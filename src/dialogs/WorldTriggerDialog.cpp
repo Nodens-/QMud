@@ -88,9 +88,7 @@ WorldTriggerDialog::WorldTriggerDialog(WorldRuntime *runtime, WorldRuntime::Trig
 {
 	setWindowTitle(currentIndex < 0 ? QStringLiteral("Add trigger") : QStringLiteral("Edit trigger"));
 	resize(520, 360);
-	setMinimumSize(620, 460);
-	if (currentIndex < 0)
-		setMinimumSize(920, 690);
+	setMinimumSize(920, 690);
 	buildUi();
 	loadTrigger();
 	updateControls();

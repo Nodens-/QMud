@@ -79,9 +79,7 @@ WorldAliasDialog::WorldAliasDialog(WorldRuntime *runtime, WorldRuntime::Alias al
 {
 	setWindowTitle(currentIndex < 0 ? QStringLiteral("Add alias") : QStringLiteral("Edit alias"));
 	resize(520, 360);
-	setMinimumSize(620, 460);
-	if (currentIndex < 0)
-		setMinimumSize(920, 690);
+	setMinimumSize(920, 690);
 	buildUi();
 	loadAlias();
 	updateButtons();
