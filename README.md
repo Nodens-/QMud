@@ -153,6 +153,19 @@ If nothing is configured, defaults are:
 - macOS: `~/Library/Application Support/QMud`
 - Windows and non-AppImage Linux: executable directory
 
+## Environment flags and CLI switches
+
+### Environment flags
+
+- `QMUD_HOME`: Overrides startup/data directory resolution (see section above).
+- `QMUD_ALLOW_MULTI_INSTANCE`: When set to `1`, `y`, `yes`, or `true`, bypasses single-instance enforcement.
+
+### CLI switches
+
+- `--multi-instance` (alias: `--allow-multi-instance`): Bypass single-instance enforcement for that process. (Not safe
+  with same datadir)
+- `--dump-lua-api <output-dir>`: Export Lua API inventory to the given directory and exit.
+
 ## Purposeful deviations from MUSHclient
 
 These are intentional design choices in QMud:
@@ -166,4 +179,3 @@ These are intentional design choices in QMud:
 - PNG has been depracated and handled with native Qt.
 - Legacy SHS code was deprecated; hashing paths use Qt (`QCryptographicHash`).
 - Newly written XML metadata uses `qmud` elements; legacy `muclient` are still read for compatibility.
-
