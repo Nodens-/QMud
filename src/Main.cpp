@@ -44,6 +44,13 @@ namespace
 		return QStringLiteral("qmud-single-instance-%1").arg(userKey);
 	}
 
+	bool isEnabledValue(const QString &value)
+	{
+		return value == QStringLiteral("1") || value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		       value.compare(QStringLiteral("yes"), Qt::CaseInsensitive) == 0 ||
+		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+	}
+
 #ifdef Q_OS_WIN
 	void configureWindowsDllSearchPath()
 	{
@@ -108,9 +115,17 @@ int main(int argc, char *argv[])
 	QApplication::setWindowIcon(QIcon(QStringLiteral(":/qmud/res/QMud.png")));
 
 	const QStringList args = QCoreApplication::arguments();
+	bool              allowMultipleInstances =
+	    isEnabledValue(qEnvironmentVariable("QMUD_ALLOW_MULTI_INSTANCE").trimmed());
 	for (int i = 1; i < args.size(); ++i)
 	{
 		const QString arg = args.at(i).trimmed();
+		if (arg.compare(QStringLiteral("--multi-instance"), Qt::CaseInsensitive) == 0 ||
+		    arg.compare(QStringLiteral("--allow-multi-instance"), Qt::CaseInsensitive) == 0)
+		{
+			allowMultipleInstances = true;
+			continue;
+		}
 		if (arg.compare(QStringLiteral("--dump-lua-api"), Qt::CaseInsensitive) != 0)
 			continue;
 
@@ -132,20 +147,23 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 
-	const QString instanceServerName = singleInstanceServerName();
-	QLocalSocket  existingInstanceProbe;
-	existingInstanceProbe.connectToServer(instanceServerName, QIODevice::WriteOnly);
-	if (existingInstanceProbe.waitForConnected(150))
-	{
-		existingInstanceProbe.write("raise");
-		existingInstanceProbe.flush();
-		existingInstanceProbe.waitForBytesWritten(100);
-		return 0;
-	}
-	QLocalServer::removeServer(instanceServerName);
 	QLocalServer instanceServer;
-	if (!instanceServer.listen(instanceServerName))
-		return 0;
+	if (!allowMultipleInstances)
+	{
+		const QString instanceServerName = singleInstanceServerName();
+		QLocalSocket  existingInstanceProbe;
+		existingInstanceProbe.connectToServer(instanceServerName, QIODevice::WriteOnly);
+		if (existingInstanceProbe.waitForConnected(150))
+		{
+			existingInstanceProbe.write("raise");
+			existingInstanceProbe.flush();
+			existingInstanceProbe.waitForBytesWritten(100);
+			return 0;
+		}
+		QLocalServer::removeServer(instanceServerName);
+		if (!instanceServer.listen(instanceServerName))
+			return 0;
+	}
 
 	MainWindow *mainWindow = nullptr;
 	QObject::connect(&instanceServer, &QLocalServer::newConnection, &app,
