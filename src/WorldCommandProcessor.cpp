@@ -3518,28 +3518,31 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 	const bool echoInput = isEnabled(attrs.value(QStringLiteral("display_my_input")));
 	const bool logInput  = isEnabled(attrs.value(QStringLiteral("log_input")));
 	const bool logIt     = logInput && !omitFromLog;
+	const bool fromTimer =
+	    m_runtime && m_runtime->currentActionSource() == WorldRuntime::eTimerFired;
+	const bool echoSend = omitFromOutput ? false : (fromTimer ? true : echoInput);
 
 	switch (sendTo)
 	{
 	case eSendToWorld:
-		sendMsg(text, omitFromOutput ? false : echoInput, false, logIt);
+		sendMsg(text, echoSend, false, logIt);
 		break;
 	case eSendToCommandQueue:
-		sendMsg(text, omitFromOutput ? false : echoInput, true, logIt);
+		sendMsg(text, echoSend, true, logIt);
 		break;
 	case eSendToSpeedwalk:
 	{
 		if (const QString evaluated = doEvaluateSpeedwalk(text);
 		    !evaluated.isEmpty() && evaluated.at(0) != QLatin1Char('*'))
 		{
-			sendMsg(evaluated, omitFromOutput ? false : echoInput, true, logIt);
+			sendMsg(evaluated, echoSend, true, logIt);
 		}
 	}
 	break;
 	case eSendImmediate:
 		if (m_runtime)
 			m_runtime->setLastImmediateExpression(text);
-		doSendMsg(text, omitFromOutput ? false : echoInput, logIt);
+		doSendMsg(text, echoSend, logIt);
 		break;
 	case eSendToCommand:
 		if (m_view && m_view->inputText().isEmpty())
