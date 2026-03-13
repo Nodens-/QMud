@@ -1,0 +1,26 @@
+# QMud Lua API inventory export
+# Exported (UTC): 2026-03-10T18:58:53Z
+
+B
+C
+Carg
+Cb
+Cc
+Cf
+Cg
+Cmt
+Cp
+Cs
+Ct
+P
+R
+S
+V
+locale
+match
+pcode
+print
+ptree
+setmaxstack
+type
+utfR

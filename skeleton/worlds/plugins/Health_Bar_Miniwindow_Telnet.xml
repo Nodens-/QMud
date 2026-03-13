@@ -1,0 +1,538 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="Health_Bar_Miniwindow_Telnet"
+   author="Nick Gammon"
+   id="083960a6b070bb36e8775b1e"
+   language="Lua"
+   purpose="Shows stats in a mini window"
+   date_written="2010-02-17"
+   requires="4.49"
+   version="2.0"
+   save_state="y"
+   >
+<description trim="y">
+<![CDATA[
+Install this plugin to show an info bar with HP, Mana, 
+and Movement points shown as a bar.
+
+The window can be dragged to a new location with the mouse.
+]]>
+</description>
+
+</plugin>
+
+
+<!--  Script  -->
+
+
+<script>
+<![CDATA[
+
+MAX_GROUP = 5
+
+GAP_BETWEEN_BARS = 4
+ 
+WINDOW_WIDTH = 300   -- width of entire status window
+NUMBER_OF_TICKS = 5  -- number of tick marks
+
+require "movewindow"
+require "gauge"
+require "pairsbykeys"
+require "serialize"
+require "checkplugin"
+
+FONT_NAME = get_preferred_font {"Sylfaen", "Dina", "Lucida Console", "Fixedsys", "Courier" } 
+FONT_SIZE = 10
+FONT_ID = "fn"  -- internal font identifier
+  
+BUFF_FONT_NAME = get_preferred_font {"Trebuchet MS", "Sylfaen", "Lucida Console", "Fixedsys", "Courier" } 
+BUFF_FONT_SIZE = 8
+BUFF_FONT_ID = "fb"  -- internal font identifier
+
+player_info = { stats = {} }
+victim_info = { stats = {} }
+hint = { stats = {} }
+
+local item_cache = {}
+            
+-- check if single item cached
+local function check_item_cache (hash)
+ 
+  -- get item if we don't have it  
+  if not item_cache [hash] then
+     item_cache [hash] = item_ppi.get_item (hash)
+  end -- if not cached
+
+end -- check_item_cache
+
+    
+function DoGauge (sPrompt, win, current, max, Colour)
+  local width = WindowTextWidth (win, FONT_ID, sPrompt, true)  -- to right-justify it
+  WindowText (win, FONT_ID, sPrompt, gauge_left - width + 5, vertical, 0, 0, ColourNameToRGB "#444444", true)
+  
+  gauge (win, sPrompt, 
+          current, max, 
+          gauge_left + 10, vertical, WINDOW_WIDTH - gauge_left - 20, font_height,
+          ColourNameToRGB (Colour or "darkgreen"), ColourNameToRGB "gray",
+          5, ColourNameToRGB "silver", -- ticks
+          ColourNameToRGB "lightgrey",  -- frame
+          0x444444)   -- shadow
+
+  vertical = vertical + font_height + GAP_BETWEEN_BARS
+end --  DoGauge
+                
+
+function OnPluginInstall ()
+  
+  player_win = GetPluginID () .. "_player"
+  victim_win = GetPluginID () .. "_victim"
+
+  
+  -- make initial window
+  WindowCreate (player_win, 0, 0, 0, 0, 0, 0, 0)
+  -- add the fonts
+  WindowFont (player_win, FONT_ID, FONT_NAME, FONT_SIZE)
+  WindowFont (player_win, BUFF_FONT_ID, BUFF_FONT_NAME, BUFF_FONT_SIZE)
+  -- find where window was last time
+  player_windowinfo = movewindow.install (player_win, 4)
+  
+  -- see how high it is
+  font_height = WindowFontInfo (player_win, FONT_ID, 1)  -- height
+  buff_font_height = WindowFontInfo (player_win, BUFF_FONT_ID, 1)  -- height
+
+  -- make initial window for victim (target)
+  WindowCreate (victim_win, 0, 0, 0, 0, 0, 0, 0)
+  -- add the fonts
+  WindowFont (victim_win, FONT_ID, FONT_NAME, FONT_SIZE)
+  WindowFont (victim_win, BUFF_FONT_ID, BUFF_FONT_NAME, BUFF_FONT_SIZE)
+  -- find where window was last time
+  victim_windowinfo = movewindow.install (victim_win, 5)
+
+  -- set up windows and data structures for groups  
+  groups = {}
+  for i = 1, MAX_GROUP do
+    groups [i] = {}
+    groups [i].win = GetPluginID () .. "_group" .. i
+    groups [i].windowinfo = movewindow.install (groups [i].win, 11)
+    groups [i].info = { stats = {} }
+    
+    -- make initial window for victim (target)
+    WindowCreate (groups [i].win, 0, 0, 0, 0, 0, 0, 0)
+    -- add the fonts
+    WindowFont (groups [i].win, FONT_ID, FONT_NAME, FONT_SIZE)
+    WindowFont (groups [i].win, BUFF_FONT_ID, BUFF_FONT_NAME, BUFF_FONT_SIZE)
+  end -- for each group
+  
+  -- get old maxima
+  assert (loadstring (GetVariable ("player_info") or "")) ()
+  -- get old colours, sequence etc.
+  assert (loadstring (GetVariable ("hint") or "")) ()
+ 
+  player_info = player_info or { stats = {} }
+  
+  -- reset current figure, may have changed
+  for k, v in pairs (player_info.stats) do
+    v.cur = nil
+    v.pct = nil
+  end -- for each stat
+  
+end -- OnPluginInstall
+
+function OnPluginEnable ()
+  WindowShow (player_win, true)
+end -- OnPluginDisable
+
+function OnPluginDisable ()
+  WindowShow (player_win, false)
+  WindowShow (victim_win, false)
+  for i, v in ipairs (groups) do
+    WindowShow (v.win, false)
+  end -- for
+end -- OnPluginDisable
+
+-- hide window on removal
+function OnPluginClose ()
+  WindowShow (player_win,  false)  -- hide it
+  WindowShow (victim_win, false)
+  for i, v in ipairs (groups) do
+    WindowShow (v.win, false)
+  end -- for
+end -- OnPluginClose
+
+function OnPluginSaveState ()
+  movewindow.save_state (player_win)
+  movewindow.save_state (victim_win)
+  for i, v in ipairs (groups) do
+    movewindow.save_state (v.win)
+  end -- for
+  SetVariable ("player_info", "player_info = " .. serialize.save_simple (player_info))
+  SetVariable ("hint", "hint = " .. serialize.save_simple (hint))
+end -- OnPluginSaveState
+
+function Buff_Processing (tbl, win)
+  local display_buffs
+
+  if tbl and #tbl > 0 then
+    window_height = window_height + buff_font_height
+    
+    -- we may get: bless, bless  so we convert that to bless(2)
+    local counted_buffs = {}
+    for _, name in ipairs (tbl) do
+      name = capitalize (name)
+      counted_buffs [name] = (counted_buffs [name] or 0) + 1
+    end -- for
+    
+    -- count them
+    local total_buffs = 0
+    for x in pairs (counted_buffs) do
+      total_buffs = total_buffs + 1
+    end -- for
+    
+    local count = 0
+    display_buffs = {}
+    
+    -- add to new table with count and comma
+    for name, n in pairsByKeys (counted_buffs) do
+      count = count + 1
+      if n > 1 then
+        name = name .. "(" .. n .. ")"
+      end -- if
+      if count < total_buffs then
+        name = name .. ", "
+      end -- if
+      table.insert (display_buffs, name)       
+    end -- for
+    
+    local x = 5  
+    
+    -- see how many lines we need
+    for _, name in ipairs (display_buffs) do
+      local width = WindowTextWidth (win, BUFF_FONT_ID, name, true)
+      if x + width >= WINDOW_WIDTH - 5 then
+        x = 5
+        window_height = window_height + buff_font_height
+      end -- if new line
+      x = x + width
+    end -- for
+        
+  end -- if some buffs there
+  
+  return display_buffs
+  
+end -- function Buff_Processing
+
+function Show_Buffs (tbl, colour, win)
+ if tbl then
+    -- seperator line
+    WindowLine (win, 5, vertical, WINDOW_WIDTH - 5, vertical, ColourNameToRGB "darkgray", 0, 1)
+    WindowLine (win, 6, vertical + 1, WINDOW_WIDTH - 4, vertical + 1, ColourNameToRGB "#444444", 0, 1)
+    
+    vertical = vertical + 2    
+    local x = 5  
+    
+    for _, name in ipairs (tbl) do
+      local width = WindowTextWidth (win, BUFF_FONT_ID, name, true)
+      if x + width >= WINDOW_WIDTH - 5 then
+        x = 5
+        vertical = vertical + buff_font_height
+      end -- if new line
+      x = x + WindowText (win, BUFF_FONT_ID, name, x, vertical, 0, 0, colour, true)
+    end -- for
+
+  vertical = vertical + buff_font_height + GAP_BETWEEN_BARS
+        
+  end -- if some buffs there
+
+end -- Show_Buffs
+
+function Show_Stats_Bar (t, info, win, windowinfo)
+
+  -- remember his level 
+  info.level = t.level or info.level
+  -- and name
+  info.unitname = t.name or info.unitname
+
+  -- can't pull things out of bar table if it isn't there
+  if not t.stats then
+    return
+  end
+
+  stats = info.stats
+  
+ -- find how many (eg. HP, mana, move)
+  for k, v in pairs (t.stats) do
+    stats [k] = stats [k] or {}
+    -- save new stats in case not supplied in future
+    stats [k].cur = v.cur or stats [k].cur
+    stats [k].max = v.max or stats [k].max
+    stats [k].pct = v.pct or stats [k].pct
+  end -- for
+
+  local labels = {}
+  local gauge_count = 0
+  for k, v in pairs (stats) do
+    if (v.cur and v.max) or v.pct then
+      table.insert (labels, k)
+      gauge_count = gauge_count + 1
+    end -- if something known
+  end -- for
+    
+  if #labels == 0 then
+    return
+  end -- nothing known yet
+  
+  -- sort into wanted order
+  table.sort (labels, function (a, b) 
+              if hint.stats [a] and hint.stats [b] then
+                return hint.stats [a].clr or a < hint.stats [b].clr or b
+              end
+              return a < b 
+              end)
+  
+  window_height = (font_height * gauge_count) + (gauge_count * 2 + 1) * GAP_BETWEEN_BARS 
+  if info.unitname or info.level then
+    window_height = window_height + font_height + GAP_BETWEEN_BARS
+  end -- if another line needed
+    
+  -- calculate lines needed for buffs
+  local display_buffs   = Buff_Processing (t.buffs, win)
+
+  -- calculate lines needed for debuffs
+  local display_debuffs = Buff_Processing (t.debuffs, win)
+  
+  window_height = window_height + GAP_BETWEEN_BARS
+  
+  WindowCreate (win, 
+                 windowinfo.window_left, 
+                 windowinfo.window_top, 
+                 WINDOW_WIDTH, window_height,  
+                 windowinfo.window_mode,   -- top right
+                 windowinfo.window_flags,
+                 0) 
+
+ 
+  -- let them move it around                 
+  movewindow.add_drag_handler (win, 0, 0, 0, 0)
+
+  -- work out how far in to start the gauge
+  gauge_left =  max_text_width (win, FONT_ID, labels) + 5
+  
+  local background_colour = ColourNameToRGB "bisque"
+  
+  if t.dead then
+    background_colour = ColourNameToRGB "mistyrose"
+  elseif t.combat then 
+    background_colour = ColourNameToRGB "rosybrown"
+  end -- if
+  
+  -- fill entire box to clear it
+  WindowRectOp (win, 2, 0, 0, 0, 0, background_colour)  -- fill entire box
+
+  --[[
+  -- some texture
+  WindowCreate ("texture", 
+                 0, 
+                 0, 
+                 WINDOW_WIDTH, window_height,  
+                 4,   -- top right
+                 0,  -- flags
+                 ColourNameToRGB "limegreen")  -- colour
+                                  
+  WindowImageFromWindow (win, "tex", "texture")
+        
+  WindowBlendImage (win, "tex", 0, 0, 0, 0, 4, 0.02)
+  
+  --]]
+  
+  -- Edge around box rectangle
+  --WindowCircleOp (win, 3, 0, 0, 0, 0, ColourNameToRGB "darkgray", 0, 2, 0, 1)
+  --WindowRectOp (win, 5, 0, 0, 0, 0, 5, 15 + 0x1000)
+
+  WindowCircleOp (win, 3, 0, 0, 0, 0, 0x505050, 0, 3, 0, 1)   -- dark grey border (3 pixels)
+  WindowCircleOp (win, 3, 1, 1, -1, -1, 0x7C7C7C, 0, 1, 0, 1)  -- lighter inner border
+  WindowCircleOp (win, 3, 2, 2, -2, -2, 0, 0, 1, 0, 1)  -- black inside that
+  WindowLine (win, 1, 1, WINDOW_WIDTH - 1, 1, 0xC2C2C2, 0, 1)  -- light top edge
+  WindowLine (win, 1, 1, 1, window_height - 1, 0xC2C2C2, 0, 1)  -- light left edge (for 3D look)
+  
+  vertical = 6  -- pixel to start at
+  if info.unitname or info.level then
+  
+    -- seperator line
+    WindowLine (win, 5, font_height + GAP_BETWEEN_BARS, WINDOW_WIDTH - 5, font_height + GAP_BETWEEN_BARS, 
+                ColourNameToRGB "darkgray", 0, 1)
+    WindowLine (win, 6, font_height + GAP_BETWEEN_BARS + 1, WINDOW_WIDTH - 4, font_height + GAP_BETWEEN_BARS + 1, ColourNameToRGB "#444444", 0, 1)
+
+    -- show info.level number inside circle
+    if info.level then
+      local levelsize = WindowTextWidth (win, FONT_ID, info.level, true)
+      local size = math.max (levelsize, font_height) + 4
+      WindowCircleOp(win, 1, WINDOW_WIDTH - size , 0, WINDOW_WIDTH, size, 
+                    ColourNameToRGB "#333333", 0, 3,  -- pen
+                    ColourNameToRGB "lightgrey", 0) -- brush
+      WindowCircleOp(win, 1, WINDOW_WIDTH - size + 1 , 1, WINDOW_WIDTH - 1, size - 1, 
+                    ColourNameToRGB "#888888", 0, 1,  -- pen
+                    0, 1) --  no brush
+      WindowText (win, FONT_ID, info.level, WINDOW_WIDTH - size / 2 - levelsize / 2, 2, 0, 0, ColourNameToRGB "#444444", true)
+    end -- of having info.level
+    
+    -- show player name
+    if info.unitname then  
+      local x = 5
+      if t.leader then
+        -- draw leader's crown
+        WindowPolygon (win, "5,12,13,12,13,4,11,6,9,4,7,6,5,4",
+                                ColourNameToRGB("black"), 0, 1,   -- pen (solid, width 3)
+                                ColourNameToRGB("gold"), 0,       -- brush (solid)
+                                true,    -- fill
+                                false)   
+        x = 20     
+      end -- if leader  
+      x = x + WindowText (win, FONT_ID, capitalize (info.unitname), x, 2, 0, 0, ColourNameToRGB "#444444", true)
+      if t.follow then
+        x = x + WindowText (win, FONT_ID, " (following " .. capitalize (t.follow) .. ")", x, 2, 0, 0, ColourNameToRGB "#444444", true)
+      end -- following
+      
+      if t.position and t.position ~= "standing" then
+        x = x + WindowText (win, FONT_ID, " [" .. capitalize (t.position) .. "]", x, 2, 0, 0, ColourNameToRGB "#666666", true)
+      end -- if
+      
+    end -- of having info.unitname
+    
+    vertical = vertical + font_height + GAP_BETWEEN_BARS
+  end
+
+  -- make sure window visible
+  WindowShow (win, true)
+        
+  -- show stats in sequence
+  for _, name in ipairs (labels) do
+    local st = stats [name]
+    local colourhint = hint.stats [name]
+    local colour
+    if colourhint then
+      colour = colourhint.clr
+    end -- if
+    
+    if st.pct then
+      DoGauge (name, win, st.pct, nil,    colour)
+    else
+      DoGauge (name, win, st.cur, st.max, colour)
+    end -- if
+  end -- for
+  
+  vertical = vertical + 1
+  
+  -- buffs
+  Show_Buffs (display_buffs, ColourNameToRGB "#003C00", win)
+  
+  -- debuffs
+  Show_Buffs (display_debuffs, ColourNameToRGB "darkred", win)
+
+end -- Show_Stats_Bar
+
+local IAC, SB, SE = 0xFF, 0xFA, 0xF0
+
+
+function OnPluginTelnetOption (option)
+
+  local t = {}  -- incoming server variables will go into table t
+  setfenv (assert (loadstring (option), "Error in: " .. option), t) () -- compile and load into t
+ 
+  --for k in pairs (t) do
+  --  print ("Received telnet item:", k, "in plugin", GetPluginName ())
+  --end -- for
+  
+  -- colour hints
+  if t.hint then
+    for k, v in pairs (t.hint) do
+      hint [k] = v
+    end -- for
+  end -- t.hint
+  
+  if not t.group then
+    return
+  end -- nothing about groups here
+  
+  local me
+  for k, v in pairs (t.group) do
+    
+    check_item_cache (v.hash)
+  
+    -- add in cached information
+    if item_cache [v.hash] then 
+      for x, y in pairs (item_cache [v.hash]) do
+        if not v [x] then  -- if value there, takes precedence over cached one
+          v [x] = y
+        end -- if not already there
+      end -- for
+    end -- if not cached
+    
+    if v.me then
+      me = v
+      t.group [k] = nil
+      break
+    end -- if found myself
+  end -- for
+  
+  -- table.sort (t.group, function (a, b) return a.name < b.name end)
+  
+  -- hopefully found myself
+  if not me then
+    return
+  end -- if
+  
+  -- don't lead ourselves
+  if next (t.group) == nil then
+    me.leader = false
+  end -- if
+  
+  Show_Stats_Bar (me, player_info, player_win, player_windowinfo)
+
+  if t.victim then
+    Show_Stats_Bar (t.victim, victim_info, victim_win, victim_windowinfo)
+  else
+    WindowShow (victim_win, false)
+  end -- if
+
+  -- hide groups in case disbanded  
+  for i, v in ipairs (groups) do
+    WindowShow (v.win, false)
+  end -- for
+  
+  if t.group and type (t.group) == "table" then
+    for i, v in ipairs (t.group) do
+      if i > MAX_GROUP then
+        break
+      end -- if
+      Show_Stats_Bar (v, groups [i].info, groups [i].win, groups [i].windowinfo)
+    end -- for each group member
+  
+  end -- if group table there
+  
+end -- function OnPluginTelnetOption
+
+function OnPluginTelnetRequest (type, data)
+  if type == 102 and data == "WILL" then
+    return true
+  end -- if
+end -- function OnPluginTelnetRequest
+
+-- on a new connection, this might be a new character, and name
+-- and all stats different
+function OnPluginConnect ()
+  WindowShow (player_win, false)
+  player_info = { stats = {} }
+  victim_info = { stats = {} }
+end -- OnConnect
+
+function OnPluginListChanged ()
+  item_ppi = load_ppi ("928dc37b201539cd14239ff0", "Item_Cache_Helper")
+end -- OnPluginListChanged
+
+]]>
+</script>
+
+</muclient>

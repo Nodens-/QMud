@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE muclient>
+<!-- Saved on Saturday, March 07, 2026, 4:14 P.M. -->
+<!-- MuClient version 10.00 -->
+<!-- Written by Nick Gammon -->
+<!-- Home Page: http://www.mushclient.com/ -->
+<muclient>
+
+<!-- variables -->
+<variables>
+  <variable name="config">config = {
+  EXITS_ON_ROOM_NAME = false,
+  STATUS_FRAME_COLOUR = "#1B1B1B",
+  ADD_NEWLINE_TO_PROMPT = false,
+  SCAN = {
+    depth = 30,
+    },
+  INCLUDE_ROOM_NAME_IN_HASH = true,
+  DIFFERENT_AREA_COLOUR = {
+    colour = 9671424.0,
+    name = "Another area",
+    },
+  ROOM_NAME_TEXT = {
+    colour = 15856574.0,
+    name = "Room name text",
+    },
+  AREA_NAME_FILL = {
+    colour = 5461520.0,
+    name = "Area name fill",
+    },
+  STATUS_TEXT_COLOUR = "lightgreen",
+  STATUS_BACKGROUND_COLOUR = "black",
+  EXIT_COLOUR = {
+    colour = 25600.0,
+    name = "Exit",
+    },
+  SHOP_FILL_COLOUR = {
+    colour = 3107669.0,
+    name = "Shop",
+    },
+  BOOKMARK_FILL_COLOUR = {
+    colour = 16436871.0,
+    name = "Notes",
+    },
+  BLANK_LINE_TERMINATES_LINE_TYPE = false,
+  LINK_TO_SELF = true,
+  EXIT_COLOUR_UP_DOWN = {
+    colour = 42495.0,
+    name = "Exit up/down",
+    },
+  TRAINER_FILL_COLOUR = {
+    colour = 3329434.0,
+    name = "Trainer",
+    },
+  SHOW_LEARNING_WINDOW = false,
+  SHOW_WARNINGS = true,
+  OUR_ROOM_COLOUR = {
+    colour = 0.0,
+    name = "Our room",
+    },
+  ACTIVATE_DESCRIPTION_AFTER_EXITS = false,
+  WINDOW = {
+    height = 400,
+    width = 400,
+    },
+  UID_SIZE = 4,
+  ROOM_NAME_BORDER = {
+    colour = 0.0,
+    name = "Room name box",
+    },
+  EXITS_IS_SINGLE_LINE = true,
+  AREA_NAME_TEXT = {
+    colour = 15856574.0,
+    name = "Area name text",
+    },
+  EXIT_COLOUR_IN_OUT = {
+    colour = 15234359.0,
+    name = "Exit in/out",
+    },
+  AREA_NAME_BORDER = {
+    colour = 0.0,
+    name = "Area name box",
+    },
+  ROOM_NAME_FILL = {
+    colour = 5461520.0,
+    name = "Room name fill",
+    },
+  WHEN_TO_DRAW_MAP = 3,
+  SORT_EXITS = false,
+  INCLUDE_EXITS_IN_HASH = true,
+  ROOM_COLOUR = {
+    colour = 16776960.0,
+    name = "Room",
+    },
+  LAST_VISIT_TIME = {
+    time = 180,
+    },
+  EXIT_LINES_START_WITH_DIRECTION = false,
+  BANK_FILL_COLOUR = {
+    colour = 55295.0,
+    name = "Bank",
+    },
+  DELAY = {
+    time = 0.3,
+    },
+  ACTIVATE_DESCRIPTION_AFTER_ROOM_NAME = true,
+  BACKGROUND_COLOUR = {
+    colour = 10040166.0,
+    name = "Background",
+    },
+  SHOW_ROOM_AND_EXITS = false,
+  PROMPT_IS_SINGLE_LINE = true,
+  MAPPER_NOTE_COLOUR = {
+    colour = 9498256.0,
+    name = "Messages",
+    },
+  UNKNOWN_ROOM_COLOUR = {
+    colour = 13289984.0,
+    name = "Unknown room",
+    },
+  DUPLICATE_FILL_COLOUR = {
+    colour = 13826810.0,
+    name = "Duplicate",
+    },
+  SAVE_LINE_INFORMATION = true,
+  FONT = {
+    size = 8,
+    name = "DejaVu Sans Mono",
+    },
+  SHOW_INFO = false,
+  }</variable>
+  <variable name="current_nomap_id">current_nomap_id = nil</variable>
+  <variable name="mw_6edbf5450bf820be31d0c434_mapper_windowflags">2</variable>
+  <variable name="mw_6edbf5450bf820be31d0c434_mapper_windowx">1381.0</variable>
+  <variable name="mw_6edbf5450bf820be31d0c434_mapper_windowy">0.0</variable>
+  <variable name="mw_learn_dialog_6edbf5450bf820be31d0c434_windowflags">2</variable>
+  <variable name="mw_learn_dialog_6edbf5450bf820be31d0c434_windowx">0.0</variable>
+  <variable name="mw_learn_dialog_6edbf5450bf820be31d0c434_windowy">0.0</variable>
+  <variable name="stats">stats = {
+  prompt = {
+    is = 0,
+    isnot = 0,
+    },
+  room_name = {
+    is = 0,
+    isnot = 0,
+    },
+  exits = {
+    is = 0,
+    isnot = 0,
+    },
+  description = {
+    is = 0,
+    isnot = 0,
+    },
+  ignore = {
+    is = 0,
+    isnot = 0,
+    },
+  cannot_move = {
+    is = 0,
+    isnot = 0,
+    },
+  }</variable>
+</variables>
+</muclient>

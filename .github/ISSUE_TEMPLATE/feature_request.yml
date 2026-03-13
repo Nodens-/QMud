@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest an improvement or new capability
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior/UI/API you want.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you considered.
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      description: Any impact on MUSHclient compatibility, persistence, or plugins?
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+

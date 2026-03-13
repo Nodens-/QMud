@@ -1,0 +1,596 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="Room_Contents_Telnet"
+   author="Nick Gammon"
+   id="a02de78ffbef7b149c6b0805"
+   language="Lua"
+   purpose="Shows contents of room in a miniwindow"
+   date_written="2010-02-02"
+   requires="4.40"
+   version="1.0"
+   save_state="y"
+   >
+<description trim="y">
+<![CDATA[
+Install this plugin to show what is in the current room.
+
+The window can be dragged to a new location with the mouse.
+]]>
+</description>
+
+</plugin>
+
+
+<!--  Script  -->
+
+
+<script>
+<![CDATA[
+
+  
+require "movewindow"
+require "serialize"
+require "getlines"
+require "gauge"
+require "checkplugin"
+require "copytable"
+
+
+FONT_NAME = get_preferred_font {"Dina",  "Lucida Console",  "Fixedsys", "Courier", "Sylfaen",} 
+FONT_SIZE = 9
+FONT_ID = "fn"  -- internal font identifier
+
+PARAGRAPH_GAP = 3
+
+local item_cache = {}
+            
+-- check if single item cached
+local function check_item_cache (hash)
+ 
+  -- get item if we don't have it  
+  if not item_cache [hash] then
+     item_cache [hash] = item_ppi.get_item (hash)
+  end -- if not cached
+
+end -- check_item_cache
+
+function OnPluginInstall ()
+  
+  win = GetPluginID ()
+
+  WindowCreate (win, 0, 0, 0, 0, 0, 0, 0)
+                 
+  -- add the font
+  WindowFont (win, FONT_ID, FONT_NAME, FONT_SIZE)
+  
+  -- see how high it is
+  font_height = WindowFontInfo (win, FONT_ID, 1) + WindowFontInfo (win, FONT_ID, 5)  -- height
+
+  -- find where window was last time
+  windowinfo = movewindow.install (win, 7)
+  
+end -- OnPluginInstall
+
+function OnPluginEnable ()
+  WindowShow (win, true)
+end -- OnPluginDisable
+
+function OnPluginDisable ()
+  WindowShow (win, false)
+end -- OnPluginDisable
+
+-- hide window on removal
+function OnPluginClose ()
+  WindowShow (win,  false)  -- hide it
+end -- OnPluginClose
+
+function OnPluginSaveState ()
+  movewindow.save_state (win)
+end -- OnPluginSaveState
+
+
+item_colours = {
+  none = "darkslateblue",
+  light = "yellow",
+  scroll = "cyan",
+  wand = "cyan",
+  staff = "cyan",
+  weapon = "black",
+  _fireweapon = "black",
+  _missile = "black",
+  treasure = "black",
+  armor = "black",
+  potion = "black",
+  _worn = "black",
+  furniture = "black",
+  trash = "black",
+  _oldtrap = "black",
+  container = "black",
+  _note = "black",
+  drinkcon = "blue",
+  key = "black",
+  food = "sienna",
+  money = "gold",
+  pen = "black",
+  boat = "black",
+  corpse = "gray",
+  corpse_pc = "gray",
+  fountain = "blue",
+  pill = "cyan",
+  blood = "maroon",
+  bloodstain = "red",
+  scraps = "black",
+  pipe = "black",
+  herbcon = "black",
+  herb = "green",
+  incense = "black",
+  fire = "red",
+  book = "black",
+  switch = "black",
+  lever = "black",
+  pullchain = "black",
+  button = "black",
+  dial = "black",
+  rune = "cyan",
+  runepouch = "cyan",
+  match = "black",
+  trap = "black",
+  map = "black",
+  portal = "black",
+  paper = "black",
+  tinder = "black",
+  lockpick = "black",
+  spike = "black",
+  disease = "black",
+  oil = "black",
+  fuel = "black",
+  _empty1 = "black",
+  _empty2 = "black",
+  missileweapon = "black",
+  projectile = "black",
+  quiver = "black",
+  shovel = "black",
+  salve = "black",
+  cook = "black",
+  keyring = "black",
+  odor = "black",
+  chance = "black",
+  mix = "black",
+   }
+
+function mouseup_player (flags, hotspot_id)
+  if bit.band (flags, 0x20) ~= 0 then
+    -- SendNoEcho (string.format ("kill <%s>", hotspot_id))
+  else
+    SendNoEcho (string.format ("examine <%s>", hotspot_id)) 
+   end -- if
+end -- mouseup_player
+
+function mouseup_npc (flags, hotspot_id)
+  if bit.band (flags, 0x20) ~= 0 then
+    SendNoEcho (string.format ("kill <%s>", hotspot_id))
+  else
+    SendNoEcho (string.format ("examine <%s>", hotspot_id)) 
+   end -- if
+end -- mouseup_npc
+
+full_exit_name = {
+ n = "North",
+ s = "South",
+ e = "East", 
+ w = "West",
+ u = "Up", 
+ d = "Down",
+ ne = "Northeast",
+ se = "Southeast",
+ nw = "Northwest", 
+ sw = "SouthWest",
+ somewhere = "Somewhere",
+ }
+ 
+function mouseup_object (flags, hotspot_id)
+
+  -- RH click
+  if bit.band (flags, 0x20) ~= 0 then
+  
+    local hash
+    
+    for _, v in ipairs (objects) do
+      if v.uid == hotspot_id then
+        hash = v.hash
+        break
+      end -- if
+    end -- for
+    
+    if not hash then
+      return
+    end -- if
+    
+    local item = item_cache [hash]
+    if not item then
+      return
+    end -- not in cache
+        
+    if not item.objtype then
+      return
+    end -- don't know what it is
+    
+    local action = "get"
+    if item.objtype == "fountain" then
+      SendNoEcho "drink"
+      return
+    elseif item.objtype == "corpse" then
+      action = "get all"
+    elseif item.objtype == "corpse_pc" then
+      action = "get all"
+    elseif item.objtype == "furniture" then
+      action = "look"
+    end -- if
+    
+    SendNoEcho (string.format ("%s <%s>", action, hotspot_id))
+  else
+    SendNoEcho (string.format ("examine <%s>", hotspot_id)) 
+  end -- if
+end -- mouseup_object
+
+function fight_text (item)
+  if item.fight and item.targethash then
+     dsc = capitalize (item.short) .. " is here"
+     local target = "<unknown>"
+
+     check_item_cache (item.targethash)
+     if item_cache [item.targethash] then
+       target = item_cache [item.targethash].short
+       if not target or target == "" then
+         target = item_cache [item.targethash].name
+       end -- if
+      end -- if hash known
+     target = target or "<whatever>"
+     if item.targetuid == my_uid then
+       target = "YOU!"
+     end -- if me
+     item._extra = string.format ("%s (fighting %s)", item._extra , target)
+  end -- if fighting
+end -- fight_text
+        
+function OnPluginTelnetOption (option)
+
+  local t = {}  -- incoming server variables will go into table t
+  setfenv (assert (loadstring (option)), t) () -- compile and load into t
+  
+  if t.inroom then
+    check_item_cache (t.inroom.hash)
+    
+    for uid, details in pairs (t.inroom.contents) do
+      check_item_cache (details.hash)
+    end -- for each exit
+    
+  end -- if t.inroom
+    
+  if t.inroom then
+    redisplay = nil   -- room changed
+  else
+    -- we couldn't display all last time, and we got some cache info, try again
+    if redisplay then
+      check_item_cache (redisplay.hash)
+      if item_cache [redisplay.hash] then
+        t.inroom = redisplay
+      else
+        return
+      end -- if
+    else
+      return
+    end
+  end
+    
+  local width = 0
+  local extra_depth = 0
+  local lines = 1  -- have at least one line
+  local dark_message = "It is too dark to see."
+  local blind_message = "You are blind!"
+  local nothing_message = "There is nothing here."
+  local count = 0
+  
+  local background_colour = ColourNameToRGB "#252525"
+   
+  room = item_cache [t.inroom.hash]
+  
+  if not room then
+    redisplay = t.inroom
+    return 
+  end -- if
+  
+  players = {}
+  objects = {}
+  npcs = {}
+
+  for uid, details in pairs (t.inroom.contents) do
+    local item = copytable.deep (item_cache [details.hash])
+    if item then
+      -- copy in extra details
+      for k, v in pairs (details) do
+        item [k] = v
+      end -- for each item
+      item.uid = uid
+      if item.type then
+        if item.type == "object" then
+          table.insert(objects, item)
+        elseif item.type == "char" then
+          if item.npc then
+            table.insert(npcs, item)
+          else
+            table.insert(players, item)
+          end -- if
+        end -- if
+      end -- type known
+    end -- if item exists
+  end -- for each exit
+    
+  if t.inroom.dark then
+    width = WindowTextWidth (win, FONT_ID, dark_message, true)
+  elseif t.inroom.blind then
+    width = WindowTextWidth (win, FONT_ID, blind_message, true)
+  else  
+    -- ROOM DESCRIPTION
+    
+    -- name of room
+    if room.name then
+      width = math.max (width, WindowTextWidth (win, FONT_ID, room.name, true))
+      lines = lines + 1
+      extra_depth = extra_depth + PARAGRAPH_GAP
+    else
+      redisplay = t.inroom  -- need to redisplay when cache info arrives
+    end -- if
+  
+    -- description
+    if room.desc then
+      room.desc = Trim (string.gsub (room.desc, "\r", ""))  -- no carriage-returns
+      for line in getlines (room.desc) do
+        width = math.max (width, WindowTextWidth (win, FONT_ID, line, true))
+        lines = lines + 1
+      end -- for
+      extra_depth = extra_depth + PARAGRAPH_GAP
+    else
+      redisplay = t.inroom  -- need to redisplay when cache info arrives
+    end -- if long description
+    
+    if room.exits then
+      if next (room.exits) then
+        local t = {}
+        for k, v in pairs (room.exits) do
+          table.insert (t, full_exit_name [k] or "Unknown")
+        end -- for each exit
+        table.sort (t)
+        exits_line = "[Exits: " .. table.concat (t, ", ") .. "]"
+      else
+        exits_line = "[No exits]"
+      end -- if    
+      width = math.max (width, WindowTextWidth (win, FONT_ID, exits_line, true))
+      lines = lines + 1
+      extra_depth = extra_depth + PARAGRAPH_GAP
+    else
+      redisplay = t.inroom  -- need to redisplay when cache info arrives
+    end -- if exits
+    
+    
+    -- NPCs
+    
+    for _, item in ipairs (npcs) do
+      item.dsc = item.longdsc
+      -- extra stuff we add to description
+      item._extra = ""
+      if item.level then
+        item._extra = string.format (" [%i]", item.level)
+      end -- if
+      fight_text (item)
+      width = math.max (width, 10 + WindowTextWidth (win, FONT_ID, item.dsc .. item._extra, true))
+      lines = lines + 1
+      count = count + 1
+    end -- for each npc
+
+    -- PLAYERS
+    
+    for _, item in ipairs (players) do
+      item.dsc = item.name
+      -- extra stuff we add to description
+      item._extra = ""
+      if item.level then
+        item._extra = string.format (" [%i]", item.level)
+      end -- if
+      if item.me then
+         item._extra = string.format ("%s <-- you", item._extra)
+         my_uid = item.uid
+      end -- if
+      fight_text (item)
+      width = math.max (width, 10 + WindowTextWidth (win, FONT_ID, item.dsc .. item._extra, true))
+      lines = lines + 1
+      count = count + 1
+    end -- for each player
+
+    -- OBJECTS
+    
+    for _, item in ipairs (objects) do
+      -- extra stuff we add to description
+      item._extra = ""
+      if item.lvl then
+        item._extra = string.format (" [%i]", item.lvl)
+      end -- if
+      width = math.max (width, 10 + WindowTextWidth (win, FONT_ID, item.dsc .. item._extra, true))
+      lines = lines + 1
+      count = count + 1
+    end -- for each object
+       
+  end -- if
+  
+  if count == 0 then
+    width = math.max (width, WindowTextWidth (win, FONT_ID, nothing_message, true))
+  else 
+    lines = lines - 1
+  end -- if  
+  
+  window_width = width + 10
+  window_height = font_height * lines + 10 + extra_depth
+  
+  WindowCreate (win, 
+                 windowinfo.window_left, 
+                 windowinfo.window_top, 
+                 window_width, window_height,  
+                 windowinfo.window_mode,   -- top right
+                 windowinfo.window_flags,
+                 0) 
+
+  -- let them move it around                 
+  movewindow.add_drag_handler (win, 0, 0, 0, 0)
+    
+  
+  -- fill entire box to clear it
+  WindowRectOp (win, 2, 0, 0, 0, 0, 0)  -- fill entire box
+   
+  -- Edge around box rectangle
+  WindowCircleOp (win, 3, 0, 0, 0, 0, ColourNameToRGB "darkgray", 0, 2, 0, 1)
+
+  if t.inroom.blind then
+    WindowText (win, FONT_ID, blind_message, 5, 5, 0, 0, ColourNameToRGB "darkred", true)
+  elseif t.inroom.dark then
+    WindowText (win, FONT_ID, dark_message, 5, 5, 0, 0, ColourNameToRGB "darkgreen", true)
+  else  
+    vertical = 5  -- pixel to start at
+
+    -- ROOM DESCRIPTION
+    
+    -- name of room
+    if room.name then
+      WindowRectOp (win, 2, 0, vertical, 0, vertical + font_height, ColourNameToRGB "midnightblue")  
+      WindowText (win, FONT_ID, room.name, 5, vertical, 0, 0, ColourNameToRGB ("white"), true)
+      vertical = vertical + font_height + PARAGRAPH_GAP
+    end -- if
+
+    -- exits
+    if room.exits then
+      WindowRectOp (win, 2, 0, vertical, 0, vertical + font_height, ColourNameToRGB "maroon")  
+      WindowText (win, FONT_ID, exits_line, 5, vertical, 0, 0, ColourNameToRGB ("white"), true)
+      vertical = vertical + font_height + PARAGRAPH_GAP
+    end -- if
+  
+    -- description
+    if room.desc then
+      for line in getlines (room.desc) do
+        WindowText (win, FONT_ID, line, 5, vertical, 0, 0, ColourNameToRGB ("yellow"), true)
+        vertical = vertical + font_height
+      end -- for
+      vertical = vertical + PARAGRAPH_GAP
+    end -- if long description
+        
+    -- OTHER STUFF IN THE ROOM
+        
+    WindowRectOp (win, 2, 0, vertical, 0, vertical + #players * font_height, ColourNameToRGB "darkslategray")  
+  
+    table.sort (players, function (a, b) return a.dsc < b.dsc end)
+    
+    -- players first            
+    for i, item in ipairs (players) do
+      local colour = "white"
+      local width
+      width = WindowText (win, FONT_ID, item.dsc .. item._extra, 5, vertical, 0, 0, ColourNameToRGB (colour), true)
+      WindowAddHotspot(win, item.uid,  
+               5, vertical, 5 + width, vertical + font_height,   -- rectangle
+               "",  -- mouseover
+               "",  -- cancelmouseover
+               "",  -- mousedown
+               "",  -- cancelmousedown
+               "mouseup_player", 
+               "LH click to examine",  -- tooltip text
+               1, 0)  -- hand cursor
+      vertical = vertical + font_height
+    end -- for
+
+    WindowRectOp (win, 2, 0, vertical, 0, vertical + #npcs * font_height, ColourNameToRGB "gainsboro") 
+
+    table.sort (npcs, function (a, b) return a.dsc < b.dsc end)
+    
+    -- then NPCs
+    for i, item in ipairs (npcs) do
+      item.dsc = string.gsub (item.dsc, "[\r\n]", "")
+      local colour = "chocolate"
+      if item.aggro then
+        colour = "crimson"
+      end -- if
+      local dsc = item.dsc
+      if item.fight then
+         dsc = capitalize (item.short) .. " is here"
+      end -- if
+        
+      local width
+      width = WindowText (win, FONT_ID, dsc .. item._extra, 5, vertical, 0, 0, ColourNameToRGB (colour), true)
+      WindowAddHotspot(win, item.uid,  
+               5, vertical, 5 + width, vertical + font_height,   -- rectangle
+               "",  -- mouseover
+               "",  -- cancelmouseover
+               "",  -- mousedown
+               "",  -- cancelmousedown
+               "mouseup_npc", 
+               string.format ("LH click to examine\nRH click to attack\nUid: %s", item.uid),  -- tooltip text
+               1, 0)  -- hand cursor
+      vertical = vertical + font_height
+    end -- for
+
+    WindowRectOp (win, 2, 0, vertical, 0, vertical + #objects * font_height, ColourNameToRGB "darkkhaki")  
+    
+    table.sort (objects, function (a, b) return a.dsc < b.dsc end)
+              
+    -- then objects in the room
+    for i, item in ipairs (objects) do
+      item.typ = item.typ or "none"
+      if item.objtype then
+        colour = item_colours [item.objtype]
+      end -- if item has a type
+      local width
+      width = WindowText (win, FONT_ID, item.dsc .. item._extra, 5, vertical, 0, 0, ColourNameToRGB (colour), true)
+      WindowAddHotspot(win, item.uid,  
+               5, vertical, 5 + width, vertical + font_height,   -- rectangle
+               "",  -- mouseover
+               "",  -- cancelmouseover
+               "",  -- mousedown
+               "",  -- cancelmousedown
+               "mouseup_object", 
+               string.format ("%s\tLH click to examine\nRH click to use\nUid: %s", capitalize (item.typ), item.uid),  -- tooltip text
+               1, 0)  -- hand cursor        
+      vertical = vertical + font_height
+    end -- for
+   
+    if count == 0 then
+      WindowText (win, FONT_ID, nothing_message, 5, vertical, 0, 0, ColourNameToRGB "darkgreen", true)
+    end -- if  
+    
+  end -- if 
+  
+  -- 3D box
+  WindowCircleOp (win, 3, 0, 0, 0, 0, 0x505050, 0, 3, 0, 1)   -- dark grey border (3 pixels)
+  WindowCircleOp (win, 3, 1, 1, -1, -1, 0x7C7C7C, 0, 1, 0, 1)  -- lighter inner border
+  WindowCircleOp (win, 3, 2, 2, -2, -2, 0, 0, 1, 0, 1)  -- black inside that
+  WindowLine (win, 1, 1, window_width - 1, 1, 0xC2C2C2, 0, 1)  -- light top edge
+  WindowLine (win, 1, 1, 1, window_height - 1, 0xC2C2C2, 0, 1)  -- light left edge (for 3D look)
+  
+  -- make sure window visible
+  WindowShow (win, true)
+
+end -- function OnPluginTelnetOption
+
+function OnPluginConnect ()
+end -- OnPluginConnect
+
+function OnPluginListChanged ()
+  
+  item_ppi = load_ppi ("928dc37b201539cd14239ff0", "Item_Cache_Helper")
+--  ppi = load_ppi ("8a78c14d185c36109f479926", "Room_Info_Helper")
+  
+end -- OnPluginListChanged
+
+
+]]>
+</script>
+
+</muclient>

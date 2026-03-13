@@ -1,0 +1,32 @@
+# QMud Lua API inventory export
+# Exported (UTC): 2026-03-10T18:58:53Z
+
+__add
+__div
+__eq
+__gc
+__lt
+__mod
+__mul
+__pow
+__sub
+__tostring
+__unm
+add
+compare
+digits
+div
+divmod
+isneg
+iszero
+mod
+mul
+neg
+number
+pow
+powmod
+sqrt
+sub
+tonumber
+tostring
+trunc

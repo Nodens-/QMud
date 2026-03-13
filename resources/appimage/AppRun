@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+
+set -u
+
+this_dir="$(readlink -f "$(dirname "$0")")"
+APPDIR="${APPDIR:-$this_dir}"
+APP_BIN="$APPDIR/usr/bin/QMud"
+
+APP_LIBS="$APPDIR/usr/lib"
+APP_LIBS64="$APPDIR/usr/lib64"
+GLIBC_DIR="$APPDIR/usr/glibc"
+
+export QT_PLUGIN_PATH="$APPDIR/usr/plugins"
+export QT_QPA_PLATFORM_PLUGIN_PATH="$APPDIR/usr/plugins/platforms"
+export QT_QPA_PLATFORMTHEME="${QT_QPA_PLATFORMTHEME:-xdgdesktopportal}"
+
+# Host-first run:
+# - relies on RUNPATH in QMud / bundled libs
+"$APP_BIN" "$@"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+    exit 0
+fi
+
+echo "Host runtime failed, retrying with bundled glibc..." >&2
+
+# Fallback run:
+# - force bundled loader
+# - search bundled glibc first, then bundled app libs
+for loader in "$GLIBC_DIR/ld-linux-x86-64.so.2" "$GLIBC_DIR/ld-linux.so.2"
+do
+    if [ -x "$loader" ]; then
+        exec "$loader" --library-path "$GLIBC_DIR:$APP_LIBS:$APP_LIBS64" "$APP_BIN" "$@"
+    fi
+done
+
+echo "Bundled glibc loader not found." >&2
+exit "$rc"

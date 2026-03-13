@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="Experience_Bar_Telnet"
+   author="Nick Gammon"
+   id="81ea2275b48f841799d27e87"
+   language="Lua"
+   purpose="Shows XP to level"
+   date_written="2010-02-17"
+   requires="4.40"
+   version="2.0"
+   >
+<description trim="y">
+<![CDATA[
+Install this plugin to show an how close you are to levelling.
+]]>
+</description>
+
+</plugin>
+
+<!--  Script  -->
+
+
+<script>
+<![CDATA[
+
+win = GetPluginID ()  -- get a unique name
+
+-- configuration
+
+GAUGE_HEIGHT = 11
+NUMBER_OF_TICKS = 19  -- (ie. 20 bars)
+
+BACKGROUND_COLOUR = 0x808080
+BOX_COLOUR = ColourNameToRGB "dodgerblue"
+
+require "gauge"
+
+-- draw the bar here, on getting the status info, or window resize
+function draw_bar ()
+
+  if not pct_xp then
+  
+    -- check numbers for validity
+    if not cur_xp or  
+       not max_xp or
+       cur_xp < 0 or
+       max_xp <= 0 then
+       return
+    end -- if
+  
+    -- cannot have more than max xp
+    if cur_xp > max_xp then
+       cur_xp = max_xp
+    end -- if
+  end -- not percentage
+    
+  -- width is window width minus 2
+  local gauge_width = GetInfo (281) - 2  -- GetInfo (281) = Output window client width
+  
+  -- make room for the bar
+  local bottom_margin = GetInfo (275)  -- = Text rectangle - bottom
+  
+  -- adjust text rectangle, keeping existing settings where possible
+  if bottom_margin == 0 or 
+    (bottom_margin < 0 and math.abs (bottom_margin) < (GAUGE_HEIGHT + 2)) then
+   TextRectangle(GetInfo (272), GetInfo (273),   -- left, top
+                  GetInfo (274), -- right
+                  - (GAUGE_HEIGHT + 2),  -- bottom (gauge height plus 2 more)
+                  GetInfo (276), GetInfo (282) or 0, GetInfo (277),  --  BorderOffset, BorderColour, BorderWidth
+                  GetInfo (278), GetInfo (279)) -- OutsideFillColour, OutsideFillStyle
+  end -- if
+  
+  -- make the miniwindow
+  WindowCreate (win, 
+             0, 0,   -- left, top (auto-positions)
+             gauge_width,     -- width
+             GAUGE_HEIGHT,  -- height
+             10,       -- auto-position: bottom left
+             0,  -- flags
+             BACKGROUND_COLOUR) 
+             
+  local cur, max = cur_xp, max_xp
+  
+  if pct_xp then
+    cur = pct_xp
+    max = nil
+  end -- if percentage given
+  
+  gauge (win, "XP", cur, max, 
+          0, 0, gauge_width, GAUGE_HEIGHT,
+          BOX_COLOUR, BACKGROUND_COLOUR,
+          NUMBER_OF_TICKS)
+
+  -- ensure window visible
+  WindowShow (win, true)
+  
+end -- draw_bar
+
+
+function OnPluginTelnetOption (option)
+
+  local t = {}  -- incoming server variables will go into table t
+  setfenv (assert (loadstring (option)), t) () -- compile and load into t
+  
+  if not t.group then
+    return
+  end -- nothing about groups here
+  
+  local me
+  for k, v in ipairs (t.group) do
+    if v.me then
+      me = v
+      table.remove (t.group, k)
+      break
+    end -- if found myself
+  end -- for
+  
+  -- hopefully found myself
+  if not me then
+    return
+  end -- if
+  
+  -- update the bar if we received updated xp
+  if me.xp then
+    -- if current or max changes, save it  
+    cur_xp = me.xp.cur or cur_xp
+    max_xp = me.xp.max or max_xp
+    pct_xp = me.xp.pct or pct_xp
+    draw_bar ()
+  end -- if
+  
+end -- function OnPluginTelnetOption
+
+function OnPluginTelnetRequest (type, data)
+  if type == 102 and data == "WILL" then
+    return true
+  end -- if
+end -- function OnPluginTelnetRequest
+
+function OnPluginWorldOutputResized ()
+  draw_bar ()
+end -- function
+ 
+-- hide window on removal
+function OnPluginClose ()
+  WindowShow (win,  false)  -- hide it
+end -- OnPluginClose
+
+-- hide window on disable
+function OnPluginDisable ()
+  WindowShow (win,  false)  -- hide it
+end -- OnPluginDisable
+
+-- show window on enable
+function OnPluginEnable ()
+  if (cur_xp and max_xp) or pct_xp then
+    WindowShow (win,  true)  -- show it
+  end -- if
+end -- OnPluginEnable
+
+]]>
+</script>
+
+</muclient>

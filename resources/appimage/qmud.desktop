@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=QMud
+Comment=QMud MUD client
+Exec=QMud
+Icon=QMud
+Categories=Network;Game;
+Terminal=false

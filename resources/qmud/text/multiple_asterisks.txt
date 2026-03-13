@@ -1,0 +1,35 @@
+Your "match" text contains multiple consecutive asterisks (eg. "**") which will probably be slow and not do what you expect.
+
+Asterisks in normal (ie. not regular expression) triggers or aliases represent a wildcard - that is, to match anything in the source text.
+
+Putting two in a row doesn't make a huge amount of sense, you are matching <anything><anything>.
+
+This will slow down the matching routine as it tries lots of combinations. For example, a trigger or alias matching: "**" and given the text "abcdef" would try these combinations:
+
+Wildcard 1: a
+Wildcard 2: bcdef
+
+then
+
+Wildcard 1: ab
+Wildcard 2: cdef
+
+then
+
+Wildcard 1: abc
+Wildcard 2: def
+
+and so on, posssibly taking a long time if the text to be scanned is long.
+
+The wildcards should be at least separated by some other character, eg. "* *" would be OK, however if you are trying to matching something like this:
+
+*** You are stunned
+
+... then you need to use a regular expression, because then you can "escape" out the asterisk with a backslash, thus making it a "normal" asterisk, and not a wildcard.
+
+For example the above line ("*** You are stunned") could be matched by:
+
+Match: ^\*\*\* You are stunned$
+Regular expression: checked
+
+The backslash "escapes" the special meaning of the asterisk, the "^" means "start of line" and the "$" means "end of line".

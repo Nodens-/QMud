@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE muclient>
+<!-- Saved on Thursday, March 05, 2026, 6:45 A.M. -->
+<!-- MuClient version 10.00 -->
+<!-- Written by Nick Gammon -->
+<!-- Home Page: http://www.mushclient.com/ -->
+<muclient>
+
+<!-- variables -->
+<variables>
+  <variable name="WINDOW_HEIGHT">894.0</variable>
+  <variable name="WINDOW_WIDTH">745.0</variable>
+  <variable name="cmention">true</variable>
+  <variable name="csound">true</variable>
+  <variable name="date_format">[%d %b %H:%M:%S] </variable>
+  <variable name="echo">true</variable>
+  <variable name="enabled">true</variable>
+  <variable name="lines">lines = {
+  }</variable>
+  <variable name="mask"></variable>
+  <variable name="mw_563dae21eb616a2f2b8d50f9_windowflags">2</variable>
+  <variable name="mw_563dae21eb616a2f2b8d50f9_windowx">1784.0</variable>
+  <variable name="mw_563dae21eb616a2f2b8d50f9_windowy">287.0</variable>
+  <variable name="name"></variable>
+  <variable name="timestamp">true</variable>
+</variables>
+</muclient>

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="Automatic_Backup_7_Days"
+   author="Nodens"
+   id="b8e6dac1ee7fe8e3de931fb7"
+   language="Lua"
+   purpose="Backs up the world file every day keeping 7 backups"
+   date_written="2020-04-19"
+   requires="4.40"
+   version="1.0"
+   >
+<description trim="y">
+<![CDATA[
+Install to backup your world file to a file of the same name with 0-6 appended, corresponding to each day of the week.
+]]>
+</description>
+
+</plugin>
+
+<script>
+<![CDATA[
+
+function do_backup ()
+  -- find name of world file
+  local world_file_name = GetInfo (54)
+  
+  world_file_name = world_file_name .. "backup\\"
+  
+  -- if found (ie. not just newly created) back it up
+  if world_file_name and world_file_name ~= "" then
+	local backup_file_name = GetInfo (67) .. "backup\\" .. GetInfo (2) .. os.date ("-backup-%w.MCL")
+
+    -- save if possible                           
+    if (Save (backup_file_name, true) == false) then
+      ColourNote ("orange","", "World file backed up as " .. backup_file_name)
+    else
+      ColourNote ("red", "", "Could not back up world file.")
+    end -- if
+  
+  end -- if world file name known
+
+end -- do_backup
+
+-- back up when disconnecting only
+function OnPluginDisconnect ()
+  do_backup ()
+end -- OnPluginDisconnect
+
+]]>
+</script> 
+
+</muclient>

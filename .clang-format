@@ -1,0 +1,33 @@
+# QMud C/C++ formatting rules
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+UseTab: ForIndentation
+TabWidth: 4
+IndentWidth: 4
+ContinuationIndentWidth: 4
+IndentAccessModifiers: true
+NamespaceIndentation: All
+
+ColumnLimit: 110
+BreakBeforeBraces: Allman
+
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+
+AlignConsecutiveAssignments: true
+AlignConsecutiveDeclarations: AcrossEmptyLinesAndComments
+AlignTrailingComments: true
+AlignArrayOfStructures: Left
+
+ReflowComments: IndentOnly
+MaxEmptyLinesToKeep: 1
+
+SortIncludes: CaseSensitive
+...

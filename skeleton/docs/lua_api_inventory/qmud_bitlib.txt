@@ -1,0 +1,15 @@
+# QMud Lua API inventory export
+# Exported (UTC): 2026-03-10T18:58:53Z
+
+ashr
+band
+bor
+clear
+mod
+neg
+shl
+shr
+test
+tonumber
+tostring
+xor

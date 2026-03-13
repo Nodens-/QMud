@@ -1,0 +1,696 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="Learning_Mapper"
+   author="Nick Gammon"
+   id="99c74b2685e425d3b6ed6a7d"
+   language="Lua"
+   purpose="AI interface to mapper to learn descriptions etc."
+   save_state="y"
+   date_written="2020-01-23 11:29:22"
+   date_modified="2020-02-10 09:00:00"
+   requires="5.05"
+   version="2.1"
+   >
+<description trim="y">
+<![CDATA[
+AUTOMATIC MAPPER ...  by Nick Gammon
+
+The window can be dragged to a new location by dragging the room name.
+
+Your current room is always in the center with a bolder border.
+
+LH-click on a room to speed-walk to it. RH-click on a room for options.
+LH-click on the "*" button on the bottom-left corner to configure it.
+
+** WHY DOES THE MAP CHANGE? **
+
+The mapper draws from your room outwards - that is, it draws your room's exits
+first, then the rooms leading from those rooms, and so on.
+
+Eventually it finds an overlap, and draws a short "stub" line to indicate there
+is a room there for which there isn't space to draw. If you get closer to that
+room the stub will disappear and the room(s) in question will be drawn.
+
+** WHAT DOES UID MEAN? **
+
+Each room has a unique identifier (UID). This is obtained by hashing up the
+room name and optionally the list of exits. Certain aliases below refer to
+rooms by their uid.
+
+ACTIONS
+
+mapper help      --> this help  (or click the "?" button on the bottom right)
+mapper zoom out  --> zoom out   (or use the mouse-wheel)
+mapper zoom in   --> zoom in    (or use the mouse-wheel)
+mapper hide      --> hide map
+mapper show      --> show map
+
+FINDING THINGS
+
+mapper notes        --> show nearby rooms that you added notes to
+mapper find <text>  --> search for text in room name, description or notes
+                          (eg. mapper find blacksmith)
+mapper where <uid>  --> show directions to a room (given a room ID)
+mapper shops        --> find nearby shops
+mapper trainers     --> find nearby trainers
+mapper banks        --> find nearby banks
+mapper peek <uid>   --> draws the map as if you were in room <uid>
+
+DATABASE MAINTENANCE
+
+mapper list         --> list rooms meeting certain criteria as follows:
+    mapper list     --> all rooms (can be lengthy, naturally)
+    mapper list uid ...           --> one or more UIDs
+                                      (if one, shows detailed info)
+    mapper list name <name>       --> rooms whose names partially match <name>
+    mapper list desc <description>--> rooms whose descriptions partially match
+                                      <description>
+    mapper list note <note>       --> rooms whose notes partially match <note>
+    mapper list area <area>       --> rooms whose areas partially match <area>
+    mapper list notes             --> rooms with any notes at all
+    mapper list orphans           --> rooms which have no rooms leading to them
+    mapper list dest <uid>        --> rooms which have an exit to <uid>
+    mapper list connect <uid>     --> rooms which are connected to <uid>
+    mapper list shop              --> rooms with shops
+    mapper list trainer           --> rooms with trainers
+    mapper list bank              --> rooms with a bank
+    mapper list colour name fore <colour>  --> rooms whose name has
+                                               foreground colour <colour>
+    mapper list colour name back <colour>  --> rooms whose name has
+                                               background colour <colour>
+    mapper list colour desc fore <colour>  --> rooms whose description has
+                                               foreground colour <colour>
+    mapper list colour desc back <colour>  --> rooms whose description has
+                                               background colour <colour>
+    mapper list colour exits fore <colour> --> rooms whose exits has
+                                               foreground colour <colour>
+    mapper list colour exits back <colour> --> rooms whose exits has
+                                               background colour <colour>
+mapper delete <uid>   --> deletes this room from the database
+mapper analyse        --> analyse the database and report on line type
+                          colours etc.
+
+(The above actions consider the entire database, not just rooms which are
+available to be walked to right now).
+
+MOVING
+
+mapper goto <room>  --> walk to a room by its room ID
+mapper stop         --> cancel any current speedwalk
+mapper resume       --> resume last speedwalk or hyperlinked speedwalk
+
+LEARNING INTERFACE CONTROL
+
+mapper learn        --> toggle on/off the mapper learning window
+                        and line informationwindow
+
+mapper corpus info  --> shows how many times you trained various different
+                        line types
+mapper corpus       --> show the entire mapper corpus (can be lengthy)
+mapper reset corpus --> deletes the entire mapper corpus so it will need to be
+                        trained again (after a confirmation dialog)
+mapper export corpus  --> export corpus database for backup or sharing
+mapper import corpus  --> import corpus database from backup or elsewhere
+
+MAPPER CONFIGURATION
+
+mapper config                  --> show all current configuration option values
+mapper config <option>         --> show one option value
+mapper config <option> <value> --> change <option> to <value>
+mapper window width <size>     --> set the map window width of the map
+mapper window height <size>    --> set the map window height of the map
+
+
+OPTION NAMES:
+
+    status_background <colour> --> background colour for the line information
+                                   window (eg. black)
+    status_border     <colour> --> colour of the border of the line information
+                                   window (eg. darkgray)
+    status_text       <colour> --> colour of the text in the line information
+                                   window (eg. lightgreen)
+    uid_size          <size>   --> how many characters of the unique ID to show
+                                   in room information (3 to 25)
+    when_to_draw      <when>   --> one of "room name", "description", "exits",
+                                  "prompt". See below.
+    activate_description_after_exits      (yes/no) -->
+          Only consider lines to be description lines directly after exit lines
+          (use for MUDs with descriptions after the exits)
+    activate_description_after_room_name  (yes/no) -->
+          Only consider lines to be description lines directly after room name
+          lines (use for MUDs with descriptions after the room names)
+    add_newline_to_prompt  (yes/no)            --> Add a newline to a prompt
+          at the end of a packet, where a packet ends with exactly ">" or "> ".
+    blank_line_terminates_line_type (yes/no)   --> A blank line is considered
+          to be the end of a line type - useful if there are no blank lines in
+          descriptions, but one after.
+    exits_on_room_name (yes/no)    --> The room name also contains
+          the available exits in the form:  Room name [N, S, E, W]
+    include_exits_in_hash (yes/no) --> Include the exits in the room ID hash.
+          YES: better handling of rooms with the same name.
+          NO: If the MUD adds and removes exits from time to time
+              (for example, if you unlock a door).
+    sort_exits (yes/no)   --> sort exits into alphabetic order,
+          also exclude non-exit words (for MUDs that put special symbols to
+          show if you have explored an exit or not).
+
+WHEN TO DRAW option
+
+When to draw the new room. Line types are one of:
+    room_name, description, exits, prompt, ignore, cannot_move
+For most MUDS: Use "exits" because exits usually come last.
+However if the exits come *before* the description is drawn,
+    then make it after the description.
+
+TIPS
+
+* If the mapper seems to lag behind drawing a new room, make sure that you get
+  a complete line *after* the exits line.
+* If the MUD supports colours, then use them. The mapper uses the colour of
+  lines to distinguish them from each other.
+* Try activating world configuration ->
+  Appearance -> Output -> "Convert IAC EOR/GA to new line"
+* If the MUD has prompts, try forcing a newline after a prompt
+  (the suggestion above might do that)
+  For example, on some MUDs you can change the prompt like this:
+    PROMPT %hH %mM %vV>!   or  PROMPT %hH %mM %vV>%c
+  In that case the "!" tells the MUD to send a new line.
+  See your MUD documentation for details.
+* You can also try activating the automatic adding of newlines after simple
+  prompts. Type "mapper config add_newline_to_prompt YES"
+* If room descriptions are not shown every time you enter a room (but only the
+  first time) turn that option off in the MUD configuration (eg. "toggle brief")
+* Also try training prompt lines (they are not otherwise used, but a prompt
+  line helps terminate a non-prompt line)
+* If the MUD shows a minimap on the left or right side of description lines,
+  turn that option off in the MUD configuration (eg. "toggle minimap")
+* It is important that temporary things (like mobs in a room, people in a room,
+  items on the ground, chat messages) are not considered part of the
+  description. If they are select that line and click "Description: No".
+* If the MUD shows everything in one colour, try activating colour output
+  (eg. "term ansi"). There may be configuration options to colour certain
+  types of lines (eg. "ansi roomshort light green"). This will help with
+  recognition of line types. The exact options will vary from MUD to MUD.
+* An exit line like: "South: A Room in Mud School" will give an erroneous
+  link to the "in" direction.
+
+LEARNING INTERFACE ALIASES (TRAIN THE MAPPER)
+
+(Type these or make a macro to use instead of clicking on the learning window
+  - for example make F5 train the selected line to be a description).
+
+mapper is room name     --> the selected line(s) are the name of a room
+mapper not room name    --> the selected line(s) are NOT the name of a room
+mapper is description   --> the selected line(s) are a room description
+mapper not description  --> the selected line(s) are NOT a room description
+mapper is exits         --> the selected line(s) are exits line(s)
+mapper not exits        --> the selected line(s) are NOT exits line(s)
+mapper is prompt        --> the selected line(s) are prompt line(s)
+mapper not prompt       --> the selected line(s) are NOT prompt line(s)
+
+MAPPER DATABASE
+
+mapper export map       --> export mapper database for backup or sharing
+mapper import map       --> import mapper database from backup or elsewhere
+mapper reset database   --> deletes the entire mapper database, so all mapped
+                            rooms are lost (after a confirmation dialog)
+
+]]>
+</description>
+
+</plugin>
+
+<!--  Triggers  -->
+
+<triggers>
+  <trigger
+   enabled="y"
+   keep_evaluating="y"
+   match="*"
+   script="line_received"
+   sequence="1"
+  >
+  </trigger>
+</triggers>
+
+
+<!--  Aliases  -->
+
+<aliases>
+
+ <alias
+   match="mapper is room_name"
+   enabled="y"
+   omit_from_command_history="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>learn_line_type ("room_name", true)</send>
+  </alias>
+
+  <alias
+   match="mapper not room_name"
+   enabled="y"
+   omit_from_command_history="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>learn_line_type ("room_name", false)</send>
+  </alias>
+
+
+  <alias
+   match="mapper is description"
+   enabled="y"
+   omit_from_command_history="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>learn_line_type ("description", true)</send>
+  </alias>
+
+  <alias
+   match="mapper not description"
+   enabled="y"
+   omit_from_command_history="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>learn_line_type ("description", false)</send>
+  </alias>
+
+ <alias
+   match="mapper is exits"
+   enabled="y"
+   omit_from_command_history="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>learn_line_type ("exits", true)</send>
+  </alias>
+
+  <alias
+   match="mapper not exits"
+   enabled="y"
+   omit_from_command_history="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>learn_line_type ("exits", false)</send>
+  </alias>
+
+<alias
+   match="mapper is prompt"
+   enabled="y"
+   omit_from_command_history="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>learn_line_type ("prompt", true)</send>
+  </alias>
+
+  <alias
+   match="mapper not prompt"
+   enabled="y"
+   omit_from_command_history="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>learn_line_type ("prompt", false)</send>
+  </alias>
+
+ <alias
+   match="mapper learn"
+   enabled="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>toggle_learn_window ()</send>
+  </alias>
+
+ <alias
+   match="^mapper analy[sz]e$"
+   enabled="y"
+   send_to="1"
+   sequence="100"
+   regexp="y"
+   script="mapper_analyse"
+  >
+  </alias>
+
+
+  <alias
+   match="mapper corpus"
+   enabled="y"
+   send_to="1"
+   sequence="100"
+   script="show_corpus"
+  >
+  </alias>
+
+ <alias
+   match="mapper reset corpus"
+   enabled="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>
+    if utils.msgbox ("Throw away the entire learning corpus and start from scratch?",
+                     "Confirmation", "yesno", "?", 2) == 'yes' then
+      corpus_reset (true)
+      ColourNote ("red", "", "Corpus reset")
+    end -- if they really want to
+  </send>
+  </alias>
+
+ <alias
+   match="mapper corpus info"
+   enabled="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>
+    corpus_info ()
+  </send>
+  </alias>
+
+ <alias
+   match="^mapper config(\s+(?<name>[a-zA-Z_]+)(\s+(?<value>.*))?)?$"
+   enabled="y"
+   send_to="1"
+   sequence="100"
+   regexp="y"
+   script="mapper_config"
+  >
+  </alias>
+
+  <alias
+   match="mapper reset database"
+   enabled="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>
+    if utils.msgbox ("Throw away the entire mapping database (rooms and exits) and start from scratch?",
+                     "Confirmation", "yesno", "?", 2) == 'yes' then
+      rooms = { }
+      duplicates = { }
+      highest_uid = 0
+      inverse_ids = { }
+      inverse_desc_hash = { }
+      ColourNote ("red", "", "Mapper database reset")
+    end -- if they really want to
+  </send>
+  </alias>
+
+
+ <!--  mapper find interface, eg. "mapper find shop" -->
+
+<alias
+   match="^mapper find ([\w* %d/&quot;]+)$"
+   enabled="y"
+   sequence="100"
+   script="map_find"
+   regexp="y"
+  >
+  </alias>
+
+  <!--  mapper goto interface, eg. "mapper goto 43052FEF" -->
+
+ <alias
+   match="mapper goto *"
+   enabled="y"
+   sequence="100"
+   script="map_goto"
+  >
+  </alias>
+
+  <!-- find shops nearby -->
+
+  <alias
+   match="^mapper shops?$"
+   regexp="y"
+   enabled="y"
+   sequence="100"
+   script="map_shops"
+  >
+
+  </alias>
+
+  <!-- find trainers nearby -->
+
+  <alias
+   match="^mapper trainers?$"
+   regexp="y"
+   enabled="y"
+   sequence="100"
+   script="map_trainers"
+  >
+
+  </alias>
+
+  <!-- find banks nearby -->
+
+  <alias
+   match="^mapper banks?$"
+   regexp="y"
+   enabled="y"
+   sequence="100"
+   script="map_banks"
+  >
+
+  </alias>
+
+  <!-- find bookmarked rooms nearby -->
+
+  <alias
+   match="^mapper notes?$"
+   regexp="y"
+   enabled="y"
+   sequence="100"
+   script="map_bookmarks"
+  >
+
+  </alias>
+
+  <!--  export rooms -->
+
+ <alias
+   match="mapper export map"
+   enabled="y"
+   sequence="100"
+   send_to="1"
+   script="mapper_export"
+  >
+   </alias>
+
+  <!--  import rooms -->
+
+ <alias
+   match="mapper import map"
+   enabled="y"
+   sequence="100"
+   send_to="1"
+   script="mapper_import"
+  >
+   </alias>
+
+ <!--  export corpus -->
+
+ <alias
+   match="mapper export corpus"
+   enabled="y"
+   sequence="100"
+   send_to="1"
+   script="corpus_export"
+  >
+   </alias>
+
+  <!--  import corpus -->
+
+ <alias
+   match="mapper import corpus"
+   enabled="y"
+   sequence="100"
+   send_to="1"
+   script="corpus_import"
+  >
+   </alias>
+
+
+  <!--  show directions to a room -->
+
+ <alias
+   match="mapper where *"
+   enabled="y"
+   sequence="100"
+   script="map_where"
+  >
+
+  </alias>
+
+  <!--  zooming aliases -->
+
+ <alias
+   match="mapper zoom out"
+   enabled="y"
+   sequence="100"
+   omit_from_command_history="y"
+   omit_from_output="y"
+   script="mapper.zoom_out"
+  >
+  </alias>
+
+<alias
+   match="mapper zoom in"
+   enabled="y"
+   sequence="100"
+   omit_from_command_history="y"
+   omit_from_output="y"
+   script="mapper.zoom_in"
+  >
+  </alias>
+
+  <!--  show/hide mapper -->
+
+  <alias
+   match="mapper hide"
+   enabled="y"
+   sequence="100"
+   script="mapper.hide"
+  >
+  </alias>
+
+   <alias
+   match="mapper show"
+   enabled="y"
+   sequence="100"
+   script="mapper.show"
+  >
+  </alias>
+
+  <!--  listing operations -->
+
+   <alias
+   match="^mapper list(.*)?$"
+   enabled="y"
+   sequence="100"
+   script="mapper_list"
+   regexp="y"
+  >
+  </alias>
+
+   <alias
+   match="^mapper delete ([0-9A-Fa-f]+)$"
+   enabled="y"
+   sequence="100"
+   script="mapper_delete"
+   regexp="y"
+  >
+  </alias>
+
+   <alias
+   match="^mapper peek ([0-9A-Fa-f]+)$"
+   enabled="y"
+   sequence="100"
+   script="mapper_peek"
+   regexp="y"
+  >
+  </alias>
+
+   <alias
+   match="mapper window width *"
+   enabled="y"
+   sequence="100"
+   script="set_window_width"
+  >
+  </alias>
+
+  <alias
+   match="mapper window height *"
+   enabled="y"
+   sequence="100"
+   script="set_window_height"
+  >
+  </alias>
+
+  <alias
+   match="mapper duplicate"
+   enabled="y"
+   sequence="100"
+   script="mark_duplicate_room"
+  >
+  </alias>
+
+  <alias
+   match="^mapper integrity(.*)?$"
+   regexp="y"
+   enabled="y"
+   sequence="100"
+   script="mapper_integrity"
+  >
+  </alias>
+
+  <alias
+   script="OnHelp"
+   match="mapper help"
+   enabled="y"
+  >
+  </alias>
+
+</aliases>
+
+<!--  Timers  -->
+
+<timers>
+  <timer script="update_buttons"
+         enabled="y"
+         second="0.2"
+   >
+
+  </timer>
+</timers>
+
+
+<!--  Script  -->
+
+<script>
+<![CDATA[
+    dofile (GetPluginInfo (GetPluginID (), 20) .. "Learning_Mapper.lua")
+
+    -- version number check of the Lua module, in case they download one file but not the other
+    if not LEARNING_MAPPER_LUA_VERSION or math.abs (LEARNING_MAPPER_LUA_VERSION - GetPluginInfo (GetPluginID (), 19)) > 0.001 then
+      ColourNote ("firebrick", "", string.rep ("-", 60))
+      ColourNote ("firebrick", "", "You do not have the current version of Learning_Mapper.xml")
+      ColourNote ("firebrick", "", string.format ("The plugin version is %0.2f, however Learning_Mapper.xml is version %0.2f ",
+                  GetPluginInfo (GetPluginID (), 19), (LEARNING_MAPPER_LUA_VERSION or "(unknown)")))
+      ColourNote ("firebrick", "", "Download the latest version from: https://github.com/nickgammon/plugins/blob/master/Learning_Mapper.lua")
+      ColourNote ("firebrick", "", "Plugin disabled.")
+      ColourNote ("firebrick", "", string.rep ("-", 60))
+      if learn_window then
+        WindowShow (learn_window, false)
+      end --if
+      if win then
+        WindowShow (win, false)
+      end -- if
+      if mapper.win then
+        WindowShow (mapper.win, false)
+      end -- if
+      EnablePlugin(GetPluginID (), false)
+       -- don't put the windows back + disable all possible callbacks
+      OnPluginInstall = function () end
+      OnPluginClose = function () end
+      OnPluginPacketReceived = function () end
+      OnPluginSaveState = function () end
+      OnPluginDrawOutputWindow = function () end
+      OnPluginWorldOutputResized = function () end
+      OnPluginConnect = function () end
+      OnPluginConnect = function () end
+    end -- if wrong version of the Lua file
+]]>
+</script>
+
+</muclient>

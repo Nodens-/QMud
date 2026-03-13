@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="GMCP_to_world"
+   author="Tyler Spivey"
+   id="b007454f07bf5e41d15f15a0"
+   language="Lua"
+   purpose="Send GMCP events to the world"
+   date_written="2018-12-30"
+   requires="4.50"
+   version="1.0"
+   >
+<description trim="y">
+<![CDATA[
+Install into IRE games to catch ATCP messages.
+
+]]>
+</description>
+
+</plugin>
+
+<!--  Aliases  -->
+<aliases>
+  <alias
+   match="^gmcp (.*)$"
+   enabled="y"
+   regexp="y"
+   send_to="12"
+   sequence="100"
+  >
+  <send>if "%1" ~= "debug" then
+	SendGMCPPacket("%1")
+  Send("")
+	end
+  </send>
+  </alias>
+	<alias
+		match = "^__TOGGLELOG$"
+		enabled = "y"
+		regexp = "y"
+		send_to="12"
+		sequence = "100"
+		keep_evaluating = "y"
+	>
+	<send>toggleLogMode()
+	</send>
+	</alias>
+</aliases>
+
+<!--  Script  -->
+
+
+<script>
+<![CDATA[
+require "json"
+require "serialize"
+
+local CLIENT_ID = json.encode({client="MUSHclient", version=Version ()})
+local IAC, SB, SE, DO = 0xFF, 0xFA, 0xF0, 0xFD
+local ATCP = 201
+local gmcpQueue = {}
+
+local logFile = io.open("GMCP_log.txt", "w")
+local logQueue = {}
+local logLength = logLength or 0
+local logMode = false
+
+local function log(what)
+  if not logState or logLength > 100000 then
+    return
+  end
+  
+  if what == nil then
+    return
+  elseif type(what) ~= "table" then
+    logFile:write(string.format("%f.2: %s\n", tostring(os.clock()), tostring(what)))
+    logLength = logLength + 1
+  else
+    local what_table = {}
+    for k,v in pairs(what) do
+      table.insert(what_table, string.format([["%s : %s"]], tostring(k), tostring(v)))
+    end
+    logFile:write(string.format("%f.2: {%s}\n", tostring(os.clock()), tostring(table.concat(what_table, ", "))))
+    logLength = logLength + 1
+  end
+end
+
+function toggleLogMode(state)
+	if not LogMode or state == false then
+		logMode = true
+	else
+		logMode = false
+	end
+	
+	print(string.format("Incoming Log Mode has been set to: %s", tostring(logMode)))
+	return logMode
+end
+
+function SendGMCPPacket(data)
+  SendPkt(string.char (IAC, SB, ATCP) .. data .. string.char (IAC, SE))
+end
+
+-- agree to use ATCP
+function OnPluginTelnetRequest (type, data)
+  
+  if type == ATCP and data == "WILL" then
+    return true
+  end -- if
+  
+  if type == ATCP and data == "SENT_DO" then
+    Note ("Enabling GMCP.")
+    SendGMCPPacket("Core.Hello " .. CLIENT_ID)
+    supports = {"Char 1", "Char.Skills 1", "Char.Items 1", "Comm.Channel 1", "IRE.Rift 1", "IRE.FileStore 1", "Room 1", "IRE.Composer 1", "Redirect 1", "IRE.Display 3", "IRE.Tasks 1", "IRE.Sound 1", "IRE.Misc 1", "IRE.Time 1", "IRE.Target 1"};
+
+    SendGMCPPacket("Core.Supports.Set " .. json.encode(supports))
+
+     return true
+  end -- if ATCP login needed (just sent DO)
+  
+  return false
+  
+end -- function OnPluginTelnetRequest
+
+function OnPluginTelnetSubnegotiation (type, option)
+
+  if type ~= ATCP then
+    return
+  end -- not Achaea subnegotiation
+
+  local command, args = string.match (option, "^([%a.]+)%s+(.*)$")
+  
+  if not command then
+    return
+  end -- don't seem to have a command
+  
+  --ExecuteNoStack("handle_GMCP " .. command .. "=" .. args)
+  gmcpQueue[#gmcpQueue+1] = {command, args}
+end -- function OnPluginTelnetSubnegotiation
+
+function OnPlugin_IAC_GA()
+  local gmcpQueueStr = serialize.save("gmcpQueue", gmcpQueue)
+  log(gmcpQueueStr)
+  --print(gmcpQueueStr)
+  SetVariable("gmcpQueue", gmcpQueueStr)
+  SetVariable("newPrompt", "1")
+  gmcpQueue = {}
+end
+
+function OnPluginLineReceived(sText)
+  --tprint(cmdQueue)
+  log(sText)
+end
+
+function PromptAck()
+  SetVariable("newPrompt", "0")
+  SetVariable("gmcpQueue", "")
+end
+
+function ExecuteNoStack(cmd)
+  local s = GetOption("enable_command_stack")
+  SetOption("enable_command_stack", 0)
+  Execute(cmd)
+  SetOption("enable_command_stack", s)
+end
+]]>
+</script>
+
+
+</muclient>

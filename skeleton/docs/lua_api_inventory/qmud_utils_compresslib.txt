@@ -1,0 +1,14 @@
+# QMud Lua API inventory export
+# Exported (UTC): 2026-03-10T18:58:53Z
+
+base64decode
+base64encode
+compress
+decompress
+fromhex
+hash
+md5
+readdir
+sha256
+split
+tohex

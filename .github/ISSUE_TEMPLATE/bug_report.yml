@@ -1,0 +1,76 @@
+name: Bug report
+description: Report a reproducible problem in QMud
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What is broken?
+      placeholder: Briefly describe the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact steps so we can reproduce it.
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: What happened instead?
+    validations:
+      required: true
+  - type: input
+    id: qmud_version
+    attributes:
+      label: QMud version/commit
+      placeholder: e.g. v10.0, or git commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - Windows
+        - macOS
+    validations:
+      required: true
+  - type: input
+    id: os_version
+    attributes:
+      label: Platform version
+      placeholder: e.g. Fedora 43, Windows 11 24H2, macOS 15.3
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Paste relevant logs, stack traces, or screenshots.
+      render: shell
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true

@@ -1,0 +1,23 @@
+QMud
+---------
+
+QMud was designed and written by Panagiotis Kalogiratos (Nodens) of Abnormal Frequency software engineering
+who is also one of CthulhuMUD's developers.
+
+QMud is Copyright (C) 2026 by Panagiotis Kalogiratos
+
+It is designed to be a Qt cross-platform client that is compatible and a spiritual successor to the excellent
+MUSHclient which was designed, written and Copyright (C) 1995 - 2007 by Nick Gammon of Gammon Software Solutions,
+as allowed by its license, which is included in QMud source and distributions and explicit permission from its author.
+
+
+Beta testers
+------------
+
+Many thanks to the following people who assisted in alpha testing of QMud v10
+
+CthulhuMUD:
+Algernon, Tanthul, Tempest
+
+Cryosphere:
+Morwen

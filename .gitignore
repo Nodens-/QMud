@@ -1,0 +1,33 @@
+.*
+!.gitignore
+!.gitattributes
+!.editorconfig
+!.clang-format
+!.github
+
+#
+#  Build directories
+#
+cmake-build-debug
+cmake-build-release
+
+#
+# Appimage tool
+#
+tools/linuxdeploy-plugin-appimage-x86_64.AppImage
+
+#
+#  Porting tracking documents
+#
+porting
+
+#
+#  Directory for exporting CLion inspector reports
+#
+inspect
+
+#
+# Help database (generated)
+#
+help.db
+documentation_fixed.sql
