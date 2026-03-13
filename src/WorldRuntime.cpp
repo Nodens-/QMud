@@ -6914,8 +6914,11 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 		out << "  <timer ";
 		saveXmlString(out, nl, "name", tm->attributes.value(QStringLiteral("name")), true);
 		saveXmlString(out, nl, "script", tm->attributes.value(QStringLiteral("script")), true);
-		saveXmlBoolean(out, nl, "enabled", isEnabledFlag(tm->attributes.value(QStringLiteral("enabled"))),
-		               true);
+		if (const bool timerEnabled = isEnabledFlag(tm->attributes.value(QStringLiteral("enabled")));
+		    timerEnabled)
+			saveXmlBoolean(out, nl, "enabled", true, true);
+		else
+			out << "enabled=\"n\" ";
 
 		bool            ok   = false;
 		const long long hour = tm->attributes.value(QStringLiteral("hour")).toLongLong(&ok);
