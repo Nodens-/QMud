@@ -64,6 +64,9 @@ done but better safe than sorry.
 - Optional Qt 6 module: `Multimedia` (sound; disabled at runtime if missing)
 - zlib
 - Lua 5.4 when `QMUD_ENABLE_LUA_SCRIPTING=ON` (default)
+- lua-socket
+- lua-json
+- lua-lpeg
 
 ## Build instructions
 
