@@ -286,7 +286,7 @@ jobs:
       - name: Resolve base version from Version.h
         id: version
         run: |
-          BASE_VERSION="$(awk -F'\"' '/kVersionString\\[\\][[:space:]]*=/ { print $2; exit }' src/Version.h)"
+          BASE_VERSION="$(grep -F -m1 'kVersionString[]' src/Version.h | cut -d'\"' -f2)"
           if [ -z "$BASE_VERSION" ]; then
             echo "Failed to resolve kVersionString from src/Version.h" >&2
             exit 1
