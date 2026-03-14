@@ -1948,11 +1948,6 @@ class WorldRuntime : public QObject
 		 * @brief Network I/O, command dispatch, and session counters.
 		 */
 		/**
-		 * @brief Processes one decoded incoming line.
-		 * @param line Incoming line text.
-		 */
-		void                                receiveIncomingLine(const QString &line);
-		/**
 		 * @brief Feeds raw socket bytes into telnet/output processing.
 		 * @param data Raw socket payload bytes.
 		 */

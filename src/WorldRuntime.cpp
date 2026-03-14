@@ -4163,14 +4163,6 @@ double WorldRuntime::scriptTimeSeconds() const
 	return static_cast<double>(m_scriptTimeNanos) / 1000000000.0;
 }
 
-void WorldRuntime::receiveIncomingLine(const QString &line)
-{
-	applyMappingFailureIfMatched(*this, line);
-	if (!m_active)
-		incrementNewLines();
-	emit incomingLineReceived(line);
-}
-
 void WorldRuntime::resetAnsiRenderState()
 {
 	m_pendingAnsiSequence.clear();
@@ -4510,6 +4502,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 	auto          emitCompletedLine = [&](QString &lineText, QVector<StyleSpan> &lineSpans)
 	{
 		applyMappingFailureIfMatched(*this, lineText);
+		if (!m_active)
+			incrementNewLines();
 		emit incomingStyledLineReceived(lineText, lineSpans);
 		emit incomingLineReceived(lineText);
 		m_linesReceived++;
