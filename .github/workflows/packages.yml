@@ -48,24 +48,98 @@ jobs:
             pkg-config \
             python3-pip
 
-      - name: Resolve Lua module root
-        run: |
-          echo "QMUD_SYSTEM_LUA_MODULES_PREFIX=/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)" >> "$GITHUB_ENV"
-
       - name: Resolve Lua module shared objects
         run: |
-          LPEG_SO="$(find "$QMUD_SYSTEM_LUA_MODULES_PREFIX" -type f -path '*/lua/*/lpeg.so' | sort | head -n 1)"
-          SOCKET_CORE_SO="$(find "$QMUD_SYSTEM_LUA_MODULES_PREFIX" -type f -path '*/lua/*/socket/core.so' | sort | head -n 1)"
-          MIME_CORE_SO="$(find "$QMUD_SYSTEM_LUA_MODULES_PREFIX" -type f -path '*/lua/*/mime/core.so' | sort | head -n 1)"
+          set -euo pipefail
+
+          find_first() {
+            local pattern="$1"
+            shift
+            for root in "$@"; do
+              [ -n "$root" ] || continue
+              [ -d "$root" ] || continue
+              local found
+              found="$(find "$root" -type f -path "$pattern" | sort | head -n 1)"
+              if [ -n "$found" ]; then
+                printf '%s\n' "$found"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          LUA_BIN=""
+          if command -v lua5.4 >/dev/null 2>&1; then
+            LUA_BIN="lua5.4"
+          elif command -v lua >/dev/null 2>&1; then
+            LUA_BIN="lua"
+          fi
+
+          lua_find_module() {
+            local module="$1"
+            [ -n "$LUA_BIN" ] || return 0
+            "$LUA_BIN" -e "local p = package.searchpath('${module}', package.cpath); if p then io.write(p) end" 2>/dev/null || true
+          }
+
+          LPEG_SO="$(lua_find_module 'lpeg')"
+          SOCKET_CORE_SO="$(lua_find_module 'socket.core')"
+          MIME_CORE_SO="$(lua_find_module 'mime.core')"
+
+          MULTIARCH_ROOT="/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+          SEARCH_ROOTS=(
+            "$MULTIARCH_ROOT"
+            /usr/lib
+            /usr/lib64
+            /usr/local/lib
+            /usr/local/lib64
+          )
+
+          if [ -n "$LUA_BIN" ]; then
+            LUA_CPATH="$("$LUA_BIN" -e 'io.write(package.cpath)' 2>/dev/null || true)"
+            while IFS=';' read -r entry; do
+              [ -n "$entry" ] || continue
+              root="$(printf '%s\n' "$entry" | sed -E 's#/\?/core\.so$##; s#/\?\.so$##')"
+              [ -d "$root" ] || continue
+              SEARCH_ROOTS+=("$root")
+            done < <(printf '%s' "$LUA_CPATH")
+          fi
+
+          if [ -z "$LPEG_SO" ]; then
+            LPEG_SO="$(find_first '*/lua/*/lpeg.so' "${SEARCH_ROOTS[@]}" || true)"
+          fi
+          if [ -z "$SOCKET_CORE_SO" ]; then
+            SOCKET_CORE_SO="$(find_first '*/lua/*/socket/core.so' "${SEARCH_ROOTS[@]}" || true)"
+          fi
+          if [ -z "$MIME_CORE_SO" ]; then
+            MIME_CORE_SO="$(find_first '*/lua/*/mime/core.so' "${SEARCH_ROOTS[@]}" || true)"
+          fi
+
+          if [ -z "$LPEG_SO" ] && dpkg -s lua-lpeg >/dev/null 2>&1; then
+            LPEG_SO="$(dpkg -L lua-lpeg | grep -E '/lua/.*/lpeg\.so$' | head -n 1 || true)"
+          fi
+          if [ -z "$SOCKET_CORE_SO" ] && dpkg -s lua-socket >/dev/null 2>&1; then
+            SOCKET_CORE_SO="$(dpkg -L lua-socket | grep -E '/lua/.*/socket/core\.so$' | head -n 1 || true)"
+          fi
+          if [ -z "$MIME_CORE_SO" ] && dpkg -s lua-socket >/dev/null 2>&1; then
+            MIME_CORE_SO="$(dpkg -L lua-socket | grep -E '/lua/.*/mime/core\.so$' | head -n 1 || true)"
+          fi
 
           if [ -z "$LPEG_SO" ] || [ -z "$SOCKET_CORE_SO" ] || [ -z "$MIME_CORE_SO" ]; then
             echo "Failed to resolve required Lua module shared objects." >&2
             echo "lpeg.so=$LPEG_SO" >&2
             echo "socket/core.so=$SOCKET_CORE_SO" >&2
             echo "mime/core.so=$MIME_CORE_SO" >&2
+            [ -n "$LUA_BIN" ] && echo "lua.cpath=$("$LUA_BIN" -e 'io.write(package.cpath)' 2>/dev/null || true)" >&2
             exit 1
           fi
 
+          QMUD_MODULE_ROOT="$(echo "$LPEG_SO" | sed -E 's#/lua/[^/]+/lpeg\.so$##')"
+          if [ -z "$QMUD_MODULE_ROOT" ] || [ ! -d "$QMUD_MODULE_ROOT" ]; then
+            echo "Failed to derive QMUD_SYSTEM_LUA_MODULES_PREFIX from $LPEG_SO" >&2
+            exit 1
+          fi
+
+          echo "QMUD_SYSTEM_LUA_MODULES_PREFIX=$QMUD_MODULE_ROOT" >> "$GITHUB_ENV"
           echo "QMUD_SYSTEM_LPEG_SO=$LPEG_SO" >> "$GITHUB_ENV"
           echo "QMUD_SYSTEM_SOCKET_CORE_SO=$SOCKET_CORE_SO" >> "$GITHUB_ENV"
           echo "QMUD_SYSTEM_MIME_CORE_SO=$MIME_CORE_SO" >> "$GITHUB_ENV"
