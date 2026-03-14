@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - master
     tags:
       - "v*"
   pull_request:
@@ -52,6 +51,24 @@ jobs:
       - name: Resolve Lua module root
         run: |
           echo "QMUD_SYSTEM_LUA_MODULES_PREFIX=/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)" >> "$GITHUB_ENV"
+
+      - name: Resolve Lua module shared objects
+        run: |
+          LPEG_SO="$(find "$QMUD_SYSTEM_LUA_MODULES_PREFIX" -type f -path '*/lua/*/lpeg.so' | sort | head -n 1)"
+          SOCKET_CORE_SO="$(find "$QMUD_SYSTEM_LUA_MODULES_PREFIX" -type f -path '*/lua/*/socket/core.so' | sort | head -n 1)"
+          MIME_CORE_SO="$(find "$QMUD_SYSTEM_LUA_MODULES_PREFIX" -type f -path '*/lua/*/mime/core.so' | sort | head -n 1)"
+
+          if [ -z "$LPEG_SO" ] || [ -z "$SOCKET_CORE_SO" ] || [ -z "$MIME_CORE_SO" ]; then
+            echo "Failed to resolve required Lua module shared objects." >&2
+            echo "lpeg.so=$LPEG_SO" >&2
+            echo "socket/core.so=$SOCKET_CORE_SO" >&2
+            echo "mime/core.so=$MIME_CORE_SO" >&2
+            exit 1
+          fi
+
+          echo "QMUD_SYSTEM_LPEG_SO=$LPEG_SO" >> "$GITHUB_ENV"
+          echo "QMUD_SYSTEM_SOCKET_CORE_SO=$SOCKET_CORE_SO" >> "$GITHUB_ENV"
+          echo "QMUD_SYSTEM_MIME_CORE_SO=$MIME_CORE_SO" >> "$GITHUB_ENV"
 
       - name: Install Qt 6.10.2
         run: |
@@ -101,7 +118,10 @@ jobs:
             -DQMUD_ENABLE_APPIMAGE=ON \
             -DQMUD_ENABLE_MAC_DOCKER=ON \
             -DQMUD_ENABLE_WINDOCKER=ON \
-            -DQMUD_SYSTEM_LUA_MODULES_PREFIX="$QMUD_SYSTEM_LUA_MODULES_PREFIX"
+            -DQMUD_SYSTEM_LUA_MODULES_PREFIX="$QMUD_SYSTEM_LUA_MODULES_PREFIX" \
+            -DQMUD_SYSTEM_LPEG_SO="$QMUD_SYSTEM_LPEG_SO" \
+            -DQMUD_SYSTEM_SOCKET_CORE_SO="$QMUD_SYSTEM_SOCKET_CORE_SO" \
+            -DQMUD_SYSTEM_MIME_CORE_SO="$QMUD_SYSTEM_MIME_CORE_SO"
 
       - name: Build AppImage
         run: |
@@ -167,7 +187,7 @@ jobs:
   publish-ci-release:
     name: Publish rolling CI prerelease
     needs: build-packages
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
