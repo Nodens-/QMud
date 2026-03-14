@@ -22,6 +22,7 @@
 #include "MxpDiagnostics.h"
 #include "NameGeneration.h"
 #include "SqliteCompat.h"
+#include "StringUtils.h"
 #include "Version.h"
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
@@ -3367,29 +3368,31 @@ namespace
 	constexpr int OPT_COMMAND_STACK = 0x000008;
 	constexpr int OPT_WORLD_ID      = 0x000010;
 
-	struct WorldNumericSaveOption
-	{
-			constexpr WorldNumericSaveOption(const char *name, long long)
-			    : name(name), min(0), max(0), flags(0)
-			{
-			}
+		struct WorldNumericSaveOption
+		{
+				constexpr WorldNumericSaveOption(const char *name, const long long defaultValue)
+				    : name(name), defaultValue(defaultValue), min(0), max(0), flags(0)
+				{
+				}
 
-			constexpr WorldNumericSaveOption(const char *name, long long, long long min, long long max)
-			    : name(name), min(min), max(max), flags(0)
-			{
-			}
+				constexpr WorldNumericSaveOption(const char *name, const long long defaultValue,
+				                                 const long long min, const long long max)
+				    : name(name), defaultValue(defaultValue), min(min), max(max), flags(0)
+				{
+				}
 
-			constexpr WorldNumericSaveOption(const char *name, long long, long long min, long long max,
-			                                 int flags)
-			    : name(name), min(min), max(max), flags(flags)
-			{
-			}
+				constexpr WorldNumericSaveOption(const char *name, const long long defaultValue,
+				                                 const long long min, const long long max, const int flags)
+				    : name(name), defaultValue(defaultValue), min(min), max(max), flags(flags)
+				{
+				}
 
-			const char *name;
-			long long   min;
-			long long   max;
-			int         flags;
-	};
+				const char *name;
+				long long   defaultValue;
+				long long   min;
+				long long   max;
+				int         flags;
+		};
 
 	struct WorldAlphaSaveOption
 	{
@@ -6686,17 +6689,20 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 
 	out << nl;
 
-	for (const auto &opt : kNumericSaveOptions)
-	{
-		if (!opt.name)
-			break;
-		const QString key   = QString::fromLatin1(opt.name);
-		const QString value = m_worldAttributes.value(key);
-		if (const bool isBool = (opt.min == 0 && opt.max == 0); isBool)
+		for (const auto &opt : kNumericSaveOptions)
 		{
-			saveXmlBoolean(out, nl, opt.name, isEnabledFlag(value));
-			continue;
-		}
+			if (!opt.name)
+				break;
+			const QString key   = QString::fromLatin1(opt.name);
+			const QString value = m_worldAttributes.value(key);
+			if (const bool isBool = (opt.min == 0 && opt.max == 0); isBool)
+			{
+				const bool currentValue = isEnabledFlag(value);
+				const bool defaultValue = opt.defaultValue != 0;
+				if (currentValue != defaultValue)
+					saveXmlString(out, nl, opt.name, qmudBoolToYn(currentValue));
+				continue;
+			}
 		if (opt.flags & OPT_RGB_COLOUR)
 		{
 			const long colour = parseColorRef(value);
