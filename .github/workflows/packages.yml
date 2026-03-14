@@ -42,6 +42,7 @@ jobs:
             lua-socket \
             lua5.4 \
             libgl1-mesa-dev \
+            libpulse0 \
             liblua5.4-dev \
             ninja-build \
             patchelf \
