@@ -3318,6 +3318,25 @@ void AppController::setupStartupBehavior()
 
 bool AppController::openWorldDocument(const QString &path)
 {
+	const bool allTypingToCommandWindow =
+	    getGlobalOption(QStringLiteral("AllTypingToCommandWindow")).toInt() != 0;
+	const QString wordDelimiters = getGlobalOption(QStringLiteral("WordDelimiters")).toString();
+	const QString wordDelimitersDblClick =
+	    getGlobalOption(QStringLiteral("WordDelimitersDblClick")).toString();
+	const bool smoothScrolling   = getGlobalOption(QStringLiteral("SmoothScrolling")).toInt() != 0;
+	const bool smootherScrolling = getGlobalOption(QStringLiteral("SmootherScrolling")).toInt() != 0;
+	const bool bleedBackground   = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
+
+	auto applyViewGlobalOptions = [&](WorldView *view)
+	{
+		if (!view)
+			return;
+		view->setAllTypingToCommandWindow(allTypingToCommandWindow);
+		view->setWordDelimiters(wordDelimiters, wordDelimitersDblClick);
+		view->setSmoothScrolling(smoothScrolling, smootherScrolling);
+		view->setBleedBackground(bleedBackground);
+	};
+
 	auto shouldActivateNewWorld = [this]() -> bool
 	{
 		if (!m_batchOpeningWorldList)
@@ -3453,6 +3472,7 @@ bool AppController::openWorldDocument(const QString &path)
 		auto *window = new WorldChildWindow(title);
 		window->setRuntime(runtime);
 		m_mainWindow->addMdiSubWindow(window, shouldActivateNewWorld());
+		applyViewGlobalOptions(window->view());
 		runtime->setPluginInstallDeferred(true);
 		runtime->applyFromDocument(doc);
 		runtime->setWorldFilePath(normalized);
@@ -3536,6 +3556,7 @@ bool AppController::openWorldDocument(const QString &path)
 	auto *window = new WorldChildWindow(title);
 	window->setRuntime(runtime);
 	m_mainWindow->addMdiSubWindow(window, shouldActivateNewWorld());
+	applyViewGlobalOptions(window->view());
 	restoreWorldWindowPlacement(window->windowTitle(), window);
 	if (getGlobalOption(QStringLiteral("OpenWorldsMaximised")).toInt() != 0)
 		window->showMaximized();
