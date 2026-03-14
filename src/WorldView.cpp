@@ -2476,9 +2476,12 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 
 	if (m_frozen)
 	{
-		if (shouldBreakAfterInlineInput && m_breakBeforeNextServerOutput && !text.isEmpty())
+		if (shouldBreakAfterInlineInput && m_breakBeforeNextServerOutput)
 		{
-			m_pendingOutput.push_back(PendingHtml{QString(), true});
+			// If this call already hard-breaks (e.g. Note()), just consume the
+			// pending break flag. Otherwise, inject a line break first.
+			if (!(text.isEmpty() && newLine))
+				m_pendingOutput.push_back(PendingHtml{QString(), true});
 			m_breakBeforeNextServerOutput = false;
 		}
 
@@ -2494,9 +2497,12 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 		return;
 	}
 
-	if (shouldBreakAfterInlineInput && m_breakBeforeNextServerOutput && !text.isEmpty())
+	if (shouldBreakAfterInlineInput && m_breakBeforeNextServerOutput)
 	{
-		appendOutputHtml(QString(), true);
+		// If this call already hard-breaks (e.g. Note()), just consume the
+		// pending break flag. Otherwise, inject a line break first.
+		if (!(text.isEmpty() && newLine))
+			appendOutputHtml(QString(), true);
 		m_breakBeforeNextServerOutput = false;
 	}
 
