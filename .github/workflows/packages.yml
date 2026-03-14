@@ -1,0 +1,217 @@
+name: Packages
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-packages:
+    name: Build AppImage / macOS / Windows packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Free runner disk space for Docker builds
+        run: |
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            curl \
+            lua-json \
+            lua-lpeg \
+            lua-socket \
+            lua5.4 \
+            libgl1-mesa-dev \
+            liblua5.4-dev \
+            ninja-build \
+            patchelf \
+            pkg-config \
+            python3-pip
+
+      - name: Resolve Lua module root
+        run: |
+          echo "QMUD_SYSTEM_LUA_MODULES_PREFIX=/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)" >> "$GITHUB_ENV"
+
+      - name: Install Qt 6.10.2
+        run: |
+          python3 -m pip install --upgrade pip setuptools wheel aqtinstall
+          aqt install-qt -O "$RUNNER_TEMP/Qt" linux desktop 6.10.2 linux_gcc_64 -m qtmultimedia
+
+          QT6_CMAKE_DIR="$(find "$RUNNER_TEMP/Qt" -type d -path '*/lib/cmake/Qt6' | sort | head -n 1)"
+          if [ -z "$QT6_CMAKE_DIR" ]; then
+            echo "Failed to locate Qt6 CMake package directory after aqt install." >&2
+            exit 1
+          fi
+
+          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+          echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build cached macOS cross image
+        uses: docker/build-push-action@v6
+        with:
+          context: tools/docker/macos-qt610
+          file: tools/docker/macos-qt610/Dockerfile
+          tags: qmud-macos-builder:qt6.10
+          load: true
+          cache-from: type=gha,scope=qmud-macos-builder
+          cache-to: type=gha,scope=qmud-macos-builder,mode=max
+
+      - name: Build cached Windows cross image
+        uses: docker/build-push-action@v6
+        with:
+          context: tools/docker/windows-qt610
+          file: tools/docker/windows-qt610/Dockerfile
+          tags: qmud-windows-builder:qt6.10
+          load: true
+          cache-from: type=gha,scope=qmud-windows-builder
+          cache-to: type=gha,scope=qmud-windows-builder,mode=max
+
+      - name: Configure CMake
+        run: |
+          cmake -S . -B cmake-build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DQMUD_CI_BUILD=${{ startsWith(github.ref, 'refs/tags/v') && 'OFF' || 'ON' }} \
+            -DQMUD_DOCKER_EXECUTABLE=docker \
+            -DQMUD_ENABLE_APPIMAGE=ON \
+            -DQMUD_ENABLE_MAC_DOCKER=ON \
+            -DQMUD_ENABLE_WINDOCKER=ON \
+            -DQMUD_SYSTEM_LUA_MODULES_PREFIX="$QMUD_SYSTEM_LUA_MODULES_PREFIX"
+
+      - name: Build AppImage
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target AppImage -j"$(nproc)"
+
+      - name: Build macOS package
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target MacDocker
+
+      - name: Build Windows package
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target WinDocker
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-appimage
+          if-no-files-found: error
+          path: |
+            cmake-build-release/appimage/*.AppImage
+            cmake-build-release/appimage/*.AppImage.zsync
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-macos
+          if-no-files-found: error
+          path: |
+            cmake-build-release/mac-docker-out/QMud.app.zip
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-windows
+          if-no-files-found: error
+          path: |
+            cmake-build-release/windows-docker-out/QMud.zip
+
+  publish-release:
+    name: Publish GitHub release assets
+    needs: build-packages
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-assets/qmud-appimage/*.AppImage
+            release-assets/qmud-appimage/*.AppImage.zsync
+            release-assets/qmud-macos/QMud.app.zip
+            release-assets/qmud-windows/QMud.zip
+
+  publish-ci-release:
+    name: Publish rolling CI prerelease
+    needs: build-packages
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve base version from Version.h
+        id: version
+        run: |
+          BASE_VERSION="$(sed -n 's/.*kVersionString\\[\\] = \"\\([^\"]*\\)\".*/\\1/p' src/Version.h | head -n 1)"
+          if [ -z "$BASE_VERSION" ]; then
+            echo "Failed to resolve kVersionString from src/Version.h" >&2
+            exit 1
+          fi
+          echo "base=$BASE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Move rolling CI tag to current commit
+        run: |
+          CI_TAG="ci-${GITHUB_REF_NAME}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "${CI_TAG}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${CI_TAG}" --force
+
+      - name: Publish CI prerelease assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-${{ github.ref_name }}
+          name: QMud v${{ steps.version.outputs.base }}-ci
+          prerelease: true
+          make_latest: false
+          generate_release_notes: false
+          overwrite_files: true
+          files: |
+            release-assets/qmud-appimage/*.AppImage
+            release-assets/qmud-appimage/*.AppImage.zsync
+            release-assets/qmud-macos/QMud.app.zip
+            release-assets/qmud-windows/QMud.zip
