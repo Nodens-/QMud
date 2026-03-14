@@ -3045,6 +3045,271 @@ namespace
 		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 	}
 
+	struct FixedColumnWrapConfig
+	{
+			bool enabled{false};
+			int  wrapColumn{0};
+			bool indentParas{true};
+	};
+
+	FixedColumnWrapConfig fixedColumnWrapConfig(const QMap<QString, QString> &attrs)
+	{
+		FixedColumnWrapConfig config;
+		const bool            wrapEnabled    = isEnabledFlag(attrs.value(QStringLiteral("wrap")));
+		const bool            autoWrapWindow = isEnabledFlag(attrs.value(QStringLiteral("auto_wrap_window_width")));
+		const bool            nawsEnabled    = isEnabledFlag(attrs.value(QStringLiteral("naws")));
+		config.wrapColumn                   = attrs.value(QStringLiteral("wrap_column")).toInt();
+		config.enabled                      = wrapEnabled && !autoWrapWindow && config.wrapColumn > 0 && !nawsEnabled;
+		const QString indentValue           = attrs.value(QStringLiteral("indent_paras"));
+		config.indentParas =
+		    !(indentValue == QStringLiteral("0") || indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+		      indentValue.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+		return config;
+	}
+
+	bool sameStyleForWrap(const WorldRuntime::StyleSpan &a, const WorldRuntime::StyleSpan &b)
+	{
+		return a.fore == b.fore && a.back == b.back && a.bold == b.bold && a.underline == b.underline &&
+		       a.italic == b.italic && a.blink == b.blink && a.strike == b.strike && a.inverse == b.inverse &&
+		       a.changed == b.changed && a.actionType == b.actionType && a.action == b.action &&
+		       a.hint == b.hint && a.variable == b.variable && a.startTag == b.startTag;
+	}
+
+	void wrapPlainLineForColumn(QString &text, const int wrapColumn, const bool indentParas)
+	{
+		if (wrapColumn <= 0 || text.isEmpty())
+			return;
+
+		QString wrappedText;
+		wrappedText.reserve(safeQSizeToInt(text.size() + text.size() / qMax(1, wrapColumn)));
+
+		int  column             = 0;
+		int  lineStart          = 0;
+		int  lastSpace          = -1;
+		bool lineHasVisibleChar = false;
+
+		auto recomputeLineState = [&]
+		{
+			column             = 0;
+			lineStart          = 0;
+			lastSpace          = -1;
+			lineHasVisibleChar = false;
+			for (int i = safeQSizeToInt(wrappedText.size()) - 1; i >= 0; --i)
+			{
+				if (wrappedText.at(i) == QLatin1Char('\n'))
+				{
+					lineStart = i + 1;
+					break;
+				}
+			}
+			for (int i = lineStart, size = safeQSizeToInt(wrappedText.size()); i < size; ++i)
+			{
+				const QChar ch = wrappedText.at(i);
+				if (ch == QLatin1Char('\n'))
+				{
+					lineStart          = i + 1;
+					column             = 0;
+					lastSpace          = -1;
+					lineHasVisibleChar = false;
+					continue;
+				}
+				if (ch == QLatin1Char(' '))
+					lastSpace = i;
+				if (!ch.isSpace())
+					lineHasVisibleChar = true;
+				++column;
+			}
+		};
+
+		for (int i = 0; i < text.size(); ++i)
+		{
+			const QChar ch = text.at(i);
+			wrappedText.append(ch);
+
+			if (ch == QLatin1Char('\n'))
+			{
+				column             = 0;
+				lineStart          = safeQSizeToInt(wrappedText.size());
+				lastSpace          = -1;
+				lineHasVisibleChar = false;
+				continue;
+			}
+
+			if (ch == QLatin1Char(' '))
+				lastSpace = safeQSizeToInt(wrappedText.size()) - 1;
+			if (!ch.isSpace())
+				lineHasVisibleChar = true;
+
+			++column;
+			if (column < wrapColumn)
+				continue;
+
+			if (!lineHasVisibleChar)
+				continue;
+
+			int insertPos = safeQSizeToInt(wrappedText.size());
+			if (lastSpace >= lineStart)
+			{
+				insertPos = indentParas ? lastSpace : lastSpace + 1;
+
+				bool onlyWhitespace = true;
+				for (int j = lineStart, size = safeQSizeToInt(wrappedText.size()); j < insertPos && j < size;
+				     ++j)
+				{
+					if (!wrappedText.at(j).isSpace())
+					{
+						onlyWhitespace = false;
+						break;
+					}
+				}
+				if (onlyWhitespace)
+					insertPos = safeQSizeToInt(wrappedText.size());
+			}
+
+			wrappedText.insert(insertPos, QLatin1Char('\n'));
+			recomputeLineState();
+		}
+
+		text = wrappedText;
+	}
+
+	void wrapStyledLineForColumn(QString &text, QVector<WorldRuntime::StyleSpan> &spans, const int wrapColumn,
+	                             const bool indentParas)
+	{
+		if (wrapColumn <= 0 || text.isEmpty())
+			return;
+
+		QVector<WorldRuntime::StyleSpan> expandedStyles;
+		expandedStyles.reserve(text.size());
+		WorldRuntime::StyleSpan lastStyle;
+		int                     covered = 0;
+		for (const WorldRuntime::StyleSpan &span : spans)
+		{
+			lastStyle     = span;
+			const int len = qMax(0, span.length);
+			for (int i = 0; i < len && covered < text.size(); ++i, ++covered)
+				expandedStyles.push_back(span);
+			if (covered >= text.size())
+				break;
+		}
+		while (expandedStyles.size() < text.size())
+			expandedStyles.push_back(lastStyle);
+
+		QString wrappedText;
+		wrappedText.reserve(safeQSizeToInt(text.size() + text.size() / qMax(1, wrapColumn)));
+		QVector<WorldRuntime::StyleSpan> wrappedStyles;
+		wrappedStyles.reserve(
+		    safeQSizeToInt(expandedStyles.size() + expandedStyles.size() / qMax(1, wrapColumn)));
+
+		int  column             = 0;
+		int  lineStart          = 0;
+		int  lastSpace          = -1;
+		bool lineHasVisibleChar = false;
+
+		auto recomputeLineState = [&]
+		{
+			column             = 0;
+			lineStart          = 0;
+			lastSpace          = -1;
+			lineHasVisibleChar = false;
+			for (int i = safeQSizeToInt(wrappedText.size()) - 1; i >= 0; --i)
+			{
+				if (wrappedText.at(i) == QLatin1Char('\n'))
+				{
+					lineStart = i + 1;
+					break;
+				}
+			}
+			for (int i = lineStart, size = safeQSizeToInt(wrappedText.size()); i < size; ++i)
+			{
+				const QChar ch = wrappedText.at(i);
+				if (ch == QLatin1Char('\n'))
+				{
+					lineStart          = i + 1;
+					column             = 0;
+					lastSpace          = -1;
+					lineHasVisibleChar = false;
+					continue;
+				}
+				if (ch == QLatin1Char(' '))
+					lastSpace = i;
+				if (!ch.isSpace())
+					lineHasVisibleChar = true;
+				++column;
+			}
+		};
+
+		for (int i = 0; i < text.size(); ++i)
+		{
+			const QChar                   ch    = text.at(i);
+			const WorldRuntime::StyleSpan style = expandedStyles.value(i);
+			wrappedText.append(ch);
+			wrappedStyles.push_back(style);
+
+			if (ch == QLatin1Char('\n'))
+			{
+				column             = 0;
+				lineStart          = safeQSizeToInt(wrappedText.size());
+				lastSpace          = -1;
+				lineHasVisibleChar = false;
+				continue;
+			}
+
+			if (ch == QLatin1Char(' '))
+				lastSpace = safeQSizeToInt(wrappedText.size()) - 1;
+			if (!ch.isSpace())
+				lineHasVisibleChar = true;
+
+			++column;
+			if (column < wrapColumn)
+				continue;
+
+			if (!lineHasVisibleChar)
+				continue;
+
+			int insertPos = safeQSizeToInt(wrappedText.size());
+			if (lastSpace >= lineStart)
+			{
+				insertPos = indentParas ? lastSpace : lastSpace + 1;
+
+				bool onlyWhitespace = true;
+				for (int j = lineStart, size = safeQSizeToInt(wrappedText.size()); j < insertPos && j < size;
+				     ++j)
+				{
+					if (!wrappedText.at(j).isSpace())
+					{
+						onlyWhitespace = false;
+						break;
+					}
+				}
+				if (onlyWhitespace)
+					insertPos = safeQSizeToInt(wrappedText.size());
+			}
+
+			const WorldRuntime::StyleSpan newlineStyle = insertPos > 0 && insertPos - 1 < wrappedStyles.size()
+			                                                 ? wrappedStyles.at(insertPos - 1)
+			                                                 : style;
+			wrappedText.insert(insertPos, QLatin1Char('\n'));
+			wrappedStyles.insert(insertPos, newlineStyle);
+			recomputeLineState();
+		}
+
+		QVector<WorldRuntime::StyleSpan> rebuilt;
+		rebuilt.reserve(wrappedStyles.size());
+		for (const WorldRuntime::StyleSpan &oneStyle : wrappedStyles)
+		{
+			WorldRuntime::StyleSpan span = oneStyle;
+			span.length                  = 1;
+			if (!rebuilt.isEmpty() && sameStyleForWrap(rebuilt.last(), span))
+				rebuilt.last().length++;
+			else
+				rebuilt.push_back(span);
+		}
+
+		text  = wrappedText;
+		spans = rebuilt;
+	}
+
 	int currentMxpDebugLevel(const QMap<QString, QString> &worldAttributes)
 	{
 		int           debugLevel = DBG_NONE;
@@ -10559,7 +10824,11 @@ void WorldRuntime::outputText(const QString &text, bool note, bool newLine)
 	const int log  = note ? (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_notes"))) ? 1 : 0)
 	                      : (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_output"))) ? 1 : 0);
 	firePluginScreendraw(type, log, text);
-	emit outputRequested(text, newLine, note);
+	QString displayText = text;
+	if (const FixedColumnWrapConfig wrapConfig = fixedColumnWrapConfig(m_worldAttributes);
+	    wrapConfig.enabled && !displayText.isEmpty())
+		wrapPlainLineForColumn(displayText, wrapConfig.wrapColumn, wrapConfig.indentParas);
+	emit outputRequested(displayText, newLine, note);
 }
 
 void WorldRuntime::outputStyledText(const QString &text, const QVector<StyleSpan> &spans, bool note,
@@ -10571,7 +10840,17 @@ void WorldRuntime::outputStyledText(const QString &text, const QVector<StyleSpan
 	const int log  = note ? (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_notes"))) ? 1 : 0)
 	                      : (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_output"))) ? 1 : 0);
 	firePluginScreendraw(type, log, text);
-	emit outputStyledRequested(text, spans, newLine, note);
+	QString           displayText  = text;
+	QVector<StyleSpan> displaySpans = spans;
+	if (const FixedColumnWrapConfig wrapConfig = fixedColumnWrapConfig(m_worldAttributes);
+	    wrapConfig.enabled && !displayText.isEmpty())
+	{
+		if (displaySpans.isEmpty())
+			wrapPlainLineForColumn(displayText, wrapConfig.wrapColumn, wrapConfig.indentParas);
+		else
+			wrapStyledLineForColumn(displayText, displaySpans, wrapConfig.wrapColumn, wrapConfig.indentParas);
+	}
+	emit outputStyledRequested(displayText, displaySpans, newLine, note);
 }
 
 void WorldRuntime::outputHtml(const QString &html)
@@ -10585,6 +10864,7 @@ void WorldRuntime::outputAnsiText(const QString &text, bool note)
 {
 	if (text.isEmpty())
 		return;
+	const FixedColumnWrapConfig wrapConfig = fixedColumnWrapConfig(m_worldAttributes);
 
 	auto parseColorValue = [](const QString &value) -> QColor
 	{
@@ -10725,7 +11005,12 @@ void WorldRuntime::outputAnsiText(const QString &text, bool note)
 
 	auto               emitLine = [&](bool newLine)
 	{
-		emit outputStyledRequested(lineText, lineSpans, newLine, note);
+		QString           displayText  = lineText;
+		QVector<StyleSpan> displaySpans = lineSpans;
+		if (wrapConfig.enabled && !displayText.isEmpty())
+			wrapStyledLineForColumn(displayText, displaySpans, wrapConfig.wrapColumn,
+			                        wrapConfig.indentParas);
+		emit outputStyledRequested(displayText, displaySpans, newLine, note);
 		lineText.clear();
 		lineSpans.clear();
 	};
