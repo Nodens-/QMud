@@ -22,6 +22,28 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Resolve package version metadata
+        run: |
+          set -euo pipefail
+
+          VERSION_LINE="$(grep -F -m1 'kVersionString[]' src/Version.h || true)"
+          BASE_VERSION="${VERSION_LINE#*\"}"
+          BASE_VERSION="${BASE_VERSION%%\"*}"
+          if [ -z "$BASE_VERSION" ]; then
+            echo "Failed to resolve kVersionString from src/Version.h" >&2
+            exit 1
+          fi
+
+          SHORT_SHA="${GITHUB_SHA::7}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            PACKAGE_VERSION="$BASE_VERSION"
+          else
+            PACKAGE_VERSION="ci-${SHORT_SHA}"
+          fi
+
+          echo "QMUD_BASE_VERSION=$BASE_VERSION" >> "$GITHUB_ENV"
+          echo "QMUD_PACKAGE_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
+
       - name: Free runner disk space for Docker builds
         run: |
           sudo rm -rf /usr/local/lib/android || true
@@ -199,6 +221,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$QT_ROOT" \
             -DQMUD_CI_BUILD=${{ startsWith(github.ref, 'refs/tags/v') && 'OFF' || 'ON' }} \
+            -DQMUD_APPIMAGE_VERSION="$QMUD_PACKAGE_VERSION" \
             -DQMUD_DOCKER_EXECUTABLE="$QMUD_DOCKER_EXECUTABLE" \
             -DQMUD_ENABLE_APPIMAGE=ON \
             -DQMUD_ENABLE_MAC_DOCKER=ON \
@@ -220,6 +243,33 @@ jobs:
         run: |
           CCACHE_DISABLE=1 cmake --build cmake-build-release --target WinDocker
 
+      - name: Normalize packaged asset filenames
+        run: |
+          set -euo pipefail
+
+          MAC_SRC="cmake-build-release/mac-docker-out/QMud.app.zip"
+          MAC_DST="cmake-build-release/mac-docker-out/QMud-${QMUD_PACKAGE_VERSION}-macos.zip"
+          WIN_SRC="cmake-build-release/windows-docker-out/QMud.zip"
+          WIN_DST="cmake-build-release/windows-docker-out/QMud-${QMUD_PACKAGE_VERSION}-windows.zip"
+
+          if [ ! -f "$MAC_SRC" ]; then
+            echo "Missing macOS package: $MAC_SRC" >&2
+            exit 1
+          fi
+          if [ ! -f "$WIN_SRC" ]; then
+            echo "Missing Windows package: $WIN_SRC" >&2
+            exit 1
+          fi
+
+          mv -f "$MAC_SRC" "$MAC_DST"
+          mv -f "$WIN_SRC" "$WIN_DST"
+
+          APPIMAGE_FILE="$(find cmake-build-release/appimage -maxdepth 1 -type f -name '*.AppImage' | sort | head -n 1)"
+          if [ -z "$APPIMAGE_FILE" ]; then
+            echo "Missing AppImage package in cmake-build-release/appimage" >&2
+            exit 1
+          fi
+
       - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4
         with:
@@ -235,7 +285,7 @@ jobs:
           name: qmud-macos
           if-no-files-found: error
           path: |
-            cmake-build-release/mac-docker-out/QMud.app.zip
+            cmake-build-release/mac-docker-out/QMud-*.zip
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -243,7 +293,7 @@ jobs:
           name: qmud-windows
           if-no-files-found: error
           path: |
-            cmake-build-release/windows-docker-out/QMud.zip
+            cmake-build-release/windows-docker-out/QMud-*.zip
 
   publish-release:
     name: Publish GitHub release assets
@@ -257,6 +307,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: qmud-*
           path: release-assets
 
       - name: Publish release assets
@@ -266,8 +317,8 @@ jobs:
           files: |
             release-assets/qmud-appimage/*.AppImage
             release-assets/qmud-appimage/*.AppImage.zsync
-            release-assets/qmud-macos/QMud.app.zip
-            release-assets/qmud-windows/QMud.zip
+            release-assets/qmud-macos/*.zip
+            release-assets/qmud-windows/*.zip
 
   publish-ci-release:
     name: Publish rolling CI prerelease
@@ -298,6 +349,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: qmud-*
           path: release-assets
 
       - name: Move rolling CI tag to current commit
@@ -320,5 +372,5 @@ jobs:
           files: |
             release-assets/qmud-appimage/*.AppImage
             release-assets/qmud-appimage/*.AppImage.zsync
-            release-assets/qmud-macos/QMud.app.zip
-            release-assets/qmud-windows/QMud.zip
+            release-assets/qmud-macos/*.zip
+            release-assets/qmud-windows/*.zip
