@@ -519,7 +519,8 @@ static QTreeWidgetItem *findTreeItemByIndex(const QTreeWidget *tree, const int i
 }
 
 static void rebuildGroupedTree(const QTableWidget *table, QTreeWidget *tree,
-                               const std::function<QString(int)> &descriptionForRow)
+                               const std::function<QString(int)> &descriptionForRow,
+                               const QString                     &expandedGroup)
 {
 	if (!table || !tree)
 		return;
@@ -557,7 +558,24 @@ static void rebuildGroupedTree(const QTableWidget *table, QTreeWidget *tree,
 		child->setData(0, Qt::UserRole, rowToIndex(table, row));
 	}
 
-	tree->expandAll();
+	bool restoredExpandedGroup = false;
+	for (int i = 0; i < tree->topLevelItemCount(); ++i)
+	{
+		if (QTreeWidgetItem *groupItem = tree->topLevelItem(i); groupItem)
+		{
+			const bool shouldExpand = !expandedGroup.isEmpty() && groupItem->text(0) == expandedGroup;
+			groupItem->setExpanded(shouldExpand);
+			restoredExpandedGroup = restoredExpandedGroup || shouldExpand;
+		}
+	}
+	if (!restoredExpandedGroup)
+	{
+		for (int i = 0; i < tree->topLevelItemCount(); ++i)
+		{
+			if (QTreeWidgetItem *groupItem = tree->topLevelItem(i); groupItem)
+				groupItem->setExpanded(false);
+		}
+	}
 	tree->setCurrentItem(findTreeItemByIndex(tree, selectedIndex));
 }
 
@@ -8207,6 +8225,55 @@ void WorldPreferencesDialog::buildUi()
 			return -1;
 		return findRowForIndex(table, index);
 	};
+	auto connectSingleGroupExpansion = [this](QTreeWidget *tree, const std::function<void(const QString &)> &save)
+	{
+		if (!tree)
+		{
+			return;
+		}
+
+			connect(tree, &QTreeWidget::itemExpanded, this,
+			        [this, tree, save](const QTreeWidgetItem *item)
+			        {
+				        if (!item || item->parent())
+					        return;
+
+			        {
+				        QSignalBlocker block(tree);
+				        for (int i = 0; i < tree->topLevelItemCount(); ++i)
+				        {
+					        QTreeWidgetItem *topLevel = tree->topLevelItem(i);
+					        if (!topLevel || topLevel == item)
+						        continue;
+					        topLevel->setExpanded(false);
+				        }
+			        }
+
+			        if (m_runtime)
+				        save(item->text(0));
+		        });
+
+			connect(tree, &QTreeWidget::itemCollapsed, this,
+			        [this, tree, save](const QTreeWidgetItem *item)
+			        {
+				        if (!item || item->parent())
+					        return;
+
+			        QString expandedGroup;
+			        for (int i = 0; i < tree->topLevelItemCount(); ++i)
+			        {
+				        QTreeWidgetItem *topLevel = tree->topLevelItem(i);
+				        if (topLevel && topLevel->isExpanded())
+				        {
+					        expandedGroup = topLevel->text(0);
+					        break;
+				        }
+			        }
+
+			        if (m_runtime)
+				        save(expandedGroup);
+		        });
+	};
 	if (m_aliasesTree)
 		connect(m_aliasesTree, &QTreeWidget::itemDoubleClicked, this,
 		        [this, editAliasItem, rowForTreeItem](const QTreeWidgetItem *item, int)
@@ -8231,6 +8298,27 @@ void WorldPreferencesDialog::buildUi()
 			        if (row >= 0)
 				        editTimerItem(row, false);
 		        });
+	connectSingleGroupExpansion(
+	    m_triggersTree,
+	    [this](const QString &group)
+	    {
+		    if (m_runtime)
+			    m_runtime->setLastTriggerTreeExpandedGroup(group);
+	    });
+	connectSingleGroupExpansion(
+	    m_aliasesTree,
+	    [this](const QString &group)
+	    {
+		    if (m_runtime)
+			    m_runtime->setLastAliasTreeExpandedGroup(group);
+	    });
+	connectSingleGroupExpansion(
+	    m_timersTree,
+	    [this](const QString &group)
+	    {
+		    if (m_runtime)
+			    m_runtime->setLastTimerTreeExpandedGroup(group);
+	    });
 	if (m_triggersTable)
 		connect(m_triggersTable, &QTableWidget::itemSelectionChanged, this,
 		        [this, syncTreeFromTable]
@@ -9993,7 +10081,8 @@ void WorldPreferencesDialog::populateTriggers()
 			                   if (QTableWidgetItem *item = m_triggersTable->item(row, 0))
 				                   return item->text();
 			                   return {};
-		                   });
+		                   },
+		                   m_runtime ? m_runtime->lastTriggerTreeExpandedGroup() : QString());
 	}
 	updateRuleViewModes();
 	if (m_useDefaultTriggers && !m_useDefaultTriggersLoaded)
@@ -10195,7 +10284,8 @@ void WorldPreferencesDialog::populateAliases()
 			                   if (QTableWidgetItem *item = m_aliasesTable->item(row, 0))
 				                   return item->text();
 			                   return {};
-		                   });
+		                   },
+		                   m_runtime ? m_runtime->lastAliasTreeExpandedGroup() : QString());
 	}
 	updateRuleViewModes();
 	if (m_useDefaultAliases && !m_useDefaultAliasesLoaded)
@@ -10414,7 +10504,8 @@ void WorldPreferencesDialog::populateTimers()
 			    if (when.isEmpty())
 				    return type;
 			    return type + QStringLiteral(": ") + when;
-		    });
+		    },
+		    m_runtime ? m_runtime->lastTimerTreeExpandedGroup() : QString());
 	}
 	updateRuleViewModes();
 	if (m_useDefaultTimers && !m_useDefaultTimersLoaded)

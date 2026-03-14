@@ -2215,6 +2215,36 @@ class WorldRuntime : public QObject
 		 */
 		void                                setLastPreferencesPage(int page);
 		/**
+		 * @brief Returns last expanded trigger-tree group in world preferences.
+		 * @return Last expanded trigger group label.
+		 */
+		[[nodiscard]] QString               lastTriggerTreeExpandedGroup() const;
+		/**
+		 * @brief Stores last expanded trigger-tree group in world preferences.
+		 * @param group Group label to persist.
+		 */
+		void                                setLastTriggerTreeExpandedGroup(const QString &group);
+		/**
+		 * @brief Returns last expanded alias-tree group in world preferences.
+		 * @return Last expanded alias group label.
+		 */
+		[[nodiscard]] QString               lastAliasTreeExpandedGroup() const;
+		/**
+		 * @brief Stores last expanded alias-tree group in world preferences.
+		 * @param group Group label to persist.
+		 */
+		void                                setLastAliasTreeExpandedGroup(const QString &group);
+		/**
+		 * @brief Returns last expanded timer-tree group in world preferences.
+		 * @return Last expanded timer group label.
+		 */
+		[[nodiscard]] QString               lastTimerTreeExpandedGroup() const;
+		/**
+		 * @brief Stores last expanded timer-tree group in world preferences.
+		 * @param group Group label to persist.
+		 */
+		void                                setLastTimerTreeExpandedGroup(const QString &group);
+		/**
 		 * @brief Returns connection start timestamp.
 		 * @return Connection start time.
 		 */
@@ -4080,6 +4110,9 @@ class WorldRuntime : public QObject
 		QString                               m_proxyAddressString;
 		quint32                               m_proxyAddressV4{0};
 		int                                   m_lastPreferencesPage{0};
+		QString                               m_lastTriggerTreeExpandedGroup;
+		QString                               m_lastAliasTreeExpandedGroup;
+		QString                               m_lastTimerTreeExpandedGroup;
 		bool                                  m_hasCachedIp{false};
 		QDateTime                             m_connectTime;
 		bool                                  m_disconnectOk{true};

@@ -6518,6 +6518,36 @@ void WorldRuntime::setLastPreferencesPage(int page)
 	m_lastPreferencesPage = page;
 }
 
+QString WorldRuntime::lastTriggerTreeExpandedGroup() const
+{
+	return m_lastTriggerTreeExpandedGroup;
+}
+
+void WorldRuntime::setLastTriggerTreeExpandedGroup(const QString &group)
+{
+	m_lastTriggerTreeExpandedGroup = group;
+}
+
+QString WorldRuntime::lastAliasTreeExpandedGroup() const
+{
+	return m_lastAliasTreeExpandedGroup;
+}
+
+void WorldRuntime::setLastAliasTreeExpandedGroup(const QString &group)
+{
+	m_lastAliasTreeExpandedGroup = group;
+}
+
+QString WorldRuntime::lastTimerTreeExpandedGroup() const
+{
+	return m_lastTimerTreeExpandedGroup;
+}
+
+void WorldRuntime::setLastTimerTreeExpandedGroup(const QString &group)
+{
+	m_lastTimerTreeExpandedGroup = group;
+}
+
 QDateTime WorldRuntime::connectTime() const
 {
 	return m_connectTime;
