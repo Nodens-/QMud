@@ -286,7 +286,9 @@ jobs:
       - name: Resolve base version from Version.h
         id: version
         run: |
-          BASE_VERSION="$(grep -F -m1 'kVersionString[]' src/Version.h | cut -d'\"' -f2)"
+          VERSION_LINE="$(grep -F -m1 'kVersionString[]' src/Version.h || true)"
+          BASE_VERSION="${VERSION_LINE#*\"}"
+          BASE_VERSION="${BASE_VERSION%%\"*}"
           if [ -z "$BASE_VERSION" ]; then
             echo "Failed to resolve kVersionString from src/Version.h" >&2
             exit 1
