@@ -56,6 +56,42 @@ you may have manually placed in the lua dir. Nothing else is required.
 Always keep a backup of your original MUSHclient dir. Extensive testing has been
 done but better safe than sorry.
 
+## Data directory resolution (`QMUD_HOME`)
+
+QMud resolves its startup/data directory in this order:
+
+1. `QMUD_HOME` environment variable (all platforms).
+2. If env var is missing, `QMUD_HOME` from system config file:
+    - Linux: `/etc/QMud/config`
+    - macOS: `/Library/Application Support/QMud/config`
+    - Windows: `%LOCALAPPDATA%/QMud/config`
+
+System config lines support both:
+
+- `QMUD_HOME=/path/to/dir`
+- `export QMUD_HOME=/path/to/dir`
+
+Quoted values are accepted, and leading `~` is expanded.
+
+If nothing is configured, defaults are:
+
+- AppImage: `$HOME/QMud`
+- macOS: `~/Library/Application Support/QMud`
+- Windows and non-AppImage Linux: executable directory
+
+## Environment flags and CLI switches
+
+### Environment flags
+
+- `QMUD_HOME`: Overrides startup/data directory resolution (see section above).
+- `QMUD_ALLOW_MULTI_INSTANCE`: When set to `1`, `y`, `yes`, or `true`, bypasses single-instance enforcement.
+
+### CLI switches
+
+- `--multi-instance` (alias: `--allow-multi-instance`): Bypass single-instance enforcement for that process. (Not safe
+  with same datadir)
+- `--dump-lua-api <output-dir>`: Export Lua API inventory to the given directory and exit.
+
 ## Build requirements
 
 - CMake 3.21+
@@ -133,41 +169,34 @@ Artifacts are written to:
 - macOS: `cmake-build-release/mac-docker-out`
 - Windows: `cmake-build-release/windows-docker-out`
 
-## Data directory resolution (`QMUD_HOME`)
+## Running tests
 
-QMud resolves its startup/data directory in this order:
+Configure with tests enabled:
 
-1. `QMUD_HOME` environment variable (all platforms).
-2. If env var is missing, `QMUD_HOME` from system config file:
-    - Linux: `/etc/QMud/config`
-    - macOS: `/Library/Application Support/QMud/config`
-    - Windows: `%LOCALAPPDATA%/QMud/config`
+```bash
+cmake -S . -B cmake-build-release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DQMUD_ENABLE_TESTING=ON \
+  -DQMUD_ENABLE_GUI_TESTS=ON
+```
 
-System config lines support both:
+Build and run all registered tests:
 
-- `QMUD_HOME=/path/to/dir`
-- `export QMUD_HOME=/path/to/dir`
+```bash
+cmake --build cmake-build-release -j"$(nproc)"
+ctest --test-dir cmake-build-release --output-on-failure
+```
 
-Quoted values are accepted, and leading `~` is expanded.
+Run the default quick suite used for pull requests:
 
-If nothing is configured, defaults are:
+```bash
+ctest --test-dir cmake-build-release --output-on-failure --label-exclude slow
+```
 
-- AppImage: `$HOME/QMud`
-- macOS: `~/Library/Application Support/QMud`
-- Windows and non-AppImage Linux: executable directory
+CI policy:
 
-## Environment flags and CLI switches
-
-### Environment flags
-
-- `QMUD_HOME`: Overrides startup/data directory resolution (see section above).
-- `QMUD_ALLOW_MULTI_INSTANCE`: When set to `1`, `y`, `yes`, or `true`, bypasses single-instance enforcement.
-
-### CLI switches
-
-- `--multi-instance` (alias: `--allow-multi-instance`): Bypass single-instance enforcement for that process. (Not safe
-  with same datadir)
-- `--dump-lua-api <output-dir>`: Export Lua API inventory to the given directory and exit.
+- `.github/workflows/tests.yml` is the authoritative test workflow.
+- Pull requests should require the `Tests / PR/Push quick suite (exclude slow)` job to pass before merge.
 
 ## Purposeful deviations from MUSHclient
 

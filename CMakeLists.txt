@@ -12,6 +12,8 @@ if (UNIX AND NOT APPLE)
 endif ()
 
 option(QMUD_ENABLE_LUA_SCRIPTING "Enable Lua scripting callbacks" ON)
+option(QMUD_ENABLE_TESTING "Enable QMud QtTest/CTest targets" ON)
+option(QMUD_ENABLE_GUI_TESTS "Enable GUI-focused QtTest suites" OFF)
 option(QMUD_CI_BUILD "Mark runtime display version as CI build (-ci suffix)" OFF)
 option(QMUD_RELEASE_NATIVE_OPTIMIZATIONS "Tune Release builds for the local CPU (-march=native or /arch:AVX2)" OFF)
 set(QMUD_SYSTEM_LUA_MODULES_PREFIX "" CACHE PATH
@@ -111,6 +113,11 @@ endfunction()
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Sql PrintSupport)
 find_package(Qt6 QUIET COMPONENTS Multimedia)
+if (QMUD_ENABLE_TESTING)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    include(CTest)
+    enable_testing()
+endif ()
 find_package(PkgConfig QUIET)
 find_package(Python3 QUIET COMPONENTS Interpreter)
 
@@ -137,12 +144,18 @@ set(QMUD_SOURCES
         Main.cpp
         MainWindowHostResolver.cpp
         MainFrame.cpp
+        MainFrameActionUtils.cpp
         AppController.cpp
         Accelerators.cpp
+        AliasMatchUtils.cpp
+        CommandPatternUtils.cpp
+        CommandQueueUtils.cpp
+        CommandTextUtils.cpp
         NameGeneration.cpp
         DoubleMetaphone.cpp
         ErrorDescriptions.cpp
         AsciiArt.cpp
+        WorldPreferencesRoutingUtils.cpp
         WorldChildWindow.cpp
         dialogs/TipDialog.cpp
         dialogs/WelcomeDialog.cpp
@@ -153,6 +166,8 @@ set(QMUD_SOURCES
         WorldDocument.cpp
         WorldRuntime.cpp
         WorldCommandProcessor.cpp
+        SpeedwalkParser.cpp
+        TimerSchedulingUtils.cpp
         WorldView.cpp
         WorldSocket.cpp
         TelnetProcessor.cpp
@@ -195,10 +210,15 @@ set(QMUD_HEADERS
         MainWindowHostResolver.h
         Version.h
         MainFrame.h
+        MainFrameActionUtils.h
         AppController.h
         Accelerators.h
         AcceleratorUtils.h
+        AliasMatchUtils.h
         CommandMappingTypes.h
+        CommandPatternUtils.h
+        CommandQueueUtils.h
+        CommandTextUtils.h
         ErrorDescriptions.h
         InfoTypesMetadata.h
         InfoTypeData.inc
@@ -216,6 +236,8 @@ set(QMUD_HEADERS
         WorldRuntime.h
         MiniWindow.h
         WorldCommandProcessor.h
+        SpeedwalkParser.h
+        TimerSchedulingUtils.h
         WorldView.h
         CommandIds.h
         WorldSocketService.h
@@ -230,6 +252,7 @@ set(QMUD_HEADERS
         LuaCallbackEngine.h
         LuaApiExport.h
         FileExtensions.h
+        WorldPreferencesRoutingUtils.h
         dialogs/LogSessionDialog.h
         MdiTabs.h
         dialogs/PluginsDialog.h
@@ -504,10 +527,6 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
     message(STATUS "Lua module provider resolution: lpeg=${QMUD_RESOLVED_LPEG_PROVIDER}, bc=${QMUD_RESOLVED_BC_PROVIDER}, luasocket=${QMUD_RESOLVED_LUASOCKET_PROVIDER}")
 endif ()
 
-# Regex compatibility harness (Qt PCRE2 vs legacy PCRE behavior)
-add_executable(QMudRegexCompat tools/regex_compat_test.cpp)
-target_link_libraries(QMudRegexCompat PRIVATE Qt6::Core)
-
 # Qt target include root: keep build-visible sources isolated under src/.
 target_include_directories(QMud PRIVATE "${QMUD_SRC_DIR}")
 
@@ -524,6 +543,10 @@ foreach (tgt lsqlite png lua luacom)
         target_link_libraries(QMud PRIVATE ${tgt})
     endif ()
 endforeach ()
+
+if (QMUD_ENABLE_TESTING)
+    add_subdirectory(tests)
+endif ()
 
 # Optional: resources (.qrc)
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/qmud.qrc")
@@ -942,7 +965,6 @@ else ()
 endif ()
 
 qmud_apply_release_optimizations(QMud)
-qmud_apply_release_optimizations(QMudRegexCompat)
 if (APPLE AND CMAKE_CROSSCOMPILING)
     # Suppress noisy osxcross/tbd linker warnings (e.g. libz/libcups out-of-sync stubs).
     target_link_options(QMud PRIVATE -Wl,-w)

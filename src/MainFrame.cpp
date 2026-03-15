@@ -9,6 +9,7 @@
 #include "MainFrame.h"
 #include "ActivityWindow.h"
 #include "AppController.h"
+#include "MainFrameActionUtils.h"
 #include "WorldChildWindow.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
@@ -82,20 +83,6 @@ static bool isTrayOnlyIconPlacement()
 	if (!app)
 		return false;
 	return app->getGlobalOption(QStringLiteral("Icon Placement")).toInt() == 1;
-}
-
-static QString worldCommandNameForSlot(const int slot)
-{
-	return QStringLiteral("World%1").arg(slot);
-}
-
-static QString worldButtonTooltipForSlot(const int slot)
-{
-	if (slot >= 1 && slot <= 9)
-		return QStringLiteral("Activates world #%1 (Ctrl+%1)").arg(slot);
-	if (slot == 10)
-		return QStringLiteral("Activates world #10 (Ctrl+0)");
-	return QStringLiteral("Activates world #%1").arg(slot);
 }
 
 void MainWindow::addToolbarSeparator(QToolBar *toolbar)
@@ -2466,9 +2453,9 @@ void MainWindow::updateActivityToolbarButtons()
 	{
 		const int slot   = sizeToInt(m_worldActions.size()) + 1;
 		auto     *action = new QAction(this);
-		action->setObjectName(worldCommandNameForSlot(slot));
+		action->setObjectName(QMudMainFrameActionUtils::worldCommandNameForSlot(slot));
 		action->setText(QString::number(slot));
-		const QString tooltip = worldButtonTooltipForSlot(slot);
+		const QString tooltip = QMudMainFrameActionUtils::worldButtonTooltipForSlot(slot);
 		action->setToolTip(tooltip);
 		action->setStatusTip(tooltip);
 		connect(action, &QAction::triggered, this, &MainWindow::onActionTriggered);

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<qmud>
+  <world
+    world_file_version="1000"
+    qmud_version="10.01"
+    date_saved="2026-03-15 12:00:00"
+    id="111111111111111111111111"
+    name="Minimal World"
+    site="example.org"
+    port="4000">
+    <notes>hello world notes</notes>
+  </world>
+  <triggers>
+    <trigger name="hello_trigger">
+      <send>say hello</send>
+    </trigger>
+  </triggers>
+  <aliases>
+    <alias name="hello_alias">
+      <send>wave</send>
+    </alias>
+  </aliases>
+  <timers>
+    <timer name="heartbeat">
+      <send>look</send>
+    </timer>
+  </timers>
+  <variables>
+    <variable name="session">baseline</variable>
+  </variables>
+  <include name="extras.xml"/>
+  <script>print("root script")</script>
+</qmud>

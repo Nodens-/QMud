@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="StatePlugin"
+    author="Tester"
+    id="eeeeeeeeeeeeeeeeeeeeeeee"
+    language="lua"
+    purpose="state merge fixture">
+    <description>state fixture plugin</description>
+  </plugin>
+  <variables>
+    <variable name="score">10</variable>
+  </variables>
+</muclient>

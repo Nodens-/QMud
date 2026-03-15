@@ -20,7 +20,7 @@ Describe impact on:
 
 ## Validation
 
-List what you verified (build profile, manual tests, etc).
+List what you verified (build targets, manual tests, etc.).
 
 ## Checklist
 
