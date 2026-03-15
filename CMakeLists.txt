@@ -50,6 +50,21 @@ else ()
     set(QMUD_LUA_MODULE_CORE_OUTPUT_NAME core.so)
 endif ()
 
+set(QMUD_LUA_MODULE_SEARCH_PATHS
+        "${QMUD_SYSTEM_LUA_MODULES_PREFIX}"
+        /usr/lib64
+        /usr/lib
+        /usr/local/lib64
+        /usr/local/lib
+        /opt/homebrew/lib
+        /opt/local/lib)
+if (CMAKE_LIBRARY_ARCHITECTURE)
+    list(APPEND QMUD_LUA_MODULE_SEARCH_PATHS
+            "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+            "/usr/local/lib/${CMAKE_LIBRARY_ARCHITECTURE}")
+endif ()
+list(REMOVE_DUPLICATES QMUD_LUA_MODULE_SEARCH_PATHS)
+
 if (POLICY CMP0069)
     cmake_policy(SET CMP0069 NEW)
 endif ()
@@ -420,7 +435,7 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
         if (NOT QMUD_HAS_SYSTEM_LPEG)
             find_file(QMUD_SYSTEM_LPEG_SO
                     NAMES lpeg.so
-                    PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                     PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
             )
             if (QMUD_SYSTEM_LPEG_SO)
@@ -457,7 +472,7 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
         if (NOT QMUD_HAS_SYSTEM_BC)
             find_file(QMUD_SYSTEM_BC_SO
                     NAMES bc.so
-                    PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                     PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
             )
             if (QMUD_SYSTEM_BC_SO)
@@ -497,13 +512,13 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
     if (NOT QMUD_HAS_SYSTEM_LUASOCKET)
         find_file(QMUD_SYSTEM_SOCKET_CORE_SO
                 NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
-                PATHS "${QMUD_SYSTEM_LUA_MODULES_PREFIX}" /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib /opt/homebrew/lib /opt/local/lib
+                PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                 PATH_SUFFIXES "" socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
                 NO_CMAKE_FIND_ROOT_PATH
         )
         find_file(QMUD_SYSTEM_MIME_CORE_SO
                 NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
-                PATHS "${QMUD_SYSTEM_LUA_MODULES_PREFIX}" /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib /opt/homebrew/lib /opt/local/lib
+                PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                 PATH_SUFFIXES "" mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
                 NO_CMAKE_FIND_ROOT_PATH
         )
@@ -702,7 +717,7 @@ endif ()
 if (NOT QMUD_SYSTEM_SOCKET_CORE_SO)
     find_file(QMUD_SYSTEM_SOCKET_CORE_SO
             NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
-            PATHS "${QMUD_SYSTEM_LUA_MODULES_PREFIX}" /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib /opt/homebrew/lib /opt/local/lib
+            PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
             PATH_SUFFIXES "" socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
             NO_CMAKE_FIND_ROOT_PATH
     )
@@ -710,7 +725,7 @@ endif ()
 if (NOT QMUD_SYSTEM_MIME_CORE_SO)
     find_file(QMUD_SYSTEM_MIME_CORE_SO
             NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
-            PATHS "${QMUD_SYSTEM_LUA_MODULES_PREFIX}" /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib /opt/homebrew/lib /opt/local/lib
+            PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
             PATH_SUFFIXES "" mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
             NO_CMAKE_FIND_ROOT_PATH
     )
@@ -1531,7 +1546,7 @@ if (UNIX AND NOT APPLE)
         if (NOT QMUD_APPIMAGE_LPEG_SO)
             find_file(QMUD_APPIMAGE_LPEG_SO
                     NAMES lpeg.so
-                    PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                     PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
             )
         endif ()
@@ -1540,7 +1555,7 @@ if (UNIX AND NOT APPLE)
         if (NOT QMUD_APPIMAGE_SOCKET_CORE_SO)
             find_file(QMUD_APPIMAGE_SOCKET_CORE_SO
                     NAMES core.so
-                    PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                     PATH_SUFFIXES lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
             )
         endif ()
@@ -1549,7 +1564,7 @@ if (UNIX AND NOT APPLE)
         if (NOT QMUD_APPIMAGE_MIME_CORE_SO)
             find_file(QMUD_APPIMAGE_MIME_CORE_SO
                     NAMES core.so
-                    PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                     PATH_SUFFIXES lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
             )
         endif ()
