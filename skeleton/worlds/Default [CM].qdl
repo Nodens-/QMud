@@ -38,7 +38,7 @@
    chat_foreground_colour="red"
    chat_background_colour="black"
    chat_port="4050"
-   confirm_before_replacing_typing="y"
+   confirm_before_replacing_typing="n"
    confirm_on_paste="y"
    confirm_on_send="y"
    convert_ga_to_newline="y"
