@@ -466,6 +466,8 @@ QByteArray TelnetProcessor::processBytes(const QByteArray &data)
 	if (data.isEmpty())
 		return {};
 
+	m_outputSize = 0;
+
 	QByteArray output;
 	QByteArray tailPlain;
 
@@ -796,8 +798,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 {
 	QByteArray output;
 	output.reserve(data.size());
-	int outputSize = 0;
-	m_outputSize   = 0;
+	int outputSize = m_outputSize;
 
 	for (int i = 0; i < data.size(); ++i)
 	{
@@ -926,14 +927,14 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			if (m_mxpEnabled && m_mxpMode == eMXP_secure_once && c != '<')
 				mxpRestoreMode();
 
-			if (m_mxpEnabled && m_useMxp != eNoMXP && m_mxpMode != eMXP_locked &&
+			if (m_mxpEnabled && m_useMxp != eNoMXP && m_mxpMode != eMXP_locked && m_mxpMode != eMXP_perm_locked &&
 			    c == '<') // MXP element start
 			{
 				m_mxpPhase = HAVE_MXP_ELEMENT;
 				m_mxpString.clear();
 				continue;
 			}
-			if (m_mxpEnabled && m_useMxp != eNoMXP && m_mxpMode != eMXP_locked &&
+			if (m_mxpEnabled && m_useMxp != eNoMXP && m_mxpMode != eMXP_locked && m_mxpMode != eMXP_perm_locked &&
 			    c == '&') // MXP entity start
 			{
 				m_mxpPhase = HAVE_MXP_ENTITY;
@@ -1670,6 +1671,7 @@ void TelnetProcessor::mxpCollectedElement()
 			ev.raw      = m_mxpString;
 			ev.offset   = m_outputSize;
 			ev.sequence = m_mxpEventSequence++;
+			ev.secure   = mxpSecure();
 			m_mxpEvents.append(ev);
 		}
 		break;
@@ -1686,6 +1688,7 @@ void TelnetProcessor::mxpCollectedElement()
 			ev.attributes = attrs;
 			ev.offset     = m_outputSize;
 			ev.sequence   = m_mxpEventSequence++;
+			ev.secure     = mxpSecure();
 			m_mxpEvents.append(ev);
 		}
 		break;
@@ -1702,6 +1705,7 @@ void TelnetProcessor::mxpCollectedElement()
 			ev.attributes = attrs;
 			ev.offset     = m_outputSize;
 			ev.sequence   = m_mxpEventSequence++;
+			ev.secure     = mxpSecure();
 			m_mxpEvents.append(ev);
 		}
 		break;

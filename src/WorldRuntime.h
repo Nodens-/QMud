@@ -25,6 +25,7 @@
 #include <QSet>
 #include <QSharedPointer>
 #include <QString>
+#include <QStringDecoder>
 #include <QVariant>
 #include <QVector>
 #include <QtSql/QSqlQuery>
@@ -378,6 +379,34 @@ class WorldRuntime : public QObject
 				bool    strike{false};
 				QString fore;
 				QString back;
+		};
+		/**
+		 * @brief Incremental MXP style state carried across packet boundaries.
+		 */
+		struct MxpStyleState
+		{
+				bool    bold{false};
+				bool    underline{false};
+				bool    italic{false};
+				bool    blink{false};
+				bool    strike{false};
+				bool    monospace{false};
+				bool    inverse{false};
+				QString fore;
+				QString back;
+				int     actionType{ActionNone};
+				QString action;
+				QString hint;
+				QString variable;
+				bool    startTag{false};
+		};
+		/**
+		 * @brief MXP style stack frame used while tags open and close.
+		 */
+		struct MxpStyleFrame
+		{
+				QByteArray    tag;
+				MxpStyleState state;
 		};
 		/**
 		 * @brief One output buffer line with text, style spans, and timing metadata.
@@ -3693,6 +3722,10 @@ class WorldRuntime : public QObject
 		 */
 		void resetAnsiRenderState();
 		/**
+		 * @brief Resets MXP rendering state machine.
+		 */
+		void resetMxpRenderState();
+		/**
 		 * @brief Runs callbacks with numeric and string arguments.
 		 * @param functionName Callback function name.
 		 * @param arg1 Numeric callback argument.
@@ -4025,6 +4058,14 @@ class WorldRuntime : public QObject
 		int                                   m_scriptCount{0};
 		QByteArray                            m_pendingAnsiSequence;
 		AnsiRenderState                       m_ansiRenderState;
+		QStringDecoder                        m_streamUtf8Decoder{QStringConverter::Utf8};
+		QStringDecoder                        m_streamLocalDecoder{QStringConverter::System};
+		bool                                  m_streamUtf8DecoderEnabled{false};
+		MxpStyleState                         m_mxpRenderStyle;
+		QVector<MxpStyleFrame>                m_mxpRenderStack;
+		QVector<QByteArray>                   m_mxpRenderBlockStack;
+		bool                                  m_mxpRenderLinkOpen{false};
+		int                                   m_mxpRenderPreDepth{0};
 
 		QString                               m_partialLineText;
 		QVector<StyleSpan>                    m_partialLineSpans;

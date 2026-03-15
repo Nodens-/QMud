@@ -158,6 +158,7 @@ class TelnetProcessor
 				QByteArray                   name;
 				QByteArray                   raw;
 				QMap<QByteArray, QByteArray> attributes;
+				bool                         secure{false};
 		};
 		/**
 		 * @brief Returns and clears parsed MXP events since the previous call.

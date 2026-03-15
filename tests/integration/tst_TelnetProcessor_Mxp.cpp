@@ -13,6 +13,7 @@
 
 namespace
 {
+	constexpr unsigned char ESC       = 0x1B;
 	constexpr unsigned char IAC       = 0xFF;
 	constexpr unsigned char SB        = 0xFA;
 	constexpr unsigned char SE        = 0xF0;
@@ -115,10 +116,81 @@ class tst_TelnetProcessor_Mxp : public QObject
 			QCOMPARE(spy.mxpStarts.size(), 1);
 			QVERIFY(spy.mxpStarts.at(0).pueblo);
 		}
+
+		void permLockedModeTreatsTagsAsPlainText()
+		{
+			TelnetProcessor processor;
+			processor.setUseMxp(2); // eUseMXP
+
+			QByteArray input;
+			input.append(static_cast<char>(ESC));
+			input.append('[');
+			input.append('7');
+			input.append('z');
+			input.append(QByteArrayLiteral("<bold>Text</bold>&lt;"));
+
+			const QByteArray output = processor.processBytes(input);
+			QCOMPARE(output, QByteArrayLiteral("<bold>Text</bold>&lt;"));
+			QVERIFY(processor.takeMxpEvents().isEmpty());
+		}
+
+		void secureFlagIsCapturedPerEventWithinSinglePacket()
+		{
+			TelnetProcessor processor;
+			processor.setUseMxp(2); // eUseMXP
+
+			QByteArray input;
+			input.append(static_cast<char>(ESC));
+			input.append('[');
+			input.append('1');
+			input.append('z');
+			input.append(QByteArrayLiteral("<send href=\"zap me\">go</send>"));
+			input.append(static_cast<char>(ESC));
+			input.append('[');
+			input.append('7');
+			input.append('z');
+
+			const QByteArray output = processor.processBytes(input);
+			QCOMPARE(output, QByteArrayLiteral("go"));
+			QVERIFY(!processor.isMxpSecure());
+
+			const QList<TelnetProcessor::MxpEvent> events = processor.takeMxpEvents();
+			QCOMPARE(events.size(), 2);
+			QCOMPARE(events.at(0).type, TelnetProcessor::MxpEvent::StartTag);
+			QCOMPARE(events.at(1).type, TelnetProcessor::MxpEvent::EndTag);
+			QCOMPARE(events.at(0).name.toLower(), QByteArrayLiteral("send"));
+			QCOMPARE(events.at(1).name.toLower(), QByteArrayLiteral("send"));
+			QVERIFY(events.at(0).secure);
+			QVERIFY(events.at(1).secure);
+		}
+
+		void permLockedModeKeepsEntitiesLiteralAcrossLines()
+		{
+			TelnetProcessor processor;
+			processor.setUseMxp(0); // eOnCommandMXP
+			processor.processBytes(bytes({IAC, SB, TELOPT_MXP, IAC, SE}));
+			QVERIFY(processor.isMxpEnabled());
+
+			QByteArray input;
+			input.append(static_cast<char>(ESC));
+			input.append('[');
+			input.append('2');
+			input.append('z');
+			input.append(QByteArrayLiteral("&lt;\n"));
+			input.append(static_cast<char>(ESC));
+			input.append('[');
+			input.append('7');
+			input.append('z');
+			input.append(QByteArrayLiteral("&lt;\n"));
+			input.append(QByteArrayLiteral("&lt;\n"));
+
+			const QByteArray output = processor.processBytes(input);
+			QCOMPARE(output, QByteArrayLiteral("&lt;\n&lt;\n&lt;\n"));
+			QVERIFY(processor.takeMxpEvents().isEmpty());
+		}
 	// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Mxp)
 
 #include "tst_TelnetProcessor_Mxp.moc"
-

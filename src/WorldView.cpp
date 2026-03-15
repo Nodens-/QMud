@@ -2525,6 +2525,8 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 {
 	if (!m_outputDocument)
 		return false;
+	if (!spans.isEmpty())
+		return false;
 	if (m_lineSpacing > 0)
 		return false;
 	if (opacity < 0.999)
@@ -2546,64 +2548,8 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 		baseFormat.setBackground(defaultBack);
 	}
 
-	auto applySpanFormat = [&](const WorldRuntime::StyleSpan &span)
-	{
-		QTextCharFormat format = baseFormat;
-		QColor          fore   = span.fore;
-		QColor          back   = span.back;
-		if (span.inverse)
-		{
-			qSwap(fore, back);
-			if (m_alternativeInverse && span.bold)
-				qSwap(fore, back);
-		}
-		if (fore.isValid())
-			format.setForeground(fore);
-		if (back.isValid())
-			format.setBackground(back);
-		format.setFontWeight((span.bold && m_showBold) ? QFont::Bold : QFont::Normal);
-		format.setFontItalic(span.italic && m_showItalic);
-		format.setFontUnderline(span.underline && m_showUnderline);
-		format.setFontStrikeOut(span.strike);
-		const bool isAnchor = span.actionType == WorldRuntime::ActionHyperlink ||
-		                      span.actionType == WorldRuntime::ActionSend ||
-		                      span.actionType == WorldRuntime::ActionPrompt;
-		format.setAnchor(isAnchor);
-		if (isAnchor)
-		{
-			format.setAnchorHref(span.action);
-			if (!span.hint.isEmpty())
-				format.setToolTip(span.hint);
-		}
-		else
-		{
-			format.setAnchorHref(QString());
-			format.setToolTip(QString());
-			format.setAnchorNames(QStringList());
-		}
-		return format;
-	};
-
-	if (spans.isEmpty())
-	{
-		if (!text.isEmpty())
-			cursor.insertText(text, baseFormat);
-	}
-	else
-	{
-		int offset = 0;
-		for (const WorldRuntime::StyleSpan &span : spans)
-		{
-			const int     length = qMax(0, span.length);
-			const QString chunk  = text.mid(offset, length);
-			offset += length;
-			if (chunk.isEmpty())
-				continue;
-			cursor.insertText(chunk, applySpanFormat(span));
-		}
-		if (offset < text.size())
-			cursor.insertText(text.mid(offset), baseFormat);
-	}
+	if (!text.isEmpty())
+		cursor.insertText(text, baseFormat);
 
 	if (newLine)
 		cursor.insertBlock(cursor.blockFormat(), baseFormat);
