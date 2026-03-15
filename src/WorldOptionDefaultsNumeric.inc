@@ -21,7 +21,7 @@
     {"chat_max_lines_per_message", 0, 0, 10000}, {"chat_max_bytes_per_message", 0, 0, LONG_MAX},
     {"chat_port", DEFAULT_CHAT_PORT, 0, USHRT_MAX},
     //{"chat_sumchecks_to_sender", false},
-    {"confirm_before_replacing_typing", true}, {"confirm_on_paste", true}, {"confirm_on_send", true},
+    {"confirm_before_replacing_typing", false}, {"confirm_on_paste", true}, {"confirm_on_send", true},
     {"connect_method", eNoAutoConnect, eNoAutoConnect, eConnectTypeMax - 1},
     {"copy_selection_to_clipboard", false}, {"convert_ga_to_newline", true},
     {"ctrl_n_goes_to_next_command", false}, {"ctrl_p_goes_to_previous_command", false},
@@ -104,7 +104,7 @@
     {"unpause_on_send", true}, {"use_custom_link_colour", true, 0, 0, OPT_SERVER_CAN_WRITE},
     {"use_default_aliases", false}, {"use_default_colours", false}, {"use_default_input_font", false},
     {"use_default_macros", false}, {"use_default_output_font", false}, {"use_default_timers", false},
-    {"use_default_triggers", false}, {"use_mxp", eOnCommandMXP, 0, 3, OPT_USE_MXP}, {"utf_8", false},
+    {"use_default_triggers", false}, {"use_mxp", eOnCommandMXP, 0, 3, OPT_USE_MXP}, {"utf_8", true},
     {"validate_incoming_chat_calls", false}, {"warn_if_scripting_inactive", true}, {"wrap", true},
     {"wrap_input", false, 0, 0, OPT_FIX_INPUT_WRAP}, // Added this, also fix wrap on column change.
     {"wrap_column", 80, 20, MAX_LINE_WIDTH, OPT_FIX_WRAP_COLUMN | OPT_FIX_INPUT_WRAP},

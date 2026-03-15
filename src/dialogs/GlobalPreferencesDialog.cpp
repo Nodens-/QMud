@@ -160,6 +160,22 @@ namespace
 			path += QLatin1Char('/');
 		return path;
 	}
+
+	QString fontStyleSummary(const int pointSize, const int weight, const bool italic)
+	{
+		QStringList parts;
+		if (pointSize > 0)
+			parts << QStringLiteral("%1 pt.").arg(pointSize);
+		if (weight >= 700)
+			parts << QStringLiteral("Bold");
+		else if (weight >= 500)
+			parts << QStringLiteral("Medium");
+		else
+			parts << QStringLiteral("Regular");
+		if (italic)
+			parts << QStringLiteral("Italic");
+		return parts.join(QLatin1Char(' '));
+	}
 } // namespace
 
 void GlobalPreferencesDialog::accept()
@@ -791,28 +807,42 @@ QWidget *GlobalPreferencesDialog::buildDefaultsPage()
 	                 {
 		                 bool  ok = false;
 		                 QFont current(m_outputFontName->text());
+		                 if (m_outputFontHeight > 0)
+			                 current.setPointSize(m_outputFontHeight);
+		                 current.setWeight(QFont::Normal);
+		                 current.setItalic(false);
 		                 QFont chosen =
 		                     QFontDialog::getFont(&ok, current, this, QStringLiteral("Select Output Font"));
 		                 if (!ok)
 			                 return;
 		                 m_outputFontName->setText(chosen.family());
-		                 m_outputFontStyle->setText(chosen.styleName());
 		                 m_outputFontHeight = chosen.pointSize();
+		                 if (m_outputFontStyle)
+			                 m_outputFontStyle->setText(
+			                     fontStyleSummary(m_outputFontHeight, QFont::Normal, false));
 	                 });
 	QObject::connect(m_inputFontButton, &QPushButton::clicked, page,
 	                 [this]()
 	                 {
 		                 bool  ok = false;
 		                 QFont current(m_inputFontName->text());
+		                 if (m_inputFontHeight > 0)
+			                 current.setPointSize(m_inputFontHeight);
+		                 if (m_inputFontWeight > 0)
+			                 current.setWeight(static_cast<QFont::Weight>(m_inputFontWeight));
+		                 current.setItalic(m_inputFontItalic != 0);
 		                 QFont chosen =
 		                     QFontDialog::getFont(&ok, current, this, QStringLiteral("Select Input Font"));
 		                 if (!ok)
 			                 return;
 		                 m_inputFontName->setText(chosen.family());
-		                 m_inputFontStyle->setText(chosen.styleName());
 		                 m_inputFontHeight = chosen.pointSize();
 		                 m_inputFontWeight = chosen.weight();
 		                 m_inputFontItalic = chosen.italic() ? 1 : 0;
+		                 if (m_inputFontStyle)
+			                 m_inputFontStyle->setText(
+			                     fontStyleSummary(m_inputFontHeight, m_inputFontWeight,
+			                                      m_inputFontItalic != 0));
 	                 });
 	return page;
 }
@@ -1230,22 +1260,10 @@ void GlobalPreferencesDialog::loadPreferences()
 	m_inputFontItalic  = app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
 
 	if (m_outputFontStyle)
-	{
-		QFont outputFont(m_outputFontName ? m_outputFontName->text() : QString());
-		if (m_outputFontHeight > 0)
-			outputFont.setPointSize(m_outputFontHeight);
-		m_outputFontStyle->setText(outputFont.styleName());
-	}
+		m_outputFontStyle->setText(fontStyleSummary(m_outputFontHeight, QFont::Normal, false));
 	if (m_inputFontStyle)
-	{
-		QFont inputFont(m_inputFontName ? m_inputFontName->text() : QString());
-		if (m_inputFontHeight > 0)
-			inputFont.setPointSize(m_inputFontHeight);
-		if (m_inputFontWeight > 0)
-			inputFont.setWeight(static_cast<QFont::Weight>(m_inputFontWeight));
-		inputFont.setItalic(m_inputFontItalic != 0);
-		m_inputFontStyle->setText(inputFont.styleName());
-	}
+		m_inputFontStyle->setText(
+		    fontStyleSummary(m_inputFontHeight, m_inputFontWeight, m_inputFontItalic != 0));
 
 	const int refreshType = app->getGlobalOption(QStringLiteral("ActivityWindowRefreshType")).toInt();
 	if (refreshType == 0)

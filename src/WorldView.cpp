@@ -3507,14 +3507,78 @@ void WorldView::applyRuntimeSettings()
 	    (useDefaultInputFontValue.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
 	     useDefaultInputFontValue == QStringLiteral("1") ||
 	     useDefaultInputFontValue.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
+	const AppController *app = AppController::instance();
+
+	auto effectiveDefaultOutputFont = [&]
+	{
+		QString outputDefaultFamily;
+		int     outputDefaultHeight  = 9;
+		int     outputDefaultCharset = 1;
+		if (app)
+		{
+			outputDefaultFamily =
+			    app->getGlobalOption(QStringLiteral("DefaultOutputFont")).toString().trimmed();
+			outputDefaultHeight =
+			    app->getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
+			outputDefaultCharset =
+			    app->getGlobalOption(QStringLiteral("DefaultOutputFontCharset")).toInt();
+		}
+
+		QFont font = qmudPreferredMonospaceFont(outputDefaultFamily, outputDefaultHeight);
+		const QString preferredFamily =
+		    outputDefaultFamily.isEmpty() ? font.family() : outputDefaultFamily;
+		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, outputDefaultCharset);
+		    !charsetFamily.isEmpty())
+		{
+			qmudApplyMonospaceFallback(font, charsetFamily);
+		}
+		font.setWeight(mapFontWeight(400));
+		font.setItalic(false);
+		return font;
+	};
+
+	auto effectiveDefaultInputFont = [&]
+	{
+		QString inputDefaultFamily;
+		int     inputDefaultHeight  = 9;
+		int     inputDefaultWeight  = 400;
+		int     inputDefaultItalic  = 0;
+		int     inputDefaultCharset = 1;
+		if (app)
+		{
+			inputDefaultFamily =
+			    app->getGlobalOption(QStringLiteral("DefaultInputFont")).toString().trimmed();
+			inputDefaultHeight =
+			    app->getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
+			inputDefaultWeight =
+			    app->getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
+			inputDefaultItalic =
+			    app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
+			inputDefaultCharset =
+			    app->getGlobalOption(QStringLiteral("DefaultInputFontCharset")).toInt();
+		}
+
+		QFont font = qmudPreferredMonospaceFont(inputDefaultFamily, inputDefaultHeight);
+		const QString preferredFamily = inputDefaultFamily.isEmpty() ? font.family() : inputDefaultFamily;
+		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, inputDefaultCharset);
+		    !charsetFamily.isEmpty())
+		{
+			qmudApplyMonospaceFallback(font, charsetFamily);
+		}
+		if (inputDefaultWeight > 0)
+			font.setWeight(mapFontWeight(inputDefaultWeight));
+		font.setItalic(inputDefaultItalic != 0);
+		return font;
+	};
 
 	if (m_output && useDefaultOutputFont)
 	{
-		m_output->setFont(m_defaultOutputFont);
+		const QFont outputFont = effectiveDefaultOutputFont();
+		m_output->setFont(outputFont);
 		if (m_liveOutput)
-			m_liveOutput->setFont(m_defaultOutputFont);
+			m_liveOutput->setFont(outputFont);
 		if (m_outputDocument)
-			m_outputDocument->setDefaultFont(m_defaultOutputFont);
+			m_outputDocument->setDefaultFont(outputFont);
 	}
 	else if (m_output && (!outputFontName.isEmpty() || outputHeight > 0 || outputWeight > 0))
 	{
@@ -3538,7 +3602,7 @@ void WorldView::applyRuntimeSettings()
 
 	if (m_input && useDefaultInputFont)
 	{
-		m_input->setFont(m_defaultInputFont);
+		m_input->setFont(effectiveDefaultInputFont());
 		updateInputHeight();
 	}
 	else if (m_input && (!inputFontName.isEmpty() || inputHeight > 0 || inputWeight > 0 || inputItalic != 0))

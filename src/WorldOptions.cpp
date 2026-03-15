@@ -19,7 +19,9 @@ namespace
 } // namespace
 
 static const WorldNumericOption kWorldNumericOptions[] = {
+#define QMUD_INCLUDE_WORLD_OPTIONS_DATA_NUMERIC_ROWS
 #include "WorldOptionsDataNumeric.inc"
+#undef QMUD_INCLUDE_WORLD_OPTIONS_DATA_NUMERIC_ROWS
     {nullptr, 0, 0, 0, 0}
 };
 
