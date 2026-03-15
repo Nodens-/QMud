@@ -12,6 +12,8 @@
 #include "WorldOptions.h"
 
 #include <QComboBox>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDialogButtonBox>
 #include <QFile>
 #include <QLabel>
 #include <QLineEdit>

@@ -14,6 +14,8 @@
 #include "WorldView.h"
 
 #include <QClipboard>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QGridLayout>
 #include <QGuiApplication>

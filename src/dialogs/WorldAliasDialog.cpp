@@ -13,6 +13,8 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QHBoxLayout>

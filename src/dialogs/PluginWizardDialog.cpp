@@ -18,6 +18,8 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
