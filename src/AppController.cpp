@@ -16,6 +16,7 @@
 #include "DocConstants.h"
 #include "FileExtensions.h"
 #include "FontUtils.h"
+#include "ImportMergeUtils.h"
 #include "LuaCallbackEngine.h"
 #include "LuaFunctionTypes.h"
 #include "MainFrame.h"
@@ -28,6 +29,7 @@
 #include "WorldDocument.h"
 #include "WorldOptionDefaults.h"
 #include "WorldOptions.h"
+#include "WorldPreferencesRoutingUtils.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
 #include "dialogs/ColourPickerDialog.h"
@@ -6434,20 +6436,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		}
 		m_mainWindow->showStatusMessage(QStringLiteral("Script file reloaded."), 3000);
 	}
-	else if (cmdName == QStringLiteral("Preferences") || isCommand(QStringLiteral("ConfigureMudAddress")) ||
-	         cmdName == QStringLiteral("ConfigureConnecting") || cmdName == QStringLiteral("ConfigureChat") ||
-	         cmdName == QStringLiteral("ConfigureLogging") || cmdName == QStringLiteral("ConfigureOutput") ||
-	         isCommand(QStringLiteral("ConfigureMxp")) || cmdName == QStringLiteral("ConfigureAnsiColours") ||
-	         cmdName == QStringLiteral("ConfigureCustomColours") ||
-	         cmdName == QStringLiteral("ConfigurePrinting") ||
-	         cmdName == QStringLiteral("ConfigureCommands") || cmdName == QStringLiteral("ConfigureKeypad") ||
-	         cmdName == QStringLiteral("ConfigureMacros") || isCommand(QStringLiteral("ConfigureAutoSay")) ||
-	         isCommand(QStringLiteral("ConfigurePaste")) || cmdName == QStringLiteral("ConfigureSendFile") ||
-	         cmdName == QStringLiteral("ConfigureScripting") ||
-	         cmdName == QStringLiteral("ConfigureVariables") ||
-	         cmdName == QStringLiteral("ConfigureTimers") || cmdName == QStringLiteral("ConfigureTriggers") ||
-	         cmdName == QStringLiteral("ConfigureAliases") || cmdName == QStringLiteral("ConfigureInfo") ||
-	         cmdName == QStringLiteral("ConfigureNotes"))
+	else if (QMudWorldPreferencesRouting::isPreferencesCommand(cmdName, isCommand))
 	{
 		if (!m_mainWindow)
 			return;
@@ -6459,57 +6448,9 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!runtime || !view)
 			return;
 
-		WorldPreferencesDialog::Page page = WorldPreferencesDialog::PageGeneral;
-		if (cmdName == QStringLiteral("Preferences"))
-		{
-			if (const int last = runtime->lastPreferencesPage(), maxPage = WorldPreferencesDialog::PageChat;
-			    last >= 0 && last <= maxPage)
-				page = static_cast<WorldPreferencesDialog::Page>(last);
-		}
-		else if (isCommand(QStringLiteral("ConfigureMudAddress")))
-			page = WorldPreferencesDialog::PageGeneral;
-		else if (cmdName == QStringLiteral("ConfigureConnecting"))
-			page = WorldPreferencesDialog::PageConnecting;
-		else if (cmdName == QStringLiteral("ConfigureChat"))
-			page = WorldPreferencesDialog::PageChat;
-		else if (cmdName == QStringLiteral("ConfigureLogging"))
-			page = WorldPreferencesDialog::PageLogging;
-		else if (cmdName == QStringLiteral("ConfigureOutput"))
-			page = WorldPreferencesDialog::PageOutput;
-		else if (isCommand(QStringLiteral("ConfigureMxp")))
-			page = WorldPreferencesDialog::PageMxp;
-		else if (cmdName == QStringLiteral("ConfigureAnsiColours"))
-			page = WorldPreferencesDialog::PageAnsiColours;
-		else if (cmdName == QStringLiteral("ConfigureCustomColours"))
-			page = WorldPreferencesDialog::PageCustomColours;
-		else if (cmdName == QStringLiteral("ConfigurePrinting"))
-			page = WorldPreferencesDialog::PagePrinting;
-		else if (cmdName == QStringLiteral("ConfigureCommands"))
-			page = WorldPreferencesDialog::PageCommands;
-		else if (cmdName == QStringLiteral("ConfigureKeypad"))
-			page = WorldPreferencesDialog::PageKeypad;
-		else if (cmdName == QStringLiteral("ConfigureMacros"))
-			page = WorldPreferencesDialog::PageMacros;
-		else if (isCommand(QStringLiteral("ConfigureAutoSay")))
-			page = WorldPreferencesDialog::PageAutoSay;
-		else if (isCommand(QStringLiteral("ConfigurePaste")))
-			page = WorldPreferencesDialog::PagePaste;
-		else if (cmdName == QStringLiteral("ConfigureSendFile"))
-			page = WorldPreferencesDialog::PageSendToWorld;
-		else if (cmdName == QStringLiteral("ConfigureScripting"))
-			page = WorldPreferencesDialog::PageScripting;
-		else if (cmdName == QStringLiteral("ConfigureVariables"))
-			page = WorldPreferencesDialog::PageVariables;
-		else if (cmdName == QStringLiteral("ConfigureTimers"))
-			page = WorldPreferencesDialog::PageTimers;
-		else if (cmdName == QStringLiteral("ConfigureTriggers"))
-			page = WorldPreferencesDialog::PageTriggers;
-		else if (cmdName == QStringLiteral("ConfigureAliases"))
-			page = WorldPreferencesDialog::PageAliases;
-		else if (cmdName == QStringLiteral("ConfigureInfo"))
-			page = WorldPreferencesDialog::PageInfo;
-		else if (cmdName == QStringLiteral("ConfigureNotes"))
-			page = WorldPreferencesDialog::PageNotes;
+		const WorldPreferencesDialog::Page page =
+		    QMudWorldPreferencesRouting::initialPageForCommand(cmdName, runtime->lastPreferencesPage(),
+		                                                       isCommand);
 
 		WorldPreferencesDialog dlg(runtime, view, m_mainWindow);
 		dlg.setInitialPage(page);
@@ -11429,38 +11370,12 @@ AppController::ImportResult AppController::importXmlFromFile(const QString &path
 		return result;
 	}
 
-	const bool allowOverwrite = mask & WorldDocument::XML_OVERWRITE;
-	auto       mergeNamedList = [&](auto &dest, const auto &src, const QString &kind) -> bool
+	const bool allowOverwrite      = mask & WorldDocument::XML_OVERWRITE;
+	const bool allowPasteDuplicate = mask & WorldDocument::XML_PASTE_DUPLICATE;
+	auto       mergeNamedList      = [&](auto &dest, const auto &src, const QString &kind) -> bool
 	{
-		QMap<QString, int> indexByName;
-		for (int i = 0; i < dest.size(); ++i)
-		{
-			if (const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toLower();
-			    !name.isEmpty())
-				indexByName.insert(name, i);
-		}
-
-		for (const auto &item : src)
-		{
-			const QString rawName = item.attributes.value(QStringLiteral("name")).trimmed();
-			const QString key     = rawName.toLower();
-			if (key.isEmpty() || !indexByName.contains(key))
-			{
-				dest.push_back(item);
-				if (!key.isEmpty())
-					indexByName.insert(key, dest.size() - 1);
-				continue;
-			}
-
-			if (!allowOverwrite)
-			{
-				result.errorMessage = QStringLiteral("Duplicate %1 label \"%2\"").arg(kind, rawName);
-				return false;
-			}
-			dest[indexByName.value(key)] = item;
-			++result.duplicates;
-		}
-		return true;
+		return QMudImportMerge::mergeNamedList(dest, src, kind, allowOverwrite, allowPasteDuplicate,
+		                                       &result.duplicates, &result.errorMessage);
 	};
 
 	if (mask & WorldDocument::XML_GENERAL)
@@ -11541,38 +11456,14 @@ AppController::ImportResult AppController::importXmlFromFile(const QString &path
 	if (mask & WorldDocument::XML_VARIABLES)
 	{
 		QList<WorldRuntime::Variable> merged = runtime->variables();
-		QMap<QString, int>            indexByName;
-		for (int i = 0; i < merged.size(); ++i)
-		{
-			if (const QString name = merged[i].attributes.value(QStringLiteral("name")).trimmed().toLower();
-			    !name.isEmpty())
-				indexByName.insert(name, i);
-		}
-
+		QList<WorldRuntime::Variable> incoming;
+		incoming.reserve(doc.variables().size());
 		for (const auto &[attributes, content] : doc.variables())
 		{
-			WorldRuntime::Variable rv{attributes, content};
-			const QString          rawName = rv.attributes.value(QStringLiteral("name")).trimmed();
-			const QString          key     = rawName.toLower();
-			if (key.isEmpty() || !indexByName.contains(key))
-			{
-				merged.push_back(rv);
-				if (!key.isEmpty())
-					indexByName.insert(key, static_cast<int>(merged.size() - 1));
-				continue;
-			}
-
-			const int existingIndex = indexByName.value(key);
-			if (allowOverwrite)
-			{
-				++result.duplicates;
-				merged[existingIndex] = rv;
-				continue;
-			}
-			if (merged[existingIndex].content != rv.content)
-				++result.duplicates;
-			merged[existingIndex] = rv;
+			incoming.push_back({attributes, content});
 		}
+		QMudImportMerge::mergeVariables(merged, incoming, allowOverwrite, allowPasteDuplicate,
+		                                &result.duplicates);
 		runtime->setVariables(merged);
 	}
 

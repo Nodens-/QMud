@@ -1096,7 +1096,6 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 		}
 
 		WorldDocument child;
-		child.m_currentIncludeStack = m_currentIncludeStack;
 		child.setLoadMask(m_loadMask);
 		if (!child.loadFromFileWithPolicy(
 		        resolved, isPlugin ? PluginPolicy::RequirePlugin : PluginPolicy::ForbidPlugins, !isPlugin))
@@ -1104,6 +1103,7 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 			m_errorString = child.errorString();
 			return false;
 		}
+		child.m_currentIncludeStack = m_currentIncludeStack;
 		const QString childPluginDir = isPlugin ? QFileInfo(resolved).absolutePath() : currentPluginDir;
 		if (!child.expandIncludesPass(resolved, pluginsDir, programDir, stateDir, false, childPluginDir,
 		                              true))

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="WarningPlugin"
+    author="Tester"
+    id="999999999999999999999999"
+    language="lua"
+    purpose="warning fixture">
+    <description>warning fixture</description>
+    <macros>
+      <macro name="up" type="send_now">
+        <send>up</send>
+      </macro>
+    </macros>
+  </plugin>
+</muclient>

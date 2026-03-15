@@ -8,10 +8,16 @@
  */
 
 #include "WorldCommandProcessor.h"
+#include "AliasMatchUtils.h"
 #include "AppController.h"
+#include "CommandPatternUtils.h"
+#include "CommandQueueUtils.h"
+#include "CommandTextUtils.h"
 #include "FileExtensions.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
+#include "SpeedwalkParser.h"
+#include "TimerSchedulingUtils.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
@@ -30,7 +36,6 @@
 #include <QMessageBox>
 #include <QRegularExpression>
 #include <QUrl>
-#include <QtMath>
 #include <algorithm>
 #include <limits>
 #ifdef HILITE
@@ -95,36 +100,6 @@ namespace
 	{
 		return value == QStringLiteral("1") || value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
 		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-	}
-
-	bool isAsciiSpace(const QChar ch)
-	{
-		const ushort u = ch.unicode();
-		return u == ' ' || u == '\t' || u == '\n' || u == '\r' || u == '\v' || u == '\f';
-	}
-
-	bool isAsciiDigit(const QChar ch)
-	{
-		const ushort u = ch.unicode();
-		return u >= '0' && u <= '9';
-	}
-
-	bool isAsciiHexDigit(const QChar ch)
-	{
-		const ushort u = ch.unicode();
-		return (u >= '0' && u <= '9') || (u >= 'a' && u <= 'f') || (u >= 'A' && u <= 'F');
-	}
-
-	int asciiHexValue(const QChar ch)
-	{
-		const ushort u = ch.unicode();
-		if (u >= '0' && u <= '9')
-			return u - '0';
-		if (u >= 'a' && u <= 'f')
-			return 10 + (u - 'a');
-		if (u >= 'A' && u <= 'F')
-			return 10 + (u - 'A');
-		return 0;
 	}
 
 	QString fixUpGerman(const QString &message)
@@ -602,63 +577,6 @@ namespace
 		return runs;
 	}
 
-	QTime timeFromParts(const int hour, const int minute, const double second)
-	{
-		if (hour < 0 || minute < 0 || second < 0.0)
-			return {};
-		const int secInt = qFloor(second);
-		int       msec   = qRound((second - secInt) * 1000.0);
-		int       adjSec = secInt;
-		if (msec >= 1000)
-		{
-			msec -= 1000;
-			adjSec += 1;
-		}
-		return {hour, minute, adjSec, msec};
-	}
-
-	qint64 intervalMsFromParts(const int hour, const int minute, const double second)
-	{
-		const int    secInt = qFloor(second);
-		const qint64 baseMs = static_cast<qint64>(hour) * 3600 * 1000 +
-		                      static_cast<qint64>(minute) * 60 * 1000 + static_cast<qint64>(secInt) * 1000;
-		const auto fracMs = static_cast<qint64>(qRound((second - secInt) * 1000.0));
-		return baseMs + fracMs;
-	}
-
-	void resetTimerFields(WorldRuntime::Timer &timer)
-	{
-		if (!isEnabledValue(timer.attributes.value(QStringLiteral("enabled"))))
-			return;
-
-		const bool      atTime       = isEnabledValue(timer.attributes.value(QStringLiteral("at_time")));
-		const int       hour         = timer.attributes.value(QStringLiteral("hour")).toInt();
-		const int       minute       = timer.attributes.value(QStringLiteral("minute")).toInt();
-		const double    second       = timer.attributes.value(QStringLiteral("second")).toDouble();
-		const int       offsetHour   = timer.attributes.value(QStringLiteral("offset_hour")).toInt();
-		const int       offsetMinute = timer.attributes.value(QStringLiteral("offset_minute")).toInt();
-		const double    offsetSecond = timer.attributes.value(QStringLiteral("offset_second")).toDouble();
-
-		const QDateTime now = QDateTime::currentDateTime();
-		timer.lastFired     = now;
-
-		if (atTime)
-		{
-			const QTime at = timeFromParts(hour, minute, second);
-			if (!at.isValid())
-				return;
-			QDateTime fire(QDate::currentDate(), at);
-			if (fire < now)
-				fire = fire.addDays(1);
-			timer.nextFireTime = fire;
-			return;
-		}
-
-		const qint64 intervalMs = intervalMsFromParts(hour, minute, second);
-		const qint64 offsetMs   = intervalMsFromParts(offsetHour, offsetMinute, offsetSecond);
-		timer.nextFireTime      = now.addMSecs(intervalMs - offsetMs);
-	}
-
 	void mixSignature(quint64 &signature, const quint64 value)
 	{
 		signature ^= value + 0x9e3779b97f4a7c15ULL + (signature << 6) + (signature >> 2);
@@ -884,8 +802,7 @@ const QStringList &WorldCommandProcessor::queuedCommands() const
 
 int WorldCommandProcessor::discardQueuedCommands()
 {
-	const int count = safeQSizeToInt(m_queuedCommands.size());
-	m_queuedCommands.clear();
+	const int count = QMudCommandQueue::discardAll(m_queuedCommands);
 	if (m_runtime)
 		m_runtime->setQueuedCommandCount(0);
 	updateQueuedCommandsStatusLine();
@@ -899,11 +816,11 @@ QString WorldCommandProcessor::evaluateSpeedwalk(const QString &speedWalkString)
 
 int WorldCommandProcessor::executeCommand(const QString &text)
 {
-	if (++m_executionDepth > kMaxExecutionDepth)
+	if (QMudAliasMatch::exceedsExecutionDepth(m_executionDepth, kMaxExecutionDepth))
 	{
-		--m_executionDepth;
 		return eCommandsNestedTooDeeply;
 	}
+	++m_executionDepth;
 	evaluateCommand(text);
 	--m_executionDepth;
 	return eOK;
@@ -1830,328 +1747,33 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 
 QString WorldCommandProcessor::makeSpeedWalkErrorString(const QString &message)
 {
-	return QStringLiteral("*") + message;
+	return QMudSpeedwalk::makeSpeedWalkErrorString(message);
 }
 
 QString WorldCommandProcessor::doEvaluateSpeedwalk(const QString &speedWalkString) const
 {
-	QString   strResult;
-	QString   str; // temporary string
-	int       count = 0;
-	int       p     = 0;
-	const int size  = safeQSizeToInt(speedWalkString.size());
-
-	while (p < size) // until string runs out
-	{
-		// bypass spaces
-		while (p < size && isAsciiSpace(speedWalkString.at(p)))
-			++p;
-
-		if (p >= size)
-			break;
-
-		// bypass comments
-		if (speedWalkString.at(p) == QLatin1Char('{'))
-		{
-			while (p < size && speedWalkString.at(p) != QLatin1Char('}'))
-				++p;
-
-			if (p >= size || speedWalkString.at(p) != QLatin1Char('}'))
-				return makeSpeedWalkErrorString(
-				    QStringLiteral("Comment code of '{' not terminated by a '}'"));
-			++p;      // skip } symbol
-			continue; // back to start of loop
-		} // end of comment
-
-		// get counter, if any
-		count = 0;
-		while (p < size && isAsciiDigit(speedWalkString.at(p)))
-		{
-			count = count * 10 + (speedWalkString.at(p).unicode() - '0');
-			++p;
-			if (count > 99)
-				return makeSpeedWalkErrorString(QStringLiteral("Speed walk counter exceeds 99"));
-		} // end of having digit(s)
-
-		// no counter, assume do once
-		if (count == 0)
-			count = 1;
-
-		// bypass spaces after counter
-		while (p < size && isAsciiSpace(speedWalkString.at(p)))
-			++p;
-
-		if (count > 1 && p >= size)
-			return makeSpeedWalkErrorString(QStringLiteral("Speed walk counter not followed by an action"));
-
-		if (count > 1 && speedWalkString.at(p) == QLatin1Char('{'))
-			return makeSpeedWalkErrorString(
-			    QStringLiteral("Speed walk counter may not be followed by a comment"));
-
-		// might have had trailing space
-		if (p >= size)
-			break;
-
-		QChar action = speedWalkString.at(p).toUpper();
-		if (action == QLatin1Char('C') || action == QLatin1Char('O') || action == QLatin1Char('L') ||
-		    action == QLatin1Char('K'))
-		{
-			if (count > 1)
-				return makeSpeedWalkErrorString(QStringLiteral("Action code of C, O, L or K must not follow "
-				                                               "a speed walk count (1-99)"));
-
-			switch (action.unicode())
-			{
-			case 'C':
-				strResult += QStringLiteral("close ");
-				break;
-			case 'O':
-				strResult += QStringLiteral("open ");
-				break;
-			case 'L':
-				strResult += QStringLiteral("lock ");
-				break;
-			case 'K':
-				strResult += QStringLiteral("unlock ");
-				break;
-			default:
-				break;
-			} // end of switch
-			++p;
-
-			// bypass spaces after open/close/lock/unlock
-			while (p < size && isAsciiSpace(speedWalkString.at(p)))
-				++p;
-
-			if (p >= size || speedWalkString.at(p).toUpper() == QLatin1Char('F') ||
-			    speedWalkString.at(p) == QLatin1Char('{'))
-				return makeSpeedWalkErrorString(QStringLiteral("Action code of C, O, L or K must be followed "
-				                                               "by a direction"));
-		} // end of C, O, L, K
-
-		if (p >= size)
-			break;
-
-		action = speedWalkString.at(p).toUpper();
-
-		// work out which direction we are going
-		switch (action.unicode())
-		{
-		case 'N':
-		case 'S':
-		case 'E':
-		case 'W':
-		case 'U':
-		case 'D':
-		{
-			// we know it will be in the list - look up the direction to send
-			const AppController *app = AppController::instance();
-			str                      = app ? app->mapDirectionToSend(QString(action.toLower())) : QString();
-			break;
-		}
-		case 'F':
-			str = m_speedWalkFiller;
-			break;
-		case '(': // special string (eg. (ne/sw) )
-		{
-			str.clear();
-			++p; // skip (
-			while (p < size && speedWalkString.at(p) != QLatin1Char(')'))
-				str += speedWalkString.at(p++);
-			if (p >= size || speedWalkString.at(p) != QLatin1Char(')'))
-				return makeSpeedWalkErrorString(QStringLiteral("Action code of '(' not terminated by a ')'"));
-			if (const qsizetype slashPos = str.indexOf(QStringLiteral("/")); slashPos != -1)
-				str = str.left(slashPos);
-			break;
-		}
-		default:
-			return QStringLiteral("*Invalid direction '%1' in speed walk, must be "
-			                      "N, S, E, W, U, D, F, or (something)")
-			    .arg(speedWalkString.at(p));
-		} // end of switch on character
-
-		++p; // bypass whatever that character was (or the trailing bracket)
-
-		// output required number of times
-		for (int j = 0; j < count; ++j)
-			strResult += str + kEndLine;
-	} // end of processing each character
-
-	return strResult;
+	const AppController *app      = AppController::instance();
+	auto                 resolver = [app](const QString &direction) -> QString
+	{ return app ? app->mapDirectionToSend(direction) : QString(); };
+	return QMudSpeedwalk::evaluateSpeedwalk(speedWalkString, m_speedWalkFiller, resolver);
 } // end of WorldCommandProcessor::doEvaluateSpeedwalk
 
 QString WorldCommandProcessor::convertToRegularExpression(const QString &matchString, const bool wholeLine,
                                                           const bool makeAsterisksWildcards)
 {
-	QString strRegexp;
-
-	int     iSize = 0;
-	for (const QChar ch : matchString)
-	{
-		if (const ushort u = ch.unicode(); u < ' ')
-			iSize += 3; // non-printable 01 to 1F become \xhh
-		else if (!(ch.isLetterOrNumber() || ch == QLatin1Char(' ') || u >= 0x80))
-		{
-			if (ch == QLatin1Char('*'))
-				iSize += 4; // * becomes .*?  (non-greedy wildcard)
-			else
-				iSize++; // others are escaped, eg. ( becomes \(
-		}
-	}
-
-	// work out new buffer size
-	strRegexp.reserve(matchString.length() + iSize + // escaped sequences
-	                  2 +                            // ^ at start, and $ at end
-	                  10);                           // 1 for null, plus 9 just in case
-
-	// now copy across non-regexp, turning it into a regexp
-	if (wholeLine)
-		strRegexp += QLatin1Char('^'); // start of buffer marker
-
-	for (const QChar ch : matchString)
-	{
-		if (ch == QLatin1Char('\n')) // newlines become \n
-		{
-			strRegexp += QLatin1Char('\\');
-			strRegexp += QLatin1Char('n');
-		}
-		else if (const ushort u = ch.unicode(); u < ' ')
-		{
-			strRegexp += QLatin1Char('\\');
-			strRegexp += QLatin1Char('x');
-			constexpr char hex[] = "0123456789abcdef";
-			strRegexp += QLatin1Char(hex[u >> 4 & 0x0F]);
-			strRegexp += QLatin1Char(hex[u & 0x0F]);
-		}
-		else if (ch.isLetterOrNumber() || ch == QLatin1Char(' ') || ch.unicode() >= 0x80)
-			strRegexp += ch; // copy alphanumeric, spaces, and high-order codepoints across
-		else if (ch == QLatin1Char('*') && makeAsterisksWildcards) // wildcard
-		{
-			strRegexp += QLatin1Char('(');
-			strRegexp += QLatin1Char('.');
-			strRegexp += QLatin1Char('*');
-			strRegexp += QLatin1Char('?');
-			strRegexp += QLatin1Char(')');
-		}
-		else
-		{ // non-alphanumeric are escaped out
-			strRegexp += QLatin1Char('\\');
-			strRegexp += ch;
-		}
-	} // end of scanning input buffer
-
-	if (wholeLine)
-		strRegexp += QLatin1Char('$'); // end of buffer marker
-
-	return strRegexp;
+	return QMudCommandPattern::convertToRegularExpression(matchString, wholeLine, makeAsterisksWildcards);
 } // end of convertToRegularExpression
 
 QString WorldCommandProcessor::fixupEscapeSequences(const QString &source)
 {
-	QString out;
-	out.reserve(source.size());
-
-	for (int i = 0; i < source.size(); ++i)
-	{
-		QChar c = source.at(i);
-
-		// look for escape sequences ...
-		if (c == QLatin1Char('\\'))
-		{
-			++i;
-			if (i >= source.size())
-				break; // trailing backslash, nothing to decode
-
-			c = source.at(i);
-			switch (c.unicode())
-			{
-			case 'a':
-				c = QChar(QLatin1Char('\a'));
-				break; // alert
-			case 'b':
-				c = QChar(QLatin1Char('\b'));
-				break; // backspace
-			case 'f':
-				c = QChar(QLatin1Char('\f'));
-				break; // formfeed
-			case 'n':
-				c = QChar(QLatin1Char('\n'));
-				break; // newline
-			case 'r':
-				c = QChar(QLatin1Char('\r'));
-				break; // carriage return
-			case 't':
-				c = QChar(QLatin1Char('\t'));
-				break; // horizontal tab
-			case 'v':
-				c = QChar(QLatin1Char('\v'));
-				break; // vertical tab
-			case '\'':
-				c = QLatin1Char('\'');
-				break; // single quote
-			case '\"':
-				c = QLatin1Char('\"');
-				break; // double quote
-			case '\\':
-				c = QLatin1Char('\\');
-				break; // backslash
-			case '?':
-				c = QLatin1Char('\?');
-				break; // question mark
-			case 'x':  // hex sequence
-			{
-				int value  = 0;
-				int digits = 0;
-				while (i + 1 < source.size() && digits < 2 && isAsciiHexDigit(source.at(i + 1)))
-				{
-					++i;
-					value = (value << 4) + asciiHexValue(source.at(i));
-					++digits;
-				}
-				c = QChar(static_cast<ushort>(value));
-			}
-			break;
-			default:
-				// Unknown escape: keep character after backslash (expected behavior).
-				break;
-			} // end of switch
-		} // end of escape sequence
-
-		out.append(c);
-	}
-
-	return out;
+	return QMudCommandText::fixupEscapeSequences(source);
 
 } // end of FixupEscapeSequences
 
 QString WorldCommandProcessor::fixWildcard(const QString &wildcard, const bool makeLowerCase,
                                            const int sendTo, const QString &language)
 {
-	QString result = wildcard;
-
-	// force to lower-case if that is what they want
-	if (makeLowerCase)
-		result = result.toLower();
-
-	// escape out strings if we are sending to script
-	if (sendTo == eSendToScript || sendTo == eSendToScriptAfterOmit)
-	{
-		if (language.compare(QStringLiteral("vbscript"), Qt::CaseInsensitive) == 0)
-			// " becomes ""
-			result.replace(QStringLiteral("\""), QStringLiteral("\"\""));
-		else
-		{ // not VBscript
-			// escape out backslashes first (ie. \ becomes \\ )
-			result.replace(QStringLiteral("\\"), QStringLiteral("\\\\"));
-			// now turn " to \"
-			result.replace(QStringLiteral("\""), QStringLiteral("\\\""));
-			// finally better escape out the $ signs
-			if (language.compare(QStringLiteral("perlscript"), Qt::CaseInsensitive) == 0)
-				result.replace(QStringLiteral("$"), QStringLiteral("\\$"));
-		} // end of not VBscript
-	} // end of sending to script
-
-	return result;
+	return QMudCommandText::fixWildcard(wildcard, makeLowerCase, sendTo, language);
 } // end of FixWildcard
 
 bool WorldCommandProcessor::findVariable(const QString &name, QString &value,
@@ -2328,7 +1950,7 @@ QString WorldCommandProcessor::fixSendText(const QString &source, int sendTo, co
 
 			/* -------------------------------------------------------------------- *
 			 *  Wildcard substitution - %1 becomes <contents of wildcard 1>         *
-			 *                        - %<foo> becomes <contents of wildcard "foo"  *
+			 *                        - %<foo> becomes <contents of wildcard "foo"> *
 			 *                        - %% becomes %                                *
 			 * -------------------------------------------------------------------- */
 
@@ -2819,33 +2441,18 @@ bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &su
 		return false;
 	}
 
-	const QRegularExpressionMatch match = regex.match(subject, startOffset);
-	if (!match.hasMatch())
-		return false;
-
-	if (!m_regexpMatchEmpty && match.capturedLength(0) == 0)
+	const QMudAliasMatch::MatchResult result =
+	    QMudAliasMatch::matchWithCaptures(regex, subject, m_regexpMatchEmpty, startOffset);
+	if (!result.matched)
 		return false;
 
 	if (startCol)
-		*startCol = safeQSizeToInt(match.capturedStart(0));
+		*startCol = result.startCol;
 	if (endCol)
-		*endCol = safeQSizeToInt(match.capturedEnd(0));
+		*endCol = result.endCol;
 
-	wildcards.clear();
-	const int lastIndex = match.lastCapturedIndex();
-	for (int i = 0; i <= lastIndex; ++i)
-		wildcards.append(match.captured(i));
-
-	namedWildcards.clear();
-	const QStringList names = regex.namedCaptureGroups();
-	for (int i = 1, size = safeQSizeToInt(names.size()); i < size; ++i)
-	{
-		const QString &name = names.at(i);
-		if (name.isEmpty())
-			continue;
-		if (i <= lastIndex)
-			namedWildcards.insert(name, match.captured(i));
-	}
+	wildcards      = result.wildcards;
+	namedWildcards = result.namedWildcards;
 
 	return true;
 }
@@ -3393,18 +3000,9 @@ void WorldCommandProcessor::checkTimers()
 		for (int i = 0, size = safeQSizeToInt(timers.size()); i < size; ++i)
 		{
 			WorldRuntime::Timer &timer = timers[i];
-			if (!isEnabledValue(timer.attributes.value(QStringLiteral("enabled"))))
+			if (!QMudTimerScheduling::isTimerDue(timer, now, connected))
 				continue;
-			if (!isEnabledValue(timer.attributes.value(QStringLiteral("active_closed"))) && !connected)
-				continue;
-			if (!timer.nextFireTime.isValid())
-				resetTimerFields(timer);
-			if (!timer.nextFireTime.isValid() || timer.nextFireTime > now)
-				continue;
-			const QString name = timer.attributes.value(QStringLiteral("name")).trimmed();
-			if (name.isEmpty())
-				continue;
-			fired.push_back({name});
+			fired.push_back({timer.attributes.value(QStringLiteral("name")).trimmed()});
 		}
 
 		auto findTimerByName = [&](const QString &name) -> int
@@ -3427,28 +3025,8 @@ void WorldCommandProcessor::checkTimers()
 			if (!isEnabledValue(timer.attributes.value(QStringLiteral("enabled"))))
 				continue;
 
-			timer.firedCount++;
-			timer.lastFired = now;
+			QMudTimerScheduling::applyTimerFiredState(timer, now);
 			m_runtime->incrementTimersFired();
-
-			if (const bool atTime = isEnabledValue(timer.attributes.value(QStringLiteral("at_time"))); atTime)
-			{
-				if (timer.nextFireTime.isValid())
-					timer.nextFireTime = timer.nextFireTime.addDays(1);
-			}
-			else
-			{
-				const int    hour   = timer.attributes.value(QStringLiteral("hour")).toInt();
-				const int    minute = timer.attributes.value(QStringLiteral("minute")).toInt();
-				const double second = timer.attributes.value(QStringLiteral("second")).toDouble();
-				timer.nextFireTime  = timer.nextFireTime.addMSecs(intervalMsFromParts(hour, minute, second));
-			}
-
-			if (!timer.nextFireTime.isValid() || timer.nextFireTime <= now)
-				resetTimerFields(timer);
-
-			if (isEnabledValue(timer.attributes.value(QStringLiteral("one_shot"))))
-				timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
 
 			const int  sendToValue = timer.attributes.value(QStringLiteral("send_to")).toInt();
 			const bool omitFromOutput =
@@ -3518,9 +3096,8 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 	const bool echoInput = isEnabled(attrs.value(QStringLiteral("display_my_input")));
 	const bool logInput  = isEnabled(attrs.value(QStringLiteral("log_input")));
 	const bool logIt     = logInput && !omitFromLog;
-	const bool fromTimer =
-	    m_runtime && m_runtime->currentActionSource() == WorldRuntime::eTimerFired;
-	const bool echoSend = omitFromOutput ? false : (fromTimer ? true : echoInput);
+	const bool fromTimer = m_runtime && m_runtime->currentActionSource() == WorldRuntime::eTimerFired;
+	const bool echoSend  = omitFromOutput ? false : (fromTimer ? true : echoInput);
 
 	switch (sendTo)
 	{
@@ -3714,28 +3291,9 @@ void WorldCommandProcessor::sendMsg(const QString &text, const bool echo, const 
 		// it needs to be queued if queuing is requested
 		// it also needs to be queued regardless if there is already something in the queue
 
-		if (m_speedWalkDelay && (queueIt || !m_queuedCommands.isEmpty()))
+		if (QMudCommandQueue::shouldQueueCommand(m_speedWalkDelay, queueIt, !m_queuedCommands.isEmpty()))
 		{
-			QString strEchoFlag;
-
-			// work out how it is to be queued
-
-			if (queueIt)
-				if (bEcho)
-					strEchoFlag = QStringLiteral("E");
-				else
-					strEchoFlag = QStringLiteral("e");
-			else if (bEcho)
-				strEchoFlag = QStringLiteral("I");
-			else
-				strEchoFlag = QStringLiteral("i");
-
-			// nolog is the lower-case version of the flag
-			if (!logIt)
-				strEchoFlag = strEchoFlag.toLower();
-
-			// queue it
-			m_queuedCommands.append(strEchoFlag + strLine);
+			m_queuedCommands.append(QMudCommandQueue::encodeQueueEntry(strLine, queueIt, bEcho, logIt));
 
 		} // end of having a speedwalk delay
 		else
@@ -4019,24 +3577,13 @@ void WorldCommandProcessor::processQueuedCommands(bool flushAll)
 		}
 	}
 
-	bool sentAny = false;
-	while (!m_queuedCommands.isEmpty())
+	bool              sentAny = false;
+	const QStringList batch   = QMudCommandQueue::takeDispatchBatch(m_queuedCommands, flushAll);
+	for (const QString &queued : batch)
 	{
-		const QString queued = m_queuedCommands.takeFirst();
-		if (queued.isEmpty())
-			continue;
-
-		const QChar   kind       = queued.at(0);
-		const bool    withEcho   = kind.toUpper() == QLatin1Char('E') || kind.toUpper() == QLatin1Char('I');
-		const bool    logIt      = kind.isUpper();
-		const bool    queuedType = kind.toUpper() == QLatin1Char('E');
-		const QString payload    = queued.mid(1);
-
-		doSendMsg(payload, withEcho, logIt);
+		const QMudCommandQueue::QueueEntry decoded = QMudCommandQueue::decodeQueueEntry(queued);
+		doSendMsg(decoded.payload, decoded.withEcho, decoded.logIt);
 		sentAny = true;
-
-		if (!flushAll && queuedType)
-			break;
 	}
 
 	if (sentAny && !flushAll)

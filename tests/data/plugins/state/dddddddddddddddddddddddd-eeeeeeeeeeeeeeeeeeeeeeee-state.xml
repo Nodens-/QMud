@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<qmud>
+  <variables>
+    <variable name="score">99</variable>
+  </variables>
+</qmud>

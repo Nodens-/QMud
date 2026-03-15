@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="FixturePlugin"
+    author="Tester"
+    id="0123456789abcdef01234567"
+    language="lua"
+    purpose="fixture plugin">
+    <description>minimal plugin fixture</description>
+    <script>return "ok"</script>
+  </plugin>
+  <triggers>
+    <trigger name="plugin_trigger">
+      <send>plugin trigger body</send>
+    </trigger>
+  </triggers>
+  <variables>
+    <variable name="plugin_var">plugin value</variable>
+  </variables>
+</muclient>

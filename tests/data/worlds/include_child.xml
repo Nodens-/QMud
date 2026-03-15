@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<qmud>
+  <triggers>
+    <trigger name="child_trigger">
+      <send>child</send>
+    </trigger>
+  </triggers>
+</qmud>

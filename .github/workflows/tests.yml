@@ -1,0 +1,251 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quick-tests:
+    name: PR/Push quick suite (exclude slow)
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            lua-json \
+            lua-lpeg \
+            lua-socket \
+            lua5.4 \
+            libgl1-mesa-dev \
+            libpulse0 \
+            liblua5.4-dev \
+            ninja-build \
+            pkg-config \
+            python3-pip
+
+      - name: Install Qt 6.10.2
+        run: |
+          python3 -m pip install --upgrade pip setuptools wheel aqtinstall
+          aqt install-qt -O "$RUNNER_TEMP/Qt" linux desktop 6.10.2 linux_gcc_64 -m qtmultimedia
+
+          QT6_CMAKE_DIR="$(find "$RUNNER_TEMP/Qt" -type d -path '*/lib/cmake/Qt6' | sort | head -n 1)"
+          if [ -z "$QT6_CMAKE_DIR" ]; then
+            echo "Failed to locate Qt6 CMake package directory after aqt install." >&2
+            exit 1
+          fi
+
+          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+          echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
+
+      - name: Configure CMake
+        run: |
+          CCACHE_DISABLE=1 cmake -S . -B cmake-build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DQMUD_ENABLE_TESTING=ON \
+            -DQMUD_ENABLE_GUI_TESTS=ON
+
+      - name: Build
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release -j"$(nproc)"
+
+      - name: Run quick test suite
+        run: |
+          ctest --test-dir cmake-build-release --output-on-failure --label-exclude slow
+
+      - name: Upload CTest logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-quick
+          if-no-files-found: ignore
+          path: |
+            cmake-build-release/Testing/Temporary/*
+            cmake-build-release/Testing/**/*.xml
+
+      - name: Upload failing test executables
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qtest-binaries-quick
+          if-no-files-found: ignore
+          path: |
+            cmake-build-release/tests/tst_*
+
+  full-tests:
+    name: Scheduled/manual full suite
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            lua-json \
+            lua-lpeg \
+            lua-socket \
+            lua5.4 \
+            libgl1-mesa-dev \
+            libpulse0 \
+            liblua5.4-dev \
+            ninja-build \
+            pkg-config \
+            python3-pip
+
+      - name: Install Qt 6.10.2
+        run: |
+          python3 -m pip install --upgrade pip setuptools wheel aqtinstall
+          aqt install-qt -O "$RUNNER_TEMP/Qt" linux desktop 6.10.2 linux_gcc_64 -m qtmultimedia
+
+          QT6_CMAKE_DIR="$(find "$RUNNER_TEMP/Qt" -type d -path '*/lib/cmake/Qt6' | sort | head -n 1)"
+          if [ -z "$QT6_CMAKE_DIR" ]; then
+            echo "Failed to locate Qt6 CMake package directory after aqt install." >&2
+            exit 1
+          fi
+
+          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+          echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
+
+      - name: Configure CMake
+        run: |
+          CCACHE_DISABLE=1 cmake -S . -B cmake-build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DQMUD_ENABLE_TESTING=ON \
+            -DQMUD_ENABLE_GUI_TESTS=ON
+
+      - name: Build
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release -j"$(nproc)"
+
+      - name: Run full test suite
+        run: |
+          ctest --test-dir cmake-build-release --output-on-failure
+
+      - name: Upload CTest logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-full
+          if-no-files-found: ignore
+          path: |
+            cmake-build-release/Testing/Temporary/*
+            cmake-build-release/Testing/**/*.xml
+
+      - name: Upload failing test executables
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qtest-binaries-full
+          if-no-files-found: ignore
+          path: |
+            cmake-build-release/tests/tst_*
+
+  coverage:
+    name: Manual coverage (llvm/gcov)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            lcov \
+            lua-json \
+            lua-lpeg \
+            lua-socket \
+            lua5.4 \
+            libgl1-mesa-dev \
+            libpulse0 \
+            liblua5.4-dev \
+            ninja-build \
+            pkg-config \
+            python3-pip
+
+      - name: Install Qt 6.10.2
+        run: |
+          python3 -m pip install --upgrade pip setuptools wheel aqtinstall
+          aqt install-qt -O "$RUNNER_TEMP/Qt" linux desktop 6.10.2 linux_gcc_64 -m qtmultimedia
+
+          QT6_CMAKE_DIR="$(find "$RUNNER_TEMP/Qt" -type d -path '*/lib/cmake/Qt6' | sort | head -n 1)"
+          if [ -z "$QT6_CMAKE_DIR" ]; then
+            echo "Failed to locate Qt6 CMake package directory after aqt install." >&2
+            exit 1
+          fi
+
+          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+          echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
+
+      - name: Configure CMake (coverage)
+        run: |
+          CCACHE_DISABLE=1 cmake -S . -B cmake-build-coverage -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DQMUD_ENABLE_TESTING=ON \
+            -DQMUD_ENABLE_GUI_TESTS=ON \
+            -DCMAKE_C_FLAGS="--coverage" \
+            -DCMAKE_CXX_FLAGS="--coverage" \
+            -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+
+      - name: Build
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-coverage -j"$(nproc)"
+
+      - name: Run tests for coverage
+        run: |
+          ctest --test-dir cmake-build-coverage --output-on-failure --label-exclude slow
+
+      - name: Generate coverage report
+        run: |
+          lcov --capture --directory cmake-build-coverage --output-file coverage.info
+          lcov --remove coverage.info '/usr/*' "$RUNNER_TEMP/*" --output-file coverage.filtered.info
+          genhtml coverage.filtered.info --output-directory coverage-html
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-coverage
+          if-no-files-found: error
+          path: |
+            coverage.filtered.info
+            coverage-html/**

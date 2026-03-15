@@ -12,6 +12,8 @@ if (UNIX AND NOT APPLE)
 endif ()
 
 option(QMUD_ENABLE_LUA_SCRIPTING "Enable Lua scripting callbacks" ON)
+option(QMUD_ENABLE_TESTING "Enable QMud QtTest/CTest targets" ON)
+option(QMUD_ENABLE_GUI_TESTS "Enable GUI-focused QtTest suites" OFF)
 option(QMUD_CI_BUILD "Mark runtime display version as CI build (-ci suffix)" OFF)
 option(QMUD_RELEASE_NATIVE_OPTIMIZATIONS "Tune Release builds for the local CPU (-march=native or /arch:AVX2)" OFF)
 set(QMUD_SYSTEM_LUA_MODULES_PREFIX "" CACHE PATH
@@ -47,6 +49,21 @@ else ()
     set(QMUD_LUA_MODULE_CORE_NAMES core.so)
     set(QMUD_LUA_MODULE_CORE_OUTPUT_NAME core.so)
 endif ()
+
+set(QMUD_LUA_MODULE_SEARCH_PATHS
+        "${QMUD_SYSTEM_LUA_MODULES_PREFIX}"
+        /usr/lib64
+        /usr/lib
+        /usr/local/lib64
+        /usr/local/lib
+        /opt/homebrew/lib
+        /opt/local/lib)
+if (CMAKE_LIBRARY_ARCHITECTURE)
+    list(APPEND QMUD_LUA_MODULE_SEARCH_PATHS
+            "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+            "/usr/local/lib/${CMAKE_LIBRARY_ARCHITECTURE}")
+endif ()
+list(REMOVE_DUPLICATES QMUD_LUA_MODULE_SEARCH_PATHS)
 
 if (POLICY CMP0069)
     cmake_policy(SET CMP0069 NEW)
@@ -111,6 +128,11 @@ endfunction()
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Sql PrintSupport)
 find_package(Qt6 QUIET COMPONENTS Multimedia)
+if (QMUD_ENABLE_TESTING)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+    include(CTest)
+    enable_testing()
+endif ()
 find_package(PkgConfig QUIET)
 find_package(Python3 QUIET COMPONENTS Interpreter)
 
@@ -137,12 +159,18 @@ set(QMUD_SOURCES
         Main.cpp
         MainWindowHostResolver.cpp
         MainFrame.cpp
+        MainFrameActionUtils.cpp
         AppController.cpp
         Accelerators.cpp
+        AliasMatchUtils.cpp
+        CommandPatternUtils.cpp
+        CommandQueueUtils.cpp
+        CommandTextUtils.cpp
         NameGeneration.cpp
         DoubleMetaphone.cpp
         ErrorDescriptions.cpp
         AsciiArt.cpp
+        WorldPreferencesRoutingUtils.cpp
         WorldChildWindow.cpp
         dialogs/TipDialog.cpp
         dialogs/WelcomeDialog.cpp
@@ -153,6 +181,8 @@ set(QMUD_SOURCES
         WorldDocument.cpp
         WorldRuntime.cpp
         WorldCommandProcessor.cpp
+        SpeedwalkParser.cpp
+        TimerSchedulingUtils.cpp
         WorldView.cpp
         WorldSocket.cpp
         TelnetProcessor.cpp
@@ -195,10 +225,15 @@ set(QMUD_HEADERS
         MainWindowHostResolver.h
         Version.h
         MainFrame.h
+        MainFrameActionUtils.h
         AppController.h
         Accelerators.h
         AcceleratorUtils.h
+        AliasMatchUtils.h
         CommandMappingTypes.h
+        CommandPatternUtils.h
+        CommandQueueUtils.h
+        CommandTextUtils.h
         ErrorDescriptions.h
         InfoTypesMetadata.h
         InfoTypeData.inc
@@ -216,6 +251,8 @@ set(QMUD_HEADERS
         WorldRuntime.h
         MiniWindow.h
         WorldCommandProcessor.h
+        SpeedwalkParser.h
+        TimerSchedulingUtils.h
         WorldView.h
         CommandIds.h
         WorldSocketService.h
@@ -230,6 +267,7 @@ set(QMUD_HEADERS
         LuaCallbackEngine.h
         LuaApiExport.h
         FileExtensions.h
+        WorldPreferencesRoutingUtils.h
         dialogs/LogSessionDialog.h
         MdiTabs.h
         dialogs/PluginsDialog.h
@@ -397,7 +435,7 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
         if (NOT QMUD_HAS_SYSTEM_LPEG)
             find_file(QMUD_SYSTEM_LPEG_SO
                     NAMES lpeg.so
-                    PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                     PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
             )
             if (QMUD_SYSTEM_LPEG_SO)
@@ -434,7 +472,7 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
         if (NOT QMUD_HAS_SYSTEM_BC)
             find_file(QMUD_SYSTEM_BC_SO
                     NAMES bc.so
-                    PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                     PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
             )
             if (QMUD_SYSTEM_BC_SO)
@@ -474,13 +512,13 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
     if (NOT QMUD_HAS_SYSTEM_LUASOCKET)
         find_file(QMUD_SYSTEM_SOCKET_CORE_SO
                 NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
-                PATHS "${QMUD_SYSTEM_LUA_MODULES_PREFIX}" /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib /opt/homebrew/lib /opt/local/lib
+                PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                 PATH_SUFFIXES "" socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
                 NO_CMAKE_FIND_ROOT_PATH
         )
         find_file(QMUD_SYSTEM_MIME_CORE_SO
                 NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
-                PATHS "${QMUD_SYSTEM_LUA_MODULES_PREFIX}" /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib /opt/homebrew/lib /opt/local/lib
+                PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                 PATH_SUFFIXES "" mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
                 NO_CMAKE_FIND_ROOT_PATH
         )
@@ -504,10 +542,6 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
     message(STATUS "Lua module provider resolution: lpeg=${QMUD_RESOLVED_LPEG_PROVIDER}, bc=${QMUD_RESOLVED_BC_PROVIDER}, luasocket=${QMUD_RESOLVED_LUASOCKET_PROVIDER}")
 endif ()
 
-# Regex compatibility harness (Qt PCRE2 vs legacy PCRE behavior)
-add_executable(QMudRegexCompat tools/regex_compat_test.cpp)
-target_link_libraries(QMudRegexCompat PRIVATE Qt6::Core)
-
 # Qt target include root: keep build-visible sources isolated under src/.
 target_include_directories(QMud PRIVATE "${QMUD_SRC_DIR}")
 
@@ -524,6 +558,10 @@ foreach (tgt lsqlite png lua luacom)
         target_link_libraries(QMud PRIVATE ${tgt})
     endif ()
 endforeach ()
+
+if (QMUD_ENABLE_TESTING)
+    add_subdirectory(tests)
+endif ()
 
 # Optional: resources (.qrc)
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources/qmud.qrc")
@@ -679,7 +717,7 @@ endif ()
 if (NOT QMUD_SYSTEM_SOCKET_CORE_SO)
     find_file(QMUD_SYSTEM_SOCKET_CORE_SO
             NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
-            PATHS "${QMUD_SYSTEM_LUA_MODULES_PREFIX}" /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib /opt/homebrew/lib /opt/local/lib
+            PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
             PATH_SUFFIXES "" socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
             NO_CMAKE_FIND_ROOT_PATH
     )
@@ -687,7 +725,7 @@ endif ()
 if (NOT QMUD_SYSTEM_MIME_CORE_SO)
     find_file(QMUD_SYSTEM_MIME_CORE_SO
             NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
-            PATHS "${QMUD_SYSTEM_LUA_MODULES_PREFIX}" /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib /opt/homebrew/lib /opt/local/lib
+            PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
             PATH_SUFFIXES "" mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
             NO_CMAKE_FIND_ROOT_PATH
     )
@@ -942,7 +980,6 @@ else ()
 endif ()
 
 qmud_apply_release_optimizations(QMud)
-qmud_apply_release_optimizations(QMudRegexCompat)
 if (APPLE AND CMAKE_CROSSCOMPILING)
     # Suppress noisy osxcross/tbd linker warnings (e.g. libz/libcups out-of-sync stubs).
     target_link_options(QMud PRIVATE -Wl,-w)
@@ -1509,7 +1546,7 @@ if (UNIX AND NOT APPLE)
         if (NOT QMUD_APPIMAGE_LPEG_SO)
             find_file(QMUD_APPIMAGE_LPEG_SO
                     NAMES lpeg.so
-                    PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                     PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
             )
         endif ()
@@ -1518,7 +1555,7 @@ if (UNIX AND NOT APPLE)
         if (NOT QMUD_APPIMAGE_SOCKET_CORE_SO)
             find_file(QMUD_APPIMAGE_SOCKET_CORE_SO
                     NAMES core.so
-                    PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                     PATH_SUFFIXES lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
             )
         endif ()
@@ -1527,7 +1564,7 @@ if (UNIX AND NOT APPLE)
         if (NOT QMUD_APPIMAGE_MIME_CORE_SO)
             find_file(QMUD_APPIMAGE_MIME_CORE_SO
                     NAMES core.so
-                    PATHS /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
                     PATH_SUFFIXES lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
             )
         endif ()

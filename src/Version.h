@@ -13,7 +13,7 @@
 inline constexpr int  kThisVersion = 1001;
 
 // Used to display the version number.
-inline constexpr char kVersionString[] = "10.01";
+inline constexpr char kVersionString[] = "10.02";
 
 // CI builds append "-ci" to the runtime display version (AppController::m_version).
 // kVersionString itself remains the canonical numeric version.
