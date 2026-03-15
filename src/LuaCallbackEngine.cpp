@@ -43,6 +43,8 @@
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDialog>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QFile>

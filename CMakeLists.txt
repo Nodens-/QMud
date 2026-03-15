@@ -1517,27 +1517,48 @@ if (UNIX AND NOT APPLE)
         endif ()
 
         if (COMMAND qt_generate_deploy_app_script)
-            qt_generate_deploy_app_script(
+            set(QMUD_QT_DEPLOY_SCRIPT_KEYWORD OUTPUT_SCRIPT)
+            set(QMUD_QT_DEPLOY_SUPPORTS_NO_UNSUPPORTED_FLAG ON)
+            set(QMUD_QT_DEPLOY_SUPPORTS_PLUGIN_FILTERS ON)
+            if (DEFINED Qt6Core_DIR AND EXISTS "${Qt6Core_DIR}/Qt6CoreMacros.cmake")
+                file(READ "${Qt6Core_DIR}/Qt6CoreMacros.cmake" QMUD_QTCORE_MACROS_CONTENT)
+                if (QMUD_QTCORE_MACROS_CONTENT MATCHES "FILENAME_VARIABLE")
+                    set(QMUD_QT_DEPLOY_SCRIPT_KEYWORD FILENAME_VARIABLE)
+                endif ()
+                if (NOT QMUD_QTCORE_MACROS_CONTENT MATCHES "NO_UNSUPPORTED_PLATFORM_ERROR")
+                    set(QMUD_QT_DEPLOY_SUPPORTS_NO_UNSUPPORTED_FLAG OFF)
+                endif ()
+                if (NOT QMUD_QTCORE_MACROS_CONTENT MATCHES "INCLUDE_PLUGIN_TYPES")
+                    set(QMUD_QT_DEPLOY_SUPPORTS_PLUGIN_FILTERS OFF)
+                endif ()
+            endif ()
+
+            set(QMUD_APPIMAGE_QT_DEPLOY_ARGS
                     TARGET QMud
-                    OUTPUT_SCRIPT QMUD_APPIMAGE_QT_DEPLOY_SCRIPT
-                    NO_UNSUPPORTED_PLATFORM_ERROR
-                    INCLUDE_PLUGIN_TYPES
-                    platforms
-                    sqldrivers
-                    platformthemes
-                    platforminputcontexts
-                    xcbglintegrations
-                    egldeviceintegrations
-                    wayland-decoration-client
-                    wayland-graphics-integration-client
-                    wayland-shell-integration
-                    INCLUDE_PLUGINS
-                    qsqlite
-                    qxcb
-                    qwayland
-                    qwayland-egl
-                    qwayland-generic
-            )
+                    ${QMUD_QT_DEPLOY_SCRIPT_KEYWORD} QMUD_APPIMAGE_QT_DEPLOY_SCRIPT)
+            if (QMUD_QT_DEPLOY_SUPPORTS_NO_UNSUPPORTED_FLAG)
+                list(APPEND QMUD_APPIMAGE_QT_DEPLOY_ARGS NO_UNSUPPORTED_PLATFORM_ERROR)
+            endif ()
+            if (QMUD_QT_DEPLOY_SUPPORTS_PLUGIN_FILTERS)
+                list(APPEND QMUD_APPIMAGE_QT_DEPLOY_ARGS
+                        INCLUDE_PLUGIN_TYPES
+                        platforms
+                        sqldrivers
+                        platformthemes
+                        platforminputcontexts
+                        xcbglintegrations
+                        egldeviceintegrations
+                        wayland-decoration-client
+                        wayland-graphics-integration-client
+                        wayland-shell-integration
+                        INCLUDE_PLUGINS
+                        qsqlite
+                        qxcb
+                        qwayland
+                        qwayland-egl
+                        qwayland-generic)
+            endif ()
+            qt_generate_deploy_app_script(${QMUD_APPIMAGE_QT_DEPLOY_ARGS})
         else ()
             message(FATAL_ERROR "Qt deploy API is unavailable; cannot stage AppImage runtime dependencies.")
         endif ()

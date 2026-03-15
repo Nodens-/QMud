@@ -27,6 +27,8 @@
 #include <QColorDialog>
 #include <QComboBox>
 #include <QDesktopServices>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDialogButtonBox>
 #include <QEvent>
 #include <QFileDialog>
 #include <QFileInfo>
