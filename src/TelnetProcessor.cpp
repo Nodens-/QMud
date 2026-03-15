@@ -470,6 +470,13 @@ QByteArray TelnetProcessor::processBytes(const QByteArray &data)
 
 	QByteArray output;
 	QByteArray tailPlain;
+	auto       takePostCompressionRemainder = [&]
+	{
+		if (m_postCompressionRemainder.isEmpty())
+			return;
+		tailPlain.append(m_postCompressionRemainder);
+		m_postCompressionRemainder.clear();
+	};
 
 	if (m_compress)
 	{
@@ -479,11 +486,7 @@ QByteArray TelnetProcessor::processBytes(const QByteArray &data)
 			m_totalUncompressedBytes += decompressed.size();
 			output.append(processPlainBytes(decompressed));
 		}
-		if (!m_postCompressionRemainder.isEmpty())
-		{
-			tailPlain = m_postCompressionRemainder;
-			m_postCompressionRemainder.clear();
-		}
+		takePostCompressionRemainder();
 	}
 	else
 	{
@@ -500,6 +503,7 @@ QByteArray TelnetProcessor::processBytes(const QByteArray &data)
 			m_totalUncompressedBytes += more.size();
 			output.append(processPlainBytes(more));
 		}
+		takePostCompressionRemainder();
 	}
 	if (!tailPlain.isEmpty())
 		output.append(processPlainBytes(tailPlain));
