@@ -209,6 +209,17 @@ namespace
 		return kPngVersion;
 	}
 
+	QString normalizeGroupName(const QString &name)
+	{
+		return name.trimmed().toLower();
+	}
+
+	bool groupMatches(const QString &candidate, const QString &groupName)
+	{
+		const QString normalizedGroup = normalizeGroupName(groupName);
+		return !normalizedGroup.isEmpty() && normalizeGroupName(candidate) == normalizedGroup;
+	}
+
 	bool pushLuaFunctionByName(lua_State *state, const QString &functionName)
 	{
 		if (!state || functionName.isEmpty())
@@ -1856,7 +1867,7 @@ static int luaEnableGroup(lua_State *L)
 		return 1;
 	}
 	const QString groupName = QString::fromUtf8(luaL_checkstring(L, 1));
-	if (groupName.isEmpty())
+	if (groupName.trimmed().isEmpty())
 	{
 		lua_pushnumber(L, 0);
 		return 1;
@@ -1875,7 +1886,7 @@ static int luaEnableGroup(lua_State *L)
 		int changed = 0;
 		for (auto &item : list)
 		{
-			if (item.attributes.value(QStringLiteral("group")) == groupName)
+			if (groupMatches(item.attributes.value(QStringLiteral("group")), groupName))
 			{
 				item.attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
 				changed++;
@@ -13281,7 +13292,7 @@ static int luaDeleteTriggerGroup(lua_State *L)
 		return 1;
 	}
 	const QString groupName = QString::fromUtf8(luaL_checkstring(L, 1));
-	if (groupName.isEmpty())
+	if (groupName.trimmed().isEmpty())
 	{
 		lua_pushnumber(L, 0);
 		return 1;
@@ -13296,7 +13307,7 @@ static int luaDeleteTriggerGroup(lua_State *L)
 	int                           removed  = 0;
 	for (int i = sizeToInt(triggers.size()) - 1; i >= 0; --i)
 	{
-		if (triggers.at(i).attributes.value(QStringLiteral("group")) == groupName)
+		if (groupMatches(triggers.at(i).attributes.value(QStringLiteral("group")), groupName))
 		{
 			triggers.removeAt(i);
 			removed++;
@@ -13317,7 +13328,7 @@ static int luaDeleteAliasGroup(lua_State *L)
 		return 1;
 	}
 	const QString groupName = QString::fromUtf8(luaL_checkstring(L, 1));
-	if (groupName.isEmpty())
+	if (groupName.trimmed().isEmpty())
 	{
 		lua_pushnumber(L, 0);
 		return 1;
@@ -13332,7 +13343,7 @@ static int luaDeleteAliasGroup(lua_State *L)
 	int                         removed = 0;
 	for (int i = sizeToInt(aliases.size()) - 1; i >= 0; --i)
 	{
-		if (aliases.at(i).attributes.value(QStringLiteral("group")) == groupName)
+		if (groupMatches(aliases.at(i).attributes.value(QStringLiteral("group")), groupName))
 		{
 			aliases.removeAt(i);
 			removed++;
@@ -13353,7 +13364,7 @@ static int luaDeleteTimerGroup(lua_State *L)
 		return 1;
 	}
 	const QString groupName = QString::fromUtf8(luaL_checkstring(L, 1));
-	if (groupName.isEmpty())
+	if (groupName.trimmed().isEmpty())
 	{
 		lua_pushnumber(L, 0);
 		return 1;
@@ -13368,7 +13379,7 @@ static int luaDeleteTimerGroup(lua_State *L)
 	int                         removed = 0;
 	for (int i = sizeToInt(timers.size()) - 1; i >= 0; --i)
 	{
-		if (timers.at(i).attributes.value(QStringLiteral("group")) == groupName)
+		if (groupMatches(timers.at(i).attributes.value(QStringLiteral("group")), groupName))
 		{
 			timers.removeAt(i);
 			removed++;
@@ -13389,7 +13400,7 @@ static int luaDeleteGroup(lua_State *L)
 		return 1;
 	}
 	const QString groupName = QString::fromUtf8(luaL_checkstring(L, 1));
-	if (groupName.isEmpty())
+	if (groupName.trimmed().isEmpty())
 	{
 		lua_pushnumber(L, 0);
 		return 1;
@@ -13406,7 +13417,7 @@ static int luaDeleteGroup(lua_State *L)
 		int removed = 0;
 		for (int i = list.size() - 1; i >= 0; --i)
 		{
-			if (list.at(i).attributes.value(QStringLiteral("group")) == groupName)
+			if (groupMatches(list.at(i).attributes.value(QStringLiteral("group")), groupName))
 			{
 				list.removeAt(i);
 				removed++;
@@ -13530,7 +13541,7 @@ static int luaEnableTriggerGroup(lua_State *L)
 	}
 	const QString groupName = QString::fromUtf8(luaL_checkstring(L, 1));
 	const bool    enabled   = optBool(L, 2, true);
-	if (groupName.isEmpty())
+	if (groupName.trimmed().isEmpty())
 	{
 		lua_pushnumber(L, 0);
 		return 1;
@@ -13545,7 +13556,7 @@ static int luaEnableTriggerGroup(lua_State *L)
 	int                           count    = 0;
 	for (auto &trigger : triggers)
 	{
-		if (trigger.attributes.value(QStringLiteral("group")) == groupName)
+		if (groupMatches(trigger.attributes.value(QStringLiteral("group")), groupName))
 		{
 			trigger.attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
 			count++;
@@ -13567,7 +13578,7 @@ static int luaEnableAliasGroup(lua_State *L)
 	}
 	const QString groupName = QString::fromUtf8(luaL_checkstring(L, 1));
 	const bool    enabled   = optBool(L, 2, true);
-	if (groupName.isEmpty())
+	if (groupName.trimmed().isEmpty())
 	{
 		lua_pushnumber(L, 0);
 		return 1;
@@ -13582,7 +13593,7 @@ static int luaEnableAliasGroup(lua_State *L)
 	int                         count   = 0;
 	for (auto &alias : aliases)
 	{
-		if (alias.attributes.value(QStringLiteral("group")) == groupName)
+		if (groupMatches(alias.attributes.value(QStringLiteral("group")), groupName))
 		{
 			alias.attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
 			count++;
@@ -13604,7 +13615,7 @@ static int luaEnableTimerGroup(lua_State *L)
 	}
 	const QString groupName = QString::fromUtf8(luaL_checkstring(L, 1));
 	const bool    enabled   = optBool(L, 2, true);
-	if (groupName.isEmpty())
+	if (groupName.trimmed().isEmpty())
 	{
 		lua_pushnumber(L, 0);
 		return 1;
@@ -13619,7 +13630,7 @@ static int luaEnableTimerGroup(lua_State *L)
 	int                         count  = 0;
 	for (auto &timer : timers)
 	{
-		if (timer.attributes.value(QStringLiteral("group")) == groupName)
+		if (groupMatches(timer.attributes.value(QStringLiteral("group")), groupName))
 		{
 			timer.attributes.insert(QStringLiteral("enabled"), attrFlag(enabled));
 			count++;
