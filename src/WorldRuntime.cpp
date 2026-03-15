@@ -7078,9 +7078,14 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 			if (ok && value != 0)
 				saveXmlNumber(out, nl, "custom_colour", value);
 		}
-		num("colour_change_type");
-		boolean("enabled");
-		boolean("expand_variables");
+			num("colour_change_type");
+			if (const bool triggerEnabled =
+			        isEnabledFlag(tr->attributes.value(QStringLiteral("enabled")));
+			    triggerEnabled)
+				saveXmlBoolean(out, nl, "enabled", true);
+			else
+				out << "   enabled=\"n\"" << nl;
+			boolean("expand_variables");
 		text("group");
 		boolean("ignore_case");
 		boolean("inverse");
@@ -7150,7 +7155,12 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 		saveXmlString(out, nl, "name", al->attributes.value(QStringLiteral("name")));
 		saveXmlString(out, nl, "script", al->attributes.value(QStringLiteral("script")));
 		saveXmlString(out, nl, "match", al->attributes.value(QStringLiteral("match")));
-		saveXmlBoolean(out, nl, "enabled", isEnabledFlag(al->attributes.value(QStringLiteral("enabled"))));
+			if (const bool aliasEnabled =
+			        isEnabledFlag(al->attributes.value(QStringLiteral("enabled")));
+			    aliasEnabled)
+				saveXmlBoolean(out, nl, "enabled", true);
+			else
+				out << "   enabled=\"n\"" << nl;
 		saveXmlBoolean(out, nl, "echo_alias",
 		               isEnabledFlag(al->attributes.value(QStringLiteral("echo_alias"))));
 		saveXmlBoolean(out, nl, "expand_variables",
