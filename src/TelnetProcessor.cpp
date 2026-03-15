@@ -1599,7 +1599,14 @@ void TelnetProcessor::sendWindowSize()
 	sizeBytes[3] = m_wrapRows & 0xFF;
 
 	QByteArray response(reinterpret_cast<const char *>(p1), sizeof p1);
-	response.append(reinterpret_cast<const char *>(sizeBytes), sizeof sizeBytes);
+	// RFC 1073/Telnet requirement: data 0xFF bytes inside subnegotiation payload
+	// must be doubled to avoid ambiguity with IAC.
+	for (const unsigned char byte : sizeBytes)
+	{
+		response.append(static_cast<char>(byte));
+		if (byte == IAC)
+			response.append(static_cast<char>(IAC));
+	}
 	response.append(reinterpret_cast<const char *>(p2), sizeof p2);
 	m_outbound.append(response);
 }

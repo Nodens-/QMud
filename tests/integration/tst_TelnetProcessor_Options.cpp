@@ -144,6 +144,17 @@ class tst_TelnetProcessor_Options : public QObject
 			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE}));
 		}
 
+		void doNawsEscapesIacBytesInWindowSizePayload()
+		{
+			TelnetProcessor processor;
+			processor.setNawsEnabled(true);
+			processor.setWindowSize(255, 255);
+
+			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+			QCOMPARE(processor.takeOutboundData(),
+			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, IAC, SE}));
+		}
+
 		void doNawsSendsWontWhenDisabled()
 		{
 			TelnetProcessor processor;
