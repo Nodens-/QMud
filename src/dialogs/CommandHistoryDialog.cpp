@@ -15,6 +15,8 @@
 #include "WorldView.h"
 #include "dialogs/FindDialog.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDialogButtonBox>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>

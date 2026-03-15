@@ -18,6 +18,8 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QFileDialog>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDialogButtonBox>
 #include <QGuiApplication>
 #include <QLabel>
 #include <QMessageBox>

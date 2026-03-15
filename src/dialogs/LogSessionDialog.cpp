@@ -9,6 +9,8 @@
 #include "dialogs/LogSessionDialog.h"
 
 #include <QCheckBox>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
