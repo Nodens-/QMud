@@ -518,8 +518,42 @@ static QTreeWidgetItem *findTreeItemByIndex(const QTreeWidget *tree, const int i
 	return nullptr;
 }
 
+static bool lessCaseInsensitive(const QString &lhs, const QString &rhs)
+{
+	const int ci = lhs.compare(rhs, Qt::CaseInsensitive);
+	if (ci != 0)
+		return ci < 0;
+	return lhs < rhs;
+}
+
+static QString groupedTreeRowName(const QTableWidget *table, const int row)
+{
+	QString group;
+	if (const QTableWidgetItem *groupItem = table->item(row, 4))
+		group = groupItem->text().trimmed();
+	if (group.isEmpty())
+		group = QStringLiteral("(ungrouped)");
+	return group;
+}
+
+static QString timerWhenText(const WorldRuntime::Timer &timer)
+{
+	const bool   atTime       = qmudIsEnabledFlag(timer.attributes.value(QStringLiteral("at_time")));
+	const int    hour         = timer.attributes.value(QStringLiteral("hour")).toInt();
+	const int    minute       = timer.attributes.value(QStringLiteral("minute")).toInt();
+	const double second       = timer.attributes.value(QStringLiteral("second")).toDouble();
+	const int    offsetHour   = timer.attributes.value(QStringLiteral("offset_hour")).toInt();
+	const int    offsetMinute = timer.attributes.value(QStringLiteral("offset_minute")).toInt();
+	const double offsetSecond = timer.attributes.value(QStringLiteral("offset_second")).toDouble();
+	QString      when         = QString::asprintf("%02d:%02d:%04.2f", hour, minute, second);
+	if (!atTime && (offsetHour != 0 || offsetMinute != 0 || offsetSecond != 0.0))
+		when += QString::asprintf(" offset %02d:%02d:%04.2f", offsetHour, offsetMinute, offsetSecond);
+	return when;
+}
+
 static void rebuildGroupedTree(const QTableWidget *table, QTreeWidget *tree,
-                               const std::function<QString(int)> &descriptionForRow)
+                               const std::function<QString(int)> &descriptionForRow,
+                               const QString                     &expandedGroup)
 {
 	if (!table || !tree)
 		return;
@@ -534,30 +568,56 @@ static void rebuildGroupedTree(const QTableWidget *table, QTreeWidget *tree,
 
 	tree->clear();
 
-	QMap<QString, QTreeWidgetItem *> groups;
+	QStringList groupNames;
+	QSet<QString> seenGroups;
 	for (int row = 0; row < table->rowCount(); ++row)
 	{
-		QString group;
-		if (const QTableWidgetItem *groupItem = table->item(row, 4))
-			group = groupItem->text().trimmed();
-		if (group.isEmpty())
-			group = QStringLiteral("(ungrouped)");
-
-		QTreeWidgetItem *parent = groups.value(group, nullptr);
-		if (!parent)
+		const QString group = groupedTreeRowName(table, row);
+		if (!seenGroups.contains(group))
 		{
-			parent = new QTreeWidgetItem(tree);
-			parent->setText(0, group);
-			parent->setFlags(parent->flags() & ~Qt::ItemIsSelectable);
-			groups.insert(group, parent);
+			seenGroups.insert(group);
+			groupNames.append(group);
 		}
+	}
+	std::ranges::sort(groupNames, lessCaseInsensitive);
 
+	QMap<QString, QTreeWidgetItem *> groups;
+	for (const QString &group : groupNames)
+	{
+		auto *parent = new QTreeWidgetItem(tree);
+		parent->setText(0, group);
+		parent->setFlags(parent->flags() & ~Qt::ItemIsSelectable);
+		groups.insert(group, parent);
+	}
+
+	for (int row = 0; row < table->rowCount(); ++row)
+	{
+		QTreeWidgetItem *parent = groups.value(groupedTreeRowName(table, row), nullptr);
+		if (!parent)
+			continue;
 		auto *child = new QTreeWidgetItem(parent);
 		child->setText(0, descriptionForRow(row));
 		child->setData(0, Qt::UserRole, rowToIndex(table, row));
 	}
 
-	tree->expandAll();
+	bool restoredExpandedGroup = false;
+	for (int i = 0; i < tree->topLevelItemCount(); ++i)
+	{
+		if (QTreeWidgetItem *groupItem = tree->topLevelItem(i); groupItem)
+		{
+			const bool shouldExpand = !expandedGroup.isEmpty() && groupItem->text(0) == expandedGroup;
+			groupItem->setExpanded(shouldExpand);
+			restoredExpandedGroup = restoredExpandedGroup || shouldExpand;
+		}
+	}
+	if (!restoredExpandedGroup)
+	{
+		for (int i = 0; i < tree->topLevelItemCount(); ++i)
+		{
+			if (QTreeWidgetItem *groupItem = tree->topLevelItem(i); groupItem)
+				groupItem->setExpanded(false);
+		}
+	}
 	tree->setCurrentItem(findTreeItemByIndex(tree, selectedIndex));
 }
 
@@ -8207,6 +8267,55 @@ void WorldPreferencesDialog::buildUi()
 			return -1;
 		return findRowForIndex(table, index);
 	};
+	auto connectSingleGroupExpansion = [this](QTreeWidget *tree, const std::function<void(const QString &)> &save)
+	{
+		if (!tree)
+		{
+			return;
+		}
+
+			connect(tree, &QTreeWidget::itemExpanded, this,
+			        [this, tree, save](const QTreeWidgetItem *item)
+			        {
+				        if (!item || item->parent())
+					        return;
+
+			        {
+				        QSignalBlocker block(tree);
+				        for (int i = 0; i < tree->topLevelItemCount(); ++i)
+				        {
+					        QTreeWidgetItem *topLevel = tree->topLevelItem(i);
+					        if (!topLevel || topLevel == item)
+						        continue;
+					        topLevel->setExpanded(false);
+				        }
+			        }
+
+			        if (m_runtime)
+				        save(item->text(0));
+		        });
+
+			connect(tree, &QTreeWidget::itemCollapsed, this,
+			        [this, tree, save](const QTreeWidgetItem *item)
+			        {
+				        if (!item || item->parent())
+					        return;
+
+			        QString expandedGroup;
+			        for (int i = 0; i < tree->topLevelItemCount(); ++i)
+			        {
+				        QTreeWidgetItem *topLevel = tree->topLevelItem(i);
+				        if (topLevel && topLevel->isExpanded())
+				        {
+					        expandedGroup = topLevel->text(0);
+					        break;
+				        }
+			        }
+
+			        if (m_runtime)
+				        save(expandedGroup);
+		        });
+	};
 	if (m_aliasesTree)
 		connect(m_aliasesTree, &QTreeWidget::itemDoubleClicked, this,
 		        [this, editAliasItem, rowForTreeItem](const QTreeWidgetItem *item, int)
@@ -8231,6 +8340,27 @@ void WorldPreferencesDialog::buildUi()
 			        if (row >= 0)
 				        editTimerItem(row, false);
 		        });
+	connectSingleGroupExpansion(
+	    m_triggersTree,
+	    [this](const QString &group)
+	    {
+		    if (m_runtime)
+			    m_runtime->setLastTriggerTreeExpandedGroup(group);
+	    });
+	connectSingleGroupExpansion(
+	    m_aliasesTree,
+	    [this](const QString &group)
+	    {
+		    if (m_runtime)
+			    m_runtime->setLastAliasTreeExpandedGroup(group);
+	    });
+	connectSingleGroupExpansion(
+	    m_timersTree,
+	    [this](const QString &group)
+	    {
+		    if (m_runtime)
+			    m_runtime->setLastTimerTreeExpandedGroup(group);
+	    });
 	if (m_triggersTable)
 		connect(m_triggersTable, &QTableWidget::itemSelectionChanged, this,
 		        [this, syncTreeFromTable]
@@ -9803,6 +9933,7 @@ void WorldPreferencesDialog::populateTriggers()
 	LuaFilterRunner filter(filterEnabled ? m_triggerFilterText : QString(), this);
 	const bool      useLuaFilter = filterEnabled && filter.isValid();
 #endif
+	QList<int> visibleIndices;
 	for (int i = 0; i < triggers.size(); ++i)
 	{
 		const WorldRuntime::Trigger &tr = triggers.at(i);
@@ -9941,6 +10072,20 @@ void WorldPreferencesDialog::populateTriggers()
 		}
 		if (!include)
 			continue;
+		visibleIndices.append(i);
+	}
+	std::ranges::sort(visibleIndices, [&triggers](const int lhs, const int rhs)
+	{
+		const QString lhsMatch = triggers.at(lhs).attributes.value(QStringLiteral("match"));
+		const QString rhsMatch = triggers.at(rhs).attributes.value(QStringLiteral("match"));
+		const int     cmp      = lhsMatch.compare(rhsMatch, Qt::CaseInsensitive);
+		if (cmp != 0)
+			return cmp < 0;
+		return lhs < rhs;
+	});
+	for (const int i : visibleIndices)
+	{
+		const WorldRuntime::Trigger &tr = triggers.at(i);
 		const int row = m_triggersTable->rowCount();
 		m_triggersTable->insertRow(row);
 		const QString trigger     = tr.attributes.value(QStringLiteral("match"));
@@ -9993,7 +10138,8 @@ void WorldPreferencesDialog::populateTriggers()
 			                   if (QTableWidgetItem *item = m_triggersTable->item(row, 0))
 				                   return item->text();
 			                   return {};
-		                   });
+		                   },
+		                   m_runtime ? m_runtime->lastTriggerTreeExpandedGroup() : QString());
 	}
 	updateRuleViewModes();
 	if (m_useDefaultTriggers && !m_useDefaultTriggersLoaded)
@@ -10032,6 +10178,7 @@ void WorldPreferencesDialog::populateAliases()
 	LuaFilterRunner filter(filterEnabled ? m_aliasFilterText : QString(), this);
 	const bool      useLuaFilter = filterEnabled && filter.isValid();
 #endif
+	QList<int> visibleIndices;
 	for (int i = 0; i < aliases.size(); ++i)
 	{
 		const WorldRuntime::Alias &al = aliases.at(i);
@@ -10146,6 +10293,20 @@ void WorldPreferencesDialog::populateAliases()
 		}
 		if (!include)
 			continue;
+		visibleIndices.append(i);
+	}
+	std::ranges::sort(visibleIndices, [&aliases](const int lhs, const int rhs)
+	{
+		const QString lhsMatch = aliases.at(lhs).attributes.value(QStringLiteral("match"));
+		const QString rhsMatch = aliases.at(rhs).attributes.value(QStringLiteral("match"));
+		const int     cmp      = lhsMatch.compare(rhsMatch, Qt::CaseInsensitive);
+		if (cmp != 0)
+			return cmp < 0;
+		return lhs < rhs;
+	});
+	for (const int i : visibleIndices)
+	{
+		const WorldRuntime::Alias &al = aliases.at(i);
 		const QString alias    = al.attributes.value(QStringLiteral("match"));
 		const QString sequence = al.attributes.value(QStringLiteral("sequence"));
 		const QString contents = formatListContents(al.children.value(QStringLiteral("send")));
@@ -10195,7 +10356,8 @@ void WorldPreferencesDialog::populateAliases()
 			                   if (QTableWidgetItem *item = m_aliasesTable->item(row, 0))
 				                   return item->text();
 			                   return {};
-		                   });
+		                   },
+		                   m_runtime ? m_runtime->lastAliasTreeExpandedGroup() : QString());
 	}
 	updateRuleViewModes();
 	if (m_useDefaultAliases && !m_useDefaultAliasesLoaded)
@@ -10234,6 +10396,7 @@ void WorldPreferencesDialog::populateTimers()
 	LuaFilterRunner filter(filterEnabled ? m_timerFilterText : QString(), this);
 	const bool      useLuaFilter = filterEnabled && filter.isValid();
 #endif
+	QList<int> visibleIndices;
 	for (int i = 0; i < timers.size(); ++i)
 	{
 		const WorldRuntime::Timer &tm = timers.at(i);
@@ -10342,17 +10505,23 @@ void WorldPreferencesDialog::populateTimers()
 		}
 		if (!include)
 			continue;
-		const bool   atTime       = qmudIsEnabledFlag(tm.attributes.value(QStringLiteral("at_time")));
-		const int    hour         = tm.attributes.value(QStringLiteral("hour")).toInt();
-		const int    minute       = tm.attributes.value(QStringLiteral("minute")).toInt();
-		const double second       = tm.attributes.value(QStringLiteral("second")).toDouble();
-		const int    offsetHour   = tm.attributes.value(QStringLiteral("offset_hour")).toInt();
-		const int    offsetMinute = tm.attributes.value(QStringLiteral("offset_minute")).toInt();
-		const double offsetSecond = tm.attributes.value(QStringLiteral("offset_second")).toDouble();
-		QString      type         = atTime ? QStringLiteral("At") : QStringLiteral("Every");
-		QString      when         = QString::asprintf("%02d:%02d:%04.2f", hour, minute, second);
-		if (!atTime && (offsetHour != 0 || offsetMinute != 0 || offsetSecond != 0.0))
-			when += QString::asprintf(" offset %02d:%02d:%04.2f", offsetHour, offsetMinute, offsetSecond);
+		visibleIndices.append(i);
+	}
+	std::ranges::sort(visibleIndices, [&timers](const int lhs, const int rhs)
+	{
+		const QString lhsWhen = timerWhenText(timers.at(lhs));
+		const QString rhsWhen = timerWhenText(timers.at(rhs));
+		const int     cmp     = lhsWhen.compare(rhsWhen, Qt::CaseInsensitive);
+		if (cmp != 0)
+			return cmp < 0;
+		return lhs < rhs;
+	});
+	for (const int i : visibleIndices)
+	{
+		const WorldRuntime::Timer &tm = timers.at(i);
+		const bool   atTime           = qmudIsEnabledFlag(tm.attributes.value(QStringLiteral("at_time")));
+		QString      type             = atTime ? QStringLiteral("At") : QStringLiteral("Every");
+		const QString when            = timerWhenText(tm);
 		const QString contents = formatListContents(tm.children.value(QStringLiteral("send")));
 		const QString label    = tm.attributes.value(QStringLiteral("name"));
 		const QString group    = tm.attributes.value(QStringLiteral("group"));
@@ -10414,7 +10583,8 @@ void WorldPreferencesDialog::populateTimers()
 			    if (when.isEmpty())
 				    return type;
 			    return type + QStringLiteral(": ") + when;
-		    });
+		    },
+		    m_runtime ? m_runtime->lastTimerTreeExpandedGroup() : QString());
 	}
 	updateRuleViewModes();
 	if (m_useDefaultTimers && !m_useDefaultTimersLoaded)

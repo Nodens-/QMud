@@ -3318,6 +3318,25 @@ void AppController::setupStartupBehavior()
 
 bool AppController::openWorldDocument(const QString &path)
 {
+	const bool allTypingToCommandWindow =
+	    getGlobalOption(QStringLiteral("AllTypingToCommandWindow")).toInt() != 0;
+	const QString wordDelimiters = getGlobalOption(QStringLiteral("WordDelimiters")).toString();
+	const QString wordDelimitersDblClick =
+	    getGlobalOption(QStringLiteral("WordDelimitersDblClick")).toString();
+	const bool smoothScrolling   = getGlobalOption(QStringLiteral("SmoothScrolling")).toInt() != 0;
+	const bool smootherScrolling = getGlobalOption(QStringLiteral("SmootherScrolling")).toInt() != 0;
+	const bool bleedBackground   = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
+
+	auto applyViewGlobalOptions = [&](WorldView *view)
+	{
+		if (!view)
+			return;
+		view->setAllTypingToCommandWindow(allTypingToCommandWindow);
+		view->setWordDelimiters(wordDelimiters, wordDelimitersDblClick);
+		view->setSmoothScrolling(smoothScrolling, smootherScrolling);
+		view->setBleedBackground(bleedBackground);
+	};
+
 	auto shouldActivateNewWorld = [this]() -> bool
 	{
 		if (!m_batchOpeningWorldList)
@@ -3453,6 +3472,7 @@ bool AppController::openWorldDocument(const QString &path)
 		auto *window = new WorldChildWindow(title);
 		window->setRuntime(runtime);
 		m_mainWindow->addMdiSubWindow(window, shouldActivateNewWorld());
+		applyViewGlobalOptions(window->view());
 		runtime->setPluginInstallDeferred(true);
 		runtime->applyFromDocument(doc);
 		runtime->setWorldFilePath(normalized);
@@ -3536,6 +3556,7 @@ bool AppController::openWorldDocument(const QString &path)
 	auto *window = new WorldChildWindow(title);
 	window->setRuntime(runtime);
 	m_mainWindow->addMdiSubWindow(window, shouldActivateNewWorld());
+	applyViewGlobalOptions(window->view());
 	restoreWorldWindowPlacement(window->windowTitle(), window);
 	if (getGlobalOption(QStringLiteral("OpenWorldsMaximised")).toInt() != 0)
 		window->showMaximized();
@@ -8982,9 +9003,14 @@ void AppController::onCommandTriggered(const QString &cmdName)
 					if (ok && value != 0)
 						saveXmlNumber(out, nl, "custom_colour", value);
 				}
-				num("colour_change_type");
-				boolean("enabled");
-				boolean("expand_variables");
+					num("colour_change_type");
+					if (const bool triggerEnabled =
+					        isEnabledFlag(tr->attributes.value(QStringLiteral("enabled")));
+					    triggerEnabled)
+						saveXmlBoolean(out, nl, "enabled", true);
+					else
+						out << "   enabled=\"n\"" << nl;
+					boolean("expand_variables");
 				text("group");
 				boolean("ignore_case");
 				boolean("inverse");
@@ -9069,8 +9095,12 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				saveXmlString(out, nl, "name", al->attributes.value(QStringLiteral("name")));
 				saveXmlString(out, nl, "script", al->attributes.value(QStringLiteral("script")));
 				saveXmlString(out, nl, "match", al->attributes.value(QStringLiteral("match")));
-				saveXmlBoolean(out, nl, "enabled",
-				               isEnabledFlag(al->attributes.value(QStringLiteral("enabled"))));
+					if (const bool aliasEnabled =
+					        isEnabledFlag(al->attributes.value(QStringLiteral("enabled")));
+					    aliasEnabled)
+						saveXmlBoolean(out, nl, "enabled", true);
+					else
+						out << "   enabled=\"n\"" << nl;
 				saveXmlBoolean(out, nl, "echo_alias",
 				               isEnabledFlag(al->attributes.value(QStringLiteral("echo_alias"))));
 				saveXmlBoolean(out, nl, "expand_variables",
@@ -9147,8 +9177,12 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				out << "  <timer ";
 				saveXmlString(out, nl, "name", tm->attributes.value(QStringLiteral("name")), true);
 				saveXmlString(out, nl, "script", tm->attributes.value(QStringLiteral("script")), true);
-				saveXmlBoolean(out, nl, "enabled",
-				               isEnabledFlag(tm->attributes.value(QStringLiteral("enabled"))), true);
+					if (const bool timerEnabled =
+					        isEnabledFlag(tm->attributes.value(QStringLiteral("enabled")));
+					    timerEnabled)
+						saveXmlBoolean(out, nl, "enabled", true, true);
+					else
+						out << "enabled=\"n\" ";
 				bool            ok   = false;
 				const long long hour = tm->attributes.value(QStringLiteral("hour")).toLongLong(&ok);
 				if (ok)
