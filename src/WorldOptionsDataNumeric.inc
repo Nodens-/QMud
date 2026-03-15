@@ -5,6 +5,8 @@
  * Role: Canonical numeric world-option definitions included into kWorldNumericOptions.
  */
 
+#ifdef QMUD_INCLUDE_WORLD_OPTIONS_DATA_NUMERIC_ROWS
+
 {"accept_chat_connections", false, 0, 0, 0}, {"alternative_inverse", false, 0, 0, 0},
     {"alt_arrow_recalls_partial", false, 0, 0, 0}, {"always_record_command_history", false, 0, 0, 0},
     {"arrows_change_history", true, 0, 0, 0}, {"arrow_keys_wrap", false, 0, 0, 0},
@@ -18,7 +20,7 @@
     {"chat_foreground_colour", RGB(255, 0, 0), 0, 0xFFFFFF, OPT_RGB_COLOUR},
     {"chat_background_colour", RGB(0, 0, 0), 0, 0xFFFFFF, OPT_RGB_COLOUR},
     {"chat_max_lines_per_message", 0, 0, 10000, 0}, {"chat_max_bytes_per_message", 0, 0, LONG_MAX, 0},
-    {"chat_port", DEFAULT_CHAT_PORT, 0, USHRT_MAX, 0}, {"confirm_before_replacing_typing", true, 0, 0, 0},
+    {"chat_port", DEFAULT_CHAT_PORT, 0, USHRT_MAX, 0}, {"confirm_before_replacing_typing", false, 0, 0, 0},
     {"confirm_on_paste", true, 0, 0, 0}, {"confirm_on_send", true, 0, 0, 0},
     {"connect_method", eNoAutoConnect, eNoAutoConnect, eConnectTypeMax - 1, 0},
     {"copy_selection_to_clipboard", false, 0, 0, 0}, {"convert_ga_to_newline", true, 0, 0, 0},
@@ -109,8 +111,10 @@
     {"use_default_input_font", false, 0, 0, 0}, {"use_default_macros", false, 0, 0, 0},
     {"use_default_output_font", false, 0, 0, 0}, {"use_default_timers", false, 0, 0, 0},
     {"use_default_triggers", false, 0, 0, 0}, {"use_mxp", eOnCommandMXP, 0, 3, OPT_USE_MXP},
-    {"utf_8", false, 0, 0, 0}, {"validate_incoming_chat_calls", false, 0, 0, 0},
+    {"utf_8", true, 0, 0, 0}, {"validate_incoming_chat_calls", false, 0, 0, 0},
     {"warn_if_scripting_inactive", true, 0, 0, 0}, {"wrap", true, 0, 0, 0},
     {"wrap_input", false, 0, 0, OPT_FIX_INPUT_WRAP},
     {"wrap_column", 80, 20, MAX_LINE_WIDTH, OPT_FIX_WRAP_COLUMN | OPT_FIX_INPUT_WRAP},
     {"write_world_name_to_log", true, 0, 0, 0},
+
+#endif // QMUD_INCLUDE_WORLD_OPTIONS_DATA_NUMERIC_ROWS

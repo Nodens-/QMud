@@ -42,6 +42,8 @@ class tst_WorldOptionDefaults : public QObject
 			QVERIFY(attrs.contains(QStringLiteral("wrap")));
 			QCOMPARE(attrs.value(QStringLiteral("wrap")), QStringLiteral("y"));
 			QCOMPARE(attrs.value(QStringLiteral("beep_sound")), QStringLiteral("sounds/QMud/beep.wav"));
+			QCOMPARE(attrs.value(QStringLiteral("confirm_before_replacing_typing")), QStringLiteral("n"));
+			QCOMPARE(attrs.value(QStringLiteral("utf_8")), QStringLiteral("y"));
 
 			QVERIFY(multilineAttrs.contains(QStringLiteral("connect_text")));
 			QVERIFY(multilineAttrs.contains(QStringLiteral("notes")));

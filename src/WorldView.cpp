@@ -2525,6 +2525,8 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 {
 	if (!m_outputDocument)
 		return false;
+	if (!spans.isEmpty())
+		return false;
 	if (m_lineSpacing > 0)
 		return false;
 	if (opacity < 0.999)
@@ -2546,64 +2548,8 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 		baseFormat.setBackground(defaultBack);
 	}
 
-	auto applySpanFormat = [&](const WorldRuntime::StyleSpan &span)
-	{
-		QTextCharFormat format = baseFormat;
-		QColor          fore   = span.fore;
-		QColor          back   = span.back;
-		if (span.inverse)
-		{
-			qSwap(fore, back);
-			if (m_alternativeInverse && span.bold)
-				qSwap(fore, back);
-		}
-		if (fore.isValid())
-			format.setForeground(fore);
-		if (back.isValid())
-			format.setBackground(back);
-		format.setFontWeight((span.bold && m_showBold) ? QFont::Bold : QFont::Normal);
-		format.setFontItalic(span.italic && m_showItalic);
-		format.setFontUnderline(span.underline && m_showUnderline);
-		format.setFontStrikeOut(span.strike);
-		const bool isAnchor = span.actionType == WorldRuntime::ActionHyperlink ||
-		                      span.actionType == WorldRuntime::ActionSend ||
-		                      span.actionType == WorldRuntime::ActionPrompt;
-		format.setAnchor(isAnchor);
-		if (isAnchor)
-		{
-			format.setAnchorHref(span.action);
-			if (!span.hint.isEmpty())
-				format.setToolTip(span.hint);
-		}
-		else
-		{
-			format.setAnchorHref(QString());
-			format.setToolTip(QString());
-			format.setAnchorNames(QStringList());
-		}
-		return format;
-	};
-
-	if (spans.isEmpty())
-	{
-		if (!text.isEmpty())
-			cursor.insertText(text, baseFormat);
-	}
-	else
-	{
-		int offset = 0;
-		for (const WorldRuntime::StyleSpan &span : spans)
-		{
-			const int     length = qMax(0, span.length);
-			const QString chunk  = text.mid(offset, length);
-			offset += length;
-			if (chunk.isEmpty())
-				continue;
-			cursor.insertText(chunk, applySpanFormat(span));
-		}
-		if (offset < text.size())
-			cursor.insertText(text.mid(offset), baseFormat);
-	}
+	if (!text.isEmpty())
+		cursor.insertText(text, baseFormat);
 
 	if (newLine)
 		cursor.insertBlock(cursor.blockFormat(), baseFormat);
@@ -3561,14 +3507,78 @@ void WorldView::applyRuntimeSettings()
 	    (useDefaultInputFontValue.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
 	     useDefaultInputFontValue == QStringLiteral("1") ||
 	     useDefaultInputFontValue.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
+	const AppController *app = AppController::instance();
+
+	auto effectiveDefaultOutputFont = [&]
+	{
+		QString outputDefaultFamily;
+		int     outputDefaultHeight  = 9;
+		int     outputDefaultCharset = 1;
+		if (app)
+		{
+			outputDefaultFamily =
+			    app->getGlobalOption(QStringLiteral("DefaultOutputFont")).toString().trimmed();
+			outputDefaultHeight =
+			    app->getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
+			outputDefaultCharset =
+			    app->getGlobalOption(QStringLiteral("DefaultOutputFontCharset")).toInt();
+		}
+
+		QFont font = qmudPreferredMonospaceFont(outputDefaultFamily, outputDefaultHeight);
+		const QString preferredFamily =
+		    outputDefaultFamily.isEmpty() ? font.family() : outputDefaultFamily;
+		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, outputDefaultCharset);
+		    !charsetFamily.isEmpty())
+		{
+			qmudApplyMonospaceFallback(font, charsetFamily);
+		}
+		font.setWeight(mapFontWeight(400));
+		font.setItalic(false);
+		return font;
+	};
+
+	auto effectiveDefaultInputFont = [&]
+	{
+		QString inputDefaultFamily;
+		int     inputDefaultHeight  = 9;
+		int     inputDefaultWeight  = 400;
+		int     inputDefaultItalic  = 0;
+		int     inputDefaultCharset = 1;
+		if (app)
+		{
+			inputDefaultFamily =
+			    app->getGlobalOption(QStringLiteral("DefaultInputFont")).toString().trimmed();
+			inputDefaultHeight =
+			    app->getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
+			inputDefaultWeight =
+			    app->getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
+			inputDefaultItalic =
+			    app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
+			inputDefaultCharset =
+			    app->getGlobalOption(QStringLiteral("DefaultInputFontCharset")).toInt();
+		}
+
+		QFont font = qmudPreferredMonospaceFont(inputDefaultFamily, inputDefaultHeight);
+		const QString preferredFamily = inputDefaultFamily.isEmpty() ? font.family() : inputDefaultFamily;
+		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, inputDefaultCharset);
+		    !charsetFamily.isEmpty())
+		{
+			qmudApplyMonospaceFallback(font, charsetFamily);
+		}
+		if (inputDefaultWeight > 0)
+			font.setWeight(mapFontWeight(inputDefaultWeight));
+		font.setItalic(inputDefaultItalic != 0);
+		return font;
+	};
 
 	if (m_output && useDefaultOutputFont)
 	{
-		m_output->setFont(m_defaultOutputFont);
+		const QFont outputFont = effectiveDefaultOutputFont();
+		m_output->setFont(outputFont);
 		if (m_liveOutput)
-			m_liveOutput->setFont(m_defaultOutputFont);
+			m_liveOutput->setFont(outputFont);
 		if (m_outputDocument)
-			m_outputDocument->setDefaultFont(m_defaultOutputFont);
+			m_outputDocument->setDefaultFont(outputFont);
 	}
 	else if (m_output && (!outputFontName.isEmpty() || outputHeight > 0 || outputWeight > 0))
 	{
@@ -3592,7 +3602,7 @@ void WorldView::applyRuntimeSettings()
 
 	if (m_input && useDefaultInputFont)
 	{
-		m_input->setFont(m_defaultInputFont);
+		m_input->setFont(effectiveDefaultInputFont());
 		updateInputHeight();
 	}
 	else if (m_input && (!inputFontName.isEmpty() || inputHeight > 0 || inputWeight > 0 || inputItalic != 0))

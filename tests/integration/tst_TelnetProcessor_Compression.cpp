@@ -85,6 +85,22 @@ class tst_TelnetProcessor_Compression : public QObject
 			QVERIFY(!processor.isCompressing());
 			QCOMPARE(processor.mccpType(), 0);
 		}
+
+		void postTeardownBytesInSameReadAreProcessed()
+		{
+			TelnetProcessor processor;
+			const QByteArray compressed = makeQtZlibPayload(QByteArrayLiteral("4. This is line four\n"));
+			QVERIFY(!compressed.isEmpty());
+
+			QByteArray packet = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
+			packet.append(compressed);
+			packet.append(QByteArrayLiteral("5. This is line five\n"));
+
+			const QByteArray output = processor.processBytes(packet);
+			QCOMPARE(output, QByteArrayLiteral("4. This is line four\n5. This is line five\n"));
+			QVERIFY(!processor.isCompressing());
+			QCOMPARE(processor.mccpType(), 0);
+		}
 	// NOLINTEND(readability-convert-member-functions-to-static)
 };
 

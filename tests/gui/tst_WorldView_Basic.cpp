@@ -10,11 +10,27 @@
 #include "AppController.h"
 #include "WorldView.h"
 
+#include <QPlainTextEdit>
 #include <QSignalSpy>
 #include <QtTest/QTest>
 
 namespace
 {
+	QMap<QString, QString> g_worldAttrs;
+	QMap<QString, QString> g_worldMultilineAttrs;
+	QMap<QString, QVariant> g_globalOptions;
+	bool g_useFakeAppController{false};
+
+	AppController *fakeAppControllerPointer()
+	{
+		return reinterpret_cast<AppController *>(static_cast<quintptr>(1));
+	}
+
+	WorldRuntime *fakeRuntimePointer()
+	{
+		return reinterpret_cast<WorldRuntime *>(static_cast<quintptr>(1));
+	}
+
 	const QMap<QString, QString> &emptyAttributes()
 	{
 		static const QMap<QString, QString> attrs;
@@ -38,17 +54,25 @@ namespace
 		static const QList<WorldRuntime::Keypad> entries;
 		return entries;
 	}
+
+	void resetTestState()
+	{
+		g_worldAttrs.clear();
+		g_worldMultilineAttrs.clear();
+		g_globalOptions.clear();
+		g_useFakeAppController = false;
+	}
 } // namespace
 
 // NOLINTBEGIN(readability-convert-member-functions-to-static)
 AppController *AppController::instance()
 {
-	return nullptr;
+	return g_useFakeAppController ? fakeAppControllerPointer() : nullptr;
 }
 
-QVariant AppController::getGlobalOption(const QString &) const
+QVariant AppController::getGlobalOption(const QString &name) const
 {
-	return {};
+	return g_globalOptions.value(name);
 }
 
 void AppController::onCommandTriggered(const QString &) {}
@@ -63,17 +87,47 @@ QString AcceleratorUtils::acceleratorToString(quint32, quint16)
 	return QString();
 }
 
+void qmudApplyMonospaceFallback(QFont &font, const QString &preferredFamily)
+{
+	if (!preferredFamily.isEmpty())
+		font.setFamily(preferredFamily);
+}
+
+QFont qmudPreferredMonospaceFont(const QString &preferredFamily, const int pointSize)
+{
+	QFont font;
+	if (!preferredFamily.isEmpty())
+		font.setFamily(preferredFamily);
+	if (pointSize > 0)
+		font.setPointSize(pointSize);
+	return font;
+}
+
+QString qmudFamilyForCharset(const QString &preferredFamily, int)
+{
+	return preferredFamily;
+}
+
 const QMap<QString, QString> &WorldRuntime::worldAttributes() const
 {
-	return emptyAttributes();
+	return g_worldAttrs.isEmpty() ? emptyAttributes() : g_worldAttrs;
 }
 
 const QMap<QString, QString> &WorldRuntime::worldMultilineAttributes() const
 {
-	return emptyAttributes();
+	return g_worldMultilineAttrs.isEmpty() ? emptyAttributes() : g_worldMultilineAttrs;
 }
 
 int WorldRuntime::outputFontHeight() const
+{
+	return 0;
+}
+
+void WorldRuntime::setOutputFontMetrics(int, int) {}
+
+void WorldRuntime::setInputFontMetrics(int, int) {}
+
+long WorldRuntime::backgroundColour() const
 {
 	return 0;
 }
@@ -248,6 +302,51 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(freezeSpy.count(), 2);
 			QVERIFY(!view.isFrozen());
 			QVERIFY(view.outputLines().contains(QStringLiteral("frozen-line")));
+		}
+
+		void defaultFontsUseGlobalPreferences()
+		{
+			resetTestState();
+			g_useFakeAppController = true;
+
+			g_worldAttrs.insert(QStringLiteral("use_default_output_font"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("output_font_name"), QStringLiteral("WorldSpecificOutput"));
+			g_worldAttrs.insert(QStringLiteral("output_font_height"), QStringLiteral("27"));
+			g_worldAttrs.insert(QStringLiteral("output_font_weight"), QStringLiteral("700"));
+			g_worldAttrs.insert(QStringLiteral("output_font_charset"), QStringLiteral("1"));
+
+			g_worldAttrs.insert(QStringLiteral("use_default_input_font"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("input_font_name"), QStringLiteral("WorldSpecificInput"));
+			g_worldAttrs.insert(QStringLiteral("input_font_height"), QStringLiteral("29"));
+			g_worldAttrs.insert(QStringLiteral("input_font_weight"), QStringLiteral("300"));
+			g_worldAttrs.insert(QStringLiteral("input_font_italic"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("input_font_charset"), QStringLiteral("1"));
+
+			g_globalOptions.insert(QStringLiteral("DefaultOutputFont"), QStringLiteral("DejaVu Sans Mono"));
+			g_globalOptions.insert(QStringLiteral("DefaultOutputFontHeight"), 13);
+			g_globalOptions.insert(QStringLiteral("DefaultOutputFontCharset"), 1);
+			g_globalOptions.insert(QStringLiteral("DefaultInputFont"), QStringLiteral("DejaVu Sans Mono"));
+			g_globalOptions.insert(QStringLiteral("DefaultInputFontHeight"), 15);
+			g_globalOptions.insert(QStringLiteral("DefaultInputFontWeight"), 700);
+			g_globalOptions.insert(QStringLiteral("DefaultInputFontItalic"), 1);
+			g_globalOptions.insert(QStringLiteral("DefaultInputFontCharset"), 1);
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+
+			const QFont outputFont = view.outputFont();
+			QCOMPARE(outputFont.pointSize(), 13);
+			QCOMPARE(outputFont.weight(), QFont::Normal);
+			QVERIFY(!outputFont.italic());
+
+			const QList<QPlainTextEdit *> inputEdits = view.findChildren<QPlainTextEdit *>();
+			QVERIFY(!inputEdits.isEmpty());
+			const QFont inputFont = inputEdits.first()->font();
+			QCOMPARE(inputFont.pointSize(), 15);
+			QCOMPARE(inputFont.weight(), QFont::Bold);
+			QVERIFY(inputFont.italic());
+
+			resetTestState();
 		}
 	// NOLINTEND(readability-convert-member-functions-to-static)
 };
