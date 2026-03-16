@@ -4058,7 +4058,7 @@ class WorldRuntime : public QObject
 		int                                   m_scriptCount{0};
 		QByteArray                            m_pendingAnsiSequence;
 		AnsiRenderState                       m_ansiRenderState;
-		QStringDecoder                        m_streamUtf8Decoder{QStringConverter::Utf8};
+		QByteArray                            m_streamUtf8Carry;
 		QStringDecoder                        m_streamLocalDecoder{QStringConverter::System};
 		bool                                  m_streamUtf8DecoderEnabled{false};
 		MxpStyleState                         m_mxpRenderStyle;
