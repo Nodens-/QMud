@@ -379,6 +379,8 @@ class WorldRuntime : public QObject
 				bool    strike{false};
 				QString fore;
 				QString back;
+				int     actionType{ActionNone};
+				QString action;
 		};
 		/**
 		 * @brief Incremental MXP style state carried across packet boundaries.

@@ -4631,6 +4631,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 				span.back      = current.back.isEmpty() ? QColor() : QColor(current.back);
 				span.bold      = current.bold;
 				span.italic    = current.italic;
+				span.actionType = current.actionType;
+				span.action    = current.action;
 				span.blink     = current.blink;
 				span.underline = current.underline;
 				span.inverse   = current.inverse;
@@ -4642,7 +4644,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 					    lastSpan.bold == span.bold && lastSpan.italic == span.italic &&
 					    lastSpan.blink == span.blink && lastSpan.underline == span.underline &&
 					    lastSpan.inverse == span.inverse && lastSpan.strike == span.strike &&
-					    lastSpan.changed == span.changed)
+					    lastSpan.changed == span.changed && lastSpan.action == span.action &&
+					    lastSpan.actionType == span.actionType)
 						lastSpan.length += span.length;
 					else
 						lineSpans.push_back(span);
@@ -4811,7 +4814,32 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 
 		auto applyOsc = [&]([[maybe_unused]] const QByteArray params)
 		{
-			/* nothing as yet */
+			if (params.startsWith("8;;")) // OSC8 hyperlinks
+			{
+				QByteArray newUrl = params.sliced(3);
+				if (newUrl.isEmpty())
+				{
+					current.actionType = ActionNone;
+					current.action = "";
+				}
+				else if (newUrl.startsWith("send:"))
+				// common MUD extensions for send: and prompt: schemas
+				{
+					current.actionType = ActionSend;
+					current.action = newUrl.sliced(5);
+				}
+				else if (newUrl.startsWith("prompt:"))
+				{
+					current.actionType = ActionPrompt;
+					current.action = newUrl.sliced(7);
+				}
+				else
+				{
+					current.actionType = ActionHyperlink;
+					current.action = newUrl;
+				}
+				return;
+			}
 		};
 
 		QByteArray plainBytes;
