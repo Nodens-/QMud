@@ -4178,6 +4178,7 @@ double WorldRuntime::scriptTimeSeconds() const
 
 void WorldRuntime::resetAnsiRenderState()
 {
+	m_ansiParserState = AnsiParserState::Normal;
 	m_pendingAnsiSequence.clear();
 	m_partialLineText.clear();
 	m_partialLineSpans.clear();
@@ -4808,81 +4809,107 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			}
 		};
 
+		auto applyOsc = [&]([[maybe_unused]] const QByteArray params)
+		{
+			/* nothing as yet */
+		};
+
 		QByteArray plainBytes;
 		QByteArray bytes = processed;
-		if (!m_pendingAnsiSequence.isEmpty())
-		{
-			bytes.prepend(m_pendingAnsiSequence);
-			m_pendingAnsiSequence.clear();
-		}
 		plainBytes.reserve(bytes.size());
+
 		for (int i = 0; i < bytes.size(); ++i)
 		{
 			const char ch = bytes.at(i);
-			if (ch == '\x1b')
+
+			switch (m_ansiParserState)
 			{
-				if (i + 1 >= bytes.size())
-				{
-					m_pendingAnsiSequence = bytes.mid(i);
+				case AnsiParserState::Normal:
+					if (ch == '\x1b')
+						m_ansiParserState = AnsiParserState::ESC;
+					else
+						plainBytes.append(ch);
 					break;
-				}
-				if (bytes.at(i + 1) != '[')
-					continue;
-				appendPlain(plainBytes);
-				plainBytes.clear();
-				const int seqStart = i;
-				i += 2;
-				QByteArray paramBytes;
-				bool       aborted = false;
-				while (i < bytes.size())
-				{
-					const auto byte = static_cast<unsigned char>(bytes.at(i));
-					if (byte >= 0x40 && byte <= 0x7E)
-						break;
-					if (byte >= 0x20 && byte <= 0x3F)
+
+				case AnsiParserState::ESC:
+					appendPlain(plainBytes);
+					plainBytes.clear();
+					if (ch == '[')
 					{
-						paramBytes.append(static_cast<char>(byte));
-						++i;
-						continue;
+						m_ansiParserState = AnsiParserState::CSI;
+						m_pendingAnsiSequence.clear();
+					} else if (ch == ']')
+					{
+						m_ansiParserState = AnsiParserState::OSC;
+						m_pendingAnsiSequence.clear();
+					} else
+					{
+						m_ansiParserState = AnsiParserState::Normal;
 					}
-					aborted = true;
 					break;
-				}
-				if (aborted)
-				{
-					i -= 1;
-					continue;
-				}
-				if (i >= bytes.size())
-				{
-					m_pendingAnsiSequence = bytes.mid(seqStart);
-					break;
-				}
-				const char finalByte = bytes.at(i);
-				if (finalByte == 'm')
-				{
-					paramBytes.replace(':', ';');
-					const QList<QByteArray> parts = paramBytes.split(';');
-					QVector<int>            codes;
-					for (const QByteArray &part : parts)
+
+				case AnsiParserState::OSC:
+					if (ch == '\a')
 					{
-						if (part.isEmpty())
+						// BEL terminates
+						m_ansiParserState = AnsiParserState::Normal;
+						applyOsc(m_pendingAnsiSequence);
+					}
+					else if (ch == '\x1b') /* so does ESC \ */
+					{
+						m_ansiParserState = AnsiParserState::OSC_ESC;
+					}
+					else
+					{
+						m_pendingAnsiSequence.append(ch);
+					}
+					break;
+
+				case AnsiParserState::OSC_ESC:
+					applyOsc(m_pendingAnsiSequence);
+					m_ansiParserState = AnsiParserState::Normal;
+					break;
+
+				case AnsiParserState::CSI:
+					if (ch >= 0x40 && ch <= 0x7e) // "final byte"
+					{
+						if (ch == 'm') // SGR - select graphics rendition
 						{
-							codes.push_back(0);
-							continue;
+							QByteArray paramBytes = m_pendingAnsiSequence;
+							paramBytes.replace(':', ';');
+							const QList<QByteArray> parts = paramBytes.split(';');
+							QVector<int>            codes;
+							for (const QByteArray &part : parts)
+							{
+								if (part.isEmpty())
+								{
+									codes.push_back(0);
+									continue;
+								}
+								bool      ok    = false;
+								const int value = part.toInt(&ok);
+								if (ok)
+									codes.push_back(value);
+							}
+							applySgr(codes);
 						}
-						bool      ok    = false;
-						const int value = part.toInt(&ok);
-						if (ok)
-							codes.push_back(value);
+						m_pendingAnsiSequence.clear();
+						m_ansiParserState = AnsiParserState::Normal;
 					}
-					applySgr(codes);
-				}
-				continue;
+					else if (ch >= 0x20 && ch <= 0x3f) // parameter/intermediate bytes
+					{
+						m_pendingAnsiSequence.append(ch);
+					}
+					else
+					{
+						m_ansiParserState = AnsiParserState::Normal;
+					}
+					break;
 			}
-			plainBytes.append(ch);
 		}
+
 		appendPlain(plainBytes);
+		plainBytes.clear();
 
 		m_ansiRenderState  = current;
 		m_partialLineText  = lineText;

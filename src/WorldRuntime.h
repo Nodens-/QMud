@@ -4056,6 +4056,13 @@ class WorldRuntime : public QObject
 		int                                   m_pluginCount{0};
 		int                                   m_includeCount{0};
 		int                                   m_scriptCount{0};
+		enum class AnsiParserState {
+			Normal,
+			ESC,
+			CSI,
+			OSC,
+			OSC_ESC
+		}                                     m_ansiParserState;
 		QByteArray                            m_pendingAnsiSequence;
 		AnsiRenderState                       m_ansiRenderState;
 		QByteArray                            m_streamUtf8Carry;
