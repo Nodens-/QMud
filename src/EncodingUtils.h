@@ -9,6 +9,10 @@
 #ifndef QMUD_ENCODINGUTILS_H
 #define QMUD_ENCODINGUTILS_H
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QByteArray>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QByteArrayView>
 #include <QString>
 
 /**
@@ -25,5 +29,13 @@ QString qmudEncodeBase64Text(const QByteArray &plaintext, bool multiLine);
  * @return Base64-encoded text.
  */
 QString qmudEncodeBase64Text(const char *plaintext, bool multiLine);
+/**
+ * @brief Decodes UTF-8 stream bytes and falls back to Windows-1252 for invalid bytes.
+ * @param bytes Incoming stream bytes.
+ * @param carry Incomplete trailing UTF-8 bytes carried across calls.
+ * @param hadInvalidBytes Optional output flag set when invalid UTF-8 bytes were recovered.
+ * @return Decoded Unicode text.
+ */
+QString qmudDecodeUtf8WithWindows1252Fallback(QByteArrayView bytes, QByteArray &carry, bool *hadInvalidBytes);
 
 #endif // QMUD_ENCODINGUTILS_H

@@ -4182,7 +4182,7 @@ void WorldRuntime::resetAnsiRenderState()
 	m_partialLineText.clear();
 	m_partialLineSpans.clear();
 	m_ansiRenderState = AnsiRenderState{};
-	m_streamUtf8Decoder.resetState();
+	m_streamUtf8Carry.clear();
 	m_streamLocalDecoder.resetState();
 	m_streamUtf8DecoderEnabled = false;
 	resetMxpRenderState();
@@ -4382,15 +4382,24 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 	if (useUtf8 != m_streamUtf8DecoderEnabled)
 	{
 		m_streamUtf8DecoderEnabled = useUtf8;
-		m_streamUtf8Decoder.resetState();
+		m_streamUtf8Carry.clear();
 		m_streamLocalDecoder.resetState();
 	}
 	auto decodeIncomingDisplayBytes = [&](const QByteArrayView bytes) -> QString
 	{
 		if (bytes.isEmpty())
 			return {};
-		const QString decoded = useUtf8 ? m_streamUtf8Decoder.decode(bytes) : m_streamLocalDecoder.decode(bytes);
-		if ((useUtf8 && m_streamUtf8Decoder.hasError()) || (!useUtf8 && m_streamLocalDecoder.hasError()))
+		if (useUtf8)
+		{
+			bool          hadInvalidBytes = false;
+			const QString decoded =
+			    qmudDecodeUtf8WithWindows1252Fallback(bytes, m_streamUtf8Carry, &hadInvalidBytes);
+			if (hadInvalidBytes)
+				++m_utf8ErrorCount;
+			return decoded;
+		}
+		const QString decoded = m_streamLocalDecoder.decode(bytes);
+		if (m_streamLocalDecoder.hasError())
 			++m_utf8ErrorCount;
 		return decoded;
 	};
