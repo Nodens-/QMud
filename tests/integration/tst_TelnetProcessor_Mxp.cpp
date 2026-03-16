@@ -188,6 +188,34 @@ class tst_TelnetProcessor_Mxp : public QObject
 			QCOMPARE(output, QByteArrayLiteral("&lt;\n&lt;\n&lt;\n"));
 			QVERIFY(processor.takeMxpEvents().isEmpty());
 		}
+
+		void mixedAnsiAndMxpKeepsAnsiDataAndTracksTagOffsets()
+		{
+			TelnetProcessor processor;
+			processor.setUseMxp(0); // eOnCommandMXP
+			processor.processBytes(bytes({IAC, SB, TELOPT_MXP, IAC, SE}));
+			QVERIFY(processor.isMxpEnabled());
+
+			const QByteArray prefix = QByteArrayLiteral("\x1b[0;31m[minimal\x1b[0m\n");
+			QByteArray       input  = prefix;
+			input.append(static_cast<char>(ESC));
+			input.append('[');
+			input.append('1');
+			input.append('z');
+			input.append(QByteArrayLiteral("<SEND href='whois Testuser'>Testuser</SEND>"));
+
+			const QByteArray output = processor.processBytes(input);
+			QCOMPARE(output, prefix + QByteArrayLiteral("Testuser"));
+
+			const QList<TelnetProcessor::MxpEvent> events = processor.takeMxpEvents();
+			QCOMPARE(events.size(), 2);
+			QCOMPARE(events.at(0).type, TelnetProcessor::MxpEvent::StartTag);
+			QCOMPARE(events.at(1).type, TelnetProcessor::MxpEvent::EndTag);
+			QCOMPARE(events.at(0).name.toLower(), QByteArrayLiteral("send"));
+			QCOMPARE(events.at(1).name.toLower(), QByteArrayLiteral("send"));
+			QCOMPARE(events.at(0).offset, static_cast<int>(prefix.size()));
+			QCOMPARE(events.at(1).offset, static_cast<int>(prefix.size() + QByteArrayLiteral("Testuser").size()));
+		}
 	// NOLINTEND(readability-convert-member-functions-to-static)
 };
 

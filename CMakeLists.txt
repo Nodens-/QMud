@@ -183,6 +183,7 @@ set(QMUD_SOURCES
         WorldCommandProcessor.cpp
         SpeedwalkParser.cpp
         TimerSchedulingUtils.cpp
+        AnsiSgrParseUtils.cpp
         WorldView.cpp
         WorldSocket.cpp
         TelnetProcessor.cpp
@@ -253,6 +254,7 @@ set(QMUD_HEADERS
         WorldCommandProcessor.h
         SpeedwalkParser.h
         TimerSchedulingUtils.h
+        AnsiSgrParseUtils.h
         WorldView.h
         CommandIds.h
         WorldSocketService.h
