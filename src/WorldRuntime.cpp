@@ -9,6 +9,7 @@
 
 #include "WorldRuntime.h"
 #include "AppController.h"
+#include "AnsiSgrParseUtils.h"
 #include "Blending.h"
 #include "ColorUtils.h"
 #include "CommandMappingTypes.h"
@@ -5253,85 +5254,145 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		{
 			if (bytes.isEmpty())
 				return;
-			QString segment = decodeIncomingDisplayBytes(bytes);
-			segment.replace('\r', QString());
-			QString rawSegment = segment;
-			if (rawSegment.isEmpty())
-				return;
-
-			const QColor fore          = current.fore.isEmpty() ? QColor() : QColor(current.fore);
-			const QColor back          = current.back.isEmpty() ? QColor() : QColor(current.back);
-			const int    segmentLength = safeQSizeToInt(rawSegment.size());
-			auto         appendRun     = [&](int start, int length)
+			auto appendDecodedSegment = [&](const QString &decoded, const QMudStyledTextState &segmentState)
 			{
-				if (length <= 0)
+				QString rawSegment = decoded;
+				rawSegment.replace('\r', QString());
+				if (rawSegment.isEmpty())
 					return;
-				lineText += rawSegment.mid(start, length);
-				StyleSpan span;
-				span.length      = length;
-				span.fore        = fore;
-				span.back        = back;
-				span.bold        = current.bold;
-				span.italic      = current.italic;
-				span.blink       = current.blink;
-				span.underline   = current.underline;
-				span.inverse     = current.inverse;
-				span.actionType  = current.actionType;
-				span.action      = current.action;
-				span.hint        = current.hint;
-				span.variable    = current.variable;
-				span.startTag    = current.startTag;
-				current.startTag = false;
-				if (!lineSpans.isEmpty())
+
+				const int segmentLength = safeQSizeToInt(rawSegment.size());
+				bool      startTag      = segmentState.startTag;
+				auto      appendRun     = [&](int start, int length)
 				{
-					StyleSpan &lastSpan = lineSpans.last();
-					if (lastSpan.fore == span.fore && lastSpan.back == span.back &&
-					    lastSpan.bold == span.bold && lastSpan.italic == span.italic &&
-					    lastSpan.blink == span.blink && lastSpan.underline == span.underline &&
-					    lastSpan.inverse == span.inverse && lastSpan.actionType == span.actionType &&
-					    lastSpan.action == span.action && lastSpan.hint == span.hint &&
-					    lastSpan.variable == span.variable && lastSpan.startTag == span.startTag)
+					if (length <= 0)
+						return;
+					lineText += rawSegment.mid(start, length);
+					StyleSpan span;
+					span.length      = length;
+					span.fore        = segmentState.fore.isEmpty() ? QColor() : QColor(segmentState.fore);
+					span.back        = segmentState.back.isEmpty() ? QColor() : QColor(segmentState.back);
+					span.bold        = segmentState.bold;
+					span.italic      = segmentState.italic;
+					span.blink       = segmentState.blink;
+					span.underline   = segmentState.underline;
+					span.inverse     = segmentState.inverse;
+					span.actionType  = segmentState.actionType;
+					span.action      = segmentState.action;
+					span.hint        = segmentState.hint;
+					span.variable    = segmentState.variable;
+					span.startTag    = startTag;
+					startTag         = false;
+					if (!lineSpans.isEmpty())
 					{
-						lastSpan.length += span.length;
+						StyleSpan &lastSpan = lineSpans.last();
+						if (lastSpan.fore == span.fore && lastSpan.back == span.back &&
+						    lastSpan.bold == span.bold && lastSpan.italic == span.italic &&
+						    lastSpan.blink == span.blink && lastSpan.underline == span.underline &&
+						    lastSpan.inverse == span.inverse && lastSpan.actionType == span.actionType &&
+						    lastSpan.action == span.action && lastSpan.hint == span.hint &&
+						    lastSpan.variable == span.variable && lastSpan.startTag == span.startTag)
+						{
+							lastSpan.length += span.length;
+						}
+						else
+							lineSpans.push_back(span);
 					}
 					else
 						lineSpans.push_back(span);
-				}
-				else
-					lineSpans.push_back(span);
-			};
-			int runStart = -1;
-			for (int i = 0; i < segmentLength; ++i)
-			{
-				const QChar ch = rawSegment.at(i);
-				if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r'))
+				};
+				int runStart = -1;
+				for (int i = 0; i < segmentLength; ++i)
 				{
-					if (runStart >= 0)
+					const QChar ch = rawSegment.at(i);
+					if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r'))
 					{
-						appendRun(runStart, i - runStart);
-						runStart = -1;
-					}
-
-					if (ch == QLatin1Char('\r'))
-					{
-						const bool nextIsNewline =
-						    (i + 1 < segmentLength && rawSegment.at(i + 1) == QLatin1Char('\n'));
-						if (carriageReturnClears && !nextIsNewline)
+						if (runStart >= 0)
 						{
-							lineText.clear();
-							lineSpans.clear();
+							appendRun(runStart, i - runStart);
+							runStart = -1;
 						}
+
+						if (ch == QLatin1Char('\r'))
+						{
+							const bool nextIsNewline =
+							    (i + 1 < segmentLength && rawSegment.at(i + 1) == QLatin1Char('\n'));
+							if (carriageReturnClears && !nextIsNewline)
+							{
+								lineText.clear();
+								lineSpans.clear();
+							}
+							continue;
+						}
+
+						emitCompletedLine(lineText, lineSpans);
 						continue;
 					}
-
-					emitCompletedLine(lineText, lineSpans);
-					continue;
+					if (runStart < 0)
+						runStart = i;
 				}
-				if (runStart < 0)
-					runStart = i;
-			}
-			if (runStart >= 0)
-				appendRun(runStart, segmentLength - runStart);
+				if (runStart >= 0)
+					appendRun(runStart, segmentLength - runStart);
+			};
+
+			auto colorFromIndex = [](int idx) -> QString
+			{
+				if (idx < 0 || idx >= 256)
+					return {};
+				const AppController *app = AppController::instance();
+				const QMudColorRef   ref = app ? app->xtermColorAt(idx) : qmudRgb(0, 0, 0);
+				return QColor(qmudRed(ref), qmudGreen(ref), qmudBlue(ref)).name();
+			};
+			auto normalAnsiColorFromIndex = [&](const int idx) -> QString
+			{
+				if (idx < 0 || idx >= normalAnsi.size())
+					return {};
+				return normalAnsi.at(idx).name();
+			};
+			auto boldAnsiColorFromIndex = [&](const int idx) -> QString
+			{
+				if (idx < 0 || idx >= boldAnsi.size())
+					return {};
+				return boldAnsi.at(idx).name();
+			};
+
+			QMudStyledTextState ansiState;
+			ansiState.bold       = current.bold;
+			ansiState.underline  = current.underline;
+			ansiState.italic     = current.italic;
+			ansiState.blink      = current.blink;
+			ansiState.strike     = current.strike;
+			ansiState.inverse    = current.inverse;
+			ansiState.fore       = current.fore;
+			ansiState.back       = current.back;
+			ansiState.actionType = current.actionType;
+			ansiState.action     = current.action;
+			ansiState.hint       = current.hint;
+			ansiState.variable   = current.variable;
+			ansiState.startTag   = current.startTag;
+			ansiState.monospace  = current.monospace;
+
+			const QVector<QMudStyledChunk> chunks =
+			    qmudParseAnsiSgrChunks(bytes, m_pendingAnsiSequence, defaultFore, defaultBack,
+			                           normalAnsiColorFromIndex, boldAnsiColorFromIndex, colorFromIndex,
+			                           decodeIncomingDisplayBytes, ansiState);
+			for (const QMudStyledChunk &chunk : chunks)
+				appendDecodedSegment(chunk.text, chunk.state);
+
+			current.bold       = ansiState.bold;
+			current.underline  = ansiState.underline;
+			current.italic     = ansiState.italic;
+			current.blink      = ansiState.blink;
+			current.strike     = ansiState.strike;
+			current.inverse    = ansiState.inverse;
+			current.fore       = ansiState.fore;
+			current.back       = ansiState.back;
+			current.actionType = ansiState.actionType;
+			current.action     = ansiState.action;
+			current.hint       = ansiState.hint;
+			current.variable   = ansiState.variable;
+			current.startTag   = ansiState.startTag;
+			current.monospace  = ansiState.monospace;
 		};
 
 		auto isAtomicTag = [](const QByteArray &tag)

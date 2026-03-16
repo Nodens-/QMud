@@ -91,6 +91,13 @@ qmud_add_qtest(tst_EncodingUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_AnsiSgrParseUtils
+        SOURCES
+        unit/tst_AnsiSgrParseUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/AnsiSgrParseUtils.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_ColorUtils
         SOURCES
         unit/tst_ColorUtils.cpp
@@ -366,6 +373,8 @@ if (QMUD_ENABLE_GUI_TESTS)
             gui/tst_WorldView_Basic.cpp
             "${CMAKE_SOURCE_DIR}/src/WorldView.cpp"
             "${CMAKE_SOURCE_DIR}/src/WorldView.h"
+            "${CMAKE_SOURCE_DIR}/src/MainWindowHostResolver.cpp"
+            "${CMAKE_SOURCE_DIR}/src/dialogs/FindDialog.cpp"
             LIBRARIES
             Qt6::Sql
             LABELS

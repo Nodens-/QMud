@@ -1668,8 +1668,15 @@ bool WorldView::doOutputFind(bool again)
 		m_outputFind.reset(new OutputFindState());
 
 	OutputFindState                        &state      = *m_outputFind;
-	const QVector<WorldRuntime::LineEntry> &lines      = m_runtime->lines();
-	const int                               totalLines = sizeToInt(lines.size());
+	QTextDocument                         *doc        = m_output ? m_output->document() : nullptr;
+	if (!doc)
+		return false;
+	const int totalLines = doc->blockCount();
+	auto      lineTextAt = [doc](const int zeroBasedLine)
+	{
+		const QTextBlock block = doc->findBlockByNumber(zeroBasedLine);
+		return block.isValid() ? block.text() : QString();
+	};
 
 	state.again = again;
 
@@ -1788,7 +1795,7 @@ bool WorldView::doOutputFind(bool again)
 			return false;
 		}
 
-		QString line = lines.at(state.currentLine).text;
+			QString line = lineTextAt(state.currentLine);
 		state.matchesOnLine.clear();
 		++milestone;
 
@@ -1821,23 +1828,25 @@ bool WorldView::doOutputFind(bool again)
 					break;
 			}
 		}
-		else
-		{
-			Qt::CaseSensitivity sensitivity = state.matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
-			const QString      &needle      = findText;
-			int                 start       = 0;
-			while (true)
+			else
 			{
-				const int index = sizeToInt(line.indexOf(needle, start, sensitivity));
-				if (index < 0)
-					break;
-				const int end = index + sizeToInt(needle.size());
-				state.matchesOnLine.push_back(qMakePair(index, end));
-				start = end;
-				if (start >= sizeToInt(line.size()))
-					break;
+				Qt::CaseSensitivity sensitivity = state.matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
+				const QString      &needle      = findText;
+				const int           lineSize    = sizeToInt(line.size());
+				int                 start       = 0;
+				while (true)
+				{
+					const qsizetype index = line.indexOf(needle, start, sensitivity);
+					if (index < 0)
+						break;
+					const int indexInt = sizeToInt(index);
+					const int end      = indexInt + sizeToInt(needle.size());
+					state.matchesOnLine.push_back(qMakePair(indexInt, end));
+					start = qMax(end, start + 1);
+					if (start >= lineSize)
+						break;
+				}
 			}
-		}
 
 		if (state.matchesOnLine.isEmpty())
 			state.currentLine += state.forwards ? 1 : -1;

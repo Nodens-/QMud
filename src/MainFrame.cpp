@@ -471,7 +471,7 @@ void MainWindow::buildMenus()
 	displayMenu->addSeparator();
 	addActionToMenu(displayMenu, QStringLiteral("Find"), QStringLiteral("&Find...\tCtrl+F"),
 	                QKeySequence::Find);
-	addActionToMenu(displayMenu, QStringLiteral("FindAgainForwards"),
+	addActionToMenu(displayMenu, QStringLiteral("FindAgain"),
 	                QStringLiteral("Find Again\tShift+Ctrl+F"), QKeySequence(QStringLiteral("Shift+Ctrl+F")));
 	addActionToMenu(displayMenu, QStringLiteral("RecallText"), QStringLiteral("&Recall Text...\tCtrl+U"),
 	                QKeySequence(QStringLiteral("Ctrl+U")));
@@ -851,7 +851,7 @@ void MainWindow::buildToolbars()
 	    {QStringLiteral("AutoSay"),              QStringLiteral("Auto Say (Shift+Ctrl+A)")           },
 	    {QStringLiteral("FreezeOutput"),         QStringLiteral("Pause (Ctrl+Space)")                },
 	    {QStringLiteral("Find"),                 QStringLiteral("Find (Ctrl+F)")                     },
-	    {QStringLiteral("FindAgainForwards"),    QStringLiteral("Find again forwards (Shift+Ctrl+F)")},
+	    {QStringLiteral("FindAgain"),            QStringLiteral("Find again (Shift+Ctrl+F)")         },
 	    {QStringLiteral("FindAgainBackwards"),   QStringLiteral("Find again backwards")              },
 	    {QStringLiteral("World1"),               QStringLiteral("Activates world #1 (Ctrl+1)")       },
 	    {QStringLiteral("World2"),               QStringLiteral("Activates world #2 (Ctrl+2)")       },
@@ -1938,7 +1938,7 @@ void MainWindow::updateEditActions()
 		a->setEnabled(canCopyHtml);
 	if (QAction *a = actionForCommand(QStringLiteral("Find")))
 		a->setEnabled(view != nullptr);
-	if (QAction *a = actionForCommand(QStringLiteral("FindAgainForwards")))
+	if (QAction *a = actionForCommand(QStringLiteral("FindAgain")))
 		a->setEnabled(canFindAgain);
 	if (QAction *a = actionForCommand(QStringLiteral("FindAgainBackwards")))
 		a->setEnabled(canFindAgain);

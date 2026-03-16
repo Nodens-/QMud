@@ -10,18 +10,32 @@
 #include "AppController.h"
 #include "WorldView.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QApplication>
+#include <QComboBox>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDialog>
+#include <QElapsedTimer>
+#include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPushButton>
+#include <QRadioButton>
 #include <QSignalSpy>
+#include <QTimer>
 #include <QtTest/QTest>
+
+#include <functional>
+#include <memory>
 
 namespace
 {
-	QMap<QString, QString> g_worldAttrs;
-	QMap<QString, QString> g_worldMultilineAttrs;
-	QMap<QString, QVariant> g_globalOptions;
-	bool g_useFakeAppController{false};
+	QMap<QString, QString>           g_worldAttrs;
+	QMap<QString, QString>           g_worldMultilineAttrs;
+	QMap<QString, QVariant>          g_globalOptions;
+	QVector<WorldRuntime::LineEntry> g_runtimeLines;
+	bool                             g_useFakeAppController{false};
 
-	AppController *fakeAppControllerPointer()
+	AppController                   *fakeAppControllerPointer()
 	{
 		return reinterpret_cast<AppController *>(static_cast<quintptr>(1));
 	}
@@ -39,8 +53,7 @@ namespace
 
 	const QVector<WorldRuntime::LineEntry> &lineStorage()
 	{
-		static const QVector<WorldRuntime::LineEntry> lines;
-		return lines;
+		return g_runtimeLines;
 	}
 
 	const QList<WorldRuntime::Macro> &macroStorage()
@@ -60,7 +73,50 @@ namespace
 		g_worldAttrs.clear();
 		g_worldMultilineAttrs.clear();
 		g_globalOptions.clear();
+		g_runtimeLines.clear();
 		g_useFakeAppController = false;
+	}
+
+	QPushButton *findButtonByText(const QObject &root, const QString &text)
+	{
+		const auto buttons = root.findChildren<QPushButton *>();
+		for (QPushButton *button : buttons)
+		{
+			if (button && button->text() == text)
+				return button;
+		}
+		return nullptr;
+	}
+
+	QRadioButton *findRadioButtonByText(const QObject &root, const QString &text)
+	{
+		const auto buttons = root.findChildren<QRadioButton *>();
+		for (QRadioButton *button : buttons)
+		{
+			if (button && button->text() == text)
+				return button;
+		}
+		return nullptr;
+	}
+
+	void scheduleDialogInteraction(const std::function<bool(const QDialog *)> &matcher,
+	                               const std::function<void(const QDialog *)> &action)
+	{
+		auto runner = std::make_shared<std::function<void(int)>>();
+		*runner     = [runner, matcher, action](int retriesLeft)
+		{
+			for (QWidget *widget : QApplication::topLevelWidgets())
+			{
+				auto *dialog = qobject_cast<QDialog *>(widget);
+				if (!dialog || !matcher(dialog))
+					continue;
+				action(dialog);
+				return;
+			}
+			if (retriesLeft > 0)
+				QTimer::singleShot(10, qApp, [runner, retriesLeft] { (*runner)(retriesLeft - 1); });
+		};
+		QTimer::singleShot(0, qApp, [runner] { (*runner)(300); });
 	}
 } // namespace
 
@@ -75,7 +131,9 @@ QVariant AppController::getGlobalOption(const QString &name) const
 	return g_globalOptions.value(name);
 }
 
-void AppController::onCommandTriggered(const QString &) {}
+void AppController::onCommandTriggered(const QString &)
+{
+}
 
 quint16 AcceleratorUtils::qtKeyToVirtualKey(Qt::Key, bool)
 {
@@ -123,16 +181,22 @@ int WorldRuntime::outputFontHeight() const
 	return 0;
 }
 
-void WorldRuntime::setOutputFontMetrics(int, int) {}
+void WorldRuntime::setOutputFontMetrics(int, int)
+{
+}
 
-void WorldRuntime::setInputFontMetrics(int, int) {}
+void WorldRuntime::setInputFontMetrics(int, int)
+{
+}
 
 long WorldRuntime::backgroundColour() const
 {
 	return 0;
 }
 
-void WorldRuntime::notifyDrawOutputWindow(int, int) {}
+void WorldRuntime::notifyDrawOutputWindow(int, int)
+{
+}
 
 QImage WorldRuntime::backgroundImage() const
 {
@@ -144,7 +208,9 @@ int WorldRuntime::backgroundImageMode() const
 	return 0;
 }
 
-void WorldRuntime::layoutMiniWindows(const QSize &, const QSize &, bool) {}
+void WorldRuntime::layoutMiniWindows(const QSize &, const QSize &, bool)
+{
+}
 
 QVector<MiniWindow *> WorldRuntime::sortedMiniWindows()
 {
@@ -166,13 +232,21 @@ const QVector<WorldRuntime::LineEntry> &WorldRuntime::lines() const
 	return lineStorage();
 }
 
-void WorldRuntime::installPendingPlugins() {}
+void WorldRuntime::installPendingPlugins()
+{
+}
 
-void WorldRuntime::notifyWorldOutputResized() {}
+void WorldRuntime::notifyWorldOutputResized()
+{
+}
 
-void WorldRuntime::firePluginCommandChanged() {}
+void WorldRuntime::firePluginCommandChanged()
+{
+}
 
-void WorldRuntime::firePluginTabComplete(QString &) {}
+void WorldRuntime::firePluginTabComplete(QString &)
+{
+}
 
 bool WorldRuntime::isConnected() const
 {
@@ -189,23 +263,31 @@ bool WorldRuntime::callWorldHotspotFunction(const QString &, long, const QString
 	return false;
 }
 
-void WorldRuntime::notifyMiniWindowMouseMoved(int, int, const QString &) {}
+void WorldRuntime::notifyMiniWindowMouseMoved(int, int, const QString &)
+{
+}
 
 MiniWindow *WorldRuntime::miniWindow(const QString &)
 {
 	return nullptr;
 }
 
-void WorldRuntime::notifyOutputSelectionChanged() {}
+void WorldRuntime::notifyOutputSelectionChanged()
+{
+}
 
-void WorldRuntime::setOutputFrozen(bool) {}
+void WorldRuntime::setOutputFrozen(bool)
+{
+}
 
 const QList<WorldRuntime::Macro> &WorldRuntime::macros() const
 {
 	return macroStorage();
 }
 
-void WorldRuntime::setCurrentActionSource(unsigned short) {}
+void WorldRuntime::setCurrentActionSource(unsigned short)
+{
+}
 
 int WorldRuntime::sendCommand(const QString &, bool, bool, bool, bool, bool) const
 {
@@ -237,9 +319,13 @@ QString WorldRuntime::formatTime(const QDateTime &, const QString &format, bool)
 	return format;
 }
 
-void WorldRuntime::addLine(const QString &, int, bool, const QDateTime &) {}
+void WorldRuntime::addLine(const QString &, int, bool, const QDateTime &)
+{
+}
 
-void WorldRuntime::addLine(const QString &, int, const QVector<StyleSpan> &, bool, const QDateTime &) {}
+void WorldRuntime::addLine(const QString &, int, const QVector<StyleSpan> &, bool, const QDateTime &)
+{
+}
 // NOLINTEND(readability-convert-member-functions-to-static)
 
 /**
@@ -249,7 +335,7 @@ class tst_WorldView_Basic : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void parseColorNamedAndHex()
 		{
@@ -348,7 +434,137 @@ class tst_WorldView_Basic : public QObject
 
 			resetTestState();
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+
+		void outputFindNoMatchReturnsWithoutHanging()
+		{
+			resetTestState();
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.appendOutputText(QStringLiteral("Alpha beta gamma"), true);
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(QStringLiteral("ZZZ"));
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    {
+				    auto *messageBox = qobject_cast<const QMessageBox *>(dialog);
+				    if (!messageBox)
+					    return false;
+				    return messageBox->windowTitle() == QStringLiteral("Find");
+			    },
+			    [](const QDialog *dialog)
+			    {
+				    QMetaObject::invokeMethod(const_cast<QDialog *>(dialog), "accept", Qt::QueuedConnection);
+			    });
+
+			QElapsedTimer timer;
+			timer.start();
+			QVERIFY(!view.doOutputFind(false));
+			QVERIFY2(timer.elapsed() < 1000, "Output find should return promptly for no-match searches.");
+
+			resetTestState();
+		}
+
+		void outputFindUsesRenderedBufferCoordinates()
+		{
+			resetTestState();
+
+			// Intentionally desync runtime text indices from rendered text to catch
+			// regressions where search scans runtime lines but highlights in document.
+			WorldRuntime::LineEntry runtimeLine;
+			runtimeLine.text = QStringLiteral("xxxxxnew staff");
+			g_runtimeLines.push_back(runtimeLine);
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.appendOutputText(QStringLiteral("new staff"), true);
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(QStringLiteral("new"));
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			QVERIFY(view.doOutputFind(false));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("new"));
+
+			resetTestState();
+		}
+
+		void outputFindAgainKeepsDirectionFromInitialSearch()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.appendOutputText(QStringLiteral("If you're new to CthulhuMUD"), true);
+			view.appendOutputText(QStringLiteral("Read through the entire Newbie School"), true);
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(QStringLiteral("new"));
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			QVERIFY(view.doOutputFind(false));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("New"));
+
+			QVERIFY(view.doOutputFind(true));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("new"));
+
+			resetTestState();
+		}
+
+		void outputFindAgainKeepsDownDirectionFromInitialSearch()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.appendOutputText(QStringLiteral("new to CthulhuMUD"), true);
+			view.appendOutputText(QStringLiteral("Read through the entire Newbie School"), true);
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [](const QDialog *dialog)
+			    {
+				    if (auto *down = findRadioButtonByText(*dialog, QStringLiteral("Down")))
+					    down->setChecked(true);
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(QStringLiteral("new"));
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			QVERIFY(view.doOutputFind(false));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("new"));
+
+			QVERIFY(view.doOutputFind(true));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("New"));
+
+			resetTestState();
+		}
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_MAIN(tst_WorldView_Basic)
