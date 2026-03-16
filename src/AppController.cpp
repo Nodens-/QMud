@@ -451,7 +451,6 @@ namespace
 		    {QStringLiteral("DoMapperComment"),          QStringLiteral("MapperComment")        },
 		    {QStringLiteral("ASCIIart"),                 QStringLiteral("AsciiArt")             },
 		    {QStringLiteral("MinimiseProgram"),          QStringLiteral("Minimize")             },
-		    {QStringLiteral("FindAgain"),                QStringLiteral("FindAgainForwards")    },
 		    {QStringLiteral("GoToURL"),                  QStringLiteral("GoToUrl")              },
 		    {QStringLiteral("SelectMatchingBrace"),      QStringLiteral("SelectToMatchingBrace")},
 		    {QStringLiteral("ConfigureAutosay"),         QStringLiteral("ConfigureAutoSay")     },
@@ -6490,6 +6489,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	}
 	else if (cmdName == QStringLiteral("Find"))
 		handleOutputFind(false, false, true);
+	else if (cmdName == QStringLiteral("FindAgain"))
+		handleOutputFind(true, false, true);
 	else if (isCommand(QStringLiteral("FindAgainForwards")))
 		handleOutputFind(true, true, true);
 	else if (cmdName == QStringLiteral("FindAgainBackwards"))
