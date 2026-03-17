@@ -262,7 +262,16 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		        [this](const QString &href)
 		        {
 			        if (MainWindowHost *main = resolveMainWindowHost(window()))
-				        main->showStatusMessage(href, href.isEmpty() ? 0 : 5000);
+			        {
+				        if (!href.isEmpty())
+					        main->setHyperlinkStatusLock(href);
+				        else
+				        {
+					        if (m_view && m_view->hyperlinkHoverActive())
+						        return;
+					        main->clearHyperlinkStatusLock();
+				        }
+			        }
 		        });
 		connect(worldRuntime, &WorldRuntime::windowTitleChanged, this,
 		        [this, worldRuntime]

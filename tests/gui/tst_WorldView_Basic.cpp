@@ -16,11 +16,14 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDialog>
 #include <QElapsedTimer>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QEvent>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSignalSpy>
+#include <QTextBrowser>
 #include <QTimer>
 #include <QtTest/QTest>
 
@@ -118,6 +121,49 @@ namespace
 		};
 		QTimer::singleShot(0, qApp, [runner] { (*runner)(300); });
 	}
+
+	QTextBrowser *findVisibleOutputBrowser(const WorldView &view)
+	{
+		const auto browsers = view.findChildren<QTextBrowser *>();
+		for (QTextBrowser *browser : browsers)
+		{
+			if (browser && browser->isVisible() && browser->viewport())
+				return browser;
+		}
+		return nullptr;
+	}
+
+	QPoint findAnchorPoint(const QTextBrowser &browser, const QString &href)
+	{
+		if (!browser.viewport())
+			return {-1, -1};
+		const QRect area = browser.viewport()->rect();
+		for (int y = area.top(); y <= area.bottom(); ++y)
+		{
+			for (int x = area.left(); x <= area.right(); ++x)
+			{
+				if (browser.anchorAt(QPoint(x, y)).trimmed() == href)
+					return {x, y};
+			}
+		}
+		return {-1, -1};
+	}
+
+	QPoint findNonAnchorPoint(const QTextBrowser &browser)
+	{
+		if (!browser.viewport())
+			return {-1, -1};
+		const QRect area = browser.viewport()->rect();
+		for (int y = area.top(); y <= area.bottom(); ++y)
+		{
+			for (int x = area.left(); x <= area.right(); ++x)
+			{
+				if (browser.anchorAt(QPoint(x, y)).trimmed().isEmpty())
+					return {x, y};
+			}
+		}
+		return {-1, -1};
+	}
 } // namespace
 
 // NOLINTBEGIN(readability-convert-member-functions-to-static)
@@ -142,7 +188,7 @@ quint16 AcceleratorUtils::qtKeyToVirtualKey(Qt::Key, bool)
 
 QString AcceleratorUtils::acceleratorToString(quint32, quint16)
 {
-	return QString();
+	return {};
 }
 
 void qmudApplyMonospaceFallback(QFont &font, const QString &preferredFamily)
@@ -561,6 +607,56 @@ class tst_WorldView_Basic : public QObject
 
 			QVERIFY(view.doOutputFind(true));
 			QCOMPARE(view.outputSelectionText(), QStringLiteral("New"));
+
+			resetTestState();
+		}
+
+		void hyperlinkHoverStatePersistsAndClearsDeterministically()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(720, 420);
+			view.show();
+			QCoreApplication::processEvents();
+
+			WorldRuntime::StyleSpan linkSpan;
+			linkSpan.length     = QStringLiteral("example-link").size();
+			linkSpan.actionType = WorldRuntime::ActionHyperlink;
+			linkSpan.action     = QStringLiteral("https://example.org/status-lock");
+
+			view.appendOutputTextStyled(QStringLiteral("example-link"), {linkSpan}, true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+
+			const QString href        = linkSpan.action;
+			const QPoint  anchorPoint = findAnchorPoint(*browser, href);
+			QVERIFY2(anchorPoint.x() >= 0 && anchorPoint.y() >= 0,
+			         "Expected hyperlink anchor in rendered output.");
+
+			QSignalSpy hoverSpy(&view, &WorldView::hyperlinkHighlighted);
+			QTest::mouseMove(browser->viewport(), anchorPoint);
+			QTRY_VERIFY(view.hyperlinkHoverActive());
+			QTRY_VERIFY(!hoverSpy.isEmpty());
+			QTRY_COMPARE(hoverSpy.back().at(0).toString(), href);
+
+			// Additional movement over the same anchor must not clear hover state.
+			QTest::mouseMove(browser->viewport(), anchorPoint + QPoint(1, 0));
+			QCoreApplication::processEvents();
+			QVERIFY(view.hyperlinkHoverActive());
+
+			// Moving to a non-anchor point must clear hover deterministically.
+			const QPoint nonAnchorPoint = findNonAnchorPoint(*browser);
+			QVERIFY2(nonAnchorPoint.x() >= 0 && nonAnchorPoint.y() >= 0,
+			         "Expected non-anchor point in output viewport.");
+			QTest::mouseMove(browser->viewport(), nonAnchorPoint);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(!view.hyperlinkHoverActive());
+			QTRY_VERIFY(!hoverSpy.isEmpty());
+			QTRY_COMPARE(hoverSpy.back().at(0).toString(), QString());
 
 			resetTestState();
 		}

@@ -68,6 +68,16 @@ namespace
 		return static_cast<int>(qBound(kMin, value, kMax));
 	}
 
+	QString anchorAtGlobalCursor(const QTextBrowser *browser)
+	{
+		if (!browser || !browser->isVisible() || !browser->viewport())
+			return {};
+		const QPoint localPos = browser->viewport()->mapFromGlobal(QCursor::pos());
+		if (!browser->viewport()->rect().contains(localPos))
+			return {};
+		return browser->anchorAt(localPos).trimmed();
+	}
+
 	class ContextMenuDismissReplayFilter final : public QObject
 	{
 		public:
@@ -726,22 +736,8 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 
 	connect(m_output, &QTextBrowser::anchorClicked, this,
 	        [this](const QUrl &url) { emit hyperlinkActivated(url.toString()); });
-
 	connect(m_output, &QTextBrowser::highlighted, this,
-	        [this](const QUrl &url)
-	        {
-		        emit hyperlinkHighlighted(url.toString());
-		        if (url.isEmpty())
-		        {
-			        if (m_anchorHoverActive)
-				        QToolTip::hideText();
-			        m_anchorHoverActive = false;
-		        }
-		        else
-		        {
-			        m_anchorHoverActive = true;
-		        }
-	        });
+	        [this](const QUrl &) { refreshHoveredHyperlinkFromCursor(); });
 
 	if (m_liveOutput)
 	{
@@ -749,20 +745,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 		        [this](const QUrl &url) { emit hyperlinkActivated(url.toString()); });
 
 		connect(m_liveOutput, &QTextBrowser::highlighted, this,
-		        [this](const QUrl &url)
-		        {
-			        emit hyperlinkHighlighted(url.toString());
-			        if (url.isEmpty())
-			        {
-				        if (m_anchorHoverActive)
-					        QToolTip::hideText();
-				        m_anchorHoverActive = false;
-			        }
-			        else
-			        {
-				        m_anchorHoverActive = true;
-			        }
-		        });
+		        [this](const QUrl &) { refreshHoveredHyperlinkFromCursor(); });
 	}
 
 	if (m_outputSplitter)
@@ -1518,6 +1501,42 @@ bool WorldView::hasInputSelection() const
 	return m_input->textCursor().hasSelection();
 }
 
+QString WorldView::currentHoveredHyperlink() const
+{
+	if (const QString liveHref = anchorAtGlobalCursor(m_liveOutput); !liveHref.isEmpty())
+		return liveHref;
+	return anchorAtGlobalCursor(m_output);
+}
+
+void WorldView::applyHoveredHyperlink(const QString &href)
+{
+	const QString normalized = href.trimmed();
+	if (normalized == m_hoveredHyperlinkHref)
+		return;
+	m_hoveredHyperlinkHref = normalized;
+	emit hyperlinkHighlighted(m_hoveredHyperlinkHref);
+	if (m_hoveredHyperlinkHref.isEmpty())
+	{
+		if (m_anchorHoverActive)
+			QToolTip::hideText();
+		m_anchorHoverActive = false;
+	}
+	else
+	{
+		m_anchorHoverActive = true;
+	}
+}
+
+void WorldView::refreshHoveredHyperlinkFromCursor()
+{
+	applyHoveredHyperlink(currentHoveredHyperlink());
+}
+
+bool WorldView::hyperlinkHoverActive() const
+{
+	return !m_hoveredHyperlinkHref.isEmpty() || !currentHoveredHyperlink().isEmpty();
+}
+
 bool WorldView::isAtBufferEnd() const
 {
 	if (!m_output)
@@ -1665,8 +1684,8 @@ bool WorldView::doOutputFind(bool again)
 	if (!m_outputFind)
 		m_outputFind.reset(new OutputFindState());
 
-	OutputFindState                        &state      = *m_outputFind;
-	QTextDocument                         *doc        = m_output ? m_output->document() : nullptr;
+	OutputFindState &state = *m_outputFind;
+	QTextDocument   *doc   = m_output ? m_output->document() : nullptr;
 	if (!doc)
 		return false;
 	const int totalLines = doc->blockCount();
@@ -1793,7 +1812,7 @@ bool WorldView::doOutputFind(bool again)
 			return false;
 		}
 
-			QString line = lineTextAt(state.currentLine);
+		QString line = lineTextAt(state.currentLine);
 		state.matchesOnLine.clear();
 		++milestone;
 
@@ -1826,25 +1845,25 @@ bool WorldView::doOutputFind(bool again)
 					break;
 			}
 		}
-			else
+		else
+		{
+			Qt::CaseSensitivity sensitivity = state.matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
+			const QString      &needle      = findText;
+			const int           lineSize    = sizeToInt(line.size());
+			int                 start       = 0;
+			while (true)
 			{
-				Qt::CaseSensitivity sensitivity = state.matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
-				const QString      &needle      = findText;
-				const int           lineSize    = sizeToInt(line.size());
-				int                 start       = 0;
-				while (true)
-				{
-					const qsizetype index = line.indexOf(needle, start, sensitivity);
-					if (index < 0)
-						break;
-					const int indexInt = sizeToInt(index);
-					const int end      = indexInt + sizeToInt(needle.size());
-					state.matchesOnLine.push_back(qMakePair(indexInt, end));
-					start = qMax(end, start + 1);
-					if (start >= lineSize)
-						break;
-				}
+				const qsizetype index = line.indexOf(needle, start, sensitivity);
+				if (index < 0)
+					break;
+				const int indexInt = sizeToInt(index);
+				const int end      = indexInt + sizeToInt(needle.size());
+				state.matchesOnLine.push_back(qMakePair(indexInt, end));
+				start = qMax(end, start + 1);
+				if (start >= lineSize)
+					break;
 			}
+		}
 
 		if (state.matchesOnLine.isEmpty())
 			state.currentLine += state.forwards ? 1 : -1;
@@ -3556,7 +3575,7 @@ void WorldView::applyRuntimeSettings()
 	     useDefaultInputFontValue.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
 	const AppController *app = AppController::instance();
 
-	auto effectiveDefaultOutputFont = [&]
+	auto                 effectiveDefaultOutputFont = [&]
 	{
 		QString outputDefaultFamily;
 		int     outputDefaultHeight  = 9;
@@ -3565,15 +3584,12 @@ void WorldView::applyRuntimeSettings()
 		{
 			outputDefaultFamily =
 			    app->getGlobalOption(QStringLiteral("DefaultOutputFont")).toString().trimmed();
-			outputDefaultHeight =
-			    app->getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
-			outputDefaultCharset =
-			    app->getGlobalOption(QStringLiteral("DefaultOutputFontCharset")).toInt();
+			outputDefaultHeight  = app->getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
+			outputDefaultCharset = app->getGlobalOption(QStringLiteral("DefaultOutputFontCharset")).toInt();
 		}
 
-		QFont font = qmudPreferredMonospaceFont(outputDefaultFamily, outputDefaultHeight);
-		const QString preferredFamily =
-		    outputDefaultFamily.isEmpty() ? font.family() : outputDefaultFamily;
+		QFont         font            = qmudPreferredMonospaceFont(outputDefaultFamily, outputDefaultHeight);
+		const QString preferredFamily = outputDefaultFamily.isEmpty() ? font.family() : outputDefaultFamily;
 		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, outputDefaultCharset);
 		    !charsetFamily.isEmpty())
 		{
@@ -3595,17 +3611,13 @@ void WorldView::applyRuntimeSettings()
 		{
 			inputDefaultFamily =
 			    app->getGlobalOption(QStringLiteral("DefaultInputFont")).toString().trimmed();
-			inputDefaultHeight =
-			    app->getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
-			inputDefaultWeight =
-			    app->getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
-			inputDefaultItalic =
-			    app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
-			inputDefaultCharset =
-			    app->getGlobalOption(QStringLiteral("DefaultInputFontCharset")).toInt();
+			inputDefaultHeight  = app->getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
+			inputDefaultWeight  = app->getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
+			inputDefaultItalic  = app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
+			inputDefaultCharset = app->getGlobalOption(QStringLiteral("DefaultInputFontCharset")).toInt();
 		}
 
-		QFont font = qmudPreferredMonospaceFont(inputDefaultFamily, inputDefaultHeight);
+		QFont         font            = qmudPreferredMonospaceFont(inputDefaultFamily, inputDefaultHeight);
 		const QString preferredFamily = inputDefaultFamily.isEmpty() ? font.family() : inputDefaultFamily;
 		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, inputDefaultCharset);
 		    !charsetFamily.isEmpty())
@@ -4309,6 +4321,9 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 
 	if (isOutputWidget)
 	{
+		if (event->type() == QEvent::MouseMove)
+			refreshHoveredHyperlinkFromCursor();
+
 		bool handled = false;
 		switch (event->type())
 		{
@@ -4330,6 +4345,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 			break;
 		case QEvent::Leave:
 			handleMiniWindowMouseLeave();
+			applyHoveredHyperlink(QString());
 			if (m_tooltipHotspot == kLineInfoTooltipId)
 			{
 				QToolTip::hideText();
@@ -4902,7 +4918,6 @@ bool WorldView::handleWorldHotkey(QKeyEvent *event)
 			default:
 				break;
 			}
-
 			if (!token.isEmpty() && !hasMeta && !hasAlt && !hasShift)
 			{
 				QString keyName = hasCtrl ? QStringLiteral("Ctrl+%1").arg(token) : token;
