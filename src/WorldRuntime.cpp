@@ -6482,7 +6482,7 @@ void WorldRuntime::markReloadReattachConnectActionsSuppressed()
 
 bool WorldRuntime::consumeReloadReattachConnectActionsSuppressed()
 {
-	const bool suppressed = m_reloadReattachSuppressConnectActions;
+	const bool suppressed                  = m_reloadReattachSuppressConnectActions;
 	m_reloadReattachSuppressConnectActions = false;
 	return suppressed;
 }
@@ -6493,7 +6493,8 @@ void WorldRuntime::requestMccpResumeAfterReloadReattach()
 		return;
 	if (isCompressing() || mccpType() != 0)
 		return;
-	if (const bool disableCompression = isEnabledFlag(m_worldAttributes.value(QStringLiteral("disable_compression")));
+	if (const bool disableCompression =
+	        isEnabledFlag(m_worldAttributes.value(QStringLiteral("disable_compression")));
 	    disableCompression)
 	{
 		return;
@@ -14390,7 +14391,7 @@ void WorldRuntime::chatNote(short noteType, const QString &message)
 	                                 .arg(backColor.green())
 	                                 .arg(backColor.blue());
 	const auto reset = QStringLiteral("\x1b[0m");
-	outputAnsiText(colourPrefix + output + reset, true);
+	outputAnsiText(colourPrefix + output + reset + QLatin1Char('\n'), true);
 }
 
 int WorldRuntime::chatPasteEverybody()
