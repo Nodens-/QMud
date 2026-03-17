@@ -86,6 +86,23 @@ class WorldSocket : public WorldSocketService
 		 */
 		[[nodiscard]] quint32 peerAddressV4() const override;
 		/**
+		 * @brief Returns native descriptor for active socket.
+		 * @return Native descriptor, or `-1` when unavailable.
+		 */
+		[[nodiscard]] qintptr nativeSocketDescriptor() const override;
+		/**
+		 * @brief Adopts an already-connected native descriptor.
+		 * @param descriptor Native descriptor to adopt.
+		 * @param errorMessage Optional output error text.
+		 * @return `true` when descriptor adoption succeeds.
+		 */
+		bool                 adoptConnectedSocketDescriptor(qintptr descriptor,
+		                                                    QString *errorMessage) override;
+		/**
+		 * @brief Immediately aborts active transport socket.
+		 */
+		void                 abortSocket() override;
+		/**
 		 * @brief Reports whether connection attempt is in progress.
 		 * @return `true` when socket is connecting.
 		 */

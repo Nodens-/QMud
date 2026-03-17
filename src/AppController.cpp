@@ -23,6 +23,9 @@
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
 #include "NameGeneration.h"
+#include "ReloadPlannerUtils.h"
+#include "ReloadRecoveryUtils.h"
+#include "ReloadStateUtils.h"
 #include "SqliteCompat.h"
 #include "Version.h"
 #include "WorldChildWindow.h"
@@ -125,10 +128,18 @@ extern "C"
 #include <QtSql/QSqlQuery>
 #include <algorithm>
 #include <clocale>
+#include <cstring>
 #include <ctime>
 #include <exception>
 #include <memory>
+#include <vector>
 #include <zlib.h>
+
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #ifdef Q_OS_WIN
 // clang-format off
@@ -144,6 +155,14 @@ extern "C"
 
 namespace
 {
+	bool envFlagEnabled(const char *name)
+	{
+		const QString value = qEnvironmentVariable(name).trimmed();
+		return value == QStringLiteral("1") || value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		       value.compare(QStringLiteral("yes"), Qt::CaseInsensitive) == 0 ||
+		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+	}
+
 	struct FileAssociationEntry
 	{
 			const char *programIdSuffix;
@@ -153,7 +172,12 @@ namespace
 			const char *legacyExtension;
 	};
 
-	constexpr quint8                   kXtermCubeValues[6] = {0, 95, 135, 175, 215, 255};
+	constexpr quint8                   kXtermCubeValues[6]         = {0, 95, 135, 175, 215, 255};
+	constexpr int                      kReloadStateStaleAgeSeconds = 10 * 60;
+	constexpr int                      kReloadMccpDisableTimeoutMs = 500;
+	constexpr char                     kReloadStateArgName[]       = "--reload-state";
+	constexpr char                     kReloadTokenArgName[]       = "--reload-token";
+	constexpr char                     kReloadLogTag[]             = "[ReloadQMud]";
 
 	const QList<FileAssociationEntry> &fileAssociationEntries()
 	{
@@ -168,6 +192,79 @@ namespace
 		};
 		return kEntries;
 	}
+
+	QString makeReloadArgument(const QString &name, const QString &value)
+	{
+		return value.isEmpty() ? QString() : (name + QLatin1Char('=') + value);
+	}
+
+	QString generateReloadToken()
+	{
+		const quint64 high = QRandomGenerator::global()->generate64();
+		const quint64 low  = QRandomGenerator::global()->generate64();
+		return QStringLiteral("%1%2").arg(high, 16, 16, QLatin1Char('0')).arg(low, 16, 16, QLatin1Char('0'));
+	}
+
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+	bool setSocketDescriptorInheritable(const int descriptor, const bool inheritable, QString *errorMessage)
+	{
+		if (errorMessage)
+			errorMessage->clear();
+		if (descriptor < 0)
+		{
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Descriptor is invalid.");
+			return false;
+		}
+		const int flags = fcntl(descriptor, F_GETFD);
+		if (flags < 0)
+		{
+			if (errorMessage)
+				*errorMessage =
+				    QStringLiteral("fcntl(F_GETFD) failed: %1").arg(QString::fromLocal8Bit(strerror(errno)));
+			return false;
+		}
+
+		int nextFlags = flags;
+		if (inheritable)
+			nextFlags &= ~FD_CLOEXEC;
+		else
+			nextFlags |= FD_CLOEXEC;
+		if (nextFlags == flags)
+			return true;
+		if (fcntl(descriptor, F_SETFD, nextFlags) == 0)
+			return true;
+		if (errorMessage)
+			*errorMessage =
+			    QStringLiteral("fcntl(F_SETFD) failed: %1").arg(QString::fromLocal8Bit(strerror(errno)));
+		return false;
+	}
+
+	bool closeSocketDescriptorIfOpen(const int descriptor, QString *errorMessage)
+	{
+		if (errorMessage)
+			errorMessage->clear();
+		if (descriptor < 0)
+			return true;
+		errno = 0;
+		if (fcntl(descriptor, F_GETFD) < 0)
+		{
+			if (errno == EBADF)
+				return true;
+			if (errorMessage)
+				*errorMessage = QStringLiteral("fcntl(F_GETFD) before close failed: %1")
+				                    .arg(QString::fromLocal8Bit(strerror(errno)));
+			return false;
+		}
+		if (close(descriptor) == 0)
+			return true;
+		if (errorMessage)
+			*errorMessage = QStringLiteral("close(%1) failed: %2")
+			                    .arg(descriptor)
+			                    .arg(QString::fromLocal8Bit(strerror(errno)));
+		return false;
+	}
+#endif
 
 #ifdef Q_OS_LINUX
 	QStringList registeredMimeTypes()
@@ -2356,6 +2453,30 @@ QVector<WorldRuntime *> AppController::activeWorldRuntimes() const
 	return runtimes;
 }
 
+void AppController::detectReloadStartupArguments()
+{
+	m_reloadLaunchRequested = false;
+	m_reloadStatePathArg.clear();
+	m_reloadTokenArg.clear();
+
+	QString statePath;
+	QString token;
+	if (!parseReloadStartupArguments(QCoreApplication::arguments(), &statePath, &token))
+		return;
+
+	m_reloadLaunchRequested = true;
+	m_reloadStatePathArg    = statePath;
+	m_reloadTokenArg        = token;
+}
+
+void AppController::cleanupReloadStateOnNormalStartup() const
+{
+	const QString statePath = reloadStateDefaultPath(m_workingDir);
+	QString       error;
+	if (!removeReloadStateFile(statePath, &error) && !error.isEmpty())
+		qWarning() << "Unable to remove stale reload state file:" << error;
+}
+
 bool AppController::openDocumentFile(const QString &path)
 {
 	// Open-document flow with world/template routing.
@@ -2564,7 +2685,7 @@ QVariant AppController::getGlobalOption(const QString &name) const
 	        ? QStringLiteral("ConfirmBeforeClosingQmud")
 	        : name.trimmed();
 
-	const auto    findKey = [&](const QString &target, const auto &table) -> int
+	const auto findKey = [&](const QString &target, const auto &table) -> int
 	{
 		for (int i = 0; table[i].name; ++i)
 		{
@@ -2637,7 +2758,7 @@ void AppController::setGlobalOptionInt(const QString &name, const int value)
 	        ? QStringLiteral("ConfirmBeforeClosingQmud")
 	        : name.trimmed();
 
-	const auto    findKey = [&](const QString &target) -> QString
+	const auto findKey = [&](const QString &target) -> QString
 	{
 		for (int i = 0; kGlobalOptionsTable[i].name; ++i)
 		{
@@ -2780,6 +2901,28 @@ bool AppController::initialize()
 	// make sure directory name ends in a slash
 	if (!m_workingDir.endsWith('/'))
 		m_workingDir += '/';
+
+	detectReloadStartupArguments();
+	if (!m_reloadLaunchRequested)
+		cleanupReloadStateOnNormalStartup();
+	else
+	{
+		QString resolvedStatePath = m_reloadStatePathArg.trimmed();
+		if (resolvedStatePath.isEmpty())
+			resolvedStatePath = reloadStateDefaultPath(m_workingDir);
+		if (const QFileInfo stateInfo(resolvedStatePath); stateInfo.isRelative())
+			resolvedStatePath = QDir(m_workingDir).filePath(resolvedStatePath);
+		if (isReloadStateFileStale(resolvedStatePath, kReloadStateStaleAgeSeconds))
+		{
+			qWarning() << kReloadLogTag << "Reload state file is stale; ignoring reload startup request.";
+			QString cleanupError;
+			if (!removeReloadStateFile(resolvedStatePath, &cleanupError) && !cleanupError.isEmpty())
+				qWarning() << kReloadLogTag << "Unable to remove stale reload state file:" << cleanupError;
+			m_reloadLaunchRequested = false;
+			m_reloadStatePathArg.clear();
+			m_reloadTokenArg.clear();
+		}
+	}
 
 	migrateLegacyIniToQmudConf(m_workingDir);
 
@@ -3255,13 +3398,268 @@ void AppController::generate256Colours()
 	}
 }
 
+bool AppController::openWorldForReloadRecovery(const ReloadWorldState &worldState, WorldRuntime **runtime)
+{
+	if (runtime)
+		*runtime = nullptr;
+	if (!m_mainWindow || !runtime)
+		return false;
+
+	bool opened = false;
+	if (!worldState.worldFilePath.trimmed().isEmpty() && QFileInfo::exists(worldState.worldFilePath))
+		opened = openDocumentFile(worldState.worldFilePath);
+	if (!opened)
+		opened = openDocumentFile(QString());
+	if (!opened)
+		return false;
+
+	WorldChildWindow *child = m_mainWindow->activeWorldChildWindow();
+	if (!child)
+		return false;
+	WorldRuntime *worldRuntime = child->runtime();
+	if (!worldRuntime)
+		return false;
+
+	if (!worldState.worldId.trimmed().isEmpty())
+		worldRuntime->setWorldAttribute(QStringLiteral("id"), worldState.worldId.trimmed());
+	if (!worldState.displayName.trimmed().isEmpty())
+	{
+		worldRuntime->setWorldAttribute(QStringLiteral("name"), worldState.displayName.trimmed());
+		child->setWindowTitle(worldState.displayName.trimmed());
+		if (WorldView *view = child->view())
+			view->setWorldName(worldState.displayName.trimmed());
+	}
+	if (!worldState.host.trimmed().isEmpty())
+		worldRuntime->setWorldAttribute(QStringLiteral("site"), worldState.host.trimmed());
+	if (worldState.port > 0)
+		worldRuntime->setWorldAttribute(QStringLiteral("port"), QString::number(worldState.port));
+	if (!worldState.worldFilePath.trimmed().isEmpty() && worldRuntime->worldFilePath().trimmed().isEmpty())
+		worldRuntime->setWorldFilePath(worldState.worldFilePath);
+	worldRuntime->setWorldAttribute(QStringLiteral("utf_8"),
+	                                worldState.utf8Enabled ? QStringLiteral("1") : QStringLiteral("0"));
+
+	*runtime = worldRuntime;
+	return true;
+}
+
+void AppController::reconnectRecoveredWorld(WorldRuntime *runtime, const ReloadWorldState &worldState,
+                                            const bool closeSocketFirst)
+{
+	if (!runtime)
+		return;
+	if (const QString warning = reconnectRecoveredRuntime(*runtime, worldState, closeSocketFirst);
+	    !warning.isEmpty())
+	{
+		qWarning() << warning;
+	}
+}
+
+bool AppController::recoverReloadStartupState()
+{
+	if (!m_reloadLaunchRequested)
+		return false;
+	++m_reloadRecoveryRuns;
+
+	QString statePath = m_reloadStatePathArg.trimmed();
+	if (statePath.isEmpty())
+		statePath = reloadStateDefaultPath(m_workingDir);
+	if (const QFileInfo stateInfo(statePath); stateInfo.isRelative())
+		statePath = QDir(m_workingDir).filePath(statePath);
+
+	ReloadStateSnapshot                snapshot;
+	const ReloadStartupValidationInput validationInput{
+	    m_reloadTokenArg.trimmed(),
+	    static_cast<qint64>(QCoreApplication::applicationPid()),
+	    QCoreApplication::applicationFilePath(),
+	};
+	QString error;
+	QString cleanupWarning;
+	if (!loadValidatedAndConsumeReloadStateSnapshot(statePath, validationInput, &snapshot, &error,
+	                                                &cleanupWarning))
+	{
+		qWarning() << kReloadLogTag << "Recovery skipped:" << error;
+		if (!cleanupWarning.isEmpty())
+			qWarning() << kReloadLogTag << "Reload state cleanup warning:" << cleanupWarning;
+		return false;
+	}
+	if (!cleanupWarning.isEmpty())
+	{
+		qWarning() << kReloadLogTag
+		           << "Unable to consume reload state file before recovery:" << cleanupWarning;
+	}
+
+	QList<ReloadWorldState> worlds = snapshot.worlds;
+	std::ranges::sort(worlds,
+	                  [](const ReloadWorldState &lhs, const ReloadWorldState &rhs)
+	                  {
+		                  if (lhs.sequence == rhs.sequence)
+			                  return lhs.displayName < rhs.displayName;
+		                  return lhs.sequence < rhs.sequence;
+	                  });
+
+	struct PendingReconnect
+	{
+			WorldRuntime    *runtime{nullptr};
+			ReloadWorldState state;
+			bool             closeSocketFirst{false};
+	};
+	QList<PendingReconnect>   reconnectQueue;
+	QList<QPointer<WorldRuntime>> mccpResumeQueue;
+	int                     openedCount       = 0;
+	int                     reattachedCount   = 0;
+	int                     reconnectCount    = 0;
+	int                     openFailures      = 0;
+	int                     adoptFailures     = 0;
+	const bool              verboseReloadLogs = envFlagEnabled("QMUD_RELOAD_VERBOSE");
+	const bool              previousSuppress  = m_suppressAutoConnect;
+	m_suppressAutoConnect                     = true;
+
+	for (const ReloadWorldState &worldState : worlds)
+	{
+		WorldRuntime *runtime = nullptr;
+		if (!openWorldForReloadRecovery(worldState, &runtime) || !runtime)
+		{
+			++openFailures;
+			qWarning() << kReloadLogTag << "World recovery open failed for"
+			           << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
+			                                                : worldState.displayName);
+			continue;
+		}
+		++openedCount;
+
+		if (worldState.connectedAtReload && worldState.socketDescriptor >= 0)
+		{
+			const ReloadRecoverySocketDecision decision = applyReloadSocketRecovery(*runtime, worldState);
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+			QString cloexecError;
+			if (!setSocketDescriptorInheritable(worldState.socketDescriptor, false, &cloexecError) &&
+			    !cloexecError.isEmpty())
+			{
+				qWarning() << kReloadLogTag << "Unable to restore close-on-exec for descriptor"
+				           << worldState.socketDescriptor << ":" << cloexecError;
+			}
+#endif
+			if (decision.outcome == ReloadRecoverySocketOutcome::ReconnectQueued)
+			{
+				if (!decision.error.isEmpty())
+				{
+					++adoptFailures;
+					qWarning() << kReloadLogTag << "Socket reattach failed for"
+					           << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
+					                                                : worldState.displayName)
+					           << ":" << decision.error;
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+					QString closeError;
+					if (!closeSocketDescriptorIfOpen(worldState.socketDescriptor, &closeError) &&
+					    !closeError.isEmpty())
+					{
+						qWarning() << kReloadLogTag << "Unable to close orphaned descriptor"
+						           << worldState.socketDescriptor << ":" << closeError;
+					}
+#endif
+				}
+				++reconnectCount;
+				if (verboseReloadLogs)
+				{
+					qInfo() << kReloadLogTag << "Queued reconnect for"
+					        << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
+					                                             : worldState.displayName);
+				}
+				reconnectQueue.push_back({runtime, worldState, decision.closeSocketFirst});
+			}
+			else if (decision.outcome == ReloadRecoverySocketOutcome::Reattached)
+			{
+				if (worldState.mccpWasActive)
+					mccpResumeQueue.push_back(runtime);
+				++reattachedCount;
+				if (verboseReloadLogs)
+				{
+					qInfo() << kReloadLogTag << "Reattached socket for"
+					        << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
+					                                             : worldState.displayName);
+				}
+			}
+			continue;
+		}
+
+		if (worldState.connectedAtReload)
+		{
+			++reconnectCount;
+			if (verboseReloadLogs)
+			{
+				qInfo() << kReloadLogTag << "Queued reconnect (no descriptor) for"
+				        << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
+				                                             : worldState.displayName);
+			}
+			reconnectQueue.push_back({runtime, worldState, false});
+		}
+	}
+
+	m_suppressAutoConnect = previousSuppress;
+
+	for (const PendingReconnect &pending : reconnectQueue)
+		reconnectRecoveredWorld(pending.runtime, pending.state, pending.closeSocketFirst);
+	for (const QPointer<WorldRuntime> &runtime : std::as_const(mccpResumeQueue))
+	{
+		if (runtime)
+			runtime->requestMccpResumeAfterReloadReattach();
+	}
+
+	qInfo() << kReloadLogTag << "Recovery summary:"
+	        << "opened=" << openedCount << "reattached=" << reattachedCount
+	        << "reconnect_queued=" << reconnectCount << "open_failures=" << openFailures
+	        << "adopt_failures=" << adoptFailures;
+	m_reloadRecoveryReattached += reattachedCount;
+	m_reloadRecoveryReconnectQueued += reconnectCount;
+	qInfo() << kReloadLogTag << "Telemetry:"
+	        << "attempts=" << m_reloadAttempts << "exec_failures=" << m_reloadExecFailures
+	        << "recoveries=" << m_reloadRecoveryRuns << "reattached_total=" << m_reloadRecoveryReattached
+	        << "reconnect_queued_total=" << m_reloadRecoveryReconnectQueued;
+	if (m_mainWindow)
+	{
+		m_mainWindow->showStatusMessage(QStringLiteral("Reload recovery: %1 reattached, %2 reconnect queued.")
+		                                    .arg(reattachedCount)
+		                                    .arg(reconnectCount),
+		                                5000);
+	}
+	return true;
+}
+
 void AppController::setupStartupBehavior()
 {
-	// simple command line parsing for auto-open behavior
-	const auto args    = QCoreApplication::arguments();
-	const auto cmdLine = args.mid(1).join(QStringLiteral(" "));
+	QString    reloadStateArg;
+	QString    reloadTokenArg;
+	const bool startedWithReloadArgs =
+	    parseReloadStartupArguments(QCoreApplication::arguments(), &reloadStateArg, &reloadTokenArg);
+	if (startedWithReloadArgs)
+	{
+		if (m_reloadLaunchRequested)
+		{
+			const bool recoveredFromReload = recoverReloadStartupState();
+			if (!recoveredFromReload)
+			{
+				qWarning() << kReloadLogTag
+				           << "Reload launch arguments were provided but recovery did not complete;"
+				              " continuing normal startup.";
+			}
+			else
+			{
+				return;
+			}
+		}
+		else
+		{
+			qWarning() << kReloadLogTag
+			           << "Reload launch arguments were provided but reload request was disabled;"
+			              " continuing normal startup.";
+		}
+	}
 
-	bool       bAutoOpen = true;
+	// simple command line parsing for auto-open behavior
+	const QStringList args    = filterReloadStartupArguments(QCoreApplication::arguments());
+	const auto        cmdLine = args.mid(1).join(QStringLiteral(" "));
+
+	bool              bAutoOpen = true;
 
 	if (cmdLine.isEmpty())
 	{
@@ -3330,7 +3728,7 @@ bool AppController::openWorldDocument(const QString &path)
 	const bool smootherScrolling = getGlobalOption(QStringLiteral("SmootherScrolling")).toInt() != 0;
 	const bool bleedBackground   = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
 
-	auto applyViewGlobalOptions = [&](WorldView *view)
+	auto       applyViewGlobalOptions = [&](WorldView *view)
 	{
 		if (!view)
 			return;
@@ -3576,6 +3974,8 @@ bool AppController::openWorldDocument(const QString &path)
 void AppController::maybeAutoConnectWorld(WorldRuntime *runtime) const
 {
 	if (!runtime)
+		return;
+	if (m_suppressAutoConnect)
 		return;
 	if (getGlobalOption(QStringLiteral("AutoConnectWorlds")).toInt() == 0)
 		return;
@@ -5275,22 +5675,24 @@ void AppController::finalizeStartupIfReady()
 		return;
 	}
 
-	if (m_startupFirstTime)
+	if (!m_reloadLaunchRequested && m_startupFirstTime)
 	{
 		WelcomeDialog dlg(QStringLiteral("I notice that this is the first time you have used"
 		                                 " QMud on this PC."),
 		                  m_mainWindow);
 		dlg.exec();
 	}
-	else if (m_startupNeedsUpgradeWelcome)
+	else if (!m_reloadLaunchRequested && m_startupNeedsUpgradeWelcome)
 	{
 		showUpgradeWelcomeIfNeeded();
 	}
 
 	setupStartupBehavior();
 
-	if (m_startupFirstTime)
+	if (!m_reloadLaunchRequested && m_startupFirstTime)
 		showGettingStartedIfNeeded();
+	if (m_reloadLaunchRequested && m_startupNeedsUpgradeWelcome)
+		showUpgradeWelcomeIfNeeded();
 
 	m_startupFirstTime           = false;
 	m_startupNeedsUpgradeWelcome = false;
@@ -5586,13 +5988,13 @@ int AppController::populateDatabase() const
 
 void AppController::loadGlobalsFromDatabase()
 {
-		const auto legacyGlobalKeyForCanonical = [](const QString &key) -> QString
-		{
-			if (key == QStringLiteral("ConfirmBeforeClosingQmud"))
-				return QStringLiteral("ConfirmBeforeClosingMushclient");
-			if (key == QStringLiteral("DefaultInputFontItalic"))
-				return QStringLiteral("DefaultInputFontItalic ");
-			if (key == QStringLiteral("DefaultOutputFont"))
+	const auto legacyGlobalKeyForCanonical = [](const QString &key) -> QString
+	{
+		if (key == QStringLiteral("ConfirmBeforeClosingQmud"))
+			return QStringLiteral("ConfirmBeforeClosingMushclient");
+		if (key == QStringLiteral("DefaultInputFontItalic"))
+			return QStringLiteral("DefaultInputFontItalic ");
+		if (key == QStringLiteral("DefaultOutputFont"))
 			return QStringLiteral("DefaultOutputFont ");
 		if (key == QStringLiteral("DefaultTimersFile"))
 			return QStringLiteral("DefaultTimersFile ");
@@ -6075,6 +6477,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		handleGameMinimize();
 	else if (cmdName == QStringLiteral("LogSession"))
 		handleLogSession();
+	else if (cmdName == QStringLiteral("ReloadQMud"))
+		handleReloadQmud();
 	else if (cmdName == QStringLiteral("GameWrapLines"))
 	{
 		if (!m_mainWindow)
@@ -6449,9 +6853,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!runtime || !view)
 			return;
 
-		const WorldPreferencesDialog::Page page =
-		    QMudWorldPreferencesRouting::initialPageForCommand(cmdName, runtime->lastPreferencesPage(),
-		                                                       isCommand);
+		const WorldPreferencesDialog::Page page = QMudWorldPreferencesRouting::initialPageForCommand(
+		    cmdName, runtime->lastPreferencesPage(), isCommand);
 
 		WorldPreferencesDialog dlg(runtime, view, m_mainWindow);
 		dlg.setInitialPage(page);
@@ -8902,7 +9305,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				return;
 			out << nl << "<!--  Triggers  -->" << nl << nl;
 			out << "<triggers" << nl;
-				saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
+			saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
 			saveXmlNumber(out, nl, "world_file_version", kThisVersion);
 			out << "  >" << nl;
 			std::ranges::stable_sort(triggers,
@@ -8947,14 +9350,14 @@ void AppController::onCommandTriggered(const QString &cmdName)
 					if (ok && value != 0)
 						saveXmlNumber(out, nl, "custom_colour", value);
 				}
-					num("colour_change_type");
-					if (const bool triggerEnabled =
-					        isEnabledFlag(tr->attributes.value(QStringLiteral("enabled")));
-					    triggerEnabled)
-						saveXmlBoolean(out, nl, "enabled", true);
-					else
-						out << "   enabled=\"n\"" << nl;
-					boolean("expand_variables");
+				num("colour_change_type");
+				if (const bool triggerEnabled =
+				        isEnabledFlag(tr->attributes.value(QStringLiteral("enabled")));
+				    triggerEnabled)
+					saveXmlBoolean(out, nl, "enabled", true);
+				else
+					out << "   enabled=\"n\"" << nl;
+				boolean("expand_variables");
 				text("group");
 				boolean("ignore_case");
 				boolean("inverse");
@@ -9024,7 +9427,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				return;
 			out << nl << "<!--  Aliases  -->" << nl << nl;
 			out << "<aliases" << nl;
-				saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
+			saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
 			saveXmlNumber(out, nl, "world_file_version", kThisVersion);
 			out << "  >" << nl;
 			std::ranges::stable_sort(aliases,
@@ -9039,12 +9442,11 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				saveXmlString(out, nl, "name", al->attributes.value(QStringLiteral("name")));
 				saveXmlString(out, nl, "script", al->attributes.value(QStringLiteral("script")));
 				saveXmlString(out, nl, "match", al->attributes.value(QStringLiteral("match")));
-					if (const bool aliasEnabled =
-					        isEnabledFlag(al->attributes.value(QStringLiteral("enabled")));
-					    aliasEnabled)
-						saveXmlBoolean(out, nl, "enabled", true);
-					else
-						out << "   enabled=\"n\"" << nl;
+				if (const bool aliasEnabled = isEnabledFlag(al->attributes.value(QStringLiteral("enabled")));
+				    aliasEnabled)
+					saveXmlBoolean(out, nl, "enabled", true);
+				else
+					out << "   enabled=\"n\"" << nl;
 				saveXmlBoolean(out, nl, "echo_alias",
 				               isEnabledFlag(al->attributes.value(QStringLiteral("echo_alias"))));
 				saveXmlBoolean(out, nl, "expand_variables",
@@ -9113,7 +9515,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				return;
 			out << nl << "<!--  Timers  -->" << nl << nl;
 			out << "<timers" << nl;
-				saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
+			saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
 			saveXmlNumber(out, nl, "world_file_version", kThisVersion);
 			out << "  >" << nl;
 			for (const auto *tm : timers)
@@ -9121,12 +9523,11 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				out << "  <timer ";
 				saveXmlString(out, nl, "name", tm->attributes.value(QStringLiteral("name")), true);
 				saveXmlString(out, nl, "script", tm->attributes.value(QStringLiteral("script")), true);
-					if (const bool timerEnabled =
-					        isEnabledFlag(tm->attributes.value(QStringLiteral("enabled")));
-					    timerEnabled)
-						saveXmlBoolean(out, nl, "enabled", true, true);
-					else
-						out << "enabled=\"n\" ";
+				if (const bool timerEnabled = isEnabledFlag(tm->attributes.value(QStringLiteral("enabled")));
+				    timerEnabled)
+					saveXmlBoolean(out, nl, "enabled", true, true);
+				else
+					out << "enabled=\"n\" ";
 				bool            ok   = false;
 				const long long hour = tm->attributes.value(QStringLiteral("hour")).toLongLong(&ok);
 				if (ok)
@@ -9192,7 +9593,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				return;
 			out << nl << "<!--  Variables  -->" << nl << nl;
 			out << "<variables" << nl;
-				saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
+			saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
 			saveXmlNumber(out, nl, "world_file_version", kThisVersion);
 			out << "  >" << nl;
 			std::ranges::stable_sort(vars,
@@ -9231,7 +9632,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		{
 			out << nl << "<!--  Plugin help  -->" << nl << nl;
 			out << "<aliases" << nl;
-				saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
+			saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
 			saveXmlNumber(out, nl, "world_file_version", kThisVersion);
 			out << "  >" << nl;
 			out << "  <alias" << nl;
@@ -11342,6 +11743,327 @@ void AppController::handleLogSession() const
 				runtime->writeLog(QStringLiteral("\n"));
 		}
 	}
+}
+
+void AppController::handleReloadQmud()
+{
+#if !defined(Q_OS_LINUX) && !defined(Q_OS_MACOS)
+	QMessageBox::information(m_mainWindow, QStringLiteral("Reload QMud"),
+	                         QStringLiteral("Reload QMud is currently available only on Linux and macOS."));
+#else
+	if (m_reloadInProgress)
+	{
+		QMessageBox::information(m_mainWindow, QStringLiteral("Reload QMud"),
+		                         QStringLiteral("A reload operation is already in progress."));
+		return;
+	}
+	if (QWidget *activeModal = QApplication::activeModalWidget(); activeModal && activeModal != m_mainWindow)
+	{
+		QMessageBox::information(m_mainWindow, QStringLiteral("Reload QMud"),
+		                         QStringLiteral("Close the active dialog before reloading QMud."));
+		return;
+	}
+
+	const bool    autoConfirmReload    = envFlagEnabled("QMUD_RELOAD_ASSUME_YES");
+	const bool    verboseReloadLogs    = envFlagEnabled("QMUD_RELOAD_VERBOSE");
+	constexpr int mccpDisableTimeoutMs = kReloadMccpDisableTimeoutMs;
+	if (!autoConfirmReload)
+	{
+		if (QMessageBox::question(
+		        m_mainWindow, QStringLiteral("Reload QMud"),
+		        QStringLiteral("QMud will restart in place and restore open worlds.\n\nContinue?"),
+		        QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok)
+			return;
+	}
+	else
+	{
+		if (verboseReloadLogs)
+			qInfo() << kReloadLogTag << "Auto-confirm enabled by QMUD_RELOAD_ASSUME_YES.";
+	}
+
+	++m_reloadAttempts;
+	m_reloadInProgress = true;
+	if (m_mainWindow)
+		m_mainWindow->showStatusMessage(QStringLiteral("Preparing Reload QMud..."), 0);
+	qInfo() << kReloadLogTag << "Preparing reload handoff. attempt=" << m_reloadAttempts
+	        << "exec_failures=" << m_reloadExecFailures << "recoveries=" << m_reloadRecoveryRuns
+	        << "mccp_disable_timeout_ms=" << mccpDisableTimeoutMs;
+
+	QVector<int> inheritableDescriptors;
+	bool         snapshotWritten    = false;
+	auto         restoreDescriptors = [&inheritableDescriptors]()
+	{
+		for (const int descriptor : std::as_const(inheritableDescriptors))
+		{
+			QString ignoredError;
+			(void)setSocketDescriptorInheritable(descriptor, false, &ignoredError);
+		}
+	};
+	auto failReload =
+	    [this, &snapshotWritten, &restoreDescriptors](const QString &statePath, const QString &message)
+	{
+		++m_reloadExecFailures;
+		restoreDescriptors();
+		if (snapshotWritten)
+		{
+			QString cleanupError;
+			if (!removeReloadStateFile(statePath, &cleanupError) && !cleanupError.isEmpty())
+				qWarning() << "Reload cleanup failed after setup error:" << cleanupError;
+		}
+		if (m_mainWindow)
+		{
+			const QString summary = message.section(QLatin1Char('\n'), 0, 0).trimmed();
+			m_mainWindow->showStatusMessage(summary.isEmpty()
+			                                    ? QStringLiteral("Reload failed.")
+			                                    : QStringLiteral("Reload failed: %1").arg(summary),
+			                                7000);
+		}
+		qWarning() << kReloadLogTag << "Reload failure detail:" << message;
+		qWarning() << kReloadLogTag << "Reload setup failed. attempt=" << m_reloadAttempts
+		           << "exec_failures=" << m_reloadExecFailures;
+		m_reloadInProgress = false;
+	};
+
+	const QString executablePath = QCoreApplication::applicationFilePath();
+	if (executablePath.trimmed().isEmpty())
+	{
+		failReload(QString(), QStringLiteral("Unable to determine executable path for reload."));
+		return;
+	}
+
+	QString statePath = reloadStateDefaultPath(m_workingDir);
+	if (const QFileInfo info(statePath); info.isRelative())
+		statePath = QDir(m_workingDir).filePath(statePath);
+	const QString       reloadToken = generateReloadToken();
+
+	ReloadStateSnapshot snapshot;
+	snapshot.schemaVersion    = 1;
+	snapshot.createdAtUtc     = QDateTime::currentDateTimeUtc();
+	snapshot.reloadToken      = reloadToken;
+	snapshot.sourcePid        = static_cast<qint64>(QCoreApplication::applicationPid());
+	snapshot.targetExecutable = executablePath;
+
+	QStringList arguments = QCoreApplication::arguments();
+	if (arguments.isEmpty())
+		arguments.push_back(executablePath);
+	else
+		arguments[0] = executablePath;
+	const QString reloadStatePrefix = QString::fromLatin1(kReloadStateArgName) + QLatin1Char('=');
+	const QString reloadTokenPrefix = QString::fromLatin1(kReloadTokenArgName) + QLatin1Char('=');
+	for (const QString &arg : std::as_const(arguments))
+	{
+		if (arg.startsWith(reloadStatePrefix) || arg.startsWith(reloadTokenPrefix))
+			continue;
+		snapshot.arguments.push_back(arg);
+	}
+	snapshot.arguments.push_back(makeReloadArgument(QString::fromLatin1(kReloadStateArgName), statePath));
+	snapshot.arguments.push_back(makeReloadArgument(QString::fromLatin1(kReloadTokenArgName), reloadToken));
+
+	MainWindowHost                      *host = resolveMainWindowHost(m_mainWindow);
+	const QVector<WorldWindowDescriptor> worlds =
+	    host ? host->worldWindowDescriptors() : QVector<WorldWindowDescriptor>{};
+	snapshot.worlds.reserve(worlds.size());
+	struct ReloadPlanRuntimeContext
+	{
+			QPointer<WorldRuntime> runtime;
+			bool                   connected{false};
+			bool                   connecting{false};
+	};
+	QVector<ReloadPlanRuntimeContext> runtimeContexts;
+	runtimeContexts.reserve(worlds.size());
+	struct PendingMccpDisable
+	{
+			int                    worldIndex{-1};
+			QPointer<WorldRuntime> runtime;
+			QString                displayName;
+	};
+	QVector<PendingMccpDisable> pendingMccpDisables;
+	pendingMccpDisables.reserve(worlds.size());
+	int connectedWorlds = 0;
+	int reattachWorlds  = 0;
+	int reconnectWorlds = 0;
+	int mccpFallbacks   = 0;
+
+	for (const WorldWindowDescriptor &entry : worlds)
+	{
+		WorldRuntime *runtime = entry.runtime;
+		if (!runtime)
+			continue;
+
+		ReloadWorldState world;
+		world.sequence = entry.sequence;
+		if (entry.window)
+			world.displayName = entry.window->windowTitle().trimmed();
+
+		const QMap<QString, QString> &attrs = runtime->worldAttributes();
+		world.worldId                       = attrs.value(QStringLiteral("id")).trimmed();
+		if (world.displayName.isEmpty())
+			world.displayName = attrs.value(QStringLiteral("name")).trimmed();
+		world.worldFilePath = runtime->worldFilePath();
+		world.host          = attrs.value(QStringLiteral("site")).trimmed();
+		world.port          = attrs.value(QStringLiteral("port")).toUShort();
+		world.utf8Enabled   = isEnabledFlag(attrs.value(QStringLiteral("utf_8")));
+
+		const bool connected  = runtime->isConnected();
+		const bool connecting = runtime->isConnecting();
+		runtimeContexts.push_back({runtime, connected, connecting});
+		world.socketDescriptor = runtime->nativeSocketDescriptor();
+		world.mccpWasActive    = runtime->isCompressing() || runtime->mccpType() != 0;
+		if (shouldAttemptReloadMccpDisable(connected, world.socketDescriptor, world.mccpWasActive))
+		{
+			world.mccpDisableAttempted = true;
+			runtime->queueMccpDisableForReload();
+			pendingMccpDisables.push_back(
+			    {static_cast<int>(snapshot.worlds.size()), runtime, world.displayName});
+		}
+		snapshot.worlds.push_back(world);
+	}
+	if (!pendingMccpDisables.isEmpty())
+	{
+		QElapsedTimer waitTimer;
+		waitTimer.start();
+		auto allMccpDisabled = [&pendingMccpDisables]() -> bool
+		{
+			return std::ranges::all_of(
+			    pendingMccpDisables, [](const PendingMccpDisable &pending)
+			    { return !pending.runtime || pending.runtime->isMccpDisableCompleteForReload(); });
+		};
+		while (!allMccpDisabled() && waitTimer.elapsed() < mccpDisableTimeoutMs)
+			QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+	}
+	for (const PendingMccpDisable &pending : std::as_const(pendingMccpDisables))
+	{
+		if (pending.worldIndex < 0 || pending.worldIndex >= snapshot.worlds.size())
+			continue;
+		ReloadWorldState &world = snapshot.worlds[pending.worldIndex];
+		if (!pending.runtime)
+		{
+			world.mccpDisableSucceeded = false;
+			continue;
+		}
+		world.mccpDisableSucceeded = pending.runtime->isMccpDisableCompleteForReload();
+		if (!world.mccpDisableSucceeded)
+			++mccpFallbacks;
+		if (verboseReloadLogs)
+		{
+			qInfo() << kReloadLogTag << "MCCP disable"
+			        << (world.mccpDisableSucceeded ? "succeeded" : "timed out") << "for"
+			        << (pending.displayName.isEmpty() ? QStringLiteral("<unnamed>") : pending.displayName);
+		}
+	}
+	QVector<int> droppedWorldIndices;
+	for (int i = 0; i < snapshot.worlds.size() && i < runtimeContexts.size(); ++i)
+	{
+		ReloadWorldState               &world = snapshot.worlds[i];
+		const ReloadPlanRuntimeContext &ctx   = runtimeContexts[i];
+		if (!ctx.runtime)
+		{
+			droppedWorldIndices.push_back(i);
+			continue;
+		}
+		const ReloadWorldPolicyDecision policyDecision =
+		    computeReloadWorldPolicy({ctx.connected, ctx.connecting, world.socketDescriptor,
+		                              world.mccpWasActive, world.mccpDisableSucceeded});
+		world.connectedAtReload = policyDecision.connectedAtReload;
+		world.policy            = policyDecision.policy;
+
+		if (!world.connectedAtReload)
+			continue;
+		++connectedWorlds;
+		if (policyDecision.shouldAttemptDescriptorInheritance)
+		{
+			QString inheritError;
+			if (!setSocketDescriptorInheritable(world.socketDescriptor, true, &inheritError))
+			{
+				world.notes =
+				    QStringLiteral("Failed to preserve socket across reload: %1").arg(inheritError.trimmed());
+				world.socketDescriptor = -1;
+				world.policy           = ReloadSocketPolicy::ParkReconnect;
+			}
+			else if (!inheritableDescriptors.contains(world.socketDescriptor))
+			{
+				inheritableDescriptors.push_back(world.socketDescriptor);
+			}
+		}
+		else
+		{
+			world.notes = QStringLiteral("No socket descriptor available; reconnect fallback required.");
+		}
+		if (world.policy == ReloadSocketPolicy::Reattach)
+			++reattachWorlds;
+		else
+			++reconnectWorlds;
+	}
+	for (qsizetype idx = droppedWorldIndices.size(); idx > 0; --idx)
+		snapshot.worlds.removeAt(droppedWorldIndices.at(idx - 1));
+	qInfo() << kReloadLogTag << "Plan summary:"
+	        << "worlds=" << snapshot.worlds.size() << "connected=" << connectedWorlds
+	        << "reattach=" << reattachWorlds << "reconnect=" << reconnectWorlds
+	        << "fallbacks=" << mccpFallbacks;
+	if (mccpFallbacks > 0)
+	{
+		if (verboseReloadLogs)
+		{
+			qInfo() << kReloadLogTag << mccpFallbacks
+			        << "world(s) downgraded to reconnect due to MCCP fallback.";
+		}
+		if (m_mainWindow)
+		{
+			m_mainWindow->showStatusMessage(
+			    QStringLiteral("Reload: %1 world(s) will reconnect due to MCCP fallback.").arg(mccpFallbacks),
+			    5000);
+		}
+	}
+
+	QString writeError;
+	if (!writeReloadStateSnapshot(statePath, snapshot, &writeError))
+	{
+		failReload(statePath, QStringLiteral("Failed to write reload state file:\n%1").arg(writeError));
+		return;
+	}
+	snapshotWritten = true;
+
+	if (const bool dryRunReload = envFlagEnabled("QMUD_RELOAD_DRY_RUN"); dryRunReload)
+	{
+		qInfo() << kReloadLogTag << "Dry-run enabled by QMUD_RELOAD_DRY_RUN; skipping exec.";
+		restoreDescriptors();
+		QString cleanupError;
+		if (!removeReloadStateFile(statePath, &cleanupError) && !cleanupError.isEmpty())
+			qWarning() << kReloadLogTag << "Dry-run cleanup failed:" << cleanupError;
+		m_reloadInProgress = false;
+		if (m_mainWindow)
+			m_mainWindow->showStatusMessage(QStringLiteral("Reload dry-run completed."), 4000);
+		return;
+	}
+
+	QByteArray executablePathBytes = QFile::encodeName(executablePath);
+	if (executablePathBytes.isEmpty())
+	{
+		failReload(statePath, QStringLiteral("Failed to encode executable path for reload."));
+		return;
+	}
+
+	std::vector<QByteArray> argvStorage;
+	argvStorage.reserve(snapshot.arguments.size());
+	for (const QString &arg : std::as_const(snapshot.arguments))
+		argvStorage.push_back(QFile::encodeName(arg));
+	if (argvStorage.empty())
+		argvStorage.push_back(executablePathBytes);
+
+	std::vector<char *> argv;
+	argv.reserve(argvStorage.size() + 1);
+	for (QByteArray &arg : argvStorage)
+		argv.push_back(arg.data());
+	argv.push_back(nullptr);
+
+	execv(executablePathBytes.constData(), argv.data());
+
+	const int savedErrno = errno;
+	qWarning() << kReloadLogTag << "execv failed with errno" << savedErrno;
+	failReload(
+	    statePath,
+	    QStringLiteral("Failed to reload QMud:\n%1").arg(QString::fromLocal8Bit(strerror(savedErrno))));
+#endif
 }
 
 AppController::ImportResult AppController::importXmlFromFile(const QString &path, const unsigned long mask)

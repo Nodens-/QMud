@@ -14,6 +14,7 @@
 #include <QAbstractSocket>
 #include <QObject>
 #include <QString>
+#include <QtGlobal>
 
 /**
  * @brief Connection preferences bundle applied to world socket services.
@@ -103,6 +104,23 @@ class WorldSocketService : public QObject
 		 * @return Peer IPv4 address.
 		 */
 		[[nodiscard]] virtual quint32 peerAddressV4() const = 0;
+		/**
+		 * @brief Returns native descriptor for active transport socket.
+		 * @return Native descriptor, or `-1` when unavailable.
+		 */
+		[[nodiscard]] virtual qintptr nativeSocketDescriptor() const = 0;
+		/**
+		 * @brief Adopts an already-connected native socket descriptor.
+		 * @param descriptor Descriptor to adopt.
+		 * @param errorMessage Optional output error text.
+		 * @return `true` when adoption succeeds.
+		 */
+		virtual bool                  adoptConnectedSocketDescriptor(qintptr descriptor,
+		                                                             QString *errorMessage) = 0;
+		/**
+		 * @brief Immediately aborts the underlying socket.
+		 */
+		virtual void                  abortSocket() = 0;
 		/**
 		 * @brief Reports whether socket is currently connecting.
 		 * @return `true` when connection attempt is in progress.

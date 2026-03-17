@@ -112,6 +112,20 @@ class TelnetProcessor
 		 */
 		void       setDisableCompression(bool enabled);
 		/**
+		 * @brief Queues telnet negotiation bytes that request MCCP disable.
+		 *
+		 * Emits `IAC DONT` for the currently active MCCP option (v2 by default)
+		 * so the server can stop compressed output before reload handoff.
+		 */
+		void       queueDisableCompressionNegotiation();
+		/**
+		 * @brief Queues telnet negotiation bytes that request MCCP v2 enable.
+		 *
+		 * Emits `IAC DO COMPRESS2` so servers that support MCCP v2 can restart
+		 * compression after reload socket reattach.
+		 */
+		void       queueEnableCompression2Negotiation();
+		/**
 		 * @brief Installs callback targets used for telnet and MXP events.
 		 * @param callbacks Callback table.
 		 */

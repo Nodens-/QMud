@@ -8,8 +8,8 @@
  */
 
 #include "WorldRuntime.h"
-#include "AppController.h"
 #include "AnsiSgrParseUtils.h"
+#include "AppController.h"
 #include "Blending.h"
 #include "ColorUtils.h"
 #include "CommandMappingTypes.h"
@@ -41,6 +41,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
@@ -3059,15 +3060,15 @@ namespace
 	FixedColumnWrapConfig fixedColumnWrapConfig(const QMap<QString, QString> &attrs)
 	{
 		FixedColumnWrapConfig config;
-		const bool            wrapEnabled    = isEnabledFlag(attrs.value(QStringLiteral("wrap")));
-		const bool            autoWrapWindow = isEnabledFlag(attrs.value(QStringLiteral("auto_wrap_window_width")));
-		const bool            nawsEnabled    = isEnabledFlag(attrs.value(QStringLiteral("naws")));
-		config.wrapColumn                   = attrs.value(QStringLiteral("wrap_column")).toInt();
-		config.enabled                      = wrapEnabled && !autoWrapWindow && config.wrapColumn > 0 && !nawsEnabled;
-		const QString indentValue           = attrs.value(QStringLiteral("indent_paras"));
-		config.indentParas =
-		    !(indentValue == QStringLiteral("0") || indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
-		      indentValue.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+		const bool            wrapEnabled = isEnabledFlag(attrs.value(QStringLiteral("wrap")));
+		const bool autoWrapWindow = isEnabledFlag(attrs.value(QStringLiteral("auto_wrap_window_width")));
+		const bool nawsEnabled    = isEnabledFlag(attrs.value(QStringLiteral("naws")));
+		config.wrapColumn         = attrs.value(QStringLiteral("wrap_column")).toInt();
+		config.enabled            = wrapEnabled && !autoWrapWindow && config.wrapColumn > 0 && !nawsEnabled;
+		const QString indentValue = attrs.value(QStringLiteral("indent_paras"));
+		config.indentParas        = !(indentValue == QStringLiteral("0") ||
+                               indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+                               indentValue.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
 		return config;
 	}
 
@@ -3127,9 +3128,12 @@ namespace
 	void wrapPlainLineForColumn(QString &text, const int wrapColumn, const bool indentParas)
 	{
 		if (wrapColumn <= 0 || text.isEmpty())
+		{
 			return;
+		}
+		constexpr auto kNoBoundary = qsizetype{-1};
 
-		QString wrappedText;
+		QString        wrappedText;
 		wrappedText.reserve(safeQSizeToInt(text.size() + text.size() / qMax(1, wrapColumn)));
 
 		int  column             = 0;
@@ -3154,20 +3158,22 @@ namespace
 			QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme, wrappedText);
 			boundary.setPosition(lineStart);
 			const QStringView wrappedView{wrappedText};
-			for (int graphemeStart = lineStart, graphemeEnd = boundary.toNextBoundary(); graphemeEnd != -1;
+			for (qsizetype graphemeStart = static_cast<qsizetype>(lineStart),
+			               graphemeEnd   = boundary.toNextBoundary();
+			     graphemeEnd != kNoBoundary;
 			     graphemeStart = graphemeEnd, graphemeEnd = boundary.toNextBoundary())
 			{
 				const QStringView grapheme = wrappedView.sliced(graphemeStart, graphemeEnd - graphemeStart);
 				if (isSingleCharGrapheme(grapheme, QLatin1Char('\n')))
 				{
-					lineStart          = graphemeEnd;
+					lineStart          = boundedQSizeToInt(graphemeEnd);
 					column             = 0;
 					lastSpace          = -1;
 					lineHasVisibleChar = false;
 					continue;
 				}
 				if (isSingleCharGrapheme(grapheme, QLatin1Char(' ')))
-					lastSpace = graphemeEnd - 1;
+					lastSpace = boundedQSizeToInt(graphemeEnd - 1);
 				if (!isWhitespaceGrapheme(grapheme))
 					lineHasVisibleChar = true;
 				column += graphemeColumnWidthForWrap(grapheme);
@@ -3176,7 +3182,7 @@ namespace
 
 		QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme, text);
 		const QStringView   textView{text};
-		for (int graphemeStart = 0, graphemeEnd = boundary.toNextBoundary(); graphemeEnd != -1;
+		for (qsizetype graphemeStart = 0, graphemeEnd = boundary.toNextBoundary(); graphemeEnd != kNoBoundary;
 		     graphemeStart = graphemeEnd, graphemeEnd = boundary.toNextBoundary())
 		{
 			const QStringView grapheme = textView.sliced(graphemeStart, graphemeEnd - graphemeStart);
@@ -3235,6 +3241,8 @@ namespace
 		if (wrapColumn <= 0 || text.isEmpty())
 			return;
 
+		constexpr auto                   kNoBoundary = qsizetype{-1};
+
 		QVector<WorldRuntime::StyleSpan> expandedStyles;
 		expandedStyles.reserve(text.size());
 		WorldRuntime::StyleSpan lastStyle;
@@ -3279,20 +3287,22 @@ namespace
 			QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme, wrappedText);
 			boundary.setPosition(lineStart);
 			const QStringView wrappedView{wrappedText};
-			for (int graphemeStart = lineStart, graphemeEnd = boundary.toNextBoundary(); graphemeEnd != -1;
+			for (qsizetype graphemeStart = static_cast<qsizetype>(lineStart),
+			               graphemeEnd   = boundary.toNextBoundary();
+			     graphemeEnd != kNoBoundary;
 			     graphemeStart = graphemeEnd, graphemeEnd = boundary.toNextBoundary())
 			{
 				const QStringView grapheme = wrappedView.sliced(graphemeStart, graphemeEnd - graphemeStart);
 				if (isSingleCharGrapheme(grapheme, QLatin1Char('\n')))
 				{
-					lineStart          = graphemeEnd;
+					lineStart          = boundedQSizeToInt(graphemeEnd);
 					column             = 0;
 					lastSpace          = -1;
 					lineHasVisibleChar = false;
 					continue;
 				}
 				if (isSingleCharGrapheme(grapheme, QLatin1Char(' ')))
-					lastSpace = graphemeEnd - 1;
+					lastSpace = boundedQSizeToInt(graphemeEnd - 1);
 				if (!isWhitespaceGrapheme(grapheme))
 					lineHasVisibleChar = true;
 				column += graphemeColumnWidthForWrap(grapheme);
@@ -3301,14 +3311,14 @@ namespace
 
 		QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme, text);
 		const QStringView   textView{text};
-		for (int graphemeStart = 0, graphemeEnd = boundary.toNextBoundary(); graphemeEnd != -1;
+		for (qsizetype graphemeStart = 0, graphemeEnd = boundary.toNextBoundary(); graphemeEnd != kNoBoundary;
 		     graphemeStart = graphemeEnd, graphemeEnd = boundary.toNextBoundary())
 		{
 			const QStringView grapheme = textView.sliced(graphemeStart, graphemeEnd - graphemeStart);
 			wrappedText.append(grapheme);
-			for (int i = graphemeStart; i < graphemeEnd; ++i)
-				wrappedStyles.push_back(expandedStyles.value(i));
-			const WorldRuntime::StyleSpan style = expandedStyles.value(graphemeEnd - 1);
+			for (qsizetype i = graphemeStart; i < graphemeEnd; ++i)
+				wrappedStyles.push_back(expandedStyles.value(boundedQSizeToInt(i)));
+			const WorldRuntime::StyleSpan style = expandedStyles.value(boundedQSizeToInt(graphemeEnd - 1));
 
 			if (isSingleCharGrapheme(grapheme, QLatin1Char('\n')))
 			{
@@ -3697,31 +3707,31 @@ namespace
 	constexpr int OPT_COMMAND_STACK = 0x000008;
 	constexpr int OPT_WORLD_ID      = 0x000010;
 
-		struct WorldNumericSaveOption
-		{
-				constexpr WorldNumericSaveOption(const char *name, const long long defaultValue)
-				    : name(name), defaultValue(defaultValue), min(0), max(0), flags(0)
-				{
-				}
+	struct WorldNumericSaveOption
+	{
+			constexpr WorldNumericSaveOption(const char *name, const long long defaultValue)
+			    : name(name), defaultValue(defaultValue), min(0), max(0), flags(0)
+			{
+			}
 
-				constexpr WorldNumericSaveOption(const char *name, const long long defaultValue,
-				                                 const long long min, const long long max)
-				    : name(name), defaultValue(defaultValue), min(min), max(max), flags(0)
-				{
-				}
+			constexpr WorldNumericSaveOption(const char *name, const long long defaultValue,
+			                                 const long long min, const long long max)
+			    : name(name), defaultValue(defaultValue), min(min), max(max), flags(0)
+			{
+			}
 
-				constexpr WorldNumericSaveOption(const char *name, const long long defaultValue,
-				                                 const long long min, const long long max, const int flags)
-				    : name(name), defaultValue(defaultValue), min(min), max(max), flags(flags)
-				{
-				}
+			constexpr WorldNumericSaveOption(const char *name, const long long defaultValue,
+			                                 const long long min, const long long max, const int flags)
+			    : name(name), defaultValue(defaultValue), min(min), max(max), flags(flags)
+			{
+			}
 
-				const char *name;
-				long long   defaultValue;
-				long long   min;
-				long long   max;
-				int         flags;
-		};
+			const char *name;
+			long long   defaultValue;
+			long long   min;
+			long long   max;
+			int         flags;
+	};
 
 	struct WorldAlphaSaveOption
 	{
@@ -4026,18 +4036,18 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 		else
 			mxpError(DBG_INFO, infoMXP_on, QStringLiteral("MXP turned on."));
 	};
-		callbacks.onMxpReset = [this]
+	callbacks.onMxpReset = [this]
+	{
+		if (m_mxpActive)
 		{
-			if (m_mxpActive)
-			{
-				m_mxpTagStack.clear();
-				m_mxpOpenTags.clear();
-				m_mxpTextBuffer.clear();
-				resetMxpRenderState();
-				clearAnsiActionContext();
-			}
-			mxpError(DBG_INFO, infoMXP_ResetReceived, QStringLiteral("MXP reset."));
-		};
+			m_mxpTagStack.clear();
+			m_mxpOpenTags.clear();
+			m_mxpTextBuffer.clear();
+			resetMxpRenderState();
+			clearAnsiActionContext();
+		}
+		mxpError(DBG_INFO, infoMXP_ResetReceived, QStringLiteral("MXP reset."));
+	};
 	callbacks.onMxpStop = [this](bool completely, bool puebloActive)
 	{
 		if (!completely)
@@ -4054,14 +4064,14 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 		// Defensive state barrier: when MXP transitions to a locked/reset mode,
 		// drop open render/tag state so secure link/style spans cannot leak into
 		// subsequent plain text.
-			if (newMode == 3 || isLockedMode(newMode))
-			{
-				m_mxpTagStack.clear();
-				m_mxpOpenTags.clear();
-				m_mxpTextBuffer.clear();
-				resetMxpRenderState();
-				clearAnsiActionContext();
-			}
+		if (newMode == 3 || isLockedMode(newMode))
+		{
+			m_mxpTagStack.clear();
+			m_mxpOpenTags.clear();
+			m_mxpTextBuffer.clear();
+			resetMxpRenderState();
+			clearAnsiActionContext();
+		}
 
 		if (!shouldLog)
 			return;
@@ -4274,6 +4284,9 @@ void WorldRuntime::clearAnsiActionContext()
 
 void WorldRuntime::receiveRawData(const QByteArray &data)
 {
+	if (m_incomingSocketDataPaused)
+		return;
+
 	if (data.isEmpty())
 		return;
 
@@ -4489,9 +4502,9 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		return decoded;
 	};
 
-	QList<TelnetProcessor::MxpEvent>      events      = m_telnet.takeMxpEvents();
-	QList<TelnetProcessor::MxpModeChange> modeChanges = m_telnet.takeMxpModeChanges();
-	auto resetMxpTrackingState = [this]
+	QList<TelnetProcessor::MxpEvent>      events                = m_telnet.takeMxpEvents();
+	QList<TelnetProcessor::MxpModeChange> modeChanges           = m_telnet.takeMxpModeChanges();
+	auto                                  resetMxpTrackingState = [this]
 	{
 		m_mxpTagStack.clear();
 		m_mxpOpenTags.clear();
@@ -4499,11 +4512,10 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		resetMxpRenderState();
 		clearAnsiActionContext();
 	};
-	const bool hasActiveMxpParserContext =
-	    !m_mxpTagStack.isEmpty() || !m_mxpRenderStack.isEmpty() || !m_mxpRenderBlockStack.isEmpty() ||
-	    m_mxpRenderLinkOpen;
+	const bool hasActiveMxpParserContext = !m_mxpTagStack.isEmpty() || !m_mxpRenderStack.isEmpty() ||
+	                                       !m_mxpRenderBlockStack.isEmpty() || m_mxpRenderLinkOpen;
 	const bool keepMxpTextBuffer = !events.isEmpty() || !modeChanges.isEmpty() || hasActiveMxpParserContext;
-	int                                    mxpBaseOffset     = 0;
+	int        mxpBaseOffset     = 0;
 	if (keepMxpTextBuffer)
 	{
 		mxpBaseOffset = safeQSizeToInt(m_mxpTextBuffer.size());
@@ -4661,7 +4673,7 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		QString            lineText  = m_partialLineText;
 		QVector<StyleSpan> lineSpans = m_partialLineSpans;
 
-		auto colorFromIndex = [](int idx) -> QString
+		auto               colorFromIndex = [](int idx) -> QString
 		{
 			if (idx < 0 || idx >= 256)
 				return {};
@@ -4786,11 +4798,10 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		ansiState.startTag   = current.startTag;
 		ansiState.monospace  = current.monospace;
 
-		constexpr QMudOscActionIds oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
-		const QVector<QMudStyledChunk> chunks =
-		    qmudParseAnsiSgrChunks(processed, m_ansiStreamState, defaultFore, defaultBack,
-		                           normalAnsiColorFromIndex, boldAnsiColorFromIndex, colorFromIndex,
-		                           decodeIncomingDisplayBytes, ansiState, oscActionIds);
+		constexpr QMudOscActionIds     oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
+		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+		    processed, m_ansiStreamState, defaultFore, defaultBack, normalAnsiColorFromIndex,
+		    boldAnsiColorFromIndex, colorFromIndex, decodeIncomingDisplayBytes, ansiState, oscActionIds);
 		for (const QMudStyledChunk &chunk : chunks)
 			appendDecodedSegment(chunk.text, chunk.state);
 
@@ -4824,34 +4835,33 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 	    luaEnabled ? m_worldAttributes.value(QStringLiteral("on_mxp_close_tag")).trimmed() : QString();
 	const QString setVarCallback =
 	    luaEnabled ? m_worldAttributes.value(QStringLiteral("on_mxp_set_variable")).trimmed() : QString();
-		{
-			QList<TelnetProcessor::MxpEvent> sorted = events;
-			std::ranges::sort(sorted,
-			                  [](const TelnetProcessor::MxpEvent &a, const TelnetProcessor::MxpEvent &b)
-			                  {
-				                  if (a.offset != b.offset)
-					                  return a.offset < b.offset;
-				                  return a.sequence < b.sequence;
-			                  });
-			QList<TelnetProcessor::MxpModeChange> sortedModeChanges = modeChanges;
-			std::ranges::sort(
-			    sortedModeChanges,
-			    [](const TelnetProcessor::MxpModeChange &a, const TelnetProcessor::MxpModeChange &b)
-			    {
-				    if (a.offset != b.offset)
-					    return a.offset < b.offset;
-				    return a.sequence < b.sequence;
-			    });
+	{
+		QList<TelnetProcessor::MxpEvent> sorted = events;
+		std::ranges::sort(sorted,
+		                  [](const TelnetProcessor::MxpEvent &a, const TelnetProcessor::MxpEvent &b)
+		                  {
+			                  if (a.offset != b.offset)
+				                  return a.offset < b.offset;
+			                  return a.sequence < b.sequence;
+		                  });
+		QList<TelnetProcessor::MxpModeChange> sortedModeChanges = modeChanges;
+		std::ranges::sort(sortedModeChanges,
+		                  [](const TelnetProcessor::MxpModeChange &a, const TelnetProcessor::MxpModeChange &b)
+		                  {
+			                  if (a.offset != b.offset)
+				                  return a.offset < b.offset;
+			                  return a.sequence < b.sequence;
+		                  });
 
-		MxpStyleState         current    = m_mxpRenderStyle;
-		QVector<MxpStyleFrame> stack     = m_mxpRenderStack;
-		QVector<QByteArray>   blockStack = m_mxpRenderBlockStack;
-		bool                  linkOpen   = m_mxpRenderLinkOpen;
-		int                   preDepth   = m_mxpRenderPreDepth;
-		QString               lineText   = m_partialLineText;
-		QVector<StyleSpan>    lineSpans  = m_partialLineSpans;
-		bool                  mxpTrackingReset{false};
-		auto restoreCurrentFromAnsiState = [&]
+		MxpStyleState          current    = m_mxpRenderStyle;
+		QVector<MxpStyleFrame> stack      = m_mxpRenderStack;
+		QVector<QByteArray>    blockStack = m_mxpRenderBlockStack;
+		bool                   linkOpen   = m_mxpRenderLinkOpen;
+		int                    preDepth   = m_mxpRenderPreDepth;
+		QString                lineText   = m_partialLineText;
+		QVector<StyleSpan>     lineSpans  = m_partialLineSpans;
+		bool                   mxpTrackingReset{false};
+		auto                   restoreCurrentFromAnsiState = [&]
 		{
 			current.bold       = m_ansiRenderState.bold;
 			current.underline  = m_ansiRenderState.underline;
@@ -4941,7 +4951,7 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			restoreCurrentFromAnsiState();
 
 		static const QRegularExpression kHexColor6(QStringLiteral("^[0-9A-Fa-f]{6}$"));
-		auto normalizeColorBytes = [](const QByteArray &value) -> QString
+		auto                            normalizeColorBytes = [](const QByteArray &value) -> QString
 		{
 			QString name = QString::fromLocal8Bit(value).trimmed();
 			if (name.isEmpty())
@@ -4973,9 +4983,9 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			return (lhs == "send" && rhs == "a") || (lhs == "a" && rhs == "send");
 		};
 
-		int last = 0;
+		int  last = 0;
 
-		auto    applyStartTag =
+		auto applyStartTag =
 		    [&](const QByteArray &activeTag, const QMap<QByteArray, QByteArray> &activeAttributes)
 		{
 			const QByteArray unnamedForeLocal = activeAttributes.value("1");
@@ -5148,25 +5158,7 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 				blockStack.push_back(activeTag);
 				preDepth++;
 			}
-			else if (activeTag == "center")
-			{
-				if (!ensureRenderBlockCapacity(activeTag))
-					return;
-				blockStack.push_back(activeTag);
-			}
-			else if (activeTag == "ul")
-			{
-				if (!ensureRenderBlockCapacity(activeTag))
-					return;
-				blockStack.push_back(activeTag);
-			}
-			else if (activeTag == "ol")
-			{
-				if (!ensureRenderBlockCapacity(activeTag))
-					return;
-				blockStack.push_back(activeTag);
-			}
-			else if (activeTag == "li")
+			else if (activeTag == "center" || activeTag == "ul" || activeTag == "ol" || activeTag == "li")
 			{
 				if (!ensureRenderBlockCapacity(activeTag))
 					return;
@@ -5192,8 +5184,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			}
 		};
 
-			auto applyEndTag = [&](const QByteArray &closeTag)
-			{
+		auto applyEndTag = [&](const QByteArray &closeTag)
+		{
 			if (closeTag == "send" || closeTag == "a")
 			{
 				if (linkOpen)
@@ -5242,34 +5234,34 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 						break;
 					}
 				}
-				}
-			};
+			}
+		};
 
-			auto applyMxpModeBarrier = [&](const TelnetProcessor::MxpModeChange &modeChange)
-			{
-				auto isLockedMode = [](const int mode) { return mode == 2 || mode == 7; };
-				if (modeChange.newMode != 3 && !isLockedMode(modeChange.newMode))
-					return;
+		auto applyMxpModeBarrier = [&](const TelnetProcessor::MxpModeChange &modeChange)
+		{
+			auto isLockedMode = [](const int mode) { return mode == 2 || mode == 7; };
+			if (modeChange.newMode != 3 && !isLockedMode(modeChange.newMode))
+				return;
 
-				m_mxpOpenTags.clear();
-				m_mxpTagStack.clear();
+			m_mxpOpenTags.clear();
+			m_mxpTagStack.clear();
 
-				if (!stack.isEmpty())
-					current = stack.front().state;
-				stack.clear();
-				blockStack.clear();
-				linkOpen = false;
-				preDepth = 0;
+			if (!stack.isEmpty())
+				current = stack.front().state;
+			stack.clear();
+			blockStack.clear();
+			linkOpen = false;
+			preDepth = 0;
 
-				current.actionType = ActionNone;
-				current.action.clear();
-				current.hint.clear();
-				current.variable.clear();
-				current.startTag = false;
-			};
+			current.actionType = ActionNone;
+			current.action.clear();
+			current.hint.clear();
+			current.variable.clear();
+			current.startTag = false;
+		};
 
-			auto appendStyled = [&](const QByteArray &bytes)
-			{
+		auto appendStyled = [&](const QByteArray &bytes)
+		{
 			if (bytes.isEmpty())
 				return;
 			auto appendDecodedSegment = [&](const QString &decoded, const QMudStyledTextState &segmentState)
@@ -5287,20 +5279,20 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 						return;
 					lineText += rawSegment.mid(start, length);
 					StyleSpan span;
-					span.length      = length;
-					span.fore        = segmentState.fore.isEmpty() ? QColor() : QColor(segmentState.fore);
-					span.back        = segmentState.back.isEmpty() ? QColor() : QColor(segmentState.back);
-					span.bold        = segmentState.bold;
-					span.italic      = segmentState.italic;
-					span.blink       = segmentState.blink;
-					span.underline   = segmentState.underline;
-					span.inverse     = segmentState.inverse;
-					span.actionType  = segmentState.actionType;
-					span.action      = segmentState.action;
-					span.hint        = segmentState.hint;
-					span.variable    = segmentState.variable;
-					span.startTag    = startTag;
-					startTag         = false;
+					span.length     = length;
+					span.fore       = segmentState.fore.isEmpty() ? QColor() : QColor(segmentState.fore);
+					span.back       = segmentState.back.isEmpty() ? QColor() : QColor(segmentState.back);
+					span.bold       = segmentState.bold;
+					span.italic     = segmentState.italic;
+					span.blink      = segmentState.blink;
+					span.underline  = segmentState.underline;
+					span.inverse    = segmentState.inverse;
+					span.actionType = segmentState.actionType;
+					span.action     = segmentState.action;
+					span.hint       = segmentState.hint;
+					span.variable   = segmentState.variable;
+					span.startTag   = startTag;
+					startTag        = false;
 					if (!lineSpans.isEmpty())
 					{
 						StyleSpan &lastSpan = lineSpans.last();
@@ -5391,10 +5383,9 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			ansiState.monospace  = current.monospace;
 
 			constexpr QMudOscActionIds oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
-			const QVector<QMudStyledChunk> chunks =
-			    qmudParseAnsiSgrChunks(bytes, m_ansiStreamState, defaultFore, defaultBack,
-			                           normalAnsiColorFromIndex, boldAnsiColorFromIndex, colorFromIndex,
-			                           decodeIncomingDisplayBytes, ansiState, oscActionIds);
+			const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+			    bytes, m_ansiStreamState, defaultFore, defaultBack, normalAnsiColorFromIndex,
+			    boldAnsiColorFromIndex, colorFromIndex, decodeIncomingDisplayBytes, ansiState, oscActionIds);
 			for (const QMudStyledChunk &chunk : chunks)
 				appendDecodedSegment(chunk.text, chunk.state);
 
@@ -5420,42 +5411,42 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			return lookupAtomicTagInfo(tag, info);
 		};
 
-			auto isTrackableTag = [](const QByteArray &tag)
-			{
-				return tag == "send" || tag == "a" || tag == "bold" || tag == "b" || tag == "strong" ||
+		auto isTrackableTag = [](const QByteArray &tag)
+		{
+			return tag == "send" || tag == "a" || tag == "bold" || tag == "b" || tag == "strong" ||
 			       tag == "underline" || tag == "u" || tag == "italic" || tag == "i" || tag == "em" ||
 			       tag == "strike" || tag == "s" || tag == "color" || tag == "c" || tag == "font" ||
 			       tag == "high" || tag == "h" || tag == "tt" || tag == "samp" || tag == "pre" ||
 			       tag == "center" || tag == "ul" || tag == "ol" || tag == "li" || tag == "var" || tag == "v";
-			};
+		};
 
-			int modeChangeIndex = 0;
+		int modeChangeIndex = 0;
 
-			for (const TelnetProcessor::MxpEvent &ev : sorted)
+		for (const TelnetProcessor::MxpEvent &ev : sorted)
+		{
+			if (mxpTrackingReset)
+				break;
+
+			while (modeChangeIndex < sortedModeChanges.size())
 			{
-				if (mxpTrackingReset)
+				const TelnetProcessor::MxpModeChange &modeChange = sortedModeChanges.at(modeChangeIndex);
+				const bool                            boundaryComesBeforeEvent =
+				    (modeChange.offset < ev.offset) ||
+				    (modeChange.offset == ev.offset && modeChange.sequence < ev.sequence);
+				if (!boundaryComesBeforeEvent)
 					break;
-
-				while (modeChangeIndex < sortedModeChanges.size())
+				if (modeChange.offset > last)
 				{
-					const TelnetProcessor::MxpModeChange &modeChange = sortedModeChanges.at(modeChangeIndex);
-					const bool boundaryComesBeforeEvent =
-					    (modeChange.offset < ev.offset) ||
-					    (modeChange.offset == ev.offset && modeChange.sequence < ev.sequence);
-					if (!boundaryComesBeforeEvent)
-						break;
-					if (modeChange.offset > last)
-					{
-						appendStyled(processed.mid(last, modeChange.offset - last));
-						last = modeChange.offset;
-					}
-					applyMxpModeBarrier(modeChange);
-					++modeChangeIndex;
+					appendStyled(processed.mid(last, modeChange.offset - last));
+					last = modeChange.offset;
 				}
+				applyMxpModeBarrier(modeChange);
+				++modeChangeIndex;
+			}
 
-				if (ev.offset > last)
-				{
-					appendStyled(processed.mid(last, ev.offset - last));
+			if (ev.offset > last)
+			{
+				appendStyled(processed.mid(last, ev.offset - last));
 				last = ev.offset;
 			}
 
@@ -6133,7 +6124,7 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 						closeTag = aliasTag;
 				}
 
-				int openMatchIndex = -1;
+				int  openMatchIndex       = -1;
 				bool closeBlockedBySecure = false;
 				for (int i = safeQSizeToInt(m_mxpOpenTags.size()) - 1; i >= 0; --i)
 				{
@@ -6245,32 +6236,32 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 					applyEndTag(closeTag);
 				}
 			}
-			}
+		}
 
-			while (modeChangeIndex < sortedModeChanges.size())
+		while (modeChangeIndex < sortedModeChanges.size())
+		{
+			const TelnetProcessor::MxpModeChange &modeChange = sortedModeChanges.at(modeChangeIndex++);
+			if (modeChange.offset > last)
 			{
-				const TelnetProcessor::MxpModeChange &modeChange = sortedModeChanges.at(modeChangeIndex++);
-				if (modeChange.offset > last)
-				{
-					appendStyled(processed.mid(last, modeChange.offset - last));
-					last = modeChange.offset;
-				}
-				applyMxpModeBarrier(modeChange);
+				appendStyled(processed.mid(last, modeChange.offset - last));
+				last = modeChange.offset;
 			}
+			applyMxpModeBarrier(modeChange);
+		}
 
-			if (last < processed.size())
-				appendStyled(processed.mid(last));
+		if (last < processed.size())
+			appendStyled(processed.mid(last));
 
 		const bool hasActiveMxpRenderContextAfterProcessing =
 		    !stack.isEmpty() || !blockStack.isEmpty() || linkOpen || preDepth > 0;
 		if (m_mxpTagStack.isEmpty() && !hasActiveMxpRenderContextAfterProcessing)
 			m_mxpTextBuffer.clear();
 
-		m_mxpRenderStyle      = current;
-		m_mxpRenderStack      = stack;
-		m_mxpRenderBlockStack = blockStack;
-		m_mxpRenderLinkOpen   = linkOpen;
-		m_mxpRenderPreDepth   = preDepth;
+		m_mxpRenderStyle             = current;
+		m_mxpRenderStack             = stack;
+		m_mxpRenderBlockStack        = blockStack;
+		m_mxpRenderLinkOpen          = linkOpen;
+		m_mxpRenderPreDepth          = preDepth;
 		m_ansiRenderState.bold       = current.bold;
 		m_ansiRenderState.underline  = current.underline;
 		m_ansiRenderState.italic     = current.italic;
@@ -6288,10 +6279,10 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 
 		m_partialLineText  = lineText;
 		m_partialLineSpans = lineSpans;
-			emit incomingStyledLinePartialReceived(lineText, lineSpans);
-			m_currentActionSource = previousActionSource;
-		}
+		emit incomingStyledLinePartialReceived(lineText, lineSpans);
+		m_currentActionSource = previousActionSource;
 	}
+}
 
 bool WorldRuntime::connectToWorld(const QString &host, quint16 port)
 {
@@ -6405,6 +6396,143 @@ void WorldRuntime::disconnectFromWorld()
 	m_disconnectOk = true;
 	m_connectPhase = eConnectDisconnecting;
 	m_socket->disconnectFromHost();
+}
+
+int WorldRuntime::nativeSocketDescriptor() const
+{
+	if (!m_socket)
+		return -1;
+	const qintptr descriptor = m_socket->nativeSocketDescriptor();
+	return descriptor < 0 ? -1 : static_cast<int>(descriptor);
+}
+
+bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, QString *errorMessage)
+{
+	if (errorMessage)
+		errorMessage->clear();
+	if (!m_socket)
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("Socket service is unavailable.");
+		return false;
+	}
+	if (descriptor < 0)
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("Socket descriptor is invalid.");
+		return false;
+	}
+
+	m_disconnectOk = false;
+	m_telnet.resetConnectionState();
+	resetAnsiRenderState();
+	m_mxpActive = false;
+	m_mxpTagStack.clear();
+	m_mxpOpenTags.clear();
+	m_mxpTextBuffer.clear();
+	m_incomingSocketDataPaused = false;
+
+	QString adoptionError;
+	if (!m_socket->adoptConnectedSocketDescriptor(static_cast<qintptr>(descriptor), &adoptionError))
+	{
+		if (errorMessage)
+			*errorMessage = adoptionError;
+		m_connectViaProxy = false;
+		m_connectPhase    = eConnectNotConnected;
+		return false;
+	}
+
+	m_connectViaProxy    = false;
+	m_connectPhase       = eConnectConnectedToMud;
+	m_hasCachedIp        = true;
+	m_connectTime        = QDateTime::currentDateTime();
+	const bool convertGA = isEnabledFlag(m_worldAttributes.value(QStringLiteral("convert_ga_to_newline")));
+	m_telnet.setConvertGAtoNewline(convertGA);
+	emit connected();
+	return true;
+}
+
+void WorldRuntime::closeSocketForReloadReconnect()
+{
+	if (!m_socket)
+		return;
+	m_incomingSocketDataPaused = false;
+	m_disconnectOk             = true;
+	m_connectViaProxy          = false;
+	m_connectPhase             = eConnectNotConnected;
+	m_socket->abortSocket();
+	m_telnet.resetConnectionState();
+	resetAnsiRenderState();
+}
+
+void WorldRuntime::setIncomingSocketDataPaused(const bool paused)
+{
+	m_incomingSocketDataPaused = paused;
+}
+
+bool WorldRuntime::incomingSocketDataPaused() const
+{
+	return m_incomingSocketDataPaused;
+}
+
+void WorldRuntime::markReloadReattachConnectActionsSuppressed()
+{
+	m_reloadReattachSuppressConnectActions = true;
+}
+
+bool WorldRuntime::consumeReloadReattachConnectActionsSuppressed()
+{
+	const bool suppressed = m_reloadReattachSuppressConnectActions;
+	m_reloadReattachSuppressConnectActions = false;
+	return suppressed;
+}
+
+void WorldRuntime::requestMccpResumeAfterReloadReattach()
+{
+	if (!m_socket || !m_socket->isConnected())
+		return;
+	if (isCompressing() || mccpType() != 0)
+		return;
+	if (const bool disableCompression = isEnabledFlag(m_worldAttributes.value(QStringLiteral("disable_compression")));
+	    disableCompression)
+	{
+		return;
+	}
+	m_telnet.queueEnableCompression2Negotiation();
+	if (const QByteArray outbound = m_telnet.takeOutboundData(); !outbound.isEmpty())
+		sendToWorld(outbound);
+}
+
+void WorldRuntime::queueMccpDisableForReload()
+{
+	if (isMccpDisableCompleteForReload())
+		return;
+
+	m_telnet.queueDisableCompressionNegotiation();
+	const QByteArray outbound = m_telnet.takeOutboundData();
+	if (!outbound.isEmpty())
+		sendToWorld(outbound);
+}
+
+bool WorldRuntime::isMccpDisableCompleteForReload() const
+{
+	return !isCompressing() && mccpType() == 0;
+}
+
+bool WorldRuntime::requestMccpDisableForReload(const int timeoutMs)
+{
+	queueMccpDisableForReload();
+
+	QElapsedTimer timer;
+	timer.start();
+	const int boundedTimeoutMs = qMax(0, timeoutMs);
+	while (timer.elapsed() < boundedTimeoutMs)
+	{
+		QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+		if (isMccpDisableCompleteForReload())
+			return true;
+	}
+	return isMccpDisableCompleteForReload();
 }
 
 void WorldRuntime::sendToWorld(const QByteArray &payload)
@@ -7144,20 +7272,20 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 
 	out << nl;
 
-		for (const auto &opt : kNumericSaveOptions)
+	for (const auto &opt : kNumericSaveOptions)
+	{
+		if (!opt.name)
+			break;
+		const QString key   = QString::fromLatin1(opt.name);
+		const QString value = m_worldAttributes.value(key);
+		if (const bool isBool = (opt.min == 0 && opt.max == 0); isBool)
 		{
-			if (!opt.name)
-				break;
-			const QString key   = QString::fromLatin1(opt.name);
-			const QString value = m_worldAttributes.value(key);
-			if (const bool isBool = (opt.min == 0 && opt.max == 0); isBool)
-			{
-				const bool currentValue = isEnabledFlag(value);
-				const bool defaultValue = opt.defaultValue != 0;
-				if (currentValue != defaultValue)
-					saveXmlString(out, nl, opt.name, qmudBoolToYn(currentValue));
-				continue;
-			}
+			const bool currentValue = isEnabledFlag(value);
+			const bool defaultValue = opt.defaultValue != 0;
+			if (currentValue != defaultValue)
+				saveXmlString(out, nl, opt.name, qmudBoolToYn(currentValue));
+			continue;
+		}
 		if (opt.flags & OPT_RGB_COLOUR)
 		{
 			const long colour = parseColorRef(value);
@@ -7244,14 +7372,13 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 			if (ok && value != 0)
 				saveXmlNumber(out, nl, "custom_colour", value);
 		}
-			num("colour_change_type");
-			if (const bool triggerEnabled =
-			        isEnabledFlag(tr->attributes.value(QStringLiteral("enabled")));
-			    triggerEnabled)
-				saveXmlBoolean(out, nl, "enabled", true);
-			else
-				out << "   enabled=\"n\"" << nl;
-			boolean("expand_variables");
+		num("colour_change_type");
+		if (const bool triggerEnabled = isEnabledFlag(tr->attributes.value(QStringLiteral("enabled")));
+		    triggerEnabled)
+			saveXmlBoolean(out, nl, "enabled", true);
+		else
+			out << "   enabled=\"n\"" << nl;
+		boolean("expand_variables");
 		text("group");
 		boolean("ignore_case");
 		boolean("inverse");
@@ -7321,12 +7448,11 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 		saveXmlString(out, nl, "name", al->attributes.value(QStringLiteral("name")));
 		saveXmlString(out, nl, "script", al->attributes.value(QStringLiteral("script")));
 		saveXmlString(out, nl, "match", al->attributes.value(QStringLiteral("match")));
-			if (const bool aliasEnabled =
-			        isEnabledFlag(al->attributes.value(QStringLiteral("enabled")));
-			    aliasEnabled)
-				saveXmlBoolean(out, nl, "enabled", true);
-			else
-				out << "   enabled=\"n\"" << nl;
+		if (const bool aliasEnabled = isEnabledFlag(al->attributes.value(QStringLiteral("enabled")));
+		    aliasEnabled)
+			saveXmlBoolean(out, nl, "enabled", true);
+		else
+			out << "   enabled=\"n\"" << nl;
 		saveXmlBoolean(out, nl, "echo_alias",
 		               isEnabledFlag(al->attributes.value(QStringLiteral("echo_alias"))));
 		saveXmlBoolean(out, nl, "expand_variables",
@@ -11044,7 +11170,7 @@ void WorldRuntime::outputStyledText(const QString &text, const QVector<StyleSpan
 	const int log  = note ? (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_notes"))) ? 1 : 0)
 	                      : (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_output"))) ? 1 : 0);
 	firePluginScreendraw(type, log, text);
-	QString           displayText  = text;
+	QString            displayText  = text;
 	QVector<StyleSpan> displaySpans = spans;
 	if (const FixedColumnWrapConfig wrapConfig = fixedColumnWrapConfig(m_worldAttributes);
 	    wrapConfig.enabled && !displayText.isEmpty())
@@ -11070,7 +11196,7 @@ void WorldRuntime::outputAnsiText(const QString &text, bool note)
 		return;
 	const FixedColumnWrapConfig wrapConfig = fixedColumnWrapConfig(m_worldAttributes);
 
-	auto parseColorValue = [](const QString &value) -> QColor
+	auto                        parseColorValue = [](const QString &value) -> QColor
 	{
 		if (value.isEmpty())
 			return {};
@@ -11209,11 +11335,10 @@ void WorldRuntime::outputAnsiText(const QString &text, bool note)
 
 	auto               emitLine = [&](bool newLine)
 	{
-		QString           displayText  = lineText;
+		QString            displayText  = lineText;
 		QVector<StyleSpan> displaySpans = lineSpans;
 		if (wrapConfig.enabled && !displayText.isEmpty())
-			wrapStyledLineForColumn(displayText, displaySpans, wrapConfig.wrapColumn,
-			                        wrapConfig.indentParas);
+			wrapStyledLineForColumn(displayText, displaySpans, wrapConfig.wrapColumn, wrapConfig.indentParas);
 		emit outputStyledRequested(displayText, displaySpans, newLine, note);
 		lineText.clear();
 		lineSpans.clear();

@@ -32,6 +32,7 @@ class ActivityDocument;
 class WorldRuntime;
 class QMdiSubWindow;
 class NameGenerator;
+struct ReloadWorldState;
 struct lua_State;
 
 /**
@@ -545,15 +546,45 @@ class AppController : public QObject
 		/**
 		 * @brief Finalizes startup once all prerequisites are complete.
 		 */
-		void              finalizeStartupIfReady();
+		void                                  finalizeStartupIfReady();
+		/**
+		 * @brief Parses reload startup arguments from process command line.
+		 */
+		void                                  detectReloadStartupArguments();
+		/**
+		 * @brief Deletes stale reload state file when startup is not reload-mode.
+		 */
+		void                                  cleanupReloadStateOnNormalStartup() const;
+		/**
+		 * @brief Executes startup recovery for reload-mode launches.
+		 * @return `true` when recovery path completed.
+		 */
+		bool                                  recoverReloadStartupState();
+		/**
+		 * @brief Opens one runtime/window pair from serialized reload world state.
+		 * @param worldState Serialized world state.
+		 * @param runtime Output runtime pointer.
+		 * @return `true` when world opening succeeds.
+		 */
+		bool                                  openWorldForReloadRecovery(const ReloadWorldState &worldState,
+		                                                                  WorldRuntime          **runtime);
+		/**
+		 * @brief Reconnects recovered runtime for `park_reconnect` fallback.
+		 * @param runtime Runtime to reconnect.
+		 * @param worldState Serialized host/port policy data.
+		 * @param closeSocketFirst Close inherited socket before reconnect when `true`.
+		 */
+		static void                           reconnectRecoveredWorld(WorldRuntime          *runtime,
+		                                                               const ReloadWorldState &worldState,
+		                                                               bool closeSocketFirst);
 		/**
 		 * @brief Creates and shows splash screen.
 		 */
-		void              showSplashScreen();
+		void                                  showSplashScreen();
 		/**
 		 * @brief Hides splash screen.
 		 */
-		void              hideSplashScreen();
+		void                                  hideSplashScreen();
 		/**
 		 * @brief Synchronizes AppImage payload skeleton files.
 		 * @param startupDir Startup directory path.
@@ -676,6 +707,10 @@ class AppController : public QObject
 		 */
 		void                   handleLogSession() const;
 		/**
+		 * @brief Handles reload-QMud action with socket handoff/reconnect policies.
+		 */
+		void                   handleReloadQmud();
+		/**
 		 * @brief Handles output-find command variants.
 		 * @param again Repeat previous find operation.
 		 * @param forceDirection Force search direction when `true`.
@@ -792,6 +827,16 @@ class AppController : public QObject
 		QRandomGenerator              m_rng{1u};
 		bool                          m_batchOpeningWorldList{false};
 		bool                          m_batchWorldListActivatedFirst{false};
+		bool                          m_suppressAutoConnect{false};
+		bool                          m_reloadInProgress{false};
+		bool                          m_reloadLaunchRequested{false};
+		int                           m_reloadAttempts{0};
+		int                           m_reloadExecFailures{0};
+		int                           m_reloadRecoveryRuns{0};
+		int                           m_reloadRecoveryReattached{0};
+		int                           m_reloadRecoveryReconnectQueued{0};
+		QString                       m_reloadStatePathArg;
+		QString                       m_reloadTokenArg;
 };
 
 #endif // QMUD_APPCONTROLLER_H
