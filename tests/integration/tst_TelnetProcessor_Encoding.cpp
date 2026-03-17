@@ -105,7 +105,7 @@ class tst_TelnetProcessor_Encoding : public QObject
 
 			processor.processBytes(bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_SEND, IAC, SE}));
 			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_IS, 'M', 'T', 'T', 'S', ' ', '1', '3', IAC, SE}));
+			         bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_IS, 'M', 'T', 'T', 'S', ' ', '2', '6', '9', IAC, SE}));
 		}
 	// NOLINTEND(readability-convert-member-functions-to-static)
 };
