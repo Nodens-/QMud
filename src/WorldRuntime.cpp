@@ -65,6 +65,7 @@
 #include <QStringConverter>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTextBoundaryFinder>
 #include <QTextStream>
 #include <QThreadPool>
 #include <QTimeZone>
@@ -101,6 +102,8 @@ constexpr int      ADJUST_COLOUR_DARKER      = 3;
 constexpr int      ADJUST_COLOUR_LESS_COLOUR = 4;
 constexpr int      ADJUST_COLOUR_MORE_COLOUR = 5;
 constexpr int      kPacketDebugChars         = 16;
+constexpr int      kMaxMxpTextBufferBytes    = 256 * 1024;
+constexpr int      kMaxMxpStackDepth         = 512;
 
 namespace
 {
@@ -3076,6 +3079,51 @@ namespace
 		       a.hint == b.hint && a.variable == b.variable && a.startTag == b.startTag;
 	}
 
+	bool isSingleCharGrapheme(const QStringView grapheme, const QChar ch)
+	{
+		return grapheme.size() == 1 && grapheme.at(0) == ch;
+	}
+
+	bool isWhitespaceGrapheme(const QStringView grapheme)
+	{
+		for (const QChar ch : grapheme)
+		{
+			if (!ch.isSpace())
+				return false;
+		}
+		return !grapheme.isEmpty();
+	}
+
+	bool isZeroWidthWrapCodeUnit(const QChar ch)
+	{
+		switch (ch.category())
+		{
+		case QChar::Mark_NonSpacing:
+		case QChar::Mark_SpacingCombining:
+		case QChar::Mark_Enclosing:
+		case QChar::Other_Format:
+			return true;
+		default:
+			break;
+		}
+		return false;
+	}
+
+	int graphemeColumnWidthForWrap(const QStringView grapheme)
+	{
+		if (grapheme.isEmpty())
+			return 0;
+		bool hasVisibleCodeUnit = false;
+		for (const QChar ch : grapheme)
+		{
+			if (isZeroWidthWrapCodeUnit(ch))
+				continue;
+			hasVisibleCodeUnit = true;
+			break;
+		}
+		return hasVisibleCodeUnit ? 1 : 0;
+	}
+
 	void wrapPlainLineForColumn(QString &text, const int wrapColumn, const bool indentParas)
 	{
 		if (wrapColumn <= 0 || text.isEmpty())
@@ -3103,31 +3151,38 @@ namespace
 					break;
 				}
 			}
-			for (int i = lineStart, size = safeQSizeToInt(wrappedText.size()); i < size; ++i)
+			QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme, wrappedText);
+			boundary.setPosition(lineStart);
+			const QStringView wrappedView{wrappedText};
+			for (int graphemeStart = lineStart, graphemeEnd = boundary.toNextBoundary(); graphemeEnd != -1;
+			     graphemeStart = graphemeEnd, graphemeEnd = boundary.toNextBoundary())
 			{
-				const QChar ch = wrappedText.at(i);
-				if (ch == QLatin1Char('\n'))
+				const QStringView grapheme = wrappedView.sliced(graphemeStart, graphemeEnd - graphemeStart);
+				if (isSingleCharGrapheme(grapheme, QLatin1Char('\n')))
 				{
-					lineStart          = i + 1;
+					lineStart          = graphemeEnd;
 					column             = 0;
 					lastSpace          = -1;
 					lineHasVisibleChar = false;
 					continue;
 				}
-				if (ch == QLatin1Char(' '))
-					lastSpace = i;
-				if (!ch.isSpace())
+				if (isSingleCharGrapheme(grapheme, QLatin1Char(' ')))
+					lastSpace = graphemeEnd - 1;
+				if (!isWhitespaceGrapheme(grapheme))
 					lineHasVisibleChar = true;
-				++column;
+				column += graphemeColumnWidthForWrap(grapheme);
 			}
 		};
 
-		for (int i = 0; i < text.size(); ++i)
+		QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme, text);
+		const QStringView   textView{text};
+		for (int graphemeStart = 0, graphemeEnd = boundary.toNextBoundary(); graphemeEnd != -1;
+		     graphemeStart = graphemeEnd, graphemeEnd = boundary.toNextBoundary())
 		{
-			const QChar ch = text.at(i);
-			wrappedText.append(ch);
+			const QStringView grapheme = textView.sliced(graphemeStart, graphemeEnd - graphemeStart);
+			wrappedText.append(grapheme);
 
-			if (ch == QLatin1Char('\n'))
+			if (isSingleCharGrapheme(grapheme, QLatin1Char('\n')))
 			{
 				column             = 0;
 				lineStart          = safeQSizeToInt(wrappedText.size());
@@ -3136,12 +3191,12 @@ namespace
 				continue;
 			}
 
-			if (ch == QLatin1Char(' '))
+			if (isSingleCharGrapheme(grapheme, QLatin1Char(' ')))
 				lastSpace = safeQSizeToInt(wrappedText.size()) - 1;
-			if (!ch.isSpace())
+			if (!isWhitespaceGrapheme(grapheme))
 				lineHasVisibleChar = true;
 
-			++column;
+			column += graphemeColumnWidthForWrap(grapheme);
 			if (column < wrapColumn)
 				continue;
 
@@ -3221,33 +3276,41 @@ namespace
 					break;
 				}
 			}
-			for (int i = lineStart, size = safeQSizeToInt(wrappedText.size()); i < size; ++i)
+			QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme, wrappedText);
+			boundary.setPosition(lineStart);
+			const QStringView wrappedView{wrappedText};
+			for (int graphemeStart = lineStart, graphemeEnd = boundary.toNextBoundary(); graphemeEnd != -1;
+			     graphemeStart = graphemeEnd, graphemeEnd = boundary.toNextBoundary())
 			{
-				const QChar ch = wrappedText.at(i);
-				if (ch == QLatin1Char('\n'))
+				const QStringView grapheme = wrappedView.sliced(graphemeStart, graphemeEnd - graphemeStart);
+				if (isSingleCharGrapheme(grapheme, QLatin1Char('\n')))
 				{
-					lineStart          = i + 1;
+					lineStart          = graphemeEnd;
 					column             = 0;
 					lastSpace          = -1;
 					lineHasVisibleChar = false;
 					continue;
 				}
-				if (ch == QLatin1Char(' '))
-					lastSpace = i;
-				if (!ch.isSpace())
+				if (isSingleCharGrapheme(grapheme, QLatin1Char(' ')))
+					lastSpace = graphemeEnd - 1;
+				if (!isWhitespaceGrapheme(grapheme))
 					lineHasVisibleChar = true;
-				++column;
+				column += graphemeColumnWidthForWrap(grapheme);
 			}
 		};
 
-		for (int i = 0; i < text.size(); ++i)
+		QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme, text);
+		const QStringView   textView{text};
+		for (int graphemeStart = 0, graphemeEnd = boundary.toNextBoundary(); graphemeEnd != -1;
+		     graphemeStart = graphemeEnd, graphemeEnd = boundary.toNextBoundary())
 		{
-			const QChar                   ch    = text.at(i);
-			const WorldRuntime::StyleSpan style = expandedStyles.value(i);
-			wrappedText.append(ch);
-			wrappedStyles.push_back(style);
+			const QStringView grapheme = textView.sliced(graphemeStart, graphemeEnd - graphemeStart);
+			wrappedText.append(grapheme);
+			for (int i = graphemeStart; i < graphemeEnd; ++i)
+				wrappedStyles.push_back(expandedStyles.value(i));
+			const WorldRuntime::StyleSpan style = expandedStyles.value(graphemeEnd - 1);
 
-			if (ch == QLatin1Char('\n'))
+			if (isSingleCharGrapheme(grapheme, QLatin1Char('\n')))
 			{
 				column             = 0;
 				lineStart          = safeQSizeToInt(wrappedText.size());
@@ -3256,12 +3319,12 @@ namespace
 				continue;
 			}
 
-			if (ch == QLatin1Char(' '))
+			if (isSingleCharGrapheme(grapheme, QLatin1Char(' ')))
 				lastSpace = safeQSizeToInt(wrappedText.size()) - 1;
-			if (!ch.isSpace())
+			if (!isWhitespaceGrapheme(grapheme))
 				lineHasVisibleChar = true;
 
-			++column;
+			column += graphemeColumnWidthForWrap(grapheme);
 			if (column < wrapColumn)
 				continue;
 
@@ -3963,17 +4026,18 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 		else
 			mxpError(DBG_INFO, infoMXP_on, QStringLiteral("MXP turned on."));
 	};
-	callbacks.onMxpReset = [this]
-	{
-		if (m_mxpActive)
+		callbacks.onMxpReset = [this]
 		{
-			m_mxpTagStack.clear();
-			m_mxpOpenTags.clear();
-			m_mxpTextBuffer.clear();
-			resetMxpRenderState();
-		}
-		mxpError(DBG_INFO, infoMXP_ResetReceived, QStringLiteral("MXP reset."));
-	};
+			if (m_mxpActive)
+			{
+				m_mxpTagStack.clear();
+				m_mxpOpenTags.clear();
+				m_mxpTextBuffer.clear();
+				resetMxpRenderState();
+				clearAnsiActionContext();
+			}
+			mxpError(DBG_INFO, infoMXP_ResetReceived, QStringLiteral("MXP reset."));
+		};
 	callbacks.onMxpStop = [this](bool completely, bool puebloActive)
 	{
 		if (!completely)
@@ -3990,13 +4054,14 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 		// Defensive state barrier: when MXP transitions to a locked/reset mode,
 		// drop open render/tag state so secure link/style spans cannot leak into
 		// subsequent plain text.
-		if (newMode == 3 || isLockedMode(newMode))
-		{
-			m_mxpTagStack.clear();
-			m_mxpOpenTags.clear();
-			m_mxpTextBuffer.clear();
-			resetMxpRenderState();
-		}
+			if (newMode == 3 || isLockedMode(newMode))
+			{
+				m_mxpTagStack.clear();
+				m_mxpOpenTags.clear();
+				m_mxpTextBuffer.clear();
+				resetMxpRenderState();
+				clearAnsiActionContext();
+			}
 
 		if (!shouldLog)
 			return;
@@ -4179,7 +4244,7 @@ double WorldRuntime::scriptTimeSeconds() const
 
 void WorldRuntime::resetAnsiRenderState()
 {
-	m_pendingAnsiSequence.clear();
+	m_ansiStreamState = QMudAnsiStreamState{};
 	m_partialLineText.clear();
 	m_partialLineSpans.clear();
 	m_ansiRenderState = AnsiRenderState{};
@@ -4196,6 +4261,15 @@ void WorldRuntime::resetMxpRenderState()
 	m_mxpRenderBlockStack.clear();
 	m_mxpRenderLinkOpen = false;
 	m_mxpRenderPreDepth = 0;
+}
+
+void WorldRuntime::clearAnsiActionContext()
+{
+	m_ansiRenderState.actionType = ActionNone;
+	m_ansiRenderState.action.clear();
+	m_ansiRenderState.hint.clear();
+	m_ansiRenderState.variable.clear();
+	m_ansiRenderState.startTag = false;
 }
 
 void WorldRuntime::receiveRawData(const QByteArray &data)
@@ -4404,12 +4478,6 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			++m_utf8ErrorCount;
 		return decoded;
 	};
-	auto decodeIncomingDisplayText = [&](const char *inputBytes, const int length) -> QString
-	{
-		if (!inputBytes || length <= 0)
-			return {};
-		return decodeIncomingDisplayBytes(QByteArrayView(inputBytes, length));
-	};
 	auto decodeIncomingIsolatedBytes = [&](const QByteArray &bytes) -> QString
 	{
 		if (bytes.isEmpty())
@@ -4421,16 +4489,34 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		return decoded;
 	};
 
-	const QList<TelnetProcessor::MxpEvent> events = m_telnet.takeMxpEvents();
+	QList<TelnetProcessor::MxpEvent>      events      = m_telnet.takeMxpEvents();
+	QList<TelnetProcessor::MxpModeChange> modeChanges = m_telnet.takeMxpModeChanges();
+	auto resetMxpTrackingState = [this]
+	{
+		m_mxpTagStack.clear();
+		m_mxpOpenTags.clear();
+		m_mxpTextBuffer.clear();
+		resetMxpRenderState();
+		clearAnsiActionContext();
+	};
 	const bool hasActiveMxpParserContext =
 	    !m_mxpTagStack.isEmpty() || !m_mxpRenderStack.isEmpty() || !m_mxpRenderBlockStack.isEmpty() ||
 	    m_mxpRenderLinkOpen;
-	const bool keepMxpTextBuffer = !events.isEmpty() || hasActiveMxpParserContext;
+	const bool keepMxpTextBuffer = !events.isEmpty() || !modeChanges.isEmpty() || hasActiveMxpParserContext;
 	int                                    mxpBaseOffset     = 0;
 	if (keepMxpTextBuffer)
 	{
 		mxpBaseOffset = safeQSizeToInt(m_mxpTextBuffer.size());
 		m_mxpTextBuffer.append(processed);
+		if (m_mxpTextBuffer.size() > kMaxMxpTextBufferBytes)
+		{
+			mxpError(DBG_WARNING, wrnMXP_TextBufferLimitExceeded,
+			         QStringLiteral("MXP text buffer exceeded %1 bytes; resetting MXP context.")
+			             .arg(kMaxMxpTextBufferBytes));
+			resetMxpTrackingState();
+			events.clear();
+			mxpBaseOffset = 0;
+		}
 	}
 	else
 	{
@@ -4438,7 +4524,7 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		// growth from plain-text traffic.
 		m_mxpTextBuffer.clear();
 	}
-	if (!events.isEmpty())
+	if (!events.isEmpty() || !modeChanges.isEmpty())
 		mxpStartUp();
 	const bool luaEnabled = isLuaScriptingEnabled(m_worldAttributes);
 
@@ -4564,7 +4650,7 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 	const bool hasActiveMxpRenderContext =
 	    !m_mxpRenderStack.isEmpty() || !m_mxpRenderBlockStack.isEmpty() || m_mxpRenderLinkOpen;
 
-	if (events.isEmpty() && !hasActiveMxpRenderContext)
+	if (events.isEmpty() && modeChanges.isEmpty() && !hasActiveMxpRenderContext)
 	{
 		AnsiRenderState current = m_ansiRenderState;
 		if (current.fore.isEmpty())
@@ -4575,7 +4661,7 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		QString            lineText  = m_partialLineText;
 		QVector<StyleSpan> lineSpans = m_partialLineSpans;
 
-		auto               colorFromIndex = [](int idx) -> QString
+		auto colorFromIndex = [](int idx) -> QString
 		{
 			if (idx < 0 || idx >= 256)
 				return {};
@@ -4584,57 +4670,39 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			return QColor(qmudRed(ref), qmudGreen(ref), qmudBlue(ref)).name();
 		};
 
-		auto setFgIndex = [&](int idx)
+		auto appendDecodedSegment = [&](const QString &decoded, const QMudStyledTextState &segmentState)
 		{
-			if (idx < 0 || idx >= normalAnsi.size())
-			{
-				current.fore.clear();
-				return;
-			}
-			const QColor chosen = current.bold ? boldAnsi.at(idx) : normalAnsi.at(idx);
-			current.fore        = chosen.isValid() ? chosen.name() : QString();
-		};
-		auto setBgIndex = [&](int idx)
-		{
-			if (idx < 0 || idx >= normalAnsi.size())
-			{
-				current.back.clear();
-				return;
-			}
-			const QColor chosen = normalAnsi.at(idx);
-			current.back        = chosen.isValid() ? chosen.name() : QString();
-		};
-
-		auto appendPlain = [&](const QByteArray &rawBytes)
-		{
-			if (rawBytes.isEmpty())
+			QString rawSegment = decoded;
+			// Avoid treating Unicode separator controls as visual line breaks.
+			rawSegment.replace(QChar(0x0085), QLatin1Char(' ')); // NEL
+			rawSegment.replace(QChar(0x2028), QLatin1Char(' ')); // LINE SEPARATOR
+			rawSegment.replace(QChar(0x2029), QLatin1Char(' ')); // PARAGRAPH SEPARATOR
+			if (rawSegment.isEmpty())
 				return;
 
-			auto appendDecodedRun = [&](int start, int length)
+			const int segmentLength = safeQSizeToInt(rawSegment.size());
+			bool      startTag      = segmentState.startTag;
+			auto      appendRun     = [&](int start, int length)
 			{
 				if (length <= 0)
 					return;
-				const char *runData = rawBytes.constData() + start;
-				QString     cooked  = decodeIncomingDisplayText(runData, length);
-				if (cooked.isEmpty())
-					return;
-
-				// Avoid treating Unicode line-separator controls as visual line breaks.
-				cooked.replace(QChar(0x0085), QLatin1Char(' ')); // NEL
-				cooked.replace(QChar(0x2028), QLatin1Char(' ')); // LINE SEPARATOR
-				cooked.replace(QChar(0x2029), QLatin1Char(' ')); // PARAGRAPH SEPARATOR
-
-				lineText += cooked;
+				lineText += rawSegment.mid(start, length);
 				StyleSpan span;
-				span.length    = safeQSizeToInt(cooked.size());
-				span.fore      = current.fore.isEmpty() ? QColor() : QColor(current.fore);
-				span.back      = current.back.isEmpty() ? QColor() : QColor(current.back);
-				span.bold      = current.bold;
-				span.italic    = current.italic;
-				span.blink     = current.blink;
-				span.underline = current.underline;
-				span.inverse   = current.inverse;
-				span.strike    = current.strike;
+				span.length     = length;
+				span.fore       = segmentState.fore.isEmpty() ? QColor() : QColor(segmentState.fore);
+				span.back       = segmentState.back.isEmpty() ? QColor() : QColor(segmentState.back);
+				span.bold       = segmentState.bold;
+				span.italic     = segmentState.italic;
+				span.blink      = segmentState.blink;
+				span.underline  = segmentState.underline;
+				span.inverse    = segmentState.inverse;
+				span.strike     = segmentState.strike;
+				span.actionType = segmentState.actionType;
+				span.action     = segmentState.action;
+				span.hint       = segmentState.hint;
+				span.variable   = segmentState.variable;
+				span.startTag   = startTag;
+				startTag        = false;
 				if (!lineSpans.isEmpty())
 				{
 					StyleSpan &lastSpan = lineSpans.last();
@@ -4642,7 +4710,9 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 					    lastSpan.bold == span.bold && lastSpan.italic == span.italic &&
 					    lastSpan.blink == span.blink && lastSpan.underline == span.underline &&
 					    lastSpan.inverse == span.inverse && lastSpan.strike == span.strike &&
-					    lastSpan.changed == span.changed)
+					    lastSpan.changed == span.changed && lastSpan.actionType == span.actionType &&
+					    lastSpan.action == span.action && lastSpan.hint == span.hint &&
+					    lastSpan.variable == span.variable && lastSpan.startTag == span.startTag)
 						lastSpan.length += span.length;
 					else
 						lineSpans.push_back(span);
@@ -4652,20 +4722,21 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			};
 
 			int runStart = -1;
-			for (int i = 0; i < rawBytes.size(); ++i)
+			for (int i = 0; i < segmentLength; ++i)
 			{
-				const char ch = rawBytes.at(i);
-				if (ch == '\n' || ch == '\r')
+				const QChar ch = rawSegment.at(i);
+				if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r'))
 				{
 					if (runStart >= 0)
 					{
-						appendDecodedRun(runStart, i - runStart);
+						appendRun(runStart, i - runStart);
 						runStart = -1;
 					}
 
-					if (ch == '\r')
+					if (ch == QLatin1Char('\r'))
 					{
-						const bool nextIsNewline = (i + 1 < rawBytes.size() && rawBytes.at(i + 1) == '\n');
+						const bool nextIsNewline =
+						    (i + 1 < segmentLength && rawSegment.at(i + 1) == QLatin1Char('\n'));
 						if (carriageReturnClears && !nextIsNewline)
 						{
 							lineText.clear();
@@ -4683,207 +4754,60 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			}
 
 			if (runStart >= 0)
-				appendDecodedRun(runStart, safeQSizeToInt(rawBytes.size()) - runStart);
+				appendRun(runStart, segmentLength - runStart);
 		};
 
-		auto applySgr = [&](const QVector<int> &codes)
+		auto normalAnsiColorFromIndex = [&](const int idx) -> QString
 		{
-			QVector<int> params = codes;
-			if (params.isEmpty())
-				params.push_back(0);
-			for (int i = 0; i < params.size(); ++i)
-			{
-				const int code = params.at(i);
-				if (code == 0)
-				{
-					current      = AnsiRenderState{};
-					current.fore = defaultFore;
-					current.back = defaultBack;
-				}
-				else if (code == 1)
-				{
-					current.bold = true;
-					if (!current.fore.isEmpty())
-					{
-						for (int idx = 0; idx < normalAnsi.size(); ++idx)
-						{
-							if (current.fore == normalAnsi.at(idx).name())
-							{
-								current.fore = boldAnsi.at(idx).name();
-								break;
-							}
-						}
-					}
-				}
-				else if (code == 3)
-					current.italic = true;
-				else if (code == 5)
-					current.blink = true;
-				else if (code == 4)
-					current.underline = true;
-				else if (code == 7)
-				{
-					current.inverse = true;
-					if (!current.fore.isEmpty() || !current.back.isEmpty())
-						qSwap(current.fore, current.back);
-				}
-				else if (code == 9)
-					current.strike = true;
-				else if (code == 22)
-				{
-					current.bold = false;
-					if (!current.fore.isEmpty())
-					{
-						for (int idx = 0; idx < boldAnsi.size(); ++idx)
-						{
-							if (current.fore == boldAnsi.at(idx).name())
-							{
-								current.fore = normalAnsi.at(idx).name();
-								break;
-							}
-						}
-					}
-				}
-				else if (code == 23)
-					current.italic = false;
-				else if (code == 25)
-					current.blink = false;
-				else if (code == 24)
-					current.underline = false;
-				else if (code == 27)
-					current.inverse = false;
-				else if (code == 29)
-					current.strike = false;
-				else if (code == 39)
-					current.fore = defaultFore;
-				else if (code == 49)
-					current.back = defaultBack;
-				else if (code >= 30 && code <= 37)
-				{
-					setFgIndex(code - 30);
-				}
-				else if (code >= 40 && code <= 47)
-				{
-					setBgIndex(code - 40);
-				}
-				else if (code >= 90 && code <= 97)
-				{
-					const int idx = code - 90;
-					if (idx >= 0 && idx < boldAnsi.size())
-						current.fore = boldAnsi.at(idx).name();
-				}
-				else if (code >= 100 && code <= 107)
-				{
-					const int idx = code - 100;
-					if (idx >= 0 && idx < boldAnsi.size())
-						current.back = boldAnsi.at(idx).name();
-				}
-				else if (code == 38 || code == 48)
-				{
-					const bool isFore = (code == 38);
-					if (i + 1 >= params.size())
-						continue;
-					const int mode = params.at(i + 1);
-					if (mode == 5 && i + 2 < params.size())
-					{
-						const int idx = params.at(i + 2);
-						if (isFore)
-							current.fore = colorFromIndex(idx);
-						else
-							current.back = colorFromIndex(idx);
-						i += 2;
-					}
-					else if (mode == 2 && i + 4 < params.size())
-					{
-						const int     r   = params.at(i + 2);
-						const int     g   = params.at(i + 3);
-						const int     b   = params.at(i + 4);
-						const QString rgb = QColor(r, g, b).name();
-						if (isFore)
-							current.fore = rgb;
-						else
-							current.back = rgb;
-						i += 4;
-					}
-				}
-			}
+			if (idx < 0 || idx >= normalAnsi.size())
+				return {};
+			return normalAnsi.at(idx).name();
+		};
+		auto boldAnsiColorFromIndex = [&](const int idx) -> QString
+		{
+			if (idx < 0 || idx >= boldAnsi.size())
+				return {};
+			return boldAnsi.at(idx).name();
 		};
 
-		QByteArray plainBytes;
-		QByteArray bytes = processed;
-		if (!m_pendingAnsiSequence.isEmpty())
-		{
-			bytes.prepend(m_pendingAnsiSequence);
-			m_pendingAnsiSequence.clear();
-		}
-		plainBytes.reserve(bytes.size());
-		for (int i = 0; i < bytes.size(); ++i)
-		{
-			const char ch = bytes.at(i);
-			if (ch == '\x1b')
-			{
-				if (i + 1 >= bytes.size())
-				{
-					m_pendingAnsiSequence = bytes.mid(i);
-					break;
-				}
-				if (bytes.at(i + 1) != '[')
-					continue;
-				appendPlain(plainBytes);
-				plainBytes.clear();
-				const int seqStart = i;
-				i += 2;
-				QByteArray paramBytes;
-				bool       aborted = false;
-				while (i < bytes.size())
-				{
-					const auto byte = static_cast<unsigned char>(bytes.at(i));
-					if (byte >= 0x40 && byte <= 0x7E)
-						break;
-					if (byte >= 0x20 && byte <= 0x3F)
-					{
-						paramBytes.append(static_cast<char>(byte));
-						++i;
-						continue;
-					}
-					aborted = true;
-					break;
-				}
-				if (aborted)
-				{
-					i -= 1;
-					continue;
-				}
-				if (i >= bytes.size())
-				{
-					m_pendingAnsiSequence = bytes.mid(seqStart);
-					break;
-				}
-				const char finalByte = bytes.at(i);
-				if (finalByte == 'm')
-				{
-					paramBytes.replace(':', ';');
-					const QList<QByteArray> parts = paramBytes.split(';');
-					QVector<int>            codes;
-					for (const QByteArray &part : parts)
-					{
-						if (part.isEmpty())
-						{
-							codes.push_back(0);
-							continue;
-						}
-						bool      ok    = false;
-						const int value = part.toInt(&ok);
-						if (ok)
-							codes.push_back(value);
-					}
-					applySgr(codes);
-				}
-				continue;
-			}
-			plainBytes.append(ch);
-		}
-		appendPlain(plainBytes);
+		QMudStyledTextState ansiState;
+		ansiState.bold       = current.bold;
+		ansiState.underline  = current.underline;
+		ansiState.italic     = current.italic;
+		ansiState.blink      = current.blink;
+		ansiState.strike     = current.strike;
+		ansiState.inverse    = current.inverse;
+		ansiState.fore       = current.fore;
+		ansiState.back       = current.back;
+		ansiState.actionType = current.actionType;
+		ansiState.action     = current.action;
+		ansiState.hint       = current.hint;
+		ansiState.variable   = current.variable;
+		ansiState.startTag   = current.startTag;
+		ansiState.monospace  = current.monospace;
+
+		constexpr QMudOscActionIds oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
+		const QVector<QMudStyledChunk> chunks =
+		    qmudParseAnsiSgrChunks(processed, m_ansiStreamState, defaultFore, defaultBack,
+		                           normalAnsiColorFromIndex, boldAnsiColorFromIndex, colorFromIndex,
+		                           decodeIncomingDisplayBytes, ansiState, oscActionIds);
+		for (const QMudStyledChunk &chunk : chunks)
+			appendDecodedSegment(chunk.text, chunk.state);
+
+		current.bold       = ansiState.bold;
+		current.underline  = ansiState.underline;
+		current.italic     = ansiState.italic;
+		current.blink      = ansiState.blink;
+		current.strike     = ansiState.strike;
+		current.inverse    = ansiState.inverse;
+		current.fore       = ansiState.fore;
+		current.back       = ansiState.back;
+		current.actionType = ansiState.actionType;
+		current.action     = ansiState.action;
+		current.hint       = ansiState.hint;
+		current.variable   = ansiState.variable;
+		current.startTag   = ansiState.startTag;
+		current.monospace  = ansiState.monospace;
 
 		m_ansiRenderState  = current;
 		m_partialLineText  = lineText;
@@ -4891,10 +4815,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		emit incomingStyledLinePartialReceived(lineText, lineSpans);
 		if (m_mxpTagStack.isEmpty() && !hasActiveMxpRenderContext)
 			m_mxpTextBuffer.clear();
-		{
-			m_currentActionSource = previousActionSource;
-			return;
-		}
+		m_currentActionSource = previousActionSource;
+		return;
 	}
 	const QString openTagCallback =
 	    luaEnabled ? m_worldAttributes.value(QStringLiteral("on_mxp_open_tag")).trimmed() : QString();
@@ -4902,23 +4824,121 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 	    luaEnabled ? m_worldAttributes.value(QStringLiteral("on_mxp_close_tag")).trimmed() : QString();
 	const QString setVarCallback =
 	    luaEnabled ? m_worldAttributes.value(QStringLiteral("on_mxp_set_variable")).trimmed() : QString();
-	{
-		QList<TelnetProcessor::MxpEvent> sorted = events;
-		std::ranges::sort(sorted,
-		                  [](const TelnetProcessor::MxpEvent &a, const TelnetProcessor::MxpEvent &b)
-		                  {
-			                  if (a.offset != b.offset)
-				                  return a.offset < b.offset;
-			                  return a.sequence < b.sequence;
-		                  });
+		{
+			QList<TelnetProcessor::MxpEvent> sorted = events;
+			std::ranges::sort(sorted,
+			                  [](const TelnetProcessor::MxpEvent &a, const TelnetProcessor::MxpEvent &b)
+			                  {
+				                  if (a.offset != b.offset)
+					                  return a.offset < b.offset;
+				                  return a.sequence < b.sequence;
+			                  });
+			QList<TelnetProcessor::MxpModeChange> sortedModeChanges = modeChanges;
+			std::ranges::sort(
+			    sortedModeChanges,
+			    [](const TelnetProcessor::MxpModeChange &a, const TelnetProcessor::MxpModeChange &b)
+			    {
+				    if (a.offset != b.offset)
+					    return a.offset < b.offset;
+				    return a.sequence < b.sequence;
+			    });
 
-		MxpStyleState       current    = m_mxpRenderStyle;
-		QVector<MxpStyleFrame> stack   = m_mxpRenderStack;
-		QVector<QByteArray> blockStack = m_mxpRenderBlockStack;
-		bool                linkOpen   = m_mxpRenderLinkOpen;
-		int                 preDepth   = m_mxpRenderPreDepth;
-		QString             lineText   = m_partialLineText;
-		QVector<StyleSpan>  lineSpans  = m_partialLineSpans;
+		MxpStyleState         current    = m_mxpRenderStyle;
+		QVector<MxpStyleFrame> stack     = m_mxpRenderStack;
+		QVector<QByteArray>   blockStack = m_mxpRenderBlockStack;
+		bool                  linkOpen   = m_mxpRenderLinkOpen;
+		int                   preDepth   = m_mxpRenderPreDepth;
+		QString               lineText   = m_partialLineText;
+		QVector<StyleSpan>    lineSpans  = m_partialLineSpans;
+		bool                  mxpTrackingReset{false};
+		auto restoreCurrentFromAnsiState = [&]
+		{
+			current.bold       = m_ansiRenderState.bold;
+			current.underline  = m_ansiRenderState.underline;
+			current.italic     = m_ansiRenderState.italic;
+			current.blink      = m_ansiRenderState.blink;
+			current.strike     = m_ansiRenderState.strike;
+			current.monospace  = m_ansiRenderState.monospace;
+			current.inverse    = m_ansiRenderState.inverse;
+			current.fore       = m_ansiRenderState.fore;
+			current.back       = m_ansiRenderState.back;
+			current.actionType = m_ansiRenderState.actionType;
+			current.action     = m_ansiRenderState.action;
+			current.hint       = m_ansiRenderState.hint;
+			current.variable   = m_ansiRenderState.variable;
+			current.startTag   = m_ansiRenderState.startTag;
+			if (current.fore.isEmpty())
+				current.fore = defaultFore;
+			if (current.back.isEmpty())
+				current.back = defaultBack;
+		};
+		auto resetMxpTrackingForOverflow = [&](const QString &reason)
+		{
+			if (mxpTrackingReset)
+				return;
+			mxpError(DBG_WARNING, wrnMXP_TagStackLimitExceeded, reason);
+			m_mxpOpenTags.clear();
+			m_mxpTagStack.clear();
+			m_mxpTextBuffer.clear();
+			clearAnsiActionContext();
+			restoreCurrentFromAnsiState();
+			stack.clear();
+			blockStack.clear();
+			linkOpen         = false;
+			preDepth         = 0;
+			mxpTrackingReset = true;
+		};
+		auto ensureOpenTagCapacity = [&]()
+		{
+			if (m_mxpOpenTags.size() >= kMaxMxpStackDepth)
+			{
+				resetMxpTrackingForOverflow(
+				    QStringLiteral("MXP open-tag stack exceeded %1 entries; resetting MXP context.")
+				        .arg(kMaxMxpStackDepth));
+				return false;
+			}
+			return true;
+		};
+		auto ensureTagFrameCapacity = [&]()
+		{
+			if (m_mxpTagStack.size() >= kMaxMxpStackDepth)
+			{
+				resetMxpTrackingForOverflow(
+				    QStringLiteral("MXP tag frame stack exceeded %1 entries; resetting MXP context.")
+				        .arg(kMaxMxpStackDepth));
+				return false;
+			}
+			return true;
+		};
+		auto ensureRenderStackCapacity = [&](const QByteArray &tag)
+		{
+			if (stack.size() >= kMaxMxpStackDepth)
+			{
+				resetMxpTrackingForOverflow(
+				    QStringLiteral("MXP render stack exceeded %1 entries near <%2>; resetting MXP context.")
+				        .arg(kMaxMxpStackDepth)
+				        .arg(QString::fromLatin1(tag)));
+				return false;
+			}
+			return true;
+		};
+		auto ensureRenderBlockCapacity = [&](const QByteArray &tag)
+		{
+			if (blockStack.size() >= kMaxMxpStackDepth)
+			{
+				resetMxpTrackingForOverflow(
+				    QStringLiteral(
+				        "MXP block-tag stack exceeded %1 entries near <%2>; resetting MXP context.")
+				        .arg(kMaxMxpStackDepth)
+				        .arg(QString::fromLatin1(tag)));
+				return false;
+			}
+			return true;
+		};
+		const bool hasPersistedMxpRenderContext =
+		    !stack.isEmpty() || !blockStack.isEmpty() || linkOpen || preDepth > 0;
+		if (!hasPersistedMxpRenderContext)
+			restoreCurrentFromAnsiState();
 
 		static const QRegularExpression kHexColor6(QStringLiteral("^[0-9A-Fa-f]{6}$"));
 		auto normalizeColorBytes = [](const QByteArray &value) -> QString
@@ -4973,6 +4993,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 				if (hint.isEmpty())
 					hint = QString::fromLocal8Bit(activeAttributes.value("xch_hint"));
 				linkOpen = true;
+				if (!ensureRenderStackCapacity(activeTag))
+					return;
 				stack.push_back({activeTag, current});
 				if (activeTag == "a")
 					current.actionType = ActionHyperlink;
@@ -4994,26 +5016,36 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			         activeTag == "h2" || activeTag == "h3" || activeTag == "h4" || activeTag == "h5" ||
 			         activeTag == "h6")
 			{
+				if (!ensureRenderStackCapacity(activeTag))
+					return;
 				stack.push_back({activeTag, current});
 				current.bold = true;
 			}
 			else if (activeTag == "underline" || activeTag == "u")
 			{
+				if (!ensureRenderStackCapacity(activeTag))
+					return;
 				stack.push_back({activeTag, current});
 				current.underline = true;
 			}
 			else if (activeTag == "italic" || activeTag == "i" || activeTag == "em")
 			{
+				if (!ensureRenderStackCapacity(activeTag))
+					return;
 				stack.push_back({activeTag, current});
 				current.italic = true;
 			}
 			else if (activeTag == "strike" || activeTag == "s")
 			{
+				if (!ensureRenderStackCapacity(activeTag))
+					return;
 				stack.push_back({activeTag, current});
 				current.strike = true;
 			}
 			else if (activeTag == "color")
 			{
+				if (!ensureRenderStackCapacity(activeTag))
+					return;
 				stack.push_back({activeTag, current});
 				if (!ignoreMxpColourChanges)
 				{
@@ -5031,6 +5063,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			}
 			else if (activeTag == "c")
 			{
+				if (!ensureRenderStackCapacity(activeTag))
+					return;
 				stack.push_back({activeTag, current});
 				if (!ignoreMxpColourChanges)
 				{
@@ -5044,6 +5078,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			}
 			else if (activeTag == "font")
 			{
+				if (!ensureRenderStackCapacity(activeTag))
+					return;
 				stack.push_back({activeTag, current});
 				QString colorSpec = QString::fromLocal8Bit(activeAttributes.value("color"));
 				if (colorSpec.isEmpty())
@@ -5088,6 +5124,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			}
 			else if (activeTag == "high" || activeTag == "h")
 			{
+				if (!ensureRenderStackCapacity(activeTag))
+					return;
 				stack.push_back({activeTag, current});
 				if (!current.fore.isEmpty())
 				{
@@ -5098,28 +5136,40 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			}
 			else if (activeTag == "tt" || activeTag == "samp")
 			{
+				if (!ensureRenderStackCapacity(activeTag))
+					return;
 				stack.push_back({activeTag, current});
 				current.monospace = true;
 			}
 			else if (activeTag == "pre")
 			{
+				if (!ensureRenderBlockCapacity(activeTag))
+					return;
 				blockStack.push_back(activeTag);
 				preDepth++;
 			}
 			else if (activeTag == "center")
 			{
+				if (!ensureRenderBlockCapacity(activeTag))
+					return;
 				blockStack.push_back(activeTag);
 			}
 			else if (activeTag == "ul")
 			{
+				if (!ensureRenderBlockCapacity(activeTag))
+					return;
 				blockStack.push_back(activeTag);
 			}
 			else if (activeTag == "ol")
 			{
+				if (!ensureRenderBlockCapacity(activeTag))
+					return;
 				blockStack.push_back(activeTag);
 			}
 			else if (activeTag == "li")
 			{
+				if (!ensureRenderBlockCapacity(activeTag))
+					return;
 				blockStack.push_back(activeTag);
 			}
 			else if (activeTag == "reset")
@@ -5142,8 +5192,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			}
 		};
 
-		auto applyEndTag = [&](const QByteArray &closeTag)
-		{
+			auto applyEndTag = [&](const QByteArray &closeTag)
+			{
 			if (closeTag == "send" || closeTag == "a")
 			{
 				if (linkOpen)
@@ -5192,11 +5242,34 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 						break;
 					}
 				}
-			}
-		};
+				}
+			};
 
-		auto appendStyled = [&](const QByteArray &bytes)
-		{
+			auto applyMxpModeBarrier = [&](const TelnetProcessor::MxpModeChange &modeChange)
+			{
+				auto isLockedMode = [](const int mode) { return mode == 2 || mode == 7; };
+				if (modeChange.newMode != 3 && !isLockedMode(modeChange.newMode))
+					return;
+
+				m_mxpOpenTags.clear();
+				m_mxpTagStack.clear();
+
+				if (!stack.isEmpty())
+					current = stack.front().state;
+				stack.clear();
+				blockStack.clear();
+				linkOpen = false;
+				preDepth = 0;
+
+				current.actionType = ActionNone;
+				current.action.clear();
+				current.hint.clear();
+				current.variable.clear();
+				current.startTag = false;
+			};
+
+			auto appendStyled = [&](const QByteArray &bytes)
+			{
 			if (bytes.isEmpty())
 				return;
 			auto appendDecodedSegment = [&](const QString &decoded, const QMudStyledTextState &segmentState)
@@ -5317,10 +5390,11 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			ansiState.startTag   = current.startTag;
 			ansiState.monospace  = current.monospace;
 
+			constexpr QMudOscActionIds oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
 			const QVector<QMudStyledChunk> chunks =
-			    qmudParseAnsiSgrChunks(bytes, m_pendingAnsiSequence, defaultFore, defaultBack,
+			    qmudParseAnsiSgrChunks(bytes, m_ansiStreamState, defaultFore, defaultBack,
 			                           normalAnsiColorFromIndex, boldAnsiColorFromIndex, colorFromIndex,
-			                           decodeIncomingDisplayBytes, ansiState);
+			                           decodeIncomingDisplayBytes, ansiState, oscActionIds);
 			for (const QMudStyledChunk &chunk : chunks)
 				appendDecodedSegment(chunk.text, chunk.state);
 
@@ -5346,20 +5420,42 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			return lookupAtomicTagInfo(tag, info);
 		};
 
-		auto isTrackableTag = [](const QByteArray &tag)
-		{
-			return tag == "send" || tag == "a" || tag == "bold" || tag == "b" || tag == "strong" ||
+			auto isTrackableTag = [](const QByteArray &tag)
+			{
+				return tag == "send" || tag == "a" || tag == "bold" || tag == "b" || tag == "strong" ||
 			       tag == "underline" || tag == "u" || tag == "italic" || tag == "i" || tag == "em" ||
 			       tag == "strike" || tag == "s" || tag == "color" || tag == "c" || tag == "font" ||
 			       tag == "high" || tag == "h" || tag == "tt" || tag == "samp" || tag == "pre" ||
 			       tag == "center" || tag == "ul" || tag == "ol" || tag == "li" || tag == "var" || tag == "v";
-		};
+			};
 
-		for (const TelnetProcessor::MxpEvent &ev : sorted)
-		{
-			if (ev.offset > last)
+			int modeChangeIndex = 0;
+
+			for (const TelnetProcessor::MxpEvent &ev : sorted)
 			{
-				appendStyled(processed.mid(last, ev.offset - last));
+				if (mxpTrackingReset)
+					break;
+
+				while (modeChangeIndex < sortedModeChanges.size())
+				{
+					const TelnetProcessor::MxpModeChange &modeChange = sortedModeChanges.at(modeChangeIndex);
+					const bool boundaryComesBeforeEvent =
+					    (modeChange.offset < ev.offset) ||
+					    (modeChange.offset == ev.offset && modeChange.sequence < ev.sequence);
+					if (!boundaryComesBeforeEvent)
+						break;
+					if (modeChange.offset > last)
+					{
+						appendStyled(processed.mid(last, modeChange.offset - last));
+						last = modeChange.offset;
+					}
+					applyMxpModeBarrier(modeChange);
+					++modeChangeIndex;
+				}
+
+				if (ev.offset > last)
+				{
+					appendStyled(processed.mid(last, ev.offset - last));
 				last = ev.offset;
 			}
 
@@ -5468,6 +5564,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 
 				if (!tagIsCommand)
 				{
+					if (!ensureOpenTagCapacity())
+						continue;
 					MxpOpenTag openTag;
 					openTag.tag          = tag;
 					openTag.openedSecure = mxpSecure;
@@ -5539,11 +5637,17 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 								continue;
 						}
 						applyStartTag(childTag, childAttrs);
+						if (mxpTrackingReset)
+							break;
 						appliedCloseTags.push_back(childTag);
 					}
+					if (mxpTrackingReset)
+						continue;
 
 					if (trackable)
 					{
+						if (!ensureTagFrameCapacity())
+							continue;
 						MxpTagFrame frame;
 						frame.tag          = tag;
 						frame.contentStart = mxpBaseOffset + ev.offset;
@@ -5557,6 +5661,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 
 				if (trackable)
 				{
+					if (!ensureTagFrameCapacity())
+						continue;
 					MxpTagFrame frame;
 					frame.tag          = tag;
 					frame.contentStart = mxpBaseOffset + ev.offset;
@@ -5577,6 +5683,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 				}
 
 				applyStartTag(effectiveTag, attributes);
+				if (mxpTrackingReset)
+					continue;
 
 				if (effectiveTag == "version" || effectiveTag == "afk" || effectiveTag == "support" ||
 				    effectiveTag == "option" || effectiveTag == "recommend_option" ||
@@ -6137,10 +6245,21 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 					applyEndTag(closeTag);
 				}
 			}
-		}
+			}
 
-		if (last < processed.size())
-			appendStyled(processed.mid(last));
+			while (modeChangeIndex < sortedModeChanges.size())
+			{
+				const TelnetProcessor::MxpModeChange &modeChange = sortedModeChanges.at(modeChangeIndex++);
+				if (modeChange.offset > last)
+				{
+					appendStyled(processed.mid(last, modeChange.offset - last));
+					last = modeChange.offset;
+				}
+				applyMxpModeBarrier(modeChange);
+			}
+
+			if (last < processed.size())
+				appendStyled(processed.mid(last));
 
 		const bool hasActiveMxpRenderContextAfterProcessing =
 		    !stack.isEmpty() || !blockStack.isEmpty() || linkOpen || preDepth > 0;
@@ -6152,13 +6271,27 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		m_mxpRenderBlockStack = blockStack;
 		m_mxpRenderLinkOpen   = linkOpen;
 		m_mxpRenderPreDepth   = preDepth;
+		m_ansiRenderState.bold       = current.bold;
+		m_ansiRenderState.underline  = current.underline;
+		m_ansiRenderState.italic     = current.italic;
+		m_ansiRenderState.blink      = current.blink;
+		m_ansiRenderState.strike     = current.strike;
+		m_ansiRenderState.monospace  = current.monospace;
+		m_ansiRenderState.inverse    = current.inverse;
+		m_ansiRenderState.fore       = current.fore;
+		m_ansiRenderState.back       = current.back;
+		m_ansiRenderState.actionType = current.actionType;
+		m_ansiRenderState.action     = current.action;
+		m_ansiRenderState.hint       = current.hint;
+		m_ansiRenderState.variable   = current.variable;
+		m_ansiRenderState.startTag   = current.startTag;
 
 		m_partialLineText  = lineText;
 		m_partialLineSpans = lineSpans;
-		emit incomingStyledLinePartialReceived(lineText, lineSpans);
-		m_currentActionSource = previousActionSource;
+			emit incomingStyledLinePartialReceived(lineText, lineSpans);
+			m_currentActionSource = previousActionSource;
+		}
 	}
-}
 
 bool WorldRuntime::connectToWorld(const QString &host, quint16 port)
 {
@@ -10229,6 +10362,7 @@ void WorldRuntime::mxpShutDown()
 	m_mxpOpenTags.clear();
 	m_mxpTextBuffer.clear();
 	resetMxpRenderState();
+	clearAnsiActionContext();
 
 	if (isLuaScriptingEnabled(m_worldAttributes) && m_luaCallbacks)
 	{
@@ -10253,6 +10387,7 @@ void WorldRuntime::resetMxpTags()
 	m_mxpOpenTags.clear();
 	m_mxpTextBuffer.clear();
 	resetMxpRenderState();
+	clearAnsiActionContext();
 }
 
 void WorldRuntime::resetIpCache()

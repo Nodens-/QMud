@@ -216,6 +216,35 @@ class tst_TelnetProcessor_Mxp : public QObject
 			QCOMPARE(events.at(0).offset, static_cast<int>(prefix.size()));
 			QCOMPARE(events.at(1).offset, static_cast<int>(prefix.size() + QByteArrayLiteral("Testuser").size()));
 		}
+
+		void modeBoundaryOffsetsTrackEscZWithinMixedStream()
+		{
+			TelnetProcessor processor;
+			processor.setUseMxp(0); // eOnCommandMXP
+			processor.processBytes(bytes({IAC, SB, TELOPT_MXP, IAC, SE}));
+			QVERIFY(processor.isMxpEnabled());
+
+			QByteArray input;
+			input.append(QByteArrayLiteral("\x1b[1z<SEND href='whois Testuser'>Testuser"));
+			input.append(QByteArrayLiteral("\x1b[7z after"));
+
+			const QByteArray output = processor.processBytes(input);
+			QCOMPARE(output, QByteArrayLiteral("Testuser after"));
+
+			const QList<TelnetProcessor::MxpEvent> events = processor.takeMxpEvents();
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.at(0).type, TelnetProcessor::MxpEvent::StartTag);
+			QCOMPARE(events.at(0).name.toLower(), QByteArrayLiteral("send"));
+			QCOMPARE(events.at(0).offset, 0);
+
+			const QList<TelnetProcessor::MxpModeChange> modeChanges = processor.takeMxpModeChanges();
+			QCOMPARE(modeChanges.size(), 2);
+			QCOMPARE(modeChanges.at(0).newMode, 1); // eMXP_secure
+			QCOMPARE(modeChanges.at(0).offset, 0);
+			QCOMPARE(modeChanges.at(1).newMode, 7); // eMXP_perm_locked
+			QCOMPARE(modeChanges.at(1).offset, static_cast<int>(QByteArrayLiteral("Testuser").size()));
+			QVERIFY(modeChanges.at(0).sequence < modeChanges.at(1).sequence);
+		}
 	// NOLINTEND(readability-convert-member-functions-to-static)
 };
 

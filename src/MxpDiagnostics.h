@@ -54,6 +54,7 @@ enum
 	errMXP_DefinitionCannotDefineElement,
 	errMXP_CannotChangeOption = 1048,
 	errMXP_OptionOutOfRange   = 1049,
+	errMXP_CollectionTooLong  = 1050,
 
 	wrnMXP_ReplacingElement = 5000,
 	wrnMXP_ManyOutstandingTags,
@@ -72,6 +73,11 @@ enum
 	wrnMXP_TagClosedAtReset,
 	wrnMXP_UnusedArgument,
 	wrnMXP_NotStartingPueblo,
+	wrnMXP_TagStackLimitExceeded  = 5017,
+	wrnMXP_TextBufferLimitExceeded = 5018,
+	wrnMXP_CustomDefinitionLimitExceeded = 5019,
+	wrnMXP_EventQueueLimitExceeded       = 5020,
+	wrnMXP_AttlistLimitExceeded          = 5021,
 
 	infoMXP_VersionSent               = 10000,
 	infoMXP_CharacterNameSent         = 10001,

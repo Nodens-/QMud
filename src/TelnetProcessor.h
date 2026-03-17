@@ -166,6 +166,22 @@ class TelnetProcessor
 		 */
 		QList<MxpEvent>      takeMxpEvents();
 		/**
+		 * @brief Parsed MXP mode transition marker emitted during stream processing.
+		 */
+		struct MxpModeChange
+		{
+				int  offset{0};
+				int  sequence{0};
+				int  oldMode{0};
+				int  newMode{0};
+				bool shouldLog{false};
+		};
+		/**
+		 * @brief Returns and clears parsed MXP mode-change markers since the previous call.
+		 * @return Parsed MXP mode-change markers.
+		 */
+		QList<MxpModeChange> takeMxpModeChanges();
+		/**
 		 * @brief Retrieves a custom MXP entity value by name.
 		 * @param name Entity name.
 		 * @param value Output entity value.
@@ -528,6 +544,8 @@ class TelnetProcessor
 		};
 		QMap<QByteArray, CustomElement> m_customElements;
 		QList<MxpEvent>                 m_mxpEvents;
+		QList<MxpModeChange>            m_mxpModeChanges;
+		bool                            m_mxpEventsOverflowed{false};
 		int                             m_mxpEventSequence{0};
 		Callbacks                       m_callbacks;
 
