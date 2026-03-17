@@ -11082,7 +11082,7 @@ void AppController::handleLogSession() const
 		return;
 	}
 
-	WorldRuntime *runtime = child->runtime();
+	QPointer<WorldRuntime> runtime = child->runtime();
 	if (!runtime)
 		return;
 
@@ -11101,8 +11101,8 @@ void AppController::handleLogSession() const
 		return;
 	}
 
-	const QMap<QString, QString> &attrs = runtime->worldAttributes();
-	const QMap<QString, QString> &multi = runtime->worldMultilineAttributes();
+	const QMap<QString, QString> attrs = runtime->worldAttributes();
+	const QMap<QString, QString> multi = runtime->worldMultilineAttributes();
 
 	bool      appendToLog    = getGlobalOption(QStringLiteral("AppendToLogFiles")).toInt() != 0;
 	const int linesThen      = static_cast<int>(runtime->lines().size());
@@ -11128,6 +11128,8 @@ void AppController::handleLogSession() const
 		dlg.setLogNotes(logNotes);
 		if (dlg.exec() != QDialog::Accepted)
 			return;
+		if (!runtime)
+			return;
 
 		lines          = dlg.lines();
 		appendToLog    = dlg.appendToLogFile();
@@ -11147,8 +11149,12 @@ void AppController::handleLogSession() const
 	                           logInput ? QStringLiteral("1") : QStringLiteral("0"));
 	runtime->setWorldAttribute(QStringLiteral("log_notes"),
 	                           logNotes ? QStringLiteral("1") : QStringLiteral("0"));
+	if (!runtime)
+		return;
 
-	const QString autoLogFileName = attrs.value(QStringLiteral("auto_log_file_name"));
+	const QMap<QString, QString> attrsAfterOptions = runtime->worldAttributes();
+
+	const QString autoLogFileName = attrsAfterOptions.value(QStringLiteral("auto_log_file_name"));
 	QString       suggestedName;
 	if (!autoLogFileName.isEmpty())
 	{
@@ -11156,7 +11162,7 @@ void AppController::handleLogSession() const
 	}
 	else
 	{
-		QString           worldName = attrs.value(QStringLiteral("name"));
+		QString           worldName = attrsAfterOptions.value(QStringLiteral("name"));
 		static const auto invalid   = QStringLiteral("<>\"|?:#%;/\\");
 		for (const QChar &ch : invalid)
 			worldName.remove(ch);
@@ -11181,6 +11187,8 @@ void AppController::handleLogSession() const
 
 	const QString fileName = dialog.exec() == QDialog::Accepted ? dialog.selectedFiles().value(0) : QString();
 	changeToStartupDirectory();
+	if (!runtime)
+		return;
 	if (fileName.isEmpty())
 		return;
 
@@ -11194,8 +11202,8 @@ void AppController::handleLogSession() const
 	if (logRaw)
 		return;
 
-	const bool logHtml     = isEnabledFlag(attrs.value(QStringLiteral("log_html")));
-	const bool logInColour = isEnabledFlag(attrs.value(QStringLiteral("log_in_colour")));
+	const bool logHtml     = isEnabledFlag(attrsAfterOptions.value(QStringLiteral("log_html")));
+	const bool logInColour = isEnabledFlag(attrsAfterOptions.value(QStringLiteral("log_in_colour")));
 	const auto now         = QDateTime::currentDateTime();
 	if (!preamble.isEmpty())
 	{
@@ -11209,7 +11217,7 @@ void AppController::handleLogSession() const
 	if (writeWorldName)
 	{
 		const QString strTime = runtime->formatTime(now, QStringLiteral("%A, %B %d, %Y, %#I:%M %p"), false);
-		QString       strPreamble = attrs.value(QStringLiteral("name"));
+		QString       strPreamble = attrsAfterOptions.value(QStringLiteral("name"));
 		strPreamble += QStringLiteral(" - ");
 		strPreamble += strTime;
 

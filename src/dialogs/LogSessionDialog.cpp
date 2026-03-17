@@ -26,11 +26,9 @@ LogSessionDialog::LogSessionDialog(QWidget *parent) : QDialog(parent)
 	setMinimumSize(620, 480);
 
 	auto mainLayout = std::make_unique<QVBoxLayout>();
-	setLayout(mainLayout.release());
 
 	auto captureGroup  = std::make_unique<QGroupBox>(QStringLiteral("Capture"), this);
 	auto captureLayout = std::make_unique<QFormLayout>();
-	captureGroup->setLayout(captureLayout.release());
 
 	m_lines = new QSpinBox(captureGroup.get());
 	m_lines->setRange(0, 500000);
@@ -42,32 +40,35 @@ LogSessionDialog::LogSessionDialog(QWidget *parent) : QDialog(parent)
 
 	m_writeWorldName = new QCheckBox(QStringLiteral("Write world name to log"), captureGroup.get());
 	captureLayout->addRow(m_writeWorldName);
+	captureGroup->setLayout(captureLayout.release());
 
-	layout()->addWidget(captureGroup.release());
+	mainLayout->addWidget(captureGroup.release());
 
 	auto optionsGroup  = std::make_unique<QGroupBox>(QStringLiteral("What to log"), this);
 	auto optionsLayout = std::make_unique<QVBoxLayout>();
-	optionsGroup->setLayout(optionsLayout.release());
 	m_logOutput = new QCheckBox(QStringLiteral("Log output from the MUD"), optionsGroup.get());
 	m_logInput  = new QCheckBox(QStringLiteral("Log your input"), optionsGroup.get());
 	m_logNotes  = new QCheckBox(QStringLiteral("Log notes"), optionsGroup.get());
 	optionsLayout->addWidget(m_logOutput);
 	optionsLayout->addWidget(m_logInput);
 	optionsLayout->addWidget(m_logNotes);
-	layout()->addWidget(optionsGroup.release());
+	optionsGroup->setLayout(optionsLayout.release());
+	mainLayout->addWidget(optionsGroup.release());
 
 	auto preambleGroup  = std::make_unique<QGroupBox>(QStringLiteral("Log file preamble"), this);
 	auto preambleLayout = std::make_unique<QVBoxLayout>();
-	preambleGroup->setLayout(preambleLayout.release());
 	m_preamble = new QTextEdit(preambleGroup.get());
 	m_preamble->setAcceptRichText(false);
 	preambleLayout->addWidget(m_preamble);
-	layout()->addWidget(preambleGroup.release());
+	preambleGroup->setLayout(preambleLayout.release());
+	mainLayout->addWidget(preambleGroup.release());
 
 	auto buttons = std::make_unique<QDialogButtonBox>(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
 	connect(buttons.get(), &QDialogButtonBox::accepted, this, &LogSessionDialog::accept);
 	connect(buttons.get(), &QDialogButtonBox::rejected, this, &LogSessionDialog::reject);
-	layout()->addWidget(buttons.release());
+	mainLayout->addWidget(buttons.release());
+
+	setLayout(mainLayout.release());
 }
 
 void LogSessionDialog::setLines(const int lines) const

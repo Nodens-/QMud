@@ -211,3 +211,7 @@ These are intentional design choices in QMud:
 - PNG has been depracated and handled with native Qt.
 - Legacy SHS code was deprecated; hashing paths use Qt (`QCryptographicHash`).
 - Newly written XML metadata uses `qmud` elements; legacy `muclient` are still read for compatibility.
+
+## Contributors
+
+- Abigail Brady ([Cryosphere](https://cryosphere.org/))

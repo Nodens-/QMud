@@ -3884,143 +3884,6 @@ void WorldPreferencesDialog::buildUi()
 			        storeKeypadFields(!m_keypadControl->isChecked());
 			        loadKeypadFields(m_keypadControl->isChecked());
 		        });
-	if (m_browseScriptFile && m_scriptFile)
-		connect(m_browseScriptFile, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getOpenFileName(this, QStringLiteral("Script file name"), startDir,
-			                                         QStringLiteral("Lua files (*.lua);;All files (*.*)"));
-			        if (!fileName.isEmpty())
-			        {
-				        m_scriptFile->setText(fileName);
-				        if (m_runtime)
-					        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-			        }
-		        });
-	if (m_newScriptFile && m_scriptFile)
-		connect(m_newScriptFile, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getSaveFileName(this, QStringLiteral("New script file"), startDir,
-			                                         QStringLiteral("Lua files (*.lua);;All files (*.*)"));
-			        if (fileName.isEmpty())
-				        return;
-			        QString finalName = fileName;
-			        if (QFileInfo(finalName).suffix().isEmpty())
-				        finalName += QStringLiteral(".lua");
-			        QSaveFile file(finalName);
-			        if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
-			        {
-				        QMessageBox::warning(this, QStringLiteral("New script file"),
-				                             QStringLiteral("Unable to create the requested file."));
-				        return;
-			        }
-			        file.commit();
-			        m_scriptFile->setText(finalName);
-			        if (m_runtime)
-				        m_runtime->setFileBrowsingDirectory(QFileInfo(finalName).absolutePath());
-		        });
-	if (m_editScriptFile && m_scriptFile)
-		connect(m_editScriptFile, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString fileName = m_scriptFile->text().trimmed();
-			        if (fileName.isEmpty())
-				        return;
-			        AppController *app              = AppController::instance();
-			        const QString  resolvedFileName = app ? app->makeAbsolutePath(fileName) : fileName;
-			        const QString  editorWindowName =
-                        m_editorWindowName ? m_editorWindowName->text().trimmed() : QString();
-			        const auto tryRaiseConfiguredEditorWindow = [&]
-			        {
-				        if (editorWindowName.isEmpty())
-					        return;
-				        bringOwnedWindowToFrontByTitle(editorWindowName);
-			        };
-			        if (m_editScriptWithNotepad && m_editScriptWithNotepad->isChecked())
-			        {
-				        if (!QFileInfo::exists(resolvedFileName))
-				        {
-					        QMessageBox::warning(this, QStringLiteral("Edit script"),
-					                             QStringLiteral("Unable to open the requested file."));
-					        return;
-				        }
-				        if (app)
-				        {
-					        (void)app->openTextDocument(resolvedFileName);
-					        tryRaiseConfiguredEditorWindow();
-					        return;
-				        }
-			        }
-			        QString editorPath;
-			        if (m_scriptEditor)
-				        editorPath = m_scriptEditor->text().trimmed();
-			        QString editorArgs;
-			        if (m_runtime)
-				        editorArgs = m_runtime->worldAttributes()
-				                         .value(QStringLiteral("script_editor_argument"))
-				                         .trimmed();
-			        if (editorArgs.isEmpty())
-				        editorArgs = QStringLiteral("\"%file\"");
-			        editorArgs.replace(QStringLiteral("%file"), resolvedFileName);
-			        if (!editorPath.isEmpty())
-			        {
-				        if (const QStringList splitArgs = QProcess::splitCommand(editorArgs);
-				            QProcess::startDetached(editorPath, splitArgs))
-				        {
-					        tryRaiseConfiguredEditorWindow();
-					        return;
-				        }
-			        }
-			        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(resolvedFileName)))
-			        {
-				        QMessageBox::warning(this, QStringLiteral("Edit script"),
-				                             QStringLiteral("Unable to open the requested file."));
-			        }
-			        else
-				        tryRaiseConfiguredEditorWindow();
-		        });
-	if (m_chooseScriptEditor && m_scriptEditor)
-		connect(m_chooseScriptEditor, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        if (const QString fileName =
-			                QFileDialog::getOpenFileName(this, QStringLiteral("Choose script editor"),
-			                                             startDir, QStringLiteral("Programs (*.*)"));
-			            !fileName.isEmpty())
-			        {
-				        if (m_runtime)
-					        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-				        m_scriptEditor->setText(fileName);
-			        }
-		        });
-	if (m_editScriptWithNotepad && m_chooseScriptEditor)
-		connect(m_editScriptWithNotepad, &QCheckBox::toggled, this,
-		        [this](const bool checked)
-		        {
-			        m_chooseScriptEditor->setEnabled(!checked);
-			        if (m_scriptEditor)
-				        m_scriptEditor->setEnabled(!checked);
-		        });
-	if (m_editScriptWithNotepad)
-	{
-		const bool checked = m_editScriptWithNotepad->isChecked();
-		if (m_chooseScriptEditor)
-			m_chooseScriptEditor->setEnabled(!checked);
-		if (m_scriptEditor)
-			m_scriptEditor->setEnabled(!checked);
-	}
-	if (m_scriptFile && m_editScriptFile)
-	{
-		connect(m_scriptFile, &QLineEdit::textChanged, this,
-		        [this](const QString &text) { m_editScriptFile->setEnabled(!text.trimmed().isEmpty()); });
-		m_editScriptFile->setEnabled(!m_scriptFile->text().trimmed().isEmpty());
-	}
 	if (m_infoCalculateMemory)
 		connect(m_infoCalculateMemory, &QPushButton::clicked, this, [this] { calculateMemoryUsage(true); });
 	if (m_chatSaveBrowse && m_chatSaveDirectory)
@@ -6416,6 +6279,144 @@ void WorldPreferencesDialog::buildUi()
 	scriptingEvents->addLayout(scriptingSide);
 	scriptingLayout->addLayout(scriptingEvents);
 	scriptingLayout->addStretch();
+
+	if (m_browseScriptFile && m_scriptFile)
+		connect(m_browseScriptFile, &QPushButton::clicked, this,
+		        [this]
+		        {
+			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
+			        const QString fileName =
+			            QFileDialog::getOpenFileName(this, QStringLiteral("Script file name"), startDir,
+			                                         QStringLiteral("Lua files (*.lua);;All files (*.*)"));
+			        if (!fileName.isEmpty())
+			        {
+				        m_scriptFile->setText(fileName);
+				        if (m_runtime)
+					        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
+			        }
+		        });
+	if (m_newScriptFile && m_scriptFile)
+		connect(m_newScriptFile, &QPushButton::clicked, this,
+		        [this]
+		        {
+			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
+			        const QString fileName =
+			            QFileDialog::getSaveFileName(this, QStringLiteral("New script file"), startDir,
+			                                         QStringLiteral("Lua files (*.lua);;All files (*.*)"));
+			        if (fileName.isEmpty())
+				        return;
+			        QString finalName = fileName;
+			        if (QFileInfo(finalName).suffix().isEmpty())
+				        finalName += QStringLiteral(".lua");
+			        QSaveFile file(finalName);
+			        if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+			        {
+				        QMessageBox::warning(this, QStringLiteral("New script file"),
+				                             QStringLiteral("Unable to create the requested file."));
+				        return;
+			        }
+			        file.commit();
+			        m_scriptFile->setText(finalName);
+			        if (m_runtime)
+				        m_runtime->setFileBrowsingDirectory(QFileInfo(finalName).absolutePath());
+		        });
+	if (m_editScriptFile && m_scriptFile)
+		connect(m_editScriptFile, &QPushButton::clicked, this,
+		        [this]
+		        {
+			        const QString fileName = m_scriptFile->text().trimmed();
+			        if (fileName.isEmpty())
+				        return;
+			        AppController *app              = AppController::instance();
+			        const QString  resolvedFileName = app ? app->makeAbsolutePath(fileName) : fileName;
+			        const QString  editorWindowName =
+			            m_editorWindowName ? m_editorWindowName->text().trimmed() : QString();
+			        const auto tryRaiseConfiguredEditorWindow = [&]
+			        {
+				        if (editorWindowName.isEmpty())
+					        return;
+				        bringOwnedWindowToFrontByTitle(editorWindowName);
+			        };
+			        if (m_editScriptWithNotepad && m_editScriptWithNotepad->isChecked())
+			        {
+				        if (!QFileInfo::exists(resolvedFileName))
+				        {
+					        QMessageBox::warning(this, QStringLiteral("Edit script"),
+					                             QStringLiteral("Unable to open the requested file."));
+					        return;
+				        }
+				        if (app)
+				        {
+					        (void)app->openTextDocument(resolvedFileName);
+					        tryRaiseConfiguredEditorWindow();
+					        return;
+				        }
+			        }
+			        QString editorPath;
+			        if (m_scriptEditor)
+				        editorPath = m_scriptEditor->text().trimmed();
+			        QString editorArgs;
+			        if (m_runtime)
+				        editorArgs = m_runtime->worldAttributes()
+				                         .value(QStringLiteral("script_editor_argument"))
+				                         .trimmed();
+			        if (editorArgs.isEmpty())
+				        editorArgs = QStringLiteral("\"%file\"");
+			        editorArgs.replace(QStringLiteral("%file"), resolvedFileName);
+			        if (!editorPath.isEmpty())
+			        {
+				        if (const QStringList splitArgs = QProcess::splitCommand(editorArgs);
+				            QProcess::startDetached(editorPath, splitArgs))
+				        {
+					        tryRaiseConfiguredEditorWindow();
+					        return;
+				        }
+			        }
+			        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(resolvedFileName)))
+			        {
+				        QMessageBox::warning(this, QStringLiteral("Edit script"),
+				                             QStringLiteral("Unable to open the requested file."));
+			        }
+			        else
+				        tryRaiseConfiguredEditorWindow();
+		        });
+	if (m_chooseScriptEditor && m_scriptEditor)
+		connect(m_chooseScriptEditor, &QPushButton::clicked, this,
+		        [this]
+		        {
+			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
+			        if (const QString fileName =
+			                QFileDialog::getOpenFileName(this, QStringLiteral("Choose script editor"),
+			                                             startDir, QStringLiteral("Programs (*.*)"));
+			            !fileName.isEmpty())
+			        {
+				        if (m_runtime)
+					        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
+				        m_scriptEditor->setText(fileName);
+			        }
+		        });
+	if (m_editScriptWithNotepad && m_chooseScriptEditor)
+		connect(m_editScriptWithNotepad, &QCheckBox::toggled, this,
+		        [this](const bool checked)
+		        {
+			        m_chooseScriptEditor->setEnabled(!checked);
+			        if (m_scriptEditor)
+				        m_scriptEditor->setEnabled(!checked);
+		        });
+	if (m_editScriptWithNotepad)
+	{
+		const bool checked = m_editScriptWithNotepad->isChecked();
+		if (m_chooseScriptEditor)
+			m_chooseScriptEditor->setEnabled(!checked);
+		if (m_scriptEditor)
+			m_scriptEditor->setEnabled(!checked);
+	}
+	if (m_scriptFile && m_editScriptFile)
+	{
+		connect(m_scriptFile, &QLineEdit::textChanged, this,
+		        [this](const QString &text) { m_editScriptFile->setEnabled(!text.trimmed().isEmpty()); });
+		m_editScriptFile->setEnabled(!m_scriptFile->text().trimmed().isEmpty());
+	}
 
 	// Notes
 	auto *notesLayout = new QVBoxLayout(notesPage);

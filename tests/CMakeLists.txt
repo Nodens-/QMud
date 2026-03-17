@@ -422,6 +422,16 @@ if (QMUD_ENABLE_GUI_TESTS)
             TIMEOUT
             20)
 
+    qmud_add_qtest(tst_Dialog_LogSession
+            GUI
+            SOURCES
+            gui/tst_Dialog_LogSession.cpp
+            "${CMAKE_SOURCE_DIR}/src/dialogs/LogSessionDialog.cpp"
+            LABELS
+            gui
+            TIMEOUT
+            20)
+
     qmud_add_qtest(tst_MdiTabs
             GUI
             SOURCES
