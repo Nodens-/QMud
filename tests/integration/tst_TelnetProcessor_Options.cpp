@@ -26,6 +26,7 @@ namespace
 	constexpr unsigned char TELOPT_NAWS          = 31;
 	constexpr unsigned char TELOPT_CHARSET       = 42;
 	constexpr unsigned char TELOPT_TERMINAL_TYPE = 24;
+	constexpr unsigned char TELOPT_COMPRESS2     = 86;
 	constexpr unsigned char CHARSET_REQUEST      = 1;
 	constexpr unsigned char CHARSET_ACCEPTED     = 2;
 	constexpr unsigned char CHARSET_REJECTED     = 3;
@@ -59,6 +60,20 @@ class tst_TelnetProcessor_Options : public QObject
 
 			processor.queueInitialNegotiation(true, true);
 			QVERIFY(processor.takeOutboundData().isEmpty());
+		}
+
+		void queueEnableCompression2NegotiationSendsDoCompress2()
+		{
+			TelnetProcessor processor;
+			processor.queueEnableCompression2Negotiation();
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_COMPRESS2}));
+		}
+
+		void queueDisableCompressionNegotiationDefaultsToCompress2()
+		{
+			TelnetProcessor processor;
+			processor.queueDisableCompressionNegotiation();
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_COMPRESS2}));
 		}
 
 		void echoNegotiationCallbacksAndReplies()

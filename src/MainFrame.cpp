@@ -251,6 +251,9 @@ void MainWindow::buildMenus()
 	                QKeySequence(QStringLiteral("Ctrl+Alt+G")));
 	addActionToMenu(m_fileMenu, QStringLiteral("LogSession"), QStringLiteral("&Log Session...\tShift+Ctrl+J"),
 	                QKeySequence(QStringLiteral("Shift+Ctrl+J")));
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+	addActionToMenu(m_fileMenu, QStringLiteral("ReloadQMud"), QStringLiteral("Reload &QMud"));
+#endif
 	addActionToMenu(m_fileMenu, QStringLiteral("ReloadDefaults"),
 	                QStringLiteral("&Reload Defaults\tCtrl+Alt+R"),
 	                QKeySequence(QStringLiteral("Ctrl+Alt+R")));

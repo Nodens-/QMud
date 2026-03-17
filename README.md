@@ -18,6 +18,15 @@ already. The possibility of bugs is currently high as not everything has been
 tested to the ground. Please use the issue tracker, with the appropriate
 template to report issues, request features, etc.
 
+## Features
+
+- Cross-platform (Linux, Windows, macOS).
+- Unicode, NAWS, Terminal Type, CHARSET, MXP, MCCP, MMCP, OSC8.
+- Lua scripting.
+- Copyover-style in-place reload on Linux/macOS (`File -> Reload QMud`).
+- Split-pane scrollback buffer.
+- Autosave, autobackup, log rotation, log compression.
+
 ## Contact / Support
 
 For support, testing feedback, and development discussion, join:
@@ -85,12 +94,21 @@ If nothing is configured, defaults are:
 
 - `QMUD_HOME`: Overrides startup/data directory resolution (see section above).
 - `QMUD_ALLOW_MULTI_INSTANCE`: When set to `1`, `y`, `yes`, or `true`, bypasses single-instance enforcement.
+- `QMUD_RELOAD_VERBOSE`: Enables verbose per-world reload diagnostics in logs.
 
 ### CLI switches
 
 - `--multi-instance` (alias: `--allow-multi-instance`): Bypass single-instance enforcement for that process. (Not safe
   with same datadir)
 - `--dump-lua-api <output-dir>`: Export Lua API inventory to the given directory and exit.
+
+## Reload QMud (Copyover-style)
+
+`File -> Reload QMud` is available on Linux and macOS. It performs a reload keeping worlds connected when possible.
+
+Current behavior/limitations:
+
+- MCCPv1/2 enabled worlds that do not honor IAC DONT COMPRESS/2 on timeout/failure, downgrade to reconnect on reload.
 
 ## Build requirements
 

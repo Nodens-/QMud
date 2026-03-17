@@ -1338,6 +1338,12 @@ void WorldCommandProcessor::handleWorldConnected()
 		}
 	}
 
+	if (m_runtime->consumeReloadReattachConnectActionsSuppressed())
+	{
+		m_runtime->fireWorldConnectHandlers();
+		return;
+	}
+
 	const int     connectMethod = attrs.value(QStringLiteral("connect_method")).toInt();
 	const QString player        = attrs.value(QStringLiteral("player"));
 	const QString worldName     = attrs.value(QStringLiteral("name"));

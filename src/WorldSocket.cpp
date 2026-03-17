@@ -138,6 +138,56 @@ quint32 WorldSocket::peerAddressV4() const
 	return addr.toIPv4Address();
 }
 
+qintptr WorldSocket::nativeSocketDescriptor() const
+{
+	if (!m_socket)
+		return static_cast<qintptr>(-1);
+	return m_socket->socketDescriptor();
+}
+
+bool WorldSocket::adoptConnectedSocketDescriptor(const qintptr descriptor, QString *errorMessage)
+{
+	if (errorMessage)
+		errorMessage->clear();
+	if (!m_socket)
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("Socket transport is not initialized.");
+		return false;
+	}
+	if (descriptor < 0)
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("Socket descriptor is invalid.");
+		return false;
+	}
+
+	if (m_socket->state() != QAbstractSocket::UnconnectedState)
+		m_socket->abort();
+	m_pendingInbound.clear();
+	m_drainingNow    = false;
+	m_drainScheduled = false;
+
+	if (!m_socket->setSocketDescriptor(descriptor, QAbstractSocket::ConnectedState, QIODevice::ReadWrite))
+	{
+		if (errorMessage)
+			*errorMessage = m_socket->errorString();
+		return false;
+	}
+	m_socket->setSocketOption(QAbstractSocket::KeepAliveOption, m_keepAliveEnabled ? 1 : 0);
+	return true;
+}
+
+void WorldSocket::abortSocket()
+{
+	if (!m_socket)
+		return;
+	m_socket->abort();
+	m_pendingInbound.clear();
+	m_drainScheduled = false;
+	m_drainingNow    = false;
+}
+
 bool WorldSocket::isConnecting() const
 {
 	if (!m_socket)

@@ -91,6 +91,20 @@ qmud_add_qtest(tst_EncodingUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_ReloadStateUtils
+        SOURCES
+        unit/tst_ReloadStateUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/ReloadStateUtils.cpp"
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_ReloadPlannerUtils
+        SOURCES
+        unit/tst_ReloadPlannerUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/ReloadPlannerUtils.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_AnsiSgrParseUtils
         SOURCES
         unit/tst_AnsiSgrParseUtils.cpp
@@ -244,6 +258,23 @@ qmud_add_qtest(tst_TelnetProcessor_Malformed
         LABELS
         integration
         regression
+        TIMEOUT
+        20)
+
+qmud_add_qtest(tst_ReloadStartupConsume
+        SOURCES
+        integration/tst_ReloadStartupConsume.cpp
+        "${CMAKE_SOURCE_DIR}/src/ReloadStateUtils.cpp"
+        LABELS
+        integration
+        TIMEOUT
+        20)
+
+qmud_add_qtest(tst_ReloadRecoveryUtils
+        SOURCES
+        integration/tst_ReloadRecoveryUtils.cpp
+        LABELS
+        integration
         TIMEOUT
         20)
 

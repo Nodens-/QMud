@@ -414,6 +414,19 @@ void TelnetProcessor::setDisableCompression(const bool enabled)
 	m_disableCompression = enabled;
 }
 
+void TelnetProcessor::queueDisableCompressionNegotiation()
+{
+	if (m_mccpType == 1)
+		sendIacDont(TELOPT_COMPRESS);
+	else
+		sendIacDont(TELOPT_COMPRESS2);
+}
+
+void TelnetProcessor::queueEnableCompression2Negotiation()
+{
+	sendIacDo(TELOPT_COMPRESS2);
+}
+
 void TelnetProcessor::resetMxp()
 {
 	mxpOff(false);

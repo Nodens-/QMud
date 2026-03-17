@@ -2001,6 +2001,61 @@ class WorldRuntime : public QObject
 		 */
 		void                                disconnectFromWorld();
 		/**
+		 * @brief Returns native descriptor of current world socket.
+		 * @return Native descriptor, or `-1` when unavailable.
+		 */
+		[[nodiscard]] int                   nativeSocketDescriptor() const;
+		/**
+		 * @brief Adopts an already-connected descriptor into this runtime.
+		 * @param descriptor Native descriptor to adopt.
+		 * @param errorMessage Optional output error text.
+		 * @return `true` when descriptor adoption succeeds.
+		 */
+		[[nodiscard]] bool                  adoptConnectedSocketDescriptor(int descriptor,
+		                                                                   QString *errorMessage = nullptr);
+		/**
+		 * @brief Closes active/adopted socket immediately for reload reconnect flow.
+		 */
+		void                                closeSocketForReloadReconnect();
+		/**
+		 * @brief Pauses or resumes processing of incoming socket payload.
+		 * @param paused Pause processing when `true`.
+		 */
+		void                                setIncomingSocketDataPaused(bool paused);
+			/**
+			 * @brief Returns whether incoming socket processing is paused.
+			 * @return `true` when incoming processing is paused.
+			 */
+			[[nodiscard]] bool                  incomingSocketDataPaused() const;
+			/**
+			 * @brief Marks next connect callback to skip auto-login/connect-text sends after reload reattach.
+			 */
+			void                                markReloadReattachConnectActionsSuppressed();
+			/**
+			 * @brief Consumes one-shot flag that suppresses auto-login/connect-text sends for reload reattach.
+			 * @return `true` when auto-login/connect-text should be skipped for current connect callback.
+			 */
+			[[nodiscard]] bool                  consumeReloadReattachConnectActionsSuppressed();
+			/**
+			 * @brief Queues one MCCP v2 enable request for a recovered reattached socket.
+			 */
+			void                                requestMccpResumeAfterReloadReattach();
+			/**
+			 * @brief Queues telnet negotiation that requests MCCP disable for reload.
+			 */
+			void                                queueMccpDisableForReload();
+		/**
+		 * @brief Returns whether MCCP is fully disabled after reload negotiation.
+		 * @return `true` when no active MCCP stream remains.
+		 */
+		[[nodiscard]] bool                  isMccpDisableCompleteForReload() const;
+		/**
+		 * @brief Requests MCCP shutdown and waits briefly for compression to stop.
+		 * @param timeoutMs Maximum wait duration in milliseconds.
+		 * @return `true` when compression is inactive after the request.
+		 */
+		[[nodiscard]] bool                  requestMccpDisableForReload(int timeoutMs);
+		/**
 		 * @brief Sends raw bytes to world socket.
 		 * @param payload Bytes to send.
 		 */
@@ -4169,8 +4224,10 @@ class WorldRuntime : public QObject
 		bool                                  m_hasCachedIp{false};
 		QDateTime                             m_connectTime;
 		bool                                  m_disconnectOk{true};
-		bool                                  m_reconnectOnLinkFailure{false};
-		QDateTime                             m_statusTime;
+			bool                                  m_reconnectOnLinkFailure{false};
+			bool                                  m_incomingSocketDataPaused{false};
+			bool                                  m_reloadReattachSuppressConnectActions{false};
+			QDateTime                             m_statusTime;
 		QDateTime                             m_lastFlushTime;
 		QDateTime                             m_clientStartTime;
 		QDateTime                             m_worldStartTime;

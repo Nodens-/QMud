@@ -161,6 +161,8 @@ set(QMUD_SOURCES
         MainFrame.cpp
         MainFrameActionUtils.cpp
         AppController.cpp
+        ReloadPlannerUtils.cpp
+        ReloadStateUtils.cpp
         Accelerators.cpp
         AliasMatchUtils.cpp
         CommandPatternUtils.cpp
@@ -228,6 +230,9 @@ set(QMUD_HEADERS
         MainFrame.h
         MainFrameActionUtils.h
         AppController.h
+        ReloadPlannerUtils.h
+        ReloadRecoveryUtils.h
+        ReloadStateUtils.h
         Accelerators.h
         AcceleratorUtils.h
         AliasMatchUtils.h

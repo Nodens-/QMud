@@ -10,6 +10,7 @@
 #include "AppController.h"
 #include "LuaApiExport.h"
 #include "MainFrame.h"
+#include "ReloadStateUtils.h"
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDebug>
@@ -117,6 +118,10 @@ int main(int argc, char *argv[])
 	const QStringList args = QCoreApplication::arguments();
 	bool              allowMultipleInstances =
 	    isEnabledValue(qEnvironmentVariable("QMUD_ALLOW_MULTI_INSTANCE").trimmed());
+	QString           reloadStatePathArg;
+	QString           reloadTokenArg;
+	const bool        reloadLaunchArguments =
+	    parseReloadStartupArguments(args, &reloadStatePathArg, &reloadTokenArg);
 	for (int i = 1; i < args.size(); ++i)
 	{
 		const QString arg = args.at(i).trimmed();
@@ -151,14 +156,17 @@ int main(int argc, char *argv[])
 	if (!allowMultipleInstances)
 	{
 		const QString instanceServerName = singleInstanceServerName();
-		QLocalSocket  existingInstanceProbe;
-		existingInstanceProbe.connectToServer(instanceServerName, QIODevice::WriteOnly);
-		if (existingInstanceProbe.waitForConnected(150))
+		if (!reloadLaunchArguments)
 		{
-			existingInstanceProbe.write("raise");
-			existingInstanceProbe.flush();
-			existingInstanceProbe.waitForBytesWritten(100);
-			return 0;
+			QLocalSocket existingInstanceProbe;
+			existingInstanceProbe.connectToServer(instanceServerName, QIODevice::WriteOnly);
+			if (existingInstanceProbe.waitForConnected(150))
+			{
+				existingInstanceProbe.write("raise");
+				existingInstanceProbe.flush();
+				existingInstanceProbe.waitForBytesWritten(100);
+				return 0;
+			}
 		}
 		QLocalServer::removeServer(instanceServerName);
 		if (!instanceServer.listen(instanceServerName))
