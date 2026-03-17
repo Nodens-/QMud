@@ -6642,7 +6642,11 @@ void WorldRuntime::incrementNewLines()
 		const QString sound = m_worldAttributes.value(QStringLiteral("new_activity_sound")).trimmed();
 		if (!sound.isEmpty() && sound.compare(QStringLiteral("(No sound)"), Qt::CaseInsensitive) != 0)
 		{
-			playSound(0, sound, false, 0.0, 0.0);
+			const bool allowBackground =
+			    isEnabledFlag(m_worldAttributes.value(QStringLiteral("play_sounds_in_background")));
+			const bool appActive = QGuiApplication::applicationState() == Qt::ApplicationActive;
+			if (allowBackground || appActive)
+				playSound(0, sound, false, 0.0, 0.0);
 		}
 	}
 }
@@ -8247,16 +8251,6 @@ static double normalizeSoundVolume(double volume)
 	return qBound(0.0, scaled, 1.0);
 }
 
-static bool allowSoundWhenUnfocused(const QMap<QString, QString> &attrs)
-{
-	return isEnabledFlag(attrs.value(QStringLiteral("play_sounds_in_background")));
-}
-
-static bool appHasAudioFocus()
-{
-	return QGuiApplication::applicationState() == Qt::ApplicationActive;
-}
-
 static bool isAbsolutePathPortable(const QString &path)
 {
 	if (path.isEmpty())
@@ -8281,9 +8275,6 @@ int WorldRuntime::playSound(int buffer, const QString &fileName, bool loop, doub
 		}
 		m_inPlaySoundPluginCallback = false;
 	}
-	if (!appHasAudioFocus() && !allowSoundWhenUnfocused(m_worldAttributes))
-		return eCannotPlaySound;
-
 	if (buffer >= 1 && buffer <= kMaxSoundBuffers && fileName.isEmpty())
 	{
 		SoundBuffer &entry = m_soundBuffers[buffer - 1];
@@ -8394,9 +8385,6 @@ int WorldRuntime::playSoundMemory(int buffer, const QByteArray &data, bool loop,
 		return eBadParameter;
 	if (buffer < 0 || buffer > kMaxSoundBuffers)
 		return eBadParameter;
-	if (!appHasAudioFocus() && !allowSoundWhenUnfocused(m_worldAttributes))
-		return eCannotPlaySound;
-
 	int targetBuffer = buffer;
 	if (targetBuffer == 0)
 	{
