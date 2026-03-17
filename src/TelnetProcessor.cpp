@@ -1631,6 +1631,10 @@ void TelnetProcessor::sendTerminalType()
 	     32 "OSC COLOR PALETTE" Client supports the OSC color palette.
 	     64 "SCREEN READER"     Client is using a screen reader.
 	    128 "PROXY"             Client is a proxy allowing different users to connect from the same IP address.
+	    256 "TRUECOLOR"         Client supports truecolor codes using semicolon notation.
+	    512 "MNES"              Client supports the Mud New Environment Standard for information exchange.
+	   1024 "MSLP"              Client supports the Mud Server Link Protocol for clickable link handling.
+	   2048 "SSL"               Client supports SSL for data encryption, preferably TLS 1.3 or higher.
 
   */
 
@@ -1648,10 +1652,16 @@ void TelnetProcessor::sendTerminalType()
 		break;
 
 	case 2:
-		if (m_utf8)
-			strTemp = QByteArray("MTTS 13");
-		else
-			strTemp = QByteArray("MTTS 9");
+		{
+			unsigned mttsBitmask = 0;
+			mttsBitmask |= 1; // ANSI
+			mttsBitmask |= 8; // 256 colors
+			mttsBitmask |= 256; // truecolor
+			if (m_utf8)
+				mttsBitmask |= 4;
+
+			strTemp = QByteArray("MTTS ") + QByteArray::number(mttsBitmask);
+		}
 		break;
 	default:
 		break;
