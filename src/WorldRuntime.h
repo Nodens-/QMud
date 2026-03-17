@@ -10,6 +10,7 @@
 #ifndef QMUD_WORLDRUNTIME_H
 #define QMUD_WORLDRUNTIME_H
 
+#include "AnsiSgrParseUtils.h"
 #include "MiniWindow.h"
 #include "SqliteCompat.h"
 #include "TelnetProcessor.h"
@@ -27,6 +28,7 @@
 #include <QString>
 #include <QStringDecoder>
 #include <QVariant>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
 #include <QtSql/QSqlQuery>
 #include <functional>
@@ -377,8 +379,14 @@ class WorldRuntime : public QObject
 				bool    blink{false};
 				bool    inverse{false};
 				bool    strike{false};
+				bool    monospace{false};
 				QString fore;
 				QString back;
+				int     actionType{ActionNone};
+				QString action;
+				QString hint;
+				QString variable;
+				bool    startTag{false};
 		};
 		/**
 		 * @brief Incremental MXP style state carried across packet boundaries.
@@ -3726,6 +3734,10 @@ class WorldRuntime : public QObject
 		 */
 		void resetMxpRenderState();
 		/**
+		 * @brief Clears non-visual ANSI action context (links/send/prompt metadata).
+		 */
+		void clearAnsiActionContext();
+		/**
 		 * @brief Runs callbacks with numeric and string arguments.
 		 * @param functionName Callback function name.
 		 * @param arg1 Numeric callback argument.
@@ -4032,7 +4044,7 @@ class WorldRuntime : public QObject
 		long                                  m_noteColourFore{0xFFFFFF};
 		long                                  m_noteColourBack{0x000000};
 		int                                   m_worldFileVersion{0};
-			QString                               m_qmudVersion;
+		QString                               m_qmudVersion;
 		QDateTime                             m_dateSaved;
 		WorldSocketService                   *m_socket{nullptr};
 		WorldView                            *m_view{nullptr};
@@ -4056,7 +4068,7 @@ class WorldRuntime : public QObject
 		int                                   m_pluginCount{0};
 		int                                   m_includeCount{0};
 		int                                   m_scriptCount{0};
-		QByteArray                            m_pendingAnsiSequence;
+		QMudAnsiStreamState                   m_ansiStreamState;
 		AnsiRenderState                       m_ansiRenderState;
 		QByteArray                            m_streamUtf8Carry;
 		QStringDecoder                        m_streamLocalDecoder{QStringConverter::System};

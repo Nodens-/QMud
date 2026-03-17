@@ -969,7 +969,6 @@ void WorldView::setFrozen(bool frozen)
 	m_frozen = frozen;
 	if (m_frozen)
 		m_timeFadeCancelled = QDateTime::currentDateTime();
-	fprintf(stderr, "WORLDVIEW freeze=%d\n", m_frozen ? 1 : 0);
 	if (m_runtime)
 		m_runtime->setOutputFrozen(m_frozen);
 	emit freezeStateChanged(m_frozen);
@@ -1427,7 +1426,6 @@ void WorldView::appendOutputHtml(const QString &html, bool newLine)
 		return;
 	if (m_frozen && !m_flushingPending)
 	{
-		fprintf(stderr, "WORLDVIEW appendOutputHtml skipped (frozen)\n");
 		m_pendingOutput.push_back(PendingHtml{html, newLine});
 		return;
 	}
@@ -2534,8 +2532,6 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 {
 	if (!m_outputDocument)
 		return false;
-	if (!spans.isEmpty())
-		return false;
 	if (m_lineSpacing > 0)
 		return false;
 	if (opacity < 0.999)
@@ -2557,8 +2553,50 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 		baseFormat.setBackground(defaultBack);
 	}
 
-	if (!text.isEmpty())
-		cursor.insertText(text, baseFormat);
+	if (spans.isEmpty())
+	{
+		if (!text.isEmpty())
+			cursor.insertText(text, baseFormat);
+	}
+	else
+	{
+		int offset = 0;
+		for (const WorldRuntime::StyleSpan &span : spans)
+		{
+			const int length = qMax(0, span.length);
+			if (length == 0)
+				continue;
+			if (span.actionType != WorldRuntime::ActionNone)
+				return false;
+
+			const QString chunk = text.mid(offset, length);
+			offset += length;
+			if (chunk.isEmpty())
+				continue;
+
+			QTextCharFormat format = baseFormat;
+			QColor          fore   = span.fore;
+			QColor          back   = span.back;
+			if (span.inverse)
+			{
+				qSwap(fore, back);
+				if (m_alternativeInverse && span.bold)
+					qSwap(fore, back);
+			}
+			if (fore.isValid())
+				format.setForeground(fore);
+			if (back.isValid())
+				format.setBackground(back);
+			format.setFontWeight(span.bold && m_showBold ? QFont::Bold : baseFormat.fontWeight());
+			format.setFontItalic(span.italic && m_showItalic);
+			format.setFontUnderline(span.underline && m_showUnderline);
+			format.setFontStrikeOut(span.strike);
+			cursor.insertText(chunk, format);
+		}
+
+		if (offset < text.size())
+			cursor.insertText(text.mid(offset), baseFormat);
+	}
 
 	if (newLine)
 		cursor.insertBlock(cursor.blockFormat(), baseFormat);

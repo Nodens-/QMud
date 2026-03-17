@@ -91,6 +91,10 @@ static constexpr unsigned char CHARSET_REJECTED        = 3;
 static constexpr unsigned char TTYPE_IS                = 0;
 static constexpr unsigned char TTYPE_SEND              = 1;
 static constexpr int           MCCP_INFLATE_CHUNK_SIZE = 8192;
+static constexpr int           kMaxMxpPendingBytes     = 8192;
+static constexpr int           kMaxMxpEventsPending    = 4096;
+static constexpr int           kMaxMxpCustomDefinitions = 1024;
+static constexpr int           kMaxMxpAttlistBytes     = 16384;
 static constexpr int           DBG_ERROR               = 1;
 static constexpr int           DBG_WARNING             = 2;
 
@@ -428,6 +432,8 @@ void TelnetProcessor::resetConnectionState()
 	m_mxpPhase   = MXP_NONE;
 	m_mxpString.clear();
 	m_mxpEvents.clear();
+	m_mxpModeChanges.clear();
+	m_mxpEventsOverflowed = false;
 	m_mxpEventSequence    = 0;
 	m_compress            = false;
 	m_mccpType            = 0;
@@ -522,7 +528,15 @@ QList<TelnetProcessor::MxpEvent> TelnetProcessor::takeMxpEvents()
 {
 	QList<MxpEvent> events = m_mxpEvents;
 	m_mxpEvents.clear();
+	m_mxpEventsOverflowed = false;
 	return events;
+}
+
+QList<TelnetProcessor::MxpModeChange> TelnetProcessor::takeMxpModeChanges()
+{
+	QList<MxpModeChange> changes = m_mxpModeChanges;
+	m_mxpModeChanges.clear();
+	return changes;
 }
 
 bool TelnetProcessor::getCustomEntityValue(const QByteArray &name, QByteArray &value) const
@@ -542,7 +556,21 @@ void TelnetProcessor::setCustomEntity(const QByteArray &name, const QByteArray &
 	if (value.isEmpty())
 		m_customEntities.remove(key);
 	else
+	{
+		if (!m_customEntities.contains(key) && m_customEntities.size() >= kMaxMxpCustomDefinitions)
+		{
+			emitMxpDiagnosticLazy(
+			    DBG_WARNING, wrnMXP_CustomDefinitionLimitExceeded,
+			    [key]
+			    {
+				    return QStringLiteral("MXP custom definition limit reached (%1). Ignoring entity &%2;.")
+				        .arg(kMaxMxpCustomDefinitions)
+				        .arg(QString::fromLocal8Bit(key));
+			    });
+			return;
+		}
 		m_customEntities.insert(key, value);
+	}
 }
 
 bool TelnetProcessor::resolveEntityValue(const QByteArray &name, QByteArray &value) const
@@ -803,6 +831,46 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 	QByteArray output;
 	output.reserve(data.size());
 	int outputSize = m_outputSize;
+	auto abortMxpCollectionOnOverflow = [this]
+	{
+		const char *phaseName = "token";
+		switch (m_mxpPhase)
+		{
+		case HAVE_MXP_ELEMENT:
+			phaseName = "element";
+			break;
+		case HAVE_MXP_COMMENT:
+			phaseName = "comment";
+			break;
+		case HAVE_MXP_QUOTE:
+			phaseName = "quoted attribute";
+			break;
+		case HAVE_MXP_ENTITY:
+			phaseName = "entity";
+			break;
+		case MXP_NONE:
+		default:
+			break;
+		}
+		emitMxpDiagnosticLazy(
+		    DBG_ERROR, errMXP_CollectionTooLong,
+		    [phaseName]
+		    {
+			    return QStringLiteral("MXP %1 exceeded %2-byte limit; discarding partial token.")
+			        .arg(QString::fromLatin1(phaseName))
+			        .arg(kMaxMxpPendingBytes);
+		    });
+		m_mxpPhase = MXP_NONE;
+		m_mxpString.clear();
+	};
+	auto appendMxpPendingByte = [&](const unsigned char byte)
+	{
+		m_mxpString.append(static_cast<char>(byte));
+		if (m_mxpString.size() <= kMaxMxpPendingBytes)
+			return true;
+		abortMxpCollectionOnOverflow();
+		return false;
+	};
 
 	for (int i = 0; i < data.size(); ++i)
 	{
@@ -836,17 +904,20 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 					// quote inside element
 					m_mxpQuoteTerminator = c;
 					m_mxpPhase           = HAVE_MXP_QUOTE;
-					m_mxpString.append(static_cast<char>(c));
+					if (!appendMxpPendingByte(c))
+						continue;
 					break;
 				case '-':
 					// may be a comment? check on a hyphen
-					m_mxpString.append(static_cast<char>(c));
+					if (!appendMxpPendingByte(c))
+						continue;
 					if (m_mxpString.left(3) == QByteArray("!--"))
 						m_mxpPhase = HAVE_MXP_COMMENT;
 					break;
 				default:
 					// any other character, add to string
-					m_mxpString.append(static_cast<char>(c));
+					if (!appendMxpPendingByte(c))
+						continue;
 					break;
 				}
 				continue;
@@ -861,7 +932,8 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				else
 				{
 					// any other character, add to string
-					m_mxpString.append(static_cast<char>(c));
+					if (!appendMxpPendingByte(c))
+						continue;
 				}
 				continue;
 
@@ -870,7 +942,8 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				if (c == m_mxpQuoteTerminator)
 					m_mxpPhase = HAVE_MXP_ELEMENT;
 
-				m_mxpString.append(static_cast<char>(c)); // collect this character
+				if (!appendMxpPendingByte(c))
+					continue;
 				continue;
 
 			case HAVE_MXP_ENTITY:
@@ -899,7 +972,8 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 					m_mxpString.clear();
 					break;
 				default:
-					m_mxpString.append(static_cast<char>(c)); // collect this character
+					if (!appendMxpPendingByte(c))
+						continue;
 					break;
 				}
 				continue;
@@ -1663,6 +1737,27 @@ void TelnetProcessor::mxpCollectedElement()
 		return;
 	}
 
+	auto appendMxpEvent = [this](const MxpEvent &event)
+	{
+		if (m_mxpEvents.size() >= kMaxMxpEventsPending)
+		{
+			if (!m_mxpEventsOverflowed)
+			{
+				m_mxpEventsOverflowed = true;
+				emitMxpDiagnosticLazy(
+				    DBG_WARNING, wrnMXP_EventQueueLimitExceeded,
+				    []
+				    {
+					    return QStringLiteral(
+					        "MXP event queue exceeded %1 entries; dropping further MXP events until drained.")
+					        .arg(kMaxMxpEventsPending);
+				    });
+			}
+			return;
+		}
+		m_mxpEvents.append(event);
+	};
+
 	// test first character, that will tell us
 	switch (c)
 	{
@@ -1676,7 +1771,7 @@ void TelnetProcessor::mxpCollectedElement()
 			ev.offset   = m_outputSize;
 			ev.sequence = m_mxpEventSequence++;
 			ev.secure   = mxpSecure();
-			m_mxpEvents.append(ev);
+			appendMxpEvent(ev);
 		}
 		break;
 	case '/': // end of tag
@@ -1693,7 +1788,7 @@ void TelnetProcessor::mxpCollectedElement()
 			ev.offset     = m_outputSize;
 			ev.sequence   = m_mxpEventSequence++;
 			ev.secure     = mxpSecure();
-			m_mxpEvents.append(ev);
+			appendMxpEvent(ev);
 		}
 		break;
 	default: // start of tag
@@ -1710,7 +1805,7 @@ void TelnetProcessor::mxpCollectedElement()
 			ev.offset     = m_outputSize;
 			ev.sequence   = m_mxpEventSequence++;
 			ev.secure     = mxpSecure();
-			m_mxpEvents.append(ev);
+			appendMxpEvent(ev);
 		}
 		break;
 	} // end of switch
@@ -2234,6 +2329,18 @@ void TelnetProcessor::mxpEntity(const QByteArray &name, const QByteArray &tagRem
 	} // end of processing the value
 
 	// add entity to map
+	if (!m_customEntities.contains(lowerName) && m_customEntities.size() >= kMaxMxpCustomDefinitions)
+	{
+		emitMxpDiagnosticLazy(
+		    DBG_WARNING, wrnMXP_CustomDefinitionLimitExceeded,
+		    [lowerName]
+		    {
+			    return QStringLiteral("MXP custom definition limit reached (%1). Ignoring entity &%2;.")
+			        .arg(kMaxMxpCustomDefinitions)
+			        .arg(QString::fromLocal8Bit(lowerName));
+		    });
+		return;
+	}
 	m_customEntities.insert(lowerName, strFixedValue);
 
 	// check they didn't supply any other arguments
@@ -2434,6 +2541,18 @@ void TelnetProcessor::mxpElement(const QByteArray &name, const QByteArray &tagRe
 		element.flag.replace(' ', '_');
 	}
 
+	if (!m_customElements.contains(lowerName) && m_customElements.size() >= kMaxMxpCustomDefinitions)
+	{
+		emitMxpDiagnosticLazy(
+		    DBG_WARNING, wrnMXP_CustomDefinitionLimitExceeded,
+		    [lowerName]
+		    {
+			    return QStringLiteral("MXP custom definition limit reached (%1). Ignoring element <%2>.")
+			        .arg(kMaxMxpCustomDefinitions)
+			        .arg(QString::fromLocal8Bit(lowerName));
+		    });
+		return;
+	}
 	m_customElements.insert(lowerName, element);
 }
 
@@ -2507,6 +2626,21 @@ void TelnetProcessor::mxpAttlist(const QByteArray &name, const QByteArray &tagRe
 
 	CustomElement element = m_customElements.value(lowerName);
 
+	const qsizetype separatorBytes = element.attributes.isEmpty() ? 0 : 1;
+	const qsizetype appendBytes    = separatorBytes + tagRemainder.size();
+	if (appendBytes > 0 && element.attributes.size() + appendBytes > kMaxMxpAttlistBytes)
+	{
+		emitMxpDiagnosticLazy(
+		    DBG_WARNING, wrnMXP_AttlistLimitExceeded,
+		    [lowerName]
+		    {
+			    return QStringLiteral("MXP ATTLIST for <%1> exceeded %2 bytes; ignoring additional attributes.")
+			        .arg(QString::fromLocal8Bit(lowerName))
+			        .arg(kMaxMxpAttlistBytes);
+		    });
+		return;
+	}
+
 	// add to any existing arguments - is this wise? :)
 	if (!element.attributes.isEmpty())
 	{
@@ -2578,6 +2712,17 @@ void TelnetProcessor::mxpModeChange(int newMode)
 	}
 
 	m_mxpMode = newMode;
+
+	if (oldMode != newMode)
+	{
+		MxpModeChange marker;
+		marker.offset    = m_outputSize;
+		marker.sequence  = m_mxpEventSequence++;
+		marker.oldMode   = oldMode;
+		marker.newMode   = newMode;
+		marker.shouldLog = shouldLog;
+		m_mxpModeChanges.push_back(marker);
+	}
 
 	if (m_callbacks.onMxpModeChange)
 		m_callbacks.onMxpModeChange(oldMode, newMode, shouldLog);

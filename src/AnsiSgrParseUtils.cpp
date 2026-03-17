@@ -9,9 +9,13 @@
 #include "AnsiSgrParseUtils.h"
 
 #include <QList>
+#include <QUrl>
 
 namespace
 {
+	constexpr int kMaxCsiPendingBytes = 128;
+	constexpr int kMaxOscPendingBytes = 8192;
+
 	QString rgbTripletToHex(const int r, const int g, const int b)
 	{
 		const auto clampChannel = [](const int value)
@@ -180,13 +184,14 @@ namespace
 } // namespace
 
 QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(
-    const QByteArray &bytes, QByteArray &pendingAnsiSequence, const QString &defaultFore,
+    const QByteArray &bytes, QMudAnsiStreamState &streamState, const QString &defaultFore,
     const QString &defaultBack, const std::function<QString(int)> &normalAnsiColorFromIndex,
     const std::function<QString(int)> &boldAnsiColorFromIndex, const std::function<QString(int)> &colorFromIndex,
-    const std::function<QString(QByteArrayView)> &decodeBytes, QMudStyledTextState &state)
+    const std::function<QString(QByteArrayView)> &decodeBytes, QMudStyledTextState &state,
+    const QMudOscActionIds &oscActionIds)
 {
 	QVector<QMudStyledChunk> chunks;
-	if (bytes.isEmpty() && pendingAnsiSequence.isEmpty())
+	if (bytes.isEmpty())
 		return chunks;
 
 	auto flushPlain = [&](QByteArray &plainBytes)
@@ -204,83 +209,207 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(
 		state.startTag = false;
 	};
 
-	QByteArray ansiBytes = bytes;
-	if (!pendingAnsiSequence.isEmpty())
+	auto applyOsc = [&](const QByteArray &params)
 	{
-		ansiBytes.prepend(pendingAnsiSequence);
-		pendingAnsiSequence.clear();
-	}
+		if (!params.startsWith("8;"))
+			return;
+
+		const int secondSemicolon = params.indexOf(';', 2);
+		if (secondSemicolon < 0)
+			return;
+
+		QByteArray url = params.mid(secondSemicolon + 1);
+		if (url.isEmpty())
+		{
+			state.actionType = oscActionIds.none;
+			state.action.clear();
+			state.hint.clear();
+			state.variable.clear();
+			state.startTag = false;
+			return;
+		}
+
+		const QString urlText = QString::fromUtf8(url);
+		const QString lower   = urlText.toLower();
+		if (lower.startsWith(QStringLiteral("send:")))
+		{
+			state.actionType = oscActionIds.send;
+			state.action     = QUrl::fromPercentEncoding(url.mid(5));
+			state.hint.clear();
+			state.variable.clear();
+			state.startTag = false;
+			return;
+		}
+		if (lower.startsWith(QStringLiteral("prompt:")))
+		{
+			state.actionType = oscActionIds.prompt;
+			state.action     = QUrl::fromPercentEncoding(url.mid(7));
+			state.hint.clear();
+			state.variable.clear();
+			state.startTag = false;
+			return;
+		}
+		if (lower.startsWith(QStringLiteral("http://")) || lower.startsWith(QStringLiteral("https://")) ||
+		    lower.startsWith(QStringLiteral("mailto:")))
+		{
+			state.actionType = oscActionIds.hyperlink;
+			state.action     = urlText;
+			state.hint.clear();
+			state.variable.clear();
+			state.startTag = false;
+			return;
+		}
+
+		// Unsupported schemes are intentionally inert.
+		state.actionType = oscActionIds.none;
+		state.action.clear();
+		state.hint.clear();
+		state.variable.clear();
+		state.startTag = false;
+	};
 
 	QByteArray plainBytes;
-	plainBytes.reserve(ansiBytes.size());
-	for (int i = 0; i < ansiBytes.size(); ++i)
+	plainBytes.reserve(bytes.size());
+	for (int i = 0; i < bytes.size(); ++i)
 	{
-		const char ch = ansiBytes.at(i);
-		if (ch == '\x1b')
+		const char ch = bytes.at(i);
+
+		switch (streamState.mode)
 		{
-			if (i + 1 >= ansiBytes.size())
-			{
-				flushPlain(plainBytes);
-				pendingAnsiSequence = ansiBytes.mid(i);
+			case QMudAnsiStreamState::Mode::Normal:
+				if (ch == '\x1b')
+				{
+					flushPlain(plainBytes);
+					streamState.mode = QMudAnsiStreamState::Mode::Escape;
+				}
+				else
+					plainBytes.append(ch);
 				break;
-			}
-			if (ansiBytes.at(i + 1) != '[')
-				continue;
 
-			flushPlain(plainBytes);
-			const int seqStart = i;
-			i += 2;
-			QByteArray paramBytes;
-			bool       aborted = false;
-			while (i < ansiBytes.size())
+			case QMudAnsiStreamState::Mode::Escape:
+				if (ch == '[')
+				{
+					streamState.pending.clear();
+					streamState.mode = QMudAnsiStreamState::Mode::Csi;
+				}
+				else if (ch == ']')
+				{
+					streamState.pending.clear();
+					streamState.mode = QMudAnsiStreamState::Mode::Osc;
+				}
+				else
+				{
+					// Unknown ESC prefix: keep the non-ESC byte as visible text.
+					plainBytes.append(ch);
+					streamState.mode = QMudAnsiStreamState::Mode::Normal;
+				}
+				break;
+
+			case QMudAnsiStreamState::Mode::Csi:
 			{
-				const auto byte = static_cast<unsigned char>(ansiBytes.at(i));
+				const unsigned char byte = static_cast<unsigned char>(ch);
 				if (byte >= 0x40 && byte <= 0x7E)
-					break;
-				if (byte >= 0x20 && byte <= 0x3F)
 				{
-					paramBytes.append(static_cast<char>(byte));
-					++i;
-					continue;
+					if (ch == 'm')
+					{
+						QByteArray params = streamState.pending;
+						params.replace(':', ';');
+						const QList<QByteArray> parts = params.split(';');
+						QVector<int>            codes;
+						for (const QByteArray &part : parts)
+						{
+							if (part.isEmpty())
+							{
+								codes.push_back(0);
+								continue;
+							}
+							bool      ok    = false;
+							const int value = part.toInt(&ok);
+							if (ok)
+								codes.push_back(value);
+						}
+						applyAnsiSgr(codes, state, defaultFore, defaultBack, normalAnsiColorFromIndex,
+						             boldAnsiColorFromIndex, colorFromIndex);
+					}
+					streamState.pending.clear();
+					streamState.mode = QMudAnsiStreamState::Mode::Normal;
 				}
-				aborted = true;
-				break;
-			}
-			if (aborted)
-			{
-				i -= 1;
-				continue;
-			}
-			if (i >= ansiBytes.size())
-			{
-				pendingAnsiSequence = ansiBytes.mid(seqStart);
+				else if (byte >= 0x20 && byte <= 0x3F)
+				{
+					streamState.pending.append(ch);
+					if (streamState.pending.size() > kMaxCsiPendingBytes)
+					{
+						streamState.pending.clear();
+						streamState.mode = QMudAnsiStreamState::Mode::Normal;
+					}
+				}
+				else
+				{
+					// Corrupt CSI: drop it and reprocess current byte as normal text.
+					streamState.pending.clear();
+					streamState.mode = QMudAnsiStreamState::Mode::Normal;
+					--i;
+				}
 				break;
 			}
 
-			const char finalByte = ansiBytes.at(i);
-			if (finalByte == 'm')
-			{
-				paramBytes.replace(':', ';');
-				const QList<QByteArray> parts = paramBytes.split(';');
-				QVector<int>            codes;
-				for (const QByteArray &part : parts)
+			case QMudAnsiStreamState::Mode::Osc:
+				if (ch == '\a')
 				{
-					if (part.isEmpty())
-					{
-						codes.push_back(0);
-						continue;
-					}
-					bool      ok    = false;
-					const int value = part.toInt(&ok);
-					if (ok)
-						codes.push_back(value);
+					applyOsc(streamState.pending);
+					streamState.pending.clear();
+					streamState.mode = QMudAnsiStreamState::Mode::Normal;
 				}
-				applyAnsiSgr(codes, state, defaultFore, defaultBack, normalAnsiColorFromIndex,
-				             boldAnsiColorFromIndex, colorFromIndex);
-			}
-			continue;
+				else if (ch == '\x1b')
+					streamState.mode = QMudAnsiStreamState::Mode::OscEsc;
+				else
+				{
+					streamState.pending.append(ch);
+					if (streamState.pending.size() > kMaxOscPendingBytes)
+					{
+						streamState.pending.clear();
+						streamState.mode = QMudAnsiStreamState::Mode::Normal;
+					}
+				}
+				break;
+
+			case QMudAnsiStreamState::Mode::OscEsc:
+				if (ch == '\\')
+				{
+					applyOsc(streamState.pending);
+					streamState.pending.clear();
+					streamState.mode = QMudAnsiStreamState::Mode::Normal;
+				}
+				else
+				{
+					// ESC not followed by ST terminator: keep bytes inside OSC payload.
+					streamState.pending.append('\x1b');
+					if (streamState.pending.size() > kMaxOscPendingBytes)
+					{
+						streamState.pending.clear();
+						streamState.mode = QMudAnsiStreamState::Mode::Normal;
+						break;
+					}
+					if (ch == '\a')
+					{
+						applyOsc(streamState.pending);
+						streamState.pending.clear();
+						streamState.mode = QMudAnsiStreamState::Mode::Normal;
+					}
+					else
+					{
+						streamState.pending.append(ch);
+						if (streamState.pending.size() > kMaxOscPendingBytes)
+						{
+							streamState.pending.clear();
+							streamState.mode = QMudAnsiStreamState::Mode::Normal;
+							break;
+						}
+						streamState.mode = QMudAnsiStreamState::Mode::Osc;
+					}
+				}
+				break;
 		}
-		plainBytes.append(ch);
 	}
 
 	flushPlain(plainBytes);
