@@ -12,148 +12,148 @@
 
 <qmud>
     <plugin
-    name="Private_Chat_Capture_Miniwindow"
-    author="Tanthul"
-    id="594f8c81800340126c6b2160"
-    language="Lua"
-    purpose="Move private chat to a miniwindow"
-    date_written="2020-02-28"
-    date_modified="2026-01-07"
-    requires="10.00"
-    version="3.0"
-    save_state="y"
+            name="Private_Chat_Capture_Miniwindow"
+            author="Tanthul"
+            id="594f8c81800340126c6b2160"
+            language="Lua"
+            purpose="Move private chat to a miniwindow"
+            date_written="2020-02-28"
+            date_modified="2026-03-18"
+            requires="10.00"
+            version="3.1"
+            save_state="y"
     >
-    
-<description trim="y">
-USAGE:
 
-  pchat echo			: toggle chats echo in main window
-  pchat echo on	        : echo chats in main window
-  pchat echo off		: do not echo chats
-  pchat show			: show chats window
-  pchat hide			: hide chats window
-  pchat sound			: toggle chat sounds
-  pchat sound on		: enable chat sounds
-  pchat sound off		: disable chat sounds
-  
-  LH-click a line to copy it to the clipboard
-  RH-click main window to see menu of options
-  Double LH-click to scroll to end
-  
-  Click title bar to drag window.
-</description>
-  
-</plugin>
+        <description trim="y">
+            USAGE:
 
-<triggers>
-<!-- Outbound channel triggers -->	
-    <trigger
-    enabled="y"
-	regexp="y"
-    match="^(\((OOC|Chat|Society)\)\s)?You (whisper|tell|reply to) (.*)"
-    script="chats"
-    omit_from_output="y"
-    sequence="100"
-    ></trigger>
+            pchat echo : toggle chats echo in main window
+            pchat echo on : echo chats in main window
+            pchat echo off : do not echo chats
+            pchat show : show chats window
+            pchat hide : hide chats window
+            pchat sound : toggle chat sounds
+            pchat sound on : enable chat sounds
+            pchat sound off : disable chat sounds
 
-	<trigger
-    enabled="y"
-	regexp="y"
-    match="^\(Society\) *You (.+).\*"
-    script="chats"
-    omit_from_output="y"
-    sequence="100"
-    ></trigger>
-	
-<!-- Display always with no sound triggers (Info/Monitoring) -->	
-	<trigger
-    enabled="y"
-	regexp="y"
-    match="^Your gain is: (.+) prac."
-    script="chats"
-    omit_from_output="y"
-    sequence="100"
-    ></trigger>
-	
-	<trigger
-    enabled="y"
-	regexp="y"
-    match="^You have become better at (.+)\!"
-    script="chats"
-    omit_from_output="y"
-    sequence="100"
-    ></trigger>
+            LH-click a line to copy it to the clipboard
+            RH-click main window to see menu of options
+            Double LH-click to scroll to end
 
-    <trigger
-    enabled="y"
-    regexp="y"
-    match="^You learn from your mistakes, and your (.+) skill improves\."
-    script="chats"
-    omit_from_output="y"
-    sequence="100"
-    ></trigger>
-	
-<!-- Inbound channel triggers (Double triggers with sound and nosound groups so they can be toggled)-->
-	<trigger
-    enabled="y"
-	regexp="y"
-    match="^(\((OOC|Chat|Society)\)\s)?(\S+)(?<!You|Notify-) (\S+\s)?(\S+\s)?(\S+\s)?(whispers|tells|reply ')(.*)(\'|\'\.)$"
-    script="chats"
-    omit_from_output="y"
-    sequence="100"
-	sound="QMud/beep.wav"
-	group="chatsound"
-    ></trigger>
-	
-	<trigger
-    enabled="n"
-	regexp="y"
-    match="^(\((OOC|Chat|Society)\)\s)?(\S+)(?<!You|Notify-) (\S+\s)?(\S+\s)?(\S+\s)?(whispers|tells|reply ')(.*)(\'|\'\.)$"
-    script="chats"
-    omit_from_output="y"
-    sequence="100"
-	group="chatnosound"
-    ></trigger>
-</triggers>
+            Click title bar to drag window.
+        </description>
 
-<aliases>
-    <alias
-    script="chat_echo"
-    match="^pchat echo( on| off)?$"
-    enabled="y"
-    regexp="y"
-    sequence="100"
-    ignore_case="y"
-    ></alias>
+    </plugin>
 
-    <alias
-    script="chat_show"
-    match="pchat show"
-    enabled="y"
-    sequence="100"
-    ignore_case="y"
-    ></alias>
+    <triggers>
+        <!-- Outbound channel triggers -->
+        <trigger
+                enabled="y"
+                regexp="y"
+                match="^(\((OOC|Chat|Society)\)\s)?You (whisper|tell|reply to) (.*)"
+                script="chats"
+                omit_from_output="y"
+                sequence="100"
+        ></trigger>
 
-    <alias
-    script="chat_hide"
-    match="pchat hide"
-    enabled="y"
-    sequence="100"
-    ignore_case="y"
-    ></alias>
-	
-	<alias
-    script="chat_sound"
-    match="^pchat sound( on| off)?$"
-    enabled="y"
-    regexp="y"
-    sequence="100"
-    ignore_case="y"
-    ></alias>
-</aliases>
+        <trigger
+                enabled="y"
+                regexp="y"
+                match="^\(Society\) *You (.+).\*"
+                script="chats"
+                omit_from_output="y"
+                sequence="100"
+        ></trigger>
 
-<script>
-<![CDATA[
+        <!-- Display always with no sound triggers (Info/Monitoring) -->
+        <trigger
+                enabled="y"
+                regexp="y"
+                match="^Your gain is: (.+) prac."
+                script="chats"
+                omit_from_output="y"
+                sequence="100"
+        ></trigger>
+
+        <trigger
+                enabled="y"
+                regexp="y"
+                match="^You have become better at (.+)\!"
+                script="chats"
+                omit_from_output="y"
+                sequence="100"
+        ></trigger>
+
+        <trigger
+                enabled="y"
+                regexp="y"
+                match="^You learn from your mistakes, and your (.+) skill improves\."
+                script="chats"
+                omit_from_output="y"
+                sequence="100"
+        ></trigger>
+
+        <!-- Inbound channel triggers (Double triggers with sound and nosound groups so they can be toggled)-->
+        <trigger
+                enabled="y"
+                regexp="y"
+                match="^(\((OOC|Chat|Society)\)\s)?(\S+)(?<!You|Notify-) (\S+\s)?(\S+\s)?(\S+\s)?(whispers|tells|reply ')(.*)(\'|\'\.)$"
+                script="chats"
+                omit_from_output="y"
+                sequence="100"
+                sound="QMud/beep.wav"
+                group="chatsound"
+        ></trigger>
+
+        <trigger
+                enabled="n"
+                regexp="y"
+                match="^(\((OOC|Chat|Society)\)\s)?(\S+)(?<!You|Notify-) (\S+\s)?(\S+\s)?(\S+\s)?(whispers|tells|reply ')(.*)(\'|\'\.)$"
+                script="chats"
+                omit_from_output="y"
+                sequence="100"
+                group="chatnosound"
+        ></trigger>
+    </triggers>
+
+    <aliases>
+        <alias
+                script="chat_echo"
+                match="^pchat echo( on| off)?$"
+                enabled="y"
+                regexp="y"
+                sequence="100"
+                ignore_case="y"
+        ></alias>
+
+        <alias
+                script="chat_show"
+                match="pchat show"
+                enabled="y"
+                sequence="100"
+                ignore_case="y"
+        ></alias>
+
+        <alias
+                script="chat_hide"
+                match="pchat hide"
+                enabled="y"
+                sequence="100"
+                ignore_case="y"
+        ></alias>
+
+        <alias
+                script="chat_sound"
+                match="^pchat sound( on| off)?$"
+                enabled="y"
+                regexp="y"
+                sequence="100"
+                ignore_case="y"
+        ></alias>
+    </aliases>
+
+    <script>
+        <![CDATA[
 
 require "movewindow"  -- load the movewindow.lua module
 require "copytable"
@@ -184,6 +184,14 @@ cmention = not (GetVariable("cmention") == "false")
 date_format = GetVariable("date_format")
 WINDOW_WIDTH = tonumber(GetVariable("WINDOW_WIDTH"))
 WINDOW_HEIGHT = tonumber(GetVariable("WINDOW_HEIGHT"))
+saved_bodyfont = GetVariable("bodyfont")
+if (saved_bodyfont ~= nil and saved_bodyfont ~= "") then
+    BODY_FONT_NAME = saved_bodyfont
+end -- if
+saved_font_size = tonumber(GetVariable("font_size"))
+if (saved_font_size ~= nil and saved_font_size > 0) then
+    BODY_FONT_SIZE = saved_font_size
+end -- if
 
 -- Saving variables. Change interval to adjust. Interval is in seconds.
 savetime = utils.timer()
@@ -205,12 +213,12 @@ WINDOW_LINES = ""
 theme = {
     WINDOW_BACKGROUND = ColourNameToRGB ("#000000"), -- for miniwindow body
     WINDOW_BORDER = ColourNameToRGB("#333333"), -- for miniwindow body
-    
+
     HIGHLIGHT=ColourNameToRGB("#666666"), -- for 3D surfaces
     FACE=ColourNameToRGB("#333333"), -- for 3D surfaces
     INNERSHADOW=ColourNameToRGB("#808080"), -- for 3D surfaces
     OUTERSHADOW = ColourNameToRGB("#404040"), -- for 3D surfaces
-   
+
     BACK_FACE = ColourNameToRGB ("#1F1F1F"), -- for contrasting details
     DETAIL = ColourNameToRGB ("#6FAF6F"), -- for contrasting details
 
@@ -225,18 +233,18 @@ theme = {
 -- Requires global theme.HIGHLIGHT, theme.FACE, theme.INNERSHADOW, and theme.OUTERSHADOW rgb colors to be set.
 function DrawThemed3DRect(Window, left, top, right, bottom)
     WindowRectOp(Window, miniwin.rect_fill, left, top, right, bottom, theme.FACE)
-    WindowLine(Window, left, top, right, top, theme.HIGHLIGHT, 
+    WindowLine(Window, left, top, right, top, theme.HIGHLIGHT,
                 miniwin.pen_solid + miniwin.pen_endcap_flat, 1)
-    WindowLine(Window, left, top, left, bottom, theme.HIGHLIGHT, 
+    WindowLine(Window, left, top, left, bottom, theme.HIGHLIGHT,
                 miniwin.pen_solid + miniwin.pen_endcap_flat, 1)
-    WindowLine(Window, left, bottom-2, right, bottom-2, theme.INNERSHADOW, 
+    WindowLine(Window, left, bottom-2, right, bottom-2, theme.INNERSHADOW,
                 miniwin.pen_solid + miniwin.pen_endcap_flat, 1)
-    WindowLine(Window, right-2, top, right-2, bottom-2, theme.INNERSHADOW, 
+    WindowLine(Window, right-2, top, right-2, bottom-2, theme.INNERSHADOW,
                 miniwin.pen_solid + miniwin.pen_endcap_flat, 1)
-    WindowLine(Window, left, bottom-1, right, bottom-1, theme.OUTERSHADOW, 
+    WindowLine(Window, left, bottom-1, right, bottom-1, theme.OUTERSHADOW,
                 miniwin.pen_solid + miniwin.pen_endcap_flat, 1)
-    WindowLine(Window, right-1, top, right-1, bottom-1, theme.OUTERSHADOW, 
-                miniwin.pen_solid + miniwin.pen_endcap_flat, 1)    
+    WindowLine(Window, right-1, top, right-1, bottom-1, theme.OUTERSHADOW,
+                miniwin.pen_solid + miniwin.pen_endcap_flat, 1)
 end
 
 function DrawThemedResizeTag(Window, x1, y1, size)
@@ -245,9 +253,9 @@ function DrawThemedResizeTag(Window, x1, y1, size)
     local m = 2
     local n = 2
     while (x1+m+2 <= x2-3 and y1+n+1 <= y2-4) do
-        WindowLine(Window, x1+m+1, y2-4, x2-3, y1+n, theme.HIGHLIGHT, 
+        WindowLine(Window, x1+m+1, y2-4, x2-3, y1+n, theme.HIGHLIGHT,
                     miniwin.pen_solid, 1)
-        WindowLine(Window, x1+m+2, y2-4, x2-3, y1+n+1, theme.INNERSHADOW, 
+        WindowLine(Window, x1+m+2, y2-4, x2-3, y1+n+1, theme.INNERSHADOW,
                     miniwin.pen_solid, 1)
         m = m+3
         n = n+3
@@ -289,7 +297,7 @@ function OnPluginInstall()
     line_height = font_height+1
     font_width = WindowTextWidth (Win, "bodyfont"..Win, "W", true)
 	titleBoxHeight = font_height + TEXT_INSET * 2
-    
+
     -- install the window movement handler, get back the window position
     windowinfo = movewindow.install (Win, miniwin.pos_top_right, miniwin.create_absolute_location, true)
 
@@ -320,23 +328,23 @@ function init(firstTime)
         WindowCreate(Win, windowinfo.window_left, windowinfo.window_top, WINDOW_WIDTH, WINDOW_HEIGHT, windowinfo.window_mode, windowinfo.window_flags, theme.WINDOW_BACKGROUND)
 
         -- catch for right-click menu and line selection
-        WindowAddHotspot(Win, "textarea", 0, theme.TITLE_HEIGHT, WINDOW_WIDTH-SCROLL_BAR_WIDTH,0, 
-            "", "", "MouseDown", "CancelMouseDown", "MouseUp", "", 
+        WindowAddHotspot(Win, "textarea", 0, theme.TITLE_HEIGHT, WINDOW_WIDTH-SCROLL_BAR_WIDTH,0,
+            "", "", "MouseDown", "CancelMouseDown", "MouseUp", "",
             miniwin.cursor_ibeam, 0)
         -- add the drag handler so they can move the window around
         movewindow.add_drag_handler (Win, 0, 0, 0, theme.TITLE_HEIGHT)
-        
+
         -- scroll bar up/down buttons
-        WindowAddHotspot(Win, "up", WINDOW_WIDTH-SCROLL_BAR_WIDTH, theme.TITLE_HEIGHT, 0, theme.TITLE_HEIGHT+SCROLL_BAR_WIDTH, 
-            "MouseOver", "CancelMouseOver", "MouseDown", "CancelMouseDown", "MouseUp", "", 
+        WindowAddHotspot(Win, "up", WINDOW_WIDTH-SCROLL_BAR_WIDTH, theme.TITLE_HEIGHT, 0, theme.TITLE_HEIGHT+SCROLL_BAR_WIDTH,
+            "MouseOver", "CancelMouseOver", "MouseDown", "CancelMouseDown", "MouseUp", "",
             miniwin.cursor_hand, 0)
-        WindowAddHotspot(Win, "down", WINDOW_WIDTH-SCROLL_BAR_WIDTH, WINDOW_HEIGHT-(2*SCROLL_BAR_WIDTH), 0, WINDOW_HEIGHT-SCROLL_BAR_WIDTH, 
-            "MouseOver", "CancelMouseOver", "MouseDown", "CancelMouseDown", "MouseUp", "", 
+        WindowAddHotspot(Win, "down", WINDOW_WIDTH-SCROLL_BAR_WIDTH, WINDOW_HEIGHT-(2*SCROLL_BAR_WIDTH), 0, WINDOW_HEIGHT-SCROLL_BAR_WIDTH,
+            "MouseOver", "CancelMouseOver", "MouseDown", "CancelMouseDown", "MouseUp", "",
             miniwin.cursor_hand, 0)
 
         -- add the resize widget hotspot
-        WindowAddHotspot(Win, "resizer", WINDOW_WIDTH-SCROLL_BAR_WIDTH, WINDOW_HEIGHT-SCROLL_BAR_WIDTH, WINDOW_WIDTH, WINDOW_HEIGHT, 
-            "MouseOver", "CancelMouseOver", "MouseDown", "CancelMouseDown", "MouseUp", "", 
+        WindowAddHotspot(Win, "resizer", WINDOW_WIDTH-SCROLL_BAR_WIDTH, WINDOW_HEIGHT-SCROLL_BAR_WIDTH, WINDOW_WIDTH, WINDOW_HEIGHT,
+            "MouseOver", "CancelMouseOver", "MouseDown", "CancelMouseDown", "MouseUp", "",
             miniwin.cursor_nw_se_arrow, 0)
         WindowDragHandler(Win, "resizer", "ResizeMoveCallback", "ResizeReleaseCallback", 0)
 		-- add mouse wheel scroll handler to text area hotspot
@@ -349,7 +357,7 @@ function init(firstTime)
         WindowMoveHotspot(Win, "resizer", WINDOW_WIDTH-SCROLL_BAR_WIDTH, WINDOW_HEIGHT-SCROLL_BAR_WIDTH, WINDOW_WIDTH, 0)
     end -- if
     WindowShow(Win, true)
-    
+
     if (firstTime == true) then
 		-- Load saved scrollback buffer.
 		assert (loadstring (GetVariable ("lines") or "")) ()
@@ -359,7 +367,7 @@ function init(firstTime)
 				table.remove(lines, 1)
 			end -- while
 		end -- if
-        for _,styles in ipairs(rawlines) do 
+        for _,styles in ipairs(rawlines) do
             fillBuffer(styles)
         end  -- for each line
     end -- if
@@ -381,7 +389,7 @@ function OnPluginEnable ()
 end -- function OnPluginEnable
 
 function OnPluginSaveState ()
-    -- save window current location for next time  
+    -- save window current location for next time
     SetVariable ("enabled", tostring (GetPluginInfo (GetPluginID(), 17)))
     movewindow.save_state (Win)
     -- save echo/sound/timestamp status
@@ -409,7 +417,7 @@ end -- function OnPluginDisable
 
 -- display one line
 function Display_Line (line, styles)
- 
+
   local left    = TEXT_INSET
   local top     = theme.TITLE_HEIGHT + (line * line_height) + 1
   local bottom  = top + line_height
@@ -418,7 +426,7 @@ function Display_Line (line, styles)
   if backfill then
       WindowRectOp (Win, miniwin.rect_fill, 1, top, WINDOW_WIDTH - SCROLL_BAR_WIDTH, bottom, ColourNameToRGB("#333333"))
   end -- backfill
-  
+
   if (styles) then
     for _, style in ipairs (styles) do
       local width = WindowTextWidth (Win, font, style.text, true) -- get width of text
@@ -426,9 +434,9 @@ function Display_Line (line, styles)
       WindowRectOp (Win, miniwin.rect_fill, left, top, right, bottom, style.backcolour)  -- draw background
       WindowText (Win, font, style.text, left, top, 0, 0, style.textcolour, true)  -- draw text
       left = left + width  -- advance horizontally
-    end -- for each style run        
+    end -- for each style run
   end -- if  styles
-  
+
 end -- Display_Line
 
 
@@ -454,7 +462,7 @@ totalSteps = ""
 function drawStuff()
     -- draw border
     WindowRectOp (Win, miniwin.rect_frame, 0, 0, 0, 0, theme.WINDOW_BORDER)
-    
+
     -- Title bar
     DrawThemed3DRect(Win, 0, 0, WINDOW_WIDTH, theme.TITLE_HEIGHT)
 
@@ -464,13 +472,13 @@ function drawStuff()
     if #lines >= 1 then
         writeLines()
     end -- if
-        
+
     -- Scrollbar base
     WindowRectOp(Win, miniwin.rect_fill, WINDOW_WIDTH-SCROLL_BAR_WIDTH, theme.TITLE_HEIGHT, WINDOW_WIDTH, WINDOW_HEIGHT, theme.BACK_FACE) -- scroll bar background
     WindowRectOp(Win, miniwin.rect_frame, WINDOW_WIDTH-SCROLL_BAR_WIDTH+1, SCROLL_BAR_WIDTH+theme.TITLE_HEIGHT+1, WINDOW_WIDTH-1, WINDOW_HEIGHT-(2*SCROLL_BAR_WIDTH)-1, ColourNameToRGB("#000000")) -- scroll bar background inset rectangle
     DrawThemed3DRect(Win, WINDOW_WIDTH-SCROLL_BAR_WIDTH, theme.TITLE_HEIGHT, WINDOW_WIDTH, theme.TITLE_HEIGHT+SCROLL_BAR_WIDTH) -- top scroll button
     DrawThemed3DRect(Win, WINDOW_WIDTH-SCROLL_BAR_WIDTH, WINDOW_HEIGHT-(SCROLL_BAR_WIDTH*2), WINDOW_WIDTH, WINDOW_HEIGHT-SCROLL_BAR_WIDTH) -- bottom scroll button
-    
+
     -- draw triangle in up button
     points = string.format ("%i,%i,%i,%i,%i,%i", (WINDOW_WIDTH-SCROLL_BAR_WIDTH)+2, theme.TITLE_HEIGHT+8,(WINDOW_WIDTH-SCROLL_BAR_WIDTH)+6, theme.TITLE_HEIGHT+4,(WINDOW_WIDTH-SCROLL_BAR_WIDTH)+10, theme.TITLE_HEIGHT+8)
     WindowPolygon (Win, points,
@@ -479,14 +487,14 @@ function drawStuff()
         true, --close
         false)  --alt fill
 
-    -- draw triangle in down button    
+    -- draw triangle in down button
     points = string.format ("%i,%i,%i,%i,%i,%i", (WINDOW_WIDTH-SCROLL_BAR_WIDTH)+2, (WINDOW_HEIGHT-SCROLL_BAR_WIDTH)-10,(WINDOW_WIDTH-SCROLL_BAR_WIDTH)+6, (WINDOW_HEIGHT-SCROLL_BAR_WIDTH)-6, (WINDOW_WIDTH-SCROLL_BAR_WIDTH)+10,(WINDOW_HEIGHT-SCROLL_BAR_WIDTH)-10)
     WindowPolygon (Win, points,
         theme.DETAIL, miniwin.pen_solid, 1,   -- pen (solid, width 1)
         theme.DETAIL, miniwin.brush_solid, --brush (solid)
         true, --close
         false) --alt fill
-    
+
     -- The scrollbar position indicator
     totalSteps = #lines
     if (totalSteps <= WINDOW_LINES-1) then totalSteps = 1 end
@@ -501,16 +509,16 @@ function drawStuff()
         if barPos+barSize > SCROLL_BAR_WIDTH+theme.TITLE_HEIGHT+SCROLL_BAR_HEIGHT then
             barPos = SCROLL_BAR_WIDTH+theme.TITLE_HEIGHT+SCROLL_BAR_HEIGHT - barSize
         end
-        WindowAddHotspot(Win, "scroller", (WINDOW_WIDTH-SCROLL_BAR_WIDTH), barPos, WINDOW_WIDTH, barPos+barSize, 
-                        "MouseOver", "CancelMouseOver", "MouseDown", "CancelMouseDown", "MouseUp", "", 
+        WindowAddHotspot(Win, "scroller", (WINDOW_WIDTH-SCROLL_BAR_WIDTH), barPos, WINDOW_WIDTH, barPos+barSize,
+                        "MouseOver", "CancelMouseOver", "MouseDown", "CancelMouseDown", "MouseUp", "",
                         miniwin.cursor_hand, 0)
         WindowDragHandler(Win, "scroller", "ScrollerMoveCallback", "ScrollerReleaseCallback", 0)
     end  -- if
     DrawThemed3DRect(Win, WINDOW_WIDTH-SCROLL_BAR_WIDTH, barPos, WINDOW_WIDTH, barPos+barSize)
-    
+
     -- resizer tag
     DrawThemedResizeTag(Win, WINDOW_WIDTH-SCROLL_BAR_WIDTH, WINDOW_HEIGHT-SCROLL_BAR_WIDTH, SCROLL_BAR_WIDTH)
-    
+
     Redraw()
 end  -- function drawStuff
 
@@ -541,7 +549,7 @@ function wheelMove (flags, hotspot_id)
 		if (lineEnd < #lines) then
             lineStart = lineStart + 1
             lineEnd = lineEnd + 1
-            WindowRectOp(Win, miniwin.rect_draw_edge, (WINDOW_WIDTH-SCROLL_BAR_WIDTH), WINDOW_HEIGHT-(SCROLL_BAR_WIDTH*2), 0, WINDOW_HEIGHT-SCROLL_BAR_WIDTH-1, 
+            WindowRectOp(Win, miniwin.rect_draw_edge, (WINDOW_WIDTH-SCROLL_BAR_WIDTH), WINDOW_HEIGHT-(SCROLL_BAR_WIDTH*2), 0, WINDOW_HEIGHT-SCROLL_BAR_WIDTH-1,
                 miniwin.rect_edge_sunken,  miniwin.rect_edge_at_all + miniwin.rect_option_fill_middle) -- down arrow pushed
             points = string.format ("%i,%i,%i,%i,%i,%i", (WINDOW_WIDTH-SCROLL_BAR_WIDTH)+3, (WINDOW_HEIGHT-SCROLL_BAR_WIDTH)-11,(WINDOW_WIDTH-SCROLL_BAR_WIDTH)+7, (WINDOW_HEIGHT-SCROLL_BAR_WIDTH)-7, (WINDOW_WIDTH-SCROLL_BAR_WIDTH)+11,(WINDOW_HEIGHT-SCROLL_BAR_WIDTH)-11) -- draw triangle in up button
             WindowPolygon (Win, points,
@@ -555,7 +563,7 @@ function wheelMove (flags, hotspot_id)
 		if (lineStart > 1) then
                 lineStart = lineStart - 1
                 lineEnd = lineEnd - 1
-                WindowRectOp(Win, miniwin.rect_draw_edge, (WINDOW_WIDTH-SCROLL_BAR_WIDTH), theme.TITLE_HEIGHT, 0, theme.TITLE_HEIGHT+SCROLL_BAR_WIDTH, 
+                WindowRectOp(Win, miniwin.rect_draw_edge, (WINDOW_WIDTH-SCROLL_BAR_WIDTH), theme.TITLE_HEIGHT, 0, theme.TITLE_HEIGHT+SCROLL_BAR_WIDTH,
                     miniwin.rect_edge_sunken,  miniwin.rect_edge_at_all + miniwin.rect_option_fill_middle) -- up arrow pushed
                 points = string.format ("%i,%i,%i,%i,%i,%i", (WINDOW_WIDTH-SCROLL_BAR_WIDTH)+3, theme.TITLE_HEIGHT+9,(WINDOW_WIDTH-SCROLL_BAR_WIDTH)+7, theme.TITLE_HEIGHT+5,(WINDOW_WIDTH-SCROLL_BAR_WIDTH)+11, theme.TITLE_HEIGHT+9)
                 WindowPolygon (Win, points,
@@ -582,7 +590,7 @@ function fillBuffer(rawstyles)
             -- remove first line if filled up
             if #lines >= MAX_LINES then
                 remove (lines, 1)
-            end -- if 
+            end -- if
             avail = WINDOW_WIDTH - (TEXT_INSET * 2) - 9
             line_styles = {}
             add_line( line_styles, beginning )
@@ -597,13 +605,13 @@ function fillBuffer(rawstyles)
         if width <= avail then
             insert (line_styles, style)
             avail = avail - width
-        else -- otherwise, have to split style   
+        else -- otherwise, have to split style
             -- look for trailing space (work backwards). remember where space is
             local col = style.length - 1
             local split_col
             -- keep going until out of columns
             while col > 1 do
-                width = WindowTextWidth (Win, "bodyfont"..Win, style.text:sub (1, col), true) 
+                width = WindowTextWidth (Win, "bodyfont"..Win, style.text:sub (1, col), true)
                 if width <= avail then
                     if not split_col then
                         split_col = col  -- in case no space found, this is where we can split
@@ -616,13 +624,13 @@ function fillBuffer(rawstyles)
                 end -- if will now fit
                 col = col - 1
             end -- while
-          
+
             -- if we found a place to split, use old style, and make it shorter. Also make a copy and put the rest in that
             if split_col then
                 insert (line_styles, style)
                 local style_copy = copytable.shallow (style)
                 style.text = style.text:sub (1, split_col)
-                style.length = split_col 
+                style.length = split_col
                 style_copy.text = style_copy.text:sub (split_col + 1)
                 style_copy.length = #style_copy.text
                 insert (styles, 1, style_copy)
@@ -630,15 +638,15 @@ function fillBuffer(rawstyles)
                 insert (line_styles, style)
             else
                 insert (styles, 1, style)
-            end -- if    
-            avail = 0  -- now we need to wrap     
+            end -- if
+            avail = 0  -- now we need to wrap
         end -- if could not fit whole thing in
     end -- while we still have styles over
 end  -- function fillBuffer
 
 -- Main capture routine
 function chats (name, line, wildcards, styles)
-    
+
     -- echo in this world as well if the user wants
     if echo then
         for _, v in ipairs (styles) do
@@ -658,20 +666,20 @@ function chats (name, line, wildcards, styles)
           style = 0,
         } )
     end -- if
-    
+
     -- store the raw lines for use during resizing
     if #rawlines >= MAX_LINES then
         table.remove(rawlines, 1)
     end
     table.insert(rawlines, styles)
-    
+
     fillBuffer(styles)
     refresh()
-	
+
 	if (utils.timer() - savetime) > SAVE_TIME_INTERVAL then
 		SaveState()
 	end -- if
-end -- function chats 
+end -- function chats
 
 function add_line ( line, is_beginning_of_message )
 	--See if we're scrolled up.
@@ -700,7 +708,7 @@ function scrollbar(calledBy)
                 if (lineStart > 1) then
                     lineStart = lineStart - 1
                     lineEnd = lineEnd - 1
-                    WindowRectOp(Win, miniwin.rect_draw_edge, (WINDOW_WIDTH-SCROLL_BAR_WIDTH), theme.TITLE_HEIGHT, 0, theme.TITLE_HEIGHT+SCROLL_BAR_WIDTH, 
+                    WindowRectOp(Win, miniwin.rect_draw_edge, (WINDOW_WIDTH-SCROLL_BAR_WIDTH), theme.TITLE_HEIGHT, 0, theme.TITLE_HEIGHT+SCROLL_BAR_WIDTH,
                         miniwin.rect_edge_sunken,  miniwin.rect_edge_at_all + miniwin.rect_option_fill_middle) -- up arrow pushed
                     points = string.format ("%i,%i,%i,%i,%i,%i", (WINDOW_WIDTH-SCROLL_BAR_WIDTH)+3, theme.TITLE_HEIGHT+9,(WINDOW_WIDTH-SCROLL_BAR_WIDTH)+7, theme.TITLE_HEIGHT+5,(WINDOW_WIDTH-SCROLL_BAR_WIDTH)+11, theme.TITLE_HEIGHT+9)
                     WindowPolygon (Win, points,
@@ -715,7 +723,7 @@ function scrollbar(calledBy)
                 if (lineEnd < #lines) then
                     lineStart = lineStart + 1
                     lineEnd = lineEnd + 1
-                WindowRectOp(Win, miniwin.rect_draw_edge, (WINDOW_WIDTH-SCROLL_BAR_WIDTH), WINDOW_HEIGHT-(SCROLL_BAR_WIDTH*2), 0, WINDOW_HEIGHT-SCROLL_BAR_WIDTH-1, 
+                WindowRectOp(Win, miniwin.rect_draw_edge, (WINDOW_WIDTH-SCROLL_BAR_WIDTH), WINDOW_HEIGHT-(SCROLL_BAR_WIDTH*2), 0, WINDOW_HEIGHT-SCROLL_BAR_WIDTH-1,
                     miniwin.rect_edge_sunken,  miniwin.rect_edge_at_all + miniwin.rect_option_fill_middle) -- down arrow pushed
                 points = string.format ("%i,%i,%i,%i,%i,%i", (WINDOW_WIDTH-SCROLL_BAR_WIDTH)+3, (WINDOW_HEIGHT-SCROLL_BAR_WIDTH)-11,(WINDOW_WIDTH-SCROLL_BAR_WIDTH)+7, (WINDOW_HEIGHT-SCROLL_BAR_WIDTH)-7, (WINDOW_WIDTH-SCROLL_BAR_WIDTH)+11,(WINDOW_HEIGHT-SCROLL_BAR_WIDTH)-11) -- draw triangle in up button
                 WindowPolygon (Win, points,
@@ -777,7 +785,7 @@ function GetBufferedMessage(xpos, ypos)
         SetClipboard(text)
     end -- if
     Redraw()
-    
+
 end  -- function GetBufferedMessage
 
 function MouseOver(flags, hotspot_id)
@@ -851,7 +859,7 @@ function chat_sound (name, line, wildcards)
     else
       csound = wildcards [1]:lower () == " on"
     end -- if
-	
+
 	process_sound_option()
 end -- function chat_sound
 
@@ -870,23 +878,23 @@ end -- function process_sound_option
 -- right click menu
 function right_click_menu ()
     menustring ="Copy All To Clipboard|Change Font|Turn Echo "
-    
+
     if echo then
         menustring = menustring .. "Off"
     else
         menustring = menustring .. "On"
     end -- if
-	
+
 	menustring = menustring .. "|Turn Sounds "
-	
+
 	if csound then
         menustring = menustring .. "Off"
     else
         menustring = menustring .. "On"
     end -- if
-    
+
     menustring = menustring.."|>Timestamp|No Timestamps|30 Aug 13:29:49|30 Aug 01:20:12PM|13:29:08|1:22:06 PM"
-    result = WindowMenu (Win, 
+    result = WindowMenu (Win,
         WindowInfo (Win, 14),  -- x position
         WindowInfo (Win, 15),   -- y position
         menustring) -- content
@@ -936,5 +944,5 @@ function right_click_menu ()
     end -- if
 end -- function right_click_menu
 ]]>
-</script>
+    </script>
 </qmud>
