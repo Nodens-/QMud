@@ -4257,7 +4257,8 @@ void WorldRuntime::resetAnsiRenderState()
 	m_ansiStreamState = QMudAnsiStreamState{};
 	m_partialLineText.clear();
 	m_partialLineSpans.clear();
-	m_ansiRenderState = AnsiRenderState{};
+	m_pendingCarriageReturnOverwrite = false;
+	m_ansiRenderState                = AnsiRenderState{};
 	m_streamUtf8Carry.clear();
 	m_streamLocalDecoder.resetState();
 	m_streamUtf8DecoderEnabled = false;
@@ -4670,8 +4671,9 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		if (current.back.isEmpty())
 			current.back = defaultBack;
 
-		QString            lineText  = m_partialLineText;
-		QVector<StyleSpan> lineSpans = m_partialLineSpans;
+		QString            lineText              = m_partialLineText;
+		QVector<StyleSpan> lineSpans             = m_partialLineSpans;
+		bool               carriageReturnPending = m_pendingCarriageReturnOverwrite;
 
 		auto               colorFromIndex = [](int idx) -> QString
 		{
@@ -4690,11 +4692,29 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			rawSegment.replace(QChar(0x2028), QLatin1Char(' ')); // LINE SEPARATOR
 			rawSegment.replace(QChar(0x2029), QLatin1Char(' ')); // PARAGRAPH SEPARATOR
 			if (rawSegment.isEmpty())
+			{
 				return;
+			}
 
 			const int segmentLength = safeQSizeToInt(rawSegment.size());
 			bool      startTag      = segmentState.startTag;
-			auto      appendRun     = [&](int start, int length)
+			auto      backspaceOne  = [&]
+			{
+				if (lineText.isEmpty())
+					return;
+				lineText.chop(1);
+				while (!lineSpans.isEmpty())
+				{
+					StyleSpan &lastSpan = lineSpans.last();
+					if (lastSpan.length > 1)
+					{
+						lastSpan.length -= 1;
+						return;
+					}
+					lineSpans.pop_back();
+				}
+			};
+			auto appendRun = [&](int start, int length)
 			{
 				if (length <= 0)
 					return;
@@ -4737,6 +4757,15 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			for (int i = 0; i < segmentLength; ++i)
 			{
 				const QChar ch = rawSegment.at(i);
+				if (carriageReturnPending && ch != QLatin1Char('\n') && ch != QLatin1Char('\r'))
+				{
+					if (carriageReturnClears)
+					{
+						lineText.clear();
+						lineSpans.clear();
+					}
+					carriageReturnPending = false;
+				}
 				if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r'))
 				{
 					if (runStart >= 0)
@@ -4749,15 +4778,23 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 					{
 						const bool nextIsNewline =
 						    (i + 1 < segmentLength && rawSegment.at(i + 1) == QLatin1Char('\n'));
-						if (carriageReturnClears && !nextIsNewline)
-						{
-							lineText.clear();
-							lineSpans.clear();
-						}
+						if (!nextIsNewline)
+							carriageReturnPending = carriageReturnClears;
 						continue;
 					}
 
+					carriageReturnPending = false;
 					emitCompletedLine(lineText, lineSpans);
+					continue;
+				}
+				if (ch == QLatin1Char('\b'))
+				{
+					if (runStart >= 0)
+					{
+						appendRun(runStart, i - runStart);
+						runStart = -1;
+					}
+					backspaceOne();
 					continue;
 				}
 
@@ -4820,9 +4857,10 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		current.startTag   = ansiState.startTag;
 		current.monospace  = ansiState.monospace;
 
-		m_ansiRenderState  = current;
-		m_partialLineText  = lineText;
-		m_partialLineSpans = lineSpans;
+		m_ansiRenderState                = current;
+		m_partialLineText                = lineText;
+		m_partialLineSpans               = lineSpans;
+		m_pendingCarriageReturnOverwrite = carriageReturnPending;
 		emit incomingStyledLinePartialReceived(lineText, lineSpans);
 		if (m_mxpTagStack.isEmpty() && !hasActiveMxpRenderContext)
 			m_mxpTextBuffer.clear();
@@ -4853,13 +4891,14 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			                  return a.sequence < b.sequence;
 		                  });
 
-		MxpStyleState          current    = m_mxpRenderStyle;
-		QVector<MxpStyleFrame> stack      = m_mxpRenderStack;
-		QVector<QByteArray>    blockStack = m_mxpRenderBlockStack;
-		bool                   linkOpen   = m_mxpRenderLinkOpen;
-		int                    preDepth   = m_mxpRenderPreDepth;
-		QString                lineText   = m_partialLineText;
-		QVector<StyleSpan>     lineSpans  = m_partialLineSpans;
+		MxpStyleState          current               = m_mxpRenderStyle;
+		QVector<MxpStyleFrame> stack                 = m_mxpRenderStack;
+		QVector<QByteArray>    blockStack            = m_mxpRenderBlockStack;
+		bool                   linkOpen              = m_mxpRenderLinkOpen;
+		int                    preDepth              = m_mxpRenderPreDepth;
+		QString                lineText              = m_partialLineText;
+		QVector<StyleSpan>     lineSpans             = m_partialLineSpans;
+		bool                   carriageReturnPending = m_pendingCarriageReturnOverwrite;
 		bool                   mxpTrackingReset{false};
 		auto                   restoreCurrentFromAnsiState = [&]
 		{
@@ -5267,13 +5306,30 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			auto appendDecodedSegment = [&](const QString &decoded, const QMudStyledTextState &segmentState)
 			{
 				QString rawSegment = decoded;
-				rawSegment.replace('\r', QString());
 				if (rawSegment.isEmpty())
+				{
 					return;
+				}
 
 				const int segmentLength = safeQSizeToInt(rawSegment.size());
 				bool      startTag      = segmentState.startTag;
-				auto      appendRun     = [&](int start, int length)
+				auto      backspaceOne  = [&]
+				{
+					if (lineText.isEmpty())
+						return;
+					lineText.chop(1);
+					while (!lineSpans.isEmpty())
+					{
+						StyleSpan &lastSpan = lineSpans.last();
+						if (lastSpan.length > 1)
+						{
+							lastSpan.length -= 1;
+							return;
+						}
+						lineSpans.pop_back();
+					}
+				};
+				auto appendRun = [&](int start, int length)
 				{
 					if (length <= 0)
 						return;
@@ -5315,6 +5371,15 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 				for (int i = 0; i < segmentLength; ++i)
 				{
 					const QChar ch = rawSegment.at(i);
+					if (carriageReturnPending && ch != QLatin1Char('\n') && ch != QLatin1Char('\r'))
+					{
+						if (carriageReturnClears)
+						{
+							lineText.clear();
+							lineSpans.clear();
+						}
+						carriageReturnPending = false;
+					}
 					if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r'))
 					{
 						if (runStart >= 0)
@@ -5327,15 +5392,23 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 						{
 							const bool nextIsNewline =
 							    (i + 1 < segmentLength && rawSegment.at(i + 1) == QLatin1Char('\n'));
-							if (carriageReturnClears && !nextIsNewline)
-							{
-								lineText.clear();
-								lineSpans.clear();
-							}
+							if (!nextIsNewline)
+								carriageReturnPending = carriageReturnClears;
 							continue;
 						}
 
+						carriageReturnPending = false;
 						emitCompletedLine(lineText, lineSpans);
+						continue;
+					}
+					if (ch == QLatin1Char('\b'))
+					{
+						if (runStart >= 0)
+						{
+							appendRun(runStart, i - runStart);
+							runStart = -1;
+						}
+						backspaceOne();
 						continue;
 					}
 					if (runStart < 0)
@@ -6277,8 +6350,9 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		m_ansiRenderState.variable   = current.variable;
 		m_ansiRenderState.startTag   = current.startTag;
 
-		m_partialLineText  = lineText;
-		m_partialLineSpans = lineSpans;
+		m_partialLineText                = lineText;
+		m_partialLineSpans               = lineSpans;
+		m_pendingCarriageReturnOverwrite = carriageReturnPending;
 		emit incomingStyledLinePartialReceived(lineText, lineSpans);
 		m_currentActionSource = previousActionSource;
 	}

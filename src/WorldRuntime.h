@@ -1889,97 +1889,97 @@ class WorldRuntime : public QObject
 		 * @brief Returns bound world view.
 		 * @return Bound world view pointer.
 		 */
-		[[nodiscard]] WorldView            *view() const;
+		[[nodiscard]] WorldView *view() const;
 		/**
 		 * @brief Installs plugins queued for delayed install.
 		 */
-		void                                installPendingPlugins();
+		void                     installPendingPlugins();
 		/**
 		 * @brief Enables/disables deferred plugin installation.
 		 * @param deferred Defer installs when `true`.
 		 */
-		void                                setPluginInstallDeferred(bool deferred);
+		void                     setPluginInstallDeferred(bool deferred);
 		/**
 		 * @brief Returns whether plugin installation is currently deferred.
 		 * @return `true` when plugin install is deferred.
 		 */
-		[[nodiscard]] bool                  pluginInstallDeferred() const;
+		[[nodiscard]] bool       pluginInstallDeferred() const;
 		/**
 		 * @brief Sets default world output background color.
 		 * @param colour RGB background color value.
 		 */
-		void                                setBackgroundColour(long colour);
+		void                     setBackgroundColour(long colour);
 		/**
 		 * @brief Returns default world output background color.
 		 * @return RGB background color value.
 		 */
-		[[nodiscard]] long                  backgroundColour() const;
+		[[nodiscard]] long       backgroundColour() const;
 		/**
 		 * @brief Returns whether runtime is in simulate mode.
 		 * @return `true` when simulate mode is active.
 		 */
-		[[nodiscard]] bool                  doingSimulate() const;
+		[[nodiscard]] bool       doingSimulate() const;
 		/**
 		 * @brief Enables/disables simulate mode.
 		 * @param value Enable simulate mode when `true`.
 		 */
-		void                                setDoingSimulate(bool value);
+		void                     setDoingSimulate(bool value);
 
 		/**
 		 * @brief Returns active world trigger count.
 		 * @return Active trigger count.
 		 */
-		[[nodiscard]] int                   triggerCount() const;
+		[[nodiscard]] int        triggerCount() const;
 		/**
 		 * @brief Returns active world alias count.
 		 * @return Active alias count.
 		 */
-		[[nodiscard]] int                   aliasCount() const;
+		[[nodiscard]] int        aliasCount() const;
 		/**
 		 * @brief Returns active world timer count.
 		 * @return Active timer count.
 		 */
-		[[nodiscard]] int                   timerCount() const;
+		[[nodiscard]] int        timerCount() const;
 		/**
 		 * @brief Returns macro count.
 		 * @return Macro count.
 		 */
-		[[nodiscard]] int                   macroCount() const;
+		[[nodiscard]] int        macroCount() const;
 		/**
 		 * @brief Returns variable count.
 		 * @return Variable count.
 		 */
-		[[nodiscard]] int                   variableCount() const;
+		[[nodiscard]] int        variableCount() const;
 		/**
 		 * @brief Returns color rule count.
 		 * @return Colour-rule count.
 		 */
-		[[nodiscard]] int                   colourCount() const;
+		[[nodiscard]] int        colourCount() const;
 		/**
 		 * @brief Returns keypad mapping count.
 		 * @return Keypad mapping count.
 		 */
-		[[nodiscard]] int                   keypadCount() const;
+		[[nodiscard]] int        keypadCount() const;
 		/**
 		 * @brief Returns printing-style rule count.
 		 * @return Printing-style rule count.
 		 */
-		[[nodiscard]] int                   printingStyleCount() const;
+		[[nodiscard]] int        printingStyleCount() const;
 		/**
 		 * @brief Returns installed plugin count.
 		 * @return Installed plugin count.
 		 */
-		[[nodiscard]] int                   pluginCount() const;
+		[[nodiscard]] int        pluginCount() const;
 		/**
 		 * @brief Returns include block count.
 		 * @return Include block count.
 		 */
-		[[nodiscard]] int                   includeCount() const;
+		[[nodiscard]] int        includeCount() const;
 		/**
 		 * @brief Returns script block count.
 		 * @return Script block count.
 		 */
-		[[nodiscard]] int                   scriptCount() const;
+		[[nodiscard]] int        scriptCount() const;
 
 		/**
 		 * @brief Network I/O, command dispatch, and session counters.
@@ -1988,130 +1988,129 @@ class WorldRuntime : public QObject
 		 * @brief Feeds raw socket bytes into telnet/output processing.
 		 * @param data Raw socket payload bytes.
 		 */
-		void                                receiveRawData(const QByteArray &data);
+		void                     receiveRawData(const QByteArray &data);
 		/**
 		 * @brief Opens world socket connection.
 		 * @param host Remote host name or IP.
 		 * @param port Remote port number.
 		 * @return `true` when the connect attempt was started.
 		 */
-		bool                                connectToWorld(const QString &host, quint16 port);
+		bool                     connectToWorld(const QString &host, quint16 port);
 		/**
 		 * @brief Closes active world socket connection.
 		 */
-		void                                disconnectFromWorld();
+		void                     disconnectFromWorld();
 		/**
 		 * @brief Returns native descriptor of current world socket.
 		 * @return Native descriptor, or `-1` when unavailable.
 		 */
-		[[nodiscard]] int                   nativeSocketDescriptor() const;
+		[[nodiscard]] int        nativeSocketDescriptor() const;
 		/**
 		 * @brief Adopts an already-connected descriptor into this runtime.
 		 * @param descriptor Native descriptor to adopt.
 		 * @param errorMessage Optional output error text.
 		 * @return `true` when descriptor adoption succeeds.
 		 */
-		[[nodiscard]] bool                  adoptConnectedSocketDescriptor(int descriptor,
-		                                                                   QString *errorMessage = nullptr);
+		[[nodiscard]] bool adoptConnectedSocketDescriptor(int descriptor, QString *errorMessage = nullptr);
 		/**
 		 * @brief Closes active/adopted socket immediately for reload reconnect flow.
 		 */
-		void                                closeSocketForReloadReconnect();
+		void               closeSocketForReloadReconnect();
 		/**
 		 * @brief Pauses or resumes processing of incoming socket payload.
 		 * @param paused Pause processing when `true`.
 		 */
-		void                                setIncomingSocketDataPaused(bool paused);
-			/**
-			 * @brief Returns whether incoming socket processing is paused.
-			 * @return `true` when incoming processing is paused.
-			 */
-			[[nodiscard]] bool                  incomingSocketDataPaused() const;
-			/**
-			 * @brief Marks next connect callback to skip auto-login/connect-text sends after reload reattach.
-			 */
-			void                                markReloadReattachConnectActionsSuppressed();
-			/**
-			 * @brief Consumes one-shot flag that suppresses auto-login/connect-text sends for reload reattach.
-			 * @return `true` when auto-login/connect-text should be skipped for current connect callback.
-			 */
-			[[nodiscard]] bool                  consumeReloadReattachConnectActionsSuppressed();
-			/**
-			 * @brief Queues one MCCP v2 enable request for a recovered reattached socket.
-			 */
-			void                                requestMccpResumeAfterReloadReattach();
-			/**
-			 * @brief Queues telnet negotiation that requests MCCP disable for reload.
-			 */
-			void                                queueMccpDisableForReload();
+		void               setIncomingSocketDataPaused(bool paused);
+		/**
+		 * @brief Returns whether incoming socket processing is paused.
+		 * @return `true` when incoming processing is paused.
+		 */
+		[[nodiscard]] bool incomingSocketDataPaused() const;
+		/**
+		 * @brief Marks next connect callback to skip auto-login/connect-text sends after reload reattach.
+		 */
+		void               markReloadReattachConnectActionsSuppressed();
+		/**
+		 * @brief Consumes one-shot flag that suppresses auto-login/connect-text sends for reload reattach.
+		 * @return `true` when auto-login/connect-text should be skipped for current connect callback.
+		 */
+		[[nodiscard]] bool consumeReloadReattachConnectActionsSuppressed();
+		/**
+		 * @brief Queues one MCCP v2 enable request for a recovered reattached socket.
+		 */
+		void               requestMccpResumeAfterReloadReattach();
+		/**
+		 * @brief Queues telnet negotiation that requests MCCP disable for reload.
+		 */
+		void               queueMccpDisableForReload();
 		/**
 		 * @brief Returns whether MCCP is fully disabled after reload negotiation.
 		 * @return `true` when no active MCCP stream remains.
 		 */
-		[[nodiscard]] bool                  isMccpDisableCompleteForReload() const;
+		[[nodiscard]] bool isMccpDisableCompleteForReload() const;
 		/**
 		 * @brief Requests MCCP shutdown and waits briefly for compression to stop.
 		 * @param timeoutMs Maximum wait duration in milliseconds.
 		 * @return `true` when compression is inactive after the request.
 		 */
-		[[nodiscard]] bool                  requestMccpDisableForReload(int timeoutMs);
+		[[nodiscard]] bool requestMccpDisableForReload(int timeoutMs);
 		/**
 		 * @brief Sends raw bytes to world socket.
 		 * @param payload Bytes to send.
 		 */
-		void                                sendToWorld(const QByteArray &payload);
+		void               sendToWorld(const QByteArray &payload);
 		/**
 		 * @brief Increments sent-line counter.
 		 */
-		void                                incrementLinesSent();
+		void               incrementLinesSent();
 		/**
 		 * @brief Returns total sent lines for current session.
 		 * @return Total sent line count.
 		 */
-		[[nodiscard]] int                   totalLinesSent() const;
+		[[nodiscard]] int  totalLinesSent() const;
 		/**
 		 * @brief Returns total received lines for current session.
 		 * @return Total received line count.
 		 */
-		[[nodiscard]] int                   totalLinesReceived() const;
+		[[nodiscard]] int  totalLinesReceived() const;
 		/**
 		 * @brief Returns unread/new line counter.
 		 * @return New line counter.
 		 */
-		[[nodiscard]] int                   newLines() const;
+		[[nodiscard]] int  newLines() const;
 		/**
 		 * @brief Sets unread/new line counter.
 		 * @param value New unread line counter value.
 		 */
-		void                                setNewLines(int value);
+		void               setNewLines(int value);
 		/**
 		 * @brief Increments unread/new line counter.
 		 */
-		void                                incrementNewLines();
+		void               incrementNewLines();
 		/**
 		 * @brief Resets unread/new line counter.
 		 */
-		void                                clearNewLines();
+		void               clearNewLines();
 		/**
 		 * @brief Marks runtime as active/inactive in UI context.
 		 * @param active Mark runtime active when `true`.
 		 */
-		void                                setActive(bool active);
+		void               setActive(bool active);
 		/**
 		 * @brief Returns active/inactive UI state.
 		 * @return `true` when runtime is active.
 		 */
-		[[nodiscard]] bool                  isActive() const;
+		[[nodiscard]] bool isActive() const;
 		/**
 		 * @brief Returns whether outstanding-line badges are suppressed.
 		 * @return `true` when outstanding-line badges are hidden.
 		 */
-		[[nodiscard]] bool                  doNotShowOutstandingLines() const;
+		[[nodiscard]] bool doNotShowOutstandingLines() const;
 		/**
 		 * @brief Sets current action source for command dispatch context.
 		 * @param source Action source code.
 		 */
-		void                                setCurrentActionSource(unsigned short source);
+		void               setCurrentActionSource(unsigned short source);
 		/**
 		 * @brief Returns current action source code.
 		 * @return Current action source code.
@@ -4136,6 +4135,7 @@ class WorldRuntime : public QObject
 
 		QString                               m_partialLineText;
 		QVector<StyleSpan>                    m_partialLineSpans;
+		bool                                  m_pendingCarriageReturnOverwrite{false};
 
 		QList<Trigger>                        m_triggers;
 		QList<Alias>                          m_aliases;
@@ -4224,10 +4224,10 @@ class WorldRuntime : public QObject
 		bool                                  m_hasCachedIp{false};
 		QDateTime                             m_connectTime;
 		bool                                  m_disconnectOk{true};
-			bool                                  m_reconnectOnLinkFailure{false};
-			bool                                  m_incomingSocketDataPaused{false};
-			bool                                  m_reloadReattachSuppressConnectActions{false};
-			QDateTime                             m_statusTime;
+		bool                                  m_reconnectOnLinkFailure{false};
+		bool                                  m_incomingSocketDataPaused{false};
+		bool                                  m_reloadReattachSuppressConnectActions{false};
+		QDateTime                             m_statusTime;
 		QDateTime                             m_lastFlushTime;
 		QDateTime                             m_clientStartTime;
 		QDateTime                             m_worldStartTime;
