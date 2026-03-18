@@ -157,6 +157,15 @@ class MainWindow : public QMainWindow, public MainWindowHost
 			showStatusMessage(message, 0);
 		}
 		/**
+		 * @brief Locks status message to hyperlink hover target.
+		 * @param href Hyperlink destination text to show.
+		 */
+		void               setHyperlinkStatusLock(const QString &href) override;
+		/**
+		 * @brief Clears hyperlink status-message lock.
+		 */
+		void               clearHyperlinkStatusLock() override;
+		/**
 		 * @brief Switches focus to notepad child window.
 		 * @return `true` when focus switched successfully.
 		 */
@@ -583,6 +592,8 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		QTextEdit               *m_infoText{nullptr};
 		QTimer                  *m_statusTimer{nullptr};
 		QTimer                  *m_statusMessageTimer{nullptr};
+		mutable bool             m_statusTipOwnsMessage{false};
+		bool                     m_hyperlinkStatusLocked{false};
 		QTimer                  *m_activityTimer{nullptr};
 		QTimer                  *m_tickTimer{nullptr};
 		QElapsedTimer            m_timerFallbackClock;

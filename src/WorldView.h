@@ -17,6 +17,7 @@
 #include <QRegularExpression>
 #include <QScopedPointer>
 #include <QString>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
 #include <QWidget>
 
@@ -451,6 +452,11 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] bool    hasInputSelection() const;
 		/**
+		 * @brief Returns whether cursor is currently hovering a hyperlink anchor.
+		 * @return `true` when output cursor is over a hyperlink anchor.
+		 */
+		[[nodiscard]] bool    hyperlinkHoverActive() const;
+		/**
 		 * @brief Returns selected output text.
 		 * @return Selected output text.
 		 */
@@ -762,6 +768,20 @@ class WorldView : public QWidget
 		 */
 		bool        handleMiniWindowMouseMove(const QMouseEvent *event, const QWidget *source);
 		/**
+		 * @brief Returns hyperlink currently under global cursor, if any.
+		 * @return Hyperlink href under cursor, or empty when none.
+		 */
+		[[nodiscard]] QString currentHoveredHyperlink() const;
+		/**
+		 * @brief Applies hovered-hyperlink state and emits change when needed.
+		 * @param href Hyperlink href under cursor (or empty).
+		 */
+		void                  applyHoveredHyperlink(const QString &href);
+		/**
+		 * @brief Refreshes hovered-hyperlink state from current cursor position.
+		 */
+		void                  refreshHoveredHyperlinkFromCursor();
+		/**
 		 * @brief Handles miniwindow mouse-press event.
 		 * @param event Mouse event payload.
 		 * @param doubleClick `true` when event is a double click.
@@ -1008,6 +1028,7 @@ class WorldView : public QWidget
 		QPoint                                  m_pendingTooltipGlobalPos;
 		QTimer                                 *m_tooltipTimer{nullptr};
 		bool                                    m_anchorHoverActive{false};
+		QString                                 m_hoveredHyperlinkHref;
 		bool                                    m_mouseCaptured{false};
 		bool                                    m_hasOutputSelection{false};
 		int                                     m_lastSelectionStartLine{0};

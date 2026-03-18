@@ -143,6 +143,15 @@ class MainWindowHost
 		 */
 		virtual void showStatusMessage(const QString &message, int timeoutMs) = 0;
 		/**
+		 * @brief Locks status message to hyperlink hover target.
+		 * @param href Hyperlink destination text to show.
+		 */
+		virtual void setHyperlinkStatusLock(const QString &href) = 0;
+		/**
+		 * @brief Clears hyperlink status-message lock and restores normal status handling.
+		 */
+		virtual void clearHyperlinkStatusLock() = 0;
+		/**
 		 * @brief Activates world tab by slot index.
 		 * @param slot Zero-based world slot index.
 		 */
