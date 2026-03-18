@@ -85,18 +85,18 @@ static constexpr int           eQueryMXP     = 1;
 static constexpr int           eUseMXP       = 2;
 static constexpr int           eNoMXP        = 3;
 
-static constexpr unsigned char CHARSET_REQUEST         = 1;
-static constexpr unsigned char CHARSET_ACCEPTED        = 2;
-static constexpr unsigned char CHARSET_REJECTED        = 3;
-static constexpr unsigned char TTYPE_IS                = 0;
-static constexpr unsigned char TTYPE_SEND              = 1;
-static constexpr int           MCCP_INFLATE_CHUNK_SIZE = 8192;
-static constexpr int           kMaxMxpPendingBytes     = 8192;
-static constexpr int           kMaxMxpEventsPending    = 4096;
+static constexpr unsigned char CHARSET_REQUEST          = 1;
+static constexpr unsigned char CHARSET_ACCEPTED         = 2;
+static constexpr unsigned char CHARSET_REJECTED         = 3;
+static constexpr unsigned char TTYPE_IS                 = 0;
+static constexpr unsigned char TTYPE_SEND               = 1;
+static constexpr int           MCCP_INFLATE_CHUNK_SIZE  = 8192;
+static constexpr int           kMaxMxpPendingBytes      = 8192;
+static constexpr int           kMaxMxpEventsPending     = 4096;
 static constexpr int           kMaxMxpCustomDefinitions = 1024;
-static constexpr int           kMaxMxpAttlistBytes     = 16384;
-static constexpr int           DBG_ERROR               = 1;
-static constexpr int           DBG_WARNING             = 2;
+static constexpr int           kMaxMxpAttlistBytes      = 16384;
+static constexpr int           DBG_ERROR                = 1;
+static constexpr int           DBG_WARNING              = 2;
 
 namespace
 {
@@ -399,8 +399,11 @@ void TelnetProcessor::setNawsEnabled(const bool enabled)
 
 void TelnetProcessor::setWindowSize(const int columns, const int rows)
 {
-	m_wrapColumns = columns;
-	m_wrapRows    = rows;
+	const bool changed = (m_wrapColumns != columns) || (m_wrapRows != rows);
+	m_wrapColumns      = columns;
+	m_wrapRows         = rows;
+	if (changed && m_naws && m_nawsWanted)
+		sendWindowSize();
 }
 
 void TelnetProcessor::setTerminalIdentification(const QString &value)
@@ -843,7 +846,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 {
 	QByteArray output;
 	output.reserve(data.size());
-	int outputSize = m_outputSize;
+	int  outputSize                   = m_outputSize;
 	auto abortMxpCollectionOnOverflow = [this]
 	{
 		const char *phaseName = "token";
@@ -865,14 +868,14 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 		default:
 			break;
 		}
-		emitMxpDiagnosticLazy(
-		    DBG_ERROR, errMXP_CollectionTooLong,
-		    [phaseName]
-		    {
-			    return QStringLiteral("MXP %1 exceeded %2-byte limit; discarding partial token.")
-			        .arg(QString::fromLatin1(phaseName))
-			        .arg(kMaxMxpPendingBytes);
-		    });
+		emitMxpDiagnosticLazy(DBG_ERROR, errMXP_CollectionTooLong,
+		                      [phaseName]
+		                      {
+			                      return QStringLiteral(
+			                                 "MXP %1 exceeded %2-byte limit; discarding partial token.")
+			                          .arg(QString::fromLatin1(phaseName))
+			                          .arg(kMaxMxpPendingBytes);
+		                      });
 		m_mxpPhase = MXP_NONE;
 		m_mxpString.clear();
 	};
@@ -1018,15 +1021,15 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			if (m_mxpEnabled && m_mxpMode == eMXP_secure_once && c != '<')
 				mxpRestoreMode();
 
-			if (m_mxpEnabled && m_useMxp != eNoMXP && m_mxpMode != eMXP_locked && m_mxpMode != eMXP_perm_locked &&
-			    c == '<') // MXP element start
+			if (m_mxpEnabled && m_useMxp != eNoMXP && m_mxpMode != eMXP_locked &&
+			    m_mxpMode != eMXP_perm_locked && c == '<') // MXP element start
 			{
 				m_mxpPhase = HAVE_MXP_ELEMENT;
 				m_mxpString.clear();
 				continue;
 			}
-			if (m_mxpEnabled && m_useMxp != eNoMXP && m_mxpMode != eMXP_locked && m_mxpMode != eMXP_perm_locked &&
-			    c == '&') // MXP entity start
+			if (m_mxpEnabled && m_useMxp != eNoMXP && m_mxpMode != eMXP_locked &&
+			    m_mxpMode != eMXP_perm_locked && c == '&') // MXP entity start
 			{
 				m_mxpPhase = HAVE_MXP_ENTITY;
 				m_mxpString.clear();
@@ -1665,17 +1668,17 @@ void TelnetProcessor::sendTerminalType()
 		break;
 
 	case 2:
-		{
-			unsigned mttsBitmask = 0;
-			mttsBitmask |= 1; // ANSI
-			mttsBitmask |= 8; // 256 colors
-			mttsBitmask |= 256; // truecolor
-			if (m_utf8)
-				mttsBitmask |= 4;
+	{
+		unsigned mttsBitmask = 0;
+		mttsBitmask |= 1;   // ANSI
+		mttsBitmask |= 8;   // 256 colors
+		mttsBitmask |= 256; // truecolor
+		if (m_utf8)
+			mttsBitmask |= 4;
 
-			strTemp = QByteArray("MTTS ") + QByteArray::number(mttsBitmask);
-		}
-		break;
+		strTemp = QByteArray("MTTS ") + QByteArray::number(mttsBitmask);
+	}
+	break;
 	default:
 		break;
 	}
@@ -1767,14 +1770,13 @@ void TelnetProcessor::mxpCollectedElement()
 			if (!m_mxpEventsOverflowed)
 			{
 				m_mxpEventsOverflowed = true;
-				emitMxpDiagnosticLazy(
-				    DBG_WARNING, wrnMXP_EventQueueLimitExceeded,
-				    []
-				    {
-					    return QStringLiteral(
-					        "MXP event queue exceeded %1 entries; dropping further MXP events until drained.")
-					        .arg(kMaxMxpEventsPending);
-				    });
+				emitMxpDiagnosticLazy(DBG_WARNING, wrnMXP_EventQueueLimitExceeded,
+				                      []
+				                      {
+					                      return QStringLiteral("MXP event queue exceeded %1 entries; "
+					                                            "dropping further MXP events until drained.")
+					                          .arg(kMaxMxpEventsPending);
+				                      });
 			}
 			return;
 		}
@@ -2647,7 +2649,7 @@ void TelnetProcessor::mxpAttlist(const QByteArray &name, const QByteArray &tagRe
 		return;
 	} // end of no element matching
 
-	CustomElement element = m_customElements.value(lowerName);
+	CustomElement   element = m_customElements.value(lowerName);
 
 	const qsizetype separatorBytes = element.attributes.isEmpty() ? 0 : 1;
 	const qsizetype appendBytes    = separatorBytes + tagRemainder.size();
@@ -2657,7 +2659,8 @@ void TelnetProcessor::mxpAttlist(const QByteArray &name, const QByteArray &tagRe
 		    DBG_WARNING, wrnMXP_AttlistLimitExceeded,
 		    [lowerName]
 		    {
-			    return QStringLiteral("MXP ATTLIST for <%1> exceeded %2 bytes; ignoring additional attributes.")
+			    return QStringLiteral(
+			               "MXP ATTLIST for <%1> exceeded %2 bytes; ignoring additional attributes.")
 			        .arg(QString::fromLocal8Bit(lowerName))
 			        .arg(kMaxMxpAttlistBytes);
 		    });

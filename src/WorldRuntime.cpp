@@ -11805,14 +11805,43 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 	if (!nawsEnabled)
 		return;
 
-	int columns = 0;
-	int rows    = 0;
+	int  columns = 0;
+	int  rows    = 0;
 
+	bool measuredFromView = false;
 	if (m_view)
 	{
 		const QRect textRect     = m_view->outputTextRectangle();
-		const int   widthPixels  = textRect.width();
+		int         widthPixels  = textRect.width();
 		const int   heightPixels = textRect.height();
+		if (!textRect.isEmpty())
+		{
+			// With NAWS enabled, use the unobscured right edge so server-side wrapping
+			// stays clear of overlay miniwindows (e.g. right-side chat/map panes).
+			int safeRight = textRect.right() + 1;
+			for (MiniWindow *window : sortedMiniWindows())
+			{
+				if (!window || !window->show || window->temporarilyHide)
+					continue;
+				if ((window->flags & kMiniWindowDrawUnderneath) != 0)
+					continue;
+				if (window->rect.isEmpty())
+					continue;
+
+				const QRect overlap = window->rect.intersected(textRect);
+				if (overlap.isEmpty())
+					continue;
+
+				const bool rightDocked =
+				    window->position == 6 || window->position == 7 || window->position == 8;
+				const bool onRightHalf = window->rect.center().x() >= textRect.center().x();
+				if (!rightDocked && !onRightHalf)
+					continue;
+
+				safeRight = qMin(safeRight, overlap.left());
+			}
+			widthPixels = qMax(0, safeRight - textRect.left());
+		}
 		if (widthPixels > 0 && heightPixels > 0)
 		{
 			const QFont        font = m_view->outputFont();
@@ -11821,16 +11850,22 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 			const int          charHeight = qMax(1, metrics.lineSpacing());
 			columns                       = widthPixels / charWidth;
 			rows                          = heightPixels / charHeight;
+			measuredFromView              = true;
 		}
 	}
 
 	if (columns <= 0 || rows <= 0)
 	{
+		// Do not push speculative fallback NAWS when a view exists but geometry
+		// is not measured yet; wait for a later resize/layout callback to send a
+		// correct size and avoid first-command wrap mismatch.
+		if (m_view && !measuredFromView)
+			return;
 		columns = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
 		rows    = 24;
 	}
 
-	if (columns > 0)
+	if (columns > 0 && rows > 0)
 		m_telnet.setWindowSize(columns, rows);
 }
 
@@ -15962,6 +15997,11 @@ void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &owner
 	distribute(rightWindows, rightRoom, topRight.y(), true, clientWidth, 0, true, false);
 	distribute(bottomWindows, bottomRoom, bottomLeft.x(), false, 0, clientHeight, false, true);
 	distribute(leftWindows, leftRoom, topLeft.y(), true, 0, 0, false, false);
+
+	// Re-evaluate NAWS width when overlay miniwindow layout changes so server-side
+	// wrapping tracks panes that consume right-side text space.
+	if (!underneath)
+		updateTelnetWindowSizeForNaws();
 }
 
 int WorldRuntime::windowRectOp(const QString &name, int action, int left, int top, int right, int bottom,
