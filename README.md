@@ -21,7 +21,7 @@ template to report issues, request features, etc.
 ## Features
 
 - Cross-platform (Linux, Windows, macOS).
-- Unicode, NAWS, Terminal Type, CHARSET, MXP, MCCP, MMCP, OSC8.
+- Unicode, NAWS, Terminal Type, CHARSET, EOR, ECHO, MXP, MSP, MCCP, MMCP, OSC8, xterm256 color, Truecolor.
 - Lua scripting.
 - Copyover-style in-place reload on Linux/macOS (`File -> Reload QMud`).
 - Split-pane scrollback buffer.
@@ -108,7 +108,8 @@ If nothing is configured, defaults are:
 
 Current behavior/limitations:
 
-- MCCPv1/2 enabled worlds that do not honor IAC DONT COMPRESS/2 on timeout/failure, downgrade to reconnect on reload.
+- MCCPv1/2 enabled worlds that do not honor IAC DONT COMPRESS/2, on timeout/failure to end compression stream, downgrade
+  to reconnect on reload.
 
 ## Build requirements
 
