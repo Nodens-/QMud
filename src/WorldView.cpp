@@ -2579,14 +2579,17 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 	}
 	else
 	{
-		int offset = 0;
+		int  offset       = 0;
+		auto isActionLink = [](const int actionType)
+		{
+			return actionType == WorldRuntime::ActionHyperlink || actionType == WorldRuntime::ActionSend ||
+			       actionType == WorldRuntime::ActionPrompt;
+		};
 		for (const WorldRuntime::StyleSpan &span : spans)
 		{
 			const int length = qMax(0, span.length);
 			if (length == 0)
 				continue;
-			if (span.actionType != WorldRuntime::ActionNone)
-				return false;
 
 			const QString chunk = text.mid(offset, length);
 			offset += length;
@@ -2608,8 +2611,25 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 				format.setBackground(back);
 			format.setFontWeight(span.bold && m_showBold ? QFont::Bold : baseFormat.fontWeight());
 			format.setFontItalic(span.italic && m_showItalic);
-			format.setFontUnderline(span.underline && m_showUnderline);
+			const bool hasLinkAction = isActionLink(span.actionType) && !span.action.isEmpty();
+			const bool underline =
+			    (span.underline && m_showUnderline) || (hasLinkAction && m_underlineHyperlinks);
+			format.setFontUnderline(underline);
 			format.setFontStrikeOut(span.strike);
+			if (hasLinkAction)
+			{
+				format.setAnchor(true);
+				format.setAnchorHref(span.action);
+				format.setToolTip(span.hint);
+				if (!fore.isValid() && m_useCustomLinkColour && m_hyperlinkColour.isValid())
+					format.setForeground(m_hyperlinkColour);
+			}
+			else
+			{
+				format.setAnchor(false);
+				format.setAnchorHref(QString());
+				format.setToolTip(QString());
+			}
 			cursor.insertText(chunk, format);
 		}
 

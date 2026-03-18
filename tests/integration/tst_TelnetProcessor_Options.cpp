@@ -33,7 +33,7 @@ namespace
 	constexpr unsigned char TTYPE_SEND           = 1;
 	constexpr unsigned char TTYPE_IS             = 0;
 
-	QByteArray bytes(std::initializer_list<unsigned char> raw)
+	QByteArray              bytes(std::initializer_list<unsigned char> raw)
 	{
 		QByteArray out;
 		out.reserve(static_cast<qsizetype>(raw.size()));
@@ -50,7 +50,7 @@ class tst_TelnetProcessor_Options : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void queueInitialNegotiationIsIdempotent()
 		{
@@ -78,8 +78,8 @@ class tst_TelnetProcessor_Options : public QObject
 
 		void echoNegotiationCallbacksAndReplies()
 		{
-			TelnetProcessor  processor;
-			QList<bool>      noEchoStates;
+			TelnetProcessor            processor;
+			QList<bool>                noEchoStates;
 			TelnetProcessor::Callbacks callbacks;
 			callbacks.onNoEchoChanged = [&noEchoStates](const bool enabled) { noEchoStates.append(enabled); };
 			processor.setCallbacks(callbacks);
@@ -95,8 +95,8 @@ class tst_TelnetProcessor_Options : public QObject
 
 		void noEchoOffRejectsEchoNegotiation()
 		{
-			TelnetProcessor processor;
-			bool            callbackFired = false;
+			TelnetProcessor            processor;
+			bool                       callbackFired = false;
 
 			TelnetProcessor::Callbacks callbacks;
 			callbacks.onNoEchoChanged = [&callbackFired](bool) { callbackFired = true; };
@@ -110,8 +110,8 @@ class tst_TelnetProcessor_Options : public QObject
 
 		void noEchoStaysEnabledAcrossIncomingData()
 		{
-			TelnetProcessor  processor;
-			QList<bool>      noEchoStates;
+			TelnetProcessor            processor;
+			QList<bool>                noEchoStates;
 			TelnetProcessor::Callbacks callbacks;
 			callbacks.onNoEchoChanged = [&noEchoStates](const bool enabled) { noEchoStates.append(enabled); };
 			processor.setCallbacks(callbacks);
@@ -131,8 +131,8 @@ class tst_TelnetProcessor_Options : public QObject
 
 		void resetConnectionStateClearsNoEchoOnce()
 		{
-			TelnetProcessor  processor;
-			QList<bool>      noEchoStates;
+			TelnetProcessor            processor;
+			QList<bool>                noEchoStates;
 			TelnetProcessor::Callbacks callbacks;
 			callbacks.onNoEchoChanged = [&noEchoStates](const bool enabled) { noEchoStates.append(enabled); };
 			processor.setCallbacks(callbacks);
@@ -166,8 +166,8 @@ class tst_TelnetProcessor_Options : public QObject
 			processor.setWindowSize(255, 255);
 
 			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, IAC, SE}));
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00,
+			                                              0xFF, 0xFF, 0x00, 0xFF, 0xFF, IAC, SE}));
 		}
 
 		void doNawsSendsWontWhenDisabled()
@@ -179,6 +179,24 @@ class tst_TelnetProcessor_Options : public QObject
 			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_NAWS}));
 		}
 
+		void doNawsSendsUpdatedWindowSizeAfterNegotiation()
+		{
+			TelnetProcessor processor;
+			processor.setNawsEnabled(true);
+			processor.setWindowSize(80, 24);
+
+			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+			QCOMPARE(processor.takeOutboundData(),
+			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE}));
+
+			processor.setWindowSize(132, 40);
+			QCOMPARE(processor.takeOutboundData(),
+			         bytes({IAC, SB, TELOPT_NAWS, 0x00, 0x84, 0x00, 0x28, IAC, SE}));
+
+			processor.setWindowSize(132, 40);
+			QVERIFY(processor.takeOutboundData().isEmpty());
+		}
+
 		void terminalTypeRequestReturnsConfiguredName()
 		{
 			TelnetProcessor processor;
@@ -188,8 +206,8 @@ class tst_TelnetProcessor_Options : public QObject
 			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_TERMINAL_TYPE}));
 
 			processor.processBytes(bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_SEND, IAC, SE}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_IS, 'Q', 'M', 'u', 'd', 'T', 'e', 'r', 'm', IAC, SE}));
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_IS, 'Q', 'M',
+			                                              'u', 'd', 'T', 'e', 'r', 'm', IAC, SE}));
 		}
 
 		void charsetRequestAcceptedAndRejected()
@@ -197,21 +215,40 @@ class tst_TelnetProcessor_Options : public QObject
 			TelnetProcessor processor;
 			processor.setUseUtf8(true);
 
-			processor.processBytes(
-			    bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REQUEST, ',', 'U', 'T', 'F', '-', '8', ',', 'U', 'S', '-',
-			           'A', 'S', 'C', 'I', 'I', IAC, SE}));
+			processor.processBytes(bytes({IAC,
+			                              SB,
+			                              TELOPT_CHARSET,
+			                              CHARSET_REQUEST,
+			                              ',',
+			                              'U',
+			                              'T',
+			                              'F',
+			                              '-',
+			                              '8',
+			                              ',',
+			                              'U',
+			                              'S',
+			                              '-',
+			                              'A',
+			                              'S',
+			                              'C',
+			                              'I',
+			                              'I',
+			                              IAC,
+			                              SE}));
 			QCOMPARE(processor.takeOutboundData(),
 			         bytes({IAC, SB, TELOPT_CHARSET, CHARSET_ACCEPTED, 'U', 'T', 'F', '-', '8', IAC, SE}));
 
-			processor.processBytes(
-			    bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REQUEST, ',', 'U', 'S', '-', 'A', 'S', 'C', 'I', 'I', IAC, SE}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REJECTED, IAC, SE}));
+			processor.processBytes(bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REQUEST, ',', 'U', 'S', '-', 'A',
+			                              'S', 'C', 'I', 'I', IAC, SE}));
+			QCOMPARE(processor.takeOutboundData(),
+			         bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REJECTED, IAC, SE}));
 		}
 
 		void gaCanConvertToNewline()
 		{
-			TelnetProcessor processor;
-			int             gaCount = 0;
+			TelnetProcessor            processor;
+			int                        gaCount = 0;
 
 			TelnetProcessor::Callbacks callbacks;
 			callbacks.onIacGa = [&gaCount]() { ++gaCount; };
@@ -222,7 +259,7 @@ class tst_TelnetProcessor_Options : public QObject
 			QCOMPARE(output, QByteArray("\n"));
 			QCOMPARE(gaCount, 1);
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Options)

@@ -611,6 +611,48 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void linkedStyledRunsPreserveExactPlainText()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(720, 420);
+			view.show();
+			QCoreApplication::processEvents();
+
+			const QString                    text = QStringLiteral("Visit help and report issues now");
+			const QString                    href = QStringLiteral("https://example.org/osc8-layout");
+
+			QVector<WorldRuntime::StyleSpan> spans;
+			spans.reserve(static_cast<int>(text.size()));
+			for (qsizetype i = 0; i < text.size(); ++i)
+			{
+				WorldRuntime::StyleSpan span;
+				span.length     = 1;
+				span.actionType = WorldRuntime::ActionHyperlink;
+				span.action     = href;
+				span.bold       = (i % 2) == 0;
+				span.fore       = (i % 3) == 0 ? QColor(QStringLiteral("#66ccff")) : QColor();
+				spans.push_back(span);
+			}
+
+			view.appendOutputTextStyled(text, spans, true);
+			QCoreApplication::processEvents();
+
+			const QStringList lines = view.outputLines();
+			QVERIFY(!lines.isEmpty());
+			QCOMPARE(lines.first(), text);
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			const QPoint anchorPoint = findAnchorPoint(*browser, href);
+			QVERIFY2(anchorPoint.x() >= 0 && anchorPoint.y() >= 0,
+			         "Expected hyperlink anchor in rendered output.");
+
+			resetTestState();
+		}
+
 		void hyperlinkHoverStatePersistsAndClearsDeterministically()
 		{
 			resetTestState();

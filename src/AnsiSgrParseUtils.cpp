@@ -16,6 +16,93 @@ namespace
 	constexpr int kMaxCsiPendingBytes = 128;
 	constexpr int kMaxOscPendingBytes = 8192;
 
+	void          appendParsedToken(QVector<int> &codes, const QByteArray &token)
+	{
+		if (token.isEmpty())
+		{
+			codes.push_back(0);
+			return;
+		}
+
+		bool      ok    = false;
+		const int value = token.toInt(&ok);
+		if (ok)
+			codes.push_back(value);
+	}
+
+	bool parseRgbComponent(const QByteArray &token, int &value)
+	{
+		if (token.isEmpty())
+		{
+			value = 0;
+			return true;
+		}
+		bool ok = false;
+		value   = token.toInt(&ok);
+		return ok;
+	}
+
+	QVector<int> parseSgrCodes(const QByteArray &rawParams)
+	{
+		QVector<int>            codes;
+		const QList<QByteArray> parts = rawParams.split(';');
+		for (const QByteArray &part : parts)
+		{
+			if (!part.contains(':'))
+			{
+				appendParsedToken(codes, part);
+				continue;
+			}
+
+			const QList<QByteArray> subParts = part.split(':');
+			if (subParts.size() >= 2)
+			{
+				bool      codeOk = false;
+				const int code   = subParts.at(0).toInt(&codeOk);
+				bool      modeOk = false;
+				const int mode   = subParts.at(1).toInt(&modeOk);
+				if (codeOk && modeOk && (code == 38 || code == 48))
+				{
+					if (mode == 5 && subParts.size() >= 3)
+					{
+						int idx = 0;
+						if (parseRgbComponent(subParts.at(2), idx))
+						{
+							codes.push_back(code);
+							codes.push_back(5);
+							codes.push_back(idx);
+							continue;
+						}
+					}
+					else if (mode == 2 && subParts.size() >= 5)
+					{
+						const int startIndex =
+						    (subParts.size() >= 6) ? 3 : 2; // 38:2:<cs>:r:g:b (optional cs) vs 38:2:r:g:b
+
+						int r = 0;
+						int g = 0;
+						int b = 0;
+						if (parseRgbComponent(subParts.at(startIndex), r) &&
+						    parseRgbComponent(subParts.at(startIndex + 1), g) &&
+						    parseRgbComponent(subParts.at(startIndex + 2), b))
+						{
+							codes.push_back(code);
+							codes.push_back(2);
+							codes.push_back(r);
+							codes.push_back(g);
+							codes.push_back(b);
+							continue;
+						}
+					}
+				}
+			}
+
+			for (const QByteArray &token : subParts)
+				appendParsedToken(codes, token);
+		}
+		return codes;
+	}
+
 	QString rgbTripletToHex(const int r, const int g, const int b)
 	{
 		const auto clampChannel = [](const int value)
@@ -34,8 +121,7 @@ namespace
 	}
 
 	void applyAnsiSgr(const QVector<int> &codes, QMudStyledTextState &state, const QString &defaultFore,
-	                  const QString &defaultBack,
-	                  const std::function<QString(int)> &normalAnsiColorFromIndex,
+	                  const QString &defaultBack, const std::function<QString(int)> &normalAnsiColorFromIndex,
 	                  const std::function<QString(int)> &boldAnsiColorFromIndex,
 	                  const std::function<QString(int)> &colorFromIndex)
 	{
@@ -55,15 +141,15 @@ namespace
 				const QString variable   = state.variable;
 				const bool    startTag   = state.startTag;
 				const bool    monospace  = state.monospace;
-				state                   = QMudStyledTextState{};
-				state.actionType        = actionType;
-				state.action            = action;
-				state.hint              = hint;
-				state.variable          = variable;
-				state.startTag          = startTag;
-				state.monospace         = monospace;
-				state.fore              = defaultFore;
-				state.back              = defaultBack;
+				state                    = QMudStyledTextState{};
+				state.actionType         = actionType;
+				state.action             = action;
+				state.hint               = hint;
+				state.variable           = variable;
+				state.startTag           = startTag;
+				state.monospace          = monospace;
+				state.fore               = defaultFore;
+				state.back               = defaultBack;
 			}
 			else if (code == 1)
 			{
@@ -183,12 +269,14 @@ namespace
 	}
 } // namespace
 
-QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(
-    const QByteArray &bytes, QMudAnsiStreamState &streamState, const QString &defaultFore,
-    const QString &defaultBack, const std::function<QString(int)> &normalAnsiColorFromIndex,
-    const std::function<QString(int)> &boldAnsiColorFromIndex, const std::function<QString(int)> &colorFromIndex,
-    const std::function<QString(QByteArrayView)> &decodeBytes, QMudStyledTextState &state,
-    const QMudOscActionIds &oscActionIds)
+QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArray &bytes, QMudAnsiStreamState &streamState,
+                                                const QString &defaultFore, const QString &defaultBack,
+                                                const std::function<QString(int)> &normalAnsiColorFromIndex,
+                                                const std::function<QString(int)> &boldAnsiColorFromIndex,
+                                                const std::function<QString(int)> &colorFromIndex,
+                                                const std::function<QString(QByteArrayView)> &decodeBytes,
+                                                QMudStyledTextState                          &state,
+                                                const QMudOscActionIds                       &oscActionIds)
 {
 	QVector<QMudStyledChunk> chunks;
 	if (bytes.isEmpty())
@@ -203,8 +291,8 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(
 		if (decoded.isEmpty())
 			return;
 		QMudStyledChunk chunk;
-		chunk.text     = decoded;
-		chunk.state    = state;
+		chunk.text  = decoded;
+		chunk.state = state;
 		chunks.push_back(chunk);
 		state.startTag = false;
 	};
@@ -276,92 +364,111 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(
 
 		switch (streamState.mode)
 		{
-			case QMudAnsiStreamState::Mode::Normal:
-				if (ch == '\x1b')
-				{
-					flushPlain(plainBytes);
-					streamState.mode = QMudAnsiStreamState::Mode::Escape;
-				}
-				else
-					plainBytes.append(ch);
-				break;
-
-			case QMudAnsiStreamState::Mode::Escape:
-				if (ch == '[')
-				{
-					streamState.pending.clear();
-					streamState.mode = QMudAnsiStreamState::Mode::Csi;
-				}
-				else if (ch == ']')
-				{
-					streamState.pending.clear();
-					streamState.mode = QMudAnsiStreamState::Mode::Osc;
-				}
-				else
-				{
-					// Unknown ESC prefix: keep the non-ESC byte as visible text.
-					plainBytes.append(ch);
-					streamState.mode = QMudAnsiStreamState::Mode::Normal;
-				}
-				break;
-
-			case QMudAnsiStreamState::Mode::Csi:
+		case QMudAnsiStreamState::Mode::Normal:
+			if (ch == '\x1b')
 			{
-				const unsigned char byte = static_cast<unsigned char>(ch);
-				if (byte >= 0x40 && byte <= 0x7E)
-				{
-					if (ch == 'm')
-					{
-						QByteArray params = streamState.pending;
-						params.replace(':', ';');
-						const QList<QByteArray> parts = params.split(';');
-						QVector<int>            codes;
-						for (const QByteArray &part : parts)
-						{
-							if (part.isEmpty())
-							{
-								codes.push_back(0);
-								continue;
-							}
-							bool      ok    = false;
-							const int value = part.toInt(&ok);
-							if (ok)
-								codes.push_back(value);
-						}
-						applyAnsiSgr(codes, state, defaultFore, defaultBack, normalAnsiColorFromIndex,
-						             boldAnsiColorFromIndex, colorFromIndex);
-					}
-					streamState.pending.clear();
-					streamState.mode = QMudAnsiStreamState::Mode::Normal;
-				}
-				else if (byte >= 0x20 && byte <= 0x3F)
-				{
-					streamState.pending.append(ch);
-					if (streamState.pending.size() > kMaxCsiPendingBytes)
-					{
-						streamState.pending.clear();
-						streamState.mode = QMudAnsiStreamState::Mode::Normal;
-					}
-				}
-				else
-				{
-					// Corrupt CSI: drop it and reprocess current byte as normal text.
-					streamState.pending.clear();
-					streamState.mode = QMudAnsiStreamState::Mode::Normal;
-					--i;
-				}
-				break;
+				flushPlain(plainBytes);
+				streamState.mode = QMudAnsiStreamState::Mode::Escape;
 			}
+			else
+				plainBytes.append(ch);
+			break;
 
-			case QMudAnsiStreamState::Mode::Osc:
+		case QMudAnsiStreamState::Mode::Escape:
+			if (ch == '[')
+			{
+				streamState.pending.clear();
+				streamState.mode = QMudAnsiStreamState::Mode::Csi;
+			}
+			else if (ch == ']')
+			{
+				streamState.pending.clear();
+				streamState.mode = QMudAnsiStreamState::Mode::Osc;
+			}
+			else
+			{
+				// Unknown ESC prefix: keep the non-ESC byte as visible text.
+				plainBytes.append(ch);
+				streamState.mode = QMudAnsiStreamState::Mode::Normal;
+			}
+			break;
+
+		case QMudAnsiStreamState::Mode::Csi:
+		{
+			const unsigned char byte = static_cast<unsigned char>(ch);
+			if (byte >= 0x40 && byte <= 0x7E)
+			{
+				if (ch == 'm')
+				{
+					const QVector<int> codes = parseSgrCodes(streamState.pending);
+					applyAnsiSgr(codes, state, defaultFore, defaultBack, normalAnsiColorFromIndex,
+					             boldAnsiColorFromIndex, colorFromIndex);
+				}
+				streamState.pending.clear();
+				streamState.mode = QMudAnsiStreamState::Mode::Normal;
+			}
+			else if (byte >= 0x20 && byte <= 0x3F)
+			{
+				streamState.pending.append(ch);
+				if (streamState.pending.size() > kMaxCsiPendingBytes)
+				{
+					streamState.pending.clear();
+					streamState.mode = QMudAnsiStreamState::Mode::Normal;
+				}
+			}
+			else
+			{
+				// Corrupt CSI: drop it and reprocess current byte as normal text.
+				streamState.pending.clear();
+				streamState.mode = QMudAnsiStreamState::Mode::Normal;
+				--i;
+			}
+			break;
+		}
+
+		case QMudAnsiStreamState::Mode::Osc:
+			if (ch == '\a')
+			{
+				applyOsc(streamState.pending);
+				streamState.pending.clear();
+				streamState.mode = QMudAnsiStreamState::Mode::Normal;
+			}
+			else if (ch == '\x1b')
+				streamState.mode = QMudAnsiStreamState::Mode::OscEsc;
+			else
+			{
+				streamState.pending.append(ch);
+				if (streamState.pending.size() > kMaxOscPendingBytes)
+				{
+					streamState.pending.clear();
+					streamState.mode = QMudAnsiStreamState::Mode::Normal;
+				}
+			}
+			break;
+
+		case QMudAnsiStreamState::Mode::OscEsc:
+			if (ch == '\\')
+			{
+				applyOsc(streamState.pending);
+				streamState.pending.clear();
+				streamState.mode = QMudAnsiStreamState::Mode::Normal;
+			}
+			else
+			{
+				// ESC not followed by ST terminator: keep bytes inside OSC payload.
+				streamState.pending.append('\x1b');
+				if (streamState.pending.size() > kMaxOscPendingBytes)
+				{
+					streamState.pending.clear();
+					streamState.mode = QMudAnsiStreamState::Mode::Normal;
+					break;
+				}
 				if (ch == '\a')
 				{
 					applyOsc(streamState.pending);
 					streamState.pending.clear();
 					streamState.mode = QMudAnsiStreamState::Mode::Normal;
 				}
-				else if (ch == '\x1b')
-					streamState.mode = QMudAnsiStreamState::Mode::OscEsc;
 				else
 				{
 					streamState.pending.append(ch);
@@ -369,46 +476,12 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(
 					{
 						streamState.pending.clear();
 						streamState.mode = QMudAnsiStreamState::Mode::Normal;
-					}
-				}
-				break;
-
-			case QMudAnsiStreamState::Mode::OscEsc:
-				if (ch == '\\')
-				{
-					applyOsc(streamState.pending);
-					streamState.pending.clear();
-					streamState.mode = QMudAnsiStreamState::Mode::Normal;
-				}
-				else
-				{
-					// ESC not followed by ST terminator: keep bytes inside OSC payload.
-					streamState.pending.append('\x1b');
-					if (streamState.pending.size() > kMaxOscPendingBytes)
-					{
-						streamState.pending.clear();
-						streamState.mode = QMudAnsiStreamState::Mode::Normal;
 						break;
 					}
-					if (ch == '\a')
-					{
-						applyOsc(streamState.pending);
-						streamState.pending.clear();
-						streamState.mode = QMudAnsiStreamState::Mode::Normal;
-					}
-					else
-					{
-						streamState.pending.append(ch);
-						if (streamState.pending.size() > kMaxOscPendingBytes)
-						{
-							streamState.pending.clear();
-							streamState.mode = QMudAnsiStreamState::Mode::Normal;
-							break;
-						}
-						streamState.mode = QMudAnsiStreamState::Mode::Osc;
-					}
+					streamState.mode = QMudAnsiStreamState::Mode::Osc;
 				}
-				break;
+			}
+			break;
 		}
 	}
 

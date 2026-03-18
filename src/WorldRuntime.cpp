@@ -4257,7 +4257,8 @@ void WorldRuntime::resetAnsiRenderState()
 	m_ansiStreamState = QMudAnsiStreamState{};
 	m_partialLineText.clear();
 	m_partialLineSpans.clear();
-	m_ansiRenderState = AnsiRenderState{};
+	m_pendingCarriageReturnOverwrite = false;
+	m_ansiRenderState                = AnsiRenderState{};
 	m_streamUtf8Carry.clear();
 	m_streamLocalDecoder.resetState();
 	m_streamUtf8DecoderEnabled = false;
@@ -4670,8 +4671,9 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		if (current.back.isEmpty())
 			current.back = defaultBack;
 
-		QString            lineText  = m_partialLineText;
-		QVector<StyleSpan> lineSpans = m_partialLineSpans;
+		QString            lineText              = m_partialLineText;
+		QVector<StyleSpan> lineSpans             = m_partialLineSpans;
+		bool               carriageReturnPending = m_pendingCarriageReturnOverwrite;
 
 		auto               colorFromIndex = [](int idx) -> QString
 		{
@@ -4690,11 +4692,29 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			rawSegment.replace(QChar(0x2028), QLatin1Char(' ')); // LINE SEPARATOR
 			rawSegment.replace(QChar(0x2029), QLatin1Char(' ')); // PARAGRAPH SEPARATOR
 			if (rawSegment.isEmpty())
+			{
 				return;
+			}
 
 			const int segmentLength = safeQSizeToInt(rawSegment.size());
 			bool      startTag      = segmentState.startTag;
-			auto      appendRun     = [&](int start, int length)
+			auto      backspaceOne  = [&]
+			{
+				if (lineText.isEmpty())
+					return;
+				lineText.chop(1);
+				while (!lineSpans.isEmpty())
+				{
+					StyleSpan &lastSpan = lineSpans.last();
+					if (lastSpan.length > 1)
+					{
+						lastSpan.length -= 1;
+						return;
+					}
+					lineSpans.pop_back();
+				}
+			};
+			auto appendRun = [&](int start, int length)
 			{
 				if (length <= 0)
 					return;
@@ -4737,6 +4757,15 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			for (int i = 0; i < segmentLength; ++i)
 			{
 				const QChar ch = rawSegment.at(i);
+				if (carriageReturnPending && ch != QLatin1Char('\n') && ch != QLatin1Char('\r'))
+				{
+					if (carriageReturnClears)
+					{
+						lineText.clear();
+						lineSpans.clear();
+					}
+					carriageReturnPending = false;
+				}
 				if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r'))
 				{
 					if (runStart >= 0)
@@ -4749,15 +4778,23 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 					{
 						const bool nextIsNewline =
 						    (i + 1 < segmentLength && rawSegment.at(i + 1) == QLatin1Char('\n'));
-						if (carriageReturnClears && !nextIsNewline)
-						{
-							lineText.clear();
-							lineSpans.clear();
-						}
+						if (!nextIsNewline)
+							carriageReturnPending = carriageReturnClears;
 						continue;
 					}
 
+					carriageReturnPending = false;
 					emitCompletedLine(lineText, lineSpans);
+					continue;
+				}
+				if (ch == QLatin1Char('\b'))
+				{
+					if (runStart >= 0)
+					{
+						appendRun(runStart, i - runStart);
+						runStart = -1;
+					}
+					backspaceOne();
 					continue;
 				}
 
@@ -4820,9 +4857,10 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		current.startTag   = ansiState.startTag;
 		current.monospace  = ansiState.monospace;
 
-		m_ansiRenderState  = current;
-		m_partialLineText  = lineText;
-		m_partialLineSpans = lineSpans;
+		m_ansiRenderState                = current;
+		m_partialLineText                = lineText;
+		m_partialLineSpans               = lineSpans;
+		m_pendingCarriageReturnOverwrite = carriageReturnPending;
 		emit incomingStyledLinePartialReceived(lineText, lineSpans);
 		if (m_mxpTagStack.isEmpty() && !hasActiveMxpRenderContext)
 			m_mxpTextBuffer.clear();
@@ -4853,13 +4891,14 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			                  return a.sequence < b.sequence;
 		                  });
 
-		MxpStyleState          current    = m_mxpRenderStyle;
-		QVector<MxpStyleFrame> stack      = m_mxpRenderStack;
-		QVector<QByteArray>    blockStack = m_mxpRenderBlockStack;
-		bool                   linkOpen   = m_mxpRenderLinkOpen;
-		int                    preDepth   = m_mxpRenderPreDepth;
-		QString                lineText   = m_partialLineText;
-		QVector<StyleSpan>     lineSpans  = m_partialLineSpans;
+		MxpStyleState          current               = m_mxpRenderStyle;
+		QVector<MxpStyleFrame> stack                 = m_mxpRenderStack;
+		QVector<QByteArray>    blockStack            = m_mxpRenderBlockStack;
+		bool                   linkOpen              = m_mxpRenderLinkOpen;
+		int                    preDepth              = m_mxpRenderPreDepth;
+		QString                lineText              = m_partialLineText;
+		QVector<StyleSpan>     lineSpans             = m_partialLineSpans;
+		bool                   carriageReturnPending = m_pendingCarriageReturnOverwrite;
 		bool                   mxpTrackingReset{false};
 		auto                   restoreCurrentFromAnsiState = [&]
 		{
@@ -5267,13 +5306,30 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			auto appendDecodedSegment = [&](const QString &decoded, const QMudStyledTextState &segmentState)
 			{
 				QString rawSegment = decoded;
-				rawSegment.replace('\r', QString());
 				if (rawSegment.isEmpty())
+				{
 					return;
+				}
 
 				const int segmentLength = safeQSizeToInt(rawSegment.size());
 				bool      startTag      = segmentState.startTag;
-				auto      appendRun     = [&](int start, int length)
+				auto      backspaceOne  = [&]
+				{
+					if (lineText.isEmpty())
+						return;
+					lineText.chop(1);
+					while (!lineSpans.isEmpty())
+					{
+						StyleSpan &lastSpan = lineSpans.last();
+						if (lastSpan.length > 1)
+						{
+							lastSpan.length -= 1;
+							return;
+						}
+						lineSpans.pop_back();
+					}
+				};
+				auto appendRun = [&](int start, int length)
 				{
 					if (length <= 0)
 						return;
@@ -5315,6 +5371,15 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 				for (int i = 0; i < segmentLength; ++i)
 				{
 					const QChar ch = rawSegment.at(i);
+					if (carriageReturnPending && ch != QLatin1Char('\n') && ch != QLatin1Char('\r'))
+					{
+						if (carriageReturnClears)
+						{
+							lineText.clear();
+							lineSpans.clear();
+						}
+						carriageReturnPending = false;
+					}
 					if (ch == QLatin1Char('\n') || ch == QLatin1Char('\r'))
 					{
 						if (runStart >= 0)
@@ -5327,15 +5392,23 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 						{
 							const bool nextIsNewline =
 							    (i + 1 < segmentLength && rawSegment.at(i + 1) == QLatin1Char('\n'));
-							if (carriageReturnClears && !nextIsNewline)
-							{
-								lineText.clear();
-								lineSpans.clear();
-							}
+							if (!nextIsNewline)
+								carriageReturnPending = carriageReturnClears;
 							continue;
 						}
 
+						carriageReturnPending = false;
 						emitCompletedLine(lineText, lineSpans);
+						continue;
+					}
+					if (ch == QLatin1Char('\b'))
+					{
+						if (runStart >= 0)
+						{
+							appendRun(runStart, i - runStart);
+							runStart = -1;
+						}
+						backspaceOne();
 						continue;
 					}
 					if (runStart < 0)
@@ -6277,8 +6350,9 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		m_ansiRenderState.variable   = current.variable;
 		m_ansiRenderState.startTag   = current.startTag;
 
-		m_partialLineText  = lineText;
-		m_partialLineSpans = lineSpans;
+		m_partialLineText                = lineText;
+		m_partialLineSpans               = lineSpans;
+		m_pendingCarriageReturnOverwrite = carriageReturnPending;
 		emit incomingStyledLinePartialReceived(lineText, lineSpans);
 		m_currentActionSource = previousActionSource;
 	}
@@ -11805,14 +11879,43 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 	if (!nawsEnabled)
 		return;
 
-	int columns = 0;
-	int rows    = 0;
+	int  columns = 0;
+	int  rows    = 0;
 
+	bool measuredFromView = false;
 	if (m_view)
 	{
 		const QRect textRect     = m_view->outputTextRectangle();
-		const int   widthPixels  = textRect.width();
+		int         widthPixels  = textRect.width();
 		const int   heightPixels = textRect.height();
+		if (!textRect.isEmpty())
+		{
+			// With NAWS enabled, use the unobscured right edge so server-side wrapping
+			// stays clear of overlay miniwindows (e.g. right-side chat/map panes).
+			int safeRight = textRect.right() + 1;
+			for (MiniWindow *window : sortedMiniWindows())
+			{
+				if (!window || !window->show || window->temporarilyHide)
+					continue;
+				if ((window->flags & kMiniWindowDrawUnderneath) != 0)
+					continue;
+				if (window->rect.isEmpty())
+					continue;
+
+				const QRect overlap = window->rect.intersected(textRect);
+				if (overlap.isEmpty())
+					continue;
+
+				const bool rightDocked =
+				    window->position == 6 || window->position == 7 || window->position == 8;
+				const bool onRightHalf = window->rect.center().x() >= textRect.center().x();
+				if (!rightDocked && !onRightHalf)
+					continue;
+
+				safeRight = qMin(safeRight, overlap.left());
+			}
+			widthPixels = qMax(0, safeRight - textRect.left());
+		}
 		if (widthPixels > 0 && heightPixels > 0)
 		{
 			const QFont        font = m_view->outputFont();
@@ -11821,16 +11924,22 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 			const int          charHeight = qMax(1, metrics.lineSpacing());
 			columns                       = widthPixels / charWidth;
 			rows                          = heightPixels / charHeight;
+			measuredFromView              = true;
 		}
 	}
 
 	if (columns <= 0 || rows <= 0)
 	{
+		// Do not push speculative fallback NAWS when a view exists but geometry
+		// is not measured yet; wait for a later resize/layout callback to send a
+		// correct size and avoid first-command wrap mismatch.
+		if (m_view && !measuredFromView)
+			return;
 		columns = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
 		rows    = 24;
 	}
 
-	if (columns > 0)
+	if (columns > 0 && rows > 0)
 		m_telnet.setWindowSize(columns, rows);
 }
 
@@ -15962,6 +16071,11 @@ void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &owner
 	distribute(rightWindows, rightRoom, topRight.y(), true, clientWidth, 0, true, false);
 	distribute(bottomWindows, bottomRoom, bottomLeft.x(), false, 0, clientHeight, false, true);
 	distribute(leftWindows, leftRoom, topLeft.y(), true, 0, 0, false, false);
+
+	// Re-evaluate NAWS width when overlay miniwindow layout changes so server-side
+	// wrapping tracks panes that consume right-side text space.
+	if (!underneath)
+		updateTelnetWindowSizeForNaws();
 }
 
 int WorldRuntime::windowRectOp(const QString &name, int action, int left, int top, int right, int bottom,
