@@ -10,10 +10,10 @@
 #define QMUD_VERSION_H
 
 // Used for detecting version changes.
-inline constexpr int  kThisVersion = 1007;
+inline constexpr int  kThisVersion = 1008;
 
 // Used to display the version number.
-inline constexpr char kVersionString[] = "10.07";
+inline constexpr char kVersionString[] = "10.08";
 
 // CI builds append "-ci" to the runtime display version (AppController::m_version).
 // kVersionString itself remains the canonical numeric version.

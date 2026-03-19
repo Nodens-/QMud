@@ -91,6 +91,13 @@ qmud_add_qtest(tst_EncodingUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_Environment
+        SOURCES
+        unit/tst_Environment.cpp
+        "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_UpdateCheckUtils
         SOURCES
         unit/tst_UpdateCheckUtils.cpp
@@ -410,6 +417,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             SOURCES
             gui/tst_WorldView_Basic.cpp
             "${CMAKE_SOURCE_DIR}/src/WorldView.cpp"
+            "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
             "${CMAKE_SOURCE_DIR}/src/WorldView.h"
             "${CMAKE_SOURCE_DIR}/src/MainWindowHostResolver.cpp"
             "${CMAKE_SOURCE_DIR}/src/dialogs/FindDialog.cpp"

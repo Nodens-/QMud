@@ -14,6 +14,7 @@
 #include "ColorPacking.h"
 #include "ColorUtils.h"
 #include "DocConstants.h"
+#include "Environment.h"
 #include "FileExtensions.h"
 #include "FontUtils.h"
 #include "ImportMergeUtils.h"
@@ -175,7 +176,7 @@ namespace
 {
 	bool envFlagEnabled(const char *name)
 	{
-		const QString value = qEnvironmentVariable(name).trimmed();
+		const QString value = qmudEnvironmentVariable(QString::fromLatin1(name)).trimmed();
 		return value == QStringLiteral("1") || value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
 		       value.compare(QStringLiteral("yes"), Qt::CaseInsensitive) == 0 ||
 		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
@@ -206,9 +207,10 @@ namespace
 	{
 		const auto updateDisabledByEnvironment = []() -> bool
 		{
-			if (!qEnvironmentVariableIsSet("QMUD_DISABLE_UPDATE"))
+			if (!qmudEnvironmentVariableIsSet(QStringLiteral("QMUD_DISABLE_UPDATE")))
 				return false;
-			const QString value = qEnvironmentVariable("QMUD_DISABLE_UPDATE").trimmed().toLower();
+			const QString value =
+			    qmudEnvironmentVariable(QStringLiteral("QMUD_DISABLE_UPDATE")).trimmed().toLower();
 			if (value.isEmpty())
 				return true;
 			return value != QStringLiteral("0") && value != QStringLiteral("false") &&
@@ -231,9 +233,10 @@ namespace
 	{
 		const auto updateDisabledByEnvironment = []() -> bool
 		{
-			if (!qEnvironmentVariableIsSet("QMUD_DISABLE_UPDATE"))
+			if (!qmudEnvironmentVariableIsSet(QStringLiteral("QMUD_DISABLE_UPDATE")))
 				return false;
-			const QString value = qEnvironmentVariable("QMUD_DISABLE_UPDATE").trimmed().toLower();
+			const QString value =
+			    qmudEnvironmentVariable(QStringLiteral("QMUD_DISABLE_UPDATE")).trimmed().toLower();
 			if (value.isEmpty())
 				return true;
 			return value != QStringLiteral("0") && value != QStringLiteral("false") &&
@@ -243,7 +246,7 @@ namespace
 		if (updateDisabledByEnvironment())
 		{
 			return QStringLiteral(
-			    "Automatic updates are disabled by QMUD_DISABLE_UPDATE environment setting.");
+			    "Automatic updates are disabled by QMUD_DISABLE_UPDATE (environment/system config).");
 		}
 #ifdef Q_OS_WIN
 		return QStringLiteral(
@@ -1963,76 +1966,6 @@ namespace
 		return value;
 	}
 
-	QString expandLeadingTilde(const QString &value)
-	{
-		if (value.isEmpty() || value.front() != QLatin1Char('~'))
-			return value;
-		if (value.size() == 1)
-			return QDir::homePath();
-#ifdef Q_OS_WIN
-		if (value.at(1) == QLatin1Char('/') || value.at(1) == QLatin1Char('\\'))
-#else
-		if (value.at(1) == QLatin1Char('/'))
-#endif
-			return QDir::homePath() + value.mid(1);
-		return value;
-	}
-
-	QString systemQmudConfigPath()
-	{
-#if defined(Q_OS_MACOS)
-		return QStringLiteral("/Library/Application Support/QMud/config");
-#elif defined(Q_OS_LINUX)
-		return QStringLiteral("/etc/QMud/config");
-#elif defined(Q_OS_WIN)
-		QString localAppData = qEnvironmentVariable("LOCALAPPDATA").trimmed();
-		if (localAppData.isEmpty())
-			localAppData = QDir::home().filePath(QStringLiteral("AppData/Local"));
-		return QDir(localAppData).filePath(QStringLiteral("QMud/config"));
-#else
-		return {};
-#endif
-	}
-
-	QString qmudHomeFromSystemConfig()
-	{
-		const QString configPath = systemQmudConfigPath();
-		if (configPath.isEmpty() || !QFileInfo::exists(configPath))
-			return {};
-
-		QFile configFile(configPath);
-		if (!configFile.open(QIODevice::ReadOnly | QIODevice::Text))
-		{
-			qWarning() << "Failed to read QMud system config:" << configPath;
-			return {};
-		}
-
-		const QString content = QString::fromUtf8(configFile.readAll());
-		for (const QStringList lines = content.split(QLatin1Char('\n')); QString line : lines)
-		{
-			line = line.trimmed();
-			if (line.isEmpty() || line.startsWith(QLatin1Char('#')) || line.startsWith(QLatin1Char(';')))
-				continue;
-			if (line.startsWith(QStringLiteral("export ")))
-				line = line.mid(7).trimmed();
-
-			const qsizetype equalsPos = line.indexOf(QLatin1Char('='));
-			if (equalsPos <= 0)
-				continue;
-
-			if (const QString key = line.left(equalsPos).trimmed();
-			    key.compare(QStringLiteral("QMUD_HOME"), Qt::CaseInsensitive) == 0)
-			{
-				QString value = line.mid(equalsPos + 1).trimmed();
-				value         = stripOptionalQuotes(value);
-				value         = expandLeadingTilde(value.trimmed());
-				return normalizePathString(value);
-			}
-		}
-
-		return {};
-	}
-
 	QString archiveRelativePathFor(const QString &baseDir, const QString &absolutePath)
 	{
 		QString relative = QDir(baseDir).relativeFilePath(absolutePath);
@@ -3239,23 +3172,20 @@ bool AppController::initialize()
 
 	// working directory at login time / data directory resolution:
 	// - QMUD_HOME environment variable overrides on all platforms.
-	// - If QMUD_HOME is not set, read QMUD_HOME from OS config file:
-	//   Linux: /etc/QMud/config
-	//   macOS: /Library/Application Support/QMud/config
+	// - If QMUD_HOME is not set, read QMUD_HOME from config fallback:
+	//   Linux: ~/.config/QMud/config, then /etc/QMud/config
+	//   macOS: ~/Library/Application Support/QMud/config, then /Library/Application Support/QMud/config
 	//   Windows: %LOCALAPPDATA%/QMud/config
+	// - In multi-instance mode, config fallback is disabled and QMUD_HOME must be set explicitly in process env.
 	// - AppImage defaults to $HOME/QMud when QMUD_HOME is not set.
 	// - macOS defaults to ~/Library/Application Support/QMud when QMUD_HOME is not set.
 	// - Windows/default keep executable directory when QMUD_HOME is not set.
 	const auto isAppImage                  = !qEnvironmentVariable("APPIMAGE").trimmed().isEmpty();
-	const auto qmudHomeFromEnv             = qEnvironmentVariable("QMUD_HOME").trimmed();
-	const auto hasQmudHomeFromEnv          = !qmudHomeFromEnv.isEmpty();
-	auto       qmudHome                    = qmudHomeFromEnv;
+	const bool hasQmudHomeFromEnv          = !qEnvironmentVariable("QMUD_HOME").trimmed().isEmpty();
+	auto       qmudHome                    = qmudEnvironmentVariable(QStringLiteral("QMUD_HOME")).trimmed();
 	bool       hasQmudHomeFromSystemConfig = false;
-	if (qmudHome.isEmpty())
-	{
-		qmudHome                    = qmudHomeFromSystemConfig();
-		hasQmudHomeFromSystemConfig = !qmudHome.isEmpty();
-	}
+	if (!hasQmudHomeFromEnv && !qmudHome.isEmpty())
+		hasQmudHomeFromSystemConfig = true;
 
 	const auto defaultStartupDir = [isAppImage]() -> QString
 	{
@@ -3291,7 +3221,7 @@ bool AppController::initialize()
 			    QDir::cleanPath(fallbackStartupDir) != QDir::cleanPath(startupDir) &&
 			    QDir().mkpath(fallbackStartupDir))
 			{
-				qWarning() << "Failed to use QMUD_HOME from system config, falling back to defaults:"
+				qWarning() << "Failed to use QMUD_HOME from config fallback, falling back to defaults:"
 				           << startupDir;
 				startupDir = fallbackStartupDir;
 			}
@@ -5469,7 +5399,7 @@ void AppController::handleUpdateQmudNow()
 				    if (QWidget *updateParent = m_updateUiParent.data();
 				        updateParent && updateParent != m_mainWindow)
 				    {
-					    if (QDialog *dialog = qobject_cast<QDialog *>(updateParent))
+					    if (auto *dialog = qobject_cast<QDialog *>(updateParent))
 						    dialog->close();
 					    else
 						    updateParent->close();
@@ -5480,7 +5410,7 @@ void AppController::handleUpdateQmudNow()
 					    QWidget *activeModal = QApplication::activeModalWidget();
 					    if (!activeModal || activeModal == m_mainWindow)
 						    break;
-					    if (QDialog *dialog = qobject_cast<QDialog *>(activeModal))
+					    if (auto *dialog = qobject_cast<QDialog *>(activeModal))
 						    dialog->close();
 					    else
 						    activeModal->close();
@@ -13077,7 +13007,7 @@ void AppController::handleReloadQmud()
 	{
 		if (autoConfirmReload)
 		{
-			if (QDialog *dialog = qobject_cast<QDialog *>(activeModal))
+			if (auto *dialog = qobject_cast<QDialog *>(activeModal))
 				dialog->close();
 			else
 				activeModal->close();

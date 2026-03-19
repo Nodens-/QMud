@@ -10,6 +10,7 @@
 #include "WorldView.h"
 #include "AcceleratorUtils.h"
 #include "AppController.h"
+#include "Environment.h"
 #include "FontUtils.h"
 #include "MainFrame.h"
 #include "MainWindowHost.h"
@@ -175,7 +176,8 @@ namespace
 
 	bool          miniWindowMouseDebugEnabled()
 	{
-		static const bool enabled = !qEnvironmentVariableIsEmpty("QMUD_DEBUG_MINIWINDOW_MOUSE");
+		static const bool enabled =
+		    !qmudEnvironmentVariableIsEmpty(QStringLiteral("QMUD_DEBUG_MINIWINDOW_MOUSE"));
 		return enabled;
 	}
 

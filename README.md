@@ -25,6 +25,7 @@ issues, request features, etc.
 - Copyover-style in-place reload on Linux/macOS (`File -> Reload QMud`).
 - Split-pane scrollback buffer.
 - Autosave, autobackup, log rotation, log compression.
+- Autoupdates (Linux/macOS currently; Windows soon).
 
 ## Contact / Support
 
@@ -33,6 +34,17 @@ For support, testing feedback, and development discussion, join:
 - [CthulhuMUD Discord](https://discord.gg/secxwnTJCq)
 
 Do **NOT** use the issue tracker for general support requests.
+
+## Contributions
+
+- Bug fix PRs are welcome.
+- Feature PRs have to be discussed first either on Issue tracker or Discord.
+- You can also contribute with documentation or translations (once work on both is started; but you can apply to help
+  before that)
+- You can also contribute with funding as funds are needed for code signing certificate, Apple registration etc.
+  in order to bring QMud to the Apple Store/avoid issues with Windows SmartScreen/WDAC.
+
+[![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20this%20project-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/nodens)
 
 ## Supported platforms
 
@@ -69,10 +81,14 @@ done but better safe than sorry.
 QMud resolves its startup/data directory in this order:
 
 1. `QMUD_HOME` environment variable (all platforms).
-2. If env var is missing, `QMUD_HOME` from system config file:
-    - Linux: `/etc/QMud/config`
-    - macOS: `/Library/Application Support/QMud/config`
+2. If env var is missing, `QMUD_HOME` from config file fallback:
+    - Linux: `~/.config/QMud/config`, then `/etc/QMud/config`
+    - macOS: `~/Library/Application Support/QMud/config`, then `/Library/Application Support/QMud/config`
     - Windows: `%LOCALAPPDATA%/QMud/config`
+
+When multi-instance mode is enabled (`QMUD_ALLOW_MULTI_INSTANCE` env var or `--multi-instance`/
+`--allow-multi-instance`), config fallback is disabled and `QMUD_HOME` must be set explicitly in the process environment
+in order to avoid second instances writing to the same datadir.
 
 System config lines support both:
 
@@ -80,6 +96,8 @@ System config lines support both:
 - `export QMUD_HOME=/path/to/dir`
 
 Quoted values are accepted, and leading `~` is expanded.
+The same config fallback files can also define any `QMUD_*` environment flag, and those values are used when the real
+process environment does not override them.
 
 If nothing is configured, defaults are:
 
@@ -91,9 +109,12 @@ If nothing is configured, defaults are:
 
 ### Environment flags
 
+Flags below can be provided either as process environment variables or in the OS config fallback files (`QMUD_*`
+entries, used as fallback when not set in the process environment).
+
 - `QMUD_HOME`: Overrides startup/data directory resolution (see section above).
 - `QMUD_ALLOW_MULTI_INSTANCE`: When set to `1`, `y`, `yes`, or `true`, bypasses single-instance enforcement. (Not safe
-  with same datadir)
+  with same datadir). In this mode, `QMUD_HOME` must be explicitly set in process environment.
 - `QMUD_DISABLE_UPDATE`:  When set to `1`, `y`, `yes`, or `true`, disables the automatic updates functionality (for
   distro packaging).
 - `QMUD_RELOAD_VERBOSE`: When set to `1`, `y`, `yes`, or `true`, enables verbose per-world reload diagnostics in logs.
@@ -101,7 +122,7 @@ If nothing is configured, defaults are:
 ### CLI switches
 
 - `--multi-instance` (alias: `--allow-multi-instance`): Bypass single-instance enforcement for that process. (Not safe
-  with same datadir)
+  with same datadir). In this mode, `QMUD_HOME` must be explicitly set in process environment.
 - `--dump-lua-api <output-dir>`: Export Lua API inventory to the given directory and exit.
 
 ## Reload QMud (Copyover-style)

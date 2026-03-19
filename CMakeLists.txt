@@ -164,6 +164,7 @@ set(QMUD_SOURCES
         UpdateCheckUtils.cpp
         ReloadPlannerUtils.cpp
         ReloadStateUtils.cpp
+        Environment.cpp
         Accelerators.cpp
         AliasMatchUtils.cpp
         CommandPatternUtils.cpp
@@ -231,6 +232,7 @@ set(QMUD_HEADERS
         MainFrame.h
         MainFrameActionUtils.h
         AppController.h
+        Environment.h
         ReloadPlannerUtils.h
         ReloadRecoveryUtils.h
         ReloadStateUtils.h
