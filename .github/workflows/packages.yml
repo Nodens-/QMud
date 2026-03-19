@@ -51,14 +51,35 @@ jobs:
             command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
           done
 
-      - name: Resolve preinstalled Qt 6.10.2
+      - name: Resolve preinstalled host Qt 6
         run: |
-          QT_ROOT="${QT_ROOT:-/opt/Qt/6.10.2/gcc_64}"
-          if [ ! -d "$QT_ROOT/lib/cmake/Qt6" ]; then
-            echo "Qt 6.10.2 not found at $QT_ROOT (expected $QT_ROOT/lib/cmake/Qt6)." >&2
+          set -euo pipefail
+          QT6_CMAKE_DIR=""
+          if [ -n "${QT_ROOT:-}" ]; then
+            if [ -d "$QT_ROOT/lib/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib/cmake/Qt6"
+            elif [ -d "$QT_ROOT/lib64/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib64/cmake/Qt6"
+            else
+              echo "QT_ROOT is set but Qt6 CMake package was not found under $QT_ROOT." >&2
+              exit 1
+            fi
+          else
+            QT6_CONFIG_FILE="$(find /opt/Qt /usr/lib64 /usr/lib -type f -path '*/cmake/Qt6/Qt6Config.cmake' 2>/dev/null | sort | head -n 1 || true)"
+            if [ -z "$QT6_CONFIG_FILE" ]; then
+              echo "Failed to locate Qt6Config.cmake on runner. Install Qt6 development packages or set QT_ROOT." >&2
+              exit 1
+            fi
+            QT6_CMAKE_DIR="$(dirname "$QT6_CONFIG_FILE")"
+          fi
+
+          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
+          if [ ! -d "$QT6_CMAKE_DIR" ]; then
+            echo "Resolved Qt6 CMake directory is invalid: $QT6_CMAKE_DIR" >&2
             exit 1
           fi
           echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+          echo "QT6_CMAKE_DIR=$QT6_CMAKE_DIR" >> "$GITHUB_ENV"
           echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
 
       - name: Resolve container executable for CMake targets
@@ -97,6 +118,7 @@ jobs:
           cmake -S . -B cmake-build-release -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DQt6_DIR="$QT6_CMAKE_DIR" \
             -DQMUD_CI_BUILD=${{ startsWith(github.ref, 'refs/tags/v') && 'OFF' || 'ON' }} \
             -DQMUD_APPIMAGE_VERSION="$QMUD_PACKAGE_VERSION" \
             -DQMUD_DOCKER_EXECUTABLE="$QMUD_DOCKER_EXECUTABLE" \
