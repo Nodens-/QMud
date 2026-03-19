@@ -3065,21 +3065,37 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 	                        !mods.testFlag(Qt::ShiftModifier) && !mods.testFlag(Qt::MetaModifier);
 	const bool hasOnlyCtrl = mods.testFlag(Qt::ControlModifier) && !mods.testFlag(Qt::AltModifier) &&
 	                         !mods.testFlag(Qt::ShiftModifier) && !mods.testFlag(Qt::MetaModifier);
+	const bool hasOnlyShift = mods.testFlag(Qt::ShiftModifier) && !mods.testFlag(Qt::ControlModifier) &&
+	                          !mods.testFlag(Qt::AltModifier) && !mods.testFlag(Qt::MetaModifier);
 	const bool altEnter =
 	    hasOnlyAlt && (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter);
-	const bool ctrlG = hasOnlyCtrl && keyEvent->key() == Qt::Key_G;
+	const bool ctrlG      = hasOnlyCtrl && keyEvent->key() == Qt::Key_G;
+	const bool shiftLeft  = hasOnlyShift && keyEvent->key() == Qt::Key_Left;
+	const bool shiftRight = hasOnlyShift && keyEvent->key() == Qt::Key_Right;
 
-	if (!altEnter && !ctrlG)
+	if (!altEnter && !ctrlG && !shiftLeft && !shiftRight)
 		return QMainWindow::eventFilter(watched, event);
 
 	if (event->type() == QEvent::ShortcutOverride)
 	{
+		if (shiftLeft || shiftRight)
+		{
+			if (QApplication::activeModalWidget())
+				return QMainWindow::eventFilter(watched, event);
+			if (!m_mdiArea)
+				return QMainWindow::eventFilter(watched, event);
+			m_mdiTabs.updateTabs();
+			if (m_mdiTabs.count() < 2)
+				return QMainWindow::eventFilter(watched, event);
+		}
 		keyEvent->accept();
 		return true;
 	}
 
 	if (QApplication::activeModalWidget())
 	{
+		if (shiftLeft || shiftRight)
+			return QMainWindow::eventFilter(watched, event);
 		keyEvent->accept();
 		return true;
 	}
@@ -3090,7 +3106,13 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 		return true;
 	}
 
-	if (triggerWorldPreferencesFromShortcut())
+	if ((altEnter || ctrlG) && triggerWorldPreferencesFromShortcut())
+	{
+		keyEvent->accept();
+		return true;
+	}
+
+	if ((shiftLeft || shiftRight) && triggerAdjacentMdiTabFromShortcut(shiftRight ? 1 : -1))
 	{
 		keyEvent->accept();
 		return true;
@@ -3131,6 +3153,35 @@ bool MainWindow::triggerWorldPreferencesFromShortcut()
 	}
 
 	emit commandTriggered(QStringLiteral("Preferences"));
+	return true;
+}
+
+bool MainWindow::triggerAdjacentMdiTabFromShortcut(const int step)
+{
+	if (!m_mdiArea || step == 0)
+		return false;
+
+	m_mdiTabs.updateTabs();
+
+	const int tabCount = m_mdiTabs.count();
+	if (tabCount < 2)
+		return false;
+
+	int currentIndex = m_mdiTabs.currentIndex();
+	if (currentIndex < 0 || currentIndex >= tabCount)
+		currentIndex = 0;
+
+	const int normalizedStep = step > 0 ? 1 : -1;
+	const int nextIndex      = (currentIndex + normalizedStep + tabCount) % tabCount;
+	if (nextIndex == currentIndex)
+		return false;
+
+	m_mdiTabs.setCurrentIndex(nextIndex);
+	if (QMdiSubWindow *target = m_mdiArea->activeSubWindow())
+	{
+		target->show();
+		target->setFocus();
+	}
 	return true;
 }
 
