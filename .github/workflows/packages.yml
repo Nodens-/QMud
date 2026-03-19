@@ -92,26 +92,38 @@ jobs:
           echo "QMUD_DOCKER_EXECUTABLE=$CONTAINER_BIN" >> "$GITHUB_ENV"
           "$CONTAINER_BIN" --version
 
-      - name: Build macOS cross image
-        run: |
-          podman build \
-            --file tools/docker/macos-qt610/Dockerfile \
-            --tag qmud-macos-builder:qt6.10 \
-            tools/docker/macos-qt610
-
       - name: Build AppImage image
         run: |
-          podman build \
-            --file tools/docker/appimage-qt610/Dockerfile \
-            --tag qmud-appimage-builder:qt6.10 \
-            tools/docker/appimage-qt610
+          if podman image exists qmud-appimage-builder:qt6.10; then
+            echo "Image qmud-appimage-builder:qt6.10 already exists, skipping build."
+          else
+            podman build \
+              --file tools/docker/appimage-qt610/Dockerfile \
+              --tag qmud-appimage-builder:qt6.10 \
+              tools/docker/appimage-qt610
+          fi
+
+      - name: Build macOS cross image
+        run: |
+          if podman image exists qmud-macos-builder:qt6.10; then
+            echo "Image qmud-macos-builder:qt6.10 already exists, skipping build."
+          else
+            podman build \
+              --file tools/docker/macos-qt610/Dockerfile \
+              --tag qmud-macos-builder:qt6.10 \
+              tools/docker/macos-qt610
+          fi
 
       - name: Build Windows cross image
         run: |
-          podman build \
-            --file tools/docker/windows-qt610/Dockerfile \
-            --tag qmud-windows-builder:qt6.10 \
-            tools/docker/windows-qt610
+          if podman image exists qmud-windows-builder:qt6.10; then
+            echo "Image qmud-windows-builder:qt6.10 already exists, skipping build."
+          else
+            podman build \
+              --file tools/docker/windows-qt610/Dockerfile \
+              --tag qmud-windows-builder:qt6.10 \
+              tools/docker/windows-qt610
+          fi
 
       - name: Configure CMake
         run: |
