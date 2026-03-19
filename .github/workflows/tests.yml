@@ -74,7 +74,7 @@ jobs:
 
       - name: Build
         run: |
-          CCACHE_DISABLE=1 cmake --build cmake-build-release -j"$(nproc)"
+          CCACHE_DISABLE=1 cmake --build cmake-build-release -j 6
 
       - name: Run quick test suite
         run: |
@@ -160,7 +160,7 @@ jobs:
 
       - name: Build
         run: |
-          CCACHE_DISABLE=1 cmake --build cmake-build-release -j"$(nproc)"
+          CCACHE_DISABLE=1 cmake --build cmake-build-release -j 6
 
       - name: Run full test suite
         run: |
@@ -249,7 +249,7 @@ jobs:
 
       - name: Build
         run: |
-          CCACHE_DISABLE=1 cmake --build cmake-build-coverage -j"$(nproc)"
+          CCACHE_DISABLE=1 cmake --build cmake-build-coverage -j 6
 
       - name: Run tests for coverage
         run: |

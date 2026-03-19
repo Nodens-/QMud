@@ -107,4 +107,4 @@ chmod 0755 "$LINUXDEPLOY_PLUGIN_APPIMAGE"
   -DQMUD_SYSTEM_SOCKET_CORE_SO="$SOCKET_CORE_SO" \
   -DQMUD_SYSTEM_MIME_CORE_SO="$MIME_CORE_SO"
 
-CCACHE_DISABLE=1 cmake --build "$BUILD_DIR" --target AppImage -j"$(nproc)"
+CCACHE_DISABLE=1 cmake --build "$BUILD_DIR" --target AppImage -j 6

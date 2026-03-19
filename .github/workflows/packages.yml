@@ -1,12 +1,14 @@
 name: Packages
 
 on:
+  workflow_run:
+    workflows:
+      - Tests
+    types:
+      - completed
   push:
-    branches:
-      - main
     tags:
       - "v*"
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -15,16 +17,24 @@ permissions:
 jobs:
   build-packages:
     name: Build AppImage / macOS / Windows packages
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'push'))
     runs-on: [self-hosted, primary]
     timeout-minutes: 180
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - name: Resolve package version metadata
         run: |
           set -euo pipefail
+
+          SOURCE_SHA="${GITHUB_SHA}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_run" ]]; then
+            SOURCE_SHA="${{ github.event.workflow_run.head_sha }}"
+          fi
 
           VERSION_LINE="$(grep -F -m1 'kVersionString[]' src/Version.h || true)"
           BASE_VERSION="${VERSION_LINE#*\"}"
@@ -34,7 +44,7 @@ jobs:
             exit 1
           fi
 
-          SHORT_SHA="${GITHUB_SHA::7}"
+          SHORT_SHA="${SOURCE_SHA::7}"
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             PACKAGE_VERSION="$BASE_VERSION"
           else
@@ -141,15 +151,15 @@ jobs:
 
       - name: Build AppImage
         run: |
-          CCACHE_DISABLE=1 cmake --build cmake-build-release --target AppImageDocker -j"$(nproc)"
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target AppImageDocker -j 6
 
       - name: Build macOS package
         run: |
-          CCACHE_DISABLE=1 cmake --build cmake-build-release --target MacDocker
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target MacDocker -j 6
 
       - name: Build Windows package
         run: |
-          CCACHE_DISABLE=1 cmake --build cmake-build-release --target WinDocker
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target WinDocker -j 6
 
       - name: Normalize packaged asset filenames
         run: |
@@ -231,7 +241,7 @@ jobs:
   publish-ci-release:
     name: Publish rolling CI prerelease
     needs: build-packages
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main')
     runs-on: [self-hosted, primary]
     permissions:
       contents: write
@@ -241,6 +251,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - name: Resolve base version from Version.h
         id: version
@@ -262,10 +273,14 @@ jobs:
 
       - name: Move rolling CI tag to current commit
         run: |
+          SOURCE_SHA="${GITHUB_SHA}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_run" ]]; then
+            SOURCE_SHA="${{ github.event.workflow_run.head_sha }}"
+          fi
           CI_TAG="ci-${GITHUB_REF_NAME}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "${CI_TAG}" "${GITHUB_SHA}"
+          git tag -f "${CI_TAG}" "${SOURCE_SHA}"
           git push origin "refs/tags/${CI_TAG}" --force
 
       - name: Publish CI prerelease assets
