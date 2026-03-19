@@ -101,7 +101,7 @@ fi
   -DQMUD_BC_PROVIDER=BUNDLED \
   -DQMUD_LUASOCKET_PROVIDER=SYSTEM
 
-cmake --build "$BUILD_DIR" --target QMud
+cmake --build "$BUILD_DIR" --target QMud -j 6
 
 QMUD_EXE="$(find "$BUILD_DIR" -maxdepth 4 -type f -name 'QMud.exe' | sort | head -n 1)"
 if [ -z "$QMUD_EXE" ]; then

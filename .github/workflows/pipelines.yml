@@ -1,0 +1,725 @@
+name: Pipelines
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quick-tests:
+    name: PR/Push quick suite (exclude slow)
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
+    runs-on: [self-hosted, primary]
+    timeout-minutes: 60
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify preinstalled host build dependencies
+        run: |
+          set -euo pipefail
+          for tool in cmake ninja ctest python3 pkg-config gcc g++; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+          done
+
+      - name: Resolve preinstalled host Qt 6
+        run: |
+          set -euo pipefail
+          QT6_CMAKE_DIR=""
+          if [ -n "${QT_ROOT:-}" ]; then
+            if [ -d "$QT_ROOT/lib/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib/cmake/Qt6"
+            elif [ -d "$QT_ROOT/lib64/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib64/cmake/Qt6"
+            else
+              echo "QT_ROOT is set but Qt6 CMake package was not found under $QT_ROOT." >&2
+              exit 1
+            fi
+          else
+            QT6_CONFIG_FILE="$(find /opt/Qt /usr/lib64 /usr/lib -type f -path '*/cmake/Qt6/Qt6Config.cmake' 2>/dev/null | sort | head -n 1 || true)"
+            if [ -z "$QT6_CONFIG_FILE" ]; then
+              echo "Failed to locate Qt6Config.cmake on runner. Install Qt6 development packages or set QT_ROOT." >&2
+              exit 1
+            fi
+            QT6_CMAKE_DIR="$(dirname "$QT6_CONFIG_FILE")"
+          fi
+
+          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
+          if [ ! -d "$QT6_CMAKE_DIR" ]; then
+            echo "Resolved Qt6 CMake directory is invalid: $QT6_CMAKE_DIR" >&2
+            exit 1
+          fi
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+          echo "QT6_CMAKE_DIR=$QT6_CMAKE_DIR" >> "$GITHUB_ENV"
+          echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
+
+      - name: Configure CMake
+        run: |
+          CCACHE_DISABLE=1 cmake -S . -B cmake-build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DQt6_DIR="$QT6_CMAKE_DIR" \
+            -DQMUD_ENABLE_TESTING=ON \
+            -DQMUD_ENABLE_GUI_TESTS=ON
+
+      - name: Build
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release -j 6
+
+      - name: Run quick test suite
+        run: |
+          ctest --test-dir cmake-build-release --output-on-failure --label-exclude slow
+
+      - name: Upload CTest logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-quick
+          if-no-files-found: ignore
+          path: |
+            cmake-build-release/Testing/Temporary/*
+            cmake-build-release/Testing/**/*.xml
+
+      - name: Upload failing test executables
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qtest-binaries-quick
+          if-no-files-found: ignore
+          path: |
+            cmake-build-release/tests/tst_*
+
+  full-tests:
+    name: Scheduled/manual full suite
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, primary]
+    timeout-minutes: 90
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify preinstalled host build dependencies
+        run: |
+          set -euo pipefail
+          for tool in cmake ninja ctest python3 pkg-config gcc g++; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+          done
+
+      - name: Resolve preinstalled host Qt 6
+        run: |
+          set -euo pipefail
+          QT6_CMAKE_DIR=""
+          if [ -n "${QT_ROOT:-}" ]; then
+            if [ -d "$QT_ROOT/lib/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib/cmake/Qt6"
+            elif [ -d "$QT_ROOT/lib64/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib64/cmake/Qt6"
+            else
+              echo "QT_ROOT is set but Qt6 CMake package was not found under $QT_ROOT." >&2
+              exit 1
+            fi
+          else
+            QT6_CONFIG_FILE="$(find /opt/Qt /usr/lib64 /usr/lib -type f -path '*/cmake/Qt6/Qt6Config.cmake' 2>/dev/null | sort | head -n 1 || true)"
+            if [ -z "$QT6_CONFIG_FILE" ]; then
+              echo "Failed to locate Qt6Config.cmake on runner. Install Qt6 development packages or set QT_ROOT." >&2
+              exit 1
+            fi
+            QT6_CMAKE_DIR="$(dirname "$QT6_CONFIG_FILE")"
+          fi
+
+          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
+          if [ ! -d "$QT6_CMAKE_DIR" ]; then
+            echo "Resolved Qt6 CMake directory is invalid: $QT6_CMAKE_DIR" >&2
+            exit 1
+          fi
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+          echo "QT6_CMAKE_DIR=$QT6_CMAKE_DIR" >> "$GITHUB_ENV"
+          echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
+
+      - name: Configure CMake
+        run: |
+          CCACHE_DISABLE=1 cmake -S . -B cmake-build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DQt6_DIR="$QT6_CMAKE_DIR" \
+            -DQMUD_ENABLE_TESTING=ON \
+            -DQMUD_ENABLE_GUI_TESTS=ON
+
+      - name: Build
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release -j 6
+
+      - name: Run full test suite
+        run: |
+          ctest --test-dir cmake-build-release --output-on-failure
+
+      - name: Upload CTest logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-full
+          if-no-files-found: ignore
+          path: |
+            cmake-build-release/Testing/Temporary/*
+            cmake-build-release/Testing/**/*.xml
+
+      - name: Upload failing test executables
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qtest-binaries-full
+          if-no-files-found: ignore
+          path: |
+            cmake-build-release/tests/tst_*
+
+  coverage:
+    name: Manual coverage (llvm/gcov)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, primary]
+    timeout-minutes: 120
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify preinstalled host build dependencies
+        run: |
+          set -euo pipefail
+          for tool in cmake ninja ctest python3 pkg-config gcc g++ lcov genhtml; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+          done
+
+      - name: Resolve preinstalled host Qt 6
+        run: |
+          set -euo pipefail
+          QT6_CMAKE_DIR=""
+          if [ -n "${QT_ROOT:-}" ]; then
+            if [ -d "$QT_ROOT/lib/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib/cmake/Qt6"
+            elif [ -d "$QT_ROOT/lib64/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib64/cmake/Qt6"
+            else
+              echo "QT_ROOT is set but Qt6 CMake package was not found under $QT_ROOT." >&2
+              exit 1
+            fi
+          else
+            QT6_CONFIG_FILE="$(find /opt/Qt /usr/lib64 /usr/lib -type f -path '*/cmake/Qt6/Qt6Config.cmake' 2>/dev/null | sort | head -n 1 || true)"
+            if [ -z "$QT6_CONFIG_FILE" ]; then
+              echo "Failed to locate Qt6Config.cmake on runner. Install Qt6 development packages or set QT_ROOT." >&2
+              exit 1
+            fi
+            QT6_CMAKE_DIR="$(dirname "$QT6_CONFIG_FILE")"
+          fi
+
+          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
+          if [ ! -d "$QT6_CMAKE_DIR" ]; then
+            echo "Resolved Qt6 CMake directory is invalid: $QT6_CMAKE_DIR" >&2
+            exit 1
+          fi
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+          echo "QT6_CMAKE_DIR=$QT6_CMAKE_DIR" >> "$GITHUB_ENV"
+          echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
+
+      - name: Configure CMake (coverage)
+        run: |
+          CCACHE_DISABLE=1 cmake -S . -B cmake-build-coverage -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DQt6_DIR="$QT6_CMAKE_DIR" \
+            -DQMUD_ENABLE_TESTING=ON \
+            -DQMUD_ENABLE_GUI_TESTS=ON \
+            -DCMAKE_C_FLAGS="--coverage" \
+            -DCMAKE_CXX_FLAGS="--coverage" \
+            -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+
+      - name: Build
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-coverage -j 6
+
+      - name: Run tests for coverage
+        run: |
+          ctest --test-dir cmake-build-coverage --output-on-failure --label-exclude slow
+
+      - name: Generate coverage report
+        run: |
+          lcov --capture --directory cmake-build-coverage --output-file coverage.info
+          lcov --remove coverage.info '/usr/*' "$RUNNER_TEMP/*" --output-file coverage.filtered.info
+          genhtml coverage.filtered.info --output-directory coverage-html
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-coverage
+          if-no-files-found: error
+          path: |
+            coverage.filtered.info
+            coverage-html/**
+
+  build-packages:
+    name: Build AppImage / macOS / Windows packages (PR/Main)
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: quick-tests
+    runs-on: [self-hosted, primary]
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve package version metadata
+        run: |
+          set -euo pipefail
+
+          VERSION_LINE="$(grep -F -m1 'kVersionString[]' src/Version.h || true)"
+          BASE_VERSION="${VERSION_LINE#*\"}"
+          BASE_VERSION="${BASE_VERSION%%\"*}"
+          if [ -z "$BASE_VERSION" ]; then
+            echo "Failed to resolve kVersionString from src/Version.h" >&2
+            exit 1
+          fi
+
+          SHORT_SHA="${GITHUB_SHA::7}"
+          PACKAGE_VERSION="ci-${SHORT_SHA}"
+
+          echo "QMUD_BASE_VERSION=$BASE_VERSION" >> "$GITHUB_ENV"
+          echo "QMUD_PACKAGE_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Verify preinstalled host build dependencies
+        run: |
+          set -euo pipefail
+          for tool in cmake ninja python3 pkg-config gcc g++ curl patchelf podman; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+          done
+
+      - name: Resolve preinstalled host Qt 6
+        run: |
+          set -euo pipefail
+          QT6_CMAKE_DIR=""
+          if [ -n "${QT_ROOT:-}" ]; then
+            if [ -d "$QT_ROOT/lib/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib/cmake/Qt6"
+            elif [ -d "$QT_ROOT/lib64/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib64/cmake/Qt6"
+            else
+              echo "QT_ROOT is set but Qt6 CMake package was not found under $QT_ROOT." >&2
+              exit 1
+            fi
+          else
+            QT6_CONFIG_FILE="$(find /opt/Qt /usr/lib64 /usr/lib -type f -path '*/cmake/Qt6/Qt6Config.cmake' 2>/dev/null | sort | head -n 1 || true)"
+            if [ -z "$QT6_CONFIG_FILE" ]; then
+              echo "Failed to locate Qt6Config.cmake on runner. Install Qt6 development packages or set QT_ROOT." >&2
+              exit 1
+            fi
+            QT6_CMAKE_DIR="$(dirname "$QT6_CONFIG_FILE")"
+          fi
+
+          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
+          if [ ! -d "$QT6_CMAKE_DIR" ]; then
+            echo "Resolved Qt6 CMake directory is invalid: $QT6_CMAKE_DIR" >&2
+            exit 1
+          fi
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+          echo "QT6_CMAKE_DIR=$QT6_CMAKE_DIR" >> "$GITHUB_ENV"
+          echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve container executable for CMake targets
+        run: |
+          CONTAINER_BIN="$(command -v podman || true)"
+          if [ -z "$CONTAINER_BIN" ]; then
+            echo "podman executable not found on PATH." >&2
+            exit 1
+          fi
+          echo "QMUD_DOCKER_EXECUTABLE=$CONTAINER_BIN" >> "$GITHUB_ENV"
+          "$CONTAINER_BIN" --version
+
+      - name: Build AppImage image
+        run: |
+          if podman image exists qmud-appimage-builder:qt6.10; then
+            echo "Image qmud-appimage-builder:qt6.10 already exists, skipping build."
+          else
+            podman build \
+              --file tools/docker/appimage-qt610/Dockerfile \
+              --tag qmud-appimage-builder:qt6.10 \
+              tools/docker/appimage-qt610
+          fi
+
+      - name: Build macOS cross image
+        run: |
+          if podman image exists qmud-macos-builder:qt6.10; then
+            echo "Image qmud-macos-builder:qt6.10 already exists, skipping build."
+          else
+            podman build \
+              --file tools/docker/macos-qt610/Dockerfile \
+              --tag qmud-macos-builder:qt6.10 \
+              tools/docker/macos-qt610
+          fi
+
+      - name: Build Windows cross image
+        run: |
+          if podman image exists qmud-windows-builder:qt6.10; then
+            echo "Image qmud-windows-builder:qt6.10 already exists, skipping build."
+          else
+            podman build \
+              --file tools/docker/windows-qt610/Dockerfile \
+              --tag qmud-windows-builder:qt6.10 \
+              tools/docker/windows-qt610
+          fi
+
+      - name: Configure CMake
+        run: |
+          cmake -S . -B cmake-build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DQt6_DIR="$QT6_CMAKE_DIR" \
+            -DQMUD_CI_BUILD=ON \
+            -DQMUD_APPIMAGE_VERSION="$QMUD_PACKAGE_VERSION" \
+            -DQMUD_DOCKER_EXECUTABLE="$QMUD_DOCKER_EXECUTABLE" \
+            -DQMUD_ENABLE_APPIMAGE=OFF \
+            -DQMUD_ENABLE_APPIMAGE_DOCKER=ON \
+            -DQMUD_ENABLE_MAC_DOCKER=ON \
+            -DQMUD_ENABLE_WINDOCKER=ON
+
+      - name: Build AppImage
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target AppImageDocker -j 6
+
+      - name: Build macOS package
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target MacDocker -j 6
+
+      - name: Build Windows package
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target WinDocker -j 6
+
+      - name: Normalize packaged asset filenames
+        run: |
+          set -euo pipefail
+
+          MAC_SRC="cmake-build-release/mac-docker-out/QMud.app.zip"
+          MAC_DST="cmake-build-release/mac-docker-out/QMud-${QMUD_PACKAGE_VERSION}-macos.zip"
+          WIN_SRC="cmake-build-release/windows-docker-out/QMud.zip"
+          WIN_DST="cmake-build-release/windows-docker-out/QMud-${QMUD_PACKAGE_VERSION}-windows.zip"
+
+          if [ ! -f "$MAC_SRC" ]; then
+            echo "Missing macOS package: $MAC_SRC" >&2
+            exit 1
+          fi
+          if [ ! -f "$WIN_SRC" ]; then
+            echo "Missing Windows package: $WIN_SRC" >&2
+            exit 1
+          fi
+
+          mv -f "$MAC_SRC" "$MAC_DST"
+          mv -f "$WIN_SRC" "$WIN_DST"
+
+          APPIMAGE_FILE="$(find cmake-build-release/appimage-docker-out -maxdepth 1 -type f -name '*.AppImage' | sort | head -n 1)"
+          if [ -z "$APPIMAGE_FILE" ]; then
+            echo "Missing AppImage package in cmake-build-release/appimage-docker-out" >&2
+            exit 1
+          fi
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-appimage
+          if-no-files-found: error
+          path: |
+            cmake-build-release/appimage-docker-out/*.AppImage
+            cmake-build-release/appimage-docker-out/*.AppImage.zsync
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-macos
+          if-no-files-found: error
+          path: |
+            cmake-build-release/mac-docker-out/QMud-*.zip
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-windows
+          if-no-files-found: error
+          path: |
+            cmake-build-release/windows-docker-out/QMud-*.zip
+
+  build-packages-tag:
+    name: Build AppImage / macOS / Windows packages (Tag)
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, primary]
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve package version metadata
+        run: |
+          set -euo pipefail
+
+          VERSION_LINE="$(grep -F -m1 'kVersionString[]' src/Version.h || true)"
+          BASE_VERSION="${VERSION_LINE#*\"}"
+          BASE_VERSION="${BASE_VERSION%%\"*}"
+          if [ -z "$BASE_VERSION" ]; then
+            echo "Failed to resolve kVersionString from src/Version.h" >&2
+            exit 1
+          fi
+
+          echo "QMUD_BASE_VERSION=$BASE_VERSION" >> "$GITHUB_ENV"
+          echo "QMUD_PACKAGE_VERSION=$BASE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Verify preinstalled host build dependencies
+        run: |
+          set -euo pipefail
+          for tool in cmake ninja python3 pkg-config gcc g++ curl patchelf podman; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+          done
+
+      - name: Resolve preinstalled host Qt 6
+        run: |
+          set -euo pipefail
+          QT6_CMAKE_DIR=""
+          if [ -n "${QT_ROOT:-}" ]; then
+            if [ -d "$QT_ROOT/lib/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib/cmake/Qt6"
+            elif [ -d "$QT_ROOT/lib64/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib64/cmake/Qt6"
+            else
+              echo "QT_ROOT is set but Qt6 CMake package was not found under $QT_ROOT." >&2
+              exit 1
+            fi
+          else
+            QT6_CONFIG_FILE="$(find /opt/Qt /usr/lib64 /usr/lib -type f -path '*/cmake/Qt6/Qt6Config.cmake' 2>/dev/null | sort | head -n 1 || true)"
+            if [ -z "$QT6_CONFIG_FILE" ]; then
+              echo "Failed to locate Qt6Config.cmake on runner. Install Qt6 development packages or set QT_ROOT." >&2
+              exit 1
+            fi
+            QT6_CMAKE_DIR="$(dirname "$QT6_CONFIG_FILE")"
+          fi
+
+          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
+          if [ ! -d "$QT6_CMAKE_DIR" ]; then
+            echo "Resolved Qt6 CMake directory is invalid: $QT6_CMAKE_DIR" >&2
+            exit 1
+          fi
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+          echo "QT6_CMAKE_DIR=$QT6_CMAKE_DIR" >> "$GITHUB_ENV"
+          echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve container executable for CMake targets
+        run: |
+          CONTAINER_BIN="$(command -v podman || true)"
+          if [ -z "$CONTAINER_BIN" ]; then
+            echo "podman executable not found on PATH." >&2
+            exit 1
+          fi
+          echo "QMUD_DOCKER_EXECUTABLE=$CONTAINER_BIN" >> "$GITHUB_ENV"
+          "$CONTAINER_BIN" --version
+
+      - name: Build AppImage image
+        run: |
+          if podman image exists qmud-appimage-builder:qt6.10; then
+            echo "Image qmud-appimage-builder:qt6.10 already exists, skipping build."
+          else
+            podman build \
+              --file tools/docker/appimage-qt610/Dockerfile \
+              --tag qmud-appimage-builder:qt6.10 \
+              tools/docker/appimage-qt610
+          fi
+
+      - name: Build macOS cross image
+        run: |
+          if podman image exists qmud-macos-builder:qt6.10; then
+            echo "Image qmud-macos-builder:qt6.10 already exists, skipping build."
+          else
+            podman build \
+              --file tools/docker/macos-qt610/Dockerfile \
+              --tag qmud-macos-builder:qt6.10 \
+              tools/docker/macos-qt610
+          fi
+
+      - name: Build Windows cross image
+        run: |
+          if podman image exists qmud-windows-builder:qt6.10; then
+            echo "Image qmud-windows-builder:qt6.10 already exists, skipping build."
+          else
+            podman build \
+              --file tools/docker/windows-qt610/Dockerfile \
+              --tag qmud-windows-builder:qt6.10 \
+              tools/docker/windows-qt610
+          fi
+
+      - name: Configure CMake
+        run: |
+          cmake -S . -B cmake-build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DQt6_DIR="$QT6_CMAKE_DIR" \
+            -DQMUD_CI_BUILD=OFF \
+            -DQMUD_APPIMAGE_VERSION="$QMUD_PACKAGE_VERSION" \
+            -DQMUD_DOCKER_EXECUTABLE="$QMUD_DOCKER_EXECUTABLE" \
+            -DQMUD_ENABLE_APPIMAGE=OFF \
+            -DQMUD_ENABLE_APPIMAGE_DOCKER=ON \
+            -DQMUD_ENABLE_MAC_DOCKER=ON \
+            -DQMUD_ENABLE_WINDOCKER=ON
+
+      - name: Build AppImage
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target AppImageDocker -j 6
+
+      - name: Build macOS package
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target MacDocker -j 6
+
+      - name: Build Windows package
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target WinDocker -j 6
+
+      - name: Normalize packaged asset filenames
+        run: |
+          set -euo pipefail
+
+          MAC_SRC="cmake-build-release/mac-docker-out/QMud.app.zip"
+          MAC_DST="cmake-build-release/mac-docker-out/QMud-${QMUD_PACKAGE_VERSION}-macos.zip"
+          WIN_SRC="cmake-build-release/windows-docker-out/QMud.zip"
+          WIN_DST="cmake-build-release/windows-docker-out/QMud-${QMUD_PACKAGE_VERSION}-windows.zip"
+
+          if [ ! -f "$MAC_SRC" ]; then
+            echo "Missing macOS package: $MAC_SRC" >&2
+            exit 1
+          fi
+          if [ ! -f "$WIN_SRC" ]; then
+            echo "Missing Windows package: $WIN_SRC" >&2
+            exit 1
+          fi
+
+          mv -f "$MAC_SRC" "$MAC_DST"
+          mv -f "$WIN_SRC" "$WIN_DST"
+
+          APPIMAGE_FILE="$(find cmake-build-release/appimage-docker-out -maxdepth 1 -type f -name '*.AppImage' | sort | head -n 1)"
+          if [ -z "$APPIMAGE_FILE" ]; then
+            echo "Missing AppImage package in cmake-build-release/appimage-docker-out" >&2
+            exit 1
+          fi
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-appimage
+          if-no-files-found: error
+          path: |
+            cmake-build-release/appimage-docker-out/*.AppImage
+            cmake-build-release/appimage-docker-out/*.AppImage.zsync
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-macos
+          if-no-files-found: error
+          path: |
+            cmake-build-release/mac-docker-out/QMud-*.zip
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-windows
+          if-no-files-found: error
+          path: |
+            cmake-build-release/windows-docker-out/QMud-*.zip
+
+  publish-release:
+    name: Publish GitHub release assets
+    needs: build-packages-tag
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, primary]
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: qmud-*
+          path: release-assets
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-assets/qmud-appimage/*.AppImage
+            release-assets/qmud-appimage/*.AppImage.zsync
+            release-assets/qmud-macos/*.zip
+            release-assets/qmud-windows/*.zip
+
+  publish-ci-release:
+    name: Publish rolling CI prerelease
+    needs: build-packages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, primary]
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve base version from Version.h
+        id: version
+        run: |
+          VERSION_LINE="$(grep -F -m1 'kVersionString[]' src/Version.h || true)"
+          BASE_VERSION="${VERSION_LINE#*\"}"
+          BASE_VERSION="${BASE_VERSION%%\"*}"
+          if [ -z "$BASE_VERSION" ]; then
+            echo "Failed to resolve kVersionString from src/Version.h" >&2
+            exit 1
+          fi
+          echo "base=$BASE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: qmud-*
+          path: release-assets
+
+      - name: Move rolling CI tag to current commit
+        run: |
+          CI_TAG="ci-${GITHUB_REF_NAME}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "${CI_TAG}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${CI_TAG}" --force
+
+      - name: Publish CI prerelease assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-${{ github.ref_name }}
+          name: QMud v${{ steps.version.outputs.base }}-ci
+          prerelease: true
+          make_latest: false
+          generate_release_notes: false
+          overwrite_files: true
+          files: |
+            release-assets/qmud-appimage/*.AppImage
+            release-assets/qmud-appimage/*.AppImage.zsync
+            release-assets/qmud-macos/*.zip
+            release-assets/qmud-windows/*.zip

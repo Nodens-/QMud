@@ -131,7 +131,7 @@ fi
   -DQMUD_BC_PROVIDER=BUNDLED \
   -DQMUD_LUASOCKET_PROVIDER=SYSTEM
 
-cmake --build "$BUILD_DIR" --target MacApp
+cmake --build "$BUILD_DIR" --target MacApp -j 6
 
 APP_STAGE_DIR="$BUILD_DIR/macapp-out/QMud.app"
 APP_MACOS_DIR="$APP_STAGE_DIR/Contents/MacOS"

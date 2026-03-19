@@ -1786,6 +1786,128 @@ if (UNIX AND NOT APPLE)
         endif ()
     endif ()
 
+    option(QMUD_ENABLE_APPIMAGE_DOCKER "Enable AppImageDocker target using a prebuilt custom Linux builder image" ON)
+    if (QMUD_ENABLE_APPIMAGE_DOCKER)
+        set(QMUD_APPIMAGE_DOCKER_IMAGE "qmud-appimage-builder:qt6.10" CACHE STRING
+                "Docker image for AppImageDocker (build from tools/docker/appimage-qt610/Dockerfile)")
+        set(QMUD_APPIMAGE_DOCKER_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/appimage-docker-build" CACHE PATH
+                "Host build directory mounted into container for AppImageDocker")
+        set(QMUD_APPIMAGE_DOCKER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/appimage-docker-out" CACHE PATH
+                "Host output directory for AppImageDocker artifacts")
+        set(QMUD_APPIMAGE_DOCKER_BUILD_TYPE "Release" CACHE STRING
+                "CMake build type used inside AppImageDocker container")
+        set(QMUD_APPIMAGE_DOCKER_QT_PREFIX "/opt/Qt/6.10.2/gcc_64" CACHE PATH
+                "Qt Linux prefix inside AppImageDocker image")
+        set(QMUD_APPIMAGE_DOCKER_LINUXDEPLOY_PLUGIN_APPIMAGE_URL
+                "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-appimage-x86_64.AppImage"
+                CACHE STRING "Download URL for linuxdeploy-plugin-appimage when missing from AppImageDocker build dir")
+        set(QMUD_APPIMAGE_DOCKER_VERSION_DEFAULT "dev")
+        if (DEFINED QMUD_APPIMAGE_VERSION)
+            set(QMUD_APPIMAGE_DOCKER_VERSION_DEFAULT "${QMUD_APPIMAGE_VERSION}")
+        endif ()
+        set(QMUD_APPIMAGE_DOCKER_VERSION "${QMUD_APPIMAGE_DOCKER_VERSION_DEFAULT}" CACHE STRING
+                "Version string embedded in AppImage metadata when building via AppImageDocker")
+        unset(QMUD_APPIMAGE_DOCKER_VERSION_DEFAULT)
+        option(QMUD_APPIMAGE_DOCKER_DISABLE_SELINUX
+                "Disable SELinux labeling for AppImageDocker container runs (--security-opt label=disable)" ON)
+        option(QMUD_APPIMAGE_DOCKER_RUN_AS_HOST_USER
+                "Run AppImageDocker container with host UID/GID to avoid root-owned output files" ON)
+        set(QMUD_APPIMAGE_DOCKER_HOST_UID "$ENV{UID}" CACHE STRING "Host UID for AppImageDocker --user")
+        set(QMUD_APPIMAGE_DOCKER_HOST_GID "" CACHE STRING "Host GID for AppImageDocker --user")
+
+        if (QMUD_APPIMAGE_DOCKER_DISABLE_SELINUX)
+            set(QMUD_APPIMAGE_DOCKER_SECURITY_OPT --security-opt label=disable)
+        else ()
+            set(QMUD_APPIMAGE_DOCKER_SECURITY_OPT)
+        endif ()
+
+        if (QMUD_APPIMAGE_DOCKER_RUN_AS_HOST_USER)
+            if (NOT QMUD_APPIMAGE_DOCKER_HOST_UID)
+                execute_process(
+                        COMMAND id -u
+                        OUTPUT_VARIABLE QMUD_APPIMAGE_DOCKER_HOST_UID
+                        OUTPUT_STRIP_TRAILING_WHITESPACE)
+            endif ()
+            if (NOT QMUD_APPIMAGE_DOCKER_HOST_GID)
+                execute_process(
+                        COMMAND id -g
+                        OUTPUT_VARIABLE QMUD_APPIMAGE_DOCKER_HOST_GID
+                        OUTPUT_STRIP_TRAILING_WHITESPACE)
+            endif ()
+            if (NOT QMUD_APPIMAGE_DOCKER_HOST_UID)
+                set(QMUD_APPIMAGE_DOCKER_HOST_UID 1000)
+            endif ()
+            if (NOT QMUD_APPIMAGE_DOCKER_HOST_GID)
+                set(QMUD_APPIMAGE_DOCKER_HOST_GID 1000)
+            endif ()
+            set(QMUD_APPIMAGE_DOCKER_HOST_UID "${QMUD_APPIMAGE_DOCKER_HOST_UID}" CACHE STRING
+                    "Host UID for AppImageDocker --user" FORCE)
+            set(QMUD_APPIMAGE_DOCKER_HOST_GID "${QMUD_APPIMAGE_DOCKER_HOST_GID}" CACHE STRING
+                    "Host GID for AppImageDocker --user" FORCE)
+            set(QMUD_APPIMAGE_DOCKER_USER_ARGS --user ${QMUD_APPIMAGE_DOCKER_HOST_UID}:${QMUD_APPIMAGE_DOCKER_HOST_GID})
+        else ()
+            set(QMUD_APPIMAGE_DOCKER_USER_ARGS)
+        endif ()
+
+        if (NOT DEFINED QMUD_DOCKER_EXECUTABLE OR QMUD_DOCKER_EXECUTABLE STREQUAL "")
+            set(QMUD_DOCKER_EXECUTABLE "docker")
+        endif ()
+
+        set(QMUD_APPIMAGE_DOCKER_SCRIPT "${CMAKE_SOURCE_DIR}/tools/scripts/appimage_docker_build.sh")
+
+        find_program(QMUD_DOCKER_EXECUTABLE_FOUND_APPIMAGEDOCKER
+                NAMES ${QMUD_DOCKER_EXECUTABLE}
+                NO_CACHE)
+        set(QMUD_APPIMAGE_DOCKER_USERNS_ARGS)
+        if (QMUD_DOCKER_EXECUTABLE_FOUND_APPIMAGEDOCKER AND QMUD_APPIMAGE_DOCKER_RUN_AS_HOST_USER)
+            execute_process(
+                    COMMAND ${QMUD_DOCKER_EXECUTABLE_FOUND_APPIMAGEDOCKER} --version
+                    OUTPUT_VARIABLE QMUD_APPIMAGE_DOCKER_VERSION_OUTPUT
+                    ERROR_VARIABLE QMUD_APPIMAGE_DOCKER_VERSION_ERROR
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_STRIP_TRAILING_WHITESPACE
+            )
+            string(TOLOWER "${QMUD_APPIMAGE_DOCKER_VERSION_OUTPUT}\n${QMUD_APPIMAGE_DOCKER_VERSION_ERROR}" QMUD_APPIMAGE_DOCKER_VERSION_TEXT)
+            if (QMUD_APPIMAGE_DOCKER_VERSION_TEXT MATCHES "podman")
+                set(QMUD_APPIMAGE_DOCKER_USERNS_ARGS --userns keep-id)
+                message(STATUS "AppImageDocker: detected podman backend, enabling --userns keep-id for host UID/GID readability")
+            endif ()
+        endif ()
+
+        if (QMUD_DOCKER_EXECUTABLE_FOUND_APPIMAGEDOCKER)
+            add_custom_target(AppImageDocker
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_APPIMAGE_DOCKER_BUILD_DIR}"
+                    COMMAND /bin/chmod 0777 "${QMUD_APPIMAGE_DOCKER_BUILD_DIR}"
+                    COMMAND ${QMUD_DOCKER_EXECUTABLE_FOUND_APPIMAGEDOCKER} run --rm
+                    ${QMUD_APPIMAGE_DOCKER_SECURITY_OPT}
+                    ${QMUD_APPIMAGE_DOCKER_USERNS_ARGS}
+                    ${QMUD_APPIMAGE_DOCKER_USER_ARGS}
+                    -e CCACHE_DISABLE=1
+                    -e QMUD_APPIMAGE_DOCKER_BUILD_TYPE=${QMUD_APPIMAGE_DOCKER_BUILD_TYPE}
+                    -e QMUD_APPIMAGE_DOCKER_QT_PREFIX=${QMUD_APPIMAGE_DOCKER_QT_PREFIX}
+                    -e QMUD_APPIMAGE_VERSION=${QMUD_APPIMAGE_DOCKER_VERSION}
+                    -e QMUD_APPIMAGE_DOCKER_LINUXDEPLOY_PLUGIN_APPIMAGE_URL=${QMUD_APPIMAGE_DOCKER_LINUXDEPLOY_PLUGIN_APPIMAGE_URL}
+                    -v "${CMAKE_SOURCE_DIR}:/home/user/project:ro"
+                    -v "${QMUD_APPIMAGE_DOCKER_BUILD_DIR}:/home/user/build:rw"
+                    "${QMUD_APPIMAGE_DOCKER_IMAGE}"
+                    sh /home/user/project/tools/scripts/appimage_docker_build.sh
+                    COMMAND ${CMAKE_COMMAND} -E rm -rf "${QMUD_APPIMAGE_DOCKER_OUTPUT_DIR}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_APPIMAGE_DOCKER_OUTPUT_DIR}"
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${QMUD_APPIMAGE_DOCKER_BUILD_DIR}/appimage"
+                    "${QMUD_APPIMAGE_DOCKER_OUTPUT_DIR}"
+                    COMMENT "Building AppImage via ${QMUD_APPIMAGE_DOCKER_IMAGE} (AppImageDocker)"
+                    USES_TERMINAL
+            )
+        else ()
+            add_custom_target(AppImageDocker
+                    COMMAND ${CMAKE_COMMAND} -E echo "AppImageDocker requires a docker-compatible executable."
+                    COMMAND ${CMAKE_COMMAND} -E echo "Set QMUD_DOCKER_EXECUTABLE to docker/podman and ensure it is available."
+                    COMMAND ${CMAKE_COMMAND} -E false
+            )
+        endif ()
+    endif ()
+
     if (CMAKE_CONFIGURATION_TYPES)
         set(QMUD_DEPLOY_BUILD_CONFIG_ARGS --config $<CONFIG>)
     else ()
