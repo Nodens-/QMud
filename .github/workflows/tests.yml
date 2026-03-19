@@ -25,35 +25,20 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install host build dependencies
+      - name: Verify preinstalled host build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            lua-json \
-            lua-lpeg \
-            lua-socket \
-            lua5.4 \
-            libgl1-mesa-dev \
-            libpulse0 \
-            liblua5.4-dev \
-            ninja-build \
-            pkg-config \
-            python3-pip
+          set -euo pipefail
+          for tool in cmake ninja ctest python3 pkg-config gcc g++; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+          done
 
-      - name: Install Qt 6.10.2
+      - name: Resolve preinstalled Qt 6.10.2
         run: |
-          python3 -m pip install --upgrade pip setuptools wheel aqtinstall
-          aqt install-qt -O "$RUNNER_TEMP/Qt" linux desktop 6.10.2 linux_gcc_64 -m qtmultimedia
-
-          QT6_CMAKE_DIR="$(find "$RUNNER_TEMP/Qt" -type d -path '*/lib/cmake/Qt6' | sort | head -n 1)"
-          if [ -z "$QT6_CMAKE_DIR" ]; then
-            echo "Failed to locate Qt6 CMake package directory after aqt install." >&2
+          QT_ROOT="${QT_ROOT:-/opt/Qt/6.10.2/gcc_64}"
+          if [ ! -d "$QT_ROOT/lib/cmake/Qt6" ]; then
+            echo "Qt 6.10.2 not found at $QT_ROOT (expected $QT_ROOT/lib/cmake/Qt6)." >&2
             exit 1
           fi
-
-          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
           echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
           echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
 
@@ -104,35 +89,20 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install host build dependencies
+      - name: Verify preinstalled host build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            lua-json \
-            lua-lpeg \
-            lua-socket \
-            lua5.4 \
-            libgl1-mesa-dev \
-            libpulse0 \
-            liblua5.4-dev \
-            ninja-build \
-            pkg-config \
-            python3-pip
+          set -euo pipefail
+          for tool in cmake ninja ctest python3 pkg-config gcc g++; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+          done
 
-      - name: Install Qt 6.10.2
+      - name: Resolve preinstalled Qt 6.10.2
         run: |
-          python3 -m pip install --upgrade pip setuptools wheel aqtinstall
-          aqt install-qt -O "$RUNNER_TEMP/Qt" linux desktop 6.10.2 linux_gcc_64 -m qtmultimedia
-
-          QT6_CMAKE_DIR="$(find "$RUNNER_TEMP/Qt" -type d -path '*/lib/cmake/Qt6' | sort | head -n 1)"
-          if [ -z "$QT6_CMAKE_DIR" ]; then
-            echo "Failed to locate Qt6 CMake package directory after aqt install." >&2
+          QT_ROOT="${QT_ROOT:-/opt/Qt/6.10.2/gcc_64}"
+          if [ ! -d "$QT_ROOT/lib/cmake/Qt6" ]; then
+            echo "Qt 6.10.2 not found at $QT_ROOT (expected $QT_ROOT/lib/cmake/Qt6)." >&2
             exit 1
           fi
-
-          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
           echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
           echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
 
@@ -183,36 +153,20 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install host build dependencies
+      - name: Verify preinstalled host build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            lcov \
-            lua-json \
-            lua-lpeg \
-            lua-socket \
-            lua5.4 \
-            libgl1-mesa-dev \
-            libpulse0 \
-            liblua5.4-dev \
-            ninja-build \
-            pkg-config \
-            python3-pip
+          set -euo pipefail
+          for tool in cmake ninja ctest python3 pkg-config gcc g++ lcov genhtml; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+          done
 
-      - name: Install Qt 6.10.2
+      - name: Resolve preinstalled Qt 6.10.2
         run: |
-          python3 -m pip install --upgrade pip setuptools wheel aqtinstall
-          aqt install-qt -O "$RUNNER_TEMP/Qt" linux desktop 6.10.2 linux_gcc_64 -m qtmultimedia
-
-          QT6_CMAKE_DIR="$(find "$RUNNER_TEMP/Qt" -type d -path '*/lib/cmake/Qt6' | sort | head -n 1)"
-          if [ -z "$QT6_CMAKE_DIR" ]; then
-            echo "Failed to locate Qt6 CMake package directory after aqt install." >&2
+          QT_ROOT="${QT_ROOT:-/opt/Qt/6.10.2/gcc_64}"
+          if [ ! -d "$QT_ROOT/lib/cmake/Qt6" ]; then
+            echo "Qt 6.10.2 not found at $QT_ROOT (expected $QT_ROOT/lib/cmake/Qt6)." >&2
             exit 1
           fi
-
-          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
           echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
           echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
 

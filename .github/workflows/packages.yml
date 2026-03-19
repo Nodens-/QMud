@@ -44,133 +44,20 @@ jobs:
           echo "QMUD_BASE_VERSION=$BASE_VERSION" >> "$GITHUB_ENV"
           echo "QMUD_PACKAGE_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
 
-      - name: Install host build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            curl \
-            lua-json \
-            lua-lpeg \
-            lua-socket \
-            lua5.4 \
-            libgl1-mesa-dev \
-            libpulse0 \
-            liblua5.4-dev \
-            ninja-build \
-            patchelf \
-            pkg-config \
-            python3-pip
-
-      - name: Resolve Lua module shared objects
+      - name: Verify preinstalled host build dependencies
         run: |
           set -euo pipefail
+          for tool in cmake ninja python3 pkg-config gcc g++ curl patchelf podman; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+          done
 
-          find_first() {
-            local pattern="$1"
-            shift
-            for root in "$@"; do
-              [ -n "$root" ] || continue
-              [ -d "$root" ] || continue
-              local found
-              found="$(find "$root" -type f -path "$pattern" | sort | head -n 1)"
-              if [ -n "$found" ]; then
-                printf '%s\n' "$found"
-                return 0
-              fi
-            done
-            return 1
-          }
-
-          LUA_BIN=""
-          if command -v lua5.4 >/dev/null 2>&1; then
-            LUA_BIN="lua5.4"
-          elif command -v lua >/dev/null 2>&1; then
-            LUA_BIN="lua"
-          fi
-
-          lua_find_module() {
-            local module="$1"
-            [ -n "$LUA_BIN" ] || return 0
-            "$LUA_BIN" -e "local p = package.searchpath('${module}', package.cpath); if p then io.write(p) end" 2>/dev/null || true
-          }
-
-          LPEG_SO="$(lua_find_module 'lpeg')"
-          SOCKET_CORE_SO="$(lua_find_module 'socket.core')"
-          MIME_CORE_SO="$(lua_find_module 'mime.core')"
-
-          MULTIARCH_ROOT="/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
-          SEARCH_ROOTS=(
-            "$MULTIARCH_ROOT"
-            /usr/lib
-            /usr/lib64
-            /usr/local/lib
-            /usr/local/lib64
-          )
-
-          if [ -n "$LUA_BIN" ]; then
-            LUA_CPATH="$("$LUA_BIN" -e 'io.write(package.cpath)' 2>/dev/null || true)"
-            while IFS=';' read -r entry; do
-              [ -n "$entry" ] || continue
-              root="$(printf '%s\n' "$entry" | sed -E 's#/\?/core\.so$##; s#/\?\.so$##')"
-              [ -d "$root" ] || continue
-              SEARCH_ROOTS+=("$root")
-            done < <(printf '%s' "$LUA_CPATH")
-          fi
-
-          if [ -z "$LPEG_SO" ]; then
-            LPEG_SO="$(find_first '*/lua/*/lpeg.so' "${SEARCH_ROOTS[@]}" || true)"
-          fi
-          if [ -z "$SOCKET_CORE_SO" ]; then
-            SOCKET_CORE_SO="$(find_first '*/lua/*/socket/core.so' "${SEARCH_ROOTS[@]}" || true)"
-          fi
-          if [ -z "$MIME_CORE_SO" ]; then
-            MIME_CORE_SO="$(find_first '*/lua/*/mime/core.so' "${SEARCH_ROOTS[@]}" || true)"
-          fi
-
-          if [ -z "$LPEG_SO" ] && dpkg -s lua-lpeg >/dev/null 2>&1; then
-            LPEG_SO="$(dpkg -L lua-lpeg | grep -E '/lua/.*/lpeg\.so$' | head -n 1 || true)"
-          fi
-          if [ -z "$SOCKET_CORE_SO" ] && dpkg -s lua-socket >/dev/null 2>&1; then
-            SOCKET_CORE_SO="$(dpkg -L lua-socket | grep -E '/lua/.*/socket/core\.so$' | head -n 1 || true)"
-          fi
-          if [ -z "$MIME_CORE_SO" ] && dpkg -s lua-socket >/dev/null 2>&1; then
-            MIME_CORE_SO="$(dpkg -L lua-socket | grep -E '/lua/.*/mime/core\.so$' | head -n 1 || true)"
-          fi
-
-          if [ -z "$LPEG_SO" ] || [ -z "$SOCKET_CORE_SO" ] || [ -z "$MIME_CORE_SO" ]; then
-            echo "Failed to resolve required Lua module shared objects." >&2
-            echo "lpeg.so=$LPEG_SO" >&2
-            echo "socket/core.so=$SOCKET_CORE_SO" >&2
-            echo "mime/core.so=$MIME_CORE_SO" >&2
-            [ -n "$LUA_BIN" ] && echo "lua.cpath=$("$LUA_BIN" -e 'io.write(package.cpath)' 2>/dev/null || true)" >&2
-            exit 1
-          fi
-
-          QMUD_MODULE_ROOT="$(echo "$LPEG_SO" | sed -E 's#/lua/[^/]+/lpeg\.so$##')"
-          if [ -z "$QMUD_MODULE_ROOT" ] || [ ! -d "$QMUD_MODULE_ROOT" ]; then
-            echo "Failed to derive QMUD_SYSTEM_LUA_MODULES_PREFIX from $LPEG_SO" >&2
-            exit 1
-          fi
-
-          echo "QMUD_SYSTEM_LUA_MODULES_PREFIX=$QMUD_MODULE_ROOT" >> "$GITHUB_ENV"
-          echo "QMUD_SYSTEM_LPEG_SO=$LPEG_SO" >> "$GITHUB_ENV"
-          echo "QMUD_SYSTEM_SOCKET_CORE_SO=$SOCKET_CORE_SO" >> "$GITHUB_ENV"
-          echo "QMUD_SYSTEM_MIME_CORE_SO=$MIME_CORE_SO" >> "$GITHUB_ENV"
-
-      - name: Install Qt 6.10.2
+      - name: Resolve preinstalled Qt 6.10.2
         run: |
-          python3 -m pip install --upgrade pip setuptools wheel aqtinstall
-          aqt install-qt -O "$RUNNER_TEMP/Qt" linux desktop 6.10.2 linux_gcc_64 -m qtmultimedia
-
-          QT6_CMAKE_DIR="$(find "$RUNNER_TEMP/Qt" -type d -path '*/lib/cmake/Qt6' | sort | head -n 1)"
-          if [ -z "$QT6_CMAKE_DIR" ]; then
-            echo "Failed to locate Qt6 CMake package directory after aqt install." >&2
+          QT_ROOT="${QT_ROOT:-/opt/Qt/6.10.2/gcc_64}"
+          if [ ! -d "$QT_ROOT/lib/cmake/Qt6" ]; then
+            echo "Qt 6.10.2 not found at $QT_ROOT (expected $QT_ROOT/lib/cmake/Qt6)." >&2
             exit 1
           fi
-
-          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
           echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
           echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
 
@@ -191,6 +78,13 @@ jobs:
             --tag qmud-macos-builder:qt6.10 \
             tools/docker/macos-qt610
 
+      - name: Build AppImage image
+        run: |
+          podman build \
+            --file tools/docker/appimage-qt610/Dockerfile \
+            --tag qmud-appimage-builder:qt6.10 \
+            tools/docker/appimage-qt610
+
       - name: Build Windows cross image
         run: |
           podman build \
@@ -206,17 +100,14 @@ jobs:
             -DQMUD_CI_BUILD=${{ startsWith(github.ref, 'refs/tags/v') && 'OFF' || 'ON' }} \
             -DQMUD_APPIMAGE_VERSION="$QMUD_PACKAGE_VERSION" \
             -DQMUD_DOCKER_EXECUTABLE="$QMUD_DOCKER_EXECUTABLE" \
-            -DQMUD_ENABLE_APPIMAGE=ON \
+            -DQMUD_ENABLE_APPIMAGE=OFF \
+            -DQMUD_ENABLE_APPIMAGE_DOCKER=ON \
             -DQMUD_ENABLE_MAC_DOCKER=ON \
-            -DQMUD_ENABLE_WINDOCKER=ON \
-            -DQMUD_SYSTEM_LUA_MODULES_PREFIX="$QMUD_SYSTEM_LUA_MODULES_PREFIX" \
-            -DQMUD_SYSTEM_LPEG_SO="$QMUD_SYSTEM_LPEG_SO" \
-            -DQMUD_SYSTEM_SOCKET_CORE_SO="$QMUD_SYSTEM_SOCKET_CORE_SO" \
-            -DQMUD_SYSTEM_MIME_CORE_SO="$QMUD_SYSTEM_MIME_CORE_SO"
+            -DQMUD_ENABLE_WINDOCKER=ON
 
       - name: Build AppImage
         run: |
-          CCACHE_DISABLE=1 cmake --build cmake-build-release --target AppImage -j"$(nproc)"
+          CCACHE_DISABLE=1 cmake --build cmake-build-release --target AppImageDocker -j"$(nproc)"
 
       - name: Build macOS package
         run: |
@@ -247,9 +138,9 @@ jobs:
           mv -f "$MAC_SRC" "$MAC_DST"
           mv -f "$WIN_SRC" "$WIN_DST"
 
-          APPIMAGE_FILE="$(find cmake-build-release/appimage -maxdepth 1 -type f -name '*.AppImage' | sort | head -n 1)"
+          APPIMAGE_FILE="$(find cmake-build-release/appimage-docker-out -maxdepth 1 -type f -name '*.AppImage' | sort | head -n 1)"
           if [ -z "$APPIMAGE_FILE" ]; then
-            echo "Missing AppImage package in cmake-build-release/appimage" >&2
+            echo "Missing AppImage package in cmake-build-release/appimage-docker-out" >&2
             exit 1
           fi
 
@@ -259,8 +150,8 @@ jobs:
           name: qmud-appimage
           if-no-files-found: error
           path: |
-            cmake-build-release/appimage/*.AppImage
-            cmake-build-release/appimage/*.AppImage.zsync
+            cmake-build-release/appimage-docker-out/*.AppImage
+            cmake-build-release/appimage-docker-out/*.AppImage.zsync
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
