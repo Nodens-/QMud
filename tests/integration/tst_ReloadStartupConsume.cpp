@@ -33,7 +33,6 @@ class tst_ReloadStartupConsume : public QObject
 			snapshot.schemaVersion    = 1;
 			snapshot.createdAtUtc     = QDateTime::currentDateTimeUtc();
 			snapshot.reloadToken      = QStringLiteral("integration-token");
-			snapshot.sourcePid        = 1010;
 			snapshot.targetExecutable = QStringLiteral("/tmp/qmud-integration");
 
 			QString error;
@@ -42,7 +41,6 @@ class tst_ReloadStartupConsume : public QObject
 
 			const ReloadStartupValidationInput input{
 			    QStringLiteral("integration-token"),
-			    1010,
 			    QStringLiteral("/tmp/qmud-integration"),
 			};
 			ReloadStateSnapshot parsed;
@@ -68,7 +66,6 @@ class tst_ReloadStartupConsume : public QObject
   "schema_version": 999,
   "created_at_utc": "2026-03-17T12:00:00.000Z",
   "reload_token": "bad",
-  "source_pid": 1,
   "target_executable": "/tmp/qmud-integration",
   "arguments": [],
   "worlds": []
@@ -80,7 +77,6 @@ class tst_ReloadStartupConsume : public QObject
 
 			const ReloadStartupValidationInput input{
 			    QStringLiteral("bad"),
-			    1,
 			    QStringLiteral("/tmp/qmud-integration"),
 			};
 			ReloadStateSnapshot parsed;

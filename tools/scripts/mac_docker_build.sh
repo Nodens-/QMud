@@ -137,6 +137,7 @@ APP_STAGE_DIR="$BUILD_DIR/macapp-out/QMud.app"
 APP_MACOS_DIR="$APP_STAGE_DIR/Contents/MacOS"
 APP_FRAMEWORKS_DIR="$APP_STAGE_DIR/Contents/Frameworks"
 APP_PLUGINS_DIR="$APP_STAGE_DIR/Contents/PlugIns"
+APP_TLS_DIR="$APP_PLUGINS_DIR/tls"
 
 mkdir -p "$APP_MACOS_DIR" "$APP_FRAMEWORKS_DIR" "$APP_PLUGINS_DIR/platforms" "$APP_PLUGINS_DIR/sqldrivers"
 if [ -d "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/multimedia" ]; then
@@ -148,6 +149,17 @@ cp "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/platforms/libqcocoa.dylib" "$APP_PLUGINS_
 cp "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/sqldrivers/libqsqlite.dylib" "$APP_PLUGINS_DIR/sqldrivers/"
 if [ -d "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/multimedia" ]; then
   cp -R "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/multimedia/." "$APP_PLUGINS_DIR/multimedia/"
+fi
+if [ ! -d "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/tls" ]; then
+  echo "Error: Qt TLS plugins directory is missing at $QMUD_MAC_DOCKER_QT_PREFIX/plugins/tls." >&2
+  exit 1
+fi
+mkdir -p "$APP_TLS_DIR"
+cp -R "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/tls/." "$APP_TLS_DIR/"
+if ! find "$APP_TLS_DIR" -maxdepth 1 -type f \( -name 'libqsecuretransportbackend*.dylib' -o -name 'libqopensslbackend*.dylib' \) | grep -q .; then
+  echo "Error: macOS package is missing a functional Qt TLS backend plugin." >&2
+  echo "Expected libqsecuretransportbackend*.dylib or libqopensslbackend*.dylib in $APP_TLS_DIR." >&2
+  exit 1
 fi
 
 cp "$QMUD_MAC_DOCKER_LUA_PREFIX/lib/liblua.5.4.dylib" "$APP_FRAMEWORKS_DIR/"

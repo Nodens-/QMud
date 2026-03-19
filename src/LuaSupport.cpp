@@ -7,6 +7,7 @@
  */
 
 #include "LuaSupport.h"
+#include "Environment.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QByteArray>
@@ -136,10 +137,12 @@ void QMudLuaSupport::callLuaCFunction(lua_State *L, const lua_CFunction fn)
 
 static bool luaCompatLoggingEnabled()
 {
-	const QByteArray env = qgetenv("QMUD_LOG_LUA_COMPAT_STATE").trimmed().toLower();
-	if (env.isEmpty())
+	const QString value = qmudEnvironmentVariable(QStringLiteral("QMUD_LOG_LUA_COMPAT_STATE")).trimmed();
+	if (value.isEmpty())
 		return false;
-	return !(env == "0" || env == "false" || env == "no" || env == "off");
+	const QString normalized = value.toLower();
+	return !(normalized == QStringLiteral("0") || normalized == QStringLiteral("false") ||
+	         normalized == QStringLiteral("no") || normalized == QStringLiteral("off"));
 }
 
 static bool luaGlobalIsFunction(lua_State *L, const char *name)

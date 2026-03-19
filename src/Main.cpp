@@ -8,6 +8,7 @@
  */
 
 #include "AppController.h"
+#include "Environment.h"
 #include "LuaApiExport.h"
 #include "MainFrame.h"
 #include "ReloadStateUtils.h"
@@ -115,12 +116,11 @@ int main(int argc, char *argv[])
 	QCoreApplication::setOrganizationName(QStringLiteral("QMudOrg"));
 	QApplication::setWindowIcon(QIcon(QStringLiteral(":/qmud/res/QMud.png")));
 
-	const QStringList args = QCoreApplication::arguments();
-	bool              allowMultipleInstances =
-	    isEnabledValue(qEnvironmentVariable("QMUD_ALLOW_MULTI_INSTANCE").trimmed());
-	QString           reloadStatePathArg;
-	QString           reloadTokenArg;
-	const bool        reloadLaunchArguments =
+	const QStringList args      = QCoreApplication::arguments();
+	bool allowMultipleInstances = isEnabledValue(qEnvironmentVariable("QMUD_ALLOW_MULTI_INSTANCE").trimmed());
+	QString    reloadStatePathArg;
+	QString    reloadTokenArg;
+	const bool reloadLaunchArguments =
 	    parseReloadStartupArguments(args, &reloadStatePathArg, &reloadTokenArg);
 	for (int i = 1; i < args.size(); ++i)
 	{
@@ -150,6 +150,16 @@ int main(int argc, char *argv[])
 
 		qInfo() << "Lua API inventory exported to" << outputDir;
 		return 0;
+	}
+
+	if (allowMultipleInstances)
+	{
+		qmudSetEnvironmentConfigFallbackEnabled(false);
+		if (qEnvironmentVariable("QMUD_HOME").trimmed().isEmpty())
+		{
+			qCritical() << "Multi-instance is enabled. QMUD_HOME needs to be set.";
+			return 1;
+		}
 	}
 
 	QLocalServer instanceServer;

@@ -11,8 +11,10 @@
 
 #include <QDialog>
 #include <QHash>
+#include <QVector>
 
 class QTabWidget;
+class QTabBar;
 class QPushButton;
 class QCheckBox;
 class QSpinBox;
@@ -46,6 +48,10 @@ class GlobalPreferencesDialog : public QDialog
 
 	private:
 		QTabWidget                 *m_tabs{nullptr};
+		QTabBar                    *m_tabRowOne{nullptr};
+		QTabBar                    *m_tabRowTwo{nullptr};
+		QVector<int>                m_tabRowOneToPage;
+		QVector<int>                m_tabRowTwoToPage;
 		QHash<QString, QCheckBox *> m_intChecks;
 		QHash<QString, QSpinBox *>  m_intSpins;
 		QHash<QString, QComboBox *> m_intCombos;
@@ -121,6 +127,13 @@ class GlobalPreferencesDialog : public QDialog
 
 		QCheckBox                  *m_allowDllsCheck{nullptr};
 		QTextEdit                  *m_luaScript{nullptr};
+		QCheckBox                  *m_autoCheckUpdatesCheck{nullptr};
+		QLabel                     *m_updateCheckEveryLabel{nullptr};
+		QSpinBox                   *m_updateCheckHoursSpin{nullptr};
+		QPushButton                *m_checkNowButton{nullptr};
+		QCheckBox                  *m_enableReloadFeatureCheck{nullptr};
+		QSpinBox                   *m_reloadMccpTimeoutSpin{nullptr};
+		bool                        m_updateMechanismAvailable{true};
 
 		/**
 		 * @brief Builds world lists/settings page.
@@ -182,6 +195,24 @@ class GlobalPreferencesDialog : public QDialog
 		 * @return Lua page widget.
 		 */
 		QWidget                    *buildLuaPage();
+		/**
+		 * @brief Builds update-check settings page.
+		 * @return Updates page widget.
+		 */
+		QWidget                    *buildUpdatesPage();
+		/**
+		 * @brief Rebuilds external two-row tab bars from page tabs.
+		 */
+		void                        rebuildExternalTabRows();
+		/**
+		 * @brief Synchronizes external tab-row selection to page index.
+		 * @param pageIndex Active page index.
+		 */
+		void                        syncExternalTabSelection(int pageIndex) const;
+		/**
+		 * @brief Applies enabled/disabled state for update-check controls.
+		 */
+		void                        refreshUpdateCheckControlsEnabledState() const;
 
 		/**
 		 * @brief Creates a small color swatch button control.

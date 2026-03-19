@@ -39,6 +39,7 @@
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QSpinBox>
+#include <QStyle>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTextEdit>
@@ -47,11 +48,91 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 {
 	setWindowTitle(QStringLiteral("Global Preferences"));
 
-	auto *root = new QVBoxLayout(this);
-	m_tabs     = new QTabWidget(this);
+	auto *root    = new QVBoxLayout(this);
+	auto *tabRows = new QVBoxLayout;
+	tabRows->setContentsMargins(0, 0, 0, 0);
+	tabRows->setSpacing(6);
+	m_tabRowOne = new QTabBar(this);
+	m_tabRowTwo = new QTabBar(this);
+	m_tabRowOne->setShape(QTabBar::RoundedNorth);
+	m_tabRowTwo->setShape(QTabBar::RoundedNorth);
+	for (QTabBar *row : {m_tabRowOne, m_tabRowTwo})
+	{
+		row->setExpanding(true);
+		row->setElideMode(Qt::ElideNone);
+		row->setUsesScrollButtons(false);
+		row->setDrawBase(false);
+		row->setDocumentMode(false);
+		row->setFocusPolicy(Qt::NoFocus);
+		row->setMinimumWidth(0);
+		row->setStyleSheet(QStringLiteral("QTabBar::tab {"
+		                                  "padding: 5px 12px;"
+		                                  "min-height: 24px;"
+		                                  "margin: 0px 2px 0px 0px;"
+		                                  "top: 0px;"
+		                                  "border-top-left-radius: 6px;"
+		                                  "border-top-right-radius: 6px;"
+		                                  "border-left: 1px solid palette(mid);"
+		                                  "border-right: 1px solid palette(mid);"
+		                                  "border-top: 1px solid palette(mid);"
+		                                  "border-bottom: 0px;"
+		                                  "background: palette(button);"
+		                                  "color: palette(buttonText);"
+		                                  "font-weight: normal;"
+		                                  "text-decoration: none;"
+		                                  "outline: none;"
+		                                  "}"
+		                                  "QTabBar::tab:hover {"
+		                                  "background: palette(light);"
+		                                  "text-decoration: none;"
+		                                  "}"
+		                                  "QTabBar[activeRow=\"true\"]::tab:selected {"
+		                                  "background: palette(base);"
+		                                  "color: palette(windowText);"
+		                                  "font-weight: 600;"
+		                                  "margin: 0px 2px 0px 0px;"
+		                                  "top: 0px;"
+		                                  "border-top: 1px solid palette(highlight);"
+		                                  "border-left: 1px solid palette(highlight);"
+		                                  "border-right: 1px solid palette(highlight);"
+		                                  "border-bottom: 0px;"
+		                                  "text-decoration: none;"
+		                                  "outline: none;"
+		                                  "}"
+		                                  "QTabBar[activeRow=\"true\"]::tab:!selected {"
+		                                  "background: palette(button);"
+		                                  "color: palette(buttonText);"
+		                                  "font-weight: normal;"
+		                                  "margin: 0px 2px 0px 0px;"
+		                                  "top: 0px;"
+		                                  "border-top: 1px solid palette(mid);"
+		                                  "border-bottom: 0px;"
+		                                  "text-decoration: none;"
+		                                  "outline: none;"
+		                                  "}"
+		                                  "QTabBar[activeRow=\"false\"]::tab:selected {"
+		                                  "background: palette(button);"
+		                                  "color: palette(buttonText);"
+		                                  "font-weight: normal;"
+		                                  "margin: 0px 2px 0px 0px;"
+		                                  "top: 0px;"
+		                                  "border-top: 1px solid palette(mid);"
+		                                  "border-left: 1px solid palette(mid);"
+		                                  "border-right: 1px solid palette(mid);"
+		                                  "border-bottom: 0px;"
+		                                  "text-decoration: none;"
+		                                  "outline: none;"
+		                                  "}"));
+	}
+	tabRows->addWidget(m_tabRowOne);
+	tabRows->addWidget(m_tabRowTwo);
+	root->addLayout(tabRows);
+
+	m_tabs = new QTabWidget(this);
 	m_tabs->setUsesScrollButtons(false);
 	m_tabs->tabBar()->setExpanding(false);
 	m_tabs->tabBar()->setElideMode(Qt::ElideNone);
+	m_tabs->tabBar()->hide();
 	m_tabs->addTab(buildWorldsPage(), QStringLiteral("Worlds"));
 	m_tabs->addTab(buildGeneralPage(), QStringLiteral("General"));
 	m_tabs->addTab(buildClosingPage(), QStringLiteral("Closing"));
@@ -64,14 +145,32 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 	m_tabs->addTab(buildTrayPage(), QStringLiteral("Tray/Taskbar"));
 	m_tabs->addTab(buildPluginsPage(), QStringLiteral("Plugins"));
 	m_tabs->addTab(buildLuaPage(), QStringLiteral("Lua"));
+	m_tabs->addTab(buildUpdatesPage(), QStringLiteral("Updates"));
+	rebuildExternalTabRows();
 	root->addWidget(m_tabs);
+
+	connect(m_tabs, &QTabWidget::currentChanged, this, &GlobalPreferencesDialog::syncExternalTabSelection);
+	connect(m_tabRowOne, &QTabBar::tabBarClicked, this,
+	        [this](const int rowIndex)
+	        {
+		        if (rowIndex < 0 || rowIndex >= m_tabRowOneToPage.size() || !m_tabs)
+			        return;
+		        m_tabs->setCurrentIndex(m_tabRowOneToPage.at(rowIndex));
+	        });
+	connect(m_tabRowTwo, &QTabBar::tabBarClicked, this,
+	        [this](const int rowIndex)
+	        {
+		        if (rowIndex < 0 || rowIndex >= m_tabRowTwoToPage.size() || !m_tabs)
+			        return;
+		        m_tabs->setCurrentIndex(m_tabRowTwoToPage.at(rowIndex));
+	        });
 
 	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
 	connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
 	connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 	root->addWidget(buttons);
 
-	resize(560, 460);
+	setFixedSize(650, 600);
 
 	loadPreferences();
 
@@ -85,6 +184,7 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 		const int tabIndex = settings.value(QStringLiteral("TabIndex"), 0).toInt();
 		if (m_tabs && tabIndex >= 0 && tabIndex < m_tabs->count())
 			m_tabs->setCurrentIndex(tabIndex);
+		syncExternalTabSelection(m_tabs ? m_tabs->currentIndex() : -1);
 		settings.endGroup();
 		connect(this, &QDialog::finished, this,
 		        [this, app](int)
@@ -176,6 +276,19 @@ namespace
 			parts << QStringLiteral("Italic");
 		return parts.join(QLatin1Char(' '));
 	}
+
+	void updateTabRowVisualState(QTabBar *row, const bool active)
+	{
+		if (!row)
+			return;
+		row->setProperty("activeRow", active);
+		if (QStyle *style = row->style(); style)
+		{
+			style->unpolish(row);
+			style->polish(row);
+		}
+		row->update();
+	}
 } // namespace
 
 void GlobalPreferencesDialog::accept()
@@ -199,9 +312,9 @@ QWidget *GlobalPreferencesDialog::buildWorldsPage()
 	auto *page   = new QWidget;
 	auto *layout = new QVBoxLayout(page);
 
-	auto *header = new QHBoxLayout;
-	auto *title  = new QLabel(QStringLiteral("Worlds to open at startup ..."));
-	m_worldCountLabel   = new QLabel(QStringLiteral("0 worlds"));
+	auto *header      = new QHBoxLayout;
+	auto *title       = new QLabel(QStringLiteral("Worlds to open at startup ..."));
+	m_worldCountLabel = new QLabel(QStringLiteral("0 worlds"));
 	m_worldCountLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 	header->addWidget(title);
 	header->addStretch();
@@ -216,8 +329,8 @@ QWidget *GlobalPreferencesDialog::buildWorldsPage()
 	m_worldSelected->setWordWrap(true);
 	layout->addWidget(m_worldSelected);
 
-	auto *buttons            = new QHBoxLayout;
-	auto *addWorld           = new QPushButton(QStringLiteral("Add..."));
+	auto *buttons     = new QHBoxLayout;
+	auto *addWorld    = new QPushButton(QStringLiteral("Add..."));
 	auto *removeWorld = new QPushButton(QStringLiteral("Remove"));
 	auto *moveUp      = new QPushButton(QStringLiteral("Move Up"));
 	auto *moveDown    = new QPushButton(QStringLiteral("Move Down"));
@@ -227,8 +340,8 @@ QWidget *GlobalPreferencesDialog::buildWorldsPage()
 	buttons->addWidget(moveDown);
 	layout->addLayout(buttons);
 
-	auto *bottomButtons           = new QHBoxLayout;
-	auto *defaultDirButton        = new QPushButton(QStringLiteral("Default World Files Directory..."));
+	auto *bottomButtons    = new QHBoxLayout;
+	auto *defaultDirButton = new QPushButton(QStringLiteral("Default World Files Directory..."));
 	bottomButtons->addWidget(defaultDirButton);
 	bottomButtons->addStretch();
 	auto *addCurrent = new QPushButton(QStringLiteral("Add Current World"));
@@ -268,12 +381,12 @@ QWidget *GlobalPreferencesDialog::buildWorldsPage()
 		                 addUniqueItemsToList(m_worldList, canonicalPathList(paths));
 		                 m_worldList->setCurrentRow(m_worldList->count() - 1);
 	                 });
-		QObject::connect(removeWorld, &QPushButton::clicked, page,
-		                 [this, updateWorldButtons]()
-		                 {
-			                 delete m_worldList->currentItem();
-			                 updateWorldButtons();
-		                 });
+	QObject::connect(removeWorld, &QPushButton::clicked, page,
+	                 [this, updateWorldButtons]()
+	                 {
+		                 delete m_worldList->currentItem();
+		                 updateWorldButtons();
+	                 });
 	QObject::connect(moveUp, &QPushButton::clicked, page,
 	                 [this, updateWorldButtons]()
 	                 {
@@ -369,9 +482,8 @@ QWidget *GlobalPreferencesDialog::buildGeneralPage()
 	auto *disableMenu = new QCheckBox(QStringLiteral("ALT key does not activate menu bar"));
 	auto *fixedFont =
 	    new QCheckBox(QStringLiteral("Use fixed space font when editing triggers/aliases etc."));
-	auto *regexEmpty = new QCheckBox(QStringLiteral("Regular expressions can match on an empty string"));
-	auto *triggerRemove =
-	    new QCheckBox(QStringLiteral("Confirm before removing triggers/aliases/timers"));
+	auto *regexEmpty    = new QCheckBox(QStringLiteral("Regular expressions can match on an empty string"));
+	auto *triggerRemove = new QCheckBox(QStringLiteral("Confirm before removing triggers/aliases/timers"));
 	auto *backupOnUpgrades = new QCheckBox(QStringLiteral("Backup on upgrades"));
 
 	registerCheck(QStringLiteral("AutoConnectWorlds"), autoConnect);
@@ -486,8 +598,8 @@ QWidget *GlobalPreferencesDialog::buildGeneralPage()
 			    return;
 		    }
 
-			    QString errorMessage;
-			    if (AppController::registerFileAssociations(&errorMessage))
+		    QString errorMessage;
+		    if (AppController::registerFileAssociations(&errorMessage))
 		    {
 			    QMessageBox::information(this, QStringLiteral("Global Preferences"),
 			                             QStringLiteral("File extensions were registered successfully."));
@@ -538,8 +650,8 @@ QWidget *GlobalPreferencesDialog::buildPrintingPage()
 	auto *page   = new QWidget;
 	auto *layout = new QVBoxLayout(page);
 
-	auto *fontRow = new QHBoxLayout;
-	m_printerFontButton  = new QPushButton(QStringLiteral("Font..."));
+	auto *fontRow       = new QHBoxLayout;
+	m_printerFontButton = new QPushButton(QStringLiteral("Font..."));
 	fontRow->addWidget(m_printerFontButton);
 	fontRow->addStretch();
 	layout->addLayout(fontRow);
@@ -596,7 +708,7 @@ QWidget *GlobalPreferencesDialog::buildLoggingPage()
 	auto *defaultDirButton = new QPushButton(QStringLiteral("Default Log Files Directory..."));
 	defaultDirButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	m_logDefaultDirLabel = new QLabel(QStringLiteral("Default Directory"));
-	auto *dirRow          = new QHBoxLayout;
+	auto *dirRow         = new QHBoxLayout;
 	dirRow->addWidget(defaultDirButton);
 	dirRow->addStretch();
 	layout->addLayout(dirRow);
@@ -662,11 +774,11 @@ QWidget *GlobalPreferencesDialog::buildActivityPage()
 	registerCheck(QStringLiteral("OpenActivityWindow"), m_openActivityWindow);
 	layout->addWidget(m_openActivityWindow);
 
-	auto *group       = new QGroupBox(QStringLiteral("Update activity window"));
-	auto *groupLayout = new QGridLayout(group);
-	m_activityOnNew          = new QRadioButton(QStringLiteral("On New Activity"));
-	m_activityPeriodic       = new QRadioButton(QStringLiteral("Periodically, every:"));
-	m_activityBoth           = new QRadioButton(QStringLiteral("Both"));
+	auto *group        = new QGroupBox(QStringLiteral("Update activity window"));
+	auto *groupLayout  = new QGridLayout(group);
+	m_activityOnNew    = new QRadioButton(QStringLiteral("On New Activity"));
+	m_activityPeriodic = new QRadioButton(QStringLiteral("Periodically, every:"));
+	m_activityBoth     = new QRadioButton(QStringLiteral("Both"));
 	groupLayout->addWidget(m_activityOnNew, 0, 0, 1, 2);
 	groupLayout->addWidget(m_activityPeriodic, 1, 0);
 	m_activityPeriod = new QSpinBox;
@@ -698,7 +810,7 @@ QWidget *GlobalPreferencesDialog::buildDefaultsPage()
 	auto *page   = new QWidget;
 	auto *layout = new QVBoxLayout(page);
 
-	auto         connectBrowse = [this](const QPushButton *button, QLineEdit *target, const QString &title,
+	auto  connectBrowse = [this](const QPushButton *button, QLineEdit *target, const QString &title,
                                 const QString &filter, const QString &suggestedName)
 	{
 		QObject::connect(button, &QPushButton::clicked, this,
@@ -778,8 +890,8 @@ QWidget *GlobalPreferencesDialog::buildDefaultsPage()
 	connectBrowse(browseTimers, m_defaultTimersEdit, QStringLiteral("Timers file name"),
 	              QStringLiteral("QMud timers (*.qdi *.mci)"), QStringLiteral("Default timers.qdi"));
 
-	auto *fontGrid = new QGridLayout;
-	m_outputFontButton    = new QPushButton(QStringLiteral("Output Font..."));
+	auto *fontGrid     = new QGridLayout;
+	m_outputFontButton = new QPushButton(QStringLiteral("Output Font..."));
 	fontGrid->addWidget(m_outputFontButton, 0, 0);
 	m_outputFontName = new QLineEdit;
 	m_outputFontName->setReadOnly(true);
@@ -802,25 +914,24 @@ QWidget *GlobalPreferencesDialog::buildDefaultsPage()
 	layout->addLayout(fontGrid);
 	layout->addStretch();
 
-	QObject::connect(m_outputFontButton, &QPushButton::clicked, page,
-	                 [this]()
-	                 {
-		                 bool  ok = false;
-		                 QFont current(m_outputFontName->text());
-		                 if (m_outputFontHeight > 0)
-			                 current.setPointSize(m_outputFontHeight);
-		                 current.setWeight(QFont::Normal);
-		                 current.setItalic(false);
-		                 QFont chosen =
-		                     QFontDialog::getFont(&ok, current, this, QStringLiteral("Select Output Font"));
-		                 if (!ok)
-			                 return;
-		                 m_outputFontName->setText(chosen.family());
-		                 m_outputFontHeight = chosen.pointSize();
-		                 if (m_outputFontStyle)
-			                 m_outputFontStyle->setText(
-			                     fontStyleSummary(m_outputFontHeight, QFont::Normal, false));
-	                 });
+	QObject::connect(
+	    m_outputFontButton, &QPushButton::clicked, page,
+	    [this]()
+	    {
+		    bool  ok = false;
+		    QFont current(m_outputFontName->text());
+		    if (m_outputFontHeight > 0)
+			    current.setPointSize(m_outputFontHeight);
+		    current.setWeight(QFont::Normal);
+		    current.setItalic(false);
+		    QFont chosen = QFontDialog::getFont(&ok, current, this, QStringLiteral("Select Output Font"));
+		    if (!ok)
+			    return;
+		    m_outputFontName->setText(chosen.family());
+		    m_outputFontHeight = chosen.pointSize();
+		    if (m_outputFontStyle)
+			    m_outputFontStyle->setText(fontStyleSummary(m_outputFontHeight, QFont::Normal, false));
+	    });
 	QObject::connect(m_inputFontButton, &QPushButton::clicked, page,
 	                 [this]()
 	                 {
@@ -840,9 +951,8 @@ QWidget *GlobalPreferencesDialog::buildDefaultsPage()
 		                 m_inputFontWeight = chosen.weight();
 		                 m_inputFontItalic = chosen.italic() ? 1 : 0;
 		                 if (m_inputFontStyle)
-			                 m_inputFontStyle->setText(
-			                     fontStyleSummary(m_inputFontHeight, m_inputFontWeight,
-			                                      m_inputFontItalic != 0));
+			                 m_inputFontStyle->setText(fontStyleSummary(m_inputFontHeight, m_inputFontWeight,
+			                                                            m_inputFontItalic != 0));
 	                 });
 	return page;
 }
@@ -873,15 +983,15 @@ QWidget *GlobalPreferencesDialog::buildNotepadPage()
 	colourLayout->addStretch();
 	layout->addWidget(colourGroup, 0, Qt::AlignHCenter);
 
-	auto *parenGroup  = new QGroupBox(QStringLiteral("Parenthesis Matching Preferences"));
-	auto *parenLayout = new QGridLayout(parenGroup);
-	m_parenNestBraces        = new QCheckBox(QStringLiteral("Braces nest"));
-	m_parenBackslash         = new QCheckBox(QStringLiteral("\\ escapes next character"));
-	m_parenPercent           = new QCheckBox(QStringLiteral("% escapes next character"));
-	m_parenSingleQuotes      = new QCheckBox(QStringLiteral("' quotes a string"));
-	m_parenSingleEscape      = new QCheckBox(QStringLiteral("... with escape inside quotes"));
-	m_parenDoubleQuotes      = new QCheckBox(QStringLiteral("\" quotes a string"));
-	m_parenDoubleEscape      = new QCheckBox(QStringLiteral("... with escape inside quotes"));
+	auto *parenGroup    = new QGroupBox(QStringLiteral("Parenthesis Matching Preferences"));
+	auto *parenLayout   = new QGridLayout(parenGroup);
+	m_parenNestBraces   = new QCheckBox(QStringLiteral("Braces nest"));
+	m_parenBackslash    = new QCheckBox(QStringLiteral("\\ escapes next character"));
+	m_parenPercent      = new QCheckBox(QStringLiteral("% escapes next character"));
+	m_parenSingleQuotes = new QCheckBox(QStringLiteral("' quotes a string"));
+	m_parenSingleEscape = new QCheckBox(QStringLiteral("... with escape inside quotes"));
+	m_parenDoubleQuotes = new QCheckBox(QStringLiteral("\" quotes a string"));
+	m_parenDoubleEscape = new QCheckBox(QStringLiteral("... with escape inside quotes"));
 	parenLayout->addWidget(m_parenNestBraces, 0, 0);
 	parenLayout->addWidget(m_parenBackslash, 1, 0);
 	parenLayout->addWidget(m_parenPercent, 2, 0);
@@ -941,13 +1051,13 @@ QWidget *GlobalPreferencesDialog::buildTrayPage()
 	topRow->addStretch();
 	layout->addLayout(topRow);
 
-	auto *grid = new QGridLayout;
-	m_trayIconGroup   = new QButtonGroup(page);
+	auto *grid      = new QGridLayout;
+	m_trayIconGroup = new QButtonGroup(page);
 	constexpr QSize trayPreviewSize(32, 32);
 	auto            iconRadio = [this, trayPreviewSize](const QString &text, const QString &path, int id)
 	{
-			auto *radio = new QRadioButton(text);
-		QIcon         icon(path);
+		auto *radio = new QRadioButton(text);
+		QIcon icon(path);
 		if (icon.isNull())
 		{
 			QPixmap pix(path);
@@ -973,8 +1083,8 @@ QWidget *GlobalPreferencesDialog::buildTrayPage()
 
 	layout->addLayout(grid);
 
-	auto *customRow = new QHBoxLayout;
-	m_customIconRadio      = new QRadioButton(QStringLiteral("Custom:"));
+	auto *customRow   = new QHBoxLayout;
+	m_customIconRadio = new QRadioButton(QStringLiteral("Custom:"));
 	m_trayIconGroup->addButton(m_customIconRadio, 10);
 	customRow->addWidget(m_customIconRadio);
 	m_customIconButton = new QPushButton(QStringLiteral("Choose..."));
@@ -1012,8 +1122,8 @@ QWidget *GlobalPreferencesDialog::buildPluginsPage()
 	auto *page   = new QWidget;
 	auto *layout = new QVBoxLayout(page);
 
-	auto *header = new QHBoxLayout;
-	auto *title  = new QLabel(QStringLiteral("Global plugins (load into each world) ..."));
+	auto *header        = new QHBoxLayout;
+	auto *title         = new QLabel(QStringLiteral("Global plugins (load into each world) ..."));
 	m_pluginsCountLabel = new QLabel(QStringLiteral("0 plugins"));
 	m_pluginsCountLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 	header->addWidget(title);
@@ -1079,12 +1189,12 @@ QWidget *GlobalPreferencesDialog::buildPluginsPage()
 		                 addUniqueItemsToList(m_pluginsList, canonicalPathList(paths));
 		                 m_pluginsList->setCurrentRow(m_pluginsList->count() - 1);
 	                 });
-		QObject::connect(removePlugin, &QPushButton::clicked, page,
-		                 [this, updatePluginButtons]()
-		                 {
-			                 delete m_pluginsList->currentItem();
-			                 updatePluginButtons();
-		                 });
+	QObject::connect(removePlugin, &QPushButton::clicked, page,
+	                 [this, updatePluginButtons]()
+	                 {
+		                 delete m_pluginsList->currentItem();
+		                 updatePluginButtons();
+	                 });
 	QObject::connect(moveUp, &QPushButton::clicked, page,
 	                 [this, updatePluginButtons]()
 	                 {
@@ -1156,12 +1266,12 @@ QWidget *GlobalPreferencesDialog::buildLuaPage()
 	                 {
 		                 QDialog dlg(this);
 		                 dlg.setWindowTitle(QStringLiteral("Edit Lua Script"));
-			                 auto *layout = new QVBoxLayout(&dlg);
-			                 auto *editor = new QTextEdit(&dlg);
+		                 auto *layout = new QVBoxLayout(&dlg);
+		                 auto *editor = new QTextEdit(&dlg);
 		                 editor->setPlainText(m_luaScript ? m_luaScript->toPlainText() : QString());
 		                 layout->addWidget(editor);
-			                 auto *buttons =
-			                     new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+		                 auto *buttons =
+		                     new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
 		                 layout->addWidget(buttons);
 		                 QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
 		                 QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
@@ -1173,6 +1283,124 @@ QWidget *GlobalPreferencesDialog::buildLuaPage()
 	                 });
 
 	return page;
+}
+
+QWidget *GlobalPreferencesDialog::buildUpdatesPage()
+{
+	auto *page   = new QWidget;
+	auto *layout = new QVBoxLayout(page);
+
+	m_autoCheckUpdatesCheck = new QCheckBox(QStringLiteral("Automatically check for updates"));
+	registerCheck(QStringLiteral("AutoCheckForUpdates"), m_autoCheckUpdatesCheck);
+	layout->addWidget(m_autoCheckUpdatesCheck);
+
+	auto *checkRow          = new QHBoxLayout;
+	m_updateCheckEveryLabel = new QLabel(QStringLiteral("Check every:"));
+	checkRow->addWidget(m_updateCheckEveryLabel);
+	m_updateCheckHoursSpin = new QSpinBox;
+	m_updateCheckHoursSpin->setRange(1, 168);
+	m_updateCheckHoursSpin->setSuffix(QStringLiteral(" hour(s)"));
+	registerSpin(QStringLiteral("UpdateCheckIntervalHours"), m_updateCheckHoursSpin);
+	checkRow->addWidget(m_updateCheckHoursSpin);
+	m_checkNowButton = new QPushButton(QStringLiteral("Check now"));
+	checkRow->addWidget(m_checkNowButton);
+	checkRow->addStretch();
+	layout->addLayout(checkRow);
+
+	m_enableReloadFeatureCheck = new QCheckBox(QStringLiteral("Enable reload feature (Linux/MacOS)"));
+	registerCheck(QStringLiteral("EnableReloadFeature"), m_enableReloadFeatureCheck);
+	layout->addWidget(m_enableReloadFeatureCheck);
+
+	auto *timeoutRow = new QHBoxLayout;
+	timeoutRow->addWidget(new QLabel(QStringLiteral("Timeout for MCCP worlds to tear down compression:")));
+	m_reloadMccpTimeoutSpin = new QSpinBox;
+	m_reloadMccpTimeoutSpin->setRange(100, 1000);
+	m_reloadMccpTimeoutSpin->setSingleStep(50);
+	m_reloadMccpTimeoutSpin->setSuffix(QStringLiteral(" ms"));
+	registerSpin(QStringLiteral("ReloadMccpDisableTimeoutMs"), m_reloadMccpTimeoutSpin);
+	timeoutRow->addWidget(m_reloadMccpTimeoutSpin);
+	timeoutRow->addStretch();
+	layout->addLayout(timeoutRow);
+
+	layout->addStretch();
+
+	connect(m_autoCheckUpdatesCheck, &QCheckBox::toggled, page,
+	        [this](const bool) { refreshUpdateCheckControlsEnabledState(); });
+	connect(m_checkNowButton, &QPushButton::clicked, page,
+	        [this]()
+	        {
+		        if (AppController *app = AppController::instance(); app)
+			        app->checkForUpdatesNow(this);
+	        });
+
+	return page;
+}
+
+void GlobalPreferencesDialog::rebuildExternalTabRows()
+{
+	m_tabRowOneToPage.clear();
+	m_tabRowTwoToPage.clear();
+	if (!m_tabs || !m_tabRowOne || !m_tabRowTwo)
+		return;
+
+	QSignalBlocker blockOne(m_tabRowOne);
+	QSignalBlocker blockTwo(m_tabRowTwo);
+	while (m_tabRowOne->count() > 0)
+		m_tabRowOne->removeTab(0);
+	while (m_tabRowTwo->count() > 0)
+		m_tabRowTwo->removeTab(0);
+
+	const int tabCount   = m_tabs->count();
+	const int splitIndex = (tabCount + 1) / 2;
+	for (int i = 0; i < tabCount; ++i)
+	{
+		const QString text = m_tabs->tabText(i);
+		if (i < splitIndex)
+		{
+			m_tabRowOne->addTab(text);
+			m_tabRowOneToPage.push_back(i);
+		}
+		else
+		{
+			m_tabRowTwo->addTab(text);
+			m_tabRowTwoToPage.push_back(i);
+		}
+	}
+	syncExternalTabSelection(m_tabs->currentIndex());
+}
+
+void GlobalPreferencesDialog::syncExternalTabSelection(const int pageIndex) const
+{
+	if (!m_tabRowOne || !m_tabRowTwo)
+		return;
+
+	QSignalBlocker blockOne(m_tabRowOne);
+	QSignalBlocker blockTwo(m_tabRowTwo);
+	m_tabRowOne->setCurrentIndex(-1);
+	m_tabRowTwo->setCurrentIndex(-1);
+
+	for (int i = 0; i < m_tabRowOneToPage.size(); ++i)
+	{
+		if (m_tabRowOneToPage.at(i) == pageIndex)
+		{
+			m_tabRowOne->setCurrentIndex(i);
+			updateTabRowVisualState(m_tabRowOne, true);
+			updateTabRowVisualState(m_tabRowTwo, false);
+			return;
+		}
+	}
+	for (int i = 0; i < m_tabRowTwoToPage.size(); ++i)
+	{
+		if (m_tabRowTwoToPage.at(i) == pageIndex)
+		{
+			m_tabRowTwo->setCurrentIndex(i);
+			updateTabRowVisualState(m_tabRowOne, false);
+			updateTabRowVisualState(m_tabRowTwo, true);
+			return;
+		}
+	}
+	updateTabRowVisualState(m_tabRowOne, false);
+	updateTabRowVisualState(m_tabRowTwo, false);
 }
 
 void GlobalPreferencesDialog::registerCheck(const QString &key, QCheckBox *box)
@@ -1318,6 +1546,31 @@ void GlobalPreferencesDialog::loadPreferences()
 
 	if (m_luaScript)
 		m_luaScript->setPlainText(app->getGlobalOption(QStringLiteral("LuaScript")).toString());
+
+	m_updateMechanismAvailable            = AppController::isUpdateMechanismAvailable();
+	const QString updateUnavailableReason = AppController::updateMechanismUnavailableReason();
+	if (m_autoCheckUpdatesCheck)
+		m_autoCheckUpdatesCheck->setToolTip(updateUnavailableReason);
+	if (m_updateCheckEveryLabel)
+		m_updateCheckEveryLabel->setToolTip(updateUnavailableReason);
+	if (m_updateCheckHoursSpin)
+		m_updateCheckHoursSpin->setToolTip(updateUnavailableReason);
+	if (m_checkNowButton)
+		m_checkNowButton->setToolTip(updateUnavailableReason);
+	refreshUpdateCheckControlsEnabledState();
+}
+
+void GlobalPreferencesDialog::refreshUpdateCheckControlsEnabledState() const
+{
+	const bool autoCheckEnabled = m_autoCheckUpdatesCheck && m_autoCheckUpdatesCheck->isChecked();
+	if (m_autoCheckUpdatesCheck)
+		m_autoCheckUpdatesCheck->setEnabled(m_updateMechanismAvailable);
+	if (m_updateCheckHoursSpin)
+		m_updateCheckHoursSpin->setEnabled(m_updateMechanismAvailable && autoCheckEnabled);
+	if (m_updateCheckEveryLabel)
+		m_updateCheckEveryLabel->setEnabled(m_updateMechanismAvailable && autoCheckEnabled);
+	if (m_checkNowButton)
+		m_checkNowButton->setEnabled(m_updateMechanismAvailable);
 }
 
 bool GlobalPreferencesDialog::applyPreferences()

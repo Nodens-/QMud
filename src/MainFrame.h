@@ -662,6 +662,12 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		bool                         triggerWorldPreferencesFromShortcut();
 		/**
+		 * @brief Activates adjacent MDI tab from keyboard navigation.
+		 * @param step Signed direction (`-1` for left, `+1` for right).
+		 * @return `true` when tab activation changed.
+		 */
+		bool                         triggerAdjacentMdiTabFromShortcut(int step);
+		/**
 		 * @brief Returns active MDI subwindow or last active fallback.
 		 * @return Active or fallback MDI subwindow, or `nullptr`.
 		 */
