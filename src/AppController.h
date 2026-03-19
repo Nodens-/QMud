@@ -11,11 +11,14 @@
 #define QMUD_APPCONTROLLER_H
 
 #include "ColorPacking.h"
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QByteArray>
 #include <QDateTime>
 #include <QHash>
 #include <QMap>
 #include <QObject>
 #include <QPageLayout>
+#include <QPointer>
 #include <QRandomGenerator>
 #include <QScopedPointer>
 #include <QSplashScreen>
@@ -23,6 +26,7 @@
 #include <QStringList>
 #include <QTranslator>
 #include <QVariant>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
 #include <QtSql/QSqlDatabase>
 #include <atomic>
@@ -32,6 +36,10 @@ class ActivityDocument;
 class WorldRuntime;
 class QMdiSubWindow;
 class NameGenerator;
+class QDialog;
+class QNetworkAccessManager;
+class QTimer;
+class QWidget;
 struct ReloadWorldState;
 struct lua_State;
 
@@ -45,15 +53,15 @@ class AppController : public QObject
 {
 		Q_OBJECT
 	public:
-	/**
-	 * @brief Direction alias tuple used for logging, sending, and reverse lookup.
-	 */
-	struct MapDirection
-	{
-		QString toLog;
-		QString toSend;
-		QString reverse;
-	};
+		/**
+		 * @brief Direction alias tuple used for logging, sending, and reverse lookup.
+		 */
+		struct MapDirection
+		{
+				QString toLog;
+				QString toSend;
+				QString reverse;
+		};
 
 		/**
 		 * @brief Returns singleton app-controller instance.
@@ -108,6 +116,11 @@ class AppController : public QObject
 		 * @brief Reloads Lua-visible globals after preference changes.
 		 */
 		void                            reloadGlobalPreferencesForLua();
+		/**
+		 * @brief Triggers immediate manual check for application updates.
+		 * @param uiParent Preferred parent for any immediate update-check UI.
+		 */
+		void                            checkForUpdatesNow(QWidget *uiParent = nullptr);
 		/**
 		 * @brief Registers OS-level file associations.
 		 * @param errorMessage Optional output error message.
@@ -286,12 +299,12 @@ class AppController : public QObject
 		 * @param runtime Runtime that reported script file change.
 		 */
 		void                               processScriptFileChange(WorldRuntime *runtime);
-	/**
-	 * @brief Result summary returned by XML import operations.
-	 */
-	struct ImportResult
-	{
-		bool    ok{false};
+		/**
+		 * @brief Result summary returned by XML import operations.
+		 */
+		struct ImportResult
+		{
+				bool    ok{false};
 				QString errorMessage;
 				int     triggers{0};
 				int     aliases{0};
@@ -352,165 +365,211 @@ class AppController : public QObject
 		void onCommandTriggered(const QString &cmdName);
 
 	private:
-		static AppController                 *s_instance;
+		static AppController             *s_instance;
 		/**
 		 * @brief Database and preference loading helpers.
 		 * @return `true` when database opens successfully.
 		 */
-		bool                                  openPreferencesDatabase();
+		bool                              openPreferencesDatabase();
 		/**
 		 * @brief Creates/updates preferences schema and seed rows.
 		 * @return Number of schema/population changes applied.
 		 */
-		[[nodiscard]] int                     populateDatabase() const;
+		[[nodiscard]] int                 populateDatabase() const;
 		/**
 		 * @brief Loads global settings from preferences database.
 		 */
-		void                                  loadGlobalsFromDatabase();
+		void                              loadGlobalsFromDatabase();
 		/**
 		 * @brief Returns count of pending DB changes.
 		 * @return Number of pending DB changes.
 		 */
-		[[nodiscard]] int                     dbChanges() const;
+		[[nodiscard]] int                 dbChanges() const;
 		/**
 		 * @brief Initializes translation/localization subsystem.
 		 * @return `true` when i18n setup succeeds.
 		 */
-		bool                                  setupI18N();
+		bool                              setupI18N();
 		/**
 		 * @brief Loads compass/map direction aliases.
 		 */
-		void                                  loadMapDirections();
+		void                              loadMapDirections();
 		/**
 		 * @brief Finds configured map direction entry.
 		 * @param direction Direction token.
 		 * @return Matching map-direction entry, or `nullptr`.
 		 */
-		[[nodiscard]] const MapDirection     *findMapDirection(const QString &direction) const;
+		[[nodiscard]] const MapDirection *findMapDirection(const QString &direction) const;
 		/**
 		 * @brief Fills xterm-256 color table.
 		 */
-		void                                  generate256Colours();
+		void                              generate256Colours();
 		/**
 		 * @brief Startup/setup preference application helpers.
 		 */
-		void                                  setupStartupBehavior();
+		void                              setupStartupBehavior();
 		/**
 		 * @brief Applies persisted main-window preferences.
 		 */
-		void                                  applyWindowPreferences();
+		void                              applyWindowPreferences();
+		/**
+		 * @brief Applies update-check/reload-gating preferences.
+		 */
+		void                              applyUpdatePreferences();
 		/**
 		 * @brief Applies persisted view preferences.
 		 */
-		void                                  applyViewPreferences() const;
+		void                              applyViewPreferences() const;
 		/**
 		 * @brief Restores toolbar layout from persisted state.
 		 */
-		void                                  loadToolbarLayout() const;
+		void                              loadToolbarLayout() const;
 		/**
 		 * @brief Restores top-level window placement.
 		 */
-		void                                  restoreWindowPlacement();
+		void                              restoreWindowPlacement();
 		/**
 		 * @brief Builds recent-files action list.
 		 */
-		void                                  setupRecentFiles() const;
+		void                              setupRecentFiles() const;
 		/**
 		 * @brief Loads print setup preferences from storage.
 		 */
-		void                                  loadPrintSetupPreferences();
+		void                              loadPrintSetupPreferences();
 		/**
 		 * @brief Saves print setup preferences to storage.
 		 */
-		void                                  savePrintSetupPreferences() const;
+		void                              savePrintSetupPreferences() const;
 		/**
 		 * @brief Applies global connection preferences.
 		 */
-		void                                  applyConnectionPreferences() const;
+		void                              applyConnectionPreferences() const;
 		/**
 		 * @brief Applies global spell-check preferences.
 		 */
-		void                                  applySpellCheckPreferences();
+		void                              applySpellCheckPreferences();
 		/**
 		 * @brief Applies plugin-related preferences.
 		 */
-		void                                  applyPluginPreferences();
+		void                              applyPluginPreferences();
 		/**
 		 * @brief Applies global font preferences.
 		 */
-		void                                  applyFontPreferences() const;
+		void                              applyFontPreferences() const;
 		/**
 		 * @brief Applies child-window behavior preferences.
 		 */
-		void                                  applyChildWindowPreferences() const;
+		void                              applyChildWindowPreferences() const;
 		/**
 		 * @brief Applies timer engine preferences.
 		 */
-		void                                  applyTimerPreferences() const;
+		void                              applyTimerPreferences() const;
 		/**
 		 * @brief Applies word-delimiter preferences.
 		 */
-		void                                  applyWordDelimiterPreferences() const;
+		void                              applyWordDelimiterPreferences() const;
 		/**
 		 * @brief Applies editor behavior preferences.
 		 */
-		void                                  applyEditorPreferences() const;
+		void                              applyEditorPreferences() const;
 		/**
 		 * @brief Applies default directories/preferences paths.
 		 */
-		void                                  applyDefaultDirectories() const;
+		void                              applyDefaultDirectories() const;
 		/**
 		 * @brief Applies locale/language settings.
 		 */
-		void                                  applyLocalePreferences();
+		void                              applyLocalePreferences();
 		/**
 		 * @brief Applies notepad appearance/settings.
 		 */
-		void                                  applyNotepadPreferences() const;
+		void                              applyNotepadPreferences() const;
 		/**
 		 * @brief Applies list view presentation settings.
 		 */
-		void                                  applyListViewPreferences() const;
+		void                              applyListViewPreferences() const;
 		/**
 		 * @brief Applies input control settings.
 		 */
-		void                                  applyInputPreferences() const;
+		void                              applyInputPreferences() const;
 		/**
 		 * @brief Applies notification settings.
 		 */
-		void                                  applyNotificationPreferences() const;
+		void                              applyNotificationPreferences() const;
 		/**
 		 * @brief Applies typing behavior settings.
 		 */
-		void                                  applyTypingPreferences() const;
+		void                              applyTypingPreferences() const;
 		/**
 		 * @brief Applies regex-engine preferences.
 		 */
-		void                                  applyRegexPreferences() const;
+		void                              applyRegexPreferences() const;
 		/**
 		 * @brief Applies icon and icon-placement preferences.
 		 */
-		void                                  applyIconPreferences() const;
+		void                              applyIconPreferences() const;
 		/**
 		 * @brief Applies font-metric compatibility preferences.
 		 */
-		void                                  applyFontMetricPreferences() const;
+		void                              applyFontMetricPreferences() const;
 		/**
 		 * @brief Applies activity-window preferences.
 		 */
-		void                                  applyActivityPreferences() const;
+		void                              applyActivityPreferences() const;
 		/**
 		 * @brief Applies package/runtime deployment preferences.
 		 */
-		void                                  applyPackagePreferences() const;
+		void                              applyPackagePreferences() const;
 		/**
 		 * @brief Applies miscellaneous preferences.
 		 */
-		void                                  applyMiscPreferences() const;
+		void                              applyMiscPreferences() const;
 		/**
 		 * @brief Applies rendering pipeline preferences.
 		 */
-		void                                  applyRenderingPreferences() const;
+		void                              applyRenderingPreferences() const;
+		/**
+		 * @brief Schedules or stops periodic update checks from preferences.
+		 */
+		void                              configureUpdateCheckTimer();
+		/**
+		 * @brief Starts one update-check request.
+		 * @param manual `true` for user-triggered checks.
+		 * @param uiParent Preferred parent for user-facing dialogs when `manual`.
+		 */
+		void                              requestUpdateCheck(bool manual, QWidget *uiParent = nullptr);
+		/**
+		 * @brief Handles completion of one update-check request.
+		 * @param manual `true` for user-triggered checks.
+		 * @param payload Raw response payload.
+		 * @param networkError Network error description (empty on success).
+		 * @param httpStatus HTTP status code, or `0` when unavailable.
+		 */
+		void handleUpdateCheckResponse(bool manual, const QByteArray &payload, const QString &networkError,
+		                               int httpStatus);
+		/**
+		 * @brief Shows modeless update-available dialog.
+		 * @param currentVersion Running version string.
+		 * @param version Available version string.
+		 * @param changelog Release changelog text.
+		 */
+		void showUpdateAvailableDialog(const QString &currentVersion, const QString &version,
+		                               const QString &changelog);
+		/**
+		 * @brief Sets visibility/enabled state of Help->Update action.
+		 * @param visible Show and enable action when `true`.
+		 */
+		void setUpdateNowActionVisible(bool visible) const;
+		/**
+		 * @brief Handles Update Now command trigger (phase-1 placeholder).
+		 */
+		void handleUpdateQmudNow();
+		/**
+		 * @brief Applies skip-version preference for currently shown update version.
+		 * @param version Version currently being prompted.
+		 * @param skipWhenTrue Store skip preference when `true`.
+		 */
+		void applySkipVersionChoice(const QString &version, bool skipWhenTrue);
 		/**
 		 * @brief Returns active world runtime instances.
 		 * @return Active world runtime list.
@@ -542,59 +601,57 @@ class AppController : public QObject
 		 * @param previousVersion Previously stored application version.
 		 * @param firstTime `true` when this is first launch after install/migration.
 		 */
-		void              backupDataOnUpgradeIfNeeded(int previousVersion, bool firstTime) const;
+		void        backupDataOnUpgradeIfNeeded(int previousVersion, bool firstTime) const;
 		/**
 		 * @brief Finalizes startup once all prerequisites are complete.
 		 */
-		void                                  finalizeStartupIfReady();
+		void        finalizeStartupIfReady();
 		/**
 		 * @brief Parses reload startup arguments from process command line.
 		 */
-		void                                  detectReloadStartupArguments();
+		void        detectReloadStartupArguments();
 		/**
 		 * @brief Deletes stale reload state file when startup is not reload-mode.
 		 */
-		void                                  cleanupReloadStateOnNormalStartup() const;
+		void        cleanupReloadStateOnNormalStartup() const;
 		/**
 		 * @brief Executes startup recovery for reload-mode launches.
 		 * @return `true` when recovery path completed.
 		 */
-		bool                                  recoverReloadStartupState();
+		bool        recoverReloadStartupState();
 		/**
 		 * @brief Opens one runtime/window pair from serialized reload world state.
 		 * @param worldState Serialized world state.
 		 * @param runtime Output runtime pointer.
 		 * @return `true` when world opening succeeds.
 		 */
-		bool                                  openWorldForReloadRecovery(const ReloadWorldState &worldState,
-		                                                                  WorldRuntime          **runtime);
+		bool        openWorldForReloadRecovery(const ReloadWorldState &worldState, WorldRuntime **runtime);
 		/**
 		 * @brief Reconnects recovered runtime for `park_reconnect` fallback.
 		 * @param runtime Runtime to reconnect.
 		 * @param worldState Serialized host/port policy data.
 		 * @param closeSocketFirst Close inherited socket before reconnect when `true`.
 		 */
-		static void                           reconnectRecoveredWorld(WorldRuntime          *runtime,
-		                                                               const ReloadWorldState &worldState,
-		                                                               bool closeSocketFirst);
+		static void reconnectRecoveredWorld(WorldRuntime *runtime, const ReloadWorldState &worldState,
+		                                    bool closeSocketFirst);
 		/**
 		 * @brief Creates and shows splash screen.
 		 */
-		void                                  showSplashScreen();
+		void        showSplashScreen();
 		/**
 		 * @brief Hides splash screen.
 		 */
-		void                                  hideSplashScreen();
+		void        hideSplashScreen();
 		/**
 		 * @brief Synchronizes AppImage payload skeleton files.
 		 * @param startupDir Startup directory path.
 		 */
-		static void       syncAppImageSkeleton(const QString &startupDir);
+		static void syncAppImageSkeleton(const QString &startupDir);
 		/**
 		 * @brief Synchronizes macOS bundle payload files.
 		 * @param startupDir Startup directory path.
 		 */
-		static void       syncMacBundlePayload(const QString &startupDir);
+		static void syncMacBundlePayload(const QString &startupDir);
 
 		/**
 		 * @brief Low-level preferences DB helpers.
@@ -829,6 +886,13 @@ class AppController : public QObject
 		bool                          m_batchWorldListActivatedFirst{false};
 		bool                          m_suppressAutoConnect{false};
 		bool                          m_reloadInProgress{false};
+		QTimer                       *m_updateCheckTimer{nullptr};
+		QNetworkAccessManager        *m_updateNetworkManager{nullptr};
+		QPointer<QDialog>             m_updateAvailableDialog;
+		QPointer<QWidget>             m_updateUiParent;
+		QString                       m_availableUpdateVersion;
+		QString                       m_availableUpdateChangelog;
+		bool                          m_updateCheckInProgress{false};
 		bool                          m_reloadLaunchRequested{false};
 		int                           m_reloadAttempts{0};
 		int                           m_reloadExecFailures{0};

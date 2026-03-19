@@ -660,6 +660,12 @@ void MainWindow::buildMenus()
 	addActionToMenu(helpMenu, QStringLiteral("RegularExpressionsWebPage"),
 	                QStringLiteral("Regular &Expressions Web Page..."));
 	helpMenu->addSeparator();
+	if (QAction *updateNowAction =
+	        addActionToMenu(helpMenu, QStringLiteral("UpdateQmudNow"), QStringLiteral("&Update QMud Now")))
+	{
+		updateNowAction->setVisible(false);
+		updateNowAction->setEnabled(false);
+	}
 	addActionToMenu(helpMenu, QStringLiteral("About"), QStringLiteral("&About QMud..."));
 }
 

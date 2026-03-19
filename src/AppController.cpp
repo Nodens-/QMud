@@ -90,13 +90,19 @@ extern "C"
 #include <QHostInfo>
 #include <QImageReader>
 #include <QInputDialog>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeySequenceEdit>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QLocale>
 #include <QMessageBox>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QNetworkAccessManager>
 #include <QNetworkInterface>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPageLayout>
 #include <QPainter>
 #include <QPixmap>
@@ -123,6 +129,7 @@ extern "C"
 #include <QThread>
 #include <QTimer>
 #include <QTranslator>
+#include <QUrl>
 #include <QtSql/QSqlDatabase>
 #include <QtSql/QSqlError>
 #include <QtSql/QSqlQuery>
@@ -172,12 +179,75 @@ namespace
 			const char *legacyExtension;
 	};
 
-	constexpr quint8                   kXtermCubeValues[6]         = {0, 95, 135, 175, 215, 255};
-	constexpr int                      kReloadStateStaleAgeSeconds = 10 * 60;
-	constexpr int                      kReloadMccpDisableTimeoutMs = 500;
-	constexpr char                     kReloadStateArgName[]       = "--reload-state";
-	constexpr char                     kReloadTokenArgName[]       = "--reload-token";
-	constexpr char                     kReloadLogTag[]             = "[ReloadQMud]";
+	constexpr quint8 kXtermCubeValues[6]         = {0, 95, 135, 175, 215, 255};
+	constexpr int    kReloadStateStaleAgeSeconds = 10 * 60;
+	constexpr char   kReloadStateArgName[]       = "--reload-state";
+	constexpr char   kReloadTokenArgName[]       = "--reload-token";
+	constexpr char   kReloadLogTag[]             = "[ReloadQMud]";
+	constexpr char   kUpdateLatestReleaseUrl[] = "https://api.github.com/repos/Nodens-/QMud/releases/latest";
+
+	QString          versionCore(QString text)
+	{
+		text = text.trimmed();
+		if (text.startsWith(QLatin1Char('v'), Qt::CaseInsensitive))
+			text.remove(0, 1);
+
+		QString out;
+		out.reserve(text.size());
+		bool sawDigit = false;
+		for (const QChar c : std::as_const(text))
+		{
+			if (c.isDigit())
+			{
+				out.push_back(c);
+				sawDigit = true;
+				continue;
+			}
+			if (c == QLatin1Char('.') && sawDigit)
+			{
+				out.push_back(c);
+				continue;
+			}
+			break;
+		}
+		while (out.endsWith(QLatin1Char('.')))
+			out.chop(1);
+		return out;
+	}
+
+	QVector<int> versionParts(const QString &text)
+	{
+		QVector<int>  out;
+		const QString core = versionCore(text);
+		if (core.isEmpty())
+			return out;
+		const QStringList parts = core.split(QLatin1Char('.'), Qt::SkipEmptyParts);
+		out.reserve(parts.size());
+		for (const QString &part : parts)
+		{
+			bool      ok = false;
+			const int n  = part.toInt(&ok);
+			out.push_back(ok ? n : 0);
+		}
+		return out;
+	}
+
+	int compareVersions(const QString &left, const QString &right)
+	{
+		const QVector<int> a   = versionParts(left);
+		const QVector<int> b   = versionParts(right);
+		const int          max = qMax(a.size(), b.size());
+		for (int i = 0; i < max; ++i)
+		{
+			const int av = i < a.size() ? a.at(i) : 0;
+			const int bv = i < b.size() ? b.at(i) : 0;
+			if (av < bv)
+				return -1;
+			if (av > bv)
+				return 1;
+		}
+		return 0;
+	}
 
 	const QList<FileAssociationEntry> &fileAssociationEntries()
 	{
@@ -1403,6 +1473,7 @@ static const struct
     {"AppendToLogFiles",                0                       },
     {"AutoConnectWorlds",               1                       },
     {"AutoExpandConfig",                1                       },
+    {"AutoCheckForUpdates",             1                       },
     {"BackupOnUpgrades",                1                       },
     {"FlatToolbars",                    1                       },
     {"AutoLogWorld",                    0                       },
@@ -1426,6 +1497,7 @@ static const struct
     {"OpenWorldsMaximised",             0                       },
     {"WindowTabsStyle",                 0                       },
     {"ReconnectOnLinkFailure",          0                       },
+    {"EnableReloadFeature",             1                       },
     {"RegexpMatchEmpty",                1                       },
     {"ShowGridLinesInListViews",        1                       },
     {"SmoothScrolling",                 0                       },
@@ -1449,7 +1521,9 @@ static const struct
     {"PrinterLeftMargin",               15                      },
     {"PrinterLinesPerPage",             60                      },
     {"PrinterTopMargin",                15                      },
+    {"ReloadMccpDisableTimeoutMs",      500                     },
     {"TimerInterval",                   0                       },
+    {"UpdateCheckIntervalHours",        1                       },
     {"FixedPitchFontSize",              9                       },
     {"TabInsertsTabInMultiLineDialogs", 0                       },
 
@@ -1465,31 +1539,32 @@ static const struct
 
     // option name                              default
 
-    {"AsciiArtFont",              "fonts\\standard.flf"       },
-    {"DefaultAliasesFile",        ""                          },
-    {"DefaultColoursFile",        ""                          },
-    {"DefaultInputFont",          "DejaVu Sans Mono"          },
-    {"DefaultLogFileDirectory",   ".\\logs\\"                 },
-    {"DefaultMacrosFile",         ""                          },
-    {"DefaultNameGenerationFile", "names/names.txt"           },
-    {"DefaultOutputFont",         "DejaVu Sans Mono"          },
-    {"DefaultTimersFile",         ""                          },
-    {"DefaultTriggersFile",       ""                          },
-    {"DefaultWorldFileDirectory", ".\\worlds\\"               },
-    {"NotepadQuoteString",        "> "                        },
-    {"PluginList",                ""                          },
-    {"PluginsDirectory",          R"(.\worlds\plugins\)"      },
-    {"StateFilesDirectory",       R"(.\worlds\plugins\state\)"}, // however see below
-    {"PrinterFont",               "Courier"                   },
-    {"TrayIconFileName",          ""                          },
-    {"WordDelimiters",            ".,()[]\"\'"                },
-    {"WordDelimitersDblClick",    ".,()[]\"\'"                },
-    {"WorldList",                 ""                          },
-    {"LuaScript",                 ""                          },
-    {"Locale",                    "EN"                        },
-    {"FixedPitchFont",            "DejaVu Sans Mono"          },
+    {"AsciiArtFont",                  "fonts\\standard.flf"       },
+    {"DefaultAliasesFile",            ""                          },
+    {"DefaultColoursFile",            ""                          },
+    {"DefaultInputFont",              "DejaVu Sans Mono"          },
+    {"DefaultLogFileDirectory",       ".\\logs\\"                 },
+    {"DefaultMacrosFile",             ""                          },
+    {"DefaultNameGenerationFile",     "names/names.txt"           },
+    {"DefaultOutputFont",             "DejaVu Sans Mono"          },
+    {"DefaultTimersFile",             ""                          },
+    {"DefaultTriggersFile",           ""                          },
+    {"DefaultWorldFileDirectory",     ".\\worlds\\"               },
+    {"NotepadQuoteString",            "> "                        },
+    {"PluginList",                    ""                          },
+    {"PluginsDirectory",              R"(.\worlds\plugins\)"      },
+    {"StateFilesDirectory",           R"(.\worlds\plugins\state\)"}, // however see below
+    {"PrinterFont",                   "Courier"                   },
+    {"TrayIconFileName",              ""                          },
+    {"WordDelimiters",                ".,()[]\"\'"                },
+    {"WordDelimitersDblClick",        ".,()[]\"\'"                },
+    {"WorldList",                     ""                          },
+    {"LuaScript",                     ""                          },
+    {"Locale",                        "EN"                        },
+    {"FixedPitchFont",                "DejaVu Sans Mono"          },
+    {"SkipUpdateNotificationVersion", ""                          },
 
-    {nullptr,                     nullptr                     }  // end of table marker
+    {nullptr,                         nullptr                     }  // end of table marker
 }; // end of table
 
 namespace
@@ -2396,6 +2471,11 @@ void AppController::setMainWindow(MainWindow *window)
 MainWindow *AppController::mainWindow() const
 {
 	return m_mainWindow;
+}
+
+void AppController::checkForUpdatesNow(QWidget *uiParent)
+{
+	requestUpdateCheck(true, uiParent);
 }
 
 void AppController::startWithSplash()
@@ -3503,16 +3583,16 @@ bool AppController::recoverReloadStartupState()
 			ReloadWorldState state;
 			bool             closeSocketFirst{false};
 	};
-	QList<PendingReconnect>   reconnectQueue;
+	QList<PendingReconnect>       reconnectQueue;
 	QList<QPointer<WorldRuntime>> mccpResumeQueue;
-	int                     openedCount       = 0;
-	int                     reattachedCount   = 0;
-	int                     reconnectCount    = 0;
-	int                     openFailures      = 0;
-	int                     adoptFailures     = 0;
-	const bool              verboseReloadLogs = envFlagEnabled("QMUD_RELOAD_VERBOSE");
-	const bool              previousSuppress  = m_suppressAutoConnect;
-	m_suppressAutoConnect                     = true;
+	int                           openedCount       = 0;
+	int                           reattachedCount   = 0;
+	int                           reconnectCount    = 0;
+	int                           openFailures      = 0;
+	int                           adoptFailures     = 0;
+	const bool                    verboseReloadLogs = envFlagEnabled("QMUD_RELOAD_VERBOSE");
+	const bool                    previousSuppress  = m_suppressAutoConnect;
+	m_suppressAutoConnect                           = true;
 
 	for (const ReloadWorldState &worldState : worlds)
 	{
@@ -4356,6 +4436,20 @@ void AppController::applyWindowPreferences()
 	// Icon/tray visibility is handled by applyIconPreferences().
 }
 
+void AppController::applyUpdatePreferences()
+{
+	const bool enableReloadFeature = getGlobalOption(QStringLiteral("EnableReloadFeature")).toInt() != 0;
+	if (m_mainWindow)
+	{
+		if (QAction *reloadAction = m_mainWindow->actionForCommand(QStringLiteral("ReloadQMud")))
+		{
+			reloadAction->setVisible(enableReloadFeature);
+			reloadAction->setEnabled(enableReloadFeature);
+		}
+	}
+	configureUpdateCheckTimer();
+}
+
 void AppController::applyViewPreferences() const
 {
 	if (!m_mainWindow)
@@ -4444,6 +4538,7 @@ void AppController::loadToolbarLayout() const
 void AppController::applyGlobalPreferences()
 {
 	applyWindowPreferences();
+	applyUpdatePreferences();
 	applyViewPreferences();
 	applyConnectionPreferences();
 	applySpellCheckPreferences();
@@ -4467,6 +4562,342 @@ void AppController::applyGlobalPreferences()
 	applyPackagePreferences();
 	applyMiscPreferences();
 	applyRenderingPreferences();
+}
+
+void AppController::configureUpdateCheckTimer()
+{
+	if (!m_updateCheckTimer)
+	{
+		m_updateCheckTimer = new QTimer(this);
+		m_updateCheckTimer->setSingleShot(false);
+		connect(m_updateCheckTimer, &QTimer::timeout, this, [this]() { requestUpdateCheck(false); });
+	}
+
+	const bool autoCheckEnabled = getGlobalOption(QStringLiteral("AutoCheckForUpdates")).toInt() != 0;
+	const int  intervalHours =
+	    qBound(1, getGlobalOption(QStringLiteral("UpdateCheckIntervalHours")).toInt(), 168);
+	const int intervalMs = intervalHours * 60 * 60 * 1000;
+
+	if (!autoCheckEnabled)
+	{
+		m_updateCheckTimer->stop();
+		return;
+	}
+
+	if (m_updateCheckTimer->interval() != intervalMs)
+		m_updateCheckTimer->setInterval(intervalMs);
+	if (!m_updateCheckTimer->isActive())
+		m_updateCheckTimer->start();
+}
+
+void AppController::requestUpdateCheck(const bool manual, QWidget *uiParent)
+{
+	if (manual)
+	{
+		m_updateUiParent = uiParent;
+		if (!m_updateUiParent)
+			m_updateUiParent = QApplication::activeModalWidget();
+	}
+
+	if (m_updateCheckInProgress)
+	{
+		if (manual)
+		{
+			QWidget *uiOwner =
+			    m_updateUiParent ? m_updateUiParent.data() : static_cast<QWidget *>(m_mainWindow);
+			QMessageBox::information(uiOwner, QStringLiteral("QMud Update"),
+			                         QStringLiteral("An update check is already in progress."));
+		}
+		return;
+	}
+
+	if (!m_updateNetworkManager)
+		m_updateNetworkManager = new QNetworkAccessManager(this);
+
+	QNetworkRequest request(QUrl(QString::fromLatin1(kUpdateLatestReleaseUrl)));
+	request.setRawHeader("User-Agent", "QMud");
+	request.setRawHeader("Accept", "application/vnd.github+json");
+
+	QNetworkReply *reply    = m_updateNetworkManager->get(request);
+	m_updateCheckInProgress = true;
+	connect(reply, &QNetworkReply::finished, this,
+	        [this, reply, manual]()
+	        {
+		        const QByteArray payload = reply->readAll();
+		        QString          networkError;
+		        if (reply->error() != QNetworkReply::NoError)
+			        networkError = reply->errorString();
+		        int httpStatus = 0;
+		        if (const QVariant status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+		            status.isValid())
+		        {
+			        httpStatus = status.toInt();
+		        }
+		        reply->deleteLater();
+		        m_updateCheckInProgress = false;
+		        handleUpdateCheckResponse(manual, payload, networkError, httpStatus);
+	        });
+}
+
+void AppController::handleUpdateCheckResponse(const bool manual, const QByteArray &payload,
+                                              const QString &networkError, const int httpStatus)
+{
+	QWidget *uiOwner = nullptr;
+	if (QWidget *activeModal = QApplication::activeModalWidget(); activeModal)
+		uiOwner = activeModal;
+	else if (m_updateUiParent && m_updateUiParent->isVisible())
+		uiOwner = m_updateUiParent.data();
+	else
+		uiOwner = m_mainWindow;
+
+	if (!networkError.isEmpty() || (httpStatus >= 400))
+	{
+		if (manual)
+		{
+			const QString message =
+			    httpStatus > 0
+			        ? QStringLiteral("Update check failed (%1): %2").arg(httpStatus).arg(networkError)
+			        : QStringLiteral("Update check failed: %1").arg(networkError);
+			QMessageBox::warning(uiOwner, QStringLiteral("QMud Update"), message);
+		}
+		return;
+	}
+
+	QJsonParseError     parseError;
+	const QJsonDocument doc = QJsonDocument::fromJson(payload, &parseError);
+	if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+	{
+		if (manual)
+		{
+			QMessageBox::warning(uiOwner, QStringLiteral("QMud Update"),
+			                     QStringLiteral("Failed to parse update response."));
+		}
+		return;
+	}
+
+	const QJsonObject root = doc.object();
+	if (root.value(QStringLiteral("draft")).toBool() || root.value(QStringLiteral("prerelease")).toBool())
+	{
+		setUpdateNowActionVisible(false);
+		m_availableUpdateVersion.clear();
+		m_availableUpdateChangelog.clear();
+		if (manual)
+		{
+			QMessageBox::information(uiOwner, QStringLiteral("QMud Update"),
+			                         QStringLiteral("No stable update is currently available."));
+		}
+		return;
+	}
+
+	QString releaseTag = root.value(QStringLiteral("tag_name")).toString().trimmed();
+	if (releaseTag.isEmpty())
+		releaseTag = root.value(QStringLiteral("name")).toString().trimmed();
+	if (releaseTag.contains(QStringLiteral("-ci"), Qt::CaseInsensitive))
+	{
+		setUpdateNowActionVisible(false);
+		m_availableUpdateVersion.clear();
+		m_availableUpdateChangelog.clear();
+		if (manual)
+		{
+			QMessageBox::information(uiOwner, QStringLiteral("QMud Update"),
+			                         QStringLiteral("No stable update is currently available."));
+		}
+		return;
+	}
+	const QString releaseVersion = versionCore(releaseTag);
+	const QString currentVersion = versionCore(m_version);
+	if (releaseVersion.isEmpty() || currentVersion.isEmpty())
+	{
+		if (manual)
+		{
+			QMessageBox::warning(uiOwner, QStringLiteral("QMud Update"),
+			                     QStringLiteral("Update response did not include a valid version."));
+		}
+		return;
+	}
+
+	if (compareVersions(releaseVersion, currentVersion) <= 0)
+	{
+		setUpdateNowActionVisible(false);
+		m_availableUpdateVersion.clear();
+		m_availableUpdateChangelog.clear();
+		if (manual)
+		{
+			QMessageBox::information(
+			    uiOwner, QStringLiteral("QMud Update"),
+			    QStringLiteral("Your current version (v%1) is up to date.").arg(currentVersion));
+		}
+		return;
+	}
+
+	QString skipVersion =
+	    versionCore(getGlobalOption(QStringLiteral("SkipUpdateNotificationVersion")).toString());
+	if (!skipVersion.isEmpty() && compareVersions(releaseVersion, skipVersion) > 0)
+	{
+		setGlobalOptionString(QStringLiteral("SkipUpdateNotificationVersion"), QString());
+		skipVersion.clear();
+	}
+
+	m_availableUpdateVersion   = releaseVersion;
+	m_availableUpdateChangelog = root.value(QStringLiteral("body")).toString();
+	if (m_availableUpdateChangelog.trimmed().isEmpty())
+	{
+		m_availableUpdateChangelog = QStringLiteral("No changelog text was provided for this release.");
+	}
+
+	const bool isSkippedVersion = !skipVersion.isEmpty() && compareVersions(releaseVersion, skipVersion) == 0;
+	if (isSkippedVersion && !manual)
+	{
+		setUpdateNowActionVisible(false);
+		return;
+	}
+
+	setUpdateNowActionVisible(true);
+	showUpdateAvailableDialog(currentVersion, m_availableUpdateVersion, m_availableUpdateChangelog);
+}
+
+void AppController::showUpdateAvailableDialog(const QString &currentVersion, const QString &version,
+                                              const QString &changelog)
+{
+	QWidget *uiOwner = nullptr;
+	if (QWidget *activeModal = QApplication::activeModalWidget(); activeModal)
+		uiOwner = activeModal;
+	else if (m_updateUiParent && m_updateUiParent->isVisible())
+		uiOwner = m_updateUiParent.data();
+	else
+		uiOwner = m_mainWindow;
+	if (!uiOwner)
+		return;
+
+	if (m_updateAvailableDialog)
+		m_updateAvailableDialog->close();
+
+	auto *dialog = new QDialog(uiOwner);
+	dialog->setAttribute(Qt::WA_DeleteOnClose, true);
+	dialog->setWindowModality(Qt::NonModal);
+	dialog->setWindowFlag(Qt::WindowContextHelpButtonHint, false);
+	dialog->setWindowTitle(QStringLiteral("QMud Update Available"));
+	dialog->setMinimumSize(760, 520);
+
+	auto *layout = new QVBoxLayout(dialog);
+	auto *title = new QLabel(QStringLiteral("A newer QMud version (v%1) is available.").arg(version), dialog);
+	title->setWordWrap(true);
+	layout->addWidget(title);
+	layout->addWidget(new QLabel(QStringLiteral("Changelog:"), dialog));
+
+	auto *changelogView = new QPlainTextEdit(dialog);
+	changelogView->setReadOnly(true);
+	changelogView->setPlainText(changelog);
+	changelogView->setFont(qmudPreferredMonospaceFont());
+	layout->addWidget(changelogView, 1);
+
+	auto *fullChangelogLink = new QLabel(dialog);
+	fullChangelogLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
+	fullChangelogLink->setOpenExternalLinks(true);
+	fullChangelogLink->setWordWrap(true);
+	const QString current = versionCore(currentVersion);
+	const QString target  = versionCore(version);
+	if (!current.isEmpty() && !target.isEmpty())
+	{
+		const QString compareUrl =
+		    QStringLiteral("https://github.com/Nodens-/QMud/compare/v%1...v%2").arg(current, target);
+		fullChangelogLink->setText(QStringLiteral("Full Changelog from v%1: <a href=\"%2\">%2</a>")
+		                               .arg(current.toHtmlEscaped(), compareUrl.toHtmlEscaped()));
+	}
+	else
+	{
+		fullChangelogLink->setText(QStringLiteral("Full Changelog link unavailable for this release."));
+	}
+	layout->addWidget(fullChangelogLink);
+
+	auto *skipVersionCheck = new QCheckBox(QStringLiteral("Do not notify me again for this version"), dialog);
+	const QString currentSkip =
+	    versionCore(getGlobalOption(QStringLiteral("SkipUpdateNotificationVersion")).toString());
+	skipVersionCheck->setChecked(!currentSkip.isEmpty() && compareVersions(currentSkip, version) == 0);
+	layout->addWidget(skipVersionCheck);
+
+	auto *buttonBox   = new QDialogButtonBox(Qt::Horizontal, dialog);
+	auto *updateLater = buttonBox->addButton(QStringLiteral("Update Later"), QDialogButtonBox::RejectRole);
+	auto *updateNow   = buttonBox->addButton(QStringLiteral("Update Now"), QDialogButtonBox::AcceptRole);
+	layout->addWidget(buttonBox);
+
+	m_updateAvailableDialog = dialog;
+	connect(dialog, &QObject::destroyed, this, [this]() { m_updateAvailableDialog = nullptr; });
+	connect(dialog, &QDialog::finished, dialog,
+	        [this, skipVersionCheck, version](const int result)
+	        {
+		        if (result == QDialog::Accepted)
+			        return;
+		        applySkipVersionChoice(version, skipVersionCheck && skipVersionCheck->isChecked());
+	        });
+	connect(updateLater, &QPushButton::clicked, dialog, [dialog]() { dialog->done(QDialog::Rejected); });
+	connect(updateNow, &QPushButton::clicked, dialog,
+	        [this, dialog, skipVersionCheck, version]()
+	        {
+		        applySkipVersionChoice(version, skipVersionCheck && skipVersionCheck->isChecked());
+		        handleUpdateQmudNow();
+		        dialog->done(QDialog::Accepted);
+	        });
+
+	dialog->show();
+	dialog->raise();
+	dialog->activateWindow();
+}
+
+void AppController::setUpdateNowActionVisible(const bool visible) const
+{
+	if (!m_mainWindow)
+		return;
+	if (QAction *updateAction = m_mainWindow->actionForCommand(QStringLiteral("UpdateQmudNow")))
+	{
+		updateAction->setVisible(visible);
+		updateAction->setEnabled(visible);
+	}
+}
+
+void AppController::handleUpdateQmudNow()
+{
+	setUpdateNowActionVisible(false);
+	m_availableUpdateVersion.clear();
+	m_availableUpdateChangelog.clear();
+
+	if (m_updateAvailableDialog)
+		m_updateAvailableDialog->close();
+
+	QWidget *uiOwner = nullptr;
+	if (QWidget *activeModal = QApplication::activeModalWidget(); activeModal)
+		uiOwner = activeModal;
+	else if (m_updateUiParent && m_updateUiParent->isVisible())
+		uiOwner = m_updateUiParent.data();
+	else
+		uiOwner = m_mainWindow;
+	QMessageBox::information(
+	    uiOwner, QStringLiteral("QMud Update"),
+	    QStringLiteral("Automatic update installation will be added in the next implementation phase."));
+}
+
+void AppController::applySkipVersionChoice(const QString &version, const bool skipWhenTrue)
+{
+	const QString normalizedVersion = versionCore(version);
+	if (normalizedVersion.isEmpty())
+		return;
+
+	const QString currentSkip =
+	    versionCore(getGlobalOption(QStringLiteral("SkipUpdateNotificationVersion")).toString());
+	if (skipWhenTrue)
+	{
+		setGlobalOptionString(QStringLiteral("SkipUpdateNotificationVersion"), normalizedVersion);
+	}
+	else if (!currentSkip.isEmpty() && compareVersions(currentSkip, normalizedVersion) == 0)
+	{
+		setGlobalOptionString(QStringLiteral("SkipUpdateNotificationVersion"), QString());
+	}
+
+	if (!m_availableUpdateVersion.isEmpty() &&
+	    compareVersions(versionCore(m_availableUpdateVersion), normalizedVersion) == 0)
+	{
+		setUpdateNowActionVisible(!skipWhenTrue);
+	}
 }
 
 void AppController::reloadGlobalPreferencesForLua()
@@ -5234,8 +5665,14 @@ void AppController::applyFontPreferences() const
 
 void AppController::applyChildWindowPreferences() const
 {
-	const int openWorldsMax = getGlobalOption(QStringLiteral("OpenWorldsMaximised")).toInt();
-	const int tabsStyle     = getGlobalOption(QStringLiteral("WindowTabsStyle")).toInt();
+	const int     openWorldsMax            = getGlobalOption(QStringLiteral("OpenWorldsMaximised")).toInt();
+	const int     tabsStyle                = getGlobalOption(QStringLiteral("WindowTabsStyle")).toInt();
+	WorldRuntime *activeWorldRuntimeBefore = nullptr;
+	if (m_mainWindow)
+	{
+		if (WorldChildWindow *activeWorld = m_mainWindow->activeWorldChildWindow(); activeWorld)
+			activeWorldRuntimeBefore = activeWorld->runtime();
+	}
 	if (m_mainWindow)
 		m_mainWindow->setWindowTabsStyle(tabsStyle);
 	if (openWorldsMax)
@@ -5245,9 +5682,14 @@ void AppController::applyChildWindowPreferences() const
 			if (!m_mainWindow)
 				break;
 			if (WorldChildWindow *child = m_mainWindow->findWorldChildWindow(runtime); child)
-				child->showMaximized();
+			{
+				if (!child->isMaximized())
+					child->showMaximized();
+			}
 		}
 	}
+	if (m_mainWindow && activeWorldRuntimeBefore)
+		m_mainWindow->activateWorldRuntime(activeWorldRuntimeBefore);
 }
 
 void AppController::applyTimerPreferences() const
@@ -6479,6 +6921,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		handleLogSession();
 	else if (cmdName == QStringLiteral("ReloadQMud"))
 		handleReloadQmud();
+	else if (cmdName == QStringLiteral("UpdateQmudNow"))
+		handleUpdateQmudNow();
 	else if (cmdName == QStringLiteral("GameWrapLines"))
 	{
 		if (!m_mainWindow)
@@ -11751,6 +12195,13 @@ void AppController::handleReloadQmud()
 	QMessageBox::information(m_mainWindow, QStringLiteral("Reload QMud"),
 	                         QStringLiteral("Reload QMud is currently available only on Linux and macOS."));
 #else
+	if (getGlobalOption(QStringLiteral("EnableReloadFeature")).toInt() == 0)
+	{
+		QMessageBox::information(m_mainWindow, QStringLiteral("Reload QMud"),
+		                         QStringLiteral("Reload QMud is disabled in global update preferences."));
+		return;
+	}
+
 	if (m_reloadInProgress)
 	{
 		QMessageBox::information(m_mainWindow, QStringLiteral("Reload QMud"),
@@ -11764,9 +12215,10 @@ void AppController::handleReloadQmud()
 		return;
 	}
 
-	const bool    autoConfirmReload    = envFlagEnabled("QMUD_RELOAD_ASSUME_YES");
-	const bool    verboseReloadLogs    = envFlagEnabled("QMUD_RELOAD_VERBOSE");
-	constexpr int mccpDisableTimeoutMs = kReloadMccpDisableTimeoutMs;
+	const bool autoConfirmReload    = envFlagEnabled("QMUD_RELOAD_ASSUME_YES");
+	const bool verboseReloadLogs    = envFlagEnabled("QMUD_RELOAD_VERBOSE");
+	const int  configuredTimeout    = getGlobalOption(QStringLiteral("ReloadMccpDisableTimeoutMs")).toInt();
+	const int  mccpDisableTimeoutMs = qBound(100, configuredTimeout, 1000);
 	if (!autoConfirmReload)
 	{
 		if (QMessageBox::question(
