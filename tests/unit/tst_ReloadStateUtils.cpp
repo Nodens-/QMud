@@ -60,7 +60,6 @@ class tst_ReloadStateUtils : public QObject
 			snapshot.schemaVersion    = 1;
 			snapshot.createdAtUtc     = QDateTime::currentDateTimeUtc();
 			snapshot.reloadToken      = QStringLiteral("reload-token");
-			snapshot.sourcePid        = 1234;
 			snapshot.targetExecutable = QStringLiteral("/tmp/QMud");
 			snapshot.arguments        = {QStringLiteral("--foo"), QStringLiteral("--bar")};
 
@@ -91,7 +90,6 @@ class tst_ReloadStateUtils : public QObject
 
 			QCOMPARE(parsed.schemaVersion, 1);
 			QCOMPARE(parsed.reloadToken, QStringLiteral("reload-token"));
-			QCOMPARE(parsed.sourcePid, 1234);
 			QCOMPARE(parsed.targetExecutable, QStringLiteral("/tmp/QMud"));
 			QCOMPARE(parsed.arguments.size(), 2);
 			QCOMPARE(parsed.worlds.size(), 1);
@@ -156,7 +154,6 @@ class tst_ReloadStateUtils : public QObject
   "schema_version": 999,
   "created_at_utc": "2026-03-17T12:00:00.000Z",
   "reload_token": "abc",
-  "source_pid": 1,
   "target_executable": "/tmp/QMud",
   "arguments": [],
   "worlds": []
@@ -184,7 +181,6 @@ class tst_ReloadStateUtils : public QObject
   "schema_version": 1,
   "created_at_utc": "2026-03-17T12:00:00.000Z",
   "reload_token": "abc",
-  "source_pid": 1,
   "target_executable": "/tmp/QMud",
   "arguments": [],
   "worlds": [
@@ -229,7 +225,6 @@ class tst_ReloadStateUtils : public QObject
   "schema_version": 1,
   "created_at_utc": "2026-03-17T12:00:00.000Z",
   "reload_token": "abc",
-  "source_pid": 1,
   "target_executable": "/tmp/QMud",
   "arguments": [],
   "worlds": [
@@ -274,7 +269,6 @@ class tst_ReloadStateUtils : public QObject
   "schema_version": 1,
   "created_at_utc": "2026-03-17T12:00:00.000Z",
   "reload_token": "abc",
-  "source_pid": 1,
   "target_executable": "/tmp/QMud",
   "arguments": [],
   "worlds": [
@@ -327,12 +321,10 @@ class tst_ReloadStateUtils : public QObject
 			const QString       executable = QStringLiteral("/tmp/qmud-test-executable");
 			ReloadStateSnapshot snapshot;
 			snapshot.reloadToken      = QStringLiteral("token");
-			snapshot.sourcePid        = 4242;
 			snapshot.targetExecutable = executable;
 
 			const ReloadStartupValidationInput input{
 			    QStringLiteral("token"),
-			    4242,
 			    executable,
 			};
 			QString error;
@@ -345,30 +337,10 @@ class tst_ReloadStateUtils : public QObject
 			const QString       executable = QStringLiteral("/tmp/qmud-test-executable");
 			ReloadStateSnapshot snapshot;
 			snapshot.reloadToken      = QStringLiteral("token-a");
-			snapshot.sourcePid        = 4242;
 			snapshot.targetExecutable = executable;
 
 			const ReloadStartupValidationInput input{
 			    QStringLiteral("token-b"),
-			    4242,
-			    executable,
-			};
-			QString error;
-			QVERIFY(!validateReloadStartupSnapshot(snapshot, input, &error));
-			QVERIFY(!error.isEmpty());
-		}
-
-		void validateReloadStartupSnapshotRejectsPidMismatch()
-		{
-			const QString       executable = QStringLiteral("/tmp/qmud-test-executable");
-			ReloadStateSnapshot snapshot;
-			snapshot.reloadToken      = QStringLiteral("token");
-			snapshot.sourcePid        = 4242;
-			snapshot.targetExecutable = executable;
-
-			const ReloadStartupValidationInput input{
-			    QStringLiteral("token"),
-			    5252,
 			    executable,
 			};
 			QString error;
@@ -382,12 +354,10 @@ class tst_ReloadStateUtils : public QObject
 			const QString       executableB = QStringLiteral("/tmp/qmud-test-executable-b");
 			ReloadStateSnapshot snapshot;
 			snapshot.reloadToken      = QStringLiteral("token");
-			snapshot.sourcePid        = 4242;
 			snapshot.targetExecutable = executableA;
 
 			const ReloadStartupValidationInput input{
 			    QStringLiteral("token"),
-			    4242,
 			    executableB,
 			};
 			QString error;
@@ -405,7 +375,6 @@ class tst_ReloadStateUtils : public QObject
 			snapshot.schemaVersion    = 1;
 			snapshot.createdAtUtc     = QDateTime::currentDateTimeUtc();
 			snapshot.reloadToken      = QStringLiteral("single-use-token");
-			snapshot.sourcePid        = 7777;
 			snapshot.targetExecutable = QStringLiteral("/tmp/qmud-single-use");
 
 			QString error;
@@ -416,7 +385,6 @@ class tst_ReloadStateUtils : public QObject
 			QVERIFY(readReloadStateSnapshot(path, &parsed, &error));
 			const ReloadStartupValidationInput validationInput{
 			    QStringLiteral("single-use-token"),
-			    7777,
 			    QStringLiteral("/tmp/qmud-single-use"),
 			};
 			QVERIFY(validateReloadStartupSnapshot(parsed, validationInput, &error));
@@ -434,7 +402,6 @@ class tst_ReloadStateUtils : public QObject
 			snapshot.schemaVersion    = 1;
 			snapshot.createdAtUtc     = QDateTime::currentDateTimeUtc();
 			snapshot.reloadToken      = QStringLiteral("consume-token");
-			snapshot.sourcePid        = 3030;
 			snapshot.targetExecutable = QStringLiteral("/tmp/qmud-consume");
 
 			QString error;
@@ -443,7 +410,6 @@ class tst_ReloadStateUtils : public QObject
 
 			const ReloadStartupValidationInput input{
 			    QStringLiteral("consume-token"),
-			    3030,
 			    QStringLiteral("/tmp/qmud-consume"),
 			};
 			ReloadStateSnapshot parsed;
@@ -468,7 +434,6 @@ class tst_ReloadStateUtils : public QObject
   "schema_version": 999,
   "created_at_utc": "2026-03-17T12:00:00.000Z",
   "reload_token": "bad",
-  "source_pid": 1,
   "target_executable": "/tmp/QMud",
   "arguments": [],
   "worlds": []
@@ -480,7 +445,6 @@ class tst_ReloadStateUtils : public QObject
 
 			const ReloadStartupValidationInput input{
 			    QStringLiteral("bad"),
-			    1,
 			    QStringLiteral("/tmp/QMud"),
 			};
 			ReloadStateSnapshot parsed;
@@ -503,7 +467,6 @@ class tst_ReloadStateUtils : public QObject
 			snapshot.schemaVersion    = 1;
 			snapshot.createdAtUtc     = QDateTime::currentDateTimeUtc();
 			snapshot.reloadToken      = QStringLiteral("token-a");
-			snapshot.sourcePid        = 4242;
 			snapshot.targetExecutable = QStringLiteral("/tmp/qmud-token-check");
 
 			QString error;
@@ -512,7 +475,6 @@ class tst_ReloadStateUtils : public QObject
 
 			const ReloadStartupValidationInput input{
 			    QStringLiteral("token-b"),
-			    4242,
 			    QStringLiteral("/tmp/qmud-token-check"),
 			};
 			ReloadStateSnapshot parsed;

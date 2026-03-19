@@ -27,6 +27,7 @@
 #include "ReloadRecoveryUtils.h"
 #include "ReloadStateUtils.h"
 #include "SqliteCompat.h"
+#include "UpdateCheckUtils.h"
 #include "Version.h"
 #include "WorldChildWindow.h"
 #include "WorldDocument.h"
@@ -68,6 +69,8 @@ extern "C"
 #include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QCryptographicHash>
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDialog>
@@ -90,6 +93,8 @@ extern "C"
 #include <QHostInfo>
 #include <QImageReader>
 #include <QInputDialog>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeySequenceEdit>
@@ -120,13 +125,17 @@ extern "C"
 #include <QSpinBox>
 #include <QSplashScreen>
 #include <QStandardPaths>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QSysInfo>
 #include <QTableWidget>
+#include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QTextBrowser>
 #include <QTextDocument>
 #include <QTextEdit>
 #include <QTextStream>
 #include <QThread>
+#include <QThreadPool>
 #include <QTimer>
 #include <QTranslator>
 #include <QUrl>
@@ -138,6 +147,8 @@ extern "C"
 #include <cstring>
 #include <ctime>
 #include <exception>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <limits>
 #include <memory>
 #include <vector>
 #include <zlib.h>
@@ -186,67 +197,289 @@ namespace
 	constexpr char   kReloadLogTag[]             = "[ReloadQMud]";
 	constexpr char   kUpdateLatestReleaseUrl[] = "https://api.github.com/repos/Nodens-/QMud/releases/latest";
 
-	QString          versionCore(QString text)
-	{
-		text = text.trimmed();
-		if (text.startsWith(QLatin1Char('v'), Qt::CaseInsensitive))
-			text.remove(0, 1);
+	using UpdateInstallTarget = QMudUpdateCheck::InstallTarget;
+	using QMudUpdateCheck::compareVersions;
+	using QMudUpdateCheck::normalizeSha256Digest;
+	using QMudUpdateCheck::versionCore;
 
-		QString out;
-		out.reserve(text.size());
-		bool sawDigit = false;
-		for (const QChar c : std::as_const(text))
+	UpdateInstallTarget detectUpdateInstallTarget()
+	{
+		const auto updateDisabledByEnvironment = []() -> bool
 		{
-			if (c.isDigit())
-			{
-				out.push_back(c);
-				sawDigit = true;
-				continue;
-			}
-			if (c == QLatin1Char('.') && sawDigit)
-			{
-				out.push_back(c);
-				continue;
-			}
-			break;
-		}
-		while (out.endsWith(QLatin1Char('.')))
-			out.chop(1);
-		return out;
+			if (!qEnvironmentVariableIsSet("QMUD_DISABLE_UPDATE"))
+				return false;
+			const QString value = qEnvironmentVariable("QMUD_DISABLE_UPDATE").trimmed().toLower();
+			if (value.isEmpty())
+				return true;
+			return value != QStringLiteral("0") && value != QStringLiteral("false") &&
+			       value != QStringLiteral("no") && value != QStringLiteral("off") &&
+			       value != QStringLiteral("n");
+		};
+		if (updateDisabledByEnvironment())
+			return UpdateInstallTarget::Unsupported;
+#ifdef Q_OS_MACOS
+		return UpdateInstallTarget::MacBundle;
+#elif defined(Q_OS_LINUX)
+		return qEnvironmentVariable("APPIMAGE").trimmed().isEmpty() ? UpdateInstallTarget::Unsupported
+		                                                            : UpdateInstallTarget::LinuxAppImage;
+#else
+		return UpdateInstallTarget::Unsupported;
+#endif
 	}
 
-	QVector<int> versionParts(const QString &text)
+	QString updateNotSupportedMessage()
 	{
-		QVector<int>  out;
-		const QString core = versionCore(text);
-		if (core.isEmpty())
-			return out;
-		const QStringList parts = core.split(QLatin1Char('.'), Qt::SkipEmptyParts);
-		out.reserve(parts.size());
-		for (const QString &part : parts)
+		const auto updateDisabledByEnvironment = []() -> bool
 		{
-			bool      ok = false;
-			const int n  = part.toInt(&ok);
-			out.push_back(ok ? n : 0);
+			if (!qEnvironmentVariableIsSet("QMUD_DISABLE_UPDATE"))
+				return false;
+			const QString value = qEnvironmentVariable("QMUD_DISABLE_UPDATE").trimmed().toLower();
+			if (value.isEmpty())
+				return true;
+			return value != QStringLiteral("0") && value != QStringLiteral("false") &&
+			       value != QStringLiteral("no") && value != QStringLiteral("off") &&
+			       value != QStringLiteral("n");
+		};
+		if (updateDisabledByEnvironment())
+		{
+			return QStringLiteral(
+			    "Automatic updates are disabled by QMUD_DISABLE_UPDATE environment setting.");
 		}
-		return out;
+#ifdef Q_OS_WIN
+		return QStringLiteral(
+		    "Automatic updates are disabled on Windows until installer-based updates are available.");
+#elif defined(Q_OS_LINUX)
+		return QStringLiteral("Automatic updates are available only for AppImage builds on Linux.");
+#else
+		return QStringLiteral("Automatic updates are not supported on this platform.");
+#endif
 	}
 
-	int compareVersions(const QString &left, const QString &right)
+	bool computeFileSha256(const QString &filePath, QString *sha256Hex, QString *errorMessage)
 	{
-		const QVector<int> a   = versionParts(left);
-		const QVector<int> b   = versionParts(right);
-		const int          max = qMax(a.size(), b.size());
-		for (int i = 0; i < max; ++i)
+		if (errorMessage)
+			errorMessage->clear();
+		if (sha256Hex)
+			sha256Hex->clear();
+		QFile file(filePath);
+		if (!file.open(QIODevice::ReadOnly))
 		{
-			const int av = i < a.size() ? a.at(i) : 0;
-			const int bv = i < b.size() ? b.at(i) : 0;
-			if (av < bv)
-				return -1;
-			if (av > bv)
-				return 1;
+			if (errorMessage)
+				*errorMessage =
+				    QStringLiteral("Unable to open %1 for checksum: %2").arg(filePath, file.errorString());
+			return false;
 		}
-		return 0;
+		QCryptographicHash hash(QCryptographicHash::Sha256);
+		while (!file.atEnd())
+		{
+			const QByteArray chunk = file.read(1024 * 1024);
+			if (chunk.isEmpty() && file.error() != QFile::NoError)
+			{
+				if (errorMessage)
+				{
+					*errorMessage = QStringLiteral("Failed to read %1 for checksum: %2")
+					                    .arg(filePath, file.errorString());
+				}
+				return false;
+			}
+			hash.addData(chunk);
+		}
+		const QString digest = QString::fromLatin1(hash.result().toHex());
+		if (sha256Hex)
+			*sha256Hex = digest;
+		return true;
+	}
+
+	bool removePathIfExists(const QString &path, QString *errorMessage)
+	{
+		if (errorMessage)
+			errorMessage->clear();
+		if (path.trimmed().isEmpty())
+		{
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Path is empty.");
+			return false;
+		}
+
+		const QFileInfo info(path);
+		if (!info.exists() && !info.isSymLink())
+			return true;
+
+		if (info.isDir() && !info.isSymLink())
+		{
+			QDir dir(path);
+			if (!dir.removeRecursively())
+			{
+				if (errorMessage)
+					*errorMessage = QStringLiteral("Failed to remove directory: %1").arg(path);
+				return false;
+			}
+			return true;
+		}
+
+		if (!QFile::remove(path))
+		{
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Failed to remove file: %1").arg(path);
+			return false;
+		}
+		return true;
+	}
+
+	bool replaceFileWithDownloadedPayload(const QString &downloadedFilePath, const QString &destinationPath,
+	                                      const QFileDevice::Permissions destinationPermissions,
+	                                      QString                       *errorMessage)
+	{
+		if (errorMessage)
+			errorMessage->clear();
+		const QFileInfo sourceInfo(downloadedFilePath);
+		if (!sourceInfo.exists() || !sourceInfo.isFile())
+		{
+			if (errorMessage)
+			{
+				*errorMessage =
+				    QStringLiteral("Downloaded package file is missing: %1").arg(downloadedFilePath);
+			}
+			return false;
+		}
+
+		const QFileInfo destinationInfo(destinationPath);
+		const QString   destinationDir = destinationInfo.absolutePath();
+		if (!QDir().mkpath(destinationDir))
+		{
+			if (errorMessage)
+				*errorMessage =
+				    QStringLiteral("Unable to create destination directory: %1").arg(destinationDir);
+			return false;
+		}
+
+		const QString stagedPath = QDir(destinationDir)
+		                               .filePath(QStringLiteral(".qmud.update.%1.%2")
+		                                             .arg(QCoreApplication::applicationPid())
+		                                             .arg(destinationInfo.fileName()));
+		const QString backupPath =
+		    QDir(destinationDir)
+		        .filePath(QStringLiteral(".qmud.update.backup.%1").arg(destinationInfo.fileName()));
+		QString ignoredError;
+		(void)removePathIfExists(stagedPath, &ignoredError);
+		(void)removePathIfExists(backupPath, &ignoredError);
+
+		if (!QFile::copy(downloadedFilePath, stagedPath))
+		{
+			if (errorMessage)
+			{
+				*errorMessage = QStringLiteral("Failed to stage update payload from %1 to %2.")
+				                    .arg(downloadedFilePath, stagedPath);
+			}
+			return false;
+		}
+
+		QFileDevice::Permissions finalPermissions = destinationPermissions;
+		if (finalPermissions == QFileDevice::Permissions())
+			finalPermissions = QFile::permissions(downloadedFilePath);
+		if (finalPermissions != QFileDevice::Permissions())
+			QFile::setPermissions(stagedPath, finalPermissions);
+
+		const bool hadExistingDestination = QFileInfo::exists(destinationPath);
+		if (hadExistingDestination && !QFile::rename(destinationPath, backupPath))
+		{
+			(void)removePathIfExists(stagedPath, &ignoredError);
+			if (errorMessage)
+				*errorMessage =
+				    QStringLiteral("Failed to stage existing file for replacement: %1").arg(destinationPath);
+			return false;
+		}
+
+		if (!QFile::rename(stagedPath, destinationPath))
+		{
+			if (!QFile::copy(stagedPath, destinationPath))
+			{
+				(void)removePathIfExists(stagedPath, &ignoredError);
+				if (hadExistingDestination)
+					(void)QFile::rename(backupPath, destinationPath);
+				if (errorMessage)
+					*errorMessage = QStringLiteral("Failed to place updated file: %1").arg(destinationPath);
+				return false;
+			}
+			QFile::remove(stagedPath);
+		}
+		if (hadExistingDestination)
+			(void)removePathIfExists(backupPath, &ignoredError);
+		return true;
+	}
+
+	QString findContainingAppBundlePath()
+	{
+		QDir currentDir = QFileInfo(QCoreApplication::applicationFilePath()).absoluteDir();
+		while (true)
+		{
+			if (currentDir.dirName().endsWith(QStringLiteral(".app"), Qt::CaseInsensitive))
+				return currentDir.absolutePath();
+			if (!currentDir.cdUp())
+				return {};
+		}
+	}
+
+	QString findExtractedAppBundlePath(const QString &rootPath)
+	{
+		const QFileInfo rootInfo(rootPath);
+		if (rootInfo.exists() && rootInfo.isDir() &&
+		    rootInfo.fileName().endsWith(QStringLiteral(".app"), Qt::CaseInsensitive))
+		{
+			return rootInfo.absoluteFilePath();
+		}
+
+		QString      firstMatch;
+		QDirIterator it(rootPath, QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+		while (it.hasNext())
+		{
+			const QString bundlePath = it.next();
+			const QString bundleName = QFileInfo(bundlePath).fileName();
+			if (!bundleName.endsWith(QStringLiteral(".app"), Qt::CaseInsensitive))
+				continue;
+			if (bundleName.compare(QStringLiteral("QMud.app"), Qt::CaseInsensitive) == 0)
+				return bundlePath;
+			if (firstMatch.isEmpty())
+				firstMatch = bundlePath;
+		}
+		return firstMatch;
+	}
+
+	bool runUpdateHelperCommand(const QString &program, const QStringList &arguments, const int timeoutMs,
+	                            QString *errorMessage)
+	{
+		if (errorMessage)
+			errorMessage->clear();
+		QProcess process;
+		process.start(program, arguments);
+		if (!process.waitForStarted(10000))
+		{
+			if (errorMessage)
+			{
+				*errorMessage = QStringLiteral("Failed to start helper command %1: %2")
+				                    .arg(program, process.errorString());
+			}
+			return false;
+		}
+		if (!process.waitForFinished(timeoutMs))
+		{
+			process.kill();
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Helper command timed out: %1").arg(program);
+			return false;
+		}
+		if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+		{
+			const QString stderrText = QString::fromUtf8(process.readAllStandardError()).trimmed();
+			const QString stdoutText = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+			QString       detail     = !stderrText.isEmpty() ? stderrText : stdoutText;
+			if (detail.isEmpty())
+				detail = QStringLiteral("exit code %1").arg(process.exitCode());
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Helper command failed (%1): %2").arg(program, detail);
+			return false;
+		}
+		return true;
 	}
 
 	const QList<FileAssociationEntry> &fileAssociationEntries()
@@ -642,6 +875,47 @@ namespace
 	{
 		return value == QStringLiteral("1") || value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
 		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+	}
+
+	QString ensureWorldFilePathForRestartSave(WorldRuntime *runtime, const AppController &app)
+	{
+		QString filePath = runtime ? runtime->worldFilePath() : QString();
+		if (!runtime || !filePath.trimmed().isEmpty())
+			return filePath;
+
+		QString baseName =
+		    runtime->worldAttributes().value(QStringLiteral("name"), QStringLiteral("World")).trimmed();
+		if (baseName.isEmpty())
+			baseName = QStringLiteral("World");
+		static const auto invalid = QStringLiteral("<>\"|?:#%;/\\");
+		for (const QChar &ch : invalid)
+			baseName.replace(ch, QLatin1Char('_'));
+		if (!baseName.endsWith(QStringLiteral(".qdl"), Qt::CaseInsensitive))
+			baseName += QStringLiteral(".qdl");
+		baseName = QMudFileExtensions::replaceOrAppendExtension(baseName, QStringLiteral("qdl"));
+
+		QString baseDir = app.defaultWorldDirectory();
+		if (baseDir.isEmpty())
+			baseDir = app.makeAbsolutePath(QStringLiteral("."));
+		if (baseDir.isEmpty())
+			baseDir = QCoreApplication::applicationDirPath();
+		const QDir dir(baseDir);
+		dir.mkpath(QStringLiteral("."));
+		filePath = dir.filePath(baseName);
+		runtime->setWorldFilePath(filePath);
+		return filePath;
+	}
+
+	QString worldDisplayNameForRestartSave(const WorldWindowDescriptor &entry)
+	{
+		QString name;
+		if (entry.runtime)
+			name = entry.runtime->worldAttributes().value(QStringLiteral("name")).trimmed();
+		if (name.isEmpty() && entry.window)
+			name = entry.window->windowTitle().trimmed();
+		if (name.isEmpty())
+			name = QStringLiteral("Untitled");
+		return name;
 	}
 
 	int hexDigitValue(const char ch)
@@ -2478,6 +2752,18 @@ void AppController::checkForUpdatesNow(QWidget *uiParent)
 	requestUpdateCheck(true, uiParent);
 }
 
+bool AppController::isUpdateMechanismAvailable()
+{
+	return detectUpdateInstallTarget() != UpdateInstallTarget::Unsupported;
+}
+
+QString AppController::updateMechanismUnavailableReason()
+{
+	if (isUpdateMechanismAvailable())
+		return {};
+	return updateNotSupportedMessage();
+}
+
 void AppController::startWithSplash()
 {
 	if (m_startupFinalized)
@@ -2531,6 +2817,58 @@ QVector<WorldRuntime *> AppController::activeWorldRuntimes() const
 			runtimes.push_back(entry.runtime);
 	}
 	return runtimes;
+}
+
+bool AppController::saveDirtyAutoSaveWorldsBeforeRestart(QString *errorMessage) const
+{
+	if (errorMessage)
+		errorMessage->clear();
+
+	const MainWindowHost *host = resolveMainWindowHost(m_mainWindow);
+	if (!host)
+		return true;
+
+	const QVector<WorldWindowDescriptor> entries = host->worldWindowDescriptors();
+	for (const WorldWindowDescriptor &entry : entries)
+	{
+		WorldRuntime *runtime = entry.runtime;
+		if (!runtime)
+			continue;
+
+		const QMap<QString, QString> &attrs = runtime->worldAttributes();
+		if (!isEnabledFlag(attrs.value(QStringLiteral("save_world_automatically"))))
+			continue;
+		if (!runtime->worldFileModified() && !runtime->variablesChanged())
+			continue;
+
+		const QString worldName = worldDisplayNameForRestartSave(entry);
+		const QString filePath  = ensureWorldFilePathForRestartSave(runtime, *this);
+		if (filePath.trimmed().isEmpty())
+		{
+			if (errorMessage)
+			{
+				*errorMessage =
+				    QStringLiteral("Unable to determine save path for world \"%1\".").arg(worldName);
+			}
+			return false;
+		}
+
+		QString saveError;
+		if (!runtime->saveWorldFile(filePath, &saveError))
+		{
+			if (errorMessage)
+			{
+				*errorMessage =
+				    QStringLiteral("Unable to save world \"%1\" before restart: %2")
+				        .arg(worldName, saveError.isEmpty() ? QStringLiteral("Unknown error.") : saveError);
+			}
+			return false;
+		}
+		runtime->setVariablesChanged(false);
+		runtime->setWorldFileModified(false);
+	}
+
+	return true;
 }
 
 void AppController::detectReloadStartupArguments()
@@ -3549,7 +3887,6 @@ bool AppController::recoverReloadStartupState()
 	ReloadStateSnapshot                snapshot;
 	const ReloadStartupValidationInput validationInput{
 	    m_reloadTokenArg.trimmed(),
-	    static_cast<qint64>(QCoreApplication::applicationPid()),
 	    QCoreApplication::applicationFilePath(),
 	};
 	QString error;
@@ -4573,6 +4910,23 @@ void AppController::configureUpdateCheckTimer()
 		connect(m_updateCheckTimer, &QTimer::timeout, this, [this]() { requestUpdateCheck(false); });
 	}
 
+	const auto clearDiscoveredUpdateState = [this]()
+	{
+		m_availableUpdateVersion.clear();
+		m_availableUpdateChangelog.clear();
+		m_availableUpdateAssetUrl.clear();
+		m_availableUpdateAssetName.clear();
+		m_availableUpdateAssetSha256.clear();
+	};
+
+	if (detectUpdateInstallTarget() == UpdateInstallTarget::Unsupported)
+	{
+		m_updateCheckTimer->stop();
+		setUpdateNowActionVisible(false);
+		clearDiscoveredUpdateState();
+		return;
+	}
+
 	const bool autoCheckEnabled = getGlobalOption(QStringLiteral("AutoCheckForUpdates")).toInt() != 0;
 	const int  intervalHours =
 	    qBound(1, getGlobalOption(QStringLiteral("UpdateCheckIntervalHours")).toInt(), 168);
@@ -4597,6 +4951,42 @@ void AppController::requestUpdateCheck(const bool manual, QWidget *uiParent)
 		m_updateUiParent = uiParent;
 		if (!m_updateUiParent)
 			m_updateUiParent = QApplication::activeModalWidget();
+	}
+
+	if (m_updatePackageDownloadInProgress)
+	{
+		if (manual)
+		{
+			QWidget *uiOwner =
+			    m_updateUiParent ? m_updateUiParent.data() : static_cast<QWidget *>(m_mainWindow);
+			QMessageBox::information(uiOwner, QStringLiteral("QMud Update"),
+			                         QStringLiteral("An update installation is already in progress."));
+		}
+		return;
+	}
+
+	const auto clearDiscoveredUpdateState = [this]()
+	{
+		m_availableUpdateVersion.clear();
+		m_availableUpdateChangelog.clear();
+		m_availableUpdateAssetUrl.clear();
+		m_availableUpdateAssetName.clear();
+		m_availableUpdateAssetSha256.clear();
+	};
+
+	if (detectUpdateInstallTarget() == UpdateInstallTarget::Unsupported)
+	{
+		setUpdateNowActionVisible(false);
+		clearDiscoveredUpdateState();
+		if (m_updateCheckTimer)
+			m_updateCheckTimer->stop();
+		if (manual)
+		{
+			QWidget *uiOwner =
+			    m_updateUiParent ? m_updateUiParent.data() : static_cast<QWidget *>(m_mainWindow);
+			QMessageBox::information(uiOwner, QStringLiteral("QMud Update"), updateNotSupportedMessage());
+		}
+		return;
 	}
 
 	if (m_updateCheckInProgress)
@@ -4642,6 +5032,15 @@ void AppController::requestUpdateCheck(const bool manual, QWidget *uiParent)
 void AppController::handleUpdateCheckResponse(const bool manual, const QByteArray &payload,
                                               const QString &networkError, const int httpStatus)
 {
+	const auto clearDiscoveredUpdateState = [this]()
+	{
+		m_availableUpdateVersion.clear();
+		m_availableUpdateChangelog.clear();
+		m_availableUpdateAssetUrl.clear();
+		m_availableUpdateAssetName.clear();
+		m_availableUpdateAssetSha256.clear();
+	};
+
 	QWidget *uiOwner = nullptr;
 	if (QWidget *activeModal = QApplication::activeModalWidget(); activeModal)
 		uiOwner = activeModal;
@@ -4663,64 +5062,43 @@ void AppController::handleUpdateCheckResponse(const bool manual, const QByteArra
 		return;
 	}
 
-	QJsonParseError     parseError;
-	const QJsonDocument doc = QJsonDocument::fromJson(payload, &parseError);
-	if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+	const QString currentVersion = versionCore(m_version);
+	const QString skipVersion =
+	    versionCore(getGlobalOption(QStringLiteral("SkipUpdateNotificationVersion")).toString());
+
+	const QMudUpdateCheck::ReleaseEvaluationResult evaluation = QMudUpdateCheck::evaluateLatestReleasePayload(
+	    payload, currentVersion, skipVersion, detectUpdateInstallTarget());
+	if (evaluation.clearSkipVersion)
+		setGlobalOptionString(QStringLiteral("SkipUpdateNotificationVersion"), QString());
+
+	switch (evaluation.status)
 	{
+	case QMudUpdateCheck::ReleaseEvaluationStatus::ParseError:
 		if (manual)
 		{
 			QMessageBox::warning(uiOwner, QStringLiteral("QMud Update"),
 			                     QStringLiteral("Failed to parse update response."));
 		}
 		return;
-	}
-
-	const QJsonObject root = doc.object();
-	if (root.value(QStringLiteral("draft")).toBool() || root.value(QStringLiteral("prerelease")).toBool())
-	{
+	case QMudUpdateCheck::ReleaseEvaluationStatus::NoStableRelease:
 		setUpdateNowActionVisible(false);
-		m_availableUpdateVersion.clear();
-		m_availableUpdateChangelog.clear();
+		clearDiscoveredUpdateState();
 		if (manual)
 		{
 			QMessageBox::information(uiOwner, QStringLiteral("QMud Update"),
 			                         QStringLiteral("No stable update is currently available."));
 		}
 		return;
-	}
-
-	QString releaseTag = root.value(QStringLiteral("tag_name")).toString().trimmed();
-	if (releaseTag.isEmpty())
-		releaseTag = root.value(QStringLiteral("name")).toString().trimmed();
-	if (releaseTag.contains(QStringLiteral("-ci"), Qt::CaseInsensitive))
-	{
-		setUpdateNowActionVisible(false);
-		m_availableUpdateVersion.clear();
-		m_availableUpdateChangelog.clear();
-		if (manual)
-		{
-			QMessageBox::information(uiOwner, QStringLiteral("QMud Update"),
-			                         QStringLiteral("No stable update is currently available."));
-		}
-		return;
-	}
-	const QString releaseVersion = versionCore(releaseTag);
-	const QString currentVersion = versionCore(m_version);
-	if (releaseVersion.isEmpty() || currentVersion.isEmpty())
-	{
+	case QMudUpdateCheck::ReleaseEvaluationStatus::InvalidVersion:
 		if (manual)
 		{
 			QMessageBox::warning(uiOwner, QStringLiteral("QMud Update"),
 			                     QStringLiteral("Update response did not include a valid version."));
 		}
 		return;
-	}
-
-	if (compareVersions(releaseVersion, currentVersion) <= 0)
-	{
+	case QMudUpdateCheck::ReleaseEvaluationStatus::UpToDate:
 		setUpdateNowActionVisible(false);
-		m_availableUpdateVersion.clear();
-		m_availableUpdateChangelog.clear();
+		clearDiscoveredUpdateState();
 		if (manual)
 		{
 			QMessageBox::information(
@@ -4728,25 +5106,33 @@ void AppController::handleUpdateCheckResponse(const bool manual, const QByteArra
 			    QStringLiteral("Your current version (v%1) is up to date.").arg(currentVersion));
 		}
 		return;
+	case QMudUpdateCheck::ReleaseEvaluationStatus::NoCompatibleAsset:
+		setUpdateNowActionVisible(false);
+		clearDiscoveredUpdateState();
+		if (manual)
+		{
+			QMessageBox::information(
+			    uiOwner, QStringLiteral("QMud Update"),
+			    QStringLiteral("A newer version (v%1) is available, but no compatible update package was "
+			                   "found for this platform.")
+			        .arg(evaluation.releaseVersion));
+		}
+		return;
+	case QMudUpdateCheck::ReleaseEvaluationStatus::UpdateAvailable:
+		break;
 	}
 
-	QString skipVersion =
-	    versionCore(getGlobalOption(QStringLiteral("SkipUpdateNotificationVersion")).toString());
-	if (!skipVersion.isEmpty() && compareVersions(releaseVersion, skipVersion) > 0)
-	{
-		setGlobalOptionString(QStringLiteral("SkipUpdateNotificationVersion"), QString());
-		skipVersion.clear();
-	}
-
-	m_availableUpdateVersion   = releaseVersion;
-	m_availableUpdateChangelog = root.value(QStringLiteral("body")).toString();
+	m_availableUpdateVersion     = evaluation.releaseVersion;
+	m_availableUpdateChangelog   = evaluation.changelog;
+	m_availableUpdateAssetUrl    = evaluation.asset.url;
+	m_availableUpdateAssetName   = evaluation.asset.name;
+	m_availableUpdateAssetSha256 = evaluation.asset.sha256;
 	if (m_availableUpdateChangelog.trimmed().isEmpty())
 	{
 		m_availableUpdateChangelog = QStringLiteral("No changelog text was provided for this release.");
 	}
 
-	const bool isSkippedVersion = !skipVersion.isEmpty() && compareVersions(releaseVersion, skipVersion) == 0;
-	if (isSkippedVersion && !manual)
+	if (evaluation.isSkippedVersion && !manual)
 	{
 		setUpdateNowActionVisible(false);
 		return;
@@ -4857,23 +5243,500 @@ void AppController::setUpdateNowActionVisible(const bool visible) const
 
 void AppController::handleUpdateQmudNow()
 {
-	setUpdateNowActionVisible(false);
-	m_availableUpdateVersion.clear();
-	m_availableUpdateChangelog.clear();
+	if (m_updatePackageDownloadInProgress)
+	{
+		QWidget *uiOwner = nullptr;
+		if (QWidget *activeModal = QApplication::activeModalWidget(); activeModal)
+			uiOwner = activeModal;
+		else if (m_updateUiParent && m_updateUiParent->isVisible())
+			uiOwner = m_updateUiParent.data();
+		else
+			uiOwner = m_mainWindow;
+		QMessageBox::information(uiOwner, QStringLiteral("QMud Update"),
+		                         QStringLiteral("An update installation is already in progress."));
+		return;
+	}
 
-	if (m_updateAvailableDialog)
-		m_updateAvailableDialog->close();
+	const QString updateVersion = m_availableUpdateVersion;
+	const QString assetUrl      = m_availableUpdateAssetUrl.trimmed();
+	const QString assetName     = m_availableUpdateAssetName.trimmed();
+	const QString assetSha256   = normalizeSha256Digest(m_availableUpdateAssetSha256);
 
-	QWidget *uiOwner = nullptr;
+	QWidget      *uiOwner = nullptr;
 	if (QWidget *activeModal = QApplication::activeModalWidget(); activeModal)
 		uiOwner = activeModal;
 	else if (m_updateUiParent && m_updateUiParent->isVisible())
 		uiOwner = m_updateUiParent.data();
 	else
 		uiOwner = m_mainWindow;
-	QMessageBox::information(
-	    uiOwner, QStringLiteral("QMud Update"),
-	    QStringLiteral("Automatic update installation will be added in the next implementation phase."));
+
+	const UpdateInstallTarget installTarget = detectUpdateInstallTarget();
+	if (installTarget == UpdateInstallTarget::Unsupported)
+	{
+		QMessageBox::information(uiOwner, QStringLiteral("QMud Update"), updateNotSupportedMessage());
+		return;
+	}
+	if (assetUrl.isEmpty() || assetName.isEmpty())
+	{
+		QMessageBox::warning(uiOwner, QStringLiteral("QMud Update"),
+		                     QStringLiteral("No compatible update package is available for this release."));
+		return;
+	}
+	if (assetSha256.isEmpty())
+	{
+		QMessageBox::warning(
+		    uiOwner, QStringLiteral("QMud Update"),
+		    QStringLiteral(
+		        "No SHA-256 checksum metadata was found for this release asset. Update was cancelled."));
+		return;
+	}
+
+	if (!m_updateNetworkManager)
+		m_updateNetworkManager = new QNetworkAccessManager(this);
+
+	auto stagingDir = std::make_shared<QTemporaryDir>();
+	if (!stagingDir->isValid())
+	{
+		QMessageBox::warning(uiOwner, QStringLiteral("QMud Update"),
+		                     QStringLiteral("Unable to create a temporary staging directory."));
+		return;
+	}
+
+	const QString downloadedPackagePath = QDir(stagingDir->path()).filePath(assetName);
+	auto          outputFile            = std::make_shared<QSaveFile>(downloadedPackagePath);
+	if (!outputFile->open(QIODevice::WriteOnly | QIODevice::Truncate))
+	{
+		QMessageBox::warning(
+		    uiOwner, QStringLiteral("QMud Update"),
+		    QStringLiteral("Unable to write %1: %2").arg(downloadedPackagePath, outputFile->errorString()));
+		return;
+	}
+
+	QNetworkRequest request{QUrl(assetUrl)};
+	request.setRawHeader("User-Agent", "QMud");
+	request.setRawHeader("Accept", "application/octet-stream");
+	QNetworkReply *reply = m_updateNetworkManager->get(request);
+	if (!reply)
+	{
+		QMessageBox::warning(uiOwner, QStringLiteral("QMud Update"),
+		                     QStringLiteral("Failed to start update package download."));
+		outputFile->cancelWriting();
+		return;
+	}
+
+	if (m_updateAvailableDialog)
+		m_updateAvailableDialog->close();
+	setUpdateNowActionVisible(false);
+	m_updatePackageDownloadInProgress = true;
+
+	const QPointer<QWidget> updateUiOwner(uiOwner);
+	const auto              resolveUiOwner = [this, updateUiOwner]() -> QWidget *
+	{
+		if (QWidget *activeModal = QApplication::activeModalWidget(); activeModal)
+			return activeModal;
+		if (updateUiOwner && updateUiOwner->isVisible())
+			return updateUiOwner.data();
+		if (m_updateUiParent && m_updateUiParent->isVisible())
+			return m_updateUiParent.data();
+		return m_mainWindow;
+	};
+	const auto restoreUpdateActionVisibility = [this]()
+	{
+		if (!m_availableUpdateVersion.isEmpty() && !m_availableUpdateAssetUrl.trimmed().isEmpty() &&
+		    !m_availableUpdateAssetName.trimmed().isEmpty())
+		{
+			setUpdateNowActionVisible(true);
+		}
+	};
+	const auto failUpdateInstall =
+	    [this, resolveUiOwner, restoreUpdateActionVisibility](const QString &message)
+	{
+		m_updatePackageDownloadInProgress = false;
+		restoreUpdateActionVisibility();
+		QMessageBox::warning(resolveUiOwner(), QStringLiteral("QMud Update"), message);
+	};
+
+	const auto timeoutTimer = std::make_shared<QTimer>();
+	timeoutTimer->setSingleShot(true);
+	const auto                    timedOut   = std::make_shared<bool>(false);
+	const auto                    writeError = std::make_shared<QString>();
+	const QPointer<QNetworkReply> replyGuard(reply);
+	const auto flushReplyPayload = [replyGuard, outputFile, downloadedPackagePath, writeError]()
+	{
+		if (!replyGuard || !writeError->isEmpty())
+			return;
+		const QByteArray chunk = replyGuard->readAll();
+		if (chunk.isEmpty())
+			return;
+		if (outputFile->write(chunk) != chunk.size())
+		{
+			*writeError = QStringLiteral("Write failed for %1: %2")
+			                  .arg(downloadedPackagePath, outputFile->errorString());
+			replyGuard->abort();
+		}
+	};
+
+	connect(reply, &QIODevice::readyRead, this, [flushReplyPayload]() { flushReplyPayload(); });
+	connect(timeoutTimer.get(), &QTimer::timeout, this,
+	        [replyGuard, timedOut]()
+	        {
+		        *timedOut = true;
+		        if (replyGuard)
+			        replyGuard->abort();
+	        });
+	connect(
+	    reply, &QNetworkReply::finished, this,
+	    [this, replyGuard, timeoutTimer, timedOut, writeError, flushReplyPayload, outputFile,
+	     downloadedPackagePath, assetSha256, updateVersion, resolveUiOwner, failUpdateInstall, stagingDir]()
+	    {
+		    timeoutTimer->stop();
+		    flushReplyPayload();
+		    if (!replyGuard)
+		    {
+			    outputFile->cancelWriting();
+			    failUpdateInstall(QStringLiteral("Update download reply became unavailable."));
+			    return;
+		    }
+
+		    const QVariant statusVar  = replyGuard->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+		    const int      httpStatus = statusVar.isValid() ? statusVar.toInt() : 0;
+		    const QString  networkError =
+                replyGuard->error() == QNetworkReply::NoError ? QString() : replyGuard->errorString();
+		    replyGuard->deleteLater();
+
+		    if (*timedOut)
+		    {
+			    outputFile->cancelWriting();
+			    failUpdateInstall(QStringLiteral("Download timed out."));
+			    return;
+		    }
+		    if (!writeError->isEmpty())
+		    {
+			    outputFile->cancelWriting();
+			    failUpdateInstall(*writeError);
+			    return;
+		    }
+		    if (!networkError.isEmpty() || httpStatus >= 400)
+		    {
+			    outputFile->cancelWriting();
+			    const QString message =
+			        httpStatus > 0
+			            ? QStringLiteral("Failed to download the update package "
+			                             "(HTTP %1): %2")
+			                  .arg(httpStatus)
+			                  .arg(networkError)
+			            : QStringLiteral("Failed to download the update package: %1").arg(networkError);
+			    failUpdateInstall(message);
+			    return;
+		    }
+		    if (!outputFile->commit())
+		    {
+			    failUpdateInstall(QStringLiteral("Commit failed for %1: %2")
+			                          .arg(downloadedPackagePath, outputFile->errorString()));
+			    return;
+		    }
+
+		    const auto completeSuccessfulInstall =
+		        [this, resolveUiOwner, updateVersion](const QString &relaunchExecutable)
+		    {
+			    m_updatePackageDownloadInProgress = false;
+			    m_availableUpdateVersion.clear();
+			    m_availableUpdateChangelog.clear();
+			    m_availableUpdateAssetUrl.clear();
+			    m_availableUpdateAssetName.clear();
+			    m_availableUpdateAssetSha256.clear();
+			    setUpdateNowActionVisible(false);
+
+			    const auto ensureWorldSavesBeforeRestart = [this, resolveUiOwner]() -> bool
+			    {
+				    QString restartSaveError;
+				    if (saveDirtyAutoSaveWorldsBeforeRestart(&restartSaveError))
+					    return true;
+				    QMessageBox::warning(
+				        resolveUiOwner(), QStringLiteral("QMud Update"),
+				        QStringLiteral(
+				            "Update installed, but failed to save dirty worlds before restart.\n%1\n\n"
+				            "Restart was cancelled; save the affected world(s) and restart QMud manually.")
+				            .arg(restartSaveError));
+				    return false;
+			    };
+
+			    const bool reloadEnabled =
+			        getGlobalOption(QStringLiteral("EnableReloadFeature")).toInt() != 0;
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+			    if (reloadEnabled)
+			    {
+				    if (QWidget *updateParent = m_updateUiParent.data();
+				        updateParent && updateParent != m_mainWindow)
+				    {
+					    if (QDialog *dialog = qobject_cast<QDialog *>(updateParent))
+						    dialog->close();
+					    else
+						    updateParent->close();
+					    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+				    }
+				    for (int attempt = 0; attempt < 4; ++attempt)
+				    {
+					    QWidget *activeModal = QApplication::activeModalWidget();
+					    if (!activeModal || activeModal == m_mainWindow)
+						    break;
+					    if (QDialog *dialog = qobject_cast<QDialog *>(activeModal))
+						    dialog->close();
+					    else
+						    activeModal->close();
+					    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+				    }
+
+				    m_reloadTargetExecutableOverride      = relaunchExecutable;
+				    const QByteArray previousReloadAssume = qgetenv("QMUD_RELOAD_ASSUME_YES");
+				    qputenv("QMUD_RELOAD_ASSUME_YES", QByteArrayLiteral("1"));
+				    handleReloadQmud();
+				    if (previousReloadAssume.isNull())
+					    qunsetenv("QMUD_RELOAD_ASSUME_YES");
+				    else
+					    qputenv("QMUD_RELOAD_ASSUME_YES", previousReloadAssume);
+				    if (!m_reloadInProgress)
+				    {
+					    if (!ensureWorldSavesBeforeRestart())
+						    return;
+					    m_reloadTargetExecutableOverride.clear();
+					    QStringList relaunchArgumentsFallback = QCoreApplication::arguments();
+					    if (!relaunchArgumentsFallback.isEmpty())
+						    relaunchArgumentsFallback.removeFirst();
+					    if (!QProcess::startDetached(relaunchExecutable, relaunchArgumentsFallback))
+					    {
+						    QMessageBox::warning(
+						        resolveUiOwner(), QStringLiteral("QMud Update"),
+						        QStringLiteral("Reload failed and automatic restart also failed.\nPlease "
+						                       "start QMud manually."));
+						    return;
+					    }
+					    QCoreApplication::quit();
+					    return;
+				    }
+				    return;
+			    }
+#else
+			    Q_UNUSED(reloadEnabled);
+#endif
+
+			    if (!ensureWorldSavesBeforeRestart())
+				    return;
+
+			    QStringList relaunchArguments = QCoreApplication::arguments();
+			    if (!relaunchArguments.isEmpty())
+				    relaunchArguments.removeFirst();
+			    if (!QProcess::startDetached(relaunchExecutable, relaunchArguments))
+			    {
+				    QMessageBox::warning(resolveUiOwner(), QStringLiteral("QMud Update"),
+				                         QStringLiteral("Update installed but failed to restart "
+				                                        "automatically.\nPlease start QMud manually."));
+				    return;
+			    }
+
+			    QMessageBox::information(
+			        resolveUiOwner(), QStringLiteral("QMud Update"),
+			        QStringLiteral("QMud v%1 was updated successfully and will now restart.")
+			            .arg(updateVersion.isEmpty() ? QStringLiteral("?") : updateVersion));
+			    QCoreApplication::quit();
+		    };
+
+		    const QPointer<AppController> controllerGuard(this);
+		    QThreadPool::globalInstance()->start(
+		        [controllerGuard, downloadedPackagePath, assetSha256, stagingDir, failUpdateInstall,
+		         completeSuccessfulInstall]()
+		        {
+			        QString downloadedSha256;
+			        QString hashError;
+			        QString installError;
+			        QString relaunchExecutable;
+
+			        if (!computeFileSha256(downloadedPackagePath, &downloadedSha256, &hashError))
+			        {
+				        installError =
+				            QStringLiteral("Failed to verify update package checksum:\n%1").arg(hashError);
+			        }
+			        else if (normalizeSha256Digest(downloadedSha256) != assetSha256)
+			        {
+				        installError =
+				            QStringLiteral("Update package checksum mismatch.\nExpected: %1\nDownloaded: %2")
+				                .arg(assetSha256, downloadedSha256);
+			        }
+			        else
+			        {
+				        const UpdateInstallTarget installTarget = detectUpdateInstallTarget();
+				        if (installTarget == UpdateInstallTarget::Unsupported)
+				        {
+					        installError = updateNotSupportedMessage();
+				        }
+				        else if (installTarget == UpdateInstallTarget::LinuxAppImage)
+				        {
+					        const QString appImagePath = qEnvironmentVariable("APPIMAGE").trimmed();
+					        if (appImagePath.isEmpty())
+					        {
+						        installError = QStringLiteral("APPIMAGE environment path is missing.");
+					        }
+					        else
+					        {
+						        QFileDevice::Permissions appImagePermissions =
+						            QFile::permissions(appImagePath);
+						        if (appImagePermissions == QFileDevice::Permissions())
+						        {
+							        appImagePermissions = QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+							                              QFileDevice::ExeOwner | QFileDevice::ReadGroup |
+							                              QFileDevice::ExeGroup | QFileDevice::ReadOther |
+							                              QFileDevice::ExeOther;
+						        }
+						        else
+						        {
+							        appImagePermissions |=
+							            QFileDevice::ExeOwner | QFileDevice::ExeGroup | QFileDevice::ExeOther;
+						        }
+
+						        if (!replaceFileWithDownloadedPayload(downloadedPackagePath, appImagePath,
+						                                              appImagePermissions, &installError))
+						        {
+							        installError =
+							            QStringLiteral("Failed to update AppImage:\n%1").arg(installError);
+						        }
+						        else
+						        {
+							        relaunchExecutable = appImagePath;
+						        }
+					        }
+				        }
+				        else if (installTarget == UpdateInstallTarget::MacBundle)
+				        {
+					        const QString unzipPath = QStandardPaths::findExecutable(QStringLiteral("unzip"));
+					        if (unzipPath.isEmpty())
+					        {
+						        installError = QStringLiteral("Required tool 'unzip' is unavailable.");
+					        }
+					        else
+					        {
+						        const QString extractRoot =
+						            QDir(stagingDir->path()).filePath(QStringLiteral("extract"));
+						        if (!QDir().mkpath(extractRoot))
+						        {
+							        installError =
+							            QStringLiteral("Unable to create temporary extraction directory: %1")
+							                .arg(extractRoot);
+						        }
+						        else if (!runUpdateHelperCommand(unzipPath,
+						                                         {QStringLiteral("-oq"),
+						                                          downloadedPackagePath, QStringLiteral("-d"),
+						                                          extractRoot},
+						                                         5 * 60 * 1000, &installError))
+						        {
+							        installError = QStringLiteral("Failed to extract update archive:\n%1")
+							                           .arg(installError);
+						        }
+						        else
+						        {
+							        const QString extractedBundlePath =
+							            findExtractedAppBundlePath(extractRoot);
+							        const QString currentBundlePath = findContainingAppBundlePath();
+							        if (extractedBundlePath.isEmpty())
+							        {
+								        installError = QStringLiteral(
+								            "Extracted archive did not contain a .app bundle.");
+							        }
+							        else if (currentBundlePath.isEmpty())
+							        {
+								        installError =
+								            QStringLiteral("Unable to locate current QMud.app bundle path.");
+							        }
+							        else
+							        {
+								        const QString dittoPath =
+								            QStandardPaths::findExecutable(QStringLiteral("ditto"));
+								        if (dittoPath.isEmpty())
+								        {
+									        installError =
+									            QStringLiteral("Required tool 'ditto' is unavailable.");
+								        }
+								        else
+								        {
+									        const QFileInfo currentBundleInfo(currentBundlePath);
+									        const QString bundleParentDir = currentBundleInfo.absolutePath();
+									        const QString stagedBundlePath =
+									            QDir(bundleParentDir)
+									                .filePath(QStringLiteral(".%1.update.staged")
+									                              .arg(currentBundleInfo.fileName()));
+									        const QString backupBundlePath =
+									            QDir(bundleParentDir)
+									                .filePath(QStringLiteral(".%1.update.backup")
+									                              .arg(currentBundleInfo.fileName()));
+									        QString cleanupError;
+									        if (!removePathIfExists(stagedBundlePath, &cleanupError) ||
+									            !removePathIfExists(backupBundlePath, &cleanupError))
+									        {
+										        installError =
+										            QStringLiteral(
+										                "Failed to prepare bundle staging paths:\n%1")
+										                .arg(cleanupError);
+									        }
+									        else if (!runUpdateHelperCommand(
+									                     dittoPath, {extractedBundlePath, stagedBundlePath},
+									                     5 * 60 * 1000, &installError))
+									        {
+										        installError =
+										            QStringLiteral("Failed to stage updated app bundle:\n%1")
+										                .arg(installError);
+									        }
+									        else if (!QDir().rename(currentBundlePath, backupBundlePath))
+									        {
+										        installError = QStringLiteral(
+										            "Failed to move current app bundle aside.");
+									        }
+									        else if (!QDir().rename(stagedBundlePath, currentBundlePath))
+									        {
+										        installError =
+										            QStringLiteral("Failed to place updated app bundle.");
+										        (void)QDir().rename(backupBundlePath, currentBundlePath);
+									        }
+									        else
+									        {
+										        (void)removePathIfExists(backupBundlePath, &cleanupError);
+										        const QString binaryName =
+										            QFileInfo(QCoreApplication::applicationFilePath())
+										                .fileName();
+										        relaunchExecutable =
+										            QDir(currentBundlePath)
+										                .filePath(QStringLiteral("Contents/MacOS/%1")
+										                              .arg(binaryName));
+									        }
+								        }
+							        }
+						        }
+					        }
+				        }
+			        }
+
+			        if (installError.isEmpty() && relaunchExecutable.trimmed().isEmpty())
+			        {
+				        installError =
+				            QStringLiteral("Update was applied but relaunch target is unavailable.");
+			        }
+
+			        QMetaObject::invokeMethod(
+			            qApp,
+			            [controllerGuard, installError, failUpdateInstall, relaunchExecutable,
+			             completeSuccessfulInstall]()
+			            {
+				            if (!controllerGuard)
+					            return;
+				            if (!installError.isEmpty())
+				            {
+					            failUpdateInstall(installError);
+					            return;
+				            }
+				            completeSuccessfulInstall(relaunchExecutable);
+			            },
+			            Qt::QueuedConnection);
+		        });
+	    });
+	timeoutTimer->start(5 * 60 * 1000);
 }
 
 void AppController::applySkipVersionChoice(const QString &version, const bool skipWhenTrue)
@@ -12202,6 +13065,8 @@ void AppController::handleReloadQmud()
 		return;
 	}
 
+	const bool autoConfirmReload = envFlagEnabled("QMUD_RELOAD_ASSUME_YES");
+	const bool verboseReloadLogs = envFlagEnabled("QMUD_RELOAD_VERBOSE");
 	if (m_reloadInProgress)
 	{
 		QMessageBox::information(m_mainWindow, QStringLiteral("Reload QMud"),
@@ -12210,15 +13075,24 @@ void AppController::handleReloadQmud()
 	}
 	if (QWidget *activeModal = QApplication::activeModalWidget(); activeModal && activeModal != m_mainWindow)
 	{
-		QMessageBox::information(m_mainWindow, QStringLiteral("Reload QMud"),
-		                         QStringLiteral("Close the active dialog before reloading QMud."));
-		return;
+		if (autoConfirmReload)
+		{
+			if (QDialog *dialog = qobject_cast<QDialog *>(activeModal))
+				dialog->close();
+			else
+				activeModal->close();
+			QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+		}
+		if (QWidget *stillModal = QApplication::activeModalWidget(); stillModal && stillModal != m_mainWindow)
+		{
+			QMessageBox::information(m_mainWindow, QStringLiteral("Reload QMud"),
+			                         QStringLiteral("Close the active dialog before reloading QMud."));
+			return;
+		}
 	}
 
-	const bool autoConfirmReload    = envFlagEnabled("QMUD_RELOAD_ASSUME_YES");
-	const bool verboseReloadLogs    = envFlagEnabled("QMUD_RELOAD_VERBOSE");
-	const int  configuredTimeout    = getGlobalOption(QStringLiteral("ReloadMccpDisableTimeoutMs")).toInt();
-	const int  mccpDisableTimeoutMs = qBound(100, configuredTimeout, 1000);
+	const int configuredTimeout    = getGlobalOption(QStringLiteral("ReloadMccpDisableTimeoutMs")).toInt();
+	const int mccpDisableTimeoutMs = qBound(100, configuredTimeout, 1000);
 	if (!autoConfirmReload)
 	{
 		if (QMessageBox::question(
@@ -12231,6 +13105,15 @@ void AppController::handleReloadQmud()
 	{
 		if (verboseReloadLogs)
 			qInfo() << kReloadLogTag << "Auto-confirm enabled by QMUD_RELOAD_ASSUME_YES.";
+	}
+
+	QString preReloadSaveError;
+	if (!saveDirtyAutoSaveWorldsBeforeRestart(&preReloadSaveError))
+	{
+		QMessageBox::warning(
+		    m_mainWindow, QStringLiteral("Reload QMud"),
+		    QStringLiteral("Failed to save dirty worlds before reload.\n%1").arg(preReloadSaveError));
+		return;
 	}
 
 	++m_reloadAttempts;
@@ -12276,7 +13159,20 @@ void AppController::handleReloadQmud()
 		m_reloadInProgress = false;
 	};
 
-	const QString executablePath = QCoreApplication::applicationFilePath();
+	QString executablePath = m_reloadTargetExecutableOverride.trimmed();
+	m_reloadTargetExecutableOverride.clear();
+	if (executablePath.isEmpty())
+	{
+#ifdef Q_OS_LINUX
+		if (const QString appImagePath = qEnvironmentVariable("APPIMAGE").trimmed();
+		    !appImagePath.isEmpty() && QFileInfo(appImagePath).exists())
+		{
+			executablePath = appImagePath;
+		}
+		else
+#endif
+			executablePath = QCoreApplication::applicationFilePath();
+	}
 	if (executablePath.trimmed().isEmpty())
 	{
 		failReload(QString(), QStringLiteral("Unable to determine executable path for reload."));
@@ -12292,7 +13188,6 @@ void AppController::handleReloadQmud()
 	snapshot.schemaVersion    = 1;
 	snapshot.createdAtUtc     = QDateTime::currentDateTimeUtc();
 	snapshot.reloadToken      = reloadToken;
-	snapshot.sourcePid        = static_cast<qint64>(QCoreApplication::applicationPid());
 	snapshot.targetExecutable = executablePath;
 
 	QStringList arguments = QCoreApplication::arguments();

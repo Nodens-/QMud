@@ -22,7 +22,7 @@ namespace
 {
 	constexpr int kReloadStateSchemaVersion = 1;
 
-	QString policyToString(const ReloadSocketPolicy policy)
+	QString       policyToString(const ReloadSocketPolicy policy)
 	{
 		return policy == ReloadSocketPolicy::ParkReconnect ? QStringLiteral("park_reconnect")
 		                                                   : QStringLiteral("reattach");
@@ -144,7 +144,8 @@ QStringList filterReloadStartupArguments(const QStringList &arguments)
 	return filtered;
 }
 
-bool writeReloadStateSnapshot(const QString &filePath, const ReloadStateSnapshot &snapshot, QString *errorMessage)
+bool writeReloadStateSnapshot(const QString &filePath, const ReloadStateSnapshot &snapshot,
+                              QString *errorMessage)
 {
 	if (errorMessage)
 		errorMessage->clear();
@@ -156,14 +157,13 @@ bool writeReloadStateSnapshot(const QString &filePath, const ReloadStateSnapshot
 	}
 
 	QJsonObject root;
-	root.insert(QStringLiteral("schema_version"), snapshot.schemaVersion > 0 ? snapshot.schemaVersion
-	                                                                       : kReloadStateSchemaVersion);
+	root.insert(QStringLiteral("schema_version"),
+	            snapshot.schemaVersion > 0 ? snapshot.schemaVersion : kReloadStateSchemaVersion);
 	root.insert(QStringLiteral("created_at_utc"),
 	            (snapshot.createdAtUtc.isValid() ? snapshot.createdAtUtc : QDateTime::currentDateTimeUtc())
 	                .toUTC()
 	                .toString(Qt::ISODateWithMs));
 	root.insert(QStringLiteral("reload_token"), snapshot.reloadToken);
-	root.insert(QStringLiteral("source_pid"), static_cast<double>(snapshot.sourcePid));
 	root.insert(QStringLiteral("target_executable"), snapshot.targetExecutable);
 
 	QJsonArray args;
@@ -243,26 +243,26 @@ bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snaps
 		return false;
 	}
 
-	QJsonParseError parseError;
+	QJsonParseError     parseError;
 	const QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &parseError);
 	if (parseError.error != QJsonParseError::NoError || !doc.isObject())
 	{
 		if (errorMessage)
 		{
-			*errorMessage = parseError.error == QJsonParseError::NoError
-			                    ? QStringLiteral("Reload state JSON root is not an object.")
-			                    : QStringLiteral("Reload state JSON parse error: %1").arg(parseError.errorString());
+			*errorMessage =
+			    parseError.error == QJsonParseError::NoError
+			        ? QStringLiteral("Reload state JSON root is not an object.")
+			        : QStringLiteral("Reload state JSON parse error: %1").arg(parseError.errorString());
 		}
 		return false;
 	}
 
-	const QJsonObject root = doc.object();
+	const QJsonObject root          = doc.object();
 	int               schemaVersion = 0;
 	if (!parseIntField(root, "schema_version", schemaVersion) || schemaVersion != kReloadStateSchemaVersion)
 	{
 		if (errorMessage)
-			*errorMessage =
-			    QStringLiteral("Unsupported reload state schema version: %1").arg(schemaVersion);
+			*errorMessage = QStringLiteral("Unsupported reload state schema version: %1").arg(schemaVersion);
 		return false;
 	}
 
@@ -284,14 +284,13 @@ bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snaps
 		return false;
 	}
 
-	const QJsonArray worldsRaw = root.value(QStringLiteral("worlds")).toArray();
-	const QJsonArray argsRaw   = root.value(QStringLiteral("arguments")).toArray();
+	const QJsonArray    worldsRaw = root.value(QStringLiteral("worlds")).toArray();
+	const QJsonArray    argsRaw   = root.value(QStringLiteral("arguments")).toArray();
 
 	ReloadStateSnapshot parsed;
 	parsed.schemaVersion    = schemaVersion;
 	parsed.createdAtUtc     = createdAtUtc;
 	parsed.reloadToken      = reloadToken;
-	parsed.sourcePid        = static_cast<qint64>(root.value(QStringLiteral("source_pid")).toDouble());
 	parsed.targetExecutable = targetExe;
 	parsed.arguments.reserve(argsRaw.size());
 	for (const auto &arg : argsRaw)
@@ -309,8 +308,7 @@ bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snaps
 		const QJsonObject object = rawEntry.toObject();
 		ReloadWorldState  world;
 		if (!parseIntField(object, "sequence", world.sequence) ||
-		    !parseIntField(object, "fd", world.socketDescriptor) ||
-		    !parsePortField(object, world.port))
+		    !parseIntField(object, "fd", world.socketDescriptor) || !parsePortField(object, world.port))
 		{
 			if (errorMessage)
 				*errorMessage = QStringLiteral("Reload world entry is missing required numeric fields.");
@@ -344,8 +342,8 @@ bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snaps
 	return true;
 }
 
-bool validateReloadStartupSnapshot(const ReloadStateSnapshot &snapshot, const ReloadStartupValidationInput &input,
-                                   QString *errorMessage)
+bool validateReloadStartupSnapshot(const ReloadStateSnapshot          &snapshot,
+                                   const ReloadStartupValidationInput &input, QString *errorMessage)
 {
 	if (errorMessage)
 		errorMessage->clear();
@@ -355,13 +353,6 @@ bool validateReloadStartupSnapshot(const ReloadStateSnapshot &snapshot, const Re
 	{
 		if (errorMessage)
 			*errorMessage = QStringLiteral("Reload token mismatch.");
-		return false;
-	}
-
-	if (input.expectedSourcePid > 0 && snapshot.sourcePid != input.expectedSourcePid)
-	{
-		if (errorMessage)
-			*errorMessage = QStringLiteral("Reload source PID mismatch.");
 		return false;
 	}
 
@@ -377,7 +368,7 @@ bool validateReloadStartupSnapshot(const ReloadStateSnapshot &snapshot, const Re
 	return true;
 }
 
-bool loadValidatedAndConsumeReloadStateSnapshot(const QString &filePath,
+bool loadValidatedAndConsumeReloadStateSnapshot(const QString                      &filePath,
                                                 const ReloadStartupValidationInput &input,
                                                 ReloadStateSnapshot *snapshot, QString *errorMessage,
                                                 QString *cleanupWarning)

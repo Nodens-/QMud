@@ -161,6 +161,7 @@ set(QMUD_SOURCES
         MainFrame.cpp
         MainFrameActionUtils.cpp
         AppController.cpp
+        UpdateCheckUtils.cpp
         ReloadPlannerUtils.cpp
         ReloadStateUtils.cpp
         Accelerators.cpp
@@ -1550,6 +1551,7 @@ if (UNIX AND NOT APPLE)
                 list(APPEND QMUD_APPIMAGE_QT_DEPLOY_ARGS
                         INCLUDE_PLUGIN_TYPES
                         platforms
+                        tls
                         sqldrivers
                         platformthemes
                         platforminputcontexts
@@ -1560,6 +1562,7 @@ if (UNIX AND NOT APPLE)
                         wayland-shell-integration
                         INCLUDE_PLUGINS
                         qsqlite
+                        qopensslbackend
                         qxcb
                         qwayland
                         qwayland-egl
@@ -1672,6 +1675,45 @@ if (UNIX AND NOT APPLE)
                     COMMAND ${CMAKE_COMMAND} -E rm -f
                     "$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}/usr/plugins/platformthemes/libqgtk3.so>"
             )
+            get_filename_component(QMUD_APPIMAGE_QT_RUNTIME_ROOT "${QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR}" DIRECTORY)
+            set(QMUD_APPIMAGE_QT_TLS_PLUGIN_DIR "")
+            set(QMUD_APPIMAGE_QT_TLS_PLUGIN_FILES)
+            set(QMUD_APPIMAGE_QT_TLS_PLUGIN_CANDIDATE_DIRS
+                    "${QMUD_APPIMAGE_QT_RUNTIME_ROOT}/plugins/tls"
+                    "${QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR}/qt6/plugins/tls"
+                    "${QMUD_APPIMAGE_QT_RUNTIME_ROOT}/lib/qt6/plugins/tls"
+                    "${QMUD_APPIMAGE_QT_RUNTIME_ROOT}/lib64/qt6/plugins/tls")
+            if (DEFINED Qt6_DIR AND NOT Qt6_DIR STREQUAL "")
+                get_filename_component(QMUD_APPIMAGE_QT6_ROOT "${Qt6_DIR}/../../.." ABSOLUTE)
+                list(APPEND QMUD_APPIMAGE_QT_TLS_PLUGIN_CANDIDATE_DIRS
+                        "${QMUD_APPIMAGE_QT6_ROOT}/plugins/tls"
+                        "${QMUD_APPIMAGE_QT6_ROOT}/lib/qt6/plugins/tls"
+                        "${QMUD_APPIMAGE_QT6_ROOT}/lib64/qt6/plugins/tls")
+            endif ()
+            list(REMOVE_DUPLICATES QMUD_APPIMAGE_QT_TLS_PLUGIN_CANDIDATE_DIRS)
+            foreach (_qmud_tls_candidate_dir IN LISTS QMUD_APPIMAGE_QT_TLS_PLUGIN_CANDIDATE_DIRS)
+                file(GLOB _qmud_tls_candidate_files
+                        "${_qmud_tls_candidate_dir}/libqopensslbackend.so*")
+                if (_qmud_tls_candidate_files)
+                    set(QMUD_APPIMAGE_QT_TLS_PLUGIN_DIR "${_qmud_tls_candidate_dir}")
+                    set(QMUD_APPIMAGE_QT_TLS_PLUGIN_FILES ${_qmud_tls_candidate_files})
+                    break()
+                endif ()
+            endforeach ()
+            if (QMUD_APPIMAGE_QT_TLS_PLUGIN_FILES)
+                add_custom_command(TARGET AppImage POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E echo "Ensuring Qt OpenSSL TLS backend plugin is staged"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}/usr/plugins/tls>"
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        ${QMUD_APPIMAGE_QT_TLS_PLUGIN_FILES}
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}/usr/plugins/tls>"
+                )
+            else ()
+                string(JOIN ", " QMUD_APPIMAGE_QT_TLS_PLUGIN_SEARCH_PATHS
+                        ${QMUD_APPIMAGE_QT_TLS_PLUGIN_CANDIDATE_DIRS})
+                message(WARNING "Qt TLS plugin libqopensslbackend.so was not found in candidate directories: ${QMUD_APPIMAGE_QT_TLS_PLUGIN_SEARCH_PATHS}. AppImage update checks may fail without a functional TLS backend.")
+            endif ()
             add_custom_command(TARGET AppImage POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E echo "Copying Qt shared libraries into AppDir/usr/lib"
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different

@@ -128,10 +128,12 @@ class GlobalPreferencesDialog : public QDialog
 		QCheckBox                  *m_allowDllsCheck{nullptr};
 		QTextEdit                  *m_luaScript{nullptr};
 		QCheckBox                  *m_autoCheckUpdatesCheck{nullptr};
+		QLabel                     *m_updateCheckEveryLabel{nullptr};
 		QSpinBox                   *m_updateCheckHoursSpin{nullptr};
 		QPushButton                *m_checkNowButton{nullptr};
 		QCheckBox                  *m_enableReloadFeatureCheck{nullptr};
 		QSpinBox                   *m_reloadMccpTimeoutSpin{nullptr};
+		bool                        m_updateMechanismAvailable{true};
 
 		/**
 		 * @brief Builds world lists/settings page.
@@ -207,6 +209,10 @@ class GlobalPreferencesDialog : public QDialog
 		 * @param pageIndex Active page index.
 		 */
 		void                        syncExternalTabSelection(int pageIndex) const;
+		/**
+		 * @brief Applies enabled/disabled state for update-check controls.
+		 */
+		void                        refreshUpdateCheckControlsEnabledState() const;
 
 		/**
 		 * @brief Creates a small color swatch button control.

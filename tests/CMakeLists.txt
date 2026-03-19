@@ -91,6 +91,13 @@ qmud_add_qtest(tst_EncodingUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_UpdateCheckUtils
+        SOURCES
+        unit/tst_UpdateCheckUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/UpdateCheckUtils.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_ReloadStateUtils
         SOURCES
         unit/tst_ReloadStateUtils.cpp
@@ -458,6 +465,19 @@ if (QMUD_ENABLE_GUI_TESTS)
             SOURCES
             gui/tst_Dialog_LogSession.cpp
             "${CMAKE_SOURCE_DIR}/src/dialogs/LogSessionDialog.cpp"
+            LABELS
+            gui
+            TIMEOUT
+            20)
+
+    qmud_add_qtest(tst_Dialog_GlobalPreferencesUpdates
+            GUI
+            SOURCES
+            gui/tst_Dialog_GlobalPreferencesUpdates.cpp
+            "${CMAKE_SOURCE_DIR}/src/dialogs/GlobalPreferencesDialog.cpp"
+            "${CMAKE_SOURCE_DIR}/src/AppController.h"
+            LIBRARIES
+            Qt6::Sql
             LABELS
             gui
             TIMEOUT

@@ -14,9 +14,8 @@ The active implementation in this repository is C++20 + Qt 6.10.
 The porting has been completed. Behavior aims for high compatibility
 with original persistence and Lua workflows while using a modern Qt
 implementation. There are several improvements and new features implemented
-already. The possibility of bugs is currently high as not everything has been
-tested to the ground. Please use the issue tracker, with the appropriate
-template to report issues, request features, etc.
+already. Please use the issue tracker, with the appropriate template to report
+issues, request features, etc.
 
 ## Features
 
@@ -93,8 +92,11 @@ If nothing is configured, defaults are:
 ### Environment flags
 
 - `QMUD_HOME`: Overrides startup/data directory resolution (see section above).
-- `QMUD_ALLOW_MULTI_INSTANCE`: When set to `1`, `y`, `yes`, or `true`, bypasses single-instance enforcement.
-- `QMUD_RELOAD_VERBOSE`: Enables verbose per-world reload diagnostics in logs.
+- `QMUD_ALLOW_MULTI_INSTANCE`: When set to `1`, `y`, `yes`, or `true`, bypasses single-instance enforcement. (Not safe
+  with same datadir)
+- `QMUD_DISABLE_UPDATE`:  When set to `1`, `y`, `yes`, or `true`, disables the automatic updates functionality (for
+  distro packaging).
+- `QMUD_RELOAD_VERBOSE`: When set to `1`, `y`, `yes`, or `true`, enables verbose per-world reload diagnostics in logs.
 
 ### CLI switches
 

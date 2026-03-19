@@ -122,6 +122,16 @@ class AppController : public QObject
 		 */
 		void                            checkForUpdatesNow(QWidget *uiParent = nullptr);
 		/**
+		 * @brief Returns whether the update-check/update-install mechanism is available.
+		 * @return `true` when update checks are enabled for this runtime.
+		 */
+		[[nodiscard]] static bool       isUpdateMechanismAvailable();
+		/**
+		 * @brief Returns a user-facing reason when update mechanism is unavailable.
+		 * @return Empty when updates are available, otherwise unavailable reason.
+		 */
+		[[nodiscard]] static QString    updateMechanismUnavailableReason();
+		/**
 		 * @brief Registers OS-level file associations.
 		 * @param errorMessage Optional output error message.
 		 * @return `true` on successful registration.
@@ -561,7 +571,7 @@ class AppController : public QObject
 		 */
 		void setUpdateNowActionVisible(bool visible) const;
 		/**
-		 * @brief Handles Update Now command trigger (phase-1 placeholder).
+		 * @brief Downloads and applies the currently discovered update package.
 		 */
 		void handleUpdateQmudNow();
 		/**
@@ -576,49 +586,58 @@ class AppController : public QObject
 		 */
 		[[nodiscard]] QVector<WorldRuntime *> activeWorldRuntimes() const;
 		/**
+		 * @brief Saves dirty worlds that have save-on-close enabled before reload/restart.
+		 *
+		 * This helper does not close windows; it only persists eligible world files.
+		 *
+		 * @param errorMessage Optional output error text when a save fails.
+		 * @return `true` when all eligible worlds were saved successfully.
+		 */
+		[[nodiscard]] bool saveDirtyAutoSaveWorldsBeforeRestart(QString *errorMessage = nullptr) const;
+		/**
 		 * @brief Loads global plugins into runtime context.
 		 * @param runtime Runtime receiving global plugin state.
 		 */
-		void                                  loadGlobalPlugins(WorldRuntime *runtime) const;
+		void               loadGlobalPlugins(WorldRuntime *runtime) const;
 		/**
 		 * @brief Startup UX helpers.
 		 */
-		void                                  showTipDialog() const;
+		void               showTipDialog() const;
 		/**
 		 * @brief Displays startup tip if enabled.
 		 */
-		void                                  showTipAtStartup() const;
+		void               showTipAtStartup() const;
 		/**
 		 * @brief Shows getting-started page when appropriate.
 		 */
-		void                                  showGettingStartedIfNeeded() const;
+		void               showGettingStartedIfNeeded() const;
 		/**
 		 * @brief Shows upgrade welcome dialog when required.
 		 */
-		void                                  showUpgradeWelcomeIfNeeded() const;
+		void               showUpgradeWelcomeIfNeeded() const;
 		/**
 		 * @brief Performs data backup when upgrading older installs.
 		 * @param previousVersion Previously stored application version.
 		 * @param firstTime `true` when this is first launch after install/migration.
 		 */
-		void        backupDataOnUpgradeIfNeeded(int previousVersion, bool firstTime) const;
+		void               backupDataOnUpgradeIfNeeded(int previousVersion, bool firstTime) const;
 		/**
 		 * @brief Finalizes startup once all prerequisites are complete.
 		 */
-		void        finalizeStartupIfReady();
+		void               finalizeStartupIfReady();
 		/**
 		 * @brief Parses reload startup arguments from process command line.
 		 */
-		void        detectReloadStartupArguments();
+		void               detectReloadStartupArguments();
 		/**
 		 * @brief Deletes stale reload state file when startup is not reload-mode.
 		 */
-		void        cleanupReloadStateOnNormalStartup() const;
+		void               cleanupReloadStateOnNormalStartup() const;
 		/**
 		 * @brief Executes startup recovery for reload-mode launches.
 		 * @return `true` when recovery path completed.
 		 */
-		bool        recoverReloadStartupState();
+		bool               recoverReloadStartupState();
 		/**
 		 * @brief Opens one runtime/window pair from serialized reload world state.
 		 * @param worldState Serialized world state.
@@ -892,8 +911,13 @@ class AppController : public QObject
 		QPointer<QWidget>             m_updateUiParent;
 		QString                       m_availableUpdateVersion;
 		QString                       m_availableUpdateChangelog;
+		QString                       m_availableUpdateAssetUrl;
+		QString                       m_availableUpdateAssetName;
+		QString                       m_availableUpdateAssetSha256;
+		bool                          m_updatePackageDownloadInProgress{false};
 		bool                          m_updateCheckInProgress{false};
 		bool                          m_reloadLaunchRequested{false};
+		QString                       m_reloadTargetExecutableOverride;
 		int                           m_reloadAttempts{0};
 		int                           m_reloadExecFailures{0};
 		int                           m_reloadRecoveryRuns{0};

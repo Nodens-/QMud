@@ -170,9 +170,7 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 	connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 	root->addWidget(buttons);
 
-	constexpr int minimumWidthReduced = 448; // 80% of 560 base width
-	setMinimumWidth(minimumWidthReduced);
-	setMinimumHeight(560);
+	setFixedSize(650, 600);
 
 	loadPreferences();
 
@@ -199,8 +197,6 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 			        settings.endGroup();
 		        });
 	}
-
-	setFixedSize(minimumSize());
 }
 
 namespace
@@ -1298,9 +1294,9 @@ QWidget *GlobalPreferencesDialog::buildUpdatesPage()
 	registerCheck(QStringLiteral("AutoCheckForUpdates"), m_autoCheckUpdatesCheck);
 	layout->addWidget(m_autoCheckUpdatesCheck);
 
-	auto *checkRow        = new QHBoxLayout;
-	auto *checkEveryLabel = new QLabel(QStringLiteral("Check every:"));
-	checkRow->addWidget(checkEveryLabel);
+	auto *checkRow          = new QHBoxLayout;
+	m_updateCheckEveryLabel = new QLabel(QStringLiteral("Check every:"));
+	checkRow->addWidget(m_updateCheckEveryLabel);
 	m_updateCheckHoursSpin = new QSpinBox;
 	m_updateCheckHoursSpin->setRange(1, 168);
 	m_updateCheckHoursSpin->setSuffix(QStringLiteral(" hour(s)"));
@@ -1329,13 +1325,7 @@ QWidget *GlobalPreferencesDialog::buildUpdatesPage()
 	layout->addStretch();
 
 	connect(m_autoCheckUpdatesCheck, &QCheckBox::toggled, page,
-	        [this, checkEveryLabel](const bool enabled)
-	        {
-		        if (m_updateCheckHoursSpin)
-			        m_updateCheckHoursSpin->setEnabled(enabled);
-		        if (checkEveryLabel)
-			        checkEveryLabel->setEnabled(enabled);
-	        });
+	        [this](const bool) { refreshUpdateCheckControlsEnabledState(); });
 	connect(m_checkNowButton, &QPushButton::clicked, page,
 	        [this]()
 	        {
@@ -1557,8 +1547,30 @@ void GlobalPreferencesDialog::loadPreferences()
 	if (m_luaScript)
 		m_luaScript->setPlainText(app->getGlobalOption(QStringLiteral("LuaScript")).toString());
 
-	if (m_autoCheckUpdatesCheck && m_updateCheckHoursSpin)
-		m_updateCheckHoursSpin->setEnabled(m_autoCheckUpdatesCheck->isChecked());
+	m_updateMechanismAvailable            = AppController::isUpdateMechanismAvailable();
+	const QString updateUnavailableReason = AppController::updateMechanismUnavailableReason();
+	if (m_autoCheckUpdatesCheck)
+		m_autoCheckUpdatesCheck->setToolTip(updateUnavailableReason);
+	if (m_updateCheckEveryLabel)
+		m_updateCheckEveryLabel->setToolTip(updateUnavailableReason);
+	if (m_updateCheckHoursSpin)
+		m_updateCheckHoursSpin->setToolTip(updateUnavailableReason);
+	if (m_checkNowButton)
+		m_checkNowButton->setToolTip(updateUnavailableReason);
+	refreshUpdateCheckControlsEnabledState();
+}
+
+void GlobalPreferencesDialog::refreshUpdateCheckControlsEnabledState() const
+{
+	const bool autoCheckEnabled = m_autoCheckUpdatesCheck && m_autoCheckUpdatesCheck->isChecked();
+	if (m_autoCheckUpdatesCheck)
+		m_autoCheckUpdatesCheck->setEnabled(m_updateMechanismAvailable);
+	if (m_updateCheckHoursSpin)
+		m_updateCheckHoursSpin->setEnabled(m_updateMechanismAvailable && autoCheckEnabled);
+	if (m_updateCheckEveryLabel)
+		m_updateCheckEveryLabel->setEnabled(m_updateMechanismAvailable && autoCheckEnabled);
+	if (m_checkNowButton)
+		m_checkNowButton->setEnabled(m_updateMechanismAvailable);
 }
 
 bool GlobalPreferencesDialog::applyPreferences()

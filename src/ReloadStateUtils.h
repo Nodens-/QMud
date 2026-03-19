@@ -54,7 +54,6 @@ struct ReloadStateSnapshot
 		int                     schemaVersion{1};
 		QDateTime               createdAtUtc;
 		QString                 reloadToken;
-		qint64                  sourcePid{0};
 		QString                 targetExecutable;
 		QStringList             arguments;
 		QList<ReloadWorldState> worlds;
@@ -66,7 +65,6 @@ struct ReloadStateSnapshot
 struct ReloadStartupValidationInput
 {
 		QString expectedToken;
-		qint64  expectedSourcePid{0};
 		QString expectedTargetExecutable;
 };
 
@@ -110,7 +108,7 @@ struct ReloadStartupValidationInput
 [[nodiscard]] bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snapshot,
                                            QString *errorMessage = nullptr);
 /**
- * @brief Validates startup snapshot metadata against expected token/pid/executable values.
+ * @brief Validates startup snapshot metadata against expected token/executable values.
  * @param snapshot Parsed snapshot payload.
  * @param input Expected startup validation values.
  * @param errorMessage Optional output error text.

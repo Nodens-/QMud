@@ -123,6 +123,16 @@ fi
 if [ -d "$QT_PREFIX/plugins" ]; then
   cp -R "$QT_PREFIX/plugins" "$STAGE_DIR/qtplugins"
 fi
+TLS_PLUGIN_DIR="$STAGE_DIR/qtplugins/tls"
+if [ ! -d "$TLS_PLUGIN_DIR" ]; then
+  echo "Error: Qt TLS plugins directory is missing from staged package: $TLS_PLUGIN_DIR" >&2
+  exit 1
+fi
+if ! find "$TLS_PLUGIN_DIR" -maxdepth 1 -type f \( -iname 'qschannelbackend.dll' -o -iname 'qopensslbackend.dll' \) | grep -q .; then
+  echo "Error: Windows package is missing a functional Qt TLS backend plugin." >&2
+  echo "Expected qschannelbackend.dll or qopensslbackend.dll in $TLS_PLUGIN_DIR." >&2
+  exit 1
+fi
 if [ -d "$MINGW_PREFIX/bin" ]; then
   cp "$MINGW_PREFIX/bin/"*.dll "$STAGE_DIR/lib/" || true
 fi
