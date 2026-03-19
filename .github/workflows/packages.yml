@@ -15,7 +15,7 @@ permissions:
 jobs:
   build-packages:
     name: Build AppImage / macOS / Windows packages
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, primary]
     timeout-minutes: 180
 
     steps:
@@ -43,14 +43,6 @@ jobs:
 
           echo "QMUD_BASE_VERSION=$BASE_VERSION" >> "$GITHUB_ENV"
           echo "QMUD_PACKAGE_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
-
-      - name: Free runner disk space for Docker builds
-        run: |
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          docker system prune -af || true
 
       - name: Install host build dependencies
         run: |
@@ -182,38 +174,29 @@ jobs:
           echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
           echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Resolve Docker executable for CMake targets
+      - name: Resolve container executable for CMake targets
         run: |
-          DOCKER_BIN="$(command -v docker || true)"
-          if [ -z "$DOCKER_BIN" ]; then
-            echo "docker executable not found on PATH." >&2
+          CONTAINER_BIN="$(command -v podman || true)"
+          if [ -z "$CONTAINER_BIN" ]; then
+            echo "podman executable not found on PATH." >&2
             exit 1
           fi
-          echo "QMUD_DOCKER_EXECUTABLE=$DOCKER_BIN" >> "$GITHUB_ENV"
-          docker --version
+          echo "QMUD_DOCKER_EXECUTABLE=$CONTAINER_BIN" >> "$GITHUB_ENV"
+          "$CONTAINER_BIN" --version
 
-      - name: Build cached macOS cross image
-        uses: docker/build-push-action@v6
-        with:
-          context: tools/docker/macos-qt610
-          file: tools/docker/macos-qt610/Dockerfile
-          tags: qmud-macos-builder:qt6.10
-          load: true
-          cache-from: type=gha,scope=qmud-macos-builder
-          cache-to: type=gha,scope=qmud-macos-builder,mode=max
+      - name: Build macOS cross image
+        run: |
+          podman build \
+            --file tools/docker/macos-qt610/Dockerfile \
+            --tag qmud-macos-builder:qt6.10 \
+            tools/docker/macos-qt610
 
-      - name: Build cached Windows cross image
-        uses: docker/build-push-action@v6
-        with:
-          context: tools/docker/windows-qt610
-          file: tools/docker/windows-qt610/Dockerfile
-          tags: qmud-windows-builder:qt6.10
-          load: true
-          cache-from: type=gha,scope=qmud-windows-builder
-          cache-to: type=gha,scope=qmud-windows-builder,mode=max
+      - name: Build Windows cross image
+        run: |
+          podman build \
+            --file tools/docker/windows-qt610/Dockerfile \
+            --tag qmud-windows-builder:qt6.10 \
+            tools/docker/windows-qt610
 
       - name: Configure CMake
         run: |
@@ -299,7 +282,7 @@ jobs:
     name: Publish GitHub release assets
     needs: build-packages
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, primary]
     permissions:
       contents: write
 
@@ -324,7 +307,7 @@ jobs:
     name: Publish rolling CI prerelease
     needs: build-packages
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, primary]
     permissions:
       contents: write
 

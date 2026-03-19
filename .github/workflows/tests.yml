@@ -16,7 +16,7 @@ jobs:
   quick-tests:
     name: PR/Push quick suite (exclude slow)
     if: github.event_name == 'pull_request' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, primary]
     timeout-minutes: 60
     env:
       QT_QPA_PLATFORM: offscreen
@@ -95,7 +95,7 @@ jobs:
   full-tests:
     name: Scheduled/manual full suite
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, primary]
     timeout-minutes: 90
     env:
       QT_QPA_PLATFORM: offscreen
@@ -174,7 +174,7 @@ jobs:
   coverage:
     name: Manual coverage (llvm/gcov)
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, primary]
     timeout-minutes: 120
     env:
       QT_QPA_PLATFORM: offscreen
