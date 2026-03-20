@@ -36,6 +36,8 @@
 #include "WorldOptions.h"
 #include "WorldPreferencesRoutingUtils.h"
 #include "WorldRuntime.h"
+#include "WorldSessionRestoreFlowUtils.h"
+#include "WorldSessionStateUtils.h"
 #include "WorldView.h"
 #include "dialogs/ColourPickerDialog.h"
 #include "dialogs/ConfirmPreambleDialog.h"
@@ -196,6 +198,8 @@ namespace
 	constexpr char   kReloadStateArgName[]       = "--reload-state";
 	constexpr char   kReloadTokenArgName[]       = "--reload-token";
 	constexpr char   kReloadLogTag[]             = "[ReloadQMud]";
+	constexpr char   kWorldSessionStateSuffix[]  = ".qws";
+	constexpr char   kWorldSessionStateDir[]     = "worlds/state";
 	constexpr char   kUpdateLatestReleaseUrl[] = "https://api.github.com/repos/Nodens-/QMud/releases/latest";
 
 	using UpdateInstallTarget = QMudUpdateCheck::InstallTarget;
@@ -1859,7 +1863,7 @@ static const struct
     {"PrinterLeftMargin",               15                      },
     {"PrinterLinesPerPage",             60                      },
     {"PrinterTopMargin",                15                      },
-    {"ReloadMccpDisableTimeoutMs",      500                     },
+    {"ReloadMccpDisableTimeoutMs",      1000                    },
     {"TimerInterval",                   0                       },
     {"UpdateCheckIntervalHours",        1                       },
     {"FixedPitchFontSize",              9                       },
@@ -2895,6 +2899,304 @@ bool AppController::closeOpenWorldLogsBeforeRestart(QString *errorMessage) const
 	return true;
 }
 
+bool AppController::saveOpenWorldSessionStatesBeforeRestart(QString *errorMessage) const
+{
+	if (errorMessage)
+		errorMessage->clear();
+
+	const MainWindowHost *host = resolveMainWindowHost(m_mainWindow);
+	if (!host)
+		return true;
+
+	const QVector<WorldWindowDescriptor> entries = host->worldWindowDescriptors();
+	for (const WorldWindowDescriptor &entry : entries)
+	{
+		WorldRuntime *runtime = entry.runtime;
+		WorldView    *view    = entry.window ? entry.window->view() : nullptr;
+		if (!runtime || !view)
+			continue;
+
+		bool       saveOk    = true;
+		QString    saveError = {};
+		bool       done      = false;
+		QEventLoop waitLoop;
+		saveWorldSessionStateAsync(
+		    runtime, view,
+		    [&saveOk, &saveError, &done, &waitLoop](const bool ok, const QString &error)
+		    {
+			    saveOk    = ok;
+			    saveError = error;
+			    done      = true;
+			    waitLoop.quit();
+		    });
+		if (!done)
+			waitLoop.exec();
+		if (!saveOk)
+		{
+			if (errorMessage)
+			{
+				const QString worldName = worldDisplayNameForRestartSave(entry);
+				*errorMessage =
+				    QStringLiteral("Unable to persist session state for world \"%1\": %2")
+				        .arg(worldName, saveError.isEmpty() ? QStringLiteral("Unknown error.") : saveError);
+			}
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool AppController::saveOpenWorldPluginStatesBeforeRestart(QString *errorMessage) const
+{
+	if (errorMessage)
+		errorMessage->clear();
+
+	const MainWindowHost *host = resolveMainWindowHost(m_mainWindow);
+	if (!host)
+		return true;
+
+	const QVector<WorldWindowDescriptor> entries = host->worldWindowDescriptors();
+	for (const WorldWindowDescriptor &entry : entries)
+	{
+		WorldRuntime *runtime = entry.runtime;
+		if (!runtime)
+			continue;
+
+		QStringList pluginIds;
+		for (const WorldRuntime::Plugin &plugin : runtime->plugins())
+		{
+			const QString pluginId = plugin.attributes.value(QStringLiteral("id")).trimmed();
+			if (!pluginId.isEmpty())
+				pluginIds.push_back(pluginId);
+		}
+
+		for (const QString &pluginId : std::as_const(pluginIds))
+		{
+			QString   pluginSaveError;
+			const int result = runtime->savePluginState(pluginId, false, &pluginSaveError);
+			if (result == eNoSuchPlugin)
+				continue;
+			if (result == eOK && pluginSaveError.trimmed().isEmpty())
+				continue;
+
+			if (errorMessage)
+			{
+				const QString worldName = worldDisplayNameForRestartSave(entry);
+				const QString detail    = !pluginSaveError.trimmed().isEmpty()
+				                              ? pluginSaveError.trimmed()
+				                              : QStringLiteral("SaveState returned code %1").arg(result);
+				*errorMessage = QStringLiteral("Unable to save plugin state for world \"%1\" (plugin %2): %3")
+				                    .arg(worldName, pluginId, detail);
+			}
+			return false;
+		}
+	}
+
+	return true;
+}
+
+QString AppController::worldSessionStateDirectoryPath() const
+{
+	QString baseDir = m_workingDir.trimmed();
+	if (baseDir.isEmpty())
+		baseDir = makeAbsolutePath(QStringLiteral("."));
+	if (baseDir.isEmpty())
+		baseDir = QCoreApplication::applicationDirPath();
+	return QDir(baseDir).filePath(QString::fromLatin1(kWorldSessionStateDir));
+}
+
+QString AppController::worldSessionStateFilePath(const WorldRuntime *runtime) const
+{
+	if (!runtime)
+		return {};
+
+	QString worldId = runtime->worldAttributes().value(QStringLiteral("id")).trimmed().toLower();
+	if (worldId.isEmpty())
+		return {};
+	for (QChar &ch : worldId)
+	{
+		if (!ch.isLetterOrNumber() && ch != QLatin1Char('_') && ch != QLatin1Char('-'))
+			ch = QLatin1Char('_');
+	}
+	if (worldId.isEmpty())
+		return {};
+
+	return QDir(worldSessionStateDirectoryPath())
+	    .filePath(worldId + QString::fromLatin1(kWorldSessionStateSuffix));
+}
+
+void AppController::saveWorldSessionStateAsync(const WorldRuntime *runtime, const WorldView *view,
+                                               std::function<void(bool, const QString &)> completion) const
+{
+	const auto completionFn =
+	    QSharedPointer<std::function<void(bool, const QString &)>>::create(std::move(completion));
+	const auto finish = [completionFn](const bool ok, const QString &error)
+	{
+		if (completionFn && *completionFn)
+			(*completionFn)(ok, error);
+	};
+
+	if (!runtime || !view)
+	{
+		finish(false, QStringLiteral("Missing runtime or view."));
+		return;
+	}
+
+	const QString                filePath = worldSessionStateFilePath(runtime);
+	const QMap<QString, QString> attrs    = runtime->worldAttributes();
+	const bool persistOutputBuffer   = isEnabledFlag(attrs.value(QStringLiteral("persist_output_buffer")));
+	const bool persistCommandHistory = isEnabledFlag(attrs.value(QStringLiteral("persist_command_history")));
+	if (filePath.trimmed().isEmpty())
+	{
+		if (persistOutputBuffer || persistCommandHistory)
+			finish(false, QStringLiteral("World session-state path is not available."));
+		else
+			finish(true, QString());
+		return;
+	}
+
+	QMudWorldSessionState::WorldSessionStateData state;
+	state.hasOutputBuffer   = persistOutputBuffer;
+	state.hasCommandHistory = persistCommandHistory;
+	if (persistOutputBuffer)
+		state.outputLines = runtime->lines();
+	if (persistCommandHistory)
+		state.commandHistory = view->commandHistoryList();
+
+	QThreadPool::globalInstance()->start(
+	    [filePath, state = std::move(state), completionFn]
+	    {
+		    QString error;
+		    bool    ok = true;
+		    if (!state.hasOutputBuffer && !state.hasCommandHistory)
+			    ok = QMudWorldSessionState::removeSessionStateFile(filePath, &error);
+		    else
+			    ok = QMudWorldSessionState::writeSessionStateFile(filePath, state, &error);
+
+		    QMetaObject::invokeMethod(
+		        qApp,
+		        [completionFn, ok, error]
+		        {
+			        if (completionFn && *completionFn)
+				        (*completionFn)(ok, error);
+		        },
+		        Qt::QueuedConnection);
+	    });
+}
+
+void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldView *view,
+                                                  std::function<void(bool, const QString &)> completion) const
+{
+	const auto completionFn =
+	    QSharedPointer<std::function<void(bool, const QString &)>>::create(std::move(completion));
+	const auto finish = [completionFn](const bool ok, const QString &error)
+	{
+		if (completionFn && *completionFn)
+			(*completionFn)(ok, error);
+	};
+
+	if (!runtime || !view)
+	{
+		finish(false, QStringLiteral("Missing runtime or view."));
+		return;
+	}
+
+	const QPointer<WorldRuntime> runtimeGuard(runtime);
+	const QPointer<WorldView>    viewGuard(view);
+	const QString                filePath = worldSessionStateFilePath(runtime);
+	const QMap<QString, QString> attrs    = runtime->worldAttributes();
+	const bool persistOutputBuffer   = isEnabledFlag(attrs.value(QStringLiteral("persist_output_buffer")));
+	const bool persistCommandHistory = isEnabledFlag(attrs.value(QStringLiteral("persist_command_history")));
+	if (filePath.trimmed().isEmpty())
+	{
+		finish(true, QString());
+		return;
+	}
+
+	QThreadPool::globalInstance()->start(
+	    [runtimeGuard, viewGuard, filePath, persistOutputBuffer, persistCommandHistory, completionFn]
+	    {
+		    QString                                      error;
+		    bool                                         ok = true;
+		    QMudWorldSessionState::WorldSessionStateData state;
+		    const auto plan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
+		        persistOutputBuffer, persistCommandHistory, QFileInfo::exists(filePath));
+		    switch (plan)
+		    {
+		    case QMudWorldSessionRestoreFlow::SessionStateLoadPlan::RemoveFileAndSucceed:
+			    ok = QMudWorldSessionState::removeSessionStateFile(filePath, &error);
+			    break;
+		    case QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply:
+			    ok = QMudWorldSessionState::readSessionStateFile(filePath, &state, &error);
+			    break;
+		    case QMudWorldSessionRestoreFlow::SessionStateLoadPlan::SkipApplyAndSucceed:
+			    break;
+		    }
+
+		    QMetaObject::invokeMethod(
+		        qApp,
+		        [runtimeGuard, viewGuard, completionFn, persistOutputBuffer, persistCommandHistory,
+		         state = std::move(state), ok, error]
+		        {
+			        if (!runtimeGuard || !viewGuard)
+			        {
+				        if (completionFn && *completionFn)
+					        (*completionFn)(false, QStringLiteral("Runtime or view was destroyed."));
+				        return;
+			        }
+
+			        if (ok)
+			        {
+				        if (persistOutputBuffer && state.hasOutputBuffer)
+					        runtimeGuard->replaceOutputLines(state.outputLines);
+				        if (persistCommandHistory && state.hasCommandHistory)
+					        viewGuard->setCommandHistoryList(state.commandHistory);
+			        }
+
+			        if (completionFn && *completionFn)
+				        (*completionFn)(ok, error);
+		        },
+		        Qt::QueuedConnection);
+	    });
+}
+
+bool AppController::restoreWorldSessionStateSync(WorldRuntime *runtime, WorldView *view,
+                                                 QString *errorMessage) const
+{
+	if (errorMessage)
+		errorMessage->clear();
+
+	bool       loadOk = true;
+	QString    loadError;
+	bool       done = false;
+	QEventLoop waitLoop;
+	restoreWorldSessionStateAsync(runtime, view,
+	                              [&loadOk, &loadError, &done, &waitLoop](const bool ok, const QString &error)
+	                              {
+		                              loadOk    = ok;
+		                              loadError = error;
+		                              done      = true;
+		                              waitLoop.quit();
+	                              });
+	if (!done)
+		waitLoop.exec();
+	if (!loadOk && errorMessage)
+		*errorMessage = loadError;
+	return loadOk;
+}
+
+void AppController::runWorldStartupPostRestore(WorldRuntime *runtime) const
+{
+	if (!runtime)
+		return;
+
+	emitStartupBanner(runtime);
+	loadGlobalPlugins(runtime);
+	runtime->setPluginInstallDeferred(false);
+	runtime->installPendingPlugins();
+}
+
 void AppController::detectReloadStartupArguments()
 {
 	m_reloadLaunchRequested = false;
@@ -3891,6 +4193,16 @@ bool AppController::openWorldForReloadRecovery(const ReloadWorldState &worldStat
 		worldRuntime->setWorldFilePath(worldState.worldFilePath);
 	worldRuntime->setWorldAttribute(QStringLiteral("utf_8"),
 	                                worldState.utf8Enabled ? QStringLiteral("1") : QStringLiteral("0"));
+	if (WorldView *view = child->view())
+	{
+		QString restoreError;
+		if (!restoreWorldSessionStateSync(worldRuntime, view, &restoreError) && !restoreError.isEmpty())
+		{
+			qWarning() << "Failed to restore world session state during reload recovery for"
+			           << reloadWorldIdentity(worldState) << ":" << restoreError;
+		}
+	}
+	runWorldStartupPostRestore(worldRuntime);
 
 	*runtime = worldRuntime;
 	return true;
@@ -4432,11 +4744,32 @@ bool AppController::openWorldDocument(const QString &path)
 		restoreWorldWindowPlacement(placementName, window);
 		if (getGlobalOption(QStringLiteral("OpenWorldsMaximised")).toInt() != 0)
 			window->showMaximized();
-		emitStartupBanner(runtime);
-		loadGlobalPlugins(runtime);
-		runtime->setPluginInstallDeferred(false);
-		runtime->installPendingPlugins();
-		maybeAutoConnectWorld(runtime);
+		if (m_suppressAutoConnect)
+		{
+			// Reload-recovery path restores state/reconnect policy explicitly after open.
+			return true;
+		}
+		const QPointer<WorldRuntime> runtimeGuard(runtime);
+		restoreWorldSessionStateAsync(
+		    runtime, window->view(),
+		    [this, runtimeGuard](const bool ok, const QString &error)
+		    {
+			    if (!runtimeGuard)
+				    return;
+			    QMudWorldSessionRestoreFlow::runPostRestoreFlow(
+			        ok, error,
+			        {
+			            [this, runtimeGuard] { runWorldStartupPostRestore(runtimeGuard); },
+			            [this, runtimeGuard] { maybeAutoConnectWorld(runtimeGuard); },
+			            [runtimeGuard](const QString &restoreError)
+			            {
+				            qWarning()
+				                << "Failed to restore world session state for"
+				                << runtimeGuard->worldAttributes().value(QStringLiteral("name")).trimmed()
+				                << ":" << restoreError;
+			            },
+			        });
+		    });
 		return true;
 	}
 
@@ -4457,11 +4790,28 @@ bool AppController::openWorldDocument(const QString &path)
 		window->showMaximized();
 	runtime->setPluginInstallDeferred(true);
 	applyConfiguredWorldDefaults(runtime);
-	emitStartupBanner(runtime);
-	loadGlobalPlugins(runtime);
-	runtime->setPluginInstallDeferred(false);
-	runtime->installPendingPlugins();
-	maybeAutoConnectWorld(runtime);
+	if (m_suppressAutoConnect)
+		return true;
+	const QPointer<WorldRuntime> runtimeGuard(runtime);
+	restoreWorldSessionStateAsync(
+	    runtime, window->view(),
+	    [this, runtimeGuard](const bool ok, const QString &error)
+	    {
+		    if (!runtimeGuard)
+			    return;
+		    QMudWorldSessionRestoreFlow::runPostRestoreFlow(
+		        ok, error,
+		        {
+		            [this, runtimeGuard] { runWorldStartupPostRestore(runtimeGuard); },
+		            [this, runtimeGuard] { maybeAutoConnectWorld(runtimeGuard); },
+		            [runtimeGuard](const QString &restoreError)
+		            {
+			            qWarning() << "Failed to restore world session state for"
+			                       << runtimeGuard->worldAttributes().value(QStringLiteral("name")).trimmed()
+			                       << ":" << restoreError;
+		            },
+		        });
+	    });
 	return true;
 }
 
@@ -5547,6 +5897,17 @@ void AppController::handleUpdateQmudNow()
 					                       "restart.\n%1\n\nRestart was cancelled; close logs manually and "
 					                       "restart QMud manually.")
 					            .arg(restartLogCloseError));
+					    return false;
+				    }
+				    QString restartSessionStateError;
+				    if (!saveOpenWorldSessionStatesBeforeRestart(&restartSessionStateError))
+				    {
+					    QMessageBox::warning(
+					        resolveUiOwner(), QStringLiteral("QMud Update"),
+					        QStringLiteral("Update installed, but failed to persist world session state "
+					                       "before restart.\n%1\n\nRestart was cancelled; restart QMud "
+					                       "manually.")
+					            .arg(restartSessionStateError));
 					    return false;
 				    }
 				    return true;
@@ -8256,7 +8617,10 @@ void AppController::onCommandTriggered(const QString &cmdName)
 
 		WorldPreferencesDialog dlg(runtime, view, m_mainWindow);
 		dlg.setInitialPage(page);
-		dlg.exec();
+		if (dlg.exec() == QDialog::Accepted)
+		{
+			saveWorldSessionStateAsync(runtime, view, [](const bool, const QString &) {});
+		}
 		m_mainWindow->updateStatusBar();
 		m_mainWindow->refreshActionState();
 	}
@@ -12613,12 +12977,34 @@ void AppController::handleFileNew()
 	}
 
 	runtime->setPluginInstallDeferred(true);
-	emitStartupBanner(runtime);
-	loadGlobalPlugins(runtime);
-	runtime->setPluginInstallDeferred(false);
-	runtime->installPendingPlugins();
-
-	maybeAutoConnectWorld(runtime);
+	if (!m_suppressAutoConnect)
+	{
+		const QPointer<WorldRuntime> runtimeGuard(runtime);
+		restoreWorldSessionStateAsync(
+		    runtime, window->view(),
+		    [this, runtimeGuard](const bool ok, const QString &error)
+		    {
+			    if (!runtimeGuard)
+				    return;
+			    QMudWorldSessionRestoreFlow::runPostRestoreFlow(
+			        ok, error,
+			        {
+			            [this, runtimeGuard] { runWorldStartupPostRestore(runtimeGuard); },
+			            [this, runtimeGuard] { maybeAutoConnectWorld(runtimeGuard); },
+			            [runtimeGuard](const QString &restoreError)
+			            {
+				            qWarning()
+				                << "Failed to restore world session state for"
+				                << runtimeGuard->worldAttributes().value(QStringLiteral("name")).trimmed()
+				                << ":" << restoreError;
+			            },
+			        });
+		    });
+	}
+	else
+	{
+		runWorldStartupPostRestore(runtime);
+	}
 }
 
 void AppController::handleHelpGettingStarted() const
@@ -13183,7 +13569,7 @@ void AppController::handleReloadQmud()
 	}
 
 	const int configuredTimeout    = getGlobalOption(QStringLiteral("ReloadMccpDisableTimeoutMs")).toInt();
-	const int mccpDisableTimeoutMs = qBound(100, configuredTimeout, 1000);
+	const int mccpDisableTimeoutMs = qBound(300, configuredTimeout, 2000);
 	if (!autoConfirmReload)
 	{
 		if (QMessageBox::question(
@@ -13207,11 +13593,27 @@ void AppController::handleReloadQmud()
 		return;
 	}
 	QString preReloadLogCloseError;
+	QString preReloadPluginStateError;
 	if (!closeOpenWorldLogsBeforeRestart(&preReloadLogCloseError))
 	{
 		QMessageBox::warning(m_mainWindow, QStringLiteral("Reload QMud"),
 		                     QStringLiteral("Failed to close active world logs before reload.\n%1")
 		                         .arg(preReloadLogCloseError));
+		return;
+	}
+	if (!saveOpenWorldPluginStatesBeforeRestart(&preReloadPluginStateError))
+	{
+		QMessageBox::warning(
+		    m_mainWindow, QStringLiteral("Reload QMud"),
+		    QStringLiteral("Failed to save plugin state before reload.\n%1").arg(preReloadPluginStateError));
+		return;
+	}
+	QString preReloadSessionStateError;
+	if (!saveOpenWorldSessionStatesBeforeRestart(&preReloadSessionStateError))
+	{
+		QMessageBox::warning(m_mainWindow, QStringLiteral("Reload QMud"),
+		                     QStringLiteral("Failed to persist world session state before reload.\n%1")
+		                         .arg(preReloadSessionStateError));
 		return;
 	}
 

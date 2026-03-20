@@ -51,6 +51,7 @@
     {"fade_output_opacity_percent", 20, 0, 100, OPT_UPDATE_VIEWS},
     {"fade_output_seconds", 8, 1, 60, OPT_UPDATE_VIEWS}, {"flash_taskbar_icon", false, 0, 0, 0},
     {"history_lines", 1000, 20, 5000, 0}, {"hyperlink_adds_to_command_history", true, 0, 0, 0},
+    {"persist_output_buffer", true, 0, 0, 0}, {"persist_command_history", true, 0, 0, 0},
     {"hyperlink_colour", RGB(0, 128, 255), 0, 0xFFFFFF, OPT_RGB_COLOUR | OPT_UPDATE_VIEWS},
     {"ignore_chat_colours", false, 0, 0, 0}, {"ignore_mxp_colour_changes", false, 0, 0, 0},
     {"indent_paras", true, 0, 0, 0},

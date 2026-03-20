@@ -228,6 +228,11 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] QStringList     commandHistoryList() const;
 		/**
+		 * @brief Replaces command history entries.
+		 * @param historyEntries Restored command history entries.
+		 */
+		void                          setCommandHistoryList(const QStringList &historyEntries);
+		/**
 		 * @brief Clears command history buffer.
 		 */
 		void                          clearCommandHistory();

@@ -1436,6 +1436,9 @@ void WorldPreferencesDialog::accept()
 			m_runtime->setWorldAttribute(QStringLiteral("convert_ga_to_newline"),
 			                             m_convertGaToNewline->isChecked() ? QStringLiteral("1")
 			                                                               : QStringLiteral("0"));
+		if (m_persistOutputBuffer)
+			m_runtime->setWorldAttribute(QStringLiteral("persist_output_buffer"),
+			                             boolAttributeValue(m_persistOutputBuffer->isChecked()));
 		if (m_toolTipVisibleTime)
 			m_runtime->setWorldAttribute(QStringLiteral("tool_tip_visible_time"),
 			                             QString::number(m_toolTipVisibleTime->value()));
@@ -1536,6 +1539,9 @@ void WorldPreferencesDialog::accept()
 		if (m_historyLines)
 			m_runtime->setWorldAttribute(QStringLiteral("history_lines"),
 			                             QString::number(m_historyLines->value()));
+		if (m_persistCommandHistory)
+			m_runtime->setWorldAttribute(QStringLiteral("persist_command_history"),
+			                             boolAttributeValue(m_persistCommandHistory->isChecked()));
 		if (m_alwaysRecordCommandHistory)
 			m_runtime->setWorldAttribute(QStringLiteral("always_record_command_history"),
 			                             boolAttributeValue(m_alwaysRecordCommandHistory->isChecked()));
@@ -5485,6 +5491,8 @@ void WorldPreferencesDialog::buildUi()
 	m_autoCopyHtml = new QCheckBox(QStringLiteral("HTML"), outputOptionsWidget);
 	m_convertGaToNewline =
 	    new QCheckBox(QStringLiteral("Convert IAC EOR/GA to new line"), outputOptionsWidget);
+	m_persistOutputBuffer =
+	    new QCheckBox(QStringLiteral("Persist output buffer across reload/restart"), outputOptionsWidget);
 	outputOptionsLayout->addWidget(m_lineInformation);
 	outputOptionsLayout->addWidget(m_startPaused);
 	outputOptionsLayout->addWidget(m_autoPause);
@@ -5507,6 +5515,7 @@ void WorldPreferencesDialog::buildUi()
 	htmlLayout->addStretch();
 	outputOptionsLayout->addLayout(htmlLayout);
 	outputOptionsLayout->addWidget(m_convertGaToNewline);
+	outputOptionsLayout->addWidget(m_persistOutputBuffer);
 	outputRight->addWidget(outputOptionsWidget);
 	if (m_copySelectionToClipboard && m_autoCopyHtml)
 		connect(m_copySelectionToClipboard, &QCheckBox::toggled, this, [this] { updateAutoCopyHtmlState(); });
@@ -5740,11 +5749,14 @@ void WorldPreferencesDialog::buildUi()
 	historyLayout->addWidget(historyKeepLabel, 0, 0);
 	historyLayout->addWidget(m_historyLines, 0, 1);
 	historyLayout->addWidget(new QLabel(QStringLiteral("lines."), historyBox), 0, 2);
+	m_persistCommandHistory =
+	    new QCheckBox(QStringLiteral("Persist command history across reload/restart"), historyBox);
+	historyLayout->addWidget(m_persistCommandHistory, 1, 0, 1, 3);
 	m_alwaysRecordCommandHistory = new QCheckBox(QStringLiteral("Always record command history"), historyBox);
 	m_doNotAddMacrosToCommandHistory =
 	    new QCheckBox(QStringLiteral("Do not add macros to command history"), historyBox);
-	historyLayout->addWidget(m_alwaysRecordCommandHistory, 1, 0, 1, 3);
-	historyLayout->addWidget(m_doNotAddMacrosToCommandHistory, 2, 0, 1, 3);
+	historyLayout->addWidget(m_alwaysRecordCommandHistory, 2, 0, 1, 3);
+	historyLayout->addWidget(m_doNotAddMacrosToCommandHistory, 3, 0, 1, 3);
 	historyLayout->setColumnStretch(1, 1);
 	commandsRight->addWidget(historyBox);
 	commandsRight->addStretch();
@@ -9304,6 +9316,9 @@ void WorldPreferencesDialog::populateOutput()
 	if (m_convertGaToNewline)
 		m_convertGaToNewline->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("convert_ga_to_newline"))));
+	if (m_persistOutputBuffer)
+		m_persistOutputBuffer->setChecked(
+		    qmudIsEnabledFlag(attrs.value(QStringLiteral("persist_output_buffer"))));
 	if (m_toolTipVisibleTime)
 		m_toolTipVisibleTime->setValue(attrs.value(QStringLiteral("tool_tip_visible_time")).toInt());
 	if (m_toolTipStartTime)
@@ -9389,6 +9404,9 @@ void WorldPreferencesDialog::populateCommands()
 		m_displayMyInput->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("display_my_input"))));
 	if (m_historyLines)
 		m_historyLines->setValue(attrs.value(QStringLiteral("history_lines")).toInt());
+	if (m_persistCommandHistory)
+		m_persistCommandHistory->setChecked(
+		    qmudIsEnabledFlag(attrs.value(QStringLiteral("persist_command_history"))));
 	if (m_alwaysRecordCommandHistory)
 		m_alwaysRecordCommandHistory->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("always_record_command_history"))));

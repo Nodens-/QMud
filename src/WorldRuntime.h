@@ -1270,6 +1270,11 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] const QVector<LineEntry> &lines() const;
 		/**
+		 * @brief Replaces output line buffer with preloaded session state.
+		 * @param lines Restored output lines.
+		 */
+		void                                    replaceOutputLines(const QVector<LineEntry> &lines);
+		/**
 		 * @brief Begins temporary incoming-line context for Lua callbacks.
 		 * @param text Incoming line text.
 		 * @param flags Line flags bitmask.
@@ -2030,6 +2035,11 @@ class WorldRuntime : public QObject
 		 * @brief Marks next connect callback to skip auto-login/connect-text sends after reload reattach.
 		 */
 		void               markReloadReattachConnectActionsSuppressed();
+		/**
+		 * @brief Returns whether reload reattach connect actions are currently suppressed.
+		 * @return `true` when next connect callback is marked as reload-reattach suppressed.
+		 */
+		[[nodiscard]] bool reloadReattachConnectActionsSuppressed() const;
 		/**
 		 * @brief Consumes one-shot flag that suppresses auto-login/connect-text sends for reload reattach.
 		 * @return `true` when auto-login/connect-text should be skipped for current connect callback.

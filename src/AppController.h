@@ -30,10 +30,12 @@
 #include <QVector>
 #include <QtSql/QSqlDatabase>
 #include <atomic>
+#include <functional>
 
 class MainWindow;
 class ActivityDocument;
 class WorldRuntime;
+class WorldView;
 class QMdiSubWindow;
 class NameGenerator;
 class QDialog;
@@ -606,6 +608,18 @@ class AppController : public QObject
 		 */
 		[[nodiscard]] bool closeOpenWorldLogsBeforeRestart(QString *errorMessage = nullptr) const;
 		/**
+		 * @brief Saves per-world output/history session-state files before reload/restart.
+		 * @param errorMessage Optional output error text when persistence fails.
+		 * @return `true` when all eligible worlds were persisted successfully.
+		 */
+		[[nodiscard]] bool saveOpenWorldSessionStatesBeforeRestart(QString *errorMessage = nullptr) const;
+		/**
+		 * @brief Saves plugin state snapshots for open worlds before reload/restart.
+		 * @param errorMessage Optional output error text when a plugin-state save fails.
+		 * @return `true` when all plugin-state saves completed successfully.
+		 */
+		[[nodiscard]] bool saveOpenWorldPluginStatesBeforeRestart(QString *errorMessage = nullptr) const;
+		/**
 		 * @brief Loads global plugins into runtime context.
 		 * @param runtime Runtime receiving global plugin state.
 		 */
@@ -841,6 +855,47 @@ class AppController : public QObject
 		 * @return `true` when world document opens successfully.
 		 */
 		bool                   openWorldDocument(const QString &path);
+		/**
+		 * @brief Resolves world session-state directory under the data directory.
+		 * @return Absolute world session-state directory path.
+		 */
+		[[nodiscard]] QString  worldSessionStateDirectoryPath() const;
+		/**
+		 * @brief Resolves one world's session-state file path.
+		 * @param runtime World runtime.
+		 * @return Absolute session-state file path (empty when unresolved).
+		 */
+		[[nodiscard]] QString  worldSessionStateFilePath(const WorldRuntime *runtime) const;
+		/**
+		 * @brief Persists one world's session-state file on a worker thread.
+		 * @param runtime World runtime.
+		 * @param view World view.
+		 * @param completion Completion callback executed on the GUI thread.
+		 */
+		void                   saveWorldSessionStateAsync(const WorldRuntime *runtime, const WorldView *view,
+		                                                  std::function<void(bool, const QString &)> completion) const;
+		/**
+		 * @brief Loads one world's session state on a worker thread and applies it.
+		 * @param runtime World runtime.
+		 * @param view World view.
+		 * @param completion Completion callback executed on the GUI thread.
+		 */
+		void                   restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldView *view,
+		                                                     std::function<void(bool, const QString &)> completion) const;
+		/**
+		 * @brief Loads one world's session state and waits for completion.
+		 * @param runtime World runtime.
+		 * @param view World view.
+		 * @param errorMessage Optional output error text.
+		 * @return `true` on success.
+		 */
+		[[nodiscard]] bool     restoreWorldSessionStateSync(WorldRuntime *runtime, WorldView *view,
+		                                                    QString *errorMessage = nullptr) const;
+		/**
+		 * @brief Emits startup banner and loads/installs global plugins after session-state restore.
+		 * @param runtime World runtime.
+		 */
+		void                   runWorldStartupPostRestore(WorldRuntime *runtime) const;
 		/**
 		 * @brief Auto-connects runtime when settings request it.
 		 * @param runtime Runtime to auto-connect.

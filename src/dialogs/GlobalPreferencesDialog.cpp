@@ -1513,7 +1513,7 @@ QWidget *GlobalPreferencesDialog::buildUpdatesPage()
 	auto *timeoutRow = new QHBoxLayout;
 	timeoutRow->addWidget(new QLabel(QStringLiteral("Timeout for MCCP worlds to tear down compression:")));
 	m_reloadMccpTimeoutSpin = new QSpinBox;
-	m_reloadMccpTimeoutSpin->setRange(100, 1000);
+	m_reloadMccpTimeoutSpin->setRange(300, 2000);
 	m_reloadMccpTimeoutSpin->setSingleStep(50);
 	m_reloadMccpTimeoutSpin->setSuffix(QStringLiteral(" ms"));
 	registerSpin(QStringLiteral("ReloadMccpDisableTimeoutMs"), m_reloadMccpTimeoutSpin);

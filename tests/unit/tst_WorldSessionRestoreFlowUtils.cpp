@@ -1,0 +1,102 @@
+/*
+ * QMud Project
+ * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
+ *
+ * File: tst_WorldSessionRestoreFlowUtils.cpp
+ * Role: QTest coverage for post-session-restore startup sequencing helpers.
+ */
+
+#include "WorldSessionRestoreFlowUtils.h"
+
+#include <QtTest/QTest>
+
+/**
+ * @brief QTest fixture covering post-restore sequencing behavior.
+ */
+class tst_WorldSessionRestoreFlowUtils : public QObject
+{
+		Q_OBJECT
+
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
+	private slots:
+		void loadPlanDefaultsOnWithoutStateFileSkipsRead()
+		{
+			const auto plan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(true, true, false);
+			QCOMPARE(plan, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::SkipApplyAndSucceed);
+		}
+
+		void loadPlanDefaultsOnWithStateFileReads()
+		{
+			const auto plan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(true, true, true);
+			QCOMPARE(plan, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply);
+		}
+
+		void loadPlanBothDisabledRemovesFile()
+		{
+			const auto plan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(false, false, true);
+			QCOMPARE(plan, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::RemoveFileAndSucceed);
+		}
+
+		void runsStartupThenAutoConnectOnSuccess()
+		{
+			QStringList sequence;
+			QMudWorldSessionRestoreFlow::runPostRestoreFlow(
+			    true, QStringLiteral("ignored"),
+			    {
+			        [&sequence] { sequence.push_back(QStringLiteral("startup")); },
+			        [&sequence] { sequence.push_back(QStringLiteral("autoconnect")); },
+			        [&sequence](const QString &error)
+			        { sequence.push_back(QStringLiteral("error:%1").arg(error)); },
+			    });
+
+			const QStringList expected{
+			    QStringLiteral("startup"),
+			    QStringLiteral("autoconnect"),
+			};
+			QCOMPARE(sequence, expected);
+		}
+
+		void reportsErrorAndStillRunsStartupAndAutoConnect()
+		{
+			QStringList sequence;
+			QMudWorldSessionRestoreFlow::runPostRestoreFlow(
+			    false, QStringLiteral("restore failed"),
+			    {
+			        [&sequence] { sequence.push_back(QStringLiteral("startup")); },
+			        [&sequence] { sequence.push_back(QStringLiteral("autoconnect")); },
+			        [&sequence](const QString &error)
+			        { sequence.push_back(QStringLiteral("error:%1").arg(error)); },
+			    });
+
+			const QStringList expected{
+			    QStringLiteral("error:restore failed"),
+			    QStringLiteral("startup"),
+			    QStringLiteral("autoconnect"),
+			};
+			QCOMPARE(sequence, expected);
+		}
+
+		void doesNotReportErrorWhenEmpty()
+		{
+			QStringList sequence;
+			QMudWorldSessionRestoreFlow::runPostRestoreFlow(
+			    false, QString(),
+			    {
+			        [&sequence] { sequence.push_back(QStringLiteral("startup")); },
+			        [&sequence] { sequence.push_back(QStringLiteral("autoconnect")); },
+			        [&sequence](const QString &error)
+			        { sequence.push_back(QStringLiteral("error:%1").arg(error)); },
+			    });
+
+			const QStringList expected{
+			    QStringLiteral("startup"),
+			    QStringLiteral("autoconnect"),
+			};
+			QCOMPARE(sequence, expected);
+		}
+		// NOLINTEND(readability-convert-member-functions-to-static)
+};
+
+QTEST_APPLESS_MAIN(tst_WorldSessionRestoreFlowUtils)
+
+#include "tst_WorldSessionRestoreFlowUtils.moc"

@@ -6577,6 +6577,11 @@ void WorldRuntime::markReloadReattachConnectActionsSuppressed()
 	m_reloadReattachSuppressConnectActions = true;
 }
 
+bool WorldRuntime::reloadReattachConnectActionsSuppressed() const
+{
+	return m_reloadReattachSuppressConnectActions;
+}
+
 bool WorldRuntime::consumeReloadReattachConnectActionsSuppressed()
 {
 	const bool suppressed                  = m_reloadReattachSuppressConnectActions;
@@ -15512,6 +15517,20 @@ void WorldRuntime::enforceOutputLineLimit()
 const QVector<WorldRuntime::LineEntry> &WorldRuntime::lines() const
 {
 	return m_lines;
+}
+
+void WorldRuntime::replaceOutputLines(const QVector<LineEntry> &lines)
+{
+	m_lines = lines;
+
+	qint64 maxLineNumber = 0;
+	for (const LineEntry &line : m_lines)
+		maxLineNumber = qMax(maxLineNumber, line.lineNumber);
+	m_nextLineNumber = qMax<qint64>(1, maxLineNumber + 1);
+
+	enforceOutputLineLimit();
+	if (m_view)
+		m_view->rebuildOutputFromLines(m_lines);
 }
 
 void WorldRuntime::beginIncomingLineLuaContext(const QString &text, int flags,

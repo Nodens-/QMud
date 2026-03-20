@@ -79,7 +79,7 @@ namespace
 		state.globalOptions.insert(QStringLiteral("AutoCheckForUpdates"), 1);
 		state.globalOptions.insert(QStringLiteral("UpdateCheckIntervalHours"), 1);
 		state.globalOptions.insert(QStringLiteral("EnableReloadFeature"), 1);
-		state.globalOptions.insert(QStringLiteral("ReloadMccpDisableTimeoutMs"), 500);
+		state.globalOptions.insert(QStringLiteral("ReloadMccpDisableTimeoutMs"), 1000);
 
 		QFile::remove(testIniFilePath());
 	}

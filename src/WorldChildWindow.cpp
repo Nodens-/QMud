@@ -296,38 +296,43 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 			        if (MainWindowHost *main = resolveMainWindowHost(window()))
 				        main->refreshTitleBar();
 		        });
-		connect(worldRuntime, &WorldRuntime::connected, this,
-		        [this, worldRuntime]
-		        {
-			        if (!m_view || !worldRuntime)
-				        return;
-			        bool          shouldFocusInput = false;
-			        const QString flag =
-			            worldRuntime->worldAttributes().value(QStringLiteral("show_connect_disconnect"));
-			        const bool show = flag.isEmpty() ||
-			                          flag.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-			                          flag == QStringLiteral("1") ||
-			                          flag.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-			        if (!show)
-				        return;
-			        const QString when =
-			            QDateTime::currentDateTime().toString(QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"));
-			        if (m_commandProcessor)
-				        m_commandProcessor->note(QStringLiteral("--- Connected on %1 ---").arg(when), true);
-			        else if (m_view)
-				        m_view->appendNoteText(QStringLiteral("--- Connected on %1 ---").arg(when), true);
-			        if (MainWindowHost *main = resolveMainWindowHost(window()))
-			        {
-				        main->setConnectedState(true);
-				        main->refreshTitleBar();
-				        main->updateActivityToolbarButtons();
-				        shouldFocusInput = main->activeWorldChildWindow() == this;
-			        }
-			        if (m_commandProcessor)
-				        m_commandProcessor->handleWorldConnected();
-			        if (m_view && shouldFocusInput)
-				        m_view->focusInput();
-		        });
+		connect(
+		    worldRuntime, &WorldRuntime::connected, this,
+		    [this, worldRuntime]
+		    {
+			    if (!m_view || !worldRuntime)
+				    return;
+			    bool          shouldFocusInput    = false;
+			    const bool    suppressConnectNote = worldRuntime->reloadReattachConnectActionsSuppressed();
+			    const QString flag =
+			        worldRuntime->worldAttributes().value(QStringLiteral("show_connect_disconnect"));
+			    const bool show = flag.isEmpty() ||
+			                      flag.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+			                      flag == QStringLiteral("1") ||
+			                      flag.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+			    if (!show && !suppressConnectNote)
+				    return;
+			    if (!suppressConnectNote)
+			    {
+				    const QString when =
+				        QDateTime::currentDateTime().toString(QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"));
+				    if (m_commandProcessor)
+					    m_commandProcessor->note(QStringLiteral("--- Connected on %1 ---").arg(when), true);
+				    else if (m_view)
+					    m_view->appendNoteText(QStringLiteral("--- Connected on %1 ---").arg(when), true);
+			    }
+			    if (MainWindowHost *main = resolveMainWindowHost(window()))
+			    {
+				    main->setConnectedState(true);
+				    main->refreshTitleBar();
+				    main->updateActivityToolbarButtons();
+				    shouldFocusInput = main->activeWorldChildWindow() == this;
+			    }
+			    if (m_commandProcessor)
+				    m_commandProcessor->handleWorldConnected();
+			    if (m_view && shouldFocusInput)
+				    m_view->focusInput();
+		    });
 		connect(worldRuntime, &WorldRuntime::disconnected, this,
 		        [this]
 		        {

@@ -1902,6 +1902,24 @@ QStringList WorldView::commandHistoryList() const
 	return list;
 }
 
+void WorldView::setCommandHistoryList(const QStringList &historyEntries)
+{
+	m_history.clear();
+	if (m_historyLimit > 0)
+	{
+		const int start = qMax(0, historyEntries.size() - m_historyLimit);
+		for (int i = start; i < historyEntries.size(); ++i)
+			m_history.push_back(historyEntries.at(i));
+	}
+	m_lastCommand = m_history.isEmpty() ? QString() : m_history.last();
+	resetHistoryRecall();
+	if (m_commandHistoryFind)
+	{
+		m_commandHistoryFind->currentLine = 0;
+		m_commandHistoryFind->again       = false;
+	}
+}
+
 void WorldView::clearCommandHistory()
 {
 	m_history.clear();

@@ -162,6 +162,8 @@ set(QMUD_SOURCES
         MainFrameActionUtils.cpp
         AppController.cpp
         UpdateCheckUtils.cpp
+        WorldSessionRestoreFlowUtils.cpp
+        WorldSessionStateUtils.cpp
         ReloadPlannerUtils.cpp
         ReloadStateUtils.cpp
         Environment.cpp
@@ -237,6 +239,8 @@ set(QMUD_HEADERS
         ReloadPlannerUtils.h
         ReloadRecoveryUtils.h
         ReloadStateUtils.h
+        WorldSessionRestoreFlowUtils.h
+        WorldSessionStateUtils.h
         Accelerators.h
         AcceleratorUtils.h
         AliasMatchUtils.h
