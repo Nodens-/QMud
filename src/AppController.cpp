@@ -2804,6 +2804,36 @@ bool AppController::saveDirtyAutoSaveWorldsBeforeRestart(QString *errorMessage) 
 	return true;
 }
 
+bool AppController::closeOpenWorldLogsBeforeRestart(QString *errorMessage) const
+{
+	if (errorMessage)
+		errorMessage->clear();
+
+	const MainWindowHost *host = resolveMainWindowHost(m_mainWindow);
+	if (!host)
+		return true;
+
+	const QVector<WorldWindowDescriptor> entries = host->worldWindowDescriptors();
+	for (const WorldWindowDescriptor &entry : entries)
+	{
+		WorldRuntime *runtime = entry.runtime;
+		if (!runtime || !runtime->isLogOpen())
+			continue;
+
+		const QString worldName = worldDisplayNameForRestartSave(entry);
+		if (const int result = runtime->closeLog(); result != eOK)
+		{
+			if (errorMessage)
+			{
+				*errorMessage = QStringLiteral("Unable to close log for world \"%1\".").arg(worldName);
+			}
+			return false;
+		}
+	}
+
+	return true;
+}
+
 void AppController::detectReloadStartupArguments()
 {
 	m_reloadLaunchRequested = false;
@@ -3164,6 +3194,21 @@ QString AppController::makeAbsolutePath(const QString &fileName) const
 		normalized += QLatin1Char('/');
 	return normalized;
 #endif
+}
+
+QStringList AppController::activeOpenWorldLogFiles() const
+{
+	QStringList openLogs;
+	for (WorldRuntime *runtime : activeWorldRuntimes())
+	{
+		if (!runtime || !runtime->isLogOpen())
+			continue;
+		const QString logFile = runtime->logFileName().trimmed();
+		if (logFile.isEmpty())
+			continue;
+		openLogs.push_back(makeAbsolutePath(logFile));
+	}
+	return openLogs;
 }
 
 bool AppController::initialize()
@@ -5377,18 +5422,32 @@ void AppController::handleUpdateQmudNow()
 			    m_availableUpdateAssetSha256.clear();
 			    setUpdateNowActionVisible(false);
 
-			    const auto ensureWorldSavesBeforeRestart = [this, resolveUiOwner]() -> bool
+			    const auto ensureWorldStatePreparedBeforeRestart = [this, resolveUiOwner]() -> bool
 			    {
 				    QString restartSaveError;
-				    if (saveDirtyAutoSaveWorldsBeforeRestart(&restartSaveError))
-					    return true;
-				    QMessageBox::warning(
-				        resolveUiOwner(), QStringLiteral("QMud Update"),
-				        QStringLiteral(
-				            "Update installed, but failed to save dirty worlds before restart.\n%1\n\n"
-				            "Restart was cancelled; save the affected world(s) and restart QMud manually.")
-				            .arg(restartSaveError));
-				    return false;
+				    if (!saveDirtyAutoSaveWorldsBeforeRestart(&restartSaveError))
+				    {
+					    QMessageBox::warning(
+					        resolveUiOwner(), QStringLiteral("QMud Update"),
+					        QStringLiteral(
+					            "Update installed, but failed to save dirty worlds before restart.\n%1\n\n"
+					            "Restart was cancelled; save the affected world(s) and restart QMud "
+					            "manually.")
+					            .arg(restartSaveError));
+					    return false;
+				    }
+				    QString restartLogCloseError;
+				    if (!closeOpenWorldLogsBeforeRestart(&restartLogCloseError))
+				    {
+					    QMessageBox::warning(
+					        resolveUiOwner(), QStringLiteral("QMud Update"),
+					        QStringLiteral("Update installed, but failed to close active world logs before "
+					                       "restart.\n%1\n\nRestart was cancelled; close logs manually and "
+					                       "restart QMud manually.")
+					            .arg(restartLogCloseError));
+					    return false;
+				    }
+				    return true;
 			    };
 
 			    const bool reloadEnabled =
@@ -5427,7 +5486,7 @@ void AppController::handleUpdateQmudNow()
 					    qputenv("QMUD_RELOAD_ASSUME_YES", previousReloadAssume);
 				    if (!m_reloadInProgress)
 				    {
-					    if (!ensureWorldSavesBeforeRestart())
+					    if (!ensureWorldStatePreparedBeforeRestart())
 						    return;
 					    m_reloadTargetExecutableOverride.clear();
 					    QStringList relaunchArgumentsFallback = QCoreApplication::arguments();
@@ -5450,7 +5509,7 @@ void AppController::handleUpdateQmudNow()
 			    Q_UNUSED(reloadEnabled);
 #endif
 
-			    if (!ensureWorldSavesBeforeRestart())
+			    if (!ensureWorldStatePreparedBeforeRestart())
 				    return;
 
 			    QStringList relaunchArguments = QCoreApplication::arguments();
@@ -12986,7 +13045,7 @@ void AppController::handleReloadQmud()
 {
 #if !defined(Q_OS_LINUX) && !defined(Q_OS_MACOS)
 	QMessageBox::information(m_mainWindow, QStringLiteral("Reload QMud"),
-	                         QStringLiteral("Reload QMud is currently available only on Linux and macOS."));
+	                         QStringLiteral("Reload QMud is available only on Linux and macOS."));
 #else
 	if (getGlobalOption(QStringLiteral("EnableReloadFeature")).toInt() == 0)
 	{
@@ -13043,6 +13102,14 @@ void AppController::handleReloadQmud()
 		QMessageBox::warning(
 		    m_mainWindow, QStringLiteral("Reload QMud"),
 		    QStringLiteral("Failed to save dirty worlds before reload.\n%1").arg(preReloadSaveError));
+		return;
+	}
+	QString preReloadLogCloseError;
+	if (!closeOpenWorldLogsBeforeRestart(&preReloadLogCloseError))
+	{
+		QMessageBox::warning(m_mainWindow, QStringLiteral("Reload QMud"),
+		                     QStringLiteral("Failed to close active world logs before reload.\n%1")
+		                         .arg(preReloadLogCloseError));
 		return;
 	}
 

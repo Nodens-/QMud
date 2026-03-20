@@ -258,6 +258,15 @@ QString AppController::makeAbsolutePath(const QString &fileName) const
 }
 
 /**
+ * @brief Returns stubbed list of currently open world log files.
+ * @return Empty list for this test fixture.
+ */
+QStringList AppController::activeOpenWorldLogFiles() const
+{
+	return {};
+}
+
+/**
  * @brief Tracks manual update-check invocations from dialog UI.
  * @param uiParent Parent widget passed by the dialog.
  */

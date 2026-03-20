@@ -276,6 +276,11 @@ class AppController : public QObject
 		 */
 		[[nodiscard]] QString              makeAbsolutePath(const QString &fileName) const;
 		/**
+		 * @brief Returns absolute paths for currently open world log files.
+		 * @return Absolute open log file paths for active worlds.
+		 */
+		[[nodiscard]] QStringList          activeOpenWorldLogFiles() const;
+		/**
 		 * @brief Applies configured default world options to runtime.
 		 * @param runtime Runtime instance to initialize.
 		 */
@@ -594,6 +599,12 @@ class AppController : public QObject
 		 * @return `true` when all eligible worlds were saved successfully.
 		 */
 		[[nodiscard]] bool saveDirtyAutoSaveWorldsBeforeRestart(QString *errorMessage = nullptr) const;
+		/**
+		 * @brief Closes open world logs before reload/restart so postamble/compression runs.
+		 * @param errorMessage Optional output error text when closing a log fails.
+		 * @return `true` when all open world logs closed successfully.
+		 */
+		[[nodiscard]] bool closeOpenWorldLogsBeforeRestart(QString *errorMessage = nullptr) const;
 		/**
 		 * @brief Loads global plugins into runtime context.
 		 * @param runtime Runtime receiving global plugin state.

@@ -17,6 +17,7 @@
 #include "EncodingUtils.h"
 #include "ErrorDescriptions.h"
 #include "FontUtils.h"
+#include "LogCompressionUtils.h"
 #include "LuaCallbackEngine.h"
 #include "LuaHeaders.h"
 #include "MainFrame.h"
@@ -3649,6 +3650,28 @@ namespace
 #else
 		return normalizePathForStorage(value);
 #endif
+	}
+
+	bool isAbsolutePathLike(const QString &value)
+	{
+		if (value.isEmpty())
+			return false;
+		const QChar first      = value.at(0);
+		const bool  isDrive    = value.size() > 1 && value.at(1) == QLatin1Char(':') && first.isLetter();
+		const bool  isUncShare = value.startsWith(QStringLiteral("//"));
+		return isDrive || isUncShare || first == QLatin1Char('/') || first == QLatin1Char('\\');
+	}
+
+	QString normalizeAutoLogFileNameValue(const QString &value)
+	{
+		QString normalized = normalizePathForStorage(value.trimmed());
+		if (normalized.isEmpty() || isAbsolutePathLike(normalized))
+			return normalizePathForRuntime(normalized);
+
+		while (normalized.startsWith(QStringLiteral("./")))
+			normalized.remove(0, 2);
+
+		return normalizePathForRuntime(normalized);
 	}
 
 	void saveXmlNumber(QTextStream &out, const QString &nl, const char *name, long long number,
@@ -10632,10 +10655,15 @@ int WorldRuntime::openLog(const QString &logFileName, bool append)
 	if (m_logFileName.isEmpty())
 		return eCouldNotOpenFile;
 
-	// Keep log paths stable across normal runs and AppImage runs:
-	// relative paths are resolved against the runtime startup directory.
+	// Resolve relative log paths under the configured default log directory.
+	// If no default is configured, fall back to <startup>/logs.
 	const QString workingDir = resolveWorkingDir(m_startupDirectory);
-	m_logFileName            = makeAbsolutePath(m_logFileName, workingDir);
+	QString       logBaseDir = m_defaultLogDirectory.trimmed();
+	if (logBaseDir.isEmpty())
+		logBaseDir = QDir::cleanPath(QDir(workingDir).filePath(QStringLiteral("logs")));
+	else
+		logBaseDir = makeAbsolutePath(logBaseDir, workingDir);
+	m_logFileName = makeAbsolutePath(m_logFileName, logBaseDir);
 
 	// Ensure missing parent folders (for patterns like logs/foo/bar.txt) exist.
 	const QFileInfo logInfo(m_logFileName);
@@ -10729,77 +10757,7 @@ QString WorldRuntime::buildRotatedLogFileName(const QString &previousFileName) c
 
 bool WorldRuntime::gzipFileInPlace(const QString &sourceFileName, QString *errorMessage)
 {
-	QFile source(sourceFileName);
-	if (!source.open(QIODevice::ReadOnly))
-	{
-		if (errorMessage)
-			*errorMessage = QStringLiteral("Could not open \"%1\" for reading").arg(sourceFileName);
-		return false;
-	}
-
-	const QString compressedName = sourceFileName + QStringLiteral(".gz");
-	QFile::remove(compressedName);
-
-	const QByteArray compressedNameBytes = QFile::encodeName(compressedName);
-	gzFile           gz                  = gzopen(compressedNameBytes.constData(), "wb");
-	if (!gz)
-	{
-		if (errorMessage)
-			*errorMessage = QStringLiteral("Could not open \"%1\" for gzip writing").arg(compressedName);
-		return false;
-	}
-
-	constexpr qint64 kChunkSize = 64 * 1024;
-	QByteArray       chunk;
-	chunk.resize(kChunkSize);
-	while (!source.atEnd())
-	{
-		const qint64 bytesRead = source.read(chunk.data(), kChunkSize);
-		if (bytesRead < 0)
-		{
-			if (errorMessage)
-				*errorMessage = QStringLiteral("Could not read \"%1\" for gzip rotation").arg(sourceFileName);
-			gzclose(gz);
-			QFile::remove(compressedName);
-			return false;
-		}
-		if (bytesRead == 0)
-			continue;
-		const int expected = static_cast<int>(bytesRead);
-		const int written  = gzwrite(gz, chunk.constData(), static_cast<unsigned int>(expected));
-		if (written != expected)
-		{
-			int         zError   = Z_OK;
-			const char *zMessage = gzerror(gz, &zError);
-			if (errorMessage)
-				*errorMessage =
-				    (zMessage && zError != Z_OK)
-				        ? QStringLiteral("gzip write failed: %1").arg(QString::fromLatin1(zMessage))
-				        : QStringLiteral("gzip write failed for \"%1\"").arg(sourceFileName);
-			gzclose(gz);
-			QFile::remove(compressedName);
-			return false;
-		}
-	}
-
-	if (gzclose(gz) != Z_OK)
-	{
-		if (errorMessage)
-			*errorMessage = QStringLiteral("Could not finalize gzip file \"%1\"").arg(compressedName);
-		QFile::remove(compressedName);
-		return false;
-	}
-
-	source.close();
-	if (!QFile::remove(sourceFileName))
-	{
-		if (errorMessage)
-			*errorMessage = QStringLiteral("Created \"%1\" but could not remove \"%2\"")
-			                    .arg(compressedName, sourceFileName);
-		return false;
-	}
-
-	return true;
+	return qmudGzipFileInPlace(sourceFileName, errorMessage);
 }
 
 int WorldRuntime::rotateLogFile()
@@ -12153,6 +12111,8 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	{
 		if (isLikelyPathAttributeName(it.key()))
 			it.value() = normalizePathForRuntime(it.value());
+		if (it.key() == QStringLiteral("auto_log_file_name"))
+			it.value() = normalizeAutoLogFileNameValue(it.value());
 	}
 	m_worldMultilineAttributes = doc.worldMultilineAttributes();
 
@@ -12434,6 +12394,8 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 	QString normalizedValue = value;
 	if (isLikelyPathAttributeName(key))
 		normalizedValue = normalizePathForRuntime(normalizedValue);
+	if (key == QStringLiteral("auto_log_file_name"))
+		normalizedValue = normalizeAutoLogFileNameValue(normalizedValue);
 	m_worldAttributes.insert(key, normalizedValue);
 	if (key == QStringLiteral("max_output_lines"))
 		enforceOutputLineLimit();

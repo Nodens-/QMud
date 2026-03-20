@@ -486,6 +486,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             "${CMAKE_SOURCE_DIR}/src/AppController.h"
             LIBRARIES
             Qt6::Sql
+            ${QMUD_ZLIB_TARGET}
             LABELS
             gui
             TIMEOUT

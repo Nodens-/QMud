@@ -233,6 +233,7 @@ set(QMUD_HEADERS
         MainFrameActionUtils.h
         AppController.h
         Environment.h
+        LogCompressionUtils.h
         ReloadPlannerUtils.h
         ReloadRecoveryUtils.h
         ReloadStateUtils.h
