@@ -165,6 +165,7 @@ bool writeReloadStateSnapshot(const QString &filePath, const ReloadStateSnapshot
 	                .toString(Qt::ISODateWithMs));
 	root.insert(QStringLiteral("reload_token"), snapshot.reloadToken);
 	root.insert(QStringLiteral("target_executable"), snapshot.targetExecutable);
+	root.insert(QStringLiteral("active_world_sequence"), snapshot.activeWorldSequence);
 
 	QJsonArray args;
 	for (const QString &arg : snapshot.arguments)
@@ -288,10 +289,11 @@ bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snaps
 	const QJsonArray    argsRaw   = root.value(QStringLiteral("arguments")).toArray();
 
 	ReloadStateSnapshot parsed;
-	parsed.schemaVersion    = schemaVersion;
-	parsed.createdAtUtc     = createdAtUtc;
-	parsed.reloadToken      = reloadToken;
-	parsed.targetExecutable = targetExe;
+	parsed.schemaVersion       = schemaVersion;
+	parsed.createdAtUtc        = createdAtUtc;
+	parsed.reloadToken         = reloadToken;
+	parsed.targetExecutable    = targetExe;
+	parsed.activeWorldSequence = root.value(QStringLiteral("active_world_sequence")).toInt(0);
 	parsed.arguments.reserve(argsRaw.size());
 	for (const auto &arg : argsRaw)
 		parsed.arguments.push_back(arg.toString());

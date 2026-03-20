@@ -55,6 +55,7 @@ struct ReloadStateSnapshot
 		QDateTime               createdAtUtc;
 		QString                 reloadToken;
 		QString                 targetExecutable;
+		int                     activeWorldSequence{0};
 		QStringList             arguments;
 		QList<ReloadWorldState> worlds;
 };

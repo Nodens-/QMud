@@ -10,16 +10,18 @@
 #include "TelnetProcessor.h"
 
 #include <QtTest/QTest>
+#include <zlib.h>
 
 namespace
 {
 	constexpr unsigned char IAC              = 0xFF;
 	constexpr unsigned char WILL             = 0xFB;
+	constexpr unsigned char WONT             = 0xFC;
 	constexpr unsigned char SB               = 0xFA;
 	constexpr unsigned char SE               = 0xF0;
 	constexpr unsigned char TELOPT_COMPRESS2 = 86;
 
-	QByteArray bytes(std::initializer_list<unsigned char> raw)
+	QByteArray              bytes(std::initializer_list<unsigned char> raw)
 	{
 		QByteArray out;
 		for (const unsigned char c : raw)
@@ -35,6 +37,30 @@ namespace
 		compressed.remove(0, 4); // qCompress prefixes uncompressed length, MCCP expects raw zlib stream only.
 		return compressed;
 	}
+
+	QByteArray makeZlibSyncFlushPayload(const QByteArray &plain)
+	{
+		z_stream stream{};
+		if (deflateInit(&stream, Z_BEST_COMPRESSION) != Z_OK)
+			return {};
+		const auto maxOut = static_cast<int>(deflateBound(&stream, static_cast<uLong>(plain.size())) + 32U);
+		if (maxOut <= 0)
+		{
+			deflateEnd(&stream);
+			return {};
+		}
+		QByteArray payload(maxOut, '\0');
+		stream.next_in   = reinterpret_cast<Bytef *>(const_cast<char *>(plain.constData()));
+		stream.avail_in  = static_cast<uInt>(plain.size());
+		stream.next_out  = reinterpret_cast<Bytef *>(payload.data());
+		stream.avail_out = static_cast<uInt>(payload.size());
+		const int rc     = deflate(&stream, Z_SYNC_FLUSH);
+		deflateEnd(&stream);
+		if (rc != Z_OK)
+			return {};
+		payload.resize(payload.size() - static_cast<int>(stream.avail_out));
+		return payload;
+	}
 } // namespace
 
 /**
@@ -44,7 +70,7 @@ class tst_TelnetProcessor_Compression : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void disableCompressionRejectsWillCompress2()
 		{
@@ -57,7 +83,7 @@ class tst_TelnetProcessor_Compression : public QObject
 
 		void mccp2ActivationAndInflate()
 		{
-			TelnetProcessor processor;
+			TelnetProcessor  processor;
 			const QByteArray compressed = makeQtZlibPayload(QByteArrayLiteral("hello"));
 			QVERIFY(!compressed.isEmpty());
 
@@ -73,7 +99,7 @@ class tst_TelnetProcessor_Compression : public QObject
 
 		void malformedCompressedDataEmitsFatalError()
 		{
-			TelnetProcessor  processor;
+			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
 
@@ -88,7 +114,7 @@ class tst_TelnetProcessor_Compression : public QObject
 
 		void postTeardownBytesInSameReadAreProcessed()
 		{
-			TelnetProcessor processor;
+			TelnetProcessor  processor;
 			const QByteArray compressed = makeQtZlibPayload(QByteArrayLiteral("4. This is line four\n"));
 			QVERIFY(!compressed.isEmpty());
 
@@ -101,7 +127,25 @@ class tst_TelnetProcessor_Compression : public QObject
 			QVERIFY(!processor.isCompressing());
 			QCOMPARE(processor.mccpType(), 0);
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+
+		void wontCompress2ClearsCompressionStateImmediately()
+		{
+			TelnetProcessor processor;
+
+			processor.processBytes(bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE}));
+			QVERIFY(processor.isCompressing());
+			QCOMPARE(processor.mccpType(), 2);
+
+			const QByteArray wontSequence   = bytes({IAC, WONT, TELOPT_COMPRESS2});
+			const QByteArray compressedWont = makeZlibSyncFlushPayload(wontSequence);
+			QVERIFY(!compressedWont.isEmpty());
+
+			const QByteArray output = processor.processBytes(compressedWont);
+			QCOMPARE(output, QByteArray());
+			QVERIFY(!processor.isCompressing());
+			QCOMPARE(processor.mccpType(), 0);
+		}
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Compression)

@@ -301,6 +301,7 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		        {
 			        if (!m_view || !worldRuntime)
 				        return;
+			        bool          shouldFocusInput = false;
 			        const QString flag =
 			            worldRuntime->worldAttributes().value(QStringLiteral("show_connect_disconnect"));
 			        const bool show = flag.isEmpty() ||
@@ -320,10 +321,11 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 				        main->setConnectedState(true);
 				        main->refreshTitleBar();
 				        main->updateActivityToolbarButtons();
+				        shouldFocusInput = main->activeWorldChildWindow() == this;
 			        }
 			        if (m_commandProcessor)
 				        m_commandProcessor->handleWorldConnected();
-			        if (m_view)
+			        if (m_view && shouldFocusInput)
 				        m_view->focusInput();
 		        });
 		connect(worldRuntime, &WorldRuntime::disconnected, this,

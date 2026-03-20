@@ -511,6 +511,25 @@ namespace
 		return QStringLiteral("%1%2").arg(high, 16, 16, QLatin1Char('0')).arg(low, 16, 16, QLatin1Char('0'));
 	}
 
+	QString reloadWorldIdentity(const ReloadWorldState &worldState)
+	{
+		const QString displayName = worldState.displayName.trimmed();
+		const QString worldId     = worldState.worldId.trimmed();
+		if (!displayName.isEmpty() && !worldId.isEmpty())
+			return QStringLiteral("%1 (id=%2)").arg(displayName, worldId);
+		if (!displayName.isEmpty())
+			return displayName;
+		if (!worldId.isEmpty())
+			return QStringLiteral("id=%1").arg(worldId);
+		return QStringLiteral("<unnamed>");
+	}
+
+	void printReloadInfoToStdout(const QString &message)
+	{
+		QTextStream out(stdout);
+		out << kReloadLogTag << ' ' << message << Qt::endl;
+	}
+
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 	bool setSocketDescriptorInheritable(const int descriptor, const bool inheritable, QString *errorMessage)
 	{
@@ -522,9 +541,31 @@ namespace
 				*errorMessage = QStringLiteral("Descriptor is invalid.");
 			return false;
 		}
-		const int flags = fcntl(descriptor, F_GETFD);
-		if (flags < 0)
+
+		constexpr int maxRetryableRetries = 8;
+
+		int           flags                 = -1;
+		int           getFdRetryableRetries = 0;
+		for (;;)
 		{
+			errno = 0;
+			flags = fcntl(descriptor, F_GETFD);
+			if (flags >= 0)
+				break;
+			if (errno == EINTR || errno == EAGAIN)
+			{
+				++getFdRetryableRetries;
+				if (getFdRetryableRetries <= maxRetryableRetries)
+					continue;
+				if (errorMessage)
+				{
+					*errorMessage =
+					    QStringLiteral("fcntl(F_GETFD) retryable failure persisted for descriptor %1: %2")
+					        .arg(descriptor)
+					        .arg(QString::fromLocal8Bit(strerror(errno)));
+				}
+				return false;
+			}
 			if (errorMessage)
 				*errorMessage =
 				    QStringLiteral("fcntl(F_GETFD) failed: %1").arg(QString::fromLocal8Bit(strerror(errno)));
@@ -538,12 +579,32 @@ namespace
 			nextFlags |= FD_CLOEXEC;
 		if (nextFlags == flags)
 			return true;
-		if (fcntl(descriptor, F_SETFD, nextFlags) == 0)
-			return true;
-		if (errorMessage)
-			*errorMessage =
-			    QStringLiteral("fcntl(F_SETFD) failed: %1").arg(QString::fromLocal8Bit(strerror(errno)));
-		return false;
+
+		int setFdRetryableRetries = 0;
+		for (;;)
+		{
+			errno = 0;
+			if (fcntl(descriptor, F_SETFD, nextFlags) == 0)
+				return true;
+			if (errno == EINTR || errno == EAGAIN)
+			{
+				++setFdRetryableRetries;
+				if (setFdRetryableRetries <= maxRetryableRetries)
+					continue;
+				if (errorMessage)
+				{
+					*errorMessage =
+					    QStringLiteral("fcntl(F_SETFD) retryable failure persisted for descriptor %1: %2")
+					        .arg(descriptor)
+					        .arg(QString::fromLocal8Bit(strerror(errno)));
+				}
+				return false;
+			}
+			if (errorMessage)
+				*errorMessage =
+				    QStringLiteral("fcntl(F_SETFD) failed: %1").arg(QString::fromLocal8Bit(strerror(errno)));
+			return false;
+		}
 	}
 
 	bool closeSocketDescriptorIfOpen(const int descriptor, QString *errorMessage)
@@ -3897,6 +3958,7 @@ bool AppController::recoverReloadStartupState()
 	};
 	QList<PendingReconnect>       reconnectQueue;
 	QList<QPointer<WorldRuntime>> mccpResumeQueue;
+	QPointer<WorldRuntime>        requestedActiveRuntime;
 	int                           openedCount       = 0;
 	int                           reattachedCount   = 0;
 	int                           reconnectCount    = 0;
@@ -3918,6 +3980,11 @@ bool AppController::recoverReloadStartupState()
 			continue;
 		}
 		++openedCount;
+		if (!requestedActiveRuntime && snapshot.activeWorldSequence > 0 &&
+		    worldState.sequence == snapshot.activeWorldSequence)
+		{
+			requestedActiveRuntime = runtime;
+		}
 
 		if (worldState.connectedAtReload && worldState.socketDescriptor >= 0)
 		{
@@ -3927,8 +3994,10 @@ bool AppController::recoverReloadStartupState()
 			if (!setSocketDescriptorInheritable(worldState.socketDescriptor, false, &cloexecError) &&
 			    !cloexecError.isEmpty())
 			{
-				qWarning() << kReloadLogTag << "Unable to restore close-on-exec for descriptor"
-				           << worldState.socketDescriptor << ":" << cloexecError;
+				printReloadInfoToStdout(
+				    QStringLiteral("Unable to restore close-on-exec for descriptor %1 after recovery: %2")
+				        .arg(worldState.socketDescriptor)
+				        .arg(cloexecError));
 			}
 #endif
 			if (decision.outcome == ReloadRecoverySocketOutcome::ReconnectQueued)
@@ -3936,19 +4005,37 @@ bool AppController::recoverReloadStartupState()
 				if (!decision.error.isEmpty())
 				{
 					++adoptFailures;
-					qWarning() << kReloadLogTag << "Socket reattach failed for"
-					           << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
-					                                                : worldState.displayName)
-					           << ":" << decision.error;
+					printReloadInfoToStdout(
+					    QStringLiteral("Socket reattach failed for %1; reconnect queued. Descriptor=%2. "
+					                   "Reason: %3")
+					        .arg(reloadWorldIdentity(worldState))
+					        .arg(worldState.socketDescriptor)
+					        .arg(decision.error.trimmed().isEmpty() ? QStringLiteral("Unknown error.")
+					                                                : decision.error.trimmed()));
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 					QString closeError;
 					if (!closeSocketDescriptorIfOpen(worldState.socketDescriptor, &closeError) &&
 					    !closeError.isEmpty())
 					{
-						qWarning() << kReloadLogTag << "Unable to close orphaned descriptor"
-						           << worldState.socketDescriptor << ":" << closeError;
+						printReloadInfoToStdout(
+						    QStringLiteral(
+						        "Unable to close orphaned descriptor %1 during reconnect fallback: %2")
+						        .arg(worldState.socketDescriptor)
+						        .arg(closeError));
 					}
 #endif
+				}
+				else
+				{
+					const QString reason =
+					    !worldState.notes.trimmed().isEmpty()
+					        ? worldState.notes.trimmed()
+					        : QStringLiteral("Policy selected reconnect after descriptor adoption.");
+					printReloadInfoToStdout(
+					    QStringLiteral("Reconnect queued for %1. Descriptor=%2. Reason: %3")
+					        .arg(reloadWorldIdentity(worldState))
+					        .arg(worldState.socketDescriptor)
+					        .arg(reason));
 				}
 				++reconnectCount;
 				if (verboseReloadLogs)
@@ -3977,6 +4064,13 @@ bool AppController::recoverReloadStartupState()
 		if (worldState.connectedAtReload)
 		{
 			++reconnectCount;
+			const QString reason = !worldState.notes.trimmed().isEmpty()
+			                           ? worldState.notes.trimmed()
+			                           : QStringLiteral("Connected world had no reusable socket descriptor.");
+			printReloadInfoToStdout(QStringLiteral("Reconnect queued for %1. Descriptor=%2. Reason: %3")
+			                            .arg(reloadWorldIdentity(worldState))
+			                            .arg(worldState.socketDescriptor)
+			                            .arg(reason));
 			if (verboseReloadLogs)
 			{
 				qInfo() << kReloadLogTag << "Queued reconnect (no descriptor) for"
@@ -3995,6 +4089,14 @@ bool AppController::recoverReloadStartupState()
 	{
 		if (runtime)
 			runtime->requestMccpResumeAfterReloadReattach();
+	}
+	if (m_mainWindow)
+	{
+		bool activated = false;
+		if (requestedActiveRuntime)
+			activated = m_mainWindow->activateWorldRuntime(requestedActiveRuntime.data());
+		if (!activated)
+			m_mainWindow->activateWorldSlot(1);
 	}
 
 	qInfo() << kReloadLogTag << "Recovery summary:"
@@ -13206,12 +13308,24 @@ void AppController::handleReloadQmud()
 	MainWindowHost                      *host = resolveMainWindowHost(m_mainWindow);
 	const QVector<WorldWindowDescriptor> worlds =
 	    host ? host->worldWindowDescriptors() : QVector<WorldWindowDescriptor>{};
+	if (host)
+	{
+		if (const WorldChildWindow *activeWorld = host->activeWorldChildWindow(); activeWorld)
+		{
+			for (const WorldWindowDescriptor &entry : worlds)
+			{
+				if (entry.window == activeWorld)
+				{
+					snapshot.activeWorldSequence = entry.sequence;
+					break;
+				}
+			}
+		}
+	}
 	snapshot.worlds.reserve(worlds.size());
 	struct ReloadPlanRuntimeContext
 	{
 			QPointer<WorldRuntime> runtime;
-			bool                   connected{false};
-			bool                   connecting{false};
 	};
 	QVector<ReloadPlanRuntimeContext> runtimeContexts;
 	runtimeContexts.reserve(worlds.size());
@@ -13248,9 +13362,8 @@ void AppController::handleReloadQmud()
 		world.port          = attrs.value(QStringLiteral("port")).toUShort();
 		world.utf8Enabled   = isEnabledFlag(attrs.value(QStringLiteral("utf_8")));
 
-		const bool connected  = runtime->isConnected();
-		const bool connecting = runtime->isConnecting();
-		runtimeContexts.push_back({runtime, connected, connecting});
+		const bool connected = runtime->isConnected();
+		runtimeContexts.push_back({runtime});
 		world.socketDescriptor = runtime->nativeSocketDescriptor();
 		world.mccpWasActive    = runtime->isCompressing() || runtime->mccpType() != 0;
 		if (shouldAttemptReloadMccpDisable(connected, world.socketDescriptor, world.mccpWasActive))
@@ -13305,11 +13418,27 @@ void AppController::handleReloadQmud()
 			droppedWorldIndices.push_back(i);
 			continue;
 		}
+
+		const bool connectedNow  = ctx.runtime->isConnected();
+		const bool connectingNow = ctx.runtime->isConnecting();
+		world.socketDescriptor   = ctx.runtime->nativeSocketDescriptor();
+		if (!world.mccpDisableAttempted)
+		{
+			const bool mccpActiveNow   = ctx.runtime->isCompressing() || ctx.runtime->mccpType() != 0;
+			world.mccpDisableSucceeded = !mccpActiveNow;
+		}
 		const ReloadWorldPolicyDecision policyDecision =
-		    computeReloadWorldPolicy({ctx.connected, ctx.connecting, world.socketDescriptor,
+		    computeReloadWorldPolicy({connectedNow, connectingNow, world.socketDescriptor,
 		                              world.mccpWasActive, world.mccpDisableSucceeded});
 		world.connectedAtReload = policyDecision.connectedAtReload;
 		world.policy            = policyDecision.policy;
+		if (world.connectedAtReload && world.policy == ReloadSocketPolicy::ParkReconnect &&
+		    world.socketDescriptor >= 0 && world.mccpWasActive && !world.mccpDisableSucceeded &&
+		    world.notes.trimmed().isEmpty())
+		{
+			world.notes =
+			    QStringLiteral("MCCP disable did not complete before reload timeout; reconnect required.");
+		}
 
 		if (!world.connectedAtReload)
 			continue;
@@ -13321,6 +13450,13 @@ void AppController::handleReloadQmud()
 			{
 				world.notes =
 				    QStringLiteral("Failed to preserve socket across reload: %1").arg(inheritError.trimmed());
+				printReloadInfoToStdout(
+				    QStringLiteral("Descriptor inheritance failed for %1; reconnect fallback forced. "
+				                   "Descriptor=%2. Reason: %3")
+				        .arg(reloadWorldIdentity(world))
+				        .arg(world.socketDescriptor)
+				        .arg(inheritError.trimmed().isEmpty() ? QStringLiteral("Unknown error.")
+				                                              : inheritError.trimmed()));
 				world.socketDescriptor = -1;
 				world.policy           = ReloadSocketPolicy::ParkReconnect;
 			}
@@ -13332,6 +13468,9 @@ void AppController::handleReloadQmud()
 		else
 		{
 			world.notes = QStringLiteral("No socket descriptor available; reconnect fallback required.");
+			printReloadInfoToStdout(
+			    QStringLiteral("No inheritable descriptor is available for %1; reconnect fallback required.")
+			        .arg(reloadWorldIdentity(world)));
 		}
 		if (world.policy == ReloadSocketPolicy::Reattach)
 			++reattachWorlds;

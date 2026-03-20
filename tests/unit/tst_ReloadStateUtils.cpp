@@ -57,11 +57,12 @@ class tst_ReloadStateUtils : public QObject
 			const QString       path = reloadStateDefaultPath(tempDir.path());
 
 			ReloadStateSnapshot snapshot;
-			snapshot.schemaVersion    = 1;
-			snapshot.createdAtUtc     = QDateTime::currentDateTimeUtc();
-			snapshot.reloadToken      = QStringLiteral("reload-token");
-			snapshot.targetExecutable = QStringLiteral("/tmp/QMud");
-			snapshot.arguments        = {QStringLiteral("--foo"), QStringLiteral("--bar")};
+			snapshot.schemaVersion       = 1;
+			snapshot.createdAtUtc        = QDateTime::currentDateTimeUtc();
+			snapshot.reloadToken         = QStringLiteral("reload-token");
+			snapshot.targetExecutable    = QStringLiteral("/tmp/QMud");
+			snapshot.activeWorldSequence = 1;
+			snapshot.arguments           = {QStringLiteral("--foo"), QStringLiteral("--bar")};
 
 			ReloadWorldState world;
 			world.sequence             = 1;
@@ -91,6 +92,7 @@ class tst_ReloadStateUtils : public QObject
 			QCOMPARE(parsed.schemaVersion, 1);
 			QCOMPARE(parsed.reloadToken, QStringLiteral("reload-token"));
 			QCOMPARE(parsed.targetExecutable, QStringLiteral("/tmp/QMud"));
+			QCOMPARE(parsed.activeWorldSequence, 1);
 			QCOMPARE(parsed.arguments.size(), 2);
 			QCOMPARE(parsed.worlds.size(), 1);
 			QCOMPARE(parsed.worlds.at(0).worldId, QStringLiteral("world-1"));
@@ -100,6 +102,34 @@ class tst_ReloadStateUtils : public QObject
 			QVERIFY(parsed.worlds.at(0).mccpWasActive);
 			QVERIFY(parsed.worlds.at(0).mccpDisableAttempted);
 			QVERIFY(!parsed.worlds.at(0).mccpDisableSucceeded);
+		}
+
+		void readDefaultsActiveWorldSequenceWhenFieldMissing()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+			const QString path = reloadStateDefaultPath(tempDir.path());
+
+			QFile         file(path);
+			QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+			const QByteArray payload = R"json(
+{
+  "schema_version": 1,
+  "created_at_utc": "2026-03-20T12:00:00.000Z",
+  "reload_token": "token",
+  "target_executable": "/tmp/qmud",
+  "arguments": [],
+  "worlds": []
+}
+)json";
+			QCOMPARE(file.write(payload), payload.size());
+			file.close();
+
+			ReloadStateSnapshot snapshot;
+			QString             error;
+			QVERIFY(readReloadStateSnapshot(path, &snapshot, &error));
+			QVERIFY2(error.isEmpty(), qPrintable(error));
+			QCOMPARE(snapshot.activeWorldSequence, 0);
 		}
 
 		void staleFileDetectionUsesModificationTimestamp()
