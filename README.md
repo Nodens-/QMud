@@ -3,7 +3,8 @@
 QMud is a Qt 6 port and continuation of the
 original [MUSHclient](https://www.mushclient.com/mushclient/mushclient.htm) (by Nick Gammon),
 designed and written by Panagiotis Kalogiratos (Nodens) of [CthulhuMUD](https://www.cthulhumud.com).
-It is compatible with existing files and plugins, but it will migrate them to
+It is client program for connecting to MUD (Multi-User Dungeon) games.
+It is compatible with existing MUSHclient files and plugins, but it will migrate them to
 its own format in order to maintain separation. As more features are implemented,
 things were bound to diverge, especially in data persistence, so, as a conscious
 choice, QMud diverges from the get-go.
@@ -180,11 +181,12 @@ cmake -S . -B cmake-build-release -DCMAKE_BUILD_TYPE=Release
 cmake --build cmake-build-release --target QMud -j"$(sysctl -n hw.ncpu)"
 ```
 
-### Cross-build Windows/macOS on Linux (Docker)
+### Cross/Docker-build AppImage/Windows/macOS on Linux
 
 Build the cross-build images first:
 
 ```bash
+docker build -t qmud-appimage-builder:qt6.10 -f tools/docker/appimage-qt610/Dockerfile tools/docker/appimage-qt610
 docker build -t qmud-macos-builder:qt6.10 -f tools/docker/macos-qt610/Dockerfile tools/docker/macos-qt610
 docker build -t qmud-windows-builder:qt6.10 -f tools/docker/windows-qt610/Dockerfile tools/docker/windows-qt610
 ```
@@ -194,6 +196,8 @@ Configure once (Docker targets are Linux-host only):
 ```bash
 cmake -S . -B cmake-build-release \
   -DCMAKE_BUILD_TYPE=Release \
+  -DQMUD_ENABLE_APPIMAGE=OFF \
+  -DQMUD_ENABLE_APPIMAGE_DOCKER=ON \
   -DQMUD_ENABLE_MAC_DOCKER=ON \
   -DQMUD_ENABLE_WINDOCKER=ON \
   -DQMUD_DOCKER_EXECUTABLE=docker
@@ -202,12 +206,14 @@ cmake -S . -B cmake-build-release \
 Build cross targets:
 
 ```bash
+cmake --build cmake-build-release --target AppImageDocker
 cmake --build cmake-build-release --target MacDocker
 cmake --build cmake-build-release --target WinDocker
 ```
 
 Artifacts are written to:
 
+- AppImage: `cmake-build-release/appimage-docker-out`
 - macOS: `cmake-build-release/mac-docker-out`
 - Windows: `cmake-build-release/windows-docker-out`
 
@@ -237,8 +243,8 @@ ctest --test-dir cmake-build-release --output-on-failure --label-exclude slow
 
 CI policy:
 
-- `.github/workflows/tests.yml` is the authoritative test workflow.
-- Pull requests should require the `Tests / PR/Push quick suite (exclude slow)` job to pass before merge.
+- `.github/workflows/pipelines.yml` is the authoritative CI workflow.
+- Pull requests should require the `Pipelines / PR/Push quick suite (exclude slow)` job to pass before merge.
 
 ## Purposeful deviations from MUSHclient
 

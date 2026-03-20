@@ -1914,17 +1914,17 @@ if (UNIX AND NOT APPLE)
         set(QMUD_DEPLOY_BUILD_CONFIG_ARGS)
     endif ()
 
-    if (TARGET AppImage AND TARGET MacDocker AND TARGET WinDocker)
+    if (TARGET AppImageDocker AND TARGET MacDocker AND TARGET WinDocker)
         add_custom_target(Deploy
-                COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" ${QMUD_DEPLOY_BUILD_CONFIG_ARGS} --target AppImage
+                COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" ${QMUD_DEPLOY_BUILD_CONFIG_ARGS} --target AppImageDocker
                 COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" ${QMUD_DEPLOY_BUILD_CONFIG_ARGS} --target MacDocker
                 COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" ${QMUD_DEPLOY_BUILD_CONFIG_ARGS} --target WinDocker
-                COMMENT "Running deploy pipeline targets in order: AppImage -> MacDocker -> WinDocker"
+                COMMENT "Running deploy pipeline targets in order: AppImageDocker -> MacDocker -> WinDocker"
                 USES_TERMINAL
         )
     else ()
         add_custom_target(Deploy
-                COMMAND ${CMAKE_COMMAND} -E echo "Deploy requires AppImage, MacDocker, and WinDocker targets."
+                COMMAND ${CMAKE_COMMAND} -E echo "Deploy requires AppImageDocker, MacDocker, and WinDocker targets."
                 COMMAND ${CMAKE_COMMAND} -E false
         )
     endif ()
