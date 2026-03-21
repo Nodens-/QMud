@@ -15556,7 +15556,7 @@ void WorldRuntime::replaceOutputLines(const QVector<LineEntry> &lines)
 
 	enforceOutputLineLimit();
 	if (m_view)
-		m_view->rebuildOutputFromLines(m_lines);
+		m_view->rebuildOutputFromLinesLazy(m_lines);
 }
 
 void WorldRuntime::finalizePendingInputLineHardReturn()

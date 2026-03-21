@@ -22,6 +22,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QScrollBar>
 #include <QSignalSpy>
 #include <QTextBrowser>
 #include <QTextCharFormat>
@@ -875,6 +876,195 @@ class tst_WorldView_Basic : public QObject
 			view.applyRuntimeSettings();
 			QVERIFY(view.outputLines().contains(QStringLiteral("runtime-only-line")));
 			QVERIFY(!view.outputLines().contains(QStringLiteral("existing-buffer-line")));
+
+			resetTestState();
+		}
+
+		void rebuildOutputFromLinesLazyShowsTailThenBackfills()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(860, 520);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QVector<WorldRuntime::LineEntry> lines;
+			lines.reserve(400);
+			for (int i = 0; i < 400; ++i)
+			{
+				WorldRuntime::LineEntry entry;
+				entry.text       = QStringLiteral("lazy-%1").arg(i, 3, 10, QLatin1Char('0'));
+				entry.flags      = WorldRuntime::LineOutput;
+				entry.hardReturn = true;
+				lines.push_back(entry);
+			}
+
+			view.rebuildOutputFromLinesLazy(lines);
+			const QStringList immediateLines = view.outputLines();
+			QVERIFY(immediateLines.contains(QStringLiteral("lazy-399")));
+			QVERIFY(!immediateLines.contains(QStringLiteral("lazy-000")));
+
+			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("lazy-000")));
+
+			resetTestState();
+		}
+
+		void applyRuntimeSettingsRebuildPreservesEndAnchorForLazyBackfill()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("use_default_output_font"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("output_font_name"), QStringLiteral("Monospace"));
+			g_worldAttrs.insert(QStringLiteral("output_font_height"), QStringLiteral("10"));
+			g_worldAttrs.insert(QStringLiteral("output_font_weight"), QStringLiteral("400"));
+			g_worldAttrs.insert(QStringLiteral("output_font_charset"), QStringLiteral("1"));
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(860, 520);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QVector<WorldRuntime::LineEntry> lines;
+			lines.reserve(3200);
+			for (int i = 0; i < 3200; ++i)
+			{
+				WorldRuntime::LineEntry entry;
+				entry.text       = QStringLiteral("anchor-%1").arg(i, 4, 10, QLatin1Char('0'));
+				entry.flags      = WorldRuntime::LineOutput;
+				entry.hardReturn = true;
+				lines.push_back(entry);
+			}
+			g_runtimeLines = lines;
+
+			view.rebuildOutputFromLinesLazy(lines);
+			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("anchor-0000")));
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			bar->setValue(bar->maximum());
+			QCoreApplication::processEvents();
+			{
+				const int endTolerance = qMax(1, bar->pageStep());
+				QVERIFY(bar->value() >= (bar->maximum() - endTolerance));
+			}
+
+			g_worldAttrs.insert(QStringLiteral("output_font_height"), QStringLiteral("18"));
+			view.applyRuntimeSettings();
+
+			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("anchor-0000")));
+			QTRY_VERIFY2(
+			    [&]
+			    {
+				    QScrollBar *scrollBar = browser->verticalScrollBar();
+				    if (!scrollBar)
+					    return false;
+				    const int endTolerance = qMax(1, scrollBar->pageStep());
+				    return scrollBar->value() >= (scrollBar->maximum() - endTolerance);
+			    }(),
+			    "Output viewport drifted away from end after lazy runtime-settings rebuild.");
+
+			resetTestState();
+		}
+
+		void rebuildDuringLazyRestoreQueuesUntilBackfillCompletes()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(860, 520);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QVector<WorldRuntime::LineEntry> lazyLines;
+			lazyLines.reserve(3000);
+			for (int i = 0; i < 3000; ++i)
+			{
+				WorldRuntime::LineEntry entry;
+				entry.text       = QStringLiteral("lazy-queue-%1").arg(i, 4, 10, QLatin1Char('0'));
+				entry.flags      = WorldRuntime::LineOutput;
+				entry.hardReturn = true;
+				lazyLines.push_back(entry);
+			}
+
+			view.rebuildOutputFromLinesLazy(lazyLines);
+			const QStringList immediateLines = view.outputLines();
+			QVERIFY(immediateLines.contains(QStringLiteral("lazy-queue-2999")));
+			QVERIFY(!immediateLines.contains(QStringLiteral("lazy-queue-0000")));
+
+			QVector<WorldRuntime::LineEntry> queuedLines;
+			queuedLines.reserve(2);
+			WorldRuntime::LineEntry queuedEntryA;
+			queuedEntryA.text       = QStringLiteral("queued-rebuild-a");
+			queuedEntryA.flags      = WorldRuntime::LineOutput;
+			queuedEntryA.hardReturn = true;
+			queuedLines.push_back(queuedEntryA);
+			WorldRuntime::LineEntry queuedEntryB;
+			queuedEntryB.text       = QStringLiteral("queued-rebuild-b");
+			queuedEntryB.flags      = WorldRuntime::LineOutput;
+			queuedEntryB.hardReturn = true;
+			queuedLines.push_back(queuedEntryB);
+
+			view.rebuildOutputFromLines(queuedLines);
+			QVERIFY(!view.outputLines().contains(QStringLiteral("queued-rebuild-a")));
+
+			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("queued-rebuild-a")));
+			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("queued-rebuild-b")));
+			QVERIFY(!view.outputLines().contains(QStringLiteral("lazy-queue-2999")));
+			QVERIFY(!view.outputLines().contains(QStringLiteral("lazy-queue-0000")));
+
+			resetTestState();
+		}
+
+		void lazyRebuildDuringLazyRestoreDoesNotOverwriteInitialRestore()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(860, 520);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QVector<WorldRuntime::LineEntry> initialRestoreLines;
+			initialRestoreLines.reserve(3000);
+			for (int i = 0; i < 3000; ++i)
+			{
+				WorldRuntime::LineEntry entry;
+				entry.text       = QStringLiteral("initial-restore-%1").arg(i, 4, 10, QLatin1Char('0'));
+				entry.flags      = WorldRuntime::LineOutput;
+				entry.hardReturn = true;
+				initialRestoreLines.push_back(entry);
+			}
+
+			view.rebuildOutputFromLinesLazy(initialRestoreLines);
+			const QStringList immediateLines = view.outputLines();
+			QVERIFY(immediateLines.contains(QStringLiteral("initial-restore-2999")));
+			QVERIFY(!immediateLines.contains(QStringLiteral("initial-restore-0000")));
+
+			QVector<WorldRuntime::LineEntry> queuedRebuildLines;
+			queuedRebuildLines.reserve(2);
+			WorldRuntime::LineEntry queuedEntryA;
+			queuedEntryA.text       = QStringLiteral("queued-lazy-a");
+			queuedEntryA.flags      = WorldRuntime::LineOutput;
+			queuedEntryA.hardReturn = true;
+			queuedRebuildLines.push_back(queuedEntryA);
+			WorldRuntime::LineEntry queuedEntryB;
+			queuedEntryB.text       = QStringLiteral("queued-lazy-b");
+			queuedEntryB.flags      = WorldRuntime::LineOutput;
+			queuedEntryB.hardReturn = true;
+			queuedRebuildLines.push_back(queuedEntryB);
+
+			view.rebuildOutputFromLinesLazy(queuedRebuildLines);
+			QVERIFY(!view.outputLines().contains(QStringLiteral("queued-lazy-a")));
+
+			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("queued-lazy-a")));
+			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("queued-lazy-b")));
+			QVERIFY(!view.outputLines().contains(QStringLiteral("initial-restore-2999")));
+			QVERIFY(!view.outputLines().contains(QStringLiteral("initial-restore-0000")));
 
 			resetTestState();
 		}

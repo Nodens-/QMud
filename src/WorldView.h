@@ -170,6 +170,13 @@ class WorldView : public QWidget
 		 */
 		void rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry> &lines);
 		/**
+		 * @brief Rebuilds output by rendering visible tail first, then asynchronously backfilling older lines.
+		 *
+		 * Intended for session-state restore paths where immediate responsiveness is preferred.
+		 * @param lines Line entries to render.
+		 */
+		void rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry> &lines);
+		/**
 		 * @brief Appends raw HTML fragment to output view.
 		 * @param html HTML fragment to append.
 		 * @param newLine Append newline after fragment when `true`.
@@ -766,6 +773,16 @@ class WorldView : public QWidget
 		void                 paintMiniWindows(class QPainter *painter, bool underneath) const;
 		void                 applyRuntimeSettingsImpl(bool rebuildOutput);
 		/**
+		 * @brief Processes one asynchronous deferred-output backfill chunk for lazy rebuild.
+		 */
+		void                 processDeferredOutputBackfillChunk();
+		/**
+		 * @brief Stops deferred output backfill and clears pending state.
+		 * @param runQueuedRebuild Run queued full rebuild after stop when `true`.
+		 * @param clearQueuedRebuild Discard queued rebuild request when `true`.
+		 */
+		void                 stopDeferredOutputBackfill(bool runQueuedRebuild, bool clearQueuedRebuild);
+		/**
 		 * @brief Starts or restarts incremental in-place hyperlink style refresh.
 		 *
 		 * Processes output blocks in small chunks to keep the UI responsive while
@@ -1125,6 +1142,15 @@ class WorldView : public QWidget
 		QElapsedTimer                           m_drawNotifyThrottle;
 		qint64                                  m_lastDrawNotifyMs{-1000};
 		bool                                    m_scrollToEndQueued{false};
+		QVector<WorldRuntime::LineEntry>        m_outputBackfillPendingLines;
+		int                                     m_outputBackfillNextIndex{-1};
+		bool                                    m_outputBackfillInFlight{false};
+		int                                     m_outputBackfillGeneration{0};
+		bool                                    m_outputBackfillQueuedRebuild{false};
+		QVector<WorldRuntime::LineEntry>        m_outputBackfillQueuedRebuildLines;
+		// One-shot end anchor consumed on the next scrollbar range change after rebuild swap.
+		// This keeps the viewport at document end when Qt adjusts layout/ranges post-rebuild.
+		bool                                    m_anchorEndOnNextRangeChange{false};
 		QTimer                                 *m_hyperlinkRestyleTimer{nullptr};
 		int                                     m_hyperlinkRestyleNextBlock{-1};
 		bool                                    m_bulkOutputRebuild{false};

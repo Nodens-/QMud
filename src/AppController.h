@@ -667,9 +667,11 @@ class AppController : public QObject
 		 * @brief Opens one runtime/window pair from serialized reload world state.
 		 * @param worldState Serialized world state.
 		 * @param runtime Output runtime pointer.
+		 * @param view Optional output world view pointer.
 		 * @return `true` when world opening succeeds.
 		 */
-		bool        openWorldForReloadRecovery(const ReloadWorldState &worldState, WorldRuntime **runtime);
+		bool        openWorldForReloadRecovery(const ReloadWorldState &worldState, WorldRuntime **runtime,
+		                                       WorldView **view = nullptr);
 		/**
 		 * @brief Reconnects recovered runtime for `park_reconnect` fallback.
 		 * @param runtime Runtime to reconnect.
