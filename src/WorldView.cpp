@@ -66,18 +66,18 @@
 namespace
 {
 	constexpr int kAutoHyperlinkUnderlineProperty = QTextFormat::UserProperty + 1201;
-	constexpr int kAutoHyperlinkColourProperty    = QTextFormat::UserProperty + 1202;
+	constexpr int kAutoHyperlinkColourProperty = QTextFormat::UserProperty + 1202;
 	constexpr int kHyperlinkRestyleBlocksPerChunk = 96;
 	constexpr int kLazyRestoreInitialMinimumLines = 120;
 	constexpr int kLazyRestoreInitialMaximumLines = 800;
-	constexpr int kLazyRestoreVisibleMultiplier   = 3;
+	constexpr int kLazyRestoreVisibleMultiplier = 3;
 
 	struct DeferredBackfillRenderLine
 	{
-			QString                          text;
-			QVector<WorldRuntime::StyleSpan> spans;
-			bool                             newLine{false};
-			double                           opacity{1.0};
+		QString text;
+		QVector<WorldRuntime::StyleSpan> spans;
+		bool newLine{false};
+		double opacity{1.0};
 	};
 
 	int sizeToInt(const qsizetype value)
@@ -87,204 +87,215 @@ namespace
 		return static_cast<int>(qBound(kMin, value, kMax));
 	}
 
-	const QSet<QString> &worldViewRuntimeSettingsAttributeKeys()
+	const QSet<QString>& worldViewRuntimeSettingsAttributeKeys()
 	{
-		static const QSet<QString> keys = {QStringLiteral("output_font_name"),
-		                                   QStringLiteral("input_font_name"),
-		                                   QStringLiteral("output_font_height"),
-		                                   QStringLiteral("input_font_height"),
-		                                   QStringLiteral("output_font_weight"),
-		                                   QStringLiteral("input_font_weight"),
-		                                   QStringLiteral("input_font_italic"),
-		                                   QStringLiteral("output_font_charset"),
-		                                   QStringLiteral("input_font_charset"),
-		                                   QStringLiteral("use_default_output_font"),
-		                                   QStringLiteral("use_default_input_font"),
-		                                   QStringLiteral("input_background_colour"),
-		                                   QStringLiteral("input_text_colour"),
-		                                   QStringLiteral("output_background_colour"),
-		                                   QStringLiteral("output_text_colour"),
-		                                   QStringLiteral("wrap_column"),
-		                                   QStringLiteral("max_output_lines"),
-		                                   QStringLiteral("wrap"),
-		                                   QStringLiteral("auto_wrap_window_width"),
-		                                   QStringLiteral("naws"),
-		                                   QStringLiteral("wrap_input"),
-		                                   QStringLiteral("show_bold"),
-		                                   QStringLiteral("show_italic"),
-		                                   QStringLiteral("show_underline"),
-		                                   QStringLiteral("alternative_inverse"),
-		                                   QStringLiteral("line_spacing"),
-		                                   QStringLiteral("fade_output_buffer_after_seconds"),
-		                                   QStringLiteral("fade_output_opacity_percent"),
-		                                   QStringLiteral("fade_output_seconds"),
-		                                   QStringLiteral("pixel_offset"),
-		                                   QStringLiteral("display_my_input"),
-		                                   QStringLiteral("line_information"),
-		                                   QStringLiteral("escape_deletes_input"),
-		                                   QStringLiteral("save_deleted_command"),
-		                                   QStringLiteral("confirm_on_paste"),
-		                                   QStringLiteral("ctrl_backspace_deletes_last_word"),
-		                                   QStringLiteral("arrows_change_history"),
-		                                   QStringLiteral("arrow_keys_wrap"),
-		                                   QStringLiteral("arrow_recalls_partial"),
-		                                   QStringLiteral("alt_arrow_recalls_partial"),
-		                                   QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
-		                                   QStringLiteral("ctrl_p_goes_to_previous_command"),
-		                                   QStringLiteral("ctrl_n_goes_to_next_command"),
-		                                   QStringLiteral("confirm_before_replacing_typing"),
-		                                   QStringLiteral("double_click_inserts"),
-		                                   QStringLiteral("double_click_sends"),
-		                                   QStringLiteral("auto_repeat"),
-		                                   QStringLiteral("lower_case_tab_completion"),
-		                                   QStringLiteral("tab_completion_space"),
-		                                   QStringLiteral("tab_completion_lines"),
-		                                   QStringLiteral("auto_resize_command_window"),
-		                                   QStringLiteral("auto_resize_minimum_lines"),
-		                                   QStringLiteral("auto_resize_maximum_lines"),
-		                                   QStringLiteral("keep_commands_on_same_line"),
-		                                   QStringLiteral("no_echo_off"),
-		                                   QStringLiteral("always_record_command_history"),
-		                                   QStringLiteral("hyperlink_adds_to_command_history"),
-		                                   QStringLiteral("use_custom_link_colour"),
-		                                   QStringLiteral("underline_hyperlinks"),
-		                                   QStringLiteral("hyperlink_colour"),
-		                                   QStringLiteral("history_lines"),
-		                                   QStringLiteral("auto_pause"),
-		                                   QStringLiteral("keep_pause_at_bottom"),
-		                                   QStringLiteral("start_paused")};
+		static const QSet<QString> keys = {
+			QStringLiteral("output_font_name"),
+			QStringLiteral("input_font_name"),
+			QStringLiteral("output_font_height"),
+			QStringLiteral("input_font_height"),
+			QStringLiteral("output_font_weight"),
+			QStringLiteral("input_font_weight"),
+			QStringLiteral("input_font_italic"),
+			QStringLiteral("output_font_charset"),
+			QStringLiteral("input_font_charset"),
+			QStringLiteral("use_default_output_font"),
+			QStringLiteral("use_default_input_font"),
+			QStringLiteral("input_background_colour"),
+			QStringLiteral("input_text_colour"),
+			QStringLiteral("output_background_colour"),
+			QStringLiteral("output_text_colour"),
+			QStringLiteral("wrap_column"),
+			QStringLiteral("max_output_lines"),
+			QStringLiteral("wrap"),
+			QStringLiteral("auto_wrap_window_width"),
+			QStringLiteral("naws"),
+			QStringLiteral("wrap_input"),
+			QStringLiteral("show_bold"),
+			QStringLiteral("show_italic"),
+			QStringLiteral("show_underline"),
+			QStringLiteral("alternative_inverse"),
+			QStringLiteral("line_spacing"),
+			QStringLiteral("fade_output_buffer_after_seconds"),
+			QStringLiteral("fade_output_opacity_percent"),
+			QStringLiteral("fade_output_seconds"),
+			QStringLiteral("pixel_offset"),
+			QStringLiteral("display_my_input"),
+			QStringLiteral("line_information"),
+			QStringLiteral("escape_deletes_input"),
+			QStringLiteral("save_deleted_command"),
+			QStringLiteral("confirm_on_paste"),
+			QStringLiteral("ctrl_backspace_deletes_last_word"),
+			QStringLiteral("arrows_change_history"),
+			QStringLiteral("arrow_keys_wrap"),
+			QStringLiteral("arrow_recalls_partial"),
+			QStringLiteral("alt_arrow_recalls_partial"),
+			QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
+			QStringLiteral("ctrl_p_goes_to_previous_command"),
+			QStringLiteral("ctrl_n_goes_to_next_command"),
+			QStringLiteral("confirm_before_replacing_typing"),
+			QStringLiteral("double_click_inserts"),
+			QStringLiteral("double_click_sends"),
+			QStringLiteral("auto_repeat"),
+			QStringLiteral("lower_case_tab_completion"),
+			QStringLiteral("tab_completion_space"),
+			QStringLiteral("tab_completion_lines"),
+			QStringLiteral("auto_resize_command_window"),
+			QStringLiteral("auto_resize_minimum_lines"),
+			QStringLiteral("auto_resize_maximum_lines"),
+			QStringLiteral("keep_commands_on_same_line"),
+			QStringLiteral("no_echo_off"),
+			QStringLiteral("always_record_command_history"),
+			QStringLiteral("hyperlink_adds_to_command_history"),
+			QStringLiteral("use_custom_link_colour"),
+			QStringLiteral("underline_hyperlinks"),
+			QStringLiteral("hyperlink_colour"),
+			QStringLiteral("history_lines"),
+			QStringLiteral("auto_pause"),
+			QStringLiteral("keep_pause_at_bottom"),
+			QStringLiteral("start_paused")
+		};
 		return keys;
 	}
 
-	const QSet<QString> &worldViewRuntimeSettingsMultilineAttributeKeys()
+	const QSet<QString>& worldViewRuntimeSettingsMultilineAttributeKeys()
 	{
 		static const QSet<QString> keys = {QStringLiteral("tab_completion_defaults")};
 		return keys;
 	}
 
-	const QSet<QString> &worldViewRuntimeSettingsRebuildAttributeKeys()
+	const QSet<QString>& worldViewRuntimeSettingsRebuildAttributeKeys()
 	{
 		// Keep this set aligned with output-rendering branches in applyRuntimeSettingsImpl().
 		// Keys listed here require rebuilding existing buffered output to avoid stale formatting/layout.
-		static const QSet<QString> keys = {QStringLiteral("output_font_name"),
-		                                   QStringLiteral("output_font_height"),
-		                                   QStringLiteral("output_font_weight"),
-		                                   QStringLiteral("output_font_charset"),
-		                                   QStringLiteral("use_default_output_font"),
-		                                   QStringLiteral("output_background_colour"),
-		                                   QStringLiteral("output_text_colour"),
-		                                   QStringLiteral("show_bold"),
-		                                   QStringLiteral("show_italic"),
-		                                   QStringLiteral("show_underline"),
-		                                   QStringLiteral("alternative_inverse"),
-		                                   QStringLiteral("line_spacing")};
+		static const QSet<QString> keys = {
+			QStringLiteral("output_font_name"),
+			QStringLiteral("output_font_height"),
+			QStringLiteral("output_font_weight"),
+			QStringLiteral("output_font_charset"),
+			QStringLiteral("use_default_output_font"),
+			QStringLiteral("output_background_colour"),
+			QStringLiteral("output_text_colour"),
+			QStringLiteral("show_bold"),
+			QStringLiteral("show_italic"),
+			QStringLiteral("show_underline"),
+			QStringLiteral("alternative_inverse"),
+			QStringLiteral("line_spacing")
+		};
 		return keys;
 	}
 
-	const QSet<QString> &worldViewRuntimeSettingsRebuildMultilineAttributeKeys()
+	const QSet<QString>& worldViewRuntimeSettingsRebuildMultilineAttributeKeys()
 	{
 		static const QSet<QString> keys = {};
 		return keys;
 	}
 
-	const QSet<QString> &worldViewEnabledBooleanAttributeKeys()
-	{
-		static const QSet<QString> keys = {QStringLiteral("wrap"),
-		                                   QStringLiteral("auto_wrap_window_width"),
-		                                   QStringLiteral("naws"),
-		                                   QStringLiteral("wrap_input"),
-		                                   QStringLiteral("alternative_inverse"),
-		                                   QStringLiteral("display_my_input"),
-		                                   QStringLiteral("line_information"),
-		                                   QStringLiteral("escape_deletes_input"),
-		                                   QStringLiteral("save_deleted_command"),
-		                                   QStringLiteral("confirm_on_paste"),
-		                                   QStringLiteral("ctrl_backspace_deletes_last_word"),
-		                                   QStringLiteral("arrows_change_history"),
-		                                   QStringLiteral("arrow_keys_wrap"),
-		                                   QStringLiteral("arrow_recalls_partial"),
-		                                   QStringLiteral("alt_arrow_recalls_partial"),
-		                                   QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
-		                                   QStringLiteral("ctrl_p_goes_to_previous_command"),
-		                                   QStringLiteral("ctrl_n_goes_to_next_command"),
-		                                   QStringLiteral("confirm_before_replacing_typing"),
-		                                   QStringLiteral("double_click_inserts"),
-		                                   QStringLiteral("double_click_sends"),
-		                                   QStringLiteral("auto_repeat"),
-		                                   QStringLiteral("lower_case_tab_completion"),
-		                                   QStringLiteral("tab_completion_space"),
-		                                   QStringLiteral("auto_resize_command_window"),
-		                                   QStringLiteral("keep_commands_on_same_line"),
-		                                   QStringLiteral("no_echo_off"),
-		                                   QStringLiteral("always_record_command_history"),
-		                                   QStringLiteral("hyperlink_adds_to_command_history"),
-		                                   QStringLiteral("use_custom_link_colour"),
-		                                   QStringLiteral("underline_hyperlinks"),
-		                                   QStringLiteral("auto_pause"),
-		                                   QStringLiteral("keep_pause_at_bottom"),
-		                                   QStringLiteral("start_paused"),
-		                                   QStringLiteral("use_default_output_font"),
-		                                   QStringLiteral("use_default_input_font")};
-		return keys;
-	}
-
-	const QSet<QString> &worldViewDisabledBooleanAttributeKeys()
-	{
-		static const QSet<QString> keys = {QStringLiteral("show_bold"), QStringLiteral("show_italic"),
-		                                   QStringLiteral("show_underline")};
-		return keys;
-	}
-
-	const QSet<QString> &worldViewNumericAttributeKeys()
-	{
-		static const QSet<QString> keys = {QStringLiteral("output_font_height"),
-		                                   QStringLiteral("input_font_height"),
-		                                   QStringLiteral("output_font_weight"),
-		                                   QStringLiteral("input_font_weight"),
-		                                   QStringLiteral("input_font_italic"),
-		                                   QStringLiteral("output_font_charset"),
-		                                   QStringLiteral("input_font_charset"),
-		                                   QStringLiteral("wrap_column"),
-		                                   QStringLiteral("max_output_lines"),
-		                                   QStringLiteral("line_spacing"),
-		                                   QStringLiteral("fade_output_buffer_after_seconds"),
-		                                   QStringLiteral("fade_output_opacity_percent"),
-		                                   QStringLiteral("fade_output_seconds"),
-		                                   QStringLiteral("pixel_offset"),
-		                                   QStringLiteral("tab_completion_lines"),
-		                                   QStringLiteral("auto_resize_minimum_lines"),
-		                                   QStringLiteral("auto_resize_maximum_lines"),
-		                                   QStringLiteral("history_lines")};
-		return keys;
-	}
-
-	const QSet<QString> &worldViewColorAttributeKeys()
+	const QSet<QString>& worldViewEnabledBooleanAttributeKeys()
 	{
 		static const QSet<QString> keys = {
-		    QStringLiteral("input_background_colour"), QStringLiteral("input_text_colour"),
-		    QStringLiteral("output_background_colour"), QStringLiteral("output_text_colour"),
-		    QStringLiteral("hyperlink_colour")};
+			QStringLiteral("wrap"),
+			QStringLiteral("auto_wrap_window_width"),
+			QStringLiteral("naws"),
+			QStringLiteral("wrap_input"),
+			QStringLiteral("alternative_inverse"),
+			QStringLiteral("display_my_input"),
+			QStringLiteral("line_information"),
+			QStringLiteral("escape_deletes_input"),
+			QStringLiteral("save_deleted_command"),
+			QStringLiteral("confirm_on_paste"),
+			QStringLiteral("ctrl_backspace_deletes_last_word"),
+			QStringLiteral("arrows_change_history"),
+			QStringLiteral("arrow_keys_wrap"),
+			QStringLiteral("arrow_recalls_partial"),
+			QStringLiteral("alt_arrow_recalls_partial"),
+			QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
+			QStringLiteral("ctrl_p_goes_to_previous_command"),
+			QStringLiteral("ctrl_n_goes_to_next_command"),
+			QStringLiteral("confirm_before_replacing_typing"),
+			QStringLiteral("double_click_inserts"),
+			QStringLiteral("double_click_sends"),
+			QStringLiteral("auto_repeat"),
+			QStringLiteral("lower_case_tab_completion"),
+			QStringLiteral("tab_completion_space"),
+			QStringLiteral("auto_resize_command_window"),
+			QStringLiteral("keep_commands_on_same_line"),
+			QStringLiteral("no_echo_off"),
+			QStringLiteral("always_record_command_history"),
+			QStringLiteral("hyperlink_adds_to_command_history"),
+			QStringLiteral("use_custom_link_colour"),
+			QStringLiteral("underline_hyperlinks"),
+			QStringLiteral("auto_pause"),
+			QStringLiteral("keep_pause_at_bottom"),
+			QStringLiteral("start_paused"),
+			QStringLiteral("use_default_output_font"),
+			QStringLiteral("use_default_input_font")
+		};
 		return keys;
 	}
 
-	bool isEnabledFlagValue(const QString &value)
+	const QSet<QString>& worldViewDisabledBooleanAttributeKeys()
+	{
+		static const QSet<QString> keys = {
+			QStringLiteral("show_bold"), QStringLiteral("show_italic"),
+			QStringLiteral("show_underline")
+		};
+		return keys;
+	}
+
+	const QSet<QString>& worldViewNumericAttributeKeys()
+	{
+		static const QSet<QString> keys = {
+			QStringLiteral("output_font_height"),
+			QStringLiteral("input_font_height"),
+			QStringLiteral("output_font_weight"),
+			QStringLiteral("input_font_weight"),
+			QStringLiteral("input_font_italic"),
+			QStringLiteral("output_font_charset"),
+			QStringLiteral("input_font_charset"),
+			QStringLiteral("wrap_column"),
+			QStringLiteral("max_output_lines"),
+			QStringLiteral("line_spacing"),
+			QStringLiteral("fade_output_buffer_after_seconds"),
+			QStringLiteral("fade_output_opacity_percent"),
+			QStringLiteral("fade_output_seconds"),
+			QStringLiteral("pixel_offset"),
+			QStringLiteral("tab_completion_lines"),
+			QStringLiteral("auto_resize_minimum_lines"),
+			QStringLiteral("auto_resize_maximum_lines"),
+			QStringLiteral("history_lines")
+		};
+		return keys;
+	}
+
+	const QSet<QString>& worldViewColorAttributeKeys()
+	{
+		static const QSet<QString> keys = {
+			QStringLiteral("input_background_colour"), QStringLiteral("input_text_colour"),
+			QStringLiteral("output_background_colour"), QStringLiteral("output_text_colour"),
+			QStringLiteral("hyperlink_colour")
+		};
+		return keys;
+	}
+
+	bool isEnabledFlagValue(const QString& value)
 	{
 		return value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0 ||
-		       value == QStringLiteral("1");
+			value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0 ||
+			value == QStringLiteral("1");
 	}
 
-	bool isDisabledFlagValue(const QString &value)
+	bool isDisabledFlagValue(const QString& value)
 	{
 		return value.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
-		       value.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0 ||
-		       value == QStringLiteral("0");
+			value.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0 ||
+			value == QStringLiteral("0");
 	}
 
-	int canonicalWorldViewNumericValue(const QString &key, const QString &value)
+	int canonicalWorldViewNumericValue(const QString& key, const QString& value)
 	{
-		bool ok     = false;
-		int  parsed = value.toInt(&ok);
+		bool ok = false;
+		int parsed = value.toInt(&ok);
 		if (key == QStringLiteral("line_spacing"))
 			return ok && parsed >= 0 ? parsed : 0;
 		if (key == QStringLiteral("fade_output_buffer_after_seconds"))
@@ -308,7 +319,7 @@ namespace
 		return ok ? parsed : 0;
 	}
 
-	QString anchorAtGlobalCursor(const QTextBrowser *browser)
+	QString anchorAtGlobalCursor(const QTextBrowser* browser)
 	{
 		if (!browser || !browser->isVisible() || !browser->viewport())
 			return {};
@@ -320,59 +331,59 @@ namespace
 
 	class ContextMenuDismissReplayFilter final : public QObject
 	{
-		public:
-			explicit ContextMenuDismissReplayFilter(const QMenu *menu) : m_menu(menu)
-			{
-			}
+	public:
+		explicit ContextMenuDismissReplayFilter(const QMenu* menu) : m_menu(menu)
+		{
+		}
 
-			[[nodiscard]] bool hasReplayPoint() const
-			{
-				return m_hasReplayPoint;
-			}
+		[[nodiscard]] bool hasReplayPoint() const
+		{
+			return m_hasReplayPoint;
+		}
 
-			[[nodiscard]] QPoint replayPoint() const
-			{
-				return m_replayPoint;
-			}
+		[[nodiscard]] QPoint replayPoint() const
+		{
+			return m_replayPoint;
+		}
 
-		protected:
-			bool eventFilter(QObject *watched, QEvent *event) override
-			{
-				if (const auto *watchedWidget = qobject_cast<QWidget *>(watched);
-				    m_menu && watchedWidget &&
-				    (watchedWidget == m_menu || m_menu->isAncestorOf(watchedWidget)))
-					return false;
-
-				if (event->type() == QEvent::MouseButtonPress)
-				{
-					if (const auto *mouse = dynamic_cast<QMouseEvent *>(event);
-					    mouse && mouse->button() == Qt::RightButton)
-					{
-						m_hasReplayPoint = true;
-						m_replayPoint    = mouse->globalPosition().toPoint();
-					}
-				}
-				else if (event->type() == QEvent::ContextMenu)
-				{
-					if (const auto *contextEvent = dynamic_cast<QContextMenuEvent *>(event);
-					    contextEvent && contextEvent->reason() == QContextMenuEvent::Mouse)
-					{
-						m_hasReplayPoint = true;
-						m_replayPoint    = contextEvent->globalPos();
-					}
-				}
+	protected:
+		bool eventFilter(QObject* watched, QEvent* event) override
+		{
+			if (const auto* watchedWidget = qobject_cast<QWidget*>(watched);
+				m_menu && watchedWidget &&
+				(watchedWidget == m_menu || m_menu->isAncestorOf(watchedWidget)))
 				return false;
-			}
 
-		private:
-			const QMenu *m_menu{nullptr};
-			bool         m_hasReplayPoint{false};
-			QPoint       m_replayPoint;
+			if (event->type() == QEvent::MouseButtonPress)
+			{
+				if (const auto* mouse = dynamic_cast<QMouseEvent*>(event);
+					mouse && mouse->button() == Qt::RightButton)
+				{
+					m_hasReplayPoint = true;
+					m_replayPoint = mouse->globalPosition().toPoint();
+				}
+			}
+			else if (event->type() == QEvent::ContextMenu)
+			{
+				if (const auto* contextEvent = dynamic_cast<QContextMenuEvent*>(event);
+					contextEvent && contextEvent->reason() == QContextMenuEvent::Mouse)
+				{
+					m_hasReplayPoint = true;
+					m_replayPoint = contextEvent->globalPos();
+				}
+			}
+			return false;
+		}
+
+	private:
+		const QMenu* m_menu{nullptr};
+		bool m_hasReplayPoint{false};
+		QPoint m_replayPoint;
 	};
 
-	void forceOpaqueMenu(QMenu *menu);
+	void forceOpaqueMenu(QMenu* menu);
 
-	void trimTrailingPromptWhitespace(QTextDocument *document)
+	void trimTrailingPromptWhitespace(QTextDocument* document)
 	{
 		if (!document)
 			return;
@@ -387,7 +398,7 @@ namespace
 				break;
 			const QChar ch = selected.at(0);
 			if (ch == QChar::ParagraphSeparator || ch == QChar::LineSeparator || ch == QLatin1Char('\n') ||
-			    ch == QLatin1Char('\r'))
+				ch == QLatin1Char('\r'))
 			{
 				cursor.clearSelection();
 				break;
@@ -402,7 +413,7 @@ namespace
 		}
 	}
 
-	bool trimTrailingPromptLineBreak(QTextDocument *document)
+	bool trimTrailingPromptLineBreak(QTextDocument* document)
 	{
 		if (!document)
 			return false;
@@ -418,7 +429,7 @@ namespace
 			return false;
 		const QChar ch = selected.at(0);
 		if (ch == QChar::ParagraphSeparator || ch == QChar::LineSeparator || ch == QLatin1Char('\n') ||
-		    ch == QLatin1Char('\r'))
+			ch == QLatin1Char('\r'))
 		{
 			cursor.removeSelectedText();
 			return true;
@@ -426,25 +437,25 @@ namespace
 		return false;
 	}
 
-	constexpr int kMiniMouseShift      = 0x01;
-	constexpr int kMiniMouseCtrl       = 0x02;
-	constexpr int kMiniMouseAlt        = 0x04;
-	constexpr int kMiniMouseLeft       = 0x10;
-	constexpr int kMiniMouseRight      = 0x20;
-	constexpr int kMiniMouseDouble     = 0x40;
-	constexpr int kMiniMouseNotFirst   = 0x80;
+	constexpr int kMiniMouseShift = 0x01;
+	constexpr int kMiniMouseCtrl = 0x02;
+	constexpr int kMiniMouseAlt = 0x04;
+	constexpr int kMiniMouseLeft = 0x10;
+	constexpr int kMiniMouseRight = 0x20;
+	constexpr int kMiniMouseDouble = 0x40;
+	constexpr int kMiniMouseNotFirst = 0x80;
 	constexpr int kMiniMouseScrollBack = 0x100;
-	constexpr int kMiniMouseMiddle     = 0x200;
-	const auto    kLineInfoTooltipId   = QStringLiteral("__line_info__");
+	constexpr int kMiniMouseMiddle = 0x200;
+	const auto kLineInfoTooltipId = QStringLiteral("__line_info__");
 
-	bool          miniWindowMouseDebugEnabled()
+	bool miniWindowMouseDebugEnabled()
 	{
 		static const bool enabled =
-		    !qmudEnvironmentVariableIsEmpty(QStringLiteral("QMUD_DEBUG_MINIWINDOW_MOUSE"));
+			!qmudEnvironmentVariableIsEmpty(QStringLiteral("QMUD_DEBUG_MINIWINDOW_MOUSE"));
 		return enabled;
 	}
 
-	void miniWindowMouseDebug(const QString &message)
+	void miniWindowMouseDebug(const QString& message)
 	{
 		if (!miniWindowMouseDebugEnabled())
 			return;
@@ -500,16 +511,18 @@ namespace
 		}
 	}
 
-	QString formatHotspotTooltip(const QString &tooltip)
+	QString formatHotspotTooltip(const QString& tooltip)
 	{
 		const qsizetype split = tooltip.indexOf(QLatin1Char('\t'));
 		if (split < 0)
 			return tooltip;
 
-		const QString title  = tooltip.left(split);
-		const QString body   = tooltip.mid(split + 1);
-		auto          toHtml = [](const QString &text)
-		{ return text.toHtmlEscaped().replace(QLatin1Char('\n'), QLatin1String("<br>")); };
+		const QString title = tooltip.left(split);
+		const QString body = tooltip.mid(split + 1);
+		auto toHtml = [](const QString& text)
+		{
+			return text.toHtmlEscaped().replace(QLatin1Char('\n'), QLatin1String("<br>"));
+		};
 
 		if (title.isEmpty())
 			return toHtml(body);
@@ -518,7 +531,7 @@ namespace
 		return QStringLiteral("<b>%1</b><br>%2").arg(toHtml(title), toHtml(body));
 	}
 
-	bool hasScaledAbsoluteRect(const MiniWindow *window)
+	bool hasScaledAbsoluteRect(const MiniWindow* window)
 	{
 		if (!window)
 			return false;
@@ -527,14 +540,14 @@ namespace
 		return window->rect.width() != window->width || window->rect.height() != window->height;
 	}
 
-	QPoint miniWindowDisplayToContent(const MiniWindow *window, const QPoint &displayPoint)
+	QPoint miniWindowDisplayToContent(const MiniWindow* window, const QPoint& displayPoint)
 	{
 		if (!hasScaledAbsoluteRect(window))
 			return displayPoint;
 
-		const int displayWidth  = qMax(1, window->rect.width());
+		const int displayWidth = qMax(1, window->rect.width());
 		const int displayHeight = qMax(1, window->rect.height());
-		const int contentWidth  = qMax(1, window->width);
+		const int contentWidth = qMax(1, window->width);
 		const int contentHeight = qMax(1, window->height);
 
 		const int x = qBound(0, (displayPoint.x() * contentWidth) / displayWidth, contentWidth - 1);
@@ -542,36 +555,36 @@ namespace
 		return {x, y};
 	}
 
-	QPoint miniWindowContentToDisplay(const MiniWindow *window, const QPoint &contentPoint)
+	QPoint miniWindowContentToDisplay(const MiniWindow* window, const QPoint& contentPoint)
 	{
 		if (!hasScaledAbsoluteRect(window))
 			return contentPoint;
 
-		const int displayWidth  = qMax(0, window->rect.width());
+		const int displayWidth = qMax(0, window->rect.width());
 		const int displayHeight = qMax(0, window->rect.height());
-		const int contentWidth  = qMax(1, window->width);
+		const int contentWidth = qMax(1, window->width);
 		const int contentHeight = qMax(1, window->height);
 
 		const int x = qBound(0,
 		                     qRound(static_cast<double>(contentPoint.x()) *
-		                            static_cast<double>(displayWidth) / static_cast<double>(contentWidth)),
+			                     static_cast<double>(displayWidth) / static_cast<double>(contentWidth)),
 		                     displayWidth);
 		const int y = qBound(0,
 		                     qRound(static_cast<double>(contentPoint.y()) *
-		                            static_cast<double>(displayHeight) / static_cast<double>(contentHeight)),
+			                     static_cast<double>(displayHeight) / static_cast<double>(contentHeight)),
 		                     displayHeight);
 		return {x, y};
 	}
 
-	QRect positionImageRect(const QSize &imageSize, const QSize &clientSize, const QSize &ownerSize,
+	QRect positionImageRect(const QSize& imageSize, const QSize& clientSize, const QSize& ownerSize,
 	                        int position)
 	{
-		const int w            = imageSize.width();
-		const int h            = imageSize.height();
-		const int clientWidth  = clientSize.width();
+		const int w = imageSize.width();
+		const int h = imageSize.height();
+		const int clientWidth = clientSize.width();
 		const int clientHeight = clientSize.height();
-		const int ownerWidth   = ownerSize.width();
-		const int ownerHeight  = ownerSize.height();
+		const int ownerWidth = ownerSize.width();
+		const int ownerHeight = ownerSize.height();
 
 		switch (position)
 		{
@@ -620,200 +633,200 @@ namespace
 
 class WrapTextBrowser : public QTextBrowser
 {
-	public:
-		explicit WrapTextBrowser(WorldView *view, QWidget *parent = nullptr, bool isLive = false)
-		    : QTextBrowser(parent), m_view(view), m_isLive(isLive)
-		{
-		}
+public:
+	explicit WrapTextBrowser(WorldView* view, QWidget* parent = nullptr, bool isLive = false)
+		: QTextBrowser(parent), m_view(view), m_isLive(isLive)
+	{
+	}
 
-		void setViewportMarginsPublic(int left, int top, int right, int bottom)
-		{
-			setViewportMargins(left, top, right, bottom);
-		}
+	void setViewportMarginsPublic(int left, int top, int right, int bottom)
+	{
+		setViewportMargins(left, top, right, bottom);
+	}
 
-	protected:
-		void mouseMoveEvent(QMouseEvent *event) override
+protected:
+	void mouseMoveEvent(QMouseEvent* event) override
+	{
+		if (m_view && m_view->handleMiniWindowMouseMove(event, viewport()))
 		{
-			if (m_view && m_view->handleMiniWindowMouseMove(event, viewport()))
-			{
-				event->accept();
-				return;
-			}
-			QTextBrowser::mouseMoveEvent(event);
+			event->accept();
+			return;
 		}
+		QTextBrowser::mouseMoveEvent(event);
+	}
 
-		void mousePressEvent(QMouseEvent *event) override
+	void mousePressEvent(QMouseEvent* event) override
+	{
+		if (m_view && m_view->handleMiniWindowMousePress(event, false, viewport()))
 		{
-			if (m_view && m_view->handleMiniWindowMousePress(event, false, viewport()))
-			{
-				event->accept();
-				return;
-			}
-			QTextBrowser::mousePressEvent(event);
+			event->accept();
+			return;
 		}
+		QTextBrowser::mousePressEvent(event);
+	}
 
-		void mouseReleaseEvent(QMouseEvent *event) override
+	void mouseReleaseEvent(QMouseEvent* event) override
+	{
+		if (m_view && m_view->handleMiniWindowMouseRelease(event, viewport()))
 		{
-			if (m_view && m_view->handleMiniWindowMouseRelease(event, viewport()))
-			{
-				event->accept();
-				return;
-			}
-			QTextBrowser::mouseReleaseEvent(event);
+			event->accept();
+			return;
 		}
+		QTextBrowser::mouseReleaseEvent(event);
+	}
 
-		void mouseDoubleClickEvent(QMouseEvent *event) override
+	void mouseDoubleClickEvent(QMouseEvent* event) override
+	{
+		if (m_view && m_view->handleMiniWindowMousePress(event, true, viewport()))
 		{
-			if (m_view && m_view->handleMiniWindowMousePress(event, true, viewport()))
-			{
-				event->accept();
-				return;
-			}
-			QTextBrowser::mouseDoubleClickEvent(event);
+			event->accept();
+			return;
 		}
+		QTextBrowser::mouseDoubleClickEvent(event);
+	}
 
-		void wheelEvent(QWheelEvent *event) override
+	void wheelEvent(QWheelEvent* event) override
+	{
+		if (m_view && m_view->handleMiniWindowWheel(event, viewport()))
 		{
-			if (m_view && m_view->handleMiniWindowWheel(event, viewport()))
-			{
-				event->accept();
-				return;
-			}
-			if (m_isLive)
-			{
-				if (m_view)
-					m_view->handleOutputWheel(event->angleDelta(), event->pixelDelta());
-				event->accept();
-				return;
-			}
+			event->accept();
+			return;
+		}
+		if (m_isLive)
+		{
 			if (m_view)
+				m_view->handleOutputWheel(event->angleDelta(), event->pixelDelta());
+			event->accept();
+			return;
+		}
+		if (m_view)
+			m_view->noteUserScrollAction();
+		QTextBrowser::wheelEvent(event);
+	}
+
+	void keyPressEvent(QKeyEvent* event) override
+	{
+		if (m_view && m_view->handleWorldHotkey(event))
+			return;
+		if (m_isLive)
+		{
+			event->accept();
+			return;
+		}
+		if (m_view)
+		{
+			switch (event->key())
+			{
+			case Qt::Key_PageUp:
+			case Qt::Key_PageDown:
+			case Qt::Key_Up:
+			case Qt::Key_Down:
+			case Qt::Key_Home:
+			case Qt::Key_End:
 				m_view->noteUserScrollAction();
-			QTextBrowser::wheelEvent(event);
-		}
-
-		void keyPressEvent(QKeyEvent *event) override
-		{
-			if (m_view && m_view->handleWorldHotkey(event))
-				return;
-			if (m_isLive)
-			{
-				event->accept();
-				return;
+				break;
+			default:
+				break;
 			}
-			if (m_view)
-			{
-				switch (event->key())
-				{
-				case Qt::Key_PageUp:
-				case Qt::Key_PageDown:
-				case Qt::Key_Up:
-				case Qt::Key_Down:
-				case Qt::Key_Home:
-				case Qt::Key_End:
-					m_view->noteUserScrollAction();
-					break;
-				default:
-					break;
-				}
-			}
-			QTextBrowser::keyPressEvent(event);
 		}
+		QTextBrowser::keyPressEvent(event);
+	}
 
-		void contextMenuEvent(QContextMenuEvent *event) override
+	void contextMenuEvent(QContextMenuEvent* event) override
+	{
+		if (m_view)
 		{
-			if (m_view)
+			const QPoint local = m_view->mapEventToOutputStack(QPointF(event->pos()), viewport());
+			if (m_view->m_outputStack && m_view->m_outputStack->rect().contains(local))
 			{
-				const QPoint local = m_view->mapEventToOutputStack(QPointF(event->pos()), viewport());
-				if (m_view->m_outputStack && m_view->m_outputStack->rect().contains(local))
-				{
-					QString hotspotId;
-					QString windowName;
-					if (m_view->hitTestMiniWindow(local, hotspotId, windowName, true))
-						return;
-				}
-				if (m_view->showWorldContextMenuAtGlobalPos(event->globalPos()))
+				QString hotspotId;
+				QString windowName;
+				if (m_view->hitTestMiniWindow(local, hotspotId, windowName, true))
 					return;
 			}
-			QTextBrowser::contextMenuEvent(event);
+			if (m_view->showWorldContextMenuAtGlobalPos(event->globalPos()))
+				return;
 		}
+		QTextBrowser::contextMenuEvent(event);
+	}
 
-	private:
-		WorldView *m_view{nullptr};
-		bool       m_isLive{false};
+private:
+	WorldView* m_view{nullptr};
+	bool m_isLive{false};
 };
 
 class InputTextEdit : public QPlainTextEdit
 {
-	public:
-		explicit InputTextEdit(WorldView *view, QWidget *parent = nullptr)
-		    : QPlainTextEdit(parent), m_view(view)
-		{
-		}
+public:
+	explicit InputTextEdit(WorldView* view, QWidget* parent = nullptr)
+		: QPlainTextEdit(parent), m_view(view)
+	{
+	}
 
-		void setViewportMarginsPublic(int left, int top, int right, int bottom)
-		{
-			setViewportMargins(left, top, right, bottom);
-		}
+	void setViewportMarginsPublic(int left, int top, int right, int bottom)
+	{
+		setViewportMargins(left, top, right, bottom);
+	}
 
-	protected:
-		void keyPressEvent(QKeyEvent *event) override;
-		void contextMenuEvent(QContextMenuEvent *event) override;
+protected:
+	void keyPressEvent(QKeyEvent* event) override;
+	void contextMenuEvent(QContextMenuEvent* event) override;
 
-	private:
-		WorldView *m_view{nullptr};
+private:
+	WorldView* m_view{nullptr};
 };
 
 class MiniWindowLayer : public QWidget
 {
-	public:
-		explicit MiniWindowLayer(WorldView *view, bool underneath, QWidget *parent = nullptr)
-		    : QWidget(parent), m_view(view), m_underneath(underneath)
-		{
-			setAttribute(Qt::WA_TransparentForMouseEvents);
-			setAutoFillBackground(false);
-		}
+public:
+	explicit MiniWindowLayer(WorldView* view, bool underneath, QWidget* parent = nullptr)
+		: QWidget(parent), m_view(view), m_underneath(underneath)
+	{
+		setAttribute(Qt::WA_TransparentForMouseEvents);
+		setAutoFillBackground(false);
+	}
 
-	protected:
-		void paintEvent(QPaintEvent *event) override
-		{
-			Q_UNUSED(event);
-			if (!m_view)
-				return;
-			QPainter painter(this);
-			painter.setRenderHint(QPainter::SmoothPixmapTransform);
-			m_view->paintMiniWindows(&painter, m_underneath);
-		}
+protected:
+	void paintEvent(QPaintEvent* event) override
+	{
+		Q_UNUSED(event);
+		if (!m_view)
+			return;
+		QPainter painter(this);
+		painter.setRenderHint(QPainter::SmoothPixmapTransform);
+		m_view->paintMiniWindows(&painter, m_underneath);
+	}
 
-	private:
-		WorldView *m_view{nullptr};
-		bool       m_underneath{false};
+private:
+	WorldView* m_view{nullptr};
+	bool m_underneath{false};
 };
 
 struct WorldView::OutputFindState
 {
-		QStringList              history;
-		QString                  title{QStringLiteral("Find in output buffer...")};
-		QString                  lastFindText;
-		bool                     matchCase{false};
-		bool                     forwards{false};
-		bool                     regexp{false};
-		bool                     again{false};
-		bool                     repeatOnSameLine{true};
-		int                      startColumn{-1};
-		int                      endColumn{-1};
-		int                      currentLine{0};
-		QVector<QPair<int, int>> matchesOnLine;
-		QRegularExpression       regex;
+	QStringList history;
+	QString title{QStringLiteral("Find in output buffer...")};
+	QString lastFindText;
+	bool matchCase{false};
+	bool forwards{false};
+	bool regexp{false};
+	bool again{false};
+	bool repeatOnSameLine{true};
+	int startColumn{-1};
+	int endColumn{-1};
+	int currentLine{0};
+	QVector<QPair<int, int>> matchesOnLine;
+	QRegularExpression regex;
 };
 
-WorldView::WorldView(QWidget *parent) : QWidget(parent)
+WorldView::WorldView(QWidget* parent) : QWidget(parent)
 {
-	auto *layout   = new QVBoxLayout(this);
-	auto *splitter = new QSplitter(Qt::Vertical, this);
-	m_splitter     = splitter;
+	auto* layout = new QVBoxLayout(this);
+	auto* splitter = new QSplitter(Qt::Vertical, this);
+	m_splitter = splitter;
 
 	m_outputContainer = new QWidget(splitter);
-	m_tooltipTimer    = new QTimer(this);
+	m_tooltipTimer = new QTimer(this);
 	m_tooltipTimer->setSingleShot(true);
 	connect(m_tooltipTimer, &QTimer::timeout, this, &WorldView::showScheduledHotspotTooltip);
 	m_fadeTimer = new QTimer(this);
@@ -832,12 +845,12 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	connect(m_hyperlinkRestyleTimer, &QTimer::timeout, this,
 	        &WorldView::processIncrementalHyperlinkRestyleChunk);
 	m_timeFadeCancelled = QDateTime::currentDateTime();
-	auto *outputLayout  = new QHBoxLayout(m_outputContainer);
+	auto* outputLayout = new QHBoxLayout(m_outputContainer);
 	outputLayout->setContentsMargins(0, 0, 0, 0);
 	outputLayout->setSpacing(0);
 
-	m_outputStack           = new QWidget(m_outputContainer);
-	auto *outputStackLayout = new QGridLayout(m_outputStack);
+	m_outputStack = new QWidget(m_outputContainer);
+	auto* outputStackLayout = new QGridLayout(m_outputStack);
 	outputStackLayout->setContentsMargins(0, 0, 0, 0);
 	outputStackLayout->setSpacing(0);
 
@@ -858,7 +871,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	m_liveOutput->setVisible(false);
 
 	m_miniUnderlay = new MiniWindowLayer(this, true, m_outputStack);
-	m_miniOverlay  = new MiniWindowLayer(this, false, m_outputStack);
+	m_miniOverlay = new MiniWindowLayer(this, false, m_outputStack);
 
 	m_outputDocument = new QTextDocument(this);
 	m_outputDocument->setUndoRedoEnabled(false);
@@ -953,7 +966,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	}
 	if (m_output->verticalScrollBar())
 	{
-		QScrollBar *bar = m_output->verticalScrollBar();
+		QScrollBar* bar = m_output->verticalScrollBar();
 		if (m_outputScrollBar)
 		{
 			auto syncExternal = [this, bar]
@@ -1009,17 +1022,17 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	connect(this, &WorldView::outputScrollChanged, this, [this] { requestDrawOutputWindowNotification(); });
 
 	connect(m_output, &QTextBrowser::anchorClicked, this,
-	        [this](const QUrl &url) { emit hyperlinkActivated(url.toString()); });
+	        [this](const QUrl& url) { emit hyperlinkActivated(url.toString()); });
 	connect(m_output, &QTextBrowser::highlighted, this,
-	        [this](const QUrl &) { refreshHoveredHyperlinkFromCursor(); });
+	        [this](const QUrl&) { refreshHoveredHyperlinkFromCursor(); });
 
 	if (m_liveOutput)
 	{
 		connect(m_liveOutput, &QTextBrowser::anchorClicked, this,
-		        [this](const QUrl &url) { emit hyperlinkActivated(url.toString()); });
+		        [this](const QUrl& url) { emit hyperlinkActivated(url.toString()); });
 
 		connect(m_liveOutput, &QTextBrowser::highlighted, this,
-		        [this](const QUrl &) { refreshHoveredHyperlinkFromCursor(); });
+		        [this](const QUrl&) { refreshHoveredHyperlinkFromCursor(); });
 	}
 
 	if (m_outputSplitter)
@@ -1039,24 +1052,26 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 
 WorldView::~WorldView() = default;
 
-void WorldView::setWorldName(const QString &name)
+void WorldView::setWorldName(const QString& name)
 {
 	setWindowTitle(name);
 }
 
-void WorldView::setRuntime(WorldRuntime *runtime)
+void WorldView::setRuntime(WorldRuntime* runtime)
 {
 	if (m_runtime && m_runtime->view() == this)
 		m_runtime->setView(nullptr);
 	m_runtime = runtime;
+	resetRuntimeSettingsSnapshot();
 	applyRuntimeSettings();
 	if (m_runtime)
 		m_runtime->setView(this);
 }
 
-void WorldView::setRuntimeObserver(WorldRuntime *runtime)
+void WorldView::setRuntimeObserver(WorldRuntime* runtime)
 {
 	m_runtime = runtime;
+	resetRuntimeSettingsSnapshot();
 	applyRuntimeSettings();
 }
 
@@ -1068,7 +1083,7 @@ void WorldView::refreshMiniWindows() const
 		m_miniOverlay->update();
 }
 
-QPoint WorldView::miniWindowGlobalPosition(const MiniWindow *window, int x, int y) const
+QPoint WorldView::miniWindowGlobalPosition(const MiniWindow* window, int x, int y) const
 {
 	if (!window)
 		return mapToGlobal(QPoint(0, 0));
@@ -1078,14 +1093,14 @@ QPoint WorldView::miniWindowGlobalPosition(const MiniWindow *window, int x, int 
 	return mapToGlobal(local);
 }
 
-bool WorldView::showWorldContextMenuAtGlobalPos(const QPoint &globalPos)
+bool WorldView::showWorldContextMenuAtGlobalPos(const QPoint& globalPos)
 {
-	WrapTextBrowser *source = nullptr;
+	WrapTextBrowser* source = nullptr;
 	if (m_output && m_output->viewport() &&
-	    m_output->viewport()->rect().contains(m_output->viewport()->mapFromGlobal(globalPos)))
+		m_output->viewport()->rect().contains(m_output->viewport()->mapFromGlobal(globalPos)))
 		source = m_output;
 	else if (m_liveOutput && m_liveOutput->viewport() &&
-	         m_liveOutput->viewport()->rect().contains(m_liveOutput->viewport()->mapFromGlobal(globalPos)))
+		m_liveOutput->viewport()->rect().contains(m_liveOutput->viewport()->mapFromGlobal(globalPos)))
 		source = m_liveOutput;
 	else
 		source = m_output ? m_output : m_liveOutput;
@@ -1094,12 +1109,12 @@ bool WorldView::showWorldContextMenuAtGlobalPos(const QPoint &globalPos)
 		return false;
 
 	const QPoint sourcePos = source->viewport()->mapFromGlobal(globalPos);
-	QMenu       *menu      = source->createStandardContextMenu(sourcePos);
+	QMenu* menu = source->createStandardContextMenu(sourcePos);
 	if (!menu)
 		return false;
 
 	menu->addSeparator();
-	if (QAction *copyHtml = menu->addAction(QStringLiteral("Copy as HTML")); copyHtml)
+	if (QAction* copyHtml = menu->addAction(QStringLiteral("Copy as HTML")); copyHtml)
 	{
 		copyHtml->setEnabled(hasOutputSelection());
 		connect(copyHtml, &QAction::triggered, this, [this] { copySelectionAsHtml(); });
@@ -1108,14 +1123,14 @@ bool WorldView::showWorldContextMenuAtGlobalPos(const QPoint &globalPos)
 	forceOpaqueMenu(menu);
 	ContextMenuDismissReplayFilter replayFilter(menu);
 	qApp->installEventFilter(&replayFilter);
-	QAction *const selected = menu->exec(globalPos);
+	QAction* const selected = menu->exec(globalPos);
 	qApp->removeEventFilter(&replayFilter);
 	delete menu;
 
 	if (!selected && replayFilter.hasReplayPoint())
 	{
-		const QPoint        replayPos = replayFilter.replayPoint();
-		QPointer<WorldView> view      = this;
+		const QPoint replayPos = replayFilter.replayPoint();
+		QPointer<WorldView> view = this;
 		QTimer::singleShot(0, qApp,
 		                   [view, replayPos]
 		                   {
@@ -1127,7 +1142,7 @@ bool WorldView::showWorldContextMenuAtGlobalPos(const QPoint &globalPos)
 	return true;
 }
 
-bool WorldView::showContextMenuAtGlobalPos(const QPoint &globalPos)
+bool WorldView::showContextMenuAtGlobalPos(const QPoint& globalPos)
 {
 	if (!m_outputStack)
 		return false;
@@ -1142,7 +1157,7 @@ bool WorldView::showContextMenuAtGlobalPos(const QPoint &globalPos)
 	return showWorldContextMenuAtGlobalPos(globalPos);
 }
 
-bool WorldView::replayMiniWindowRightClickAtGlobalPos(const QPoint &globalPos)
+bool WorldView::replayMiniWindowRightClickAtGlobalPos(const QPoint& globalPos)
 {
 	if (!m_runtime || !m_outputStack)
 		return false;
@@ -1206,7 +1221,7 @@ void WorldView::collapseScrollbackSplitToLiveOutput()
 	scrollOutputToEnd();
 }
 
-WorldRuntime *WorldView::runtime() const
+WorldRuntime* WorldView::runtime() const
 {
 	return m_runtime;
 }
@@ -1231,10 +1246,10 @@ void WorldView::setFrozen(bool frozen)
 	emit freezeStateChanged(m_frozen);
 	if (!m_frozen && !m_pendingOutput.isEmpty())
 	{
-		m_flushingPending                  = true;
+		m_flushingPending = true;
 		const QVector<PendingHtml> pending = m_pendingOutput;
 		m_pendingOutput.clear();
-		for (const PendingHtml &entry : pending)
+		for (const PendingHtml& entry : pending)
 			appendOutputHtml(entry.html, entry.newLine);
 		m_flushingPending = false;
 	}
@@ -1248,18 +1263,18 @@ bool WorldView::isFrozen() const
 void WorldView::noteUserScrollAction()
 {
 	m_anchorEndOnNextRangeChange = false;
-	m_timeFadeCancelled          = QDateTime::currentDateTime();
+	m_timeFadeCancelled = QDateTime::currentDateTime();
 	if (!m_autoPause || !m_outputScrollBar)
 		return;
 	const bool atEnd = isAtBufferEnd();
 	setScrollbackSplitActive(!atEnd);
 }
 
-void WorldView::handleOutputWheel(const QPoint &angleDelta, const QPoint &pixelDelta)
+void WorldView::handleOutputWheel(const QPoint& angleDelta, const QPoint& pixelDelta)
 {
 	if (!m_outputScrollBar)
 		return;
-	int  delta = 0;
+	int delta = 0;
 	bool pixel = false;
 	if (!pixelDelta.isNull())
 	{
@@ -1299,8 +1314,8 @@ void WorldView::setScrollbackSplitActive(bool active)
 	if (m_scrollbackSplitActive)
 	{
 		m_liveOutput->setVisible(true);
-		const int total    = m_outputSplitter->size().height();
-		int       liveSize = m_lastLiveSplitSize;
+		const int total = m_outputSplitter->size().height();
+		int liveSize = m_lastLiveSplitSize;
 		if (liveSize <= 0 && total > 0)
 			liveSize = qMax(1, total / 4);
 		if (total > 0)
@@ -1323,11 +1338,11 @@ void WorldView::setScrollbackSplitActive(bool active)
 	}
 }
 
-void WorldView::scrollViewToEnd(const WrapTextBrowser *view)
+void WorldView::scrollViewToEnd(const WrapTextBrowser* view)
 {
 	if (!view)
 		return;
-	QScrollBar *const bar = view->verticalScrollBar();
+	QScrollBar* const bar = view->verticalScrollBar();
 	if (!bar)
 		return;
 	bar->setValue(bar->maximum());
@@ -1356,7 +1371,7 @@ void WorldView::requestOutputScrollToEnd()
 	                   });
 }
 
-WrapTextBrowser *WorldView::activeOutputView() const
+WrapTextBrowser* WorldView::activeOutputView() const
 {
 	if (m_scrollbackSplitActive && m_liveOutput && m_liveOutput->isVisible())
 		return m_liveOutput;
@@ -1365,10 +1380,10 @@ WrapTextBrowser *WorldView::activeOutputView() const
 
 void WorldView::scrollOutputToStart() const
 {
-	WrapTextBrowser *const view = activeOutputView();
+	WrapTextBrowser* const view = activeOutputView();
 	if (!view)
 		return;
-	if (QScrollBar *bar = view->verticalScrollBar())
+	if (QScrollBar* bar = view->verticalScrollBar())
 		bar->setValue(bar->minimum());
 }
 
@@ -1379,58 +1394,59 @@ void WorldView::scrollOutputToEnd() const
 
 void WorldView::scrollOutputPageUp() const
 {
-	WrapTextBrowser *const view = activeOutputView();
+	WrapTextBrowser* const view = activeOutputView();
 	if (!view)
 		return;
-	if (QScrollBar *bar = view->verticalScrollBar())
+	if (QScrollBar* bar = view->verticalScrollBar())
 		bar->setValue(bar->value() - bar->pageStep());
 }
 
 void WorldView::scrollOutputPageDown() const
 {
-	WrapTextBrowser *const view = activeOutputView();
+	WrapTextBrowser* const view = activeOutputView();
 	if (!view)
 		return;
-	if (QScrollBar *bar = view->verticalScrollBar())
+	if (QScrollBar* bar = view->verticalScrollBar())
 		bar->setValue(bar->value() + bar->pageStep());
 }
 
 void WorldView::scrollOutputLineUp() const
 {
-	WrapTextBrowser *const view = activeOutputView();
+	WrapTextBrowser* const view = activeOutputView();
 	if (!view)
 		return;
-	if (QScrollBar *bar = view->verticalScrollBar())
+	if (QScrollBar* bar = view->verticalScrollBar())
 		bar->setValue(bar->value() - bar->singleStep());
 }
 
 void WorldView::scrollOutputLineDown() const
 {
-	WrapTextBrowser *const view = activeOutputView();
+	WrapTextBrowser* const view = activeOutputView();
 	if (!view)
 		return;
-	if (QScrollBar *bar = view->verticalScrollBar())
+	if (QScrollBar* bar = view->verticalScrollBar())
 		bar->setValue(bar->value() + bar->singleStep());
 }
-void WorldView::addHyperlinkToHistory(const QString &text)
+
+void WorldView::addHyperlinkToHistory(const QString& text)
 {
 	if (!m_hyperlinkAddsToCommandHistory)
 		return;
 	addToHistory(text);
 }
 
-void WorldView::appendOutputText(const QString &text, bool newLine)
+void WorldView::appendOutputText(const QString& text, bool newLine)
 {
 	appendOutputTextInternal(text, newLine, true, WorldRuntime::LineOutput);
 }
 
-void WorldView::appendOutputTextStyled(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
+void WorldView::appendOutputTextStyled(const QString& text, const QVector<WorldRuntime::StyleSpan>& spans,
                                        bool newLine)
 {
 	appendOutputTextInternal(text, newLine, true, WorldRuntime::LineOutput, spans);
 }
 
-void WorldView::appendNoteText(const QString &text, bool newLine)
+void WorldView::appendNoteText(const QString& text, bool newLine)
 {
 	if (!m_runtime || text.isEmpty())
 	{
@@ -1438,24 +1454,24 @@ void WorldView::appendNoteText(const QString &text, bool newLine)
 		return;
 	}
 
-	const unsigned short    noteStyle = m_runtime->noteStyle();
-	const long              foreValue = m_runtime->noteColourFore();
-	const long              backValue = m_runtime->noteColourBack();
+	const unsigned short noteStyle = m_runtime->noteStyle();
+	const long foreValue = m_runtime->noteColourFore();
+	const long backValue = m_runtime->noteColourBack();
 	WorldRuntime::StyleSpan span;
-	span.length    = sizeToInt(text.size());
-	span.fore      = QColor(static_cast<int>(foreValue & 0xFF), static_cast<int>((foreValue >> 8) & 0xFF),
-	                        static_cast<int>((foreValue >> 16) & 0xFF));
-	span.back      = QColor(static_cast<int>(backValue & 0xFF), static_cast<int>((backValue >> 8) & 0xFF),
-	                        static_cast<int>((backValue >> 16) & 0xFF));
-	span.bold      = (noteStyle & 0x0001) != 0;
+	span.length = sizeToInt(text.size());
+	span.fore = QColor(static_cast<int>(foreValue & 0xFF), static_cast<int>((foreValue >> 8) & 0xFF),
+	                   static_cast<int>((foreValue >> 16) & 0xFF));
+	span.back = QColor(static_cast<int>(backValue & 0xFF), static_cast<int>((backValue >> 8) & 0xFF),
+	                   static_cast<int>((backValue >> 16) & 0xFF));
+	span.bold = (noteStyle & 0x0001) != 0;
 	span.underline = (noteStyle & 0x0002) != 0;
-	span.blink     = (noteStyle & 0x0004) != 0;
-	span.inverse   = (noteStyle & 0x0008) != 0;
-	span.changed   = true;
+	span.blink = (noteStyle & 0x0004) != 0;
+	span.inverse = (noteStyle & 0x0008) != 0;
+	span.changed = true;
 	appendOutputTextInternal(text, newLine, true, WorldRuntime::LineNote, {span});
 }
 
-void WorldView::appendNoteTextStyled(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
+void WorldView::appendNoteTextStyled(const QString& text, const QVector<WorldRuntime::StyleSpan>& spans,
                                      bool newLine)
 {
 	if (!m_runtime || spans.isEmpty())
@@ -1464,16 +1480,16 @@ void WorldView::appendNoteTextStyled(const QString &text, const QVector<WorldRun
 		return;
 	}
 
-	QVector<WorldRuntime::StyleSpan> normalized    = spans;
-	const long                       noteForeValue = m_runtime->noteColourFore();
-	const long                       noteBackValue = m_runtime->noteColourBack();
-	const QColor                     noteFore(static_cast<int>(noteForeValue & 0xFF),
-	                                          static_cast<int>((noteForeValue >> 8) & 0xFF),
-	                                          static_cast<int>((noteForeValue >> 16) & 0xFF));
-	const QColor                     noteBack(static_cast<int>(noteBackValue & 0xFF),
-	                                          static_cast<int>((noteBackValue >> 8) & 0xFF),
-	                                          static_cast<int>((noteBackValue >> 16) & 0xFF));
-	for (WorldRuntime::StyleSpan &span : normalized)
+	QVector<WorldRuntime::StyleSpan> normalized = spans;
+	const long noteForeValue = m_runtime->noteColourFore();
+	const long noteBackValue = m_runtime->noteColourBack();
+	const QColor noteFore(static_cast<int>(noteForeValue & 0xFF),
+	                      static_cast<int>((noteForeValue >> 8) & 0xFF),
+	                      static_cast<int>((noteForeValue >> 16) & 0xFF));
+	const QColor noteBack(static_cast<int>(noteBackValue & 0xFF),
+	                      static_cast<int>((noteBackValue >> 8) & 0xFF),
+	                      static_cast<int>((noteBackValue >> 16) & 0xFF));
+	for (WorldRuntime::StyleSpan& span : normalized)
 	{
 		if (!span.fore.isValid())
 			span.fore = noteFore;
@@ -1483,15 +1499,15 @@ void WorldView::appendNoteTextStyled(const QString &text, const QVector<WorldRun
 	appendOutputTextInternal(text, newLine, true, WorldRuntime::LineNote, normalized);
 }
 
-QString WorldView::pasteCommand(const QString &text)
+QString WorldView::pasteCommand(const QString& text)
 {
 	if (!m_input)
 		return {};
-	QTextCursor   cursor  = m_input->textCursor();
-	const int     start   = cursor.selectionStart();
-	const int     end     = cursor.selectionEnd();
+	QTextCursor cursor = m_input->textCursor();
+	const int start = cursor.selectionStart();
+	const int end = cursor.selectionEnd();
 	const QString current = m_input->toPlainText();
-	QString       selected;
+	QString selected;
 	if (end > start)
 		selected = current.mid(start, end - start);
 	cursor.insertText(text);
@@ -1504,15 +1520,15 @@ QString WorldView::pushCommand()
 {
 	if (!m_input)
 		return {};
-	const QString command     = m_input->toPlainText();
-	const bool    savedNoEcho = m_noEcho;
-	m_noEcho                  = false;
+	const QString command = m_input->toPlainText();
+	const bool savedNoEcho = m_noEcho;
+	m_noEcho = false;
 	addToHistory(command);
 	m_noEcho = savedNoEcho;
 
 	m_settingText = true;
 	m_input->clear();
-	m_settingText  = false;
+	m_settingText = false;
 	m_inputChanged = false;
 	resetHistoryRecall();
 	return command;
@@ -1520,16 +1536,16 @@ QString WorldView::pushCommand()
 
 namespace
 {
-	void forceOpaqueMenu(QMenu *menu)
+	void forceOpaqueMenu(QMenu* menu)
 	{
 		if (!menu)
 			return;
 
-		const QPalette appPalette      = QApplication::palette();
-		QColor         base            = appPalette.color(QPalette::Base);
-		QColor         text            = appPalette.color(QPalette::Text);
-		QColor         highlight       = appPalette.color(QPalette::Highlight);
-		QColor         highlightedText = appPalette.color(QPalette::HighlightedText);
+		const QPalette appPalette = QApplication::palette();
+		QColor base = appPalette.color(QPalette::Base);
+		QColor text = appPalette.color(QPalette::Text);
+		QColor highlight = appPalette.color(QPalette::Highlight);
+		QColor highlightedText = appPalette.color(QPalette::HighlightedText);
 
 		if (!base.isValid())
 			base = QColor(40, 40, 40);
@@ -1557,11 +1573,11 @@ namespace
 		// menu can open immediately at the clicked location (expected behavior).
 		menu->setAttribute(Qt::WA_NoMouseReplay, false);
 		menu->setStyleSheet(QStringLiteral("QMenu { background-color: %1; color: %2; } "
-		                                   "QMenu::item:selected { background-color: %3; color: %4; }")
-		                        .arg(base.name(), text.name(), highlight.name(), highlightedText.name()));
+				"QMenu::item:selected { background-color: %3; color: %4; }")
+			.arg(base.name(), text.name(), highlight.name(), highlightedText.name()));
 	}
 
-	QString escapeWithBreaks(const QString &input)
+	QString escapeWithBreaks(const QString& input)
 	{
 		QString escaped;
 		escaped.reserve(input.size() * 2);
@@ -1598,7 +1614,7 @@ namespace
 		return escaped;
 	}
 
-	QString buildOutputHtml(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans, bool showBold,
+	QString buildOutputHtml(const QString& text, const QVector<WorldRuntime::StyleSpan>& spans, bool showBold,
 	                        bool showItalic, bool showUnderline, bool alternativeInverse, int lineSpacing,
 	                        double opacity)
 	{
@@ -1609,11 +1625,11 @@ namespace
 		}
 
 		QString html;
-		int     offset = 0;
-		for (const WorldRuntime::StyleSpan &span : spans)
+		int offset = 0;
+		for (const WorldRuntime::StyleSpan& span : spans)
 		{
-			const int     length = qMax(0, span.length);
-			const QString chunk  = text.mid(offset, length);
+			const int length = qMax(0, span.length);
+			const QString chunk = text.mid(offset, length);
 			offset += length;
 			if (chunk.isEmpty())
 				continue;
@@ -1623,7 +1639,7 @@ namespace
 				style += QStringLiteral("line-height:%1%;").arg(100 + lineSpacing);
 			if (opacity < 0.999)
 				style +=
-				    QStringLiteral("opacity:%1;").arg(QString::number(qBound(0.0, opacity, 1.0), 'f', 3));
+					QStringLiteral("opacity:%1;").arg(QString::number(qBound(0.0, opacity, 1.0), 'f', 3));
 			QColor fore = span.fore;
 			QColor back = span.back;
 			if (span.inverse)
@@ -1651,15 +1667,15 @@ namespace
 			}
 
 			const QString escaped = escapeWithBreaks(chunk);
-			QString       wrapped = QStringLiteral("<span style=\"%1\">%2</span>").arg(style, escaped);
+			QString wrapped = QStringLiteral("<span style=\"%1\">%2</span>").arg(style, escaped);
 
 			if (span.actionType == WorldRuntime::ActionHyperlink ||
-			    span.actionType == WorldRuntime::ActionSend || span.actionType == WorldRuntime::ActionPrompt)
+				span.actionType == WorldRuntime::ActionSend || span.actionType == WorldRuntime::ActionPrompt)
 			{
 				const QString href = span.action.toHtmlEscaped();
 				if (!span.hint.isEmpty())
 					wrapped = QStringLiteral("<a href=\"%1\" title=\"%2\">%3</a>")
-					              .arg(href, span.hint.toHtmlEscaped(), wrapped);
+						.arg(href, span.hint.toHtmlEscaped(), wrapped);
 				else
 					wrapped = QStringLiteral("<a href=\"%1\">%2</a>").arg(href, wrapped);
 			}
@@ -1675,10 +1691,9 @@ namespace
 
 		return html;
 	}
-
 } // namespace
 
-void WorldView::appendOutputHtml(const QString &html, bool newLine)
+void WorldView::appendOutputHtml(const QString& html, bool newLine)
 {
 	if (!m_outputDocument)
 		return;
@@ -1694,7 +1709,7 @@ void WorldView::appendOutputHtml(const QString &html, bool newLine)
 		QTextCharFormat defaultFormat = cursor.charFormat();
 		defaultFormat.setForeground(m_output->palette().color(QPalette::Text));
 		const QColor defaultBack =
-		    m_outputBackground.isValid() ? m_outputBackground : m_output->palette().color(QPalette::Base);
+			m_outputBackground.isValid() ? m_outputBackground : m_output->palette().color(QPalette::Base);
 		defaultFormat.setBackground(defaultBack);
 		cursor.setCharFormat(defaultFormat);
 	}
@@ -1703,7 +1718,7 @@ void WorldView::appendOutputHtml(const QString &html, bool newLine)
 	if (newLine)
 	{
 		const QTextBlockFormat blockFormat = cursor.blockFormat();
-		const QTextCharFormat  charFormat  = cursor.charFormat();
+		const QTextCharFormat charFormat = cursor.charFormat();
 		cursor.insertBlock(blockFormat, charFormat);
 	}
 	if (m_bulkOutputRebuild)
@@ -1720,7 +1735,7 @@ void WorldView::commitPendingInlineInputBreak()
 	m_breakBeforeNextServerOutput = false;
 }
 
-void WorldView::echoInputText(const QString &text)
+void WorldView::echoInputText(const QString& text)
 {
 	if (!m_displayMyInput || !m_output)
 		return;
@@ -1730,7 +1745,7 @@ void WorldView::echoInputText(const QString &text)
 	QVector<WorldRuntime::StyleSpan> echoSpans;
 	if (m_runtime && !trimmed.isEmpty())
 	{
-		bool      ok         = false;
+		bool ok = false;
 		const int echoColour = m_runtime->worldAttributes().value(QStringLiteral("echo_colour")).toInt(&ok);
 		if (ok && echoColour > 0 && echoColour <= MAX_CUSTOM)
 		{
@@ -1741,8 +1756,8 @@ void WorldView::echoInputText(const QString &text)
 			};
 			WorldRuntime::StyleSpan span;
 			span.length = sizeToInt(trimmed.size());
-			span.fore   = fromColorRef(m_runtime->customColourText(echoColour));
-			span.back   = fromColorRef(m_runtime->customColourBackground(echoColour));
+			span.fore = fromColorRef(m_runtime->customColourText(echoColour));
+			span.back = fromColorRef(m_runtime->customColourBackground(echoColour));
 			echoSpans.push_back(span);
 		}
 	}
@@ -1750,10 +1765,10 @@ void WorldView::echoInputText(const QString &text)
 	if (m_runtime)
 	{
 		const unsigned short source = m_runtime->currentActionSource();
-		const bool           interactiveSource =
-		    source == WorldRuntime::eUserTyping || source == WorldRuntime::eUserMacro ||
-		    source == WorldRuntime::eUserKeypad || source == WorldRuntime::eUserAccelerator ||
-		    source == WorldRuntime::eUserMenuAction;
+		const bool interactiveSource =
+			source == WorldRuntime::eUserTyping || source == WorldRuntime::eUserMacro ||
+			source == WorldRuntime::eUserKeypad || source == WorldRuntime::eUserAccelerator ||
+			source == WorldRuntime::eUserMenuAction;
 		if (!interactiveSource)
 			keepOnSameLine = false;
 	}
@@ -1773,7 +1788,7 @@ void WorldView::echoInputText(const QString &text)
 		}
 		else
 		{
-			bool        consumedExistingBreak = false;
+			bool consumedExistingBreak = false;
 			// Keep prompt-line echo updates visually stable by applying line-break
 			// consumption and echoed text insertion in a single document edit block.
 			QTextCursor editCursor(m_outputDocument);
@@ -1800,8 +1815,8 @@ void WorldView::echoInputText(const QString &text)
 
 	// Echoed command text is now committed output. Do not let subsequent partial
 	// server updates replace this region.
-	m_hasPartialOutput    = false;
-	m_partialOutputStart  = 0;
+	m_hasPartialOutput = false;
+	m_partialOutputStart = 0;
 	m_partialOutputLength = 0;
 }
 
@@ -1835,7 +1850,7 @@ QString WorldView::currentHoveredHyperlink() const
 	return anchorAtGlobalCursor(m_output);
 }
 
-void WorldView::applyHoveredHyperlink(const QString &href)
+void WorldView::applyHoveredHyperlink(const QString& href)
 {
 	const QString normalized = href.trimmed();
 	if (normalized == m_hoveredHyperlinkHref)
@@ -1868,7 +1883,7 @@ bool WorldView::isAtBufferEnd() const
 {
 	if (!m_output)
 		return true;
-	QScrollBar *const bar = m_output->verticalScrollBar();
+	QScrollBar* const bar = m_output->verticalScrollBar();
 	if (!bar)
 		return true;
 	return bar->value() >= bar->maximum();
@@ -1879,7 +1894,7 @@ void WorldView::selectOutputLine(int zeroBasedLine) const
 	if (!m_output)
 		return;
 
-	QTextDocument *doc = m_output->document();
+	QTextDocument* doc = m_output->document();
 	if (!doc)
 		return;
 
@@ -1902,7 +1917,7 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 	if (!m_output)
 		return;
 
-	QTextDocument *doc = m_output->document();
+	QTextDocument* doc = m_output->document();
 	if (!doc)
 		return;
 
@@ -1913,10 +1928,10 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 	if (!block.isValid())
 		return;
 
-	const QString text     = block.text();
-	const int     textSize = sizeToInt(text.size());
-	startColumn            = qMax(0, startColumn);
-	endColumn              = qMax(startColumn, endColumn);
+	const QString text = block.text();
+	const int textSize = sizeToInt(text.size());
+	startColumn = qMax(0, startColumn);
+	endColumn = qMax(startColumn, endColumn);
 	if (startColumn > textSize)
 		startColumn = textSize;
 	if (endColumn > textSize)
@@ -1934,7 +1949,7 @@ void WorldView::setOutputSelection(int startLine, int endLine, int startColumn, 
 	if (!m_output)
 		return;
 
-	QTextDocument *doc = m_output->document();
+	QTextDocument* doc = m_output->document();
 	if (!doc)
 		return;
 
@@ -1954,17 +1969,17 @@ void WorldView::setOutputSelection(int startLine, int endLine, int startColumn, 
 		endLine = blockCount;
 
 	const QTextBlock startBlock = doc->findBlockByNumber(startLine - 1);
-	const QTextBlock endBlock   = doc->findBlockByNumber(endLine - 1);
+	const QTextBlock endBlock = doc->findBlockByNumber(endLine - 1);
 	if (!startBlock.isValid() || !endBlock.isValid())
 		return;
 
 	startColumn = qMax(1, startColumn);
-	endColumn   = qMax(1, endColumn);
+	endColumn = qMax(1, endColumn);
 
-	const int   startMax = sizeToInt(startBlock.text().size());
-	const int   endMax   = sizeToInt(endBlock.text().size());
-	const int   startPos = startBlock.position() + qMin(startColumn - 1, startMax);
-	const int   endPos   = endBlock.position() + qMin(endColumn - 1, endMax);
+	const int startMax = sizeToInt(startBlock.text().size());
+	const int endMax = sizeToInt(endBlock.text().size());
+	const int startPos = startBlock.position() + qMin(startColumn - 1, startMax);
+	const int endPos = endBlock.position() + qMin(endColumn - 1, endMax);
 
 	QTextCursor cursor(doc);
 	cursor.setPosition(startPos);
@@ -1982,7 +1997,7 @@ int WorldView::setOutputScroll(int position, bool visible)
 	if (m_outputScrollBar)
 		m_outputScrollBar->setVisible(visible);
 
-	QScrollBar *bar = m_output->verticalScrollBar();
+	QScrollBar* bar = m_output->verticalScrollBar();
 	if (!bar)
 		return eBadParameter;
 
@@ -2011,12 +2026,12 @@ bool WorldView::doOutputFind(bool again)
 	if (!m_outputFind)
 		m_outputFind.reset(new OutputFindState());
 
-	OutputFindState &state = *m_outputFind;
-	QTextDocument   *doc   = m_output ? m_output->document() : nullptr;
+	OutputFindState& state = *m_outputFind;
+	QTextDocument* doc = m_output ? m_output->document() : nullptr;
 	if (!doc)
 		return false;
 	const int totalLines = doc->blockCount();
-	auto      lineTextAt = [doc](const int zeroBasedLine)
+	auto lineTextAt = [doc](const int zeroBasedLine)
 	{
 		const QTextBlock block = doc->findBlockByNumber(zeroBasedLine);
 		return block.isValid() ? block.text() : QString();
@@ -2039,9 +2054,9 @@ bool WorldView::doOutputFind(bool again)
 			return false;
 
 		state.matchCase = dlg.matchCase();
-		state.forwards  = dlg.forwards();
-		state.regexp    = dlg.regexp();
-		findText        = dlg.findText();
+		state.forwards = dlg.forwards();
+		state.regexp = dlg.regexp();
+		findText = dlg.findText();
 
 		if (!findText.isEmpty() && (state.history.isEmpty() || state.history.front() != findText))
 			state.history.prepend(findText);
@@ -2049,7 +2064,7 @@ bool WorldView::doOutputFind(bool again)
 		state.lastFindText = findText;
 		state.matchesOnLine.clear();
 		state.startColumn = -1;
-		state.endColumn   = -1;
+		state.endColumn = -1;
 		state.currentLine = state.forwards ? 0 : totalLines - 1;
 
 		if (state.regexp)
@@ -2061,8 +2076,8 @@ bool WorldView::doOutputFind(bool again)
 			if (!state.regex.isValid())
 			{
 				QMessageBox::warning(
-				    this, QStringLiteral("Find"),
-				    QStringLiteral("Regular expression error: %1").arg(state.regex.errorString()));
+					this, QStringLiteral("Find"),
+					QStringLiteral("Regular expression error: %1").arg(state.regex.errorString()));
 				return false;
 			}
 		}
@@ -2076,7 +2091,7 @@ bool WorldView::doOutputFind(bool again)
 			state.currentLine += state.forwards ? 1 : -1;
 	}
 
-	MainWindowHost                  *main = resolveMainWindowHost(window());
+	MainWindowHost* main = resolveMainWindowHost(window());
 	std::unique_ptr<QProgressDialog> progress;
 	const int remaining = state.forwards ? (totalLines - state.currentLine) : state.currentLine;
 	if (remaining > 500)
@@ -2098,11 +2113,11 @@ bool WorldView::doOutputFind(bool again)
 	auto notFound = [&](bool againSearch)
 	{
 		const QString typeLabel =
-		    state.regexp ? QStringLiteral("regular expression") : QStringLiteral("text");
+			state.regexp ? QStringLiteral("regular expression") : QStringLiteral("text");
 		const QString suffix = againSearch ? QStringLiteral(" again.") : QStringLiteral(".");
 		QMessageBox::information(
-		    this, QStringLiteral("Find"),
-		    QStringLiteral("The %1 \"%2\" was not found%3").arg(typeLabel, findText, suffix));
+			this, QStringLiteral("Find"),
+			QStringLiteral("The %1 \"%2\" was not found%3").arg(typeLabel, findText, suffix));
 		state.startColumn = -1;
 		state.matchesOnLine.clear();
 		wrapUp();
@@ -2123,9 +2138,9 @@ bool WorldView::doOutputFind(bool again)
 		if (!state.matchesOnLine.isEmpty())
 		{
 			const QPair<int, int> match =
-			    state.forwards ? state.matchesOnLine.takeFirst() : state.matchesOnLine.takeLast();
+				state.forwards ? state.matchesOnLine.takeFirst() : state.matchesOnLine.takeLast();
 			state.startColumn = match.first;
-			state.endColumn   = match.second;
+			state.endColumn = match.second;
 			if (!state.repeatOnSameLine)
 				state.matchesOnLine.clear();
 			selectOutputRange(state.currentLine, state.startColumn, state.endColumn);
@@ -2145,7 +2160,7 @@ bool WorldView::doOutputFind(bool again)
 
 		if (progress && milestone > 31)
 		{
-			milestone       = 0;
+			milestone = 0;
 			const int value = state.forwards ? state.currentLine : (totalLines - state.currentLine);
 			progress->setValue(qBound(0, value, totalLines));
 			if (progress->wasCanceled())
@@ -2165,7 +2180,7 @@ bool WorldView::doOutputFind(bool again)
 				if (!match.hasMatch())
 					continue;
 				const int start = sizeToInt(match.capturedStart());
-				const int end   = sizeToInt(match.capturedEnd());
+				const int end = sizeToInt(match.capturedEnd());
 				if (start >= 0 && end >= start)
 					state.matchesOnLine.push_back(qMakePair(start, end));
 				if (end >= sizeToInt(line.size()))
@@ -2175,16 +2190,16 @@ bool WorldView::doOutputFind(bool again)
 		else
 		{
 			Qt::CaseSensitivity sensitivity = state.matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
-			const QString      &needle      = findText;
-			const int           lineSize    = sizeToInt(line.size());
-			int                 start       = 0;
+			const QString& needle = findText;
+			const int lineSize = sizeToInt(line.size());
+			int start = 0;
 			while (true)
 			{
 				const qsizetype index = line.indexOf(needle, start, sensitivity);
 				if (index < 0)
 					break;
 				const int indexInt = sizeToInt(index);
-				const int end      = indexInt + sizeToInt(needle.size());
+				const int end = indexInt + sizeToInt(needle.size());
 				state.matchesOnLine.push_back(qMakePair(indexInt, end));
 				start = qMax(end, start + 1);
 				if (start >= lineSize)
@@ -2211,7 +2226,7 @@ bool WorldView::hasOutputFindHistory() const
 	return !m_outputFind->history.isEmpty();
 }
 
-CommandHistoryFindState *WorldView::commandHistoryFindState()
+CommandHistoryFindState* WorldView::commandHistoryFindState()
 {
 	if (!m_commandHistoryFind)
 		m_commandHistoryFind.reset(new CommandHistoryFindState());
@@ -2222,12 +2237,12 @@ QStringList WorldView::commandHistoryList() const
 {
 	QStringList list;
 	list.reserve(m_history.size());
-	for (const QString &entry : m_history)
+	for (const QString& entry : m_history)
 		list.append(entry);
 	return list;
 }
 
-void WorldView::setCommandHistoryList(const QStringList &historyEntries)
+void WorldView::setCommandHistoryList(const QStringList& historyEntries)
 {
 	m_history.clear();
 	if (m_historyLimit > 0)
@@ -2241,7 +2256,7 @@ void WorldView::setCommandHistoryList(const QStringList &historyEntries)
 	if (m_commandHistoryFind)
 	{
 		m_commandHistoryFind->currentLine = 0;
-		m_commandHistoryFind->again       = false;
+		m_commandHistoryFind->again = false;
 	}
 }
 
@@ -2252,7 +2267,7 @@ void WorldView::clearCommandHistory()
 	if (m_commandHistoryFind)
 	{
 		m_commandHistoryFind->currentLine = 0;
-		m_commandHistoryFind->again       = false;
+		m_commandHistoryFind->again = false;
 	}
 }
 
@@ -2261,7 +2276,7 @@ bool WorldView::hasCommandHistory() const
 	return !m_history.isEmpty();
 }
 
-void WorldView::sendCommandFromHistory(const QString &text)
+void WorldView::sendCommandFromHistory(const QString& text)
 {
 	if (text.isEmpty())
 		return;
@@ -2276,7 +2291,7 @@ void WorldView::sendCommandFromHistory(const QString &text)
 	{
 		m_settingText = true;
 		m_input->clear();
-		m_settingText  = false;
+		m_settingText = false;
 		m_inputChanged = false;
 	}
 	resetHistoryRecall();
@@ -2289,8 +2304,8 @@ void WorldView::showCommandHistoryDialog()
 		return;
 
 	CommandHistoryDialog dlg(this);
-	dlg.m_msgList          = &historyList;
-	dlg.m_sendview         = this;
+	dlg.m_msgList = &historyList;
+	dlg.m_sendview = this;
 	dlg.m_pHistoryFindInfo = commandHistoryFindState();
 	dlg.populateList();
 	dlg.exec();
@@ -2307,8 +2322,8 @@ QString WorldView::wordUnderCursor() const
 		return cursor.selectedText();
 	}
 
-	QTextCursor   cursor = m_output->textCursor();
-	const QString text   = m_output->toPlainText();
+	QTextCursor cursor = m_output->textCursor();
+	const QString text = m_output->toPlainText();
 	if (text.isEmpty())
 		return {};
 
@@ -2338,15 +2353,15 @@ QString WorldView::wordUnderCursor() const
 	return text.mid(start, end - start);
 }
 
-void WorldView::setWordDelimiters(const QString &delimiters, const QString &doubleClickDelimiters)
+void WorldView::setWordDelimiters(const QString& delimiters, const QString& doubleClickDelimiters)
 {
-	m_wordDelimiters         = delimiters;
+	m_wordDelimiters = delimiters;
 	m_wordDelimitersDblClick = doubleClickDelimiters;
 }
 
 void WorldView::setSmoothScrolling(bool smooth, bool smoother)
 {
-	m_smoothScrolling   = smooth;
+	m_smoothScrolling = smooth;
 	m_smootherScrolling = smoother;
 	if (m_output && m_output->verticalScrollBar())
 		m_output->verticalScrollBar()->setSingleStep(smoother ? 1 : 3);
@@ -2377,7 +2392,7 @@ int WorldView::inputSelectionStartColumn() const
 	if (!m_input)
 		return 0;
 	const QTextCursor cursor = m_input->textCursor();
-	const int         start  = cursor.selectionStart();
+	const int start = cursor.selectionStart();
 	// Legacy GetInfo(236): return caret/selection start + 1 even when no selection.
 	return start + 1;
 }
@@ -2387,20 +2402,20 @@ int WorldView::inputSelectionEndColumn() const
 	if (!m_input)
 		return 0;
 	const QTextCursor cursor = m_input->textCursor();
-	const int         start  = cursor.selectionStart();
-	const int         end    = cursor.selectionEnd();
+	const int start = cursor.selectionStart();
+	const int end = cursor.selectionEnd();
 	if (end <= start)
 		return 0;
 	return end;
 }
 
-QPlainTextEdit *WorldView::inputEditor() const
+QPlainTextEdit* WorldView::inputEditor() const
 {
 	return m_input;
 }
 
-static bool getOutputSelectionBounds(const WrapTextBrowser *output, const WrapTextBrowser *liveOutput,
-                                     int &startLine, int &startColumn, int &endLine, int &endColumn)
+static bool getOutputSelectionBounds(const WrapTextBrowser* output, const WrapTextBrowser* liveOutput,
+                                     int& startLine, int& startColumn, int& endLine, int& endColumn)
 {
 	QTextCursor cursor;
 	if (output && output->textCursor().hasSelection())
@@ -2411,55 +2426,55 @@ static bool getOutputSelectionBounds(const WrapTextBrowser *output, const WrapTe
 		return false;
 
 	const int start = cursor.selectionStart();
-	const int end   = cursor.selectionEnd();
+	const int end = cursor.selectionEnd();
 	if (end <= start)
 		return false;
 
-	QTextDocument *doc = cursor.document();
-	QTextCursor    startCursor(doc);
+	QTextDocument* doc = cursor.document();
+	QTextCursor startCursor(doc);
 	startCursor.setPosition(start);
 	QTextCursor endCursor(doc);
 	endCursor.setPosition(end);
 
 	const QTextBlock startBlock = startCursor.block();
-	const QTextBlock endBlock   = endCursor.block();
+	const QTextBlock endBlock = endCursor.block();
 
-	startLine   = startBlock.blockNumber() + 1;
-	endLine     = endBlock.blockNumber() + 1;
+	startLine = startBlock.blockNumber() + 1;
+	endLine = endBlock.blockNumber() + 1;
 	startColumn = start - startBlock.position() + 1;
-	endColumn   = end - endBlock.position() + 1;
+	endColumn = end - endBlock.position() + 1;
 	return true;
 }
 
 void WorldView::handleOutputSelectionChanged()
 {
-	int        startLine   = 0;
-	int        startColumn = 0;
-	int        endLine     = 0;
-	int        endColumn   = 0;
+	int startLine = 0;
+	int startColumn = 0;
+	int endLine = 0;
+	int endColumn = 0;
 	const bool hasSelection =
-	    getOutputSelectionBounds(m_output, m_liveOutput, startLine, startColumn, endLine, endColumn);
+		getOutputSelectionBounds(m_output, m_liveOutput, startLine, startColumn, endLine, endColumn);
 	const bool selectionSame =
-	    (hasSelection == m_hasOutputSelection && startLine == m_lastSelectionStartLine &&
-	     startColumn == m_lastSelectionStartColumn && endLine == m_lastSelectionEndLine &&
-	     endColumn == m_lastSelectionEndColumn);
+	(hasSelection == m_hasOutputSelection && startLine == m_lastSelectionStartLine &&
+		startColumn == m_lastSelectionStartColumn && endLine == m_lastSelectionEndLine &&
+		endColumn == m_lastSelectionEndColumn);
 	if (selectionSame)
 		return;
 
-	m_hasOutputSelection       = hasSelection;
-	m_lastSelectionStartLine   = startLine;
+	m_hasOutputSelection = hasSelection;
+	m_lastSelectionStartLine = startLine;
 	m_lastSelectionStartColumn = startColumn;
-	m_lastSelectionEndLine     = endLine;
-	m_lastSelectionEndColumn   = endColumn;
+	m_lastSelectionEndLine = endLine;
+	m_lastSelectionEndColumn = endColumn;
 
 	if (hasSelection && m_runtime)
 	{
-		const QMap<QString, QString> &attrs   = m_runtime->worldAttributes();
-		auto                          enabled = [](const QString &value)
+		const QMap<QString, QString>& attrs = m_runtime->worldAttributes();
+		auto enabled = [](const QString& value)
 		{
 			return value == QStringLiteral("1") ||
-			       value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-			       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+				value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+				value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 		};
 		if (enabled(attrs.value(QStringLiteral("copy_selection_to_clipboard"))))
 		{
@@ -2477,10 +2492,10 @@ void WorldView::handleOutputSelectionChanged()
 
 int WorldView::outputSelectionStartLine() const
 {
-	int startLine   = 0;
+	int startLine = 0;
 	int startColumn = 0;
-	int endLine     = 0;
-	int endColumn   = 0;
+	int endLine = 0;
+	int endColumn = 0;
 	if (!getOutputSelectionBounds(m_output, m_liveOutput, startLine, startColumn, endLine, endColumn))
 		return 0;
 	return startLine;
@@ -2488,10 +2503,10 @@ int WorldView::outputSelectionStartLine() const
 
 int WorldView::outputSelectionEndLine() const
 {
-	int startLine   = 0;
+	int startLine = 0;
 	int startColumn = 0;
-	int endLine     = 0;
-	int endColumn   = 0;
+	int endLine = 0;
+	int endColumn = 0;
 	if (!getOutputSelectionBounds(m_output, m_liveOutput, startLine, startColumn, endLine, endColumn))
 		return 0;
 	return endLine;
@@ -2499,10 +2514,10 @@ int WorldView::outputSelectionEndLine() const
 
 int WorldView::outputSelectionStartColumn() const
 {
-	int startLine   = 0;
+	int startLine = 0;
 	int startColumn = 0;
-	int endLine     = 0;
-	int endColumn   = 0;
+	int endLine = 0;
+	int endColumn = 0;
 	if (!getOutputSelectionBounds(m_output, m_liveOutput, startLine, startColumn, endLine, endColumn))
 		return 0;
 	return startColumn;
@@ -2510,10 +2525,10 @@ int WorldView::outputSelectionStartColumn() const
 
 int WorldView::outputSelectionEndColumn() const
 {
-	int startLine   = 0;
+	int startLine = 0;
 	int startColumn = 0;
-	int endLine     = 0;
-	int endColumn   = 0;
+	int endLine = 0;
+	int endColumn = 0;
 	if (!getOutputSelectionBounds(m_output, m_liveOutput, startLine, startColumn, endLine, endColumn))
 		return 0;
 	return endColumn;
@@ -2542,8 +2557,8 @@ QRect WorldView::outputTextRectangle() const
 	if (!m_outputStack || !m_output || !m_output->viewport())
 		return {};
 
-	const QWidget *viewport = m_output->viewport();
-	const QPoint   topLeft  = viewport->mapTo(m_outputStack, QPoint(0, 0));
+	const QWidget* viewport = m_output->viewport();
+	const QPoint topLeft = viewport->mapTo(m_outputStack, QPoint(0, 0));
 	return {topLeft, viewport->size()};
 }
 
@@ -2565,7 +2580,7 @@ int WorldView::outputScrollPosition() const
 {
 	if (!m_output)
 		return 0;
-	QScrollBar *const bar = m_output->verticalScrollBar();
+	QScrollBar* const bar = m_output->verticalScrollBar();
 	if (!bar)
 		return 0;
 	return bar->value();
@@ -2588,12 +2603,12 @@ void WorldView::requestDrawOutputWindowNotification()
 	if (!m_drawNotifyThrottle.isValid())
 		m_drawNotifyThrottle.start();
 	constexpr qint64 kMinDrawNotifyIntervalMs = 16;
-	const qint64     nowMs                    = m_drawNotifyThrottle.elapsed();
-	const qint64     sinceLastMs              = nowMs - m_lastDrawNotifyMs;
-	const int        delayMs                  = (sinceLastMs >= kMinDrawNotifyIntervalMs)
-	                                                ? 0
-	                                                : static_cast<int>(kMinDrawNotifyIntervalMs - sinceLastMs);
-	m_drawNotifyQueued                        = true;
+	const qint64 nowMs = m_drawNotifyThrottle.elapsed();
+	const qint64 sinceLastMs = nowMs - m_lastDrawNotifyMs;
+	const int delayMs = (sinceLastMs >= kMinDrawNotifyIntervalMs)
+		                    ? 0
+		                    : static_cast<int>(kMinDrawNotifyIntervalMs - sinceLastMs);
+	m_drawNotifyQueued = true;
 	QTimer::singleShot(delayMs, this,
 	                   [this]
 	                   {
@@ -2609,9 +2624,9 @@ void WorldView::notifyDrawOutputWindow() const
 {
 	if (!m_runtime)
 		return;
-	const int fontHeight     = m_runtime->outputFontHeight();
+	const int fontHeight = m_runtime->outputFontHeight();
 	const int adjustedScroll = outputScrollPosition() - m_inputPixelOffset;
-	int       firstLine      = 1;
+	int firstLine = 1;
 	if (fontHeight > 0)
 	{
 		firstLine = (adjustedScroll / fontHeight) + 1;
@@ -2641,7 +2656,7 @@ void WorldView::copySelection() const
 	if (hasInputSelection())
 	{
 		const QTextCursor cursor = m_input->textCursor();
-		QString           text   = cursor.selectedText();
+		QString text = cursor.selectedText();
 		text.replace(QChar(0x2029), QLatin1Char('\n'));
 		QGuiApplication::clipboard()->setText(text);
 	}
@@ -2668,7 +2683,7 @@ QString WorldView::inputSelectionText() const
 	if (!hasInputSelection())
 		return {};
 	const QTextCursor cursor = m_input->textCursor();
-	QString           text   = cursor.selectedText();
+	QString text = cursor.selectedText();
 	text.replace(QChar(0x2029), QLatin1Char('\n'));
 	return text;
 }
@@ -2703,8 +2718,8 @@ void WorldView::copySelectionAsHtml() const
 	if (!hasOutputSelection())
 		return;
 
-	QTextCursor            cursor;
-	const WrapTextBrowser *source = nullptr;
+	QTextCursor cursor;
+	const WrapTextBrowser* source = nullptr;
 	if (m_output && m_output->textCursor().hasSelection())
 	{
 		cursor = m_output->textCursor();
@@ -2720,39 +2735,39 @@ void WorldView::copySelectionAsHtml() const
 		return;
 	}
 	const QTextDocumentFragment frag(cursor);
-	QString                     text = frag.toPlainText();
+	QString text = frag.toPlainText();
 	text.replace(QChar(0x2029), QLatin1Char('\n'));
 
-	const QString   fragmentHtml = frag.toHtml();
-	QString         bodyContent  = fragmentHtml;
-	const qsizetype bodyStart    = fragmentHtml.indexOf(QStringLiteral("<body"));
+	const QString fragmentHtml = frag.toHtml();
+	QString bodyContent = fragmentHtml;
+	const qsizetype bodyStart = fragmentHtml.indexOf(QStringLiteral("<body"));
 	if (bodyStart >= 0)
 	{
 		const qsizetype bodyTagEnd = fragmentHtml.indexOf(QLatin1Char('>'), bodyStart);
-		const qsizetype bodyEnd    = fragmentHtml.indexOf(QStringLiteral("</body>"), bodyTagEnd);
+		const qsizetype bodyEnd = fragmentHtml.indexOf(QStringLiteral("</body>"), bodyTagEnd);
 		if (bodyTagEnd >= 0 && bodyEnd > bodyTagEnd)
 			bodyContent = fragmentHtml.mid(bodyTagEnd + 1, bodyEnd - bodyTagEnd - 1);
 	}
 	if (bodyContent.isEmpty())
 		bodyContent = fragmentHtml;
 
-	const QFont   font     = source->font();
+	const QFont font = source->font();
 	const QString fontFace = font.family();
-	const QColor  back     = source->palette().color(QPalette::Base);
+	const QColor back = source->palette().color(QPalette::Base);
 
-	QString       html;
+	QString html;
 	html += QStringLiteral("<!-- Produced by QMud v %1 - www.qmud.dev -->\n")
-	            .arg(QString::fromLatin1(kVersionString));
+		.arg(QString::fromLatin1(kVersionString));
 	html += QStringLiteral("<table border=0 cellpadding=5 bgcolor=\"#%1%2%3\">\n")
-	            .arg(back.red(), 2, 16, QLatin1Char('0'))
-	            .arg(back.green(), 2, 16, QLatin1Char('0'))
-	            .arg(back.blue(), 2, 16, QLatin1Char('0'));
+	        .arg(back.red(), 2, 16, QLatin1Char('0'))
+	        .arg(back.green(), 2, 16, QLatin1Char('0'))
+	        .arg(back.blue(), 2, 16, QLatin1Char('0'));
 	html += QStringLiteral("<tr><td>\n");
 	html += QStringLiteral(
-	            "<pre><code>"
-	            "<font size=2 face=\"%1, DejaVu Sans Mono, Consolas, Menlo, Monaco, Courier New, Courier\">"
-	            "<font color=\"#0\">")
-	            .arg(fontFace.toHtmlEscaped());
+			"<pre><code>"
+			"<font size=2 face=\"%1, DejaVu Sans Mono, Consolas, Menlo, Monaco, Courier New, Courier\">"
+			"<font color=\"#0\">")
+		.arg(fontFace.toHtmlEscaped());
 	html += bodyContent;
 	html += QStringLiteral("</font></font></code></pre>\n");
 	html += QStringLiteral("</td></tr></table>\n");
@@ -2763,11 +2778,11 @@ void WorldView::copySelectionAsHtml() const
 	QGuiApplication::clipboard()->setMimeData(data.release());
 }
 
-void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool recordLine, int flags,
-                                         const QVector<WorldRuntime::StyleSpan> &spans)
+void WorldView::appendOutputTextInternal(const QString& text, bool newLine, bool recordLine, int flags,
+                                         const QVector<WorldRuntime::StyleSpan>& spans)
 {
 	const bool shouldBreakAfterInlineInput =
-	    (flags & (WorldRuntime::LineOutput | WorldRuntime::LineNote)) != 0;
+		(flags & (WorldRuntime::LineOutput | WorldRuntime::LineNote)) != 0;
 	bool injectPendingBreakBeforeRender = false;
 	if (shouldBreakAfterInlineInput && m_breakBeforeNextServerOutput)
 	{
@@ -2788,17 +2803,17 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 	int recordedFlags = flags;
 	if (m_runtime)
 	{
-		const QMap<QString, QString> &attrs   = m_runtime->worldAttributes();
-		auto                          enabled = [](const QString &value)
+		const QMap<QString, QString>& attrs = m_runtime->worldAttributes();
+		auto enabled = [](const QString& value)
 		{
 			return value == QStringLiteral("1") ||
-			       value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-			       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+				value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+				value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 		};
 		const bool logOutput = enabled(attrs.value(QStringLiteral("log_output")));
-		const bool logInput  = enabled(attrs.value(QStringLiteral("log_input")));
-		const bool logNotes  = enabled(attrs.value(QStringLiteral("log_notes")));
-		bool       shouldLog = false;
+		const bool logInput = enabled(attrs.value(QStringLiteral("log_input")));
+		const bool logNotes = enabled(attrs.value(QStringLiteral("log_notes")));
+		bool shouldLog = false;
 		if (flags & WorldRuntime::LineNote)
 			shouldLog = logNotes;
 		else if (flags & WorldRuntime::LineInput)
@@ -2820,15 +2835,16 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 			QColor back;
 			if (m_runtime)
 			{
-				const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
+				const QMap<QString, QString>& attrs = m_runtime->worldAttributes();
 				fore = parseColor(attrs.value(QStringLiteral("output_text_colour")));
 				back = parseColor(attrs.value(QStringLiteral("output_background_colour")));
 			}
 			if (!fore.isValid())
 				fore = m_output->palette().color(QPalette::Text);
 			if (!back.isValid())
-				back = m_outputBackground.isValid() ? m_outputBackground
-				                                    : m_output->palette().color(QPalette::Base);
+				back = m_outputBackground.isValid()
+					       ? m_outputBackground
+					       : m_output->palette().color(QPalette::Base);
 			span.fore = fore;
 			span.back = back;
 		}
@@ -2836,10 +2852,10 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 	}
 
 	WorldRuntime::LineEntry displayEntry;
-	displayEntry.text  = text;
+	displayEntry.text = text;
 	displayEntry.flags = recordedFlags;
 	displayEntry.spans = displaySpans;
-	displayEntry.time  = QDateTime::currentDateTime();
+	displayEntry.time = QDateTime::currentDateTime();
 	QDateTime previousLineTime;
 
 	if (recordLine && m_runtime)
@@ -2849,7 +2865,7 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 		else
 			m_runtime->addLine(text, recordedFlags, displaySpans, newLine);
 
-		const QVector<WorldRuntime::LineEntry> &lines = m_runtime->lines();
+		const QVector<WorldRuntime::LineEntry>& lines = m_runtime->lines();
 		if (!lines.isEmpty())
 		{
 			displayEntry = lines.last();
@@ -2866,19 +2882,21 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 		if (injectPendingBreakBeforeRender)
 			m_pendingOutput.push_back(PendingHtml{QString(), true});
 
-		QString                          displayText   = displayEntry.text;
+		QString displayText = displayEntry.text;
 		QVector<WorldRuntime::StyleSpan> renderedSpans = displayEntry.spans;
 		buildDisplayLine(displayEntry, previousLineTime, displayText, renderedSpans);
 
 		const double opacity = lineOpacityForTimestamp(displayEntry.time);
 		m_pendingOutput.push_back(
-		    PendingHtml{buildOutputHtml(displayText, renderedSpans, m_showBold, m_showItalic, m_showUnderline,
-		                                m_alternativeInverse, m_lineSpacing, opacity),
-		                newLine});
+			PendingHtml{
+				buildOutputHtml(displayText, renderedSpans, m_showBold, m_showItalic, m_showUnderline,
+				                m_alternativeInverse, m_lineSpacing, opacity),
+				newLine
+			});
 		return;
 	}
 
-	QString                          displayText   = displayEntry.text;
+	QString displayText = displayEntry.text;
 	QVector<WorldRuntime::StyleSpan> renderedSpans = displayEntry.spans;
 	buildDisplayLine(displayEntry, previousLineTime, displayText, renderedSpans);
 
@@ -2886,7 +2904,7 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 	if (injectPendingBreakBeforeRender)
 	{
 		const bool previousBulkState = m_bulkOutputRebuild;
-		m_bulkOutputRebuild          = true;
+		m_bulkOutputRebuild = true;
 		QTextCursor editCursor(m_outputDocument);
 		editCursor.beginEditBlock();
 		appendOutputHtml(QString(), true);
@@ -2912,7 +2930,7 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 	requestDrawOutputWindowNotification();
 }
 
-bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
+bool WorldView::appendOutputTextFast(const QString& text, const QVector<WorldRuntime::StyleSpan>& spans,
                                      bool newLine, double opacity)
 {
 	if (!m_outputDocument)
@@ -2934,7 +2952,7 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 	{
 		baseFormat.setForeground(m_output->palette().color(QPalette::Text));
 		const QColor defaultBack =
-		    m_outputBackground.isValid() ? m_outputBackground : m_output->palette().color(QPalette::Base);
+			m_outputBackground.isValid() ? m_outputBackground : m_output->palette().color(QPalette::Base);
 		baseFormat.setBackground(defaultBack);
 	}
 
@@ -2945,13 +2963,13 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 	}
 	else
 	{
-		int  offset       = 0;
+		int offset = 0;
 		auto isActionLink = [](const int actionType)
 		{
 			return actionType == WorldRuntime::ActionHyperlink || actionType == WorldRuntime::ActionSend ||
-			       actionType == WorldRuntime::ActionPrompt;
+				actionType == WorldRuntime::ActionPrompt;
 		};
-		for (const WorldRuntime::StyleSpan &span : spans)
+		for (const WorldRuntime::StyleSpan& span : spans)
 		{
 			const int length = qMax(0, span.length);
 			if (length == 0)
@@ -2963,8 +2981,8 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 				continue;
 
 			QTextCharFormat format = baseFormat;
-			QColor          fore   = span.fore;
-			QColor          back   = span.back;
+			QColor fore = span.fore;
+			QColor back = span.back;
 			if (span.inverse)
 			{
 				qSwap(fore, back);
@@ -2977,10 +2995,10 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 				format.setBackground(back);
 			format.setFontWeight(span.bold && m_showBold ? QFont::Bold : baseFormat.fontWeight());
 			format.setFontItalic(span.italic && m_showItalic);
-			const bool hasLinkAction       = isActionLink(span.actionType) && !span.action.isEmpty();
+			const bool hasLinkAction = isActionLink(span.actionType) && !span.action.isEmpty();
 			const bool spanUnderlineActive = span.underline && m_showUnderline;
 			const bool linkUnderlineActive = hasLinkAction && m_underlineHyperlinks;
-			const bool underline           = spanUnderlineActive || linkUnderlineActive;
+			const bool underline = spanUnderlineActive || linkUnderlineActive;
 			format.setFontUnderline(underline);
 			format.setFontStrikeOut(span.strike);
 			if (hasLinkAction)
@@ -3024,7 +3042,7 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 	return true;
 }
 
-void WorldView::updatePartialOutputText(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans)
+void WorldView::updatePartialOutputText(const QString& text, const QVector<WorldRuntime::StyleSpan>& spans)
 {
 	if (!m_outputDocument || m_frozen)
 		return;
@@ -3040,8 +3058,8 @@ void WorldView::updatePartialOutputText(const QString &text, const QVector<World
 
 	if (m_breakBeforeNextServerOutput && !text.isEmpty())
 	{
-		m_hasPartialOutput    = false;
-		m_partialOutputStart  = 0;
+		m_hasPartialOutput = false;
+		m_partialOutputStart = 0;
 		m_partialOutputLength = 0;
 		commitPendingInlineInputBreak();
 		cursor = QTextCursor(m_outputDocument);
@@ -3060,13 +3078,13 @@ void WorldView::updatePartialOutputText(const QString &text, const QVector<World
 		m_partialOutputStart = cursor.position();
 	}
 
-	const double  opacity = lineOpacityForTimestamp(QDateTime::currentDateTime());
-	const QString html    = buildOutputHtml(text, spans, m_showBold, m_showItalic, m_showUnderline,
-	                                        m_alternativeInverse, m_lineSpacing, opacity);
+	const double opacity = lineOpacityForTimestamp(QDateTime::currentDateTime());
+	const QString html = buildOutputHtml(text, spans, m_showBold, m_showItalic, m_showUnderline,
+	                                     m_alternativeInverse, m_lineSpacing, opacity);
 	cursor.insertHtml(html);
 
 	m_partialOutputLength = cursor.position() - m_partialOutputStart;
-	m_hasPartialOutput    = true;
+	m_hasPartialOutput = true;
 
 	requestOutputScrollToEnd();
 }
@@ -3081,8 +3099,8 @@ void WorldView::clearPartialOutput()
 	cursor.setPosition(m_partialOutputStart + m_partialOutputLength, QTextCursor::KeepAnchor);
 	cursor.removeSelectedText();
 
-	m_hasPartialOutput    = false;
-	m_partialOutputStart  = 0;
+	m_hasPartialOutput = false;
+	m_partialOutputStart = 0;
 	m_partialOutputLength = 0;
 
 	requestOutputScrollToEnd();
@@ -3097,8 +3115,8 @@ void WorldView::clearOutputBuffer()
 	stopIncrementalHyperlinkRestyle();
 	m_outputDocument->clear();
 	m_pendingOutput.clear();
-	m_hasPartialOutput    = false;
-	m_partialOutputStart  = 0;
+	m_hasPartialOutput = false;
+	m_partialOutputStart = 0;
 	m_partialOutputLength = 0;
 
 	if (m_scrollbackSplitActive)
@@ -3108,16 +3126,16 @@ void WorldView::clearOutputBuffer()
 	requestDrawOutputWindowNotification();
 }
 
-void WorldView::rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry> &lines)
+void WorldView::rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry>& lines)
 {
 	if (!m_outputDocument)
 		return;
 
 	const bool backfillActive =
-	    m_outputBackfillInFlight || m_outputBackfillNextIndex >= 0 || !m_outputBackfillPendingLines.isEmpty();
+		m_outputBackfillInFlight || m_outputBackfillNextIndex >= 0 || !m_outputBackfillPendingLines.isEmpty();
 	if (backfillActive)
 	{
-		m_outputBackfillQueuedRebuild      = true;
+		m_outputBackfillQueuedRebuild = true;
 		m_outputBackfillQueuedRebuildLines = lines;
 		return;
 	}
@@ -3126,16 +3144,16 @@ void WorldView::rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry> &l
 	stopIncrementalHyperlinkRestyle();
 	m_outputDocument->clear();
 	m_pendingOutput.clear();
-	m_hasPartialOutput    = false;
-	m_partialOutputStart  = 0;
+	m_hasPartialOutput = false;
+	m_partialOutputStart = 0;
 	m_partialOutputLength = 0;
 
 	const bool previousBulkState = m_bulkOutputRebuild;
-	m_bulkOutputRebuild          = true;
+	m_bulkOutputRebuild = true;
 	QDateTime previousLineTime;
-	for (const auto &entry : lines)
+	for (const auto& entry : lines)
 	{
-		QString                          displayText  = entry.text;
+		QString displayText = entry.text;
 		QVector<WorldRuntime::StyleSpan> displaySpans = entry.spans;
 		buildDisplayLine(entry, previousLineTime, displayText, displaySpans);
 		appendOutputHtml(buildOutputHtml(displayText, displaySpans, m_showBold, m_showItalic, m_showUnderline,
@@ -3153,16 +3171,16 @@ void WorldView::rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry> &l
 	requestDrawOutputWindowNotification();
 }
 
-void WorldView::rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry> &lines)
+void WorldView::rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry>& lines)
 {
 	if (!m_outputDocument)
 		return;
 
 	const bool backfillActive =
-	    m_outputBackfillInFlight || m_outputBackfillNextIndex >= 0 || !m_outputBackfillPendingLines.isEmpty();
+		m_outputBackfillInFlight || m_outputBackfillNextIndex >= 0 || !m_outputBackfillPendingLines.isEmpty();
 	if (backfillActive)
 	{
-		m_outputBackfillQueuedRebuild      = true;
+		m_outputBackfillQueuedRebuild = true;
 		m_outputBackfillQueuedRebuildLines = lines;
 		return;
 	}
@@ -3171,15 +3189,15 @@ void WorldView::rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry
 	stopIncrementalHyperlinkRestyle();
 	m_outputDocument->clear();
 	m_pendingOutput.clear();
-	m_hasPartialOutput    = false;
-	m_partialOutputStart  = 0;
+	m_hasPartialOutput = false;
+	m_partialOutputStart = 0;
 	m_partialOutputLength = 0;
 
 	int estimatedVisibleLines = 0;
 	if (m_output && m_output->viewport())
 	{
 		const int viewportHeight = m_output->viewport()->height();
-		const int lineHeight     = qMax(1, QFontMetrics(m_output->font()).lineSpacing());
+		const int lineHeight = qMax(1, QFontMetrics(m_output->font()).lineSpacing());
 		if (viewportHeight > 0)
 			estimatedVisibleLines = qMax(1, viewportHeight / lineHeight);
 	}
@@ -3187,20 +3205,20 @@ void WorldView::rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry
 		estimatedVisibleLines = kLazyRestoreInitialMinimumLines;
 
 	const int initialLineCount =
-	    qBound(kLazyRestoreInitialMinimumLines, estimatedVisibleLines * kLazyRestoreVisibleMultiplier,
-	           kLazyRestoreInitialMaximumLines);
-	const int  firstImmediateIndex = qMax(0, lines.size() - initialLineCount);
+		qBound(kLazyRestoreInitialMinimumLines, estimatedVisibleLines * kLazyRestoreVisibleMultiplier,
+		       kLazyRestoreInitialMaximumLines);
+	const int firstImmediateIndex = qMax(0, lines.size() - initialLineCount);
 
 	const bool previousBulkState = m_bulkOutputRebuild;
-	m_bulkOutputRebuild          = true;
+	m_bulkOutputRebuild = true;
 	QDateTime previousLineTime;
 	if (firstImmediateIndex > 0)
 		previousLineTime = lines.at(firstImmediateIndex - 1).time;
 
 	for (int i = firstImmediateIndex; i < lines.size(); ++i)
 	{
-		const WorldRuntime::LineEntry   &entry = lines.at(i);
-		QString                          displayText(entry.text);
+		const WorldRuntime::LineEntry& entry = lines.at(i);
+		QString displayText(entry.text);
 		QVector<WorldRuntime::StyleSpan> displaySpans(entry.spans);
 		buildDisplayLine(entry, previousLineTime, displayText, displaySpans);
 		appendOutputHtml(buildOutputHtml(displayText, displaySpans, m_showBold, m_showItalic, m_showUnderline,
@@ -3214,7 +3232,7 @@ void WorldView::rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry
 	if (firstImmediateIndex > 0)
 	{
 		m_outputBackfillPendingLines = lines.mid(0, firstImmediateIndex);
-		m_outputBackfillNextIndex    = m_outputBackfillPendingLines.size() - 1;
+		m_outputBackfillNextIndex = m_outputBackfillPendingLines.size() - 1;
 		processDeferredOutputBackfillChunk();
 	}
 
@@ -3247,157 +3265,160 @@ void WorldView::processDeferredOutputBackfillChunk()
 	QVector<DeferredBackfillRenderLine> renderLines;
 	renderLines.reserve(pendingLines.size());
 	QDateTime previousLineTime;
-	for (const WorldRuntime::LineEntry &entry : pendingLines)
+	for (const WorldRuntime::LineEntry& entry : pendingLines)
 	{
-		QString                          displayText(entry.text);
+		QString displayText(entry.text);
 		QVector<WorldRuntime::StyleSpan> displaySpans(entry.spans);
 		buildDisplayLine(entry, previousLineTime, displayText, displaySpans);
-		renderLines.push_back(DeferredBackfillRenderLine{displayText, displaySpans, entry.hardReturn,
-		                                                 lineOpacityForTimestamp(entry.time)});
+		renderLines.push_back(DeferredBackfillRenderLine{
+			displayText, displaySpans, entry.hardReturn,
+			lineOpacityForTimestamp(entry.time)
+		});
 		previousLineTime = entry.time;
 	}
 	pendingLines.clear();
 
-	const bool showBold           = m_showBold;
-	const bool showItalic         = m_showItalic;
-	const bool showUnderline      = m_showUnderline;
+	const bool showBold = m_showBold;
+	const bool showItalic = m_showItalic;
+	const bool showUnderline = m_showUnderline;
 	const bool alternativeInverse = m_alternativeInverse;
-	const int  lineSpacing        = m_lineSpacing;
-	const int  generation         = m_outputBackfillGeneration;
-	m_outputBackfillInFlight      = true;
+	const int lineSpacing = m_lineSpacing;
+	const int generation = m_outputBackfillGeneration;
+	m_outputBackfillInFlight = true;
 	QPointer<WorldView> viewGuard = this;
 	QThreadPool::globalInstance()->start(
-	    [viewGuard, generation, renderLines = std::move(renderLines), showBold, showItalic, showUnderline,
-	     alternativeInverse, lineSpacing]() mutable
-	    {
-		    QVector<WorldView::PendingHtml> renderedHtml;
-		    renderedHtml.reserve(renderLines.size());
-		    for (const DeferredBackfillRenderLine &line : renderLines)
-		    {
-			    renderedHtml.push_back(WorldView::PendingHtml{
-			        buildOutputHtml(line.text, line.spans, showBold, showItalic, showUnderline,
-			                        alternativeInverse, lineSpacing, line.opacity),
-			        line.newLine});
-		    }
-		    QMetaObject::invokeMethod(
-		        qApp,
-		        [viewGuard, generation, renderedHtml = std::move(renderedHtml)]() mutable
-		        {
-			        if (!viewGuard)
-				        return;
-			        if (generation != viewGuard->m_outputBackfillGeneration)
-				        return;
+		[viewGuard, generation, renderLines = std::move(renderLines), showBold, showItalic, showUnderline,
+			alternativeInverse, lineSpacing]() mutable
+		{
+			QVector<WorldView::PendingHtml> renderedHtml;
+			renderedHtml.reserve(renderLines.size());
+			for (const DeferredBackfillRenderLine& line : renderLines)
+			{
+				renderedHtml.push_back(WorldView::PendingHtml{
+					buildOutputHtml(line.text, line.spans, showBold, showItalic, showUnderline,
+					                alternativeInverse, lineSpacing, line.opacity),
+					line.newLine
+				});
+			}
+			QMetaObject::invokeMethod(
+				qApp,
+				[viewGuard, generation, renderedHtml = std::move(renderedHtml)]() mutable
+				{
+					if (!viewGuard)
+						return;
+					if (generation != viewGuard->m_outputBackfillGeneration)
+						return;
 
-			        viewGuard->m_outputBackfillInFlight = false;
-			        if (!viewGuard->m_outputDocument)
-			        {
-				        viewGuard->stopDeferredOutputBackfill(false, true);
-				        return;
-			        }
+					viewGuard->m_outputBackfillInFlight = false;
+					if (!viewGuard->m_outputDocument)
+					{
+						viewGuard->stopDeferredOutputBackfill(false, true);
+						return;
+					}
 
-			        const bool previousBulkState   = viewGuard->m_bulkOutputRebuild;
-			        viewGuard->m_bulkOutputRebuild = true;
+					const bool previousBulkState = viewGuard->m_bulkOutputRebuild;
+					viewGuard->m_bulkOutputRebuild = true;
 
-			        auto captureViewState = [](WrapTextBrowser *view)
-			        {
-				        struct
-				        {
-						        bool updatesEnabled{true};
-				        } state;
-				        if (!view)
-					        return state;
-				        state.updatesEnabled = view->updatesEnabled();
-				        view->setUpdatesEnabled(false);
-				        return state;
-			        };
-			        const auto           outputViewState = captureViewState(viewGuard->m_output);
-			        const auto           liveViewState   = captureViewState(viewGuard->m_liveOutput);
+					auto captureViewState = [](WrapTextBrowser* view)
+					{
+						struct
+						{
+							bool updatesEnabled{true};
+						} state;
+						if (!view)
+							return state;
+						state.updatesEnabled = view->updatesEnabled();
+						view->setUpdatesEnabled(false);
+						return state;
+					};
+					const auto outputViewState = captureViewState(viewGuard->m_output);
+					const auto liveViewState = captureViewState(viewGuard->m_liveOutput);
 
-			        QTextDocument *const oldDocument = viewGuard->m_outputDocument;
-			        auto                *newDocument = new QTextDocument(viewGuard);
-			        newDocument->setUndoRedoEnabled(false);
-			        newDocument->setDefaultFont(oldDocument->defaultFont());
-			        newDocument->setDefaultStyleSheet(oldDocument->defaultStyleSheet());
-			        newDocument->setMaximumBlockCount(oldDocument->maximumBlockCount());
+					QTextDocument* const oldDocument = viewGuard->m_outputDocument;
+					auto* newDocument = new QTextDocument(viewGuard);
+					newDocument->setUndoRedoEnabled(false);
+					newDocument->setDefaultFont(oldDocument->defaultFont());
+					newDocument->setDefaultStyleSheet(oldDocument->defaultStyleSheet());
+					newDocument->setMaximumBlockCount(oldDocument->maximumBlockCount());
 
-			        QTextCursor cursor(newDocument);
-			        cursor.movePosition(QTextCursor::Start);
-			        if (viewGuard->m_output)
-			        {
-				        QTextCharFormat defaultFormat = cursor.charFormat();
-				        defaultFormat.setForeground(viewGuard->m_output->palette().color(QPalette::Text));
-				        const QColor defaultBack = viewGuard->m_outputBackground.isValid()
-				                                       ? viewGuard->m_outputBackground
-				                                       : viewGuard->m_output->palette().color(QPalette::Base);
-				        defaultFormat.setBackground(defaultBack);
-				        cursor.setCharFormat(defaultFormat);
-			        }
+					QTextCursor cursor(newDocument);
+					cursor.movePosition(QTextCursor::Start);
+					if (viewGuard->m_output)
+					{
+						QTextCharFormat defaultFormat = cursor.charFormat();
+						defaultFormat.setForeground(viewGuard->m_output->palette().color(QPalette::Text));
+						const QColor defaultBack = viewGuard->m_outputBackground.isValid()
+							                           ? viewGuard->m_outputBackground
+							                           : viewGuard->m_output->palette().color(QPalette::Base);
+						defaultFormat.setBackground(defaultBack);
+						cursor.setCharFormat(defaultFormat);
+					}
 
-			        for (const WorldView::PendingHtml &entry : renderedHtml)
-			        {
-				        if (!entry.html.isEmpty())
-					        cursor.insertHtml(entry.html);
-				        if (entry.newLine)
-				        {
-					        const QTextBlockFormat blockFormat = cursor.blockFormat();
-					        const QTextCharFormat  charFormat  = cursor.charFormat();
-					        cursor.insertBlock(blockFormat, charFormat);
-				        }
-			        }
-			        const int   prefixCharacters = cursor.position();
+					for (const WorldView::PendingHtml& entry : renderedHtml)
+					{
+						if (!entry.html.isEmpty())
+							cursor.insertHtml(entry.html);
+						if (entry.newLine)
+						{
+							const QTextBlockFormat blockFormat = cursor.blockFormat();
+							const QTextCharFormat charFormat = cursor.charFormat();
+							cursor.insertBlock(blockFormat, charFormat);
+						}
+					}
+					const int prefixCharacters = cursor.position();
 
-			        QTextCursor oldCursor(oldDocument);
-			        oldCursor.select(QTextCursor::Document);
-			        const QTextDocumentFragment existingFragment(oldCursor.selection());
-			        cursor.insertFragment(existingFragment);
+					QTextCursor oldCursor(oldDocument);
+					oldCursor.select(QTextCursor::Document);
+					const QTextDocumentFragment existingFragment(oldCursor.selection());
+					cursor.insertFragment(existingFragment);
 
-			        if (viewGuard->m_hasPartialOutput && prefixCharacters > 0)
-				        viewGuard->m_partialOutputStart += prefixCharacters;
+					if (viewGuard->m_hasPartialOutput && prefixCharacters > 0)
+						viewGuard->m_partialOutputStart += prefixCharacters;
 
-			        QObject::disconnect(oldDocument, nullptr, viewGuard, nullptr);
-			        viewGuard->m_outputDocument = newDocument;
-			        if (viewGuard->m_output)
-				        viewGuard->m_output->setDocument(newDocument);
-			        if (viewGuard->m_liveOutput)
-				        viewGuard->m_liveOutput->setDocument(newDocument);
-			        QObject::connect(newDocument, &QTextDocument::contentsChanged, viewGuard,
-			                         [viewGuard]
-			                         {
-				                         if (viewGuard->m_scrollbackSplitActive && !viewGuard->m_frozen)
-					                         WorldView::scrollViewToEnd(viewGuard->m_liveOutput);
-			                         });
-			        oldDocument->deleteLater();
+					QObject::disconnect(oldDocument, nullptr, viewGuard, nullptr);
+					viewGuard->m_outputDocument = newDocument;
+					if (viewGuard->m_output)
+						viewGuard->m_output->setDocument(newDocument);
+					if (viewGuard->m_liveOutput)
+						viewGuard->m_liveOutput->setDocument(newDocument);
+					QObject::connect(newDocument, &QTextDocument::contentsChanged, viewGuard,
+					                 [viewGuard]
+					                 {
+						                 if (viewGuard->m_scrollbackSplitActive && !viewGuard->m_frozen)
+							                 WorldView::scrollViewToEnd(viewGuard->m_liveOutput);
+					                 });
+					oldDocument->deleteLater();
 
-			        viewGuard->m_bulkOutputRebuild = previousBulkState;
+					viewGuard->m_bulkOutputRebuild = previousBulkState;
 
-			        auto restoreViewState = [](WrapTextBrowser *view, const auto &state)
-			        {
-				        if (view)
-				        {
-					        QScrollBar *const bar        = view->verticalScrollBar();
-					        const int         newMaximum = bar ? bar->maximum() : 0;
-					        if (bar)
-						        bar->setValue(newMaximum);
-					        view->setUpdatesEnabled(state.updatesEnabled);
-					        if (QWidget *viewport = view->viewport())
-						        viewport->update();
-				        }
-			        };
-			        restoreViewState(viewGuard->m_output, outputViewState);
-			        restoreViewState(viewGuard->m_liveOutput, liveViewState);
-			        if (viewGuard->m_outputScrollBar)
-			        {
-				        QScrollBar *const outputBar  = viewGuard->m_output->verticalScrollBar();
-				        const int         newMaximum = outputBar ? outputBar->maximum() : 0;
-				        viewGuard->m_outputScrollBar->setValue(newMaximum);
-				        viewGuard->m_anchorEndOnNextRangeChange = true;
-			        }
+					auto restoreViewState = [](WrapTextBrowser* view, const auto& state)
+					{
+						if (view)
+						{
+							QScrollBar* const bar = view->verticalScrollBar();
+							const int newMaximum = bar ? bar->maximum() : 0;
+							if (bar)
+								bar->setValue(newMaximum);
+							view->setUpdatesEnabled(state.updatesEnabled);
+							if (QWidget* viewport = view->viewport())
+								viewport->update();
+						}
+					};
+					restoreViewState(viewGuard->m_output, outputViewState);
+					restoreViewState(viewGuard->m_liveOutput, liveViewState);
+					if (viewGuard->m_outputScrollBar)
+					{
+						QScrollBar* const outputBar = viewGuard->m_output->verticalScrollBar();
+						const int newMaximum = outputBar ? outputBar->maximum() : 0;
+						viewGuard->m_outputScrollBar->setValue(newMaximum);
+						viewGuard->m_anchorEndOnNextRangeChange = true;
+					}
 
-			        viewGuard->requestDrawOutputWindowNotification();
-			        viewGuard->stopDeferredOutputBackfill(true, false);
-		        },
-		        Qt::QueuedConnection);
-	    });
+					viewGuard->requestDrawOutputWindowNotification();
+					viewGuard->stopDeferredOutputBackfill(true, false);
+				},
+				Qt::QueuedConnection);
+		});
 }
 
 void WorldView::stopDeferredOutputBackfill(const bool runQueuedRebuild, const bool clearQueuedRebuild)
@@ -3407,12 +3428,12 @@ void WorldView::stopDeferredOutputBackfill(const bool runQueuedRebuild, const bo
 	m_outputBackfillPendingLines.clear();
 	m_outputBackfillNextIndex = -1;
 
-	bool                             shouldRunQueuedRebuild = false;
+	bool shouldRunQueuedRebuild = false;
 	QVector<WorldRuntime::LineEntry> queuedRebuildLines;
 	if (!clearQueuedRebuild && runQueuedRebuild && m_outputBackfillQueuedRebuild)
 	{
 		shouldRunQueuedRebuild = true;
-		queuedRebuildLines     = m_outputBackfillQueuedRebuildLines;
+		queuedRebuildLines = m_outputBackfillQueuedRebuildLines;
 	}
 
 	if (clearQueuedRebuild || shouldRunQueuedRebuild)
@@ -3428,8 +3449,8 @@ void WorldView::stopDeferredOutputBackfill(const bool runQueuedRebuild, const bo
 	}
 }
 
-void WorldView::buildDisplayLine(const WorldRuntime::LineEntry &entry, const QDateTime &previousLineTime,
-                                 QString &displayText, QVector<WorldRuntime::StyleSpan> &displaySpans) const
+void WorldView::buildDisplayLine(const WorldRuntime::LineEntry& entry, const QDateTime& previousLineTime,
+                                 QString& displayText, QVector<WorldRuntime::StyleSpan>& displaySpans) const
 {
 	if (displaySpans.isEmpty() && !displayText.isEmpty())
 	{
@@ -3441,15 +3462,16 @@ void WorldView::buildDisplayLine(const WorldRuntime::LineEntry &entry, const QDa
 			QColor back;
 			if (m_runtime)
 			{
-				const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
+				const QMap<QString, QString>& attrs = m_runtime->worldAttributes();
 				fore = parseColor(attrs.value(QStringLiteral("output_text_colour")));
 				back = parseColor(attrs.value(QStringLiteral("output_background_colour")));
 			}
 			if (!fore.isValid())
 				fore = m_output->palette().color(QPalette::Text);
 			if (!back.isValid())
-				back = m_outputBackground.isValid() ? m_outputBackground
-				                                    : m_output->palette().color(QPalette::Base);
+				back = m_outputBackground.isValid()
+					       ? m_outputBackground
+					       : m_output->palette().color(QPalette::Base);
 			span.fore = fore;
 			span.back = back;
 		}
@@ -3459,35 +3481,35 @@ void WorldView::buildDisplayLine(const WorldRuntime::LineEntry &entry, const QDa
 	if (!m_runtime)
 		return;
 
-	auto preambleKey           = QStringLiteral("timestamp_output");
+	auto preambleKey = QStringLiteral("timestamp_output");
 	auto preambleTextColourKey = QStringLiteral("timestamp_output_text_colour");
 	auto preambleBackColourKey = QStringLiteral("timestamp_output_back_colour");
 	if (entry.flags & WorldRuntime::LineNote)
 	{
-		preambleKey           = QStringLiteral("timestamp_notes");
+		preambleKey = QStringLiteral("timestamp_notes");
 		preambleTextColourKey = QStringLiteral("timestamp_notes_text_colour");
 		preambleBackColourKey = QStringLiteral("timestamp_notes_back_colour");
 	}
 	else if (entry.flags & WorldRuntime::LineInput)
 	{
-		preambleKey           = QStringLiteral("timestamp_input");
+		preambleKey = QStringLiteral("timestamp_input");
 		preambleTextColourKey = QStringLiteral("timestamp_input_text_colour");
 		preambleBackColourKey = QStringLiteral("timestamp_input_back_colour");
 	}
 
-	const QMap<QString, QString> &attrs    = m_runtime->worldAttributes();
-	QString                       preamble = attrs.value(preambleKey);
+	const QMap<QString, QString>& attrs = m_runtime->worldAttributes();
+	QString preamble = attrs.value(preambleKey);
 	if (preamble.isEmpty())
 		return;
 
-	const QDateTime lineTime   = entry.time.isValid() ? entry.time : QDateTime::currentDateTime();
+	const QDateTime lineTime = entry.time.isValid() ? entry.time : QDateTime::currentDateTime();
 	const QDateTime worldStart = m_runtime->worldStartTime();
-	const double    elapsed    = (worldStart.isValid() && lineTime.isValid())
-	                                 ? (static_cast<double>(worldStart.msecsTo(lineTime)) / 1000.0)
-	                                 : 0.0;
-	const double    delta      = (previousLineTime.isValid() && lineTime.isValid())
-	                                 ? (static_cast<double>(previousLineTime.msecsTo(lineTime)) / 1000.0)
-	                                 : 0.0;
+	const double elapsed = (worldStart.isValid() && lineTime.isValid())
+		                       ? (static_cast<double>(worldStart.msecsTo(lineTime)) / 1000.0)
+		                       : 0.0;
+	const double delta = (previousLineTime.isValid() && lineTime.isValid())
+		                     ? (static_cast<double>(previousLineTime.msecsTo(lineTime)) / 1000.0)
+		                     : 0.0;
 
 	preamble.replace(QStringLiteral("%e"), QStringLiteral("%1").arg(elapsed, 0, 'f', 6));
 	preamble.replace(QStringLiteral("%D"), QStringLiteral("%1").arg(delta, 10, 'f', 6));
@@ -3497,8 +3519,8 @@ void WorldView::buildDisplayLine(const WorldRuntime::LineEntry &entry, const QDa
 
 	WorldRuntime::StyleSpan prefixSpan;
 	prefixSpan.length = sizeToInt(preamble.size());
-	prefixSpan.fore   = parseColor(attrs.value(preambleTextColourKey));
-	prefixSpan.back   = parseColor(attrs.value(preambleBackColourKey));
+	prefixSpan.fore = parseColor(attrs.value(preambleTextColourKey));
+	prefixSpan.back = parseColor(attrs.value(preambleBackColourKey));
 	if (!prefixSpan.fore.isValid() && m_output)
 		prefixSpan.fore = m_output->palette().color(QPalette::Text);
 	if (!prefixSpan.back.isValid())
@@ -3514,7 +3536,7 @@ void WorldView::buildDisplayLine(const WorldRuntime::LineEntry &entry, const QDa
 	displaySpans.prepend(prefixSpan);
 }
 
-QColor WorldView::parseColor(const QString &value)
+QColor WorldView::parseColor(const QString& value)
 {
 	if (value.isEmpty())
 		return {};
@@ -3523,7 +3545,7 @@ QColor WorldView::parseColor(const QString &value)
 	if (color.isValid())
 		return color;
 
-	bool      ok      = false;
+	bool ok = false;
 	const int numeric = value.toInt(&ok);
 	if (ok)
 	{
@@ -3536,32 +3558,32 @@ QColor WorldView::parseColor(const QString &value)
 	return {};
 }
 
-const QSet<QString> &WorldView::runtimeSettingsAttributeKeys()
+const QSet<QString>& WorldView::runtimeSettingsAttributeKeys()
 {
 	return worldViewRuntimeSettingsAttributeKeys();
 }
 
-const QSet<QString> &WorldView::runtimeSettingsMultilineAttributeKeys()
+const QSet<QString>& WorldView::runtimeSettingsMultilineAttributeKeys()
 {
 	return worldViewRuntimeSettingsMultilineAttributeKeys();
 }
 
-bool WorldView::runtimeSettingValuesEquivalent(const QString &key, const QString &before,
-                                               const QString &after)
+bool WorldView::runtimeSettingValuesEquivalent(const QString& key, const QString& before,
+                                               const QString& after)
 {
 	if (before == after)
 		return true;
-	if (const auto &enabledBoolKeys = worldViewEnabledBooleanAttributeKeys(); enabledBoolKeys.contains(key))
+	if (const auto& enabledBoolKeys = worldViewEnabledBooleanAttributeKeys(); enabledBoolKeys.contains(key))
 		return isEnabledFlagValue(before) == isEnabledFlagValue(after);
-	if (const auto &disabledBoolKeys = worldViewDisabledBooleanAttributeKeys();
-	    disabledBoolKeys.contains(key))
+	if (const auto& disabledBoolKeys = worldViewDisabledBooleanAttributeKeys();
+		disabledBoolKeys.contains(key))
 		return isDisabledFlagValue(before) == isDisabledFlagValue(after);
-	if (const auto &numericKeys = worldViewNumericAttributeKeys(); numericKeys.contains(key))
+	if (const auto& numericKeys = worldViewNumericAttributeKeys(); numericKeys.contains(key))
 		return canonicalWorldViewNumericValue(key, before) == canonicalWorldViewNumericValue(key, after);
-	if (const auto &colorKeys = worldViewColorAttributeKeys(); colorKeys.contains(key))
+	if (const auto& colorKeys = worldViewColorAttributeKeys(); colorKeys.contains(key))
 	{
 		const QColor beforeColor = parseColor(before);
-		const QColor afterColor  = parseColor(after);
+		const QColor afterColor = parseColor(after);
 		if (!beforeColor.isValid() && !afterColor.isValid())
 			return true;
 		return beforeColor.isValid() && afterColor.isValid() && beforeColor.rgba() == afterColor.rgba();
@@ -3569,20 +3591,71 @@ bool WorldView::runtimeSettingValuesEquivalent(const QString &key, const QString
 	return before == after;
 }
 
-bool WorldView::runtimeMultilineSettingValuesEquivalent(const QString &key, const QString &before,
-                                                        const QString &after)
+bool WorldView::runtimeMultilineSettingValuesEquivalent(const QString& key, const QString& before,
+                                                        const QString& after)
 {
 	if (!runtimeSettingsMultilineAttributeKeys().contains(key))
 		return before == after;
 	return before == after;
 }
 
-const QSet<QString> &WorldView::runtimeSettingsRebuildAttributeKeys()
+QSet<QString> WorldView::changedRuntimeSettingsAttributeKeys(const QMap<QString, QString>& before,
+                                                             const QMap<QString, QString>& after)
+{
+	QSet<QString> changedKeys;
+	for (const QString& key : runtimeSettingsAttributeKeys())
+	{
+		if (!runtimeSettingValuesEquivalent(key, before.value(key), after.value(key)))
+			changedKeys.insert(key);
+	}
+	return changedKeys;
+}
+
+QSet<QString> WorldView::changedRuntimeSettingsMultilineAttributeKeys(
+	const QMap<QString, QString>& beforeMultiline, const QMap<QString, QString>& afterMultiline,
+	const QMap<QString, QString>& beforeAttributes, const QMap<QString, QString>& afterAttributes)
+{
+	QSet<QString> changedKeys;
+	for (const QString& key : runtimeSettingsMultilineAttributeKeys())
+	{
+		QString beforeValue = beforeMultiline.value(key);
+		QString afterValue = afterMultiline.value(key);
+		if (key == QStringLiteral("tab_completion_defaults"))
+		{
+			if (beforeValue.isEmpty())
+				beforeValue = beforeAttributes.value(key);
+			if (afterValue.isEmpty())
+				afterValue = afterAttributes.value(key);
+		}
+		if (!runtimeMultilineSettingValuesEquivalent(key, beforeValue, afterValue))
+			changedKeys.insert(key);
+	}
+	return changedKeys;
+}
+
+bool WorldView::runtimeSettingsNeedFullRebuild(const QSet<QString>& changedAttributeKeys,
+                                               const QSet<QString>& changedMultilineKeys)
+{
+	const auto hasAnyChangedKeys = [](const QSet<QString>& changedKeys, const QSet<QString>& interestingKeys)
+	{
+		for (const QString& key : changedKeys)
+		{
+			if (interestingKeys.contains(key))
+				return true;
+		}
+		return false;
+	};
+
+	return hasAnyChangedKeys(changedAttributeKeys, runtimeSettingsRebuildAttributeKeys()) ||
+		hasAnyChangedKeys(changedMultilineKeys, runtimeSettingsRebuildMultilineAttributeKeys());
+}
+
+const QSet<QString>& WorldView::runtimeSettingsRebuildAttributeKeys()
 {
 	return worldViewRuntimeSettingsRebuildAttributeKeys();
 }
 
-const QSet<QString> &WorldView::runtimeSettingsRebuildMultilineAttributeKeys()
+const QSet<QString>& WorldView::runtimeSettingsRebuildMultilineAttributeKeys()
 {
 	return worldViewRuntimeSettingsRebuildMultilineAttributeKeys();
 }
@@ -3598,7 +3671,7 @@ QFont::Weight WorldView::mapFontWeight(int weight)
 	return QFont::Normal;
 }
 
-void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
+void WorldView::paintMiniWindows(QPainter* painter, bool underneath) const
 {
 	if (!painter)
 		return;
@@ -3619,7 +3692,7 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 	}
 
 	const QSize clientSize = m_outputStack ? m_outputStack->size() : size();
-	const QSize ownerSize  = size();
+	const QSize ownerSize = size();
 	if (underneath)
 	{
 		const QImage image = m_runtime->backgroundImage();
@@ -3664,16 +3737,16 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 	}
 	m_runtime->layoutMiniWindows(clientSize, ownerSize, underneath);
 
-	const auto windows         = m_runtime->sortedMiniWindows();
-	auto       makeTransparent = [](const QImage &source, const QColor &key) -> QImage
+	const auto windows = m_runtime->sortedMiniWindows();
+	auto makeTransparent = [](const QImage& source, const QColor& key) -> QImage
 	{
 		if (source.isNull())
 			return source;
-		QImage     image  = source.convertToFormat(QImage::Format_ARGB32);
+		QImage image = source.convertToFormat(QImage::Format_ARGB32);
 		const QRgb keyRgb = qRgb(key.red(), key.green(), key.blue());
 		for (int y = 0; y < image.height(); ++y)
 		{
-			auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+			auto* line = reinterpret_cast<QRgb*>(image.scanLine(y));
 			for (int x = 0; x < image.width(); ++x)
 			{
 				if ((line[x] & 0x00FFFFFF) == (keyRgb & 0x00FFFFFF))
@@ -3685,7 +3758,7 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 		return image;
 	};
 
-	for (MiniWindow *window : windows)
+	for (MiniWindow* window : windows)
 	{
 		if (!window || !window->show || window->temporarilyHide)
 			continue;
@@ -3701,7 +3774,7 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 		{
 			if ((window->flags & kMiniWindowAbsoluteLocation) == 0 && window->position == 13)
 			{
-				const int tileWidth  = image.width();
+				const int tileWidth = image.width();
 				const int tileHeight = image.height();
 				if (tileWidth > 0 && tileHeight > 0)
 				{
@@ -3715,7 +3788,7 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 			}
 
 			if ((window->flags & kMiniWindowAbsoluteLocation) == 0 && window->position >= 0 &&
-			    window->position <= 3)
+				window->position <= 3)
 			{
 				painter->drawImage(window->rect, image);
 			}
@@ -3737,14 +3810,14 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 	}
 }
 
-QPoint WorldView::mapEventToOutputStack(const QPoint &globalPos) const
+QPoint WorldView::mapEventToOutputStack(const QPoint& globalPos) const
 {
 	if (m_outputStack)
 		return m_outputStack->mapFromGlobal(globalPos);
 	return mapFromGlobal(globalPos);
 }
 
-QPoint WorldView::mapEventToOutputStack(const QPointF &localPos, const QWidget *source) const
+QPoint WorldView::mapEventToOutputStack(const QPointF& localPos, const QWidget* source) const
 {
 	if (m_outputStack && source)
 	{
@@ -3757,7 +3830,7 @@ QPoint WorldView::mapEventToOutputStack(const QPointF &localPos, const QWidget *
 	return localPos.toPoint();
 }
 
-MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspotId, QString &windowName,
+MiniWindow* WorldView::hitTestMiniWindow(const QPoint& localPos, QString& hotspotId, QString& windowName,
                                          bool includeUnderneath) const
 {
 	hotspotId.clear();
@@ -3766,7 +3839,7 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 		return nullptr;
 
 	const auto windows = m_runtime->sortedMiniWindows();
-	for (MiniWindow *window : windows | std::views::reverse)
+	for (MiniWindow* window : windows | std::views::reverse)
 	{
 		if (!window || !window->show || window->temporarilyHide)
 			continue;
@@ -3784,7 +3857,7 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 		{
 			if (hit.value().rect.contains(relative))
 			{
-				hotspotId  = hit.key();
+				hotspotId = hit.key();
 				windowName = window->name;
 				return window;
 			}
@@ -3796,7 +3869,7 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 	return nullptr;
 }
 
-void WorldView::callHotspotCallback(MiniWindow *window, const QString &hotspotId, const QString &callbackName,
+void WorldView::callHotspotCallback(MiniWindow* window, const QString& hotspotId, const QString& callbackName,
                                     int flags) const
 {
 	if (!window || callbackName.isEmpty() || hotspotId.isEmpty())
@@ -3804,7 +3877,7 @@ void WorldView::callHotspotCallback(MiniWindow *window, const QString &hotspotId
 	if (!m_runtime)
 		return;
 	window->executingScript = true;
-	bool ok                 = false;
+	bool ok = false;
 	if (window->callbackPlugin.isEmpty())
 		ok = m_runtime->callWorldHotspotFunction(callbackName, flags, hotspotId);
 	else
@@ -3813,15 +3886,15 @@ void WorldView::callHotspotCallback(MiniWindow *window, const QString &hotspotId
 	if (miniWindowMouseDebugEnabled())
 	{
 		miniWindowMouseDebug(
-		    QStringLiteral("callback window=%1 hotspot=%2 plugin=%3 fn=%4 flags=0x%5 ok=%6")
-		        .arg(window->name, hotspotId,
-		             window->callbackPlugin.isEmpty() ? QStringLiteral("<world>") : window->callbackPlugin,
-		             callbackName, QString::number(flags, 16),
-		             ok ? QStringLiteral("1") : QStringLiteral("0")));
+			QStringLiteral("callback window=%1 hotspot=%2 plugin=%3 fn=%4 flags=0x%5 ok=%6")
+			.arg(window->name, hotspotId,
+			     window->callbackPlugin.isEmpty() ? QStringLiteral("<world>") : window->callbackPlugin,
+			     callbackName, QString::number(flags, 16),
+			     ok ? QStringLiteral("1") : QStringLiteral("0")));
 	}
 }
 
-void WorldView::cancelMouseOver(MiniWindow *window, const QString &hotspotId)
+void WorldView::cancelMouseOver(MiniWindow* window, const QString& hotspotId)
 {
 	if (!window || hotspotId.isEmpty())
 		return;
@@ -3843,9 +3916,9 @@ void WorldView::clearHotspotCursor()
 	applyOutputCursor(nullptr);
 }
 
-void WorldView::applyOutputCursor(const QCursor *cursor)
+void WorldView::applyOutputCursor(const QCursor* cursor)
 {
-	auto apply = [cursor](QWidget *widget)
+	auto apply = [cursor](QWidget* widget)
 	{
 		if (!widget)
 			return;
@@ -3865,7 +3938,7 @@ void WorldView::applyOutputCursor(const QCursor *cursor)
 	apply(m_liveOutput ? m_liveOutput->viewport() : nullptr);
 }
 
-void WorldView::updateHotspotCursor(MiniWindow *window, const QString &hotspotId)
+void WorldView::updateHotspotCursor(MiniWindow* window, const QString& hotspotId)
 {
 	if (!window || hotspotId.isEmpty())
 	{
@@ -3888,7 +3961,7 @@ void WorldView::updateHotspotCursor(MiniWindow *window, const QString &hotspotId
 	applyOutputCursor(&cursor);
 }
 
-int WorldView::computeMiniWindowMouseFlags(const QMouseEvent *event, bool doubleClick, int baseFlags)
+int WorldView::computeMiniWindowMouseFlags(const QMouseEvent* event, bool doubleClick, int baseFlags)
 {
 	Q_UNUSED(event);
 	int flags = baseFlags;
@@ -3905,12 +3978,12 @@ bool WorldView::handleMiniWindowMouseLeave()
 		m_hoverWindowName.clear();
 		return false;
 	}
-	m_lastMousePos    = QPoint(-1, -1);
+	m_lastMousePos = QPoint(-1, -1);
 	m_hasLastMousePos = true;
 	m_runtime->notifyMiniWindowMouseMoved(-1, -1, QString());
 	if (m_hoverWindowName.isEmpty())
 		return false;
-	MiniWindow *window = m_runtime->miniWindow(m_hoverWindowName);
+	MiniWindow* window = m_runtime->miniWindow(m_hoverWindowName);
 	if (window && !window->mouseOverHotspot.isEmpty())
 		cancelMouseOver(window, window->mouseOverHotspot);
 	clearPendingHotspotTooltip();
@@ -3918,15 +3991,15 @@ bool WorldView::handleMiniWindowMouseLeave()
 	return true;
 }
 
-bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidget *source)
+bool WorldView::handleMiniWindowMouseMove(const QMouseEvent* event, const QWidget* source)
 {
 	if (!m_runtime || !m_outputStack)
 		return false;
 
-	const QPoint globalPos  = event->globalPosition().toPoint();
-	const QPoint local      = mapEventToOutputStack(event->position(), source);
-	QPoint       hitLocal   = local;
-	const QRect  outputRect = m_outputStack->rect();
+	const QPoint globalPos = event->globalPosition().toPoint();
+	const QPoint local = mapEventToOutputStack(event->position(), source);
+	QPoint hitLocal = local;
+	const QRect outputRect = m_outputStack->rect();
 	if (!outputRect.contains(hitLocal))
 	{
 		if (!m_capturedWindowName.isEmpty())
@@ -3940,31 +4013,31 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 			return false;
 		}
 	}
-	m_lastMousePos             = hitLocal;
-	m_hasLastMousePos          = true;
+	m_lastMousePos = hitLocal;
+	m_hasLastMousePos = true;
 	const QPoint callbackLocal = hitLocal;
 
-	QString      hotspotId;
-	QString      windowName;
-	MiniWindow  *window = hitTestMiniWindow(hitLocal, hotspotId, windowName);
+	QString hotspotId;
+	QString windowName;
+	MiniWindow* window = hitTestMiniWindow(hitLocal, hotspotId, windowName);
 	if (miniWindowMouseDebugEnabled())
 	{
 		miniWindowMouseDebug(
-		    QStringLiteral("move local=(%1,%2) hit=(%3,%4) window=%5 hotspot=%6 captured=%7")
-		        .arg(local.x())
-		        .arg(local.y())
-		        .arg(hitLocal.x())
-		        .arg(hitLocal.y())
-		        .arg(windowName.isEmpty() ? QStringLiteral("<none>") : windowName)
-		        .arg(hotspotId.isEmpty() ? QStringLiteral("<none>") : hotspotId)
-		        .arg(m_capturedWindowName.isEmpty() ? QStringLiteral("<none>") : m_capturedWindowName));
+			QStringLiteral("move local=(%1,%2) hit=(%3,%4) window=%5 hotspot=%6 captured=%7")
+			.arg(local.x())
+			.arg(local.y())
+			.arg(hitLocal.x())
+			.arg(hitLocal.y())
+			.arg(windowName.isEmpty() ? QStringLiteral("<none>") : windowName)
+			.arg(hotspotId.isEmpty() ? QStringLiteral("<none>") : hotspotId)
+			.arg(m_capturedWindowName.isEmpty() ? QStringLiteral("<none>") : m_capturedWindowName));
 	}
 	if (m_runtime)
 		m_runtime->notifyMiniWindowMouseMoved(callbackLocal.x(), callbackLocal.y(), windowName);
 
 	if (!m_capturedWindowName.isEmpty())
 	{
-		MiniWindow *captured = m_runtime->miniWindow(m_capturedWindowName);
+		MiniWindow* captured = m_runtime->miniWindow(m_capturedWindowName);
 		if (captured)
 			captured->clientMousePosition = callbackLocal;
 		if (!m_tooltipHotspot.isEmpty())
@@ -3976,7 +4049,7 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 		if (captured && !captured->mouseDownHotspot.isEmpty())
 		{
 			const QString down = captured->mouseDownHotspot;
-			auto          it   = captured->hotspots.find(down);
+			auto it = captured->hotspots.find(down);
 			if (it != captured->hotspots.end())
 			{
 				const QString moveCallback = it->moveCallback;
@@ -3992,10 +4065,10 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 	{
 		if (!previousHoverWindow.isEmpty())
 		{
-			if (MiniWindow *oldWindow = m_runtime->miniWindow(previousHoverWindow); oldWindow)
+			if (MiniWindow* oldWindow = m_runtime->miniWindow(previousHoverWindow); oldWindow)
 			{
 				oldWindow->lastMousePosition =
-				    miniWindowDisplayToContent(oldWindow, hitLocal - oldWindow->rect.topLeft());
+					miniWindowDisplayToContent(oldWindow, hitLocal - oldWindow->rect.topLeft());
 				oldWindow->lastMouseUpdate++;
 				if (!oldWindow->mouseOverHotspot.isEmpty())
 					cancelMouseOver(oldWindow, oldWindow->mouseOverHotspot);
@@ -4045,7 +4118,7 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 	}
 	else if (hotspotIt != window->hotspots.end())
 	{
-		const int     hotspotFlags      = hotspotIt->flags;
+		const int hotspotFlags = hotspotIt->flags;
 		const QString mouseOverCallback = hotspotIt->mouseOver;
 		if ((hotspotFlags & 0x01) && !mouseOverCallback.isEmpty())
 			callHotspotCallback(window, hotspotId, mouseOverCallback,
@@ -4060,34 +4133,34 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 	return true;
 }
 
-bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool doubleClick, const QWidget *source)
+bool WorldView::handleMiniWindowMousePress(const QMouseEvent* event, bool doubleClick, const QWidget* source)
 {
 	if (!m_runtime || !m_outputStack)
 		return false;
 
 	const QPoint globalPos = event->globalPosition().toPoint();
-	const QPoint local     = mapEventToOutputStack(event->position(), source);
-	m_lastMousePos         = local;
-	m_hasLastMousePos      = true;
+	const QPoint local = mapEventToOutputStack(event->position(), source);
+	m_lastMousePos = local;
+	m_hasLastMousePos = true;
 	if (!m_outputStack->rect().contains(local))
 		return false;
 
-	QString     hotspotId;
-	QString     windowName;
-	MiniWindow *window = hitTestMiniWindow(local, hotspotId, windowName, true);
+	QString hotspotId;
+	QString windowName;
+	MiniWindow* window = hitTestMiniWindow(local, hotspotId, windowName, true);
 	if (miniWindowMouseDebugEnabled())
 	{
 		miniWindowMouseDebug(QStringLiteral("press button=%1 dbl=%2 local=(%3,%4) window=%5 hotspot=%6")
-		                         .arg(static_cast<int>(event->button()))
-		                         .arg(doubleClick ? 1 : 0)
-		                         .arg(local.x())
-		                         .arg(local.y())
-		                         .arg(windowName.isEmpty() ? QStringLiteral("<none>") : windowName)
-		                         .arg(hotspotId.isEmpty() ? QStringLiteral("<none>") : hotspotId));
+		                     .arg(static_cast<int>(event->button()))
+		                     .arg(doubleClick ? 1 : 0)
+		                     .arg(local.x())
+		                     .arg(local.y())
+		                     .arg(windowName.isEmpty() ? QStringLiteral("<none>") : windowName)
+		                     .arg(hotspotId.isEmpty() ? QStringLiteral("<none>") : hotspotId));
 	}
 	if (!m_hoverWindowName.isEmpty())
 	{
-		MiniWindow *hoverWindow = m_runtime->miniWindow(m_hoverWindowName);
+		MiniWindow* hoverWindow = m_runtime->miniWindow(m_hoverWindowName);
 		if (hoverWindow && !hoverWindow->mouseOverHotspot.isEmpty())
 			cancelMouseOver(hoverWindow, hoverWindow->mouseOverHotspot);
 		m_hoverWindowName.clear();
@@ -4095,9 +4168,9 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 	if (!window)
 		return false;
 
-	m_hoverWindowName           = windowName;
+	m_hoverWindowName = windowName;
 	window->clientMousePosition = local;
-	window->lastMousePosition   = miniWindowDisplayToContent(window, local - window->rect.topLeft());
+	window->lastMousePosition = miniWindowDisplayToContent(window, local - window->rect.topLeft());
 	window->lastMouseUpdate++;
 	if (!window->mouseOverHotspot.isEmpty())
 		cancelMouseOver(window, window->mouseOverHotspot);
@@ -4138,10 +4211,10 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 		break;
 	}
 
-	const int flags          = computeMiniWindowMouseFlags(event, doubleClick, base);
+	const int flags = computeMiniWindowMouseFlags(event, doubleClick, base);
 	window->mouseDownHotspot = hotspotId;
 	window->flagsOnMouseDown =
-	    flags & (kMiniMouseLeft | kMiniMouseRight | kMiniMouseDouble | kMiniMouseMiddle);
+		flags & (kMiniMouseLeft | kMiniMouseRight | kMiniMouseDouble | kMiniMouseMiddle);
 	m_capturedWindowName = window->name;
 	if (!m_mouseCaptured)
 	{
@@ -4168,43 +4241,43 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 	return true;
 }
 
-bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWidget *source)
+bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent* event, const QWidget* source)
 {
 	if (!m_runtime || !m_mouseCaptured)
 		return false;
 
-	const QPoint local        = mapEventToOutputStack(event->position(), source);
-	QPoint       boundedLocal = local;
-	const QRect  outputRect   = m_outputStack->rect();
+	const QPoint local = mapEventToOutputStack(event->position(), source);
+	QPoint boundedLocal = local;
+	const QRect outputRect = m_outputStack->rect();
 	if (!outputRect.contains(boundedLocal))
 	{
 		boundedLocal.setX(qBound(outputRect.left(), boundedLocal.x(), outputRect.right()));
 		boundedLocal.setY(qBound(outputRect.top(), boundedLocal.y(), outputRect.bottom()));
 	}
-	m_lastMousePos    = boundedLocal;
+	m_lastMousePos = boundedLocal;
 	m_hasLastMousePos = true;
-	QString     hotspotId;
-	QString     windowName;
-	MiniWindow *windowUnderCursor = hitTestMiniWindow(local, hotspotId, windowName, true);
+	QString hotspotId;
+	QString windowName;
+	MiniWindow* windowUnderCursor = hitTestMiniWindow(local, hotspotId, windowName, true);
 	if (miniWindowMouseDebugEnabled())
 	{
 		miniWindowMouseDebug(
-		    QStringLiteral("release button=%1 local=(%2,%3) window=%4 hotspot=%5 captured=%6")
-		        .arg(static_cast<int>(event->button()))
-		        .arg(local.x())
-		        .arg(local.y())
-		        .arg(windowName.isEmpty() ? QStringLiteral("<none>") : windowName)
-		        .arg(hotspotId.isEmpty() ? QStringLiteral("<none>") : hotspotId)
-		        .arg(m_capturedWindowName.isEmpty() ? QStringLiteral("<none>") : m_capturedWindowName));
+			QStringLiteral("release button=%1 local=(%2,%3) window=%4 hotspot=%5 captured=%6")
+			.arg(static_cast<int>(event->button()))
+			.arg(local.x())
+			.arg(local.y())
+			.arg(windowName.isEmpty() ? QStringLiteral("<none>") : windowName)
+			.arg(hotspotId.isEmpty() ? QStringLiteral("<none>") : hotspotId)
+			.arg(m_capturedWindowName.isEmpty() ? QStringLiteral("<none>") : m_capturedWindowName));
 	}
 
-	MiniWindow *pressedWindow =
-	    !m_capturedWindowName.isEmpty() ? m_runtime->miniWindow(m_capturedWindowName) : nullptr;
+	MiniWindow* pressedWindow =
+		!m_capturedWindowName.isEmpty() ? m_runtime->miniWindow(m_capturedWindowName) : nullptr;
 	QString previousDownHotspot;
 	if (pressedWindow)
 	{
 		pressedWindow->clientMousePosition = boundedLocal;
-		previousDownHotspot                = pressedWindow->mouseDownHotspot;
+		previousDownHotspot = pressedWindow->mouseDownHotspot;
 		pressedWindow->mouseDownHotspot.clear();
 	}
 
@@ -4218,7 +4291,7 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 	if (pressedWindow && !previousDownHotspot.isEmpty())
 	{
 		const int flags = withMiniWindowModifierFlags(pressedWindow->flagsOnMouseDown);
-		auto      it    = pressedWindow->hotspots.find(previousDownHotspot);
+		auto it = pressedWindow->hotspots.find(previousDownHotspot);
 		if (it != pressedWindow->hotspots.end())
 		{
 			const QString releaseCallback = it->releaseCallback;
@@ -4247,7 +4320,7 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 	if (windowUnderCursor)
 	{
 		windowUnderCursor->lastMousePosition =
-		    miniWindowDisplayToContent(windowUnderCursor, boundedLocal - windowUnderCursor->rect.topLeft());
+			miniWindowDisplayToContent(windowUnderCursor, boundedLocal - windowUnderCursor->rect.topLeft());
 		windowUnderCursor->lastMouseUpdate++;
 	}
 	if (windowUnderCursor)
@@ -4256,7 +4329,7 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 	return true;
 }
 
-bool WorldView::handleMiniWindowWheel(const QWheelEvent *event, const QWidget *source) const
+bool WorldView::handleMiniWindowWheel(const QWheelEvent* event, const QWidget* source) const
 {
 	if (!m_runtime || !m_outputStack)
 		return false;
@@ -4265,9 +4338,9 @@ bool WorldView::handleMiniWindowWheel(const QWheelEvent *event, const QWidget *s
 	if (!m_outputStack->rect().contains(local))
 		return false;
 
-	QString     hotspotId;
-	QString     windowName;
-	MiniWindow *window = hitTestMiniWindow(local, hotspotId, windowName, true);
+	QString hotspotId;
+	QString windowName;
+	MiniWindow* window = hitTestMiniWindow(local, hotspotId, windowName, true);
 	if (!window || hotspotId.isEmpty())
 		return false;
 
@@ -4275,7 +4348,7 @@ bool WorldView::handleMiniWindowWheel(const QWheelEvent *event, const QWidget *s
 	if (it == window->hotspots.end() || it->scrollwheelCallback.isEmpty())
 		return false;
 
-	int       flags = 0;
+	int flags = 0;
 	const int delta = event->angleDelta().y();
 	if (delta < 0)
 		flags |= kMiniMouseScrollBack;
@@ -4286,12 +4359,117 @@ bool WorldView::handleMiniWindowWheel(const QWheelEvent *event, const QWidget *s
 
 void WorldView::applyRuntimeSettings()
 {
-	applyRuntimeSettingsImpl(true);
+	applyRuntimeSettingsWithPolicy(true);
 }
 
 void WorldView::applyRuntimeSettingsWithoutOutputRebuild()
 {
-	applyRuntimeSettingsImpl(false);
+	applyRuntimeSettingsWithPolicy(false);
+}
+
+void WorldView::resetRuntimeSettingsSnapshot()
+{
+	m_hasRuntimeSettingsSnapshot = false;
+	m_lastRuntimeSettingsAttributes.clear();
+	m_lastRuntimeSettingsMultilineAttributes.clear();
+	m_lastRuntimeDefaultFontSnapshot = RuntimeDefaultFontSnapshot{};
+}
+
+void WorldView::applyRuntimeSettingsWithPolicy(const bool allowRebuild)
+{
+	if (!m_runtime)
+		return;
+
+	const QMap<QString, QString>& attrs = m_runtime->worldAttributes();
+	const QMap<QString, QString>& multilineAttrs = m_runtime->worldMultilineAttributes();
+
+	RuntimeDefaultFontSnapshot currentDefaultFontSnapshot;
+	if (const AppController* app = AppController::instance())
+	{
+		currentDefaultFontSnapshot.inputFontName =
+			app->getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
+		currentDefaultFontSnapshot.inputFontHeight =
+			app->getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
+		currentDefaultFontSnapshot.inputFontWeight =
+			app->getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
+		currentDefaultFontSnapshot.inputFontItalic =
+			app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
+		currentDefaultFontSnapshot.inputFontCharset =
+			app->getGlobalOption(QStringLiteral("DefaultInputFontCharset")).toInt();
+		currentDefaultFontSnapshot.outputFontName =
+			app->getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
+		currentDefaultFontSnapshot.outputFontHeight =
+			app->getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
+		currentDefaultFontSnapshot.outputFontCharset =
+			app->getGlobalOption(QStringLiteral("DefaultOutputFontCharset")).toInt();
+	}
+
+	QSet<QString> changedViewAttributeKeys;
+	QSet<QString> changedViewMultilineKeys;
+	if (m_hasRuntimeSettingsSnapshot)
+	{
+		changedViewAttributeKeys =
+			changedRuntimeSettingsAttributeKeys(m_lastRuntimeSettingsAttributes, attrs);
+		changedViewMultilineKeys = changedRuntimeSettingsMultilineAttributeKeys(
+			m_lastRuntimeSettingsMultilineAttributes, multilineAttrs, m_lastRuntimeSettingsAttributes, attrs);
+	}
+	else
+	{
+		changedViewAttributeKeys = runtimeSettingsAttributeKeys();
+		changedViewMultilineKeys = runtimeSettingsMultilineAttributeKeys();
+	}
+
+	if (m_hasRuntimeSettingsSnapshot)
+	{
+		const bool useDefaultInputFont =
+			isEnabledFlagValue(attrs.value(QStringLiteral("use_default_input_font")));
+		const bool useDefaultOutputFont =
+			isEnabledFlagValue(attrs.value(QStringLiteral("use_default_output_font")));
+
+		const bool defaultInputFontChanged =
+			currentDefaultFontSnapshot.inputFontName != m_lastRuntimeDefaultFontSnapshot.inputFontName ||
+			currentDefaultFontSnapshot.inputFontHeight != m_lastRuntimeDefaultFontSnapshot.inputFontHeight ||
+			currentDefaultFontSnapshot.inputFontWeight != m_lastRuntimeDefaultFontSnapshot.inputFontWeight ||
+			currentDefaultFontSnapshot.inputFontItalic != m_lastRuntimeDefaultFontSnapshot.inputFontItalic ||
+			currentDefaultFontSnapshot.inputFontCharset != m_lastRuntimeDefaultFontSnapshot.inputFontCharset;
+		const bool defaultOutputFontChanged =
+			currentDefaultFontSnapshot.outputFontName != m_lastRuntimeDefaultFontSnapshot.outputFontName ||
+			currentDefaultFontSnapshot.outputFontHeight !=
+			m_lastRuntimeDefaultFontSnapshot.outputFontHeight ||
+			currentDefaultFontSnapshot.outputFontCharset !=
+			m_lastRuntimeDefaultFontSnapshot.outputFontCharset;
+
+		if (useDefaultInputFont && defaultInputFontChanged)
+		{
+			changedViewAttributeKeys.insert(QStringLiteral("input_font_name"));
+			changedViewAttributeKeys.insert(QStringLiteral("input_font_height"));
+			changedViewAttributeKeys.insert(QStringLiteral("input_font_weight"));
+			changedViewAttributeKeys.insert(QStringLiteral("input_font_italic"));
+			changedViewAttributeKeys.insert(QStringLiteral("input_font_charset"));
+		}
+		if (useDefaultOutputFont && defaultOutputFontChanged)
+		{
+			changedViewAttributeKeys.insert(QStringLiteral("output_font_name"));
+			changedViewAttributeKeys.insert(QStringLiteral("output_font_height"));
+			changedViewAttributeKeys.insert(QStringLiteral("output_font_charset"));
+		}
+	}
+
+	const bool needsFullRebuild =
+		allowRebuild && runtimeSettingsNeedFullRebuild(changedViewAttributeKeys, changedViewMultilineKeys);
+
+	applyRuntimeSettingsImpl(needsFullRebuild);
+
+	m_lastRuntimeSettingsAttributes.clear();
+	for (const QString& key : runtimeSettingsAttributeKeys())
+		m_lastRuntimeSettingsAttributes.insert(key, attrs.value(key));
+
+	m_lastRuntimeSettingsMultilineAttributes.clear();
+	for (const QString& key : runtimeSettingsMultilineAttributeKeys())
+		m_lastRuntimeSettingsMultilineAttributes.insert(key, multilineAttrs.value(key));
+
+	m_lastRuntimeDefaultFontSnapshot = currentDefaultFontSnapshot;
+	m_hasRuntimeSettingsSnapshot = true;
 }
 
 void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
@@ -4299,46 +4477,46 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	if (!m_runtime)
 		return;
 
-	const QMap<QString, QString> &attrs          = m_runtime->worldAttributes();
-	const QMap<QString, QString> &multilineAttrs = m_runtime->worldMultilineAttributes();
-	const QString                 outputFontName = attrs.value(QStringLiteral("output_font_name"));
-	const QString                 inputFontName  = attrs.value(QStringLiteral("input_font_name"));
-	const int                     outputHeight   = attrs.value(QStringLiteral("output_font_height")).toInt();
-	const int                     inputHeight    = attrs.value(QStringLiteral("input_font_height")).toInt();
-	const int                     outputWeight   = attrs.value(QStringLiteral("output_font_weight")).toInt();
-	const int                     inputWeight    = attrs.value(QStringLiteral("input_font_weight")).toInt();
-	const int                     inputItalic    = attrs.value(QStringLiteral("input_font_italic")).toInt();
-	const int                     outputCharset  = attrs.value(QStringLiteral("output_font_charset")).toInt();
-	const int                     inputCharset   = attrs.value(QStringLiteral("input_font_charset")).toInt();
-	const QString useDefaultOutputFontValue      = attrs.value(QStringLiteral("use_default_output_font"));
-	const bool    useDefaultOutputFont =
-	    (useDefaultOutputFontValue.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-	     useDefaultOutputFontValue == QStringLiteral("1") ||
-	     useDefaultOutputFontValue.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
+	const QMap<QString, QString>& attrs = m_runtime->worldAttributes();
+	const QMap<QString, QString>& multilineAttrs = m_runtime->worldMultilineAttributes();
+	const QString outputFontName = attrs.value(QStringLiteral("output_font_name"));
+	const QString inputFontName = attrs.value(QStringLiteral("input_font_name"));
+	const int outputHeight = attrs.value(QStringLiteral("output_font_height")).toInt();
+	const int inputHeight = attrs.value(QStringLiteral("input_font_height")).toInt();
+	const int outputWeight = attrs.value(QStringLiteral("output_font_weight")).toInt();
+	const int inputWeight = attrs.value(QStringLiteral("input_font_weight")).toInt();
+	const int inputItalic = attrs.value(QStringLiteral("input_font_italic")).toInt();
+	const int outputCharset = attrs.value(QStringLiteral("output_font_charset")).toInt();
+	const int inputCharset = attrs.value(QStringLiteral("input_font_charset")).toInt();
+	const QString useDefaultOutputFontValue = attrs.value(QStringLiteral("use_default_output_font"));
+	const bool useDefaultOutputFont =
+	(useDefaultOutputFontValue.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		useDefaultOutputFontValue == QStringLiteral("1") ||
+		useDefaultOutputFontValue.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
 	const QString useDefaultInputFontValue = attrs.value(QStringLiteral("use_default_input_font"));
-	const bool    useDefaultInputFont =
-	    (useDefaultInputFontValue.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-	     useDefaultInputFontValue == QStringLiteral("1") ||
-	     useDefaultInputFontValue.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
-	const AppController *app = AppController::instance();
+	const bool useDefaultInputFont =
+	(useDefaultInputFontValue.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		useDefaultInputFontValue == QStringLiteral("1") ||
+		useDefaultInputFontValue.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
+	const AppController* app = AppController::instance();
 
-	auto                 effectiveDefaultOutputFont = [&]
+	auto effectiveDefaultOutputFont = [&]
 	{
 		QString outputDefaultFamily;
-		int     outputDefaultHeight  = 9;
-		int     outputDefaultCharset = 1;
+		int outputDefaultHeight = 9;
+		int outputDefaultCharset = 1;
 		if (app)
 		{
 			outputDefaultFamily =
-			    app->getGlobalOption(QStringLiteral("DefaultOutputFont")).toString().trimmed();
-			outputDefaultHeight  = app->getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
+				app->getGlobalOption(QStringLiteral("DefaultOutputFont")).toString().trimmed();
+			outputDefaultHeight = app->getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
 			outputDefaultCharset = app->getGlobalOption(QStringLiteral("DefaultOutputFontCharset")).toInt();
 		}
 
-		QFont         font            = qmudPreferredMonospaceFont(outputDefaultFamily, outputDefaultHeight);
+		QFont font = qmudPreferredMonospaceFont(outputDefaultFamily, outputDefaultHeight);
 		const QString preferredFamily = outputDefaultFamily.isEmpty() ? font.family() : outputDefaultFamily;
 		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, outputDefaultCharset);
-		    !charsetFamily.isEmpty())
+			!charsetFamily.isEmpty())
 		{
 			qmudApplyMonospaceFallback(font, charsetFamily);
 		}
@@ -4350,24 +4528,24 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	auto effectiveDefaultInputFont = [&]
 	{
 		QString inputDefaultFamily;
-		int     inputDefaultHeight  = 9;
-		int     inputDefaultWeight  = 400;
-		int     inputDefaultItalic  = 0;
-		int     inputDefaultCharset = 1;
+		int inputDefaultHeight = 9;
+		int inputDefaultWeight = 400;
+		int inputDefaultItalic = 0;
+		int inputDefaultCharset = 1;
 		if (app)
 		{
 			inputDefaultFamily =
-			    app->getGlobalOption(QStringLiteral("DefaultInputFont")).toString().trimmed();
-			inputDefaultHeight  = app->getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
-			inputDefaultWeight  = app->getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
-			inputDefaultItalic  = app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
+				app->getGlobalOption(QStringLiteral("DefaultInputFont")).toString().trimmed();
+			inputDefaultHeight = app->getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
+			inputDefaultWeight = app->getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
+			inputDefaultItalic = app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
 			inputDefaultCharset = app->getGlobalOption(QStringLiteral("DefaultInputFontCharset")).toInt();
 		}
 
-		QFont         font            = qmudPreferredMonospaceFont(inputDefaultFamily, inputDefaultHeight);
+		QFont font = qmudPreferredMonospaceFont(inputDefaultFamily, inputDefaultHeight);
 		const QString preferredFamily = inputDefaultFamily.isEmpty() ? font.family() : inputDefaultFamily;
 		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, inputDefaultCharset);
-		    !charsetFamily.isEmpty())
+			!charsetFamily.isEmpty())
 		{
 			qmudApplyMonospaceFallback(font, charsetFamily);
 		}
@@ -4392,7 +4570,7 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 		if (!outputFontName.isEmpty())
 			qmudApplyMonospaceFallback(font, outputFontName);
 		const QString preferredFamily = outputFontName.isEmpty() ? font.family() : outputFontName;
-		const QString charsetFamily   = qmudFamilyForCharset(preferredFamily, outputCharset);
+		const QString charsetFamily = qmudFamilyForCharset(preferredFamily, outputCharset);
 		if (!charsetFamily.isEmpty())
 			qmudApplyMonospaceFallback(font, charsetFamily);
 		if (outputHeight > 0)
@@ -4417,7 +4595,7 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 		if (!inputFontName.isEmpty())
 			qmudApplyMonospaceFallback(font, inputFontName);
 		const QString preferredFamily = inputFontName.isEmpty() ? font.family() : inputFontName;
-		const QString charsetFamily   = qmudFamilyForCharset(preferredFamily, inputCharset);
+		const QString charsetFamily = qmudFamilyForCharset(preferredFamily, inputCharset);
 		if (!charsetFamily.isEmpty())
 			qmudApplyMonospaceFallback(font, charsetFamily);
 		if (inputHeight > 0)
@@ -4445,13 +4623,13 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 
 	if (m_input)
 	{
-		QPalette       palette      = m_input->palette();
-		const QColor   inputBack    = parseColor(attrs.value(QStringLiteral("input_background_colour")));
-		const QColor   inputText    = parseColor(attrs.value(QStringLiteral("input_text_colour")));
+		QPalette palette = m_input->palette();
+		const QColor inputBack = parseColor(attrs.value(QStringLiteral("input_background_colour")));
+		const QColor inputText = parseColor(attrs.value(QStringLiteral("input_text_colour")));
 		constexpr QRgb fallbackBack = qRgb(0, 0, 0);
 		constexpr QRgb fallbackText = qRgb(192, 192, 192);
-		const QColor   resolvedBack = inputBack.isValid() ? inputBack : QColor::fromRgb(fallbackBack);
-		QColor         resolvedText = inputText.isValid() ? inputText : QColor::fromRgb(fallbackText);
+		const QColor resolvedBack = inputBack.isValid() ? inputBack : QColor::fromRgb(fallbackBack);
+		QColor resolvedText = inputText.isValid() ? inputText : QColor::fromRgb(fallbackText);
 		if (resolvedText == resolvedBack)
 			resolvedText = QColor::fromRgb(fallbackText);
 		palette.setColor(QPalette::Base, resolvedBack);
@@ -4463,19 +4641,19 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 
 	if (m_output)
 	{
-		QPalette       palette      = m_output->palette();
-		const QColor   outputBack   = parseColor(attrs.value(QStringLiteral("output_background_colour")));
-		const QColor   outputText   = parseColor(attrs.value(QStringLiteral("output_text_colour")));
+		QPalette palette = m_output->palette();
+		const QColor outputBack = parseColor(attrs.value(QStringLiteral("output_background_colour")));
+		const QColor outputText = parseColor(attrs.value(QStringLiteral("output_text_colour")));
 		constexpr QRgb fallbackBack = qRgb(0, 0, 0);
 		constexpr QRgb fallbackText = qRgb(192, 192, 192);
-		QColor         resolvedBack = outputBack;
+		QColor resolvedBack = outputBack;
 		if (!resolvedBack.isValid() && m_runtime && m_runtime->backgroundColour() != 0)
 		{
 			const long colour = m_runtime->backgroundColour();
-			const int  r      = static_cast<int>(colour & 0xFF);
-			const int  g      = static_cast<int>((colour >> 8) & 0xFF);
-			const int  b      = static_cast<int>((colour >> 16) & 0xFF);
-			resolvedBack      = QColor(r, g, b);
+			const int r = static_cast<int>(colour & 0xFF);
+			const int g = static_cast<int>((colour >> 8) & 0xFF);
+			const int b = static_cast<int>((colour >> 16) & 0xFF);
+			resolvedBack = QColor(r, g, b);
 		}
 		m_outputBackground = resolvedBack.isValid() ? resolvedBack : QColor::fromRgb(fallbackBack);
 		palette.setColor(QPalette::Base, Qt::transparent);
@@ -4498,19 +4676,19 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 			m_miniOverlay->update();
 	}
 
-	const int     wrapColumn  = attrs.value(QStringLiteral("wrap_column")).toInt();
+	const int wrapColumn = attrs.value(QStringLiteral("wrap_column")).toInt();
 	const QString wrapEnabled = attrs.value(QStringLiteral("wrap"));
-	const bool    wrapOutput  = (wrapEnabled.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-                             wrapEnabled == QStringLiteral("1") ||
-                             wrapEnabled.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
-	const QString autoWrap    = attrs.value(QStringLiteral("auto_wrap_window_width"));
-	const bool    autoWrapWindow =
-	    (autoWrap.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 || autoWrap == QStringLiteral("1") ||
-	     autoWrap.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
-	const QString nawsValue   = attrs.value(QStringLiteral("naws"));
-	const bool    nawsEnabled = (nawsValue.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-                              nawsValue == QStringLiteral("1") ||
-                              nawsValue.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
+	const bool wrapOutput = (wrapEnabled.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		wrapEnabled == QStringLiteral("1") ||
+		wrapEnabled.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
+	const QString autoWrap = attrs.value(QStringLiteral("auto_wrap_window_width"));
+	const bool autoWrapWindow =
+	(autoWrap.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 || autoWrap == QStringLiteral("1") ||
+		autoWrap.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
+	const QString nawsValue = attrs.value(QStringLiteral("naws"));
+	const bool nawsEnabled = (nawsValue.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		nawsValue == QStringLiteral("1") ||
+		nawsValue.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
 	if (m_output)
 	{
 		m_wrapColumn = wrapColumn;
@@ -4526,7 +4704,7 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 		else
 		{
 			if (const bool fixedColumnWrap = !autoWrapWindow && m_wrapColumn > 0 && !nawsEnabled;
-			    fixedColumnWrap)
+				fixedColumnWrap)
 			{
 				// Runtime already applies fixed-column wrapping before text reaches the view.
 				// Keep the Qt view in NoWrap mode so existing output does not reflow on resize.
@@ -4558,36 +4736,36 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	}
 
 	const QString wrapInput = attrs.value(QStringLiteral("wrap_input"));
-	const auto    isEnabled = [](const QString &value)
+	const auto isEnabled = [](const QString& value)
 	{
 		return value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 || value == QStringLiteral("1") ||
-		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+			value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 	};
-	const auto isDisabled = [](const QString &value)
+	const auto isDisabled = [](const QString& value)
 	{
 		return value.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 || value == QStringLiteral("0") ||
-		       value.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0;
+			value.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0;
 	};
-	m_wrapInput                      = isEnabled(wrapInput);
-	const QString showBold           = attrs.value(QStringLiteral("show_bold"));
-	m_showBold                       = !isDisabled(showBold);
-	const QString showItalic         = attrs.value(QStringLiteral("show_italic"));
-	m_showItalic                     = !isDisabled(showItalic);
-	const QString showUnderline      = attrs.value(QStringLiteral("show_underline"));
-	m_showUnderline                  = !isDisabled(showUnderline);
+	m_wrapInput = isEnabled(wrapInput);
+	const QString showBold = attrs.value(QStringLiteral("show_bold"));
+	m_showBold = !isDisabled(showBold);
+	const QString showItalic = attrs.value(QStringLiteral("show_italic"));
+	m_showItalic = !isDisabled(showItalic);
+	const QString showUnderline = attrs.value(QStringLiteral("show_underline"));
+	m_showUnderline = !isDisabled(showUnderline);
 	const QString alternativeInverse = attrs.value(QStringLiteral("alternative_inverse"));
-	m_alternativeInverse             = isEnabled(alternativeInverse);
-	bool lineSpacingOk               = false;
-	int  lineSpacing                 = attrs.value(QStringLiteral("line_spacing")).toInt(&lineSpacingOk);
+	m_alternativeInverse = isEnabled(alternativeInverse);
+	bool lineSpacingOk = false;
+	int lineSpacing = attrs.value(QStringLiteral("line_spacing")).toInt(&lineSpacingOk);
 	if (!lineSpacingOk || lineSpacing < 0)
 		lineSpacing = 0;
-	m_lineSpacing      = lineSpacing;
-	bool fadeAfterOk   = false;
+	m_lineSpacing = lineSpacing;
+	bool fadeAfterOk = false;
 	bool fadeOpacityOk = false;
 	bool fadeSecondsOk = false;
-	int  fadeAfter     = attrs.value(QStringLiteral("fade_output_buffer_after_seconds")).toInt(&fadeAfterOk);
-	int  fadeOpacity   = attrs.value(QStringLiteral("fade_output_opacity_percent")).toInt(&fadeOpacityOk);
-	int  fadeSeconds   = attrs.value(QStringLiteral("fade_output_seconds")).toInt(&fadeSecondsOk);
+	int fadeAfter = attrs.value(QStringLiteral("fade_output_buffer_after_seconds")).toInt(&fadeAfterOk);
+	int fadeOpacity = attrs.value(QStringLiteral("fade_output_opacity_percent")).toInt(&fadeOpacityOk);
+	int fadeSeconds = attrs.value(QStringLiteral("fade_output_seconds")).toInt(&fadeSecondsOk);
 	if (!fadeAfterOk || fadeAfter < 0)
 		fadeAfter = 0;
 	if (!fadeOpacityOk)
@@ -4596,8 +4774,8 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	if (!fadeSecondsOk || fadeSeconds <= 0)
 		fadeSeconds = 1;
 	m_fadeOutputBufferAfterSeconds = fadeAfter;
-	m_fadeOutputOpacityPercent     = fadeOpacity;
-	m_fadeOutputSeconds            = fadeSeconds;
+	m_fadeOutputOpacityPercent = fadeOpacity;
+	m_fadeOutputSeconds = fadeSeconds;
 	if (m_fadeTimer)
 	{
 		if (m_fadeOutputBufferAfterSeconds > 0)
@@ -4610,86 +4788,86 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	}
 	m_inputPixelOffset = attrs.value(QStringLiteral("pixel_offset")).toInt();
 
-	const QString displayInput    = attrs.value(QStringLiteral("display_my_input"));
-	m_displayMyInput              = isEnabled(displayInput);
+	const QString displayInput = attrs.value(QStringLiteral("display_my_input"));
+	m_displayMyInput = isEnabled(displayInput);
 	const QString lineInformation = attrs.value(QStringLiteral("line_information"));
-	m_lineInformation             = isEnabled(lineInformation);
+	m_lineInformation = isEnabled(lineInformation);
 
-	const QString escapeDeletes          = attrs.value(QStringLiteral("escape_deletes_input"));
-	m_escapeDeletesInput                 = isEnabled(escapeDeletes);
-	const QString saveDeleted            = attrs.value(QStringLiteral("save_deleted_command"));
-	m_saveDeletedCommand                 = isEnabled(saveDeleted);
-	const QString confirmPaste           = attrs.value(QStringLiteral("confirm_on_paste"));
-	m_confirmOnPaste                     = isEnabled(confirmPaste);
-	const QString ctrlBackspace          = attrs.value(QStringLiteral("ctrl_backspace_deletes_last_word"));
-	m_ctrlBackspaceDeletesLastWord       = isEnabled(ctrlBackspace);
-	const QString arrowsHistory          = attrs.value(QStringLiteral("arrows_change_history"));
-	m_arrowsChangeHistory                = isEnabled(arrowsHistory);
-	const QString arrowWrap              = attrs.value(QStringLiteral("arrow_keys_wrap"));
-	m_arrowKeysWrap                      = isEnabled(arrowWrap);
-	const QString arrowPartial           = attrs.value(QStringLiteral("arrow_recalls_partial"));
-	m_arrowRecallsPartial                = isEnabled(arrowPartial);
-	const QString altArrowPartial        = attrs.value(QStringLiteral("alt_arrow_recalls_partial"));
-	m_altArrowRecallsPartial             = isEnabled(altArrowPartial);
-	const QString ctrlZToEnd             = attrs.value(QStringLiteral("ctrl_z_goes_to_end_of_buffer"));
-	m_ctrlZGoesToEndOfBuffer             = isEnabled(ctrlZToEnd);
-	const QString ctrlPToPrev            = attrs.value(QStringLiteral("ctrl_p_goes_to_previous_command"));
-	m_ctrlPGoesToPreviousCommand         = isEnabled(ctrlPToPrev);
-	const QString ctrlNToNext            = attrs.value(QStringLiteral("ctrl_n_goes_to_next_command"));
-	m_ctrlNGoesToNextCommand             = isEnabled(ctrlNToNext);
-	const QString confirmReplace         = attrs.value(QStringLiteral("confirm_before_replacing_typing"));
-	m_confirmBeforeReplacingTyping       = isEnabled(confirmReplace);
-	const QString doubleClickInserts     = attrs.value(QStringLiteral("double_click_inserts"));
-	m_doubleClickInserts                 = isEnabled(doubleClickInserts);
-	const QString doubleClickSends       = attrs.value(QStringLiteral("double_click_sends"));
-	m_doubleClickSends                   = isEnabled(doubleClickSends);
-	const QString autoRepeat             = attrs.value(QStringLiteral("auto_repeat"));
-	m_autoRepeat                         = isEnabled(autoRepeat);
+	const QString escapeDeletes = attrs.value(QStringLiteral("escape_deletes_input"));
+	m_escapeDeletesInput = isEnabled(escapeDeletes);
+	const QString saveDeleted = attrs.value(QStringLiteral("save_deleted_command"));
+	m_saveDeletedCommand = isEnabled(saveDeleted);
+	const QString confirmPaste = attrs.value(QStringLiteral("confirm_on_paste"));
+	m_confirmOnPaste = isEnabled(confirmPaste);
+	const QString ctrlBackspace = attrs.value(QStringLiteral("ctrl_backspace_deletes_last_word"));
+	m_ctrlBackspaceDeletesLastWord = isEnabled(ctrlBackspace);
+	const QString arrowsHistory = attrs.value(QStringLiteral("arrows_change_history"));
+	m_arrowsChangeHistory = isEnabled(arrowsHistory);
+	const QString arrowWrap = attrs.value(QStringLiteral("arrow_keys_wrap"));
+	m_arrowKeysWrap = isEnabled(arrowWrap);
+	const QString arrowPartial = attrs.value(QStringLiteral("arrow_recalls_partial"));
+	m_arrowRecallsPartial = isEnabled(arrowPartial);
+	const QString altArrowPartial = attrs.value(QStringLiteral("alt_arrow_recalls_partial"));
+	m_altArrowRecallsPartial = isEnabled(altArrowPartial);
+	const QString ctrlZToEnd = attrs.value(QStringLiteral("ctrl_z_goes_to_end_of_buffer"));
+	m_ctrlZGoesToEndOfBuffer = isEnabled(ctrlZToEnd);
+	const QString ctrlPToPrev = attrs.value(QStringLiteral("ctrl_p_goes_to_previous_command"));
+	m_ctrlPGoesToPreviousCommand = isEnabled(ctrlPToPrev);
+	const QString ctrlNToNext = attrs.value(QStringLiteral("ctrl_n_goes_to_next_command"));
+	m_ctrlNGoesToNextCommand = isEnabled(ctrlNToNext);
+	const QString confirmReplace = attrs.value(QStringLiteral("confirm_before_replacing_typing"));
+	m_confirmBeforeReplacingTyping = isEnabled(confirmReplace);
+	const QString doubleClickInserts = attrs.value(QStringLiteral("double_click_inserts"));
+	m_doubleClickInserts = isEnabled(doubleClickInserts);
+	const QString doubleClickSends = attrs.value(QStringLiteral("double_click_sends"));
+	m_doubleClickSends = isEnabled(doubleClickSends);
+	const QString autoRepeat = attrs.value(QStringLiteral("auto_repeat"));
+	m_autoRepeat = isEnabled(autoRepeat);
 	const QString lowerCaseTabCompletion = attrs.value(QStringLiteral("lower_case_tab_completion"));
-	m_lowerCaseTabCompletion             = isEnabled(lowerCaseTabCompletion);
-	const QString tabCompletionSpace     = attrs.value(QStringLiteral("tab_completion_space"));
-	m_tabCompletionSpace                 = isEnabled(tabCompletionSpace);
-	bool tabLinesOk                      = false;
-	int  tabLines = attrs.value(QStringLiteral("tab_completion_lines")).toInt(&tabLinesOk);
+	m_lowerCaseTabCompletion = isEnabled(lowerCaseTabCompletion);
+	const QString tabCompletionSpace = attrs.value(QStringLiteral("tab_completion_space"));
+	m_tabCompletionSpace = isEnabled(tabCompletionSpace);
+	bool tabLinesOk = false;
+	int tabLines = attrs.value(QStringLiteral("tab_completion_lines")).toInt(&tabLinesOk);
 	if (!tabLinesOk || tabLines < 1)
 		tabLines = 200;
-	m_tabCompletionLines    = tabLines;
+	m_tabCompletionLines = tabLines;
 	m_tabCompletionDefaults = multilineAttrs.value(QStringLiteral("tab_completion_defaults"));
 	if (m_tabCompletionDefaults.isEmpty())
 		m_tabCompletionDefaults = attrs.value(QStringLiteral("tab_completion_defaults"));
-	const QString autoResize  = attrs.value(QStringLiteral("auto_resize_command_window"));
+	const QString autoResize = attrs.value(QStringLiteral("auto_resize_command_window"));
 	m_autoResizeCommandWindow = isEnabled(autoResize);
-	bool minOk                = false;
-	bool maxOk                = false;
-	int  minLines             = attrs.value(QStringLiteral("auto_resize_minimum_lines")).toInt(&minOk);
-	int  maxLines             = attrs.value(QStringLiteral("auto_resize_maximum_lines")).toInt(&maxOk);
+	bool minOk = false;
+	bool maxOk = false;
+	int minLines = attrs.value(QStringLiteral("auto_resize_minimum_lines")).toInt(&minOk);
+	int maxLines = attrs.value(QStringLiteral("auto_resize_maximum_lines")).toInt(&maxOk);
 	if (!minOk || minLines <= 0)
 		minLines = 1;
 	if (!maxOk || maxLines <= 0)
 		maxLines = 20;
-	m_autoResizeMinimumLines        = minLines;
-	m_autoResizeMaximumLines        = maxLines;
-	const QString keepCommands      = attrs.value(QStringLiteral("keep_commands_on_same_line"));
-	m_keepCommandsOnSameLine        = isEnabled(keepCommands);
-	const QString noEchoOff         = attrs.value(QStringLiteral("no_echo_off"));
-	m_noEchoOff                     = isEnabled(noEchoOff);
-	const QString alwaysRecord      = attrs.value(QStringLiteral("always_record_command_history"));
-	m_alwaysRecordCommandHistory    = isEnabled(alwaysRecord);
-	const QString hyperlinkHistory  = attrs.value(QStringLiteral("hyperlink_adds_to_command_history"));
+	m_autoResizeMinimumLines = minLines;
+	m_autoResizeMaximumLines = maxLines;
+	const QString keepCommands = attrs.value(QStringLiteral("keep_commands_on_same_line"));
+	m_keepCommandsOnSameLine = isEnabled(keepCommands);
+	const QString noEchoOff = attrs.value(QStringLiteral("no_echo_off"));
+	m_noEchoOff = isEnabled(noEchoOff);
+	const QString alwaysRecord = attrs.value(QStringLiteral("always_record_command_history"));
+	m_alwaysRecordCommandHistory = isEnabled(alwaysRecord);
+	const QString hyperlinkHistory = attrs.value(QStringLiteral("hyperlink_adds_to_command_history"));
 	m_hyperlinkAddsToCommandHistory = isEnabled(hyperlinkHistory);
-	const bool    previousUseCustomLinkColour = m_useCustomLinkColour;
-	const bool    previousUnderlineHyperlinks = m_underlineHyperlinks;
-	const QColor  previousHyperlinkColour     = m_hyperlinkColour;
-	const QString useCustomLink               = attrs.value(QStringLiteral("use_custom_link_colour"));
-	m_useCustomLinkColour                     = isEnabled(useCustomLink);
-	const QString underlineLinks              = attrs.value(QStringLiteral("underline_hyperlinks"));
-	m_underlineHyperlinks                     = isEnabled(underlineLinks);
-	const QColor linkColour                   = parseColor(attrs.value(QStringLiteral("hyperlink_colour")));
+	const bool previousUseCustomLinkColour = m_useCustomLinkColour;
+	const bool previousUnderlineHyperlinks = m_underlineHyperlinks;
+	const QColor previousHyperlinkColour = m_hyperlinkColour;
+	const QString useCustomLink = attrs.value(QStringLiteral("use_custom_link_colour"));
+	m_useCustomLinkColour = isEnabled(useCustomLink);
+	const QString underlineLinks = attrs.value(QStringLiteral("underline_hyperlinks"));
+	m_underlineHyperlinks = isEnabled(underlineLinks);
+	const QColor linkColour = parseColor(attrs.value(QStringLiteral("hyperlink_colour")));
 	if (linkColour.isValid())
 		m_hyperlinkColour = linkColour;
 	const bool hyperlinkPresentationChanged = previousUseCustomLinkColour != m_useCustomLinkColour ||
-	                                          previousUnderlineHyperlinks != m_underlineHyperlinks ||
-	                                          previousHyperlinkColour != m_hyperlinkColour;
+		previousUnderlineHyperlinks != m_underlineHyperlinks ||
+		previousHyperlinkColour != m_hyperlinkColour;
 	if (m_noEchoOff)
 		m_noEcho = false;
 	m_historyLimit = attrs.value(QStringLiteral("history_lines")).toInt();
@@ -4702,7 +4880,7 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 		applyMaxOutputLinesSetting();
 
 		QString css = QStringLiteral("a { text-decoration: %1;")
-		                  .arg(m_underlineHyperlinks ? QStringLiteral("underline") : QStringLiteral("none"));
+			.arg(m_underlineHyperlinks ? QStringLiteral("underline") : QStringLiteral("none"));
 		if (m_useCustomLinkColour && m_hyperlinkColour.isValid())
 			css += QStringLiteral(" color: %1;").arg(m_hyperlinkColour.name());
 		css += QStringLiteral(" }");
@@ -4711,8 +4889,8 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 			scheduleIncrementalHyperlinkRestyle();
 	}
 
-	m_autoPause                  = false;
-	m_keepPauseAtBottom          = false;
+	m_autoPause = false;
+	m_keepPauseAtBottom = false;
 	const QString autoPauseValue = attrs.value(QStringLiteral("auto_pause"));
 	if (!autoPauseValue.isEmpty())
 		m_autoPause = isEnabled(autoPauseValue);
@@ -4783,16 +4961,16 @@ void WorldView::stopIncrementalHyperlinkRestyle()
 	m_hyperlinkRestyleNextBlock = -1;
 }
 
-bool WorldView::restyleHyperlinksInBlock(const QTextBlock &block) const
+bool WorldView::restyleHyperlinksInBlock(const QTextBlock& block) const
 {
 	if (!m_outputDocument || !block.isValid())
 		return false;
 
 	struct HyperlinkFragmentUpdate
 	{
-			int             start{0};
-			int             length{0};
-			QTextCharFormat format;
+		int start{0};
+		int length{0};
+		QTextCharFormat format;
 	};
 
 	const bool applyCustomHyperlinkColour = m_useCustomLinkColour && m_hyperlinkColour.isValid();
@@ -4808,10 +4986,10 @@ bool WorldView::restyleHyperlinksInBlock(const QTextBlock &block) const
 			continue;
 
 		QTextCharFormat updated = format;
-		bool            changed = false;
+		bool changed = false;
 
 		if (const bool autoUnderline = updated.property(kAutoHyperlinkUnderlineProperty).toBool();
-		    autoUnderline)
+			autoUnderline)
 		{
 			if (updated.fontUnderline() != m_underlineHyperlinks)
 			{
@@ -4820,7 +4998,7 @@ bool WorldView::restyleHyperlinksInBlock(const QTextBlock &block) const
 			}
 		}
 		else if (m_underlineHyperlinks && updated.hasProperty(QTextFormat::FontUnderline) &&
-		         !updated.fontUnderline())
+			!updated.fontUnderline())
 		{
 			// Legacy fast-path links may carry explicit non-underlined state from
 			// prior settings. Promote these to auto-managed so future flips remain
@@ -4835,7 +5013,7 @@ bool WorldView::restyleHyperlinksInBlock(const QTextBlock &block) const
 			if (applyCustomHyperlinkColour)
 			{
 				if (!updated.hasProperty(QTextFormat::ForegroundBrush) ||
-				    updated.foreground().color() != m_hyperlinkColour)
+					updated.foreground().color() != m_hyperlinkColour)
 				{
 					updated.setForeground(m_hyperlinkColour);
 					changed = true;
@@ -4844,11 +5022,11 @@ bool WorldView::restyleHyperlinksInBlock(const QTextBlock &block) const
 			else
 			{
 				const QColor defaultLinkColour =
-				    m_output ? m_output->palette().color(QPalette::Text) : QColor();
+					m_output ? m_output->palette().color(QPalette::Text) : QColor();
 				if (defaultLinkColour.isValid())
 				{
 					if (!updated.hasProperty(QTextFormat::ForegroundBrush) ||
-					    updated.foreground().color() != defaultLinkColour)
+						updated.foreground().color() != defaultLinkColour)
 					{
 						updated.setForeground(defaultLinkColour);
 						changed = true;
@@ -4878,7 +5056,7 @@ bool WorldView::restyleHyperlinksInBlock(const QTextBlock &block) const
 		return false;
 
 	QTextCursor cursor(m_outputDocument);
-	for (const HyperlinkFragmentUpdate &update : updates)
+	for (const HyperlinkFragmentUpdate& update : updates)
 	{
 		cursor.setPosition(update.start);
 		cursor.setPosition(update.start + update.length, QTextCursor::KeepAnchor);
@@ -4900,9 +5078,9 @@ int WorldView::tooltipStartDelayMs() const
 {
 	if (!m_runtime)
 		return 400;
-	const QString value  = m_runtime->worldAttributes().value(QStringLiteral("tool_tip_start_time"));
-	bool          ok     = false;
-	int           parsed = value.toInt(&ok);
+	const QString value = m_runtime->worldAttributes().value(QStringLiteral("tool_tip_start_time"));
+	bool ok = false;
+	int parsed = value.toInt(&ok);
 	if (!ok || parsed < 0)
 		parsed = 400;
 	return parsed;
@@ -4912,16 +5090,16 @@ int WorldView::tooltipVisibleDurationMs() const
 {
 	if (!m_runtime)
 		return 5000;
-	const QString value  = m_runtime->worldAttributes().value(QStringLiteral("tool_tip_visible_time"));
-	bool          ok     = false;
-	int           parsed = value.toInt(&ok);
+	const QString value = m_runtime->worldAttributes().value(QStringLiteral("tool_tip_visible_time"));
+	bool ok = false;
+	int parsed = value.toInt(&ok);
 	if (!ok || parsed <= 0)
 		parsed = 5000;
 	return parsed;
 }
 
-void WorldView::scheduleHotspotTooltip(const QString &hotspotId, const QString &tooltipText,
-                                       const QPoint &globalPos)
+void WorldView::scheduleHotspotTooltip(const QString& hotspotId, const QString& tooltipText,
+                                       const QPoint& globalPos)
 {
 	if (tooltipText.isEmpty())
 		return;
@@ -4929,8 +5107,8 @@ void WorldView::scheduleHotspotTooltip(const QString &hotspotId, const QString &
 	if (m_tooltipTimer)
 		m_tooltipTimer->stop();
 
-	m_pendingTooltipHotspot   = hotspotId;
-	m_pendingTooltipText      = tooltipText;
+	m_pendingTooltipHotspot = hotspotId;
+	m_pendingTooltipText = tooltipText;
 	m_pendingTooltipGlobalPos = globalPos;
 
 	const int delay = tooltipStartDelayMs();
@@ -4964,22 +5142,22 @@ void WorldView::clearPendingHotspotTooltip()
 	m_pendingTooltipText.clear();
 }
 
-double WorldView::lineOpacityForTimestamp(const QDateTime &when) const
+double WorldView::lineOpacityForTimestamp(const QDateTime& when) const
 {
 	if (m_fadeOutputBufferAfterSeconds <= 0 || m_fadeOutputSeconds <= 0 || m_frozen)
 		return 1.0;
 	if (!when.isValid())
 		return 1.0;
 
-	const QDateTime now              = QDateTime::currentDateTime();
-	qint64          timeSinceArrived = when.secsTo(now);
+	const QDateTime now = QDateTime::currentDateTime();
+	qint64 timeSinceArrived = when.secsTo(now);
 	if (timeSinceArrived < 0)
 		timeSinceArrived = 0;
 
 	if (m_timeFadeCancelled.isValid())
 	{
-		const qint64 cancelled   = m_timeFadeCancelled.secsTo(now);
-		const auto   resetWindow = static_cast<qint64>(m_fadeOutputBufferAfterSeconds) + m_fadeOutputSeconds;
+		const qint64 cancelled = m_timeFadeCancelled.secsTo(now);
+		const auto resetWindow = static_cast<qint64>(m_fadeOutputBufferAfterSeconds) + m_fadeOutputSeconds;
 		if (cancelled >= 0 && cancelled < resetWindow && when <= m_timeFadeCancelled)
 		{
 			timeSinceArrived = cancelled;
@@ -4989,13 +5167,13 @@ double WorldView::lineOpacityForTimestamp(const QDateTime &when) const
 	if (timeSinceArrived <= m_fadeOutputBufferAfterSeconds)
 		return 1.0;
 
-	const double fadeLimit   = qBound(0.0, static_cast<double>(m_fadeOutputOpacityPercent) / 100.0, 1.0);
+	const double fadeLimit = qBound(0.0, static_cast<double>(m_fadeOutputOpacityPercent) / 100.0, 1.0);
 	const qint64 fadeElapsed = timeSinceArrived - m_fadeOutputBufferAfterSeconds;
 	if (fadeElapsed >= m_fadeOutputSeconds)
 		return fadeLimit;
 
 	const double progress = static_cast<double>(fadeElapsed) / static_cast<double>(m_fadeOutputSeconds);
-	const double opacity  = 1.0 - ((1.0 - fadeLimit) * progress);
+	const double opacity = 1.0 - ((1.0 - fadeLimit) * progress);
 	return qBound(fadeLimit, opacity, 1.0);
 }
 
@@ -5004,15 +5182,15 @@ bool WorldView::fadeRebuildNeededNow() const
 	if (!m_runtime || m_fadeOutputBufferAfterSeconds <= 0 || m_fadeOutputSeconds <= 0 || m_frozen)
 		return false;
 
-	const QVector<WorldRuntime::LineEntry> &lines = m_runtime->lines();
+	const QVector<WorldRuntime::LineEntry>& lines = m_runtime->lines();
 	if (lines.isEmpty())
 		return false;
 
-	const QDateTime now        = QDateTime::currentDateTime();
-	const qint64    lowerBound = m_fadeOutputBufferAfterSeconds;
-	const auto      upperBound = static_cast<qint64>(m_fadeOutputBufferAfterSeconds) + m_fadeOutputSeconds;
+	const QDateTime now = QDateTime::currentDateTime();
+	const qint64 lowerBound = m_fadeOutputBufferAfterSeconds;
+	const auto upperBound = static_cast<qint64>(m_fadeOutputBufferAfterSeconds) + m_fadeOutputSeconds;
 
-	for (const WorldRuntime::LineEntry &line : lines)
+	for (const WorldRuntime::LineEntry& line : lines)
 	{
 		if (!line.time.isValid())
 			continue;
@@ -5037,7 +5215,7 @@ bool WorldView::fadeRebuildNeededNow() const
 	return false;
 }
 
-void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMouseEvent *event)
+void WorldView::updateLineInformationTooltip(const QWidget* watched, const QMouseEvent* event)
 {
 	auto hideLineInfoTooltip = [this]
 	{
@@ -5055,7 +5233,7 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 		return;
 	}
 
-	WrapTextBrowser *view = nullptr;
+	WrapTextBrowser* view = nullptr;
 	if (watched == m_output || watched == (m_output ? m_output->viewport() : nullptr))
 		view = m_output;
 	else if (watched == m_liveOutput || watched == (m_liveOutput ? m_liveOutput->viewport() : nullptr))
@@ -5071,7 +5249,7 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 	else
 		posInView = view->viewport()->mapFromGlobal(event->globalPosition().toPoint());
 
-	QAbstractTextDocumentLayout *documentLayout = view->document()->documentLayout();
+	QAbstractTextDocumentLayout* documentLayout = view->document()->documentLayout();
 	if (!documentLayout)
 	{
 		hideLineInfoTooltip();
@@ -5080,7 +5258,7 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 
 	const QPointF documentPos(posInView.x() + view->horizontalScrollBar()->value(),
 	                          posInView.y() + view->verticalScrollBar()->value());
-	const QSizeF  documentSize = documentLayout->documentSize();
+	const QSizeF documentSize = documentLayout->documentSize();
 	if (documentPos.y() < 0.0 || documentPos.y() >= documentSize.height())
 	{
 		hideLineInfoTooltip();
@@ -5103,18 +5281,19 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 		return;
 	}
 
-	const int                               lineIndex = cursor.block().blockNumber();
-	const QVector<WorldRuntime::LineEntry> &lines     = m_runtime->lines();
+	const int lineIndex = cursor.block().blockNumber();
+	const QVector<WorldRuntime::LineEntry>& lines = m_runtime->lines();
 	if (lineIndex < 0 || lineIndex >= lines.size())
 	{
 		hideLineInfoTooltip();
 		return;
 	}
 
-	const WorldRuntime::LineEntry &line = lines.at(lineIndex);
-	const QString when = line.time.isValid() ? line.time.toString(QStringLiteral("dddd, MMMM dd, HH:mm:ss"))
-	                                         : QStringLiteral("(unknown time)");
-	QString       suffix;
+	const WorldRuntime::LineEntry& line = lines.at(lineIndex);
+	const QString when = line.time.isValid()
+		                     ? line.time.toString(QStringLiteral("dddd, MMMM dd, HH:mm:ss"))
+		                     : QStringLiteral("(unknown time)");
+	QString suffix;
 	if (line.flags & WorldRuntime::LineNote)
 		suffix = QStringLiteral(", (note)");
 	else if (line.flags & WorldRuntime::LineInput)
@@ -5123,7 +5302,7 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 	scheduleHotspotTooltip(kLineInfoTooltipId, text, event->globalPosition().toPoint());
 }
 
-void WorldView::resizeEvent(QResizeEvent *event)
+void WorldView::resizeEvent(QResizeEvent* event)
 {
 	QWidget::resizeEvent(event);
 	updateWrapMargin();
@@ -5144,7 +5323,7 @@ void WorldView::resizeEvent(QResizeEvent *event)
 	requestDrawOutputWindowNotification();
 }
 
-void WorldView::showEvent(QShowEvent *event)
+void WorldView::showEvent(QShowEvent* event)
 {
 	QWidget::showEvent(event);
 	applyDefaultInputHeight(true);
@@ -5152,7 +5331,7 @@ void WorldView::showEvent(QShowEvent *event)
 		m_runtime->installPendingPlugins();
 }
 
-void WorldView::mouseMoveEvent(QMouseEvent *event)
+void WorldView::mouseMoveEvent(QMouseEvent* event)
 {
 	if (m_mouseCaptured)
 	{
@@ -5163,7 +5342,7 @@ void WorldView::mouseMoveEvent(QMouseEvent *event)
 	QWidget::mouseMoveEvent(event);
 }
 
-void WorldView::mouseReleaseEvent(QMouseEvent *event)
+void WorldView::mouseReleaseEvent(QMouseEvent* event)
 {
 	if (m_mouseCaptured)
 	{
@@ -5174,17 +5353,17 @@ void WorldView::mouseReleaseEvent(QMouseEvent *event)
 	QWidget::mouseReleaseEvent(event);
 }
 
-bool WorldView::eventFilter(QObject *watched, QEvent *event)
+bool WorldView::eventFilter(QObject* watched, QEvent* event)
 {
-	const QWidget *outputViewport     = m_output ? m_output->viewport() : nullptr;
-	const QWidget *liveOutputViewport = m_liveOutput ? m_liveOutput->viewport() : nullptr;
-	const bool     isOutputWidget     = watched == m_outputContainer || watched == m_outputStack ||
-	                            watched == m_outputSplitter || watched == m_outputScrollBar ||
-	                            watched == m_output || watched == m_liveOutput || watched == outputViewport ||
-	                            watched == liveOutputViewport;
+	const QWidget* outputViewport = m_output ? m_output->viewport() : nullptr;
+	const QWidget* liveOutputViewport = m_liveOutput ? m_liveOutput->viewport() : nullptr;
+	const bool isOutputWidget = watched == m_outputContainer || watched == m_outputStack ||
+		watched == m_outputSplitter || watched == m_outputScrollBar ||
+		watched == m_output || watched == m_liveOutput || watched == outputViewport ||
+		watched == liveOutputViewport;
 
 	if ((watched == m_outputContainer || watched == m_outputStack || watched == m_outputSplitter) &&
-	    (event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest))
+		(event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest))
 	{
 		refreshMiniWindows();
 		if (m_runtime)
@@ -5193,7 +5372,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 
 	if (m_allTypingToCommandWindow && isOutputWidget && event->type() == QEvent::KeyPress && m_input)
 	{
-		if (const auto *keyEvent = dynamic_cast<QKeyEvent *>(event))
+		if (const auto* keyEvent = dynamic_cast<QKeyEvent*>(event))
 		{
 			QKeyEvent forwarded(keyEvent->type(), keyEvent->key(), keyEvent->modifiers(), keyEvent->text(),
 			                    keyEvent->isAutoRepeat(), keyEvent->count());
@@ -5205,7 +5384,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 
 	if (isOutputWidget && event->type() == QEvent::KeyPress)
 	{
-		if (auto *keyEvent = dynamic_cast<QKeyEvent *>(event); keyEvent && handleWorldHotkey(keyEvent))
+		if (auto* keyEvent = dynamic_cast<QKeyEvent*>(event); keyEvent && handleWorldHotkey(keyEvent))
 		{
 			event->accept();
 			return true;
@@ -5214,16 +5393,16 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 
 	if (event->type() == QEvent::Wheel)
 	{
-		if (auto *wheel = dynamic_cast<QWheelEvent *>(event))
+		if (auto* wheel = dynamic_cast<QWheelEvent*>(event))
 		{
-			if (isOutputWidget && handleMiniWindowWheel(wheel, qobject_cast<QWidget *>(watched)))
+			if (isOutputWidget && handleMiniWindowWheel(wheel, qobject_cast<QWidget*>(watched)))
 			{
 				event->accept();
 				return true;
 			}
 
 			if (watched == m_outputContainer || watched == m_outputStack || watched == m_outputSplitter ||
-			    watched == m_outputScrollBar)
+				watched == m_outputScrollBar)
 			{
 				handleOutputWheel(wheel->angleDelta(), wheel->pixelDelta());
 				event->accept();
@@ -5241,20 +5420,20 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 		switch (event->type())
 		{
 		case QEvent::MouseMove:
-			if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
-				handled = handleMiniWindowMouseMove(mouseEvent, qobject_cast<QWidget *>(watched));
+			if (auto* mouseEvent = dynamic_cast<QMouseEvent*>(event))
+				handled = handleMiniWindowMouseMove(mouseEvent, qobject_cast<QWidget*>(watched));
 			break;
 		case QEvent::MouseButtonPress:
-			if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
-				handled = handleMiniWindowMousePress(mouseEvent, false, qobject_cast<QWidget *>(watched));
+			if (auto* mouseEvent = dynamic_cast<QMouseEvent*>(event))
+				handled = handleMiniWindowMousePress(mouseEvent, false, qobject_cast<QWidget*>(watched));
 			break;
 		case QEvent::MouseButtonRelease:
-			if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
-				handled = handleMiniWindowMouseRelease(mouseEvent, qobject_cast<QWidget *>(watched));
+			if (auto* mouseEvent = dynamic_cast<QMouseEvent*>(event))
+				handled = handleMiniWindowMouseRelease(mouseEvent, qobject_cast<QWidget*>(watched));
 			break;
 		case QEvent::MouseButtonDblClick:
-			if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
-				handled = handleMiniWindowMousePress(mouseEvent, true, qobject_cast<QWidget *>(watched));
+			if (auto* mouseEvent = dynamic_cast<QMouseEvent*>(event))
+				handled = handleMiniWindowMousePress(mouseEvent, true, qobject_cast<QWidget*>(watched));
 			break;
 		case QEvent::Leave:
 			handleMiniWindowMouseLeave();
@@ -5266,42 +5445,42 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 			}
 			break;
 		case QEvent::ContextMenu:
-		{
-			if (const auto *contextEvent = dynamic_cast<QContextMenuEvent *>(event))
 			{
-				const QPoint local =
-				    mapEventToOutputStack(QPointF(contextEvent->pos()), qobject_cast<QWidget *>(watched));
-				if (m_outputStack && m_outputStack->rect().contains(local))
+				if (const auto* contextEvent = dynamic_cast<QContextMenuEvent*>(event))
 				{
-					QString hotspotId;
-					QString windowName;
-					if (const auto *window = hitTestMiniWindow(local, hotspotId, windowName, true); window)
-						handled = true;
+					const QPoint local =
+						mapEventToOutputStack(QPointF(contextEvent->pos()), qobject_cast<QWidget*>(watched));
+					if (m_outputStack && m_outputStack->rect().contains(local))
+					{
+						QString hotspotId;
+						QString windowName;
+						if (const auto* window = hitTestMiniWindow(local, hotspotId, windowName, true); window)
+							handled = true;
+					}
 				}
 			}
-		}
-		break;
+			break;
 		default:
 			break;
 		}
 
 		if (!handled && event->type() == QEvent::MouseMove)
 		{
-			if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
-				updateLineInformationTooltip(qobject_cast<QWidget *>(watched), mouseEvent);
+			if (auto* mouseEvent = dynamic_cast<QMouseEvent*>(event))
+				updateLineInformationTooltip(qobject_cast<QWidget*>(watched), mouseEvent);
 		}
 
 		if (!handled && event->type() == QEvent::MouseButtonDblClick)
 		{
-			if (auto *dblClick = dynamic_cast<QMouseEvent *>(event);
-			    dblClick && dblClick->button() == Qt::LeftButton &&
-			    (m_doubleClickSends || m_doubleClickInserts))
+			if (auto* dblClick = dynamic_cast<QMouseEvent*>(event);
+				dblClick && dblClick->button() == Qt::LeftButton &&
+				(m_doubleClickSends || m_doubleClickInserts))
 			{
 				QTimer::singleShot(0, this,
 				                   [this]
 				                   {
 					                   QString selected = outputSelectedText().replace(
-					                       QChar::ParagraphSeparator, QLatin1Char(' '));
+						                   QChar::ParagraphSeparator, QLatin1Char(' '));
 					                   selected = selected.trimmed();
 					                   if (selected.isEmpty())
 						                   return;
@@ -5335,7 +5514,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 
 void WorldView::updateWrapMargin() const
 {
-	auto applyMargin = [this](WrapTextBrowser *view)
+	auto applyMargin = [this](WrapTextBrowser* view)
 	{
 		if (!view)
 			return;
@@ -5347,9 +5526,9 @@ void WorldView::updateWrapMargin() const
 		}
 
 		const QFontMetrics metrics(view->font());
-		const int          desiredWidth  = metrics.horizontalAdvance(QLatin1Char('M')) * m_wrapColumn;
-		const int          viewportWidth = view->viewport()->width();
-		int                rightMargin   = 0;
+		const int desiredWidth = metrics.horizontalAdvance(QLatin1Char('M')) * m_wrapColumn;
+		const int viewportWidth = view->viewport()->width();
+		int rightMargin = 0;
 		if (desiredWidth > 0 && viewportWidth > desiredWidth)
 			rightMargin = viewportWidth - desiredWidth;
 		view->setViewportMarginsPublic(0, 0, rightMargin, 0);
@@ -5378,10 +5557,10 @@ void WorldView::updateInputWrap() const
 	if (iWidth > MAX_LINE_WIDTH)
 		iWidth = MAX_LINE_WIDTH;
 
-	const int charWidth     = QFontMetrics(m_input->font()).horizontalAdvance(QLatin1Char('M'));
-	const int desiredWidth  = iWidth * charWidth;
+	const int charWidth = QFontMetrics(m_input->font()).horizontalAdvance(QLatin1Char('M'));
+	const int desiredWidth = iWidth * charWidth;
 	const int viewportWidth = m_input->viewport()->width();
-	int       rightMargin   = viewportWidth - desiredWidth - m_inputPixelOffset;
+	int rightMargin = viewportWidth - desiredWidth - m_inputPixelOffset;
 	if (rightMargin < m_inputPixelOffset)
 		rightMargin = m_inputPixelOffset;
 
@@ -5395,7 +5574,7 @@ void WorldView::updateInputHeight() const
 	if (!m_input)
 		return;
 
-	const int frame      = m_input->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, m_input);
+	const int frame = m_input->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, m_input);
 	const int lineHeight = QFontMetrics(m_input->font()).lineSpacing();
 	const int singleLine = lineHeight + frame * 2 + 4;
 	if (!m_autoResizeCommandWindow)
@@ -5411,9 +5590,9 @@ void WorldView::updateInputHeight() const
 		qSwap(minLines, maxLines);
 
 	int lineCount = 1;
-	if (QTextDocument *doc = m_input->document())
+	if (QTextDocument* doc = m_input->document())
 		lineCount = qMax(1, doc->blockCount());
-	const int targetLines  = qBound(minLines, lineCount, maxLines);
+	const int targetLines = qBound(minLines, lineCount, maxLines);
 	const int targetHeight = (lineHeight * targetLines) + frame * 2 + 4;
 	m_input->setMinimumHeight(targetHeight);
 	m_input->setMaximumHeight(targetHeight);
@@ -5424,7 +5603,7 @@ void WorldView::applyDefaultInputHeight(bool setSplitterSizes)
 	if (!m_input || m_defaultInputHeightApplied)
 		return;
 
-	const int frame      = m_input->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, m_input);
+	const int frame = m_input->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, m_input);
 	const int lineHeight = QFontMetrics(m_input->font()).lineSpacing();
 	const int singleLine = lineHeight + frame * 2 + 4;
 
@@ -5447,7 +5626,7 @@ void WorldView::applyDefaultInputHeight(bool setSplitterSizes)
 	m_input->setMaximumHeight(QWIDGETSIZE_MAX);
 }
 
-void WorldView::addToHistory(const QString &text)
+void WorldView::addToHistory(const QString& text)
 {
 	if (m_noEcho && !m_alwaysRecordCommandHistory)
 		return;
@@ -5466,10 +5645,10 @@ void WorldView::addToHistory(const QString &text)
 	m_lastCommand = text;
 }
 
-void WorldView::addToHistoryForced(const QString &text)
+void WorldView::addToHistoryForced(const QString& text)
 {
 	const bool savedNoEcho = m_noEcho;
-	m_noEcho               = false;
+	m_noEcho = false;
 	addToHistory(text);
 	m_noEcho = savedNoEcho;
 }
@@ -5514,9 +5693,9 @@ void WorldView::recallLastWord()
 		if (current.isEmpty())
 			return;
 
-		const int     position = cursor.position();
-		QString       before   = current.left(position);
-		const QString after    = current.mid(position);
+		const int position = cursor.position();
+		QString before = current.left(position);
+		const QString after = current.mid(position);
 		while (before.endsWith(QLatin1Char(' ')))
 			before.chop(1);
 		if (const qsizetype spacePos = before.lastIndexOf(QLatin1Char(' ')); spacePos < 0)
@@ -5541,8 +5720,8 @@ void WorldView::recallLastWord()
 	if (line.isEmpty())
 		return;
 
-	const qsizetype pos  = line.lastIndexOf(QLatin1Char(' '));
-	const QString   word = line.mid(pos + 1);
+	const qsizetype pos = line.lastIndexOf(QLatin1Char(' '));
+	const QString word = line.mid(pos + 1);
 	if (word.isEmpty())
 		return;
 
@@ -5567,7 +5746,7 @@ QString WorldView::inputText() const
 	return m_input->toPlainText();
 }
 
-bool WorldView::confirmReplaceTyping(const QString &replacement)
+bool WorldView::confirmReplaceTyping(const QString& replacement)
 {
 	if (!m_confirmBeforeReplacingTyping)
 		return true;
@@ -5579,19 +5758,19 @@ bool WorldView::confirmReplaceTyping(const QString &replacement)
 	if (current.isEmpty())
 		return true;
 
-	constexpr int limit              = 200;
-	QString       trimmedCurrent     = current;
-	QString       trimmedReplacement = replacement;
+	constexpr int limit = 200;
+	QString trimmedCurrent = current;
+	QString trimmedReplacement = replacement;
 	if (trimmedCurrent.size() > limit)
 		trimmedCurrent = trimmedCurrent.left(limit) + QStringLiteral(" ...");
 	if (trimmedReplacement.size() > limit)
 		trimmedReplacement = trimmedReplacement.left(limit) + QStringLiteral(" ...");
 
 	const int result =
-	    QMessageBox::question(this, QStringLiteral("QMud"),
-	                          QStringLiteral("Replace your typing of\n\n\"%1\"\n\nwith\n\n\"%2\"?")
-	                              .arg(trimmedCurrent, trimmedReplacement),
-	                          QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+		QMessageBox::question(this, QStringLiteral("QMud"),
+		                      QStringLiteral("Replace your typing of\n\n\"%1\"\n\nwith\n\n\"%2\"?")
+		                      .arg(trimmedCurrent, trimmedReplacement),
+		                      QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
 
 	if (result != QMessageBox::Ok)
 	{
@@ -5605,14 +5784,14 @@ bool WorldView::confirmReplaceTyping(const QString &replacement)
 	return true;
 }
 
-bool WorldView::executeMacroByName(const QString &name)
+bool WorldView::executeMacroByName(const QString& name)
 {
 	if (!m_runtime || name.isEmpty())
 		return false;
 
-	const QList<WorldRuntime::Macro> &macros = m_runtime->macros();
-	const WorldRuntime::Macro        *macro  = nullptr;
-	for (const auto &entry : macros)
+	const QList<WorldRuntime::Macro>& macros = m_runtime->macros();
+	const WorldRuntime::Macro* macro = nullptr;
+	for (const auto& entry : macros)
 	{
 		const QString macroName = entry.attributes.value(QStringLiteral("name")).trimmed();
 		if (macroName.compare(name, Qt::CaseInsensitive) == 0)
@@ -5641,11 +5820,11 @@ bool WorldView::executeMacroByName(const QString &name)
 	}
 	if (type == QStringLiteral("send_now"))
 	{
-		const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
+		const QMap<QString, QString>& attrs = m_runtime->worldAttributes();
 		const QString noHistoryFlag = attrs.value(QStringLiteral("do_not_add_macros_to_command_history"));
-		const bool    noHistory     = (noHistoryFlag == QStringLiteral("1") ||
-                                noHistoryFlag.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-                                noHistoryFlag.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
+		const bool noHistory = (noHistoryFlag == QStringLiteral("1") ||
+			noHistoryFlag.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+			noHistoryFlag.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
 		m_runtime->setCurrentActionSource(WorldRuntime::eUserMacro);
 		(void)m_runtime->sendCommand(send, true, false, true, !noHistory, true);
 		m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
@@ -5665,36 +5844,36 @@ bool WorldView::executeMacroByName(const QString &name)
 	return false;
 }
 
-bool WorldView::handleWorldHotkey(QKeyEvent *event)
+bool WorldView::handleWorldHotkey(QKeyEvent* event)
 {
 	if (!m_runtime || !event)
 		return false;
 
-	const Qt::KeyboardModifiers mods           = event->modifiers();
-	const bool                  hasShift       = (mods & Qt::ShiftModifier) != 0;
-	const bool                  hasCtrl        = (mods & Qt::ControlModifier) != 0;
-	const bool                  hasAlt         = (mods & Qt::AltModifier) != 0;
-	const bool                  hasMeta        = (mods & Qt::MetaModifier) != 0;
-	const bool                  isRepeat       = event->isAutoRepeat();
-	const bool                  keypadModifier = (mods & Qt::KeypadModifier) != 0;
+	const Qt::KeyboardModifiers mods = event->modifiers();
+	const bool hasShift = (mods & Qt::ShiftModifier) != 0;
+	const bool hasCtrl = (mods & Qt::ControlModifier) != 0;
+	const bool hasAlt = (mods & Qt::AltModifier) != 0;
+	const bool hasMeta = (mods & Qt::MetaModifier) != 0;
+	const bool isRepeat = event->isAutoRepeat();
+	const bool keypadModifier = (mods & Qt::KeypadModifier) != 0;
 	if (!isRepeat)
 	{
 		m_keypadRepeatArmed = false;
 		m_keypadRepeatQtKey = 0;
-		m_keypadRepeatCtrl  = false;
+		m_keypadRepeatCtrl = false;
 	}
 	const bool keypadRepeatFallback = !keypadModifier && isRepeat && m_keypadRepeatArmed &&
-	                                  event->key() == m_keypadRepeatQtKey && hasCtrl == m_keypadRepeatCtrl &&
-	                                  !hasMeta && !hasAlt && !hasShift;
+		event->key() == m_keypadRepeatQtKey && hasCtrl == m_keypadRepeatCtrl &&
+		!hasMeta && !hasAlt && !hasShift;
 	const bool keypad = keypadModifier || keypadRepeatFallback;
 
-	auto       tryAccelerator = [&]() -> bool
+	auto tryAccelerator = [&]() -> bool
 	{
 		if (hasMeta)
 			return false;
 		const int key = event->key();
 		if (key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt || key == Qt::Key_Meta ||
-		    key == Qt::Key_unknown)
+			key == Qt::Key_unknown)
 			return false;
 
 		quint32 virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
@@ -5709,13 +5888,13 @@ bool WorldView::handleWorldHotkey(QKeyEvent *event)
 			return false;
 		const qint64 mapKey = (static_cast<qint64>(virt) << 16) | keyCode;
 
-		const int    commandId = m_runtime->acceleratorCommandForKey(mapKey);
+		const int commandId = m_runtime->acceleratorCommandForKey(mapKey);
 		if (commandId < 0)
 			return false;
 
 		m_runtime->setCurrentActionSource(WorldRuntime::eUserAccelerator);
 		const bool ok = m_runtime->executeAcceleratorCommand(
-		    commandId, AcceleratorUtils::acceleratorToString(virt, keyCode));
+			commandId, AcceleratorUtils::acceleratorToString(virt, keyCode));
 		m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
 		return ok;
 	};
@@ -5729,7 +5908,7 @@ bool WorldView::handleWorldHotkey(QKeyEvent *event)
 	// 1) Macro hotkeys (F-keys and Alt+letter) as stored in macro names.
 	if (!hasMeta)
 	{
-		QString   macroName;
+		QString macroName;
 		const int key = event->key();
 		if (key >= Qt::Key_F1 && key <= Qt::Key_F35)
 		{
@@ -5756,8 +5935,8 @@ bool WorldView::handleWorldHotkey(QKeyEvent *event)
 		{
 			if ((event->key() == Qt::Key_F1 || event->key() == Qt::Key_F6) && !hasShift && !hasCtrl)
 			{
-				AppController *app     = AppController::instance();
-				const bool     f1Macro = app && app->getGlobalOption(QStringLiteral("F1macro")).toInt() != 0;
+				AppController* app = AppController::instance();
+				const bool f1Macro = app && app->getGlobalOption(QStringLiteral("F1macro")).toInt() != 0;
 				if (!f1Macro)
 					macroName.clear();
 			}
@@ -5772,11 +5951,11 @@ bool WorldView::handleWorldHotkey(QKeyEvent *event)
 	// 2) World keypad mapping from world properties.
 	if (keypad)
 	{
-		const QMap<QString, QString> &attrs         = m_runtime->worldAttributes();
-		const QString                 enabled       = attrs.value(QStringLiteral("keypad_enable"));
-		const bool                    keypadEnabled = (enabled == QStringLiteral("1") ||
-                                    enabled.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-                                    enabled.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
+		const QMap<QString, QString>& attrs = m_runtime->worldAttributes();
+		const QString enabled = attrs.value(QStringLiteral("keypad_enable"));
+		const bool keypadEnabled = (enabled == QStringLiteral("1") ||
+			enabled.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+			enabled.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
 		if (keypadEnabled)
 		{
 			QString token;
@@ -5834,18 +6013,18 @@ bool WorldView::handleWorldHotkey(QKeyEvent *event)
 			if (!token.isEmpty() && !hasMeta && !hasAlt && !hasShift)
 			{
 				QString keyName = hasCtrl ? QStringLiteral("Ctrl+%1").arg(token) : token;
-				const QList<WorldRuntime::Keypad> &entries = m_runtime->keypadEntries();
-				for (const WorldRuntime::Keypad &entry : entries)
+				const QList<WorldRuntime::Keypad>& entries = m_runtime->keypadEntries();
+				for (const WorldRuntime::Keypad& entry : entries)
 				{
 					if (entry.attributes.value(QStringLiteral("name"))
-					        .compare(keyName, Qt::CaseInsensitive) == 0)
+					         .compare(keyName, Qt::CaseInsensitive) == 0)
 					{
 						QString send = entry.content;
 						send.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
 						send.replace(QLatin1Char('\r'), QLatin1Char('\n'));
 						const QStringList lines = send.split(QLatin1Char('\n'));
-						QString           normalized;
-						for (const QString &line : lines)
+						QString normalized;
+						for (const QString& line : lines)
 						{
 							if (!line.trimmed().isEmpty())
 							{
@@ -5861,7 +6040,7 @@ bool WorldView::handleWorldHotkey(QKeyEvent *event)
 							{
 								m_keypadRepeatArmed = true;
 								m_keypadRepeatQtKey = event->key();
-								m_keypadRepeatCtrl  = hasCtrl;
+								m_keypadRepeatCtrl = hasCtrl;
 							}
 							emit sendText(send);
 							event->accept();
@@ -5877,7 +6056,7 @@ bool WorldView::handleWorldHotkey(QKeyEvent *event)
 	return false;
 }
 
-void WorldView::setInputText(const QString &text, bool markChanged)
+void WorldView::setInputText(const QString& text, bool markChanged)
 {
 	if (!m_input)
 		return;
@@ -5886,7 +6065,7 @@ void WorldView::setInputText(const QString &text, bool markChanged)
 	QTextCursor cursor = m_input->textCursor();
 	cursor.movePosition(QTextCursor::End);
 	m_input->setTextCursor(cursor);
-	m_settingText  = false;
+	m_settingText = false;
 	m_inputChanged = markChanged;
 	updateInputHeight();
 }
@@ -5896,10 +6075,10 @@ int WorldView::setCommandSelection(int first, int last) const
 	if (!m_input)
 		return eBadParameter;
 	const QString current = m_input->toPlainText();
-	const int     maxPos  = sizeToInt(current.size());
-	const int     start   = qBound(0, first - 1, maxPos);
-	const int     end     = qBound(0, last, maxPos);
-	QTextCursor   cursor  = m_input->textCursor();
+	const int maxPos = sizeToInt(current.size());
+	const int start = qBound(0, first - 1, maxPos);
+	const int end = qBound(0, last, maxPos);
+	QTextCursor cursor = m_input->textCursor();
 	cursor.setPosition(start);
 	cursor.setPosition(end, QTextCursor::KeepAnchor);
 	m_input->setTextCursor(cursor);
@@ -5938,7 +6117,7 @@ void WorldView::recallPartialHistory(int direction)
 	if (m_inputChanged)
 	{
 		m_partialCommand = m_input->toPlainText();
-		m_partialIndex   = (direction < 0) ? sizeToInt(m_history.size()) : -1;
+		m_partialIndex = (direction < 0) ? sizeToInt(m_history.size()) : -1;
 	}
 
 	if (m_partialCommand.isEmpty())
@@ -6048,13 +6227,13 @@ void WorldView::resetHistoryRecall()
 	m_inputChanged = false;
 }
 
-bool WorldView::tabCompleteOneLine(int startColumn, int endColumn, const QString &targetWordLower,
-                                   const QString &line, bool insertSpace)
+bool WorldView::tabCompleteOneLine(int startColumn, int endColumn, const QString& targetWordLower,
+                                   const QString& line, bool insertSpace)
 {
 	if (!m_input || targetWordLower.isEmpty() || line.isEmpty())
 		return false;
 
-	int       i          = 0;
+	int i = 0;
 	const int lineLength = sizeToInt(line.size());
 	while (i < lineLength)
 	{
@@ -6157,8 +6336,8 @@ bool WorldView::handleTabCompletionKeyPress()
 	if (!m_runtime)
 		return false;
 
-	const QVector<WorldRuntime::LineEntry> &lines   = m_runtime->lines();
-	int                                     scanned = 0;
+	const QVector<WorldRuntime::LineEntry>& lines = m_runtime->lines();
+	int scanned = 0;
 	for (int i = sizeToInt(lines.size()) - 1; i >= 0; --i)
 	{
 		if (++scanned > m_tabCompletionLines)
@@ -6170,7 +6349,7 @@ bool WorldView::handleTabCompletionKeyPress()
 	return false;
 }
 
-void InputTextEdit::keyPressEvent(QKeyEvent *event)
+void InputTextEdit::keyPressEvent(QKeyEvent* event)
 {
 	if (m_view && m_view->handleWorldHotkey(event))
 		return;
@@ -6181,32 +6360,32 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 		return;
 	}
 
-	const Qt::KeyboardModifiers modifiers  = event->modifiers();
+	const Qt::KeyboardModifiers modifiers = event->modifiers();
 	const bool enterWithoutActionModifiers = (modifiers == Qt::NoModifier || modifiers == Qt::KeypadModifier);
 
 	if (m_view && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) &&
-	    enterWithoutActionModifiers)
+		enterWithoutActionModifiers)
 	{
 		QString text = toPlainText();
 		if (m_view->m_runtime)
 		{
-			const QMap<QString, QString> &attrs     = m_view->m_runtime->worldAttributes();
-			const auto                    isEnabled = [](const QString &value)
+			const QMap<QString, QString>& attrs = m_view->m_runtime->worldAttributes();
+			const auto isEnabled = [](const QString& value)
 			{
 				return value == QStringLiteral("1") ||
-				       value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-				       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+					value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+					value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 			};
-			const bool spellOnSend      = isEnabled(attrs.value(QStringLiteral("spell_check_on_send")));
+			const bool spellOnSend = isEnabled(attrs.value(QStringLiteral("spell_check_on_send")));
 			const bool scriptingEnabled = isEnabled(attrs.value(QStringLiteral("enable_scripts"))) &&
-			                              attrs.value(QStringLiteral("script_language"))
-			                                      .compare(QStringLiteral("Lua"), Qt::CaseInsensitive) == 0;
+				attrs.value(QStringLiteral("script_language"))
+				     .compare(QStringLiteral("Lua"), Qt::CaseInsensitive) == 0;
 			const QString scriptPrefix = attrs.value(QStringLiteral("script_prefix"));
-			const bool    scriptCommand =
-			    scriptingEnabled && !scriptPrefix.isEmpty() && text.startsWith(scriptPrefix);
+			const bool scriptCommand =
+				scriptingEnabled && !scriptPrefix.isEmpty() && text.startsWith(scriptPrefix);
 			if (spellOnSend && !scriptCommand)
 			{
-				if (AppController *app = AppController::instance())
+				if (AppController* app = AppController::instance())
 					app->onCommandTriggered(QStringLiteral("SpellCheck"));
 				text = toPlainText();
 			}
@@ -6248,10 +6427,10 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 		}
 		if (m_view->m_ctrlBackspaceDeletesLastWord)
 		{
-			const QString current  = toPlainText();
-			const int     position = cursor.position();
-			QString       before   = current.left(position);
-			const QString after    = current.mid(position);
+			const QString current = toPlainText();
+			const int position = cursor.position();
+			QString before = current.left(position);
+			const QString after = current.mid(position);
 			while (before.endsWith(QLatin1Char(' ')))
 				before.chop(1);
 			if (const qsizetype spacePos = before.lastIndexOf(QLatin1Char(' ')); spacePos < 0)
@@ -6291,7 +6470,7 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 	}
 
 	if (m_view && (event->modifiers() & Qt::ControlModifier) &&
-	    !(event->modifiers() & (Qt::AltModifier | Qt::ShiftModifier | Qt::MetaModifier)))
+		!(event->modifiers() & (Qt::AltModifier | Qt::ShiftModifier | Qt::MetaModifier)))
 	{
 		if (event->key() == Qt::Key_N && m_view->m_ctrlNGoesToNextCommand)
 		{
@@ -6318,7 +6497,7 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 			if (m_view->m_arrowsChangeHistory)
 			{
 				if (m_view->m_arrowRecallsPartial &&
-				    (m_view->m_inputChanged || !m_view->m_partialCommand.isEmpty()))
+					(m_view->m_inputChanged || !m_view->m_partialCommand.isEmpty()))
 					m_view->recallPartialHistory(direction);
 				else
 					m_view->recallHistory(direction);
@@ -6336,12 +6515,12 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 	QPlainTextEdit::keyPressEvent(event);
 }
 
-void InputTextEdit::contextMenuEvent(QContextMenuEvent *event)
+void InputTextEdit::contextMenuEvent(QContextMenuEvent* event)
 {
-	QMenu *menu = createStandardContextMenu();
+	QMenu* menu = createStandardContextMenu();
 	if (m_view && menu)
 	{
-		for (const QList<QAction *> actions = menu->actions(); QAction *action : actions)
+		for (const QList<QAction*> actions = menu->actions(); QAction* action : actions)
 		{
 			if (action && action->shortcut() == QKeySequence::Paste)
 			{
