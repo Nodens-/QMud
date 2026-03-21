@@ -163,6 +163,30 @@ namespace
 		}
 	}
 
+	bool trimTrailingPromptLineBreak(QTextDocument *document)
+	{
+		if (!document)
+			return false;
+
+		QTextCursor cursor(document);
+		cursor.movePosition(QTextCursor::End);
+		if (cursor.position() <= 0)
+			return false;
+
+		cursor.movePosition(QTextCursor::Left, QTextCursor::KeepAnchor, 1);
+		const QString selected = cursor.selectedText();
+		if (selected.isEmpty())
+			return false;
+		const QChar ch = selected.at(0);
+		if (ch == QChar::ParagraphSeparator || ch == QChar::LineSeparator || ch == QLatin1Char('\n') ||
+		    ch == QLatin1Char('\r'))
+		{
+			cursor.removeSelectedText();
+			return true;
+		}
+		return false;
+	}
+
 	constexpr int kMiniMouseShift      = 0x01;
 	constexpr int kMiniMouseCtrl       = 0x02;
 	constexpr int kMiniMouseAlt        = 0x04;
@@ -1438,6 +1462,15 @@ void WorldView::appendOutputHtml(const QString &html, bool newLine)
 	requestOutputScrollToEnd();
 }
 
+void WorldView::commitPendingInlineInputBreak()
+{
+	if (m_runtime)
+		m_runtime->finalizePendingInputLineHardReturn();
+
+	appendOutputHtml(QString(), true);
+	m_breakBeforeNextServerOutput = false;
+}
+
 void WorldView::echoInputText(const QString &text)
 {
 	if (!m_displayMyInput || !m_output)
@@ -1464,11 +1497,54 @@ void WorldView::echoInputText(const QString &text)
 			echoSpans.push_back(span);
 		}
 	}
-	if (m_keepCommandsOnSameLine)
+	bool keepOnSameLine = m_keepCommandsOnSameLine;
+	if (m_runtime)
 	{
-		trimTrailingPromptWhitespace(m_outputDocument);
-		appendOutputTextInternal(trimmed, false, true, WorldRuntime::LineInput, echoSpans);
-		m_breakBeforeNextServerOutput = true;
+		const unsigned short source = m_runtime->currentActionSource();
+		const bool           interactiveSource =
+		    source == WorldRuntime::eUserTyping || source == WorldRuntime::eUserMacro ||
+		    source == WorldRuntime::eUserKeypad || source == WorldRuntime::eUserAccelerator ||
+		    source == WorldRuntime::eUserMenuAction;
+		if (!interactiveSource)
+			keepOnSameLine = false;
+	}
+
+	if (keepOnSameLine)
+	{
+		bool insertedBreakBeforeEcho = false;
+		if (m_breakBeforeNextServerOutput)
+		{
+			commitPendingInlineInputBreak();
+			insertedBreakBeforeEcho = true;
+		}
+		if (!m_outputDocument)
+		{
+			appendOutputTextInternal(trimmed, false, true, WorldRuntime::LineInput, echoSpans);
+			m_breakBeforeNextServerOutput = true;
+		}
+		else
+		{
+			bool consumedExistingBreak = false;
+			// Keep prompt-line echo updates visually stable by applying line-break
+			// consumption and echoed text insertion in a single document edit block.
+			QTextCursor editCursor(m_outputDocument);
+			editCursor.beginEditBlock();
+			trimTrailingPromptWhitespace(m_outputDocument);
+			if (!insertedBreakBeforeEcho)
+			{
+				consumedExistingBreak = trimTrailingPromptLineBreak(m_outputDocument);
+				if (consumedExistingBreak && m_runtime)
+				{
+					m_runtime->clearLastLineHardReturn();
+				}
+			}
+			appendOutputTextInternal(trimmed, false, true, WorldRuntime::LineInput, echoSpans);
+			if (consumedExistingBreak)
+				commitPendingInlineInputBreak();
+			editCursor.endEditBlock();
+			if (!consumedExistingBreak)
+				m_breakBeforeNextServerOutput = true;
+		}
 	}
 	else
 		appendOutputTextInternal(trimmed, true, true, WorldRuntime::LineInput, echoSpans);
@@ -2441,6 +2517,25 @@ void WorldView::copySelectionAsHtml() const
 void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool recordLine, int flags,
                                          const QVector<WorldRuntime::StyleSpan> &spans)
 {
+	const bool shouldBreakAfterInlineInput =
+	    (flags & (WorldRuntime::LineOutput | WorldRuntime::LineNote)) != 0;
+	bool injectPendingBreakBeforeRender = false;
+	if (shouldBreakAfterInlineInput && m_breakBeforeNextServerOutput)
+	{
+		// If this call already hard-breaks (e.g. Note()), just consume the
+		// pending break flag. Otherwise, inject a line break first.
+		if (!(text.isEmpty() && newLine))
+		{
+			if (m_runtime)
+				m_runtime->finalizePendingInputLineHardReturn();
+			injectPendingBreakBeforeRender = true;
+		}
+		else
+			m_breakBeforeNextServerOutput = false;
+		if (injectPendingBreakBeforeRender)
+			m_breakBeforeNextServerOutput = false;
+	}
+
 	int recordedFlags = flags;
 	if (m_runtime)
 	{
@@ -2517,19 +2612,10 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 	if (!m_outputDocument)
 		return;
 
-	const bool shouldBreakAfterInlineInput =
-	    (flags & (WorldRuntime::LineOutput | WorldRuntime::LineNote)) != 0;
-
 	if (m_frozen)
 	{
-		if (shouldBreakAfterInlineInput && m_breakBeforeNextServerOutput)
-		{
-			// If this call already hard-breaks (e.g. Note()), just consume the
-			// pending break flag. Otherwise, inject a line break first.
-			if (!(text.isEmpty() && newLine))
-				m_pendingOutput.push_back(PendingHtml{QString(), true});
-			m_breakBeforeNextServerOutput = false;
-		}
+		if (injectPendingBreakBeforeRender)
+			m_pendingOutput.push_back(PendingHtml{QString(), true});
 
 		QString                          displayText   = displayEntry.text;
 		QVector<WorldRuntime::StyleSpan> renderedSpans = displayEntry.spans;
@@ -2543,20 +2629,31 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 		return;
 	}
 
-	if (shouldBreakAfterInlineInput && m_breakBeforeNextServerOutput)
-	{
-		// If this call already hard-breaks (e.g. Note()), just consume the
-		// pending break flag. Otherwise, inject a line break first.
-		if (!(text.isEmpty() && newLine))
-			appendOutputHtml(QString(), true);
-		m_breakBeforeNextServerOutput = false;
-	}
-
 	QString                          displayText   = displayEntry.text;
 	QVector<WorldRuntime::StyleSpan> renderedSpans = displayEntry.spans;
 	buildDisplayLine(displayEntry, previousLineTime, displayText, renderedSpans);
 
 	const double opacity = lineOpacityForTimestamp(displayEntry.time);
+	if (injectPendingBreakBeforeRender)
+	{
+		const bool previousBulkState = m_bulkOutputRebuild;
+		m_bulkOutputRebuild          = true;
+		QTextCursor editCursor(m_outputDocument);
+		editCursor.beginEditBlock();
+		appendOutputHtml(QString(), true);
+		if (!appendOutputTextFast(displayText, renderedSpans, newLine, opacity))
+		{
+			appendOutputHtml(buildOutputHtml(displayText, renderedSpans, m_showBold, m_showItalic,
+			                                 m_showUnderline, m_alternativeInverse, m_lineSpacing, opacity),
+			                 newLine);
+		}
+		editCursor.endEditBlock();
+		m_bulkOutputRebuild = previousBulkState;
+		requestOutputScrollToEnd();
+		requestDrawOutputWindowNotification();
+		return;
+	}
+
 	if (!appendOutputTextFast(displayText, renderedSpans, newLine, opacity))
 	{
 		appendOutputHtml(buildOutputHtml(displayText, renderedSpans, m_showBold, m_showItalic,
@@ -2684,9 +2781,8 @@ void WorldView::updatePartialOutputText(const QString &text, const QVector<World
 		m_hasPartialOutput    = false;
 		m_partialOutputStart  = 0;
 		m_partialOutputLength = 0;
-		appendOutputHtml(QString(), true);
-		m_breakBeforeNextServerOutput = false;
-		cursor                        = QTextCursor(m_outputDocument);
+		commitPendingInlineInputBreak();
+		cursor = QTextCursor(m_outputDocument);
 		cursor.movePosition(QTextCursor::End);
 	}
 

@@ -64,7 +64,6 @@ WorldTimerDialog::WorldTimerDialog(WorldRuntime *runtime, WorldRuntime::Timer ti
       m_currentIndex(currentIndex)
 {
 	setWindowTitle(currentIndex < 0 ? QStringLiteral("Add timer") : QStringLiteral("Edit timer"));
-	resize(520, 360);
 	setMinimumSize(920, 690);
 	buildUi();
 	loadTimer();

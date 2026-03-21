@@ -1730,7 +1730,8 @@ static QList<WorldRuntime::Alias>   &mutableAliasList(WorldRuntime *runtime, Wor
 static QList<WorldRuntime::Timer>   &mutableTimerList(WorldRuntime *runtime, WorldRuntime::Plugin *plugin);
 static void commitTriggerListMutation(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin);
 static void commitAliasListMutation(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin);
-static void commitTimerListMutation(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin);
+static void commitTimerListMutation(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
+                                    bool structureChanged = false);
 
 static int  addTempTimer(const LuaCallbackEngine *engine, double seconds, const QString &text,
                          const int sendTo)
@@ -1783,7 +1784,7 @@ static int  addTempTimer(const LuaCallbackEngine *engine, double seconds, const 
 	resetTimerFields(timer);
 
 	timers.push_back(timer);
-	commitTimerListMutation(runtime, plugin);
+	commitTimerListMutation(runtime, plugin, true);
 	return eOK;
 }
 
@@ -4425,8 +4426,8 @@ static int luaMapColourList(lua_State *L)
 	int index = 1;
 	for (auto it = map.constBegin(); it != map.constEnd(); ++it)
 	{
-			const QString lhs     = WorldRuntime::rgbColourToName(it.key());
-			const QString rhs     = WorldRuntime::rgbColourToName(it.value());
+		const QString lhs     = WorldRuntime::rgbColourToName(it.key());
+		const QString rhs     = WorldRuntime::rgbColourToName(it.value());
 		const QString mapping = lhs + QStringLiteral(" = ") + rhs;
 		lua_pushinteger(L, index++);
 		lua_pushstring(L, mapping.toLocal8Bit().constData());
@@ -12815,10 +12816,15 @@ static void commitAliasListMutation(WorldRuntime *runtime, const WorldRuntime::P
 		runtime->markAliasesChanged();
 }
 
-static void commitTimerListMutation(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin)
+static void commitTimerListMutation(WorldRuntime *runtime, const WorldRuntime::Plugin *plugin,
+                                    const bool structureChanged)
 {
-	if (!plugin && runtime)
+	if (!runtime)
+		return;
+	if (!plugin)
 		runtime->markTimersChanged();
+	if (structureChanged)
+		runtime->noteTimerStructureMutation();
 }
 
 static bool resolvePluginContext(const LuaCallbackEngine *engine, WorldRuntime *runtime,
@@ -13039,7 +13045,7 @@ static int addTimerInternal(const LuaCallbackEngine *engine, const QString &rawN
 	resetTimerFields(timer);
 
 	timers.insert(insertIndex, timer);
-	commitTimerListMutation(runtime, plugin);
+	commitTimerListMutation(runtime, plugin, true);
 	return eOK;
 }
 
@@ -13189,7 +13195,7 @@ static int luaDeleteTimer(lua_State *L)
 		return 1;
 	}
 	timers.removeAt(index);
-	commitTimerListMutation(runtime, plugin);
+	commitTimerListMutation(runtime, plugin, true);
 	lua_pushnumber(L, eOK);
 	return 1;
 }
@@ -13279,7 +13285,7 @@ static int luaDeleteTemporaryTimers(lua_State *L)
 			removed++;
 		}
 	}
-	commitTimerListMutation(runtime, plugin);
+	commitTimerListMutation(runtime, plugin, removed > 0);
 	lua_pushnumber(L, removed);
 	return 1;
 }
@@ -13387,7 +13393,7 @@ static int luaDeleteTimerGroup(lua_State *L)
 			removed++;
 		}
 	}
-	commitTimerListMutation(runtime, plugin);
+	commitTimerListMutation(runtime, plugin, removed > 0);
 	lua_pushnumber(L, removed);
 	return 1;
 }
@@ -13432,11 +13438,14 @@ static int luaDeleteGroup(lua_State *L)
 	QList<WorldRuntime::Alias>   &aliases  = mutableAliasList(runtime, plugin);
 	QList<WorldRuntime::Timer>   &timers   = mutableTimerList(runtime, plugin);
 
-	const int removed = removeGroup(triggers) + removeGroup(aliases) + removeGroup(timers);
+	const int                     triggerRemoved = removeGroup(triggers);
+	const int                     aliasRemoved   = removeGroup(aliases);
+	const int                     timerRemoved   = removeGroup(timers);
+	const int                     removed        = triggerRemoved + aliasRemoved + timerRemoved;
 
 	commitTriggerListMutation(runtime, plugin);
 	commitAliasListMutation(runtime, plugin);
-	commitTimerListMutation(runtime, plugin);
+	commitTimerListMutation(runtime, plugin, timerRemoved > 0);
 
 	lua_pushnumber(L, removed);
 	return 1;

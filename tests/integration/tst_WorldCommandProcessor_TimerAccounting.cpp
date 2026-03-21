@@ -37,7 +37,7 @@ class tst_WorldCommandProcessor_TimerAccounting : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void dueTimerAdvancesAndIncrementsFiredCount()
 		{
@@ -91,7 +91,16 @@ class tst_WorldCommandProcessor_TimerAccounting : public QObject
 			QVERIFY(!QMudTimerScheduling::isTimerDue(timer, now, false));
 			QVERIFY(QMudTimerScheduling::isTimerDue(timer, now, true));
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+
+		void unnamedTimerCanBeDue()
+		{
+			WorldRuntime::Timer timer = makeTimer(QString());
+			const QDateTime     now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
+			timer.nextFireTime = now.addSecs(-1);
+
+			QVERIFY(QMudTimerScheduling::isTimerDue(timer, now, true));
+		}
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_TimerAccounting)

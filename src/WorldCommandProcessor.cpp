@@ -621,6 +621,11 @@ namespace
 		}
 		return signature;
 	}
+
+	bool pluginHasValidId(const WorldRuntime::Plugin &plugin)
+	{
+		return !plugin.attributes.value(QStringLiteral("id")).trimmed().isEmpty();
+	}
 } // namespace
 
 QString WorldCommandProcessor::fixHtmlString(const QString &source)
@@ -1625,7 +1630,8 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 			if (pluginIndex < 0 || pluginIndex >= pluginList.size())
 				continue;
 			WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
-			if (!plugin || !plugin->enabled || plugin->installPending || plugin->sequence >= 0)
+			if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
+			    plugin->sequence >= 0)
 				continue;
 			if (processOneAliasSequence(line, true, bOmitFromLog, bEchoAlias, bOmitFromHistory,
 			                            matchedAliases, oneShotAliases, plugin))
@@ -1649,7 +1655,8 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 			if (pluginIndex < 0 || pluginIndex >= pluginList.size())
 				continue;
 			WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
-			if (!plugin || !plugin->enabled || plugin->installPending || plugin->sequence < 0)
+			if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
+			    plugin->sequence < 0)
 				continue;
 			if (processOneAliasSequence(line, true, bOmitFromLog, bEchoAlias, bOmitFromHistory,
 			                            matchedAliases, oneShotAliases, plugin))
@@ -2943,7 +2950,8 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 		if (pluginIndex < 0 || pluginIndex >= pluginList.size())
 			continue;
 		WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
-		if (!plugin || !plugin->enabled || plugin->installPending || plugin->sequence >= 0)
+		if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
+		    plugin->sequence >= 0)
 			continue;
 		m_runtime->setStopTriggerEvaluation(WorldRuntime::KeepEvaluating);
 		processSequence(plugin->triggers, plugin);
@@ -2964,7 +2972,8 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			if (pluginIndex < 0 || pluginIndex >= pluginList.size())
 				continue;
 			WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
-			if (!plugin || !plugin->enabled || plugin->installPending || plugin->sequence < 0)
+			if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
+			    plugin->sequence < 0)
 				continue;
 			m_runtime->setStopTriggerEvaluation(WorldRuntime::KeepEvaluating);
 			processSequence(plugin->triggers, plugin);
@@ -2997,88 +3006,139 @@ void WorldCommandProcessor::checkTimers()
 
 	auto processTimers = [&](QList<WorldRuntime::Timer> &timers, const WorldRuntime::Plugin *plugin)
 	{
-		struct TimerKey
+		constexpr int kMaxRescansPerTick = 2;
+		int           rescanCount        = 0;
+		const bool    pluginScoped       = plugin != nullptr;
+		const QString pluginId =
+		    plugin ? plugin->attributes.value(QStringLiteral("id")).trimmed().toLower() : QString();
+
+		auto clearExecutingFlags = [&]
 		{
-				QString name;
+			if (!pluginScoped)
+			{
+				for (WorldRuntime::Timer &timer : timers)
+					timer.executingScript = false;
+				return;
+			}
+
+			if (pluginId.isEmpty() || !m_runtime)
+				return;
+			if (WorldRuntime::Plugin *activePlugin = m_runtime->pluginForId(pluginId))
+			{
+				for (WorldRuntime::Timer &timer : activePlugin->timers)
+					timer.executingScript = false;
+			}
 		};
-		QVector<TimerKey> fired;
 
-		for (int i = 0, size = safeQSizeToInt(timers.size()); i < size; ++i)
+		while (true)
 		{
-			WorldRuntime::Timer &timer = timers[i];
-			if (!QMudTimerScheduling::isTimerDue(timer, now, connected))
-				continue;
-			fired.push_back({timer.attributes.value(QStringLiteral("name")).trimmed()});
-		}
-
-		auto findTimerByName = [&](const QString &name) -> int
-		{
-			const QString normalized = name.trimmed().toLower();
+			QVector<int> firedIndices;
 			for (int i = 0, size = safeQSizeToInt(timers.size()); i < size; ++i)
 			{
-				if (timers.at(i).attributes.value(QStringLiteral("name")).trimmed().toLower() == normalized)
-					return i;
+				if (QMudTimerScheduling::isTimerDue(timers[i], now, connected))
+					firedIndices.push_back(i);
 			}
-			return -1;
-		};
 
-		for (const auto &[timerName] : fired)
-		{
-			const int timerIndex = findTimerByName(timerName);
-			if (timerIndex < 0)
-				continue;
-			WorldRuntime::Timer &timer = timers[timerIndex];
-			if (!isEnabledValue(timer.attributes.value(QStringLiteral("enabled"))))
-				continue;
-
-			QMudTimerScheduling::applyTimerFiredState(timer, now);
-			m_runtime->incrementTimersFired();
-
-			const int  sendToValue = timer.attributes.value(QStringLiteral("send_to")).toInt();
-			const bool omitFromOutput =
-			    isEnabledValue(timer.attributes.value(QStringLiteral("omit_from_output")));
-			const bool omitFromLog = isEnabledValue(timer.attributes.value(QStringLiteral("omit_from_log")));
-			const QString variableName = timer.attributes.value(QStringLiteral("variable"));
-			const QString label        = timer.attributes.value(QStringLiteral("name")).trimmed();
-			const QString sendText     = timer.children.value(QStringLiteral("send"));
-
-			timer.executingScript = true;
-			if (m_runtime)
-				m_runtime->setCurrentActionSource(WorldRuntime::eTimerFired);
-			sendTo(sendToValue, sendText, omitFromOutput, omitFromLog, variableName,
-			       QStringLiteral("Timer: %1").arg(label), plugin);
-			if (m_runtime)
-				m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
-			timer.executingScript = false;
-
-			if (const QString scriptName = timer.attributes.value(QStringLiteral("script"));
-			    !scriptName.isEmpty())
+			bool rescanNeeded = false;
+			for (const int timerIndex : std::as_const(firedIndices))
 			{
+				if (timerIndex < 0 || timerIndex >= safeQSizeToInt(timers.size()))
+				{
+					if (pluginScoped)
+						return;
+					rescanNeeded = true;
+					break;
+				}
+				if (!isEnabledValue(timers.at(timerIndex).attributes.value(QStringLiteral("enabled"))))
+					continue;
+
+				QMudTimerScheduling::applyTimerFiredState(timers[timerIndex], now);
+				m_runtime->incrementTimersFired();
+
+				const int sendToValue =
+				    timers.at(timerIndex).attributes.value(QStringLiteral("send_to")).toInt();
+				const bool omitFromOutput = isEnabledValue(
+				    timers.at(timerIndex).attributes.value(QStringLiteral("omit_from_output")));
+				const bool omitFromLog =
+				    isEnabledValue(timers.at(timerIndex).attributes.value(QStringLiteral("omit_from_log")));
+				const QString variableName =
+				    timers.at(timerIndex).attributes.value(QStringLiteral("variable"));
+				const QString label =
+				    timers.at(timerIndex).attributes.value(QStringLiteral("name")).trimmed();
+				const QString sendText   = timers.at(timerIndex).children.value(QStringLiteral("send"));
+				const QString scriptName = timers.at(timerIndex).attributes.value(QStringLiteral("script"));
+
+				timers[timerIndex].executingScript = true;
+				if (m_runtime)
+					m_runtime->setCurrentActionSource(WorldRuntime::eTimerFired);
+				const quint64 serialBeforeSend = m_runtime->timerStructureMutationSerial();
+				sendTo(sendToValue, sendText, omitFromOutput, omitFromLog, variableName,
+				       QStringLiteral("Timer: %1").arg(label), plugin);
+				if (m_runtime)
+					m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
+				const quint64 serialAfterSend = m_runtime->timerStructureMutationSerial();
+				if (serialAfterSend != serialBeforeSend)
+				{
+					clearExecutingFlags();
+					if (pluginScoped)
+						return;
+					rescanNeeded = true;
+					break;
+				}
+				timers[timerIndex].executingScript = false;
+
+				if (scriptName.isEmpty())
+					continue;
+
 				LuaCallbackEngine *lua = plugin ? plugin->lua.data() : m_runtime->luaCallbacks();
 				if (!plugin && !canExecuteWorldScript(QStringLiteral("Timer"), scriptName, lua, true))
 					continue;
-				if (lua)
+				if (!lua)
+					continue;
+
+				timers[timerIndex].executingScript = true;
+				if (m_runtime)
+					m_runtime->setCurrentActionSource(WorldRuntime::eTimerFired);
+				const quint64 serialBeforeScript = m_runtime->timerStructureMutationSerial();
+				lua->callFunctionWithStringsAndWildcards(scriptName, {label}, QStringList(),
+				                                         QMap<QString, QString>(), nullptr);
+				if (m_runtime)
+					m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
+				const quint64 serialAfterScript = m_runtime->timerStructureMutationSerial();
+				if (serialAfterScript != serialBeforeScript)
 				{
-					timer.executingScript = true;
-					if (m_runtime)
-						m_runtime->setCurrentActionSource(WorldRuntime::eTimerFired);
-					lua->callFunctionWithStringsAndWildcards(scriptName, {label}, QStringList(),
-					                                         QMap<QString, QString>(), nullptr);
-					if (m_runtime)
-						m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
-					timer.executingScript = false;
-					timer.invocationCount++;
+					clearExecutingFlags();
+					if (pluginScoped)
+						return;
+					rescanNeeded = true;
+					break;
 				}
+				timers[timerIndex].executingScript = false;
+				timers[timerIndex].invocationCount++;
 			}
+
+			if (!rescanNeeded || rescanCount >= kMaxRescansPerTick)
+				break;
+			++rescanCount;
 		}
 	};
 
 	processTimers(m_runtime->timersMutable(), nullptr);
-	for (auto &plugin : m_runtime->pluginsMutable())
+
+	QStringList pluginIds;
+	for (const auto &plugin : m_runtime->plugins())
 	{
-		if (!plugin.enabled || plugin.installPending)
+		if (!pluginHasValidId(plugin) || !plugin.enabled || plugin.installPending)
 			continue;
-		processTimers(plugin.timers, &plugin);
+		const QString pluginId = plugin.attributes.value(QStringLiteral("id")).trimmed().toLower();
+		pluginIds.push_back(pluginId);
+	}
+	for (const QString &pluginId : std::as_const(pluginIds))
+	{
+		WorldRuntime::Plugin *plugin = m_runtime->pluginForId(pluginId);
+		if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending)
+			continue;
+		processTimers(plugin->timers, plugin);
 	}
 }
 

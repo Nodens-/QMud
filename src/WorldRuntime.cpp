@@ -146,6 +146,16 @@ namespace
 		return static_cast<int>(value > kMaxInt ? kMaxInt : value);
 	}
 
+	bool hasValidPluginId(const WorldRuntime::Plugin &plugin)
+	{
+		return !plugin.attributes.value(QStringLiteral("id")).trimmed().isEmpty();
+	}
+
+	bool canExecutePlugin(const WorldRuntime::Plugin &plugin)
+	{
+		return hasValidPluginId(plugin) && plugin.enabled && plugin.lua && !plugin.installPending;
+	}
+
 	long roundedToLong(const double value)
 	{
 		return std::lround(value);
@@ -4219,7 +4229,7 @@ WorldRuntime::~WorldRuntime()
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (plugin.lua)
+		if (plugin.lua && hasValidPluginId(plugin))
 			plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginClose"));
 		savePluginStateForPlugin(plugin, false, nullptr);
 	}
@@ -10952,7 +10962,7 @@ bool WorldRuntime::callPluginCallbacksStopOnFalse(const QString &functionName, c
 	bool result = true;
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool       hasFunction = false;
 		const bool ok = plugin.lua->callFunctionWithString(functionName, payload, &hasFunction, true);
@@ -10969,7 +10979,7 @@ void WorldRuntime::callPluginCallbacks(const QString &functionName, const QStrin
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionWithString(functionName, payload, nullptr, true);
 	}
@@ -10979,7 +10989,7 @@ void WorldRuntime::callPluginCallbacksNoArgs(const QString &functionName)
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionNoArgs(functionName, nullptr, true);
 	}
@@ -10989,7 +10999,7 @@ bool WorldRuntime::callPluginCallbacksStopOnTrue(const QString &functionName, lo
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool       hasFunction = false;
 		const bool ok =
@@ -11005,7 +11015,7 @@ bool WorldRuntime::callPluginCallbacksStopOnTrueWithString(const QString &functi
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool hasFunction = false;
 		plugin.lua->callFunctionWithString(functionName, payload, &hasFunction, false);
@@ -11021,7 +11031,7 @@ void WorldRuntime::callPluginCallbacksTransformBytes(const QString &functionName
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool hasFunction = false;
 		plugin.lua->callFunctionWithBytesInOut(functionName, payload, &hasFunction);
@@ -11032,7 +11042,7 @@ void WorldRuntime::callPluginCallbacksTransformString(const QString &functionNam
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool hasFunction = false;
 		plugin.lua->callFunctionWithStringInOut(functionName, payload, &hasFunction);
@@ -11044,7 +11054,7 @@ bool WorldRuntime::callPluginCallbacksStopOnFalseWithNumberAndString(const QStri
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool       hasFunction = false;
 		const bool ok =
@@ -11061,7 +11071,7 @@ bool WorldRuntime::callPluginCallbacksStopOnFalseWithTwoNumbersAndString(const Q
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool       hasFunction = false;
 		const bool ok = plugin.lua->callFunctionWithTwoNumbersAndString(functionName, arg1, arg2, arg3,
@@ -11077,7 +11087,7 @@ void WorldRuntime::callPluginCallbacksWithNumberAndString(const QString &functio
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionWithNumberAndString(functionName, arg1, arg2, nullptr, true);
 	}
@@ -11087,7 +11097,7 @@ void WorldRuntime::callPluginCallbacksWithBytes(const QString &functionName, con
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionWithBytes(functionName, payload, nullptr, true);
 	}
@@ -11098,7 +11108,7 @@ bool WorldRuntime::callPluginCallbacksStopOnTrueBytes(const QString &functionNam
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool       hasFunction = false;
 		const bool ok =
@@ -11114,7 +11124,7 @@ void WorldRuntime::callPluginCallbacksWithNumberAndBytes(const QString &function
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionWithNumberAndBytes(functionName, arg1, payload, nullptr, true);
 	}
@@ -11129,7 +11139,7 @@ bool WorldRuntime::callPluginHotspotFunction(const QString &pluginId, const QStr
 	if (index < 0)
 		return false;
 	Plugin const &plugin = m_plugins[index];
-	if (!plugin.enabled || !plugin.lua || plugin.installPending)
+	if (!canExecutePlugin(plugin))
 		return false;
 	const unsigned short previousActionSource = m_currentActionSource;
 	m_currentActionSource                     = eHotspotCallback;
@@ -11623,7 +11633,7 @@ bool WorldRuntime::executeAcceleratorCommand(int commandId, const QString &keyLa
 		if (index < 0)
 			return false;
 		plugin = &m_plugins[index];
-		if (!plugin->enabled)
+		if (!hasValidPluginId(*plugin) || !plugin->enabled || plugin->installPending)
 			return false;
 	}
 
@@ -12585,7 +12595,8 @@ void WorldRuntime::setTimers(const QList<Timer> &timers)
 		applyTimerDefaults(rt);
 		m_timers.push_back(rt);
 	}
-	m_timerCount        = safeQSizeToInt(m_timers.size());
+	m_timerCount = safeQSizeToInt(m_timers.size());
+	noteTimerStructureMutation();
 	m_worldFileModified = true;
 }
 
@@ -12593,6 +12604,16 @@ void WorldRuntime::markTimersChanged()
 {
 	m_timerCount        = safeQSizeToInt(m_timers.size());
 	m_worldFileModified = true;
+}
+
+quint64 WorldRuntime::timerStructureMutationSerial() const
+{
+	return m_timerStructureMutationSerial;
+}
+
+void WorldRuntime::noteTimerStructureMutation()
+{
+	++m_timerStructureMutationSerial;
 }
 
 const QList<WorldRuntime::Macro> &WorldRuntime::macros() const
@@ -13591,6 +13612,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 	m_plugins.push_back(rp);
 	sortPluginsBySequence();
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
+	noteTimerStructureMutation();
 
 	// Queue install for the plugin we just loaded (not "last after sort"),
 	// otherwise lower-sequence plugins can remain permanently install-pending.
@@ -13617,6 +13639,7 @@ bool WorldRuntime::unloadPlugin(const QString &pluginId, QString *error)
 	savePluginStateForPlugin(plugin, false, nullptr);
 	m_plugins.removeAt(index);
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
+	noteTimerStructureMutation();
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginListChanged"));
 	return true;
 }
@@ -13959,7 +13982,7 @@ int WorldRuntime::broadcastPlugin(long message, const QString &text, const QStri
 	int count = 0;
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 
 		const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
@@ -15187,7 +15210,7 @@ void WorldRuntime::callPluginCallbacksWithTwoNumbersAndString(const QString &fun
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionWithTwoNumbersAndString(functionName, arg1, arg2, arg3, nullptr, true);
 	}
@@ -15531,6 +15554,32 @@ void WorldRuntime::replaceOutputLines(const QVector<LineEntry> &lines)
 	enforceOutputLineLimit();
 	if (m_view)
 		m_view->rebuildOutputFromLines(m_lines);
+}
+
+void WorldRuntime::finalizePendingInputLineHardReturn()
+{
+	if (m_lines.isEmpty())
+		return;
+
+	LineEntry &last = m_lines.last();
+	if (last.hardReturn)
+		return;
+	if ((last.flags & LineInput) == 0)
+		return;
+
+	last.hardReturn = true;
+}
+
+void WorldRuntime::clearLastLineHardReturn()
+{
+	if (m_lines.isEmpty())
+		return;
+
+	LineEntry &last = m_lines.last();
+	if (!last.hardReturn)
+		return;
+
+	last.hardReturn = false;
 }
 
 void WorldRuntime::beginIncomingLineLuaContext(const QString &text, int flags,
@@ -17985,7 +18034,7 @@ WorldView *WorldRuntime::view() const
 
 void WorldRuntime::queuePluginInstall(Plugin &plugin)
 {
-	if (!plugin.lua)
+	if (!plugin.lua || !hasValidPluginId(plugin))
 		return;
 	if (m_loadingDocument || m_pluginInstallDeferred)
 	{
@@ -18029,7 +18078,7 @@ void WorldRuntime::installPendingPlugins()
 	for (int i = 0; i < m_plugins.size(); ++i)
 	{
 		const Plugin &plugin = m_plugins.at(i);
-		if (plugin.installPending && plugin.lua)
+		if (plugin.installPending && plugin.lua && hasValidPluginId(plugin))
 			pendingIndices.push_back(i);
 	}
 	if (pendingIndices.isEmpty())

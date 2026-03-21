@@ -921,6 +921,13 @@ class WorldView : public QWidget
 		 */
 		bool appendOutputTextFast(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
 		                          bool newLine, double opacity);
+		/**
+		 * @brief Commits pending inline-input separator both in runtime state and output view.
+		 *
+		 * This keeps synthetic line breaks (inserted before subsequent output/input after
+		 * keep-on-same-line echo) reproducible when output is rebuilt from runtime lines.
+		 */
+		void commitPendingInlineInputBreak();
 		struct PendingHtml
 		{
 				QString html;

@@ -88,8 +88,7 @@ namespace QMudTimerScheduling
 			resetTimerFields(timer, now);
 		if (!timer.nextFireTime.isValid() || timer.nextFireTime > now)
 			return false;
-		const QString name = timer.attributes.value(QStringLiteral("name")).trimmed();
-		return !name.isEmpty();
+		return true;
 	}
 
 	void applyTimerFiredState(WorldRuntime::Timer &timer, const QDateTime &now)

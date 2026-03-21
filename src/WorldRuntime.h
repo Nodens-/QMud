@@ -528,6 +528,15 @@ class WorldRuntime : public QObject
 		 */
 		void                                 markTimersChanged();
 		/**
+		 * @brief Returns serial that increments on timer list structure mutations.
+		 * @return Monotonic timer-list structure mutation serial.
+		 */
+		[[nodiscard]] quint64                timerStructureMutationSerial() const;
+		/**
+		 * @brief Marks timer list structure as changed (insert/remove/reorder).
+		 */
+		void                                 noteTimerStructureMutation();
+		/**
 		 * @brief Returns macro list.
 		 * @return Immutable macro list.
 		 */
@@ -1274,6 +1283,21 @@ class WorldRuntime : public QObject
 		 * @param lines Restored output lines.
 		 */
 		void                                    replaceOutputLines(const QVector<LineEntry> &lines);
+		/**
+		 * @brief Marks the last buffered input line as hard-return terminated when pending.
+		 *
+		 * This is used when the view injects a synthetic visual separator (for example, when
+		 * keeping echoed commands on the same line) so runtime line state remains consistent
+		 * with the rendered document after rebuilds.
+		 */
+		void                                    finalizePendingInputLineHardReturn();
+		/**
+		 * @brief Clears hard-return termination flag on the last buffered line when set.
+		 *
+		 * Used by keep-on-same-line echo flow when the view consumes a trailing
+		 * line break from the existing rendered output.
+		 */
+		void                                    clearLastLineHardReturn();
 		/**
 		 * @brief Begins temporary incoming-line context for Lua callbacks.
 		 * @param text Incoming line text.
@@ -4124,6 +4148,7 @@ class WorldRuntime : public QObject
 		int                                   m_triggerCount{0};
 		int                                   m_aliasCount{0};
 		int                                   m_timerCount{0};
+		quint64                               m_timerStructureMutationSerial{0};
 		int                                   m_macroCount{0};
 		int                                   m_variableCount{0};
 		int                                   m_colourCount{0};

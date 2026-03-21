@@ -36,6 +36,7 @@ namespace
 	QMap<QString, QString>           g_worldMultilineAttrs;
 	QMap<QString, QVariant>          g_globalOptions;
 	QVector<WorldRuntime::LineEntry> g_runtimeLines;
+	unsigned short                   g_currentActionSource{WorldRuntime::eUnknownActionSource};
 	bool                             g_useFakeAppController{false};
 
 	AppController                   *fakeAppControllerPointer()
@@ -77,6 +78,7 @@ namespace
 		g_worldMultilineAttrs.clear();
 		g_globalOptions.clear();
 		g_runtimeLines.clear();
+		g_currentActionSource  = WorldRuntime::eUnknownActionSource;
 		g_useFakeAppController = false;
 	}
 
@@ -240,6 +242,16 @@ long WorldRuntime::backgroundColour() const
 	return 0;
 }
 
+long WorldRuntime::customColourText(int) const
+{
+	return 0;
+}
+
+long WorldRuntime::customColourBackground(int) const
+{
+	return 0;
+}
+
 void WorldRuntime::notifyDrawOutputWindow(int, int)
 {
 }
@@ -331,8 +343,14 @@ const QList<WorldRuntime::Macro> &WorldRuntime::macros() const
 	return macroStorage();
 }
 
-void WorldRuntime::setCurrentActionSource(unsigned short)
+void WorldRuntime::setCurrentActionSource(unsigned short source)
 {
+	g_currentActionSource = source;
+}
+
+unsigned short WorldRuntime::currentActionSource() const
+{
+	return g_currentActionSource;
 }
 
 int WorldRuntime::sendCommand(const QString &, bool, bool, bool, bool, bool) const
@@ -365,12 +383,45 @@ QString WorldRuntime::formatTime(const QDateTime &, const QString &format, bool)
 	return format;
 }
 
-void WorldRuntime::addLine(const QString &, int, bool, const QDateTime &)
+void WorldRuntime::addLine(const QString &text, int flags, bool hardReturn, const QDateTime &time)
 {
+	LineEntry entry;
+	entry.text       = text;
+	entry.flags      = flags;
+	entry.hardReturn = hardReturn;
+	entry.time       = time;
+	entry.lineNumber = g_runtimeLines.isEmpty() ? 1 : (g_runtimeLines.last().lineNumber + 1);
+	g_runtimeLines.push_back(entry);
 }
 
-void WorldRuntime::addLine(const QString &, int, const QVector<StyleSpan> &, bool, const QDateTime &)
+void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSpan> &spans, bool hardReturn,
+                           const QDateTime &time)
 {
+	LineEntry entry;
+	entry.text       = text;
+	entry.flags      = flags;
+	entry.hardReturn = hardReturn;
+	entry.spans      = spans;
+	entry.time       = time;
+	entry.lineNumber = g_runtimeLines.isEmpty() ? 1 : (g_runtimeLines.last().lineNumber + 1);
+	g_runtimeLines.push_back(entry);
+}
+
+void WorldRuntime::finalizePendingInputLineHardReturn()
+{
+	if (g_runtimeLines.isEmpty())
+		return;
+	LineEntry &last = g_runtimeLines.last();
+	if ((last.flags & LineInput) == 0)
+		return;
+	last.hardReturn = true;
+}
+
+void WorldRuntime::clearLastLineHardReturn()
+{
+	if (g_runtimeLines.isEmpty())
+		return;
+	g_runtimeLines.last().hardReturn = false;
 }
 // NOLINTEND(readability-convert-member-functions-to-static)
 
@@ -416,6 +467,61 @@ class tst_WorldView_Basic : public QObject
 			const QStringList lines = view.outputLines();
 			QVERIFY(!lines.isEmpty());
 			QVERIFY(lines.contains(QStringLiteral("line-one")));
+		}
+
+		void applyRuntimeSettingsPreservesSyntheticInputBreaks()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
+			g_currentActionSource = WorldRuntime::eUserTyping;
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+
+			view.echoInputText(QStringLiteral("look\r\n"));
+			view.appendOutputText(QStringLiteral("The room is quiet."), true);
+
+			const QStringList before = view.outputLines();
+			const int         lookAt = before.indexOf(QStringLiteral("look"));
+			QVERIFY(lookAt >= 0);
+			QCOMPARE(before.value(lookAt + 1), QStringLiteral("The room is quiet."));
+
+			view.applyRuntimeSettings();
+
+			const QStringList after      = view.outputLines();
+			const int         lookAfter  = after.indexOf(QStringLiteral("look"));
+			const int         mergedLine = after.indexOf(QStringLiteral("lookThe room is quiet."));
+			QVERIFY(lookAfter >= 0);
+			QCOMPARE(after.value(lookAfter + 1), QStringLiteral("The room is quiet."));
+			QCOMPARE(mergedLine, -1);
+
+			resetTestState();
+		}
+
+		void keepCommandsOnSameLineConsumesPreviousLineBreak()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
+			g_currentActionSource = WorldRuntime::eUserTyping;
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+
+			view.appendOutputText(QStringLiteral("Ready."), true);
+			view.echoInputText(QStringLiteral("look\r\n"));
+
+			const QStringList lines      = view.outputLines();
+			const int         mergedLine = lines.indexOf(QStringLiteral("Ready.look"));
+			QVERIFY(mergedLine >= 0);
+			QVERIFY(g_runtimeLines.size() >= 2);
+			QVERIFY(!g_runtimeLines.at(0).hardReturn);
+			QVERIFY(g_runtimeLines.at(1).hardReturn);
+
+			resetTestState();
 		}
 
 		void freezeStateSignalAndBufferedFlush()
@@ -707,4 +813,6 @@ class tst_WorldView_Basic : public QObject
 
 QTEST_MAIN(tst_WorldView_Basic)
 
+#if __has_include("tst_WorldView_Basic.moc")
 #include "tst_WorldView_Basic.moc"
+#endif
