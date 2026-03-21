@@ -31,6 +31,7 @@ class QSplitter;
 class QScrollBar;
 class QWidget;
 class QTextDocument;
+class QTextBlock;
 class QTimer;
 
 /**
@@ -448,6 +449,10 @@ class WorldView : public QWidget
 		 */
 		void                  applyMaxOutputLinesSetting() const;
 		/**
+		 * @brief Applies runtime settings without rebuilding the existing output buffer.
+		 */
+		void                  applyRuntimeSettingsWithoutOutputRebuild();
+		/**
 		 * @brief Adds command text to history buffer.
 		 * @param text Command text to add.
 		 */
@@ -716,31 +721,41 @@ class WorldView : public QWidget
 		                                                                  const QString &before,
 		                                                                  const QString &after);
 		/**
+		 * @brief Returns runtime attribute keys whose effective changes require output rebuild.
+		 * @return Set of runtime attribute keys requiring full output rebuild.
+		 */
+		[[nodiscard]] static const QSet<QString> &runtimeSettingsRebuildAttributeKeys();
+		/**
+		 * @brief Returns multiline runtime attribute keys whose changes require output rebuild.
+		 * @return Set of multiline runtime attribute keys requiring full output rebuild.
+		 */
+		[[nodiscard]] static const QSet<QString> &runtimeSettingsRebuildMultilineAttributeKeys();
+		/**
 		 * @brief Maps legacy font-weight value to Qt weight.
 		 * @param weight Legacy font-weight value.
 		 * @return Corresponding Qt font weight.
 		 */
-		static QFont::Weight      mapFontWeight(int weight);
+		static QFont::Weight                      mapFontWeight(int weight);
 		/**
 		 * @brief Returns output scrollbar position.
 		 * @return Output scrollbar position.
 		 */
-		[[nodiscard]] int         outputScrollPosition() const;
+		[[nodiscard]] int                         outputScrollPosition() const;
 		/**
 		 * @brief Returns true when output scrollbar is visible.
 		 * @return `true` when output scrollbar is visible.
 		 */
-		[[nodiscard]] bool        outputScrollBarVisible() const;
+		[[nodiscard]] bool                        outputScrollBarVisible() const;
 		/**
 		 * @brief Returns desired output scrollbar visibility setting.
 		 * @return Desired output scrollbar visibility setting.
 		 */
-		[[nodiscard]] bool        outputScrollBarWanted() const;
+		[[nodiscard]] bool                        outputScrollBarWanted() const;
 		/**
 		 * @brief Returns output text viewport rectangle.
 		 * @return Output text viewport rectangle.
 		 */
-		[[nodiscard]] QRect       outputTextRectangle() const;
+		[[nodiscard]] QRect                       outputTextRectangle() const;
 
 	private:
 		/**
@@ -749,6 +764,28 @@ class WorldView : public QWidget
 		 * @param underneath Render underneath layer when `true`; overlay otherwise.
 		 */
 		void                 paintMiniWindows(class QPainter *painter, bool underneath) const;
+		void                 applyRuntimeSettingsImpl(bool rebuildOutput);
+		/**
+		 * @brief Starts or restarts incremental in-place hyperlink style refresh.
+		 *
+		 * Processes output blocks in small chunks to keep the UI responsive while
+		 * applying hyperlink presentation setting changes to existing rendered text.
+		 */
+		void                 scheduleIncrementalHyperlinkRestyle();
+		/**
+		 * @brief Processes one incremental chunk of hyperlink style refresh.
+		 */
+		void                 processIncrementalHyperlinkRestyleChunk();
+		/**
+		 * @brief Stops any in-progress incremental hyperlink style refresh.
+		 */
+		void                 stopIncrementalHyperlinkRestyle();
+		/**
+		 * @brief Restyles hyperlink fragments within a single text block.
+		 * @param block Target output document block.
+		 * @return `true` when at least one fragment format was updated.
+		 */
+		bool                 restyleHyperlinksInBlock(const QTextBlock &block) const;
 		/**
 		 * @brief Handles mouse wheel scrolling over output.
 		 * @param angleDelta Wheel angle delta.
@@ -1088,6 +1125,8 @@ class WorldView : public QWidget
 		QElapsedTimer                           m_drawNotifyThrottle;
 		qint64                                  m_lastDrawNotifyMs{-1000};
 		bool                                    m_scrollToEndQueued{false};
+		QTimer                                 *m_hyperlinkRestyleTimer{nullptr};
+		int                                     m_hyperlinkRestyleNextBlock{-1};
 		bool                                    m_bulkOutputRebuild{false};
 		bool                                    m_keypadRepeatArmed{false};
 		int                                     m_keypadRepeatQtKey{0};

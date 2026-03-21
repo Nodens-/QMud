@@ -24,6 +24,9 @@
 #include <QRadioButton>
 #include <QSignalSpy>
 #include <QTextBrowser>
+#include <QTextCharFormat>
+#include <QTextDocument>
+#include <QTextFragment>
 #include <QTimer>
 #include <QtTest/QTest>
 
@@ -165,6 +168,31 @@ namespace
 			}
 		}
 		return {-1, -1};
+	}
+
+	struct AnchorFormatSnapshot
+	{
+			bool            found{false};
+			int             blockNumber{-1};
+			QTextCharFormat format;
+	};
+
+	AnchorFormatSnapshot findAnchorFormatSnapshot(const QTextDocument &document, const QString &href)
+	{
+		for (QTextBlock block = document.begin(); block.isValid(); block = block.next())
+		{
+			for (QTextBlock::Iterator iterator = block.begin(); !iterator.atEnd(); ++iterator)
+			{
+				const QTextFragment fragment = iterator.fragment();
+				if (!fragment.isValid())
+					continue;
+				const QTextCharFormat format = fragment.charFormat();
+				if (!format.isAnchor() || format.anchorHref() != href)
+					continue;
+				return AnchorFormatSnapshot{true, block.blockNumber(), format};
+			}
+		}
+		return {};
 	}
 } // namespace
 
@@ -805,6 +833,125 @@ class tst_WorldView_Basic : public QObject
 			QTRY_VERIFY(!view.hyperlinkHoverActive());
 			QTRY_VERIFY(!hoverSpy.isEmpty());
 			QTRY_COMPARE(hoverSpy.back().at(0).toString(), QString());
+
+			resetTestState();
+		}
+
+		void runtimeSettingsRebuildAttributeKeysExcludeWrapAndHyperlinkPresentation()
+		{
+			const QSet<QString> &rebuildKeys = WorldView::runtimeSettingsRebuildAttributeKeys();
+			QVERIFY(!rebuildKeys.contains(QStringLiteral("wrap")));
+			QVERIFY(!rebuildKeys.contains(QStringLiteral("wrap_column")));
+			QVERIFY(!rebuildKeys.contains(QStringLiteral("auto_wrap_window_width")));
+			QVERIFY(!rebuildKeys.contains(QStringLiteral("naws")));
+			QVERIFY(!rebuildKeys.contains(QStringLiteral("use_custom_link_colour")));
+			QVERIFY(!rebuildKeys.contains(QStringLiteral("underline_hyperlinks")));
+			QVERIFY(!rebuildKeys.contains(QStringLiteral("hyperlink_colour")));
+			QVERIFY(rebuildKeys.contains(QStringLiteral("show_bold")));
+			QVERIFY(rebuildKeys.contains(QStringLiteral("line_spacing")));
+		}
+
+		void applyRuntimeSettingsWithoutOutputRebuildPreservesRenderedBuffer()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.appendOutputText(QStringLiteral("existing-buffer-line"), true);
+			QVERIFY(view.outputLines().contains(QStringLiteral("existing-buffer-line")));
+			g_runtimeLines.clear();
+
+			WorldRuntime::LineEntry runtimeLine;
+			runtimeLine.text       = QStringLiteral("runtime-only-line");
+			runtimeLine.flags      = WorldRuntime::LineOutput;
+			runtimeLine.hardReturn = true;
+			g_runtimeLines.push_back(runtimeLine);
+
+			view.applyRuntimeSettingsWithoutOutputRebuild();
+			QVERIFY(view.outputLines().contains(QStringLiteral("existing-buffer-line")));
+			QVERIFY(!view.outputLines().contains(QStringLiteral("runtime-only-line")));
+
+			view.applyRuntimeSettings();
+			QVERIFY(view.outputLines().contains(QStringLiteral("runtime-only-line")));
+			QVERIFY(!view.outputLines().contains(QStringLiteral("existing-buffer-line")));
+
+			resetTestState();
+		}
+
+		void hyperlinkPresentationSettingsRestyleInPlaceWithoutRebuild()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("use_custom_link_colour"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("underline_hyperlinks"), QStringLiteral("0"));
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(860, 520);
+			view.show();
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			const QColor  targetColour(QStringLiteral("#12ab34"));
+			const QString oldestHref = QStringLiteral("https://example.org/inplace/000");
+			QString       newestHref;
+			for (int i = 0; i < 160; ++i)
+			{
+				const QString lineText = QStringLiteral("link-%1").arg(i, 3, 10, QLatin1Char('0'));
+				const QString href =
+				    QStringLiteral("https://example.org/inplace/%1").arg(i, 3, 10, QLatin1Char('0'));
+				newestHref = href;
+				WorldRuntime::StyleSpan span;
+				span.length     = lineText.size();
+				span.actionType = WorldRuntime::ActionHyperlink;
+				span.action     = href;
+				view.appendOutputTextStyled(lineText, {span}, true);
+			}
+			QCoreApplication::processEvents();
+
+			const QStringList linesBefore = view.outputLines();
+			QVERIFY(linesBefore.contains(QStringLiteral("link-000")));
+			QVERIFY(linesBefore.contains(QStringLiteral("link-159")));
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QTextDocument *document = browser->document();
+			QVERIFY(document);
+
+			const AnchorFormatSnapshot beforeOldest = findAnchorFormatSnapshot(*document, oldestHref);
+			const AnchorFormatSnapshot beforeNewest = findAnchorFormatSnapshot(*document, newestHref);
+			QVERIFY(beforeOldest.found);
+			QVERIFY(beforeNewest.found);
+			QVERIFY(!beforeOldest.format.fontUnderline());
+			QVERIFY(!beforeNewest.format.fontUnderline());
+
+			g_worldAttrs.insert(QStringLiteral("use_custom_link_colour"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("underline_hyperlinks"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("hyperlink_colour"), targetColour.name());
+			g_runtimeLines.clear();
+
+			view.applyRuntimeSettingsWithoutOutputRebuild();
+
+			QTRY_VERIFY2(
+			    [&]
+			    {
+				    const AnchorFormatSnapshot newest = findAnchorFormatSnapshot(*document, newestHref);
+				    return newest.found && newest.format.fontUnderline() &&
+				           newest.format.foreground().color() == targetColour;
+			    }(),
+			    "Newest hyperlink was not restyled in-place to underline/custom color.");
+
+			QTRY_VERIFY2(
+			    [&]
+			    {
+				    const AnchorFormatSnapshot oldest = findAnchorFormatSnapshot(*document, oldestHref);
+				    return oldest.found && oldest.format.fontUnderline() &&
+				           oldest.format.foreground().color() == targetColour;
+			    }(),
+			    "Oldest hyperlink was not restyled in-place to underline/custom color.");
+
+			const QStringList linesAfter = view.outputLines();
+			QCOMPARE(linesAfter, linesBefore);
 
 			resetTestState();
 		}

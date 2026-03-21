@@ -154,6 +154,16 @@ static QSet<QString> changedWorldViewMultilineAttributeKeys(const QMap<QString, 
 	return changedKeys;
 }
 
+static bool hasAnyChangedKeys(const QSet<QString> &changedKeys, const QSet<QString> &interestingKeys)
+{
+	for (const QString &key : changedKeys)
+	{
+		if (interestingKeys.contains(key))
+			return true;
+	}
+	return false;
+}
+
 static quint64 totalPhysicalMemoryBytes()
 {
 #if defined(Q_OS_UNIX)
@@ -2113,16 +2123,17 @@ void WorldPreferencesDialog::accept()
 		const QSet<QString> changedViewMultilineKeys = changedWorldViewMultilineAttributeKeys(
 		    worldMultilineBeforeApply, m_runtime->worldMultilineAttributes(), worldAttributesBeforeApply,
 		    m_runtime->worldAttributes());
-		if (const bool onlyMaxOutputLinesChanged =
-		        changedViewMultilineKeys.isEmpty() && changedViewAttributeKeys.size() == 1 &&
-		        changedViewAttributeKeys.contains(QStringLiteral("max_output_lines"));
-		    onlyMaxOutputLinesChanged)
+		if (!changedViewAttributeKeys.isEmpty() || !changedViewMultilineKeys.isEmpty())
 		{
-			m_view->applyMaxOutputLinesSetting();
-		}
-		else if (!changedViewAttributeKeys.isEmpty() || !changedViewMultilineKeys.isEmpty())
-		{
-			m_view->applyRuntimeSettings();
+			const bool needsFullRebuild =
+			    hasAnyChangedKeys(changedViewAttributeKeys,
+			                      WorldView::runtimeSettingsRebuildAttributeKeys()) ||
+			    hasAnyChangedKeys(changedViewMultilineKeys,
+			                      WorldView::runtimeSettingsRebuildMultilineAttributeKeys());
+			if (needsFullRebuild)
+				m_view->applyRuntimeSettings();
+			else
+				m_view->applyRuntimeSettingsWithoutOutputRebuild();
 		}
 	}
 

@@ -46,11 +46,13 @@
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStyle>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextDocumentFragment>
+#include <QTextFragment>
 #include <QTextOption>
 #include <QTimer>
 #include <QToolTip>
@@ -62,7 +64,11 @@
 
 namespace
 {
-	int sizeToInt(const qsizetype value)
+	constexpr int kAutoHyperlinkUnderlineProperty = QTextFormat::UserProperty + 1201;
+	constexpr int kAutoHyperlinkColourProperty    = QTextFormat::UserProperty + 1202;
+	constexpr int kHyperlinkRestyleBlocksPerChunk = 96;
+
+	int           sizeToInt(const qsizetype value)
 	{
 		constexpr qsizetype kMin = 0;
 		constexpr qsizetype kMax = std::numeric_limits<int>::max();
@@ -141,6 +147,31 @@ namespace
 	const QSet<QString> &worldViewRuntimeSettingsMultilineAttributeKeys()
 	{
 		static const QSet<QString> keys = {QStringLiteral("tab_completion_defaults")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewRuntimeSettingsRebuildAttributeKeys()
+	{
+		// Keep this set aligned with output-rendering branches in applyRuntimeSettingsImpl().
+		// Keys listed here require rebuilding existing buffered output to avoid stale formatting/layout.
+		static const QSet<QString> keys = {QStringLiteral("output_font_name"),
+		                                   QStringLiteral("output_font_height"),
+		                                   QStringLiteral("output_font_weight"),
+		                                   QStringLiteral("output_font_charset"),
+		                                   QStringLiteral("use_default_output_font"),
+		                                   QStringLiteral("output_background_colour"),
+		                                   QStringLiteral("output_text_colour"),
+		                                   QStringLiteral("show_bold"),
+		                                   QStringLiteral("show_italic"),
+		                                   QStringLiteral("show_underline"),
+		                                   QStringLiteral("alternative_inverse"),
+		                                   QStringLiteral("line_spacing")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewRuntimeSettingsRebuildMultilineAttributeKeys()
+	{
+		static const QSet<QString> keys = {};
 		return keys;
 	}
 
@@ -784,6 +815,10 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 			        return;
 		        rebuildOutputFromLines(m_runtime->lines());
 	        });
+	m_hyperlinkRestyleTimer = new QTimer(this);
+	m_hyperlinkRestyleTimer->setSingleShot(false);
+	connect(m_hyperlinkRestyleTimer, &QTimer::timeout, this,
+	        &WorldView::processIncrementalHyperlinkRestyleChunk);
 	m_timeFadeCancelled = QDateTime::currentDateTime();
 	auto *outputLayout  = new QHBoxLayout(m_outputContainer);
 	outputLayout->setContentsMargins(0, 0, 0, 0);
@@ -2924,9 +2959,10 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 				format.setBackground(back);
 			format.setFontWeight(span.bold && m_showBold ? QFont::Bold : baseFormat.fontWeight());
 			format.setFontItalic(span.italic && m_showItalic);
-			const bool hasLinkAction = isActionLink(span.actionType) && !span.action.isEmpty();
-			const bool underline =
-			    (span.underline && m_showUnderline) || (hasLinkAction && m_underlineHyperlinks);
+			const bool hasLinkAction       = isActionLink(span.actionType) && !span.action.isEmpty();
+			const bool spanUnderlineActive = span.underline && m_showUnderline;
+			const bool linkUnderlineActive = hasLinkAction && m_underlineHyperlinks;
+			const bool underline           = spanUnderlineActive || linkUnderlineActive;
 			format.setFontUnderline(underline);
 			format.setFontStrikeOut(span.strike);
 			if (hasLinkAction)
@@ -2934,14 +2970,26 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 				format.setAnchor(true);
 				format.setAnchorHref(span.action);
 				format.setToolTip(span.hint);
-				if (!fore.isValid() && m_useCustomLinkColour && m_hyperlinkColour.isValid())
-					format.setForeground(m_hyperlinkColour);
+				if (!spanUnderlineActive)
+					format.setProperty(kAutoHyperlinkUnderlineProperty, true);
+				else
+					format.clearProperty(kAutoHyperlinkUnderlineProperty);
+				if (!fore.isValid())
+				{
+					format.setProperty(kAutoHyperlinkColourProperty, true);
+					if (m_useCustomLinkColour && m_hyperlinkColour.isValid())
+						format.setForeground(m_hyperlinkColour);
+				}
+				else
+					format.clearProperty(kAutoHyperlinkColourProperty);
 			}
 			else
 			{
 				format.setAnchor(false);
 				format.setAnchorHref(QString());
 				format.setToolTip(QString());
+				format.clearProperty(kAutoHyperlinkUnderlineProperty);
+				format.clearProperty(kAutoHyperlinkColourProperty);
 			}
 			cursor.insertText(chunk, format);
 		}
@@ -3027,6 +3075,7 @@ void WorldView::clearOutputBuffer()
 	if (!m_outputDocument)
 		return;
 
+	stopIncrementalHyperlinkRestyle();
 	m_outputDocument->clear();
 	m_pendingOutput.clear();
 	m_hasPartialOutput    = false;
@@ -3045,6 +3094,7 @@ void WorldView::rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry> &l
 	if (!m_outputDocument)
 		return;
 
+	stopIncrementalHyperlinkRestyle();
 	m_outputDocument->clear();
 	m_pendingOutput.clear();
 	m_hasPartialOutput    = false;
@@ -3221,6 +3271,16 @@ bool WorldView::runtimeMultilineSettingValuesEquivalent(const QString &key, cons
 	if (!runtimeSettingsMultilineAttributeKeys().contains(key))
 		return before == after;
 	return before == after;
+}
+
+const QSet<QString> &WorldView::runtimeSettingsRebuildAttributeKeys()
+{
+	return worldViewRuntimeSettingsRebuildAttributeKeys();
+}
+
+const QSet<QString> &WorldView::runtimeSettingsRebuildMultilineAttributeKeys()
+{
+	return worldViewRuntimeSettingsRebuildMultilineAttributeKeys();
 }
 
 QFont::Weight WorldView::mapFontWeight(int weight)
@@ -3922,6 +3982,16 @@ bool WorldView::handleMiniWindowWheel(const QWheelEvent *event, const QWidget *s
 
 void WorldView::applyRuntimeSettings()
 {
+	applyRuntimeSettingsImpl(true);
+}
+
+void WorldView::applyRuntimeSettingsWithoutOutputRebuild()
+{
+	applyRuntimeSettingsImpl(false);
+}
+
+void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
+{
 	if (!m_runtime)
 		return;
 
@@ -4303,13 +4373,19 @@ void WorldView::applyRuntimeSettings()
 	m_alwaysRecordCommandHistory    = isEnabled(alwaysRecord);
 	const QString hyperlinkHistory  = attrs.value(QStringLiteral("hyperlink_adds_to_command_history"));
 	m_hyperlinkAddsToCommandHistory = isEnabled(hyperlinkHistory);
-	const QString useCustomLink     = attrs.value(QStringLiteral("use_custom_link_colour"));
-	m_useCustomLinkColour           = isEnabled(useCustomLink);
-	const QString underlineLinks    = attrs.value(QStringLiteral("underline_hyperlinks"));
-	m_underlineHyperlinks           = isEnabled(underlineLinks);
-	const QColor linkColour         = parseColor(attrs.value(QStringLiteral("hyperlink_colour")));
+	const bool    previousUseCustomLinkColour = m_useCustomLinkColour;
+	const bool    previousUnderlineHyperlinks = m_underlineHyperlinks;
+	const QColor  previousHyperlinkColour     = m_hyperlinkColour;
+	const QString useCustomLink               = attrs.value(QStringLiteral("use_custom_link_colour"));
+	m_useCustomLinkColour                     = isEnabled(useCustomLink);
+	const QString underlineLinks              = attrs.value(QStringLiteral("underline_hyperlinks"));
+	m_underlineHyperlinks                     = isEnabled(underlineLinks);
+	const QColor linkColour                   = parseColor(attrs.value(QStringLiteral("hyperlink_colour")));
 	if (linkColour.isValid())
 		m_hyperlinkColour = linkColour;
+	const bool hyperlinkPresentationChanged = previousUseCustomLinkColour != m_useCustomLinkColour ||
+	                                          previousUnderlineHyperlinks != m_underlineHyperlinks ||
+	                                          previousHyperlinkColour != m_hyperlinkColour;
 	if (m_noEchoOff)
 		m_noEcho = false;
 	m_historyLimit = attrs.value(QStringLiteral("history_lines")).toInt();
@@ -4327,6 +4403,8 @@ void WorldView::applyRuntimeSettings()
 			css += QStringLiteral(" color: %1;").arg(m_hyperlinkColour.name());
 		css += QStringLiteral(" }");
 		m_outputDocument->setDefaultStyleSheet(css);
+		if (hyperlinkPresentationChanged && !rebuildOutput)
+			scheduleIncrementalHyperlinkRestyle();
 	}
 
 	m_autoPause                  = false;
@@ -4346,12 +4424,158 @@ void WorldView::applyRuntimeSettings()
 		m_startPausedApplied = true;
 	}
 
-	if (m_runtime)
+	if (rebuildOutput)
+		stopIncrementalHyperlinkRestyle();
+	if (m_runtime && rebuildOutput)
 		rebuildOutputFromLines(m_runtime->lines());
 
 	updateInputWrap();
 	updateInputHeight();
 	applyDefaultInputHeight(false);
+}
+
+void WorldView::scheduleIncrementalHyperlinkRestyle()
+{
+	if (!m_outputDocument || !m_hyperlinkRestyleTimer)
+		return;
+
+	m_hyperlinkRestyleNextBlock = m_outputDocument->blockCount() - 1;
+	if (!m_hyperlinkRestyleTimer->isActive())
+		m_hyperlinkRestyleTimer->start(0);
+}
+
+void WorldView::processIncrementalHyperlinkRestyleChunk()
+{
+	if (!m_outputDocument || !m_hyperlinkRestyleTimer)
+	{
+		stopIncrementalHyperlinkRestyle();
+		return;
+	}
+
+	int processedBlocks = 0;
+	while (processedBlocks < kHyperlinkRestyleBlocksPerChunk && m_hyperlinkRestyleNextBlock >= 0)
+	{
+		const QTextBlock block = m_outputDocument->findBlockByNumber(m_hyperlinkRestyleNextBlock);
+		--m_hyperlinkRestyleNextBlock;
+		if (!block.isValid())
+			continue;
+		static_cast<void>(restyleHyperlinksInBlock(block));
+		++processedBlocks;
+	}
+
+	if (m_hyperlinkRestyleNextBlock < 0)
+		stopIncrementalHyperlinkRestyle();
+}
+
+void WorldView::stopIncrementalHyperlinkRestyle()
+{
+	if (m_hyperlinkRestyleTimer && m_hyperlinkRestyleTimer->isActive())
+		m_hyperlinkRestyleTimer->stop();
+	m_hyperlinkRestyleNextBlock = -1;
+}
+
+bool WorldView::restyleHyperlinksInBlock(const QTextBlock &block) const
+{
+	if (!m_outputDocument || !block.isValid())
+		return false;
+
+	struct HyperlinkFragmentUpdate
+	{
+			int             start{0};
+			int             length{0};
+			QTextCharFormat format;
+	};
+
+	const bool applyCustomHyperlinkColour = m_useCustomLinkColour && m_hyperlinkColour.isValid();
+	QVector<HyperlinkFragmentUpdate> updates;
+	for (QTextBlock::Iterator iterator = block.begin(); !iterator.atEnd(); ++iterator)
+	{
+		const QTextFragment fragment = iterator.fragment();
+		if (!fragment.isValid())
+			continue;
+
+		const QTextCharFormat format = fragment.charFormat();
+		if (!format.isAnchor() || format.anchorHref().isEmpty())
+			continue;
+
+		QTextCharFormat updated = format;
+		bool            changed = false;
+
+		if (const bool autoUnderline = updated.property(kAutoHyperlinkUnderlineProperty).toBool();
+		    autoUnderline)
+		{
+			if (updated.fontUnderline() != m_underlineHyperlinks)
+			{
+				updated.setFontUnderline(m_underlineHyperlinks);
+				changed = true;
+			}
+		}
+		else if (m_underlineHyperlinks && updated.hasProperty(QTextFormat::FontUnderline) &&
+		         !updated.fontUnderline())
+		{
+			// Legacy fast-path links may carry explicit non-underlined state from
+			// prior settings. Promote these to auto-managed so future flips remain
+			// in-place.
+			updated.setFontUnderline(true);
+			updated.setProperty(kAutoHyperlinkUnderlineProperty, true);
+			changed = true;
+		}
+
+		if (const bool autoColour = updated.property(kAutoHyperlinkColourProperty).toBool(); autoColour)
+		{
+			if (applyCustomHyperlinkColour)
+			{
+				if (!updated.hasProperty(QTextFormat::ForegroundBrush) ||
+				    updated.foreground().color() != m_hyperlinkColour)
+				{
+					updated.setForeground(m_hyperlinkColour);
+					changed = true;
+				}
+			}
+			else
+			{
+				const QColor defaultLinkColour =
+				    m_output ? m_output->palette().color(QPalette::Text) : QColor();
+				if (defaultLinkColour.isValid())
+				{
+					if (!updated.hasProperty(QTextFormat::ForegroundBrush) ||
+					    updated.foreground().color() != defaultLinkColour)
+					{
+						updated.setForeground(defaultLinkColour);
+						changed = true;
+					}
+				}
+				else if (updated.hasProperty(QTextFormat::ForegroundBrush))
+				{
+					updated.clearForeground();
+					changed = true;
+				}
+			}
+		}
+		else if (!updated.hasProperty(QTextFormat::ForegroundBrush) && applyCustomHyperlinkColour)
+		{
+			updated.setForeground(m_hyperlinkColour);
+			updated.setProperty(kAutoHyperlinkColourProperty, true);
+			changed = true;
+		}
+
+		if (!changed)
+			continue;
+
+		updates.push_back(HyperlinkFragmentUpdate{fragment.position(), fragment.length(), updated});
+	}
+
+	if (updates.isEmpty())
+		return false;
+
+	QTextCursor cursor(m_outputDocument);
+	for (const HyperlinkFragmentUpdate &update : updates)
+	{
+		cursor.setPosition(update.start);
+		cursor.setPosition(update.start + update.length, QTextCursor::KeepAnchor);
+		cursor.setCharFormat(update.format);
+	}
+	return true;
 }
 
 void WorldView::applyMaxOutputLinesSetting() const
