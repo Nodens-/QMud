@@ -16,6 +16,8 @@
 #include <QPoint>
 #include <QRegularExpression>
 #include <QScopedPointer>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QSet>
 #include <QString>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
@@ -442,6 +444,10 @@ class WorldView : public QWidget
 		 */
 		void                  applyRuntimeSettings();
 		/**
+		 * @brief Applies only the runtime output line limit to the output document.
+		 */
+		void                  applyMaxOutputLinesSetting() const;
+		/**
 		 * @brief Adds command text to history buffer.
 		 * @param text Command text to add.
 		 */
@@ -681,31 +687,60 @@ class WorldView : public QWidget
 		 */
 		static QColor parseColor(const QString &value);
 		/**
+		 * @brief Returns runtime attribute keys that affect world-view rendering/behavior.
+		 * @return Set of world-view-relevant runtime attribute keys.
+		 */
+		[[nodiscard]] static const QSet<QString> &runtimeSettingsAttributeKeys();
+		/**
+		 * @brief Returns multiline runtime attribute keys that affect world-view behavior.
+		 * @return Set of world-view-relevant multiline runtime attribute keys.
+		 */
+		[[nodiscard]] static const QSet<QString> &runtimeSettingsMultilineAttributeKeys();
+		/**
+		 * @brief Compares runtime attribute values using world-view semantic equivalence.
+		 * @param key Runtime attribute key.
+		 * @param before Value before edit.
+		 * @param after Value after edit.
+		 * @return `true` when values are equivalent for world-view behavior.
+		 */
+		[[nodiscard]] static bool runtimeSettingValuesEquivalent(const QString &key, const QString &before,
+		                                                         const QString &after);
+		/**
+		 * @brief Compares multiline runtime attribute values for world-view behavior.
+		 * @param key Multiline runtime attribute key.
+		 * @param before Value before edit.
+		 * @param after Value after edit.
+		 * @return `true` when values are equivalent for world-view behavior.
+		 */
+		[[nodiscard]] static bool runtimeMultilineSettingValuesEquivalent(const QString &key,
+		                                                                  const QString &before,
+		                                                                  const QString &after);
+		/**
 		 * @brief Maps legacy font-weight value to Qt weight.
 		 * @param weight Legacy font-weight value.
 		 * @return Corresponding Qt font weight.
 		 */
-		static QFont::Weight mapFontWeight(int weight);
+		static QFont::Weight      mapFontWeight(int weight);
 		/**
 		 * @brief Returns output scrollbar position.
 		 * @return Output scrollbar position.
 		 */
-		[[nodiscard]] int    outputScrollPosition() const;
+		[[nodiscard]] int         outputScrollPosition() const;
 		/**
 		 * @brief Returns true when output scrollbar is visible.
 		 * @return `true` when output scrollbar is visible.
 		 */
-		[[nodiscard]] bool   outputScrollBarVisible() const;
+		[[nodiscard]] bool        outputScrollBarVisible() const;
 		/**
 		 * @brief Returns desired output scrollbar visibility setting.
 		 * @return Desired output scrollbar visibility setting.
 		 */
-		[[nodiscard]] bool   outputScrollBarWanted() const;
+		[[nodiscard]] bool        outputScrollBarWanted() const;
 		/**
 		 * @brief Returns output text viewport rectangle.
 		 * @return Output text viewport rectangle.
 		 */
-		[[nodiscard]] QRect  outputTextRectangle() const;
+		[[nodiscard]] QRect       outputTextRectangle() const;
 
 	private:
 		/**

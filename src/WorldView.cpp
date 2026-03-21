@@ -69,6 +69,202 @@ namespace
 		return static_cast<int>(qBound(kMin, value, kMax));
 	}
 
+	const QSet<QString> &worldViewRuntimeSettingsAttributeKeys()
+	{
+		static const QSet<QString> keys = {QStringLiteral("output_font_name"),
+		                                   QStringLiteral("input_font_name"),
+		                                   QStringLiteral("output_font_height"),
+		                                   QStringLiteral("input_font_height"),
+		                                   QStringLiteral("output_font_weight"),
+		                                   QStringLiteral("input_font_weight"),
+		                                   QStringLiteral("input_font_italic"),
+		                                   QStringLiteral("output_font_charset"),
+		                                   QStringLiteral("input_font_charset"),
+		                                   QStringLiteral("use_default_output_font"),
+		                                   QStringLiteral("use_default_input_font"),
+		                                   QStringLiteral("input_background_colour"),
+		                                   QStringLiteral("input_text_colour"),
+		                                   QStringLiteral("output_background_colour"),
+		                                   QStringLiteral("output_text_colour"),
+		                                   QStringLiteral("wrap_column"),
+		                                   QStringLiteral("max_output_lines"),
+		                                   QStringLiteral("wrap"),
+		                                   QStringLiteral("auto_wrap_window_width"),
+		                                   QStringLiteral("naws"),
+		                                   QStringLiteral("wrap_input"),
+		                                   QStringLiteral("show_bold"),
+		                                   QStringLiteral("show_italic"),
+		                                   QStringLiteral("show_underline"),
+		                                   QStringLiteral("alternative_inverse"),
+		                                   QStringLiteral("line_spacing"),
+		                                   QStringLiteral("fade_output_buffer_after_seconds"),
+		                                   QStringLiteral("fade_output_opacity_percent"),
+		                                   QStringLiteral("fade_output_seconds"),
+		                                   QStringLiteral("pixel_offset"),
+		                                   QStringLiteral("display_my_input"),
+		                                   QStringLiteral("line_information"),
+		                                   QStringLiteral("escape_deletes_input"),
+		                                   QStringLiteral("save_deleted_command"),
+		                                   QStringLiteral("confirm_on_paste"),
+		                                   QStringLiteral("ctrl_backspace_deletes_last_word"),
+		                                   QStringLiteral("arrows_change_history"),
+		                                   QStringLiteral("arrow_keys_wrap"),
+		                                   QStringLiteral("arrow_recalls_partial"),
+		                                   QStringLiteral("alt_arrow_recalls_partial"),
+		                                   QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
+		                                   QStringLiteral("ctrl_p_goes_to_previous_command"),
+		                                   QStringLiteral("ctrl_n_goes_to_next_command"),
+		                                   QStringLiteral("confirm_before_replacing_typing"),
+		                                   QStringLiteral("double_click_inserts"),
+		                                   QStringLiteral("double_click_sends"),
+		                                   QStringLiteral("auto_repeat"),
+		                                   QStringLiteral("lower_case_tab_completion"),
+		                                   QStringLiteral("tab_completion_space"),
+		                                   QStringLiteral("tab_completion_lines"),
+		                                   QStringLiteral("auto_resize_command_window"),
+		                                   QStringLiteral("auto_resize_minimum_lines"),
+		                                   QStringLiteral("auto_resize_maximum_lines"),
+		                                   QStringLiteral("keep_commands_on_same_line"),
+		                                   QStringLiteral("no_echo_off"),
+		                                   QStringLiteral("always_record_command_history"),
+		                                   QStringLiteral("hyperlink_adds_to_command_history"),
+		                                   QStringLiteral("use_custom_link_colour"),
+		                                   QStringLiteral("underline_hyperlinks"),
+		                                   QStringLiteral("hyperlink_colour"),
+		                                   QStringLiteral("history_lines"),
+		                                   QStringLiteral("auto_pause"),
+		                                   QStringLiteral("keep_pause_at_bottom"),
+		                                   QStringLiteral("start_paused")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewRuntimeSettingsMultilineAttributeKeys()
+	{
+		static const QSet<QString> keys = {QStringLiteral("tab_completion_defaults")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewEnabledBooleanAttributeKeys()
+	{
+		static const QSet<QString> keys = {QStringLiteral("wrap"),
+		                                   QStringLiteral("auto_wrap_window_width"),
+		                                   QStringLiteral("naws"),
+		                                   QStringLiteral("wrap_input"),
+		                                   QStringLiteral("alternative_inverse"),
+		                                   QStringLiteral("display_my_input"),
+		                                   QStringLiteral("line_information"),
+		                                   QStringLiteral("escape_deletes_input"),
+		                                   QStringLiteral("save_deleted_command"),
+		                                   QStringLiteral("confirm_on_paste"),
+		                                   QStringLiteral("ctrl_backspace_deletes_last_word"),
+		                                   QStringLiteral("arrows_change_history"),
+		                                   QStringLiteral("arrow_keys_wrap"),
+		                                   QStringLiteral("arrow_recalls_partial"),
+		                                   QStringLiteral("alt_arrow_recalls_partial"),
+		                                   QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
+		                                   QStringLiteral("ctrl_p_goes_to_previous_command"),
+		                                   QStringLiteral("ctrl_n_goes_to_next_command"),
+		                                   QStringLiteral("confirm_before_replacing_typing"),
+		                                   QStringLiteral("double_click_inserts"),
+		                                   QStringLiteral("double_click_sends"),
+		                                   QStringLiteral("auto_repeat"),
+		                                   QStringLiteral("lower_case_tab_completion"),
+		                                   QStringLiteral("tab_completion_space"),
+		                                   QStringLiteral("auto_resize_command_window"),
+		                                   QStringLiteral("keep_commands_on_same_line"),
+		                                   QStringLiteral("no_echo_off"),
+		                                   QStringLiteral("always_record_command_history"),
+		                                   QStringLiteral("hyperlink_adds_to_command_history"),
+		                                   QStringLiteral("use_custom_link_colour"),
+		                                   QStringLiteral("underline_hyperlinks"),
+		                                   QStringLiteral("auto_pause"),
+		                                   QStringLiteral("keep_pause_at_bottom"),
+		                                   QStringLiteral("start_paused"),
+		                                   QStringLiteral("use_default_output_font"),
+		                                   QStringLiteral("use_default_input_font")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewDisabledBooleanAttributeKeys()
+	{
+		static const QSet<QString> keys = {QStringLiteral("show_bold"), QStringLiteral("show_italic"),
+		                                   QStringLiteral("show_underline")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewNumericAttributeKeys()
+	{
+		static const QSet<QString> keys = {QStringLiteral("output_font_height"),
+		                                   QStringLiteral("input_font_height"),
+		                                   QStringLiteral("output_font_weight"),
+		                                   QStringLiteral("input_font_weight"),
+		                                   QStringLiteral("input_font_italic"),
+		                                   QStringLiteral("output_font_charset"),
+		                                   QStringLiteral("input_font_charset"),
+		                                   QStringLiteral("wrap_column"),
+		                                   QStringLiteral("max_output_lines"),
+		                                   QStringLiteral("line_spacing"),
+		                                   QStringLiteral("fade_output_buffer_after_seconds"),
+		                                   QStringLiteral("fade_output_opacity_percent"),
+		                                   QStringLiteral("fade_output_seconds"),
+		                                   QStringLiteral("pixel_offset"),
+		                                   QStringLiteral("tab_completion_lines"),
+		                                   QStringLiteral("auto_resize_minimum_lines"),
+		                                   QStringLiteral("auto_resize_maximum_lines"),
+		                                   QStringLiteral("history_lines")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewColorAttributeKeys()
+	{
+		static const QSet<QString> keys = {
+		    QStringLiteral("input_background_colour"), QStringLiteral("input_text_colour"),
+		    QStringLiteral("output_background_colour"), QStringLiteral("output_text_colour"),
+		    QStringLiteral("hyperlink_colour")};
+		return keys;
+	}
+
+	bool isEnabledFlagValue(const QString &value)
+	{
+		return value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0 ||
+		       value == QStringLiteral("1");
+	}
+
+	bool isDisabledFlagValue(const QString &value)
+	{
+		return value.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+		       value.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0 ||
+		       value == QStringLiteral("0");
+	}
+
+	int canonicalWorldViewNumericValue(const QString &key, const QString &value)
+	{
+		bool ok     = false;
+		int  parsed = value.toInt(&ok);
+		if (key == QStringLiteral("line_spacing"))
+			return ok && parsed >= 0 ? parsed : 0;
+		if (key == QStringLiteral("fade_output_buffer_after_seconds"))
+			return ok && parsed >= 0 ? parsed : 0;
+		if (key == QStringLiteral("fade_output_opacity_percent"))
+		{
+			if (!ok)
+				parsed = 100;
+			return qBound(0, parsed, 100);
+		}
+		if (key == QStringLiteral("fade_output_seconds"))
+			return ok && parsed > 0 ? parsed : 1;
+		if (key == QStringLiteral("tab_completion_lines"))
+			return ok && parsed >= 1 ? parsed : 200;
+		if (key == QStringLiteral("auto_resize_minimum_lines"))
+			return ok && parsed > 0 ? parsed : 1;
+		if (key == QStringLiteral("auto_resize_maximum_lines"))
+			return ok && parsed > 0 ? parsed : 20;
+		if (key == QStringLiteral("history_lines"))
+			return ok && parsed >= 0 ? parsed : 0;
+		return ok ? parsed : 0;
+	}
+
 	QString anchorAtGlobalCursor(const QTextBrowser *browser)
 	{
 		if (!browser || !browser->isVisible() || !browser->viewport())
@@ -1524,7 +1720,7 @@ void WorldView::echoInputText(const QString &text)
 		}
 		else
 		{
-			bool consumedExistingBreak = false;
+			bool        consumedExistingBreak = false;
 			// Keep prompt-line echo updates visually stable by applying line-break
 			// consumption and echoed text insertion in a single document edit block.
 			QTextCursor editCursor(m_outputDocument);
@@ -2986,6 +3182,47 @@ QColor WorldView::parseColor(const QString &value)
 	return {};
 }
 
+const QSet<QString> &WorldView::runtimeSettingsAttributeKeys()
+{
+	return worldViewRuntimeSettingsAttributeKeys();
+}
+
+const QSet<QString> &WorldView::runtimeSettingsMultilineAttributeKeys()
+{
+	return worldViewRuntimeSettingsMultilineAttributeKeys();
+}
+
+bool WorldView::runtimeSettingValuesEquivalent(const QString &key, const QString &before,
+                                               const QString &after)
+{
+	if (before == after)
+		return true;
+	if (const auto &enabledBoolKeys = worldViewEnabledBooleanAttributeKeys(); enabledBoolKeys.contains(key))
+		return isEnabledFlagValue(before) == isEnabledFlagValue(after);
+	if (const auto &disabledBoolKeys = worldViewDisabledBooleanAttributeKeys();
+	    disabledBoolKeys.contains(key))
+		return isDisabledFlagValue(before) == isDisabledFlagValue(after);
+	if (const auto &numericKeys = worldViewNumericAttributeKeys(); numericKeys.contains(key))
+		return canonicalWorldViewNumericValue(key, before) == canonicalWorldViewNumericValue(key, after);
+	if (const auto &colorKeys = worldViewColorAttributeKeys(); colorKeys.contains(key))
+	{
+		const QColor beforeColor = parseColor(before);
+		const QColor afterColor  = parseColor(after);
+		if (!beforeColor.isValid() && !afterColor.isValid())
+			return true;
+		return beforeColor.isValid() && afterColor.isValid() && beforeColor.rgba() == afterColor.rgba();
+	}
+	return before == after;
+}
+
+bool WorldView::runtimeMultilineSettingValuesEquivalent(const QString &key, const QString &before,
+                                                        const QString &after)
+{
+	if (!runtimeSettingsMultilineAttributeKeys().contains(key))
+		return before == after;
+	return before == after;
+}
+
 QFont::Weight WorldView::mapFontWeight(int weight)
 {
 	if (weight >= 700)
@@ -4082,9 +4319,7 @@ void WorldView::applyRuntimeSettings()
 		m_history.remove(0, m_history.size() - m_historyLimit);
 	if (m_outputDocument)
 	{
-		bool ok             = false;
-		int  maxOutputLines = attrs.value(QStringLiteral("max_output_lines")).toInt(&ok);
-		m_outputDocument->setMaximumBlockCount(maxOutputLines > 0 ? maxOutputLines : 0);
+		applyMaxOutputLinesSetting();
 
 		QString css = QStringLiteral("a { text-decoration: %1;")
 		                  .arg(m_underlineHyperlinks ? QStringLiteral("underline") : QStringLiteral("none"));
@@ -4117,6 +4352,15 @@ void WorldView::applyRuntimeSettings()
 	updateInputWrap();
 	updateInputHeight();
 	applyDefaultInputHeight(false);
+}
+
+void WorldView::applyMaxOutputLinesSetting() const
+{
+	if (!m_runtime || !m_outputDocument)
+		return;
+
+	const int maxOutputLines = m_runtime->worldAttributes().value(QStringLiteral("max_output_lines")).toInt();
+	m_outputDocument->setMaximumBlockCount(maxOutputLines > 0 ? maxOutputLines : 0);
 }
 
 int WorldView::tooltipStartDelayMs() const

@@ -12411,14 +12411,17 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 		normalizedValue = normalizePathForRuntime(normalizedValue);
 	if (key == QStringLiteral("auto_log_file_name"))
 		normalizedValue = normalizeAutoLogFileNameValue(normalizedValue);
+	if (const auto existing = m_worldAttributes.constFind(key);
+	    existing != m_worldAttributes.constEnd() && existing.value() == normalizedValue)
+	{
+		return;
+	}
 	m_worldAttributes.insert(key, normalizedValue);
 	if (key == QStringLiteral("max_output_lines"))
 		enforceOutputLineLimit();
 	if (!m_loadingDocument)
 		m_worldFileModified = true;
 	emit worldAttributeChanged(key);
-	if (key == QStringLiteral("max_output_lines") && !m_loadingDocument && m_view)
-		m_view->rebuildOutputFromLines(m_lines);
 	if (key == QStringLiteral("script_filename") && m_scriptWatcher)
 	{
 		const QStringList watched = m_scriptWatcher->files();

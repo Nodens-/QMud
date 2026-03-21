@@ -119,6 +119,41 @@ static bool confirmRemoval(QWidget *parent, const QString &singular)
 	return result == QMessageBox::Yes;
 }
 
+static QSet<QString> changedWorldViewAttributeKeys(const QMap<QString, QString> &before,
+                                                   const QMap<QString, QString> &after)
+{
+	QSet<QString> changedKeys;
+	for (const QString &key : WorldView::runtimeSettingsAttributeKeys())
+	{
+		if (!WorldView::runtimeSettingValuesEquivalent(key, before.value(key), after.value(key)))
+			changedKeys.insert(key);
+	}
+	return changedKeys;
+}
+
+static QSet<QString> changedWorldViewMultilineAttributeKeys(const QMap<QString, QString> &beforeMultiline,
+                                                            const QMap<QString, QString> &afterMultiline,
+                                                            const QMap<QString, QString> &beforeAttributes,
+                                                            const QMap<QString, QString> &afterAttributes)
+{
+	QSet<QString> changedKeys;
+	for (const QString &key : WorldView::runtimeSettingsMultilineAttributeKeys())
+	{
+		QString beforeValue = beforeMultiline.value(key);
+		QString afterValue  = afterMultiline.value(key);
+		if (key == QStringLiteral("tab_completion_defaults"))
+		{
+			if (beforeValue.isEmpty())
+				beforeValue = beforeAttributes.value(key);
+			if (afterValue.isEmpty())
+				afterValue = afterAttributes.value(key);
+		}
+		if (!WorldView::runtimeMultilineSettingValuesEquivalent(key, beforeValue, afterValue))
+			changedKeys.insert(key);
+	}
+	return changedKeys;
+}
+
 static quint64 totalPhysicalMemoryBytes()
 {
 #if defined(Q_OS_UNIX)
@@ -996,6 +1031,8 @@ void WorldPreferencesDialog::setInitialPage(const Page page)
 
 void WorldPreferencesDialog::accept()
 {
+	QMap<QString, QString> worldAttributesBeforeApply;
+	QMap<QString, QString> worldMultilineBeforeApply;
 	if (m_runtime)
 	{
 		auto readSwatchValue = [](const QLineEdit *edit) -> QString
@@ -1209,9 +1246,11 @@ void WorldPreferencesDialog::accept()
 			}
 		}
 
+		worldAttributesBeforeApply          = m_runtime->worldAttributes();
+		worldMultilineBeforeApply           = m_runtime->worldMultilineAttributes();
 		const bool    hadLogOpenBeforeApply = m_runtime->isLogOpen();
 		const QString previousAutoLogFileName =
-		    m_runtime->worldAttributes().value(QStringLiteral("auto_log_file_name"));
+		    worldAttributesBeforeApply.value(QStringLiteral("auto_log_file_name"));
 
 		if (m_worldName)
 			m_runtime->setWorldAttribute(QStringLiteral("name"), m_worldName->text().trimmed());
@@ -2068,7 +2107,24 @@ void WorldPreferencesDialog::accept()
 	m_runtime->syncChatAcceptCallsWithPreferences();
 
 	if (m_view)
-		m_view->applyRuntimeSettings();
+	{
+		const QSet<QString> changedViewAttributeKeys =
+		    changedWorldViewAttributeKeys(worldAttributesBeforeApply, m_runtime->worldAttributes());
+		const QSet<QString> changedViewMultilineKeys = changedWorldViewMultilineAttributeKeys(
+		    worldMultilineBeforeApply, m_runtime->worldMultilineAttributes(), worldAttributesBeforeApply,
+		    m_runtime->worldAttributes());
+		if (const bool onlyMaxOutputLinesChanged =
+		        changedViewMultilineKeys.isEmpty() && changedViewAttributeKeys.size() == 1 &&
+		        changedViewAttributeKeys.contains(QStringLiteral("max_output_lines"));
+		    onlyMaxOutputLinesChanged)
+		{
+			m_view->applyMaxOutputLinesSetting();
+		}
+		else if (!changedViewAttributeKeys.isEmpty() || !changedViewMultilineKeys.isEmpty())
+		{
+			m_view->applyRuntimeSettings();
+		}
+	}
 
 	QDialog::accept();
 }
