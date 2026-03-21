@@ -6225,6 +6225,16 @@ void WorldView::resetHistoryRecall()
 	m_partialIndex = -1;
 	m_partialCommand.clear();
 	m_inputChanged = false;
+	resetTabCompletionCycle();
+}
+
+void WorldView::resetTabCompletionCycle()
+{
+	m_tabCompletionCycleTargetLower.clear();
+	m_tabCompletionCycleStartColumn = -1;
+	m_tabCompletionCycleEndColumn = -1;
+	m_tabCompletionCycleLastSource = -2;
+	m_tabCompletionCycleActive = false;
 }
 
 bool WorldView::tabCompleteOneLine(int startColumn, int endColumn, const QString& targetWordLower,
@@ -6295,17 +6305,77 @@ bool WorldView::handleTabCompletionKeyPress()
 	if (!m_input)
 		return false;
 
-	const QTextCursor cursor = m_input->textCursor();
+	QTextCursor cursor = m_input->textCursor();
 	if (cursor.selectionStart() != cursor.selectionEnd())
+	{
+		resetTabCompletionCycle();
 		return false;
+	}
 
 	const QString currentText = m_input->toPlainText();
 	if (currentText.isEmpty())
+	{
+		resetTabCompletionCycle();
 		return false;
+	}
 
-	const int endColumn = cursor.position();
-	if (endColumn <= 0 || endColumn > currentText.size())
-		return false;
+	int endColumn = cursor.position();
+	int startColumn = -1;
+	int lastSource = -2;
+	QString targetWordLower;
+
+	bool continueCycle = m_tabCompletionCycleActive;
+	if (continueCycle)
+	{
+		const bool cycleRangeValid = m_tabCompletionCycleStartColumn >= 0 &&
+			m_tabCompletionCycleEndColumn > m_tabCompletionCycleStartColumn &&
+			m_tabCompletionCycleEndColumn <= currentText.size();
+		if (!cycleRangeValid || endColumn != m_tabCompletionCycleEndColumn)
+			continueCycle = false;
+	}
+
+	if (continueCycle)
+	{
+		startColumn = m_tabCompletionCycleStartColumn;
+		endColumn = m_tabCompletionCycleEndColumn;
+		lastSource = m_tabCompletionCycleLastSource;
+		targetWordLower = m_tabCompletionCycleTargetLower;
+		if (targetWordLower.isEmpty())
+		{
+			resetTabCompletionCycle();
+			return false;
+		}
+	}
+	else
+	{
+		if (endColumn <= 0 || endColumn > currentText.size())
+		{
+			resetTabCompletionCycle();
+			return false;
+		}
+
+		startColumn = endColumn - 1;
+		while (startColumn >= 0)
+		{
+			if (const QChar ch = currentText.at(startColumn); ch.isSpace() || m_wordDelimiters.contains(ch))
+				break;
+			--startColumn;
+		}
+		++startColumn;
+
+		if (startColumn >= endColumn)
+		{
+			resetTabCompletionCycle();
+			return false;
+		}
+
+		targetWordLower = currentText.mid(startColumn, endColumn - startColumn).toLower();
+		if (targetWordLower.isEmpty())
+		{
+			resetTabCompletionCycle();
+			return false;
+		}
+	}
 
 	bool insertSpace = m_tabCompletionSpace;
 	if (endColumn < currentText.size())
@@ -6314,47 +6384,72 @@ bool WorldView::handleTabCompletionKeyPress()
 			insertSpace = true;
 	}
 
-	int startColumn = endColumn - 1;
-	while (startColumn >= 0)
+	bool completionApplied = false;
+	int matchedSource = -2;
+
+	if (!continueCycle &&
+		tabCompleteOneLine(startColumn, endColumn, targetWordLower, m_tabCompletionDefaults, insertSpace))
 	{
-		if (const QChar ch = currentText.at(startColumn); ch.isSpace() || m_wordDelimiters.contains(ch))
-			break;
-		--startColumn;
-	}
-	++startColumn;
-
-	if (startColumn >= endColumn)
-		return false;
-
-	const QString targetWordLower = currentText.mid(startColumn, endColumn - startColumn).toLower();
-	if (targetWordLower.isEmpty())
-		return false;
-
-	if (tabCompleteOneLine(startColumn, endColumn, targetWordLower, m_tabCompletionDefaults, insertSpace))
-		return true;
-
-	if (!m_runtime)
-		return false;
-
-	const QVector<WorldRuntime::LineEntry>& lines = m_runtime->lines();
-	int scanned = 0;
-	for (int i = sizeToInt(lines.size()) - 1; i >= 0; --i)
-	{
-		if (++scanned > m_tabCompletionLines)
-			break;
-		if (tabCompleteOneLine(startColumn, endColumn, targetWordLower, lines.at(i).text, insertSpace))
-			return true;
+		completionApplied = true;
+		matchedSource = -1;
 	}
 
-	return false;
+	if (!completionApplied)
+	{
+		if (!m_runtime)
+		{
+			resetTabCompletionCycle();
+			return false;
+		}
+
+		const QVector<WorldRuntime::LineEntry>& lines = m_runtime->lines();
+		int startLine = sizeToInt(lines.size()) - 1;
+		if (continueCycle)
+		{
+			if (lastSource >= 0)
+				startLine = lastSource - 1;
+			else if (lastSource == -1)
+				startLine = sizeToInt(lines.size()) - 1;
+		}
+
+		int scanned = 0;
+		for (int i = startLine; i >= 0; --i)
+		{
+			if (++scanned > m_tabCompletionLines)
+				break;
+			if (!tabCompleteOneLine(startColumn, endColumn, targetWordLower, lines.at(i).text, insertSpace))
+				continue;
+			completionApplied = true;
+			matchedSource = i;
+			break;
+		}
+	}
+
+	if (!completionApplied)
+	{
+		resetTabCompletionCycle();
+		return false;
+	}
+
+	cursor = m_input->textCursor();
+	m_tabCompletionCycleTargetLower = targetWordLower;
+	m_tabCompletionCycleStartColumn = startColumn;
+	m_tabCompletionCycleEndColumn = cursor.position();
+	m_tabCompletionCycleLastSource = matchedSource;
+	m_tabCompletionCycleActive = true;
+	return true;
 }
 
 void InputTextEdit::keyPressEvent(QKeyEvent* event)
 {
+	const bool plainTab = event->key() == Qt::Key_Tab && event->modifiers() == Qt::NoModifier;
+	if (m_view && !plainTab)
+		m_view->resetTabCompletionCycle();
+
 	if (m_view && m_view->handleWorldHotkey(event))
 		return;
 
-	if (m_view && event->key() == Qt::Key_Tab && event->modifiers() == Qt::NoModifier)
+	if (m_view && plainTab)
 	{
 		m_view->handleTabCompletionKeyPress();
 		return;

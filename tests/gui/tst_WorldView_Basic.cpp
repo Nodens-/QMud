@@ -617,6 +617,63 @@ private slots:
 		resetTestState();
 	}
 
+	void tabCompletionCyclesUpwardAndResetsOnNonTabKey()
+	{
+		resetTestState();
+		g_worldAttrs.insert(QStringLiteral("tab_completion_space"), QStringLiteral("0"));
+
+		WorldRuntime::LineEntry older;
+		older.text = QStringLiteral("stamina");
+		older.flags = WorldRuntime::LineOutput;
+		older.hardReturn = true;
+		g_runtimeLines.push_back(older);
+
+		WorldRuntime::LineEntry middle;
+		middle.text = QStringLiteral("starlight");
+		middle.flags = WorldRuntime::LineOutput;
+		middle.hardReturn = true;
+		g_runtimeLines.push_back(middle);
+
+		WorldRuntime::LineEntry newer;
+		newer.text = QStringLiteral("starch");
+		newer.flags = WorldRuntime::LineOutput;
+		newer.hardReturn = true;
+		g_runtimeLines.push_back(newer);
+
+		WorldView view;
+		view.resize(860, 520);
+		view.show();
+		view.setRuntimeObserver(fakeRuntimePointer());
+		QCoreApplication::processEvents();
+
+		QPlainTextEdit* input = view.inputEditor();
+		QVERIFY(input);
+		input->setFocus();
+
+		view.setInputText(QStringLiteral("sta"), true);
+		QTextCursor cursor = input->textCursor();
+		cursor.setPosition(view.inputText().size());
+		input->setTextCursor(cursor);
+
+		QTest::keyClick(input, Qt::Key_Tab);
+		QCOMPARE(view.inputText(), QStringLiteral("starch"));
+
+		QTest::keyClick(input, Qt::Key_Tab);
+		QCOMPARE(view.inputText(), QStringLiteral("starlight"));
+
+		QTest::keyClick(input, Qt::Key_Left);
+
+		view.setInputText(QStringLiteral("sta"), true);
+		cursor = input->textCursor();
+		cursor.setPosition(view.inputText().size());
+		input->setTextCursor(cursor);
+
+		QTest::keyClick(input, Qt::Key_Tab);
+		QCOMPARE(view.inputText(), QStringLiteral("starch"));
+
+		resetTestState();
+	}
+
 	void outputFindNoMatchReturnsWithoutHanging()
 	{
 		resetTestState();

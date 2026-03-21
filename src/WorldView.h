@@ -558,6 +558,10 @@ public:
 	 */
 	void resetHistoryRecall();
 	/**
+	 * @brief Resets Tab-completion cycling state.
+	 */
+	void resetTabCompletionCycle();
+	/**
 	 * @brief Confirms replacing current typing with suggested text.
 	 * @param replacement Replacement text candidate.
 	 * @return `true` when replacement is approved.
@@ -1128,6 +1132,11 @@ private:
 	int m_autoResizeMaximumLines{20};
 	int m_tabCompletionLines{200};
 	QString m_tabCompletionDefaults;
+	QString m_tabCompletionCycleTargetLower;
+	int m_tabCompletionCycleStartColumn{-1};
+	int m_tabCompletionCycleEndColumn{-1};
+	int m_tabCompletionCycleLastSource{-2};
+	bool m_tabCompletionCycleActive{false};
 	int m_fadeOutputBufferAfterSeconds{0};
 	int m_fadeOutputOpacityPercent{100};
 	int m_fadeOutputSeconds{1};
