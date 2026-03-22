@@ -23,12 +23,11 @@ namespace
 
 	QString extractAssetSha256(const QJsonObject &assetObj)
 	{
-		QString digest = QMudUpdateCheck::normalizeSha256Digest(
-		    assetObj.value(QStringLiteral("digest")).toString());
+		QString digest =
+		    QMudUpdateCheck::normalizeSha256Digest(assetObj.value(QStringLiteral("digest")).toString());
 		if (!digest.isEmpty())
 			return digest;
-		digest =
-		    QMudUpdateCheck::normalizeSha256Digest(assetObj.value(QStringLiteral("sha256")).toString());
+		digest = QMudUpdateCheck::normalizeSha256Digest(assetObj.value(QStringLiteral("sha256")).toString());
 		return digest;
 	}
 
@@ -114,8 +113,8 @@ namespace QMudUpdateCheck
 
 		const QVector<int> a   = versionParts(left);
 		const QVector<int> b   = versionParts(right);
-		const int          max = qMax(a.size(), b.size());
-		for (int i = 0; i < max; ++i)
+		const qsizetype    max = qMax(a.size(), b.size());
+		for (qsizetype i = 0; i < max; ++i)
 		{
 			const int av = i < a.size() ? a.at(i) : 0;
 			const int bv = i < b.size() ? b.at(i) : 0;
@@ -132,7 +131,7 @@ namespace QMudUpdateCheck
 		digestText = digestText.trimmed();
 		if (digestText.isEmpty())
 			return {};
-		const int separatorIndex = digestText.indexOf(QLatin1Char(':'));
+		const qsizetype separatorIndex = digestText.indexOf(QLatin1Char(':'));
 		if (separatorIndex >= 0)
 		{
 			const QString algorithm = digestText.left(separatorIndex).trimmed();
@@ -162,7 +161,7 @@ namespace QMudUpdateCheck
 			return selected;
 
 		int selectedScore = std::numeric_limits<int>::min();
-		for (const QJsonValue &value : assets)
+		for (const auto &value : assets)
 		{
 			if (!value.isObject())
 				continue;
@@ -198,16 +197,13 @@ namespace QMudUpdateCheck
 				}
 				else if (lowerName.endsWith(QStringLiteral(".zip")))
 				{
-					const bool hasMacMarker = assetNameContainsAny(
-					    lowerName, {QStringLiteral("mac"), QStringLiteral("macos"),
-					                QStringLiteral("osx"), QStringLiteral("darwin")});
+					const bool hasMacMarker =
+					    assetNameContainsAny(lowerName, {QStringLiteral("mac"), QStringLiteral("macos"),
+					                                     QStringLiteral("osx"), QStringLiteral("darwin")});
 					const bool hasWindowsMarker =
-					    assetNameContainsAny(lowerName, {QStringLiteral("windows"),
-					                                     QStringLiteral("win32"),
-					                                     QStringLiteral("win64"),
-					                                     QStringLiteral("mingw"),
-					                                     QStringLiteral(".msi"),
-					                                     QStringLiteral(".exe")});
+					    assetNameContainsAny(lowerName, {QStringLiteral("windows"), QStringLiteral("win32"),
+					                                     QStringLiteral("win64"), QStringLiteral("mingw"),
+					                                     QStringLiteral(".msi"), QStringLiteral(".exe")});
 					if (hasMacMarker && !hasWindowsMarker)
 						score = 180 + archScore;
 					else
@@ -218,27 +214,54 @@ namespace QMudUpdateCheck
 					continue;
 				}
 			}
+			else if (target == InstallTarget::WindowsInstaller)
+			{
+				if (!lowerName.endsWith(QStringLiteral(".exe")))
+					continue;
+
+				const bool hasWindowsMarker =
+				    assetNameContainsAny(lowerName, {QStringLiteral("windows"), QStringLiteral("win"),
+				                                     QStringLiteral("setup"), QStringLiteral("installer")});
+				if (!hasWindowsMarker)
+					continue;
+
+				const bool hasPortableMarker =
+				    assetNameContainsAny(lowerName, {QStringLiteral("portable"), QStringLiteral(".zip")});
+				if (hasPortableMarker)
+					continue;
+
+				const bool has32BitMarker = assetNameContainsAny(
+				    lowerName, {QStringLiteral("x86"), QStringLiteral("win32"), QStringLiteral("i386"),
+				                QStringLiteral("32bit"), QStringLiteral("32-bit"), QStringLiteral("x32")});
+				if (has32BitMarker)
+					continue;
+
+				const int archScore = architecturePreferenceScore(lowerName);
+				if (archScore < 0)
+					continue;
+				score = 260 + archScore;
+			}
 
 			if (score > selectedScore)
 			{
-				selectedScore = score;
-				selected.name = name;
-				selected.url = url;
+				selectedScore   = score;
+				selected.name   = name;
+				selected.url    = url;
 				selected.sha256 = sha256;
 			}
 		}
 		return selected;
 	}
 
-	ReleaseEvaluationResult evaluateLatestReleasePayload(const QByteArray &payload,
-	                                                     const QString    &currentVersion,
-	                                                     const QString    &skipVersion,
+	ReleaseEvaluationResult evaluateLatestReleasePayload(const QByteArray   &payload,
+	                                                     const QString      &currentVersion,
+	                                                     const QString      &skipVersion,
 	                                                     const InstallTarget target)
 	{
 		ReleaseEvaluationResult result;
 
-		QJsonParseError     parseError;
-		const QJsonDocument doc = QJsonDocument::fromJson(payload, &parseError);
+		QJsonParseError         parseError;
+		const QJsonDocument     doc = QJsonDocument::fromJson(payload, &parseError);
 		if (parseError.error != QJsonParseError::NoError || !doc.isObject())
 		{
 			result.status = ReleaseEvaluationStatus::ParseError;

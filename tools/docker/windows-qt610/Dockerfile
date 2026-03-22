@@ -28,6 +28,9 @@ RUN dnf -y upgrade && \
       mingw64-gcc \
       mingw64-gcc-c++ \
       mingw64-headers \
+      mingw-nsis-base \
+      mingw32-nsis \
+      mingw64-nsis \
       mingw64-zlib \
       ninja-build \
       openssl \
