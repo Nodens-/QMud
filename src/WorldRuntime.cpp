@@ -4152,6 +4152,15 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 	callbacks.onNoEchoChanged      = [this](bool enabled) { setNoCommandEcho(enabled); };
 	callbacks.onFatalProtocolError = [this](const QString &message)
 	{
+#ifndef NDEBUG
+		const QString worldName = m_worldAttributes.value(QStringLiteral("name")).trimmed();
+		qWarning().noquote() << QStringLiteral("[QMud][MCCP] fatal protocol error in world \"%1\": %2")
+		                            .arg(worldName.isEmpty() ? QStringLiteral("<unnamed>") : worldName,
+		                                 message.isEmpty()
+		                                     ? QStringLiteral(
+		                                           "Cannot process compressed output. World closed.")
+		                                     : message);
+#endif
 		emit socketError(message.isEmpty() ? QStringLiteral("Cannot process compressed output. World closed.")
 		                                   : message);
 		disconnectFromWorld();

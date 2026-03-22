@@ -13930,7 +13930,15 @@ void AppController::handleReloadQmud()
 		}
 		world.mccpDisableSucceeded = pending.runtime->isMccpDisableCompleteForReload();
 		if (!world.mccpDisableSucceeded)
+		{
 			++mccpFallbacks;
+#ifndef NDEBUG
+			qWarning() << kReloadLogTag << "MCCP disable incomplete for"
+			           << (pending.displayName.isEmpty() ? QStringLiteral("<unnamed>") : pending.displayName)
+			           << "isCompressing=" << pending.runtime->isCompressing()
+			           << "mccpType=" << pending.runtime->mccpType();
+#endif
+		}
 		if (verboseReloadLogs)
 		{
 			qInfo() << kReloadLogTag << "MCCP disable"

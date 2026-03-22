@@ -145,6 +145,49 @@ class tst_TelnetProcessor_Compression : public QObject
 			QVERIFY(!processor.isCompressing());
 			QCOMPARE(processor.mccpType(), 0);
 		}
+
+		void mccpRestartAfterStreamEndPreservesCompressedOrdering()
+		{
+			TelnetProcessor   processor;
+			TelnetCallbackSpy spy;
+			processor.setCallbacks(spy.callbacks());
+
+			const QByteArray firstStream = makeQtZlibPayload(QByteArrayLiteral("old-stream\n"));
+			QVERIFY(!firstStream.isEmpty());
+
+			QByteArray firstPacket = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
+			firstPacket.append(firstStream);
+			firstPacket.append(QByteArrayLiteral("copyover-tail\n"));
+
+			const QByteArray firstOutput = processor.processBytes(firstPacket);
+			QCOMPARE(firstOutput, QByteArrayLiteral("old-stream\ncopyover-tail\n"));
+			QVERIFY(!processor.isCompressing());
+			QCOMPARE(processor.mccpType(), 0);
+
+			const QByteArray restartStream = makeQtZlibPayload(QByteArrayLiteral("new-stream\n"));
+			QVERIFY(restartStream.size() > 6);
+			constexpr int    splitAt      = 4;
+			const QByteArray restartPartA = restartStream.left(splitAt);
+			const QByteArray restartPartB = restartStream.mid(splitAt);
+			QVERIFY(!restartPartA.isEmpty());
+			QVERIFY(!restartPartB.isEmpty());
+
+			QByteArray restartNegotiationPacket = QByteArrayLiteral("after-copyover\n");
+			restartNegotiationPacket.append(bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE}));
+			restartNegotiationPacket.append(restartPartA);
+
+			const QByteArray restartOutputA = processor.processBytes(restartNegotiationPacket);
+			QVERIFY(restartOutputA.startsWith(QByteArrayLiteral("after-copyover\n")));
+			QVERIFY(processor.isCompressing());
+			QCOMPARE(processor.mccpType(), 2);
+			QVERIFY(spy.fatalProtocolErrors.isEmpty());
+
+			const QByteArray restartOutputB = processor.processBytes(restartPartB);
+			QCOMPARE(restartOutputA + restartOutputB, QByteArrayLiteral("after-copyover\nnew-stream\n"));
+			QVERIFY(!processor.isCompressing());
+			QCOMPARE(processor.mccpType(), 0);
+			QVERIFY(spy.fatalProtocolErrors.isEmpty());
+		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
