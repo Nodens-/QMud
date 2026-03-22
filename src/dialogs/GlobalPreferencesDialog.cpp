@@ -238,7 +238,7 @@ namespace
 		if (descriptor < 0)
 			return false;
 
-		flock lock{};
+		struct flock lock{};
 		lock.l_type   = F_WRLCK;
 		lock.l_whence = SEEK_SET;
 		lock.l_start  = 0;
