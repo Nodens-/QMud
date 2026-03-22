@@ -1242,6 +1242,15 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			// Received: IAC WONT x
 			//
 			// telnet negotiation : in response to WONT, we say DONT
+			if (c == TELOPT_COMPRESS || c == TELOPT_COMPRESS2)
+			{
+				m_compress = false;
+				m_mccpType = 0;
+				m_compressInput.clear();
+				m_compressInputOffset = 0;
+				m_pendingCompressed.clear();
+				m_postCompressionRemainder.clear();
+			}
 			if (c == TELOPT_ECHO && !m_noEchoOff)
 			{
 				m_noEcho = false;
@@ -1327,6 +1336,16 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			sendIacWont(c);
 			switch (c)
 			{
+			case TELOPT_COMPRESS2:
+			case TELOPT_COMPRESS:
+				m_compress = false;
+				m_mccpType = 0;
+				m_compressInput.clear();
+				m_compressInputOffset = 0;
+				m_pendingCompressed.clear();
+				m_postCompressionRemainder.clear();
+				break;
+
 			case TELOPT_MXP:
 				mxpOff(true);
 				break; // end of MXP

@@ -79,7 +79,7 @@ namespace
 		state.globalOptions.insert(QStringLiteral("AutoCheckForUpdates"), 1);
 		state.globalOptions.insert(QStringLiteral("UpdateCheckIntervalHours"), 1);
 		state.globalOptions.insert(QStringLiteral("EnableReloadFeature"), 1);
-		state.globalOptions.insert(QStringLiteral("ReloadMccpDisableTimeoutMs"), 500);
+		state.globalOptions.insert(QStringLiteral("ReloadMccpDisableTimeoutMs"), 1000);
 
 		QFile::remove(testIniFilePath());
 	}
@@ -255,6 +255,15 @@ void AppController::changeToStartupDirectory() const
 QString AppController::makeAbsolutePath(const QString &fileName) const
 {
 	return fileName;
+}
+
+/**
+ * @brief Returns stubbed list of currently open world log files.
+ * @return Empty list for this test fixture.
+ */
+QStringList AppController::activeOpenWorldLogFiles() const
+{
+	return {};
 }
 
 /**

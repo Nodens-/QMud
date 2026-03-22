@@ -528,6 +528,15 @@ class WorldRuntime : public QObject
 		 */
 		void                                 markTimersChanged();
 		/**
+		 * @brief Returns serial that increments on timer list structure mutations.
+		 * @return Monotonic timer-list structure mutation serial.
+		 */
+		[[nodiscard]] quint64                timerStructureMutationSerial() const;
+		/**
+		 * @brief Marks timer list structure as changed (insert/remove/reorder).
+		 */
+		void                                 noteTimerStructureMutation();
+		/**
 		 * @brief Returns macro list.
 		 * @return Immutable macro list.
 		 */
@@ -1269,6 +1278,26 @@ class WorldRuntime : public QObject
 		 * @return Immutable buffered line list.
 		 */
 		[[nodiscard]] const QVector<LineEntry> &lines() const;
+		/**
+		 * @brief Replaces output line buffer with preloaded session state.
+		 * @param lines Restored output lines.
+		 */
+		void                                    replaceOutputLines(const QVector<LineEntry> &lines);
+		/**
+		 * @brief Marks the last buffered input line as hard-return terminated when pending.
+		 *
+		 * This is used when the view injects a synthetic visual separator (for example, when
+		 * keeping echoed commands on the same line) so runtime line state remains consistent
+		 * with the rendered document after rebuilds.
+		 */
+		void                                    finalizePendingInputLineHardReturn();
+		/**
+		 * @brief Clears hard-return termination flag on the last buffered line when set.
+		 *
+		 * Used by keep-on-same-line echo flow when the view consumes a trailing
+		 * line break from the existing rendered output.
+		 */
+		void                                    clearLastLineHardReturn();
 		/**
 		 * @brief Begins temporary incoming-line context for Lua callbacks.
 		 * @param text Incoming line text.
@@ -2030,6 +2059,11 @@ class WorldRuntime : public QObject
 		 * @brief Marks next connect callback to skip auto-login/connect-text sends after reload reattach.
 		 */
 		void               markReloadReattachConnectActionsSuppressed();
+		/**
+		 * @brief Returns whether reload reattach connect actions are currently suppressed.
+		 * @return `true` when next connect callback is marked as reload-reattach suppressed.
+		 */
+		[[nodiscard]] bool reloadReattachConnectActionsSuppressed() const;
 		/**
 		 * @brief Consumes one-shot flag that suppresses auto-login/connect-text sends for reload reattach.
 		 * @return `true` when auto-login/connect-text should be skipped for current connect callback.
@@ -4114,6 +4148,7 @@ class WorldRuntime : public QObject
 		int                                   m_triggerCount{0};
 		int                                   m_aliasCount{0};
 		int                                   m_timerCount{0};
+		quint64                               m_timerStructureMutationSerial{0};
 		int                                   m_macroCount{0};
 		int                                   m_variableCount{0};
 		int                                   m_colourCount{0};

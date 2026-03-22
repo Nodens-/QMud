@@ -9,6 +9,7 @@
 #include "dialogs/GlobalPreferencesDialog.h"
 
 #include "AppController.h"
+#include "LogCompressionUtils.h"
 #include "MainFrame.h"
 #include "WorldChildWindow.h"
 #include "WorldRuntime.h"
@@ -20,7 +21,9 @@
 #include <QCoreApplication>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDialogButtonBox>
+#include <QDirIterator>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFontDialog>
 #include <QFormLayout>
 #include <QGridLayout>
@@ -31,7 +34,9 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPixmap>
+#include <QPointer>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSet>
@@ -43,6 +48,15 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTextEdit>
+#include <QThreadPool>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(parent)
 {
@@ -201,6 +215,52 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 
 namespace
 {
+	bool isFileOpenForWriteByAnotherProcess(const QString &path)
+	{
+		if (path.trimmed().isEmpty())
+			return false;
+#ifdef Q_OS_WIN
+		const QString normalized = QDir::toNativeSeparators(QDir::cleanPath(path));
+		const auto    nativePath = reinterpret_cast<LPCWSTR>(normalized.utf16());
+		HANDLE        handle = CreateFileW(nativePath, GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+		                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (handle == INVALID_HANDLE_VALUE)
+		{
+			const DWORD error = GetLastError();
+			return error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION ||
+			       error == ERROR_ACCESS_DENIED;
+		}
+		CloseHandle(handle);
+		return false;
+#else
+		const QByteArray nativePath = QFile::encodeName(path);
+		const int        descriptor = ::open(nativePath.constData(), O_RDWR);
+		if (descriptor < 0)
+			return false;
+
+		struct flock lock{};
+		lock.l_type   = F_WRLCK;
+		lock.l_whence = SEEK_SET;
+		lock.l_start  = 0;
+		lock.l_len    = 0;
+
+		const int lockResult = fcntl(descriptor, F_SETLK, &lock);
+		if (lockResult == -1 && (errno == EACCES || errno == EAGAIN))
+		{
+			::close(descriptor);
+			return true;
+		}
+
+		if (lockResult == 0)
+		{
+			lock.l_type = F_UNLCK;
+			(void)fcntl(descriptor, F_SETLK, &lock);
+		}
+		::close(descriptor);
+		return false;
+#endif
+	}
+
 	QString storagePath(const QString &value)
 	{
 		QString out = value.trimmed();
@@ -707,9 +767,12 @@ QWidget *GlobalPreferencesDialog::buildLoggingPage()
 
 	auto *defaultDirButton = new QPushButton(QStringLiteral("Default Log Files Directory..."));
 	defaultDirButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	auto *compressLogsButton = new QPushButton(QStringLiteral("Compress all uncompressed logs"));
+	compressLogsButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	m_logDefaultDirLabel = new QLabel(QStringLiteral("Default Directory"));
 	auto *dirRow         = new QHBoxLayout;
 	dirRow->addWidget(defaultDirButton);
+	dirRow->addWidget(compressLogsButton);
 	dirRow->addStretch();
 	layout->addLayout(dirRow);
 	layout->addWidget(m_logDefaultDirLabel);
@@ -729,6 +792,142 @@ QWidget *GlobalPreferencesDialog::buildLoggingPage()
 		                 if (!dir.isEmpty())
 			                 m_logDefaultDirLabel->setText(runtimePath(dir));
 	                 });
+	QObject::connect(
+	    compressLogsButton, &QPushButton::clicked, page,
+	    [this, compressLogsButton]()
+	    {
+		    AppController *app = AppController::instance();
+		    if (!app || !m_logDefaultDirLabel)
+			    return;
+
+		    const QString configuredDir = m_logDefaultDirLabel->text().trimmed();
+		    if (configuredDir.isEmpty())
+		    {
+			    QMessageBox::information(this, QStringLiteral("Compress Logs"),
+			                             QStringLiteral("Default log directory is not set."));
+			    return;
+		    }
+
+		    const QString   absoluteDir = QDir::cleanPath(app->makeAbsolutePath(configuredDir));
+		    const QFileInfo dirInfo(absoluteDir);
+		    if (!dirInfo.exists() || !dirInfo.isDir())
+		    {
+			    QMessageBox::warning(
+			        this, QStringLiteral("Compress Logs"),
+			        QStringLiteral("Default log directory does not exist:\n%1").arg(absoluteDir));
+			    return;
+		    }
+
+		    QSet<QString> openLogPathKeys;
+		    const auto    toPathKey = [](const QString &path) -> QString
+		    {
+			    QString key = QDir::cleanPath(storagePath(path));
+#ifdef Q_OS_WIN
+			    key = key.toLower();
+#endif
+			    return key;
+		    };
+		    for (const QString &openLogPath : app->activeOpenWorldLogFiles())
+			    openLogPathKeys.insert(toPathKey(openLogPath));
+
+		    compressLogsButton->setEnabled(false);
+		    const QPointer<GlobalPreferencesDialog> dialogGuard(this);
+		    const QPointer<QPushButton>             buttonGuard(compressLogsButton);
+
+		    struct CompressionSummary
+		    {
+				    int         compressedCount{0};
+				    int         skippedCount{0};
+				    int         inUseSkippedCount{0};
+				    QStringList failures;
+		    };
+
+		    QThreadPool::globalInstance()->start(
+		        [absoluteDir, openLogPathKeys, toPathKey, dialogGuard, buttonGuard]()
+		        {
+			        CompressionSummary summary;
+			        QDirIterator       it(absoluteDir, QDir::Files | QDir::NoDotAndDotDot,
+			                              QDirIterator::Subdirectories);
+			        while (it.hasNext())
+			        {
+				        const QString filePath = it.next();
+				        if (openLogPathKeys.contains(toPathKey(filePath)))
+				        {
+					        ++summary.inUseSkippedCount;
+					        continue;
+				        }
+				        if (filePath.endsWith(QStringLiteral(".gz"), Qt::CaseInsensitive))
+				        {
+					        ++summary.skippedCount;
+					        continue;
+				        }
+				        if (isFileOpenForWriteByAnotherProcess(filePath))
+				        {
+					        ++summary.inUseSkippedCount;
+					        continue;
+				        }
+
+				        QString gzipError;
+				        if (qmudGzipFileInPlace(filePath, &gzipError))
+				        {
+					        ++summary.compressedCount;
+				        }
+				        else
+				        {
+					        if (gzipError.isEmpty())
+						        gzipError = QStringLiteral("Unknown error.");
+					        summary.failures.push_back(QStringLiteral("%1: %2").arg(filePath, gzipError));
+				        }
+			        }
+
+			        if (!dialogGuard && !buttonGuard)
+				        return;
+
+			        if (dialogGuard)
+			        {
+				        QMetaObject::invokeMethod(
+				            dialogGuard.data(),
+				            [dialogGuard, buttonGuard, summary = std::move(summary)]()
+				            {
+					            if (buttonGuard)
+						            buttonGuard->setEnabled(true);
+					            if (!dialogGuard)
+						            return;
+
+					            if (!summary.failures.isEmpty())
+					            {
+						            QMessageBox::warning(
+						                dialogGuard, QStringLiteral("Compress Logs"),
+						                QStringLiteral(
+						                    "Compressed %1 file(s), skipped %2 existing .gz file(s), "
+						                    "skipped %3 file(s) currently in use, failed %4 file(s).\n\n"
+						                    "First error:\n%5")
+						                    .arg(summary.compressedCount)
+						                    .arg(summary.skippedCount)
+						                    .arg(summary.inUseSkippedCount)
+						                    .arg(summary.failures.size())
+						                    .arg(summary.failures.front()));
+						            return;
+					            }
+
+					            QMessageBox::information(
+					                dialogGuard, QStringLiteral("Compress Logs"),
+					                QStringLiteral("Compressed %1 file(s), skipped %2 existing .gz "
+					                               "file(s), skipped %3 file(s) currently in use.")
+					                    .arg(summary.compressedCount)
+					                    .arg(summary.skippedCount)
+					                    .arg(summary.inUseSkippedCount));
+				            },
+				            Qt::QueuedConnection);
+			        }
+			        else if (buttonGuard)
+			        {
+				        QMetaObject::invokeMethod(
+				            buttonGuard.data(), [buttonGuard]() { buttonGuard->setEnabled(true); },
+				            Qt::QueuedConnection);
+			        }
+		        });
+	    });
 
 	m_autoLogCheck = new QCheckBox(QStringLiteral("Auto Log when opening world"));
 	registerCheck(QStringLiteral("AutoLogWorld"), m_autoLogCheck);
@@ -1314,7 +1513,7 @@ QWidget *GlobalPreferencesDialog::buildUpdatesPage()
 	auto *timeoutRow = new QHBoxLayout;
 	timeoutRow->addWidget(new QLabel(QStringLiteral("Timeout for MCCP worlds to tear down compression:")));
 	m_reloadMccpTimeoutSpin = new QSpinBox;
-	m_reloadMccpTimeoutSpin->setRange(100, 1000);
+	m_reloadMccpTimeoutSpin->setRange(300, 2000);
 	m_reloadMccpTimeoutSpin->setSingleStep(50);
 	m_reloadMccpTimeoutSpin->setSuffix(QStringLiteral(" ms"));
 	registerSpin(QStringLiteral("ReloadMccpDisableTimeoutMs"), m_reloadMccpTimeoutSpin);

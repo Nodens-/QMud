@@ -105,6 +105,21 @@ qmud_add_qtest(tst_UpdateCheckUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_WorldSessionStateUtils
+        GUI
+        SOURCES
+        unit/tst_WorldSessionStateUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/WorldSessionStateUtils.cpp"
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_WorldSessionRestoreFlowUtils
+        SOURCES
+        unit/tst_WorldSessionRestoreFlowUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/WorldSessionRestoreFlowUtils.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_ReloadStateUtils
         SOURCES
         unit/tst_ReloadStateUtils.cpp
@@ -486,6 +501,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             "${CMAKE_SOURCE_DIR}/src/AppController.h"
             LIBRARIES
             Qt6::Sql
+            ${QMUD_ZLIB_TARGET}
             LABELS
             gui
             TIMEOUT

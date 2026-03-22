@@ -17,6 +17,7 @@
 #include "EncodingUtils.h"
 #include "ErrorDescriptions.h"
 #include "FontUtils.h"
+#include "LogCompressionUtils.h"
 #include "LuaCallbackEngine.h"
 #include "LuaHeaders.h"
 #include "MainFrame.h"
@@ -143,6 +144,16 @@ namespace
 			return 0;
 		constexpr qint64 kMaxInt = std::numeric_limits<int>::max();
 		return static_cast<int>(value > kMaxInt ? kMaxInt : value);
+	}
+
+	bool hasValidPluginId(const WorldRuntime::Plugin &plugin)
+	{
+		return !plugin.attributes.value(QStringLiteral("id")).trimmed().isEmpty();
+	}
+
+	bool canExecutePlugin(const WorldRuntime::Plugin &plugin)
+	{
+		return hasValidPluginId(plugin) && plugin.enabled && plugin.lua && !plugin.installPending;
 	}
 
 	long roundedToLong(const double value)
@@ -3651,6 +3662,28 @@ namespace
 #endif
 	}
 
+	bool isAbsolutePathLike(const QString &value)
+	{
+		if (value.isEmpty())
+			return false;
+		const QChar first      = value.at(0);
+		const bool  isDrive    = value.size() > 1 && value.at(1) == QLatin1Char(':') && first.isLetter();
+		const bool  isUncShare = value.startsWith(QStringLiteral("//"));
+		return isDrive || isUncShare || first == QLatin1Char('/') || first == QLatin1Char('\\');
+	}
+
+	QString normalizeAutoLogFileNameValue(const QString &value)
+	{
+		QString normalized = normalizePathForStorage(value.trimmed());
+		if (normalized.isEmpty() || isAbsolutePathLike(normalized))
+			return normalizePathForRuntime(normalized);
+
+		while (normalized.startsWith(QStringLiteral("./")))
+			normalized.remove(0, 2);
+
+		return normalizePathForRuntime(normalized);
+	}
+
 	void saveXmlNumber(QTextStream &out, const QString &nl, const char *name, long long number,
 	                   bool sameLine = false)
 	{
@@ -4196,7 +4229,7 @@ WorldRuntime::~WorldRuntime()
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (plugin.lua)
+		if (plugin.lua && hasValidPluginId(plugin))
 			plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginClose"));
 		savePluginStateForPlugin(plugin, false, nullptr);
 	}
@@ -6552,6 +6585,11 @@ bool WorldRuntime::incomingSocketDataPaused() const
 void WorldRuntime::markReloadReattachConnectActionsSuppressed()
 {
 	m_reloadReattachSuppressConnectActions = true;
+}
+
+bool WorldRuntime::reloadReattachConnectActionsSuppressed() const
+{
+	return m_reloadReattachSuppressConnectActions;
 }
 
 bool WorldRuntime::consumeReloadReattachConnectActionsSuppressed()
@@ -10632,10 +10670,15 @@ int WorldRuntime::openLog(const QString &logFileName, bool append)
 	if (m_logFileName.isEmpty())
 		return eCouldNotOpenFile;
 
-	// Keep log paths stable across normal runs and AppImage runs:
-	// relative paths are resolved against the runtime startup directory.
+	// Resolve relative log paths under the configured default log directory.
+	// If no default is configured, fall back to <startup>/logs.
 	const QString workingDir = resolveWorkingDir(m_startupDirectory);
-	m_logFileName            = makeAbsolutePath(m_logFileName, workingDir);
+	QString       logBaseDir = m_defaultLogDirectory.trimmed();
+	if (logBaseDir.isEmpty())
+		logBaseDir = QDir::cleanPath(QDir(workingDir).filePath(QStringLiteral("logs")));
+	else
+		logBaseDir = makeAbsolutePath(logBaseDir, workingDir);
+	m_logFileName = makeAbsolutePath(m_logFileName, logBaseDir);
 
 	// Ensure missing parent folders (for patterns like logs/foo/bar.txt) exist.
 	const QFileInfo logInfo(m_logFileName);
@@ -10729,77 +10772,7 @@ QString WorldRuntime::buildRotatedLogFileName(const QString &previousFileName) c
 
 bool WorldRuntime::gzipFileInPlace(const QString &sourceFileName, QString *errorMessage)
 {
-	QFile source(sourceFileName);
-	if (!source.open(QIODevice::ReadOnly))
-	{
-		if (errorMessage)
-			*errorMessage = QStringLiteral("Could not open \"%1\" for reading").arg(sourceFileName);
-		return false;
-	}
-
-	const QString compressedName = sourceFileName + QStringLiteral(".gz");
-	QFile::remove(compressedName);
-
-	const QByteArray compressedNameBytes = QFile::encodeName(compressedName);
-	gzFile           gz                  = gzopen(compressedNameBytes.constData(), "wb");
-	if (!gz)
-	{
-		if (errorMessage)
-			*errorMessage = QStringLiteral("Could not open \"%1\" for gzip writing").arg(compressedName);
-		return false;
-	}
-
-	constexpr qint64 kChunkSize = 64 * 1024;
-	QByteArray       chunk;
-	chunk.resize(kChunkSize);
-	while (!source.atEnd())
-	{
-		const qint64 bytesRead = source.read(chunk.data(), kChunkSize);
-		if (bytesRead < 0)
-		{
-			if (errorMessage)
-				*errorMessage = QStringLiteral("Could not read \"%1\" for gzip rotation").arg(sourceFileName);
-			gzclose(gz);
-			QFile::remove(compressedName);
-			return false;
-		}
-		if (bytesRead == 0)
-			continue;
-		const int expected = static_cast<int>(bytesRead);
-		const int written  = gzwrite(gz, chunk.constData(), static_cast<unsigned int>(expected));
-		if (written != expected)
-		{
-			int         zError   = Z_OK;
-			const char *zMessage = gzerror(gz, &zError);
-			if (errorMessage)
-				*errorMessage =
-				    (zMessage && zError != Z_OK)
-				        ? QStringLiteral("gzip write failed: %1").arg(QString::fromLatin1(zMessage))
-				        : QStringLiteral("gzip write failed for \"%1\"").arg(sourceFileName);
-			gzclose(gz);
-			QFile::remove(compressedName);
-			return false;
-		}
-	}
-
-	if (gzclose(gz) != Z_OK)
-	{
-		if (errorMessage)
-			*errorMessage = QStringLiteral("Could not finalize gzip file \"%1\"").arg(compressedName);
-		QFile::remove(compressedName);
-		return false;
-	}
-
-	source.close();
-	if (!QFile::remove(sourceFileName))
-	{
-		if (errorMessage)
-			*errorMessage = QStringLiteral("Created \"%1\" but could not remove \"%2\"")
-			                    .arg(compressedName, sourceFileName);
-		return false;
-	}
-
-	return true;
+	return qmudGzipFileInPlace(sourceFileName, errorMessage);
 }
 
 int WorldRuntime::rotateLogFile()
@@ -10989,7 +10962,7 @@ bool WorldRuntime::callPluginCallbacksStopOnFalse(const QString &functionName, c
 	bool result = true;
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool       hasFunction = false;
 		const bool ok = plugin.lua->callFunctionWithString(functionName, payload, &hasFunction, true);
@@ -11006,7 +10979,7 @@ void WorldRuntime::callPluginCallbacks(const QString &functionName, const QStrin
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionWithString(functionName, payload, nullptr, true);
 	}
@@ -11016,7 +10989,7 @@ void WorldRuntime::callPluginCallbacksNoArgs(const QString &functionName)
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionNoArgs(functionName, nullptr, true);
 	}
@@ -11026,7 +10999,7 @@ bool WorldRuntime::callPluginCallbacksStopOnTrue(const QString &functionName, lo
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool       hasFunction = false;
 		const bool ok =
@@ -11042,7 +11015,7 @@ bool WorldRuntime::callPluginCallbacksStopOnTrueWithString(const QString &functi
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool hasFunction = false;
 		plugin.lua->callFunctionWithString(functionName, payload, &hasFunction, false);
@@ -11058,7 +11031,7 @@ void WorldRuntime::callPluginCallbacksTransformBytes(const QString &functionName
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool hasFunction = false;
 		plugin.lua->callFunctionWithBytesInOut(functionName, payload, &hasFunction);
@@ -11069,7 +11042,7 @@ void WorldRuntime::callPluginCallbacksTransformString(const QString &functionNam
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool hasFunction = false;
 		plugin.lua->callFunctionWithStringInOut(functionName, payload, &hasFunction);
@@ -11081,7 +11054,7 @@ bool WorldRuntime::callPluginCallbacksStopOnFalseWithNumberAndString(const QStri
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool       hasFunction = false;
 		const bool ok =
@@ -11098,7 +11071,7 @@ bool WorldRuntime::callPluginCallbacksStopOnFalseWithTwoNumbersAndString(const Q
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool       hasFunction = false;
 		const bool ok = plugin.lua->callFunctionWithTwoNumbersAndString(functionName, arg1, arg2, arg3,
@@ -11114,7 +11087,7 @@ void WorldRuntime::callPluginCallbacksWithNumberAndString(const QString &functio
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionWithNumberAndString(functionName, arg1, arg2, nullptr, true);
 	}
@@ -11124,7 +11097,7 @@ void WorldRuntime::callPluginCallbacksWithBytes(const QString &functionName, con
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionWithBytes(functionName, payload, nullptr, true);
 	}
@@ -11135,7 +11108,7 @@ bool WorldRuntime::callPluginCallbacksStopOnTrueBytes(const QString &functionNam
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		bool       hasFunction = false;
 		const bool ok =
@@ -11151,7 +11124,7 @@ void WorldRuntime::callPluginCallbacksWithNumberAndBytes(const QString &function
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionWithNumberAndBytes(functionName, arg1, payload, nullptr, true);
 	}
@@ -11166,7 +11139,7 @@ bool WorldRuntime::callPluginHotspotFunction(const QString &pluginId, const QStr
 	if (index < 0)
 		return false;
 	Plugin const &plugin = m_plugins[index];
-	if (!plugin.enabled || !plugin.lua || plugin.installPending)
+	if (!canExecutePlugin(plugin))
 		return false;
 	const unsigned short previousActionSource = m_currentActionSource;
 	m_currentActionSource                     = eHotspotCallback;
@@ -11660,7 +11633,7 @@ bool WorldRuntime::executeAcceleratorCommand(int commandId, const QString &keyLa
 		if (index < 0)
 			return false;
 		plugin = &m_plugins[index];
-		if (!plugin->enabled)
+		if (!hasValidPluginId(*plugin) || !plugin->enabled || plugin->installPending)
 			return false;
 	}
 
@@ -12153,6 +12126,8 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	{
 		if (isLikelyPathAttributeName(it.key()))
 			it.value() = normalizePathForRuntime(it.value());
+		if (it.key() == QStringLiteral("auto_log_file_name"))
+			it.value() = normalizeAutoLogFileNameValue(it.value());
 	}
 	m_worldMultilineAttributes = doc.worldMultilineAttributes();
 
@@ -12434,14 +12409,19 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 	QString normalizedValue = value;
 	if (isLikelyPathAttributeName(key))
 		normalizedValue = normalizePathForRuntime(normalizedValue);
+	if (key == QStringLiteral("auto_log_file_name"))
+		normalizedValue = normalizeAutoLogFileNameValue(normalizedValue);
+	if (const auto existing = m_worldAttributes.constFind(key);
+	    existing != m_worldAttributes.constEnd() && existing.value() == normalizedValue)
+	{
+		return;
+	}
 	m_worldAttributes.insert(key, normalizedValue);
 	if (key == QStringLiteral("max_output_lines"))
 		enforceOutputLineLimit();
 	if (!m_loadingDocument)
 		m_worldFileModified = true;
 	emit worldAttributeChanged(key);
-	if (key == QStringLiteral("max_output_lines") && !m_loadingDocument && m_view)
-		m_view->rebuildOutputFromLines(m_lines);
 	if (key == QStringLiteral("script_filename") && m_scriptWatcher)
 	{
 		const QStringList watched = m_scriptWatcher->files();
@@ -12618,7 +12598,8 @@ void WorldRuntime::setTimers(const QList<Timer> &timers)
 		applyTimerDefaults(rt);
 		m_timers.push_back(rt);
 	}
-	m_timerCount        = safeQSizeToInt(m_timers.size());
+	m_timerCount = safeQSizeToInt(m_timers.size());
+	noteTimerStructureMutation();
 	m_worldFileModified = true;
 }
 
@@ -12626,6 +12607,16 @@ void WorldRuntime::markTimersChanged()
 {
 	m_timerCount        = safeQSizeToInt(m_timers.size());
 	m_worldFileModified = true;
+}
+
+quint64 WorldRuntime::timerStructureMutationSerial() const
+{
+	return m_timerStructureMutationSerial;
+}
+
+void WorldRuntime::noteTimerStructureMutation()
+{
+	++m_timerStructureMutationSerial;
 }
 
 const QList<WorldRuntime::Macro> &WorldRuntime::macros() const
@@ -13624,6 +13615,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 	m_plugins.push_back(rp);
 	sortPluginsBySequence();
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
+	noteTimerStructureMutation();
 
 	// Queue install for the plugin we just loaded (not "last after sort"),
 	// otherwise lower-sequence plugins can remain permanently install-pending.
@@ -13650,6 +13642,7 @@ bool WorldRuntime::unloadPlugin(const QString &pluginId, QString *error)
 	savePluginStateForPlugin(plugin, false, nullptr);
 	m_plugins.removeAt(index);
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
+	noteTimerStructureMutation();
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginListChanged"));
 	return true;
 }
@@ -13992,7 +13985,7 @@ int WorldRuntime::broadcastPlugin(long message, const QString &text, const QStri
 	int count = 0;
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 
 		const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
@@ -15220,7 +15213,7 @@ void WorldRuntime::callPluginCallbacksWithTwoNumbersAndString(const QString &fun
 {
 	for (auto &plugin : m_plugins)
 	{
-		if (!plugin.enabled || !plugin.lua || plugin.installPending)
+		if (!canExecutePlugin(plugin))
 			continue;
 		plugin.lua->callFunctionWithTwoNumbersAndString(functionName, arg1, arg2, arg3, nullptr, true);
 	}
@@ -15550,6 +15543,46 @@ void WorldRuntime::enforceOutputLineLimit()
 const QVector<WorldRuntime::LineEntry> &WorldRuntime::lines() const
 {
 	return m_lines;
+}
+
+void WorldRuntime::replaceOutputLines(const QVector<LineEntry> &lines)
+{
+	m_lines = lines;
+
+	qint64 maxLineNumber = 0;
+	for (const LineEntry &line : m_lines)
+		maxLineNumber = qMax(maxLineNumber, line.lineNumber);
+	m_nextLineNumber = qMax<qint64>(1, maxLineNumber + 1);
+
+	enforceOutputLineLimit();
+	if (m_view)
+		m_view->rebuildOutputFromLinesLazy(m_lines);
+}
+
+void WorldRuntime::finalizePendingInputLineHardReturn()
+{
+	if (m_lines.isEmpty())
+		return;
+
+	LineEntry &last = m_lines.last();
+	if (last.hardReturn)
+		return;
+	if ((last.flags & LineInput) == 0)
+		return;
+
+	last.hardReturn = true;
+}
+
+void WorldRuntime::clearLastLineHardReturn()
+{
+	if (m_lines.isEmpty())
+		return;
+
+	LineEntry &last = m_lines.last();
+	if (!last.hardReturn)
+		return;
+
+	last.hardReturn = false;
 }
 
 void WorldRuntime::beginIncomingLineLuaContext(const QString &text, int flags,
@@ -18004,7 +18037,7 @@ WorldView *WorldRuntime::view() const
 
 void WorldRuntime::queuePluginInstall(Plugin &plugin)
 {
-	if (!plugin.lua)
+	if (!plugin.lua || !hasValidPluginId(plugin))
 		return;
 	if (m_loadingDocument || m_pluginInstallDeferred)
 	{
@@ -18048,7 +18081,7 @@ void WorldRuntime::installPendingPlugins()
 	for (int i = 0; i < m_plugins.size(); ++i)
 	{
 		const Plugin &plugin = m_plugins.at(i);
-		if (plugin.installPending && plugin.lua)
+		if (plugin.installPending && plugin.lua && hasValidPluginId(plugin))
 			pendingIndices.push_back(i);
 	}
 	if (pendingIndices.isEmpty())

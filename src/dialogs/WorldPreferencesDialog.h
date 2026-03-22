@@ -80,7 +80,7 @@ class WorldPreferencesDialog : public QDialog
 		 * @brief Selects initially visible preferences page.
 		 * @param page Page enum value to activate.
 		 */
-			void setInitialPage(Page page);
+		void setInitialPage(Page page);
 
 	protected:
 		/**
@@ -110,18 +110,18 @@ class WorldPreferencesDialog : public QDialog
 		 * @param row Row index of the color cell.
 		 * @param column Column index of the color cell.
 		 */
-			void                          editColourCell(QTableWidget *table, int row, int column);
+		void                          editColourCell(QTableWidget *table, int row, int column);
 		/**
 		 * @brief Opens macro editor for the selected row.
 		 * @param row Macro row index to edit.
 		 */
-			void                          editMacroAtRow(int row);
+		void                          editMacroAtRow(int row);
 		/**
 		 * @brief Finds macro rows matching text criteria.
 		 * @param text Search text or regex pattern.
 		 * @param continueFromCurrent Continue from current selection when `true`.
 		 */
-			void                          findMacro(const QString &text, bool continueFromCurrent);
+		void                          findMacro(const QString &text, bool continueFromCurrent);
 		/**
 		 * @brief Saves macro list to XML/file.
 		 * @param fileName Target file path.
@@ -146,7 +146,7 @@ class WorldPreferencesDialog : public QDialog
 		 * @param replace Replace existing triggers when `true`.
 		 * @return `true` on successful load and merge/replace.
 		 */
-			bool                          loadTriggersFromFile(const QString &fileName, bool replace);
+		bool                          loadTriggersFromFile(const QString &fileName, bool replace);
 		/**
 		 * @brief Saves alias list to XML/file.
 		 * @param fileName Target file path.
@@ -159,7 +159,7 @@ class WorldPreferencesDialog : public QDialog
 		 * @param replace Replace existing aliases when `true`.
 		 * @return `true` on successful load and merge/replace.
 		 */
-			bool                          loadAliasesFromFile(const QString &fileName, bool replace);
+		bool                          loadAliasesFromFile(const QString &fileName, bool replace);
 		/**
 		 * @brief Saves timer list to XML/file.
 		 * @param fileName Target file path.
@@ -172,7 +172,7 @@ class WorldPreferencesDialog : public QDialog
 		 * @param replace Replace existing timers when `true`.
 		 * @return `true` on successful load and merge/replace.
 		 */
-			bool                          loadTimersFromFile(const QString &fileName, bool replace);
+		bool                          loadTimersFromFile(const QString &fileName, bool replace);
 		/**
 		 * @brief Saves variables to XML/file.
 		 * @param fileName Target file path.
@@ -285,7 +285,7 @@ class WorldPreferencesDialog : public QDialog
 		 * @brief Recalculates memory usage estimates for scripts/rules.
 		 * @param allowProgress Show progress UI for expensive runs when `true`.
 		 */
-			void                          calculateMemoryUsage(bool allowProgress);
+		void                          calculateMemoryUsage(bool allowProgress);
 		/**
 		 * @brief Updates enable state of clear-cached-data button.
 		 */
@@ -294,7 +294,7 @@ class WorldPreferencesDialog : public QDialog
 		 * @brief Finds text within notes editor.
 		 * @param again Continue search from current position when `true`.
 		 */
-			void                          doNotesFind(bool again);
+		void                          doNotesFind(bool again);
 		/**
 		 * @brief Applies swatch color style to line-edit field.
 		 * @param edit Target line edit showing a color value.
@@ -410,12 +410,12 @@ class WorldPreferencesDialog : public QDialog
 		 * @brief Keypad view-mode data marshaling helpers.
 		 * @param ctrlView Use Ctrl-modifier keypad view when `true`, base view otherwise.
 		 */
-			void                          storeKeypadFields(bool ctrlView);
+		void                          storeKeypadFields(bool ctrlView);
 		/**
 		 * @brief Loads keypad controls from selected view-mode buffer.
 		 * @param ctrlView Use Ctrl-modifier keypad view when `true`, base view otherwise.
 		 */
-			void                          loadKeypadFields(bool ctrlView);
+		void                          loadKeypadFields(bool ctrlView);
 
 		WorldRuntime                 *m_runtime{nullptr};
 		WorldView                    *m_view{nullptr};
@@ -556,6 +556,7 @@ class WorldPreferencesDialog : public QDialog
 		QCheckBox                    *m_utf8{nullptr};
 		QCheckBox                    *m_carriageReturnClearsLine{nullptr};
 		QCheckBox                    *m_convertGaToNewline{nullptr};
+		QCheckBox                    *m_persistOutputBuffer{nullptr};
 		QSpinBox                     *m_fadeOutputBufferAfterSeconds{nullptr};
 		QSpinBox                     *m_fadeOutputOpacityPercent{nullptr};
 		QSpinBox                     *m_fadeOutputSeconds{nullptr};
@@ -587,6 +588,7 @@ class WorldPreferencesDialog : public QDialog
 		QSpinBox                     *m_speedWalkDelay{nullptr};
 		QCheckBox                    *m_displayMyInput{nullptr};
 		QSpinBox                     *m_historyLines{nullptr};
+		QCheckBox                    *m_persistCommandHistory{nullptr};
 		QCheckBox                    *m_alwaysRecordCommandHistory{nullptr};
 		QCheckBox                    *m_doNotAddMacrosToCommandHistory{nullptr};
 		QCheckBox                    *m_autoResizeCommandWindow{nullptr};
@@ -712,7 +714,7 @@ class WorldPreferencesDialog : public QDialog
 		// Info
 		QLabel                       *m_infoWorldFile{nullptr};
 		QLabel                       *m_infoWorldFileVersion{nullptr};
-			QLabel                       *m_infoQmudVersion{nullptr};
+		QLabel                       *m_infoQmudVersion{nullptr};
 		QLineEdit                    *m_infoWorldId{nullptr};
 		QLabel                       *m_infoDateSaved{nullptr};
 		QLabel                       *m_infoBufferLines{nullptr};

@@ -16,6 +16,8 @@
 #include <QPoint>
 #include <QRegularExpression>
 #include <QScopedPointer>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QSet>
 #include <QString>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
@@ -29,7 +31,9 @@ class QSplitter;
 class QScrollBar;
 class QWidget;
 class QTextDocument;
+class QTextBlock;
 class QTimer;
+class QWheelEvent;
 
 /**
  * @brief Stateful options and cursor data for command-history find operations.
@@ -56,6 +60,7 @@ struct CommandHistoryFindState
 class WorldView : public QWidget
 {
 		Q_OBJECT
+
 	public:
 		/**
 		 * @brief Creates world output/input composite widget.
@@ -167,6 +172,13 @@ class WorldView : public QWidget
 		 */
 		void rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry> &lines);
 		/**
+		 * @brief Rebuilds output by rendering visible tail first, then asynchronously backfilling older lines.
+		 *
+		 * Intended for session-state restore paths where immediate responsiveness is preferred.
+		 * @param lines Line entries to render.
+		 */
+		void rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry> &lines);
+		/**
 		 * @brief Appends raw HTML fragment to output view.
 		 * @param html HTML fragment to append.
 		 * @param newLine Append newline after fragment when `true`.
@@ -227,6 +239,11 @@ class WorldView : public QWidget
 		 * @return Command history entries.
 		 */
 		[[nodiscard]] QStringList     commandHistoryList() const;
+		/**
+		 * @brief Replaces command history entries.
+		 * @param historyEntries Restored command history entries.
+		 */
+		void                          setCommandHistoryList(const QStringList &historyEntries);
 		/**
 		 * @brief Clears command history buffer.
 		 */
@@ -437,6 +454,14 @@ class WorldView : public QWidget
 		 */
 		void                  applyRuntimeSettings();
 		/**
+		 * @brief Applies only the runtime output line limit to the output document.
+		 */
+		void                  applyMaxOutputLinesSetting() const;
+		/**
+		 * @brief Applies runtime settings without rebuilding the existing output buffer.
+		 */
+		void                  applyRuntimeSettingsWithoutOutputRebuild();
+		/**
 		 * @brief Adds command text to history buffer.
 		 * @param text Command text to add.
 		 */
@@ -533,6 +558,10 @@ class WorldView : public QWidget
 		 * @brief Resets history recall cursor/state.
 		 */
 		void                  resetHistoryRecall();
+		/**
+		 * @brief Resets Tab-completion cycling state.
+		 */
+		void                  resetTabCompletionCycle();
 		/**
 		 * @brief Confirms replacing current typing with suggested text.
 		 * @param replacement Replacement text candidate.
@@ -676,31 +705,98 @@ class WorldView : public QWidget
 		 */
 		static QColor parseColor(const QString &value);
 		/**
+		 * @brief Returns runtime attribute keys that affect world-view rendering/behavior.
+		 * @return Set of world-view-relevant runtime attribute keys.
+		 */
+		[[nodiscard]] static const QSet<QString> &runtimeSettingsAttributeKeys();
+		/**
+		 * @brief Returns multiline runtime attribute keys that affect world-view behavior.
+		 * @return Set of world-view-relevant multiline runtime attribute keys.
+		 */
+		[[nodiscard]] static const QSet<QString> &runtimeSettingsMultilineAttributeKeys();
+		/**
+		 * @brief Compares runtime attribute values using world-view semantic equivalence.
+		 * @param key Runtime attribute key.
+		 * @param before Value before edit.
+		 * @param after Value after edit.
+		 * @return `true` when values are equivalent for world-view behavior.
+		 */
+		[[nodiscard]] static bool runtimeSettingValuesEquivalent(const QString &key, const QString &before,
+		                                                         const QString &after);
+		/**
+		 * @brief Compares multiline runtime attribute values for world-view behavior.
+		 * @param key Multiline runtime attribute key.
+		 * @param before Value before edit.
+		 * @param after Value after edit.
+		 * @return `true` when values are equivalent for world-view behavior.
+		 */
+		[[nodiscard]] static bool runtimeMultilineSettingValuesEquivalent(const QString &key,
+		                                                                  const QString &before,
+		                                                                  const QString &after);
+		/**
+		 * @brief Returns semantically changed runtime attribute keys for world-view behavior.
+		 * @param before Runtime attributes before change.
+		 * @param after Runtime attributes after change.
+		 * @return Set of changed runtime attribute keys.
+		 */
+		[[nodiscard]] static QSet<QString>
+		changedRuntimeSettingsAttributeKeys(const QMap<QString, QString> &before,
+		                                    const QMap<QString, QString> &after);
+		/**
+		 * @brief Returns semantically changed runtime multiline keys for world-view behavior.
+		 * @param beforeMultiline Multiline runtime attributes before change.
+		 * @param afterMultiline Multiline runtime attributes after change.
+		 * @param beforeAttributes Runtime attributes before change.
+		 * @param afterAttributes Runtime attributes after change.
+		 * @return Set of changed multiline runtime keys.
+		 */
+		[[nodiscard]] static QSet<QString> changedRuntimeSettingsMultilineAttributeKeys(
+		    const QMap<QString, QString> &beforeMultiline, const QMap<QString, QString> &afterMultiline,
+		    const QMap<QString, QString> &beforeAttributes, const QMap<QString, QString> &afterAttributes);
+		/**
+		 * @brief Returns whether changed runtime settings require rebuilding existing output.
+		 * @param changedAttributeKeys Semantically changed runtime attribute keys.
+		 * @param changedMultilineKeys Semantically changed multiline runtime keys.
+		 * @return `true` when full output rebuild is required.
+		 */
+		[[nodiscard]] static bool runtimeSettingsNeedFullRebuild(const QSet<QString> &changedAttributeKeys,
+		                                                         const QSet<QString> &changedMultilineKeys);
+		/**
+		 * @brief Returns runtime attribute keys whose effective changes require output rebuild.
+		 * @return Set of runtime attribute keys requiring full output rebuild.
+		 */
+		[[nodiscard]] static const QSet<QString> &runtimeSettingsRebuildAttributeKeys();
+		/**
+		 * @brief Returns multiline runtime attribute keys whose changes require output rebuild.
+		 * @return Set of multiline runtime attribute keys requiring full output rebuild.
+		 */
+		[[nodiscard]] static const QSet<QString> &runtimeSettingsRebuildMultilineAttributeKeys();
+		/**
 		 * @brief Maps legacy font-weight value to Qt weight.
 		 * @param weight Legacy font-weight value.
 		 * @return Corresponding Qt font weight.
 		 */
-		static QFont::Weight mapFontWeight(int weight);
+		static QFont::Weight                      mapFontWeight(int weight);
 		/**
 		 * @brief Returns output scrollbar position.
 		 * @return Output scrollbar position.
 		 */
-		[[nodiscard]] int    outputScrollPosition() const;
+		[[nodiscard]] int                         outputScrollPosition() const;
 		/**
 		 * @brief Returns true when output scrollbar is visible.
 		 * @return `true` when output scrollbar is visible.
 		 */
-		[[nodiscard]] bool   outputScrollBarVisible() const;
+		[[nodiscard]] bool                        outputScrollBarVisible() const;
 		/**
 		 * @brief Returns desired output scrollbar visibility setting.
 		 * @return Desired output scrollbar visibility setting.
 		 */
-		[[nodiscard]] bool   outputScrollBarWanted() const;
+		[[nodiscard]] bool                        outputScrollBarWanted() const;
 		/**
 		 * @brief Returns output text viewport rectangle.
 		 * @return Output text viewport rectangle.
 		 */
-		[[nodiscard]] QRect  outputTextRectangle() const;
+		[[nodiscard]] QRect                       outputTextRectangle() const;
 
 	private:
 		/**
@@ -710,11 +806,79 @@ class WorldView : public QWidget
 		 */
 		void                 paintMiniWindows(class QPainter *painter, bool underneath) const;
 		/**
-		 * @brief Handles mouse wheel scrolling over output.
-		 * @param angleDelta Wheel angle delta.
-		 * @param pixelDelta Wheel pixel delta.
+		 * @brief Applies runtime settings with policy-driven rebuild selection.
+		 * @param allowRebuild `true` to run semantic rebuild policy, `false` to force no rebuild.
 		 */
-		void                 handleOutputWheel(const QPoint &angleDelta, const QPoint &pixelDelta);
+		void                 applyRuntimeSettingsWithPolicy(bool allowRebuild);
+		void                 applyRuntimeSettingsImpl(bool rebuildOutput);
+		/**
+		 * @brief Clears cached runtime-settings snapshot state.
+		 */
+		void                 resetRuntimeSettingsSnapshot();
+		/**
+		 * @brief Processes one asynchronous deferred-output backfill chunk for lazy rebuild.
+		 */
+		void                 processDeferredOutputBackfillChunk();
+		/**
+		 * @brief Stops deferred output backfill and clears pending state.
+		 * @param runQueuedRebuild Run queued full rebuild after stop when `true`.
+		 * @param clearQueuedRebuild Discard queued rebuild request when `true`.
+		 */
+		void                 stopDeferredOutputBackfill(bool runQueuedRebuild, bool clearQueuedRebuild);
+		/**
+		 * @brief Starts or restarts incremental in-place hyperlink style refresh.
+		 *
+		 * Processes output blocks in small chunks to keep the UI responsive while
+		 * applying hyperlink presentation setting changes to existing rendered text.
+		 */
+		void                 scheduleIncrementalHyperlinkRestyle();
+		/**
+		 * @brief Processes one incremental chunk of hyperlink style refresh.
+		 */
+		void                 processIncrementalHyperlinkRestyleChunk();
+		/**
+		 * @brief Stops any in-progress incremental hyperlink style refresh.
+		 */
+		void                 stopIncrementalHyperlinkRestyle();
+		/**
+		 * @brief Restyles hyperlink fragments within a single text block.
+		 * @param block Target output document block.
+		 * @return `true` when at least one fragment format was updated.
+		 */
+		[[nodiscard]] bool   restyleHyperlinksInBlock(const QTextBlock &block) const;
+		/**
+		 * @brief Handles mouse wheel scrolling over output.
+		 * @param event Wheel event payload.
+		 */
+		void                 handleOutputWheel(const QWheelEvent *event);
+		/**
+		 * @brief Returns output-scrollbar units corresponding to one rendered text line.
+		 */
+		[[nodiscard]] int    outputScrollUnitsPerLine() const;
+		/**
+		 * @brief Synchronizes output scrollbar single-step values to line-height units.
+		 */
+		void                 syncOutputScrollSingleStep() const;
+		/**
+		 * @brief Applies end-anchor immediately to internal/external output scrollbars.
+		 */
+		void                 applyEndAnchorNow() const;
+		/**
+		 * @brief Starts a scoped post-rebuild end-anchor request.
+		 */
+		void                 requestEndAnchorAfterRebuild();
+		/**
+		 * @brief Marks active post-rebuild end-anchor request as mutation-complete.
+		 */
+		void                 markEndAnchorMutationComplete();
+		/**
+		 * @brief Finishes and clears any pending post-rebuild end-anchor request.
+		 */
+		void                 finishPendingEndAnchorRequest();
+		/**
+		 * @brief Applies pending post-rebuild end anchor in response to range changes.
+		 */
+		void                 handlePendingEndAnchorRangeChange();
 		/**
 		 * @brief Marks that user initiated a manual scroll action.
 		 */
@@ -916,6 +1080,14 @@ class WorldView : public QWidget
 		 */
 		bool appendOutputTextFast(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
 		                          bool newLine, double opacity);
+		/**
+		 * @brief Commits pending inline-input separator both in runtime state and output view.
+		 *
+		 * This keeps synthetic line breaks (inserted before subsequent output/input after
+		 * keep-on-same-line echo) reproducible when output is rebuilt from runtime lines.
+		 */
+		void commitPendingInlineInputBreak();
+
 		struct PendingHtml
 		{
 				QString html;
@@ -988,6 +1160,11 @@ class WorldView : public QWidget
 		int                                          m_autoResizeMaximumLines{20};
 		int                                          m_tabCompletionLines{200};
 		QString                                      m_tabCompletionDefaults;
+		QString                                      m_tabCompletionCycleTargetLower;
+		int                                          m_tabCompletionCycleStartColumn{-1};
+		int                                          m_tabCompletionCycleEndColumn{-1};
+		int                                          m_tabCompletionCycleLastSource{-2};
+		bool                                         m_tabCompletionCycleActive{false};
 		int                                          m_fadeOutputBufferAfterSeconds{0};
 		int                                          m_fadeOutputOpacityPercent{100};
 		int                                          m_fadeOutputSeconds{1};
@@ -1041,10 +1218,43 @@ class WorldView : public QWidget
 		QElapsedTimer                           m_drawNotifyThrottle;
 		qint64                                  m_lastDrawNotifyMs{-1000};
 		bool                                    m_scrollToEndQueued{false};
+		int                                     m_wheelAngleRemainderY{0};
+		QVector<WorldRuntime::LineEntry>        m_outputBackfillPendingLines;
+		int                                     m_outputBackfillNextIndex{-1};
+		bool                                    m_outputBackfillInFlight{false};
+		int                                     m_outputBackfillGeneration{0};
+		bool                                    m_outputBackfillQueuedRebuild{false};
+		QVector<WorldRuntime::LineEntry>        m_outputBackfillQueuedRebuildLines;
+		quint64                                 m_endAnchorRequestSerial{0};
+		quint64                                 m_pendingEndAnchorRequestSerial{0};
+		// Keep output anchored at end across post-rebuild layout/range changes.
+		bool                                    m_pendingEndAnchorMutationComplete{false};
+		bool                                    m_pendingEndAnchorSawRangeChange{false};
+		QTimer                                 *m_hyperlinkRestyleTimer{nullptr};
+		int                                     m_hyperlinkRestyleNextBlock{-1};
 		bool                                    m_bulkOutputRebuild{false};
 		bool                                    m_keypadRepeatArmed{false};
 		int                                     m_keypadRepeatQtKey{0};
 		bool                                    m_keypadRepeatCtrl{false};
+		/**
+		 * @brief Snapshot of global default fonts used to detect effective view-setting changes.
+		 */
+		struct RuntimeDefaultFontSnapshot
+		{
+				QString inputFontName;
+				int     inputFontHeight{0};
+				int     inputFontWeight{0};
+				int     inputFontItalic{0};
+				int     inputFontCharset{0};
+				QString outputFontName;
+				int     outputFontHeight{0};
+				int     outputFontCharset{0};
+		};
+
+		bool                       m_hasRuntimeSettingsSnapshot{false};
+		QMap<QString, QString>     m_lastRuntimeSettingsAttributes;
+		QMap<QString, QString>     m_lastRuntimeSettingsMultilineAttributes;
+		RuntimeDefaultFontSnapshot m_lastRuntimeDefaultFontSnapshot;
 };
 
 #endif // QMUD_WORLDVIEW_H

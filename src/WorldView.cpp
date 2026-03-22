@@ -33,6 +33,7 @@
 #include <QGridLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
@@ -46,27 +47,267 @@
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStyle>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextDocumentFragment>
+#include <QTextFragment>
 #include <QTextOption>
+#include <QThreadPool>
 #include <QTimer>
 #include <QToolTip>
 #include <QUrl>
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <ranges>
 
 namespace
 {
+	constexpr int kAutoHyperlinkUnderlineProperty = QTextFormat::UserProperty + 1201;
+	constexpr int kAutoHyperlinkColourProperty    = QTextFormat::UserProperty + 1202;
+	constexpr int kHyperlinkRestyleBlocksPerChunk = 96;
+	constexpr int kLazyRestoreInitialMinimumLines = 120;
+	constexpr int kLazyRestoreInitialMaximumLines = 800;
+	constexpr int kLazyRestoreVisibleMultiplier   = 3;
+
+	struct DeferredBackfillRenderLine
+	{
+			QString                          text;
+			QVector<WorldRuntime::StyleSpan> spans;
+			bool                             newLine{false};
+			double                           opacity{1.0};
+	};
+
 	int sizeToInt(const qsizetype value)
 	{
 		constexpr qsizetype kMin = 0;
 		constexpr qsizetype kMax = std::numeric_limits<int>::max();
 		return static_cast<int>(qBound(kMin, value, kMax));
+	}
+
+	const QSet<QString> &worldViewRuntimeSettingsAttributeKeys()
+	{
+		static const QSet<QString> keys = {QStringLiteral("output_font_name"),
+		                                   QStringLiteral("input_font_name"),
+		                                   QStringLiteral("output_font_height"),
+		                                   QStringLiteral("input_font_height"),
+		                                   QStringLiteral("output_font_weight"),
+		                                   QStringLiteral("input_font_weight"),
+		                                   QStringLiteral("input_font_italic"),
+		                                   QStringLiteral("output_font_charset"),
+		                                   QStringLiteral("input_font_charset"),
+		                                   QStringLiteral("use_default_output_font"),
+		                                   QStringLiteral("use_default_input_font"),
+		                                   QStringLiteral("input_background_colour"),
+		                                   QStringLiteral("input_text_colour"),
+		                                   QStringLiteral("output_background_colour"),
+		                                   QStringLiteral("output_text_colour"),
+		                                   QStringLiteral("wrap_column"),
+		                                   QStringLiteral("max_output_lines"),
+		                                   QStringLiteral("wrap"),
+		                                   QStringLiteral("auto_wrap_window_width"),
+		                                   QStringLiteral("naws"),
+		                                   QStringLiteral("wrap_input"),
+		                                   QStringLiteral("show_bold"),
+		                                   QStringLiteral("show_italic"),
+		                                   QStringLiteral("show_underline"),
+		                                   QStringLiteral("alternative_inverse"),
+		                                   QStringLiteral("line_spacing"),
+		                                   QStringLiteral("fade_output_buffer_after_seconds"),
+		                                   QStringLiteral("fade_output_opacity_percent"),
+		                                   QStringLiteral("fade_output_seconds"),
+		                                   QStringLiteral("pixel_offset"),
+		                                   QStringLiteral("display_my_input"),
+		                                   QStringLiteral("line_information"),
+		                                   QStringLiteral("escape_deletes_input"),
+		                                   QStringLiteral("save_deleted_command"),
+		                                   QStringLiteral("confirm_on_paste"),
+		                                   QStringLiteral("ctrl_backspace_deletes_last_word"),
+		                                   QStringLiteral("arrows_change_history"),
+		                                   QStringLiteral("arrow_keys_wrap"),
+		                                   QStringLiteral("arrow_recalls_partial"),
+		                                   QStringLiteral("alt_arrow_recalls_partial"),
+		                                   QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
+		                                   QStringLiteral("ctrl_p_goes_to_previous_command"),
+		                                   QStringLiteral("ctrl_n_goes_to_next_command"),
+		                                   QStringLiteral("confirm_before_replacing_typing"),
+		                                   QStringLiteral("double_click_inserts"),
+		                                   QStringLiteral("double_click_sends"),
+		                                   QStringLiteral("auto_repeat"),
+		                                   QStringLiteral("lower_case_tab_completion"),
+		                                   QStringLiteral("tab_completion_space"),
+		                                   QStringLiteral("tab_completion_lines"),
+		                                   QStringLiteral("auto_resize_command_window"),
+		                                   QStringLiteral("auto_resize_minimum_lines"),
+		                                   QStringLiteral("auto_resize_maximum_lines"),
+		                                   QStringLiteral("keep_commands_on_same_line"),
+		                                   QStringLiteral("no_echo_off"),
+		                                   QStringLiteral("always_record_command_history"),
+		                                   QStringLiteral("hyperlink_adds_to_command_history"),
+		                                   QStringLiteral("use_custom_link_colour"),
+		                                   QStringLiteral("underline_hyperlinks"),
+		                                   QStringLiteral("hyperlink_colour"),
+		                                   QStringLiteral("history_lines"),
+		                                   QStringLiteral("auto_pause"),
+		                                   QStringLiteral("keep_pause_at_bottom"),
+		                                   QStringLiteral("start_paused")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewRuntimeSettingsMultilineAttributeKeys()
+	{
+		static const QSet<QString> keys = {QStringLiteral("tab_completion_defaults")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewRuntimeSettingsRebuildAttributeKeys()
+	{
+		// Keep this set aligned with output-rendering branches in applyRuntimeSettingsImpl().
+		// Keys listed here require rebuilding existing buffered output to avoid stale formatting/layout.
+		static const QSet<QString> keys = {QStringLiteral("output_font_name"),
+		                                   QStringLiteral("output_font_height"),
+		                                   QStringLiteral("output_font_weight"),
+		                                   QStringLiteral("output_font_charset"),
+		                                   QStringLiteral("use_default_output_font"),
+		                                   QStringLiteral("output_background_colour"),
+		                                   QStringLiteral("output_text_colour"),
+		                                   QStringLiteral("show_bold"),
+		                                   QStringLiteral("show_italic"),
+		                                   QStringLiteral("show_underline"),
+		                                   QStringLiteral("alternative_inverse"),
+		                                   QStringLiteral("line_spacing")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewRuntimeSettingsRebuildMultilineAttributeKeys()
+	{
+		static const QSet<QString> keys = {};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewEnabledBooleanAttributeKeys()
+	{
+		static const QSet<QString> keys = {QStringLiteral("wrap"),
+		                                   QStringLiteral("auto_wrap_window_width"),
+		                                   QStringLiteral("naws"),
+		                                   QStringLiteral("wrap_input"),
+		                                   QStringLiteral("alternative_inverse"),
+		                                   QStringLiteral("display_my_input"),
+		                                   QStringLiteral("line_information"),
+		                                   QStringLiteral("escape_deletes_input"),
+		                                   QStringLiteral("save_deleted_command"),
+		                                   QStringLiteral("confirm_on_paste"),
+		                                   QStringLiteral("ctrl_backspace_deletes_last_word"),
+		                                   QStringLiteral("arrows_change_history"),
+		                                   QStringLiteral("arrow_keys_wrap"),
+		                                   QStringLiteral("arrow_recalls_partial"),
+		                                   QStringLiteral("alt_arrow_recalls_partial"),
+		                                   QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
+		                                   QStringLiteral("ctrl_p_goes_to_previous_command"),
+		                                   QStringLiteral("ctrl_n_goes_to_next_command"),
+		                                   QStringLiteral("confirm_before_replacing_typing"),
+		                                   QStringLiteral("double_click_inserts"),
+		                                   QStringLiteral("double_click_sends"),
+		                                   QStringLiteral("auto_repeat"),
+		                                   QStringLiteral("lower_case_tab_completion"),
+		                                   QStringLiteral("tab_completion_space"),
+		                                   QStringLiteral("auto_resize_command_window"),
+		                                   QStringLiteral("keep_commands_on_same_line"),
+		                                   QStringLiteral("no_echo_off"),
+		                                   QStringLiteral("always_record_command_history"),
+		                                   QStringLiteral("hyperlink_adds_to_command_history"),
+		                                   QStringLiteral("use_custom_link_colour"),
+		                                   QStringLiteral("underline_hyperlinks"),
+		                                   QStringLiteral("auto_pause"),
+		                                   QStringLiteral("keep_pause_at_bottom"),
+		                                   QStringLiteral("start_paused"),
+		                                   QStringLiteral("use_default_output_font"),
+		                                   QStringLiteral("use_default_input_font")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewDisabledBooleanAttributeKeys()
+	{
+		static const QSet<QString> keys = {QStringLiteral("show_bold"), QStringLiteral("show_italic"),
+		                                   QStringLiteral("show_underline")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewNumericAttributeKeys()
+	{
+		static const QSet<QString> keys = {QStringLiteral("output_font_height"),
+		                                   QStringLiteral("input_font_height"),
+		                                   QStringLiteral("output_font_weight"),
+		                                   QStringLiteral("input_font_weight"),
+		                                   QStringLiteral("input_font_italic"),
+		                                   QStringLiteral("output_font_charset"),
+		                                   QStringLiteral("input_font_charset"),
+		                                   QStringLiteral("wrap_column"),
+		                                   QStringLiteral("max_output_lines"),
+		                                   QStringLiteral("line_spacing"),
+		                                   QStringLiteral("fade_output_buffer_after_seconds"),
+		                                   QStringLiteral("fade_output_opacity_percent"),
+		                                   QStringLiteral("fade_output_seconds"),
+		                                   QStringLiteral("pixel_offset"),
+		                                   QStringLiteral("tab_completion_lines"),
+		                                   QStringLiteral("auto_resize_minimum_lines"),
+		                                   QStringLiteral("auto_resize_maximum_lines"),
+		                                   QStringLiteral("history_lines")};
+		return keys;
+	}
+
+	const QSet<QString> &worldViewColorAttributeKeys()
+	{
+		static const QSet<QString> keys = {
+		    QStringLiteral("input_background_colour"), QStringLiteral("input_text_colour"),
+		    QStringLiteral("output_background_colour"), QStringLiteral("output_text_colour"),
+		    QStringLiteral("hyperlink_colour")};
+		return keys;
+	}
+
+	bool isEnabledFlagValue(const QString &value)
+	{
+		return value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0 ||
+		       value == QStringLiteral("1");
+	}
+
+	bool isDisabledFlagValue(const QString &value)
+	{
+		return value.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+		       value.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0 ||
+		       value == QStringLiteral("0");
+	}
+
+	int canonicalWorldViewNumericValue(const QString &key, const QString &value)
+	{
+		bool ok     = false;
+		int  parsed = value.toInt(&ok);
+		if (key == QStringLiteral("line_spacing"))
+			return ok && parsed >= 0 ? parsed : 0;
+		if (key == QStringLiteral("fade_output_buffer_after_seconds"))
+			return ok && parsed >= 0 ? parsed : 0;
+		if (key == QStringLiteral("fade_output_opacity_percent"))
+		{
+			if (!ok)
+				parsed = 100;
+			return qBound(0, parsed, 100);
+		}
+		if (key == QStringLiteral("fade_output_seconds"))
+			return ok && parsed > 0 ? parsed : 1;
+		if (key == QStringLiteral("tab_completion_lines"))
+			return ok && parsed >= 1 ? parsed : 200;
+		if (key == QStringLiteral("auto_resize_minimum_lines"))
+			return ok && parsed > 0 ? parsed : 1;
+		if (key == QStringLiteral("auto_resize_maximum_lines"))
+			return ok && parsed > 0 ? parsed : 20;
+		if (key == QStringLiteral("history_lines"))
+			return ok && parsed >= 0 ? parsed : 0;
+		return ok ? parsed : 0;
 	}
 
 	QString anchorAtGlobalCursor(const QTextBrowser *browser)
@@ -161,6 +402,30 @@ namespace
 			cursor.clearSelection();
 			break;
 		}
+	}
+
+	bool trimTrailingPromptLineBreak(QTextDocument *document)
+	{
+		if (!document)
+			return false;
+
+		QTextCursor cursor(document);
+		cursor.movePosition(QTextCursor::End);
+		if (cursor.position() <= 0)
+			return false;
+
+		cursor.movePosition(QTextCursor::Left, QTextCursor::KeepAnchor, 1);
+		const QString selected = cursor.selectedText();
+		if (selected.isEmpty())
+			return false;
+		const QChar ch = selected.at(0);
+		if (ch == QChar::ParagraphSeparator || ch == QChar::LineSeparator || ch == QLatin1Char('\n') ||
+		    ch == QLatin1Char('\r'))
+		{
+			cursor.removeSelectedText();
+			return true;
+		}
+		return false;
 	}
 
 	constexpr int kMiniMouseShift      = 0x01;
@@ -416,15 +681,12 @@ class WrapTextBrowser : public QTextBrowser
 				event->accept();
 				return;
 			}
-			if (m_isLive)
+			if (m_view)
 			{
-				if (m_view)
-					m_view->handleOutputWheel(event->angleDelta(), event->pixelDelta());
+				m_view->handleOutputWheel(event);
 				event->accept();
 				return;
 			}
-			if (m_view)
-				m_view->noteUserScrollAction();
 			QTextBrowser::wheelEvent(event);
 		}
 
@@ -564,6 +826,10 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 			        return;
 		        rebuildOutputFromLines(m_runtime->lines());
 	        });
+	m_hyperlinkRestyleTimer = new QTimer(this);
+	m_hyperlinkRestyleTimer->setSingleShot(false);
+	connect(m_hyperlinkRestyleTimer, &QTimer::timeout, this,
+	        &WorldView::processIncrementalHyperlinkRestyleChunk);
 	m_timeFadeCancelled = QDateTime::currentDateTime();
 	auto *outputLayout  = new QHBoxLayout(m_outputContainer);
 	outputLayout->setContentsMargins(0, 0, 0, 0);
@@ -696,18 +962,20 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 				QSignalBlocker block(m_outputScrollBar);
 				m_outputScrollBar->setRange(bar->minimum(), bar->maximum());
 				m_outputScrollBar->setPageStep(bar->pageStep());
-				m_outputScrollBar->setSingleStep(bar->singleStep());
+				m_outputScrollBar->setSingleStep(outputScrollUnitsPerLine());
 				m_outputScrollBar->setValue(bar->value());
 			};
 			connect(bar, &QScrollBar::rangeChanged, this,
 			        [this, bar](int min, int max)
 			        {
-				        if (!m_outputScrollBar)
-					        return;
-				        QSignalBlocker block(m_outputScrollBar);
-				        m_outputScrollBar->setRange(min, max);
-				        m_outputScrollBar->setPageStep(bar->pageStep());
-				        m_outputScrollBar->setSingleStep(bar->singleStep());
+				        if (m_outputScrollBar)
+				        {
+					        QSignalBlocker block(m_outputScrollBar);
+					        m_outputScrollBar->setRange(min, max);
+					        m_outputScrollBar->setPageStep(bar->pageStep());
+					        m_outputScrollBar->setSingleStep(outputScrollUnitsPerLine());
+				        }
+				        handlePendingEndAnchorRangeChange();
 			        });
 			connect(bar, &QScrollBar::valueChanged, this,
 			        [this](int value)
@@ -733,6 +1001,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 		}
 		connect(bar, &QScrollBar::valueChanged, this, [this](int) { emit outputScrollChanged(); });
 	}
+	syncOutputScrollSingleStep();
 	connect(m_input, &QPlainTextEdit::selectionChanged, this, [this] { emit inputSelectionChanged(); });
 	connect(this, &WorldView::outputScrollChanged, this, [this] { requestDrawOutputWindowNotification(); });
 
@@ -777,6 +1046,7 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 	if (m_runtime && m_runtime->view() == this)
 		m_runtime->setView(nullptr);
 	m_runtime = runtime;
+	resetRuntimeSettingsSnapshot();
 	applyRuntimeSettings();
 	if (m_runtime)
 		m_runtime->setView(this);
@@ -785,6 +1055,7 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 {
 	m_runtime = runtime;
+	resetRuntimeSettingsSnapshot();
 	applyRuntimeSettings();
 }
 
@@ -975,6 +1246,7 @@ bool WorldView::isFrozen() const
 
 void WorldView::noteUserScrollAction()
 {
+	finishPendingEndAnchorRequest();
 	m_timeFadeCancelled = QDateTime::currentDateTime();
 	if (!m_autoPause || !m_outputScrollBar)
 		return;
@@ -982,35 +1254,141 @@ void WorldView::noteUserScrollAction()
 	setScrollbackSplitActive(!atEnd);
 }
 
-void WorldView::handleOutputWheel(const QPoint &angleDelta, const QPoint &pixelDelta)
+int WorldView::outputScrollUnitsPerLine() const
 {
-	if (!m_outputScrollBar)
-		return;
-	int  delta = 0;
-	bool pixel = false;
-	if (!pixelDelta.isNull())
+	const WrapTextBrowser *const view = m_output ? m_output : m_liveOutput;
+	if (!view)
+		return 1;
+	return qMax(1, QFontMetrics(view->font()).lineSpacing());
+}
+
+void WorldView::syncOutputScrollSingleStep() const
+{
+	const int singleStep = outputScrollUnitsPerLine();
+	if (m_output)
 	{
-		delta = pixelDelta.y();
-		pixel = true;
+		if (QScrollBar *const bar = m_output->verticalScrollBar())
+			bar->setSingleStep(singleStep);
 	}
-	else if (!angleDelta.isNull())
+	if (m_liveOutput)
 	{
-		delta = angleDelta.y();
+		if (QScrollBar *const bar = m_liveOutput->verticalScrollBar())
+			bar->setSingleStep(singleStep);
 	}
-	if (delta == 0)
+	if (m_outputScrollBar)
+		m_outputScrollBar->setSingleStep(singleStep);
+}
+
+void WorldView::applyEndAnchorNow() const
+{
+	if (!m_output)
 		return;
-	int value = m_outputScrollBar->value();
-	if (pixel)
+	QScrollBar *const outputBar = m_output->verticalScrollBar();
+	if (!outputBar)
+		return;
+	const int maximum = outputBar->maximum();
+	outputBar->setValue(maximum);
+	if (m_outputScrollBar)
+		m_outputScrollBar->setValue(maximum);
+}
+
+void WorldView::requestEndAnchorAfterRebuild()
+{
+	finishPendingEndAnchorRequest();
+	if (!m_output || !m_outputDocument)
+		return;
+	m_pendingEndAnchorRequestSerial    = ++m_endAnchorRequestSerial;
+	m_pendingEndAnchorMutationComplete = false;
+	m_pendingEndAnchorSawRangeChange   = false;
+}
+
+void WorldView::markEndAnchorMutationComplete()
+{
+	if (m_pendingEndAnchorRequestSerial == 0)
+		return;
+	if (m_scrollbackSplitActive)
 	{
+		finishPendingEndAnchorRequest();
+		return;
+	}
+	m_pendingEndAnchorMutationComplete = true;
+	if (!m_pendingEndAnchorSawRangeChange)
+	{
+		applyEndAnchorNow();
+		finishPendingEndAnchorRequest();
+	}
+}
+
+void WorldView::finishPendingEndAnchorRequest()
+{
+	m_pendingEndAnchorRequestSerial    = 0;
+	m_pendingEndAnchorMutationComplete = false;
+	m_pendingEndAnchorSawRangeChange   = false;
+}
+
+void WorldView::handlePendingEndAnchorRangeChange()
+{
+	if (m_pendingEndAnchorRequestSerial == 0 || m_scrollbackSplitActive)
+		return;
+	m_pendingEndAnchorSawRangeChange = true;
+	applyEndAnchorNow();
+	if (m_pendingEndAnchorMutationComplete)
+		finishPendingEndAnchorRequest();
+}
+
+void WorldView::handleOutputWheel(const QWheelEvent *event)
+{
+	if (!m_outputScrollBar || !event)
+		return;
+
+	const QPoint angleDelta    = event->angleDelta();
+	const QPoint pixelDelta    = event->pixelDelta();
+	const bool   preferAngle   = !angleDelta.isNull();
+	const int    wheelLineStep = m_smootherScrolling ? 1 : 5;
+	const int    lineUnits     = outputScrollUnitsPerLine();
+
+	int          value = m_outputScrollBar->value();
+	bool         moved = false;
+	if (preferAngle)
+	{
+		const int delta = angleDelta.y();
+		if (delta == 0)
+			return;
+
+		if (m_wheelAngleRemainderY != 0 &&
+		    ((m_wheelAngleRemainderY > 0 && delta < 0) || (m_wheelAngleRemainderY < 0 && delta > 0)))
+		{
+			// Suppress tiny opposite-direction deltas from sensitive wheels unless they
+			// are large enough to clearly indicate a real direction change.
+			const int reversalGuard = qMax(60, 120 - qAbs(m_wheelAngleRemainderY));
+			if (qAbs(delta) < reversalGuard)
+				return;
+			m_wheelAngleRemainderY = 0;
+		}
+
+		// Prefer notch-based wheel deltas when available.
+		// This avoids high-resolution pixel deltas making wheel scroll feel one-line-at-a-time.
+		m_wheelAngleRemainderY += delta;
+		const int steps = m_wheelAngleRemainderY / 120;
+		m_wheelAngleRemainderY %= 120;
+		if (steps != 0)
+		{
+			value -= steps * wheelLineStep * lineUnits;
+			moved = true;
+		}
+	}
+	else if (!pixelDelta.isNull())
+	{
+		const int delta = pixelDelta.y();
+		if (delta == 0)
+			return;
+
+		m_wheelAngleRemainderY = 0;
 		value -= delta;
+		moved = true;
 	}
-	else
-	{
-		int steps = delta / 120;
-		if (steps == 0)
-			steps = (delta > 0) ? 1 : -1;
-		value -= steps * m_outputScrollBar->singleStep();
-	}
+	if (!moved)
+		return;
 	m_outputScrollBar->setValue(value);
 	noteUserScrollAction();
 }
@@ -1128,7 +1506,7 @@ void WorldView::scrollOutputLineUp() const
 	if (!view)
 		return;
 	if (QScrollBar *bar = view->verticalScrollBar())
-		bar->setValue(bar->value() - bar->singleStep());
+		bar->setValue(bar->value() - outputScrollUnitsPerLine());
 }
 
 void WorldView::scrollOutputLineDown() const
@@ -1137,8 +1515,9 @@ void WorldView::scrollOutputLineDown() const
 	if (!view)
 		return;
 	if (QScrollBar *bar = view->verticalScrollBar())
-		bar->setValue(bar->value() + bar->singleStep());
+		bar->setValue(bar->value() + outputScrollUnitsPerLine());
 }
+
 void WorldView::addHyperlinkToHistory(const QString &text)
 {
 	if (!m_hyperlinkAddsToCommandHistory)
@@ -1402,7 +1781,6 @@ namespace
 
 		return html;
 	}
-
 } // namespace
 
 void WorldView::appendOutputHtml(const QString &html, bool newLine)
@@ -1438,6 +1816,15 @@ void WorldView::appendOutputHtml(const QString &html, bool newLine)
 	requestOutputScrollToEnd();
 }
 
+void WorldView::commitPendingInlineInputBreak()
+{
+	if (m_runtime)
+		m_runtime->finalizePendingInputLineHardReturn();
+
+	appendOutputHtml(QString(), true);
+	m_breakBeforeNextServerOutput = false;
+}
+
 void WorldView::echoInputText(const QString &text)
 {
 	if (!m_displayMyInput || !m_output)
@@ -1464,11 +1851,54 @@ void WorldView::echoInputText(const QString &text)
 			echoSpans.push_back(span);
 		}
 	}
-	if (m_keepCommandsOnSameLine)
+	bool keepOnSameLine = m_keepCommandsOnSameLine;
+	if (m_runtime)
 	{
-		trimTrailingPromptWhitespace(m_outputDocument);
-		appendOutputTextInternal(trimmed, false, true, WorldRuntime::LineInput, echoSpans);
-		m_breakBeforeNextServerOutput = true;
+		const unsigned short source = m_runtime->currentActionSource();
+		const bool           interactiveSource =
+		    source == WorldRuntime::eUserTyping || source == WorldRuntime::eUserMacro ||
+		    source == WorldRuntime::eUserKeypad || source == WorldRuntime::eUserAccelerator ||
+		    source == WorldRuntime::eUserMenuAction;
+		if (!interactiveSource)
+			keepOnSameLine = false;
+	}
+
+	if (keepOnSameLine)
+	{
+		bool insertedBreakBeforeEcho = false;
+		if (m_breakBeforeNextServerOutput)
+		{
+			commitPendingInlineInputBreak();
+			insertedBreakBeforeEcho = true;
+		}
+		if (!m_outputDocument)
+		{
+			appendOutputTextInternal(trimmed, false, true, WorldRuntime::LineInput, echoSpans);
+			m_breakBeforeNextServerOutput = true;
+		}
+		else
+		{
+			bool        consumedExistingBreak = false;
+			// Keep prompt-line echo updates visually stable by applying line-break
+			// consumption and echoed text insertion in a single document edit block.
+			QTextCursor editCursor(m_outputDocument);
+			editCursor.beginEditBlock();
+			trimTrailingPromptWhitespace(m_outputDocument);
+			if (!insertedBreakBeforeEcho)
+			{
+				consumedExistingBreak = trimTrailingPromptLineBreak(m_outputDocument);
+				if (consumedExistingBreak && m_runtime)
+				{
+					m_runtime->clearLastLineHardReturn();
+				}
+			}
+			appendOutputTextInternal(trimmed, false, true, WorldRuntime::LineInput, echoSpans);
+			if (consumedExistingBreak)
+				commitPendingInlineInputBreak();
+			editCursor.endEditBlock();
+			if (!consumedExistingBreak)
+				m_breakBeforeNextServerOutput = true;
+		}
 	}
 	else
 		appendOutputTextInternal(trimmed, true, true, WorldRuntime::LineInput, echoSpans);
@@ -1902,6 +2332,25 @@ QStringList WorldView::commandHistoryList() const
 	return list;
 }
 
+void WorldView::setCommandHistoryList(const QStringList &historyEntries)
+{
+	m_history.clear();
+	if (m_historyLimit > 0)
+	{
+		const auto      limit = static_cast<qsizetype>(m_historyLimit);
+		const qsizetype start = qMax<qsizetype>(0, historyEntries.size() - limit);
+		for (qsizetype i = start; i < historyEntries.size(); ++i)
+			m_history.push_back(historyEntries.at(i));
+	}
+	m_lastCommand = m_history.isEmpty() ? QString() : m_history.last();
+	resetHistoryRecall();
+	if (m_commandHistoryFind)
+	{
+		m_commandHistoryFind->currentLine = 0;
+		m_commandHistoryFind->again       = false;
+	}
+}
+
 void WorldView::clearCommandHistory()
 {
 	m_history.clear();
@@ -2005,12 +2454,10 @@ void WorldView::setSmoothScrolling(bool smooth, bool smoother)
 {
 	m_smoothScrolling   = smooth;
 	m_smootherScrolling = smoother;
-	if (m_output && m_output->verticalScrollBar())
-		m_output->verticalScrollBar()->setSingleStep(smoother ? 1 : 3);
+	syncOutputScrollSingleStep();
+	const int inputStep = smoother ? 1 : 5;
 	if (m_input && m_input->verticalScrollBar())
-		m_input->verticalScrollBar()->setSingleStep(smoother ? 1 : 3);
-	if (m_outputScrollBar)
-		m_outputScrollBar->setSingleStep(smoother ? 1 : 3);
+		m_input->verticalScrollBar()->setSingleStep(inputStep);
 }
 
 void WorldView::setBleedBackground(bool enabled)
@@ -2423,6 +2870,25 @@ void WorldView::copySelectionAsHtml() const
 void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool recordLine, int flags,
                                          const QVector<WorldRuntime::StyleSpan> &spans)
 {
+	const bool shouldBreakAfterInlineInput =
+	    (flags & (WorldRuntime::LineOutput | WorldRuntime::LineNote)) != 0;
+	bool injectPendingBreakBeforeRender = false;
+	if (shouldBreakAfterInlineInput && m_breakBeforeNextServerOutput)
+	{
+		// If this call already hard-breaks (e.g. Note()), just consume the
+		// pending break flag. Otherwise, inject a line break first.
+		if (!(text.isEmpty() && newLine))
+		{
+			if (m_runtime)
+				m_runtime->finalizePendingInputLineHardReturn();
+			injectPendingBreakBeforeRender = true;
+		}
+		else
+			m_breakBeforeNextServerOutput = false;
+		if (injectPendingBreakBeforeRender)
+			m_breakBeforeNextServerOutput = false;
+	}
+
 	int recordedFlags = flags;
 	if (m_runtime)
 	{
@@ -2499,19 +2965,10 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 	if (!m_outputDocument)
 		return;
 
-	const bool shouldBreakAfterInlineInput =
-	    (flags & (WorldRuntime::LineOutput | WorldRuntime::LineNote)) != 0;
-
 	if (m_frozen)
 	{
-		if (shouldBreakAfterInlineInput && m_breakBeforeNextServerOutput)
-		{
-			// If this call already hard-breaks (e.g. Note()), just consume the
-			// pending break flag. Otherwise, inject a line break first.
-			if (!(text.isEmpty() && newLine))
-				m_pendingOutput.push_back(PendingHtml{QString(), true});
-			m_breakBeforeNextServerOutput = false;
-		}
+		if (injectPendingBreakBeforeRender)
+			m_pendingOutput.push_back(PendingHtml{QString(), true});
 
 		QString                          displayText   = displayEntry.text;
 		QVector<WorldRuntime::StyleSpan> renderedSpans = displayEntry.spans;
@@ -2525,20 +2982,31 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 		return;
 	}
 
-	if (shouldBreakAfterInlineInput && m_breakBeforeNextServerOutput)
-	{
-		// If this call already hard-breaks (e.g. Note()), just consume the
-		// pending break flag. Otherwise, inject a line break first.
-		if (!(text.isEmpty() && newLine))
-			appendOutputHtml(QString(), true);
-		m_breakBeforeNextServerOutput = false;
-	}
-
 	QString                          displayText   = displayEntry.text;
 	QVector<WorldRuntime::StyleSpan> renderedSpans = displayEntry.spans;
 	buildDisplayLine(displayEntry, previousLineTime, displayText, renderedSpans);
 
 	const double opacity = lineOpacityForTimestamp(displayEntry.time);
+	if (injectPendingBreakBeforeRender)
+	{
+		const bool previousBulkState = m_bulkOutputRebuild;
+		m_bulkOutputRebuild          = true;
+		QTextCursor editCursor(m_outputDocument);
+		editCursor.beginEditBlock();
+		appendOutputHtml(QString(), true);
+		if (!appendOutputTextFast(displayText, renderedSpans, newLine, opacity))
+		{
+			appendOutputHtml(buildOutputHtml(displayText, renderedSpans, m_showBold, m_showItalic,
+			                                 m_showUnderline, m_alternativeInverse, m_lineSpacing, opacity),
+			                 newLine);
+		}
+		editCursor.endEditBlock();
+		m_bulkOutputRebuild = previousBulkState;
+		requestOutputScrollToEnd();
+		requestDrawOutputWindowNotification();
+		return;
+	}
+
 	if (!appendOutputTextFast(displayText, renderedSpans, newLine, opacity))
 	{
 		appendOutputHtml(buildOutputHtml(displayText, renderedSpans, m_showBold, m_showItalic,
@@ -2613,9 +3081,10 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 				format.setBackground(back);
 			format.setFontWeight(span.bold && m_showBold ? QFont::Bold : baseFormat.fontWeight());
 			format.setFontItalic(span.italic && m_showItalic);
-			const bool hasLinkAction = isActionLink(span.actionType) && !span.action.isEmpty();
-			const bool underline =
-			    (span.underline && m_showUnderline) || (hasLinkAction && m_underlineHyperlinks);
+			const bool hasLinkAction       = isActionLink(span.actionType) && !span.action.isEmpty();
+			const bool spanUnderlineActive = span.underline && m_showUnderline;
+			const bool linkUnderlineActive = hasLinkAction && m_underlineHyperlinks;
+			const bool underline           = spanUnderlineActive || linkUnderlineActive;
 			format.setFontUnderline(underline);
 			format.setFontStrikeOut(span.strike);
 			if (hasLinkAction)
@@ -2623,14 +3092,26 @@ bool WorldView::appendOutputTextFast(const QString &text, const QVector<WorldRun
 				format.setAnchor(true);
 				format.setAnchorHref(span.action);
 				format.setToolTip(span.hint);
-				if (!fore.isValid() && m_useCustomLinkColour && m_hyperlinkColour.isValid())
-					format.setForeground(m_hyperlinkColour);
+				if (!spanUnderlineActive)
+					format.setProperty(kAutoHyperlinkUnderlineProperty, true);
+				else
+					format.clearProperty(kAutoHyperlinkUnderlineProperty);
+				if (!fore.isValid())
+				{
+					format.setProperty(kAutoHyperlinkColourProperty, true);
+					if (m_useCustomLinkColour && m_hyperlinkColour.isValid())
+						format.setForeground(m_hyperlinkColour);
+				}
+				else
+					format.clearProperty(kAutoHyperlinkColourProperty);
 			}
 			else
 			{
 				format.setAnchor(false);
 				format.setAnchorHref(QString());
 				format.setToolTip(QString());
+				format.clearProperty(kAutoHyperlinkUnderlineProperty);
+				format.clearProperty(kAutoHyperlinkColourProperty);
 			}
 			cursor.insertText(chunk, format);
 		}
@@ -2666,9 +3147,8 @@ void WorldView::updatePartialOutputText(const QString &text, const QVector<World
 		m_hasPartialOutput    = false;
 		m_partialOutputStart  = 0;
 		m_partialOutputLength = 0;
-		appendOutputHtml(QString(), true);
-		m_breakBeforeNextServerOutput = false;
-		cursor                        = QTextCursor(m_outputDocument);
+		commitPendingInlineInputBreak();
+		cursor = QTextCursor(m_outputDocument);
 		cursor.movePosition(QTextCursor::End);
 	}
 
@@ -2717,6 +3197,8 @@ void WorldView::clearOutputBuffer()
 	if (!m_outputDocument)
 		return;
 
+	stopDeferredOutputBackfill(false, true);
+	stopIncrementalHyperlinkRestyle();
 	m_outputDocument->clear();
 	m_pendingOutput.clear();
 	m_hasPartialOutput    = false;
@@ -2735,6 +3217,18 @@ void WorldView::rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry> &l
 	if (!m_outputDocument)
 		return;
 
+	const bool backfillActive =
+	    m_outputBackfillInFlight || m_outputBackfillNextIndex >= 0 || !m_outputBackfillPendingLines.isEmpty();
+	if (backfillActive)
+	{
+		m_outputBackfillQueuedRebuild      = true;
+		m_outputBackfillQueuedRebuildLines = lines;
+		return;
+	}
+
+	stopDeferredOutputBackfill(false, true);
+	stopIncrementalHyperlinkRestyle();
+	requestEndAnchorAfterRebuild();
 	m_outputDocument->clear();
 	m_pendingOutput.clear();
 	m_hasPartialOutput    = false;
@@ -2761,7 +3255,280 @@ void WorldView::rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry> &l
 		scrollViewToEnd(m_liveOutput);
 	else
 		scrollViewToEnd(m_output);
+	markEndAnchorMutationComplete();
 	requestDrawOutputWindowNotification();
+}
+
+void WorldView::rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry> &lines)
+{
+	if (!m_outputDocument)
+		return;
+
+	const bool backfillActive =
+	    m_outputBackfillInFlight || m_outputBackfillNextIndex >= 0 || !m_outputBackfillPendingLines.isEmpty();
+	if (backfillActive)
+	{
+		m_outputBackfillQueuedRebuild      = true;
+		m_outputBackfillQueuedRebuildLines = lines;
+		return;
+	}
+
+	stopDeferredOutputBackfill(false, true);
+	stopIncrementalHyperlinkRestyle();
+	requestEndAnchorAfterRebuild();
+	m_outputDocument->clear();
+	m_pendingOutput.clear();
+	m_hasPartialOutput    = false;
+	m_partialOutputStart  = 0;
+	m_partialOutputLength = 0;
+
+	int estimatedVisibleLines = 0;
+	if (m_output && m_output->viewport())
+	{
+		const int viewportHeight = m_output->viewport()->height();
+		const int lineHeight     = qMax(1, QFontMetrics(m_output->font()).lineSpacing());
+		if (viewportHeight > 0)
+			estimatedVisibleLines = qMax(1, viewportHeight / lineHeight);
+	}
+	if (estimatedVisibleLines <= 0)
+		estimatedVisibleLines = kLazyRestoreInitialMinimumLines;
+
+	const int initialLineCount =
+	    qBound(kLazyRestoreInitialMinimumLines, estimatedVisibleLines * kLazyRestoreVisibleMultiplier,
+	           kLazyRestoreInitialMaximumLines);
+	const int firstImmediateIndex =
+	    sizeToInt(qMax<qsizetype>(0, lines.size() - static_cast<qsizetype>(initialLineCount)));
+
+	const bool previousBulkState = m_bulkOutputRebuild;
+	m_bulkOutputRebuild          = true;
+	QDateTime previousLineTime;
+	if (firstImmediateIndex > 0)
+		previousLineTime = lines.at(firstImmediateIndex - 1).time;
+
+	for (int i = firstImmediateIndex; i < lines.size(); ++i)
+	{
+		const WorldRuntime::LineEntry   &entry = lines.at(i);
+		QString                          displayText(entry.text);
+		QVector<WorldRuntime::StyleSpan> displaySpans(entry.spans);
+		buildDisplayLine(entry, previousLineTime, displayText, displaySpans);
+		appendOutputHtml(buildOutputHtml(displayText, displaySpans, m_showBold, m_showItalic, m_showUnderline,
+		                                 m_alternativeInverse, m_lineSpacing,
+		                                 lineOpacityForTimestamp(entry.time)),
+		                 entry.hardReturn);
+		previousLineTime = entry.time;
+	}
+	m_bulkOutputRebuild = previousBulkState;
+
+	if (firstImmediateIndex > 0)
+	{
+		m_outputBackfillPendingLines = lines.mid(0, firstImmediateIndex);
+		m_outputBackfillNextIndex    = sizeToInt(m_outputBackfillPendingLines.size()) - 1;
+		processDeferredOutputBackfillChunk();
+	}
+	else
+	{
+		markEndAnchorMutationComplete();
+	}
+
+	if (m_scrollbackSplitActive)
+		scrollViewToEnd(m_liveOutput);
+	else
+		scrollViewToEnd(m_output);
+	requestDrawOutputWindowNotification();
+}
+
+void WorldView::processDeferredOutputBackfillChunk()
+{
+	if (!m_outputDocument)
+	{
+		stopDeferredOutputBackfill(false, true);
+		return;
+	}
+	if (m_outputBackfillInFlight)
+		return;
+	if (m_outputBackfillNextIndex < 0 || m_outputBackfillPendingLines.isEmpty())
+	{
+		stopDeferredOutputBackfill(true, false);
+		return;
+	}
+
+	QVector<WorldRuntime::LineEntry> pendingLines = std::move(m_outputBackfillPendingLines);
+	m_outputBackfillPendingLines.clear();
+	m_outputBackfillNextIndex = -1;
+
+	QVector<DeferredBackfillRenderLine> renderLines;
+	renderLines.reserve(pendingLines.size());
+	QDateTime previousLineTime;
+	for (const WorldRuntime::LineEntry &entry : pendingLines)
+	{
+		QString                          displayText(entry.text);
+		QVector<WorldRuntime::StyleSpan> displaySpans(entry.spans);
+		buildDisplayLine(entry, previousLineTime, displayText, displaySpans);
+		renderLines.push_back(DeferredBackfillRenderLine{displayText, displaySpans, entry.hardReturn,
+		                                                 lineOpacityForTimestamp(entry.time)});
+		previousLineTime = entry.time;
+	}
+	pendingLines.clear();
+
+	const bool showBold           = m_showBold;
+	const bool showItalic         = m_showItalic;
+	const bool showUnderline      = m_showUnderline;
+	const bool alternativeInverse = m_alternativeInverse;
+	const int  lineSpacing        = m_lineSpacing;
+	const int  generation         = m_outputBackfillGeneration;
+	m_outputBackfillInFlight      = true;
+	QPointer<WorldView> viewGuard = this;
+	QThreadPool::globalInstance()->start(
+	    [viewGuard, generation, renderLines = std::move(renderLines), showBold, showItalic, showUnderline,
+	     alternativeInverse, lineSpacing]() mutable
+	    {
+		    QVector<WorldView::PendingHtml> renderedHtml;
+		    renderedHtml.reserve(renderLines.size());
+		    for (const DeferredBackfillRenderLine &line : renderLines)
+		    {
+			    renderedHtml.push_back(WorldView::PendingHtml{
+			        buildOutputHtml(line.text, line.spans, showBold, showItalic, showUnderline,
+			                        alternativeInverse, lineSpacing, line.opacity),
+			        line.newLine});
+		    }
+		    QMetaObject::invokeMethod(
+		        qApp,
+		        [viewGuard, generation, renderedHtml = std::move(renderedHtml)]() mutable
+		        {
+			        if (!viewGuard)
+				        return;
+			        if (generation != viewGuard->m_outputBackfillGeneration)
+				        return;
+
+			        viewGuard->m_outputBackfillInFlight = false;
+			        if (!viewGuard->m_outputDocument)
+			        {
+				        viewGuard->stopDeferredOutputBackfill(false, true);
+				        return;
+			        }
+
+			        const bool previousBulkState   = viewGuard->m_bulkOutputRebuild;
+			        viewGuard->m_bulkOutputRebuild = true;
+
+			        auto captureViewState = [](WrapTextBrowser *view)
+			        {
+				        struct
+				        {
+						        bool updatesEnabled{true};
+				        } state;
+				        if (!view)
+					        return state;
+				        state.updatesEnabled = view->updatesEnabled();
+				        view->setUpdatesEnabled(false);
+				        return state;
+			        };
+			        const auto           outputViewState = captureViewState(viewGuard->m_output);
+			        const auto           liveViewState   = captureViewState(viewGuard->m_liveOutput);
+
+			        QTextDocument *const oldDocument = viewGuard->m_outputDocument;
+			        auto                *newDocument = new QTextDocument(viewGuard);
+			        newDocument->setUndoRedoEnabled(false);
+			        newDocument->setDefaultFont(oldDocument->defaultFont());
+			        newDocument->setDefaultStyleSheet(oldDocument->defaultStyleSheet());
+			        newDocument->setMaximumBlockCount(oldDocument->maximumBlockCount());
+
+			        QTextCursor cursor(newDocument);
+			        cursor.movePosition(QTextCursor::Start);
+			        if (viewGuard->m_output)
+			        {
+				        QTextCharFormat defaultFormat = cursor.charFormat();
+				        defaultFormat.setForeground(viewGuard->m_output->palette().color(QPalette::Text));
+				        const QColor defaultBack = viewGuard->m_outputBackground.isValid()
+				                                       ? viewGuard->m_outputBackground
+				                                       : viewGuard->m_output->palette().color(QPalette::Base);
+				        defaultFormat.setBackground(defaultBack);
+				        cursor.setCharFormat(defaultFormat);
+			        }
+
+			        for (const WorldView::PendingHtml &entry : renderedHtml)
+			        {
+				        if (!entry.html.isEmpty())
+					        cursor.insertHtml(entry.html);
+				        if (entry.newLine)
+				        {
+					        const QTextBlockFormat blockFormat = cursor.blockFormat();
+					        const QTextCharFormat  charFormat  = cursor.charFormat();
+					        cursor.insertBlock(blockFormat, charFormat);
+				        }
+			        }
+			        const int   prefixCharacters = cursor.position();
+
+			        QTextCursor oldCursor(oldDocument);
+			        oldCursor.select(QTextCursor::Document);
+			        const QTextDocumentFragment existingFragment(oldCursor.selection());
+			        cursor.insertFragment(existingFragment);
+
+			        if (viewGuard->m_hasPartialOutput && prefixCharacters > 0)
+				        viewGuard->m_partialOutputStart += prefixCharacters;
+
+			        QObject::disconnect(oldDocument, nullptr, viewGuard, nullptr);
+			        viewGuard->m_outputDocument = newDocument;
+			        if (viewGuard->m_output)
+				        viewGuard->m_output->setDocument(newDocument);
+			        if (viewGuard->m_liveOutput)
+				        viewGuard->m_liveOutput->setDocument(newDocument);
+			        QObject::connect(newDocument, &QTextDocument::contentsChanged, viewGuard,
+			                         [viewGuard]
+			                         {
+				                         if (viewGuard->m_scrollbackSplitActive && !viewGuard->m_frozen)
+					                         WorldView::scrollViewToEnd(viewGuard->m_liveOutput);
+			                         });
+			        oldDocument->deleteLater();
+
+			        viewGuard->m_bulkOutputRebuild = previousBulkState;
+
+			        auto restoreViewState = [](WrapTextBrowser *view, const auto &state)
+			        {
+				        if (view)
+				        {
+					        view->setUpdatesEnabled(state.updatesEnabled);
+					        if (QWidget *viewport = view->viewport())
+						        viewport->update();
+				        }
+			        };
+			        restoreViewState(viewGuard->m_output, outputViewState);
+			        restoreViewState(viewGuard->m_liveOutput, liveViewState);
+			        viewGuard->markEndAnchorMutationComplete();
+
+			        viewGuard->requestDrawOutputWindowNotification();
+			        viewGuard->stopDeferredOutputBackfill(true, false);
+		        },
+		        Qt::QueuedConnection);
+	    });
+}
+
+void WorldView::stopDeferredOutputBackfill(const bool runQueuedRebuild, const bool clearQueuedRebuild)
+{
+	++m_outputBackfillGeneration;
+	m_outputBackfillInFlight = false;
+	m_outputBackfillPendingLines.clear();
+	m_outputBackfillNextIndex = -1;
+
+	bool                             shouldRunQueuedRebuild = false;
+	QVector<WorldRuntime::LineEntry> queuedRebuildLines;
+	if (!clearQueuedRebuild && runQueuedRebuild && m_outputBackfillQueuedRebuild)
+	{
+		shouldRunQueuedRebuild = true;
+		queuedRebuildLines     = m_outputBackfillQueuedRebuildLines;
+	}
+
+	if (clearQueuedRebuild || shouldRunQueuedRebuild)
+	{
+		finishPendingEndAnchorRequest();
+		m_outputBackfillQueuedRebuild = false;
+		m_outputBackfillQueuedRebuildLines.clear();
+	}
+
+	if (shouldRunQueuedRebuild)
+	{
+		rebuildOutputFromLinesLazy(queuedRebuildLines);
+		return;
+	}
 }
 
 void WorldView::buildDisplayLine(const WorldRuntime::LineEntry &entry, const QDateTime &previousLineTime,
@@ -2870,6 +3637,104 @@ QColor WorldView::parseColor(const QString &value)
 	}
 
 	return {};
+}
+
+const QSet<QString> &WorldView::runtimeSettingsAttributeKeys()
+{
+	return worldViewRuntimeSettingsAttributeKeys();
+}
+
+const QSet<QString> &WorldView::runtimeSettingsMultilineAttributeKeys()
+{
+	return worldViewRuntimeSettingsMultilineAttributeKeys();
+}
+
+bool WorldView::runtimeSettingValuesEquivalent(const QString &key, const QString &before,
+                                               const QString &after)
+{
+	if (before == after)
+		return true;
+	if (const auto &enabledBoolKeys = worldViewEnabledBooleanAttributeKeys(); enabledBoolKeys.contains(key))
+		return isEnabledFlagValue(before) == isEnabledFlagValue(after);
+	if (const auto &disabledBoolKeys = worldViewDisabledBooleanAttributeKeys();
+	    disabledBoolKeys.contains(key))
+		return isDisabledFlagValue(before) == isDisabledFlagValue(after);
+	if (const auto &numericKeys = worldViewNumericAttributeKeys(); numericKeys.contains(key))
+		return canonicalWorldViewNumericValue(key, before) == canonicalWorldViewNumericValue(key, after);
+	if (const auto &colorKeys = worldViewColorAttributeKeys(); colorKeys.contains(key))
+	{
+		const QColor beforeColor = parseColor(before);
+		const QColor afterColor  = parseColor(after);
+		if (!beforeColor.isValid() && !afterColor.isValid())
+			return true;
+		return beforeColor.isValid() && afterColor.isValid() && beforeColor.rgba() == afterColor.rgba();
+	}
+	return before == after;
+}
+
+bool WorldView::runtimeMultilineSettingValuesEquivalent(const QString &key, const QString &before,
+                                                        const QString &after)
+{
+	if (!runtimeSettingsMultilineAttributeKeys().contains(key))
+		return before == after;
+	return before == after;
+}
+
+QSet<QString> WorldView::changedRuntimeSettingsAttributeKeys(const QMap<QString, QString> &before,
+                                                             const QMap<QString, QString> &after)
+{
+	QSet<QString> changedKeys;
+	for (const QString &key : runtimeSettingsAttributeKeys())
+	{
+		if (!runtimeSettingValuesEquivalent(key, before.value(key), after.value(key)))
+			changedKeys.insert(key);
+	}
+	return changedKeys;
+}
+
+QSet<QString> WorldView::changedRuntimeSettingsMultilineAttributeKeys(
+    const QMap<QString, QString> &beforeMultiline, const QMap<QString, QString> &afterMultiline,
+    const QMap<QString, QString> &beforeAttributes, const QMap<QString, QString> &afterAttributes)
+{
+	QSet<QString> changedKeys;
+	for (const QString &key : runtimeSettingsMultilineAttributeKeys())
+	{
+		QString beforeValue = beforeMultiline.value(key);
+		QString afterValue  = afterMultiline.value(key);
+		if (key == QStringLiteral("tab_completion_defaults"))
+		{
+			if (beforeValue.isEmpty())
+				beforeValue = beforeAttributes.value(key);
+			if (afterValue.isEmpty())
+				afterValue = afterAttributes.value(key);
+		}
+		if (!runtimeMultilineSettingValuesEquivalent(key, beforeValue, afterValue))
+			changedKeys.insert(key);
+	}
+	return changedKeys;
+}
+
+bool WorldView::runtimeSettingsNeedFullRebuild(const QSet<QString> &changedAttributeKeys,
+                                               const QSet<QString> &changedMultilineKeys)
+{
+	const auto hasAnyChangedKeys = [](const QSet<QString> &changedKeys, const QSet<QString> &interestingKeys)
+	{
+		return std::ranges::any_of(changedKeys, [&interestingKeys](const QString &key)
+		                           { return interestingKeys.contains(key); });
+	};
+
+	return hasAnyChangedKeys(changedAttributeKeys, runtimeSettingsRebuildAttributeKeys()) ||
+	       hasAnyChangedKeys(changedMultilineKeys, runtimeSettingsRebuildMultilineAttributeKeys());
+}
+
+const QSet<QString> &WorldView::runtimeSettingsRebuildAttributeKeys()
+{
+	return worldViewRuntimeSettingsRebuildAttributeKeys();
+}
+
+const QSet<QString> &WorldView::runtimeSettingsRebuildMultilineAttributeKeys()
+{
+	return worldViewRuntimeSettingsRebuildMultilineAttributeKeys();
 }
 
 QFont::Weight WorldView::mapFontWeight(int weight)
@@ -3571,6 +4436,121 @@ bool WorldView::handleMiniWindowWheel(const QWheelEvent *event, const QWidget *s
 
 void WorldView::applyRuntimeSettings()
 {
+	applyRuntimeSettingsWithPolicy(true);
+}
+
+void WorldView::applyRuntimeSettingsWithoutOutputRebuild()
+{
+	applyRuntimeSettingsWithPolicy(false);
+}
+
+void WorldView::resetRuntimeSettingsSnapshot()
+{
+	m_hasRuntimeSettingsSnapshot = false;
+	m_lastRuntimeSettingsAttributes.clear();
+	m_lastRuntimeSettingsMultilineAttributes.clear();
+	m_lastRuntimeDefaultFontSnapshot = RuntimeDefaultFontSnapshot{};
+}
+
+void WorldView::applyRuntimeSettingsWithPolicy(const bool allowRebuild)
+{
+	if (!m_runtime)
+		return;
+
+	const QMap<QString, QString> &attrs          = m_runtime->worldAttributes();
+	const QMap<QString, QString> &multilineAttrs = m_runtime->worldMultilineAttributes();
+
+	RuntimeDefaultFontSnapshot    currentDefaultFontSnapshot;
+	if (const AppController *app = AppController::instance())
+	{
+		currentDefaultFontSnapshot.inputFontName =
+		    app->getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
+		currentDefaultFontSnapshot.inputFontHeight =
+		    app->getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
+		currentDefaultFontSnapshot.inputFontWeight =
+		    app->getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
+		currentDefaultFontSnapshot.inputFontItalic =
+		    app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
+		currentDefaultFontSnapshot.inputFontCharset =
+		    app->getGlobalOption(QStringLiteral("DefaultInputFontCharset")).toInt();
+		currentDefaultFontSnapshot.outputFontName =
+		    app->getGlobalOption(QStringLiteral("DefaultOutputFont")).toString();
+		currentDefaultFontSnapshot.outputFontHeight =
+		    app->getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
+		currentDefaultFontSnapshot.outputFontCharset =
+		    app->getGlobalOption(QStringLiteral("DefaultOutputFontCharset")).toInt();
+	}
+
+	QSet<QString> changedViewAttributeKeys;
+	QSet<QString> changedViewMultilineKeys;
+	if (m_hasRuntimeSettingsSnapshot)
+	{
+		changedViewAttributeKeys =
+		    changedRuntimeSettingsAttributeKeys(m_lastRuntimeSettingsAttributes, attrs);
+		changedViewMultilineKeys = changedRuntimeSettingsMultilineAttributeKeys(
+		    m_lastRuntimeSettingsMultilineAttributes, multilineAttrs, m_lastRuntimeSettingsAttributes, attrs);
+	}
+	else
+	{
+		changedViewAttributeKeys = runtimeSettingsAttributeKeys();
+		changedViewMultilineKeys = runtimeSettingsMultilineAttributeKeys();
+	}
+
+	if (m_hasRuntimeSettingsSnapshot)
+	{
+		const bool useDefaultInputFont =
+		    isEnabledFlagValue(attrs.value(QStringLiteral("use_default_input_font")));
+		const bool useDefaultOutputFont =
+		    isEnabledFlagValue(attrs.value(QStringLiteral("use_default_output_font")));
+
+		const bool defaultInputFontChanged =
+		    currentDefaultFontSnapshot.inputFontName != m_lastRuntimeDefaultFontSnapshot.inputFontName ||
+		    currentDefaultFontSnapshot.inputFontHeight != m_lastRuntimeDefaultFontSnapshot.inputFontHeight ||
+		    currentDefaultFontSnapshot.inputFontWeight != m_lastRuntimeDefaultFontSnapshot.inputFontWeight ||
+		    currentDefaultFontSnapshot.inputFontItalic != m_lastRuntimeDefaultFontSnapshot.inputFontItalic ||
+		    currentDefaultFontSnapshot.inputFontCharset != m_lastRuntimeDefaultFontSnapshot.inputFontCharset;
+		const bool defaultOutputFontChanged =
+		    currentDefaultFontSnapshot.outputFontName != m_lastRuntimeDefaultFontSnapshot.outputFontName ||
+		    currentDefaultFontSnapshot.outputFontHeight !=
+		        m_lastRuntimeDefaultFontSnapshot.outputFontHeight ||
+		    currentDefaultFontSnapshot.outputFontCharset !=
+		        m_lastRuntimeDefaultFontSnapshot.outputFontCharset;
+
+		if (useDefaultInputFont && defaultInputFontChanged)
+		{
+			changedViewAttributeKeys.insert(QStringLiteral("input_font_name"));
+			changedViewAttributeKeys.insert(QStringLiteral("input_font_height"));
+			changedViewAttributeKeys.insert(QStringLiteral("input_font_weight"));
+			changedViewAttributeKeys.insert(QStringLiteral("input_font_italic"));
+			changedViewAttributeKeys.insert(QStringLiteral("input_font_charset"));
+		}
+		if (useDefaultOutputFont && defaultOutputFontChanged)
+		{
+			changedViewAttributeKeys.insert(QStringLiteral("output_font_name"));
+			changedViewAttributeKeys.insert(QStringLiteral("output_font_height"));
+			changedViewAttributeKeys.insert(QStringLiteral("output_font_charset"));
+		}
+	}
+
+	const bool needsFullRebuild =
+	    allowRebuild && runtimeSettingsNeedFullRebuild(changedViewAttributeKeys, changedViewMultilineKeys);
+
+	applyRuntimeSettingsImpl(needsFullRebuild);
+
+	m_lastRuntimeSettingsAttributes.clear();
+	for (const QString &key : runtimeSettingsAttributeKeys())
+		m_lastRuntimeSettingsAttributes.insert(key, attrs.value(key));
+
+	m_lastRuntimeSettingsMultilineAttributes.clear();
+	for (const QString &key : runtimeSettingsMultilineAttributeKeys())
+		m_lastRuntimeSettingsMultilineAttributes.insert(key, multilineAttrs.value(key));
+
+	m_lastRuntimeDefaultFontSnapshot = currentDefaultFontSnapshot;
+	m_hasRuntimeSettingsSnapshot     = true;
+}
+
+void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
+{
 	if (!m_runtime)
 		return;
 
@@ -3703,6 +4683,8 @@ void WorldView::applyRuntimeSettings()
 		m_input->setFont(font);
 		updateInputHeight();
 	}
+
+	syncOutputScrollSingleStep();
 
 	if (m_runtime)
 	{
@@ -3952,13 +4934,19 @@ void WorldView::applyRuntimeSettings()
 	m_alwaysRecordCommandHistory    = isEnabled(alwaysRecord);
 	const QString hyperlinkHistory  = attrs.value(QStringLiteral("hyperlink_adds_to_command_history"));
 	m_hyperlinkAddsToCommandHistory = isEnabled(hyperlinkHistory);
-	const QString useCustomLink     = attrs.value(QStringLiteral("use_custom_link_colour"));
-	m_useCustomLinkColour           = isEnabled(useCustomLink);
-	const QString underlineLinks    = attrs.value(QStringLiteral("underline_hyperlinks"));
-	m_underlineHyperlinks           = isEnabled(underlineLinks);
-	const QColor linkColour         = parseColor(attrs.value(QStringLiteral("hyperlink_colour")));
+	const bool    previousUseCustomLinkColour = m_useCustomLinkColour;
+	const bool    previousUnderlineHyperlinks = m_underlineHyperlinks;
+	const QColor  previousHyperlinkColour     = m_hyperlinkColour;
+	const QString useCustomLink               = attrs.value(QStringLiteral("use_custom_link_colour"));
+	m_useCustomLinkColour                     = isEnabled(useCustomLink);
+	const QString underlineLinks              = attrs.value(QStringLiteral("underline_hyperlinks"));
+	m_underlineHyperlinks                     = isEnabled(underlineLinks);
+	const QColor linkColour                   = parseColor(attrs.value(QStringLiteral("hyperlink_colour")));
 	if (linkColour.isValid())
 		m_hyperlinkColour = linkColour;
+	const bool hyperlinkPresentationChanged = previousUseCustomLinkColour != m_useCustomLinkColour ||
+	                                          previousUnderlineHyperlinks != m_underlineHyperlinks ||
+	                                          previousHyperlinkColour != m_hyperlinkColour;
 	if (m_noEchoOff)
 		m_noEcho = false;
 	m_historyLimit = attrs.value(QStringLiteral("history_lines")).toInt();
@@ -3968,9 +4956,7 @@ void WorldView::applyRuntimeSettings()
 		m_history.remove(0, m_history.size() - m_historyLimit);
 	if (m_outputDocument)
 	{
-		bool ok             = false;
-		int  maxOutputLines = attrs.value(QStringLiteral("max_output_lines")).toInt(&ok);
-		m_outputDocument->setMaximumBlockCount(maxOutputLines > 0 ? maxOutputLines : 0);
+		applyMaxOutputLinesSetting();
 
 		QString css = QStringLiteral("a { text-decoration: %1;")
 		                  .arg(m_underlineHyperlinks ? QStringLiteral("underline") : QStringLiteral("none"));
@@ -3978,6 +4964,8 @@ void WorldView::applyRuntimeSettings()
 			css += QStringLiteral(" color: %1;").arg(m_hyperlinkColour.name());
 		css += QStringLiteral(" }");
 		m_outputDocument->setDefaultStyleSheet(css);
+		if (hyperlinkPresentationChanged && !rebuildOutput)
+			scheduleIncrementalHyperlinkRestyle();
 	}
 
 	m_autoPause                  = false;
@@ -3997,12 +4985,172 @@ void WorldView::applyRuntimeSettings()
 		m_startPausedApplied = true;
 	}
 
-	if (m_runtime)
-		rebuildOutputFromLines(m_runtime->lines());
+	if (rebuildOutput)
+		stopIncrementalHyperlinkRestyle();
+	if (rebuildOutput && m_scrollbackSplitActive)
+	{
+		setScrollbackSplitActive(false);
+		scrollViewToEnd(m_output);
+	}
+	if (m_runtime && rebuildOutput)
+		rebuildOutputFromLinesLazy(m_runtime->lines());
 
 	updateInputWrap();
 	updateInputHeight();
 	applyDefaultInputHeight(false);
+}
+
+void WorldView::scheduleIncrementalHyperlinkRestyle()
+{
+	if (!m_outputDocument || !m_hyperlinkRestyleTimer)
+		return;
+
+	m_hyperlinkRestyleNextBlock = m_outputDocument->blockCount() - 1;
+	if (!m_hyperlinkRestyleTimer->isActive())
+		m_hyperlinkRestyleTimer->start(0);
+}
+
+void WorldView::processIncrementalHyperlinkRestyleChunk()
+{
+	if (!m_outputDocument || !m_hyperlinkRestyleTimer)
+	{
+		stopIncrementalHyperlinkRestyle();
+		return;
+	}
+
+	int processedBlocks = 0;
+	while (processedBlocks < kHyperlinkRestyleBlocksPerChunk && m_hyperlinkRestyleNextBlock >= 0)
+	{
+		const QTextBlock block = m_outputDocument->findBlockByNumber(m_hyperlinkRestyleNextBlock);
+		--m_hyperlinkRestyleNextBlock;
+		if (!block.isValid())
+			continue;
+		static_cast<void>(restyleHyperlinksInBlock(block));
+		++processedBlocks;
+	}
+
+	if (m_hyperlinkRestyleNextBlock < 0)
+		stopIncrementalHyperlinkRestyle();
+}
+
+void WorldView::stopIncrementalHyperlinkRestyle()
+{
+	if (m_hyperlinkRestyleTimer && m_hyperlinkRestyleTimer->isActive())
+		m_hyperlinkRestyleTimer->stop();
+	m_hyperlinkRestyleNextBlock = -1;
+}
+
+bool WorldView::restyleHyperlinksInBlock(const QTextBlock &block) const
+{
+	if (!m_outputDocument || !block.isValid())
+		return false;
+
+	struct HyperlinkFragmentUpdate
+	{
+			int             start{0};
+			int             length{0};
+			QTextCharFormat format;
+	};
+
+	const bool applyCustomHyperlinkColour = m_useCustomLinkColour && m_hyperlinkColour.isValid();
+	QVector<HyperlinkFragmentUpdate> updates;
+	for (QTextBlock::Iterator iterator = block.begin(); !iterator.atEnd(); ++iterator)
+	{
+		const QTextFragment fragment = iterator.fragment();
+		if (!fragment.isValid())
+			continue;
+
+		const QTextCharFormat format = fragment.charFormat();
+		if (!format.isAnchor() || format.anchorHref().isEmpty())
+			continue;
+
+		QTextCharFormat updated = format;
+		bool            changed = false;
+
+		if (const bool autoUnderline = updated.property(kAutoHyperlinkUnderlineProperty).toBool();
+		    autoUnderline)
+		{
+			if (updated.fontUnderline() != m_underlineHyperlinks)
+			{
+				updated.setFontUnderline(m_underlineHyperlinks);
+				changed = true;
+			}
+		}
+		else if (m_underlineHyperlinks && updated.hasProperty(QTextFormat::FontUnderline) &&
+		         !updated.fontUnderline())
+		{
+			// Legacy fast-path links may carry explicit non-underlined state from
+			// prior settings. Promote these to auto-managed so future flips remain
+			// in-place.
+			updated.setFontUnderline(true);
+			updated.setProperty(kAutoHyperlinkUnderlineProperty, true);
+			changed = true;
+		}
+
+		if (const bool autoColour = updated.property(kAutoHyperlinkColourProperty).toBool(); autoColour)
+		{
+			if (applyCustomHyperlinkColour)
+			{
+				if (!updated.hasProperty(QTextFormat::ForegroundBrush) ||
+				    updated.foreground().color() != m_hyperlinkColour)
+				{
+					updated.setForeground(m_hyperlinkColour);
+					changed = true;
+				}
+			}
+			else
+			{
+				const QColor defaultLinkColour =
+				    m_output ? m_output->palette().color(QPalette::Text) : QColor();
+				if (defaultLinkColour.isValid())
+				{
+					if (!updated.hasProperty(QTextFormat::ForegroundBrush) ||
+					    updated.foreground().color() != defaultLinkColour)
+					{
+						updated.setForeground(defaultLinkColour);
+						changed = true;
+					}
+				}
+				else if (updated.hasProperty(QTextFormat::ForegroundBrush))
+				{
+					updated.clearForeground();
+					changed = true;
+				}
+			}
+		}
+		else if (!updated.hasProperty(QTextFormat::ForegroundBrush) && applyCustomHyperlinkColour)
+		{
+			updated.setForeground(m_hyperlinkColour);
+			updated.setProperty(kAutoHyperlinkColourProperty, true);
+			changed = true;
+		}
+
+		if (!changed)
+			continue;
+
+		updates.push_back(HyperlinkFragmentUpdate{fragment.position(), fragment.length(), updated});
+	}
+
+	if (updates.isEmpty())
+		return false;
+
+	QTextCursor cursor(m_outputDocument);
+	for (const HyperlinkFragmentUpdate &update : updates)
+	{
+		cursor.setPosition(update.start);
+		cursor.setPosition(update.start + update.length, QTextCursor::KeepAnchor);
+		cursor.setCharFormat(update.format);
+	}
+	return true;
+}
+
+void WorldView::applyMaxOutputLinesSetting() const
+{
+	if (!m_runtime || !m_outputDocument)
+		return;
+
+	const int maxOutputLines = m_runtime->worldAttributes().value(QStringLiteral("max_output_lines")).toInt();
+	m_outputDocument->setMaximumBlockCount(maxOutputLines > 0 ? maxOutputLines : 0);
 }
 
 int WorldView::tooltipStartDelayMs() const
@@ -4332,9 +5480,10 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 			}
 
 			if (watched == m_outputContainer || watched == m_outputStack || watched == m_outputSplitter ||
-			    watched == m_outputScrollBar)
+			    watched == m_outputScrollBar || watched == m_output || watched == m_liveOutput ||
+			    watched == outputViewport || watched == liveOutputViewport)
 			{
-				handleOutputWheel(wheel->angleDelta(), wheel->pixelDelta());
+				handleOutputWheel(wheel);
 				event->accept();
 				return true;
 			}
@@ -5155,6 +6304,16 @@ void WorldView::resetHistoryRecall()
 	m_partialIndex = -1;
 	m_partialCommand.clear();
 	m_inputChanged = false;
+	resetTabCompletionCycle();
+}
+
+void WorldView::resetTabCompletionCycle()
+{
+	m_tabCompletionCycleTargetLower.clear();
+	m_tabCompletionCycleStartColumn = -1;
+	m_tabCompletionCycleEndColumn   = -1;
+	m_tabCompletionCycleLastSource  = -2;
+	m_tabCompletionCycleActive      = false;
 }
 
 bool WorldView::tabCompleteOneLine(int startColumn, int endColumn, const QString &targetWordLower,
@@ -5225,17 +6384,77 @@ bool WorldView::handleTabCompletionKeyPress()
 	if (!m_input)
 		return false;
 
-	const QTextCursor cursor = m_input->textCursor();
+	QTextCursor cursor = m_input->textCursor();
 	if (cursor.selectionStart() != cursor.selectionEnd())
+	{
+		resetTabCompletionCycle();
 		return false;
+	}
 
 	const QString currentText = m_input->toPlainText();
 	if (currentText.isEmpty())
+	{
+		resetTabCompletionCycle();
 		return false;
+	}
 
-	const int endColumn = cursor.position();
-	if (endColumn <= 0 || endColumn > currentText.size())
-		return false;
+	int     endColumn   = cursor.position();
+	int     startColumn = -1;
+	int     lastSource  = -2;
+	QString targetWordLower;
+
+	bool    continueCycle = m_tabCompletionCycleActive;
+	if (continueCycle)
+	{
+		const bool cycleRangeValid = m_tabCompletionCycleStartColumn >= 0 &&
+		                             m_tabCompletionCycleEndColumn > m_tabCompletionCycleStartColumn &&
+		                             m_tabCompletionCycleEndColumn <= currentText.size();
+		if (!cycleRangeValid || endColumn != m_tabCompletionCycleEndColumn)
+			continueCycle = false;
+	}
+
+	if (continueCycle)
+	{
+		startColumn     = m_tabCompletionCycleStartColumn;
+		endColumn       = m_tabCompletionCycleEndColumn;
+		lastSource      = m_tabCompletionCycleLastSource;
+		targetWordLower = m_tabCompletionCycleTargetLower;
+		if (targetWordLower.isEmpty())
+		{
+			resetTabCompletionCycle();
+			return false;
+		}
+	}
+	else
+	{
+		if (endColumn <= 0 || endColumn > currentText.size())
+		{
+			resetTabCompletionCycle();
+			return false;
+		}
+
+		startColumn = endColumn - 1;
+		while (startColumn >= 0)
+		{
+			if (const QChar ch = currentText.at(startColumn); ch.isSpace() || m_wordDelimiters.contains(ch))
+				break;
+			--startColumn;
+		}
+		++startColumn;
+
+		if (startColumn >= endColumn)
+		{
+			resetTabCompletionCycle();
+			return false;
+		}
+
+		targetWordLower = currentText.mid(startColumn, endColumn - startColumn).toLower();
+		if (targetWordLower.isEmpty())
+		{
+			resetTabCompletionCycle();
+			return false;
+		}
+	}
 
 	bool insertSpace = m_tabCompletionSpace;
 	if (endColumn < currentText.size())
@@ -5244,47 +6463,72 @@ bool WorldView::handleTabCompletionKeyPress()
 			insertSpace = true;
 	}
 
-	int startColumn = endColumn - 1;
-	while (startColumn >= 0)
+	bool completionApplied = false;
+	int  matchedSource     = -2;
+
+	if (!continueCycle &&
+	    tabCompleteOneLine(startColumn, endColumn, targetWordLower, m_tabCompletionDefaults, insertSpace))
 	{
-		if (const QChar ch = currentText.at(startColumn); ch.isSpace() || m_wordDelimiters.contains(ch))
-			break;
-		--startColumn;
-	}
-	++startColumn;
-
-	if (startColumn >= endColumn)
-		return false;
-
-	const QString targetWordLower = currentText.mid(startColumn, endColumn - startColumn).toLower();
-	if (targetWordLower.isEmpty())
-		return false;
-
-	if (tabCompleteOneLine(startColumn, endColumn, targetWordLower, m_tabCompletionDefaults, insertSpace))
-		return true;
-
-	if (!m_runtime)
-		return false;
-
-	const QVector<WorldRuntime::LineEntry> &lines   = m_runtime->lines();
-	int                                     scanned = 0;
-	for (int i = sizeToInt(lines.size()) - 1; i >= 0; --i)
-	{
-		if (++scanned > m_tabCompletionLines)
-			break;
-		if (tabCompleteOneLine(startColumn, endColumn, targetWordLower, lines.at(i).text, insertSpace))
-			return true;
+		completionApplied = true;
+		matchedSource     = -1;
 	}
 
-	return false;
+	if (!completionApplied)
+	{
+		if (!m_runtime)
+		{
+			resetTabCompletionCycle();
+			return false;
+		}
+
+		const QVector<WorldRuntime::LineEntry> &lines     = m_runtime->lines();
+		int                                     startLine = sizeToInt(lines.size()) - 1;
+		if (continueCycle)
+		{
+			if (lastSource >= 0)
+				startLine = lastSource - 1;
+			else if (lastSource == -1)
+				startLine = sizeToInt(lines.size()) - 1;
+		}
+
+		int scanned = 0;
+		for (int i = startLine; i >= 0; --i)
+		{
+			if (++scanned > m_tabCompletionLines)
+				break;
+			if (!tabCompleteOneLine(startColumn, endColumn, targetWordLower, lines.at(i).text, insertSpace))
+				continue;
+			completionApplied = true;
+			matchedSource     = i;
+			break;
+		}
+	}
+
+	if (!completionApplied)
+	{
+		resetTabCompletionCycle();
+		return false;
+	}
+
+	cursor                          = m_input->textCursor();
+	m_tabCompletionCycleTargetLower = targetWordLower;
+	m_tabCompletionCycleStartColumn = startColumn;
+	m_tabCompletionCycleEndColumn   = cursor.position();
+	m_tabCompletionCycleLastSource  = matchedSource;
+	m_tabCompletionCycleActive      = true;
+	return true;
 }
 
 void InputTextEdit::keyPressEvent(QKeyEvent *event)
 {
+	const bool plainTab = event->key() == Qt::Key_Tab && event->modifiers() == Qt::NoModifier;
+	if (m_view && !plainTab)
+		m_view->resetTabCompletionCycle();
+
 	if (m_view && m_view->handleWorldHotkey(event))
 		return;
 
-	if (m_view && event->key() == Qt::Key_Tab && event->modifiers() == Qt::NoModifier)
+	if (m_view && plainTab)
 	{
 		m_view->handleTabCompletionKeyPress();
 		return;
