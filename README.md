@@ -24,7 +24,7 @@ issues, request features, etc.
 - Unicode, NAWS, Terminal Type, CHARSET, EOR, ECHO, MXP, MSP, MCCP, MMCP, OSC8, xterm256 color, Truecolor.
 - Lua scripting.
 - Copyover-style in-place reload on Linux/macOS (`File -> Reload QMud`).
-- Split-pane scrollback buffer.
+- Split-pane scrollback buffer, persistent scrollback buffer/command history.
 - Autosave, autobackup, log rotation, log compression.
 - Autoupdates (Linux/macOS currently; Windows soon).
 
@@ -244,7 +244,8 @@ ctest --test-dir cmake-build-release --output-on-failure --label-exclude slow
 CI policy:
 
 - `.github/workflows/pipelines.yml` is the authoritative CI workflow.
-- Pull requests should require the `Pipelines / PR/Push quick suite (exclude slow)` job to pass before merge.
+- Pull requests should require the `Pipelines / PR/Push quick suite (exclude slow)` and package build jobs to pass
+  before merge.
 
 ## Purposeful deviations from MUSHclient
 
