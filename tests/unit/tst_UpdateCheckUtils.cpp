@@ -209,6 +209,47 @@ class tst_UpdateCheckUtils : public QObject
 
 			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::NoCompatibleAsset);
 		}
+
+		/**
+		 * @brief Verifies Windows update target selects setup executable assets.
+		 */
+		void evaluateLatestReleasePayloadWindowsSelectsSetupExe()
+		{
+			QJsonArray assets;
+			assets.push_back(makeAsset(QStringLiteral("QMud-10.07-windows.zip"),
+			                           QStringLiteral("https://example.invalid/qmud-windows.zip"),
+			                           QStringLiteral("sha256:%1").arg(sampleSha256())));
+			assets.push_back(makeAsset(QStringLiteral("QMud-10.07-win-setup.exe"),
+			                           QStringLiteral("https://example.invalid/qmud-win-setup.exe"),
+			                           QStringLiteral("sha256:%1").arg(sampleSha256())));
+
+			const QByteArray payload = makeLatestReleasePayload(QStringLiteral("v10.07"), assets);
+			const auto       result  = QMudUpdateCheck::evaluateLatestReleasePayload(
+                payload, QStringLiteral("10.04"), QString(),
+                QMudUpdateCheck::InstallTarget::WindowsInstaller);
+
+			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::UpdateAvailable);
+			QCOMPARE(result.asset.name, QStringLiteral("QMud-10.07-win-setup.exe"));
+			QCOMPARE(result.asset.url, QStringLiteral("https://example.invalid/qmud-win-setup.exe"));
+		}
+
+		/**
+		 * @brief Verifies Windows target rejects portable-only assets.
+		 */
+		void evaluateLatestReleasePayloadWindowsRejectsPortableOnlyAssets()
+		{
+			QJsonArray assets;
+			assets.push_back(makeAsset(QStringLiteral("QMud-10.07-windows.zip"),
+			                           QStringLiteral("https://example.invalid/qmud-windows.zip"),
+			                           QStringLiteral("sha256:%1").arg(sampleSha256())));
+
+			const QByteArray payload = makeLatestReleasePayload(QStringLiteral("v10.07"), assets);
+			const auto       result  = QMudUpdateCheck::evaluateLatestReleasePayload(
+                payload, QStringLiteral("10.04"), QString(),
+                QMudUpdateCheck::InstallTarget::WindowsInstaller);
+
+			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::NoCompatibleAsset);
+		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 

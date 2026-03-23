@@ -17,6 +17,7 @@
 #include <QSet>
 #include <QString>
 #include <QtGlobal>
+#include <cstdio>
 #include <zlib.h>
 
 /* Phases for processing input stream ...
@@ -499,9 +500,29 @@ QByteArray TelnetProcessor::processBytes(const QByteArray &data)
 		tailPlain.append(m_postCompressionRemainder);
 		m_postCompressionRemainder.clear();
 	};
+	auto drainPendingCompressed = [&]
+	{
+		while (m_compress && !m_pendingCompressed.isEmpty())
+		{
+			const QByteArray pendingChunk = m_pendingCompressed;
+			m_pendingCompressed.clear();
+			m_totalCompressedBytes += pendingChunk.size();
+			const QByteArray decompressed = inflateIfNeeded(pendingChunk);
+			if (!decompressed.isEmpty())
+			{
+				m_totalUncompressedBytes += decompressed.size();
+				output.append(processPlainBytes(decompressed));
+			}
+			takePostCompressionRemainder();
+		}
+	};
 
 	if (m_compress)
 	{
+		// Preserve stream ordering across MCCP boundaries: previously queued
+		// compressed bytes from telnet parsing must be processed before fresh socket
+		// payload.
+		drainPendingCompressed();
 		m_totalCompressedBytes += data.size();
 		if (const QByteArray decompressed = inflateIfNeeded(data); !decompressed.isEmpty())
 		{
@@ -509,26 +530,31 @@ QByteArray TelnetProcessor::processBytes(const QByteArray &data)
 			output.append(processPlainBytes(decompressed));
 		}
 		takePostCompressionRemainder();
+		drainPendingCompressed();
 	}
 	else
 	{
 		output = processPlainBytes(data);
 	}
 
-	if (m_compress && !m_pendingCompressed.isEmpty())
+	while (true)
 	{
-		m_totalCompressedBytes += m_pendingCompressed.size();
-		const QByteArray more = inflateIfNeeded(m_pendingCompressed);
-		m_pendingCompressed.clear();
-		if (!more.isEmpty())
+		bool progressed = false;
+		if (m_compress && !m_pendingCompressed.isEmpty())
 		{
-			m_totalUncompressedBytes += more.size();
-			output.append(processPlainBytes(more));
+			drainPendingCompressed();
+			progressed = true;
 		}
-		takePostCompressionRemainder();
+		if (!tailPlain.isEmpty())
+		{
+			const QByteArray plainTail = tailPlain;
+			tailPlain.clear();
+			output.append(processPlainBytes(plainTail));
+			progressed = true;
+		}
+		if (!progressed)
+			break;
 	}
-	if (!tailPlain.isEmpty())
-		output.append(processPlainBytes(tailPlain));
 
 	return output;
 }
@@ -636,6 +662,16 @@ void TelnetProcessor::activatePuebloMode()
 int TelnetProcessor::mccpType() const
 {
 	return m_mccpType;
+}
+
+int TelnetProcessor::windowColumns() const
+{
+	return m_wrapColumns;
+}
+
+int TelnetProcessor::windowRows() const
+{
+	return m_wrapRows;
 }
 
 qint64 TelnetProcessor::totalCompressedBytes() const
@@ -771,6 +807,21 @@ QByteArray TelnetProcessor::inflateIfNeeded(const QByteArray &data)
 			}
 			if (m_callbacks.onFatalProtocolError)
 				m_callbacks.onFatalProtocolError(message);
+#ifndef NDEBUG
+			const char *zlibMessage =
+			    (m_zlib->stream.msg && m_zlib->stream.msg[0] != '\0') ? m_zlib->stream.msg : "<none>";
+			std::fprintf(
+			    stderr,
+			    "[QMud][MCCP] fatal inflate error: result=%d msg=%s mccp_type=%d compress=%d avail_in=%u "
+			    "avail_out=%u input_size=%lld input_offset=%d pending_size=%lld remainder_size=%lld\n",
+			    result, zlibMessage, m_mccpType, m_compress ? 1 : 0,
+			    static_cast<unsigned>(m_zlib->stream.avail_in),
+			    static_cast<unsigned>(m_zlib->stream.avail_out),
+			    static_cast<long long>(m_compressInput.size()), m_compressInputOffset,
+			    static_cast<long long>(m_pendingCompressed.size()),
+			    static_cast<long long>(m_postCompressionRemainder.size()));
+			std::fflush(stderr);
+#endif
 			m_compress = false;
 			m_mccpType = 0;
 			m_compressInput.clear();
@@ -783,10 +834,21 @@ QByteArray TelnetProcessor::inflateIfNeeded(const QByteArray &data)
 		if (produced > 0)
 			output.append(m_compressOutputChunk.constData(), produced);
 
-		if (result == Z_BUF_ERROR &&
-		    (m_zlib->stream.avail_in == 0 ||
-		     (m_zlib->stream.avail_in == beforeIn && m_zlib->stream.avail_out == beforeOut)))
+		const bool noProgress = m_zlib->stream.avail_in == beforeIn && m_zlib->stream.avail_out == beforeOut;
+		if (result == Z_BUF_ERROR && (m_zlib->stream.avail_in == 0 || noProgress))
 		{
+			if (noProgress && m_zlib->stream.avail_in > 0)
+			{
+#ifndef NDEBUG
+				std::fprintf(stderr,
+				             "[QMud][MCCP] inflate made no progress: mccp_type=%d avail_in=%u avail_out=%u "
+				             "input_size=%lld input_offset=%d\n",
+				             m_mccpType, static_cast<unsigned>(m_zlib->stream.avail_in),
+				             static_cast<unsigned>(m_zlib->stream.avail_out),
+				             static_cast<long long>(m_compressInput.size()), m_compressInputOffset);
+				std::fflush(stderr);
+#endif
+			}
 			// no progress with available input
 			break;
 		}
@@ -814,6 +876,11 @@ QByteArray TelnetProcessor::inflateIfNeeded(const QByteArray &data)
 		m_mccpType = 0;
 		m_compressInput.clear();
 		m_compressInputOffset = 0;
+#ifndef NDEBUG
+		std::fprintf(stderr, "[QMud][MCCP] stream ended: remainder=%d, switching to plain input.\n",
+		             remainderSize);
+		std::fflush(stderr);
+#endif
 		return output;
 	}
 
@@ -1555,6 +1622,16 @@ bool TelnetProcessor::startCompression(const int type, QString *errorMessage)
 		m_compressInitOk      = initResult == Z_OK;
 		if (!m_compressInitOk && errorMessage)
 			*errorMessage = QStringLiteral("Cannot process compressed output. World closed.");
+		if (!m_compressInitOk)
+		{
+#ifndef NDEBUG
+			const char *zlibMessage =
+			    (m_zlib->stream.msg && m_zlib->stream.msg[0] != '\0') ? m_zlib->stream.msg : "<none>";
+			std::fprintf(stderr, "[QMud][MCCP] startCompression init failed: type=%d init_result=%d msg=%s\n",
+			             type, initResult, zlibMessage);
+			std::fflush(stderr);
+#endif
+		}
 	}
 
 	if (!m_compressInitOk)
@@ -1562,6 +1639,13 @@ bool TelnetProcessor::startCompression(const int type, QString *errorMessage)
 
 	if (const int resetResult = inflateReset(&m_zlib->stream); resetResult != Z_OK)
 	{
+#ifndef NDEBUG
+		const char *zlibMessage =
+		    (m_zlib->stream.msg && m_zlib->stream.msg[0] != '\0') ? m_zlib->stream.msg : "<none>";
+		std::fprintf(stderr, "[QMud][MCCP] startCompression reset failed: type=%d reset_result=%d msg=%s\n",
+		             type, resetResult, zlibMessage);
+		std::fflush(stderr);
+#endif
 		if (errorMessage)
 		{
 			if (m_zlib->stream.msg && m_zlib->stream.msg[0] != '\0')

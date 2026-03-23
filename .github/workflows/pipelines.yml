@@ -416,6 +416,8 @@ jobs:
           MAC_DST="cmake-build-release/mac-docker-out/QMud-${QMUD_PACKAGE_VERSION}-macos.zip"
           WIN_SRC="cmake-build-release/windows-docker-out/QMud.zip"
           WIN_DST="cmake-build-release/windows-docker-out/QMud-${QMUD_PACKAGE_VERSION}-windows.zip"
+          WIN_SETUP_SRC="cmake-build-release/windows-docker-out/QMud-setup.exe"
+          WIN_SETUP_DST="cmake-build-release/windows-docker-out/QMud-${QMUD_PACKAGE_VERSION}-win-setup.exe"
 
           if [ ! -f "$MAC_SRC" ]; then
             echo "Missing macOS package: $MAC_SRC" >&2
@@ -425,9 +427,14 @@ jobs:
             echo "Missing Windows package: $WIN_SRC" >&2
             exit 1
           fi
+          if [ ! -f "$WIN_SETUP_SRC" ]; then
+            echo "Missing Windows installer: $WIN_SETUP_SRC" >&2
+            exit 1
+          fi
 
           mv -f "$MAC_SRC" "$MAC_DST"
           mv -f "$WIN_SRC" "$WIN_DST"
+          mv -f "$WIN_SETUP_SRC" "$WIN_SETUP_DST"
 
           APPIMAGE_FILE="$(find cmake-build-release/appimage-docker-out -maxdepth 1 -type f -name '*.AppImage' | sort | head -n 1)"
           if [ -z "$APPIMAGE_FILE" ]; then
@@ -459,6 +466,7 @@ jobs:
           if-no-files-found: error
           path: |
             cmake-build-release/windows-docker-out/QMud-*.zip
+            cmake-build-release/windows-docker-out/QMud-*.exe
 
   build-packages-tag:
     name: Build AppImage / macOS / Windows packages (Tag)
@@ -600,6 +608,8 @@ jobs:
           MAC_DST="cmake-build-release/mac-docker-out/QMud-${QMUD_PACKAGE_VERSION}-macos.zip"
           WIN_SRC="cmake-build-release/windows-docker-out/QMud.zip"
           WIN_DST="cmake-build-release/windows-docker-out/QMud-${QMUD_PACKAGE_VERSION}-windows.zip"
+          WIN_SETUP_SRC="cmake-build-release/windows-docker-out/QMud-setup.exe"
+          WIN_SETUP_DST="cmake-build-release/windows-docker-out/QMud-${QMUD_PACKAGE_VERSION}-win-setup.exe"
 
           if [ ! -f "$MAC_SRC" ]; then
             echo "Missing macOS package: $MAC_SRC" >&2
@@ -609,9 +619,14 @@ jobs:
             echo "Missing Windows package: $WIN_SRC" >&2
             exit 1
           fi
+          if [ ! -f "$WIN_SETUP_SRC" ]; then
+            echo "Missing Windows installer: $WIN_SETUP_SRC" >&2
+            exit 1
+          fi
 
           mv -f "$MAC_SRC" "$MAC_DST"
           mv -f "$WIN_SRC" "$WIN_DST"
+          mv -f "$WIN_SETUP_SRC" "$WIN_SETUP_DST"
 
           APPIMAGE_FILE="$(find cmake-build-release/appimage-docker-out -maxdepth 1 -type f -name '*.AppImage' | sort | head -n 1)"
           if [ -z "$APPIMAGE_FILE" ]; then
@@ -643,6 +658,7 @@ jobs:
           if-no-files-found: error
           path: |
             cmake-build-release/windows-docker-out/QMud-*.zip
+            cmake-build-release/windows-docker-out/QMud-*.exe
 
   publish-release:
     name: Publish GitHub release assets
@@ -668,6 +684,7 @@ jobs:
             release-assets/qmud-appimage/*.AppImage.zsync
             release-assets/qmud-macos/*.zip
             release-assets/qmud-windows/*.zip
+            release-assets/qmud-windows/*.exe
 
   publish-ci-release:
     name: Publish rolling CI prerelease
@@ -723,3 +740,4 @@ jobs:
             release-assets/qmud-appimage/*.AppImage.zsync
             release-assets/qmud-macos/*.zip
             release-assets/qmud-windows/*.zip
+            release-assets/qmud-windows/*.exe

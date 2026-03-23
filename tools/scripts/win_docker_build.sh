@@ -25,6 +25,20 @@ MINGW_TRIPLET="$QMUD_WINDOCKER_MINGW_TRIPLET"
 MINGW_INCLUDE_DIR="$MINGW_PREFIX/include"
 MINGW_LIB_DIR="$MINGW_PREFIX/lib"
 
+if [ "$MINGW_TRIPLET" != "x86_64-w64-mingw32" ]; then
+  echo "Error: unsupported MinGW triplet '$MINGW_TRIPLET'. Only x86_64-w64-mingw32 is supported." >&2
+  exit 1
+fi
+
+case "$QT_PREFIX" in
+  */mingw_64|*/mingw_64/*)
+    ;;
+  *)
+    echo "Error: unsupported Qt target prefix '$QT_PREFIX'. Expected a 64-bit mingw_64 Qt SDK path." >&2
+    exit 1
+    ;;
+esac
+
 export PKG_CONFIG_SYSROOT_DIR="$MINGW_PREFIX"
 export PKG_CONFIG_LIBDIR="$MINGW_LIB_DIR/pkgconfig:$MINGW_LIB_DIR/share/pkgconfig"
 export PKG_CONFIG_PATH=
@@ -74,9 +88,9 @@ fi
 
 "$CMAKE_EXE" -S "$PROJECT_DIR" -G Ninja -B "$BUILD_DIR" \
   -DCMAKE_SYSTEM_NAME=Windows \
-  -DCMAKE_C_COMPILER=${MINGW_TRIPLET}-gcc \
-  -DCMAKE_CXX_COMPILER=${MINGW_TRIPLET}-g++ \
-  -DCMAKE_RC_COMPILER=${MINGW_TRIPLET}-windres \
+  -DCMAKE_C_COMPILER="${MINGW_TRIPLET}-gcc" \
+  -DCMAKE_CXX_COMPILER="${MINGW_TRIPLET}-g++" \
+  -DCMAKE_RC_COMPILER="${MINGW_TRIPLET}-windres" \
   -DCMAKE_C_FLAGS="-UUNICODE -U_UNICODE" \
   -DCMAKE_CXX_FLAGS="-UUNICODE -U_UNICODE" \
   -DCMAKE_FIND_ROOT_PATH="${MINGW_PREFIX};${QT_PREFIX}" \
@@ -204,3 +218,44 @@ fi
 
 cmake -E rm -f "$STAGE_ROOT/$PACKAGE_NAME.zip"
 cmake -E chdir "$STAGE_ROOT" cmake -E tar cf "$PACKAGE_NAME.zip" --format=zip "$PACKAGE_NAME"
+
+WININSTALL_SCRIPT="$PROJECT_DIR/tools/scripts/wininstall.nsi"
+if [ ! -f "$WININSTALL_SCRIPT" ]; then
+  echo "Error: missing NSIS script: $WININSTALL_SCRIPT" >&2
+  exit 1
+fi
+if ! command -v makensis >/dev/null 2>&1; then
+  echo "Error: makensis was not found in PATH. Install NSIS in the Windows build environment." >&2
+  exit 1
+fi
+MAKENSIS_BIN="$(command -v makensis)"
+NSISDIR="/usr/share/nsis"
+if [ ! -f "$NSISDIR/Stubs/zlib-amd64-unicode" ]; then
+  echo "Error: 64-bit NSIS stub zlib-amd64-unicode was not found at $NSISDIR/Stubs." >&2
+  echo "Install mingw64-nsis in the Fedora Windows builder image." >&2
+  exit 1
+fi
+
+QMUD_VERSION="$(sed -n 's/.*kVersionString\[\] = \"\([^\"]*\)\".*/\1/p' "$PROJECT_DIR/src/Version.h" | head -n 1)"
+if [ -z "$QMUD_VERSION" ]; then
+  QMUD_VERSION=dev
+fi
+INSTALLER_ICON="$PROJECT_DIR/resources/windows/QMud.ico"
+if [ ! -f "$INSTALLER_ICON" ]; then
+  echo "Error: missing Windows installer icon: $INSTALLER_ICON" >&2
+  exit 1
+fi
+
+INSTALLER_OUT="$STAGE_ROOT/QMud-setup.exe"
+rm -f "$INSTALLER_OUT"
+NSISDIR="$NSISDIR" "$MAKENSIS_BIN" -V2 \
+  -DQMUD_SOURCE_DIR="$STAGE_DIR" \
+  -DQMUD_OUTPUT_FILE="$INSTALLER_OUT" \
+  -DQMUD_VERSION="$QMUD_VERSION" \
+  -DQMUD_INSTALLER_ICON="$INSTALLER_ICON" \
+  "$WININSTALL_SCRIPT"
+
+if [ ! -f "$INSTALLER_OUT" ]; then
+  echo "Error: NSIS installer was not produced: $INSTALLER_OUT" >&2
+  exit 1
+fi

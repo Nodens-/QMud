@@ -24,6 +24,7 @@ namespace QMudUpdateCheck
 		Unsupported,
 		LinuxAppImage,
 		MacBundle,
+		WindowsInstaller,
 	};
 
 	/**

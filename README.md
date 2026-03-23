@@ -26,7 +26,7 @@ issues, request features, etc.
 - Copyover-style in-place reload on Linux/macOS (`File -> Reload QMud`).
 - Split-pane scrollback buffer, persistent scrollback buffer/command history.
 - Autosave, autobackup, log rotation, log compression.
-- Autoupdates (Linux/macOS currently; Windows soon).
+- Autoupdates.
 
 ## Contact / Support
 
@@ -146,6 +146,7 @@ Current behavior/limitations:
 - lua-socket
 - lua-json
 - lua-lpeg
+-
 
 ## Build instructions
 

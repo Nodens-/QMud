@@ -1279,8 +1279,8 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] const QVector<LineEntry> &lines() const;
 		/**
-		 * @brief Replaces output line buffer with preloaded session state.
-		 * @param lines Restored output lines.
+		 * @brief Replaces buffered output lines and rebuilds the attached view.
+		 * @param lines Replacement buffered output lines.
 		 */
 		void                                    replaceOutputLines(const QVector<LineEntry> &lines);
 		/**
@@ -3315,6 +3315,16 @@ class WorldRuntime : public QObject
 		 * @param newLine Append newline when `true`.
 		 */
 		void outputStyledText(const QString &text, const QVector<StyleSpan> &spans, bool note, bool newLine);
+		/**
+		 * @brief Applies output-display wrapping policy to local command echo text.
+		 *
+		 * Uses the same effective column constraints as world output (including NAWS
+		 * width when enabled) so echoed input aligns with server-side wrapping.
+		 *
+		 * @param text Echo text to normalize in-place.
+		 * @param spans Optional echo style spans, normalized in-place.
+		 */
+		void prepareInputEchoForDisplay(QString &text, QVector<StyleSpan> &spans) const;
 		/**
 		 * @brief Emits HTML output fragment to view.
 		 * @param html HTML fragment.
