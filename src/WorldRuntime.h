@@ -1279,8 +1279,8 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] const QVector<LineEntry> &lines() const;
 		/**
-		 * @brief Replaces output line buffer with preloaded session state.
-		 * @param lines Restored output lines.
+		 * @brief Replaces buffered output lines and rebuilds the attached view.
+		 * @param lines Replacement buffered output lines.
 		 */
 		void                                    replaceOutputLines(const QVector<LineEntry> &lines);
 		/**

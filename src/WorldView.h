@@ -174,7 +174,8 @@ class WorldView : public QWidget
 		/**
 		 * @brief Rebuilds output by rendering visible tail first, then asynchronously backfilling older lines.
 		 *
-		 * Intended for session-state restore paths where immediate responsiveness is preferred.
+		 * Intended for session-state restore and other large-output rebuild paths where immediate
+		 * responsiveness is preferred.
 		 * @param lines Line entries to render.
 		 */
 		void rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry> &lines);
@@ -804,42 +805,63 @@ class WorldView : public QWidget
 		 * @param painter Painter used for miniwindow rendering.
 		 * @param underneath Render underneath layer when `true`; overlay otherwise.
 		 */
-		void                 paintMiniWindows(class QPainter *painter, bool underneath) const;
+		void        paintMiniWindows(class QPainter *painter, bool underneath) const;
 		/**
 		 * @brief Applies runtime settings with policy-driven rebuild selection.
 		 * @param allowRebuild `true` to run semantic rebuild policy, `false` to force no rebuild.
 		 */
-		void                 applyRuntimeSettingsWithPolicy(bool allowRebuild);
-		void                 applyRuntimeSettingsImpl(bool rebuildOutput);
+		void        applyRuntimeSettingsWithPolicy(bool allowRebuild);
+		void        applyRuntimeSettingsImpl(bool rebuildOutput);
 		/**
 		 * @brief Clears cached runtime-settings snapshot state.
 		 */
-		void                 resetRuntimeSettingsSnapshot();
+		void        resetRuntimeSettingsSnapshot();
 		/**
 		 * @brief Processes one asynchronous deferred-output backfill chunk for lazy rebuild.
 		 */
-		void                 processDeferredOutputBackfillChunk();
+		void        processDeferredOutputBackfillChunk();
+		/**
+		 * @brief Enqueues one deferred-output backfill apply on the GUI thread.
+		 * @param view Target world view.
+		 * @param generation Backfill generation captured for stale-work rejection.
+		 * @param combinedHtml Pre-rendered deferred-prefix HTML payload.
+		 */
+		static void enqueueDeferredOutputBackfillApply(WorldView *view, int generation, QString combinedHtml);
+		/**
+		 * @brief Schedules serialized GUI-thread processing for queued deferred-output applies.
+		 */
+		static void scheduleQueuedDeferredOutputBackfillApplyProcessing();
+		/**
+		 * @brief Processes one queued deferred-output apply, preferring the active world first.
+		 */
+		static void processQueuedDeferredOutputBackfillApply();
+		/**
+		 * @brief Applies one deferred-output backfill payload on the GUI thread.
+		 * @param generation Backfill generation captured for stale-work rejection.
+		 * @param combinedHtml Pre-rendered deferred-prefix HTML payload.
+		 */
+		void        applyDeferredOutputBackfill(int generation, const QString &combinedHtml);
 		/**
 		 * @brief Stops deferred output backfill and clears pending state.
 		 * @param runQueuedRebuild Run queued full rebuild after stop when `true`.
 		 * @param clearQueuedRebuild Discard queued rebuild request when `true`.
 		 */
-		void                 stopDeferredOutputBackfill(bool runQueuedRebuild, bool clearQueuedRebuild);
+		void        stopDeferredOutputBackfill(bool runQueuedRebuild, bool clearQueuedRebuild);
 		/**
 		 * @brief Starts or restarts incremental in-place hyperlink style refresh.
 		 *
 		 * Processes output blocks in small chunks to keep the UI responsive while
 		 * applying hyperlink presentation setting changes to existing rendered text.
 		 */
-		void                 scheduleIncrementalHyperlinkRestyle();
+		void        scheduleIncrementalHyperlinkRestyle();
 		/**
 		 * @brief Processes one incremental chunk of hyperlink style refresh.
 		 */
-		void                 processIncrementalHyperlinkRestyleChunk();
+		void        processIncrementalHyperlinkRestyleChunk();
 		/**
 		 * @brief Stops any in-progress incremental hyperlink style refresh.
 		 */
-		void                 stopIncrementalHyperlinkRestyle();
+		void        stopIncrementalHyperlinkRestyle();
 		/**
 		 * @brief Restyles hyperlink fragments within a single text block.
 		 * @param block Target output document block.
@@ -860,25 +882,33 @@ class WorldView : public QWidget
 		 */
 		void                 syncOutputScrollSingleStep() const;
 		/**
-		 * @brief Applies end-anchor immediately to internal/external output scrollbars.
+		 * @brief Applies end-anchor immediately to output scrollbars.
 		 */
 		void                 applyEndAnchorNow() const;
 		/**
-		 * @brief Starts a scoped post-rebuild end-anchor request.
+		 * @brief Injects a synthetic post-swap output tick to drive normal scroll-to-end behavior.
 		 */
-		void                 requestEndAnchorAfterRebuild();
+		void                 emitPostSwapOutputTick();
 		/**
-		 * @brief Marks active post-rebuild end-anchor request as mutation-complete.
+		 * @brief Removes the synthetic post-swap output tick when it is still present.
+		 */
+		void                 removePostSwapOutputTick() const;
+		/**
+		 * @brief Connects contents-changed handling for an output document.
+		 */
+		void                 connectOutputDocumentContentsSignal(const QTextDocument *document);
+		/**
+		 * @brief Starts a scoped end-anchor request for an output mutation.
+		 */
+		void                 requestEndAnchorAfterOutputMutation();
+		/**
+		 * @brief Marks the active output-mutation end-anchor request as complete.
 		 */
 		void                 markEndAnchorMutationComplete();
 		/**
-		 * @brief Finishes and clears any pending post-rebuild end-anchor request.
+		 * @brief Finishes and clears any pending output end-anchor request.
 		 */
 		void                 finishPendingEndAnchorRequest();
-		/**
-		 * @brief Applies pending post-rebuild end anchor in response to range changes.
-		 */
-		void                 handlePendingEndAnchorRangeChange();
 		/**
 		 * @brief Marks that user initiated a manual scroll action.
 		 */
@@ -1227,9 +1257,7 @@ class WorldView : public QWidget
 		QVector<WorldRuntime::LineEntry>        m_outputBackfillQueuedRebuildLines;
 		quint64                                 m_endAnchorRequestSerial{0};
 		quint64                                 m_pendingEndAnchorRequestSerial{0};
-		// Keep output anchored at end across post-rebuild layout/range changes.
 		bool                                    m_pendingEndAnchorMutationComplete{false};
-		bool                                    m_pendingEndAnchorSawRangeChange{false};
 		QTimer                                 *m_hyperlinkRestyleTimer{nullptr};
 		int                                     m_hyperlinkRestyleNextBlock{-1};
 		bool                                    m_bulkOutputRebuild{false};

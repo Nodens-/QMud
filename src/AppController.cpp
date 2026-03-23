@@ -4155,8 +4155,8 @@ void AppController::generate256Colours()
 	}
 }
 
-bool AppController::openWorldForReloadRecovery(const ReloadWorldState &worldState, WorldRuntime **runtime,
-                                               WorldView **view)
+bool AppController::openWorldForReloadRecovery(const ReloadWorldState &worldState, const bool activateWindow,
+                                               WorldRuntime **runtime, WorldView **view)
 {
 	if (runtime)
 		*runtime = nullptr;
@@ -4165,19 +4165,37 @@ bool AppController::openWorldForReloadRecovery(const ReloadWorldState &worldStat
 	if (!m_mainWindow || !runtime)
 		return false;
 
-	bool opened = false;
+	const QVector<WorldRuntime *> existingRuntimes           = activeWorldRuntimes();
+	bool                          opened                     = false;
+	const int                     previousActivationOverride = m_nextNewWorldActivationOverride;
+	m_nextNewWorldActivationOverride                         = activateWindow ? 1 : 0;
 	if (!worldState.worldFilePath.trimmed().isEmpty() && QFileInfo::exists(worldState.worldFilePath))
 		opened = openDocumentFile(worldState.worldFilePath);
 	if (!opened)
 		opened = openDocumentFile(QString());
+	m_nextNewWorldActivationOverride = previousActivationOverride;
 	if (!opened)
 		return false;
 
-	WorldChildWindow *child = m_mainWindow->activeWorldChildWindow();
-	if (!child)
-		return false;
-	WorldRuntime *worldRuntime = child->runtime();
+	WorldRuntime *worldRuntime = nullptr;
+	for (WorldRuntime *candidate : activeWorldRuntimes())
+	{
+		if (!existingRuntimes.contains(candidate))
+		{
+			worldRuntime = candidate;
+			break;
+		}
+	}
+	if (!worldRuntime && activateWindow)
+	{
+		if (WorldChildWindow *activeChild = m_mainWindow->activeWorldChildWindow(); activeChild)
+			worldRuntime = activeChild->runtime();
+	}
 	if (!worldRuntime)
+		return false;
+
+	WorldChildWindow *child = m_mainWindow->findWorldChildWindow(worldRuntime);
+	if (!child)
 		return false;
 	WorldView *worldView = child->view();
 
@@ -4276,7 +4294,9 @@ bool AppController::recoverReloadStartupState()
 	{
 		WorldRuntime *runtime = nullptr;
 		WorldView    *view    = nullptr;
-		if (!openWorldForReloadRecovery(worldState, &runtime, &view) || !runtime || !view)
+		const bool    activateWindow =
+		    snapshot.activeWorldSequence > 0 && worldState.sequence == snapshot.activeWorldSequence;
+		if (!openWorldForReloadRecovery(worldState, activateWindow, &runtime, &view) || !runtime || !view)
 		{
 			++openFailures;
 			qWarning() << kReloadLogTag << "World recovery open failed for"
@@ -4288,6 +4308,12 @@ bool AppController::recoverReloadStartupState()
 		    worldState.sequence == snapshot.activeWorldSequence)
 		{
 			requestedActiveRuntime = runtime;
+			if (m_mainWindow)
+				m_mainWindow->activateWorldRuntime(runtime);
+		}
+		else if (requestedActiveRuntime && m_mainWindow)
+		{
+			m_mainWindow->activateWorldRuntime(requestedActiveRuntime.data());
 		}
 		openedWorlds.push_back({runtime, view, worldState});
 	}
@@ -4596,6 +4622,12 @@ bool AppController::openWorldDocument(const QString &path)
 
 	auto shouldActivateNewWorld = [this]() -> bool
 	{
+		if (m_nextNewWorldActivationOverride >= 0)
+		{
+			const bool activate              = m_nextNewWorldActivationOverride != 0;
+			m_nextNewWorldActivationOverride = -1;
+			return activate;
+		}
 		if (!m_batchOpeningWorldList)
 			return true;
 		if (!m_batchWorldListActivatedFirst)
