@@ -178,7 +178,7 @@ class TelnetProcessor
 		 * @brief Returns and clears parsed MXP events since the previous call.
 		 * @return Parsed MXP events.
 		 */
-		QList<MxpEvent>      takeMxpEvents();
+		QList<MxpEvent> takeMxpEvents();
 		/**
 		 * @brief Parsed MXP mode transition marker emitted during stream processing.
 		 */
@@ -239,6 +239,16 @@ class TelnetProcessor
 		 * @brief Forces pueblo mode activation.
 		 */
 		void                 activatePuebloMode();
+		/**
+		 * @brief Returns current NAWS window width in columns.
+		 * @return Current NAWS width in columns.
+		 */
+		[[nodiscard]] int    windowColumns() const;
+		/**
+		 * @brief Returns current NAWS window height in rows.
+		 * @return Current NAWS height in rows.
+		 */
+		[[nodiscard]] int    windowRows() const;
 		/**
 		 * @brief Returns the negotiated MCCP compression type.
 		 * @return Active MCCP type code.

@@ -11228,6 +11228,34 @@ void WorldRuntime::outputStyledText(const QString &text, const QVector<StyleSpan
 	emit outputStyledRequested(displayText, displaySpans, newLine, note);
 }
 
+void WorldRuntime::prepareInputEchoForDisplay(QString &text, QVector<StyleSpan> &spans) const
+{
+	if (text.isEmpty())
+		return;
+
+	if (!isEnabledFlag(m_worldAttributes.value(QStringLiteral("wrap"))))
+		return;
+
+	int wrapColumn = m_telnet.windowColumns();
+	if (!isEnabledFlag(m_worldAttributes.value(QStringLiteral("auto_wrap_window_width"))))
+	{
+		const int configuredWrapColumn = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
+		if (configuredWrapColumn > 0)
+			wrapColumn = wrapColumn > 0 ? qMin(wrapColumn, configuredWrapColumn) : configuredWrapColumn;
+	}
+	if (wrapColumn <= 0)
+		return;
+
+	const QString indentValue = m_worldAttributes.value(QStringLiteral("indent_paras"));
+	const bool    indentParas = !(indentValue == QStringLiteral("0") ||
+                               indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+                               indentValue.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+	if (spans.isEmpty())
+		wrapPlainLineForColumn(text, wrapColumn, indentParas);
+	else
+		wrapStyledLineForColumn(text, spans, wrapColumn, indentParas);
+}
+
 void WorldRuntime::outputHtml(const QString &html)
 {
 	if (html.isEmpty())
@@ -11858,8 +11886,6 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 {
 	const bool nawsEnabled = isEnabledFlag(m_worldAttributes.value(QStringLiteral("naws")));
 	m_telnet.setNawsEnabled(nawsEnabled);
-	if (!nawsEnabled)
-		return;
 
 	int  columns = 0;
 	int  rows    = 0;
@@ -11915,7 +11941,7 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 		// Do not push speculative fallback NAWS when a view exists but geometry
 		// is not measured yet; wait for a later resize/layout callback to send a
 		// correct size and avoid first-command wrap mismatch.
-		if (m_view && !measuredFromView)
+		if (nawsEnabled && m_view && !measuredFromView)
 			return;
 		columns = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
 		rows    = 24;

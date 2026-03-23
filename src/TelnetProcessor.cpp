@@ -664,6 +664,16 @@ int TelnetProcessor::mccpType() const
 	return m_mccpType;
 }
 
+int TelnetProcessor::windowColumns() const
+{
+	return m_wrapColumns;
+}
+
+int TelnetProcessor::windowRows() const
+{
+	return m_wrapRows;
+}
+
 qint64 TelnetProcessor::totalCompressedBytes() const
 {
 	return m_totalCompressedBytes;

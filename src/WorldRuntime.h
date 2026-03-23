@@ -3316,6 +3316,16 @@ class WorldRuntime : public QObject
 		 */
 		void outputStyledText(const QString &text, const QVector<StyleSpan> &spans, bool note, bool newLine);
 		/**
+		 * @brief Applies output-display wrapping policy to local command echo text.
+		 *
+		 * Uses the same effective column constraints as world output (including NAWS
+		 * width when enabled) so echoed input aligns with server-side wrapping.
+		 *
+		 * @param text Echo text to normalize in-place.
+		 * @param spans Optional echo style spans, normalized in-place.
+		 */
+		void prepareInputEchoForDisplay(QString &text, QVector<StyleSpan> &spans) const;
+		/**
 		 * @brief Emits HTML output fragment to view.
 		 * @param html HTML fragment.
 		 */

@@ -1956,6 +1956,7 @@ void WorldView::echoInputText(const QString &text)
 			span.back   = fromColorRef(m_runtime->customColourBackground(echoColour));
 			echoSpans.push_back(span);
 		}
+		m_runtime->prepareInputEchoForDisplay(trimmed, echoSpans);
 	}
 	bool keepOnSameLine = m_keepCommandsOnSameLine;
 	if (m_runtime)
