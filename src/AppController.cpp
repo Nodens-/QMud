@@ -6020,10 +6020,10 @@ void AppController::handleUpdateQmudNow()
 				        QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
 				    const QString waitPid =
 				        QString::number(static_cast<qint64>(QCoreApplication::applicationPid()));
-				    const QStringList installerArgs = {QStringLiteral("/s"),
-				                                       QStringLiteral("/waitpid=%1").arg(waitPid),
-				                                       QStringLiteral("/targetdir=\"%1\"").arg(targetDir),
-				                                       QStringLiteral("/runprocess=\"%1\"").arg(runProcess)};
+				    const QStringList installerArgs = {QStringLiteral("/S"),
+				                                       QStringLiteral("/WAITPID=%1").arg(waitPid),
+				                                       QStringLiteral("/TARGETDIR=%1").arg(targetDir),
+				                                       QStringLiteral("/RUNPROCESS=%1").arg(runProcess)};
 
 				    if (!QProcess::startDetached(installerPath, installerArgs))
 				    {

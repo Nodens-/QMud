@@ -85,6 +85,22 @@ Function WaitForProcessExitByPid
   ${EndIf}
 FunctionEnd
 
+Function StripOptionalOuterQuotes
+  Exch $0
+  StrLen $1 $0
+  ${If} $1 >= 2
+    StrCpy $2 $0 1
+    IntOp $3 $1 - 1
+    StrCpy $4 $0 1 $3
+    ${If} $2 == '"'
+    ${AndIf} $4 == '"'
+      IntOp $1 $1 - 2
+      StrCpy $0 $0 $1 1
+    ${EndIf}
+  ${EndIf}
+  Exch $0
+FunctionEnd
+
 Function .onInit
   ${GetParameters} $0
   ${GetOptions} "$0" "/TARGETDIR=" $CliTargetDir
@@ -96,6 +112,11 @@ Function .onInit
   ${EndIf}
   ${If} $CliTargetDir == ""
     ${GetOptions} "$0" "/extractdir=" $CliTargetDir
+  ${EndIf}
+  ${If} $CliTargetDir != ""
+    Push $CliTargetDir
+    Call StripOptionalOuterQuotes
+    Pop $CliTargetDir
   ${EndIf}
   ${If} $CliTargetDir != ""
     StrCpy $INSTDIR $CliTargetDir
@@ -110,6 +131,11 @@ Function .onInit
   ${EndIf}
   ${If} $CliRunProcess == ""
     ${GetOptions} "$0" "/run=" $CliRunProcess
+  ${EndIf}
+  ${If} $CliRunProcess != ""
+    Push $CliRunProcess
+    Call StripOptionalOuterQuotes
+    Pop $CliRunProcess
   ${EndIf}
 
   ${GetOptions} "$0" "/WAITPID=" $CliWaitPid
@@ -172,6 +198,6 @@ Section "Install"
     CreateShortCut "$DESKTOP\QMud.lnk" "$INSTDIR\QMud.exe" "" "$INSTDIR\QMud.exe" 0
 
   ${If} $CliRunProcess != ""
-    Exec $CliRunProcess
+    Exec '"$CliRunProcess"'
   ${EndIf}
 SectionEnd
