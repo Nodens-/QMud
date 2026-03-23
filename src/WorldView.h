@@ -882,10 +882,6 @@ class WorldView : public QWidget
 		 */
 		void                 syncOutputScrollSingleStep() const;
 		/**
-		 * @brief Applies end-anchor immediately to output scrollbars.
-		 */
-		void                 applyEndAnchorNow() const;
-		/**
 		 * @brief Injects a synthetic post-swap output tick to drive normal scroll-to-end behavior.
 		 */
 		void                 emitPostSwapOutputTick();
@@ -897,18 +893,6 @@ class WorldView : public QWidget
 		 * @brief Connects contents-changed handling for an output document.
 		 */
 		void                 connectOutputDocumentContentsSignal(const QTextDocument *document);
-		/**
-		 * @brief Starts a scoped end-anchor request for an output mutation.
-		 */
-		void                 requestEndAnchorAfterOutputMutation();
-		/**
-		 * @brief Marks the active output-mutation end-anchor request as complete.
-		 */
-		void                 markEndAnchorMutationComplete();
-		/**
-		 * @brief Finishes and clears any pending output end-anchor request.
-		 */
-		void                 finishPendingEndAnchorRequest();
 		/**
 		 * @brief Marks that user initiated a manual scroll action.
 		 */
@@ -1255,9 +1239,6 @@ class WorldView : public QWidget
 		int                                     m_outputBackfillGeneration{0};
 		bool                                    m_outputBackfillQueuedRebuild{false};
 		QVector<WorldRuntime::LineEntry>        m_outputBackfillQueuedRebuildLines;
-		quint64                                 m_endAnchorRequestSerial{0};
-		quint64                                 m_pendingEndAnchorRequestSerial{0};
-		bool                                    m_pendingEndAnchorMutationComplete{false};
 		QTimer                                 *m_hyperlinkRestyleTimer{nullptr};
 		int                                     m_hyperlinkRestyleNextBlock{-1};
 		bool                                    m_bulkOutputRebuild{false};
