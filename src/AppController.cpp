@@ -13109,6 +13109,8 @@ void AppController::handleFileNew()
 		return;
 
 	m_typeOfNewDocument = eNormalNewDocument;
+	const QPointer<WorldRuntime> previouslyActiveRuntime =
+	    m_mainWindow->activeWorldChildWindow() ? m_mainWindow->activeWorldChildWindow()->runtime() : nullptr;
 
 	auto *runtime = new WorldRuntime(m_mainWindow);
 	initializeWorldRuntime(runtime);
@@ -13123,6 +13125,19 @@ void AppController::handleFileNew()
 	{
 		window->close();
 		runtime->deleteLater();
+		if (previouslyActiveRuntime)
+		{
+			const QPointer<MainWindow> mainWindowGuard = m_mainWindow;
+			QMetaObject::invokeMethod(
+			    qApp,
+			    [mainWindowGuard, previouslyActiveRuntime]
+			    {
+				    if (!mainWindowGuard || !previouslyActiveRuntime)
+					    return;
+				    mainWindowGuard->activateWorldRuntime(previouslyActiveRuntime);
+			    },
+			    Qt::QueuedConnection);
+		}
 		return;
 	}
 
