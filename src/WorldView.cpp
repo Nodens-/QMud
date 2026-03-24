@@ -115,6 +115,29 @@ namespace
 		return static_cast<int>(qBound(kMin, value, kMax));
 	}
 
+	[[nodiscard]] bool traceOutputBackfillEnabled()
+	{
+		static const bool enabled = []
+		{
+			const QByteArray value = qgetenv("QMUD_TRACE_BACKFILL");
+			if (value.isEmpty())
+				return false;
+			return value != "0" && value.compare("false", Qt::CaseInsensitive) != 0 &&
+			       value.compare("n", Qt::CaseInsensitive) != 0;
+		}();
+		return enabled;
+	}
+
+	[[nodiscard]] QString traceWorldName(const WorldRuntime *runtime)
+	{
+		if (!runtime)
+			return QStringLiteral("<null>");
+		QString name = runtime->worldAttributes().value(QStringLiteral("name")).trimmed();
+		if (!name.isEmpty())
+			return name;
+		return QStringLiteral("<unnamed>");
+	}
+
 	const QSet<QString> &worldViewRuntimeSettingsAttributeKeys()
 	{
 		static const QSet<QString> keys = {QStringLiteral("output_font_name"),
@@ -659,6 +682,11 @@ class WrapTextBrowser : public QTextBrowser
 			setViewportMargins(left, top, right, bottom);
 		}
 
+		[[nodiscard]] QMargins viewportMarginsPublic() const
+		{
+			return viewportMargins();
+		}
+
 	protected:
 		void mouseMoveEvent(QMouseEvent *event) override
 		{
@@ -780,6 +808,11 @@ class InputTextEdit : public QPlainTextEdit
 			setViewportMargins(left, top, right, bottom);
 		}
 
+		[[nodiscard]] QMargins viewportMarginsPublic() const
+		{
+			return viewportMargins();
+		}
+
 	protected:
 		void keyPressEvent(QKeyEvent *event) override;
 		void contextMenuEvent(QContextMenuEvent *event) override;
@@ -867,7 +900,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	outputStackLayout->setSpacing(0);
 
 	m_outputSplitter = new QSplitter(Qt::Vertical, m_outputStack);
-	m_outputSplitter->setChildrenCollapsible(false);
+	m_outputSplitter->setChildrenCollapsible(true);
 
 	m_output = new WrapTextBrowser(this, m_outputSplitter);
 	m_output->setReadOnly(true);
@@ -880,7 +913,6 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	m_liveOutput->setOpenLinks(false);
 	m_liveOutput->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 	m_liveOutput->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-	m_liveOutput->setVisible(false);
 
 	m_miniUnderlay = new MiniWindowLayer(this, true, m_outputStack);
 	m_miniOverlay  = new MiniWindowLayer(this, false, m_outputStack);
@@ -913,6 +945,9 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	m_outputSplitter->addWidget(m_liveOutput);
 	m_outputSplitter->setStretchFactor(0, 1);
 	m_outputSplitter->setStretchFactor(1, 0);
+	m_outputSplitter->setCollapsible(0, false);
+	m_outputSplitter->setCollapsible(1, true);
+	m_outputSplitter->setSizes(QList<int>() << 1 << 0);
 
 	m_outputScrollBar = new QScrollBar(Qt::Vertical, m_outputContainer);
 	outputStackLayout->addWidget(m_miniUnderlay, 0, 0);
@@ -985,25 +1020,51 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 				m_outputScrollBar->setSingleStep(outputScrollUnitsPerLine());
 				m_outputScrollBar->setValue(bar->value());
 			};
-			connect(bar, &QScrollBar::rangeChanged, this,
-			        [this, bar](int min, int max)
-			        {
-				        if (m_outputScrollBar)
-				        {
-					        QSignalBlocker block(m_outputScrollBar);
-					        m_outputScrollBar->setRange(min, max);
-					        m_outputScrollBar->setPageStep(bar->pageStep());
-					        m_outputScrollBar->setSingleStep(outputScrollUnitsPerLine());
-				        }
-			        });
-			connect(bar, &QScrollBar::valueChanged, this,
-			        [this](int value)
-			        {
-				        if (!m_outputScrollBar)
-					        return;
-				        QSignalBlocker block(m_outputScrollBar);
-				        m_outputScrollBar->setValue(value);
-			        });
+			connect(
+			    bar, &QScrollBar::rangeChanged, this,
+			    [this, bar](int min, int max)
+			    {
+				    if (traceOutputBackfillEnabled())
+				    {
+					    qInfo().noquote()
+					        << QStringLiteral(
+					               "[OutputBackfill] sb-range world=%1 min=%2 max=%3 value=%4 extValue=%5")
+					               .arg(traceWorldName(m_runtime))
+					               .arg(min)
+					               .arg(max)
+					               .arg(bar ? bar->value() : -1)
+					               .arg(m_outputScrollBar ? m_outputScrollBar->value() : -1);
+				    }
+				    if (m_outputScrollBar)
+				    {
+					    QSignalBlocker block(m_outputScrollBar);
+					    m_outputScrollBar->setRange(min, max);
+					    m_outputScrollBar->setPageStep(bar->pageStep());
+					    m_outputScrollBar->setSingleStep(outputScrollUnitsPerLine());
+				    }
+			    });
+			connect(
+			    bar, &QScrollBar::valueChanged, this,
+			    [this](int value)
+			    {
+				    if (traceOutputBackfillEnabled())
+				    {
+					    const QScrollBar *const outputBar =
+					        m_output ? m_output->verticalScrollBar() : nullptr;
+					    qInfo().noquote()
+					        << QStringLiteral(
+					               "[OutputBackfill] sb-value world=%1 value=%2 max=%3 extBefore=%4 split=%5")
+					               .arg(traceWorldName(m_runtime))
+					               .arg(value)
+					               .arg(outputBar ? outputBar->maximum() : -1)
+					               .arg(m_outputScrollBar ? m_outputScrollBar->value() : -1)
+					               .arg(m_scrollbackSplitActive ? QStringLiteral("1") : QStringLiteral("0"));
+				    }
+				    if (!m_outputScrollBar)
+					    return;
+				    QSignalBlocker block(m_outputScrollBar);
+				    m_outputScrollBar->setValue(value);
+			    });
 			connect(m_outputScrollBar, &QScrollBar::valueChanged, this,
 			        [bar](int value)
 			        {
@@ -1265,7 +1326,6 @@ bool WorldView::isFrozen() const
 
 void WorldView::noteUserScrollAction()
 {
-	finishPendingEndAnchorRequest();
 	m_timeFadeCancelled = QDateTime::currentDateTime();
 	if (!m_autoPause || !m_outputScrollBar)
 		return;
@@ -1296,28 +1356,6 @@ void WorldView::syncOutputScrollSingleStep() const
 	}
 	if (m_outputScrollBar)
 		m_outputScrollBar->setSingleStep(singleStep);
-}
-
-void WorldView::applyEndAnchorNow() const
-{
-	if (m_output)
-	{
-		m_output->moveCursor(QTextCursor::End);
-		m_output->ensureCursorVisible();
-		if (QScrollBar *const outputBar = m_output->verticalScrollBar())
-		{
-			outputBar->setValue(outputBar->maximum());
-			if (m_outputScrollBar)
-				m_outputScrollBar->setValue(outputBar->value());
-		}
-	}
-	if (m_liveOutput)
-	{
-		m_liveOutput->moveCursor(QTextCursor::End);
-		m_liveOutput->ensureCursorVisible();
-		if (QScrollBar *const liveBar = m_liveOutput->verticalScrollBar())
-			liveBar->setValue(liveBar->maximum());
-	}
 }
 
 void WorldView::emitPostSwapOutputTick()
@@ -1401,47 +1439,6 @@ void WorldView::connectOutputDocumentContentsSignal(const QTextDocument *documen
 	        });
 }
 
-void WorldView::requestEndAnchorAfterOutputMutation()
-{
-	finishPendingEndAnchorRequest();
-	if (!m_output || !m_outputDocument)
-		return;
-	m_pendingEndAnchorRequestSerial    = ++m_endAnchorRequestSerial;
-	m_pendingEndAnchorMutationComplete = false;
-}
-
-void WorldView::markEndAnchorMutationComplete()
-{
-	if (m_pendingEndAnchorRequestSerial == 0)
-		return;
-	if (m_scrollbackSplitActive)
-	{
-		finishPendingEndAnchorRequest();
-		return;
-	}
-	m_pendingEndAnchorMutationComplete = true;
-	const quint64             serial   = m_pendingEndAnchorRequestSerial;
-	const QPointer<WorldView> that(this);
-	QMetaObject::invokeMethod(
-	    this,
-	    [that, serial]
-	    {
-		    if (!that || that->m_pendingEndAnchorRequestSerial != serial || that->m_scrollbackSplitActive)
-			    return;
-		    if (!that->m_pendingEndAnchorMutationComplete)
-			    return;
-		    that->applyEndAnchorNow();
-		    that->finishPendingEndAnchorRequest();
-	    },
-	    Qt::QueuedConnection);
-}
-
-void WorldView::finishPendingEndAnchorRequest()
-{
-	m_pendingEndAnchorRequestSerial    = 0;
-	m_pendingEndAnchorMutationComplete = false;
-}
-
 void WorldView::handleOutputWheel(const QWheelEvent *event)
 {
 	if (!m_outputScrollBar || !event)
@@ -1509,7 +1506,6 @@ void WorldView::setScrollbackSplitActive(bool active)
 
 	if (m_scrollbackSplitActive)
 	{
-		m_liveOutput->setVisible(true);
 		const int total    = m_outputSplitter->size().height();
 		int       liveSize = m_lastLiveSplitSize;
 		if (liveSize <= 0 && total > 0)
@@ -1526,7 +1522,6 @@ void WorldView::setScrollbackSplitActive(bool active)
 	{
 		if (const QList<int> sizes = m_outputSplitter->sizes(); sizes.size() >= 2)
 			m_lastLiveSplitSize = sizes.at(1);
-		m_liveOutput->setVisible(false);
 		m_outputSplitter->setSizes(QList<int>() << 1 << 0);
 		m_userScrollAction = false;
 		if (!m_frozen)
@@ -1550,6 +1545,16 @@ void WorldView::requestOutputScrollToEnd()
 		return;
 	if (m_scrollToEndQueued)
 		return;
+	if (traceOutputBackfillEnabled())
+	{
+		const QScrollBar *const bar = m_output ? m_output->verticalScrollBar() : nullptr;
+		qInfo().noquote() << QStringLiteral(
+		                         "[OutputBackfill] scroll-to-end request world=%1 value=%2 max=%3 split=%4")
+		                         .arg(traceWorldName(m_runtime))
+		                         .arg(bar ? bar->value() : -1)
+		                         .arg(bar ? bar->maximum() : -1)
+		                         .arg(m_scrollbackSplitActive ? QStringLiteral("1") : QStringLiteral("0"));
+	}
 	m_scrollToEndQueued = true;
 	QPointer<WorldView> that(this);
 	QTimer::singleShot(0, this,
@@ -1560,6 +1565,20 @@ void WorldView::requestOutputScrollToEnd()
 		                   that->m_scrollToEndQueued = false;
 		                   if (that->m_frozen)
 			                   return;
+		                   if (traceOutputBackfillEnabled())
+		                   {
+			                   const QScrollBar *const bar =
+			                       that->m_output ? that->m_output->verticalScrollBar() : nullptr;
+			                   qInfo().noquote()
+			                       << QStringLiteral(
+			                              "[OutputBackfill] scroll-to-end fire world=%1 value=%2 max=%3 "
+			                              "split=%4")
+			                              .arg(traceWorldName(that->m_runtime))
+			                              .arg(bar ? bar->value() : -1)
+			                              .arg(bar ? bar->maximum() : -1)
+			                              .arg(that->m_scrollbackSplitActive ? QStringLiteral("1")
+			                                                                 : QStringLiteral("0"));
+		                   }
 		                   if (that->m_scrollbackSplitActive)
 			                   scrollViewToEnd(that->m_liveOutput);
 		                   else
@@ -1893,6 +1912,19 @@ void WorldView::appendOutputHtml(const QString &html, bool newLine)
 {
 	if (!m_outputDocument)
 		return;
+	if (traceOutputBackfillEnabled())
+	{
+		const QScrollBar *const bar = m_output ? m_output->verticalScrollBar() : nullptr;
+		qInfo().noquote()
+		    << QStringLiteral("[OutputBackfill] append-html world=%1 newLine=%2 htmlLen=%3 value=%4 max=%5 "
+		                      "bulk=%6")
+		           .arg(traceWorldName(m_runtime))
+		           .arg(newLine ? QStringLiteral("1") : QStringLiteral("0"))
+		           .arg(html.size())
+		           .arg(bar ? bar->value() : -1)
+		           .arg(bar ? bar->maximum() : -1)
+		           .arg(m_bulkOutputRebuild ? QStringLiteral("1") : QStringLiteral("0"));
+	}
 	if (m_frozen && !m_flushingPending)
 	{
 		m_pendingOutput.push_back(PendingHtml{html, newLine});
@@ -1916,6 +1948,16 @@ void WorldView::appendOutputHtml(const QString &html, bool newLine)
 		const QTextBlockFormat blockFormat = cursor.blockFormat();
 		const QTextCharFormat  charFormat  = cursor.charFormat();
 		cursor.insertBlock(blockFormat, charFormat);
+	}
+	if (traceOutputBackfillEnabled())
+	{
+		const QScrollBar *const bar = m_output ? m_output->verticalScrollBar() : nullptr;
+		qInfo().noquote() << QStringLiteral(
+		                         "[OutputBackfill] append-html done world=%1 value=%2 max=%3 bulk=%4")
+		                         .arg(traceWorldName(m_runtime))
+		                         .arg(bar ? bar->value() : -1)
+		                         .arg(bar ? bar->maximum() : -1)
+		                         .arg(m_bulkOutputRebuild ? QStringLiteral("1") : QStringLiteral("0"));
 	}
 	if (m_bulkOutputRebuild)
 		return;
@@ -3326,10 +3368,24 @@ void WorldView::rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry> &l
 
 	const bool backfillActive =
 	    m_outputBackfillInFlight || m_outputBackfillNextIndex >= 0 || !m_outputBackfillPendingLines.isEmpty();
+	if (traceOutputBackfillEnabled())
+	{
+		qInfo().noquote() << QStringLiteral(
+		                         "[OutputBackfill] rebuild sync world=%1 lines=%2 backfillActive=%3")
+		                         .arg(traceWorldName(m_runtime))
+		                         .arg(lines.size())
+		                         .arg(backfillActive ? QStringLiteral("1") : QStringLiteral("0"));
+	}
 	if (backfillActive)
 	{
 		m_outputBackfillQueuedRebuild      = true;
 		m_outputBackfillQueuedRebuildLines = lines;
+		if (traceOutputBackfillEnabled())
+		{
+			qInfo().noquote() << QStringLiteral("[OutputBackfill] queued sync rebuild world=%1 lines=%2")
+			                         .arg(traceWorldName(m_runtime))
+			                         .arg(lines.size());
+		}
 		return;
 	}
 
@@ -3361,8 +3417,7 @@ void WorldView::rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry> &l
 		scrollViewToEnd(m_liveOutput);
 	else
 		scrollViewToEnd(m_output);
-	requestEndAnchorAfterOutputMutation();
-	markEndAnchorMutationComplete();
+	emitPostSwapOutputTick();
 	requestDrawOutputWindowNotification();
 }
 
@@ -3373,10 +3428,24 @@ void WorldView::rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry
 
 	const bool backfillActive =
 	    m_outputBackfillInFlight || m_outputBackfillNextIndex >= 0 || !m_outputBackfillPendingLines.isEmpty();
+	if (traceOutputBackfillEnabled())
+	{
+		qInfo().noquote() << QStringLiteral(
+		                         "[OutputBackfill] rebuild lazy world=%1 lines=%2 backfillActive=%3")
+		                         .arg(traceWorldName(m_runtime))
+		                         .arg(lines.size())
+		                         .arg(backfillActive ? QStringLiteral("1") : QStringLiteral("0"));
+	}
 	if (backfillActive)
 	{
 		m_outputBackfillQueuedRebuild      = true;
 		m_outputBackfillQueuedRebuildLines = lines;
+		if (traceOutputBackfillEnabled())
+		{
+			qInfo().noquote() << QStringLiteral("[OutputBackfill] queued lazy rebuild world=%1 lines=%2")
+			                         .arg(traceWorldName(m_runtime))
+			                         .arg(lines.size());
+		}
 		return;
 	}
 
@@ -3404,6 +3473,14 @@ void WorldView::rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry
 	           kLazyRestoreInitialMaximumLines);
 	const int firstImmediateIndex =
 	    sizeToInt(qMax<qsizetype>(0, lines.size() - static_cast<qsizetype>(initialLineCount)));
+	if (traceOutputBackfillEnabled())
+	{
+		qInfo().noquote() << QStringLiteral(
+		                         "[OutputBackfill] lazy split world=%1 immediateFrom=%2 pending=%3")
+		                         .arg(traceWorldName(m_runtime))
+		                         .arg(firstImmediateIndex)
+		                         .arg(firstImmediateIndex > 0 ? firstImmediateIndex : 0);
+	}
 
 	const bool previousBulkState = m_bulkOutputRebuild;
 	m_bulkOutputRebuild          = true;
@@ -3432,10 +3509,7 @@ void WorldView::rebuildOutputFromLinesLazy(const QVector<WorldRuntime::LineEntry
 		processDeferredOutputBackfillChunk();
 	}
 	else
-	{
-		requestEndAnchorAfterOutputMutation();
-		markEndAnchorMutationComplete();
-	}
+		emitPostSwapOutputTick();
 
 	if (m_scrollbackSplitActive)
 		scrollViewToEnd(m_liveOutput);
@@ -3542,6 +3616,14 @@ void WorldView::processDeferredOutputBackfillChunk()
 	QVector<WorldRuntime::LineEntry> pendingLines = std::move(m_outputBackfillPendingLines);
 	m_outputBackfillPendingLines.clear();
 	m_outputBackfillNextIndex = -1;
+	if (traceOutputBackfillEnabled())
+	{
+		qInfo().noquote() << QStringLiteral(
+		                         "[OutputBackfill] worker start world=%1 pendingLines=%2 generation=%3")
+		                         .arg(traceWorldName(m_runtime))
+		                         .arg(pendingLines.size())
+		                         .arg(m_outputBackfillGeneration);
+	}
 
 	QVector<DeferredBackfillRenderLine> renderLines;
 	renderLines.reserve(pendingLines.size());
@@ -3627,6 +3709,13 @@ void WorldView::applyDeferredOutputBackfill(const int generation, const QString 
 {
 	if (generation != m_outputBackfillGeneration)
 		return;
+	if (traceOutputBackfillEnabled())
+	{
+		qInfo().noquote() << QStringLiteral("[OutputBackfill] apply world=%1 generation=%2 htmlChars=%3")
+		                         .arg(traceWorldName(m_runtime))
+		                         .arg(generation)
+		                         .arg(combinedHtml.size());
+	}
 
 	m_outputBackfillInFlight = false;
 	if (!m_outputDocument)
@@ -3714,6 +3803,16 @@ void WorldView::applyDeferredOutputBackfill(const int generation, const QString 
 
 void WorldView::stopDeferredOutputBackfill(const bool runQueuedRebuild, const bool clearQueuedRebuild)
 {
+	if (traceOutputBackfillEnabled())
+	{
+		qInfo().noquote() << QStringLiteral(
+		                         "[OutputBackfill] stop world=%1 runQueued=%2 clearQueued=%3 queued=%4")
+		                         .arg(traceWorldName(m_runtime))
+		                         .arg(runQueuedRebuild ? QStringLiteral("1") : QStringLiteral("0"))
+		                         .arg(clearQueuedRebuild ? QStringLiteral("1") : QStringLiteral("0"))
+		                         .arg(m_outputBackfillQueuedRebuild ? QStringLiteral("1")
+		                                                            : QStringLiteral("0"));
+	}
 	++m_outputBackfillGeneration;
 	m_outputBackfillInFlight = false;
 	m_outputBackfillPendingLines.clear();
@@ -3729,7 +3828,6 @@ void WorldView::stopDeferredOutputBackfill(const bool runQueuedRebuild, const bo
 
 	if (clearQueuedRebuild || shouldRunQueuedRebuild)
 	{
-		finishPendingEndAnchorRequest();
 		m_outputBackfillQueuedRebuild = false;
 		m_outputBackfillQueuedRebuildLines.clear();
 	}
@@ -4765,6 +4863,11 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 {
 	if (!m_runtime)
 		return;
+	if (rebuildOutput && traceOutputBackfillEnabled())
+	{
+		qInfo().noquote() << QStringLiteral("[OutputBackfill] applyRuntimeSettings requests rebuild world=%1")
+		                         .arg(traceWorldName(m_runtime));
+	}
 
 	const QMap<QString, QString> &attrs          = m_runtime->worldAttributes();
 	const QMap<QString, QString> &multilineAttrs = m_runtime->worldMultilineAttributes();
@@ -5594,6 +5697,16 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 
 void WorldView::resizeEvent(QResizeEvent *event)
 {
+	if (traceOutputBackfillEnabled())
+	{
+		const QScrollBar *const bar = m_output ? m_output->verticalScrollBar() : nullptr;
+		qInfo().noquote() << QStringLiteral("[OutputBackfill] resize world=%1 size=%2x%3 value=%4 max=%5")
+		                         .arg(traceWorldName(m_runtime))
+		                         .arg(width())
+		                         .arg(height())
+		                         .arg(bar ? bar->value() : -1)
+		                         .arg(bar ? bar->maximum() : -1);
+	}
 	QWidget::resizeEvent(event);
 	updateWrapMargin();
 	updateInputWrap();
@@ -5615,6 +5728,14 @@ void WorldView::resizeEvent(QResizeEvent *event)
 
 void WorldView::showEvent(QShowEvent *event)
 {
+	if (traceOutputBackfillEnabled())
+	{
+		const QScrollBar *const bar = m_output ? m_output->verticalScrollBar() : nullptr;
+		qInfo().noquote() << QStringLiteral("[OutputBackfill] show world=%1 value=%2 max=%3")
+		                         .arg(traceWorldName(m_runtime))
+		                         .arg(bar ? bar->value() : -1)
+		                         .arg(bar ? bar->maximum() : -1);
+	}
 	QWidget::showEvent(event);
 	applyDefaultInputHeight(true);
 	if (m_runtime)
@@ -5812,7 +5933,10 @@ void WorldView::updateWrapMargin() const
 
 		if (m_wrapColumn <= 0)
 		{
-			view->setViewportMarginsPublic(0, 0, 0, 0);
+			const QMargins     currentMargins = view->viewportMarginsPublic();
+			constexpr QMargins targetMargins(0, 0, 0, 0);
+			if (currentMargins != targetMargins)
+				view->setViewportMarginsPublic(0, 0, 0, 0);
 			return;
 		}
 
@@ -5822,7 +5946,10 @@ void WorldView::updateWrapMargin() const
 		int                rightMargin   = 0;
 		if (desiredWidth > 0 && viewportWidth > desiredWidth)
 			rightMargin = viewportWidth - desiredWidth;
-		view->setViewportMarginsPublic(0, 0, rightMargin, 0);
+		const QMargins currentMargins = view->viewportMarginsPublic();
+		const QMargins targetMargins(0, 0, rightMargin, 0);
+		if (currentMargins != targetMargins)
+			view->setViewportMarginsPublic(0, 0, rightMargin, 0);
 	};
 
 	applyMargin(m_output);
@@ -5838,7 +5965,10 @@ void WorldView::updateInputWrap() const
 	{
 		m_input->setLineWrapMode(QPlainTextEdit::NoWrap);
 		m_input->setWordWrapMode(QTextOption::NoWrap);
-		m_input->setViewportMarginsPublic(m_inputPixelOffset, 0, m_inputPixelOffset, 0);
+		const QMargins currentMargins = m_input->viewportMarginsPublic();
+		const QMargins targetMargins(m_inputPixelOffset, 0, m_inputPixelOffset, 0);
+		if (currentMargins != targetMargins)
+			m_input->setViewportMarginsPublic(m_inputPixelOffset, 0, m_inputPixelOffset, 0);
 		return;
 	}
 
@@ -5855,7 +5985,10 @@ void WorldView::updateInputWrap() const
 	if (rightMargin < m_inputPixelOffset)
 		rightMargin = m_inputPixelOffset;
 
-	m_input->setViewportMarginsPublic(m_inputPixelOffset, 0, rightMargin, 0);
+	const QMargins currentMargins = m_input->viewportMarginsPublic();
+	const QMargins targetMargins(m_inputPixelOffset, 0, rightMargin, 0);
+	if (currentMargins != targetMargins)
+		m_input->setViewportMarginsPublic(m_inputPixelOffset, 0, rightMargin, 0);
 	m_input->setLineWrapMode(QPlainTextEdit::WidgetWidth);
 	m_input->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
 }

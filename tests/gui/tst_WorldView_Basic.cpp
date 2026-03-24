@@ -138,13 +138,23 @@ namespace
 
 	QTextBrowser *findVisibleOutputBrowser(const WorldView &view)
 	{
-		const auto browsers = view.findChildren<QTextBrowser *>();
+		const auto    browsers         = view.findChildren<QTextBrowser *>();
+		QTextBrowser *bestBrowser      = nullptr;
+		int           bestViewportArea = -1;
 		for (QTextBrowser *browser : browsers)
 		{
-			if (browser && browser->isVisible() && browser->viewport())
-				return browser;
+			if (!browser || !browser->isVisible() || !browser->viewport())
+				continue;
+
+			const QRect viewportRect = browser->viewport()->rect();
+			const int   viewportArea = viewportRect.width() * viewportRect.height();
+			if (viewportArea > bestViewportArea)
+			{
+				bestViewportArea = viewportArea;
+				bestBrowser      = browser;
+			}
 		}
-		return nullptr;
+		return bestBrowser;
 	}
 
 	QPoint findAnchorPoint(const QTextBrowser &browser, const QString &href)
