@@ -17004,8 +17004,6 @@ int WorldRuntime::windowDrawImage(const QString &name, const QString &imageId, i
 			{
 				if ((line[x] & 0x00FFFFFF) == (key.rgb() & 0x00FFFFFF))
 					line[x] &= 0x00FFFFFF;
-				else
-					line[x] |= 0xFF000000;
 			}
 		}
 		painter.drawImage(QPoint(left, top), copy);
@@ -17566,8 +17564,6 @@ int WorldRuntime::windowTransformImage(const QString &name, const QString &image
 			{
 				if ((line[x] & 0x00FFFFFF) == (key.rgb() & 0x00FFFFFF))
 					line[x] &= 0x00FFFFFF;
-				else
-					line[x] |= 0xFF000000;
 			}
 		}
 		painter.drawImage(QPointF(0, 0), copy);

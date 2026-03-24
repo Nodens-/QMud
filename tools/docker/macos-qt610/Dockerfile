@@ -96,6 +96,8 @@ RUN dnf -y install qt6-qtbase-devel && \
 ARG LUA_VERSION=5.4.7
 ARG LUASOCKET_VERSION=3.1.0
 ARG LPEG_VERSION=1.1.0
+ARG LUASEC_VERSION=1.3.2
+ARG OPENSSL_VERSION=3.3.2
 
 RUN cat > /usr/local/bin/build-qmud-macos-lua-deps.sh <<'EOF' && chmod +x /usr/local/bin/build-qmud-macos-lua-deps.sh
 #!/usr/bin/env bash
@@ -104,6 +106,8 @@ set -euxo pipefail
 LUA_VERSION="${LUA_VERSION:?LUA_VERSION not set}"
 LUASOCKET_VERSION="${LUASOCKET_VERSION:?LUASOCKET_VERSION not set}"
 LPEG_VERSION="${LPEG_VERSION:?LPEG_VERSION not set}"
+LUASEC_VERSION="${LUASEC_VERSION:?LUASEC_VERSION not set}"
+OPENSSL_VERSION="${OPENSSL_VERSION:?OPENSSL_VERSION not set}"
 
 LUA_CC=""
 for CANDIDATE_DIR in "${OSXCROSS_BIN_DIR:-/opt/osxcross/target/bin}" /opt/osxcross/bin /usr/local/osxcross/bin; do
@@ -125,7 +129,7 @@ fi
 
 mkdir -p /tmp/qmud-src
 mkdir -p /opt/qmud/macos-deps/lua/include /opt/qmud/macos-deps/lua/lib
-mkdir -p /opt/qmud/macos-deps/lua-modules/socket /opt/qmud/macos-deps/lua-modules/mime /opt/qmud/macos-deps/lua-modules/json
+mkdir -p /opt/qmud/macos-deps/lua-modules/socket /opt/qmud/macos-deps/lua-modules/mime /opt/qmud/macos-deps/lua-modules/json /opt/qmud/macos-deps/lua-modules/ssl
 
 curl -fsSL "https://www.lua.org/ftp/lua-${LUA_VERSION}.tar.gz" -o /tmp/qmud-src/lua.tar.gz
 tar -xf /tmp/qmud-src/lua.tar.gz -C /tmp/qmud-src
@@ -192,6 +196,82 @@ done
 copy_socket_lua_file socket || true
 copy_socket_lua_file mbox || true
 
+curl -fsSL "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" -o /tmp/qmud-src/openssl.tar.gz || \
+curl -fsSL "https://www.openssl.org/source/old/3.3/openssl-${OPENSSL_VERSION}.tar.gz" -o /tmp/qmud-src/openssl.tar.gz
+tar -xf /tmp/qmud-src/openssl.tar.gz -C /tmp/qmud-src
+OPENSSL_SRC="$(find /tmp/qmud-src -maxdepth 1 -type d -name "openssl-${OPENSSL_VERSION}*" | head -n 1 || true)"
+[[ -n "${OPENSSL_SRC}" ]]
+cd "${OPENSSL_SRC}"
+OPENSSL_TARGET="darwin64-x86_64-cc"
+if [[ "${LUA_CC}" == *"aarch64-apple-darwin"* ]] || [[ "${LUA_CC}" == *"arm64-apple-darwin"* ]]; then
+  OPENSSL_TARGET="darwin64-arm64-cc"
+fi
+CC="${LUA_CC}" ./Configure "${OPENSSL_TARGET}" no-shared no-tests no-apps no-module no-legacy \
+  --prefix=/opt/qmud/macos-deps/openssl \
+  --openssldir=/opt/qmud/macos-deps/openssl
+make -j"$(nproc)"
+make install_sw
+
+curl -fsSL "https://github.com/brunoos/luasec/archive/refs/tags/v${LUASEC_VERSION}.tar.gz" -o /tmp/qmud-src/luasec.tar.gz || \
+curl -fsSL "https://github.com/brunoos/luasec/archive/refs/tags/${LUASEC_VERSION}.tar.gz" -o /tmp/qmud-src/luasec.tar.gz
+tar -xf /tmp/qmud-src/luasec.tar.gz -C /tmp/qmud-src
+LUASEC_SRC="$(find /tmp/qmud-src -maxdepth 1 -type d -name "luasec*${LUASEC_VERSION}*" | head -n 1 || true)"
+[[ -n "${LUASEC_SRC}" ]]
+LUASEC_SRC_C_DIR="${LUASEC_SRC}/src"
+[[ -d "${LUASEC_SRC_C_DIR}" ]]
+cd "${LUASEC_SRC_C_DIR}"
+LUASEC_C_SOURCES=""
+for src in config.c context.c ec.c options.c ssl.c x509.c; do
+  if [[ -f "${src}" ]]; then
+    LUASEC_C_SOURCES="${LUASEC_C_SOURCES} ${src}"
+  fi
+done
+if [[ -z "${LUASEC_C_SOURCES}" ]]; then
+  echo "Error: could not resolve LuaSec C sources in ${LUASEC_SRC_C_DIR}" >&2
+  exit 1
+fi
+LUASEC_SOCKET_SOURCES=""
+for src in luasocket/buffer.c luasocket/io.c luasocket/timeout.c; do
+  if [[ -f "${src}" ]]; then
+    LUASEC_SOCKET_SOURCES="${LUASEC_SOCKET_SOURCES} ${src}"
+  fi
+done
+if [[ -f "luasocket/usocket.c" ]]; then
+  LUASEC_SOCKET_SOURCES="${LUASEC_SOCKET_SOURCES} luasocket/usocket.c"
+elif [[ -f "luasocket/wsocket.c" ]]; then
+  LUASEC_SOCKET_SOURCES="${LUASEC_SOCKET_SOURCES} luasocket/wsocket.c"
+fi
+if [[ -z "${LUASEC_SOCKET_SOURCES}" ]]; then
+  echo "Error: could not resolve bundled LuaSocket sources in ${LUASEC_SRC_C_DIR}/luasocket" >&2
+  exit 1
+fi
+"${LUA_CC}" -O2 -fPIC -mmacosx-version-min=12.0 \
+  -I/opt/qmud/macos-deps/lua/include \
+  -I/opt/qmud/macos-deps/openssl/include \
+  -I"${LUASEC_SRC_C_DIR}" \
+  -bundle -undefined dynamic_lookup \
+  ${LUASEC_C_SOURCES} ${LUASEC_SOCKET_SOURCES} \
+  /opt/qmud/macos-deps/openssl/lib/libssl.a \
+  /opt/qmud/macos-deps/openssl/lib/libcrypto.a \
+  -lz \
+  -o /opt/qmud/macos-deps/lua-modules/ssl/core.so
+
+if [[ -f "${LUASEC_SRC}/ssl.lua" ]]; then
+  cp "${LUASEC_SRC}/ssl.lua" /opt/qmud/macos-deps/lua-modules/ssl.lua
+elif [[ -f "${LUASEC_SRC_C_DIR}/ssl.lua" ]]; then
+  cp "${LUASEC_SRC_C_DIR}/ssl.lua" /opt/qmud/macos-deps/lua-modules/ssl.lua
+fi
+for name in config.lua https.lua options.lua; do
+  if [[ -f "${LUASEC_SRC_C_DIR}/${name}" ]]; then
+    cp "${LUASEC_SRC_C_DIR}/${name}" "/opt/qmud/macos-deps/lua-modules/ssl/${name}"
+  fi
+done
+if [[ -d "${LUASEC_SRC_C_DIR}/ssl" ]]; then
+  cp -R "${LUASEC_SRC_C_DIR}/ssl/." /opt/qmud/macos-deps/lua-modules/ssl/
+elif [[ -d "${LUASEC_SRC}/ssl" ]]; then
+  cp -R "${LUASEC_SRC}/ssl/." /opt/qmud/macos-deps/lua-modules/ssl/
+fi
+
 curl -fsSL "https://www.inf.puc-rio.br/~roberto/lpeg/lpeg-${LPEG_VERSION}.tar.gz" -o /tmp/qmud-src/lpeg.tar.gz
 tar -xf /tmp/qmud-src/lpeg.tar.gz -C /tmp/qmud-src
 LPEG_SRC="$(find /tmp/qmud-src -maxdepth 1 -type d -name "lpeg*${LPEG_VERSION}*" | head -n 1 || true)"
@@ -217,10 +297,15 @@ cp /opt/qmud/macos-deps/lua-modules/json.lua /opt/qmud/macos-deps/lua-modules/js
 test -f /opt/qmud/macos-deps/lua/lib/liblua.5.4.dylib
 test -f /opt/qmud/macos-deps/lua-modules/socket/core.so
 test -f /opt/qmud/macos-deps/lua-modules/mime/core.so
+test -f /opt/qmud/macos-deps/lua-modules/ssl/core.so
+test -f /opt/qmud/macos-deps/lua-modules/ssl.lua
+test -f /opt/qmud/macos-deps/openssl/include/openssl/ssl.h
+test -f /opt/qmud/macos-deps/openssl/lib/libssl.a
+test -f /opt/qmud/macos-deps/openssl/lib/libcrypto.a
 rm -rf /tmp/qmud-src
 EOF
 
-RUN LUA_VERSION="${LUA_VERSION}" LUASOCKET_VERSION="${LUASOCKET_VERSION}" LPEG_VERSION="${LPEG_VERSION}" \
+RUN LUA_VERSION="${LUA_VERSION}" LUASOCKET_VERSION="${LUASOCKET_VERSION}" LPEG_VERSION="${LPEG_VERSION}" LUASEC_VERSION="${LUASEC_VERSION}" OPENSSL_VERSION="${OPENSSL_VERSION}" \
     /usr/local/bin/build-qmud-macos-lua-deps.sh
 
 ENV QMUD_MACOS_QT_PREFIX=/opt/Qt/${QT_VERSION}/macos

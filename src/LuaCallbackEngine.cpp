@@ -8439,18 +8439,17 @@ static int luaUtilsSplit(lua_State *L)
 	const QByteArray sep(sepData, static_cast<int>(sepLen));
 	const int        count = static_cast<int>(luaL_optnumber(L, 3, 0));
 
-	if (sep.size() != 1)
-		luaL_error(L, "Separator must be a single character");
+	if (sep.isEmpty())
+		luaL_error(L, "Separator must not be empty");
 	if (count < 0)
 		luaL_error(L, "Count must be positive or zero");
 
 	lua_newtable(L);
-	const char needle = sep.at(0);
-	int        i      = 1;
-	qsizetype  start  = 0;
+	int       i     = 1;
+	qsizetype start = 0;
 	while (start <= input.size())
 	{
-		const qsizetype pos = input.indexOf(needle, start);
+		const qsizetype pos = input.indexOf(sep, start);
 		if (pos < 0 || (count != 0 && i > count))
 		{
 			const QByteArray part = input.mid(start);
@@ -8461,7 +8460,7 @@ static int luaUtilsSplit(lua_State *L)
 		const QByteArray part = input.mid(start, pos - start);
 		lua_pushlstring(L, part.constData(), part.size());
 		lua_rawseti(L, -2, i++);
-		start = pos + 1;
+		start = pos + sep.size();
 	}
 	return 1;
 }
@@ -15054,7 +15053,8 @@ static int luaGetTriggerWildcard(lua_State *L)
 		ok = runtime->triggerWildcard(name, wildcardName, value);
 	if (!ok)
 	{
-		lua_pushnil(L);
+		// MUSHclient parity: missing wildcard lookup returns empty string for Lua callers.
+		lua_pushstring(L, "");
 		return 1;
 	}
 	lua_pushstring(L, value.toLocal8Bit().constData());
@@ -15080,7 +15080,8 @@ static int luaGetAliasWildcard(lua_State *L)
 		ok = runtime->aliasWildcard(name, wildcardName, value);
 	if (!ok)
 	{
-		lua_pushnil(L);
+		// MUSHclient parity: missing wildcard lookup returns empty string for Lua callers.
+		lua_pushstring(L, "");
 		return 1;
 	}
 	lua_pushstring(L, value.toLocal8Bit().constData());

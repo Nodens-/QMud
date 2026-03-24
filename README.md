@@ -68,14 +68,19 @@ What is migrated:
 Path handling during migration normalizes legacy Windows-style paths (for
 example `C:\...`) so migrated worlds resolve correctly on the active platform.
 
-### Migration Tips
+### How to Migrate
 
-If you want to keep an as clean datadir as possible when migrating MUSHclient data,
-Move to QMud home dir only your worlds dir, scripts dir (if you have
-any custom scripts), mushclient_prefs.sqlite, mushclient.ini and any lua modules
-you may have manually placed in the lua dir. Nothing else is required.
-Always keep a backup of your original MUSHclient dir. Extensive testing has been
-done but better safe than sorry.
+1. Install/Run QMud (depending on platform) to create fresh QMud home directory.
+2. Copy your MUSHclient's lua contents into QMud/lua directory without overwritting anything. (*IF* you have placed any
+   custom lua modules there)
+3. Copy your MUSHclient scripts directory into QMud/ directory without overwritting anything. (*IF* you have placed any
+   custom scripts there)
+4. Copy your MUSHclient world directory into QMud/ without overwriting anything.
+5. Delete QMud.conf and QMud.sqlite from QMud/ directory.
+6. Copy your mushclient.ini and mushclient_prefs.sqlite to QMud/ directory.
+7. Run QMud.
+
+Always keep a copy of your original MUSHclient directory. Extensive testing has been done but better safe than sorry.
 
 ## Data directory resolution (`QMUD_HOME`)
 
@@ -146,7 +151,11 @@ Current behavior/limitations:
 - lua-socket
 - lua-json
 - lua-lpeg
--
+- lua-sec
+- patchelf (for AppImage non-docker target)
+
+Docker build images for AppImage/Windows/macOS have everything required for building already staged. The above is for
+building natively.
 
 ## Build instructions
 
