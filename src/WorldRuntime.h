@@ -4083,6 +4083,7 @@ class WorldRuntime : public QObject
 		struct SaveSnapshot
 		{
 				QString                   targetFilePath;
+				QString                   startupDirectory;
 				QString                   worldFilePath;
 				QString                   pluginsDirectory;
 				QMap<QString, QString>    worldAttributes;

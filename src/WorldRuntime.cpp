@@ -83,6 +83,7 @@
 #include <QUrl>
 #include <QtMath>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <exception>
 #include <iterator>
@@ -3646,6 +3647,22 @@ namespace
 		       key.endsWith(QStringLiteral("_sound"));
 	}
 
+	bool isCanonicalizablePathAttributeName(const QString &name)
+	{
+		const QString key = name.trimmed().toLower();
+		if (key.isEmpty())
+			return false;
+		if (key == QStringLiteral("script_filename") || key == QStringLiteral("auto_log_file_name") ||
+		    key == QStringLiteral("chat_file_save_directory") || key == QStringLiteral("sound") ||
+		    key == QStringLiteral("beep_sound") || key == QStringLiteral("new_activity_sound"))
+		{
+			return true;
+		}
+		return key.endsWith(QStringLiteral("_directory")) || key.endsWith(QStringLiteral("_file")) ||
+		       key.endsWith(QStringLiteral("_filename")) || key.endsWith(QStringLiteral("_file_name")) ||
+		       key.endsWith(QStringLiteral("_path")) || key.endsWith(QStringLiteral("_sound"));
+	}
+
 	QString normalizePathForStorage(const QString &value)
 	{
 		QString normalized = value;
@@ -3886,6 +3903,123 @@ namespace
 		if (hadTrailingSeparator && !normalized.endsWith(QLatin1Char('/')))
 			normalized += QLatin1Char('/');
 		return normalized;
+	}
+
+	QString canonicalPortableRootName(const QString &segment)
+	{
+		static constexpr std::array<const char *, 8> kPortableRoots = {"worlds", "lua",   "logs",   "plugins",
+		                                                               "sounds", "state", "backup", "docs"};
+		for (const char *root : kPortableRoots)
+		{
+			if (segment.compare(QLatin1String(root), Qt::CaseInsensitive) == 0)
+				return QString::fromLatin1(root);
+		}
+		return {};
+	}
+
+	QString extractPortableRootRelativePath(const QString &path)
+	{
+		QString normalized = normalizePathForStorage(path.trimmed());
+		if (normalized.isEmpty())
+			return {};
+		if (normalized.startsWith(QLatin1Char('/')) && normalized.size() > 3 && normalized.at(1).isLetter() &&
+		    normalized.at(2) == QLatin1Char(':'))
+		{
+			normalized.remove(0, 1);
+		}
+
+		const QStringList segments = normalized.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+		if (segments.isEmpty())
+			return {};
+
+		for (qsizetype i = 0; i < segments.size(); ++i)
+		{
+			const QString root = canonicalPortableRootName(segments.at(i));
+			if (root.isEmpty())
+				continue;
+			QStringList relativeSegments;
+			relativeSegments.reserve(segments.size() - i);
+			relativeSegments.push_back(root);
+			for (qsizetype j = i + 1; j < segments.size(); ++j)
+				relativeSegments.push_back(segments.at(j));
+			return QDir::cleanPath(relativeSegments.join(QLatin1Char('/')));
+		}
+		return {};
+	}
+
+	bool hasUrlScheme(const QString &value)
+	{
+		const QUrl url(value);
+		return url.isValid() && !url.scheme().isEmpty() && value.contains(QStringLiteral("://"));
+	}
+
+	QString toDotRelativePath(const QString &relativePath)
+	{
+		QString cleaned = normalizePathForStorage(relativePath.trimmed());
+		if (cleaned.isEmpty())
+			return {};
+		cleaned = QDir::cleanPath(cleaned);
+		while (cleaned.startsWith(QStringLiteral("./")))
+			cleaned.remove(0, 2);
+		if (cleaned.isEmpty() || cleaned == QStringLiteral("."))
+			return QStringLiteral("./");
+		if (cleaned.startsWith(QStringLiteral("../")))
+			return cleaned;
+		return QStringLiteral("./") + cleaned;
+	}
+
+	QString canonicalizePathForStorage(const QString &path, const QString &workingDir)
+	{
+		QString normalized = normalizePathForStorage(path.trimmed());
+		if (normalized.isEmpty() || hasUrlScheme(normalized))
+			return normalized;
+
+		if (const QString portableRelative = extractPortableRootRelativePath(normalized);
+		    !portableRelative.isEmpty())
+		{
+			return toDotRelativePath(portableRelative);
+		}
+
+		if (!isAbsolutePathLike(normalized))
+			return toDotRelativePath(normalized);
+
+		if (normalized.startsWith(QLatin1Char('/')) && normalized.size() > 3 && normalized.at(1).isLetter() &&
+		    normalized.at(2) == QLatin1Char(':'))
+		{
+			normalized.remove(0, 1);
+		}
+
+		QString cleanedAbsolute = QDir::cleanPath(normalized);
+		if (!workingDir.isEmpty())
+		{
+			const QString relative = QDir(workingDir).relativeFilePath(cleanedAbsolute);
+			if (!relative.isEmpty() && relative != QStringLiteral("..") &&
+			    !relative.startsWith(QStringLiteral("../")) && !QDir::isAbsolutePath(relative))
+			{
+				return toDotRelativePath(relative);
+			}
+		}
+
+		return cleanedAbsolute;
+	}
+
+	QString canonicalizePathForRuntime(const QString &path, const QString &workingDir)
+	{
+		return normalizePathForRuntime(canonicalizePathForStorage(path, workingDir));
+	}
+
+	void normalizePathAttributeMapForStorage(QMap<QString, QString> &attributes, const QString &workingDir)
+	{
+		for (auto it = attributes.begin(); it != attributes.end(); ++it)
+		{
+			if (!isCanonicalizablePathAttributeName(it.key()))
+				continue;
+			if (it.value().trimmed() == QString::fromLatin1(kNoSoundLiteral))
+				continue;
+			it.value() = canonicalizePathForStorage(it.value(), workingDir);
+			if (it.key() == QStringLiteral("auto_log_file_name"))
+				it.value() = normalizeAutoLogFileNameValue(it.value());
+		}
 	}
 
 	QString toQtDateFormat(const QString &format)
@@ -7050,6 +7184,7 @@ WorldRuntime::SaveSnapshot WorldRuntime::buildSaveSnapshot(const QString &fileNa
 {
 	SaveSnapshot snapshot;
 	snapshot.targetFilePath           = fileName.trimmed();
+	snapshot.startupDirectory         = m_startupDirectory;
 	snapshot.worldFilePath            = m_worldFilePath;
 	snapshot.pluginsDirectory         = m_pluginsDirectory;
 	snapshot.worldAttributes          = m_worldAttributes;
@@ -7311,7 +7446,70 @@ void WorldRuntime::saveWorldFileAsync(const QString                             
 
 bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *error)
 {
-	const QString trimmed = snapshot.targetFilePath.trimmed();
+	SaveSnapshot  normalizedSnapshot = snapshot;
+	const QString workingDir         = resolveWorkingDir(normalizedSnapshot.startupDirectory);
+	const QString worldDir           = normalizedSnapshot.worldFilePath.trimmed().isEmpty()
+	                                       ? QString()
+	                                       : QFileInfo(normalizedSnapshot.worldFilePath.trimmed()).absolutePath();
+	const QString pluginsDir         = normalizedSnapshot.pluginsDirectory.trimmed();
+
+	const auto    normalizePathAttributes = [&](QMap<QString, QString> &attributes)
+	{ normalizePathAttributeMapForStorage(attributes, workingDir); };
+	const auto normalizeEntryPathAttributes = [&](auto &entries)
+	{
+		for (auto &entry : entries)
+			normalizePathAttributes(entry.attributes);
+	};
+
+	normalizePathAttributes(normalizedSnapshot.worldAttributes);
+	normalizeEntryPathAttributes(normalizedSnapshot.triggers);
+	normalizeEntryPathAttributes(normalizedSnapshot.aliases);
+	normalizeEntryPathAttributes(normalizedSnapshot.timers);
+	normalizeEntryPathAttributes(normalizedSnapshot.macros);
+	normalizeEntryPathAttributes(normalizedSnapshot.variables);
+	normalizeEntryPathAttributes(normalizedSnapshot.colours);
+	normalizeEntryPathAttributes(normalizedSnapshot.keypadEntries);
+	normalizeEntryPathAttributes(normalizedSnapshot.printingStyles);
+
+	for (auto &includeEntry : normalizedSnapshot.includes)
+	{
+		QString includeName = includeEntry.attributes.value(QStringLiteral("name")).trimmed();
+		if (includeName.isEmpty())
+			continue;
+		const QString normalizedInclude = normalizePathForStorage(includeName);
+		if (!isAbsolutePathLike(normalizedInclude) && !worldDir.isEmpty())
+			includeName = QDir(worldDir).filePath(normalizedInclude);
+		includeEntry.attributes.insert(QStringLiteral("name"),
+		                               canonicalizePathForStorage(includeName, workingDir));
+	}
+
+	for (auto &plugin : normalizedSnapshot.plugins)
+	{
+		normalizePathAttributes(plugin.attributes);
+		QString source = plugin.source.trimmed();
+		if (!source.isEmpty())
+		{
+			const QString normalizedSource = normalizePathForStorage(source);
+			if (!isAbsolutePathLike(normalizedSource) && !pluginsDir.isEmpty())
+				source = QDir(pluginsDir).filePath(normalizedSource);
+			plugin.source = canonicalizePathForStorage(source, workingDir);
+		}
+
+		if (const QString sourceAttr = plugin.attributes.value(QStringLiteral("source")).trimmed();
+		    !sourceAttr.isEmpty())
+		{
+			QString rewrittenSource = sourceAttr;
+			if (const QString normalizedSource = normalizePathForStorage(sourceAttr);
+			    !isAbsolutePathLike(normalizedSource) && !pluginsDir.isEmpty())
+			{
+				rewrittenSource = QDir(pluginsDir).filePath(normalizedSource);
+			}
+			plugin.attributes.insert(QStringLiteral("source"),
+			                         canonicalizePathForStorage(rewrittenSource, workingDir));
+		}
+	}
+
+	const QString trimmed = normalizedSnapshot.targetFilePath.trimmed();
 	if (trimmed.isEmpty())
 	{
 		if (error)
@@ -7319,20 +7517,18 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 		return false;
 	}
 
-	const auto &m_worldAttributes          = snapshot.worldAttributes;
-	const auto &m_worldMultilineAttributes = snapshot.worldMultilineAttributes;
-	const auto &m_includes                 = snapshot.includes;
-	const auto &m_triggers                 = snapshot.triggers;
-	const auto &m_aliases                  = snapshot.aliases;
-	const auto &m_timers                   = snapshot.timers;
-	const auto &m_macros                   = snapshot.macros;
-	const auto &m_variables                = snapshot.variables;
-	const auto &m_colours                  = snapshot.colours;
-	const auto &m_keypadEntries            = snapshot.keypadEntries;
-	const auto &m_printingStyles           = snapshot.printingStyles;
-	const auto &m_plugins                  = snapshot.plugins;
-	const auto &m_pluginsDirectory         = snapshot.pluginsDirectory;
-	const auto &m_worldFilePath            = snapshot.worldFilePath;
+	const auto &m_worldAttributes          = normalizedSnapshot.worldAttributes;
+	const auto &m_worldMultilineAttributes = normalizedSnapshot.worldMultilineAttributes;
+	const auto &m_includes                 = normalizedSnapshot.includes;
+	const auto &m_triggers                 = normalizedSnapshot.triggers;
+	const auto &m_aliases                  = normalizedSnapshot.aliases;
+	const auto &m_timers                   = normalizedSnapshot.timers;
+	const auto &m_macros                   = normalizedSnapshot.macros;
+	const auto &m_variables                = normalizedSnapshot.variables;
+	const auto &m_colours                  = normalizedSnapshot.colours;
+	const auto &m_keypadEntries            = normalizedSnapshot.keypadEntries;
+	const auto &m_printingStyles           = normalizedSnapshot.printingStyles;
+	const auto &m_plugins                  = normalizedSnapshot.plugins;
 
 	QSaveFile   file(trimmed);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
@@ -7962,23 +8158,7 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 			out << nl << "<!-- plugins -->" << nl;
 			wrotePlugins = true;
 		}
-		const QString cleanedSource  = QDir::cleanPath(QDir::fromNativeSeparators(source));
-		QString       relativeSource = cleanedSource;
-		QString       pluginsDir     = m_pluginsDirectory;
-		if (!pluginsDir.isEmpty())
-		{
-			pluginsDir     = QDir::cleanPath(QDir::fromNativeSeparators(pluginsDir));
-			relativeSource = QDir(pluginsDir).relativeFilePath(cleanedSource);
-		}
-		else if (!m_worldFilePath.isEmpty())
-		{
-			const QString worldDir = QFileInfo(m_worldFilePath).absolutePath();
-			if (!worldDir.isEmpty())
-				relativeSource = QDir(worldDir).relativeFilePath(cleanedSource);
-		}
-		if (relativeSource.startsWith(QStringLiteral("./")))
-			relativeSource = relativeSource.mid(2);
-		source = normalizePathForStorage(relativeSource);
+		source = normalizePathForStorage(source);
 		out << "<include ";
 		saveXmlString(out, nl, "name", source, true);
 		saveXmlBoolean(out, nl, "plugin", true, true);
@@ -12155,11 +12335,15 @@ static QStringList keypadNameList()
 
 void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 {
-	m_loadingDocument = true;
-	m_worldAttributes = doc.worldAttributes();
+	m_loadingDocument        = true;
+	const QString workingDir = resolveWorkingDir(m_startupDirectory);
+	m_worldAttributes        = doc.worldAttributes();
 	for (auto it = m_worldAttributes.begin(); it != m_worldAttributes.end(); ++it)
 	{
-		if (isLikelyPathAttributeName(it.key()))
+		if (isCanonicalizablePathAttributeName(it.key()) &&
+		    it.value().trimmed() != QString::fromLatin1(kNoSoundLiteral))
+			it.value() = canonicalizePathForRuntime(it.value(), workingDir);
+		else if (isLikelyPathAttributeName(it.key()))
 			it.value() = normalizePathForRuntime(it.value());
 		if (it.key() == QStringLiteral("auto_log_file_name"))
 			it.value() = normalizeAutoLogFileNameValue(it.value());
@@ -12424,8 +12608,8 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 			m_scriptWatcher->removePaths(watched);
 		if (!scriptFile.isEmpty())
 		{
-			const QString workingDir = resolveWorkingDir(m_startupDirectory);
-			const QString path       = makeAbsolutePath(scriptFile, workingDir);
+			const QString scriptWorkingDir = resolveWorkingDir(m_startupDirectory);
+			const QString path             = makeAbsolutePath(scriptFile, scriptWorkingDir);
 			if (!path.isEmpty())
 				m_scriptWatcher->addPath(path);
 		}

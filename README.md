@@ -79,6 +79,8 @@ example `C:\...`) so migrated worlds resolve correctly on the active platform.
 5. Delete QMud.conf and QMud.sqlite from QMud/ directory.
 6. Copy your mushclient.ini and mushclient_prefs.sqlite to QMud/ directory.
 7. Run QMud.
+8. Change Terminal Type (TTYPE) in world preferences to "QMud" unless you have a reason to keep it mushclient (eg Mud
+   does some special handling on TTYPE).
 
 Always keep a copy of your original MUSHclient directory. Extensive testing has been done but better safe than sorry.
 
