@@ -18,6 +18,14 @@ option(QMUD_CI_BUILD "Mark runtime display version as CI build (-ci suffix)" OFF
 option(QMUD_RELEASE_NATIVE_OPTIMIZATIONS "Tune Release builds for the local CPU (-march=native or /arch:AVX2)" OFF)
 set(QMUD_SYSTEM_LUA_MODULES_PREFIX "" CACHE PATH
         "Optional root path for system Lua module files (socket.lua/mime.lua/ltn12.lua/socket/*.lua/json.lua/re.lua/json/)")
+set(QMUD_SYSTEM_SSL_CORE_SO "" CACHE FILEPATH
+        "Optional explicit path to system LuaSec C module (ssl/core.so or ssl.so)")
+set(QMUD_SYSTEM_SSL_LUA_FILE "" CACHE FILEPATH
+        "Optional explicit path to system LuaSec top-level Lua file (ssl.lua)")
+set(QMUD_SYSTEM_SSL_LUA_DIR "" CACHE PATH
+        "Optional explicit path to system LuaSec Lua directory (ssl/*.lua)")
+set(QMUD_SYSTEM_SOCKET_CMODULE_DIR "" CACHE PATH
+        "Optional explicit path to system LuaSocket C modules directory (socket/*.so)")
 set(QMUD_LPEG_PROVIDER "AUTO" CACHE STRING "Lua LPeg provider: AUTO or SYSTEM")
 set(QMUD_BC_PROVIDER "AUTO" CACHE STRING "Lua bc provider: AUTO, SYSTEM, or BUNDLED")
 set(QMUD_LUASOCKET_PROVIDER "AUTO" CACHE STRING "LuaSocket provider: AUTO or SYSTEM")
@@ -669,6 +677,23 @@ find_file(QMUD_SYSTEM_RE_LUA_FILE
         NO_DEFAULT_PATH
         NO_CMAKE_FIND_ROOT_PATH
 )
+if (NOT QMUD_SYSTEM_SSL_LUA_FILE)
+    find_file(QMUD_SYSTEM_SSL_LUA_FILE
+            NAMES ssl.lua
+            PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+            NO_DEFAULT_PATH
+            NO_CMAKE_FIND_ROOT_PATH
+    )
+endif ()
+if (NOT QMUD_SYSTEM_SSL_LUA_DIR)
+    find_path(QMUD_SYSTEM_SSL_LUA_DIR
+            NAMES https.lua options.lua
+            PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+            PATH_SUFFIXES ssl
+            NO_DEFAULT_PATH
+            NO_CMAKE_FIND_ROOT_PATH
+    )
+endif ()
 find_path(QMUD_SYSTEM_SOCKET_LUA_DIR
         NAMES http.lua ftp.lua smtp.lua tp.lua url.lua
         PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
@@ -677,6 +702,8 @@ find_path(QMUD_SYSTEM_SOCKET_LUA_DIR
         NO_CMAKE_FIND_ROOT_PATH
 )
 if (QMUD_SYSTEM_SOCKET_LUA_DIR)
+    file(GLOB QMUD_SYSTEM_SOCKET_ALL_LUA_FILES CONFIGURE_DEPENDS
+            "${QMUD_SYSTEM_SOCKET_LUA_DIR}/*.lua")
     find_file(QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE
             NAMES socket.lua
             PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
@@ -725,6 +752,12 @@ if (QMUD_SYSTEM_SOCKET_LUA_DIR)
             NO_DEFAULT_PATH
             NO_CMAKE_FIND_ROOT_PATH
     )
+    find_file(QMUD_SYSTEM_SOCKET_DIR_HEADERS_LUA_FILE
+            NAMES headers.lua
+            PATHS "${QMUD_SYSTEM_SOCKET_LUA_DIR}"
+            NO_DEFAULT_PATH
+            NO_CMAKE_FIND_ROOT_PATH
+    )
 endif ()
 if (NOT QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE)
     set(QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE "${QMUD_SYSTEM_SOCKET_LUA_FILE}")
@@ -743,6 +776,9 @@ if (NOT QMUD_SYSTEM_SOCKET_CORE_SO)
             NO_CMAKE_FIND_ROOT_PATH
     )
 endif ()
+if (NOT QMUD_SYSTEM_SOCKET_CMODULE_DIR AND QMUD_SYSTEM_SOCKET_CORE_SO)
+    get_filename_component(QMUD_SYSTEM_SOCKET_CMODULE_DIR "${QMUD_SYSTEM_SOCKET_CORE_SO}" DIRECTORY)
+endif ()
 if (NOT QMUD_SYSTEM_MIME_CORE_SO)
     find_file(QMUD_SYSTEM_MIME_CORE_SO
             NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
@@ -750,6 +786,38 @@ if (NOT QMUD_SYSTEM_MIME_CORE_SO)
             PATH_SUFFIXES "" mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
             NO_CMAKE_FIND_ROOT_PATH
     )
+endif ()
+if (NOT QMUD_SYSTEM_SSL_CORE_SO)
+    find_file(QMUD_SYSTEM_SSL_CORE_SO
+            NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
+            PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+            PATH_SUFFIXES ssl lua/5.4/ssl lua/5.3/ssl lua/5.2/ssl lua/5.1/ssl
+            NO_CMAKE_FIND_ROOT_PATH
+    )
+endif ()
+if (NOT QMUD_SYSTEM_SSL_CORE_SO)
+    find_file(QMUD_SYSTEM_SSL_CORE_SO
+            NAMES ssl.so
+            PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+            PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
+            NO_CMAKE_FIND_ROOT_PATH
+    )
+endif ()
+if (NOT QMUD_SYSTEM_SSL_CORE_SO AND EXISTS "/usr/lib64/lua/5.4/ssl.so")
+    set(QMUD_SYSTEM_SSL_CORE_SO "/usr/lib64/lua/5.4/ssl.so" CACHE FILEPATH
+            "Optional explicit path to system LuaSec C module (ssl/core.so or ssl.so)" FORCE)
+endif ()
+if (NOT QMUD_SYSTEM_SSL_LUA_FILE AND EXISTS "/usr/share/lua/5.4/ssl.lua")
+    set(QMUD_SYSTEM_SSL_LUA_FILE "/usr/share/lua/5.4/ssl.lua" CACHE FILEPATH
+            "Optional explicit path to system LuaSec top-level Lua file (ssl.lua)" FORCE)
+endif ()
+if (NOT QMUD_SYSTEM_SSL_LUA_DIR AND EXISTS "/usr/share/lua/5.4/ssl")
+    set(QMUD_SYSTEM_SSL_LUA_DIR "/usr/share/lua/5.4/ssl" CACHE PATH
+            "Optional explicit path to system LuaSec Lua directory (ssl/*.lua)" FORCE)
+endif ()
+if (NOT QMUD_SYSTEM_SOCKET_CMODULE_DIR AND EXISTS "/usr/lib64/lua/5.4/socket")
+    set(QMUD_SYSTEM_SOCKET_CMODULE_DIR "/usr/lib64/lua/5.4/socket" CACHE PATH
+            "Optional explicit path to system LuaSocket C modules directory (socket/*.so)" FORCE)
 endif ()
 if (EXISTS "${SKELETON_SRC}")
     file(GLOB_RECURSE SKELETON_FILES CONFIGURE_DEPENDS
@@ -777,17 +845,6 @@ if (EXISTS "${SKELETON_SRC}")
             "${QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE}")
         if (_qmud_socket_lua_file)
             list(APPEND QMUD_SYSTEM_SOCKET_TOPLEVEL_LUA_FILES "${_qmud_socket_lua_file}")
-        endif ()
-    endforeach ()
-    set(QMUD_SYSTEM_SOCKET_MODULE_LUA_FILES)
-    foreach (_qmud_socket_lua_file
-            "${QMUD_SYSTEM_SOCKET_DIR_FTP_LUA_FILE}"
-            "${QMUD_SYSTEM_SOCKET_DIR_HTTP_LUA_FILE}"
-            "${QMUD_SYSTEM_SOCKET_DIR_SMTP_LUA_FILE}"
-            "${QMUD_SYSTEM_SOCKET_DIR_TP_LUA_FILE}"
-            "${QMUD_SYSTEM_SOCKET_DIR_URL_LUA_FILE}")
-        if (_qmud_socket_lua_file)
-            list(APPEND QMUD_SYSTEM_SOCKET_MODULE_LUA_FILES "${_qmud_socket_lua_file}")
         endif ()
     endforeach ()
     if (QMUD_ENABLE_LUA_SCRIPTING)
@@ -818,6 +875,12 @@ if (EXISTS "${SKELETON_SRC}")
         if (NOT QMUD_SYSTEM_SOCKET_DIR_URL_LUA_FILE)
             message(FATAL_ERROR "System LuaSocket socket/url.lua not found.")
         endif ()
+        if (NOT QMUD_SYSTEM_SOCKET_DIR_HEADERS_LUA_FILE)
+            message(FATAL_ERROR "System LuaSocket socket/headers.lua not found.")
+        endif ()
+        if (NOT QMUD_SYSTEM_SOCKET_ALL_LUA_FILES)
+            message(FATAL_ERROR "System LuaSocket socket/*.lua files not found.")
+        endif ()
         if (NOT QMUD_SYSTEM_JSON_TOP_LUA_FILE)
             message(FATAL_ERROR "System json.lua not found.")
         endif ()
@@ -845,7 +908,7 @@ if (EXISTS "${SKELETON_SRC}")
             ${QMUD_SYSTEM_TOPLEVEL_LUA_FILES}
             ${QMUD_SYSTEM_JSON_LUA_FILES}
             ${QMUD_SYSTEM_SOCKET_TOPLEVEL_LUA_FILES}
-            ${QMUD_SYSTEM_SOCKET_MODULE_LUA_FILES}
+            ${QMUD_SYSTEM_SOCKET_ALL_LUA_FILES}
             ${QMUD_SYSTEM_SOCKET_CORE_SO}
             ${QMUD_SYSTEM_MIME_CORE_SO}
     )
@@ -920,7 +983,7 @@ if (EXISTS "${SKELETON_SRC}")
                 "$<SHELL_PATH:${SKELETON_DST}/lua/${name}>"
         )
     endforeach ()
-    foreach (f IN LISTS QMUD_SYSTEM_SOCKET_MODULE_LUA_FILES)
+    foreach (f IN LISTS QMUD_SYSTEM_SOCKET_ALL_LUA_FILES)
         get_filename_component(name "${f}" NAME)
         add_custom_command(
                 OUTPUT "${SKELETON_STAMP}"
@@ -1502,7 +1565,9 @@ if (UNIX AND NOT APPLE)
         set(QMUD_APPIMAGE_EXE_DST "${QMUD_APPIMAGE_APPDIR}/usr/bin/QMud")
         set(QMUD_APPIMAGE_SKELETON_SOCKET_DIR "${QMUD_APPIMAGE_APPDIR}/skeleton/socket")
         set(QMUD_APPIMAGE_SKELETON_MIME_DIR "${QMUD_APPIMAGE_APPDIR}/skeleton/mime")
+        set(QMUD_APPIMAGE_SKELETON_SSL_DIR "${QMUD_APPIMAGE_APPDIR}/skeleton/ssl")
         set(QMUD_APPIMAGE_SKELETON_LUA_DIR "${QMUD_APPIMAGE_APPDIR}/skeleton/lua")
+        set(QMUD_APPIMAGE_SKELETON_LUA_SSL_DIR "${QMUD_APPIMAGE_APPDIR}/skeleton/lua/ssl")
         if (QMUD_APPIMAGE_NO_STRIP)
             set(QMUD_APPIMAGE_STRIP_ENV NO_STRIP=1)
         else ()
@@ -1612,6 +1677,48 @@ if (UNIX AND NOT APPLE)
                     PATH_SUFFIXES lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
             )
         endif ()
+        set(QMUD_APPIMAGE_SOCKET_CMODULE_DIR "${QMUD_SYSTEM_SOCKET_CMODULE_DIR}")
+        if (NOT QMUD_APPIMAGE_SOCKET_CMODULE_DIR AND QMUD_APPIMAGE_SOCKET_CORE_SO)
+            get_filename_component(QMUD_APPIMAGE_SOCKET_CMODULE_DIR "${QMUD_APPIMAGE_SOCKET_CORE_SO}" DIRECTORY)
+        endif ()
+        if (QMUD_APPIMAGE_SOCKET_CMODULE_DIR)
+            file(GLOB QMUD_APPIMAGE_SOCKET_CMODULE_FILES
+                    "${QMUD_APPIMAGE_SOCKET_CMODULE_DIR}/*.so*")
+        else ()
+            set(QMUD_APPIMAGE_SOCKET_CMODULE_FILES)
+        endif ()
+        set(QMUD_APPIMAGE_SSL_CORE_SO "${QMUD_SYSTEM_SSL_CORE_SO}")
+        if (NOT QMUD_APPIMAGE_SSL_CORE_SO)
+            find_file(QMUD_APPIMAGE_SSL_CORE_SO
+                    NAMES core.so
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+                    PATH_SUFFIXES ssl lua/5.4/ssl lua/5.3/ssl lua/5.2/ssl lua/5.1/ssl
+            )
+        endif ()
+        if (NOT QMUD_APPIMAGE_SSL_CORE_SO)
+            find_file(QMUD_APPIMAGE_SSL_CORE_SO
+                    NAMES ssl.so
+                    PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+                    PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
+            )
+        endif ()
+
+        set(QMUD_APPIMAGE_SSL_LUA_FILE "${QMUD_SYSTEM_SSL_LUA_FILE}")
+        if (NOT QMUD_APPIMAGE_SSL_LUA_FILE)
+            find_file(QMUD_APPIMAGE_SSL_LUA_FILE
+                    NAMES ssl.lua
+                    PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+            )
+        endif ()
+
+        set(QMUD_APPIMAGE_SSL_LUA_DIR "${QMUD_SYSTEM_SSL_LUA_DIR}")
+        if (NOT QMUD_APPIMAGE_SSL_LUA_DIR)
+            find_path(QMUD_APPIMAGE_SSL_LUA_DIR
+                    NAMES https.lua options.lua
+                    PATHS ${QMUD_SYSTEM_LUA_SEARCH_PATHS}
+                    PATH_SUFFIXES ssl
+            )
+        endif ()
 
         if (NOT QMUD_APPIMAGE_LPEG_SO)
             message(FATAL_ERROR "System lpeg.so not found; AppImage packaging requires system LPeg.")
@@ -1621,6 +1728,15 @@ if (UNIX AND NOT APPLE)
         endif ()
         if (NOT QMUD_APPIMAGE_MIME_CORE_SO)
             message(FATAL_ERROR "System LuaSocket mime/core.so not found; AppImage packaging requires system LuaSocket.")
+        endif ()
+        if (NOT QMUD_APPIMAGE_SSL_CORE_SO)
+            message(FATAL_ERROR "System LuaSec C module (ssl/core.so or ssl.so) not found; AppImage packaging requires system LuaSec.")
+        endif ()
+        if (NOT QMUD_APPIMAGE_SSL_LUA_FILE)
+            message(FATAL_ERROR "System LuaSec ssl.lua not found; AppImage packaging requires system LuaSec.")
+        endif ()
+        if (NOT QMUD_APPIMAGE_SSL_LUA_DIR)
+            message(FATAL_ERROR "System LuaSec ssl/*.lua directory not found; AppImage packaging requires system LuaSec.")
         endif ()
         if (NOT QMUD_LUA_LIBRARY_FILES)
             message(WARNING "Lua shared library path was not resolved; AppImage may miss liblua in usr/lib.")
@@ -1669,6 +1785,8 @@ if (UNIX AND NOT APPLE)
                         COMMAND ${CMAKE_COMMAND} -E make_directory "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_LUA_DIR}>"
                         COMMAND ${CMAKE_COMMAND} -E make_directory "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_SOCKET_DIR}>"
                         COMMAND ${CMAKE_COMMAND} -E make_directory "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_MIME_DIR}>"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_SSL_DIR}>"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_LUA_SSL_DIR}>"
                 )
             endif ()
             add_custom_command(TARGET AppImage POST_BUILD
@@ -1741,6 +1859,32 @@ if (UNIX AND NOT APPLE)
                         "$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}/usr/lib>"
                 )
             endif ()
+            if (QMUD_SYSTEM_SOCKET_LUA_DIR)
+                add_custom_command(TARGET AppImage POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E echo "Staging LuaSocket socket/*.lua into AppDir skeleton/socket"
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "$<SHELL_PATH:${QMUD_SYSTEM_SOCKET_LUA_DIR}>"
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_SOCKET_DIR}>"
+                )
+            endif ()
+            if (QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE AND QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE AND QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE)
+                add_custom_command(TARGET AppImage POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E echo "Staging LuaSocket top-level Lua files into AppDir skeleton/lua"
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "$<SHELL_PATH:${QMUD_SYSTEM_SOCKET_DIR_SOCKET_LUA_FILE}>"
+                        "$<SHELL_PATH:${QMUD_SYSTEM_SOCKET_DIR_LTN12_LUA_FILE}>"
+                        "$<SHELL_PATH:${QMUD_SYSTEM_SOCKET_DIR_MIME_LUA_FILE}>"
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_LUA_DIR}>"
+                )
+            endif ()
+            if (QMUD_APPIMAGE_SOCKET_CMODULE_FILES)
+                add_custom_command(TARGET AppImage POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E echo "Staging LuaSocket C modules into AppDir skeleton/socket"
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        ${QMUD_APPIMAGE_SOCKET_CMODULE_FILES}
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_SOCKET_DIR}>"
+                )
+            endif ()
             if (QMUD_APPIMAGE_SOCKET_CORE_SO)
                 add_custom_command(TARGET AppImage POST_BUILD
                         COMMAND ${CMAKE_COMMAND} -E echo "Staging LuaSocket socket/core.so into AppDir skeleton"
@@ -1765,6 +1909,36 @@ if (UNIX AND NOT APPLE)
                         "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_LUA_DIR}/lpeg.so>"
                 )
             endif ()
+            if (QMUD_APPIMAGE_SSL_LUA_DIR)
+                add_custom_command(TARGET AppImage POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E echo "Staging LuaSec ssl/*.lua into AppDir skeleton"
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SSL_LUA_DIR}>"
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_SSL_DIR}>"
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SSL_LUA_DIR}>"
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_LUA_SSL_DIR}>"
+                )
+            endif ()
+            if (QMUD_APPIMAGE_SSL_LUA_FILE)
+                add_custom_command(TARGET AppImage POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E echo "Staging LuaSec ssl.lua into AppDir skeleton/lua"
+                        COMMAND ${CMAKE_COMMAND} -E copy
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SSL_LUA_FILE}>"
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_LUA_DIR}/ssl.lua>"
+                )
+            endif ()
+            if (QMUD_APPIMAGE_SSL_CORE_SO)
+                add_custom_command(TARGET AppImage POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E echo "Staging LuaSec C module into AppDir skeleton/ssl and skeleton/lua/ssl"
+                        COMMAND ${CMAKE_COMMAND} -E copy
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SSL_CORE_SO}>"
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_SSL_DIR}/core.so>"
+                        COMMAND ${CMAKE_COMMAND} -E copy
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SSL_CORE_SO}>"
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_LUA_SSL_DIR}/core.so>"
+                )
+            endif ()
             add_custom_command(TARGET AppImage POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E echo "Collecting transitive runtime libraries into AppDir/usr/lib and AppDir/usr/glibc"
                     COMMAND ${CMAKE_COMMAND} -E env
@@ -1773,8 +1947,10 @@ if (UNIX AND NOT APPLE)
                     "$<SHELL_PATH:${QMUD_APPIMAGE_COLLECT_RUNTIME_SCRIPT}>"
                     "$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}>"
                     "$<SHELL_PATH:${QMUD_APPIMAGE_EXE_DST}>"
+                    ${QMUD_APPIMAGE_SOCKET_CMODULE_FILES}
                     "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_SOCKET_DIR}/core.so>"
                     "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_MIME_DIR}/core.so>"
+                    "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_SSL_DIR}/core.so>"
                     "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_LUA_DIR}/lpeg.so>"
             )
             add_custom_command(TARGET AppImage POST_BUILD

@@ -28,6 +28,7 @@ RUN dnf -y upgrade && \
       mingw64-gcc \
       mingw64-gcc-c++ \
       mingw64-headers \
+      mingw64-openssl \
       mingw-nsis-base \
       mingw32-nsis \
       mingw64-nsis \
@@ -67,6 +68,7 @@ RUN aqt install-qt -O /opt/Qt windows desktop "${QT_VERSION}" "${QT_ARCH}" -m qt
 ARG LUA_VERSION=5.4.7
 ARG LUASOCKET_VERSION=3.1.0
 ARG LPEG_VERSION=1.1.0
+ARG LUASEC_VERSION=1.3.2
 
 RUN cat > /usr/local/bin/build-qmud-windows-lua-deps.sh <<'EOF' && chmod +x /usr/local/bin/build-qmud-windows-lua-deps.sh
 #!/usr/bin/env bash
@@ -75,6 +77,7 @@ set -euxo pipefail
 LUA_VERSION="${LUA_VERSION:?LUA_VERSION not set}"
 LUASOCKET_VERSION="${LUASOCKET_VERSION:?LUASOCKET_VERSION not set}"
 LPEG_VERSION="${LPEG_VERSION:?LPEG_VERSION not set}"
+LUASEC_VERSION="${LUASEC_VERSION:?LUASEC_VERSION not set}"
 
 LUA_CC="${LUA_CC:-x86_64-w64-mingw32-gcc}"
 if ! command -v "${LUA_CC}" >/dev/null 2>&1; then
@@ -84,7 +87,7 @@ fi
 
 mkdir -p /tmp/qmud-src
 mkdir -p /opt/qmud/windows-deps/lua/include /opt/qmud/windows-deps/lua/lib /opt/qmud/windows-deps/lua/bin
-mkdir -p /opt/qmud/windows-deps/lua-modules/socket /opt/qmud/windows-deps/lua-modules/mime /opt/qmud/windows-deps/lua-modules/json
+mkdir -p /opt/qmud/windows-deps/lua-modules/socket /opt/qmud/windows-deps/lua-modules/mime /opt/qmud/windows-deps/lua-modules/json /opt/qmud/windows-deps/lua-modules/ssl
 
 curl -fsSL "https://www.lua.org/ftp/lua-${LUA_VERSION}.tar.gz" -o /tmp/qmud-src/lua.tar.gz
 tar -xf /tmp/qmud-src/lua.tar.gz -C /tmp/qmud-src
@@ -156,6 +159,60 @@ done
 copy_socket_lua_file socket || true
 copy_socket_lua_file mbox || true
 
+curl -fsSL "https://github.com/brunoos/luasec/archive/refs/tags/v${LUASEC_VERSION}.tar.gz" -o /tmp/qmud-src/luasec.tar.gz || \
+curl -fsSL "https://github.com/brunoos/luasec/archive/refs/tags/${LUASEC_VERSION}.tar.gz" -o /tmp/qmud-src/luasec.tar.gz
+tar -xf /tmp/qmud-src/luasec.tar.gz -C /tmp/qmud-src
+LUASEC_SRC="$(find /tmp/qmud-src -maxdepth 1 -type d -name "luasec*${LUASEC_VERSION}*" | head -n 1 || true)"
+[[ -n "${LUASEC_SRC}" ]]
+LUASEC_SRC_C_DIR="${LUASEC_SRC}/src"
+[[ -d "${LUASEC_SRC_C_DIR}" ]]
+cd "${LUASEC_SRC_C_DIR}"
+LUASEC_C_SOURCES=""
+for src in config.c context.c ec.c options.c ssl.c x509.c; do
+  if [[ -f "${src}" ]]; then
+    LUASEC_C_SOURCES="${LUASEC_C_SOURCES} ${src}"
+  fi
+done
+if [[ -z "${LUASEC_C_SOURCES}" ]]; then
+  echo "Error: could not resolve LuaSec C sources in ${LUASEC_SRC_C_DIR}" >&2
+  exit 1
+fi
+LUASEC_SOCKET_SOURCES=""
+for src in luasocket/buffer.c luasocket/io.c luasocket/timeout.c luasocket/wsocket.c; do
+  if [[ -f "${src}" ]]; then
+    LUASEC_SOCKET_SOURCES="${LUASEC_SOCKET_SOURCES} ${src}"
+  fi
+done
+if [[ -z "${LUASEC_SOCKET_SOURCES}" ]]; then
+  echo "Error: could not resolve bundled LuaSocket sources in ${LUASEC_SRC_C_DIR}/luasocket" >&2
+  exit 1
+fi
+"${LUA_CC}" -O2 -shared -Wl,--export-all-symbols \
+  -I/opt/qmud/windows-deps/lua/include \
+  -I"${LUASEC_SRC_C_DIR}" \
+  -I/usr/x86_64-w64-mingw32/sys-root/mingw/include \
+  ${LUASEC_C_SOURCES} ${LUASEC_SOCKET_SOURCES} \
+  -o /opt/qmud/windows-deps/lua-modules/ssl/core.dll \
+  -L/opt/qmud/windows-deps/lua/lib \
+  -L/usr/x86_64-w64-mingw32/sys-root/mingw/lib \
+  -llua54 -lssl -lcrypto -lws2_32 -lcrypt32 -lgdi32
+
+if [[ -f "${LUASEC_SRC}/ssl.lua" ]]; then
+  cp "${LUASEC_SRC}/ssl.lua" /opt/qmud/windows-deps/lua-modules/ssl.lua
+elif [[ -f "${LUASEC_SRC_C_DIR}/ssl.lua" ]]; then
+  cp "${LUASEC_SRC_C_DIR}/ssl.lua" /opt/qmud/windows-deps/lua-modules/ssl.lua
+fi
+for name in config.lua https.lua options.lua; do
+  if [[ -f "${LUASEC_SRC_C_DIR}/${name}" ]]; then
+    cp "${LUASEC_SRC_C_DIR}/${name}" "/opt/qmud/windows-deps/lua-modules/ssl/${name}"
+  fi
+done
+if [[ -d "${LUASEC_SRC_C_DIR}/ssl" ]]; then
+  cp -R "${LUASEC_SRC_C_DIR}/ssl/." /opt/qmud/windows-deps/lua-modules/ssl/
+elif [[ -d "${LUASEC_SRC}/ssl" ]]; then
+  cp -R "${LUASEC_SRC}/ssl/." /opt/qmud/windows-deps/lua-modules/ssl/
+fi
+
 curl -fsSL "https://www.inf.puc-rio.br/~roberto/lpeg/lpeg-${LPEG_VERSION}.tar.gz" -o /tmp/qmud-src/lpeg.tar.gz
 tar -xf /tmp/qmud-src/lpeg.tar.gz -C /tmp/qmud-src
 LPEG_SRC="$(find /tmp/qmud-src -maxdepth 1 -type d -name "lpeg*${LPEG_VERSION}*" | head -n 1 || true)"
@@ -183,11 +240,13 @@ cp /opt/qmud/windows-deps/lua-modules/json.lua /opt/qmud/windows-deps/lua-module
 test -f /opt/qmud/windows-deps/lua/bin/lua54.dll
 test -f /opt/qmud/windows-deps/lua-modules/socket/core.dll
 test -f /opt/qmud/windows-deps/lua-modules/mime/core.dll
+test -f /opt/qmud/windows-deps/lua-modules/ssl/core.dll
+test -f /opt/qmud/windows-deps/lua-modules/ssl.lua
 test -f /opt/qmud/windows-deps/lua-modules/lpeg.dll
 rm -rf /tmp/qmud-src
 EOF
 
-RUN LUA_VERSION="${LUA_VERSION}" LUASOCKET_VERSION="${LUASOCKET_VERSION}" LPEG_VERSION="${LPEG_VERSION}" \
+RUN LUA_VERSION="${LUA_VERSION}" LUASOCKET_VERSION="${LUASOCKET_VERSION}" LPEG_VERSION="${LPEG_VERSION}" LUASEC_VERSION="${LUASEC_VERSION}" \
     /usr/local/bin/build-qmud-windows-lua-deps.sh
 
 ENV QMUD_WINDOWS_QT_PREFIX=/opt/Qt/${QT_VERSION}/mingw_64

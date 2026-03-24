@@ -4138,8 +4138,6 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 			{
 				if ((line[x] & 0x00FFFFFF) == (keyRgb & 0x00FFFFFF))
 					line[x] &= 0x00FFFFFF;
-				else
-					line[x] |= 0xFF000000;
 			}
 		}
 		return image;

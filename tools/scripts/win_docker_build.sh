@@ -187,6 +187,8 @@ if [ ! -f "$BUILD_DIR/mime/core.dll" ]; then
 fi
 cp "$BUILD_DIR/mime/core.dll" "$STAGE_DIR/mime/core.dll"
 
+mkdir -p "$STAGE_DIR/ssl" "$STAGE_DIR/lua/ssl"
+
 for name in socket.lua ltn12.lua mime.lua; do
   if [ ! -f "$BUILD_DIR/lua/$name" ]; then
     echo "Error: expected generated LuaSocket Lua file at $BUILD_DIR/lua/$name, but it was not found." >&2
@@ -195,18 +197,23 @@ for name in socket.lua ltn12.lua mime.lua; do
   cp "$BUILD_DIR/lua/$name" "$STAGE_DIR/lua/$name"
 done
 
-for name in ftp.lua http.lua smtp.lua tp.lua url.lua; do
-  if [ ! -f "$BUILD_DIR/socket/$name" ]; then
-    echo "Error: expected generated LuaSocket Lua file at $BUILD_DIR/socket/$name, but it was not found." >&2
-    exit 1
-  fi
-  cp "$BUILD_DIR/socket/$name" "$STAGE_DIR/socket/$name"
+set -- "$BUILD_DIR"/socket/*.lua
+if [ ! -f "$1" ]; then
+  echo "Error: expected generated LuaSocket Lua files at $BUILD_DIR/socket/*.lua, but none were found." >&2
+  exit 1
+fi
+for socket_lua in "$BUILD_DIR"/socket/*.lua; do
+  cp "$socket_lua" "$STAGE_DIR/socket/$(basename "$socket_lua")"
 done
+if [ ! -f "$STAGE_DIR/socket/headers.lua" ]; then
+  echo "Error: staged LuaSocket modules are missing headers.lua in $STAGE_DIR/socket." >&2
+  exit 1
+fi
 
 if [ -f "$LUA_MODULES_PREFIX/lpeg.dll" ]; then
   cp "$LUA_MODULES_PREFIX/lpeg.dll" "$STAGE_DIR/lua/lpeg.dll"
 fi
-for name in json.lua re.lua; do
+for name in json.lua re.lua ssl.lua; do
   if [ -f "$LUA_MODULES_PREFIX/$name" ]; then
     cp "$LUA_MODULES_PREFIX/$name" "$STAGE_DIR/lua/$name"
   fi
@@ -214,6 +221,20 @@ done
 if [ -d "$LUA_MODULES_PREFIX/json" ]; then
   mkdir -p "$STAGE_DIR/lua/json"
   cp -R "$LUA_MODULES_PREFIX/json/." "$STAGE_DIR/lua/json/"
+fi
+if [ ! -f "$LUA_MODULES_PREFIX/ssl/core.dll" ]; then
+  echo "Error: expected LuaSec core module at $LUA_MODULES_PREFIX/ssl/core.dll, but it was not found." >&2
+  exit 1
+fi
+cp "$LUA_MODULES_PREFIX/ssl/core.dll" "$STAGE_DIR/ssl/core.dll"
+cp "$LUA_MODULES_PREFIX/ssl/core.dll" "$STAGE_DIR/lua/ssl/core.dll"
+if [ -d "$LUA_MODULES_PREFIX/ssl" ]; then
+  cp -R "$LUA_MODULES_PREFIX/ssl/." "$STAGE_DIR/ssl/"
+  cp -R "$LUA_MODULES_PREFIX/ssl/." "$STAGE_DIR/lua/ssl/"
+fi
+if [ ! -f "$STAGE_DIR/lua/ssl.lua" ]; then
+  echo "Error: expected LuaSec top-level module ssl.lua at $LUA_MODULES_PREFIX/ssl.lua, but it was not found." >&2
+  exit 1
 fi
 
 cmake -E rm -f "$STAGE_ROOT/$PACKAGE_NAME.zip"

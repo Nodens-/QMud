@@ -165,9 +165,15 @@ fi
 cp "$QMUD_MAC_DOCKER_LUA_PREFIX/lib/liblua.5.4.dylib" "$APP_FRAMEWORKS_DIR/"
 cp "$QMUD_MAC_DOCKER_LUA_PREFIX/lib/liblua.dylib" "$APP_FRAMEWORKS_DIR/"
 
-mkdir -p "$APP_MACOS_DIR/socket" "$APP_MACOS_DIR/mime" "$APP_MACOS_DIR/lua/json"
+mkdir -p "$APP_MACOS_DIR/socket" "$APP_MACOS_DIR/mime" "$APP_MACOS_DIR/ssl" "$APP_MACOS_DIR/lua/json" "$APP_MACOS_DIR/lua/ssl"
 cp "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/socket/core.so" "$APP_MACOS_DIR/socket/core.so"
 cp "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/mime/core.so" "$APP_MACOS_DIR/mime/core.so"
+if [ ! -f "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl/core.so" ]; then
+  echo "Error: expected LuaSec core module at $QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl/core.so, but it was not found." >&2
+  exit 1
+fi
+cp "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl/core.so" "$APP_MACOS_DIR/ssl/core.so"
+cp "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl/core.so" "$APP_MACOS_DIR/lua/ssl/core.so"
 
 if [ -f "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/lpeg.so" ]; then
   cp "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/lpeg.so" "$APP_MACOS_DIR/lua/lpeg.so"
@@ -184,9 +190,19 @@ fi
 if [ -f "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ltn12.lua" ]; then
   cp "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ltn12.lua" "$APP_MACOS_DIR/lua/ltn12.lua"
 fi
+if [ -f "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl.lua" ]; then
+  cp "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl.lua" "$APP_MACOS_DIR/lua/ssl.lua"
+else
+  echo "Error: expected LuaSec top-level module ssl.lua at $QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl.lua, but it was not found." >&2
+  exit 1
+fi
 if [ -f "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/json.lua" ]; then
   cp "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/json.lua" "$APP_MACOS_DIR/lua/json.lua"
 fi
 if [ -d "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/json" ]; then
   cp -R "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/json/." "$APP_MACOS_DIR/lua/json/"
+fi
+if [ -d "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl" ]; then
+  cp -R "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl/." "$APP_MACOS_DIR/ssl/"
+  cp -R "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl/." "$APP_MACOS_DIR/lua/ssl/"
 fi

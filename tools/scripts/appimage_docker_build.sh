@@ -29,6 +29,14 @@ lua_find_module() {
   "$LUA_BIN" -e "local p = package.searchpath('${module}', package.cpath); if p then io.write(p) end" 2>/dev/null || true
 }
 
+lua_find_lua_file() {
+  module="$1"
+  if [ -z "$LUA_BIN" ]; then
+    return 0
+  fi
+  "$LUA_BIN" -e "local p = package.searchpath('${module}', package.path); if p then io.write(p) end" 2>/dev/null || true
+}
+
 find_first() {
   pattern="$1"
   shift
@@ -47,6 +55,11 @@ find_first() {
 LPEG_SO="$(lua_find_module 'lpeg')"
 SOCKET_CORE_SO="$(lua_find_module 'socket.core')"
 MIME_CORE_SO="$(lua_find_module 'mime.core')"
+SSL_CORE_SO="$(lua_find_module 'ssl.core')"
+SOCKET_LUA_FILE="$(lua_find_lua_file 'socket')"
+MIME_LUA_FILE="$(lua_find_lua_file 'mime')"
+LTN12_LUA_FILE="$(lua_find_lua_file 'ltn12')"
+SSL_LUA_FILE="$(lua_find_lua_file 'ssl')"
 
 if [ -z "$LPEG_SO" ]; then
   LPEG_SO="$(find_first '*/lua/*/lpeg.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
@@ -57,12 +70,76 @@ fi
 if [ -z "$MIME_CORE_SO" ]; then
   MIME_CORE_SO="$(find_first '*/lua/*/mime/core.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
 fi
+if [ -z "$SSL_CORE_SO" ]; then
+  SSL_CORE_SO="$(find_first '*/lua/*/ssl/core.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
+fi
+if [ -z "$SSL_CORE_SO" ]; then
+  SSL_CORE_SO="$(find_first '*/lua/*/ssl.so' /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib || true)"
+fi
+if [ -z "$SOCKET_LUA_FILE" ]; then
+  SOCKET_LUA_FILE="$(find_first '*/lua/*/socket.lua' /usr/share /usr/local/share || true)"
+fi
+if [ -z "$MIME_LUA_FILE" ]; then
+  MIME_LUA_FILE="$(find_first '*/lua/*/mime.lua' /usr/share /usr/local/share || true)"
+fi
+if [ -z "$LTN12_LUA_FILE" ]; then
+  LTN12_LUA_FILE="$(find_first '*/lua/*/ltn12.lua' /usr/share /usr/local/share || true)"
+fi
+if [ -z "$SSL_LUA_FILE" ]; then
+  SSL_LUA_FILE="$(find_first '*/lua/*/ssl.lua' /usr/share /usr/local/share || true)"
+fi
 
-if [ -z "$LPEG_SO" ] || [ -z "$SOCKET_CORE_SO" ] || [ -z "$MIME_CORE_SO" ]; then
+SOCKET_CMODULE_DIR=""
+if [ -n "$SOCKET_CORE_SO" ]; then
+  SOCKET_CMODULE_DIR="$(dirname "$SOCKET_CORE_SO")"
+fi
+
+SOCKET_LUA_DIR=""
+if [ -n "$SOCKET_LUA_FILE" ]; then
+  SOCKET_LUA_BASE="$(dirname "$SOCKET_LUA_FILE")"
+  if [ -d "$SOCKET_LUA_BASE/socket" ]; then
+    SOCKET_LUA_DIR="$SOCKET_LUA_BASE/socket"
+  fi
+fi
+if [ -z "$SOCKET_LUA_DIR" ]; then
+  SOCKET_LUA_DIR="$(find_first '*/lua/*/socket/headers.lua' /usr/share /usr/local/share | sed -E 's#/headers\.lua$##' || true)"
+fi
+
+SSL_LUA_DIR=""
+if [ -n "$SSL_LUA_FILE" ]; then
+  SSL_LUA_BASE="$(dirname "$SSL_LUA_FILE")"
+  if [ -d "$SSL_LUA_BASE/ssl" ]; then
+    SSL_LUA_DIR="$SSL_LUA_BASE/ssl"
+  fi
+fi
+if [ -z "$SSL_LUA_DIR" ]; then
+  SSL_LUA_DIR="$(find_first '*/lua/*/ssl/https.lua' /usr/share /usr/local/share | sed -E 's#/https\.lua$##' || true)"
+fi
+
+if [ -z "$LPEG_SO" ] || [ -z "$SOCKET_CORE_SO" ] || [ -z "$MIME_CORE_SO" ] || [ -z "$SSL_CORE_SO" ]; then
   echo "Failed to resolve required Lua module shared objects for AppImage build." >&2
   echo "lpeg.so=$LPEG_SO" >&2
   echo "socket/core.so=$SOCKET_CORE_SO" >&2
   echo "mime/core.so=$MIME_CORE_SO" >&2
+  echo "ssl/core.so or ssl.so=$SSL_CORE_SO" >&2
+  exit 1
+fi
+if [ -z "$SOCKET_LUA_FILE" ] || [ -z "$MIME_LUA_FILE" ] || [ -z "$LTN12_LUA_FILE" ] || [ -z "$SOCKET_LUA_DIR" ]; then
+  echo "Failed to resolve required LuaSocket Lua files for AppImage build." >&2
+  echo "socket.lua=$SOCKET_LUA_FILE" >&2
+  echo "mime.lua=$MIME_LUA_FILE" >&2
+  echo "ltn12.lua=$LTN12_LUA_FILE" >&2
+  echo "socket/*.lua dir=$SOCKET_LUA_DIR" >&2
+  exit 1
+fi
+if [ ! -f "$SOCKET_LUA_DIR/headers.lua" ]; then
+  echo "Failed to resolve LuaSocket headers.lua in $SOCKET_LUA_DIR." >&2
+  exit 1
+fi
+if [ -z "$SSL_LUA_FILE" ] || [ -z "$SSL_LUA_DIR" ]; then
+  echo "Failed to resolve required LuaSec Lua files for AppImage build." >&2
+  echo "ssl.lua=$SSL_LUA_FILE" >&2
+  echo "ssl/*.lua dir=$SSL_LUA_DIR" >&2
   exit 1
 fi
 
@@ -105,6 +182,14 @@ chmod 0755 "$LINUXDEPLOY_PLUGIN_APPIMAGE"
   -DQMUD_SYSTEM_LUA_MODULES_PREFIX="$QMUD_MODULE_ROOT" \
   -DQMUD_SYSTEM_LPEG_SO="$LPEG_SO" \
   -DQMUD_SYSTEM_SOCKET_CORE_SO="$SOCKET_CORE_SO" \
-  -DQMUD_SYSTEM_MIME_CORE_SO="$MIME_CORE_SO"
+  -DQMUD_SYSTEM_MIME_CORE_SO="$MIME_CORE_SO" \
+  -DQMUD_SYSTEM_SOCKET_LUA_FILE="$SOCKET_LUA_FILE" \
+  -DQMUD_SYSTEM_MIME_LUA_FILE="$MIME_LUA_FILE" \
+  -DQMUD_SYSTEM_LTN12_LUA_FILE="$LTN12_LUA_FILE" \
+  -DQMUD_SYSTEM_SOCKET_LUA_DIR="$SOCKET_LUA_DIR" \
+  -DQMUD_SYSTEM_SOCKET_CMODULE_DIR="$SOCKET_CMODULE_DIR" \
+  -DQMUD_SYSTEM_SSL_CORE_SO="$SSL_CORE_SO" \
+  -DQMUD_SYSTEM_SSL_LUA_FILE="$SSL_LUA_FILE" \
+  -DQMUD_SYSTEM_SSL_LUA_DIR="$SSL_LUA_DIR"
 
 CCACHE_DISABLE=1 cmake --build "$BUILD_DIR" --target AppImage -j 6

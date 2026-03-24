@@ -22,6 +22,7 @@ RUN dnf -y upgrade && \
       lua \
       lua-devel \
       lua-json \
+      lua-sec \
       lua-lpeg \
       lua-socket \
       make \

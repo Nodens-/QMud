@@ -219,6 +219,25 @@ if not module then
     return env
   end
 end
+
+-- Legacy Mushclient scripts often expect require("json") to expose global json.
+-- Preserve compatibility by auto-exporting simple module names to _G when missing.
+if require and not rawget(_G, "__qmud_require_compat_wrapped") then
+  local _require = require
+  function require(name)
+    local mod = _require(name)
+    if type(name) == "string"
+      and name:match("^[%a_][%w_]*$")
+      and rawget(_G, name) == nil then
+      local t = type(mod)
+      if t == "table" or t == "function" or t == "userdata" then
+        rawset(_G, name, mod)
+      end
+    end
+    return mod
+  end
+  rawset(_G, "__qmud_require_compat_wrapped", true)
+end
 )lua";
 
 	if (luaL_dostring(L, kCompatScript) != 0)
