@@ -85,4 +85,7 @@ class tst_EncodingUtils : public QObject
 
 QTEST_APPLESS_MAIN(tst_EncodingUtils)
 
+
+#if __has_include("tst_EncodingUtils.moc")
 #include "tst_EncodingUtils.moc"
+#endif

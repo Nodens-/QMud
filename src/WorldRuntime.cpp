@@ -8,6 +8,7 @@
  */
 
 #include "WorldRuntime.h"
+
 #include "AnsiSgrParseUtils.h"
 #include "AppController.h"
 #include "Blending.h"
@@ -34,6 +35,7 @@
 #include "WorldSocket.h"
 #include "WorldView.h"
 #include "scripting/ScriptingErrors.h"
+
 #include <QApplication>
 #include <QBuffer>
 #include <QClipboard>
@@ -83,6 +85,7 @@
 #include <QUrl>
 #include <QtMath>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <exception>
 #include <iterator>
@@ -2891,22 +2894,84 @@ namespace
 	QMap<QByteArray, QByteArray> mergeAttributeDefaultsBytes(const QByteArray         &defaults,
 	                                                         const QList<MxpArgument> &provided)
 	{
-		QMap<QByteArray, QByteArray> merged;
-		if (!defaults.isEmpty())
+		QMap<QByteArray, QByteArray> merged = buildArgumentTableBytes(provided);
+		if (defaults.isEmpty())
+			return merged;
+
+		const QByteArray         tag            = QByteArray("tag ") + defaults;
+		ParsedMxpArguments const parsedDefaults = parseMxpArguments(tag);
+		int                      sequence       = 0;
+
+		for (const MxpArgument &attribute : parsedDefaults.args)
 		{
-			const QByteArray         tag            = QByteArray("tag ") + defaults;
-			ParsedMxpArguments const parsedDefaults = parseMxpArguments(tag);
-			merged                                  = buildArgumentTableBytes(parsedDefaults.args);
+			++sequence;
+			QByteArray nameKey;
+			QByteArray defaultValue;
+			if (attribute.name.isEmpty())
+			{
+				nameKey = attribute.value.toLocal8Bit().trimmed().toLower();
+			}
+			else
+			{
+				nameKey      = attribute.name.toLocal8Bit().trimmed().toLower();
+				defaultValue = attribute.value.toLocal8Bit();
+			}
+			if (nameKey.isEmpty())
+				continue;
+
+			QByteArray positionalValue;
+			QByteArray namedValue;
+			bool       hasPositionalValue = false;
+			bool       hasNamedValue      = false;
+			for (const MxpArgument &providedArg : provided)
+			{
+				if (!providedArg.name.isEmpty() &&
+				    providedArg.name.compare(QString::fromLocal8Bit(nameKey), Qt::CaseInsensitive) == 0)
+				{
+					namedValue    = providedArg.value.toLocal8Bit();
+					hasNamedValue = true;
+					break;
+				}
+				if (!hasPositionalValue && providedArg.position == sequence)
+				{
+					positionalValue    = providedArg.value.toLocal8Bit();
+					hasPositionalValue = true;
+				}
+			}
+
+			QByteArray replacement = hasNamedValue        ? namedValue
+			                         : hasPositionalValue ? positionalValue
+			                                              : defaultValue;
+
+			merged.insert(nameKey, replacement);
+			merged.insert(QByteArray::number(sequence), replacement);
 		}
-		const QMap<QByteArray, QByteArray> providedTable = buildArgumentTableBytes(provided);
-		for (auto it = providedTable.constBegin(); it != providedTable.constEnd(); ++it)
-			merged.insert(it.key(), it.value());
+
 		return merged;
 	}
 
 	QByteArray resolveDefinitionEntities(const QByteArray &source, const QMap<QByteArray, QByteArray> &values,
 	                                     const TelnetProcessor &telnet)
 	{
+		auto decodeNumericEntity = [](const QByteArray &name, QByteArray &decoded) -> bool
+		{
+			if (!name.startsWith('#'))
+				return false;
+			bool     ok   = false;
+			uint32_t code = 0;
+			if (name.size() > 2 && (name.at(1) == 'x' || name.at(1) == 'X'))
+				code = name.mid(2).toUInt(&ok, 16);
+			else
+				code = name.mid(1).toUInt(&ok, 10);
+			if (!ok || code > 0x10FFFFu)
+				return false;
+			QString out;
+			out.reserve(2);
+			out.append(QChar::fromUcs4(code));
+			decoded = out.toUtf8();
+			return !decoded.isEmpty();
+		};
+
 		QByteArray output;
 		output.reserve(source.size());
 		for (qsizetype i = 0; i < source.size(); ++i)
@@ -2938,7 +3003,7 @@ namespace
 			else
 			{
 				QByteArray resolved;
-				if (telnet.resolveEntityValue(name, resolved))
+				if (decodeNumericEntity(name, resolved) || telnet.resolveEntityValue(name, resolved))
 					output.append(resolved);
 				else
 				{
@@ -3076,6 +3141,47 @@ namespace
 		const bool nawsEnabled    = isEnabledFlag(attrs.value(QStringLiteral("naws")));
 		config.wrapColumn         = attrs.value(QStringLiteral("wrap_column")).toInt();
 		config.enabled            = wrapEnabled && !autoWrapWindow && config.wrapColumn > 0 && !nawsEnabled;
+		const QString indentValue = attrs.value(QStringLiteral("indent_paras"));
+		config.indentParas        = !(indentValue == QStringLiteral("0") ||
+                               indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+                               indentValue.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+		return config;
+	}
+
+	FixedColumnWrapConfig fixedColumnWrapConfigIgnoringNaws(const QMap<QString, QString> &attrs)
+	{
+		FixedColumnWrapConfig config;
+		const bool            wrapEnabled = isEnabledFlag(attrs.value(QStringLiteral("wrap")));
+		const bool autoWrapWindow = isEnabledFlag(attrs.value(QStringLiteral("auto_wrap_window_width")));
+		config.wrapColumn         = attrs.value(QStringLiteral("wrap_column")).toInt();
+		config.enabled            = wrapEnabled && !autoWrapWindow && config.wrapColumn > 0;
+		const QString indentValue = attrs.value(QStringLiteral("indent_paras"));
+		config.indentParas        = !(indentValue == QStringLiteral("0") ||
+                               indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+                               indentValue.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+		return config;
+	}
+
+	FixedColumnWrapConfig adaptiveWrapConfig(const QMap<QString, QString> &attrs, int effectiveColumns)
+	{
+		FixedColumnWrapConfig config;
+		const bool            wrapEnabled = isEnabledFlag(attrs.value(QStringLiteral("wrap")));
+		if (!wrapEnabled)
+			return config;
+
+		const bool autoWrapWindow = isEnabledFlag(attrs.value(QStringLiteral("auto_wrap_window_width")));
+		if (!autoWrapWindow)
+		{
+			const int configuredWrapColumn = attrs.value(QStringLiteral("wrap_column")).toInt();
+			if (configuredWrapColumn > 0)
+			{
+				effectiveColumns = effectiveColumns > 0 ? qMin(effectiveColumns, configuredWrapColumn)
+				                                        : configuredWrapColumn;
+			}
+		}
+
+		config.wrapColumn         = effectiveColumns;
+		config.enabled            = config.wrapColumn > 0;
 		const QString indentValue = attrs.value(QStringLiteral("indent_paras"));
 		config.indentParas        = !(indentValue == QStringLiteral("0") ||
                                indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
@@ -3543,7 +3649,17 @@ namespace
 
 	QString fixHtmlString(const QString &source)
 	{
-		QString   strOldString = source;
+		QString cleaned;
+		cleaned.reserve(source.size());
+		for (const QChar ch : source)
+		{
+			const ushort code = ch.unicode();
+			if (code < 0x20 && code != 0x09 && code != 0x0A && code != 0x0D)
+				continue;
+			cleaned += ch;
+		}
+
+		QString   strOldString = cleaned;
 		QString   strNewString;
 
 		qsizetype i;
@@ -3580,7 +3696,17 @@ namespace
 
 	QString fixHtmlMultilineString(const QString &source)
 	{
-		QString   strOldString = source;
+		QString cleaned;
+		cleaned.reserve(source.size());
+		for (const QChar ch : source)
+		{
+			const ushort code = ch.unicode();
+			if (code < 0x20 && code != 0x09 && code != 0x0A && code != 0x0D)
+				continue;
+			cleaned += ch;
+		}
+
+		QString   strOldString = cleaned;
 		QString   strNewString;
 
 		qsizetype i;
@@ -3644,6 +3770,22 @@ namespace
 		return key.contains(QStringLiteral("file")) || key.contains(QStringLiteral("directory")) ||
 		       key.contains(QStringLiteral("path")) || key == QStringLiteral("sound") ||
 		       key.endsWith(QStringLiteral("_sound"));
+	}
+
+	bool isCanonicalizablePathAttributeName(const QString &name)
+	{
+		const QString key = name.trimmed().toLower();
+		if (key.isEmpty())
+			return false;
+		if (key == QStringLiteral("script_filename") || key == QStringLiteral("auto_log_file_name") ||
+		    key == QStringLiteral("chat_file_save_directory") || key == QStringLiteral("sound") ||
+		    key == QStringLiteral("beep_sound") || key == QStringLiteral("new_activity_sound"))
+		{
+			return true;
+		}
+		return key.endsWith(QStringLiteral("_directory")) || key.endsWith(QStringLiteral("_file")) ||
+		       key.endsWith(QStringLiteral("_filename")) || key.endsWith(QStringLiteral("_file_name")) ||
+		       key.endsWith(QStringLiteral("_path")) || key.endsWith(QStringLiteral("_sound"));
 	}
 
 	QString normalizePathForStorage(const QString &value)
@@ -3886,6 +4028,165 @@ namespace
 		if (hadTrailingSeparator && !normalized.endsWith(QLatin1Char('/')))
 			normalized += QLatin1Char('/');
 		return normalized;
+	}
+
+	QString canonicalPortableRootName(const QString &segment)
+	{
+		static constexpr std::array<const char *, 8> kPortableRoots = {"worlds", "lua",   "logs",   "plugins",
+		                                                               "sounds", "state", "backup", "docs"};
+		for (const char *root : kPortableRoots)
+		{
+			if (segment.compare(QLatin1String(root), Qt::CaseInsensitive) == 0)
+				return QString::fromLatin1(root);
+		}
+		return {};
+	}
+
+	QString collapseLeadingDuplicatePortableRoot(const QString &relativePath)
+	{
+		QString     cleaned  = QDir::cleanPath(relativePath);
+		QStringList segments = cleaned.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+		if (segments.size() < 2)
+			return cleaned;
+
+		const QString root = canonicalPortableRootName(segments.at(0));
+		if (root.isEmpty())
+			return cleaned;
+
+		// Guard against accidentally duplicated portable-root prefixes such as
+		// "worlds/worlds/..." or "worlds/plugins/worlds/plugins/..."
+		// introduced by legacy path rewrites.
+		auto prefixesMatch = [&segments](const int startA, const int startB, const int count) -> bool
+		{
+			for (int i = 0; i < count; ++i)
+			{
+				if (segments.at(startA + i).compare(segments.at(startB + i), Qt::CaseInsensitive) != 0)
+					return false;
+			}
+			return true;
+		};
+
+		bool collapsed = true;
+		while (collapsed)
+		{
+			collapsed              = false;
+			const int maxPrefixLen = safeQSizeToInt(segments.size() / 2);
+			for (int prefixLen = maxPrefixLen; prefixLen >= 1; --prefixLen)
+			{
+				if (!prefixesMatch(0, prefixLen, prefixLen))
+					continue;
+				for (int removeIndex = 0; removeIndex < prefixLen; ++removeIndex)
+					segments.removeAt(prefixLen);
+				collapsed = true;
+				break;
+			}
+		}
+		return QDir::cleanPath(segments.join(QLatin1Char('/')));
+	}
+
+	QString extractPortableRootRelativePath(const QString &path)
+	{
+		QString normalized = normalizePathForStorage(path.trimmed());
+		if (normalized.isEmpty())
+			return {};
+		if (normalized.startsWith(QLatin1Char('/')) && normalized.size() > 3 && normalized.at(1).isLetter() &&
+		    normalized.at(2) == QLatin1Char(':'))
+		{
+			normalized.remove(0, 1);
+		}
+
+		const QStringList segments = normalized.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+		if (segments.isEmpty())
+			return {};
+
+		for (qsizetype i = 0; i < segments.size(); ++i)
+		{
+			const QString root = canonicalPortableRootName(segments.at(i));
+			if (root.isEmpty())
+				continue;
+			QStringList relativeSegments;
+			relativeSegments.reserve(segments.size() - i);
+			relativeSegments.push_back(root);
+			for (qsizetype j = i + 1; j < segments.size(); ++j)
+				relativeSegments.push_back(segments.at(j));
+			return collapseLeadingDuplicatePortableRoot(relativeSegments.join(QLatin1Char('/')));
+		}
+		return {};
+	}
+
+	bool hasUrlScheme(const QString &value)
+	{
+		const QUrl url(value);
+		return url.isValid() && !url.scheme().isEmpty() && value.contains(QStringLiteral("://"));
+	}
+
+	QString toDotRelativePath(const QString &relativePath)
+	{
+		QString cleaned = normalizePathForStorage(relativePath.trimmed());
+		if (cleaned.isEmpty())
+			return {};
+		cleaned = QDir::cleanPath(cleaned);
+		while (cleaned.startsWith(QStringLiteral("./")))
+			cleaned.remove(0, 2);
+		if (cleaned.isEmpty() || cleaned == QStringLiteral("."))
+			return QStringLiteral("./");
+		if (cleaned.startsWith(QStringLiteral("../")))
+			return cleaned;
+		return QStringLiteral("./") + cleaned;
+	}
+
+	QString canonicalizePathForStorage(const QString &path, const QString &workingDir)
+	{
+		QString normalized = normalizePathForStorage(path.trimmed());
+		if (normalized.isEmpty() || hasUrlScheme(normalized))
+			return normalized;
+
+		if (const QString portableRelative = extractPortableRootRelativePath(normalized);
+		    !portableRelative.isEmpty())
+		{
+			return toDotRelativePath(portableRelative);
+		}
+
+		if (!isAbsolutePathLike(normalized))
+			return toDotRelativePath(normalized);
+
+		if (normalized.startsWith(QLatin1Char('/')) && normalized.size() > 3 && normalized.at(1).isLetter() &&
+		    normalized.at(2) == QLatin1Char(':'))
+		{
+			normalized.remove(0, 1);
+		}
+
+		QString cleanedAbsolute = QDir::cleanPath(normalized);
+		if (!workingDir.isEmpty())
+		{
+			const QString relative = QDir(workingDir).relativeFilePath(cleanedAbsolute);
+			if (!relative.isEmpty() && relative != QStringLiteral("..") &&
+			    !relative.startsWith(QStringLiteral("../")) && !QDir::isAbsolutePath(relative))
+			{
+				return toDotRelativePath(relative);
+			}
+		}
+
+		return cleanedAbsolute;
+	}
+
+	QString canonicalizePathForRuntime(const QString &path, const QString &workingDir)
+	{
+		return normalizePathForRuntime(canonicalizePathForStorage(path, workingDir));
+	}
+
+	void normalizePathAttributeMapForStorage(QMap<QString, QString> &attributes, const QString &workingDir)
+	{
+		for (auto it = attributes.begin(); it != attributes.end(); ++it)
+		{
+			if (!isCanonicalizablePathAttributeName(it.key()))
+				continue;
+			if (it.value().trimmed() == QString::fromLatin1(kNoSoundLiteral))
+				continue;
+			it.value() = canonicalizePathForStorage(it.value(), workingDir);
+			if (it.key() == QStringLiteral("auto_log_file_name"))
+				it.value() = normalizeAutoLogFileNameValue(it.value());
+		}
 	}
 
 	QString toQtDateFormat(const QString &format)
@@ -4236,6 +4537,13 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 
 WorldRuntime::~WorldRuntime()
 {
+	if (m_viewDestroyedConnection)
+	{
+		QObject::disconnect(m_viewDestroyedConnection);
+		m_viewDestroyedConnection = QMetaObject::Connection{};
+	}
+	m_view = nullptr;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (plugin.lua && hasValidPluginId(plugin))
@@ -5320,8 +5628,13 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 
 		auto applyMxpModeBarrier = [&](const TelnetProcessor::MxpModeChange &modeChange)
 		{
-			auto isLockedMode = [](const int mode) { return mode == 2 || mode == 7; };
-			if (modeChange.newMode != 3 && !isLockedMode(modeChange.newMode))
+			auto       isLockedMode = [](const int mode) { return mode == 2 || mode == 7; };
+			auto       isOpenMode   = [](const int mode) { return mode == 0 || mode == 5; };
+			const bool closeOpenTagsForModeTransition =
+			    isOpenMode(modeChange.oldMode) && !isOpenMode(modeChange.newMode);
+			const bool resetOrLockedTransition = modeChange.newMode == 3 || isLockedMode(modeChange.newMode);
+
+			if (!closeOpenTagsForModeTransition && !resetOrLockedTransition)
 				return;
 
 			m_mxpOpenTags.clear();
@@ -5526,15 +5839,6 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			return lookupAtomicTagInfo(tag, info);
 		};
 
-		auto isTrackableTag = [](const QByteArray &tag)
-		{
-			return tag == "send" || tag == "a" || tag == "bold" || tag == "b" || tag == "strong" ||
-			       tag == "underline" || tag == "u" || tag == "italic" || tag == "i" || tag == "em" ||
-			       tag == "strike" || tag == "s" || tag == "color" || tag == "c" || tag == "font" ||
-			       tag == "high" || tag == "h" || tag == "tt" || tag == "samp" || tag == "pre" ||
-			       tag == "center" || tag == "ul" || tag == "ol" || tag == "li" || tag == "var" || tag == "v";
-		};
-
 		int modeChangeIndex = 0;
 
 		for (const TelnetProcessor::MxpEvent &ev : sorted)
@@ -5598,7 +5902,9 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 				if (!hasCustomElement && !hasAtomicTag)
 				{
 					mxpError(DBG_ERROR, errMXP_UnknownElement,
-					         QStringLiteral("Unknown MXP element: <%1>").arg(tagText));
+					         QStringLiteral("Unknown MXP element: <%1> (custom elements loaded: %2)")
+					             .arg(tagText)
+					             .arg(m_telnet.customElementCount()));
 					continue;
 				}
 				if (hasAtomicTag && atomicInfo.puebloOnly && !m_telnet.isPuebloActive())
@@ -5655,17 +5961,22 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 				if (isAtomicTag(tag))
 					argsForScript = buildArgumentString(parsed.args);
 
-				const QString pluginOpenPayload = QStringLiteral("%1,%2").arg(tagText, argsForScript);
-				if (!callPluginCallbacksStopOnFalse(QStringLiteral("OnPluginMXPopenTag"), pluginOpenPayload))
-					continue;
-
-				if (!openTagCallback.isEmpty() && m_luaCallbacks && tag != "afk")
+				// MUSHclient parity: MXP open-tag callbacks are only invoked for
+				// user-defined tags, not built-in atomic command/style tags.
+				if (hasCustomElement)
 				{
-					const QMap<QString, QString> argumentTable = buildArgumentTable(parsed.args);
-					const bool suppress = m_luaCallbacks->callMxpStartTag(openTagCallback, tagText,
-					                                                      argsForScript, argumentTable);
-					if (suppress)
+					const QString pluginOpenPayload = QStringLiteral("%1,%2").arg(tagText, argsForScript);
+					if (!callPluginCallbacksStopOnFalse(QStringLiteral("OnPluginMXPopenTag"),
+					                                    pluginOpenPayload))
 						continue;
+					if (!openTagCallback.isEmpty() && m_luaCallbacks && tag != "afk")
+					{
+						const QMap<QString, QString> argumentTable = buildArgumentTable(parsed.args);
+						const bool suppress = m_luaCallbacks->callMxpStartTag(openTagCallback, tagText,
+						                                                      argsForScript, argumentTable);
+						if (suppress)
+							continue;
+					}
 				}
 
 				if (!tagIsCommand)
@@ -5681,8 +5992,6 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 
 				QVector<QByteArray>                   customTagSequence;
 				QVector<QMap<QByteArray, QByteArray>> customTagAttributes;
-				QVector<QMap<QString, QString>>       customTagArgTables;
-				QVector<QString>                      customTagArgs;
 				if (hasCustomElement)
 				{
 					const QMap<QByteArray, QByteArray> mergedDefaults =
@@ -5701,22 +6010,17 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 							continue;
 						if (!isAtomicTag(tagName))
 							continue;
-						QMap<QString, QString> const       argTable = buildArgumentTable(defParsed.args);
-						QMap<QByteArray, QByteArray> const attrMap  = buildArgumentTableBytes(defParsed.args);
+						QMap<QByteArray, QByteArray> const attrMap = buildArgumentTableBytes(defParsed.args);
 						customTagSequence.push_back(tagName);
 						customTagAttributes.push_back(attrMap);
-						customTagArgTables.push_back(argTable);
-						customTagArgs.push_back(buildArgumentString(defParsed.args));
 					}
 				}
 
-				bool const trackable = isTrackableTag(tag) && !tagIsCommand;
+				bool const trackable = !tagIsCommand;
 				if (tagIsCommand)
 				{
 					customTagSequence.clear();
 					customTagAttributes.clear();
-					customTagArgTables.clear();
-					customTagArgs.clear();
 				}
 
 				if (!customTagSequence.isEmpty())
@@ -5724,24 +6028,8 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 					QVector<QByteArray> appliedCloseTags;
 					for (int i = 0; i < customTagSequence.size(); ++i)
 					{
-						const QByteArray                  &childTag     = customTagSequence.at(i);
-						const QString                      childTagText = QString::fromLatin1(childTag);
-						const QMap<QByteArray, QByteArray> childAttrs   = customTagAttributes.value(i);
-						const QString                      argsForChild = customTagArgs.value(i);
-
-						const QString                      childPluginOpenPayload =
-						    QStringLiteral("%1,%2").arg(childTagText, argsForChild);
-						if (!callPluginCallbacksStopOnFalse(QStringLiteral("OnPluginMXPopenTag"),
-						                                    childPluginOpenPayload))
-							continue;
-						if (!openTagCallback.isEmpty() && m_luaCallbacks && childTag != "afk")
-						{
-							const QMap<QString, QString> argumentTable = customTagArgTables.value(i);
-							const bool                   suppress      = m_luaCallbacks->callMxpStartTag(
-                                openTagCallback, childTagText, argsForChild, argumentTable);
-							if (suppress)
-								continue;
-						}
+						const QByteArray                  &childTag   = customTagSequence.at(i);
+						const QMap<QByteArray, QByteArray> childAttrs = customTagAttributes.value(i);
 						applyStartTag(childTag, childAttrs);
 						if (mxpTrackingReset)
 							break;
@@ -6224,23 +6512,11 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 			}
 			else if (ev.type == TelnetProcessor::MxpEvent::EndTag)
 			{
-				QByteArray                         closeTag     = tag;
-				const bool                         endMxpSecure = ev.secure;
-				TelnetProcessor::CustomElementInfo endCustomInfo;
-				if (m_telnet.getCustomElementInfo(tag, endCustomInfo))
-				{
-					const QMap<QByteArray, QByteArray> mergedDefaults =
-					    mergeAttributeDefaultsBytes(endCustomInfo.attributes, {});
-					QByteArray const resolvedDefinition =
-					    resolveDefinitionEntities(endCustomInfo.definition, mergedDefaults, m_telnet);
-					QMap<QByteArray, QByteArray> aliasAttributes;
-					QByteArray                   aliasTag;
-					if (parseDefinitionAlias(resolvedDefinition, aliasTag, aliasAttributes))
-						closeTag = aliasTag;
-				}
+				const QByteArray &closeTag     = tag;
+				const bool        endMxpSecure = ev.secure;
 
-				int  openMatchIndex       = -1;
-				bool closeBlockedBySecure = false;
+				int               openMatchIndex       = -1;
+				bool              closeBlockedBySecure = false;
 				for (int i = safeQSizeToInt(m_mxpOpenTags.size()) - 1; i >= 0; --i)
 				{
 					const MxpOpenTag &openTag = m_mxpOpenTags.at(i);
@@ -7050,6 +7326,7 @@ WorldRuntime::SaveSnapshot WorldRuntime::buildSaveSnapshot(const QString &fileNa
 {
 	SaveSnapshot snapshot;
 	snapshot.targetFilePath           = fileName.trimmed();
+	snapshot.startupDirectory         = m_startupDirectory;
 	snapshot.worldFilePath            = m_worldFilePath;
 	snapshot.pluginsDirectory         = m_pluginsDirectory;
 	snapshot.worldAttributes          = m_worldAttributes;
@@ -7311,7 +7588,73 @@ void WorldRuntime::saveWorldFileAsync(const QString                             
 
 bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *error)
 {
-	const QString trimmed = snapshot.targetFilePath.trimmed();
+	SaveSnapshot  normalizedSnapshot = snapshot;
+	const QString workingDir         = resolveWorkingDir(normalizedSnapshot.startupDirectory);
+	const QString worldDir           = normalizedSnapshot.worldFilePath.trimmed().isEmpty()
+	                                       ? QString()
+	                                       : QFileInfo(normalizedSnapshot.worldFilePath.trimmed()).absolutePath();
+	const QString pluginsDir         = normalizedSnapshot.pluginsDirectory.trimmed();
+
+	const auto    normalizePathAttributes = [&](QMap<QString, QString> &attributes)
+	{ normalizePathAttributeMapForStorage(attributes, workingDir); };
+	const auto normalizeEntryPathAttributes = [&](auto &entries)
+	{
+		for (auto &entry : entries)
+			normalizePathAttributes(entry.attributes);
+	};
+
+	normalizePathAttributes(normalizedSnapshot.worldAttributes);
+	normalizeEntryPathAttributes(normalizedSnapshot.triggers);
+	normalizeEntryPathAttributes(normalizedSnapshot.aliases);
+	normalizeEntryPathAttributes(normalizedSnapshot.timers);
+	normalizeEntryPathAttributes(normalizedSnapshot.macros);
+	normalizeEntryPathAttributes(normalizedSnapshot.variables);
+	normalizeEntryPathAttributes(normalizedSnapshot.colours);
+	normalizeEntryPathAttributes(normalizedSnapshot.keypadEntries);
+	normalizeEntryPathAttributes(normalizedSnapshot.printingStyles);
+
+	for (auto &includeEntry : normalizedSnapshot.includes)
+	{
+		QString includeName = includeEntry.attributes.value(QStringLiteral("name")).trimmed();
+		if (includeName.isEmpty())
+			continue;
+		const QString normalizedInclude = normalizePathForStorage(includeName);
+		const bool    hasPortableRoot   = !extractPortableRootRelativePath(normalizedInclude).isEmpty();
+		if (!isAbsolutePathLike(normalizedInclude) && !hasPortableRoot && !worldDir.isEmpty())
+			includeName = QDir(worldDir).filePath(normalizedInclude);
+		includeEntry.attributes.insert(QStringLiteral("name"),
+		                               canonicalizePathForStorage(includeName, workingDir));
+	}
+
+	for (auto &plugin : normalizedSnapshot.plugins)
+	{
+		normalizePathAttributes(plugin.attributes);
+		QString source = plugin.source.trimmed();
+		if (!source.isEmpty())
+		{
+			const QString normalizedSource = normalizePathForStorage(source);
+			const bool    hasPortableRoot  = !extractPortableRootRelativePath(normalizedSource).isEmpty();
+			if (!isAbsolutePathLike(normalizedSource) && !hasPortableRoot && !pluginsDir.isEmpty())
+				source = QDir(pluginsDir).filePath(normalizedSource);
+			plugin.source = canonicalizePathForStorage(source, workingDir);
+		}
+
+		if (const QString sourceAttr = plugin.attributes.value(QStringLiteral("source")).trimmed();
+		    !sourceAttr.isEmpty())
+		{
+			QString rewrittenSource = sourceAttr;
+			if (const QString normalizedSource = normalizePathForStorage(sourceAttr);
+			    !isAbsolutePathLike(normalizedSource) &&
+			    extractPortableRootRelativePath(normalizedSource).isEmpty() && !pluginsDir.isEmpty())
+			{
+				rewrittenSource = QDir(pluginsDir).filePath(normalizedSource);
+			}
+			plugin.attributes.insert(QStringLiteral("source"),
+			                         canonicalizePathForStorage(rewrittenSource, workingDir));
+		}
+	}
+
+	const QString trimmed = normalizedSnapshot.targetFilePath.trimmed();
 	if (trimmed.isEmpty())
 	{
 		if (error)
@@ -7319,20 +7662,17 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 		return false;
 	}
 
-	const auto &m_worldAttributes          = snapshot.worldAttributes;
-	const auto &m_worldMultilineAttributes = snapshot.worldMultilineAttributes;
-	const auto &m_includes                 = snapshot.includes;
-	const auto &m_triggers                 = snapshot.triggers;
-	const auto &m_aliases                  = snapshot.aliases;
-	const auto &m_timers                   = snapshot.timers;
-	const auto &m_macros                   = snapshot.macros;
-	const auto &m_variables                = snapshot.variables;
-	const auto &m_colours                  = snapshot.colours;
-	const auto &m_keypadEntries            = snapshot.keypadEntries;
-	const auto &m_printingStyles           = snapshot.printingStyles;
-	const auto &m_plugins                  = snapshot.plugins;
-	const auto &m_pluginsDirectory         = snapshot.pluginsDirectory;
-	const auto &m_worldFilePath            = snapshot.worldFilePath;
+	const auto &m_worldAttributes          = normalizedSnapshot.worldAttributes;
+	const auto &m_worldMultilineAttributes = normalizedSnapshot.worldMultilineAttributes;
+	const auto &m_triggers                 = normalizedSnapshot.triggers;
+	const auto &m_aliases                  = normalizedSnapshot.aliases;
+	const auto &m_timers                   = normalizedSnapshot.timers;
+	const auto &m_macros                   = normalizedSnapshot.macros;
+	const auto &m_variables                = normalizedSnapshot.variables;
+	const auto &m_colours                  = normalizedSnapshot.colours;
+	const auto &m_keypadEntries            = normalizedSnapshot.keypadEntries;
+	const auto &m_printingStyles           = normalizedSnapshot.printingStyles;
+	const auto &m_plugins                  = normalizedSnapshot.plugins;
 
 	QSaveFile   file(trimmed);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
@@ -7357,18 +7697,6 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 	out << "<!-- Written by Panagiotis Kalogiratos -->" << nl;
 	out << "<!-- Home Page: https://github.com/Nodens-/QMud -->" << nl;
 	out << "<qmud>" << nl;
-
-	for (const auto &inc : m_includes)
-	{
-		if (isEnabledFlag(inc.attributes.value(QStringLiteral("plugin"))))
-			continue;
-		const QString name = normalizePathForStorage(inc.attributes.value(QStringLiteral("name")).trimmed());
-		if (name.isEmpty())
-			continue;
-		out << "<include ";
-		saveXmlString(out, nl, "name", name, true);
-		out << "/>" << nl;
-	}
 
 	out << "<world" << nl;
 	saveXmlString(out, nl, "qmud_version", QString::fromLatin1(kVersionString));
@@ -7962,26 +8290,13 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 			out << nl << "<!-- plugins -->" << nl;
 			wrotePlugins = true;
 		}
-		const QString cleanedSource  = QDir::cleanPath(QDir::fromNativeSeparators(source));
-		QString       relativeSource = cleanedSource;
-		QString       pluginsDir     = m_pluginsDirectory;
-		if (!pluginsDir.isEmpty())
-		{
-			pluginsDir     = QDir::cleanPath(QDir::fromNativeSeparators(pluginsDir));
-			relativeSource = QDir(pluginsDir).relativeFilePath(cleanedSource);
-		}
-		else if (!m_worldFilePath.isEmpty())
-		{
-			const QString worldDir = QFileInfo(m_worldFilePath).absolutePath();
-			if (!worldDir.isEmpty())
-				relativeSource = QDir(worldDir).relativeFilePath(cleanedSource);
-		}
-		if (relativeSource.startsWith(QStringLiteral("./")))
-			relativeSource = relativeSource.mid(2);
-		source = normalizePathForStorage(relativeSource);
+		source = normalizePathForStorage(source);
 		out << "<include ";
 		saveXmlString(out, nl, "name", source, true);
 		saveXmlBoolean(out, nl, "plugin", true, true);
+		if (!isEnabledFlag(plugin.attributes.value(QStringLiteral("enabled"))) &&
+		    plugin.attributes.contains(QStringLiteral("enabled")))
+			out << "enabled=\"n\" ";
 		out << "/>" << nl;
 	}
 
@@ -8264,8 +8579,15 @@ const WorldRuntime::TextRectangleSettings &WorldRuntime::textRectangle() const
 void WorldRuntime::setTextRectangle(const TextRectangleSettings &settings)
 {
 	m_textRectangle = settings;
+	++m_suppressWorldOutputResizedCallbacks;
 	if (WorldView *view = this->view())
+	{
+		view->updateWrapMargin();
 		view->update();
+	}
+	updateTelnetWindowSizeForNaws();
+	if (m_suppressWorldOutputResizedCallbacks > 0)
+		--m_suppressWorldOutputResizedCallbacks;
 }
 
 QList<int> WorldRuntime::udpPortList() const
@@ -11199,8 +11521,12 @@ void WorldRuntime::outputText(const QString &text, bool note, bool newLine)
 	const int log  = note ? (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_notes"))) ? 1 : 0)
 	                      : (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_output"))) ? 1 : 0);
 	firePluginScreendraw(type, log, text);
-	QString displayText = text;
-	if (const FixedColumnWrapConfig wrapConfig = fixedColumnWrapConfig(m_worldAttributes);
+	QString    displayText         = text;
+	const bool useAdaptiveNoteWrap = note && isConnected() && m_telnet.isNawsNegotiated();
+	if (const FixedColumnWrapConfig wrapConfig =
+	        useAdaptiveNoteWrap ? adaptiveWrapConfig(m_worldAttributes, m_telnet.windowColumns())
+	                            : (note ? fixedColumnWrapConfigIgnoringNaws(m_worldAttributes)
+	                                    : fixedColumnWrapConfig(m_worldAttributes));
 	    wrapConfig.enabled && !displayText.isEmpty())
 		wrapPlainLineForColumn(displayText, wrapConfig.wrapColumn, wrapConfig.indentParas);
 	emit outputRequested(displayText, newLine, note);
@@ -11215,9 +11541,13 @@ void WorldRuntime::outputStyledText(const QString &text, const QVector<StyleSpan
 	const int log  = note ? (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_notes"))) ? 1 : 0)
 	                      : (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_output"))) ? 1 : 0);
 	firePluginScreendraw(type, log, text);
-	QString            displayText  = text;
-	QVector<StyleSpan> displaySpans = spans;
-	if (const FixedColumnWrapConfig wrapConfig = fixedColumnWrapConfig(m_worldAttributes);
+	QString            displayText         = text;
+	QVector<StyleSpan> displaySpans        = spans;
+	const bool         useAdaptiveNoteWrap = note && isConnected() && m_telnet.isNawsNegotiated();
+	if (const FixedColumnWrapConfig wrapConfig =
+	        useAdaptiveNoteWrap ? adaptiveWrapConfig(m_worldAttributes, m_telnet.windowColumns())
+	                            : (note ? fixedColumnWrapConfigIgnoringNaws(m_worldAttributes)
+	                                    : fixedColumnWrapConfig(m_worldAttributes));
 	    wrapConfig.enabled && !displayText.isEmpty())
 	{
 		if (displaySpans.isEmpty())
@@ -11236,8 +11566,11 @@ void WorldRuntime::prepareInputEchoForDisplay(QString &text, QVector<StyleSpan> 
 	if (!isEnabledFlag(m_worldAttributes.value(QStringLiteral("wrap"))))
 		return;
 
-	int wrapColumn = m_telnet.windowColumns();
-	if (!isEnabledFlag(m_worldAttributes.value(QStringLiteral("auto_wrap_window_width"))))
+	const bool nawsNegotiated = m_telnet.isNawsNegotiated();
+	const bool autoWrapWindow =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("auto_wrap_window_width")));
+	int wrapColumn = nawsNegotiated ? m_telnet.windowColumns() : 0;
+	if (!autoWrapWindow)
 	{
 		const int configuredWrapColumn = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
 		if (configuredWrapColumn > 0)
@@ -11267,9 +11600,13 @@ void WorldRuntime::outputAnsiText(const QString &text, bool note)
 {
 	if (text.isEmpty())
 		return;
-	const FixedColumnWrapConfig wrapConfig = fixedColumnWrapConfig(m_worldAttributes);
+	const bool                  useAdaptiveNoteWrap = note && isConnected() && m_telnet.isNawsNegotiated();
+	const FixedColumnWrapConfig wrapConfig =
+	    useAdaptiveNoteWrap ? adaptiveWrapConfig(m_worldAttributes, m_telnet.windowColumns())
+	                        : (note ? fixedColumnWrapConfigIgnoringNaws(m_worldAttributes)
+	                                : fixedColumnWrapConfig(m_worldAttributes));
 
-	auto                        parseColorValue = [](const QString &value) -> QColor
+	auto parseColorValue = [](const QString &value) -> QColor
 	{
 		if (value.isEmpty())
 			return {};
@@ -11879,6 +12216,8 @@ void WorldRuntime::notifyMiniWindowMouseMoved(int x, int y, const QString &windo
 void WorldRuntime::notifyWorldOutputResized()
 {
 	updateTelnetWindowSizeForNaws();
+	if (m_suppressWorldOutputResizedCallbacks > 0)
+		return;
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginWorldOutputResized"));
 }
 
@@ -12155,11 +12494,15 @@ static QStringList keypadNameList()
 
 void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 {
-	m_loadingDocument = true;
-	m_worldAttributes = doc.worldAttributes();
+	m_loadingDocument        = true;
+	const QString workingDir = resolveWorkingDir(m_startupDirectory);
+	m_worldAttributes        = doc.worldAttributes();
 	for (auto it = m_worldAttributes.begin(); it != m_worldAttributes.end(); ++it)
 	{
-		if (isLikelyPathAttributeName(it.key()))
+		if (isCanonicalizablePathAttributeName(it.key()) &&
+		    it.value().trimmed() != QString::fromLatin1(kNoSoundLiteral))
+			it.value() = canonicalizePathForRuntime(it.value(), workingDir);
+		else if (isLikelyPathAttributeName(it.key()))
 			it.value() = normalizePathForRuntime(it.value());
 		if (it.key() == QStringLiteral("auto_log_file_name"))
 			it.value() = normalizeAutoLogFileNameValue(it.value());
@@ -12319,32 +12662,42 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 		rp.global                 = isEnabledFlag(rp.attributes.value(QStringLiteral("global")));
 		rp.saveState              = isEnabledFlag(rp.attributes.value(QStringLiteral("save_state")));
 		const QString enabledFlag = rp.attributes.value(QStringLiteral("enabled"));
-		rp.enabled                = enabledFlag.isEmpty() ? true : isEnabledFlag(enabledFlag);
+		const bool    requestedEnabled = enabledFlag.isEmpty() ? true : isEnabledFlag(enabledFlag);
+		rp.enabled                     = requestedEnabled;
 		for (const auto &t : p.triggers)
 		{
 			Trigger rt;
-			rt.attributes = t.attributes;
-			rt.children   = t.children;
-			rt.included   = t.included;
+			rt.attributes                 = t.attributes;
+			rt.children                   = t.children;
+			rt.included                   = t.included;
+			const bool hasExplicitEnabled = rt.attributes.contains(QStringLiteral("enabled"));
 			applyTriggerDefaults(rt);
+			if (!hasExplicitEnabled)
+				rt.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
 			rp.triggers.push_back(rt);
 		}
 		for (const auto &a : p.aliases)
 		{
 			Alias ra;
-			ra.attributes = a.attributes;
-			ra.children   = a.children;
-			ra.included   = a.included;
+			ra.attributes                 = a.attributes;
+			ra.children                   = a.children;
+			ra.included                   = a.included;
+			const bool hasExplicitEnabled = ra.attributes.contains(QStringLiteral("enabled"));
 			applyAliasDefaults(ra);
+			if (!hasExplicitEnabled)
+				ra.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
 			rp.aliases.push_back(ra);
 		}
 		for (const auto &t : p.timers)
 		{
 			Timer rt;
-			rt.attributes = t.attributes;
-			rt.children   = t.children;
-			rt.included   = t.included;
+			rt.attributes                 = t.attributes;
+			rt.children                   = t.children;
+			rt.included                   = t.included;
+			const bool hasExplicitEnabled = rt.attributes.contains(QStringLiteral("enabled"));
 			applyTimerDefaults(rt);
+			if (!hasExplicitEnabled)
+				rt.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
 			resetTimerFields(rt);
 			rp.timers.push_back(rt);
 		}
@@ -12394,6 +12747,11 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 			rp.lua->setPluginInfo(rp.attributes.value(QStringLiteral("id")),
 			                      rp.attributes.value(QStringLiteral("name")));
 		}
+		if (!requestedEnabled && rp.lua && hasValidPluginId(rp))
+		{
+			rp.enabled             = true;
+			rp.disableAfterInstall = true;
+		}
 		m_plugins.push_back(rp);
 	}
 	sortPluginsBySequence();
@@ -12403,12 +12761,26 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 		queuePluginInstall(plugin);
 	}
 	m_includes.clear();
+	QHash<QString, bool> uniqueNonPluginIncludes;
 	for (const auto &i : doc.includes())
 	{
 		Include ri;
 		ri.attributes = i.attributes;
+		if (!isEnabledFlag(ri.attributes.value(QStringLiteral("plugin"))))
+		{
+			const QString includeName =
+			    normalizePathForStorage(ri.attributes.value(QStringLiteral("name")).trimmed());
+			if (includeName.isEmpty())
+				continue;
+			const QString includeKey = includeName.toLower();
+			if (uniqueNonPluginIncludes.contains(includeKey))
+				continue;
+			uniqueNonPluginIncludes.insert(includeKey, true);
+			ri.attributes.insert(QStringLiteral("name"), includeName);
+		}
 		m_includes.push_back(ri);
 	}
+	m_includeCount = safeQSizeToInt(m_includes.size());
 	m_scripts.clear();
 	for (const auto &s : doc.scripts())
 	{
@@ -12424,8 +12796,8 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 			m_scriptWatcher->removePaths(watched);
 		if (!scriptFile.isEmpty())
 		{
-			const QString workingDir = resolveWorkingDir(m_startupDirectory);
-			const QString path       = makeAbsolutePath(scriptFile, workingDir);
+			const QString scriptWorkingDir = resolveWorkingDir(m_startupDirectory);
+			const QString path             = makeAbsolutePath(scriptFile, scriptWorkingDir);
 			if (!path.isEmpty())
 				m_scriptWatcher->addPath(path);
 		}
@@ -13554,47 +13926,57 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 	}
 
 	Plugin rp;
-	rp.attributes             = p.attributes;
-	rp.description            = p.description;
-	rp.script                 = p.script;
-	rp.source                 = resolved;
-	rp.directory              = info.absolutePath();
-	rp.global                 = markGlobal;
-	rp.sequence               = pluginSequenceFromAttributes(rp.attributes);
-	rp.version                = rp.attributes.value(QStringLiteral("version")).toDouble();
-	rp.requiredVersion        = rp.attributes.value(QStringLiteral("requires")).toDouble();
-	rp.dateWritten            = parsePluginDate(rp.attributes.value(QStringLiteral("date_written")));
-	rp.dateModified           = parsePluginDate(rp.attributes.value(QStringLiteral("date_modified")));
-	rp.dateInstalled          = QDateTime::currentDateTime();
-	rp.saveState              = isEnabledFlag(rp.attributes.value(QStringLiteral("save_state")));
-	const QString enabledFlag = rp.attributes.value(QStringLiteral("enabled"));
-	rp.enabled                = enabledFlag.isEmpty() ? true : isEnabledFlag(enabledFlag);
+	rp.attributes                  = p.attributes;
+	rp.description                 = p.description;
+	rp.script                      = p.script;
+	rp.source                      = resolved;
+	rp.directory                   = info.absolutePath();
+	rp.global                      = markGlobal;
+	rp.sequence                    = pluginSequenceFromAttributes(rp.attributes);
+	rp.version                     = rp.attributes.value(QStringLiteral("version")).toDouble();
+	rp.requiredVersion             = rp.attributes.value(QStringLiteral("requires")).toDouble();
+	rp.dateWritten                 = parsePluginDate(rp.attributes.value(QStringLiteral("date_written")));
+	rp.dateModified                = parsePluginDate(rp.attributes.value(QStringLiteral("date_modified")));
+	rp.dateInstalled               = QDateTime::currentDateTime();
+	rp.saveState                   = isEnabledFlag(rp.attributes.value(QStringLiteral("save_state")));
+	const QString enabledFlag      = rp.attributes.value(QStringLiteral("enabled"));
+	const bool    requestedEnabled = enabledFlag.isEmpty() ? true : isEnabledFlag(enabledFlag);
+	rp.enabled                     = requestedEnabled;
 
 	for (const auto &t : p.triggers)
 	{
 		Trigger rt;
-		rt.attributes = t.attributes;
-		rt.children   = t.children;
-		rt.included   = t.included;
+		rt.attributes                 = t.attributes;
+		rt.children                   = t.children;
+		rt.included                   = t.included;
+		const bool hasExplicitEnabled = rt.attributes.contains(QStringLiteral("enabled"));
 		applyTriggerDefaults(rt);
+		if (!hasExplicitEnabled)
+			rt.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
 		rp.triggers.push_back(rt);
 	}
 	for (const auto &a : p.aliases)
 	{
 		Alias ra;
-		ra.attributes = a.attributes;
-		ra.children   = a.children;
-		ra.included   = a.included;
+		ra.attributes                 = a.attributes;
+		ra.children                   = a.children;
+		ra.included                   = a.included;
+		const bool hasExplicitEnabled = ra.attributes.contains(QStringLiteral("enabled"));
 		applyAliasDefaults(ra);
+		if (!hasExplicitEnabled)
+			ra.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
 		rp.aliases.push_back(ra);
 	}
 	for (const auto &t : p.timers)
 	{
 		Timer rt;
-		rt.attributes = t.attributes;
-		rt.children   = t.children;
-		rt.included   = t.included;
+		rt.attributes                 = t.attributes;
+		rt.children                   = t.children;
+		rt.included                   = t.included;
+		const bool hasExplicitEnabled = rt.attributes.contains(QStringLiteral("enabled"));
 		applyTimerDefaults(rt);
+		if (!hasExplicitEnabled)
+			rt.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
 		resetTimerFields(rt);
 		rp.timers.push_back(rt);
 	}
@@ -13646,6 +14028,11 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 		rp.lua->setPluginInfo(rp.attributes.value(QStringLiteral("id")),
 		                      rp.attributes.value(QStringLiteral("name")));
 	}
+	if (!requestedEnabled && rp.lua && hasValidPluginId(rp))
+	{
+		rp.enabled             = true;
+		rp.disableAfterInstall = true;
+	}
 
 	m_plugins.push_back(rp);
 	sortPluginsBySequence();
@@ -13689,11 +14076,35 @@ bool WorldRuntime::enablePlugin(const QString &pluginId, bool enable)
 		return false;
 	Plugin &plugin = m_plugins[index];
 	if (plugin.enabled == enable)
+	{
+		if (enable && plugin.disableAfterInstall)
+		{
+			plugin.disableAfterInstall = false;
+			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+			if (!m_loadingDocument)
+				m_worldFileModified = true;
+		}
 		return true;
+	}
 	plugin.enabled = enable;
-	if (plugin.lua)
-		plugin.lua->callFunctionNoArgs(enable ? QStringLiteral("OnPluginEnable")
-		                                      : QStringLiteral("OnPluginDisable"));
+	if (!enable)
+		plugin.disableAfterInstall = false;
+	plugin.attributes.insert(QStringLiteral("enabled"), enable ? QStringLiteral("1") : QStringLiteral("0"));
+	if (enable)
+	{
+		if (plugin.lua)
+			plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginEnable"));
+		// Callback may toggle plugin state (e.g. script calls EnablePlugin on itself).
+		if (plugin.enabled && plugin.installPending)
+			queuePluginInstall(plugin);
+	}
+	else
+	{
+		if (plugin.lua)
+			plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginDisable"));
+	}
+	if (!m_loadingDocument)
+		m_worldFileModified = true;
 	return true;
 }
 
@@ -15062,9 +15473,9 @@ QVariant WorldRuntime::pluginInfo(const QString &pluginId, int infoType) const
 	case 12:
 		return plugin.variables.size();
 	case 13:
-		return plugin.dateWritten.isValid() ? QVariant(toOleDate(plugin.dateWritten)) : QVariant();
+		return plugin.dateWritten.isValid() ? QVariant(plugin.dateWritten) : QVariant();
 	case 14:
-		return plugin.dateModified.isValid() ? QVariant(toOleDate(plugin.dateModified)) : QVariant();
+		return plugin.dateModified.isValid() ? QVariant(plugin.dateModified) : QVariant();
 	case 15:
 		return plugin.saveState;
 	case 16:
@@ -15090,7 +15501,7 @@ QVariant WorldRuntime::pluginInfo(const QString &pluginId, int infoType) const
 	case 21:
 		return index + 1;
 	case 22:
-		return plugin.dateInstalled.isValid() ? QVariant(toOleDate(plugin.dateInstalled)) : QVariant();
+		return plugin.dateInstalled.isValid() ? QVariant(plugin.dateInstalled) : QVariant();
 	case 23:
 		return plugin.callingPluginId;
 	case 24:
@@ -17065,8 +17476,8 @@ int WorldRuntime::windowDrawImageAlpha(const QString &name, const QString &image
 		const auto *overLine = reinterpret_cast<const QRgb *>(overlay.constScanLine(y));
 		for (int x = 0; x < w; ++x)
 		{
-			const QColor a(overLine[x]);
-			const QColor b(baseLine[x]);
+			const QColor a        = QColor::fromRgba(overLine[x]);
+			const QColor b        = QColor::fromRgba(baseLine[x]);
 			const int    mask     = a.alpha();
 			const int    blendedR = (a.red() * mask + b.red() * (255 - mask)) / 255;
 			const int    blendedG = (a.green() * mask + b.green() * (255 - mask)) / 255;
@@ -18058,7 +18469,21 @@ QString WorldRuntime::windowMenu(const QString &name, int left, int top, const Q
 
 void WorldRuntime::setView(WorldView *view)
 {
+	if (m_viewDestroyedConnection)
+	{
+		QObject::disconnect(m_viewDestroyedConnection);
+		m_viewDestroyedConnection = QMetaObject::Connection{};
+	}
 	m_view = view;
+	if (m_view)
+	{
+		m_viewDestroyedConnection = connect(m_view, &QObject::destroyed, this,
+		                                    [this]
+		                                    {
+			                                    m_view                    = nullptr;
+			                                    m_viewDestroyedConnection = QMetaObject::Connection{};
+		                                    });
+	}
 }
 
 WorldView *WorldRuntime::view() const
@@ -18070,6 +18495,11 @@ void WorldRuntime::queuePluginInstall(Plugin &plugin)
 {
 	if (!plugin.lua || !hasValidPluginId(plugin))
 		return;
+	if (!plugin.enabled && !plugin.disableAfterInstall)
+	{
+		plugin.installPending = true;
+		return;
+	}
 	if (m_loadingDocument || m_pluginInstallDeferred)
 	{
 		plugin.installPending = true;
@@ -18079,24 +18509,36 @@ void WorldRuntime::queuePluginInstall(Plugin &plugin)
 	    m_view && m_view->isVisible() && m_view->outputClientWidth() > 0 && m_view->outputClientHeight() > 0;
 	if (installReady)
 	{
-		plugin.installPending         = false;
-		bool       hasInstallFunction = false;
-		const bool installed =
-		    plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginInstall"), &hasInstallFunction, false);
-		if (hasInstallFunction && !installed)
-		{
-			plugin.enabled = false;
-			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
-			qWarning() << "Disabling plugin after OnPluginInstall failure:"
-			           << plugin.attributes.value(QStringLiteral("name"))
-			           << plugin.attributes.value(QStringLiteral("id"));
-		}
+		plugin.installPending = false;
+		runPluginInstallCallback(plugin);
 		notifyWorldOutputResized();
 		notifyDrawOutputWindow(1, 0);
 	}
 	else
 	{
 		plugin.installPending = true;
+	}
+}
+
+void WorldRuntime::runPluginInstallCallback(Plugin &plugin)
+{
+	if (!plugin.lua || !hasValidPluginId(plugin))
+		return;
+
+	plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginInstall"), nullptr, true);
+	if (plugin.disableAfterInstall)
+	{
+		if (plugin.enabled)
+		{
+			plugin.enabled = false;
+			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
+			plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginDisable"));
+		}
+		else
+		{
+			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
+		}
+		plugin.disableAfterInstall = false;
 	}
 }
 
@@ -18112,7 +18554,8 @@ void WorldRuntime::installPendingPlugins()
 	for (int i = 0; i < m_plugins.size(); ++i)
 	{
 		const Plugin &plugin = m_plugins.at(i);
-		if (plugin.installPending && plugin.lua && hasValidPluginId(plugin))
+		if (plugin.installPending && (plugin.enabled || plugin.disableAfterInstall) && plugin.lua &&
+		    hasValidPluginId(plugin))
 			pendingIndices.push_back(i);
 	}
 	if (pendingIndices.isEmpty())
@@ -18129,18 +18572,7 @@ void WorldRuntime::installPendingPlugins()
 		Plugin &plugin = m_plugins[index];
 		if (!plugin.lua)
 			continue;
-		bool       hasInstallFunction = false;
-		const bool installed =
-		    plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginInstall"), &hasInstallFunction, false);
-		if (hasInstallFunction && !installed)
-		{
-			plugin.enabled = false;
-			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
-			qWarning() << "Disabling plugin after OnPluginInstall failure:"
-			           << plugin.attributes.value(QStringLiteral("name"))
-			           << plugin.attributes.value(QStringLiteral("id"));
-			continue;
-		}
+		runPluginInstallCallback(plugin);
 		installedAny = true;
 	}
 	if (installedAny)

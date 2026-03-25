@@ -7,6 +7,7 @@
  */
 
 #include "LuaSupport.h"
+
 #include "Environment.h"
 #include "scripting/ScriptingErrors.h"
 
@@ -237,6 +238,143 @@ if require and not rawget(_G, "__qmud_require_compat_wrapped") then
     return mod
   end
   rawset(_G, "__qmud_require_compat_wrapped", true)
+end
+
+-- Lua 5.1 accepted non-integer numbers with integer format specifiers
+-- ("%i", "%d", "%x", ...). Lua 5.4 raises "number has no integer
+-- representation". Preserve legacy script behavior by coercing numeric
+-- arguments toward zero for those specifiers before formatting.
+if string and type(string.format) == "function" and
+   not rawget(_G, "__qmud_string_format_compat_wrapped") then
+  local _format = string.format
+
+  local function is_integer_specifier(spec)
+    return spec == "d" or spec == "i" or spec == "o" or
+           spec == "u" or spec == "x" or spec == "X"
+  end
+
+  local function coerce_to_integer(v)
+    if type(v) ~= "number" then
+      return v
+    end
+    local int_v = math.tointeger and math.tointeger(v)
+    if int_v ~= nil then
+      return int_v
+    end
+    local truncated = math.modf(v)
+    return truncated
+  end
+
+  local function coerce_integer_format_args(fmt, ...)
+    if type(fmt) ~= "string" then
+      return _format(fmt, ...)
+    end
+    local args = { ... }
+    local arg_index = 1
+    local i = 1
+    local len = #fmt
+
+    while i <= len do
+      local ch = fmt:sub(i, i)
+      if ch ~= "%" then
+        i = i + 1
+      else
+        if i < len and fmt:sub(i + 1, i + 1) == "%" then
+          i = i + 2
+        else
+          local j = i + 1
+          while j <= len do
+            local token = fmt:sub(j, j)
+            if token == "*" then
+              arg_index = arg_index + 1
+              j = j + 1
+            elseif token:match("[%aA-Z]") then
+              if is_integer_specifier(token) then
+                args[arg_index] = coerce_to_integer(args[arg_index])
+              end
+              arg_index = arg_index + 1
+              i = j + 1
+              break
+            else
+              j = j + 1
+            end
+          end
+          if j > len then
+            i = len + 1
+          end
+        end
+      end
+    end
+
+    return _format(fmt, table.unpack(args))
+  end
+
+  function string.format(fmt, ...)
+    local ok, result = pcall(_format, fmt, ...)
+    if ok then
+      return result
+    end
+    if type(result) == "string" and result:find("integer representation", 1, true) then
+      return coerce_integer_format_args(fmt, ...)
+    end
+    error(result, 2)
+  end
+
+  rawset(_G, "__qmud_string_format_compat_wrapped", true)
+end
+
+-- Lua 5.1 tolerated replacement strings in string.gsub that used "%"
+-- before non-capture characters (eg "%[" ... "%]"), while Lua 5.4 raises:
+-- "invalid use of '%' in replacement string".
+-- Preserve Mushclient plugin compatibility by retrying with a lenient
+-- replacement normalization when that specific error occurs.
+if string and type(string.gsub) == "function" and
+   not rawget(_G, "__qmud_string_gsub_compat_wrapped") then
+  local _gsub = string.gsub
+
+  local function normalize_gsub_replacement(rep)
+    if type(rep) ~= "string" then
+      return rep
+    end
+    local out = {}
+    local i = 1
+    local len = #rep
+    while i <= len do
+      local ch = rep:sub(i, i)
+      if ch ~= "%" then
+        out[#out + 1] = ch
+        i = i + 1
+      else
+        local next_ch = rep:sub(i + 1, i + 1)
+        if next_ch == "" then
+          out[#out + 1] = "%"
+          i = i + 1
+        elseif next_ch == "%" or next_ch:match("%d") then
+          out[#out + 1] = "%"
+          out[#out + 1] = next_ch
+          i = i + 2
+        else
+          out[#out + 1] = next_ch
+          i = i + 2
+        end
+      end
+    end
+    return table.concat(out)
+  end
+
+  function string.gsub(s, pattern, repl, n)
+    local ok, a, b = pcall(_gsub, s, pattern, repl, n)
+    if ok then
+      return a, b
+    end
+    if type(repl) == "string" and type(a) == "string" and
+       a:find("invalid use of '%' in replacement string", 1, true) then
+      return _gsub(s, pattern, normalize_gsub_replacement(repl), n)
+    end
+    error(a, 2)
+  end
+
+  rawset(_G, "__qmud_string_gsub_compat_wrapped", true)
 end
 )lua";
 

@@ -488,4 +488,7 @@ class tst_Dialog_GlobalPreferencesUpdates : public QObject
 
 QTEST_MAIN(tst_Dialog_GlobalPreferencesUpdates)
 
+
+#if __has_include("tst_Dialog_GlobalPreferencesUpdates.moc")
 #include "tst_Dialog_GlobalPreferencesUpdates.moc"
+#endif

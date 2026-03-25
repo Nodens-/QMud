@@ -179,4 +179,7 @@ class tst_ReloadRecoveryUtils : public QObject
 
 QTEST_APPLESS_MAIN(tst_ReloadRecoveryUtils)
 
+
+#if __has_include("tst_ReloadRecoveryUtils.moc")
 #include "tst_ReloadRecoveryUtils.moc"
+#endif

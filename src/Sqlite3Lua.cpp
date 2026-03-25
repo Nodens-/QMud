@@ -6,9 +6,8 @@
  * Role: Lua-facing SQLite binding implementation that exposes database operations to embedded scripts.
  */
 
-#include "SqliteCompat.h"
-
 #include "LuaHeaders.h"
+#include "SqliteCompat.h"
 
 #include <QMetaType>
 #include <QtSql/QSqlError>
@@ -175,6 +174,9 @@ namespace
 		if (!stmt)
 			return;
 		stmt->query.finish();
+		// Fully detach from the connection before removeDatabase(); finished
+		// queries can still keep internal handles alive.
+		stmt->query    = QSqlQuery();
 		stmt->prepared = false;
 		stmt->executed = false;
 		stmt->hasRow   = false;
@@ -189,6 +191,9 @@ namespace
 		if (!iter)
 			return;
 		iter->query.finish();
+		// Fully detach from the connection before removeDatabase(); finished
+		// queries can still keep internal handles alive.
+		iter->query   = QSqlQuery();
 		iter->active  = false;
 		iter->columns = 0;
 		untrackIterator(iter->db, iter);
@@ -1303,6 +1308,24 @@ namespace
 		{
 			setDbStatus(db, SQLITE_MISUSE, QStringLiteral("attempt to use closed sqlite database"));
 			return luaL_error(L, "attempt to use closed sqlite database");
+		}
+
+		// Keep at most one active rows iterator per SQLite connection. The Qt SQLite
+		// driver can behave unstably when multiple live query cursors overlap on the
+		// same connection and one is abandoned by script code.
+		if (!db->iterators.isEmpty())
+		{
+			QVector<LuaSqliteIter *> activeIterators;
+			activeIterators.reserve(db->iterators.size());
+			for (LuaSqliteIter *activeIter : db->iterators)
+				activeIterators.push_back(activeIter);
+			for (LuaSqliteIter *activeIter : activeIterators)
+			{
+				invalidateIterator(activeIter);
+				releaseDbRef(activeIter->ownerState, activeIter->dbRef);
+				activeIter->ownerState = nullptr;
+			}
+			db->iterators.clear();
 		}
 
 		auto *iter = static_cast<LuaSqliteIter *>(lua_newuserdata(L, sizeof(LuaSqliteIter)));

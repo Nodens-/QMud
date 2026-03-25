@@ -98,4 +98,7 @@ class tst_Dialog_WorldPreferences : public QObject
 
 QTEST_APPLESS_MAIN(tst_Dialog_WorldPreferences)
 
+
+#if __has_include("tst_Dialog_WorldPreferences.moc")
 #include "tst_Dialog_WorldPreferences.moc"
+#endif

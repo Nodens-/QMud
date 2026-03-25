@@ -153,10 +153,12 @@ class tst_TelnetProcessor_Options : public QObject
 			TelnetProcessor processor;
 			processor.setNawsEnabled(true);
 			processor.setWindowSize(80, 24);
+			QVERIFY(!processor.isNawsNegotiated());
 
 			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
 			QCOMPARE(processor.takeOutboundData(),
 			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE}));
+			QVERIFY(processor.isNawsNegotiated());
 		}
 
 		void doNawsEscapesIacBytesInWindowSizePayload()
@@ -174,9 +176,11 @@ class tst_TelnetProcessor_Options : public QObject
 		{
 			TelnetProcessor processor;
 			processor.setNawsEnabled(false);
+			QVERIFY(!processor.isNawsNegotiated());
 
 			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
 			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_NAWS}));
+			QVERIFY(!processor.isNawsNegotiated());
 		}
 
 		void doNawsSendsUpdatedWindowSizeAfterNegotiation()
@@ -195,6 +199,40 @@ class tst_TelnetProcessor_Options : public QObject
 
 			processor.setWindowSize(132, 40);
 			QVERIFY(processor.takeOutboundData().isEmpty());
+		}
+
+		void nawsNegotiationStateClearsOnDontWontAndReset()
+		{
+			TelnetProcessor processor;
+			processor.setNawsEnabled(true);
+			processor.setWindowSize(80, 24);
+			QVERIFY(!processor.isNawsNegotiated());
+
+			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+			QCOMPARE(processor.takeOutboundData(),
+			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE}));
+			QVERIFY(processor.isNawsNegotiated());
+
+			processor.processBytes(bytes({IAC, DONT, TELOPT_NAWS}));
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_NAWS}));
+			QVERIFY(!processor.isNawsNegotiated());
+
+			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+			QCOMPARE(processor.takeOutboundData(),
+			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE}));
+			QVERIFY(processor.isNawsNegotiated());
+
+			processor.processBytes(bytes({IAC, WONT, TELOPT_NAWS}));
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_NAWS}));
+			QVERIFY(!processor.isNawsNegotiated());
+
+			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+			QCOMPARE(processor.takeOutboundData(),
+			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE}));
+			QVERIFY(processor.isNawsNegotiated());
+
+			processor.resetConnectionState();
+			QVERIFY(!processor.isNawsNegotiated());
 		}
 
 		void terminalTypeRequestReturnsConfiguredName()
@@ -264,4 +302,7 @@ class tst_TelnetProcessor_Options : public QObject
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Options)
 
+
+#if __has_include("tst_TelnetProcessor_Options.moc")
 #include "tst_TelnetProcessor_Options.moc"
+#endif

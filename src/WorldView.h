@@ -11,8 +11,11 @@
 #define QMUD_WORLDVIEW_H
 
 #include "WorldRuntime.h"
+
 #include <QElapsedTimer>
 #include <QFont>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QPair>
 #include <QPoint>
 #include <QRegularExpression>
 #include <QScopedPointer>
@@ -331,57 +334,65 @@ class WorldView : public QWidget
 		 */
 		QPoint                        miniWindowGlobalPosition(const MiniWindow *window, int x, int y) const;
 		/**
+		 * @brief Parses MXP send/hint payloads into context-menu action entries.
+		 * @param rawHref Raw anchor href payload.
+		 * @param rawHint Raw anchor tooltip payload.
+		 * @return Ordered list of (`action`, `label`) entries.
+		 */
+		[[nodiscard]] static QVector<QPair<QString, QString>>
+		                     parseMxpContextMenuActions(const QString &rawHref, const QString &rawHint);
+		/**
 		 * @brief Shows generic context menu at global position.
 		 * @param globalPos Global screen position.
 		 * @return `true` when a menu action was handled.
 		 */
-		bool                          showContextMenuAtGlobalPos(const QPoint &globalPos);
+		bool                 showContextMenuAtGlobalPos(const QPoint &globalPos);
 		/**
 		 * @brief Shows world context menu at global position.
 		 * @param globalPos Global screen position.
 		 * @return `true` when a menu action was handled.
 		 */
-		bool                          showWorldContextMenuAtGlobalPos(const QPoint &globalPos);
+		bool                 showWorldContextMenuAtGlobalPos(const QPoint &globalPos);
 		/**
 		 * @brief Replays right-click event against miniwindow hotspots.
 		 * @param globalPos Global click position.
 		 * @return `true` when a hotspot handled the click.
 		 */
-		bool                          replayMiniWindowRightClickAtGlobalPos(const QPoint &globalPos);
+		bool                 replayMiniWindowRightClickAtGlobalPos(const QPoint &globalPos);
 		/**
 		 * @brief Handles world hotkey keypress.
 		 * @param event Key event to process.
 		 * @return `true` when the hotkey is consumed.
 		 */
-		bool                          handleWorldHotkey(QKeyEvent *event);
+		bool                 handleWorldHotkey(QKeyEvent *event);
 		/**
 		 * @brief Returns true when miniwindow mouse capture is active.
 		 * @return `true` when miniwindow mouse capture is active.
 		 */
-		[[nodiscard]] bool            isMiniWindowCaptureActive() const;
+		[[nodiscard]] bool   isMiniWindowCaptureActive() const;
 		/**
 		 * @brief Returns true when last mouse position is known.
 		 * @return `true` when last mouse position is available.
 		 */
-		[[nodiscard]] bool            hasLastMousePosition() const;
+		[[nodiscard]] bool   hasLastMousePosition() const;
 		/**
 		 * @brief Returns cached last mouse position.
 		 * @return Cached last mouse position.
 		 */
-		[[nodiscard]] QPoint          lastMousePosition() const;
+		[[nodiscard]] QPoint lastMousePosition() const;
 		/**
 		 * @brief Re-evaluates miniwindow hover state.
 		 */
-		void                          recheckMiniWindowHover();
+		void                 recheckMiniWindowHover();
 		/**
 		 * @brief Returns true when scrollback split view is active.
 		 * @return `true` when split view is active.
 		 */
-		[[nodiscard]] bool            isScrollbackSplitActive() const;
+		[[nodiscard]] bool   isScrollbackSplitActive() const;
 		/**
 		 * @brief Collapses split output view back to live-only output.
 		 */
-		void                          collapseScrollbackSplitToLiveOutput();
+		void                 collapseScrollbackSplitToLiveOutput();
 
 	signals:
 		/**

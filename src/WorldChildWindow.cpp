@@ -8,16 +8,17 @@
  */
 
 #include "WorldChildWindow.h"
+
 #include "ActivityWindow.h"
 #include "AppController.h"
 #include "DocConstants.h"
 #include "FileExtensions.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
-#include "MxpDebugWindow.h"
 #include "WorldCommandProcessor.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
+
 #include <QCloseEvent>
 #include <QColor>
 #include <QCoreApplication>
@@ -25,6 +26,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
+#include <QMdiArea>
 #include <QMessageBox>
 #include <QPalette>
 #include <QPlainTextEdit>
@@ -34,6 +36,7 @@
 #include <QTextOption>
 #include <QTimer>
 #include <limits>
+#include <memory>
 
 namespace
 {
@@ -538,15 +541,24 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		        {
 			        if (!m_mxpDebug)
 			        {
-				        QWidget *host = parentWidget();
-				        m_mxpDebug    = new MxpDebugWindow(host);
-				        m_mxpDebug->setAttribute(Qt::WA_DeleteOnClose, false);
+				        QMdiArea *const mdi = mdiArea();
+				        if (!mdi)
+					        return;
+				        auto debugWindow          = std::make_unique<TextChildWindow>(title, QString(), mdi);
+				        TextChildWindow *debugPtr = debugWindow.get();
+				        debugPtr->setQuerySaveOnClose(false);
+				        debugPtr->editor()->setReadOnly(true);
+				        mdi->addSubWindow(debugPtr);
+				        connect(debugPtr, &QObject::destroyed, this, [this] { m_mxpDebug = nullptr; });
+				        debugPtr->showMaximized();
+				        if (MainWindowHost *main = resolveMainWindowHost(window()))
+					        main->updateMdiTabs();
+				        m_mxpDebug                                                   = debugPtr;
+				        [[maybe_unused]] TextChildWindow *const transferredOwnership = debugWindow.release();
+				        Q_ASSERT(transferredOwnership == debugPtr);
 			        }
-			        m_mxpDebug->setTitle(title);
-			        m_mxpDebug->appendMessage(message);
-			        if (!m_mxpDebug->isVisible())
-				        m_mxpDebug->show();
-			        m_mxpDebug->raise();
+			        m_mxpDebug->setWindowTitle(title);
+			        m_mxpDebug->appendText(message);
 		        });
 		connect(m_view, &WorldView::hyperlinkActivated, m_commandProcessor,
 		        &WorldCommandProcessor::onHyperlinkActivated);
@@ -828,8 +840,8 @@ TextChildWindow::TextChildWindow(QWidget *parent) : QMdiSubWindow(parent)
 {
 	setAttribute(Qt::WA_DeleteOnClose, true);
 	setWindowTitle(QStringLiteral("Text"));
-	m_editor = new QPlainTextEdit;
-	setWidget(m_editor);
+	setWidget(new QPlainTextEdit(this));
+	m_editor = qobject_cast<QPlainTextEdit *>(widget());
 	if (m_editor)
 	{
 		if (AppController *app = AppController::instance(); app)
@@ -879,9 +891,10 @@ TextChildWindow::TextChildWindow(const QString &title, const QString &text, QWid
 {
 	setAttribute(Qt::WA_DeleteOnClose, true);
 	setWindowTitle(title);
-	m_editor = new QPlainTextEdit;
-	m_editor->setPlainText(text);
-	setWidget(m_editor);
+	setWidget(new QPlainTextEdit(this));
+	m_editor = qobject_cast<QPlainTextEdit *>(widget());
+	if (m_editor)
+		m_editor->setPlainText(text);
 	if (m_editor)
 	{
 		if (AppController *app = AppController::instance(); app)

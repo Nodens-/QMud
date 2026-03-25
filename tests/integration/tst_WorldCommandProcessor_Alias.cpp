@@ -84,4 +84,7 @@ class tst_WorldCommandProcessor_Alias : public QObject
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_Alias)
 
+
+#if __has_include("tst_WorldCommandProcessor_Alias.moc")
 #include "tst_WorldCommandProcessor_Alias.moc"
+#endif

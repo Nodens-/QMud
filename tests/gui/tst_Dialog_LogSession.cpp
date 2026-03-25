@@ -76,4 +76,7 @@ class tst_Dialog_LogSession : public QObject
 
 QTEST_MAIN(tst_Dialog_LogSession)
 
+
+#if __has_include("tst_Dialog_LogSession.moc")
 #include "tst_Dialog_LogSession.moc"
+#endif

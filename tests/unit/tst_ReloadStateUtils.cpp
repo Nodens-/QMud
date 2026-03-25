@@ -520,4 +520,7 @@ class tst_ReloadStateUtils : public QObject
 
 QTEST_APPLESS_MAIN(tst_ReloadStateUtils)
 
+
+#if __has_include("tst_ReloadStateUtils.moc")
 #include "tst_ReloadStateUtils.moc"
+#endif

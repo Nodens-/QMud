@@ -16,8 +16,8 @@
 #include "scripting/ScriptingErrors.h"
 
 #include <QPushButton>
-#include <QSignalSpy>
 #include <QTableWidget>
+#include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
 namespace
@@ -268,4 +268,7 @@ class tst_Dialog_Plugins : public QObject
 
 QTEST_MAIN(tst_Dialog_Plugins)
 
+
+#if __has_include("tst_Dialog_Plugins.moc")
 #include "tst_Dialog_Plugins.moc"
+#endif

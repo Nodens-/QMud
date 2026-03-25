@@ -112,4 +112,7 @@ class tst_TelnetProcessor_Encoding : public QObject
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Encoding)
 
+
+#if __has_include("tst_TelnetProcessor_Encoding.moc")
 #include "tst_TelnetProcessor_Encoding.moc"
+#endif

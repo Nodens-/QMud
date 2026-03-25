@@ -23,12 +23,14 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollBar>
-#include <QSignalSpy>
+#include <QSplitter>
 #include <QTextBrowser>
 #include <QTextCharFormat>
 #include <QTextDocument>
 #include <QTextFragment>
 #include <QTimer>
+#include <QUrl>
+#include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
 #include <functional>
@@ -37,14 +39,15 @@
 
 namespace
 {
-	QMap<QString, QString>           g_worldAttrs;
-	QMap<QString, QString>           g_worldMultilineAttrs;
-	QMap<QString, QVariant>          g_globalOptions;
-	QVector<WorldRuntime::LineEntry> g_runtimeLines;
-	unsigned short                   g_currentActionSource{WorldRuntime::eUnknownActionSource};
-	bool                             g_useFakeAppController{false};
+	QMap<QString, QString>              g_worldAttrs;
+	QMap<QString, QString>              g_worldMultilineAttrs;
+	QMap<QString, QVariant>             g_globalOptions;
+	QVector<WorldRuntime::LineEntry>    g_runtimeLines;
+	WorldRuntime::TextRectangleSettings g_textRectangle;
+	unsigned short                      g_currentActionSource{WorldRuntime::eUnknownActionSource};
+	bool                                g_useFakeAppController{false};
 
-	AppController                   *fakeAppControllerPointer()
+	AppController                      *fakeAppControllerPointer()
 	{
 		return reinterpret_cast<AppController *>(static_cast<quintptr>(1));
 	}
@@ -83,6 +86,7 @@ namespace
 		g_worldMultilineAttrs.clear();
 		g_globalOptions.clear();
 		g_runtimeLines.clear();
+		g_textRectangle        = {};
 		g_currentActionSource  = WorldRuntime::eUnknownActionSource;
 		g_useFakeAppController = false;
 	}
@@ -192,7 +196,6 @@ namespace
 	struct AnchorFormatSnapshot
 	{
 			bool            found{false};
-			int             blockNumber{-1};
 			QTextCharFormat format;
 	};
 
@@ -208,7 +211,7 @@ namespace
 				const QTextCharFormat format = fragment.charFormat();
 				if (!format.isAnchor() || format.anchorHref() != href)
 					continue;
-				return AnchorFormatSnapshot{true, block.blockNumber(), format};
+				return AnchorFormatSnapshot{true, format};
 			}
 		}
 		return {};
@@ -385,6 +388,16 @@ void WorldRuntime::setOutputFrozen(bool)
 {
 }
 
+const WorldRuntime::TextRectangleSettings &WorldRuntime::textRectangle() const
+{
+	return g_textRectangle;
+}
+
+void WorldRuntime::setTextRectangle(const TextRectangleSettings &settings)
+{
+	g_textRectangle = settings;
+}
+
 const QList<WorldRuntime::Macro> &WorldRuntime::macros() const
 {
 	return macroStorage();
@@ -524,6 +537,147 @@ class tst_WorldView_Basic : public QObject
 			const QStringList lines = view.outputLines();
 			QVERIFY(!lines.isEmpty());
 			QVERIFY(lines.contains(QStringLiteral("line-one")));
+		}
+
+		void textRectangleAppliedToOutputViewport()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			const QRect fullRect = view.outputTextRectangle();
+			QVERIFY2(fullRect.width() > 200,
+			         "Baseline output viewport width too small for text-rectangle test.");
+			QVERIFY2(fullRect.height() > 200,
+			         "Baseline output viewport height too small for text-rectangle test.");
+
+			g_textRectangle.left   = 15;
+			g_textRectangle.top    = 11;
+			g_textRectangle.right  = 260;
+			g_textRectangle.bottom = 210;
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+
+			const QRect rect = view.outputTextRectangle();
+			QCOMPARE(rect.left(), fullRect.left() + g_textRectangle.left);
+			QCOMPARE(rect.top(), fullRect.top() + g_textRectangle.top);
+			QVERIFY(qAbs(rect.width() - (g_textRectangle.right - g_textRectangle.left)) <= 16);
+			QVERIFY(qAbs(rect.height() - (g_textRectangle.bottom - g_textRectangle.top)) <= 16);
+
+			resetTestState();
+		}
+
+		void textRectangleSupportsNegativeRightBottomOffsets()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			const int baseWidth  = view.outputTextRectangle().width();
+			const int baseHeight = view.outputTextRectangle().height();
+			QVERIFY(baseWidth > 80);
+			QVERIFY(baseHeight > 80);
+
+			g_textRectangle.left   = 7;
+			g_textRectangle.top    = 9;
+			g_textRectangle.right  = -13;
+			g_textRectangle.bottom = -17;
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+
+			const QRect rect = view.outputTextRectangle();
+			QCOMPARE(rect.width(), baseWidth - g_textRectangle.left - 13);
+			QCOMPARE(rect.height(), baseHeight - g_textRectangle.top - 17);
+
+			resetTestState();
+		}
+
+		void textRectangleContainsBothSplitPanes()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(920, 660);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			g_textRectangle.left   = 17;
+			g_textRectangle.top    = 13;
+			g_textRectangle.right  = 320;
+			g_textRectangle.bottom = 250;
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = nullptr;
+			const auto splitters      = view.findChildren<QSplitter *>();
+			for (QSplitter *splitter : splitters)
+			{
+				if (!splitter || splitter->count() != 2)
+					continue;
+				if (!qobject_cast<QTextBrowser *>(splitter->widget(0)) ||
+				    !qobject_cast<QTextBrowser *>(splitter->widget(1)))
+					continue;
+				outputSplitter = splitter;
+				break;
+			}
+			QVERIFY(outputSplitter);
+
+			outputSplitter->setSizes(QList<int>() << 170 << 120);
+			QCoreApplication::processEvents();
+
+			const QRect textRect = view.outputTextRectangle();
+			QCOMPARE(outputSplitter->geometry().topLeft(), textRect.topLeft());
+			QVERIFY(outputSplitter->geometry().width() >= textRect.width());
+			QVERIFY(outputSplitter->geometry().height() >= textRect.height());
+
+			QWidget *const outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+
+			for (int i = 0; i < outputSplitter->count(); ++i)
+			{
+				auto *browser = qobject_cast<QTextBrowser *>(outputSplitter->widget(i));
+				QVERIFY(browser);
+				QWidget *const viewport = browser->viewport();
+				QVERIFY(viewport);
+				const QRect viewportRect(viewport->mapTo(outputStack, QPoint(0, 0)), viewport->size());
+				QVERIFY2(textRect.contains(viewportRect),
+				         "Split output viewport escaped configured text rectangle.");
+			}
+
+			resetTestState();
+		}
+
+		void collapsedScrollbackSplitterHandleIsHidden()
+		{
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = nullptr;
+			const auto splitters      = view.findChildren<QSplitter *>();
+			for (QSplitter *splitter : splitters)
+			{
+				if (!splitter || splitter->count() != 2)
+					continue;
+				if (!qobject_cast<QTextBrowser *>(splitter->widget(0)) ||
+				    !qobject_cast<QTextBrowser *>(splitter->widget(1)))
+					continue;
+				outputSplitter = splitter;
+				break;
+			}
+			QVERIFY(outputSplitter);
+			QCOMPARE(outputSplitter->handleWidth(), 0);
 		}
 
 		void applyRuntimeSettingsPreservesSyntheticInputBreaks()
@@ -923,6 +1077,55 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void hyperlinkLeftClickEmitsHrefForCommandProcessorDispatch()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(720, 420);
+			view.show();
+			QCoreApplication::processEvents();
+
+			WorldRuntime::StyleSpan span;
+			span.length     = QStringLiteral("assistant").size();
+			span.actionType = WorldRuntime::ActionSend;
+			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
+			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
+			                                       "Attack assistant");
+			view.appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			const QPoint anchorPoint = findAnchorPoint(*browser, span.action);
+			QVERIFY(anchorPoint.x() >= 0 && anchorPoint.y() >= 0);
+
+			QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
+			QTest::mouseClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, anchorPoint);
+			QTRY_COMPARE(activatedSpy.count(), 1);
+			const QString emittedHref =
+			    QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8());
+			QCOMPARE(emittedHref, span.action);
+
+			resetTestState();
+		}
+
+		void mxpContextMenuActionParsingBuildsRightClickEntries()
+		{
+			const QVector<QPair<QString, QString>> actions = WorldView::parseMxpContextMenuActions(
+			    QStringLiteral("examine assistant|consider assistant|attack assistant"),
+			    QStringLiteral(
+			        "Right mouse click to act|Examine assistant|Consider assistant|Attack assistant"));
+			QCOMPARE(actions.size(), 3);
+			QCOMPARE(actions.at(0).first, QStringLiteral("examine assistant"));
+			QCOMPARE(actions.at(0).second, QStringLiteral("Examine assistant"));
+			QCOMPARE(actions.at(1).first, QStringLiteral("consider assistant"));
+			QCOMPARE(actions.at(1).second, QStringLiteral("Consider assistant"));
+			QCOMPARE(actions.at(2).first, QStringLiteral("attack assistant"));
+			QCOMPARE(actions.at(2).second, QStringLiteral("Attack assistant"));
+		}
+
 		void runtimeSettingsRebuildAttributeKeysExcludeWrapAndHyperlinkPresentation()
 		{
 			const QSet<QString> &rebuildKeys = WorldView::runtimeSettingsRebuildAttributeKeys();
@@ -1054,6 +1257,53 @@ class tst_WorldView_Basic : public QObject
 				    return scrollBar->value() >= (scrollBar->maximum() - endTolerance);
 			    }(),
 			    "Output viewport drifted away from end after lazy runtime-settings rebuild.");
+
+			resetTestState();
+		}
+
+		void resizeEventPreservesEndAnchorWhenViewportWasAtEnd()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(1080, 520);
+			view.show();
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 320; ++i)
+			{
+				const QString line = QStringLiteral("resize-anchor-%1 ").arg(i, 4, 10, QLatin1Char('0')) +
+				                     QString(220, QLatin1Char('x'));
+				view.appendOutputText(line, true);
+			}
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+
+			bar->setValue(bar->maximum());
+			QCoreApplication::processEvents();
+
+			view.resize(460, 520);
+
+			QTRY_VERIFY2(
+			    [&]
+			    {
+				    QScrollBar *scrollBar = browser->verticalScrollBar();
+				    if (!scrollBar)
+					    return false;
+				    const int endTolerance = qMax(1, scrollBar->pageStep());
+				    return scrollBar->value() >= (scrollBar->maximum() - endTolerance);
+			    }(),
+			    "Output viewport drifted away from end after world-view resize.");
 
 			resetTestState();
 		}

@@ -14,6 +14,7 @@
 #include "MiniWindow.h"
 #include "SqliteCompat.h"
 #include "TelnetProcessor.h"
+
 #include <QByteArray>
 #include <QColor>
 #include <QDateTime>
@@ -22,6 +23,7 @@
 #include <QImage>
 #include <QList>
 #include <QMap>
+#include <QMetaObject>
 #include <QObject>
 #include <QSet>
 #include <QSharedPointer>
@@ -245,6 +247,7 @@ class WorldRuntime : public QObject
 				QString                               directory;
 				QString                               callingPluginId;
 				bool                                  enabled{true};
+				bool                                  disableAfterInstall{false};
 				bool                                  global{false};
 				bool                                  saveState{false};
 				bool                                  savingStateNow{false};
@@ -3900,6 +3903,11 @@ class WorldRuntime : public QObject
 		 */
 		void queuePluginInstall(Plugin &plugin);
 		/**
+		 * @brief Executes plugin install callback and applies pending startup-disable state.
+		 * @param plugin Plugin instance.
+		 */
+		static void           runPluginInstallCallback(Plugin &plugin);
+		/**
 		 * @brief Returns whether current Lua-context line is buffered.
 		 * @return `true` when current Lua-context line is in buffer.
 		 */
@@ -4083,6 +4091,7 @@ class WorldRuntime : public QObject
 		struct SaveSnapshot
 		{
 				QString                   targetFilePath;
+				QString                   startupDirectory;
 				QString                   worldFilePath;
 				QString                   pluginsDirectory;
 				QMap<QString, QString>    worldAttributes;
@@ -4146,6 +4155,7 @@ class WorldRuntime : public QObject
 		QDateTime                             m_dateSaved;
 		WorldSocketService                   *m_socket{nullptr};
 		WorldView                            *m_view{nullptr};
+		QMetaObject::Connection               m_viewDestroyedConnection;
 		long                                  m_backgroundColour{0};
 		QImage                                m_backgroundImage;
 		QImage                                m_foregroundImage;
@@ -4304,6 +4314,7 @@ class WorldRuntime : public QObject
 		bool                                  m_inCancelSoundPluginCallback{false};
 		bool                                  m_inScreendrawCallback{false};
 		bool                                  m_inDrawOutputWindowCallback{false};
+		int                                   m_suppressWorldOutputResizedCallbacks{0};
 		bool                                  m_pluginInstallDeferred{false};
 		int                                   m_outputWindowRedrawCount{0};
 		QFileSystemWatcher                   *m_scriptWatcher{nullptr};

@@ -57,5 +57,8 @@ class tst_FontUtils : public QObject
 
 QTEST_GUILESS_MAIN(tst_FontUtils)
 
-#include "tst_FontUtils.moc"
 
+
+#if __has_include("tst_FontUtils.moc")
+#include "tst_FontUtils.moc"
+#endif

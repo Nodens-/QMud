@@ -85,4 +85,7 @@ class tst_ReloadPlannerUtils : public QObject
 
 QTEST_APPLESS_MAIN(tst_ReloadPlannerUtils)
 
+
+#if __has_include("tst_ReloadPlannerUtils.moc")
 #include "tst_ReloadPlannerUtils.moc"
+#endif

@@ -93,4 +93,7 @@ class tst_ReloadStartupConsume : public QObject
 
 QTEST_APPLESS_MAIN(tst_ReloadStartupConsume)
 
+
+#if __has_include("tst_ReloadStartupConsume.moc")
 #include "tst_ReloadStartupConsume.moc"
+#endif

@@ -94,5 +94,8 @@ class tst_TelnetProcessor_Subnegotiation : public QObject
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Subnegotiation)
 
-#include "tst_TelnetProcessor_Subnegotiation.moc"
 
+
+#if __has_include("tst_TelnetProcessor_Subnegotiation.moc")
+#include "tst_TelnetProcessor_Subnegotiation.moc"
+#endif

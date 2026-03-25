@@ -115,5 +115,8 @@ class tst_RegexCompat : public QObject
 
 QTEST_APPLESS_MAIN(tst_RegexCompat)
 
-#include "tst_RegexCompat.moc"
 
+
+#if __has_include("tst_RegexCompat.moc")
+#include "tst_RegexCompat.moc"
+#endif

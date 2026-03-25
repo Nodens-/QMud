@@ -10,11 +10,62 @@
 
 #include "Version.h"
 
-#include <algorithm>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QXmlStreamReader>
+#include <algorithm>
+
+static bool isPortableRootSegment(const QString &segment)
+{
+	return segment.compare(QStringLiteral("worlds"), Qt::CaseInsensitive) == 0 ||
+	       segment.compare(QStringLiteral("logs"), Qt::CaseInsensitive) == 0 ||
+	       segment.compare(QStringLiteral("lua"), Qt::CaseInsensitive) == 0 ||
+	       segment.compare(QStringLiteral("plugins"), Qt::CaseInsensitive) == 0 ||
+	       segment.compare(QStringLiteral("sounds"), Qt::CaseInsensitive) == 0 ||
+	       segment.compare(QStringLiteral("state"), Qt::CaseInsensitive) == 0 ||
+	       segment.compare(QStringLiteral("backup"), Qt::CaseInsensitive) == 0 ||
+	       segment.compare(QStringLiteral("docs"), Qt::CaseInsensitive) == 0;
+}
+
+static QString collapseLeadingDuplicatePortablePrefixPath(const QString &path)
+{
+	QString normalized = path;
+	normalized.replace(QLatin1Char('\\'), QLatin1Char('/'));
+	normalized = QDir::cleanPath(normalized);
+
+	QStringList segments = normalized.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+	if (segments.size() < 2 || !isPortableRootSegment(segments.at(0)))
+		return normalized;
+
+	auto prefixesMatch = [&segments](const int startA, const int startB, const int count) -> bool
+	{
+		for (int i = 0; i < count; ++i)
+		{
+			if (segments.at(startA + i).compare(segments.at(startB + i), Qt::CaseInsensitive) != 0)
+				return false;
+		}
+		return true;
+	};
+
+	bool collapsed = true;
+	while (collapsed)
+	{
+		collapsed              = false;
+		const int maxPrefixLen = static_cast<int>(segments.size() / 2);
+		for (int prefixLen = maxPrefixLen; prefixLen >= 1; --prefixLen)
+		{
+			if (!prefixesMatch(0, prefixLen, prefixLen))
+				continue;
+			for (int removeIndex = 0; removeIndex < prefixLen; ++removeIndex)
+				segments.removeAt(prefixLen);
+			collapsed = true;
+			break;
+		}
+	}
+
+	return QDir::cleanPath(segments.join(QLatin1Char('/')));
+}
 
 static QString escapeInvalidAttributeChars(const QString &input)
 {
@@ -154,7 +205,7 @@ static QString escapeInvalidAttributeChars(const QString &input)
 static QString wrapScriptBlocksInCData(const QString &input)
 {
 	qsizetype pos = 0;
-	QString output;
+	QString   output;
 	output.reserve(input.size());
 	const auto startTag = QStringLiteral("<script");
 	const auto endTag   = QStringLiteral("</script>");
@@ -197,9 +248,23 @@ static QString wrapScriptBlocksInCData(const QString &input)
 	return output;
 }
 
+static QString stripInvalidXmlChars(const QString &input)
+{
+	QString output;
+	output.reserve(input.size());
+	for (const QChar ch : input)
+	{
+		const ushort code = ch.unicode();
+		if (code < 0x20 && code != 0x09 && code != 0x0A && code != 0x0D)
+			continue;
+		output += ch;
+	}
+	return output;
+}
+
 static QString sanitizeXmlForQt(const QString &input)
 {
-	return wrapScriptBlocksInCData(escapeInvalidAttributeChars(input));
+	return stripInvalidXmlChars(wrapScriptBlocksInCData(escapeInvalidAttributeChars(input)));
 }
 
 static QStringList macroDescriptionList()
@@ -357,26 +422,26 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 			{
 				sawContent = true;
 
-					const QXmlStreamAttributes attrs = reader.attributes();
-					for (const QXmlStreamAttribute &attr : attrs)
+				const QXmlStreamAttributes attrs = reader.attributes();
+				for (const QXmlStreamAttribute &attr : attrs)
+				{
+					const QString attrName  = attr.name().toString();
+					const QString attrValue = attr.value().toString();
+					if (attrName == QLatin1String("muclient_version"))
 					{
-						const QString attrName  = attr.name().toString();
-						const QString attrValue = attr.value().toString();
-						if (attrName == QLatin1String("muclient_version"))
-						{
-							if (!attrs.hasAttribute(QLatin1String("qmud_version")))
-								m_worldAttributes.insert(QStringLiteral("qmud_version"), attrValue);
-							continue;
-						}
-						m_worldAttributes.insert(attrName, attrValue);
+						if (!attrs.hasAttribute(QLatin1String("qmud_version")))
+							m_worldAttributes.insert(QStringLiteral("qmud_version"), attrValue);
+						continue;
 					}
+					m_worldAttributes.insert(attrName, attrValue);
+				}
 
-					if (attrs.hasAttribute(QLatin1String("world_file_version")))
-						m_worldFileVersion = attrs.value(QLatin1String("world_file_version")).toInt();
-					if (attrs.hasAttribute(QLatin1String("qmud_version")))
-						m_qmudVersion = attrs.value(QLatin1String("qmud_version")).toString();
-					else if (attrs.hasAttribute(QLatin1String("muclient_version")))
-						m_qmudVersion = attrs.value(QLatin1String("muclient_version")).toString();
+				if (attrs.hasAttribute(QLatin1String("world_file_version")))
+					m_worldFileVersion = attrs.value(QLatin1String("world_file_version")).toInt();
+				if (attrs.hasAttribute(QLatin1String("qmud_version")))
+					m_qmudVersion = attrs.value(QLatin1String("qmud_version")).toString();
+				else if (attrs.hasAttribute(QLatin1String("muclient_version")))
+					m_qmudVersion = attrs.value(QLatin1String("muclient_version")).toString();
 				if (attrs.hasAttribute(QLatin1String("date_saved")))
 				{
 					const QString dateText = attrs.value(QLatin1String("date_saved")).toString();
@@ -1103,7 +1168,7 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 			m_errorString = child.errorString();
 			return false;
 		}
-		child.m_currentIncludeStack = m_currentIncludeStack;
+		child.m_currentIncludeStack  = m_currentIncludeStack;
 		const QString childPluginDir = isPlugin ? QFileInfo(resolved).absolutePath() : currentPluginDir;
 		if (!child.expandIncludesPass(resolved, pluginsDir, programDir, stateDir, false, childPluginDir,
 		                              true))
@@ -1122,7 +1187,10 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 		QString newPluginName;
 		if (isPlugin && !child.m_plugins.isEmpty())
 		{
-			Plugin &childPlugin = child.m_plugins.front();
+			Plugin       &childPlugin    = child.m_plugins.front();
+			const QString includeEnabled = include.attributes.value(QStringLiteral("enabled")).trimmed();
+			if (!includeEnabled.isEmpty())
+				childPlugin.attributes.insert(QStringLiteral("enabled"), includeEnabled);
 			childPlugin.attributes.insert(QStringLiteral("source"), resolved);
 			childPlugin.attributes.insert(QStringLiteral("directory"), QFileInfo(resolved).absolutePath());
 			newPluginId   = childPlugin.attributes.value(QStringLiteral("id")).trimmed().toLower();
@@ -1210,9 +1278,9 @@ bool WorldDocument::isArchiveXMLFile(const QString &fileName)
 	    static_cast<unsigned char>(buf[1]) == 0xFE)
 	{
 		const QByteArray rest = buf.mid(2);
-		const auto len  = rest.size() / 2;
-		const auto *ptr = reinterpret_cast<const char16_t *>(rest.constData());
-		text            = QString::fromUtf16(ptr, len);
+		const auto       len  = rest.size() / 2;
+		const auto      *ptr  = reinterpret_cast<const char16_t *>(rest.constData());
+		text                  = QString::fromUtf16(ptr, len);
 	}
 	else if (buf.size() >= 3 && static_cast<unsigned char>(buf[0]) == 0xEF &&
 	         static_cast<unsigned char>(buf[1]) == 0xBB && static_cast<unsigned char>(buf[2]) == 0xBF)
@@ -1276,10 +1344,11 @@ QString WorldDocument::resolveIncludePath(const QString &rawName, const QString 
 	nativeName = name;
 	nativeName.replace(QLatin1Char('\\'), QLatin1Char('/'));
 #endif
+	nativeName = collapseLeadingDuplicatePortablePrefixPath(nativeName);
 
 	// Repair malformed "/C:/..." paths emitted by some legacy exports.
-	if (nativeName.startsWith(QLatin1Char('/')) && nativeName.size() > 3 &&
-	    nativeName.at(1).isLetter() && nativeName.at(2) == QLatin1Char(':'))
+	if (nativeName.startsWith(QLatin1Char('/')) && nativeName.size() > 3 && nativeName.at(1).isLetter() &&
+	    nativeName.at(2) == QLatin1Char(':'))
 	{
 		nativeName = nativeName.mid(1);
 	}
@@ -1300,8 +1369,8 @@ QString WorldDocument::resolveIncludePath(const QString &rawName, const QString 
 
 	// Convert legacy absolute Windows paths that point into portable roots
 	// (eg. "C:/Games/.../worlds/foo.xml") to portable-root paths.
-	if (const bool isDrivePath = nativeName.size() >= 2 && nativeName.at(1) == QLatin1Char(':') &&
-	                             nativeName.at(0).isLetter();
+	if (const bool isDrivePath =
+	        nativeName.size() >= 2 && nativeName.at(1) == QLatin1Char(':') && nativeName.at(0).isLetter();
 	    isDrivePath)
 	{
 		const QString lower = nativeName.toLower();
@@ -1335,6 +1404,19 @@ QString WorldDocument::resolveIncludePath(const QString &rawName, const QString 
 	    nativeName.startsWith(QStringLiteral("./")) || nativeName.startsWith(QStringLiteral(".\\")) ||
 	    nativeName.startsWith(QStringLiteral("../")) || nativeName.startsWith(QStringLiteral("..\\"));
 
+	QString explicitRelativeWithoutCurrentDir = nativeName;
+	while (explicitRelativeWithoutCurrentDir.startsWith(QStringLiteral("./")) ||
+	       explicitRelativeWithoutCurrentDir.startsWith(QStringLiteral(".\\")))
+	{
+		explicitRelativeWithoutCurrentDir.remove(0, 2);
+	}
+
+	const QString explicitRelativeLower      = explicitRelativeWithoutCurrentDir.toLower();
+	const bool    explicitStartsPortableRoot = explicitRelativeLower == QStringLiteral("worlds") ||
+	                                        explicitRelativeLower.startsWith(QStringLiteral("worlds/")) ||
+	                                        explicitRelativeLower == QStringLiteral("logs") ||
+	                                        explicitRelativeLower.startsWith(QStringLiteral("logs/"));
+
 	const QString normalizedLower    = nativeName.toLower();
 	const bool    startsPortableRoot = normalizedLower == QStringLiteral("worlds") ||
 	                                normalizedLower.startsWith(QStringLiteral("worlds/")) ||
@@ -1343,6 +1425,11 @@ QString WorldDocument::resolveIncludePath(const QString &rawName, const QString 
 
 	if (isExplicitRelative)
 	{
+		if (explicitStartsPortableRoot)
+		{
+			const QString base = progDir.isEmpty() ? worldDir : progDir;
+			return QDir::cleanPath(QDir(base).filePath(explicitRelativeWithoutCurrentDir));
+		}
 		const QString base = (wantPlugins || !currentPluginDir.isEmpty())
 		                         ? (plugDir.isEmpty() ? worldDir : plugDir)
 		                         : worldDir;
@@ -1502,7 +1589,9 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 	m_keypadEntries.append(other.m_keypadEntries);
 	m_printingStyles.append(other.m_printingStyles);
 	m_plugins.append(other.m_plugins);
-	m_includes.append(other.m_includes);
+	// Keep only includes declared in the loaded root document.
+	// Nested includes (including plugin-local includes) are expanded into runtime
+	// content but must not be flattened back into the parent include list.
 	m_scripts.append(other.m_scripts);
 	if (!other.m_comments.isEmpty())
 	{

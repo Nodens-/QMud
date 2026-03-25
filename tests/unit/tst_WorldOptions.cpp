@@ -60,4 +60,7 @@ class tst_WorldOptions : public QObject
 
 QTEST_APPLESS_MAIN(tst_WorldOptions)
 
+
+#if __has_include("tst_WorldOptions.moc")
 #include "tst_WorldOptions.moc"
+#endif
