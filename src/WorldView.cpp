@@ -1086,12 +1086,14 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	m_outputSplitter->setCollapsible(0, false);
 	m_outputSplitter->setCollapsible(1, true);
 	m_outputSplitter->setSizes(QList<int>() << 1 << 0);
+	m_outputSplitter->setHandleWidth(0);
 
 	m_outputScrollBar = new QScrollBar(Qt::Vertical, m_outputContainer);
 	outputStackLayout->addWidget(m_miniUnderlay, 0, 0);
-	outputStackLayout->addWidget(m_outputSplitter, 0, 0);
 	outputStackLayout->addWidget(m_miniOverlay, 0, 0);
+	m_outputSplitter->setGeometry(m_outputStack->rect());
 	m_miniUnderlay->lower();
+	m_outputSplitter->raise();
 	m_miniOverlay->raise();
 
 	outputLayout->addWidget(m_outputStack, 1);
@@ -1708,6 +1710,9 @@ void WorldView::setScrollbackSplitActive(bool active)
 	m_scrollbackSplitActive = active;
 	if (!m_outputSplitter || !m_liveOutput)
 		return;
+	const int defaultHandleWidth =
+	    qMax(1, style()->pixelMetric(QStyle::PM_SplitterWidth, nullptr, m_outputSplitter));
+	m_outputSplitter->setHandleWidth(m_scrollbackSplitActive ? defaultHandleWidth : 0);
 
 	if (m_scrollbackSplitActive)
 	{
@@ -2997,12 +3002,16 @@ int WorldView::outputClientWidth() const
 
 QRect WorldView::outputTextRectangle() const
 {
-	if (!m_outputStack || !m_output || !m_output->viewport())
+	if (!m_outputStack || !m_outputSplitter)
 		return {};
 
-	const QWidget *viewport = m_output->viewport();
-	const QPoint   topLeft  = viewport->mapTo(m_outputStack, QPoint(0, 0));
-	return {topLeft, viewport->size()};
+	QRect rect = m_outputSplitter->geometry();
+	if (m_output)
+	{
+		const QMargins margins = m_output->viewportMarginsPublic();
+		rect.adjust(margins.left(), margins.top(), -margins.right(), -margins.bottom());
+	}
+	return rect;
 }
 
 QFont WorldView::outputFont() const
@@ -5981,6 +5990,8 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 	if ((watched == m_outputContainer || watched == m_outputStack || watched == m_outputSplitter) &&
 	    event->type() == QEvent::Resize)
 	{
+		if (watched == m_outputContainer || watched == m_outputStack)
+			updateWrapMargin();
 		refreshMiniWindows();
 		if (m_runtime)
 			m_runtime->notifyWorldOutputResized();
@@ -6139,13 +6150,11 @@ void WorldView::updateWrapMargin() const
 	const QRect textRect = outputTextRectangleForClient(m_outputStack->size(), m_runtime);
 	const QRect effectiveRect =
 	    textRect.isNull() ? QRect(0, 0, m_outputStack->width(), m_outputStack->height()) : textRect;
-	const int textLeft   = qMax(0, effectiveRect.left());
-	const int textTop    = qMax(0, effectiveRect.top());
-	const int textRight  = qMax(0, m_outputStack->width() - (effectiveRect.left() + effectiveRect.width()));
-	const int textBottom = qMax(0, m_outputStack->height() - (effectiveRect.top() + effectiveRect.height()));
-	const int textWidth  = qMax(0, effectiveRect.width());
+	if (m_outputSplitter->geometry() != effectiveRect)
+		m_outputSplitter->setGeometry(effectiveRect);
+	const int textWidth = qMax(0, effectiveRect.width());
 
-	auto      applyMargin = [this, textLeft, textTop, textRight, textBottom, textWidth](WrapTextBrowser *view)
+	auto      applyMargin = [this, textWidth](WrapTextBrowser *view)
 	{
 		if (!view)
 			return;
@@ -6162,7 +6171,7 @@ void WorldView::updateWrapMargin() const
 		}
 
 		const QMargins currentMargins = view->viewportMarginsPublic();
-		const QMargins targetMargins(textLeft, textTop, textRight + wrapExtraRight, textBottom);
+		const QMargins targetMargins(0, 0, wrapExtraRight, 0);
 		if (currentMargins != targetMargins)
 			view->setViewportMarginsPublic(targetMargins.left(), targetMargins.top(), targetMargins.right(),
 			                               targetMargins.bottom());

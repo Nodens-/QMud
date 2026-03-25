@@ -23,6 +23,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollBar>
+#include <QSplitter>
 #include <QTextBrowser>
 #include <QTextCharFormat>
 #include <QTextDocument>
@@ -597,6 +598,86 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(rect.height(), baseHeight - g_textRectangle.top - 17);
 
 			resetTestState();
+		}
+
+		void textRectangleContainsBothSplitPanes()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(920, 660);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			g_textRectangle.left   = 17;
+			g_textRectangle.top    = 13;
+			g_textRectangle.right  = 320;
+			g_textRectangle.bottom = 250;
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = nullptr;
+			const auto splitters      = view.findChildren<QSplitter *>();
+			for (QSplitter *splitter : splitters)
+			{
+				if (!splitter || splitter->count() != 2)
+					continue;
+				if (!qobject_cast<QTextBrowser *>(splitter->widget(0)) ||
+				    !qobject_cast<QTextBrowser *>(splitter->widget(1)))
+					continue;
+				outputSplitter = splitter;
+				break;
+			}
+			QVERIFY(outputSplitter);
+
+			outputSplitter->setSizes(QList<int>() << 170 << 120);
+			QCoreApplication::processEvents();
+
+			const QRect textRect = view.outputTextRectangle();
+			QCOMPARE(outputSplitter->geometry().topLeft(), textRect.topLeft());
+			QVERIFY(outputSplitter->geometry().width() >= textRect.width());
+			QVERIFY(outputSplitter->geometry().height() >= textRect.height());
+
+			QWidget *const outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+
+			for (int i = 0; i < outputSplitter->count(); ++i)
+			{
+				auto *browser = qobject_cast<QTextBrowser *>(outputSplitter->widget(i));
+				QVERIFY(browser);
+				QWidget *const viewport = browser->viewport();
+				QVERIFY(viewport);
+				const QRect viewportRect(viewport->mapTo(outputStack, QPoint(0, 0)), viewport->size());
+				QVERIFY2(textRect.contains(viewportRect),
+				         "Split output viewport escaped configured text rectangle.");
+			}
+
+			resetTestState();
+		}
+
+		void collapsedScrollbackSplitterHandleIsHidden()
+		{
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = nullptr;
+			const auto splitters      = view.findChildren<QSplitter *>();
+			for (QSplitter *splitter : splitters)
+			{
+				if (!splitter || splitter->count() != 2)
+					continue;
+				if (!qobject_cast<QTextBrowser *>(splitter->widget(0)) ||
+				    !qobject_cast<QTextBrowser *>(splitter->widget(1)))
+					continue;
+				outputSplitter = splitter;
+				break;
+			}
+			QVERIFY(outputSplitter);
+			QCOMPARE(outputSplitter->handleWidth(), 0);
 		}
 
 		void applyRuntimeSettingsPreservesSyntheticInputBreaks()
