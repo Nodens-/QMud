@@ -5873,6 +5873,8 @@ void WorldView::resizeEvent(QResizeEvent *event)
 		m_runtime->installPendingPlugins();
 		m_runtime->notifyWorldOutputResized();
 	}
+	if (!m_frozen)
+		requestOutputScrollToEnd();
 	requestDrawOutputWindowNotification();
 }
 

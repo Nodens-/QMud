@@ -1178,9 +1178,10 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 	if (!m_mdiArea || !subWindow)
 		return;
 
-	auto *world = qobject_cast<WorldChildWindow *>(subWindow);
+	auto *world      = qobject_cast<WorldChildWindow *>(subWindow);
+	auto *textWindow = qobject_cast<TextChildWindow *>(subWindow);
 	m_mdiArea->addSubWindow(subWindow);
-	if (world)
+	if (world || textWindow)
 		subWindow->showMaximized();
 	else
 		subWindow->show();
@@ -1197,7 +1198,10 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 	if (activate)
 	{
 		m_mdiArea->setActiveSubWindow(subWindow);
-		subWindow->show();
+		if (world || textWindow)
+			subWindow->showMaximized();
+		else
+			subWindow->show();
 		subWindow->raise();
 		subWindow->activateWindow();
 		if (world)

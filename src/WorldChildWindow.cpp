@@ -550,7 +550,7 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 				        debugPtr->editor()->setReadOnly(true);
 				        mdi->addSubWindow(debugPtr);
 				        connect(debugPtr, &QObject::destroyed, this, [this] { m_mxpDebug = nullptr; });
-				        debugPtr->show();
+				        debugPtr->showMaximized();
 				        if (MainWindowHost *main = resolveMainWindowHost(window()))
 					        main->updateMdiTabs();
 				        m_mxpDebug                                                   = debugPtr;

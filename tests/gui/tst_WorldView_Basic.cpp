@@ -1107,6 +1107,53 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void resizeEventPreservesEndAnchorWhenViewportWasAtEnd()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(1080, 520);
+			view.show();
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 320; ++i)
+			{
+				const QString line = QStringLiteral("resize-anchor-%1 ").arg(i, 4, 10, QLatin1Char('0')) +
+				                     QString(220, QLatin1Char('x'));
+				view.appendOutputText(line, true);
+			}
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+
+			bar->setValue(bar->maximum());
+			QCoreApplication::processEvents();
+
+			view.resize(460, 520);
+
+			QTRY_VERIFY2(
+			    [&]
+			    {
+				    QScrollBar *scrollBar = browser->verticalScrollBar();
+				    if (!scrollBar)
+					    return false;
+				    const int endTolerance = qMax(1, scrollBar->pageStep());
+				    return scrollBar->value() >= (scrollBar->maximum() - endTolerance);
+			    }(),
+			    "Output viewport drifted away from end after world-view resize.");
+
+			resetTestState();
+		}
+
 		void rebuildDuringLazyRestoreQueuesUntilBackfillCompletes()
 		{
 			resetTestState();
