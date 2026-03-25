@@ -60,4 +60,7 @@ class tst_DoubleMetaphone : public QObject
 
 QTEST_APPLESS_MAIN(tst_DoubleMetaphone)
 
+
+#if __has_include("tst_DoubleMetaphone.moc")
 #include "tst_DoubleMetaphone.moc"
+#endif

@@ -102,4 +102,7 @@ class tst_Environment : public QObject
 
 QTEST_APPLESS_MAIN(tst_Environment)
 
+
+#if __has_include("tst_Environment.moc")
 #include "tst_Environment.moc"
+#endif

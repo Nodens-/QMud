@@ -34,5 +34,8 @@ class tst_QTestSmoke : public QObject
 
 QTEST_APPLESS_MAIN(tst_QTestSmoke)
 
-#include "tst_QTestSmoke.moc"
 
+
+#if __has_include("tst_QTestSmoke.moc")
+#include "tst_QTestSmoke.moc"
+#endif

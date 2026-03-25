@@ -36,5 +36,8 @@ class tst_ColorUtils : public QObject
 
 QTEST_APPLESS_MAIN(tst_ColorUtils)
 
-#include "tst_ColorUtils.moc"
 
+
+#if __has_include("tst_ColorUtils.moc")
+#include "tst_ColorUtils.moc"
+#endif

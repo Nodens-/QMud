@@ -137,4 +137,7 @@ class tst_ImportMergeUtils : public QObject
 
 QTEST_APPLESS_MAIN(tst_ImportMergeUtils)
 
+
+#if __has_include("tst_ImportMergeUtils.moc")
 #include "tst_ImportMergeUtils.moc"
+#endif

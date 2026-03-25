@@ -106,4 +106,7 @@ class tst_WorldCommandProcessor_Speedwalk : public QObject
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_Speedwalk)
 
+
+#if __has_include("tst_WorldCommandProcessor_Speedwalk.moc")
 #include "tst_WorldCommandProcessor_Speedwalk.moc"
+#endif

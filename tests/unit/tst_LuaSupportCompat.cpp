@@ -250,3 +250,8 @@ class tst_LuaSupportCompat : public QObject
 };
 
 QTEST_APPLESS_MAIN(tst_LuaSupportCompat)
+
+
+#if __has_include("tst_LuaSupportCompat.moc")
+#include "tst_LuaSupportCompat.moc"
+#endif

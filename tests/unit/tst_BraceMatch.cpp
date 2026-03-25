@@ -78,5 +78,8 @@ class tst_BraceMatch : public QObject
 
 QTEST_MAIN(tst_BraceMatch)
 
-#include "tst_BraceMatch.moc"
 
+
+#if __has_include("tst_BraceMatch.moc")
+#include "tst_BraceMatch.moc"
+#endif

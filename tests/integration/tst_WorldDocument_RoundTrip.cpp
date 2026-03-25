@@ -145,4 +145,7 @@ class tst_WorldDocument_RoundTrip : public QObject
 
 QTEST_APPLESS_MAIN(tst_WorldDocument_RoundTrip)
 
+
+#if __has_include("tst_WorldDocument_RoundTrip.moc")
 #include "tst_WorldDocument_RoundTrip.moc"
+#endif

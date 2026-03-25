@@ -78,4 +78,7 @@ class tst_WorldCommandProcessor_Regex : public QObject
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_Regex)
 
+
+#if __has_include("tst_WorldCommandProcessor_Regex.moc")
 #include "tst_WorldCommandProcessor_Regex.moc"
+#endif

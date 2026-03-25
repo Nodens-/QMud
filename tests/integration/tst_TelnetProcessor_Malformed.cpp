@@ -245,4 +245,7 @@ class tst_TelnetProcessor_Malformed : public QObject
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Malformed)
 
+
+#if __has_include("tst_TelnetProcessor_Malformed.moc")
 #include "tst_TelnetProcessor_Malformed.moc"
+#endif

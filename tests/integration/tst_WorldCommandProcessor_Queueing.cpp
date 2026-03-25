@@ -161,4 +161,7 @@ class tst_WorldCommandProcessor_Queueing : public QObject
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_Queueing)
 
+
+#if __has_include("tst_WorldCommandProcessor_Queueing.moc")
 #include "tst_WorldCommandProcessor_Queueing.moc"
+#endif

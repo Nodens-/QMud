@@ -65,4 +65,7 @@ class tst_AcceleratorUtils : public QObject
 
 QTEST_GUILESS_MAIN(tst_AcceleratorUtils)
 
+
+#if __has_include("tst_AcceleratorUtils.moc")
 #include "tst_AcceleratorUtils.moc"
+#endif

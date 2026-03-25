@@ -59,4 +59,7 @@ class tst_MainFrame_Actions : public QObject
 
 QTEST_APPLESS_MAIN(tst_MainFrame_Actions)
 
+
+#if __has_include("tst_MainFrame_Actions.moc")
 #include "tst_MainFrame_Actions.moc"
+#endif

@@ -360,4 +360,7 @@ void tst_AnsiSgrParseUtils::indexedColorColonSgrParses()
 
 QTEST_APPLESS_MAIN(tst_AnsiSgrParseUtils)
 
+
+#if __has_include("tst_AnsiSgrParseUtils.moc")
 #include "tst_AnsiSgrParseUtils.moc"
+#endif
