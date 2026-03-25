@@ -245,6 +245,11 @@ class TelnetProcessor
 		 */
 		[[nodiscard]] int    windowColumns() const;
 		/**
+		 * @brief Returns whether NAWS was successfully negotiated with the server.
+		 * @return `true` when NAWS negotiation is active.
+		 */
+		[[nodiscard]] bool   isNawsNegotiated() const;
+		/**
 		 * @brief Returns current NAWS window height in rows.
 		 * @return Current NAWS height in rows.
 		 */

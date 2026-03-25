@@ -8,6 +8,7 @@
  */
 
 #include "LuaCallbackEngine.h"
+
 #include "AcceleratorUtils.h"
 #include "AppController.h"
 #include "DoubleMetaphone.h"
@@ -31,6 +32,7 @@
 #include "WorldView.h"
 #include "dialogs/SpellCheckDialog.h"
 #include "scripting/ScriptingErrors.h"
+
 #include <QApplication>
 #include <QBitmap>
 #include <QByteArray>
@@ -19378,14 +19380,10 @@ bool LuaCallbackEngine::callFunctionNoArgs(const QString &functionName, bool *ha
 	bool result = defaultResult;
 	if (lua_gettop(m_state) > 0)
 	{
-		// Many legacy callbacks (notably OnPluginInstall) don't return an explicit value.
-		// Treat nil/non-numeric non-boolean returns as success to preserve MUSHclient behavior.
 		if (lua_isboolean(m_state, -1))
 			result = lua_toboolean(m_state, -1) != 0;
 		else if (lua_isnumber(m_state, -1))
 			result = lua_tonumber(m_state, -1) != 0.0;
-		else
-			result = true;
 	}
 	lua_pop(m_state, 1);
 	return result;
@@ -19434,7 +19432,7 @@ bool LuaCallbackEngine::callFunctionWithString(const QString &functionName, cons
 	{
 		if (lua_isboolean(m_state, -1))
 			result = lua_toboolean(m_state, -1) != 0;
-		else
+		else if (lua_isnumber(m_state, -1))
 			result = lua_tonumber(m_state, -1) != 0.0;
 	}
 	lua_pop(m_state, 1);
@@ -19484,7 +19482,7 @@ bool LuaCallbackEngine::callFunctionWithBytes(const QString &functionName, const
 	{
 		if (lua_isboolean(m_state, -1))
 			result = lua_toboolean(m_state, -1) != 0;
-		else
+		else if (lua_isnumber(m_state, -1))
 			result = lua_tonumber(m_state, -1) != 0.0;
 	}
 	lua_pop(m_state, 1);
@@ -19631,7 +19629,7 @@ bool LuaCallbackEngine::callFunctionWithNumberAndString(const QString &functionN
 	{
 		if (lua_isboolean(m_state, -1))
 			result = lua_toboolean(m_state, -1) != 0;
-		else
+		else if (lua_isnumber(m_state, -1))
 			result = lua_tonumber(m_state, -1) != 0.0;
 	}
 	lua_pop(m_state, 1);
@@ -19690,7 +19688,7 @@ bool LuaCallbackEngine::callFunctionWithNumberAndStrings(const QString &function
 	{
 		if (lua_isboolean(m_state, -1))
 			result = lua_toboolean(m_state, -1) != 0;
-		else
+		else if (lua_isnumber(m_state, -1))
 			result = lua_tonumber(m_state, -1) != 0.0;
 	}
 	lua_pop(m_state, 1);
@@ -19747,7 +19745,7 @@ bool LuaCallbackEngine::callFunctionWithTwoNumbersAndString(const QString &funct
 	{
 		if (lua_isboolean(m_state, -1))
 			result = lua_toboolean(m_state, -1) != 0;
-		else
+		else if (lua_isnumber(m_state, -1))
 			result = lua_tonumber(m_state, -1) != 0.0;
 	}
 	lua_pop(m_state, 1);
@@ -19801,7 +19799,7 @@ bool LuaCallbackEngine::callFunctionWithNumberAndBytes(const QString &functionNa
 	{
 		if (lua_isboolean(m_state, -1))
 			result = lua_toboolean(m_state, -1) != 0;
-		else
+		else if (lua_isnumber(m_state, -1))
 			result = lua_tonumber(m_state, -1) != 0.0;
 	}
 	lua_pop(m_state, 1);

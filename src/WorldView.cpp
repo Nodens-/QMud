@@ -8,6 +8,7 @@
  */
 
 #include "WorldView.h"
+
 #include "AcceleratorUtils.h"
 #include "AppController.h"
 #include "Environment.h"
@@ -367,6 +368,91 @@ namespace
 		if (!browser->viewport()->rect().contains(localPos))
 			return {};
 		return browser->anchorAt(localPos).trimmed();
+	}
+
+	QString decodeMxpMenuText(QString text)
+	{
+		if (text.isEmpty())
+			return {};
+
+		text = QUrl::fromPercentEncoding(text.toUtf8());
+		if (!text.contains(QLatin1Char('&')))
+			return text;
+
+		QString result;
+		result.reserve(text.size());
+		for (qsizetype i = 0; i < text.size(); ++i)
+		{
+			const QChar ch = text.at(i);
+			if (ch != QLatin1Char('&'))
+			{
+				result.append(ch);
+				continue;
+			}
+
+			const qsizetype semi = text.indexOf(QLatin1Char(';'), i + 1);
+			if (semi < 0)
+			{
+				result.append(ch);
+				continue;
+			}
+
+			const QString entity = text.mid(i + 1, semi - i - 1).trimmed();
+			QString       decoded;
+			if (entity.compare(QStringLiteral("quot"), Qt::CaseInsensitive) == 0)
+				decoded = QStringLiteral("\"");
+			else if (entity.compare(QStringLiteral("apos"), Qt::CaseInsensitive) == 0)
+				decoded = QStringLiteral("'");
+			else if (entity.compare(QStringLiteral("amp"), Qt::CaseInsensitive) == 0)
+				decoded = QStringLiteral("&");
+			else if (entity.compare(QStringLiteral("lt"), Qt::CaseInsensitive) == 0)
+				decoded = QStringLiteral("<");
+			else if (entity.compare(QStringLiteral("gt"), Qt::CaseInsensitive) == 0)
+				decoded = QStringLiteral(">");
+			else if (entity.startsWith(QLatin1Char('#')))
+			{
+				bool     ok   = false;
+				uint32_t code = 0;
+				if (entity.size() > 2 &&
+				    (entity.at(1) == QLatin1Char('x') || entity.at(1) == QLatin1Char('X')))
+					code = entity.mid(2).toUInt(&ok, 16);
+				else
+					code = entity.mid(1).toUInt(&ok, 10);
+				if (ok && code <= 0x10FFFFu)
+					decoded = QString(QChar::fromUcs4(code));
+			}
+
+			if (decoded.isEmpty())
+			{
+				result.append(ch);
+				continue;
+			}
+
+			result.append(decoded);
+			i = semi;
+		}
+		return result;
+	}
+
+	QString anchorHintAtPosition(const QTextBrowser *browser, const QPoint &sourcePos)
+	{
+		if (!browser)
+			return {};
+
+		QTextCursor cursor = browser->cursorForPosition(sourcePos);
+		auto        format = cursor.charFormat();
+		if (format.isAnchor() && !format.anchorHref().trimmed().isEmpty())
+			return format.toolTip().trimmed();
+
+		const int pos = cursor.position();
+		if (pos > 0)
+		{
+			cursor.setPosition(pos - 1);
+			format = cursor.charFormat();
+			if (format.isAnchor() && !format.anchorHref().trimmed().isEmpty())
+				return format.toolTip().trimmed();
+		}
+		return {};
 	}
 
 	class ContextMenuDismissReplayFilter final : public QObject
@@ -1139,6 +1225,52 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 	applyRuntimeSettings();
 }
 
+QVector<QPair<QString, QString>> WorldView::parseMxpContextMenuActions(const QString &rawHref,
+                                                                       const QString &rawHint)
+{
+	const QString decodedHref = decodeMxpMenuText(rawHref).trimmed();
+	if (decodedHref.isEmpty())
+		return {};
+
+	QStringList actionParts = decodedHref.split(QLatin1Char('|'), Qt::KeepEmptyParts);
+	QStringList actions;
+	actions.reserve(actionParts.size());
+	for (const QString &part : actionParts)
+	{
+		const QString trimmed = part.trimmed();
+		if (!trimmed.isEmpty())
+			actions.push_back(trimmed);
+	}
+	if (actions.isEmpty())
+		return {};
+
+	const QString decodedHint = decodeMxpMenuText(rawHint).trimmed();
+	QStringList   hints;
+	if (!decodedHint.isEmpty())
+		hints = decodedHint.split(QLatin1Char('|'), Qt::KeepEmptyParts);
+
+	while (!hints.isEmpty() && hints.size() > actions.size())
+		hints.removeFirst();
+
+	constexpr int                    kMaxMxpContextActions = 32;
+	QVector<QPair<QString, QString>> result;
+	result.reserve(qMin(actions.size(), kMaxMxpContextActions));
+
+	for (int i = 0; i < actions.size() && i < kMaxMxpContextActions; ++i)
+	{
+		const QString &action = actions.at(i);
+		QString        label;
+		if (i < hints.size())
+			label = hints.at(i).trimmed();
+		if (label.isEmpty())
+			label = action;
+		label.replace(QStringLiteral("&"), QStringLiteral("&&"));
+		result.push_back({action, label});
+	}
+
+	return result;
+}
+
 void WorldView::refreshMiniWindows() const
 {
 	if (m_miniUnderlay)
@@ -1172,16 +1304,37 @@ bool WorldView::showWorldContextMenuAtGlobalPos(const QPoint &globalPos)
 	if (!source)
 		return false;
 
-	const QPoint sourcePos = source->viewport()->mapFromGlobal(globalPos);
-	QMenu       *menu      = source->createStandardContextMenu(sourcePos);
-	if (!menu)
-		return false;
+	const QPoint                           sourcePos = source->viewport()->mapFromGlobal(globalPos);
+	QMenu                                 *menu      = nullptr;
 
-	menu->addSeparator();
-	if (QAction *copyHtml = menu->addAction(QStringLiteral("Copy as HTML")); copyHtml)
+	const QString                          href    = source->anchorAt(sourcePos).trimmed();
+	const QString                          hint    = anchorHintAtPosition(source, sourcePos);
+	const QVector<QPair<QString, QString>> actions = parseMxpContextMenuActions(href, hint);
+	if (!actions.isEmpty())
 	{
-		copyHtml->setEnabled(hasOutputSelection());
-		connect(copyHtml, &QAction::triggered, this, [this] { copySelectionAsHtml(); });
+		menu = new QMenu(source);
+		for (int i = 0; i < actions.size(); ++i)
+		{
+			const auto &entry  = actions.at(i);
+			QAction    *action = menu->addAction(entry.second);
+			connect(action, &QAction::triggered, this,
+			        [this, actionText = entry.first] { emit hyperlinkActivated(actionText); });
+			if (i == 0)
+				menu->setDefaultAction(action);
+		}
+	}
+	else
+	{
+		menu = source->createStandardContextMenu(sourcePos);
+		if (!menu)
+			return false;
+
+		menu->addSeparator();
+		if (QAction *copyHtml = menu->addAction(QStringLiteral("Copy as HTML")); copyHtml)
+		{
+			copyHtml->setEnabled(hasOutputSelection());
+			connect(copyHtml, &QAction::triggered, this, [this] { copySelectionAsHtml(); });
+		}
 	}
 
 	forceOpaqueMenu(menu);
@@ -4218,6 +4371,7 @@ QPoint WorldView::mapEventToOutputStack(const QPointF &localPos, const QWidget *
 MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspotId, QString &windowName,
                                          bool includeUnderneath) const
 {
+	Q_UNUSED(includeUnderneath);
 	hotspotId.clear();
 	windowName.clear();
 	if (!m_runtime || !m_outputStack)
@@ -4228,10 +4382,8 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 	{
 		if (!window || !window->show || window->temporarilyHide)
 			continue;
-		// Some migrated profiles/plugins persist stale flags; if hotspots exist, keep them interactive.
-		if ((window->flags & kMiniWindowIgnoreMouse) && window->hotspots.isEmpty())
-			continue;
-		if (!includeUnderneath && (window->flags & kMiniWindowDrawUnderneath))
+		// MUSHclient parity: underneath or ignore-mouse windows are never mouse-interactive.
+		if ((window->flags & kMiniWindowDrawUnderneath) || (window->flags & kMiniWindowIgnoreMouse))
 			continue;
 		if (window->rect.width() <= 0 || window->rect.height() <= 0)
 			continue;

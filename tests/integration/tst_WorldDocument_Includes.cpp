@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QtTest/QTest>
+#include <algorithm>
 
 namespace
 {
@@ -20,7 +21,7 @@ namespace
 	constexpr unsigned int kIncludeMergeKeep      = 0x04;
 	constexpr unsigned int kIncludeMergeWarn      = 0x08;
 
-	QString fixturePath(const QString &relativePath)
+	QString                fixturePath(const QString &relativePath)
 	{
 		return QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR)).filePath(relativePath);
 	}
@@ -45,12 +46,8 @@ namespace
 
 	bool warningContains(const WorldDocument &doc, const QString &needle)
 	{
-		for (const QString &warning : doc.warnings())
-		{
-			if (warning.contains(needle))
-				return true;
-		}
-		return false;
+		return std::ranges::any_of(doc.warnings(),
+		                           [&needle](const QString &warning) { return warning.contains(needle); });
 	}
 
 	QString pluginVariableByName(const WorldDocument::Plugin &plugin, const QString &name)
@@ -71,7 +68,7 @@ class tst_WorldDocument_Includes : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void initTestCase()
 		{
@@ -80,12 +77,13 @@ class tst_WorldDocument_Includes : public QObject
 
 		void expandIncludesMergesWorldAndPluginFixtures()
 		{
-			const QString worldPath  = fixturePath(QStringLiteral("tests/data/worlds/world_with_plugin_include.xml"));
+			const QString worldPath =
+			    fixturePath(QStringLiteral("tests/data/worlds/world_with_plugin_include.xml"));
 			const QString pluginsDir = fixturePath(QStringLiteral("tests/data/plugins"));
 			const QString programDir = fixturePath(QStringLiteral("tests/data"));
 			const QString stateDir   = fixturePath(QStringLiteral("tests/data/plugins/state"));
 
-			WorldDocument  doc;
+			WorldDocument doc;
 			QVERIFY(doc.loadFromFile(worldPath));
 			QVERIFY(doc.expandIncludes(worldPath, pluginsDir, programDir, stateDir));
 
@@ -197,6 +195,46 @@ class tst_WorldDocument_Includes : public QObject
 			}
 		}
 
+		void pluginLocalIncludesAreNotPromotedToWorldIncludes()
+		{
+			QMudTest::ScopedTempDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsPath       = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
+			const QString worldPath         = QDir(tempDir.path()).filePath(QStringLiteral("main.xml"));
+			const QString pluginPath        = QDir(pluginsPath).filePath(QStringLiteral("plugin.xml"));
+			const QString pluginIncludePath = QDir(pluginsPath).filePath(QStringLiteral("constants.xml"));
+
+			QVERIFY(QDir().mkpath(pluginsPath));
+			QVERIFY(writeTextFile(worldPath, QStringLiteral(R"(<?xml version="1.0" encoding="UTF-8"?>
+<qmud>
+  <world id="aaaaaaaaaaaaaaaaaaaaaaaa" name="Main"/>
+  <include name="plugin.xml" plugin="y"/>
+</qmud>)")));
+			QVERIFY(writeTextFile(pluginPath, QStringLiteral(R"(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin name="PluginA" id="bbbbbbbbbbbbbbbbbbbbbbbb" language="lua"/>
+  <include name="constants.xml"/>
+</muclient>)")));
+			QVERIFY(writeTextFile(pluginIncludePath, QStringLiteral(R"(<?xml version="1.0" encoding="UTF-8"?>
+<qmud>
+  <variables>
+    <variable name="from_constants">ok</variable>
+  </variables>
+</qmud>)")));
+
+			WorldDocument doc;
+			QVERIFY(doc.loadFromFile(worldPath));
+			QVERIFY(doc.expandIncludes(worldPath, pluginsPath, tempDir.path(), QString()));
+
+			QCOMPARE(doc.includes().size(), 1);
+			QCOMPARE(doc.includes().front().attributes.value(QStringLiteral("name")),
+			         QStringLiteral("plugin.xml"));
+			QCOMPARE(doc.plugins().size(), 1);
+			QCOMPARE(pluginVariableByName(doc.plugins().front(), QStringLiteral("from_constants")),
+			         QStringLiteral("ok"));
+		}
+
 		void includeWithoutNameReturnsError()
 		{
 			QMudTest::ScopedTempDir tempDir;
@@ -214,7 +252,7 @@ class tst_WorldDocument_Includes : public QObject
 			QVERIFY(!doc.expandIncludes(mainPath, tempDir.path(), tempDir.path(), QString()));
 			QCOMPARE(doc.errorString(), QStringLiteral("Name of include file not specified"));
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_WorldDocument_Includes)

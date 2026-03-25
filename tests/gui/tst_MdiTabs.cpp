@@ -11,22 +11,28 @@
 #include "WorldRuntime.h"
 
 #include <QMdiArea>
-#include <QSignalSpy>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
 // NOLINTBEGIN(readability-convert-member-functions-to-static)
-WorldChildWindow::WorldChildWindow(QWidget *parent) : QMdiSubWindow(parent) {}
+WorldChildWindow::WorldChildWindow(QWidget *parent) : QMdiSubWindow(parent)
+{
+}
 
 WorldChildWindow::WorldChildWindow(const QString &title, QWidget *parent) : QMdiSubWindow(parent)
 {
 	setWindowTitle(title);
 }
 
-void WorldChildWindow::setRuntime(WorldRuntime *) {}
+void WorldChildWindow::setRuntime(WorldRuntime *)
+{
+}
 
-void WorldChildWindow::setRuntimeObserver(WorldRuntime *) {}
+void WorldChildWindow::setRuntimeObserver(WorldRuntime *)
+{
+}
 
 WorldRuntime *WorldChildWindow::runtime() const
 {
@@ -58,7 +64,9 @@ bool WorldChildWindow::event(QEvent *event)
 	return QMdiSubWindow::event(event);
 }
 
-ActivityChildWindow::ActivityChildWindow(QWidget *parent) : QMdiSubWindow(parent) {}
+ActivityChildWindow::ActivityChildWindow(QWidget *parent) : QMdiSubWindow(parent)
+{
+}
 
 ActivityChildWindow::ActivityChildWindow(const QString &title, QWidget *parent) : QMdiSubWindow(parent)
 {
@@ -70,9 +78,12 @@ ActivityWindow *ActivityChildWindow::activityWindow() const
 	return nullptr;
 }
 
-TextChildWindow::TextChildWindow(QWidget *parent) : QMdiSubWindow(parent) {}
+TextChildWindow::TextChildWindow(QWidget *parent) : QMdiSubWindow(parent)
+{
+}
 
-TextChildWindow::TextChildWindow(const QString &title, const QString &, QWidget *parent) : QMdiSubWindow(parent)
+TextChildWindow::TextChildWindow(const QString &title, const QString &, QWidget *parent)
+    : QMdiSubWindow(parent)
 {
 	setWindowTitle(title);
 }
@@ -82,16 +93,22 @@ QPlainTextEdit *TextChildWindow::editor() const
 	return nullptr;
 }
 
-void TextChildWindow::setText(const QString &) const {}
+void TextChildWindow::setText(const QString &) const
+{
+}
 
-void TextChildWindow::appendText(const QString &) const {}
+void TextChildWindow::appendText(const QString &) const
+{
+}
 
 QString TextChildWindow::filePath() const
 {
 	return QString();
 }
 
-void TextChildWindow::setFilePath(const QString &) {}
+void TextChildWindow::setFilePath(const QString &)
+{
+}
 
 bool TextChildWindow::saveToFile(const QString &, QString *error)
 {
@@ -107,7 +124,9 @@ bool TextChildWindow::saveToCurrentFile(QString *error)
 	return false;
 }
 
-void TextChildWindow::setQuerySaveOnClose(bool) {}
+void TextChildWindow::setQuerySaveOnClose(bool)
+{
+}
 
 void TextChildWindow::closeEvent(QCloseEvent *event)
 {
@@ -164,7 +183,7 @@ class tst_MdiTabs : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void tabCreationVisibilityAndActiveTab()
 		{
@@ -219,16 +238,18 @@ class tst_MdiTabs : public QObject
 			addWindow(mdiArea, QStringLiteral("Three"));
 			tabs.updateTabs();
 
-			QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("One"), QStringLiteral("Two"), QStringLiteral("Three")}));
+			QCOMPARE(tabTexts(tabs),
+			         QStringList({QStringLiteral("One"), QStringLiteral("Two"), QStringLiteral("Three")}));
 
 			tabs.moveTab(0, 2);
 			tabs.updateTabs();
-			QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("Two"), QStringLiteral("Three"), QStringLiteral("One")}));
+			QCOMPARE(tabTexts(tabs),
+			         QStringList({QStringLiteral("Two"), QStringLiteral("Three"), QStringLiteral("One")}));
 
 			addWindow(mdiArea, QStringLiteral("Four"));
 			tabs.updateTabs();
-			QCOMPARE(tabTexts(tabs),
-			         QStringList({QStringLiteral("Two"), QStringLiteral("Three"), QStringLiteral("One"), QStringLiteral("Four")}));
+			QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("Two"), QStringLiteral("Three"),
+			                                      QStringLiteral("One"), QStringLiteral("Four")}));
 		}
 
 		void middleClickClosesClickedTab()
@@ -256,9 +277,7 @@ class tst_MdiTabs : public QObject
 			QCOMPARE(tabs.count(), 1);
 			QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("Two")}));
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_MAIN(tst_MdiTabs)
-
-#include "tst_MdiTabs.moc"

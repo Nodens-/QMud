@@ -11,6 +11,7 @@
 // Handles telnet phase/state transitions together with IAC/MCCP decoding.
 
 #include "TelnetProcessor.h"
+
 #include "MxpDiagnostics.h"
 
 #include <QList>
@@ -98,6 +99,7 @@ static constexpr int           kMaxMxpCustomDefinitions = 1024;
 static constexpr int           kMaxMxpAttlistBytes      = 16384;
 static constexpr int           DBG_ERROR                = 1;
 static constexpr int           DBG_WARNING              = 2;
+static constexpr int           DBG_INFO                 = 3;
 
 namespace
 {
@@ -452,6 +454,7 @@ void TelnetProcessor::resetConnectionState()
 	m_mxpModeChanges.clear();
 	m_mxpEventsOverflowed = false;
 	m_mxpEventSequence    = 0;
+	m_nawsWanted          = false;
 	m_compress            = false;
 	m_mccpType            = 0;
 	m_compressInitOk      = false;
@@ -667,6 +670,11 @@ int TelnetProcessor::mccpType() const
 int TelnetProcessor::windowColumns() const
 {
 	return m_wrapColumns;
+}
+
+bool TelnetProcessor::isNawsNegotiated() const
+{
+	return m_naws && m_nawsWanted;
 }
 
 int TelnetProcessor::windowRows() const
@@ -1088,20 +1096,25 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			if (m_mxpEnabled && m_mxpMode == eMXP_secure_once && c != '<')
 				mxpRestoreMode();
 
-			if (m_mxpEnabled && m_useMxp != eNoMXP && m_mxpMode != eMXP_locked &&
-			    m_mxpMode != eMXP_perm_locked && c == '<') // MXP element start
+			if (m_mxpEnabled && m_useMxp != eNoMXP && (mxpOpen() || mxpSecure()) &&
+			    c == '<') // MXP element start
 			{
 				m_mxpPhase = HAVE_MXP_ELEMENT;
 				m_mxpString.clear();
 				continue;
 			}
-			if (m_mxpEnabled && m_useMxp != eNoMXP && m_mxpMode != eMXP_locked &&
-			    m_mxpMode != eMXP_perm_locked && c == '&') // MXP entity start
+			if (m_mxpEnabled && m_useMxp != eNoMXP && (mxpOpen() || mxpSecure()) &&
+			    c == '&') // MXP entity start
 			{
 				m_mxpPhase = HAVE_MXP_ENTITY;
 				m_mxpString.clear();
 				continue;
 			}
+
+			// Match MUSHclient MXP newline semantics: on each newline in MXP mode
+			// (except Pueblo), revert to the configured default security mode.
+			if (m_mxpEnabled && !m_puebloActive && c == '\n')
+				mxpModeChange(-1);
 
 			output.append(static_cast<char>(c));
 			outputSize += 1;
@@ -1324,6 +1337,8 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				if (m_callbacks.onNoEchoChanged)
 					m_callbacks.onNoEchoChanged(false);
 			}
+			if (c == TELOPT_NAWS)
+				m_nawsWanted = false;
 			sendIacDont(c);
 			m_phase = NONE;
 			break;
@@ -1417,9 +1432,12 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				mxpOff(true);
 				break; // end of MXP
 
-			// for MTTS start back at sequence 0
+				// for MTTS start back at sequence 0
 			case TELOPT_TERMINAL_TYPE:
 				m_ttypeSequence = 0;
+				break;
+			case TELOPT_NAWS:
+				m_nawsWanted = false;
 				break;
 			default:
 				break;
@@ -2302,18 +2320,6 @@ void TelnetProcessor::emitMxpDiagnostic(const int level, const long messageNumbe
 
 void TelnetProcessor::mxpDefinition(QByteArray definition)
 {
-	if (m_puebloActive)
-	{
-		emitMxpDiagnosticLazy(DBG_ERROR, errMXP_DefinitionAttemptInPueblo,
-		                      [definition]
-		                      {
-			                      return QStringLiteral(
-			                                 "Defining elements/entities not valid in Pueblo: <!%1>")
-			                          .arg(QString::fromLocal8Bit(definition));
-		                      });
-		return;
-	}
-
 	const bool isSecure = mxpSecure();
 	if (m_mxpMode == eMXP_secure_once)
 		mxpRestoreMode();
@@ -2364,11 +2370,13 @@ void TelnetProcessor::mxpDefinition(QByteArray definition)
 	}
 
 	// debugging
-	// MXP_error (DBG_INFO, msgMXP_GotDefinition,
-	//           TFormat ("Got Definition: !%s %s %s",
-	//                   (LPCTSTR) strDefinition,
-	//                   (LPCTSTR) strName,
-	//                   (LPCTSTR) strTag));
+	emitMxpDiagnosticLazy(DBG_INFO, msgMXP_GotDefinition,
+	                      [strDefinition, strName, definition]
+	                      {
+		                      return QStringLiteral("Got Definition: !%1 %2 %3")
+		                          .arg(QString::fromLocal8Bit(strDefinition), QString::fromLocal8Bit(strName),
+		                               QString::fromLocal8Bit(definition));
+	                      });
 
 	if (strDefinition == "element" || strDefinition == "el")
 	{

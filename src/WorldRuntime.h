@@ -14,6 +14,7 @@
 #include "MiniWindow.h"
 #include "SqliteCompat.h"
 #include "TelnetProcessor.h"
+
 #include <QByteArray>
 #include <QColor>
 #include <QDateTime>
@@ -22,6 +23,7 @@
 #include <QImage>
 #include <QList>
 #include <QMap>
+#include <QMetaObject>
 #include <QObject>
 #include <QSet>
 #include <QSharedPointer>
@@ -4147,6 +4149,7 @@ class WorldRuntime : public QObject
 		QDateTime                             m_dateSaved;
 		WorldSocketService                   *m_socket{nullptr};
 		WorldView                            *m_view{nullptr};
+		QMetaObject::Connection               m_viewDestroyedConnection;
 		long                                  m_backgroundColour{0};
 		QImage                                m_backgroundImage;
 		QImage                                m_foregroundImage;

@@ -23,12 +23,13 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollBar>
-#include <QSignalSpy>
 #include <QTextBrowser>
 #include <QTextCharFormat>
 #include <QTextDocument>
 #include <QTextFragment>
 #include <QTimer>
+#include <QUrl>
+#include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
 #include <functional>
@@ -192,7 +193,6 @@ namespace
 	struct AnchorFormatSnapshot
 	{
 			bool            found{false};
-			int             blockNumber{-1};
 			QTextCharFormat format;
 	};
 
@@ -208,7 +208,7 @@ namespace
 				const QTextCharFormat format = fragment.charFormat();
 				if (!format.isAnchor() || format.anchorHref() != href)
 					continue;
-				return AnchorFormatSnapshot{true, block.blockNumber(), format};
+				return AnchorFormatSnapshot{true, format};
 			}
 		}
 		return {};
@@ -921,6 +921,55 @@ class tst_WorldView_Basic : public QObject
 			QTRY_COMPARE(hoverSpy.back().at(0).toString(), QString());
 
 			resetTestState();
+		}
+
+		void hyperlinkLeftClickEmitsHrefForCommandProcessorDispatch()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(720, 420);
+			view.show();
+			QCoreApplication::processEvents();
+
+			WorldRuntime::StyleSpan span;
+			span.length     = QStringLiteral("assistant").size();
+			span.actionType = WorldRuntime::ActionSend;
+			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
+			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
+			                                       "Attack assistant");
+			view.appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			const QPoint anchorPoint = findAnchorPoint(*browser, span.action);
+			QVERIFY(anchorPoint.x() >= 0 && anchorPoint.y() >= 0);
+
+			QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
+			QTest::mouseClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, anchorPoint);
+			QTRY_COMPARE(activatedSpy.count(), 1);
+			const QString emittedHref =
+			    QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8());
+			QCOMPARE(emittedHref, span.action);
+
+			resetTestState();
+		}
+
+		void mxpContextMenuActionParsingBuildsRightClickEntries()
+		{
+			const QVector<QPair<QString, QString>> actions = WorldView::parseMxpContextMenuActions(
+			    QStringLiteral("examine assistant|consider assistant|attack assistant"),
+			    QStringLiteral(
+			        "Right mouse click to act|Examine assistant|Consider assistant|Attack assistant"));
+			QCOMPARE(actions.size(), 3);
+			QCOMPARE(actions.at(0).first, QStringLiteral("examine assistant"));
+			QCOMPARE(actions.at(0).second, QStringLiteral("Examine assistant"));
+			QCOMPARE(actions.at(1).first, QStringLiteral("consider assistant"));
+			QCOMPARE(actions.at(1).second, QStringLiteral("Consider assistant"));
+			QCOMPARE(actions.at(2).first, QStringLiteral("attack assistant"));
+			QCOMPARE(actions.at(2).second, QStringLiteral("Attack assistant"));
 		}
 
 		void runtimeSettingsRebuildAttributeKeysExcludeWrapAndHyperlinkPresentation()

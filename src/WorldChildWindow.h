@@ -11,6 +11,7 @@
 
 #include <QMdiSubWindow>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QString>
 
 class ActivityWindow;
@@ -19,6 +20,7 @@ class QEvent;
 class QResizeEvent;
 class QShowEvent;
 class QTimer;
+class TextChildWindow;
 class WorldRuntime;
 
 /**
@@ -122,7 +124,7 @@ class WorldChildWindow : public QMdiSubWindow
 		class WorldRuntime          *m_runtime{nullptr};
 		class WorldView             *m_view{nullptr};
 		class WorldCommandProcessor *m_commandProcessor{nullptr};
-		class MxpDebugWindow        *m_mxpDebug{nullptr};
+		QPointer<TextChildWindow>    m_mxpDebug{nullptr};
 		QTimer                      *m_autosaveTimer{nullptr};
 		bool                         m_primaryRuntimeBinding{false};
 		bool                         m_autosaveInFlight{false};

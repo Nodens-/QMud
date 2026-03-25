@@ -13,13 +13,13 @@
 
 namespace
 {
-	constexpr unsigned char ESC       = 0x1B;
-	constexpr unsigned char IAC       = 0xFF;
-	constexpr unsigned char SB        = 0xFA;
-	constexpr unsigned char SE        = 0xF0;
+	constexpr unsigned char ESC        = 0x1B;
+	constexpr unsigned char IAC        = 0xFF;
+	constexpr unsigned char SB         = 0xFA;
+	constexpr unsigned char SE         = 0xF0;
 	constexpr unsigned char TELOPT_MXP = 91;
 
-	QByteArray bytes(std::initializer_list<unsigned char> raw)
+	QByteArray              bytes(std::initializer_list<unsigned char> raw)
 	{
 		QByteArray out;
 		for (const unsigned char c : raw)
@@ -35,7 +35,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void parseStartAndEndTags()
 		{
@@ -71,7 +71,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 
 		void onCommandModeStartsFromSubnegotiation()
 		{
-			TelnetProcessor  processor;
+			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
 			processor.setUseMxp(0); // eOnCommandMXP
@@ -86,7 +86,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 
 		void resetAndDisableCallbacks()
 		{
-			TelnetProcessor  processor;
+			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
 
@@ -106,7 +106,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 
 		void activatePuebloMode()
 		{
-			TelnetProcessor  processor;
+			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
 
@@ -214,7 +214,8 @@ class tst_TelnetProcessor_Mxp : public QObject
 			QCOMPARE(events.at(0).name.toLower(), QByteArrayLiteral("send"));
 			QCOMPARE(events.at(1).name.toLower(), QByteArrayLiteral("send"));
 			QCOMPARE(events.at(0).offset, static_cast<int>(prefix.size()));
-			QCOMPARE(events.at(1).offset, static_cast<int>(prefix.size() + QByteArrayLiteral("Testuser").size()));
+			QCOMPARE(events.at(1).offset,
+			         static_cast<int>(prefix.size() + QByteArrayLiteral("Testuser").size()));
 		}
 
 		void modeBoundaryOffsetsTrackEscZWithinMixedStream()
@@ -245,7 +246,37 @@ class tst_TelnetProcessor_Mxp : public QObject
 			QCOMPARE(modeChanges.at(1).offset, static_cast<int>(QByteArrayLiteral("Testuser").size()));
 			QVERIFY(modeChanges.at(0).sequence < modeChanges.at(1).sequence);
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+
+		void customElementDefinitionParsesAndIsQueryable()
+		{
+			TelnetProcessor processor;
+			processor.setUseMxp(2); // eUseMXP
+
+			QByteArray input;
+			input.append(static_cast<char>(ESC));
+			input.append('[');
+			input.append('1');
+			input.append('z');
+			input.append(
+			    QByteArrayLiteral("<!el pers \"<send href='examine &name;|consider &name;' "
+			                      "hint='Examine &desc;|Consider &desc;' expire=pers>\" ATT='name desc'>"));
+
+			QCOMPARE(processor.processBytes(input), QByteArray());
+
+			const QList<TelnetProcessor::MxpEvent> events = processor.takeMxpEvents();
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.at(0).type, TelnetProcessor::MxpEvent::Definition);
+
+			TelnetProcessor::CustomElementInfo info;
+			QVERIFY(processor.getCustomElementInfo(QByteArrayLiteral("pers"), info));
+			QCOMPARE(info.name, QByteArrayLiteral("pers"));
+			QCOMPARE(info.attributes, QByteArrayLiteral("name desc"));
+			QVERIFY(info.definition.contains(QByteArrayLiteral("send")));
+			QVERIFY(info.definition.contains(QByteArrayLiteral("&name;")));
+			QVERIFY(info.definition.contains(QByteArrayLiteral("&desc;")));
+			QCOMPARE(processor.customElementCount(), 1);
+		}
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Mxp)

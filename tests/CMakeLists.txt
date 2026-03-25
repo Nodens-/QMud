@@ -98,6 +98,26 @@ qmud_add_qtest(tst_Environment
         LABELS
         unit)
 
+if (QMUD_ENABLE_LUA_SCRIPTING)
+    qmud_add_qtest(tst_LuaSupportCompat
+            SOURCES
+            unit/tst_LuaSupportCompat.cpp
+            "${CMAKE_SOURCE_DIR}/src/LuaSupport.cpp"
+            "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
+            LIBRARIES
+            ${LUA_LIBRARIES}
+            LABELS
+            unit)
+    if (TARGET Lua::Lua)
+        target_link_libraries(tst_LuaSupportCompat PRIVATE Lua::Lua)
+    endif ()
+    if (DEFINED LUA_INCLUDE_DIR)
+        target_include_directories(tst_LuaSupportCompat SYSTEM BEFORE PRIVATE ${LUA_INCLUDE_DIR})
+    elseif (DEFINED LUA_INCLUDE_DIRS)
+        target_include_directories(tst_LuaSupportCompat SYSTEM BEFORE PRIVATE ${LUA_INCLUDE_DIRS})
+    endif ()
+endif ()
+
 qmud_add_qtest(tst_UpdateCheckUtils
         SOURCES
         unit/tst_UpdateCheckUtils.cpp
