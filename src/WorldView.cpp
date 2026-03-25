@@ -116,6 +116,58 @@ namespace
 		return static_cast<int>(qBound(kMin, value, kMax));
 	}
 
+	[[nodiscard]] bool hasConfiguredTextRectangle(const WorldRuntime::TextRectangleSettings &settings)
+	{
+		return settings.left != 0 || settings.top != 0 || settings.right != 0 || settings.bottom != 0;
+	}
+
+	[[nodiscard]] QRect normalizeTextRectangleForClient(const WorldRuntime::TextRectangleSettings &settings,
+	                                                    const QSize                               &clientSize)
+	{
+		const int clientWidth  = qMax(0, clientSize.width());
+		const int clientHeight = qMax(0, clientSize.height());
+		if (clientWidth <= 0 || clientHeight <= 0)
+			return {};
+
+		if (!hasConfiguredTextRectangle(settings))
+			return {0, 0, clientWidth, clientHeight};
+
+		int left   = settings.left;
+		int top    = settings.top;
+		int right  = settings.right;
+		int bottom = settings.bottom;
+
+		if (right <= 0)
+		{
+			right += clientWidth;
+			right = qMax(right, left + 20);
+		}
+
+		if (bottom <= 0)
+		{
+			bottom += clientHeight;
+			bottom = qMax(bottom, top + 20);
+		}
+
+		left   = qBound(0, left, clientWidth);
+		top    = qBound(0, top, clientHeight);
+		right  = qBound(left, right, clientWidth);
+		bottom = qBound(top, bottom, clientHeight);
+		return {left, top, right - left, bottom - top};
+	}
+
+	[[nodiscard]] QRect outputTextRectangleForClient(const QSize &clientSize, const WorldRuntime *runtime)
+	{
+		if (clientSize.width() <= 0 || clientSize.height() <= 0)
+			return {};
+		if (!runtime)
+			return {
+			    {0, 0},
+                clientSize
+            };
+		return normalizeTextRectangleForClient(runtime->textRectangle(), clientSize);
+	}
+
 	[[nodiscard]] bool traceOutputBackfillEnabled()
 	{
 		static const bool enabled = []
@@ -5460,6 +5512,7 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	if (m_runtime && rebuildOutput)
 		rebuildOutputFromLinesLazy(m_runtime->lines());
 
+	updateWrapMargin();
 	updateInputWrap();
 	updateInputHeight();
 	applyDefaultInputHeight(false);
@@ -5926,7 +5979,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 	                            watched == liveOutputViewport;
 
 	if ((watched == m_outputContainer || watched == m_outputStack || watched == m_outputSplitter) &&
-	    (event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest))
+	    event->type() == QEvent::Resize)
 	{
 		refreshMiniWindows();
 		if (m_runtime)
@@ -6078,30 +6131,41 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 
 void WorldView::updateWrapMargin() const
 {
-	auto applyMargin = [this](WrapTextBrowser *view)
+	if (!m_outputStack || !m_outputSplitter)
+		return;
+	if (m_outputStack->width() <= 0 || m_outputStack->height() <= 0)
+		return;
+
+	const QRect textRect = outputTextRectangleForClient(m_outputStack->size(), m_runtime);
+	const QRect effectiveRect =
+	    textRect.isNull() ? QRect(0, 0, m_outputStack->width(), m_outputStack->height()) : textRect;
+	const int textLeft   = qMax(0, effectiveRect.left());
+	const int textTop    = qMax(0, effectiveRect.top());
+	const int textRight  = qMax(0, m_outputStack->width() - (effectiveRect.left() + effectiveRect.width()));
+	const int textBottom = qMax(0, m_outputStack->height() - (effectiveRect.top() + effectiveRect.height()));
+	const int textWidth  = qMax(0, effectiveRect.width());
+
+	auto      applyMargin = [this, textLeft, textTop, textRight, textBottom, textWidth](WrapTextBrowser *view)
 	{
 		if (!view)
 			return;
-
-		if (m_wrapColumn <= 0)
-		{
-			const QMargins     currentMargins = view->viewportMarginsPublic();
-			constexpr QMargins targetMargins(0, 0, 0, 0);
-			if (currentMargins != targetMargins)
-				view->setViewportMarginsPublic(0, 0, 0, 0);
+		if (view->width() <= 0 || view->height() <= 0)
 			return;
+
+		int wrapExtraRight = 0;
+		if (m_wrapColumn > 0)
+		{
+			const QFontMetrics metrics(view->font());
+			const int          desiredWidth = metrics.horizontalAdvance(QLatin1Char('M')) * m_wrapColumn;
+			if (desiredWidth > 0 && textWidth > desiredWidth)
+				wrapExtraRight = textWidth - desiredWidth;
 		}
 
-		const QFontMetrics metrics(view->font());
-		const int          desiredWidth  = metrics.horizontalAdvance(QLatin1Char('M')) * m_wrapColumn;
-		const int          viewportWidth = view->viewport()->width();
-		int                rightMargin   = 0;
-		if (desiredWidth > 0 && viewportWidth > desiredWidth)
-			rightMargin = viewportWidth - desiredWidth;
 		const QMargins currentMargins = view->viewportMarginsPublic();
-		const QMargins targetMargins(0, 0, rightMargin, 0);
+		const QMargins targetMargins(textLeft, textTop, textRight + wrapExtraRight, textBottom);
 		if (currentMargins != targetMargins)
-			view->setViewportMarginsPublic(0, 0, rightMargin, 0);
+			view->setViewportMarginsPublic(targetMargins.left(), targetMargins.top(), targetMargins.right(),
+			                               targetMargins.bottom());
 	};
 
 	applyMargin(m_output);

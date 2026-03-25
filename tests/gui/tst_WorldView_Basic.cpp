@@ -38,14 +38,15 @@
 
 namespace
 {
-	QMap<QString, QString>           g_worldAttrs;
-	QMap<QString, QString>           g_worldMultilineAttrs;
-	QMap<QString, QVariant>          g_globalOptions;
-	QVector<WorldRuntime::LineEntry> g_runtimeLines;
-	unsigned short                   g_currentActionSource{WorldRuntime::eUnknownActionSource};
-	bool                             g_useFakeAppController{false};
+	QMap<QString, QString>              g_worldAttrs;
+	QMap<QString, QString>              g_worldMultilineAttrs;
+	QMap<QString, QVariant>             g_globalOptions;
+	QVector<WorldRuntime::LineEntry>    g_runtimeLines;
+	WorldRuntime::TextRectangleSettings g_textRectangle;
+	unsigned short                      g_currentActionSource{WorldRuntime::eUnknownActionSource};
+	bool                                g_useFakeAppController{false};
 
-	AppController                   *fakeAppControllerPointer()
+	AppController                      *fakeAppControllerPointer()
 	{
 		return reinterpret_cast<AppController *>(static_cast<quintptr>(1));
 	}
@@ -84,6 +85,7 @@ namespace
 		g_worldMultilineAttrs.clear();
 		g_globalOptions.clear();
 		g_runtimeLines.clear();
+		g_textRectangle        = {};
 		g_currentActionSource  = WorldRuntime::eUnknownActionSource;
 		g_useFakeAppController = false;
 	}
@@ -385,6 +387,16 @@ void WorldRuntime::setOutputFrozen(bool)
 {
 }
 
+const WorldRuntime::TextRectangleSettings &WorldRuntime::textRectangle() const
+{
+	return g_textRectangle;
+}
+
+void WorldRuntime::setTextRectangle(const TextRectangleSettings &settings)
+{
+	g_textRectangle = settings;
+}
+
 const QList<WorldRuntime::Macro> &WorldRuntime::macros() const
 {
 	return macroStorage();
@@ -524,6 +536,67 @@ class tst_WorldView_Basic : public QObject
 			const QStringList lines = view.outputLines();
 			QVERIFY(!lines.isEmpty());
 			QVERIFY(lines.contains(QStringLiteral("line-one")));
+		}
+
+		void textRectangleAppliedToOutputViewport()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			const QRect fullRect = view.outputTextRectangle();
+			QVERIFY2(fullRect.width() > 200,
+			         "Baseline output viewport width too small for text-rectangle test.");
+			QVERIFY2(fullRect.height() > 200,
+			         "Baseline output viewport height too small for text-rectangle test.");
+
+			g_textRectangle.left   = 15;
+			g_textRectangle.top    = 11;
+			g_textRectangle.right  = 260;
+			g_textRectangle.bottom = 210;
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+
+			const QRect rect = view.outputTextRectangle();
+			QCOMPARE(rect.left(), fullRect.left() + g_textRectangle.left);
+			QCOMPARE(rect.top(), fullRect.top() + g_textRectangle.top);
+			QVERIFY(qAbs(rect.width() - (g_textRectangle.right - g_textRectangle.left)) <= 16);
+			QVERIFY(qAbs(rect.height() - (g_textRectangle.bottom - g_textRectangle.top)) <= 16);
+
+			resetTestState();
+		}
+
+		void textRectangleSupportsNegativeRightBottomOffsets()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			const int baseWidth  = view.outputTextRectangle().width();
+			const int baseHeight = view.outputTextRectangle().height();
+			QVERIFY(baseWidth > 80);
+			QVERIFY(baseHeight > 80);
+
+			g_textRectangle.left   = 7;
+			g_textRectangle.top    = 9;
+			g_textRectangle.right  = -13;
+			g_textRectangle.bottom = -17;
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+
+			const QRect rect = view.outputTextRectangle();
+			QCOMPARE(rect.width(), baseWidth - g_textRectangle.left - 13);
+			QCOMPARE(rect.height(), baseHeight - g_textRectangle.top - 17);
+
+			resetTestState();
 		}
 
 		void applyRuntimeSettingsPreservesSyntheticInputBreaks()

@@ -42,6 +42,8 @@ Do **NOT** use the issue tracker for general support requests.
 - Feature PRs have to be discussed first either on Issue tracker or Discord.
 - You can also contribute with documentation or translations (once work on both is started; but you can apply to help
   before that)
+- You can test plugins of various MUDs and see if they're working right or not. Open detailed issues if something's not
+  working including a source for the plugin in question.
 - You can also contribute with funding as funds are needed for code signing certificate, Apple registration etc.
   in order to bring QMud to the Apple Store/avoid issues with Windows SmartScreen/WDAC.
 
@@ -81,6 +83,9 @@ example `C:\...`) so migrated worlds resolve correctly on the active platform.
 7. Run QMud.
 8. Change Terminal Type (TTYPE) in world preferences to "QMud" unless you have a reason to keep it mushclient (eg Mud
    does some special handling on TTYPE).
+9. (Optional) Do a manual check on your .qdl world files with a text editor to make sure paths have migrated normally.
+   QMud saves paths ALWAYS as RELATIVE to the QMUD_HOME directory and with FORWARD slashes even on Windows. So all paths
+   in the world file should look like: `<include name="./worlds/plugins/CthulhuMUD/CthulhuMUD_Mapper.xml" plugin="y" />`
 
 Always keep a copy of your original MUSHclient directory. Extensive testing has been done but better safe than sorry.
 

@@ -8579,8 +8579,15 @@ const WorldRuntime::TextRectangleSettings &WorldRuntime::textRectangle() const
 void WorldRuntime::setTextRectangle(const TextRectangleSettings &settings)
 {
 	m_textRectangle = settings;
+	++m_suppressWorldOutputResizedCallbacks;
 	if (WorldView *view = this->view())
+	{
+		view->updateWrapMargin();
 		view->update();
+	}
+	updateTelnetWindowSizeForNaws();
+	if (m_suppressWorldOutputResizedCallbacks > 0)
+		--m_suppressWorldOutputResizedCallbacks;
 }
 
 QList<int> WorldRuntime::udpPortList() const
@@ -12209,6 +12216,8 @@ void WorldRuntime::notifyMiniWindowMouseMoved(int x, int y, const QString &windo
 void WorldRuntime::notifyWorldOutputResized()
 {
 	updateTelnetWindowSizeForNaws();
+	if (m_suppressWorldOutputResizedCallbacks > 0)
+		return;
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginWorldOutputResized"));
 }
 
@@ -12653,7 +12662,8 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 		rp.global                 = isEnabledFlag(rp.attributes.value(QStringLiteral("global")));
 		rp.saveState              = isEnabledFlag(rp.attributes.value(QStringLiteral("save_state")));
 		const QString enabledFlag = rp.attributes.value(QStringLiteral("enabled"));
-		rp.enabled                = enabledFlag.isEmpty() ? true : isEnabledFlag(enabledFlag);
+		const bool    requestedEnabled = enabledFlag.isEmpty() ? true : isEnabledFlag(enabledFlag);
+		rp.enabled                     = requestedEnabled;
 		for (const auto &t : p.triggers)
 		{
 			Trigger rt;
@@ -12736,6 +12746,11 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 			rp.lua->setScriptText(rp.script);
 			rp.lua->setPluginInfo(rp.attributes.value(QStringLiteral("id")),
 			                      rp.attributes.value(QStringLiteral("name")));
+		}
+		if (!requestedEnabled && rp.lua && hasValidPluginId(rp))
+		{
+			rp.enabled             = true;
+			rp.disableAfterInstall = true;
 		}
 		m_plugins.push_back(rp);
 	}
@@ -13911,21 +13926,22 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 	}
 
 	Plugin rp;
-	rp.attributes             = p.attributes;
-	rp.description            = p.description;
-	rp.script                 = p.script;
-	rp.source                 = resolved;
-	rp.directory              = info.absolutePath();
-	rp.global                 = markGlobal;
-	rp.sequence               = pluginSequenceFromAttributes(rp.attributes);
-	rp.version                = rp.attributes.value(QStringLiteral("version")).toDouble();
-	rp.requiredVersion        = rp.attributes.value(QStringLiteral("requires")).toDouble();
-	rp.dateWritten            = parsePluginDate(rp.attributes.value(QStringLiteral("date_written")));
-	rp.dateModified           = parsePluginDate(rp.attributes.value(QStringLiteral("date_modified")));
-	rp.dateInstalled          = QDateTime::currentDateTime();
-	rp.saveState              = isEnabledFlag(rp.attributes.value(QStringLiteral("save_state")));
-	const QString enabledFlag = rp.attributes.value(QStringLiteral("enabled"));
-	rp.enabled                = enabledFlag.isEmpty() ? true : isEnabledFlag(enabledFlag);
+	rp.attributes                  = p.attributes;
+	rp.description                 = p.description;
+	rp.script                      = p.script;
+	rp.source                      = resolved;
+	rp.directory                   = info.absolutePath();
+	rp.global                      = markGlobal;
+	rp.sequence                    = pluginSequenceFromAttributes(rp.attributes);
+	rp.version                     = rp.attributes.value(QStringLiteral("version")).toDouble();
+	rp.requiredVersion             = rp.attributes.value(QStringLiteral("requires")).toDouble();
+	rp.dateWritten                 = parsePluginDate(rp.attributes.value(QStringLiteral("date_written")));
+	rp.dateModified                = parsePluginDate(rp.attributes.value(QStringLiteral("date_modified")));
+	rp.dateInstalled               = QDateTime::currentDateTime();
+	rp.saveState                   = isEnabledFlag(rp.attributes.value(QStringLiteral("save_state")));
+	const QString enabledFlag      = rp.attributes.value(QStringLiteral("enabled"));
+	const bool    requestedEnabled = enabledFlag.isEmpty() ? true : isEnabledFlag(enabledFlag);
+	rp.enabled                     = requestedEnabled;
 
 	for (const auto &t : p.triggers)
 	{
@@ -14012,6 +14028,11 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 		rp.lua->setPluginInfo(rp.attributes.value(QStringLiteral("id")),
 		                      rp.attributes.value(QStringLiteral("name")));
 	}
+	if (!requestedEnabled && rp.lua && hasValidPluginId(rp))
+	{
+		rp.enabled             = true;
+		rp.disableAfterInstall = true;
+	}
 
 	m_plugins.push_back(rp);
 	sortPluginsBySequence();
@@ -14055,14 +14076,33 @@ bool WorldRuntime::enablePlugin(const QString &pluginId, bool enable)
 		return false;
 	Plugin &plugin = m_plugins[index];
 	if (plugin.enabled == enable)
+	{
+		if (enable && plugin.disableAfterInstall)
+		{
+			plugin.disableAfterInstall = false;
+			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+			if (!m_loadingDocument)
+				m_worldFileModified = true;
+		}
 		return true;
+	}
 	plugin.enabled = enable;
+	if (!enable)
+		plugin.disableAfterInstall = false;
 	plugin.attributes.insert(QStringLiteral("enabled"), enable ? QStringLiteral("1") : QStringLiteral("0"));
 	if (enable)
-		queuePluginInstall(plugin);
-	if (plugin.lua)
-		plugin.lua->callFunctionNoArgs(enable ? QStringLiteral("OnPluginEnable")
-		                                      : QStringLiteral("OnPluginDisable"));
+	{
+		if (plugin.lua)
+			plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginEnable"));
+		// Callback may toggle plugin state (e.g. script calls EnablePlugin on itself).
+		if (plugin.enabled && plugin.installPending)
+			queuePluginInstall(plugin);
+	}
+	else
+	{
+		if (plugin.lua)
+			plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginDisable"));
+	}
 	if (!m_loadingDocument)
 		m_worldFileModified = true;
 	return true;
@@ -15433,9 +15473,9 @@ QVariant WorldRuntime::pluginInfo(const QString &pluginId, int infoType) const
 	case 12:
 		return plugin.variables.size();
 	case 13:
-		return plugin.dateWritten.isValid() ? QVariant(toOleDate(plugin.dateWritten)) : QVariant();
+		return plugin.dateWritten.isValid() ? QVariant(plugin.dateWritten) : QVariant();
 	case 14:
-		return plugin.dateModified.isValid() ? QVariant(toOleDate(plugin.dateModified)) : QVariant();
+		return plugin.dateModified.isValid() ? QVariant(plugin.dateModified) : QVariant();
 	case 15:
 		return plugin.saveState;
 	case 16:
@@ -15461,7 +15501,7 @@ QVariant WorldRuntime::pluginInfo(const QString &pluginId, int infoType) const
 	case 21:
 		return index + 1;
 	case 22:
-		return plugin.dateInstalled.isValid() ? QVariant(toOleDate(plugin.dateInstalled)) : QVariant();
+		return plugin.dateInstalled.isValid() ? QVariant(plugin.dateInstalled) : QVariant();
 	case 23:
 		return plugin.callingPluginId;
 	case 24:
@@ -18455,7 +18495,7 @@ void WorldRuntime::queuePluginInstall(Plugin &plugin)
 {
 	if (!plugin.lua || !hasValidPluginId(plugin))
 		return;
-	if (!plugin.enabled)
+	if (!plugin.enabled && !plugin.disableAfterInstall)
 	{
 		plugin.installPending = true;
 		return;
@@ -18470,13 +18510,35 @@ void WorldRuntime::queuePluginInstall(Plugin &plugin)
 	if (installReady)
 	{
 		plugin.installPending = false;
-		plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginInstall"), nullptr, true);
+		runPluginInstallCallback(plugin);
 		notifyWorldOutputResized();
 		notifyDrawOutputWindow(1, 0);
 	}
 	else
 	{
 		plugin.installPending = true;
+	}
+}
+
+void WorldRuntime::runPluginInstallCallback(Plugin &plugin)
+{
+	if (!plugin.lua || !hasValidPluginId(plugin))
+		return;
+
+	plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginInstall"), nullptr, true);
+	if (plugin.disableAfterInstall)
+	{
+		if (plugin.enabled)
+		{
+			plugin.enabled = false;
+			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
+			plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginDisable"));
+		}
+		else
+		{
+			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
+		}
+		plugin.disableAfterInstall = false;
 	}
 }
 
@@ -18492,7 +18554,8 @@ void WorldRuntime::installPendingPlugins()
 	for (int i = 0; i < m_plugins.size(); ++i)
 	{
 		const Plugin &plugin = m_plugins.at(i);
-		if (plugin.installPending && plugin.enabled && plugin.lua && hasValidPluginId(plugin))
+		if (plugin.installPending && (plugin.enabled || plugin.disableAfterInstall) && plugin.lua &&
+		    hasValidPluginId(plugin))
 			pendingIndices.push_back(i);
 	}
 	if (pendingIndices.isEmpty())
@@ -18507,9 +18570,9 @@ void WorldRuntime::installPendingPlugins()
 	for (const int index : pendingIndices)
 	{
 		Plugin &plugin = m_plugins[index];
-		if (!plugin.enabled || !plugin.lua)
+		if (!plugin.lua)
 			continue;
-		plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginInstall"), nullptr, true);
+		runPluginInstallCallback(plugin);
 		installedAny = true;
 	}
 	if (installedAny)

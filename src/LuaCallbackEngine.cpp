@@ -7122,13 +7122,25 @@ static int luaGetInfo(lua_State *L)
 	case 292:
 	{
 		WorldView *view = runtime->view();
-		lua_pushnumber(L, view ? view->outputTextRectangle().right() : 0);
+		if (!view)
+		{
+			lua_pushnumber(L, 0);
+			return 1;
+		}
+		const QRect rect = view->outputTextRectangle();
+		lua_pushnumber(L, rect.left() + rect.width());
 		return 1;
 	}
 	case 293:
 	{
 		WorldView *view = runtime->view();
-		lua_pushnumber(L, view ? view->outputTextRectangle().bottom() : 0);
+		if (!view)
+		{
+			lua_pushnumber(L, 0);
+			return 1;
+		}
+		const QRect rect = view->outputTextRectangle();
+		lua_pushnumber(L, rect.top() + rect.height());
 		return 1;
 	}
 

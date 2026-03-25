@@ -247,6 +247,7 @@ class WorldRuntime : public QObject
 				QString                               directory;
 				QString                               callingPluginId;
 				bool                                  enabled{true};
+				bool                                  disableAfterInstall{false};
 				bool                                  global{false};
 				bool                                  saveState{false};
 				bool                                  savingStateNow{false};
@@ -3902,6 +3903,11 @@ class WorldRuntime : public QObject
 		 */
 		void queuePluginInstall(Plugin &plugin);
 		/**
+		 * @brief Executes plugin install callback and applies pending startup-disable state.
+		 * @param plugin Plugin instance.
+		 */
+		static void           runPluginInstallCallback(Plugin &plugin);
+		/**
 		 * @brief Returns whether current Lua-context line is buffered.
 		 * @return `true` when current Lua-context line is in buffer.
 		 */
@@ -4308,6 +4314,7 @@ class WorldRuntime : public QObject
 		bool                                  m_inCancelSoundPluginCallback{false};
 		bool                                  m_inScreendrawCallback{false};
 		bool                                  m_inDrawOutputWindowCallback{false};
+		int                                   m_suppressWorldOutputResizedCallbacks{0};
 		bool                                  m_pluginInstallDeferred{false};
 		int                                   m_outputWindowRedrawCount{0};
 		QFileSystemWatcher                   *m_scriptWatcher{nullptr};
