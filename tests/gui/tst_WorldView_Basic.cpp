@@ -1283,7 +1283,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void outputNavigationKeysFromInputScrollOutputWhenAllTypingToCommandWindowEnabled()
+		void outputNavigationKeysFromInputUseSplitPagingAndShiftHomeEndWhenAllTypingToCommandWindowEnabled()
 		{
 			resetTestState();
 
@@ -1308,21 +1308,62 @@ class tst_WorldView_Basic : public QObject
 			QScrollBar *bar = browser->verticalScrollBar();
 			QVERIFY(bar);
 			QTRY_VERIFY(bar->maximum() > bar->minimum());
+			QVERIFY(!view.isScrollbackSplitActive());
 
-			QCOMPARE(view.setOutputScroll(0, true), 0);
-			QTRY_COMPARE(view.outputScrollPosition(), bar->minimum());
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
 
+			QTest::keyClick(input, Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar = splitTop->verticalScrollBar();
+			QVERIFY(topBar);
+			QTRY_VERIFY(topBar->value() < topBar->maximum());
+
+			topBar->setValue(topBar->minimum());
 			QTest::keyClick(input, Qt::Key_PageDown);
 			QCoreApplication::processEvents();
-			QTRY_VERIFY(view.outputScrollPosition() > bar->minimum());
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			QTRY_VERIFY(topBar->value() > topBar->minimum());
+
+			topBar->setValue(qMax(topBar->minimum(), topBar->maximum() - qMax(1, topBar->pageStep() / 2)));
+			QTest::keyClick(input, Qt::Key_PageDown);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(!view.isScrollbackSplitActive());
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			view.setInputText(QStringLiteral("home-end-input"), true);
+			QCoreApplication::processEvents();
+			QCOMPARE(input->textCursor().position(), 14);
+			const int scrollBeforePlainHomeEnd = view.outputScrollPosition();
 
 			QTest::keyClick(input, Qt::Key_End);
 			QCoreApplication::processEvents();
-			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+			QCOMPARE(input->textCursor().position(), 14);
+			QCOMPARE(view.outputScrollPosition(), scrollBeforePlainHomeEnd);
 
 			QTest::keyClick(input, Qt::Key_Home);
 			QCoreApplication::processEvents();
-			QTRY_COMPARE(view.outputScrollPosition(), bar->minimum());
+			QCOMPARE(input->textCursor().position(), 0);
+			QCOMPARE(view.outputScrollPosition(), scrollBeforePlainHomeEnd);
+
+			QTest::keyClick(input, Qt::Key_Home, Qt::ShiftModifier);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			std::tie(splitTop, splitBottom) = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			topBar = splitTop->verticalScrollBar();
+			QVERIFY(topBar);
+			QTRY_COMPARE(topBar->value(), topBar->minimum());
+
+			QTest::keyClick(input, Qt::Key_End, Qt::ShiftModifier);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(!view.isScrollbackSplitActive());
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
 
 			resetTestState();
 		}

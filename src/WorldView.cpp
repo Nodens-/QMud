@@ -8087,37 +8087,72 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 
 	if (m_view && m_view->m_allTypingToCommandWindow)
 	{
-		if (WrapTextBrowser *const outputView = m_view->activeOutputView())
+		const Qt::KeyboardModifiers modifiers = event->modifiers();
+		const bool                  shiftOnlyScroll =
+		    (modifiers & Qt::ShiftModifier) != 0 &&
+		    (modifiers & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) == 0;
+		auto topScrollBar = [this]() -> QScrollBar *
 		{
-			if (QScrollBar *const bar = outputView->verticalScrollBar())
-			{
-				bool handled = true;
-				switch (event->key())
-				{
-				case Qt::Key_PageUp:
-					bar->setValue(bar->value() - bar->pageStep());
-					break;
-				case Qt::Key_PageDown:
-					bar->setValue(bar->value() + bar->pageStep());
-					break;
-				case Qt::Key_Home:
-					bar->setValue(bar->minimum());
-					break;
-				case Qt::Key_End:
-					bar->setValue(bar->maximum());
-					break;
-				default:
-					handled = false;
-					break;
-				}
+			if (!m_view || !m_view->m_output)
+				return nullptr;
+			return m_view->m_output->verticalScrollBar();
+		};
 
-				if (handled)
+		bool handled = true;
+		switch (event->key())
+		{
+		case Qt::Key_PageUp:
+			m_view->setScrollbackSplitActive(true);
+			if (QScrollBar *const topBar = topScrollBar())
+				topBar->setValue(topBar->value() - topBar->pageStep());
+			else
+				handled = false;
+			break;
+		case Qt::Key_PageDown:
+			if (QScrollBar *const topBar = topScrollBar())
+			{
+				topBar->setValue(topBar->value() + topBar->pageStep());
+				if (m_view->m_scrollbackSplitActive && topBar->value() >= topBar->maximum())
+					m_view->setScrollbackSplitActive(false);
+			}
+			else
+				handled = false;
+			break;
+		case Qt::Key_Home:
+			if (shiftOnlyScroll)
+			{
+				m_view->setScrollbackSplitActive(true);
+				if (QScrollBar *const topBar = topScrollBar())
 				{
-					m_view->noteUserScrollAction();
-					m_view->requestNativeOutputRepaint();
-					return;
+					topBar->setValue(topBar->minimum());
 				}
 			}
+			else
+			{
+				handled = false;
+			}
+			break;
+		case Qt::Key_End:
+			if (shiftOnlyScroll)
+			{
+				m_view->setScrollbackSplitActive(false);
+				m_view->scrollOutputToEnd();
+			}
+			else
+			{
+				handled = false;
+			}
+			break;
+		default:
+			handled = false;
+			break;
+		}
+
+		if (handled)
+		{
+			m_view->noteUserScrollAction();
+			m_view->requestNativeOutputRepaint();
+			return;
 		}
 	}
 
