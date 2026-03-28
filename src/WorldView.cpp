@@ -23,6 +23,7 @@
 #include "dialogs/FindDialog.h"
 #include "scripting/ScriptingErrors.h"
 
+#include <QAbstractScrollArea>
 #include <QApplication>
 #include <QClipboard>
 #include <QColor>
@@ -49,7 +50,6 @@
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStyle>
-#include <QTextBrowser>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextLayout>
@@ -787,12 +787,37 @@ namespace
 	}
 } // namespace
 
-class WrapTextBrowser : public QTextBrowser
+class WrapTextBrowser : public QAbstractScrollArea
 {
 	public:
-		explicit WrapTextBrowser(WorldView *view, QWidget *parent = nullptr, bool isLive = false)
-		    : QTextBrowser(parent), m_view(view), m_isLive(isLive)
+		enum LineWrapMode
 		{
+			NoWrap,
+			WidgetWidth,
+		};
+
+		explicit WrapTextBrowser(WorldView *view, QWidget *parent = nullptr, bool isLive = false)
+		    : QAbstractScrollArea(parent), m_view(view), m_isLive(isLive)
+		{
+			setFrameShape(QFrame::NoFrame);
+			setViewport(new QWidget(this));
+			if (QWidget *const vp = viewport())
+			{
+				vp->setAutoFillBackground(false);
+				vp->setAttribute(Qt::WA_OpaquePaintEvent, false);
+			}
+			setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+			setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+		}
+
+		void setLineWrapMode(const LineWrapMode mode)
+		{
+			m_lineWrapMode = mode;
+		}
+
+		[[nodiscard]] LineWrapMode lineWrapMode() const
+		{
+			return m_lineWrapMode;
 		}
 
 		void setViewportMarginsPublic(int left, int top, int right, int bottom)
@@ -818,7 +843,7 @@ class WrapTextBrowser : public QTextBrowser
 				}
 				return;
 			}
-			QTextBrowser::paintEvent(event);
+			QAbstractScrollArea::paintEvent(event);
 		}
 
 		void mouseMoveEvent(QMouseEvent *event) override
@@ -828,7 +853,7 @@ class WrapTextBrowser : public QTextBrowser
 				event->accept();
 				return;
 			}
-			QTextBrowser::mouseMoveEvent(event);
+			QAbstractScrollArea::mouseMoveEvent(event);
 		}
 
 		void mousePressEvent(QMouseEvent *event) override
@@ -838,7 +863,7 @@ class WrapTextBrowser : public QTextBrowser
 				event->accept();
 				return;
 			}
-			QTextBrowser::mousePressEvent(event);
+			QAbstractScrollArea::mousePressEvent(event);
 		}
 
 		void mouseReleaseEvent(QMouseEvent *event) override
@@ -848,7 +873,7 @@ class WrapTextBrowser : public QTextBrowser
 				event->accept();
 				return;
 			}
-			QTextBrowser::mouseReleaseEvent(event);
+			QAbstractScrollArea::mouseReleaseEvent(event);
 		}
 
 		void mouseDoubleClickEvent(QMouseEvent *event) override
@@ -858,7 +883,7 @@ class WrapTextBrowser : public QTextBrowser
 				event->accept();
 				return;
 			}
-			QTextBrowser::mouseDoubleClickEvent(event);
+			QAbstractScrollArea::mouseDoubleClickEvent(event);
 		}
 
 		void wheelEvent(QWheelEvent *event) override
@@ -874,7 +899,7 @@ class WrapTextBrowser : public QTextBrowser
 				event->accept();
 				return;
 			}
-			QTextBrowser::wheelEvent(event);
+			QAbstractScrollArea::wheelEvent(event);
 		}
 
 		void keyPressEvent(QKeyEvent *event) override
@@ -902,7 +927,7 @@ class WrapTextBrowser : public QTextBrowser
 					break;
 				}
 			}
-			QTextBrowser::keyPressEvent(event);
+			QAbstractScrollArea::keyPressEvent(event);
 		}
 
 		void contextMenuEvent(QContextMenuEvent *event) override
@@ -920,12 +945,13 @@ class WrapTextBrowser : public QTextBrowser
 				if (m_view->showWorldContextMenuAtGlobalPos(event->globalPos()))
 					return;
 			}
-			QTextBrowser::contextMenuEvent(event);
+			QAbstractScrollArea::contextMenuEvent(event);
 		}
 
 	private:
-		WorldView *m_view{nullptr};
-		bool       m_isLive{false};
+		WorldView   *m_view{nullptr};
+		bool         m_isLive{false};
+		LineWrapMode m_lineWrapMode{NoWrap};
 };
 
 class InputTextEdit : public QPlainTextEdit
@@ -947,6 +973,7 @@ class InputTextEdit : public QPlainTextEdit
 		}
 
 	protected:
+		bool event(QEvent *event) override;
 		void keyPressEvent(QKeyEvent *event) override;
 		void contextMenuEvent(QContextMenuEvent *event) override;
 
@@ -1054,14 +1081,10 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	m_outputSplitter->setChildrenCollapsible(true);
 
 	m_output = new WrapTextBrowser(this, m_outputSplitter);
-	m_output->setReadOnly(true);
-	m_output->setOpenLinks(false);
 	m_output->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 	m_output->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
 	m_liveOutput = new WrapTextBrowser(this, m_outputSplitter, true);
-	m_liveOutput->setReadOnly(true);
-	m_liveOutput->setOpenLinks(false);
 	m_liveOutput->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 	m_liveOutput->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
@@ -1155,13 +1178,6 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 		        }
 	        });
 
-	connect(m_output, &QTextBrowser::selectionChanged, this,
-	        [this] { handleOutputSelectionChanged(m_output); });
-	if (m_liveOutput)
-	{
-		connect(m_liveOutput, &QTextBrowser::selectionChanged, this,
-		        [this] { handleOutputSelectionChanged(m_liveOutput); });
-	}
 	if (m_output->verticalScrollBar())
 	{
 		QScrollBar *bar = m_output->verticalScrollBar();
@@ -1242,20 +1258,6 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	syncOutputScrollSingleStep();
 	connect(m_input, &QPlainTextEdit::selectionChanged, this, [this] { emit inputSelectionChanged(); });
 	connect(this, &WorldView::outputScrollChanged, this, [this] { requestDrawOutputWindowNotification(); });
-
-	connect(m_output, &QTextBrowser::anchorClicked, this,
-	        [this](const QUrl &url) { emit hyperlinkActivated(url.toString()); });
-	connect(m_output, &QTextBrowser::highlighted, this,
-	        [this](const QUrl &) { refreshHoveredHyperlinkFromCursor(); });
-
-	if (m_liveOutput)
-	{
-		connect(m_liveOutput, &QTextBrowser::anchorClicked, this,
-		        [this](const QUrl &url) { emit hyperlinkActivated(url.toString()); });
-
-		connect(m_liveOutput, &QTextBrowser::highlighted, this,
-		        [this](const QUrl &) { refreshHoveredHyperlinkFromCursor(); });
-	}
 
 	if (m_outputSplitter)
 	{
@@ -2580,7 +2582,7 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 	const int   x = qBound(0, viewPos.x(), viewportRect.width() - 1);
 	const int   y = qBound(0, viewPos.y(), viewportRect.height() - 1);
 
-	const bool  wrapEnabled          = view->lineWrapMode() != QTextBrowser::NoWrap;
+	const bool  wrapEnabled          = view->lineWrapMode() != WrapTextBrowser::NoWrap;
 	const int   wrapWidthPixels      = nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
 	const int   localWrapWidthPixels = nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
 	const int   lineSpacing          = qMax(0, m_lineSpacing);
@@ -3215,7 +3217,7 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRect &updateRe
 		if (configured.isValid())
 			defaultTextColour = configured;
 	}
-	const bool wrapEnabled     = m_output->lineWrapMode() != QTextBrowser::NoWrap;
+	const bool wrapEnabled     = m_output->lineWrapMode() != WrapTextBrowser::NoWrap;
 	const int  wrapWidthPixels = nativeWrapWidthPixels(panes.constFirst().textRect.width(), wrapEnabled);
 	const int  localWrapWidthPixels =
 	    nativeLocalWrapWidthPixels(panes.constFirst().textRect.width(), wrapEnabled);
@@ -4477,22 +4479,6 @@ int WorldView::inputSelectionEndColumn() const
 QPlainTextEdit *WorldView::inputEditor() const
 {
 	return m_input;
-}
-
-void WorldView::handleOutputSelectionChanged(const WrapTextBrowser *source)
-{
-	Q_UNUSED(source);
-
-	int startLine   = 0;
-	int startColumn = 0;
-	int endLine     = 0;
-	int endColumn   = 0;
-	if (nativeOutputSelectionBounds(startLine, startColumn, endLine, endColumn))
-	{
-		applyResolvedOutputSelection(true, startLine, startColumn, endLine, endColumn);
-		return;
-	}
-	clearNativeOutputSelection(true);
 }
 
 int WorldView::outputSelectionStartLine() const
@@ -6298,9 +6284,9 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 		m_wrapColumn = wrapColumn;
 		if (!wrapOutput)
 		{
-			m_output->setLineWrapMode(QTextBrowser::NoWrap);
+			m_output->setLineWrapMode(WrapTextBrowser::NoWrap);
 			if (m_liveOutput)
-				m_liveOutput->setLineWrapMode(QTextBrowser::NoWrap);
+				m_liveOutput->setLineWrapMode(WrapTextBrowser::NoWrap);
 			m_output->setViewportMarginsPublic(0, 0, 0, 0);
 			if (m_liveOutput)
 				m_liveOutput->setViewportMarginsPublic(0, 0, 0, 0);
@@ -6311,12 +6297,10 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 			{
 				// Runtime applies all non-NAWS wrapping (world wrap and auto-wrap-to-window).
 				// Keep the Qt view in NoWrap mode so existing output does not reflow on resize.
-				m_output->setLineWrapMode(QTextBrowser::NoWrap);
-				m_output->setWordWrapMode(QTextOption::NoWrap);
+				m_output->setLineWrapMode(WrapTextBrowser::NoWrap);
 				if (m_liveOutput)
 				{
-					m_liveOutput->setLineWrapMode(QTextBrowser::NoWrap);
-					m_liveOutput->setWordWrapMode(QTextOption::NoWrap);
+					m_liveOutput->setLineWrapMode(WrapTextBrowser::NoWrap);
 				}
 				m_output->setViewportMarginsPublic(0, 0, 0, 0);
 				if (m_liveOutput)
@@ -6324,12 +6308,10 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 			}
 			else
 			{
-				m_output->setLineWrapMode(QTextBrowser::WidgetWidth);
-				m_output->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+				m_output->setLineWrapMode(WrapTextBrowser::WidgetWidth);
 				if (m_liveOutput)
 				{
-					m_liveOutput->setLineWrapMode(QTextBrowser::WidgetWidth);
-					m_liveOutput->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+					m_liveOutput->setLineWrapMode(WrapTextBrowser::WidgetWidth);
 				}
 				m_output->setViewportMarginsPublic(0, 0, 0, 0);
 				if (m_liveOutput)
@@ -6860,24 +6842,81 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 		requestWorldOutputResizedNotification();
 	}
 
-	if (m_allTypingToCommandWindow && isOutputWidget && event->type() == QEvent::KeyPress && m_input)
-	{
-		if (const auto *keyEvent = dynamic_cast<QKeyEvent *>(event))
-		{
-			QKeyEvent forwarded(keyEvent->type(), keyEvent->key(), keyEvent->modifiers(), keyEvent->text(),
-			                    keyEvent->isAutoRepeat(), keyEvent->count());
-			m_input->setFocus(Qt::OtherFocusReason);
-			QCoreApplication::sendEvent(m_input, &forwarded);
-			return true;
-		}
-	}
-
 	if (isOutputWidget && event->type() == QEvent::KeyPress)
 	{
-		if (auto *keyEvent = dynamic_cast<QKeyEvent *>(event); keyEvent && handleWorldHotkey(keyEvent))
+		if (auto *keyEvent = dynamic_cast<QKeyEvent *>(event))
 		{
-			event->accept();
-			return true;
+			if (keyEvent->matches(QKeySequence::Copy) && hasOutputSelection())
+			{
+				copySelection();
+				event->accept();
+				return true;
+			}
+
+			auto targetOutputView = [&]() -> WrapTextBrowser *
+			{
+				if (watched == m_liveOutput || watched == liveOutputViewport)
+					return m_liveOutput;
+				if (watched == m_output || watched == outputViewport)
+					return m_output;
+				return activeOutputView();
+			};
+
+			if (WrapTextBrowser *const targetView = targetOutputView())
+			{
+				if (QScrollBar *const bar = targetView->verticalScrollBar())
+				{
+					const int lineStep = outputScrollUnitsPerLine();
+					bool      handled  = true;
+					switch (keyEvent->key())
+					{
+					case Qt::Key_PageUp:
+						bar->setValue(bar->value() - bar->pageStep());
+						break;
+					case Qt::Key_PageDown:
+						bar->setValue(bar->value() + bar->pageStep());
+						break;
+					case Qt::Key_Up:
+						bar->setValue(bar->value() - lineStep);
+						break;
+					case Qt::Key_Down:
+						bar->setValue(bar->value() + lineStep);
+						break;
+					case Qt::Key_Home:
+						bar->setValue(bar->minimum());
+						break;
+					case Qt::Key_End:
+						bar->setValue(bar->maximum());
+						break;
+					default:
+						handled = false;
+						break;
+					}
+
+					if (handled)
+					{
+						noteUserScrollAction();
+						requestNativeOutputRepaint();
+						event->accept();
+						return true;
+					}
+				}
+			}
+
+			if (m_allTypingToCommandWindow && m_input)
+			{
+				QKeyEvent forwarded(keyEvent->type(), keyEvent->key(), keyEvent->modifiers(),
+				                    keyEvent->text(), keyEvent->isAutoRepeat(), keyEvent->count());
+				m_input->setFocus(Qt::OtherFocusReason);
+				QCoreApplication::sendEvent(m_input, &forwarded);
+				return true;
+			}
+
+			if (handleWorldHotkey(keyEvent))
+			{
+				event->accept();
+				return true;
+			}
 		}
 	}
 
@@ -8023,6 +8062,48 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 	if (m_view && !plainTab)
 		m_view->resetTabCompletionCycle();
 
+	if (m_view && event->matches(QKeySequence::Copy) && m_view->hasOutputSelection())
+	{
+		m_view->copySelection();
+		return;
+	}
+
+	if (m_view && m_view->m_allTypingToCommandWindow)
+	{
+		if (WrapTextBrowser *const outputView = m_view->activeOutputView())
+		{
+			if (QScrollBar *const bar = outputView->verticalScrollBar())
+			{
+				bool handled = true;
+				switch (event->key())
+				{
+				case Qt::Key_PageUp:
+					bar->setValue(bar->value() - bar->pageStep());
+					break;
+				case Qt::Key_PageDown:
+					bar->setValue(bar->value() + bar->pageStep());
+					break;
+				case Qt::Key_Home:
+					bar->setValue(bar->minimum());
+					break;
+				case Qt::Key_End:
+					bar->setValue(bar->maximum());
+					break;
+				default:
+					handled = false;
+					break;
+				}
+
+				if (handled)
+				{
+					m_view->noteUserScrollAction();
+					m_view->requestNativeOutputRepaint();
+					return;
+				}
+			}
+		}
+	}
+
 	if (m_view && m_view->handleWorldHotkey(event))
 		return;
 
@@ -8185,6 +8266,28 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 	}
 
 	QPlainTextEdit::keyPressEvent(event);
+}
+
+bool InputTextEdit::event(QEvent *event)
+{
+	if (m_view && event->type() == QEvent::ShortcutOverride)
+	{
+		if (const auto *keyEvent = dynamic_cast<QKeyEvent *>(event))
+		{
+			const Qt::KeyboardModifiers modifiers = keyEvent->modifiers();
+			const bool                  plainCtrl = (modifiers & Qt::ControlModifier) != 0 &&
+			                       (modifiers & (Qt::AltModifier | Qt::MetaModifier)) == 0;
+			const bool isCopyShortcut =
+			    keyEvent->matches(QKeySequence::Copy) || (plainCtrl && keyEvent->key() == Qt::Key_C);
+			if (isCopyShortcut && m_view->hasOutputSelection())
+			{
+				event->accept();
+				return true;
+			}
+		}
+	}
+
+	return QPlainTextEdit::event(event);
 }
 
 void InputTextEdit::contextMenuEvent(QContextMenuEvent *event)

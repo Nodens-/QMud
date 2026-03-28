@@ -11,6 +11,8 @@
 #include "WorldView.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QAbstractScrollArea>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -26,7 +28,6 @@
 #include <QRadioButton>
 #include <QScrollBar>
 #include <QSplitter>
-#include <QTextBrowser>
 #include <QTextDocument>
 #include <QTimer>
 #include <QToolTip>
@@ -35,12 +36,14 @@
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
+#include <array>
 #include <functional>
 #include <limits>
 #include <memory>
 
 namespace
 {
+	using QTextBrowser = QAbstractScrollArea;
 	QMap<QString, QString>              g_worldAttrs;
 	QMap<QString, QString>              g_worldMultilineAttrs;
 	QMap<QString, QVariant>             g_globalOptions;
@@ -206,10 +209,10 @@ namespace
 
 	QTextBrowser *findVisibleOutputBrowser(const WorldView &view)
 	{
-		const auto    browsers         = view.findChildren<QTextBrowser *>();
-		QTextBrowser *bestBrowser      = nullptr;
-		int           bestViewportArea = -1;
-		auto          viewportArea     = [](const QTextBrowser *browser)
+		const auto [topBrowser, bottomBrowser] = findSplitOutputBrowsers(view);
+		QTextBrowser *bestBrowser              = nullptr;
+		int           bestViewportArea         = -1;
+		auto          viewportArea             = [](const QTextBrowser *browser)
 		{
 			if (!browser || !browser->viewport())
 				return -1;
@@ -223,6 +226,8 @@ namespace
 				return -1;
 			return width * height;
 		};
+
+		const std::array<QTextBrowser *, 2> browsers{topBrowser, bottomBrowser};
 		for (QTextBrowser *browser : browsers)
 		{
 			const int area = viewportArea(browser);
@@ -234,8 +239,8 @@ namespace
 				bestBrowser      = browser;
 			}
 		}
-		if (!bestBrowser && !browsers.isEmpty())
-			bestBrowser = browsers.constFirst();
+		if (!bestBrowser)
+			bestBrowser = topBrowser ? topBrowser : bottomBrowser;
 		return bestBrowser;
 	}
 
@@ -296,21 +301,6 @@ namespace
 			}
 			return false;
 		};
-
-		if (QTextDocument *document = browser.document())
-		{
-			const int probeLimit = qMin(256, document->characterCount());
-			for (int position = 0; position < probeLimit; position += 2)
-			{
-				QTextCursor cursor(document);
-				cursor.setPosition(position);
-				const QPoint point = browser.cursorRect(cursor).center();
-				if (point.x() < 0 || point.y() < 0)
-					continue;
-				if (probeHover(point))
-					return point;
-			}
-		}
 
 		const QRect area = browser.viewport()->rect();
 		const int   fastBottom =
@@ -403,15 +393,6 @@ namespace
 			}
 		}
 		return {-1, -1};
-	}
-
-	QPoint findTextPoint(const QTextBrowser &browser, const int documentPosition)
-	{
-		if (!browser.viewport() || !browser.document() || documentPosition < 0)
-			return {-1, -1};
-		QTextCursor cursor(browser.document());
-		cursor.setPosition(documentPosition);
-		return browser.cursorRect(cursor).center();
 	}
 
 	MiniWindow &appendTestMiniWindow(const QString &name, const QRect &rect, int flags, const QColor &fill)
@@ -1190,6 +1171,158 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.setOutputScroll(-1, true), 0);
 			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
 			QTRY_VERIFY(view.outputScrollBarVisible());
+
+			resetTestState();
+		}
+
+		void outputKeyboardNavigationStillScrollsWhenAllTypingToCommandWindowEnabled()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 320; ++i)
+				view.appendOutputText(QStringLiteral("keyboard-scroll-%1").arg(i), true);
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+
+			QCOMPARE(view.setOutputScroll(0, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->minimum());
+
+			QTest::keyClick(viewport, Qt::Key_PageDown);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.outputScrollPosition() > bar->minimum());
+
+			QTest::keyClick(viewport, Qt::Key_End);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QTest::keyClick(viewport, Qt::Key_Home);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(view.outputScrollPosition(), bar->minimum());
+
+			resetTestState();
+		}
+
+		void ctrlCCopiesOutputSelectionWhenAllTypingToCommandWindowEnabled()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			view.setInputText(QStringLiteral("input-copy-target"), true);
+			if (QPlainTextEdit *input = view.inputEditor())
+				input->selectAll();
+
+			view.appendOutputText(QStringLiteral("output-copy-target"), true);
+			QCoreApplication::processEvents();
+			view.selectOutputRange(0, 0, 6);
+			QTRY_VERIFY(view.hasOutputSelection());
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("output"));
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+
+			QGuiApplication::clipboard()->setText(QStringLiteral("clipboard-before-copy"));
+			QTest::keyClick(viewport, Qt::Key_C, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("output"));
+
+			resetTestState();
+		}
+
+		void ctrlCCopiesOutputSelectionWhenInputFocused()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			view.setInputText(QStringLiteral("input-copy-target"), true);
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->selectAll();
+
+			view.appendOutputText(QStringLiteral("output-copy-target"), true);
+			QCoreApplication::processEvents();
+			view.selectOutputRange(0, 0, 6);
+			QTRY_VERIFY(view.hasOutputSelection());
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("output"));
+
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			QGuiApplication::clipboard()->setText(QStringLiteral("clipboard-before-copy"));
+			QTest::keySequence(input, QKeySequence::Copy);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("output"));
+
+			resetTestState();
+		}
+
+		void outputNavigationKeysFromInputScrollOutputWhenAllTypingToCommandWindowEnabled()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 320; ++i)
+				view.appendOutputText(QStringLiteral("input-key-scroll-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+
+			QCOMPARE(view.setOutputScroll(0, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->minimum());
+
+			QTest::keyClick(input, Qt::Key_PageDown);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.outputScrollPosition() > bar->minimum());
+
+			QTest::keyClick(input, Qt::Key_End);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QTest::keyClick(input, Qt::Key_Home);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(view.outputScrollPosition(), bar->minimum());
 
 			resetTestState();
 		}
@@ -2690,27 +2823,26 @@ class tst_WorldView_Basic : public QObject
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
 			QVERIFY(browser);
-			QVERIFY(browser->document());
-			QVERIFY(browser->document()->toPlainText().isEmpty());
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
 			view.updatePartialOutputText(QStringLiteral("par"));
 			QCoreApplication::processEvents();
 			QStringList lines = view.outputLines();
 			QCOMPARE(lines.size(), 1);
 			QCOMPARE(lines.first(), QStringLiteral("par"));
-			QVERIFY(browser->document()->toPlainText().isEmpty());
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
 			view.updatePartialOutputText(QStringLiteral("part"));
 			QCoreApplication::processEvents();
 			lines = view.outputLines();
 			QCOMPARE(lines.size(), 1);
 			QCOMPARE(lines.first(), QStringLiteral("part"));
-			QVERIFY(browser->document()->toPlainText().isEmpty());
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
 			view.clearPartialOutput();
 			QCoreApplication::processEvents();
 			QVERIFY(view.outputLines().isEmpty());
-			QVERIFY(browser->document()->toPlainText().isEmpty());
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
 			view.updatePartialOutputText(QStringLiteral("temp"));
 			view.appendOutputText(QStringLiteral("final"), true);
@@ -2719,7 +2851,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(!lines.isEmpty());
 			QCOMPARE(lines.last(), QStringLiteral("final"));
 			QVERIFY(!lines.contains(QStringLiteral("temp")));
-			QVERIFY(browser->document()->toPlainText().isEmpty());
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
 			resetTestState();
 		}
@@ -2735,12 +2867,12 @@ class tst_WorldView_Basic : public QObject
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
 			QVERIFY(browser);
-			QVERIFY(browser->document());
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
 			view.appendOutputText(QStringLiteral("pre-runtime-line"), true);
 			QCoreApplication::processEvents();
 			QVERIFY(view.outputLines().contains(QStringLiteral("pre-runtime-line")));
-			QVERIFY(browser->document()->toPlainText().isEmpty());
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
 			WorldRuntime::LineEntry runtimeEntry;
 			runtimeEntry.text       = QStringLiteral("runtime-native-line");
@@ -2756,7 +2888,7 @@ class tst_WorldView_Basic : public QObject
 
 			QTRY_COMPARE(view.outputLines().size(), 1);
 			QCOMPARE(view.outputLines().first(), QStringLiteral("runtime-native-line"));
-			QVERIFY(browser->document()->toPlainText().isEmpty());
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
 			resetTestState();
 		}

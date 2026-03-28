@@ -1002,11 +1002,6 @@ class WorldView : public QWidget
 		 */
 		void                 requestOutputScrollToEnd();
 		/**
-		 * @brief Handles output selection changed callback.
-		 * @param source Output view that emitted the selection-changed signal.
-		 */
-		void                 handleOutputSelectionChanged(const WrapTextBrowser *source = nullptr);
-		/**
 		 * @brief Maps global point to output stack coordinates.
 		 * @param globalPos Global screen coordinate.
 		 * @return Output-stack-local coordinate.
