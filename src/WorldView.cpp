@@ -7070,6 +7070,10 @@ void WorldView::updateWrapMargin() const
 	int reservedRight = 0;
 	if (m_runtime && !effectiveRect.isEmpty())
 	{
+		// Keep miniwindow rects current before calculating reserved margin so
+		// window moves/resizes are reflected immediately in NAWS sizing.
+		m_runtime->layoutMiniWindows(m_outputStack->size(), size(), false);
+
 		const bool cacheHit = m_wrapMarginReservationCacheValid &&
 		                      m_wrapMarginReservationRect == effectiveRect &&
 		                      m_wrapMarginReservationSerial == m_miniWindowChangeSerial;
@@ -7088,21 +7092,34 @@ void WorldView::updateWrapMargin() const
 				QRect candidateRect;
 				if (window->position == 6 || window->position == 7 || window->position == 8)
 				{
-					const int width = qMax(0, window->width);
-					if (width <= 0)
-						continue;
-					candidateRect = QRect(effectiveRect.right() + 1 - width, effectiveRect.top(), width,
-					                      effectiveRect.height());
+					// For docked windows, use the laid-out rect when available so stacked
+					// dock panes reserve their true left edge for NAWS calculations.
+					if (!window->rect.isEmpty())
+					{
+						candidateRect = window->rect;
+					}
+					else
+					{
+						const int width = qMax(0, window->width);
+						if (width <= 0)
+							continue;
+						candidateRect = QRect(effectiveRect.right() + 1 - width, effectiveRect.top(), width,
+						                      effectiveRect.height());
+					}
 				}
 				else
 				{
 					if (window->rect.isEmpty())
 						continue;
-					const bool rightHalfAbsolute = (window->flags & kMiniWindowAbsoluteLocation) != 0 &&
-					                               window->rect.center().x() >= effectiveRect.center().x();
-					const bool rightHalfFloating =
-					    window->position == 13 && window->rect.center().x() >= effectiveRect.center().x();
-					if (!rightHalfAbsolute && !rightHalfFloating)
+					const bool absolute = (window->flags & kMiniWindowAbsoluteLocation) != 0;
+					// Skip full-surface background modes; they are not overlay blockers.
+					if (!absolute && window->position >= 0 && window->position <= 3)
+						continue;
+					if (!absolute && window->position == 13)
+						continue;
+
+					const bool rightHalf = window->rect.center().x() >= effectiveRect.center().x();
+					if (!rightHalf)
 						continue;
 					candidateRect = window->rect;
 				}

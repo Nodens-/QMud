@@ -12208,12 +12208,13 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 {
 	const bool nawsEnabled = isEnabledFlag(m_worldAttributes.value(QStringLiteral("naws")));
 	m_telnet.setNawsEnabled(nawsEnabled);
-	const int worldWrapColumn = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
+	const bool wrapEnabled     = isEnabledFlag(m_worldAttributes.value(QStringLiteral("wrap")));
+	const int  worldWrapColumn = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
+	const int  minimumColumns  = wrapEnabled ? worldWrapColumn : 0;
 
-	int       columns = 0;
-	int       rows    = 0;
+	int        columns = 0;
+	int        rows    = 0;
 
-	bool      measuredFromView = false;
 	if (m_view)
 	{
 		const QRect textRect     = m_view->outputTextRectangle();
@@ -12227,25 +12228,30 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 			const int          charHeight = qMax(1, metrics.lineSpacing());
 			columns                       = widthPixels / charWidth;
 			rows                          = heightPixels / charHeight;
-			measuredFromView              = true;
 		}
 	}
 
 	if (columns <= 0 || rows <= 0)
 	{
-		// Do not push speculative fallback NAWS when a view exists but geometry
-		// is not measured yet; wait for a later resize/layout callback to send a
-		// correct size and avoid first-command wrap mismatch.
-		if (nawsEnabled && m_view && !measuredFromView)
-			return;
-		columns = worldWrapColumn;
-		rows    = 24;
+		// When geometry is not measurable yet (e.g. hidden/inactive view), keep
+		// NAWS values protocol-valid using configured wrap or last known telnet size.
+		columns = m_telnet.windowColumns();
+		if (minimumColumns > 0)
+			columns = qMax(columns, minimumColumns);
+		rows = m_telnet.windowRows() > 0 ? m_telnet.windowRows() : 24;
 	}
-	else if (worldWrapColumn > 0)
-		columns = qMax(columns, worldWrapColumn);
+	else if (minimumColumns > 0)
+		columns = qMax(columns, minimumColumns);
 
 	if (columns > 0 && rows > 0)
 		m_telnet.setWindowSize(columns, rows);
+
+	if (m_socket && m_socket->isConnected())
+	{
+		const QByteArray outbound = m_telnet.takeOutboundData();
+		if (!outbound.isEmpty())
+			sendToWorld(outbound);
+	}
 }
 
 void WorldRuntime::notifyDrawOutputWindow(int firstLine, int offset)
@@ -12784,6 +12790,12 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 	m_worldAttributes.insert(key, normalizedValue);
 	if (key == QStringLiteral("max_output_lines"))
 		enforceOutputLineLimit();
+	if (key == QStringLiteral("naws"))
+	{
+		updateTelnetWindowSizeForNaws();
+		if (m_view)
+			m_view->applyRuntimeSettingsWithoutOutputRebuild();
+	}
 	if (!m_loadingDocument)
 		m_worldFileModified = true;
 	emit worldAttributeChanged(key);
