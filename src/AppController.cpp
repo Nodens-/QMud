@@ -5318,30 +5318,20 @@ void AppController::applyViewPreferences() const
 
 void AppController::saveViewPreferences()
 {
-	// Persist toolbar/status/info bar visibility state.
-	const int viewToolbar = m_mainWindow && m_mainWindow->actionForCommand(QStringLiteral("ViewToolbar")) &&
-	                                m_mainWindow->actionForCommand(QStringLiteral("ViewToolbar"))->isChecked()
-	                            ? 1
-	                            : 0;
+	// Persist toolbar/status/info bar visibility state from the actual widgets.
+	// This keeps restart/reload behavior correct even if visibility changed outside
+	// the View-menu actions.
+	const int viewToolbar =
+	    m_mainWindow && m_mainWindow->mainToolbar() && !m_mainWindow->mainToolbar()->isHidden() ? 1 : 0;
 	const int viewWorldToolbar =
-	    m_mainWindow && m_mainWindow->actionForCommand(QStringLiteral("ViewWorldToolbar")) &&
-	            m_mainWindow->actionForCommand(QStringLiteral("ViewWorldToolbar"))->isChecked()
-	        ? 1
-	        : 0;
+	    m_mainWindow && m_mainWindow->worldToolbar() && !m_mainWindow->worldToolbar()->isHidden() ? 1 : 0;
 	const int activityToolbar =
-	    m_mainWindow && m_mainWindow->actionForCommand(QStringLiteral("ActivityToolbar")) &&
-	            m_mainWindow->actionForCommand(QStringLiteral("ActivityToolbar"))->isChecked()
-	        ? 1
-	        : 0;
+	    m_mainWindow && m_mainWindow->activityToolbar() && !m_mainWindow->activityToolbar()->isHidden() ? 1
+	                                                                                                    : 0;
 	const int viewStatusbar =
-	    m_mainWindow && m_mainWindow->actionForCommand(QStringLiteral("ViewStatusbar")) &&
-	            m_mainWindow->actionForCommand(QStringLiteral("ViewStatusbar"))->isChecked()
-	        ? 1
-	        : 0;
-	const int viewInfoBar = m_mainWindow && m_mainWindow->actionForCommand(QStringLiteral("ViewInfoBar")) &&
-	                                m_mainWindow->actionForCommand(QStringLiteral("ViewInfoBar"))->isChecked()
-	                            ? 1
-	                            : 0;
+	    m_mainWindow && m_mainWindow->frameStatusBar() && !m_mainWindow->frameStatusBar()->isHidden() ? 1 : 0;
+	const int viewInfoBar =
+	    m_mainWindow && m_mainWindow->infoDock() && !m_mainWindow->infoDock()->isHidden() ? 1 : 0;
 
 	(void)dbWriteInt(QStringLiteral("prefs"), QStringLiteral("ViewToolbar"), viewToolbar);
 	(void)dbWriteInt(QStringLiteral("prefs"), QStringLiteral("ViewWorldToolbar"), viewWorldToolbar);
@@ -10504,13 +10494,13 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!m_mainWindow)
 			return;
 		WorldChildWindow *world = m_mainWindow->activeWorldChildWindow();
-			if (!world)
-				return;
-			if (WorldRuntime *runtime = world->runtime(); runtime)
-			{
-				runtime->deleteOutput();
-				return;
-			}
+		if (!world)
+			return;
+		if (WorldRuntime *runtime = world->runtime(); runtime)
+		{
+			runtime->deleteOutput();
+			return;
+		}
 		WorldView *view = world->view();
 		if (!view)
 			return;
@@ -13764,6 +13754,11 @@ void AppController::handleReloadQmud()
 		if (verboseReloadLogs)
 			qInfo() << kReloadLogTag << "Auto-confirm enabled by QMUD_RELOAD_ASSUME_YES.";
 	}
+
+	// Persist current frame visibility/layout before reload handoff.
+	saveViewPreferences();
+	saveWindowPlacement();
+	saveSessionState();
 
 	QString preReloadSaveError;
 	if (!saveDirtyAutoSaveWorldsBeforeRestart(&preReloadSaveError))
