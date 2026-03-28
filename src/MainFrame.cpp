@@ -2552,7 +2552,9 @@ QVector<WorldWindowDescriptor> MainWindow::worldWindowDescriptors() const
 	if (!m_mdiArea)
 		return entries;
 
-	const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+	QList<QMdiSubWindow *> windows = m_mdiTabs.orderedWindows();
+	if (windows.isEmpty())
+		windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
 	entries.reserve(windows.size());
 	int sequence = 1;
 	for (QMdiSubWindow *sub : windows)

@@ -4538,11 +4538,15 @@ void AppController::setupStartupBehavior()
 		}
 	}
 
+	const bool        skipStartupWorldListAutoOpen = startedWithReloadArgs;
+
 	// simple command line parsing for auto-open behavior
 	const QStringList args    = filterReloadStartupArguments(QCoreApplication::arguments());
 	const auto        cmdLine = args.mid(1).join(QStringLiteral(" "));
 
 	bool              bAutoOpen = true;
+	if (skipStartupWorldListAutoOpen)
+		bAutoOpen = false;
 
 	if (cmdLine.isEmpty())
 	{
@@ -4579,7 +4583,7 @@ void AppController::setupStartupBehavior()
 
 	// open all worlds specified in global preferences if no shift key is down
 	if (const auto modifiers = QGuiApplication::keyboardModifiers();
-	    !(modifiers & Qt::ShiftModifier) && m_autoOpen)
+	    !(modifiers & Qt::ShiftModifier) && m_autoOpen && !skipStartupWorldListAutoOpen)
 	{
 		auto       worldList         = getGlobalOption(QStringLiteral("WorldList")).toString();
 		bool       worldListChanged  = false;

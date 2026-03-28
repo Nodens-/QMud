@@ -159,6 +159,18 @@ void MdiTabs::updateTabs()
 	update();
 }
 
+QList<QMdiSubWindow *> MdiTabs::orderedWindows() const
+{
+	QList<QMdiSubWindow *> ordered;
+	ordered.reserve(m_orderedWindows.size());
+	for (const QPointer<QMdiSubWindow> &sub : m_orderedWindows)
+	{
+		if (sub)
+			ordered.push_back(sub);
+	}
+	return ordered;
+}
+
 void MdiTabs::onCurrentChanged(int index)
 {
 	if (!m_mdiArea)
