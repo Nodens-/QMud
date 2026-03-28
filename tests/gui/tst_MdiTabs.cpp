@@ -103,7 +103,7 @@ void TextChildWindow::appendText(const QString &) const
 
 QString TextChildWindow::filePath() const
 {
-	return QString();
+	return {};
 }
 
 void TextChildWindow::setFilePath(const QString &)
@@ -135,7 +135,7 @@ void TextChildWindow::closeEvent(QCloseEvent *event)
 
 QString WorldRuntime::windowTitleOverride() const
 {
-	return QString();
+	return {};
 }
 
 const QMap<QString, QString> &WorldRuntime::worldAttributes() const
@@ -277,11 +277,43 @@ class tst_MdiTabs : public QObject
 			QCOMPARE(tabs.count(), 1);
 			QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("Two")}));
 		}
+
+		void mixedTabsKeepOrderAndActiveIndexAcrossWorldTitleUpdates()
+		{
+			QWidget     host;
+			QVBoxLayout layout(&host);
+			QMdiArea    mdiArea;
+			MdiTabs     tabs;
+
+			layout.addWidget(&tabs);
+			layout.addWidget(&mdiArea);
+			host.resize(640, 480);
+			host.show();
+
+			tabs.create(&mdiArea, kMdiTabsTop);
+			QMdiSubWindow *worldA  = addWindow(mdiArea, QStringLiteral("World A"));
+			QMdiSubWindow *notepad = addWindow(mdiArea, QStringLiteral("Notepad"));
+			addWindow(mdiArea, QStringLiteral("World B"));
+			tabs.updateTabs();
+
+			QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("World A"), QStringLiteral("Notepad"),
+			                                      QStringLiteral("World B")}));
+
+			mdiArea.setActiveSubWindow(notepad);
+			tabs.updateTabs();
+			QCOMPARE(tabs.currentIndex(), 1);
+
+			worldA->setWindowTitle(QStringLiteral("World A (active)"));
+			tabs.updateTabs();
+			QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("World A (active)"),
+			                                      QStringLiteral("Notepad"), QStringLiteral("World B")}));
+			QCOMPARE(tabs.currentIndex(), 1);
+			QCOMPARE(mdiArea.activeSubWindow(), notepad);
+		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_MAIN(tst_MdiTabs)
-
 
 #if __has_include("tst_MdiTabs.moc")
 #include "tst_MdiTabs.moc"

@@ -26,6 +26,7 @@
 #include "NameGeneration.h"
 #include "SqliteCompat.h"
 #include "StringUtils.h"
+#include "TimeFormatUtils.h"
 #include "Version.h"
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
@@ -209,7 +210,6 @@ namespace
 				return m_replayPoint;
 			}
 
-		protected:
 			bool eventFilter(QObject *watched, QEvent *event) override
 			{
 				if (auto *watchedWidget = qobject_cast<QWidget *>(watched);
@@ -3133,59 +3133,53 @@ namespace
 			bool indentParas{true};
 	};
 
-	FixedColumnWrapConfig fixedColumnWrapConfig(const QMap<QString, QString> &attrs)
+	int wrapColumnFromWorldSettings(const QMap<QString, QString> &attrs)
 	{
-		FixedColumnWrapConfig config;
-		const bool            wrapEnabled = isEnabledFlag(attrs.value(QStringLiteral("wrap")));
-		const bool autoWrapWindow = isEnabledFlag(attrs.value(QStringLiteral("auto_wrap_window_width")));
-		const bool nawsEnabled    = isEnabledFlag(attrs.value(QStringLiteral("naws")));
-		config.wrapColumn         = attrs.value(QStringLiteral("wrap_column")).toInt();
-		config.enabled            = wrapEnabled && !autoWrapWindow && config.wrapColumn > 0 && !nawsEnabled;
-		const QString indentValue = attrs.value(QStringLiteral("indent_paras"));
-		config.indentParas        = !(indentValue == QStringLiteral("0") ||
-                               indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
-                               indentValue.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
-		return config;
+		return attrs.value(QStringLiteral("wrap_column")).toInt();
 	}
 
-	FixedColumnWrapConfig fixedColumnWrapConfigIgnoringNaws(const QMap<QString, QString> &attrs)
+	int wrapColumnWithWorldMinimum(const int calculatedColumns, const int worldWrapColumn)
 	{
-		FixedColumnWrapConfig config;
-		const bool            wrapEnabled = isEnabledFlag(attrs.value(QStringLiteral("wrap")));
-		const bool autoWrapWindow = isEnabledFlag(attrs.value(QStringLiteral("auto_wrap_window_width")));
-		config.wrapColumn         = attrs.value(QStringLiteral("wrap_column")).toInt();
-		config.enabled            = wrapEnabled && !autoWrapWindow && config.wrapColumn > 0;
-		const QString indentValue = attrs.value(QStringLiteral("indent_paras"));
-		config.indentParas        = !(indentValue == QStringLiteral("0") ||
-                               indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
-                               indentValue.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
-		return config;
+		if (worldWrapColumn <= 0)
+			return calculatedColumns;
+		if (calculatedColumns <= 0)
+			return worldWrapColumn;
+		return qMax(calculatedColumns, worldWrapColumn);
 	}
 
-	FixedColumnWrapConfig adaptiveWrapConfig(const QMap<QString, QString> &attrs, int effectiveColumns)
+	int localWrapColumnForOutput(const QMap<QString, QString> &attrs, const bool nawsNegotiated,
+	                             const int windowColumns)
+	{
+		if (!isEnabledFlag(attrs.value(QStringLiteral("wrap"))))
+			return 0;
+
+		const int  worldWrapColumn = wrapColumnFromWorldSettings(attrs);
+		const bool autoWrapWindow  = isEnabledFlag(attrs.value(QStringLiteral("auto_wrap_window_width")));
+
+		if (nawsNegotiated)
+			return wrapColumnWithWorldMinimum(windowColumns, worldWrapColumn);
+
+		if (autoWrapWindow)
+			return wrapColumnWithWorldMinimum(windowColumns, worldWrapColumn);
+
+		return worldWrapColumn;
+	}
+
+	bool indentParasEnabled(const QMap<QString, QString> &attrs)
+	{
+		const QString indentValue = attrs.value(QStringLiteral("indent_paras"));
+		return !(indentValue == QStringLiteral("0") ||
+		         indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+		         indentValue.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+	}
+
+	FixedColumnWrapConfig localOutputWrapConfig(const QMap<QString, QString> &attrs,
+	                                            const bool nawsNegotiated, const int windowColumns)
 	{
 		FixedColumnWrapConfig config;
-		const bool            wrapEnabled = isEnabledFlag(attrs.value(QStringLiteral("wrap")));
-		if (!wrapEnabled)
-			return config;
-
-		const bool autoWrapWindow = isEnabledFlag(attrs.value(QStringLiteral("auto_wrap_window_width")));
-		if (!autoWrapWindow)
-		{
-			const int configuredWrapColumn = attrs.value(QStringLiteral("wrap_column")).toInt();
-			if (configuredWrapColumn > 0)
-			{
-				effectiveColumns = effectiveColumns > 0 ? qMin(effectiveColumns, configuredWrapColumn)
-				                                        : configuredWrapColumn;
-			}
-		}
-
-		config.wrapColumn         = effectiveColumns;
-		config.enabled            = config.wrapColumn > 0;
-		const QString indentValue = attrs.value(QStringLiteral("indent_paras"));
-		config.indentParas        = !(indentValue == QStringLiteral("0") ||
-                               indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
-                               indentValue.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+		config.indentParas = indentParasEnabled(attrs);
+		config.wrapColumn  = localWrapColumnForOutput(attrs, nawsNegotiated, windowColumns);
+		config.enabled     = config.wrapColumn > 0;
 		return config;
 	}
 
@@ -3242,7 +3236,31 @@ namespace
 		return hasVisibleCodeUnit ? 1 : 0;
 	}
 
-	void wrapPlainLineForColumn(QString &text, const int wrapColumn, const bool indentParas)
+	int trailingLineColumnWidthForWrap(const QString &text)
+	{
+		if (text.isEmpty())
+			return 0;
+
+		constexpr auto      kNoBoundary = qsizetype{-1};
+		QTextBoundaryFinder boundary(QTextBoundaryFinder::Grapheme, text);
+		const QStringView   textView{text};
+		int                 column = 0;
+		for (qsizetype graphemeStart = 0, graphemeEnd = boundary.toNextBoundary(); graphemeEnd != kNoBoundary;
+		     graphemeStart = graphemeEnd, graphemeEnd = boundary.toNextBoundary())
+		{
+			const QStringView grapheme = textView.sliced(graphemeStart, graphemeEnd - graphemeStart);
+			if (isSingleCharGrapheme(grapheme, QLatin1Char('\n')))
+			{
+				column = 0;
+				continue;
+			}
+			column += graphemeColumnWidthForWrap(grapheme);
+		}
+		return column;
+	}
+
+	void wrapPlainLineForColumn(QString &text, const int wrapColumn, const bool indentParas,
+	                            const int firstLinePrefixColumns = 0)
 	{
 		if (wrapColumn <= 0 || text.isEmpty())
 		{
@@ -3253,10 +3271,10 @@ namespace
 		QString        wrappedText;
 		wrappedText.reserve(safeQSizeToInt(text.size() + text.size() / qMax(1, wrapColumn)));
 
-		int  column             = 0;
+		int  column             = qMax(0, firstLinePrefixColumns);
 		int  lineStart          = 0;
 		int  lastSpace          = -1;
-		bool lineHasVisibleChar = false;
+		bool lineHasVisibleChar = column > 0;
 
 		auto recomputeLineState = [&]
 		{
@@ -3353,7 +3371,7 @@ namespace
 	}
 
 	void wrapStyledLineForColumn(QString &text, QVector<WorldRuntime::StyleSpan> &spans, const int wrapColumn,
-	                             const bool indentParas)
+	                             const bool indentParas, const int firstLinePrefixColumns = 0)
 	{
 		if (wrapColumn <= 0 || text.isEmpty())
 			return;
@@ -3382,10 +3400,10 @@ namespace
 		wrappedStyles.reserve(
 		    safeQSizeToInt(expandedStyles.size() + expandedStyles.size() / qMax(1, wrapColumn)));
 
-		int  column             = 0;
+		int  column             = qMax(0, firstLinePrefixColumns);
 		int  lineStart          = 0;
 		int  lastSpace          = -1;
-		bool lineHasVisibleChar = false;
+		bool lineHasVisibleChar = column > 0;
 
 		auto recomputeLineState = [&]
 		{
@@ -3947,13 +3965,6 @@ namespace
 
 	};
 
-	QString escapePercent(const QString &value)
-	{
-		QString result = value;
-		result.replace(QStringLiteral("%"), QStringLiteral("%%"));
-		return result;
-	}
-
 	QString resolveWorkingDir(const QString &startupDir)
 	{
 		if (!startupDir.isEmpty())
@@ -4187,106 +4198,6 @@ namespace
 			if (it.key() == QStringLiteral("auto_log_file_name"))
 				it.value() = normalizeAutoLogFileNameValue(it.value());
 		}
-	}
-
-	QString toQtDateFormat(const QString &format)
-	{
-		QString result;
-		result.reserve(format.size() + 16);
-
-		QString literal;
-		literal.reserve(format.size());
-		const auto flushLiteral = [&]
-		{
-			if (literal.isEmpty())
-				return;
-			QString escaped = literal;
-			escaped.replace(QStringLiteral("'"), QStringLiteral("''"));
-			result += QLatin1Char('\'');
-			result += escaped;
-			result += QLatin1Char('\'');
-			literal.clear();
-		};
-
-		for (int i = 0; i < format.size(); ++i)
-		{
-			const QChar ch = format.at(i);
-			if (ch != QLatin1Char('%'))
-			{
-				literal += ch;
-				continue;
-			}
-
-			if (i + 1 >= format.size())
-			{
-				literal += QLatin1Char('%');
-				break;
-			}
-
-			QChar next  = format.at(++i);
-			bool  noPad = false;
-			if (next == QLatin1Char('#') && i + 1 < format.size())
-			{
-				noPad = true;
-				next  = format.at(++i);
-			}
-
-			QString token;
-			switch (next.unicode())
-			{
-			case '%':
-				literal += QLatin1Char('%');
-				break;
-			case 'A':
-				token = QStringLiteral("dddd");
-				break;
-			case 'B':
-				token = QStringLiteral("MMMM");
-				break;
-			case 'b':
-				token = QStringLiteral("MMM");
-				break;
-			case 'd':
-				token = noPad ? QStringLiteral("d") : QStringLiteral("dd");
-				break;
-			case 'm':
-				token = noPad ? QStringLiteral("M") : QStringLiteral("MM");
-				break;
-			case 'Y':
-				token = QStringLiteral("yyyy");
-				break;
-			case 'H':
-				token = noPad ? QStringLiteral("H") : QStringLiteral("HH");
-				break;
-			case 'I':
-				token = noPad ? QStringLiteral("h") : QStringLiteral("hh");
-				break;
-			case 'M':
-				token = noPad ? QStringLiteral("m") : QStringLiteral("mm");
-				break;
-			case 'S':
-				token = noPad ? QStringLiteral("s") : QStringLiteral("ss");
-				break;
-			case 'p':
-				token = QStringLiteral("AP");
-				break;
-			default:
-				literal += QLatin1Char('%');
-				if (noPad)
-					literal += QLatin1Char('#');
-				literal += next;
-				break;
-			}
-
-			if (!token.isEmpty())
-			{
-				flushLiteral();
-				result += token;
-			}
-		}
-
-		flushLiteral();
-		return result;
 	}
 
 	bool patternUsesPlayerDirective(const QString &pattern)
@@ -7197,6 +7108,16 @@ QString WorldRuntime::firstSpecialFontPath() const
 bool WorldRuntime::isConnected() const
 {
 	return m_connectPhase == eConnectConnectedToMud;
+}
+
+bool WorldRuntime::isNawsNegotiated() const
+{
+	return m_telnet.isNawsNegotiated();
+}
+
+int WorldRuntime::outputWrapColumns() const
+{
+	return m_telnet.windowColumns();
 }
 
 int WorldRuntime::connectPhase() const
@@ -11203,33 +11124,18 @@ qint64 WorldRuntime::logFilePosition() const
 
 QString WorldRuntime::formatTime(const QDateTime &time, const QString &format, bool fixHtml) const
 {
-	QString       strFormat = format;
+	const auto workingDir = TimeFormatUtils::resolveWorkingDir(m_startupDirectory);
+	const auto worldDir   = TimeFormatUtils::makeAbsolutePath(m_defaultWorldDirectory, workingDir);
+	const auto logDir     = TimeFormatUtils::makeAbsolutePath(m_defaultLogDirectory, workingDir);
 
-	QString const workingDir = resolveWorkingDir(m_startupDirectory);
-	QString const worldName  = m_worldAttributes.value(QStringLiteral("name"));
-	QString const playerName = m_worldAttributes.value(QStringLiteral("player"));
-	const QString worldDir   = makeAbsolutePath(m_defaultWorldDirectory, workingDir);
-	const QString logDir     = makeAbsolutePath(m_defaultLogDirectory, workingDir);
+	TimeFormatUtils::WorldTimeFormatContext context;
+	context.workingDir = workingDir;
+	context.worldName  = m_worldAttributes.value(QStringLiteral("name"));
+	context.playerName = m_worldAttributes.value(QStringLiteral("player"));
+	context.worldDir   = worldDir;
+	context.logDir     = logDir;
 
-	if (fixHtml)
-	{
-		strFormat.replace(QStringLiteral("%E"), escapePercent(fixHtmlString(workingDir)));
-		strFormat.replace(QStringLiteral("%N"), escapePercent(fixHtmlString(worldName)));
-		strFormat.replace(QStringLiteral("%P"), escapePercent(fixHtmlString(playerName)));
-		strFormat.replace(QStringLiteral("%F"), escapePercent(fixHtmlString(worldDir)));
-		strFormat.replace(QStringLiteral("%L"), escapePercent(fixHtmlString(logDir)));
-	}
-	else
-	{
-		strFormat.replace(QStringLiteral("%E"), escapePercent(workingDir));
-		strFormat.replace(QStringLiteral("%N"), escapePercent(worldName));
-		strFormat.replace(QStringLiteral("%P"), escapePercent(playerName));
-		strFormat.replace(QStringLiteral("%F"), escapePercent(worldDir));
-		strFormat.replace(QStringLiteral("%L"), escapePercent(logDir));
-	}
-
-	const QString qtFormat = toQtDateFormat(strFormat);
-	return QLocale::system().toString(time, qtFormat);
+	return TimeFormatUtils::formatWorldTime(time, format, context, fixHtml, &fixHtmlString);
 }
 
 void WorldRuntime::setDefaultWorldDirectory(const QString &path)
@@ -11288,8 +11194,48 @@ QString WorldRuntime::mainTitleOverride() const
 	return m_mainTitleOverride;
 }
 
+bool WorldRuntime::hasAnyPluginCallback(const QString &functionName)
+{
+	if (functionName.isEmpty() || m_plugins.isEmpty())
+		return false;
+
+	const int pluginCount = safeQSizeToInt(m_plugins.size());
+	if (m_pluginCallbackPresencePluginCount != pluginCount)
+	{
+		m_pluginCallbackPresence.clear();
+		m_pluginCallbackPresencePluginCount = pluginCount;
+	}
+
+	const qint64     nowMs                       = QDateTime::currentMSecsSinceEpoch();
+	const auto       it                          = m_pluginCallbackPresence.constFind(functionName);
+	constexpr qint64 kCallbackPresenceCacheTtlMs = 2000;
+	if (it != m_pluginCallbackPresence.constEnd() &&
+	    (nowMs - it->lastCheckedMs) < kCallbackPresenceCacheTtlMs)
+	{
+		return it->hasAny;
+	}
+
+	bool hasAny = false;
+	for (const auto &plugin : m_plugins)
+	{
+		if (!canExecutePlugin(plugin) || !plugin.lua)
+			continue;
+		if (plugin.lua->hasFunction(functionName))
+		{
+			hasAny = true;
+			break;
+		}
+	}
+
+	m_pluginCallbackPresence.insert(functionName, {hasAny, nowMs});
+	return hasAny;
+}
+
 bool WorldRuntime::callPluginCallbacksStopOnFalse(const QString &functionName, const QString &payload)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return true;
+
 	bool result = true;
 	for (auto &plugin : m_plugins)
 	{
@@ -11308,6 +11254,9 @@ bool WorldRuntime::callPluginCallbacksStopOnFalse(const QString &functionName, c
 
 void WorldRuntime::callPluginCallbacks(const QString &functionName, const QString &payload)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11318,6 +11267,9 @@ void WorldRuntime::callPluginCallbacks(const QString &functionName, const QStrin
 
 void WorldRuntime::callPluginCallbacksNoArgs(const QString &functionName)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11328,6 +11280,9 @@ void WorldRuntime::callPluginCallbacksNoArgs(const QString &functionName)
 
 bool WorldRuntime::callPluginCallbacksStopOnTrue(const QString &functionName, long arg1, const QString &arg2)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return false;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11344,6 +11299,9 @@ bool WorldRuntime::callPluginCallbacksStopOnTrue(const QString &functionName, lo
 bool WorldRuntime::callPluginCallbacksStopOnTrueWithString(const QString &functionName,
                                                            const QString &payload)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return false;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11360,6 +11318,9 @@ bool WorldRuntime::callPluginCallbacksStopOnTrueWithString(const QString &functi
 
 void WorldRuntime::callPluginCallbacksTransformBytes(const QString &functionName, QByteArray &payload)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11371,6 +11332,9 @@ void WorldRuntime::callPluginCallbacksTransformBytes(const QString &functionName
 
 void WorldRuntime::callPluginCallbacksTransformString(const QString &functionName, QString &payload)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11383,6 +11347,9 @@ void WorldRuntime::callPluginCallbacksTransformString(const QString &functionNam
 bool WorldRuntime::callPluginCallbacksStopOnFalseWithNumberAndString(const QString &functionName, long arg1,
                                                                      const QString &arg2)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return true;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11400,6 +11367,9 @@ bool WorldRuntime::callPluginCallbacksStopOnFalseWithTwoNumbersAndString(const Q
                                                                          long arg1, long arg2,
                                                                          const QString &arg3)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return true;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11416,6 +11386,9 @@ bool WorldRuntime::callPluginCallbacksStopOnFalseWithTwoNumbersAndString(const Q
 void WorldRuntime::callPluginCallbacksWithNumberAndString(const QString &functionName, long arg1,
                                                           const QString &arg2)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11426,6 +11399,9 @@ void WorldRuntime::callPluginCallbacksWithNumberAndString(const QString &functio
 
 void WorldRuntime::callPluginCallbacksWithBytes(const QString &functionName, const QByteArray &payload)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11437,6 +11413,9 @@ void WorldRuntime::callPluginCallbacksWithBytes(const QString &functionName, con
 bool WorldRuntime::callPluginCallbacksStopOnTrueBytes(const QString &functionName, long arg1,
                                                       const QByteArray &payload)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return false;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11453,6 +11432,9 @@ bool WorldRuntime::callPluginCallbacksStopOnTrueBytes(const QString &functionNam
 void WorldRuntime::callPluginCallbacksWithNumberAndBytes(const QString &functionName, long arg1,
                                                          const QByteArray &payload)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -11521,13 +11503,13 @@ void WorldRuntime::outputText(const QString &text, bool note, bool newLine)
 	const int log  = note ? (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_notes"))) ? 1 : 0)
 	                      : (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_output"))) ? 1 : 0);
 	firePluginScreendraw(type, log, text);
-	QString    displayText         = text;
-	const bool useAdaptiveNoteWrap = note && isConnected() && m_telnet.isNawsNegotiated();
-	if (const FixedColumnWrapConfig wrapConfig =
-	        useAdaptiveNoteWrap ? adaptiveWrapConfig(m_worldAttributes, m_telnet.windowColumns())
-	                            : (note ? fixedColumnWrapConfigIgnoringNaws(m_worldAttributes)
-	                                    : fixedColumnWrapConfig(m_worldAttributes));
-	    wrapConfig.enabled && !displayText.isEmpty())
+	QString                     displayText          = text;
+	const bool                  serverSideWrapActive = isConnected() && m_telnet.isNawsNegotiated();
+	const FixedColumnWrapConfig wrapConfig =
+	    (!note && serverSideWrapActive)
+	        ? FixedColumnWrapConfig{}
+	        : localOutputWrapConfig(m_worldAttributes, serverSideWrapActive, m_telnet.windowColumns());
+	if (wrapConfig.enabled && !displayText.isEmpty())
 		wrapPlainLineForColumn(displayText, wrapConfig.wrapColumn, wrapConfig.indentParas);
 	emit outputRequested(displayText, newLine, note);
 }
@@ -11541,14 +11523,14 @@ void WorldRuntime::outputStyledText(const QString &text, const QVector<StyleSpan
 	const int log  = note ? (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_notes"))) ? 1 : 0)
 	                      : (isEnabledFlag(m_worldAttributes.value(QStringLiteral("log_output"))) ? 1 : 0);
 	firePluginScreendraw(type, log, text);
-	QString            displayText         = text;
-	QVector<StyleSpan> displaySpans        = spans;
-	const bool         useAdaptiveNoteWrap = note && isConnected() && m_telnet.isNawsNegotiated();
-	if (const FixedColumnWrapConfig wrapConfig =
-	        useAdaptiveNoteWrap ? adaptiveWrapConfig(m_worldAttributes, m_telnet.windowColumns())
-	                            : (note ? fixedColumnWrapConfigIgnoringNaws(m_worldAttributes)
-	                                    : fixedColumnWrapConfig(m_worldAttributes));
-	    wrapConfig.enabled && !displayText.isEmpty())
+	QString                     displayText          = text;
+	QVector<StyleSpan>          displaySpans         = spans;
+	const bool                  serverSideWrapActive = isConnected() && m_telnet.isNawsNegotiated();
+	const FixedColumnWrapConfig wrapConfig =
+	    (!note && serverSideWrapActive)
+	        ? FixedColumnWrapConfig{}
+	        : localOutputWrapConfig(m_worldAttributes, serverSideWrapActive, m_telnet.windowColumns());
+	if (wrapConfig.enabled && !displayText.isEmpty())
 	{
 		if (displaySpans.isEmpty())
 			wrapPlainLineForColumn(displayText, wrapConfig.wrapColumn, wrapConfig.indentParas);
@@ -11558,53 +11540,54 @@ void WorldRuntime::outputStyledText(const QString &text, const QVector<StyleSpan
 	emit outputStyledRequested(displayText, displaySpans, newLine, note);
 }
 
-void WorldRuntime::prepareInputEchoForDisplay(QString &text, QVector<StyleSpan> &spans) const
+void WorldRuntime::prepareInputEchoForDisplay(QString &text, QVector<StyleSpan> &spans,
+                                              const bool appendToCurrentLine) const
 {
 	if (text.isEmpty())
 		return;
 
-	if (!isEnabledFlag(m_worldAttributes.value(QStringLiteral("wrap"))))
+	const bool wrapEnabled = isEnabledFlag(m_worldAttributes.value(QStringLiteral("wrap")));
+	if (!wrapEnabled)
 		return;
 
-	const bool nawsNegotiated = m_telnet.isNawsNegotiated();
-	const bool autoWrapWindow =
-	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("auto_wrap_window_width")));
-	int wrapColumn = nawsNegotiated ? m_telnet.windowColumns() : 0;
-	if (!autoWrapWindow)
+	const bool                  nawsNegotiated = isConnected() && m_telnet.isNawsNegotiated();
+	const FixedColumnWrapConfig wrapConfig =
+	    localOutputWrapConfig(m_worldAttributes, nawsNegotiated, m_telnet.windowColumns());
+	if (!wrapConfig.enabled || wrapConfig.wrapColumn <= 0)
+		return;
+
+	int firstLinePrefixColumns = 0;
+	if (appendToCurrentLine && !m_lines.isEmpty())
 	{
-		const int configuredWrapColumn = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
-		if (configuredWrapColumn > 0)
-			wrapColumn = wrapColumn > 0 ? qMin(wrapColumn, configuredWrapColumn) : configuredWrapColumn;
+		firstLinePrefixColumns = trailingLineColumnWidthForWrap(m_lines.constLast().text);
+		if (firstLinePrefixColumns >= wrapConfig.wrapColumn)
+		{
+			text.prepend(QLatin1Char('\n'));
+			if (!spans.isEmpty())
+			{
+				StyleSpan prefixSpan = spans.constFirst();
+				prefixSpan.length    = 1;
+				spans.prepend(prefixSpan);
+			}
+			firstLinePrefixColumns = 0;
+		}
 	}
-	if (wrapColumn <= 0)
-		return;
-
-	const QString indentValue = m_worldAttributes.value(QStringLiteral("indent_paras"));
-	const bool    indentParas = !(indentValue == QStringLiteral("0") ||
-                               indentValue.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
-                               indentValue.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
 	if (spans.isEmpty())
-		wrapPlainLineForColumn(text, wrapColumn, indentParas);
+		wrapPlainLineForColumn(text, wrapConfig.wrapColumn, wrapConfig.indentParas, firstLinePrefixColumns);
 	else
-		wrapStyledLineForColumn(text, spans, wrapColumn, indentParas);
-}
-
-void WorldRuntime::outputHtml(const QString &html)
-{
-	if (html.isEmpty())
-		return;
-	emit incomingHtmlReceived(html);
+		wrapStyledLineForColumn(text, spans, wrapConfig.wrapColumn, wrapConfig.indentParas,
+		                        firstLinePrefixColumns);
 }
 
 void WorldRuntime::outputAnsiText(const QString &text, bool note)
 {
 	if (text.isEmpty())
 		return;
-	const bool                  useAdaptiveNoteWrap = note && isConnected() && m_telnet.isNawsNegotiated();
+	const bool                  serverSideWrapActive = isConnected() && m_telnet.isNawsNegotiated();
 	const FixedColumnWrapConfig wrapConfig =
-	    useAdaptiveNoteWrap ? adaptiveWrapConfig(m_worldAttributes, m_telnet.windowColumns())
-	                        : (note ? fixedColumnWrapConfigIgnoringNaws(m_worldAttributes)
-	                                : fixedColumnWrapConfig(m_worldAttributes));
+	    (!note && serverSideWrapActive)
+	        ? FixedColumnWrapConfig{}
+	        : localOutputWrapConfig(m_worldAttributes, serverSideWrapActive, m_telnet.windowColumns());
 
 	auto parseColorValue = [](const QString &value) -> QColor
 	{
@@ -12225,44 +12208,17 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 {
 	const bool nawsEnabled = isEnabledFlag(m_worldAttributes.value(QStringLiteral("naws")));
 	m_telnet.setNawsEnabled(nawsEnabled);
+	const int worldWrapColumn = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
 
-	int  columns = 0;
-	int  rows    = 0;
+	int       columns = 0;
+	int       rows    = 0;
 
-	bool measuredFromView = false;
+	bool      measuredFromView = false;
 	if (m_view)
 	{
 		const QRect textRect     = m_view->outputTextRectangle();
 		int         widthPixels  = textRect.width();
 		const int   heightPixels = textRect.height();
-		if (!textRect.isEmpty())
-		{
-			// With NAWS enabled, use the unobscured right edge so server-side wrapping
-			// stays clear of overlay miniwindows (e.g. right-side chat/map panes).
-			int safeRight = textRect.right() + 1;
-			for (MiniWindow *window : sortedMiniWindows())
-			{
-				if (!window || !window->show || window->temporarilyHide)
-					continue;
-				if ((window->flags & kMiniWindowDrawUnderneath) != 0)
-					continue;
-				if (window->rect.isEmpty())
-					continue;
-
-				const QRect overlap = window->rect.intersected(textRect);
-				if (overlap.isEmpty())
-					continue;
-
-				const bool rightDocked =
-				    window->position == 6 || window->position == 7 || window->position == 8;
-				const bool onRightHalf = window->rect.center().x() >= textRect.center().x();
-				if (!rightDocked && !onRightHalf)
-					continue;
-
-				safeRight = qMin(safeRight, overlap.left());
-			}
-			widthPixels = qMax(0, safeRight - textRect.left());
-		}
 		if (widthPixels > 0 && heightPixels > 0)
 		{
 			const QFont        font = m_view->outputFont();
@@ -12282,9 +12238,11 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 		// correct size and avoid first-command wrap mismatch.
 		if (nawsEnabled && m_view && !measuredFromView)
 			return;
-		columns = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
+		columns = worldWrapColumn;
 		rows    = 24;
 	}
+	else if (worldWrapColumn > 0)
+		columns = qMax(columns, worldWrapColumn);
 
 	if (columns > 0 && rows > 0)
 		m_telnet.setWindowSize(columns, rows);
@@ -15657,6 +15615,9 @@ namespace
 void WorldRuntime::callPluginCallbacksWithTwoNumbersAndString(const QString &functionName, long arg1,
                                                               long arg2, const QString &arg3)
 {
+	if (!hasAnyPluginCallback(functionName))
+		return;
+
 	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin))
@@ -16002,7 +15963,7 @@ void WorldRuntime::replaceOutputLines(const QVector<LineEntry> &lines)
 
 	enforceOutputLineLimit();
 	if (m_view)
-		m_view->rebuildOutputFromLinesLazy(m_lines);
+		m_view->restoreOutputFromPersistedLines(m_lines);
 }
 
 void WorldRuntime::finalizePendingInputLineHardReturn()
@@ -16550,11 +16511,6 @@ void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &owner
 	distribute(rightWindows, rightRoom, topRight.y(), true, clientWidth, 0, true, false);
 	distribute(bottomWindows, bottomRoom, bottomLeft.x(), false, 0, clientHeight, false, true);
 	distribute(leftWindows, leftRoom, topLeft.y(), true, 0, 0, false, false);
-
-	// Re-evaluate NAWS width when overlay miniwindow layout changes so server-side
-	// wrapping tracks panes that consume right-side text space.
-	if (!underneath)
-		updateTelnetWindowSizeForNaws();
 }
 
 int WorldRuntime::windowRectOp(const QString &name, int action, int left, int top, int right, int bottom,

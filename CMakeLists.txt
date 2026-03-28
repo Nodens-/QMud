@@ -170,6 +170,7 @@ set(QMUD_SOURCES
         MainFrameActionUtils.cpp
         AppController.cpp
         UpdateCheckUtils.cpp
+        TimeFormatUtils.cpp
         WorldSessionRestoreFlowUtils.cpp
         WorldSessionStateUtils.cpp
         ReloadPlannerUtils.cpp

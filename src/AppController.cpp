@@ -8,6 +8,7 @@
  */
 
 #include "AppController.h"
+
 #include "ActivityDocument.h"
 #include "AsciiArt.h"
 #include "BraceMatch.h"
@@ -10383,7 +10384,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		auto *window = new WorldChildWindow(world->windowTitle());
 		window->setRuntimeObserver(runtime);
 		if (auto *view = window->view())
-			view->rebuildOutputFromLinesLazy(runtime->lines());
+			view->restoreOutputFromPersistedLines(runtime->lines());
 		m_mainWindow->addMdiSubWindow(window);
 		if (world->isMaximized())
 			window->showMaximized();
@@ -10503,8 +10504,13 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!m_mainWindow)
 			return;
 		WorldChildWindow *world = m_mainWindow->activeWorldChildWindow();
-		if (!world)
-			return;
+			if (!world)
+				return;
+			if (WorldRuntime *runtime = world->runtime(); runtime)
+			{
+				runtime->deleteOutput();
+				return;
+			}
 		WorldView *view = world->view();
 		if (!view)
 			return;

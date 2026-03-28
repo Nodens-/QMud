@@ -1437,11 +1437,9 @@ static int luaColourNote(lua_State *L)
 	if (!runtime)
 		return 0;
 
-	const QString textColour = QString::fromUtf8(luaL_checkstring(L, 1));
-	const QString backColour = QString::fromUtf8(luaL_checkstring(L, 2));
-	QString       text       = QString::fromUtf8(luaL_checkstring(L, 3));
-	if (text.right(2) != QStringLiteral("\r\n"))
-		text += QStringLiteral("\r\n");
+	const QString        textColour = QString::fromUtf8(luaL_checkstring(L, 1));
+	const QString        backColour = QString::fromUtf8(luaL_checkstring(L, 2));
+	const QString        text       = QString::fromUtf8(luaL_checkstring(L, 3));
 
 	const bool           oldNotesInRgb     = runtime->notesInRgb();
 	const long           oldFore           = runtime->noteColourFore();
@@ -1471,7 +1469,7 @@ static int luaColourNote(lua_State *L)
 	span.blink     = (noteStyle & kStyleBlink) != 0;
 	span.inverse   = (noteStyle & kStyleInverse) != 0;
 	span.changed   = true;
-	runtime->outputStyledText(text, {span}, true, false);
+	runtime->outputStyledText(text, {span}, true, true);
 
 	if (oldNotesInRgb)
 	{
@@ -4710,7 +4708,12 @@ static int luaNoteHr(lua_State *L)
 	WorldRuntime *runtime = engine->worldRuntime();
 	if (!runtime)
 		return 0;
-	runtime->outputHtml(QStringLiteral("<hr/>"));
+	if (WorldView *const view = runtime->view())
+	{
+		view->appendHorizontalRule();
+		return 0;
+	}
+
 	int flags = WorldRuntime::LineHorizontalRule;
 	if (isEnabledValue(runtime->worldAttributes().value(QStringLiteral("log_notes"))))
 		flags |= WorldRuntime::LineLog;
@@ -7128,7 +7131,7 @@ static int luaGetInfo(lua_State *L)
 			return 1;
 		}
 		const QRect rect = view->outputTextRectangle();
-		lua_pushnumber(L, rect.left() + rect.width());
+		lua_pushnumber(L, rect.right());
 		return 1;
 	}
 	case 293:
@@ -7140,7 +7143,7 @@ static int luaGetInfo(lua_State *L)
 			return 1;
 		}
 		const QRect rect = view->outputTextRectangle();
-		lua_pushnumber(L, rect.top() + rect.height());
+		lua_pushnumber(L, rect.bottom());
 		return 1;
 	}
 

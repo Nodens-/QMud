@@ -3052,8 +3052,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 
 	if ((watched == m_mdiArea || watched == m_centralContainer || watched == m_centralLayout ||
 	     watched == this) &&
-	    (event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest ||
-	     event->type() == QEvent::WindowStateChange))
+	    (event->type() == QEvent::Resize || event->type() == QEvent::WindowStateChange))
 	{
 		refreshWorldMiniWindows();
 	}
@@ -3129,15 +3128,29 @@ void MainWindow::refreshWorldMiniWindows() const
 	if (!m_mdiArea)
 		return;
 
+	auto refreshWorld = [](const WorldChildWindow *world)
+	{
+		if (!world)
+			return;
+		if (WorldView *view = world->view())
+			view->refreshMiniWindows();
+	};
+
+	if (auto *activeWorld = qobject_cast<WorldChildWindow *>(m_mdiArea->activeSubWindow());
+	    activeWorld && activeWorld->windowState().testFlag(Qt::WindowMaximized))
+	{
+		refreshWorld(activeWorld);
+		return;
+	}
+
 	for (QMdiSubWindow *sub : m_mdiArea->subWindowList(QMdiArea::CreationOrder))
 	{
 		auto *world = qobject_cast<WorldChildWindow *>(sub);
 		if (!world)
 			continue;
-		if (WorldView *view = world->view())
-			view->refreshMiniWindows();
-		if (WorldRuntime *runtime = world->runtime())
-			runtime->notifyWorldOutputResized();
+		if (!world->isVisible() || world->windowState().testFlag(Qt::WindowMinimized))
+			continue;
+		refreshWorld(world);
 	}
 }
 

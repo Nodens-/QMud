@@ -20,6 +20,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QHash>
 #include <QImage>
 #include <QList>
 #include <QMap>
@@ -818,15 +819,15 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Returns ANSI color entry for bold/normal table.
 		 * @param bold Read from bold table when `true`, normal table otherwise.
-		 * @param index ANSI colour index.
+		 * @param index ANSI color index.
 		 * @return Color value for the requested entry.
 		 */
 		[[nodiscard]] QColor                      ansiColour(bool bold, int index) const;
 		/**
-		 * @brief Sets ANSI colour entry.
+		 * @brief Sets ANSI color entry.
 		 * @param bold Write to bold table when `true`, normal table otherwise.
-		 * @param index ANSI colour index.
-		 * @param color New colour value.
+		 * @param index ANSI color index.
+		 * @param color New color value.
 		 */
 		void                                      setAnsiColour(bool bold, int index, const QColor &color);
 		/**
@@ -1577,14 +1578,14 @@ class WorldRuntime : public QObject
 		 * @param name Miniwindow name.
 		 * @param x Pixel x coordinate.
 		 * @param y Pixel y coordinate.
-		 * @return Pixel colour value.
+		 * @return Pixel color value.
 		 */
 		[[nodiscard]] QVariant windowGetPixel(const QString &name, int x, int y) const;
 		/**
 		 * @brief Creates image from 8x8 monochrome bitmap rows.
 		 * @param name Miniwindow name.
 		 * @param imageId Image resource id.
-		 * @param row1 Bitmap row 1 bits.
+		 * @param row1 Bitmap row 1 bit.
 		 * @param row2 Bitmap row 2 bits.
 		 * @param row3 Bitmap row 3 bits.
 		 * @param row4 Bitmap row 4 bits.
@@ -1923,7 +1924,7 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] WorldView *view() const;
 		/**
-		 * @brief Installs plugins queued for delayed install.
+		 * @brief Installs plugins queued for delayed installation.
 		 */
 		void                     installPendingPlugins();
 		/**
@@ -2327,6 +2328,20 @@ class WorldRuntime : public QObject
 		 * @return `true` when connected.
 		 */
 		[[nodiscard]] bool                  isConnected() const;
+		/**
+		 * @brief Returns whether NAWS is currently negotiated with the server.
+		 * @return `true` when NAWS negotiation is active.
+		 */
+		[[nodiscard]] bool                  isNawsNegotiated() const;
+		/**
+		 * @brief Returns the currently calculated output wrap columns.
+		 *
+		 * This is the same column value maintained for NAWS window-size updates,
+		 * including miniwindow-reserved output space.
+		 *
+		 * @return Calculated wrap columns, or `0` when not available yet.
+		 */
+		[[nodiscard]] int                   outputWrapColumns() const;
 		/**
 		 * @brief Returns current connection phase enum value.
 		 * @return Connection phase code.
@@ -2789,10 +2804,10 @@ class WorldRuntime : public QObject
 		 * @brief Static helper APIs exposed to scripting/commands.
 		 */
 		/**
-		 * @brief Adjusts colour value using a transformation method.
-		 * @param colour Input colour value.
+		 * @brief Adjusts color value using a transformation method.
+		 * @param colour Input color value.
 		 * @param method Adjustment method code.
-		 * @return Adjusted colour value.
+		 * @return Adjusted color value.
 		 */
 		static long                    adjustColour(long colour, short method);
 		/**
@@ -2801,15 +2816,15 @@ class WorldRuntime : public QObject
 		 * @param base Base/destination colour.
 		 * @param mode Blend mode code.
 		 * @param opacity Blend opacity.
-		 * @return Blended colour value.
+		 * @return Blended color value.
 		 */
 		static long                    blendPixel(long blend, long base, short mode, double opacity);
 		/**
 		 * @brief Applies pixel filter operation.
-		 * @param pixel Input colour value.
+		 * @param pixel Input color value.
 		 * @param operation Filter operation code.
 		 * @param options Filter options value.
-		 * @return Filtered colour value.
+		 * @return Filtered color value.
 		 */
 		static long                    filterPixel(long pixel, short operation, double options);
 		/**
@@ -2827,7 +2842,7 @@ class WorldRuntime : public QObject
 		static QString                 base64Decode(const QString &text);
 		/**
 		 * @brief Converts RGB value to canonical colour name.
-		 * @param colour RGB colour value.
+		 * @param colour RGB color value.
 		 * @return Colour name.
 		 */
 		static QString                 rgbColourToName(long colour);
@@ -2853,15 +2868,15 @@ class WorldRuntime : public QObject
 		 */
 		static QStringList             internalCommandsList();
 		/**
-		 * @brief Returns mapped colour replacement or original.
-		 * @param value Input colour value.
-		 * @return Mapped colour value.
+		 * @brief Returns mapped color replacement or original.
+		 * @param value Input color value.
+		 * @return Mapped color value.
 		 */
 		[[nodiscard]] long             getMapColour(long value) const;
 		/**
-		 * @brief Returns mapped system colour value.
+		 * @brief Returns mapped system color value.
 		 * @param index System color index.
-		 * @return RGB colour value.
+		 * @return RGB color value.
 		 */
 		static long                    getSysColor(int index);
 		/**
@@ -2933,20 +2948,20 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Converts color name to RGB value.
 		 * @param name Colour name.
-		 * @return RGB colour value.
+		 * @return RGB color value.
 		 */
 		static long                    colourNameToRGB(const QString &name);
 		/**
 		 * @brief Sets custom note text color entry.
 		 * @param index Custom color index.
-		 * @param color Text colour value.
+		 * @param color Text color value.
 		 * @return API status code.
 		 */
 		int                            setCustomColourText(int index, const QColor &color);
 		/**
 		 * @brief Sets custom note background color entry.
 		 * @param index Custom color index.
-		 * @param color Background colour value.
+		 * @param color Background color value.
 		 * @return API status code.
 		 */
 		int                            setCustomColourBackground(int index, const QColor &color);
@@ -2960,13 +2975,13 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Returns custom note text color entry.
 		 * @param index Custom color index.
-		 * @return Text colour RGB value.
+		 * @return Text color RGB value.
 		 */
 		[[nodiscard]] long             customColourText(int index) const;
 		/**
 		 * @brief Returns custom note background color entry.
 		 * @param index Custom color index.
-		 * @return Background colour RGB value.
+		 * @return Background color RGB value.
 		 */
 		[[nodiscard]] long             customColourBackground(int index) const;
 		/**
@@ -3156,7 +3171,7 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Returns mapped color for original color.
 		 * @param original Original color value.
-		 * @return Mapped colour value.
+		 * @return Mapped color value.
 		 */
 		[[nodiscard]] long             mapColourValue(long original) const;
 		/**
@@ -3166,20 +3181,20 @@ class WorldRuntime : public QObject
 		 */
 		void                           mapColour(long original, long replacement);
 		/**
-		 * @brief Returns full colour translation map.
-		 * @return Colour translation map.
+		 * @brief Returns full color translation map.
+		 * @return Color translation map.
 		 */
 		[[nodiscard]] QMap<long, long> mapColourList() const;
 		/**
 		 * @brief Returns normal ANSI color by index.
-		 * @param index ANSI colour index.
-		 * @return ANSI colour value.
+		 * @param index ANSI color index.
+		 * @return ANSI color value.
 		 */
 		[[nodiscard]] long             normalColour(int index) const;
 		/**
 		 * @brief Sets normal ANSI color by index.
-		 * @param index ANSI colour index.
-		 * @param value ANSI colour value.
+		 * @param index ANSI color index.
+		 * @param value ANSI color value.
 		 */
 		void                           setNormalColour(int index, long value);
 		/**
@@ -3326,13 +3341,11 @@ class WorldRuntime : public QObject
 		 *
 		 * @param text Echo text to normalize in-place.
 		 * @param spans Optional echo style spans, normalized in-place.
+		 * @param appendToCurrentLine When `true`, account for existing prompt width on
+		 * the current line for first-line echo wrapping.
 		 */
-		void prepareInputEchoForDisplay(QString &text, QVector<StyleSpan> &spans) const;
-		/**
-		 * @brief Emits HTML output fragment to view.
-		 * @param html HTML fragment.
-		 */
-		void outputHtml(const QString &html);
+		void prepareInputEchoForDisplay(QString &text, QVector<StyleSpan> &spans,
+		                                bool appendToCurrentLine) const;
 		/**
 		 * @brief Sends command through runtime command pipeline.
 		 * @param text Command text.
@@ -3707,11 +3720,6 @@ class WorldRuntime : public QObject
 		void incomingStyledLinePartialReceived(const QString                          &line,
 		                                       const QVector<WorldRuntime::StyleSpan> &spans);
 		/**
-		 * @brief Emitted when HTML output fragment arrives.
-		 * @param html HTML fragment.
-		 */
-		void incomingHtmlReceived(const QString &html);
-		/**
 		 * @brief Emitted to append plain output.
 		 * @param text Output text.
 		 * @param newLine Append newline when `true`.
@@ -3898,6 +3906,12 @@ class WorldRuntime : public QObject
 		bool callPluginCallbacksStopOnFalseWithTwoNumbersAndString(const QString &functionName, long arg1,
 		                                                           long arg2, const QString &arg3);
 		/**
+		 * @brief Returns whether any executable plugin exposes a callback function.
+		 * @param functionName Callback function name.
+		 * @return `true` when at least one plugin currently has the callback.
+		 */
+		bool hasAnyPluginCallback(const QString &functionName);
+		/**
 		 * @brief Queues plugin for deferred installation.
 		 * @param plugin Plugin instance.
 		 */
@@ -3962,7 +3976,7 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] QString chatSaveDirectory() const;
 		/**
-		 * @brief Returns ignore chat colour-codes setting.
+		 * @brief Returns ignore chat color-codes setting.
 		 * @return Ignore-chat-colours flag.
 		 */
 		[[nodiscard]] bool    ignoreChatColours() const;
@@ -3982,7 +3996,7 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] long    chatForegroundColour() const;
 		/**
-		 * @brief Returns default chat background colour.
+		 * @brief Returns default chat background color.
 		 * @return Chat background color.
 		 */
 		[[nodiscard]] long    chatBackgroundColour() const;
@@ -4216,127 +4230,134 @@ class WorldRuntime : public QObject
 		QDateTime                             m_lastChatMessageTime;
 		QDateTime                             m_lastChatGroupMessageTime;
 		QList<Plugin>                         m_plugins;
-		QList<Include>                        m_includes;
-		QList<Script>                         m_scripts;
-		QString                               m_comments;
-		QVector<LineEntry>                    m_lines;
-		QMap<qint64, int>                     m_acceleratorKeyToCommand;
-		QMap<int, AcceleratorEntry>           m_commandToAcceleratorEntry;
-		int                                   m_nextAcceleratorCommand{kAcceleratorFirstCommand};
-		QMap<QString, MiniWindow>             m_miniWindows;
-		int                                   m_absoluteReferenceRightOver{0};
-		int                                   m_absoluteReferenceBottomOver{0};
-		int                                   m_absoluteReferenceRightUnder{0};
-		int                                   m_absoluteReferenceBottomUnder{0};
-		QSet<QString>                         m_specialFontPaths;
-		QVector<QString>                      m_specialFontPathOrder;
-		QVector<int>                          m_specialFontIds;
-		QFile                                 m_logFile;
-		QString                               m_logFileName;
-		QString                               m_logRotationBaseFileName;
-		bool                                  m_logRotateInProgress{false};
-		QString                               m_defaultWorldDirectory;
-		QString                               m_defaultLogDirectory;
-		QString                               m_startupDirectory;
-		QString                               m_worldFilePath;
-		QString                               m_pluginsDirectory;
-		QString                               m_stateFilesDirectory;
-		QString                               m_fileBrowsingDirectory;
-		QString                               m_preferencesDatabaseName;
-		QString                               m_translatorFile;
-		QString                               m_locale;
-		QString                               m_fixedPitchFont;
-		QString                               m_statusMessage;
-		QString                               m_wordUnderMenu;
-		bool                                  m_debugIncomingPackets{false};
-		QString                               m_lastImmediateExpression;
-		QString                               m_lastCommandSent;
-		QString                               m_lastTelnetSubnegotiation;
-		int                                   m_totalLinesSent{0};
-		QDateTime                             m_lastUserInput;
-		int                                   m_linesReceived{0};
-		int                                   m_utf8ErrorCount{0};
-		int                                   m_lastLineWithIacGa{0};
-		unsigned short                        m_currentActionSource{eUnknownActionSource};
-		int                                   m_newLines{0};
-		bool                                  m_doingSimulate{false};
-		bool                                  m_tabCompleteFunctions{false};
-		QSet<QString>                         m_shiftTabCompleteItems;
-		bool                                  m_active{false};
-		int                                   m_triggersMatchedThisSession{0};
-		int                                   m_triggersEvaluatedCount{0};
-		int                                   m_aliasesMatchedThisSession{0};
-		int                                   m_aliasesEvaluatedCount{0};
-		int                                   m_timersFiredThisSession{0};
-		int                                   m_connectPhase{eConnectNotConnected};
-		bool                                  m_connectViaProxy{false};
-		QString                               m_proxyAddressString;
-		quint32                               m_proxyAddressV4{0};
-		int                                   m_lastPreferencesPage{0};
-		QString                               m_lastTriggerTreeExpandedGroup;
-		QString                               m_lastAliasTreeExpandedGroup;
-		QString                               m_lastTimerTreeExpandedGroup;
-		bool                                  m_hasCachedIp{false};
-		QDateTime                             m_connectTime;
-		bool                                  m_disconnectOk{true};
-		bool                                  m_reconnectOnLinkFailure{false};
-		bool                                  m_incomingSocketDataPaused{false};
-		bool                                  m_reloadReattachSuppressConnectActions{false};
-		QDateTime                             m_statusTime;
-		QDateTime                             m_lastFlushTime;
-		QDateTime                             m_clientStartTime;
-		QDateTime                             m_worldStartTime;
-		int                                   m_mxpErrors{0};
-		bool                                  m_mxpActive{false};
-		bool                                  m_outputFrozen{false};
-		TextRectangleSettings                 m_textRectangle;
-		QMap<int, UdpListener>                m_udpListeners;
-		QVector<SoundBuffer>                  m_soundBuffers;
-		int                                   m_outputFontHeight{0};
-		int                                   m_outputFontWidth{0};
-		int                                   m_inputFontHeight{0};
-		int                                   m_inputFontWidth{0};
-		int                                   m_queuedCommandCount{0};
-		bool                                  m_removeMapReverses{true};
-		qint64                                m_bytesIn{0};
-		qint64                                m_bytesOut{0};
-		int                                   m_inputPacketCount{0};
-		int                                   m_outputPacketCount{0};
-		bool                                  m_isMapping{false};
-		bool                                  m_variablesChanged{false};
-		bool                                  m_lineOmittedFromOutput{false};
-		bool                                  m_traceEnabled{false};
-		bool                                  m_worldFileModified{false};
-		qint64                                m_newlinesReceived{0};
-		bool                                  m_scriptFileChanged{false};
-		bool                                  m_loadingDocument{false};
-		bool                                  m_inPlaySoundPluginCallback{false};
-		bool                                  m_inCancelSoundPluginCallback{false};
-		bool                                  m_inScreendrawCallback{false};
-		bool                                  m_inDrawOutputWindowCallback{false};
-		int                                   m_suppressWorldOutputResizedCallbacks{0};
-		bool                                  m_pluginInstallDeferred{false};
-		int                                   m_outputWindowRedrawCount{0};
-		QFileSystemWatcher                   *m_scriptWatcher{nullptr};
-		QVector<MxpTagFrame>                  m_mxpTagStack;
-		QVector<MxpOpenTag>                   m_mxpOpenTags;
-		QByteArray                            m_mxpTextBuffer;
-		QString                               m_windowTitleOverride;
-		QString                               m_mainTitleOverride;
-		class LuaCallbackEngine              *m_luaCallbacks{nullptr};
-		QString                               m_luaScriptText;
-		WorldCommandProcessor                *m_commandProcessor{nullptr};
-		int                                   m_lastGoTo{1};
-		QList<QString>                        m_mappingList;
-		qint64                                m_triggerTimeNs{0};
-		qint64                                m_aliasTimeNs{0};
-		QElapsedTimer                         m_lineTimer;
-		qint64                                m_nextLineNumber{1};
-		bool                                  m_luaContextLineActive{false};
-		bool                                  m_luaContextLineBuffered{false};
-		bool                                  m_luaContextLineCommitted{false};
-		int                                   m_luaContextLineBufferIndex{0};
-		LineEntry                             m_luaContextLineEntry;
+		struct PluginCallbackPresenceEntry
+		{
+				bool   hasAny{false};
+				qint64 lastCheckedMs{0};
+		};
+		QHash<QString, PluginCallbackPresenceEntry> m_pluginCallbackPresence;
+		int                                         m_pluginCallbackPresencePluginCount{-1};
+		QList<Include>                              m_includes;
+		QList<Script>                               m_scripts;
+		QString                                     m_comments;
+		QVector<LineEntry>                          m_lines;
+		QMap<qint64, int>                           m_acceleratorKeyToCommand;
+		QMap<int, AcceleratorEntry>                 m_commandToAcceleratorEntry;
+		int                                         m_nextAcceleratorCommand{kAcceleratorFirstCommand};
+		QMap<QString, MiniWindow>                   m_miniWindows;
+		int                                         m_absoluteReferenceRightOver{0};
+		int                                         m_absoluteReferenceBottomOver{0};
+		int                                         m_absoluteReferenceRightUnder{0};
+		int                                         m_absoluteReferenceBottomUnder{0};
+		QSet<QString>                               m_specialFontPaths;
+		QVector<QString>                            m_specialFontPathOrder;
+		QVector<int>                                m_specialFontIds;
+		QFile                                       m_logFile;
+		QString                                     m_logFileName;
+		QString                                     m_logRotationBaseFileName;
+		bool                                        m_logRotateInProgress{false};
+		QString                                     m_defaultWorldDirectory;
+		QString                                     m_defaultLogDirectory;
+		QString                                     m_startupDirectory;
+		QString                                     m_worldFilePath;
+		QString                                     m_pluginsDirectory;
+		QString                                     m_stateFilesDirectory;
+		QString                                     m_fileBrowsingDirectory;
+		QString                                     m_preferencesDatabaseName;
+		QString                                     m_translatorFile;
+		QString                                     m_locale;
+		QString                                     m_fixedPitchFont;
+		QString                                     m_statusMessage;
+		QString                                     m_wordUnderMenu;
+		bool                                        m_debugIncomingPackets{false};
+		QString                                     m_lastImmediateExpression;
+		QString                                     m_lastCommandSent;
+		QString                                     m_lastTelnetSubnegotiation;
+		int                                         m_totalLinesSent{0};
+		QDateTime                                   m_lastUserInput;
+		int                                         m_linesReceived{0};
+		int                                         m_utf8ErrorCount{0};
+		int                                         m_lastLineWithIacGa{0};
+		unsigned short                              m_currentActionSource{eUnknownActionSource};
+		int                                         m_newLines{0};
+		bool                                        m_doingSimulate{false};
+		bool                                        m_tabCompleteFunctions{false};
+		QSet<QString>                               m_shiftTabCompleteItems;
+		bool                                        m_active{false};
+		int                                         m_triggersMatchedThisSession{0};
+		int                                         m_triggersEvaluatedCount{0};
+		int                                         m_aliasesMatchedThisSession{0};
+		int                                         m_aliasesEvaluatedCount{0};
+		int                                         m_timersFiredThisSession{0};
+		int                                         m_connectPhase{eConnectNotConnected};
+		bool                                        m_connectViaProxy{false};
+		QString                                     m_proxyAddressString;
+		quint32                                     m_proxyAddressV4{0};
+		int                                         m_lastPreferencesPage{0};
+		QString                                     m_lastTriggerTreeExpandedGroup;
+		QString                                     m_lastAliasTreeExpandedGroup;
+		QString                                     m_lastTimerTreeExpandedGroup;
+		bool                                        m_hasCachedIp{false};
+		QDateTime                                   m_connectTime;
+		bool                                        m_disconnectOk{true};
+		bool                                        m_reconnectOnLinkFailure{false};
+		bool                                        m_incomingSocketDataPaused{false};
+		bool                                        m_reloadReattachSuppressConnectActions{false};
+		QDateTime                                   m_statusTime;
+		QDateTime                                   m_lastFlushTime;
+		QDateTime                                   m_clientStartTime;
+		QDateTime                                   m_worldStartTime;
+		int                                         m_mxpErrors{0};
+		bool                                        m_mxpActive{false};
+		bool                                        m_outputFrozen{false};
+		TextRectangleSettings                       m_textRectangle;
+		QMap<int, UdpListener>                      m_udpListeners;
+		QVector<SoundBuffer>                        m_soundBuffers;
+		int                                         m_outputFontHeight{0};
+		int                                         m_outputFontWidth{0};
+		int                                         m_inputFontHeight{0};
+		int                                         m_inputFontWidth{0};
+		int                                         m_queuedCommandCount{0};
+		bool                                        m_removeMapReverses{true};
+		qint64                                      m_bytesIn{0};
+		qint64                                      m_bytesOut{0};
+		int                                         m_inputPacketCount{0};
+		int                                         m_outputPacketCount{0};
+		bool                                        m_isMapping{false};
+		bool                                        m_variablesChanged{false};
+		bool                                        m_lineOmittedFromOutput{false};
+		bool                                        m_traceEnabled{false};
+		bool                                        m_worldFileModified{false};
+		qint64                                      m_newlinesReceived{0};
+		bool                                        m_scriptFileChanged{false};
+		bool                                        m_loadingDocument{false};
+		bool                                        m_inPlaySoundPluginCallback{false};
+		bool                                        m_inCancelSoundPluginCallback{false};
+		bool                                        m_inScreendrawCallback{false};
+		bool                                        m_inDrawOutputWindowCallback{false};
+		int                                         m_suppressWorldOutputResizedCallbacks{0};
+		bool                                        m_pluginInstallDeferred{false};
+		int                                         m_outputWindowRedrawCount{0};
+		QFileSystemWatcher                         *m_scriptWatcher{nullptr};
+		QVector<MxpTagFrame>                        m_mxpTagStack;
+		QVector<MxpOpenTag>                         m_mxpOpenTags;
+		QByteArray                                  m_mxpTextBuffer;
+		QString                                     m_windowTitleOverride;
+		QString                                     m_mainTitleOverride;
+		class LuaCallbackEngine                    *m_luaCallbacks{nullptr};
+		QString                                     m_luaScriptText;
+		WorldCommandProcessor                      *m_commandProcessor{nullptr};
+		int                                         m_lastGoTo{1};
+		QList<QString>                              m_mappingList;
+		qint64                                      m_triggerTimeNs{0};
+		qint64                                      m_aliasTimeNs{0};
+		QElapsedTimer                               m_lineTimer;
+		qint64                                      m_nextLineNumber{1};
+		bool                                        m_luaContextLineActive{false};
+		bool                                        m_luaContextLineBuffered{false};
+		bool                                        m_luaContextLineCommitted{false};
+		int                                         m_luaContextLineBufferIndex{0};
+		LineEntry                                   m_luaContextLineEntry;
 };
 
 #endif // QMUD_WORLDRUNTIME_H

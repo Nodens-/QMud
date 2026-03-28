@@ -986,18 +986,29 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 	};
 	if (m_runtime)
 	{
-		attrs                     = &m_runtime->worldAttributes();
-		const bool wrapEnabled    = isEnabled(attrs->value(QStringLiteral("wrap")));
-		const bool autoWrapWindow = isEnabled(attrs->value(QStringLiteral("auto_wrap_window_width")));
-		const bool nawsEnabled    = isEnabled(attrs->value(QStringLiteral("naws")));
-		wrapColumn                = attrs->value(QStringLiteral("wrap_column")).toInt();
-		runtimeWrap               = wrapEnabled && !autoWrapWindow && wrapColumn > 0 && !nawsEnabled;
-		indentParas               = !(
-            attrs->value(QStringLiteral("indent_paras")) == QStringLiteral("0") ||
-            attrs->value(QStringLiteral("indent_paras")).compare(QStringLiteral("n"), Qt::CaseInsensitive) ==
-                0 ||
-            attrs->value(QStringLiteral("indent_paras"))
-                    .compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+		attrs                          = &m_runtime->worldAttributes();
+		const bool wrapEnabled         = isEnabled(attrs->value(QStringLiteral("wrap")));
+		const bool autoWrapWindow      = isEnabled(attrs->value(QStringLiteral("auto_wrap_window_width")));
+		const bool nawsNegotiated      = m_runtime->isConnected() && m_runtime->isNawsNegotiated();
+		const int  worldWrapColumn     = attrs->value(QStringLiteral("wrap_column")).toInt();
+		int        effectiveWrapColumn = worldWrapColumn;
+		if (autoWrapWindow)
+		{
+			const int calculatedColumns = m_runtime->outputWrapColumns();
+			if (worldWrapColumn > 0)
+				effectiveWrapColumn =
+				    calculatedColumns > 0 ? qMax(calculatedColumns, worldWrapColumn) : worldWrapColumn;
+			else
+				effectiveWrapColumn = calculatedColumns;
+		}
+		wrapColumn  = effectiveWrapColumn;
+		runtimeWrap = wrapEnabled && !nawsNegotiated && wrapColumn > 0;
+		indentParas = !(
+		    attrs->value(QStringLiteral("indent_paras")) == QStringLiteral("0") ||
+		    attrs->value(QStringLiteral("indent_paras")).compare(QStringLiteral("n"), Qt::CaseInsensitive) ==
+		        0 ||
+		    attrs->value(QStringLiteral("indent_paras"))
+		            .compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
 	}
 
 	QVector<WorldRuntime::StyleSpan> normalizedSpans = spans;
