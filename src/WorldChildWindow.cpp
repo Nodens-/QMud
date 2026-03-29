@@ -26,7 +26,6 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
-#include <QMdiArea>
 #include <QMessageBox>
 #include <QPalette>
 #include <QPlainTextEdit>
@@ -538,18 +537,15 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		        {
 			        if (!m_mxpDebug)
 			        {
-				        QMdiArea *const mdi = mdiArea();
-				        if (!mdi)
+				        MainWindowHost *main = resolveMainWindowHost(window());
+				        if (!main)
 					        return;
-				        auto debugWindow          = std::make_unique<TextChildWindow>(title, QString(), mdi);
-				        TextChildWindow *debugPtr = debugWindow.get();
+				        auto             debugWindow = std::make_unique<TextChildWindow>(title, QString());
+				        TextChildWindow *debugPtr    = debugWindow.get();
 				        debugPtr->setQuerySaveOnClose(false);
 				        debugPtr->editor()->setReadOnly(true);
-				        mdi->addSubWindow(debugPtr);
 				        connect(debugPtr, &QObject::destroyed, this, [this] { m_mxpDebug = nullptr; });
-				        debugPtr->showMaximized();
-				        if (MainWindowHost *main = resolveMainWindowHost(window()))
-					        main->updateMdiTabs();
+				        main->addMdiSubWindow(debugPtr, false);
 				        m_mxpDebug                                                   = debugPtr;
 				        [[maybe_unused]] TextChildWindow *const transferredOwnership = debugWindow.release();
 				        Q_ASSERT(transferredOwnership == debugPtr);

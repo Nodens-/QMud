@@ -4597,7 +4597,7 @@ void AppController::setupStartupBehavior()
 		if (!worldList.isEmpty())
 		{
 			const auto items = splitSerializedWorldList(worldList);
-			openWorldsFromList(items, true);
+			openWorldsFromList(items, false);
 		}
 	}
 
@@ -4632,13 +4632,6 @@ bool AppController::openWorldDocument(const QString &path)
 			const bool activate              = m_nextNewWorldActivationOverride != 0;
 			m_nextNewWorldActivationOverride = -1;
 			return activate;
-		}
-		if (!m_batchOpeningWorldList)
-			return true;
-		if (!m_batchWorldListActivatedFirst)
-		{
-			m_batchWorldListActivatedFirst = true;
-			return true;
 		}
 		return false;
 	};
@@ -10944,8 +10937,13 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (fileName.isEmpty())
 			return;
 		const QFileInfo info(fileName);
-		m_fileBrowsingDir = info.absolutePath();
-		openDocumentFile(fileName);
+		m_fileBrowsingDir                    = info.absolutePath();
+		const int previousActivationOverride = m_nextNewWorldActivationOverride;
+		if (QMudFileExtensions::isWorldSuffix(info.suffix().toLower()))
+			m_nextNewWorldActivationOverride = 1;
+		const bool opened = openDocumentFile(fileName);
+		Q_UNUSED(opened);
+		m_nextNewWorldActivationOverride = previousActivationOverride;
 	}
 	else if (cmdName == QStringLiteral("OpenWorldsInStartupList"))
 	{
@@ -10962,7 +10960,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (worldList.isEmpty())
 			return;
 		const auto items = splitSerializedWorldList(worldList);
-		openWorldsFromList(items, true);
+		openWorldsFromList(items, false);
 		changeToStartupDirectory();
 	}
 	else if (cmdName == QStringLiteral("CloseWorld"))
@@ -12256,7 +12254,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (worldList.isEmpty())
 			return;
 		const QStringList items = splitSerializedWorldList(worldList);
-		openWorldsFromList(items, true);
+		openWorldsFromList(items, false);
 
 		for (WorldRuntime *runtime : activeWorldRuntimes())
 			connectRuntime(runtime);
@@ -13117,7 +13115,7 @@ void AppController::handleFileNew()
 
 	auto *window = new WorldChildWindow(QStringLiteral("World"));
 	window->setRuntime(runtime);
-	m_mainWindow->addMdiSubWindow(window);
+	m_mainWindow->addMdiSubWindow(window, true);
 
 	WorldPreferencesDialog dlg(runtime, window->view(), m_mainWindow);
 	dlg.setInitialPage(WorldPreferencesDialog::PageGeneral);

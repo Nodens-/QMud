@@ -13,6 +13,7 @@
 #include "MdiTabs.h"
 #include <QDockWidget>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMap>
@@ -103,19 +104,20 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @param cmdName Command identifier/name.
 		 * @return Matching action pointer, or `nullptr`.
 		 */
-		[[nodiscard]] QAction          *actionForCommand(const QString &cmdName) const override;
+		[[nodiscard]] QAction *actionForCommand(const QString &cmdName) const override;
 		/**
 		 * @brief Creates generic MDI child container.
 		 * @param title Initial child window title.
 		 * @return Created child widget.
 		 */
-		QWidget                        *createMdiChild(const QString &title);
+		QWidget               *createMdiChild(const QString &title);
 		/**
 		 * @brief Adds child window to MDI area.
 		 * @param subWindow Subwindow to add.
 		 * @param activate Activate subwindow immediately when `true`.
 		 */
-		void                            addMdiSubWindow(QMdiSubWindow *subWindow, bool activate = true);
+		using MainWindowHost::addMdiSubWindow;
+		void                            addMdiSubWindow(QMdiSubWindow *subWindow, bool activate) override;
 		/**
 		 * @brief Returns active world child window.
 		 * @return Active world child window, or `nullptr`.
@@ -511,6 +513,15 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		void recentFileTriggered(const QString &path);
 
+	public:
+		/**
+		 * @brief Handles filtered child-widget events.
+		 * @param watched Object receiving the event.
+		 * @param event Event payload.
+		 * @return `true` when event is consumed.
+		 */
+		bool eventFilter(QObject *watched, QEvent *event) override;
+
 	protected:
 		/**
 		 * @brief Qt event handlers for top-level window lifecycle/input.
@@ -539,12 +550,10 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		bool            event(QEvent *event) override;
 		/**
-		 * @brief Handles filtered child-widget events.
-		 * @param watched Object receiving the event.
-		 * @param event Event payload.
-		 * @return `true` when event is consumed.
+		 * @brief Handles frame close to persist state and shutdown.
+		 * @param event Close event payload.
 		 */
-		bool            eventFilter(QObject *watched, QEvent *event) override;
+		void            closeEvent(QCloseEvent *event) override;
 
 		QToolBar       *m_mainToolbarWidget{nullptr};
 		QToolBar       *m_worldToolbarWidget{nullptr};
@@ -557,57 +566,59 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		unsigned int m_backgroundColour{0xFFFFFFFF}; // MDI frame background color, 0xFFFFFFFF for the default
 
 	protected: // control bar embedded members
-		bool                     m_fullScreenMode{false};
-		MdiTabs                  m_mdiTabs;
+		bool                                      m_fullScreenMode{false};
+		MdiTabs                                   m_mdiTabs;
 
-		QMdiArea                *m_mdiArea{nullptr};
-		QPointer<QMdiSubWindow>  m_lastActiveSubWindow;
+		QMdiArea                                 *m_mdiArea{nullptr};
+		QPointer<QMdiSubWindow>                   m_lastActiveSubWindow;
+		QHash<QObject *, QPointer<QMdiSubWindow>> m_closeFallbackByWindow;
+		QVector<QPointer<QMdiSubWindow>>          m_activationHistory;
 
-		bool                     m_initialShowHandled{false};
-		QRect                    m_lastNormalGeometry;
+		bool                                      m_initialShowHandled{false};
+		QRect                                     m_lastNormalGeometry;
 
-		QWidget                 *m_centralContainer{nullptr};
-		QVBoxLayout             *m_centralLayout{nullptr};
+		QWidget                                  *m_centralContainer{nullptr};
+		QVBoxLayout                              *m_centralLayout{nullptr};
 
-		QSystemTrayIcon         *m_trayIcon{nullptr};
+		QSystemTrayIcon                          *m_trayIcon{nullptr};
 
-		QMenu                   *m_fileMenu{nullptr};
-		QMenu                   *m_windowMenu{nullptr};
+		QMenu                                    *m_fileMenu{nullptr};
+		QMenu                                    *m_windowMenu{nullptr};
 
-		QVector<QAction *>       m_recentActions;
-		int                      m_recentMax{4};
+		QVector<QAction *>                        m_recentActions;
+		int                                       m_recentMax{4};
 
-		QMap<QString, QAction *> m_actions;
-		QVector<QAction *>       m_worldActions;
-		QByteArray               m_defaultToolbarState;
-		QStatusBar              *m_qtStatusBar{nullptr};
-		StatusPaneLabel         *m_statusMessage{nullptr};
-		StatusPaneLabel         *m_statusFreeze{nullptr};
-		StatusPaneLabel         *m_statusMushName{nullptr};
-		StatusPaneLabel         *m_statusTime{nullptr};
-		StatusPaneLabel         *m_statusLines{nullptr};
-		StatusPaneLabel         *m_statusLog{nullptr};
-		StatusPaneLabel         *m_statusCaps{nullptr};
-		QDockWidget             *m_infoDock{nullptr};
-		QTextEdit               *m_infoText{nullptr};
-		QTimer                  *m_statusTimer{nullptr};
-		QTimer                  *m_statusMessageTimer{nullptr};
-		mutable bool             m_statusTipOwnsMessage{false};
-		bool                     m_hyperlinkStatusLocked{false};
-		QTimer                  *m_activityTimer{nullptr};
-		QTimer                  *m_tickTimer{nullptr};
-		QElapsedTimer            m_timerFallbackClock;
-		qint64                   m_lastTimerProcessNs{0};
-		qint64                   m_lastTickProcessNs{0};
-		int                      m_windowTabsStyle{1};
-		int                      m_activityToolbarStyle{0};
-		int                      m_activityRefreshType{0};
-		int                      m_activityRefreshInterval{15};
-		bool                     m_disableKeyboardMenuActivation{false};
-		bool                     m_deferredUiRefreshQueued{false};
-		bool                     m_deferredUiRefreshStatus{false};
-		bool                     m_deferredUiRefreshTabs{false};
-		bool                     m_deferredUiRefreshActivity{false};
+		QMap<QString, QAction *>                  m_actions;
+		QVector<QAction *>                        m_worldActions;
+		QByteArray                                m_defaultToolbarState;
+		QStatusBar                               *m_qtStatusBar{nullptr};
+		StatusPaneLabel                          *m_statusMessage{nullptr};
+		StatusPaneLabel                          *m_statusFreeze{nullptr};
+		StatusPaneLabel                          *m_statusMushName{nullptr};
+		StatusPaneLabel                          *m_statusTime{nullptr};
+		StatusPaneLabel                          *m_statusLines{nullptr};
+		StatusPaneLabel                          *m_statusLog{nullptr};
+		StatusPaneLabel                          *m_statusCaps{nullptr};
+		QDockWidget                              *m_infoDock{nullptr};
+		QTextEdit                                *m_infoText{nullptr};
+		QTimer                                   *m_statusTimer{nullptr};
+		QTimer                                   *m_statusMessageTimer{nullptr};
+		mutable bool                              m_statusTipOwnsMessage{false};
+		bool                                      m_hyperlinkStatusLocked{false};
+		QTimer                                   *m_activityTimer{nullptr};
+		QTimer                                   *m_tickTimer{nullptr};
+		QElapsedTimer                             m_timerFallbackClock;
+		qint64                                    m_lastTimerProcessNs{0};
+		qint64                                    m_lastTickProcessNs{0};
+		int                                       m_windowTabsStyle{1};
+		int                                       m_activityToolbarStyle{0};
+		int                                       m_activityRefreshType{0};
+		int                                       m_activityRefreshInterval{15};
+		bool                                      m_disableKeyboardMenuActivation{false};
+		bool                                      m_deferredUiRefreshQueued{false};
+		bool                                      m_deferredUiRefreshStatus{false};
+		bool                                      m_deferredUiRefreshTabs{false};
+		bool                                      m_deferredUiRefreshActivity{false};
 
 	private slots:
 		/**
@@ -672,11 +683,6 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @return Active or fallback MDI subwindow, or `nullptr`.
 		 */
 		[[nodiscard]] QMdiSubWindow *currentOrLastActiveSubWindow() const;
-		/**
-		 * @brief Handles frame close to persist state and shutdown.
-		 * @param event Close event payload.
-		 */
-		void                         closeEvent(QCloseEvent *event) override;
 		/**
 		 * @brief Builds menu bar and command actions.
 		 */

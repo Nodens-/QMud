@@ -1160,16 +1160,16 @@ QWidget *MainWindow::createMdiChild(const QString &title)
 	if (!m_mdiArea)
 		return nullptr;
 
-	auto *child  = new QWidget(m_mdiArea);
+	auto *child  = new QWidget();
 	auto *layout = new QVBoxLayout(child);
 	auto *label  = new QLabel(title, child);
 	layout->addWidget(label);
 	child->setLayout(layout);
 
-	QMdiSubWindow *sub = m_mdiArea->addSubWindow(child);
+	auto *sub = new QMdiSubWindow();
+	sub->setWidget(child);
 	sub->setWindowTitle(title);
-	sub->show();
-	m_mdiTabs.updateTabs();
+	addMdiSubWindow(sub, false);
 	return child;
 }
 
@@ -1178,9 +1178,32 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 	if (!m_mdiArea || !subWindow)
 		return;
 
-	auto *world      = qobject_cast<WorldChildWindow *>(subWindow);
-	auto *textWindow = qobject_cast<TextChildWindow *>(subWindow);
+	const QPointer<QMdiSubWindow> previousActive = !activate ? m_mdiArea->activeSubWindow() : nullptr;
+
+	auto                         *world      = qobject_cast<WorldChildWindow *>(subWindow);
+	auto                         *textWindow = qobject_cast<TextChildWindow *>(subWindow);
 	m_mdiArea->addSubWindow(subWindow);
+	subWindow->installEventFilter(this);
+	connect(subWindow, &QObject::destroyed, this,
+	        [this](QObject *obj)
+	        {
+		        for (qsizetype i = m_activationHistory.size(); i-- > 0;)
+		        {
+			        QPointer<QMdiSubWindow> sub = m_activationHistory.at(i);
+			        if (!sub || sub.data() == obj)
+				        m_activationHistory.removeAt(i);
+		        }
+		        if (m_lastActiveSubWindow && m_lastActiveSubWindow.data() == obj)
+			        m_lastActiveSubWindow.clear();
+		        const QPointer<QMdiSubWindow> fallback = m_closeFallbackByWindow.take(obj);
+		        if (!m_mdiArea || !fallback)
+			        return;
+		        const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+		        if (!windows.contains(fallback))
+			        return;
+		        if (m_mdiArea->activeSubWindow() != fallback)
+			        m_mdiArea->setActiveSubWindow(fallback);
+	        });
 	if (world || textWindow)
 		subWindow->showMaximized();
 	else
@@ -1209,6 +1232,10 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 			if (WorldView *view = world->view())
 				view->focusInput();
 		}
+	}
+	else if (previousActive && previousActive != subWindow)
+	{
+		m_mdiArea->setActiveSubWindow(previousActive);
 	}
 	m_mdiTabs.updateTabs();
 }
@@ -1895,8 +1922,28 @@ void MainWindow::updateWindowMenu()
 
 void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 {
+	if (m_mdiArea)
+	{
+		const QList<QMdiSubWindow *> currentWindows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+		for (qsizetype i = m_activationHistory.size(); i-- > 0;)
+		{
+			QPointer<QMdiSubWindow> sub = m_activationHistory.at(i);
+			if (!sub || !currentWindows.contains(sub))
+				m_activationHistory.removeAt(i);
+		}
+	}
+
 	if (window)
+	{
 		m_lastActiveSubWindow = window;
+		for (qsizetype i = m_activationHistory.size(); i-- > 0;)
+		{
+			QPointer<QMdiSubWindow> sub = m_activationHistory.at(i);
+			if (!sub || sub == window)
+				m_activationHistory.removeAt(i);
+		}
+		m_activationHistory.push_back(window);
+	}
 
 	WorldRuntime *activeRuntime = nullptr;
 	if (m_mdiArea)
@@ -2829,9 +2876,6 @@ bool MainWindow::appendToNotepad(const QString &title, const QString &text, cons
 		target->setText(text);
 	else
 		target->appendText(text);
-	m_mdiArea->setActiveSubWindow(target);
-	target->show();
-	target->raise();
 	return true;
 }
 
@@ -3057,6 +3101,28 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 	    (event->type() == QEvent::Resize || event->type() == QEvent::WindowStateChange))
 	{
 		refreshWorldMiniWindows();
+	}
+
+	if (event->type() == QEvent::Close)
+	{
+		if (auto *closingSubWindow = qobject_cast<QMdiSubWindow *>(watched);
+		    closingSubWindow && m_mdiArea && m_mdiArea->activeSubWindow() == closingSubWindow)
+		{
+			QPointer<QMdiSubWindow>      fallback;
+			const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+			for (qsizetype i = m_activationHistory.size(); i-- > 0;)
+			{
+				QMdiSubWindow *sub = m_activationHistory.at(i);
+				if (!sub || sub == closingSubWindow || !windows.contains(sub))
+					continue;
+				fallback = sub;
+				break;
+			}
+			if (fallback)
+				m_closeFallbackByWindow.insert(closingSubWindow, fallback);
+			else
+				m_closeFallbackByWindow.remove(closingSubWindow);
+		}
 	}
 
 	if (event->type() != QEvent::KeyPress && event->type() != QEvent::ShortcutOverride)
