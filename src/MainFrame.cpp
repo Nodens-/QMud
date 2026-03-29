@@ -2061,6 +2061,8 @@ void MainWindow::setStatusNormal()
 {
 	if (m_hyperlinkStatusLocked)
 		return;
+	if (m_statusTipOwnsMessage)
+		return;
 	if (m_statusMessageTimer)
 		m_statusMessageTimer->stop();
 	setStatusMessageNow(QStringLiteral("Ready"));

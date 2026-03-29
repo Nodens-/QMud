@@ -3693,6 +3693,9 @@ void WorldCommandProcessor::updateQueuedCommandsStatusLine()
 
 	if (m_queuedCommands.isEmpty())
 	{
+		if (!m_queueStatusOwnsMessage)
+			return;
+		m_queueStatusOwnsMessage = false;
 		main->setStatusNormal();
 		return;
 	}
@@ -3743,6 +3746,7 @@ void WorldCommandProcessor::updateQueuedCommandsStatusLine()
 		queued += QStringLiteral("...");
 
 	main->setStatusMessageNow(queued);
+	m_queueStatusOwnsMessage = true;
 }
 
 void WorldCommandProcessor::logLine(const QString &text, const QString &preambleKey,

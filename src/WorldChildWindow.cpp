@@ -555,6 +555,12 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		        });
 		connect(m_view, &WorldView::hyperlinkActivated, m_commandProcessor,
 		        &WorldCommandProcessor::onHyperlinkActivated);
+		connect(m_view, &WorldView::hyperlinkActivated, this,
+		        [this](const QString &)
+		        {
+			        if (MainWindowHost *main = resolveMainWindowHost(window()))
+				        main->clearHyperlinkStatusLock();
+		        });
 	}
 	tryInstallPendingPlugins();
 	if (primary)
