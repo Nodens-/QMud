@@ -2582,7 +2582,12 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 	const QMap<QString, QString> &worldAttrs = m_runtime->worldAttributes();
 	if (!attrTrue(worldAttrs.value(QStringLiteral("enable_triggers"))))
+	{
+		// Triggers disabled should bypass trigger evaluation only.
+		// Preserve incoming style spans so ANSI/MXP colors still render.
+		result.spans = spans;
 		return result;
+	}
 
 	QElapsedTimer timer;
 	timer.start();
