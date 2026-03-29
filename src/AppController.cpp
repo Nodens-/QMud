@@ -4378,131 +4378,160 @@ bool AppController::recoverReloadStartupState()
 		return true;
 	}
 
+	const auto handleRecoveredWorld = [this, asyncContext](WorldRuntime           *runtime,
+	                                                       const ReloadWorldState &worldState, const bool ok,
+	                                                       const QString &error)
+	{
+		if (!runtime)
+			return;
+
+		if (!ok && !error.isEmpty())
+		{
+			qWarning() << "Failed to restore world session state during reload recovery for"
+			           << reloadWorldIdentity(worldState) << ":" << error;
+		}
+		runWorldStartupPostRestore(runtime);
+
+		if (worldState.connectedAtReload && worldState.socketDescriptor >= 0)
+		{
+			const ReloadRecoverySocketDecision decision = applyReloadSocketRecovery(*runtime, worldState);
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+			QString cloexecError;
+			if (!setSocketDescriptorInheritable(worldState.socketDescriptor, false, &cloexecError) &&
+			    !cloexecError.isEmpty())
+			{
+				printReloadInfoToStdout(
+				    QStringLiteral("Unable to restore close-on-exec for descriptor %1 after recovery: %2")
+				        .arg(worldState.socketDescriptor)
+				        .arg(cloexecError));
+			}
+#endif
+			if (decision.outcome == ReloadRecoverySocketOutcome::ReconnectQueued)
+			{
+				if (!decision.error.isEmpty())
+				{
+					++asyncContext->adoptFailures;
+					printReloadInfoToStdout(
+					    QStringLiteral("Socket reattach failed for %1; reconnect queued. Descriptor=%2. "
+					                   "Reason: %3")
+					        .arg(reloadWorldIdentity(worldState))
+					        .arg(worldState.socketDescriptor)
+					        .arg(decision.error.trimmed().isEmpty() ? QStringLiteral("Unknown error.")
+					                                                : decision.error.trimmed()));
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+					QString closeError;
+					if (!closeSocketDescriptorIfOpen(worldState.socketDescriptor, &closeError) &&
+					    !closeError.isEmpty())
+					{
+						printReloadInfoToStdout(
+						    QStringLiteral("Unable to close orphaned descriptor %1 during reconnect "
+						                   "fallback: %2")
+						        .arg(worldState.socketDescriptor)
+						        .arg(closeError));
+					}
+#endif
+				}
+				else
+				{
+					const QString reason =
+					    !worldState.notes.trimmed().isEmpty()
+					        ? worldState.notes.trimmed()
+					        : QStringLiteral("Policy selected reconnect after descriptor adoption.");
+					printReloadInfoToStdout(
+					    QStringLiteral("Reconnect queued for %1. Descriptor=%2. Reason: %3")
+					        .arg(reloadWorldIdentity(worldState))
+					        .arg(worldState.socketDescriptor)
+					        .arg(reason));
+				}
+				++asyncContext->reconnectCount;
+				if (asyncContext->verboseReloadLogs)
+				{
+					qInfo() << kReloadLogTag << "Queued reconnect for"
+					        << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
+					                                             : worldState.displayName);
+				}
+				reconnectRecoveredWorld(runtime, worldState, decision.closeSocketFirst);
+			}
+			else if (decision.outcome == ReloadRecoverySocketOutcome::Reattached)
+			{
+				if (worldState.mccpWasActive)
+					runtime->requestMccpResumeAfterReloadReattach();
+				++asyncContext->reattachedCount;
+				if (asyncContext->verboseReloadLogs)
+				{
+					qInfo() << kReloadLogTag << "Reattached socket for"
+					        << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
+					                                             : worldState.displayName);
+				}
+			}
+		}
+		else if (worldState.connectedAtReload)
+		{
+			++asyncContext->reconnectCount;
+			const QString reason = !worldState.notes.trimmed().isEmpty()
+			                           ? worldState.notes.trimmed()
+			                           : QStringLiteral("Connected world had no reusable socket descriptor.");
+			printReloadInfoToStdout(QStringLiteral("Reconnect queued for %1. Descriptor=%2. Reason: %3")
+			                            .arg(reloadWorldIdentity(worldState))
+			                            .arg(worldState.socketDescriptor)
+			                            .arg(reason));
+			if (asyncContext->verboseReloadLogs)
+			{
+				qInfo() << kReloadLogTag << "Queued reconnect (no descriptor) for"
+				        << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
+				                                             : worldState.displayName);
+			}
+			reconnectRecoveredWorld(runtime, worldState, false);
+		}
+	};
+
+	auto restoredOneWorld = [asyncContext, finalizeRecovery]()
+	{
+		--asyncContext->pending;
+		if (asyncContext->pending <= 0)
+			finalizeRecovery();
+	};
+
+	if (asyncContext->requestedActiveRuntime && !openedWorlds.isEmpty())
+	{
+		for (int i = 0; i < openedWorlds.size(); ++i)
+		{
+			if (openedWorlds.at(i).runtime == asyncContext->requestedActiveRuntime)
+			{
+				if (i > 0)
+					openedWorlds.move(i, 0);
+				break;
+			}
+		}
+	}
+
+	if (asyncContext->requestedActiveRuntime && !openedWorlds.isEmpty() &&
+	    openedWorlds.front().runtime == asyncContext->requestedActiveRuntime)
+	{
+		const OpenedRecoveryWorld opened = openedWorlds.front();
+		openedWorlds.pop_front();
+		QString    restoreError;
+		const bool restored = restoreWorldSessionStateSync(opened.runtime, opened.view, &restoreError);
+		handleRecoveredWorld(opened.runtime, opened.state, restored, restoreError);
+		restoredOneWorld();
+	}
+
+	if (asyncContext->pending <= 0)
+		return true;
+
 	for (const OpenedRecoveryWorld &opened : std::as_const(openedWorlds))
 	{
 		const QPointer<WorldRuntime> runtimeGuard = opened.runtime;
 		const QPointer<WorldView>    viewGuard    = opened.view;
 		const ReloadWorldState       worldState   = opened.state;
 
-		restoreWorldSessionStateAsync(
-		    runtimeGuard, viewGuard,
-		    [this, asyncContext, finalizeRecovery, runtimeGuard, worldState](const bool     ok,
-		                                                                     const QString &error)
-		    {
-			    if (runtimeGuard)
-			    {
-				    if (!ok && !error.isEmpty())
-				    {
-					    qWarning() << "Failed to restore world session state during reload recovery for"
-					               << reloadWorldIdentity(worldState) << ":" << error;
-				    }
-				    runWorldStartupPostRestore(runtimeGuard);
-
-				    if (worldState.connectedAtReload && worldState.socketDescriptor >= 0)
-				    {
-					    const ReloadRecoverySocketDecision decision =
-					        applyReloadSocketRecovery(*runtimeGuard, worldState);
-#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
-					    QString cloexecError;
-					    if (!setSocketDescriptorInheritable(worldState.socketDescriptor, false,
-					                                        &cloexecError) &&
-					        !cloexecError.isEmpty())
-					    {
-						    printReloadInfoToStdout(
-						        QStringLiteral(
-						            "Unable to restore close-on-exec for descriptor %1 after recovery: %2")
-						            .arg(worldState.socketDescriptor)
-						            .arg(cloexecError));
-					    }
-#endif
-					    if (decision.outcome == ReloadRecoverySocketOutcome::ReconnectQueued)
-					    {
-						    if (!decision.error.isEmpty())
-						    {
-							    ++asyncContext->adoptFailures;
-							    printReloadInfoToStdout(
-							        QStringLiteral(
-							            "Socket reattach failed for %1; reconnect queued. Descriptor=%2. "
-							            "Reason: %3")
-							            .arg(reloadWorldIdentity(worldState))
-							            .arg(worldState.socketDescriptor)
-							            .arg(decision.error.trimmed().isEmpty()
-							                     ? QStringLiteral("Unknown error.")
-							                     : decision.error.trimmed()));
-#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
-							    QString closeError;
-							    if (!closeSocketDescriptorIfOpen(worldState.socketDescriptor, &closeError) &&
-							        !closeError.isEmpty())
-							    {
-								    printReloadInfoToStdout(
-								        QStringLiteral("Unable to close orphaned descriptor %1 during "
-								                       "reconnect fallback: %2")
-								            .arg(worldState.socketDescriptor)
-								            .arg(closeError));
-							    }
-#endif
-						    }
-						    else
-						    {
-							    const QString reason =
-							        !worldState.notes.trimmed().isEmpty()
-							            ? worldState.notes.trimmed()
-							            : QStringLiteral(
-							                  "Policy selected reconnect after descriptor adoption.");
-							    printReloadInfoToStdout(
-							        QStringLiteral("Reconnect queued for %1. Descriptor=%2. Reason: %3")
-							            .arg(reloadWorldIdentity(worldState))
-							            .arg(worldState.socketDescriptor)
-							            .arg(reason));
-						    }
-						    ++asyncContext->reconnectCount;
-						    if (asyncContext->verboseReloadLogs)
-						    {
-							    qInfo() << kReloadLogTag << "Queued reconnect for"
-							            << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
-							                                                 : worldState.displayName);
-						    }
-						    reconnectRecoveredWorld(runtimeGuard, worldState, decision.closeSocketFirst);
-					    }
-					    else if (decision.outcome == ReloadRecoverySocketOutcome::Reattached)
-					    {
-						    if (worldState.mccpWasActive)
-							    runtimeGuard->requestMccpResumeAfterReloadReattach();
-						    ++asyncContext->reattachedCount;
-						    if (asyncContext->verboseReloadLogs)
-						    {
-							    qInfo() << kReloadLogTag << "Reattached socket for"
-							            << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
-							                                                 : worldState.displayName);
-						    }
-					    }
-				    }
-				    else if (worldState.connectedAtReload)
-				    {
-					    ++asyncContext->reconnectCount;
-					    const QString reason =
-					        !worldState.notes.trimmed().isEmpty()
-					            ? worldState.notes.trimmed()
-					            : QStringLiteral("Connected world had no reusable socket descriptor.");
-					    printReloadInfoToStdout(
-					        QStringLiteral("Reconnect queued for %1. Descriptor=%2. Reason: %3")
-					            .arg(reloadWorldIdentity(worldState))
-					            .arg(worldState.socketDescriptor)
-					            .arg(reason));
-					    if (asyncContext->verboseReloadLogs)
-					    {
-						    qInfo() << kReloadLogTag << "Queued reconnect (no descriptor) for"
-						            << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
-						                                                 : worldState.displayName);
-					    }
-					    reconnectRecoveredWorld(runtimeGuard, worldState, false);
-				    }
-			    }
-
-			    --asyncContext->pending;
-			    if (asyncContext->pending <= 0)
-				    finalizeRecovery();
-		    });
+		restoreWorldSessionStateAsync(runtimeGuard, viewGuard,
+		                              [runtimeGuard, worldState, handleRecoveredWorld,
+		                               restoredOneWorld](const bool ok, const QString &error)
+		                              {
+			                              handleRecoveredWorld(runtimeGuard, worldState, ok, error);
+			                              restoredOneWorld();
+		                              });
 	}
 
 	return true;
