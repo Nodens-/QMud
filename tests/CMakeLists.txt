@@ -545,4 +545,14 @@ if (QMUD_ENABLE_GUI_TESTS)
             gui
             TIMEOUT
             20)
+
+    qmud_add_qtest(tst_TabActivationHistory
+            GUI
+            SOURCES
+            gui/tst_TabActivationHistory.cpp
+            "${CMAKE_SOURCE_DIR}/src/TabActivationHistory.cpp"
+            LABELS
+            gui
+            TIMEOUT
+            20)
 endif ()

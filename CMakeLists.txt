@@ -168,6 +168,7 @@ set(QMUD_SOURCES
         MainWindowHostResolver.cpp
         MainFrame.cpp
         MainFrameActionUtils.cpp
+        TabActivationHistory.cpp
         AppController.cpp
         UpdateCheckUtils.cpp
         TimeFormatUtils.cpp
@@ -242,6 +243,7 @@ set(QMUD_HEADERS
         Version.h
         MainFrame.h
         MainFrameActionUtils.h
+        TabActivationHistory.h
         AppController.h
         Environment.h
         LogCompressionUtils.h

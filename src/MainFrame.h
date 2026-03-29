@@ -11,14 +11,15 @@
 
 #include "MainWindowHost.h"
 #include "MdiTabs.h"
+#include "TabActivationHistory.h"
 #include <QDockWidget>
 #include <QElapsedTimer>
-#include <QHash>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMap>
 #include <QRect>
 #include <QStatusBar>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QStringList>
 #include <QTextEdit>
 #include <QTimer>
@@ -566,59 +567,58 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		unsigned int m_backgroundColour{0xFFFFFFFF}; // MDI frame background color, 0xFFFFFFFF for the default
 
 	protected: // control bar embedded members
-		bool                                      m_fullScreenMode{false};
-		MdiTabs                                   m_mdiTabs;
+		bool                     m_fullScreenMode{false};
+		MdiTabs                  m_mdiTabs;
 
-		QMdiArea                                 *m_mdiArea{nullptr};
-		QPointer<QMdiSubWindow>                   m_lastActiveSubWindow;
-		QHash<QObject *, QPointer<QMdiSubWindow>> m_closeFallbackByWindow;
-		QVector<QPointer<QMdiSubWindow>>          m_activationHistory;
+		QMdiArea                *m_mdiArea{nullptr};
+		QPointer<QMdiSubWindow>  m_lastActiveSubWindow;
+		TabActivationHistory     m_tabActivationHistory;
 
-		bool                                      m_initialShowHandled{false};
-		QRect                                     m_lastNormalGeometry;
+		bool                     m_initialShowHandled{false};
+		QRect                    m_lastNormalGeometry;
 
-		QWidget                                  *m_centralContainer{nullptr};
-		QVBoxLayout                              *m_centralLayout{nullptr};
+		QWidget                 *m_centralContainer{nullptr};
+		QVBoxLayout             *m_centralLayout{nullptr};
 
-		QSystemTrayIcon                          *m_trayIcon{nullptr};
+		QSystemTrayIcon         *m_trayIcon{nullptr};
 
-		QMenu                                    *m_fileMenu{nullptr};
-		QMenu                                    *m_windowMenu{nullptr};
+		QMenu                   *m_fileMenu{nullptr};
+		QMenu                   *m_windowMenu{nullptr};
 
-		QVector<QAction *>                        m_recentActions;
-		int                                       m_recentMax{4};
+		QVector<QAction *>       m_recentActions;
+		int                      m_recentMax{4};
 
-		QMap<QString, QAction *>                  m_actions;
-		QVector<QAction *>                        m_worldActions;
-		QByteArray                                m_defaultToolbarState;
-		QStatusBar                               *m_qtStatusBar{nullptr};
-		StatusPaneLabel                          *m_statusMessage{nullptr};
-		StatusPaneLabel                          *m_statusFreeze{nullptr};
-		StatusPaneLabel                          *m_statusMushName{nullptr};
-		StatusPaneLabel                          *m_statusTime{nullptr};
-		StatusPaneLabel                          *m_statusLines{nullptr};
-		StatusPaneLabel                          *m_statusLog{nullptr};
-		StatusPaneLabel                          *m_statusCaps{nullptr};
-		QDockWidget                              *m_infoDock{nullptr};
-		QTextEdit                                *m_infoText{nullptr};
-		QTimer                                   *m_statusTimer{nullptr};
-		QTimer                                   *m_statusMessageTimer{nullptr};
-		mutable bool                              m_statusTipOwnsMessage{false};
-		bool                                      m_hyperlinkStatusLocked{false};
-		QTimer                                   *m_activityTimer{nullptr};
-		QTimer                                   *m_tickTimer{nullptr};
-		QElapsedTimer                             m_timerFallbackClock;
-		qint64                                    m_lastTimerProcessNs{0};
-		qint64                                    m_lastTickProcessNs{0};
-		int                                       m_windowTabsStyle{1};
-		int                                       m_activityToolbarStyle{0};
-		int                                       m_activityRefreshType{0};
-		int                                       m_activityRefreshInterval{15};
-		bool                                      m_disableKeyboardMenuActivation{false};
-		bool                                      m_deferredUiRefreshQueued{false};
-		bool                                      m_deferredUiRefreshStatus{false};
-		bool                                      m_deferredUiRefreshTabs{false};
-		bool                                      m_deferredUiRefreshActivity{false};
+		QMap<QString, QAction *> m_actions;
+		QVector<QAction *>       m_worldActions;
+		QByteArray               m_defaultToolbarState;
+		QStatusBar              *m_qtStatusBar{nullptr};
+		StatusPaneLabel         *m_statusMessage{nullptr};
+		StatusPaneLabel         *m_statusFreeze{nullptr};
+		StatusPaneLabel         *m_statusMushName{nullptr};
+		StatusPaneLabel         *m_statusTime{nullptr};
+		StatusPaneLabel         *m_statusLines{nullptr};
+		StatusPaneLabel         *m_statusLog{nullptr};
+		StatusPaneLabel         *m_statusCaps{nullptr};
+		QDockWidget             *m_infoDock{nullptr};
+		QTextEdit               *m_infoText{nullptr};
+		QTimer                  *m_statusTimer{nullptr};
+		QTimer                  *m_statusMessageTimer{nullptr};
+		mutable bool             m_statusTipOwnsMessage{false};
+		bool                     m_hyperlinkStatusLocked{false};
+		QTimer                  *m_activityTimer{nullptr};
+		QTimer                  *m_tickTimer{nullptr};
+		QElapsedTimer            m_timerFallbackClock;
+		qint64                   m_lastTimerProcessNs{0};
+		qint64                   m_lastTickProcessNs{0};
+		int                      m_windowTabsStyle{1};
+		int                      m_activityToolbarStyle{0};
+		int                      m_activityRefreshType{0};
+		int                      m_activityRefreshInterval{15};
+		bool                     m_disableKeyboardMenuActivation{false};
+		bool                     m_deferredUiRefreshQueued{false};
+		bool                     m_deferredUiRefreshStatus{false};
+		bool                     m_deferredUiRefreshTabs{false};
+		bool                     m_deferredUiRefreshActivity{false};
 
 	private slots:
 		/**

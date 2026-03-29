@@ -1187,19 +1187,14 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 	connect(subWindow, &QObject::destroyed, this,
 	        [this](QObject *obj)
 	        {
-		        for (qsizetype i = m_activationHistory.size(); i-- > 0;)
-		        {
-			        QPointer<QMdiSubWindow> sub = m_activationHistory.at(i);
-			        if (!sub || sub.data() == obj)
-				        m_activationHistory.removeAt(i);
-		        }
 		        if (m_lastActiveSubWindow && m_lastActiveSubWindow.data() == obj)
 			        m_lastActiveSubWindow.clear();
-		        const QPointer<QMdiSubWindow> fallback = m_closeFallbackByWindow.take(obj);
-		        if (!m_mdiArea || !fallback)
+		        if (!m_mdiArea)
 			        return;
-		        const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
-		        if (!windows.contains(fallback))
+		        const QList<QMdiSubWindow *>  windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+		        const QPointer<QMdiSubWindow> fallback =
+		            m_tabActivationHistory.takeFallbackOnDestroyed(obj, windows);
+		        if (!fallback)
 			        return;
 		        if (m_mdiArea->activeSubWindow() != fallback)
 			        m_mdiArea->setActiveSubWindow(fallback);
@@ -1922,27 +1917,14 @@ void MainWindow::updateWindowMenu()
 
 void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 {
-	if (m_mdiArea)
-	{
-		const QList<QMdiSubWindow *> currentWindows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
-		for (qsizetype i = m_activationHistory.size(); i-- > 0;)
-		{
-			QPointer<QMdiSubWindow> sub = m_activationHistory.at(i);
-			if (!sub || !currentWindows.contains(sub))
-				m_activationHistory.removeAt(i);
-		}
-	}
-
 	if (window)
 	{
 		m_lastActiveSubWindow = window;
-		for (qsizetype i = m_activationHistory.size(); i-- > 0;)
+		if (m_mdiArea)
 		{
-			QPointer<QMdiSubWindow> sub = m_activationHistory.at(i);
-			if (!sub || sub == window)
-				m_activationHistory.removeAt(i);
+			const QList<QMdiSubWindow *> currentWindows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+			m_tabActivationHistory.onActivated(window, currentWindows);
 		}
-		m_activationHistory.push_back(window);
 	}
 
 	WorldRuntime *activeRuntime = nullptr;
@@ -3108,20 +3090,8 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 		if (auto *closingSubWindow = qobject_cast<QMdiSubWindow *>(watched);
 		    closingSubWindow && m_mdiArea && m_mdiArea->activeSubWindow() == closingSubWindow)
 		{
-			QPointer<QMdiSubWindow>      fallback;
 			const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
-			for (qsizetype i = m_activationHistory.size(); i-- > 0;)
-			{
-				QMdiSubWindow *sub = m_activationHistory.at(i);
-				if (!sub || sub == closingSubWindow || !windows.contains(sub))
-					continue;
-				fallback = sub;
-				break;
-			}
-			if (fallback)
-				m_closeFallbackByWindow.insert(closingSubWindow, fallback);
-			else
-				m_closeFallbackByWindow.remove(closingSubWindow);
+			m_tabActivationHistory.onCloseEvent(closingSubWindow, m_mdiArea->activeSubWindow(), windows);
 		}
 	}
 
