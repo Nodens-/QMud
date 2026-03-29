@@ -182,6 +182,7 @@ set(QMUD_SOURCES
         CommandPatternUtils.cpp
         CommandQueueUtils.cpp
         CommandTextUtils.cpp
+        HyperlinkActionUtils.cpp
         NameGeneration.cpp
         DoubleMetaphone.cpp
         ErrorDescriptions.cpp

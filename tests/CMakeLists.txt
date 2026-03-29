@@ -91,6 +91,14 @@ qmud_add_qtest(tst_EncodingUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_HyperlinkActionUtils
+        GUI
+        SOURCES
+        unit/tst_HyperlinkActionUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/HyperlinkActionUtils.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_Environment
         SOURCES
         unit/tst_Environment.cpp
