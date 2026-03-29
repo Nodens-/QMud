@@ -15,6 +15,7 @@
 #include "CommandQueueUtils.h"
 #include "CommandTextUtils.h"
 #include "FileExtensions.h"
+#include "HyperlinkActionUtils.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
 #include "SpeedwalkParser.h"
@@ -114,79 +115,6 @@ namespace
 		result.replace(QChar(0x00D6), QStringLiteral("Oe")); // Ö
 		result.replace(QChar(0x00DF), QStringLiteral("ss")); // ß
 		return result;
-	}
-
-	QString decodeMxpActionText(QString text)
-	{
-		text = QUrl::fromPercentEncoding(text.toUtf8());
-		if (!text.contains(QLatin1Char('&')))
-			return text;
-
-		QString result;
-		result.reserve(text.size());
-		for (qsizetype i = 0; i < text.size(); ++i)
-		{
-			const QChar ch = text.at(i);
-			if (ch != QLatin1Char('&'))
-			{
-				result.append(ch);
-				continue;
-			}
-
-			const qsizetype semi = text.indexOf(QLatin1Char(';'), i + 1);
-			if (semi < 0)
-			{
-				result.append(ch);
-				continue;
-			}
-
-			const QString entity = text.mid(i + 1, semi - i - 1).trimmed();
-			QString       decoded;
-			if (entity.compare(QStringLiteral("quot"), Qt::CaseInsensitive) == 0)
-				decoded = QStringLiteral("\"");
-			else if (entity.compare(QStringLiteral("apos"), Qt::CaseInsensitive) == 0)
-				decoded = QStringLiteral("'");
-			else if (entity.compare(QStringLiteral("amp"), Qt::CaseInsensitive) == 0)
-				decoded = QStringLiteral("&");
-			else if (entity.compare(QStringLiteral("lt"), Qt::CaseInsensitive) == 0)
-				decoded = QStringLiteral("<");
-			else if (entity.compare(QStringLiteral("gt"), Qt::CaseInsensitive) == 0)
-				decoded = QStringLiteral(">");
-			else if (entity.startsWith(QLatin1Char('#')))
-			{
-				bool     ok   = false;
-				uint32_t code = 0;
-				if (entity.size() > 2 &&
-				    (entity.at(1) == QLatin1Char('x') || entity.at(1) == QLatin1Char('X')))
-					code = entity.mid(2).toUInt(&ok, 16);
-				else
-					code = entity.mid(1).toUInt(&ok, 10);
-				if (ok && code <= 0x10FFFFu)
-					decoded = QString(QChar::fromUcs4(code));
-			}
-
-			if (decoded.isEmpty())
-			{
-				result.append(ch);
-				continue;
-			}
-
-			result.append(decoded);
-			i = semi;
-		}
-		return result;
-	}
-
-	QString firstMxpSendAction(const QString &href)
-	{
-		const QStringList parts = href.split(QLatin1Char('|'), Qt::KeepEmptyParts);
-		for (const QString &part : parts)
-		{
-			const QString trimmed = part.trimmed();
-			if (!trimmed.isEmpty())
-				return trimmed;
-		}
-		return href.trimmed();
 	}
 
 	QString englishWeekdayLower(const QDate &date)
@@ -986,18 +914,29 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 	};
 	if (m_runtime)
 	{
-		attrs                     = &m_runtime->worldAttributes();
-		const bool wrapEnabled    = isEnabled(attrs->value(QStringLiteral("wrap")));
-		const bool autoWrapWindow = isEnabled(attrs->value(QStringLiteral("auto_wrap_window_width")));
-		const bool nawsEnabled    = isEnabled(attrs->value(QStringLiteral("naws")));
-		wrapColumn                = attrs->value(QStringLiteral("wrap_column")).toInt();
-		runtimeWrap               = wrapEnabled && !autoWrapWindow && wrapColumn > 0 && !nawsEnabled;
-		indentParas               = !(
-            attrs->value(QStringLiteral("indent_paras")) == QStringLiteral("0") ||
-            attrs->value(QStringLiteral("indent_paras")).compare(QStringLiteral("n"), Qt::CaseInsensitive) ==
-                0 ||
-            attrs->value(QStringLiteral("indent_paras"))
-                    .compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+		attrs                          = &m_runtime->worldAttributes();
+		const bool wrapEnabled         = isEnabled(attrs->value(QStringLiteral("wrap")));
+		const bool autoWrapWindow      = isEnabled(attrs->value(QStringLiteral("auto_wrap_window_width")));
+		const bool nawsNegotiated      = m_runtime->isConnected() && m_runtime->isNawsNegotiated();
+		const int  worldWrapColumn     = attrs->value(QStringLiteral("wrap_column")).toInt();
+		int        effectiveWrapColumn = worldWrapColumn;
+		if (autoWrapWindow)
+		{
+			const int calculatedColumns = m_runtime->outputWrapColumns();
+			if (worldWrapColumn > 0)
+				effectiveWrapColumn =
+				    calculatedColumns > 0 ? qMax(calculatedColumns, worldWrapColumn) : worldWrapColumn;
+			else
+				effectiveWrapColumn = calculatedColumns;
+		}
+		wrapColumn  = effectiveWrapColumn;
+		runtimeWrap = wrapEnabled && !nawsNegotiated && wrapColumn > 0;
+		indentParas = !(
+		    attrs->value(QStringLiteral("indent_paras")) == QStringLiteral("0") ||
+		    attrs->value(QStringLiteral("indent_paras")).compare(QStringLiteral("n"), Qt::CaseInsensitive) ==
+		        0 ||
+		    attrs->value(QStringLiteral("indent_paras"))
+		            .compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
 	}
 
 	QVector<WorldRuntime::StyleSpan> normalizedSpans = spans;
@@ -1240,21 +1179,13 @@ void WorldCommandProcessor::onHyperlinkActivated(const QString &href)
 		return;
 	}
 
+	MxpHyperlinkDispatchPolicy dispatchPolicy = MxpHyperlinkDispatchPolicy::DirectSend;
 	if (m_runtime && m_view)
+		dispatchPolicy = resolveMxpHyperlinkDispatchPolicy(m_runtime->lines(), normalizedHref);
+	if (dispatchPolicy == MxpHyperlinkDispatchPolicy::PromptInput)
 	{
-		const QVector<WorldRuntime::LineEntry> &lines = m_runtime->lines();
-		for (int i = safeQSizeToInt(lines.size()) - 1; i >= 0; --i)
-		{
-			for (const WorldRuntime::StyleSpan &span : lines.at(i).spans)
-			{
-				if (span.actionType == WorldRuntime::ActionPrompt &&
-				    decodeMxpActionText(span.action) == normalizedHref)
-				{
-					m_view->setInputText(normalizedHref, true);
-					return;
-				}
-			}
-		}
+		m_view->setInputText(normalizedHref, true);
+		return;
 	}
 
 	bool echo         = true;
@@ -1275,7 +1206,10 @@ void WorldCommandProcessor::onHyperlinkActivated(const QString &href)
 	const QString sendText = firstMxpSendAction(normalizedHref);
 	if (sendText.isEmpty())
 		return;
-	sendMsg(sendText, echo, false, true);
+	if (dispatchPolicy == MxpHyperlinkDispatchPolicy::CommandProcessing)
+		executeCommand(sendText);
+	else
+		sendMsg(sendText, echo, false, true);
 	if (addToHistory && m_view)
 		m_view->addHyperlinkToHistory(sendText);
 }
@@ -2571,7 +2505,12 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 	const QMap<QString, QString> &worldAttrs = m_runtime->worldAttributes();
 	if (!attrTrue(worldAttrs.value(QStringLiteral("enable_triggers"))))
+	{
+		// Triggers disabled should bypass trigger evaluation only.
+		// Preserve incoming style spans so ANSI/MXP colors still render.
+		result.spans = spans;
 		return result;
+	}
 
 	QElapsedTimer timer;
 	timer.start();
@@ -3754,6 +3693,9 @@ void WorldCommandProcessor::updateQueuedCommandsStatusLine()
 
 	if (m_queuedCommands.isEmpty())
 	{
+		if (!m_queueStatusOwnsMessage)
+			return;
+		m_queueStatusOwnsMessage = false;
 		main->setStatusNormal();
 		return;
 	}
@@ -3804,6 +3746,7 @@ void WorldCommandProcessor::updateQueuedCommandsStatusLine()
 		queued += QStringLiteral("...");
 
 	main->setStatusMessageNow(queued);
+	m_queueStatusOwnsMessage = true;
 }
 
 void WorldCommandProcessor::logLine(const QString &text, const QString &preambleKey,

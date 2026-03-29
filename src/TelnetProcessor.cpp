@@ -397,6 +397,15 @@ void TelnetProcessor::setUseMxp(const int mode)
 
 void TelnetProcessor::setNawsEnabled(const bool enabled)
 {
+	if (m_naws == enabled)
+		return;
+
+	if (!enabled && m_nawsWanted)
+	{
+		sendIacWont(TELOPT_NAWS);
+		m_nawsWanted = false;
+	}
+
 	m_naws = enabled;
 }
 

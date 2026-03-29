@@ -11,6 +11,7 @@
 
 #include "MainWindowHost.h"
 #include "MdiTabs.h"
+#include "TabActivationHistory.h"
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QLabel>
@@ -18,6 +19,7 @@
 #include <QMap>
 #include <QRect>
 #include <QStatusBar>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QStringList>
 #include <QTextEdit>
 #include <QTimer>
@@ -103,19 +105,20 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @param cmdName Command identifier/name.
 		 * @return Matching action pointer, or `nullptr`.
 		 */
-		[[nodiscard]] QAction          *actionForCommand(const QString &cmdName) const override;
+		[[nodiscard]] QAction *actionForCommand(const QString &cmdName) const override;
 		/**
 		 * @brief Creates generic MDI child container.
 		 * @param title Initial child window title.
 		 * @return Created child widget.
 		 */
-		QWidget                        *createMdiChild(const QString &title);
+		QWidget               *createMdiChild(const QString &title);
 		/**
 		 * @brief Adds child window to MDI area.
 		 * @param subWindow Subwindow to add.
 		 * @param activate Activate subwindow immediately when `true`.
 		 */
-		void                            addMdiSubWindow(QMdiSubWindow *subWindow, bool activate = true);
+		using MainWindowHost::addMdiSubWindow;
+		void                            addMdiSubWindow(QMdiSubWindow *subWindow, bool activate) override;
 		/**
 		 * @brief Returns active world child window.
 		 * @return Active world child window, or `nullptr`.
@@ -511,6 +514,15 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		void recentFileTriggered(const QString &path);
 
+	public:
+		/**
+		 * @brief Handles filtered child-widget events.
+		 * @param watched Object receiving the event.
+		 * @param event Event payload.
+		 * @return `true` when event is consumed.
+		 */
+		bool eventFilter(QObject *watched, QEvent *event) override;
+
 	protected:
 		/**
 		 * @brief Qt event handlers for top-level window lifecycle/input.
@@ -539,12 +551,10 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		bool            event(QEvent *event) override;
 		/**
-		 * @brief Handles filtered child-widget events.
-		 * @param watched Object receiving the event.
-		 * @param event Event payload.
-		 * @return `true` when event is consumed.
+		 * @brief Handles frame close to persist state and shutdown.
+		 * @param event Close event payload.
 		 */
-		bool            eventFilter(QObject *watched, QEvent *event) override;
+		void            closeEvent(QCloseEvent *event) override;
 
 		QToolBar       *m_mainToolbarWidget{nullptr};
 		QToolBar       *m_worldToolbarWidget{nullptr};
@@ -562,6 +572,7 @@ class MainWindow : public QMainWindow, public MainWindowHost
 
 		QMdiArea                *m_mdiArea{nullptr};
 		QPointer<QMdiSubWindow>  m_lastActiveSubWindow;
+		TabActivationHistory     m_tabActivationHistory;
 
 		bool                     m_initialShowHandled{false};
 		QRect                    m_lastNormalGeometry;
@@ -672,11 +683,6 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @return Active or fallback MDI subwindow, or `nullptr`.
 		 */
 		[[nodiscard]] QMdiSubWindow *currentOrLastActiveSubWindow() const;
-		/**
-		 * @brief Handles frame close to persist state and shutdown.
-		 * @param event Close event payload.
-		 */
-		void                         closeEvent(QCloseEvent *event) override;
 		/**
 		 * @brief Builds menu bar and command actions.
 		 */

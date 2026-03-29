@@ -1160,16 +1160,16 @@ QWidget *MainWindow::createMdiChild(const QString &title)
 	if (!m_mdiArea)
 		return nullptr;
 
-	auto *child  = new QWidget(m_mdiArea);
+	auto *child  = new QWidget();
 	auto *layout = new QVBoxLayout(child);
 	auto *label  = new QLabel(title, child);
 	layout->addWidget(label);
 	child->setLayout(layout);
 
-	QMdiSubWindow *sub = m_mdiArea->addSubWindow(child);
+	auto *sub = new QMdiSubWindow();
+	sub->setWidget(child);
 	sub->setWindowTitle(title);
-	sub->show();
-	m_mdiTabs.updateTabs();
+	addMdiSubWindow(sub, false);
 	return child;
 }
 
@@ -1178,9 +1178,27 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 	if (!m_mdiArea || !subWindow)
 		return;
 
-	auto *world      = qobject_cast<WorldChildWindow *>(subWindow);
-	auto *textWindow = qobject_cast<TextChildWindow *>(subWindow);
+	const QPointer<QMdiSubWindow> previousActive = !activate ? m_mdiArea->activeSubWindow() : nullptr;
+
+	auto                         *world      = qobject_cast<WorldChildWindow *>(subWindow);
+	auto                         *textWindow = qobject_cast<TextChildWindow *>(subWindow);
 	m_mdiArea->addSubWindow(subWindow);
+	subWindow->installEventFilter(this);
+	connect(subWindow, &QObject::destroyed, this,
+	        [this](QObject *obj)
+	        {
+		        if (m_lastActiveSubWindow && m_lastActiveSubWindow.data() == obj)
+			        m_lastActiveSubWindow.clear();
+		        if (!m_mdiArea)
+			        return;
+		        const QList<QMdiSubWindow *>  windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+		        const QPointer<QMdiSubWindow> fallback =
+		            m_tabActivationHistory.takeFallbackOnDestroyed(obj, windows);
+		        if (!fallback)
+			        return;
+		        if (m_mdiArea->activeSubWindow() != fallback)
+			        m_mdiArea->setActiveSubWindow(fallback);
+	        });
 	if (world || textWindow)
 		subWindow->showMaximized();
 	else
@@ -1209,6 +1227,10 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 			if (WorldView *view = world->view())
 				view->focusInput();
 		}
+	}
+	else if (previousActive && previousActive != subWindow)
+	{
+		m_mdiArea->setActiveSubWindow(previousActive);
 	}
 	m_mdiTabs.updateTabs();
 }
@@ -1896,7 +1918,14 @@ void MainWindow::updateWindowMenu()
 void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 {
 	if (window)
+	{
 		m_lastActiveSubWindow = window;
+		if (m_mdiArea)
+		{
+			const QList<QMdiSubWindow *> currentWindows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+			m_tabActivationHistory.onActivated(window, currentWindows);
+		}
+	}
 
 	WorldRuntime *activeRuntime = nullptr;
 	if (m_mdiArea)
@@ -2031,6 +2060,8 @@ void MainWindow::setShowDebugStatus(const bool enabled)
 void MainWindow::setStatusNormal()
 {
 	if (m_hyperlinkStatusLocked)
+		return;
+	if (m_statusTipOwnsMessage)
 		return;
 	if (m_statusMessageTimer)
 		m_statusMessageTimer->stop();
@@ -2552,7 +2583,9 @@ QVector<WorldWindowDescriptor> MainWindow::worldWindowDescriptors() const
 	if (!m_mdiArea)
 		return entries;
 
-	const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+	QList<QMdiSubWindow *> windows = m_mdiTabs.orderedWindows();
+	if (windows.isEmpty())
+		windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
 	entries.reserve(windows.size());
 	int sequence = 1;
 	for (QMdiSubWindow *sub : windows)
@@ -2827,9 +2860,6 @@ bool MainWindow::appendToNotepad(const QString &title, const QString &text, cons
 		target->setText(text);
 	else
 		target->appendText(text);
-	m_mdiArea->setActiveSubWindow(target);
-	target->show();
-	target->raise();
 	return true;
 }
 
@@ -3052,10 +3082,19 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 
 	if ((watched == m_mdiArea || watched == m_centralContainer || watched == m_centralLayout ||
 	     watched == this) &&
-	    (event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest ||
-	     event->type() == QEvent::WindowStateChange))
+	    (event->type() == QEvent::Resize || event->type() == QEvent::WindowStateChange))
 	{
 		refreshWorldMiniWindows();
+	}
+
+	if (event->type() == QEvent::Close)
+	{
+		if (auto *closingSubWindow = qobject_cast<QMdiSubWindow *>(watched);
+		    closingSubWindow && m_mdiArea && m_mdiArea->activeSubWindow() == closingSubWindow)
+		{
+			const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+			m_tabActivationHistory.onCloseEvent(closingSubWindow, m_mdiArea->activeSubWindow(), windows);
+		}
 	}
 
 	if (event->type() != QEvent::KeyPress && event->type() != QEvent::ShortcutOverride)
@@ -3129,15 +3168,29 @@ void MainWindow::refreshWorldMiniWindows() const
 	if (!m_mdiArea)
 		return;
 
+	auto refreshWorld = [](const WorldChildWindow *world)
+	{
+		if (!world)
+			return;
+		if (WorldView *view = world->view())
+			view->refreshMiniWindows();
+	};
+
+	if (auto *activeWorld = qobject_cast<WorldChildWindow *>(m_mdiArea->activeSubWindow());
+	    activeWorld && activeWorld->windowState().testFlag(Qt::WindowMaximized))
+	{
+		refreshWorld(activeWorld);
+		return;
+	}
+
 	for (QMdiSubWindow *sub : m_mdiArea->subWindowList(QMdiArea::CreationOrder))
 	{
 		auto *world = qobject_cast<WorldChildWindow *>(sub);
 		if (!world)
 			continue;
-		if (WorldView *view = world->view())
-			view->refreshMiniWindows();
-		if (WorldRuntime *runtime = world->runtime())
-			runtime->notifyWorldOutputResized();
+		if (!world->isVisible() || world->windowState().testFlag(Qt::WindowMinimized))
+			continue;
+		refreshWorld(world);
 	}
 }
 

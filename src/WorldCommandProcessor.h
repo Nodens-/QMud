@@ -421,6 +421,7 @@ class WorldCommandProcessor : public QObject
 		WorldRuntime                              *m_runtime{nullptr};
 		WorldView                                 *m_view{nullptr};
 		QStringList                                m_queuedCommands;
+		bool                                       m_queueStatusOwnsMessage{false};
 		int                                        m_speedWalkDelay{0};
 		QString                                    m_speedWalkFiller;
 		bool                                       m_pluginProcessingSend{false};

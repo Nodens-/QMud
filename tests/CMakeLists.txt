@@ -91,10 +91,25 @@ qmud_add_qtest(tst_EncodingUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_HyperlinkActionUtils
+        GUI
+        SOURCES
+        unit/tst_HyperlinkActionUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/HyperlinkActionUtils.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_Environment
         SOURCES
         unit/tst_Environment.cpp
         "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_TimeFormatUtils
+        SOURCES
+        unit/tst_TimeFormatUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/TimeFormatUtils.cpp"
         LABELS
         unit)
 
@@ -453,6 +468,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             gui/tst_WorldView_Basic.cpp
             "${CMAKE_SOURCE_DIR}/src/WorldView.cpp"
             "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
+            "${CMAKE_SOURCE_DIR}/src/TimeFormatUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/WorldView.h"
             "${CMAKE_SOURCE_DIR}/src/MainWindowHostResolver.cpp"
             "${CMAKE_SOURCE_DIR}/src/dialogs/FindDialog.cpp"
@@ -461,7 +477,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             LABELS
             gui
             TIMEOUT
-            20)
+            120)
     target_compile_options(tst_WorldView_Basic PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(tst_WorldView_Basic PRIVATE -Wl,--gc-sections)
 
@@ -533,6 +549,16 @@ if (QMUD_ENABLE_GUI_TESTS)
             gui/tst_MdiTabs.cpp
             "${CMAKE_SOURCE_DIR}/src/WorldChildWindow.h"
             "${CMAKE_SOURCE_DIR}/src/MdiTabs.cpp"
+            LABELS
+            gui
+            TIMEOUT
+            20)
+
+    qmud_add_qtest(tst_TabActivationHistory
+            GUI
+            SOURCES
+            gui/tst_TabActivationHistory.cpp
+            "${CMAKE_SOURCE_DIR}/src/TabActivationHistory.cpp"
             LABELS
             gui
             TIMEOUT

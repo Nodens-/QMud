@@ -14,6 +14,7 @@
 #include <QVector>
 
 class QAction;
+class QMdiSubWindow;
 class QString;
 class WorldChildWindow;
 class WorldRuntime;
@@ -49,7 +50,21 @@ class MainWindowHost
 		 * @param cmdName Command identifier/name.
 		 * @return Matching action pointer, or `nullptr` if not found.
 		 */
-		[[nodiscard]] virtual QAction          *actionForCommand(const QString &cmdName) const = 0;
+		[[nodiscard]] virtual QAction *actionForCommand(const QString &cmdName) const = 0;
+		/**
+		 * @brief Adds an MDI subwindow with optional activation.
+		 * @param subWindow Subwindow to add.
+		 * @param activate Activate subwindow immediately when `true`.
+		 */
+		virtual void                   addMdiSubWindow(QMdiSubWindow *subWindow, bool activate) = 0;
+		/**
+		 * @brief Adds an MDI subwindow without activating it.
+		 * @param subWindow Subwindow to add.
+		 */
+		void                           addMdiSubWindow(QMdiSubWindow *subWindow)
+		{
+			addMdiSubWindow(subWindow, false);
+		}
 		/**
 		 * @brief Returns the currently active world child window.
 		 * @return Active world child window pointer, or `nullptr`.

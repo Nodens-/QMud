@@ -26,7 +26,6 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
-#include <QMdiArea>
 #include <QMessageBox>
 #include <QPalette>
 #include <QPlainTextEdit>
@@ -222,12 +221,6 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 	}
 	if (m_view)
 	{
-		connect(worldRuntime, &WorldRuntime::incomingHtmlReceived, m_view,
-		        [this](const QString &html)
-		        {
-			        if (m_view)
-				        m_view->appendOutputHtml(html);
-		        });
 		connect(worldRuntime, &WorldRuntime::outputRequested, m_view,
 		        [this](const QString &text, const bool newLine, const bool note)
 		        {
@@ -253,7 +246,7 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		        [this]
 		        {
 			        if (m_view)
-				        m_view->refreshMiniWindows();
+				        m_view->onMiniWindowsChanged();
 		        });
 		connect(m_view, &WorldView::outputSelectionChanged, worldRuntime,
 		        [worldRuntime]
@@ -387,12 +380,15 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 					    m_view->appendNoteText(QStringLiteral("For assistance with connection problems see:"),
 					                           true);
 				    }
-				    const QString forumLink = QString::fromLatin1(FORUM_URL);
-				    m_view->appendOutputHtml(
-				        QStringLiteral("<a href=\"%1\">%2</a>")
-				            .arg(forumLink.toHtmlEscaped(),
-				                 QStringLiteral("How to resolve network connection problems")),
-				        true);
+				    const QString           forumLink = QString::fromLatin1(FORUM_URL);
+				    WorldRuntime::StyleSpan linkSpan;
+				    const QString linkText = QStringLiteral("How to resolve network connection problems");
+				    const auto    boundedLinkSize =
+				        qMin(linkText.size(), static_cast<qsizetype>(std::numeric_limits<int>::max()));
+				    linkSpan.length     = static_cast<int>(boundedLinkSize);
+				    linkSpan.actionType = WorldRuntime::ActionHyperlink;
+				    linkSpan.action     = forumLink;
+				    m_view->appendOutputTextStyled(linkText, {linkSpan}, true);
 				    if (m_commandProcessor)
 					    m_commandProcessor->note(QString(), true);
 				    else
@@ -541,18 +537,15 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		        {
 			        if (!m_mxpDebug)
 			        {
-				        QMdiArea *const mdi = mdiArea();
-				        if (!mdi)
+				        MainWindowHost *main = resolveMainWindowHost(window());
+				        if (!main)
 					        return;
-				        auto debugWindow          = std::make_unique<TextChildWindow>(title, QString(), mdi);
-				        TextChildWindow *debugPtr = debugWindow.get();
+				        auto             debugWindow = std::make_unique<TextChildWindow>(title, QString());
+				        TextChildWindow *debugPtr    = debugWindow.get();
 				        debugPtr->setQuerySaveOnClose(false);
 				        debugPtr->editor()->setReadOnly(true);
-				        mdi->addSubWindow(debugPtr);
 				        connect(debugPtr, &QObject::destroyed, this, [this] { m_mxpDebug = nullptr; });
-				        debugPtr->showMaximized();
-				        if (MainWindowHost *main = resolveMainWindowHost(window()))
-					        main->updateMdiTabs();
+				        main->addMdiSubWindow(debugPtr, false);
 				        m_mxpDebug                                                   = debugPtr;
 				        [[maybe_unused]] TextChildWindow *const transferredOwnership = debugWindow.release();
 				        Q_ASSERT(transferredOwnership == debugPtr);
@@ -562,6 +555,12 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		        });
 		connect(m_view, &WorldView::hyperlinkActivated, m_commandProcessor,
 		        &WorldCommandProcessor::onHyperlinkActivated);
+		connect(m_view, &WorldView::hyperlinkActivated, this,
+		        [this](const QString &)
+		        {
+			        if (MainWindowHost *main = resolveMainWindowHost(window()))
+				        main->clearHyperlinkStatusLock();
+		        });
 	}
 	tryInstallPendingPlugins();
 	if (primary)

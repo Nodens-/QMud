@@ -53,12 +53,17 @@ class MdiTabs : public QTabBar
 		 * @brief Synchronizes tabs with current MDI child window set.
 		 */
 		void updateTabs(); // sync the tabctrl with all views
+		/**
+		 * @brief Returns current tab ordering as MDI windows.
+		 * @return Ordered list of currently tracked subwindows.
+		 */
+		[[nodiscard]] QList<QMdiSubWindow *> orderedWindows() const;
 
 		/**
 		 * @brief Sets minimum number of views required before tabs are shown.
 		 * @param minViews Minimum visible-view count before showing tabs.
 		 */
-		void setMinViews(int minViews)
+		void                                 setMinViews(int minViews)
 		{
 			m_minVisibleViews = minViews;
 		}
