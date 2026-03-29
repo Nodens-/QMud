@@ -7759,32 +7759,51 @@ void WorldView::recallPartialHistory(int direction)
 		return;
 	}
 
-	int index = m_partialIndex;
-	while (true)
+	const qsizetype partialLen = m_partialCommand.size();
+	const auto      findMatch  = [&](const bool requireBoundaryAfterPrefix) -> int
 	{
-		index += (direction < 0) ? -1 : 1;
-		if (index < 0 || index >= m_history.size())
+		int index = m_partialIndex;
+		while (true)
 		{
-			if (confirmReplaceTyping(QString()))
-				setInputText(QString());
-			m_partialCommand.clear();
-			m_partialIndex = -1;
-			return;
+			index += (direction < 0) ? -1 : 1;
+			if (index < 0 || index >= m_history.size())
+				return -1;
+
+			const QString candidate = m_history.at(index);
+			if (!candidate.startsWith(m_partialCommand, Qt::CaseInsensitive))
+				continue;
+			if (candidate.compare(m_partialCommand, Qt::CaseInsensitive) == 0)
+				continue;
+
+			if (!requireBoundaryAfterPrefix)
+				return index;
+
+			if (candidate.size() == partialLen)
+				return index;
+			const QChar nextChar = candidate.at(partialLen);
+			if (nextChar.isSpace())
+				return index;
 		}
+	};
 
-		const QString candidate = m_history.at(index);
-		if (!candidate.startsWith(m_partialCommand, Qt::CaseInsensitive))
-			continue;
-		if (candidate.compare(m_partialCommand, Qt::CaseInsensitive) == 0)
-			continue;
-
-		if (!confirmReplaceTyping(candidate))
-			return;
-
-		m_partialIndex = index;
-		setInputText(candidate);
+	int index = findMatch(true);
+	if (index < 0)
+		index = findMatch(false);
+	if (index < 0)
+	{
+		if (confirmReplaceTyping(QString()))
+			setInputText(QString());
+		m_partialCommand.clear();
+		m_partialIndex = -1;
 		return;
 	}
+
+	const QString candidate = m_history.at(index);
+	if (!confirmReplaceTyping(candidate))
+		return;
+
+	m_partialIndex = index;
+	setInputText(candidate);
 }
 
 void WorldView::recallHistory(int direction)
