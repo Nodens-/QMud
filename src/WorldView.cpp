@@ -16,6 +16,7 @@
 #include "MainFrame.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
+#include "MiniWindowBrushUtils.h"
 #include "Version.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
@@ -41,6 +42,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPalette>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -1310,8 +1312,8 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 		m_nativeRenderLineCacheFromRuntime = true;
 		m_nativeRenderLineCacheValid       = false;
 		m_nativeLayoutCacheValid           = false;
-		m_lastQueuedOutputTextRect         = {};
-		m_lastQueuedOutputTextRectValid    = false;
+		m_lastQueuedOutputClientSize       = {};
+		m_lastQueuedOutputClientSizeValid  = false;
 		clearNativeOutputSelection(true);
 		m_nativeStandaloneOutputLines.clear();
 		m_nativeStandaloneNextLineNumber  = 1;
@@ -1356,8 +1358,8 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 		m_nativeRenderLineCacheFromRuntime = true;
 		m_nativeRenderLineCacheValid       = false;
 		m_nativeLayoutCacheValid           = false;
-		m_lastQueuedOutputTextRect         = {};
-		m_lastQueuedOutputTextRectValid    = false;
+		m_lastQueuedOutputClientSize       = {};
+		m_lastQueuedOutputClientSizeValid  = false;
 		clearNativeOutputSelection(true);
 		m_nativeStandaloneOutputLines.clear();
 		m_nativeStandaloneNextLineNumber  = 1;
@@ -1442,7 +1444,8 @@ void WorldView::onMiniWindowsChanged()
 	    {
 		    m_wrapMarginUpdateQueued = false;
 		    updateWrapMargin();
-		    requestWorldOutputResizedNotification();
+		    if (m_runtime)
+			    m_runtime->refreshNawsWindowSize();
 	    },
 	    Qt::QueuedConnection);
 }
@@ -3148,6 +3151,66 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 	return false;
 }
 
+void WorldView::paintTextRectangleCompatibilityFrame(QPainter *painter, const QRect &updateRect) const
+{
+	if (!painter || !m_outputStack || !m_runtime)
+		return;
+
+	const WorldRuntime::TextRectangleSettings &settings = m_runtime->textRectangle();
+	if (!hasConfiguredTextRectangle(settings))
+		return;
+
+	const QRect outputRect = m_outputStack->rect();
+	if (outputRect.isEmpty())
+		return;
+
+	const QRect textRect = outputTextRectangleUnreserved().intersected(outputRect);
+	if (textRect.isEmpty())
+		return;
+
+	const int borderOffset = qMax(0, settings.borderOffset);
+	QRect     frameRect =
+	    textRect.adjusted(-borderOffset, -borderOffset, borderOffset, borderOffset).intersected(outputRect);
+	if (frameRect.isEmpty())
+		return;
+
+	const QBrush outsideBrush = MiniWindowBrushUtils::makeBrush(
+	    settings.outsideFillStyle, settings.borderColour, settings.outsideFillColour);
+	if (outsideBrush.style() != Qt::NoBrush)
+	{
+		painter->save();
+		painter->setClipRect(updateRect);
+		QPainterPath outsidePath;
+		outsidePath.setFillRule(Qt::OddEvenFill);
+		outsidePath.addRect(outputRect);
+		outsidePath.addRect(frameRect);
+		painter->fillPath(outsidePath, outsideBrush);
+		painter->restore();
+	}
+
+	const int borderWidth = qMax(0, settings.borderWidth);
+	if (borderWidth <= 0)
+		return;
+
+	const QColor borderColor = MiniWindowBrushUtils::colorFromRefOrTransparent(settings.borderColour);
+	if (borderColor.alpha() == 0)
+		return;
+
+	painter->save();
+	painter->setClipRect(updateRect);
+	painter->setPen(borderColor);
+	painter->setBrush(Qt::NoBrush);
+	QRect borderRect = frameRect;
+	for (int i = 0; i < borderWidth; ++i)
+	{
+		if (borderRect.width() <= 0 || borderRect.height() <= 0)
+			break;
+		painter->drawRect(borderRect.adjusted(0, 0, -1, -1));
+		borderRect.adjust(1, 1, -1, -1);
+	}
+	painter->restore();
+}
+
 void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRect &updateRect) const
 {
 	if (!painter || !m_nativeOutputCanvas || !m_output)
@@ -4545,13 +4608,19 @@ int WorldView::outputClientWidth() const
 
 QRect WorldView::outputTextRectangle() const
 {
-	if (!m_outputStack || !m_outputSplitter)
-		return {};
-
-	QRect rect = m_outputSplitter->geometry();
+	QRect rect = outputTextRectangleUnreserved();
+	if (m_runtime && hasConfiguredTextRectangle(m_runtime->textRectangle()))
+		return rect;
 	if (m_wrapMarginReservationPixels > 0)
 		rect.adjust(0, 0, -qMin(m_wrapMarginReservationPixels, qMax(0, rect.width() - 1)), 0);
 	return rect;
+}
+
+QRect WorldView::outputTextRectangleUnreserved() const
+{
+	if (!m_outputStack || !m_outputSplitter)
+		return {};
+	return m_outputSplitter->geometry();
 }
 
 QFont WorldView::outputFont() const
@@ -4607,13 +4676,13 @@ void WorldView::requestWorldOutputResizedNotification()
 {
 	if (!m_runtime)
 		return;
-	const QRect textRect = outputTextRectangle();
-	if (textRect.width() <= 0 || textRect.height() <= 0)
+	const QSize clientSize(outputClientWidth(), outputClientHeight());
+	if (clientSize.width() <= 0 || clientSize.height() <= 0)
 		return;
-	if (m_lastQueuedOutputTextRectValid && textRect == m_lastQueuedOutputTextRect)
+	if (m_lastQueuedOutputClientSizeValid && clientSize == m_lastQueuedOutputClientSize)
 		return;
-	m_lastQueuedOutputTextRect      = textRect;
-	m_lastQueuedOutputTextRectValid = true;
+	m_lastQueuedOutputClientSize      = clientSize;
+	m_lastQueuedOutputClientSizeValid = true;
 	if (m_worldOutputResizedQueued)
 		return;
 	m_worldOutputResizedQueued = true;
@@ -5286,6 +5355,7 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 	{
 		const QColor back = m_outputBackground.isValid() ? m_outputBackground : QColor(0, 0, 0);
 		painter->fillRect(painter->viewport(), back);
+		paintTextRectangleCompatibilityFrame(painter, painter->viewport());
 	}
 
 	if (!m_runtime)
@@ -5443,7 +5513,9 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 	if (!m_runtime || !m_outputStack)
 		return nullptr;
 
-	const auto windows = m_runtime->sortedMiniWindows();
+	const auto  windows        = m_runtime->sortedMiniWindows();
+	MiniWindow *fallbackWindow = nullptr;
+	QString     fallbackWindowName;
 	for (MiniWindow *window : windows | std::views::reverse)
 	{
 		if (!window || !window->show || window->temporarilyHide)
@@ -5455,6 +5527,11 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 			continue;
 		if (!window->rect.contains(localPos))
 			continue;
+		if (!fallbackWindow)
+		{
+			fallbackWindow     = window;
+			fallbackWindowName = window->name;
+		}
 		const QPoint relative = miniWindowDisplayToContent(window, localPos - window->rect.topLeft());
 		for (auto hit = window->hotspots.constBegin(); hit != window->hotspots.constEnd(); ++hit)
 		{
@@ -5465,8 +5542,12 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 				return window;
 			}
 		}
-		windowName = window->name;
-		return window;
+	}
+
+	if (fallbackWindow)
+	{
+		windowName = fallbackWindowName;
+		return fallbackWindow;
 	}
 
 	return nullptr;
@@ -5535,6 +5616,9 @@ void WorldView::applyOutputCursor(const QCursor *cursor)
 	apply(m_outputContainer);
 	apply(m_outputStack);
 	apply(m_outputSplitter);
+	apply(m_nativeOutputCanvas);
+	apply(m_miniUnderlay);
+	apply(m_miniOverlay);
 	apply(m_output);
 	apply(m_output ? m_output->viewport() : nullptr);
 	apply(m_liveOutput);
@@ -6796,6 +6880,8 @@ void WorldView::showEvent(QShowEvent *event)
 		m_nativeOutputCanvas->setVisible(true);
 		m_nativeOutputCanvas->raise();
 	}
+	if (m_miniOverlay)
+		m_miniOverlay->raise();
 	syncOutputTextVisibilityForNativeCanvas();
 	applyDefaultInputHeight(true);
 	if (m_runtime)
@@ -7070,70 +7156,78 @@ void WorldView::updateWrapMargin() const
 	int reservedRight = 0;
 	if (m_runtime && !effectiveRect.isEmpty())
 	{
-		// Keep miniwindow rects current before calculating reserved margin so
-		// window moves/resizes are reflected immediately in NAWS sizing.
-		m_runtime->layoutMiniWindows(m_outputStack->size(), size(), false);
-
-		const bool cacheHit = m_wrapMarginReservationCacheValid &&
-		                      m_wrapMarginReservationRect == effectiveRect &&
-		                      m_wrapMarginReservationSerial == m_miniWindowChangeSerial;
-		if (cacheHit)
-			reservedRight = m_wrapMarginReservationPixels;
-		else
+		const bool textRectangleCompatActive = hasConfiguredTextRectangle(m_runtime->textRectangle());
+		if (!textRectangleCompatActive)
 		{
-			int safeRight = effectiveRect.right() + 1;
-			for (MiniWindow *window : m_runtime->sortedMiniWindows())
-			{
-				if (!window || !window->show || window->temporarilyHide)
-					continue;
-				if ((window->flags & kMiniWindowDrawUnderneath) != 0)
-					continue;
+			// Keep miniwindow rects current before calculating reserved margin so
+			// window moves/resizes are reflected immediately in NAWS sizing.
+			m_runtime->layoutMiniWindows(m_outputStack->size(), size(), false);
 
-				QRect candidateRect;
-				if (window->position == 6 || window->position == 7 || window->position == 8)
+			const bool cacheHit = m_wrapMarginReservationCacheValid &&
+			                      m_wrapMarginReservationRect == effectiveRect &&
+			                      m_wrapMarginReservationSerial == m_miniWindowChangeSerial;
+			if (cacheHit)
+				reservedRight = m_wrapMarginReservationPixels;
+			else
+			{
+				int safeRight = effectiveRect.right() + 1;
+				for (MiniWindow *window : m_runtime->sortedMiniWindows())
 				{
-					// For docked windows, use the laid-out rect when available so stacked
-					// dock panes reserve their true left edge for NAWS calculations.
-					if (!window->rect.isEmpty())
+					if (!window || !window->show || window->temporarilyHide)
+						continue;
+					if ((window->flags & kMiniWindowDrawUnderneath) != 0)
+						continue;
+
+					QRect candidateRect;
+					if (window->position == 6 || window->position == 7 || window->position == 8)
 					{
-						candidateRect = window->rect;
+						// For docked windows, use the laid-out rect when available so stacked
+						// dock panes reserve their true left edge for NAWS calculations.
+						if (!window->rect.isEmpty())
+						{
+							candidateRect = window->rect;
+						}
+						else
+						{
+							const int width = qMax(0, window->width);
+							if (width <= 0)
+								continue;
+							candidateRect = QRect(effectiveRect.right() + 1 - width, effectiveRect.top(),
+							                      width, effectiveRect.height());
+						}
 					}
 					else
 					{
-						const int width = qMax(0, window->width);
-						if (width <= 0)
+						if (window->rect.isEmpty())
 							continue;
-						candidateRect = QRect(effectiveRect.right() + 1 - width, effectiveRect.top(), width,
-						                      effectiveRect.height());
+						const bool absolute = (window->flags & kMiniWindowAbsoluteLocation) != 0;
+						// Skip full-surface background modes; they are not overlay blockers.
+						if (!absolute && window->position >= 0 && window->position <= 3)
+							continue;
+						if (!absolute && window->position == 13)
+							continue;
+
+						const bool rightHalf = window->rect.center().x() >= effectiveRect.center().x();
+						if (!rightHalf)
+							continue;
+						candidateRect = window->rect;
 					}
-				}
-				else
-				{
-					if (window->rect.isEmpty())
-						continue;
-					const bool absolute = (window->flags & kMiniWindowAbsoluteLocation) != 0;
-					// Skip full-surface background modes; they are not overlay blockers.
-					if (!absolute && window->position >= 0 && window->position <= 3)
-						continue;
-					if (!absolute && window->position == 13)
-						continue;
 
-					const bool rightHalf = window->rect.center().x() >= effectiveRect.center().x();
-					if (!rightHalf)
+					const QRect overlap = candidateRect.intersected(effectiveRect);
+					if (overlap.isEmpty())
 						continue;
-					candidateRect = window->rect;
+					safeRight = qMin(safeRight, overlap.left());
 				}
-
-				const QRect overlap = candidateRect.intersected(effectiveRect);
-				if (overlap.isEmpty())
-					continue;
-				safeRight = qMin(safeRight, overlap.left());
+				reservedRight                     = qMax(0, (effectiveRect.right() + 1) - safeRight);
+				m_wrapMarginReservationCacheValid = true;
+				m_wrapMarginReservationRect       = effectiveRect;
+				m_wrapMarginReservationSerial     = m_miniWindowChangeSerial;
+				m_wrapMarginReservationPixels     = reservedRight;
 			}
-			reservedRight                     = qMax(0, (effectiveRect.right() + 1) - safeRight);
-			m_wrapMarginReservationCacheValid = true;
-			m_wrapMarginReservationRect       = effectiveRect;
-			m_wrapMarginReservationSerial     = m_miniWindowChangeSerial;
-			m_wrapMarginReservationPixels     = reservedRight;
+		}
+		else
+		{
+			m_wrapMarginReservationCacheValid = false;
 		}
 	}
 	else

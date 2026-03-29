@@ -22,6 +22,7 @@
 #include "LuaCallbackEngine.h"
 #include "LuaHeaders.h"
 #include "MainFrame.h"
+#include "MiniWindowBrushUtils.h"
 #include "MxpDiagnostics.h"
 #include "NameGeneration.h"
 #include "SqliteCompat.h"
@@ -1719,10 +1720,7 @@ namespace
 
 	QColor        colorFromRef(long value)
 	{
-		const int r = static_cast<int>(value & 0xFF);
-		const int g = static_cast<int>((value >> 8) & 0xFF);
-		const int b = static_cast<int>((value >> 16) & 0xFF);
-		return {r, g, b};
+		return MiniWindowBrushUtils::colorFromRef(value);
 	}
 
 	long colorToRef(const QColor &color)
@@ -1839,109 +1837,6 @@ namespace
 			return eOK;
 		default:
 			return eBrushStyleNotValid;
-		}
-	}
-
-	QColor colorFromRefOrTransparent(long value)
-	{
-		if (value == -1)
-			return {0, 0, 0, 0};
-		return colorFromRef(value);
-	}
-
-	QImage makePatternImage(const quint8 (&rows)[8], const QColor &foreground, const QColor &background)
-	{
-		QImage pattern(8, 8, QImage::Format_ARGB32);
-		pattern.fill(background);
-		for (int y = 0; y < 8; ++y)
-		{
-			const quint8 row = rows[y];
-			for (int x = 0; x < 8; ++x)
-			{
-				if ((row >> (7 - x)) & 0x01)
-					pattern.setPixel(x, y, foreground.rgba());
-			}
-		}
-		return pattern;
-	}
-
-	QBrush makeBrush(long brushStyle, long penColour, long brushColour, bool *ok)
-	{
-		if (ok)
-			*ok = true;
-
-		if (brushStyle == 1 || brushColour == -1)
-			return Qt::NoBrush;
-
-		const QColor penColor   = colorFromRefOrTransparent(penColour);
-		const QColor brushColor = colorFromRefOrTransparent(brushColour);
-
-		auto patternBrush = [&](const quint8(&rows)[8], const QColor &foreground, const QColor &background)
-		{ return QBrush(QPixmap::fromImage(makePatternImage(rows, foreground, background))); };
-
-		switch (brushStyle)
-		{
-		case 0:
-			return {brushColor};
-		case 2:
-		{
-			static constexpr quint8 rows[8] = {0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 3:
-		{
-			static constexpr quint8 rows[8] = {0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 4:
-		{
-			static constexpr quint8 rows[8] = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 5:
-		{
-			static constexpr quint8 rows[8] = {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 6:
-		{
-			static constexpr quint8 rows[8] = {0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xAA};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 7:
-		{
-			static constexpr quint8 rows[8] = {0x81, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x81};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 8:
-		{
-			static constexpr quint8 rows[8] = {0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55};
-			return patternBrush(rows, brushColor, penColor);
-		}
-		case 9:
-		{
-			static constexpr quint8 rows[8] = {0x33, 0x33, 0xCC, 0xCC, 0x33, 0x33, 0xCC, 0xCC};
-			return patternBrush(rows, brushColor, penColor);
-		}
-		case 10:
-		{
-			static constexpr quint8 rows[8] = {0x0F, 0x0F, 0x0F, 0x0F, 0xF0, 0xF0, 0xF0, 0xF0};
-			return patternBrush(rows, brushColor, penColor);
-		}
-		case 11:
-		{
-			static constexpr quint8 rows[8] = {0xCC, 0x33, 0x00, 0x00, 0xCC, 0x33, 0x00, 0x00};
-			return patternBrush(rows, brushColor, penColor);
-		}
-		case 12:
-		{
-			static constexpr quint8 rows[8] = {0x11, 0x11, 0x22, 0x22, 0x11, 0x11, 0x22, 0x22};
-			return patternBrush(rows, brushColor, penColor);
-		}
-		default:
-			if (ok)
-				*ok = false;
-			return Qt::NoBrush;
 		}
 	}
 
@@ -12204,9 +12099,17 @@ void WorldRuntime::notifyWorldOutputResized()
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginWorldOutputResized"));
 }
 
+void WorldRuntime::refreshNawsWindowSize()
+{
+	updateTelnetWindowSizeForNaws();
+}
+
 void WorldRuntime::updateTelnetWindowSizeForNaws()
 {
-	const bool nawsEnabled = isEnabledFlag(m_worldAttributes.value(QStringLiteral("naws")));
+	const bool textRectangleCompatActive = m_textRectangle.left != 0 || m_textRectangle.top != 0 ||
+	                                       m_textRectangle.right != 0 || m_textRectangle.bottom != 0;
+	const bool nawsEnabled =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("naws"))) && !textRectangleCompatActive;
 	m_telnet.setNawsEnabled(nawsEnabled);
 	const bool wrapEnabled     = isEnabledFlag(m_worldAttributes.value(QStringLiteral("wrap")));
 	const int  worldWrapColumn = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
@@ -12217,7 +12120,8 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 
 	if (m_view)
 	{
-		const QRect textRect     = m_view->outputTextRectangle();
+		const QRect textRect     = textRectangleCompatActive ? m_view->outputTextRectangleUnreserved()
+		                                                     : m_view->outputTextRectangle();
 		int         widthPixels  = textRect.width();
 		const int   heightPixels = textRect.height();
 		if (widthPixels > 0 && heightPixels > 0)
@@ -16727,7 +16631,7 @@ int WorldRuntime::windowCircleOp(const QString &name, int action, int left, int 
 	painter.setPen(penStyle == 5 ? Qt::NoPen : pen);
 
 	bool         brushOk = true;
-	QBrush const brush   = makeBrush(brushStyle, penColour, brushColour, &brushOk);
+	QBrush const brush   = MiniWindowBrushUtils::makeBrush(brushStyle, penColour, brushColour, &brushOk);
 	if (!brushOk)
 		return eBrushStyleNotValid;
 	painter.setBrush(brush);
@@ -16902,7 +16806,7 @@ int WorldRuntime::windowPolygon(const QString &name, const QString &points, long
 	pen.setJoinStyle(mapPenJoin(penStyle));
 	painter.setPen(penStyle == 5 ? Qt::NoPen : pen);
 	bool         brushOk = true;
-	QBrush const brush   = makeBrush(brushStyle, penColour, brushColour, &brushOk);
+	QBrush const brush   = MiniWindowBrushUtils::makeBrush(brushStyle, penColour, brushColour, &brushOk);
 	if (!brushOk)
 		return eBrushStyleNotValid;
 	painter.setBrush(brush);
@@ -17496,8 +17400,8 @@ int WorldRuntime::windowImageOp(const QString &name, int action, int left, int t
 	QImage pattern = it.value().image;
 	if (it.value().monochrome)
 	{
-		const QColor fore = colorFromRefOrTransparent(brushColour);
-		const QColor back = colorFromRefOrTransparent(penColour);
+		const QColor fore = MiniWindowBrushUtils::colorFromRefOrTransparent(brushColour);
+		const QColor back = MiniWindowBrushUtils::colorFromRefOrTransparent(penColour);
 		QImage       recoloured(pattern.size(), QImage::Format_ARGB32);
 		for (int y = 0; y < pattern.height(); ++y)
 		{

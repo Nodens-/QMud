@@ -7113,13 +7113,33 @@ static int luaGetInfo(lua_State *L)
 	case 290:
 	{
 		WorldView *view = runtime->view();
-		lua_pushnumber(L, view ? view->outputTextRectangle().left() : 0);
+		if (!view)
+		{
+			lua_pushnumber(L, 0);
+			return 1;
+		}
+		const WorldRuntime::TextRectangleSettings &settings = runtime->textRectangle();
+		const bool                                 textRectangleCompatActive =
+		    settings.left != 0 || settings.top != 0 || settings.right != 0 || settings.bottom != 0;
+		const QRect rect =
+		    textRectangleCompatActive ? view->outputTextRectangleUnreserved() : view->outputTextRectangle();
+		lua_pushnumber(L, rect.left());
 		return 1;
 	}
 	case 291:
 	{
 		WorldView *view = runtime->view();
-		lua_pushnumber(L, view ? view->outputTextRectangle().top() : 0);
+		if (!view)
+		{
+			lua_pushnumber(L, 0);
+			return 1;
+		}
+		const WorldRuntime::TextRectangleSettings &settings = runtime->textRectangle();
+		const bool                                 textRectangleCompatActive =
+		    settings.left != 0 || settings.top != 0 || settings.right != 0 || settings.bottom != 0;
+		const QRect rect =
+		    textRectangleCompatActive ? view->outputTextRectangleUnreserved() : view->outputTextRectangle();
+		lua_pushnumber(L, rect.top());
 		return 1;
 	}
 	case 292:
@@ -7130,8 +7150,12 @@ static int luaGetInfo(lua_State *L)
 			lua_pushnumber(L, 0);
 			return 1;
 		}
-		const QRect rect = view->outputTextRectangle();
-		lua_pushnumber(L, rect.right());
+		const WorldRuntime::TextRectangleSettings &settings = runtime->textRectangle();
+		const bool                                 textRectangleCompatActive =
+		    settings.left != 0 || settings.top != 0 || settings.right != 0 || settings.bottom != 0;
+		const QRect rect =
+		    textRectangleCompatActive ? view->outputTextRectangleUnreserved() : view->outputTextRectangle();
+		lua_pushnumber(L, rect.left() + rect.width());
 		return 1;
 	}
 	case 293:
@@ -7142,8 +7166,12 @@ static int luaGetInfo(lua_State *L)
 			lua_pushnumber(L, 0);
 			return 1;
 		}
-		const QRect rect = view->outputTextRectangle();
-		lua_pushnumber(L, rect.bottom());
+		const WorldRuntime::TextRectangleSettings &settings = runtime->textRectangle();
+		const bool                                 textRectangleCompatActive =
+		    settings.left != 0 || settings.top != 0 || settings.right != 0 || settings.bottom != 0;
+		const QRect rect =
+		    textRectangleCompatActive ? view->outputTextRectangleUnreserved() : view->outputTextRectangle();
+		lua_pushnumber(L, rect.top() + rect.height());
 		return 1;
 	}
 

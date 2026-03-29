@@ -806,6 +806,11 @@ class WorldView : public QWidget
 		 * @return Output text viewport rectangle.
 		 */
 		[[nodiscard]] QRect                       outputTextRectangle() const;
+		/**
+		 * @brief Returns unreserved output text viewport rectangle.
+		 * @return Output text rectangle before right-reservation adjustments.
+		 */
+		[[nodiscard]] QRect                       outputTextRectangleUnreserved() const;
 
 	private:
 		friend class WorldOutputCanvas;
@@ -862,6 +867,7 @@ class WorldView : public QWidget
 		 * @param updateRect Dirty rectangle from paint event.
 		 */
 		void                paintNativeOutputCanvas(QPainter *painter, const QRect &updateRect) const;
+		void paintTextRectangleCompatibilityFrame(QPainter *painter, const QRect &updateRect) const;
 		/**
 		 * @brief One native-render line with merged text/spans and line opacity.
 		 */
@@ -1215,8 +1221,8 @@ class WorldView : public QWidget
 		mutable QRect                                m_wrapMarginReservationRect;
 		mutable quint64                              m_wrapMarginReservationSerial{0};
 		mutable int                                  m_wrapMarginReservationPixels{0};
-		QRect                                        m_lastQueuedOutputTextRect;
-		bool                                         m_lastQueuedOutputTextRectValid{false};
+		QSize                                        m_lastQueuedOutputClientSize;
+		bool                                         m_lastQueuedOutputClientSizeValid{false};
 		mutable QVector<NativeOutputRenderLine>      m_nativeRenderLineCache;
 		mutable bool                                 m_nativeRenderLineCacheValid{false};
 		mutable bool                                 m_nativeRenderLineCacheFromRuntime{false};

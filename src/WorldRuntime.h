@@ -3536,6 +3536,10 @@ class WorldRuntime : public QObject
 		 */
 		void                  notifyWorldOutputResized();
 		/**
+		 * @brief Refreshes NAWS window size without firing resize callbacks.
+		 */
+		void                  refreshNawsWindowSize();
+		/**
 		 * @brief Dispatches draw-output-window notification.
 		 * @param firstLine First visible line index.
 		 * @param offset Pixel offset.

@@ -431,6 +431,12 @@ namespace
 		}
 		return lines;
 	}
+
+	bool colorsMatchExactly(const QColor &lhs, const QColor &rhs)
+	{
+		return lhs.red() == rhs.red() && lhs.green() == rhs.green() && lhs.blue() == rhs.blue() &&
+		       lhs.alpha() == rhs.alpha();
+	}
 } // namespace
 
 // NOLINTBEGIN(readability-convert-member-functions-to-static)
@@ -579,6 +585,10 @@ void WorldRuntime::installPendingPlugins()
 void WorldRuntime::notifyWorldOutputResized()
 {
 	++g_worldOutputResizedNotifyCount;
+}
+
+void WorldRuntime::refreshNawsWindowSize()
+{
 }
 
 void WorldRuntime::firePluginCommandChanged()
@@ -1003,7 +1013,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void textRectangleInfoBoundsAreInclusive()
+		void textRectangleInfoBoundsUseRightBottomEdges()
 		{
 			resetTestState();
 
@@ -1026,11 +1036,11 @@ class tst_WorldView_Basic : public QObject
 
 			const int info290 = rect.left();
 			const int info291 = rect.top();
-			const int info292 = rect.right();
-			const int info293 = rect.bottom();
+			const int info292 = rect.left() + rect.width();
+			const int info293 = rect.top() + rect.height();
 
-			QCOMPARE(info292 - info290 + 1, rect.width());
-			QCOMPARE(info293 - info291 + 1, rect.height());
+			QCOMPARE(info292 - info290, rect.width());
+			QCOMPARE(info293 - info291, rect.height());
 
 			resetTestState();
 		}
@@ -1987,6 +1997,99 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(browser);
 			const int viewportWidthAfter = browser->viewport() ? browser->viewport()->width() : 0;
 			QCOMPARE(viewportWidthAfter, viewportWidthBefore);
+			resetTestState();
+		}
+
+		void textRectangleOutsideFillDoesNotCoverUnderlayMiniWindows()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			g_textRectangle.left              = 220;
+			g_textRectangle.top               = 120;
+			g_textRectangle.right             = 700;
+			g_textRectangle.bottom            = 440;
+			g_textRectangle.borderOffset      = 0;
+			g_textRectangle.borderWidth       = 0;
+			g_textRectangle.outsideFillStyle  = 0;        // solid
+			g_textRectangle.outsideFillColour = 0x00FF00; // green (COLORREF)
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+
+			constexpr QColor underlayColour(255, 0, 255, 255);
+			appendTestMiniWindow(QStringLiteral("underlay-miniw"), QRect(24, 24, 40, 40),
+			                     kMiniWindowDrawUnderneath, underlayColour);
+			view.onMiniWindowsChanged();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			outputStack->update();
+			QCoreApplication::processEvents();
+
+			const QImage image = outputStack->grab().toImage();
+			QVERIFY(!image.isNull());
+			constexpr QPoint samplePoint(40, 40);
+			QVERIFY(image.rect().contains(samplePoint));
+			const QColor sample = image.pixelColor(samplePoint);
+			QVERIFY2(colorsMatchExactly(sample, underlayColour),
+			         "TextRectangle outside fill obscured an underneath miniwindow.");
+
+			resetTestState();
+		}
+
+		void overlayMiniWindowsRemainAboveNoWrapText()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			// Force long unwrapped output that crosses the overlay miniwindow bounds.
+			view.appendOutputText(QStringLiteral("W").repeated(1200), true);
+			QCoreApplication::processEvents();
+
+			constexpr QColor overlayColour(255, 0, 255, 255);
+			const QRect      overlayRect(120, 0, 220, 30);
+			appendTestMiniWindow(QStringLiteral("overlay-nowrap"), overlayRect, 0, overlayColour);
+			view.onMiniWindowsChanged();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			outputStack->update();
+			QCoreApplication::processEvents();
+
+			const QImage image = outputStack->grab().toImage();
+			QVERIFY(!image.isNull());
+			const QRect sampleRect = overlayRect.intersected(image.rect());
+			QVERIFY(!sampleRect.isEmpty());
+			for (int y = sampleRect.top(); y <= sampleRect.bottom(); ++y)
+			{
+				for (int x = sampleRect.left(); x <= sampleRect.right(); ++x)
+				{
+					const QColor sample = image.pixelColor(x, y);
+					QVERIFY2(colorsMatchExactly(sample, overlayColour),
+					         "No-wrap output painted above overlay miniwindow.");
+				}
+			}
+
 			resetTestState();
 		}
 
