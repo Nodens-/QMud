@@ -17373,25 +17373,52 @@ int WorldRuntime::windowDrawImageAlpha(const QString &name, const QString &image
 	if (surface.isNull() || image.isNull())
 		return eOK;
 
-	const int fixedRight   = window->fixRight(right);
-	const int fixedBottom  = window->fixBottom(bottom);
-	const int targetLeft   = qMax(0, left);
-	const int targetTop    = qMax(0, top);
-	const int targetRight  = qMin(fixedRight, window->width);
-	const int targetBottom = qMin(fixedBottom, window->height);
-	const int targetWidth  = targetRight - targetLeft;
-	const int targetHeight = targetBottom - targetTop;
+	int drawLeft = left;
+	int drawTop  = top;
+
+	int sourceLeft = qMax(0, srcLeft);
+	int sourceTop  = qMax(0, srcTop);
+	int targetWidth{};
+	int targetHeight{};
+
+	if (right == 0)
+		targetWidth = image.width() - sourceLeft;
+	else
+		targetWidth = window->fixRight(right) - left;
+
+	if (bottom == 0)
+		targetHeight = image.height() - sourceTop;
+	else
+		targetHeight = window->fixBottom(bottom) - top;
+
+	if (drawLeft < 0)
+	{
+		sourceLeft -= drawLeft;
+		targetWidth += drawLeft;
+		drawLeft = 0;
+	}
+
+	if (drawTop < 0)
+	{
+		sourceTop -= drawTop;
+		targetHeight += drawTop;
+		drawTop = 0;
+	}
+
+	if (drawLeft >= window->width || drawTop >= window->height)
+		return eOK;
+
+	targetWidth  = qMin(targetWidth, window->width - drawLeft);
+	targetHeight = qMin(targetHeight, window->height - drawTop);
 	if (targetWidth <= 0 || targetHeight <= 0)
 		return eOK;
 
-	const int sourceLeft = qMax(0, srcLeft);
-	const int sourceTop  = qMax(0, srcTop);
-	QRect     source(sourceLeft, sourceTop, targetWidth, targetHeight);
+	QRect source(sourceLeft, sourceTop, targetWidth, targetHeight);
 	source = source.intersected(image.rect());
 	if (source.width() <= 0 || source.height() <= 0)
 		return eOK;
 
-	QImage base = surface.copy(targetLeft, targetTop, source.width(), source.height())
+	QImage base = surface.copy(drawLeft, drawTop, source.width(), source.height())
 	                  .convertToFormat(QImage::Format_ARGB32);
 	QImage const overlay = image.copy(source).convertToFormat(QImage::Format_ARGB32);
 	const int    w       = qMin(base.width(), overlay.width());
@@ -17419,7 +17446,7 @@ int WorldRuntime::windowDrawImageAlpha(const QString &name, const QString &image
 	}
 
 	QPainter painter(&surface);
-	painter.drawImage(QPoint(targetLeft, targetTop), base);
+	painter.drawImage(QPoint(drawLeft, drawTop), base);
 	emit miniWindowsChanged();
 	return eOK;
 }
