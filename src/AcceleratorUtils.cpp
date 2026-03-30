@@ -8,6 +8,7 @@
  */
 
 #include "AcceleratorUtils.h"
+#include <QtCore/QStringList>
 #include <QtCore/Qt>
 #include <QtGui/QKeySequence>
 #include <limits>
@@ -71,6 +72,116 @@ namespace
 	constexpr quint16 kVkOem5      = 0xDC;
 	constexpr quint16 kVkOem6      = 0xDD;
 	constexpr quint16 kVkOem7      = 0xDE;
+
+	bool              parseLegacyAccelerator(const QString &text, quint32 &virt, quint16 &key)
+	{
+		const QStringList parts = text.trimmed().toLower().split(QLatin1Char('+'), Qt::SkipEmptyParts);
+		if (parts.isEmpty())
+			return false;
+
+		bool hasShift = false;
+		bool hasCtrl  = false;
+		bool hasAlt   = false;
+		bool hasKey   = false;
+		key           = 0;
+
+		for (const QString &rawPart : parts)
+		{
+			const QString part = rawPart.trimmed();
+			if (part.isEmpty())
+				continue;
+
+			if (part == QStringLiteral("shift"))
+			{
+				hasShift = true;
+				continue;
+			}
+			if (part == QStringLiteral("ctrl") || part == QStringLiteral("control"))
+			{
+				hasCtrl = true;
+				continue;
+			}
+			if (part == QStringLiteral("alt"))
+			{
+				hasAlt = true;
+				continue;
+			}
+			if (part == QStringLiteral("meta") || part == QStringLiteral("cmd") ||
+			    part == QStringLiteral("win"))
+				return false;
+
+			quint16 parsedKey = 0;
+			bool    keyParsed = true;
+			if (part.startsWith(QStringLiteral("numpad")) && part.size() == 7 && part.at(6).isDigit())
+			{
+				parsedKey =
+				    static_cast<quint16>(kVkNumpad0 + (part.at(6).unicode() - QLatin1Char('0').unicode()));
+			}
+			else if (part == QStringLiteral("add"))
+			{
+				parsedKey = kVkAdd;
+			}
+			else if (part == QStringLiteral("subtract"))
+			{
+				parsedKey = kVkSubtract;
+			}
+			else if (part == QStringLiteral("multiply") || part == QStringLiteral("star"))
+			{
+				parsedKey = kVkMultiply;
+			}
+			else if (part == QStringLiteral("divide") || part == QStringLiteral("slash"))
+			{
+				parsedKey = kVkDivide;
+			}
+			else if (part == QStringLiteral("decimal") || part == QStringLiteral("dot") ||
+			         part == QStringLiteral("period"))
+			{
+				parsedKey = kVkDecimal;
+			}
+			else if (part.size() == 1 && part.at(0).isDigit())
+			{
+				parsedKey = static_cast<quint16>(kVk0 + (part.at(0).unicode() - QLatin1Char('0').unicode()));
+			}
+			else if (part.size() == 1 && part.at(0).isLetter())
+			{
+				parsedKey = static_cast<quint16>(
+				    kVkA + (part.at(0).toUpper().unicode() - QLatin1Char('A').unicode()));
+			}
+			else if (part.startsWith(QLatin1Char('f')) && part.size() > 1)
+			{
+				bool      ok      = false;
+				const int fNumber = part.mid(1).toInt(&ok);
+				if (ok && fNumber >= 1 && fNumber <= 24)
+					parsedKey = static_cast<quint16>(kVkF1 + (fNumber - 1));
+				else
+					keyParsed = false;
+			}
+			else
+			{
+				keyParsed = false;
+			}
+
+			if (!keyParsed)
+				return false;
+			if (hasKey)
+				return false;
+
+			key    = parsedKey;
+			hasKey = true;
+		}
+
+		if (!hasKey || key == 0)
+			return false;
+
+		virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
+		if (hasShift)
+			virt |= AcceleratorUtils::kShiftFlag;
+		if (hasCtrl)
+			virt |= AcceleratorUtils::kControlFlag;
+		if (hasAlt)
+			virt |= AcceleratorUtils::kAltFlag;
+		return true;
+	}
 
 } // namespace
 
@@ -315,11 +426,11 @@ namespace AcceleratorUtils
 	{
 		const QKeySequence seq = QKeySequence::fromString(text, QKeySequence::PortableText);
 		if (seq.isEmpty())
-			return false;
+			return parseLegacyAccelerator(text, virt, key);
 
 		const QKeyCombination combo = seq[0];
-		if (combo.key() == static_cast<Qt::Key>(0))
-			return false;
+		if (combo.key() == static_cast<Qt::Key>(0) || combo.key() == Qt::Key_unknown)
+			return parseLegacyAccelerator(text, virt, key);
 
 		Qt::KeyboardModifiers mods   = combo.keyboardModifiers();
 		const bool            keypad = (mods & Qt::KeypadModifier) != 0;

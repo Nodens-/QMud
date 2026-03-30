@@ -17,7 +17,7 @@ class tst_AcceleratorUtils : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void stringRoundTrip()
 		{
@@ -43,6 +43,29 @@ class tst_AcceleratorUtils : public QObject
 			QVERIFY(AcceleratorUtils::virtualKeyUsesKeypadModifier(key));
 		}
 
+		void legacyNumpadAcceleratorParsing()
+		{
+			quint32 virt = 0;
+			quint16 key  = 0;
+			QVERIFY(AcceleratorUtils::stringToAccelerator(QStringLiteral("alt+numpad6"), virt, key));
+			QVERIFY((virt & AcceleratorUtils::kAltFlag) != 0);
+			QCOMPARE(key, AcceleratorUtils::qtKeyToVirtualKey(Qt::Key_6, true));
+		}
+
+		void legacyAddSubtractParsing()
+		{
+			quint32 virt = 0;
+			quint16 key  = 0;
+			QVERIFY(AcceleratorUtils::stringToAccelerator(QStringLiteral("subtract"), virt, key));
+			QCOMPARE(key, AcceleratorUtils::qtKeyToVirtualKey(Qt::Key_Minus, true));
+			QVERIFY((virt & AcceleratorUtils::kAltFlag) == 0);
+
+			QVERIFY(AcceleratorUtils::stringToAccelerator(QStringLiteral("ctrl+alt+add"), virt, key));
+			QVERIFY((virt & AcceleratorUtils::kControlFlag) != 0);
+			QVERIFY((virt & AcceleratorUtils::kAltFlag) != 0);
+			QCOMPARE(key, AcceleratorUtils::qtKeyToVirtualKey(Qt::Key_Plus, true));
+		}
+
 		void virtualKeySymmetry()
 		{
 			constexpr quint16 keys[] = {0x41, 0x70, 0x25};
@@ -56,15 +79,14 @@ class tst_AcceleratorUtils : public QObject
 
 		void unknownKeyFormatting()
 		{
-			const QString text =
-			    AcceleratorUtils::acceleratorToString(AcceleratorUtils::kVirtKeyFlag, static_cast<quint16>(0));
+			const QString text = AcceleratorUtils::acceleratorToString(AcceleratorUtils::kVirtKeyFlag,
+			                                                           static_cast<quint16>(0));
 			QVERIFY(text.isEmpty());
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_GUILESS_MAIN(tst_AcceleratorUtils)
-
 
 #if __has_include("tst_AcceleratorUtils.moc")
 #include "tst_AcceleratorUtils.moc"

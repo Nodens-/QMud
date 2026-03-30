@@ -27,6 +27,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollBar>
+#include <QShortcut>
 #include <QSplitter>
 #include <QTextDocument>
 #include <QTimer>
@@ -64,6 +65,10 @@ namespace
 	bool                                g_connected{false};
 	bool                                g_nawsNegotiated{false};
 	bool                                g_useFakeAppController{false};
+	QHash<quint64, quint16>             g_virtualKeyMap;
+	QHash<qint64, int>                  g_acceleratorCommands;
+	int                                 g_acceleratorExecutionCount{0};
+	int                                 g_lastExecutedAcceleratorCommand{-1};
 
 	AppController                      *fakeAppControllerPointer()
 	{
@@ -120,6 +125,25 @@ namespace
 		g_connected             = false;
 		g_nawsNegotiated        = false;
 		g_useFakeAppController  = false;
+		g_virtualKeyMap.clear();
+		g_acceleratorCommands.clear();
+		g_acceleratorExecutionCount      = 0;
+		g_lastExecutedAcceleratorCommand = -1;
+	}
+
+	qint64 makeAcceleratorMapKey(const Qt::Key key, const Qt::KeyboardModifiers modifiers,
+	                             const quint16 virtualKey, const bool keypad = false)
+	{
+		quint32 virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
+		if ((modifiers & Qt::ShiftModifier) != 0)
+			virt |= AcceleratorUtils::kShiftFlag;
+		if ((modifiers & Qt::ControlModifier) != 0)
+			virt |= AcceleratorUtils::kControlFlag;
+		if ((modifiers & Qt::AltModifier) != 0)
+			virt |= AcceleratorUtils::kAltFlag;
+		const quint64 mapId = (static_cast<quint64>(static_cast<quint32>(key)) << 1) | (keypad ? 1ULL : 0ULL);
+		g_virtualKeyMap.insert(mapId, virtualKey);
+		return (static_cast<qint64>(virt) << 16) | virtualKey;
 	}
 
 	int boundedSizeToInt(const qsizetype value)
@@ -431,6 +455,12 @@ namespace
 		}
 		return lines;
 	}
+
+	bool colorsMatchExactly(const QColor &lhs, const QColor &rhs)
+	{
+		return lhs.red() == rhs.red() && lhs.green() == rhs.green() && lhs.blue() == rhs.blue() &&
+		       lhs.alpha() == rhs.alpha();
+	}
 } // namespace
 
 // NOLINTBEGIN(readability-convert-member-functions-to-static)
@@ -448,9 +478,13 @@ void AppController::onCommandTriggered(const QString &)
 {
 }
 
-quint16 AcceleratorUtils::qtKeyToVirtualKey(Qt::Key, bool)
+quint16 AcceleratorUtils::qtKeyToVirtualKey(Qt::Key key, bool keypad)
 {
-	return 0;
+	const quint64 mapId = (static_cast<quint64>(static_cast<quint32>(key)) << 1) | (keypad ? 1ULL : 0ULL);
+	if (const auto it = g_virtualKeyMap.constFind(mapId); it != g_virtualKeyMap.constEnd())
+		return it.value();
+	const quint64 fallbackId = static_cast<quint64>(static_cast<quint32>(key)) << 1;
+	return g_virtualKeyMap.value(fallbackId, 0);
 }
 
 QString AcceleratorUtils::acceleratorToString(quint32, quint16)
@@ -534,7 +568,7 @@ int WorldRuntime::backgroundImageMode() const
 	return 0;
 }
 
-void WorldRuntime::layoutMiniWindows(const QSize &, const QSize &, bool)
+void WorldRuntime::layoutMiniWindows(const QSize &, const QSize &, bool, const QVector<MiniWindow *> *)
 {
 }
 
@@ -579,6 +613,10 @@ void WorldRuntime::installPendingPlugins()
 void WorldRuntime::notifyWorldOutputResized()
 {
 	++g_worldOutputResizedNotifyCount;
+}
+
+void WorldRuntime::refreshNawsWindowSize()
+{
 }
 
 void WorldRuntime::firePluginCommandChanged()
@@ -674,14 +712,18 @@ int WorldRuntime::sendCommand(const QString &, bool, bool, bool, bool, bool) con
 	return 0;
 }
 
-int WorldRuntime::acceleratorCommandForKey(qint64) const
+int WorldRuntime::acceleratorCommandForKey(qint64 key) const
 {
-	return 0;
+	return g_acceleratorCommands.value(key, -1);
 }
 
-bool WorldRuntime::executeAcceleratorCommand(int, const QString &)
+bool WorldRuntime::executeAcceleratorCommand(int commandId, const QString &)
 {
-	return false;
+	if (commandId < 0)
+		return false;
+	++g_acceleratorExecutionCount;
+	g_lastExecutedAcceleratorCommand = commandId;
+	return true;
 }
 
 const QList<WorldRuntime::Keypad> &WorldRuntime::keypadEntries() const
@@ -1003,7 +1045,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void textRectangleInfoBoundsAreInclusive()
+		void textRectangleInfoBoundsUseRightBottomEdges()
 		{
 			resetTestState();
 
@@ -1026,11 +1068,11 @@ class tst_WorldView_Basic : public QObject
 
 			const int info290 = rect.left();
 			const int info291 = rect.top();
-			const int info292 = rect.right();
-			const int info293 = rect.bottom();
+			const int info292 = rect.left() + rect.width();
+			const int info293 = rect.top() + rect.height();
 
-			QCOMPARE(info292 - info290 + 1, rect.width());
-			QCOMPARE(info293 - info291 + 1, rect.height());
+			QCOMPARE(info292 - info290, rect.width());
+			QCOMPARE(info293 - info291, rect.height());
 
 			resetTestState();
 		}
@@ -1279,6 +1321,156 @@ class tst_WorldView_Basic : public QObject
 			QTest::keySequence(input, QKeySequence::Copy);
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("output"));
+
+			resetTestState();
+		}
+
+		void ctrlBackspaceClearsInput()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			view.setInputText(QStringLiteral("alpha beta gamma"), true);
+			QCOMPARE(view.inputText(), QStringLiteral("alpha beta gamma"));
+
+			int       shortcutTriggerCount = 0;
+			QShortcut conflictingShortcut(QKeySequence(QStringLiteral("Ctrl+Backspace")), input);
+			conflictingShortcut.setContext(Qt::WidgetWithChildrenShortcut);
+			connect(&conflictingShortcut, &QShortcut::activated, this,
+			        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+			QTest::keyClick(input, Qt::Key_Backspace, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.inputText(), QString());
+			QCOMPARE(shortcutTriggerCount, 0);
+			resetTestState();
+		}
+
+		void pluginAcceleratorOverridesConflictingShortcut()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			constexpr Qt::Key key        = Qt::Key_K;
+			constexpr quint16 virtualKey = 0x4B;
+			constexpr int     commandId  = 77;
+			const qint64      mapKey     = makeAcceleratorMapKey(key, Qt::ControlModifier, virtualKey);
+			g_acceleratorCommands.insert(mapKey, commandId);
+
+			int       shortcutTriggerCount = 0;
+			QShortcut conflictingShortcut(QKeySequence(QStringLiteral("Ctrl+K")), input);
+			conflictingShortcut.setContext(Qt::WidgetWithChildrenShortcut);
+			connect(&conflictingShortcut, &QShortcut::activated, this,
+			        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+
+			QTest::keyClick(input, key, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_acceleratorExecutionCount, 1);
+			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
+			QCOMPARE(shortcutTriggerCount, 0);
+
+			resetTestState();
+		}
+
+		void pluginNumpadAcceleratorRequiresKeypadModifier()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			constexpr Qt::Key key          = Qt::Key_6;
+			constexpr quint16 numpadVk     = 0x66;
+			constexpr int     commandId    = 88;
+			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::AltModifier, numpadVk, true);
+			g_acceleratorCommands.insert(numpadMapKey, commandId);
+			constexpr quint64 keypadMapId = (static_cast<quint64>(static_cast<quint32>(key)) << 1) | 1ULL;
+			g_virtualKeyMap.insert(keypadMapId, numpadVk);
+
+			int       shortcutTriggerCount = 0;
+			QShortcut conflictingShortcut(QKeySequence(QStringLiteral("Alt+6")), input);
+			conflictingShortcut.setContext(Qt::WidgetWithChildrenShortcut);
+			connect(&conflictingShortcut, &QShortcut::activated, this,
+			        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+
+			QTest::keyClick(input, key, Qt::AltModifier);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_acceleratorExecutionCount, 0);
+			QCOMPARE(g_lastExecutedAcceleratorCommand, -1);
+			QCOMPARE(shortcutTriggerCount, 1);
+
+			QTest::keyClick(input, key, Qt::AltModifier | Qt::KeypadModifier);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_acceleratorExecutionCount, 1);
+			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
+
+			resetTestState();
+		}
+
+		void topRowDigitDoesNotTriggerNumpadAccelerator()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			constexpr Qt::Key key          = Qt::Key_8;
+			constexpr quint16 numpadVk     = 0x68;
+			constexpr quint16 topRowVk     = 0x38;
+			constexpr int     commandId    = 99;
+			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::NoModifier, numpadVk, true);
+			g_acceleratorCommands.insert(numpadMapKey, commandId);
+			constexpr quint64 topRowMapId = static_cast<quint64>(static_cast<quint32>(key)) << 1;
+			g_virtualKeyMap.insert(topRowMapId, topRowVk);
+
+			QTest::keyClick(input, key, Qt::NoModifier);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_acceleratorExecutionCount, 0);
+			QCOMPARE(g_lastExecutedAcceleratorCommand, -1);
+			QCOMPARE(input->toPlainText(), QStringLiteral("8"));
 
 			resetTestState();
 		}
@@ -1987,6 +2179,99 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(browser);
 			const int viewportWidthAfter = browser->viewport() ? browser->viewport()->width() : 0;
 			QCOMPARE(viewportWidthAfter, viewportWidthBefore);
+			resetTestState();
+		}
+
+		void textRectangleOutsideFillDoesNotCoverUnderlayMiniWindows()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			g_textRectangle.left              = 220;
+			g_textRectangle.top               = 120;
+			g_textRectangle.right             = 700;
+			g_textRectangle.bottom            = 440;
+			g_textRectangle.borderOffset      = 0;
+			g_textRectangle.borderWidth       = 0;
+			g_textRectangle.outsideFillStyle  = 0;        // solid
+			g_textRectangle.outsideFillColour = 0x00FF00; // green (COLORREF)
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+
+			constexpr QColor underlayColour(255, 0, 255, 255);
+			appendTestMiniWindow(QStringLiteral("underlay-miniw"), QRect(24, 24, 40, 40),
+			                     kMiniWindowDrawUnderneath, underlayColour);
+			view.onMiniWindowsChanged();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			outputStack->update();
+			QCoreApplication::processEvents();
+
+			const QImage image = outputStack->grab().toImage();
+			QVERIFY(!image.isNull());
+			constexpr QPoint samplePoint(40, 40);
+			QVERIFY(image.rect().contains(samplePoint));
+			const QColor sample = image.pixelColor(samplePoint);
+			QVERIFY2(colorsMatchExactly(sample, underlayColour),
+			         "TextRectangle outside fill obscured an underneath miniwindow.");
+
+			resetTestState();
+		}
+
+		void overlayMiniWindowsRemainAboveNoWrapText()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			// Force long unwrapped output that crosses the overlay miniwindow bounds.
+			view.appendOutputText(QStringLiteral("W").repeated(1200), true);
+			QCoreApplication::processEvents();
+
+			constexpr QColor overlayColour(255, 0, 255, 255);
+			const QRect      overlayRect(120, 0, 220, 30);
+			appendTestMiniWindow(QStringLiteral("overlay-nowrap"), overlayRect, 0, overlayColour);
+			view.onMiniWindowsChanged();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			outputStack->update();
+			QCoreApplication::processEvents();
+
+			const QImage image = outputStack->grab().toImage();
+			QVERIFY(!image.isNull());
+			const QRect sampleRect = overlayRect.intersected(image.rect());
+			QVERIFY(!sampleRect.isEmpty());
+			for (int y = sampleRect.top(); y <= sampleRect.bottom(); ++y)
+			{
+				for (int x = sampleRect.left(); x <= sampleRect.right(); ++x)
+				{
+					const QColor sample = image.pixelColor(x, y);
+					QVERIFY2(colorsMatchExactly(sample, overlayColour),
+					         "No-wrap output painted above overlay miniwindow.");
+				}
+			}
+
 			resetTestState();
 		}
 
@@ -3276,6 +3561,16 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(actions.at(1).second, QStringLiteral("Consider assistant"));
 			QCOMPARE(actions.at(2).first, QStringLiteral("attack assistant"));
 			QCOMPARE(actions.at(2).second, QStringLiteral("Attack assistant"));
+
+			const QVector<QPair<QString, QString>> apostropheActions = WorldView::parseMxpContextMenuActions(
+			    QStringLiteral("examine a scroll of 'harm'|consider a scroll of 'harm'"),
+			    QStringLiteral(
+			        "Right mouse click to act|Examine a scroll of 'harm'|Consider a scroll of 'harm'"));
+			QCOMPARE(apostropheActions.size(), 2);
+			QCOMPARE(apostropheActions.at(0).first, QStringLiteral("examine a scroll of 'harm'"));
+			QCOMPARE(apostropheActions.at(0).second, QStringLiteral("Examine a scroll of 'harm'"));
+			QCOMPARE(apostropheActions.at(1).first, QStringLiteral("consider a scroll of 'harm'"));
+			QCOMPARE(apostropheActions.at(1).second, QStringLiteral("Consider a scroll of 'harm'"));
 		}
 
 		void runtimeSettingsRebuildAttributeKeysExcludeWrapAndHyperlinkPresentation()

@@ -1400,8 +1400,10 @@ class WorldRuntime : public QObject
 		 * @param clientSize Current output client size.
 		 * @param ownerSize Owning widget size.
 		 * @param underneath Layout behind output surface when `true`.
+		 * @param orderedWindows Optional pre-sorted miniwindow list to reuse for this layout pass.
 		 */
-		void layoutMiniWindows(const QSize &clientSize, const QSize &ownerSize, bool underneath);
+		void layoutMiniWindows(const QSize &clientSize, const QSize &ownerSize, bool underneath,
+		                       const QVector<MiniWindow *> *orderedWindows = nullptr);
 		/**
 		 * @brief Draws rectangle/frame/fill operation on miniwindow.
 		 * @param name Miniwindow name.
@@ -3535,6 +3537,10 @@ class WorldRuntime : public QObject
 		 * @brief Dispatches output-resized notification.
 		 */
 		void                  notifyWorldOutputResized();
+		/**
+		 * @brief Refreshes NAWS window size without firing resize callbacks.
+		 */
+		void                  refreshNawsWindowSize();
 		/**
 		 * @brief Dispatches draw-output-window notification.
 		 * @param firstLine First visible line index.

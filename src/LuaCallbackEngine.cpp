@@ -7113,13 +7113,33 @@ static int luaGetInfo(lua_State *L)
 	case 290:
 	{
 		WorldView *view = runtime->view();
-		lua_pushnumber(L, view ? view->outputTextRectangle().left() : 0);
+		if (!view)
+		{
+			lua_pushnumber(L, 0);
+			return 1;
+		}
+		const WorldRuntime::TextRectangleSettings &settings = runtime->textRectangle();
+		const bool                                 textRectangleCompatActive =
+		    settings.left != 0 || settings.top != 0 || settings.right != 0 || settings.bottom != 0;
+		const QRect rect =
+		    textRectangleCompatActive ? view->outputTextRectangleUnreserved() : view->outputTextRectangle();
+		lua_pushnumber(L, rect.left());
 		return 1;
 	}
 	case 291:
 	{
 		WorldView *view = runtime->view();
-		lua_pushnumber(L, view ? view->outputTextRectangle().top() : 0);
+		if (!view)
+		{
+			lua_pushnumber(L, 0);
+			return 1;
+		}
+		const WorldRuntime::TextRectangleSettings &settings = runtime->textRectangle();
+		const bool                                 textRectangleCompatActive =
+		    settings.left != 0 || settings.top != 0 || settings.right != 0 || settings.bottom != 0;
+		const QRect rect =
+		    textRectangleCompatActive ? view->outputTextRectangleUnreserved() : view->outputTextRectangle();
+		lua_pushnumber(L, rect.top());
 		return 1;
 	}
 	case 292:
@@ -7130,8 +7150,12 @@ static int luaGetInfo(lua_State *L)
 			lua_pushnumber(L, 0);
 			return 1;
 		}
-		const QRect rect = view->outputTextRectangle();
-		lua_pushnumber(L, rect.right());
+		const WorldRuntime::TextRectangleSettings &settings = runtime->textRectangle();
+		const bool                                 textRectangleCompatActive =
+		    settings.left != 0 || settings.top != 0 || settings.right != 0 || settings.bottom != 0;
+		const QRect rect =
+		    textRectangleCompatActive ? view->outputTextRectangleUnreserved() : view->outputTextRectangle();
+		lua_pushnumber(L, rect.left() + rect.width());
 		return 1;
 	}
 	case 293:
@@ -7142,8 +7166,12 @@ static int luaGetInfo(lua_State *L)
 			lua_pushnumber(L, 0);
 			return 1;
 		}
-		const QRect rect = view->outputTextRectangle();
-		lua_pushnumber(L, rect.bottom());
+		const WorldRuntime::TextRectangleSettings &settings = runtime->textRectangle();
+		const bool                                 textRectangleCompatActive =
+		    settings.left != 0 || settings.top != 0 || settings.right != 0 || settings.bottom != 0;
+		const QRect rect =
+		    textRectangleCompatActive ? view->outputTextRectangleUnreserved() : view->outputTextRectangle();
+		lua_pushnumber(L, rect.top() + rect.height());
 		return 1;
 	}
 
@@ -11623,9 +11651,10 @@ static int luaAcceleratorTo(lua_State *L)
 		return 1;
 	}
 
-	const char *keyText  = luaL_checkstring(L, 1);
-	const char *sendText = luaL_checkstring(L, 2);
-	const int   sendTo   = static_cast<int>(luaL_checkinteger(L, 3));
+	const char *keyText       = luaL_checkstring(L, 1);
+	const char *sendText      = luaL_checkstring(L, 2);
+	const int   sendTo        = static_cast<int>(luaL_checkinteger(L, 3));
+	const auto  sendTextValue = QString::fromUtf8(sendText);
 	if (sendTo < 0 || sendTo >= eSendToLast)
 	{
 		lua_pushnumber(L, eOptionOutOfRange);
@@ -11642,7 +11671,7 @@ static int luaAcceleratorTo(lua_State *L)
 
 	const qint64 mapKey = static_cast<qint64>(virt) << 16 | key;
 
-	if (sendText[0] == '\0')
+	if (sendTextValue.isEmpty() || (sendTo == eSendToScript && sendTextValue.trimmed().isEmpty()))
 	{
 		runtime->removeAccelerator(mapKey);
 		lua_pushnumber(L, eOK);
@@ -11661,7 +11690,7 @@ static int luaAcceleratorTo(lua_State *L)
 	}
 
 	WorldRuntime::AcceleratorEntry entry;
-	entry.text     = QString::fromUtf8(sendText);
+	entry.text     = sendTextValue;
 	entry.sendTo   = sendTo;
 	entry.pluginId = engine->pluginId();
 	runtime->registerAccelerator(mapKey, commandId, entry);

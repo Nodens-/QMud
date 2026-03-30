@@ -16,6 +16,7 @@
 #include "MainFrame.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
+#include "MiniWindowBrushUtils.h"
 #include "Version.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
@@ -41,6 +42,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPalette>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -216,6 +218,23 @@ namespace
                 clientSize
             };
 		return normalizeTextRectangleForClient(runtime->textRectangle(), clientSize);
+	}
+
+	[[nodiscard]] QImage transparentColorKeyedCopy(const QImage &source, const QRgb keyRgb)
+	{
+		if (source.isNull())
+			return source;
+		QImage image = source.convertToFormat(QImage::Format_ARGB32);
+		for (int y = 0; y < image.height(); ++y)
+		{
+			auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+			for (int x = 0; x < image.width(); ++x)
+			{
+				if ((line[x] & 0x00FFFFFF) == (keyRgb & 0x00FFFFFF))
+					line[x] &= 0x00FFFFFF;
+			}
+		}
+		return image;
 	}
 
 	[[nodiscard]] bool traceOutputBackfillEnabled()
@@ -1310,8 +1329,8 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 		m_nativeRenderLineCacheFromRuntime = true;
 		m_nativeRenderLineCacheValid       = false;
 		m_nativeLayoutCacheValid           = false;
-		m_lastQueuedOutputTextRect         = {};
-		m_lastQueuedOutputTextRectValid    = false;
+		m_lastQueuedOutputClientSize       = {};
+		m_lastQueuedOutputClientSizeValid  = false;
 		clearNativeOutputSelection(true);
 		m_nativeStandaloneOutputLines.clear();
 		m_nativeStandaloneNextLineNumber  = 1;
@@ -1356,8 +1375,8 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 		m_nativeRenderLineCacheFromRuntime = true;
 		m_nativeRenderLineCacheValid       = false;
 		m_nativeLayoutCacheValid           = false;
-		m_lastQueuedOutputTextRect         = {};
-		m_lastQueuedOutputTextRectValid    = false;
+		m_lastQueuedOutputClientSize       = {};
+		m_lastQueuedOutputClientSizeValid  = false;
 		clearNativeOutputSelection(true);
 		m_nativeStandaloneOutputLines.clear();
 		m_nativeStandaloneNextLineNumber  = 1;
@@ -1432,7 +1451,6 @@ void WorldView::onMiniWindowsChanged()
 {
 	++m_miniWindowChangeSerial;
 	m_wrapMarginReservationCacheValid = false;
-	refreshMiniWindows();
 	if (m_wrapMarginUpdateQueued)
 		return;
 	m_wrapMarginUpdateQueued = true;
@@ -1441,8 +1459,10 @@ void WorldView::onMiniWindowsChanged()
 	    [this]
 	    {
 		    m_wrapMarginUpdateQueued = false;
+		    refreshMiniWindows();
 		    updateWrapMargin();
-		    requestWorldOutputResizedNotification();
+		    if (m_runtime)
+			    m_runtime->refreshNawsWindowSize();
 	    },
 	    Qt::QueuedConnection);
 }
@@ -3148,6 +3168,66 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 	return false;
 }
 
+void WorldView::paintTextRectangleCompatibilityFrame(QPainter *painter, const QRect &updateRect) const
+{
+	if (!painter || !m_outputStack || !m_runtime)
+		return;
+
+	const WorldRuntime::TextRectangleSettings &settings = m_runtime->textRectangle();
+	if (!hasConfiguredTextRectangle(settings))
+		return;
+
+	const QRect outputRect = m_outputStack->rect();
+	if (outputRect.isEmpty())
+		return;
+
+	const QRect textRect = outputTextRectangleUnreserved().intersected(outputRect);
+	if (textRect.isEmpty())
+		return;
+
+	const int borderOffset = qMax(0, settings.borderOffset);
+	QRect     frameRect =
+	    textRect.adjusted(-borderOffset, -borderOffset, borderOffset, borderOffset).intersected(outputRect);
+	if (frameRect.isEmpty())
+		return;
+
+	const QBrush outsideBrush = MiniWindowBrushUtils::makeBrush(
+	    settings.outsideFillStyle, settings.borderColour, settings.outsideFillColour);
+	if (outsideBrush.style() != Qt::NoBrush)
+	{
+		painter->save();
+		painter->setClipRect(updateRect);
+		QPainterPath outsidePath;
+		outsidePath.setFillRule(Qt::OddEvenFill);
+		outsidePath.addRect(outputRect);
+		outsidePath.addRect(frameRect);
+		painter->fillPath(outsidePath, outsideBrush);
+		painter->restore();
+	}
+
+	const int borderWidth = qMax(0, settings.borderWidth);
+	if (borderWidth <= 0)
+		return;
+
+	const QColor borderColor = MiniWindowBrushUtils::colorFromRefOrTransparent(settings.borderColour);
+	if (borderColor.alpha() == 0)
+		return;
+
+	painter->save();
+	painter->setClipRect(updateRect);
+	painter->setPen(borderColor);
+	painter->setBrush(Qt::NoBrush);
+	QRect borderRect = frameRect;
+	for (int i = 0; i < borderWidth; ++i)
+	{
+		if (borderRect.width() <= 0 || borderRect.height() <= 0)
+			break;
+		painter->drawRect(borderRect.adjusted(0, 0, -1, -1));
+		borderRect.adjust(1, 1, -1, -1);
+	}
+	painter->restore();
+}
+
 void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRect &updateRect) const
 {
 	if (!painter || !m_nativeOutputCanvas || !m_output)
@@ -4545,13 +4625,19 @@ int WorldView::outputClientWidth() const
 
 QRect WorldView::outputTextRectangle() const
 {
-	if (!m_outputStack || !m_outputSplitter)
-		return {};
-
-	QRect rect = m_outputSplitter->geometry();
+	QRect rect = outputTextRectangleUnreserved();
+	if (m_runtime && hasConfiguredTextRectangle(m_runtime->textRectangle()))
+		return rect;
 	if (m_wrapMarginReservationPixels > 0)
 		rect.adjust(0, 0, -qMin(m_wrapMarginReservationPixels, qMax(0, rect.width() - 1)), 0);
 	return rect;
+}
+
+QRect WorldView::outputTextRectangleUnreserved() const
+{
+	if (!m_outputStack || !m_outputSplitter)
+		return {};
+	return m_outputSplitter->geometry();
 }
 
 QFont WorldView::outputFont() const
@@ -4607,13 +4693,13 @@ void WorldView::requestWorldOutputResizedNotification()
 {
 	if (!m_runtime)
 		return;
-	const QRect textRect = outputTextRectangle();
-	if (textRect.width() <= 0 || textRect.height() <= 0)
+	const QSize clientSize(outputClientWidth(), outputClientHeight());
+	if (clientSize.width() <= 0 || clientSize.height() <= 0)
 		return;
-	if (m_lastQueuedOutputTextRectValid && textRect == m_lastQueuedOutputTextRect)
+	if (m_lastQueuedOutputClientSizeValid && clientSize == m_lastQueuedOutputClientSize)
 		return;
-	m_lastQueuedOutputTextRect      = textRect;
-	m_lastQueuedOutputTextRectValid = true;
+	m_lastQueuedOutputClientSize      = clientSize;
+	m_lastQueuedOutputClientSizeValid = true;
 	if (m_worldOutputResizedQueued)
 		return;
 	m_worldOutputResizedQueued = true;
@@ -5286,6 +5372,7 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 	{
 		const QColor back = m_outputBackground.isValid() ? m_outputBackground : QColor(0, 0, 0);
 		painter->fillRect(painter->viewport(), back);
+		paintTextRectangleCompatibilityFrame(painter, painter->viewport());
 	}
 
 	if (!m_runtime)
@@ -5341,26 +5428,8 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 			}
 		}
 	}
-	m_runtime->layoutMiniWindows(clientSize, ownerSize, underneath);
-
-	const auto windows         = m_runtime->sortedMiniWindows();
-	auto       makeTransparent = [](const QImage &source, const QColor &key) -> QImage
-	{
-		if (source.isNull())
-			return source;
-		QImage     image  = source.convertToFormat(QImage::Format_ARGB32);
-		const QRgb keyRgb = qRgb(key.red(), key.green(), key.blue());
-		for (int y = 0; y < image.height(); ++y)
-		{
-			auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
-			for (int x = 0; x < image.width(); ++x)
-			{
-				if ((line[x] & 0x00FFFFFF) == (keyRgb & 0x00FFFFFF))
-					line[x] &= 0x00FFFFFF;
-			}
-		}
-		return image;
-	};
+	const auto windows = m_runtime->sortedMiniWindows();
+	m_runtime->layoutMiniWindows(clientSize, ownerSize, underneath, &windows);
 
 	for (MiniWindow *window : windows)
 	{
@@ -5370,9 +5439,23 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 		if (drawUnder != underneath)
 			continue;
 
-		QImage image = window->surface;
+		const QImage *imagePtr = &window->surface;
 		if ((window->flags & kMiniWindowTransparent) != 0)
-			image = makeTransparent(window->surface, window->background);
+		{
+			const QRgb keyRgb =
+			    qRgb(window->background.red(), window->background.green(), window->background.blue());
+			const auto sourceKey = window->surface.cacheKey();
+			if (window->transparentSurfaceCache.isNull() ||
+			    window->transparentSurfaceSourceKey != sourceKey ||
+			    window->transparentSurfaceKeyRgb != keyRgb)
+			{
+				window->transparentSurfaceCache     = transparentColorKeyedCopy(window->surface, keyRgb);
+				window->transparentSurfaceSourceKey = sourceKey;
+				window->transparentSurfaceKeyRgb    = keyRgb;
+			}
+			imagePtr = &window->transparentSurfaceCache;
+		}
+		const QImage &image = *imagePtr;
 
 		if (!image.isNull())
 		{
@@ -5443,7 +5526,9 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 	if (!m_runtime || !m_outputStack)
 		return nullptr;
 
-	const auto windows = m_runtime->sortedMiniWindows();
+	const auto  windows        = m_runtime->sortedMiniWindows();
+	MiniWindow *fallbackWindow = nullptr;
+	QString     fallbackWindowName;
 	for (MiniWindow *window : windows | std::views::reverse)
 	{
 		if (!window || !window->show || window->temporarilyHide)
@@ -5455,6 +5540,11 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 			continue;
 		if (!window->rect.contains(localPos))
 			continue;
+		if (!fallbackWindow)
+		{
+			fallbackWindow     = window;
+			fallbackWindowName = window->name;
+		}
 		const QPoint relative = miniWindowDisplayToContent(window, localPos - window->rect.topLeft());
 		for (auto hit = window->hotspots.constBegin(); hit != window->hotspots.constEnd(); ++hit)
 		{
@@ -5465,8 +5555,12 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 				return window;
 			}
 		}
-		windowName = window->name;
-		return window;
+	}
+
+	if (fallbackWindow)
+	{
+		windowName = fallbackWindowName;
+		return fallbackWindow;
 	}
 
 	return nullptr;
@@ -5535,6 +5629,9 @@ void WorldView::applyOutputCursor(const QCursor *cursor)
 	apply(m_outputContainer);
 	apply(m_outputStack);
 	apply(m_outputSplitter);
+	apply(m_nativeOutputCanvas);
+	apply(m_miniUnderlay);
+	apply(m_miniOverlay);
 	apply(m_output);
 	apply(m_output ? m_output->viewport() : nullptr);
 	apply(m_liveOutput);
@@ -6796,6 +6893,8 @@ void WorldView::showEvent(QShowEvent *event)
 		m_nativeOutputCanvas->setVisible(true);
 		m_nativeOutputCanvas->raise();
 	}
+	if (m_miniOverlay)
+		m_miniOverlay->raise();
 	syncOutputTextVisibilityForNativeCanvas();
 	applyDefaultInputHeight(true);
 	if (m_runtime)
@@ -6840,6 +6939,16 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 			updateWrapMargin();
 		refreshMiniWindows();
 		requestWorldOutputResizedNotification();
+	}
+
+	if (isOutputWidget && event->type() == QEvent::ShortcutOverride)
+	{
+		if (const auto *keyEvent = dynamic_cast<QKeyEvent *>(event);
+		    keyEvent && hasWorldAcceleratorBinding(keyEvent))
+		{
+			event->accept();
+			return true;
+		}
 	}
 
 	if (isOutputWidget && event->type() == QEvent::KeyPress)
@@ -7070,70 +7179,79 @@ void WorldView::updateWrapMargin() const
 	int reservedRight = 0;
 	if (m_runtime && !effectiveRect.isEmpty())
 	{
-		// Keep miniwindow rects current before calculating reserved margin so
-		// window moves/resizes are reflected immediately in NAWS sizing.
-		m_runtime->layoutMiniWindows(m_outputStack->size(), size(), false);
-
-		const bool cacheHit = m_wrapMarginReservationCacheValid &&
-		                      m_wrapMarginReservationRect == effectiveRect &&
-		                      m_wrapMarginReservationSerial == m_miniWindowChangeSerial;
-		if (cacheHit)
-			reservedRight = m_wrapMarginReservationPixels;
-		else
+		const bool textRectangleCompatActive = hasConfiguredTextRectangle(m_runtime->textRectangle());
+		if (!textRectangleCompatActive)
 		{
-			int safeRight = effectiveRect.right() + 1;
-			for (MiniWindow *window : m_runtime->sortedMiniWindows())
-			{
-				if (!window || !window->show || window->temporarilyHide)
-					continue;
-				if ((window->flags & kMiniWindowDrawUnderneath) != 0)
-					continue;
+			const auto windows = m_runtime->sortedMiniWindows();
+			// Keep miniwindow rects current before calculating reserved margin so
+			// window moves/resizes are reflected immediately in NAWS sizing.
+			m_runtime->layoutMiniWindows(m_outputStack->size(), size(), false, &windows);
 
-				QRect candidateRect;
-				if (window->position == 6 || window->position == 7 || window->position == 8)
+			const bool cacheHit = m_wrapMarginReservationCacheValid &&
+			                      m_wrapMarginReservationRect == effectiveRect &&
+			                      m_wrapMarginReservationSerial == m_miniWindowChangeSerial;
+			if (cacheHit)
+				reservedRight = m_wrapMarginReservationPixels;
+			else
+			{
+				int safeRight = effectiveRect.right() + 1;
+				for (MiniWindow *window : windows)
 				{
-					// For docked windows, use the laid-out rect when available so stacked
-					// dock panes reserve their true left edge for NAWS calculations.
-					if (!window->rect.isEmpty())
+					if (!window || !window->show || window->temporarilyHide)
+						continue;
+					if ((window->flags & kMiniWindowDrawUnderneath) != 0)
+						continue;
+
+					QRect candidateRect;
+					if (window->position == 6 || window->position == 7 || window->position == 8)
 					{
-						candidateRect = window->rect;
+						// For docked windows, use the laid-out rect when available so stacked
+						// dock panes reserve their true left edge for NAWS calculations.
+						if (!window->rect.isEmpty())
+						{
+							candidateRect = window->rect;
+						}
+						else
+						{
+							const int width = qMax(0, window->width);
+							if (width <= 0)
+								continue;
+							candidateRect = QRect(effectiveRect.right() + 1 - width, effectiveRect.top(),
+							                      width, effectiveRect.height());
+						}
 					}
 					else
 					{
-						const int width = qMax(0, window->width);
-						if (width <= 0)
+						if (window->rect.isEmpty())
 							continue;
-						candidateRect = QRect(effectiveRect.right() + 1 - width, effectiveRect.top(), width,
-						                      effectiveRect.height());
+						const bool absolute = (window->flags & kMiniWindowAbsoluteLocation) != 0;
+						// Skip full-surface background modes; they are not overlay blockers.
+						if (!absolute && window->position >= 0 && window->position <= 3)
+							continue;
+						if (!absolute && window->position == 13)
+							continue;
+
+						const bool rightHalf = window->rect.center().x() >= effectiveRect.center().x();
+						if (!rightHalf)
+							continue;
+						candidateRect = window->rect;
 					}
-				}
-				else
-				{
-					if (window->rect.isEmpty())
-						continue;
-					const bool absolute = (window->flags & kMiniWindowAbsoluteLocation) != 0;
-					// Skip full-surface background modes; they are not overlay blockers.
-					if (!absolute && window->position >= 0 && window->position <= 3)
-						continue;
-					if (!absolute && window->position == 13)
-						continue;
 
-					const bool rightHalf = window->rect.center().x() >= effectiveRect.center().x();
-					if (!rightHalf)
+					const QRect overlap = candidateRect.intersected(effectiveRect);
+					if (overlap.isEmpty())
 						continue;
-					candidateRect = window->rect;
+					safeRight = qMin(safeRight, overlap.left());
 				}
-
-				const QRect overlap = candidateRect.intersected(effectiveRect);
-				if (overlap.isEmpty())
-					continue;
-				safeRight = qMin(safeRight, overlap.left());
+				reservedRight                     = qMax(0, (effectiveRect.right() + 1) - safeRight);
+				m_wrapMarginReservationCacheValid = true;
+				m_wrapMarginReservationRect       = effectiveRect;
+				m_wrapMarginReservationSerial     = m_miniWindowChangeSerial;
+				m_wrapMarginReservationPixels     = reservedRight;
 			}
-			reservedRight                     = qMax(0, (effectiveRect.right() + 1) - safeRight);
-			m_wrapMarginReservationCacheValid = true;
-			m_wrapMarginReservationRect       = effectiveRect;
-			m_wrapMarginReservationSerial     = m_miniWindowChangeSerial;
-			m_wrapMarginReservationPixels     = reservedRight;
+		}
+		else
+		{
+			m_wrapMarginReservationCacheValid = false;
 		}
 	}
 	else
@@ -7477,6 +7595,73 @@ bool WorldView::executeMacroByName(const QString &name)
 	return false;
 }
 
+namespace
+{
+	struct AcceleratorLookup
+	{
+			quint32 virt{0};
+			quint16 keyCode{0};
+			qint64  mapKey{0};
+	};
+
+	bool buildAcceleratorLookup(const QKeyEvent *event, const bool keypad, AcceleratorLookup &lookup)
+	{
+		if (!event)
+			return false;
+
+		const Qt::KeyboardModifiers mods = event->modifiers();
+		if ((mods & Qt::MetaModifier) != 0)
+			return false;
+
+		const int key = event->key();
+		if (key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt || key == Qt::Key_Meta ||
+		    key == Qt::Key_unknown)
+			return false;
+
+		lookup.virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
+		if ((mods & Qt::ShiftModifier) != 0)
+			lookup.virt |= AcceleratorUtils::kShiftFlag;
+		if ((mods & Qt::ControlModifier) != 0)
+			lookup.virt |= AcceleratorUtils::kControlFlag;
+		if ((mods & Qt::AltModifier) != 0)
+			lookup.virt |= AcceleratorUtils::kAltFlag;
+
+		lookup.keyCode = AcceleratorUtils::qtKeyToVirtualKey(static_cast<Qt::Key>(key), keypad);
+		if (lookup.keyCode == 0)
+			return false;
+
+		lookup.mapKey = (static_cast<qint64>(lookup.virt) << 16) | lookup.keyCode;
+		return true;
+	}
+
+	int findAcceleratorCommandForEvent(const WorldRuntime *runtime, const QKeyEvent *event,
+	                                   const bool keypadHint, AcceleratorLookup *resolvedLookup = nullptr)
+	{
+		if (!runtime || !event)
+			return -1;
+
+		AcceleratorLookup lookup;
+		if (!buildAcceleratorLookup(event, keypadHint, lookup))
+			return -1;
+
+		const int commandId = runtime->acceleratorCommandForKey(lookup.mapKey);
+		if (commandId < 0)
+			return -1;
+		if (resolvedLookup)
+			*resolvedLookup = lookup;
+		return commandId;
+	}
+} // namespace
+
+bool WorldView::hasWorldAcceleratorBinding(const QKeyEvent *event) const
+{
+	if (!m_runtime || !event)
+		return false;
+
+	const bool keypad = (event->modifiers() & Qt::KeypadModifier) != 0;
+	return findAcceleratorCommandForEvent(m_runtime, event, keypad) >= 0;
+}
+
 bool WorldView::handleWorldHotkey(QKeyEvent *event)
 {
 	if (!m_runtime || !event)
@@ -7502,32 +7687,14 @@ bool WorldView::handleWorldHotkey(QKeyEvent *event)
 
 	auto       tryAccelerator = [&]() -> bool
 	{
-		if (hasMeta)
-			return false;
-		const int key = event->key();
-		if (key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt || key == Qt::Key_Meta ||
-		    key == Qt::Key_unknown)
-			return false;
-
-		quint32 virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
-		if (hasShift)
-			virt |= AcceleratorUtils::kShiftFlag;
-		if (hasCtrl)
-			virt |= AcceleratorUtils::kControlFlag;
-		if (hasAlt)
-			virt |= AcceleratorUtils::kAltFlag;
-		const quint16 keyCode = AcceleratorUtils::qtKeyToVirtualKey(static_cast<Qt::Key>(key), keypad);
-		if (keyCode == 0)
-			return false;
-		const qint64 mapKey = (static_cast<qint64>(virt) << 16) | keyCode;
-
-		const int    commandId = m_runtime->acceleratorCommandForKey(mapKey);
+		AcceleratorLookup lookup;
+		const int         commandId = findAcceleratorCommandForEvent(m_runtime, event, keypad, &lookup);
 		if (commandId < 0)
 			return false;
 
 		m_runtime->setCurrentActionSource(WorldRuntime::eUserAccelerator);
 		const bool ok = m_runtime->executeAcceleratorCommand(
-		    commandId, AcceleratorUtils::acceleratorToString(virt, keyCode));
+		    commandId, AcceleratorUtils::acceleratorToString(lookup.virt, lookup.keyCode));
 		m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
 		return ok;
 	};
@@ -8242,42 +8409,9 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 	}
 	if (m_view && event->key() == Qt::Key_Backspace && (event->modifiers() & Qt::ControlModifier))
 	{
-		QTextCursor cursor = textCursor();
-		if (cursor.hasSelection())
-		{
-			cursor.removeSelectedText();
-			setTextCursor(cursor);
-			return;
-		}
-		if (m_view->m_ctrlBackspaceDeletesLastWord)
-		{
-			const QString current  = toPlainText();
-			const int     position = cursor.position();
-			QString       before   = current.left(position);
-			const QString after    = current.mid(position);
-			while (before.endsWith(QLatin1Char(' ')))
-				before.chop(1);
-			if (const qsizetype spacePos = before.lastIndexOf(QLatin1Char(' ')); spacePos < 0)
-				before.clear();
-			else
-				before = before.left(spacePos);
-			const QString updated = before + after;
-			setPlainText(updated);
-			cursor = textCursor();
-			cursor.setPosition(sizeToInt(before.length()));
-			setTextCursor(cursor);
-			return;
-		}
-
-		if (const int position = cursor.position(); position > 0)
-		{
-			QString current = toPlainText();
-			current.remove(position - 1, 1);
-			setPlainText(current);
-			cursor = textCursor();
-			cursor.setPosition(position - 1);
-			setTextCursor(cursor);
-		}
+		clear();
+		m_view->m_inputChanged = false;
+		m_view->resetHistoryRecall();
 		return;
 	}
 
@@ -8348,9 +8482,20 @@ bool InputTextEdit::event(QEvent *event)
 			const Qt::KeyboardModifiers modifiers = keyEvent->modifiers();
 			const bool                  plainCtrl = (modifiers & Qt::ControlModifier) != 0 &&
 			                       (modifiers & (Qt::AltModifier | Qt::MetaModifier)) == 0;
+			const bool isCtrlBackspace = plainCtrl && keyEvent->key() == Qt::Key_Backspace;
 			const bool isCopyShortcut =
 			    keyEvent->matches(QKeySequence::Copy) || (plainCtrl && keyEvent->key() == Qt::Key_C);
+			if (isCtrlBackspace)
+			{
+				event->accept();
+				return true;
+			}
 			if (isCopyShortcut && m_view->hasOutputSelection())
+			{
+				event->accept();
+				return true;
+			}
+			if (m_view->hasWorldAcceleratorBinding(keyEvent))
 			{
 				event->accept();
 				return true;

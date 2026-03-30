@@ -467,6 +467,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             SOURCES
             gui/tst_WorldView_Basic.cpp
             "${CMAKE_SOURCE_DIR}/src/WorldView.cpp"
+            "${CMAKE_SOURCE_DIR}/src/MiniWindowBrushUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
             "${CMAKE_SOURCE_DIR}/src/TimeFormatUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/WorldView.h"

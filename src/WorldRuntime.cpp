@@ -22,6 +22,7 @@
 #include "LuaCallbackEngine.h"
 #include "LuaHeaders.h"
 #include "MainFrame.h"
+#include "MiniWindowBrushUtils.h"
 #include "MxpDiagnostics.h"
 #include "NameGeneration.h"
 #include "SqliteCompat.h"
@@ -87,6 +88,7 @@
 #include <QtMath>
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <exception>
 #include <iterator>
@@ -148,6 +150,15 @@ namespace
 			return 0;
 		constexpr qint64 kMaxInt = std::numeric_limits<int>::max();
 		return static_cast<int>(value > kMaxInt ? kMaxInt : value);
+	}
+
+	[[nodiscard]] bool textRectangleSettingsEqual(const WorldRuntime::TextRectangleSettings &lhs,
+	                                              const WorldRuntime::TextRectangleSettings &rhs)
+	{
+		return lhs.left == rhs.left && lhs.top == rhs.top && lhs.right == rhs.right &&
+		       lhs.bottom == rhs.bottom && lhs.borderOffset == rhs.borderOffset &&
+		       lhs.borderColour == rhs.borderColour && lhs.borderWidth == rhs.borderWidth &&
+		       lhs.outsideFillColour == rhs.outsideFillColour && lhs.outsideFillStyle == rhs.outsideFillStyle;
 	}
 
 	bool hasValidPluginId(const WorldRuntime::Plugin &plugin)
@@ -1719,10 +1730,7 @@ namespace
 
 	QColor        colorFromRef(long value)
 	{
-		const int r = static_cast<int>(value & 0xFF);
-		const int g = static_cast<int>((value >> 8) & 0xFF);
-		const int b = static_cast<int>((value >> 16) & 0xFF);
-		return {r, g, b};
+		return MiniWindowBrushUtils::colorFromRef(value);
 	}
 
 	long colorToRef(const QColor &color)
@@ -1839,109 +1847,6 @@ namespace
 			return eOK;
 		default:
 			return eBrushStyleNotValid;
-		}
-	}
-
-	QColor colorFromRefOrTransparent(long value)
-	{
-		if (value == -1)
-			return {0, 0, 0, 0};
-		return colorFromRef(value);
-	}
-
-	QImage makePatternImage(const quint8 (&rows)[8], const QColor &foreground, const QColor &background)
-	{
-		QImage pattern(8, 8, QImage::Format_ARGB32);
-		pattern.fill(background);
-		for (int y = 0; y < 8; ++y)
-		{
-			const quint8 row = rows[y];
-			for (int x = 0; x < 8; ++x)
-			{
-				if ((row >> (7 - x)) & 0x01)
-					pattern.setPixel(x, y, foreground.rgba());
-			}
-		}
-		return pattern;
-	}
-
-	QBrush makeBrush(long brushStyle, long penColour, long brushColour, bool *ok)
-	{
-		if (ok)
-			*ok = true;
-
-		if (brushStyle == 1 || brushColour == -1)
-			return Qt::NoBrush;
-
-		const QColor penColor   = colorFromRefOrTransparent(penColour);
-		const QColor brushColor = colorFromRefOrTransparent(brushColour);
-
-		auto patternBrush = [&](const quint8(&rows)[8], const QColor &foreground, const QColor &background)
-		{ return QBrush(QPixmap::fromImage(makePatternImage(rows, foreground, background))); };
-
-		switch (brushStyle)
-		{
-		case 0:
-			return {brushColor};
-		case 2:
-		{
-			static constexpr quint8 rows[8] = {0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 3:
-		{
-			static constexpr quint8 rows[8] = {0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 4:
-		{
-			static constexpr quint8 rows[8] = {0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 5:
-		{
-			static constexpr quint8 rows[8] = {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 6:
-		{
-			static constexpr quint8 rows[8] = {0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xAA};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 7:
-		{
-			static constexpr quint8 rows[8] = {0x81, 0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x81};
-			return patternBrush(rows, penColor, brushColor);
-		}
-		case 8:
-		{
-			static constexpr quint8 rows[8] = {0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55};
-			return patternBrush(rows, brushColor, penColor);
-		}
-		case 9:
-		{
-			static constexpr quint8 rows[8] = {0x33, 0x33, 0xCC, 0xCC, 0x33, 0x33, 0xCC, 0xCC};
-			return patternBrush(rows, brushColor, penColor);
-		}
-		case 10:
-		{
-			static constexpr quint8 rows[8] = {0x0F, 0x0F, 0x0F, 0x0F, 0xF0, 0xF0, 0xF0, 0xF0};
-			return patternBrush(rows, brushColor, penColor);
-		}
-		case 11:
-		{
-			static constexpr quint8 rows[8] = {0xCC, 0x33, 0x00, 0x00, 0xCC, 0x33, 0x00, 0x00};
-			return patternBrush(rows, brushColor, penColor);
-		}
-		case 12:
-		{
-			static constexpr quint8 rows[8] = {0x11, 0x11, 0x22, 0x22, 0x11, 0x11, 0x22, 0x22};
-			return patternBrush(rows, brushColor, penColor);
-		}
-		default:
-			if (ok)
-				*ok = false;
-			return Qt::NoBrush;
 		}
 	}
 
@@ -2731,6 +2636,28 @@ namespace
 		return true;
 	}
 
+	[[nodiscard]] bool mxpQuotedTokenEndsHere(const char *afterQuote)
+	{
+		const char *p = afterQuote;
+		while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+			++p;
+		if (*p == '\0' || *p == '>' || *p == '/')
+			return true;
+		if (*p == '|' || *p == ',' || *p == ';')
+			return false;
+
+		const auto isAttrChar = [](const unsigned char ch)
+		{ return std::isalnum(ch) != 0 || ch == '_' || ch == '-' || ch == ':'; };
+
+		if (!isAttrChar(static_cast<unsigned char>(*p)))
+			return false;
+		while (isAttrChar(static_cast<unsigned char>(*p)))
+			++p;
+		while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+			++p;
+		return *p == '=' || *p == '\0' || *p == '>' || *p == '/';
+	}
+
 	bool mxpGetWord(QByteArray &result, QByteArray &input)
 	{
 		const char *p = input.constData();
@@ -2746,11 +2673,23 @@ namespace
 		{
 			const char quote = *p;
 			pStart           = ++p; // bypass opening quote
-			for (; *p != quote && *p; p++)
-				len++; // count up to closing quote
+			for (; *p; ++p)
+			{
+				if (*p == quote)
+				{
+					// Be forgiving with malformed MXP values that embed quote chars
+					// without entity escaping (e.g. href='... 'harm' | ...'). Treat a
+					// quote as closing only at real token boundaries.
+					if (mxpQuotedTokenEndsHere(p + 1))
+						break;
+				}
+				++len;
+			}
 			result = QByteArray(pStart, len);
-			input  = QByteArray(++p); // return rest of line
-			return false;             // not end, even if empty
+			if (*p == quote)
+				++p;
+			input = QByteArray(p); // return rest of line
+			return false;          // not end, even if empty
 		}
 
 		// where word starts
@@ -8499,6 +8438,9 @@ const WorldRuntime::TextRectangleSettings &WorldRuntime::textRectangle() const
 
 void WorldRuntime::setTextRectangle(const TextRectangleSettings &settings)
 {
+	if (textRectangleSettingsEqual(m_textRectangle, settings))
+		return;
+
 	m_textRectangle = settings;
 	++m_suppressWorldOutputResizedCallbacks;
 	if (WorldView *view = this->view())
@@ -12204,9 +12146,17 @@ void WorldRuntime::notifyWorldOutputResized()
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginWorldOutputResized"));
 }
 
+void WorldRuntime::refreshNawsWindowSize()
+{
+	updateTelnetWindowSizeForNaws();
+}
+
 void WorldRuntime::updateTelnetWindowSizeForNaws()
 {
-	const bool nawsEnabled = isEnabledFlag(m_worldAttributes.value(QStringLiteral("naws")));
+	const bool textRectangleCompatActive = m_textRectangle.left != 0 || m_textRectangle.top != 0 ||
+	                                       m_textRectangle.right != 0 || m_textRectangle.bottom != 0;
+	const bool nawsEnabled =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("naws"))) && !textRectangleCompatActive;
 	m_telnet.setNawsEnabled(nawsEnabled);
 	const bool wrapEnabled     = isEnabledFlag(m_worldAttributes.value(QStringLiteral("wrap")));
 	const int  worldWrapColumn = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
@@ -12217,7 +12167,8 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 
 	if (m_view)
 	{
-		const QRect textRect     = m_view->outputTextRectangle();
+		const QRect textRect     = textRectangleCompatActive ? m_view->outputTextRectangleUnreserved()
+		                                                     : m_view->outputTextRectangle();
 		int         widthPixels  = textRect.width();
 		const int   heightPixels = textRect.height();
 		if (widthPixels > 0 && heightPixels > 0)
@@ -16260,17 +16211,24 @@ QVector<MiniWindow *> WorldRuntime::sortedMiniWindows()
 	return ordered;
 }
 
-void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &ownerSize, bool underneath)
+void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &ownerSize, bool underneath,
+                                     const QVector<MiniWindow *> *orderedWindows)
 {
-	const int clientWidth  = clientSize.width();
-	const int clientHeight = clientSize.height();
-	const int ownerWidth   = ownerSize.width();
-	const int ownerHeight  = ownerSize.height();
-	auto      windows      = sortedMiniWindows();
+	const int             clientWidth  = clientSize.width();
+	const int             clientHeight = clientSize.height();
+	const int             ownerWidth   = ownerSize.width();
+	const int             ownerHeight  = ownerSize.height();
+	QVector<MiniWindow *> fallbackWindows;
+	if (!orderedWindows)
+	{
+		fallbackWindows = sortedMiniWindows();
+		orderedWindows  = &fallbackWindows;
+	}
+	const QVector<MiniWindow *> &windows = *orderedWindows;
 
-	int       absoluteMaxRight  = 0;
-	int       absoluteMaxBottom = 0;
-	bool      sawAbsolute       = false;
+	int                          absoluteMaxRight  = 0;
+	int                          absoluteMaxBottom = 0;
+	bool                         sawAbsolute       = false;
 	for (MiniWindow const *window : windows)
 	{
 		if (!window || !window->show)
@@ -16727,7 +16685,7 @@ int WorldRuntime::windowCircleOp(const QString &name, int action, int left, int 
 	painter.setPen(penStyle == 5 ? Qt::NoPen : pen);
 
 	bool         brushOk = true;
-	QBrush const brush   = makeBrush(brushStyle, penColour, brushColour, &brushOk);
+	QBrush const brush   = MiniWindowBrushUtils::makeBrush(brushStyle, penColour, brushColour, &brushOk);
 	if (!brushOk)
 		return eBrushStyleNotValid;
 	painter.setBrush(brush);
@@ -16902,7 +16860,7 @@ int WorldRuntime::windowPolygon(const QString &name, const QString &points, long
 	pen.setJoinStyle(mapPenJoin(penStyle));
 	painter.setPen(penStyle == 5 ? Qt::NoPen : pen);
 	bool         brushOk = true;
-	QBrush const brush   = makeBrush(brushStyle, penColour, brushColour, &brushOk);
+	QBrush const brush   = MiniWindowBrushUtils::makeBrush(brushStyle, penColour, brushColour, &brushOk);
 	if (!brushOk)
 		return eBrushStyleNotValid;
 	painter.setBrush(brush);
@@ -17415,25 +17373,52 @@ int WorldRuntime::windowDrawImageAlpha(const QString &name, const QString &image
 	if (surface.isNull() || image.isNull())
 		return eOK;
 
-	const int fixedRight   = window->fixRight(right);
-	const int fixedBottom  = window->fixBottom(bottom);
-	const int targetLeft   = qMax(0, left);
-	const int targetTop    = qMax(0, top);
-	const int targetRight  = qMin(fixedRight, window->width);
-	const int targetBottom = qMin(fixedBottom, window->height);
-	const int targetWidth  = targetRight - targetLeft;
-	const int targetHeight = targetBottom - targetTop;
+	int drawLeft = left;
+	int drawTop  = top;
+
+	int sourceLeft = qMax(0, srcLeft);
+	int sourceTop  = qMax(0, srcTop);
+	int targetWidth{};
+	int targetHeight{};
+
+	if (right == 0)
+		targetWidth = image.width() - sourceLeft;
+	else
+		targetWidth = window->fixRight(right) - left;
+
+	if (bottom == 0)
+		targetHeight = image.height() - sourceTop;
+	else
+		targetHeight = window->fixBottom(bottom) - top;
+
+	if (drawLeft < 0)
+	{
+		sourceLeft -= drawLeft;
+		targetWidth += drawLeft;
+		drawLeft = 0;
+	}
+
+	if (drawTop < 0)
+	{
+		sourceTop -= drawTop;
+		targetHeight += drawTop;
+		drawTop = 0;
+	}
+
+	if (drawLeft >= window->width || drawTop >= window->height)
+		return eOK;
+
+	targetWidth  = qMin(targetWidth, window->width - drawLeft);
+	targetHeight = qMin(targetHeight, window->height - drawTop);
 	if (targetWidth <= 0 || targetHeight <= 0)
 		return eOK;
 
-	const int sourceLeft = qMax(0, srcLeft);
-	const int sourceTop  = qMax(0, srcTop);
-	QRect     source(sourceLeft, sourceTop, targetWidth, targetHeight);
+	QRect source(sourceLeft, sourceTop, targetWidth, targetHeight);
 	source = source.intersected(image.rect());
 	if (source.width() <= 0 || source.height() <= 0)
 		return eOK;
 
-	QImage base = surface.copy(targetLeft, targetTop, source.width(), source.height())
+	QImage base = surface.copy(drawLeft, drawTop, source.width(), source.height())
 	                  .convertToFormat(QImage::Format_ARGB32);
 	QImage const overlay = image.copy(source).convertToFormat(QImage::Format_ARGB32);
 	const int    w       = qMin(base.width(), overlay.width());
@@ -17461,7 +17446,7 @@ int WorldRuntime::windowDrawImageAlpha(const QString &name, const QString &image
 	}
 
 	QPainter painter(&surface);
-	painter.drawImage(QPoint(targetLeft, targetTop), base);
+	painter.drawImage(QPoint(drawLeft, drawTop), base);
 	emit miniWindowsChanged();
 	return eOK;
 }
@@ -17496,8 +17481,8 @@ int WorldRuntime::windowImageOp(const QString &name, int action, int left, int t
 	QImage pattern = it.value().image;
 	if (it.value().monochrome)
 	{
-		const QColor fore = colorFromRefOrTransparent(brushColour);
-		const QColor back = colorFromRefOrTransparent(penColour);
+		const QColor fore = MiniWindowBrushUtils::colorFromRefOrTransparent(brushColour);
+		const QColor back = MiniWindowBrushUtils::colorFromRefOrTransparent(penColour);
 		QImage       recoloured(pattern.size(), QImage::Format_ARGB32);
 		for (int y = 0; y < pattern.height(); ++y)
 		{
@@ -18000,6 +17985,12 @@ int WorldRuntime::windowPosition(const QString &name, int left, int top, int pos
 	window->location = QPoint(left, top);
 	window->position = position;
 	window->flags    = flags;
+	if ((flags & kMiniWindowTransparent) == 0 && !window->transparentSurfaceCache.isNull())
+	{
+		window->transparentSurfaceCache     = QImage();
+		window->transparentSurfaceSourceKey = 0;
+		window->transparentSurfaceKeyRgb    = 0;
+	}
 	emit miniWindowsChanged();
 	return eOK;
 }
