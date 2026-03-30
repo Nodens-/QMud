@@ -247,6 +247,37 @@ class tst_TelnetProcessor_Mxp : public QObject
 			QVERIFY(modeChanges.at(0).sequence < modeChanges.at(1).sequence);
 		}
 
+		void resetConnectionStateClearsStaleMxpLockedMode()
+		{
+			TelnetProcessor processor;
+			processor.setUseMxp(2); // eUseMXP
+
+			// Move to permanently locked mode (server-side state before reconnect).
+			QByteArray lockMode;
+			lockMode.append(static_cast<char>(ESC));
+			lockMode.append('[');
+			lockMode.append('7');
+			lockMode.append('z');
+			QCOMPARE(processor.processBytes(lockMode), QByteArray());
+
+			// In locked mode, tags are treated as literal text.
+			QCOMPARE(processor.processBytes(QByteArrayLiteral("<send href='look'>go</send>")),
+			         QByteArrayLiteral("<send href='look'>go</send>"));
+
+			processor.resetConnectionState();
+			// Runtime reapplies world setting every packet; keep same mode and verify
+			// "same value" path can re-enable MXP after reset.
+			processor.setUseMxp(2); // eUseMXP
+
+			// After reset + reapply, MXP should parse again, not leak raw tags.
+			QCOMPARE(processor.processBytes(QByteArrayLiteral("<send href='look'>go</send>")),
+			         QByteArrayLiteral("go"));
+			const QList<TelnetProcessor::MxpEvent> events = processor.takeMxpEvents();
+			QCOMPARE(events.size(), 2);
+			QCOMPARE(events.at(0).type, TelnetProcessor::MxpEvent::StartTag);
+			QCOMPARE(events.at(1).type, TelnetProcessor::MxpEvent::EndTag);
+		}
+
 		void customElementDefinitionParsesAndIsQueryable()
 		{
 			TelnetProcessor processor;
@@ -280,7 +311,6 @@ class tst_TelnetProcessor_Mxp : public QObject
 };
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Mxp)
-
 
 #if __has_include("tst_TelnetProcessor_Mxp.moc")
 #include "tst_TelnetProcessor_Mxp.moc"

@@ -463,6 +463,12 @@ void TelnetProcessor::resetConnectionState()
 	m_mxpModeChanges.clear();
 	m_mxpEventsOverflowed = false;
 	m_mxpEventSequence    = 0;
+	m_mxpEnabled          = false;
+	m_puebloActive        = false;
+	m_mxpDefaultMode      = eMXP_open;
+	m_mxpMode             = eMXP_open;
+	m_customElements.clear();
+	m_customEntities.clear();
 	m_nawsWanted          = false;
 	m_compress            = false;
 	m_mccpType            = 0;
