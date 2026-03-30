@@ -11651,9 +11651,10 @@ static int luaAcceleratorTo(lua_State *L)
 		return 1;
 	}
 
-	const char *keyText  = luaL_checkstring(L, 1);
-	const char *sendText = luaL_checkstring(L, 2);
-	const int   sendTo   = static_cast<int>(luaL_checkinteger(L, 3));
+	const char *keyText       = luaL_checkstring(L, 1);
+	const char *sendText      = luaL_checkstring(L, 2);
+	const int   sendTo        = static_cast<int>(luaL_checkinteger(L, 3));
+	const auto  sendTextValue = QString::fromUtf8(sendText);
 	if (sendTo < 0 || sendTo >= eSendToLast)
 	{
 		lua_pushnumber(L, eOptionOutOfRange);
@@ -11670,7 +11671,7 @@ static int luaAcceleratorTo(lua_State *L)
 
 	const qint64 mapKey = static_cast<qint64>(virt) << 16 | key;
 
-	if (sendText[0] == '\0')
+	if (sendTextValue.isEmpty() || (sendTo == eSendToScript && sendTextValue.trimmed().isEmpty()))
 	{
 		runtime->removeAccelerator(mapKey);
 		lua_pushnumber(L, eOK);
@@ -11689,7 +11690,7 @@ static int luaAcceleratorTo(lua_State *L)
 	}
 
 	WorldRuntime::AcceleratorEntry entry;
-	entry.text     = QString::fromUtf8(sendText);
+	entry.text     = sendTextValue;
 	entry.sendTo   = sendTo;
 	entry.pluginId = engine->pluginId();
 	runtime->registerAccelerator(mapKey, commandId, entry);

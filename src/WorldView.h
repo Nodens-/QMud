@@ -366,6 +366,12 @@ class WorldView : public QWidget
 		 */
 		bool                 handleWorldHotkey(QKeyEvent *event);
 		/**
+		 * @brief Returns whether a key event has a registered world accelerator binding.
+		 * @param event Key event to inspect.
+		 * @return `true` when accelerator dispatch should preempt Qt shortcuts.
+		 */
+		[[nodiscard]] bool   hasWorldAcceleratorBinding(const QKeyEvent *event) const;
+		/**
 		 * @brief Returns true when miniwindow mouse capture is active.
 		 * @return `true` when miniwindow mouse capture is active.
 		 */

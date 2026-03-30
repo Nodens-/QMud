@@ -6928,6 +6928,16 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 		requestWorldOutputResizedNotification();
 	}
 
+	if (isOutputWidget && event->type() == QEvent::ShortcutOverride)
+	{
+		if (const auto *keyEvent = dynamic_cast<QKeyEvent *>(event);
+		    keyEvent && hasWorldAcceleratorBinding(keyEvent))
+		{
+			event->accept();
+			return true;
+		}
+	}
+
 	if (isOutputWidget && event->type() == QEvent::KeyPress)
 	{
 		if (auto *keyEvent = dynamic_cast<QKeyEvent *>(event))
@@ -7571,6 +7581,124 @@ bool WorldView::executeMacroByName(const QString &name)
 	return false;
 }
 
+namespace
+{
+	struct AcceleratorLookup
+	{
+			quint32 virt{0};
+			quint16 keyCode{0};
+			qint64  mapKey{0};
+	};
+
+	bool supportsAlternateKeypadLookup(const Qt::Key key)
+	{
+		switch (key)
+		{
+		case Qt::Key_0:
+		case Qt::Key_1:
+		case Qt::Key_2:
+		case Qt::Key_3:
+		case Qt::Key_4:
+		case Qt::Key_5:
+		case Qt::Key_6:
+		case Qt::Key_7:
+		case Qt::Key_8:
+		case Qt::Key_9:
+		case Qt::Key_Plus:
+		case Qt::Key_Equal:
+		case Qt::Key_Minus:
+		case Qt::Key_Underscore:
+		case Qt::Key_Period:
+		case Qt::Key_Greater:
+		case Qt::Key_Slash:
+		case Qt::Key_Question:
+		case Qt::Key_Asterisk:
+		case Qt::Key_Enter:
+		case Qt::Key_Return:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	bool buildAcceleratorLookup(const QKeyEvent *event, const bool keypad, AcceleratorLookup &lookup)
+	{
+		if (!event)
+			return false;
+
+		const Qt::KeyboardModifiers mods = event->modifiers();
+		if ((mods & Qt::MetaModifier) != 0)
+			return false;
+
+		const int key = event->key();
+		if (key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt || key == Qt::Key_Meta ||
+		    key == Qt::Key_unknown)
+			return false;
+
+		lookup.virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
+		if ((mods & Qt::ShiftModifier) != 0)
+			lookup.virt |= AcceleratorUtils::kShiftFlag;
+		if ((mods & Qt::ControlModifier) != 0)
+			lookup.virt |= AcceleratorUtils::kControlFlag;
+		if ((mods & Qt::AltModifier) != 0)
+			lookup.virt |= AcceleratorUtils::kAltFlag;
+
+		lookup.keyCode = AcceleratorUtils::qtKeyToVirtualKey(static_cast<Qt::Key>(key), keypad);
+		if (lookup.keyCode == 0)
+			return false;
+
+		lookup.mapKey = (static_cast<qint64>(lookup.virt) << 16) | lookup.keyCode;
+		return true;
+	}
+
+	int findAcceleratorCommandForEvent(const WorldRuntime *runtime, const QKeyEvent *event,
+	                                   const bool keypadHint, AcceleratorLookup *resolvedLookup = nullptr)
+	{
+		if (!runtime || !event)
+			return -1;
+
+		AcceleratorLookup primaryLookup;
+		qint64            primaryMapKey = std::numeric_limits<qint64>::min();
+		if (buildAcceleratorLookup(event, keypadHint, primaryLookup))
+		{
+			primaryMapKey       = primaryLookup.mapKey;
+			const int commandId = runtime->acceleratorCommandForKey(primaryLookup.mapKey);
+			if (commandId >= 0)
+			{
+				if (resolvedLookup)
+					*resolvedLookup = primaryLookup;
+				return commandId;
+			}
+		}
+
+		const auto key = static_cast<Qt::Key>(event->key());
+		if (!supportsAlternateKeypadLookup(key))
+			return -1;
+
+		AcceleratorLookup alternateLookup;
+		if (!buildAcceleratorLookup(event, !keypadHint, alternateLookup))
+			return -1;
+		if (alternateLookup.mapKey == primaryMapKey)
+			return -1;
+
+		const int commandId = runtime->acceleratorCommandForKey(alternateLookup.mapKey);
+		if (commandId < 0)
+			return -1;
+		if (resolvedLookup)
+			*resolvedLookup = alternateLookup;
+		return commandId;
+	}
+} // namespace
+
+bool WorldView::hasWorldAcceleratorBinding(const QKeyEvent *event) const
+{
+	if (!m_runtime || !event)
+		return false;
+
+	const bool keypad = (event->modifiers() & Qt::KeypadModifier) != 0;
+	return findAcceleratorCommandForEvent(m_runtime, event, keypad) >= 0;
+}
+
 bool WorldView::handleWorldHotkey(QKeyEvent *event)
 {
 	if (!m_runtime || !event)
@@ -7596,32 +7724,14 @@ bool WorldView::handleWorldHotkey(QKeyEvent *event)
 
 	auto       tryAccelerator = [&]() -> bool
 	{
-		if (hasMeta)
-			return false;
-		const int key = event->key();
-		if (key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt || key == Qt::Key_Meta ||
-		    key == Qt::Key_unknown)
-			return false;
-
-		quint32 virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
-		if (hasShift)
-			virt |= AcceleratorUtils::kShiftFlag;
-		if (hasCtrl)
-			virt |= AcceleratorUtils::kControlFlag;
-		if (hasAlt)
-			virt |= AcceleratorUtils::kAltFlag;
-		const quint16 keyCode = AcceleratorUtils::qtKeyToVirtualKey(static_cast<Qt::Key>(key), keypad);
-		if (keyCode == 0)
-			return false;
-		const qint64 mapKey = (static_cast<qint64>(virt) << 16) | keyCode;
-
-		const int    commandId = m_runtime->acceleratorCommandForKey(mapKey);
+		AcceleratorLookup lookup;
+		const int         commandId = findAcceleratorCommandForEvent(m_runtime, event, keypad, &lookup);
 		if (commandId < 0)
 			return false;
 
 		m_runtime->setCurrentActionSource(WorldRuntime::eUserAccelerator);
 		const bool ok = m_runtime->executeAcceleratorCommand(
-		    commandId, AcceleratorUtils::acceleratorToString(virt, keyCode));
+		    commandId, AcceleratorUtils::acceleratorToString(lookup.virt, lookup.keyCode));
 		m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
 		return ok;
 	};
@@ -8336,42 +8446,9 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 	}
 	if (m_view && event->key() == Qt::Key_Backspace && (event->modifiers() & Qt::ControlModifier))
 	{
-		QTextCursor cursor = textCursor();
-		if (cursor.hasSelection())
-		{
-			cursor.removeSelectedText();
-			setTextCursor(cursor);
-			return;
-		}
-		if (m_view->m_ctrlBackspaceDeletesLastWord)
-		{
-			const QString current  = toPlainText();
-			const int     position = cursor.position();
-			QString       before   = current.left(position);
-			const QString after    = current.mid(position);
-			while (before.endsWith(QLatin1Char(' ')))
-				before.chop(1);
-			if (const qsizetype spacePos = before.lastIndexOf(QLatin1Char(' ')); spacePos < 0)
-				before.clear();
-			else
-				before = before.left(spacePos);
-			const QString updated = before + after;
-			setPlainText(updated);
-			cursor = textCursor();
-			cursor.setPosition(sizeToInt(before.length()));
-			setTextCursor(cursor);
-			return;
-		}
-
-		if (const int position = cursor.position(); position > 0)
-		{
-			QString current = toPlainText();
-			current.remove(position - 1, 1);
-			setPlainText(current);
-			cursor = textCursor();
-			cursor.setPosition(position - 1);
-			setTextCursor(cursor);
-		}
+		clear();
+		m_view->m_inputChanged = false;
+		m_view->resetHistoryRecall();
 		return;
 	}
 
@@ -8442,9 +8519,20 @@ bool InputTextEdit::event(QEvent *event)
 			const Qt::KeyboardModifiers modifiers = keyEvent->modifiers();
 			const bool                  plainCtrl = (modifiers & Qt::ControlModifier) != 0 &&
 			                       (modifiers & (Qt::AltModifier | Qt::MetaModifier)) == 0;
+			const bool isCtrlBackspace = plainCtrl && keyEvent->key() == Qt::Key_Backspace;
 			const bool isCopyShortcut =
 			    keyEvent->matches(QKeySequence::Copy) || (plainCtrl && keyEvent->key() == Qt::Key_C);
+			if (isCtrlBackspace)
+			{
+				event->accept();
+				return true;
+			}
 			if (isCopyShortcut && m_view->hasOutputSelection())
+			{
+				event->accept();
+				return true;
+			}
+			if (m_view->hasWorldAcceleratorBinding(keyEvent))
 			{
 				event->accept();
 				return true;
