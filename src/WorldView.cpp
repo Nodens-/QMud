@@ -220,6 +220,23 @@ namespace
 		return normalizeTextRectangleForClient(runtime->textRectangle(), clientSize);
 	}
 
+	[[nodiscard]] QImage transparentColorKeyedCopy(const QImage &source, const QRgb keyRgb)
+	{
+		if (source.isNull())
+			return source;
+		QImage image = source.convertToFormat(QImage::Format_ARGB32);
+		for (int y = 0; y < image.height(); ++y)
+		{
+			auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+			for (int x = 0; x < image.width(); ++x)
+			{
+				if ((line[x] & 0x00FFFFFF) == (keyRgb & 0x00FFFFFF))
+					line[x] &= 0x00FFFFFF;
+			}
+		}
+		return image;
+	}
+
 	[[nodiscard]] bool traceOutputBackfillEnabled()
 	{
 		static const bool enabled = []
@@ -1434,7 +1451,6 @@ void WorldView::onMiniWindowsChanged()
 {
 	++m_miniWindowChangeSerial;
 	m_wrapMarginReservationCacheValid = false;
-	refreshMiniWindows();
 	if (m_wrapMarginUpdateQueued)
 		return;
 	m_wrapMarginUpdateQueued = true;
@@ -1443,6 +1459,7 @@ void WorldView::onMiniWindowsChanged()
 	    [this]
 	    {
 		    m_wrapMarginUpdateQueued = false;
+		    refreshMiniWindows();
 		    updateWrapMargin();
 		    if (m_runtime)
 			    m_runtime->refreshNawsWindowSize();
@@ -5411,26 +5428,8 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 			}
 		}
 	}
-	m_runtime->layoutMiniWindows(clientSize, ownerSize, underneath);
-
-	const auto windows         = m_runtime->sortedMiniWindows();
-	auto       makeTransparent = [](const QImage &source, const QColor &key) -> QImage
-	{
-		if (source.isNull())
-			return source;
-		QImage     image  = source.convertToFormat(QImage::Format_ARGB32);
-		const QRgb keyRgb = qRgb(key.red(), key.green(), key.blue());
-		for (int y = 0; y < image.height(); ++y)
-		{
-			auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
-			for (int x = 0; x < image.width(); ++x)
-			{
-				if ((line[x] & 0x00FFFFFF) == (keyRgb & 0x00FFFFFF))
-					line[x] &= 0x00FFFFFF;
-			}
-		}
-		return image;
-	};
+	const auto windows = m_runtime->sortedMiniWindows();
+	m_runtime->layoutMiniWindows(clientSize, ownerSize, underneath, &windows);
 
 	for (MiniWindow *window : windows)
 	{
@@ -5440,9 +5439,23 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath) const
 		if (drawUnder != underneath)
 			continue;
 
-		QImage image = window->surface;
+		const QImage *imagePtr = &window->surface;
 		if ((window->flags & kMiniWindowTransparent) != 0)
-			image = makeTransparent(window->surface, window->background);
+		{
+			const QRgb keyRgb =
+			    qRgb(window->background.red(), window->background.green(), window->background.blue());
+			const auto sourceKey = window->surface.cacheKey();
+			if (window->transparentSurfaceCache.isNull() ||
+			    window->transparentSurfaceSourceKey != sourceKey ||
+			    window->transparentSurfaceKeyRgb != keyRgb)
+			{
+				window->transparentSurfaceCache     = transparentColorKeyedCopy(window->surface, keyRgb);
+				window->transparentSurfaceSourceKey = sourceKey;
+				window->transparentSurfaceKeyRgb    = keyRgb;
+			}
+			imagePtr = &window->transparentSurfaceCache;
+		}
+		const QImage &image = *imagePtr;
 
 		if (!image.isNull())
 		{
@@ -7169,9 +7182,10 @@ void WorldView::updateWrapMargin() const
 		const bool textRectangleCompatActive = hasConfiguredTextRectangle(m_runtime->textRectangle());
 		if (!textRectangleCompatActive)
 		{
+			const auto windows = m_runtime->sortedMiniWindows();
 			// Keep miniwindow rects current before calculating reserved margin so
 			// window moves/resizes are reflected immediately in NAWS sizing.
-			m_runtime->layoutMiniWindows(m_outputStack->size(), size(), false);
+			m_runtime->layoutMiniWindows(m_outputStack->size(), size(), false, &windows);
 
 			const bool cacheHit = m_wrapMarginReservationCacheValid &&
 			                      m_wrapMarginReservationRect == effectiveRect &&
@@ -7181,7 +7195,7 @@ void WorldView::updateWrapMargin() const
 			else
 			{
 				int safeRight = effectiveRect.right() + 1;
-				for (MiniWindow *window : m_runtime->sortedMiniWindows())
+				for (MiniWindow *window : windows)
 				{
 					if (!window || !window->show || window->temporarilyHide)
 						continue;

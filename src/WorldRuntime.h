@@ -1400,8 +1400,10 @@ class WorldRuntime : public QObject
 		 * @param clientSize Current output client size.
 		 * @param ownerSize Owning widget size.
 		 * @param underneath Layout behind output surface when `true`.
+		 * @param orderedWindows Optional pre-sorted miniwindow list to reuse for this layout pass.
 		 */
-		void layoutMiniWindows(const QSize &clientSize, const QSize &ownerSize, bool underneath);
+		void layoutMiniWindows(const QSize &clientSize, const QSize &ownerSize, bool underneath,
+		                       const QVector<MiniWindow *> *orderedWindows = nullptr);
 		/**
 		 * @brief Draws rectangle/frame/fill operation on miniwindow.
 		 * @param name Miniwindow name.

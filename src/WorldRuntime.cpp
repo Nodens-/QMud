@@ -151,6 +151,15 @@ namespace
 		return static_cast<int>(value > kMaxInt ? kMaxInt : value);
 	}
 
+	[[nodiscard]] bool textRectangleSettingsEqual(const WorldRuntime::TextRectangleSettings &lhs,
+	                                              const WorldRuntime::TextRectangleSettings &rhs)
+	{
+		return lhs.left == rhs.left && lhs.top == rhs.top && lhs.right == rhs.right &&
+		       lhs.bottom == rhs.bottom && lhs.borderOffset == rhs.borderOffset &&
+		       lhs.borderColour == rhs.borderColour && lhs.borderWidth == rhs.borderWidth &&
+		       lhs.outsideFillColour == rhs.outsideFillColour && lhs.outsideFillStyle == rhs.outsideFillStyle;
+	}
+
 	bool hasValidPluginId(const WorldRuntime::Plugin &plugin)
 	{
 		return !plugin.attributes.value(QStringLiteral("id")).trimmed().isEmpty();
@@ -8394,6 +8403,9 @@ const WorldRuntime::TextRectangleSettings &WorldRuntime::textRectangle() const
 
 void WorldRuntime::setTextRectangle(const TextRectangleSettings &settings)
 {
+	if (textRectangleSettingsEqual(m_textRectangle, settings))
+		return;
+
 	m_textRectangle = settings;
 	++m_suppressWorldOutputResizedCallbacks;
 	if (WorldView *view = this->view())
@@ -16164,17 +16176,24 @@ QVector<MiniWindow *> WorldRuntime::sortedMiniWindows()
 	return ordered;
 }
 
-void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &ownerSize, bool underneath)
+void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &ownerSize, bool underneath,
+                                     const QVector<MiniWindow *> *orderedWindows)
 {
-	const int clientWidth  = clientSize.width();
-	const int clientHeight = clientSize.height();
-	const int ownerWidth   = ownerSize.width();
-	const int ownerHeight  = ownerSize.height();
-	auto      windows      = sortedMiniWindows();
+	const int             clientWidth  = clientSize.width();
+	const int             clientHeight = clientSize.height();
+	const int             ownerWidth   = ownerSize.width();
+	const int             ownerHeight  = ownerSize.height();
+	QVector<MiniWindow *> fallbackWindows;
+	if (!orderedWindows)
+	{
+		fallbackWindows = sortedMiniWindows();
+		orderedWindows  = &fallbackWindows;
+	}
+	const QVector<MiniWindow *> &windows = *orderedWindows;
 
-	int       absoluteMaxRight  = 0;
-	int       absoluteMaxBottom = 0;
-	bool      sawAbsolute       = false;
+	int                          absoluteMaxRight  = 0;
+	int                          absoluteMaxBottom = 0;
+	bool                         sawAbsolute       = false;
 	for (MiniWindow const *window : windows)
 	{
 		if (!window || !window->show)
@@ -17904,6 +17923,12 @@ int WorldRuntime::windowPosition(const QString &name, int left, int top, int pos
 	window->location = QPoint(left, top);
 	window->position = position;
 	window->flags    = flags;
+	if ((flags & kMiniWindowTransparent) == 0 && !window->transparentSurfaceCache.isNull())
+	{
+		window->transparentSurfaceCache     = QImage();
+		window->transparentSurfaceSourceKey = 0;
+		window->transparentSurfaceKeyRgb    = 0;
+	}
 	emit miniWindowsChanged();
 	return eOK;
 }

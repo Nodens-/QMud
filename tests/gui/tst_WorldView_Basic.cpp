@@ -568,7 +568,7 @@ int WorldRuntime::backgroundImageMode() const
 	return 0;
 }
 
-void WorldRuntime::layoutMiniWindows(const QSize &, const QSize &, bool)
+void WorldRuntime::layoutMiniWindows(const QSize &, const QSize &, bool, const QVector<MiniWindow *> *)
 {
 }
 

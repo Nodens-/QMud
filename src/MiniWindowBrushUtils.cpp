@@ -14,8 +14,8 @@
 #include <QMutex>
 #include <QMutexLocker>
 
-#include <algorithm>
 #include <array>
+#include <list>
 
 namespace
 {
@@ -118,39 +118,15 @@ namespace
 
 	struct PatternBrushCacheEntry
 	{
-			QBrush  brush;
-			quint64 lastAccess{0};
+			QBrush                               brush;
+			std::list<PatternBrushKey>::iterator lruIt;
 	};
 
-	struct PatternBrushEvictionCandidate
+	void touchPatternBrushLru(std::list<PatternBrushKey> &lru, const PatternBrushCacheEntry &entry)
 	{
-			PatternBrushKey key;
-			quint64         lastAccess{0};
-	};
-
-	[[nodiscard]] QVector<PatternBrushEvictionCandidate>
-	snapshotPatternBrushCache(const QHash<PatternBrushKey, PatternBrushCacheEntry> &cache)
-	{
-		QVector<PatternBrushEvictionCandidate> snapshot;
-		snapshot.reserve(cache.size());
-		for (auto it = cache.constBegin(); it != cache.constEnd(); ++it)
-			snapshot.push_back({it.key(), it.value().lastAccess});
-		return snapshot;
-	}
-
-	[[nodiscard]] QVector<PatternBrushEvictionCandidate>
-	planPatternBrushCacheEvictions(QVector<PatternBrushEvictionCandidate> evictionOrder)
-	{
-		constexpr qsizetype kCacheTrimTo = 1792;
-		if (evictionOrder.size() <= kCacheTrimTo)
-			return {};
-
-		std::ranges::sort(evictionOrder, [](const PatternBrushEvictionCandidate &lhs,
-		                                    const PatternBrushEvictionCandidate &rhs)
-		                  { return lhs.lastAccess < rhs.lastAccess; });
-
-		evictionOrder.resize(evictionOrder.size() - kCacheTrimTo);
-		return evictionOrder;
+		if (entry.lruIt == std::prev(lru.end()))
+			return;
+		lru.splice(lru.end(), lru, entry.lruIt);
 	}
 
 	QBrush cachedPatternBrush(const long brushStyle, const QColor &foreground, const QColor &background)
@@ -161,50 +137,44 @@ namespace
 
 		static QMutex                                         cacheMutex;
 		static QHash<PatternBrushKey, PatternBrushCacheEntry> cache;
-		static quint64                                        accessSequence = 0;
-		QVector<PatternBrushEvictionCandidate>                evictionSnapshot;
-		{
-			QMutexLocker          lock(&cacheMutex);
+		static std::list<PatternBrushKey>                     lru;
+		const PatternBrushKey key{static_cast<int>(brushStyle), foreground.rgba(), background.rgba()};
 
-			const PatternBrushKey key{static_cast<int>(brushStyle), foreground.rgba(), background.rgba()};
-			const quint64         access = ++accessSequence;
+		{
+			QMutexLocker lock(&cacheMutex);
 			if (auto it = cache.find(key); it != cache.end())
 			{
-				it.value().lastAccess = access;
+				touchPatternBrushLru(lru, it.value());
 				return it.value().brush;
 			}
-
-			const QBrush brush(patternImage(*rows, foreground, background));
-			cache.insert(key, {brush, access});
-
-			constexpr int kCacheMaxEntries = 2048;
-			if (cache.size() > kCacheMaxEntries)
-				evictionSnapshot = snapshotPatternBrushCache(cache);
-
-			if (evictionSnapshot.isEmpty())
-				return brush;
 		}
 
+		// Build the brush outside the lock; this path is the heavy miss case.
+		const QBrush brush(patternImage(*rows, foreground, background));
+
+		QMutexLocker lock(&cacheMutex);
+		if (auto it = cache.find(key); it != cache.end())
 		{
-			const QVector<PatternBrushEvictionCandidate> evictionPlan =
-			    planPatternBrushCacheEvictions(evictionSnapshot);
-			QMutexLocker lock(&cacheMutex);
-			for (const PatternBrushEvictionCandidate &candidate : evictionPlan)
-			{
-				auto it = cache.find(candidate.key);
-				if (it == cache.end())
-					continue;
-				if (it.value().lastAccess > candidate.lastAccess)
-					continue;
-				cache.erase(it);
-			}
-
-			const PatternBrushKey key{static_cast<int>(brushStyle), foreground.rgba(), background.rgba()};
-			if (const auto it = cache.constFind(key); it != cache.constEnd())
-				return it.value().brush;
+			touchPatternBrushLru(lru, it.value());
+			return it.value().brush;
 		}
 
-		return {patternImage(*rows, foreground, background)};
+		lru.push_back(key);
+		cache.insert(key, {brush, std::prev(lru.end())});
+
+		constexpr qsizetype kCacheMaxEntries = 2048;
+		if (cache.size() > kCacheMaxEntries)
+		{
+			constexpr qsizetype kCacheTrimTo = 1792;
+			while (cache.size() > kCacheTrimTo && !lru.empty())
+			{
+				const PatternBrushKey evicted = lru.front();
+				lru.pop_front();
+				cache.remove(evicted);
+			}
+		}
+
+		return brush;
 	}
 } // namespace
 

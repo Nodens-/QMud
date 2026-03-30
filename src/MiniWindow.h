@@ -91,6 +91,9 @@ struct MiniWindow
 		QDateTime                        installedAt;
 
 		QImage                           surface;
+		QImage                           transparentSurfaceCache;
+		qint64                           transparentSurfaceSourceKey{0};
+		QRgb                             transparentSurfaceKeyRgb{0};
 		QMap<QString, MiniWindowFont>    fonts;
 		QMap<QString, MiniWindowImage>   images;
 		QMap<QString, MiniWindowHotspot> hotspots;
@@ -112,7 +115,10 @@ struct MiniWindow
 			show            = false;
 			surface         = QImage(qMax(1, width), qMax(1, height), QImage::Format_ARGB32);
 			surface.fill(background.isValid() ? background : QColor(0, 0, 0));
-			installedAt = QDateTime::currentDateTime();
+			transparentSurfaceCache     = QImage();
+			transparentSurfaceSourceKey = 0;
+			transparentSurfaceKeyRgb    = 0;
+			installedAt                 = QDateTime::currentDateTime();
 		}
 
 		/**
