@@ -7604,37 +7604,6 @@ namespace
 			qint64  mapKey{0};
 	};
 
-	bool supportsAlternateKeypadLookup(const Qt::Key key)
-	{
-		switch (key)
-		{
-		case Qt::Key_0:
-		case Qt::Key_1:
-		case Qt::Key_2:
-		case Qt::Key_3:
-		case Qt::Key_4:
-		case Qt::Key_5:
-		case Qt::Key_6:
-		case Qt::Key_7:
-		case Qt::Key_8:
-		case Qt::Key_9:
-		case Qt::Key_Plus:
-		case Qt::Key_Equal:
-		case Qt::Key_Minus:
-		case Qt::Key_Underscore:
-		case Qt::Key_Period:
-		case Qt::Key_Greater:
-		case Qt::Key_Slash:
-		case Qt::Key_Question:
-		case Qt::Key_Asterisk:
-		case Qt::Key_Enter:
-		case Qt::Key_Return:
-			return true;
-		default:
-			return false;
-		}
-	}
-
 	bool buildAcceleratorLookup(const QKeyEvent *event, const bool keypad, AcceleratorLookup &lookup)
 	{
 		if (!event)
@@ -7671,35 +7640,15 @@ namespace
 		if (!runtime || !event)
 			return -1;
 
-		AcceleratorLookup primaryLookup;
-		qint64            primaryMapKey = std::numeric_limits<qint64>::min();
-		if (buildAcceleratorLookup(event, keypadHint, primaryLookup))
-		{
-			primaryMapKey       = primaryLookup.mapKey;
-			const int commandId = runtime->acceleratorCommandForKey(primaryLookup.mapKey);
-			if (commandId >= 0)
-			{
-				if (resolvedLookup)
-					*resolvedLookup = primaryLookup;
-				return commandId;
-			}
-		}
-
-		const auto key = static_cast<Qt::Key>(event->key());
-		if (!supportsAlternateKeypadLookup(key))
+		AcceleratorLookup lookup;
+		if (!buildAcceleratorLookup(event, keypadHint, lookup))
 			return -1;
 
-		AcceleratorLookup alternateLookup;
-		if (!buildAcceleratorLookup(event, !keypadHint, alternateLookup))
-			return -1;
-		if (alternateLookup.mapKey == primaryMapKey)
-			return -1;
-
-		const int commandId = runtime->acceleratorCommandForKey(alternateLookup.mapKey);
+		const int commandId = runtime->acceleratorCommandForKey(lookup.mapKey);
 		if (commandId < 0)
 			return -1;
 		if (resolvedLookup)
-			*resolvedLookup = alternateLookup;
+			*resolvedLookup = lookup;
 		return commandId;
 	}
 } // namespace

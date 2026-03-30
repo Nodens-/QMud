@@ -1394,7 +1394,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void pluginNumpadAcceleratorOverridesAltDigitShortcut()
+		void pluginNumpadAcceleratorRequiresKeypadModifier()
 		{
 			resetTestState();
 
@@ -1412,12 +1412,11 @@ class tst_WorldView_Basic : public QObject
 
 			constexpr Qt::Key key          = Qt::Key_6;
 			constexpr quint16 numpadVk     = 0x66;
-			constexpr quint16 topRowVk     = 0x36;
 			constexpr int     commandId    = 88;
 			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::AltModifier, numpadVk, true);
 			g_acceleratorCommands.insert(numpadMapKey, commandId);
-			constexpr quint64 topRowMapId = static_cast<quint64>(static_cast<quint32>(key)) << 1;
-			g_virtualKeyMap.insert(topRowMapId, topRowVk);
+			constexpr quint64 keypadMapId = (static_cast<quint64>(static_cast<quint32>(key)) << 1) | 1ULL;
+			g_virtualKeyMap.insert(keypadMapId, numpadVk);
 
 			int       shortcutTriggerCount = 0;
 			QShortcut conflictingShortcut(QKeySequence(QStringLiteral("Alt+6")), input);
@@ -1428,9 +1427,50 @@ class tst_WorldView_Basic : public QObject
 			QTest::keyClick(input, key, Qt::AltModifier);
 			QCoreApplication::processEvents();
 
+			QCOMPARE(g_acceleratorExecutionCount, 0);
+			QCOMPARE(g_lastExecutedAcceleratorCommand, -1);
+			QCOMPARE(shortcutTriggerCount, 1);
+
+			QTest::keyClick(input, key, Qt::AltModifier | Qt::KeypadModifier);
+			QCoreApplication::processEvents();
+
 			QCOMPARE(g_acceleratorExecutionCount, 1);
 			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
-			QCOMPARE(shortcutTriggerCount, 0);
+
+			resetTestState();
+		}
+
+		void topRowDigitDoesNotTriggerNumpadAccelerator()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			constexpr Qt::Key key          = Qt::Key_8;
+			constexpr quint16 numpadVk     = 0x68;
+			constexpr quint16 topRowVk     = 0x38;
+			constexpr int     commandId    = 99;
+			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::NoModifier, numpadVk, true);
+			g_acceleratorCommands.insert(numpadMapKey, commandId);
+			constexpr quint64 topRowMapId = static_cast<quint64>(static_cast<quint32>(key)) << 1;
+			g_virtualKeyMap.insert(topRowMapId, topRowVk);
+
+			QTest::keyClick(input, key, Qt::NoModifier);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_acceleratorExecutionCount, 0);
+			QCOMPARE(g_lastExecutedAcceleratorCommand, -1);
+			QCOMPARE(input->toPlainText(), QStringLiteral("8"));
 
 			resetTestState();
 		}
