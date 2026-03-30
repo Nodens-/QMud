@@ -3521,6 +3521,16 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(actions.at(1).second, QStringLiteral("Consider assistant"));
 			QCOMPARE(actions.at(2).first, QStringLiteral("attack assistant"));
 			QCOMPARE(actions.at(2).second, QStringLiteral("Attack assistant"));
+
+			const QVector<QPair<QString, QString>> apostropheActions = WorldView::parseMxpContextMenuActions(
+			    QStringLiteral("examine a scroll of 'harm'|consider a scroll of 'harm'"),
+			    QStringLiteral(
+			        "Right mouse click to act|Examine a scroll of 'harm'|Consider a scroll of 'harm'"));
+			QCOMPARE(apostropheActions.size(), 2);
+			QCOMPARE(apostropheActions.at(0).first, QStringLiteral("examine a scroll of 'harm'"));
+			QCOMPARE(apostropheActions.at(0).second, QStringLiteral("Examine a scroll of 'harm'"));
+			QCOMPARE(apostropheActions.at(1).first, QStringLiteral("consider a scroll of 'harm'"));
+			QCOMPARE(apostropheActions.at(1).second, QStringLiteral("Consider a scroll of 'harm'"));
 		}
 
 		void runtimeSettingsRebuildAttributeKeysExcludeWrapAndHyperlinkPresentation()

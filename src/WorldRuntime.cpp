@@ -88,6 +88,7 @@
 #include <QtMath>
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <exception>
 #include <iterator>
@@ -2635,6 +2636,28 @@ namespace
 		return true;
 	}
 
+	[[nodiscard]] bool mxpQuotedTokenEndsHere(const char *afterQuote)
+	{
+		const char *p = afterQuote;
+		while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+			++p;
+		if (*p == '\0' || *p == '>' || *p == '/')
+			return true;
+		if (*p == '|' || *p == ',' || *p == ';')
+			return false;
+
+		const auto isAttrChar = [](const unsigned char ch)
+		{ return std::isalnum(ch) != 0 || ch == '_' || ch == '-' || ch == ':'; };
+
+		if (!isAttrChar(static_cast<unsigned char>(*p)))
+			return false;
+		while (isAttrChar(static_cast<unsigned char>(*p)))
+			++p;
+		while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+			++p;
+		return *p == '=' || *p == '\0' || *p == '>' || *p == '/';
+	}
+
 	bool mxpGetWord(QByteArray &result, QByteArray &input)
 	{
 		const char *p = input.constData();
@@ -2650,11 +2673,23 @@ namespace
 		{
 			const char quote = *p;
 			pStart           = ++p; // bypass opening quote
-			for (; *p != quote && *p; p++)
-				len++; // count up to closing quote
+			for (; *p; ++p)
+			{
+				if (*p == quote)
+				{
+					// Be forgiving with malformed MXP values that embed quote chars
+					// without entity escaping (e.g. href='... 'harm' | ...'). Treat a
+					// quote as closing only at real token boundaries.
+					if (mxpQuotedTokenEndsHere(p + 1))
+						break;
+				}
+				++len;
+			}
 			result = QByteArray(pStart, len);
-			input  = QByteArray(++p); // return rest of line
-			return false;             // not end, even if empty
+			if (*p == quote)
+				++p;
+			input = QByteArray(p); // return rest of line
+			return false;          // not end, even if empty
 		}
 
 		// where word starts
