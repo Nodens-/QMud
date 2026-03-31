@@ -38,6 +38,8 @@
 #include <QHBoxLayout>
 #include <QHash>
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QInputMethodEvent>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
@@ -998,6 +1000,9 @@ class InputTextEdit : public QPlainTextEdit
 
 	private:
 		WorldView *m_view{nullptr};
+#ifdef Q_OS_WIN
+		bool m_suppressNextAltNumpadCommit{false};
+#endif
 };
 
 class MiniWindowLayer : public QWidget
@@ -7015,7 +7020,9 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 			if (m_allTypingToCommandWindow && m_input)
 			{
 				QKeyEvent forwarded(keyEvent->type(), keyEvent->key(), keyEvent->modifiers(),
-				                    keyEvent->text(), keyEvent->isAutoRepeat(), keyEvent->count());
+				                    keyEvent->nativeScanCode(), keyEvent->nativeVirtualKey(),
+				                    keyEvent->nativeModifiers(), keyEvent->text(), keyEvent->isAutoRepeat(),
+				                    keyEvent->count());
 				m_input->setFocus(Qt::OtherFocusReason);
 				QCoreApplication::sendEvent(m_input, &forwarded);
 				return true;
@@ -7604,6 +7611,38 @@ namespace
 			qint64  mapKey{0};
 	};
 
+#ifdef Q_OS_WIN
+	[[nodiscard]] quint16 windowsNumpadVirtualKey(const quint32 nativeVirtualKey)
+	{
+		// Windows Alt+Numpad input can omit Qt::KeypadModifier.
+		switch (nativeVirtualKey)
+		{
+		case 0x60: // VK_NUMPAD0
+		case 0x61: // VK_NUMPAD1
+		case 0x62: // VK_NUMPAD2
+		case 0x63: // VK_NUMPAD3
+		case 0x64: // VK_NUMPAD4
+		case 0x65: // VK_NUMPAD5
+		case 0x66: // VK_NUMPAD6
+		case 0x67: // VK_NUMPAD7
+		case 0x68: // VK_NUMPAD8
+		case 0x69: // VK_NUMPAD9
+		case 0x6A: // VK_MULTIPLY
+		case 0x6B: // VK_ADD
+		case 0x6D: // VK_SUBTRACT
+		case 0x6F: // VK_DIVIDE
+			return static_cast<quint16>(nativeVirtualKey);
+		default:
+			return 0;
+		}
+	}
+
+	[[nodiscard]] bool windowsNumpadDigitVirtualKey(const quint32 nativeVirtualKey)
+	{
+		return nativeVirtualKey >= 0x60 && nativeVirtualKey <= 0x69; // VK_NUMPAD0..VK_NUMPAD9
+	}
+#endif
+
 	bool buildAcceleratorLookup(const QKeyEvent *event, const bool keypad, AcceleratorLookup &lookup)
 	{
 		if (!event)
@@ -7614,8 +7653,17 @@ namespace
 			return false;
 
 		const int key = event->key();
+#ifdef Q_OS_WIN
+		quint16 forcedWindowsNumpadKeyCode = 0;
+		if (!keypad && (mods & Qt::AltModifier) != 0)
+			forcedWindowsNumpadKeyCode = windowsNumpadVirtualKey(event->nativeVirtualKey());
+#endif
 		if (key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt || key == Qt::Key_Meta ||
-		    key == Qt::Key_unknown)
+		    (key == Qt::Key_unknown
+#ifdef Q_OS_WIN
+		     && forcedWindowsNumpadKeyCode == 0
+#endif
+		     ))
 			return false;
 
 		lookup.virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
@@ -7626,7 +7674,13 @@ namespace
 		if ((mods & Qt::AltModifier) != 0)
 			lookup.virt |= AcceleratorUtils::kAltFlag;
 
+#ifdef Q_OS_WIN
+		lookup.keyCode = (forcedWindowsNumpadKeyCode != 0)
+		                     ? forcedWindowsNumpadKeyCode
+		                     : AcceleratorUtils::qtKeyToVirtualKey(static_cast<Qt::Key>(key), keypad);
+#else
 		lookup.keyCode = AcceleratorUtils::qtKeyToVirtualKey(static_cast<Qt::Key>(key), keypad);
+#endif
 		if (lookup.keyCode == 0)
 			return false;
 
@@ -8265,6 +8319,31 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 	if (m_view && !plainTab)
 		m_view->resetTabCompletionCycle();
 
+#ifdef Q_OS_WIN
+	const bool isKeypadDigit = (event->modifiers() & Qt::KeypadModifier) != 0 && event->key() >= Qt::Key_0 &&
+	                           event->key() <= Qt::Key_9;
+	const bool windowsAltNumpadDigitKey =
+	    (event->modifiers() & Qt::AltModifier) != 0 &&
+	    (isKeypadDigit || windowsNumpadDigitVirtualKey(event->nativeVirtualKey()));
+	if (m_suppressNextAltNumpadCommit)
+	{
+		const Qt::KeyboardModifiers modifiers = event->modifiers();
+		const bool                  plainPrintable =
+		    (modifiers & (Qt::ControlModifier | Qt::MetaModifier)) == 0 && !event->text().isEmpty();
+		if (plainPrintable)
+		{
+			m_suppressNextAltNumpadCommit = false;
+			event->accept();
+			return;
+		}
+		if (event->key() != Qt::Key_Shift && event->key() != Qt::Key_Control && event->key() != Qt::Key_Alt &&
+		    event->key() != Qt::Key_Meta && event->key() != Qt::Key_AltGr)
+		{
+			m_suppressNextAltNumpadCommit = false;
+		}
+	}
+#endif
+
 	if (m_view && event->matches(QKeySequence::Copy) && m_view->hasOutputSelection())
 	{
 		m_view->copySelection();
@@ -8343,7 +8422,13 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 	}
 
 	if (m_view && m_view->handleWorldHotkey(event))
+	{
+#ifdef Q_OS_WIN
+		if (windowsAltNumpadDigitKey)
+			m_suppressNextAltNumpadCommit = true;
+#endif
 		return;
+	}
 
 	if (m_view && plainTab)
 	{
@@ -8475,6 +8560,20 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 
 bool InputTextEdit::event(QEvent *event)
 {
+#ifdef Q_OS_WIN
+	if (m_suppressNextAltNumpadCommit && event->type() == QEvent::InputMethod)
+	{
+		if (const auto *ime = dynamic_cast<QInputMethodEvent *>(event); ime && !ime->commitString().isEmpty())
+		{
+			m_suppressNextAltNumpadCommit = false;
+			event->accept();
+			return true;
+		}
+	}
+	if (event->type() == QEvent::FocusOut)
+		m_suppressNextAltNumpadCommit = false;
+#endif
+
 	if (m_view && event->type() == QEvent::ShortcutOverride)
 	{
 		if (const auto *keyEvent = dynamic_cast<QKeyEvent *>(event))

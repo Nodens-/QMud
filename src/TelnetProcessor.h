@@ -16,6 +16,7 @@
 #include <QByteArray>
 #include <QMap>
 #include <QString>
+#include <array>
 #include <functional>
 
 /**
@@ -95,6 +96,12 @@ class TelnetProcessor
 		 * @param enabled Enable NAWS negotiation when `true`.
 		 */
 		void       setNawsEnabled(bool enabled);
+		/**
+		 * @brief Enables/disables one-time telnet option negotiation mode.
+		 * @param enabled When `true`, repeated WILL/WONT and DO/DONT for an already
+		 * negotiated option are ignored.
+		 */
+		void       setNegotiateOptionsOnce(bool enabled);
 		/**
 		 * @brief Updates terminal size values used for NAWS replies.
 		 * @param columns Terminal width in columns.
@@ -591,6 +598,9 @@ class TelnetProcessor
 		bool                            m_seenCompressWillIac{false};
 		bool                            m_requestedSga{false};
 		bool                            m_requestedEor{false};
+		bool                            m_negotiateOptionsOnce{false};
+		std::array<bool, 256>           m_seenWillWontOption{};
+		std::array<bool, 256>           m_seenDoDontOption{};
 
 		struct ZStreamWrapper;
 		ZStreamWrapper *m_zlib{nullptr};

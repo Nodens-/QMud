@@ -246,11 +246,190 @@ class tst_LuaSupportCompat : public QObject
 			QVERIFY2(result.ok, qPrintable(result.error));
 			QCOMPARE(result.value, QStringLiteral("%foo"));
 		}
+
+		void socketHttpRequireShimRoutesHttpsThroughSslModuleWhenAvailable()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			const auto result = evaluateLuaToString(
+			    state.get(), QByteArrayLiteral("package.preload[\"socket.http\"] = function()\n"
+			                                   "  return {\n"
+			                                   "    request = function(reqt, body)\n"
+			                                   "      return \"plain:\" .. tostring(reqt), 480, { src = "
+			                                   "\"plain\" }\n"
+			                                   "    end\n"
+			                                   "  }\n"
+			                                   "end\n"
+			                                   "package.preload[\"ssl.https\"] = function()\n"
+			                                   "  return {\n"
+			                                   "    request = function(reqt, body)\n"
+			                                   "      if type(reqt) == \"table\" then\n"
+			                                   "        if reqt.sink then reqt.sink(\"secure:\" .. "
+			                                   "tostring(reqt.url)) end\n"
+			                                   "        return 1, 200, { src = \"ssl\" }\n"
+			                                   "      end\n"
+			                                   "      return \"secure:\" .. tostring(reqt), 200, { src = "
+			                                   "\"ssl\" }\n"
+			                                   "    end\n"
+			                                   "  }\n"
+			                                   "end\n"
+			                                   "local http = require(\"socket.http\")\n"
+			                                   "local page, code, headers = "
+			                                   "http.request(\"https://example.invalid/path\")\n"
+			                                   "return tostring(page) .. \"|\" .. tostring(code) .. \"|\" "
+			                                   ".. tostring(headers and headers.src)"));
+			QVERIFY2(result.ok, qPrintable(result.error));
+			QCOMPARE(result.value, QStringLiteral("secure:https://example.invalid/path|200|ssl"));
+		}
+
+		void socketHttpRequireShimPreservesHttpsPostBodySemantics()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			const auto result = evaluateLuaToString(
+			    state.get(), QByteArrayLiteral("package.preload[\"socket.http\"] = function()\n"
+			                                   "  return {\n"
+			                                   "    request = function(reqt, body)\n"
+			                                   "      return \"plain-fallback\", 599, { src = "
+			                                   "\"plain\" }\n"
+			                                   "    end\n"
+			                                   "  }\n"
+			                                   "end\n"
+			                                   "package.preload[\"ltn12\"] = function()\n"
+			                                   "  return {\n"
+			                                   "    source = {\n"
+			                                   "      string = function(value)\n"
+			                                   "        local emitted = false\n"
+			                                   "        return function()\n"
+			                                   "          if emitted then return nil end\n"
+			                                   "          emitted = true\n"
+			                                   "          return value\n"
+			                                   "        end\n"
+			                                   "      end\n"
+			                                   "    },\n"
+			                                   "    sink = {\n"
+			                                   "      table = function(target)\n"
+			                                   "        return function(chunk)\n"
+			                                   "          if chunk then target[#target + 1] = chunk "
+			                                   "end\n"
+			                                   "          return 1\n"
+			                                   "        end\n"
+			                                   "      end\n"
+			                                   "    }\n"
+			                                   "  }\n"
+			                                   "end\n"
+			                                   "package.preload[\"ssl.https\"] = function()\n"
+			                                   "  return {\n"
+			                                   "    request = function(req)\n"
+			                                   "      local body = \"\"\n"
+			                                   "      while true do\n"
+			                                   "        local chunk = req.source and req.source()\n"
+			                                   "        if chunk == nil then break end\n"
+			                                   "        body = body .. chunk\n"
+			                                   "      end\n"
+			                                   "      if req.sink then req.sink(\"atlas-ok\") end\n"
+			                                   "      return 1, 200, {\n"
+			                                   "        method = req.method,\n"
+			                                   "        ct = req.headers and "
+			                                   "req.headers[\"content-type\"],\n"
+			                                   "        cl = req.headers and "
+			                                   "req.headers[\"content-length\"],\n"
+			                                   "        body = body,\n"
+			                                   "      }, \"HTTP/1.1 200 OK\"\n"
+			                                   "    end\n"
+			                                   "  }\n"
+			                                   "end\n"
+			                                   "local http = require(\"socket.http\")\n"
+			                                   "local page, code, headers = "
+			                                   "http.request(\"https://example.invalid/path\", "
+			                                   "\"map=x\")\n"
+			                                   "return tostring(page) .. \"|\" .. tostring(code) .. "
+			                                   "\"|\" .. tostring(headers and headers.method) .. "
+			                                   "\"|\" .. tostring(headers and headers.ct) .. \"|\" .. "
+			                                   "tostring(headers and headers.cl) .. \"|\" .. "
+			                                   "tostring(headers and headers.body)"));
+			QVERIFY2(result.ok, qPrintable(result.error));
+			QCOMPARE(result.value,
+			         QStringLiteral("atlas-ok|200|POST|application/x-www-form-urlencoded|5|map=x"));
+		}
+
+		void socketHttpRequireShimFallsBackWhenSslModuleUnavailable()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			const auto result = evaluateLuaToString(
+			    state.get(), QByteArrayLiteral("package.preload[\"socket.http\"] = function()\n"
+			                                   "  return {\n"
+			                                   "    request = function(reqt, body)\n"
+			                                   "      return \"plain:\" .. tostring(reqt), 201, { src = "
+			                                   "\"plain\" }\n"
+			                                   "    end\n"
+			                                   "  }\n"
+			                                   "end\n"
+			                                   "package.loaded[\"ssl.https\"] = nil\n"
+			                                   "package.preload[\"ssl.https\"] = function()\n"
+			                                   "  error(\"ssl disabled for test\")\n"
+			                                   "end\n"
+			                                   "local http = require(\"socket.http\")\n"
+			                                   "local page, code, headers = "
+			                                   "http.request(\"https://example.invalid/path\", \"map=x\")\n"
+			                                   "return tostring(code) .. \"|\" .. "
+			                                   "tostring(headers and headers.src)"));
+			QVERIFY2(result.ok, qPrintable(result.error));
+			QCOMPARE(result.value, QStringLiteral("201|plain"));
+		}
+
+		void socketHttpRequireShimPatchesRealModulesForHttps()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			const auto result = evaluateLuaToString(
+			    state.get(), QByteArrayLiteral("local ok_http, http = pcall(require, \"socket.http\")\n"
+			                                   "if not ok_http then\n"
+			                                   "  return \"no-http\"\n"
+			                                   "end\n"
+			                                   "local ok_https, https = pcall(require, \"ssl.https\")\n"
+			                                   "if not ok_https then\n"
+			                                   "  return \"no-https\"\n"
+			                                   "end\n"
+			                                   "if type(http) ~= \"table\" or type(http.request) ~= "
+			                                   "\"function\" then\n"
+			                                   "  return \"bad-http\"\n"
+			                                   "end\n"
+			                                   "if type(https) ~= \"table\" or type(https.request) ~= "
+			                                   "\"function\" then\n"
+			                                   "  return \"bad-https\"\n"
+			                                   "end\n"
+			                                   "local called = false\n"
+			                                   "local original = https.request\n"
+			                                   "https.request = function(reqt, body)\n"
+			                                   "  called = true\n"
+			                                   "  if type(reqt) == \"table\" then\n"
+			                                   "    if reqt.sink then reqt.sink(\"shim-ok\") end\n"
+			                                   "    return 1, 299, { src = \"ssl-real\" }\n"
+			                                   "  end\n"
+			                                   "  return \"shim-ok\", 299, { src = \"ssl-real\" }\n"
+			                                   "end\n"
+			                                   "local page, code, headers = "
+			                                   "http.request(\"https://example.invalid/path\")\n"
+			                                   "https.request = original\n"
+			                                   "return tostring(called) .. \"|\" .. tostring(page) .. \"|\" "
+			                                   ".. tostring(code) .. \"|\" .. tostring(headers and "
+			                                   "headers.src)"));
+
+			QVERIFY2(result.ok, qPrintable(result.error));
+			if (result.value == QStringLiteral("no-http") || result.value == QStringLiteral("no-https"))
+				QSKIP("System Lua modules socket.http/ssl.https not available in this environment");
+			QCOMPARE(result.value, QStringLiteral("true|shim-ok|299|ssl-real"));
+		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_LuaSupportCompat)
-
 
 #if __has_include("tst_LuaSupportCompat.moc")
 #include "tst_LuaSupportCompat.moc"

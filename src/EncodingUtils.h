@@ -30,6 +30,12 @@ QString qmudEncodeBase64Text(const QByteArray &plaintext, bool multiLine);
  */
 QString qmudEncodeBase64Text(const char *plaintext, bool multiLine);
 /**
+ * @brief Decodes bytes as Windows-1252 text.
+ * @param bytes Input byte sequence.
+ * @return Decoded Unicode text.
+ */
+QString qmudDecodeWindows1252(QByteArrayView bytes);
+/**
  * @brief Decodes UTF-8 stream bytes and falls back to Windows-1252 for invalid bytes.
  * @param bytes Incoming stream bytes.
  * @param carry Incomplete trailing UTF-8 bytes carried across calls.

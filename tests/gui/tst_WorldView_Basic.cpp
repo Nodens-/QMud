@@ -21,6 +21,7 @@
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QInputMethodEvent>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPlainTextEdit>
@@ -33,6 +34,7 @@
 #include <QTimer>
 #include <QToolTip>
 #include <QUrl>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QWheelEvent>
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
@@ -1438,6 +1440,138 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
 
 			resetTestState();
+		}
+
+		void windowsAltNumpadAcceleratorDoesNotInsertCommittedCharacter()
+		{
+#ifndef Q_OS_WIN
+			QSKIP("Windows-specific Alt+Numpad behavior");
+#else
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			constexpr Qt::Key key          = Qt::Key_4;
+			constexpr quint16 numpadVk     = 0x64;
+			constexpr int     commandId    = 108;
+			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::AltModifier, numpadVk, true);
+			g_acceleratorCommands.insert(numpadMapKey, commandId);
+
+			QKeyEvent keyPress(QEvent::KeyPress, key, Qt::AltModifier, 0, numpadVk, 0, QStringLiteral("4"),
+			                   false, 1);
+			QCoreApplication::sendEvent(input, &keyPress);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_acceleratorExecutionCount, 1);
+			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
+
+			QInputMethodEvent ime;
+			ime.setCommitString(QStringLiteral("\u2666"));
+			QCoreApplication::sendEvent(input, &ime);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(input->toPlainText(), QString());
+
+			resetTestState();
+#endif
+		}
+
+		void windowsAltNumpadAcceleratorDoesNotInsertFollowupPrintableKeyPress()
+		{
+#ifndef Q_OS_WIN
+			QSKIP("Windows-specific Alt+Numpad behavior");
+#else
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			constexpr Qt::Key key          = Qt::Key_4;
+			constexpr quint16 numpadVk     = 0x64;
+			constexpr int     commandId    = 109;
+			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::AltModifier, numpadVk, true);
+			g_acceleratorCommands.insert(numpadMapKey, commandId);
+
+			QKeyEvent acceleratorPress(QEvent::KeyPress, key, Qt::AltModifier, 0, numpadVk, 0,
+			                           QStringLiteral("4"), false, 1);
+			QCoreApplication::sendEvent(input, &acceleratorPress);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_acceleratorExecutionCount, 1);
+			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
+
+			QKeyEvent followupPrintable(QEvent::KeyPress, Qt::Key_unknown, Qt::NoModifier, 0, 0, 0,
+			                            QStringLiteral("\u2666"), false, 1);
+			QCoreApplication::sendEvent(input, &followupPrintable);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(input->toPlainText(), QString());
+
+			resetTestState();
+#endif
+		}
+
+		void windowsAltNumpadAcceleratorDoesNotInsertFollowupPrintableKeyPressWithAltModifier()
+		{
+#ifndef Q_OS_WIN
+			QSKIP("Windows-specific Alt+Numpad behavior");
+#else
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			constexpr Qt::Key key          = Qt::Key_4;
+			constexpr quint16 numpadVk     = 0x64;
+			constexpr int     commandId    = 110;
+			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::AltModifier, numpadVk, true);
+			g_acceleratorCommands.insert(numpadMapKey, commandId);
+
+			QKeyEvent acceleratorPress(QEvent::KeyPress, key, Qt::AltModifier, 0, numpadVk, 0,
+			                           QStringLiteral("4"), false, 1);
+			QCoreApplication::sendEvent(input, &acceleratorPress);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_acceleratorExecutionCount, 1);
+			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
+
+			QKeyEvent followupPrintable(QEvent::KeyPress, Qt::Key_unknown, Qt::AltModifier, 0, 0, 0,
+			                            QStringLiteral("\u2666"), false, 1);
+			QCoreApplication::sendEvent(input, &followupPrintable);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(input->toPlainText(), QString());
+
+			resetTestState();
+#endif
 		}
 
 		void topRowDigitDoesNotTriggerNumpadAccelerator()

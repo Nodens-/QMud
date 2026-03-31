@@ -1891,6 +1891,10 @@ void WorldPreferencesDialog::accept()
 		if (m_connectMethod && m_connectMethod->currentIndex() >= 0)
 			m_runtime->setWorldAttribute(QStringLiteral("connect_method"),
 			                             QString::number(m_connectMethod->currentData().toInt()));
+		if (m_onlyNegotiateTelnetOptionsOnce)
+			m_runtime->setWorldAttribute(QStringLiteral("only_negotiate_telnet_options_once"),
+			                             m_onlyNegotiateTelnetOptionsOnce->isChecked() ? QStringLiteral("1")
+			                                                                           : QStringLiteral("0"));
 
 		if (m_useMxp && m_useMxp->currentIndex() >= 0)
 			m_runtime->setWorldAttribute(QStringLiteral("use_mxp"), m_useMxp->currentData().toString());
@@ -7266,6 +7270,9 @@ void WorldPreferencesDialog::buildUi()
 	connectNote->setWordWrap(true);
 	connectTextLayout->addWidget(connectNote);
 	connectingLayout->addWidget(connectTextGroup);
+	m_onlyNegotiateTelnetOptionsOnce =
+	    new QCheckBox(QStringLiteral("Only negotiate telnet options once"), connectingPage);
+	connectingLayout->addWidget(m_onlyNegotiateTelnetOptionsOnce);
 	connectingLayout->addStretch();
 
 	// MXP
@@ -10897,6 +10904,11 @@ void WorldPreferencesDialog::populateConnecting() const
 		const int method = attrs.value(QStringLiteral("connect_method")).toInt();
 		if (const int index = m_connectMethod->findData(method); index >= 0)
 			m_connectMethod->setCurrentIndex(index);
+	}
+	if (m_onlyNegotiateTelnetOptionsOnce)
+	{
+		m_onlyNegotiateTelnetOptionsOnce->setChecked(
+		    qmudIsEnabledFlag(attrs.value(QStringLiteral("only_negotiate_telnet_options_once"))));
 	}
 	if (m_connectLineCount && m_connectText)
 	{

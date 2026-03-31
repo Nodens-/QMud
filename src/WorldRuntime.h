@@ -29,7 +29,6 @@
 #include <QSet>
 #include <QSharedPointer>
 #include <QString>
-#include <QStringDecoder>
 #include <QVariant>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
@@ -4200,7 +4199,6 @@ class WorldRuntime : public QObject
 		QMudAnsiStreamState                   m_ansiStreamState;
 		AnsiRenderState                       m_ansiRenderState;
 		QByteArray                            m_streamUtf8Carry;
-		QStringDecoder                        m_streamLocalDecoder{QStringConverter::System};
 		bool                                  m_streamUtf8DecoderEnabled{false};
 		MxpStyleState                         m_mxpRenderStyle;
 		QVector<MxpStyleFrame>                m_mxpRenderStack;

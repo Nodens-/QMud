@@ -17,7 +17,7 @@ class tst_EncodingUtils : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void encodeSingleLine()
 		{
@@ -47,18 +47,18 @@ class tst_EncodingUtils : public QObject
 
 		void decodeUtf8KeepsSplitMultibyteCarry()
 		{
-			QByteArray carry;
-			bool       hadInvalid = false;
+			QByteArray       carry;
+			bool             hadInvalid = false;
 
 			const QByteArray part1 = QByteArrayLiteral("language") + QByteArray::fromHex("E2");
 			const QByteArray part2 = QByteArray::fromHex("8094") + QByteArrayLiteral("marks");
 
-			const QString first = qmudDecodeUtf8WithWindows1252Fallback(part1, carry, &hadInvalid);
+			const QString    first = qmudDecodeUtf8WithWindows1252Fallback(part1, carry, &hadInvalid);
 			QCOMPARE(first, QStringLiteral("language"));
 			QVERIFY(!hadInvalid);
 			QCOMPARE(carry, QByteArray::fromHex("E2"));
 
-			const QString second = qmudDecodeUtf8WithWindows1252Fallback(part2, carry, &hadInvalid);
+			const QString second         = qmudDecodeUtf8WithWindows1252Fallback(part2, carry, &hadInvalid);
 			const QString expectedSecond = QString(QChar(0x2014)) + QStringLiteral("marks");
 			QCOMPARE(second, expectedSecond);
 			QVERIFY(!hadInvalid);
@@ -71,20 +71,34 @@ class tst_EncodingUtils : public QObject
 			bytes.append(static_cast<char>(0x97));
 			bytes.append("marks");
 
-			QByteArray carry;
-			bool       hadInvalid = false;
-			const QString decoded = qmudDecodeUtf8WithWindows1252Fallback(bytes, carry, &hadInvalid);
+			QByteArray    carry;
+			bool          hadInvalid = false;
+			const QString decoded    = qmudDecodeUtf8WithWindows1252Fallback(bytes, carry, &hadInvalid);
 
 			const QString expected = QStringLiteral("language") + QChar(0x2014) + QStringLiteral("marks");
 			QCOMPARE(decoded, expected);
 			QVERIFY(hadInvalid);
 			QVERIFY(carry.isEmpty());
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+
+		void decodeWindows1252MapsC1Glyphs()
+		{
+			QByteArray bytes;
+			bytes.append(static_cast<char>(0x97));
+			bytes.append(static_cast<char>(0x80));
+			const QString decoded = qmudDecodeWindows1252(bytes);
+			QCOMPARE(decoded, QString(QChar(0x2014)) + QString(QChar(0x20AC)));
+		}
+
+		void decodeWindows1252PreservesAscii()
+		{
+			const QByteArray bytes = QByteArrayLiteral("Crystal map");
+			QCOMPARE(qmudDecodeWindows1252(bytes), QStringLiteral("Crystal map"));
+		}
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_EncodingUtils)
-
 
 #if __has_include("tst_EncodingUtils.moc")
 #include "tst_EncodingUtils.moc"

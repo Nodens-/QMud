@@ -409,6 +409,16 @@ void TelnetProcessor::setNawsEnabled(const bool enabled)
 	m_naws = enabled;
 }
 
+void TelnetProcessor::setNegotiateOptionsOnce(const bool enabled)
+{
+	if (m_negotiateOptionsOnce == enabled)
+		return;
+
+	m_negotiateOptionsOnce = enabled;
+	m_seenWillWontOption.fill(false);
+	m_seenDoDontOption.fill(false);
+}
+
 void TelnetProcessor::setWindowSize(const int columns, const int rows)
 {
 	const bool changed = (m_wrapColumns != columns) || (m_wrapRows != rows);
@@ -481,7 +491,9 @@ void TelnetProcessor::resetConnectionState()
 	m_compressInputOffset = 0;
 	m_requestedSga        = false;
 	m_requestedEor        = false;
-	m_noEcho              = false;
+	m_seenWillWontOption.fill(false);
+	m_seenDoDontOption.fill(false);
+	m_noEcho = false;
 	if (hadNoEcho && m_callbacks.onNoEchoChanged)
 		m_callbacks.onNoEchoChanged(false);
 	if (m_zlib)
@@ -1247,11 +1259,16 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			//
 			// telnet negotiation : in response to WILL, we say DONT
 			// (except for compression, MXP, TERMINAL_TYPE and SGA), we *will* handle that)
+			if (m_negotiateOptionsOnce && m_seenWillWontOption[c])
+			{
+				m_phase = NONE;
+				break;
+			}
 			switch (c)
 			{
 			case TELOPT_COMPRESS2:
 			case TELOPT_COMPRESS:
-				// initialise compression library if not already decompressing
+				// initialize compression library if not already decompressing
 				if (!m_disableCompression)
 				{
 					if (!(c == TELOPT_COMPRESS && m_supportsMccp2)) // don't agree to MCCP1 and MCCP2
@@ -1330,13 +1347,19 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				}
 				break; // end of others
 			} // end of switch
-			m_phase = NONE;
+			m_seenWillWontOption[c] = true;
+			m_phase                 = NONE;
 			break;
 
 		case HAVE_WONT:
 			// Received: IAC WONT x
 			//
 			// telnet negotiation : in response to WONT, we say DONT
+			if (m_negotiateOptionsOnce && m_seenWillWontOption[c])
+			{
+				m_phase = NONE;
+				break;
+			}
 			if (c == TELOPT_COMPRESS || c == TELOPT_COMPRESS2)
 			{
 				m_compress = false;
@@ -1355,7 +1378,8 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			if (c == TELOPT_NAWS)
 				m_nawsWanted = false;
 			sendIacDont(c);
-			m_phase = NONE;
+			m_seenWillWontOption[c] = true;
+			m_phase                 = NONE;
 			break;
 
 		case HAVE_DO:
@@ -1368,6 +1392,11 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			// telnet negotiation : in response to DO, we say WILL for:
 			//  <102> (Aardwolf), SGA, echo, NAWS, CHARSET, MXP and Terminal type
 			// for others we query plugins to see if they want to handle it or not
+			if (m_negotiateOptionsOnce && m_seenDoDontOption[c])
+			{
+				m_phase = NONE;
+				break;
+			}
 			switch (c)
 			{
 			case SGA:
@@ -1423,13 +1452,19 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				}
 				break; // end of others
 			} // end of switch
-			m_phase = NONE;
+			m_seenDoDontOption[c] = true;
+			m_phase               = NONE;
 			break;
 
 		case HAVE_DONT:
 			// Received: IAC DONT x
 			//
 			// telnet negotiation : in response to DONT, we say WONT
+			if (m_negotiateOptionsOnce && m_seenDoDontOption[c])
+			{
+				m_phase = NONE;
+				break;
+			}
 			sendIacWont(c);
 			switch (c)
 			{
@@ -1457,7 +1492,8 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			default:
 				break;
 			} // end of switch
-			m_phase = NONE;
+			m_seenDoDontOption[c] = true;
+			m_phase               = NONE;
 			break;
 
 		case HAVE_SB:
@@ -2101,7 +2137,7 @@ QByteArray TelnetProcessor::mxpCollectedEntity()
 	return {};
 }
 
-// here at an unexpected termination of element collection, eg. <blah \n
+// here at an unexpected termination of element collection, e.g. <blah \n
 void TelnetProcessor::mxpUnterminatedElement(const char *reason)
 {
 	const auto *type = "thing";
