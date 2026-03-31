@@ -4460,7 +4460,6 @@ void WorldRuntime::resetAnsiRenderState()
 	m_pendingCarriageReturnOverwrite = false;
 	m_ansiRenderState                = AnsiRenderState{};
 	m_streamUtf8Carry.clear();
-	m_streamLocalDecoder.resetState();
 	m_streamUtf8DecoderEnabled = false;
 	resetMxpRenderState();
 }
@@ -4672,7 +4671,6 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 	{
 		m_streamUtf8DecoderEnabled = useUtf8;
 		m_streamUtf8Carry.clear();
-		m_streamLocalDecoder.resetState();
 	}
 	auto decodeIncomingDisplayBytes = [&](const QByteArrayView bytes) -> QString
 	{
@@ -4687,20 +4685,21 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 				++m_utf8ErrorCount;
 			return decoded;
 		}
-		const QString decoded = m_streamLocalDecoder.decode(bytes);
-		if (m_streamLocalDecoder.hasError())
-			++m_utf8ErrorCount;
-		return decoded;
+		return qmudDecodeWindows1252(bytes);
 	};
 	auto decodeIncomingIsolatedBytes = [&](const QByteArray &bytes) -> QString
 	{
 		if (bytes.isEmpty())
 			return {};
-		QStringDecoder decoder(useUtf8 ? QStringConverter::Utf8 : QStringConverter::System);
-		const QString  decoded = decoder.decode(bytes);
-		if (decoder.hasError())
-			++m_utf8ErrorCount;
-		return decoded;
+		if (useUtf8)
+		{
+			QStringDecoder decoder(QStringConverter::Utf8);
+			const QString  decoded = decoder.decode(bytes);
+			if (decoder.hasError())
+				++m_utf8ErrorCount;
+			return decoded;
+		}
+		return qmudDecodeWindows1252(bytes);
 	};
 
 	QList<TelnetProcessor::MxpEvent>      events                = m_telnet.takeMxpEvents();

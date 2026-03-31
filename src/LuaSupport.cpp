@@ -225,8 +225,92 @@ end
 -- Preserve compatibility by auto-exporting simple module names to _G when missing.
 if require and not rawget(_G, "__qmud_require_compat_wrapped") then
   local _require = require
+  local function patch_socket_http_https(mod)
+    if type(mod) ~= "table" then
+      return mod
+    end
+    if rawget(mod, "__qmud_https_request_compat_wrapped") then
+      return mod
+    end
+    local raw_request = mod.request
+    if type(raw_request) ~= "function" then
+      rawset(mod, "__qmud_https_request_compat_wrapped", true)
+      return mod
+    end
+
+    local function is_https_request(reqt)
+      if type(reqt) == "string" then
+        return reqt:match("^https://") ~= nil
+      end
+      if type(reqt) ~= "table" then
+        return false
+      end
+      local url = reqt.url or reqt[1]
+      return type(url) == "string" and url:match("^https://") ~= nil
+    end
+
+    local function request_https_string(https_mod, url, body)
+      local ok_ltn12, ltn12 = pcall(_require, "ltn12")
+      if not ok_ltn12 or type(ltn12) ~= "table" then
+        return https_mod.request(url, body)
+      end
+      if type(ltn12.sink) ~= "table" or type(ltn12.sink.table) ~= "function" then
+        return https_mod.request(url, body)
+      end
+
+      local response_chunks = {}
+      local request = {
+        url = url,
+        target = response_chunks,
+        sink = ltn12.sink.table(response_chunks),
+      }
+      if body ~= nil then
+        if type(ltn12.source) ~= "table" or type(ltn12.source.string) ~= "function" then
+          return https_mod.request(url, body)
+        end
+        local body_string = tostring(body)
+        request.source = ltn12.source.string(body_string)
+        request.headers = {
+          ["content-length"] = string.len(body_string),
+          ["content-type"] = "application/x-www-form-urlencoded",
+        }
+        request.method = "POST"
+      end
+
+      local first, code, headers, status = https_mod.request(request)
+      if first == nil then
+        return nil, code, headers, status
+      end
+
+      local page = table.concat(response_chunks)
+      if page == "" and type(first) == "string" then
+        page = first
+      end
+      return page, code, headers, status
+    end
+
+    mod.request = function(reqt, body)
+      if is_https_request(reqt) then
+        local ok_https, https_mod = pcall(_require, "ssl.https")
+        if ok_https and type(https_mod) == "table" and type(https_mod.request) == "function" then
+          if type(reqt) == "table" then
+            return https_mod.request(reqt)
+          end
+          return request_https_string(https_mod, reqt, body)
+        end
+      end
+      return raw_request(reqt, body)
+    end
+
+    rawset(mod, "__qmud_https_request_compat_wrapped", true)
+    return mod
+  end
+
   function require(name)
     local mod = _require(name)
+    if name == "socket.http" then
+      mod = patch_socket_http_https(mod)
+    end
     if type(name) == "string"
       and name:match("^[%a_][%w_]*$")
       and rawget(_G, name) == nil then

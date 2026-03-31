@@ -18,7 +18,7 @@ namespace
 	QChar decodeWindows1252Byte(const unsigned char byte)
 	{
 		if (byte >= 0x80 && byte <= 0x9F)
-			return QChar(kWindows1252C1Map[byte - 0x80]);
+			return {kWindows1252C1Map[byte - 0x80]};
 		return QChar(byte);
 	}
 
@@ -63,7 +63,19 @@ QString qmudEncodeBase64Text(const char *plaintext, const bool multiLine)
 	return qmudEncodeBase64Text(QByteArray(plaintext), multiLine);
 }
 
-QString qmudDecodeUtf8WithWindows1252Fallback(const QByteArrayView bytes, QByteArray &carry, bool *hadInvalidBytes)
+QString qmudDecodeWindows1252(const QByteArrayView bytes)
+{
+	if (bytes.isEmpty())
+		return {};
+	QString output;
+	output.reserve(bytes.size());
+	for (const auto byte : bytes)
+		output.append(decodeWindows1252Byte(static_cast<unsigned char>(byte)));
+	return output;
+}
+
+QString qmudDecodeUtf8WithWindows1252Fallback(const QByteArrayView bytes, QByteArray &carry,
+                                              bool *hadInvalidBytes)
 {
 	if (hadInvalidBytes)
 		*hadInvalidBytes = false;
@@ -81,7 +93,7 @@ QString qmudDecodeUtf8WithWindows1252Fallback(const QByteArrayView bytes, QByteA
 	int i = 0;
 	while (i < buffer.size())
 	{
-		const unsigned char head = static_cast<unsigned char>(buffer.at(i));
+		const auto head = static_cast<unsigned char>(buffer.at(i));
 		if (head < 0x80)
 		{
 			output.append(QChar(head));
@@ -128,7 +140,7 @@ QString qmudDecodeUtf8WithWindows1252Fallback(const QByteArrayView bytes, QByteA
 		bool continuationValid = true;
 		for (int j = 1; j < sequenceLength; ++j)
 		{
-			const unsigned char continuation = static_cast<unsigned char>(buffer.at(i + j));
+			const auto continuation = static_cast<unsigned char>(buffer.at(i + j));
 			if ((continuation & 0xC0) != 0x80)
 			{
 				continuationValid = false;
