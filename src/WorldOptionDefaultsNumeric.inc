@@ -8,7 +8,7 @@
 
 #ifdef QMUD_INCLUDE_WORLD_OPTION_DEFAULTS_NUMERIC_ROWS
 
-	{"accept_chat_connections", false}, {"alternative_inverse", false}, {"alt_arrow_recalls_partial", false},
+{"accept_chat_connections", false}, {"alternative_inverse", false}, {"alt_arrow_recalls_partial", false},
     {"always_record_command_history", false}, {"arrows_change_history", true}, {"arrow_keys_wrap", false},
     {"arrow_recalls_partial", false}, {"autosay_exclude_macros", false}, {"autosay_exclude_non_alpha", false},
     {"auto_allow_files", false}, {"auto_allow_snooping", false}, {"auto_copy_to_clipboard_in_html", false},
@@ -24,8 +24,9 @@
     {"confirm_before_replacing_typing", false}, {"confirm_on_paste", true}, {"confirm_on_send", true},
     {"connect_method", eNoAutoConnect, eNoAutoConnect, eConnectTypeMax - 1},
     {"copy_selection_to_clipboard", false}, {"convert_ga_to_newline", true},
-    {"ctrl_n_goes_to_next_command", false}, {"ctrl_p_goes_to_previous_command", false},
-    {"ctrl_z_goes_to_end_of_buffer", false}, {"ctrl_backspace_deletes_last_word", false},
+    {"only_negotiate_telnet_options_once", false}, {"ctrl_n_goes_to_next_command", false},
+    {"ctrl_p_goes_to_previous_command", false}, {"ctrl_z_goes_to_end_of_buffer", false},
+    {"ctrl_backspace_deletes_last_word", false},
     {"custom_16_is_default_colour", false, 0, 0, OPT_UPDATE_VIEWS},
     {"default_trigger_send_to", eSendToWorld, eSendToWorld, eSendToLast - 1},
     {"default_trigger_sequence", DEFAULT_TRIGGER_SEQUENCE, 0, 10000}, {"default_trigger_regexp", false},

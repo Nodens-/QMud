@@ -46,6 +46,7 @@ class tst_WorldOptionDefaults : public QObject
 			QCOMPARE(attrs.value(QStringLiteral("utf_8")), QStringLiteral("y"));
 			QCOMPARE(attrs.value(QStringLiteral("persist_output_buffer")), QStringLiteral("y"));
 			QCOMPARE(attrs.value(QStringLiteral("persist_command_history")), QStringLiteral("y"));
+			QCOMPARE(attrs.value(QStringLiteral("only_negotiate_telnet_options_once")), QStringLiteral("n"));
 
 			QVERIFY(multilineAttrs.contains(QStringLiteral("connect_text")));
 			QVERIFY(multilineAttrs.contains(QStringLiteral("notes")));
@@ -82,7 +83,6 @@ class tst_WorldOptionDefaults : public QObject
 };
 
 QTEST_APPLESS_MAIN(tst_WorldOptionDefaults)
-
 
 #if __has_include("tst_WorldOptionDefaults.moc")
 #include "tst_WorldOptionDefaults.moc"

@@ -62,6 +62,35 @@ class tst_TelnetProcessor_Options : public QObject
 			QVERIFY(processor.takeOutboundData().isEmpty());
 		}
 
+		void repeatedSgaNegotiationRemainsEnabledByDefault()
+		{
+			TelnetProcessor processor;
+
+			processor.processBytes(bytes({IAC, WILL, SGA}));
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
+
+			processor.processBytes(bytes({IAC, WILL, SGA}));
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
+		}
+
+		void repeatedSgaNegotiationCanBeSuppressedWhenConfigured()
+		{
+			TelnetProcessor processor;
+			processor.setNegotiateOptionsOnce(true);
+
+			processor.processBytes(bytes({IAC, WILL, SGA}));
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
+
+			processor.processBytes(bytes({IAC, WILL, SGA}));
+			QVERIFY(processor.takeOutboundData().isEmpty());
+
+			processor.processBytes(bytes({IAC, DO, SGA}));
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, SGA}));
+
+			processor.processBytes(bytes({IAC, DO, SGA}));
+			QVERIFY(processor.takeOutboundData().isEmpty());
+		}
+
 		void queueEnableCompression2NegotiationSendsDoCompress2()
 		{
 			TelnetProcessor processor;

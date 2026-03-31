@@ -4573,13 +4573,16 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 	const bool    noEchoOff              = isEnabledFlag(noEchoOffFlag);
 	const QString disableCompressionFlag = m_worldAttributes.value(QStringLiteral("disable_compression"));
 	const bool    disableCompression     = isEnabledFlag(disableCompressionFlag);
-	const int     useMxp                 = m_worldAttributes.value(QStringLiteral("use_mxp")).toInt();
-	const QString terminalId             = m_worldAttributes.value(QStringLiteral("terminal_identification"));
+	const bool    negotiateOptionsOnce =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("only_negotiate_telnet_options_once")));
+	const int     useMxp     = m_worldAttributes.value(QStringLiteral("use_mxp")).toInt();
+	const QString terminalId = m_worldAttributes.value(QStringLiteral("terminal_identification"));
 
 	m_telnet.setUseUtf8(useUtf8);
 	m_telnet.setConvertGAtoNewline(convertGA);
 	m_telnet.setNoEchoOff(noEchoOff);
 	m_telnet.setDisableCompression(disableCompression);
+	m_telnet.setNegotiateOptionsOnce(negotiateOptionsOnce);
 	if (useMxp >= 0)
 		m_telnet.setUseMxp(useMxp);
 	updateTelnetWindowSizeForNaws();

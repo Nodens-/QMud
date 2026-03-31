@@ -81,12 +81,12 @@ class WorldPreferencesDialog : public QDialog
 		 * @param page Page enum value to activate.
 		 */
 		void setInitialPage(Page page);
-
-	protected:
 		/**
 		 * @brief Validates and applies all edited world preferences.
 		 */
 		void accept() override;
+
+	protected:
 		/**
 		 * @brief Handles dialog-level event filtering hooks.
 		 * @param obj Object that received the event.
@@ -194,7 +194,7 @@ class WorldPreferencesDialog : public QDialog
 		 */
 		void                          populateSound() const;
 		/**
-		 * @brief Populates custom colour page controls.
+		 * @brief Populates custom color page controls.
 		 */
 		void                          populateCustomColours();
 		/**
@@ -202,7 +202,7 @@ class WorldPreferencesDialog : public QDialog
 		 */
 		void                          populateLogging() const;
 		/**
-		 * @brief Populates ANSI colour page controls.
+		 * @brief Populates ANSI color page controls.
 		 */
 		void                          populateAnsiColours();
 		/**
@@ -361,7 +361,7 @@ class WorldPreferencesDialog : public QDialog
 		 */
 		static bool                   hasDefaultOutputFont();
 		/**
-		 * @brief Returns true when default colours file exists.
+		 * @brief Returns true when default colors file exists.
 		 * @return `true` when default colors resource file is present.
 		 */
 		static bool                   hasDefaultColoursFile();
@@ -448,7 +448,7 @@ class WorldPreferencesDialog : public QDialog
 		QPushButton                  *m_noActivitySound{nullptr};
 		QCheckBox                    *m_playSoundsInBackground{nullptr};
 
-		// Custom colours / ANSI colours
+		// Custom colors / ANSI colors
 		QVector<QLineEdit *>          m_customColourNames;
 		QVector<QPushButton *>        m_customTextSwatches;
 		QVector<QPushButton *>        m_customBackSwatches;
@@ -765,6 +765,7 @@ class WorldPreferencesDialog : public QDialog
 		QLineEdit                    *m_password{nullptr};
 		QTextEdit                    *m_connectText{nullptr};
 		QComboBox                    *m_connectMethod{nullptr};
+		QCheckBox                    *m_onlyNegotiateTelnetOptionsOnce{nullptr};
 		QLabel                       *m_connectLineCount{nullptr};
 
 		// MXP
