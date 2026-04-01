@@ -50,6 +50,16 @@ class tst_WorldOptions : public QObject
 			QCOMPARE(opt->maxValue, static_cast<long long>(MAX_LINE_WIDTH));
 		}
 
+		void regexpMatchEmptyOptionIsExposed()
+		{
+			const WorldNumericOption *opt =
+			    QMudWorldOptions::findWorldNumericOption(QStringLiteral("regexp_match_empty"));
+			QVERIFY(opt != nullptr);
+			QCOMPARE(opt->defaultValue, 1LL);
+			QCOMPARE(opt->minValue, 0LL);
+			QCOMPARE(opt->maxValue, 0LL);
+		}
+
 		void findUnknownReturnsNull()
 		{
 			QCOMPARE(QMudWorldOptions::findWorldNumericOption(QStringLiteral("not_an_option")),
@@ -59,7 +69,6 @@ class tst_WorldOptions : public QObject
 };
 
 QTEST_APPLESS_MAIN(tst_WorldOptions)
-
 
 #if __has_include("tst_WorldOptions.moc")
 #include "tst_WorldOptions.moc"

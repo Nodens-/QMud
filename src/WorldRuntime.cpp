@@ -144,6 +144,20 @@ namespace
 		return static_cast<int>(size);
 	}
 
+	bool worldAttributeAffectsCommandProcessor(const QString &key)
+	{
+		return key.compare(QStringLiteral("speed_walk_delay"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("speed_walk_filler"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("translate_german"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("translate_backslash_sequences"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("enable_spam_prevention"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("spam_line_count"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("spam_message"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("do_not_translate_iac_to_iac_iac"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("regexp_match_empty"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("utf_8"), Qt::CaseInsensitive) == 0;
+	}
+
 	int safeQInt64ToInt(const qint64 value)
 	{
 		if (value <= 0)
@@ -12720,6 +12734,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 		}
 	}
 	m_loadingDocument = false;
+	refreshCommandProcessorOptions();
 	installPendingPlugins();
 }
 
@@ -12749,6 +12764,8 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 		if (m_view)
 			m_view->applyRuntimeSettingsWithoutOutputRebuild();
 	}
+	if (!m_loadingDocument && worldAttributeAffectsCommandProcessor(key))
+		refreshCommandProcessorOptions();
 	if (!m_loadingDocument)
 		m_worldFileModified = true;
 	emit worldAttributeChanged(key);

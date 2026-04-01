@@ -104,6 +104,19 @@ namespace
 		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 	}
 
+	QString rightTrimmedTriggerLine(const QString &line)
+	{
+		qsizetype end = line.size();
+		while (end > 0)
+		{
+			const QChar ch = line.at(end - 1);
+			if (ch != QLatin1Char(' ') && ch != QLatin1Char('\t'))
+				break;
+			--end;
+		}
+		return end == line.size() ? line : line.left(end);
+	}
+
 	QString fixUpGerman(const QString &message)
 	{
 		QString result = message;
@@ -746,6 +759,8 @@ void WorldCommandProcessor::setRuntime(WorldRuntime *runtime)
 	m_doNotTranslateIac                 = isEnabledValue(noTranslateIac);
 	const QString matchEmpty            = attrs.value(QStringLiteral("regexp_match_empty"));
 	m_regexpMatchEmpty                  = !(matchEmpty == QStringLiteral("0") ||
+                           matchEmpty.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+                           matchEmpty.compare(QStringLiteral("no"), Qt::CaseInsensitive) == 0 ||
                            matchEmpty.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
 	const QString utf8                  = attrs.value(QStringLiteral("utf_8"));
 	m_utf8                              = isEnabledValue(utf8);
@@ -2494,13 +2509,16 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	if (!m_runtime)
 		return result;
 
-	auto attrTrue = [](const QString &value)
+	const QString triggerLine = rightTrimmedTriggerLine(line);
+
+	auto          attrTrue = [](const QString &value)
 	{
 		return value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 || value == QStringLiteral("1") ||
 		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 	};
 
-	m_runtime->addRecentLine(line);
+	// Trigger matching parity: evaluate line text without trailing horizontal whitespace.
+	m_runtime->addRecentLine(triggerLine);
 	m_runtime->setLineOmittedFromOutput(false);
 
 	const QMap<QString, QString> &worldAttrs = m_runtime->worldAttributes();
@@ -2680,7 +2698,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 			QString    target =
                 multiLine ? buildTarget(trigger.attributes.value(QStringLiteral("lines_to_match")).toInt())
-			                 : line;
+			                 : triggerLine;
 			trigger.lastMatchTarget = target;
 
 			if (attrTrue(trigger.attributes.value(QStringLiteral("expand_variables"))) &&
@@ -2705,18 +2723,6 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 			if (!multiLine)
 			{
-				QColor fore;
-				QColor back;
-				bool   bold      = false;
-				bool   italic    = false;
-				bool   underline = false;
-				bool   inverse   = false;
-				if (!styleAtColumn(startCol, fore, back, bold, italic, underline, inverse))
-					continue;
-
-				if (inverse)
-					qSwap(fore, back);
-
 				const bool matchTextColour =
 				    attrTrue(trigger.attributes.value(QStringLiteral("match_text_colour")));
 				const bool matchBack =
@@ -2726,53 +2732,74 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				const bool matchUnderline =
 				    attrTrue(trigger.attributes.value(QStringLiteral("match_underline")));
 				const bool matchInverse = attrTrue(trigger.attributes.value(QStringLiteral("match_inverse")));
+				const bool requiresStyleState = matchTextColour || matchBack || matchBold || matchItalic ||
+				                                matchUnderline || matchInverse;
 
-				if (matchTextColour)
+				if (requiresStyleState)
 				{
-					if (const int expected = trigger.attributes.value(QStringLiteral("text_colour")).toInt();
-					    colourIndexFor(fore) != expected)
-					{
+					QColor fore;
+					QColor back;
+					bool   bold      = false;
+					bool   italic    = false;
+					bool   underline = false;
+					bool   inverse   = false;
+					if (!styleAtColumn(startCol, fore, back, bold, italic, underline, inverse))
 						continue;
+
+					if (inverse)
+						qSwap(fore, back);
+
+					if (matchTextColour)
+					{
+						if (const int expected =
+						        trigger.attributes.value(QStringLiteral("text_colour")).toInt();
+						    colourIndexFor(fore) != expected)
+						{
+							continue;
+						}
 					}
-				}
-				if (matchBack)
-				{
-					if (const int expected = trigger.attributes.value(QStringLiteral("back_colour")).toInt();
-					    colourIndexFor(back) != expected)
+					if (matchBack)
 					{
-						continue;
+						if (const int expected =
+						        trigger.attributes.value(QStringLiteral("back_colour")).toInt();
+						    colourIndexFor(back) != expected)
+						{
+							continue;
+						}
 					}
-				}
-				if (matchBold)
-				{
-					if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("bold")));
-					    bold != desired)
+					if (matchBold)
 					{
-						continue;
+						if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("bold")));
+						    bold != desired)
+						{
+							continue;
+						}
 					}
-				}
-				if (matchItalic)
-				{
-					if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("italic")));
-					    italic != desired)
+					if (matchItalic)
 					{
-						continue;
+						if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("italic")));
+						    italic != desired)
+						{
+							continue;
+						}
 					}
-				}
-				if (matchUnderline)
-				{
-					if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("underline")));
-					    underline != desired)
+					if (matchUnderline)
 					{
-						continue;
+						if (const bool desired =
+						        attrTrue(trigger.attributes.value(QStringLiteral("underline")));
+						    underline != desired)
+						{
+							continue;
+						}
 					}
-				}
-				if (matchInverse)
-				{
-					if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("inverse")));
-					    inverse != desired)
+					if (matchInverse)
 					{
-						continue;
+						if (const bool desired =
+						        attrTrue(trigger.attributes.value(QStringLiteral("inverse")));
+						    inverse != desired)
+						{
+							continue;
+						}
 					}
 				}
 			}
@@ -2889,7 +2916,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				script.plugin         = plugin;
 				script.index          = index;
 				script.label          = scriptLabel;
-				script.line           = line;
+				script.line           = multiLine ? line : triggerLine;
 				script.wildcards      = wildcards;
 				script.namedWildcards = namedWildcards;
 				result.triggerScripts.push_back(script);

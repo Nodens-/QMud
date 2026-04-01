@@ -68,6 +68,7 @@
     {"log_input", false, 0, 0, 0}, {"log_in_colour", false, 0, 0, 0}, {"log_notes", false, 0, 0, 0},
     {"log_output", true, 0, 0, 0}, {"log_raw", false, 0, 0, 0}, {"log_script_errors", false, 0, 0, 0},
     {"lower_case_tab_completion", false, 0, 0, 0}, {"map_failure_regexp", false, 0, 0, 0},
+    {"regexp_match_empty", true, 0, 0, 0},
     {"max_output_lines", 5000, 200, 500000, OPT_FIX_OUTPUT_BUFFER},
     {"mud_can_change_link_colour", true, 0, 0, OPT_SERVER_CAN_WRITE},
     {"mud_can_remove_underline", false, 0, 0, OPT_SERVER_CAN_WRITE},

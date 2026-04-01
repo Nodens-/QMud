@@ -10681,6 +10681,45 @@ static void registerLuaPreloads(lua_State *L)
 	lua_pop(L, 2);
 }
 
+static bool requireModuleNoThrow(lua_State *L, const char *moduleName)
+{
+	if (!L || !moduleName || *moduleName == '\0')
+		return false;
+
+	const int stackTop = lua_gettop(L);
+	lua_getglobal(L, "require");
+	if (!lua_isfunction(L, -1))
+	{
+		lua_settop(L, stackTop);
+		return false;
+	}
+	lua_pushstring(L, moduleName);
+	if (lua_pcall(L, 1, 1, 0) != 0)
+	{
+		lua_settop(L, stackTop);
+		return false;
+	}
+
+	lua_settop(L, stackTop);
+	return true;
+}
+
+static void registerSocketLibraries(lua_State *L)
+{
+	// Load networking modules while package C loaders are still available.
+	// When package restrictions are applied afterwards, already-loaded modules
+	// remain usable and preserve Mushclient-compatible socket.http behavior.
+	(void)requireModuleNoThrow(L, "socket.core");
+	(void)requireModuleNoThrow(L, "mime.core");
+	(void)requireModuleNoThrow(L, "socket");
+	(void)requireModuleNoThrow(L, "mime");
+	(void)requireModuleNoThrow(L, "ltn12");
+	(void)requireModuleNoThrow(L, "socket.url");
+	(void)requireModuleNoThrow(L, "socket.http");
+	(void)requireModuleNoThrow(L, "ssl");
+	(void)requireModuleNoThrow(L, "ssl.https");
+}
+
 static void registerSqliteLibrary(lua_State *L)
 {
 	// Prefer standard Lua loader path first.
@@ -18596,6 +18635,7 @@ void LuaCallbackEngine::registerWorldBindings()
 	registerSqliteLibrary(m_state);
 	registerBcLibrary(m_state);
 	registerLpegLibrary(m_state);
+	registerSocketLibraries(m_state);
 	registerProgressLibrary(m_state);
 
 	QSet<QString> registered;

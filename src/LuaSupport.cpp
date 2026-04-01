@@ -289,14 +289,32 @@ if require and not rawget(_G, "__qmud_require_compat_wrapped") then
       return page, code, headers, status
     end
 
+    local function should_fallback_to_raw(first, code)
+      if first ~= nil then
+        return false
+      end
+      if type(code) ~= "string" then
+        return false
+      end
+      return code:find("create function not permitted", 1, true) ~= nil
+    end
+
     mod.request = function(reqt, body)
       if is_https_request(reqt) then
         local ok_https, https_mod = pcall(_require, "ssl.https")
         if ok_https and type(https_mod) == "table" and type(https_mod.request) == "function" then
           if type(reqt) == "table" then
-            return https_mod.request(reqt)
+            local first, code, headers, status = https_mod.request(reqt)
+            if should_fallback_to_raw(first, code) then
+              return raw_request(reqt, body)
+            end
+            return first, code, headers, status
           end
-          return request_https_string(https_mod, reqt, body)
+          local first, code, headers, status = request_https_string(https_mod, reqt, body)
+          if should_fallback_to_raw(first, code) then
+            return raw_request(reqt, body)
+          end
+          return first, code, headers, status
         end
       end
       return raw_request(reqt, body)

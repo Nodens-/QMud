@@ -382,6 +382,36 @@ class tst_LuaSupportCompat : public QObject
 			QCOMPARE(result.value, QStringLiteral("201|plain"));
 		}
 
+		void socketHttpRequireShimFallsBackToRawWhenSslHttpsRejectsCreateFunction()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			const auto result = evaluateLuaToString(
+			    state.get(), QByteArrayLiteral("package.preload[\"socket.http\"] = function()\n"
+			                                   "  return {\n"
+			                                   "    request = function(reqt, body)\n"
+			                                   "      return \"raw:\" .. tostring(reqt), 206, { src = "
+			                                   "\"raw\" }\n"
+			                                   "    end\n"
+			                                   "  }\n"
+			                                   "end\n"
+			                                   "package.preload[\"ssl.https\"] = function()\n"
+			                                   "  return {\n"
+			                                   "    request = function(reqt, body)\n"
+			                                   "      return nil, \"create function not permitted\"\n"
+			                                   "    end\n"
+			                                   "  }\n"
+			                                   "end\n"
+			                                   "local http = require(\"socket.http\")\n"
+			                                   "local page, code, headers = "
+			                                   "http.request(\"https://example.invalid/path\", \"map=x\")\n"
+			                                   "return tostring(page) .. \"|\" .. tostring(code) .. "
+			                                   "\"|\" .. tostring(headers and headers.src)"));
+			QVERIFY2(result.ok, qPrintable(result.error));
+			QCOMPARE(result.value, QStringLiteral("raw:https://example.invalid/path|206|raw"));
+		}
+
 		void socketHttpRequireShimPatchesRealModulesForHttps()
 		{
 			LuaStateOwner state = makeCompatLuaState();
