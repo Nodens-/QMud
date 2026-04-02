@@ -3201,6 +3201,116 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void outputFindActivatesSplitAndAnchorsLivePaneAtBottom()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 320; ++i)
+			{
+				if (i == 48)
+					view.appendOutputText(QStringLiteral("find_split_target_alpha"), true);
+				else
+					view.appendOutputText(QStringLiteral("find-split-fill-%1").arg(i), true);
+			}
+			QCoreApplication::processEvents();
+			QVERIFY(!view.isScrollbackSplitActive());
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(QStringLiteral("find_split_target_alpha"));
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			QVERIFY(view.doOutputFind(false));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("find_split_target_alpha"));
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+
+			const auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar  = splitTop->verticalScrollBar();
+			QScrollBar *liveBar = splitBottom->verticalScrollBar();
+			QVERIFY(topBar);
+			QVERIFY(liveBar);
+			QTRY_VERIFY(topBar->value() < topBar->maximum());
+			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+
+			view.appendOutputText(QStringLiteral("find-split-live-tail"), true);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+
+			resetTestState();
+		}
+
+		void outputFindAgainKeepsSplitResultInTopPaneAndLivePaneAnchored()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 360; ++i)
+			{
+				if (i == 90 || i == 190)
+					view.appendOutputText(QStringLiteral("find_split_target_beta"), true);
+				else
+					view.appendOutputText(QStringLiteral("find-next-split-fill-%1").arg(i), true);
+			}
+			QCoreApplication::processEvents();
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(QStringLiteral("find_split_target_beta"));
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			QVERIFY(view.doOutputFind(false));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("find_split_target_beta"));
+			const int firstMatchLine = view.outputSelectionStartLine();
+			QVERIFY(firstMatchLine > 0);
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+
+			const auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar  = splitTop->verticalScrollBar();
+			QScrollBar *liveBar = splitBottom->verticalScrollBar();
+			QVERIFY(topBar);
+			QVERIFY(liveBar);
+			QTRY_VERIFY(topBar->value() < topBar->maximum());
+			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+
+			QVERIFY(view.doOutputFind(true));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("find_split_target_beta"));
+			const int nextMatchLine = view.outputSelectionStartLine();
+			QVERIFY(nextMatchLine > 0);
+			QVERIFY(nextMatchLine < firstMatchLine);
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			QTRY_VERIFY(topBar->value() < topBar->maximum());
+			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+
+			resetTestState();
+		}
+
 		void historyRecallWorksWhileOutputSelectionIsActive()
 		{
 			resetTestState();

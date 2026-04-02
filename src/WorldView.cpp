@@ -4117,6 +4117,52 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 	endColumn          = qBound(startColumn, endColumn, textSize);
 	const_cast<WorldView *>(this)->setNativeOutputSelection(m_output, {zeroBasedLine, startColumn},
 	                                                        {zeroBasedLine, endColumn}, false);
+
+	if (!m_output || !m_output->viewport())
+		return;
+
+	QScrollBar *const bar = m_output->verticalScrollBar();
+	if (!bar)
+		return;
+
+	const QRect viewportRect = m_output->viewport()->rect();
+	if (viewportRect.isEmpty())
+		return;
+
+	const bool  wrapEnabled          = m_output->lineWrapMode() != WrapTextBrowser::NoWrap;
+	const int   wrapWidthPixels      = nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
+	const int   localWrapWidthPixels = nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
+	const int   lineSpacingSetting   = qMax(0, m_lineSpacing);
+	const QFont layoutFont           = m_output->font();
+	ensureNativeLayoutCaches(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting, layoutFont);
+
+	if (zeroBasedLine + 1 >= m_nativeLayoutCumulativeHeights.size())
+		return;
+
+	const int lineTop =
+	    qMax(0, static_cast<int>(std::floor(m_nativeLayoutCumulativeHeights.at(zeroBasedLine))));
+	const int lineBottom =
+	    qMax(lineTop + 1, static_cast<int>(std::ceil(m_nativeLayoutCumulativeHeights.at(zeroBasedLine + 1))));
+
+	const int currentTop    = bar->value();
+	const int pageStep      = qMax(1, bar->pageStep());
+	const int currentBottom = currentTop + pageStep;
+	int       target        = currentTop;
+	if (lineTop < currentTop)
+		target = lineTop;
+	else if (lineBottom > currentBottom)
+		target = lineBottom - pageStep;
+
+	target = qBound(bar->minimum(), target, bar->maximum());
+	if (target < bar->maximum())
+		const_cast<WorldView *>(this)->setScrollbackSplitActive(true);
+	if (target != bar->value())
+	{
+		if (m_outputScrollBar)
+			m_outputScrollBar->setValue(target);
+		else
+			bar->setValue(target);
+	}
 }
 
 void WorldView::setOutputSelection(int startLine, int endLine, int startColumn, int endColumn) const
