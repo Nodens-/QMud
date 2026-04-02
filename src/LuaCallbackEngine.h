@@ -11,8 +11,10 @@
 #define QMUD_LUACALLBACKENGINE_H
 
 #include <QSet>
+#include <QHash>
 #include <QString>
 #include <QVector>
+#include <functional>
 #include <memory>
 
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
@@ -48,6 +50,8 @@ struct LuaStyleRun
 class LuaCallbackEngine
 {
 	public:
+		using CallbackCatalogObserver = std::function<void()>;
+
 		/**
 		 * @brief Constructs callback engine with no loaded script.
 		 */
@@ -304,6 +308,26 @@ class LuaCallbackEngine
 		 * @return Immutable set of discovered function names.
 		 */
 		[[nodiscard]] const QSet<QString> &luaFunctionsSet() const;
+		/**
+		 * @brief Assigns observer invoked when Lua callback catalog changes.
+		 * @param observer Observer callback.
+		 */
+		void                               setCallbackCatalogObserver(CallbackCatalogObserver observer);
+		/**
+		 * @brief Sets tracked plugin-callback names whose presence should be monitored.
+		 * @param callbackNames Callback names to monitor.
+		 */
+		void                               setObservedPluginCallbacks(const QSet<QString> &callbackNames);
+		/**
+		 * @brief Returns whether monitored callback is currently available.
+		 * @param functionName Callback function name.
+		 * @return `true` when callback exists in current Lua state.
+		 */
+		[[nodiscard]] bool                 hasObservedPluginCallback(const QString &functionName) const;
+		/**
+		 * @brief Refreshes monitored callback-presence map and notifies observer on changes.
+		 */
+		void                               refreshLuaCallbackCatalogNow();
 
 	private:
 		/**
@@ -331,7 +355,10 @@ class LuaCallbackEngine
 		bool                                        m_packageRestrictionsApplied{false};
 		bool                                        m_packageRestrictionsAppliedValue{true};
 #endif
-		QSet<QString> m_luaFunctionsSet;
+		QSet<QString>           m_luaFunctionsSet;
+		QSet<QString>           m_observedPluginCallbacks;
+		QHash<QString, bool>    m_observedPluginCallbackPresence;
+		CallbackCatalogObserver m_callbackCatalogObserver;
 };
 
 #endif // QMUD_LUACALLBACKENGINE_H

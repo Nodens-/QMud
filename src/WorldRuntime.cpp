@@ -25,6 +25,7 @@
 #include "MiniWindowBrushUtils.h"
 #include "MxpDiagnostics.h"
 #include "NameGeneration.h"
+#include "PluginCallbackCatalogUtils.h"
 #include "SqliteCompat.h"
 #include "StringUtils.h"
 #include "TimeFormatUtils.h"
@@ -34,6 +35,7 @@
 #include "WorldDocument.h"
 #include "WorldOptionDefaults.h"
 #include "WorldOptions.h"
+#include "WorldRuntimeAttributeUtils.h"
 #include "WorldSocket.h"
 #include "WorldView.h"
 #include "scripting/ScriptingErrors.h"
@@ -66,6 +68,7 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QScreen>
 #include <QStack>
 #include <QStringConverter>
@@ -11154,39 +11157,84 @@ QString WorldRuntime::mainTitleOverride() const
 
 bool WorldRuntime::hasAnyPluginCallback(const QString &functionName)
 {
-	if (functionName.isEmpty() || m_plugins.isEmpty())
+	if (functionName.isEmpty())
+		return false;
+
+	noteObservedPluginCallbackQuery(m_observedPluginCallbackQueryGeneration, functionName,
+	                                m_observedPluginCallbackGeneration);
+
+	if (ensureObservedPluginCallback(m_observedPluginCallbacks, functionName))
+	{
+		for (auto &plugin : m_plugins)
+		{
+			if (plugin.lua)
+				plugin.lua->setObservedPluginCallbacks(m_observedPluginCallbacks);
+		}
+		m_pluginCallbackPresenceDirty = true;
+	}
+
+	if (m_plugins.isEmpty())
 		return false;
 
 	const int pluginCount = safeQSizeToInt(m_plugins.size());
 	if (m_pluginCallbackPresencePluginCount != pluginCount)
 	{
-		m_pluginCallbackPresence.clear();
 		m_pluginCallbackPresencePluginCount = pluginCount;
+		m_pluginCallbackPresenceDirty       = true;
 	}
 
-	const qint64     nowMs                       = QDateTime::currentMSecsSinceEpoch();
-	const auto       it                          = m_pluginCallbackPresence.constFind(functionName);
-	constexpr qint64 kCallbackPresenceCacheTtlMs = 2000;
-	if (it != m_pluginCallbackPresence.constEnd() &&
-	    (nowMs - it->lastCheckedMs) < kCallbackPresenceCacheTtlMs)
+	if (m_pluginCallbackPresenceDirty)
+		rebuildPluginCallbackPresenceCache();
+	return m_pluginCallbackPresenceCounts.value(functionName) > 0;
+}
+
+void WorldRuntime::invalidatePluginCallbackPresenceCache()
+{
+	m_pluginCallbackPresenceDirty = true;
+}
+
+void WorldRuntime::rebuildPluginCallbackPresenceCache()
+{
+	m_pluginCallbackPresenceCounts.clear();
+	pruneStaleObservedPluginCallbacks(m_observedPluginCallbacks, m_observedPluginCallbackQueryGeneration,
+	                                  m_observedPluginCallbackGeneration,
+	                                  observedPluginCallbackRetentionGenerations());
+
+	if (m_observedPluginCallbacks.isEmpty())
 	{
-		return it->hasAny;
+		m_pluginCallbackPresencePluginCount = safeQSizeToInt(m_plugins.size());
+		m_pluginCallbackPresenceDirty       = false;
+		advanceObservedPluginCallbackGeneration(m_observedPluginCallbackGeneration);
+		return;
 	}
 
-	bool hasAny = false;
-	for (const auto &plugin : m_plugins)
+	for (auto &plugin : m_plugins)
 	{
 		if (!canExecutePlugin(plugin) || !plugin.lua)
 			continue;
-		if (plugin.lua->hasFunction(functionName))
+		plugin.lua->setObservedPluginCallbacks(m_observedPluginCallbacks);
+		if (!plugin.lua->loadScript())
+			continue;
+		for (const QString &name : m_observedPluginCallbacks)
 		{
-			hasAny = true;
-			break;
+			if (name.isEmpty())
+				continue;
+			if (plugin.lua->hasObservedPluginCallback(name))
+				++m_pluginCallbackPresenceCounts[name];
 		}
 	}
+	m_pluginCallbackPresencePluginCount = safeQSizeToInt(m_plugins.size());
+	m_pluginCallbackPresenceDirty       = false;
+	advanceObservedPluginCallbackGeneration(m_observedPluginCallbackGeneration);
+}
 
-	m_pluginCallbackPresence.insert(functionName, {hasAny, nowMs});
-	return hasAny;
+void WorldRuntime::bindPluginCallbackObserver(const Plugin &plugin)
+{
+	if (!plugin.lua)
+		return;
+	plugin.lua->setObservedPluginCallbacks(m_observedPluginCallbacks);
+	plugin.lua->setCallbackCatalogObserver([this] { invalidatePluginCallbackPresenceCache(); });
+	invalidatePluginCallbackPresenceCache();
 }
 
 bool WorldRuntime::callPluginCallbacksStopOnFalse(const QString &functionName, const QString &payload)
@@ -12575,6 +12623,11 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 		m_printingStyles.push_back(rp);
 	}
 	m_plugins.clear();
+	resetObservedPluginCallbackTracking(m_observedPluginCallbacks, m_observedPluginCallbackQueryGeneration,
+	                                    m_observedPluginCallbackGeneration);
+	m_pluginCallbackPresenceCounts.clear();
+	m_pluginCallbackPresencePluginCount = -1;
+	invalidatePluginCallbackPresenceCache();
 	for (const auto &p : doc.plugins())
 	{
 		Plugin rp;
@@ -12677,6 +12730,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 			rp.lua->setScriptText(rp.script);
 			rp.lua->setPluginInfo(rp.attributes.value(QStringLiteral("id")),
 			                      rp.attributes.value(QStringLiteral("name")));
+			bindPluginCallbackObserver(rp);
 		}
 		if (!requestedEnabled && rp.lua && hasValidPluginId(rp))
 		{
@@ -12687,6 +12741,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	}
 	sortPluginsBySequence();
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
+	invalidatePluginCallbackPresenceCache();
 	for (auto &plugin : m_plugins)
 	{
 		queuePluginInstall(plugin);
@@ -12791,7 +12846,8 @@ const QMap<QString, QString> &WorldRuntime::worldMultilineAttributes() const
 
 void WorldRuntime::setWorldMultilineAttribute(const QString &key, const QString &value)
 {
-	m_worldMultilineAttributes.insert(key, value);
+	if (!upsertWorldMultilineAttributeIfChanged(m_worldMultilineAttributes, key, value))
+		return;
 	if (!m_loadingDocument)
 		m_worldFileModified = true;
 	if (key == QStringLiteral("script"))
@@ -13967,6 +14023,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 		rp.lua->setScriptText(rp.script);
 		rp.lua->setPluginInfo(rp.attributes.value(QStringLiteral("id")),
 		                      rp.attributes.value(QStringLiteral("name")));
+		bindPluginCallbackObserver(rp);
 	}
 	if (!requestedEnabled && rp.lua && hasValidPluginId(rp))
 	{
@@ -13978,6 +14035,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 	sortPluginsBySequence();
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
 	noteTimerStructureMutation();
+	invalidatePluginCallbackPresenceCache();
 
 	// Queue install for the plugin we just loaded (not "last after sort"),
 	// otherwise lower-sequence plugins can remain permanently install-pending.
@@ -14005,6 +14063,7 @@ bool WorldRuntime::unloadPlugin(const QString &pluginId, QString *error)
 	m_plugins.removeAt(index);
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
 	noteTimerStructureMutation();
+	invalidatePluginCallbackPresenceCache();
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginListChanged"));
 	return true;
 }
@@ -14021,6 +14080,7 @@ bool WorldRuntime::enablePlugin(const QString &pluginId, bool enable)
 		{
 			plugin.disableAfterInstall = false;
 			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+			invalidatePluginCallbackPresenceCache();
 			if (!m_loadingDocument)
 				m_worldFileModified = true;
 		}
@@ -14045,6 +14105,7 @@ bool WorldRuntime::enablePlugin(const QString &pluginId, bool enable)
 	}
 	if (!m_loadingDocument)
 		m_worldFileModified = true;
+	invalidatePluginCallbackPresenceCache();
 	return true;
 }
 
@@ -14179,6 +14240,13 @@ int WorldRuntime::callPluginLua(const QString &pluginId, const QString &routine,
 		lua_pushstring(callerState, error.toLocal8Bit().constData());
 		return 2;
 	}
+
+	[[maybe_unused]] const auto refreshCallbackCatalog = qScopeGuard(
+	    [&plugin]
+	    {
+		    if (plugin.lua)
+			    plugin.lua->refreshLuaCallbackCatalogNow();
+	    });
 
 	auto pushNestedFunction = [](lua_State *L, const QString &dottedName) -> bool
 	{
@@ -18473,28 +18541,38 @@ void WorldRuntime::queuePluginInstall(Plugin &plugin)
 {
 	if (!plugin.lua || !hasValidPluginId(plugin))
 		return;
+
+	const auto setInstallPending = [this, &plugin](const bool pending)
+	{
+		if (plugin.installPending == pending)
+			return;
+		plugin.installPending = pending;
+		invalidatePluginCallbackPresenceCache();
+	};
+
 	if (!plugin.enabled && !plugin.disableAfterInstall)
 	{
-		plugin.installPending = true;
+		setInstallPending(true);
 		return;
 	}
 	if (m_loadingDocument || m_pluginInstallDeferred)
 	{
-		plugin.installPending = true;
+		setInstallPending(true);
 		return;
 	}
 	const bool installReady =
 	    m_view && m_view->isVisible() && m_view->outputClientWidth() > 0 && m_view->outputClientHeight() > 0;
 	if (installReady)
 	{
-		plugin.installPending = false;
+		setInstallPending(false);
 		runPluginInstallCallback(plugin);
+		invalidatePluginCallbackPresenceCache();
 		notifyWorldOutputResized();
 		notifyDrawOutputWindow(1, 0);
 	}
 	else
 	{
-		plugin.installPending = true;
+		setInstallPending(true);
 	}
 }
 
@@ -18541,8 +18619,16 @@ void WorldRuntime::installPendingPlugins()
 
 	// Preserve startup behavior: once install starts, plugins can see each other
 	// as install-ready during OnPluginInstall callbacks.
+	bool installPendingStateChanged = false;
 	for (const int index : pendingIndices)
+	{
+		if (!m_plugins[index].installPending)
+			continue;
 		m_plugins[index].installPending = false;
+		installPendingStateChanged      = true;
+	}
+	if (installPendingStateChanged)
+		invalidatePluginCallbackPresenceCache();
 
 	bool installedAny = false;
 	for (const int index : pendingIndices)
@@ -18555,6 +18641,7 @@ void WorldRuntime::installPendingPlugins()
 	}
 	if (installedAny)
 	{
+		invalidatePluginCallbackPresenceCache();
 		notifyWorldOutputResized();
 		notifyDrawOutputWindow(1, 0);
 	}

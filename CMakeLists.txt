@@ -256,6 +256,7 @@ set(QMUD_HEADERS
         ReloadStateUtils.h
         WorldSessionRestoreFlowUtils.h
         WorldSessionStateUtils.h
+        PluginCallbackCatalogUtils.h
         Accelerators.h
         AcceleratorUtils.h
         AliasMatchUtils.h
@@ -278,6 +279,7 @@ set(QMUD_HEADERS
         dialogs/ImportXmlDialog.h
         WorldDocument.h
         WorldRuntime.h
+        WorldRuntimeAttributeUtils.h
         MiniWindow.h
         MiniWindowBrushUtils.h
         WorldCommandProcessor.h

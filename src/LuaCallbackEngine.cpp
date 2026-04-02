@@ -439,6 +439,13 @@ void LuaCallbackEngine::setScriptText(const QString &script)
 {
 	m_script       = script;
 	m_scriptLoaded = false;
+	m_luaFunctionsSet.clear();
+	if (!m_observedPluginCallbackPresence.isEmpty())
+	{
+		m_observedPluginCallbackPresence.clear();
+		if (m_callbackCatalogObserver)
+			m_callbackCatalogObserver();
+	}
 }
 
 bool LuaCallbackEngine::loadScript()
@@ -453,12 +460,16 @@ bool LuaCallbackEngine::loadScript()
 void LuaCallbackEngine::resetState()
 {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
+	const bool hadObservedCallbacks = !m_observedPluginCallbackPresence.isEmpty();
 	m_ownedState.reset();
 	m_state = nullptr;
 	m_luaFunctionsSet.clear();
+	m_observedPluginCallbackPresence.clear();
 	m_worldBindingsReady         = false;
 	m_scriptLoaded               = false;
 	m_packageRestrictionsApplied = false;
+	if (hadObservedCallbacks && m_callbackCatalogObserver)
+		m_callbackCatalogObserver();
 #endif
 }
 
@@ -499,6 +510,57 @@ int LuaCallbackEngine::scriptExecutionDepth() const
 const QSet<QString> &LuaCallbackEngine::luaFunctionsSet() const
 {
 	return m_luaFunctionsSet;
+}
+
+void LuaCallbackEngine::setCallbackCatalogObserver(CallbackCatalogObserver observer)
+{
+	m_callbackCatalogObserver = std::move(observer);
+}
+
+void LuaCallbackEngine::setObservedPluginCallbacks(const QSet<QString> &callbackNames)
+{
+	if (m_observedPluginCallbacks == callbackNames)
+		return;
+	m_observedPluginCallbacks = callbackNames;
+	refreshLuaCallbackCatalogNow();
+}
+
+bool LuaCallbackEngine::hasObservedPluginCallback(const QString &functionName) const
+{
+	return m_observedPluginCallbackPresence.value(functionName, false);
+}
+
+void LuaCallbackEngine::refreshLuaCallbackCatalogNow()
+{
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+	if (m_observedPluginCallbacks.isEmpty())
+	{
+		if (m_observedPluginCallbackPresence.isEmpty())
+			return;
+		m_observedPluginCallbackPresence.clear();
+		if (m_callbackCatalogObserver)
+			m_callbackCatalogObserver();
+		return;
+	}
+
+	QHash<QString, bool> refreshed;
+	refreshed.reserve(m_observedPluginCallbacks.size());
+	for (const QString &callbackName : m_observedPluginCallbacks)
+	{
+		bool present = false;
+		if (m_state && !callbackName.isEmpty() && pushLuaFunctionByName(m_state, callbackName))
+		{
+			present = true;
+			lua_pop(m_state, 1);
+		}
+		refreshed.insert(callbackName, present);
+	}
+	if (refreshed == m_observedPluginCallbackPresence)
+		return;
+	m_observedPluginCallbackPresence = std::move(refreshed);
+	if (m_callbackCatalogObserver)
+		m_callbackCatalogObserver();
+#endif
 }
 
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
@@ -625,7 +687,11 @@ class ScriptExecutionDepthGuard
 		~ScriptExecutionDepthGuard()
 		{
 			if (m_engine)
+			{
 				m_engine->popScriptExecutionDepth();
+				if (m_engine->scriptExecutionDepth() == 0)
+					m_engine->refreshLuaCallbackCatalogNow();
+			}
 		}
 
 	private:
@@ -18513,6 +18579,7 @@ bool LuaCallbackEngine::ensureState()
 		{
 			m_scriptLoaded = true;
 			refreshLuaFunctionSetForState(m_state, m_luaFunctionsSet);
+			refreshLuaCallbackCatalogNow();
 			return true;
 		}
 		if (const QByteArray scriptBytes = m_script.toUtf8();
@@ -18527,6 +18594,7 @@ bool LuaCallbackEngine::ensureState()
 		}
 		m_scriptLoaded = true;
 		refreshLuaFunctionSetForState(m_state, m_luaFunctionsSet);
+		refreshLuaCallbackCatalogNow();
 	}
 
 	return true;

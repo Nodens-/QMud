@@ -1735,6 +1735,31 @@ void WorldView::requestNativeOutputRepaint(const QRect &rect) const
 		m_nativeOutputCanvas->update();
 }
 
+void WorldView::primeNativeOutputCaches() const
+{
+	if (!m_output || !m_output->viewport() || !m_nativeOutputCanvas)
+		return;
+	if (!isVisible() || !m_output->viewport()->isVisible())
+		return;
+	if (m_runtime && !m_runtime->isActive())
+		return;
+
+	const QRect viewportRect = m_output->viewport()->rect();
+	if (viewportRect.width() <= 0 || viewportRect.height() <= 0)
+		return;
+
+	const QVector<NativeOutputRenderLine> lines = nativeOutputRenderLines();
+	if (lines.isEmpty())
+		return;
+
+	const bool  wrapEnabled          = m_output->lineWrapMode() != WrapTextBrowser::NoWrap;
+	const int   wrapWidthPixels      = nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
+	const int   localWrapWidthPixels = nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
+	const int   lineSpacingSetting   = qMax(0, m_lineSpacing);
+	const QFont layoutFont           = m_output->font();
+	ensureNativeLayoutCaches(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting, layoutFont);
+}
+
 QRect WorldView::nativeOutputPaneRect(const WrapTextBrowser *view) const
 {
 	if (!m_nativeOutputCanvas || !view || !view->viewport())
@@ -5157,10 +5182,8 @@ void WorldView::restoreOutputFromPersistedLines(const QVector<WorldRuntime::Line
 	const bool runtimeAttached = m_runtime && m_runtime->view() == this;
 	if (runtimeAttached)
 	{
-		Q_UNUSED(lines);
 		// Runtime-attached views always render from runtime-owned line state.
-		m_nativeRenderLineCacheFromRuntime = true;
-		m_nativeRenderLineCacheValid       = false;
+		rebuildNativeRenderCacheFromLineEntries(lines, true);
 	}
 	else
 	{
@@ -5188,6 +5211,7 @@ void WorldView::restoreOutputFromPersistedLines(const QVector<WorldRuntime::Line
 		scrollViewToEnd(m_liveOutput);
 	else
 		scrollViewToEnd(m_output);
+	primeNativeOutputCaches();
 	requestDrawOutputWindowNotification();
 	requestNativeOutputRepaint();
 }
@@ -6948,6 +6972,7 @@ void WorldView::showEvent(QShowEvent *event)
 		m_miniOverlay->raise();
 	syncOutputTextVisibilityForNativeCanvas();
 	applyDefaultInputHeight(true);
+	primeNativeOutputCaches();
 	if (m_runtime)
 		m_runtime->installPendingPlugins();
 }

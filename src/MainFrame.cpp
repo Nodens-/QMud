@@ -7,6 +7,7 @@
  */
 
 #include "MainFrame.h"
+
 #include "ActivityWindow.h"
 #include "AppController.h"
 #include "MainFrameActionUtils.h"
@@ -1960,7 +1961,10 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 	if (auto *world = qobject_cast<WorldChildWindow *>(window))
 	{
 		if (WorldView *view = world->view())
+		{
+			view->primeNativeOutputCaches();
 			view->focusInput();
+		}
 	}
 }
 

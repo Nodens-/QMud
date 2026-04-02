@@ -185,6 +185,10 @@ class WorldView : public QWidget
 		 */
 		void restoreOutputFromPersistedLines(const QVector<WorldRuntime::LineEntry> &lines);
 		/**
+		 * @brief Builds runtime render/layout caches for current viewport proactively.
+		 */
+		void primeNativeOutputCaches() const;
+		/**
 		 * @brief Echoes user input text into output stream.
 		 * @param text Input text to echo.
 		 */

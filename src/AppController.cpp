@@ -3087,6 +3087,52 @@ void AppController::saveWorldSessionStateAsync(const WorldRuntime *runtime, cons
 	    });
 }
 
+void AppController::beginRestoreScrollbackStatus() const
+{
+	if (!m_mainWindow)
+		return;
+	const QString restoreMessage = QStringLiteral("Restoring scrollback buffers");
+	if (m_restoreScrollbackInFlight == 0)
+	{
+		if (const WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
+			m_restoreScrollbackStatusRuntime = world->runtime();
+		else
+			m_restoreScrollbackStatusRuntime = nullptr;
+		m_restoreScrollbackStatusPrevious =
+		    m_restoreScrollbackStatusRuntime ? m_restoreScrollbackStatusRuntime->statusMessage() : QString{};
+		m_mainWindow->setStatusMessageNow(restoreMessage);
+	}
+	++m_restoreScrollbackInFlight;
+}
+
+void AppController::endRestoreScrollbackStatus() const
+{
+	if (m_restoreScrollbackInFlight <= 0)
+		return;
+	--m_restoreScrollbackInFlight;
+	if (m_restoreScrollbackInFlight > 0 || !m_mainWindow)
+		return;
+
+	const QString restoreMessage = QStringLiteral("Restoring scrollback buffers");
+	WorldRuntime *activeRuntime  = nullptr;
+	if (const WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
+		activeRuntime = world->runtime();
+	if (activeRuntime && activeRuntime->statusMessage() == restoreMessage)
+	{
+		if (activeRuntime == m_restoreScrollbackStatusRuntime && !m_restoreScrollbackStatusPrevious.isEmpty())
+			m_mainWindow->setStatusMessageNow(m_restoreScrollbackStatusPrevious);
+		else
+			m_mainWindow->setStatusNormal();
+	}
+	else if (!activeRuntime)
+	{
+		m_mainWindow->setStatusNormal();
+	}
+
+	m_restoreScrollbackStatusRuntime = nullptr;
+	m_restoreScrollbackStatusPrevious.clear();
+}
+
 void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldView *view,
                                                   std::function<void(bool, const QString &)> completion) const
 {
@@ -3116,15 +3162,32 @@ void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldVi
 		return;
 	}
 
+	const QPointer<AppController> controllerGuard(const_cast<AppController *>(this));
+
 	QThreadPool::globalInstance()->start(
-	    [runtimeGuard, viewGuard, filePath, persistOutputBuffer, persistCommandHistory, completionFn]
+	    [controllerGuard, runtimeGuard, viewGuard, filePath, persistOutputBuffer, persistCommandHistory,
+	     completionFn]
 	    {
 		    QString                                      error;
 		    bool                                         ok = true;
 		    QMudWorldSessionState::WorldSessionStateData state;
-		    const auto plan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
+		    const auto loadPlan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
 		        persistOutputBuffer, persistCommandHistory, QFileInfo::exists(filePath));
-		    switch (plan)
+		    const bool restoreScrollbackInFlight =
+		        persistOutputBuffer &&
+		        loadPlan == QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply;
+		    if (restoreScrollbackInFlight && controllerGuard)
+		    {
+			    QMetaObject::invokeMethod(
+			        qApp,
+			        [controllerGuard]
+			        {
+				        if (controllerGuard)
+					        controllerGuard->beginRestoreScrollbackStatus();
+			        },
+			        Qt::BlockingQueuedConnection);
+		    }
+		    switch (loadPlan)
 		    {
 		    case QMudWorldSessionRestoreFlow::SessionStateLoadPlan::RemoveFileAndSucceed:
 			    ok = QMudWorldSessionState::removeSessionStateFile(filePath, &error);
@@ -3139,8 +3202,11 @@ void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldVi
 		    QMetaObject::invokeMethod(
 		        qApp,
 		        [runtimeGuard, viewGuard, completionFn, persistOutputBuffer, persistCommandHistory,
-		         state = std::move(state), ok, error]
+		         state = std::move(state), ok, error, restoreScrollbackInFlight, controllerGuard]
 		        {
+			        if (restoreScrollbackInFlight && controllerGuard)
+				        controllerGuard->endRestoreScrollbackStatus();
+
 			        if (!runtimeGuard || !viewGuard)
 			        {
 				        if (completionFn && *completionFn)
