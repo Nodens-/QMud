@@ -10,6 +10,7 @@
 #include "ActivityWindow.h"
 #include "AppController.h"
 #include "MainFrameActionUtils.h"
+#include "MainFrameMdiUtils.h"
 #include "WorldChildWindow.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
@@ -1178,10 +1179,14 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 	if (!m_mdiArea || !subWindow)
 		return;
 
-	const QPointer<QMdiSubWindow> previousActive = !activate ? m_mdiArea->activeSubWindow() : nullptr;
+	const QPointer<QMdiSubWindow> previousActive =
+	    !activate ? QMudMainFrameMdiUtils::resolveBackgroundAddRestoreTarget(
+	                    m_mdiArea->activeSubWindow(), m_lastActiveSubWindow,
+	                    m_mdiArea->subWindowList(QMdiArea::CreationOrder), subWindow)
+	              : nullptr;
 
-	auto                         *world      = qobject_cast<WorldChildWindow *>(subWindow);
-	auto                         *textWindow = qobject_cast<TextChildWindow *>(subWindow);
+	auto *world      = qobject_cast<WorldChildWindow *>(subWindow);
+	auto *textWindow = qobject_cast<TextChildWindow *>(subWindow);
 	m_mdiArea->addSubWindow(subWindow);
 	subWindow->installEventFilter(this);
 	connect(subWindow, &QObject::destroyed, this,
@@ -1228,7 +1233,7 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 				view->focusInput();
 		}
 	}
-	else if (previousActive && previousActive != subWindow)
+	else if (previousActive)
 	{
 		m_mdiArea->setActiveSubWindow(previousActive);
 	}
@@ -1249,15 +1254,9 @@ QMdiSubWindow *MainWindow::currentOrLastActiveSubWindow() const
 {
 	if (!m_mdiArea)
 		return nullptr;
-
-	if (auto *active = m_mdiArea->activeSubWindow())
-		return active;
-
-	if (m_lastActiveSubWindow &&
-	    m_mdiArea->subWindowList(QMdiArea::CreationOrder).contains(m_lastActiveSubWindow))
-		return m_lastActiveSubWindow;
-
-	return nullptr;
+	return QMudMainFrameMdiUtils::resolveCurrentOrLastActiveSubWindow(
+	    m_mdiArea->activeSubWindow(), m_lastActiveSubWindow,
+	    m_mdiArea->subWindowList(QMdiArea::CreationOrder));
 }
 
 WorldChildWindow *MainWindow::findWorldChildWindow(WorldRuntime *runtime) const

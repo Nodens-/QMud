@@ -3257,21 +3257,21 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 		if (m_view)
 		{
 			if (MainWindowHost *main = resolveMainWindowHost(m_view->window()))
-				main->sendToNotepad(description, text + kEndLine, nullptr);
+				main->sendToNotepad(description, text + kEndLine, m_runtime);
 		}
 		break;
 	case eAppendToNotepad:
 		if (m_view)
 		{
 			if (MainWindowHost *main = resolveMainWindowHost(m_view->window()))
-				main->appendToNotepad(description, text + kEndLine, false, nullptr);
+				main->appendToNotepad(description, text + kEndLine, false, m_runtime);
 		}
 		break;
 	case eReplaceNotepad:
 		if (m_view)
 		{
 			if (MainWindowHost *main = resolveMainWindowHost(m_view->window()))
-				main->appendToNotepad(description, text + kEndLine, true, nullptr);
+				main->appendToNotepad(description, text + kEndLine, true, m_runtime);
 		}
 		break;
 	case eSendToExecute:

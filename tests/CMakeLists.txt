@@ -199,6 +199,14 @@ qmud_add_qtest(tst_AcceleratorUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_MainFrameMdiUtils
+        GUI
+        SOURCES
+        unit/tst_MainFrameMdiUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/MainFrameMdiUtils.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_BraceMatch
         GUI
         SOURCES
