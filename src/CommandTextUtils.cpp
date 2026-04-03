@@ -29,6 +29,19 @@ namespace
 			return 10 + (u - 'A');
 		return 0;
 	}
+
+	QString rightTrimmedTriggerLine(const QString &line)
+	{
+		qsizetype end = line.size();
+		while (end > 0)
+		{
+			const QChar ch = line.at(end - 1);
+			if (ch != QLatin1Char(' ') && ch != QLatin1Char('\t'))
+				break;
+			--end;
+		}
+		return end == line.size() ? line : line.left(end);
+	}
 } // namespace
 
 QString QMudCommandText::fixupEscapeSequences(const QString &source)
@@ -130,4 +143,21 @@ QString QMudCommandText::fixWildcard(const QString &wildcard, const bool makeLow
 	}
 
 	return result;
+}
+
+QString QMudCommandText::normalizeTriggerMatchLine(const QString &line, const bool preserveTrailingWhitespace)
+{
+	return preserveTrailingWhitespace ? line : rightTrimmedTriggerLine(line);
+}
+
+QString QMudCommandText::buildTriggerMultilineTarget(const QStringList &recentLines,
+                                                     const bool         preserveTrailingWhitespace)
+{
+	QString target;
+	for (const QString &recentLine : recentLines)
+	{
+		target += normalizeTriggerMatchLine(recentLine, preserveTrailingWhitespace);
+		target += QLatin1Char('\n');
+	}
+	return target;
 }

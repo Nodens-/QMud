@@ -9,7 +9,9 @@
 #ifndef QMUD_COMMANDTEXTUTILS_H
 #define QMUD_COMMANDTEXTUTILS_H
 
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QString>
+#include <QStringList>
 
 namespace QMudCommandText
 {
@@ -29,6 +31,22 @@ namespace QMudCommandText
 	 * @return Processed wildcard text.
 	 */
 	QString fixWildcard(const QString &wildcard, bool makeLowerCase, int sendTo, const QString &language);
+
+	/**
+	 * @brief Normalizes one trigger match line according to regexp/wildcard mode.
+	 * @param line Incoming line text.
+	 * @param preserveTrailingWhitespace Keep trailing spaces/tabs when `true`.
+	 * @return Normalized trigger match target line.
+	 */
+	QString normalizeTriggerMatchLine(const QString &line, bool preserveTrailingWhitespace);
+
+	/**
+	 * @brief Builds multiline trigger target text from recent lines.
+	 * @param recentLines Recent line history in chronological order.
+	 * @param preserveTrailingWhitespace Keep trailing spaces/tabs per line when `true`.
+	 * @return Multiline target text joined with trailing `\n` per line.
+	 */
+	QString buildTriggerMultilineTarget(const QStringList &recentLines, bool preserveTrailingWhitespace);
 } // namespace QMudCommandText
 
 #endif // QMUD_COMMANDTEXTUTILS_H

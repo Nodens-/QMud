@@ -104,19 +104,6 @@ namespace
 		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 	}
 
-	QString rightTrimmedTriggerLine(const QString &line)
-	{
-		qsizetype end = line.size();
-		while (end > 0)
-		{
-			const QChar ch = line.at(end - 1);
-			if (ch != QLatin1Char(' ') && ch != QLatin1Char('\t'))
-				break;
-			--end;
-		}
-		return end == line.size() ? line : line.left(end);
-	}
-
 	QString fixUpGerman(const QString &message)
 	{
 		QString result = message;
@@ -2509,7 +2496,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	if (!m_runtime)
 		return result;
 
-	const QString triggerLine = rightTrimmedTriggerLine(line);
+	const QString trimmedTriggerLine = QMudCommandText::normalizeTriggerMatchLine(line, false);
 
 	auto          attrTrue = [](const QString &value)
 	{
@@ -2517,8 +2504,8 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 	};
 
-	// Trigger matching parity: evaluate line text without trailing horizontal whitespace.
-	m_runtime->addRecentLine(triggerLine);
+	// Keep original incoming text for multiline trigger history.
+	m_runtime->addRecentLine(line);
 	m_runtime->setLineOmittedFromOutput(false);
 
 	const QMap<QString, QString> &worldAttrs = m_runtime->worldAttributes();
@@ -2558,19 +2545,13 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	QVector<WorldRuntime::StyleSpan> workingSpans = spans;
 	bool                             spansChanged = false;
 
-	auto                             buildTarget = [&](const int linesToMatch) -> QString
+	auto buildTarget = [&](const int linesToMatch, const bool preserveTrailingWhitespace) -> QString
 	{
 		int count = linesToMatch;
 		if (count <= 0)
 			count = 1;
 		const QStringList recentLines = m_runtime->recentLines(count);
-		QString           target;
-		for (const QString &recentLine : recentLines)
-		{
-			target += recentLine;
-			target += QLatin1Char('\n');
-		}
-		return target;
+		return QMudCommandText::buildTriggerMultilineTarget(recentLines, preserveTrailingWhitespace);
 	};
 
 	auto colourIndexFor = [&](const QColor &colour) -> int
@@ -2696,9 +2677,11 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			const bool ignoreCase = attrTrue(trigger.attributes.value(QStringLiteral("ignore_case")));
 			const bool multiLine  = attrTrue(trigger.attributes.value(QStringLiteral("multi_line")));
 
+			const bool preserveTrailingWhitespace = isRegexp;
 			QString    target =
-                multiLine ? buildTarget(trigger.attributes.value(QStringLiteral("lines_to_match")).toInt())
-			                 : triggerLine;
+                multiLine ? buildTarget(trigger.attributes.value(QStringLiteral("lines_to_match")).toInt(),
+			                               preserveTrailingWhitespace)
+			                 : (preserveTrailingWhitespace ? line : trimmedTriggerLine);
 			trigger.lastMatchTarget = target;
 
 			if (attrTrue(trigger.attributes.value(QStringLiteral("expand_variables"))) &&
@@ -2916,7 +2899,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				script.plugin         = plugin;
 				script.index          = index;
 				script.label          = scriptLabel;
-				script.line           = multiLine ? line : triggerLine;
+				script.line           = line;
 				script.wildcards      = wildcards;
 				script.namedWildcards = namedWildcards;
 				result.triggerScripts.push_back(script);
