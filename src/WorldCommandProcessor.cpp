@@ -1209,7 +1209,51 @@ void WorldCommandProcessor::onHyperlinkActivated(const QString &href)
 	if (sendText.isEmpty())
 		return;
 	if (dispatchPolicy == MxpHyperlinkDispatchPolicy::CommandProcessing)
-		executeCommand(sendText);
+	{
+		PluginHyperlinkCall pluginCall;
+		if (m_runtime && parsePluginHyperlinkCall(sendText, pluginCall))
+		{
+			const int result = m_runtime->callPlugin(pluginCall.pluginId, pluginCall.routine,
+			                                         pluginCall.argument, QString());
+			if (result != eOK)
+			{
+				QString pluginName = pluginCall.pluginId;
+				if (const WorldRuntime::Plugin *plugin = m_runtime->pluginForId(pluginCall.pluginId))
+				{
+					if (const QString name = plugin->attributes.value(QStringLiteral("name")).trimmed();
+					    !name.isEmpty())
+						pluginName = name;
+				}
+
+				switch (result)
+				{
+				case eNoSuchPlugin:
+					note(QStringLiteral("Plugin \"%1\" is not installed").arg(pluginName));
+					break;
+				case eNoSuchRoutine:
+					note(QStringLiteral("Script routine \"%1\" is not in plugin %2")
+					         .arg(pluginCall.routine, pluginName));
+					break;
+				case eErrorCallingPluginRoutine:
+					note(QStringLiteral("An error occurred calling plugin %1").arg(pluginName));
+					break;
+				default:
+				{
+					const QString description = WorldRuntime::errorDesc(result);
+					if (!description.isEmpty())
+						note(QStringLiteral("%1 (error %2)").arg(description).arg(result));
+					else
+						note(QStringLiteral("Plugin callback failed (error %1)").arg(result));
+					break;
+				}
+				}
+			}
+		}
+		else
+		{
+			executeCommand(sendText);
+		}
+	}
 	else
 		sendMsg(sendText, echo, false, true);
 	if (addToHistory && m_view)

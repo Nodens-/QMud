@@ -10,6 +10,37 @@
 
 #include <QUrl>
 
+namespace
+{
+	constexpr qsizetype kPluginIdLength = 24;
+
+	bool                isHexPluginId(const QStringView pluginId)
+	{
+		if (pluginId.size() != kPluginIdLength)
+			return false;
+
+		for (const QChar ch : pluginId)
+		{
+			const QChar lower = ch.toLower();
+			if (!ch.isDigit() && (lower < QLatin1Char('a') || lower > QLatin1Char('f')))
+				return false;
+		}
+		return true;
+	}
+
+	bool isValidRoutineName(const QStringView routine)
+	{
+		if (routine.isEmpty())
+			return false;
+		for (const QChar ch : routine)
+		{
+			if (!ch.isLetterOrNumber() && ch != QLatin1Char('_') && ch != QLatin1Char('.'))
+				return false;
+		}
+		return true;
+	}
+} // namespace
+
 QString decodeMxpActionText(QString text)
 {
 	text = QUrl::fromPercentEncoding(text.toUtf8());
@@ -80,6 +111,40 @@ QString firstMxpSendAction(const QString &href)
 			return trimmed;
 	}
 	return href.trimmed();
+}
+
+bool parsePluginHyperlinkCall(const QString &action, PluginHyperlinkCall &parsed)
+{
+	const QString payload = action.trimmed();
+	if (payload.size() < kPluginIdLength + 5 || !payload.startsWith(QStringLiteral("!!")) ||
+	    !payload.endsWith(QLatin1Char(')')))
+		return false;
+
+	const QStringView payloadView{payload};
+	if (payloadView.at(2 + kPluginIdLength) != QLatin1Char(':'))
+		return false;
+
+	const QStringView pluginId = payloadView.mid(2, kPluginIdLength);
+	if (!isHexPluginId(pluginId))
+		return false;
+
+	const QStringView callback = payloadView.mid(3 + kPluginIdLength);
+	const qsizetype   bracket  = callback.indexOf(QLatin1Char('('));
+	if (bracket <= 0)
+		return false;
+
+	const QStringView routine = callback.first(bracket);
+	if (!isValidRoutineName(routine))
+		return false;
+
+	const QStringView argumentWithClose = callback.mid(bracket + 1);
+	if (!argumentWithClose.endsWith(QLatin1Char(')')))
+		return false;
+
+	parsed.pluginId = pluginId.toString();
+	parsed.routine  = routine.toString();
+	parsed.argument = argumentWithClose.first(argumentWithClose.size() - 1).toString();
+	return true;
 }
 
 MxpHyperlinkDispatchPolicy resolveMxpHyperlinkDispatchPolicy(const QVector<WorldRuntime::LineEntry> &lines,

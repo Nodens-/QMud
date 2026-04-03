@@ -43,6 +43,28 @@ class tst_HyperlinkActionUtils : public QObject
 			QCOMPARE(firstMxpSendAction(href), QStringLiteral("mapper goto 72930"));
 		}
 
+		void parsePluginHyperlinkCallAcceptsMushclientPayload()
+		{
+			const QString action = QStringLiteral(
+			    "!!f973af093e715dece34dc25f:mapper.do_hyperlink(7B69D4750239F990D19E3A7181FCA922)");
+			PluginHyperlinkCall parsed;
+			QVERIFY(parsePluginHyperlinkCall(action, parsed));
+			QCOMPARE(parsed.pluginId, QStringLiteral("f973af093e715dece34dc25f"));
+			QCOMPARE(parsed.routine, QStringLiteral("mapper.do_hyperlink"));
+			QCOMPARE(parsed.argument, QStringLiteral("7B69D4750239F990D19E3A7181FCA922"));
+		}
+
+		void parsePluginHyperlinkCallRejectsInvalidCallbackSyntax()
+		{
+			PluginHyperlinkCall parsed;
+			QVERIFY(!parsePluginHyperlinkCall(
+			    QStringLiteral("!!f973af093e715dece34dc25f:mapper.do_hyperlink"), parsed));
+			QVERIFY(!parsePluginHyperlinkCall(
+			    QStringLiteral("!!f973af093e715dece34dc25g:mapper.do_hyperlink(123)"), parsed));
+			QVERIFY(!parsePluginHyperlinkCall(
+			    QStringLiteral("!!f973af093e715dece34dc25f:mapper.do hyperlink(123)"), parsed));
+		}
+
 		void resolvePolicyReturnsPromptInputForPromptSpan()
 		{
 			QVector<WorldRuntime::LineEntry> lines;
