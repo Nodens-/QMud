@@ -3091,7 +3091,6 @@ void AppController::beginRestoreScrollbackStatus() const
 {
 	if (!m_mainWindow)
 		return;
-	const QString restoreMessage = QStringLiteral("Restoring scrollback buffers");
 	if (m_restoreScrollbackInFlight == 0)
 	{
 		if (const WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
@@ -3100,9 +3099,13 @@ void AppController::beginRestoreScrollbackStatus() const
 			m_restoreScrollbackStatusRuntime = nullptr;
 		m_restoreScrollbackStatusPrevious =
 		    m_restoreScrollbackStatusRuntime ? m_restoreScrollbackStatusRuntime->statusMessage() : QString{};
-		m_mainWindow->setStatusMessageNow(restoreMessage);
 	}
 	++m_restoreScrollbackInFlight;
+	const QString restoreMessage =
+	    m_restoreScrollbackInFlight > 1
+	        ? QStringLiteral("Restoring scrollback buffers (%1 remaining)").arg(m_restoreScrollbackInFlight)
+	        : QStringLiteral("Restoring scrollback buffers");
+	m_mainWindow->setStatusMessageNow(restoreMessage);
 }
 
 void AppController::endRestoreScrollbackStatus() const
@@ -3110,24 +3113,22 @@ void AppController::endRestoreScrollbackStatus() const
 	if (m_restoreScrollbackInFlight <= 0)
 		return;
 	--m_restoreScrollbackInFlight;
-	if (m_restoreScrollbackInFlight > 0 || !m_mainWindow)
+	if (!m_mainWindow)
 		return;
+	if (m_restoreScrollbackInFlight > 0)
+	{
+		m_mainWindow->setStatusMessageNow(
+		    QStringLiteral("Restoring scrollback buffers (%1 remaining)").arg(m_restoreScrollbackInFlight));
+		return;
+	}
 
-	const QString restoreMessage = QStringLiteral("Restoring scrollback buffers");
-	WorldRuntime *activeRuntime  = nullptr;
+	WorldRuntime *activeRuntime = nullptr;
 	if (const WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
 		activeRuntime = world->runtime();
-	if (activeRuntime && activeRuntime->statusMessage() == restoreMessage)
-	{
-		if (activeRuntime == m_restoreScrollbackStatusRuntime && !m_restoreScrollbackStatusPrevious.isEmpty())
-			m_mainWindow->setStatusMessageNow(m_restoreScrollbackStatusPrevious);
-		else
-			m_mainWindow->setStatusNormal();
-	}
-	else if (!activeRuntime)
-	{
+	if (activeRuntime == m_restoreScrollbackStatusRuntime && !m_restoreScrollbackStatusPrevious.isEmpty())
+		m_mainWindow->setStatusMessageNow(m_restoreScrollbackStatusPrevious);
+	else
 		m_mainWindow->setStatusNormal();
-	}
 
 	m_restoreScrollbackStatusRuntime = nullptr;
 	m_restoreScrollbackStatusPrevious.clear();
