@@ -168,10 +168,12 @@ set(QMUD_SOURCES
         MainWindowHostResolver.cpp
         MainFrame.cpp
         MainFrameActionUtils.cpp
+        MainFrameMdiUtils.cpp
         TabActivationHistory.cpp
         AppController.cpp
         UpdateCheckUtils.cpp
         TimeFormatUtils.cpp
+        TraceDispatchUtils.cpp
         WorldSessionRestoreFlowUtils.cpp
         WorldSessionStateUtils.cpp
         ReloadPlannerUtils.cpp
@@ -245,6 +247,7 @@ set(QMUD_HEADERS
         Version.h
         MainFrame.h
         MainFrameActionUtils.h
+        MainFrameMdiUtils.h
         TabActivationHistory.h
         AppController.h
         Environment.h
@@ -254,6 +257,7 @@ set(QMUD_HEADERS
         ReloadStateUtils.h
         WorldSessionRestoreFlowUtils.h
         WorldSessionStateUtils.h
+        PluginCallbackCatalogUtils.h
         Accelerators.h
         AcceleratorUtils.h
         AliasMatchUtils.h
@@ -276,6 +280,7 @@ set(QMUD_HEADERS
         dialogs/ImportXmlDialog.h
         WorldDocument.h
         WorldRuntime.h
+        WorldRuntimeAttributeUtils.h
         MiniWindow.h
         MiniWindowBrushUtils.h
         WorldCommandProcessor.h

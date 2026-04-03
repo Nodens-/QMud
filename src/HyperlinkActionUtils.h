@@ -16,6 +16,16 @@
 #include <QVector>
 
 /**
+ * @brief Parsed Mushclient-compatible plugin callback hyperlink action.
+ */
+struct PluginHyperlinkCall
+{
+		QString pluginId; ///< 24-hex plugin identifier.
+		QString routine;  ///< Callback routine name.
+		QString argument; ///< Raw argument payload inside parentheses.
+};
+
+/**
  * @brief Hyperlink dispatch policy for one activated action.
  */
 enum class MxpHyperlinkDispatchPolicy
@@ -38,6 +48,14 @@ enum class MxpHyperlinkDispatchPolicy
  * @return First non-empty action segment (or trimmed input when no segments found).
  */
 [[nodiscard]] QString firstMxpSendAction(const QString &href);
+
+/**
+ * @brief Parses `!!pluginid:routine(argument)` hyperlink callback payloads.
+ * @param action Decoded send action text.
+ * @param parsed Parsed callback fields when function returns `true`.
+ * @return `true` when payload matches Mushclient callback syntax.
+ */
+[[nodiscard]] bool    parsePluginHyperlinkCall(const QString &action, PluginHyperlinkCall &parsed);
 
 /**
  * @brief Chooses hyperlink dispatch policy using rendered line/span context.

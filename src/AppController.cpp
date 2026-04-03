@@ -3087,6 +3087,53 @@ void AppController::saveWorldSessionStateAsync(const WorldRuntime *runtime, cons
 	    });
 }
 
+void AppController::beginRestoreScrollbackStatus() const
+{
+	if (!m_mainWindow)
+		return;
+	if (m_restoreScrollbackInFlight == 0)
+	{
+		if (const WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
+			m_restoreScrollbackStatusRuntime = world->runtime();
+		else
+			m_restoreScrollbackStatusRuntime = nullptr;
+		m_restoreScrollbackStatusPrevious =
+		    m_restoreScrollbackStatusRuntime ? m_restoreScrollbackStatusRuntime->statusMessage() : QString{};
+	}
+	++m_restoreScrollbackInFlight;
+	const QString restoreMessage =
+	    m_restoreScrollbackInFlight > 1
+	        ? QStringLiteral("Restoring scrollback buffers (%1 remaining)").arg(m_restoreScrollbackInFlight)
+	        : QStringLiteral("Restoring scrollback buffers");
+	m_mainWindow->setStatusMessageNow(restoreMessage);
+}
+
+void AppController::endRestoreScrollbackStatus() const
+{
+	if (m_restoreScrollbackInFlight <= 0)
+		return;
+	--m_restoreScrollbackInFlight;
+	if (!m_mainWindow)
+		return;
+	if (m_restoreScrollbackInFlight > 0)
+	{
+		m_mainWindow->setStatusMessageNow(
+		    QStringLiteral("Restoring scrollback buffers (%1 remaining)").arg(m_restoreScrollbackInFlight));
+		return;
+	}
+
+	WorldRuntime *activeRuntime = nullptr;
+	if (const WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
+		activeRuntime = world->runtime();
+	if (activeRuntime == m_restoreScrollbackStatusRuntime && !m_restoreScrollbackStatusPrevious.isEmpty())
+		m_mainWindow->setStatusMessageNow(m_restoreScrollbackStatusPrevious);
+	else
+		m_mainWindow->setStatusNormal();
+
+	m_restoreScrollbackStatusRuntime = nullptr;
+	m_restoreScrollbackStatusPrevious.clear();
+}
+
 void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldView *view,
                                                   std::function<void(bool, const QString &)> completion) const
 {
@@ -3116,15 +3163,32 @@ void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldVi
 		return;
 	}
 
+	const QPointer<AppController> controllerGuard(const_cast<AppController *>(this));
+
 	QThreadPool::globalInstance()->start(
-	    [runtimeGuard, viewGuard, filePath, persistOutputBuffer, persistCommandHistory, completionFn]
+	    [controllerGuard, runtimeGuard, viewGuard, filePath, persistOutputBuffer, persistCommandHistory,
+	     completionFn]
 	    {
 		    QString                                      error;
 		    bool                                         ok = true;
 		    QMudWorldSessionState::WorldSessionStateData state;
-		    const auto plan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
+		    const auto loadPlan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
 		        persistOutputBuffer, persistCommandHistory, QFileInfo::exists(filePath));
-		    switch (plan)
+		    const bool restoreScrollbackInFlight =
+		        persistOutputBuffer &&
+		        loadPlan == QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply;
+		    if (restoreScrollbackInFlight && controllerGuard)
+		    {
+			    QMetaObject::invokeMethod(
+			        qApp,
+			        [controllerGuard]
+			        {
+				        if (controllerGuard)
+					        controllerGuard->beginRestoreScrollbackStatus();
+			        },
+			        Qt::BlockingQueuedConnection);
+		    }
+		    switch (loadPlan)
 		    {
 		    case QMudWorldSessionRestoreFlow::SessionStateLoadPlan::RemoveFileAndSucceed:
 			    ok = QMudWorldSessionState::removeSessionStateFile(filePath, &error);
@@ -3139,8 +3203,11 @@ void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldVi
 		    QMetaObject::invokeMethod(
 		        qApp,
 		        [runtimeGuard, viewGuard, completionFn, persistOutputBuffer, persistCommandHistory,
-		         state = std::move(state), ok, error]
+		         state = std::move(state), ok, error, restoreScrollbackInFlight, controllerGuard]
 		        {
+			        if (restoreScrollbackInFlight && controllerGuard)
+				        controllerGuard->endRestoreScrollbackStatus();
+
 			        if (!runtimeGuard || !viewGuard)
 			        {
 				        if (completionFn && *completionFn)
@@ -7080,7 +7147,12 @@ void AppController::loadGlobalPlugins(WorldRuntime *runtime) const
 		if (QString error; !runtime->loadPluginFile(entry, &error, true))
 		{
 			if (!error.isEmpty())
+			{
 				qWarning() << "Plugin load failed:" << error;
+				runtime->outputText(
+				    QStringLiteral("Plugin load failed (%1): %2").arg(QDir::toNativeSeparators(entry), error),
+				    true, true);
+			}
 		}
 	}
 }

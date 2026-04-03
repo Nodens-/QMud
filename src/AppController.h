@@ -923,6 +923,8 @@ class AppController : public QObject
 		 * @param runtime Runtime to auto-connect.
 		 */
 		void                   maybeAutoConnectWorld(WorldRuntime *runtime) const;
+		void                   beginRestoreScrollbackStatus() const;
+		void                   endRestoreScrollbackStatus() const;
 		MainWindow            *m_mainWindow{nullptr};
 		QDateTime              m_whenClientStarted;
 		QString                m_version;
@@ -989,6 +991,9 @@ class AppController : public QObject
 		ActivityDocument                *m_activityDoc{nullptr};
 		std::atomic<qint64>              m_uniqueNumber{0};
 		QRandomGenerator                 m_rng{1u};
+		mutable int                      m_restoreScrollbackInFlight{0};
+		mutable QPointer<WorldRuntime>   m_restoreScrollbackStatusRuntime;
+		mutable QString                  m_restoreScrollbackStatusPrevious;
 		mutable bool                     m_hasFontMetricApplySignature{false};
 		mutable FontMetricApplySignature m_lastFontMetricApplySignature;
 		bool                             m_batchOpeningWorldList{false};

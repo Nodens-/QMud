@@ -20,6 +20,7 @@
 #include "MainWindowHostResolver.h"
 #include "SpeedwalkParser.h"
 #include "TimerSchedulingUtils.h"
+#include "TraceDispatchUtils.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
@@ -746,6 +747,8 @@ void WorldCommandProcessor::setRuntime(WorldRuntime *runtime)
 	m_doNotTranslateIac                 = isEnabledValue(noTranslateIac);
 	const QString matchEmpty            = attrs.value(QStringLiteral("regexp_match_empty"));
 	m_regexpMatchEmpty                  = !(matchEmpty == QStringLiteral("0") ||
+                           matchEmpty.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+                           matchEmpty.compare(QStringLiteral("no"), Qt::CaseInsensitive) == 0 ||
                            matchEmpty.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
 	const QString utf8                  = attrs.value(QStringLiteral("utf_8"));
 	m_utf8                              = isEnabledValue(utf8);
@@ -837,6 +840,26 @@ void WorldCommandProcessor::sendToFromAccelerator(int sendTo, const QString &tex
                                                   const WorldRuntime::Plugin *plugin)
 {
 	this->sendTo(sendTo, text, true, true, QString(), description, plugin);
+}
+
+void WorldCommandProcessor::emitTrace(const QString &message) const
+{
+	if (!m_runtime)
+		return;
+	QMudTraceDispatch::emitTrace(
+	    message, QMudTraceDispatch::Callbacks{[this]() { return m_runtime && m_runtime->traceEnabled(); },
+	                                          [this](const bool enabled)
+	                                          {
+		                                          if (m_runtime)
+			                                          m_runtime->setTraceEnabled(enabled);
+	                                          },
+	                                          [this](const QString &text)
+	                                          { return m_runtime && m_runtime->firePluginTrace(text); },
+	                                          [this](const QString &line)
+	                                          {
+		                                          if (m_runtime)
+			                                          m_runtime->outputText(line, true, true);
+	                                          }});
 }
 
 void WorldCommandProcessor::onCommandEntered(const QString &text)
@@ -1207,7 +1230,51 @@ void WorldCommandProcessor::onHyperlinkActivated(const QString &href)
 	if (sendText.isEmpty())
 		return;
 	if (dispatchPolicy == MxpHyperlinkDispatchPolicy::CommandProcessing)
-		executeCommand(sendText);
+	{
+		PluginHyperlinkCall pluginCall;
+		if (m_runtime && parsePluginHyperlinkCall(sendText, pluginCall))
+		{
+			const int result = m_runtime->callPlugin(pluginCall.pluginId, pluginCall.routine,
+			                                         pluginCall.argument, QString());
+			if (result != eOK)
+			{
+				QString pluginName = pluginCall.pluginId;
+				if (const WorldRuntime::Plugin *plugin = m_runtime->pluginForId(pluginCall.pluginId))
+				{
+					if (const QString name = plugin->attributes.value(QStringLiteral("name")).trimmed();
+					    !name.isEmpty())
+						pluginName = name;
+				}
+
+				switch (result)
+				{
+				case eNoSuchPlugin:
+					note(QStringLiteral("Plugin \"%1\" is not installed").arg(pluginName));
+					break;
+				case eNoSuchRoutine:
+					note(QStringLiteral("Script routine \"%1\" is not in plugin %2")
+					         .arg(pluginCall.routine, pluginName));
+					break;
+				case eErrorCallingPluginRoutine:
+					note(QStringLiteral("An error occurred calling plugin %1").arg(pluginName));
+					break;
+				default:
+				{
+					const QString description = WorldRuntime::errorDesc(result);
+					if (!description.isEmpty())
+						note(QStringLiteral("%1 (error %2)").arg(description).arg(result));
+					else
+						note(QStringLiteral("Plugin callback failed (error %1)").arg(result));
+					break;
+				}
+				}
+			}
+		}
+		else
+		{
+			executeCommand(sendText);
+		}
+	}
 	else
 		sendMsg(sendText, echo, false, true);
 	if (addToHistory && m_view)
@@ -2342,8 +2409,12 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 		omitFromLog = attrTrue(alias.attributes.value(QStringLiteral("omit_from_log")));
 
 		// get unlabelled alias's internal name
-		const QString  label       = alias.attributes.value(QStringLiteral("name"));
-		const QString  scriptLabel = label.isEmpty() ? matchText : label;
+		const QString label       = alias.attributes.value(QStringLiteral("name"));
+		const QString scriptLabel = label.isEmpty() ? matchText : label;
+		if (label.isEmpty())
+			emitTrace(QStringLiteral("Matched alias \"%1\"").arg(matchText));
+		else
+			emitTrace(QStringLiteral("Matched alias %1").arg(label));
 
 		const QString  language       = m_runtime->worldAttributes().value(QStringLiteral("script_language"));
 		constexpr bool lowerWildcards = false;
@@ -2494,12 +2565,15 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	if (!m_runtime)
 		return result;
 
-	auto attrTrue = [](const QString &value)
+	const QString trimmedTriggerLine = QMudCommandText::normalizeTriggerMatchLine(line, false);
+
+	auto          attrTrue = [](const QString &value)
 	{
 		return value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 || value == QStringLiteral("1") ||
 		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 	};
 
+	// Keep original incoming text for multiline trigger history.
 	m_runtime->addRecentLine(line);
 	m_runtime->setLineOmittedFromOutput(false);
 
@@ -2540,19 +2614,13 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	QVector<WorldRuntime::StyleSpan> workingSpans = spans;
 	bool                             spansChanged = false;
 
-	auto                             buildTarget = [&](const int linesToMatch) -> QString
+	auto buildTarget = [&](const int linesToMatch, const bool preserveTrailingWhitespace) -> QString
 	{
 		int count = linesToMatch;
 		if (count <= 0)
 			count = 1;
 		const QStringList recentLines = m_runtime->recentLines(count);
-		QString           target;
-		for (const QString &recentLine : recentLines)
-		{
-			target += recentLine;
-			target += QLatin1Char('\n');
-		}
-		return target;
+		return QMudCommandText::buildTriggerMultilineTarget(recentLines, preserveTrailingWhitespace);
 	};
 
 	auto colourIndexFor = [&](const QColor &colour) -> int
@@ -2678,9 +2746,11 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			const bool ignoreCase = attrTrue(trigger.attributes.value(QStringLiteral("ignore_case")));
 			const bool multiLine  = attrTrue(trigger.attributes.value(QStringLiteral("multi_line")));
 
+			const bool preserveTrailingWhitespace = isRegexp;
 			QString    target =
-                multiLine ? buildTarget(trigger.attributes.value(QStringLiteral("lines_to_match")).toInt())
-			                 : line;
+                multiLine ? buildTarget(trigger.attributes.value(QStringLiteral("lines_to_match")).toInt(),
+			                               preserveTrailingWhitespace)
+			                 : (preserveTrailingWhitespace ? line : trimmedTriggerLine);
 			trigger.lastMatchTarget = target;
 
 			if (attrTrue(trigger.attributes.value(QStringLiteral("expand_variables"))) &&
@@ -2705,18 +2775,6 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 			if (!multiLine)
 			{
-				QColor fore;
-				QColor back;
-				bool   bold      = false;
-				bool   italic    = false;
-				bool   underline = false;
-				bool   inverse   = false;
-				if (!styleAtColumn(startCol, fore, back, bold, italic, underline, inverse))
-					continue;
-
-				if (inverse)
-					qSwap(fore, back);
-
 				const bool matchTextColour =
 				    attrTrue(trigger.attributes.value(QStringLiteral("match_text_colour")));
 				const bool matchBack =
@@ -2726,53 +2784,74 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				const bool matchUnderline =
 				    attrTrue(trigger.attributes.value(QStringLiteral("match_underline")));
 				const bool matchInverse = attrTrue(trigger.attributes.value(QStringLiteral("match_inverse")));
+				const bool requiresStyleState = matchTextColour || matchBack || matchBold || matchItalic ||
+				                                matchUnderline || matchInverse;
 
-				if (matchTextColour)
+				if (requiresStyleState)
 				{
-					if (const int expected = trigger.attributes.value(QStringLiteral("text_colour")).toInt();
-					    colourIndexFor(fore) != expected)
-					{
+					QColor fore;
+					QColor back;
+					bool   bold      = false;
+					bool   italic    = false;
+					bool   underline = false;
+					bool   inverse   = false;
+					if (!styleAtColumn(startCol, fore, back, bold, italic, underline, inverse))
 						continue;
+
+					if (inverse)
+						qSwap(fore, back);
+
+					if (matchTextColour)
+					{
+						if (const int expected =
+						        trigger.attributes.value(QStringLiteral("text_colour")).toInt();
+						    colourIndexFor(fore) != expected)
+						{
+							continue;
+						}
 					}
-				}
-				if (matchBack)
-				{
-					if (const int expected = trigger.attributes.value(QStringLiteral("back_colour")).toInt();
-					    colourIndexFor(back) != expected)
+					if (matchBack)
 					{
-						continue;
+						if (const int expected =
+						        trigger.attributes.value(QStringLiteral("back_colour")).toInt();
+						    colourIndexFor(back) != expected)
+						{
+							continue;
+						}
 					}
-				}
-				if (matchBold)
-				{
-					if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("bold")));
-					    bold != desired)
+					if (matchBold)
 					{
-						continue;
+						if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("bold")));
+						    bold != desired)
+						{
+							continue;
+						}
 					}
-				}
-				if (matchItalic)
-				{
-					if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("italic")));
-					    italic != desired)
+					if (matchItalic)
 					{
-						continue;
+						if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("italic")));
+						    italic != desired)
+						{
+							continue;
+						}
 					}
-				}
-				if (matchUnderline)
-				{
-					if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("underline")));
-					    underline != desired)
+					if (matchUnderline)
 					{
-						continue;
+						if (const bool desired =
+						        attrTrue(trigger.attributes.value(QStringLiteral("underline")));
+						    underline != desired)
+						{
+							continue;
+						}
 					}
-				}
-				if (matchInverse)
-				{
-					if (const bool desired = attrTrue(trigger.attributes.value(QStringLiteral("inverse")));
-					    inverse != desired)
+					if (matchInverse)
 					{
-						continue;
+						if (const bool desired =
+						        attrTrue(trigger.attributes.value(QStringLiteral("inverse")));
+						    inverse != desired)
+						{
+							continue;
+						}
 					}
 				}
 			}
@@ -2803,6 +2882,11 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			const QString label = trigger.attributes.value(QStringLiteral("name")).trimmed();
 			const QString scriptLabel =
 			    label.isEmpty() ? trigger.attributes.value(QStringLiteral("match")).trimmed() : label;
+			if (label.isEmpty())
+				emitTrace(QStringLiteral("Matched trigger \"%1\"")
+				              .arg(trigger.attributes.value(QStringLiteral("match"))));
+			else
+				emitTrace(QStringLiteral("Matched trigger %1").arg(label));
 
 			const int  sendToValue = trigger.attributes.value(QStringLiteral("send_to")).toInt();
 			const bool lowerWildcards =
@@ -3088,6 +3172,10 @@ void WorldCommandProcessor::checkTimers()
 				    timers.at(timerIndex).attributes.value(QStringLiteral("name")).trimmed();
 				const QString sendText   = timers.at(timerIndex).children.value(QStringLiteral("send"));
 				const QString scriptName = timers.at(timerIndex).attributes.value(QStringLiteral("script"));
+				if (label.isEmpty())
+					emitTrace(QStringLiteral("Fired unlabelled timer "));
+				else
+					emitTrace(QStringLiteral("Fired timer %1").arg(label));
 
 				timers[timerIndex].executingScript = true;
 				if (m_runtime)
@@ -3230,21 +3318,21 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 		if (m_view)
 		{
 			if (MainWindowHost *main = resolveMainWindowHost(m_view->window()))
-				main->sendToNotepad(description, text + kEndLine, nullptr);
+				main->sendToNotepad(description, text + kEndLine, m_runtime);
 		}
 		break;
 	case eAppendToNotepad:
 		if (m_view)
 		{
 			if (MainWindowHost *main = resolveMainWindowHost(m_view->window()))
-				main->appendToNotepad(description, text + kEndLine, false, nullptr);
+				main->appendToNotepad(description, text + kEndLine, false, m_runtime);
 		}
 		break;
 	case eReplaceNotepad:
 		if (m_view)
 		{
 			if (MainWindowHost *main = resolveMainWindowHost(m_view->window()))
-				main->appendToNotepad(description, text + kEndLine, true, nullptr);
+				main->appendToNotepad(description, text + kEndLine, true, m_runtime);
 		}
 		break;
 	case eSendToExecute:

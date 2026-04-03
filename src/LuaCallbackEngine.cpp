@@ -18,11 +18,13 @@
 #include "InfoTypesMetadata.h"
 #include "LuaFunctionTypes.h"
 #include "LuaSupport.h"
+#include "LuaUtf8Utils.h"
 #include "MainFrame.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
 #include "SqliteCompat.h"
 #include "StringUtils.h"
+#include "TraceDispatchUtils.h"
 #include "Version.h"
 #include "WorldChildWindow.h"
 #include "WorldDocument.h"
@@ -81,6 +83,7 @@
 #include <QUrl>
 #include <QUuid>
 #include <QVBoxLayout>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
 #include <QXmlStreamReader>
 #include <QtMath>
@@ -89,6 +92,7 @@
 #include <QtSql/QSqlQuery>
 #include <QtSql/QSqlRecord>
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <memory>
 #ifdef Q_OS_WIN
@@ -439,6 +443,13 @@ void LuaCallbackEngine::setScriptText(const QString &script)
 {
 	m_script       = script;
 	m_scriptLoaded = false;
+	m_luaFunctionsSet.clear();
+	if (!m_observedPluginCallbackPresence.isEmpty())
+	{
+		m_observedPluginCallbackPresence.clear();
+		if (m_callbackCatalogObserver)
+			m_callbackCatalogObserver();
+	}
 }
 
 bool LuaCallbackEngine::loadScript()
@@ -453,12 +464,16 @@ bool LuaCallbackEngine::loadScript()
 void LuaCallbackEngine::resetState()
 {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
+	const bool hadObservedCallbacks = !m_observedPluginCallbackPresence.isEmpty();
 	m_ownedState.reset();
 	m_state = nullptr;
 	m_luaFunctionsSet.clear();
+	m_observedPluginCallbackPresence.clear();
 	m_worldBindingsReady         = false;
 	m_scriptLoaded               = false;
 	m_packageRestrictionsApplied = false;
+	if (hadObservedCallbacks && m_callbackCatalogObserver)
+		m_callbackCatalogObserver();
 #endif
 }
 
@@ -499,6 +514,57 @@ int LuaCallbackEngine::scriptExecutionDepth() const
 const QSet<QString> &LuaCallbackEngine::luaFunctionsSet() const
 {
 	return m_luaFunctionsSet;
+}
+
+void LuaCallbackEngine::setCallbackCatalogObserver(CallbackCatalogObserver observer)
+{
+	m_callbackCatalogObserver = std::move(observer);
+}
+
+void LuaCallbackEngine::setObservedPluginCallbacks(const QSet<QString> &callbackNames)
+{
+	if (m_observedPluginCallbacks == callbackNames)
+		return;
+	m_observedPluginCallbacks = callbackNames;
+	refreshLuaCallbackCatalogNow();
+}
+
+bool LuaCallbackEngine::hasObservedPluginCallback(const QString &functionName) const
+{
+	return m_observedPluginCallbackPresence.value(functionName, false);
+}
+
+void LuaCallbackEngine::refreshLuaCallbackCatalogNow()
+{
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+	if (m_observedPluginCallbacks.isEmpty())
+	{
+		if (m_observedPluginCallbackPresence.isEmpty())
+			return;
+		m_observedPluginCallbackPresence.clear();
+		if (m_callbackCatalogObserver)
+			m_callbackCatalogObserver();
+		return;
+	}
+
+	QHash<QString, bool> refreshed;
+	refreshed.reserve(m_observedPluginCallbacks.size());
+	for (const QString &callbackName : m_observedPluginCallbacks)
+	{
+		bool present = false;
+		if (m_state && !callbackName.isEmpty() && pushLuaFunctionByName(m_state, callbackName))
+		{
+			present = true;
+			lua_pop(m_state, 1);
+		}
+		refreshed.insert(callbackName, present);
+	}
+	if (refreshed == m_observedPluginCallbackPresence)
+		return;
+	m_observedPluginCallbackPresence = std::move(refreshed);
+	if (m_callbackCatalogObserver)
+		m_callbackCatalogObserver();
+#endif
 }
 
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
@@ -625,7 +691,11 @@ class ScriptExecutionDepthGuard
 		~ScriptExecutionDepthGuard()
 		{
 			if (m_engine)
+			{
 				m_engine->popScriptExecutionDepth();
+				if (m_engine->scriptExecutionDepth() == 0)
+					m_engine->refreshLuaCallbackCatalogNow();
+			}
 		}
 
 	private:
@@ -7745,13 +7815,35 @@ static void reportLuaError(const LuaCallbackEngine &engine, const QString &messa
 			if (bool parsedKeyword = false; parseBooleanKeywordValue(flag, parsedKeyword))
 				toOutput = parsedKeyword;
 		}
-		if (toOutput && !runtime->suppressScriptErrorOutputToWorld())
+		if ((toOutput || runtime->forceScriptErrorOutputToWorld()) &&
+		    !runtime->suppressScriptErrorOutputToWorld())
 		{
 			runtime->outputText(message, true, true);
 			return;
 		}
 	}
 	qWarning() << message;
+}
+
+static int luaReportRequireFailure(lua_State *L)
+{
+	const auto *engine = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
+	if (!engine)
+		return 0;
+
+	WorldRuntime *runtime = engine->worldRuntime();
+	if (!runtime || !runtime->forceScriptErrorOutputToWorld())
+		return 0;
+
+	const QString module  = QString::fromUtf8(luaL_optstring(L, 1, ""));
+	const QString details = QString::fromUtf8(luaL_optstring(L, 2, ""));
+	const QString message = module.isEmpty()
+	                            ? QStringLiteral("Lua require failed: %1")
+	                                  .arg(details.isEmpty() ? QStringLiteral("unknown") : details)
+	                            : QStringLiteral("Lua require failed for module '%1': %2")
+	                                  .arg(module, details.isEmpty() ? QStringLiteral("unknown") : details);
+	reportLuaError(*engine, message);
+	return 0;
 }
 
 static bool optBool(lua_State *L, const int index, const bool defaultValue)
@@ -10681,6 +10773,45 @@ static void registerLuaPreloads(lua_State *L)
 	lua_pop(L, 2);
 }
 
+static bool requireModuleNoThrow(lua_State *L, const char *moduleName)
+{
+	if (!L || !moduleName || *moduleName == '\0')
+		return false;
+
+	const int stackTop = lua_gettop(L);
+	lua_getglobal(L, "require");
+	if (!lua_isfunction(L, -1))
+	{
+		lua_settop(L, stackTop);
+		return false;
+	}
+	lua_pushstring(L, moduleName);
+	if (lua_pcall(L, 1, 1, 0) != 0)
+	{
+		lua_settop(L, stackTop);
+		return false;
+	}
+
+	lua_settop(L, stackTop);
+	return true;
+}
+
+static void registerSocketLibraries(lua_State *L)
+{
+	// Load networking modules while package C loaders are still available.
+	// When package restrictions are applied afterwards, already-loaded modules
+	// remain usable and preserve Mushclient-compatible socket.http behavior.
+	(void)requireModuleNoThrow(L, "socket.core");
+	(void)requireModuleNoThrow(L, "mime.core");
+	(void)requireModuleNoThrow(L, "socket");
+	(void)requireModuleNoThrow(L, "mime");
+	(void)requireModuleNoThrow(L, "ltn12");
+	(void)requireModuleNoThrow(L, "socket.url");
+	(void)requireModuleNoThrow(L, "socket.http");
+	(void)requireModuleNoThrow(L, "ssl");
+	(void)requireModuleNoThrow(L, "ssl.https");
+}
+
 static void registerSqliteLibrary(lua_State *L)
 {
 	// Prefer standard Lua loader path first.
@@ -12076,16 +12207,16 @@ static int luaTraceOut(lua_State *L)
 	if (!engine)
 		return 0;
 	WorldRuntime *runtime = engine->worldRuntime();
-	if (!runtime || !runtime->traceEnabled())
+	if (!runtime)
 		return 0;
-	const QString message         = concatLuaArgs(L, 1);
-	const bool    traceWasEnabled = runtime->traceEnabled();
-	runtime->setTraceEnabled(false);
-	const bool handledByPlugin = runtime->firePluginTrace(message);
-	runtime->setTraceEnabled(traceWasEnabled);
-	if (handledByPlugin)
-		return 0;
-	runtime->outputText(QStringLiteral("TRACE: %1").arg(message), true, true);
+	const QString message = concatLuaArgs(L, 1);
+	QMudTraceDispatch::emitTrace(
+	    message,
+	    QMudTraceDispatch::Callbacks{
+	        [runtime]() { return runtime->traceEnabled(); },
+	        [runtime](const bool enabled) { runtime->setTraceEnabled(enabled); },
+	        [runtime](const QString &text) { return runtime->firePluginTrace(text); },
+	        [runtime](const QString &line) { runtime->outputText(line, true, true); }});
 	return 0;
 }
 
@@ -18474,6 +18605,7 @@ bool LuaCallbackEngine::ensureState()
 		{
 			m_scriptLoaded = true;
 			refreshLuaFunctionSetForState(m_state, m_luaFunctionsSet);
+			refreshLuaCallbackCatalogNow();
 			return true;
 		}
 		if (const QByteArray scriptBytes = m_script.toUtf8();
@@ -18488,6 +18620,7 @@ bool LuaCallbackEngine::ensureState()
 		}
 		m_scriptLoaded = true;
 		refreshLuaFunctionSetForState(m_state, m_luaFunctionsSet);
+		refreshLuaCallbackCatalogNow();
 	}
 
 	return true;
@@ -18596,6 +18729,7 @@ void LuaCallbackEngine::registerWorldBindings()
 	registerSqliteLibrary(m_state);
 	registerBcLibrary(m_state);
 	registerLpegLibrary(m_state);
+	registerSocketLibraries(m_state);
 	registerProgressLibrary(m_state);
 
 	QSet<QString> registered;
@@ -19051,6 +19185,10 @@ void LuaCallbackEngine::registerWorldBindings()
 	};
 	for (const auto &[name, function] : kWorldBindings)
 		registerWorldFn(name, function);
+
+	lua_pushlightuserdata(m_state, this);
+	lua_pushcclosure(m_state, luaReportRequireFailure, 1);
+	lua_setglobal(m_state, "__qmud_report_require_failure");
 
 	for (const char *name : kWorldLibNames)
 	{
@@ -19694,6 +19832,31 @@ bool LuaCallbackEngine::callFunctionWithNumberAndStrings(const QString &function
                                                          bool defaultResult)
 {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
+	const std::array<QByteArray, 3> utf8Args  = qmudEncodeUtf8Triplet(arg2, arg3, arg4);
+	const QByteArray               &arg2Bytes = utf8Args[0];
+	const QByteArray               &arg3Bytes = utf8Args[1];
+	const QByteArray               &arg4Bytes = utf8Args[2];
+	return callFunctionWithNumberAndUtf8Strings(functionName, arg1, arg2Bytes, arg3Bytes, arg4Bytes,
+	                                            hasFunction, defaultResult);
+#else
+	Q_UNUSED(functionName);
+	Q_UNUSED(arg1);
+	Q_UNUSED(arg2);
+	Q_UNUSED(arg3);
+	Q_UNUSED(arg4);
+	Q_UNUSED(hasFunction);
+	Q_UNUSED(defaultResult);
+	return defaultResult;
+#endif
+}
+
+bool LuaCallbackEngine::callFunctionWithNumberAndUtf8Strings(const QString &functionName, long arg1,
+                                                             const QByteArray &arg2Utf8,
+                                                             const QByteArray &arg3Utf8,
+                                                             const QByteArray &arg4Utf8, bool *hasFunction,
+                                                             bool defaultResult)
+{
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
 	if (hasFunction)
 		*hasFunction = false;
 	if (functionName.isEmpty())
@@ -19707,12 +19870,9 @@ bool LuaCallbackEngine::callFunctionWithNumberAndStrings(const QString &function
 		*hasFunction = true;
 
 	lua_pushinteger(m_state, arg1);
-	const QByteArray arg2Bytes = arg2.toUtf8();
-	lua_pushlstring(m_state, arg2Bytes.constData(), arg2Bytes.size());
-	const QByteArray arg3Bytes = arg3.toUtf8();
-	lua_pushlstring(m_state, arg3Bytes.constData(), arg3Bytes.size());
-	const QByteArray arg4Bytes = arg4.toUtf8();
-	lua_pushlstring(m_state, arg4Bytes.constData(), arg4Bytes.size());
+	lua_pushlstring(m_state, arg2Utf8.constData(), arg2Utf8.size());
+	lua_pushlstring(m_state, arg3Utf8.constData(), arg3Utf8.size());
+	lua_pushlstring(m_state, arg4Utf8.constData(), arg4Utf8.size());
 
 	QElapsedTimer timer;
 	timer.start();
@@ -19740,9 +19900,9 @@ bool LuaCallbackEngine::callFunctionWithNumberAndStrings(const QString &function
 #else
 	Q_UNUSED(functionName);
 	Q_UNUSED(arg1);
-	Q_UNUSED(arg2);
-	Q_UNUSED(arg3);
-	Q_UNUSED(arg4);
+	Q_UNUSED(arg2Utf8);
+	Q_UNUSED(arg3Utf8);
+	Q_UNUSED(arg4Utf8);
 	Q_UNUSED(hasFunction);
 	Q_UNUSED(defaultResult);
 	return defaultResult;

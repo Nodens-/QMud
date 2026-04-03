@@ -18,7 +18,7 @@ class tst_WorldCommandProcessor_SendTargets : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void scriptWildcardEscaping_data()
 		{
@@ -29,35 +29,19 @@ class tst_WorldCommandProcessor_SendTargets : public QObject
 			QTest::addColumn<QString>("expected");
 
 			QTest::newRow("lua-script")
-			    << QStringLiteral("He said \"A\"\\B$")
-			    << static_cast<int>(eSendToScript)
-			    << QStringLiteral("lua")
-			    << false
-			    << QStringLiteral("He said \\\"A\\\"\\\\B$");
+			    << QStringLiteral("He said \"A\"\\B$") << static_cast<int>(eSendToScript)
+			    << QStringLiteral("lua") << false << QStringLiteral("He said \\\"A\\\"\\\\B$");
 			QTest::newRow("perl-script")
-			    << QStringLiteral("He said \"A\"\\B$")
-			    << static_cast<int>(eSendToScriptAfterOmit)
-			    << QStringLiteral("perlscript")
-			    << false
-			    << QStringLiteral("He said \\\"A\\\"\\\\B\\$");
+			    << QStringLiteral("He said \"A\"\\B$") << static_cast<int>(eSendToScriptAfterOmit)
+			    << QStringLiteral("perlscript") << false << QStringLiteral("He said \\\"A\\\"\\\\B\\$");
 			QTest::newRow("vbscript")
-			    << QStringLiteral("He said \"A\"\\B$")
-			    << static_cast<int>(eSendToScript)
-			    << QStringLiteral("vbscript")
-			    << false
-			    << QStringLiteral("He said \"\"A\"\"\\B$");
+			    << QStringLiteral("He said \"A\"\\B$") << static_cast<int>(eSendToScript)
+			    << QStringLiteral("vbscript") << false << QStringLiteral("He said \"\"A\"\"\\B$");
 			QTest::newRow("world-no-script-escaping")
-			    << QStringLiteral("AbC\\\"$")
-			    << static_cast<int>(eSendToWorld)
-			    << QStringLiteral("lua")
-			    << false
-			    << QStringLiteral("AbC\\\"$");
-			QTest::newRow("lowercase-non-script")
-			    << QStringLiteral("MiXeD")
-			    << static_cast<int>(eSendToWorld)
-			    << QStringLiteral("lua")
-			    << true
-			    << QStringLiteral("mixed");
+			    << QStringLiteral("AbC\\\"$") << static_cast<int>(eSendToWorld) << QStringLiteral("lua")
+			    << false << QStringLiteral("AbC\\\"$");
+			QTest::newRow("lowercase-non-script") << QStringLiteral("MiXeD") << static_cast<int>(eSendToWorld)
+			                                      << QStringLiteral("lua") << true << QStringLiteral("mixed");
 		}
 
 		void scriptWildcardEscaping()
@@ -80,14 +64,39 @@ class tst_WorldCommandProcessor_SendTargets : public QObject
 
 		void escapeSequenceTrailingBackslashDropped()
 		{
-			QCOMPARE(QMudCommandText::fixupEscapeSequences(QStringLiteral("abc\\")),
-			         QStringLiteral("abc"));
+			QCOMPARE(QMudCommandText::fixupEscapeSequences(QStringLiteral("abc\\")), QStringLiteral("abc"));
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+
+		void triggerMatchTargetPreservesTrailingWhitespaceForRegexp()
+		{
+			const QString line = QStringLiteral("<274hp 930sp 448st> ");
+			QCOMPARE(QMudCommandText::normalizeTriggerMatchLine(line, true), line);
+		}
+
+		void triggerMatchTargetTrimsTrailingWhitespaceForWildcard()
+		{
+			const QString line = QStringLiteral("<274hp 930sp 448st> \t");
+			QCOMPARE(QMudCommandText::normalizeTriggerMatchLine(line, false),
+			         QStringLiteral("<274hp 930sp 448st>"));
+		}
+
+		void triggerMultilineTargetPreservesTrailingWhitespaceForRegexp()
+		{
+			const QStringList lines = {QStringLiteral("line 1 "), QStringLiteral("line 2\t")};
+			QCOMPARE(QMudCommandText::buildTriggerMultilineTarget(lines, true),
+			         QStringLiteral("line 1 \nline 2\t\n"));
+		}
+
+		void triggerMultilineTargetTrimsTrailingWhitespaceForWildcard()
+		{
+			const QStringList lines = {QStringLiteral("line 1 "), QStringLiteral("line 2\t")};
+			QCOMPARE(QMudCommandText::buildTriggerMultilineTarget(lines, false),
+			         QStringLiteral("line 1\nline 2\n"));
+		}
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_SendTargets)
-
 
 #if __has_include("tst_WorldCommandProcessor_SendTargets.moc")
 #include "tst_WorldCommandProcessor_SendTargets.moc"

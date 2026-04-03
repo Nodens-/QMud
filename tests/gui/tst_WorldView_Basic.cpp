@@ -1777,13 +1777,82 @@ class tst_WorldView_Basic : public QObject
 			const auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
 			QVERIFY(splitTop);
 			QVERIFY(splitBottom);
+			QScrollBar *splitTopBar = splitTop->verticalScrollBar();
+			QVERIFY(splitTopBar);
 			QScrollBar *liveBar = splitBottom->verticalScrollBar();
 			QVERIFY(liveBar);
 			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+			const int topBeforeAppend = splitTopBar->value();
 
 			view.appendOutputText(QStringLiteral("split-live-stick-new"), true);
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+			QCOMPARE(splitTopBar->value(), topBeforeAppend);
+
+			resetTestState();
+		}
+
+		void scrollbackSplitTopPaneStaysAnchoredDuringHeadTrimAppends()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("220"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(QStringLiteral("split-anchor-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
+			QVERIFY(topBrowser);
+			const QPointF localPos(topBrowser->viewport()->rect().center());
+			const QPointF globalPos(topBrowser->viewport()->mapToGlobal(localPos.toPoint()));
+			QWheelEvent   wheelUp(localPos, globalPos, QPoint(0, 0), QPoint(0, 120), Qt::NoButton,
+			                      Qt::NoModifier, Qt::NoScrollPhase, false);
+			QCoreApplication::sendEvent(topBrowser->viewport(), &wheelUp);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+
+			const auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *liveBar = splitBottom->verticalScrollBar();
+			QVERIFY(liveBar);
+			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+
+			auto selectWordInView = [&view](const QTextBrowser *target, const QVector<QPoint> &points)
+			{
+				for (const QPoint &point : points)
+				{
+					QTest::mouseDClick(target->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+					QCoreApplication::processEvents();
+					if (view.hasOutputSelection() && !view.outputSelectionText().isEmpty())
+						return view.outputSelectionText();
+				}
+				return QString{};
+			};
+
+			const QVector<QPoint> topProbePoints{
+			    splitTop->viewport()->rect().center(),
+			    QPoint(24, qMax(8, splitTop->viewport()->rect().height() / 3)),
+			    QPoint(24, qMax(8, splitTop->viewport()->rect().height() / 2)),
+			};
+			const QString beforeAnchorWord = selectWordInView(splitTop, topProbePoints);
+			QVERIFY(beforeAnchorWord.startsWith(QStringLiteral("split-anchor-")));
+
+			for (int i = 0; i < 40; ++i)
+				view.appendOutputText(QStringLiteral("split-anchor-tail-%1").arg(i), true);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+
+			const QString afterAnchorWord = selectWordInView(splitTop, topProbePoints);
+			QCOMPARE(afterAnchorWord, beforeAnchorWord);
 
 			resetTestState();
 		}
@@ -2445,7 +2514,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void nativeOutputRendererNonContiguousLineNumbersReuseCacheOnStablePaints()
+		void nativeOutputRendererTreatsTailHardReturnFlipAsIncremental()
 		{
 			resetTestState();
 
@@ -2453,6 +2522,91 @@ class tst_WorldView_Basic : public QObject
 			view.resize(640, 420);
 			view.show();
 			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(nativeCanvas);
+
+			view.appendOutputText(QStringLiteral("tail-open"), false);
+			QCoreApplication::processEvents();
+			nativeCanvas->update();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 1);
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
+			             QStringLiteral("tail-open"));
+
+			const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
+
+			QVERIFY(!g_runtimeLines.isEmpty());
+			g_runtimeLines.last().hardReturn = true;
+
+			nativeCanvas->update();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 1);
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
+			             QStringLiteral("tail-open"));
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(), rebuildsBefore);
+			resetTestState();
+		}
+
+		void nativeOutputRendererKeepsIncrementalAppendAfterRuntimeSettingsPin()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(640, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(nativeCanvas);
+
+			view.appendOutputText(QStringLiteral("settings-one"), true);
+			QCoreApplication::processEvents();
+			nativeCanvas->update();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 1);
+			const int rebuildsBeforeSettings =
+			    nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
+
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+			nativeCanvas->update();
+			QCoreApplication::processEvents();
+
+			const int rebuildsAfterSettings =
+			    nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
+			const int updatesBeforeAppend =
+			    nativeCanvas->property("qmud_native_cache_incremental_updates").toInt();
+
+			view.appendOutputText(QStringLiteral("settings-two"), true);
+			QCoreApplication::processEvents();
+			nativeCanvas->update();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 2);
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
+			             QStringLiteral("settings-two"));
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(),
+			             rebuildsAfterSettings);
+			QTRY_VERIFY(nativeCanvas->property("qmud_native_cache_incremental_updates").toInt() >
+			            updatesBeforeAppend);
+			QVERIFY(rebuildsAfterSettings >= rebuildsBeforeSettings);
+			resetTestState();
+		}
+
+		void nativeOutputRendererNonContiguousLineNumbersReuseCacheOnStablePaints()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(640, 420);
+			view.show();
+			view.setRuntime(fakeRuntimePointer());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -2473,14 +2627,14 @@ class tst_WorldView_Basic : public QObject
 			g_runtimeLines = restoredLines;
 
 			view.restoreOutputFromPersistedLines(restoredLines);
-			nativeCanvas->update();
+			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
 
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 3);
 			const int rebuildsBeforeStablePaint =
 			    nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
 
-			nativeCanvas->update();
+			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
 			const int rebuildsAfterFirstStablePaint =
 			    nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
@@ -2490,6 +2644,168 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(),
 			             rebuildsAfterFirstStablePaint);
+			resetTestState();
+		}
+
+		void nativeOutputRendererNonContiguousRollingWindowStaysIncremental()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(640, 420);
+			view.show();
+			view.setRuntime(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(nativeCanvas);
+
+			QVector<WorldRuntime::LineEntry> restoredLines;
+			restoredLines.reserve(4);
+			for (int i = 0; i < 4; ++i)
+			{
+				WorldRuntime::LineEntry entry;
+				entry.text       = QStringLiteral("noncontig-roll-%1").arg(i);
+				entry.flags      = WorldRuntime::LineOutput;
+				entry.hardReturn = true;
+				entry.lineNumber = (i + 1) * 10;
+				restoredLines.push_back(entry);
+			}
+			g_runtimeLines = restoredLines;
+
+			view.restoreOutputFromPersistedLines(restoredLines);
+			nativeCanvas->repaint();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 4);
+			const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
+			const int updatesBefore = nativeCanvas->property("qmud_native_cache_incremental_updates").toInt();
+			const int trimDropsBefore = nativeCanvas->property("qmud_native_cache_trim_drops").toInt();
+
+			g_runtimeLines.removeFirst();
+			WorldRuntime::LineEntry appended;
+			appended.text       = QStringLiteral("noncontig-roll-4");
+			appended.flags      = WorldRuntime::LineOutput;
+			appended.hardReturn = true;
+			appended.lineNumber = 50;
+			g_runtimeLines.push_back(appended);
+
+			nativeCanvas->repaint();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 4);
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
+			             QStringLiteral("noncontig-roll-4"));
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(), rebuildsBefore);
+			QTRY_VERIFY(nativeCanvas->property("qmud_native_cache_incremental_updates").toInt() >
+			            updatesBefore);
+			QTRY_VERIFY(nativeCanvas->property("qmud_native_cache_trim_drops").toInt() > trimDropsBefore);
+			resetTestState();
+		}
+
+		void nativeOutputRendererTrimIntoMergedHeadLineStaysIncremental()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(640, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(nativeCanvas);
+
+			view.appendOutputText(QStringLiteral("merge-a"), false);
+			view.appendOutputText(QStringLiteral("merge-b"), true);
+			view.appendOutputText(QStringLiteral("merge-c"), true);
+			QCoreApplication::processEvents();
+			nativeCanvas->repaint();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 2);
+			QTRY_COMPARE(view.outputLines().value(0), QStringLiteral("merge-amerge-b"));
+			QTRY_COMPARE(view.outputLines().value(1), QStringLiteral("merge-c"));
+			const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
+			const int updatesBefore = nativeCanvas->property("qmud_native_cache_incremental_updates").toInt();
+
+			QVERIFY(!g_runtimeLines.isEmpty());
+			g_runtimeLines.removeFirst();
+			nativeCanvas->repaint();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 2);
+			QTRY_COMPARE(view.outputLines().value(0), QStringLiteral("merge-b"));
+			QTRY_COMPARE(view.outputLines().value(1), QStringLiteral("merge-c"));
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(), rebuildsBefore);
+			QTRY_VERIFY(nativeCanvas->property("qmud_native_cache_incremental_updates").toInt() >
+			            updatesBefore);
+			resetTestState();
+		}
+
+		void nativeOutputRendererNonContiguousMergedHeadTrimStaysIncremental()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(640, 420);
+			view.show();
+			view.setRuntime(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(nativeCanvas);
+
+			QVector<WorldRuntime::LineEntry> restoredLines;
+			restoredLines.reserve(3);
+			{
+				WorldRuntime::LineEntry entry;
+				entry.text       = QStringLiteral("noncontig-merge-a");
+				entry.flags      = WorldRuntime::LineOutput;
+				entry.hardReturn = false;
+				entry.lineNumber = 10;
+				restoredLines.push_back(entry);
+			}
+			{
+				WorldRuntime::LineEntry entry;
+				entry.text       = QStringLiteral("noncontig-merge-b");
+				entry.flags      = WorldRuntime::LineOutput;
+				entry.hardReturn = true;
+				entry.lineNumber = 20;
+				restoredLines.push_back(entry);
+			}
+			{
+				WorldRuntime::LineEntry entry;
+				entry.text       = QStringLiteral("noncontig-merge-c");
+				entry.flags      = WorldRuntime::LineOutput;
+				entry.hardReturn = true;
+				entry.lineNumber = 30;
+				restoredLines.push_back(entry);
+			}
+			g_runtimeLines = restoredLines;
+
+			view.restoreOutputFromPersistedLines(restoredLines);
+			nativeCanvas->repaint();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 2);
+			QTRY_COMPARE(view.outputLines().value(0), QStringLiteral("noncontig-merge-anoncontig-merge-b"));
+			QTRY_COMPARE(view.outputLines().value(1), QStringLiteral("noncontig-merge-c"));
+			const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
+			const int updatesBefore = nativeCanvas->property("qmud_native_cache_incremental_updates").toInt();
+
+			g_runtimeLines.removeFirst();
+			nativeCanvas->repaint();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 2);
+			QTRY_COMPARE(view.outputLines().value(0), QStringLiteral("noncontig-merge-b"));
+			QTRY_COMPARE(view.outputLines().value(1), QStringLiteral("noncontig-merge-c"));
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(), rebuildsBefore);
+			QTRY_VERIFY(nativeCanvas->property("qmud_native_cache_incremental_updates").toInt() >
+			            updatesBefore);
 			resetTestState();
 		}
 
@@ -2527,6 +2843,51 @@ class tst_WorldView_Basic : public QObject
 			             QStringLiteral("trim-c"));
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(), rebuildsBefore);
 			QTRY_VERIFY(nativeCanvas->property("qmud_native_cache_trim_drops").toInt() > trimDropsBefore);
+			resetTestState();
+		}
+
+		void nativeOutputRendererTrimAppendKeepsLayoutMeasurementsLocal()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+
+			WorldView view;
+			view.resize(420, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(nativeCanvas);
+
+			for (int i = 0; i < 160; ++i)
+				view.appendOutputText(
+				    QStringLiteral("trim-layout-%1 ").arg(i) + QString(180, QLatin1Char('z')), true);
+			QCoreApplication::processEvents();
+			nativeCanvas->update();
+			QCoreApplication::processEvents();
+
+			const int lineCountBefore = nativeCanvas->property("qmud_native_plain_line_count").toInt();
+			const int rowsBefore      = nativeCanvas->property("qmud_native_layout_row_measurements").toInt();
+			const int rebuildsBefore  = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
+			QVERIFY(lineCountBefore > 40);
+			QVERIFY(rowsBefore > 0);
+
+			g_runtimeLines.removeFirst();
+			view.appendOutputText(QStringLiteral("trim-layout-tail ") + QString(180, QLatin1Char('q')), true);
+			QCoreApplication::processEvents();
+			nativeCanvas->update();
+			QCoreApplication::processEvents();
+
+			const int rowsAfter = nativeCanvas->property("qmud_native_layout_row_measurements").toInt();
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(), rebuildsBefore);
+			const int measuredDelta = rowsAfter - rowsBefore;
+			QVERIFY2(
+			    measuredDelta <= 64,
+			    qPrintable(
+			        QStringLiteral("Expected local layout remeasure only, delta=%1").arg(measuredDelta)));
 			resetTestState();
 		}
 
@@ -2819,6 +3180,33 @@ class tst_WorldView_Basic : public QObject
 			const QStringList lines      = view.outputLines();
 			const qsizetype   mergedLine = lines.indexOf(QStringLiteral("Ready.look"));
 			QVERIFY(mergedLine >= 0);
+			QVERIFY(g_runtimeLines.size() >= 2);
+			QVERIFY(!g_runtimeLines.at(0).hardReturn);
+			QVERIFY(g_runtimeLines.at(1).hardReturn);
+
+			resetTestState();
+		}
+
+		void keepCommandsOnSameLineRemainsMergedAfterCachePrimed()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
+			g_currentActionSource = WorldRuntime::eUserTyping;
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+
+			view.appendOutputText(QStringLiteral("Ready."), true);
+			QCOMPARE(view.outputLines().last(), QStringLiteral("Ready."));
+
+			view.echoInputText(QStringLiteral("look\r\n"));
+
+			const QStringList lines      = view.outputLines();
+			const qsizetype   mergedLine = lines.indexOf(QStringLiteral("Ready.look"));
+			QVERIFY(mergedLine >= 0);
+			QCOMPARE(lines.indexOf(QStringLiteral("Ready.")), qsizetype{-1});
 			QVERIFY(g_runtimeLines.size() >= 2);
 			QVERIFY(!g_runtimeLines.at(0).hardReturn);
 			QVERIFY(g_runtimeLines.at(1).hardReturn);
@@ -3197,6 +3585,116 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(view.doOutputFind(false));
 			QCOMPARE(view.outputSelectionText(), QStringLiteral("New"));
 			QCOMPARE(view.outputSelectionStartColumn(), 1);
+
+			resetTestState();
+		}
+
+		void outputFindActivatesSplitAndAnchorsLivePaneAtBottom()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 320; ++i)
+			{
+				if (i == 48)
+					view.appendOutputText(QStringLiteral("find_split_target_alpha"), true);
+				else
+					view.appendOutputText(QStringLiteral("find-split-fill-%1").arg(i), true);
+			}
+			QCoreApplication::processEvents();
+			QVERIFY(!view.isScrollbackSplitActive());
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(QStringLiteral("find_split_target_alpha"));
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			QVERIFY(view.doOutputFind(false));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("find_split_target_alpha"));
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+
+			const auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar  = splitTop->verticalScrollBar();
+			QScrollBar *liveBar = splitBottom->verticalScrollBar();
+			QVERIFY(topBar);
+			QVERIFY(liveBar);
+			QTRY_VERIFY(topBar->value() < topBar->maximum());
+			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+
+			view.appendOutputText(QStringLiteral("find-split-live-tail"), true);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+
+			resetTestState();
+		}
+
+		void outputFindAgainKeepsSplitResultInTopPaneAndLivePaneAnchored()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 360; ++i)
+			{
+				if (i == 90 || i == 190)
+					view.appendOutputText(QStringLiteral("find_split_target_beta"), true);
+				else
+					view.appendOutputText(QStringLiteral("find-next-split-fill-%1").arg(i), true);
+			}
+			QCoreApplication::processEvents();
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(QStringLiteral("find_split_target_beta"));
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			QVERIFY(view.doOutputFind(false));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("find_split_target_beta"));
+			const int firstMatchLine = view.outputSelectionStartLine();
+			QVERIFY(firstMatchLine > 0);
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+
+			const auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar  = splitTop->verticalScrollBar();
+			QScrollBar *liveBar = splitBottom->verticalScrollBar();
+			QVERIFY(topBar);
+			QVERIFY(liveBar);
+			QTRY_VERIFY(topBar->value() < topBar->maximum());
+			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+
+			QVERIFY(view.doOutputFind(true));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("find_split_target_beta"));
+			const int nextMatchLine = view.outputSelectionStartLine();
+			QVERIFY(nextMatchLine > 0);
+			QVERIFY(nextMatchLine < firstMatchLine);
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			QTRY_VERIFY(topBar->value() < topBar->maximum());
+			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
 
 			resetTestState();
 		}

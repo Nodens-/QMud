@@ -10,6 +10,8 @@
 
 #include <QtTest/QTest>
 
+extern "C" int luaopen_lsqlite3(lua_State *L);
+
 namespace
 {
 	/**
@@ -71,6 +73,22 @@ namespace
 		result.value      = QString::fromUtf8(bytes ? bytes : "", static_cast<int>(len));
 		lua_pop(L, 1);
 		return result;
+	}
+
+	bool openSqliteModule(lua_State *L, QString &error)
+	{
+		if (!L)
+		{
+			error = QStringLiteral("Lua state is null.");
+			return false;
+		}
+		if (luaopen_lsqlite3(L) != 1)
+		{
+			error = QStringLiteral("luaopen_lsqlite3 did not return a module table.");
+			return false;
+		}
+		lua_pop(L, 1);
+		return true;
 	}
 } // namespace
 
@@ -166,6 +184,31 @@ class tst_LuaSupportCompat : public QObject
 			                                   "tostring(rawget(_G, \"foo.bar\") == nil)"));
 			QVERIFY2(result.ok, qPrintable(result.error));
 			QCOMPARE(result.value, QStringLiteral("7:true"));
+		}
+
+		void requireShimReportsFailedRequiresThroughHook()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			const auto result = evaluateLuaToString(
+			    state.get(),
+			    QByteArrayLiteral("local captured_name = \"\"\n"
+			                      "local captured_error = \"\"\n"
+			                      "__qmud_report_require_failure = function(name, err)\n"
+			                      "  captured_name = tostring(name)\n"
+			                      "  captured_error = tostring(err)\n"
+			                      "end\n"
+			                      "local ok, err = pcall(require, \"__qmud_missing_module_for_test__\")\n"
+			                      "return tostring(ok) .. \"|\" .. captured_name .. \"|\" .. "
+			                      "tostring(#captured_error > 0) .. \"|\" .. tostring(type(err))"));
+			QVERIFY2(result.ok, qPrintable(result.error));
+			const QStringList parts = result.value.split('|');
+			QCOMPARE(parts.size(), 4);
+			QCOMPARE(parts.at(0), QStringLiteral("false"));
+			QCOMPARE(parts.at(1), QStringLiteral("__qmud_missing_module_for_test__"));
+			QCOMPARE(parts.at(2), QStringLiteral("true"));
+			QCOMPARE(parts.at(3), QStringLiteral("string"));
 		}
 
 		void stringFormatIntegerSpecifiersCoerceLua54NumbersLikeLua51()
@@ -382,6 +425,36 @@ class tst_LuaSupportCompat : public QObject
 			QCOMPARE(result.value, QStringLiteral("201|plain"));
 		}
 
+		void socketHttpRequireShimFallsBackToRawWhenSslHttpsRejectsCreateFunction()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			const auto result = evaluateLuaToString(
+			    state.get(), QByteArrayLiteral("package.preload[\"socket.http\"] = function()\n"
+			                                   "  return {\n"
+			                                   "    request = function(reqt, body)\n"
+			                                   "      return \"raw:\" .. tostring(reqt), 206, { src = "
+			                                   "\"raw\" }\n"
+			                                   "    end\n"
+			                                   "  }\n"
+			                                   "end\n"
+			                                   "package.preload[\"ssl.https\"] = function()\n"
+			                                   "  return {\n"
+			                                   "    request = function(reqt, body)\n"
+			                                   "      return nil, \"create function not permitted\"\n"
+			                                   "    end\n"
+			                                   "  }\n"
+			                                   "end\n"
+			                                   "local http = require(\"socket.http\")\n"
+			                                   "local page, code, headers = "
+			                                   "http.request(\"https://example.invalid/path\", \"map=x\")\n"
+			                                   "return tostring(page) .. \"|\" .. tostring(code) .. "
+			                                   "\"|\" .. tostring(headers and headers.src)"));
+			QVERIFY2(result.ok, qPrintable(result.error));
+			QCOMPARE(result.value, QStringLiteral("raw:https://example.invalid/path|206|raw"));
+		}
+
 		void socketHttpRequireShimPatchesRealModulesForHttps()
 		{
 			LuaStateOwner state = makeCompatLuaState();
@@ -426,10 +499,47 @@ class tst_LuaSupportCompat : public QObject
 				QSKIP("System Lua modules socket.http/ssl.https not available in this environment");
 			QCOMPARE(result.value, QStringLiteral("true|shim-ok|299|ssl-real"));
 		}
+
+		void sqliteNamedRowsAllowsNestedIteratorsOnSameConnection()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			QString sqliteError;
+			QVERIFY2(openSqliteModule(state.get(), sqliteError), qPrintable(sqliteError));
+
+			const auto result = evaluateLuaToString(
+			    state.get(),
+			    QByteArrayLiteral(
+			        "local db = assert(sqlite3.open_memory())\n"
+			        "assert(db:execute([["
+			        "CREATE TABLE rooms(uid TEXT, area TEXT);"
+			        "CREATE TABLE bookmarks(uid TEXT, notes TEXT);"
+			        "INSERT INTO rooms(uid, area) VALUES ('A0', 'A');"
+			        "INSERT INTO rooms(uid, area) VALUES ('A1', 'A');"
+			        "INSERT INTO rooms(uid, area) VALUES ('A2', 'A');"
+			        "INSERT INTO bookmarks(uid, notes) VALUES ('A1', 'Keep');"
+			        "]]))\n"
+			        "local collected = {}\n"
+			        "for row in db:nrows(\"SELECT uid FROM rooms WHERE area = 'A' ORDER BY uid\") do\n"
+			        "  local note = nil\n"
+			        "  for note_row in db:nrows(string.format(\"SELECT notes FROM bookmarks WHERE uid = "
+			        "%s\", string.format(\"'%s'\", row.uid))) do\n"
+			        "    note = note_row.notes\n"
+			        "  end\n"
+			        "  if note and note ~= '' then\n"
+			        "    collected[row.uid] = note\n"
+			        "  end\n"
+			        "end\n"
+			        "db:close()\n"
+			        "return tostring(collected['A1'] ~= nil) .. ':' .. tostring(next(collected) ~= nil)"));
+			QVERIFY2(result.ok, qPrintable(result.error));
+			QCOMPARE(result.value, QStringLiteral("true:true"));
+		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
-QTEST_APPLESS_MAIN(tst_LuaSupportCompat)
+QTEST_MAIN(tst_LuaSupportCompat)
 
 #if __has_include("tst_LuaSupportCompat.moc")
 #include "tst_LuaSupportCompat.moc"

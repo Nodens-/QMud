@@ -113,14 +113,23 @@ qmud_add_qtest(tst_TimeFormatUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_TraceDispatchUtils
+        SOURCES
+        unit/tst_TraceDispatchUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/TraceDispatchUtils.cpp"
+        LABELS
+        unit)
+
 if (QMUD_ENABLE_LUA_SCRIPTING)
     qmud_add_qtest(tst_LuaSupportCompat
             SOURCES
             unit/tst_LuaSupportCompat.cpp
             "${CMAKE_SOURCE_DIR}/src/LuaSupport.cpp"
+            "${CMAKE_SOURCE_DIR}/src/Sqlite3Lua.cpp"
             "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
             LIBRARIES
             ${LUA_LIBRARIES}
+            Qt6::Sql
             LABELS
             unit)
     if (TARGET Lua::Lua)
@@ -199,6 +208,14 @@ qmud_add_qtest(tst_AcceleratorUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_MainFrameMdiUtils
+        GUI
+        SOURCES
+        unit/tst_MainFrameMdiUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/MainFrameMdiUtils.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_BraceMatch
         GUI
         SOURCES
@@ -226,6 +243,31 @@ qmud_add_qtest(tst_WorldOptionDefaults
         "${CMAKE_SOURCE_DIR}/src/WorldOptionDefaults.cpp"
         "${CMAKE_SOURCE_DIR}/src/StringUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/Accelerators.cpp"
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_PluginCallbackCatalogUtils
+        SOURCES
+        unit/tst_PluginCallbackCatalogUtils.cpp
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_MemoryImageDecodeCacheUtils
+        GUI
+        SOURCES
+        unit/tst_MemoryImageDecodeCacheUtils.cpp
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_LuaUtf8Utils
+        SOURCES
+        unit/tst_LuaUtf8Utils.cpp
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_WorldRuntimeAttributeUtils
+        SOURCES
+        unit/tst_WorldRuntimeAttributeUtils.cpp
         LABELS
         unit)
 

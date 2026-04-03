@@ -25,6 +25,7 @@
 #include "MiniWindowBrushUtils.h"
 #include "MxpDiagnostics.h"
 #include "NameGeneration.h"
+#include "PluginCallbackCatalogUtils.h"
 #include "SqliteCompat.h"
 #include "StringUtils.h"
 #include "TimeFormatUtils.h"
@@ -34,6 +35,7 @@
 #include "WorldDocument.h"
 #include "WorldOptionDefaults.h"
 #include "WorldOptions.h"
+#include "WorldRuntimeAttributeUtils.h"
 #include "WorldSocket.h"
 #include "WorldView.h"
 #include "scripting/ScriptingErrors.h"
@@ -66,6 +68,7 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QScreen>
 #include <QStack>
 #include <QStringConverter>
@@ -103,15 +106,17 @@ static void        buildCustomColours(const QList<WorldRuntime::Colour> &colours
 static QStringList macroDescriptionList();
 static QStringList keypadNameList();
 
-constexpr int      kChatLoopDiscardSeconds   = 5;
-constexpr int      ADJUST_COLOUR_INVERT      = 1;
-constexpr int      ADJUST_COLOUR_LIGHTER     = 2;
-constexpr int      ADJUST_COLOUR_DARKER      = 3;
-constexpr int      ADJUST_COLOUR_LESS_COLOUR = 4;
-constexpr int      ADJUST_COLOUR_MORE_COLOUR = 5;
-constexpr int      kPacketDebugChars         = 16;
-constexpr int      kMaxMxpTextBufferBytes    = 256 * 1024;
-constexpr int      kMaxMxpStackDepth         = 512;
+constexpr int      kChatLoopDiscardSeconds           = 5;
+constexpr int      ADJUST_COLOUR_INVERT              = 1;
+constexpr int      ADJUST_COLOUR_LIGHTER             = 2;
+constexpr int      ADJUST_COLOUR_DARKER              = 3;
+constexpr int      ADJUST_COLOUR_LESS_COLOUR         = 4;
+constexpr int      ADJUST_COLOUR_MORE_COLOUR         = 5;
+constexpr int      kPacketDebugChars                 = 16;
+constexpr int      kMaxMxpTextBufferBytes            = 256 * 1024;
+constexpr int      kMaxMxpStackDepth                 = 512;
+constexpr int      kMemoryImageDecodeCacheMaxEntries = 48;
+constexpr qint64   kMemoryImageDecodeCacheMaxBytes   = 64LL * 1024LL * 1024LL;
 
 namespace
 {
@@ -142,6 +147,20 @@ namespace
 		if (size < kMinInt)
 			return std::numeric_limits<int>::min();
 		return static_cast<int>(size);
+	}
+
+	bool worldAttributeAffectsCommandProcessor(const QString &key)
+	{
+		return key.compare(QStringLiteral("speed_walk_delay"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("speed_walk_filler"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("translate_german"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("translate_backslash_sequences"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("enable_spam_prevention"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("spam_line_count"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("spam_message"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("do_not_translate_iac_to_iac_iac"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("regexp_match_empty"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("utf_8"), Qt::CaseInsensitive) == 0;
 	}
 
 	int safeQInt64ToInt(const qint64 value)
@@ -11140,39 +11159,89 @@ QString WorldRuntime::mainTitleOverride() const
 
 bool WorldRuntime::hasAnyPluginCallback(const QString &functionName)
 {
-	if (functionName.isEmpty() || m_plugins.isEmpty())
+	if (functionName.isEmpty())
+		return false;
+
+	noteObservedPluginCallbackQuery(m_observedPluginCallbackQueryGeneration, functionName,
+	                                m_observedPluginCallbackGeneration);
+
+	if (ensureObservedPluginCallback(m_observedPluginCallbacks, functionName))
+	{
+		for (auto &plugin : m_plugins)
+		{
+			if (plugin.lua)
+				plugin.lua->setObservedPluginCallbacks(m_observedPluginCallbacks);
+		}
+		m_pluginCallbackPresenceDirty = true;
+	}
+
+	if (m_plugins.isEmpty())
 		return false;
 
 	const int pluginCount = safeQSizeToInt(m_plugins.size());
 	if (m_pluginCallbackPresencePluginCount != pluginCount)
 	{
-		m_pluginCallbackPresence.clear();
 		m_pluginCallbackPresencePluginCount = pluginCount;
+		m_pluginCallbackPresenceDirty       = true;
 	}
 
-	const qint64     nowMs                       = QDateTime::currentMSecsSinceEpoch();
-	const auto       it                          = m_pluginCallbackPresence.constFind(functionName);
-	constexpr qint64 kCallbackPresenceCacheTtlMs = 2000;
-	if (it != m_pluginCallbackPresence.constEnd() &&
-	    (nowMs - it->lastCheckedMs) < kCallbackPresenceCacheTtlMs)
+	if (m_pluginCallbackPresenceDirty)
+		rebuildPluginCallbackPresenceCache();
+	return m_pluginCallbackPresenceCounts.value(functionName) > 0;
+}
+
+void WorldRuntime::invalidatePluginCallbackPresenceCache()
+{
+	m_pluginCallbackPresenceDirty = true;
+}
+
+void WorldRuntime::rebuildPluginCallbackPresenceCache()
+{
+	m_pluginCallbackPresenceCounts.clear();
+	m_pluginCallbackRecipientIndices.clear();
+	pruneStaleObservedPluginCallbacks(m_observedPluginCallbacks, m_observedPluginCallbackQueryGeneration,
+	                                  m_observedPluginCallbackGeneration,
+	                                  observedPluginCallbackRetentionGenerations());
+
+	if (m_observedPluginCallbacks.isEmpty())
 	{
-		return it->hasAny;
+		m_pluginCallbackPresencePluginCount = safeQSizeToInt(m_plugins.size());
+		m_pluginCallbackPresenceDirty       = false;
+		advanceObservedPluginCallbackGeneration(m_observedPluginCallbackGeneration);
+		return;
 	}
 
-	bool hasAny = false;
-	for (const auto &plugin : m_plugins)
+	for (int pluginIndex = 0; pluginIndex < m_plugins.size(); ++pluginIndex)
 	{
+		auto &plugin = m_plugins[pluginIndex];
 		if (!canExecutePlugin(plugin) || !plugin.lua)
 			continue;
-		if (plugin.lua->hasFunction(functionName))
+		plugin.lua->setObservedPluginCallbacks(m_observedPluginCallbacks);
+		if (!plugin.lua->loadScript())
+			continue;
+		for (const QString &name : m_observedPluginCallbacks)
 		{
-			hasAny = true;
-			break;
+			if (name.isEmpty())
+				continue;
+			if (plugin.lua->hasObservedPluginCallback(name))
+			{
+				++m_pluginCallbackPresenceCounts[name];
+				m_pluginCallbackRecipientIndices[name].push_back(pluginIndex);
+			}
 		}
 	}
+	m_pluginCallbackPresencePluginCount = safeQSizeToInt(m_plugins.size());
+	m_pluginCallbackPresenceDirty       = false;
+	advanceObservedPluginCallbackGeneration(m_observedPluginCallbackGeneration);
+}
 
-	m_pluginCallbackPresence.insert(functionName, {hasAny, nowMs});
-	return hasAny;
+void WorldRuntime::bindPluginCallbackObserver(const Plugin &plugin)
+{
+	if (!plugin.lua)
+		return;
+	plugin.lua->setObservedPluginCallbacks(m_observedPluginCallbacks);
+	plugin.lua->setCallbackCatalogObserver([this] { invalidatePluginCallbackPresenceCache(); });
+	invalidatePluginCallbackPresenceCache();
 }
 
 bool WorldRuntime::callPluginCallbacksStopOnFalse(const QString &functionName, const QString &payload)
@@ -12228,6 +12297,11 @@ bool WorldRuntime::suppressScriptErrorOutputToWorld() const
 	return m_inDrawOutputWindowCallback || m_inScreendrawCallback;
 }
 
+bool WorldRuntime::forceScriptErrorOutputToWorld() const
+{
+	return m_forceScriptErrorOutputDepth > 0;
+}
+
 void WorldRuntime::notifyOutputSelectionChanged()
 {
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginSelectionChanged"));
@@ -12561,6 +12635,12 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 		m_printingStyles.push_back(rp);
 	}
 	m_plugins.clear();
+	resetObservedPluginCallbackTracking(m_observedPluginCallbacks, m_observedPluginCallbackQueryGeneration,
+	                                    m_observedPluginCallbackGeneration);
+	m_pluginCallbackPresenceCounts.clear();
+	m_pluginCallbackRecipientIndices.clear();
+	m_pluginCallbackPresencePluginCount = -1;
+	invalidatePluginCallbackPresenceCache();
 	for (const auto &p : doc.plugins())
 	{
 		Plugin rp;
@@ -12663,6 +12743,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 			rp.lua->setScriptText(rp.script);
 			rp.lua->setPluginInfo(rp.attributes.value(QStringLiteral("id")),
 			                      rp.attributes.value(QStringLiteral("name")));
+			bindPluginCallbackObserver(rp);
 		}
 		if (!requestedEnabled && rp.lua && hasValidPluginId(rp))
 		{
@@ -12673,6 +12754,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	}
 	sortPluginsBySequence();
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
+	invalidatePluginCallbackPresenceCache();
 	for (auto &plugin : m_plugins)
 	{
 		queuePluginInstall(plugin);
@@ -12720,6 +12802,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 		}
 	}
 	m_loadingDocument = false;
+	refreshCommandProcessorOptions();
 	installPendingPlugins();
 }
 
@@ -12749,6 +12832,8 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 		if (m_view)
 			m_view->applyRuntimeSettingsWithoutOutputRebuild();
 	}
+	if (!m_loadingDocument && worldAttributeAffectsCommandProcessor(key))
+		refreshCommandProcessorOptions();
 	if (!m_loadingDocument)
 		m_worldFileModified = true;
 	emit worldAttributeChanged(key);
@@ -12774,7 +12859,8 @@ const QMap<QString, QString> &WorldRuntime::worldMultilineAttributes() const
 
 void WorldRuntime::setWorldMultilineAttribute(const QString &key, const QString &value)
 {
-	m_worldMultilineAttributes.insert(key, value);
+	if (!upsertWorldMultilineAttributeIfChanged(m_worldMultilineAttributes, key, value))
+		return;
 	if (!m_loadingDocument)
 		m_worldFileModified = true;
 	if (key == QStringLiteral("script"))
@@ -13950,6 +14036,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 		rp.lua->setScriptText(rp.script);
 		rp.lua->setPluginInfo(rp.attributes.value(QStringLiteral("id")),
 		                      rp.attributes.value(QStringLiteral("name")));
+		bindPluginCallbackObserver(rp);
 	}
 	if (!requestedEnabled && rp.lua && hasValidPluginId(rp))
 	{
@@ -13961,6 +14048,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 	sortPluginsBySequence();
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
 	noteTimerStructureMutation();
+	invalidatePluginCallbackPresenceCache();
 
 	// Queue install for the plugin we just loaded (not "last after sort"),
 	// otherwise lower-sequence plugins can remain permanently install-pending.
@@ -13988,6 +14076,7 @@ bool WorldRuntime::unloadPlugin(const QString &pluginId, QString *error)
 	m_plugins.removeAt(index);
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
 	noteTimerStructureMutation();
+	invalidatePluginCallbackPresenceCache();
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginListChanged"));
 	return true;
 }
@@ -14004,6 +14093,7 @@ bool WorldRuntime::enablePlugin(const QString &pluginId, bool enable)
 		{
 			plugin.disableAfterInstall = false;
 			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+			invalidatePluginCallbackPresenceCache();
 			if (!m_loadingDocument)
 				m_worldFileModified = true;
 		}
@@ -14028,6 +14118,7 @@ bool WorldRuntime::enablePlugin(const QString &pluginId, bool enable)
 	}
 	if (!m_loadingDocument)
 		m_worldFileModified = true;
+	invalidatePluginCallbackPresenceCache();
 	return true;
 }
 
@@ -14162,6 +14253,13 @@ int WorldRuntime::callPluginLua(const QString &pluginId, const QString &routine,
 		lua_pushstring(callerState, error.toLocal8Bit().constData());
 		return 2;
 	}
+
+	[[maybe_unused]] const auto refreshCallbackCatalog = qScopeGuard(
+	    [&plugin]
+	    {
+		    if (plugin.lua)
+			    plugin.lua->refreshLuaCallbackCatalogNow();
+	    });
 
 	auto pushNestedFunction = [](lua_State *L, const QString &dottedName) -> bool
 	{
@@ -14351,10 +14449,33 @@ int WorldRuntime::callPluginLua(const QString &pluginId, const QString &routine,
 int WorldRuntime::broadcastPlugin(long message, const QString &text, const QString &callingPluginId,
                                   const QString &callingPluginName)
 {
-	int count = 0;
-	for (auto &plugin : m_plugins)
+	const QString callbackName = QStringLiteral("OnPluginBroadcast");
+	if (!hasAnyPluginCallback(callbackName))
+		return 0;
+	const auto recipientsIt = m_pluginCallbackRecipientIndices.constFind(callbackName);
+	if (recipientsIt == m_pluginCallbackRecipientIndices.constEnd())
+		return 0;
+	const QVector<int> recipientIndices =
+	    qmudFilterValidPluginRecipientIndices(recipientsIt.value(), m_plugins.size());
+	if (recipientIndices.isEmpty())
+		return 0;
+	if (qmudShouldSkipSelfOnlyPluginBroadcast(
+	        recipientIndices, m_plugins.size(), callingPluginId,
+	        [this](const int index) { return m_plugins.at(index).attributes.value(QStringLiteral("id")); }))
+		return 0;
+	const QByteArray callingPluginIdUtf8   = callingPluginId.toUtf8();
+	const QByteArray callingPluginNameUtf8 = callingPluginName.toUtf8();
+	const QByteArray textUtf8              = text.toUtf8();
+
+	int              count = 0;
+	for (const int pluginIndex : recipientIndices)
 	{
+		if (pluginIndex < 0 || pluginIndex >= m_plugins.size())
+			continue;
+		auto &plugin = m_plugins[pluginIndex];
 		if (!canExecutePlugin(plugin))
+			continue;
+		if (!plugin.lua)
 			continue;
 
 		const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
@@ -14362,8 +14483,8 @@ int WorldRuntime::broadcastPlugin(long message, const QString &text, const QStri
 			continue;
 
 		bool hasFunction = false;
-		plugin.lua->callFunctionWithNumberAndStrings(QStringLiteral("OnPluginBroadcast"), message,
-		                                             callingPluginId, callingPluginName, text, &hasFunction);
+		plugin.lua->callFunctionWithNumberAndUtf8Strings(callbackName, message, callingPluginIdUtf8,
+		                                                 callingPluginNameUtf8, textUtf8, &hasFunction);
 		if (hasFunction)
 			++count;
 	}
@@ -17223,16 +17344,28 @@ int WorldRuntime::windowLoadImageMemory(const QString &name, const QString &imag
 	if (!window)
 		return eNoSuchWindow;
 
-	QImage const image = QImage::fromData(data);
-	if (image.isNull())
-		return eUnableToLoadImage;
-	const bool isMonochrome =
-	    (image.format() == QImage::Format_Mono || image.format() == QImage::Format_MonoLSB);
+	QImage image;
+	bool   decodedHasAlpha = false;
+	bool   isMonochrome    = false;
+	if (!qmudLookupMemoryImageDecodeCache(m_memoryImageDecodeCache, data, image, decodedHasAlpha,
+	                                      isMonochrome))
+	{
+		const QImage decoded = QImage::fromData(data);
+		if (decoded.isNull())
+			return eUnableToLoadImage;
+		isMonochrome =
+		    (decoded.format() == QImage::Format_Mono || decoded.format() == QImage::Format_MonoLSB);
+		image           = decoded.convertToFormat(QImage::Format_ARGB32);
+		decodedHasAlpha = image.hasAlphaChannel();
+		qmudInsertMemoryImageDecodeCache(m_memoryImageDecodeCache, m_memoryImageDecodeCacheBytes, data, image,
+		                                 decodedHasAlpha, isMonochrome, kMemoryImageDecodeCacheMaxEntries,
+		                                 kMemoryImageDecodeCacheMaxBytes);
+	}
 
 	MiniWindowImage entry;
-	entry.image      = image.convertToFormat(QImage::Format_ARGB32);
+	entry.image      = image;
 	entry.source     = QStringLiteral("<memory>");
-	entry.hasAlpha   = hasAlpha || entry.image.hasAlphaChannel();
+	entry.hasAlpha   = hasAlpha || decodedHasAlpha;
 	entry.monochrome = isMonochrome;
 	window->images.insert(imageId, entry);
 	return eOK;
@@ -18456,28 +18589,38 @@ void WorldRuntime::queuePluginInstall(Plugin &plugin)
 {
 	if (!plugin.lua || !hasValidPluginId(plugin))
 		return;
+
+	const auto setInstallPending = [this, &plugin](const bool pending)
+	{
+		if (plugin.installPending == pending)
+			return;
+		plugin.installPending = pending;
+		invalidatePluginCallbackPresenceCache();
+	};
+
 	if (!plugin.enabled && !plugin.disableAfterInstall)
 	{
-		plugin.installPending = true;
+		setInstallPending(true);
 		return;
 	}
 	if (m_loadingDocument || m_pluginInstallDeferred)
 	{
-		plugin.installPending = true;
+		setInstallPending(true);
 		return;
 	}
 	const bool installReady =
 	    m_view && m_view->isVisible() && m_view->outputClientWidth() > 0 && m_view->outputClientHeight() > 0;
 	if (installReady)
 	{
-		plugin.installPending = false;
+		setInstallPending(false);
 		runPluginInstallCallback(plugin);
+		invalidatePluginCallbackPresenceCache();
 		notifyWorldOutputResized();
 		notifyDrawOutputWindow(1, 0);
 	}
 	else
 	{
-		plugin.installPending = true;
+		setInstallPending(true);
 	}
 }
 
@@ -18486,6 +18629,13 @@ void WorldRuntime::runPluginInstallCallback(Plugin &plugin)
 	if (!plugin.lua || !hasValidPluginId(plugin))
 		return;
 
+	++m_forceScriptErrorOutputDepth;
+	[[maybe_unused]] const auto restoreScriptErrorOutputBehavior = qScopeGuard(
+	    [this]
+	    {
+		    if (m_forceScriptErrorOutputDepth > 0)
+			    --m_forceScriptErrorOutputDepth;
+	    });
 	plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginInstall"), nullptr, true);
 	if (plugin.disableAfterInstall)
 	{
@@ -18524,8 +18674,16 @@ void WorldRuntime::installPendingPlugins()
 
 	// Preserve startup behavior: once install starts, plugins can see each other
 	// as install-ready during OnPluginInstall callbacks.
+	bool installPendingStateChanged = false;
 	for (const int index : pendingIndices)
+	{
+		if (!m_plugins[index].installPending)
+			continue;
 		m_plugins[index].installPending = false;
+		installPendingStateChanged      = true;
+	}
+	if (installPendingStateChanged)
+		invalidatePluginCallbackPresenceCache();
 
 	bool installedAny = false;
 	for (const int index : pendingIndices)
@@ -18538,6 +18696,7 @@ void WorldRuntime::installPendingPlugins()
 	}
 	if (installedAny)
 	{
+		invalidatePluginCallbackPresenceCache();
 		notifyWorldOutputResized();
 		notifyDrawOutputWindow(1, 0);
 	}

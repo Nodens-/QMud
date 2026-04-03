@@ -11,6 +11,7 @@
 #define QMUD_WORLDRUNTIME_H
 
 #include "AnsiSgrParseUtils.h"
+#include "MemoryImageDecodeCacheUtils.h"
 #include "MiniWindow.h"
 #include "SqliteCompat.h"
 #include "TelnetProcessor.h"
@@ -3552,6 +3553,11 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] bool    suppressScriptErrorOutputToWorld() const;
 		/**
+		 * @brief Returns whether startup/install callbacks force script errors to world output.
+		 * @return `true` when startup/install callbacks should always show script errors in world output.
+		 */
+		[[nodiscard]] bool    forceScriptErrorOutputToWorld() const;
+		/**
 		 * @brief Returns draw-output notification count.
 		 * @return Output-window redraw count.
 		 */
@@ -3917,6 +3923,12 @@ class WorldRuntime : public QObject
 		 */
 		bool hasAnyPluginCallback(const QString &functionName);
 		/**
+		 * @brief Clears callback-presence cache after plugin execution-state changes.
+		 */
+		void invalidatePluginCallbackPresenceCache();
+		void rebuildPluginCallbackPresenceCache();
+		void bindPluginCallbackObserver(const Plugin &plugin);
+		/**
 		 * @brief Queues plugin for deferred installation.
 		 * @param plugin Plugin instance.
 		 */
@@ -3925,7 +3937,7 @@ class WorldRuntime : public QObject
 		 * @brief Executes plugin install callback and applies pending startup-disable state.
 		 * @param plugin Plugin instance.
 		 */
-		static void           runPluginInstallCallback(Plugin &plugin);
+		void                  runPluginInstallCallback(Plugin &plugin);
 		/**
 		 * @brief Returns whether current Lua-context line is buffered.
 		 * @return `true` when current Lua-context line is in buffer.
@@ -4145,7 +4157,6 @@ class WorldRuntime : public QObject
 		 * @return `true` when write succeeds.
 		 */
 		static bool                writeSaveSnapshot(const SaveSnapshot &snapshot, QString *error);
-
 		struct MxpTagFrame
 		{
 				QByteArray          tag;
@@ -4160,208 +4171,211 @@ class WorldRuntime : public QObject
 				bool       noReset{false};
 		};
 
-		QMap<QString, QString>                m_worldAttributes;
-		QMap<QString, QString>                m_worldMultilineAttributes;
-		qint64                                m_scriptTimeNanos{0};
-		unsigned short                        m_noteStyle{0};
-		QMap<long, long>                      m_colourTranslationMap;
-		bool                                  m_notesInRgb{false};
-		int                                   m_noteTextColour{kSameColour};
-		long                                  m_noteColourFore{0xFFFFFF};
-		long                                  m_noteColourBack{0x000000};
-		int                                   m_worldFileVersion{0};
-		QString                               m_qmudVersion;
-		QDateTime                             m_dateSaved;
-		WorldSocketService                   *m_socket{nullptr};
-		WorldView                            *m_view{nullptr};
-		QMetaObject::Connection               m_viewDestroyedConnection;
-		long                                  m_backgroundColour{0};
-		QImage                                m_backgroundImage;
-		QImage                                m_foregroundImage;
-		QString                               m_backgroundImageName;
-		QString                               m_foregroundImageName;
-		int                                   m_backgroundImageMode{0};
-		int                                   m_foregroundImageMode{0};
-		TelnetProcessor                       m_telnet;
+		QMap<QString, QString>                   m_worldAttributes;
+		QMap<QString, QString>                   m_worldMultilineAttributes;
+		qint64                                   m_scriptTimeNanos{0};
+		unsigned short                           m_noteStyle{0};
+		QMap<long, long>                         m_colourTranslationMap;
+		bool                                     m_notesInRgb{false};
+		int                                      m_noteTextColour{kSameColour};
+		long                                     m_noteColourFore{0xFFFFFF};
+		long                                     m_noteColourBack{0x000000};
+		int                                      m_worldFileVersion{0};
+		QString                                  m_qmudVersion;
+		QDateTime                                m_dateSaved;
+		WorldSocketService                      *m_socket{nullptr};
+		WorldView                               *m_view{nullptr};
+		QMetaObject::Connection                  m_viewDestroyedConnection;
+		long                                     m_backgroundColour{0};
+		QImage                                   m_backgroundImage;
+		QImage                                   m_foregroundImage;
+		QString                                  m_backgroundImageName;
+		QString                                  m_foregroundImageName;
+		int                                      m_backgroundImageMode{0};
+		int                                      m_foregroundImageMode{0};
+		TelnetProcessor                          m_telnet;
 
-		int                                   m_triggerCount{0};
-		int                                   m_aliasCount{0};
-		int                                   m_timerCount{0};
-		quint64                               m_timerStructureMutationSerial{0};
-		int                                   m_macroCount{0};
-		int                                   m_variableCount{0};
-		int                                   m_colourCount{0};
-		int                                   m_keypadCount{0};
-		int                                   m_printingStyleCount{0};
-		int                                   m_pluginCount{0};
-		int                                   m_includeCount{0};
-		int                                   m_scriptCount{0};
-		QMudAnsiStreamState                   m_ansiStreamState;
-		AnsiRenderState                       m_ansiRenderState;
-		QByteArray                            m_streamUtf8Carry;
-		bool                                  m_streamUtf8DecoderEnabled{false};
-		MxpStyleState                         m_mxpRenderStyle;
-		QVector<MxpStyleFrame>                m_mxpRenderStack;
-		QVector<QByteArray>                   m_mxpRenderBlockStack;
-		bool                                  m_mxpRenderLinkOpen{false};
-		int                                   m_mxpRenderPreDepth{0};
+		int                                      m_triggerCount{0};
+		int                                      m_aliasCount{0};
+		int                                      m_timerCount{0};
+		quint64                                  m_timerStructureMutationSerial{0};
+		int                                      m_macroCount{0};
+		int                                      m_variableCount{0};
+		int                                      m_colourCount{0};
+		int                                      m_keypadCount{0};
+		int                                      m_printingStyleCount{0};
+		int                                      m_pluginCount{0};
+		int                                      m_includeCount{0};
+		int                                      m_scriptCount{0};
+		QMudAnsiStreamState                      m_ansiStreamState;
+		AnsiRenderState                          m_ansiRenderState;
+		QByteArray                               m_streamUtf8Carry;
+		bool                                     m_streamUtf8DecoderEnabled{false};
+		MxpStyleState                            m_mxpRenderStyle;
+		QVector<MxpStyleFrame>                   m_mxpRenderStack;
+		QVector<QByteArray>                      m_mxpRenderBlockStack;
+		bool                                     m_mxpRenderLinkOpen{false};
+		int                                      m_mxpRenderPreDepth{0};
 
-		QString                               m_partialLineText;
-		QVector<StyleSpan>                    m_partialLineSpans;
-		bool                                  m_pendingCarriageReturnOverwrite{false};
+		QString                                  m_partialLineText;
+		QVector<StyleSpan>                       m_partialLineSpans;
+		bool                                     m_pendingCarriageReturnOverwrite{false};
 
-		QList<Trigger>                        m_triggers;
-		QList<Alias>                          m_aliases;
-		QList<Timer>                          m_timers;
-		QStringList                           m_recentLines;
-		StopTriggerEvaluation                 m_stopTriggerEvaluation{KeepEvaluating};
-		QMap<QString, QStringList>            m_triggerWildcards;
-		QMap<QString, QMap<QString, QString>> m_triggerNamedWildcards;
-		QMap<QString, QStringList>            m_aliasWildcards;
-		QMap<QString, QMap<QString, QString>> m_aliasNamedWildcards;
-		QList<Macro>                          m_macros;
-		QList<Variable>                       m_variables;
-		QMap<QString, ArrayEntry>             m_arrays;
-		QMap<QString, DatabaseEntry>          m_databases;
-		QList<Colour>                         m_colours;
-		QList<Keypad>                         m_keypadEntries;
-		QList<PrintingStyle>                  m_printingStyles;
-		QTcpServer                           *m_chatServer{nullptr};
-		QMap<long, ChatConnection *>          m_chatConnections;
-		long                                  m_nextChatId{0};
-		QString                               m_lastChatMessageSent;
-		QString                               m_lastChatGroupMessageSent;
-		QDateTime                             m_lastChatMessageTime;
-		QDateTime                             m_lastChatGroupMessageTime;
-		QList<Plugin>                         m_plugins;
-		struct PluginCallbackPresenceEntry
-		{
-				bool   hasAny{false};
-				qint64 lastCheckedMs{0};
-		};
-		QHash<QString, PluginCallbackPresenceEntry> m_pluginCallbackPresence;
-		int                                         m_pluginCallbackPresencePluginCount{-1};
-		QList<Include>                              m_includes;
-		QList<Script>                               m_scripts;
-		QString                                     m_comments;
-		QVector<LineEntry>                          m_lines;
-		QMap<qint64, int>                           m_acceleratorKeyToCommand;
-		QMap<int, AcceleratorEntry>                 m_commandToAcceleratorEntry;
-		int                                         m_nextAcceleratorCommand{kAcceleratorFirstCommand};
-		QMap<QString, MiniWindow>                   m_miniWindows;
-		int                                         m_absoluteReferenceRightOver{0};
-		int                                         m_absoluteReferenceBottomOver{0};
-		int                                         m_absoluteReferenceRightUnder{0};
-		int                                         m_absoluteReferenceBottomUnder{0};
-		QSet<QString>                               m_specialFontPaths;
-		QVector<QString>                            m_specialFontPathOrder;
-		QVector<int>                                m_specialFontIds;
-		QFile                                       m_logFile;
-		QString                                     m_logFileName;
-		QString                                     m_logRotationBaseFileName;
-		bool                                        m_logRotateInProgress{false};
-		QString                                     m_defaultWorldDirectory;
-		QString                                     m_defaultLogDirectory;
-		QString                                     m_startupDirectory;
-		QString                                     m_worldFilePath;
-		QString                                     m_pluginsDirectory;
-		QString                                     m_stateFilesDirectory;
-		QString                                     m_fileBrowsingDirectory;
-		QString                                     m_preferencesDatabaseName;
-		QString                                     m_translatorFile;
-		QString                                     m_locale;
-		QString                                     m_fixedPitchFont;
-		QString                                     m_statusMessage;
-		QString                                     m_wordUnderMenu;
-		bool                                        m_debugIncomingPackets{false};
-		QString                                     m_lastImmediateExpression;
-		QString                                     m_lastCommandSent;
-		QString                                     m_lastTelnetSubnegotiation;
-		int                                         m_totalLinesSent{0};
-		QDateTime                                   m_lastUserInput;
-		int                                         m_linesReceived{0};
-		int                                         m_utf8ErrorCount{0};
-		int                                         m_lastLineWithIacGa{0};
-		unsigned short                              m_currentActionSource{eUnknownActionSource};
-		int                                         m_newLines{0};
-		bool                                        m_doingSimulate{false};
-		bool                                        m_tabCompleteFunctions{false};
-		QSet<QString>                               m_shiftTabCompleteItems;
-		bool                                        m_active{false};
-		int                                         m_triggersMatchedThisSession{0};
-		int                                         m_triggersEvaluatedCount{0};
-		int                                         m_aliasesMatchedThisSession{0};
-		int                                         m_aliasesEvaluatedCount{0};
-		int                                         m_timersFiredThisSession{0};
-		int                                         m_connectPhase{eConnectNotConnected};
-		bool                                        m_connectViaProxy{false};
-		QString                                     m_proxyAddressString;
-		quint32                                     m_proxyAddressV4{0};
-		int                                         m_lastPreferencesPage{0};
-		QString                                     m_lastTriggerTreeExpandedGroup;
-		QString                                     m_lastAliasTreeExpandedGroup;
-		QString                                     m_lastTimerTreeExpandedGroup;
-		bool                                        m_hasCachedIp{false};
-		QDateTime                                   m_connectTime;
-		bool                                        m_disconnectOk{true};
-		bool                                        m_reconnectOnLinkFailure{false};
-		bool                                        m_incomingSocketDataPaused{false};
-		bool                                        m_reloadReattachSuppressConnectActions{false};
-		QDateTime                                   m_statusTime;
-		QDateTime                                   m_lastFlushTime;
-		QDateTime                                   m_clientStartTime;
-		QDateTime                                   m_worldStartTime;
-		int                                         m_mxpErrors{0};
-		bool                                        m_mxpActive{false};
-		bool                                        m_outputFrozen{false};
-		TextRectangleSettings                       m_textRectangle;
-		QMap<int, UdpListener>                      m_udpListeners;
-		QVector<SoundBuffer>                        m_soundBuffers;
-		int                                         m_outputFontHeight{0};
-		int                                         m_outputFontWidth{0};
-		int                                         m_inputFontHeight{0};
-		int                                         m_inputFontWidth{0};
-		int                                         m_queuedCommandCount{0};
-		bool                                        m_removeMapReverses{true};
-		qint64                                      m_bytesIn{0};
-		qint64                                      m_bytesOut{0};
-		int                                         m_inputPacketCount{0};
-		int                                         m_outputPacketCount{0};
-		bool                                        m_isMapping{false};
-		bool                                        m_variablesChanged{false};
-		bool                                        m_lineOmittedFromOutput{false};
-		bool                                        m_traceEnabled{false};
-		bool                                        m_worldFileModified{false};
-		qint64                                      m_newlinesReceived{0};
-		bool                                        m_scriptFileChanged{false};
-		bool                                        m_loadingDocument{false};
-		bool                                        m_inPlaySoundPluginCallback{false};
-		bool                                        m_inCancelSoundPluginCallback{false};
-		bool                                        m_inScreendrawCallback{false};
-		bool                                        m_inDrawOutputWindowCallback{false};
-		int                                         m_suppressWorldOutputResizedCallbacks{0};
-		bool                                        m_pluginInstallDeferred{false};
-		int                                         m_outputWindowRedrawCount{0};
-		QFileSystemWatcher                         *m_scriptWatcher{nullptr};
-		QVector<MxpTagFrame>                        m_mxpTagStack;
-		QVector<MxpOpenTag>                         m_mxpOpenTags;
-		QByteArray                                  m_mxpTextBuffer;
-		QString                                     m_windowTitleOverride;
-		QString                                     m_mainTitleOverride;
-		class LuaCallbackEngine                    *m_luaCallbacks{nullptr};
-		QString                                     m_luaScriptText;
-		WorldCommandProcessor                      *m_commandProcessor{nullptr};
-		int                                         m_lastGoTo{1};
-		QList<QString>                              m_mappingList;
-		qint64                                      m_triggerTimeNs{0};
-		qint64                                      m_aliasTimeNs{0};
-		QElapsedTimer                               m_lineTimer;
-		qint64                                      m_nextLineNumber{1};
-		bool                                        m_luaContextLineActive{false};
-		bool                                        m_luaContextLineBuffered{false};
-		bool                                        m_luaContextLineCommitted{false};
-		int                                         m_luaContextLineBufferIndex{0};
-		LineEntry                                   m_luaContextLineEntry;
+		QList<Trigger>                           m_triggers;
+		QList<Alias>                             m_aliases;
+		QList<Timer>                             m_timers;
+		QStringList                              m_recentLines;
+		StopTriggerEvaluation                    m_stopTriggerEvaluation{KeepEvaluating};
+		QMap<QString, QStringList>               m_triggerWildcards;
+		QMap<QString, QMap<QString, QString>>    m_triggerNamedWildcards;
+		QMap<QString, QStringList>               m_aliasWildcards;
+		QMap<QString, QMap<QString, QString>>    m_aliasNamedWildcards;
+		QList<Macro>                             m_macros;
+		QList<Variable>                          m_variables;
+		QMap<QString, ArrayEntry>                m_arrays;
+		QMap<QString, DatabaseEntry>             m_databases;
+		QList<Colour>                            m_colours;
+		QList<Keypad>                            m_keypadEntries;
+		QList<PrintingStyle>                     m_printingStyles;
+		QTcpServer                              *m_chatServer{nullptr};
+		QMap<long, ChatConnection *>             m_chatConnections;
+		long                                     m_nextChatId{0};
+		QString                                  m_lastChatMessageSent;
+		QString                                  m_lastChatGroupMessageSent;
+		QDateTime                                m_lastChatMessageTime;
+		QDateTime                                m_lastChatGroupMessageTime;
+		QList<Plugin>                            m_plugins;
+		QSet<QString>                            m_observedPluginCallbacks;
+		QHash<QString, quint64>                  m_observedPluginCallbackQueryGeneration;
+		quint64                                  m_observedPluginCallbackGeneration{1};
+		QHash<QString, int>                      m_pluginCallbackPresenceCounts;
+		QHash<QString, QVector<int>>             m_pluginCallbackRecipientIndices;
+		int                                      m_pluginCallbackPresencePluginCount{-1};
+		bool                                     m_pluginCallbackPresenceDirty{true};
+		QList<Include>                           m_includes;
+		QList<Script>                            m_scripts;
+		QString                                  m_comments;
+		QVector<LineEntry>                       m_lines;
+		QMap<qint64, int>                        m_acceleratorKeyToCommand;
+		QMap<int, AcceleratorEntry>              m_commandToAcceleratorEntry;
+		int                                      m_nextAcceleratorCommand{kAcceleratorFirstCommand};
+		QMap<QString, MiniWindow>                m_miniWindows;
+		QVector<QMudMemoryImageDecodeCacheEntry> m_memoryImageDecodeCache;
+		qint64                                   m_memoryImageDecodeCacheBytes{0};
+		int                                      m_absoluteReferenceRightOver{0};
+		int                                      m_absoluteReferenceBottomOver{0};
+		int                                      m_absoluteReferenceRightUnder{0};
+		int                                      m_absoluteReferenceBottomUnder{0};
+		QSet<QString>                            m_specialFontPaths;
+		QVector<QString>                         m_specialFontPathOrder;
+		QVector<int>                             m_specialFontIds;
+		QFile                                    m_logFile;
+		QString                                  m_logFileName;
+		QString                                  m_logRotationBaseFileName;
+		bool                                     m_logRotateInProgress{false};
+		QString                                  m_defaultWorldDirectory;
+		QString                                  m_defaultLogDirectory;
+		QString                                  m_startupDirectory;
+		QString                                  m_worldFilePath;
+		QString                                  m_pluginsDirectory;
+		QString                                  m_stateFilesDirectory;
+		QString                                  m_fileBrowsingDirectory;
+		QString                                  m_preferencesDatabaseName;
+		QString                                  m_translatorFile;
+		QString                                  m_locale;
+		QString                                  m_fixedPitchFont;
+		QString                                  m_statusMessage;
+		QString                                  m_wordUnderMenu;
+		bool                                     m_debugIncomingPackets{false};
+		QString                                  m_lastImmediateExpression;
+		QString                                  m_lastCommandSent;
+		QString                                  m_lastTelnetSubnegotiation;
+		int                                      m_totalLinesSent{0};
+		QDateTime                                m_lastUserInput;
+		int                                      m_linesReceived{0};
+		int                                      m_utf8ErrorCount{0};
+		int                                      m_lastLineWithIacGa{0};
+		unsigned short                           m_currentActionSource{eUnknownActionSource};
+		int                                      m_newLines{0};
+		bool                                     m_doingSimulate{false};
+		bool                                     m_tabCompleteFunctions{false};
+		QSet<QString>                            m_shiftTabCompleteItems;
+		bool                                     m_active{false};
+		int                                      m_triggersMatchedThisSession{0};
+		int                                      m_triggersEvaluatedCount{0};
+		int                                      m_aliasesMatchedThisSession{0};
+		int                                      m_aliasesEvaluatedCount{0};
+		int                                      m_timersFiredThisSession{0};
+		int                                      m_connectPhase{eConnectNotConnected};
+		bool                                     m_connectViaProxy{false};
+		QString                                  m_proxyAddressString;
+		quint32                                  m_proxyAddressV4{0};
+		int                                      m_lastPreferencesPage{0};
+		QString                                  m_lastTriggerTreeExpandedGroup;
+		QString                                  m_lastAliasTreeExpandedGroup;
+		QString                                  m_lastTimerTreeExpandedGroup;
+		bool                                     m_hasCachedIp{false};
+		QDateTime                                m_connectTime;
+		bool                                     m_disconnectOk{true};
+		bool                                     m_reconnectOnLinkFailure{false};
+		bool                                     m_incomingSocketDataPaused{false};
+		bool                                     m_reloadReattachSuppressConnectActions{false};
+		QDateTime                                m_statusTime;
+		QDateTime                                m_lastFlushTime;
+		QDateTime                                m_clientStartTime;
+		QDateTime                                m_worldStartTime;
+		int                                      m_mxpErrors{0};
+		bool                                     m_mxpActive{false};
+		bool                                     m_outputFrozen{false};
+		TextRectangleSettings                    m_textRectangle;
+		QMap<int, UdpListener>                   m_udpListeners;
+		QVector<SoundBuffer>                     m_soundBuffers;
+		int                                      m_outputFontHeight{0};
+		int                                      m_outputFontWidth{0};
+		int                                      m_inputFontHeight{0};
+		int                                      m_inputFontWidth{0};
+		int                                      m_queuedCommandCount{0};
+		bool                                     m_removeMapReverses{true};
+		qint64                                   m_bytesIn{0};
+		qint64                                   m_bytesOut{0};
+		int                                      m_inputPacketCount{0};
+		int                                      m_outputPacketCount{0};
+		bool                                     m_isMapping{false};
+		bool                                     m_variablesChanged{false};
+		bool                                     m_lineOmittedFromOutput{false};
+		bool                                     m_traceEnabled{false};
+		bool                                     m_worldFileModified{false};
+		qint64                                   m_newlinesReceived{0};
+		bool                                     m_scriptFileChanged{false};
+		bool                                     m_loadingDocument{false};
+		bool                                     m_inPlaySoundPluginCallback{false};
+		bool                                     m_inCancelSoundPluginCallback{false};
+		bool                                     m_inScreendrawCallback{false};
+		bool                                     m_inDrawOutputWindowCallback{false};
+		int                                      m_forceScriptErrorOutputDepth{0};
+		int                                      m_suppressWorldOutputResizedCallbacks{0};
+		bool                                     m_pluginInstallDeferred{false};
+		int                                      m_outputWindowRedrawCount{0};
+		QFileSystemWatcher                      *m_scriptWatcher{nullptr};
+		QVector<MxpTagFrame>                     m_mxpTagStack;
+		QVector<MxpOpenTag>                      m_mxpOpenTags;
+		QByteArray                               m_mxpTextBuffer;
+		QString                                  m_windowTitleOverride;
+		QString                                  m_mainTitleOverride;
+		class LuaCallbackEngine                 *m_luaCallbacks{nullptr};
+		QString                                  m_luaScriptText;
+		WorldCommandProcessor                   *m_commandProcessor{nullptr};
+		int                                      m_lastGoTo{1};
+		QList<QString>                           m_mappingList;
+		qint64                                   m_triggerTimeNs{0};
+		qint64                                   m_aliasTimeNs{0};
+		QElapsedTimer                            m_lineTimer;
+		qint64                                   m_nextLineNumber{1};
+		bool                                     m_luaContextLineActive{false};
+		bool                                     m_luaContextLineBuffered{false};
+		bool                                     m_luaContextLineCommitted{false};
+		int                                      m_luaContextLineBufferIndex{0};
+		LineEntry                                m_luaContextLineEntry;
 };
 
 #endif // QMUD_WORLDRUNTIME_H

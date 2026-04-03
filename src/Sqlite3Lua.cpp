@@ -1310,24 +1310,6 @@ namespace
 			return luaL_error(L, "attempt to use closed sqlite database");
 		}
 
-		// Keep at most one active rows iterator per SQLite connection. The Qt SQLite
-		// driver can behave unstably when multiple live query cursors overlap on the
-		// same connection and one is abandoned by script code.
-		if (!db->iterators.isEmpty())
-		{
-			QVector<LuaSqliteIter *> activeIterators;
-			activeIterators.reserve(db->iterators.size());
-			for (LuaSqliteIter *activeIter : db->iterators)
-				activeIterators.push_back(activeIter);
-			for (LuaSqliteIter *activeIter : activeIterators)
-			{
-				invalidateIterator(activeIter);
-				releaseDbRef(activeIter->ownerState, activeIter->dbRef);
-				activeIter->ownerState = nullptr;
-			}
-			db->iterators.clear();
-		}
-
 		auto *iter = static_cast<LuaSqliteIter *>(lua_newuserdata(L, sizeof(LuaSqliteIter)));
 		new (iter) LuaSqliteIter;
 		iter->db         = db;

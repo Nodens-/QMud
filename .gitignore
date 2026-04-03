@@ -28,6 +28,11 @@ porting
 inspect
 
 #
+#  Performance data file for profiling.
+#
+perf.data
+
+#
 # Help database (generated)
 #
 help.db

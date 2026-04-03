@@ -372,6 +372,11 @@ class WorldCommandProcessor : public QObject
 		            const QString &variableName, const QString &description,
 		            const WorldRuntime::Plugin *plugin);
 		/**
+		 * @brief Emits one trace line through plugin trace callbacks/world output.
+		 * @param message Trace message without `TRACE:` prefix.
+		 */
+		void emitTrace(const QString &message) const;
+		/**
 		 * @brief Verifies world connection state before socket sends.
 		 * @return `true` when connection state allows sending.
 		 */
