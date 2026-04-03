@@ -10,8 +10,11 @@
 #ifndef QMUD_LUACALLBACKENGINE_H
 #define QMUD_LUACALLBACKENGINE_H
 
-#include <QSet>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QByteArray>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QHash>
+#include <QSet>
 #include <QString>
 #include <QVector>
 #include <functional>
@@ -230,6 +233,21 @@ class LuaCallbackEngine
 		bool callFunctionWithNumberAndStrings(const QString &functionName, long arg1, const QString &arg2,
 		                                      const QString &arg3, const QString &arg4,
 		                                      bool *hasFunction = nullptr, bool defaultResult = true);
+		/**
+		 * @brief Calls function with one number and three pre-encoded UTF-8 string arguments.
+		 * @param functionName Callback function name.
+		 * @param arg1 Numeric argument.
+		 * @param arg2Utf8 First string argument encoded as UTF-8 bytes.
+		 * @param arg3Utf8 Second string argument encoded as UTF-8 bytes.
+		 * @param arg4Utf8 Third string argument encoded as UTF-8 bytes.
+		 * @param hasFunction Optional output flag indicating function existence.
+		 * @param defaultResult Result when function is missing/error.
+		 * @return Callback result.
+		 */
+		bool callFunctionWithNumberAndUtf8Strings(const QString &functionName, long arg1,
+		                                          const QByteArray &arg2Utf8, const QByteArray &arg3Utf8,
+		                                          const QByteArray &arg4Utf8, bool *hasFunction = nullptr,
+		                                          bool defaultResult = true);
 		/**
 		 * @brief Calls function with two numbers and one string argument.
 		 * @param functionName Callback function name.

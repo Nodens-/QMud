@@ -12,6 +12,9 @@
 #include <QHash>
 #include <QSet>
 #include <QString>
+#include <QVector>
+
+#include <functional>
 
 /**
  * @brief Returns number of generations an observed callback name should be retained without queries.
@@ -104,6 +107,49 @@ inline void resetObservedPluginCallbackTracking(QSet<QString>           &observe
 	observedCallbackNames.clear();
 	queryGenerationByName.clear();
 	generation = 1;
+}
+
+/**
+ * @brief Filters cached recipient indices to currently valid plugin-index range.
+ * @param cachedIndices Recipient indices from callback-presence cache.
+ * @param pluginCount Current plugin count.
+ * @return Valid recipient indices preserving original order.
+ */
+inline QVector<int> qmudFilterValidPluginRecipientIndices(const QVector<int> &cachedIndices,
+                                                          const int           pluginCount)
+{
+	QVector<int> filtered;
+	filtered.reserve(cachedIndices.size());
+	for (const int index : cachedIndices)
+	{
+		if (index < 0 || index >= pluginCount)
+			continue;
+		filtered.push_back(index);
+	}
+	return filtered;
+}
+
+/**
+ * @brief Returns whether broadcast can be skipped when sole recipient is caller plugin itself.
+ * @param recipientIndices Valid recipient indices.
+ * @param pluginCount Current plugin count.
+ * @param callingPluginId Optional caller plugin id.
+ * @param pluginIdAt Callback that returns plugin id by index.
+ * @return `true` when single recipient exists and its id matches caller id case-insensitively.
+ */
+inline bool qmudShouldSkipSelfOnlyPluginBroadcast(const QVector<int> &recipientIndices, const int pluginCount,
+                                                  const QString                     &callingPluginId,
+                                                  const std::function<QString(int)> &pluginIdAt)
+{
+	if (callingPluginId.isEmpty() || recipientIndices.size() != 1)
+		return false;
+	if (pluginCount <= 0 || !pluginIdAt)
+		return false;
+	const int onlyIndex = recipientIndices.constFirst();
+	if (onlyIndex < 0 || onlyIndex >= pluginCount)
+		return false;
+	const QString onlyPluginId = pluginIdAt(onlyIndex);
+	return onlyPluginId.compare(callingPluginId, Qt::CaseInsensitive) == 0;
 }
 
 #endif // QMUD_PLUGINCALLBACKCATALOGUTILS_H

@@ -243,6 +243,19 @@ qmud_add_qtest(tst_PluginCallbackCatalogUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_MemoryImageDecodeCacheUtils
+        GUI
+        SOURCES
+        unit/tst_MemoryImageDecodeCacheUtils.cpp
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_LuaUtf8Utils
+        SOURCES
+        unit/tst_LuaUtf8Utils.cpp
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_WorldRuntimeAttributeUtils
         SOURCES
         unit/tst_WorldRuntimeAttributeUtils.cpp

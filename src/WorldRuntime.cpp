@@ -106,15 +106,17 @@ static void        buildCustomColours(const QList<WorldRuntime::Colour> &colours
 static QStringList macroDescriptionList();
 static QStringList keypadNameList();
 
-constexpr int      kChatLoopDiscardSeconds   = 5;
-constexpr int      ADJUST_COLOUR_INVERT      = 1;
-constexpr int      ADJUST_COLOUR_LIGHTER     = 2;
-constexpr int      ADJUST_COLOUR_DARKER      = 3;
-constexpr int      ADJUST_COLOUR_LESS_COLOUR = 4;
-constexpr int      ADJUST_COLOUR_MORE_COLOUR = 5;
-constexpr int      kPacketDebugChars         = 16;
-constexpr int      kMaxMxpTextBufferBytes    = 256 * 1024;
-constexpr int      kMaxMxpStackDepth         = 512;
+constexpr int      kChatLoopDiscardSeconds           = 5;
+constexpr int      ADJUST_COLOUR_INVERT              = 1;
+constexpr int      ADJUST_COLOUR_LIGHTER             = 2;
+constexpr int      ADJUST_COLOUR_DARKER              = 3;
+constexpr int      ADJUST_COLOUR_LESS_COLOUR         = 4;
+constexpr int      ADJUST_COLOUR_MORE_COLOUR         = 5;
+constexpr int      kPacketDebugChars                 = 16;
+constexpr int      kMaxMxpTextBufferBytes            = 256 * 1024;
+constexpr int      kMaxMxpStackDepth                 = 512;
+constexpr int      kMemoryImageDecodeCacheMaxEntries = 48;
+constexpr qint64   kMemoryImageDecodeCacheMaxBytes   = 64LL * 1024LL * 1024LL;
 
 namespace
 {
@@ -11196,6 +11198,7 @@ void WorldRuntime::invalidatePluginCallbackPresenceCache()
 void WorldRuntime::rebuildPluginCallbackPresenceCache()
 {
 	m_pluginCallbackPresenceCounts.clear();
+	m_pluginCallbackRecipientIndices.clear();
 	pruneStaleObservedPluginCallbacks(m_observedPluginCallbacks, m_observedPluginCallbackQueryGeneration,
 	                                  m_observedPluginCallbackGeneration,
 	                                  observedPluginCallbackRetentionGenerations());
@@ -11208,8 +11211,9 @@ void WorldRuntime::rebuildPluginCallbackPresenceCache()
 		return;
 	}
 
-	for (auto &plugin : m_plugins)
+	for (int pluginIndex = 0; pluginIndex < m_plugins.size(); ++pluginIndex)
 	{
+		auto &plugin = m_plugins[pluginIndex];
 		if (!canExecutePlugin(plugin) || !plugin.lua)
 			continue;
 		plugin.lua->setObservedPluginCallbacks(m_observedPluginCallbacks);
@@ -11220,7 +11224,10 @@ void WorldRuntime::rebuildPluginCallbackPresenceCache()
 			if (name.isEmpty())
 				continue;
 			if (plugin.lua->hasObservedPluginCallback(name))
+			{
 				++m_pluginCallbackPresenceCounts[name];
+				m_pluginCallbackRecipientIndices[name].push_back(pluginIndex);
+			}
 		}
 	}
 	m_pluginCallbackPresencePluginCount = safeQSizeToInt(m_plugins.size());
@@ -12626,6 +12633,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	resetObservedPluginCallbackTracking(m_observedPluginCallbacks, m_observedPluginCallbackQueryGeneration,
 	                                    m_observedPluginCallbackGeneration);
 	m_pluginCallbackPresenceCounts.clear();
+	m_pluginCallbackRecipientIndices.clear();
 	m_pluginCallbackPresencePluginCount = -1;
 	invalidatePluginCallbackPresenceCache();
 	for (const auto &p : doc.plugins())
@@ -14436,10 +14444,33 @@ int WorldRuntime::callPluginLua(const QString &pluginId, const QString &routine,
 int WorldRuntime::broadcastPlugin(long message, const QString &text, const QString &callingPluginId,
                                   const QString &callingPluginName)
 {
-	int count = 0;
-	for (auto &plugin : m_plugins)
+	const QString callbackName = QStringLiteral("OnPluginBroadcast");
+	if (!hasAnyPluginCallback(callbackName))
+		return 0;
+	const auto recipientsIt = m_pluginCallbackRecipientIndices.constFind(callbackName);
+	if (recipientsIt == m_pluginCallbackRecipientIndices.constEnd())
+		return 0;
+	const QVector<int> recipientIndices =
+	    qmudFilterValidPluginRecipientIndices(recipientsIt.value(), m_plugins.size());
+	if (recipientIndices.isEmpty())
+		return 0;
+	if (qmudShouldSkipSelfOnlyPluginBroadcast(
+	        recipientIndices, m_plugins.size(), callingPluginId,
+	        [this](const int index) { return m_plugins.at(index).attributes.value(QStringLiteral("id")); }))
+		return 0;
+	const QByteArray callingPluginIdUtf8   = callingPluginId.toUtf8();
+	const QByteArray callingPluginNameUtf8 = callingPluginName.toUtf8();
+	const QByteArray textUtf8              = text.toUtf8();
+
+	int              count = 0;
+	for (const int pluginIndex : recipientIndices)
 	{
+		if (pluginIndex < 0 || pluginIndex >= m_plugins.size())
+			continue;
+		auto &plugin = m_plugins[pluginIndex];
 		if (!canExecutePlugin(plugin))
+			continue;
+		if (!plugin.lua)
 			continue;
 
 		const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
@@ -14447,8 +14478,8 @@ int WorldRuntime::broadcastPlugin(long message, const QString &text, const QStri
 			continue;
 
 		bool hasFunction = false;
-		plugin.lua->callFunctionWithNumberAndStrings(QStringLiteral("OnPluginBroadcast"), message,
-		                                             callingPluginId, callingPluginName, text, &hasFunction);
+		plugin.lua->callFunctionWithNumberAndUtf8Strings(callbackName, message, callingPluginIdUtf8,
+		                                                 callingPluginNameUtf8, textUtf8, &hasFunction);
 		if (hasFunction)
 			++count;
 	}
@@ -17308,16 +17339,28 @@ int WorldRuntime::windowLoadImageMemory(const QString &name, const QString &imag
 	if (!window)
 		return eNoSuchWindow;
 
-	QImage const image = QImage::fromData(data);
-	if (image.isNull())
-		return eUnableToLoadImage;
-	const bool isMonochrome =
-	    (image.format() == QImage::Format_Mono || image.format() == QImage::Format_MonoLSB);
+	QImage image;
+	bool   decodedHasAlpha = false;
+	bool   isMonochrome    = false;
+	if (!qmudLookupMemoryImageDecodeCache(m_memoryImageDecodeCache, data, image, decodedHasAlpha,
+	                                      isMonochrome))
+	{
+		const QImage decoded = QImage::fromData(data);
+		if (decoded.isNull())
+			return eUnableToLoadImage;
+		isMonochrome =
+		    (decoded.format() == QImage::Format_Mono || decoded.format() == QImage::Format_MonoLSB);
+		image           = decoded.convertToFormat(QImage::Format_ARGB32);
+		decodedHasAlpha = image.hasAlphaChannel();
+		qmudInsertMemoryImageDecodeCache(m_memoryImageDecodeCache, m_memoryImageDecodeCacheBytes, data, image,
+		                                 decodedHasAlpha, isMonochrome, kMemoryImageDecodeCacheMaxEntries,
+		                                 kMemoryImageDecodeCacheMaxBytes);
+	}
 
 	MiniWindowImage entry;
-	entry.image      = image.convertToFormat(QImage::Format_ARGB32);
+	entry.image      = image;
 	entry.source     = QStringLiteral("<memory>");
-	entry.hasAlpha   = hasAlpha || entry.image.hasAlphaChannel();
+	entry.hasAlpha   = hasAlpha || decodedHasAlpha;
 	entry.monochrome = isMonochrome;
 	window->images.insert(imageId, entry);
 	return eOK;

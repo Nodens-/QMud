@@ -18,6 +18,7 @@
 #include "InfoTypesMetadata.h"
 #include "LuaFunctionTypes.h"
 #include "LuaSupport.h"
+#include "LuaUtf8Utils.h"
 #include "MainFrame.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
@@ -81,6 +82,7 @@
 #include <QUrl>
 #include <QUuid>
 #include <QVBoxLayout>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
 #include <QXmlStreamReader>
 #include <QtMath>
@@ -89,6 +91,7 @@
 #include <QtSql/QSqlQuery>
 #include <QtSql/QSqlRecord>
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <memory>
 #ifdef Q_OS_WIN
@@ -19802,6 +19805,31 @@ bool LuaCallbackEngine::callFunctionWithNumberAndStrings(const QString &function
                                                          bool defaultResult)
 {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
+	const std::array<QByteArray, 3> utf8Args  = qmudEncodeUtf8Triplet(arg2, arg3, arg4);
+	const QByteArray               &arg2Bytes = utf8Args[0];
+	const QByteArray               &arg3Bytes = utf8Args[1];
+	const QByteArray               &arg4Bytes = utf8Args[2];
+	return callFunctionWithNumberAndUtf8Strings(functionName, arg1, arg2Bytes, arg3Bytes, arg4Bytes,
+	                                            hasFunction, defaultResult);
+#else
+	Q_UNUSED(functionName);
+	Q_UNUSED(arg1);
+	Q_UNUSED(arg2);
+	Q_UNUSED(arg3);
+	Q_UNUSED(arg4);
+	Q_UNUSED(hasFunction);
+	Q_UNUSED(defaultResult);
+	return defaultResult;
+#endif
+}
+
+bool LuaCallbackEngine::callFunctionWithNumberAndUtf8Strings(const QString &functionName, long arg1,
+                                                             const QByteArray &arg2Utf8,
+                                                             const QByteArray &arg3Utf8,
+                                                             const QByteArray &arg4Utf8, bool *hasFunction,
+                                                             bool defaultResult)
+{
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
 	if (hasFunction)
 		*hasFunction = false;
 	if (functionName.isEmpty())
@@ -19815,12 +19843,9 @@ bool LuaCallbackEngine::callFunctionWithNumberAndStrings(const QString &function
 		*hasFunction = true;
 
 	lua_pushinteger(m_state, arg1);
-	const QByteArray arg2Bytes = arg2.toUtf8();
-	lua_pushlstring(m_state, arg2Bytes.constData(), arg2Bytes.size());
-	const QByteArray arg3Bytes = arg3.toUtf8();
-	lua_pushlstring(m_state, arg3Bytes.constData(), arg3Bytes.size());
-	const QByteArray arg4Bytes = arg4.toUtf8();
-	lua_pushlstring(m_state, arg4Bytes.constData(), arg4Bytes.size());
+	lua_pushlstring(m_state, arg2Utf8.constData(), arg2Utf8.size());
+	lua_pushlstring(m_state, arg3Utf8.constData(), arg3Utf8.size());
+	lua_pushlstring(m_state, arg4Utf8.constData(), arg4Utf8.size());
 
 	QElapsedTimer timer;
 	timer.start();
@@ -19848,9 +19873,9 @@ bool LuaCallbackEngine::callFunctionWithNumberAndStrings(const QString &function
 #else
 	Q_UNUSED(functionName);
 	Q_UNUSED(arg1);
-	Q_UNUSED(arg2);
-	Q_UNUSED(arg3);
-	Q_UNUSED(arg4);
+	Q_UNUSED(arg2Utf8);
+	Q_UNUSED(arg3Utf8);
+	Q_UNUSED(arg4Utf8);
 	Q_UNUSED(hasFunction);
 	Q_UNUSED(defaultResult);
 	return defaultResult;

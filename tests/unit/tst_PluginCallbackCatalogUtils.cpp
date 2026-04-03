@@ -87,6 +87,73 @@ class tst_PluginCallbackCatalogUtils : public QObject
 			QVERIFY(queryGenerations.isEmpty());
 			QCOMPARE(generation, static_cast<quint64>(1));
 		}
+
+		/**
+		 * @brief Verifies recipient filtering preserves order and removes out-of-range entries.
+		 */
+		static void filtersRecipientIndicesByPluginCount()
+		{
+			const QVector<int> cached{2, -1, 0, 9, 1, 3};
+			const QVector<int> filtered = qmudFilterValidPluginRecipientIndices(cached, 3);
+			QCOMPARE(filtered, QVector<int>({2, 0, 1}));
+		}
+
+		/**
+		 * @brief Verifies recipient filtering returns empty list for non-positive plugin count.
+		 */
+		static void filtersRecipientIndicesHandlesNonPositivePluginCount()
+		{
+			const QVector<int> cached{0, 1, 2};
+			QVERIFY(qmudFilterValidPluginRecipientIndices(cached, 0).isEmpty());
+			QVERIFY(qmudFilterValidPluginRecipientIndices(cached, -1).isEmpty());
+		}
+
+		/**
+		 * @brief Verifies single-recipient self-broadcast skip logic.
+		 */
+		static void selfOnlyBroadcastCanBeSkipped()
+		{
+			const QVector<int> recipients{1};
+			const bool skip = qmudShouldSkipSelfOnlyPluginBroadcast(recipients, 3, QStringLiteral("plugin-b"),
+			                                                        [](const int index)
+			                                                        {
+				                                                        switch (index)
+				                                                        {
+				                                                        case 0:
+					                                                        return QStringLiteral("plugin-a");
+				                                                        case 1:
+					                                                        return QStringLiteral("plugin-B");
+				                                                        default:
+					                                                        return QStringLiteral("plugin-c");
+				                                                        }
+			                                                        });
+			QVERIFY(skip);
+		}
+
+		/**
+		 * @brief Verifies skip logic stays disabled for empty caller or multiple recipients.
+		 */
+		static void selfOnlySkipRequiresSingleCallerRecipient()
+		{
+			const QVector<int> single{0};
+			QVERIFY(!qmudShouldSkipSelfOnlyPluginBroadcast(single, 1, QString(), [](const int)
+			                                               { return QStringLiteral("plugin-a"); }));
+
+			const QVector<int> multiple{0, 1};
+			QVERIFY(!qmudShouldSkipSelfOnlyPluginBroadcast(
+			    multiple, 2, QStringLiteral("plugin-a"), [](const int index)
+			    { return index == 0 ? QStringLiteral("plugin-a") : QStringLiteral("plugin-b"); }));
+		}
+
+		/**
+		 * @brief Verifies skip logic does not trigger when callback accessor is missing.
+		 */
+		static void selfOnlySkipRequiresValidAccessor()
+		{
+			const QVector<int> recipients{0};
+			QVERIFY(!qmudShouldSkipSelfOnlyPluginBroadcast(recipients, 1, QStringLiteral("plugin-a"),
+			                                               std::function<QString(int)>()));
+		}
 };
 
 QTEST_APPLESS_MAIN(tst_PluginCallbackCatalogUtils)
