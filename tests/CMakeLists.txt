@@ -118,9 +118,11 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
             SOURCES
             unit/tst_LuaSupportCompat.cpp
             "${CMAKE_SOURCE_DIR}/src/LuaSupport.cpp"
+            "${CMAKE_SOURCE_DIR}/src/Sqlite3Lua.cpp"
             "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
             LIBRARIES
             ${LUA_LIBRARIES}
+            Qt6::Sql
             LABELS
             unit)
     if (TARGET Lua::Lua)

@@ -10,6 +10,8 @@
 
 #include <QtTest/QTest>
 
+extern "C" int luaopen_lsqlite3(lua_State *L);
+
 namespace
 {
 	/**
@@ -71,6 +73,22 @@ namespace
 		result.value      = QString::fromUtf8(bytes ? bytes : "", static_cast<int>(len));
 		lua_pop(L, 1);
 		return result;
+	}
+
+	bool openSqliteModule(lua_State *L, QString &error)
+	{
+		if (!L)
+		{
+			error = QStringLiteral("Lua state is null.");
+			return false;
+		}
+		if (luaopen_lsqlite3(L) != 1)
+		{
+			error = QStringLiteral("luaopen_lsqlite3 did not return a module table.");
+			return false;
+		}
+		lua_pop(L, 1);
+		return true;
 	}
 } // namespace
 
@@ -456,10 +474,47 @@ class tst_LuaSupportCompat : public QObject
 				QSKIP("System Lua modules socket.http/ssl.https not available in this environment");
 			QCOMPARE(result.value, QStringLiteral("true|shim-ok|299|ssl-real"));
 		}
+
+		void sqliteNamedRowsAllowsNestedIteratorsOnSameConnection()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			QString sqliteError;
+			QVERIFY2(openSqliteModule(state.get(), sqliteError), qPrintable(sqliteError));
+
+			const auto result = evaluateLuaToString(
+			    state.get(),
+			    QByteArrayLiteral(
+			        "local db = assert(sqlite3.open_memory())\n"
+			        "assert(db:execute([["
+			        "CREATE TABLE rooms(uid TEXT, area TEXT);"
+			        "CREATE TABLE bookmarks(uid TEXT, notes TEXT);"
+			        "INSERT INTO rooms(uid, area) VALUES ('A0', 'A');"
+			        "INSERT INTO rooms(uid, area) VALUES ('A1', 'A');"
+			        "INSERT INTO rooms(uid, area) VALUES ('A2', 'A');"
+			        "INSERT INTO bookmarks(uid, notes) VALUES ('A1', 'Keep');"
+			        "]]))\n"
+			        "local collected = {}\n"
+			        "for row in db:nrows(\"SELECT uid FROM rooms WHERE area = 'A' ORDER BY uid\") do\n"
+			        "  local note = nil\n"
+			        "  for note_row in db:nrows(string.format(\"SELECT notes FROM bookmarks WHERE uid = "
+			        "%s\", string.format(\"'%s'\", row.uid))) do\n"
+			        "    note = note_row.notes\n"
+			        "  end\n"
+			        "  if note and note ~= '' then\n"
+			        "    collected[row.uid] = note\n"
+			        "  end\n"
+			        "end\n"
+			        "db:close()\n"
+			        "return tostring(collected['A1'] ~= nil) .. ':' .. tostring(next(collected) ~= nil)"));
+			QVERIFY2(result.ok, qPrintable(result.error));
+			QCOMPARE(result.value, QStringLiteral("true:true"));
+		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
-QTEST_APPLESS_MAIN(tst_LuaSupportCompat)
+QTEST_MAIN(tst_LuaSupportCompat)
 
 #if __has_include("tst_LuaSupportCompat.moc")
 #include "tst_LuaSupportCompat.moc"
