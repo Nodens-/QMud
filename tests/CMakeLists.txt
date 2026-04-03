@@ -113,6 +113,13 @@ qmud_add_qtest(tst_TimeFormatUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_TraceDispatchUtils
+        SOURCES
+        unit/tst_TraceDispatchUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/TraceDispatchUtils.cpp"
+        LABELS
+        unit)
+
 if (QMUD_ENABLE_LUA_SCRIPTING)
     qmud_add_qtest(tst_LuaSupportCompat
             SOURCES

@@ -20,6 +20,7 @@
 #include "MainWindowHostResolver.h"
 #include "SpeedwalkParser.h"
 #include "TimerSchedulingUtils.h"
+#include "TraceDispatchUtils.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
@@ -839,6 +840,26 @@ void WorldCommandProcessor::sendToFromAccelerator(int sendTo, const QString &tex
                                                   const WorldRuntime::Plugin *plugin)
 {
 	this->sendTo(sendTo, text, true, true, QString(), description, plugin);
+}
+
+void WorldCommandProcessor::emitTrace(const QString &message) const
+{
+	if (!m_runtime)
+		return;
+	QMudTraceDispatch::emitTrace(
+	    message, QMudTraceDispatch::Callbacks{[this]() { return m_runtime && m_runtime->traceEnabled(); },
+	                                          [this](const bool enabled)
+	                                          {
+		                                          if (m_runtime)
+			                                          m_runtime->setTraceEnabled(enabled);
+	                                          },
+	                                          [this](const QString &text)
+	                                          { return m_runtime && m_runtime->firePluginTrace(text); },
+	                                          [this](const QString &line)
+	                                          {
+		                                          if (m_runtime)
+			                                          m_runtime->outputText(line, true, true);
+	                                          }});
 }
 
 void WorldCommandProcessor::onCommandEntered(const QString &text)
@@ -2388,8 +2409,12 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 		omitFromLog = attrTrue(alias.attributes.value(QStringLiteral("omit_from_log")));
 
 		// get unlabelled alias's internal name
-		const QString  label       = alias.attributes.value(QStringLiteral("name"));
-		const QString  scriptLabel = label.isEmpty() ? matchText : label;
+		const QString label       = alias.attributes.value(QStringLiteral("name"));
+		const QString scriptLabel = label.isEmpty() ? matchText : label;
+		if (label.isEmpty())
+			emitTrace(QStringLiteral("Matched alias \"%1\"").arg(matchText));
+		else
+			emitTrace(QStringLiteral("Matched alias %1").arg(label));
 
 		const QString  language       = m_runtime->worldAttributes().value(QStringLiteral("script_language"));
 		constexpr bool lowerWildcards = false;
@@ -2857,6 +2882,11 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			const QString label = trigger.attributes.value(QStringLiteral("name")).trimmed();
 			const QString scriptLabel =
 			    label.isEmpty() ? trigger.attributes.value(QStringLiteral("match")).trimmed() : label;
+			if (label.isEmpty())
+				emitTrace(QStringLiteral("Matched trigger \"%1\"")
+				              .arg(trigger.attributes.value(QStringLiteral("match"))));
+			else
+				emitTrace(QStringLiteral("Matched trigger %1").arg(label));
 
 			const int  sendToValue = trigger.attributes.value(QStringLiteral("send_to")).toInt();
 			const bool lowerWildcards =
@@ -3142,6 +3172,10 @@ void WorldCommandProcessor::checkTimers()
 				    timers.at(timerIndex).attributes.value(QStringLiteral("name")).trimmed();
 				const QString sendText   = timers.at(timerIndex).children.value(QStringLiteral("send"));
 				const QString scriptName = timers.at(timerIndex).attributes.value(QStringLiteral("script"));
+				if (label.isEmpty())
+					emitTrace(QStringLiteral("Fired unlabelled timer "));
+				else
+					emitTrace(QStringLiteral("Fired timer %1").arg(label));
 
 				timers[timerIndex].executingScript = true;
 				if (m_runtime)

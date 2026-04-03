@@ -173,6 +173,7 @@ set(QMUD_SOURCES
         AppController.cpp
         UpdateCheckUtils.cpp
         TimeFormatUtils.cpp
+        TraceDispatchUtils.cpp
         WorldSessionRestoreFlowUtils.cpp
         WorldSessionStateUtils.cpp
         ReloadPlannerUtils.cpp

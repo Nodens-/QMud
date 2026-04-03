@@ -24,6 +24,7 @@
 #include "MainWindowHostResolver.h"
 #include "SqliteCompat.h"
 #include "StringUtils.h"
+#include "TraceDispatchUtils.h"
 #include "Version.h"
 #include "WorldChildWindow.h"
 #include "WorldDocument.h"
@@ -12206,16 +12207,16 @@ static int luaTraceOut(lua_State *L)
 	if (!engine)
 		return 0;
 	WorldRuntime *runtime = engine->worldRuntime();
-	if (!runtime || !runtime->traceEnabled())
+	if (!runtime)
 		return 0;
-	const QString message         = concatLuaArgs(L, 1);
-	const bool    traceWasEnabled = runtime->traceEnabled();
-	runtime->setTraceEnabled(false);
-	const bool handledByPlugin = runtime->firePluginTrace(message);
-	runtime->setTraceEnabled(traceWasEnabled);
-	if (handledByPlugin)
-		return 0;
-	runtime->outputText(QStringLiteral("TRACE: %1").arg(message), true, true);
+	const QString message = concatLuaArgs(L, 1);
+	QMudTraceDispatch::emitTrace(
+	    message,
+	    QMudTraceDispatch::Callbacks{
+	        [runtime]() { return runtime->traceEnabled(); },
+	        [runtime](const bool enabled) { runtime->setTraceEnabled(enabled); },
+	        [runtime](const QString &text) { return runtime->firePluginTrace(text); },
+	        [runtime](const QString &line) { runtime->outputText(line, true, true); }});
 	return 0;
 }
 
