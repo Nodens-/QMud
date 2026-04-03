@@ -7814,13 +7814,35 @@ static void reportLuaError(const LuaCallbackEngine &engine, const QString &messa
 			if (bool parsedKeyword = false; parseBooleanKeywordValue(flag, parsedKeyword))
 				toOutput = parsedKeyword;
 		}
-		if (toOutput && !runtime->suppressScriptErrorOutputToWorld())
+		if ((toOutput || runtime->forceScriptErrorOutputToWorld()) &&
+		    !runtime->suppressScriptErrorOutputToWorld())
 		{
 			runtime->outputText(message, true, true);
 			return;
 		}
 	}
 	qWarning() << message;
+}
+
+static int luaReportRequireFailure(lua_State *L)
+{
+	const auto *engine = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
+	if (!engine)
+		return 0;
+
+	WorldRuntime *runtime = engine->worldRuntime();
+	if (!runtime || !runtime->forceScriptErrorOutputToWorld())
+		return 0;
+
+	const QString module  = QString::fromUtf8(luaL_optstring(L, 1, ""));
+	const QString details = QString::fromUtf8(luaL_optstring(L, 2, ""));
+	const QString message = module.isEmpty()
+	                            ? QStringLiteral("Lua require failed: %1")
+	                                  .arg(details.isEmpty() ? QStringLiteral("unknown") : details)
+	                            : QStringLiteral("Lua require failed for module '%1': %2")
+	                                  .arg(module, details.isEmpty() ? QStringLiteral("unknown") : details);
+	reportLuaError(*engine, message);
+	return 0;
 }
 
 static bool optBool(lua_State *L, const int index, const bool defaultValue)
@@ -19162,6 +19184,10 @@ void LuaCallbackEngine::registerWorldBindings()
 	};
 	for (const auto &[name, function] : kWorldBindings)
 		registerWorldFn(name, function);
+
+	lua_pushlightuserdata(m_state, this);
+	lua_pushcclosure(m_state, luaReportRequireFailure, 1);
+	lua_setglobal(m_state, "__qmud_report_require_failure");
 
 	for (const char *name : kWorldLibNames)
 	{

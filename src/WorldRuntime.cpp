@@ -12297,6 +12297,11 @@ bool WorldRuntime::suppressScriptErrorOutputToWorld() const
 	return m_inDrawOutputWindowCallback || m_inScreendrawCallback;
 }
 
+bool WorldRuntime::forceScriptErrorOutputToWorld() const
+{
+	return m_forceScriptErrorOutputDepth > 0;
+}
+
 void WorldRuntime::notifyOutputSelectionChanged()
 {
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginSelectionChanged"));
@@ -18624,6 +18629,13 @@ void WorldRuntime::runPluginInstallCallback(Plugin &plugin)
 	if (!plugin.lua || !hasValidPluginId(plugin))
 		return;
 
+	++m_forceScriptErrorOutputDepth;
+	[[maybe_unused]] const auto restoreScriptErrorOutputBehavior = qScopeGuard(
+	    [this]
+	    {
+		    if (m_forceScriptErrorOutputDepth > 0)
+			    --m_forceScriptErrorOutputDepth;
+	    });
 	plugin.lua->callFunctionNoArgs(QStringLiteral("OnPluginInstall"), nullptr, true);
 	if (plugin.disableAfterInstall)
 	{

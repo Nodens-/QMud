@@ -7147,7 +7147,12 @@ void AppController::loadGlobalPlugins(WorldRuntime *runtime) const
 		if (QString error; !runtime->loadPluginFile(entry, &error, true))
 		{
 			if (!error.isEmpty())
+			{
 				qWarning() << "Plugin load failed:" << error;
+				runtime->outputText(
+				    QStringLiteral("Plugin load failed (%1): %2").arg(QDir::toNativeSeparators(entry), error),
+				    true, true);
+			}
 		}
 	}
 }

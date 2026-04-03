@@ -186,6 +186,31 @@ class tst_LuaSupportCompat : public QObject
 			QCOMPARE(result.value, QStringLiteral("7:true"));
 		}
 
+		void requireShimReportsFailedRequiresThroughHook()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			const auto result = evaluateLuaToString(
+			    state.get(),
+			    QByteArrayLiteral("local captured_name = \"\"\n"
+			                      "local captured_error = \"\"\n"
+			                      "__qmud_report_require_failure = function(name, err)\n"
+			                      "  captured_name = tostring(name)\n"
+			                      "  captured_error = tostring(err)\n"
+			                      "end\n"
+			                      "local ok, err = pcall(require, \"__qmud_missing_module_for_test__\")\n"
+			                      "return tostring(ok) .. \"|\" .. captured_name .. \"|\" .. "
+			                      "tostring(#captured_error > 0) .. \"|\" .. tostring(type(err))"));
+			QVERIFY2(result.ok, qPrintable(result.error));
+			const QStringList parts = result.value.split('|');
+			QCOMPARE(parts.size(), 4);
+			QCOMPARE(parts.at(0), QStringLiteral("false"));
+			QCOMPARE(parts.at(1), QStringLiteral("__qmud_missing_module_for_test__"));
+			QCOMPARE(parts.at(2), QStringLiteral("true"));
+			QCOMPARE(parts.at(3), QStringLiteral("string"));
+		}
+
 		void stringFormatIntegerSpecifiersCoerceLua54NumbersLikeLua51()
 		{
 			LuaStateOwner state = makeCompatLuaState();

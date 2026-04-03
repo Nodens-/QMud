@@ -3553,6 +3553,11 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] bool    suppressScriptErrorOutputToWorld() const;
 		/**
+		 * @brief Returns whether startup/install callbacks force script errors to world output.
+		 * @return `true` when startup/install callbacks should always show script errors in world output.
+		 */
+		[[nodiscard]] bool    forceScriptErrorOutputToWorld() const;
+		/**
 		 * @brief Returns draw-output notification count.
 		 * @return Output-window redraw count.
 		 */
@@ -3932,7 +3937,7 @@ class WorldRuntime : public QObject
 		 * @brief Executes plugin install callback and applies pending startup-disable state.
 		 * @param plugin Plugin instance.
 		 */
-		static void           runPluginInstallCallback(Plugin &plugin);
+		void                  runPluginInstallCallback(Plugin &plugin);
 		/**
 		 * @brief Returns whether current Lua-context line is buffered.
 		 * @return `true` when current Lua-context line is in buffer.
@@ -4347,6 +4352,7 @@ class WorldRuntime : public QObject
 		bool                                     m_inCancelSoundPluginCallback{false};
 		bool                                     m_inScreendrawCallback{false};
 		bool                                     m_inDrawOutputWindowCallback{false};
+		int                                      m_forceScriptErrorOutputDepth{0};
 		int                                      m_suppressWorldOutputResizedCallbacks{0};
 		bool                                     m_pluginInstallDeferred{false};
 		int                                      m_outputWindowRedrawCount{0};

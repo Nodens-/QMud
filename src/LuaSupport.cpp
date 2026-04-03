@@ -325,7 +325,15 @@ if require and not rawget(_G, "__qmud_require_compat_wrapped") then
   end
 
   function require(name)
-    local mod = _require(name)
+    local ok, mod_or_err = pcall(_require, name)
+    if not ok then
+      local hook = rawget(_G, "__qmud_report_require_failure")
+      if type(hook) == "function" then
+        pcall(hook, tostring(name), tostring(mod_or_err))
+      end
+      error(mod_or_err, 2)
+    end
+    local mod = mod_or_err
     if name == "socket.http" then
       mod = patch_socket_http_https(mod)
     end
