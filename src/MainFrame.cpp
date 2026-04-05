@@ -654,7 +654,11 @@ void MainWindow::buildMenus()
 	addActionToMenu(helpMenu, QStringLiteral("FunctionsWebPage"),
 	                QStringLiteral("Fu&nctions Web Page ...\tShift+Ctrl+Alt+U"),
 	                QKeySequence(QStringLiteral("Shift+Ctrl+Alt+U")));
-	addActionToMenu(helpMenu, QStringLiteral("HelpMudLists"), QStringLiteral("&MUD Lists..."));
+	if (QAction *mudListsAction =
+	        addActionToMenu(helpMenu, QStringLiteral("HelpMudLists"), QStringLiteral("&MUD Lists...")))
+	{
+		mudListsAction->setVisible(false);
+	}
 	addActionToMenu(helpMenu, QStringLiteral("WebPage"),
 	                QStringLiteral("QMud &Web Page...\tShift+Ctrl+Alt+W"),
 	                QKeySequence(QStringLiteral("Shift+Ctrl+Alt+W")));

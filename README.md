@@ -10,6 +10,8 @@ things were bound to diverge, especially in data persistence, so, as a conscious
 choice, QMud diverges from the get-go.
 The active implementation in this repository is C++20 + Qt 6.10.
 
+The official site and documentation of QMud is here: [qmud.dev](https://qmud.dev)
+
 ## Project status
 
 The porting has been completed. Behavior aims for high compatibility
