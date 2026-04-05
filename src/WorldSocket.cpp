@@ -14,6 +14,54 @@
 #include <QMetaObject>
 #include <QNetworkProxy>
 #include <QTcpSocket>
+#if defined(Q_OS_WIN)
+#include <mstcpip.h>
+#include <winsock2.h>
+#elif defined(Q_OS_UNIX)
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#endif
+
+namespace
+{
+	void applyMushclientKeepAliveSettings(QTcpSocket *socket, const bool enabled)
+	{
+		if (!socket)
+			return;
+
+		socket->setSocketOption(QAbstractSocket::KeepAliveOption, enabled ? 1 : 0);
+		if (!enabled)
+			return;
+
+		const qintptr descriptor = socket->socketDescriptor();
+		if (descriptor < 0)
+			return;
+
+#if defined(Q_OS_WIN)
+		tcp_keepalive keepaliveData{};
+		keepaliveData.onoff             = 1;
+		keepaliveData.keepalivetime     = 120000; // 2 minutes
+		keepaliveData.keepaliveinterval = 6000;   // 6 seconds
+		DWORD bytesReturned             = 0;
+		(void)WSAIoctl(static_cast<SOCKET>(descriptor), SIO_KEEPALIVE_VALS, &keepaliveData,
+		               static_cast<DWORD>(sizeof(keepaliveData)), nullptr, 0, &bytesReturned, nullptr,
+		               nullptr);
+#elif defined(Q_OS_UNIX)
+		const int     fd              = static_cast<int>(descriptor);
+		constexpr int idleSeconds     = 120;
+		constexpr int intervalSeconds = 6;
+#if defined(TCP_KEEPIDLE)
+		(void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idleSeconds, sizeof(idleSeconds));
+#elif defined(TCP_KEEPALIVE)
+		(void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &idleSeconds, sizeof(idleSeconds));
+#endif
+#if defined(TCP_KEEPINTVL)
+		(void)setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intervalSeconds, sizeof(intervalSeconds));
+#endif
+#endif
+	}
+} // namespace
 
 WorldSocket::WorldSocket(QObject *parent) : WorldSocketService(parent)
 {
@@ -40,7 +88,7 @@ void WorldSocket::setKeepAliveEnabled(bool enabled)
 {
 	m_keepAliveEnabled = enabled;
 	if (m_socket && m_socket->state() == QAbstractSocket::ConnectedState)
-		m_socket->setSocketOption(QAbstractSocket::KeepAliveOption, enabled ? 1 : 0);
+		applyMushclientKeepAliveSettings(m_socket, enabled);
 }
 
 void WorldSocket::setProxySettings(int proxyType, const QString &server, quint16 port,
@@ -91,7 +139,7 @@ bool WorldSocket::connectToHost(const QString &host, quint16 port)
 
 	if (m_socket->state() != QAbstractSocket::UnconnectedState)
 		m_socket->abort();
-	m_socket->setSocketOption(QAbstractSocket::KeepAliveOption, m_keepAliveEnabled ? 1 : 0);
+	applyMushclientKeepAliveSettings(m_socket, m_keepAliveEnabled);
 	m_socket->connectToHost(host, port);
 	return true;
 }
@@ -174,7 +222,7 @@ bool WorldSocket::adoptConnectedSocketDescriptor(const qintptr descriptor, QStri
 			*errorMessage = m_socket->errorString();
 		return false;
 	}
-	m_socket->setSocketOption(QAbstractSocket::KeepAliveOption, m_keepAliveEnabled ? 1 : 0);
+	applyMushclientKeepAliveSettings(m_socket, m_keepAliveEnabled);
 	return true;
 }
 
@@ -232,11 +280,11 @@ void WorldSocket::drainPendingReads()
 		return;
 	}
 
-	constexpr qsizetype kEmitChunkSize = 16 * 1024;
-	constexpr int kMaxChunksPerDrain = 4;
-	constexpr int kDrainBudgetMs     = 2;
-	int           emitted            = 0;
-	QElapsedTimer budget;
+	constexpr qsizetype kEmitChunkSize     = 16 * 1024;
+	constexpr int       kMaxChunksPerDrain = 4;
+	constexpr int       kDrainBudgetMs     = 2;
+	int                 emitted            = 0;
+	QElapsedTimer       budget;
 	budget.start();
 
 	while (!m_pendingInbound.isEmpty())
@@ -263,7 +311,7 @@ void WorldSocket::drainPendingReads()
 void WorldSocket::onConnected()
 {
 	if (m_socket)
-		m_socket->setSocketOption(QAbstractSocket::KeepAliveOption, m_keepAliveEnabled ? 1 : 0);
+		applyMushclientKeepAliveSettings(m_socket, m_keepAliveEnabled);
 	emit connected();
 }
 

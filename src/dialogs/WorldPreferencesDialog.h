@@ -556,6 +556,7 @@ class WorldPreferencesDialog : public QDialog
 		QCheckBox                    *m_utf8{nullptr};
 		QCheckBox                    *m_carriageReturnClearsLine{nullptr};
 		QCheckBox                    *m_convertGaToNewline{nullptr};
+		QCheckBox                    *m_sendKeepAlives{nullptr};
 		QCheckBox                    *m_persistOutputBuffer{nullptr};
 		QSpinBox                     *m_fadeOutputBufferAfterSeconds{nullptr};
 		QSpinBox                     *m_fadeOutputOpacityPercent{nullptr};

@@ -1441,6 +1441,10 @@ void WorldPreferencesDialog::accept()
 			m_runtime->setWorldAttribute(QStringLiteral("convert_ga_to_newline"),
 			                             m_convertGaToNewline->isChecked() ? QStringLiteral("1")
 			                                                               : QStringLiteral("0"));
+		if (m_sendKeepAlives)
+			m_runtime->setWorldAttribute(QStringLiteral("send_keep_alives"), m_sendKeepAlives->isChecked()
+			                                                                     ? QStringLiteral("1")
+			                                                                     : QStringLiteral("0"));
 		if (m_persistOutputBuffer)
 			m_runtime->setWorldAttribute(QStringLiteral("persist_output_buffer"),
 			                             boolAttributeValue(m_persistOutputBuffer->isChecked()));
@@ -5517,6 +5521,7 @@ void WorldPreferencesDialog::buildUi()
 	m_autoCopyHtml = new QCheckBox(QStringLiteral("HTML"), outputOptionsWidget);
 	m_convertGaToNewline =
 	    new QCheckBox(QStringLiteral("Convert IAC EOR/GA to new line"), outputOptionsWidget);
+	m_sendKeepAlives = new QCheckBox(QStringLiteral("Send keep alives"), outputOptionsWidget);
 	m_persistOutputBuffer =
 	    new QCheckBox(QStringLiteral("Persist output buffer across reload/restart"), outputOptionsWidget);
 	outputOptionsLayout->addWidget(m_lineInformation);
@@ -5541,6 +5546,7 @@ void WorldPreferencesDialog::buildUi()
 	htmlLayout->addStretch();
 	outputOptionsLayout->addLayout(htmlLayout);
 	outputOptionsLayout->addWidget(m_convertGaToNewline);
+	outputOptionsLayout->addWidget(m_sendKeepAlives);
 	outputOptionsLayout->addWidget(m_persistOutputBuffer);
 	outputRight->addWidget(outputOptionsWidget);
 	if (m_copySelectionToClipboard && m_autoCopyHtml)
@@ -5548,14 +5554,12 @@ void WorldPreferencesDialog::buildUi()
 
 	auto *outputTelnetBox    = new QWidget(outputPage);
 	auto *outputTelnetLayout = new QGridLayout(outputTelnetBox);
-	auto *telnetLabel        = new QLabel(QStringLiteral("Telnet"), outputTelnetBox);
 	auto *terminalTypeLabel  = new QLabel(QStringLiteral("Terminal Type:"), outputTelnetBox);
 	terminalTypeLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 	m_terminalIdentification = new QLineEdit(outputTelnetBox);
 	m_terminalIdentification->setMaxLength(20);
-	outputTelnetLayout->addWidget(telnetLabel, 0, 0, 1, 2, Qt::AlignRight);
-	outputTelnetLayout->addWidget(terminalTypeLabel, 1, 0);
-	outputTelnetLayout->addWidget(m_terminalIdentification, 1, 1);
+	outputTelnetLayout->addWidget(terminalTypeLabel, 0, 0);
+	outputTelnetLayout->addWidget(m_terminalIdentification, 0, 1);
 	outputTelnetLayout->setColumnStretch(1, 1);
 	outputRight->addStretch();
 	outputRight->addWidget(outputTelnetBox);
@@ -9345,6 +9349,8 @@ void WorldPreferencesDialog::populateOutput()
 	if (m_convertGaToNewline)
 		m_convertGaToNewline->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("convert_ga_to_newline"))));
+	if (m_sendKeepAlives)
+		m_sendKeepAlives->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("send_keep_alives"))));
 	if (m_persistOutputBuffer)
 		m_persistOutputBuffer->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("persist_output_buffer"))));
