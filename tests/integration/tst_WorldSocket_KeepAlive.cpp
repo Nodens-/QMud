@@ -135,7 +135,7 @@ class tst_WorldSocket_KeepAlive : public QObject
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
-QTEST_APPLESS_MAIN(tst_WorldSocket_KeepAlive)
+QTEST_GUILESS_MAIN(tst_WorldSocket_KeepAlive)
 
 #if __has_include("tst_WorldSocket_KeepAlive.moc")
 #include "tst_WorldSocket_KeepAlive.moc"
