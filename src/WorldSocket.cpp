@@ -15,8 +15,8 @@
 #include <QNetworkProxy>
 #include <QTcpSocket>
 #if defined(Q_OS_WIN)
-#include <mstcpip.h>
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #elif defined(Q_OS_UNIX)
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -25,6 +25,25 @@
 
 namespace
 {
+#if defined(Q_OS_WIN)
+#ifndef SIO_KEEPALIVE_VALS
+#define SIO_KEEPALIVE_VALS _WSAIOW(IOC_VENDOR, 4)
+#endif
+
+	/**
+	 * @brief Windows keepalive tuning payload used with `SIO_KEEPALIVE_VALS`.
+	 *
+	 * Defined locally to avoid toolchain/header-order sensitivity between MSVC
+	 * and MinGW while keeping WinSock API-compatible field layout.
+	 */
+	struct WinTcpKeepAlive
+	{
+			u_long onoff;
+			u_long keepalivetime;
+			u_long keepaliveinterval;
+	};
+#endif
+
 	void applyMushclientKeepAliveSettings(QTcpSocket *socket, const bool enabled)
 	{
 		if (!socket)
@@ -39,7 +58,7 @@ namespace
 			return;
 
 #if defined(Q_OS_WIN)
-		tcp_keepalive keepaliveData{};
+		WinTcpKeepAlive keepaliveData{};
 		keepaliveData.onoff             = 1;
 		keepaliveData.keepalivetime     = 120000; // 2 minutes
 		keepaliveData.keepaliveinterval = 6000;   // 6 seconds
