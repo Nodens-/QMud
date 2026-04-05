@@ -60,6 +60,16 @@ class tst_WorldOptions : public QObject
 			QCOMPARE(opt->maxValue, 0LL);
 		}
 
+		void sendKeepAlivesOptionIsBooleanAndDefaultOff()
+		{
+			const WorldNumericOption *opt =
+			    QMudWorldOptions::findWorldNumericOption(QStringLiteral("send_keep_alives"));
+			QVERIFY(opt != nullptr);
+			QCOMPARE(opt->defaultValue, 0LL);
+			QCOMPARE(opt->minValue, 0LL);
+			QCOMPARE(opt->maxValue, 0LL);
+		}
+
 		void findUnknownReturnsNull()
 		{
 			QCOMPARE(QMudWorldOptions::findWorldNumericOption(QStringLiteral("not_an_option")),

@@ -384,6 +384,18 @@ qmud_add_qtest(tst_ReloadRecoveryUtils
         TIMEOUT
         20)
 
+qmud_add_qtest(tst_WorldSocket_KeepAlive
+        SOURCES
+        integration/tst_WorldSocket_KeepAlive.cpp
+        "${CMAKE_SOURCE_DIR}/src/WorldSocketService.h"
+        "${CMAKE_SOURCE_DIR}/src/WorldSocket.cpp"
+        LIBRARIES
+        Qt6::Network
+        LABELS
+        integration
+        TIMEOUT
+        20)
+
 qmud_add_qtest(tst_WorldDocument_Load
         SOURCES
         integration/tst_WorldDocument_Load.cpp
