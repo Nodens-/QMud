@@ -6,6 +6,7 @@
  * Role: Integration coverage for world socket keepalive behavior and OS-level tuning.
  */
 
+#include "WorldOptions.h"
 #include "WorldSocket.h"
 
 #include <QTcpServer>
@@ -70,6 +71,7 @@ class tst_WorldSocket_KeepAlive : public QObject
 				QSKIP("Local TCP listen is unavailable in this environment.");
 
 			WorldSocket socket;
+			socket.setProxySettings(eProxyServerNone, QString(), 0, QString(), QString());
 			socket.setKeepAliveEnabled(true);
 
 			QSignalSpy connectedSpy(&socket, &WorldSocket::connected);
@@ -102,6 +104,7 @@ class tst_WorldSocket_KeepAlive : public QObject
 				QSKIP("Local TCP listen is unavailable in this environment.");
 
 			WorldSocket socket;
+			socket.setProxySettings(eProxyServerNone, QString(), 0, QString(), QString());
 			socket.setKeepAliveEnabled(true);
 
 			QSignalSpy connectedSpy(&socket, &WorldSocket::connected);
