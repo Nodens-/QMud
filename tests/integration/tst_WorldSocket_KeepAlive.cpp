@@ -67,17 +67,22 @@ class tst_WorldSocket_KeepAlive : public QObject
 		void togglesKeepAliveOnConnectedSocket()
 		{
 			QTcpServer server;
-			if (!server.listen(QHostAddress::AnyIPv4, 0))
+			if (!server.listen(QHostAddress::LocalHost, 0))
 				QSKIP("Local TCP listen is unavailable in this environment.");
 
 			WorldSocket socket;
 			socket.setProxySettings(eProxyServerNone, QString(), 0, QString(), QString());
 			socket.setKeepAliveEnabled(true);
 
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
 			QSignalSpy connectedSpy(&socket, &WorldSocket::connected);
 			QVERIFY(socket.connectToHost(QStringLiteral("127.0.0.1"), server.serverPort()));
 			QVERIFY(connectedSpy.wait(5000));
-			QVERIFY(server.waitForNewConnection(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QVERIFY(server.hasPendingConnections());
+			if (QTcpSocket *accepted = server.nextPendingConnection())
+				accepted->deleteLater();
 
 			const qintptr descriptor = socket.nativeSocketDescriptor();
 			QVERIFY(descriptor >= 0);
@@ -100,17 +105,22 @@ class tst_WorldSocket_KeepAlive : public QObject
 		void appliesMushclientParityKeepAliveTimings()
 		{
 			QTcpServer server;
-			if (!server.listen(QHostAddress::AnyIPv4, 0))
+			if (!server.listen(QHostAddress::LocalHost, 0))
 				QSKIP("Local TCP listen is unavailable in this environment.");
 
 			WorldSocket socket;
 			socket.setProxySettings(eProxyServerNone, QString(), 0, QString(), QString());
 			socket.setKeepAliveEnabled(true);
 
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
 			QSignalSpy connectedSpy(&socket, &WorldSocket::connected);
 			QVERIFY(socket.connectToHost(QStringLiteral("127.0.0.1"), server.serverPort()));
 			QVERIFY(connectedSpy.wait(5000));
-			QVERIFY(server.waitForNewConnection(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QVERIFY(server.hasPendingConnections());
+			if (QTcpSocket *accepted = server.nextPendingConnection())
+				accepted->deleteLater();
 
 			const qintptr descriptor = socket.nativeSocketDescriptor();
 			QVERIFY(descriptor >= 0);
