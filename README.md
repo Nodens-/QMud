@@ -3,12 +3,14 @@
 QMud is a Qt 6 port and continuation of the
 original [MUSHclient](https://www.mushclient.com/mushclient/mushclient.htm) (by Nick Gammon),
 designed and written by Panagiotis Kalogiratos (Nodens) of [CthulhuMUD](https://www.cthulhumud.com).
-It is client program for connecting to MUD (Multi-User Dungeon) games.
+It is a client program for connecting to MUD (Multi-User Dungeon) games.
 It is compatible with existing MUSHclient files and plugins, but it will migrate them to
 its own format in order to maintain separation. As more features are implemented,
 things were bound to diverge, especially in data persistence, so, as a conscious
 choice, QMud diverges from the get-go.
 The active implementation in this repository is C++20 + Qt 6.10.
+
+The official site and documentation of QMud is here: [qmud.dev](https://qmud.dev)
 
 ## Project status
 
@@ -73,9 +75,9 @@ example `C:\...`) so migrated worlds resolve correctly on the active platform.
 ### How to Migrate
 
 1. Install/Run QMud (depending on platform) to create fresh QMud home directory.
-2. Copy your MUSHclient's lua contents into QMud/lua directory without overwritting anything. (*IF* you have placed any
+2. Copy your MUSHclient's lua contents into QMud/lua directory without overwriting anything. (*IF* you have placed any
    custom lua modules there)
-3. Copy your MUSHclient scripts directory into QMud/ directory without overwritting anything. (*IF* you have placed any
+3. Copy your MUSHclient scripts directory into QMud/ directory without overwriting anything. (*IF* you have placed any
    custom scripts there)
 4. Copy your MUSHclient world directory into QMud/ without overwriting anything.
 5. Delete QMud.conf and QMud.sqlite from QMud/ directory.
