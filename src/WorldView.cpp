@@ -9743,6 +9743,11 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 
 	if (m_view && event->key() == Qt::Key_Escape)
 	{
+		if (m_view->isScrollbackSplitActive())
+		{
+			m_view->collapseScrollbackSplitToLiveOutput();
+			return;
+		}
 		if (m_view->m_escapeDeletesInput)
 		{
 			if (m_view->m_saveDeletedCommand)

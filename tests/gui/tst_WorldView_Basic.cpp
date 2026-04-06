@@ -1744,6 +1744,58 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void escapeAlwaysCollapsesSplit_data()
+		{
+			QTest::addColumn<bool>("escapeDeletesInput");
+
+			QTest::newRow("escape-deletes-input-disabled") << false;
+			QTest::newRow("escape-deletes-input-enabled") << true;
+		}
+
+		void escapeAlwaysCollapsesSplit()
+		{
+			QFETCH(bool, escapeDeletesInput);
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("escape_deletes_input"),
+			                    escapeDeletesInput ? QStringLiteral("1") : QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 300; ++i)
+				view.appendOutputText(QStringLiteral("split-escape-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
+			QVERIFY(topBrowser);
+			QScrollBar *topBar = topBrowser->verticalScrollBar();
+			QVERIFY(topBar);
+			QTRY_VERIFY(topBar->maximum() > topBar->minimum());
+
+			const QPointF localPos(topBrowser->viewport()->rect().center());
+			const QPointF globalPos(topBrowser->viewport()->mapToGlobal(localPos.toPoint()));
+			QWheelEvent   wheelUp(localPos, globalPos, QPoint(0, 0), QPoint(0, 120), Qt::NoButton,
+			                      Qt::NoModifier, Qt::NoScrollPhase, false);
+			QCoreApplication::sendEvent(topBrowser->viewport(), &wheelUp);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			view.setInputText(QStringLiteral("escape-collapse-input"), true);
+			input->setFocus();
+			QTest::keyClick(input, Qt::Key_Escape);
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY(!view.isScrollbackSplitActive());
+			resetTestState();
+		}
+
 		void scrollbackSplitLivePaneSticksToBottomOnAppend()
 		{
 			resetTestState();
