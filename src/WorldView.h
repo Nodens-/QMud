@@ -1049,6 +1049,16 @@ class WorldView : public QWidget
 		 */
 		void               clearNativeOutputSelection(bool notify = true);
 		/**
+		 * @brief Applies pending head-trim remapping to native selection line indices.
+		 * @param lines Current native render lines.
+		 */
+		void               applyPendingNativeSelectionHeadTrim(const QVector<NativeOutputRenderLine> &lines);
+		/**
+		 * @brief Clears native output selection when selected text is outside visible viewport.
+		 * @param view Output view used to evaluate visibility.
+		 */
+		void               clearNativeSelectionIfOutsideVisibleViewport(const WrapTextBrowser *view);
+		/**
 		 * @brief Updates native output selection state from anchor/cursor positions.
 		 * @param sourceView Originating output view.
 		 * @param anchor Selection anchor position.
@@ -1480,6 +1490,7 @@ class WorldView : public QWidget
 		bool                                    m_anchorHoverActive{false};
 		QString                                 m_hoveredHyperlinkHref;
 		NativeOutputSelectionState              m_nativeOutputSelection;
+		mutable int                             m_nativeSelectionPendingHeadTrimLines{0};
 		bool                                    m_mouseCaptured{false};
 		bool                                    m_hasOutputSelection{false};
 		WrapTextBrowser                        *m_lastOutputSelectionView{nullptr};
