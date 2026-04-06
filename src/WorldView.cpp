@@ -1303,6 +1303,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 					    return;
 				    QSignalBlocker block(m_outputScrollBar);
 				    m_outputScrollBar->setValue(value);
+				    clearNativeSelectionIfOutsideVisibleViewport(m_output);
 				    if (!m_nativeScrollSyncInPaint)
 					    requestNativeOutputRepaint();
 			    });
@@ -1321,6 +1322,16 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 			syncExternal();
 		}
 		connect(bar, &QScrollBar::valueChanged, this, [this](int) { emit outputScrollChanged(); });
+	}
+	if (m_liveOutput && m_liveOutput->verticalScrollBar())
+	{
+		connect(m_liveOutput->verticalScrollBar(), &QScrollBar::valueChanged, this,
+		        [this](int)
+		        {
+			        clearNativeSelectionIfOutsideVisibleViewport(m_liveOutput);
+			        if (!m_nativeScrollSyncInPaint)
+				        requestNativeOutputRepaint();
+		        });
 	}
 	syncOutputScrollSingleStep();
 	connect(m_input, &QPlainTextEdit::selectionChanged, this, [this] { emit inputSelectionChanged(); });
@@ -2819,8 +2830,10 @@ void WorldView::bumpNativeRenderLineCacheRevision(const NativeRenderCacheDeltaKi
 	m_nativeRenderCacheDelta.newLineCount    = sizeToInt(m_nativeRenderLineCache.size());
 	m_nativeRenderCacheDelta.tailLineMutated = tailLineMutated;
 	m_nativeRenderCacheDelta.headTrimCount   = qMax(0, headTrimCount);
-	m_nativeSplitTopHeadTrimPixelsRevision   = 0;
-	m_nativeSplitTopHeadTrimPixels           = 0;
+	if (m_nativeRenderCacheDelta.headTrimCount > 0)
+		m_nativeSelectionPendingHeadTrimLines += m_nativeRenderCacheDelta.headTrimCount;
+	m_nativeSplitTopHeadTrimPixelsRevision = 0;
+	m_nativeSplitTopHeadTrimPixels         = 0;
 }
 
 void WorldView::rebuildNativeRenderCacheFromLineEntries(const QVector<WorldRuntime::LineEntry> &lines,
@@ -3327,11 +3340,12 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 		if (m_nativeCachedRuntimeCount > 0 && forwardProgress && structuralChange)
 		{
 			int overlapLastIndex = -1;
-			for (int i = runtimeLines.size() - 1; i >= 0; --i)
+			for (qsizetype i = runtimeLines.size(); i > 0; --i)
 			{
-				if (!lineEntriesEquivalentForCache(runtimeLines.at(i), m_nativeCachedRuntimeLastEntry))
+				const qsizetype index = i - 1;
+				if (!lineEntriesEquivalentForCache(runtimeLines.at(index), m_nativeCachedRuntimeLastEntry))
 					continue;
-				overlapLastIndex = i;
+				overlapLastIndex = sizeToInt(index);
 				break;
 			}
 
@@ -3799,11 +3813,117 @@ void WorldView::clearNativeOutputSelection(const bool notify)
 {
 	const bool hadNativeState = m_nativeOutputSelection.hasSelection || m_nativeOutputSelection.dragging ||
 	                            m_nativeOutputSelection.sourceView != nullptr;
-	const QRect oldPaneRect = nativeOutputPaneRect(m_nativeOutputSelection.sourceView);
-	m_nativeOutputSelection = {};
+	const QRect oldPaneRect               = nativeOutputPaneRect(m_nativeOutputSelection.sourceView);
+	m_nativeOutputSelection               = {};
+	m_nativeSelectionPendingHeadTrimLines = 0;
 	requestNativeOutputRepaint(oldPaneRect);
 	if (notify && hadNativeState)
 		applyResolvedOutputSelection(false, 0, 0, 0, 0);
+}
+
+void WorldView::applyPendingNativeSelectionHeadTrim(const QVector<NativeOutputRenderLine> &lines)
+{
+	const int trimCount = m_nativeSelectionPendingHeadTrimLines;
+	if (trimCount <= 0)
+		return;
+	m_nativeSelectionPendingHeadTrimLines = 0;
+
+	if (!m_nativeOutputSelection.hasSelection && !m_nativeOutputSelection.dragging)
+		return;
+	if (lines.isEmpty())
+	{
+		clearNativeOutputSelection(true);
+		return;
+	}
+
+	auto shiftLineIndex = [trimCount](NativeOutputPosition &position) { position.line -= trimCount; };
+	shiftLineIndex(m_nativeOutputSelection.anchor);
+	shiftLineIndex(m_nativeOutputSelection.cursor);
+	shiftLineIndex(m_nativeOutputSelection.start);
+	shiftLineIndex(m_nativeOutputSelection.end);
+
+	if (m_nativeOutputSelection.anchor.line < 0 || m_nativeOutputSelection.cursor.line < 0 ||
+	    m_nativeOutputSelection.start.line < 0 || m_nativeOutputSelection.end.line < 0)
+	{
+		clearNativeOutputSelection(true);
+		return;
+	}
+
+	const int maxLine       = sizeToInt(lines.size()) - 1;
+	auto      clampPosition = [&lines, maxLine](NativeOutputPosition &position)
+	{
+		position.line    = qBound(0, position.line, maxLine);
+		const int maxCol = sizeToInt(lines.at(position.line).text.size());
+		position.column  = qBound(0, position.column, maxCol);
+	};
+	clampPosition(m_nativeOutputSelection.anchor);
+	clampPosition(m_nativeOutputSelection.cursor);
+	clampPosition(m_nativeOutputSelection.start);
+	clampPosition(m_nativeOutputSelection.end);
+
+	NativeOutputPosition start = m_nativeOutputSelection.anchor;
+	NativeOutputPosition end   = m_nativeOutputSelection.cursor;
+	if (start.line > end.line || (start.line == end.line && start.column > end.column))
+		qSwap(start, end);
+	m_nativeOutputSelection.start        = start;
+	m_nativeOutputSelection.end          = end;
+	m_nativeOutputSelection.hasSelection = start.line != end.line || start.column != end.column;
+	if (!m_nativeOutputSelection.hasSelection)
+		clearNativeOutputSelection(true);
+}
+
+void WorldView::clearNativeSelectionIfOutsideVisibleViewport(const WrapTextBrowser *const view)
+{
+	if (!view || !m_nativeOutputSelection.hasSelection || m_nativeOutputSelection.sourceView != view)
+		return;
+	if (!view->viewport() || !view->isVisible() || !view->viewport()->isVisible())
+	{
+		clearNativeOutputSelection(true);
+		return;
+	}
+
+	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	if (lines.isEmpty())
+	{
+		clearNativeOutputSelection(true);
+		return;
+	}
+
+	applyPendingNativeSelectionHeadTrim(lines);
+	if (!m_nativeOutputSelection.hasSelection)
+		return;
+
+	const QRect viewportRect = view->viewport()->rect();
+	if (viewportRect.width() <= 0 || viewportRect.height() <= 0)
+		return;
+
+	const bool   wrapEnabled          = view->lineWrapMode() != WrapTextBrowser::NoWrap;
+	const int    wrapWidthPixels      = nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
+	const int    localWrapWidthPixels = nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
+	const int    lineSpacingSetting   = qMax(0, m_lineSpacing);
+	const QFont &layoutFont           = view->font();
+	ensureNativeLayoutCaches(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting, layoutFont);
+
+	if (m_nativeLayoutCumulativeHeights.size() <= lines.size())
+		return;
+
+	const qreal docY            = m_nativeLayoutCumulativeHeights.at(lines.size());
+	const int   nativeMaxScroll = qMax(0, static_cast<int>(std::ceil(docY)) - viewportRect.height());
+	const int   barValue        = view->verticalScrollBar() ? qMax(0, view->verticalScrollBar()->value()) : 0;
+	const int   effectiveScrollY = nativeMaxScroll > 0 ? qBound(0, barValue, nativeMaxScroll) : 0;
+	const auto  visibleTop       = static_cast<qreal>(effectiveScrollY);
+	const qreal visibleBottom    = visibleTop + static_cast<qreal>(viewportRect.height());
+
+	int         startLine = qBound(0, m_nativeOutputSelection.start.line, sizeToInt(lines.size()) - 1);
+	int         endLine   = qBound(0, m_nativeOutputSelection.end.line, sizeToInt(lines.size()) - 1);
+	if (startLine > endLine)
+		qSwap(startLine, endLine);
+
+	const qreal selectionTop           = m_nativeLayoutCumulativeHeights.at(startLine);
+	const qreal selectionBottom        = m_nativeLayoutCumulativeHeights.at(endLine + 1);
+	const bool  intersectsVisibleRange = selectionBottom > visibleTop && selectionTop < visibleBottom;
+	if (!intersectsVisibleRange)
+		clearNativeOutputSelection(true);
 }
 
 void WorldView::setNativeOutputSelection(const WrapTextBrowser      *sourceView,
@@ -3825,10 +3945,11 @@ void WorldView::setNativeOutputSelection(const WrapTextBrowser      *sourceView,
 		return qBound(0, column, maxColumn);
 	};
 
-	int                  anchorLine = anchor.line;
-	int                  cursorLine = cursor.line;
-	int                  anchorCol  = clampLineColumn(anchorLine, anchor.column, &anchorLine);
-	int                  cursorCol  = clampLineColumn(cursorLine, cursor.column, &cursorLine);
+	m_nativeSelectionPendingHeadTrimLines = 0;
+	int                  anchorLine       = anchor.line;
+	int                  cursorLine       = cursor.line;
+	int                  anchorCol        = clampLineColumn(anchorLine, anchor.column, &anchorLine);
+	int                  cursorCol        = clampLineColumn(cursorLine, cursor.column, &cursorLine);
 
 	NativeOutputPosition start{anchorLine, anchorCol};
 	NativeOutputPosition end{cursorLine, cursorCol};
@@ -3889,6 +4010,10 @@ bool WorldView::nativeOutputSelectionBounds(int &startLine, int &startColumn, in
 	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
 	if (lines.isEmpty())
 		return false;
+	const_cast<WorldView *>(this)->applyPendingNativeSelectionHeadTrim(lines);
+	if (!m_nativeOutputSelection.hasSelection)
+		return false;
+
 	auto clampLineColumn = [&lines](int line, int column, int *clampedLine = nullptr)
 	{
 		const int boundedLine = qBound(0, line, sizeToInt(lines.size()) - 1);
@@ -4689,6 +4814,8 @@ void WorldView::requestOutputScrollToEnd()
 			                   scrollViewToEnd(that->m_liveOutput);
 		                   else
 			                   scrollViewToEnd(that->m_output);
+		                   that->clearNativeSelectionIfOutsideVisibleViewport(that->m_output);
+		                   that->clearNativeSelectionIfOutsideVisibleViewport(that->m_liveOutput);
 	                   });
 }
 

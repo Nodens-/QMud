@@ -2030,6 +2030,152 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void selectionTracksAcrossHeadTrimWhileVisibleThenClearsOutOfViewport()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("90"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 90; ++i)
+				view.appendOutputText(QStringLiteral("trim-track-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+			QCoreApplication::processEvents();
+
+			const QStringList lines = view.outputLines();
+			QVERIFY(lines.size() >= 12);
+			const qsizetype selectedLineIndex = lines.size() - 8;
+			const QString  &selectedText      = lines.at(selectedLineIndex);
+			view.selectOutputRange(boundedSizeToInt(selectedLineIndex), 0,
+			                       boundedSizeToInt(selectedText.size()));
+			QTRY_COMPARE(view.outputSelectionText(), selectedText);
+
+			view.appendOutputText(QStringLiteral("trim-track-tail-primer"), true);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(view.outputSelectionText(), selectedText);
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			const int lineHeight              = qMax(1, QFontMetrics(browser->font()).lineSpacing());
+			const int visibleLinesEstimate    = qMax(1, bar->pageStep() / lineHeight);
+			const int appendCountForOutOfView = visibleLinesEstimate + 8;
+			for (int i = 0; i < appendCountForOutOfView; ++i)
+				view.appendOutputText(QStringLiteral("trim-track-tail-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY(!view.hasOutputSelection());
+			QTRY_COMPARE(view.outputSelectionText(), QString());
+			QVERIFY(view.outputLines().contains(selectedText));
+			resetTestState();
+		}
+
+		void selectionClearsWhenManualScrollMovesSelectedRangeOutOfView()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 260; ++i)
+				view.appendOutputText(QStringLiteral("manual-clear-%1").arg(i, 3, 10, QLatin1Char('0')),
+				                      true);
+			QCoreApplication::processEvents();
+
+			const QStringList lines = view.outputLines();
+			QVERIFY(lines.size() >= 4);
+			const qsizetype selectedLineIndex = lines.size() - 2;
+			const QString  &selectedText      = lines.at(selectedLineIndex);
+			view.selectOutputRange(boundedSizeToInt(selectedLineIndex), 0,
+			                       boundedSizeToInt(selectedText.size()));
+			QTRY_COMPARE(view.outputSelectionText(), selectedText);
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			bar->setValue(bar->minimum());
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY(!view.hasOutputSelection());
+			QTRY_COMPARE(view.outputSelectionText(), QString());
+			QVERIFY(view.outputLines().contains(selectedText));
+			resetTestState();
+		}
+
+		void splitTopSelectionClearsWhenManualScrollMovesItOutOfView()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 320; ++i)
+				view.appendOutputText(QStringLiteral("split-clear-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
+			QVERIFY(topBrowser);
+			const QPointF localPos(topBrowser->viewport()->rect().center());
+			const QPointF globalPos(topBrowser->viewport()->mapToGlobal(localPos.toPoint()));
+			QWheelEvent   wheelUp(localPos, globalPos, QPoint(0, 0), QPoint(0, 120), Qt::NoButton,
+			                      Qt::NoModifier, Qt::NoScrollPhase, false);
+			QCoreApplication::sendEvent(topBrowser->viewport(), &wheelUp);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+
+			const auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar = splitTop->verticalScrollBar();
+			QVERIFY(topBar);
+
+			auto selectWordInView = [&view](const QTextBrowser *target, const QVector<QPoint> &points)
+			{
+				for (const QPoint &point : points)
+				{
+					QTest::mouseDClick(target->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+					QCoreApplication::processEvents();
+					if (view.hasOutputSelection() && !view.outputSelectionText().isEmpty())
+						return view.outputSelectionText();
+				}
+				return QString{};
+			};
+
+			const QVector<QPoint> topProbePoints{
+			    splitTop->viewport()->rect().center(),
+			    QPoint(24, qMax(8, splitTop->viewport()->rect().height() / 3)),
+			    QPoint(24, qMax(8, splitTop->viewport()->rect().height() / 2)),
+			};
+			const QString selectedText = selectWordInView(splitTop, topProbePoints);
+			QVERIFY(!selectedText.isEmpty());
+			QVERIFY(selectedText.startsWith(QStringLiteral("split-clear-")));
+
+			const int startValue = topBar->value();
+			const int step       = qMax(1, topBar->pageStep());
+			topBar->setValue(qMin(topBar->maximum(), startValue + (step * 2)));
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY(!view.hasOutputSelection());
+			QTRY_COMPARE(view.outputSelectionText(), QString());
+			QVERIFY(view.outputLines().contains(selectedText));
+			resetTestState();
+		}
+
 		void collapsedSplitIgnoresHiddenLiveSelection()
 		{
 			resetTestState();
