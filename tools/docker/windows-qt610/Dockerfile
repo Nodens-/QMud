@@ -63,7 +63,7 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
 ARG QT_VERSION=6.10.2
 ARG QT_ARCH=win64_mingw
 
-RUN aqt install-qt -O /opt/Qt windows desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia
+RUN aqt install-qt -O /opt/Qt windows desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia qtspeech
 
 ARG LUA_VERSION=5.4.7
 ARG LUASOCKET_VERSION=3.1.0

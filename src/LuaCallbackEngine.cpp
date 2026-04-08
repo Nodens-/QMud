@@ -17,6 +17,7 @@
 #include "FontUtils.h"
 #include "InfoTypesMetadata.h"
 #include "LuaFunctionTypes.h"
+#include "LuaLuacomShim.h"
 #include "LuaSupport.h"
 #include "LuaUtf8Utils.h"
 #include "MainFrame.h"
@@ -10765,6 +10766,7 @@ static void registerLuaPreloads(lua_State *L)
 		lua_setfield(L, -2, "sqlite3");
 		lua_pushcfunction(L, luaopen_lsqlite3);
 		lua_setfield(L, -2, "lsqlite3");
+		QMudLuacomShim::registerPreload(L);
 #ifdef QMUD_BUNDLED_BC
 		lua_pushcfunction(L, luaopen_bc);
 		lua_setfield(L, -2, "bc");

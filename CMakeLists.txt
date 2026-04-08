@@ -135,7 +135,7 @@ function(qmud_apply_release_optimizations target_name)
 endfunction()
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Sql PrintSupport)
-find_package(Qt6 QUIET COMPONENTS Multimedia)
+find_package(Qt6 QUIET COMPONENTS Multimedia TextToSpeech)
 if (QMUD_ENABLE_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
     include(CTest)
@@ -220,6 +220,8 @@ set(QMUD_SOURCES
         InfoTypesMetadata.cpp
         StringUtils.cpp
         LuaSupport.cpp
+        TtsEngine.cpp
+        LuaLuacomShim.cpp
         AcceleratorUtils.cpp
         dialogs/LogSessionDialog.cpp
         MdiTabs.cpp
@@ -270,6 +272,8 @@ set(QMUD_HEADERS
         InfoTypeData.inc
         LuaFunctionTypes.h
         SqliteCompat.h
+        TtsEngine.h
+        LuaLuacomShim.h
         AsciiArt.h
         WorldChildWindow.h
         dialogs/TipDialog.h
@@ -367,11 +371,21 @@ else ()
     message(WARNING "Qt6 Multimedia module not found; building with QMUD_ENABLE_SOUND=0")
 endif ()
 
-target_link_libraries(QMud PRIVATE Qt6::Widgets Qt6::Network Qt6::Sql Qt6::PrintSupport ${QMUD_ZLIB_TARGET} ${QMUD_QT_MULTIMEDIA_TARGET})
+set(QMUD_QT_TEXTTOSPEECH_TARGET "")
+set(QMUD_ENABLE_TEXT_TO_SPEECH_VALUE 0)
+if (TARGET Qt6::TextToSpeech)
+    set(QMUD_QT_TEXTTOSPEECH_TARGET Qt6::TextToSpeech)
+    set(QMUD_ENABLE_TEXT_TO_SPEECH_VALUE 1)
+else ()
+    message(WARNING "Qt6 TextToSpeech module not found; building with QMUD_ENABLE_TEXT_TO_SPEECH=0")
+endif ()
+
+target_link_libraries(QMud PRIVATE Qt6::Widgets Qt6::Network Qt6::Sql Qt6::PrintSupport ${QMUD_ZLIB_TARGET} ${QMUD_QT_MULTIMEDIA_TARGET} ${QMUD_QT_TEXTTOSPEECH_TARGET})
 if (APPLE)
     target_link_libraries(QMud PRIVATE "-framework CoreServices")
 endif ()
-target_compile_definitions(QMud PRIVATE QMUD_ENABLE_SOUND=${QMUD_ENABLE_SOUND_VALUE})
+target_compile_definitions(QMud PRIVATE QMUD_ENABLE_SOUND=${QMUD_ENABLE_SOUND_VALUE}
+        QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
 
 if (QMUD_ENABLE_LUA_SCRIPTING)
     set(QMUD_LUA_LIBRARY_FILES "")
@@ -1856,6 +1870,69 @@ if (UNIX AND NOT APPLE)
                         ${QMUD_APPIMAGE_QT_TLS_PLUGIN_CANDIDATE_DIRS})
                 message(WARNING "Qt TLS plugin libqopensslbackend.so was not found in candidate directories: ${QMUD_APPIMAGE_QT_TLS_PLUGIN_SEARCH_PATHS}. AppImage update checks may fail without a functional TLS backend.")
             endif ()
+            set(QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS
+                    "${QMUD_APPIMAGE_QT_RUNTIME_ROOT}/plugins/texttospeech"
+                    "${QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR}/qt6/plugins/texttospeech"
+                    "${QMUD_APPIMAGE_QT_RUNTIME_ROOT}/lib/qt6/plugins/texttospeech"
+                    "${QMUD_APPIMAGE_QT_RUNTIME_ROOT}/lib64/qt6/plugins/texttospeech"
+                    "/usr/lib64/qt6/plugins/texttospeech"
+                    "/usr/lib/qt6/plugins/texttospeech")
+            if (DEFINED CMAKE_LIBRARY_ARCHITECTURE AND NOT CMAKE_LIBRARY_ARCHITECTURE STREQUAL "")
+                list(APPEND QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS
+                        "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}/qt6/plugins/texttospeech")
+            endif ()
+            if (DEFINED Qt6_DIR AND NOT Qt6_DIR STREQUAL "")
+                get_filename_component(QMUD_APPIMAGE_QT6_ROOT "${Qt6_DIR}/../../.." ABSOLUTE)
+                list(APPEND QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS
+                        "${QMUD_APPIMAGE_QT6_ROOT}/plugins/texttospeech"
+                        "${QMUD_APPIMAGE_QT6_ROOT}/lib/qt6/plugins/texttospeech"
+                        "${QMUD_APPIMAGE_QT6_ROOT}/lib64/qt6/plugins/texttospeech")
+            endif ()
+            if (DEFINED Qt6TextToSpeech_DIR AND NOT Qt6TextToSpeech_DIR STREQUAL "")
+                get_filename_component(QMUD_APPIMAGE_QT6_TTS_ROOT "${Qt6TextToSpeech_DIR}/../../.." ABSOLUTE)
+                list(APPEND QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS
+                        "${QMUD_APPIMAGE_QT6_TTS_ROOT}/plugins/texttospeech"
+                        "${QMUD_APPIMAGE_QT6_TTS_ROOT}/lib/qt6/plugins/texttospeech"
+                        "${QMUD_APPIMAGE_QT6_TTS_ROOT}/lib64/qt6/plugins/texttospeech")
+            endif ()
+            list(REMOVE_DUPLICATES QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS)
+            set(QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_SPEECHD)
+            set(QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_FLITE)
+            foreach (_qmud_tts_candidate_dir IN LISTS QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS)
+                if (NOT QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_SPEECHD)
+                    file(GLOB _qmud_tts_speechd_files
+                            "${_qmud_tts_candidate_dir}/*speechd*.so*")
+                    if (NOT _qmud_tts_speechd_files)
+                        file(GLOB _qmud_tts_speechd_files
+                                "${_qmud_tts_candidate_dir}/*speechdispatcher*.so*")
+                    endif ()
+                    if (_qmud_tts_speechd_files)
+                        set(QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_SPEECHD ${_qmud_tts_speechd_files})
+                    endif ()
+                endif ()
+                if (NOT QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_FLITE)
+                    file(GLOB _qmud_tts_flite_files
+                            "${_qmud_tts_candidate_dir}/*flite*.so*")
+                    if (_qmud_tts_flite_files)
+                        set(QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_FLITE ${_qmud_tts_flite_files})
+                    endif ()
+                endif ()
+            endforeach ()
+            if (QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_SPEECHD AND QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_FLITE)
+                add_custom_command(TARGET AppImage POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E echo "Ensuring Qt TextToSpeech speechd/flite plugins are staged"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}/usr/plugins/texttospeech>"
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        ${QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_SPEECHD}
+                        ${QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_FLITE}
+                        "$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}/usr/plugins/texttospeech>"
+                )
+            else ()
+                string(JOIN ", " QMUD_APPIMAGE_QT_TTS_PLUGIN_SEARCH_PATHS
+                        ${QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS})
+                message(FATAL_ERROR "Qt TextToSpeech plugins for speechd/flite were not found in candidate directories: ${QMUD_APPIMAGE_QT_TTS_PLUGIN_SEARCH_PATHS}.")
+            endif ()
             add_custom_command(TARGET AppImage POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E echo "Copying Qt shared libraries into AppDir/usr/lib"
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -1963,6 +2040,14 @@ if (UNIX AND NOT APPLE)
                     "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_MIME_DIR}/core.so>"
                     "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_SSL_DIR}/core.so>"
                     "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_LUA_DIR}/lpeg.so>"
+            )
+            add_custom_command(TARGET AppImage POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E echo "Removing bundled libspeechd to prefer host speech-dispatcher at runtime"
+                    COMMAND find
+                    "$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}>"
+                    -type f
+                    -name "libspeechd.so*"
+                    -delete
             )
             add_custom_command(TARGET AppImage POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E echo "Packaging AppImage with linuxdeploy-plugin-appimage"

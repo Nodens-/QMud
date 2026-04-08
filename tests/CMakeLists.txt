@@ -120,6 +120,18 @@ qmud_add_qtest(tst_TraceDispatchUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_TtsEngine
+        SOURCES
+        unit/tst_TtsEngine.cpp
+        "${CMAKE_SOURCE_DIR}/src/TtsEngine.cpp"
+        LIBRARIES
+        ${QMUD_QT_TEXTTOSPEECH_TARGET}
+        LABELS
+        unit)
+target_compile_definitions(tst_TtsEngine
+        PRIVATE
+        QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
+
 if (QMUD_ENABLE_LUA_SCRIPTING)
     qmud_add_qtest(tst_LuaSupportCompat
             SOURCES
@@ -140,6 +152,28 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
     elseif (DEFINED LUA_INCLUDE_DIRS)
         target_include_directories(tst_LuaSupportCompat SYSTEM BEFORE PRIVATE ${LUA_INCLUDE_DIRS})
     endif ()
+
+    qmud_add_qtest(tst_LuaLuacomShim
+            SOURCES
+            unit/tst_LuaLuacomShim.cpp
+            "${CMAKE_SOURCE_DIR}/src/TtsEngine.cpp"
+            "${CMAKE_SOURCE_DIR}/src/LuaLuacomShim.cpp"
+            LIBRARIES
+            ${LUA_LIBRARIES}
+            ${QMUD_QT_TEXTTOSPEECH_TARGET}
+            LABELS
+            unit)
+    if (TARGET Lua::Lua)
+        target_link_libraries(tst_LuaLuacomShim PRIVATE Lua::Lua)
+    endif ()
+    if (DEFINED LUA_INCLUDE_DIR)
+        target_include_directories(tst_LuaLuacomShim SYSTEM BEFORE PRIVATE ${LUA_INCLUDE_DIR})
+    elseif (DEFINED LUA_INCLUDE_DIRS)
+        target_include_directories(tst_LuaLuacomShim SYSTEM BEFORE PRIVATE ${LUA_INCLUDE_DIRS})
+    endif ()
+    target_compile_definitions(tst_LuaLuacomShim
+            PRIVATE
+            QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
 endif ()
 
 qmud_add_qtest(tst_UpdateCheckUtils

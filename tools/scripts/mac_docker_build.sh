@@ -121,6 +121,7 @@ fi
   -DQMUD_MACAPP_MACDEPLOYQT_NO_PLUGINS=ON \
   -DQt6_DIR="$QMUD_MAC_DOCKER_QT_PREFIX/lib/cmake/Qt6" \
   -DQt6Multimedia_DIR="$QMUD_MAC_DOCKER_QT_PREFIX/lib/cmake/Qt6Multimedia" \
+  -DQt6TextToSpeech_DIR="$QMUD_MAC_DOCKER_QT_PREFIX/lib/cmake/Qt6TextToSpeech" \
   -DQT_HOST_PATH="$QT_HOST_PATH_ROOT" \
   -DQT_HOST_PATH_CMAKE_DIR="$QT_HOST_CMAKE_DIR" \
   -DCMAKE_AUTOMOC_EXECUTABLE="$QT_HOST_MOC" \
@@ -143,12 +144,25 @@ mkdir -p "$APP_MACOS_DIR" "$APP_FRAMEWORKS_DIR" "$APP_PLUGINS_DIR/platforms" "$A
 if [ -d "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/multimedia" ]; then
   mkdir -p "$APP_PLUGINS_DIR/multimedia"
 fi
+if [ -d "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/texttospeech" ]; then
+  mkdir -p "$APP_PLUGINS_DIR/texttospeech"
+fi
 
 cp -R "$QMUD_MAC_DOCKER_QT_PREFIX"/lib/Qt*.framework "$APP_FRAMEWORKS_DIR/"
 cp "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/platforms/libqcocoa.dylib" "$APP_PLUGINS_DIR/platforms/"
 cp "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/sqldrivers/libqsqlite.dylib" "$APP_PLUGINS_DIR/sqldrivers/"
 if [ -d "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/multimedia" ]; then
   cp -R "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/multimedia/." "$APP_PLUGINS_DIR/multimedia/"
+fi
+if [ ! -d "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/texttospeech" ]; then
+  echo "Error: Qt TextToSpeech plugins directory is missing at $QMUD_MAC_DOCKER_QT_PREFIX/plugins/texttospeech." >&2
+  exit 1
+fi
+cp -R "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/texttospeech/." "$APP_PLUGINS_DIR/texttospeech/"
+if ! find "$APP_PLUGINS_DIR/texttospeech" -maxdepth 1 -type f -name '*.dylib' | grep -q .; then
+  echo "Error: macOS package is missing Qt TextToSpeech engine plugins." >&2
+  echo "Expected at least one plugin dylib in $APP_PLUGINS_DIR/texttospeech." >&2
+  exit 1
 fi
 if [ ! -d "$QMUD_MAC_DOCKER_QT_PREFIX/plugins/tls" ]; then
   echo "Error: Qt TLS plugins directory is missing at $QMUD_MAC_DOCKER_QT_PREFIX/plugins/tls." >&2
