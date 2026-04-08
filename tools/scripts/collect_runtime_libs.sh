@@ -59,6 +59,9 @@ copy_lib() {
       ;;
   esac
   case "$name" in
+    libspeechd.so*)
+      return 0
+      ;;
     ld-musl*.so*|\
     libwayland-*.so*|libxkbcommon*.so*|libxcb*.so*|libX11*.so*|libXau.so*|libXdmcp.so*|libXext.so*|libXrender.so*|libSM.so*|libICE.so*|\
     libEGL.so*|libGLX.so*|libOpenGL.so*|libGLdispatch.so*|libdrm.so*|libgbm.so*|\

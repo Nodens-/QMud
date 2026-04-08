@@ -155,6 +155,7 @@ Current behavior/limitations:
 - C++20 compiler
 - Qt 6 modules: `Widgets`, `Network`, `Sql`, `PrintSupport`
 - Optional Qt 6 module: `Multimedia` (sound; disabled at runtime if missing)
+- Optional Qt 6 module: `TextToSpeech` (TTS support; disabled if missing)
 - zlib
 - Lua 5.4 when `QMUD_ENABLE_LUA_SCRIPTING=ON` (default)
 - lua-socket
@@ -162,6 +163,8 @@ Current behavior/limitations:
 - lua-lpeg
 - lua-sec
 - patchelf (for AppImage non-docker target)
+- qt6-qtspeech-speechd (and working speech-dispatcher daemon/libspeechd) or qt6-qtspeech-flite (for AppImage non-docker
+  target with TTS support)
 
 Docker build images for AppImage/Windows/macOS have everything required for building already staged. The above is for
 building natively.

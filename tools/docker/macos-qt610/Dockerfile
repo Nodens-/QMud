@@ -91,7 +91,7 @@ ARG QT_ARCH=clang_64
 
 RUN dnf -y install qt6-qtbase-devel && \
     dnf clean all && \
-    aqt install-qt -O /opt/Qt mac desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia
+    aqt install-qt -O /opt/Qt mac desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia qtspeech
 
 ARG LUA_VERSION=5.4.7
 ARG LUASOCKET_VERSION=3.1.0

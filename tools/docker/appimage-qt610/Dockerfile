@@ -34,6 +34,8 @@ RUN dnf -y upgrade && \
       pulseaudio-libs \
       python3 \
       python3-pip \
+      qt6-qtspeech-flite \
+      qt6-qtspeech-speechd \
       rsync \
       tar \
       unzip \
@@ -49,7 +51,7 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
 ARG QT_VERSION=6.10.2
 ARG QT_ARCH=linux_gcc_64
 
-RUN aqt install-qt -O /opt/Qt linux desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia
+RUN aqt install-qt -O /opt/Qt linux desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia qtspeech
 
 ENV QMUD_APPIMAGE_QT_PREFIX=/opt/Qt/${QT_VERSION}/gcc_64
 ENV PATH=/opt/Qt/${QT_VERSION}/gcc_64/bin:${PATH}

@@ -104,6 +104,7 @@ fi
   -DVulkan_INCLUDE_DIR="$MINGW_INCLUDE_DIR" \
   -DQt6_DIR="$QT_PREFIX/lib/cmake/Qt6" \
   -DQt6Multimedia_DIR="$QT_PREFIX/lib/cmake/Qt6Multimedia" \
+  -DQt6TextToSpeech_DIR="$QT_PREFIX/lib/cmake/Qt6TextToSpeech" \
   -DQT_HOST_PATH="$QT_HOST_PATH_ROOT" \
   -DQT_HOST_PATH_CMAKE_DIR="$QT_HOST_CMAKE_DIR" \
   -DQT_NO_QTPATHS_DEPLOYMENT_WARNING=ON \
@@ -147,6 +148,16 @@ if ! find "$TLS_PLUGIN_DIR" -maxdepth 1 -type f \( -iname 'qschannelbackend.dll'
   echo "Expected qschannelbackend.dll or qopensslbackend.dll in $TLS_PLUGIN_DIR." >&2
   exit 1
 fi
+TTS_PLUGIN_DIR="$STAGE_DIR/qtplugins/texttospeech"
+if [ ! -d "$TTS_PLUGIN_DIR" ]; then
+  echo "Error: Qt TextToSpeech plugins directory is missing from staged package: $TTS_PLUGIN_DIR" >&2
+  exit 1
+fi
+if ! find "$TTS_PLUGIN_DIR" -maxdepth 1 -type f -iname '*.dll' | grep -q .; then
+  echo "Error: Windows package is missing Qt TextToSpeech engine plugins." >&2
+  echo "Expected at least one plugin DLL in $TTS_PLUGIN_DIR." >&2
+  exit 1
+fi
 if [ -d "$MINGW_PREFIX/bin" ]; then
   cp "$MINGW_PREFIX/bin/"*.dll "$STAGE_DIR/lib/" || true
 fi
@@ -154,7 +165,7 @@ if [ -d "$LUA_PREFIX/bin" ]; then
   cp "$LUA_PREFIX/bin/"*.dll "$STAGE_DIR/lib/" || true
 fi
 
-STARTUP_DLLS='Qt6Core.dll Qt6Gui.dll Qt6Multimedia.dll Qt6Network.dll Qt6PrintSupport.dll Qt6Sql.dll Qt6Widgets.dll lua54.dll libgcc_s_seh-1.dll libstdc++-6.dll zlib1.dll libwinpthread-1.dll'
+STARTUP_DLLS='Qt6Core.dll Qt6Gui.dll Qt6Multimedia.dll Qt6Network.dll Qt6PrintSupport.dll Qt6Sql.dll Qt6TextToSpeech.dll Qt6Widgets.dll lua54.dll libgcc_s_seh-1.dll libstdc++-6.dll zlib1.dll libwinpthread-1.dll'
 for dll in $STARTUP_DLLS; do
   src="$(find "$STAGE_DIR/lib" -maxdepth 1 -type f -iname "$dll" | head -n 1)"
   if [ -n "$src" ]; then
