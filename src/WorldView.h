@@ -1054,8 +1054,8 @@ class WorldView : public QWidget
 		 */
 		void               applyPendingNativeSelectionHeadTrim(const QVector<NativeOutputRenderLine> &lines);
 		/**
-		 * @brief Clears native output selection when selected text is outside visible viewport.
-		 * @param view Output view used to evaluate visibility.
+		 * @brief Applies native selection maintenance after viewport/scroll updates.
+		 * @param view Output view associated with the current selection.
 		 */
 		void               clearNativeSelectionIfOutsideVisibleViewport(const WrapTextBrowser *view);
 		/**

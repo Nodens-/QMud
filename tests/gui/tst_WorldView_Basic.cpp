@@ -2082,7 +2082,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void selectionTracksAcrossHeadTrimWhileVisibleThenClearsOutOfViewport()
+		void selectionTracksAcrossHeadTrimWhileVisibleThenPersistsOutOfViewport()
 		{
 			resetTestState();
 			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("90"));
@@ -2121,13 +2121,13 @@ class tst_WorldView_Basic : public QObject
 				view.appendOutputText(QStringLiteral("trim-track-tail-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
-			QTRY_VERIFY(!view.hasOutputSelection());
-			QTRY_COMPARE(view.outputSelectionText(), QString());
+			QTRY_VERIFY(view.hasOutputSelection());
+			QTRY_COMPARE(view.outputSelectionText(), selectedText);
 			QVERIFY(view.outputLines().contains(selectedText));
 			resetTestState();
 		}
 
-		void selectionClearsWhenManualScrollMovesSelectedRangeOutOfView()
+		void selectionPersistsWhenManualScrollMovesSelectedRangeOutOfView()
 		{
 			resetTestState();
 
@@ -2158,13 +2158,13 @@ class tst_WorldView_Basic : public QObject
 			bar->setValue(bar->minimum());
 			QCoreApplication::processEvents();
 
-			QTRY_VERIFY(!view.hasOutputSelection());
-			QTRY_COMPARE(view.outputSelectionText(), QString());
+			QTRY_VERIFY(view.hasOutputSelection());
+			QTRY_COMPARE(view.outputSelectionText(), selectedText);
 			QVERIFY(view.outputLines().contains(selectedText));
 			resetTestState();
 		}
 
-		void splitTopSelectionClearsWhenManualScrollMovesItOutOfView()
+		void splitTopSelectionPersistsWhenManualScrollMovesItOutOfView()
 		{
 			resetTestState();
 			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
@@ -2222,8 +2222,8 @@ class tst_WorldView_Basic : public QObject
 			topBar->setValue(qMin(topBar->maximum(), startValue + (step * 2)));
 			QCoreApplication::processEvents();
 
-			QTRY_VERIFY(!view.hasOutputSelection());
-			QTRY_COMPARE(view.outputSelectionText(), QString());
+			QTRY_VERIFY(view.hasOutputSelection());
+			QTRY_COMPARE(view.outputSelectionText(), selectedText);
 			QVERIFY(view.outputLines().contains(selectedText));
 			resetTestState();
 		}
@@ -4375,6 +4375,58 @@ class tst_WorldView_Basic : public QObject
 
 			QTRY_VERIFY(view.hasOutputSelection());
 			QTRY_VERIFY(view.outputSelectionText().contains(QStringLiteral("selection-pass-through")));
+			resetTestState();
+		}
+
+		void nativeOutputSelectionDragStopsWhenMouseMoveHasNoPressedButton()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			view.appendOutputText(
+			    QStringLiteral("native-drag-stop-target-abcdefghijklmnopqrstuvwxyz-0123456789"), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QVERIFY(viewport->width() > 80);
+			QVERIFY(viewport->height() > 24);
+
+			const QPoint dragStart(10, qBound(10, viewport->height() / 2, viewport->height() - 10));
+			const QPoint dragFar(qBound(20, viewport->width() - 10, viewport->width() - 10), dragStart.y());
+			const QPoint dragNear(18, dragStart.y());
+			QVERIFY(viewport->rect().contains(dragStart));
+			QVERIFY(viewport->rect().contains(dragFar));
+			QVERIFY(viewport->rect().contains(dragNear));
+
+			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, dragStart);
+			QTest::mouseMove(viewport, dragFar, 5);
+			QTRY_VERIFY(view.hasOutputSelection());
+			const QString selectionBeforeLostMove = view.outputSelectionText();
+			QVERIFY(!selectionBeforeLostMove.isEmpty());
+
+			const QPoint globalNear = viewport->mapToGlobal(dragNear);
+			QMouseEvent  lostMove(QEvent::MouseMove, QPointF(dragNear), QPointF(globalNear), Qt::NoButton,
+			                      Qt::NoButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(viewport, &lostMove);
+			QCoreApplication::processEvents();
+			QCOMPARE(view.outputSelectionText(), selectionBeforeLostMove);
+
+			const QPoint globalFar = viewport->mapToGlobal(dragFar);
+			QMouseEvent  hoverMove(QEvent::MouseMove, QPointF(dragFar), QPointF(globalFar), Qt::NoButton,
+			                       Qt::NoButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(viewport, &hoverMove);
+			QCoreApplication::processEvents();
+			QCOMPARE(view.outputSelectionText(), selectionBeforeLostMove);
+
+			QTest::mouseRelease(viewport, Qt::LeftButton, Qt::NoModifier, dragFar);
 			resetTestState();
 		}
 

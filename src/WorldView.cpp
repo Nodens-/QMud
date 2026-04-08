@@ -3892,38 +3892,6 @@ void WorldView::clearNativeSelectionIfOutsideVisibleViewport(const WrapTextBrows
 	applyPendingNativeSelectionHeadTrim(lines);
 	if (!m_nativeOutputSelection.hasSelection)
 		return;
-
-	const QRect viewportRect = view->viewport()->rect();
-	if (viewportRect.width() <= 0 || viewportRect.height() <= 0)
-		return;
-
-	const bool   wrapEnabled          = view->lineWrapMode() != WrapTextBrowser::NoWrap;
-	const int    wrapWidthPixels      = nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
-	const int    localWrapWidthPixels = nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
-	const int    lineSpacingSetting   = qMax(0, m_lineSpacing);
-	const QFont &layoutFont           = view->font();
-	ensureNativeLayoutCaches(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting, layoutFont);
-
-	if (m_nativeLayoutCumulativeHeights.size() <= lines.size())
-		return;
-
-	const qreal docY            = m_nativeLayoutCumulativeHeights.at(lines.size());
-	const int   nativeMaxScroll = qMax(0, static_cast<int>(std::ceil(docY)) - viewportRect.height());
-	const int   barValue        = view->verticalScrollBar() ? qMax(0, view->verticalScrollBar()->value()) : 0;
-	const int   effectiveScrollY = nativeMaxScroll > 0 ? qBound(0, barValue, nativeMaxScroll) : 0;
-	const auto  visibleTop       = static_cast<qreal>(effectiveScrollY);
-	const qreal visibleBottom    = visibleTop + static_cast<qreal>(viewportRect.height());
-
-	int         startLine = qBound(0, m_nativeOutputSelection.start.line, sizeToInt(lines.size()) - 1);
-	int         endLine   = qBound(0, m_nativeOutputSelection.end.line, sizeToInt(lines.size()) - 1);
-	if (startLine > endLine)
-		qSwap(startLine, endLine);
-
-	const qreal selectionTop           = m_nativeLayoutCumulativeHeights.at(startLine);
-	const qreal selectionBottom        = m_nativeLayoutCumulativeHeights.at(endLine + 1);
-	const bool  intersectsVisibleRange = selectionBottom > visibleTop && selectionTop < visibleBottom;
-	if (!intersectsVisibleRange)
-		clearNativeOutputSelection(true);
 }
 
 void WorldView::setNativeOutputSelection(const WrapTextBrowser      *sourceView,
@@ -4190,6 +4158,11 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 			return false;
 		if (!m_nativeOutputSelection.dragging)
 			return false;
+		if ((mouseEvent->buttons() & Qt::LeftButton) == Qt::NoButton)
+		{
+			m_nativeOutputSelection.dragging = false;
+			return false;
+		}
 
 		WrapTextBrowser *dragView =
 		    m_nativeOutputSelection.sourceView ? m_nativeOutputSelection.sourceView : sourceView;
