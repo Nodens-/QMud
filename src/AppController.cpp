@@ -1690,7 +1690,7 @@ namespace
 		const QString timestamp =
 		    QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMddTHHmmssZ"));
 		const QString fileName =
-		    QStringLiteral("QMud_Backup_%1_%2.gz")
+		    QStringLiteral("QMud_Backup_%1_%2.tar.gz")
 		        .arg(sanitizedBackupNamePart(versionLabel), sanitizedBackupNamePart(timestamp));
 		const QString archivePath = QDir(backupDirPath).filePath(fileName);
 		QFile::remove(archivePath);
