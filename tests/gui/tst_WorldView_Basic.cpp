@@ -2583,6 +2583,272 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void inputWrapMarginsRecomputeWhenInputAreaIsResized()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("20"));
+
+			WorldView view;
+			view.resize(1600, 480);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			QVERIFY(input->viewport());
+			const int initialViewportWidth = input->viewport()->width();
+			QVERIFY(initialViewportWidth > 200);
+
+			view.resize(340, 480);
+			QCoreApplication::processEvents();
+
+			const int resizedInputWidth    = input->width();
+			const int resizedViewportWidth = input->viewport()->width();
+			QVERIFY(resizedInputWidth > 0);
+			QVERIFY2(resizedViewportWidth > (resizedInputWidth / 4),
+			         "Input viewport collapsed after resize with wrap_input enabled.");
+
+			resetTestState();
+		}
+
+		void inputWrapDisabledStillUsesWidgetWidthWrap()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("pixel_offset"), QStringLiteral("8"));
+
+			WorldView view;
+			view.resize(700, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			QCOMPARE(input->lineWrapMode(), QPlainTextEdit::WidgetWidth);
+			QCOMPARE(input->wordWrapMode(), QTextOption::WrapAtWordBoundaryOrAnywhere);
+
+			resetTestState();
+		}
+
+		void autoResizeCommandWindowUsesWrappedVisualLines()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(360, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			const int singleHeight = input->height();
+			QVERIFY(singleHeight > 0);
+
+			view.setInputText(QStringLiteral("word ").repeated(180), true);
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY2(input->height() > singleHeight,
+			             "Auto-resize should grow for one long wrapped line.");
+
+			resetTestState();
+		}
+
+		void autoResizeCommandWindowReflowsOnInputResize()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("50"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(340, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			const QString text = QStringLiteral("word ").repeated(120);
+			view.setInputText(text, true);
+			QCoreApplication::processEvents();
+
+			const int narrowHeight = input->height();
+			QVERIFY(narrowHeight > 0);
+
+			view.resize(980, 420);
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY2(
+			    input->height() < narrowHeight,
+			    "Auto-resize height should shrink when input width increases and wrapping decreases.");
+			const int bottomGap = input->viewport()->rect().bottom() - input->cursorRect().bottom();
+			QVERIFY2(bottomGap <= (input->fontMetrics().lineSpacing() / 2),
+			         "After resize reflow, active wrapped line should stay near the bottom edge.");
+
+			resetTestState();
+		}
+
+		void pasteIntoInputKeepsCursorVisibleWithAutoResize()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(360, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+			const int singleHeight = input->height();
+			QVERIFY(singleHeight > 0);
+
+			const QString pasted = QStringLiteral("paste ") + QStringLiteral("word ").repeated(120);
+			QGuiApplication::clipboard()->setText(pasted);
+			QTest::keySequence(input, QKeySequence::Paste);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.inputText(), pasted);
+			QCOMPARE(input->textCursor().position(), boundedSizeToInt(pasted.size()));
+			QTRY_VERIFY2(input->height() > singleHeight,
+			             "Auto-resize should grow after paste when wrapped content expands.");
+			QVERIFY2(input->viewport()->rect().intersects(input->cursorRect()),
+			         "Input cursor should remain visible after paste with auto-resize enabled.");
+			const int bottomGap = input->viewport()->rect().bottom() - input->cursorRect().bottom();
+			QVERIFY2(bottomGap <= (input->fontMetrics().lineSpacing() / 2),
+			         "Wrapped input should keep the active line near the bottom edge.");
+
+			QTest::keyClicks(input, QStringLiteral(" tail"));
+			QCoreApplication::processEvents();
+			QCOMPARE(input->textCursor().position(), boundedSizeToInt(pasted.size() + 5));
+			QVERIFY2(input->viewport()->rect().intersects(input->cursorRect()),
+			         "Input cursor should stay visible while typing after large paste.");
+			const int bottomGapAfterTyping =
+			    input->viewport()->rect().bottom() - input->cursorRect().bottom();
+			QVERIFY2(bottomGapAfterTyping <= (input->fontMetrics().lineSpacing() / 2),
+			         "Typing after paste should keep the active line near the bottom edge.");
+
+			resetTestState();
+		}
+
+		void pasteIntoInputPreservesTrailingNewlineFromClipboard()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(420, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			const QString pastedWithTrailingNewline = QStringLiteral("say test line\n");
+			QGuiApplication::clipboard()->setText(pastedWithTrailingNewline);
+			QTest::keySequence(input, QKeySequence::Paste);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.inputText(), pastedWithTrailingNewline);
+			QCOMPARE(input->textCursor().position(), boundedSizeToInt(pastedWithTrailingNewline.size()));
+
+			resetTestState();
+		}
+
+		void pasteIntoInputEmptyClipboardDoesNothing()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(420, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			view.setInputText(QStringLiteral("say north"), true);
+			QCoreApplication::processEvents();
+
+			QGuiApplication::clipboard()->setText(QString());
+			QTest::keySequence(input, QKeySequence::Paste);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.inputText(), QStringLiteral("say north"));
+			QCOMPARE(input->textCursor().position(), boundedSizeToInt(QStringLiteral("say north").size()));
+
+			resetTestState();
+		}
+
+		void autoResizeCommandWindowDoesNotAddExtraLineForTrailingWhitespaceWrap()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("12"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(380, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			const QString trailingSpaceWrappedText = QStringLiteral("word ").repeated(85);
+			view.setInputText(trailingSpaceWrappedText, true);
+			QCoreApplication::processEvents();
+
+			const int bottomGap = input->viewport()->rect().bottom() - input->cursorRect().bottom();
+			QVERIFY2(bottomGap <= (input->fontMetrics().lineSpacing() / 2),
+			         "Trailing whitespace wrap should not allocate an extra visual line below the cursor.");
+
+			resetTestState();
+		}
+
 		void textRectangleOutsideFillDoesNotCoverUnderlayMiniWindows()
 		{
 			resetTestState();
