@@ -100,6 +100,8 @@ int main(int argc, char *argv[])
 {
 #ifdef Q_OS_WIN
 	configureWindowsDllSearchPath();
+	if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
+		qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("windows:darkmode=2"));
 #endif
 
 	if (qEnvironmentVariableIsEmpty("QT_PLUGIN_PATH"))

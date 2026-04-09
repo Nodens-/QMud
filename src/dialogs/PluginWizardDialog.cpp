@@ -135,6 +135,9 @@ PluginWizardDialog::PluginWizardDialog(WorldRuntime *runtime, QWidget *parent)
     : QWizard(parent), m_runtime(runtime)
 {
 	setWindowTitle(QStringLiteral("Plugin Wizard"));
+#ifdef Q_OS_WIN
+	setWizardStyle(QWizard::ClassicStyle);
+#endif
 	setOption(NoBackButtonOnStartPage, true);
 	setOption(HaveFinishButtonOnEarlyPages, false);
 	setButtonText(FinishButton, QStringLiteral("&Create..."));
@@ -204,49 +207,10 @@ void PluginWizardDialog::accept()
 	if (m_state.helpAlias.isEmpty() && !m_state.name.isEmpty())
 		m_state.helpAlias = m_state.name + QStringLiteral(":help");
 
-	m_state.selectedTriggers.clear();
-	if (m_triggerTable)
-	{
-		for (const QModelIndex &idx : m_triggerTable->selectionModel()->selectedRows())
-		{
-			const int row = idx.row();
-			if (const QTableWidgetItem *item = m_triggerTable->item(row, 0))
-				m_state.selectedTriggers.insert(item->data(Qt::UserRole).toInt());
-		}
-	}
-
-	m_state.selectedAliases.clear();
-	if (m_aliasTable)
-	{
-		for (const QModelIndex &idx : m_aliasTable->selectionModel()->selectedRows())
-		{
-			const int row = idx.row();
-			if (const QTableWidgetItem *item = m_aliasTable->item(row, 0))
-				m_state.selectedAliases.insert(item->data(Qt::UserRole).toInt());
-		}
-	}
-
-	m_state.selectedTimers.clear();
-	if (m_timerTable)
-	{
-		for (const QModelIndex &idx : m_timerTable->selectionModel()->selectedRows())
-		{
-			const int row = idx.row();
-			if (const QTableWidgetItem *item = m_timerTable->item(row, 0))
-				m_state.selectedTimers.insert(item->data(Qt::UserRole).toInt());
-		}
-	}
-
-	m_state.selectedVariables.clear();
-	if (m_variableTable)
-	{
-		for (const QModelIndex &idx : m_variableTable->selectionModel()->selectedRows())
-		{
-			const int row = idx.row();
-			if (const QTableWidgetItem *item = m_variableTable->item(row, 0))
-				m_state.selectedVariables.insert(item->data(Qt::UserRole).toInt());
-		}
-	}
+	m_state.selectedTriggers  = selectedIndices(m_triggerTable);
+	m_state.selectedAliases   = selectedIndices(m_aliasTable);
+	m_state.selectedTimers    = selectedIndices(m_timerTable);
+	m_state.selectedVariables = selectedIndices(m_variableTable);
 
 	m_state.saveState = m_saveState ? m_saveState->isChecked() : false;
 	m_state.language  = m_languageCombo ? m_languageCombo->currentText().trimmed() : QStringLiteral("Lua");
@@ -352,7 +316,7 @@ void PluginWizardDialog::buildPage2()
 	pagePtr->setTitle(QStringLiteral("Description"));
 
 	auto layout     = std::make_unique<QVBoxLayout>();
-	auto descHeader = std::make_unique<QHBoxLayout>(pagePtr);
+	auto descHeader = std::make_unique<QHBoxLayout>();
 	descHeader->addWidget(new QLabel(QStringLiteral("Description:"), pagePtr));
 	descHeader->addStretch(1);
 	auto  editButton    = std::make_unique<QPushButton>(QStringLiteral("Edit..."), pagePtr);
@@ -363,7 +327,7 @@ void PluginWizardDialog::buildPage2()
 	m_descriptionEdit = new QTextEdit(pagePtr);
 	layout->addWidget(m_descriptionEdit);
 
-	auto helpRow   = std::make_unique<QHBoxLayout>(pagePtr);
+	auto helpRow   = std::make_unique<QHBoxLayout>();
 	m_generateHelp = new QCheckBox(QStringLiteral("Generate help alias"), pagePtr);
 	m_generateHelp->setChecked(true);
 	m_helpAliasEdit = new QLineEdit(pagePtr);
@@ -405,7 +369,7 @@ void PluginWizardDialog::buildPage3()
 	setColumnTitles(m_triggerTable, {"Name", "Match", "Send", "Group"});
 	layout->addWidget(m_triggerTable);
 
-	auto  buttons       = std::make_unique<QHBoxLayout>(pagePtr);
+	auto  buttons       = std::make_unique<QHBoxLayout>();
 	auto  selectAll     = std::make_unique<QPushButton>(QStringLiteral("Select All"), pagePtr);
 	auto  selectNone    = std::make_unique<QPushButton>(QStringLiteral("Select None"), pagePtr);
 	auto *selectAllPtr  = selectAll.get();
@@ -436,7 +400,7 @@ void PluginWizardDialog::buildPage4()
 	setColumnTitles(m_aliasTable, {"Name", "Match", "Send", "Group"});
 	layout->addWidget(m_aliasTable);
 
-	auto  buttons       = std::make_unique<QHBoxLayout>(pagePtr);
+	auto  buttons       = std::make_unique<QHBoxLayout>();
 	auto  selectAll     = std::make_unique<QPushButton>(QStringLiteral("Select All"), pagePtr);
 	auto  selectNone    = std::make_unique<QPushButton>(QStringLiteral("Select None"), pagePtr);
 	auto *selectAllPtr  = selectAll.get();
@@ -467,7 +431,7 @@ void PluginWizardDialog::buildPage5()
 	setColumnTitles(m_timerTable, {"Name", "Time", "Send", "Group"});
 	layout->addWidget(m_timerTable);
 
-	auto  buttons       = std::make_unique<QHBoxLayout>(pagePtr);
+	auto  buttons       = std::make_unique<QHBoxLayout>();
 	auto  selectAll     = std::make_unique<QPushButton>(QStringLiteral("Select All"), pagePtr);
 	auto  selectNone    = std::make_unique<QPushButton>(QStringLiteral("Select None"), pagePtr);
 	auto *selectAllPtr  = selectAll.get();
@@ -498,7 +462,7 @@ void PluginWizardDialog::buildPage6()
 	setColumnTitles(m_variableTable, {"Name", "Contents"});
 	layout->addWidget(m_variableTable);
 
-	auto  buttons       = std::make_unique<QHBoxLayout>(pagePtr);
+	auto  buttons       = std::make_unique<QHBoxLayout>();
 	auto  selectAll     = std::make_unique<QPushButton>(QStringLiteral("Select All"), pagePtr);
 	auto  selectNone    = std::make_unique<QPushButton>(QStringLiteral("Select None"), pagePtr);
 	auto *selectAllPtr  = selectAll.get();
@@ -529,7 +493,7 @@ void PluginWizardDialog::buildPage7()
 	pagePtr->setTitle(QStringLiteral("Script"));
 
 	auto layout     = std::make_unique<QVBoxLayout>();
-	auto langRow    = std::make_unique<QHBoxLayout>(pagePtr);
+	auto langRow    = std::make_unique<QHBoxLayout>();
 	m_languageCombo = new QComboBox(pagePtr);
 	m_languageCombo->addItem(QStringLiteral("Lua"));
 	m_languageCombo->setCurrentIndex(0);
@@ -542,7 +506,7 @@ void PluginWizardDialog::buildPage7()
 	m_standardConstants->setChecked(false);
 	layout->addWidget(m_standardConstants);
 
-	auto scriptHeader = std::make_unique<QHBoxLayout>(pagePtr);
+	auto scriptHeader = std::make_unique<QHBoxLayout>();
 	scriptHeader->addWidget(new QLabel(QStringLiteral("Script:"), pagePtr));
 	scriptHeader->addStretch(1);
 	auto  editButton    = std::make_unique<QPushButton>(QStringLiteral("Edit..."), pagePtr);
@@ -593,7 +557,7 @@ void PluginWizardDialog::buildPage8()
 	pagePtr->setTitle(QStringLiteral("Comments"));
 
 	auto layout = std::make_unique<QVBoxLayout>();
-	auto header = std::make_unique<QHBoxLayout>(pagePtr);
+	auto header = std::make_unique<QHBoxLayout>();
 	header->addWidget(new QLabel(QStringLiteral("Comments:"), pagePtr));
 	header->addStretch(1);
 	auto  editButton    = std::make_unique<QPushButton>(QStringLiteral("Edit..."), pagePtr);

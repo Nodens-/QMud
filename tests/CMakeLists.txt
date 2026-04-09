@@ -604,6 +604,20 @@ if (QMUD_ENABLE_GUI_TESTS)
             TIMEOUT
             20)
 
+    qmud_add_qtest(tst_Dialog_PluginWizard
+            GUI
+            SOURCES
+            gui/tst_Dialog_PluginWizard.cpp
+            "${CMAKE_SOURCE_DIR}/src/dialogs/PluginWizardDialog.cpp"
+            "${CMAKE_SOURCE_DIR}/src/AppController.h"
+            "${CMAKE_SOURCE_DIR}/src/WorldRuntime.h"
+            LIBRARIES
+            Qt6::Sql
+            LABELS
+            gui
+            TIMEOUT
+            20)
+
     qmud_add_qtest(tst_Dialog_ColourPicker
             GUI
             SOURCES
