@@ -36,6 +36,12 @@ QString qmudFixupEscapeSequences(const QString &source);
  */
 QString qmudFixUpGerman(const QString &message);
 /**
+ * @brief Removes ANSI CSI escape sequences from text.
+ * @param input Source text that may include terminal escape codes.
+ * @return Text with ANSI control sequences removed.
+ */
+QString qmudStripAnsiEscapeCodes(const QString &input);
+/**
  * @brief Parses enabled flag strings (y/n/true/false).
  * @param value Flag text.
  * @return Parsed boolean flag value.

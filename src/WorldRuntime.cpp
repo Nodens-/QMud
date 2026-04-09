@@ -452,14 +452,6 @@ static QByteArray ansiCode(int code)
 	return payload;
 }
 
-static QString stripAnsiString(const QString &input)
-{
-	static QRegularExpression const ansiExpr(QStringLiteral("\x1b\\[[0-9;]*[A-Za-z]"));
-	QString                         output = input;
-	output.remove(ansiExpr);
-	return output;
-}
-
 namespace
 {
 	constexpr int kDbErrorIdNotFound            = -1;
@@ -6458,26 +6450,29 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 							    m_mxpTextBuffer.mid(frame.contentStart, eventOffset - frame.contentStart);
 						if (textBytes.size() > 1000)
 							textBytes = textBytes.left(1000);
-						QString const text = decodeIncomingIsolatedBytes(textBytes);
+						QString const text          = decodeIncomingIsolatedBytes(textBytes);
+						QString const sanitizedText = qmudStripAnsiEscapeCodes(text);
 
 						if (!closeTagCallback.isEmpty() && m_luaCallbacks)
 						{
 							m_luaCallbacks->callMxpEndTag(closeTagCallback, QString::fromLatin1(frame.tag),
-							                              text);
+							                              sanitizedText);
 						}
 
 						const QString pluginClosePayload =
-						    QStringLiteral("%1,%2").arg(QString::fromLatin1(frame.tag), text);
+						    QStringLiteral("%1,%2").arg(QString::fromLatin1(frame.tag), sanitizedText);
 						callPluginCallbacks(QStringLiteral("OnPluginMXPcloseTag"), pluginClosePayload);
 
 						if (!frame.variableName.isEmpty())
 						{
 							const QString variableName = QStringLiteral("mxp_%1").arg(frame.variableName);
-							setVariable(variableName, text);
+							setVariable(variableName, sanitizedText);
 							if (!setVarCallback.isEmpty() && m_luaCallbacks)
-								m_luaCallbacks->callMxpSetVariable(setVarCallback, variableName, text);
+								m_luaCallbacks->callMxpSetVariable(setVarCallback, variableName,
+								                                   sanitizedText);
 
-							const QString pluginVarPayload = QStringLiteral("%1=%2").arg(variableName, text);
+							const QString pluginVarPayload =
+							    QStringLiteral("%1=%2").arg(variableName, sanitizedText);
 							callPluginCallbacks(QStringLiteral("OnPluginMXPsetVariable"), pluginVarPayload);
 							if (frame.tag == "var" || frame.tag == "v")
 								callPluginCallbacks(QStringLiteral("OnPluginMXPsetEntity"), pluginVarPayload);
@@ -14455,12 +14450,13 @@ int WorldRuntime::broadcastPlugin(long message, const QString &text, const QStri
 	const auto recipientsIt = m_pluginCallbackRecipientIndices.constFind(callbackName);
 	if (recipientsIt == m_pluginCallbackRecipientIndices.constEnd())
 		return 0;
+	const int          pluginCount = safeQSizeToInt(m_plugins.size());
 	const QVector<int> recipientIndices =
-	    qmudFilterValidPluginRecipientIndices(recipientsIt.value(), m_plugins.size());
+	    qmudFilterValidPluginRecipientIndices(recipientsIt.value(), pluginCount);
 	if (recipientIndices.isEmpty())
 		return 0;
 	if (qmudShouldSkipSelfOnlyPluginBroadcast(
-	        recipientIndices, m_plugins.size(), callingPluginId,
+	        recipientIndices, pluginCount, callingPluginId,
 	        [this](const int index) { return m_plugins.at(index).attributes.value(QStringLiteral("id")); }))
 		return 0;
 	const QByteArray callingPluginIdUtf8   = callingPluginId.toUtf8();
@@ -14959,7 +14955,7 @@ void WorldRuntime::chatNote(short noteType, const QString &message)
 
 	QString output = text;
 	if (ignoreChatColours())
-		output = stripAnsiString(output);
+		output = qmudStripAnsiEscapeCodes(output);
 
 	const QString prefix = m_worldAttributes.value(QStringLiteral("chat_message_prefix"));
 	output               = prefix + output;

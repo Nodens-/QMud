@@ -11,7 +11,9 @@
 #include "CommandMappingTypes.h"
 
 #include <QByteArray>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QHash>
+#include <QRegularExpression>
 #include <QVector>
 
 namespace
@@ -204,6 +206,14 @@ QString qmudFixUpGerman(const QString &message)
 	result.replace(QStringLiteral("Ö"), QStringLiteral("Oe"));
 	result.replace(QStringLiteral("ß"), QStringLiteral("ss"));
 	return result;
+}
+
+QString qmudStripAnsiEscapeCodes(const QString &input)
+{
+	static const QRegularExpression ansiExpr(QStringLiteral("\x1b\\[[0-9;]*[A-Za-z]"));
+	QString                         output = input;
+	output.remove(ansiExpr);
+	return output;
 }
 
 bool qmudIsEnabledFlag(const QString &value)

@@ -305,6 +305,12 @@ qmud_add_qtest(tst_WorldRuntimeAttributeUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_WorldRuleEnableUtils
+        SOURCES
+        unit/tst_WorldRuleEnableUtils.cpp
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_DoubleMetaphone
         SOURCES
         unit/tst_DoubleMetaphone.cpp
