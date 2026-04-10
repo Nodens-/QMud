@@ -713,26 +713,14 @@ jobs:
                   return []
               return [part.strip() for part in re.split(r"(?<=\\.)\\s+", collapsed) if part.strip()]
 
-          def parse_pr_number(subject: str, body: str) -> str:
-              for pattern in (r"Merge pull request #(\\d+)", r"\\(#(\\d+)\\)", r"#(\\d+)"):
-                  match = re.search(pattern, subject)
-                  if match:
-                      return match.group(1)
-              match = re.search(r"/pull/(\\d+)", body)
-              return match.group(1) if match else ""
+          commit_pr_cache: dict[str, list[dict]] = {}
 
-          def parse_merge_login(subject: str) -> str:
-              match = re.search(r"Merge pull request #\\d+ from ([^/\\s]+)/", subject)
-              return match.group(1) if match else ""
-
-          pr_cache: dict[str, dict] = {}
-
-          def fetch_pr(pr_number: str) -> dict:
-              if pr_number in pr_cache:
-                  return pr_cache[pr_number]
-              url = f"{api_base}/repos/{repo}/pulls/{pr_number}"
+          def fetch_commit_prs(sha: str) -> list[dict]:
+              if sha in commit_pr_cache:
+                  return commit_pr_cache[sha]
+              url = f"{api_base}/repos/{repo}/commits/{sha}/pulls"
               headers = {
-                  "Accept": "application/vnd.github+json",
+                  "Accept": "application/vnd.github+json, application/vnd.github.groot-preview+json",
                   "User-Agent": "qmud-release-notes",
               }
               if token:
@@ -742,64 +730,59 @@ jobs:
                   with urllib.request.urlopen(req, timeout=10) as resp:
                       payload = json.loads(resp.read().decode("utf-8"))
               except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
-                  payload = {}
-              pr_cache[pr_number] = payload
-              return payload
+                  payload = []
+              prs = payload if isinstance(payload, list) else []
+              commit_pr_cache[sha] = prs
+              return prs
 
           raw = subprocess.check_output(
-              ["git", "log", "--first-parent", "--reverse", "--pretty=format:%H%x1f%s%x1f%b%x1e", range_spec],
+              ["git", "rev-list", "--first-parent", "--reverse", range_spec],
               text=True,
               encoding="utf-8",
               errors="replace",
           )
-          records = [record for record in raw.split("\x1e") if record.strip()]
+          commits = [line.strip() for line in raw.splitlines() if line.strip()]
 
           lines = ["## What's changed", ""]
           seen_prs: set[str] = set()
-          if records:
-              for record in records:
-                  fields = record.split("\x1f")
-                  if len(fields) < 3:
+          if commits:
+              for sha in commits:
+                  prs = fetch_commit_prs(sha)
+                  if not prs:
                       continue
-                  subject = fields[1].strip()
-                  body = fields[2].strip()
-                  body_lines = [line.strip() for line in body.splitlines() if line.strip()]
+                  for pr_payload in prs:
+                      if not isinstance(pr_payload, dict):
+                          continue
+                      number = pr_payload.get("number")
+                      if number is None:
+                          continue
+                      pr_number = str(number).strip()
+                      if not pr_number or pr_number in seen_prs:
+                          continue
+                      seen_prs.add(pr_number)
 
-                  pr_number = parse_pr_number(subject, body)
-                  if not pr_number or pr_number in seen_prs:
-                      continue
-                  seen_prs.add(pr_number)
+                      source_text = str(pr_payload.get("title", "")).strip()
+                      if not source_text:
+                          source_text = f"PR #{pr_number}"
+                      sentences = split_sentences(source_text)
+                      if not sentences:
+                          sentences = [source_text]
 
-                  text = subject
-                  if subject.startswith("Merge pull request #") and body_lines:
-                      text = body_lines[0]
-                  elif body_lines and body_lines[0] and body_lines[0] != subject:
-                      text = body_lines[0]
+                      login = ""
+                      user = pr_payload.get("user")
+                      if isinstance(user, dict):
+                          login = str(user.get("login", "")).strip()
 
-                  pr_payload = fetch_pr(pr_number)
-                  pr_title = str(pr_payload.get("title", "")).strip()
-                  login = ""
-                  user = pr_payload.get("user")
-                  if isinstance(user, dict):
-                      login = str(user.get("login", "")).strip()
-                  if not login:
-                      login = parse_merge_login(subject)
-
-                  source_text = pr_title or text
-                  sentences = split_sentences(source_text)
-                  if not sentences:
-                      sentences = [source_text or f"PR #{pr_number}"]
-
-                  if login:
-                      head = (
-                          f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}) "
-                          f"by [@{login}]({server}/{login}): {sentences[0]}"
-                      )
-                  else:
-                      head = f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}): {sentences[0]}"
-                  lines.append(head)
-                  for sentence in sentences[1:]:
-                      lines.append(f"  {sentence}")
+                      if login:
+                          head = (
+                              f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}) "
+                              f"by [@{login}]({server}/{login}): {sentences[0]}"
+                          )
+                      else:
+                          head = f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}): {sentences[0]}"
+                      lines.append(head)
+                      for sentence in sentences[1:]:
+                          lines.append(f"  {sentence}")
 
           if len(lines) == 2:
               lines.append("- No merged pull requests found in selected range.")
@@ -854,11 +837,8 @@ jobs:
           path: release-assets
 
       - name: Move rolling CI tag to current commit
-        id: ci_tag
         run: |
           CI_TAG="ci-${GITHUB_REF_NAME}"
-          OLD_SHA="$(git rev-parse -q --verify "refs/tags/${CI_TAG}^{commit}" || true)"
-          echo "old_sha=${OLD_SHA}" >> "$GITHUB_OUTPUT"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -f "${CI_TAG}" "${GITHUB_SHA}"
@@ -867,12 +847,12 @@ jobs:
       - name: Build CI changelog body
         id: changelog
         env:
-          OLD_SHA: ${{ steps.ci_tag.outputs.old_sha }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          PREVIOUS_TAG="$(git tag --sort=-v:refname --list 'v*' | head -n 1)"
           RANGE="${GITHUB_SHA}^!"
-          if [ -n "${OLD_SHA}" ] && [ "${OLD_SHA}" != "${GITHUB_SHA}" ]; then
-            RANGE="${OLD_SHA}..${GITHUB_SHA}"
+          if [ -n "${PREVIOUS_TAG}" ]; then
+            RANGE="${PREVIOUS_TAG}..${GITHUB_SHA}"
           fi
           export RANGE
           python3 - <<'PY'
@@ -896,26 +876,14 @@ jobs:
                   return []
               return [part.strip() for part in re.split(r"(?<=\\.)\\s+", collapsed) if part.strip()]
 
-          def parse_pr_number(subject: str, body: str) -> str:
-              for pattern in (r"Merge pull request #(\\d+)", r"\\(#(\\d+)\\)", r"#(\\d+)"):
-                  match = re.search(pattern, subject)
-                  if match:
-                      return match.group(1)
-              match = re.search(r"/pull/(\\d+)", body)
-              return match.group(1) if match else ""
+          commit_pr_cache: dict[str, list[dict]] = {}
 
-          def parse_merge_login(subject: str) -> str:
-              match = re.search(r"Merge pull request #\\d+ from ([^/\\s]+)/", subject)
-              return match.group(1) if match else ""
-
-          pr_cache: dict[str, dict] = {}
-
-          def fetch_pr(pr_number: str) -> dict:
-              if pr_number in pr_cache:
-                  return pr_cache[pr_number]
-              url = f"{api_base}/repos/{repo}/pulls/{pr_number}"
+          def fetch_commit_prs(sha: str) -> list[dict]:
+              if sha in commit_pr_cache:
+                  return commit_pr_cache[sha]
+              url = f"{api_base}/repos/{repo}/commits/{sha}/pulls"
               headers = {
-                  "Accept": "application/vnd.github+json",
+                  "Accept": "application/vnd.github+json, application/vnd.github.groot-preview+json",
                   "User-Agent": "qmud-release-notes",
               }
               if token:
@@ -925,64 +893,59 @@ jobs:
                   with urllib.request.urlopen(req, timeout=10) as resp:
                       payload = json.loads(resp.read().decode("utf-8"))
               except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
-                  payload = {}
-              pr_cache[pr_number] = payload
-              return payload
+                  payload = []
+              prs = payload if isinstance(payload, list) else []
+              commit_pr_cache[sha] = prs
+              return prs
 
           raw = subprocess.check_output(
-              ["git", "log", "--first-parent", "--reverse", "--pretty=format:%H%x1f%s%x1f%b%x1e", range_spec],
+              ["git", "rev-list", "--first-parent", "--reverse", range_spec],
               text=True,
               encoding="utf-8",
               errors="replace",
           )
-          records = [record for record in raw.split("\x1e") if record.strip()]
+          commits = [line.strip() for line in raw.splitlines() if line.strip()]
 
           lines = ["## What's changed", ""]
           seen_prs: set[str] = set()
-          if records:
-              for record in records:
-                  fields = record.split("\x1f")
-                  if len(fields) < 3:
+          if commits:
+              for sha in commits:
+                  prs = fetch_commit_prs(sha)
+                  if not prs:
                       continue
-                  subject = fields[1].strip()
-                  body = fields[2].strip()
-                  body_lines = [line.strip() for line in body.splitlines() if line.strip()]
+                  for pr_payload in prs:
+                      if not isinstance(pr_payload, dict):
+                          continue
+                      number = pr_payload.get("number")
+                      if number is None:
+                          continue
+                      pr_number = str(number).strip()
+                      if not pr_number or pr_number in seen_prs:
+                          continue
+                      seen_prs.add(pr_number)
 
-                  pr_number = parse_pr_number(subject, body)
-                  if not pr_number or pr_number in seen_prs:
-                      continue
-                  seen_prs.add(pr_number)
+                      source_text = str(pr_payload.get("title", "")).strip()
+                      if not source_text:
+                          source_text = f"PR #{pr_number}"
+                      sentences = split_sentences(source_text)
+                      if not sentences:
+                          sentences = [source_text]
 
-                  text = subject
-                  if subject.startswith("Merge pull request #") and body_lines:
-                      text = body_lines[0]
-                  elif body_lines and body_lines[0] and body_lines[0] != subject:
-                      text = body_lines[0]
+                      login = ""
+                      user = pr_payload.get("user")
+                      if isinstance(user, dict):
+                          login = str(user.get("login", "")).strip()
 
-                  pr_payload = fetch_pr(pr_number)
-                  pr_title = str(pr_payload.get("title", "")).strip()
-                  login = ""
-                  user = pr_payload.get("user")
-                  if isinstance(user, dict):
-                      login = str(user.get("login", "")).strip()
-                  if not login:
-                      login = parse_merge_login(subject)
-
-                  source_text = pr_title or text
-                  sentences = split_sentences(source_text)
-                  if not sentences:
-                      sentences = [source_text or f"PR #{pr_number}"]
-
-                  if login:
-                      head = (
-                          f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}) "
-                          f"by [@{login}]({server}/{login}): {sentences[0]}"
-                      )
-                  else:
-                      head = f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}): {sentences[0]}"
-                  lines.append(head)
-                  for sentence in sentences[1:]:
-                      lines.append(f"  {sentence}")
+                      if login:
+                          head = (
+                              f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}) "
+                              f"by [@{login}]({server}/{login}): {sentences[0]}"
+                          )
+                      else:
+                          head = f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}): {sentences[0]}"
+                      lines.append(head)
+                      for sentence in sentences[1:]:
+                          lines.append(f"  {sentence}")
 
           if len(lines) == 2:
               lines.append("- No merged pull requests found in selected range.")
