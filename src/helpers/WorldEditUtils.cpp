@@ -6,7 +6,7 @@
  * Role: Common dialog helper implementations reused by world object editors to enforce consistent validation rules.
  */
 
-#include "dialogs/WorldEditUtils.h"
+#include "helpers/WorldEditUtils.h"
 #include "AppController.h"
 #include "FontUtils.h"
 #include "WorldOptions.h"

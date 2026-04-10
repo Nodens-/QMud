@@ -53,8 +53,8 @@
 #include "dialogs/TipDialog.h"
 #include "dialogs/WelcomeDialog.h"
 #include "dialogs/WelcomeUpgradeDialog.h"
-#include "dialogs/WorldEditUtils.h"
 #include "dialogs/WorldPreferencesDialog.h"
+#include "helpers/WorldEditUtils.h"
 #include "scripting/ScriptingErrors.h"
 
 #if defined(QMUD_ENABLE_LUA_I18N) || defined(QMUD_ENABLE_LUA_SCRIPTING)

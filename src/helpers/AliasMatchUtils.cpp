@@ -26,7 +26,7 @@ namespace QMudAliasMatch
 	MatchResult matchWithCaptures(const QRegularExpression &regex, const QString &subject,
 	                              const bool allowEmptyMatch, const int startOffset)
 	{
-		MatchResult out;
+		MatchResult                   out;
 		const QRegularExpressionMatch match = regex.match(subject, startOffset);
 		if (!match.hasMatch())
 			return out;

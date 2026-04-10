@@ -17,9 +17,8 @@ bool shouldAttemptReloadMccpDisable(const bool connected, const int socketDescri
 ReloadWorldPolicyDecision computeReloadWorldPolicy(const ReloadWorldPolicyInput &input)
 {
 	ReloadWorldPolicyDecision decision;
-	decision.connectedAtReload = input.connected || input.connecting;
-	decision.shouldAttemptDescriptorInheritance =
-	    decision.connectedAtReload && input.socketDescriptor >= 0;
+	decision.connectedAtReload                  = input.connected || input.connecting;
+	decision.shouldAttemptDescriptorInheritance = decision.connectedAtReload && input.socketDescriptor >= 0;
 
 	if (!decision.connectedAtReload)
 	{

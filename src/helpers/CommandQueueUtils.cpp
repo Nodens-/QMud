@@ -17,7 +17,8 @@ namespace QMudCommandQueue
 		return speedWalkDelayMs > 0 && (queueRequested || queueNotEmpty);
 	}
 
-	QString encodeQueueEntry(const QString &payload, const bool queueRequested, const bool echo, const bool logIt)
+	QString encodeQueueEntry(const QString &payload, const bool queueRequested, const bool echo,
+	                         const bool logIt)
 	{
 		QString flag;
 		if (queueRequested)
@@ -38,7 +39,7 @@ namespace QMudCommandQueue
 		const QChar kind  = entry.at(0);
 		const QChar upper = kind.toUpper();
 
-		QueueEntry out;
+		QueueEntry  out;
 		out.withEcho   = (upper == QLatin1Char('E') || upper == QLatin1Char('I'));
 		out.logIt      = kind.isUpper();
 		out.queuedType = (upper == QLatin1Char('E'));

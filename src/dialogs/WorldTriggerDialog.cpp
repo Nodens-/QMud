@@ -9,7 +9,7 @@
 #include "dialogs/WorldTriggerDialog.h"
 #include "StringUtils.h"
 #include "WorldOptions.h"
-#include "dialogs/WorldEditUtils.h"
+#include "helpers/WorldEditUtils.h"
 
 #include <QCheckBox>
 #include <QColorDialog>
