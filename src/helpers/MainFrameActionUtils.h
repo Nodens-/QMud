@@ -34,6 +34,20 @@ namespace QMudMainFrameActionUtils
 	 */
 	[[nodiscard]] bool shouldAttemptIncomingLineTaskbarFlash(bool worldFlashEnabled, bool appFocused);
 	/**
+	 * @brief Resolves app-focused state for taskbar flash gating from Qt/main-window focus signals.
+	 * @param qtAppFocused `true` when Qt reports ApplicationActive.
+	 * @param windowFocused `true` when main-window focus tracker reports focused.
+	 * @return `true` when flash logic should treat app as focused.
+	 */
+	[[nodiscard]] bool resolveIncomingLineFocusForFlash(bool qtAppFocused, bool windowFocused);
+	/**
+	 * @brief Resolves app-focused state for activity-sound gating from Qt/main-window focus signals.
+	 * @param qtAppFocused `true` when Qt reports ApplicationActive.
+	 * @param windowFocused `true` when main-window focus tracker reports focused.
+	 * @return `true` when sound logic should treat app as focused.
+	 */
+	[[nodiscard]] bool resolveIncomingLineFocusForActivitySound(bool qtAppFocused, bool windowFocused);
+	/**
 	 * @brief Returns whether main window should issue a background flash request now.
 	 * @param appFocused `true` when QMud currently has application focus.
 	 * @param flashAlreadyRequested `true` when background session has already requested flash.

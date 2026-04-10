@@ -99,6 +99,49 @@ class tst_MainFrame_Actions : public QObject
 			    expected);
 		}
 
+		void resolveIncomingLineFocusForFlash_data()
+		{
+			QTest::addColumn<bool>("qtAppFocused");
+			QTest::addColumn<bool>("windowFocused");
+			QTest::addColumn<bool>("expected");
+
+			QTest::newRow("both-focused") << true << true << true;
+			QTest::newRow("qt-focused-window-unfocused") << true << false << true;
+			QTest::newRow("qt-unfocused-window-focused") << false << true << true;
+			QTest::newRow("both-unfocused") << false << false << false;
+		}
+
+		void resolveIncomingLineFocusForFlash()
+		{
+			QFETCH(bool, qtAppFocused);
+			QFETCH(bool, windowFocused);
+			QFETCH(bool, expected);
+			QCOMPARE(QMudMainFrameActionUtils::resolveIncomingLineFocusForFlash(qtAppFocused, windowFocused),
+			         expected);
+		}
+
+		void resolveIncomingLineFocusForActivitySound_data()
+		{
+			QTest::addColumn<bool>("qtAppFocused");
+			QTest::addColumn<bool>("windowFocused");
+			QTest::addColumn<bool>("expected");
+
+			QTest::newRow("both-focused") << true << true << true;
+			QTest::newRow("qt-focused-window-unfocused") << true << false << false;
+			QTest::newRow("qt-unfocused-window-focused") << false << true << false;
+			QTest::newRow("both-unfocused") << false << false << false;
+		}
+
+		void resolveIncomingLineFocusForActivitySound()
+		{
+			QFETCH(bool, qtAppFocused);
+			QFETCH(bool, windowFocused);
+			QFETCH(bool, expected);
+			QCOMPARE(QMudMainFrameActionUtils::resolveIncomingLineFocusForActivitySound(qtAppFocused,
+			                                                                            windowFocused),
+			         expected);
+		}
+
 		void shouldResetBackgroundFlashLatch_data()
 		{
 			QTest::addColumn<bool>("previousFocused");

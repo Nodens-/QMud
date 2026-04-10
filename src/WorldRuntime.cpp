@@ -6912,27 +6912,35 @@ void WorldRuntime::setNewLines(int value)
 void WorldRuntime::incrementNewLines()
 {
 	++m_newLines;
-	bool appFocused = QGuiApplication::applicationState() == Qt::ApplicationActive;
+	const bool qtAppFocused  = QGuiApplication::applicationState() == Qt::ApplicationActive;
+	bool       windowFocused = qtAppFocused;
 	if (const AppController *app = AppController::instance())
 	{
 		if (const MainWindow *mainWindow = app->mainWindow())
-			appFocused = mainWindow->isApplicationFocused();
+			windowFocused = mainWindow->isApplicationFocused();
 	}
+	const bool appFocusedForFlash =
+	    QMudMainFrameActionUtils::resolveIncomingLineFocusForFlash(qtAppFocused, windowFocused);
+	const bool appFocusedForSound =
+	    QMudMainFrameActionUtils::resolveIncomingLineFocusForActivitySound(qtAppFocused, windowFocused);
 	const bool worldFlashEnabled =
 	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("flash_taskbar_icon")));
-	if (QMudMainFrameActionUtils::shouldAttemptIncomingLineTaskbarFlash(worldFlashEnabled, appFocused))
+	if (QMudMainFrameActionUtils::shouldAttemptIncomingLineTaskbarFlash(worldFlashEnabled,
+	                                                                    appFocusedForFlash))
 	{
 		flashTaskbarForView(m_view);
 	}
-	if (!m_active)
+
+	const bool worldInactive          = !m_active;
+	const bool backgroundWindowActive = !appFocusedForSound;
+	if (worldInactive || backgroundWindowActive)
 	{
 		const QString sound = m_worldAttributes.value(QStringLiteral("new_activity_sound")).trimmed();
 		if (!sound.isEmpty() && sound.compare(QStringLiteral("(No sound)"), Qt::CaseInsensitive) != 0)
 		{
 			const bool allowBackground =
 			    isEnabledFlag(m_worldAttributes.value(QStringLiteral("play_sounds_in_background")));
-			const bool appActive = QGuiApplication::applicationState() == Qt::ApplicationActive;
-			if (allowBackground || appActive)
+			if (appFocusedForSound || allowBackground)
 				playSound(0, sound, false, 0.0, 0.0);
 		}
 	}

@@ -31,6 +31,16 @@ namespace QMudMainFrameActionUtils
 		return worldFlashEnabled && !appFocused;
 	}
 
+	bool resolveIncomingLineFocusForFlash(const bool qtAppFocused, const bool windowFocused)
+	{
+		return qtAppFocused || windowFocused;
+	}
+
+	bool resolveIncomingLineFocusForActivitySound(const bool qtAppFocused, const bool windowFocused)
+	{
+		return qtAppFocused && windowFocused;
+	}
+
 	bool shouldRequestBackgroundTaskbarFlash(const bool appFocused, const bool flashAlreadyRequested)
 	{
 		return !appFocused && !flashAlreadyRequested;
