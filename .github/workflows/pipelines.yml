@@ -28,6 +28,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   full-tests:
@@ -121,41 +122,81 @@ jobs:
         run: |
           rm -rf cmake-build-release cmake-build-coverage release-assets
 
-  coverage-path-gate:
-    name: Coverage path gate (src/tests changed)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  code-path-gate:
+    name: Code path gate (src/tests changed)
+    if: (github.event_name == 'pull_request' && github.event.action != 'closed') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: [self-hosted, primary]
     outputs:
+      run_code_pipeline: ${{ steps.filter.outputs.run_code_pipeline }}
       run_coverage: ${{ steps.filter.outputs.run_coverage }}
 
     steps:
-      - name: Detect code/test changes in push range
+      - name: Detect code/test changes
         id: filter
         uses: actions/github-script@v9
         with:
           script: |
             const { owner, repo } = context.repo;
-            const before = context.payload.before;
-            const after = context.payload.after || context.sha;
+            const eventName = context.eventName;
+            const isCoverageTrigger = (filename) => (
+              filename.startsWith("src/") ||
+              filename.startsWith("tests/")
+            );
+            const isCodePipelineTrigger = (filename) => (
+              isCoverageTrigger(filename) ||
+              filename.startsWith("resources/") ||
+              filename.startsWith("skeleton/") ||
+              filename.startsWith("tools/") ||
+              filename === "CMakeLists.txt" ||
+              filename.endsWith("/CMakeLists.txt")
+            );
 
-            if (!before || /^0+$/.test(before)) {
-              core.info("No valid base SHA in push payload; running coverage by default.");
-              core.setOutput("run_coverage", "true");
-              return;
+            let runPipeline = false;
+            let runCoverage = false;
+
+            if (eventName === "pull_request") {
+              const prNumber = context.payload.pull_request.number;
+              let page = 1;
+              while (true) {
+                const response = await github.rest.pulls.listFiles({
+                  owner,
+                  repo,
+                  pull_number: prNumber,
+                  per_page: 100,
+                  page,
+                });
+                const files = Array.isArray(response.data) ? response.data : [];
+                runPipeline = runPipeline || files.some((file) => isCodePipelineTrigger(file.filename || ""));
+                runCoverage = runCoverage || files.some((file) => isCoverageTrigger(file.filename || ""));
+                if ((runPipeline && runCoverage) || files.length < 100) {
+                  break;
+                }
+                page += 1;
+              }
+              core.info(`PR #${prNumber} run_code_pipeline=${runPipeline}, run_coverage=${runCoverage}`);
+            } else if (eventName === "push") {
+              const before = context.payload.before;
+              const after = context.payload.after || context.sha;
+              if (!before || /^0+$/.test(before)) {
+                core.info("No valid base SHA in push payload; running code pipeline by default, skipping coverage.");
+                runPipeline = true;
+                runCoverage = false;
+              } else {
+                const response = await github.rest.repos.compareCommitsWithBasehead({
+                  owner,
+                  repo,
+                  basehead: `${before}...${after}`,
+                });
+                const files = Array.isArray(response.data.files) ? response.data.files : [];
+                runPipeline = files.some((file) => isCodePipelineTrigger(file.filename || ""));
+                runCoverage = files.some((file) => isCoverageTrigger(file.filename || ""));
+                core.info(`Compared ${before}...${after} (${files.length} files), run_code_pipeline=${runPipeline}, run_coverage=${runCoverage}`);
+              }
+            } else {
+              core.info(`Unsupported event ${eventName} for code path gate`);
             }
 
-            const response = await github.rest.repos.compareCommitsWithBasehead({
-              owner,
-              repo,
-              basehead: `${before}...${after}`,
-            });
-            const files = Array.isArray(response.data.files) ? response.data.files : [];
-            const runCoverage = files.some((file) => {
-              const filename = file.filename || "";
-              return filename.startsWith("src/") || filename.startsWith("tests/");
-            });
-
-            core.info(`Compared ${before}...${after} (${files.length} files), run_coverage=${runCoverage}`);
+            core.setOutput("run_code_pipeline", runPipeline ? "true" : "false");
             core.setOutput("run_coverage", runCoverage ? "true" : "false");
 
       - name: Cleanup workspace build directories
@@ -165,10 +206,10 @@ jobs:
 
   coverage:
     name: Coverage on main pushes after build (llvm/gcov)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.coverage-path-gate.outputs.run_coverage == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.code-path-gate.outputs.run_coverage == 'true'
     needs:
       - build-packages
-      - coverage-path-gate
+      - code-path-gate
     runs-on: [self-hosted, primary]
     timeout-minutes: 120
     env:
@@ -362,7 +403,8 @@ jobs:
 
   build-packages:
     name: Build AppImage / macOS / Windows packages (PR/Main)
-    if: (github.event_name == 'pull_request' && github.event.action != 'closed') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: ((github.event_name == 'pull_request' && github.event.action != 'closed') || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && needs.code-path-gate.outputs.run_code_pipeline == 'true'
+    needs: code-path-gate
     runs-on: [self-hosted, primary]
     timeout-minutes: 180
 
