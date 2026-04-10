@@ -269,9 +269,33 @@ jobs:
             -DCMAKE_CXX_FLAGS="--coverage" \
             -DCMAKE_EXE_LINKER_FLAGS="--coverage"
 
-      - name: Build
+      - name: Build coverage test targets
         run: |
-          CCACHE_DISABLE=1 cmake --build cmake-build-coverage -j 6
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          listing = subprocess.check_output(
+              ["ctest", "--test-dir", "cmake-build-coverage", "-N", "--show-only=json-v1"],
+              text=True,
+          )
+          payload = json.loads(listing)
+          targets = [entry.get("name", "").strip() for entry in payload.get("tests", [])]
+          targets = [name for name in targets if name]
+          if not targets:
+              raise SystemExit("No CTest targets discovered for coverage build.")
+
+          chunk_size = 20
+          for index in range(0, len(targets), chunk_size):
+              chunk = targets[index:index + chunk_size]
+              env = os.environ.copy()
+              env["CCACHE_DISABLE"] = "1"
+              subprocess.check_call(
+                  ["cmake", "--build", "cmake-build-coverage", "-j", "6", "--target", *chunk],
+                  env=env,
+              )
+          PY
 
       - name: Run tests for coverage
         run: |
@@ -371,9 +395,33 @@ jobs:
             -DCMAKE_CXX_FLAGS="--coverage" \
             -DCMAKE_EXE_LINKER_FLAGS="--coverage"
 
-      - name: Build
+      - name: Build coverage test targets
         run: |
-          CCACHE_DISABLE=1 cmake --build cmake-build-coverage -j 6
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          listing = subprocess.check_output(
+              ["ctest", "--test-dir", "cmake-build-coverage", "-N", "--show-only=json-v1"],
+              text=True,
+          )
+          payload = json.loads(listing)
+          targets = [entry.get("name", "").strip() for entry in payload.get("tests", [])]
+          targets = [name for name in targets if name]
+          if not targets:
+              raise SystemExit("No CTest targets discovered for coverage build.")
+
+          chunk_size = 20
+          for index in range(0, len(targets), chunk_size):
+              chunk = targets[index:index + chunk_size]
+              env = os.environ.copy()
+              env["CCACHE_DISABLE"] = "1"
+              subprocess.check_call(
+                  ["cmake", "--build", "cmake-build-coverage", "-j", "6", "--target", *chunk],
+                  env=env,
+              )
+          PY
 
       - name: Run tests for coverage
         run: |
