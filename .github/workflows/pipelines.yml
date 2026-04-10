@@ -669,16 +669,99 @@ jobs:
       contents: write
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: qmud-*
           path: release-assets
 
+      - name: Build release changelog body
+        id: release_changelog
+        run: |
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          PREVIOUS_TAG="$(git tag --sort=-v:refname --list 'v*' | awk -v cur="${CURRENT_TAG}" '$0 != cur {print; exit}')"
+          RANGE="${CURRENT_TAG}^!"
+          if [ -n "${PREVIOUS_TAG}" ]; then
+            RANGE="${PREVIOUS_TAG}..${CURRENT_TAG}"
+          fi
+          export RANGE
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          range_spec = os.environ.get("RANGE", "").strip()
+          repo = os.environ["GITHUB_REPOSITORY"]
+          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+          output_path = "release-notes.md"
+
+          def split_sentences(text: str) -> list[str]:
+              collapsed = " ".join(text.split())
+              if not collapsed:
+                  return []
+              return [part.strip() for part in re.split(r"(?<=\\.)\\s+", collapsed) if part.strip()]
+
+          raw = subprocess.check_output(
+              ["git", "log", "--reverse", "--pretty=format:%H%x1f%s%x1f%b%x1e", range_spec],
+              text=True,
+              encoding="utf-8",
+              errors="replace",
+          )
+          records = [record for record in raw.split("\x1e") if record.strip()]
+
+          lines = ["## What's changed", ""]
+          if records:
+              for record in records:
+                  fields = record.split("\x1f")
+                  if len(fields) < 3:
+                      continue
+                  sha = fields[0].strip()
+                  subject = fields[1].strip()
+                  body = fields[2].strip()
+                  body_lines = [line.strip() for line in body.splitlines() if line.strip()]
+
+                  text = subject
+                  if subject.startswith("Merge pull request #") and body_lines:
+                      text = body_lines[0]
+                  elif body_lines and body_lines[0] and body_lines[0] != subject:
+                      text = body_lines[0]
+
+                  pr_match = re.search(r"Merge pull request #(\\d+)", subject)
+                  if not pr_match:
+                      pr_match = re.search(r"#(\\d+)", subject)
+                  if not pr_match:
+                      pr_match = re.search(r"/pull/(\\d+)", body)
+                  pr_number = pr_match.group(1) if pr_match else ""
+
+                  sentences = split_sentences(text)
+                  if not sentences:
+                      sentences = [text or subject or sha[:8]]
+
+                  if pr_number:
+                      head = f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}): {sentences[0]}"
+                  else:
+                      head = f"- `{sha[:8]}`: {sentences[0]}"
+                  lines.append(head)
+                  for sentence in sentences[1:]:
+                      lines.append(f"  {sentence}")
+          else:
+              lines.append("- No changes found in selected range.")
+
+          with open(output_path, "w", encoding="utf-8") as fh:
+              fh.write("\\n".join(lines).rstrip() + "\\n")
+          PY
+          echo "body_path=release-notes.md" >> "$GITHUB_OUTPUT"
+
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          generate_release_notes: false
+          body_path: ${{ steps.release_changelog.outputs.body_path }}
           files: |
             release-assets/qmud-appimage/*.AppImage
             release-assets/qmud-appimage/*.AppImage.zsync
@@ -719,12 +802,120 @@ jobs:
           path: release-assets
 
       - name: Move rolling CI tag to current commit
+        id: ci_tag
         run: |
           CI_TAG="ci-${GITHUB_REF_NAME}"
+          OLD_SHA="$(git rev-parse -q --verify "refs/tags/${CI_TAG}^{commit}" || true)"
+          echo "old_sha=${OLD_SHA}" >> "$GITHUB_OUTPUT"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -f "${CI_TAG}" "${GITHUB_SHA}"
           git push origin "refs/tags/${CI_TAG}" --force
+
+      - name: Build CI changelog body
+        id: changelog
+        env:
+          OLD_SHA: ${{ steps.ci_tag.outputs.old_sha }}
+        run: |
+          RANGE="${GITHUB_SHA}^!"
+          if [ -n "${OLD_SHA}" ] && [ "${OLD_SHA}" != "${GITHUB_SHA}" ]; then
+            RANGE="${OLD_SHA}..${GITHUB_SHA}"
+          fi
+          export RANGE
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          range_spec = os.environ.get("RANGE", "").strip()
+          repo = os.environ["GITHUB_REPOSITORY"]
+          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+          output_path = "ci-release-notes.md"
+
+          def split_sentences(text: str) -> list[str]:
+              collapsed = " ".join(text.split())
+              if not collapsed:
+                  return []
+              return [part.strip() for part in re.split(r"(?<=\\.)\\s+", collapsed) if part.strip()]
+
+          raw = subprocess.check_output(
+              ["git", "log", "--reverse", "--pretty=format:%H%x1f%s%x1f%b%x1e", range_spec],
+              text=True,
+              encoding="utf-8",
+              errors="replace",
+          )
+          records = [record for record in raw.split("\x1e") if record.strip()]
+
+          lines = ["## What's changed", ""]
+          if records:
+              for record in records:
+                  fields = record.split("\x1f")
+                  if len(fields) < 3:
+                      continue
+                  sha = fields[0].strip()
+                  subject = fields[1].strip()
+                  body = fields[2].strip()
+                  body_lines = [line.strip() for line in body.splitlines() if line.strip()]
+
+                  text = subject
+                  if subject.startswith("Merge pull request #") and body_lines:
+                      text = body_lines[0]
+                  elif body_lines and body_lines[0] and body_lines[0] != subject:
+                      text = body_lines[0]
+
+                  pr_match = re.search(r"Merge pull request #(\\d+)", subject)
+                  if not pr_match:
+                      pr_match = re.search(r"#(\\d+)", subject)
+                  if not pr_match:
+                      pr_match = re.search(r"/pull/(\\d+)", body)
+                  pr_number = pr_match.group(1) if pr_match else ""
+
+                  sentences = split_sentences(text)
+                  if not sentences:
+                      sentences = [text or subject or sha[:8]]
+
+                  if pr_number:
+                      head = f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}): {sentences[0]}"
+                  else:
+                      head = f"- `{sha[:8]}`: {sentences[0]}"
+                  lines.append(head)
+                  for sentence in sentences[1:]:
+                      lines.append(f"  {sentence}")
+          else:
+              lines.append("- No changes found in selected range.")
+
+          with open(output_path, "w", encoding="utf-8") as fh:
+              fh.write("\\n".join(lines).rstrip() + "\\n")
+          PY
+          echo "body_path=ci-release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Remove old CI release assets
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const tag = `ci-${context.ref.replace('refs/heads/', '')}`;
+            let release;
+            try {
+              release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+            } catch (error) {
+              if (error.status === 404) {
+                core.info(`No existing release for tag ${tag}; skipping cleanup.`);
+                return;
+              }
+              throw error;
+            }
+
+            const assets = release.data.assets || [];
+            for (const asset of assets) {
+              core.info(`Deleting old CI asset: ${asset.name}`);
+              await github.rest.repos.deleteReleaseAsset({
+                owner,
+                repo,
+                asset_id: asset.id,
+              });
+            }
 
       - name: Publish CI prerelease assets
         uses: softprops/action-gh-release@v2
@@ -734,6 +925,7 @@ jobs:
           prerelease: true
           make_latest: false
           generate_release_notes: false
+          body_path: ${{ steps.changelog.outputs.body_path }}
           overwrite_files: true
           files: |
             release-assets/qmud-appimage/*.AppImage
