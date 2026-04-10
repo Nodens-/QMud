@@ -6,7 +6,7 @@
 [![Website](https://img.shields.io/website?url=https%3A%2F%2Fqmud.dev)](https://qmud.dev)
 [![Issues](https://img.shields.io/github/issues/Nodens-/QMud)](https://github.com/Nodens-/QMud/issues)
 [![PRs](https://img.shields.io/github/issues-pr/Nodens-/QMud)](https://github.com/Nodens-/QMud/pulls)
-[![License](https://img.shields.io/github/license/Nodens-/QMud)](https://github.com/Nodens-/QMud/blob/main/skeleton/docs/licenses/QMud_GPL3.txt)
+[![License](https://img.shields.io/github/license/Nodens-/QMud)](https://github.com/Nodens-/QMud/blob/main/LICENSE.md)
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20this%20project-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/nodens)
 
 QMud is a Qt 6 port and continuation of the
@@ -295,3 +295,12 @@ These are intentional design choices in QMud:
 ## Contributors
 
 - Abigail Brady ([Cryosphere](https://cryosphere.org/))
+
+## License
+
+QMud is licensed under the GNU General Public License v3.0.
+See [LICENSE](./LICENSE.md).
+
+Third-party license texts are in `skeleton/docs/licenses`.
+
+([Qt source archive](https://download.qt.io/archive/qt/))
