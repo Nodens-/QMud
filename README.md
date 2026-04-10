@@ -1,5 +1,7 @@
 # QMud
 
+[![Pipelines](https://github.com/Nodens-/QMud/actions/workflows/pipelines.yml/badge.svg)](https://github.com/Nodens-/QMud/actions/workflows/pipelines.yml)
+
 QMud is a Qt 6 port and continuation of the
 original [MUSHclient](https://www.mushclient.com/mushclient/mushclient.htm) (by Nick Gammon),
 designed and written by Panagiotis Kalogiratos (Nodens) of [CthulhuMUD](https://www.cthulhumud.com).
