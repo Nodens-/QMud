@@ -2561,7 +2561,9 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	if (!m_runtime)
 		return result;
 
-	const QString trimmedTriggerLine = QMudCommandText::normalizeTriggerMatchLine(line, false);
+	const QString                          &matchInputLine  = line;
+	const QVector<WorldRuntime::StyleSpan> &matchInputSpans = spans;
+	const QString trimmedTriggerLine = QMudCommandText::normalizeTriggerMatchLine(matchInputLine, false);
 
 	auto          attrTrue = [](const QString &value)
 	{
@@ -2570,7 +2572,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	};
 
 	// Keep original incoming text for multiline trigger history.
-	m_runtime->addRecentLine(line);
+	m_runtime->addRecentLine(matchInputLine);
 	m_runtime->setLineOmittedFromOutput(false);
 
 	const QMap<QString, QString> &worldAttrs = m_runtime->worldAttributes();
@@ -2628,8 +2630,9 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	                         bool &underline, bool &inverse) -> bool
 	{
 		ensurePaletteReady();
-		const QVector<WorldRuntime::StyleSpan> &sourceSpans = workingSpans.isEmpty() ? spans : workingSpans;
-		const auto effective = ensureSpansForLine(line, sourceSpans, defaultFore, defaultBack);
+		// Trigger matching always uses immutable input line/spans.
+		// Trigger style rewrites are output transformations only.
+		const auto effective = ensureSpansForLine(matchInputLine, matchInputSpans, defaultFore, defaultBack);
 		int        pos       = 0;
 		for (const auto &span : effective)
 		{
@@ -2740,7 +2743,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			QString    target =
                 multiLine ? buildTarget(trigger.attributes.value(QStringLiteral("lines_to_match")).toInt(),
 			                               preserveTrailingWhitespace)
-			                 : (preserveTrailingWhitespace ? line : trimmedTriggerLine);
+			                 : (preserveTrailingWhitespace ? matchInputLine : trimmedTriggerLine);
 			trigger.lastMatchTarget = target;
 
 			if (attrTrue(trigger.attributes.value(QStringLiteral("expand_variables"))) &&
@@ -2963,7 +2966,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				script.plugin         = plugin;
 				script.index          = index;
 				script.label          = scriptLabel;
-				script.line           = line;
+				script.line           = matchInputLine;
 				script.wildcards      = wildcards;
 				script.namedWildcards = namedWildcards;
 				result.triggerScripts.push_back(script);
@@ -2981,7 +2984,8 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				if (workingSpans.isEmpty())
 				{
 					ensurePaletteReady();
-					workingSpans = ensureSpansForLine(line, spans, defaultFore, defaultBack);
+					workingSpans =
+					    ensureSpansForLine(matchInputLine, matchInputSpans, defaultFore, defaultBack);
 				}
 				spansChanged = true;
 
@@ -3083,7 +3087,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	if (spansChanged)
 		result.spans = workingSpans;
 	else
-		result.spans = spans;
+		result.spans = matchInputSpans;
 
 	m_runtime->setLineOmittedFromOutput(result.omitFromOutput);
 	m_runtime->addTriggerTimeNs(timer.nsecsElapsed());
