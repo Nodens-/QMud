@@ -222,7 +222,7 @@ jobs:
       - name: Verify preinstalled host build dependencies
         run: |
           set -euo pipefail
-          for tool in cmake ninja ctest python3 pkg-config gcc g++ lcov genhtml; do
+          for tool in cmake ninja ctest python3 pkg-config gcc g++ gcovr; do
             command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
           done
 
@@ -279,10 +279,13 @@ jobs:
 
       - name: Generate coverage report
         run: |
-          lcov --capture --directory cmake-build-coverage --output-file coverage.info --rc lcov_branch_coverage=1
-          lcov --remove coverage.info '/usr/*' "$RUNNER_TEMP/*" --output-file coverage.filtered.info --rc lcov_branch_coverage=1
-          lcov --extract coverage.filtered.info '*/src/*' --output-file coverage.filtered.info --rc lcov_branch_coverage=1
-          genhtml coverage.filtered.info --output-directory coverage-html --branch-coverage --rc genhtml_branch_coverage=1
+          gcovr \
+            --root "$GITHUB_WORKSPACE" \
+            --object-directory cmake-build-coverage \
+            --filter "$GITHUB_WORKSPACE/src/" \
+            --print-summary \
+            --xml-pretty --xml coverage.xml \
+            --html-details coverage-html/index.html
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v7
@@ -290,14 +293,14 @@ jobs:
           name: qmud-coverage
           if-no-files-found: error
           path: |
-            coverage.filtered.info
+            coverage.xml
             coverage-html/**
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage.filtered.info
+          files: coverage.xml
           fail_ci_if_error: true
 
       - name: Cleanup workspace build directories
@@ -320,7 +323,7 @@ jobs:
       - name: Verify preinstalled host build dependencies
         run: |
           set -euo pipefail
-          for tool in cmake ninja ctest python3 pkg-config gcc g++ lcov genhtml; do
+          for tool in cmake ninja ctest python3 pkg-config gcc g++ gcovr; do
             command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
           done
 
@@ -377,10 +380,13 @@ jobs:
 
       - name: Generate coverage report
         run: |
-          lcov --capture --directory cmake-build-coverage --output-file coverage.info --rc lcov_branch_coverage=1
-          lcov --remove coverage.info '/usr/*' "$RUNNER_TEMP/*" --output-file coverage.filtered.info --rc lcov_branch_coverage=1
-          lcov --extract coverage.filtered.info '*/src/*' --output-file coverage.filtered.info --rc lcov_branch_coverage=1
-          genhtml coverage.filtered.info --output-directory coverage-html --branch-coverage --rc genhtml_branch_coverage=1
+          gcovr \
+            --root "$GITHUB_WORKSPACE" \
+            --object-directory cmake-build-coverage \
+            --filter "$GITHUB_WORKSPACE/src/" \
+            --print-summary \
+            --xml-pretty --xml coverage.xml \
+            --html-details coverage-html/index.html
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v7
@@ -388,14 +394,14 @@ jobs:
           name: qmud-coverage
           if-no-files-found: error
           path: |
-            coverage.filtered.info
+            coverage.xml
             coverage-html/**
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage.filtered.info
+          files: coverage.xml
           fail_ci_if_error: true
 
       - name: Cleanup workspace build directories
