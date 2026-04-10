@@ -9,6 +9,7 @@
 #include "AcceleratorUtils.h"
 #include "AppController.h"
 #include "WorldView.h"
+#include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QAbstractScrollArea>
@@ -2845,6 +2846,93 @@ class tst_WorldView_Basic : public QObject
 			const int bottomGap = input->viewport()->rect().bottom() - input->cursorRect().bottom();
 			QVERIFY2(bottomGap <= (input->fontMetrics().lineSpacing() / 2),
 			         "Trailing whitespace wrap should not allocate an extra visual line below the cursor.");
+
+			resetTestState();
+		}
+
+		void programmaticInputClearResetsAutoResizeAndKeepsCaretVisible()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("auto_repeat"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(360, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+			const int singleHeight = input->height();
+			QVERIFY(singleHeight > 0);
+
+			view.setInputText(QStringLiteral("word ").repeated(120), true);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(input->height() > singleHeight);
+
+			const QString pushed = view.pushCommand();
+			QCOMPARE(pushed, QStringLiteral("word ").repeated(120));
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.inputText(), QString());
+			QCOMPARE(input->height(), singleHeight);
+			QVERIFY2(input->viewport()->rect().intersects(input->cursorRect()),
+			         "Programmatic push-command clear should leave caret visible.");
+
+			view.setInputText(QStringLiteral("word ").repeated(120), true);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(input->height() > singleHeight);
+
+			view.sendCommandFromHistory(QStringLiteral("north"));
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.inputText(), QString());
+			QCOMPARE(input->height(), singleHeight);
+			QVERIFY2(input->viewport()->rect().intersects(input->cursorRect()),
+			         "History-send clear should leave caret visible.");
+
+			resetTestState();
+		}
+
+		void commandSelectionKeepsCaretVisibleForWrappedInput()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("2"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(360, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+
+			const QString wrapped = QStringLiteral("word ").repeated(200);
+			view.setInputText(wrapped, true);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(input->height() > 0);
+
+			QCOMPARE(view.setCommandSelection(1, 1), eOK);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(input->textCursor().anchor(), 0);
+			QCOMPARE(input->textCursor().position(), 1);
+			QVERIFY2(input->viewport()->rect().intersects(input->cursorRect()),
+			         "SetCommandSelection should keep the caret in view.");
 
 			resetTestState();
 		}

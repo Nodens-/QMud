@@ -25,6 +25,8 @@
 #include "scripting/ScriptingErrors.h"
 
 #include <QAbstractScrollArea>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QClipboard>
 #include <QColor>
@@ -4992,10 +4994,7 @@ QString WorldView::pushCommand()
 	addToHistory(command);
 	m_noEcho = savedNoEcho;
 
-	m_settingText = true;
-	m_input->clear();
-	m_settingText  = false;
-	m_inputChanged = false;
+	setInputText(QString(), false);
 	resetHistoryRecall();
 	return command;
 }
@@ -5657,10 +5656,7 @@ void WorldView::sendCommandFromHistory(const QString &text)
 	}
 	else if (m_input)
 	{
-		m_settingText = true;
-		m_input->clear();
-		m_settingText  = false;
-		m_inputChanged = false;
+		setInputText(QString(), false);
 	}
 	resetHistoryRecall();
 }
@@ -8604,63 +8600,67 @@ void WorldView::updateInputHeight() const
 	int lineCount = 1;
 	if (QTextDocument *doc = m_input->document())
 	{
-		const int blockLines = qMax(1, doc->blockCount());
-		lineCount            = blockLines;
+		lineCount = qMax(1, doc->blockCount());
 
 		if (m_input->lineWrapMode() == QPlainTextEdit::WidgetWidth)
 		{
-			const int wrapWidth =
-			    qMax(1, m_input->viewport() ? m_input->viewport()->width() : m_input->width());
-			QTextOption wrapOption = doc->defaultTextOption();
-			wrapOption.setWrapMode(m_input->wordWrapMode());
-			wrapOption.setTabStopDistance(m_input->tabStopDistance());
+			if (QAbstractTextDocumentLayout *layout = doc->documentLayout())
+				(void)layout->documentSize();
+
 			int visualLines = 0;
 			for (QTextBlock block = doc->begin(); block.isValid(); block = block.next())
 			{
-				const QString blockText = block.text();
-				QTextLayout   layout(blockText, m_input->font());
-				layout.setTextOption(wrapOption);
-				layout.beginLayout();
-				int blockVisualLines = 0;
-				while (true)
-				{
-					QTextLine textLine = layout.createLine();
-					if (!textLine.isValid())
-						break;
-					textLine.setLineWidth(wrapWidth);
-					++blockVisualLines;
-				}
-				layout.endLayout();
-				visualLines += qMax(1, blockVisualLines);
+				const QTextLayout *layout           = block.layout();
+				const int          blockVisualLines = layout ? qMax(1, layout->lineCount()) : 1;
+				visualLines += blockVisualLines;
 			}
-			lineCount = qMax(blockLines, visualLines);
+			lineCount = qMax(1, visualLines);
+
+			const QTextCursor cursor              = m_input->textCursor();
+			const int         documentEndPosition = qMax(0, doc->characterCount() - 1);
+			if (cursor.position() >= documentEndPosition && lineCount > 1)
+			{
+				const QTextBlock   lastBlock  = doc->lastBlock();
+				const QTextLayout *lastLayout = lastBlock.layout();
+				if (lastLayout && lastLayout->lineCount() > 1)
+				{
+					const QTextLine lastLine = lastLayout->lineAt(lastLayout->lineCount() - 1);
+					if (lastLine.isValid() && lastLine.textLength() == 0)
+						--lineCount;
+				}
+			}
 		}
 	}
-	const int targetLines         = qBound(minLines, lineCount, maxLines);
-	auto      applyHeightForLines = [this, lineHeight, frame](const int lines)
+
+	auto applyHeightForLines = [this, lineHeight, frame](const int lines)
 	{
 		const int targetHeight = (lineHeight * lines) + frame * 2 + 4;
+		if (m_input->minimumHeight() == targetHeight && m_input->maximumHeight() == targetHeight)
+			return;
 		m_input->setMinimumHeight(targetHeight);
 		m_input->setMaximumHeight(targetHeight);
 	};
 
-	int adjustedLines = targetLines;
-	applyHeightForLines(adjustedLines);
+	int targetLines = qBound(minLines, lineCount, maxLines);
+	applyHeightForLines(targetLines);
 
-	if (adjustedLines > minLines)
+	if (targetLines > minLines)
 	{
 		const QTextCursor    cursor   = m_input->textCursor();
-		const QTextDocument *doc      = m_input->document();
-		const int documentEndPosition = doc ? qMax(0, doc->characterCount() - 1) : cursor.position();
+		const QTextDocument *document = m_input->document();
+		const int            documentEndPosition =
+            document ? qMax(0, document->characterCount() - 1) : cursor.position();
 		if (cursor.position() >= documentEndPosition)
 		{
-			while (adjustedLines > minLines)
+			const int bottomGap  = m_input->viewport()->rect().bottom() - m_input->cursorRect().bottom();
+			const int allowedGap = lineHeight / 2;
+			if (bottomGap > allowedGap)
 			{
-				const int bottomGap = m_input->viewport()->rect().bottom() - m_input->cursorRect().bottom();
-				if (bottomGap < lineHeight)
-					break;
-				--adjustedLines;
-				applyHeightForLines(adjustedLines);
+				const int excessGap   = bottomGap - allowedGap;
+				const int maxTrim     = targetLines - minLines;
+				const int linesToTrim = qBound(1, (excessGap + lineHeight - 1) / lineHeight, maxTrim);
+				targetLines -= linesToTrim;
+				applyHeightForLines(targetLines);
 			}
 		}
 	}
@@ -9247,6 +9247,7 @@ int WorldView::setCommandSelection(int first, int last) const
 	cursor.setPosition(start);
 	cursor.setPosition(end, QTextCursor::KeepAnchor);
 	m_input->setTextCursor(cursor);
+	ensureCursorVisibleNowAndQueued(m_input);
 	return eOK;
 }
 
