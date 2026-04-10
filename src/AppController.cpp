@@ -3101,11 +3101,8 @@ void AppController::beginRestoreScrollbackStatus() const
 		    m_restoreScrollbackStatusRuntime ? m_restoreScrollbackStatusRuntime->statusMessage() : QString{};
 	}
 	++m_restoreScrollbackInFlight;
-	const QString restoreMessage =
-	    m_restoreScrollbackInFlight > 1
-	        ? QStringLiteral("Restoring scrollback buffers (%1 remaining)").arg(m_restoreScrollbackInFlight)
-	        : QStringLiteral("Restoring scrollback buffers");
-	m_mainWindow->setStatusMessageNow(restoreMessage);
+	m_mainWindow->setStatusMessageNow(
+	    QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(m_restoreScrollbackInFlight));
 }
 
 void AppController::endRestoreScrollbackStatus() const
@@ -3118,7 +3115,7 @@ void AppController::endRestoreScrollbackStatus() const
 	if (m_restoreScrollbackInFlight > 0)
 	{
 		m_mainWindow->setStatusMessageNow(
-		    QStringLiteral("Restoring scrollback buffers (%1 remaining)").arg(m_restoreScrollbackInFlight));
+		    QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(m_restoreScrollbackInFlight));
 		return;
 	}
 
@@ -3132,6 +3129,7 @@ void AppController::endRestoreScrollbackStatus() const
 
 	m_restoreScrollbackStatusRuntime = nullptr;
 	m_restoreScrollbackStatusPrevious.clear();
+	maybeShowDeferredUpgradeWelcomeAfterStartupRestores();
 }
 
 void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldView *view,
@@ -3162,32 +3160,21 @@ void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldVi
 		finish(true, QString());
 		return;
 	}
-
+	const auto loadPlan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
+	    persistOutputBuffer, persistCommandHistory, QFileInfo::exists(filePath));
+	const bool trackScrollbackRestoreStatus =
+	    QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(persistOutputBuffer, loadPlan);
 	const QPointer<AppController> controllerGuard(const_cast<AppController *>(this));
+	if (trackScrollbackRestoreStatus && controllerGuard)
+		controllerGuard->beginRestoreScrollbackStatus();
 
 	QThreadPool::globalInstance()->start(
 	    [controllerGuard, runtimeGuard, viewGuard, filePath, persistOutputBuffer, persistCommandHistory,
-	     completionFn]
+	     completionFn, loadPlan, trackScrollbackRestoreStatus]
 	    {
 		    QString                                      error;
 		    bool                                         ok = true;
 		    QMudWorldSessionState::WorldSessionStateData state;
-		    const auto loadPlan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
-		        persistOutputBuffer, persistCommandHistory, QFileInfo::exists(filePath));
-		    const bool restoreScrollbackInFlight =
-		        persistOutputBuffer &&
-		        loadPlan == QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply;
-		    if (restoreScrollbackInFlight && controllerGuard)
-		    {
-			    QMetaObject::invokeMethod(
-			        qApp,
-			        [controllerGuard]
-			        {
-				        if (controllerGuard)
-					        controllerGuard->beginRestoreScrollbackStatus();
-			        },
-			        Qt::BlockingQueuedConnection);
-		    }
 		    switch (loadPlan)
 		    {
 		    case QMudWorldSessionRestoreFlow::SessionStateLoadPlan::RemoveFileAndSucceed:
@@ -3203,15 +3190,19 @@ void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldVi
 		    QMetaObject::invokeMethod(
 		        qApp,
 		        [runtimeGuard, viewGuard, completionFn, persistOutputBuffer, persistCommandHistory,
-		         state = std::move(state), ok, error, restoreScrollbackInFlight, controllerGuard]
+		         state = std::move(state), ok, error, trackScrollbackRestoreStatus, controllerGuard]
 		        {
-			        if (restoreScrollbackInFlight && controllerGuard)
-				        controllerGuard->endRestoreScrollbackStatus();
+			        const auto finishTrackedRestore = [trackScrollbackRestoreStatus, controllerGuard]
+			        {
+				        if (trackScrollbackRestoreStatus && controllerGuard)
+					        controllerGuard->endRestoreScrollbackStatus();
+			        };
 
 			        if (!runtimeGuard || !viewGuard)
 			        {
 				        if (completionFn && *completionFn)
 					        (*completionFn)(false, QStringLiteral("Runtime or view was destroyed."));
+				        finishTrackedRestore();
 				        return;
 			        }
 
@@ -3225,6 +3216,7 @@ void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldVi
 
 			        if (completionFn && *completionFn)
 				        (*completionFn)(ok, error);
+			        finishTrackedRestore();
 		        },
 		        Qt::QueuedConnection);
 	    });
@@ -7648,6 +7640,19 @@ void AppController::showUpgradeWelcomeIfNeeded() const
 	dlg.exec();
 }
 
+void AppController::maybeShowDeferredUpgradeWelcomeAfterStartupRestores() const
+{
+	if (!QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(
+	        m_deferUpgradeWelcomeUntilStartupRestores, m_startupRestoreDispatchComplete,
+	        m_restoreScrollbackInFlight))
+	{
+		return;
+	}
+	showUpgradeWelcomeIfNeeded();
+	m_deferUpgradeWelcomeUntilStartupRestores = false;
+	m_startupRestoreDispatchComplete          = false;
+}
+
 void AppController::backupDataOnUpgradeIfNeeded(const int previousVersion, const bool firstTime) const
 {
 	if (firstTime || previousVersion >= kThisVersion)
@@ -7685,6 +7690,12 @@ void AppController::finalizeStartupIfReady()
 		return;
 	}
 
+	if (m_startupNeedsUpgradeWelcome)
+	{
+		m_deferUpgradeWelcomeUntilStartupRestores = true;
+		m_startupRestoreDispatchComplete          = false;
+	}
+
 	if (!m_reloadLaunchRequested && m_startupFirstTime)
 	{
 		WelcomeDialog dlg(QStringLiteral("I notice that this is the first time you have used"
@@ -7692,17 +7703,13 @@ void AppController::finalizeStartupIfReady()
 		                  m_mainWindow);
 		dlg.exec();
 	}
-	else if (!m_reloadLaunchRequested && m_startupNeedsUpgradeWelcome)
-	{
-		showUpgradeWelcomeIfNeeded();
-	}
 
 	setupStartupBehavior();
+	m_startupRestoreDispatchComplete = true;
+	maybeShowDeferredUpgradeWelcomeAfterStartupRestores();
 
 	if (!m_reloadLaunchRequested && m_startupFirstTime)
 		showGettingStartedIfNeeded();
-	if (m_reloadLaunchRequested && m_startupNeedsUpgradeWelcome)
-		showUpgradeWelcomeIfNeeded();
 
 	m_startupFirstTime           = false;
 	m_startupNeedsUpgradeWelcome = false;

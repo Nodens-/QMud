@@ -8,6 +8,8 @@
 
 #include "WorldSessionRestoreFlowUtils.h"
 
+#include <QtGlobal>
+
 namespace QMudWorldSessionRestoreFlow
 {
 	SessionStateLoadPlan computeSessionStateLoadPlan(const bool persistOutputBuffer,
@@ -19,6 +21,25 @@ namespace QMudWorldSessionRestoreFlow
 		if (stateFileExists)
 			return SessionStateLoadPlan::ReadFileAndApply;
 		return SessionStateLoadPlan::SkipApplyAndSucceed;
+	}
+
+	bool shouldTrackScrollbackRestoreStatus(const bool                 persistOutputBuffer,
+	                                        const SessionStateLoadPlan loadPlan)
+	{
+		return persistOutputBuffer && loadPlan != SessionStateLoadPlan::RemoveFileAndSucceed;
+	}
+
+	bool shouldShowDeferredUpgradeWelcome(const bool deferUpgradeWelcome,
+	                                      const bool startupRestoreDispatchComplete,
+	                                      const int  restoreScrollbackInFlight)
+	{
+		return deferUpgradeWelcome && startupRestoreDispatchComplete && restoreScrollbackInFlight <= 0;
+	}
+
+	QString restoreScrollbackStatusMessage(const int restoreScrollbackInFlight)
+	{
+		return QStringLiteral("Restoring scrollback buffers (%1 remaining)")
+		    .arg(qMax(0, restoreScrollbackInFlight));
 	}
 
 	void runPostRestoreFlow(const bool restoreOk, const QString &restoreError,
