@@ -24,6 +24,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QFontMetrics>
+#include <QGuiApplication>
 #include <QIcon>
 #include <QImageReader>
 #include <QInputDialog>
@@ -97,6 +98,7 @@ void MainWindow::addToolbarSeparator(QToolBar *toolbar)
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 {
 	qApp->installEventFilter(this);
+	connect(qApp, &QGuiApplication::applicationStateChanged, this, &MainWindow::onApplicationStateChanged);
 	setWindowTitle(QStringLiteral("QMud"));
 	setWindowIcon(QIcon(QStringLiteral(":/qmud/res/QMud.png")));
 	resize(1024, 768);
@@ -111,6 +113,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 		m_statusMessageTimer->stop();
 	if (m_statusMessage)
 		m_statusMessage->setText(QStringLiteral("Ready"));
+	m_lastKnownApplicationFocused              = QGuiApplication::applicationState() == Qt::ApplicationActive;
+	m_taskbarFlashRequestedInBackgroundSession = false;
 	setTimerInterval(0);
 }
 
@@ -1243,6 +1247,15 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 		m_mdiArea->setActiveSubWindow(previousActive);
 	}
 	m_mdiTabs.updateTabs();
+}
+
+void MainWindow::onApplicationStateChanged(const Qt::ApplicationState state)
+{
+	const bool focused = state == Qt::ApplicationActive;
+	if (!QMudMainFrameActionUtils::shouldResetBackgroundFlashLatch(m_lastKnownApplicationFocused, focused))
+		return;
+	m_lastKnownApplicationFocused              = focused;
+	m_taskbarFlashRequestedInBackgroundSession = false;
 }
 
 WorldChildWindow *MainWindow::activeWorldChildWindow() const
@@ -2969,6 +2982,30 @@ void MainWindow::setTimerInterval(int seconds)
 		m_activityTimer->start(seconds * 1000);
 
 	m_tickTimer->start(40);
+}
+
+bool MainWindow::requestBackgroundTaskbarFlash(QWidget *preferredTarget)
+{
+	if (!QMudMainFrameActionUtils::shouldRequestBackgroundTaskbarFlash(
+	        m_lastKnownApplicationFocused, m_taskbarFlashRequestedInBackgroundSession))
+	{
+		return !m_lastKnownApplicationFocused && m_taskbarFlashRequestedInBackgroundSession;
+	}
+
+	QWidget *alertTarget = preferredTarget ? preferredTarget->window() : nullptr;
+	if (!alertTarget)
+		alertTarget = preferredTarget ? preferredTarget : this;
+	if (!alertTarget)
+		return false;
+
+	QApplication::alert(alertTarget, 0);
+	m_taskbarFlashRequestedInBackgroundSession = true;
+	return true;
+}
+
+bool MainWindow::isApplicationFocused() const
+{
+	return m_lastKnownApplicationFocused;
 }
 
 void MainWindow::setActivityRefresh(const int mode, const int interval)

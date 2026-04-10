@@ -236,13 +236,13 @@ class AppController : public QObject
 		 */
 		void                               setGlobalOptionString(const QString &name, const QString &value);
 		/**
-		 * @brief Returns xterm palette colour at index.
+		 * @brief Returns xterm palette color at index.
 		 * @param index Palette index.
-		 * @return Packed xterm colour value.
+		 * @return Packed xterm color value.
 		 */
 		[[nodiscard]] QMudColorRef         xtermColorAt(int index) const;
 		/**
-		 * @brief Selects xterm colour cube preset.
+		 * @brief Selects xterm color cube preset.
 		 * @param which Preset selector.
 		 */
 		void                               setXtermColourCube(int which);
@@ -660,6 +660,10 @@ class AppController : public QObject
 		 */
 		void               showUpgradeWelcomeIfNeeded() const;
 		/**
+		 * @brief Shows deferred upgrade dialog after scrollback restore counter reaches zero.
+		 */
+		void               maybeShowDeferredUpgradeWelcomeAfterStartupRestores() const;
+		/**
 		 * @brief Performs data backup when upgrading older installs.
 		 * @param previousVersion Previously stored application version.
 		 * @param firstTime `true` when this is first launch after install/migration.
@@ -977,6 +981,8 @@ class AppController : public QObject
 		bool                             m_startupFinalized{false};
 		bool                             m_startupFirstTime{false};
 		bool                             m_startupNeedsUpgradeWelcome{false};
+		mutable bool                     m_deferUpgradeWelcomeUntilStartupRestores{false};
+		mutable bool                     m_startupRestoreDispatchComplete{false};
 		QTranslator                     *m_qtTranslator{nullptr};
 		lua_State                       *m_translatorLua{nullptr};
 #ifdef QMUD_ENABLE_LUA_SCRIPTING

@@ -33,6 +33,30 @@ namespace QMudWorldSessionRestoreFlow
 	 */
 	[[nodiscard]] SessionStateLoadPlan
 	computeSessionStateLoadPlan(bool persistOutputBuffer, bool persistCommandHistory, bool stateFileExists);
+	/**
+	 * @brief Returns whether scrollback-restore status tracking should be active.
+	 * @param persistOutputBuffer Persist output buffer when `true`.
+	 * @param loadPlan Precomputed session-state load plan.
+	 * @return `true` when this restore should contribute to scrollback in-flight status.
+	 */
+	[[nodiscard]] bool    shouldTrackScrollbackRestoreStatus(bool                 persistOutputBuffer,
+	                                                         SessionStateLoadPlan loadPlan);
+	/**
+	 * @brief Returns whether deferred upgrade welcome can be shown now.
+	 * @param deferUpgradeWelcome `true` when upgrade welcome is deferred.
+	 * @param startupRestoreDispatchComplete `true` when startup restore dispatch has finished.
+	 * @param restoreScrollbackInFlight Number of tracked restore jobs still in flight.
+	 * @return `true` when upgrade welcome can be shown.
+	 */
+	[[nodiscard]] bool    shouldShowDeferredUpgradeWelcome(bool deferUpgradeWelcome,
+	                                                       bool startupRestoreDispatchComplete,
+	                                                       int  restoreScrollbackInFlight);
+	/**
+	 * @brief Builds status-bar message for tracked scrollback restore progress.
+	 * @param restoreScrollbackInFlight Number of tracked restore jobs still in flight.
+	 * @return Status message text.
+	 */
+	[[nodiscard]] QString restoreScrollbackStatusMessage(int restoreScrollbackInFlight);
 
 	/**
 	 * @brief Callback bundle used when session-state restore completes.

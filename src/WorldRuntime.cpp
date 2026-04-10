@@ -22,6 +22,7 @@
 #include "LuaCallbackEngine.h"
 #include "LuaHeaders.h"
 #include "MainFrame.h"
+#include "MainFrameActionUtils.h"
 #include "MiniWindowBrushUtils.h"
 #include "MxpDiagnostics.h"
 #include "NameGeneration.h"
@@ -136,6 +137,24 @@ namespace
 			return 0;
 		constexpr qsizetype kMaxInt = std::numeric_limits<int>::max();
 		return size > kMaxInt ? std::numeric_limits<int>::max() : static_cast<int>(size);
+	}
+
+	void flashTaskbarForView(QWidget *view)
+	{
+		if (const AppController *app = AppController::instance())
+		{
+			if (MainWindow *mainWindow = app->mainWindow())
+			{
+				(void)mainWindow->requestBackgroundTaskbarFlash(view);
+				return;
+			}
+		}
+		if (!view)
+			return;
+		QWidget *alertTarget = view->window();
+		if (!alertTarget)
+			alertTarget = view;
+		QApplication::alert(alertTarget, 0);
 	}
 
 	int boundedQSizeToInt(const qsizetype size)
@@ -450,14 +469,6 @@ static QByteArray ansiCode(int code)
 	payload.append(QByteArray::number(code));
 	payload.append('m');
 	return payload;
-}
-
-static QString stripAnsiString(const QString &input)
-{
-	static QRegularExpression const ansiExpr(QStringLiteral("\x1b\\[[0-9;]*[A-Za-z]"));
-	QString                         output = input;
-	output.remove(ansiExpr);
-	return output;
 }
 
 namespace
@@ -6458,26 +6469,29 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 							    m_mxpTextBuffer.mid(frame.contentStart, eventOffset - frame.contentStart);
 						if (textBytes.size() > 1000)
 							textBytes = textBytes.left(1000);
-						QString const text = decodeIncomingIsolatedBytes(textBytes);
+						QString const text          = decodeIncomingIsolatedBytes(textBytes);
+						QString const sanitizedText = qmudStripAnsiEscapeCodes(text);
 
 						if (!closeTagCallback.isEmpty() && m_luaCallbacks)
 						{
 							m_luaCallbacks->callMxpEndTag(closeTagCallback, QString::fromLatin1(frame.tag),
-							                              text);
+							                              sanitizedText);
 						}
 
 						const QString pluginClosePayload =
-						    QStringLiteral("%1,%2").arg(QString::fromLatin1(frame.tag), text);
+						    QStringLiteral("%1,%2").arg(QString::fromLatin1(frame.tag), sanitizedText);
 						callPluginCallbacks(QStringLiteral("OnPluginMXPcloseTag"), pluginClosePayload);
 
 						if (!frame.variableName.isEmpty())
 						{
 							const QString variableName = QStringLiteral("mxp_%1").arg(frame.variableName);
-							setVariable(variableName, text);
+							setVariable(variableName, sanitizedText);
 							if (!setVarCallback.isEmpty() && m_luaCallbacks)
-								m_luaCallbacks->callMxpSetVariable(setVarCallback, variableName, text);
+								m_luaCallbacks->callMxpSetVariable(setVarCallback, variableName,
+								                                   sanitizedText);
 
-							const QString pluginVarPayload = QStringLiteral("%1=%2").arg(variableName, text);
+							const QString pluginVarPayload =
+							    QStringLiteral("%1=%2").arg(variableName, sanitizedText);
 							callPluginCallbacks(QStringLiteral("OnPluginMXPsetVariable"), pluginVarPayload);
 							if (frame.tag == "var" || frame.tag == "v")
 								callPluginCallbacks(QStringLiteral("OnPluginMXPsetEntity"), pluginVarPayload);
@@ -6897,24 +6911,36 @@ void WorldRuntime::setNewLines(int value)
 
 void WorldRuntime::incrementNewLines()
 {
-	const bool wasZero = (m_newLines == 0);
 	++m_newLines;
-	if (!m_active && wasZero)
+	const bool qtAppFocused  = QGuiApplication::applicationState() == Qt::ApplicationActive;
+	bool       windowFocused = qtAppFocused;
+	if (const AppController *app = AppController::instance())
 	{
-		if (isEnabledFlag(m_worldAttributes.value(QStringLiteral("flash_taskbar_icon"))) && m_view)
-		{
-			QWidget *alertTarget = m_view->window();
-			if (!alertTarget)
-				alertTarget = m_view;
-			QApplication::alert(alertTarget, 0);
-		}
+		if (const MainWindow *mainWindow = app->mainWindow())
+			windowFocused = mainWindow->isApplicationFocused();
+	}
+	const bool appFocusedForFlash =
+	    QMudMainFrameActionUtils::resolveIncomingLineFocusForFlash(qtAppFocused, windowFocused);
+	const bool appFocusedForSound =
+	    QMudMainFrameActionUtils::resolveIncomingLineFocusForActivitySound(qtAppFocused, windowFocused);
+	const bool worldFlashEnabled =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("flash_taskbar_icon")));
+	if (QMudMainFrameActionUtils::shouldAttemptIncomingLineTaskbarFlash(worldFlashEnabled,
+	                                                                    appFocusedForFlash))
+	{
+		flashTaskbarForView(m_view);
+	}
+
+	const bool worldInactive          = !m_active;
+	const bool backgroundWindowActive = !appFocusedForSound;
+	if (worldInactive || backgroundWindowActive)
+	{
 		const QString sound = m_worldAttributes.value(QStringLiteral("new_activity_sound")).trimmed();
 		if (!sound.isEmpty() && sound.compare(QStringLiteral("(No sound)"), Qt::CaseInsensitive) != 0)
 		{
 			const bool allowBackground =
 			    isEnabledFlag(m_worldAttributes.value(QStringLiteral("play_sounds_in_background")));
-			const bool appActive = QGuiApplication::applicationState() == Qt::ApplicationActive;
-			if (allowBackground || appActive)
+			if (appFocusedForSound || allowBackground)
 				playSound(0, sound, false, 0.0, 0.0);
 		}
 	}
@@ -12818,8 +12844,8 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 		normalizedValue = normalizePathForRuntime(normalizedValue);
 	if (key == QStringLiteral("auto_log_file_name"))
 		normalizedValue = normalizeAutoLogFileNameValue(normalizedValue);
-	if (const auto existing = m_worldAttributes.constFind(key);
-	    existing != m_worldAttributes.constEnd() && existing.value() == normalizedValue)
+	const auto existing = m_worldAttributes.constFind(key);
+	if (existing != m_worldAttributes.constEnd() && existing.value() == normalizedValue)
 	{
 		return;
 	}
@@ -14455,12 +14481,13 @@ int WorldRuntime::broadcastPlugin(long message, const QString &text, const QStri
 	const auto recipientsIt = m_pluginCallbackRecipientIndices.constFind(callbackName);
 	if (recipientsIt == m_pluginCallbackRecipientIndices.constEnd())
 		return 0;
+	const int          pluginCount = safeQSizeToInt(m_plugins.size());
 	const QVector<int> recipientIndices =
-	    qmudFilterValidPluginRecipientIndices(recipientsIt.value(), m_plugins.size());
+	    qmudFilterValidPluginRecipientIndices(recipientsIt.value(), pluginCount);
 	if (recipientIndices.isEmpty())
 		return 0;
 	if (qmudShouldSkipSelfOnlyPluginBroadcast(
-	        recipientIndices, m_plugins.size(), callingPluginId,
+	        recipientIndices, pluginCount, callingPluginId,
 	        [this](const int index) { return m_plugins.at(index).attributes.value(QStringLiteral("id")); }))
 		return 0;
 	const QByteArray callingPluginIdUtf8   = callingPluginId.toUtf8();
@@ -14959,7 +14986,7 @@ void WorldRuntime::chatNote(short noteType, const QString &message)
 
 	QString output = text;
 	if (ignoreChatColours())
-		output = stripAnsiString(output);
+		output = qmudStripAnsiEscapeCodes(output);
 
 	const QString prefix = m_worldAttributes.value(QStringLiteral("chat_message_prefix"));
 	output               = prefix + output;

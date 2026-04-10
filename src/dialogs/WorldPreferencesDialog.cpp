@@ -3916,120 +3916,6 @@ void WorldPreferencesDialog::buildUi()
 			        m_runtime->resetIpCache();
 			        updateClearCachedButton();
 		        });
-	if (m_browseLogFile && m_autoLogFileName)
-		connect(m_browseLogFile, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->defaultLogDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getSaveFileName(this, QStringLiteral("Log file name"), startDir,
-			                                         QStringLiteral("Text files (*.txt)"));
-			        if (!fileName.isEmpty())
-			        {
-				        if (m_runtime)
-					        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-				        m_autoLogFileName->setText(fileName);
-			        }
-		        });
-	if (m_standardPreamble && m_logFilePreamble && m_logFilePostamble)
-		connect(m_standardPreamble, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString preamble =
-			            QStringLiteral("<html>\n"
-			                           " <head>\n"
-			                           " <title>Log of %N session</title>\n"
-			                           " <style type=\"text/css\">\n"
-			                           "   body {background-color: black;}\n"
-			                           " </style>\n"
-			                           " </head>\n"
-			                           " <body>\n"
-			                           "   <pre><code>\n"
-			                           "   <font size=2 face=\"DejaVu Sans Mono, Consolas, Menlo, Monaco, "
-			                           "Courier New, Courier\">\n");
-			        const QString postamble = QStringLiteral("</font></code></pre>\n"
-			                                                 "</body>\n"
-			                                                 "</html>\n");
-			        m_logFilePreamble->setPlainText(preamble);
-			        m_logFilePostamble->setPlainText(postamble);
-		        });
-	if (m_editPreamble && m_logFilePreamble)
-		connect(
-		    m_editPreamble, &QPushButton::clicked, this, [this]
-		    { editPlainTextWithDialog(this, m_logFilePreamble, QStringLiteral("Edit log file preamble")); });
-	if (m_editPostamble && m_logFilePostamble)
-		connect(m_editPostamble, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        editPlainTextWithDialog(this, m_logFilePostamble,
-			                                QStringLiteral("Edit log file postamble"));
-		        });
-	if (m_substitutionHelp)
-		connect(m_substitutionHelp, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        QDialog dialog(this);
-			        dialog.setWindowTitle(QStringLiteral("Special characters"));
-			        auto *dialogLayout = new QVBoxLayout(&dialog);
-			        auto *text         = new QTextEdit(&dialog);
-			        text->setReadOnly(true);
-			        QFile file(QStringLiteral(":/resources/qmud/text/substitutions.txt"));
-			        if (file.open(QIODevice::ReadOnly | QIODevice::Text))
-			        {
-				        QTextStream stream(&file);
-				        text->setPlainText(stream.readAll());
-			        }
-			        else
-			        {
-				        text->setPlainText(QStringLiteral("Substitution help file is not available."));
-			        }
-			        dialogLayout->addWidget(text);
-			        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &dialog);
-			        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-			        dialogLayout->addWidget(buttons);
-			        dialog.exec();
-		        });
-	if (m_connectText && m_connectLineCount)
-		connect(m_connectText, &QTextEdit::textChanged, this,
-		        [this]
-		        {
-			        const QString text  = m_connectText->toPlainText();
-			        int           lines = 0;
-			        if (!text.isEmpty())
-				        lines = saturatingToInt(text.count(QLatin1Char('\n')) + 1);
-			        m_connectLineCount->setText(formatLineCountLabel(lines));
-		        });
-	if (m_keypadControl)
-		connect(m_keypadControl, &QCheckBox::toggled, this,
-		        [this]
-		        {
-			        storeKeypadFields(!m_keypadControl->isChecked());
-			        loadKeypadFields(m_keypadControl->isChecked());
-		        });
-	if (m_infoCalculateMemory)
-		connect(m_infoCalculateMemory, &QPushButton::clicked, this, [this] { calculateMemoryUsage(true); });
-	if (m_chatSaveBrowse && m_chatSaveDirectory)
-		connect(m_chatSaveBrowse, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString dirName  = QFileDialog::getExistingDirectory(
-                        this, QStringLiteral("Save chat files folder"), startDir);
-			        if (!dirName.isEmpty())
-			        {
-				        if (m_runtime)
-					        m_runtime->setFileBrowsingDirectory(dirName);
-				        m_chatSaveDirectory->setText(dirName);
-			        }
-		        });
-	if (m_resetMxpTagsButton)
-		connect(m_resetMxpTagsButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!m_runtime)
-				        return;
-			        m_runtime->resetMxp();
-		        });
 
 	// Logging
 	auto *loggingLayout   = new QGridLayout(loggingPage);
@@ -4150,6 +4036,69 @@ void WorldPreferencesDialog::buildUi()
 			        m_logInColour->setEnabled(checked);
 		        if (m_standardPreamble)
 			        m_standardPreamble->setEnabled(checked);
+	        });
+	connect(m_browseLogFile, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        const QString startDir = m_runtime ? m_runtime->defaultLogDirectory() : QString();
+		        const QString fileName = QFileDialog::getSaveFileName(
+		            this, QStringLiteral("Log file name"), startDir, QStringLiteral("Text files (*.txt)"));
+		        if (!fileName.isEmpty())
+		        {
+			        if (m_runtime)
+				        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
+			        m_autoLogFileName->setText(fileName);
+		        }
+	        });
+	connect(m_standardPreamble, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        const QString preamble =
+		            QStringLiteral("<html>\n"
+		                           " <head>\n"
+		                           " <title>Log of %N session</title>\n"
+		                           " <style type=\"text/css\">\n"
+		                           "   body {background-color: black;}\n"
+		                           " </style>\n"
+		                           " </head>\n"
+		                           " <body>\n"
+		                           "   <pre><code>\n"
+		                           "   <font size=2 face=\"DejaVu Sans Mono, Consolas, Menlo, Monaco, "
+		                           "Courier New, Courier\">\n");
+		        const QString postamble = QStringLiteral("</font></code></pre>\n"
+		                                                 "</body>\n"
+		                                                 "</html>\n");
+		        m_logFilePreamble->setPlainText(preamble);
+		        m_logFilePostamble->setPlainText(postamble);
+	        });
+	connect(m_editPreamble, &QPushButton::clicked, this, [this]
+	        { editPlainTextWithDialog(this, m_logFilePreamble, QStringLiteral("Edit log file preamble")); });
+	connect(
+	    m_editPostamble, &QPushButton::clicked, this, [this]
+	    { editPlainTextWithDialog(this, m_logFilePostamble, QStringLiteral("Edit log file postamble")); });
+	connect(m_substitutionHelp, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        QDialog dialog(this);
+		        dialog.setWindowTitle(QStringLiteral("Special characters"));
+		        auto *dialogLayout = new QVBoxLayout(&dialog);
+		        auto *text         = new QTextEdit(&dialog);
+		        text->setReadOnly(true);
+		        QFile file(QStringLiteral(":/resources/qmud/text/substitutions.txt"));
+		        if (file.open(QIODevice::ReadOnly | QIODevice::Text))
+		        {
+			        QTextStream stream(&file);
+			        text->setPlainText(stream.readAll());
+		        }
+		        else
+		        {
+			        text->setPlainText(QStringLiteral("Substitution help file is not available."));
+		        }
+		        dialogLayout->addWidget(text);
+		        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &dialog);
+		        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+		        dialogLayout->addWidget(buttons);
+		        dialog.exec();
 	        });
 
 	// ANSI colors
@@ -4493,173 +4442,6 @@ void WorldPreferencesDialog::buildUi()
 				        return;
 			        applyCustomRandom();
 		        });
-	if (m_ansiDefaults)
-		connect(m_ansiDefaults, &QPushButton::clicked, this,
-		        [this, writeAnsiColours]
-		        {
-			        if (QMessageBox::question(this, QStringLiteral("ANSI colours"),
-			                                  QStringLiteral("Reset all colours to the ANSI defaults?"),
-			                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
-				        return;
-			        unsigned long normal[8];
-			        unsigned long bold[8];
-			        setDefaultAnsiColours(normal, bold);
-			        QVector<QColor> normalColours(8);
-			        QVector<QColor> boldColours(8);
-			        for (int i = 0; i < 8; ++i)
-			        {
-				        normalColours[i] = fromColourRef(static_cast<long>(normal[i]));
-				        boldColours[i]   = fromColourRef(static_cast<long>(bold[i]));
-			        }
-			        writeAnsiColours(normalColours, boldColours);
-		        });
-	if (m_ansiSwap)
-		connect(m_ansiSwap, &QPushButton::clicked, this,
-		        [readAnsiColours, writeAnsiColours]
-		        {
-			        QVector<QColor> normal(8);
-			        QVector<QColor> bold(8);
-			        readAnsiColours(normal, bold);
-			        for (int i = 0; i < normal.size(); ++i)
-				        qSwap(normal[i], bold[i]);
-			        writeAnsiColours(normal, bold);
-		        });
-	if (m_ansiInvert)
-		connect(m_ansiInvert, &QPushButton::clicked, this,
-		        [applyAnsiAdjust] { applyAnsiAdjust(ADJUST_COLOUR_INVERT); });
-	if (m_ansiLighter)
-		connect(m_ansiLighter, &QPushButton::clicked, this,
-		        [applyAnsiAdjust] { applyAnsiAdjust(ADJUST_COLOUR_LIGHTER); });
-	if (m_ansiDarker)
-		connect(m_ansiDarker, &QPushButton::clicked, this,
-		        [applyAnsiAdjust] { applyAnsiAdjust(ADJUST_COLOUR_DARKER); });
-	if (m_ansiMoreColour)
-		connect(m_ansiMoreColour, &QPushButton::clicked, this,
-		        [applyAnsiAdjust] { applyAnsiAdjust(ADJUST_COLOUR_MORE_COLOUR); });
-	if (m_ansiLessColour)
-		connect(m_ansiLessColour, &QPushButton::clicked, this,
-		        [applyAnsiAdjust] { applyAnsiAdjust(ADJUST_COLOUR_LESS_COLOUR); });
-	if (m_ansiRandom)
-		connect(m_ansiRandom, &QPushButton::clicked, this,
-		        [this, applyAnsiRandom]
-		        {
-			        if (QMessageBox::question(this, QStringLiteral("ANSI colours"),
-			                                  QStringLiteral("Make all colours random?"),
-			                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
-				        return;
-			        applyAnsiRandom();
-		        });
-	if (m_copyAnsiToCustom)
-		connect(m_copyAnsiToCustom, &QPushButton::clicked, this,
-		        [this, readAnsiColours, readCustomColours, writeCustomColours]
-		        {
-			        if (QMessageBox::question(this, QStringLiteral("ANSI colours"),
-			                                  QStringLiteral("Copy all 16 colours to the custom colours?"),
-			                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
-				        return;
-			        QVector<QColor> normal(8);
-			        QVector<QColor> bold(8);
-			        readAnsiColours(normal, bold);
-			        QVector<QPair<QColor, QColor>> custom = readCustomColours();
-			        for (int i = 0; i < 8 && i < custom.size(); ++i)
-				        custom[i].first = normal[i];
-			        for (int i = 0; i < 8 && (i + 8) < custom.size(); ++i)
-				        custom[i + 8].first = bold[i];
-			        writeCustomColours(custom);
-		        });
-	if (m_ansiLoad)
-		connect(m_ansiLoad, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName = QFileDialog::getOpenFileName(
-			            this, QStringLiteral("Colour file name"), startDir,
-			            QStringLiteral("QMud colours (*.qdc *.mcc);;All files (*.*)"));
-			        if (fileName.isEmpty())
-				        return;
-			        if (m_runtime)
-				        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-			        WorldDocument doc;
-			        doc.setLoadMask(WorldDocument::XML_COLOURS | WorldDocument::XML_NO_PLUGINS |
-			                        WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-			        if (!doc.loadFromFile(fileName))
-			        {
-				        QMessageBox::warning(this, QStringLiteral("Load colours"), doc.errorString());
-				        return;
-			        }
-			        if (m_runtime)
-			        {
-				        QList<WorldRuntime::Colour> colours;
-				        for (const auto &c : doc.colours())
-				        {
-					        WorldRuntime::Colour rc;
-					        rc.group      = c.group;
-					        rc.attributes = c.attributes;
-					        bool      ok  = false;
-					        const int seq = rc.attributes.value(QStringLiteral("seq")).toInt(&ok);
-					        if (ok)
-						        rc.attributes.insert(QStringLiteral("seq_index"), QString::number(seq - 1));
-					        colours.push_back(rc);
-				        }
-				        m_runtime->setColours(colours);
-			        }
-			        populateCustomColours();
-			        populateAnsiColours();
-		        });
-	if (m_ansiSave)
-		connect(m_ansiSave, &QPushButton::clicked, this,
-		        [this, readCustomColours, readCustomNames, readAnsiColours]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName = QFileDialog::getSaveFileName(
-			            this, QStringLiteral("Colour file name"), startDir,
-			            QStringLiteral("QMud colours (*.qdc *.mcc);;All files (*.*)"));
-			        if (fileName.isEmpty())
-				        return;
-			        const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdc"));
-			        if (m_runtime)
-				        m_runtime->setFileBrowsingDirectory(QFileInfo(outputPath).absolutePath());
-			        QVector<QColor> normal(8);
-			        QVector<QColor> bold(8);
-			        readAnsiColours(normal, bold);
-			        const QVector<QPair<QColor, QColor>> custom = readCustomColours();
-			        const QVector<QString>               names  = readCustomNames();
-			        QSaveFile                            file(outputPath);
-			        if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
-			        {
-				        QMessageBox::warning(this, QStringLiteral("Save colours"),
-				                             QStringLiteral("Unable to write to %1").arg(outputPath));
-				        return;
-			        }
-			        QTextStream stream(&file);
-			        stream << "<colours>\n";
-			        stream << "\n <ansi>\n";
-			        stream << "\n  <normal>\n";
-			        for (int i = 0; i < normal.size(); ++i)
-				        stream << "   <colour seq=\"" << (i + 1) << "\" rgb=\""
-				               << formatColourValue(normal.at(i)) << "\"/>\n";
-			        stream << "\n  </normal>\n";
-			        stream << "\n  <bold>\n";
-			        for (int i = 0; i < bold.size(); ++i)
-				        stream << "   <colour seq=\"" << (i + 1) << "\" rgb=\""
-				               << formatColourValue(bold.at(i)) << "\"/>\n";
-			        stream << "\n  </bold>\n";
-			        stream << "\n </ansi>\n";
-			        stream << "\n <custom>\n";
-			        for (int i = 0; i < custom.size(); ++i)
-			        {
-				        stream << "  <colour seq=\"" << (i + 1) << "\"";
-				        if (!names.value(i).isEmpty())
-					        stream << " name=\"" << fixHtmlString(names.value(i)) << "\"";
-				        stream << " text=\"" << formatColourValue(custom.at(i).first) << "\""
-				               << " back=\"" << formatColourValue(custom.at(i).second) << "\"/>\n";
-			        }
-			        stream << "\n </custom>\n";
-			        stream << "</colours>\n";
-			        if (!file.commit())
-				        QMessageBox::warning(this, QStringLiteral("Save colours"),
-				                             QStringLiteral("Unable to write to %1").arg(outputPath));
-		        });
 	auto *ansiButtons  = new QGridLayout();
 	m_ansiDefaults     = new QPushButton(QStringLiteral("&ANSI colours..."), ansiColoursPage);
 	m_ansiSwap         = new QPushButton(QStringLiteral("<- Swap ->"), ansiColoursPage);
@@ -4728,6 +4510,162 @@ void WorldPreferencesDialog::buildUi()
 	ansiColoursLayout->addStretch(1);
 	ansiColoursLayout->addLayout(ansiContentLayout);
 	ansiColoursLayout->addStretch(1);
+	connect(m_ansiDefaults, &QPushButton::clicked, this,
+	        [this, writeAnsiColours]
+	        {
+		        if (QMessageBox::question(this, QStringLiteral("ANSI colours"),
+		                                  QStringLiteral("Reset all colours to the ANSI defaults?"),
+		                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+			        return;
+		        unsigned long normal[8];
+		        unsigned long bold[8];
+		        setDefaultAnsiColours(normal, bold);
+		        QVector<QColor> normalColours(8);
+		        QVector<QColor> boldColours(8);
+		        for (int i = 0; i < 8; ++i)
+		        {
+			        normalColours[i] = fromColourRef(static_cast<long>(normal[i]));
+			        boldColours[i]   = fromColourRef(static_cast<long>(bold[i]));
+		        }
+		        writeAnsiColours(normalColours, boldColours);
+	        });
+	connect(m_ansiSwap, &QPushButton::clicked, this,
+	        [readAnsiColours, writeAnsiColours]
+	        {
+		        QVector<QColor> normal(8);
+		        QVector<QColor> bold(8);
+		        readAnsiColours(normal, bold);
+		        for (int i = 0; i < normal.size(); ++i)
+			        qSwap(normal[i], bold[i]);
+		        writeAnsiColours(normal, bold);
+	        });
+	connect(m_ansiInvert, &QPushButton::clicked, this,
+	        [applyAnsiAdjust] { applyAnsiAdjust(ADJUST_COLOUR_INVERT); });
+	connect(m_ansiLighter, &QPushButton::clicked, this,
+	        [applyAnsiAdjust] { applyAnsiAdjust(ADJUST_COLOUR_LIGHTER); });
+	connect(m_ansiDarker, &QPushButton::clicked, this,
+	        [applyAnsiAdjust] { applyAnsiAdjust(ADJUST_COLOUR_DARKER); });
+	connect(m_ansiMoreColour, &QPushButton::clicked, this,
+	        [applyAnsiAdjust] { applyAnsiAdjust(ADJUST_COLOUR_MORE_COLOUR); });
+	connect(m_ansiLessColour, &QPushButton::clicked, this,
+	        [applyAnsiAdjust] { applyAnsiAdjust(ADJUST_COLOUR_LESS_COLOUR); });
+	connect(m_ansiRandom, &QPushButton::clicked, this,
+	        [this, applyAnsiRandom]
+	        {
+		        if (QMessageBox::question(this, QStringLiteral("ANSI colours"),
+		                                  QStringLiteral("Make all colours random?"),
+		                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+			        return;
+		        applyAnsiRandom();
+	        });
+	connect(m_copyAnsiToCustom, &QPushButton::clicked, this,
+	        [this, readAnsiColours, readCustomColours, writeCustomColours]
+	        {
+		        if (QMessageBox::question(this, QStringLiteral("ANSI colours"),
+		                                  QStringLiteral("Copy all 16 colours to the custom colours?"),
+		                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+			        return;
+		        QVector<QColor> normal(8);
+		        QVector<QColor> bold(8);
+		        readAnsiColours(normal, bold);
+		        QVector<QPair<QColor, QColor>> custom = readCustomColours();
+		        for (int i = 0; i < 8 && i < custom.size(); ++i)
+			        custom[i].first = normal[i];
+		        for (int i = 0; i < 8 && (i + 8) < custom.size(); ++i)
+			        custom[i + 8].first = bold[i];
+		        writeCustomColours(custom);
+	        });
+	connect(m_ansiLoad, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
+		        const QString fileName = QFileDialog::getOpenFileName(
+		            this, QStringLiteral("Colour file name"), startDir,
+		            QStringLiteral("QMud colours (*.qdc *.mcc);;All files (*.*)"));
+		        if (fileName.isEmpty())
+			        return;
+		        if (m_runtime)
+			        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
+		        WorldDocument doc;
+		        doc.setLoadMask(WorldDocument::XML_COLOURS | WorldDocument::XML_NO_PLUGINS |
+		                        WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
+		        if (!doc.loadFromFile(fileName))
+		        {
+			        QMessageBox::warning(this, QStringLiteral("Load colours"), doc.errorString());
+			        return;
+		        }
+		        if (m_runtime)
+		        {
+			        QList<WorldRuntime::Colour> colours;
+			        for (const auto &c : doc.colours())
+			        {
+				        WorldRuntime::Colour rc;
+				        rc.group      = c.group;
+				        rc.attributes = c.attributes;
+				        bool      ok  = false;
+				        const int seq = rc.attributes.value(QStringLiteral("seq")).toInt(&ok);
+				        if (ok)
+					        rc.attributes.insert(QStringLiteral("seq_index"), QString::number(seq - 1));
+				        colours.push_back(rc);
+			        }
+			        m_runtime->setColours(colours);
+		        }
+		        populateCustomColours();
+		        populateAnsiColours();
+	        });
+	connect(m_ansiSave, &QPushButton::clicked, this,
+	        [this, readCustomColours, readCustomNames, readAnsiColours]
+	        {
+		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
+		        const QString fileName = QFileDialog::getSaveFileName(
+		            this, QStringLiteral("Colour file name"), startDir,
+		            QStringLiteral("QMud colours (*.qdc *.mcc);;All files (*.*)"));
+		        if (fileName.isEmpty())
+			        return;
+		        const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdc"));
+		        if (m_runtime)
+			        m_runtime->setFileBrowsingDirectory(QFileInfo(outputPath).absolutePath());
+		        QVector<QColor> normal(8);
+		        QVector<QColor> bold(8);
+		        readAnsiColours(normal, bold);
+		        const QVector<QPair<QColor, QColor>> custom = readCustomColours();
+		        const QVector<QString>               names  = readCustomNames();
+		        QSaveFile                            file(outputPath);
+		        if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+		        {
+			        QMessageBox::warning(this, QStringLiteral("Save colours"),
+			                             QStringLiteral("Unable to write to %1").arg(outputPath));
+			        return;
+		        }
+		        QTextStream stream(&file);
+		        stream << "<colours>\n";
+		        stream << "\n <ansi>\n";
+		        stream << "\n  <normal>\n";
+		        for (int i = 0; i < normal.size(); ++i)
+			        stream << "   <colour seq=\"" << (i + 1) << "\" rgb=\"" << formatColourValue(normal.at(i))
+			               << "\"/>\n";
+		        stream << "\n  </normal>\n";
+		        stream << "\n  <bold>\n";
+		        for (int i = 0; i < bold.size(); ++i)
+			        stream << "   <colour seq=\"" << (i + 1) << "\" rgb=\"" << formatColourValue(bold.at(i))
+			               << "\"/>\n";
+		        stream << "\n  </bold>\n";
+		        stream << "\n </ansi>\n";
+		        stream << "\n <custom>\n";
+		        for (int i = 0; i < custom.size(); ++i)
+		        {
+			        stream << "  <colour seq=\"" << (i + 1) << "\"";
+			        if (!names.value(i).isEmpty())
+				        stream << " name=\"" << fixHtmlString(names.value(i)) << "\"";
+			        stream << " text=\"" << formatColourValue(custom.at(i).first) << "\""
+			               << " back=\"" << formatColourValue(custom.at(i).second) << "\"/>\n";
+		        }
+		        stream << "\n </custom>\n";
+		        stream << "</colours>\n";
+		        if (!file.commit())
+			        QMessageBox::warning(this, QStringLiteral("Save colours"),
+			                             QStringLiteral("Unable to write to %1").arg(outputPath));
+	        });
 
 	// Macros
 	auto *macrosLayout = new QVBoxLayout(macrosPage);
@@ -4827,62 +4765,6 @@ void WorldPreferencesDialog::buildUi()
 		        }
 	        });
 
-	if (m_editTriggersFilter)
-		connect(m_editTriggersFilter, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!editFilterDialog(this, m_triggerFilterText, QStringLiteral("Edit trigger filter")))
-				        return;
-			        if (m_filterTriggers)
-				        m_filterTriggers->setChecked(true);
-			        populateTriggers();
-			        updateTriggerControls();
-		        });
-	if (m_filterTriggers)
-		connect(m_filterTriggers, &QCheckBox::toggled, this,
-		        [this]
-		        {
-			        populateTriggers();
-			        updateTriggerControls();
-		        });
-
-	if (m_editAliasesFilter)
-		connect(m_editAliasesFilter, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!editFilterDialog(this, m_aliasFilterText, QStringLiteral("Edit alias filter")))
-				        return;
-			        if (m_filterAliases)
-				        m_filterAliases->setChecked(true);
-			        populateAliases();
-			        updateAliasControls();
-		        });
-	if (m_filterAliases)
-		connect(m_filterAliases, &QCheckBox::toggled, this,
-		        [this]
-		        {
-			        populateAliases();
-			        updateAliasControls();
-		        });
-
-	if (m_editTimersFilter)
-		connect(m_editTimersFilter, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!editFilterDialog(this, m_timerFilterText, QStringLiteral("Edit timer filter")))
-				        return;
-			        if (m_filterTimers)
-				        m_filterTimers->setChecked(true);
-			        populateTimers();
-			        updateTimerControls();
-		        });
-	if (m_filterTimers)
-		connect(m_filterTimers, &QCheckBox::toggled, this,
-		        [this]
-		        {
-			        populateTimers();
-			        updateTimerControls();
-		        });
 	auto editVariableDialog = [this](QString &name, QString &value, const bool allowRename) -> bool
 	{
 		QDialog dialog(this);
@@ -5154,130 +5036,6 @@ void WorldPreferencesDialog::buildUi()
 			        populateVariables();
 			        updateVariableControls();
 		        });
-	if (m_notes && m_saveNotesButton)
-	{
-		m_saveNotesButton->setEnabled(!m_notes->toPlainText().isEmpty());
-		connect(m_notes, &QTextEdit::textChanged, this,
-		        [this]
-		        {
-			        if (m_notesUpdating || !m_notes)
-				        return;
-			        constexpr int maxLength = 32000;
-			        const QString text      = m_notes->toPlainText();
-			        if (text.size() > maxLength)
-			        {
-				        m_notesUpdating         = true;
-				        const QString trimmed   = text.left(maxLength);
-				        const int     cursorPos = m_notes->textCursor().position();
-				        m_notes->setPlainText(trimmed);
-				        QTextCursor cursor = m_notes->textCursor();
-				        cursor.setPosition(qMin(cursorPos, maxLength));
-				        m_notes->setTextCursor(cursor);
-				        m_notesUpdating = false;
-				        QMessageBox::warning(this, QStringLiteral("Notes"),
-				                             QStringLiteral("Notes are limited to 32000 characters."));
-			        }
-			        if (m_saveNotesButton)
-				        m_saveNotesButton->setEnabled(!m_notes->toPlainText().isEmpty());
-		        });
-	}
-	if (m_loadNotesButton && m_notes)
-		connect(m_loadNotesButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        if (const QString fileName =
-			                QFileDialog::getOpenFileName(this, QStringLiteral("File to load notes from"),
-			                                             startDir, QStringLiteral("Text files (*.txt)"));
-			            !fileName.isEmpty())
-			        {
-				        if (m_runtime)
-					        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-				        QFile file(fileName);
-				        if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-				        {
-					        QMessageBox::warning(this, QStringLiteral("Load notes"),
-					                             QStringLiteral("Unable to open the requested file."));
-					        return;
-				        }
-				        const qint64 length = file.size();
-				        if (length > 32000)
-				        {
-					        QMessageBox::warning(
-					            this, QStringLiteral("Load notes"),
-					            QStringLiteral("File exceeds 32000 bytes in length, cannot be loaded"));
-					        return;
-				        }
-				        if (length <= 0)
-				        {
-					        QMessageBox::warning(this, QStringLiteral("Load notes"),
-					                             QStringLiteral("File is empty"));
-					        return;
-				        }
-				        QTextStream in(&file);
-				        in.setEncoding(QStringConverter::Utf8);
-				        m_notes->setPlainText(in.readAll());
-			        }
-		        });
-	if (m_saveNotesButton && m_notes)
-		connect(m_saveNotesButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        QString       suggestedName;
-			        if (m_runtime)
-				        suggestedName = m_runtime->worldAttributes().value(QStringLiteral("name"));
-			        if (!suggestedName.isEmpty())
-				        suggestedName += QStringLiteral(" notes");
-			        QString initialPath = startDir;
-			        if (!suggestedName.isEmpty())
-				        initialPath =
-				            startDir.isEmpty() ? suggestedName : QDir(startDir).filePath(suggestedName);
-			        if (const QString fileName =
-			                QFileDialog::getSaveFileName(this, QStringLiteral("File to save notes into"),
-			                                             initialPath, QStringLiteral("Text files (*.txt)"));
-			            !fileName.isEmpty())
-			        {
-				        if (m_runtime)
-					        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-				        QSaveFile file(fileName);
-				        if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
-				        {
-					        QMessageBox::warning(this, QStringLiteral("Save notes"),
-					                             QStringLiteral("Unable to create the requested file."));
-					        return;
-				        }
-				        QTextStream out(&file);
-				        out.setEncoding(QStringConverter::Utf8);
-				        out << m_notes->toPlainText();
-				        if (!file.commit())
-					        QMessageBox::warning(this, QStringLiteral("Save notes"),
-					                             QStringLiteral("Unable to create the requested file."));
-			        }
-		        });
-	if (m_editNotesButton && m_notes)
-		connect(m_editNotesButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        QDialog dialog(this);
-			        dialog.setWindowTitle(QStringLiteral("Edit notes"));
-			        auto *dialogLayout = new QVBoxLayout(&dialog);
-			        auto *edit         = new QTextEdit(&dialog);
-			        edit->setPlainText(m_notes->toPlainText());
-			        dialogLayout->addWidget(edit);
-			        auto *buttons =
-			            new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-			        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-			        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-			        dialogLayout->addWidget(buttons);
-			        if (dialog.exec() == QDialog::Accepted)
-				        m_notes->setPlainText(edit->toPlainText());
-		        });
-	if (m_findNotesButton && m_notes)
-		connect(m_findNotesButton, &QPushButton::clicked, this, [this] { doNotesFind(false); });
-	if (m_findNextNotesButton && m_notes)
-		connect(m_findNextNotesButton, &QPushButton::clicked, this, [this] { doNotesFind(true); });
-
 	// Output
 	auto *outputLayout = new QGridLayout(outputPage);
 	auto *outputLeft   = new QVBoxLayout();
@@ -6563,6 +6321,120 @@ void WorldPreferencesDialog::buildUi()
 	notesButtons->addWidget(m_findNextNotesButton);
 	notesButtons->addStretch();
 	notesLayout->addLayout(notesButtons);
+	m_saveNotesButton->setEnabled(!m_notes->toPlainText().isEmpty());
+	connect(m_notes, &QTextEdit::textChanged, this,
+	        [this]
+	        {
+		        if (m_notesUpdating || !m_notes)
+			        return;
+		        constexpr int maxLength = 32000;
+		        const QString text      = m_notes->toPlainText();
+		        if (text.size() > maxLength)
+		        {
+			        m_notesUpdating         = true;
+			        const QString trimmed   = text.left(maxLength);
+			        const int     cursorPos = m_notes->textCursor().position();
+			        m_notes->setPlainText(trimmed);
+			        QTextCursor cursor = m_notes->textCursor();
+			        cursor.setPosition(qMin(cursorPos, maxLength));
+			        m_notes->setTextCursor(cursor);
+			        m_notesUpdating = false;
+			        QMessageBox::warning(this, QStringLiteral("Notes"),
+			                             QStringLiteral("Notes are limited to 32000 characters."));
+		        }
+		        if (m_saveNotesButton)
+			        m_saveNotesButton->setEnabled(!m_notes->toPlainText().isEmpty());
+	        });
+	connect(m_loadNotesButton, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
+		        if (const QString fileName =
+		                QFileDialog::getOpenFileName(this, QStringLiteral("File to load notes from"),
+		                                             startDir, QStringLiteral("Text files (*.txt)"));
+		            !fileName.isEmpty())
+		        {
+			        if (m_runtime)
+				        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
+			        QFile file(fileName);
+			        if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+			        {
+				        QMessageBox::warning(this, QStringLiteral("Load notes"),
+				                             QStringLiteral("Unable to open the requested file."));
+				        return;
+			        }
+			        const qint64 length = file.size();
+			        if (length > 32000)
+			        {
+				        QMessageBox::warning(
+				            this, QStringLiteral("Load notes"),
+				            QStringLiteral("File exceeds 32000 bytes in length, cannot be loaded"));
+				        return;
+			        }
+			        if (length <= 0)
+			        {
+				        QMessageBox::warning(this, QStringLiteral("Load notes"),
+				                             QStringLiteral("File is empty"));
+				        return;
+			        }
+			        QTextStream in(&file);
+			        in.setEncoding(QStringConverter::Utf8);
+			        m_notes->setPlainText(in.readAll());
+		        }
+	        });
+	connect(m_saveNotesButton, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
+		        QString       suggestedName;
+		        if (m_runtime)
+			        suggestedName = m_runtime->worldAttributes().value(QStringLiteral("name"));
+		        if (!suggestedName.isEmpty())
+			        suggestedName += QStringLiteral(" notes");
+		        QString initialPath = startDir;
+		        if (!suggestedName.isEmpty())
+			        initialPath = startDir.isEmpty() ? suggestedName : QDir(startDir).filePath(suggestedName);
+		        if (const QString fileName =
+		                QFileDialog::getSaveFileName(this, QStringLiteral("File to save notes into"),
+		                                             initialPath, QStringLiteral("Text files (*.txt)"));
+		            !fileName.isEmpty())
+		        {
+			        if (m_runtime)
+				        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
+			        QSaveFile file(fileName);
+			        if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+			        {
+				        QMessageBox::warning(this, QStringLiteral("Save notes"),
+				                             QStringLiteral("Unable to create the requested file."));
+				        return;
+			        }
+			        QTextStream out(&file);
+			        out.setEncoding(QStringConverter::Utf8);
+			        out << m_notes->toPlainText();
+			        if (!file.commit())
+				        QMessageBox::warning(this, QStringLiteral("Save notes"),
+				                             QStringLiteral("Unable to create the requested file."));
+		        }
+	        });
+	connect(m_editNotesButton, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        QDialog dialog(this);
+		        dialog.setWindowTitle(QStringLiteral("Edit notes"));
+		        auto *dialogLayout = new QVBoxLayout(&dialog);
+		        auto *edit         = new QTextEdit(&dialog);
+		        edit->setPlainText(m_notes->toPlainText());
+		        dialogLayout->addWidget(edit);
+		        auto *buttons =
+		            new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+		        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+		        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+		        dialogLayout->addWidget(buttons);
+		        if (dialog.exec() == QDialog::Accepted)
+			        m_notes->setPlainText(edit->toPlainText());
+	        });
+	connect(m_findNotesButton, &QPushButton::clicked, this, [this] { doNotesFind(false); });
+	connect(m_findNextNotesButton, &QPushButton::clicked, this, [this] { doNotesFind(true); });
 
 	// Tables
 	auto makeTable = [](QWidget *parent, const QStringList &headers) -> QTableWidget *
@@ -6775,6 +6647,54 @@ void WorldPreferencesDialog::buildUi()
 	timerButtons->setVerticalSpacing(4);
 	timerButtons->setColumnStretch(6, 1);
 	timersLayout->addLayout(timerButtons);
+	connect(m_editTriggersFilter, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        if (!editFilterDialog(this, m_triggerFilterText, QStringLiteral("Edit trigger filter")))
+			        return;
+		        if (m_filterTriggers)
+			        m_filterTriggers->setChecked(true);
+		        populateTriggers();
+		        updateTriggerControls();
+	        });
+	connect(m_filterTriggers, &QCheckBox::toggled, this,
+	        [this]
+	        {
+		        populateTriggers();
+		        updateTriggerControls();
+	        });
+	connect(m_editAliasesFilter, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        if (!editFilterDialog(this, m_aliasFilterText, QStringLiteral("Edit alias filter")))
+			        return;
+		        if (m_filterAliases)
+			        m_filterAliases->setChecked(true);
+		        populateAliases();
+		        updateAliasControls();
+	        });
+	connect(m_filterAliases, &QCheckBox::toggled, this,
+	        [this]
+	        {
+		        populateAliases();
+		        updateAliasControls();
+	        });
+	connect(m_editTimersFilter, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        if (!editFilterDialog(this, m_timerFilterText, QStringLiteral("Edit timer filter")))
+			        return;
+		        if (m_filterTimers)
+			        m_filterTimers->setChecked(true);
+		        populateTimers();
+		        updateTimerControls();
+	        });
+	connect(m_filterTimers, &QCheckBox::toggled, this,
+	        [this]
+	        {
+		        populateTimers();
+		        updateTimerControls();
+	        });
 
 	auto *varsLayout = new QVBoxLayout(variablesPage);
 	m_variablesTable = makeTable(variablesPage, {QStringLiteral("Name"), QStringLiteral("Value")});
@@ -6874,6 +6794,12 @@ void WorldPreferencesDialog::buildUi()
 	keypadBlock->addLayout(keypadOptions, 3, 0, 1, 3, Qt::AlignLeft);
 	keypadLayout->addWidget(keypadContent, 0, Qt::AlignHCenter);
 	keypadLayout->addStretch();
+	connect(m_keypadControl, &QCheckBox::toggled, this,
+	        [this]
+	        {
+		        storeKeypadFields(!m_keypadControl->isChecked());
+		        loadKeypadFields(m_keypadControl->isChecked());
+	        });
 
 	// Paste
 	auto *pasteLayout    = new QVBoxLayout(pastePage);
@@ -6987,6 +6913,7 @@ void WorldPreferencesDialog::buildUi()
 	memoryLayout->addWidget(m_infoMemoryUsed, 1, 2, Qt::AlignRight);
 	memoryLayout->addWidget(m_infoCalculateMemory, 1, 3, Qt::AlignLeft);
 	infoLayout->addWidget(memoryBox);
+	connect(m_infoCalculateMemory, &QPushButton::clicked, this, [this] { calculateMemoryUsage(true); });
 
 	auto *timeBox    = new QGroupBox(QStringLiteral("Time"), infoPage);
 	auto *timeLayout = new QGridLayout(timeBox);
@@ -7267,6 +7194,15 @@ void WorldPreferencesDialog::buildUi()
 	m_connectLineCount->setAlignment(Qt::AlignRight);
 	connectTextLayout->addWidget(m_connectText);
 	connectTextLayout->addWidget(m_connectLineCount);
+	connect(m_connectText, &QTextEdit::textChanged, this,
+	        [this]
+	        {
+		        const QString text  = m_connectText->toPlainText();
+		        int           lines = 0;
+		        if (!text.isEmpty())
+			        lines = saturatingToInt(text.count(QLatin1Char('\n')) + 1);
+		        m_connectLineCount->setText(formatLineCountLabel(lines));
+	        });
 	auto *connectNote =
 	    new QLabel(QStringLiteral("You can use \"%name%\" or \"%password%\" if you wish the name "
 	                              "or password supplied above to be inserted."),
@@ -7347,6 +7283,13 @@ void WorldPreferencesDialog::buildUi()
 	mxpLayout->addWidget(m_mudCanChangeOptions);
 	m_resetMxpTagsButton = new QPushButton(QStringLiteral("Reset tags"), mxpPage);
 	mxpLayout->addWidget(m_resetMxpTagsButton, 0, Qt::AlignLeft);
+	connect(m_resetMxpTagsButton, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        if (!m_runtime)
+			        return;
+		        m_runtime->resetMxp();
+	        });
 	mxpLayout->addStretch();
 
 	// Chat
@@ -7419,6 +7362,19 @@ void WorldPreferencesDialog::buildUi()
 	filesLayout->addWidget(new QLabel(QStringLiteral("Save to:"), filesBox), 1, 0);
 	filesLayout->addWidget(m_chatSaveDirectory, 1, 1);
 	filesLayout->addWidget(m_chatSaveBrowse, 2, 1, 1, 1, Qt::AlignLeft);
+	connect(m_chatSaveBrowse, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
+		        const QString dirName  = QFileDialog::getExistingDirectory(
+                    this, QStringLiteral("Save chat files folder"), startDir);
+		        if (!dirName.isEmpty())
+		        {
+			        if (m_runtime)
+				        m_runtime->setFileBrowsingDirectory(dirName);
+			        m_chatSaveDirectory->setText(dirName);
+		        }
+	        });
 	chatLayout->addWidget(filesBox);
 	chatLayout->addStretch();
 

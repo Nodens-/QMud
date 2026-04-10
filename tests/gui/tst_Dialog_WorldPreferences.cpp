@@ -8,6 +8,9 @@
 
 #include "WorldPreferencesRoutingUtils.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDir>
+#include <QFile>
 #include <QtTest/QTest>
 
 /**
@@ -17,8 +20,79 @@ class tst_Dialog_WorldPreferences : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
+		void worldPreferencesButtonConnectionsAreAfterConstruction()
+		{
+			const QString sourcePath =
+			    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
+			        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
+			QFile sourceFile(sourcePath);
+			QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
+			         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
+			const QString sourceText = QString::fromUtf8(sourceFile.readAll());
+
+			auto          firstMatchLine = [&sourceText](const QString &pattern) -> int
+			{
+				const QRegularExpression      regex(pattern);
+				const QRegularExpressionMatch match = regex.match(sourceText);
+				if (!match.hasMatch())
+					return -1;
+				return static_cast<int>(sourceText.left(match.capturedStart()).count(QLatin1Char('\n'))) + 1;
+			};
+
+			const QStringList mustBeConstructedBeforeConnect = {QStringLiteral("m_browseLogFile"),
+			                                                    QStringLiteral("m_standardPreamble"),
+			                                                    QStringLiteral("m_editPreamble"),
+			                                                    QStringLiteral("m_editPostamble"),
+			                                                    QStringLiteral("m_substitutionHelp"),
+			                                                    QStringLiteral("m_connectText"),
+			                                                    QStringLiteral("m_keypadControl"),
+			                                                    QStringLiteral("m_infoCalculateMemory"),
+			                                                    QStringLiteral("m_chatSaveBrowse"),
+			                                                    QStringLiteral("m_resetMxpTagsButton"),
+			                                                    QStringLiteral("m_loadNotesButton"),
+			                                                    QStringLiteral("m_saveNotesButton"),
+			                                                    QStringLiteral("m_editNotesButton"),
+			                                                    QStringLiteral("m_findNotesButton"),
+			                                                    QStringLiteral("m_findNextNotesButton"),
+			                                                    QStringLiteral("m_editTriggersFilter"),
+			                                                    QStringLiteral("m_filterTriggers"),
+			                                                    QStringLiteral("m_editAliasesFilter"),
+			                                                    QStringLiteral("m_filterAliases"),
+			                                                    QStringLiteral("m_editTimersFilter"),
+			                                                    QStringLiteral("m_filterTimers"),
+			                                                    QStringLiteral("m_ansiDefaults"),
+			                                                    QStringLiteral("m_ansiSwap"),
+			                                                    QStringLiteral("m_ansiInvert"),
+			                                                    QStringLiteral("m_ansiLighter"),
+			                                                    QStringLiteral("m_ansiDarker"),
+			                                                    QStringLiteral("m_ansiMoreColour"),
+			                                                    QStringLiteral("m_ansiLessColour"),
+			                                                    QStringLiteral("m_ansiRandom"),
+			                                                    QStringLiteral("m_ansiLoad"),
+			                                                    QStringLiteral("m_ansiSave"),
+			                                                    QStringLiteral("m_copyAnsiToCustom")};
+
+			for (const QString &widgetName : mustBeConstructedBeforeConnect)
+			{
+				const QString escaped = QRegularExpression::escape(widgetName);
+				const int createLine  = firstMatchLine(QStringLiteral("\\b%1\\s*=\\s*new\\b").arg(escaped));
+				const int connectLine =
+				    firstMatchLine(QStringLiteral("\\bconnect\\s*\\(\\s*%1\\s*,").arg(escaped));
+
+				QVERIFY2(createLine > 0,
+				         qPrintable(QStringLiteral("No construction found for %1").arg(widgetName)));
+				QVERIFY2(connectLine > 0,
+				         qPrintable(QStringLiteral("No connect found for %1").arg(widgetName)));
+				QVERIFY2(connectLine > createLine,
+				         qPrintable(QStringLiteral("%1 connect line %2 is before construction line %3")
+				                        .arg(widgetName)
+				                        .arg(connectLine)
+				                        .arg(createLine)));
+			}
+		}
+
 		void commandRecognitionAndPageMapping_data()
 		{
 			QTest::addColumn<QString>("cmdName");
@@ -86,7 +160,7 @@ class tst_Dialog_WorldPreferences : public QObject
 				if (commandName == QStringLiteral("ConfigurePaste"))
 					return pasteAlias;
 				return false;
-	// NOLINTEND(readability-convert-member-functions-to-static)
+				// NOLINTEND(readability-convert-member-functions-to-static)
 			};
 
 			QCOMPARE(QMudWorldPreferencesRouting::isPreferencesCommand(cmdName, matcher), expectedRecognized);
@@ -97,7 +171,6 @@ class tst_Dialog_WorldPreferences : public QObject
 };
 
 QTEST_APPLESS_MAIN(tst_Dialog_WorldPreferences)
-
 
 #if __has_include("tst_Dialog_WorldPreferences.moc")
 #include "tst_Dialog_WorldPreferences.moc"

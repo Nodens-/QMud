@@ -37,6 +37,68 @@ class tst_WorldSessionRestoreFlowUtils : public QObject
 			QCOMPARE(plan, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::RemoveFileAndSucceed);
 		}
 
+		void scrollbackStatusTrackingRequiresOutputBufferPersistence()
+		{
+			const bool track = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
+			    true, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply);
+			QVERIFY(track);
+		}
+
+		void scrollbackStatusTrackingSkipsHistoryOnlyReadPlan()
+		{
+			const bool track = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
+			    false, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply);
+			QVERIFY(!track);
+		}
+
+		void scrollbackStatusTrackingIncludesSkipApplyPlanWhenOutputBufferIsEnabled()
+		{
+			const bool skipPlan = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
+			    true, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::SkipApplyAndSucceed);
+			QVERIFY(skipPlan);
+		}
+
+		void scrollbackStatusTrackingSkipsRemovePlan()
+		{
+			const bool removePlan = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
+			    false, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::RemoveFileAndSucceed);
+			QVERIFY(!removePlan);
+		}
+
+		void deferredUpgradeWelcomeRequiresDeferFlag()
+		{
+			const bool show = QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(false, true, 0);
+			QVERIFY(!show);
+		}
+
+		void deferredUpgradeWelcomeRequiresDispatchComplete()
+		{
+			const bool show = QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(true, false, 0);
+			QVERIFY(!show);
+		}
+
+		void deferredUpgradeWelcomeRequiresNoInFlightRestores()
+		{
+			const bool show = QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(true, true, 2);
+			QVERIFY(!show);
+		}
+
+		void deferredUpgradeWelcomeAllowsWhenReady()
+		{
+			const bool show = QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(true, true, 0);
+			QVERIFY(show);
+		}
+
+		void restoreStatusMessageAlwaysShowsRemainingCount()
+		{
+			const QString one     = QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(1);
+			const QString many    = QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(3);
+			const QString clamped = QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(-4);
+			QCOMPARE(one, QStringLiteral("Restoring scrollback buffers (1 remaining)"));
+			QCOMPARE(many, QStringLiteral("Restoring scrollback buffers (3 remaining)"));
+			QCOMPARE(clamped, QStringLiteral("Restoring scrollback buffers (0 remaining)"));
+		}
+
 		void runsStartupThenAutoConnectOnSuccess()
 		{
 			QStringList sequence;
@@ -98,7 +160,6 @@ class tst_WorldSessionRestoreFlowUtils : public QObject
 };
 
 QTEST_APPLESS_MAIN(tst_WorldSessionRestoreFlowUtils)
-
 
 #if __has_include("tst_WorldSessionRestoreFlowUtils.moc")
 #include "tst_WorldSessionRestoreFlowUtils.moc"

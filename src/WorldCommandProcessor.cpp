@@ -22,6 +22,7 @@
 #include "TimerSchedulingUtils.h"
 #include "TraceDispatchUtils.h"
 #include "WorldOptions.h"
+#include "WorldRuleEnableUtils.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
 #include "scripting/ScriptingErrors.h"
@@ -1696,56 +1697,51 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 	}
 
 	// --------------------------- ALIASES ------------------------------
-	bool              bEchoAlias       = echoInput;
-	bool              bOmitFromLog     = false;
-	bool              bOmitFromHistory = false;
-	QVector<AliasRef> matchedAliases;
-	QVector<AliasRef> oneShotAliases;
-
-	if (const QString enableAliases = attrs.value(QStringLiteral("enable_aliases"));
-	    isEnabledValue(enableAliases))
+	bool                         bEchoAlias       = echoInput;
+	bool                         bOmitFromLog     = false;
+	bool                         bOmitFromHistory = false;
+	QVector<AliasRef>            matchedAliases;
+	QVector<AliasRef>            oneShotAliases;
+	bool                         stopAliasEvaluation = false;
+	QList<WorldRuntime::Plugin> &pluginList          = m_runtime->pluginsMutable();
+	const QVector<int>          &pluginIndices       = sortedPluginIndices();
+	for (int pluginIndex : pluginIndices)
 	{
-		bool                         stopAliasEvaluation = false;
-		QList<WorldRuntime::Plugin> &pluginList          = m_runtime->pluginsMutable();
-		const QVector<int>          &pluginIndices       = sortedPluginIndices();
-		for (int pluginIndex : pluginIndices)
-		{
-			if (pluginIndex < 0 || pluginIndex >= pluginList.size())
-				continue;
-			WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
-			if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
-			    plugin->sequence >= 0)
-				continue;
-			if (processOneAliasSequence(line, true, bOmitFromLog, bEchoAlias, bOmitFromHistory,
-			                            matchedAliases, oneShotAliases, plugin))
-			{
-				stopAliasEvaluation = true;
-				break;
-			}
-		}
-
-		if (!stopAliasEvaluation &&
-		    processOneAliasSequence(line, true, bOmitFromLog, bEchoAlias, bOmitFromHistory, matchedAliases,
-		                            oneShotAliases, nullptr))
+		if (pluginIndex < 0 || pluginIndex >= pluginList.size())
+			continue;
+		WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
+		if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
+		    plugin->sequence >= 0)
+			continue;
+		if (processOneAliasSequence(line, true, bOmitFromLog, bEchoAlias, bOmitFromHistory, matchedAliases,
+		                            oneShotAliases, plugin))
 		{
 			stopAliasEvaluation = true;
+			break;
 		}
+	}
 
-		for (int pluginIndex : pluginIndices)
+	if (!stopAliasEvaluation && shouldEvaluateRuleCollection(attrs, WorldRuleKind::Alias, false) &&
+	    processOneAliasSequence(line, true, bOmitFromLog, bEchoAlias, bOmitFromHistory, matchedAliases,
+	                            oneShotAliases, nullptr))
+	{
+		stopAliasEvaluation = true;
+	}
+
+	for (int pluginIndex : pluginIndices)
+	{
+		if (stopAliasEvaluation)
+			break;
+		if (pluginIndex < 0 || pluginIndex >= pluginList.size())
+			continue;
+		WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
+		if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
+		    plugin->sequence < 0)
+			continue;
+		if (processOneAliasSequence(line, true, bOmitFromLog, bEchoAlias, bOmitFromHistory, matchedAliases,
+		                            oneShotAliases, plugin))
 		{
-			if (stopAliasEvaluation)
-				break;
-			if (pluginIndex < 0 || pluginIndex >= pluginList.size())
-				continue;
-			WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
-			if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
-			    plugin->sequence < 0)
-				continue;
-			if (processOneAliasSequence(line, true, bOmitFromLog, bEchoAlias, bOmitFromHistory,
-			                            matchedAliases, oneShotAliases, plugin))
-			{
-				break;
-			}
+			break;
 		}
 	}
 
@@ -2578,13 +2574,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	m_runtime->setLineOmittedFromOutput(false);
 
 	const QMap<QString, QString> &worldAttrs = m_runtime->worldAttributes();
-	if (!attrTrue(worldAttrs.value(QStringLiteral("enable_triggers"))))
-	{
-		// Triggers disabled should bypass trigger evaluation only.
-		// Preserve incoming style spans so ANSI/MXP colors still render.
-		result.spans = spans;
-		return result;
-	}
+	const bool worldTriggersEnabled = shouldEvaluateRuleCollection(worldAttrs, WorldRuleKind::Trigger, false);
 
 	QElapsedTimer timer;
 	timer.start();
@@ -3066,8 +3056,11 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 	if (m_runtime->stopTriggerEvaluation() != WorldRuntime::StopAllSequences)
 	{
-		m_runtime->setStopTriggerEvaluation(WorldRuntime::KeepEvaluating);
-		processSequence(m_runtime->triggersMutable(), nullptr);
+		if (worldTriggersEnabled)
+		{
+			m_runtime->setStopTriggerEvaluation(WorldRuntime::KeepEvaluating);
+			processSequence(m_runtime->triggersMutable(), nullptr);
+		}
 	}
 
 	if (m_runtime->stopTriggerEvaluation() != WorldRuntime::StopAllSequences)
@@ -3103,8 +3096,8 @@ void WorldCommandProcessor::checkTimers()
 
 	if (!m_runtime)
 		return;
-	if (!isEnabledValue(m_runtime->worldAttributes().value(QStringLiteral("enable_timers"))))
-		return;
+	const bool worldTimersEnabled =
+	    shouldEvaluateRuleCollection(m_runtime->worldAttributes(), WorldRuleKind::Timer, false);
 
 	const QDateTime now       = QDateTime::currentDateTime();
 	const bool      connected = m_runtime->connectPhase() == WorldRuntime::eConnectConnectedToMud;
@@ -3232,7 +3225,8 @@ void WorldCommandProcessor::checkTimers()
 		}
 	};
 
-	processTimers(m_runtime->timersMutable(), nullptr);
+	if (worldTimersEnabled)
+		processTimers(m_runtime->timersMutable(), nullptr);
 
 	QStringList pluginIds;
 	for (const auto &plugin : m_runtime->plugins())

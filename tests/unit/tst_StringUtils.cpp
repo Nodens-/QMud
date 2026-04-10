@@ -17,7 +17,7 @@ class tst_StringUtils : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void commandRoundTrip_data()
 		{
@@ -38,7 +38,8 @@ class tst_StringUtils : public QObject
 
 		void commandLookupIsCaseInsensitive()
 		{
-			QCOMPARE(qmudStringToCommandId(QStringLiteral("copy")), qmudStringToCommandId(QStringLiteral("CoPy")));
+			QCOMPARE(qmudStringToCommandId(QStringLiteral("copy")),
+			         qmudStringToCommandId(QStringLiteral("CoPy")));
 			QCOMPARE(qmudStringToCommandId(QStringLiteral("no_such_command")), 0);
 			QCOMPARE(qmudStringToCommandId(QString()), 0);
 			QCOMPARE(qmudCommandIdToString(0), QString());
@@ -63,9 +64,12 @@ class tst_StringUtils : public QObject
 
 		void editDistance()
 		{
-			QCOMPARE(qmudEditDistance(QStringView{QStringLiteral("kitten")}, QStringView{QStringLiteral("sitting")}),
+			QCOMPARE(qmudEditDistance(QStringView{QStringLiteral("kitten")},
+			                          QStringView{QStringLiteral("sitting")}),
 			         3);
-			QCOMPARE(qmudEditDistance(QStringView{QStringLiteral("same")}, QStringView{QStringLiteral("same")}), 0);
+			QCOMPARE(
+			    qmudEditDistance(QStringView{QStringLiteral("same")}, QStringView{QStringLiteral("same")}),
+			    0);
 
 			const QString longA(25, QLatin1Char('a'));
 			const QString longB(25, QLatin1Char('b'));
@@ -75,6 +79,13 @@ class tst_StringUtils : public QObject
 		void germanFixups()
 		{
 			QCOMPARE(qmudFixUpGerman(QStringLiteral("ÄÖÜäöüß")), QStringLiteral("AeOeUeaeoeuess"));
+		}
+
+		void stripAnsiEscapeCodes()
+		{
+			const QString input = QStringLiteral("HP:\x1b[0m\x1b[38;5;10m255\x1b[0m SP:\x1b[31m120\x1b[0m");
+			QCOMPARE(qmudStripAnsiEscapeCodes(input), QStringLiteral("HP:255 SP:120"));
+			QCOMPARE(qmudStripAnsiEscapeCodes(QStringLiteral("plain text")), QStringLiteral("plain text"));
 		}
 
 		void enabledFlag_data()
@@ -102,12 +113,10 @@ class tst_StringUtils : public QObject
 			QCOMPARE(qmudBoolToYn(true), QStringLiteral("y"));
 			QCOMPARE(qmudBoolToYn(false), QStringLiteral("n"));
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_StringUtils)
-
-
 
 #if __has_include("tst_StringUtils.moc")
 #include "tst_StringUtils.moc"

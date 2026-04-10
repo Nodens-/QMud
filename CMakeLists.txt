@@ -165,31 +165,31 @@ set(QMUD_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 # Core Qt entry-point sources (start minimal, expand as modules are ported)
 set(QMUD_SOURCES
         Main.cpp
-        MainWindowHostResolver.cpp
+        helpers/MainWindowHostResolver.cpp
         MainFrame.cpp
-        MainFrameActionUtils.cpp
-        MainFrameMdiUtils.cpp
+        helpers/MainFrameActionUtils.cpp
+        helpers/MainFrameMdiUtils.cpp
         TabActivationHistory.cpp
         AppController.cpp
-        UpdateCheckUtils.cpp
-        TimeFormatUtils.cpp
-        TraceDispatchUtils.cpp
-        WorldSessionRestoreFlowUtils.cpp
-        WorldSessionStateUtils.cpp
-        ReloadPlannerUtils.cpp
-        ReloadStateUtils.cpp
+        helpers/UpdateCheckUtils.cpp
+        helpers/TimeFormatUtils.cpp
+        helpers/TraceDispatchUtils.cpp
+        helpers/WorldSessionRestoreFlowUtils.cpp
+        helpers/WorldSessionStateUtils.cpp
+        helpers/ReloadPlannerUtils.cpp
+        helpers/ReloadStateUtils.cpp
         Environment.cpp
         Accelerators.cpp
-        AliasMatchUtils.cpp
-        CommandPatternUtils.cpp
-        CommandQueueUtils.cpp
-        CommandTextUtils.cpp
-        HyperlinkActionUtils.cpp
+        helpers/AliasMatchUtils.cpp
+        helpers/CommandPatternUtils.cpp
+        helpers/CommandQueueUtils.cpp
+        helpers/CommandTextUtils.cpp
+        helpers/HyperlinkActionUtils.cpp
         NameGeneration.cpp
         DoubleMetaphone.cpp
         ErrorDescriptions.cpp
         AsciiArt.cpp
-        WorldPreferencesRoutingUtils.cpp
+        helpers/WorldPreferencesRoutingUtils.cpp
         WorldChildWindow.cpp
         dialogs/TipDialog.cpp
         dialogs/WelcomeDialog.cpp
@@ -201,28 +201,28 @@ set(QMUD_SOURCES
         WorldRuntime.cpp
         WorldCommandProcessor.cpp
         SpeedwalkParser.cpp
-        TimerSchedulingUtils.cpp
-        AnsiSgrParseUtils.cpp
+        helpers/TimerSchedulingUtils.cpp
+        helpers/AnsiSgrParseUtils.cpp
         WorldView.cpp
         WorldSocket.cpp
         TelnetProcessor.cpp
         WorldOptions.cpp
         WorldOptionDefaults.cpp
         MxpDebugWindow.cpp
-        EncodingUtils.cpp
-        ColorUtils.cpp
-        MiniWindowBrushUtils.cpp
-        FontUtils.cpp
+        helpers/EncodingUtils.cpp
+        helpers/ColorUtils.cpp
+        helpers/MiniWindowBrushUtils.cpp
+        helpers/FontUtils.cpp
         BraceMatch.cpp
         LuaCallbackEngine.cpp
         LuaApiExport.cpp
         LuaFunctionMetadata.cpp
         InfoTypesMetadata.cpp
-        StringUtils.cpp
+        helpers/StringUtils.cpp
         LuaSupport.cpp
         TtsEngine.cpp
         LuaLuacomShim.cpp
-        AcceleratorUtils.cpp
+        helpers/AcceleratorUtils.cpp
         dialogs/LogSessionDialog.cpp
         MdiTabs.cpp
         dialogs/PluginsDialog.cpp
@@ -235,7 +235,7 @@ set(QMUD_SOURCES
         dialogs/FindDialog.cpp
         dialogs/CommandHistoryDialog.cpp
         dialogs/WorldPreferencesDialog.cpp
-        dialogs/WorldEditUtils.cpp
+        helpers/WorldEditUtils.cpp
         dialogs/WorldAliasDialog.cpp
         dialogs/WorldTriggerDialog.cpp
         dialogs/WorldTimerDialog.cpp
@@ -245,28 +245,28 @@ set(QMUD_SOURCES
 # Optionally collect headers (helps IDEs) — not required for build
 set(QMUD_HEADERS
         MainWindowHost.h
-        MainWindowHostResolver.h
+        helpers/MainWindowHostResolver.h
         Version.h
         MainFrame.h
-        MainFrameActionUtils.h
-        MainFrameMdiUtils.h
+        helpers/MainFrameActionUtils.h
+        helpers/MainFrameMdiUtils.h
         TabActivationHistory.h
         AppController.h
         Environment.h
-        LogCompressionUtils.h
-        ReloadPlannerUtils.h
-        ReloadRecoveryUtils.h
-        ReloadStateUtils.h
-        WorldSessionRestoreFlowUtils.h
-        WorldSessionStateUtils.h
-        PluginCallbackCatalogUtils.h
+        helpers/LogCompressionUtils.h
+        helpers/ReloadPlannerUtils.h
+        helpers/ReloadRecoveryUtils.h
+        helpers/ReloadStateUtils.h
+        helpers/WorldSessionRestoreFlowUtils.h
+        helpers/WorldSessionStateUtils.h
+        helpers/PluginCallbackCatalogUtils.h
         Accelerators.h
-        AcceleratorUtils.h
-        AliasMatchUtils.h
+        helpers/AcceleratorUtils.h
+        helpers/AliasMatchUtils.h
         CommandMappingTypes.h
-        CommandPatternUtils.h
-        CommandQueueUtils.h
-        CommandTextUtils.h
+        helpers/CommandPatternUtils.h
+        helpers/CommandQueueUtils.h
+        helpers/CommandTextUtils.h
         ErrorDescriptions.h
         InfoTypesMetadata.h
         InfoTypeData.inc
@@ -284,13 +284,13 @@ set(QMUD_HEADERS
         dialogs/ImportXmlDialog.h
         WorldDocument.h
         WorldRuntime.h
-        WorldRuntimeAttributeUtils.h
+        helpers/WorldRuntimeAttributeUtils.h
         MiniWindow.h
-        MiniWindowBrushUtils.h
+        helpers/MiniWindowBrushUtils.h
         WorldCommandProcessor.h
         SpeedwalkParser.h
-        TimerSchedulingUtils.h
-        AnsiSgrParseUtils.h
+        helpers/TimerSchedulingUtils.h
+        helpers/AnsiSgrParseUtils.h
         WorldView.h
         CommandIds.h
         WorldSocketService.h
@@ -305,7 +305,7 @@ set(QMUD_HEADERS
         LuaCallbackEngine.h
         LuaApiExport.h
         FileExtensions.h
-        WorldPreferencesRoutingUtils.h
+        helpers/WorldPreferencesRoutingUtils.h
         dialogs/LogSessionDialog.h
         MdiTabs.h
         dialogs/PluginsDialog.h
@@ -318,7 +318,7 @@ set(QMUD_HEADERS
         dialogs/FindDialog.h
         dialogs/CommandHistoryDialog.h
         dialogs/WorldPreferencesDialog.h
-        dialogs/WorldEditUtils.h
+        helpers/WorldEditUtils.h
         dialogs/WorldAliasDialog.h
         dialogs/WorldTriggerDialog.h
         dialogs/WorldTimerDialog.h
@@ -594,7 +594,7 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
 endif ()
 
 # Qt target include root: keep build-visible sources isolated under src/.
-target_include_directories(QMud PRIVATE "${QMUD_SRC_DIR}")
+target_include_directories(QMud PRIVATE "${QMUD_SRC_DIR}" "${QMUD_SRC_DIR}/helpers")
 
 # Add optional subprojects (preserve original behavior)
 foreach (dir lsqlite png scripting mxp lua luacom)

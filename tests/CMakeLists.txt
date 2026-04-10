@@ -27,6 +27,7 @@ function(qmud_add_qtest target_name)
     target_include_directories(${target_name}
             PRIVATE
             "${CMAKE_SOURCE_DIR}/src"
+            "${CMAKE_SOURCE_DIR}/src/helpers"
             "${CMAKE_CURRENT_SOURCE_DIR}/support")
 
     if (QMUD_QTEST_GUI)
@@ -63,7 +64,8 @@ target_link_libraries(qmud_test_support PUBLIC Qt6::Core)
 target_include_directories(qmud_test_support
         PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/support"
-        "${CMAKE_SOURCE_DIR}/src")
+        "${CMAKE_SOURCE_DIR}/src"
+        "${CMAKE_SOURCE_DIR}/src/helpers")
 
 qmud_add_qtest(tst_QTestSmoke
         SOURCES
@@ -79,7 +81,7 @@ qmud_add_qtest(tst_QTestSmoke
 qmud_add_qtest(tst_StringUtils
         SOURCES
         unit/tst_StringUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/StringUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/StringUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/Accelerators.cpp"
         LABELS
         unit)
@@ -87,7 +89,7 @@ qmud_add_qtest(tst_StringUtils
 qmud_add_qtest(tst_EncodingUtils
         SOURCES
         unit/tst_EncodingUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/EncodingUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LABELS
         unit)
 
@@ -95,7 +97,7 @@ qmud_add_qtest(tst_HyperlinkActionUtils
         GUI
         SOURCES
         unit/tst_HyperlinkActionUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/HyperlinkActionUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/HyperlinkActionUtils.cpp"
         LABELS
         unit)
 
@@ -109,14 +111,14 @@ qmud_add_qtest(tst_Environment
 qmud_add_qtest(tst_TimeFormatUtils
         SOURCES
         unit/tst_TimeFormatUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/TimeFormatUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/TimeFormatUtils.cpp"
         LABELS
         unit)
 
 qmud_add_qtest(tst_TraceDispatchUtils
         SOURCES
         unit/tst_TraceDispatchUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/TraceDispatchUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/TraceDispatchUtils.cpp"
         LABELS
         unit)
 
@@ -179,7 +181,7 @@ endif ()
 qmud_add_qtest(tst_UpdateCheckUtils
         SOURCES
         unit/tst_UpdateCheckUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/UpdateCheckUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/UpdateCheckUtils.cpp"
         LABELS
         unit)
 
@@ -187,42 +189,42 @@ qmud_add_qtest(tst_WorldSessionStateUtils
         GUI
         SOURCES
         unit/tst_WorldSessionStateUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/WorldSessionStateUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/WorldSessionStateUtils.cpp"
         LABELS
         unit)
 
 qmud_add_qtest(tst_WorldSessionRestoreFlowUtils
         SOURCES
         unit/tst_WorldSessionRestoreFlowUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/WorldSessionRestoreFlowUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/WorldSessionRestoreFlowUtils.cpp"
         LABELS
         unit)
 
 qmud_add_qtest(tst_ReloadStateUtils
         SOURCES
         unit/tst_ReloadStateUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/ReloadStateUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/ReloadStateUtils.cpp"
         LABELS
         unit)
 
 qmud_add_qtest(tst_ReloadPlannerUtils
         SOURCES
         unit/tst_ReloadPlannerUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/ReloadPlannerUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/ReloadPlannerUtils.cpp"
         LABELS
         unit)
 
 qmud_add_qtest(tst_AnsiSgrParseUtils
         SOURCES
         unit/tst_AnsiSgrParseUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/AnsiSgrParseUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/AnsiSgrParseUtils.cpp"
         LABELS
         unit)
 
 qmud_add_qtest(tst_ColorUtils
         SOURCES
         unit/tst_ColorUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/ColorUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/ColorUtils.cpp"
         LABELS
         unit)
 
@@ -230,7 +232,7 @@ qmud_add_qtest(tst_FontUtils
         GUI
         SOURCES
         unit/tst_FontUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/FontUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/FontUtils.cpp"
         LABELS
         unit)
 
@@ -238,7 +240,7 @@ qmud_add_qtest(tst_AcceleratorUtils
         GUI
         SOURCES
         unit/tst_AcceleratorUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/AcceleratorUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/AcceleratorUtils.cpp"
         LABELS
         unit)
 
@@ -246,7 +248,7 @@ qmud_add_qtest(tst_MainFrameMdiUtils
         GUI
         SOURCES
         unit/tst_MainFrameMdiUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/MainFrameMdiUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/MainFrameMdiUtils.cpp"
         LABELS
         unit)
 
@@ -275,7 +277,7 @@ qmud_add_qtest(tst_WorldOptionDefaults
         SOURCES
         unit/tst_WorldOptionDefaults.cpp
         "${CMAKE_SOURCE_DIR}/src/WorldOptionDefaults.cpp"
-        "${CMAKE_SOURCE_DIR}/src/StringUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/StringUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/Accelerators.cpp"
         LABELS
         unit)
@@ -302,6 +304,12 @@ qmud_add_qtest(tst_LuaUtf8Utils
 qmud_add_qtest(tst_WorldRuntimeAttributeUtils
         SOURCES
         unit/tst_WorldRuntimeAttributeUtils.cpp
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_WorldRuleEnableUtils
+        SOURCES
+        unit/tst_WorldRuleEnableUtils.cpp
         LABELS
         unit)
 
@@ -404,7 +412,7 @@ qmud_add_qtest(tst_TelnetProcessor_Malformed
 qmud_add_qtest(tst_ReloadStartupConsume
         SOURCES
         integration/tst_ReloadStartupConsume.cpp
-        "${CMAKE_SOURCE_DIR}/src/ReloadStateUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/ReloadStateUtils.cpp"
         LABELS
         integration
         TIMEOUT
@@ -486,8 +494,8 @@ qmud_add_qtest(tst_WorldCommandProcessor_Speedwalk
 qmud_add_qtest(tst_WorldCommandProcessor_Alias
         SOURCES
         integration/tst_WorldCommandProcessor_Alias.cpp
-        "${CMAKE_SOURCE_DIR}/src/AliasMatchUtils.cpp"
-        "${CMAKE_SOURCE_DIR}/src/CommandPatternUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/AliasMatchUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/CommandPatternUtils.cpp"
         LABELS
         integration
         TIMEOUT
@@ -496,7 +504,7 @@ qmud_add_qtest(tst_WorldCommandProcessor_Alias
 qmud_add_qtest(tst_WorldCommandProcessor_Regex
         SOURCES
         integration/tst_WorldCommandProcessor_Regex.cpp
-        "${CMAKE_SOURCE_DIR}/src/CommandPatternUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/CommandPatternUtils.cpp"
         LABELS
         integration
         TIMEOUT
@@ -505,7 +513,7 @@ qmud_add_qtest(tst_WorldCommandProcessor_Regex
 qmud_add_qtest(tst_WorldCommandProcessor_SendTargets
         SOURCES
         integration/tst_WorldCommandProcessor_SendTargets.cpp
-        "${CMAKE_SOURCE_DIR}/src/CommandTextUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/CommandTextUtils.cpp"
         LABELS
         integration
         TIMEOUT
@@ -514,7 +522,7 @@ qmud_add_qtest(tst_WorldCommandProcessor_SendTargets
 qmud_add_qtest(tst_WorldCommandProcessor_Queueing
         SOURCES
         integration/tst_WorldCommandProcessor_Queueing.cpp
-        "${CMAKE_SOURCE_DIR}/src/CommandQueueUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/CommandQueueUtils.cpp"
         LABELS
         integration
         TIMEOUT
@@ -524,7 +532,7 @@ qmud_add_qtest(tst_WorldCommandProcessor_TimerAccounting
         GUI
         SOURCES
         integration/tst_WorldCommandProcessor_TimerAccounting.cpp
-        "${CMAKE_SOURCE_DIR}/src/TimerSchedulingUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/TimerSchedulingUtils.cpp"
         LABELS
         integration
         TIMEOUT
@@ -534,7 +542,7 @@ if (QMUD_ENABLE_GUI_TESTS)
     qmud_add_qtest(tst_MainFrame_Actions
             SOURCES
             gui/tst_MainFrame_Actions.cpp
-            "${CMAKE_SOURCE_DIR}/src/MainFrameActionUtils.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/MainFrameActionUtils.cpp"
             LABELS
             gui
             TIMEOUT
@@ -544,7 +552,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             GUI
             SOURCES
             gui/tst_Dialog_WorldPreferences.cpp
-            "${CMAKE_SOURCE_DIR}/src/WorldPreferencesRoutingUtils.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/WorldPreferencesRoutingUtils.cpp"
             LABELS
             gui
             TIMEOUT
@@ -555,11 +563,11 @@ if (QMUD_ENABLE_GUI_TESTS)
             SOURCES
             gui/tst_WorldView_Basic.cpp
             "${CMAKE_SOURCE_DIR}/src/WorldView.cpp"
-            "${CMAKE_SOURCE_DIR}/src/MiniWindowBrushUtils.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowBrushUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
-            "${CMAKE_SOURCE_DIR}/src/TimeFormatUtils.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/TimeFormatUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/WorldView.h"
-            "${CMAKE_SOURCE_DIR}/src/MainWindowHostResolver.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/MainWindowHostResolver.cpp"
             "${CMAKE_SOURCE_DIR}/src/dialogs/FindDialog.cpp"
             LIBRARIES
             Qt6::Sql
@@ -589,6 +597,20 @@ if (QMUD_ENABLE_GUI_TESTS)
             SOURCES
             gui/tst_Dialog_Plugins.cpp
             "${CMAKE_SOURCE_DIR}/src/dialogs/PluginsDialog.cpp"
+            "${CMAKE_SOURCE_DIR}/src/AppController.h"
+            "${CMAKE_SOURCE_DIR}/src/WorldRuntime.h"
+            LIBRARIES
+            Qt6::Sql
+            LABELS
+            gui
+            TIMEOUT
+            20)
+
+    qmud_add_qtest(tst_Dialog_PluginWizard
+            GUI
+            SOURCES
+            gui/tst_Dialog_PluginWizard.cpp
+            "${CMAKE_SOURCE_DIR}/src/dialogs/PluginWizardDialog.cpp"
             "${CMAKE_SOURCE_DIR}/src/AppController.h"
             "${CMAKE_SOURCE_DIR}/src/WorldRuntime.h"
             LIBRARIES
