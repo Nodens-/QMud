@@ -753,7 +753,7 @@ jobs:
               lines.append("- No changes found in selected range.")
 
           with open(output_path, "w", encoding="utf-8") as fh:
-              fh.write("\\n".join(lines).rstrip() + "\\n")
+              fh.write("\n".join(lines).rstrip() + "\n")
           PY
           echo "body_path=release-notes.md" >> "$GITHUB_OUTPUT"
 
@@ -885,7 +885,7 @@ jobs:
               lines.append("- No changes found in selected range.")
 
           with open(output_path, "w", encoding="utf-8") as fh:
-              fh.write("\\n".join(lines).rstrip() + "\\n")
+              fh.write("\n".join(lines).rstrip() + "\n")
           PY
           echo "body_path=ci-release-notes.md" >> "$GITHUB_OUTPUT"
 
