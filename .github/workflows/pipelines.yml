@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Verify preinstalled host build dependencies
         run: |
@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload CTest logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ctest-logs-full
           if-no-files-found: ignore
@@ -109,12 +109,17 @@ jobs:
 
       - name: Upload failing test executables
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qtest-binaries-full
           if-no-files-found: ignore
           path: |
             cmake-build-release/tests/tst_*
+
+      - name: Cleanup workspace build directories
+        if: always()
+        run: |
+          rm -rf cmake-build-release cmake-build-coverage release-assets
 
   coverage-path-gate:
     name: Coverage path gate (src/tests changed)
@@ -126,7 +131,7 @@ jobs:
     steps:
       - name: Detect code/test changes in push range
         id: filter
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -153,6 +158,11 @@ jobs:
             core.info(`Compared ${before}...${after} (${files.length} files), run_coverage=${runCoverage}`);
             core.setOutput("run_coverage", runCoverage ? "true" : "false");
 
+      - name: Cleanup workspace build directories
+        if: always()
+        run: |
+          rm -rf cmake-build-release cmake-build-coverage release-assets
+
   coverage:
     name: Coverage on main pushes after build (llvm/gcov)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.coverage-path-gate.outputs.run_coverage == 'true'
@@ -166,7 +176,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Verify preinstalled host build dependencies
         run: |
@@ -233,7 +243,7 @@ jobs:
           genhtml coverage.filtered.info --output-directory coverage-html
 
       - name: Upload coverage artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qmud-coverage
           if-no-files-found: error
@@ -247,6 +257,11 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.filtered.info
           fail_ci_if_error: true
+
+      - name: Cleanup workspace build directories
+        if: always()
+        run: |
+          rm -rf cmake-build-release cmake-build-coverage release-assets
 
   coverage-manual:
     name: Manual coverage (forced)
@@ -258,7 +273,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Verify preinstalled host build dependencies
         run: |
@@ -325,7 +340,7 @@ jobs:
           genhtml coverage.filtered.info --output-directory coverage-html
 
       - name: Upload coverage artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qmud-coverage
           if-no-files-found: error
@@ -340,6 +355,11 @@ jobs:
           files: coverage.filtered.info
           fail_ci_if_error: true
 
+      - name: Cleanup workspace build directories
+        if: always()
+        run: |
+          rm -rf cmake-build-release cmake-build-coverage release-assets
+
   build-packages:
     name: Build AppImage / macOS / Windows packages (PR/Main)
     if: (github.event_name == 'pull_request' && github.event.action != 'closed') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -348,7 +368,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve package version metadata
         run: |
@@ -442,7 +462,7 @@ jobs:
 
       - name: Upload CTest logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ctest-logs-quick
           if-no-files-found: ignore
@@ -452,7 +472,7 @@ jobs:
 
       - name: Upload failing test executables
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qtest-binaries-quick
           if-no-files-found: ignore
@@ -539,7 +559,7 @@ jobs:
           fi
 
       - name: Upload AppImage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qmud-appimage
           if-no-files-found: error
@@ -548,7 +568,7 @@ jobs:
             cmake-build-release/appimage-docker-out/*.AppImage.zsync
 
       - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qmud-macos
           if-no-files-found: error
@@ -556,13 +576,18 @@ jobs:
             cmake-build-release/mac-docker-out/QMud-*.zip
 
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qmud-windows
           if-no-files-found: error
           path: |
             cmake-build-release/windows-docker-out/QMud-*.zip
             cmake-build-release/windows-docker-out/QMud-*.exe
+
+      - name: Cleanup workspace build directories
+        if: always()
+        run: |
+          rm -rf cmake-build-release cmake-build-coverage release-assets
 
   build-packages-tag:
     name: Build AppImage / macOS / Windows packages (Tag)
@@ -572,7 +597,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve package version metadata
         run: |
@@ -731,7 +756,7 @@ jobs:
           fi
 
       - name: Upload AppImage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qmud-appimage
           if-no-files-found: error
@@ -740,7 +765,7 @@ jobs:
             cmake-build-release/appimage-docker-out/*.AppImage.zsync
 
       - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qmud-macos
           if-no-files-found: error
@@ -748,13 +773,18 @@ jobs:
             cmake-build-release/mac-docker-out/QMud-*.zip
 
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qmud-windows
           if-no-files-found: error
           path: |
             cmake-build-release/windows-docker-out/QMud-*.zip
             cmake-build-release/windows-docker-out/QMud-*.exe
+
+      - name: Cleanup workspace build directories
+        if: always()
+        run: |
+          rm -rf cmake-build-release cmake-build-coverage release-assets
 
   publish-release:
     name: Publish GitHub release assets
@@ -766,12 +796,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: qmud-*
           path: release-assets
@@ -894,6 +924,11 @@ jobs:
             release-assets/qmud-windows/*.zip
             release-assets/qmud-windows/*.exe
 
+      - name: Cleanup workspace build directories
+        if: always()
+        run: |
+          rm -rf cmake-build-release cmake-build-coverage release-assets release-notes.md ci-release-notes.md
+
   publish-ci-release:
     name: Publish rolling CI prerelease
     needs: build-packages
@@ -904,7 +939,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -921,7 +956,7 @@ jobs:
           echo "base=$BASE_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: qmud-*
           path: release-assets
@@ -1040,7 +1075,7 @@ jobs:
           echo "body_path=ci-release-notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Remove old CI release assets
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const owner = context.repo.owner;
@@ -1083,3 +1118,8 @@ jobs:
             release-assets/qmud-macos/*.zip
             release-assets/qmud-windows/*.zip
             release-assets/qmud-windows/*.exe
+
+      - name: Cleanup workspace build directories
+        if: always()
+        run: |
+          rm -rf cmake-build-release cmake-build-coverage release-assets release-notes.md ci-release-notes.md
