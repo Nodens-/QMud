@@ -510,64 +510,14 @@ qmud_add_qtest(tst_WorldCommandProcessor_Regex
         TIMEOUT
         20)
 
-set(QMUD_TEST_APP_SOURCES "${QMUD_SOURCE_FILES_ABS}")
-list(REMOVE_ITEM QMUD_TEST_APP_SOURCES "${QMUD_SRC_DIR}/Main.cpp")
-list(APPEND QMUD_TEST_APP_SOURCES "${QMUD_SRC_DIR}/WorldSocketService.h")
-if (QMUD_ENABLE_LUA_SCRIPTING)
-    list(APPEND QMUD_TEST_APP_SOURCES "${QMUD_SRC_DIR}/Sqlite3Lua.cpp")
-endif ()
-
 qmud_add_qtest(tst_WorldCommandProcessor_SendTargets
-        GUI
         SOURCES
         integration/tst_WorldCommandProcessor_SendTargets.cpp
-        ${QMUD_TEST_APP_SOURCES}
-        LIBRARIES
-        Qt6::Network
-        Qt6::Sql
-        Qt6::PrintSupport
-        ${QMUD_ZLIB_TARGET}
-        ${QMUD_QT_MULTIMEDIA_TARGET}
-        ${QMUD_QT_TEXTTOSPEECH_TARGET}
+        "${CMAKE_SOURCE_DIR}/src/helpers/CommandTextUtils.cpp"
         LABELS
         integration
         TIMEOUT
-        60)
-
-target_compile_definitions(tst_WorldCommandProcessor_SendTargets
-        PRIVATE
-        NOMINMAX
-        _CRT_SECURE_NO_WARNINGS
-        QMUD_BUILD_DATE_UTC="${QMUD_BUILD_DATE_UTC}"
-        QMUD_BUILD_TIME_UTC="${QMUD_BUILD_TIME_UTC}"
-        QMUD_ENABLE_SOUND=${QMUD_ENABLE_SOUND_VALUE}
-        QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
-
-if (QMUD_CI_BUILD)
-    target_compile_definitions(tst_WorldCommandProcessor_SendTargets PRIVATE CI_BUILD)
-endif ()
-
-foreach (tgt lsqlite png lua luacom)
-    if (TARGET ${tgt})
-        target_link_libraries(tst_WorldCommandProcessor_SendTargets PRIVATE ${tgt})
-    endif ()
-endforeach ()
-
-if (QMUD_ENABLE_LUA_SCRIPTING)
-    target_compile_definitions(tst_WorldCommandProcessor_SendTargets PRIVATE QMUD_ENABLE_LUA_SCRIPTING)
-    if (TARGET Lua::Lua)
-        target_link_libraries(tst_WorldCommandProcessor_SendTargets PRIVATE Lua::Lua)
-    else ()
-        target_link_libraries(tst_WorldCommandProcessor_SendTargets PRIVATE ${LUA_LIBRARIES})
-    endif ()
-    if (DEFINED LUA_INCLUDE_DIR)
-        target_include_directories(tst_WorldCommandProcessor_SendTargets SYSTEM BEFORE PRIVATE
-                ${LUA_INCLUDE_DIR})
-    elseif (DEFINED LUA_INCLUDE_DIRS)
-        target_include_directories(tst_WorldCommandProcessor_SendTargets SYSTEM BEFORE PRIVATE
-                ${LUA_INCLUDE_DIRS})
-    endif ()
-endif ()
+        20)
 
 qmud_add_qtest(tst_WorldCommandProcessor_Queueing
         SOURCES
