@@ -710,7 +710,7 @@ jobs:
               collapsed = " ".join(text.split())
               if not collapsed:
                   return []
-              return [part.strip() for part in re.split(r"(?<=\\.)\\s+", collapsed) if part.strip()]
+              return [part.strip() for part in re.split(r"(?<=\.)\s*", collapsed) if part.strip()]
 
           commit_pr_cache: dict[str, list[dict]] = {}
 
@@ -867,7 +867,7 @@ jobs:
               collapsed = " ".join(text.split())
               if not collapsed:
                   return []
-              return [part.strip() for part in re.split(r"(?<=\\.)\\s+", collapsed) if part.strip()]
+              return [part.strip() for part in re.split(r"(?<=\.)\s*", collapsed) if part.strip()]
 
           commit_pr_cache: dict[str, list[dict]] = {}
 
