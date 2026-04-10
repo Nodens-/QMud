@@ -165,7 +165,7 @@ set(QMUD_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 # Core Qt entry-point sources (start minimal, expand as modules are ported)
 set(QMUD_SOURCES
         Main.cpp
-        MainWindowHostResolver.cpp
+        helpers/MainWindowHostResolver.cpp
         MainFrame.cpp
         helpers/MainFrameActionUtils.cpp
         helpers/MainFrameMdiUtils.cpp
@@ -245,7 +245,7 @@ set(QMUD_SOURCES
 # Optionally collect headers (helps IDEs) — not required for build
 set(QMUD_HEADERS
         MainWindowHost.h
-        MainWindowHostResolver.h
+        helpers/MainWindowHostResolver.h
         Version.h
         MainFrame.h
         helpers/MainFrameActionUtils.h

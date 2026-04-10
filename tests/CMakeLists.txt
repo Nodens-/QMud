@@ -567,7 +567,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/TimeFormatUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/WorldView.h"
-            "${CMAKE_SOURCE_DIR}/src/MainWindowHostResolver.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/MainWindowHostResolver.cpp"
             "${CMAKE_SOURCE_DIR}/src/dialogs/FindDialog.cpp"
             LIBRARIES
             Qt6::Sql
