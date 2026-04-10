@@ -2,6 +2,10 @@ name: Pipelines
 
 on:
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
   push:
     branches:
       - main
@@ -10,6 +14,12 @@ on:
   schedule:
     - cron: "0 4 * * *"
   workflow_dispatch:
+    inputs:
+      force_coverage:
+        description: "Force coverage run"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -17,7 +27,7 @@ permissions:
 jobs:
   quick-tests:
     name: PR/Push quick suite (exclude slow)
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
+    if: (github.event_name == 'pull_request' && github.event.action != 'closed') || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
     runs-on: [self-hosted, primary]
     timeout-minutes: 60
     env:
@@ -187,9 +197,49 @@ jobs:
           path: |
             cmake-build-release/tests/tst_*
 
+  coverage-path-gate:
+    name: Coverage path gate (src/tests changed)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, primary]
+    outputs:
+      run_coverage: ${{ steps.filter.outputs.run_coverage }}
+
+    steps:
+      - name: Detect code/test changes in push range
+        id: filter
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const before = context.payload.before;
+            const after = context.payload.after || context.sha;
+
+            if (!before || /^0+$/.test(before)) {
+              core.info("No valid base SHA in push payload; running coverage by default.");
+              core.setOutput("run_coverage", "true");
+              return;
+            }
+
+            const response = await github.rest.repos.compareCommitsWithBasehead({
+              owner,
+              repo,
+              basehead: `${before}...${after}`,
+            });
+            const files = Array.isArray(response.data.files) ? response.data.files : [];
+            const runCoverage = files.some((file) => {
+              const filename = file.filename || "";
+              return filename.startsWith("src/") || filename.startsWith("tests/");
+            });
+
+            core.info(`Compared ${before}...${after} (${files.length} files), run_coverage=${runCoverage}`);
+            core.setOutput("run_coverage", runCoverage ? "true" : "false");
+
   coverage:
-    name: Manual coverage (llvm/gcov)
-    if: github.event_name == 'workflow_dispatch'
+    name: Coverage on main pushes after build (llvm/gcov)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.coverage-path-gate.outputs.run_coverage == 'true'
+    needs:
+      - build-packages
+      - coverage-path-gate
     runs-on: [self-hosted, primary]
     timeout-minutes: 120
     env:
@@ -272,9 +322,108 @@ jobs:
             coverage.filtered.info
             coverage-html/**
 
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.filtered.info
+          fail_ci_if_error: true
+
+  coverage-manual:
+    name: Manual coverage (forced)
+    if: github.event_name == 'workflow_dispatch' && (inputs.force_coverage == true || inputs.force_coverage == 'true')
+    runs-on: [self-hosted, primary]
+    timeout-minutes: 120
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify preinstalled host build dependencies
+        run: |
+          set -euo pipefail
+          for tool in cmake ninja ctest python3 pkg-config gcc g++ lcov genhtml; do
+            command -v "$tool" >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+          done
+
+      - name: Resolve preinstalled host Qt 6
+        run: |
+          set -euo pipefail
+          QT6_CMAKE_DIR=""
+          if [ -n "${QT_ROOT:-}" ]; then
+            if [ -d "$QT_ROOT/lib/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib/cmake/Qt6"
+            elif [ -d "$QT_ROOT/lib64/cmake/Qt6" ]; then
+              QT6_CMAKE_DIR="$QT_ROOT/lib64/cmake/Qt6"
+            else
+              echo "QT_ROOT is set but Qt6 CMake package was not found under $QT_ROOT." >&2
+              exit 1
+            fi
+          else
+            QT6_CONFIG_FILE="$(find /opt/Qt /usr/lib64 /usr/lib -type f -path '*/cmake/Qt6/Qt6Config.cmake' 2>/dev/null | sort | head -n 1 || true)"
+            if [ -z "$QT6_CONFIG_FILE" ]; then
+              echo "Failed to locate Qt6Config.cmake on runner. Install Qt6 development packages or set QT_ROOT." >&2
+              exit 1
+            fi
+            QT6_CMAKE_DIR="$(dirname "$QT6_CONFIG_FILE")"
+          fi
+
+          QT_ROOT="$(cd "$QT6_CMAKE_DIR/../../.." && pwd)"
+          if [ ! -d "$QT6_CMAKE_DIR" ]; then
+            echo "Resolved Qt6 CMake directory is invalid: $QT6_CMAKE_DIR" >&2
+            exit 1
+          fi
+          echo "QT_ROOT=$QT_ROOT" >> "$GITHUB_ENV"
+          echo "QT6_CMAKE_DIR=$QT6_CMAKE_DIR" >> "$GITHUB_ENV"
+          echo "$QT_ROOT/bin" >> "$GITHUB_PATH"
+
+      - name: Configure CMake (coverage)
+        run: |
+          CCACHE_DISABLE=1 cmake -S . -B cmake-build-coverage -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DQt6_DIR="$QT6_CMAKE_DIR" \
+            -DQMUD_ENABLE_TESTING=ON \
+            -DQMUD_ENABLE_GUI_TESTS=ON \
+            -DCMAKE_C_FLAGS="--coverage" \
+            -DCMAKE_CXX_FLAGS="--coverage" \
+            -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+
+      - name: Build
+        run: |
+          CCACHE_DISABLE=1 cmake --build cmake-build-coverage -j 6
+
+      - name: Run tests for coverage
+        run: |
+          ctest --test-dir cmake-build-coverage --output-on-failure --label-exclude slow
+
+      - name: Generate coverage report
+        run: |
+          lcov --capture --directory cmake-build-coverage --output-file coverage.info
+          lcov --remove coverage.info '/usr/*' "$RUNNER_TEMP/*" --output-file coverage.filtered.info
+          genhtml coverage.filtered.info --output-directory coverage-html
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmud-coverage
+          if-no-files-found: error
+          path: |
+            coverage.filtered.info
+            coverage-html/**
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.filtered.info
+          fail_ci_if_error: true
+
   build-packages:
     name: Build AppImage / macOS / Windows packages (PR/Main)
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: (github.event_name == 'pull_request' && github.event.action != 'closed') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: quick-tests
     runs-on: [self-hosted, primary]
     timeout-minutes: 180

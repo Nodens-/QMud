@@ -1,6 +1,7 @@
 # QMud
 
 [![Pipelines](https://github.com/Nodens-/QMud/actions/workflows/pipelines.yml/badge.svg)](https://github.com/Nodens-/QMud/actions/workflows/pipelines.yml)
+[![codecov](https://codecov.io/gh/Nodens-/QMud/branch/main/graph/badge.svg)](https://codecov.io/gh/Nodens-/QMud)
 
 QMud is a Qt 6 port and continuation of the
 original [MUSHclient](https://www.mushclient.com/mushclient/mushclient.htm) (by Nick Gammon),
