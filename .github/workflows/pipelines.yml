@@ -279,6 +279,7 @@ jobs:
 
       - name: Generate coverage report
         run: |
+          mkdir -p coverage-html
           gcovr \
             --root "$GITHUB_WORKSPACE" \
             --object-directory cmake-build-coverage \
@@ -380,6 +381,7 @@ jobs:
 
       - name: Generate coverage report
         run: |
+          mkdir -p coverage-html
           gcovr \
             --root "$GITHUB_WORKSPACE" \
             --object-directory cmake-build-coverage \
