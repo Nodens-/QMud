@@ -702,7 +702,6 @@ jobs:
 
           range_spec = os.environ.get("RANGE", "").strip()
           repo = os.environ["GITHUB_REPOSITORY"]
-          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
           api_base = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
           token = os.environ.get("GITHUB_TOKEN", "").strip()
           output_path = "release-notes.md"
@@ -763,7 +762,7 @@ jobs:
 
                       source_text = str(pr_payload.get("title", "")).strip()
                       if not source_text:
-                          source_text = f"PR #{pr_number}"
+                          source_text = "Untitled PR."
                       sentences = split_sentences(source_text)
                       if not sentences:
                           sentences = [source_text]
@@ -773,19 +772,14 @@ jobs:
                       if isinstance(user, dict):
                           login = str(user.get("login", "")).strip()
 
-                      if login:
-                          head = (
-                              f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}) "
-                              f"by [@{login}]({server}/{login}): {sentences[0]}"
-                          )
-                      else:
-                          head = f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}): {sentences[0]}"
-                      lines.append(head)
-                      for sentence in sentences[1:]:
-                          lines.append(f"  {sentence}")
+                      for sentence in sentences:
+                          if login:
+                              lines.append(f"* {sentence} by @{login} (#{pr_number})")
+                          else:
+                              lines.append(f"* {sentence} (#{pr_number})")
 
           if len(lines) == 2:
-              lines.append("- No merged pull requests found in selected range.")
+              lines.append("* No merged pull requests found in selected range.")
 
           with open(output_path, "w", encoding="utf-8") as fh:
               fh.write("\n".join(lines).rstrip() + "\n")
@@ -865,7 +859,6 @@ jobs:
 
           range_spec = os.environ.get("RANGE", "").strip()
           repo = os.environ["GITHUB_REPOSITORY"]
-          server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
           api_base = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
           token = os.environ.get("GITHUB_TOKEN", "").strip()
           output_path = "ci-release-notes.md"
@@ -926,7 +919,7 @@ jobs:
 
                       source_text = str(pr_payload.get("title", "")).strip()
                       if not source_text:
-                          source_text = f"PR #{pr_number}"
+                          source_text = "Untitled PR."
                       sentences = split_sentences(source_text)
                       if not sentences:
                           sentences = [source_text]
@@ -936,19 +929,14 @@ jobs:
                       if isinstance(user, dict):
                           login = str(user.get("login", "")).strip()
 
-                      if login:
-                          head = (
-                              f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}) "
-                              f"by [@{login}]({server}/{login}): {sentences[0]}"
-                          )
-                      else:
-                          head = f"- [#{pr_number}]({server}/{repo}/pull/{pr_number}): {sentences[0]}"
-                      lines.append(head)
-                      for sentence in sentences[1:]:
-                          lines.append(f"  {sentence}")
+                      for sentence in sentences:
+                          if login:
+                              lines.append(f"* {sentence} by @{login} (#{pr_number})")
+                          else:
+                              lines.append(f"* {sentence} (#{pr_number})")
 
           if len(lines) == 2:
-              lines.append("- No merged pull requests found in selected range.")
+              lines.append("* No merged pull requests found in selected range.")
 
           with open(output_path, "w", encoding="utf-8") as fh:
               fh.write("\n".join(lines).rstrip() + "\n")
