@@ -1,5 +1,9 @@
 # QMud
 
+[![Pipelines](https://github.com/Nodens-/QMud/actions/workflows/pipelines.yml/badge.svg)](https://github.com/Nodens-/QMud/actions/workflows/pipelines.yml)
+[![codecov](https://codecov.io/gh/Nodens-/QMud/branch/main/graph/badge.svg)](https://codecov.io/gh/Nodens-/QMud)
+[![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20this%20project-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/nodens)
+
 QMud is a Qt 6 port and continuation of the
 original [MUSHclient](https://www.mushclient.com/mushclient/mushclient.htm) (by Nick Gammon),
 designed and written by Panagiotis Kalogiratos (Nodens) of [CthulhuMUD](https://www.cthulhumud.com).
