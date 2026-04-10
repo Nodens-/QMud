@@ -17,7 +17,7 @@ class tst_MainFrame_Actions : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void worldSlotCommandName_data()
 		{
@@ -54,11 +54,76 @@ class tst_MainFrame_Actions : public QObject
 			QFETCH(QString, expected);
 			QCOMPARE(QMudMainFrameActionUtils::worldButtonTooltipForSlot(slot), expected);
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+
+		void shouldAttemptIncomingLineTaskbarFlash_data()
+		{
+			QTest::addColumn<bool>("worldFlashEnabled");
+			QTest::addColumn<bool>("appFocused");
+			QTest::addColumn<bool>("expected");
+
+			QTest::newRow("enabled-unfocused") << true << false << true;
+			QTest::newRow("enabled-focused") << true << true << false;
+			QTest::newRow("disabled-unfocused") << false << false << false;
+			QTest::newRow("disabled-focused") << false << true << false;
+		}
+
+		void shouldAttemptIncomingLineTaskbarFlash()
+		{
+			QFETCH(bool, worldFlashEnabled);
+			QFETCH(bool, appFocused);
+			QFETCH(bool, expected);
+			QCOMPARE(QMudMainFrameActionUtils::shouldAttemptIncomingLineTaskbarFlash(worldFlashEnabled,
+			                                                                         appFocused),
+			         expected);
+		}
+
+		void shouldRequestBackgroundTaskbarFlash_data()
+		{
+			QTest::addColumn<bool>("appFocused");
+			QTest::addColumn<bool>("alreadyRequested");
+			QTest::addColumn<bool>("expected");
+
+			QTest::newRow("unfocused-not-requested") << false << false << true;
+			QTest::newRow("unfocused-already-requested") << false << true << false;
+			QTest::newRow("focused-not-requested") << true << false << false;
+			QTest::newRow("focused-already-requested") << true << true << false;
+		}
+
+		void shouldRequestBackgroundTaskbarFlash()
+		{
+			QFETCH(bool, appFocused);
+			QFETCH(bool, alreadyRequested);
+			QFETCH(bool, expected);
+			QCOMPARE(
+			    QMudMainFrameActionUtils::shouldRequestBackgroundTaskbarFlash(appFocused, alreadyRequested),
+			    expected);
+		}
+
+		void shouldResetBackgroundFlashLatch_data()
+		{
+			QTest::addColumn<bool>("previousFocused");
+			QTest::addColumn<bool>("currentFocused");
+			QTest::addColumn<bool>("expected");
+
+			QTest::newRow("focused-to-unfocused") << true << false << true;
+			QTest::newRow("unfocused-to-focused") << false << true << true;
+			QTest::newRow("focused-to-focused") << true << true << false;
+			QTest::newRow("unfocused-to-unfocused") << false << false << false;
+		}
+
+		void shouldResetBackgroundFlashLatch()
+		{
+			QFETCH(bool, previousFocused);
+			QFETCH(bool, currentFocused);
+			QFETCH(bool, expected);
+			QCOMPARE(
+			    QMudMainFrameActionUtils::shouldResetBackgroundFlashLatch(previousFocused, currentFocused),
+			    expected);
+		}
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_MainFrame_Actions)
-
 
 #if __has_include("tst_MainFrame_Actions.moc")
 #include "tst_MainFrame_Actions.moc"

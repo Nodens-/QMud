@@ -22,6 +22,7 @@
 #include "LuaCallbackEngine.h"
 #include "LuaHeaders.h"
 #include "MainFrame.h"
+#include "MainFrameActionUtils.h"
 #include "MiniWindowBrushUtils.h"
 #include "MxpDiagnostics.h"
 #include "NameGeneration.h"
@@ -136,6 +137,24 @@ namespace
 			return 0;
 		constexpr qsizetype kMaxInt = std::numeric_limits<int>::max();
 		return size > kMaxInt ? std::numeric_limits<int>::max() : static_cast<int>(size);
+	}
+
+	void flashTaskbarForView(QWidget *view)
+	{
+		if (const AppController *app = AppController::instance())
+		{
+			if (MainWindow *mainWindow = app->mainWindow())
+			{
+				(void)mainWindow->requestBackgroundTaskbarFlash(view);
+				return;
+			}
+		}
+		if (!view)
+			return;
+		QWidget *alertTarget = view->window();
+		if (!alertTarget)
+			alertTarget = view;
+		QApplication::alert(alertTarget, 0);
 	}
 
 	int boundedQSizeToInt(const qsizetype size)
@@ -6892,17 +6911,21 @@ void WorldRuntime::setNewLines(int value)
 
 void WorldRuntime::incrementNewLines()
 {
-	const bool wasZero = (m_newLines == 0);
 	++m_newLines;
-	if (!m_active && wasZero)
+	bool appFocused = QGuiApplication::applicationState() == Qt::ApplicationActive;
+	if (const AppController *app = AppController::instance())
 	{
-		if (isEnabledFlag(m_worldAttributes.value(QStringLiteral("flash_taskbar_icon"))) && m_view)
-		{
-			QWidget *alertTarget = m_view->window();
-			if (!alertTarget)
-				alertTarget = m_view;
-			QApplication::alert(alertTarget, 0);
-		}
+		if (const MainWindow *mainWindow = app->mainWindow())
+			appFocused = mainWindow->isApplicationFocused();
+	}
+	const bool worldFlashEnabled =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("flash_taskbar_icon")));
+	if (QMudMainFrameActionUtils::shouldAttemptIncomingLineTaskbarFlash(worldFlashEnabled, appFocused))
+	{
+		flashTaskbarForView(m_view);
+	}
+	if (!m_active)
+	{
 		const QString sound = m_worldAttributes.value(QStringLiteral("new_activity_sound")).trimmed();
 		if (!sound.isEmpty() && sound.compare(QStringLiteral("(No sound)"), Qt::CaseInsensitive) != 0)
 		{
@@ -12813,8 +12836,8 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 		normalizedValue = normalizePathForRuntime(normalizedValue);
 	if (key == QStringLiteral("auto_log_file_name"))
 		normalizedValue = normalizeAutoLogFileNameValue(normalizedValue);
-	if (const auto existing = m_worldAttributes.constFind(key);
-	    existing != m_worldAttributes.constEnd() && existing.value() == normalizedValue)
+	const auto existing = m_worldAttributes.constFind(key);
+	if (existing != m_worldAttributes.constEnd() && existing.value() == normalizedValue)
 	{
 		return;
 	}

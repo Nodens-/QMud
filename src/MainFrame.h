@@ -259,6 +259,17 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		void               setTimerInterval(int seconds);
 		/**
+		 * @brief Requests one taskbar flash for current background session.
+		 * @param preferredTarget Preferred widget target for platform alert API.
+		 * @return `true` when current background session is already/now marked as flashed.
+		 */
+		[[nodiscard]] bool requestBackgroundTaskbarFlash(QWidget *preferredTarget);
+		/**
+		 * @brief Returns whether QMud is currently focused as active application window.
+		 * @return `true` when application is focused.
+		 */
+		[[nodiscard]] bool isApplicationFocused() const;
+		/**
 		 * @brief Sets activity refresh mode and interval.
 		 * @param mode Activity refresh mode.
 		 * @param interval Refresh interval in seconds.
@@ -619,6 +630,8 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		bool                     m_deferredUiRefreshStatus{false};
 		bool                     m_deferredUiRefreshTabs{false};
 		bool                     m_deferredUiRefreshActivity{false};
+		bool                     m_lastKnownApplicationFocused{true};
+		bool                     m_taskbarFlashRequestedInBackgroundSession{false};
 
 	private slots:
 		/**
@@ -665,6 +678,11 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @brief Handles mushname status click.
 		 */
 		void onStatusMushnameClick() const;
+		/**
+		 * @brief Handles Qt application focus-state changes.
+		 * @param state New application state.
+		 */
+		void onApplicationStateChanged(Qt::ApplicationState state);
 
 	private:
 		/**
