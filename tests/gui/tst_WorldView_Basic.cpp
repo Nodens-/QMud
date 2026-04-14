@@ -2760,6 +2760,63 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void pasteHomeBackspaceSequenceKeepsInputCaretVisibleWithAutoResize()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("8"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(360, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			const QString pasted = QStringLiteral("first ") + QStringLiteral("word ").repeated(48) +
+			                       QStringLiteral("\nsecond ") + QStringLiteral("word ").repeated(44) +
+			                       QStringLiteral("\nthird line");
+			QGuiApplication::clipboard()->setText(pasted);
+
+			auto assertCaretVisible = [input]
+			{
+				const QRect cursorRect = input->cursorRect();
+				QVERIFY2(cursorRect.isValid(), "Input cursor rectangle should remain valid.");
+				QVERIFY2(cursorRect.height() > 0, "Input cursor rectangle should have positive height.");
+				QVERIFY2(input->viewport()->rect().intersects(cursorRect),
+				         "Input caret should remain visible inside viewport.");
+			};
+
+			for (int i = 0; i < 25; ++i)
+			{
+				view.setInputText(QString(), true);
+				QCoreApplication::processEvents();
+
+				QTest::keySequence(input, QKeySequence::Paste);
+				QCoreApplication::processEvents();
+				QCOMPARE(view.inputText(), pasted);
+				assertCaretVisible();
+
+				QTest::keyClick(input, Qt::Key_Home);
+				QCoreApplication::processEvents();
+				assertCaretVisible();
+
+				QTest::keyClick(input, Qt::Key_Backspace);
+				QCoreApplication::processEvents();
+				assertCaretVisible();
+			}
+
+			resetTestState();
+		}
+
 		void pasteIntoInputPreservesTrailingNewlineFromClipboard()
 		{
 			resetTestState();

@@ -8589,6 +8589,7 @@ void WorldView::updateInputHeight() const
 	{
 		m_input->setMinimumHeight(singleLine);
 		m_input->setMaximumHeight(QWIDGETSIZE_MAX);
+		ensureCursorVisibleNowAndQueued(m_input);
 		return;
 	}
 
@@ -8664,6 +8665,8 @@ void WorldView::updateInputHeight() const
 			}
 		}
 	}
+
+	ensureCursorVisibleNowAndQueued(m_input);
 }
 
 void WorldView::applyDefaultInputHeight(bool setSplitterSizes)
@@ -9874,6 +9877,8 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 	}
 
 	QPlainTextEdit::keyPressEvent(event);
+	if (m_view)
+		ensureCursorVisibleNowAndQueued(this);
 }
 
 bool InputTextEdit::event(QEvent *event)
@@ -9941,7 +9946,7 @@ void InputTextEdit::resizeEvent(QResizeEvent *event)
 			    guard->m_view->updateInputWrap();
 			    guard->m_view->updateInputHeight();
 		    }
-		    guard->ensureCursorVisible();
+		    ensureCursorVisibleNowAndQueued(guard.data());
 		    guard->m_wrapUpdateQueued = false;
 	    },
 	    Qt::QueuedConnection);
