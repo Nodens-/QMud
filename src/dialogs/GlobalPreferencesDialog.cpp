@@ -278,12 +278,59 @@ namespace
 #endif
 	}
 
+	QString qmudHomeDirectory(const AppController *app)
+	{
+		if (!app)
+			return {};
+		return QDir::cleanPath(QFileInfo(app->iniFilePath()).absolutePath());
+	}
+
+	QString preferredQmudHomeRelativePath(const QString &value)
+	{
+		const QString normalized = storagePath(value);
+		if (normalized.isEmpty())
+			return normalized;
+
+		AppController *app = AppController::instance();
+		if (!app)
+			return normalized;
+
+		const QString absolute = QDir::cleanPath(app->makeAbsolutePath(normalized));
+		const QString qmudHome = qmudHomeDirectory(app);
+		if (qmudHome.isEmpty())
+			return absolute;
+
+		QString relative = storagePath(QDir(qmudHome).relativeFilePath(absolute));
+		if (!relative.isEmpty() && relative != QStringLiteral("..") &&
+		    !relative.startsWith(QStringLiteral("../")) && !QDir::isAbsolutePath(relative))
+		{
+			if (!relative.startsWith(QStringLiteral("./")) && !relative.startsWith(QStringLiteral("../")))
+				relative.prepend(QStringLiteral("./"));
+			return relative;
+		}
+		return absolute;
+	}
+
+	QString runtimeWorldListPath(const QString &value)
+	{
+		return runtimePath(preferredQmudHomeRelativePath(value));
+	}
+
 	QStringList canonicalPathList(const QStringList &paths)
 	{
 		QStringList out;
 		out.reserve(paths.size());
 		for (const QString &path : paths)
 			out.push_back(runtimePath(path));
+		return out;
+	}
+
+	QStringList canonicalWorldPathList(const QStringList &paths)
+	{
+		QStringList out;
+		out.reserve(paths.size());
+		for (const QString &path : paths)
+			out.push_back(runtimeWorldListPath(path));
 		return out;
 	}
 
@@ -438,7 +485,7 @@ QWidget *GlobalPreferencesDialog::buildWorldsPage()
 			                 app->changeToStartupDirectory();
 		                 if (paths.isEmpty())
 			                 return;
-		                 addUniqueItemsToList(m_worldList, canonicalPathList(paths));
+		                 addUniqueItemsToList(m_worldList, canonicalWorldPathList(paths));
 		                 m_worldList->setCurrentRow(m_worldList->count() - 1);
 	                 });
 	QObject::connect(removeWorld, &QPushButton::clicked, page,
@@ -500,7 +547,7 @@ QWidget *GlobalPreferencesDialog::buildWorldsPage()
 		                 WorldRuntime *runtime = world->runtime();
 		                 if (!runtime)
 			                 return;
-		                 const QString path = runtimePath(runtime->worldFilePath());
+		                 const QString path = runtimeWorldListPath(runtime->worldFilePath());
 		                 if (path.isEmpty())
 			                 return;
 		                 const QList<QListWidgetItem *> existing =
@@ -1663,7 +1710,7 @@ void GlobalPreferencesDialog::loadPreferences()
 		it.value()->setText(app->getGlobalOption(it.key()).toString());
 
 	const QString worldList = app->getGlobalOption(QStringLiteral("WorldList")).toString();
-	setListFromStrings(m_worldList, canonicalPathList(worldList.split('*', Qt::SkipEmptyParts)));
+	setListFromStrings(m_worldList, canonicalWorldPathList(worldList.split('*', Qt::SkipEmptyParts)));
 	syncWorldListSelection();
 
 	const QString pluginList = app->getGlobalOption(QStringLiteral("PluginList")).toString();
@@ -1807,8 +1854,9 @@ bool GlobalPreferencesDialog::applyPreferences()
 		app->setGlobalOptionString(it.key(), it.value()->text());
 
 	if (m_worldList)
-		app->setGlobalOptionString(QStringLiteral("WorldList"),
-		                           listFromWidget(m_worldList).join(QStringLiteral("*")));
+		app->setGlobalOptionString(
+		    QStringLiteral("WorldList"),
+		    canonicalWorldPathList(listFromWidget(m_worldList)).join(QStringLiteral("*")));
 
 	if (m_pluginsList)
 		app->setGlobalOptionString(QStringLiteral("PluginList"),
