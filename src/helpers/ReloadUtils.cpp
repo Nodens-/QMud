@@ -2,11 +2,11 @@
  * QMud Project
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
- * File: ReloadStateUtils.cpp
- * Role: JSON manifest serialization/parsing helpers for reload/copyover handoff and stale-state cleanup checks.
+ * File: ReloadUtils.cpp
+ * Role: Consolidated reload/copyover state, policy, recovery, and MCCP probe helper implementations.
  */
 
-#include "ReloadStateUtils.h"
+#include "ReloadUtils.h"
 
 #include <QDir>
 #include <QFile>
@@ -442,4 +442,178 @@ bool isReloadStateFileStale(const QString &filePath, const int maxAgeSeconds, co
 	if (!modifiedUtc.isValid() || !nowUtc.isValid())
 		return true;
 	return modifiedUtc.secsTo(nowUtc) > maxAgeSeconds;
+}
+
+bool shouldAttemptReloadMccpDisable(const bool connected, const int socketDescriptor, const bool tlsEnabled,
+                                    const bool mccpWasActive)
+{
+	return connected && socketDescriptor >= 0 && !tlsEnabled && mccpWasActive;
+}
+
+ReloadWorldPolicyDecision computeReloadWorldPolicy(const ReloadWorldPolicyInput &input)
+{
+	ReloadWorldPolicyDecision decision;
+	decision.connectedAtReload = input.connected || input.connecting;
+
+	if (!decision.connectedAtReload)
+	{
+		decision.policy = ReloadSocketPolicy::Reattach;
+		return decision;
+	}
+
+	if (input.tlsEnabled)
+	{
+		decision.shouldAttemptDescriptorInheritance = false;
+		decision.policy                             = ReloadSocketPolicy::ParkReconnect;
+		return decision;
+	}
+	decision.shouldAttemptDescriptorInheritance = input.socketDescriptor >= 0;
+
+	if (input.connected && input.socketDescriptor >= 0)
+	{
+		decision.policy = ReloadSocketPolicy::Reattach;
+		return decision;
+	}
+
+	decision.policy = ReloadSocketPolicy::ParkReconnect;
+	return decision;
+}
+
+ReloadRecoverySocketDecision applyReloadSocketRecovery(ReloadSocketRecoveryOps &runtime,
+                                                       const ReloadWorldState  &worldState)
+{
+	ReloadRecoverySocketDecision decision;
+
+	if (worldState.connectedAtReload && worldState.socketDescriptor >= 0)
+	{
+		runtime.markReloadReattachConnectActionsSuppressed();
+		QString adoptError;
+		if (!runtime.adoptConnectedSocketDescriptor(worldState.socketDescriptor, &adoptError))
+		{
+			(void)runtime.consumeReloadReattachConnectActionsSuppressed();
+			decision.outcome          = ReloadRecoverySocketOutcome::ReconnectQueued;
+			decision.closeSocketFirst = false;
+			decision.error            = adoptError;
+			return decision;
+		}
+
+		decision.outcome = ReloadRecoverySocketOutcome::Reattached;
+		return decision;
+	}
+
+	if (worldState.connectedAtReload)
+	{
+		decision.outcome          = ReloadRecoverySocketOutcome::ReconnectQueued;
+		decision.closeSocketFirst = false;
+	}
+
+	return decision;
+}
+
+QString reconnectRecoveredRuntime(ReloadReconnectOps &runtime, const ReloadWorldState &worldState,
+                                  const bool closeSocketFirst)
+{
+	if (closeSocketFirst)
+		runtime.closeSocketForReloadReconnect();
+	runtime.setIncomingSocketDataPaused(false);
+
+	QString host = worldState.host.trimmed();
+	quint16 port = worldState.port;
+	if (host.isEmpty())
+		host = runtime.worldAttribute(QStringLiteral("site")).trimmed();
+	if (port == 0)
+		port = runtime.worldAttribute(QStringLiteral("port")).toUShort();
+	if (host.isEmpty() || port == 0)
+	{
+		return QStringLiteral("Reload reconnect skipped due to missing host/port for world %1")
+		    .arg(worldState.displayName);
+	}
+
+	runtime.setWorldAttribute(QStringLiteral("site"), host);
+	runtime.setWorldAttribute(QStringLiteral("port"), QString::number(port));
+	if (!runtime.connectToWorld(host, port))
+	{
+		return QStringLiteral("Reload reconnect failed to start for world %1 (%2:%3)")
+		    .arg(worldState.displayName, host, QString::number(port));
+	}
+	return {};
+}
+
+void applyReloadPostReattachActions(ReloadPostReattachOps &runtime, const ReloadWorldState &worldState)
+{
+	const bool mccpProbeOnReattach = worldState.mccpWasActive && !worldState.mccpDisableSucceeded;
+	runtime.configureReloadMccpReattachProbe(mccpProbeOnReattach);
+	if (worldState.mccpWasActive && !mccpProbeOnReattach)
+		runtime.requestMccpResumeAfterReloadReattach();
+	runtime.sendReloadReattachLookProbe();
+}
+
+bool isLikelyResidualMccpPayload(const QByteArray &data)
+{
+	if (data.isEmpty())
+		return true;
+	qsizetype textLikeCount = 0;
+	for (const char rawByte : data)
+	{
+		const auto byte = static_cast<unsigned char>(rawByte);
+		if ((byte >= 0x20 && byte <= 0x7E) || byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n')
+			++textLikeCount;
+	}
+	return (textLikeCount * 100) < (data.size() * 50);
+}
+
+bool shouldReconnectOnReloadMccpProbeTimeout(const QByteArray &bufferedProbePayload)
+{
+	return bufferedProbePayload.isEmpty() || isLikelyResidualMccpPayload(bufferedProbePayload);
+}
+
+ReloadMccpProbeTimeoutAction resolveReloadMccpProbeTimeoutAction(const QByteArray &bufferedProbePayload,
+                                                                 const int         pass)
+{
+	if (bufferedProbePayload.isEmpty() && pass == 0)
+		return ReloadMccpProbeTimeoutAction::WaitSecondPass;
+	return shouldReconnectOnReloadMccpProbeTimeout(bufferedProbePayload)
+	           ? ReloadMccpProbeTimeoutAction::Reconnect
+	           : ReloadMccpProbeTimeoutAction::KeepReattach;
+}
+
+QByteArray extractReloadMccpProbeDecisionPayload(const QByteArray &probeBuffer, const bool lookProbeSent,
+                                                 const qsizetype decisionOffset)
+{
+	if (!lookProbeSent)
+		return {};
+	if (decisionOffset >= probeBuffer.size())
+		return {};
+	return probeBuffer.mid(decisionOffset);
+}
+
+ReloadMccpProbePayloads makeReloadMccpProbePayloads(const QByteArray &probeBuffer, const bool lookProbeSent,
+                                                    const qsizetype decisionOffset)
+{
+	return {probeBuffer, extractReloadMccpProbeDecisionPayload(probeBuffer, lookProbeSent, decisionOffset)};
+}
+
+bool ingestReloadMccpProbeChunk(const ReloadMccpProbeIngressInput &input, qint64 *bytesIn,
+                                int *inputPacketCount, QByteArray *probeBuffer)
+{
+	if (!bytesIn || !inputPacketCount || !probeBuffer)
+		return false;
+	if (input.simulatedInput || !input.probePending)
+		return false;
+
+	*bytesIn += input.rawSize;
+	++(*inputPacketCount);
+	if (!input.processedPayload.isEmpty())
+		probeBuffer->append(input.processedPayload);
+	return true;
+}
+
+QByteArray takeDeferredReloadMccpProbePayload(QByteArray *probeBuffer)
+{
+	if (!probeBuffer || probeBuffer->isEmpty())
+		return {};
+
+	QByteArray payload;
+	payload.swap(*probeBuffer);
+	return payload;
 }

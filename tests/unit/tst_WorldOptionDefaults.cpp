@@ -48,6 +48,7 @@ class tst_WorldOptionDefaults : public QObject
 			QCOMPARE(attrs.value(QStringLiteral("persist_command_history")), QStringLiteral("y"));
 			QCOMPARE(attrs.value(QStringLiteral("regexp_match_empty")), QStringLiteral("y"));
 			QCOMPARE(attrs.value(QStringLiteral("only_negotiate_telnet_options_once")), QStringLiteral("n"));
+			QCOMPARE(attrs.value(QStringLiteral("tls_disable_certificate_validation")), QStringLiteral("n"));
 
 			QVERIFY(multilineAttrs.contains(QStringLiteral("connect_text")));
 			QVERIFY(multilineAttrs.contains(QStringLiteral("notes")));

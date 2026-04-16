@@ -1229,6 +1229,15 @@ void WorldPreferencesDialog::accept()
 		}
 		if (m_port)
 			m_runtime->setWorldAttribute(QStringLiteral("port"), QString::number(m_port->value()));
+		if (m_tlsEncryption)
+			m_runtime->setWorldAttribute(QStringLiteral("tls_encryption"),
+			                             boolAttributeValue(m_tlsEncryption->isChecked()));
+		if (m_tlsMethod)
+			m_runtime->setWorldAttribute(QStringLiteral("tls_method"),
+			                             QString::number(m_tlsMethod->currentData().toInt()));
+		if (m_tlsDisableCertificateValidation)
+			m_runtime->setWorldAttribute(QStringLiteral("tls_disable_certificate_validation"),
+			                             boolAttributeValue(m_tlsDisableCertificateValidation->isChecked()));
 		if (m_saveWorldAutomatically)
 			m_runtime->setWorldAttribute(QStringLiteral("save_world_automatically"),
 			                             m_saveWorldAutomatically->isChecked() ? QStringLiteral("1")
@@ -3670,11 +3679,20 @@ void WorldPreferencesDialog::buildUi()
 	m_port          = new QSpinBox(mudGroup);
 	m_port->setRange(1, 65535);
 	m_clearCachedButton = new QPushButton(QStringLiteral("Clear Cached IP"), mudGroup);
+	m_tlsEncryption     = new QCheckBox(QStringLiteral("TLS Encryption"), mudGroup);
+	m_tlsMethod         = new QComboBox(mudGroup);
+	m_tlsDisableCertificateValidation =
+	    new QCheckBox(QStringLiteral("Disable certificate validation"), mudGroup);
+	m_tlsMethod->addItem(QStringLiteral("Direct"), eTlsDirect);
+	m_tlsMethod->addItem(QStringLiteral("START-TLS"), eTlsStartTls);
 	mudLayout->addWidget(new QLabel(QStringLiteral("TCP/IP"), mudGroup), 0, 0);
 	mudLayout->addWidget(m_host, 0, 1, 1, 2);
 	mudLayout->addWidget(new QLabel(QStringLiteral("Port"), mudGroup), 1, 0);
 	mudLayout->addWidget(m_port, 1, 1);
 	mudLayout->addWidget(m_clearCachedButton, 2, 1);
+	mudLayout->addWidget(m_tlsEncryption, 3, 1);
+	mudLayout->addWidget(m_tlsMethod, 3, 2);
+	mudLayout->addWidget(m_tlsDisableCertificateValidation, 4, 1, 1, 2);
 	generalLayout->addWidget(mudGroup, 1, 0);
 
 	auto *proxyGroup  = new QGroupBox(QStringLiteral("Proxy"), generalPage);
@@ -3916,6 +3934,10 @@ void WorldPreferencesDialog::buildUi()
 			        m_runtime->resetIpCache();
 			        updateClearCachedButton();
 		        });
+	if (m_tlsEncryption)
+		connect(m_tlsEncryption, &QCheckBox::toggled, this,
+		        [this](const bool) { updateTlsEncryptionState(); });
+	updateTlsEncryptionState();
 
 	// Logging
 	auto *loggingLayout   = new QGridLayout(loggingPage);
@@ -8906,6 +8928,22 @@ void WorldPreferencesDialog::populateGeneral()
 		m_host->setText(attrs.value(QStringLiteral("site")));
 	if (m_port)
 		m_port->setValue(attrs.value(QStringLiteral("port")).toInt());
+	if (m_tlsEncryption)
+		m_tlsEncryption->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("tls_encryption"))));
+	if (m_tlsMethod)
+	{
+		const int tlsMethod = attrs.value(QStringLiteral("tls_method")).toInt();
+		int       index     = m_tlsMethod->findData(tlsMethod);
+		if (index < 0)
+			index = m_tlsMethod->findData(eTlsDirect);
+		if (index >= 0)
+			m_tlsMethod->setCurrentIndex(index);
+	}
+	if (m_tlsDisableCertificateValidation)
+	{
+		m_tlsDisableCertificateValidation->setChecked(
+		    qmudIsEnabledFlag(attrs.value(QStringLiteral("tls_disable_certificate_validation"))));
+	}
 	if (m_saveWorldAutomatically)
 		m_saveWorldAutomatically->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("save_world_automatically"))));
@@ -8933,6 +8971,7 @@ void WorldPreferencesDialog::populateGeneral()
 	m_proxyUsername = attrs.value(QStringLiteral("proxy_username"));
 	m_proxyPassword = attrs.value(QStringLiteral("proxy_password"));
 	updateClearCachedButton();
+	updateTlsEncryptionState();
 }
 
 void WorldPreferencesDialog::populateSound() const
@@ -9720,6 +9759,15 @@ void WorldPreferencesDialog::updateClearCachedButton() const
 	if (m_runtime)
 		enabled = m_runtime->hasCachedIp() || !m_runtime->peerAddressString().trimmed().isEmpty();
 	m_clearCachedButton->setEnabled(enabled);
+}
+
+void WorldPreferencesDialog::updateTlsEncryptionState() const
+{
+	const bool enabled = m_tlsEncryption && m_tlsEncryption->isChecked();
+	if (m_tlsMethod)
+		m_tlsMethod->setEnabled(enabled);
+	if (m_tlsDisableCertificateValidation)
+		m_tlsDisableCertificateValidation->setEnabled(enabled);
 }
 
 void WorldPreferencesDialog::populateSendToWorld() const

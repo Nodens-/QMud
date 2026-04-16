@@ -23,6 +23,10 @@ struct WorldSocketConnectionSettings
 {
 		bool    useUtf8{false};
 		bool    keepAlive{false};
+		bool    tlsEncryption{false};
+		int     tlsMethod{0};
+		bool    disableTlsCertificateValidation{false};
+		QString tlsServerName;
 		int     proxyType{0};
 		QString proxyServer;
 		quint16 proxyPort{0};
@@ -78,6 +82,12 @@ class WorldSocketService : public QObject
 		 */
 		virtual void   applyConnectionSettings(const WorldSocketConnectionSettings &settings) = 0;
 		/**
+		 * @brief Starts TLS client encryption on an already-connected socket.
+		 * @param errorMessage Optional output error text.
+		 * @return `true` when upgrade attempt was started or already active.
+		 */
+		virtual bool   startClientEncryption(QString *errorMessage) = 0;
+		/**
 		 * @brief Initiates connection to host and port.
 		 * @param host Target host.
 		 * @param port Target port.
@@ -115,22 +125,21 @@ class WorldSocketService : public QObject
 		 * @param errorMessage Optional output error text.
 		 * @return `true` when adoption succeeds.
 		 */
-		virtual bool                  adoptConnectedSocketDescriptor(qintptr descriptor,
-		                                                             QString *errorMessage) = 0;
+		virtual bool adoptConnectedSocketDescriptor(qintptr descriptor, QString *errorMessage) = 0;
 		/**
 		 * @brief Immediately aborts the underlying socket.
 		 */
-		virtual void                  abortSocket() = 0;
+		virtual void abortSocket() = 0;
 		/**
 		 * @brief Reports whether socket is currently connecting.
 		 * @return `true` when connection attempt is in progress.
 		 */
-		[[nodiscard]] virtual bool    isConnecting() const = 0;
+		[[nodiscard]] virtual bool isConnecting() const = 0;
 		/**
 		 * @brief Reports whether socket is currently connected.
 		 * @return `true` when socket is connected.
 		 */
-		[[nodiscard]] virtual bool    isConnected() const = 0;
+		[[nodiscard]] virtual bool isConnected() const = 0;
 
 	signals:
 		/**
@@ -152,6 +161,10 @@ class WorldSocketService : public QObject
 		 * @brief Emitted after successful connection establishment.
 		 */
 		void connected();
+		/**
+		 * @brief Emitted when TLS encryption becomes active on the socket.
+		 */
+		void tlsEncrypted();
 		/**
 		 * @brief Emitted after connection teardown.
 		 */

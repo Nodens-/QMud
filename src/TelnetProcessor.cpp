@@ -67,6 +67,7 @@ static constexpr unsigned char TELOPT_COMPRESS2     = 86; // MCCP v2
 static constexpr unsigned char TELOPT_ECHO          = 1;
 static constexpr unsigned char TELOPT_NAWS          = 31;
 static constexpr unsigned char TELOPT_CHARSET       = 42;
+static constexpr unsigned char TELOPT_START_TLS     = 46;
 static constexpr unsigned char TELOPT_TERMINAL_TYPE = 24;
 static constexpr unsigned char TELOPT_MUD_SPECIFIC  = 102;
 static constexpr unsigned char TELOPT_MXP           = 91;
@@ -92,6 +93,7 @@ static constexpr unsigned char CHARSET_ACCEPTED         = 2;
 static constexpr unsigned char CHARSET_REJECTED         = 3;
 static constexpr unsigned char TTYPE_IS                 = 0;
 static constexpr unsigned char TTYPE_SEND               = 1;
+static constexpr unsigned char START_TLS_FOLLOWS        = 1;
 static constexpr int           MCCP_INFLATE_CHUNK_SIZE  = 8192;
 static constexpr int           kMaxMxpPendingBytes      = 8192;
 static constexpr int           kMaxMxpEventsPending     = 4096;
@@ -452,6 +454,56 @@ void TelnetProcessor::queueEnableCompression2Negotiation()
 	sendIacDo(TELOPT_COMPRESS2);
 }
 
+void TelnetProcessor::setStartTlsEnabled(const bool enabled)
+{
+	if (m_startTlsEnabled == enabled)
+		return;
+	m_startTlsEnabled = enabled;
+	if (!m_startTlsEnabled)
+	{
+		m_startTlsDoSent              = false;
+		m_startTlsFollowsSent         = false;
+		m_startTlsUpgradeRequested    = false;
+		m_startTlsUpgradeInProgress   = false;
+		m_startTlsActive              = false;
+		m_startTlsNegotiationRejected = false;
+	}
+}
+
+void TelnetProcessor::queueStartTlsNegotiation()
+{
+	if (!m_startTlsEnabled || m_startTlsActive || m_startTlsUpgradeInProgress || m_startTlsDoSent)
+		return;
+	sendIacDo(TELOPT_START_TLS);
+	m_startTlsDoSent = true;
+}
+
+bool TelnetProcessor::takeStartTlsUpgradeRequest()
+{
+	const bool requested       = m_startTlsUpgradeRequested;
+	m_startTlsUpgradeRequested = false;
+	return requested;
+}
+
+bool TelnetProcessor::takeStartTlsNegotiationRejected()
+{
+	const bool rejected           = m_startTlsNegotiationRejected;
+	m_startTlsNegotiationRejected = false;
+	return rejected;
+}
+
+void TelnetProcessor::setStartTlsActive(const bool active)
+{
+	m_startTlsActive            = active;
+	m_startTlsUpgradeInProgress = false;
+	if (active)
+	{
+		m_startTlsDoSent              = false;
+		m_startTlsFollowsSent         = false;
+		m_startTlsNegotiationRejected = false;
+	}
+}
+
 void TelnetProcessor::resetMxp()
 {
 	mxpOff(false);
@@ -488,9 +540,15 @@ void TelnetProcessor::resetConnectionState()
 	m_pendingCompressed.clear();
 	m_compressInput.clear();
 	m_postCompressionRemainder.clear();
-	m_compressInputOffset = 0;
-	m_requestedSga        = false;
-	m_requestedEor        = false;
+	m_compressInputOffset         = 0;
+	m_startTlsActive              = false;
+	m_startTlsDoSent              = false;
+	m_startTlsFollowsSent         = false;
+	m_startTlsUpgradeRequested    = false;
+	m_startTlsUpgradeInProgress   = false;
+	m_startTlsNegotiationRejected = false;
+	m_requestedSga                = false;
+	m_requestedEor                = false;
 	m_seenWillWontOption.fill(false);
 	m_seenDoDontOption.fill(false);
 	m_noEcho = false;
@@ -667,6 +725,112 @@ bool TelnetProcessor::getCustomElementInfo(const QByteArray &name, CustomElement
 	info.definition                 = elementDefinition;
 	info.attributes                 = elementAttributes;
 	return true;
+}
+
+QList<TelnetProcessor::CustomElementInfo> TelnetProcessor::customElementInfos() const
+{
+	QList<CustomElementInfo> infos;
+	infos.reserve(m_customElements.size());
+	for (auto it = m_customElements.cbegin(); it != m_customElements.cend(); ++it)
+	{
+		const auto &[elementName, elementOpen, elementCommand, elementTag, elementFlag, elementDefinition,
+		             elementAttributes] = it.value();
+		CustomElementInfo info;
+		info.name       = elementName;
+		info.open       = elementOpen;
+		info.command    = elementCommand;
+		info.tag        = elementTag;
+		info.flag       = elementFlag;
+		info.definition = elementDefinition;
+		info.attributes = elementAttributes;
+		infos.push_back(info);
+	}
+	return infos;
+}
+
+void TelnetProcessor::setCustomElementInfos(const QList<CustomElementInfo> &elements)
+{
+	m_customElements.clear();
+	for (const CustomElementInfo &info : elements)
+	{
+		const QByteArray lowerName = info.name.toLower();
+		if (lowerName.isEmpty())
+			continue;
+		if (!m_customElements.contains(lowerName) && m_customElements.size() >= kMaxMxpCustomDefinitions)
+			break;
+		CustomElement element;
+		element.name       = lowerName;
+		element.open       = info.open;
+		element.command    = info.command;
+		element.tag        = info.tag;
+		element.flag       = info.flag;
+		element.definition = info.definition;
+		element.attributes = info.attributes;
+		m_customElements.insert(lowerName, element);
+	}
+}
+
+TelnetProcessor::MxpSessionState TelnetProcessor::mxpSessionState() const
+{
+	MxpSessionState state;
+	state.enabled      = m_mxpEnabled;
+	state.puebloActive = m_puebloActive;
+	state.secureMode   = mxpSecure();
+	state.mode         = m_mxpMode;
+	state.defaultMode  = m_mxpDefaultMode;
+	state.previousMode = m_mxpPreviousMode;
+	return state;
+}
+
+void TelnetProcessor::setMxpSessionState(const MxpSessionState &state)
+{
+	m_mxpEnabled = state.enabled;
+	if (!state.enabled)
+	{
+		m_puebloActive   = false;
+		m_mxpMode        = eMXP_open;
+		m_mxpDefaultMode = eMXP_open;
+		m_mxpPhase       = MXP_NONE;
+		m_mxpString.clear();
+		m_mxpModeChanges.clear();
+		m_mxpEvents.clear();
+		m_mxpEventsOverflowed = false;
+		m_mxpEventSequence    = 0;
+		return;
+	}
+
+	auto isValidMxpMode = [](const int mode)
+	{
+		switch (mode)
+		{
+		case eMXP_open:
+		case eMXP_secure:
+		case eMXP_locked:
+		case eMXP_secure_once:
+		case eMXP_perm_open:
+		case eMXP_perm_secure:
+		case eMXP_perm_locked:
+			return true;
+		default:
+			return false;
+		}
+	};
+
+	const int fallbackMode         = state.secureMode ? eMXP_secure : eMXP_open;
+	const int restoredMode         = isValidMxpMode(state.mode) ? state.mode : fallbackMode;
+	const int restoredDefaultMode  = isValidMxpMode(state.defaultMode) ? state.defaultMode : fallbackMode;
+	const int restoredPreviousMode = isValidMxpMode(state.previousMode) ? state.previousMode : restoredMode;
+
+	m_puebloActive    = state.puebloActive;
+	m_mxpMode         = restoredMode;
+	m_mxpDefaultMode  = restoredDefaultMode;
+	m_mxpPreviousMode = restoredPreviousMode;
+	m_mxpPhase        = MXP_NONE;
+	m_mxpString.clear();
+	m_mxpModeChanges.clear();
+	m_mxpEvents.clear();
+	m_mxpEventsOverflowed = false;
+	m_mxpEventSequence    = 0;
 }
 
 bool TelnetProcessor::isMxpSecure() const
@@ -1308,6 +1472,26 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				}
 				break; // end of TELOPT_ECHO
 
+			case TELOPT_START_TLS:
+				if (m_startTlsEnabled && !m_startTlsActive)
+				{
+					if (!m_startTlsDoSent)
+						sendIacDo(c);
+					m_startTlsDoSent = true;
+					if (!m_startTlsFollowsSent && !m_startTlsUpgradeInProgress)
+					{
+						sendStartTlsFollows();
+						m_startTlsFollowsSent       = true;
+						m_startTlsUpgradeRequested  = true;
+						m_startTlsUpgradeInProgress = true;
+					}
+				}
+				else
+				{
+					sendIacDont(c);
+				}
+				break;
+
 			case TELOPT_MXP:
 				if (m_useMxp == eNoMXP)
 				{
@@ -1377,6 +1561,16 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			}
 			if (c == TELOPT_NAWS)
 				m_nawsWanted = false;
+			if (c == TELOPT_START_TLS)
+			{
+				if (m_startTlsEnabled && !m_startTlsActive)
+					m_startTlsNegotiationRejected = true;
+				m_startTlsDoSent            = false;
+				m_startTlsFollowsSent       = false;
+				m_startTlsUpgradeRequested  = false;
+				m_startTlsUpgradeInProgress = false;
+				m_startTlsActive            = false;
+			}
 			sendIacDont(c);
 			m_seenWillWontOption[c] = true;
 			m_phase                 = NONE;
@@ -1405,6 +1599,13 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			case TELOPT_CHARSET:
 				sendIacWill(c);
 				break; // end of things we will do
+
+			case TELOPT_START_TLS:
+				if (m_startTlsEnabled && !m_startTlsActive)
+					sendIacWill(c);
+				else
+					sendIacWont(c);
+				break;
 
 			// for MTTS start back at sequence 0
 			case TELOPT_TERMINAL_TYPE:
@@ -1488,6 +1689,15 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				break;
 			case TELOPT_NAWS:
 				m_nawsWanted = false;
+				break;
+			case TELOPT_START_TLS:
+				if (m_startTlsEnabled && !m_startTlsActive)
+					m_startTlsNegotiationRejected = true;
+				m_startTlsDoSent            = false;
+				m_startTlsFollowsSent       = false;
+				m_startTlsUpgradeRequested  = false;
+				m_startTlsUpgradeInProgress = false;
+				m_startTlsActive            = false;
 				break;
 			default:
 				break;
@@ -1596,6 +1806,16 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 						else
 							sendCharsetRejected();
 					}
+				}
+			}
+			else if (m_subnegotiationType == TELOPT_START_TLS)
+			{
+				if (m_startTlsEnabled && !m_startTlsActive && !m_startTlsUpgradeInProgress &&
+				    m_subnegotiationData.size() == 1 &&
+				    static_cast<unsigned char>(m_subnegotiationData.at(0)) == START_TLS_FOLLOWS)
+				{
+					m_startTlsUpgradeRequested  = true;
+					m_startTlsUpgradeInProgress = true;
 				}
 			}
 			else if (m_subnegotiationType == TELOPT_TERMINAL_TYPE)
@@ -1763,6 +1983,12 @@ void TelnetProcessor::sendIacWill(const unsigned char option)
 void TelnetProcessor::sendIacWont(const unsigned char option)
 {
 	const unsigned char bytes[3] = {IAC, WONT, option};
+	m_outbound.append(reinterpret_cast<const char *>(bytes), sizeof bytes);
+}
+
+void TelnetProcessor::sendStartTlsFollows()
+{
+	constexpr unsigned char bytes[] = {IAC, SB, TELOPT_START_TLS, START_TLS_FOLLOWS, IAC, SE};
 	m_outbound.append(reinterpret_cast<const char *>(bytes), sizeof bytes);
 }
 

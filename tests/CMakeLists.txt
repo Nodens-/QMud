@@ -200,17 +200,10 @@ qmud_add_qtest(tst_WorldSessionRestoreFlowUtils
         LABELS
         unit)
 
-qmud_add_qtest(tst_ReloadStateUtils
+qmud_add_qtest(tst_ReloadUnit
         SOURCES
-        unit/tst_ReloadStateUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/helpers/ReloadStateUtils.cpp"
-        LABELS
-        unit)
-
-qmud_add_qtest(tst_ReloadPlannerUtils
-        SOURCES
-        unit/tst_ReloadPlannerUtils.cpp
-        "${CMAKE_SOURCE_DIR}/src/helpers/ReloadPlannerUtils.cpp"
+        unit/tst_ReloadUnit.cpp
+        "${CMAKE_SOURCE_DIR}/src/helpers/ReloadUtils.cpp"
         LABELS
         unit)
 
@@ -304,6 +297,12 @@ qmud_add_qtest(tst_LuaUtf8Utils
 qmud_add_qtest(tst_WorldRuntimeAttributeUtils
         SOURCES
         unit/tst_WorldRuntimeAttributeUtils.cpp
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_StartTlsFallbackUtils
+        SOURCES
+        unit/tst_StartTlsFallbackUtils.cpp
         LABELS
         unit)
 
@@ -409,18 +408,10 @@ qmud_add_qtest(tst_TelnetProcessor_Malformed
         TIMEOUT
         20)
 
-qmud_add_qtest(tst_ReloadStartupConsume
+qmud_add_qtest(tst_ReloadIntegration
         SOURCES
-        integration/tst_ReloadStartupConsume.cpp
-        "${CMAKE_SOURCE_DIR}/src/helpers/ReloadStateUtils.cpp"
-        LABELS
-        integration
-        TIMEOUT
-        20)
-
-qmud_add_qtest(tst_ReloadRecoveryUtils
-        SOURCES
-        integration/tst_ReloadRecoveryUtils.cpp
+        integration/tst_ReloadIntegration.cpp
+        "${CMAKE_SOURCE_DIR}/src/helpers/ReloadUtils.cpp"
         LABELS
         integration
         TIMEOUT

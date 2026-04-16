@@ -133,6 +133,38 @@ class TelnetProcessor
 		 */
 		void       queueEnableCompression2Negotiation();
 		/**
+		 * @brief Enables START-TLS telnet negotiation support.
+		 * @param enabled Enable START-TLS handling when `true`.
+		 */
+		void       setStartTlsEnabled(bool enabled);
+		/**
+		 * @brief Queues client START-TLS capability negotiation.
+		 *
+		 * Emits `IAC DO START_TLS` when START-TLS is enabled and not already active.
+		 */
+		void       queueStartTlsNegotiation();
+		/**
+		 * @brief Returns whether START-TLS upgrade was requested by negotiation.
+		 *
+		 * The returned flag is cleared after each call.
+		 *
+		 * @return `true` when caller should start TLS client encryption now.
+		 */
+		bool       takeStartTlsUpgradeRequest();
+		/**
+		 * @brief Returns whether START-TLS negotiation was rejected by peer.
+		 *
+		 * The returned flag is cleared after each call.
+		 *
+		 * @return `true` when peer rejected START-TLS negotiation.
+		 */
+		bool       takeStartTlsNegotiationRejected();
+		/**
+		 * @brief Sets whether TLS is currently active for this connection.
+		 * @param active Set to `true` after socket encryption succeeds.
+		 */
+		void       setStartTlsActive(bool active);
+		/**
 		 * @brief Installs callback targets used for telnet and MXP events.
 		 * @param callbacks Callback table.
 		 */
@@ -316,6 +348,18 @@ class TelnetProcessor
 		 */
 		void                 setMxpDefaultMode(MxpDefaultMode mode);
 		/**
+		 * @brief Snapshot of MXP session state used for reload restoration.
+		 */
+		struct MxpSessionState
+		{
+				bool enabled{false};
+				bool puebloActive{false};
+				bool secureMode{false};
+				int  mode{0};
+				int  defaultMode{0};
+				int  previousMode{0};
+		};
+		/**
 		 * @brief Query result for custom MXP element metadata.
 		 */
 		struct CustomElementInfo
@@ -335,6 +379,26 @@ class TelnetProcessor
 		 * @return `true` when custom element exists.
 		 */
 		bool getCustomElementInfo(const QByteArray &name, CustomElementInfo &info) const;
+		/**
+		 * @brief Returns all custom MXP element definitions.
+		 * @return Snapshot list of custom element metadata.
+		 */
+		[[nodiscard]] QList<CustomElementInfo> customElementInfos() const;
+		/**
+		 * @brief Replaces all custom MXP element definitions from snapshot metadata.
+		 * @param elements Custom element metadata to apply.
+		 */
+		void                          setCustomElementInfos(const QList<CustomElementInfo> &elements);
+		/**
+		 * @brief Returns MXP session-state flags used by reload restoration.
+		 * @return MXP session-state snapshot.
+		 */
+		[[nodiscard]] MxpSessionState mxpSessionState() const;
+		/**
+		 * @brief Restores MXP session-state flags after reload descriptor adoption.
+		 * @param state MXP session-state snapshot.
+		 */
+		void                          setMxpSessionState(const MxpSessionState &state);
 
 	private:
 		enum Phase
@@ -508,6 +572,10 @@ class TelnetProcessor
 		 */
 		void                     sendIacWont(unsigned char option);
 		/**
+		 * @brief Sends START-TLS FOLLOWS subnegotiation.
+		 */
+		void                     sendStartTlsFollows();
+		/**
 		 * @brief Sends CHARSET ACCEPTED subnegotiation.
 		 * @param charset Accepted charset name.
 		 */
@@ -590,6 +658,13 @@ class TelnetProcessor
 		bool                            m_compressInitOk{false};
 		bool                            m_supportsMccp2{false};
 		bool                            m_disableCompression{false};
+		bool                            m_startTlsEnabled{false};
+		bool                            m_startTlsActive{false};
+		bool                            m_startTlsDoSent{false};
+		bool                            m_startTlsFollowsSent{false};
+		bool                            m_startTlsUpgradeRequested{false};
+		bool                            m_startTlsUpgradeInProgress{false};
+		bool                            m_startTlsNegotiationRejected{false};
 		qint64                          m_totalCompressedBytes{0};
 		qint64                          m_totalUncompressedBytes{0};
 		qint64                          m_mxpTagCount{0};
