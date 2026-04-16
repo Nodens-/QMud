@@ -70,6 +70,16 @@ class tst_WorldOptions : public QObject
 			QCOMPARE(opt->maxValue, 0LL);
 		}
 
+		void tlsDisableCertificateValidationOptionIsBooleanAndDefaultOff()
+		{
+			const WorldNumericOption *opt = QMudWorldOptions::findWorldNumericOption(
+			    QStringLiteral("tls_disable_certificate_validation"));
+			QVERIFY(opt != nullptr);
+			QCOMPARE(opt->defaultValue, 0LL);
+			QCOMPARE(opt->minValue, 0LL);
+			QCOMPARE(opt->maxValue, 0LL);
+		}
+
 		void findUnknownReturnsNull()
 		{
 			QCOMPARE(QMudWorldOptions::findWorldNumericOption(QStringLiteral("not_an_option")),

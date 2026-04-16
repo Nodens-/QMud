@@ -763,8 +763,8 @@ class AppController : public QObject
 		 * @param defaultValue Value returned when key is missing.
 		 * @return Stored string value, or `defaultValue`.
 		 */
-		[[nodiscard]] QString  dbGetString(const QString &section, const QString &entry,
-		                                   const QString &defaultValue = QString()) const;
+		[[nodiscard]] QString dbGetString(const QString &section, const QString &entry,
+		                                  const QString &defaultValue = QString()) const;
 		/**
 		 * @brief Writes string value to preferences DB.
 		 * @param section Preferences section name.
@@ -772,84 +772,84 @@ class AppController : public QObject
 		 * @param value String value to store.
 		 * @return SQLite-style result code.
 		 */
-		[[nodiscard]] int      dbWriteString(const QString &section, const QString &entry,
-		                                     const QString &value) const;
+		[[nodiscard]] int     dbWriteString(const QString &section, const QString &entry,
+		                                    const QString &value) const;
 		/**
 		 * @brief Escapes string for SQL literal usage.
 		 * @param input Raw string input.
 		 * @return SQL-literal-safe string.
 		 */
-		static QString         escapeSql(const QString &input);
+		static QString        escapeSql(const QString &input);
 
 		/**
 		 * @brief Command handlers for main-window actions.
 		 */
-		void                   handleAppAbout();
+		void                  handleAppAbout();
 		/**
 		 * @brief Handles File->New action.
 		 */
-		void                   handleFileNew();
+		void                  handleFileNew();
 		/**
 		 * @brief Handles Help->Getting Started action.
 		 */
-		void                   handleHelpGettingStarted() const;
+		void                  handleHelpGettingStarted() const;
 		/**
 		 * @brief Handles Help->Contents action.
 		 */
-		void                   handleHelpContents() const;
+		void                  handleHelpContents() const;
 		/**
 		 * @brief Handles Edit->Colour Picker action.
 		 */
-		void                   handleEditColourPicker() const;
+		void                  handleEditColourPicker() const;
 		/**
 		 * @brief Handles Copy action.
 		 */
-		void                   handleCopy() const;
+		void                  handleCopy() const;
 		/**
 		 * @brief Handles Copy as HTML action.
 		 */
-		void                   handleCopyAsHtml() const;
+		void                  handleCopyAsHtml() const;
 		/**
 		 * @brief Handles Quick Connect action.
 		 */
-		void                   handleQuickConnect();
+		void                  handleQuickConnect();
 		/**
 		 * @brief Handles connect-or-reconnect action.
 		 */
-		void                   handleConnectOrReconnect() const;
+		void                  handleConnectOrReconnect() const;
 		/**
 		 * @brief Handles connect action.
 		 */
-		void                   handleConnect() const;
+		void                  handleConnect() const;
 		/**
 		 * @brief Handles disconnect action.
 		 */
-		void                   handleDisconnect() const;
+		void                  handleDisconnect() const;
 		/**
 		 * @brief Handles game minimize action.
 		 */
-		void                   handleGameMinimize() const;
+		void                  handleGameMinimize() const;
 		/**
 		 * @brief Handles log-session action.
 		 */
-		void                   handleLogSession() const;
+		void                  handleLogSession() const;
 		/**
 		 * @brief Handles reload-QMud action with socket handoff/reconnect policies.
 		 */
-		void                   handleReloadQmud();
+		void                  handleReloadQmud();
 		/**
 		 * @brief Handles output-find command variants.
 		 * @param again Repeat previous find operation.
 		 * @param forceDirection Force search direction when `true`.
 		 * @param forwards Search forward when `true`, backward otherwise.
 		 */
-		void                   handleOutputFind(bool again, bool forceDirection, bool forwards) const;
+		void                  handleOutputFind(bool again, bool forceDirection, bool forwards) const;
 		/**
 		 * @brief Activates notepad by title.
 		 * @param title Notepad title.
 		 * @return `true` when a matching notepad is activated.
 		 */
-		[[nodiscard]] bool     activateNotepad(const QString &title) const;
+		[[nodiscard]] bool    activateNotepad(const QString &title) const;
 		/**
 		 * @brief Appends/replaces notepad content.
 		 * @param title Notepad title.
@@ -857,118 +857,124 @@ class AppController : public QObject
 		 * @param replace Replace existing content when `true`; append otherwise.
 		 * @return `true` when destination notepad is found or created successfully.
 		 */
-		[[nodiscard]] bool     appendToNotepad(const QString &title, const QString &text, bool replace) const;
+		[[nodiscard]] bool    appendToNotepad(const QString &title, const QString &text, bool replace) const;
 		/**
 		 * @brief Sends text to notepad, replacing existing content.
 		 * @param title Notepad title.
 		 * @param text Text payload.
 		 * @return `true` when destination notepad is found or created successfully.
 		 */
-		[[nodiscard]] bool     sendToNotepad(const QString &title, const QString &text) const;
+		[[nodiscard]] bool    sendToNotepad(const QString &title, const QString &text) const;
 		/**
 		 * @brief Applies app-level initialization to a new world runtime.
 		 * @param runtime Runtime to initialize.
 		 */
-		void                   initializeWorldRuntime(WorldRuntime *runtime) const;
+		void                  initializeWorldRuntime(WorldRuntime *runtime) const;
 		/**
 		 * @brief Emits startup banner lines to runtime output.
 		 * @param runtime Runtime that receives startup banner output.
 		 */
-		static void            emitStartupBanner(WorldRuntime *runtime);
+		static void           emitStartupBanner(WorldRuntime *runtime);
 		/**
 		 * @brief Opens and initializes one world document.
 		 * @param path World-document path.
 		 * @return `true` when world document opens successfully.
 		 */
-		bool                   openWorldDocument(const QString &path);
+		bool                  openWorldDocument(const QString &path);
 		/**
 		 * @brief Resolves world session-state directory under the data directory.
 		 * @return Absolute world session-state directory path.
 		 */
-		[[nodiscard]] QString  worldSessionStateDirectoryPath() const;
+		[[nodiscard]] QString worldSessionStateDirectoryPath() const;
 		/**
 		 * @brief Resolves one world's session-state file path.
 		 * @param runtime World runtime.
 		 * @return Absolute session-state file path (empty when unresolved).
 		 */
-		[[nodiscard]] QString  worldSessionStateFilePath(const WorldRuntime *runtime) const;
+		[[nodiscard]] QString worldSessionStateFilePath(const WorldRuntime *runtime) const;
 		/**
 		 * @brief Persists one world's session-state file on a worker thread.
 		 * @param runtime World runtime.
 		 * @param view World view.
 		 * @param completion Completion callback executed on the GUI thread.
 		 */
-		void                   saveWorldSessionStateAsync(const WorldRuntime *runtime, const WorldView *view,
-		                                                  std::function<void(bool, const QString &)> completion) const;
+		void                  saveWorldSessionStateAsync(const WorldRuntime *runtime, const WorldView *view,
+		                                                 std::function<void(bool, const QString &)> completion) const;
 		/**
 		 * @brief Loads one world's session state on a worker thread and applies it.
 		 * @param runtime World runtime.
 		 * @param view World view.
+		 * @param forceReadSessionState Force reading existing session-state file regardless of user
+		 * persistence toggles.
 		 * @param completion Completion callback executed on the GUI thread.
 		 */
-		void                   restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldView *view,
-		                                                     std::function<void(bool, const QString &)> completion) const;
+		void restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldView *view, bool forceReadSessionState,
+		                                   std::function<void(bool, const QString &)> completion) const;
 		/**
 		 * @brief Loads one world's session state and waits for completion.
 		 * @param runtime World runtime.
 		 * @param view World view.
 		 * @param errorMessage Optional output error text.
+		 * @param forceReadSessionState Force reading existing session-state file regardless of user
+		 * persistence toggles.
 		 * @return `true` on success.
 		 */
-		[[nodiscard]] bool     restoreWorldSessionStateSync(WorldRuntime *runtime, WorldView *view,
-		                                                    QString *errorMessage = nullptr) const;
+		[[nodiscard]] bool               restoreWorldSessionStateSync(WorldRuntime *runtime, WorldView *view,
+		                                                              QString *errorMessage = nullptr,
+		                                                              bool     forceReadSessionState = false) const;
 		/**
 		 * @brief Emits startup banner and loads/installs global plugins after session-state restore.
 		 * @param runtime World runtime.
 		 */
-		void                   runWorldStartupPostRestore(WorldRuntime *runtime) const;
+		void                             runWorldStartupPostRestore(WorldRuntime *runtime) const;
 		/**
 		 * @brief Auto-connects runtime when settings request it.
 		 * @param runtime Runtime to auto-connect.
 		 */
-		void                   maybeAutoConnectWorld(WorldRuntime *runtime) const;
-		void                   beginRestoreScrollbackStatus() const;
-		void                   endRestoreScrollbackStatus() const;
-		MainWindow            *m_mainWindow{nullptr};
-		QDateTime              m_whenClientStarted;
-		QString                m_version;
-		QString                m_workingDir;
-		QString                m_fileBrowsingDir;
-		QString                m_preferencesDatabaseName;
-		QString                m_locale;
-		QString                m_translatorFile;
-		QMap<QString, int>     m_globalIntPrefs;
-		QMap<QString, QString> m_globalStringPrefs;
-		QString                m_luaScript;
-		QString                m_pluginsDirectory;
-		QString                m_fixedPitchFont;
-		QString                m_lastGlobalChangeFrom;
-		QString                m_lastGlobalChangeTo;
-		QString                m_lastGlobalReplaceFind;
-		QString                m_lastGlobalReplaceReplace;
-		QString                m_lastFunctionListFilter;
-		QString                m_lastQuickConnectWorldName;
-		QString                m_lastQuickConnectHost;
-		QString                m_lastDebugWorldInput;
-		quint16                m_lastQuickConnectPort{4000};
-		bool                   m_lastGlobalReplaceRegexp{false};
-		bool                   m_lastGlobalReplaceEachLine{false};
-		bool                   m_lastGlobalReplaceEscapeSequences{false};
-		QString                m_lastMapperSpecialAction;
-		QString                m_lastMapperSpecialReverse;
-		QString                m_lastSendToAllWorlds;
-		QString                m_asciiArtText;
-		QString                m_printSetupPrinterName;
-		QPageLayout            m_printSetupLayout;
-		bool                   m_echoSendToAll{true};
-		bool                   m_hasPrintSetup{false};
-		QStringList            m_recallFindHistory;
-		QString                m_recallLinePreamble;
-		bool                   m_recallMatchCase{false};
-		bool                   m_recallRegexp{false};
-		bool                   m_recallCommands{true};
-		bool                   m_recallOutput{true};
-		bool                   m_recallNotes{true};
+		void                             maybeAutoConnectWorld(WorldRuntime *runtime) const;
+		void                             beginRestoreScrollbackStatus() const;
+		void                             preseedRestoreScrollbackStatus(int count) const;
+		void                             endRestoreScrollbackStatus() const;
+		MainWindow                      *m_mainWindow{nullptr};
+		QDateTime                        m_whenClientStarted;
+		QString                          m_version;
+		QString                          m_workingDir;
+		QString                          m_fileBrowsingDir;
+		QString                          m_preferencesDatabaseName;
+		QString                          m_locale;
+		QString                          m_translatorFile;
+		QMap<QString, int>               m_globalIntPrefs;
+		QMap<QString, QString>           m_globalStringPrefs;
+		QString                          m_luaScript;
+		QString                          m_pluginsDirectory;
+		QString                          m_fixedPitchFont;
+		QString                          m_lastGlobalChangeFrom;
+		QString                          m_lastGlobalChangeTo;
+		QString                          m_lastGlobalReplaceFind;
+		QString                          m_lastGlobalReplaceReplace;
+		QString                          m_lastFunctionListFilter;
+		QString                          m_lastQuickConnectWorldName;
+		QString                          m_lastQuickConnectHost;
+		QString                          m_lastDebugWorldInput;
+		quint16                          m_lastQuickConnectPort{4000};
+		bool                             m_lastGlobalReplaceRegexp{false};
+		bool                             m_lastGlobalReplaceEachLine{false};
+		bool                             m_lastGlobalReplaceEscapeSequences{false};
+		QString                          m_lastMapperSpecialAction;
+		QString                          m_lastMapperSpecialReverse;
+		QString                          m_lastSendToAllWorlds;
+		QString                          m_asciiArtText;
+		QString                          m_printSetupPrinterName;
+		QPageLayout                      m_printSetupLayout;
+		bool                             m_echoSendToAll{true};
+		bool                             m_hasPrintSetup{false};
+		QStringList                      m_recallFindHistory;
+		QString                          m_recallLinePreamble;
+		bool                             m_recallMatchCase{false};
+		bool                             m_recallRegexp{false};
+		bool                             m_recallCommands{true};
+		bool                             m_recallOutput{true};
+		bool                             m_recallNotes{true};
 		QHash<class WorldRuntime *, int> m_savedWrapColumns;
 		bool                             m_autoOpen{true};
 		NewDocumentType                  m_typeOfNewDocument{eNormalNewDocument};
@@ -998,6 +1004,7 @@ class AppController : public QObject
 		std::atomic<qint64>              m_uniqueNumber{0};
 		QRandomGenerator                 m_rng{1u};
 		mutable int                      m_restoreScrollbackInFlight{0};
+		mutable int                      m_restoreScrollbackPreseedBudget{0};
 		mutable QPointer<WorldRuntime>   m_restoreScrollbackStatusRuntime;
 		mutable QString                  m_restoreScrollbackStatusPrevious;
 		mutable bool                     m_hasFontMetricApplySignature{false};

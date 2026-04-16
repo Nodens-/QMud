@@ -307,6 +307,28 @@ class tst_TelnetProcessor_Mxp : public QObject
 			QVERIFY(info.definition.contains(QByteArrayLiteral("&desc;")));
 			QCOMPARE(processor.customElementCount(), 1);
 		}
+
+		void mxpSessionStateRestoresDetailedModes()
+		{
+			TelnetProcessor processor;
+			processor.setUseMxp(2); // eUseMXP
+
+			TelnetProcessor::MxpSessionState saved;
+			saved.enabled      = true;
+			saved.puebloActive = false;
+			saved.secureMode   = true;
+			saved.mode         = 6; // eMXP_perm_secure
+			saved.defaultMode  = 6; // eMXP_perm_secure
+			saved.previousMode = 5; // eMXP_perm_open
+
+			processor.setMxpSessionState(saved);
+			const TelnetProcessor::MxpSessionState restored = processor.mxpSessionState();
+			QVERIFY(restored.enabled);
+			QVERIFY(restored.secureMode);
+			QCOMPARE(restored.mode, saved.mode);
+			QCOMPARE(restored.defaultMode, saved.defaultMode);
+			QCOMPARE(restored.previousMode, saved.previousMode);
+		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 

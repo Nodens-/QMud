@@ -27,7 +27,9 @@
 #include "MxpDiagnostics.h"
 #include "NameGeneration.h"
 #include "PluginCallbackCatalogUtils.h"
+#include "ReloadUtils.h"
 #include "SqliteCompat.h"
+#include "StartTlsFallbackUtils.h"
 #include "StringUtils.h"
 #include "TimeFormatUtils.h"
 #include "Version.h"
@@ -4388,26 +4390,54 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 		        m_mxpTextBuffer.clear();
 		        resetAnsiRenderState();
 		        m_connectViaProxy = false;
-		        m_connectPhase    = eConnectConnectedToMud;
 		        m_hasCachedIp     = true;
 		        m_connectTime     = QDateTime::currentDateTime();
-		        const bool convertGA =
-		            isEnabledFlag(m_worldAttributes.value(QStringLiteral("convert_ga_to_newline")));
-		        m_telnet.setConvertGAtoNewline(convertGA);
-		        m_telnet.queueInitialNegotiation(true, convertGA);
-		        const QByteArray outbound = m_telnet.takeOutboundData();
-		        if (!outbound.isEmpty())
-			        sendToWorld(outbound);
-		        emit connected();
+		        if (!m_tlsEncryptionEnabled)
+		        {
+			        finalizeSocketConnectedState();
+			        return;
+		        }
+		        if (m_tlsMethod == eTlsDirect)
+		        {
+			        finalizeSocketConnectedState();
+			        return;
+		        }
+		        if (m_tlsMethod == eTlsStartTls)
+		        {
+			        m_telnet.queueStartTlsNegotiation();
+			        if (const QByteArray outbound = m_telnet.takeOutboundData(); !outbound.isEmpty())
+				        sendToWorld(outbound);
+			        startStartTlsFallbackTimer();
+			        return;
+		        }
+	        });
+	connect(m_socket, &WorldSocketService::tlsEncrypted, this,
+	        [this]
+	        {
+		        cancelStartTlsFallbackTimer();
+		        if (m_tlsEncryptionEnabled && m_tlsMethod == eTlsStartTls)
+			        m_telnet.setStartTlsActive(true);
+		        finalizeSocketConnectedState();
 	        });
 	connect(m_socket, &WorldSocketService::disconnected, this,
 	        [this]
 	        {
-		        const bool wasConnected =
-		            (m_connectPhase == eConnectConnectedToMud || m_connectPhase == eConnectDisconnecting);
+		        cancelStartTlsFallbackTimer();
+		        cancelReloadMccpProbeTimeout();
+		        m_reloadReattachMccpProbePending        = false;
+		        m_reloadReattachMccpResumePending       = false;
+		        m_reloadReattachLookProbeSent           = false;
+		        m_reloadReattachMccpProbeDecisionOffset = 0;
+		        m_reloadMccpProbeTimeoutPass            = 0;
+		        m_reloadReattachMccpProbeBuffer.clear();
+		        m_reloadReattachUseDeferredMxpReplay = false;
+		        m_reloadReattachMxpProbeEvents.clear();
+		        m_reloadReattachMxpProbeModeChanges.clear();
+		        const bool wasConnected = m_socketReadyForWorld || m_connectPhase == eConnectDisconnecting;
 		        mxpShutDown();
-		        m_connectViaProxy = false;
-		        m_connectPhase    = eConnectNotConnected;
+		        m_connectViaProxy     = false;
+		        m_connectPhase        = eConnectNotConnected;
+		        m_socketReadyForWorld = false;
 		        m_telnet.resetConnectionState();
 		        resetAnsiRenderState();
 		        if (wasConnected)
@@ -4534,6 +4564,82 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 	const unsigned short previousActionSource = m_currentActionSource;
 	m_currentActionSource                     = eInputFromServer;
 
+	const QString utf8Flag  = m_worldAttributes.value(QStringLiteral("utf_8"));
+	const bool    useUtf8   = isEnabledFlag(utf8Flag);
+	const QString gaFlag    = m_worldAttributes.value(QStringLiteral("convert_ga_to_newline"));
+	const bool    convertGA = isEnabledFlag(gaFlag);
+	const bool    carriageReturnClears =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("carriage_return_clears_line")));
+	const QString noEchoOffFlag          = m_worldAttributes.value(QStringLiteral("no_echo_off"));
+	const bool    noEchoOff              = isEnabledFlag(noEchoOffFlag);
+	const QString disableCompressionFlag = m_worldAttributes.value(QStringLiteral("disable_compression"));
+	const bool    disableCompression     = isEnabledFlag(disableCompressionFlag);
+	const bool    negotiateOptionsOnce =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("only_negotiate_telnet_options_once")));
+	const int     useMxp     = m_worldAttributes.value(QStringLiteral("use_mxp")).toInt();
+	const QString terminalId = m_worldAttributes.value(QStringLiteral("terminal_identification"));
+
+	m_telnet.setUseUtf8(useUtf8);
+	m_telnet.setConvertGAtoNewline(convertGA);
+	m_telnet.setNoEchoOff(noEchoOff);
+	m_telnet.setDisableCompression(disableCompression);
+	m_telnet.setNegotiateOptionsOnce(negotiateOptionsOnce);
+	if (useMxp >= 0)
+		m_telnet.setUseMxp(useMxp);
+	updateTelnetWindowSizeForNaws();
+	if (!terminalId.isEmpty())
+		m_telnet.setTerminalIdentification(terminalId);
+
+	if (!simulatedInput && m_reloadReattachMccpProbePending)
+	{
+		// Probe quarantine mode: keep telnet state/protocol negotiation current,
+		// but defer all output/plugin processing until keep/reconnect decision.
+		QByteArray                            processed                 = m_telnet.processBytes(data);
+		QList<TelnetProcessor::MxpEvent>      mxpEventsDuringProbe      = m_telnet.takeMxpEvents();
+		QList<TelnetProcessor::MxpModeChange> mxpModeChangesDuringProbe = m_telnet.takeMxpModeChanges();
+		QByteArray const                      outbound                  = m_telnet.takeOutboundData();
+		if (!outbound.isEmpty())
+			sendToWorld(outbound);
+		if (m_tlsEncryptionEnabled && m_tlsMethod == eTlsStartTls &&
+		    m_telnet.takeStartTlsNegotiationRejected() && !m_socketReadyForWorld)
+		{
+			cancelStartTlsFallbackTimer();
+			outputText(QStringLiteral("TLS Encryption NOT enabled: Server denied."), true, true);
+			m_telnet.setStartTlsEnabled(false);
+			finalizeSocketConnectedState();
+		}
+		if (m_telnet.takeStartTlsUpgradeRequest())
+		{
+			cancelStartTlsFallbackTimer();
+			if (!beginStartTlsUpgrade())
+			{
+				m_currentActionSource = previousActionSource;
+				return;
+			}
+		}
+		if (!mxpEventsDuringProbe.isEmpty() || !mxpModeChangesDuringProbe.isEmpty())
+		{
+			const qsizetype baseOffset = m_reloadReattachMccpProbeBuffer.size();
+			for (TelnetProcessor::MxpEvent &ev : mxpEventsDuringProbe)
+				ev.offset = safeQSizeToInt(baseOffset + static_cast<qsizetype>(qMax(ev.offset, 0)));
+			for (TelnetProcessor::MxpModeChange &change : mxpModeChangesDuringProbe)
+				change.offset = safeQSizeToInt(baseOffset + static_cast<qsizetype>(qMax(change.offset, 0)));
+			m_reloadReattachMxpProbeEvents.append(mxpEventsDuringProbe);
+			m_reloadReattachMxpProbeModeChanges.append(mxpModeChangesDuringProbe);
+			m_reloadReattachUseDeferredMxpReplay = true;
+		}
+		const ReloadMccpProbeIngressInput ingressInput{
+		    simulatedInput,
+		    m_reloadReattachMccpProbePending,
+		    data.size(),
+		    processed,
+		};
+		(void)ingestReloadMccpProbeChunk(ingressInput, &m_bytesIn, &m_inputPacketCount,
+		                                 &m_reloadReattachMccpProbeBuffer);
+		m_currentActionSource = previousActionSource;
+		return;
+	}
+
 	if (!simulatedInput)
 	{
 		m_bytesIn += data.size();
@@ -4592,32 +4698,6 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		};
 		appendPacketDebug(QStringLiteral("Incoming"), data, m_inputPacketCount);
 	}
-
-	const QString utf8Flag  = m_worldAttributes.value(QStringLiteral("utf_8"));
-	const bool    useUtf8   = isEnabledFlag(utf8Flag);
-	const QString gaFlag    = m_worldAttributes.value(QStringLiteral("convert_ga_to_newline"));
-	const bool    convertGA = isEnabledFlag(gaFlag);
-	const bool    carriageReturnClears =
-	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("carriage_return_clears_line")));
-	const QString noEchoOffFlag          = m_worldAttributes.value(QStringLiteral("no_echo_off"));
-	const bool    noEchoOff              = isEnabledFlag(noEchoOffFlag);
-	const QString disableCompressionFlag = m_worldAttributes.value(QStringLiteral("disable_compression"));
-	const bool    disableCompression     = isEnabledFlag(disableCompressionFlag);
-	const bool    negotiateOptionsOnce =
-	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("only_negotiate_telnet_options_once")));
-	const int     useMxp     = m_worldAttributes.value(QStringLiteral("use_mxp")).toInt();
-	const QString terminalId = m_worldAttributes.value(QStringLiteral("terminal_identification"));
-
-	m_telnet.setUseUtf8(useUtf8);
-	m_telnet.setConvertGAtoNewline(convertGA);
-	m_telnet.setNoEchoOff(noEchoOff);
-	m_telnet.setDisableCompression(disableCompression);
-	m_telnet.setNegotiateOptionsOnce(negotiateOptionsOnce);
-	if (useMxp >= 0)
-		m_telnet.setUseMxp(useMxp);
-	updateTelnetWindowSizeForNaws();
-	if (!terminalId.isEmpty())
-		m_telnet.setTerminalIdentification(terminalId);
 
 	// Legacy behavior: packet callbacks run on telnet-processed bytes, not on the
 	// raw compressed stream.
@@ -4694,8 +4774,31 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 	QByteArray const outbound = m_telnet.takeOutboundData();
 	if (!outbound.isEmpty())
 		sendToWorld(outbound);
+	if (m_tlsEncryptionEnabled && m_tlsMethod == eTlsStartTls && m_telnet.takeStartTlsNegotiationRejected() &&
+	    !m_socketReadyForWorld)
+	{
+		cancelStartTlsFallbackTimer();
+		outputText(QStringLiteral("TLS Encryption NOT enabled: Server denied."), true, true);
+		m_telnet.setStartTlsEnabled(false);
+		finalizeSocketConnectedState();
+	}
+	if (m_telnet.takeStartTlsUpgradeRequest())
+	{
+		cancelStartTlsFallbackTimer();
+		if (!beginStartTlsUpgrade())
+		{
+			m_currentActionSource = previousActionSource;
+			return;
+		}
+	}
 	if (processed.isEmpty())
 	{
+		if (simulatedInput && m_reloadReattachUseDeferredMxpReplay)
+		{
+			m_reloadReattachUseDeferredMxpReplay = false;
+			m_reloadReattachMxpProbeEvents.clear();
+			m_reloadReattachMxpProbeModeChanges.clear();
+		}
 		m_currentActionSource = previousActionSource;
 		return;
 	}
@@ -4735,9 +4838,20 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 		return qmudDecodeWindows1252(bytes);
 	};
 
-	QList<TelnetProcessor::MxpEvent>      events                = m_telnet.takeMxpEvents();
-	QList<TelnetProcessor::MxpModeChange> modeChanges           = m_telnet.takeMxpModeChanges();
-	auto                                  resetMxpTrackingState = [this]
+	QList<TelnetProcessor::MxpEvent>      events;
+	QList<TelnetProcessor::MxpModeChange> modeChanges;
+	if (simulatedInput && m_reloadReattachUseDeferredMxpReplay)
+	{
+		events.swap(m_reloadReattachMxpProbeEvents);
+		modeChanges.swap(m_reloadReattachMxpProbeModeChanges);
+		m_reloadReattachUseDeferredMxpReplay = false;
+	}
+	else
+	{
+		events      = m_telnet.takeMxpEvents();
+		modeChanges = m_telnet.takeMxpModeChanges();
+	}
+	auto resetMxpTrackingState = [this]
 	{
 		m_mxpTagStack.clear();
 		m_mxpOpenTags.clear();
@@ -6561,16 +6675,120 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 	}
 }
 
+void WorldRuntime::finalizeSocketConnectedState()
+{
+	if (m_socketReadyForWorld)
+		return;
+	m_connectPhase       = eConnectConnectedToMud;
+	const bool convertGA = isEnabledFlag(m_worldAttributes.value(QStringLiteral("convert_ga_to_newline")));
+	const int  useMxp    = m_worldAttributes.value(QStringLiteral("use_mxp")).toInt();
+	m_telnet.setConvertGAtoNewline(convertGA);
+	if (useMxp >= 0)
+		m_telnet.setUseMxp(useMxp);
+	m_telnet.queueInitialNegotiation(true, convertGA);
+	if (const QByteArray outbound = m_telnet.takeOutboundData(); !outbound.isEmpty())
+		sendToWorld(outbound);
+	m_socketReadyForWorld = true;
+	emit connected();
+}
+
+bool WorldRuntime::beginStartTlsUpgrade()
+{
+	if (!m_socket)
+		return false;
+	QString error;
+	if (!m_socket->startClientEncryption(&error))
+	{
+		if (error.isEmpty())
+			error = QStringLiteral("START-TLS upgrade failed.");
+		emit socketError(error);
+		disconnectFromWorld();
+		return false;
+	}
+	return true;
+}
+
+void WorldRuntime::startStartTlsFallbackTimer()
+{
+	if (!(m_tlsEncryptionEnabled && m_tlsMethod == eTlsStartTls))
+		return;
+	const quint64 generation = ++m_startTlsFallbackGeneration;
+	QTimer::singleShot(500, this,
+	                   [this, generation]
+	                   {
+		                   const StartTlsFallbackContext context = {generation,
+		                                                            m_startTlsFallbackGeneration,
+		                                                            m_socket != nullptr,
+		                                                            m_socket && m_socket->isConnected(),
+		                                                            m_socketReadyForWorld,
+		                                                            m_tlsEncryptionEnabled,
+		                                                            m_tlsMethod};
+		                   if (!shouldFallbackToPlainOnStartTlsTimeout(context))
+			                   return;
+		                   outputText(QStringLiteral("TLS Encryption NOT enabled: Server did not respond to "
+		                                             "START-TLS"),
+		                              true, true);
+		                   m_telnet.setStartTlsEnabled(false);
+		                   finalizeSocketConnectedState();
+	                   });
+}
+
+void WorldRuntime::cancelStartTlsFallbackTimer()
+{
+	++m_startTlsFallbackGeneration;
+}
+
 bool WorldRuntime::connectToWorld(const QString &host, quint16 port)
 {
 	if (!m_socket)
 		return false;
 
+	cancelStartTlsFallbackTimer();
+	cancelReloadMccpProbeTimeout();
+	m_reloadReattachMccpProbePending        = false;
+	m_reloadReattachMccpResumePending       = false;
+	m_reloadReattachLookProbeSent           = false;
+	m_reloadReattachMccpProbeDecisionOffset = 0;
+	m_reloadMccpProbeTimeoutPass            = 0;
+	m_reloadReattachMccpProbeBuffer.clear();
+	m_reloadReattachUseDeferredMxpReplay = false;
+	m_reloadReattachMxpProbeEvents.clear();
+	m_reloadReattachMxpProbeModeChanges.clear();
 	m_proxyAddressString.clear();
-	m_proxyAddressV4 = 0;
-	m_disconnectOk   = false;
+	m_proxyAddressV4      = 0;
+	m_disconnectOk        = false;
+	m_socketReadyForWorld = false;
 	m_telnet.resetConnectionState();
 	resetAnsiRenderState();
+	m_tlsEncryptionEnabled = isEnabledFlag(m_worldAttributes.value(QStringLiteral("tls_encryption")));
+	if (m_tlsEncryptionEnabled)
+	{
+		const int configuredTlsMethod = m_worldAttributes.value(QStringLiteral("tls_method")).toInt();
+		if (configuredTlsMethod == eTlsStartTls)
+			m_tlsMethod = eTlsStartTls;
+		else
+			m_tlsMethod = eTlsDirect;
+		m_tlsDisableCertificateValidation =
+		    isEnabledFlag(m_worldAttributes.value(QStringLiteral("tls_disable_certificate_validation")));
+	}
+	else
+	{
+		m_tlsMethod                       = eTlsDirect;
+		m_tlsDisableCertificateValidation = false;
+	}
+	m_telnet.setStartTlsEnabled(m_tlsEncryptionEnabled && m_tlsMethod == eTlsStartTls);
+#if !QT_CONFIG(ssl)
+	if (m_tlsEncryptionEnabled)
+	{
+		const QString message =
+		    QStringLiteral("World has TLS option enabled but TLS is not enabled in this build.");
+		outputText(message, true, true);
+		m_connectViaProxy     = false;
+		m_connectPhase        = eConnectNotConnected;
+		m_socketReadyForWorld = false;
+		return false;
+	}
+#endif
 	const bool    useUtf8   = isEnabledFlag(m_worldAttributes.value(QStringLiteral("utf_8")));
 	const bool    keepAlive = isEnabledFlag(m_worldAttributes.value(QStringLiteral("send_keep_alives")));
 	const int     configuredProxyType = m_worldAttributes.value(QStringLiteral("proxy_type")).toInt();
@@ -6583,8 +6801,12 @@ bool WorldRuntime::connectToWorld(const QString &host, quint16 port)
 	    (configuredProxyType == eProxyServerSocks4 || configuredProxyType == eProxyServerSocks5) &&
 	    !proxyServer.isEmpty() && proxyPort != 0;
 	WorldSocketConnectionSettings connectionSettings;
-	connectionSettings.useUtf8       = useUtf8;
-	connectionSettings.keepAlive     = keepAlive;
+	connectionSettings.useUtf8                         = useUtf8;
+	connectionSettings.keepAlive                       = keepAlive;
+	connectionSettings.tlsEncryption                   = m_tlsEncryptionEnabled;
+	connectionSettings.tlsMethod                       = m_tlsMethod;
+	connectionSettings.disableTlsCertificateValidation = m_tlsDisableCertificateValidation;
+	connectionSettings.tlsServerName                   = host.trimmed();
 	connectionSettings.proxyType     = m_connectViaProxy ? configuredProxyType : eProxyServerNone;
 	connectionSettings.proxyServer   = m_connectViaProxy ? proxyServer : QString();
 	connectionSettings.proxyPort     = m_connectViaProxy ? proxyPort : 0;
@@ -6670,6 +6892,17 @@ void WorldRuntime::disconnectFromWorld()
 		return;
 	if (m_connectPhase == eConnectNotConnected || m_connectPhase == eConnectDisconnecting)
 		return;
+	cancelStartTlsFallbackTimer();
+	cancelReloadMccpProbeTimeout();
+	m_reloadReattachMccpProbePending        = false;
+	m_reloadReattachMccpResumePending       = false;
+	m_reloadReattachLookProbeSent           = false;
+	m_reloadReattachMccpProbeDecisionOffset = 0;
+	m_reloadMccpProbeTimeoutPass            = 0;
+	m_reloadReattachMccpProbeBuffer.clear();
+	m_reloadReattachUseDeferredMxpReplay = false;
+	m_reloadReattachMxpProbeEvents.clear();
+	m_reloadReattachMxpProbeModeChanges.clear();
 	m_disconnectOk = true;
 	m_connectPhase = eConnectDisconnecting;
 	m_socket->disconnectFromHost();
@@ -6700,10 +6933,30 @@ bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, QString 
 		return false;
 	}
 
-	m_disconnectOk = false;
+	const QList<TelnetProcessor::CustomElementInfo> preservedCustomMxpElements =
+	    m_telnet.customElementInfos();
+	const TelnetProcessor::MxpSessionState preservedMxpSessionState = m_telnet.mxpSessionState();
+	const bool                             preservedMxpActive       = m_mxpActive;
+
+	cancelStartTlsFallbackTimer();
+	cancelReloadMccpProbeTimeout();
+	m_reloadReattachMccpProbePending        = false;
+	m_reloadReattachMccpResumePending       = false;
+	m_reloadReattachLookProbeSent           = false;
+	m_reloadReattachMccpProbeDecisionOffset = 0;
+	m_reloadMccpProbeTimeoutPass            = 0;
+	m_reloadReattachMccpProbeBuffer.clear();
+	m_reloadReattachUseDeferredMxpReplay = false;
+	m_reloadReattachMxpProbeEvents.clear();
+	m_reloadReattachMxpProbeModeChanges.clear();
+	m_disconnectOk        = false;
+	m_socketReadyForWorld = false;
 	m_telnet.resetConnectionState();
+	m_telnet.setStartTlsEnabled(false);
+	m_telnet.setCustomElementInfos(preservedCustomMxpElements);
+	m_telnet.setMxpSessionState(preservedMxpSessionState);
+	m_mxpActive = preservedMxpActive && preservedMxpSessionState.enabled;
 	resetAnsiRenderState();
-	m_mxpActive = false;
 	m_mxpTagStack.clear();
 	m_mxpOpenTags.clear();
 	m_mxpTextBuffer.clear();
@@ -6719,12 +6972,16 @@ bool WorldRuntime::adoptConnectedSocketDescriptor(const int descriptor, QString 
 		return false;
 	}
 
-	m_connectViaProxy    = false;
-	m_connectPhase       = eConnectConnectedToMud;
-	m_hasCachedIp        = true;
-	m_connectTime        = QDateTime::currentDateTime();
+	m_connectViaProxy                 = false;
+	m_connectPhase                    = eConnectConnectedToMud;
+	m_tlsEncryptionEnabled            = false;
+	m_tlsMethod                       = eTlsDirect;
+	m_tlsDisableCertificateValidation = false;
+	m_hasCachedIp                     = true;
+	m_connectTime                     = QDateTime::currentDateTime();
 	const bool convertGA = isEnabledFlag(m_worldAttributes.value(QStringLiteral("convert_ga_to_newline")));
 	m_telnet.setConvertGAtoNewline(convertGA);
+	m_socketReadyForWorld = true;
 	emit connected();
 	return true;
 }
@@ -6733,12 +6990,26 @@ void WorldRuntime::closeSocketForReloadReconnect()
 {
 	if (!m_socket)
 		return;
-	m_incomingSocketDataPaused = false;
-	m_disconnectOk             = true;
-	m_connectViaProxy          = false;
-	m_connectPhase             = eConnectNotConnected;
+	cancelStartTlsFallbackTimer();
+	cancelReloadMccpProbeTimeout();
+	m_reloadReattachMccpProbePending        = false;
+	m_reloadReattachMccpResumePending       = false;
+	m_reloadReattachLookProbeSent           = false;
+	m_reloadReattachMccpProbeDecisionOffset = 0;
+	m_reloadMccpProbeTimeoutPass            = 0;
+	m_reloadReattachMccpProbeBuffer.clear();
+	m_reloadReattachUseDeferredMxpReplay = false;
+	m_reloadReattachMxpProbeEvents.clear();
+	m_reloadReattachMxpProbeModeChanges.clear();
+	m_incomingSocketDataPaused        = false;
+	m_disconnectOk                    = true;
+	m_connectViaProxy                 = false;
+	m_connectPhase                    = eConnectNotConnected;
+	m_tlsDisableCertificateValidation = false;
+	m_socketReadyForWorld             = false;
 	m_socket->abortSocket();
 	m_telnet.resetConnectionState();
+	m_telnet.setStartTlsEnabled(false);
 	resetAnsiRenderState();
 }
 
@@ -6784,6 +7055,133 @@ void WorldRuntime::requestMccpResumeAfterReloadReattach()
 	m_telnet.queueEnableCompression2Negotiation();
 	if (const QByteArray outbound = m_telnet.takeOutboundData(); !outbound.isEmpty())
 		sendToWorld(outbound);
+}
+
+void WorldRuntime::configureReloadMccpReattachProbe(const bool enabled)
+{
+	cancelReloadMccpProbeTimeout();
+	m_reloadReattachMccpProbePending        = enabled;
+	m_reloadReattachMccpResumePending       = enabled;
+	m_reloadReattachLookProbeSent           = false;
+	m_reloadReattachMccpProbeDecisionOffset = 0;
+	m_reloadMccpProbeTimeoutPass            = 0;
+	m_reloadReattachMccpProbeBuffer.clear();
+	m_reloadReattachUseDeferredMxpReplay = false;
+	m_reloadReattachMxpProbeEvents.clear();
+	m_reloadReattachMxpProbeModeChanges.clear();
+	if (enabled)
+		armReloadMccpProbeTimeout();
+}
+
+void WorldRuntime::sendReloadReattachLookProbe()
+{
+	if (!m_socket || !m_socket->isConnected())
+		return;
+	if (m_reloadReattachMccpProbePending)
+	{
+		m_reloadReattachLookProbeSent           = true;
+		m_reloadReattachMccpProbeDecisionOffset = m_reloadReattachMccpProbeBuffer.size();
+	}
+	sendToWorld(QByteArrayLiteral("look\r\n"));
+}
+
+void WorldRuntime::armReloadMccpProbeTimeout()
+{
+	const quint64 generation     = ++m_reloadMccpProbeGeneration;
+	m_reloadMccpProbeTimeoutPass = 0;
+	armReloadMccpProbeTimeoutPass(generation, 0);
+}
+
+void WorldRuntime::armReloadMccpProbeTimeoutPass(const quint64 generation, const int pass)
+{
+	QTimer::singleShot(
+	    500, this,
+	    [this, generation, pass]
+	    {
+		    if (generation != m_reloadMccpProbeGeneration)
+			    return;
+		    if (!m_reloadReattachMccpProbePending)
+			    return;
+		    const ReloadMccpProbePayloads payloads =
+		        makeReloadMccpProbePayloads(m_reloadReattachMccpProbeBuffer, m_reloadReattachLookProbeSent,
+		                                    m_reloadReattachMccpProbeDecisionOffset);
+		    const ReloadMccpProbeTimeoutAction timeoutAction =
+		        resolveReloadMccpProbeTimeoutAction(payloads.decisionPayload, pass);
+		    if (timeoutAction == ReloadMccpProbeTimeoutAction::WaitSecondPass)
+		    {
+			    m_reloadMccpProbeTimeoutPass = 1;
+			    armReloadMccpProbeTimeoutPass(generation, 1);
+			    return;
+		    }
+
+		    m_reloadReattachMccpProbePending        = false;
+		    m_reloadMccpProbeTimeoutPass            = 0;
+		    const QByteArray decisionPayload        = payloads.decisionPayload;
+		    m_reloadReattachLookProbeSent           = false;
+		    m_reloadReattachMccpProbeDecisionOffset = 0;
+		    if (timeoutAction == ReloadMccpProbeTimeoutAction::Reconnect)
+		    {
+			    m_reloadReattachMccpResumePending = false;
+			    m_reloadReattachMccpProbeBuffer.clear();
+			    m_reloadReattachUseDeferredMxpReplay = false;
+			    m_reloadReattachMxpProbeEvents.clear();
+			    m_reloadReattachMxpProbeModeChanges.clear();
+			    if (decisionPayload.isEmpty())
+			    {
+				    outputText(QStringLiteral("Reload reattach probe timed out without response. "
+				                              "Reconnecting."),
+				               true, true);
+			    }
+			    else
+			    {
+				    outputText(QStringLiteral("Reload reattach detected active MCCP stream. "
+				                              "Reconnecting."),
+				               true, true);
+			    }
+			    const QString host = m_worldAttributes.value(QStringLiteral("site")).trimmed();
+			    const quint16 port = m_worldAttributes.value(QStringLiteral("port")).toUShort();
+			    closeSocketForReloadReconnect();
+			    if (!host.isEmpty() && port != 0)
+			    {
+				    if (!connectToWorld(host, port))
+					    outputText(QStringLiteral("Reload reconnect failed to start after MCCP "
+					                              "probe fallback."),
+					               true, true);
+			    }
+			    else
+			    {
+				    outputText(QStringLiteral("Reload reconnect skipped after MCCP probe fallback "
+				                              "due to missing host/port."),
+				               true, true);
+			    }
+			    return;
+		    }
+
+		    const bool resumeAfterReplay      = m_reloadReattachMccpResumePending;
+		    m_reloadReattachMccpResumePending = false;
+		    const QByteArray buffered = takeDeferredReloadMccpProbePayload(&m_reloadReattachMccpProbeBuffer);
+		    if (!buffered.isEmpty())
+		    {
+			    const bool wasSimulated = m_doingSimulate;
+			    m_doingSimulate         = true;
+			    receiveRawData(buffered);
+			    m_doingSimulate = wasSimulated;
+		    }
+		    if (m_reloadReattachUseDeferredMxpReplay)
+		    {
+			    m_reloadReattachUseDeferredMxpReplay = false;
+			    m_reloadReattachMxpProbeEvents.clear();
+			    m_reloadReattachMxpProbeModeChanges.clear();
+		    }
+		    if (resumeAfterReplay)
+			    requestMccpResumeAfterReloadReattach();
+	    });
+}
+
+void WorldRuntime::cancelReloadMccpProbeTimeout()
+{
+	++m_reloadMccpProbeGeneration;
+	m_reloadMccpProbeTimeoutPass = 0;
 }
 
 void WorldRuntime::queueMccpDisableForReload()
@@ -9901,6 +10299,35 @@ int WorldRuntime::customEntityCount() const
 	return m_telnet.customEntityCount();
 }
 
+QList<TelnetProcessor::CustomElementInfo> WorldRuntime::customMxpElements() const
+{
+	return m_telnet.customElementInfos();
+}
+
+void WorldRuntime::setCustomMxpElements(const QList<TelnetProcessor::CustomElementInfo> &elements)
+{
+	m_telnet.setCustomElementInfos(elements);
+}
+
+TelnetProcessor::MxpSessionState WorldRuntime::mxpSessionState() const
+{
+	return m_telnet.mxpSessionState();
+}
+
+void WorldRuntime::setMxpSessionState(const TelnetProcessor::MxpSessionState &state)
+{
+	m_telnet.setMxpSessionState(state);
+	m_mxpActive = state.enabled;
+	if (!state.enabled)
+	{
+		m_mxpTagStack.clear();
+		m_mxpOpenTags.clear();
+		m_mxpTextBuffer.clear();
+		resetMxpRenderState();
+		clearAnsiActionContext();
+	}
+}
+
 QString WorldRuntime::peerAddressString() const
 {
 	if (!m_socket)
@@ -9937,9 +10364,15 @@ bool WorldRuntime::isPuebloActive() const
 
 bool WorldRuntime::isConnecting() const
 {
-	if (!m_socket)
+	switch (m_connectPhase)
+	{
+	case eConnectNotConnected:
+	case eConnectConnectedToMud:
+	case eConnectDisconnecting:
 		return false;
-	return m_socket->isConnecting();
+	default:
+		return true;
+	}
 }
 
 bool WorldRuntime::isMapping() const

@@ -2,11 +2,11 @@
  * QMud Project
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
- * File: tst_ReloadStateUtils.cpp
- * Role: QTest coverage for reload-state manifest parsing, persistence, and stale-file helpers.
+ * File: tst_ReloadUnit.cpp
+ * Role: Consolidated unit-level QTest coverage for reload state, planning, and MCCP probe helpers.
  */
 
-#include "ReloadStateUtils.h"
+#include "ReloadUtils.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QFile>
@@ -15,9 +15,9 @@
 #include <QtTest/QTest>
 
 /**
- * @brief QTest fixture covering reload-state helper behavior.
+ * @brief QTest fixture covering reload-related unit helper behavior.
  */
-class tst_ReloadStateUtils : public QObject
+class tst_ReloadUnit : public QObject
 {
 		Q_OBJECT
 
@@ -515,12 +515,284 @@ class tst_ReloadStateUtils : public QObject
 			QVERIFY(cleanupWarning.isEmpty());
 			QVERIFY(!QFile::exists(path));
 		}
+
+		void shouldAttemptMccpDisableRequiresConnectedDescriptorAndActiveMccp()
+		{
+			QVERIFY(shouldAttemptReloadMccpDisable(true, 10, false, true));
+			QVERIFY(!shouldAttemptReloadMccpDisable(false, 10, false, true));
+			QVERIFY(!shouldAttemptReloadMccpDisable(true, -1, false, true));
+			QVERIFY(!shouldAttemptReloadMccpDisable(true, 10, false, false));
+			QVERIFY(!shouldAttemptReloadMccpDisable(true, 10, true, true));
+		}
+
+		void disconnectedWorldIsNotRecovered()
+		{
+			const ReloadWorldPolicyDecision decision =
+			    computeReloadWorldPolicy({false, false, -1, false, false, false});
+			QVERIFY(!decision.connectedAtReload);
+			QVERIFY(!decision.shouldAttemptDescriptorInheritance);
+			QCOMPARE(decision.policy, ReloadSocketPolicy::Reattach);
+		}
+
+		void connectedWorldWithoutMccpUsesReattach()
+		{
+			const ReloadWorldPolicyDecision decision =
+			    computeReloadWorldPolicy({true, false, 42, false, false, false});
+			QVERIFY(decision.connectedAtReload);
+			QVERIFY(decision.shouldAttemptDescriptorInheritance);
+			QCOMPARE(decision.policy, ReloadSocketPolicy::Reattach);
+		}
+
+		void connectedWorldWithMccpTimeoutStillUsesReattach()
+		{
+			const ReloadWorldPolicyDecision decision =
+			    computeReloadWorldPolicy({true, false, 42, false, true, false});
+			QVERIFY(decision.connectedAtReload);
+			QVERIFY(decision.shouldAttemptDescriptorInheritance);
+			QCOMPARE(decision.policy, ReloadSocketPolicy::Reattach);
+		}
+
+		void connectedWorldWithMccpDisableSuccessReattaches()
+		{
+			const ReloadWorldPolicyDecision decision =
+			    computeReloadWorldPolicy({true, false, 42, false, true, true});
+			QVERIFY(decision.connectedAtReload);
+			QVERIFY(decision.shouldAttemptDescriptorInheritance);
+			QCOMPARE(decision.policy, ReloadSocketPolicy::Reattach);
+		}
+
+		void tlsWorldAlwaysUsesReconnectPolicy()
+		{
+			const ReloadWorldPolicyDecision decision =
+			    computeReloadWorldPolicy({true, false, 42, true, false, true});
+			QVERIFY(decision.connectedAtReload);
+			QVERIFY(!decision.shouldAttemptDescriptorInheritance);
+			QCOMPARE(decision.policy, ReloadSocketPolicy::ParkReconnect);
+		}
+
+		void connectedWorldWithoutDescriptorFallsBackToReconnect()
+		{
+			const ReloadWorldPolicyDecision decision =
+			    computeReloadWorldPolicy({true, false, -1, false, false, false});
+			QVERIFY(decision.connectedAtReload);
+			QVERIFY(!decision.shouldAttemptDescriptorInheritance);
+			QCOMPARE(decision.policy, ReloadSocketPolicy::ParkReconnect);
+		}
+
+		void connectingWorldUsesReconnectPolicy()
+		{
+			const ReloadWorldPolicyDecision decision =
+			    computeReloadWorldPolicy({false, true, 7, false, false, false});
+			QVERIFY(decision.connectedAtReload);
+			QVERIFY(decision.shouldAttemptDescriptorInheritance);
+			QCOMPARE(decision.policy, ReloadSocketPolicy::ParkReconnect);
+		}
+
+		void asciiPayloadIsNotFlagged()
+		{
+			const QByteArray payload =
+			    QByteArrayLiteral("You are standing in a dusty room with exits north and east.\r\n");
+			QVERIFY(!isLikelyResidualMccpPayload(payload));
+		}
+
+		void exactlyHalfPrintablePayloadIsNotFlagged()
+		{
+			QByteArray payload;
+			payload.append(QByteArrayLiteral("room here"));
+			for (int i = 0; i < 8; ++i)
+				payload.append(static_cast<char>(0x80 + i));
+			QVERIFY(!isLikelyResidualMccpPayload(payload));
+		}
+
+		void belowHalfPrintablePayloadIsFlagged()
+		{
+			QByteArray payload;
+			payload.append(QByteArrayLiteral("room"));
+			for (int i = 0; i < 8; ++i)
+				payload.append(static_cast<char>(0x80 + i));
+			QVERIFY(isLikelyResidualMccpPayload(payload));
+		}
+
+		void binaryPayloadIsFlagged()
+		{
+			QByteArray payload;
+			payload.reserve(48);
+			for (int i = 0; i < 48; ++i)
+				payload.append(static_cast<char>(0x80 + (i % 48)));
+			QVERIFY(isLikelyResidualMccpPayload(payload));
+		}
+
+		void emptyPayloadIsFlagged()
+		{
+			QVERIFY(isLikelyResidualMccpPayload(QByteArray()));
+		}
+
+		void timeoutWithNoProbeBytesReconnects()
+		{
+			QVERIFY(shouldReconnectOnReloadMccpProbeTimeout(QByteArray()));
+		}
+
+		void timeoutWithPrintableProbeBytesKeepsReattach()
+		{
+			const QByteArray payload = QByteArrayLiteral("look output room description\r\n");
+			QVERIFY(!shouldReconnectOnReloadMccpProbeTimeout(payload));
+		}
+
+		void timeoutWithMostlyBinaryProbeBytesReconnects()
+		{
+			QByteArray payload;
+			payload.append(QByteArrayLiteral("look"));
+			for (int i = 0; i < 8; ++i)
+				payload.append(static_cast<char>(0x80 + i));
+			QVERIFY(shouldReconnectOnReloadMccpProbeTimeout(payload));
+		}
+
+		void firstPassWithoutPayloadDefersToSecondPass()
+		{
+			QCOMPARE(resolveReloadMccpProbeTimeoutAction(QByteArray(), 0),
+			         ReloadMccpProbeTimeoutAction::WaitSecondPass);
+		}
+
+		void secondPassWithoutPayloadReconnects()
+		{
+			QCOMPARE(resolveReloadMccpProbeTimeoutAction(QByteArray(), 1),
+			         ReloadMccpProbeTimeoutAction::Reconnect);
+		}
+
+		void twoPassFlowKeepsWhenReplyArrivesOnSecondPass()
+		{
+			QCOMPARE(resolveReloadMccpProbeTimeoutAction(QByteArray(), 0),
+			         ReloadMccpProbeTimeoutAction::WaitSecondPass);
+			const QByteArray lateReply =
+			    QByteArrayLiteral("You are in a room with exits north and east.\r\n");
+			QCOMPARE(resolveReloadMccpProbeTimeoutAction(lateReply, 1),
+			         ReloadMccpProbeTimeoutAction::KeepReattach);
+		}
+
+		void noDecisionBytesBeforeLookProbeSend()
+		{
+			const QByteArray full = QByteArrayLiteral("prelook bytes\r\n");
+			QVERIFY(extractReloadMccpProbeDecisionPayload(full, false, 0).isEmpty());
+		}
+
+		void noDecisionBytesWhenOffsetAtTail()
+		{
+			const QByteArray full = QByteArrayLiteral("abc");
+			QVERIFY(extractReloadMccpProbeDecisionPayload(full, true, full.size()).isEmpty());
+		}
+
+		void decisionBytesStartExactlyAtLookOffset()
+		{
+			const QByteArray full = QByteArrayLiteral("prelook bytesPOSTLOOK PAYLOAD\r\n");
+			const QByteArray out  = extractReloadMccpProbeDecisionPayload(full, true, 13);
+			QCOMPARE(out, QByteArrayLiteral("POSTLOOK PAYLOAD\r\n"));
+		}
+
+		void payloadBuilderPreservesReplayAndDecisionSlices()
+		{
+			const QByteArray full = QByteArrayLiteral("AAAApost-look reply\r\n");
+			const auto       out  = makeReloadMccpProbePayloads(full, true, 4);
+			QCOMPARE(out.replayPayload, full);
+			QCOMPARE(out.decisionPayload, QByteArrayLiteral("post-look reply\r\n"));
+		}
+
+		void probeIngressSkipsWhenNotPending()
+		{
+			qint64                            bytesIn     = 10;
+			int                               packetCount = 2;
+			QByteArray                        probeBuffer = QByteArrayLiteral("existing");
+			const ReloadMccpProbeIngressInput input{
+			    false,
+			    false,
+			    5,
+			    QByteArrayLiteral("processed"),
+			};
+
+			QVERIFY(!ingestReloadMccpProbeChunk(input, &bytesIn, &packetCount, &probeBuffer));
+			QCOMPARE(bytesIn, static_cast<qint64>(10));
+			QCOMPARE(packetCount, 2);
+			QCOMPARE(probeBuffer, QByteArrayLiteral("existing"));
+		}
+
+		void probeIngressSkipsForSimulatedInput()
+		{
+			qint64                            bytesIn     = 10;
+			int                               packetCount = 2;
+			QByteArray                        probeBuffer = QByteArrayLiteral("existing");
+			const ReloadMccpProbeIngressInput input{
+			    true,
+			    true,
+			    5,
+			    QByteArrayLiteral("processed"),
+			};
+
+			QVERIFY(!ingestReloadMccpProbeChunk(input, &bytesIn, &packetCount, &probeBuffer));
+			QCOMPARE(bytesIn, static_cast<qint64>(10));
+			QCOMPARE(packetCount, 2);
+			QCOMPARE(probeBuffer, QByteArrayLiteral("existing"));
+		}
+
+		void probeIngressAccumulatesCountersAndProcessedPayload()
+		{
+			qint64                            bytesIn     = 10;
+			int                               packetCount = 2;
+			QByteArray                        probeBuffer = QByteArrayLiteral("existing");
+			const ReloadMccpProbeIngressInput input{
+			    false,
+			    true,
+			    5,
+			    QByteArrayLiteral("processed"),
+			};
+
+			QVERIFY(ingestReloadMccpProbeChunk(input, &bytesIn, &packetCount, &probeBuffer));
+			QCOMPARE(bytesIn, static_cast<qint64>(15));
+			QCOMPARE(packetCount, 3);
+			QCOMPARE(probeBuffer, QByteArrayLiteral("existingprocessed"));
+		}
+
+		void probeIngressCountsRawChunkEvenWhenProcessedIsEmpty()
+		{
+			qint64                            bytesIn     = 0;
+			int                               packetCount = 0;
+			QByteArray                        probeBuffer;
+			const ReloadMccpProbeIngressInput input{
+			    false,
+			    true,
+			    12,
+			    QByteArray(),
+			};
+
+			QVERIFY(ingestReloadMccpProbeChunk(input, &bytesIn, &packetCount, &probeBuffer));
+			QCOMPARE(bytesIn, static_cast<qint64>(12));
+			QCOMPARE(packetCount, 1);
+			QVERIFY(probeBuffer.isEmpty());
+		}
+
+		void takeDeferredPayloadReturnsAndClearsBuffer()
+		{
+			QByteArray       probeBuffer = QByteArrayLiteral("deferred-processed-data");
+
+			const QByteArray payload = takeDeferredReloadMccpProbePayload(&probeBuffer);
+			QCOMPARE(payload, QByteArrayLiteral("deferred-processed-data"));
+			QVERIFY(probeBuffer.isEmpty());
+		}
+
+		void takeDeferredPayloadIsOneShot()
+		{
+			QByteArray       probeBuffer = QByteArrayLiteral("deferred-processed-data");
+
+			const QByteArray firstTake  = takeDeferredReloadMccpProbePayload(&probeBuffer);
+			const QByteArray secondTake = takeDeferredReloadMccpProbePayload(&probeBuffer);
+
+			QCOMPARE(firstTake, QByteArrayLiteral("deferred-processed-data"));
+			QVERIFY(secondTake.isEmpty());
+			QVERIFY(probeBuffer.isEmpty());
+		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
-QTEST_APPLESS_MAIN(tst_ReloadStateUtils)
+QTEST_APPLESS_MAIN(tst_ReloadUnit)
 
-
-#if __has_include("tst_ReloadStateUtils.moc")
-#include "tst_ReloadStateUtils.moc"
+#if __has_include("tst_ReloadUnit.moc")
+#include "tst_ReloadUnit.moc"
 #endif

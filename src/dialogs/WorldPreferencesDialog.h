@@ -291,6 +291,10 @@ class WorldPreferencesDialog : public QDialog
 		 */
 		void                          updateClearCachedButton() const;
 		/**
+		 * @brief Updates TLS mode UI enable state.
+		 */
+		void                          updateTlsEncryptionState() const;
+		/**
 		 * @brief Finds text within notes editor.
 		 * @param again Continue search from current position when `true`.
 		 */
@@ -427,6 +431,9 @@ class WorldPreferencesDialog : public QDialog
 		QLineEdit                    *m_worldName{nullptr};
 		QLineEdit                    *m_host{nullptr};
 		QSpinBox                     *m_port{nullptr};
+		QCheckBox                    *m_tlsEncryption{nullptr};
+		QComboBox                    *m_tlsMethod{nullptr};
+		QCheckBox                    *m_tlsDisableCertificateValidation{nullptr};
 		QCheckBox                    *m_saveWorldAutomatically{nullptr};
 		QSpinBox                     *m_autosaveMinutes{nullptr};
 		QComboBox                    *m_proxyType{nullptr};

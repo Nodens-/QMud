@@ -176,8 +176,7 @@ set(QMUD_SOURCES
         helpers/TraceDispatchUtils.cpp
         helpers/WorldSessionRestoreFlowUtils.cpp
         helpers/WorldSessionStateUtils.cpp
-        helpers/ReloadPlannerUtils.cpp
-        helpers/ReloadStateUtils.cpp
+        helpers/ReloadUtils.cpp
         Environment.cpp
         Accelerators.cpp
         helpers/AliasMatchUtils.cpp
@@ -254,9 +253,7 @@ set(QMUD_HEADERS
         AppController.h
         Environment.h
         helpers/LogCompressionUtils.h
-        helpers/ReloadPlannerUtils.h
-        helpers/ReloadRecoveryUtils.h
-        helpers/ReloadStateUtils.h
+        helpers/ReloadUtils.h
         helpers/WorldSessionRestoreFlowUtils.h
         helpers/WorldSessionStateUtils.h
         helpers/PluginCallbackCatalogUtils.h

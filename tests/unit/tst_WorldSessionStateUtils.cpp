@@ -51,6 +51,19 @@ namespace
 		line.elapsed    = 12.5;
 		return line;
 	}
+
+	TelnetProcessor::CustomElementInfo makeSampleCustomElement()
+	{
+		TelnetProcessor::CustomElementInfo element;
+		element.name       = QByteArrayLiteral("room");
+		element.open       = true;
+		element.command    = false;
+		element.tag        = 37;
+		element.flag       = QByteArrayLiteral("SET");
+		element.definition = QByteArrayLiteral("<B><FONT COLOR=red>&text;</FONT></B>");
+		element.attributes = QByteArrayLiteral("text");
+		return element;
+	}
 } // namespace
 
 /**
@@ -69,10 +82,14 @@ class tst_WorldSessionStateUtils : public QObject
 			const QString statePath = tempDir.filePath(QStringLiteral("world.qws"));
 
 			QMudWorldSessionState::WorldSessionStateData writeData;
-			writeData.hasOutputBuffer   = true;
-			writeData.hasCommandHistory = true;
+			writeData.hasOutputBuffer      = true;
+			writeData.hasCommandHistory    = true;
+			writeData.hasCustomMxpElements = true;
+			writeData.hasMxpSessionState   = true;
+			writeData.mxpSessionState      = {true, false, false, 0, 1, 6};
 			writeData.outputLines.push_back(makeSampleLine());
 			writeData.commandHistory = {QStringLiteral("north"), QStringLiteral("look")};
+			writeData.customMxpElements.push_back(makeSampleCustomElement());
 
 			QString error;
 			QVERIFY(QMudWorldSessionState::writeSessionStateFile(statePath, writeData, &error));
@@ -83,8 +100,26 @@ class tst_WorldSessionStateUtils : public QObject
 			QVERIFY2(error.isEmpty(), qPrintable(error));
 			QVERIFY(readData.hasOutputBuffer);
 			QVERIFY(readData.hasCommandHistory);
+			QVERIFY(readData.hasCustomMxpElements);
+			QVERIFY(readData.hasMxpSessionState);
 			QCOMPARE(readData.outputLines.size(), 1);
 			QCOMPARE(readData.commandHistory, writeData.commandHistory);
+			QCOMPARE(readData.mxpSessionState.enabled, writeData.mxpSessionState.enabled);
+			QCOMPARE(readData.mxpSessionState.puebloActive, writeData.mxpSessionState.puebloActive);
+			QCOMPARE(readData.mxpSessionState.secureMode, writeData.mxpSessionState.secureMode);
+			QCOMPARE(readData.mxpSessionState.mode, writeData.mxpSessionState.mode);
+			QCOMPARE(readData.mxpSessionState.defaultMode, writeData.mxpSessionState.defaultMode);
+			QCOMPARE(readData.mxpSessionState.previousMode, writeData.mxpSessionState.previousMode);
+			QCOMPARE(readData.customMxpElements.size(), 1);
+			QCOMPARE(readData.customMxpElements.at(0).name, writeData.customMxpElements.at(0).name);
+			QCOMPARE(readData.customMxpElements.at(0).open, writeData.customMxpElements.at(0).open);
+			QCOMPARE(readData.customMxpElements.at(0).command, writeData.customMxpElements.at(0).command);
+			QCOMPARE(readData.customMxpElements.at(0).tag, writeData.customMxpElements.at(0).tag);
+			QCOMPARE(readData.customMxpElements.at(0).flag, writeData.customMxpElements.at(0).flag);
+			QCOMPARE(readData.customMxpElements.at(0).definition,
+			         writeData.customMxpElements.at(0).definition);
+			QCOMPARE(readData.customMxpElements.at(0).attributes,
+			         writeData.customMxpElements.at(0).attributes);
 
 			const WorldRuntime::LineEntry &line = readData.outputLines.at(0);
 			QCOMPARE(line.text, writeData.outputLines.at(0).text);
@@ -137,6 +172,28 @@ class tst_WorldSessionStateUtils : public QObject
 			QVERIFY(!historyOnlyRead.hasOutputBuffer);
 			QVERIFY(historyOnlyRead.hasCommandHistory);
 			QCOMPARE(historyOnlyRead.commandHistory, historyOnly.commandHistory);
+
+			const QString customOnlyPath = tempDir.filePath(QStringLiteral("custom_only.qws"));
+			QMudWorldSessionState::WorldSessionStateData customOnly;
+			customOnly.hasCustomMxpElements = true;
+			customOnly.hasMxpSessionState   = true;
+			customOnly.mxpSessionState      = {true, true, true, 6, 6, 6};
+			customOnly.customMxpElements.push_back(makeSampleCustomElement());
+			QVERIFY(QMudWorldSessionState::writeSessionStateFile(customOnlyPath, customOnly, &error));
+			QMudWorldSessionState::WorldSessionStateData customOnlyRead;
+			QVERIFY(QMudWorldSessionState::readSessionStateFile(customOnlyPath, &customOnlyRead, &error));
+			QVERIFY(!customOnlyRead.hasOutputBuffer);
+			QVERIFY(!customOnlyRead.hasCommandHistory);
+			QVERIFY(customOnlyRead.hasCustomMxpElements);
+			QVERIFY(customOnlyRead.hasMxpSessionState);
+			QCOMPARE(customOnlyRead.customMxpElements.size(), 1);
+			QCOMPARE(customOnlyRead.customMxpElements.at(0).name, customOnly.customMxpElements.at(0).name);
+			QCOMPARE(customOnlyRead.mxpSessionState.enabled, customOnly.mxpSessionState.enabled);
+			QCOMPARE(customOnlyRead.mxpSessionState.puebloActive, customOnly.mxpSessionState.puebloActive);
+			QCOMPARE(customOnlyRead.mxpSessionState.secureMode, customOnly.mxpSessionState.secureMode);
+			QCOMPARE(customOnlyRead.mxpSessionState.mode, customOnly.mxpSessionState.mode);
+			QCOMPARE(customOnlyRead.mxpSessionState.defaultMode, customOnly.mxpSessionState.defaultMode);
+			QCOMPARE(customOnlyRead.mxpSessionState.previousMode, customOnly.mxpSessionState.previousMode);
 		}
 
 		void removeSessionStateFileHandlesMissingAndExistingFiles()
@@ -189,7 +246,6 @@ class tst_WorldSessionStateUtils : public QObject
 };
 
 QTEST_APPLESS_MAIN(tst_WorldSessionStateUtils)
-
 
 #if __has_include("tst_WorldSessionStateUtils.moc")
 #include "tst_WorldSessionStateUtils.moc"

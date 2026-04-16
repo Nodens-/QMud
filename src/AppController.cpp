@@ -25,9 +25,7 @@
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
 #include "NameGeneration.h"
-#include "ReloadPlannerUtils.h"
-#include "ReloadRecoveryUtils.h"
-#include "ReloadStateUtils.h"
+#include "ReloadUtils.h"
 #include "SqliteCompat.h"
 #include "UpdateCheckUtils.h"
 #include "Version.h"
@@ -203,6 +201,75 @@ namespace
 	constexpr char   kWorldSessionStateSuffix[]  = ".qws";
 	constexpr char   kWorldSessionStateDir[]     = "worlds/state";
 	constexpr char   kUpdateLatestReleaseUrl[] = "https://api.github.com/repos/Nodens-/QMud/releases/latest";
+
+	class WorldRuntimeReloadOps final : public ReloadSocketRecoveryOps,
+	                                    public ReloadReconnectOps,
+	                                    public ReloadPostReattachOps
+	{
+		public:
+			explicit WorldRuntimeReloadOps(WorldRuntime &runtime) : m_runtime(runtime)
+			{
+			}
+
+			[[nodiscard]] bool adoptConnectedSocketDescriptor(const int descriptor,
+			                                                  QString  *errorMessage) override
+			{
+				return m_runtime.adoptConnectedSocketDescriptor(descriptor, errorMessage);
+			}
+
+			void markReloadReattachConnectActionsSuppressed() override
+			{
+				m_runtime.markReloadReattachConnectActionsSuppressed();
+			}
+
+			[[nodiscard]] bool consumeReloadReattachConnectActionsSuppressed() override
+			{
+				return m_runtime.consumeReloadReattachConnectActionsSuppressed();
+			}
+
+			void closeSocketForReloadReconnect() override
+			{
+				m_runtime.closeSocketForReloadReconnect();
+			}
+
+			void setIncomingSocketDataPaused(const bool paused) override
+			{
+				m_runtime.setIncomingSocketDataPaused(paused);
+			}
+
+			[[nodiscard]] QString worldAttribute(const QString &name) const override
+			{
+				return m_runtime.worldAttributes().value(name);
+			}
+
+			void setWorldAttribute(const QString &name, const QString &value) override
+			{
+				m_runtime.setWorldAttribute(name, value);
+			}
+
+			[[nodiscard]] bool connectToWorld(const QString &host, const quint16 port) override
+			{
+				return m_runtime.connectToWorld(host, port);
+			}
+
+			void configureReloadMccpReattachProbe(const bool enabled) override
+			{
+				m_runtime.configureReloadMccpReattachProbe(enabled);
+			}
+
+			void requestMccpResumeAfterReloadReattach() override
+			{
+				m_runtime.requestMccpResumeAfterReloadReattach();
+			}
+
+			void sendReloadReattachLookProbe() override
+			{
+				m_runtime.sendReloadReattachLookProbe();
+			}
+
+		private:
+			WorldRuntime &m_runtime;
+	};
 
 	using UpdateInstallTarget = QMudUpdateCheck::InstallTarget;
 	using QMudUpdateCheck::compareVersions;
@@ -3059,19 +3126,27 @@ void AppController::saveWorldSessionStateAsync(const WorldRuntime *runtime, cons
 	}
 
 	QMudWorldSessionState::WorldSessionStateData state;
-	state.hasOutputBuffer   = persistOutputBuffer;
-	state.hasCommandHistory = persistCommandHistory;
+	const TelnetProcessor::MxpSessionState       mxpState = runtime->mxpSessionState();
+	state.hasOutputBuffer                                 = persistOutputBuffer;
+	state.hasCommandHistory                               = persistCommandHistory;
+	state.hasCustomMxpElements                            = runtime->customElementCount() > 0;
+	state.hasMxpSessionState                              = mxpState.enabled;
 	if (persistOutputBuffer)
 		state.outputLines = runtime->lines();
 	if (persistCommandHistory)
 		state.commandHistory = view->commandHistoryList();
+	if (state.hasCustomMxpElements)
+		state.customMxpElements = runtime->customMxpElements();
+	if (state.hasMxpSessionState)
+		state.mxpSessionState = mxpState;
 
 	QThreadPool::globalInstance()->start(
 	    [filePath, state = std::move(state), completionFn]
 	    {
 		    QString error;
 		    bool    ok = true;
-		    if (!state.hasOutputBuffer && !state.hasCommandHistory)
+		    if (!state.hasOutputBuffer && !state.hasCommandHistory && !state.hasCustomMxpElements &&
+		        !state.hasMxpSessionState)
 			    ok = QMudWorldSessionState::removeSessionStateFile(filePath, &error);
 		    else
 			    ok = QMudWorldSessionState::writeSessionStateFile(filePath, state, &error);
@@ -3105,6 +3180,27 @@ void AppController::beginRestoreScrollbackStatus() const
 	    QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(m_restoreScrollbackInFlight));
 }
 
+void AppController::preseedRestoreScrollbackStatus(const int count) const
+{
+	if (!m_mainWindow || count <= 0)
+		return;
+
+	if (m_restoreScrollbackInFlight == 0)
+	{
+		if (const WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
+			m_restoreScrollbackStatusRuntime = world->runtime();
+		else
+			m_restoreScrollbackStatusRuntime = nullptr;
+		m_restoreScrollbackStatusPrevious =
+		    m_restoreScrollbackStatusRuntime ? m_restoreScrollbackStatusRuntime->statusMessage() : QString{};
+	}
+
+	m_restoreScrollbackInFlight += count;
+	m_restoreScrollbackPreseedBudget += count;
+	m_mainWindow->setStatusMessageNow(
+	    QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(m_restoreScrollbackInFlight));
+}
+
 void AppController::endRestoreScrollbackStatus() const
 {
 	if (m_restoreScrollbackInFlight <= 0)
@@ -3129,10 +3225,12 @@ void AppController::endRestoreScrollbackStatus() const
 
 	m_restoreScrollbackStatusRuntime = nullptr;
 	m_restoreScrollbackStatusPrevious.clear();
+	m_restoreScrollbackPreseedBudget = 0;
 	maybeShowDeferredUpgradeWelcomeAfterStartupRestores();
 }
 
 void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldView *view,
+                                                  const bool forceReadSessionState,
                                                   std::function<void(bool, const QString &)> completion) const
 {
 	const auto completionFn =
@@ -3160,13 +3258,21 @@ void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldVi
 		finish(true, QString());
 		return;
 	}
-	const auto loadPlan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
-	    persistOutputBuffer, persistCommandHistory, QFileInfo::exists(filePath));
+	const bool stateFileExists = QFileInfo::exists(filePath);
+	const auto loadPlan        = (forceReadSessionState && stateFileExists)
+	                                 ? QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply
+	                                 : QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
+                                    persistOutputBuffer, persistCommandHistory, stateFileExists);
 	const bool trackScrollbackRestoreStatus =
 	    QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(persistOutputBuffer, loadPlan);
 	const QPointer<AppController> controllerGuard(const_cast<AppController *>(this));
 	if (trackScrollbackRestoreStatus && controllerGuard)
-		controllerGuard->beginRestoreScrollbackStatus();
+	{
+		if (controllerGuard->m_restoreScrollbackPreseedBudget > 0)
+			--controllerGuard->m_restoreScrollbackPreseedBudget;
+		else
+			controllerGuard->beginRestoreScrollbackStatus();
+	}
 
 	QThreadPool::globalInstance()->start(
 	    [controllerGuard, runtimeGuard, viewGuard, filePath, persistOutputBuffer, persistCommandHistory,
@@ -3212,6 +3318,10 @@ void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldVi
 					        runtimeGuard->replaceOutputLines(state.outputLines);
 				        if (persistCommandHistory && state.hasCommandHistory)
 					        viewGuard->setCommandHistoryList(state.commandHistory);
+				        if (state.hasMxpSessionState)
+					        runtimeGuard->setMxpSessionState(state.mxpSessionState);
+				        if (state.hasCustomMxpElements)
+					        runtimeGuard->setCustomMxpElements(state.customMxpElements);
 			        }
 
 			        if (completionFn && *completionFn)
@@ -3223,7 +3333,8 @@ void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldVi
 }
 
 bool AppController::restoreWorldSessionStateSync(WorldRuntime *runtime, WorldView *view,
-                                                 QString *errorMessage) const
+                                                 QString   *errorMessage,
+                                                 const bool forceReadSessionState) const
 {
 	if (errorMessage)
 		errorMessage->clear();
@@ -3232,7 +3343,7 @@ bool AppController::restoreWorldSessionStateSync(WorldRuntime *runtime, WorldVie
 	QString    loadError;
 	bool       done = false;
 	QEventLoop waitLoop;
-	restoreWorldSessionStateAsync(runtime, view,
+	restoreWorldSessionStateAsync(runtime, view, forceReadSessionState,
 	                              [&loadOk, &loadError, &done, &waitLoop](const bool ok, const QString &error)
 	                              {
 		                              loadOk    = ok;
@@ -4288,7 +4399,8 @@ void AppController::reconnectRecoveredWorld(WorldRuntime *runtime, const ReloadW
 {
 	if (!runtime)
 		return;
-	if (const QString warning = reconnectRecoveredRuntime(*runtime, worldState, closeSocketFirst);
+	WorldRuntimeReloadOps runtimeOps(*runtime);
+	if (const QString warning = reconnectRecoveredRuntime(runtimeOps, worldState, closeSocketFirst);
 	    !warning.isEmpty())
 	{
 		qWarning() << warning;
@@ -4437,12 +4549,22 @@ bool AppController::recoverReloadStartupState()
 		return true;
 	}
 
-	const auto handleRecoveredWorld = [this, asyncContext](WorldRuntime           *runtime,
-	                                                       const ReloadWorldState &worldState, const bool ok,
-	                                                       const QString &error)
+	auto restoredOneWorld = [asyncContext, finalizeRecovery]()
+	{
+		--asyncContext->pending;
+		if (asyncContext->pending <= 0)
+			finalizeRecovery();
+	};
+
+	const auto handleRecoveredWorld =
+	    [this, asyncContext, restoredOneWorld](WorldRuntime *runtime, const ReloadWorldState &worldState,
+	                                           const bool ok, const QString &error)
 	{
 		if (!runtime)
+		{
+			restoredOneWorld();
 			return;
+		}
 
 		if (!ok && !error.isEmpty())
 		{
@@ -4451,104 +4573,125 @@ bool AppController::recoverReloadStartupState()
 		}
 		runWorldStartupPostRestore(runtime);
 
-		if (worldState.connectedAtReload && worldState.socketDescriptor >= 0)
+		if (!worldState.connectedAtReload)
 		{
-			const ReloadRecoverySocketDecision decision = applyReloadSocketRecovery(*runtime, worldState);
-#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
-			QString cloexecError;
-			if (!setSocketDescriptorInheritable(worldState.socketDescriptor, false, &cloexecError) &&
-			    !cloexecError.isEmpty())
-			{
-				printReloadInfoToStdout(
-				    QStringLiteral("Unable to restore close-on-exec for descriptor %1 after recovery: %2")
-				        .arg(worldState.socketDescriptor)
-				        .arg(cloexecError));
-			}
-#endif
-			if (decision.outcome == ReloadRecoverySocketOutcome::ReconnectQueued)
-			{
-				if (!decision.error.isEmpty())
-				{
-					++asyncContext->adoptFailures;
-					printReloadInfoToStdout(
-					    QStringLiteral("Socket reattach failed for %1; reconnect queued. Descriptor=%2. "
-					                   "Reason: %3")
-					        .arg(reloadWorldIdentity(worldState))
-					        .arg(worldState.socketDescriptor)
-					        .arg(decision.error.trimmed().isEmpty() ? QStringLiteral("Unknown error.")
-					                                                : decision.error.trimmed()));
-#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
-					QString closeError;
-					if (!closeSocketDescriptorIfOpen(worldState.socketDescriptor, &closeError) &&
-					    !closeError.isEmpty())
-					{
-						printReloadInfoToStdout(
-						    QStringLiteral("Unable to close orphaned descriptor %1 during reconnect "
-						                   "fallback: %2")
-						        .arg(worldState.socketDescriptor)
-						        .arg(closeError));
-					}
-#endif
-				}
-				else
-				{
-					const QString reason =
-					    !worldState.notes.trimmed().isEmpty()
-					        ? worldState.notes.trimmed()
-					        : QStringLiteral("Policy selected reconnect after descriptor adoption.");
-					printReloadInfoToStdout(
-					    QStringLiteral("Reconnect queued for %1. Descriptor=%2. Reason: %3")
-					        .arg(reloadWorldIdentity(worldState))
-					        .arg(worldState.socketDescriptor)
-					        .arg(reason));
-				}
-				++asyncContext->reconnectCount;
-				if (asyncContext->verboseReloadLogs)
-				{
-					qInfo() << kReloadLogTag << "Queued reconnect for"
-					        << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
-					                                             : worldState.displayName);
-				}
-				reconnectRecoveredWorld(runtime, worldState, decision.closeSocketFirst);
-			}
-			else if (decision.outcome == ReloadRecoverySocketOutcome::Reattached)
-			{
-				if (worldState.mccpWasActive)
-					runtime->requestMccpResumeAfterReloadReattach();
-				++asyncContext->reattachedCount;
-				if (asyncContext->verboseReloadLogs)
-				{
-					qInfo() << kReloadLogTag << "Reattached socket for"
-					        << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
-					                                             : worldState.displayName);
-				}
-			}
+			restoredOneWorld();
+			return;
 		}
-		else if (worldState.connectedAtReload)
-		{
-			++asyncContext->reconnectCount;
-			const QString reason = !worldState.notes.trimmed().isEmpty()
-			                           ? worldState.notes.trimmed()
-			                           : QStringLiteral("Connected world had no reusable socket descriptor.");
-			printReloadInfoToStdout(QStringLiteral("Reconnect queued for %1. Descriptor=%2. Reason: %3")
-			                            .arg(reloadWorldIdentity(worldState))
-			                            .arg(worldState.socketDescriptor)
-			                            .arg(reason));
-			if (asyncContext->verboseReloadLogs)
-			{
-				qInfo() << kReloadLogTag << "Queued reconnect (no descriptor) for"
-				        << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
-				                                             : worldState.displayName);
-			}
-			reconnectRecoveredWorld(runtime, worldState, false);
-		}
-	};
 
-	auto restoredOneWorld = [asyncContext, finalizeRecovery]()
-	{
-		--asyncContext->pending;
-		if (asyncContext->pending <= 0)
-			finalizeRecovery();
+		// Defer socket reattach/probe work to the next event-loop turn so restored
+		// output can paint before network recovery traffic starts.
+		const QPointer<WorldRuntime> runtimeGuard(runtime);
+		QMetaObject::invokeMethod(
+		    qApp,
+		    [asyncContext, runtimeGuard, worldState, restoredOneWorld]
+		    {
+			    if (!runtimeGuard)
+			    {
+				    restoredOneWorld();
+				    return;
+			    }
+
+			    WorldRuntime *runtimePtr = runtimeGuard.data();
+			    if (worldState.socketDescriptor >= 0)
+			    {
+				    WorldRuntimeReloadOps              runtimeOps(*runtimePtr);
+				    const ReloadRecoverySocketDecision decision =
+				        applyReloadSocketRecovery(runtimeOps, worldState);
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+				    QString cloexecError;
+				    if (!setSocketDescriptorInheritable(worldState.socketDescriptor, false, &cloexecError) &&
+				        !cloexecError.isEmpty())
+				    {
+					    printReloadInfoToStdout(
+					        QStringLiteral(
+					            "Unable to restore close-on-exec for descriptor %1 after recovery: %2")
+					            .arg(worldState.socketDescriptor)
+					            .arg(cloexecError));
+				    }
+#endif
+				    if (decision.outcome == ReloadRecoverySocketOutcome::ReconnectQueued)
+				    {
+					    if (!decision.error.isEmpty())
+					    {
+						    ++asyncContext->adoptFailures;
+						    printReloadInfoToStdout(
+						        QStringLiteral(
+						            "Socket reattach failed for %1; reconnect queued. Descriptor=%2. "
+						            "Reason: %3")
+						            .arg(reloadWorldIdentity(worldState))
+						            .arg(worldState.socketDescriptor)
+						            .arg(decision.error.trimmed().isEmpty() ? QStringLiteral("Unknown error.")
+						                                                    : decision.error.trimmed()));
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+						    QString closeError;
+						    if (!closeSocketDescriptorIfOpen(worldState.socketDescriptor, &closeError) &&
+						        !closeError.isEmpty())
+						    {
+							    printReloadInfoToStdout(
+							        QStringLiteral("Unable to close orphaned descriptor %1 during reconnect "
+							                       "fallback: %2")
+							            .arg(worldState.socketDescriptor)
+							            .arg(closeError));
+						    }
+#endif
+					    }
+					    else
+					    {
+						    const QString reason =
+						        !worldState.notes.trimmed().isEmpty()
+						            ? worldState.notes.trimmed()
+						            : QStringLiteral("Policy selected reconnect after descriptor adoption.");
+						    printReloadInfoToStdout(
+						        QStringLiteral("Reconnect queued for %1. Descriptor=%2. Reason: %3")
+						            .arg(reloadWorldIdentity(worldState))
+						            .arg(worldState.socketDescriptor)
+						            .arg(reason));
+					    }
+					    ++asyncContext->reconnectCount;
+					    if (asyncContext->verboseReloadLogs)
+					    {
+						    qInfo() << kReloadLogTag << "Queued reconnect for"
+						            << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
+						                                                 : worldState.displayName);
+					    }
+					    reconnectRecoveredWorld(runtimePtr, worldState, decision.closeSocketFirst);
+				    }
+				    else if (decision.outcome == ReloadRecoverySocketOutcome::Reattached)
+				    {
+					    applyReloadPostReattachActions(runtimeOps, worldState);
+					    ++asyncContext->reattachedCount;
+					    if (asyncContext->verboseReloadLogs)
+					    {
+						    qInfo() << kReloadLogTag << "Reattached socket for"
+						            << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
+						                                                 : worldState.displayName);
+					    }
+				    }
+			    }
+			    else
+			    {
+				    ++asyncContext->reconnectCount;
+				    const QString reason =
+				        !worldState.notes.trimmed().isEmpty()
+				            ? worldState.notes.trimmed()
+				            : QStringLiteral("Connected world had no reusable socket descriptor.");
+				    printReloadInfoToStdout(
+				        QStringLiteral("Reconnect queued for %1. Descriptor=%2. Reason: %3")
+				            .arg(reloadWorldIdentity(worldState))
+				            .arg(worldState.socketDescriptor)
+				            .arg(reason));
+				    if (asyncContext->verboseReloadLogs)
+				    {
+					    qInfo() << kReloadLogTag << "Queued reconnect (no descriptor) for"
+					            << (worldState.displayName.isEmpty() ? QStringLiteral("<unnamed>")
+					                                                 : worldState.displayName);
+				    }
+				    reconnectRecoveredWorld(runtimePtr, worldState, false);
+			    }
+			    restoredOneWorld();
+		    },
+		    Qt::QueuedConnection);
 	};
 
 	if (asyncContext->requestedActiveRuntime && !openedWorlds.isEmpty())
@@ -4564,15 +4707,42 @@ bool AppController::recoverReloadStartupState()
 		}
 	}
 
+	const auto tracksScrollbackRestore = [this](const WorldRuntime *runtime)
+	{
+		if (!runtime)
+			return false;
+		const QString filePath = worldSessionStateFilePath(runtime);
+		if (filePath.trimmed().isEmpty())
+			return false;
+		const QMap<QString, QString> attrs = runtime->worldAttributes();
+		const bool persistOutputBuffer = isEnabledFlag(attrs.value(QStringLiteral("persist_output_buffer")));
+		const bool persistCommandHistory =
+		    isEnabledFlag(attrs.value(QStringLiteral("persist_command_history")));
+		const bool stateFileExists = QFileInfo::exists(filePath);
+		const auto loadPlan        = stateFileExists
+		                                 ? QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply
+		                                 : QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
+                                        persistOutputBuffer, persistCommandHistory, false);
+		return QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(persistOutputBuffer, loadPlan);
+	};
+
+	int preseedRestoreCount = 0;
+	for (const OpenedRecoveryWorld &opened : std::as_const(openedWorlds))
+	{
+		if (tracksScrollbackRestore(opened.runtime))
+			++preseedRestoreCount;
+	}
+	if (preseedRestoreCount > 0)
+		preseedRestoreScrollbackStatus(preseedRestoreCount);
+
 	if (asyncContext->requestedActiveRuntime && !openedWorlds.isEmpty() &&
 	    openedWorlds.front().runtime == asyncContext->requestedActiveRuntime)
 	{
 		const OpenedRecoveryWorld opened = openedWorlds.front();
 		openedWorlds.pop_front();
 		QString    restoreError;
-		const bool restored = restoreWorldSessionStateSync(opened.runtime, opened.view, &restoreError);
+		const bool restored = restoreWorldSessionStateSync(opened.runtime, opened.view, &restoreError, true);
 		handleRecoveredWorld(opened.runtime, opened.state, restored, restoreError);
-		restoredOneWorld();
 	}
 
 	if (asyncContext->pending <= 0)
@@ -4584,13 +4754,10 @@ bool AppController::recoverReloadStartupState()
 		const QPointer<WorldView>    viewGuard    = opened.view;
 		const ReloadWorldState       worldState   = opened.state;
 
-		restoreWorldSessionStateAsync(runtimeGuard, viewGuard,
-		                              [runtimeGuard, worldState, handleRecoveredWorld,
-		                               restoredOneWorld](const bool ok, const QString &error)
-		                              {
-			                              handleRecoveredWorld(runtimeGuard, worldState, ok, error);
-			                              restoredOneWorld();
-		                              });
+		restoreWorldSessionStateAsync(
+		    runtimeGuard, viewGuard, true,
+		    [runtimeGuard, worldState, handleRecoveredWorld](const bool ok, const QString &error)
+		    { handleRecoveredWorld(runtimeGuard, worldState, ok, error); });
 	}
 
 	return true;
@@ -4919,7 +5086,7 @@ bool AppController::openWorldDocument(const QString &path)
 		}
 		const QPointer<WorldRuntime> runtimeGuard(runtime);
 		restoreWorldSessionStateAsync(
-		    runtime, window->view(),
+		    runtime, window->view(), false,
 		    [this, runtimeGuard](const bool ok, const QString &error)
 		    {
 			    if (!runtimeGuard)
@@ -4962,7 +5129,7 @@ bool AppController::openWorldDocument(const QString &path)
 		return true;
 	const QPointer<WorldRuntime> runtimeGuard(runtime);
 	restoreWorldSessionStateAsync(
-	    runtime, window->view(),
+	    runtime, window->view(), false,
 	    [this, runtimeGuard](const bool ok, const QString &error)
 	    {
 		    if (!runtimeGuard)
@@ -13262,7 +13429,7 @@ void AppController::handleFileNew()
 	{
 		const QPointer<WorldRuntime> runtimeGuard(runtime);
 		restoreWorldSessionStateAsync(
-		    runtime, window->view(),
+		    runtime, window->view(), false,
 		    [this, runtimeGuard](const bool ok, const QString &error)
 		    {
 			    if (!runtimeGuard)
@@ -14045,16 +14212,18 @@ void AppController::handleReloadQmud()
 		world.worldId                       = attrs.value(QStringLiteral("id")).trimmed();
 		if (world.displayName.isEmpty())
 			world.displayName = attrs.value(QStringLiteral("name")).trimmed();
-		world.worldFilePath = runtime->worldFilePath();
-		world.host          = attrs.value(QStringLiteral("site")).trimmed();
-		world.port          = attrs.value(QStringLiteral("port")).toUShort();
-		world.utf8Enabled   = isEnabledFlag(attrs.value(QStringLiteral("utf_8")));
+		world.worldFilePath   = runtime->worldFilePath();
+		world.host            = attrs.value(QStringLiteral("site")).trimmed();
+		world.port            = attrs.value(QStringLiteral("port")).toUShort();
+		world.utf8Enabled     = isEnabledFlag(attrs.value(QStringLiteral("utf_8")));
+		const bool tlsEnabled = isEnabledFlag(attrs.value(QStringLiteral("tls_encryption")));
 
 		const bool connected = runtime->isConnected();
 		runtimeContexts.push_back({runtime});
 		world.socketDescriptor = runtime->nativeSocketDescriptor();
 		world.mccpWasActive    = runtime->isCompressing() || runtime->mccpType() != 0;
-		if (shouldAttemptReloadMccpDisable(connected, world.socketDescriptor, world.mccpWasActive))
+		if (shouldAttemptReloadMccpDisable(connected, world.socketDescriptor, tlsEnabled,
+		                                   world.mccpWasActive))
 		{
 			world.mccpDisableAttempted = true;
 			runtime->queueMccpDisableForReload();
@@ -14118,22 +14287,30 @@ void AppController::handleReloadQmud()
 		const bool connectedNow  = ctx.runtime->isConnected();
 		const bool connectingNow = ctx.runtime->isConnecting();
 		world.socketDescriptor   = ctx.runtime->nativeSocketDescriptor();
+		const bool tlsEnabled =
+		    isEnabledFlag(ctx.runtime->worldAttributes().value(QStringLiteral("tls_encryption")));
 		if (!world.mccpDisableAttempted)
 		{
 			const bool mccpActiveNow   = ctx.runtime->isCompressing() || ctx.runtime->mccpType() != 0;
 			world.mccpDisableSucceeded = !mccpActiveNow;
 		}
 		const ReloadWorldPolicyDecision policyDecision =
-		    computeReloadWorldPolicy({connectedNow, connectingNow, world.socketDescriptor,
+		    computeReloadWorldPolicy({connectedNow, connectingNow, world.socketDescriptor, tlsEnabled,
 		                              world.mccpWasActive, world.mccpDisableSucceeded});
 		world.connectedAtReload = policyDecision.connectedAtReload;
 		world.policy            = policyDecision.policy;
-		if (world.connectedAtReload && world.policy == ReloadSocketPolicy::ParkReconnect &&
-		    world.socketDescriptor >= 0 && world.mccpWasActive && !world.mccpDisableSucceeded &&
+		if (world.connectedAtReload && tlsEnabled)
+			world.socketDescriptor = -1;
+		if (world.connectedAtReload && world.policy == ReloadSocketPolicy::ParkReconnect && tlsEnabled &&
 		    world.notes.trimmed().isEmpty())
 		{
-			world.notes =
-			    QStringLiteral("MCCP disable did not complete before reload timeout; reconnect required.");
+			world.notes = QStringLiteral("TLS world reload policy requires reconnect.");
+		}
+		if (world.connectedAtReload && world.mccpWasActive && !world.mccpDisableSucceeded &&
+		    world.notes.trimmed().isEmpty())
+		{
+			world.notes = QStringLiteral("MCCP disable did not complete before reload timeout; reattach will "
+			                             "probe stream state and reconnect only if needed.");
 		}
 
 		if (!world.connectedAtReload)
@@ -14161,7 +14338,7 @@ void AppController::handleReloadQmud()
 				inheritableDescriptors.push_back(world.socketDescriptor);
 			}
 		}
-		else
+		else if (!tlsEnabled)
 		{
 			world.notes = QStringLiteral("No socket descriptor available; reconnect fallback required.");
 			printReloadInfoToStdout(
@@ -14183,13 +14360,16 @@ void AppController::handleReloadQmud()
 	{
 		if (verboseReloadLogs)
 		{
-			qInfo() << kReloadLogTag << mccpFallbacks
-			        << "world(s) downgraded to reconnect due to MCCP fallback.";
+			qInfo()
+			    << kReloadLogTag << mccpFallbacks
+			    << "world(s) had MCCP disable timeout; startup reattach probe will validate stream state.";
 		}
 		if (m_mainWindow)
 		{
 			m_mainWindow->showStatusMessage(
-			    QStringLiteral("Reload: %1 world(s) will reconnect due to MCCP fallback.").arg(mccpFallbacks),
+			    QStringLiteral(
+			        "Reload: %1 world(s) timed out while disabling MCCP; reattach validation enabled.")
+			        .arg(mccpFallbacks),
 			    5000);
 		}
 	}

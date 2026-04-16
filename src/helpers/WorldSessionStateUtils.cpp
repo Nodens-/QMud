@@ -23,6 +23,8 @@ namespace
 	constexpr quint32 kContainerFlagCompressed       = 0x01u;
 	constexpr quint32 kPayloadFlagOutputBuffer       = 0x01u;
 	constexpr quint32 kPayloadFlagCommandHistory     = 0x02u;
+	constexpr quint32 kPayloadFlagCustomMxpElements  = 0x04u;
+	constexpr quint32 kPayloadFlagMxpSessionState    = 0x08u;
 	constexpr quint16 kStyleFlagBold                 = 0x0001u;
 	constexpr quint16 kStyleFlagUnderline            = 0x0002u;
 	constexpr quint16 kStyleFlagItalic               = 0x0004u;
@@ -35,15 +37,16 @@ namespace
 	constexpr quint32 kMaxPersistedOutputLineCount   = 500000u;
 	constexpr quint32 kMaxPersistedSpanCountPerLine  = 100000u;
 	constexpr quint32 kMaxPersistedHistoryEntryCount = 5000u;
+	constexpr quint32 kMaxPersistedCustomMxpElements = 2048u;
 
 	quint32           crc32ForBytes(const QByteArray &bytes)
 	{
-		static const std::array<quint32, 256> table = []
+		static constexpr std::array<quint32, 256> table = []
 		{
 			std::array<quint32, 256> result{};
-			for (quint32 i = 0; i < result.size(); ++i)
+			for (size_t i = 0; i < result.size(); ++i)
 			{
-				quint32 value = i;
+				quint32 value = static_cast<quint32>(i);
 				for (int bit = 0; bit < 8; ++bit)
 				{
 					if (value & 1u)
@@ -190,6 +193,38 @@ namespace
 		}
 		return true;
 	}
+
+	void writeCustomMxpElement(QDataStream &stream, const TelnetProcessor::CustomElementInfo &element)
+	{
+		stream << element.name;
+		stream << element.open;
+		stream << element.command;
+		stream << static_cast<qint32>(element.tag);
+		stream << element.flag;
+		stream << element.definition;
+		stream << element.attributes;
+	}
+
+	bool readCustomMxpElement(QDataStream &stream, TelnetProcessor::CustomElementInfo &element,
+	                          QString *errorMessage)
+	{
+		qint32 tag = 0;
+		stream >> element.name;
+		stream >> element.open;
+		stream >> element.command;
+		stream >> tag;
+		stream >> element.flag;
+		stream >> element.definition;
+		stream >> element.attributes;
+		if (stream.status() != QDataStream::Ok)
+		{
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Failed to parse custom MXP element.");
+			return false;
+		}
+		element.tag = tag;
+		return true;
+	}
 } // namespace
 
 namespace QMudWorldSessionState
@@ -205,7 +240,8 @@ namespace QMudWorldSessionState
 				*errorMessage = QStringLiteral("Session state file path is empty.");
 			return false;
 		}
-		if (!state.hasOutputBuffer && !state.hasCommandHistory)
+		if (!state.hasOutputBuffer && !state.hasCommandHistory && !state.hasCustomMxpElements &&
+		    !state.hasMxpSessionState)
 		{
 			if (errorMessage)
 				*errorMessage = QStringLiteral("No session-state sections were enabled.");
@@ -232,6 +268,10 @@ namespace QMudWorldSessionState
 				payloadFlags |= kPayloadFlagOutputBuffer;
 			if (state.hasCommandHistory)
 				payloadFlags |= kPayloadFlagCommandHistory;
+			if (state.hasCustomMxpElements)
+				payloadFlags |= kPayloadFlagCustomMxpElements;
+			if (state.hasMxpSessionState)
+				payloadFlags |= kPayloadFlagMxpSessionState;
 			payloadStream << payloadFlags;
 			if (state.hasOutputBuffer)
 			{
@@ -244,6 +284,21 @@ namespace QMudWorldSessionState
 				payloadStream << static_cast<quint32>(state.commandHistory.size());
 				for (const QString &entry : state.commandHistory)
 					payloadStream << entry;
+			}
+			if (state.hasCustomMxpElements)
+			{
+				payloadStream << static_cast<quint32>(state.customMxpElements.size());
+				for (const TelnetProcessor::CustomElementInfo &element : state.customMxpElements)
+					writeCustomMxpElement(payloadStream, element);
+			}
+			if (state.hasMxpSessionState)
+			{
+				payloadStream << state.mxpSessionState.enabled;
+				payloadStream << state.mxpSessionState.puebloActive;
+				payloadStream << state.mxpSessionState.secureMode;
+				payloadStream << static_cast<qint32>(state.mxpSessionState.mode);
+				payloadStream << static_cast<qint32>(state.mxpSessionState.defaultMode);
+				payloadStream << static_cast<qint32>(state.mxpSessionState.previousMode);
 			}
 			if (payloadStream.status() != QDataStream::Ok)
 			{
@@ -389,8 +444,10 @@ namespace QMudWorldSessionState
 		payloadStream.setByteOrder(QDataStream::LittleEndian);
 		quint32 payloadFlags = 0;
 		payloadStream >> payloadFlags;
-		state->hasOutputBuffer   = (payloadFlags & kPayloadFlagOutputBuffer) != 0;
-		state->hasCommandHistory = (payloadFlags & kPayloadFlagCommandHistory) != 0;
+		state->hasOutputBuffer      = (payloadFlags & kPayloadFlagOutputBuffer) != 0;
+		state->hasCommandHistory    = (payloadFlags & kPayloadFlagCommandHistory) != 0;
+		state->hasCustomMxpElements = (payloadFlags & kPayloadFlagCustomMxpElements) != 0;
+		state->hasMxpSessionState   = (payloadFlags & kPayloadFlagMxpSessionState) != 0;
 
 		if (state->hasOutputBuffer)
 		{
@@ -434,6 +491,53 @@ namespace QMudWorldSessionState
 				QString entry;
 				payloadStream >> entry;
 				state->commandHistory.push_back(entry);
+			}
+		}
+		if (state->hasCustomMxpElements)
+		{
+			quint32 elementCount = 0;
+			payloadStream >> elementCount;
+			if (elementCount > kMaxPersistedCustomMxpElements)
+			{
+				if (errorMessage)
+				{
+					*errorMessage = QStringLiteral("Session state has too many custom MXP elements (%1).")
+					                    .arg(elementCount);
+				}
+				return false;
+			}
+			state->customMxpElements.reserve(static_cast<int>(elementCount));
+			for (quint32 i = 0; i < elementCount; ++i)
+			{
+				TelnetProcessor::CustomElementInfo element;
+				if (!readCustomMxpElement(payloadStream, element, errorMessage))
+					return false;
+				state->customMxpElements.push_back(element);
+			}
+		}
+		if (state->hasMxpSessionState)
+		{
+			payloadStream >> state->mxpSessionState.enabled;
+			payloadStream >> state->mxpSessionState.puebloActive;
+			payloadStream >> state->mxpSessionState.secureMode;
+			if (!payloadStream.atEnd())
+			{
+				qint32 mode         = 0;
+				qint32 defaultMode  = 0;
+				qint32 previousMode = 0;
+				payloadStream >> mode;
+				payloadStream >> defaultMode;
+				payloadStream >> previousMode;
+				state->mxpSessionState.mode         = mode;
+				state->mxpSessionState.defaultMode  = defaultMode;
+				state->mxpSessionState.previousMode = previousMode;
+			}
+			else
+			{
+				const int fallbackMode              = state->mxpSessionState.secureMode ? 1 : 0;
+				state->mxpSessionState.mode         = fallbackMode;
+				state->mxpSessionState.defaultMode  = fallbackMode;
+				state->mxpSessionState.previousMode = fallbackMode;
 			}
 		}
 

@@ -58,6 +58,14 @@ enum
 	eProxyServerLast,
 };
 
+// TLS mode enum values
+enum
+{
+	eTlsDirect,
+	eTlsStartTls,
+	eTlsMethodLast,
+};
+
 // Auto-connect values
 enum
 {
@@ -98,7 +106,7 @@ enum
 // Option flags
 inline constexpr int OPT_CUSTOM_COLOUR =
     0x000001; // color number  (add 1 to color to save, subtract 1 to load)
-inline constexpr int OPT_RGB_COLOUR          = 0x000002;  // colour is RGB colour
+inline constexpr int OPT_RGB_COLOUR          = 0x000002;  // color is RGB color
 inline constexpr int OPT_DOUBLE              = 0x000004;  // option is a double
 inline constexpr int OPT_UPDATE_VIEWS        = 0x000100;  // if changed, update all views
 inline constexpr int OPT_UPDATE_INPUT_FONT   = 0x000200;  // if changed, update input font

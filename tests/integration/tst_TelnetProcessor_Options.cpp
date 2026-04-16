@@ -25,11 +25,13 @@ namespace
 	constexpr unsigned char WILL_END_OF_RECORD   = 25;
 	constexpr unsigned char TELOPT_NAWS          = 31;
 	constexpr unsigned char TELOPT_CHARSET       = 42;
+	constexpr unsigned char TELOPT_START_TLS     = 46;
 	constexpr unsigned char TELOPT_TERMINAL_TYPE = 24;
 	constexpr unsigned char TELOPT_COMPRESS2     = 86;
 	constexpr unsigned char CHARSET_REQUEST      = 1;
 	constexpr unsigned char CHARSET_ACCEPTED     = 2;
 	constexpr unsigned char CHARSET_REJECTED     = 3;
+	constexpr unsigned char START_TLS_FOLLOWS    = 1;
 	constexpr unsigned char TTYPE_SEND           = 1;
 	constexpr unsigned char TTYPE_IS             = 0;
 
@@ -329,6 +331,46 @@ class tst_TelnetProcessor_Options : public QObject
 			                              'S', 'C', 'I', 'I', IAC, SE}));
 			QCOMPARE(processor.takeOutboundData(),
 			         bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REJECTED, IAC, SE}));
+		}
+
+		void startTlsNegotiationQueuesDoAndRequestsUpgradeOnWill()
+		{
+			TelnetProcessor processor;
+			processor.setStartTlsEnabled(true);
+			processor.queueStartTlsNegotiation();
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_START_TLS}));
+
+			processor.processBytes(bytes({IAC, WILL, TELOPT_START_TLS}));
+			QCOMPARE(processor.takeOutboundData(),
+			         bytes({IAC, SB, TELOPT_START_TLS, START_TLS_FOLLOWS, IAC, SE}));
+			QVERIFY(processor.takeStartTlsUpgradeRequest());
+			QVERIFY(!processor.takeStartTlsUpgradeRequest());
+		}
+
+		void startTlsFollowsSubnegotiationRequestsUpgrade()
+		{
+			TelnetProcessor processor;
+			processor.setStartTlsEnabled(true);
+			processor.processBytes(bytes({IAC, SB, TELOPT_START_TLS, START_TLS_FOLLOWS, IAC, SE}));
+			QVERIFY(processor.takeStartTlsUpgradeRequest());
+			QVERIFY(!processor.takeStartTlsUpgradeRequest());
+
+			processor.setStartTlsActive(true);
+			processor.processBytes(bytes({IAC, SB, TELOPT_START_TLS, START_TLS_FOLLOWS, IAC, SE}));
+			QVERIFY(!processor.takeStartTlsUpgradeRequest());
+		}
+
+		void startTlsRejectionIsReported()
+		{
+			TelnetProcessor processor;
+			processor.setStartTlsEnabled(true);
+			processor.queueStartTlsNegotiation();
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_START_TLS}));
+
+			processor.processBytes(bytes({IAC, WONT, TELOPT_START_TLS}));
+			QVERIFY(processor.takeStartTlsNegotiationRejected());
+			QVERIFY(!processor.takeStartTlsNegotiationRejected());
+			QVERIFY(!processor.takeStartTlsUpgradeRequest());
 		}
 
 		void gaCanConvertToNewline()

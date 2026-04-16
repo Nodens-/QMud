@@ -2080,6 +2080,29 @@ class WorldRuntime : public QObject
 		 */
 		void               requestMccpResumeAfterReloadReattach();
 		/**
+		 * @brief Arms first-payload MCCP validation for a reload-reattached descriptor.
+		 * @param enabled Enable residual-MCCP probe when `true`.
+		 */
+		void               configureReloadMccpReattachProbe(bool enabled);
+		/**
+		 * @brief Sends `look` probe command immediately after reload socket reattach.
+		 */
+		void               sendReloadReattachLookProbe();
+		/**
+		 * @brief Arms one-shot timeout that finalizes pending reload MCCP probe decision.
+		 */
+		void               armReloadMccpProbeTimeout();
+		/**
+		 * @brief Arms one reload MCCP probe timeout pass.
+		 * @param generation Probe generation token.
+		 * @param pass Timeout pass index (`0` first 500ms, `1` second 500ms).
+		 */
+		void               armReloadMccpProbeTimeoutPass(quint64 generation, int pass);
+		/**
+		 * @brief Cancels pending reload MCCP probe timeout callbacks.
+		 */
+		void               cancelReloadMccpProbeTimeout();
+		/**
 		 * @brief Queues telnet negotiation that requests MCCP disable for reload.
 		 */
 		void               queueMccpDisableForReload();
@@ -2801,7 +2824,7 @@ class WorldRuntime : public QObject
 		 * @param buffer Sound buffer slot index.
 		 * @return Playback status code.
 		 */
-		[[nodiscard]] int              soundStatus(int buffer) const;
+		[[nodiscard]] int     soundStatus(int buffer) const;
 		/**
 		 * @brief Static helper APIs exposed to scripting/commands.
 		 */
@@ -2811,7 +2834,7 @@ class WorldRuntime : public QObject
 		 * @param method Adjustment method code.
 		 * @return Adjusted color value.
 		 */
-		static long                    adjustColour(long colour, short method);
+		static long           adjustColour(long colour, short method);
 		/**
 		 * @brief Blends two pixels with blend mode and opacity.
 		 * @param blend Blend/source colour.
@@ -2820,7 +2843,7 @@ class WorldRuntime : public QObject
 		 * @param opacity Blend opacity.
 		 * @return Blended color value.
 		 */
-		static long                    blendPixel(long blend, long base, short mode, double opacity);
+		static long           blendPixel(long blend, long base, short mode, double opacity);
 		/**
 		 * @brief Applies pixel filter operation.
 		 * @param pixel Input color value.
@@ -2828,281 +2851,301 @@ class WorldRuntime : public QObject
 		 * @param options Filter options value.
 		 * @return Filtered color value.
 		 */
-		static long                    filterPixel(long pixel, short operation, double options);
+		static long           filterPixel(long pixel, short operation, double options);
 		/**
 		 * @brief Encodes text as Base64.
 		 * @param text Input text.
 		 * @param multiLine Emit multiline Base64 when `true`.
 		 * @return Base64-encoded text.
 		 */
-		static QString                 base64Encode(const QString &text, bool multiLine);
+		static QString        base64Encode(const QString &text, bool multiLine);
 		/**
 		 * @brief Decodes Base64 text.
 		 * @param text Base64 text.
 		 * @return Decoded text.
 		 */
-		static QString                 base64Decode(const QString &text);
+		static QString        base64Decode(const QString &text);
 		/**
 		 * @brief Converts RGB value to canonical colour name.
 		 * @param colour RGB color value.
 		 * @return Colour name.
 		 */
-		static QString                 rgbColourToName(long colour);
+		static QString        rgbColourToName(long colour);
 		/**
 		 * @brief Returns client version string.
 		 * @return Client version string.
 		 */
-		static QString                 clientVersionString();
+		static QString        clientVersionString();
 		/**
 		 * @brief Returns text description for error code.
 		 * @param code Error/status code.
 		 * @return Human-readable error description.
 		 */
-		static QString                 errorDesc(int code);
+		static QString        errorDesc(int code);
 		/**
 		 * @brief Generates random fantasy-style name.
 		 * @return Generated name.
 		 */
-		static QString                 generateName();
+		static QString        generateName();
 		/**
 		 * @brief Returns list of built-in internal command names.
 		 * @return Internal command names.
 		 */
-		static QStringList             internalCommandsList();
+		static QStringList    internalCommandsList();
 		/**
 		 * @brief Returns mapped color replacement or original.
 		 * @param value Input color value.
 		 * @return Mapped color value.
 		 */
-		[[nodiscard]] long             getMapColour(long value) const;
+		[[nodiscard]] long    getMapColour(long value) const;
 		/**
 		 * @brief Returns mapped system color value.
 		 * @param index System color index.
 		 * @return RGB color value.
 		 */
-		static long                    getSysColor(int index);
+		static long           getSysColor(int index);
 		/**
 		 * @brief Returns process-wide unique numeric id.
 		 * @return Unique numeric id.
 		 */
-		static long                    getUniqueNumber();
+		static long           getUniqueNumber();
 		/**
 		 * @brief Escapes plain text into regex-safe expression.
 		 * @param text Plain text.
 		 * @return Regex-safe text.
 		 */
-		static QString                 makeRegularExpression(const QString &text);
+		static QString        makeRegularExpression(const QString &text);
 		/**
 		 * @brief Computes metaphone code.
 		 * @param text Input text.
 		 * @param length Requested metaphone length.
 		 * @return Metaphone code.
 		 */
-		static QString                 metaphone(const QString &text, int length);
+		static QString        metaphone(const QString &text, int length);
 		/**
 		 * @brief Returns random floating-point value.
 		 * @return Random number.
 		 */
-		static double                  mtRand();
+		static double         mtRand();
 		/**
 		 * @brief Loads external names source file.
 		 * @param fileName Names file path.
 		 * @return API status code.
 		 */
-		static int                     readNamesFile(const QString &fileName);
+		static int            readNamesFile(const QString &fileName);
 		/**
 		 * @brief Stores output-font metrics.
 		 * @param height Output font height.
 		 * @param width Output font width.
 		 */
-		void                           setOutputFontMetrics(int height, int width);
+		void                  setOutputFontMetrics(int height, int width);
 		/**
 		 * @brief Stores input-font metrics.
 		 * @param height Input font height.
 		 * @param width Input font width.
 		 */
-		void                           setInputFontMetrics(int height, int width);
+		void                  setInputFontMetrics(int height, int width);
 		/**
 		 * @brief Returns output-font height.
 		 * @return Output font height in pixels.
 		 */
-		[[nodiscard]] int              outputFontHeight() const;
+		[[nodiscard]] int     outputFontHeight() const;
 		/**
 		 * @brief Returns output-font width.
 		 * @return Output font width in pixels.
 		 */
-		[[nodiscard]] int              outputFontWidth() const;
+		[[nodiscard]] int     outputFontWidth() const;
 		/**
 		 * @brief Returns input-font height.
 		 * @return Input font height in pixels.
 		 */
-		[[nodiscard]] int              inputFontHeight() const;
+		[[nodiscard]] int     inputFontHeight() const;
 		/**
 		 * @brief Returns input-font width.
 		 * @return Input font width in pixels.
 		 */
-		[[nodiscard]] int              inputFontWidth() const;
+		[[nodiscard]] int     inputFontWidth() const;
 		/**
 		 * @brief Sets queued-command count.
 		 * @param count Queued-command count value.
 		 */
-		void                           setQueuedCommandCount(int count);
+		void                  setQueuedCommandCount(int count);
 		/**
 		 * @brief Converts color name to RGB value.
 		 * @param name Colour name.
 		 * @return RGB color value.
 		 */
-		static long                    colourNameToRGB(const QString &name);
+		static long           colourNameToRGB(const QString &name);
 		/**
 		 * @brief Sets custom note text color entry.
 		 * @param index Custom color index.
 		 * @param color Text color value.
 		 * @return API status code.
 		 */
-		int                            setCustomColourText(int index, const QColor &color);
+		int                   setCustomColourText(int index, const QColor &color);
 		/**
 		 * @brief Sets custom note background color entry.
 		 * @param index Custom color index.
 		 * @param color Background color value.
 		 * @return API status code.
 		 */
-		int                            setCustomColourBackground(int index, const QColor &color);
+		int                   setCustomColourBackground(int index, const QColor &color);
 		/**
 		 * @brief Sets custom color display name.
 		 * @param index Custom color index.
 		 * @param name Display name.
 		 * @return API status code.
 		 */
-		int                            setCustomColourName(int index, const QString &name);
+		int                   setCustomColourName(int index, const QString &name);
 		/**
 		 * @brief Returns custom note text color entry.
 		 * @param index Custom color index.
 		 * @return Text color RGB value.
 		 */
-		[[nodiscard]] long             customColourText(int index) const;
+		[[nodiscard]] long    customColourText(int index) const;
 		/**
 		 * @brief Returns custom note background color entry.
 		 * @param index Custom color index.
 		 * @return Background color RGB value.
 		 */
-		[[nodiscard]] long             customColourBackground(int index) const;
+		[[nodiscard]] long    customColourBackground(int index) const;
 		/**
 		 * @brief Loads world output background image.
 		 * @param fileName Image file path.
 		 * @param mode Draw mode code.
 		 * @return API status code.
 		 */
-		int                            setBackgroundImage(const QString &fileName, int mode);
+		int                   setBackgroundImage(const QString &fileName, int mode);
 		/**
 		 * @brief Loads world output foreground image.
 		 * @param fileName Image file path.
 		 * @param mode Draw mode code.
 		 * @return API status code.
 		 */
-		int                            setForegroundImage(const QString &fileName, int mode);
+		int                   setForegroundImage(const QString &fileName, int mode);
 		/**
 		 * @brief Returns configured background image.
 		 * @return Background image.
 		 */
-		[[nodiscard]] QImage           backgroundImage() const;
+		[[nodiscard]] QImage  backgroundImage() const;
 		/**
 		 * @brief Returns configured foreground image.
 		 * @return Foreground image.
 		 */
-		[[nodiscard]] QImage           foregroundImage() const;
+		[[nodiscard]] QImage  foregroundImage() const;
 		/**
 		 * @brief Returns background image draw mode.
 		 * @return Background image mode code.
 		 */
-		[[nodiscard]] int              backgroundImageMode() const;
+		[[nodiscard]] int     backgroundImageMode() const;
 		/**
 		 * @brief Returns foreground image draw mode.
 		 * @return Foreground image mode code.
 		 */
-		[[nodiscard]] int              foregroundImageMode() const;
+		[[nodiscard]] int     foregroundImageMode() const;
 		/**
 		 * @brief Returns background image source name.
 		 * @return Background image source name.
 		 */
-		[[nodiscard]] QString          backgroundImageName() const;
+		[[nodiscard]] QString backgroundImageName() const;
 		/**
 		 * @brief Returns foreground image source name.
 		 * @return Foreground image source name.
 		 */
-		[[nodiscard]] QString          foregroundImageName() const;
+		[[nodiscard]] QString foregroundImageName() const;
 		/**
 		 * @brief Requests close of a named notepad window.
 		 * @param title Notepad title.
 		 * @param querySave Prompt to save when `true`.
 		 * @return `true` when close is accepted.
 		 */
-		bool                           closeNotepad(const QString &title, bool querySave);
+		bool                  closeNotepad(const QString &title, bool querySave);
 		/**
 		 * @brief Executes debug command and returns result payload.
 		 * @param command Debug command text.
 		 * @return Command result payload.
 		 */
-		QVariant                       debugCommand(const QString &command);
+		QVariant              debugCommand(const QString &command);
 		/**
 		 * @brief Returns queued-command count.
 		 * @return Queued-command count.
 		 */
-		[[nodiscard]] int              queuedCommandCount() const;
+		[[nodiscard]] int     queuedCommandCount() const;
 		/**
 		 * @brief Returns bytes received from socket.
 		 * @return Received byte count.
 		 */
-		[[nodiscard]] qint64           bytesIn() const;
+		[[nodiscard]] qint64  bytesIn() const;
 		/**
 		 * @brief Returns bytes sent to socket.
 		 * @return Sent byte count.
 		 */
-		[[nodiscard]] qint64           bytesOut() const;
+		[[nodiscard]] qint64  bytesOut() const;
 		/**
 		 * @brief Returns input packet counter.
 		 * @return Input packet count.
 		 */
-		[[nodiscard]] int              inputPacketCount() const;
+		[[nodiscard]] int     inputPacketCount() const;
 		/**
 		 * @brief Returns output packet counter.
 		 * @return Output packet count.
 		 */
-		[[nodiscard]] int              outputPacketCount() const;
+		[[nodiscard]] int     outputPacketCount() const;
 		/**
 		 * @brief Returns compressed-byte total for MCCP.
 		 * @return Total compressed bytes.
 		 */
-		[[nodiscard]] qint64           totalCompressedBytes() const;
+		[[nodiscard]] qint64  totalCompressedBytes() const;
 		/**
 		 * @brief Returns uncompressed-byte total for MCCP.
 		 * @return Total uncompressed bytes.
 		 */
-		[[nodiscard]] qint64           totalUncompressedBytes() const;
+		[[nodiscard]] qint64  totalUncompressedBytes() const;
 		/**
 		 * @brief Returns active MCCP type code.
 		 * @return MCCP type code.
 		 */
-		[[nodiscard]] int              mccpType() const;
+		[[nodiscard]] int     mccpType() const;
 		/**
 		 * @brief Returns processed MXP tag count.
 		 * @return MXP tag count.
 		 */
-		[[nodiscard]] qint64           mxpTagCount() const;
+		[[nodiscard]] qint64  mxpTagCount() const;
 		/**
 		 * @brief Returns processed MXP entity count.
 		 * @return MXP entity count.
 		 */
-		[[nodiscard]] qint64           mxpEntityCount() const;
+		[[nodiscard]] qint64  mxpEntityCount() const;
 		/**
 		 * @brief Returns custom MXP element count.
 		 * @return Custom element count.
 		 */
-		[[nodiscard]] int              customElementCount() const;
+		[[nodiscard]] int     customElementCount() const;
 		/**
 		 * @brief Returns custom MXP entity count.
 		 * @return Custom entity count.
 		 */
-		[[nodiscard]] int              customEntityCount() const;
+		[[nodiscard]] int     customEntityCount() const;
+		/**
+		 * @brief Returns custom MXP element definitions currently known by telnet state.
+		 * @return Snapshot list of custom element metadata.
+		 */
+		[[nodiscard]] QList<TelnetProcessor::CustomElementInfo> customMxpElements() const;
+		/**
+		 * @brief Replaces custom MXP element definitions in telnet state.
+		 * @param elements Custom element metadata to apply.
+		 */
+		void setCustomMxpElements(const QList<TelnetProcessor::CustomElementInfo> &elements);
+		/**
+		 * @brief Returns MXP session-state flags for reload/session persistence.
+		 * @return MXP session-state snapshot.
+		 */
+		[[nodiscard]] TelnetProcessor::MxpSessionState mxpSessionState() const;
+		/**
+		 * @brief Restores MXP session-state flags after reload/session restore.
+		 * @param state MXP session-state snapshot.
+		 */
+		void                           setMxpSessionState(const TelnetProcessor::MxpSessionState &state);
 		/**
 		 * @brief Returns remote peer address string.
 		 * @return Peer address string.
@@ -3804,6 +3847,23 @@ class WorldRuntime : public QObject
 		 */
 		bool callPluginCallbacksStopOnFalse(const QString &functionName, const QString &payload);
 		/**
+		 * @brief Finalizes world-ready connection state after transport/TLS handshake.
+		 */
+		void finalizeSocketConnectedState();
+		/**
+		 * @brief Starts START-TLS socket upgrade when requested by telnet negotiation.
+		 * @return `true` when upgrade start succeeds.
+		 */
+		bool beginStartTlsUpgrade();
+		/**
+		 * @brief Starts one-shot START-TLS fallback timer.
+		 */
+		void startStartTlsFallbackTimer();
+		/**
+		 * @brief Cancels pending START-TLS fallback timer callbacks.
+		 */
+		void cancelStartTlsFallbackTimer();
+		/**
 		 * @brief Runs plugin callbacks with string payload.
 		 * @param functionName Callback function name.
 		 * @param payload Callback payload text.
@@ -3937,7 +3997,7 @@ class WorldRuntime : public QObject
 		 * @brief Executes plugin install callback and applies pending startup-disable state.
 		 * @param plugin Plugin instance.
 		 */
-		void                  runPluginInstallCallback(Plugin &plugin);
+		void runPluginInstallCallback(Plugin &plugin);
 		/**
 		 * @brief Returns whether current Lua-context line is buffered.
 		 * @return `true` when current Lua-context line is in buffer.
@@ -4308,6 +4368,11 @@ class WorldRuntime : public QObject
 		int                                      m_timersFiredThisSession{0};
 		int                                      m_connectPhase{eConnectNotConnected};
 		bool                                     m_connectViaProxy{false};
+		bool                                     m_tlsEncryptionEnabled{false};
+		int                                      m_tlsMethod{0};
+		bool                                     m_tlsDisableCertificateValidation{false};
+		bool                                     m_socketReadyForWorld{false};
+		quint64                                  m_startTlsFallbackGeneration{0};
 		QString                                  m_proxyAddressString;
 		quint32                                  m_proxyAddressV4{0};
 		int                                      m_lastPreferencesPage{0};
@@ -4320,6 +4385,16 @@ class WorldRuntime : public QObject
 		bool                                     m_reconnectOnLinkFailure{false};
 		bool                                     m_incomingSocketDataPaused{false};
 		bool                                     m_reloadReattachSuppressConnectActions{false};
+		bool                                     m_reloadReattachMccpProbePending{false};
+		bool                                     m_reloadReattachMccpResumePending{false};
+		bool                                     m_reloadReattachLookProbeSent{false};
+		bool                                     m_reloadReattachUseDeferredMxpReplay{false};
+		qsizetype                                m_reloadReattachMccpProbeDecisionOffset{0};
+		int                                      m_reloadMccpProbeTimeoutPass{0};
+		QByteArray                               m_reloadReattachMccpProbeBuffer;
+		QList<TelnetProcessor::MxpEvent>         m_reloadReattachMxpProbeEvents;
+		QList<TelnetProcessor::MxpModeChange>    m_reloadReattachMxpProbeModeChanges;
+		quint64                                  m_reloadMccpProbeGeneration{0};
 		QDateTime                                m_statusTime;
 		QDateTime                                m_lastFlushTime;
 		QDateTime                                m_clientStartTime;

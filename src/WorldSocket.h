@@ -59,6 +59,12 @@ class WorldSocket : public WorldSocketService
 		 */
 		void   applyConnectionSettings(const WorldSocketConnectionSettings &settings) override;
 		/**
+		 * @brief Starts TLS client encryption for START-TLS upgrade flow.
+		 * @param errorMessage Optional output error text.
+		 * @return `true` when upgrade attempt was started or already active.
+		 */
+		bool   startClientEncryption(QString *errorMessage) override;
+		/**
 		 * @brief Connects to MUD host.
 		 * @param host Target host.
 		 * @param port Target port.
@@ -96,22 +102,21 @@ class WorldSocket : public WorldSocketService
 		 * @param errorMessage Optional output error text.
 		 * @return `true` when descriptor adoption succeeds.
 		 */
-		bool                 adoptConnectedSocketDescriptor(qintptr descriptor,
-		                                                    QString *errorMessage) override;
+		bool               adoptConnectedSocketDescriptor(qintptr descriptor, QString *errorMessage) override;
 		/**
 		 * @brief Immediately aborts active transport socket.
 		 */
-		void                 abortSocket() override;
+		void               abortSocket() override;
 		/**
 		 * @brief Reports whether connection attempt is in progress.
 		 * @return `true` when socket is connecting.
 		 */
-		[[nodiscard]] bool    isConnecting() const override;
+		[[nodiscard]] bool isConnecting() const override;
 		/**
 		 * @brief Reports whether socket is connected.
 		 * @return `true` when socket is connected.
 		 */
-		[[nodiscard]] bool    isConnected() const override;
+		[[nodiscard]] bool isConnected() const override;
 
 	private slots:
 		/**
@@ -134,11 +139,20 @@ class WorldSocket : public WorldSocketService
 		 * @brief Converts Qt socket errors to service error messages.
 		 */
 		void onErrorOccurred();
+		/**
+		 * @brief Forwards Qt encrypted-socket readiness.
+		 */
+		void onTlsEncrypted();
 
 	private:
 		QTcpSocket *m_socket{nullptr};
 		bool        m_useUtf8{false};
 		bool        m_keepAliveEnabled{false};
+		bool        m_tlsEncryption{false};
+		int         m_tlsMethod{0};
+		bool        m_disableTlsCertificateValidation{false};
+		QString     m_tlsServerName;
+		QString     m_lastConnectHost;
 		QByteArray  m_pendingInbound;
 		bool        m_drainScheduled{false};
 		bool        m_drainingNow{false};

@@ -13,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QMetaObject>
 #include <QNetworkProxy>
+#include <QSslSocket>
 #include <QTcpSocket>
 #if defined(Q_OS_WIN)
 #include <winsock2.h>
@@ -25,6 +26,13 @@
 
 namespace
 {
+#if QT_CONFIG(ssl)
+	QSslSocket *asSslSocket(QTcpSocket *socket)
+	{
+		return qobject_cast<QSslSocket *>(socket);
+	}
+#endif
+
 #if defined(Q_OS_WIN)
 #ifndef SIO_KEEPALIVE_VALS
 #define SIO_KEEPALIVE_VALS _WSAIOW(IOC_VENDOR, 4)
@@ -84,7 +92,7 @@ namespace
 
 WorldSocket::WorldSocket(QObject *parent) : WorldSocketService(parent)
 {
-	m_socket = new QTcpSocket(this);
+	m_socket = new QSslSocket(this);
 	connect(m_socket, &QTcpSocket::readyRead, this, &WorldSocket::onReadyRead);
 	connect(m_socket, &QTcpSocket::connected, this, &WorldSocket::onConnected);
 	connect(m_socket, &QTcpSocket::disconnected, this, &WorldSocket::onDisconnected);
@@ -95,6 +103,10 @@ WorldSocket::WorldSocket(QObject *parent) : WorldSocketService(parent)
 #else
 	connect(m_socket, QOverload<QAbstractSocket::SocketError>::of(&QTcpSocket::error), this,
 	        &WorldSocket::onErrorOccurred);
+#endif
+#if QT_CONFIG(ssl)
+	if (QSslSocket *sslSocket = asSslSocket(m_socket))
+		connect(sslSocket, &QSslSocket::encrypted, this, &WorldSocket::onTlsEncrypted);
 #endif
 }
 
@@ -147,8 +159,69 @@ void WorldSocket::applyConnectionSettings(const WorldSocketConnectionSettings &s
 {
 	setUseUtf8(settings.useUtf8);
 	setKeepAliveEnabled(settings.keepAlive);
+	m_tlsEncryption                   = settings.tlsEncryption;
+	m_tlsMethod                       = settings.tlsMethod;
+	m_disableTlsCertificateValidation = settings.disableTlsCertificateValidation;
+	m_tlsServerName                   = settings.tlsServerName.trimmed();
 	setProxySettings(settings.proxyType, settings.proxyServer, settings.proxyPort, settings.proxyUsername,
 	                 settings.proxyPassword);
+}
+
+bool WorldSocket::startClientEncryption(QString *errorMessage)
+{
+	if (errorMessage)
+		errorMessage->clear();
+	if (!m_socket)
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("Socket transport is not initialized.");
+		return false;
+	}
+	if (!m_tlsEncryption || m_tlsMethod != eTlsStartTls)
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("START-TLS is not enabled for this connection.");
+		return false;
+	}
+
+#if QT_CONFIG(ssl)
+	QSslSocket *sslSocket = asSslSocket(m_socket);
+	if (!sslSocket)
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("TLS transport is unavailable.");
+		return false;
+	}
+	if (!QSslSocket::supportsSsl())
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("TLS support is unavailable in this build.");
+		return false;
+	}
+	if (sslSocket->state() != QAbstractSocket::ConnectedState)
+	{
+		if (errorMessage)
+			*errorMessage = QStringLiteral("Socket is not connected.");
+		return false;
+	}
+	if (sslSocket->isEncrypted())
+		return true;
+
+	const QString verifyName = !m_tlsServerName.isEmpty() ? m_tlsServerName : m_lastConnectHost;
+	sslSocket->setPeerVerifyMode(m_disableTlsCertificateValidation ? QSslSocket::VerifyNone
+	                                                               : QSslSocket::VerifyPeer);
+	if (!m_disableTlsCertificateValidation && !verifyName.isEmpty())
+		sslSocket->setPeerVerifyName(verifyName);
+	else
+		sslSocket->setPeerVerifyName(QString());
+	sslSocket->flush();
+	sslSocket->startClientEncryption();
+	return true;
+#else
+	if (errorMessage)
+		*errorMessage = QStringLiteral("TLS support is unavailable in this build.");
+	return false;
+#endif
 }
 
 bool WorldSocket::connectToHost(const QString &host, quint16 port)
@@ -156,10 +229,33 @@ bool WorldSocket::connectToHost(const QString &host, quint16 port)
 	if (!m_socket)
 		return false;
 
+	m_lastConnectHost = host.trimmed();
 	if (m_socket->state() != QAbstractSocket::UnconnectedState)
 		m_socket->abort();
 	applyMushclientKeepAliveSettings(m_socket, m_keepAliveEnabled);
-	m_socket->connectToHost(host, port);
+#if QT_CONFIG(ssl)
+	QSslSocket *sslSocket = asSslSocket(m_socket);
+	if (m_tlsEncryption && (!sslSocket || !QSslSocket::supportsSsl()))
+	{
+		emit socketError(QStringLiteral("TLS support is unavailable in this build."));
+		return false;
+	}
+	if (m_tlsEncryption && m_tlsMethod == eTlsDirect)
+	{
+		const QString verifyName = !m_tlsServerName.isEmpty() ? m_tlsServerName : m_lastConnectHost;
+		sslSocket->setPeerVerifyMode(m_disableTlsCertificateValidation ? QSslSocket::VerifyNone
+		                                                               : QSslSocket::VerifyPeer);
+		if (!m_disableTlsCertificateValidation && !verifyName.isEmpty())
+			sslSocket->setPeerVerifyName(verifyName);
+		else
+			sslSocket->setPeerVerifyName(QString());
+		sslSocket->connectToHostEncrypted(host, port);
+	}
+	else
+#endif
+	{
+		m_socket->connectToHost(host, port);
+	}
 	return true;
 }
 
@@ -348,4 +444,9 @@ void WorldSocket::onErrorOccurred()
 		return;
 
 	emit socketError(m_socket->errorString());
+}
+
+void WorldSocket::onTlsEncrypted()
+{
+	emit tlsEncrypted();
 }
