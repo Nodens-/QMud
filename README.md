@@ -157,6 +157,7 @@ Current behavior/limitations:
 
 - MCCPv1/2 enabled worlds that do not honor IAC DONT COMPRESS/2, on timeout/failure to end compression stream, downgrade
   to reconnect on reload.
+- TLS connected worlds also downgrade to reconnect for the time being.
 
 ## Build requirements
 
