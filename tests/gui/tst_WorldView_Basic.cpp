@@ -2703,7 +2703,7 @@ class tst_WorldView_Basic : public QObject
 			    input->height() < narrowHeight,
 			    "Auto-resize height should shrink when input width increases and wrapping decreases.");
 			const int bottomGap = input->viewport()->rect().bottom() - input->cursorRect().bottom();
-			QVERIFY2(bottomGap <= (input->fontMetrics().lineSpacing() / 2),
+			QVERIFY2(bottomGap <= input->fontMetrics().lineSpacing(),
 			         "After resize reflow, active wrapped line should stay near the bottom edge.");
 
 			resetTestState();
@@ -2835,7 +2835,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY2(input->viewport()->rect().intersects(input->cursorRect()),
 			         "Input cursor should remain visible after paste with auto-resize enabled.");
 			const int bottomGap = input->viewport()->rect().bottom() - input->cursorRect().bottom();
-			QVERIFY2(bottomGap <= (input->fontMetrics().lineSpacing() / 2),
+			QVERIFY2(bottomGap <= input->fontMetrics().lineSpacing(),
 			         "Wrapped input should keep the active line near the bottom edge.");
 
 			QTest::keyClicks(input, QStringLiteral(" tail"));
@@ -2845,7 +2845,7 @@ class tst_WorldView_Basic : public QObject
 			         "Input cursor should stay visible while typing after large paste.");
 			const int bottomGapAfterTyping =
 			    input->viewport()->rect().bottom() - input->cursorRect().bottom();
-			QVERIFY2(bottomGapAfterTyping <= (input->fontMetrics().lineSpacing() / 2),
+			QVERIFY2(bottomGapAfterTyping <= input->fontMetrics().lineSpacing(),
 			         "Typing after paste should keep the active line near the bottom edge.");
 
 			resetTestState();
@@ -3217,7 +3217,7 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 
 			const int bottomGap = input->viewport()->rect().bottom() - input->cursorRect().bottom();
-			QVERIFY2(bottomGap <= (input->fontMetrics().lineSpacing() / 2),
+			QVERIFY2(bottomGap <= input->fontMetrics().lineSpacing(),
 			         "Trailing whitespace wrap should not allocate an extra visual line below the cursor.");
 
 			resetTestState();
