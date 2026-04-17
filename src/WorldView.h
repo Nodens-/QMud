@@ -108,7 +108,7 @@ class WorldView : public QWidget
 		 */
 		void                        addHyperlinkToHistory(const QString &text);
 		/**
-		 * @brief Adds history entry bypassing duplicate checks.
+		 * @brief Adds history entry bypassing no-echo filtering.
 		 * @param text Command text to append.
 		 */
 		void                        addToHistoryForced(const QString &text);

@@ -4681,7 +4681,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void partialHistoryRecallPrefersCommandTokenBoundary()
+		void partialHistoryRecallUsesPrefixAndNewestFirst()
 		{
 			resetTestState();
 			g_worldAttrs.insert(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
@@ -4693,21 +4693,105 @@ class tst_WorldView_Basic : public QObject
 			view.show();
 			view.setRuntimeObserver(fakeRuntimePointer());
 			view.applyRuntimeSettings();
-			view.addToHistoryForced(QStringLiteral("ff test"));
-			view.addToHistoryForced(QStringLiteral("ffl test"));
+			view.addToHistoryForced(QStringLiteral("hitman"));
+			view.addToHistoryForced(QStringLiteral("hit man"));
+			view.addToHistoryForced(QStringLiteral("hit123"));
+			view.addToHistoryForced(QStringLiteral("hit 321"));
 			QCoreApplication::processEvents();
 
 			QPlainTextEdit *input = view.inputEditor();
 			QVERIFY(input);
 			input->setFocus();
-			view.setInputText(QStringLiteral("ff"), true);
+			view.setInputText(QStringLiteral("hit"), true);
 			QCoreApplication::processEvents();
 
 			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
-			QCOMPARE(view.inputText(), QStringLiteral("ff test"));
+			QCOMPARE(view.inputText(), QStringLiteral("hit 321"));
 
-			QTest::keyClick(input, Qt::Key_Down, Qt::AltModifier);
-			QCOMPARE(view.inputText(), QStringLiteral("ffl test"));
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit123"));
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit man"));
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hitman"));
+
+			view.setInputText(QStringLiteral("hit "), true);
+			QCoreApplication::processEvents();
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit 321"));
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit man"));
+
+			resetTestState();
+		}
+
+		void partialHistoryRecallReseedsAfterManualEdit()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			view.addToHistoryForced(QStringLiteral("hitman"));
+			view.addToHistoryForced(QStringLiteral("hit man"));
+			view.addToHistoryForced(QStringLiteral("hit123"));
+			view.addToHistoryForced(QStringLiteral("hit 321"));
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus();
+			view.setInputText(QStringLiteral("hit"), true);
+			QCoreApplication::processEvents();
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit 321"));
+
+			QTest::keyClick(input, Qt::Key_A, Qt::ControlModifier);
+			QTest::keyClicks(input, QStringLiteral("hit "));
+			QCoreApplication::processEvents();
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit 321"));
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit man"));
+
+			resetTestState();
+		}
+
+		void commandHistoryKeepsOnlyNewestDuplicateEntry()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+
+			view.addToHistoryForced(QStringLiteral("look"));
+			view.addToHistoryForced(QStringLiteral("north"));
+			view.addToHistoryForced(QStringLiteral("look"));
+			view.addToHistoryForced(QStringLiteral("south"));
+			view.addToHistoryForced(QStringLiteral("look"));
+
+			QCOMPARE(view.commandHistoryList(),
+			         (QStringList{QStringLiteral("north"), QStringLiteral("south"), QStringLiteral("look")}));
+
+			view.addToHistoryForced(QStringLiteral("look"));
+			QCOMPARE(view.commandHistoryList(),
+			         (QStringList{QStringLiteral("north"), QStringLiteral("south"), QStringLiteral("look")}));
 
 			resetTestState();
 		}

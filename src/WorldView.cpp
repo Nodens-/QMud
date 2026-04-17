@@ -81,6 +81,16 @@ namespace
 		return static_cast<int>(qBound(kMin, value, kMax));
 	}
 
+	void appendDeduplicatedHistoryEntry(QVector<QString> &history, const QString &entry,
+	                                    const int historyLimit)
+	{
+		const auto newEnd = std::ranges::remove(history, entry).begin();
+		history.erase(newEnd, history.end());
+		history.append(entry);
+		if (historyLimit > 0 && history.size() > historyLimit)
+			history.remove(0, history.size() - historyLimit);
+	}
+
 	bool styleSpansEquivalent(const WorldRuntime::StyleSpan &lhs, const WorldRuntime::StyleSpan &rhs)
 	{
 		return lhs.length == rhs.length && lhs.fore == rhs.fore && lhs.back == rhs.back &&
@@ -8833,9 +8843,7 @@ void WorldView::addToHistory(const QString &text)
 	if (text == m_lastCommand)
 		return;
 
-	m_history.append(text);
-	if (m_history.size() > m_historyLimit)
-		m_history.remove(0, m_history.size() - m_historyLimit);
+	appendDeduplicatedHistoryEntry(m_history, text, m_historyLimit);
 	m_lastCommand = text;
 }
 
@@ -9408,7 +9416,7 @@ void WorldView::recallPartialHistory(int direction)
 	if (m_inputChanged)
 	{
 		m_partialCommand = m_input->toPlainText();
-		m_partialIndex   = (direction < 0) ? sizeToInt(m_history.size()) : -1;
+		m_partialIndex   = sizeToInt(m_history.size());
 	}
 
 	if (m_partialCommand.isEmpty())
@@ -9417,13 +9425,12 @@ void WorldView::recallPartialHistory(int direction)
 		return;
 	}
 
-	const qsizetype partialLen = m_partialCommand.size();
-	const auto      findMatch  = [&](const bool requireBoundaryAfterPrefix) -> int
+	const auto findMatch = [&](const int step) -> int
 	{
 		int index = m_partialIndex;
 		while (true)
 		{
-			index += (direction < 0) ? -1 : 1;
+			index += step;
 			if (index < 0 || index >= m_history.size())
 				return -1;
 
@@ -9432,21 +9439,12 @@ void WorldView::recallPartialHistory(int direction)
 				continue;
 			if (candidate.compare(m_partialCommand, Qt::CaseInsensitive) == 0)
 				continue;
-
-			if (!requireBoundaryAfterPrefix)
-				return index;
-
-			if (candidate.size() == partialLen)
-				return index;
-			const QChar nextChar = candidate.at(partialLen);
-			if (nextChar.isSpace())
-				return index;
+			return index;
 		}
 	};
 
-	int index = findMatch(true);
-	if (index < 0)
-		index = findMatch(false);
+	const bool preferNewest = (direction < 0) || (m_partialIndex >= m_history.size());
+	int        index        = preferNewest ? findMatch(-1) : findMatch(1);
 	if (index < 0)
 	{
 		if (confirmReplaceTyping(QString()))
