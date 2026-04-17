@@ -16,7 +16,7 @@
 #include "MainFrame.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
-#include "MiniWindowBrushUtils.h"
+#include "MiniWindowUtils.h"
 #include "Version.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
@@ -4307,8 +4307,8 @@ void WorldView::paintTextRectangleCompatibilityFrame(QPainter *painter, const QR
 	if (frameRect.isEmpty())
 		return;
 
-	const QBrush outsideBrush = MiniWindowBrushUtils::makeBrush(
-	    settings.outsideFillStyle, settings.borderColour, settings.outsideFillColour);
+	const QBrush outsideBrush = MiniWindowUtils::makeBrush(settings.outsideFillStyle, settings.borderColour,
+	                                                       settings.outsideFillColour);
 	if (outsideBrush.style() != Qt::NoBrush)
 	{
 		painter->save();
@@ -4325,7 +4325,7 @@ void WorldView::paintTextRectangleCompatibilityFrame(QPainter *painter, const QR
 	if (borderWidth <= 0)
 		return;
 
-	const QColor borderColor = MiniWindowBrushUtils::colorFromRefOrTransparent(settings.borderColour);
+	const QColor borderColor = MiniWindowUtils::colorFromRefOrTransparent(settings.borderColour);
 	if (borderColor.alpha() == 0)
 		return;
 

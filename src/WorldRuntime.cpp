@@ -23,7 +23,7 @@
 #include "LuaHeaders.h"
 #include "MainFrame.h"
 #include "MainFrameActionUtils.h"
-#include "MiniWindowBrushUtils.h"
+#include "MiniWindowUtils.h"
 #include "MxpDiagnostics.h"
 #include "NameGeneration.h"
 #include "PluginCallbackCatalogUtils.h"
@@ -1762,7 +1762,7 @@ namespace
 
 	QColor        colorFromRef(long value)
 	{
-		return MiniWindowBrushUtils::colorFromRef(value);
+		return MiniWindowUtils::colorFromRef(value);
 	}
 
 	long colorToRef(const QColor &color)
@@ -17268,7 +17268,7 @@ int WorldRuntime::windowCircleOp(const QString &name, int action, int left, int 
 	painter.setPen(penStyle == 5 ? Qt::NoPen : pen);
 
 	bool         brushOk = true;
-	QBrush const brush   = MiniWindowBrushUtils::makeBrush(brushStyle, penColour, brushColour, &brushOk);
+	QBrush const brush   = MiniWindowUtils::makeBrush(brushStyle, penColour, brushColour, &brushOk);
 	if (!brushOk)
 		return eBrushStyleNotValid;
 	painter.setBrush(brush);
@@ -17443,7 +17443,7 @@ int WorldRuntime::windowPolygon(const QString &name, const QString &points, long
 	pen.setJoinStyle(mapPenJoin(penStyle));
 	painter.setPen(penStyle == 5 ? Qt::NoPen : pen);
 	bool         brushOk = true;
-	QBrush const brush   = MiniWindowBrushUtils::makeBrush(brushStyle, penColour, brushColour, &brushOk);
+	QBrush const brush   = MiniWindowUtils::makeBrush(brushStyle, penColour, brushColour, &brushOk);
 	if (!brushOk)
 		return eBrushStyleNotValid;
 	painter.setBrush(brush);
@@ -17693,6 +17693,942 @@ int WorldRuntime::windowText(const QString &name, const QString &fontId, const Q
 	const int width = it.value().metrics.horizontalAdvance(text);
 	emit      miniWindowsChanged();
 	return qMin(width, rect.width());
+}
+
+int WorldRuntime::windowOutputText(const QString &name, const QString &fontId, const QString &text, int left,
+                                   int top, int right, int bottom, long colour, const QString &mouseUp,
+                                   const QString &hotspotPrefix, const QString &pluginId,
+                                   WindowOutputMetrics *metricsOut)
+{
+	if (metricsOut)
+		*metricsOut = WindowOutputMetrics{};
+
+	if (name.isEmpty())
+		return -1;
+
+	MiniWindow *window = miniWindow(name);
+	if (!window)
+		return -1;
+
+	const auto fontIt = window->fonts.find(fontId);
+	if (fontIt == window->fonts.end())
+		return -2;
+
+	if (!mouseUp.isEmpty() && !isValidScriptLabel(mouseUp))
+		return eInvalidObjectLabel;
+
+	QImage &surface = window->surface;
+	if (surface.isNull())
+		return eOK;
+
+	const QRect rect = rectFromCoords(*window, left, top, right, bottom);
+	if (rect.width() <= 0 || rect.height() <= 0)
+		return eOK;
+
+	const QString normalizedPrefix =
+	    hotspotPrefix.trimmed().isEmpty() ? QStringLiteral("output_link") : hotspotPrefix.trimmed();
+	const QString    scopedPrefix = normalizedPrefix + QLatin1Char('_');
+	QVector<QString> scopedGeneratedIds;
+	scopedGeneratedIds.reserve(window->outputGeneratedHotspots.size());
+	for (const QString &generatedHotspotId : std::as_const(window->outputGeneratedHotspots))
+	{
+		if (!generatedHotspotId.startsWith(scopedPrefix))
+			continue;
+		window->hotspots.remove(generatedHotspotId);
+		if (window->mouseOverHotspot == generatedHotspotId)
+			window->mouseOverHotspot.clear();
+		if (window->mouseDownHotspot == generatedHotspotId)
+			window->mouseDownHotspot.clear();
+		scopedGeneratedIds.push_back(generatedHotspotId);
+	}
+	for (const QString &generatedHotspotId : std::as_const(scopedGeneratedIds))
+	{
+		window->outputGeneratedHotspots.remove(generatedHotspotId);
+	}
+	if (window->hotspots.isEmpty())
+	{
+		window->callbackPlugin.clear();
+		window->outputHotspotSerial = 0;
+	}
+
+	if (text.isEmpty())
+	{
+		emit miniWindowsChanged();
+		return 0;
+	}
+
+	auto parseColorValue = [](const QString &value) -> QColor
+	{
+		if (value.isEmpty())
+			return {};
+		QColor color(value);
+		if (color.isValid())
+			return color;
+		bool      ok      = false;
+		const int numeric = value.toInt(&ok);
+		if (!ok)
+			return {};
+		const int r = numeric & 0xFF;
+		const int g = (numeric >> 8) & 0xFF;
+		const int b = (numeric >> 16) & 0xFF;
+		return {r, g, b};
+	};
+
+	QVector<QColor> normalAnsi(8);
+	QVector<QColor> boldAnsi(8);
+	QVector<QColor> customText(16);
+	QVector<QColor> customBack(16);
+	normalAnsi[0] = QColor(0, 0, 0);
+	normalAnsi[1] = QColor(128, 0, 0);
+	normalAnsi[2] = QColor(0, 128, 0);
+	normalAnsi[3] = QColor(128, 128, 0);
+	normalAnsi[4] = QColor(0, 0, 128);
+	normalAnsi[5] = QColor(128, 0, 128);
+	normalAnsi[6] = QColor(0, 128, 128);
+	normalAnsi[7] = QColor(192, 192, 192);
+	boldAnsi[0]   = QColor(128, 128, 128);
+	boldAnsi[1]   = QColor(255, 0, 0);
+	boldAnsi[2]   = QColor(0, 255, 0);
+	boldAnsi[3]   = QColor(255, 255, 0);
+	boldAnsi[4]   = QColor(0, 0, 255);
+	boldAnsi[5]   = QColor(255, 0, 255);
+	boldAnsi[6]   = QColor(0, 255, 255);
+	boldAnsi[7]   = QColor(255, 255, 255);
+	for (int i = 0; i < customText.size(); ++i)
+	{
+		customText[i] = QColor(255, 255, 255);
+		customBack[i] = QColor(0, 0, 0);
+	}
+	customText[0]  = QColor(255, 128, 128);
+	customText[1]  = QColor(255, 255, 128);
+	customText[2]  = QColor(128, 255, 128);
+	customText[3]  = QColor(128, 255, 255);
+	customText[4]  = QColor(0, 128, 255);
+	customText[5]  = QColor(255, 128, 192);
+	customText[6]  = QColor(255, 0, 0);
+	customText[7]  = QColor(0, 128, 192);
+	customText[8]  = QColor(255, 0, 255);
+	customText[9]  = QColor(128, 64, 64);
+	customText[10] = QColor(255, 128, 64);
+	customText[11] = QColor(0, 128, 128);
+	customText[12] = QColor(0, 64, 128);
+	customText[13] = QColor(255, 0, 128);
+	customText[14] = QColor(0, 128, 0);
+	customText[15] = QColor(0, 0, 255);
+
+	for (const auto &entry : m_colours)
+	{
+		const QString group = entry.group.trimmed().toLower();
+		bool          ok    = false;
+		const int     seq   = entry.attributes.value(QStringLiteral("seq")).toInt(&ok);
+		const int     index = ok ? seq - 1 : -1;
+		if (index < 0)
+			continue;
+		if (group == QStringLiteral("ansi/normal") && index < normalAnsi.size())
+		{
+			const QColor rgb = parseColorValue(entry.attributes.value(QStringLiteral("rgb")));
+			if (rgb.isValid())
+				normalAnsi[index] = rgb;
+		}
+		else if (group == QStringLiteral("ansi/bold") && index < boldAnsi.size())
+		{
+			const QColor rgb = parseColorValue(entry.attributes.value(QStringLiteral("rgb")));
+			if (rgb.isValid())
+				boldAnsi[index] = rgb;
+		}
+		else if ((group == QStringLiteral("custom/custom") || group == QStringLiteral("custom")) &&
+		         index < customText.size())
+		{
+			const QColor textColor = parseColorValue(entry.attributes.value(QStringLiteral("text")));
+			const QColor backColor = parseColorValue(entry.attributes.value(QStringLiteral("back")));
+			if (textColor.isValid())
+				customText[index] = textColor;
+			if (backColor.isValid())
+				customBack[index] = backColor;
+		}
+	}
+
+	const bool custom16Default =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("custom_16_is_default_colour")));
+	const bool ignoreMxpColourChanges =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("ignore_mxp_colour_changes")));
+	QColor defaultForeColor = parseColorValue(m_worldAttributes.value(QStringLiteral("output_text_colour")));
+	QColor defaultBackColor =
+	    parseColorValue(m_worldAttributes.value(QStringLiteral("output_background_colour")));
+	if (!defaultForeColor.isValid())
+		defaultForeColor = custom16Default ? customText.value(15) : normalAnsi.value(7);
+	if (!defaultBackColor.isValid())
+		defaultBackColor = custom16Default ? customBack.value(15) : normalAnsi.value(0);
+	const QString defaultFore = defaultForeColor.name();
+	const QString defaultBack = defaultBackColor.name();
+	const bool    useCustomLinkColour =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("use_custom_link_colour")));
+	const bool underlineHyperlinks =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("underline_hyperlinks")));
+	const QColor configuredHyperlinkColour =
+	    parseColorValue(m_worldAttributes.value(QStringLiteral("hyperlink_colour")));
+
+	MxpStyleState          current = m_mxpRenderStyle;
+	QVector<MxpStyleFrame> mxpStyleStack(m_mxpRenderStack);
+	QVector<QByteArray>    mxpBlockStack(m_mxpRenderBlockStack);
+	bool                   mxpLinkOpen = m_mxpRenderLinkOpen;
+	int                    mxpPreDepth = m_mxpRenderPreDepth;
+	const bool             hasPersistedMxpRenderContext =
+	    !mxpStyleStack.isEmpty() || !mxpBlockStack.isEmpty() || mxpLinkOpen || mxpPreDepth > 0;
+	if (!hasPersistedMxpRenderContext)
+	{
+		current.bold       = m_ansiRenderState.bold;
+		current.underline  = m_ansiRenderState.underline;
+		current.italic     = m_ansiRenderState.italic;
+		current.blink      = m_ansiRenderState.blink;
+		current.strike     = m_ansiRenderState.strike;
+		current.monospace  = m_ansiRenderState.monospace;
+		current.inverse    = m_ansiRenderState.inverse;
+		current.fore       = m_ansiRenderState.fore;
+		current.back       = m_ansiRenderState.back;
+		current.actionType = m_ansiRenderState.actionType;
+		current.action     = m_ansiRenderState.action;
+		current.hint       = m_ansiRenderState.hint;
+		current.variable   = m_ansiRenderState.variable;
+		current.startTag   = m_ansiRenderState.startTag;
+	}
+	if (current.fore.isEmpty())
+		current.fore = defaultFore;
+	if (current.back.isEmpty())
+		current.back = defaultBack;
+
+	QMudAnsiStreamState ansiStreamState = m_ansiStreamState;
+
+	struct ParsedRun
+	{
+			QString                 text;
+			WorldRuntime::StyleSpan style;
+	};
+	QVector<ParsedRun> parsedRuns;
+	auto styleEquivalent = [](const WorldRuntime::StyleSpan &lhs, const WorldRuntime::StyleSpan &rhs)
+	{
+		return lhs.fore == rhs.fore && lhs.back == rhs.back && lhs.bold == rhs.bold &&
+		       lhs.underline == rhs.underline && lhs.italic == rhs.italic && lhs.blink == rhs.blink &&
+		       lhs.strike == rhs.strike && lhs.inverse == rhs.inverse && lhs.actionType == rhs.actionType &&
+		       lhs.action == rhs.action && lhs.hint == rhs.hint && lhs.variable == rhs.variable;
+	};
+	auto appendRun = [&](const QString &segment, const QMudStyledTextState &state)
+	{
+		if (segment.isEmpty())
+			return;
+		WorldRuntime::StyleSpan span;
+		span.length     = safeQSizeToInt(segment.size());
+		span.fore       = state.fore.isEmpty() ? QColor() : QColor(state.fore);
+		span.back       = state.back.isEmpty() ? QColor() : QColor(state.back);
+		span.bold       = state.bold;
+		span.underline  = state.underline;
+		span.italic     = state.italic;
+		span.blink      = state.blink;
+		span.strike     = state.strike;
+		span.inverse    = state.inverse;
+		span.actionType = state.actionType;
+		span.action     = state.action;
+		span.hint       = state.hint;
+		span.variable   = state.variable;
+		if (!parsedRuns.isEmpty() && styleEquivalent(parsedRuns.last().style, span))
+		{
+			parsedRuns.last().text += segment;
+			parsedRuns.last().style.length = safeQSizeToInt(parsedRuns.last().text.size());
+			return;
+		}
+		parsedRuns.push_back({segment, span});
+	};
+
+	auto colorFromXtermIndex = [](const int index) -> QString
+	{
+		if (index < 0 || index >= 256)
+			return {};
+		const AppController *app = AppController::instance();
+		const QMudColorRef   ref = app ? app->xtermColorAt(index) : qmudRgb(0, 0, 0);
+		return QColor(qmudRed(ref), qmudGreen(ref), qmudBlue(ref)).name();
+	};
+	auto normalAnsiColor = [&](const int index) -> QString
+	{
+		if (index < 0 || index >= normalAnsi.size())
+			return {};
+		return normalAnsi.at(index).name();
+	};
+	auto boldAnsiColor = [&](const int index) -> QString
+	{
+		if (index < 0 || index >= boldAnsi.size())
+			return {};
+		return boldAnsi.at(index).name();
+	};
+	auto appendStyledChunk = [&](const QString &chunkText)
+	{
+		if (chunkText.isEmpty())
+			return;
+
+		QMudStyledTextState ansiState;
+		ansiState.bold       = current.bold;
+		ansiState.underline  = current.underline;
+		ansiState.italic     = current.italic;
+		ansiState.blink      = current.blink;
+		ansiState.strike     = current.strike;
+		ansiState.inverse    = current.inverse;
+		ansiState.fore       = current.fore;
+		ansiState.back       = current.back;
+		ansiState.actionType = current.actionType;
+		ansiState.action     = current.action;
+		ansiState.hint       = current.hint;
+		ansiState.variable   = current.variable;
+		ansiState.startTag   = current.startTag;
+		ansiState.monospace  = current.monospace;
+
+		constexpr QMudOscActionIds     oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
+		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+		    chunkText.toUtf8(), ansiStreamState, defaultFore, defaultBack, normalAnsiColor, boldAnsiColor,
+		    colorFromXtermIndex, [](const QByteArrayView bytes)
+		    { return QString::fromUtf8(bytes.data(), safeQSizeToInt(bytes.size())); }, ansiState,
+		    oscActionIds);
+		for (const QMudStyledChunk &chunk : chunks)
+		{
+			QString normalized = chunk.text;
+			normalized.replace(QChar(0x0085), QLatin1Char(' '));
+			normalized.replace(QChar(0x2028), QLatin1Char(' '));
+			normalized.replace(QChar(0x2029), QLatin1Char(' '));
+			appendRun(normalized, chunk.state);
+		}
+
+		current.bold       = ansiState.bold;
+		current.underline  = ansiState.underline;
+		current.italic     = ansiState.italic;
+		current.blink      = ansiState.blink;
+		current.strike     = ansiState.strike;
+		current.inverse    = ansiState.inverse;
+		current.fore       = ansiState.fore;
+		current.back       = ansiState.back;
+		current.actionType = ansiState.actionType;
+		current.action     = ansiState.action;
+		current.hint       = ansiState.hint;
+		current.variable   = ansiState.variable;
+		current.startTag   = ansiState.startTag;
+		current.monospace  = ansiState.monospace;
+	};
+
+	static const QRegularExpression kHexColor6(QStringLiteral("^[0-9A-Fa-f]{6}$"));
+	auto                            normalizeColorBytes = [](const QByteArray &value) -> QString
+	{
+		QString name = QString::fromLocal8Bit(value).trimmed();
+		if (name.isEmpty())
+			return {};
+		if (kHexColor6.match(name).hasMatch())
+			name.prepend(QLatin1Char('#'));
+		QColor color(name);
+		return color.isValid() ? color.name() : QString();
+	};
+	auto normalizeColorText = [](const QString &value) -> QString
+	{
+		QString name = value.trimmed();
+		if (name.isEmpty())
+			return {};
+		if (kHexColor6.match(name).hasMatch())
+			name.prepend(QLatin1Char('#'));
+		QColor color(name);
+		return color.isValid() ? color.name() : QString();
+	};
+	auto mxpTagsEquivalent = [](const QByteArray &lhs, const QByteArray &rhs)
+	{
+		if (lhs == rhs)
+			return true;
+		return (lhs == "send" && rhs == "a") || (lhs == "a" && rhs == "send");
+	};
+	auto applyStartTag =
+	    [&](const QByteArray &activeTag, const QMap<QByteArray, QByteArray> &activeAttributes)
+	{
+		const QByteArray unnamedFore = activeAttributes.value("1");
+		const QByteArray unnamedBack = activeAttributes.value("2");
+		if (activeTag == "send" || activeTag == "a")
+		{
+			QString href = QString::fromLocal8Bit(activeAttributes.value("href"));
+			if (href.isEmpty())
+				href = QString::fromLocal8Bit(activeAttributes.value("xch_cmd"));
+			QString xchPrompt = QString::fromLocal8Bit(activeAttributes.value("xch_prompt"));
+			if (xchPrompt.isEmpty())
+				xchPrompt = QString::fromLocal8Bit(activeAttributes.value("prompt"));
+			QString hint = QString::fromLocal8Bit(activeAttributes.value("hint"));
+			if (hint.isEmpty())
+				hint = QString::fromLocal8Bit(activeAttributes.value("xch_hint"));
+			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpStyleStack.push_back({activeTag, current});
+			mxpLinkOpen = true;
+			if (activeTag == "a")
+				current.actionType = ActionHyperlink;
+			else if (!xchPrompt.isEmpty())
+				current.actionType = ActionPrompt;
+			else
+				current.actionType = ActionSend;
+			current.action   = href;
+			current.hint     = hint.isEmpty() ? xchPrompt : hint;
+			QString variable = QString::fromLocal8Bit(activeAttributes.value("xch_set"));
+			if (variable.isEmpty())
+				variable = QString::fromLocal8Bit(activeAttributes.value("variable"));
+			if (variable.isEmpty())
+				variable = QString::fromLocal8Bit(activeAttributes.value("set"));
+			current.variable = variable;
+			current.startTag = true;
+			return;
+		}
+		if (activeTag == "bold" || activeTag == "b" || activeTag == "strong" || activeTag == "h1" ||
+		    activeTag == "h2" || activeTag == "h3" || activeTag == "h4" || activeTag == "h5" ||
+		    activeTag == "h6")
+		{
+			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpStyleStack.push_back({activeTag, current});
+			current.bold = true;
+			return;
+		}
+		if (activeTag == "underline" || activeTag == "u")
+		{
+			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpStyleStack.push_back({activeTag, current});
+			current.underline = true;
+			return;
+		}
+		if (activeTag == "italic" || activeTag == "i" || activeTag == "em")
+		{
+			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpStyleStack.push_back({activeTag, current});
+			current.italic = true;
+			return;
+		}
+		if (activeTag == "strike" || activeTag == "s")
+		{
+			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpStyleStack.push_back({activeTag, current});
+			current.strike = true;
+			return;
+		}
+		if (activeTag == "color")
+		{
+			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpStyleStack.push_back({activeTag, current});
+			if (!ignoreMxpColourChanges)
+			{
+				QString fore = normalizeColorBytes(activeAttributes.value("fore"));
+				if (fore.isEmpty())
+					fore = normalizeColorBytes(unnamedFore);
+				QString back = normalizeColorBytes(activeAttributes.value("back"));
+				if (back.isEmpty())
+					back = normalizeColorBytes(unnamedBack);
+				if (!fore.isEmpty())
+					current.fore = fore;
+				if (!back.isEmpty())
+					current.back = back;
+			}
+			return;
+		}
+		if (activeTag == "c")
+		{
+			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpStyleStack.push_back({activeTag, current});
+			if (!ignoreMxpColourChanges)
+			{
+				const QString fore = normalizeColorBytes(unnamedFore);
+				const QString back = normalizeColorBytes(unnamedBack);
+				if (!fore.isEmpty())
+					current.fore = fore;
+				if (!back.isEmpty())
+					current.back = back;
+			}
+			return;
+		}
+		if (activeTag == "font")
+		{
+			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpStyleStack.push_back({activeTag, current});
+			QString colorSpec = QString::fromLocal8Bit(activeAttributes.value("color"));
+			if (colorSpec.isEmpty())
+				colorSpec = QString::fromLocal8Bit(activeAttributes.value("fgcolor"));
+			const QStringList parts = colorSpec.split(',', Qt::SkipEmptyParts);
+			for (QString part : parts)
+			{
+				part = part.trimmed();
+				if (part.compare(QStringLiteral("bold"), Qt::CaseInsensitive) == 0)
+					current.bold = true;
+				else if (part.compare(QStringLiteral("italic"), Qt::CaseInsensitive) == 0)
+					current.italic = true;
+				else if (part.compare(QStringLiteral("underline"), Qt::CaseInsensitive) == 0)
+					current.underline = true;
+				else if (part.compare(QStringLiteral("blink"), Qt::CaseInsensitive) == 0)
+					current.blink = true;
+				else if (part.compare(QStringLiteral("inverse"), Qt::CaseInsensitive) == 0)
+				{
+					current.inverse = true;
+					if (!current.fore.isEmpty() || !current.back.isEmpty())
+						qSwap(current.fore, current.back);
+				}
+				else if (!ignoreMxpColourChanges)
+				{
+					const QString resolved = normalizeColorText(part);
+					if (!resolved.isEmpty())
+						current.fore = resolved;
+				}
+			}
+			QString back = QString::fromLocal8Bit(activeAttributes.value("back"));
+			if (back.isEmpty())
+				back = QString::fromLocal8Bit(activeAttributes.value("bgcolor"));
+			if (!ignoreMxpColourChanges)
+			{
+				const QString resolvedBack = normalizeColorText(back);
+				if (!resolvedBack.isEmpty())
+					current.back = resolvedBack;
+			}
+			return;
+		}
+		if (activeTag == "high" || activeTag == "h")
+		{
+			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpStyleStack.push_back({activeTag, current});
+			if (!current.fore.isEmpty())
+			{
+				const QColor color(current.fore);
+				if (color.isValid())
+					current.fore = color.lighter(115).name();
+			}
+			return;
+		}
+		if (activeTag == "tt" || activeTag == "samp")
+		{
+			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpStyleStack.push_back({activeTag, current});
+			current.monospace = true;
+			return;
+		}
+		if (activeTag == "pre")
+		{
+			if (mxpBlockStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpBlockStack.push_back(activeTag);
+			++mxpPreDepth;
+			return;
+		}
+		if (activeTag == "center" || activeTag == "ul" || activeTag == "ol" || activeTag == "li")
+		{
+			if (mxpBlockStack.size() >= kMaxMxpStackDepth)
+				return;
+			mxpBlockStack.push_back(activeTag);
+			return;
+		}
+		if (activeTag == "reset")
+		{
+			mxpStyleStack.clear();
+			mxpBlockStack.clear();
+			mxpLinkOpen  = false;
+			mxpPreDepth  = 0;
+			current      = MxpStyleState{};
+			current.fore = defaultFore;
+			current.back = defaultBack;
+		}
+	};
+	auto applyEndTag = [&](const QByteArray &closeTag)
+	{
+		if (closeTag == "send" || closeTag == "a")
+		{
+			mxpLinkOpen = false;
+			for (int i = safeQSizeToInt(mxpStyleStack.size()) - 1; i >= 0; --i)
+			{
+				if (mxpTagsEquivalent(mxpStyleStack.at(i).tag, closeTag))
+				{
+					current = mxpStyleStack.at(i).state;
+					mxpStyleStack.removeAt(i);
+					break;
+				}
+			}
+			return;
+		}
+		if (closeTag == "pre" || closeTag == "center" || closeTag == "ul" || closeTag == "ol" ||
+		    closeTag == "li")
+		{
+			for (int i = safeQSizeToInt(mxpBlockStack.size()) - 1; i >= 0; --i)
+			{
+				if (mxpBlockStack.at(i) == closeTag)
+				{
+					for (int j = safeQSizeToInt(mxpBlockStack.size()) - 1; j >= i; --j)
+					{
+						if (mxpBlockStack.at(j) == "pre" && mxpPreDepth > 0)
+							--mxpPreDepth;
+					}
+					mxpBlockStack.resize(i);
+					break;
+				}
+			}
+			return;
+		}
+		for (int i = safeQSizeToInt(mxpStyleStack.size()) - 1; i >= 0; --i)
+		{
+			if (mxpStyleStack.at(i).tag == closeTag)
+			{
+				current = mxpStyleStack.at(i).state;
+				mxpStyleStack.removeAt(i);
+				break;
+			}
+		}
+	};
+
+	struct LogicalCustomFrame
+	{
+			QByteArray          tag;
+			QVector<QByteArray> closeTags;
+	};
+	QVector<LogicalCustomFrame> logicalFrames;
+	auto                        applyMarkerTag = [&](const QString &tagContent, const bool closing)
+	{
+		const QByteArray rawTag = tagContent.trimmed().toLocal8Bit();
+		if (rawTag.isEmpty())
+			return;
+
+		if (closing)
+		{
+			const QByteArray closeTag = rawTag.toLower();
+			for (int i = safeQSizeToInt(logicalFrames.size()) - 1; i >= 0; --i)
+			{
+				if (!mxpTagsEquivalent(logicalFrames.at(i).tag, closeTag))
+					continue;
+				const QVector<QByteArray> closeTags = logicalFrames.at(i).closeTags;
+				logicalFrames.resize(i);
+				if (!closeTags.isEmpty())
+				{
+					for (int j = safeQSizeToInt(closeTags.size()) - 1; j >= 0; --j)
+						applyEndTag(closeTags.at(j));
+				}
+				else
+					applyEndTag(closeTag);
+				return;
+			}
+			applyEndTag(closeTag);
+			return;
+		}
+
+		QByteArray tagName;
+		QByteArray temp = rawTag;
+		mxpGetWord(tagName, temp);
+		tagName = tagName.toLower();
+		if (tagName.isEmpty())
+			return;
+
+		ParsedMxpArguments                 parsed       = parseMxpArguments(rawTag);
+		QMap<QByteArray, QByteArray>       attributes   = buildArgumentTableBytes(parsed.args);
+		QByteArray                         effectiveTag = tagName;
+		TelnetProcessor::CustomElementInfo customInfo;
+		AtomicTagInfo                      atomicInfo;
+		const bool hasCustomElement = m_telnet.getCustomElementInfo(tagName, customInfo);
+		const bool hasAtomicTag     = lookupAtomicTagInfo(tagName, atomicInfo);
+		if (!hasCustomElement && !hasAtomicTag)
+			return;
+
+		if (hasCustomElement)
+		{
+			const QMap<QByteArray, QByteArray> mergedDefaults =
+			    mergeAttributeDefaultsBytes(customInfo.attributes, parsed.args);
+			const QByteArray resolvedDefinition =
+			    resolveDefinitionEntities(customInfo.definition, mergedDefaults, m_telnet);
+			QMap<QByteArray, QByteArray> aliasAttributes;
+			QByteArray                   aliasTag;
+			if (parseDefinitionAlias(resolvedDefinition, aliasTag, aliasAttributes))
+			{
+				effectiveTag = aliasTag;
+				if (!aliasAttributes.isEmpty())
+					attributes = aliasAttributes;
+			}
+		}
+
+		QVector<QByteArray> customTagSequence;
+		if (hasCustomElement)
+		{
+			const QMap<QByteArray, QByteArray> mergedDefaults =
+			    mergeAttributeDefaultsBytes(customInfo.attributes, parsed.args);
+			const QVector<QByteArray> rawTags = extractDefinitionTags(customInfo.definition);
+			for (const QByteArray &rawDefinitionTag : rawTags)
+			{
+				const QByteArray resolved =
+				    resolveDefinitionEntities(rawDefinitionTag, mergedDefaults, m_telnet);
+				const ParsedMxpArguments defParsed = parseMxpArguments(resolved);
+				QByteArray               definitionTagName;
+				QByteArray               definitionTemp = resolved;
+				mxpGetWord(definitionTagName, definitionTemp);
+				definitionTagName = definitionTagName.toLower();
+				if (definitionTagName.isEmpty())
+					continue;
+				if (!lookupAtomicTagInfo(definitionTagName, atomicInfo))
+					continue;
+				customTagSequence.push_back(definitionTagName);
+				applyStartTag(definitionTagName, buildArgumentTableBytes(defParsed.args));
+			}
+		}
+
+		const bool trackable = !(hasCustomElement ? customInfo.command : atomicInfo.command);
+		if (customTagSequence.isEmpty())
+			applyStartTag(effectiveTag, attributes);
+
+		if (!trackable)
+			return;
+
+		LogicalCustomFrame frame;
+		frame.tag = tagName;
+		if (!customTagSequence.isEmpty())
+			frame.closeTags = customTagSequence;
+		else
+			frame.closeTags = {effectiveTag};
+		logicalFrames.push_back(frame);
+	};
+
+	QString source = text;
+	source.replace(QStringLiteral("\\3"), QString(QChar(3)));
+	source.replace(QStringLiteral("\\4"), QString(QChar(4)));
+	QString         plainBuffer;
+	constexpr QChar mxpOpenMarker(3);
+	constexpr QChar mxpCloseMarker(4);
+	for (qsizetype i = 0; i < source.size(); ++i)
+	{
+		if (source.at(i) != mxpOpenMarker)
+		{
+			plainBuffer.append(source.at(i));
+			continue;
+		}
+
+		const qsizetype markerEnd = source.indexOf(mxpCloseMarker, i + 1);
+		if (markerEnd < 0)
+		{
+			plainBuffer.append(source.mid(i));
+			break;
+		}
+
+		appendStyledChunk(plainBuffer);
+		plainBuffer.clear();
+
+		QString    markerText = source.mid(i + 1, markerEnd - i - 1).trimmed();
+		const bool closing    = markerText.startsWith(QLatin1Char('/'));
+		if (closing)
+			markerText.remove(0, 1);
+		applyMarkerTag(markerText, closing);
+		i = markerEnd;
+	}
+	appendStyledChunk(plainBuffer);
+
+	const QColor fallbackTextColor = colorFromRef(colour);
+
+	QPainter     painter(&surface);
+	painter.setClipRect(rect);
+	int    x                    = rect.left();
+	int    y                    = rect.top();
+	int    maxDrawnWidth        = 0;
+	int    hotspotStatus        = eOK;
+	int    renderedLeft         = rect.right() + 1;
+	int    renderedTop          = rect.bottom() + 1;
+	int    renderedRight        = rect.left() - 1;
+	int    renderedBottom       = rect.top() - 1;
+	int    renderedLineCount    = 0;
+	int    renderedHotspotCount = 0;
+	bool   hasPreviousRunOnLine = false;
+	bool   hasCountedLineY      = false;
+	int    countedLineY         = 0;
+	QColor previousRunBackColor;
+	auto   newline = [&]
+	{
+		x = rect.left();
+		y += fontIt.value().metrics.height();
+		hasPreviousRunOnLine = false;
+		previousRunBackColor = QColor();
+	};
+
+	bool abortedForHeight = false;
+	for (const ParsedRun &run : std::as_const(parsedRuns))
+	{
+		if (run.text.isEmpty())
+			continue;
+		QColor foreColor = run.style.fore.isValid() ? run.style.fore : fallbackTextColor;
+		QColor backColor = run.style.back;
+		if (run.style.inverse)
+			qSwap(foreColor, backColor);
+		const bool hasLinkAction = run.style.actionType == ActionHyperlink ||
+		                           run.style.actionType == ActionSend || run.style.actionType == ActionPrompt;
+		if (hasLinkAction && useCustomLinkColour && configuredHyperlinkColour.isValid())
+			foreColor = configuredHyperlinkColour;
+
+		QFont drawFont = fontIt.value().font;
+		drawFont.setBold(run.style.bold);
+		drawFont.setItalic(run.style.italic);
+		drawFont.setUnderline(run.style.underline || (hasLinkAction && underlineHyperlinks));
+		drawFont.setStrikeOut(run.style.strike);
+		QFontMetrics metrics(drawFont);
+		const int    lineHeight = metrics.height();
+		const int    ascent     = metrics.ascent();
+		const int    rightLimit = rect.right() + 1;
+
+		QString      currentLineText;
+		int          currentLineWidth = 0;
+		auto         flushLineRun     = [&]
+		{
+			if (currentLineText.isEmpty())
+				return;
+			if (!MiniWindowUtils::lineFitsVertically(y, lineHeight, rect.bottom()))
+			{
+				currentLineText.clear();
+				currentLineWidth = 0;
+				abortedForHeight = true;
+				return;
+			}
+			if (backColor.isValid())
+			{
+				int fillLeft  = x;
+				int fillWidth = currentLineWidth;
+				if (hasPreviousRunOnLine && previousRunBackColor.isValid() &&
+				    previousRunBackColor == backColor && fillWidth > 1)
+				{
+					++fillLeft;
+					--fillWidth;
+				}
+				if (fillWidth > 0)
+					painter.fillRect(QRect(fillLeft, y, fillWidth, lineHeight), backColor);
+			}
+			painter.setFont(drawFont);
+			painter.setPen(foreColor);
+			painter.drawText(x, y + ascent, currentLineText);
+
+			const int runLeft  = x;
+			const int runRight = x + currentLineWidth;
+			maxDrawnWidth      = std::max(maxDrawnWidth, runRight - rect.left());
+			renderedLeft       = std::min(renderedLeft, runLeft);
+			renderedTop        = std::min(renderedTop, y);
+			renderedRight      = std::max(renderedRight, runRight - 1);
+			renderedBottom     = std::max(renderedBottom, y + lineHeight - 1);
+			if (!hasCountedLineY || countedLineY != y)
+			{
+				++renderedLineCount;
+				countedLineY    = y;
+				hasCountedLineY = true;
+			}
+			if (hasLinkAction && !run.style.action.trimmed().isEmpty())
+			{
+				const QString hotspotId =
+				    QStringLiteral("%1_%2").arg(normalizedPrefix).arg(++window->outputHotspotSerial);
+				const int addResult =
+				    windowAddHotspot(name, hotspotId, runLeft, y, runRight, y + lineHeight, QString(),
+				                     QString(), QString(), QString(), mouseUp, QString(), 1, 0, pluginId);
+				if (addResult == eOK)
+				{
+					if (auto inserted = window->hotspots.find(hotspotId); inserted != window->hotspots.end())
+					{
+						inserted->outputActionType = run.style.actionType;
+						inserted->outputAction     = run.style.action;
+						window->outputGeneratedHotspots.insert(hotspotId);
+						++renderedHotspotCount;
+					}
+				}
+				else if (hotspotStatus == eOK)
+					hotspotStatus = addResult;
+			}
+
+			x += currentLineWidth;
+			hasPreviousRunOnLine = true;
+			previousRunBackColor = backColor;
+			currentLineText.clear();
+			currentLineWidth = 0;
+		};
+
+		for (const QChar ch : run.text)
+		{
+			if (abortedForHeight)
+				break;
+			if (ch == QLatin1Char('\r'))
+				continue;
+			if (ch == QLatin1Char('\b'))
+			{
+				if (!currentLineText.isEmpty())
+				{
+					currentLineText.chop(1);
+					currentLineWidth = metrics.horizontalAdvance(currentLineText);
+				}
+				continue;
+			}
+			if (ch == QLatin1Char('\n'))
+			{
+				flushLineRun();
+				if (abortedForHeight)
+					break;
+				newline();
+				continue;
+			}
+
+			int candidateWidth = metrics.horizontalAdvance(currentLineText + ch);
+			while (
+			    MiniWindowUtils::runNeedsWrap(x, candidateWidth, currentLineWidth, rect.left(), rightLimit))
+			{
+				int splitIndex = -1;
+				for (int i = safeQSizeToInt(currentLineText.size()) - 1; i >= 0; --i)
+				{
+					if (currentLineText.at(i).isSpace())
+					{
+						splitIndex = i;
+						break;
+					}
+				}
+				if (splitIndex > 0)
+				{
+					const QString carry = currentLineText.mid(splitIndex + 1);
+					currentLineText.truncate(splitIndex);
+					currentLineWidth = metrics.horizontalAdvance(currentLineText);
+					flushLineRun();
+					if (abortedForHeight)
+						break;
+					newline();
+					currentLineText = carry;
+					currentLineWidth =
+					    currentLineText.isEmpty() ? 0 : metrics.horizontalAdvance(currentLineText);
+					candidateWidth = metrics.horizontalAdvance(currentLineText + ch);
+					continue;
+				}
+
+				flushLineRun();
+				if (abortedForHeight)
+					break;
+				newline();
+				candidateWidth = metrics.horizontalAdvance(currentLineText + ch);
+			}
+			if (abortedForHeight)
+				break;
+			if (currentLineText.isEmpty() && ch.isSpace())
+				continue;
+			currentLineText.append(ch);
+			currentLineWidth = metrics.horizontalAdvance(currentLineText);
+		}
+		flushLineRun();
+		if (abortedForHeight)
+			break;
+	}
+
+	emit miniWindowsChanged();
+	if (metricsOut && renderedBottom >= rect.top())
+	{
+		metricsOut->left         = renderedLeft;
+		metricsOut->top          = renderedTop;
+		metricsOut->right        = renderedRight;
+		metricsOut->bottom       = renderedBottom;
+		metricsOut->width        = renderedRight - renderedLeft + 1;
+		metricsOut->height       = renderedBottom - renderedTop + 1;
+		metricsOut->lineCount    = renderedLineCount;
+		metricsOut->hotspotCount = renderedHotspotCount;
+		metricsOut->hasOutput    = true;
+	}
+	if (hotspotStatus != eOK)
+		return hotspotStatus;
+	return qMin(maxDrawnWidth, rect.width());
 }
 
 int WorldRuntime::windowTextWidth(const QString &name, const QString &fontId, const QString &text) const
@@ -18076,8 +19012,8 @@ int WorldRuntime::windowImageOp(const QString &name, int action, int left, int t
 	QImage pattern = it.value().image;
 	if (it.value().monochrome)
 	{
-		const QColor fore = MiniWindowBrushUtils::colorFromRefOrTransparent(brushColour);
-		const QColor back = MiniWindowBrushUtils::colorFromRefOrTransparent(penColour);
+		const QColor fore = MiniWindowUtils::colorFromRefOrTransparent(brushColour);
+		const QColor back = MiniWindowUtils::colorFromRefOrTransparent(penColour);
 		QImage       recoloured(pattern.size(), QImage::Format_ARGB32);
 		for (int y = 0; y < pattern.height(); ++y)
 		{
@@ -18696,6 +19632,7 @@ int WorldRuntime::windowDeleteHotspot(const QString &name, const QString &hotspo
 	if (it == window->hotspots.end())
 		return eHotspotNotInstalled;
 	window->hotspots.erase(it);
+	window->outputGeneratedHotspots.remove(hotspotId);
 	if (window->mouseOverHotspot == hotspotId)
 		window->mouseOverHotspot.clear();
 	if (window->mouseDownHotspot == hotspotId)
@@ -18711,6 +19648,8 @@ int WorldRuntime::windowDeleteAllHotspots(const QString &name)
 	if (!window)
 		return eNoSuchWindow;
 	window->hotspots.clear();
+	window->outputGeneratedHotspots.clear();
+	window->outputHotspotSerial = 0;
 	window->mouseOverHotspot.clear();
 	window->mouseDownHotspot.clear();
 	window->callbackPlugin.clear();
@@ -18770,6 +19709,24 @@ QVariant WorldRuntime::windowHotspotInfo(const QString &name, const QString &hot
 	default:
 		return {};
 	}
+}
+
+int WorldRuntime::windowOutputActivate(const QString &name, const QString &hotspotId)
+{
+	MiniWindow *window = miniWindow(name);
+	if (!window)
+		return eNoSuchWindow;
+
+	const auto hotspotIt = window->hotspots.find(hotspotId);
+	if (hotspotIt == window->hotspots.end())
+		return eHotspotNotInstalled;
+
+	const MiniWindowHotspot &hotspot = hotspotIt.value();
+	if (!MiniWindowUtils::hasActivatableAction(hotspot.outputActionType, hotspot.outputAction, ActionNone))
+		return eBadParameter;
+
+	emit miniWindowOutputActionActivated(hotspot.outputActionType, hotspot.outputAction);
+	return eOK;
 }
 
 int WorldRuntime::windowHotspotTooltip(const QString &name, const QString &hotspotId, const QString &tooltip)

@@ -111,6 +111,12 @@ class WorldCommandProcessor : public QObject
 		 */
 		void onHyperlinkActivated(const QString &href);
 		/**
+		 * @brief Dispatches miniwindow output actions using world-link semantics.
+		 * @param actionType Action type.
+		 * @param action Action payload.
+		 */
+		void onMiniWindowOutputActionActivated(int actionType, const QString &action);
+		/**
 		 * @brief Starts timers/queue flow after world connects.
 		 */
 		void handleWorldConnected();

@@ -483,11 +483,30 @@ class tst_Dialog_GlobalPreferencesUpdates : public QObject
 			         850);
 			QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
 		}
+
+		/**
+		 * @brief Verifies world-list entries persist relative to QMUD_HOME when possible.
+		 */
+		void acceptPersistsWorldListRelativeToQmudHome()
+		{
+			resetStubState();
+
+			const QString qmudHome = QFileInfo(testIniFilePath()).absolutePath();
+			const QString worldPath =
+			    QDir::cleanPath(QDir(qmudHome).filePath(QStringLiteral("worlds/test-world.mcl")));
+			stubState().globalOptions.insert(QStringLiteral("WorldList"), worldPath);
+
+			GlobalPreferencesDialog dialog;
+			dialog.show();
+			dialog.accept();
+
+			QCOMPARE(stubState().globalOptions.value(QStringLiteral("WorldList")).toString(),
+			         QStringLiteral("./worlds/test-world.mcl"));
+		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_MAIN(tst_Dialog_GlobalPreferencesUpdates)
-
 
 #if __has_include("tst_Dialog_GlobalPreferencesUpdates.moc")
 #include "tst_Dialog_GlobalPreferencesUpdates.moc"

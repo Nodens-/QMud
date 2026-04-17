@@ -94,10 +94,20 @@ qmud_add_qtest(tst_EncodingUtils
         unit)
 
 qmud_add_qtest(tst_HyperlinkActionUtils
-        GUI
         SOURCES
         unit/tst_HyperlinkActionUtils.cpp
         "${CMAKE_SOURCE_DIR}/src/helpers/HyperlinkActionUtils.cpp"
+        LIBRARIES
+        Qt6::Gui
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_MiniWindowUtils
+        SOURCES
+        unit/tst_MiniWindowUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowUtils.cpp"
+        LIBRARIES
+        Qt6::Gui
         LABELS
         unit)
 
@@ -554,7 +564,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             SOURCES
             gui/tst_WorldView_Basic.cpp
             "${CMAKE_SOURCE_DIR}/src/WorldView.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowBrushUtils.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/TimeFormatUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/WorldView.h"

@@ -210,7 +210,7 @@ set(QMUD_SOURCES
         MxpDebugWindow.cpp
         helpers/EncodingUtils.cpp
         helpers/ColorUtils.cpp
-        helpers/MiniWindowBrushUtils.cpp
+        helpers/MiniWindowUtils.cpp
         helpers/FontUtils.cpp
         BraceMatch.cpp
         LuaCallbackEngine.cpp
@@ -283,7 +283,7 @@ set(QMUD_HEADERS
         WorldRuntime.h
         helpers/WorldRuntimeAttributeUtils.h
         MiniWindow.h
-        helpers/MiniWindowBrushUtils.h
+        helpers/MiniWindowUtils.h
         WorldCommandProcessor.h
         SpeedwalkParser.h
         helpers/TimerSchedulingUtils.h

@@ -17971,15 +17971,14 @@ static int luaWindowFontList(lua_State *L)
 	return pushOptionalStringList(L, fonts);
 }
 
-static bool decodeMiniWindowText(lua_State *L, const bool unicode, QString &out)
+static bool decodeMiniWindowTextArg(lua_State *L, const int argumentIndex, const bool unicode, QString &out)
 {
-	constexpr int kTextArg = 3;
 	if (!unicode)
 	{
-		out = QString::fromLocal8Bit(luaL_checkstring(L, kTextArg));
+		out = QString::fromLocal8Bit(luaL_checkstring(L, argumentIndex));
 		return true;
 	}
-	const char      *raw = luaL_checkstring(L, kTextArg);
+	const char      *raw = luaL_checkstring(L, argumentIndex);
 	const QByteArray bytes(raw);
 	QStringDecoder   decoder(QStringConverter::Utf8);
 	out = decoder.decode(bytes);
@@ -17998,7 +17997,7 @@ static int luaWindowText(lua_State *L)
 	const QString fontId  = QString::fromUtf8(luaL_checkstring(L, 2));
 	const bool    unicode = optBool(L, 9, false);
 	QString       text;
-	if (!decodeMiniWindowText(L, unicode, text))
+	if (!decodeMiniWindowTextArg(L, 3, unicode, text))
 	{
 		lua_pushnumber(L, -3);
 		return 1;
@@ -18024,12 +18023,85 @@ static int luaWindowTextWidth(lua_State *L)
 	const QString fontId  = QString::fromUtf8(luaL_checkstring(L, 2));
 	const bool    unicode = optBool(L, 4, false);
 	QString       text;
-	if (!decodeMiniWindowText(L, unicode, text))
+	if (!decodeMiniWindowTextArg(L, 3, unicode, text))
 	{
 		lua_pushnumber(L, -3);
 		return 1;
 	}
 	lua_pushnumber(L, runtime->windowTextWidth(name, fontId, text));
+	return 1;
+}
+
+static int luaWindowOutputText(lua_State *L)
+{
+	auto pushWindowOutputMetrics = [L](const WorldRuntime::WindowOutputMetrics &metrics)
+	{
+		lua_newtable(L);
+		lua_pushnumber(L, metrics.left);
+		lua_setfield(L, -2, "left");
+		lua_pushnumber(L, metrics.top);
+		lua_setfield(L, -2, "top");
+		lua_pushnumber(L, metrics.right);
+		lua_setfield(L, -2, "right");
+		lua_pushnumber(L, metrics.bottom);
+		lua_setfield(L, -2, "bottom");
+		lua_pushnumber(L, metrics.width);
+		lua_setfield(L, -2, "width");
+		lua_pushnumber(L, metrics.height);
+		lua_setfield(L, -2, "height");
+		lua_pushnumber(L, metrics.lineCount);
+		lua_setfield(L, -2, "line_count");
+		lua_pushnumber(L, metrics.hotspotCount);
+		lua_setfield(L, -2, "hotspot_count");
+		lua_pushboolean(L, metrics.hasOutput);
+		lua_setfield(L, -2, "has_output");
+	};
+
+	WorldRuntime *runtime = runtimeFromLua(L);
+	if (!runtime)
+	{
+		constexpr WorldRuntime::WindowOutputMetrics metrics;
+		lua_pushnumber(L, eNoSuchWindow);
+		pushWindowOutputMetrics(metrics);
+		return 2;
+	}
+	const QString name          = QString::fromUtf8(luaL_checkstring(L, 1));
+	const QString fontId        = QString::fromUtf8(luaL_checkstring(L, 2));
+	const QString mouseUp       = QString::fromUtf8(luaL_optstring(L, 9, ""));
+	const QString hotspotPrefix = QString::fromUtf8(luaL_optstring(L, 10, "output_link"));
+	const bool    unicode       = optBool(L, 11, false);
+	QString       text;
+	if (!decodeMiniWindowTextArg(L, 3, unicode, text))
+	{
+		constexpr WorldRuntime::WindowOutputMetrics metrics;
+		lua_pushnumber(L, -3);
+		pushWindowOutputMetrics(metrics);
+		return 2;
+	}
+	const int                         left   = luaToInt(L, 4);
+	const int                         top    = luaToInt(L, 5);
+	const int                         right  = luaToInt(L, 6);
+	const int                         bottom = luaToInt(L, 7);
+	const long                        colour = luaToLong(L, 8);
+	WorldRuntime::WindowOutputMetrics metrics;
+	const int result = runtime->windowOutputText(name, fontId, text, left, top, right, bottom, colour,
+	                                             mouseUp, hotspotPrefix, pluginIdFromLua(L), &metrics);
+	lua_pushnumber(L, result);
+	pushWindowOutputMetrics(metrics);
+	return 2;
+}
+
+static int luaWindowOutputActivate(lua_State *L)
+{
+	WorldRuntime *runtime = runtimeFromLua(L);
+	if (!runtime)
+	{
+		lua_pushnumber(L, eNoSuchWindow);
+		return 1;
+	}
+	const QString name      = QString::fromUtf8(luaL_checkstring(L, 1));
+	const QString hotspotId = QString::fromUtf8(luaL_checkstring(L, 2));
+	lua_pushnumber(L, runtime->windowOutputActivate(name, hotspotId));
 	return 1;
 }
 
@@ -19172,6 +19244,8 @@ void LuaCallbackEngine::registerWorldBindings()
 	    {"WindowPosition",            luaWindowPosition           },
 	    {"WindowRectOp",              luaWindowRectOp             },
 	    {"WindowResize",              luaWindowResize             },
+	    {"WindowOutputActivate",      luaWindowOutputActivate     },
+	    {"WindowOutputText",          luaWindowOutputText         },
 	    {"WindowScrollwheelHandler",  luaWindowScrollwheelHandler },
 	    {"WindowSetPixel",            luaWindowSetPixel           },
 	    {"WindowSetZOrder",           luaWindowSetZOrder          },

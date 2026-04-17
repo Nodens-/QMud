@@ -41,6 +41,12 @@ enum class MxpHyperlinkDispatchPolicy
  * @return Decoded action text.
  */
 [[nodiscard]] QString decodeMxpActionText(QString text);
+/**
+ * @brief Decodes and trims MXP action payload text for dispatch matching/input.
+ * @param text Raw action text from span/href payload.
+ * @return Normalized decoded action text.
+ */
+[[nodiscard]] QString normalizeMxpActionText(const QString &text);
 
 /**
  * @brief Returns first executable send action from a potentially piped MXP action string.
