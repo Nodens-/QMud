@@ -37,6 +37,12 @@ class tst_HyperlinkActionUtils : public QObject
 			QCOMPARE(decodeMxpActionText(encoded), QStringLiteral("mapper goto 72930&foo=#bar"));
 		}
 
+		void normalizeMxpActionTextDecodesAndTrims()
+		{
+			const QString encoded = QStringLiteral("  mapper%20goto%2072930&amp;foo=%23bar  ");
+			QCOMPARE(normalizeMxpActionText(encoded), QStringLiteral("mapper goto 72930&foo=#bar"));
+		}
+
 		void firstMxpSendActionReturnsFirstNonEmptySegment()
 		{
 			const QString href = QStringLiteral(" | mapper goto 72930 | mapper goto 42 ");

@@ -1191,7 +1191,7 @@ void WorldCommandProcessor::onHyperlinkActivated(const QString &href)
 	if (href.isEmpty())
 		return;
 
-	const QString normalizedHref = decodeMxpActionText(href).trimmed();
+	const QString normalizedHref = normalizeMxpActionText(href);
 	if (normalizedHref.isEmpty())
 		return;
 
@@ -1280,6 +1280,21 @@ void WorldCommandProcessor::onHyperlinkActivated(const QString &href)
 		sendMsg(sendText, echo, false, true);
 	if (addToHistory && m_view)
 		m_view->addHyperlinkToHistory(sendText);
+}
+
+void WorldCommandProcessor::onMiniWindowOutputActionActivated(const int actionType, const QString &action)
+{
+	if (actionType == WorldRuntime::ActionPrompt)
+	{
+		const QString normalizedAction = normalizeMxpActionText(action);
+		if (normalizedAction.isEmpty())
+			return;
+		if (m_view)
+			m_view->setInputText(normalizedAction, true);
+		return;
+	}
+
+	onHyperlinkActivated(action);
 }
 
 void WorldCommandProcessor::note(const QString &text, const bool newLine) const

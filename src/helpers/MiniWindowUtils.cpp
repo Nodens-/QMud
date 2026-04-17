@@ -2,17 +2,18 @@
  * QMud Project
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
- * File: MiniWindowBrushUtils.cpp
- * Role: Shared colour/brush helpers for miniwindow and text-rectangle compatibility drawing.
+ * File: MiniWindowUtils.cpp
+ * Role: Shared miniwindow rendering helpers (brush/color plus output layout/action predicates).
  */
 
-#include "MiniWindowBrushUtils.h"
+#include "MiniWindowUtils.h"
 
 #include <QHash>
 #include <QImage>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QMutex>
 #include <QMutexLocker>
+#include <QtGlobal>
 
 #include <array>
 #include <list>
@@ -178,7 +179,7 @@ namespace
 	}
 } // namespace
 
-namespace MiniWindowBrushUtils
+namespace MiniWindowUtils
 {
 	QColor colorFromRef(const long value)
 	{
@@ -229,4 +230,26 @@ namespace MiniWindowBrushUtils
 			return Qt::NoBrush;
 		}
 	}
-} // namespace MiniWindowBrushUtils
+
+	bool lineFitsVertically(const int y, const int lineHeight, const int rectBottom)
+	{
+		if (lineHeight <= 0)
+			return false;
+		const qint64 lineBottom = static_cast<qint64>(y) + static_cast<qint64>(lineHeight) - 1;
+		return lineBottom <= static_cast<qint64>(rectBottom);
+	}
+
+	bool runNeedsWrap(const int x, const int candidateWidth, const int currentLineWidth, const int rectLeft,
+	                  const int rightLimitExclusive)
+	{
+		const qint64 candidateRightExclusive = static_cast<qint64>(x) + static_cast<qint64>(candidateWidth);
+		const qint64 currentRightExclusive   = static_cast<qint64>(x) + static_cast<qint64>(currentLineWidth);
+		return candidateRightExclusive > static_cast<qint64>(rightLimitExclusive) &&
+		       currentRightExclusive > static_cast<qint64>(rectLeft);
+	}
+
+	bool hasActivatableAction(const int actionType, const QString &action, const int actionNoneType)
+	{
+		return actionType != actionNoneType && !action.trimmed().isEmpty();
+	}
+} // namespace MiniWindowUtils

@@ -9,6 +9,7 @@
 #include "HyperlinkActionUtils.h"
 
 #include <QUrl>
+#include <algorithm>
 
 namespace
 {
@@ -19,25 +20,22 @@ namespace
 		if (pluginId.size() != kPluginIdLength)
 			return false;
 
-		for (const QChar ch : pluginId)
-		{
-			const QChar lower = ch.toLower();
-			if (!ch.isDigit() && (lower < QLatin1Char('a') || lower > QLatin1Char('f')))
-				return false;
-		}
-		return true;
+		return std::ranges::all_of(pluginId,
+		                           [](const QChar ch)
+		                           {
+			                           const QChar lower = ch.toLower();
+			                           return ch.isDigit() ||
+			                                  (lower >= QLatin1Char('a') && lower <= QLatin1Char('f'));
+		                           });
 	}
 
 	bool isValidRoutineName(const QStringView routine)
 	{
 		if (routine.isEmpty())
 			return false;
-		for (const QChar ch : routine)
-		{
-			if (!ch.isLetterOrNumber() && ch != QLatin1Char('_') && ch != QLatin1Char('.'))
-				return false;
-		}
-		return true;
+		return std::ranges::all_of(
+		    routine, [](const QChar ch)
+		    { return ch.isLetterOrNumber() || ch == QLatin1Char('_') || ch == QLatin1Char('.'); });
 	}
 } // namespace
 
@@ -99,6 +97,11 @@ QString decodeMxpActionText(QString text)
 		i = semi;
 	}
 	return result;
+}
+
+QString normalizeMxpActionText(const QString &text)
+{
+	return decodeMxpActionText(text).trimmed();
 }
 
 QString firstMxpSendAction(const QString &href)

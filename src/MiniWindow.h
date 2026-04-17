@@ -15,6 +15,7 @@
 #include <QMap>
 #include <QPoint>
 #include <QRect>
+#include <QSet>
 #include <QString>
 
 /**
@@ -35,6 +36,8 @@ struct MiniWindowHotspot
 		QString releaseCallback;
 		int     dragFlags{0};
 		QString scrollwheelCallback;
+		int     outputActionType{0};
+		QString outputAction;
 };
 
 constexpr int kMiniWindowDrawUnderneath   = 0x01;
@@ -97,6 +100,8 @@ struct MiniWindow
 		QMap<QString, MiniWindowFont>    fonts;
 		QMap<QString, MiniWindowImage>   images;
 		QMap<QString, MiniWindowHotspot> hotspots;
+		QSet<QString>                    outputGeneratedHotspots;
+		quint64                          outputHotspotSerial{0};
 
 		/**
 		 * @brief Initializes miniwindow geometry, flags, and backing surface.

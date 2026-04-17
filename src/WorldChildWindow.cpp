@@ -555,6 +555,8 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		        });
 		connect(m_view, &WorldView::hyperlinkActivated, m_commandProcessor,
 		        &WorldCommandProcessor::onHyperlinkActivated);
+		connect(worldRuntime, &WorldRuntime::miniWindowOutputActionActivated, m_commandProcessor,
+		        &WorldCommandProcessor::onMiniWindowOutputActionActivated);
 		connect(m_view, &WorldView::hyperlinkActivated, this,
 		        [this](const QString &)
 		        {
