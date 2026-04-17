@@ -1009,11 +1009,14 @@ class WorldView : public QWidget
 		 * @param href Optional hyperlink href at hit point.
 		 * @param hint Optional hyperlink hint at hit point.
 		 * @param allowCacheBuild `true` to rebuild layout caches on demand, `false` to query only when cache is ready.
+		 * @param requireTextHit `true` to require the point to fall inside rendered text glyph bounds.
+		 * @param textHit Optional output set to `true` when the point is over rendered text glyph bounds.
 		 * @return `true` when hit maps inside the rendered output surface.
 		 */
 		[[nodiscard]] bool nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &viewPos,
 		                                       NativeOutputPosition &position, QString *href = nullptr,
-		                                       QString *hint = nullptr, bool allowCacheBuild = true) const;
+		                                       QString *hint = nullptr, bool allowCacheBuild = true,
+		                                       bool requireTextHit = false, bool *textHit = nullptr) const;
 		/**
 		 * @brief Resolves native-output hit-test information for a mouse event source widget.
 		 * @param watched Event source widget from the installed event filter.
@@ -1024,13 +1027,15 @@ class WorldView : public QWidget
 		 * @param href Optional hyperlink href at hit point.
 		 * @param hint Optional hyperlink hint at hit point.
 		 * @param allowCacheBuild `true` to rebuild layout caches on demand, `false` to query only when cache is ready.
+		 * @param textHit Optional output set to `true` when the event point is over rendered text glyph bounds.
 		 * @return `true` when event position maps to native output text.
 		 */
 		[[nodiscard]] bool nativeOutputHitTestForMouseEvent(const QWidget *watched, const QMouseEvent *event,
 		                                                    WrapTextBrowser *&view, QPoint &viewPos,
 		                                                    NativeOutputPosition &position,
 		                                                    QString *href = nullptr, QString *hint = nullptr,
-		                                                    bool allowCacheBuild = true) const;
+		                                                    bool  allowCacheBuild = true,
+		                                                    bool *textHit         = nullptr) const;
 		/**
 		 * @brief Hit-tests a global point against visible native output panes.
 		 * @param globalPos Global screen coordinate.
@@ -1250,12 +1255,14 @@ class WorldView : public QWidget
 		 * @param precomputedView Optional resolved output view for the hit-test.
 		 * @param precomputedPosInView Optional viewport-local position for @p precomputedView.
 		 * @param precomputedHit Optional precomputed native-output hit position.
+		 * @param precomputedTextHit Optional precomputed text-hit state for @p precomputedHit.
 		 * @param allowCacheBuild `true` to rebuild layout caches on demand, `false` to query only when cache is ready.
 		 */
 		void                 updateLineInformationTooltip(const QWidget *watched, const QMouseEvent *event,
 		                                                  const WrapTextBrowser      *precomputedView = nullptr,
 		                                                  const QPoint               *precomputedPosInView = nullptr,
 		                                                  const NativeOutputPosition *precomputedHit = nullptr,
+		                                                  const bool                 *precomputedTextHit = nullptr,
 		                                                  bool                        allowCacheBuild = true);
 		/**
 		 * @brief Computes line fade opacity for timestamp.

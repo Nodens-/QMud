@@ -13,7 +13,7 @@ endif ()
 
 option(QMUD_ENABLE_LUA_SCRIPTING "Enable Lua scripting callbacks" ON)
 option(QMUD_ENABLE_TESTING "Enable QMud QtTest/CTest targets" ON)
-option(QMUD_ENABLE_GUI_TESTS "Enable GUI-focused QtTest suites" OFF)
+option(QMUD_ENABLE_GUI_TESTS "Enable GUI-focused QtTest suites" ON)
 option(QMUD_CI_BUILD "Mark runtime display version as CI build (-ci suffix)" OFF)
 option(QMUD_RELEASE_NATIVE_OPTIMIZATIONS "Tune Release builds for the local CPU (-march=native or /arch:AVX2)" OFF)
 set(QMUD_SYSTEM_LUA_MODULES_PREFIX "" CACHE PATH

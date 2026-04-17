@@ -362,20 +362,28 @@ namespace
 		return {-1, -1};
 	}
 
-	QPoint findLineInformationPoint(const WorldView &view, const QTextBrowser &browser)
+	QPoint findLineInformationPoint(const QTextBrowser &browser)
 	{
 		if (!browser.viewport())
 			return {-1, -1};
 
-		auto         *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+		QWidget *root = browser.window();
+		auto    *nativeCanvas =
+            root ? root->findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas")) : nullptr;
 		QElapsedTimer readyTimer;
 		readyTimer.start();
-		while (readyTimer.elapsed() < 500)
+		constexpr qint64 kMaxReadyWaitMs       = 500;
+		constexpr qint64 kMissingCanvasGraceMs = 50;
+		while (readyTimer.elapsed() < kMaxReadyWaitMs)
 		{
-			const bool ready = nativeCanvas && nativeCanvas->isVisible() && view.isVisible() &&
-			                   browser.viewport()->isVisible() && browser.viewport()->width() > 1 &&
-			                   browser.viewport()->height() > 1;
-			if (ready)
+			if (!nativeCanvas && root)
+				nativeCanvas = root->findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+
+			const bool viewReady = root && root->isVisible() && browser.viewport()->isVisible() &&
+			                       browser.viewport()->width() > 1 && browser.viewport()->height() > 1;
+			if (viewReady && nativeCanvas && nativeCanvas->isVisible())
+				break;
+			if (viewReady && !nativeCanvas && readyTimer.elapsed() >= kMissingCanvasGraceMs)
 				break;
 			QCoreApplication::processEvents();
 			QTest::qWait(1);
@@ -384,14 +392,31 @@ namespace
 		const QRect area = browser.viewport()->rect();
 		const int   probeBottom =
 		    qMin(area.bottom(), area.top() + qMax(24, QFontMetrics(browser.font()).height() * 6));
+		const int probeRight = qMin(area.right(), area.left() + 320);
+
+		auto      probePoint = [&browser](const QPoint &point)
+		{
+			QToolTip::hideText();
+			QCoreApplication::processEvents();
+			QTest::mouseMove(browser.viewport(), point);
+			QCoreApplication::processEvents();
+			QCoreApplication::processEvents();
+			return QToolTip::text().contains(QStringLiteral("Line "));
+		};
+
+		const int lineHeight = qMax(1, QFontMetrics(browser.font()).height());
+		const int candidateY = qMin(probeBottom, area.top() + (lineHeight / 2));
+		for (int x = area.left() + 2; x <= probeRight; x += 12)
+		{
+			if (probePoint({x, candidateY}))
+				return {x, candidateY};
+		}
 
 		for (int y = area.top(); y <= probeBottom; y += 4)
 		{
-			for (int x = area.left(); x <= area.right(); x += 4)
+			for (int x = area.left(); x <= probeRight; x += 4)
 			{
-				QTest::mouseDClick(browser.viewport(), Qt::LeftButton, Qt::NoModifier, {x, y});
-				QCoreApplication::processEvents();
-				if (view.hasOutputSelection())
+				if (probePoint({x, y}))
 					return {x, y};
 			}
 		}
@@ -4712,7 +4737,7 @@ class tst_WorldView_Basic : public QObject
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
 			QVERIFY(browser);
-			const QPoint point = findLineInformationPoint(view, *browser);
+			const QPoint point = findLineInformationPoint(*browser);
 			QVERIFY2(point.x() >= 0 && point.y() >= 0,
 			         "Expected line-information tooltip probe point in rendered output.");
 			QTest::mouseMove(browser->viewport(), point);
@@ -4720,6 +4745,49 @@ class tst_WorldView_Basic : public QObject
 			QTRY_VERIFY(QToolTip::text().contains(QStringLiteral("Line 1, ")));
 			QTRY_VERIFY(QToolTip::text().contains(QStringLiteral("(unknown time)")));
 			QToolTip::hideText();
+
+			resetTestState();
+		}
+
+		void lineInformationTooltipDoesNotShowOnBlankAreaOfRenderedLine()
+		{
+			resetTestState();
+			QToolTip::hideText();
+			g_worldAttrs.insert(QStringLiteral("line_information"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("tool_tip_start_time"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("tool_tip_visible_time"), QStringLiteral("5000"));
+
+			WorldRuntime::LineEntry entry;
+			entry.text       = QStringLiteral("tip");
+			entry.flags      = WorldRuntime::LineOutput;
+			entry.hardReturn = true;
+			entry.lineNumber = 1;
+			g_runtimeLines.push_back(entry);
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			view.rebuildOutputFromLines(g_runtimeLines);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			const QPoint textPoint = findLineInformationPoint(*browser);
+			QVERIFY2(textPoint.x() >= 0 && textPoint.y() >= 0,
+			         "Expected line-information tooltip probe point in rendered output.");
+
+			QTest::mouseMove(browser->viewport(), textPoint);
+			QTRY_VERIFY(QToolTip::text().contains(QStringLiteral("Line 1, ")));
+
+			const QRect  viewportRect = browser->viewport()->rect();
+			const int    blankX = qBound(viewportRect.left(), viewportRect.right() - 2, viewportRect.right());
+			const QPoint blankPoint(blankX, textPoint.y());
+			QVERIFY(blankPoint.x() > textPoint.x());
+
+			QTest::mouseMove(browser->viewport(), blankPoint);
+			QTRY_VERIFY(QToolTip::text().isEmpty());
 
 			resetTestState();
 		}

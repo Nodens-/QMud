@@ -3597,13 +3597,16 @@ bool WorldView::nativeOutputInteractionActive() const
 
 bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &viewPos,
                                     NativeOutputPosition &position, QString *href, QString *hint,
-                                    const bool allowCacheBuild) const
+                                    const bool allowCacheBuild, const bool requireTextHit,
+                                    bool *const textHit) const
 {
 	position = {};
 	if (href)
 		href->clear();
 	if (hint)
 		hint->clear();
+	if (textHit)
+		*textHit = false;
 	if (!nativeOutputInteractionActive() || !view || !view->viewport())
 		return false;
 
@@ -3672,6 +3675,8 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 	const NativeOutputRenderLine &line = lines.at(lineIndex);
 	if (line.text.isEmpty())
 	{
+		if (requireTextHit)
+			return false;
 		position = {lineIndex, 0};
 		return true;
 	}
@@ -3679,6 +3684,8 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 	const QTextLayout *layout = nativeLayoutForLine(lineIndex);
 	if (!layout || layout->lineCount() <= 0)
 	{
+		if (requireTextHit)
+			return false;
 		position = {lineIndex, 0};
 		return true;
 	}
@@ -3689,6 +3696,8 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 	QTextLine   targetRow = layout->lineAt(0);
 	if (!targetRow.isValid())
 	{
+		if (requireTextHit)
+			return false;
 		position = {lineIndex, 0};
 		return true;
 	}
@@ -3704,21 +3713,26 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 		}
 	}
 
-	const int   rowStartColumn = targetRow.textStart();
-	const int   rowEndColumn   = rowStartColumn + targetRow.textLength();
-	const qreal rowLeft        = targetRow.cursorToX(rowStartColumn);
-	const qreal rowRight       = targetRow.cursorToX(rowEndColumn);
-	const qreal minX           = qMin(rowLeft, rowRight);
-	const qreal maxX           = qMax(rowLeft, rowRight);
-	const bool  insideTextRow  = static_cast<qreal>(x) >= minX && static_cast<qreal>(x) < maxX;
+	const int   rowStartColumn  = targetRow.textStart();
+	const int   rowEndColumn    = rowStartColumn + targetRow.textLength();
+	const qreal rowLeft         = targetRow.cursorToX(rowStartColumn);
+	const qreal rowRight        = targetRow.cursorToX(rowEndColumn);
+	const qreal minX            = qMin(rowLeft, rowRight);
+	const qreal maxX            = qMax(rowLeft, rowRight);
+	const bool  insideTextRow   = static_cast<qreal>(x) >= minX && static_cast<qreal>(x) < maxX;
+	const bool  resolvedTextHit = insideTextRow && rowEndColumn > rowStartColumn;
+	if (textHit)
+		*textHit = resolvedTextHit;
+	if (requireTextHit && !resolvedTextHit)
+		return false;
 
-	int         column = targetRow.xToCursor(static_cast<qreal>(x), QTextLine::CursorBetweenCharacters);
-	column             = qBound(rowStartColumn, column, rowEndColumn);
-	position           = {lineIndex, column};
+	int column = targetRow.xToCursor(static_cast<qreal>(x), QTextLine::CursorBetweenCharacters);
+	column     = qBound(rowStartColumn, column, rowEndColumn);
+	position   = {lineIndex, column};
 
 	if (href || hint)
 	{
-		if (!insideTextRow || rowEndColumn <= rowStartColumn)
+		if (!resolvedTextHit)
 			return true;
 
 		const int textSize = sizeToInt(line.text.size());
@@ -3781,7 +3795,7 @@ bool WorldView::nativeOutputHitTestGlobal(const QPoint &globalPos, WrapTextBrows
 bool WorldView::nativeOutputHitTestForMouseEvent(const QWidget *watched, const QMouseEvent *event,
                                                  WrapTextBrowser *&view, QPoint &viewPos,
                                                  NativeOutputPosition &position, QString *href, QString *hint,
-                                                 const bool allowCacheBuild) const
+                                                 const bool allowCacheBuild, bool *const textHit) const
 {
 	view     = nullptr;
 	viewPos  = {};
@@ -3790,6 +3804,8 @@ bool WorldView::nativeOutputHitTestForMouseEvent(const QWidget *watched, const Q
 		href->clear();
 	if (hint)
 		hint->clear();
+	if (textHit)
+		*textHit = false;
 	if (!watched || !event || !nativeOutputInteractionActive())
 		return false;
 
@@ -3809,7 +3825,7 @@ bool WorldView::nativeOutputHitTestForMouseEvent(const QWidget *watched, const Q
 
 	if (!view->viewport()->rect().contains(viewPos))
 		return false;
-	return nativeOutputHitTest(view, viewPos, position, href, hint, allowCacheBuild);
+	return nativeOutputHitTest(view, viewPos, position, href, hint, allowCacheBuild, false, textHit);
 }
 
 void WorldView::applyResolvedOutputSelection(const bool hasSelection, const int startLine,
@@ -8007,7 +8023,7 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
                                              const WrapTextBrowser      *precomputedView,
                                              const QPoint               *precomputedPosInView,
                                              const NativeOutputPosition *precomputedHit,
-                                             const bool                  allowCacheBuild)
+                                             const bool *precomputedTextHit, const bool allowCacheBuild)
 {
 	auto hideLineInfoTooltip = [this]
 	{
@@ -8027,10 +8043,19 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 
 	WrapTextBrowser     *view = nullptr;
 	NativeOutputPosition hit;
+	bool                 textHit = false;
 	if (precomputedView && precomputedPosInView && precomputedHit)
 	{
 		view = const_cast<WrapTextBrowser *>(precomputedView);
 		hit  = *precomputedHit;
+		if (precomputedTextHit)
+			textHit = *precomputedTextHit;
+		else if (!nativeOutputHitTest(view, *precomputedPosInView, hit, nullptr, nullptr, allowCacheBuild,
+		                              false, &textHit))
+		{
+			hideLineInfoTooltip();
+			return;
+		}
 	}
 	else
 	{
@@ -8048,11 +8073,16 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 			posInView = event->position().toPoint();
 		else
 			posInView = view->viewport()->mapFromGlobal(event->globalPosition().toPoint());
-		if (!nativeOutputHitTest(view, posInView, hit, nullptr, nullptr, allowCacheBuild))
+		if (!nativeOutputHitTest(view, posInView, hit, nullptr, nullptr, allowCacheBuild, false, &textHit))
 		{
 			hideLineInfoTooltip();
 			return;
 		}
+	}
+	if (!textHit)
+	{
+		hideLineInfoTooltip();
+		return;
 	}
 
 	const QVector<NativeOutputRenderLine> &renderLines = nativeOutputRenderLines();
@@ -8308,6 +8338,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 		WrapTextBrowser     *mouseMoveHitView      = nullptr;
 		QPoint               mouseMoveHitPosInView;
 		NativeOutputPosition mouseMoveHit;
+		bool                 mouseMoveTextHit = false;
 
 		if (event->type() == QEvent::MouseMove)
 		{
@@ -8316,7 +8347,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 				QString mouseMoveHref;
 				if (nativeOutputHitTestForMouseEvent(watchedWidget, mouseEvent, mouseMoveHitView,
 				                                     mouseMoveHitPosInView, mouseMoveHit, &mouseMoveHref,
-				                                     nullptr, false))
+				                                     nullptr, false, &mouseMoveTextHit))
 				{
 					hasMouseMoveNativeHit = true;
 					applyHoveredHyperlink(mouseMoveHref);
@@ -8391,7 +8422,8 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 				updateLineInformationTooltip(watchedWidget, mouseEvent,
 				                             hasMouseMoveNativeHit ? mouseMoveHitView : nullptr,
 				                             hasMouseMoveNativeHit ? &mouseMoveHitPosInView : nullptr,
-				                             hasMouseMoveNativeHit ? &mouseMoveHit : nullptr, false);
+				                             hasMouseMoveNativeHit ? &mouseMoveHit : nullptr,
+				                             hasMouseMoveNativeHit ? &mouseMoveTextHit : nullptr, false);
 			}
 		}
 
