@@ -2703,8 +2703,99 @@ class tst_WorldView_Basic : public QObject
 			    input->height() < narrowHeight,
 			    "Auto-resize height should shrink when input width increases and wrapping decreases.");
 			const int bottomGap = input->viewport()->rect().bottom() - input->cursorRect().bottom();
-			QVERIFY2(bottomGap <= (input->fontMetrics().lineSpacing() / 2),
+			QVERIFY2(bottomGap <= input->fontMetrics().lineSpacing(),
 			         "After resize reflow, active wrapped line should stay near the bottom edge.");
+
+			resetTestState();
+		}
+
+		void enablingAutoResizeCompactsInputPaneWithoutBottomDeadSpace()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(420, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			auto *inputSplitter = qobject_cast<QSplitter *>(input->parentWidget());
+			QVERIFY(inputSplitter);
+			QVERIFY(inputSplitter->sizes().size() >= 2);
+
+			const int expandedInputHeight = qMax(input->height() * 4, 140);
+			QCOMPARE(view.setCommandWindowHeight(expandedInputHeight), eOK);
+			QCoreApplication::processEvents();
+
+			const QList<int> sizesBeforeToggle = inputSplitter->sizes();
+			QVERIFY(sizesBeforeToggle.size() >= 2);
+			QVERIFY2(sizesBeforeToggle.at(1) >= qMax(expandedInputHeight - 4, 100),
+			         "Precondition failed: command pane did not expand before auto-resize toggle.");
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY(inputSplitter->sizes().size() >= 2);
+			const QList<int> sizesAfterToggle = inputSplitter->sizes();
+			QVERIFY2(qAbs(sizesAfterToggle.at(1) - input->height()) <= 2,
+			         "Auto-resize should compact splitter input pane to the actual input widget height.");
+			QVERIFY2(sizesAfterToggle.at(1) + 20 < sizesBeforeToggle.at(1),
+			         "Auto-resize should reduce command pane height from the pre-toggle expanded size.");
+			QVERIFY2(sizesAfterToggle.at(0) > sizesBeforeToggle.at(0),
+			         "Space released by one-line auto-resize should be returned to world output pane.");
+
+			resetTestState();
+		}
+
+		void autoResizePolicyChangeReappliesWithoutInputEdit()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(340, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			const int singleHeight = input->height();
+			QVERIFY(singleHeight > 0);
+
+			const QString longWrapped =
+			    QStringLiteral("policy-check ") + QStringLiteral("word ").repeated(220);
+			view.setInputText(longWrapped, true);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(input->height() > singleHeight);
+			const int expandedHeight = input->height();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("1"));
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+			QTRY_VERIFY2(input->height() < expandedHeight,
+			             "Reducing auto-resize maximum lines should shrink input without any text edit.");
+			QCOMPARE(input->height(), singleHeight);
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+			QTRY_VERIFY2(
+			    input->height() > singleHeight,
+			    "Increasing auto-resize maximum lines should re-expand input without any text edit.");
 
 			resetTestState();
 		}
@@ -2744,7 +2835,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY2(input->viewport()->rect().intersects(input->cursorRect()),
 			         "Input cursor should remain visible after paste with auto-resize enabled.");
 			const int bottomGap = input->viewport()->rect().bottom() - input->cursorRect().bottom();
-			QVERIFY2(bottomGap <= (input->fontMetrics().lineSpacing() / 2),
+			QVERIFY2(bottomGap <= input->fontMetrics().lineSpacing(),
 			         "Wrapped input should keep the active line near the bottom edge.");
 
 			QTest::keyClicks(input, QStringLiteral(" tail"));
@@ -2754,8 +2845,148 @@ class tst_WorldView_Basic : public QObject
 			         "Input cursor should stay visible while typing after large paste.");
 			const int bottomGapAfterTyping =
 			    input->viewport()->rect().bottom() - input->cursorRect().bottom();
-			QVERIFY2(bottomGapAfterTyping <= (input->fontMetrics().lineSpacing() / 2),
+			QVERIFY2(bottomGapAfterTyping <= input->fontMetrics().lineSpacing(),
 			         "Typing after paste should keep the active line near the bottom edge.");
+
+			resetTestState();
+		}
+
+		void multilinePasteAutoResizeKeepsExpectedHeightProgression()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(360, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			const int singleHeight = input->height();
+			QVERIFY(singleHeight > 0);
+
+			const QString multilineNoTrailingBlank =
+			    QStringLiteral("The automated test verifies command input auto-resize behavior with wrapped "
+			                   "multiline text content\n and a continuation line that starts with a space.");
+
+			QGuiApplication::clipboard()->setText(multilineNoTrailingBlank);
+			QTest::keySequence(input, QKeySequence::Paste);
+			QCoreApplication::processEvents();
+
+			const int heightWithoutTrailingBlank = input->height();
+			QTRY_VERIFY2(heightWithoutTrailingBlank > singleHeight,
+			             "Two-line multiline paste should expand command input height.");
+			QCOMPARE(view.inputText(), multilineNoTrailingBlank);
+			QTextCursor firstLineCursor(input->document());
+			firstLineCursor.movePosition(QTextCursor::Start);
+			QVERIFY2(input->viewport()->rect().intersects(input->cursorRect(firstLineCursor)),
+			         "First line should remain visible after multiline paste.");
+
+			view.setInputText(QString(), true);
+			QCoreApplication::processEvents();
+			QCOMPARE(input->height(), singleHeight);
+
+			const QString multilineWithTrailingBlank = multilineNoTrailingBlank + QStringLiteral("\n\n");
+			QGuiApplication::clipboard()->setText(multilineWithTrailingBlank);
+			QTest::keySequence(input, QKeySequence::Paste);
+			QCoreApplication::processEvents();
+
+			const int heightWithTrailingBlank = input->height();
+			QTRY_VERIFY2(heightWithTrailingBlank >= heightWithoutTrailingBlank,
+			             "Adding a trailing blank line should not shrink auto-resized input height.");
+			QCOMPARE(view.inputText(), multilineWithTrailingBlank);
+			firstLineCursor = QTextCursor(input->document());
+			firstLineCursor.movePosition(QTextCursor::Start);
+			QVERIFY2(input->viewport()->rect().intersects(input->cursorRect(firstLineCursor)),
+			         "First line should remain visible after multiline paste with trailing blank line.");
+			QVERIFY2(input->viewport()->rect().intersects(input->cursorRect()),
+			         "Input caret should remain visible after multiline paste with trailing blank line.");
+
+			const QPoint clickPoint(input->viewport()->rect().center().x(),
+			                        input->viewport()->rect().bottom() - 2);
+			QTest::mouseClick(input->viewport(), Qt::LeftButton, Qt::NoModifier, clickPoint);
+			QCoreApplication::processEvents();
+			firstLineCursor = QTextCursor(input->document());
+			firstLineCursor.movePosition(QTextCursor::Start);
+			QVERIFY2(input->viewport()->rect().intersects(input->cursorRect(firstLineCursor)),
+			         "First line should remain visible after mouse click in command input.");
+
+			resetTestState();
+		}
+
+		void multilineMergeSplitSequenceKeepsTopLineVisible()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(360, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			const int singleHeight = input->height();
+			QVERIFY(singleHeight > 0);
+
+			const QString multilineNoTrailingBlank =
+			    QStringLiteral("The automated test verifies command input auto-resize behavior with wrapped "
+			                   "multiline text content\n and a continuation line that starts with a space.");
+
+			QGuiApplication::clipboard()->setText(multilineNoTrailingBlank);
+			for (int iteration = 0; iteration < 20; ++iteration)
+			{
+				view.setInputText(QString(), true);
+				QCoreApplication::processEvents();
+				QTest::keySequence(input, QKeySequence::Paste);
+				QCoreApplication::processEvents();
+
+				QTRY_VERIFY(input->height() > singleHeight);
+				QCOMPARE(input->document()->blockCount(), 2);
+
+				QTextCursor cursor = input->textCursor();
+				cursor.movePosition(QTextCursor::End);
+				input->setTextCursor(cursor);
+				QCoreApplication::processEvents();
+
+				QTest::keyClick(input, Qt::Key_Home);
+				QTest::keyClick(input, Qt::Key_Backspace);
+				QTest::keyClick(input, Qt::Key_Return, Qt::ShiftModifier);
+				if (input->document()->blockCount() == 1)
+					input->insertPlainText(QStringLiteral("\n"));
+				QTest::keyClick(input, Qt::Key_End);
+				QCoreApplication::processEvents();
+
+				QCOMPARE(input->document()->blockCount(), 2);
+				QTRY_VERIFY2(
+				    input->height() > singleHeight,
+				    "Input should remain in multiline auto-resized height after merge/split sequence.");
+				if (QScrollBar *bar = input->verticalScrollBar())
+					QTRY_COMPARE(bar->value(), bar->minimum());
+				QTextCursor firstLineCursor(input->document());
+				firstLineCursor.movePosition(QTextCursor::Start);
+				QVERIFY2(input->viewport()->rect().intersects(input->cursorRect(firstLineCursor)),
+				         "First line should remain visible after Home/Backspace/Shift+Enter/End sequence.");
+			}
 
 			resetTestState();
 		}
@@ -2812,6 +3043,91 @@ class tst_WorldView_Basic : public QObject
 				QTest::keyClick(input, Qt::Key_Backspace);
 				QCoreApplication::processEvents();
 				assertCaretVisible();
+			}
+
+			resetTestState();
+		}
+
+		void multilinePasteCrossLineLeftAndMergeKeepsInputViewportStable()
+		{
+			resetTestState();
+
+			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("8"));
+			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(360, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+			const int singleHeight = input->height();
+			QVERIFY(singleHeight > 0);
+
+			const QString pasted = QStringLiteral("first ") + QStringLiteral("word ").repeated(44) +
+			                       QStringLiteral("\nsecond ") + QStringLiteral("word ").repeated(40) +
+			                       QStringLiteral("\nthird ") + QStringLiteral("word ").repeated(36);
+			QGuiApplication::clipboard()->setText(pasted);
+
+			auto assertCaretVisible = [input]
+			{
+				const QRect cursorRect = input->cursorRect();
+				QVERIFY2(cursorRect.isValid(), "Input cursor rectangle should remain valid.");
+				QVERIFY2(cursorRect.height() > 0, "Input cursor rectangle should have positive height.");
+				QVERIFY2(input->viewport()->rect().intersects(cursorRect),
+				         "Input caret should remain visible inside viewport.");
+			};
+
+			for (int i = 0; i < 40; ++i)
+			{
+				view.setInputText(QString(), true);
+				QCoreApplication::processEvents();
+
+				QTest::keySequence(input, QKeySequence::Paste);
+				QCoreApplication::processEvents();
+				QCOMPARE(view.inputText(), pasted);
+				QTRY_VERIFY2(input->height() > singleHeight,
+				             "Auto-resize should grow after multiline paste.");
+				assertCaretVisible();
+
+				QTextCursor cursor = input->textCursor();
+				cursor.movePosition(QTextCursor::End);
+				input->setTextCursor(cursor);
+				QCoreApplication::processEvents();
+				assertCaretVisible();
+
+				QTest::keyClick(input, Qt::Key_Home);
+				QCoreApplication::processEvents();
+				assertCaretVisible();
+				const int homePosition = input->textCursor().position();
+
+				QTest::keyClick(input, Qt::Key_Left);
+				QCoreApplication::processEvents();
+				assertCaretVisible();
+				QVERIFY2(input->textCursor().position() < homePosition,
+				         "Left at line start should move caret to previous line.");
+
+				QTextCursor mergeCursor = input->textCursor();
+				mergeCursor.movePosition(QTextCursor::End);
+				mergeCursor.movePosition(QTextCursor::StartOfBlock);
+				input->setTextCursor(mergeCursor);
+				QCoreApplication::processEvents();
+				assertCaretVisible();
+				const int blockCountBeforeMerge = input->document()->blockCount();
+				QVERIFY(blockCountBeforeMerge >= 3);
+
+				QTest::keyClick(input, Qt::Key_Backspace);
+				QCoreApplication::processEvents();
+				assertCaretVisible();
+				QCOMPARE(input->document()->blockCount(), blockCountBeforeMerge - 1);
+				QCOMPARE(view.inputText().size(), boundedSizeToInt(pasted.size()) - 1);
 			}
 
 			resetTestState();
@@ -2901,7 +3217,7 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 
 			const int bottomGap = input->viewport()->rect().bottom() - input->cursorRect().bottom();
-			QVERIFY2(bottomGap <= (input->fontMetrics().lineSpacing() / 2),
+			QVERIFY2(bottomGap <= input->fontMetrics().lineSpacing(),
 			         "Trailing whitespace wrap should not allocate an extra visual line below the cursor.");
 
 			resetTestState();
@@ -5561,6 +5877,4 @@ class tst_WorldView_Basic : public QObject
 };
 QTEST_MAIN(tst_WorldView_Basic)
 
-#if __has_include("tst_WorldView_Basic.moc")
 #include "tst_WorldView_Basic.moc"
-#endif

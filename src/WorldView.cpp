@@ -161,6 +161,9 @@ namespace
 			return;
 
 		edit->ensureCursorVisible();
+		if (!edit->viewport()->rect().intersects(edit->cursorRect()))
+			edit->centerCursor();
+		edit->viewport()->update();
 		QPointer<QPlainTextEdit> guard(edit);
 		QMetaObject::invokeMethod(
 		    edit,
@@ -169,8 +172,23 @@ namespace
 			    if (!guard)
 				    return;
 			    guard->ensureCursorVisible();
+			    if (!guard->viewport()->rect().intersects(guard->cursorRect()))
+				    guard->centerCursor();
+			    guard->viewport()->update();
 		    },
 		    Qt::QueuedConnection);
+	}
+
+	int inputVerticalChromePx(const QPlainTextEdit *edit, const QMargins &viewportMargins, const int frame)
+	{
+		if (!edit)
+			return frame * 2;
+		const QMargins contentsMargins = edit->contentsMargins();
+		int            documentMargins = 0;
+		if (const QTextDocument *doc = edit->document())
+			documentMargins = qMax(0, qCeil(doc->documentMargin())) * 2;
+		return frame * 2 + contentsMargins.top() + contentsMargins.bottom() + viewportMargins.top() +
+		       viewportMargins.bottom() + documentMargins;
 	}
 
 	QString htmlStyleForSpan(const WorldRuntime::StyleSpan &span, const QColor &defaultTextColour,
@@ -1057,12 +1075,13 @@ class InputTextEdit : public QPlainTextEdit
 	protected:
 		bool event(QEvent *event) override;
 		void keyPressEvent(QKeyEvent *event) override;
+		void mousePressEvent(QMouseEvent *event) override;
+		void mouseReleaseEvent(QMouseEvent *event) override;
 		void resizeEvent(QResizeEvent *event) override;
 		void contextMenuEvent(QContextMenuEvent *event) override;
 
 	private:
 		WorldView *m_view{nullptr};
-		bool       m_wrapUpdateQueued{false};
 #ifdef Q_OS_WIN
 		bool m_suppressNextAltNumpadCommit{false};
 #endif
@@ -1258,8 +1277,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 		        m_partialCommand.clear();
 		        m_partialIndex = -1;
 		        m_historyIndex = -1;
-		        updateInputHeight();
-		        ensureCursorVisibleNowAndQueued(m_input);
+		        requestInputViewportSync();
 		        if (m_runtime && !m_notifyingPluginCommandChanged)
 		        {
 			        m_notifyingPluginCommandChanged = true;
@@ -4979,8 +4997,7 @@ QString WorldView::pasteCommand(const QString &text)
 	cursor.insertText(text);
 	m_input->setTextCursor(cursor);
 	m_inputChanged = true;
-	updateInputHeight();
-	ensureCursorVisibleNowAndQueued(m_input);
+	requestInputViewportSync();
 	return selected;
 }
 
@@ -5881,6 +5898,27 @@ bool WorldView::outputScrollBarVisible() const
 bool WorldView::outputScrollBarWanted() const
 {
 	return m_outputScrollBarWanted;
+}
+
+void WorldView::requestInputViewportSync()
+{
+	if (!m_input || m_inputViewportSyncQueued)
+		return;
+	m_inputViewportSyncQueued = true;
+	QPointer<WorldView> guard(this);
+	QMetaObject::invokeMethod(
+	    this,
+	    [guard]
+	    {
+		    if (!guard)
+			    return;
+		    guard->m_inputViewportSyncQueued = false;
+		    if (!guard->m_input)
+			    return;
+		    guard->updateInputWrap();
+		    guard->updateInputHeight();
+	    },
+	    Qt::QueuedConnection);
 }
 
 void WorldView::requestDrawOutputWindowNotification()
@@ -7489,7 +7527,6 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	if (m_input && useDefaultInputFont)
 	{
 		m_input->setFont(effectiveDefaultInputFont());
-		updateInputHeight();
 	}
 	else if (m_input && (!inputFontName.isEmpty() || inputHeight > 0 || inputWeight > 0 || inputItalic != 0))
 	{
@@ -7506,7 +7543,6 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 			font.setWeight(mapFontWeight(inputWeight));
 		font.setItalic(inputItalic != 0);
 		m_input->setFont(font);
-		updateInputHeight();
 	}
 
 	syncOutputScrollSingleStep();
@@ -8582,14 +8618,24 @@ void WorldView::updateInputHeight() const
 	if (!m_input)
 		return;
 
-	const int frame      = m_input->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, m_input);
-	const int lineHeight = QFontMetrics(m_input->font()).lineSpacing();
-	const int singleLine = lineHeight + frame * 2 + 4;
+	const int frame       = m_input->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, m_input);
+	const int lineHeight  = QFontMetrics(m_input->font()).lineSpacing();
+	const int inputChrome = inputVerticalChromePx(m_input, m_input->viewportMarginsPublic(), frame);
+	const int singleLine  = lineHeight + inputChrome;
 	if (!m_autoResizeCommandWindow)
 	{
 		m_input->setMinimumHeight(singleLine);
 		m_input->setMaximumHeight(QWIDGETSIZE_MAX);
 		ensureCursorVisibleNowAndQueued(m_input);
+		m_autoResizeInputDocRevision     = -1;
+		m_autoResizeInputBlockCount      = 0;
+		m_autoResizeInputViewportWidth   = -1;
+		m_autoResizeInputAppliedLines    = 1;
+		m_autoResizeLastMinLines         = 1;
+		m_autoResizeLastMaxLines         = 20;
+		m_autoResizeLastWrapInput        = m_wrapInput;
+		m_autoResizeLastWrapColumn       = m_wrapColumn;
+		m_autoResizeLastInputPixelOffset = m_inputPixelOffset;
 		return;
 	}
 
@@ -8597,11 +8643,20 @@ void WorldView::updateInputHeight() const
 	int maxLines = qMax(1, m_autoResizeMaximumLines);
 	if (minLines > maxLines)
 		qSwap(minLines, maxLines);
+	const bool policyUnchanged =
+	    minLines == m_autoResizeLastMinLines && maxLines == m_autoResizeLastMaxLines &&
+	    m_wrapInput == m_autoResizeLastWrapInput && m_wrapColumn == m_autoResizeLastWrapColumn &&
+	    m_inputPixelOffset == m_autoResizeLastInputPixelOffset;
 
-	int lineCount = 1;
+	int       lineCount     = 1;
+	int       docRevision   = -1;
+	int       docBlockCount = 1;
+	const int viewportWidth = m_input->viewport() ? m_input->viewport()->width() : -1;
 	if (QTextDocument *doc = m_input->document())
 	{
-		lineCount = qMax(1, doc->blockCount());
+		docRevision   = doc->revision();
+		docBlockCount = qMax(1, doc->blockCount());
+		lineCount     = docBlockCount;
 
 		if (m_input->lineWrapMode() == QPlainTextEdit::WidgetWidth)
 		{
@@ -8619,23 +8674,36 @@ void WorldView::updateInputHeight() const
 
 			const QTextCursor cursor              = m_input->textCursor();
 			const int         documentEndPosition = qMax(0, doc->characterCount() - 1);
-			if (cursor.position() >= documentEndPosition && lineCount > 1)
+			if (cursor.position() >= documentEndPosition && lineCount > 1 && doc->blockCount() == 1)
 			{
-				const QTextBlock   lastBlock  = doc->lastBlock();
-				const QTextLayout *lastLayout = lastBlock.layout();
-				if (lastLayout && lastLayout->lineCount() > 1)
+				const QString inputText = m_input->toPlainText();
+				const bool    hasExplicitTrailingNewline =
+				    inputText.endsWith(QLatin1Char('\n')) || inputText.endsWith(QLatin1Char('\r'));
+				if (!hasExplicitTrailingNewline)
 				{
-					const QTextLine lastLine = lastLayout->lineAt(lastLayout->lineCount() - 1);
-					if (lastLine.isValid() && lastLine.textLength() == 0)
-						--lineCount;
+					const QTextBlock   lastBlock  = doc->lastBlock();
+					const QTextLayout *lastLayout = lastBlock.layout();
+					if (lastLayout && lastLayout->lineCount() > 1)
+					{
+						const QTextLine lastLine = lastLayout->lineAt(lastLayout->lineCount() - 1);
+						if (lastLine.isValid() && lastLine.textLength() == 0)
+							--lineCount;
+					}
 				}
 			}
 		}
+
+		// Never collapse explicit multiline input below block count even if
+		// transient layout metrics under-report wrapped visual rows.
+		lineCount = qMax(lineCount, docBlockCount);
 	}
 
-	auto applyHeightForLines = [this, lineHeight, frame](const int lines)
+	auto targetHeightForLines = [lineHeight, inputChrome](const int lines)
+	{ return (lineHeight * lines) + inputChrome; };
+
+	auto applyHeightForLines = [this, &targetHeightForLines](const int lines)
 	{
-		const int targetHeight = (lineHeight * lines) + frame * 2 + 4;
+		const int targetHeight = targetHeightForLines(lines);
 		if (m_input->minimumHeight() == targetHeight && m_input->maximumHeight() == targetHeight)
 			return;
 		m_input->setMinimumHeight(targetHeight);
@@ -8643,27 +8711,49 @@ void WorldView::updateInputHeight() const
 	};
 
 	int targetLines = qBound(minLines, lineCount, maxLines);
-	applyHeightForLines(targetLines);
-
-	if (targetLines > minLines)
+	if (docRevision >= 0)
 	{
-		const QTextCursor    cursor   = m_input->textCursor();
-		const QTextDocument *document = m_input->document();
-		const int            documentEndPosition =
-            document ? qMax(0, document->characterCount() - 1) : cursor.position();
-		if (cursor.position() >= documentEndPosition)
+		const bool docShapeUnchanged = docRevision == m_autoResizeInputDocRevision &&
+		                               docBlockCount == m_autoResizeInputBlockCount &&
+		                               viewportWidth == m_autoResizeInputViewportWidth;
+		if (docShapeUnchanged && policyUnchanged && targetLines < m_autoResizeInputAppliedLines)
+			targetLines = m_autoResizeInputAppliedLines;
+	}
+	applyHeightForLines(targetLines);
+	if (m_splitter)
+	{
+		const int total = m_splitter->size().height();
+		if (total > 0)
 		{
-			const int bottomGap  = m_input->viewport()->rect().bottom() - m_input->cursorRect().bottom();
-			const int allowedGap = lineHeight / 2;
-			if (bottomGap > allowedGap)
+			const int        targetHeight = qBound(0, targetHeightForLines(targetLines), total);
+			const int        outputHeight = total - targetHeight;
+			const QList<int> currentSizes = m_splitter->sizes();
+			if (currentSizes.size() >= 2 &&
+			    (qAbs(currentSizes.at(0) - outputHeight) > 1 || qAbs(currentSizes.at(1) - targetHeight) > 1))
 			{
-				const int excessGap   = bottomGap - allowedGap;
-				const int maxTrim     = targetLines - minLines;
-				const int linesToTrim = qBound(1, (excessGap + lineHeight - 1) / lineHeight, maxTrim);
-				targetLines -= linesToTrim;
-				applyHeightForLines(targetLines);
+				m_splitter->setSizes(QList<int>() << outputHeight << targetHeight);
 			}
 		}
+	}
+	if (docRevision >= 0)
+	{
+		m_autoResizeInputDocRevision     = docRevision;
+		m_autoResizeInputBlockCount      = docBlockCount;
+		m_autoResizeInputViewportWidth   = viewportWidth;
+		m_autoResizeInputAppliedLines    = targetLines;
+		m_autoResizeLastMinLines         = minLines;
+		m_autoResizeLastMaxLines         = maxLines;
+		m_autoResizeLastWrapInput        = m_wrapInput;
+		m_autoResizeLastWrapColumn       = m_wrapColumn;
+		m_autoResizeLastInputPixelOffset = m_inputPixelOffset;
+	}
+
+	if (targetLines >= lineCount)
+	{
+		if (QScrollBar *const bar = m_input->verticalScrollBar())
+			bar->setValue(bar->minimum());
+		m_input->viewport()->update();
+		return;
 	}
 
 	ensureCursorVisibleNowAndQueued(m_input);
@@ -8674,9 +8764,10 @@ void WorldView::applyDefaultInputHeight(bool setSplitterSizes)
 	if (!m_input || m_defaultInputHeightApplied)
 		return;
 
-	const int frame      = m_input->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, m_input);
-	const int lineHeight = QFontMetrics(m_input->font()).lineSpacing();
-	const int singleLine = lineHeight + frame * 2 + 4;
+	const int frame       = m_input->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, m_input);
+	const int lineHeight  = QFontMetrics(m_input->font()).lineSpacing();
+	const int inputChrome = inputVerticalChromePx(m_input, m_input->viewportMarginsPublic(), frame);
+	const int singleLine  = lineHeight + inputChrome;
 
 	m_input->setMinimumHeight(singleLine);
 	m_input->setMaximumHeight(singleLine);
@@ -8756,7 +8847,7 @@ void WorldView::recallLastWord()
 			cursor.removeSelectedText();
 			m_input->setTextCursor(cursor);
 			m_inputChanged = true;
-			updateInputHeight();
+			requestInputViewportSync();
 			return;
 		}
 
@@ -8780,7 +8871,7 @@ void WorldView::recallLastWord()
 		cursor.setPosition(sizeToInt(before.length()));
 		m_input->setTextCursor(cursor);
 		m_inputChanged = true;
-		updateInputHeight();
+		requestInputViewportSync();
 		return;
 	}
 
@@ -8798,7 +8889,7 @@ void WorldView::recallLastWord()
 
 	m_input->insertPlainText(word);
 	m_inputChanged = true;
-	updateInputHeight();
+	requestInputViewportSync();
 }
 
 void WorldView::removeLastHistoryEntry()
@@ -8907,7 +8998,7 @@ bool WorldView::executeMacroByName(const QString &name)
 		{
 			m_input->insertPlainText(send);
 			m_inputChanged = true;
-			updateInputHeight();
+			requestInputViewportSync();
 		}
 		return true;
 	}
@@ -9234,8 +9325,7 @@ void WorldView::setInputText(const QString &text, bool markChanged)
 	m_input->setTextCursor(cursor);
 	m_settingText  = false;
 	m_inputChanged = markChanged;
-	updateInputHeight();
-	ensureCursorVisibleNowAndQueued(m_input);
+	requestInputViewportSync();
 }
 
 int WorldView::setCommandSelection(int first, int last) const
@@ -9805,7 +9895,6 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 		}
 		const QString pasteText = QGuiApplication::clipboard()->text();
 		m_view->pasteCommand(pasteText);
-		ensureCursorVisibleNowAndQueued(this);
 		return;
 	}
 	if (m_view && event->key() == Qt::Key_Backspace && (event->modifiers() & Qt::ControlModifier))
@@ -9878,7 +9967,21 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 
 	QPlainTextEdit::keyPressEvent(event);
 	if (m_view)
-		ensureCursorVisibleNowAndQueued(this);
+		m_view->requestInputViewportSync();
+}
+
+void InputTextEdit::mousePressEvent(QMouseEvent *event)
+{
+	QPlainTextEdit::mousePressEvent(event);
+	if (m_view)
+		m_view->requestInputViewportSync();
+}
+
+void InputTextEdit::mouseReleaseEvent(QMouseEvent *event)
+{
+	QPlainTextEdit::mouseReleaseEvent(event);
+	if (m_view)
+		m_view->requestInputViewportSync();
 }
 
 bool InputTextEdit::event(QEvent *event)
@@ -9931,25 +10034,8 @@ bool InputTextEdit::event(QEvent *event)
 void InputTextEdit::resizeEvent(QResizeEvent *event)
 {
 	QPlainTextEdit::resizeEvent(event);
-	if (!m_view || m_wrapUpdateQueued)
-		return;
-	m_wrapUpdateQueued = true;
-	QPointer<InputTextEdit> guard(this);
-	QMetaObject::invokeMethod(
-	    this,
-	    [guard]
-	    {
-		    if (!guard)
-			    return;
-		    if (guard->m_view)
-		    {
-			    guard->m_view->updateInputWrap();
-			    guard->m_view->updateInputHeight();
-		    }
-		    ensureCursorVisibleNowAndQueued(guard.data());
-		    guard->m_wrapUpdateQueued = false;
-	    },
-	    Qt::QueuedConnection);
+	if (m_view)
+		m_view->requestInputViewportSync();
 }
 
 void InputTextEdit::contextMenuEvent(QContextMenuEvent *event)
@@ -9969,7 +10055,6 @@ void InputTextEdit::contextMenuEvent(QContextMenuEvent *event)
 					        if (m_view)
 					        {
 						        m_view->pasteCommand(pasteText);
-						        ensureCursorVisibleNowAndQueued(this);
 					        }
 					        else
 					        {

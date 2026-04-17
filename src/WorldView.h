@@ -1288,6 +1288,10 @@ class WorldView : public QWidget
 		 */
 		void requestDrawOutputWindowNotification();
 		/**
+		 * @brief Queues coalesced input wrap/height/caret viewport synchronization.
+		 */
+		void requestInputViewportSync();
+		/**
 		 * @brief Queues world-output-resized notification callback.
 		 */
 		void requestWorldOutputResizedNotification();
@@ -1501,6 +1505,16 @@ class WorldView : public QWidget
 		QPoint                                  m_lastMousePos;
 		bool                                    m_hasLastMousePos{false};
 		bool                                    m_drawNotifyQueued{false};
+		bool                                    m_inputViewportSyncQueued{false};
+		mutable int                             m_autoResizeInputDocRevision{-1};
+		mutable int                             m_autoResizeInputBlockCount{0};
+		mutable int                             m_autoResizeInputViewportWidth{-1};
+		mutable int                             m_autoResizeInputAppliedLines{1};
+		mutable int                             m_autoResizeLastMinLines{1};
+		mutable int                             m_autoResizeLastMaxLines{20};
+		mutable bool                            m_autoResizeLastWrapInput{false};
+		mutable int                             m_autoResizeLastWrapColumn{0};
+		mutable int                             m_autoResizeLastInputPixelOffset{0};
 		bool                                    m_worldOutputResizedQueued{false};
 		bool                                    m_wrapMarginUpdateQueued{false};
 		bool                                    m_scrollToEndQueued{false};
