@@ -4,7 +4,7 @@ set -eu
 PROJECT_DIR=${PROJECT_DIR:-/home/user/project}
 BUILD_DIR=${BUILD_DIR:-/home/user/build}
 QMUD_WINDOCKER_BUILD_TYPE=${QMUD_WINDOCKER_BUILD_TYPE:-Release}
-QMUD_WINDOCKER_QT_PREFIX=${QMUD_WINDOCKER_QT_PREFIX:-/opt/Qt/6.10.2/mingw_64}
+QMUD_WINDOCKER_QT_PREFIX=${QMUD_WINDOCKER_QT_PREFIX:-/opt/Qt/latest/mingw_64}
 QMUD_WINDOCKER_QT_HOST_PREFIX=${QMUD_WINDOCKER_QT_HOST_PREFIX:-/usr/lib64/qt6}
 QMUD_WINDOCKER_MINGW_PREFIX=${QMUD_WINDOCKER_MINGW_PREFIX:-/usr/x86_64-w64-mingw32/sys-root/mingw}
 QMUD_WINDOCKER_MINGW_TRIPLET=${QMUD_WINDOCKER_MINGW_TRIPLET:-x86_64-w64-mingw32}
@@ -44,7 +44,7 @@ export PKG_CONFIG_LIBDIR="$MINGW_LIB_DIR/pkgconfig:$MINGW_LIB_DIR/share/pkgconfi
 export PKG_CONFIG_PATH=
 
 if [ ! -x "$QT_HOST_PREFIX/libexec/moc" ]; then
-  for QT_HOST_CANDIDATE in /usr/lib64/qt6 /usr/lib/qt6 /opt/Qt/6.10.2/gcc_64 /opt/Qt/6.10.2/linux_gcc_64; do
+  for QT_HOST_CANDIDATE in /usr/lib64/qt6 /usr/lib/qt6 /opt/Qt/latest/gcc_64 /opt/Qt/latest/linux_gcc_64; do
     if [ -x "$QT_HOST_CANDIDATE/libexec/moc" ]; then
       QT_HOST_PREFIX="$QT_HOST_CANDIDATE"
       break

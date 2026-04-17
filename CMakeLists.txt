@@ -1283,7 +1283,7 @@ if (UNIX AND NOT APPLE)
         set_property(CACHE QMUD_MAC_DOCKER_ARCH PROPERTY STRINGS x86_64 aarch64)
         set(QMUD_MAC_DOCKER_OSX_DEPLOYMENT_TARGET "13.0.0" CACHE STRING
                 "CMAKE_OSX_DEPLOYMENT_TARGET used inside MacDocker container")
-        set(QMUD_MAC_DOCKER_QT_PREFIX "/opt/Qt/6.10.2/macos" CACHE PATH
+        set(QMUD_MAC_DOCKER_QT_PREFIX "/opt/Qt/latest/macos" CACHE PATH
                 "Qt macOS prefix inside MacDocker image")
         set(QMUD_MAC_DOCKER_QT_HOST_PREFIX "/usr/lib64/qt6" CACHE PATH
                 "Qt host-tools prefix inside MacDocker image (must provide runnable moc/uic/rcc)")
@@ -1409,7 +1409,7 @@ if (UNIX AND NOT APPLE)
                 "Host output directory for WinDocker artifacts")
         set(QMUD_WINDOCKER_BUILD_TYPE "Release" CACHE STRING
                 "CMake build type used inside WinDocker container")
-        set(QMUD_WINDOCKER_QT_PREFIX "/opt/Qt/6.10.2/mingw_64" CACHE PATH
+        set(QMUD_WINDOCKER_QT_PREFIX "/opt/Qt/latest/mingw_64" CACHE PATH
                 "Qt Windows prefix inside WinDocker image")
         set(QMUD_WINDOCKER_QT_HOST_PREFIX "/usr/lib64/qt6" CACHE PATH
                 "Qt host-tools prefix inside WinDocker image (must provide runnable moc/uic/rcc)")
@@ -1526,6 +1526,9 @@ if (UNIX AND NOT APPLE)
 
     option(QMUD_ENABLE_APPIMAGE "Enable AppImage packaging target (Linux only)" ON)
     if (QMUD_ENABLE_APPIMAGE)
+        option(QMUD_APPIMAGE_STRICT_QT_SOURCE
+                "Restrict AppImage Qt runtime and plugin discovery to configured Qt SDK paths (disable /usr fallback plugin paths)"
+                OFF)
         set(QMUD_APPIMAGE_VERSION "dev" CACHE STRING "Version string embedded in AppImage metadata")
         set(QMUD_APPIMAGE_WORK_DIR "${CMAKE_CURRENT_BINARY_DIR}/appimage" CACHE PATH "Working directory for AppImage assembly")
         set(QMUD_LINUXDEPLOY_PLUGIN_APPIMAGE_EXECUTABLE "" CACHE FILEPATH
@@ -1610,9 +1613,29 @@ if (UNIX AND NOT APPLE)
         endif ()
 
         set(QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR "")
-        get_target_property(QMUD_APPIMAGE_QTCORE_LOCATION Qt6::Core IMPORTED_LOCATION)
-        if (QMUD_APPIMAGE_QTCORE_LOCATION)
-            get_filename_component(QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR "${QMUD_APPIMAGE_QTCORE_LOCATION}" DIRECTORY)
+        set(QMUD_APPIMAGE_QT_STRICT_ROOT "")
+        if (QMUD_APPIMAGE_STRICT_QT_SOURCE AND DEFINED Qt6_DIR AND NOT Qt6_DIR STREQUAL "")
+            get_filename_component(QMUD_APPIMAGE_QT_STRICT_ROOT "${Qt6_DIR}/../../.." ABSOLUTE)
+            foreach (_qmud_qt_runtime_lib_candidate_dir
+                    "${QMUD_APPIMAGE_QT_STRICT_ROOT}/lib"
+                    "${QMUD_APPIMAGE_QT_STRICT_ROOT}/lib64")
+                file(GLOB _qmud_qtcore_in_candidate "${_qmud_qt_runtime_lib_candidate_dir}/libQt6Core.so*")
+                if (_qmud_qtcore_in_candidate)
+                    set(QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR "${_qmud_qt_runtime_lib_candidate_dir}")
+                    break()
+                endif ()
+            endforeach ()
+            if (NOT QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR)
+                message(FATAL_ERROR
+                        "QMUD_APPIMAGE_STRICT_QT_SOURCE is ON, but no Qt runtime lib directory containing "
+                        "libQt6Core.so* was found under ${QMUD_APPIMAGE_QT_STRICT_ROOT}.")
+            endif ()
+        endif ()
+        if (NOT QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR)
+            get_target_property(QMUD_APPIMAGE_QTCORE_LOCATION Qt6::Core IMPORTED_LOCATION)
+            if (QMUD_APPIMAGE_QTCORE_LOCATION)
+                get_filename_component(QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR "${QMUD_APPIMAGE_QTCORE_LOCATION}" DIRECTORY)
+            endif ()
         endif ()
         if (NOT QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR)
             message(FATAL_ERROR "Could not resolve Qt runtime library directory from Qt6::Core.")
@@ -1657,6 +1680,7 @@ if (UNIX AND NOT APPLE)
                         platforminputcontexts
                         xcbglintegrations
                         egldeviceintegrations
+                        texttospeech
                         wayland-decoration-client
                         wayland-graphics-integration-client
                         wayland-shell-integration
@@ -1811,9 +1835,13 @@ if (UNIX AND NOT APPLE)
                         COMMAND ${CMAKE_COMMAND} -E make_directory "$<SHELL_PATH:${QMUD_APPIMAGE_SKELETON_LUA_SSL_DIR}>"
                 )
             endif ()
+            get_filename_component(QMUD_APPIMAGE_QT_RUNTIME_ROOT "${QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR}" DIRECTORY)
             add_custom_command(TARGET AppImage POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E echo "Staging Qt runtime libraries/plugins into AppDir"
-                    COMMAND ${CMAKE_COMMAND}
+                    COMMAND ${CMAKE_COMMAND} -E env
+                    "QT_PLUGIN_PATH=$<SHELL_PATH:${QMUD_APPIMAGE_QT_RUNTIME_ROOT}/plugins>"
+                    "QT_QPA_PLATFORM_PLUGIN_PATH=$<SHELL_PATH:${QMUD_APPIMAGE_QT_RUNTIME_ROOT}/plugins/platforms>"
+                    ${CMAKE_COMMAND}
                     -DCMAKE_INSTALL_PREFIX="$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}>"
                     -DQT_DEPLOY_PREFIX="$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}>"
                     -DQT_DEPLOY_BIN_DIR=usr/bin
@@ -1828,7 +1856,6 @@ if (UNIX AND NOT APPLE)
                     COMMAND ${CMAKE_COMMAND} -E rm -f
                     "$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}/usr/plugins/platformthemes/libqgtk3.so>"
             )
-            get_filename_component(QMUD_APPIMAGE_QT_RUNTIME_ROOT "${QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR}" DIRECTORY)
             set(QMUD_APPIMAGE_QT_TLS_PLUGIN_DIR "")
             set(QMUD_APPIMAGE_QT_TLS_PLUGIN_FILES)
             set(QMUD_APPIMAGE_QT_TLS_PLUGIN_CANDIDATE_DIRS
@@ -1866,69 +1893,6 @@ if (UNIX AND NOT APPLE)
                 string(JOIN ", " QMUD_APPIMAGE_QT_TLS_PLUGIN_SEARCH_PATHS
                         ${QMUD_APPIMAGE_QT_TLS_PLUGIN_CANDIDATE_DIRS})
                 message(WARNING "Qt TLS plugin libqopensslbackend.so was not found in candidate directories: ${QMUD_APPIMAGE_QT_TLS_PLUGIN_SEARCH_PATHS}. AppImage update checks may fail without a functional TLS backend.")
-            endif ()
-            set(QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS
-                    "${QMUD_APPIMAGE_QT_RUNTIME_ROOT}/plugins/texttospeech"
-                    "${QMUD_APPIMAGE_QT_RUNTIME_LIB_DIR}/qt6/plugins/texttospeech"
-                    "${QMUD_APPIMAGE_QT_RUNTIME_ROOT}/lib/qt6/plugins/texttospeech"
-                    "${QMUD_APPIMAGE_QT_RUNTIME_ROOT}/lib64/qt6/plugins/texttospeech"
-                    "/usr/lib64/qt6/plugins/texttospeech"
-                    "/usr/lib/qt6/plugins/texttospeech")
-            if (DEFINED CMAKE_LIBRARY_ARCHITECTURE AND NOT CMAKE_LIBRARY_ARCHITECTURE STREQUAL "")
-                list(APPEND QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS
-                        "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}/qt6/plugins/texttospeech")
-            endif ()
-            if (DEFINED Qt6_DIR AND NOT Qt6_DIR STREQUAL "")
-                get_filename_component(QMUD_APPIMAGE_QT6_ROOT "${Qt6_DIR}/../../.." ABSOLUTE)
-                list(APPEND QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS
-                        "${QMUD_APPIMAGE_QT6_ROOT}/plugins/texttospeech"
-                        "${QMUD_APPIMAGE_QT6_ROOT}/lib/qt6/plugins/texttospeech"
-                        "${QMUD_APPIMAGE_QT6_ROOT}/lib64/qt6/plugins/texttospeech")
-            endif ()
-            if (DEFINED Qt6TextToSpeech_DIR AND NOT Qt6TextToSpeech_DIR STREQUAL "")
-                get_filename_component(QMUD_APPIMAGE_QT6_TTS_ROOT "${Qt6TextToSpeech_DIR}/../../.." ABSOLUTE)
-                list(APPEND QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS
-                        "${QMUD_APPIMAGE_QT6_TTS_ROOT}/plugins/texttospeech"
-                        "${QMUD_APPIMAGE_QT6_TTS_ROOT}/lib/qt6/plugins/texttospeech"
-                        "${QMUD_APPIMAGE_QT6_TTS_ROOT}/lib64/qt6/plugins/texttospeech")
-            endif ()
-            list(REMOVE_DUPLICATES QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS)
-            set(QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_SPEECHD)
-            set(QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_FLITE)
-            foreach (_qmud_tts_candidate_dir IN LISTS QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS)
-                if (NOT QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_SPEECHD)
-                    file(GLOB _qmud_tts_speechd_files
-                            "${_qmud_tts_candidate_dir}/*speechd*.so*")
-                    if (NOT _qmud_tts_speechd_files)
-                        file(GLOB _qmud_tts_speechd_files
-                                "${_qmud_tts_candidate_dir}/*speechdispatcher*.so*")
-                    endif ()
-                    if (_qmud_tts_speechd_files)
-                        set(QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_SPEECHD ${_qmud_tts_speechd_files})
-                    endif ()
-                endif ()
-                if (NOT QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_FLITE)
-                    file(GLOB _qmud_tts_flite_files
-                            "${_qmud_tts_candidate_dir}/*flite*.so*")
-                    if (_qmud_tts_flite_files)
-                        set(QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_FLITE ${_qmud_tts_flite_files})
-                    endif ()
-                endif ()
-            endforeach ()
-            if (QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_SPEECHD AND QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_FLITE)
-                add_custom_command(TARGET AppImage POST_BUILD
-                        COMMAND ${CMAKE_COMMAND} -E echo "Ensuring Qt TextToSpeech speechd/flite plugins are staged"
-                        COMMAND ${CMAKE_COMMAND} -E make_directory
-                        "$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}/usr/plugins/texttospeech>"
-                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                        ${QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_SPEECHD}
-                        ${QMUD_APPIMAGE_QT_TTS_PLUGIN_FILES_FLITE}
-                        "$<SHELL_PATH:${QMUD_APPIMAGE_APPDIR}/usr/plugins/texttospeech>"
-                )
-            else ()
-                string(JOIN ", " QMUD_APPIMAGE_QT_TTS_PLUGIN_SEARCH_PATHS
-                        ${QMUD_APPIMAGE_QT_TTS_PLUGIN_CANDIDATE_DIRS})
-                message(FATAL_ERROR "Qt TextToSpeech plugins for speechd/flite were not found in candidate directories: ${QMUD_APPIMAGE_QT_TTS_PLUGIN_SEARCH_PATHS}.")
             endif ()
             add_custom_command(TARGET AppImage POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E echo "Copying Qt shared libraries into AppDir/usr/lib"
@@ -2076,7 +2040,7 @@ if (UNIX AND NOT APPLE)
                 "Host output directory for AppImageDocker artifacts")
         set(QMUD_APPIMAGE_DOCKER_BUILD_TYPE "Release" CACHE STRING
                 "CMake build type used inside AppImageDocker container")
-        set(QMUD_APPIMAGE_DOCKER_QT_PREFIX "/opt/Qt/6.10.2/gcc_64" CACHE PATH
+        set(QMUD_APPIMAGE_DOCKER_QT_PREFIX "/opt/Qt/latest/gcc_64" CACHE PATH
                 "Qt Linux prefix inside AppImageDocker image")
         set(QMUD_APPIMAGE_DOCKER_LINUXDEPLOY_PLUGIN_APPIMAGE_URL
                 "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-appimage-x86_64.AppImage"

@@ -60,10 +60,13 @@ RUN dnf -y upgrade && \
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
     python3 -m pip install --no-cache-dir --upgrade aqtinstall
 
-ARG QT_VERSION=6.10.2
+ARG QT_SERIES=6.10
 ARG QT_ARCH=win64_mingw
 
-RUN aqt install-qt -O /opt/Qt windows desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia qtspeech
+RUN set -eux; \
+    QT_VERSION="$(aqt list-qt windows desktop --spec "${QT_SERIES}" --latest-version)"; \
+    aqt install-qt -O /opt/Qt windows desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia qtspeech && \
+    ln -sfn "/opt/Qt/${QT_VERSION}" /opt/Qt/latest
 
 ARG LUA_VERSION=5.4.7
 ARG LUASOCKET_VERSION=3.1.0
@@ -249,7 +252,7 @@ EOF
 RUN LUA_VERSION="${LUA_VERSION}" LUASOCKET_VERSION="${LUASOCKET_VERSION}" LPEG_VERSION="${LPEG_VERSION}" LUASEC_VERSION="${LUASEC_VERSION}" \
     /usr/local/bin/build-qmud-windows-lua-deps.sh
 
-ENV QMUD_WINDOWS_QT_PREFIX=/opt/Qt/${QT_VERSION}/mingw_64
+ENV QMUD_WINDOWS_QT_PREFIX=/opt/Qt/latest/mingw_64
 ENV QMUD_WINDOWS_QT_HOST_PREFIX=/usr/lib64/qt6
 ENV QMUD_WINDOWS_MINGW_PREFIX=/usr/x86_64-w64-mingw32/sys-root/mingw
 ENV QMUD_WINDOWS_LUA_PREFIX=/opt/qmud/windows-deps/lua

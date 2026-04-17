@@ -86,12 +86,15 @@ ENV OSXCROSS_ROOT=/opt/osxcross
 ENV OSXCROSS_BIN_DIR=/opt/osxcross/target/bin
 ENV PATH=/opt/osxcross/target/bin:/opt/osxcross/bin:${PATH}
 
-ARG QT_VERSION=6.10.2
+ARG QT_SERIES=6.10
 ARG QT_ARCH=clang_64
 
 RUN dnf -y install qt6-qtbase-devel && \
     dnf clean all && \
-    aqt install-qt -O /opt/Qt mac desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia qtspeech
+    set -eux; \
+    QT_VERSION="$(aqt list-qt mac desktop --spec "${QT_SERIES}" --latest-version)"; \
+    aqt install-qt -O /opt/Qt mac desktop "${QT_VERSION}" "${QT_ARCH}" -m qtmultimedia qtspeech && \
+    ln -sfn "/opt/Qt/${QT_VERSION}" /opt/Qt/latest
 
 ARG LUA_VERSION=5.4.7
 ARG LUASOCKET_VERSION=3.1.0
@@ -308,7 +311,7 @@ EOF
 RUN LUA_VERSION="${LUA_VERSION}" LUASOCKET_VERSION="${LUASOCKET_VERSION}" LPEG_VERSION="${LPEG_VERSION}" LUASEC_VERSION="${LUASEC_VERSION}" OPENSSL_VERSION="${OPENSSL_VERSION}" \
     /usr/local/bin/build-qmud-macos-lua-deps.sh
 
-ENV QMUD_MACOS_QT_PREFIX=/opt/Qt/${QT_VERSION}/macos
+ENV QMUD_MACOS_QT_PREFIX=/opt/Qt/latest/macos
 ENV QMUD_MACOS_QT_HOST_PREFIX=/usr/lib64/qt6
 ENV QMUD_MACOS_LUA_PREFIX=/opt/qmud/macos-deps/lua
 ENV QMUD_MACOS_LUA_MODULES=/opt/qmud/macos-deps/lua-modules

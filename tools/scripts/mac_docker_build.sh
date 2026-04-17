@@ -7,7 +7,7 @@ BUILD_ARCH=${BUILD_ARCH:-x86_64}
 QMUD_MAC_DOCKER_IMAGE=${QMUD_MAC_DOCKER_IMAGE:-qmud-macos-builder:qt6.10}
 QMUD_MAC_DOCKER_BUILD_TYPE=${QMUD_MAC_DOCKER_BUILD_TYPE:-Release}
 QMUD_MAC_DOCKER_OSX_DEPLOYMENT_TARGET=${QMUD_MAC_DOCKER_OSX_DEPLOYMENT_TARGET:-13.0.0}
-QMUD_MAC_DOCKER_QT_PREFIX=${QMUD_MAC_DOCKER_QT_PREFIX:-/opt/Qt/6.10.2/macos}
+QMUD_MAC_DOCKER_QT_PREFIX=${QMUD_MAC_DOCKER_QT_PREFIX:-/opt/Qt/latest/macos}
 QMUD_MAC_DOCKER_QT_HOST_PREFIX=${QMUD_MAC_DOCKER_QT_HOST_PREFIX:-/usr/lib64/qt6}
 QMUD_MAC_DOCKER_LUA_PREFIX=${QMUD_MAC_DOCKER_LUA_PREFIX:-/opt/qmud/macos-deps/lua}
 QMUD_MAC_DOCKER_LUA_MODULES_PREFIX=${QMUD_MAC_DOCKER_LUA_MODULES_PREFIX:-/opt/qmud/macos-deps/lua-modules}
@@ -17,7 +17,7 @@ rm -rf "$BUILD_DIR/CMakeFiles"
 export PATH="$QMUD_MAC_DOCKER_QT_PREFIX/bin:$PATH"
 QT_HOST_PREFIX="$QMUD_MAC_DOCKER_QT_HOST_PREFIX"
 if [ ! -x "$QT_HOST_PREFIX/libexec/moc" ]; then
-  for QT_HOST_CANDIDATE in /usr/lib64/qt6 /usr/lib/qt6 /opt/Qt/6.10.2/gcc_64 /opt/Qt/6.10.2/linux_gcc_64 /opt/Qt/6.10.0/gcc_64 /opt/Qt/6.10.0/linux_gcc_64; do
+  for QT_HOST_CANDIDATE in /usr/lib64/qt6 /usr/lib/qt6 /opt/Qt/latest/gcc_64 /opt/Qt/latest/linux_gcc_64; do
     if [ -x "$QT_HOST_CANDIDATE/libexec/moc" ]; then
       QT_HOST_PREFIX="$QT_HOST_CANDIDATE"
       break
