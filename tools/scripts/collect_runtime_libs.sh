@@ -47,11 +47,8 @@ copy_lib() {
   fi
   dst="$dst_dir/$name"
   if [ -e "$dst" ]; then
-    src_real="$(readlink -f "$lib" 2>/dev/null || printf '%s' "$lib")"
-    dst_real="$(readlink -f "$dst" 2>/dev/null || printf '%s' "$dst")"
-    if [ "$src_real" = "$dst_real" ]; then
-      return 0
-    fi
+    # Never replace a library that's already staged; only add missing entries.
+    return 0
   fi
   case "$name" in
     linux-vdso.so*)
