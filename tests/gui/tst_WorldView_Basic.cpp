@@ -23,6 +23,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QInputMethodEvent>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPlainTextEdit>
@@ -5121,6 +5122,90 @@ class tst_WorldView_Basic : public QObject
 			const QString emittedHref =
 			    QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8());
 			QCOMPARE(emittedHref, span.action);
+			resetTestState();
+		}
+
+		void rightClickOnLinkPrefersSelectionMenuWhenOutputSelectionExists() const
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(720, 420);
+			view.show();
+			QCoreApplication::processEvents();
+
+			WorldRuntime::StyleSpan span;
+			span.length     = QStringLiteral("assistant").size();
+			span.actionType = WorldRuntime::ActionSend;
+			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
+			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
+			                                       "Attack assistant");
+			view.appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			const QPoint anchorPoint = findHyperlinkPoint(view, *browser, span.action);
+			QVERIFY(anchorPoint.x() >= 0 && anchorPoint.y() >= 0);
+			const QPoint globalAnchorPos = browser->viewport()->mapToGlobal(anchorPoint);
+
+			struct MenuCaptureFilter final : QObject
+			{
+					explicit MenuCaptureFilter(QStringList *capturedActions, bool *captured)
+					    : m_capturedActions(capturedActions), m_captured(captured)
+					{
+					}
+
+					bool eventFilter(QObject *watched, QEvent *event) override
+					{
+						if (!m_capturedActions || !m_captured || *m_captured || event->type() != QEvent::Show)
+							return QObject::eventFilter(watched, event);
+						auto *menu = qobject_cast<QMenu *>(watched);
+						if (!menu)
+							return QObject::eventFilter(watched, event);
+
+						const QList<QAction *> actions = menu->actions();
+						m_capturedActions->reserve(actions.size());
+						for (QAction *action : actions)
+						{
+							if (action)
+								m_capturedActions->push_back(action->text());
+						}
+						*m_captured = true;
+						QMetaObject::invokeMethod(menu, &QMenu::close, Qt::QueuedConnection);
+						return QObject::eventFilter(watched, event);
+					}
+
+				private:
+					QStringList *m_capturedActions{nullptr};
+					bool        *m_captured{nullptr};
+			};
+
+			auto captureWorldMenuActions = [&view](const QPoint &globalPos) -> QStringList
+			{
+				QStringList       capturedActions;
+				bool              captured = false;
+				MenuCaptureFilter filter(&capturedActions, &captured);
+				qApp->installEventFilter(&filter);
+				const bool shown = view.showWorldContextMenuAtGlobalPos(globalPos);
+				qApp->removeEventFilter(&filter);
+				if (!shown || !captured)
+					return {};
+				return capturedActions;
+			};
+
+			const QStringList linkMenuActions = captureWorldMenuActions(globalAnchorPos);
+			QCOMPARE(linkMenuActions,
+			         (QStringList{QStringLiteral("Examine assistant"), QStringLiteral("Consider assistant"),
+			                      QStringLiteral("Attack assistant")}));
+
+			view.selectOutputRange(0, 0, 3);
+			QTRY_VERIFY(view.hasOutputSelection());
+			const QStringList selectionMenuActions = captureWorldMenuActions(globalAnchorPos);
+			QCOMPARE(selectionMenuActions,
+			         (QStringList{QStringLiteral("Copy"), QStringLiteral("Copy as HTML")}));
+
 			resetTestState();
 		}
 

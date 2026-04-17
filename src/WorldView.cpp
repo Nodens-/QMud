@@ -1614,8 +1614,9 @@ bool WorldView::showWorldContextMenuAtGlobalPos(const QPoint &globalPos)
 	QString              hint;
 	NativeOutputPosition hit;
 	(void)nativeOutputHitTest(source, sourcePos, hit, &href, &hint);
-	const QVector<QPair<QString, QString>> actions = parseMxpContextMenuActions(href, hint);
-	if (!actions.isEmpty())
+	const QVector<QPair<QString, QString>> actions      = parseMxpContextMenuActions(href, hint);
+	const bool                             hasSelection = hasOutputSelection();
+	if (!hasSelection && !actions.isEmpty())
 	{
 		menu = new QMenu(source);
 		for (int i = 0; i < actions.size(); ++i)
@@ -1633,12 +1634,12 @@ bool WorldView::showWorldContextMenuAtGlobalPos(const QPoint &globalPos)
 		menu = new QMenu(source);
 		if (QAction *copy = menu->addAction(QStringLiteral("Copy")); copy)
 		{
-			copy->setEnabled(hasOutputSelection());
+			copy->setEnabled(hasSelection);
 			connect(copy, &QAction::triggered, this, [this] { copySelection(); });
 		}
 		if (QAction *copyHtml = menu->addAction(QStringLiteral("Copy as HTML")); copyHtml)
 		{
-			copyHtml->setEnabled(hasOutputSelection());
+			copyHtml->setEnabled(hasSelection);
 			connect(copyHtml, &QAction::triggered, this, [this] { copySelectionAsHtml(); });
 		}
 	}
