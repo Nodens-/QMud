@@ -171,6 +171,15 @@ class LuaCallbackEngine
 		bool callFunctionNoArgs(const QString &functionName, bool *hasFunction = nullptr,
 		                        bool defaultResult = true);
 		/**
+		 * @brief Calls function with one string argument and ignores return value semantics.
+		 * @param functionName Callback function name.
+		 * @param arg String argument.
+		 * @param hasFunction Optional output flag indicating function existence.
+		 * @return `true` when function exists and executes without Lua error.
+		 */
+		bool callProcedureWithString(const QString &functionName, const QString &arg,
+		                             bool *hasFunction = nullptr);
+		/**
 		 * @brief Calls function with one string argument.
 		 * @param functionName Callback function name.
 		 * @param arg String argument.

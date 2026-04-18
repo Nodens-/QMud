@@ -12761,6 +12761,17 @@ bool WorldRuntime::forceScriptErrorOutputToWorld() const
 	return m_forceScriptErrorOutputDepth > 0;
 }
 
+void WorldRuntime::pushForceScriptErrorOutputToWorld()
+{
+	++m_forceScriptErrorOutputDepth;
+}
+
+void WorldRuntime::popForceScriptErrorOutputToWorld()
+{
+	if (m_forceScriptErrorOutputDepth > 0)
+		--m_forceScriptErrorOutputDepth;
+}
+
 void WorldRuntime::notifyOutputSelectionChanged()
 {
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginSelectionChanged"));
@@ -14654,7 +14665,7 @@ int WorldRuntime::callPlugin(const QString &pluginId, const QString &routine, co
 	const QString savedCalling = plugin.callingPluginId;
 	plugin.callingPluginId     = callingPluginId;
 	bool       hasFunction     = false;
-	const bool ok              = plugin.lua->callFunctionWithString(routine, argument, &hasFunction, false);
+	const bool ok              = plugin.lua->callProcedureWithString(routine, argument, &hasFunction);
 	plugin.callingPluginId     = savedCalling;
 	if (!hasFunction)
 		return eNoSuchRoutine;

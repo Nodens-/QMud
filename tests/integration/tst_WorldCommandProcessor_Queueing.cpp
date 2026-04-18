@@ -6,7 +6,7 @@
  * Role: QTest coverage for WorldCommandProcessor Queueing behavior.
  */
 
-#include "CommandQueueUtils.h"
+#include "WorldCommandProcessorUtils.h"
 
 #include <QtTest/QTest>
 
@@ -17,7 +17,7 @@ class tst_WorldCommandProcessor_Queueing : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void queueDecision_data()
 		{
@@ -39,9 +39,8 @@ class tst_WorldCommandProcessor_Queueing : public QObject
 			QFETCH(bool, queueNotEmpty);
 			QFETCH(bool, expected);
 
-			QCOMPARE(
-			    QMudCommandQueue::shouldQueueCommand(speedWalkDelayMs, queueRequested, queueNotEmpty),
-			    expected);
+			QCOMPARE(QMudCommandQueue::shouldQueueCommand(speedWalkDelayMs, queueRequested, queueNotEmpty),
+			         expected);
 		}
 
 		void queueEntryEncoding_data()
@@ -79,41 +78,16 @@ class tst_WorldCommandProcessor_Queueing : public QObject
 			QTest::addColumn<QString>("payload");
 
 			QTest::newRow("queued-echo-log")
-			    << QStringLiteral("Ego")
-			    << true
-			    << true
-			    << true
-			    << QStringLiteral("go");
+			    << QStringLiteral("Ego") << true << true << true << QStringLiteral("go");
 			QTest::newRow("queued-no-log")
-			    << QStringLiteral("ego")
-			    << true
-			    << false
-			    << true
-			    << QStringLiteral("go");
+			    << QStringLiteral("ego") << true << false << true << QStringLiteral("go");
 			QTest::newRow("immediate-echo-log")
-			    << QStringLiteral("Igo")
-			    << true
-			    << true
-			    << false
-			    << QStringLiteral("go");
+			    << QStringLiteral("Igo") << true << true << false << QStringLiteral("go");
 			QTest::newRow("immediate-no-log")
-			    << QStringLiteral("igo")
-			    << true
-			    << false
-			    << false
-			    << QStringLiteral("go");
+			    << QStringLiteral("igo") << true << false << false << QStringLiteral("go");
 			QTest::newRow("unknown-flag-falls-back")
-			    << QStringLiteral("Xgo")
-			    << false
-			    << true
-			    << false
-			    << QStringLiteral("go");
-			QTest::newRow("empty-entry")
-			    << QString()
-			    << false
-			    << false
-			    << false
-			    << QString();
+			    << QStringLiteral("Xgo") << false << true << false << QStringLiteral("go");
+			QTest::newRow("empty-entry") << QString() << false << false << false << QString();
 		}
 
 		void queueEntryDecoding()
@@ -133,8 +107,8 @@ class tst_WorldCommandProcessor_Queueing : public QObject
 
 		void takeDispatchBatchStopsAtQueuedType()
 		{
-			QStringList queue = {QStringLiteral("Ifirst"), QStringLiteral("Esecond"),
-			                     QStringLiteral("ithird")};
+			QStringList       queue = {QStringLiteral("Ifirst"), QStringLiteral("Esecond"),
+			                           QStringLiteral("ithird")};
 			const QStringList batch = QMudCommandQueue::takeDispatchBatch(queue, false);
 			QCOMPARE(batch, (QStringList{QStringLiteral("Ifirst"), QStringLiteral("Esecond")}));
 			QCOMPARE(queue, (QStringList{QStringLiteral("ithird")}));
@@ -142,8 +116,8 @@ class tst_WorldCommandProcessor_Queueing : public QObject
 
 		void takeDispatchBatchFlushAllConsumesEverything()
 		{
-			QStringList queue = {QString(), QStringLiteral("ifirst"), QStringLiteral("esecond"),
-			                     QStringLiteral("Ithird")};
+			QStringList       queue = {QString(), QStringLiteral("ifirst"), QStringLiteral("esecond"),
+			                           QStringLiteral("Ithird")};
 			const QStringList batch = QMudCommandQueue::takeDispatchBatch(queue, true);
 			QCOMPARE(batch, (QStringList{QStringLiteral("ifirst"), QStringLiteral("esecond"),
 			                             QStringLiteral("Ithird")}));
@@ -156,11 +130,10 @@ class tst_WorldCommandProcessor_Queueing : public QObject
 			QCOMPARE(QMudCommandQueue::discardAll(queue), 2);
 			QVERIFY(queue.isEmpty());
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_Queueing)
-
 
 #if __has_include("tst_WorldCommandProcessor_Queueing.moc")
 #include "tst_WorldCommandProcessor_Queueing.moc"

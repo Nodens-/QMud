@@ -231,46 +231,7 @@ namespace
 
 	bool pushLuaFunctionByName(lua_State *state, const QString &functionName)
 	{
-		if (!state || functionName.isEmpty())
-			return false;
-
-		const QByteArray fullName = functionName.toUtf8();
-		lua_getglobal(state, fullName.constData());
-		if (lua_isfunction(state, -1))
-			return true;
-		lua_pop(state, 1);
-
-		const QStringList parts = functionName.split(QLatin1Char('.'), Qt::SkipEmptyParts);
-		if (parts.size() < 2)
-			return false;
-
-		const QByteArray first = parts.first().toUtf8();
-		lua_getglobal(state, first.constData());
-		if (!lua_istable(state, -1))
-		{
-			lua_pop(state, 1);
-			return false;
-		}
-
-		for (int i = 1; i < parts.size(); ++i)
-		{
-			const QByteArray part = parts[i].toUtf8();
-			lua_getfield(state, -1, part.constData());
-			lua_remove(state, -2);
-			if (i < parts.size() - 1 && !lua_istable(state, -1))
-			{
-				lua_pop(state, 1);
-				return false;
-			}
-		}
-
-		if (!lua_isfunction(state, -1))
-		{
-			lua_pop(state, 1);
-			return false;
-		}
-
-		return true;
+		return QMudLuaSupport::pushLuaFunctionByName(state, functionName);
 	}
 } // namespace
 constexpr int kLogPixelsXDeviceCapIndex = 88;
@@ -19701,6 +19662,44 @@ bool LuaCallbackEngine::callFunctionWithString(const QString &functionName, cons
 	Q_UNUSED(hasFunction);
 	Q_UNUSED(defaultResult);
 	return defaultResult;
+#endif
+}
+
+bool LuaCallbackEngine::callProcedureWithString(const QString &functionName, const QString &arg,
+                                                bool *hasFunction)
+{
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+	if (hasFunction)
+		*hasFunction = false;
+	if (functionName.isEmpty())
+		return false;
+	if (!ensureState())
+		return false;
+
+	QElapsedTimer timer;
+	timer.start();
+	ScriptExecutionDepthGuard depthGuard(this);
+	QString                   error;
+	bool                      callbackPresent = false;
+	const bool                ok =
+	    QMudLuaSupport::callLuaNamedProcedureWithString(m_state, functionName, arg, &callbackPresent, &error);
+	if (hasFunction)
+		*hasFunction = callbackPresent;
+	if (!ok && callbackPresent)
+	{
+		reportLuaError(*this,
+		               QStringLiteral("Lua callback failed: %1").arg(error.isEmpty() ? "unknown" : error));
+		addScriptTimeForEngine(*this, timer.nsecsElapsed());
+		return false;
+	}
+	if (callbackPresent)
+		addScriptTimeForEngine(*this, timer.nsecsElapsed());
+	return ok;
+#else
+	Q_UNUSED(functionName);
+	Q_UNUSED(arg);
+	Q_UNUSED(hasFunction);
+	return false;
 #endif
 }
 
