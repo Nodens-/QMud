@@ -66,6 +66,8 @@
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStyleOptionGroupBox>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QStyleOptionSpinBox>
 #include <QTableWidget>
 #include <QTemporaryFile>
 #include <QTextCursor>
@@ -156,6 +158,30 @@ static QString canonicalSavePath(const QString &fileName, const QString &extensi
 	if (const QString suffix = QFileInfo(output).suffix().toLower(); suffix != extensionLower)
 		output = QMudFileExtensions::replaceOrAppendExtension(output, extensionLower);
 	return output;
+}
+
+static void configureSpinBoxWidthForRange(QSpinBox *spin)
+{
+	if (!spin)
+		return;
+
+	const auto makeDisplayText = [spin](const int value)
+	{ return spin->prefix() + spin->locale().toString(value) + spin->suffix(); };
+	const QString minText = makeDisplayText(spin->minimum());
+	const QString maxText = makeDisplayText(spin->maximum());
+	const int     textWidth =
+	    qMax(spin->fontMetrics().horizontalAdvance(minText), spin->fontMetrics().horizontalAdvance(maxText));
+
+	QStyleOptionSpinBox option;
+	option.initFrom(spin);
+	option.subControls = QStyle::SC_All;
+	const QRect editField =
+	    spin->style()->subControlRect(QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxEditField, spin);
+	const int chromeWidth = qMax(0, spin->sizeHint().width() - editField.width());
+	const int targetWidth = qMax(spin->minimumSizeHint().width(), chromeWidth + textWidth + 12);
+
+	spin->setMinimumWidth(targetWidth);
+	spin->setMaximumWidth(targetWidth);
 }
 
 class GradientHeader : public QWidget
@@ -5217,11 +5243,11 @@ void WorldPreferencesDialog::buildUi()
 	auto *outputBufferLayout = new QGridLayout(outputBufferBox);
 	m_maxLines               = new QSpinBox(outputBufferBox);
 	m_maxLines->setRange(200, 500000);
-	m_maxLines->setMaximumWidth(90);
+	configureSpinBoxWidthForRange(m_maxLines);
 	m_wrapOutput = new QCheckBox(QStringLiteral("Wrap output at column number"), outputBufferBox);
 	m_wrapColumn = new QSpinBox(outputBufferBox);
 	m_wrapColumn->setRange(20, 500);
-	m_wrapColumn->setMaximumWidth(90);
+	configureSpinBoxWidthForRange(m_wrapColumn);
 	auto *adjustWidthButton = new QPushButton(QStringLiteral("Adjust width to size"), outputBufferBox);
 	auto *adjustSizeButton  = new QPushButton(QStringLiteral("Adjust size to width"), outputBufferBox);
 	outputBufferLayout->addWidget(new QLabel(QStringLiteral("Number of lines in output"), outputBufferBox), 0,
@@ -5421,7 +5447,7 @@ void WorldPreferencesDialog::buildUi()
 	m_speedWalkFiller = new QLineEdit(speedWalkBox);
 	m_speedWalkDelay  = new QSpinBox(speedWalkBox);
 	m_speedWalkDelay->setRange(0, 30000);
-	m_speedWalkDelay->setMaximumWidth(60);
+	configureSpinBoxWidthForRange(m_speedWalkDelay);
 	auto *fillerLabel = new QLabel(QStringLiteral("Filler:"), speedWalkBox);
 	fillerLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 	auto *delayLabel = new QLabel(QStringLiteral("Delay:"), speedWalkBox);
@@ -5493,10 +5519,10 @@ void WorldPreferencesDialog::buildUi()
 	m_autoResizeCommandWindow = new QCheckBox(QStringLiteral("Auto-resize command window"), commandResizeBox);
 	m_autoResizeMinimumLines  = new QSpinBox(commandResizeBox);
 	m_autoResizeMinimumLines->setRange(1, 100);
-	m_autoResizeMinimumLines->setMaximumWidth(60);
+	configureSpinBoxWidthForRange(m_autoResizeMinimumLines);
 	m_autoResizeMaximumLines = new QSpinBox(commandResizeBox);
 	m_autoResizeMaximumLines->setRange(1, 100);
-	m_autoResizeMaximumLines->setMaximumWidth(60);
+	configureSpinBoxWidthForRange(m_autoResizeMaximumLines);
 	commandResizeLayout->addWidget(m_autoResizeCommandWindow, 0, 0, 1, 4);
 	commandResizeLayout->addWidget(new QLabel(QStringLiteral("Min lines:"), commandResizeBox), 1, 0);
 	commandResizeLayout->addWidget(m_autoResizeMinimumLines, 1, 1);
@@ -5511,7 +5537,7 @@ void WorldPreferencesDialog::buildUi()
 	m_enableSpamPrevention = new QCheckBox(QStringLiteral("Enable Spam Prevention"), spamBox);
 	m_spamLineCount        = new QSpinBox(spamBox);
 	m_spamLineCount->setRange(5, 500);
-	m_spamLineCount->setMaximumWidth(60);
+	configureSpinBoxWidthForRange(m_spamLineCount);
 	m_spamMessage        = new QLineEdit(spamBox);
 	auto *spamEveryLabel = new QLabel(QStringLiteral("Every"), spamBox);
 	spamEveryLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -5555,7 +5581,7 @@ void WorldPreferencesDialog::buildUi()
 	historyKeepLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 	m_historyLines = new QSpinBox(historyBox);
 	m_historyLines->setRange(20, 5000);
-	m_historyLines->setMaximumWidth(70);
+	configureSpinBoxWidthForRange(m_historyLines);
 	historyLayout->addWidget(historyKeepLabel, 0, 0);
 	historyLayout->addWidget(m_historyLines, 0, 1);
 	historyLayout->addWidget(new QLabel(QStringLiteral("lines."), historyBox), 0, 2);
