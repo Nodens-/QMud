@@ -75,6 +75,32 @@ namespace
 		return result;
 	}
 
+	bool executeLuaChunk(lua_State *L, const QByteArray &chunk, QString &error)
+	{
+		error.clear();
+		if (!L)
+		{
+			error = QStringLiteral("Lua state is null.");
+			return false;
+		}
+		if (luaL_loadbuffer(L, chunk.constData(), static_cast<size_t>(chunk.size()),
+		                    "tst_LuaSupportCompat_exec") != 0)
+		{
+			const char *err = lua_tostring(L, -1);
+			error           = QString::fromUtf8(err ? err : "unknown load error");
+			lua_pop(L, 1);
+			return false;
+		}
+		if (lua_pcall(L, 0, 0, 0) != 0)
+		{
+			const char *err = lua_tostring(L, -1);
+			error           = QString::fromUtf8(err ? err : "unknown runtime error");
+			lua_pop(L, 1);
+			return false;
+		}
+		return true;
+	}
+
 	bool openSqliteModule(lua_State *L, QString &error)
 	{
 		if (!L)
@@ -152,6 +178,101 @@ class tst_LuaSupportCompat : public QObject
 			                                   "return tostring(type(fn)) .. \":\" .. tostring(fn())"));
 			QVERIFY2(result.ok, qPrintable(result.error));
 			QCOMPARE(result.value, QStringLiteral("function:123"));
+		}
+
+		void namedProcedureCallTreatsNilReturnAsSuccess()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			QString execError;
+			QVERIFY2(executeLuaChunk(state.get(),
+			                         QByteArrayLiteral("mapper = {}\n"
+			                                           "function mapper.do_hyperlink(hash)\n"
+			                                           "  _G.__qmud_procedure_arg = hash\n"
+			                                           "  return nil\n"
+			                                           "end"),
+			                         execError),
+			         qPrintable(execError));
+
+			bool    hasFunction = false;
+			QString callError;
+			QVERIFY(QMudLuaSupport::callLuaNamedProcedureWithString(
+			    state.get(), QStringLiteral("mapper.do_hyperlink"), QStringLiteral("7B69"), &hasFunction,
+			    &callError));
+			QVERIFY(hasFunction);
+			QVERIFY(callError.isEmpty());
+
+			const auto result =
+			    evaluateLuaToString(state.get(), QByteArrayLiteral("return tostring(__qmud_procedure_arg)"));
+			QVERIFY2(result.ok, qPrintable(result.error));
+			QCOMPARE(result.value, QStringLiteral("7B69"));
+		}
+
+		void namedProcedureCallIgnoresBooleanFalseReturn()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			QString execError;
+			QVERIFY2(executeLuaChunk(state.get(),
+			                         QByteArrayLiteral("mapper = {}\n"
+			                                           "function mapper.do_hyperlink(hash)\n"
+			                                           "  _G.__qmud_false_return_seen = hash\n"
+			                                           "  return false\n"
+			                                           "end"),
+			                         execError),
+			         qPrintable(execError));
+
+			bool    hasFunction = false;
+			QString callError;
+			QVERIFY(QMudLuaSupport::callLuaNamedProcedureWithString(
+			    state.get(), QStringLiteral("mapper.do_hyperlink"), QStringLiteral("A1"), &hasFunction,
+			    &callError));
+			QVERIFY(hasFunction);
+			QVERIFY(callError.isEmpty());
+
+			const auto result = evaluateLuaToString(
+			    state.get(), QByteArrayLiteral("return tostring(__qmud_false_return_seen)"));
+			QVERIFY2(result.ok, qPrintable(result.error));
+			QCOMPARE(result.value, QStringLiteral("A1"));
+		}
+
+		void namedProcedureCallReportsRuntimeError()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			QString execError;
+			QVERIFY2(executeLuaChunk(state.get(),
+			                         QByteArrayLiteral("mapper = {}\n"
+			                                           "function mapper.do_hyperlink(hash)\n"
+			                                           "  error(\"boom:\" .. tostring(hash))\n"
+			                                           "end"),
+			                         execError),
+			         qPrintable(execError));
+
+			bool    hasFunction = false;
+			QString callError;
+			QVERIFY(!QMudLuaSupport::callLuaNamedProcedureWithString(
+			    state.get(), QStringLiteral("mapper.do_hyperlink"), QStringLiteral("ERR"), &hasFunction,
+			    &callError));
+			QVERIFY(hasFunction);
+			QVERIFY(callError.contains(QStringLiteral("boom:ERR")));
+		}
+
+		void namedProcedureCallReportsMissingFunction()
+		{
+			LuaStateOwner state = makeCompatLuaState();
+			QVERIFY(state);
+
+			bool    hasFunction = true;
+			QString callError;
+			QVERIFY(!QMudLuaSupport::callLuaNamedProcedureWithString(
+			    state.get(), QStringLiteral("mapper.missing_callback"), QStringLiteral("ARG"), &hasFunction,
+			    &callError));
+			QVERIFY(!hasFunction);
+			QVERIFY(callError.isEmpty());
 		}
 
 		void requireShimExportsSimpleModuleNamesToGlobals()

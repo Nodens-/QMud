@@ -13,6 +13,8 @@
 
 #include <QByteArray>
 #include <QDebug>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QStringList>
 
 #include <cstdlib>
 
@@ -37,6 +39,50 @@ static int luaPanic(lua_State *L)
 	else
 		qWarning() << "Lua panic: <unknown>";
 	return 0;
+}
+
+bool QMudLuaSupport::pushLuaFunctionByName(lua_State *state, const QString &functionName)
+{
+	if (!state || functionName.isEmpty())
+		return false;
+
+	const QByteArray fullName = functionName.toUtf8();
+	lua_getglobal(state, fullName.constData());
+	if (lua_isfunction(state, -1))
+		return true;
+	lua_pop(state, 1);
+
+	const QStringList parts = functionName.split(QLatin1Char('.'), Qt::SkipEmptyParts);
+	if (parts.size() < 2)
+		return false;
+
+	const QByteArray first = parts.first().toUtf8();
+	lua_getglobal(state, first.constData());
+	if (!lua_istable(state, -1))
+	{
+		lua_pop(state, 1);
+		return false;
+	}
+
+	for (int i = 1; i < parts.size(); ++i)
+	{
+		const QByteArray part = parts.at(i).toUtf8();
+		lua_getfield(state, -1, part.constData());
+		lua_remove(state, -2);
+		if (i < parts.size() - 1 && !lua_istable(state, -1))
+		{
+			lua_pop(state, 1);
+			return false;
+		}
+	}
+
+	if (!lua_isfunction(state, -1))
+	{
+		lua_pop(state, 1);
+		return false;
+	}
+
+	return true;
 }
 
 lua_State *QMudLuaSupport::makeLuaState()
@@ -494,6 +540,37 @@ end
 		qWarning() << "Lua 5.1 compat init failed:" << (err ? err : "unknown");
 		lua_pop(L, 1);
 	}
+}
+
+bool QMudLuaSupport::callLuaNamedProcedureWithString(lua_State *L, const QString &functionName,
+                                                     const QString &arg, bool *hasFunction, QString *luaError)
+{
+	if (hasFunction)
+		*hasFunction = false;
+	if (luaError)
+		luaError->clear();
+	if (!L || functionName.isEmpty())
+		return false;
+
+	if (!QMudLuaSupport::pushLuaFunctionByName(L, functionName))
+		return false;
+	if (hasFunction)
+		*hasFunction = true;
+
+	const QByteArray argBytes = arg.toUtf8();
+	lua_pushlstring(L, argBytes.constData(), argBytes.size());
+
+	if (lua_pcall(L, 1, 1, 0) != 0)
+	{
+		const char *err = lua_tostring(L, -1);
+		if (luaError)
+			*luaError = QString::fromUtf8(err ? err : "unknown");
+		lua_pop(L, 1);
+		return false;
+	}
+
+	lua_pop(L, 1);
+	return true;
 }
 
 void QMudLuaSupport::applyLuaPackageRestrictions(lua_State *L, const bool enablePackage)

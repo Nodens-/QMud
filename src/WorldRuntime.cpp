@@ -14654,7 +14654,7 @@ int WorldRuntime::callPlugin(const QString &pluginId, const QString &routine, co
 	const QString savedCalling = plugin.callingPluginId;
 	plugin.callingPluginId     = callingPluginId;
 	bool       hasFunction     = false;
-	const bool ok              = plugin.lua->callFunctionWithString(routine, argument, &hasFunction, false);
+	const bool ok              = plugin.lua->callProcedureWithString(routine, argument, &hasFunction);
 	plugin.callingPluginId     = savedCalling;
 	if (!hasFunction)
 		return eNoSuchRoutine;

@@ -11,6 +11,8 @@
 
 #include "LuaHeaders.h"
 
+#include <QString>
+
 /**
  * @brief RAII wrapper for a raw Lua state pointer.
  *
@@ -109,6 +111,31 @@ namespace QMudLuaSupport
 	 */
 	void       applyLua51Compat(lua_State *L);
 	/**
+	 * @brief Pushes a named Lua function (supports dotted names) onto the stack.
+	 *
+	 * Supports direct globals (`foo`) and table-qualified names (`table.fn`).
+	 *
+	 * @param L Lua state pointer.
+	 * @param functionName Lua function name.
+	 * @return `true` when a function is resolved and pushed, otherwise `false`.
+	 */
+	bool       pushLuaFunctionByName(lua_State *L, const QString &functionName);
+	/**
+	 * @brief Calls a named Lua function (supports dotted names) as a procedure with one string argument.
+	 *
+	 * Procedure semantics: callback return value is ignored; success means the function exists and executes
+	 * without Lua runtime error.
+	 *
+	 * @param L Lua state pointer.
+	 * @param functionName Lua function name (e.g. `foo` or `table.fn`).
+	 * @param arg String argument.
+	 * @param hasFunction Optional output flag indicating function existence.
+	 * @param luaError Optional output for Lua runtime error text on failure.
+	 * @return `true` when function exists and executes successfully.
+	 */
+	bool       callLuaNamedProcedureWithString(lua_State *L, const QString &functionName, const QString &arg,
+	                                           bool *hasFunction = nullptr, QString *luaError = nullptr);
+	/**
 	 * @brief Reads optional boolean argument with default fallback.
 	 * @param L Lua state pointer.
 	 * @param argIndex Lua argument index.
@@ -137,8 +164,8 @@ void qmudLogLua51CompatState(lua_State *L, const char *context);
 /**
  * @brief Validates and normalizes brush-style values for drawing APIs.
  * @param brushStyle Requested brush style value.
- * @param penColour Pen colour value.
- * @param brushColour Brush colour value.
+ * @param penColour Pen color value.
+ * @param brushColour Brush color value.
  * @return Normalized brush style value.
  */
 long qmudValidateBrushStyle(long brushStyle, long penColour, long brushColour);
