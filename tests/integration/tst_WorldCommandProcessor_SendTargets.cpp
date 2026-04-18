@@ -6,7 +6,7 @@
  * Role: QTest coverage for WorldCommandProcessor SendTargets behavior.
  */
 
-#include "CommandTextUtils.h"
+#include "WorldCommandProcessorUtils.h"
 #include "WorldOptions.h"
 
 #include <QtTest/QTest>

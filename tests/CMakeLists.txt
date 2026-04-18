@@ -132,6 +132,13 @@ qmud_add_qtest(tst_TraceDispatchUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_ScriptErrorRoutingUtils
+        SOURCES
+        unit/tst_ScriptErrorRoutingUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/helpers/WorldCommandProcessorUtils.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_TtsEngine
         SOURCES
         unit/tst_TtsEngine.cpp
@@ -496,7 +503,7 @@ qmud_add_qtest(tst_WorldCommandProcessor_Alias
         SOURCES
         integration/tst_WorldCommandProcessor_Alias.cpp
         "${CMAKE_SOURCE_DIR}/src/helpers/AliasMatchUtils.cpp"
-        "${CMAKE_SOURCE_DIR}/src/helpers/CommandPatternUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/WorldCommandProcessorUtils.cpp"
         LABELS
         integration
         TIMEOUT
@@ -505,7 +512,7 @@ qmud_add_qtest(tst_WorldCommandProcessor_Alias
 qmud_add_qtest(tst_WorldCommandProcessor_Regex
         SOURCES
         integration/tst_WorldCommandProcessor_Regex.cpp
-        "${CMAKE_SOURCE_DIR}/src/helpers/CommandPatternUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/WorldCommandProcessorUtils.cpp"
         LABELS
         integration
         TIMEOUT
@@ -514,7 +521,7 @@ qmud_add_qtest(tst_WorldCommandProcessor_Regex
 qmud_add_qtest(tst_WorldCommandProcessor_SendTargets
         SOURCES
         integration/tst_WorldCommandProcessor_SendTargets.cpp
-        "${CMAKE_SOURCE_DIR}/src/helpers/CommandTextUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/WorldCommandProcessorUtils.cpp"
         LABELS
         integration
         TIMEOUT
@@ -523,7 +530,7 @@ qmud_add_qtest(tst_WorldCommandProcessor_SendTargets
 qmud_add_qtest(tst_WorldCommandProcessor_Queueing
         SOURCES
         integration/tst_WorldCommandProcessor_Queueing.cpp
-        "${CMAKE_SOURCE_DIR}/src/helpers/CommandQueueUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/WorldCommandProcessorUtils.cpp"
         LABELS
         integration
         TIMEOUT

@@ -12761,6 +12761,17 @@ bool WorldRuntime::forceScriptErrorOutputToWorld() const
 	return m_forceScriptErrorOutputDepth > 0;
 }
 
+void WorldRuntime::pushForceScriptErrorOutputToWorld()
+{
+	++m_forceScriptErrorOutputDepth;
+}
+
+void WorldRuntime::popForceScriptErrorOutputToWorld()
+{
+	if (m_forceScriptErrorOutputDepth > 0)
+		--m_forceScriptErrorOutputDepth;
+}
+
 void WorldRuntime::notifyOutputSelectionChanged()
 {
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginSelectionChanged"));

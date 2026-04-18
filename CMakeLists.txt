@@ -180,10 +180,8 @@ set(QMUD_SOURCES
         Environment.cpp
         Accelerators.cpp
         helpers/AliasMatchUtils.cpp
-        helpers/CommandPatternUtils.cpp
-        helpers/CommandQueueUtils.cpp
-        helpers/CommandTextUtils.cpp
         helpers/HyperlinkActionUtils.cpp
+        helpers/WorldCommandProcessorUtils.cpp
         NameGeneration.cpp
         DoubleMetaphone.cpp
         ErrorDescriptions.cpp
@@ -261,9 +259,7 @@ set(QMUD_HEADERS
         helpers/AcceleratorUtils.h
         helpers/AliasMatchUtils.h
         CommandMappingTypes.h
-        helpers/CommandPatternUtils.h
-        helpers/CommandQueueUtils.h
-        helpers/CommandTextUtils.h
+        helpers/WorldCommandProcessorUtils.h
         ErrorDescriptions.h
         InfoTypesMetadata.h
         InfoTypeData.inc

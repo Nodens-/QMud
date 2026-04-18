@@ -11,9 +11,6 @@
 
 #include "AliasMatchUtils.h"
 #include "AppController.h"
-#include "CommandPatternUtils.h"
-#include "CommandQueueUtils.h"
-#include "CommandTextUtils.h"
 #include "FileExtensions.h"
 #include "HyperlinkActionUtils.h"
 #include "MainWindowHost.h"
@@ -21,6 +18,7 @@
 #include "SpeedwalkParser.h"
 #include "TimerSchedulingUtils.h"
 #include "TraceDispatchUtils.h"
+#include "WorldCommandProcessorUtils.h"
 #include "WorldOptions.h"
 #include "WorldRuleEnableUtils.h"
 #include "WorldRuntime.h"
@@ -38,6 +36,7 @@
 #include <QGuiApplication>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QUrl>
 #include <algorithm>
@@ -1051,11 +1050,24 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 			continue;
 		if (!lua)
 			continue;
-		if (m_runtime)
-			m_runtime->setCurrentActionSource(WorldRuntime::eTriggerFired);
-		lua->executeScript(scriptText, description, &styleRuns);
-		if (m_runtime)
-			m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
+		QPointer<WorldRuntime> executionRuntime = m_runtime;
+		if (executionRuntime)
+			executionRuntime->setCurrentActionSource(WorldRuntime::eTriggerFired);
+		QMudScriptErrorRouting::executeWithWorldErrorRouting(
+		    executionRuntime != nullptr, plugin != nullptr,
+		    [&] { lua->executeScript(scriptText, description, &styleRuns); },
+		    [executionRuntime]
+		    {
+			    if (executionRuntime)
+				    executionRuntime->pushForceScriptErrorOutputToWorld();
+		    },
+		    [executionRuntime]
+		    {
+			    if (executionRuntime)
+				    executionRuntime->popForceScriptErrorOutputToWorld();
+		    });
+		if (executionRuntime)
+			executionRuntime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
 	}
 
 	for (const auto &[plugin, index, label, scriptLine, wildcards, namedWildcards] :
@@ -3413,7 +3425,22 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 			}
 		}
 		if (lua)
-			lua->executeScript(text, description, nullptr);
+		{
+			QPointer<WorldRuntime> executionRuntime = m_runtime;
+			QMudScriptErrorRouting::executeWithWorldErrorRouting(
+			    executionRuntime != nullptr, plugin != nullptr,
+			    [&] { lua->executeScript(text, description, nullptr); },
+			    [executionRuntime]
+			    {
+				    if (executionRuntime)
+					    executionRuntime->pushForceScriptErrorOutputToWorld();
+			    },
+			    [executionRuntime]
+			    {
+				    if (executionRuntime)
+					    executionRuntime->popForceScriptErrorOutputToWorld();
+			    });
+		}
 	}
 	break;
 	default:

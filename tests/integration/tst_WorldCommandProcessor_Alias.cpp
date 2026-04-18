@@ -7,7 +7,7 @@
  */
 
 #include "AliasMatchUtils.h"
-#include "CommandPatternUtils.h"
+#include "WorldCommandProcessorUtils.h"
 
 #include <QRegularExpression>
 #include <QtTest/QTest>
@@ -19,17 +19,17 @@ class tst_WorldCommandProcessor_Alias : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void wildcardAliasCapturesWildcards()
 		{
-			const QString pattern = QMudCommandPattern::convertToRegularExpression(
-			    QStringLiteral("buy * from *"), true, true);
+			const QString pattern =
+			    QMudCommandPattern::convertToRegularExpression(QStringLiteral("buy * from *"), true, true);
 			const QRegularExpression regex(pattern);
 			QVERIFY(regex.isValid());
 
-			const QMudAliasMatch::MatchResult result = QMudAliasMatch::matchWithCaptures(
-			    regex, QStringLiteral("buy sword from merchant"), true);
+			const QMudAliasMatch::MatchResult result =
+			    QMudAliasMatch::matchWithCaptures(regex, QStringLiteral("buy sword from merchant"), true);
 			QVERIFY(result.matched);
 			QCOMPARE(result.wildcards.size(), 3);
 			QCOMPARE(result.wildcards.at(1), QStringLiteral("sword"));
@@ -50,8 +50,8 @@ class tst_WorldCommandProcessor_Alias : public QObject
 
 		void ignoreCaseOptionControlsAliasMatch()
 		{
-			const QString pattern = QMudCommandPattern::convertToRegularExpression(
-			    QStringLiteral("Cast *"), true, true);
+			const QString pattern =
+			    QMudCommandPattern::convertToRegularExpression(QStringLiteral("Cast *"), true, true);
 
 			const QRegularExpression sensitiveRegex(pattern);
 			QVERIFY(!QMudAliasMatch::matchWithCaptures(sensitiveRegex, QStringLiteral("cast fire"), true)
@@ -79,11 +79,10 @@ class tst_WorldCommandProcessor_Alias : public QObject
 			QVERIFY(!QMudAliasMatch::exceedsExecutionDepth(19, 20));
 			QVERIFY(QMudAliasMatch::exceedsExecutionDepth(20, 20));
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_Alias)
-
 
 #if __has_include("tst_WorldCommandProcessor_Alias.moc")
 #include "tst_WorldCommandProcessor_Alias.moc"

@@ -3643,6 +3643,14 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] bool    forceScriptErrorOutputToWorld() const;
 		/**
+		 * @brief Increments forced script-error output depth.
+		 */
+		void                  pushForceScriptErrorOutputToWorld();
+		/**
+		 * @brief Decrements forced script-error output depth.
+		 */
+		void                  popForceScriptErrorOutputToWorld();
+		/**
 		 * @brief Returns draw-output notification count.
 		 * @return Output-window redraw count.
 		 */
