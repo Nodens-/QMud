@@ -642,10 +642,13 @@ class WorldView : public QWidget
 		 * @param targetWordLower Lowercased target word.
 		 * @param line Source line text.
 		 * @param insertSpace Insert trailing space after completion when `true`.
+		 * @param appliedCompletion Receives inserted completion token when non-null.
+		 * @param skipCanonicalCompletions Canonical completion tokens to skip when non-null.
 		 * @return `true` when completion changed the line.
 		 */
 		bool tabCompleteOneLine(int startColumn, int endColumn, const QString &targetWordLower,
-		                        const QString &line, bool insertSpace);
+		                        const QString &line, bool insertSpace, QString *appliedCompletion,
+		                        const QSet<QString> *skipCanonicalCompletions);
 		/**
 		 * @brief Applies default command-input height policy.
 		 * @param setSplitterSizes Apply splitter sizing when `true`.
@@ -1455,6 +1458,7 @@ class WorldView : public QWidget
 		int                                          m_tabCompletionCycleEndColumn{-1};
 		int                                          m_tabCompletionCycleLastSource{-2};
 		bool                                         m_tabCompletionCycleActive{false};
+		QSet<QString>                                m_tabCompletionCycleSeenCompletions;
 		int                                          m_fadeOutputBufferAfterSeconds{0};
 		int                                          m_fadeOutputOpacityPercent{100};
 		int                                          m_fadeOutputSeconds{1};

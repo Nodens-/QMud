@@ -9544,10 +9544,12 @@ void WorldView::resetTabCompletionCycle()
 	m_tabCompletionCycleEndColumn   = -1;
 	m_tabCompletionCycleLastSource  = -2;
 	m_tabCompletionCycleActive      = false;
+	m_tabCompletionCycleSeenCompletions.clear();
 }
 
 bool WorldView::tabCompleteOneLine(int startColumn, int endColumn, const QString &targetWordLower,
-                                   const QString &line, bool insertSpace)
+                                   const QString &line, bool insertSpace, QString *appliedCompletion,
+                                   const QSet<QString> *skipCanonicalCompletions)
 {
 	if (!m_input || targetWordLower.isEmpty() || line.isEmpty())
 		return false;
@@ -9589,6 +9591,14 @@ bool WorldView::tabCompleteOneLine(int startColumn, int endColumn, const QString
 			QString replacement = line.mid(i, replacementLength);
 			if (m_lowerCaseTabCompletion)
 				replacement = replacement.toLower();
+			const QString canonicalCompletion = replacement.toCaseFolded();
+			if (skipCanonicalCompletions && skipCanonicalCompletions->contains(canonicalCompletion))
+			{
+				i = end;
+				continue;
+			}
+			if (appliedCompletion)
+				*appliedCompletion = replacement;
 			if (m_runtime)
 				m_runtime->firePluginTabComplete(replacement);
 			if (insertSpace)
@@ -9657,6 +9667,7 @@ bool WorldView::handleTabCompletionKeyPress()
 	}
 	else
 	{
+		m_tabCompletionCycleSeenCompletions.clear();
 		if (endColumn <= 0 || endColumn > currentText.size())
 		{
 			resetTabCompletionCycle();
@@ -9693,11 +9704,13 @@ bool WorldView::handleTabCompletionKeyPress()
 			insertSpace = true;
 	}
 
-	bool completionApplied = false;
-	int  matchedSource     = -2;
+	bool    completionApplied = false;
+	int     matchedSource     = -2;
+	QString matchedCompletion;
 
 	if (!continueCycle &&
-	    tabCompleteOneLine(startColumn, endColumn, targetWordLower, m_tabCompletionDefaults, insertSpace))
+	    tabCompleteOneLine(startColumn, endColumn, targetWordLower, m_tabCompletionDefaults, insertSpace,
+	                       &matchedCompletion, &m_tabCompletionCycleSeenCompletions))
 	{
 		completionApplied = true;
 		matchedSource     = -1;
@@ -9726,7 +9739,8 @@ bool WorldView::handleTabCompletionKeyPress()
 		{
 			if (++scanned > m_tabCompletionLines)
 				break;
-			if (!tabCompleteOneLine(startColumn, endColumn, targetWordLower, lines.at(i).text, insertSpace))
+			if (!tabCompleteOneLine(startColumn, endColumn, targetWordLower, lines.at(i).text, insertSpace,
+			                        &matchedCompletion, &m_tabCompletionCycleSeenCompletions))
 				continue;
 			completionApplied = true;
 			matchedSource     = i;
@@ -9740,7 +9754,9 @@ bool WorldView::handleTabCompletionKeyPress()
 		return false;
 	}
 
-	cursor                          = m_input->textCursor();
+	cursor = m_input->textCursor();
+	if (!matchedCompletion.isEmpty())
+		m_tabCompletionCycleSeenCompletions.insert(matchedCompletion.toCaseFolded());
 	m_tabCompletionCycleTargetLower = targetWordLower;
 	m_tabCompletionCycleStartColumn = startColumn;
 	m_tabCompletionCycleEndColumn   = cursor.position();
