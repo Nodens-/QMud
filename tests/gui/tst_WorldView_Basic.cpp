@@ -23,6 +23,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QInputMethodEvent>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPlainTextEdit>
@@ -362,20 +363,28 @@ namespace
 		return {-1, -1};
 	}
 
-	QPoint findLineInformationPoint(const WorldView &view, const QTextBrowser &browser)
+	QPoint findLineInformationPoint(const QTextBrowser &browser)
 	{
 		if (!browser.viewport())
 			return {-1, -1};
 
-		auto         *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+		QWidget *root = browser.window();
+		auto    *nativeCanvas =
+            root ? root->findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas")) : nullptr;
 		QElapsedTimer readyTimer;
 		readyTimer.start();
-		while (readyTimer.elapsed() < 500)
+		constexpr qint64 kMaxReadyWaitMs       = 500;
+		constexpr qint64 kMissingCanvasGraceMs = 50;
+		while (readyTimer.elapsed() < kMaxReadyWaitMs)
 		{
-			const bool ready = nativeCanvas && nativeCanvas->isVisible() && view.isVisible() &&
-			                   browser.viewport()->isVisible() && browser.viewport()->width() > 1 &&
-			                   browser.viewport()->height() > 1;
-			if (ready)
+			if (!nativeCanvas && root)
+				nativeCanvas = root->findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+
+			const bool viewReady = root && root->isVisible() && browser.viewport()->isVisible() &&
+			                       browser.viewport()->width() > 1 && browser.viewport()->height() > 1;
+			if (viewReady && nativeCanvas && nativeCanvas->isVisible())
+				break;
+			if (viewReady && !nativeCanvas && readyTimer.elapsed() >= kMissingCanvasGraceMs)
 				break;
 			QCoreApplication::processEvents();
 			QTest::qWait(1);
@@ -384,14 +393,31 @@ namespace
 		const QRect area = browser.viewport()->rect();
 		const int   probeBottom =
 		    qMin(area.bottom(), area.top() + qMax(24, QFontMetrics(browser.font()).height() * 6));
+		const int probeRight = qMin(area.right(), area.left() + 320);
+
+		auto      probePoint = [&browser](const QPoint &point)
+		{
+			QToolTip::hideText();
+			QCoreApplication::processEvents();
+			QTest::mouseMove(browser.viewport(), point);
+			QCoreApplication::processEvents();
+			QCoreApplication::processEvents();
+			return QToolTip::text().contains(QStringLiteral("Line "));
+		};
+
+		const int lineHeight = qMax(1, QFontMetrics(browser.font()).height());
+		const int candidateY = qMin(probeBottom, area.top() + (lineHeight / 2));
+		for (int x = area.left() + 2; x <= probeRight; x += 12)
+		{
+			if (probePoint({x, candidateY}))
+				return {x, candidateY};
+		}
 
 		for (int y = area.top(); y <= probeBottom; y += 4)
 		{
-			for (int x = area.left(); x <= area.right(); x += 4)
+			for (int x = area.left(); x <= probeRight; x += 4)
 			{
-				QTest::mouseDClick(browser.viewport(), Qt::LeftButton, Qt::NoModifier, {x, y});
-				QCoreApplication::processEvents();
-				if (view.hasOutputSelection())
+				if (probePoint({x, y}))
 					return {x, y};
 			}
 		}
@@ -4259,6 +4285,62 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void tabCompletionSkipsDuplicateMatchesWithinCycleAndResetsAfterTyping()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("tab_completion_space"), QStringLiteral("0"));
+
+			WorldRuntime::LineEntry older;
+			older.text       = QStringLiteral("stamina");
+			older.flags      = WorldRuntime::LineOutput;
+			older.hardReturn = true;
+			g_runtimeLines.push_back(older);
+
+			WorldRuntime::LineEntry middle;
+			middle.text       = QStringLiteral("starch");
+			middle.flags      = WorldRuntime::LineOutput;
+			middle.hardReturn = true;
+			g_runtimeLines.push_back(middle);
+
+			WorldRuntime::LineEntry newer;
+			newer.text       = QStringLiteral("starch");
+			newer.flags      = WorldRuntime::LineOutput;
+			newer.hardReturn = true;
+			g_runtimeLines.push_back(newer);
+
+			WorldView view;
+			view.resize(860, 520);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus();
+
+			view.setInputText(QStringLiteral("sta"), true);
+			QTextCursor cursor = input->textCursor();
+			cursor.movePosition(QTextCursor::End);
+			input->setTextCursor(cursor);
+
+			QTest::keyClick(input, Qt::Key_Tab);
+			QCOMPARE(view.inputText(), QStringLiteral("starch"));
+
+			QTest::keyClick(input, Qt::Key_Tab);
+			QCOMPARE(view.inputText(), QStringLiteral("stamina"));
+
+			QTest::keyClick(input, Qt::Key_A, Qt::ControlModifier);
+			QTest::keyClicks(input, QStringLiteral("sta"));
+			cursor = input->textCursor();
+			cursor.movePosition(QTextCursor::End);
+			input->setTextCursor(cursor);
+
+			QTest::keyClick(input, Qt::Key_Tab);
+			QCOMPARE(view.inputText(), QStringLiteral("starch"));
+
+			resetTestState();
+		}
+
 		void outputFindNoMatchReturnsWithoutHanging()
 		{
 			resetTestState();
@@ -4656,7 +4738,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void partialHistoryRecallPrefersCommandTokenBoundary()
+		void partialHistoryRecallUsesPrefixAndNewestFirst()
 		{
 			resetTestState();
 			g_worldAttrs.insert(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
@@ -4668,21 +4750,105 @@ class tst_WorldView_Basic : public QObject
 			view.show();
 			view.setRuntimeObserver(fakeRuntimePointer());
 			view.applyRuntimeSettings();
-			view.addToHistoryForced(QStringLiteral("ff test"));
-			view.addToHistoryForced(QStringLiteral("ffl test"));
+			view.addToHistoryForced(QStringLiteral("hitman"));
+			view.addToHistoryForced(QStringLiteral("hit man"));
+			view.addToHistoryForced(QStringLiteral("hit123"));
+			view.addToHistoryForced(QStringLiteral("hit 321"));
 			QCoreApplication::processEvents();
 
 			QPlainTextEdit *input = view.inputEditor();
 			QVERIFY(input);
 			input->setFocus();
-			view.setInputText(QStringLiteral("ff"), true);
+			view.setInputText(QStringLiteral("hit"), true);
 			QCoreApplication::processEvents();
 
 			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
-			QCOMPARE(view.inputText(), QStringLiteral("ff test"));
+			QCOMPARE(view.inputText(), QStringLiteral("hit 321"));
 
-			QTest::keyClick(input, Qt::Key_Down, Qt::AltModifier);
-			QCOMPARE(view.inputText(), QStringLiteral("ffl test"));
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit123"));
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit man"));
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hitman"));
+
+			view.setInputText(QStringLiteral("hit "), true);
+			QCoreApplication::processEvents();
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit 321"));
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit man"));
+
+			resetTestState();
+		}
+
+		void partialHistoryRecallReseedsAfterManualEdit()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			view.addToHistoryForced(QStringLiteral("hitman"));
+			view.addToHistoryForced(QStringLiteral("hit man"));
+			view.addToHistoryForced(QStringLiteral("hit123"));
+			view.addToHistoryForced(QStringLiteral("hit 321"));
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus();
+			view.setInputText(QStringLiteral("hit"), true);
+			QCoreApplication::processEvents();
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit 321"));
+
+			QTest::keyClick(input, Qt::Key_A, Qt::ControlModifier);
+			QTest::keyClicks(input, QStringLiteral("hit "));
+			QCoreApplication::processEvents();
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit 321"));
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCOMPARE(view.inputText(), QStringLiteral("hit man"));
+
+			resetTestState();
+		}
+
+		void commandHistoryKeepsOnlyNewestDuplicateEntry()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+
+			view.addToHistoryForced(QStringLiteral("look"));
+			view.addToHistoryForced(QStringLiteral("north"));
+			view.addToHistoryForced(QStringLiteral("look"));
+			view.addToHistoryForced(QStringLiteral("south"));
+			view.addToHistoryForced(QStringLiteral("look"));
+
+			QCOMPARE(view.commandHistoryList(),
+			         (QStringList{QStringLiteral("north"), QStringLiteral("south"), QStringLiteral("look")}));
+
+			view.addToHistoryForced(QStringLiteral("look"));
+			QCOMPARE(view.commandHistoryList(),
+			         (QStringList{QStringLiteral("north"), QStringLiteral("south"), QStringLiteral("look")}));
 
 			resetTestState();
 		}
@@ -4712,7 +4878,7 @@ class tst_WorldView_Basic : public QObject
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
 			QVERIFY(browser);
-			const QPoint point = findLineInformationPoint(view, *browser);
+			const QPoint point = findLineInformationPoint(*browser);
 			QVERIFY2(point.x() >= 0 && point.y() >= 0,
 			         "Expected line-information tooltip probe point in rendered output.");
 			QTest::mouseMove(browser->viewport(), point);
@@ -4720,6 +4886,49 @@ class tst_WorldView_Basic : public QObject
 			QTRY_VERIFY(QToolTip::text().contains(QStringLiteral("Line 1, ")));
 			QTRY_VERIFY(QToolTip::text().contains(QStringLiteral("(unknown time)")));
 			QToolTip::hideText();
+
+			resetTestState();
+		}
+
+		void lineInformationTooltipDoesNotShowOnBlankAreaOfRenderedLine()
+		{
+			resetTestState();
+			QToolTip::hideText();
+			g_worldAttrs.insert(QStringLiteral("line_information"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("tool_tip_start_time"), QStringLiteral("0"));
+			g_worldAttrs.insert(QStringLiteral("tool_tip_visible_time"), QStringLiteral("5000"));
+
+			WorldRuntime::LineEntry entry;
+			entry.text       = QStringLiteral("tip");
+			entry.flags      = WorldRuntime::LineOutput;
+			entry.hardReturn = true;
+			entry.lineNumber = 1;
+			g_runtimeLines.push_back(entry);
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			view.rebuildOutputFromLines(g_runtimeLines);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			const QPoint textPoint = findLineInformationPoint(*browser);
+			QVERIFY2(textPoint.x() >= 0 && textPoint.y() >= 0,
+			         "Expected line-information tooltip probe point in rendered output.");
+
+			QTest::mouseMove(browser->viewport(), textPoint);
+			QTRY_VERIFY(QToolTip::text().contains(QStringLiteral("Line 1, ")));
+
+			const QRect  viewportRect = browser->viewport()->rect();
+			const int    blankX = qBound(viewportRect.left(), viewportRect.right() - 2, viewportRect.right());
+			const QPoint blankPoint(blankX, textPoint.y());
+			QVERIFY(blankPoint.x() > textPoint.x());
+
+			QTest::mouseMove(browser->viewport(), blankPoint);
+			QTRY_VERIFY(QToolTip::text().isEmpty());
 
 			resetTestState();
 		}
@@ -4969,6 +5178,90 @@ class tst_WorldView_Basic : public QObject
 			const QString emittedHref =
 			    QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8());
 			QCOMPARE(emittedHref, span.action);
+			resetTestState();
+		}
+
+		void rightClickOnLinkPrefersSelectionMenuWhenOutputSelectionExists() const
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(720, 420);
+			view.show();
+			QCoreApplication::processEvents();
+
+			WorldRuntime::StyleSpan span;
+			span.length     = QStringLiteral("assistant").size();
+			span.actionType = WorldRuntime::ActionSend;
+			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
+			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
+			                                       "Attack assistant");
+			view.appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			const QPoint anchorPoint = findHyperlinkPoint(view, *browser, span.action);
+			QVERIFY(anchorPoint.x() >= 0 && anchorPoint.y() >= 0);
+			const QPoint globalAnchorPos = browser->viewport()->mapToGlobal(anchorPoint);
+
+			struct MenuCaptureFilter final : QObject
+			{
+					explicit MenuCaptureFilter(QStringList *capturedActions, bool *captured)
+					    : m_capturedActions(capturedActions), m_captured(captured)
+					{
+					}
+
+					bool eventFilter(QObject *watched, QEvent *event) override
+					{
+						if (!m_capturedActions || !m_captured || *m_captured || event->type() != QEvent::Show)
+							return QObject::eventFilter(watched, event);
+						auto *menu = qobject_cast<QMenu *>(watched);
+						if (!menu)
+							return QObject::eventFilter(watched, event);
+
+						const QList<QAction *> actions = menu->actions();
+						m_capturedActions->reserve(actions.size());
+						for (QAction *action : actions)
+						{
+							if (action)
+								m_capturedActions->push_back(action->text());
+						}
+						*m_captured = true;
+						QMetaObject::invokeMethod(menu, &QMenu::close, Qt::QueuedConnection);
+						return QObject::eventFilter(watched, event);
+					}
+
+				private:
+					QStringList *m_capturedActions{nullptr};
+					bool        *m_captured{nullptr};
+			};
+
+			auto captureWorldMenuActions = [&view](const QPoint &globalPos) -> QStringList
+			{
+				QStringList       capturedActions;
+				bool              captured = false;
+				MenuCaptureFilter filter(&capturedActions, &captured);
+				qApp->installEventFilter(&filter);
+				const bool shown = view.showWorldContextMenuAtGlobalPos(globalPos);
+				qApp->removeEventFilter(&filter);
+				if (!shown || !captured)
+					return {};
+				return capturedActions;
+			};
+
+			const QStringList linkMenuActions = captureWorldMenuActions(globalAnchorPos);
+			QCOMPARE(linkMenuActions,
+			         (QStringList{QStringLiteral("Examine assistant"), QStringLiteral("Consider assistant"),
+			                      QStringLiteral("Attack assistant")}));
+
+			view.selectOutputRange(0, 0, 3);
+			QTRY_VERIFY(view.hasOutputSelection());
+			const QStringList selectionMenuActions = captureWorldMenuActions(globalAnchorPos);
+			QCOMPARE(selectionMenuActions,
+			         (QStringList{QStringLiteral("Copy"), QStringLiteral("Copy as HTML")}));
+
 			resetTestState();
 		}
 

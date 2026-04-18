@@ -81,6 +81,16 @@ namespace
 		return static_cast<int>(qBound(kMin, value, kMax));
 	}
 
+	void appendDeduplicatedHistoryEntry(QVector<QString> &history, const QString &entry,
+	                                    const int historyLimit)
+	{
+		const auto newEnd = std::ranges::remove(history, entry).begin();
+		history.erase(newEnd, history.end());
+		history.append(entry);
+		if (historyLimit > 0 && history.size() > historyLimit)
+			history.remove(0, history.size() - historyLimit);
+	}
+
 	bool styleSpansEquivalent(const WorldRuntime::StyleSpan &lhs, const WorldRuntime::StyleSpan &rhs)
 	{
 		return lhs.length == rhs.length && lhs.fore == rhs.fore && lhs.back == rhs.back &&
@@ -1604,8 +1614,9 @@ bool WorldView::showWorldContextMenuAtGlobalPos(const QPoint &globalPos)
 	QString              hint;
 	NativeOutputPosition hit;
 	(void)nativeOutputHitTest(source, sourcePos, hit, &href, &hint);
-	const QVector<QPair<QString, QString>> actions = parseMxpContextMenuActions(href, hint);
-	if (!actions.isEmpty())
+	const QVector<QPair<QString, QString>> actions      = parseMxpContextMenuActions(href, hint);
+	const bool                             hasSelection = hasOutputSelection();
+	if (!hasSelection && !actions.isEmpty())
 	{
 		menu = new QMenu(source);
 		for (int i = 0; i < actions.size(); ++i)
@@ -1623,12 +1634,12 @@ bool WorldView::showWorldContextMenuAtGlobalPos(const QPoint &globalPos)
 		menu = new QMenu(source);
 		if (QAction *copy = menu->addAction(QStringLiteral("Copy")); copy)
 		{
-			copy->setEnabled(hasOutputSelection());
+			copy->setEnabled(hasSelection);
 			connect(copy, &QAction::triggered, this, [this] { copySelection(); });
 		}
 		if (QAction *copyHtml = menu->addAction(QStringLiteral("Copy as HTML")); copyHtml)
 		{
-			copyHtml->setEnabled(hasOutputSelection());
+			copyHtml->setEnabled(hasSelection);
 			connect(copyHtml, &QAction::triggered, this, [this] { copySelectionAsHtml(); });
 		}
 	}
@@ -3597,13 +3608,16 @@ bool WorldView::nativeOutputInteractionActive() const
 
 bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &viewPos,
                                     NativeOutputPosition &position, QString *href, QString *hint,
-                                    const bool allowCacheBuild) const
+                                    const bool allowCacheBuild, const bool requireTextHit,
+                                    bool *const textHit) const
 {
 	position = {};
 	if (href)
 		href->clear();
 	if (hint)
 		hint->clear();
+	if (textHit)
+		*textHit = false;
 	if (!nativeOutputInteractionActive() || !view || !view->viewport())
 		return false;
 
@@ -3672,6 +3686,8 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 	const NativeOutputRenderLine &line = lines.at(lineIndex);
 	if (line.text.isEmpty())
 	{
+		if (requireTextHit)
+			return false;
 		position = {lineIndex, 0};
 		return true;
 	}
@@ -3679,6 +3695,8 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 	const QTextLayout *layout = nativeLayoutForLine(lineIndex);
 	if (!layout || layout->lineCount() <= 0)
 	{
+		if (requireTextHit)
+			return false;
 		position = {lineIndex, 0};
 		return true;
 	}
@@ -3689,6 +3707,8 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 	QTextLine   targetRow = layout->lineAt(0);
 	if (!targetRow.isValid())
 	{
+		if (requireTextHit)
+			return false;
 		position = {lineIndex, 0};
 		return true;
 	}
@@ -3704,21 +3724,26 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 		}
 	}
 
-	const int   rowStartColumn = targetRow.textStart();
-	const int   rowEndColumn   = rowStartColumn + targetRow.textLength();
-	const qreal rowLeft        = targetRow.cursorToX(rowStartColumn);
-	const qreal rowRight       = targetRow.cursorToX(rowEndColumn);
-	const qreal minX           = qMin(rowLeft, rowRight);
-	const qreal maxX           = qMax(rowLeft, rowRight);
-	const bool  insideTextRow  = static_cast<qreal>(x) >= minX && static_cast<qreal>(x) < maxX;
+	const int   rowStartColumn  = targetRow.textStart();
+	const int   rowEndColumn    = rowStartColumn + targetRow.textLength();
+	const qreal rowLeft         = targetRow.cursorToX(rowStartColumn);
+	const qreal rowRight        = targetRow.cursorToX(rowEndColumn);
+	const qreal minX            = qMin(rowLeft, rowRight);
+	const qreal maxX            = qMax(rowLeft, rowRight);
+	const bool  insideTextRow   = static_cast<qreal>(x) >= minX && static_cast<qreal>(x) < maxX;
+	const bool  resolvedTextHit = insideTextRow && rowEndColumn > rowStartColumn;
+	if (textHit)
+		*textHit = resolvedTextHit;
+	if (requireTextHit && !resolvedTextHit)
+		return false;
 
-	int         column = targetRow.xToCursor(static_cast<qreal>(x), QTextLine::CursorBetweenCharacters);
-	column             = qBound(rowStartColumn, column, rowEndColumn);
-	position           = {lineIndex, column};
+	int column = targetRow.xToCursor(static_cast<qreal>(x), QTextLine::CursorBetweenCharacters);
+	column     = qBound(rowStartColumn, column, rowEndColumn);
+	position   = {lineIndex, column};
 
 	if (href || hint)
 	{
-		if (!insideTextRow || rowEndColumn <= rowStartColumn)
+		if (!resolvedTextHit)
 			return true;
 
 		const int textSize = sizeToInt(line.text.size());
@@ -3781,7 +3806,7 @@ bool WorldView::nativeOutputHitTestGlobal(const QPoint &globalPos, WrapTextBrows
 bool WorldView::nativeOutputHitTestForMouseEvent(const QWidget *watched, const QMouseEvent *event,
                                                  WrapTextBrowser *&view, QPoint &viewPos,
                                                  NativeOutputPosition &position, QString *href, QString *hint,
-                                                 const bool allowCacheBuild) const
+                                                 const bool allowCacheBuild, bool *const textHit) const
 {
 	view     = nullptr;
 	viewPos  = {};
@@ -3790,6 +3815,8 @@ bool WorldView::nativeOutputHitTestForMouseEvent(const QWidget *watched, const Q
 		href->clear();
 	if (hint)
 		hint->clear();
+	if (textHit)
+		*textHit = false;
 	if (!watched || !event || !nativeOutputInteractionActive())
 		return false;
 
@@ -3809,7 +3836,7 @@ bool WorldView::nativeOutputHitTestForMouseEvent(const QWidget *watched, const Q
 
 	if (!view->viewport()->rect().contains(viewPos))
 		return false;
-	return nativeOutputHitTest(view, viewPos, position, href, hint, allowCacheBuild);
+	return nativeOutputHitTest(view, viewPos, position, href, hint, allowCacheBuild, false, textHit);
 }
 
 void WorldView::applyResolvedOutputSelection(const bool hasSelection, const int startLine,
@@ -8007,7 +8034,7 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
                                              const WrapTextBrowser      *precomputedView,
                                              const QPoint               *precomputedPosInView,
                                              const NativeOutputPosition *precomputedHit,
-                                             const bool                  allowCacheBuild)
+                                             const bool *precomputedTextHit, const bool allowCacheBuild)
 {
 	auto hideLineInfoTooltip = [this]
 	{
@@ -8027,10 +8054,19 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 
 	WrapTextBrowser     *view = nullptr;
 	NativeOutputPosition hit;
+	bool                 textHit = false;
 	if (precomputedView && precomputedPosInView && precomputedHit)
 	{
 		view = const_cast<WrapTextBrowser *>(precomputedView);
 		hit  = *precomputedHit;
+		if (precomputedTextHit)
+			textHit = *precomputedTextHit;
+		else if (!nativeOutputHitTest(view, *precomputedPosInView, hit, nullptr, nullptr, allowCacheBuild,
+		                              false, &textHit))
+		{
+			hideLineInfoTooltip();
+			return;
+		}
 	}
 	else
 	{
@@ -8048,11 +8084,16 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 			posInView = event->position().toPoint();
 		else
 			posInView = view->viewport()->mapFromGlobal(event->globalPosition().toPoint());
-		if (!nativeOutputHitTest(view, posInView, hit, nullptr, nullptr, allowCacheBuild))
+		if (!nativeOutputHitTest(view, posInView, hit, nullptr, nullptr, allowCacheBuild, false, &textHit))
 		{
 			hideLineInfoTooltip();
 			return;
 		}
+	}
+	if (!textHit)
+	{
+		hideLineInfoTooltip();
+		return;
 	}
 
 	const QVector<NativeOutputRenderLine> &renderLines = nativeOutputRenderLines();
@@ -8308,6 +8349,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 		WrapTextBrowser     *mouseMoveHitView      = nullptr;
 		QPoint               mouseMoveHitPosInView;
 		NativeOutputPosition mouseMoveHit;
+		bool                 mouseMoveTextHit = false;
 
 		if (event->type() == QEvent::MouseMove)
 		{
@@ -8316,7 +8358,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 				QString mouseMoveHref;
 				if (nativeOutputHitTestForMouseEvent(watchedWidget, mouseEvent, mouseMoveHitView,
 				                                     mouseMoveHitPosInView, mouseMoveHit, &mouseMoveHref,
-				                                     nullptr, false))
+				                                     nullptr, false, &mouseMoveTextHit))
 				{
 					hasMouseMoveNativeHit = true;
 					applyHoveredHyperlink(mouseMoveHref);
@@ -8391,7 +8433,8 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 				updateLineInformationTooltip(watchedWidget, mouseEvent,
 				                             hasMouseMoveNativeHit ? mouseMoveHitView : nullptr,
 				                             hasMouseMoveNativeHit ? &mouseMoveHitPosInView : nullptr,
-				                             hasMouseMoveNativeHit ? &mouseMoveHit : nullptr, false);
+				                             hasMouseMoveNativeHit ? &mouseMoveHit : nullptr,
+				                             hasMouseMoveNativeHit ? &mouseMoveTextHit : nullptr, false);
 			}
 		}
 
@@ -8801,9 +8844,7 @@ void WorldView::addToHistory(const QString &text)
 	if (text == m_lastCommand)
 		return;
 
-	m_history.append(text);
-	if (m_history.size() > m_historyLimit)
-		m_history.remove(0, m_history.size() - m_historyLimit);
+	appendDeduplicatedHistoryEntry(m_history, text, m_historyLimit);
 	m_lastCommand = text;
 }
 
@@ -9376,7 +9417,7 @@ void WorldView::recallPartialHistory(int direction)
 	if (m_inputChanged)
 	{
 		m_partialCommand = m_input->toPlainText();
-		m_partialIndex   = (direction < 0) ? sizeToInt(m_history.size()) : -1;
+		m_partialIndex   = sizeToInt(m_history.size());
 	}
 
 	if (m_partialCommand.isEmpty())
@@ -9385,13 +9426,12 @@ void WorldView::recallPartialHistory(int direction)
 		return;
 	}
 
-	const qsizetype partialLen = m_partialCommand.size();
-	const auto      findMatch  = [&](const bool requireBoundaryAfterPrefix) -> int
+	const auto findMatch = [&](const int step) -> int
 	{
 		int index = m_partialIndex;
 		while (true)
 		{
-			index += (direction < 0) ? -1 : 1;
+			index += step;
 			if (index < 0 || index >= m_history.size())
 				return -1;
 
@@ -9400,21 +9440,12 @@ void WorldView::recallPartialHistory(int direction)
 				continue;
 			if (candidate.compare(m_partialCommand, Qt::CaseInsensitive) == 0)
 				continue;
-
-			if (!requireBoundaryAfterPrefix)
-				return index;
-
-			if (candidate.size() == partialLen)
-				return index;
-			const QChar nextChar = candidate.at(partialLen);
-			if (nextChar.isSpace())
-				return index;
+			return index;
 		}
 	};
 
-	int index = findMatch(true);
-	if (index < 0)
-		index = findMatch(false);
+	const bool preferNewest = (direction < 0) || (m_partialIndex >= m_history.size());
+	int        index        = preferNewest ? findMatch(-1) : findMatch(1);
 	if (index < 0)
 	{
 		if (confirmReplaceTyping(QString()))
@@ -9513,10 +9544,12 @@ void WorldView::resetTabCompletionCycle()
 	m_tabCompletionCycleEndColumn   = -1;
 	m_tabCompletionCycleLastSource  = -2;
 	m_tabCompletionCycleActive      = false;
+	m_tabCompletionCycleSeenCompletions.clear();
 }
 
 bool WorldView::tabCompleteOneLine(int startColumn, int endColumn, const QString &targetWordLower,
-                                   const QString &line, bool insertSpace)
+                                   const QString &line, bool insertSpace, QString *appliedCompletion,
+                                   const QSet<QString> *skipCanonicalCompletions)
 {
 	if (!m_input || targetWordLower.isEmpty() || line.isEmpty())
 		return false;
@@ -9558,6 +9591,14 @@ bool WorldView::tabCompleteOneLine(int startColumn, int endColumn, const QString
 			QString replacement = line.mid(i, replacementLength);
 			if (m_lowerCaseTabCompletion)
 				replacement = replacement.toLower();
+			const QString canonicalCompletion = replacement.toCaseFolded();
+			if (skipCanonicalCompletions && skipCanonicalCompletions->contains(canonicalCompletion))
+			{
+				i = end;
+				continue;
+			}
+			if (appliedCompletion)
+				*appliedCompletion = replacement;
 			if (m_runtime)
 				m_runtime->firePluginTabComplete(replacement);
 			if (insertSpace)
@@ -9626,6 +9667,7 @@ bool WorldView::handleTabCompletionKeyPress()
 	}
 	else
 	{
+		m_tabCompletionCycleSeenCompletions.clear();
 		if (endColumn <= 0 || endColumn > currentText.size())
 		{
 			resetTabCompletionCycle();
@@ -9662,11 +9704,13 @@ bool WorldView::handleTabCompletionKeyPress()
 			insertSpace = true;
 	}
 
-	bool completionApplied = false;
-	int  matchedSource     = -2;
+	bool    completionApplied = false;
+	int     matchedSource     = -2;
+	QString matchedCompletion;
 
 	if (!continueCycle &&
-	    tabCompleteOneLine(startColumn, endColumn, targetWordLower, m_tabCompletionDefaults, insertSpace))
+	    tabCompleteOneLine(startColumn, endColumn, targetWordLower, m_tabCompletionDefaults, insertSpace,
+	                       &matchedCompletion, &m_tabCompletionCycleSeenCompletions))
 	{
 		completionApplied = true;
 		matchedSource     = -1;
@@ -9695,7 +9739,8 @@ bool WorldView::handleTabCompletionKeyPress()
 		{
 			if (++scanned > m_tabCompletionLines)
 				break;
-			if (!tabCompleteOneLine(startColumn, endColumn, targetWordLower, lines.at(i).text, insertSpace))
+			if (!tabCompleteOneLine(startColumn, endColumn, targetWordLower, lines.at(i).text, insertSpace,
+			                        &matchedCompletion, &m_tabCompletionCycleSeenCompletions))
 				continue;
 			completionApplied = true;
 			matchedSource     = i;
@@ -9709,7 +9754,9 @@ bool WorldView::handleTabCompletionKeyPress()
 		return false;
 	}
 
-	cursor                          = m_input->textCursor();
+	cursor = m_input->textCursor();
+	if (!matchedCompletion.isEmpty())
+		m_tabCompletionCycleSeenCompletions.insert(matchedCompletion.toCaseFolded());
 	m_tabCompletionCycleTargetLower = targetWordLower;
 	m_tabCompletionCycleStartColumn = startColumn;
 	m_tabCompletionCycleEndColumn   = cursor.position();
