@@ -1252,6 +1252,8 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 void MainWindow::onApplicationStateChanged(const Qt::ApplicationState state)
 {
 	const bool focused = state == Qt::ApplicationActive;
+	if (!focused)
+		clearHyperlinkStatusLock();
 	if (!QMudMainFrameActionUtils::shouldResetBackgroundFlashLatch(m_lastKnownApplicationFocused, focused))
 		return;
 	m_lastKnownApplicationFocused              = focused;
