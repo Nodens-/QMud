@@ -1274,7 +1274,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	splitter->addWidget(m_input);
 	splitter->setStretchFactor(0, 1);
 	splitter->setStretchFactor(1, 0);
-	applyDefaultInputHeight(true);
+	applyDefaultInputHeight(false);
 
 	layout->addWidget(splitter);
 
@@ -8148,6 +8148,8 @@ void WorldView::resizeEvent(QResizeEvent *event)
 	QWidget::resizeEvent(event);
 	updateWrapMargin();
 	updateInputWrap();
+	if (!m_defaultInputHeightApplied)
+		applyDefaultInputHeight(true);
 	if (m_scrollbackSplitActive && m_outputSplitter)
 	{
 		const QList<int> sizes = m_outputSplitter->sizes();
@@ -8817,10 +8819,15 @@ void WorldView::applyDefaultInputHeight(bool setSplitterSizes)
 
 	if (setSplitterSizes && m_splitter)
 	{
-		const int total = m_splitter->size().height();
-		if (total > 0)
+		if (!isVisible())
 		{
-			const int outputSize = qMax(0, total - singleLine);
+			m_input->setMaximumHeight(QWIDGETSIZE_MAX);
+			return;
+		}
+		const int total = m_splitter->size().height();
+		if (total > singleLine)
+		{
+			const int outputSize = total - singleLine;
 			m_splitter->setSizes(QList<int>() << outputSize << singleLine);
 			m_input->setMaximumHeight(QWIDGETSIZE_MAX);
 			m_defaultInputHeightApplied = true;

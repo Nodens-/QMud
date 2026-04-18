@@ -160,7 +160,6 @@ class tst_Dialog_WorldPreferences : public QObject
 				if (commandName == QStringLiteral("ConfigurePaste"))
 					return pasteAlias;
 				return false;
-				// NOLINTEND(readability-convert-member-functions-to-static)
 			};
 
 			QCOMPARE(QMudWorldPreferencesRouting::isPreferencesCommand(cmdName, matcher), expectedRecognized);
@@ -168,7 +167,73 @@ class tst_Dialog_WorldPreferences : public QObject
 			             QMudWorldPreferencesRouting::initialPageForCommand(cmdName, lastPage, matcher)),
 			         expectedPage);
 		}
+
+		void spinBoxesUseRangeBasedWidthPolicy()
+		{
+			const QString sourcePath =
+			    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
+			        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
+			QFile sourceFile(sourcePath);
+			QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
+			         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
+			const QString sourceText = QString::fromUtf8(sourceFile.readAll());
+
+			auto          firstMatchLine = [&sourceText](const QString &pattern) -> int
+			{
+				const QRegularExpression      regex(pattern);
+				const QRegularExpressionMatch match = regex.match(sourceText);
+				if (!match.hasMatch())
+					return -1;
+				return static_cast<int>(sourceText.left(match.capturedStart()).count(QLatin1Char('\n'))) + 1;
+			};
+
+			QVERIFY2(firstMatchLine(QStringLiteral(
+			             "\\bconfigureSpinBoxWidthForRange\\s*\\(\\s*QSpinBox\\s*\\*\\s*\\w+\\s*\\)")) > 0,
+			         "Expected range-based spin-box width helper was not found.");
+			QVERIFY2(firstMatchLine(QStringLiteral("\\bQStyleOptionSpinBox\\b")) > 0,
+			         "Expected style-aware spin-box width calculation was not found.");
+
+			const QStringList spinNames = {QStringLiteral("m_maxLines"),
+			                               QStringLiteral("m_wrapColumn"),
+			                               QStringLiteral("m_speedWalkDelay"),
+			                               QStringLiteral("m_autoResizeMinimumLines"),
+			                               QStringLiteral("m_autoResizeMaximumLines"),
+			                               QStringLiteral("m_spamLineCount"),
+			                               QStringLiteral("m_historyLines")};
+
+			for (const QString &spinName : spinNames)
+			{
+				const QString escaped = QRegularExpression::escape(spinName);
+				const int     createLine =
+				    firstMatchLine(QStringLiteral("\\b%1\\s*=\\s*new\\s+QSpinBox\\s*\\(").arg(escaped));
+				const int setRangeLine =
+				    firstMatchLine(QStringLiteral("\\b%1\\s*->\\s*setRange\\s*\\(").arg(escaped));
+				const int configureLine = firstMatchLine(
+				    QStringLiteral("\\bconfigureSpinBoxWidthForRange\\s*\\(\\s*%1\\s*\\)\\s*;").arg(escaped));
+
+				QVERIFY2(createLine > 0,
+				         qPrintable(QStringLiteral("No QSpinBox construction found for %1").arg(spinName)));
+				QVERIFY2(setRangeLine > 0,
+				         qPrintable(QStringLiteral("No setRange(...) call found for %1").arg(spinName)));
+				QVERIFY2(configureLine > 0,
+				         qPrintable(QStringLiteral("No configureSpinBoxWidthForRange(...) call found for %1")
+				                        .arg(spinName)));
+				QVERIFY2(setRangeLine > createLine,
+				         qPrintable(
+				             QStringLiteral("Expected setRange(...) after %1 construction.").arg(spinName)));
+				QVERIFY2(configureLine > setRangeLine,
+				         qPrintable(
+				             QStringLiteral("Expected configureSpinBoxWidthForRange(%1) after setRange(...).")
+				                 .arg(spinName)));
+
+				const QRegularExpression fixedWidthPattern(
+				    QStringLiteral("\\b%1\\s*->\\s*set(?:Maximum|Minimum|Fixed)Width\\s*\\(").arg(escaped));
+				QVERIFY2(!fixedWidthPattern.match(sourceText).hasMatch(),
+				         qPrintable(QStringLiteral("Unexpected fixed-width policy for %1").arg(spinName)));
+			}
+		}
 };
+// NOLINTEND(readability-convert-member-functions-to-static)
 
 QTEST_APPLESS_MAIN(tst_Dialog_WorldPreferences)
 

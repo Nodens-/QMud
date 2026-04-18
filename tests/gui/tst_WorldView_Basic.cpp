@@ -2735,6 +2735,35 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void defaultInputSplitterSizingRepairsPoisonedPreShowState()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(420, 420);
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			auto *inputSplitter = qobject_cast<QSplitter *>(input->parentWidget());
+			QVERIFY(inputSplitter);
+
+			inputSplitter->setSizes(QList<int>() << 0 << 1000);
+
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY(inputSplitter->sizes().size() >= 2);
+			const QList<int> sizes = inputSplitter->sizes();
+			QVERIFY2(sizes.at(0) > 0, "Output pane should recover from poisoned pre-show splitter sizes.");
+			QVERIFY2(sizes.at(1) > 0, "Input pane should keep a positive height after startup sizing.");
+			QVERIFY2(qAbs(sizes.at(1) - input->height()) <= 2,
+			         "Startup default input sizing should synchronize splitter/input heights.");
+
+			resetTestState();
+		}
+
 		void enablingAutoResizeCompactsInputPaneWithoutBottomDeadSpace()
 		{
 			resetTestState();
