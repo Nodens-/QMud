@@ -45,7 +45,9 @@ local fontProps = {"fontID", "fontName", "fontSize", "fontBold", "fontItalic", "
 local commas, CheckStyle, DoFade, PrintText
 local matteHilight, matteShadow, Bar, ansiCodes, ansiColors, _Doc
 
-module(...)
+local _M = {}
+_M._NAME = "InfoBox"
+_ENV = _M
 
 setmetatable ( _M, {__index = world, class = "module"})           -- find all the MushClient Functions
 
@@ -1676,3 +1678,6 @@ function Doc (self, topic)
         end end
         print("\n\nSyntax: ".. GetInfo(36) .. _NAME .. ':Doc("topic")\n')
 end end
+
+
+return _M
