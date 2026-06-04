@@ -90,7 +90,11 @@ bool QMudLuaSupport::pushLuaFunctionByName(lua_State *state, const QString &func
 
 lua_State *QMudLuaSupport::makeLuaState()
 {
+#if LUA_VERSION_NUM >= 505
+	lua_State *L = lua_newstate(luaAlloc, nullptr, 0);
+#else
 	lua_State *L = lua_newstate(luaAlloc, nullptr);
+#endif
 	if (L)
 		lua_atpanic(L, &luaPanic);
 	return L;

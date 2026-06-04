@@ -64,6 +64,8 @@ set(QMUD_LUA_MODULE_SEARCH_PATHS
         "${QMUD_SYSTEM_LUA_MODULES_PREFIX}"
         /usr/lib64
         /usr/lib
+        /usr/lib/lua/5.5
+        /usr/lib64/lua/5.5
         /usr/local/lib64
         /usr/local/lib
         /opt/homebrew/lib
@@ -474,7 +476,7 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
     endif ()
     target_sources(QMud PRIVATE src/Sqlite3Lua.cpp)
     set(QMUD_HAS_SYSTEM_LPEG OFF)
-    set(QMUD_LUA_INTERPRETER "")
+    unset(QMUD_LUA_INTERPRETER)
     if (DEFINED LUA_EXECUTABLE AND EXISTS "${LUA_EXECUTABLE}")
         set(QMUD_LUA_INTERPRETER "${LUA_EXECUTABLE}")
     else ()
@@ -500,12 +502,21 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
             find_file(QMUD_SYSTEM_LPEG_SO
                     NAMES lpeg.so
                     PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
+                    PATH_SUFFIXES "" lua/5.5 lua/5.4 lua/5.3 lua/5.2 lua/5.1
             )
             if (QMUD_SYSTEM_LPEG_SO)
                 set(QMUD_HAS_SYSTEM_LPEG ON)
             endif ()
         endif ()
+    endif ()
+
+    if (QMUD_HAS_SYSTEM_LPEG AND NOT QMUD_SYSTEM_LPEG_SO)
+        find_file(QMUD_SYSTEM_LPEG_SO
+                NAMES lpeg.so
+                PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+                PATH_SUFFIXES "" lua/5.5 lua/5.4 lua/5.3 lua/5.2 lua/5.1
+                NO_CMAKE_FIND_ROOT_PATH
+        )
     endif ()
 
     if (QMUD_HAS_SYSTEM_LPEG)
@@ -573,18 +584,34 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
         find_file(QMUD_SYSTEM_SOCKET_CORE_SO
                 NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
                 PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                PATH_SUFFIXES "" socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
+                PATH_SUFFIXES "" socket lua/5.5/socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
                 NO_CMAKE_FIND_ROOT_PATH
         )
         find_file(QMUD_SYSTEM_MIME_CORE_SO
                 NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
                 PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                PATH_SUFFIXES "" mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
+                PATH_SUFFIXES "" mime lua/5.5/mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
                 NO_CMAKE_FIND_ROOT_PATH
         )
         if (QMUD_SYSTEM_SOCKET_CORE_SO AND QMUD_SYSTEM_MIME_CORE_SO)
             set(QMUD_HAS_SYSTEM_LUASOCKET ON)
         endif ()
+    endif ()
+    if (QMUD_HAS_SYSTEM_LUASOCKET AND NOT QMUD_SYSTEM_SOCKET_CORE_SO)
+        find_file(QMUD_SYSTEM_SOCKET_CORE_SO
+                NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
+                PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+                PATH_SUFFIXES "" socket lua/5.5/socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
+                NO_CMAKE_FIND_ROOT_PATH
+        )
+    endif ()
+    if (QMUD_HAS_SYSTEM_LUASOCKET AND NOT QMUD_SYSTEM_MIME_CORE_SO)
+        find_file(QMUD_SYSTEM_MIME_CORE_SO
+                NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
+                PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
+                PATH_SUFFIXES "" mime lua/5.5/mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
+                NO_CMAKE_FIND_ROOT_PATH
+        )
     endif ()
     if (QMUD_HAS_SYSTEM_LUASOCKET)
         set(QMUD_RESOLVED_LUASOCKET_PROVIDER "SYSTEM")
@@ -661,10 +688,12 @@ endif ()
 set(SKELETON_SRC "${CMAKE_CURRENT_SOURCE_DIR}/skeleton")
 set(SKELETON_DST "${CMAKE_CURRENT_BINARY_DIR}")
 set(QMUD_SYSTEM_LUA_SEARCH_PATHS
+        /usr/share/lua/5.5
         /usr/share/lua/5.4
         /usr/share/lua/5.3
         /usr/share/lua/5.2
         /usr/share/lua/5.1
+        /usr/local/share/lua/5.5
         /usr/local/share/lua/5.4
         /usr/local/share/lua/5.3
         /usr/local/share/lua/5.2
@@ -806,7 +835,7 @@ if (NOT QMUD_SYSTEM_SOCKET_CORE_SO)
     find_file(QMUD_SYSTEM_SOCKET_CORE_SO
             NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
             PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-            PATH_SUFFIXES "" socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
+            PATH_SUFFIXES "" socket lua/5.5/socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
             NO_CMAKE_FIND_ROOT_PATH
     )
 endif ()
@@ -817,7 +846,7 @@ if (NOT QMUD_SYSTEM_MIME_CORE_SO)
     find_file(QMUD_SYSTEM_MIME_CORE_SO
             NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
             PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-            PATH_SUFFIXES "" mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
+            PATH_SUFFIXES "" mime lua/5.5/mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
             NO_CMAKE_FIND_ROOT_PATH
     )
 endif ()
@@ -825,7 +854,7 @@ if (NOT QMUD_SYSTEM_SSL_CORE_SO)
     find_file(QMUD_SYSTEM_SSL_CORE_SO
             NAMES ${QMUD_LUA_MODULE_CORE_NAMES}
             PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-            PATH_SUFFIXES ssl lua/5.4/ssl lua/5.3/ssl lua/5.2/ssl lua/5.1/ssl
+            PATH_SUFFIXES ssl lua/5.5/ssl lua/5.4/ssl lua/5.3/ssl lua/5.2/ssl lua/5.1/ssl
             NO_CMAKE_FIND_ROOT_PATH
     )
 endif ()
@@ -841,16 +870,36 @@ if (NOT QMUD_SYSTEM_SSL_CORE_SO AND EXISTS "/usr/lib64/lua/5.4/ssl.so")
     set(QMUD_SYSTEM_SSL_CORE_SO "/usr/lib64/lua/5.4/ssl.so" CACHE FILEPATH
             "Optional explicit path to system LuaSec C module (ssl/core.so or ssl.so)" FORCE)
 endif ()
+if (NOT QMUD_SYSTEM_SSL_CORE_SO AND EXISTS "/usr/lib/lua/5.5/ssl/core.so")
+    set(QMUD_SYSTEM_SSL_CORE_SO "/usr/lib/lua/5.5/ssl/core.so" CACHE FILEPATH
+            "Optional explicit path to system LuaSec C module (ssl/core.so or ssl.so)" FORCE)
+endif ()
+if (NOT QMUD_SYSTEM_SSL_CORE_SO AND EXISTS "/usr/lib/lua/5.5/ssl.so")
+    set(QMUD_SYSTEM_SSL_CORE_SO "/usr/lib/lua/5.5/ssl.so" CACHE FILEPATH
+            "Optional explicit path to system LuaSec C module (ssl/core.so or ssl.so)" FORCE)
+endif ()
 if (NOT QMUD_SYSTEM_SSL_LUA_FILE AND EXISTS "/usr/share/lua/5.4/ssl.lua")
     set(QMUD_SYSTEM_SSL_LUA_FILE "/usr/share/lua/5.4/ssl.lua" CACHE FILEPATH
+            "Optional explicit path to system LuaSec top-level Lua file (ssl.lua)" FORCE)
+endif ()
+if (NOT QMUD_SYSTEM_SSL_LUA_FILE AND EXISTS "/usr/share/lua/5.5/ssl.lua")
+    set(QMUD_SYSTEM_SSL_LUA_FILE "/usr/share/lua/5.5/ssl.lua" CACHE FILEPATH
             "Optional explicit path to system LuaSec top-level Lua file (ssl.lua)" FORCE)
 endif ()
 if (NOT QMUD_SYSTEM_SSL_LUA_DIR AND EXISTS "/usr/share/lua/5.4/ssl")
     set(QMUD_SYSTEM_SSL_LUA_DIR "/usr/share/lua/5.4/ssl" CACHE PATH
             "Optional explicit path to system LuaSec Lua directory (ssl/*.lua)" FORCE)
 endif ()
+if (NOT QMUD_SYSTEM_SSL_LUA_DIR AND EXISTS "/usr/share/lua/5.5/ssl")
+    set(QMUD_SYSTEM_SSL_LUA_DIR "/usr/share/lua/5.5/ssl" CACHE PATH
+            "Optional explicit path to system LuaSec Lua directory (ssl/*.lua)" FORCE)
+endif ()
 if (NOT QMUD_SYSTEM_SOCKET_CMODULE_DIR AND EXISTS "/usr/lib64/lua/5.4/socket")
     set(QMUD_SYSTEM_SOCKET_CMODULE_DIR "/usr/lib64/lua/5.4/socket" CACHE PATH
+            "Optional explicit path to system LuaSocket C modules directory (socket/*.so)" FORCE)
+endif ()
+if (NOT QMUD_SYSTEM_SOCKET_CMODULE_DIR AND EXISTS "/usr/lib/lua/5.5/socket")
+    set(QMUD_SYSTEM_SOCKET_CMODULE_DIR "/usr/lib/lua/5.5/socket" CACHE PATH
             "Optional explicit path to system LuaSocket C modules directory (socket/*.so)" FORCE)
 endif ()
 if (EXISTS "${SKELETON_SRC}")
@@ -928,7 +977,11 @@ if (EXISTS "${SKELETON_SRC}")
     else ()
         set(QMUD_SYSTEM_JSON_LUA_FILES)
         if (QMUD_ENABLE_LUA_SCRIPTING)
-            message(FATAL_ERROR "System Lua JSON module directory not found.")
+            if (QMUD_SYSTEM_JSON_TOP_LUA_FILE)
+                message(STATUS "System Lua JSON module directory not found; using single json.lua (${QMUD_SYSTEM_JSON_TOP_LUA_FILE})")
+            else ()
+                message(FATAL_ERROR "System Lua JSON module directory not found.")
+            endif ()
         endif ()
     endif ()
     set(SKELETON_STAMP "${SKELETON_DST}/.skeleton.stamp")
@@ -1737,7 +1790,7 @@ if (UNIX AND NOT APPLE)
             find_file(QMUD_APPIMAGE_LPEG_SO
                     NAMES lpeg.so
                     PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES lua/5.4 lua/5.3 lua/5.2 lua/5.1
+                    PATH_SUFFIXES lua/5.5 lua/5.4 lua/5.3 lua/5.2 lua/5.1
             )
         endif ()
 
@@ -1746,7 +1799,7 @@ if (UNIX AND NOT APPLE)
             find_file(QMUD_APPIMAGE_SOCKET_CORE_SO
                     NAMES core.so
                     PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
+                    PATH_SUFFIXES lua/5.5/socket lua/5.4/socket lua/5.3/socket lua/5.2/socket lua/5.1/socket
             )
         endif ()
 
@@ -1755,7 +1808,7 @@ if (UNIX AND NOT APPLE)
             find_file(QMUD_APPIMAGE_MIME_CORE_SO
                     NAMES core.so
                     PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
+                    PATH_SUFFIXES lua/5.5/mime lua/5.4/mime lua/5.3/mime lua/5.2/mime lua/5.1/mime
             )
         endif ()
         set(QMUD_APPIMAGE_SOCKET_CMODULE_DIR "${QMUD_SYSTEM_SOCKET_CMODULE_DIR}")
@@ -1773,7 +1826,7 @@ if (UNIX AND NOT APPLE)
             find_file(QMUD_APPIMAGE_SSL_CORE_SO
                     NAMES core.so
                     PATHS ${QMUD_LUA_MODULE_SEARCH_PATHS}
-                    PATH_SUFFIXES ssl lua/5.4/ssl lua/5.3/ssl lua/5.2/ssl lua/5.1/ssl
+                    PATH_SUFFIXES ssl lua/5.5/ssl lua/5.4/ssl lua/5.3/ssl lua/5.2/ssl lua/5.1/ssl
             )
         endif ()
         if (NOT QMUD_APPIMAGE_SSL_CORE_SO)
