@@ -13784,6 +13784,16 @@ bool InputTextEdit::event(QEvent *event)
 				event->accept();
 				return true;
 			}
+			// Claim these before window-level QActions (Undo/Print/New) steal them when compat bindings are on
+			const bool ctrlNoShift = plainCtrl && !(modifiers & Qt::ShiftModifier);
+			if (ctrlNoShift &&
+			    ((keyEvent->key() == Qt::Key_Z && m_view->m_ctrlZGoesToEndOfBuffer) ||
+			     (keyEvent->key() == Qt::Key_P && m_view->m_ctrlPGoesToPreviousCommand) ||
+			     (keyEvent->key() == Qt::Key_N && m_view->m_ctrlNGoesToNextCommand)))
+			{
+				event->accept();
+				return true;
+			}
 			if (m_view->hasWorldAcceleratorBinding(keyEvent))
 			{
 				event->accept();

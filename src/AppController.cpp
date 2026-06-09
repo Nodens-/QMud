@@ -8832,6 +8832,16 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		QWidget *focus = focusedEditor();
 		if (!focus)
 			return false;
+        if (m_mainWindow && name == QStringLiteral("Undo"))
+        {
+            const WorldChildWindow* world = m_mainWindow->activeWorldChildWindow();
+            WorldView* view = world ? world->view() : nullptr;
+            if(view && view->ctrlZGoesToEndOfBuffer())
+            {
+                view->scrollOutputToEnd();
+                return true;
+            }
+        }
 		if (auto *edit = qobject_cast<QLineEdit *>(focus))
 			return dispatchEditCommand(edit, name);
 		if (auto *edit = qobject_cast<QPlainTextEdit *>(focus))

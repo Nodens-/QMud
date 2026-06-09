@@ -313,6 +313,7 @@ class WorldView : public QWidget
 		 * @brief Scrolls output to end.
 		 */
 		void                          scrollOutputToEnd() const;
+		bool                          ctrlZGoesToEndOfBuffer() const { return m_ctrlZGoesToEndOfBuffer; }
 		/**
 		 * @brief Scrolls output one page up.
 		 */

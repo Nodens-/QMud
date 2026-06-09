@@ -3228,8 +3228,15 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 	    hasOnlyAlt && (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter);
 	const bool ctrlG       = hasOnlyCtrl && keyEvent->key() == Qt::Key_G;
 	const int  tabShortcut = QMudMainFrameActionUtils::adjacentTabShortcutStep(keyEvent->key(), mods);
+	bool       ctrlZ       = false;
+	if (hasOnlyCtrl && keyEvent->key() == Qt::Key_Z)
+	{
+		if (const auto *world = activeWorldChildWindow())
+			if (const auto *view = world->view())
+				ctrlZ = view->ctrlZGoesToEndOfBuffer();
+	}
 
-	if (!altEnter && !ctrlG && tabShortcut == 0)
+	if (!altEnter && !ctrlG && tabShortcut == 0 && !ctrlZ)
 		return QMainWindow::eventFilter(watched, event);
 
 	if (event->type() == QEvent::ShortcutOverride)
@@ -3250,7 +3257,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 
 	if (QApplication::activeModalWidget())
 	{
-		if (tabShortcut != 0)
+		if (tabShortcut != 0 || ctrlZ)
 			return QMainWindow::eventFilter(watched, event);
 		keyEvent->accept();
 		return true;
@@ -3270,6 +3277,20 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 
 	if (tabShortcut != 0 && triggerAdjacentMdiTabFromShortcut(tabShortcut))
 	{
+		keyEvent->accept();
+		return true;
+	}
+	if (ctrlZ)
+	{
+        auto* world = activeWorldChildWindow();
+        auto* view = world ? world->view() : nullptr;
+
+        if (view)
+        {
+            //view->scrollOutputToEnd();
+            this->onStatusFreezeDoubleClick();
+        }
+
 		keyEvent->accept();
 		return true;
 	}
