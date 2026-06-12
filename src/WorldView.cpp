@@ -1265,6 +1265,10 @@ class WrapTextBrowser : public QAbstractScrollArea
 		{
 			if (m_view && m_view->handleWorldHotkey(event))
 				return;
+			if (m_view && m_view->handleCommandOptionShortcut(event))
+				return;
+			if (m_view && m_view->handleCommandHistoryShortcut(event))
+				return;
 			if (m_isLive)
 			{
 				event->accept();
@@ -11945,7 +11949,8 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 	if (isOutputWidget && event->type() == QEvent::ShortcutOverride)
 	{
 		if (const auto *keyEvent = dynamic_cast<QKeyEvent *>(event);
-		    keyEvent && hasWorldAcceleratorBinding(keyEvent))
+		    keyEvent && (hasWorldAcceleratorBinding(keyEvent) || hasCommandOptionShortcut(keyEvent) ||
+		                 hasCommandHistoryShortcut(keyEvent)))
 		{
 			event->accept();
 			return true;
@@ -11959,6 +11964,21 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 			if (keyEvent->matches(QKeySequence::Copy) && hasOutputSelection())
 			{
 				copySelection();
+				event->accept();
+				return true;
+			}
+			if (handleWorldHotkey(keyEvent))
+			{
+				event->accept();
+				return true;
+			}
+			if (handleCommandOptionShortcut(keyEvent))
+			{
+				event->accept();
+				return true;
+			}
+			if (handleCommandHistoryShortcut(keyEvent))
+			{
 				event->accept();
 				return true;
 			}
@@ -12021,12 +12041,6 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 				                    keyEvent->count());
 				m_input->setFocus(Qt::OtherFocusReason);
 				QCoreApplication::sendEvent(m_input, &forwarded);
-				return true;
-			}
-
-			if (handleWorldHotkey(keyEvent))
-			{
-				event->accept();
 				return true;
 			}
 		}
@@ -12888,6 +12902,84 @@ bool WorldView::hasWorldAcceleratorBinding(const QKeyEvent *event) const
 	return findAcceleratorCommandForEvent(m_runtime, event, keypad) >= 0;
 }
 
+bool WorldView::hasCommandOptionShortcut(const QKeyEvent *event) const
+{
+	if (!event)
+		return false;
+
+	const Qt::KeyboardModifiers modifiers = event->modifiers();
+	const bool hasOnlyCtrl = modifiers.testFlag(Qt::ControlModifier) &&
+	                         !modifiers.testFlag(Qt::AltModifier) && !modifiers.testFlag(Qt::ShiftModifier) &&
+	                         !modifiers.testFlag(Qt::MetaModifier);
+	if (!hasOnlyCtrl)
+		return false;
+
+	switch (event->key())
+	{
+	case Qt::Key_N:
+		return m_ctrlNGoesToNextCommand;
+	case Qt::Key_P:
+		return m_ctrlPGoesToPreviousCommand;
+	case Qt::Key_Z:
+		return m_ctrlZGoesToEndOfBuffer;
+	default:
+		return false;
+	}
+}
+
+bool WorldView::handleCommandOptionShortcut(QKeyEvent *event)
+{
+	if (!hasCommandOptionShortcut(event))
+		return false;
+
+	switch (event->key())
+	{
+	case Qt::Key_N:
+		recallNextCommand();
+		break;
+	case Qt::Key_P:
+		recallPreviousCommand();
+		break;
+	case Qt::Key_Z:
+		if (m_scrollbackSplitActive)
+			collapseScrollbackSplitToLiveOutput();
+		else
+			scrollOutputToEnd();
+		clearNativeOutputSelection(true);
+		break;
+	default:
+		return false;
+	}
+
+	event->accept();
+	return true;
+}
+
+bool WorldView::hasCommandHistoryShortcut(const QKeyEvent *event) const
+{
+	if (!event)
+		return false;
+	if (!m_altArrowRecallsPartial && !m_arrowRecallsPartial)
+		return false;
+
+	const Qt::KeyboardModifiers modifiers = event->modifiers();
+	const bool hasOnlyAlt = modifiers.testFlag(Qt::AltModifier) && !modifiers.testFlag(Qt::ControlModifier) &&
+	                        !modifiers.testFlag(Qt::ShiftModifier) && !modifiers.testFlag(Qt::MetaModifier);
+	return hasOnlyAlt && (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down);
+}
+
+bool WorldView::handleCommandHistoryShortcut(QKeyEvent *event)
+{
+	if (!hasCommandHistoryShortcut(event))
+		return false;
+
+	const int direction = event->key() == Qt::Key_Up ? -1 : 1;
+	recallPartialHistory(direction);
+
+	event->accept();
+	return true;
+}
+
 bool WorldView::handleWorldHotkey(QKeyEvent *event)
 {
 	if (!m_runtime || !event)
@@ -13608,6 +13700,22 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 #endif
 		return;
 	}
+	if (m_view && m_view->handleCommandOptionShortcut(event))
+	{
+#ifdef Q_OS_WIN
+		if (windowsAltNumpadDigitKey)
+			m_suppressNextAltNumpadCommit = true;
+#endif
+		return;
+	}
+	if (m_view && m_view->handleCommandHistoryShortcut(event))
+	{
+#ifdef Q_OS_WIN
+		if (windowsAltNumpadDigitKey)
+			m_suppressNextAltNumpadCommit = true;
+#endif
+		return;
+	}
 
 	if (m_view && plainTab)
 	{
@@ -13671,11 +13779,14 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 		m_view->pasteCommand(pasteText);
 		return;
 	}
-	if (m_view && event->key() == Qt::Key_Backspace && (event->modifiers() & Qt::ControlModifier))
+	const Qt::KeyboardModifiers keyModifiers = event->modifiers();
+	const bool                  ctrlBackspace =
+	    event->key() == Qt::Key_Backspace && keyModifiers.testFlag(Qt::ControlModifier) &&
+	    !keyModifiers.testFlag(Qt::AltModifier) && !keyModifiers.testFlag(Qt::ShiftModifier) &&
+	    !keyModifiers.testFlag(Qt::MetaModifier);
+	if (m_view && ctrlBackspace)
 	{
-		clear();
-		m_view->m_inputChanged = false;
-		m_view->resetHistoryRecall();
+		m_view->recallLastWord();
 		return;
 	}
 
@@ -13696,26 +13807,6 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 		}
 	}
 
-	if (m_view && (event->modifiers() & Qt::ControlModifier) &&
-	    !(event->modifiers() & (Qt::AltModifier | Qt::ShiftModifier | Qt::MetaModifier)))
-	{
-		if (event->key() == Qt::Key_N && m_view->m_ctrlNGoesToNextCommand)
-		{
-			m_view->recallNextCommand();
-			return;
-		}
-		if (event->key() == Qt::Key_P && m_view->m_ctrlPGoesToPreviousCommand)
-		{
-			m_view->recallPreviousCommand();
-			return;
-		}
-		if (event->key() == Qt::Key_Z && m_view->m_ctrlZGoesToEndOfBuffer)
-		{
-			m_view->scrollOutputToEnd();
-			return;
-		}
-	}
-
 	if (m_view && (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down))
 	{
 		const int direction = (event->key() == Qt::Key_Up) ? -1 : 1;
@@ -13729,14 +13820,6 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 					m_view->recallPartialHistory(direction);
 				else
 					m_view->recallHistory(direction);
-				handled = true;
-			}
-		}
-		else if (event->modifiers() == Qt::AltModifier)
-		{
-			if (m_view->m_altArrowRecallsPartial || m_view->m_arrowRecallsPartial)
-			{
-				m_view->recallPartialHistory(direction);
 				handled = true;
 			}
 		}
@@ -13786,11 +13869,14 @@ bool InputTextEdit::event(QEvent *event)
 		if (const auto *keyEvent = dynamic_cast<QKeyEvent *>(event))
 		{
 			const Qt::KeyboardModifiers modifiers = keyEvent->modifiers();
-			const bool                  plainCtrl = (modifiers & Qt::ControlModifier) != 0 &&
-			                                        (modifiers & (Qt::AltModifier | Qt::MetaModifier)) == 0;
-			const bool                  isCtrlBackspace = plainCtrl && keyEvent->key() == Qt::Key_Backspace;
-			const bool                  isCopyShortcut =
-			    keyEvent->matches(QKeySequence::Copy) || (plainCtrl && keyEvent->key() == Qt::Key_C);
+			const bool                  hasOnlyCtrl =
+			    (modifiers & Qt::ControlModifier) != 0 &&
+			    (modifiers & (Qt::AltModifier | Qt::ShiftModifier | Qt::MetaModifier)) == 0;
+			const bool isCtrlBackspace = hasOnlyCtrl && keyEvent->key() == Qt::Key_Backspace;
+			const bool isCopyShortcut =
+			    keyEvent->matches(QKeySequence::Copy) || (hasOnlyCtrl && keyEvent->key() == Qt::Key_C);
+			const bool isPasteShortcut = keyEvent->matches(QKeySequence::Paste);
+			const bool isPlainTab      = modifiers == Qt::NoModifier && keyEvent->key() == Qt::Key_Tab;
 			if (isCtrlBackspace)
 			{
 				event->accept();
@@ -13801,7 +13887,8 @@ bool InputTextEdit::event(QEvent *event)
 				event->accept();
 				return true;
 			}
-			if (m_view->hasWorldAcceleratorBinding(keyEvent))
+			if (isPasteShortcut || isPlainTab || m_view->hasWorldAcceleratorBinding(keyEvent) ||
+			    m_view->hasCommandOptionShortcut(keyEvent) || m_view->hasCommandHistoryShortcut(keyEvent))
 			{
 				event->accept();
 				return true;
