@@ -9836,7 +9836,7 @@ void LuaCallbackEngine::setScriptText(const QString &script)
 	if (!m_observedPluginCallbackPresence.isEmpty())
 		m_observedPluginCallbackPresence.clear();
 	if (m_callbackCatalogObserver)
-		m_callbackCatalogObserver(m_pluginId.trimmed().toLower(), {}, m_luaFunctionsSet);
+		m_callbackCatalogObserver(pluginIdMetadata().trimmed().toLower(), {}, m_luaFunctionsSet);
 }
 
 bool LuaCallbackEngine::loadScript()
@@ -9870,7 +9870,7 @@ void LuaCallbackEngine::resetState()
 	m_callingPluginIdStack.clear();
 	m_dispatchMiniWindowSnapshotStack.clear();
 	if (m_callbackCatalogObserver)
-		m_callbackCatalogObserver(m_pluginId.trimmed().toLower(), {}, m_luaFunctionsSet);
+		m_callbackCatalogObserver(pluginIdMetadata().trimmed().toLower(), {}, m_luaFunctionsSet);
 #endif
 }
 
@@ -9963,7 +9963,7 @@ void LuaCallbackEngine::refreshLuaCallbackCatalogNow()
 {
 	bindOrAssertExecutionThread("LuaCallbackEngine::refreshLuaCallbackCatalogNow");
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
-	const QString normalizedPluginId = m_pluginId.trimmed().toLower();
+	const QString normalizedPluginId = pluginIdMetadata().trimmed().toLower();
 	if (m_observedPluginCallbacks.isEmpty())
 	{
 		if (m_observedPluginCallbackPresence.isEmpty())
@@ -10018,8 +10018,6 @@ lua_State *LuaCallbackEngine::luaState() const
 void LuaCallbackEngine::setPluginInfo(const QString &id, const QString &name, const QString &directory)
 {
 	bindOrAssertExecutionThread("LuaCallbackEngine::setPluginInfo");
-	m_pluginId                  = id;
-	m_pluginName                = name;
 	QString normalizedDirectory = directory;
 	if (!normalizedDirectory.isEmpty() && !normalizedDirectory.endsWith('/') &&
 	    !normalizedDirectory.endsWith('\\'))
@@ -10027,18 +10025,30 @@ void LuaCallbackEngine::setPluginInfo(const QString &id, const QString &name, co
 		normalizedDirectory += '/';
 	}
 	normalizedDirectory.replace(QLatin1Char('\\'), QLatin1Char('/'));
+	m_pluginId        = id;
+	m_pluginName      = name;
 	m_pluginDirectory = normalizedDirectory;
 }
 
 QString LuaCallbackEngine::pluginId() const
 {
 	bindOrAssertExecutionThread("LuaCallbackEngine::pluginId");
+	return pluginIdMetadata();
+}
+
+QString LuaCallbackEngine::pluginIdMetadata() const
+{
 	return m_pluginId;
 }
 
 QString LuaCallbackEngine::pluginName() const
 {
 	bindOrAssertExecutionThread("LuaCallbackEngine::pluginName");
+	return pluginNameMetadata();
+}
+
+QString LuaCallbackEngine::pluginNameMetadata() const
+{
 	return m_pluginName;
 }
 

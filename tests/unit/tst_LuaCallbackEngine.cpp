@@ -2347,6 +2347,14 @@ function OnPluginEnable()
          empty_plugin_variable_case_ok and
          empty_plugin_variable_list_ok
 end
+function empty_plugin_variable_status_value(value)
+  return table.concat({
+    tostring(empty_plugin_variable_ok),
+    tostring(empty_plugin_variable_case_ok),
+    tostring(empty_plugin_variable_list_ok),
+    empty_plugin_variable_status or "no-status"
+  }, "|")
+end
 )lua"),
 	                       &runtime);
 
@@ -2358,11 +2366,16 @@ end
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(result.boolResultValid);
-	QVERIFY2(result.boolResult,
-	         qPrintable(luaGlobalString(engine->luaState(), "empty_plugin_variable_status")));
-	QVERIFY(luaGlobalBoolean(engine->luaState(), "empty_plugin_variable_ok"));
-	QVERIFY(luaGlobalBoolean(engine->luaState(), "empty_plugin_variable_case_ok"));
-	QVERIFY(luaGlobalBoolean(engine->luaState(), "empty_plugin_variable_list_ok"));
+
+	LuaBatchDispatchRequest statusRequest = request;
+	statusRequest.kind                    = LuaBatchDispatchKind::StringInOut;
+	statusRequest.functionName            = QStringLiteral("empty_plugin_variable_status_value");
+	statusRequest.stringArg               = QStringLiteral("ignored");
+	statusRequest.miniWindowSnapshotArg   = {};
+	LuaBatchDispatchResult statusResult;
+	dispatchWorkerAndWait(executor, statusRequest, statusResult);
+	QVERIFY2(result.boolResult, qPrintable(statusResult.stringResult));
+	QCOMPARE(statusResult.stringResult, QStringLiteral("true|true|true|1|active|true|1|active"));
 	teardownWorkerEngine(executor, engine);
 }
 

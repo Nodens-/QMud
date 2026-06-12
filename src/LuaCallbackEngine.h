@@ -116,10 +116,20 @@ class LuaCallbackEngine
 		 */
 		[[nodiscard]] QString pluginId() const;
 		/**
+		 * @brief Returns plugin id metadata without binding Lua execution-thread affinity.
+		 * @return Plugin id metadata.
+		 */
+		[[nodiscard]] QString pluginIdMetadata() const;
+		/**
 		 * @brief Returns bound plugin display name.
 		 * @return Plugin display name.
 		 */
 		[[nodiscard]] QString pluginName() const;
+		/**
+		 * @brief Returns plugin display-name metadata without binding Lua execution-thread affinity.
+		 * @return Plugin display-name metadata.
+		 */
+		[[nodiscard]] QString pluginNameMetadata() const;
 		/**
 		 * @brief Returns bound plugin directory (legacy type-20 GetPluginInfo value).
 		 * @return Plugin directory with trailing separator when known.
