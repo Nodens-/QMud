@@ -7,6 +7,7 @@
  */
 
 #include "NativePluginRegistry.h"
+#include "WorldChildWindow.h"
 #include "WorldDocument.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
@@ -31,6 +32,7 @@ namespace
 {
 	const QString kDeferredConnectPluginId = QStringLiteral("abcdeffedcbaabcdeffedcba");
 	const QString kTeardownStatePluginId   = QStringLiteral("fedcbaabcdeffedcbaabcdef");
+	const QString kHiddenMessagePluginId   = QStringLiteral("112233445566778899aabbcc");
 
 	/**
 	 * @brief Writes text to a test fixture file.
@@ -63,17 +65,61 @@ namespace
 	}
 
 	/**
+	 * @brief Writes a plugin fixture with connect/disconnect lifecycle markers.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writeHiddenMessageLifecyclePlugin(const QString &pluginsDir)
+	{
+		const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("hidden_messages.xml"));
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="HiddenMessagesLifecycle"
+    author="QMud Test"
+    id="112233445566778899aabbcc"
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function OnPluginConnect()
+  SetVariable("connect_marker", "connected")
+end
+
+function OnPluginDisconnect()
+  SetVariable("disconnect_marker", "disconnected")
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml"));
+	}
+
+	/**
 	 * @brief Reads a plugin variable from the runtime.
+	 * @param runtime Runtime to inspect.
+	 * @param pluginId Plugin identifier to inspect.
+	 * @param name Plugin variable name.
+	 * @return Variable value, or empty when missing.
+	 */
+	QString pluginVariable(const WorldRuntime &runtime, const QString &pluginId, const QString &name)
+	{
+		QString value;
+		if (!runtime.findPluginVariable(pluginId, name, value))
+			return {};
+		return value;
+	}
+
+	/**
+	 * @brief Reads a deferred-connect plugin variable from the runtime.
 	 * @param runtime Runtime to inspect.
 	 * @param name Plugin variable name.
 	 * @return Variable value, or empty when missing.
 	 */
 	QString pluginVariable(const WorldRuntime &runtime, const QString &name)
 	{
-		QString value;
-		if (!runtime.findPluginVariable(kDeferredConnectPluginId, name, value))
-			return {};
-		return value;
+		return pluginVariable(runtime, kDeferredConnectPluginId, name);
 	}
 
 	/**
@@ -105,6 +151,107 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 		Q_OBJECT
 
 	private slots:
+		static void hiddenConnectDisconnectMessagesDoNotSuppressPluginLifecycleCallbacks()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeHiddenMessageLifecyclePlugin(pluginsDir));
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("show_connect_disconnect"), QStringLiteral("0"));
+
+			WorldChildWindow window(QStringLiteral("Hidden Messages"));
+			window.resize(640, 480);
+			window.setRuntime(&runtime);
+			window.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("hidden_messages.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			QVERIFY(QMetaObject::invokeMethod(&runtime, "connected", Qt::DirectConnection));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kHiddenMessagePluginId, QStringLiteral("connect_marker")),
+			    QStringLiteral("connected"), 5000);
+
+			QVERIFY(QMetaObject::invokeMethod(&runtime, "disconnected", Qt::DirectConnection));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kHiddenMessagePluginId, QStringLiteral("disconnect_marker")),
+			    QStringLiteral("disconnected"), 5000);
+		}
+
+		static void hiddenConnectDisconnectMessagesDoNotSuppressLifecycleActions()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeHiddenMessageLifecyclePlugin(pluginsDir));
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("show_connect_disconnect"), QStringLiteral("0"));
+			runtime.setWorldMultilineAttribute(QStringLiteral("connect_text"),
+			                                   QStringLiteral("hidden_connect_text"));
+
+			WorldChildWindow window(QStringLiteral("Hidden Messages"));
+			window.resize(640, 480);
+			window.setRuntime(&runtime);
+			window.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("hidden_messages.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy disconnectedSpy(&runtime, &WorldRuntime::disconnected);
+			QVERIFY(disconnectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QByteArray received;
+			auto       hasReceivedConnectText = [&acceptedSocket, &received]
+			{
+				if (acceptedSocket->bytesAvailable() == 0)
+					acceptedSocket->waitForReadyRead(10);
+				received += acceptedSocket->readAll();
+				return received.contains("hidden_connect_text");
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(hasReceivedConnectText(), 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kHiddenMessagePluginId, QStringLiteral("connect_marker")),
+			    QStringLiteral("connected"), 5000);
+
+			runtime.disconnectFromWorld();
+			if (disconnectedSpy.isEmpty())
+				QVERIFY(disconnectedSpy.wait(5000));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kHiddenMessagePluginId, QStringLiteral("disconnect_marker")),
+			    QStringLiteral("disconnected"), 5000);
+		}
+
 		static void teardownPluginCloseRunsBeforeSaveStateWithQueuedAsyncCallback()
 		{
 			QTemporaryDir tempDir;
