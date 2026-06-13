@@ -16,18 +16,21 @@
 #include <QFile>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QHostAddress>
+#include <QScopeGuard>
 #include <QScopedPointer>
 #include <QTcpServer>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTcpSocket>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
+#include <QXmlStreamReader>
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
 namespace
 {
 	const QString kDeferredConnectPluginId = QStringLiteral("abcdeffedcbaabcdeffedcba");
+	const QString kTeardownStatePluginId   = QStringLiteral("fedcbaabcdeffedcbaabcdef");
 
 	/**
 	 * @brief Writes text to a test fixture file.
@@ -72,6 +75,26 @@ namespace
 			return {};
 		return value;
 	}
+
+	/**
+	 * @brief Extracts a saved plugin-state variable from a state XML document.
+	 * @param xml State XML text.
+	 * @param name Variable name to find.
+	 * @return Saved variable value, or empty when missing.
+	 */
+	QString savedStateVariable(const QString &xml, const QString &name)
+	{
+		QXmlStreamReader reader(xml);
+		while (!reader.atEnd())
+		{
+			reader.readNext();
+			if (!reader.isStartElement() || reader.name() != QLatin1String("variable"))
+				continue;
+			if (reader.attributes().value(QStringLiteral("name")) == name)
+				return reader.readElementText();
+		}
+		return {};
+	}
 } // namespace
 
 /**
@@ -82,6 +105,86 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 		Q_OBJECT
 
 	private slots:
+		static void teardownPluginCloseRunsBeforeSaveStateWithQueuedAsyncCallback()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString originalCurrentPath = QDir::currentPath();
+			QVERIFY(QDir::setCurrent(tempDir.path()));
+			const auto restoreCurrentPath =
+			    qScopeGuard([originalCurrentPath]() { QDir::setCurrent(originalCurrentPath); });
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			const QString stateDir   = QDir(tempDir.path()).filePath(QStringLiteral("state"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(QDir().mkpath(stateDir));
+
+			const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("teardown_state.xml"));
+			QVERIFY(writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="TeardownState"
+    author="QMud Test"
+    id="fedcbaabcdeffedcbaabcdef"
+    language="lua"
+    enabled="y"
+    save_state="y"
+    sequence="100">
+    <script><![CDATA[
+function OnPluginClose()
+  SetVariable("close_marker", "closed")
+end
+
+function OnPluginAsyncResult(request_id, api_name, status, payload)
+  SetVariable("async_marker", "ran")
+end
+
+function OnPluginSaveState()
+  SetVariable("save_marker", (GetVariable("close_marker") or "missing") .. ":saved")
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml")));
+
+			const QString worldId   = QStringLiteral("aaaaaaaaaaaaaaaaaaaaaaaa");
+			const QString statePath = QDir(stateDir).filePath(
+			    worldId + QStringLiteral("-") + kTeardownStatePluginId + QStringLiteral("-state.xml"));
+			{
+				WorldView view;
+				view.resize(640, 480);
+				view.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(tempDir.path());
+				runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+				runtime.setStateFilesDirectory(stateDir);
+				runtime.setWorldAttribute(QStringLiteral("id"), worldId);
+				view.setRuntime(&runtime);
+				QCoreApplication::processEvents();
+
+				QString loadError;
+				QVERIFY2(runtime.loadPluginFile(QStringLiteral("teardown_state.xml"), &loadError),
+				         qPrintable(loadError));
+				QCOMPARE(runtime.plugins().size(), 1);
+				QCOMPARE(runtime.plugins().constFirst().attributes.value(QStringLiteral("id")),
+				         kTeardownStatePluginId);
+				QVERIFY(runtime.plugins().constFirst().saveState);
+				QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+				runtime.dispatchPluginAsyncResult(kTeardownStatePluginId, 1, QStringLiteral("teardown-test"),
+				                                  true, 0, QStringLiteral("queued"));
+			}
+
+			QString savedText;
+			QVERIFY(readTextFile(statePath, savedText));
+			QCOMPARE(savedStateVariable(savedText, QStringLiteral("close_marker")), QStringLiteral("closed"));
+			QCOMPARE(savedStateVariable(savedText, QStringLiteral("save_marker")),
+			         QStringLiteral("closed:saved"));
+			QCOMPARE(savedStateVariable(savedText, QStringLiteral("async_marker")), QString());
+		}
+
 		static void nativeShimPluginSourceSurvivesWorldSaveReload()
 		{
 			QTemporaryDir tempDir;

@@ -714,7 +714,7 @@ namespace
 		    QStringLiteral("OnPluginTelnetOption"),  QStringLiteral("OnPluginPacketReceived"),
 		    QStringLiteral("OnPluginMXPopenTag"),    QStringLiteral("OnPluginMXPcloseTag"),
 		    QStringLiteral("OnPluginMXPsetEntity"),  QStringLiteral("OnPluginMXPsetVariable"),
-		    QStringLiteral("OnPluginSaveState"),
+		    QStringLiteral("OnPluginClose"),         QStringLiteral("OnPluginSaveState"),
 		};
 		return kInputCriticalCallbacks.contains(request.functionName);
 	}
@@ -4288,22 +4288,6 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 
 WorldRuntime::~WorldRuntime()
 {
-	QMudNativePluginRegistry::discardRuntimeState(this);
-	if (m_viewDestroyedConnection)
-	{
-		QObject::disconnect(m_viewDestroyedConnection);
-		m_viewDestroyedConnection = QMetaObject::Connection{};
-	}
-	m_view = nullptr;
-
-	for (auto &plugin : m_plugins)
-	{
-		if (plugin.lua && hasValidPluginId(plugin))
-			dispatchSingleEngineNoArgCallback(plugin.lua, QStringLiteral("OnPluginClose"), true);
-		savePluginStateForPlugin(plugin, false, nullptr);
-	}
-	m_pluginCallbackDispatchShuttingDown = true;
-
 	QVector<QSharedPointer<LuaCallbackEngine>> enginesToTeardown;
 	enginesToTeardown.reserve((m_luaCallbacks ? 1 : 0) + m_plugins.size());
 	for (auto &plugin : m_plugins)
@@ -4314,7 +4298,24 @@ WorldRuntime::~WorldRuntime()
 	}
 	if (m_luaCallbacks)
 		enginesToTeardown.push_back(makeNonOwningLuaEngineRef(m_luaCallbacks));
+
 	cancelSuspendedPluginCallbackDispatchesForEngines(enginesToTeardown);
+
+	for (auto &plugin : m_plugins)
+	{
+		if (plugin.lua && hasValidPluginId(plugin))
+			dispatchSingleEngineNoArgCallback(plugin.lua, QStringLiteral("OnPluginClose"), true);
+		savePluginStateForPlugin(plugin, false, nullptr);
+	}
+	m_pluginCallbackDispatchShuttingDown = true;
+
+	if (m_viewDestroyedConnection)
+	{
+		QObject::disconnect(m_viewDestroyedConnection);
+		m_viewDestroyedConnection = QMetaObject::Connection{};
+	}
+	m_view = nullptr;
+
 	for (auto &plugin : m_plugins)
 		plugin.lua.clear();
 	dispatchTeardownLuaEngines(enginesToTeardown, true);
@@ -4323,6 +4324,7 @@ WorldRuntime::~WorldRuntime()
 		delete m_luaCallbacks;
 		m_luaCallbacks = nullptr;
 	}
+	QMudNativePluginRegistry::discardRuntimeState(this);
 
 	const QStringList dbNames = m_databases.keys();
 	for (const QString &name : dbNames)
@@ -19711,12 +19713,25 @@ int WorldRuntime::callPluginLua(const QString &pluginId, const QString &routine,
 		    QThread::currentThread() == thread()
 		        ? invokeNative()
 		        : qmudInvokeMethodOr(this, QMudNativePluginRegistry::NativeCallResult{}, invokeNative);
-		lua_pushnumber(callerState, result.errorCode);
 		if (result.errorCode != eOK)
+			return pushCodeAndMessage(result.errorCode, result.errorText);
+		const qsizetype returnValueCount      = result.returnValues.size();
+		constexpr int   kErrorCodeReturnCount = 1;
+		if (returnValueCount > std::numeric_limits<int>::max() - kErrorCodeReturnCount)
 		{
-			pushUtf8String(callerState, result.errorText);
-			return 2;
+			return pushCodeAndMessage(
+			    eErrorCallingPluginRoutine,
+			    QStringLiteral("Native plugin routine '%1' returned too many values").arg(routine));
 		}
+		const int pushedValueCount = static_cast<int>(returnValueCount) + kErrorCodeReturnCount;
+		if (lua_checkstack(callerState, pushedValueCount) == 0)
+		{
+			return pushCodeAndMessage(
+			    eErrorCallingPluginRoutine,
+			    QStringLiteral("Unable to reserve Lua stack space for native plugin routine '%1'")
+			        .arg(routine));
+		}
+		lua_pushnumber(callerState, result.errorCode);
 		for (const QVariant &value : result.returnValues)
 		{
 			switch (value.typeId())
@@ -19736,7 +19751,7 @@ int WorldRuntime::callPluginLua(const QString &pluginId, const QString &routine,
 				break;
 			}
 		}
-		return result.returnValues.size() + 1;
+		return pushedValueCount;
 	}
 
 	if (QThread::currentThread() != thread())
