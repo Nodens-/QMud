@@ -3609,10 +3609,10 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 	switch (sendTo)
 	{
 	case eSendToWorld:
-		sendMsg(text, echoSend, false, logIt);
+		sendMsg(QMudCommandText::normalizeActionCommandTextForSend(text), echoSend, false, logIt);
 		break;
 	case eSendToCommandQueue:
-		sendMsg(text, echoSend, true, logIt);
+		sendMsg(QMudCommandText::normalizeActionCommandTextForSend(text), echoSend, true, logIt);
 		break;
 	case eSendToSpeedwalk:
 	{

@@ -130,6 +130,29 @@ class tst_WorldCommandProcessor_Queueing : public QObject
 			QCOMPARE(QMudCommandQueue::discardAll(queue), 2);
 			QVERIFY(queue.isEmpty());
 		}
+
+		void actionCommandTextNormalizesLineEndingsForSend_data()
+		{
+			QTest::addColumn<QString>("input");
+			QTest::addColumn<QString>("expected");
+
+			QTest::newRow("lf") << QStringLiteral("north\nsouth") << QStringLiteral("north\r\nsouth");
+			QTest::newRow("crlf") << QStringLiteral("north\r\nsouth") << QStringLiteral("north\r\nsouth");
+			QTest::newRow("cr") << QStringLiteral("north\rsouth") << QStringLiteral("north\r\nsouth");
+			QTest::newRow("mixed") << QStringLiteral("north\nsouth\reast\r\nwest")
+			                       << QStringLiteral("north\r\nsouth\r\neast\r\nwest");
+			QTest::newRow("trailing-lf") << QStringLiteral("north\n") << QStringLiteral("north\r\n");
+			QTest::newRow("trailing-crlf") << QStringLiteral("north\r\n") << QStringLiteral("north\r\n");
+			QTest::newRow("empty") << QString() << QString();
+		}
+
+		void actionCommandTextNormalizesLineEndingsForSend()
+		{
+			QFETCH(QString, input);
+			QFETCH(QString, expected);
+
+			QCOMPARE(QMudCommandText::normalizeActionCommandTextForSend(input), expected);
+		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 

@@ -91,6 +91,13 @@ namespace QMudCommandText
 	QString fixupEscapeSequences(const QString &source);
 
 	/**
+	 * @brief Converts action command body line endings to the send pipeline terminator.
+	 * @param source Action command text from send-to-world/queue bodies.
+	 * @return Command text with CRLF, LF, and CR represented as CRLF.
+	 */
+	QString normalizeActionCommandTextForSend(const QString &source);
+
+	/**
 	 * @brief Applies wildcard replacement/post-processing for send-target transforms.
 	 * @param wildcard Wildcard value to process.
 	 * @param makeLowerCase Force lowercase conversion when `true`.
