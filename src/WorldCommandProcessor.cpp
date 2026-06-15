@@ -1168,9 +1168,15 @@ const QStringList &WorldCommandProcessor::queuedCommands() const
 	return m_queuedCommands;
 }
 
+int WorldCommandProcessor::triggerPriorityQueuedCommandCount() const
+{
+	return m_triggerPriorityQueuedCommands;
+}
+
 int WorldCommandProcessor::discardQueuedCommands()
 {
-	const int count = QMudCommandQueue::discardAll(m_queuedCommands);
+	const int count                 = QMudCommandQueue::discardAll(m_queuedCommands);
+	m_triggerPriorityQueuedCommands = 0;
 	if (m_runtime)
 		m_runtime->setQueuedCommandCount(0);
 	updateQueuedCommandsStatusLine();
@@ -1192,6 +1198,14 @@ int WorldCommandProcessor::executeCommand(const QString &text)
 	evaluateCommand(text);
 	--m_executionDepth;
 	return eOK;
+}
+
+int WorldCommandProcessor::executeCommandWithTriggerPriority(const QString &text)
+{
+	++m_triggerCommandPriorityDepth;
+	const auto restoreTriggerCommandPriority = qScopeGuard([this] { --m_triggerCommandPriorityDepth; });
+	Q_UNUSED(restoreTriggerCommandPriority);
+	return executeCommand(text);
 }
 
 void WorldCommandProcessor::sendToFromAccelerator(int sendTo, const QString &text, const QString &description,
@@ -1699,12 +1713,27 @@ void WorldCommandProcessor::sendRawText(const QString &text, const bool echo, co
 		m_view->addToHistoryForced(text);
 }
 
+void WorldCommandProcessor::sendRawTextWithTriggerPriority(const QString &text, const bool echo,
+                                                           const bool queue, const bool log,
+                                                           const bool history)
+{
+	++m_triggerCommandPriorityDepth;
+	const auto restoreTriggerCommandPriority = qScopeGuard([this] { --m_triggerCommandPriorityDepth; });
+	Q_UNUSED(restoreTriggerCommandPriority);
+	sendRawText(text, echo, queue, log, history);
+}
+
 void WorldCommandProcessor::sendImmediateText(const QString &text, const bool echo, const bool log,
                                               const bool history)
 {
 	doSendMsg(text, echo, log);
 	if (history && m_view)
 		m_view->addToHistoryForced(text);
+}
+
+void WorldCommandProcessor::sendDeferredInboundText(const QString &text, const bool echo, const bool log)
+{
+	doSendMsg(text, echo, log);
 }
 
 void WorldCommandProcessor::logInputCommand(const QString &text) const
@@ -3605,14 +3634,25 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 	const bool logIt     = logInput && !omitFromLog;
 	const bool fromTimer = m_runtime && m_runtime->currentActionSource() == WorldRuntime::eTimerFired;
 	const bool echoSend  = omitFromOutput ? false : (fromTimer ? true : echoInput);
+	const bool triggerCommandPriority = m_runtime &&
+	                                    m_runtime->currentActionSource() == WorldRuntime::eTriggerFired &&
+	                                    (sendTo == eSendToWorld || sendTo == eSendToExecute);
+	if (triggerCommandPriority)
+		++m_triggerCommandPriorityDepth;
+	[[maybe_unused]] const auto restoreTriggerCommandPriority = qScopeGuard(
+	    [this, triggerCommandPriority]
+	    {
+		    if (triggerCommandPriority)
+			    --m_triggerCommandPriorityDepth;
+	    });
 
 	switch (sendTo)
 	{
 	case eSendToWorld:
-		sendMsg(text, echoSend, false, logIt);
+		sendMsg(QMudCommandText::normalizeActionCommandTextNewlines(text), echoSend, false, logIt);
 		break;
 	case eSendToCommandQueue:
-		sendMsg(text, echoSend, true, logIt);
+		sendMsg(QMudCommandText::normalizeActionCommandTextNewlines(text), echoSend, true, logIt);
 		break;
 	case eSendToSpeedwalk:
 	{
@@ -3672,7 +3712,13 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 		const bool saved = m_suppressInputLog;
 		if (omitFromLog)
 			m_suppressInputLog = true;
-		executeCommand(text);
+		const QString     normalized = QMudCommandText::normalizeActionCommandTextNewlines(text);
+		const QStringList commands   = normalized.split(kEndLine, Qt::SkipEmptyParts);
+		if (!commands.isEmpty())
+		{
+			for (const QString &command : commands)
+				executeCommand(command);
+		}
 		m_suppressInputLog = saved;
 	}
 	break;
@@ -3830,11 +3876,27 @@ void WorldCommandProcessor::sendMsg(const QString &text, const bool echo, const 
 
 		if (QMudCommandQueue::shouldQueueCommand(m_speedWalkDelay, queueIt, !m_queuedCommands.isEmpty()))
 		{
-			m_queuedCommands.append(QMudCommandQueue::encodeQueueEntry(strLine, queueIt, bEcho, logIt));
+			const QString encoded = QMudCommandQueue::encodeQueueEntry(strLine, queueIt, bEcho, logIt);
+			if (const bool triggerPriority = !queueIt && m_triggerCommandPriorityDepth > 0; triggerPriority)
+			{
+				const int insertAt =
+				    qBound(0, m_triggerPriorityQueuedCommands, safeQSizeToInt(m_queuedCommands.size()));
+				m_queuedCommands.insert(insertAt, encoded);
+				m_triggerPriorityQueuedCommands = insertAt + 1;
+			}
+			else
+			{
+				m_queuedCommands.append(encoded);
+			}
 
 		} // end of having a speedwalk delay
 		else
+		{
+			const bool triggerPriority = !queueIt && m_triggerCommandPriorityDepth > 0;
+			if (m_runtime && m_runtime->deferInboundImmediateCommand(strLine, bEcho, logIt, triggerPriority))
+				continue;
 			doSendMsg(strLine, bEcho, logIt); // just send it
+		}
 	} // end of breaking it into lines
 
 	if (!m_queuedCommands.isEmpty())
@@ -4114,8 +4176,11 @@ void WorldCommandProcessor::processQueuedCommands(bool flushAll)
 		}
 	}
 
-	bool              sentAny = false;
-	const QStringList batch   = QMudCommandQueue::takeDispatchBatch(m_queuedCommands, flushAll);
+	bool              sentAny         = false;
+	const int         queuedBefore    = safeQSizeToInt(m_queuedCommands.size());
+	const QStringList batch           = QMudCommandQueue::takeDispatchBatch(m_queuedCommands, flushAll);
+	const int         removedFromHead = queuedBefore - safeQSizeToInt(m_queuedCommands.size());
+	m_triggerPriorityQueuedCommands   = qMax(0, m_triggerPriorityQueuedCommands - removedFromHead);
 	for (const QString &queued : batch)
 	{
 		const QMudCommandQueue::QueueEntry decoded = QMudCommandQueue::decodeQueueEntry(queued);
@@ -4127,6 +4192,8 @@ void WorldCommandProcessor::processQueuedCommands(bool flushAll)
 		m_queueDispatchTimer.restart();
 	if (flushAll && m_queueDispatchTimer.isValid())
 		m_queueDispatchTimer.invalidate();
+	if (m_queuedCommands.isEmpty())
+		m_triggerPriorityQueuedCommands = 0;
 
 	if (m_runtime)
 		m_runtime->setQueuedCommandCount(safeQSizeToInt(m_queuedCommands.size()));

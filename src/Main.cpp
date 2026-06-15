@@ -34,6 +34,11 @@ namespace
 #else
 	constexpr DWORD kLoadLibrarySearchDefaultDirs = 0x00001000;
 #endif
+#ifdef LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+	constexpr DWORD kLoadLibrarySearchDllLoadDir = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR;
+#else
+	constexpr DWORD kLoadLibrarySearchDllLoadDir = 0x00000100;
+#endif
 
 	template <typename Function> Function resolveKernel32Function(HMODULE kernel32, const char *name)
 	{
@@ -42,6 +47,17 @@ namespace
 		static_assert(sizeof(function) == sizeof(procedure));
 		std::memcpy(&function, &procedure, sizeof(function));
 		return function;
+	}
+
+	void preloadBundledOpenSslDll(const QString &dllPath, bool useModernSearchFlags)
+	{
+		const wchar_t *path = reinterpret_cast<const wchar_t *>(dllPath.utf16());
+		const HMODULE  module =
+		    useModernSearchFlags
+		        ? LoadLibraryExW(path, nullptr, kLoadLibrarySearchDllLoadDir | kLoadLibrarySearchDefaultDirs)
+		        : LoadLibraryW(path);
+		if (!module)
+			qWarning() << "Failed to preload bundled OpenSSL DLL" << dllPath << "error" << GetLastError();
 	}
 #endif
 
@@ -93,14 +109,23 @@ namespace
 		auto addDllDirectoryFn = resolveKernel32Function<AddDllDirectoryFn>(kernel32, "AddDllDirectory");
 		if (setDefaultDllDirectoriesFn && addDllDirectoryFn)
 		{
-			setDefaultDllDirectoriesFn(kLoadLibrarySearchDefaultDirs);
-			addDllDirectoryFn(libDirPath);
+			if (!setDefaultDllDirectoriesFn(kLoadLibrarySearchDefaultDirs))
+				qWarning() << "SetDefaultDllDirectories failed with error" << GetLastError();
+			if (!addDllDirectoryFn(libDirPath))
+				qWarning() << "AddDllDirectory failed for" << libDir << "with error" << GetLastError();
+			preloadBundledOpenSslDll(libDir + QStringLiteral("\\libcrypto-3-x64.dll"), true);
+			preloadBundledOpenSslDll(libDir + QStringLiteral("\\libssl-3-x64.dll"), true);
 			return;
 		}
 
 		auto setDllDirectoryWFn = resolveKernel32Function<SetDllDirectoryWFn>(kernel32, "SetDllDirectoryW");
 		if (setDllDirectoryWFn)
-			setDllDirectoryWFn(libDirPath);
+		{
+			if (!setDllDirectoryWFn(libDirPath))
+				qWarning() << "SetDllDirectory failed for" << libDir << "with error" << GetLastError();
+			preloadBundledOpenSslDll(libDir + QStringLiteral("\\libcrypto-3-x64.dll"), false);
+			preloadBundledOpenSslDll(libDir + QStringLiteral("\\libssl-3-x64.dll"), false);
+		}
 	}
 #endif
 } // namespace

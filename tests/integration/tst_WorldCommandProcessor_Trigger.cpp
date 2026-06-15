@@ -11,6 +11,13 @@
 #include "WorldCommandProcessorUtils.h"
 #include "WorldOptions.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QHostAddress>
+#include <QScopedPointer>
+#include <QTcpServer>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QTcpSocket>
+#include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
 namespace
@@ -47,6 +54,32 @@ namespace
 		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
 		trigger.children.insert(QStringLiteral("send"), QStringLiteral("return true"));
 		return trigger;
+	}
+
+	/**
+	 * @brief Decodes queued command payloads for assertions.
+	 * @param processor Processor whose queue should be inspected.
+	 * @return Queue payloads in dispatch order.
+	 */
+	QStringList queuedPayloads(const WorldCommandProcessor &processor)
+	{
+		QStringList payloads;
+		for (const QString &entry : processor.queuedCommands())
+			payloads.push_back(QMudCommandQueue::decodeQueueEntry(entry).payload);
+		return payloads;
+	}
+
+	/**
+	 * @brief Decodes queued command delayed-queue flags for assertions.
+	 * @param processor Processor whose queue should be inspected.
+	 * @return Queue delayed flags in dispatch order.
+	 */
+	QList<bool> queuedTypes(const WorldCommandProcessor &processor)
+	{
+		QList<bool> queuedTypes;
+		for (const QString &entry : processor.queuedCommands())
+			queuedTypes.push_back(QMudCommandQueue::decodeQueueEntry(entry).queuedType);
+		return queuedTypes;
 	}
 } // namespace
 
@@ -191,6 +224,62 @@ class tst_WorldCommandProcessor_Trigger : public QObject
 			QCOMPARE(capturedRuns.at(2).textColour, 0x0000ff);
 			QCOMPARE(capturedRuns.at(2).backColour, 0x000000);
 			QCOMPARE(capturedRuns.at(2).style, 0);
+		}
+
+		static void triggerSendsInsertAtPriorityQueueBoundary()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("1000"));
+
+			WorldCommandProcessor processor;
+			processor.setRuntime(&runtime);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			processor.sendRawText(QStringLiteral("qcmd-tail-9f31"), false, true, true, false);
+			QCOMPARE(queuedPayloads(processor), (QStringList{QStringLiteral("qcmd-tail-9f31")}));
+			QCOMPARE(queuedTypes(processor), (QList<bool>{true}));
+
+			processor.sendRawTextWithTriggerPriority(QStringLiteral("qcmd-priority-a17"), false, false, true,
+			                                         false);
+			processor.sendRawTextWithTriggerPriority(QStringLiteral("qcmd-priority-b42"), false, false, true,
+			                                         false);
+			processor.sendRawTextWithTriggerPriority(QStringLiteral("qcmd-priority-c83"), false, false, true,
+			                                         false);
+
+			QCOMPARE(queuedPayloads(processor),
+			         (QStringList{QStringLiteral("qcmd-priority-a17"), QStringLiteral("qcmd-priority-b42"),
+			                      QStringLiteral("qcmd-priority-c83"), QStringLiteral("qcmd-tail-9f31")}));
+			QCOMPARE(queuedTypes(processor), (QList<bool>{false, false, false, true}));
+
+			processor.sendRawText(QStringLiteral("qcmd-normal-d64"), false, false, true, false);
+			QCOMPARE(queuedPayloads(processor),
+			         (QStringList{QStringLiteral("qcmd-priority-a17"), QStringLiteral("qcmd-priority-b42"),
+			                      QStringLiteral("qcmd-priority-c83"), QStringLiteral("qcmd-tail-9f31"),
+			                      QStringLiteral("qcmd-normal-d64")}));
+			QCOMPARE(queuedTypes(processor), (QList<bool>{false, false, false, true, false}));
+
+			processor.sendRawTextWithTriggerPriority(QStringLiteral("qcmd-priority-e05"), false, false, true,
+			                                         false);
+
+			QCOMPARE(queuedPayloads(processor),
+			         (QStringList{QStringLiteral("qcmd-priority-a17"), QStringLiteral("qcmd-priority-b42"),
+			                      QStringLiteral("qcmd-priority-c83"), QStringLiteral("qcmd-priority-e05"),
+			                      QStringLiteral("qcmd-tail-9f31"), QStringLiteral("qcmd-normal-d64")}));
+			QCOMPARE(queuedTypes(processor), (QList<bool>{false, false, false, false, true, false}));
 		}
 };
 

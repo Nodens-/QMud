@@ -648,6 +648,7 @@ namespace
 			QSet<QString>                                         missingMiniWindowHotspots;
 			int                                                   actionSourceOverride{0};
 			bool                                                  hasActionSourceOverride{false};
+			bool                                                  directTriggerScriptActionPriority{false};
 			QPointer<WorldRuntime>                                deferredRuntimeTarget;
 			QVector<std::function<void()>>                        deferredRuntimeMutations;
 			bool                                                  hasPendingDeferredRuntimeMutations{false};
@@ -660,6 +661,12 @@ namespace
 	{
 			bool done{false};
 			int  value{0};
+	};
+
+	struct CallbackActionSourceOverride
+	{
+			bool           active{false};
+			unsigned short source{WorldRuntime::eUnknownActionSource};
 	};
 
 	enum class DeferredRuntimeMutationFlushPolicy
@@ -703,6 +710,16 @@ namespace
 		context.hasPendingDeferredRuntimeMutations = false;
 		if (g_activeDeferredMutationContextCount > 0)
 			--g_activeDeferredMutationContextCount;
+	}
+
+	CallbackActionSourceOverride callbackActionSourceOverride(const LuaCallbackExecutionContext *context)
+	{
+		if (!context || !context->hasActionSourceOverride)
+			return {};
+		CallbackActionSourceOverride source;
+		source.active = true;
+		source.source = static_cast<unsigned short>(context->actionSourceOverride);
+		return source;
 	}
 
 	void pushActiveCallbackContext(const LuaCallbackEngine *engine, LuaCallbackExecutionContext &&context)
@@ -6712,8 +6729,10 @@ namespace
 	QVariantHash commandUiValuesFromSnapshot(const WorldRuntime::CommandUiSnapshot &snapshot)
 	{
 		QVariantHash values;
-		values.reserve(52);
+		values.reserve(53);
 		values.insert(QStringLiteral("queuedCommands"), snapshot.queuedCommands);
+		values.insert(QStringLiteral("triggerPriorityQueuedCommandCount"),
+		              snapshot.triggerPriorityQueuedCommandCount);
 		values.insert(QStringLiteral("commandInputText"), snapshot.commandInputText);
 		values.insert(QStringLiteral("commandHistory"), snapshot.commandHistory);
 		values.insert(QStringLiteral("inputSelectionStartColumn"), snapshot.inputSelectionStartColumn);
@@ -6775,7 +6794,9 @@ namespace
 	{
 		WorldRuntime::CommandUiSnapshot snapshot;
 		const QVariantHash             &values = dispatchSnapshot.commandUiValues;
-		snapshot.queuedCommands   = values.value(QStringLiteral("queuedCommands")).toStringList();
+		snapshot.queuedCommands = values.value(QStringLiteral("queuedCommands")).toStringList();
+		snapshot.triggerPriorityQueuedCommandCount =
+		    values.value(QStringLiteral("triggerPriorityQueuedCommandCount")).toInt();
 		snapshot.commandInputText = values.value(QStringLiteral("commandInputText")).toString();
 		snapshot.commandHistory   = values.value(QStringLiteral("commandHistory")).toStringList();
 		snapshot.inputSelectionStartColumn =
@@ -9644,7 +9665,9 @@ namespace
 		if (lines.isEmpty())
 			lines.append(QString());
 
-		bool changed = false;
+		const auto *context         = activeCallbackContextConst(engine);
+		const bool  triggerPriority = !queue && context && context->directTriggerScriptActionPriority;
+		bool        changed         = false;
 		for (const QString &line : lines)
 		{
 			if (!QMudCommandQueue::shouldQueueCommand(speedWalkDelay, queue,
@@ -9653,7 +9676,18 @@ namespace
 				immediateLines.append(line);
 				continue;
 			}
-			snapshot.queuedCommands.append(QMudCommandQueue::encodeQueueEntry(line, queue, echo, log));
+			const QString encoded = QMudCommandQueue::encodeQueueEntry(line, queue, echo, log);
+			if (triggerPriority)
+			{
+				const int queueSize = sizeToInt(snapshot.queuedCommands.size());
+				const int insertAt  = qBound(0, snapshot.triggerPriorityQueuedCommandCount, queueSize);
+				snapshot.queuedCommands.insert(insertAt, encoded);
+				snapshot.triggerPriorityQueuedCommandCount = insertAt + 1;
+			}
+			else
+			{
+				snapshot.queuedCommands.append(encoded);
+			}
 			changed = true;
 		}
 
@@ -9836,7 +9870,7 @@ void LuaCallbackEngine::setScriptText(const QString &script)
 	if (!m_observedPluginCallbackPresence.isEmpty())
 		m_observedPluginCallbackPresence.clear();
 	if (m_callbackCatalogObserver)
-		m_callbackCatalogObserver(m_pluginId.trimmed().toLower(), {}, m_luaFunctionsSet);
+		m_callbackCatalogObserver(pluginIdMetadata().trimmed().toLower(), {}, m_luaFunctionsSet);
 }
 
 bool LuaCallbackEngine::loadScript()
@@ -9870,7 +9904,7 @@ void LuaCallbackEngine::resetState()
 	m_callingPluginIdStack.clear();
 	m_dispatchMiniWindowSnapshotStack.clear();
 	if (m_callbackCatalogObserver)
-		m_callbackCatalogObserver(m_pluginId.trimmed().toLower(), {}, m_luaFunctionsSet);
+		m_callbackCatalogObserver(pluginIdMetadata().trimmed().toLower(), {}, m_luaFunctionsSet);
 #endif
 }
 
@@ -9963,7 +9997,7 @@ void LuaCallbackEngine::refreshLuaCallbackCatalogNow()
 {
 	bindOrAssertExecutionThread("LuaCallbackEngine::refreshLuaCallbackCatalogNow");
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
-	const QString normalizedPluginId = m_pluginId.trimmed().toLower();
+	const QString normalizedPluginId = pluginIdMetadata().trimmed().toLower();
 	if (m_observedPluginCallbacks.isEmpty())
 	{
 		if (m_observedPluginCallbackPresence.isEmpty())
@@ -10018,8 +10052,6 @@ lua_State *LuaCallbackEngine::luaState() const
 void LuaCallbackEngine::setPluginInfo(const QString &id, const QString &name, const QString &directory)
 {
 	bindOrAssertExecutionThread("LuaCallbackEngine::setPluginInfo");
-	m_pluginId                  = id;
-	m_pluginName                = name;
 	QString normalizedDirectory = directory;
 	if (!normalizedDirectory.isEmpty() && !normalizedDirectory.endsWith('/') &&
 	    !normalizedDirectory.endsWith('\\'))
@@ -10027,18 +10059,30 @@ void LuaCallbackEngine::setPluginInfo(const QString &id, const QString &name, co
 		normalizedDirectory += '/';
 	}
 	normalizedDirectory.replace(QLatin1Char('\\'), QLatin1Char('/'));
+	m_pluginId        = id;
+	m_pluginName      = name;
 	m_pluginDirectory = normalizedDirectory;
 }
 
 QString LuaCallbackEngine::pluginId() const
 {
 	bindOrAssertExecutionThread("LuaCallbackEngine::pluginId");
+	return pluginIdMetadata();
+}
+
+QString LuaCallbackEngine::pluginIdMetadata() const
+{
 	return m_pluginId;
 }
 
 QString LuaCallbackEngine::pluginName() const
 {
 	bindOrAssertExecutionThread("LuaCallbackEngine::pluginName");
+	return pluginNameMetadata();
+}
+
+QString LuaCallbackEngine::pluginNameMetadata() const
+{
 	return m_pluginName;
 }
 
@@ -13424,8 +13468,12 @@ static int luaDiscardQueue(lua_State *L)
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime, [](const WorldRuntime &targetRuntime)
 		    { static_cast<void>(targetRuntime.discardQueuedCommands()); });
-		updateCachedCommandUiSnapshot(engine, [](WorldRuntime::CommandUiSnapshot &cached)
-		                              { cached.queuedCommands.clear(); });
+		updateCachedCommandUiSnapshot(engine,
+		                              [](WorldRuntime::CommandUiSnapshot &cached)
+		                              {
+			                              cached.queuedCommands.clear();
+			                              cached.triggerPriorityQueuedCommandCount = 0;
+		                              });
 		WorldRuntime::RuntimeCountersSnapshot runtimeSnapshot;
 		static_cast<void>(resolveRuntimeCountersSnapshotForApi(engine, runtime, runtimeSnapshot));
 		updateCallbackRuntimeSnapshot(engine, [](WorldRuntime::RuntimeCountersSnapshot &cached)
@@ -16638,12 +16686,18 @@ static int luaExecute(lua_State *L)
 		return 1;
 	}
 	const QString input = QString::fromUtf8(luaL_checkstring(L, 1));
-	if (activeCallbackContextConst(engine))
+	if (const auto *context = activeCallbackContextConst(engine); context)
 	{
-		return enqueueRuntimeThreadAsyncStatusResult(
+		const bool triggerPriority = context->directTriggerScriptActionPriority;
+		const int  results         = enqueueRuntimeThreadAsyncStatusResult(
 		    L, engine, runtime, QStringLiteral("Execute"), eOK, eWorldClosed,
-		    [input](const WorldRuntime &targetRuntime) -> int { return targetRuntime.executeCommand(input); },
+		    [input, triggerPriority](const WorldRuntime &targetRuntime) -> int
+		    {
+			    return triggerPriority ? targetRuntime.executeCommandWithTriggerPriority(input)
+			                           : targetRuntime.executeCommand(input);
+		    },
 		    [](const int status) { return status == eOK; });
+		return results;
 	}
 	const int result = runOnRuntimeThreadDeferredMutation(
 	    engine, runtime, [input](const WorldRuntime &targetRuntime) -> int
@@ -30646,13 +30700,34 @@ static int pushDispatchSendCommandResult(lua_State *L, const LuaCallbackEngine *
 			return 1;
 		}
 
+		const auto                        *context              = activeCallbackContextConst(engine);
+		const CallbackActionSourceOverride actionSourceOverride = callbackActionSourceOverride(context);
+		const bool                         directTriggerPrioritySend =
+		    context && context->directTriggerScriptActionPriority && !queue && !immediate;
 		const QPointer<WorldRuntime> runtimeGuard(runtime);
 		const int                    results = enqueueRuntimeThreadAsyncOkStatusResult(
 		    L, engine, runtime, apiName, eWorldClosed,
-		    [runtimeGuard, text, echo, queue, log, history, immediate](WorldRuntime &) -> int
+		    [runtimeGuard, text, echo, queue, log, history, immediate, actionSourceOverride,
+		     directTriggerPrioritySend](WorldRuntime &) -> int
 		    {
 			    if (!runtimeGuard)
 				    return eWorldClosed;
+			    if (actionSourceOverride.active)
+			    {
+				    const unsigned short previousActionSource = runtimeGuard->currentActionSource();
+				    runtimeGuard->setCurrentActionSource(actionSourceOverride.source);
+				    [[maybe_unused]] const auto restoreActionSource = qScopeGuard(
+				        [runtimeGuard, previousActionSource]
+				        {
+					        if (runtimeGuard)
+						        runtimeGuard->setCurrentActionSource(previousActionSource);
+				        });
+				    return directTriggerPrioritySend
+				               ? runtimeGuard->sendCommandWithTriggerPriority(text, echo, queue, log, history)
+				               : runtimeGuard->sendCommand(text, echo, queue, log, history, immediate);
+			    }
+			    if (directTriggerPrioritySend)
+				    return runtimeGuard->sendCommandWithTriggerPriority(text, echo, queue, log, history);
 			    return runtimeGuard->sendCommand(text, echo, queue, log, history, immediate);
 		    });
 		if (lua_tointeger(L, -results) == eOK)
@@ -46430,8 +46505,11 @@ bool LuaCallbackEngine::executeScript(const QString &code, const QString &descri
 	                                                  ? CallbackWildcardDomain::Trigger
 	                                                  : CallbackWildcardDomain::None;
 	LuaCallbackExecutionContext  context;
-	context.wildcardDomain                   = wildcardDomain;
-	context.triggerOutputReplacesMatchedLine = triggerOutputReplacesMatchedLine;
+	context.wildcardDomain                    = wildcardDomain;
+	context.actionSourceOverride              = hasTriggerContext ? WorldRuntime::eTriggerFired : -1;
+	context.hasActionSourceOverride           = hasTriggerContext;
+	context.directTriggerScriptActionPriority = hasTriggerContext;
+	context.triggerOutputReplacesMatchedLine  = triggerOutputReplacesMatchedLine;
 	pushActiveCallbackContext(this, std::move(context));
 	if (const auto *snapshot = currentDispatchMiniWindowSnapshot(); snapshot)
 		seedCallbackMiniWindowSnapshot(this, snapshot);

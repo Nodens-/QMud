@@ -568,8 +568,8 @@ namespace
 	{
 		if (!engine)
 			return QStringLiteral("<null>");
-		const QString id   = engine->pluginId().trimmed();
-		const QString name = engine->pluginName().trimmed();
+		const QString id   = engine->pluginIdMetadata().trimmed();
+		const QString name = engine->pluginNameMetadata().trimmed();
 		if (name.isEmpty())
 			return id;
 		return QStringLiteral("%1/%2").arg(id, name);
@@ -588,7 +588,7 @@ namespace
 	{
 		return std::ranges::any_of(
 		    engines, [](const QSharedPointer<LuaCallbackEngine> &engine)
-		    { return engine && qmudMmStartupDiagIsWatchedPluginId(engine->pluginId()); });
+		    { return engine && qmudMmStartupDiagIsWatchedPluginId(engine->pluginIdMetadata()); });
 	}
 
 	bool qmudMmStartupDiagRequestHasWatchedEngine(const LuaBatchDispatchRequest &request)
@@ -609,7 +609,7 @@ namespace
 			return true;
 		return std::ranges::any_of(
 		    recipients, [](const QSharedPointer<LuaCallbackEngine> &engine)
-		    { return engine && qmudMmStartupDiagIsWatchedPluginId(engine->pluginId()); });
+		    { return engine && qmudMmStartupDiagIsWatchedPluginId(engine->pluginIdMetadata()); });
 	}
 
 	QString qmudMmStartupDiagResultLabel(const LuaBatchDispatchResult &result)
@@ -714,7 +714,7 @@ namespace
 		    QStringLiteral("OnPluginTelnetOption"),  QStringLiteral("OnPluginPacketReceived"),
 		    QStringLiteral("OnPluginMXPopenTag"),    QStringLiteral("OnPluginMXPcloseTag"),
 		    QStringLiteral("OnPluginMXPsetEntity"),  QStringLiteral("OnPluginMXPsetVariable"),
-		    QStringLiteral("OnPluginSaveState"),
+		    QStringLiteral("OnPluginClose"),         QStringLiteral("OnPluginSaveState"),
 		};
 		return kInputCriticalCallbacks.contains(request.functionName);
 	}
@@ -4070,20 +4070,14 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 	TelnetProcessor::Callbacks callbacks;
 	callbacks.onTelnetRequest = [this](int number, const QString &type)
 	{ return callPluginCallbacksStopOnTrue(QStringLiteral("OnPluginTelnetRequest"), number, type); };
-	callbacks.onTelnetSubnegotiation = [this](int number, const QByteArray &data)
+	callbacks.onTelnetSubnegotiation = [](int number, const QByteArray &data)
 	{
-		m_lastTelnetSubnegotiation = QString::fromLatin1(data);
-		callPluginCallbacksWithNumberAndBytes(QStringLiteral("OnPluginTelnetSubnegotiation"), number, data,
-		                                      true);
+		Q_UNUSED(number);
+		Q_UNUSED(data);
 	};
-	callbacks.onTelnetOption = [this](const QByteArray &data)
-	{ callPluginCallbacksWithBytes(QStringLiteral("OnPluginTelnetOption"), data, true); };
-	callbacks.onIacGa = [this]
-	{
-		m_lastLineWithIacGa = m_linesReceived;
-		callPluginCallbacksNoArgs(QStringLiteral("OnPluginIacGa"), true);
-	};
-	callbacks.onMxpStart = [this](bool pueblo, bool manual)
+	callbacks.onTelnetOption = [](const QByteArray &data) { Q_UNUSED(data); };
+	callbacks.onIacGa        = [] {};
+	callbacks.onMxpStart     = [this](bool pueblo, bool manual)
 	{
 		Q_UNUSED(manual);
 		mxpStartUp();
@@ -4288,22 +4282,6 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 
 WorldRuntime::~WorldRuntime()
 {
-	QMudNativePluginRegistry::discardRuntimeState(this);
-	if (m_viewDestroyedConnection)
-	{
-		QObject::disconnect(m_viewDestroyedConnection);
-		m_viewDestroyedConnection = QMetaObject::Connection{};
-	}
-	m_view = nullptr;
-
-	for (auto &plugin : m_plugins)
-	{
-		if (plugin.lua && hasValidPluginId(plugin))
-			dispatchSingleEngineNoArgCallback(plugin.lua, QStringLiteral("OnPluginClose"), true);
-		savePluginStateForPlugin(plugin, false, nullptr);
-	}
-	m_pluginCallbackDispatchShuttingDown = true;
-
 	QVector<QSharedPointer<LuaCallbackEngine>> enginesToTeardown;
 	enginesToTeardown.reserve((m_luaCallbacks ? 1 : 0) + m_plugins.size());
 	for (auto &plugin : m_plugins)
@@ -4314,7 +4292,24 @@ WorldRuntime::~WorldRuntime()
 	}
 	if (m_luaCallbacks)
 		enginesToTeardown.push_back(makeNonOwningLuaEngineRef(m_luaCallbacks));
+
 	cancelSuspendedPluginCallbackDispatchesForEngines(enginesToTeardown);
+
+	for (auto &plugin : m_plugins)
+	{
+		if (plugin.lua && hasValidPluginId(plugin))
+			dispatchSingleEngineNoArgCallback(plugin.lua, QStringLiteral("OnPluginClose"), true);
+		savePluginStateForPlugin(plugin, false, nullptr);
+	}
+	m_pluginCallbackDispatchShuttingDown = true;
+
+	if (m_viewDestroyedConnection)
+	{
+		QObject::disconnect(m_viewDestroyedConnection);
+		m_viewDestroyedConnection = QMetaObject::Connection{};
+	}
+	m_view = nullptr;
+
 	for (auto &plugin : m_plugins)
 		plugin.lua.clear();
 	dispatchTeardownLuaEngines(enginesToTeardown, true);
@@ -4323,6 +4318,7 @@ WorldRuntime::~WorldRuntime()
 		delete m_luaCallbacks;
 		m_luaCallbacks = nullptr;
 	}
+	QMudNativePluginRegistry::discardRuntimeState(this);
 
 	const QStringList dbNames = m_databases.keys();
 	for (const QString &name : dbNames)
@@ -4436,6 +4432,49 @@ void WorldRuntime::receiveRawData(const QByteArray &data)
 	}
 }
 
+void WorldRuntime::beginInboundCommandDeferralScope() const
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::beginInboundCommandDeferralScope");
+	++m_inboundCommandDeferralDepth;
+}
+
+void WorldRuntime::endInboundCommandDeferralScope() const
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::endInboundCommandDeferralScope");
+	if (m_inboundCommandDeferralDepth <= 0)
+		return;
+	--m_inboundCommandDeferralDepth;
+	if (m_inboundCommandDeferralDepth == 0)
+		flushDeferredInboundCommands();
+}
+
+void WorldRuntime::flushDeferredInboundCommands() const
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::flushDeferredInboundCommands");
+	if (m_flushingDeferredInboundCommands || m_deferredInboundCommands.isEmpty())
+		return;
+
+	const QVector<DeferredInboundCommand> commands = m_deferredInboundCommands;
+	m_deferredInboundCommands.clear();
+	m_deferredInboundTriggerPriorityCommands = 0;
+
+	m_flushingDeferredInboundCommands = true;
+	const auto restoreFlushing        = qScopeGuard([this] { m_flushingDeferredInboundCommands = false; });
+	Q_UNUSED(restoreFlushing);
+	for (const DeferredInboundCommand &command : commands)
+	{
+		if (!m_commandProcessor)
+			break;
+		const unsigned short previousActionSource               = m_currentActionSource;
+		const_cast<WorldRuntime *>(this)->m_currentActionSource = command.actionSource;
+		const auto restoreActionSource =
+		    qScopeGuard([this, previousActionSource]
+		                { const_cast<WorldRuntime *>(this)->m_currentActionSource = previousActionSource; });
+		Q_UNUSED(restoreActionSource);
+		m_commandProcessor->sendDeferredInboundText(command.text, command.echo, command.log);
+	}
+}
+
 void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simulatedInput)
 {
 	if (!simulatedInput)
@@ -4449,6 +4488,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 
 	const unsigned short previousActionSource = m_currentActionSource;
 	m_currentActionSource                     = eInputFromServer;
+	beginInboundCommandDeferralScope();
+	const auto    closeInboundCommandDeferral = qScopeGuard([this] { endInboundCommandDeferralScope(); });
 
 	const QString utf8Flag  = m_worldAttributes.value(QStringLiteral("utf_8"));
 	const bool    useUtf8   = isEnabledFlag(utf8Flag);
@@ -4480,7 +4521,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 	{
 		// Probe quarantine mode: keep telnet state/protocol negotiation current,
 		// but defer all output/plugin processing until keep/reconnect decision.
-		QByteArray                            processed                 = m_telnet.processBytes(data);
+		QByteArray processed = m_telnet.processBytes(data);
+		static_cast<void>(m_telnet.takeTelnetPluginEvents());
 		QList<TelnetProcessor::MxpEvent>      mxpEventsDuringProbe      = m_telnet.takeMxpEvents();
 		QList<TelnetProcessor::MxpModeChange> mxpModeChangesDuringProbe = m_telnet.takeMxpModeChanges();
 		QByteArray const                      outbound                  = m_telnet.takeOutboundData();
@@ -4585,24 +4627,73 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 		appendPacketDebug(QStringLiteral("Incoming"), data, m_inputPacketCount);
 	}
 
-	// Legacy behavior: packet callbacks run on telnet-processed bytes, not on the
-	// raw compressed stream.
-	QByteArray processed = simulatedInput ? data : m_telnet.processBytes(data);
-	callPluginCallbacksTransformBytes(QStringLiteral("OnPluginPacketReceived"), processed);
+	QByteArray                                processed;
+	QList<TelnetProcessor::TelnetPluginEvent> telnetPluginEvents;
+	auto rebaseTelnetEventOffsetsForRemoval = [&](const qsizetype startOffset, const qsizetype removedSize)
+	{
+		if (removedSize <= 0)
+			return;
+		const int start = safeQSizeToInt(startOffset);
+		const int count = safeQSizeToInt(removedSize);
+		for (TelnetProcessor::TelnetPluginEvent &event : telnetPluginEvents)
+		{
+			if (event.offset <= start)
+				continue;
+			const int removedBeforeEvent = qMin(count, event.offset - start);
+			event.offset -= removedBeforeEvent;
+		}
+	};
+	auto rebaseTelnetEventOffsetsForFilter = [&](const QByteArray &bytes, const auto shouldRemove)
+	{
+		if (telnetPluginEvents.isEmpty())
+			return;
+		QVector<int> removedBefore;
+		removedBefore.reserve(safeQSizeToInt(bytes.size()) + 1);
+		int removed = 0;
+		removedBefore.push_back(0);
+		for (const char ch : bytes)
+		{
+			if (shouldRemove(ch))
+				++removed;
+			removedBefore.push_back(removed);
+		}
+		const int originalSize = safeQSizeToInt(bytes.size());
+		for (TelnetProcessor::TelnetPluginEvent &event : telnetPluginEvents)
+		{
+			const int originalOffset = qBound(0, event.offset, originalSize);
+			event.offset             = originalOffset - removedBefore.at(originalOffset);
+		}
+	};
+	if (simulatedInput)
+	{
+		processed = data;
+		callPluginCallbacksTransformBytes(QStringLiteral("OnPluginPacketReceived"), processed);
+	}
+	else
+	{
+		// Packet callbacks transform each decompressed incoming payload before telnet/MXP
+		// parsing; parser event offsets are then based on the same bytes that render.
+		processed = m_telnet.processBytes(
+		    data, [this](QByteArray &packetPayload)
+		    { callPluginCallbacksTransformBytes(QStringLiteral("OnPluginPacketReceived"), packetPayload); });
+		telnetPluginEvents = m_telnet.takeTelnetPluginEvents();
+	}
 	if (processed.contains('\0'))
 	{
-		QByteArray sanitized;
+		const QByteArray beforeFilter = processed;
+		QByteArray       sanitized;
 		sanitized.reserve(processed.size());
 		for (const char ch : processed)
 		{
 			if (ch != '\0')
 				sanitized.append(ch);
 		}
+		rebaseTelnetEventOffsetsForFilter(beforeFilter, [](const char ch) { return ch == '\0'; });
 		processed.swap(sanitized);
 	}
 
 	// Port of the ReceiveMsg/DisplayMsg line handling:
-	// - pass data through telnet/MCCP phase processing
+	// - pass callback-transformed data through telnet/MCCP phase processing
 	// - accumulate raw bytes
 	// - split on LF
 	// - trim CR
@@ -4613,14 +4704,21 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 		if (const qsizetype marker = processed.indexOf(kPuebloStart); marker >= 0)
 		{
 			m_telnet.activatePuebloMode();
+			rebaseTelnetEventOffsetsForRemoval(marker, kPuebloStart.size());
 			processed.remove(marker, kPuebloStart.size());
 			if (marker < processed.size())
 			{
 				if (marker + 1 < processed.size() && processed.at(marker) == '\r' &&
 				    processed.at(marker + 1) == '\n')
+				{
+					rebaseTelnetEventOffsetsForRemoval(marker, 2);
 					processed.remove(marker, 2);
+				}
 				else if (processed.at(marker) == '\n')
+				{
+					rebaseTelnetEventOffsetsForRemoval(marker, 1);
 					processed.remove(marker, 1);
+				}
 			}
 		}
 	}
@@ -4632,13 +4730,16 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 	}
 	if (bellCount > 0)
 	{
-		QByteArray filtered;
+		const QByteArray beforeFilter = processed;
+		QByteArray       filtered;
 		filtered.reserve(processed.size());
 		for (char const ch : processed)
 		{
 			if (static_cast<unsigned char>(ch) != 0x07)
 				filtered.append(ch);
 		}
+		rebaseTelnetEventOffsetsForFilter(beforeFilter, [](const char ch)
+		                                  { return static_cast<unsigned char>(ch) == 0x07; });
 		processed = filtered;
 
 		if (const bool enableBeeps = isEnabledFlag(m_worldAttributes.value(QStringLiteral("enable_beeps")));
@@ -4677,8 +4778,37 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			return;
 		}
 	}
+
+	std::ranges::sort(
+	    telnetPluginEvents,
+	    [](const TelnetProcessor::TelnetPluginEvent &a, const TelnetProcessor::TelnetPluginEvent &b)
+	    {
+		    if (a.offset != b.offset)
+			    return a.offset < b.offset;
+		    return a.sequence < b.sequence;
+	    });
+	auto dispatchTelnetPluginEvent = [this](const TelnetProcessor::TelnetPluginEvent &event)
+	{
+		switch (event.type)
+		{
+		case TelnetProcessor::TelnetPluginEvent::IacGa:
+			m_lastLineWithIacGa = m_linesReceived;
+			callPluginCallbacksNoArgs(QStringLiteral("OnPluginIacGa"), true);
+			break;
+		case TelnetProcessor::TelnetPluginEvent::Option:
+			callPluginCallbacksWithBytes(QStringLiteral("OnPluginTelnetOption"), event.data, true);
+			break;
+		case TelnetProcessor::TelnetPluginEvent::Subnegotiation:
+			m_lastTelnetSubnegotiation = QString::fromLatin1(event.data);
+			callPluginCallbacksWithNumberAndBytes(QStringLiteral("OnPluginTelnetSubnegotiation"),
+			                                      event.option, event.data, true);
+			break;
+		}
+	};
 	if (processed.isEmpty())
 	{
+		for (const TelnetProcessor::TelnetPluginEvent &event : std::as_const(telnetPluginEvents))
+			dispatchTelnetPluginEvent(event);
 		if (simulatedInput && m_reloadReattachUseDeferredMxpReplay)
 		{
 			m_reloadReattachUseDeferredMxpReplay = false;
@@ -5067,33 +5197,65 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 		ansiState.startTag   = current.startTag;
 		ansiState.monospace  = current.monospace;
 
-		constexpr QMudOscActionIds     oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
-		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
-		    processed, m_ansiStreamState, defaultFore, defaultBack, normalAnsiColorFromIndex,
-		    boldAnsiColorFromIndex, colorFromIndex, decodeIncomingDisplayBytes, ansiState, oscActionIds);
-		for (const QMudStyledChunk &chunk : chunks)
-			appendDecodedSegment(chunk.text, chunk.state);
+		auto commitAnsiRenderState = [&]
+		{
+			current.bold       = ansiState.bold;
+			current.underline  = ansiState.underline;
+			current.italic     = ansiState.italic;
+			current.blink      = ansiState.blink;
+			current.strike     = ansiState.strike;
+			current.inverse    = ansiState.inverse;
+			current.fore       = ansiState.fore;
+			current.back       = ansiState.back;
+			current.actionType = ansiState.actionType;
+			current.action     = ansiState.action;
+			current.hint       = ansiState.hint;
+			current.variable   = ansiState.variable;
+			current.startTag   = ansiState.startTag;
+			current.monospace  = ansiState.monospace;
 
-		current.bold       = ansiState.bold;
-		current.underline  = ansiState.underline;
-		current.italic     = ansiState.italic;
-		current.blink      = ansiState.blink;
-		current.strike     = ansiState.strike;
-		current.inverse    = ansiState.inverse;
-		current.fore       = ansiState.fore;
-		current.back       = ansiState.back;
-		current.actionType = ansiState.actionType;
-		current.action     = ansiState.action;
-		current.hint       = ansiState.hint;
-		current.variable   = ansiState.variable;
-		current.startTag   = ansiState.startTag;
-		current.monospace  = ansiState.monospace;
+			m_ansiRenderState                = current;
+			m_partialLineText                = lineText;
+			m_partialLineSpans               = lineSpans;
+			m_pendingCarriageReturnOverwrite = carriageReturnPending;
+			emit incomingStyledLinePartialReceived(lineText, lineSpans);
+		};
 
-		m_ansiRenderState                = current;
-		m_partialLineText                = lineText;
-		m_partialLineSpans               = lineSpans;
-		m_pendingCarriageReturnOverwrite = carriageReturnPending;
-		emit incomingStyledLinePartialReceived(lineText, lineSpans);
+		constexpr QMudOscActionIds oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
+		bool                       ansiRenderStateDirty = false;
+		auto                       appendAnsiBytes      = [&](const QByteArray &bytes)
+		{
+			if (bytes.isEmpty())
+				return;
+			const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+			    bytes, m_ansiStreamState, defaultFore, defaultBack, normalAnsiColorFromIndex,
+			    boldAnsiColorFromIndex, colorFromIndex, decodeIncomingDisplayBytes, ansiState, oscActionIds);
+			for (const QMudStyledChunk &chunk : chunks)
+				appendDecodedSegment(chunk.text, chunk.state);
+			ansiRenderStateDirty = true;
+		};
+
+		const int processedSize    = safeQSizeToInt(processed.size());
+		int       telnetEventIndex = 0;
+		int       lastTelnetOffset = 0;
+		for (; telnetEventIndex < telnetPluginEvents.size(); ++telnetEventIndex)
+		{
+			const TelnetProcessor::TelnetPluginEvent &event       = telnetPluginEvents.at(telnetEventIndex);
+			const int                                 eventOffset = qBound(0, event.offset, processedSize);
+			if (eventOffset > lastTelnetOffset)
+				appendAnsiBytes(processed.mid(lastTelnetOffset, eventOffset - lastTelnetOffset));
+			lastTelnetOffset = eventOffset;
+			if (ansiRenderStateDirty)
+			{
+				commitAnsiRenderState();
+				ansiRenderStateDirty = false;
+			}
+			dispatchTelnetPluginEvent(event);
+		}
+		if (lastTelnetOffset < processedSize)
+			appendAnsiBytes(processed.mid(lastTelnetOffset));
+
+		commitAnsiRenderState();
 		if (m_mxpTagStack.isEmpty() && !hasActiveMxpRenderContext)
 			m_mxpTextBuffer.clear();
 		m_currentActionSource = previousActionSource;
@@ -5122,17 +5284,18 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				                  return a.offset < b.offset;
 			                  return a.sequence < b.sequence;
 		                  });
+		QList<TelnetProcessor::TelnetPluginEvent> sortedTelnetPluginEvents = telnetPluginEvents;
 
-		MxpStyleState          current               = m_mxpRenderStyle;
-		QVector<MxpStyleFrame> stack                 = m_mxpRenderStack;
-		QVector<QByteArray>    blockStack            = m_mxpRenderBlockStack;
-		bool                   linkOpen              = m_mxpRenderLinkOpen;
-		int                    preDepth              = m_mxpRenderPreDepth;
-		QString                lineText              = m_partialLineText;
-		QVector<StyleSpan>     lineSpans             = m_partialLineSpans;
-		bool                   carriageReturnPending = m_pendingCarriageReturnOverwrite;
-		bool                   mxpTrackingReset{false};
-		auto                   restoreCurrentFromAnsiState = [&]
+		MxpStyleState                             current               = m_mxpRenderStyle;
+		QVector<MxpStyleFrame>                    stack                 = m_mxpRenderStack;
+		QVector<QByteArray>                       blockStack            = m_mxpRenderBlockStack;
+		bool                                      linkOpen              = m_mxpRenderLinkOpen;
+		int                                       preDepth              = m_mxpRenderPreDepth;
+		QString                                   lineText              = m_partialLineText;
+		QVector<StyleSpan>                        lineSpans             = m_partialLineSpans;
+		bool                                      carriageReturnPending = m_pendingCarriageReturnOverwrite;
+		bool                                      mxpTrackingReset{false};
+		auto                                      restoreCurrentFromAnsiState = [&]
 		{
 			current.bold       = m_ansiRenderState.bold;
 			current.underline  = m_ansiRenderState.underline;
@@ -5254,9 +5417,10 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			return (lhs == "send" && rhs == "a") || (lhs == "a" && rhs == "send");
 		};
 
-		int  last = 0;
+		const int processedSize = safeQSizeToInt(processed.size());
+		int       last          = 0;
 
-		auto applyStartTag =
+		auto      applyStartTag =
 		    [&](const QByteArray &activeTag, const QMap<QByteArray, QByteArray> &activeAttributes)
 		{
 			const QByteArray unnamedForeLocal = activeAttributes.value("1");
@@ -5715,35 +5879,104 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			current.monospace  = ansiState.monospace;
 		};
 
+		auto commitMxpRenderState = [&]
+		{
+			m_mxpRenderStyle             = current;
+			m_mxpRenderStack             = stack;
+			m_mxpRenderBlockStack        = blockStack;
+			m_mxpRenderLinkOpen          = linkOpen;
+			m_mxpRenderPreDepth          = preDepth;
+			m_ansiRenderState.bold       = current.bold;
+			m_ansiRenderState.underline  = current.underline;
+			m_ansiRenderState.italic     = current.italic;
+			m_ansiRenderState.blink      = current.blink;
+			m_ansiRenderState.strike     = current.strike;
+			m_ansiRenderState.monospace  = current.monospace;
+			m_ansiRenderState.inverse    = current.inverse;
+			m_ansiRenderState.fore       = current.fore;
+			m_ansiRenderState.back       = current.back;
+			m_ansiRenderState.actionType = current.actionType;
+			m_ansiRenderState.action     = current.action;
+			m_ansiRenderState.hint       = current.hint;
+			m_ansiRenderState.variable   = current.variable;
+			m_ansiRenderState.startTag   = current.startTag;
+
+			m_partialLineText                = lineText;
+			m_partialLineSpans               = lineSpans;
+			m_pendingCarriageReturnOverwrite = carriageReturnPending;
+			emit incomingStyledLinePartialReceived(lineText, lineSpans);
+		};
+
 		auto isAtomicTag = [](const QByteArray &tag)
 		{
 			AtomicTagInfo info;
 			return lookupAtomicTagInfo(tag, info);
 		};
 
-		int modeChangeIndex = 0;
+		int  modeChangeIndex        = 0;
+		int  telnetPluginEventIndex = 0;
+		auto boundaryComesBefore    = [](const int boundaryOffset, const int boundarySequence,
+		                                 const int eventOffset, const int eventSequence)
+		{
+			return (boundaryOffset < eventOffset) ||
+			       (boundaryOffset == eventOffset && boundarySequence < eventSequence);
+		};
+		auto drainTelnetAndModeBoundariesBefore = [&](const int eventOffset, const int eventSequence)
+		{
+			while (true)
+			{
+				const bool haveModeChange =
+				    modeChangeIndex < sortedModeChanges.size() &&
+				    boundaryComesBefore(sortedModeChanges.at(modeChangeIndex).offset,
+				                        sortedModeChanges.at(modeChangeIndex).sequence, eventOffset,
+				                        eventSequence);
+				const bool haveTelnetEvent =
+				    telnetPluginEventIndex < sortedTelnetPluginEvents.size() &&
+				    boundaryComesBefore(sortedTelnetPluginEvents.at(telnetPluginEventIndex).offset,
+				                        sortedTelnetPluginEvents.at(telnetPluginEventIndex).sequence,
+				                        eventOffset, eventSequence);
+				if (!haveModeChange && !haveTelnetEvent)
+					break;
+
+				const bool takeModeChange =
+				    haveModeChange &&
+				    (!haveTelnetEvent ||
+				     boundaryComesBefore(sortedModeChanges.at(modeChangeIndex).offset,
+				                         sortedModeChanges.at(modeChangeIndex).sequence,
+				                         sortedTelnetPluginEvents.at(telnetPluginEventIndex).offset,
+				                         sortedTelnetPluginEvents.at(telnetPluginEventIndex).sequence));
+				if (takeModeChange)
+				{
+					const TelnetProcessor::MxpModeChange &modeChange =
+					    sortedModeChanges.at(modeChangeIndex++);
+					if (modeChange.offset > last)
+					{
+						appendStyled(processed.mid(last, modeChange.offset - last));
+						last = modeChange.offset;
+					}
+					applyMxpModeBarrier(modeChange);
+					continue;
+				}
+
+				const TelnetProcessor::TelnetPluginEvent &telnetEvent =
+				    sortedTelnetPluginEvents.at(telnetPluginEventIndex++);
+				const int telnetOffset = qBound(0, telnetEvent.offset, processedSize);
+				if (telnetOffset > last)
+				{
+					appendStyled(processed.mid(last, telnetOffset - last));
+					last = telnetOffset;
+				}
+				commitMxpRenderState();
+				dispatchTelnetPluginEvent(telnetEvent);
+			}
+		};
 
 		for (const TelnetProcessor::MxpEvent &ev : sorted)
 		{
 			if (mxpTrackingReset)
 				break;
 
-			while (modeChangeIndex < sortedModeChanges.size())
-			{
-				const TelnetProcessor::MxpModeChange &modeChange = sortedModeChanges.at(modeChangeIndex);
-				const bool                            boundaryComesBeforeEvent =
-				    (modeChange.offset < ev.offset) ||
-				    (modeChange.offset == ev.offset && modeChange.sequence < ev.sequence);
-				if (!boundaryComesBeforeEvent)
-					break;
-				if (modeChange.offset > last)
-				{
-					appendStyled(processed.mid(last, modeChange.offset - last));
-					last = modeChange.offset;
-				}
-				applyMxpModeBarrier(modeChange);
-				++modeChangeIndex;
-			}
+			drainTelnetAndModeBoundariesBefore(ev.offset, ev.sequence);
 
 			if (ev.offset > last)
 			{
@@ -6542,18 +6775,9 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			}
 		}
 
-		while (modeChangeIndex < sortedModeChanges.size())
-		{
-			const TelnetProcessor::MxpModeChange &modeChange = sortedModeChanges.at(modeChangeIndex++);
-			if (modeChange.offset > last)
-			{
-				appendStyled(processed.mid(last, modeChange.offset - last));
-				last = modeChange.offset;
-			}
-			applyMxpModeBarrier(modeChange);
-		}
+		drainTelnetAndModeBoundariesBefore(std::numeric_limits<int>::max(), std::numeric_limits<int>::max());
 
-		if (last < processed.size())
+		if (last < processedSize)
 			appendStyled(processed.mid(last));
 
 		const bool hasActiveMxpRenderContextAfterProcessing =
@@ -6561,30 +6785,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 		if (m_mxpTagStack.isEmpty() && !hasActiveMxpRenderContextAfterProcessing)
 			m_mxpTextBuffer.clear();
 
-		m_mxpRenderStyle             = current;
-		m_mxpRenderStack             = stack;
-		m_mxpRenderBlockStack        = blockStack;
-		m_mxpRenderLinkOpen          = linkOpen;
-		m_mxpRenderPreDepth          = preDepth;
-		m_ansiRenderState.bold       = current.bold;
-		m_ansiRenderState.underline  = current.underline;
-		m_ansiRenderState.italic     = current.italic;
-		m_ansiRenderState.blink      = current.blink;
-		m_ansiRenderState.strike     = current.strike;
-		m_ansiRenderState.monospace  = current.monospace;
-		m_ansiRenderState.inverse    = current.inverse;
-		m_ansiRenderState.fore       = current.fore;
-		m_ansiRenderState.back       = current.back;
-		m_ansiRenderState.actionType = current.actionType;
-		m_ansiRenderState.action     = current.action;
-		m_ansiRenderState.hint       = current.hint;
-		m_ansiRenderState.variable   = current.variable;
-		m_ansiRenderState.startTag   = current.startTag;
-
-		m_partialLineText                = lineText;
-		m_partialLineSpans               = lineSpans;
-		m_pendingCarriageReturnOverwrite = carriageReturnPending;
-		emit incomingStyledLinePartialReceived(lineText, lineSpans);
+		commitMxpRenderState();
 		m_currentActionSource = previousActionSource;
 	}
 }
@@ -9001,8 +9202,10 @@ void WorldRuntime::populateLuaCallbackDispatchVolatileSnapshot(
 	snapshot.commandUiOutputClientWidth  = commandUi.outputClientWidth;
 	snapshot.commandUiViewHeight         = commandUi.viewHeight;
 	snapshot.commandUiViewWidth          = commandUi.viewWidth;
-	snapshot.commandUiValues.reserve(52);
+	snapshot.commandUiValues.reserve(53);
 	snapshot.commandUiValues.insert(QStringLiteral("queuedCommands"), commandUi.queuedCommands);
+	snapshot.commandUiValues.insert(QStringLiteral("triggerPriorityQueuedCommandCount"),
+	                                commandUi.triggerPriorityQueuedCommandCount);
 	snapshot.commandUiValues.insert(QStringLiteral("commandInputText"), commandUi.commandInputText);
 	snapshot.commandUiValues.insert(QStringLiteral("inputSelectionStartColumn"),
 	                                commandUi.inputSelectionStartColumn);
@@ -9561,8 +9764,10 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 	snapshot->commandUiOutputClientWidth  = commandUi.outputClientWidth;
 	snapshot->commandUiViewHeight         = commandUi.viewHeight;
 	snapshot->commandUiViewWidth          = commandUi.viewWidth;
-	snapshot->commandUiValues.reserve(52);
+	snapshot->commandUiValues.reserve(53);
 	snapshot->commandUiValues.insert(QStringLiteral("queuedCommands"), commandUi.queuedCommands);
+	snapshot->commandUiValues.insert(QStringLiteral("triggerPriorityQueuedCommandCount"),
+	                                 commandUi.triggerPriorityQueuedCommandCount);
 	snapshot->commandUiValues.insert(QStringLiteral("commandInputText"), commandUi.commandInputText);
 	snapshot->commandUiValues.insert(QStringLiteral("inputSelectionStartColumn"),
 	                                 commandUi.inputSelectionStartColumn);
@@ -12869,6 +13074,18 @@ int WorldRuntime::executeCommand(const QString &text) const
 	return m_commandProcessor->executeCommand(text);
 }
 
+int WorldRuntime::executeCommandWithTriggerPriority(const QString &text) const
+{
+	if (QThread::currentThread() != thread())
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), eWorldClosed,
+		                          [this, text] { return executeCommandWithTriggerPriority(text); });
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::executeCommandWithTriggerPriority");
+	if (!m_commandProcessor)
+		return eWorldClosed;
+	return m_commandProcessor->executeCommandWithTriggerPriority(text);
+}
+
 QString WorldRuntime::getEntityValue(const QString &name) const
 {
 	QByteArray value;
@@ -13955,7 +14172,7 @@ void WorldRuntime::storeSuspendedPluginCallbackDispatch(PluginCallbackDispatchCo
 		if (const QSharedPointer<LuaCallbackEngine> &engine =
 		        command.request.engines.at(suspendedEngineIndex);
 		    engine)
-			suspended.pluginId = engine->pluginId();
+			suspended.pluginId = engine->pluginIdMetadata();
 	}
 	suspended.command                     = std::move(command);
 	suspended.partialResult               = std::move(result);
@@ -16165,6 +16382,51 @@ int WorldRuntime::sendCommand(const QString &text, bool echo, bool queue, bool l
 	return eOK;
 }
 
+int WorldRuntime::sendCommandWithTriggerPriority(const QString &text, const bool echo, const bool queue,
+                                                 const bool log, const bool history) const
+{
+	if (QThread::currentThread() != thread())
+		return qmudInvokeMethodOr(
+		    const_cast<WorldRuntime *>(this), eWorldClosed, [this, text, echo, queue, log, history]
+		    { return sendCommandWithTriggerPriority(text, echo, queue, log, history); });
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::sendCommandWithTriggerPriority");
+	if (m_connectPhase != eConnectConnectedToMud)
+		return eWorldClosed;
+	if (!m_commandProcessor)
+		return eWorldClosed;
+	if (m_commandProcessor->pluginProcessingSent())
+		return eItemInUse;
+
+	m_commandProcessor->sendRawTextWithTriggerPriority(text, echo, queue, log, history);
+	return eOK;
+}
+
+bool WorldRuntime::deferInboundImmediateCommand(const QString &text, const bool echo, const bool log,
+                                                const bool triggerPriority) const
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::deferInboundImmediateCommand");
+	if (m_inboundCommandDeferralDepth <= 0 || m_flushingDeferredInboundCommands)
+		return false;
+
+	DeferredInboundCommand command;
+	command.text         = text;
+	command.echo         = echo;
+	command.log          = log;
+	command.actionSource = m_currentActionSource;
+	if (triggerPriority)
+	{
+		const int insertAt = qBound(0, m_deferredInboundTriggerPriorityCommands,
+		                            safeQSizeToInt(m_deferredInboundCommands.size()));
+		m_deferredInboundCommands.insert(insertAt, command);
+		m_deferredInboundTriggerPriorityCommands = insertAt + 1;
+		return true;
+	}
+
+	m_deferredInboundCommands.push_back(command);
+	return true;
+}
+
 void WorldRuntime::logInputCommand(const QString &text) const
 {
 	if (QThread::currentThread() != thread())
@@ -16269,7 +16531,10 @@ WorldRuntime::CommandUiSnapshot WorldRuntime::commandUiSnapshot(const bool inclu
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::commandUiSnapshot");
 	CommandUiSnapshot snapshot;
 	if (m_commandProcessor)
-		snapshot.queuedCommands = m_commandProcessor->queuedCommands();
+	{
+		snapshot.queuedCommands                    = m_commandProcessor->queuedCommands();
+		snapshot.triggerPriorityQueuedCommandCount = m_commandProcessor->triggerPriorityQueuedCommandCount();
+	}
 	snapshot.textRectangleLeft              = m_textRectangle.left;
 	snapshot.textRectangleTop               = m_textRectangle.top;
 	snapshot.textRectangleRight             = m_textRectangle.right;
@@ -19711,12 +19976,25 @@ int WorldRuntime::callPluginLua(const QString &pluginId, const QString &routine,
 		    QThread::currentThread() == thread()
 		        ? invokeNative()
 		        : qmudInvokeMethodOr(this, QMudNativePluginRegistry::NativeCallResult{}, invokeNative);
-		lua_pushnumber(callerState, result.errorCode);
 		if (result.errorCode != eOK)
+			return pushCodeAndMessage(result.errorCode, result.errorText);
+		const qsizetype returnValueCount      = result.returnValues.size();
+		constexpr int   kErrorCodeReturnCount = 1;
+		if (returnValueCount > std::numeric_limits<int>::max() - kErrorCodeReturnCount)
 		{
-			pushUtf8String(callerState, result.errorText);
-			return 2;
+			return pushCodeAndMessage(
+			    eErrorCallingPluginRoutine,
+			    QStringLiteral("Native plugin routine '%1' returned too many values").arg(routine));
 		}
+		const int pushedValueCount = static_cast<int>(returnValueCount) + kErrorCodeReturnCount;
+		if (lua_checkstack(callerState, pushedValueCount) == 0)
+		{
+			return pushCodeAndMessage(
+			    eErrorCallingPluginRoutine,
+			    QStringLiteral("Unable to reserve Lua stack space for native plugin routine '%1'")
+			        .arg(routine));
+		}
+		lua_pushnumber(callerState, result.errorCode);
 		for (const QVariant &value : result.returnValues)
 		{
 			switch (value.typeId())
@@ -19736,7 +20014,7 @@ int WorldRuntime::callPluginLua(const QString &pluginId, const QString &routine,
 				break;
 			}
 		}
-		return result.returnValues.size() + 1;
+		return pushedValueCount;
 	}
 
 	if (QThread::currentThread() != thread())

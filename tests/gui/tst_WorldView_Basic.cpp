@@ -2159,14 +2159,16 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void ctrlBackspaceClearsInput()
+		void ctrlBackspaceDeletesPreviousWordWhenOptionEnabled()
 		{
 			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("ctrl_backspace_deletes_last_word"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
 			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			QPlainTextEdit *input = view.inputEditor();
@@ -2185,7 +2187,39 @@ class tst_WorldView_Basic : public QObject
 			QTest::keyClick(input, Qt::Key_Backspace, Qt::ControlModifier);
 			QCoreApplication::processEvents();
 
-			QCOMPARE(view.inputText(), QString());
+			QCOMPARE(view.inputText(), QStringLiteral("alpha beta"));
+			QCOMPARE(shortcutTriggerCount, 0);
+			resetTestState();
+		}
+
+		void ctrlBackspaceRecallsLastHistoryWordWhenDeleteOptionDisabled()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			view.addToHistoryForced(QStringLiteral("cast fireball"));
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+
+			int       shortcutTriggerCount = 0;
+			QShortcut conflictingShortcut(QKeySequence(QStringLiteral("Ctrl+Backspace")), input);
+			conflictingShortcut.setContext(Qt::WidgetWithChildrenShortcut);
+			connect(&conflictingShortcut, &QShortcut::activated, this,
+			        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+			QTest::keyClick(input, Qt::Key_Backspace, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.inputText(), QStringLiteral("fireball"));
 			QCOMPARE(shortcutTriggerCount, 0);
 			resetTestState();
 		}
@@ -2224,6 +2258,262 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_acceleratorExecutionCount, 1);
 			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
 			QCOMPARE(shortcutTriggerCount, 0);
+
+			resetTestState();
+		}
+
+		void commandOptionShortcutsOverrideConflictingShortcutsWithInputFocus()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("ctrl_p_goes_to_previous_command"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("ctrl_n_goes_to_next_command"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("ctrl_z_goes_to_end_of_buffer"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			view.addToHistoryForced(QStringLiteral("north"));
+			view.addToHistoryForced(QStringLiteral("south"));
+			for (int i = 0; i < 320; ++i)
+				view.appendOutputText(QStringLiteral("command-option-input-scroll-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+
+			int       shortcutTriggerCount = 0;
+			QShortcut ctrlPShortcut(QKeySequence(QStringLiteral("Ctrl+P")), &view);
+			QShortcut ctrlNShortcut(QKeySequence(QStringLiteral("Ctrl+N")), &view);
+			QShortcut ctrlZShortcut(QKeySequence(QStringLiteral("Ctrl+Z")), &view);
+			for (QShortcut *shortcut : {&ctrlPShortcut, &ctrlNShortcut, &ctrlZShortcut})
+			{
+				shortcut->setContext(Qt::ApplicationShortcut);
+				connect(shortcut, &QShortcut::activated, this,
+				        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+			}
+
+			QTest::keyClick(input, Qt::Key_P, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+			QCOMPARE(view.inputText(), QStringLiteral("south"));
+
+			QTest::keyClick(input, Qt::Key_P, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+			QCOMPARE(view.inputText(), QStringLiteral("north"));
+
+			QTest::keyClick(input, Qt::Key_N, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+			QCOMPARE(view.inputText(), QStringLiteral("south"));
+
+			QCOMPARE(view.setOutputScroll(0, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->minimum());
+			QTest::keyClick(input, Qt::Key_Z, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+			QVERIFY(!view.isScrollbackSplitActive());
+			QCOMPARE(shortcutTriggerCount, 0);
+
+			resetTestState();
+		}
+
+		void commandOptionShortcutsOverrideConflictingShortcutsWithOutputFocus()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("ctrl_p_goes_to_previous_command"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("ctrl_n_goes_to_next_command"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("ctrl_z_goes_to_end_of_buffer"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			view.addToHistoryForced(QStringLiteral("north"));
+			view.addToHistoryForced(QStringLiteral("south"));
+			for (int i = 0; i < 320; ++i)
+				view.appendOutputText(QStringLiteral("command-option-output-scroll-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+
+			int       shortcutTriggerCount = 0;
+			QShortcut ctrlPShortcut(QKeySequence(QStringLiteral("Ctrl+P")), &view);
+			QShortcut ctrlNShortcut(QKeySequence(QStringLiteral("Ctrl+N")), &view);
+			QShortcut ctrlZShortcut(QKeySequence(QStringLiteral("Ctrl+Z")), &view);
+			for (QShortcut *shortcut : {&ctrlPShortcut, &ctrlNShortcut, &ctrlZShortcut})
+			{
+				shortcut->setContext(Qt::ApplicationShortcut);
+				connect(shortcut, &QShortcut::activated, this,
+				        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+			}
+
+			QTest::keyClick(viewport, Qt::Key_P, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+			QCOMPARE(view.inputText(), QStringLiteral("south"));
+
+			QTest::keyClick(viewport, Qt::Key_P, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+			QCOMPARE(view.inputText(), QStringLiteral("north"));
+
+			QTest::keyClick(viewport, Qt::Key_N, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+			QCOMPARE(view.inputText(), QStringLiteral("south"));
+
+			QCOMPARE(view.setOutputScroll(0, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->minimum());
+			QTest::keyClick(viewport, Qt::Key_Z, Qt::ControlModifier);
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+			QVERIFY(!view.isScrollbackSplitActive());
+			QCOMPARE(shortcutTriggerCount, 0);
+
+			resetTestState();
+		}
+
+		void commandOptionShortcutDetectionRequiresEnabledOption()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QKeyEvent ctrlPDisabled(QEvent::ShortcutOverride, Qt::Key_P, Qt::ControlModifier);
+			QVERIFY(!view.hasCommandOptionShortcut(&ctrlPDisabled));
+
+			g_worldAttrs.insert(QStringLiteral("ctrl_p_goes_to_previous_command"), QStringLiteral("1"));
+			view.applyRuntimeSettings();
+			QKeyEvent ctrlPEnabled(QEvent::ShortcutOverride, Qt::Key_P, Qt::ControlModifier);
+			QVERIFY(view.hasCommandOptionShortcut(&ctrlPEnabled));
+
+			QKeyEvent ctrlShiftP(QEvent::ShortcutOverride, Qt::Key_P,
+			                     Qt::ControlModifier | Qt::ShiftModifier);
+			QVERIFY(!view.hasCommandOptionShortcut(&ctrlShiftP));
+
+			resetTestState();
+		}
+
+		void commandHistoryShortcutsOverrideConflictingShortcutsWithInputFocus()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			view.addToHistoryForced(QStringLiteral("hitman"));
+			view.addToHistoryForced(QStringLiteral("hit 321"));
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+			view.setInputText(QStringLiteral("hit"), true);
+
+			int       shortcutTriggerCount = 0;
+			QShortcut altUpShortcut(QKeySequence(QStringLiteral("Alt+Up")), &view);
+			QShortcut altDownShortcut(QKeySequence(QStringLiteral("Alt+Down")), &view);
+			for (QShortcut *shortcut : {&altUpShortcut, &altDownShortcut})
+			{
+				shortcut->setContext(Qt::ApplicationShortcut);
+				connect(shortcut, &QShortcut::activated, this,
+				        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+			}
+
+			QTest::keyClick(input, Qt::Key_Up, Qt::AltModifier);
+			QCoreApplication::processEvents();
+			QCOMPARE(view.inputText(), QStringLiteral("hit 321"));
+			QCOMPARE(shortcutTriggerCount, 0);
+
+			resetTestState();
+		}
+
+		void commandHistoryShortcutsOverrideConflictingShortcutsWithOutputFocus()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			view.addToHistoryForced(QStringLiteral("hitman"));
+			view.addToHistoryForced(QStringLiteral("hit 321"));
+			view.appendOutputText(QStringLiteral("history-output-focus"), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			view.setInputText(QStringLiteral("hit"), true);
+
+			int       shortcutTriggerCount = 0;
+			QShortcut altUpShortcut(QKeySequence(QStringLiteral("Alt+Up")), &view);
+			QShortcut altDownShortcut(QKeySequence(QStringLiteral("Alt+Down")), &view);
+			for (QShortcut *shortcut : {&altUpShortcut, &altDownShortcut})
+			{
+				shortcut->setContext(Qt::ApplicationShortcut);
+				connect(shortcut, &QShortcut::activated, this,
+				        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+			}
+
+			QTest::keyClick(viewport, Qt::Key_Up, Qt::AltModifier);
+			QCoreApplication::processEvents();
+			QCOMPARE(view.inputText(), QStringLiteral("hit 321"));
+			QCOMPARE(shortcutTriggerCount, 0);
+
+			resetTestState();
+		}
+
+		void commandHistoryShortcutDetectionRequiresEnabledOptionAndExactAltArrow()
+		{
+			resetTestState();
+
+			WorldView view;
+			QKeyEvent altUp(QEvent::ShortcutOverride, Qt::Key_Up, Qt::AltModifier);
+			QVERIFY(!view.hasCommandHistoryShortcut(&altUp));
+
+			g_worldAttrs.insert(QStringLiteral("alt_arrow_recalls_partial"), QStringLiteral("1"));
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+
+			QVERIFY(view.hasCommandHistoryShortcut(&altUp));
+
+			QKeyEvent altDown(QEvent::ShortcutOverride, Qt::Key_Down, Qt::AltModifier);
+			QVERIFY(view.hasCommandHistoryShortcut(&altDown));
+
+			QKeyEvent plainUp(QEvent::ShortcutOverride, Qt::Key_Up, Qt::NoModifier);
+			QVERIFY(!view.hasCommandHistoryShortcut(&plainUp));
+
+			QKeyEvent ctrlAltUp(QEvent::ShortcutOverride, Qt::Key_Up, Qt::ControlModifier | Qt::AltModifier);
+			QVERIFY(!view.hasCommandHistoryShortcut(&ctrlAltUp));
 
 			resetTestState();
 		}

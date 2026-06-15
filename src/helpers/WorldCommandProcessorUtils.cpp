@@ -175,6 +175,30 @@ namespace QMudCommandQueue
 
 namespace QMudCommandText
 {
+	QString normalizeActionCommandTextNewlines(const QString &source)
+	{
+		QString normalized;
+		normalized.reserve(source.size());
+		for (qsizetype i = 0; i < source.size(); ++i)
+		{
+			const QChar ch = source.at(i);
+			if (ch == QLatin1Char('\r'))
+			{
+				if (i + 1 < source.size() && source.at(i + 1) == QLatin1Char('\n'))
+					++i;
+				normalized += QStringLiteral("\r\n");
+				continue;
+			}
+			if (ch == QLatin1Char('\n'))
+			{
+				normalized += QStringLiteral("\r\n");
+				continue;
+			}
+			normalized += ch;
+		}
+		return normalized;
+	}
+
 	QString fixupEscapeSequences(const QString &source)
 	{
 		QString out;

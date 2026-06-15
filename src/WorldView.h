@@ -405,6 +405,30 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] bool   hasWorldAcceleratorBinding(const QKeyEvent *event) const;
 		/**
+		 * @brief Returns whether a key event is claimed by command option settings.
+		 * @param event Key event to inspect.
+		 * @return `true` when a command option shortcut should preempt Qt shortcuts.
+		 */
+		[[nodiscard]] bool   hasCommandOptionShortcut(const QKeyEvent *event) const;
+		/**
+		 * @brief Handles command option shortcuts.
+		 * @param event Key event to process.
+		 * @return `true` when the shortcut is consumed.
+		 */
+		bool                 handleCommandOptionShortcut(QKeyEvent *event);
+		/**
+		 * @brief Returns whether a key event is a command-history shortcut.
+		 * @param event Key event to inspect.
+		 * @return `true` when command-history routing should preempt Qt shortcuts.
+		 */
+		[[nodiscard]] bool   hasCommandHistoryShortcut(const QKeyEvent *event) const;
+		/**
+		 * @brief Handles command-history shortcuts.
+		 * @param event Key event to process.
+		 * @return `true` when the shortcut is consumed.
+		 */
+		bool                 handleCommandHistoryShortcut(QKeyEvent *event);
+		/**
 		 * @brief Returns true when miniwindow mouse capture is active.
 		 * @return `true` when miniwindow mouse capture is active.
 		 */

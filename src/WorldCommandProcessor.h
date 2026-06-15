@@ -56,6 +56,11 @@ class WorldCommandProcessor : public QObject
 		 */
 		const QStringList &queuedCommands() const;
 		/**
+		 * @brief Returns count of trigger-priority commands at the queue front.
+		 * @return Number of front-band trigger-priority queued commands.
+		 */
+		int                triggerPriorityQueuedCommandCount() const;
+		/**
 		 * @brief Clears queued commands and returns number discarded.
 		 * @return Discarded command count.
 		 */
@@ -72,6 +77,12 @@ class WorldCommandProcessor : public QObject
 		 * @return Execution status/result code.
 		 */
 		int                executeCommand(const QString &text);
+		/**
+		 * @brief Executes one direct trigger-script command with priority over queued movement.
+		 * @param text Command text.
+		 * @return Execution status/result code.
+		 */
+		int                executeCommandWithTriggerPriority(const QString &text);
 		/**
 		 * @brief Sends text using explicit send-target from accelerator context.
 		 * @param sendTo Send-target enum value.
@@ -158,6 +169,16 @@ class WorldCommandProcessor : public QObject
 		 */
 		void sendRawText(const QString &text, bool echo, bool queue, bool log, bool history);
 		/**
+		 * @brief Sends direct trigger-script raw command text with priority over queued movement.
+		 * @param text Command text.
+		 * @param echo Echo command when `true`.
+		 * @param queue Queue command when `true`.
+		 * @param log Log command when `true`.
+		 * @param history Add command to history when `true`.
+		 */
+		void sendRawTextWithTriggerPriority(const QString &text, bool echo, bool queue, bool log,
+		                                    bool history);
+		/**
 		 * @brief Sends text immediately bypassing queue delay.
 		 * @param text Command text.
 		 * @param echo Echo command when `true`.
@@ -165,6 +186,13 @@ class WorldCommandProcessor : public QObject
 		 * @param history Add command to history when `true`.
 		 */
 		void sendImmediateText(const QString &text, bool echo, bool log, bool history);
+		/**
+		 * @brief Sends one deferred inbound command line through the immediate send path.
+		 * @param text Command line text.
+		 * @param echo Echo command when `true`.
+		 * @param log Log command when `true`.
+		 */
+		void sendDeferredInboundText(const QString &text, bool echo, bool log);
 		/**
 		 * @brief Writes input line to log according to settings.
 		 * @param text Input text.
@@ -545,6 +573,8 @@ class WorldCommandProcessor : public QObject
 		WorldRuntime                                *m_runtime{nullptr};
 		WorldView                                   *m_view{nullptr};
 		QStringList                                  m_queuedCommands;
+		int                                          m_triggerPriorityQueuedCommands{0};
+		int                                          m_triggerCommandPriorityDepth{0};
 		bool                                         m_queueStatusOwnsMessage{false};
 		int                                          m_speedWalkDelay{0};
 		QString                                      m_speedWalkFiller;

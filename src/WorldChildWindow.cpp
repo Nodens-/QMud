@@ -296,13 +296,8 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 			    const bool    suppressConnectNote = worldRuntime->reloadReattachConnectActionsSuppressed();
 			    const QString flag =
 			        worldRuntime->worldAttributes().value(QStringLiteral("show_connect_disconnect"));
-			    const bool show = flag.isEmpty() ||
-			                      flag.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-			                      flag == QStringLiteral("1") ||
-			                      flag.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-			    if (!show && !suppressConnectNote)
-				    return;
-			    if (!suppressConnectNote)
+			    if (const bool show = flag.isEmpty() || isEnabledFlagValue(flag);
+			        show && !suppressConnectNote)
 			    {
 				    const QString when =
 				        QDateTime::currentDateTime().toString(QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"));
@@ -323,12 +318,6 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 			    if (m_view && shouldFocusInput)
 				    m_view->focusInput();
 		    });
-		connect(worldRuntime, &WorldRuntime::disconnected, this,
-		        [this]
-		        {
-			        if (MainWindowHost *main = resolveMainWindowHost(window()))
-				        main->updateActivityToolbarButtons();
-		        });
 		connect(
 		    worldRuntime, &WorldRuntime::socketError, this,
 		    [this, worldRuntime](const QString &message)
@@ -397,41 +386,43 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		    {
 			    if (!m_view || !worldRuntime)
 				    return;
+			    if (MainWindowHost *main = resolveMainWindowHost(window()))
+				    main->updateActivityToolbarButtons();
 			    const QString flag =
 			        worldRuntime->worldAttributes().value(QStringLiteral("show_connect_disconnect"));
-			    const bool show = flag.isEmpty() ||
-			                      flag.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-			                      flag == QStringLiteral("1") ||
-			                      flag.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-			    if (!show)
-				    return;
-			    const QString when =
-			        QDateTime::currentDateTime().toString(QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"));
-			    if (m_commandProcessor)
-				    m_commandProcessor->note(QStringLiteral("--- Disconnected on %1 ---").arg(when), true);
-			    else if (m_view)
-				    m_view->appendNoteText(QStringLiteral("--- Disconnected on %1 ---").arg(when), true);
-			    if (worldRuntime->connectTime().isValid())
+			    if (const bool show = flag.isEmpty() || isEnabledFlagValue(flag); show)
 			    {
-				    const qint64  seconds = worldRuntime->connectTime().secsTo(QDateTime::currentDateTime());
-				    const qint64  days    = seconds / 86400;
-				    const qint64  hours   = seconds % 86400 / 3600;
-				    const qint64  minutes = seconds % 3600 / 60;
-				    const qint64  secs    = seconds % 60;
-				    const QString duration =
-				        QStringLiteral("--- Connected for %1 day%2, %3 hour%4, %5 minute%6, %7 second%8. ---")
-				            .arg(days)
-				            .arg(days == 1 ? QString() : QStringLiteral("s"))
-				            .arg(hours)
-				            .arg(hours == 1 ? QString() : QStringLiteral("s"))
-				            .arg(minutes)
-				            .arg(minutes == 1 ? QString() : QStringLiteral("s"))
-				            .arg(secs)
-				            .arg(secs == 1 ? QString() : QStringLiteral("s"));
+				    const QString when =
+				        QDateTime::currentDateTime().toString(QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"));
 				    if (m_commandProcessor)
-					    m_commandProcessor->note(duration, true);
+					    m_commandProcessor->note(QStringLiteral("--- Disconnected on %1 ---").arg(when),
+					                             true);
 				    else if (m_view)
-					    m_view->appendNoteText(duration, true);
+					    m_view->appendNoteText(QStringLiteral("--- Disconnected on %1 ---").arg(when), true);
+				    if (worldRuntime->connectTime().isValid())
+				    {
+					    const qint64 seconds =
+					        worldRuntime->connectTime().secsTo(QDateTime::currentDateTime());
+					    const qint64  days    = seconds / 86400;
+					    const qint64  hours   = seconds % 86400 / 3600;
+					    const qint64  minutes = seconds % 3600 / 60;
+					    const qint64  secs    = seconds % 60;
+					    const QString duration =
+					        QStringLiteral(
+					            "--- Connected for %1 day%2, %3 hour%4, %5 minute%6, %7 second%8. ---")
+					            .arg(days)
+					            .arg(days == 1 ? QString() : QStringLiteral("s"))
+					            .arg(hours)
+					            .arg(hours == 1 ? QString() : QStringLiteral("s"))
+					            .arg(minutes)
+					            .arg(minutes == 1 ? QString() : QStringLiteral("s"))
+					            .arg(secs)
+					            .arg(secs == 1 ? QString() : QStringLiteral("s"));
+					    if (m_commandProcessor)
+						    m_commandProcessor->note(duration, true);
+					    else if (m_view)
+						    m_view->appendNoteText(duration, true);
+				    }
 			    }
 			    if (m_commandProcessor)
 			    {

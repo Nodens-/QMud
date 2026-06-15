@@ -2748,6 +2748,12 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] int            executeCommand(const QString &text) const;
 		/**
+		 * @brief Executes one direct trigger-script command with priority over queued movement.
+		 * @param text Command text.
+		 * @return API status code.
+		 */
+		[[nodiscard]] int            executeCommandWithTriggerPriority(const QString &text) const;
+		/**
 		 * @brief Gets MXP entity value.
 		 * @param name Entity name.
 		 * @return Entity value.
@@ -4020,8 +4026,29 @@ class WorldRuntime : public QObject
 		 * @param immediate Send as immediate when `true`.
 		 * @return API status code.
 		 */
-		[[nodiscard]] int  sendCommand(const QString &text, bool echo, bool queue, bool log, bool history,
-		                               bool immediate) const;
+		[[nodiscard]] int sendCommand(const QString &text, bool echo, bool queue, bool log, bool history,
+		                              bool immediate) const;
+		/**
+		 * @brief Sends direct trigger-script command text with priority over queued movement.
+		 * @param text Command text.
+		 * @param echo Echo command when `true`.
+		 * @param queue Queue command when `true`.
+		 * @param log Log command when `true`.
+		 * @param history Add command to history when `true`.
+		 * @return API status code.
+		 */
+		[[nodiscard]] int sendCommandWithTriggerPriority(const QString &text, bool echo, bool queue, bool log,
+		                                                 bool history) const;
+		/**
+		 * @brief Defers an immediate command send until current inbound world data finishes processing.
+		 * @param text Command line text.
+		 * @param echo Echo command when `true`.
+		 * @param log Log command when `true`.
+		 * @param triggerPriority Place command in the inbound trigger-priority band when `true`.
+		 * @return `true` when the command was deferred.
+		 */
+		[[nodiscard]] bool deferInboundImmediateCommand(const QString &text, bool echo, bool log,
+		                                                bool triggerPriority) const;
 		/**
 		 * @brief Command-processor bridge, accelerators, and plugin callbacks.
 		 */
@@ -4068,6 +4095,7 @@ class WorldRuntime : public QObject
 				QStringList queuedCommands;
 				QString     commandInputText;
 				QStringList commandHistory;
+				int         triggerPriorityQueuedCommandCount{0};
 				int         inputSelectionStartColumn{0};
 				int         inputSelectionEndColumn{0};
 				int         outputSelectionEndColumn{0};
@@ -5136,6 +5164,18 @@ class WorldRuntime : public QObject
 		 */
 		void processRawDataPayload(const QByteArray &data, bool simulatedInput);
 		/**
+		 * @brief Starts an inbound command deferral scope.
+		 */
+		void beginInboundCommandDeferralScope() const;
+		/**
+		 * @brief Ends an inbound command deferral scope and flushes staged commands at the outer boundary.
+		 */
+		void endInboundCommandDeferralScope() const;
+		/**
+		 * @brief Flushes staged commands created while inbound world data was being processed.
+		 */
+		void flushDeferredInboundCommands() const;
+		/**
 		 * @brief Queues plugin for deferred installation.
 		 * @param plugin Plugin instance.
 		 */
@@ -5642,72 +5682,83 @@ class WorldRuntime : public QObject
 		QList<TelnetProcessor::MxpEvent>                m_reloadReattachMxpProbeEvents;
 		QList<TelnetProcessor::MxpModeChange>           m_reloadReattachMxpProbeModeChanges;
 		quint64                                         m_reloadMccpProbeGeneration{0};
-		QDateTime                                       m_statusTime;
-		QDateTime                                       m_lastFlushTime;
-		QDateTime                                       m_clientStartTime;
-		QDateTime                                       m_worldStartTime;
-		int                                             m_mxpErrors{0};
-		bool                                            m_mxpActive{false};
-		bool                                            m_outputFrozen{false};
-		TextRectangleSettings                           m_textRectangle;
-		QMap<int, UdpListener>                          m_udpListeners;
-		QVector<SoundBuffer>                            m_soundBuffers;
-		int                                             m_outputFontHeight{0};
-		int                                             m_outputFontWidth{0};
-		int                                             m_inputFontHeight{0};
-		int                                             m_inputFontWidth{0};
-		int                                             m_queuedCommandCount{0};
-		bool                                            m_removeMapReverses{true};
-		qint64                                          m_bytesIn{0};
-		qint64                                          m_bytesOut{0};
-		int                                             m_inputPacketCount{0};
-		int                                             m_outputPacketCount{0};
-		bool                                            m_isMapping{false};
-		bool                                            m_variablesChanged{false};
-		bool                                            m_lineOmittedFromOutput{false};
-		bool                                            m_traceEnabled{false};
-		bool                                            m_worldFileModified{false};
-		qint64                                          m_newlinesReceived{0};
-		bool                                            m_scriptFileChanged{false};
-		bool                                            m_loadingDocument{false};
-		bool                                            m_inPlaySoundPluginCallback{false};
-		bool                                            m_inCancelSoundPluginCallback{false};
-		bool                                            m_inScreendrawCallback{false};
-		bool                                            m_inDrawOutputWindowCallback{false};
-		int                                             m_suppressWorldOutputResizedCallbacks{0};
-		bool                                            m_pluginInstallDeferred{false};
-		bool                                            m_pluginInstallInProgress{false};
-		bool                                            m_pluginInstallRetryQueued{false};
-		QVector<std::function<void()>>                  m_pluginInstallCommittedWaiters;
-		bool                                            m_deferredConnectAfterPluginInstallPending{false};
-		bool                                            m_deferredWorldConnectHandlersPending{false};
-		QString                                         m_deferredConnectHost;
-		quint16                                         m_deferredConnectPort{0};
-		int                                             m_outputWindowRedrawCount{0};
-		QFileSystemWatcher                             *m_scriptWatcher{nullptr};
-		QVector<MxpTagFrame>                            m_mxpTagStack;
-		QVector<MxpOpenTag>                             m_mxpOpenTags;
-		QByteArray                                      m_mxpTextBuffer;
-		QString                                         m_windowTitleOverride;
-		QString                                         m_mainTitleOverride;
-		class LuaCallbackEngine                        *m_luaCallbacks{nullptr};
-		std::unique_ptr<ILuaExecutor>                   m_luaExecutor;
-		QString                                         m_luaScriptText;
-		WorldCommandProcessor                          *m_commandProcessor{nullptr};
-		int                                             m_lastGoTo{1};
-		QList<QString>                                  m_mappingList;
-		qint64                                          m_triggerTimeNs{0};
-		qint64                                          m_aliasTimeNs{0};
-		QElapsedTimer                                   m_lineTimer;
-		qint64                                          m_nextLineNumber{1};
-		bool                                            m_luaContextLineActive{false};
-		bool                                            m_luaContextLineBuffered{false};
-		bool                                            m_luaContextLineCommitted{false};
-		int                                             m_luaContextLineBufferIndex{0};
-		LineEntry                                       m_luaContextLineEntry;
-		QHash<qint64, int>                              m_luaCallbackAfterAnchorInsertionOffsets;
-		mutable quint64                                 m_luaCallbackLineBufferSnapshotGeneration{0};
-		mutable quint64                                 m_luaCallbackLineBufferSnapshotCacheGeneration{0};
+		struct DeferredInboundCommand
+		{
+				QString        text;
+				bool           echo{false};
+				bool           log{false};
+				unsigned short actionSource{eUnknownActionSource};
+		};
+		mutable QVector<DeferredInboundCommand> m_deferredInboundCommands;
+		mutable int                             m_deferredInboundTriggerPriorityCommands{0};
+		mutable int                             m_inboundCommandDeferralDepth{0};
+		mutable bool                            m_flushingDeferredInboundCommands{false};
+		QDateTime                               m_statusTime;
+		QDateTime                               m_lastFlushTime;
+		QDateTime                               m_clientStartTime;
+		QDateTime                               m_worldStartTime;
+		int                                     m_mxpErrors{0};
+		bool                                    m_mxpActive{false};
+		bool                                    m_outputFrozen{false};
+		TextRectangleSettings                   m_textRectangle;
+		QMap<int, UdpListener>                  m_udpListeners;
+		QVector<SoundBuffer>                    m_soundBuffers;
+		int                                     m_outputFontHeight{0};
+		int                                     m_outputFontWidth{0};
+		int                                     m_inputFontHeight{0};
+		int                                     m_inputFontWidth{0};
+		int                                     m_queuedCommandCount{0};
+		bool                                    m_removeMapReverses{true};
+		qint64                                  m_bytesIn{0};
+		qint64                                  m_bytesOut{0};
+		int                                     m_inputPacketCount{0};
+		int                                     m_outputPacketCount{0};
+		bool                                    m_isMapping{false};
+		bool                                    m_variablesChanged{false};
+		bool                                    m_lineOmittedFromOutput{false};
+		bool                                    m_traceEnabled{false};
+		bool                                    m_worldFileModified{false};
+		qint64                                  m_newlinesReceived{0};
+		bool                                    m_scriptFileChanged{false};
+		bool                                    m_loadingDocument{false};
+		bool                                    m_inPlaySoundPluginCallback{false};
+		bool                                    m_inCancelSoundPluginCallback{false};
+		bool                                    m_inScreendrawCallback{false};
+		bool                                    m_inDrawOutputWindowCallback{false};
+		int                                     m_suppressWorldOutputResizedCallbacks{0};
+		bool                                    m_pluginInstallDeferred{false};
+		bool                                    m_pluginInstallInProgress{false};
+		bool                                    m_pluginInstallRetryQueued{false};
+		QVector<std::function<void()>>          m_pluginInstallCommittedWaiters;
+		bool                                    m_deferredConnectAfterPluginInstallPending{false};
+		bool                                    m_deferredWorldConnectHandlersPending{false};
+		QString                                 m_deferredConnectHost;
+		quint16                                 m_deferredConnectPort{0};
+		int                                     m_outputWindowRedrawCount{0};
+		QFileSystemWatcher                     *m_scriptWatcher{nullptr};
+		QVector<MxpTagFrame>                    m_mxpTagStack;
+		QVector<MxpOpenTag>                     m_mxpOpenTags;
+		QByteArray                              m_mxpTextBuffer;
+		QString                                 m_windowTitleOverride;
+		QString                                 m_mainTitleOverride;
+		class LuaCallbackEngine                *m_luaCallbacks{nullptr};
+		std::unique_ptr<ILuaExecutor>           m_luaExecutor;
+		QString                                 m_luaScriptText;
+		WorldCommandProcessor                  *m_commandProcessor{nullptr};
+		int                                     m_lastGoTo{1};
+		QList<QString>                          m_mappingList;
+		qint64                                  m_triggerTimeNs{0};
+		qint64                                  m_aliasTimeNs{0};
+		QElapsedTimer                           m_lineTimer;
+		qint64                                  m_nextLineNumber{1};
+		bool                                    m_luaContextLineActive{false};
+		bool                                    m_luaContextLineBuffered{false};
+		bool                                    m_luaContextLineCommitted{false};
+		int                                     m_luaContextLineBufferIndex{0};
+		LineEntry                               m_luaContextLineEntry;
+		QHash<qint64, int>                      m_luaCallbackAfterAnchorInsertionOffsets;
+		mutable quint64                         m_luaCallbackLineBufferSnapshotGeneration{0};
+		mutable quint64                         m_luaCallbackLineBufferSnapshotCacheGeneration{0};
 		mutable QSharedPointer<const LuaCallbackLineBufferSnapshot> m_luaCallbackLineBufferSnapshotCache;
 		mutable quint64 m_luaCallbackRecentLineBufferSnapshotCacheGeneration{0};
 		mutable QSharedPointer<const LuaCallbackLineBufferSnapshot>
