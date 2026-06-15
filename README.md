@@ -312,6 +312,7 @@ These are intentional design choices in QMud:
 ## Contributors
 
 - Abigail Brady ([Cryosphere](https://cryosphere.org/))
+- RunnerScrab
 
 ## License
 
