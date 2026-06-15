@@ -8,9 +8,12 @@
 
 #include "NativePluginRegistry.h"
 #include "WorldChildWindow.h"
+#include "WorldCommandProcessorUtils.h"
 #include "WorldDocument.h"
+#include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
+#include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
@@ -30,9 +33,31 @@
 
 namespace
 {
-	const QString kDeferredConnectPluginId = QStringLiteral("abcdeffedcbaabcdeffedcba");
-	const QString kTeardownStatePluginId   = QStringLiteral("fedcbaabcdeffedcbaabcdef");
-	const QString kHiddenMessagePluginId   = QStringLiteral("112233445566778899aabbcc");
+	const QString           kDeferredConnectPluginId = QStringLiteral("abcdeffedcbaabcdeffedcba");
+	const QString           kTeardownStatePluginId   = QStringLiteral("fedcbaabcdeffedcbaabcdef");
+	const QString           kHiddenMessagePluginId   = QStringLiteral("112233445566778899aabbcc");
+	const QString           kNestedCallPluginId      = QStringLiteral("2233445566778899aabbccdd");
+	const QString           kTelnetOrderingPluginId  = QStringLiteral("00112233445566778899aabb");
+	const QString           kTelnetTriggerLine       = QStringLiteral("qxv-lattice-17");
+	const QString           kTelnetAfterLine         = QStringLiteral("qxv-after-64");
+
+	constexpr unsigned char IAC  = 0xFF;
+	constexpr unsigned char SB   = 0xFA;
+	constexpr unsigned char SE   = 0xF0;
+	constexpr unsigned char GMCP = 201;
+
+	/**
+	 * @brief Builds a byte array from unsigned byte literals.
+	 * @param raw Raw byte values.
+	 * @return Byte array containing the values.
+	 */
+	QByteArray              bytes(std::initializer_list<unsigned char> raw)
+	{
+		QByteArray out;
+		for (const unsigned char c : raw)
+			out.append(static_cast<char>(c));
+		return out;
+	}
 
 	/**
 	 * @brief Writes text to a test fixture file.
@@ -40,7 +65,7 @@ namespace
 	 * @param text Text to write.
 	 * @return `true` when the file was written completely.
 	 */
-	bool          writeTextFile(const QString &path, const QString &text)
+	bool writeTextFile(const QString &path, const QString &text)
 	{
 		QFile file(path);
 		if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
@@ -94,6 +119,216 @@ end
   </plugin>
 </muclient>
 )xml"));
+	}
+
+	/**
+	 * @brief Writes a plugin fixture whose telnet subnegotiation callback sends a command.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @param insertTriggerLineBeforeGmcp Whether packet receive should inject a trigger line before GMCP.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writeTelnetOrderingPlugin(const QString &pluginsDir, const bool insertTriggerLineBeforeGmcp = false)
+	{
+		const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("telnet_ordering.xml"));
+		QString       script     = QStringLiteral(R"lua(
+function qcb_append_order(marker)
+  local current = GetVariable("callback_order") or ""
+  if current ~= "" then
+    current = current .. ","
+  end
+  SetVariable("callback_order", current .. marker)
+end
+
+function qcb_mark_trigger(arg)
+  qcb_append_order("trigger")
+end
+
+function OnPluginTelnetSubnegotiation(msg_type, data)
+  qcb_append_order("telnet")
+  Send("qcmd-telnet-b73")
+end
+)lua");
+		if (insertTriggerLineBeforeGmcp)
+		{
+			script += QStringLiteral(R"lua(
+
+function OnPluginPacketReceived(packet)
+  local gmcp = string.char(255, 250, 201)
+  local transformed = string.gsub(packet, gmcp, "qxv-lattice-17\r\n" .. gmcp, 1)
+  return transformed
+end
+)lua");
+		}
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="TelnetOrdering"
+    author="QMud Test"
+    id=")xml") + kTelnetOrderingPluginId + QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+)xml") + QStringLiteral("    <script><![CDATA[") +
+		                                     script + QStringLiteral("]]></script>\n") +
+		                                     QStringLiteral(R"xml(  </plugin>
+</muclient>
+)xml"));
+	}
+
+	/**
+	 * @brief Writes a plugin fixture whose routine sends a command.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writeNestedCallPluginSendPlugin(const QString &pluginsDir)
+	{
+		const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("nested_call_send.xml"));
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="NestedCallSend"
+    author="QMud Test"
+    id=")xml") + kNestedCallPluginId + QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function qcb_nested_priority_check(arg)
+  Send("qcmd-nested-p54")
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml"));
+	}
+
+	/**
+	 * @brief Creates a script trigger that sends a command when matched text arrives.
+	 * @param match Trigger match text.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makeTelnetOrderingTrigger(const QString &match = kTelnetTriggerLine)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"), match);
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		trigger.children.insert(QStringLiteral("send"),
+		                        QStringLiteral("CallPlugin(\"%1\", \"qcb_mark_trigger\", \"\")\n"
+		                                       "Send(\"qcmd-trigger-a91\")")
+		                            .arg(kTelnetOrderingPluginId));
+		return trigger;
+	}
+
+	/**
+	 * @brief Creates a direct script trigger whose Lua body sends multiple commands.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makeLuaSendPriorityTrigger()
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("qxv-priority-line-38"));
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		trigger.children.insert(QStringLiteral("send"),
+		                        QStringLiteral("Send(\"qcmd-lua-a91\")\nSend(\"qcmd-lua-b26\")"));
+		return trigger;
+	}
+
+	/**
+	 * @brief Creates a direct script trigger whose Lua body executes a command.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makeLuaExecutePriorityTrigger()
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("qxv-lua-execute-line-73"));
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		trigger.children.insert(QStringLiteral("send"), QStringLiteral("Execute(\"qcmd-lua-execute-c52\")"));
+		return trigger;
+	}
+
+	/**
+	 * @brief Creates a direct script trigger whose Lua body mixes Send and Execute commands.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makeLuaMixedPriorityTrigger()
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("qxv-lua-mixed-line-84"));
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		trigger.children.insert(QStringLiteral("send"), QStringLiteral("Send(\"qcmd-lua-mixed-a19\")\n"
+		                                                               "Execute(\"qcmd-lua-mixed-b42\")\n"
+		                                                               "Send(\"qcmd-lua-mixed-c86\")"));
+		return trigger;
+	}
+
+	/**
+	 * @brief Creates a direct script trigger whose Lua body calls a plugin routine.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makeLuaCallPluginPriorityTrigger()
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("qxv-callplugin-line-52"));
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		trigger.children.insert(QStringLiteral("send"),
+		                        QStringLiteral("CallPlugin(\"%1\", \"qcb_nested_priority_check\", \"\")")
+		                            .arg(kNestedCallPluginId));
+		return trigger;
+	}
+
+	/**
+	 * @brief Creates a named callback trigger whose Lua function sends a command.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makeNamedCallbackQueueNormalTrigger()
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("qxv-callback-line-61"));
+		trigger.attributes.insert(QStringLiteral("script"), QStringLiteral("qcb_priority_check"));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		return trigger;
+	}
+
+	/**
+	 * @brief Creates an execute trigger whose command should claim the direct trigger priority band.
+	 * @param match Trigger match text.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makeExecuteQueuePriorityTrigger(const QString &match)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"), match);
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToExecute));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		trigger.children.insert(QStringLiteral("send"), QStringLiteral("qcmd-execute-a14"));
+		return trigger;
+	}
+
+	/**
+	 * @brief Decodes queued command payloads for assertions.
+	 * @param runtime Runtime whose queue should be inspected.
+	 * @return Queue payloads in dispatch order.
+	 */
+	QStringList queuedPayloads(const WorldRuntime &runtime)
+	{
+		QStringList payloads;
+		for (const QString &entry : runtime.queuedCommands())
+			payloads.push_back(QMudCommandQueue::decodeQueueEntry(entry).payload);
+		return payloads;
 	}
 
 	/**
@@ -250,6 +485,545 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    pluginVariable(runtime, kHiddenMessagePluginId, QStringLiteral("disconnect_marker")),
 			    QStringLiteral("disconnected"), 5000);
+		}
+
+		static void executeTriggerSendCommandEntersPriorityQueueBand()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("60000"));
+			runtime.triggersMutable().push_back(
+			    makeExecuteQueuePriorityTrigger(QStringLiteral("qxv-execute-line-42")));
+			runtime.markTriggersChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QCOMPARE(runtime.sendCommand(QStringLiteral("qcmd-tail-z77"), false, true, true, false, false),
+			         eOK);
+			QTRY_COMPARE_WITH_TIMEOUT(queuedPayloads(runtime), (QStringList{QStringLiteral("qcmd-tail-z77")}),
+			                          5000);
+
+			const QByteArray triggerLine = QByteArrayLiteral("qxv-execute-line-42\r\n");
+			QCOMPARE(acceptedSocket->write(triggerLine), static_cast<qint64>(triggerLine.size()));
+			QVERIFY(acceptedSocket->flush());
+
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    queuedPayloads(runtime),
+			    (QStringList{QStringLiteral("qcmd-execute-a14"), QStringLiteral("qcmd-tail-z77")}), 5000);
+		}
+
+		static void directLuaTriggerSendCommandsEnterPriorityQueueBand()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("60000"));
+			runtime.triggersMutable().push_back(makeLuaSendPriorityTrigger());
+			runtime.markTriggersChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QCOMPARE(runtime.sendCommand(QStringLiteral("qcmd-tail-z77"), false, true, true, false, false),
+			         eOK);
+			QTRY_COMPARE_WITH_TIMEOUT(queuedPayloads(runtime), (QStringList{QStringLiteral("qcmd-tail-z77")}),
+			                          5000);
+
+			const QByteArray triggerLine = QByteArrayLiteral("qxv-priority-line-38\r\n");
+			QCOMPARE(acceptedSocket->write(triggerLine), static_cast<qint64>(triggerLine.size()));
+			QVERIFY(acceptedSocket->flush());
+
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    queuedPayloads(runtime),
+			    (QStringList{QStringLiteral("qcmd-lua-a91"), QStringLiteral("qcmd-lua-b26"),
+			                 QStringLiteral("qcmd-tail-z77")}),
+			    5000);
+		}
+
+		static void directLuaTriggerExecuteCommandEntersPriorityQueueBand()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("60000"));
+			runtime.triggersMutable().push_back(makeLuaExecutePriorityTrigger());
+			runtime.markTriggersChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QCOMPARE(runtime.sendCommand(QStringLiteral("qcmd-tail-z77"), false, true, true, false, false),
+			         eOK);
+			QTRY_COMPARE_WITH_TIMEOUT(queuedPayloads(runtime), (QStringList{QStringLiteral("qcmd-tail-z77")}),
+			                          5000);
+
+			const QByteArray triggerLine = QByteArrayLiteral("qxv-lua-execute-line-73\r\n");
+			QCOMPARE(acceptedSocket->write(triggerLine), static_cast<qint64>(triggerLine.size()));
+			QVERIFY(acceptedSocket->flush());
+
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    queuedPayloads(runtime),
+			    (QStringList{QStringLiteral("qcmd-lua-execute-c52"), QStringLiteral("qcmd-tail-z77")}), 5000);
+		}
+
+		static void directLuaTriggerMixedSendAndExecuteCommandsPreservePriorityOrder()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("60000"));
+			runtime.triggersMutable().push_back(makeLuaMixedPriorityTrigger());
+			runtime.markTriggersChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QCOMPARE(runtime.sendCommand(QStringLiteral("qcmd-tail-z77"), false, true, true, false, false),
+			         eOK);
+			QTRY_COMPARE_WITH_TIMEOUT(queuedPayloads(runtime), (QStringList{QStringLiteral("qcmd-tail-z77")}),
+			                          5000);
+
+			const QByteArray triggerLine = QByteArrayLiteral("qxv-lua-mixed-line-84\r\n");
+			QCOMPARE(acceptedSocket->write(triggerLine), static_cast<qint64>(triggerLine.size()));
+			QVERIFY(acceptedSocket->flush());
+
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    queuedPayloads(runtime),
+			    (QStringList{QStringLiteral("qcmd-lua-mixed-a19"), QStringLiteral("qcmd-lua-mixed-b42"),
+			                 QStringLiteral("qcmd-lua-mixed-c86"), QStringLiteral("qcmd-tail-z77")}),
+			    5000);
+		}
+
+		static void namedLuaTriggerCallbackSendDoesNotEnterDirectActionPriorityQueueBand()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("60000"));
+			runtime.setLuaScriptText(
+			    QStringLiteral("function qcb_priority_check(name, line, wildcards, styles)\n"
+			                   "  Send(\"qcmd-callback-e71\")\n"
+			                   "end\n"));
+			runtime.triggersMutable().push_back(makeNamedCallbackQueueNormalTrigger());
+			runtime.markTriggersChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QCOMPARE(runtime.sendCommand(QStringLiteral("qcmd-tail-z77"), false, true, true, false, false),
+			         eOK);
+			QTRY_COMPARE_WITH_TIMEOUT(queuedPayloads(runtime), (QStringList{QStringLiteral("qcmd-tail-z77")}),
+			                          5000);
+
+			const QByteArray triggerLine = QByteArrayLiteral("qxv-callback-line-61\r\n");
+			QCOMPARE(acceptedSocket->write(triggerLine), static_cast<qint64>(triggerLine.size()));
+			QVERIFY(acceptedSocket->flush());
+
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    queuedPayloads(runtime),
+			    (QStringList{QStringLiteral("qcmd-tail-z77"), QStringLiteral("qcmd-callback-e71")}), 5000);
+		}
+
+		static void directLuaTriggerCallPluginSendDoesNotInheritDirectActionPriorityQueueBand()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeNestedCallPluginSendPlugin(pluginsDir));
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("60000"));
+			runtime.triggersMutable().push_back(makeLuaCallPluginPriorityTrigger());
+			runtime.markTriggersChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("nested_call_send.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QCOMPARE(runtime.sendCommand(QStringLiteral("qcmd-tail-z77"), false, true, true, false, false),
+			         eOK);
+			QTRY_COMPARE_WITH_TIMEOUT(queuedPayloads(runtime), (QStringList{QStringLiteral("qcmd-tail-z77")}),
+			                          5000);
+
+			const QByteArray triggerLine = QByteArrayLiteral("qxv-callplugin-line-52\r\n");
+			QCOMPARE(acceptedSocket->write(triggerLine), static_cast<qint64>(triggerLine.size()));
+			QVERIFY(acceptedSocket->flush());
+
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    queuedPayloads(runtime),
+			    (QStringList{QStringLiteral("qcmd-tail-z77"), QStringLiteral("qcmd-nested-p54")}), 5000);
+		}
+
+		static void telnetSubnegotiationCallbacksPreserveStreamOrderAfterCompletedTriggerLine()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeTelnetOrderingPlugin(pluginsDir));
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger());
+			runtime.markTriggersChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("telnet_ordering.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QByteArray payload = kTelnetTriggerLine.toUtf8() + QByteArrayLiteral("\r\n");
+			payload += bytes({IAC, SB, GMCP, 'q', '7', 'x', IAC, SE});
+			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
+			QVERIFY(acceptedSocket->flush());
+
+			QByteArray received;
+			auto       receivedBothCommands = [&]
+			{
+				if (acceptedSocket->bytesAvailable() == 0)
+					acceptedSocket->waitForReadyRead(10);
+				received += acceptedSocket->readAll();
+				return received.contains("qcmd-trigger-a91\r\n") && received.contains("qcmd-telnet-b73\r\n");
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(receivedBothCommands(), 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("callback_order")),
+			    QStringLiteral("trigger,telnet"), 5000);
+			QVERIFY(received.indexOf("qcmd-trigger-a91\r\n") < received.indexOf("qcmd-telnet-b73\r\n"));
+		}
+
+		static void telnetSubnegotiationCallbacksUsePacketTransformedStreamOrder()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeTelnetOrderingPlugin(pluginsDir, true));
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger());
+			runtime.markTriggersChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("telnet_ordering.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QByteArray payload = bytes({IAC, SB, GMCP, 'q', '7', 'x', IAC, SE});
+			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
+			QVERIFY(acceptedSocket->flush());
+
+			QByteArray received;
+			auto       receivedBothCommands = [&]
+			{
+				if (acceptedSocket->bytesAvailable() == 0)
+					acceptedSocket->waitForReadyRead(10);
+				received += acceptedSocket->readAll();
+				return received.contains("qcmd-trigger-a91\r\n") && received.contains("qcmd-telnet-b73\r\n");
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(receivedBothCommands(), 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("callback_order")),
+			    QStringLiteral("trigger,telnet"), 5000);
+			QVERIFY(received.indexOf("qcmd-trigger-a91\r\n") < received.indexOf("qcmd-telnet-b73\r\n"));
+		}
+
+		static void telnetSubnegotiationCallbacksRebaseOffsetsAfterFilteredBytes()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeTelnetOrderingPlugin(pluginsDir));
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger(kTelnetAfterLine));
+			runtime.markTriggersChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("telnet_ordering.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QByteArray payload(10, '\0');
+			payload += bytes({IAC, SB, GMCP, 'q', '7', 'x', IAC, SE});
+			payload += kTelnetAfterLine.toUtf8() + QByteArrayLiteral("\r\n");
+			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
+			QVERIFY(acceptedSocket->flush());
+
+			QByteArray received;
+			auto       receivedBothCommands = [&]
+			{
+				if (acceptedSocket->bytesAvailable() == 0)
+					acceptedSocket->waitForReadyRead(10);
+				received += acceptedSocket->readAll();
+				return received.contains("qcmd-trigger-a91\r\n") && received.contains("qcmd-telnet-b73\r\n");
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(receivedBothCommands(), 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("callback_order")),
+			    QStringLiteral("telnet,trigger"), 5000);
+			QVERIFY(received.indexOf("qcmd-trigger-a91\r\n") < received.indexOf("qcmd-telnet-b73\r\n"));
+		}
+
+		static void telnetSubnegotiationCallbacksRebaseOffsetsAfterRemovedPuebloMarker()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeTelnetOrderingPlugin(pluginsDir));
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("detect_pueblo"), QStringLiteral("1"));
+			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger(kTelnetAfterLine));
+			runtime.markTriggersChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("telnet_ordering.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QByteArray payload = QByteArrayLiteral("</xch_mudtext>\r\n");
+			payload += bytes({IAC, SB, GMCP, 'q', '7', 'x', IAC, SE});
+			payload += kTelnetAfterLine.toUtf8() + QByteArrayLiteral("\r\n");
+			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
+			QVERIFY(acceptedSocket->flush());
+
+			QByteArray received;
+			auto       receivedBothCommands = [&]
+			{
+				if (acceptedSocket->bytesAvailable() == 0)
+					acceptedSocket->waitForReadyRead(10);
+				received += acceptedSocket->readAll();
+				return received.contains("qcmd-trigger-a91\r\n") && received.contains("qcmd-telnet-b73\r\n");
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(receivedBothCommands(), 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("callback_order")),
+			    QStringLiteral("telnet,trigger"), 5000);
+			QVERIFY(received.indexOf("qcmd-trigger-a91\r\n") < received.indexOf("qcmd-telnet-b73\r\n"));
 		}
 
 		static void teardownPluginCloseRunsBeforeSaveStateWithQueuedAsyncCallback()

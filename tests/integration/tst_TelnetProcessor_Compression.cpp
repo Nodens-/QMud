@@ -20,6 +20,7 @@ namespace
 	constexpr unsigned char SB               = 0xFA;
 	constexpr unsigned char SE               = 0xF0;
 	constexpr unsigned char TELOPT_COMPRESS2 = 86;
+	constexpr unsigned char GMCP             = 201;
 
 	QByteArray              bytes(std::initializer_list<unsigned char> raw)
 	{
@@ -95,6 +96,132 @@ class tst_TelnetProcessor_Compression : public QObject
 			QCOMPARE(processor.mccpType(), 0);
 			QVERIFY(processor.totalCompressedBytes() > 0);
 			QVERIFY(processor.totalUncompressedBytes() >= 5);
+		}
+
+		void packetTransformRunsAfterMccpInflateBeforeTelnetParsing()
+		{
+			TelnetProcessor  processor;
+
+			QByteArray       plain      = bytes({IAC, SB, GMCP, 'r', 'o', 'o', 'm', IAC, SE});
+			const QByteArray compressed = makeQtZlibPayload(plain);
+			QVERIFY(!compressed.isEmpty());
+
+			const QByteArray  gmcpMarker = bytes({IAC, SB, GMCP});
+			QList<QByteArray> seenPackets;
+			const QByteArray  prefix     = QByteArrayLiteral("pre");
+			const QByteArray  activation = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
+			QByteArray        packet     = prefix + activation + compressed;
+			const QByteArray  output     = processor.processBytes(
+			    packet,
+			    [&](QByteArray &payload)
+			    {
+				    seenPackets.append(payload);
+				    if (payload == prefix)
+				    {
+					    payload = QByteArrayLiteral("prefix\n");
+					    return;
+				    }
+				    const qsizetype gmcpAt = payload.indexOf(gmcpMarker);
+				    if (gmcpAt >= 0)
+					    payload.insert(gmcpAt, QByteArrayLiteral("qxv-insert-5d2\r\n"));
+			    });
+
+			QCOMPARE(seenPackets.size(), 2);
+			QCOMPARE(seenPackets.at(0), prefix);
+			QCOMPARE(seenPackets.at(1), plain);
+			QVERIFY(!seenPackets.contains(activation));
+			QVERIFY(!seenPackets.contains(compressed));
+			QCOMPARE(output, QByteArrayLiteral("prefix\nqxv-insert-5d2\r\n"));
+
+			const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+			QCOMPARE(events.constFirst().offset, QByteArrayLiteral("prefix\nqxv-insert-5d2\r\n").size());
+		}
+
+		void packetTransformDoesNotMisclassifyEscapedIacInsideSubnegotiationAsMccp()
+		{
+			TelnetProcessor processor;
+
+			QByteArray      payload = QByteArrayLiteral("before");
+			payload += bytes({IAC, SB, GMCP, 'a', IAC, IAC, SB, TELOPT_COMPRESS2, 'b', IAC, SE});
+			payload += QByteArrayLiteral("after");
+
+			QList<QByteArray> seenPackets;
+			const QByteArray  output = processor.processBytes(payload, [&](const QByteArray &packetPayload)
+			                                                  { seenPackets.append(packetPayload); });
+
+			QCOMPARE(seenPackets.size(), 1);
+			QCOMPARE(seenPackets.constFirst(), payload);
+			QCOMPARE(output, QByteArrayLiteral("beforeafter"));
+			QVERIFY(!processor.isCompressing());
+
+			const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+			QCOMPARE(events.constFirst().option, static_cast<int>(GMCP));
+			QCOMPARE(events.constFirst().data, bytes({'a', IAC, SB, TELOPT_COMPRESS2, 'b'}));
+		}
+
+		void packetTransformDoesNotSeeSplitMccpActivation()
+		{
+			TelnetProcessor  processor;
+
+			const QByteArray plain      = QByteArrayLiteral("after-mccp\n");
+			const QByteArray compressed = makeQtZlibPayload(plain);
+			QVERIFY(!compressed.isEmpty());
+
+			const QByteArray  activation = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
+			QList<QByteArray> seenPackets;
+			const QByteArray  firstOutput =
+			    processor.processBytes(QByteArrayLiteral("before\n") + activation.left(2),
+			                           [&](const QByteArray &payload) { seenPackets.append(payload); });
+			QCOMPARE(firstOutput, QByteArrayLiteral("before\n"));
+
+			const QByteArray secondOutput =
+			    processor.processBytes(activation.mid(2) + compressed,
+			                           [&](const QByteArray &payload) { seenPackets.append(payload); });
+			QCOMPARE(secondOutput, plain);
+
+			QCOMPARE(seenPackets.size(), 2);
+			QCOMPARE(seenPackets.at(0), QByteArrayLiteral("before\n"));
+			QCOMPARE(seenPackets.at(1), plain);
+			QVERIFY(!seenPackets.contains(activation));
+			QVERIFY(!seenPackets.contains(compressed));
+		}
+
+		void packetTransformDoesNotSeeMccpRestartAfterStreamEnd()
+		{
+			TelnetProcessor  processor;
+
+			const QByteArray firstPlain   = QByteArrayLiteral("old-stream\n");
+			const QByteArray secondPlain  = QByteArrayLiteral("new-stream\n");
+			const QByteArray firstStream  = makeQtZlibPayload(firstPlain);
+			const QByteArray secondStream = makeQtZlibPayload(secondPlain);
+			QVERIFY(!firstStream.isEmpty());
+			QVERIFY(!secondStream.isEmpty());
+
+			const QByteArray  activation     = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
+			const QByteArray  plainRemainder = QByteArrayLiteral("after-copyover\n");
+			QList<QByteArray> seenPackets;
+			QByteArray        packet = activation + firstStream + plainRemainder + activation + secondStream;
+			const QByteArray  output =
+			    processor.processBytes(packet,
+			                           [&](QByteArray &payload)
+			                           {
+				                           seenPackets.append(payload);
+				                           if (payload == plainRemainder)
+					                           payload = QByteArrayLiteral("between-streams\n");
+			                           });
+
+			QCOMPARE(seenPackets.size(), 3);
+			QCOMPARE(seenPackets.at(0), firstPlain);
+			QCOMPARE(seenPackets.at(1), plainRemainder);
+			QCOMPARE(seenPackets.at(2), secondPlain);
+			QVERIFY(!seenPackets.contains(activation));
+			QVERIFY(!seenPackets.contains(firstStream));
+			QVERIFY(!seenPackets.contains(secondStream));
+			QCOMPARE(output, QByteArrayLiteral("old-stream\nbetween-streams\nnew-stream\n"));
 		}
 
 		void malformedCompressedDataEmitsFatalError()
@@ -192,7 +319,6 @@ class tst_TelnetProcessor_Compression : public QObject
 };
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Compression)
-
 
 #if __has_include("tst_TelnetProcessor_Compression.moc")
 #include "tst_TelnetProcessor_Compression.moc"

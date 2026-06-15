@@ -20,7 +20,7 @@ namespace
 	constexpr unsigned char TELOPT_TERMINAL_TYPE = 24;
 	constexpr unsigned char TTYPE_SEND           = 1;
 
-	QByteArray bytes(std::initializer_list<unsigned char> raw)
+	QByteArray              bytes(std::initializer_list<unsigned char> raw)
 	{
 		QByteArray out;
 		for (const unsigned char c : raw)
@@ -36,11 +36,11 @@ class tst_TelnetProcessor_Subnegotiation : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void genericSubnegotiationCallback()
 		{
-			TelnetProcessor  processor;
+			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
 
@@ -50,9 +50,28 @@ class tst_TelnetProcessor_Subnegotiation : public QObject
 			QCOMPARE(spy.subnegotiations.at(0).data, QByteArrayLiteral("ab"));
 		}
 
+		void subnegotiationPluginEventRecordsProcessedStreamOffset()
+		{
+			TelnetProcessor processor;
+
+			QByteArray      input = QByteArrayLiteral("room text\r\n");
+			input += bytes({IAC, SB, 201, 'r', 'o', 'o', 'm', IAC, SE});
+			input += QByteArrayLiteral("prompt");
+
+			const QByteArray output = processor.processBytes(input);
+			QCOMPARE(output, QByteArrayLiteral("room text\r\nprompt"));
+
+			const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.at(0).type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+			QCOMPARE(events.at(0).option, 201);
+			QCOMPARE(events.at(0).data, QByteArrayLiteral("room"));
+			QCOMPARE(events.at(0).offset, QByteArrayLiteral("room text\r\n").size());
+		}
+
 		void mudSpecificCallsOptionAndSubnegotiation()
 		{
-			TelnetProcessor  processor;
+			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
 
@@ -64,9 +83,26 @@ class tst_TelnetProcessor_Subnegotiation : public QObject
 			QCOMPARE(spy.telnetOptions.at(0), QByteArray("x\xFFy", 3));
 		}
 
-		void subnegotiationCanSpanPackets()
+		void mudSpecificPluginEventsKeepOptionBeforeSubnegotiation()
 		{
 			TelnetProcessor  processor;
+
+			const QByteArray output =
+			    processor.processBytes(bytes({'a', IAC, SB, TELOPT_MUD_SPECIFIC, 'x', IAC, SE, 'b'}));
+			QCOMPARE(output, QByteArrayLiteral("ab"));
+
+			const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+			QCOMPARE(events.size(), 2);
+			QCOMPARE(events.at(0).type, TelnetProcessor::TelnetPluginEvent::Option);
+			QCOMPARE(events.at(1).type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+			QCOMPARE(events.at(0).offset, 1);
+			QCOMPARE(events.at(1).offset, 1);
+			QVERIFY(events.at(0).sequence < events.at(1).sequence);
+		}
+
+		void subnegotiationCanSpanPackets()
+		{
+			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
 
@@ -79,22 +115,44 @@ class tst_TelnetProcessor_Subnegotiation : public QObject
 			QCOMPARE(spy.subnegotiations.at(0).data, QByteArrayLiteral("ab"));
 		}
 
+		void splitSubnegotiationEscapedIacDoesNotStartMccp()
+		{
+			TelnetProcessor processor;
+
+			processor.processBytes(bytes({IAC, SB, 200, 'a'}));
+
+			QList<QByteArray> seenPackets;
+			const QByteArray  secondPacket = bytes({IAC, IAC, SB, 86, 'b', IAC, SE});
+			const QByteArray  output = processor.processBytes(secondPacket, [&](const QByteArray &payload)
+			                                                  { seenPackets.append(payload); });
+
+			QCOMPARE(output, QByteArray());
+			QCOMPARE(seenPackets.size(), 1);
+			QCOMPARE(seenPackets.constFirst(), secondPacket);
+			QVERIFY(!processor.isCompressing());
+
+			const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+			QCOMPARE(events.constFirst().option, 200);
+			QCOMPARE(events.constFirst().data, bytes({'a', IAC, SB, 86, 'b'}));
+		}
+
 		void terminalTypeSubnegotiationDoesNotCallGenericCallback()
 		{
-			TelnetProcessor  processor;
+			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
 
 			processor.processBytes(bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_SEND, IAC, SE}));
 			QCOMPARE(spy.subnegotiations.size(), 0);
+			QVERIFY(processor.takeTelnetPluginEvents().isEmpty());
 			QVERIFY(!processor.takeOutboundData().isEmpty());
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Subnegotiation)
-
-
 
 #if __has_include("tst_TelnetProcessor_Subnegotiation.moc")
 #include "tst_TelnetProcessor_Subnegotiation.moc"

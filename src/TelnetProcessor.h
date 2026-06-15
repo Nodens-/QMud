@@ -14,6 +14,8 @@
 #define QMUD_TELNETPROCESSOR_H
 
 #include <QByteArray>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QList>
 #include <QMap>
 #include <QString>
 #include <array>
@@ -191,10 +193,42 @@ class TelnetProcessor
 		 */
 		QByteArray processBytes(const QByteArray &data);
 		/**
+		 * @brief Callback that can transform decompressed bytes before telnet/MXP parsing.
+		 */
+		using PacketTransformCallback = std::function<void(QByteArray &)>;
+		/**
+		 * @brief Processes incoming bytes and transforms each decompressed packet before parsing.
+		 * @param data Incoming raw bytes.
+		 * @param packetTransform Transform applied after MCCP decompression and before telnet parsing.
+		 * @return Processed/plain payload bytes for output.
+		 */
+		QByteArray processBytes(const QByteArray &data, const PacketTransformCallback &packetTransform);
+		/**
+		 * @brief Plugin-visible telnet event emitted at a position in processed output.
+		 */
+		struct TelnetPluginEvent
+		{
+				enum Type
+				{
+					IacGa,
+					Option,
+					Subnegotiation
+				} type{Subnegotiation};
+				int        offset{0};
+				int        sequence{0};
+				int        option{0};
+				QByteArray data;
+		};
+		/**
+		 * @brief Returns and clears plugin-visible telnet events since the previous call.
+		 * @return Ordered telnet plugin events.
+		 */
+		QList<TelnetPluginEvent> takeTelnetPluginEvents();
+		/**
 		 * @brief Returns and clears bytes queued for outbound socket write.
 		 * @return Queued outbound bytes.
 		 */
-		QByteArray takeOutboundData();
+		QByteArray               takeOutboundData();
 		/**
 		 * @brief Parsed MXP token emitted during stream processing.
 		 */
@@ -590,31 +624,39 @@ class TelnetProcessor
 		 * @brief Sends current NAWS window size.
 		 */
 		void                     sendWindowSize();
+		/**
+		 * @brief Records a plugin-visible telnet event at the current output position.
+		 * @param type Plugin event type.
+		 * @param option Telnet option number.
+		 * @param data Telnet event payload bytes.
+		 */
+		void       appendTelnetPluginEvent(TelnetPluginEvent::Type type, int option, const QByteArray &data);
 
-		Phase                    m_phase{NONE};
-		int                      m_code{0};
-		bool                     m_convertGAtoNewline{false};
-		bool                     m_noEchoOff{false};
-		bool                     m_noEcho{false};
-		bool                     m_utf8{false};
-		int                      m_useMxp{3}; // eNoMXP by default
-		bool                     m_naws{false};
-		bool                     m_nawsWanted{false};
-		int                      m_wrapColumns{0};
-		int                      m_wrapRows{0};
-		int                      m_ttypeSequence{0};
-		QString                  m_terminalIdentification{QStringLiteral("QMud")};
+		Phase      m_phase{NONE};
+		int        m_code{0};
+		bool       m_convertGAtoNewline{false};
+		bool       m_noEchoOff{false};
+		bool       m_noEcho{false};
+		bool       m_utf8{false};
+		int        m_useMxp{3}; // eNoMXP by default
+		bool       m_naws{false};
+		bool       m_nawsWanted{false};
+		int        m_wrapColumns{0};
+		int        m_wrapRows{0};
+		int        m_ttypeSequence{0};
+		QString    m_terminalIdentification{QStringLiteral("QMud")};
 
-		int                      m_subnegotiationType{0};
-		QByteArray               m_subnegotiationData;
-		QByteArray               m_outbound;
-		QByteArray               m_ansiBuffer;
-		QByteArray               m_pendingCompressed;
-		QByteArray               m_compressInput;
-		QByteArray               m_compressOutputChunk;
-		QByteArray               m_postCompressionRemainder;
-		int                      m_compressInputOffset{0};
-		int                      m_outputSize{0};
+		int        m_subnegotiationType{0};
+		QByteArray m_subnegotiationData;
+		QByteArray m_outbound;
+		QByteArray m_ansiBuffer;
+		QByteArray m_pendingPacketTransformBytes;
+		QByteArray m_pendingCompressed;
+		QByteArray m_compressInput;
+		QByteArray m_compressOutputChunk;
+		QByteArray m_postCompressionRemainder;
+		int        m_compressInputOffset{0};
+		int        m_outputSize{0};
 
 		enum MxpPhase
 		{
@@ -647,6 +689,7 @@ class TelnetProcessor
 		QMap<QByteArray, CustomElement> m_customElements;
 		QList<MxpEvent>                 m_mxpEvents;
 		QList<MxpModeChange>            m_mxpModeChanges;
+		QList<TelnetPluginEvent>        m_telnetPluginEvents;
 		bool                            m_mxpEventsOverflowed{false};
 		int                             m_mxpEventSequence{0};
 		Callbacks                       m_callbacks;

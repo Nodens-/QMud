@@ -518,11 +518,13 @@ void TelnetProcessor::resetConnectionState()
 	m_subnegotiationData.clear();
 	m_outbound.clear();
 	m_ansiBuffer.clear();
+	m_pendingPacketTransformBytes.clear();
 	m_outputSize = 0;
 	m_mxpPhase   = MXP_NONE;
 	m_mxpString.clear();
 	m_mxpEvents.clear();
 	m_mxpModeChanges.clear();
+	m_telnetPluginEvents.clear();
 	m_mxpEventsOverflowed = false;
 	m_mxpEventSequence    = 0;
 	m_mxpEnabled          = false;
@@ -574,19 +576,233 @@ void TelnetProcessor::queueInitialNegotiation(const bool requestSga, const bool 
 
 QByteArray TelnetProcessor::processBytes(const QByteArray &data)
 {
-	if (data.isEmpty())
+	return processBytes(data, {});
+}
+
+QByteArray TelnetProcessor::processBytes(const QByteArray              &data,
+                                         const PacketTransformCallback &packetTransform)
+{
+	if (data.isEmpty() && m_pendingPacketTransformBytes.isEmpty())
 		return {};
 
 	m_outputSize = 0;
 
+	QByteArray input = m_pendingPacketTransformBytes + data;
+	m_pendingPacketTransformBytes.clear();
+
 	QByteArray output;
 	QByteArray tailPlain;
-	auto       takePostCompressionRemainder = [&]
+	auto       appendPlainBytes = [&](QByteArray plain)
+	{
+		if (plain.isEmpty())
+			return;
+		if (packetTransform)
+			packetTransform(plain);
+		if (!plain.isEmpty())
+			output.append(processPlainBytes(plain));
+	};
+	struct MccpActivationRange
+	{
+			qsizetype start{-1};
+			qsizetype end{-1};
+			qsizetype holdStart{-1};
+	};
+	auto findSubnegotiationEnd = [](const QByteArray &bytes, const qsizetype start) -> qsizetype
+	{
+		for (qsizetype i = start; i + 1 < bytes.size(); ++i)
+		{
+			if (static_cast<unsigned char>(bytes.at(i)) != IAC)
+				continue;
+			const auto next = static_cast<unsigned char>(bytes.at(i + 1));
+			if (next == IAC)
+			{
+				++i;
+				continue;
+			}
+			if (next == SE)
+				return i + 2;
+		}
+		return -1;
+	};
+	auto findMccpActivationRange = [&](const QByteArray &bytes) -> MccpActivationRange
+	{
+		if (bytes.isEmpty())
+			return {};
+
+		auto rangeForSubnegotiation = [&](const qsizetype startOffset, const qsizetype optionOffset,
+		                                  const bool holdIncomplete) -> MccpActivationRange
+		{
+			if (optionOffset >= bytes.size())
+				return holdIncomplete ? MccpActivationRange{-1, -1, startOffset} : MccpActivationRange{};
+			const auto option = static_cast<unsigned char>(bytes.at(optionOffset));
+			if (option == TELOPT_COMPRESS2)
+			{
+				const qsizetype end = findSubnegotiationEnd(bytes, optionOffset + 1);
+				if (end < 0)
+					return holdIncomplete ? MccpActivationRange{-1, -1, startOffset}
+					                      : MccpActivationRange{startOffset, bytes.size(), -1};
+				return {startOffset, end, -1};
+			}
+			if (option == TELOPT_COMPRESS)
+			{
+				if (optionOffset + 1 >= bytes.size())
+					return holdIncomplete ? MccpActivationRange{-1, -1, startOffset} : MccpActivationRange{};
+				if (static_cast<unsigned char>(bytes.at(optionOffset + 1)) == WILL)
+				{
+					const qsizetype terminatorOffset = optionOffset + 2;
+					if (terminatorOffset >= bytes.size())
+						return holdIncomplete ? MccpActivationRange{-1, -1, startOffset}
+						                      : MccpActivationRange{};
+					if (static_cast<unsigned char>(bytes.at(terminatorOffset)) != IAC)
+						return {};
+					const qsizetype end = findSubnegotiationEnd(bytes, terminatorOffset);
+					if (end < 0)
+						return holdIncomplete ? MccpActivationRange{-1, -1, startOffset}
+						                      : MccpActivationRange{startOffset, bytes.size(), -1};
+					return {startOffset, end, -1};
+				}
+			}
+			return {};
+		};
+
+		switch (m_phase)
+		{
+		case HAVE_IAC:
+			if (static_cast<unsigned char>(bytes.at(0)) == SB)
+				return rangeForSubnegotiation(0, 1, true);
+			break;
+		case HAVE_SB:
+			return rangeForSubnegotiation(0, 0, true);
+		case HAVE_SUBNEGOTIATION:
+			if (m_subnegotiationType == TELOPT_COMPRESS2)
+			{
+				const qsizetype end = findSubnegotiationEnd(bytes, 0);
+				if (end < 0)
+					return {-1, -1, 0};
+				return {0, end, -1};
+			}
+			return {};
+		case HAVE_SUBNEGOTIATION_IAC:
+			if (m_subnegotiationType == TELOPT_COMPRESS2)
+			{
+				if (static_cast<unsigned char>(bytes.at(0)) != IAC)
+					return {0, 1, -1};
+				const qsizetype end = findSubnegotiationEnd(bytes, 1);
+				if (end < 0)
+					return {-1, -1, 0};
+				return {0, end, -1};
+			}
+			return {};
+		case HAVE_COMPRESS:
+			if (static_cast<unsigned char>(bytes.at(0)) == WILL)
+			{
+				const qsizetype end = findSubnegotiationEnd(bytes, 1);
+				if (end < 0)
+					return {-1, -1, 0};
+				return {0, end, -1};
+			}
+			return {};
+		case HAVE_COMPRESS_WILL:
+			if (m_seenCompressWillIac && static_cast<unsigned char>(bytes.at(0)) == SE)
+				return {0, 1, -1};
+			{
+				const qsizetype end = findSubnegotiationEnd(bytes, 0);
+				if (end < 0)
+					return {-1, -1, 0};
+				return {0, end, -1};
+			}
+		default:
+			break;
+		}
+
+		for (qsizetype i = 0; i < bytes.size(); ++i)
+		{
+			if (static_cast<unsigned char>(bytes.at(i)) != IAC)
+				continue;
+
+			if (i + 1 >= bytes.size())
+				return {-1, -1, i};
+
+			const auto command = static_cast<unsigned char>(bytes.at(i + 1));
+			if (command == IAC)
+			{
+				++i;
+				continue;
+			}
+			if (command != SB)
+			{
+				if (command == WILL || command == WONT || command == DO || command == DONT)
+				{
+					if (i + 2 >= bytes.size())
+						return {-1, -1, i};
+					i += 2;
+				}
+				else
+				{
+					++i;
+				}
+				continue;
+			}
+
+			const MccpActivationRange range = rangeForSubnegotiation(i, i + 2, true);
+			if (range.start >= 0)
+				return range;
+			if (range.holdStart >= 0)
+				return range;
+
+			const qsizetype subnegotiationEnd = findSubnegotiationEnd(bytes, i + 3);
+			if (subnegotiationEnd < 0)
+				return {};
+			i = subnegotiationEnd - 1;
+		}
+		return {};
+	};
+	auto takePostCompressionRemainder = [&]
 	{
 		if (m_postCompressionRemainder.isEmpty())
 			return;
 		tailPlain.append(m_postCompressionRemainder);
 		m_postCompressionRemainder.clear();
+	};
+	auto processCompressedBytes = [&](const QByteArray &compressed)
+	{
+		if (compressed.isEmpty())
+			return;
+		m_totalCompressedBytes += compressed.size();
+		if (const QByteArray decompressed = inflateIfNeeded(compressed); !decompressed.isEmpty())
+		{
+			m_totalUncompressedBytes += decompressed.size();
+			appendPlainBytes(decompressed);
+		}
+		takePostCompressionRemainder();
+	};
+	std::function<void(const QByteArray &)> processUncompressedBytes;
+	processUncompressedBytes = [&](const QByteArray &bytes)
+	{
+		if (bytes.isEmpty())
+			return;
+		const MccpActivationRange activationRange = findMccpActivationRange(bytes);
+		if (activationRange.start < 0)
+		{
+			if (activationRange.holdStart >= 0)
+			{
+				appendPlainBytes(bytes.left(activationRange.holdStart));
+				m_pendingPacketTransformBytes = bytes.mid(activationRange.holdStart);
+				return;
+			}
+			appendPlainBytes(bytes);
+			return;
+		}
+
+		appendPlainBytes(bytes.left(activationRange.start));
+		output.append(
+		    processPlainBytes(bytes.mid(activationRange.start, activationRange.end - activationRange.start)));
+
+		const QByteArray compressedTail = bytes.mid(activationRange.end);
+		if (m_compress)
+			processCompressedBytes(compressedTail);
+		else
+			processUncompressedBytes(compressedTail);
 	};
 	auto drainPendingCompressed = [&]
 	{
@@ -594,14 +810,7 @@ QByteArray TelnetProcessor::processBytes(const QByteArray &data)
 		{
 			const QByteArray pendingChunk = m_pendingCompressed;
 			m_pendingCompressed.clear();
-			m_totalCompressedBytes += pendingChunk.size();
-			const QByteArray decompressed = inflateIfNeeded(pendingChunk);
-			if (!decompressed.isEmpty())
-			{
-				m_totalUncompressedBytes += decompressed.size();
-				output.append(processPlainBytes(decompressed));
-			}
-			takePostCompressionRemainder();
+			processCompressedBytes(pendingChunk);
 		}
 	};
 
@@ -611,18 +820,14 @@ QByteArray TelnetProcessor::processBytes(const QByteArray &data)
 		// compressed bytes from telnet parsing must be processed before fresh socket
 		// payload.
 		drainPendingCompressed();
-		m_totalCompressedBytes += data.size();
-		if (const QByteArray decompressed = inflateIfNeeded(data); !decompressed.isEmpty())
-		{
-			m_totalUncompressedBytes += decompressed.size();
-			output.append(processPlainBytes(decompressed));
-		}
-		takePostCompressionRemainder();
-		drainPendingCompressed();
+		if (m_compress)
+			processCompressedBytes(input);
+		else
+			processUncompressedBytes(input);
 	}
 	else
 	{
-		output = processPlainBytes(data);
+		processUncompressedBytes(input);
 	}
 
 	while (true)
@@ -637,7 +842,7 @@ QByteArray TelnetProcessor::processBytes(const QByteArray &data)
 		{
 			const QByteArray plainTail = tailPlain;
 			tailPlain.clear();
-			output.append(processPlainBytes(plainTail));
+			processUncompressedBytes(plainTail);
 			progressed = true;
 		}
 		if (!progressed)
@@ -652,6 +857,13 @@ QByteArray TelnetProcessor::takeOutboundData()
 	QByteArray out = m_outbound;
 	m_outbound.clear();
 	return out;
+}
+
+QList<TelnetProcessor::TelnetPluginEvent> TelnetProcessor::takeTelnetPluginEvents()
+{
+	QList<TelnetPluginEvent> events = m_telnetPluginEvents;
+	m_telnetPluginEvents.clear();
+	return events;
 }
 
 QList<TelnetProcessor::MxpEvent> TelnetProcessor::takeMxpEvents()
@@ -1387,6 +1599,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				break;
 			case GA:
 			case EOR:
+				appendTelnetPluginEvent(TelnetPluginEvent::IacGa, c, {});
 				if (m_callbacks.onIacGa)
 					m_callbacks.onIacGa();
 				if (m_convertGAtoNewline)
@@ -1835,14 +2048,21 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			else if (m_subnegotiationType == TELOPT_MUD_SPECIFIC)
 			{
 				// stuff for Aardwolf (telopt 102) - call specific plugin handler: OnPluginTelnetOption
+				appendTelnetPluginEvent(TelnetPluginEvent::Option, m_subnegotiationType,
+				                        m_subnegotiationData);
 				if (m_callbacks.onTelnetOption)
 					m_callbacks.onTelnetOption(m_subnegotiationData);
+				appendTelnetPluginEvent(TelnetPluginEvent::Subnegotiation, m_subnegotiationType,
+				                        m_subnegotiationData);
 				if (m_callbacks.onTelnetSubnegotiation)
 					m_callbacks.onTelnetSubnegotiation(m_subnegotiationType, m_subnegotiationData);
 			}
-			else if (m_callbacks.onTelnetSubnegotiation)
+			else
 			{
-				m_callbacks.onTelnetSubnegotiation(m_subnegotiationType, m_subnegotiationData);
+				appendTelnetPluginEvent(TelnetPluginEvent::Subnegotiation, m_subnegotiationType,
+				                        m_subnegotiationData);
+				if (m_callbacks.onTelnetSubnegotiation)
+					m_callbacks.onTelnetSubnegotiation(m_subnegotiationType, m_subnegotiationData);
 			}
 			m_phase = NONE;
 			break;
@@ -2117,6 +2337,18 @@ void TelnetProcessor::sendWindowSize()
 	}
 	response.append(reinterpret_cast<const char *>(p2), sizeof p2);
 	m_outbound.append(response);
+}
+
+void TelnetProcessor::appendTelnetPluginEvent(const TelnetPluginEvent::Type type, const int option,
+                                              const QByteArray &data)
+{
+	TelnetPluginEvent event;
+	event.type     = type;
+	event.offset   = m_outputSize;
+	event.sequence = m_mxpEventSequence++;
+	event.option   = option;
+	event.data     = data;
+	m_telnetPluginEvents.append(event);
 }
 
 // here when element collection complete
