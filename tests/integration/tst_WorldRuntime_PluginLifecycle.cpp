@@ -39,6 +39,7 @@ namespace
 	const QString           kHiddenMessagePluginId   = QStringLiteral("112233445566778899aabbcc");
 	const QString           kNestedCallPluginId      = QStringLiteral("2233445566778899aabbccdd");
 	const QString           kTelnetOrderingPluginId  = QStringLiteral("00112233445566778899aabb");
+	const QString           kTimerCommandPluginId    = QStringLiteral("33445566778899aabbccddee");
 	const QString           kTelnetTriggerLine       = QStringLiteral("qxv-lattice-17");
 	const QString           kTelnetAfterLine         = QStringLiteral("qxv-after-64");
 
@@ -140,6 +141,14 @@ function qcb_append_order(marker)
   SetVariable("callback_order", current .. marker)
 end
 
+function qcb_append_send_order(command)
+  local current = GetVariable("send_order") or ""
+  if current ~= "" then
+    current = current .. ","
+  end
+  SetVariable("send_order", current .. command)
+end
+
 function qcb_mark_trigger(arg)
   qcb_append_order("trigger")
 end
@@ -147,6 +156,11 @@ end
 function OnPluginTelnetSubnegotiation(msg_type, data)
   qcb_append_order("telnet")
   Send("qcmd-telnet-b73")
+end
+
+function OnPluginSend(command)
+  qcb_append_send_order(command)
+  return false
 end
 )lua");
 		if (insertTriggerLineBeforeGmcp)
@@ -198,6 +212,39 @@ end
     <script><![CDATA[
 function qcb_nested_priority_check(arg)
   Send("qcmd-nested-p54")
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml"));
+	}
+
+	/**
+	 * @brief Writes a plugin fixture that records command callbacks.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writeTimerCommandRecorderPlugin(const QString &pluginsDir)
+	{
+		const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("timer_command_recorder.xml"));
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="TimerCommandRecorder"
+    author="QMud Test"
+    id=")xml") + kTimerCommandPluginId + QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function OnPluginCommand(command)
+  local current = GetVariable("timer_commands") or ""
+  if current ~= "" then
+    current = current .. ","
+  end
+  SetVariable("timer_commands", current .. command)
+  return false
 end
 ]]></script>
   </plugin>
@@ -362,6 +409,7 @@ end
 		WorldRuntime::Timer timer;
 		timer.attributes.insert(QStringLiteral("name"), QStringLiteral("qxv-timer-multiline-41"));
 		timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		timer.attributes.insert(QStringLiteral("active_closed"), QStringLiteral("1"));
 		timer.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToExecute));
 		timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("0"));
 		timer.attributes.insert(QStringLiteral("hour"), QStringLiteral("0"));
@@ -460,6 +508,21 @@ end
 	QString pluginVariable(const WorldRuntime &runtime, const QString &name)
 	{
 		return pluginVariable(runtime, kDeferredConnectPluginId, name);
+	}
+
+	/**
+	 * @brief Verifies callback and send order recorded by the telnet ordering plugin.
+	 * @param runtime Runtime to inspect.
+	 * @param callbackOrder Expected callback order marker list.
+	 */
+	void verifyTelnetCallbackAndSendOrder(const WorldRuntime &runtime, const QString &callbackOrder)
+	{
+		QTRY_COMPARE_WITH_TIMEOUT(
+		    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("callback_order")), callbackOrder,
+		    5000);
+		QTRY_COMPARE_WITH_TIMEOUT(
+		    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("send_order")),
+		    QStringLiteral("qcmd-trigger-a91,qcmd-telnet-b73"), 5000);
 	}
 
 	/**
@@ -721,40 +784,34 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 
 		static void executeTimerMultilineActionRunsEachCommandWithoutBlankLines()
 		{
-			QTcpServer server;
-			if (!server.listen(QHostAddress::LocalHost, 0))
-				QSKIP("Local TCP listen is unavailable in this environment.");
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeTimerCommandRecorderPlugin(pluginsDir));
 
 			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
 			runtime.setWorldAttribute(QStringLiteral("enable_timers"), QStringLiteral("y"));
-			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("60000"));
 			runtime.timersMutable().push_back(makeMultilineExecuteTimer());
 			runtime.markTimersChanged();
 
 			RuntimeCommandHarness harness(runtime);
-			QSignalSpy            connectedSpy(&runtime, &WorldRuntime::connected);
-			QVERIFY(connectedSpy.isValid());
-			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
-			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(harness.showAndWait());
 
-			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
-			QVERIFY(connectedSpy.wait(5000));
-			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
-			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
-			QVERIFY(!acceptedSocket.isNull());
-
-			QCOMPARE(runtime.sendCommand(QStringLiteral("qcmd-tail-z77"), false, true, true, false, false),
-			         eOK);
-			QTRY_COMPARE_WITH_TIMEOUT(queuedPayloads(runtime), (QStringList{QStringLiteral("qcmd-tail-z77")}),
-			                          5000);
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("timer_command_recorder.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
 
 			runtime.timersMutable().first().nextFireTime = QDateTime::currentDateTime().addMSecs(-1);
 
+			QTRY_COMPARE_WITH_TIMEOUT(runtime.timersFiredThisSession(), 1, 5000);
 			QTRY_COMPARE_WITH_TIMEOUT(
-			    queuedPayloads(runtime),
-			    (QStringList{QStringLiteral("qcmd-tail-z77"), QStringLiteral("qcmd-timer-multi-a23"),
-			                 QStringLiteral("qcmd-timer-multi-b58")}),
-			    5000);
+			    pluginVariable(runtime, kTimerCommandPluginId, QStringLiteral("timer_commands")),
+			    QStringLiteral("qcmd-timer-multi-a23,qcmd-timer-multi-b58"), 5000);
 		}
 
 		static void directLuaTriggerSendCommandsEnterPriorityQueueBand()
@@ -1036,19 +1093,7 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
 			QVERIFY(acceptedSocket->flush());
 
-			QByteArray received;
-			auto       receivedBothCommands = [&]
-			{
-				if (acceptedSocket->bytesAvailable() == 0)
-					acceptedSocket->waitForReadyRead(10);
-				received += acceptedSocket->readAll();
-				return received.contains("qcmd-trigger-a91\r\n") && received.contains("qcmd-telnet-b73\r\n");
-			};
-			QTRY_VERIFY_WITH_TIMEOUT(receivedBothCommands(), 5000);
-			QTRY_COMPARE_WITH_TIMEOUT(
-			    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("callback_order")),
-			    QStringLiteral("trigger,telnet"), 5000);
-			QVERIFY(received.indexOf("qcmd-trigger-a91\r\n") < received.indexOf("qcmd-telnet-b73\r\n"));
+			verifyTelnetCallbackAndSendOrder(runtime, QStringLiteral("trigger,telnet"));
 		}
 
 		static void telnetSubnegotiationCallbacksUsePacketTransformedStreamOrder()
@@ -1092,19 +1137,7 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
 			QVERIFY(acceptedSocket->flush());
 
-			QByteArray received;
-			auto       receivedBothCommands = [&]
-			{
-				if (acceptedSocket->bytesAvailable() == 0)
-					acceptedSocket->waitForReadyRead(10);
-				received += acceptedSocket->readAll();
-				return received.contains("qcmd-trigger-a91\r\n") && received.contains("qcmd-telnet-b73\r\n");
-			};
-			QTRY_VERIFY_WITH_TIMEOUT(receivedBothCommands(), 5000);
-			QTRY_COMPARE_WITH_TIMEOUT(
-			    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("callback_order")),
-			    QStringLiteral("trigger,telnet"), 5000);
-			QVERIFY(received.indexOf("qcmd-trigger-a91\r\n") < received.indexOf("qcmd-telnet-b73\r\n"));
+			verifyTelnetCallbackAndSendOrder(runtime, QStringLiteral("trigger,telnet"));
 		}
 
 		static void telnetSubnegotiationCallbacksRebaseOffsetsAfterFilteredBytes()
@@ -1150,19 +1183,7 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
 			QVERIFY(acceptedSocket->flush());
 
-			QByteArray received;
-			auto       receivedBothCommands = [&]
-			{
-				if (acceptedSocket->bytesAvailable() == 0)
-					acceptedSocket->waitForReadyRead(10);
-				received += acceptedSocket->readAll();
-				return received.contains("qcmd-trigger-a91\r\n") && received.contains("qcmd-telnet-b73\r\n");
-			};
-			QTRY_VERIFY_WITH_TIMEOUT(receivedBothCommands(), 5000);
-			QTRY_COMPARE_WITH_TIMEOUT(
-			    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("callback_order")),
-			    QStringLiteral("telnet,trigger"), 5000);
-			QVERIFY(received.indexOf("qcmd-trigger-a91\r\n") < received.indexOf("qcmd-telnet-b73\r\n"));
+			verifyTelnetCallbackAndSendOrder(runtime, QStringLiteral("telnet,trigger"));
 		}
 
 		static void telnetSubnegotiationCallbacksRebaseOffsetsAfterRemovedPuebloMarker()
@@ -1209,19 +1230,7 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
 			QVERIFY(acceptedSocket->flush());
 
-			QByteArray received;
-			auto       receivedBothCommands = [&]
-			{
-				if (acceptedSocket->bytesAvailable() == 0)
-					acceptedSocket->waitForReadyRead(10);
-				received += acceptedSocket->readAll();
-				return received.contains("qcmd-trigger-a91\r\n") && received.contains("qcmd-telnet-b73\r\n");
-			};
-			QTRY_VERIFY_WITH_TIMEOUT(receivedBothCommands(), 5000);
-			QTRY_COMPARE_WITH_TIMEOUT(
-			    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("callback_order")),
-			    QStringLiteral("telnet,trigger"), 5000);
-			QVERIFY(received.indexOf("qcmd-trigger-a91\r\n") < received.indexOf("qcmd-telnet-b73\r\n"));
+			verifyTelnetCallbackAndSendOrder(runtime, QStringLiteral("telnet,trigger"));
 		}
 
 		static void teardownPluginCloseRunsBeforeSaveStateWithQueuedAsyncCallback()
