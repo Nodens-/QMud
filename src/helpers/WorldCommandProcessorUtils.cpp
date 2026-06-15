@@ -175,7 +175,7 @@ namespace QMudCommandQueue
 
 namespace QMudCommandText
 {
-	QString normalizeActionCommandTextForSend(const QString &source)
+	QString normalizeActionCommandTextNewlines(const QString &source)
 	{
 		QString normalized;
 		normalized.reserve(source.size());

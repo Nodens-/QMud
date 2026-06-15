@@ -91,11 +91,11 @@ namespace QMudCommandText
 	QString fixupEscapeSequences(const QString &source);
 
 	/**
-	 * @brief Converts action command body line endings to the send pipeline terminator.
-	 * @param source Action command text from send-to-world/queue bodies.
+	 * @brief Converts action command body line endings to the command pipeline terminator.
+	 * @param source Action command text from multiline command bodies.
 	 * @return Command text with CRLF, LF, and CR represented as CRLF.
 	 */
-	QString normalizeActionCommandTextForSend(const QString &source);
+	QString normalizeActionCommandTextNewlines(const QString &source);
 
 	/**
 	 * @brief Applies wildcard replacement/post-processing for send-target transforms.

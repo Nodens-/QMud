@@ -3649,10 +3649,10 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 	switch (sendTo)
 	{
 	case eSendToWorld:
-		sendMsg(QMudCommandText::normalizeActionCommandTextForSend(text), echoSend, false, logIt);
+		sendMsg(QMudCommandText::normalizeActionCommandTextNewlines(text), echoSend, false, logIt);
 		break;
 	case eSendToCommandQueue:
-		sendMsg(QMudCommandText::normalizeActionCommandTextForSend(text), echoSend, true, logIt);
+		sendMsg(QMudCommandText::normalizeActionCommandTextNewlines(text), echoSend, true, logIt);
 		break;
 	case eSendToSpeedwalk:
 	{
@@ -3712,7 +3712,13 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 		const bool saved = m_suppressInputLog;
 		if (omitFromLog)
 			m_suppressInputLog = true;
-		executeCommand(text);
+		const QString     normalized = QMudCommandText::normalizeActionCommandTextNewlines(text);
+		const QStringList commands   = normalized.split(kEndLine, Qt::SkipEmptyParts);
+		if (!commands.isEmpty())
+		{
+			for (const QString &command : commands)
+				executeCommand(command);
+		}
 		m_suppressInputLog = saved;
 	}
 	break;

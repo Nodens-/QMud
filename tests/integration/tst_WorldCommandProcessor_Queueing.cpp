@@ -131,7 +131,7 @@ class tst_WorldCommandProcessor_Queueing : public QObject
 			QVERIFY(queue.isEmpty());
 		}
 
-		void actionCommandTextNormalizesLineEndingsForSend_data()
+		void actionCommandTextNormalizesNewlines_data()
 		{
 			QTest::addColumn<QString>("input");
 			QTest::addColumn<QString>("expected");
@@ -146,12 +146,12 @@ class tst_WorldCommandProcessor_Queueing : public QObject
 			QTest::newRow("empty") << QString() << QString();
 		}
 
-		void actionCommandTextNormalizesLineEndingsForSend()
+		void actionCommandTextNormalizesNewlines()
 		{
 			QFETCH(QString, input);
 			QFETCH(QString, expected);
 
-			QCOMPARE(QMudCommandText::normalizeActionCommandTextForSend(input), expected);
+			QCOMPARE(QMudCommandText::normalizeActionCommandTextNewlines(input), expected);
 		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };

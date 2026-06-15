@@ -8,6 +8,7 @@
 
 #include "NativePluginRegistry.h"
 #include "WorldChildWindow.h"
+#include "WorldCommandProcessor.h"
 #include "WorldCommandProcessorUtils.h"
 #include "WorldDocument.h"
 #include "WorldOptions.h"
@@ -319,6 +320,63 @@ end
 	}
 
 	/**
+	 * @brief Creates an execute trigger with a multiline action body.
+	 * @param match Trigger match text.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makeMultilineExecuteTrigger(const QString &match)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"), match);
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToExecute));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		trigger.children.insert(QStringLiteral("send"),
+		                        QStringLiteral("qcmd-trigger-multi-a23\nqcmd-trigger-multi-b58\n"));
+		return trigger;
+	}
+
+	/**
+	 * @brief Creates an execute alias with a multiline action body.
+	 * @param match Alias match text.
+	 * @return Alias fixture.
+	 */
+	WorldRuntime::Alias makeMultilineExecuteAlias(const QString &match)
+	{
+		WorldRuntime::Alias alias;
+		alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		alias.attributes.insert(QStringLiteral("match"), match);
+		alias.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToExecute));
+		alias.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		alias.children.insert(QStringLiteral("send"),
+		                      QStringLiteral("qcmd-alias-multi-a23\nqcmd-alias-multi-b58\n"));
+		return alias;
+	}
+
+	/**
+	 * @brief Creates an execute timer with a multiline action body.
+	 * @return Timer fixture.
+	 */
+	WorldRuntime::Timer makeMultilineExecuteTimer()
+	{
+		WorldRuntime::Timer timer;
+		timer.attributes.insert(QStringLiteral("name"), QStringLiteral("qxv-timer-multiline-41"));
+		timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		timer.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToExecute));
+		timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("hour"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("minute"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("second"), QStringLiteral("3600"));
+		timer.attributes.insert(QStringLiteral("offset_hour"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("offset_minute"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("offset_second"), QStringLiteral("0"));
+		timer.children.insert(QStringLiteral("send"),
+		                      QStringLiteral("\nqcmd-timer-multi-a23\n\nqcmd-timer-multi-b58\n"));
+		timer.nextFireTime = QDateTime::currentDateTime().addSecs(3600);
+		return timer;
+	}
+
+	/**
 	 * @brief Decodes queued command payloads for assertions.
 	 * @param runtime Runtime whose queue should be inspected.
 	 * @return Queue payloads in dispatch order.
@@ -530,6 +588,137 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    queuedPayloads(runtime),
 			    (QStringList{QStringLiteral("qcmd-execute-a14"), QStringLiteral("qcmd-tail-z77")}), 5000);
+		}
+
+		static void executeTriggerMultilineActionRunsEachCommandWithoutTrailingBlank()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("60000"));
+			runtime.triggersMutable().push_back(
+			    makeMultilineExecuteTrigger(QStringLiteral("qxv-execute-multiline-18")));
+			runtime.markTriggersChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QCOMPARE(runtime.sendCommand(QStringLiteral("qcmd-tail-z77"), false, true, true, false, false),
+			         eOK);
+			QTRY_COMPARE_WITH_TIMEOUT(queuedPayloads(runtime), (QStringList{QStringLiteral("qcmd-tail-z77")}),
+			                          5000);
+
+			const QByteArray triggerLine = QByteArrayLiteral("qxv-execute-multiline-18\r\n");
+			QCOMPARE(acceptedSocket->write(triggerLine), static_cast<qint64>(triggerLine.size()));
+			QVERIFY(acceptedSocket->flush());
+
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    queuedPayloads(runtime),
+			    (QStringList{QStringLiteral("qcmd-trigger-multi-a23"),
+			                 QStringLiteral("qcmd-trigger-multi-b58"), QStringLiteral("qcmd-tail-z77")}),
+			    5000);
+		}
+
+		static void executeAliasMultilineActionRunsEachCommandWithoutTrailingBlank()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("60000"));
+			runtime.aliasesMutable().push_back(
+			    makeMultilineExecuteAlias(QStringLiteral("qxv-alias-multiline-29")));
+			runtime.markAliasesChanged();
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QCOMPARE(runtime.sendCommand(QStringLiteral("qcmd-tail-z77"), false, true, true, false, false),
+			         eOK);
+			QTRY_COMPARE_WITH_TIMEOUT(queuedPayloads(runtime), (QStringList{QStringLiteral("qcmd-tail-z77")}),
+			                          5000);
+
+			QCOMPARE(runtime.executeCommand(QStringLiteral("qxv-alias-multiline-29")), eOK);
+
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    queuedPayloads(runtime),
+			    (QStringList{QStringLiteral("qcmd-tail-z77"), QStringLiteral("qcmd-alias-multi-a23"),
+			                 QStringLiteral("qcmd-alias-multi-b58")}),
+			    5000);
+		}
+
+		static void executeTimerMultilineActionRunsEachCommandWithoutBlankLines()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_timers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("60000"));
+			runtime.timersMutable().push_back(makeMultilineExecuteTimer());
+			runtime.markTimersChanged();
+
+			WorldCommandProcessor processor;
+			processor.setRuntime(&runtime);
+			runtime.setCommandProcessor(&processor);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			runtime.timersMutable().first().nextFireTime = QDateTime::currentDateTime().addMSecs(-1);
+
+			QByteArray received;
+			auto       receivedTimerCommands = [&acceptedSocket, &received]
+			{
+				if (acceptedSocket->bytesAvailable() == 0)
+					acceptedSocket->waitForReadyRead(10);
+				received += acceptedSocket->readAll();
+				return received == QByteArrayLiteral("qcmd-timer-multi-a23\r\nqcmd-timer-multi-b58\r\n");
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(receivedTimerCommands(), 5000);
 		}
 
 		static void directLuaTriggerSendCommandsEnterPriorityQueueBand()
