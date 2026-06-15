@@ -536,6 +536,8 @@ end
 		runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
 		runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
 		runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+		runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+		runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
 	}
 
 	/**
