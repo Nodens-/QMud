@@ -377,6 +377,53 @@ end
 	}
 
 	/**
+	 * @brief Test fixture binding a runtime to a view and command processor.
+	 */
+	struct RuntimeCommandHarness
+	{
+			/**
+			 * @brief Constructs and wires the runtime command-processing path.
+			 * @param boundRuntime Runtime to bind.
+			 */
+			explicit RuntimeCommandHarness(WorldRuntime &boundRuntime) : runtime(boundRuntime)
+			{
+				view.resize(640, 480);
+				processor.setView(&view);
+				processor.setRuntime(&runtime);
+				runtime.setCommandProcessor(&processor);
+				view.setRuntime(&runtime);
+				QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &processor,
+				                 &WorldCommandProcessor::onIncomingStyledLineReceived);
+				QObject::connect(&runtime, &WorldRuntime::incomingStyledLinePartialReceived, &processor,
+				                 &WorldCommandProcessor::onIncomingStyledLinePartialReceived);
+			}
+
+			/**
+			 * @brief Detaches runtime pointers before members are destroyed.
+			 */
+			~RuntimeCommandHarness()
+			{
+				view.setRuntime(nullptr);
+				runtime.setCommandProcessor(nullptr);
+				processor.setRuntime(nullptr);
+			}
+
+			/**
+			 * @brief Shows the view and waits until exposed.
+			 * @return `true` when the view is exposed.
+			 */
+			bool showAndWait()
+			{
+				view.show();
+				return QTest::qWaitForWindowExposed(&view);
+			}
+
+			WorldRuntime         &runtime;
+			WorldView             view;
+			WorldCommandProcessor processor;
+	};
+
+	/**
 	 * @brief Decodes queued command payloads for assertions.
 	 * @param runtime Runtime whose queue should be inspected.
 	 * @return Queue payloads in dispatch order.
@@ -559,11 +606,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			    makeExecuteQueuePriorityTrigger(QStringLiteral("qxv-execute-line-42")));
 			runtime.markTriggersChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
 			QVERIFY(connectedSpy.isValid());
@@ -604,11 +648,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			    makeMultilineExecuteTrigger(QStringLiteral("qxv-execute-multiline-18")));
 			runtime.markTriggersChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
 			QVERIFY(connectedSpy.isValid());
@@ -650,11 +691,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			    makeMultilineExecuteAlias(QStringLiteral("qxv-alias-multiline-29")));
 			runtime.markAliasesChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
 			QVERIFY(connectedSpy.isValid());
@@ -693,11 +731,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			runtime.timersMutable().push_back(makeMultilineExecuteTimer());
 			runtime.markTimersChanged();
 
-			WorldCommandProcessor processor;
-			processor.setRuntime(&runtime);
-			runtime.setCommandProcessor(&processor);
-
-			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			RuntimeCommandHarness harness(runtime);
+			QSignalSpy            connectedSpy(&runtime, &WorldRuntime::connected);
 			QVERIFY(connectedSpy.isValid());
 			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
 			QVERIFY(serverAcceptedSpy.isValid());
@@ -708,17 +743,18 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
 			QVERIFY(!acceptedSocket.isNull());
 
+			QCOMPARE(runtime.sendCommand(QStringLiteral("qcmd-tail-z77"), false, true, true, false, false),
+			         eOK);
+			QTRY_COMPARE_WITH_TIMEOUT(queuedPayloads(runtime), (QStringList{QStringLiteral("qcmd-tail-z77")}),
+			                          5000);
+
 			runtime.timersMutable().first().nextFireTime = QDateTime::currentDateTime().addMSecs(-1);
 
-			QByteArray received;
-			auto       receivedTimerCommands = [&acceptedSocket, &received]
-			{
-				if (acceptedSocket->bytesAvailable() == 0)
-					acceptedSocket->waitForReadyRead(10);
-				received += acceptedSocket->readAll();
-				return received == QByteArrayLiteral("qcmd-timer-multi-a23\r\nqcmd-timer-multi-b58\r\n");
-			};
-			QTRY_VERIFY_WITH_TIMEOUT(receivedTimerCommands(), 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    queuedPayloads(runtime),
+			    (QStringList{QStringLiteral("qcmd-tail-z77"), QStringLiteral("qcmd-timer-multi-a23"),
+			                 QStringLiteral("qcmd-timer-multi-b58")}),
+			    5000);
 		}
 
 		static void directLuaTriggerSendCommandsEnterPriorityQueueBand()
@@ -736,11 +772,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			runtime.triggersMutable().push_back(makeLuaSendPriorityTrigger());
 			runtime.markTriggersChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
 			QVERIFY(connectedSpy.isValid());
@@ -784,11 +817,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			runtime.triggersMutable().push_back(makeLuaExecutePriorityTrigger());
 			runtime.markTriggersChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
 			QVERIFY(connectedSpy.isValid());
@@ -830,11 +860,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			runtime.triggersMutable().push_back(makeLuaMixedPriorityTrigger());
 			runtime.markTriggersChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
 			QVERIFY(connectedSpy.isValid());
@@ -882,11 +909,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			runtime.triggersMutable().push_back(makeNamedCallbackQueueNormalTrigger());
 			runtime.markTriggersChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
 			QVERIFY(connectedSpy.isValid());
@@ -937,11 +961,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			runtime.triggersMutable().push_back(makeLuaCallPluginPriorityTrigger());
 			runtime.markTriggersChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QString loadError;
 			QVERIFY2(runtime.loadPluginFile(QStringLiteral("nested_call_send.xml"), &loadError),
@@ -992,11 +1013,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger());
 			runtime.markTriggersChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QString loadError;
 			QVERIFY2(runtime.loadPluginFile(QStringLiteral("telnet_ordering.xml"), &loadError),
@@ -1052,11 +1070,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger());
 			runtime.markTriggersChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QString loadError;
 			QVERIFY2(runtime.loadPluginFile(QStringLiteral("telnet_ordering.xml"), &loadError),
@@ -1111,11 +1126,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger(kTelnetAfterLine));
 			runtime.markTriggersChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QString loadError;
 			QVERIFY2(runtime.loadPluginFile(QStringLiteral("telnet_ordering.xml"), &loadError),
@@ -1173,11 +1185,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger(kTelnetAfterLine));
 			runtime.markTriggersChanged();
 
-			WorldView view;
-			view.resize(640, 480);
-			view.setRuntime(&runtime);
-			view.show();
-			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
 
 			QString loadError;
 			QVERIFY2(runtime.loadPluginFile(QStringLiteral("telnet_ordering.xml"), &loadError),

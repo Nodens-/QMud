@@ -253,11 +253,12 @@ class tst_WorldCommandProcessor_Trigger : public QObject
 			QCOMPARE(queuedPayloads(processor), (QStringList{QStringLiteral("qcmd-tail-9f31")}));
 			QCOMPARE(queuedTypes(processor), (QList<bool>{true}));
 
-			runtime.setCurrentActionSource(WorldRuntime::eTriggerFired);
-			processor.sendRawText(QStringLiteral("qcmd-priority-a17"), false, false, true, false);
-			processor.sendRawText(QStringLiteral("qcmd-priority-b42"), false, false, true, false);
-			processor.sendRawText(QStringLiteral("qcmd-priority-c83"), false, false, true, false);
-			runtime.setCurrentActionSource(WorldRuntime::eUnknownActionSource);
+			processor.sendRawTextWithTriggerPriority(QStringLiteral("qcmd-priority-a17"), false, false, true,
+			                                         false);
+			processor.sendRawTextWithTriggerPriority(QStringLiteral("qcmd-priority-b42"), false, false, true,
+			                                         false);
+			processor.sendRawTextWithTriggerPriority(QStringLiteral("qcmd-priority-c83"), false, false, true,
+			                                         false);
 
 			QCOMPARE(queuedPayloads(processor),
 			         (QStringList{QStringLiteral("qcmd-priority-a17"), QStringLiteral("qcmd-priority-b42"),
@@ -271,9 +272,8 @@ class tst_WorldCommandProcessor_Trigger : public QObject
 			                      QStringLiteral("qcmd-normal-d64")}));
 			QCOMPARE(queuedTypes(processor), (QList<bool>{false, false, false, true, false}));
 
-			runtime.setCurrentActionSource(WorldRuntime::eTriggerFired);
-			processor.sendRawText(QStringLiteral("qcmd-priority-e05"), false, false, true, false);
-			runtime.setCurrentActionSource(WorldRuntime::eUnknownActionSource);
+			processor.sendRawTextWithTriggerPriority(QStringLiteral("qcmd-priority-e05"), false, false, true,
+			                                         false);
 
 			QCOMPARE(queuedPayloads(processor),
 			         (QStringList{QStringLiteral("qcmd-priority-a17"), QStringLiteral("qcmd-priority-b42"),
