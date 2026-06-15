@@ -9,6 +9,7 @@
 #include "dialogs/GlobalPreferencesDialog.h"
 
 #include "AppController.h"
+#include "FontUtils.h"
 #include "LogCompressionUtils.h"
 #include "MainFrame.h"
 #include "WorldChildWindow.h"
@@ -24,7 +25,6 @@
 #include <QDirIterator>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFontDialog>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -521,7 +521,7 @@ QWidget *GlobalPreferencesDialog::buildWorldsPage()
 			                 app->changeToFileBrowsingDirectory();
 		                 const QString startDir = m_worldDefaultDir ? m_worldDefaultDir->text() : QString();
 		                 const QString dir      = QFileDialog::getExistingDirectory(
-		                     this, QStringLiteral("Select Default World Files Directory"), startDir);
+                             this, QStringLiteral("Select Default World Files Directory"), startDir);
 		                 if (app)
 			                 app->changeToStartupDirectory();
 		                 if (!dir.isEmpty())
@@ -798,7 +798,7 @@ QWidget *GlobalPreferencesDialog::buildPrintingPage()
 			                 current.setWeight(static_cast<QFont::Weight>(m_printerFontWeight));
 		                 current.setItalic(m_printerFontItalic != 0);
 		                 QFont chosen =
-		                     QFontDialog::getFont(&ok, current, this, QStringLiteral("Select Printer Font"));
+		                     qmudGetFont(&ok, current, this, QStringLiteral("Select Printer Font"));
 		                 if (!ok)
 			                 return;
 		                 m_printerFontLabel->setText(chosen.family());
@@ -1060,7 +1060,7 @@ QWidget *GlobalPreferencesDialog::buildDefaultsPage()
 	auto *layout = new QVBoxLayout(page);
 
 	auto  connectBrowse = [this](const QPushButton *button, QLineEdit *target, const QString &title,
-	                             const QString &filter, const QString &suggestedName)
+                                const QString &filter, const QString &suggestedName)
 	{
 		QObject::connect(button, &QPushButton::clicked, this,
 		                 [this, target, title, filter, suggestedName]()
@@ -1163,24 +1163,24 @@ QWidget *GlobalPreferencesDialog::buildDefaultsPage()
 	layout->addLayout(fontGrid);
 	layout->addStretch();
 
-	QObject::connect(
-	    m_outputFontButton, &QPushButton::clicked, page,
-	    [this]()
-	    {
-		    bool  ok = false;
-		    QFont current(m_outputFontName->text());
-		    if (m_outputFontHeight > 0)
-			    current.setPointSize(m_outputFontHeight);
-		    current.setWeight(QFont::Normal);
-		    current.setItalic(false);
-		    QFont chosen = QFontDialog::getFont(&ok, current, this, QStringLiteral("Select Output Font"));
-		    if (!ok)
-			    return;
-		    m_outputFontName->setText(chosen.family());
-		    m_outputFontHeight = chosen.pointSize();
-		    if (m_outputFontStyle)
-			    m_outputFontStyle->setText(fontStyleSummary(m_outputFontHeight, QFont::Normal, false));
-	    });
+	QObject::connect(m_outputFontButton, &QPushButton::clicked, page,
+	                 [this]()
+	                 {
+		                 bool  ok = false;
+		                 QFont current(m_outputFontName->text());
+		                 if (m_outputFontHeight > 0)
+			                 current.setPointSize(m_outputFontHeight);
+		                 current.setWeight(QFont::Normal);
+		                 current.setItalic(false);
+		                 QFont chosen = qmudGetFont(&ok, current, this, QStringLiteral("Select Output Font"));
+		                 if (!ok)
+			                 return;
+		                 m_outputFontName->setText(chosen.family());
+		                 m_outputFontHeight = chosen.pointSize();
+		                 if (m_outputFontStyle)
+			                 m_outputFontStyle->setText(
+			                     fontStyleSummary(m_outputFontHeight, QFont::Normal, false));
+	                 });
 	QObject::connect(m_inputFontButton, &QPushButton::clicked, page,
 	                 [this]()
 	                 {
@@ -1191,8 +1191,7 @@ QWidget *GlobalPreferencesDialog::buildDefaultsPage()
 		                 if (m_inputFontWeight > 0)
 			                 current.setWeight(static_cast<QFont::Weight>(m_inputFontWeight));
 		                 current.setItalic(m_inputFontItalic != 0);
-		                 QFont chosen =
-		                     QFontDialog::getFont(&ok, current, this, QStringLiteral("Select Input Font"));
+		                 QFont chosen = qmudGetFont(&ok, current, this, QStringLiteral("Select Input Font"));
 		                 if (!ok)
 			                 return;
 		                 m_inputFontName->setText(chosen.family());

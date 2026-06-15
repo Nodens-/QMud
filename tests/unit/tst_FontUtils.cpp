@@ -19,7 +19,7 @@ class tst_FontUtils : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void applyMonospaceFallback()
 		{
@@ -34,6 +34,15 @@ class tst_FontUtils : public QObject
 			const QFont font = qmudPreferredMonospaceFont(QStringLiteral("DejaVu Sans Mono"), 13);
 			QVERIFY(font.fixedPitch());
 			QCOMPARE(font.pointSize(), 13);
+		}
+
+		void fontDialogUsesQtDialogOnMacOS()
+		{
+#ifdef Q_OS_MACOS
+			QVERIFY(qmudFontDialogUsesQtDialog());
+#else
+			QVERIFY(!qmudFontDialogUsesQtDialog());
+#endif
 		}
 
 		void mapCharsetKnownAndUnknown()
@@ -52,12 +61,10 @@ class tst_FontUtils : public QObject
 			QCOMPARE(qmudFamilyForCharset(QStringLiteral("MyPreferredFamily"), 999),
 			         QStringLiteral("MyPreferredFamily"));
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_GUILESS_MAIN(tst_FontUtils)
-
-
 
 #if __has_include("tst_FontUtils.moc")
 #include "tst_FontUtils.moc"

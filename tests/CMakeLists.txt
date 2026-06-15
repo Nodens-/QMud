@@ -131,7 +131,7 @@ qmud_add_qtest(tst_MiniWindowUtils
         "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/FontUtils.cpp"
         LIBRARIES
-        Qt6::Gui
+        Qt6::Widgets
         LABELS
         unit)
 
@@ -231,6 +231,7 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
             "${CMAKE_SOURCE_DIR}/src/Sqlite3Lua.cpp"
             "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/AcceleratorUtils.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/FontUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/LuaExecutionUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
             LIBRARIES
@@ -809,6 +810,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             SOURCES
             gui/tst_Dialog_GlobalPreferencesUpdates.cpp
             "${CMAKE_SOURCE_DIR}/src/dialogs/GlobalPreferencesDialog.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/FontUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/AppController.h"
             LIBRARIES
             Qt6::Sql

@@ -10,6 +10,7 @@
 #include "FontUtils.h"
 
 #include <QFont>
+#include <QFontDialog>
 #include <QStringList>
 
 namespace
@@ -24,6 +25,15 @@ namespace
 		         << QStringLiteral("Menlo") << QStringLiteral("Monaco") << QStringLiteral("Courier New");
 		families.removeDuplicates();
 		return families;
+	}
+
+	QFontDialog::FontDialogOptions fontDialogOptions()
+	{
+#ifdef Q_OS_MACOS
+		return QFontDialog::DontUseNativeDialog;
+#else
+		return {};
+#endif
 	}
 } // namespace
 
@@ -42,6 +52,20 @@ QFont qmudPreferredMonospaceFont(const QString &preferredFamily, const int point
 	if (pointSize > 0)
 		font.setPointSize(pointSize);
 	return font;
+}
+
+bool qmudFontDialogUsesQtDialog()
+{
+#ifdef Q_OS_MACOS
+	return true;
+#else
+	return false;
+#endif
+}
+
+QFont qmudGetFont(bool *ok, const QFont &initial, QWidget *parent, const QString &title)
+{
+	return QFontDialog::getFont(ok, initial, parent, title, fontDialogOptions());
 }
 
 bool qmudMapWindowsCharsetToWritingSystem(const int charset, QFontDatabase::WritingSystem *outWritingSystem)
