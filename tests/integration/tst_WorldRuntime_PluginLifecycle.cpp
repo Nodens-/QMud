@@ -141,14 +141,6 @@ function qcb_append_order(marker)
   SetVariable("callback_order", current .. marker)
 end
 
-function qcb_append_send_order(command)
-  local current = GetVariable("send_order") or ""
-  if current ~= "" then
-    current = current .. ","
-  end
-  SetVariable("send_order", current .. command)
-end
-
 function qcb_mark_trigger(arg)
   qcb_append_order("trigger")
 end
@@ -156,11 +148,6 @@ end
 function OnPluginTelnetSubnegotiation(msg_type, data)
   qcb_append_order("telnet")
   Send("qcmd-telnet-b73")
-end
-
-function OnPluginSend(command)
-  qcb_append_send_order(command)
-  return false
 end
 )lua");
 		if (insertTriggerLineBeforeGmcp)
@@ -511,18 +498,28 @@ end
 	}
 
 	/**
-	 * @brief Verifies callback and send order recorded by the telnet ordering plugin.
+	 * @brief Verifies callback order and socket send order for telnet ordering tests.
 	 * @param runtime Runtime to inspect.
+	 * @param acceptedSocket Accepted test-server socket receiving client commands.
 	 * @param callbackOrder Expected callback order marker list.
 	 */
-	void verifyTelnetCallbackAndSendOrder(const WorldRuntime &runtime, const QString &callbackOrder)
+	void verifyTelnetCallbackAndSocketSendOrder(const WorldRuntime &runtime, QTcpSocket *acceptedSocket,
+	                                            const QString &callbackOrder)
 	{
 		QTRY_COMPARE_WITH_TIMEOUT(
 		    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("callback_order")), callbackOrder,
 		    5000);
-		QTRY_COMPARE_WITH_TIMEOUT(
-		    pluginVariable(runtime, kTelnetOrderingPluginId, QStringLiteral("send_order")),
-		    QStringLiteral("qcmd-trigger-a91,qcmd-telnet-b73"), 5000);
+
+		QByteArray received;
+		auto       receivedBothCommands = [&]
+		{
+			if (acceptedSocket->bytesAvailable() == 0)
+				acceptedSocket->waitForReadyRead(10);
+			received += acceptedSocket->readAll();
+			return received.contains("qcmd-trigger-a91\r\n") && received.contains("qcmd-telnet-b73\r\n");
+		};
+		QTRY_VERIFY_WITH_TIMEOUT(receivedBothCommands(), 5000);
+		QVERIFY(received.indexOf("qcmd-trigger-a91\r\n") < received.indexOf("qcmd-telnet-b73\r\n"));
 	}
 
 	/**
@@ -1107,7 +1104,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
 			QVERIFY(acceptedSocket->flush());
 
-			verifyTelnetCallbackAndSendOrder(runtime, QStringLiteral("trigger,telnet"));
+			verifyTelnetCallbackAndSocketSendOrder(runtime, acceptedSocket.data(),
+			                                       QStringLiteral("trigger,telnet"));
 		}
 
 		static void telnetSubnegotiationCallbacksUsePacketTransformedStreamOrder()
@@ -1150,7 +1148,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
 			QVERIFY(acceptedSocket->flush());
 
-			verifyTelnetCallbackAndSendOrder(runtime, QStringLiteral("trigger,telnet"));
+			verifyTelnetCallbackAndSocketSendOrder(runtime, acceptedSocket.data(),
+			                                       QStringLiteral("trigger,telnet"));
 		}
 
 		static void telnetSubnegotiationCallbacksRebaseOffsetsAfterFilteredBytes()
@@ -1195,7 +1194,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
 			QVERIFY(acceptedSocket->flush());
 
-			verifyTelnetCallbackAndSendOrder(runtime, QStringLiteral("telnet,trigger"));
+			verifyTelnetCallbackAndSocketSendOrder(runtime, acceptedSocket.data(),
+			                                       QStringLiteral("telnet,trigger"));
 		}
 
 		static void telnetSubnegotiationCallbacksRebaseOffsetsAfterRemovedPuebloMarker()
@@ -1241,7 +1241,8 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QCOMPARE(acceptedSocket->write(payload), static_cast<qint64>(payload.size()));
 			QVERIFY(acceptedSocket->flush());
 
-			verifyTelnetCallbackAndSendOrder(runtime, QStringLiteral("telnet,trigger"));
+			verifyTelnetCallbackAndSocketSendOrder(runtime, acceptedSocket.data(),
+			                                       QStringLiteral("telnet,trigger"));
 		}
 
 		static void teardownPluginCloseRunsBeforeSaveStateWithQueuedAsyncCallback()
