@@ -526,6 +526,19 @@ end
 	}
 
 	/**
+	 * @brief Applies shared runtime setup for telnet ordering tests.
+	 * @param runtime Runtime to configure.
+	 * @param startupDirectory Temporary startup directory containing plugin fixtures.
+	 */
+	void configureTelnetOrderingRuntime(WorldRuntime &runtime, const QString &startupDirectory)
+	{
+		runtime.setStartupDirectory(startupDirectory);
+		runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+		runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+		runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+	}
+
+	/**
 	 * @brief Extracts a saved plugin-state variable from a state XML document.
 	 * @param xml State XML text.
 	 * @param name Variable name to find.
@@ -1065,8 +1078,7 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 				QSKIP("Local TCP listen is unavailable in this environment.");
 
 			WorldRuntime runtime;
-			runtime.setStartupDirectory(tempDir.path());
-			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			configureTelnetOrderingRuntime(runtime, tempDir.path());
 			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger());
 			runtime.markTriggersChanged();
 
@@ -1110,8 +1122,7 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 				QSKIP("Local TCP listen is unavailable in this environment.");
 
 			WorldRuntime runtime;
-			runtime.setStartupDirectory(tempDir.path());
-			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			configureTelnetOrderingRuntime(runtime, tempDir.path());
 			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger());
 			runtime.markTriggersChanged();
 
@@ -1154,8 +1165,7 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 				QSKIP("Local TCP listen is unavailable in this environment.");
 
 			WorldRuntime runtime;
-			runtime.setStartupDirectory(tempDir.path());
-			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			configureTelnetOrderingRuntime(runtime, tempDir.path());
 			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger(kTelnetAfterLine));
 			runtime.markTriggersChanged();
 
@@ -1200,8 +1210,7 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 				QSKIP("Local TCP listen is unavailable in this environment.");
 
 			WorldRuntime runtime;
-			runtime.setStartupDirectory(tempDir.path());
-			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			configureTelnetOrderingRuntime(runtime, tempDir.path());
 			runtime.setWorldAttribute(QStringLiteral("detect_pueblo"), QStringLiteral("1"));
 			runtime.triggersMutable().push_back(makeTelnetOrderingTrigger(kTelnetAfterLine));
 			runtime.markTriggersChanged();
