@@ -12611,9 +12611,8 @@ void WorldView::repeatLastCommand()
 {
 	if (!m_input || m_lastCommand.isEmpty())
 		return;
-	if (!confirmReplaceTyping(m_lastCommand))
-		return;
-	setInputText(m_lastCommand, true);
+	emit sendText(m_lastCommand);
+	resetHistoryRecall();
 }
 
 void WorldView::recallLastWord()

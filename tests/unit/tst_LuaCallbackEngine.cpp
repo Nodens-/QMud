@@ -6,15 +6,12 @@
  * Role: Unit coverage for Lua callback-engine dispatch, catalog, and callback-context semantics.
  */
 
-#include "AppController.h"
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
 #include "LuaExecutorWorker.h"
 #include "LuaSupport.h"
 #include "NativePluginRegistry.h"
-#include "TelnetProcessor.h"
 #include "WorldRuntime.h"
-#include "WorldView.h"
 #include "helpers/LuaExecutionUtils.h"
 #include "helpers/PluginPathUtils.h"
 #include "scripting/ScriptingErrors.h"
@@ -22,6 +19,9 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 #include <QFile>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMetaObject>
 #include <QScopeGuard>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -39,765 +39,6 @@ extern "C"
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
-}
-
-AppController *AppController::instance()
-{
-	return nullptr;
-}
-
-// NOLINTBEGIN(readability-convert-member-functions-to-static,readability-make-member-function-const,readability-non-const-parameter)
-QVariant AppController::getGlobalOption(const QString &name) const
-{
-	Q_UNUSED(name);
-	return {};
-}
-
-QString AppController::iniFilePath() const
-{
-	return QDir::current().filePath(QStringLiteral("qmud.ini"));
-}
-
-bool AppController::isTranslatorLuaAvailable() const
-{
-	return false;
-}
-
-QVariantMap qmudCollectGuiSystemValues()
-{
-	return {};
-}
-
-TelnetProcessor::TelnetProcessor() = default;
-
-namespace
-{
-	struct RuntimeStubState
-	{
-			int                                           outputBatchDepth     = 0;
-			int                                           miniWindowBatchDepth = 0;
-			int                                           savePluginStateCalls = 0;
-			unsigned short                                noteStyle            = 0;
-			int                                           noteTextColour       = 0;
-			long                                          noteColourFore       = 0xFFFFFF;
-			long                                          noteColourBack       = 0;
-			bool                                          notesInRgb           = false;
-			QStringList                                   outputLines;
-			QList<bool>                                   outputNewLines;
-			QStringList                                   windowNames;
-			QHash<QString, QHash<int, QVariant>>          windowInfo;
-			QHash<QString, QStringList>                   hotspotIds;
-			QHash<int, int>                               soundStatusByBuffer;
-			QVector<WorldRuntime::LineEntry>              lineEntries;
-			QString                                       startupDirectory;
-			QMap<QString, QString>                        worldAttributes;
-			QString                                       logFileName;
-			QString                                       worldFilePath;
-			QString                                       defaultWorldDirectory;
-			QString                                       defaultLogDirectory;
-			QString                                       pluginsDirectory;
-			QString                                       translatorFile;
-			QString                                       firstSpecialFontPath;
-			QString                                       preferencesDatabaseName;
-			QString                                       fileBrowsingDirectory;
-			QString                                       stateFilesDirectory;
-			QList<WorldRuntime::Plugin>                   plugins;
-			QList<WorldRuntime::Variable>                 variables;
-			QSharedPointer<LuaCallbackMiniWindowSnapshot> variableDispatchSnapshotCache;
-			int                nextAcceleratorCommand = WorldRuntime::kAcceleratorFirstCommand;
-			QHash<qint64, int> acceleratorKeyToCommand;
-			QHash<int, WorldRuntime::AcceleratorEntry> acceleratorEntries;
-	};
-
-	QHash<const WorldRuntime *, RuntimeStubState> &runtimeStubStates()
-	{
-		static QHash<const WorldRuntime *, RuntimeStubState> states;
-		return states;
-	}
-
-	RuntimeStubState &runtimeStubState(const WorldRuntime *runtime)
-	{
-		return runtimeStubStates()[runtime];
-	}
-
-	WorldRuntime::LineEntry makeStubLineEntry(const RuntimeStubState &state, const QString &text,
-	                                          const int flags, const QVector<WorldRuntime::StyleSpan> &spans,
-	                                          const bool hardReturn)
-	{
-		qint64 nextLineNumber = 1;
-		for (const WorldRuntime::LineEntry &entry : state.lineEntries)
-			nextLineNumber = qMax(nextLineNumber, entry.lineNumber + 1);
-
-		WorldRuntime::LineEntry entry;
-		entry.text       = text;
-		entry.flags      = flags;
-		entry.spans      = spans;
-		entry.hardReturn = hardReturn;
-		entry.time       = QDateTime::currentDateTime();
-		entry.lineNumber = nextLineNumber;
-		return entry;
-	}
-
-	QStringList logicalOutputLinesFromEntries(const QVector<WorldRuntime::LineEntry> &entries)
-	{
-		QStringList lines;
-		QString     currentLine;
-		for (const WorldRuntime::LineEntry &entry : entries)
-		{
-			if ((entry.flags & WorldRuntime::LineHidden) != 0)
-				continue;
-			currentLine += entry.text;
-			if (entry.hardReturn)
-			{
-				lines.push_back(currentLine);
-				currentLine.clear();
-			}
-		}
-		if (!currentLine.isEmpty())
-			lines.push_back(currentLine);
-		return lines;
-	}
-
-	int safeQSizeToInt(const qsizetype size)
-	{
-		if (size <= 0)
-			return 0;
-		constexpr qsizetype kMaxInt = std::numeric_limits<int>::max();
-		return size > kMaxInt ? std::numeric_limits<int>::max() : static_cast<int>(size);
-	}
-
-	QSharedPointer<const LuaCallbackMiniWindowSnapshot>
-	captureVariableDispatchSnapshotForTest(const WorldRuntime &runtime)
-	{
-		RuntimeStubState &state = runtimeStubState(&runtime);
-		if (state.variableDispatchSnapshotCache)
-			return state.variableDispatchSnapshotCache;
-		auto snapshot                       = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
-		snapshot->worldVariablesSnapshot    = runtime.variableSnapshot();
-		snapshot->hasWorldVariablesSnapshot = true;
-		state.variableDispatchSnapshotCache = snapshot;
-		return snapshot;
-	}
-} // namespace
-
-WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
-{
-	runtimeStubStates().insert(this, RuntimeStubState{});
-}
-
-WorldRuntime::~WorldRuntime()
-{
-	QMudNativePluginRegistry::discardRuntimeState(this);
-	runtimeStubStates().remove(this);
-}
-
-void WorldRuntime::notifyNativePluginStateChanged()
-{
-}
-
-void WorldRuntime::addScriptTime(qint64 nanos)
-{
-	Q_UNUSED(nanos);
-}
-
-WorldRuntime::RuntimeCountersSnapshot WorldRuntime::runtimeCountersSnapshot(bool includeStrings) const
-{
-	Q_UNUSED(includeStrings);
-	RuntimeCountersSnapshot snapshot;
-	const RuntimeStubState &state = runtimeStubState(this);
-	snapshot.notesInRgb           = state.notesInRgb;
-	snapshot.noteStyle            = state.noteStyle;
-	snapshot.noteTextColour       = state.noteTextColour;
-	snapshot.noteColourFore       = state.noteColourFore;
-	snapshot.noteColourBack       = state.noteColourBack;
-	snapshot.outputLineCount      = safeQSizeToInt(state.outputLines.size());
-	if (includeStrings)
-	{
-		snapshot.logFileName             = state.logFileName;
-		snapshot.worldFilePath           = state.worldFilePath;
-		snapshot.defaultWorldDirectory   = state.defaultWorldDirectory;
-		snapshot.defaultLogDirectory     = state.defaultLogDirectory;
-		snapshot.pluginsDirectory        = state.pluginsDirectory;
-		snapshot.startupDirectory        = state.startupDirectory;
-		snapshot.translatorFile          = state.translatorFile;
-		snapshot.firstSpecialFontPath    = state.firstSpecialFontPath;
-		snapshot.preferencesDatabaseName = state.preferencesDatabaseName;
-		snapshot.fileBrowsingDirectory   = state.fileBrowsingDirectory;
-		snapshot.stateFilesDirectory     = state.stateFilesDirectory;
-	}
-	return snapshot;
-}
-
-void WorldRuntime::beginOutputViewMutationBatch()
-{
-	++runtimeStubState(this).outputBatchDepth;
-}
-
-void WorldRuntime::endOutputViewMutationBatch()
-{
-	--runtimeStubState(this).outputBatchDepth;
-}
-
-bool WorldRuntime::luaContextLineEntry(int lineNumber, LineEntry &entry) const
-{
-	Q_UNUSED(lineNumber);
-	Q_UNUSED(entry);
-	return false;
-}
-
-int WorldRuntime::luaContextLinesInBufferCount() const
-{
-	return 0;
-}
-
-void WorldRuntime::beginMiniWindowMutationBatch()
-{
-	++runtimeStubState(this).miniWindowBatchDepth;
-}
-
-void WorldRuntime::endMiniWindowMutationBatch()
-{
-	--runtimeStubState(this).miniWindowBatchDepth;
-}
-
-QString WorldRuntime::startupDirectory() const
-{
-	return runtimeStubState(this).startupDirectory;
-}
-
-QString WorldRuntime::defaultLogDirectory() const
-{
-	return {};
-}
-
-QString WorldRuntime::worldAttributeValue(const QString &key) const
-{
-	return runtimeStubState(this).worldAttributes.value(key);
-}
-
-QString WorldRuntime::worldMultilineAttributeValue(const QString &key) const
-{
-	return worldAttributeValue(key);
-}
-
-long WorldRuntime::backgroundColour() const
-{
-	return 0;
-}
-
-WorldRuntime::CommandUiSnapshot WorldRuntime::commandUiSnapshot(bool includeHistory, bool includeFrameData,
-                                                                bool allowSelectedWordHitTest) const
-{
-	Q_UNUSED(includeHistory);
-	Q_UNUSED(includeFrameData);
-	Q_UNUSED(allowSelectedWordHitTest);
-	return {};
-}
-
-unsigned short WorldRuntime::noteStyle() const
-{
-	return runtimeStubState(this).noteStyle;
-}
-
-bool WorldRuntime::notesInRgb() const
-{
-	return runtimeStubState(this).notesInRgb;
-}
-
-int WorldRuntime::noteTextColour() const
-{
-	return runtimeStubState(this).noteTextColour;
-}
-
-void WorldRuntime::setNoteTextColour(int value)
-{
-	RuntimeStubState &state = runtimeStubState(this);
-	state.noteTextColour    = value;
-	state.notesInRgb        = false;
-}
-
-long WorldRuntime::noteColourFore() const
-{
-	return runtimeStubState(this).noteColourFore;
-}
-
-void WorldRuntime::setNoteColourFore(long value)
-{
-	runtimeStubState(this).noteColourFore = value & 0x00FFFFFF;
-	runtimeStubState(this).notesInRgb     = true;
-}
-
-long WorldRuntime::noteColourBack() const
-{
-	return runtimeStubState(this).noteColourBack;
-}
-
-long WorldRuntime::normalColour(int index) const
-{
-	Q_UNUSED(index);
-	return 0xFFFFFF;
-}
-
-long WorldRuntime::customColourText(int index) const
-{
-	Q_UNUSED(index);
-	return 0xFFFFFF;
-}
-
-long WorldRuntime::customColourBackground(int index) const
-{
-	Q_UNUSED(index);
-	return 0;
-}
-
-const QList<WorldRuntime::Variable> &WorldRuntime::variables() const
-{
-	return runtimeStubState(this).variables;
-}
-
-bool WorldRuntime::findVariable(const QString &name, QString &value) const
-{
-	for (const Variable &variable : runtimeStubState(this).variables)
-	{
-		const QString variableName = variable.attributes.value(QStringLiteral("name"));
-		if (variableName.compare(name, Qt::CaseInsensitive) == 0)
-		{
-			value = variable.content;
-			return true;
-		}
-	}
-	return false;
-}
-
-QStringList WorldRuntime::variableList() const
-{
-	QStringList names;
-	for (const Variable &variable : runtimeStubState(this).variables)
-	{
-		const QString name = variable.attributes.value(QStringLiteral("name"));
-		if (!name.isEmpty())
-			names.push_back(name);
-	}
-	return names;
-}
-
-QMap<QString, QString> WorldRuntime::variableSnapshot() const
-{
-	QMap<QString, QString> snapshot;
-	for (const Variable &variable : runtimeStubState(this).variables)
-	{
-		const QString name = variable.attributes.value(QStringLiteral("name"));
-		if (!name.isEmpty())
-			snapshot.insert(name, variable.content);
-	}
-	return snapshot;
-}
-
-void WorldRuntime::invalidateLuaCallbackDispatchSnapshot() const
-{
-	runtimeStubState(this).variableDispatchSnapshotCache.clear();
-}
-
-void WorldRuntime::setVariable(const QString &name, const QString &value)
-{
-	if (name.isEmpty())
-		return;
-
-	RuntimeStubState &state = runtimeStubState(this);
-	for (Variable &variable : state.variables)
-	{
-		const QString variableName = variable.attributes.value(QStringLiteral("name"));
-		if (variableName.compare(name, Qt::CaseInsensitive) == 0)
-		{
-			variable.content = value;
-			invalidateLuaCallbackDispatchSnapshot();
-			return;
-		}
-	}
-
-	Variable variable;
-	variable.attributes.insert(QStringLiteral("name"), name);
-	variable.content = value;
-	state.variables.push_back(variable);
-	invalidateLuaCallbackDispatchSnapshot();
-}
-
-void WorldRuntime::setVariables(const QList<Variable> &variables)
-{
-	runtimeStubState(this).variables = variables;
-	invalidateLuaCallbackDispatchSnapshot();
-}
-
-int WorldRuntime::deleteVariable(const QString &name)
-{
-	RuntimeStubState &state = runtimeStubState(this);
-	for (int i = 0; i < state.variables.size(); ++i)
-	{
-		const QString variableName = state.variables.at(i).attributes.value(QStringLiteral("name"));
-		if (variableName.compare(name, Qt::CaseInsensitive) == 0)
-		{
-			state.variables.removeAt(i);
-			invalidateLuaCallbackDispatchSnapshot();
-			return eOK;
-		}
-	}
-	return eVariableNotFound;
-}
-
-void WorldRuntime::setNoteColourBack(long value)
-{
-	runtimeStubState(this).noteColourBack = value & 0x00FFFFFF;
-	runtimeStubState(this).notesInRgb     = true;
-}
-
-void WorldRuntime::outputText(const QString &text, bool note, bool newLine)
-{
-	RuntimeStubState &state = runtimeStubState(this);
-	state.outputLines.push_back(text);
-	state.outputNewLines.push_back(newLine);
-	state.lineEntries.push_back(makeStubLineEntry(state, text, note ? LineNote : LineOutput, {}, newLine));
-}
-
-void WorldRuntime::outputStyledText(const QString &text, const QVector<StyleSpan> &spans, bool note,
-                                    bool newLine)
-{
-	RuntimeStubState &state = runtimeStubState(this);
-	state.outputLines.push_back(text);
-	state.outputNewLines.push_back(newLine);
-	state.lineEntries.push_back(makeStubLineEntry(state, text, note ? LineNote : LineOutput, spans, newLine));
-}
-
-bool WorldRuntime::writeLuaCallbackOutputAtLineAnchor(qint64 anchorLineNumber, int anchorRelativeOffset,
-                                                      bool replaceAnchor, const QString &text, int flags,
-                                                      const QVector<StyleSpan> &spans, bool hardReturn)
-{
-	RuntimeStubState &state = runtimeStubState(this);
-	state.outputLines.push_back(text);
-	state.outputNewLines.push_back(hardReturn);
-
-	int anchorIndex = -1;
-	for (int index = 0; index < state.lineEntries.size(); ++index)
-	{
-		if (state.lineEntries.at(index).lineNumber == anchorLineNumber)
-		{
-			anchorIndex = index;
-			break;
-		}
-	}
-	if (anchorIndex < 0)
-		return false;
-
-	WorldRuntime::LineEntry entry = makeStubLineEntry(state, text, flags & ~LineHidden, spans, hardReturn);
-	if (replaceAnchor)
-	{
-		state.lineEntries[anchorIndex] = entry;
-		return true;
-	}
-
-	const qsizetype insertIndex = qBound<qsizetype>(
-	    0, static_cast<qsizetype>(anchorIndex) + anchorRelativeOffset, state.lineEntries.size());
-	state.lineEntries.insert(insertIndex, entry);
-	return true;
-}
-
-int WorldRuntime::savePluginState(const QString &pluginId, bool scripted, QString *error)
-{
-	Q_UNUSED(pluginId);
-	Q_UNUSED(scripted);
-	if (error)
-		error->clear();
-	++runtimeStubState(this).savePluginStateCalls;
-	return 0;
-}
-
-int WorldRuntime::windowCreate(const QString &name, int left, int top, int width, int height, int position,
-                               int flags, const QColor &background, const QString &pluginId)
-{
-	Q_UNUSED(background);
-	Q_UNUSED(pluginId);
-	RuntimeStubState &state = runtimeStubState(this);
-	if (!state.windowNames.contains(name))
-		state.windowNames.push_back(name);
-	state.windowInfo[name][1] = left;
-	state.windowInfo[name][2] = top;
-	state.windowInfo[name][3] = width;
-	state.windowInfo[name][4] = height;
-	state.windowInfo[name][7] = position;
-	state.windowInfo[name][8] = flags;
-	return 0;
-}
-
-QStringList WorldRuntime::windowList() const
-{
-	return runtimeStubState(this).windowNames;
-}
-
-QVariant WorldRuntime::windowInfo(const QString &name, int infoType) const
-{
-	return runtimeStubState(this).windowInfo.value(name).value(infoType);
-}
-
-int WorldRuntime::windowPosition(const QString &name, int left, int top, int position, int flags)
-{
-	RuntimeStubState &state   = runtimeStubState(this);
-	state.windowInfo[name][1] = left;
-	state.windowInfo[name][2] = top;
-	state.windowInfo[name][7] = position;
-	state.windowInfo[name][8] = flags;
-	return 0;
-}
-
-int WorldRuntime::windowResize(const QString &name, int width, int height, long colour)
-{
-	Q_UNUSED(colour);
-	RuntimeStubState &state   = runtimeStubState(this);
-	state.windowInfo[name][3] = width;
-	state.windowInfo[name][4] = height;
-	return 0;
-}
-
-int WorldRuntime::windowAddHotspot(const QString &name, const QString &hotspotId, int left, int top,
-                                   int right, int bottom, const QString &mouseOver,
-                                   const QString &cancelMouseOver, const QString &mouseDown,
-                                   const QString &cancelMouseDown, const QString &mouseUp,
-                                   const QString &tooltip, int cursor, int flags, const QString &pluginId)
-{
-	Q_UNUSED(left);
-	Q_UNUSED(top);
-	Q_UNUSED(right);
-	Q_UNUSED(bottom);
-	Q_UNUSED(mouseOver);
-	Q_UNUSED(cancelMouseOver);
-	Q_UNUSED(mouseDown);
-	Q_UNUSED(cancelMouseDown);
-	Q_UNUSED(mouseUp);
-	Q_UNUSED(tooltip);
-	Q_UNUSED(cursor);
-	Q_UNUSED(flags);
-	Q_UNUSED(pluginId);
-	RuntimeStubState &state = runtimeStubState(this);
-	if (!state.hotspotIds[name].contains(hotspotId))
-		state.hotspotIds[name].push_back(hotspotId);
-	return 0;
-}
-
-QStringList WorldRuntime::windowHotspotList(const QString &name) const
-{
-	return runtimeStubState(this).hotspotIds.value(name);
-}
-
-int WorldRuntime::playSound(const int buffer, const QString &fileName, const bool loop, double, double)
-{
-	return playSoundBypassingPluginCallbacks(buffer, fileName, loop, 0.0, 0.0);
-}
-
-int WorldRuntime::playSoundBypassingPluginCallbacks(const int buffer, const QString &fileName,
-                                                    const bool loop, double, double)
-{
-	if (fileName.isEmpty())
-	{
-		if (!runtimeStubState(this).soundStatusByBuffer.contains(buffer))
-			return eBadParameter;
-		runtimeStubState(this).soundStatusByBuffer.insert(buffer, loop ? 2 : 1);
-		return eOK;
-	}
-	const int targetBuffer = buffer > 0 ? buffer : 1;
-	runtimeStubState(this).soundStatusByBuffer.insert(targetBuffer, loop ? 2 : 1);
-	return eOK;
-}
-
-int WorldRuntime::stopSound(const int buffer)
-{
-	return stopSoundBypassingPluginCallbacks(buffer);
-}
-
-int WorldRuntime::stopSoundBypassingPluginCallbacks(const int buffer)
-{
-	RuntimeStubState &state = runtimeStubState(this);
-	if (buffer == 0)
-		state.soundStatusByBuffer.clear();
-	else
-		state.soundStatusByBuffer.remove(buffer);
-	return eOK;
-}
-
-int WorldRuntime::soundStatus(const int buffer) const
-{
-	if (buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
-		return -1;
-	return runtimeStubState(this).soundStatusByBuffer.value(buffer, -2);
-}
-
-const QList<WorldRuntime::Plugin> &WorldRuntime::plugins() const
-{
-	return runtimeStubState(this).plugins;
-}
-
-QList<WorldRuntime::Plugin> &WorldRuntime::pluginsMutable()
-{
-	return runtimeStubState(this).plugins;
-}
-
-bool WorldRuntime::isPluginInstalled(const QString &pluginId) const
-{
-	if (QMudNativePluginRegistry::isBlacklistedId(pluginId))
-		return false;
-	if (!QMudNativePluginRegistry::resolveShimIdOrName(pluginId).isEmpty())
-		return true;
-	for (const Plugin &plugin : runtimeStubState(this).plugins)
-	{
-		if (plugin.attributes.value(QStringLiteral("id")).compare(pluginId, Qt::CaseInsensitive) == 0)
-			return true;
-	}
-	return false;
-}
-
-QVariant WorldRuntime::pluginInfo(const QString &pluginId, const int infoType) const
-{
-	if (const QString shimId = QMudNativePluginRegistry::resolveShimIdOrName(pluginId); !shimId.isEmpty())
-	{
-		int               visibleIndex = 0;
-		const QStringList ids          = pluginIdList();
-		for (int i = 0; i < ids.size(); ++i)
-		{
-			if (ids.at(i).compare(shimId, Qt::CaseInsensitive) == 0)
-			{
-				visibleIndex = i + 1;
-				break;
-			}
-		}
-		const bool enabled =
-		    shimId.compare(QMudNativePluginRegistry::mushReaderPluginId(), Qt::CaseInsensitive) == 0
-		        ? QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(this)
-		        : true;
-		return QMudNativePluginRegistry::pluginInfo(shimId, infoType, visibleIndex, enabled);
-	}
-	for (const Plugin &plugin : runtimeStubState(this).plugins)
-	{
-		if (plugin.attributes.value(QStringLiteral("id")).compare(pluginId, Qt::CaseInsensitive) != 0)
-			continue;
-		switch (infoType)
-		{
-		case 1:
-			return plugin.attributes.value(QStringLiteral("name"));
-		case 2:
-			return plugin.attributes.value(QStringLiteral("author"));
-		case 3:
-			return plugin.description;
-		case 4:
-			return plugin.script;
-		case 5:
-			return plugin.attributes.value(QStringLiteral("language"));
-		case 6:
-			return plugin.source;
-		case 7:
-			return plugin.attributes.value(QStringLiteral("id"));
-		case 8:
-			return plugin.attributes.value(QStringLiteral("purpose"));
-		case 20:
-			return plugin.directory;
-		default:
-			return {};
-		}
-	}
-	return {};
-}
-
-bool WorldRuntime::findPluginVariable(const QString &pluginId, const QString &name, QString &value) const
-{
-	for (const Plugin &plugin : runtimeStubState(this).plugins)
-	{
-		if (plugin.attributes.value(QStringLiteral("id")).compare(pluginId, Qt::CaseInsensitive) != 0)
-			continue;
-		for (auto it = plugin.variables.constBegin(); it != plugin.variables.constEnd(); ++it)
-		{
-			if (it.key().compare(name, Qt::CaseInsensitive) == 0)
-			{
-				value = it.value();
-				return true;
-			}
-		}
-		return false;
-	}
-	return false;
-}
-
-bool WorldRuntime::pluginVariableSnapshot(const QString &pluginId, QMap<QString, QString> &values) const
-{
-	values.clear();
-	for (const Plugin &plugin : runtimeStubState(this).plugins)
-	{
-		if (plugin.attributes.value(QStringLiteral("id")).compare(pluginId, Qt::CaseInsensitive) != 0)
-			continue;
-		values = plugin.variables;
-		return true;
-	}
-	return false;
-}
-
-QStringList WorldRuntime::pluginIdList() const
-{
-	QStringList ids;
-	for (const Plugin &plugin : runtimeStubState(this).plugins)
-	{
-		const QString id = plugin.attributes.value(QStringLiteral("id"));
-		if (!id.isEmpty() && !QMudNativePluginRegistry::isBlacklistedId(id))
-			ids.push_back(id);
-	}
-	for (const QString &shimId :
-	     {QMudNativePluginRegistry::mushReaderPluginId(), QMudNativePluginRegistry::luaAudioPluginId()})
-	{
-		if (!ids.contains(shimId, Qt::CaseInsensitive))
-			ids.push_back(shimId);
-	}
-	return ids;
-}
-
-int WorldRuntime::allocateAcceleratorCommand()
-{
-	RuntimeStubState &state = runtimeStubState(this);
-	return state.nextAcceleratorCommand++;
-}
-
-void WorldRuntime::registerAccelerator(const qint64 key, const int commandId, const AcceleratorEntry &entry)
-{
-	RuntimeStubState &state = runtimeStubState(this);
-	state.acceleratorKeyToCommand.insert(key, commandId);
-	state.acceleratorEntries.insert(commandId, entry);
-}
-
-void WorldRuntime::removeAccelerator(const qint64 key)
-{
-	RuntimeStubState &state = runtimeStubState(this);
-	const auto        it    = state.acceleratorKeyToCommand.constFind(key);
-	if (it == state.acceleratorKeyToCommand.constEnd())
-		return;
-	state.acceleratorEntries.remove(it.value());
-	state.acceleratorKeyToCommand.remove(key);
-}
-
-int WorldRuntime::acceleratorCommandForKey(const qint64 key) const
-{
-	return runtimeStubState(this).acceleratorKeyToCommand.value(key, -1);
-}
-
-QVariant WorldRuntime::windowHotspotInfo(const QString &name, const QString &hotspotId, int infoType) const
-{
-	Q_UNUSED(name);
-	Q_UNUSED(hotspotId);
-	Q_UNUSED(infoType);
-	return {};
-}
-
-bool WorldRuntime::suppressScriptErrorOutputToWorld() const
-{
-	return false;
-}
-// NOLINTEND(readability-convert-member-functions-to-static,readability-make-member-function-const,readability-non-const-parameter)
-
-QColor WorldView::parseColor(const QString &value)
-{
-	return {value};
 }
 
 namespace
@@ -871,6 +112,51 @@ namespace
 		const QString value = QString::fromUtf8(lua_tostring(state, -1));
 		lua_pop(state, 1);
 		return value;
+	}
+
+	int safeQSizeToInt(const qsizetype size)
+	{
+		if (size <= 0)
+			return 0;
+		constexpr qsizetype kMaxInt = std::numeric_limits<int>::max();
+		return size > kMaxInt ? std::numeric_limits<int>::max() : static_cast<int>(size);
+	}
+
+	QStringList logicalOutputLinesFromEntries(const QVector<WorldRuntime::LineEntry> &entries)
+	{
+		QStringList lines;
+		QString     currentLine;
+		for (const WorldRuntime::LineEntry &entry : entries)
+		{
+			if ((entry.flags & WorldRuntime::LineHidden) != 0)
+				continue;
+			currentLine += entry.text;
+			if (entry.hardReturn)
+			{
+				lines.push_back(currentLine);
+				currentLine.clear();
+			}
+		}
+		if (!currentLine.isEmpty())
+			lines.push_back(currentLine);
+		return lines;
+	}
+
+	QString acceptedModalStringResult(const QString &value)
+	{
+		QJsonObject object;
+		object.insert(QStringLiteral("accepted"), true);
+		object.insert(QStringLiteral("value"), value);
+		return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
+	}
+
+	QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+	captureVariableDispatchSnapshotForTest(const WorldRuntime &runtime)
+	{
+		auto snapshot                       = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+		snapshot->worldVariablesSnapshot    = runtime.variableSnapshot();
+		snapshot->hasWorldVariablesSnapshot = true;
+		return snapshot;
 	}
 
 	struct LuaStateDeleterForTest
@@ -1149,10 +435,10 @@ void tst_LuaCallbackEngine::modalYieldResumePreservesNumberAndStringCallback()
 	setEngineScript(*engine, QStringLiteral(R"lua(
 colour_seen = false
 function OnHotspot(flags, hotspot)
-  SaveState()
-  local colour = TestYieldModalNumber()
+  modal_number_phase = "before"
+  local colour = PickColour(-1)
   colour_seen = flags == 2 and hotspot == "tab" and colour == 255
-  SaveState()
+  modal_number_phase = "after"
   return colour_seen
 end
 )lua"));
@@ -1174,7 +460,7 @@ end
 	QVERIFY(initialResult.pendingModalStringRequest.guiCallable);
 	QVERIFY(initialResult.pendingModalStringRequest.resultCallback);
 	executeDeferredMutations(initialResult);
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 1);
+	QCOMPARE(luaGlobalString(engine->luaState(), "modal_number_phase"), QStringLiteral("before"));
 	QVERIFY(!luaGlobalBoolean(engine->luaState(), "colour_seen"));
 
 	LuaBatchDispatchRequest resumeRequest;
@@ -1190,7 +476,7 @@ end
 	QVERIFY(resumedResult.hasFunctionValid);
 	QVERIFY(resumedResult.hasFunction);
 	executeDeferredMutations(resumedResult);
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 2);
+	QCOMPARE(luaGlobalString(engine->luaState(), "modal_number_phase"), QStringLiteral("after"));
 	QVERIFY(luaGlobalBoolean(engine->luaState(), "colour_seen"));
 }
 
@@ -1202,7 +488,7 @@ void tst_LuaCallbackEngine::modalYieldResumePreservesStringInOutCallback()
 	setEngineScript(*engine, QStringLiteral(R"lua(
 string_seen = ""
 function Transform(value)
-  local choice = TestYieldModalString()
+  local choice = utils.inputbox("choose", "title", "")
   string_seen = value .. ":" .. choice
   return string_seen
 end
@@ -1227,7 +513,7 @@ end
 	resumeRequest.engines       = {engine};
 	resumeRequest.kind          = LuaBatchDispatchKind::ResumeSuspendedModalString;
 	resumeRequest.modalResumeId = initialResult.modalResumeId;
-	resumeRequest.stringArg     = QStringLiteral("after");
+	resumeRequest.stringArg     = acceptedModalStringResult(QStringLiteral("after"));
 
 	LuaBatchDispatchResult resumedResult = executor.dispatchBatch(resumeRequest);
 	QVERIFY(!resumedResult.suspended);
@@ -1247,10 +533,10 @@ void tst_LuaCallbackEngine::modalYieldResumePreservesNoArgsCallback()
 	setEngineScript(*engine, QStringLiteral(R"lua(
 noargs_seen = false
 function OnPluginEnable()
-  SaveState()
-  local choice = TestYieldModalString()
+  modal_noargs_phase = "before"
+  local choice = utils.inputbox("choose", "title", "")
   noargs_seen = choice == "accepted"
-  SaveState()
+  modal_noargs_phase = "after"
   return noargs_seen
 end
 )lua"));
@@ -1270,14 +556,14 @@ end
 	QVERIFY(!initialResult.boolResultValid);
 	QVERIFY(!initialResult.hasFunctionValid);
 	executeDeferredMutations(initialResult);
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 1);
+	QCOMPARE(luaGlobalString(engine->luaState(), "modal_noargs_phase"), QStringLiteral("before"));
 	QVERIFY(!luaGlobalBoolean(engine->luaState(), "noargs_seen"));
 
 	LuaBatchDispatchRequest resumeRequest;
 	resumeRequest.engines       = {engine};
 	resumeRequest.kind          = LuaBatchDispatchKind::ResumeSuspendedModalString;
 	resumeRequest.modalResumeId = initialResult.modalResumeId;
-	resumeRequest.stringArg     = QStringLiteral("accepted");
+	resumeRequest.stringArg     = acceptedModalStringResult(QStringLiteral("accepted"));
 
 	LuaBatchDispatchResult resumedResult = executor.dispatchBatch(resumeRequest);
 	QVERIFY(!resumedResult.suspended);
@@ -1286,7 +572,7 @@ end
 	QVERIFY(resumedResult.hasFunctionValid);
 	QVERIFY(resumedResult.hasFunction);
 	executeDeferredMutations(resumedResult);
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 2);
+	QCOMPARE(luaGlobalString(engine->luaState(), "modal_noargs_phase"), QStringLiteral("after"));
 	QVERIFY(luaGlobalBoolean(engine->luaState(), "noargs_seen"));
 }
 
@@ -1298,10 +584,10 @@ void tst_LuaCallbackEngine::modalYieldResumePreservesBytesInOutCallback()
 	setEngineScript(*engine, QStringLiteral(R"lua(
 bytes_seen = false
 function TransformBytes(value)
-  SaveState()
-  local suffix = TestYieldModalString()
+  modal_bytes_phase = "before"
+  local suffix = utils.inputbox("choose", "title", "")
   bytes_seen = value == "payload" and suffix == "done"
-  SaveState()
+  modal_bytes_phase = "after"
   return value .. ":" .. suffix
 end
 )lua"));
@@ -1320,14 +606,14 @@ end
 	QVERIFY(initialResult.hasPendingModalStringRequest);
 	QCOMPARE(initialResult.bytesResult, QByteArray("payload"));
 	executeDeferredMutations(initialResult);
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 1);
+	QCOMPARE(luaGlobalString(engine->luaState(), "modal_bytes_phase"), QStringLiteral("before"));
 	QVERIFY(!luaGlobalBoolean(engine->luaState(), "bytes_seen"));
 
 	LuaBatchDispatchRequest resumeRequest;
 	resumeRequest.engines       = {engine};
 	resumeRequest.kind          = LuaBatchDispatchKind::ResumeSuspendedModalString;
 	resumeRequest.modalResumeId = initialResult.modalResumeId;
-	resumeRequest.stringArg     = QStringLiteral("done");
+	resumeRequest.stringArg     = acceptedModalStringResult(QStringLiteral("done"));
 
 	LuaBatchDispatchResult resumedResult = executor.dispatchBatch(resumeRequest);
 	QVERIFY(!resumedResult.suspended);
@@ -1337,7 +623,7 @@ end
 	QVERIFY(resumedResult.hasFunction);
 	QCOMPARE(resumedResult.bytesResult, QByteArray("payload:done"));
 	executeDeferredMutations(resumedResult);
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 2);
+	QCOMPARE(luaGlobalString(engine->luaState(), "modal_bytes_phase"), QStringLiteral("after"));
 	QVERIFY(luaGlobalBoolean(engine->luaState(), "bytes_seen"));
 }
 
@@ -1349,11 +635,11 @@ void tst_LuaCallbackEngine::modalYieldResumeSupportsStackedModalCalls()
 	setEngineScript(*engine, QStringLiteral(R"lua(
 stacked_seen = false
 function OnHotspot(flags, hotspot)
-  SaveState()
-  local first = TestYieldModalNumber()
-  SaveState()
-  local second = TestYieldModalNumber()
-  SaveState()
+  modal_stacked_phase = "before_first"
+  local first = PickColour(-1)
+  modal_stacked_phase = "before_second"
+  local second = PickColour(-1)
+  modal_stacked_phase = "after_second"
   stacked_seen = flags == 4 and hotspot == "stacked" and first == 10 and second == 20
   return stacked_seen
 end
@@ -1373,7 +659,7 @@ end
 	QVERIFY(firstSuspend.modalResumeId != 0);
 	QVERIFY(firstSuspend.hasPendingModalStringRequest);
 	executeDeferredMutations(firstSuspend);
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 1);
+	QCOMPARE(luaGlobalString(engine->luaState(), "modal_stacked_phase"), QStringLiteral("before_first"));
 
 	LuaBatchDispatchRequest firstResume;
 	firstResume.engines       = {engine};
@@ -1388,7 +674,7 @@ end
 	QCOMPARE(secondSuspend.suspendedEngineIndex, 0);
 	QVERIFY(secondSuspend.hasPendingModalStringRequest);
 	executeDeferredMutations(secondSuspend);
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 2);
+	QCOMPARE(luaGlobalString(engine->luaState(), "modal_stacked_phase"), QStringLiteral("before_second"));
 	QVERIFY(!luaGlobalBoolean(engine->luaState(), "stacked_seen"));
 
 	LuaBatchDispatchRequest secondResume;
@@ -1402,7 +688,7 @@ end
 	QVERIFY(completed.boolResultValid);
 	QVERIFY(completed.boolResult);
 	executeDeferredMutations(completed);
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 3);
+	QCOMPARE(luaGlobalString(engine->luaState(), "modal_stacked_phase"), QStringLiteral("after_second"));
 	QVERIFY(luaGlobalBoolean(engine->luaState(), "stacked_seen"));
 }
 
@@ -1414,10 +700,10 @@ void tst_LuaCallbackEngine::workerModalResumeDefersPostModalRuntimeMutations()
 	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
 worker_resume_seen = false
 function OnPluginEnable()
-  SaveState()
-  local choice = TestYieldModalString()
+  worker_modal_phase = "before"
+  local choice = utils.inputbox("choose", "title", "")
   worker_resume_seen = choice == "accepted"
-  SaveState()
+  worker_modal_phase = "after"
   return worker_resume_seen
 end
 function worker_status(value)
@@ -1439,33 +725,30 @@ end
 	dispatchWorkerAndWait(executor, request, initialResult);
 	QVERIFY(initialResult.suspended);
 	QVERIFY(initialResult.modalResumeId != 0);
-	QVERIFY(!initialResult.deferredRuntimeMutationBatches.isEmpty());
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 0);
-	executeDeferredMutations(initialResult);
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 1);
-
-	LuaBatchDispatchRequest resumeRequest;
-	resumeRequest.engines       = {engine};
-	resumeRequest.kind          = LuaBatchDispatchKind::ResumeSuspendedModalString;
-	resumeRequest.modalResumeId = initialResult.modalResumeId;
-	resumeRequest.stringArg     = QStringLiteral("accepted");
-
-	LuaBatchDispatchResult resumedResult;
-	dispatchWorkerAndWait(executor, resumeRequest, resumedResult);
-	QVERIFY(!resumedResult.suspended);
-	QVERIFY(resumedResult.boolResultValid);
-	QVERIFY(resumedResult.boolResult);
-	QVERIFY(!resumedResult.deferredRuntimeMutationBatches.isEmpty());
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 1);
-	executeDeferredMutations(resumedResult);
-	QCOMPARE(runtimeStubState(&runtime).savePluginStateCalls, 2);
-
 	LuaBatchDispatchRequest statusRequest;
 	statusRequest.engines      = {engine};
 	statusRequest.kind         = LuaBatchDispatchKind::StringInOut;
 	statusRequest.functionName = QStringLiteral("worker_status");
 	statusRequest.stringArg    = QStringLiteral("ignored");
 	LuaBatchDispatchResult statusResult;
+	dispatchWorkerAndWait(executor, statusRequest, statusResult);
+	QCOMPARE(statusResult.stringResult, QStringLiteral("no"));
+	executeDeferredMutations(initialResult);
+
+	LuaBatchDispatchRequest resumeRequest;
+	resumeRequest.engines       = {engine};
+	resumeRequest.kind          = LuaBatchDispatchKind::ResumeSuspendedModalString;
+	resumeRequest.modalResumeId = initialResult.modalResumeId;
+	resumeRequest.stringArg     = acceptedModalStringResult(QStringLiteral("accepted"));
+
+	LuaBatchDispatchResult resumedResult;
+	dispatchWorkerAndWait(executor, resumeRequest, resumedResult);
+	QVERIFY(!resumedResult.suspended);
+	QVERIFY(resumedResult.boolResultValid);
+	QVERIFY(resumedResult.boolResult);
+	QVERIFY(resumedResult.deferredRuntimeMutationBatches.isEmpty());
+	executeDeferredMutations(resumedResult);
+
 	dispatchWorkerAndWait(executor, statusRequest, statusResult);
 	QCOMPARE(statusResult.stringResult, QStringLiteral("yes"));
 
@@ -1480,7 +763,7 @@ void tst_LuaCallbackEngine::modalYieldCancelPreventsCallbackContinuation()
 	setEngineScript(*engine, QStringLiteral(R"lua(
 cancel_seen = false
 function OnHotspot(flags, hotspot)
-  local colour = TestYieldModalNumber()
+  local colour = PickColour(-1)
   cancel_seen = true
   return colour == 42
 end
@@ -1590,7 +873,7 @@ void tst_LuaCallbackEngine::worldLuaFileApisAcceptMixedSeparators()
 	input.close();
 
 	WorldRuntime runtime;
-	runtimeStubState(&runtime).startupDirectory = root.absolutePath();
+	runtime.setStartupDirectory(root.absolutePath());
 	LuaCallbackEngine engine;
 	engine.setWorldRuntime(&runtime);
 	setEngineScript(engine, QString());
@@ -1652,7 +935,7 @@ void tst_LuaCallbackEngine::worldLuaFileApisUseRuntimeHomeAcrossThreadAffinity()
 	    });
 	worker.start();
 	QVERIFY(worker.isRunning());
-	runtimeStubState(&runtime).startupDirectory = root.absolutePath();
+	runtime.setStartupDirectory(root.absolutePath());
 	runtime.moveToThread(&worker);
 
 	LuaCallbackEngine engine;
@@ -1705,9 +988,8 @@ void tst_LuaCallbackEngine::worldLuaFileApisIgnoreProcessQmudHome()
 			    qunsetenv("QMUD_HOME");
 	    });
 
-	WorldRuntime      runtime;
-	RuntimeStubState &state = runtimeStubState(&runtime);
-	state.startupDirectory  = runtimeRoot.absolutePath();
+	WorldRuntime runtime;
+	runtime.setStartupDirectory(runtimeRoot.absolutePath());
 
 	LuaCallbackEngine engine;
 	engine.setWorldRuntime(&runtime);
@@ -1720,7 +1002,7 @@ process_qmud_home_ignored = chunk() == "runtime"
 	QVERIFY(engine.executeScript(script, QStringLiteral("ignore process QMUD_HOME")));
 	QVERIFY(luaGlobalBoolean(engine.luaState(), "process_qmud_home_ignored"));
 
-	state.startupDirectory.clear();
+	runtime.setStartupDirectory(QString());
 	LuaCallbackEngine missingHomeEngine;
 	missingHomeEngine.setWorldRuntime(&runtime);
 	setEngineScript(missingHomeEngine, QString());
@@ -1757,37 +1039,75 @@ void tst_LuaCallbackEngine::luaVisiblePathApisReturnRelativePosix()
 	[[maybe_unused]] const auto restoreCurrentPath =
 	    qScopeGuard([previousCurrentPath] { QDir::setCurrent(previousCurrentPath); });
 
-	WorldRuntime      runtime;
-	RuntimeStubState &state = runtimeStubState(&runtime);
-	state.startupDirectory  = root.absolutePath();
-	state.worldAttributes.insert(QStringLiteral("new_activity_sound"),
-	                             QStringLiteral(R"(C:\MUSHclient\sounds\activity.wav)"));
-	state.worldAttributes.insert(QStringLiteral("script_editor"),
-	                             QStringLiteral(R"(C:\MUSHclient\worlds\foo\editor.lua)"));
-	state.worldAttributes.insert(QStringLiteral("script_filename"),
-	                             QStringLiteral(R"(C:\MUSHclient\worlds\foo\script.lua)"));
-	state.worldAttributes.insert(QStringLiteral("auto_log_file_name"),
-	                             QStringLiteral(R"(C:\MUSHclient\logs\auto.log)"));
-	state.worldAttributes.insert(QStringLiteral("beep_sound"),
-	                             QStringLiteral(R"(C:\MUSHclient\sounds\beep.wav)"));
-	state.worldAttributes.insert(QStringLiteral("foreground_image"),
-	                             QStringLiteral(R"(C:\MUSHclient\worlds\foo\foreground.png)"));
-	state.worldAttributes.insert(QStringLiteral("background_image"),
-	                             QStringLiteral(R"(C:\MUSHclient\worlds\foo\background.png)"));
-	state.logFileName             = root.filePath(QStringLiteral("logs/current.log"));
-	state.worldFilePath           = root.filePath(QStringLiteral("worlds/foo/test.mcl"));
-	state.defaultWorldDirectory   = QStringLiteral(R"(C:\MUSHclient\worlds\)");
-	state.defaultLogDirectory     = root.filePath(QStringLiteral("logs"));
-	state.pluginsDirectory        = QStringLiteral(R"(C:\MUSHclient\worlds\plugins\)");
-	state.translatorFile          = root.filePath(QStringLiteral("locale/EN.lua"));
-	state.firstSpecialFontPath    = root.filePath(QStringLiteral("fonts/special.ttf"));
-	state.preferencesDatabaseName = root.filePath(QStringLiteral("prefs/qmud.db"));
-	state.fileBrowsingDirectory   = root.filePath(QStringLiteral("worlds/browse"));
-	state.stateFilesDirectory     = QStringLiteral(R"(C:\MUSHclient\worlds\plugins\state\)");
+	WorldRuntime runtime;
+	runtime.setStartupDirectory(root.absolutePath());
+	runtime.setWorldAttribute(QStringLiteral("new_activity_sound"),
+	                          QStringLiteral(R"(C:\MUSHclient\sounds\activity.wav)"));
+	runtime.setWorldAttribute(QStringLiteral("script_editor"),
+	                          QStringLiteral(R"(C:\MUSHclient\worlds\foo\editor.lua)"));
+	runtime.setWorldAttribute(QStringLiteral("script_filename"),
+	                          QStringLiteral(R"(C:\MUSHclient\worlds\foo\script.lua)"));
+	runtime.setWorldAttribute(QStringLiteral("auto_log_file_name"),
+	                          QStringLiteral(R"(C:\MUSHclient\logs\auto.log)"));
+	runtime.setWorldAttribute(QStringLiteral("beep_sound"),
+	                          QStringLiteral(R"(C:\MUSHclient\sounds\beep.wav)"));
+	runtime.setWorldAttribute(QStringLiteral("foreground_image"),
+	                          QStringLiteral(R"(C:\MUSHclient\worlds\foo\foreground.png)"));
+	runtime.setWorldAttribute(QStringLiteral("background_image"),
+	                          QStringLiteral(R"(C:\MUSHclient\worlds\foo\background.png)"));
+	runtime.setWorldFilePath(root.filePath(QStringLiteral("worlds/foo/test.mcl")));
+	runtime.setDefaultWorldDirectory(QStringLiteral("C:/MUSHclient/worlds/"));
+	runtime.setDefaultLogDirectory(root.filePath(QStringLiteral("logs")));
+	runtime.setPluginsDirectory(QStringLiteral("C:/MUSHclient/worlds/plugins/"));
+	runtime.setTranslatorFile(root.filePath(QStringLiteral("locale/EN.lua")));
+	runtime.setPreferencesDatabaseName(root.filePath(QStringLiteral("prefs/qmud.db")));
+	runtime.setFileBrowsingDirectory(root.filePath(QStringLiteral("worlds/browse")));
+	runtime.setStateFilesDirectory(QStringLiteral("C:/MUSHclient/worlds/plugins/state/"));
+	QCOMPARE(runtime.openLog(root.filePath(QStringLiteral("logs/current.log")), false), eOK);
 
-	LuaCallbackEngine engine;
-	engine.setWorldRuntime(&runtime);
-	setEngineScript(engine, QStringLiteral(R"lua(
+	auto engine = QSharedPointer<LuaCallbackEngine>::create();
+	engine->setWorldRuntime(&runtime);
+	setEngineScript(*engine, QString());
+
+	auto snapshot                       = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	snapshot->hasWorldAttributeSnapshot = true;
+	snapshot->worldAttributesSnapshot.insert(QStringLiteral("new_activity_sound"),
+	                                         QStringLiteral(R"(C:\MUSHclient\sounds\activity.wav)"));
+	snapshot->worldAttributesSnapshot.insert(QStringLiteral("script_editor"),
+	                                         QStringLiteral(R"(C:\MUSHclient\worlds\foo\editor.lua)"));
+	snapshot->worldAttributesSnapshot.insert(QStringLiteral("script_filename"),
+	                                         QStringLiteral(R"(C:\MUSHclient\worlds\foo\script.lua)"));
+	snapshot->worldAttributesSnapshot.insert(QStringLiteral("auto_log_file_name"),
+	                                         QStringLiteral(R"(C:\MUSHclient\logs\auto.log)"));
+	snapshot->worldAttributesSnapshot.insert(QStringLiteral("beep_sound"),
+	                                         QStringLiteral(R"(C:\MUSHclient\sounds\beep.wav)"));
+	snapshot->worldAttributesSnapshot.insert(QStringLiteral("foreground_image"),
+	                                         QStringLiteral(R"(C:\MUSHclient\worlds\foo\foreground.png)"));
+	snapshot->worldAttributesSnapshot.insert(QStringLiteral("background_image"),
+	                                         QStringLiteral(R"(C:\MUSHclient\worlds\foo\background.png)"));
+	snapshot->hasRuntimeCountersSnapshot = true;
+	snapshot->runtimeCounterValues.insert(QStringLiteral("logFileName"),
+	                                      root.filePath(QStringLiteral("logs/current.log")));
+	snapshot->runtimeCounterValues.insert(QStringLiteral("worldFilePath"),
+	                                      root.filePath(QStringLiteral("worlds/foo/test.mcl")));
+	snapshot->runtimeCounterValues.insert(QStringLiteral("defaultWorldDirectory"),
+	                                      QStringLiteral("C:/MUSHclient/worlds/"));
+	snapshot->runtimeCounterValues.insert(QStringLiteral("defaultLogDirectory"),
+	                                      root.filePath(QStringLiteral("logs")));
+	snapshot->runtimeCounterValues.insert(QStringLiteral("pluginsDirectory"),
+	                                      QStringLiteral("C:/MUSHclient/worlds/plugins/"));
+	snapshot->runtimeCounterValues.insert(QStringLiteral("startupDirectory"), root.absolutePath());
+	snapshot->runtimeCounterValues.insert(QStringLiteral("translatorFile"),
+	                                      root.filePath(QStringLiteral("locale/EN.lua")));
+	snapshot->runtimeCounterValues.insert(QStringLiteral("firstSpecialFontPath"), QString());
+	snapshot->runtimeCounterValues.insert(QStringLiteral("preferencesDatabaseName"),
+	                                      root.filePath(QStringLiteral("prefs/qmud.db")));
+	snapshot->runtimeCounterValues.insert(QStringLiteral("fileBrowsingDirectory"),
+	                                      root.filePath(QStringLiteral("worlds/browse")));
+	snapshot->runtimeCounterValues.insert(QStringLiteral("stateFilesDirectory"),
+	                                      QStringLiteral("C:/MUSHclient/worlds/plugins/state/"));
+
+	const QString           script = QStringLiteral(R"lua(
 local values = {
   GetInfo(9),
   GetInfo(10),
@@ -1820,7 +1140,19 @@ getinfo_56_ok = #getinfo_56 > 0 and getinfo_56:sub(-1) == "/" and not getinfo_56
 local info = utils.info()
 utils_info_summary = tostring(info.app_directory) .. "|" .. tostring(info.current_directory)
 utils_info_ok = utils_info_summary == "./|./"
-)lua"));
+)lua");
+
+	LuaExecutorDirect       executor;
+	LuaBatchDispatchRequest request;
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::ExecuteScript;
+	request.stringArg             = script;
+	request.stringArg2            = QStringLiteral("path visible api snapshot");
+	request.miniWindowSnapshotArg = snapshot;
+	LuaBatchDispatchResult result = executor.dispatchBatch(request);
+	QVERIFY(result.boolResultValid);
+	QVERIFY(result.boolResult);
+	executeDeferredMutations(result);
 
 	const QString expected =
 	    QStringList{
@@ -1841,7 +1173,7 @@ utils_info_ok = utils_info_summary == "./|./"
 	        QStringLiteral("./"),
 	        QStringLiteral("locale/EN.lua"),
 	        QStringLiteral("sounds/"),
-	        QStringLiteral("fonts/special.ttf"),
+	        QString(),
 	        QStringLiteral("worlds/foo/foreground.png"),
 	        QStringLiteral("worlds/foo/background.png"),
 	        QStringLiteral("prefs/qmud.db"),
@@ -1851,12 +1183,12 @@ utils_info_ok = utils_info_summary == "./|./"
 	        .join(QLatin1Char('|'));
 	const QString expectedGetInfo56 =
 	    QMudPluginPathUtils::normalizeSeparators(root.absolutePath()) + QLatin1Char('/');
-	QCOMPARE(luaGlobalString(engine.luaState(), "path_summary"), expected);
-	QVERIFY(luaGlobalBoolean(engine.luaState(), "path_no_backslashes"));
-	QCOMPARE(luaGlobalString(engine.luaState(), "getinfo_56"), expectedGetInfo56);
-	QVERIFY(luaGlobalBoolean(engine.luaState(), "getinfo_56_ok"));
-	QCOMPARE(luaGlobalString(engine.luaState(), "utils_info_summary"), QStringLiteral("./|./"));
-	QVERIFY(luaGlobalBoolean(engine.luaState(), "utils_info_ok"));
+	QCOMPARE(luaGlobalString(engine->luaState(), "path_summary"), expected);
+	QVERIFY(luaGlobalBoolean(engine->luaState(), "path_no_backslashes"));
+	QCOMPARE(luaGlobalString(engine->luaState(), "getinfo_56"), expectedGetInfo56);
+	QVERIFY(luaGlobalBoolean(engine->luaState(), "getinfo_56_ok"));
+	QCOMPARE(luaGlobalString(engine->luaState(), "utils_info_summary"), QStringLiteral("./|./"));
+	QVERIFY(luaGlobalBoolean(engine->luaState(), "utils_info_ok"));
 	QVERIFY(QDir::setCurrent(previousCurrentPath));
 	QVERIFY(root.removeRecursively());
 }
@@ -2081,7 +1413,22 @@ end
 
 void tst_LuaCallbackEngine::workerCallbackBatchCapturesOutputMiniWindowAndSaveStateMutations()
 {
-	WorldRuntime      runtime;
+	WorldRuntime runtime;
+	QStringList  outputTexts;
+	QList<bool>  outputNewLines;
+	QObject::connect(&runtime, &WorldRuntime::outputRequested, &runtime,
+	                 [&](const QString &text, const bool newLine, const bool)
+	                 {
+		                 outputTexts.push_back(text);
+		                 outputNewLines.push_back(newLine);
+	                 });
+	QObject::connect(
+	    &runtime, &WorldRuntime::outputStyledRequested, &runtime,
+	    [&](const QString &text, const QVector<WorldRuntime::StyleSpan> &, const bool newLine, const bool)
+	    {
+		    outputTexts.push_back(text);
+		    outputNewLines.push_back(newLine);
+	    });
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
 	LuaExecutorWorker executor;
 	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
@@ -2128,21 +1475,28 @@ end
 	QCOMPARE(statusResult.stringResult, QStringLiteral("true|true|true|true|true|true"));
 
 	executeDeferredMutations(callbackResult);
-	const RuntimeStubState &state = runtimeStubState(&runtime);
-	QVERIFY(state.outputLines.contains(QStringLiteral("batch-note")));
-	QVERIFY(state.windowNames.contains(QStringLiteral("batch")));
-	QCOMPARE(state.windowInfo.value(QStringLiteral("batch")).value(1).toInt(), 12);
-	QCOMPARE(state.windowInfo.value(QStringLiteral("batch")).value(2).toInt(), 24);
-	QCOMPARE(state.windowInfo.value(QStringLiteral("batch")).value(3).toInt(), 64);
-	QCOMPARE(state.windowInfo.value(QStringLiteral("batch")).value(4).toInt(), 32);
-	QVERIFY(state.hotspotIds.value(QStringLiteral("batch")).contains(QStringLiteral("drag")));
-	QCOMPARE(state.savePluginStateCalls, 1);
+	QVERIFY(outputTexts.contains(QStringLiteral("batch-note")));
+	QVERIFY(runtime.windowList().contains(QStringLiteral("batch")));
+	QCOMPARE(runtime.windowInfo(QStringLiteral("batch"), 1).toInt(), 12);
+	QCOMPARE(runtime.windowInfo(QStringLiteral("batch"), 2).toInt(), 24);
+	QCOMPARE(runtime.windowInfo(QStringLiteral("batch"), 3).toInt(), 64);
+	QCOMPARE(runtime.windowInfo(QStringLiteral("batch"), 4).toInt(), 32);
+	QVERIFY(runtime.windowHotspotList(QStringLiteral("batch")).contains(QStringLiteral("drag")));
 	teardownWorkerEngine(executor, engine);
 }
 
 void tst_LuaCallbackEngine::workerColourOutputMatchesMushclientGroupingAndNewlineSemantics()
 {
-	WorldRuntime      runtime;
+	WorldRuntime runtime;
+	QStringList  outputTexts;
+	QList<bool>  outputNewLines;
+	QObject::connect(
+	    &runtime, &WorldRuntime::outputStyledRequested, &runtime,
+	    [&](const QString &text, const QVector<WorldRuntime::StyleSpan> &, const bool newLine, const bool)
+	    {
+		    outputTexts.push_back(text);
+		    outputNewLines.push_back(newLine);
+	    });
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
 	LuaExecutorWorker executor;
 	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
@@ -2164,17 +1518,31 @@ end
 	dispatchWorkerAndWait(executor, request, result);
 	executeDeferredMutations(result);
 
-	const RuntimeStubState &state = runtimeStubState(&runtime);
-	QCOMPARE(state.outputLines,
+	QCOMPARE(outputTexts,
 	         QStringList({QStringLiteral("note-a"), QStringLiteral("note-b"), QStringLiteral("note-c"),
 	                      QStringLiteral("tell-a"), QStringLiteral("tell-b")}));
-	QCOMPARE(state.outputNewLines, QList<bool>({false, false, true, false, false}));
+	QCOMPARE(outputNewLines, QList<bool>({false, false, true, false, false}));
 	teardownWorkerEngine(executor, engine);
 }
 
 void tst_LuaCallbackEngine::colourTellIgnoresTrailingLuaGsubReturnAndKeepsFollowingNote()
 {
-	WorldRuntime      runtime;
+	WorldRuntime runtime;
+	QStringList  outputTexts;
+	QList<bool>  outputNewLines;
+	QObject::connect(&runtime, &WorldRuntime::outputRequested, &runtime,
+	                 [&](const QString &text, const bool newLine, const bool)
+	                 {
+		                 outputTexts.push_back(text);
+		                 outputNewLines.push_back(newLine);
+	                 });
+	QObject::connect(
+	    &runtime, &WorldRuntime::outputStyledRequested, &runtime,
+	    [&](const QString &text, const QVector<WorldRuntime::StyleSpan> &, const bool newLine, const bool)
+	    {
+		    outputTexts.push_back(text);
+		    outputNewLines.push_back(newLine);
+	    });
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
 	LuaExecutorWorker executor;
 	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
@@ -2195,20 +1563,25 @@ end
 	dispatchWorkerAndWait(executor, request, result);
 	executeDeferredMutations(result);
 
-	const RuntimeStubState &state = runtimeStubState(&runtime);
-	QCOMPARE(state.outputLines,
+	QCOMPARE(outputTexts,
 	         QStringList({QStringLiteral("You made "), QStringLiteral("10,000"), QStringLiteral(" gold!")}));
-	QCOMPARE(state.outputNewLines, QList<bool>({false, false, true}));
-	QCOMPARE(logicalOutputLinesFromEntries(state.lineEntries),
-	         QStringList({QStringLiteral("You made 10,000 gold!")}));
+	QCOMPARE(outputNewLines, QList<bool>({false, false, true}));
 	teardownWorkerEngine(executor, engine);
 }
 
 void tst_LuaCallbackEngine::executeScriptNoteUsesRuntimeNoteColour()
 {
-	WorldRuntime runtime;
-	auto        &state  = runtimeStubState(&runtime);
-	auto         engine = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime                     runtime;
+	QString                          outputText;
+	QVector<WorldRuntime::StyleSpan> outputSpans;
+	QObject::connect(
+	    &runtime, &WorldRuntime::outputStyledRequested, &runtime,
+	    [&](const QString &text, const QVector<WorldRuntime::StyleSpan> &spans, const bool, const bool)
+	    {
+		    outputText  = text;
+		    outputSpans = spans;
+	    });
+	auto engine = QSharedPointer<LuaCallbackEngine>::create();
 	engine->setWorldRuntime(&runtime);
 	setEngineScript(*engine, QString());
 
@@ -2233,18 +1606,15 @@ void tst_LuaCallbackEngine::executeScriptNoteUsesRuntimeNoteColour()
 	QVERIFY(result.boolResult);
 	executeDeferredMutations(result);
 
-	QCOMPARE(state.lineEntries.size(), 1);
-	const WorldRuntime::LineEntry &entry = state.lineEntries.constFirst();
-	QCOMPARE(entry.text, QStringLiteral("test"));
-	QVERIFY(!entry.spans.isEmpty());
-	QCOMPARE(entry.spans.constFirst().fore, QColor(0, 255, 255));
-	QCOMPARE(entry.spans.constFirst().back, QColor(Qt::black));
+	QCOMPARE(outputText, QStringLiteral("test"));
+	QVERIFY(!outputSpans.isEmpty());
+	QCOMPARE(outputSpans.constFirst().fore, QColor(0, 255, 255));
+	QCOMPARE(outputSpans.constFirst().back, QColor(Qt::black));
 }
 
 void tst_LuaCallbackEngine::selfPluginInfoMetadataFallsThroughToRuntime()
 {
 	WorldRuntime         runtime;
-	auto                &state = runtimeStubState(&runtime);
 
 	WorldRuntime::Plugin plugin;
 	plugin.attributes.insert(QStringLiteral("id"), QStringLiteral("Plugin.Id"));
@@ -2256,7 +1626,7 @@ void tst_LuaCallbackEngine::selfPluginInfoMetadataFallsThroughToRuntime()
 	plugin.script      = QStringLiteral("Runtime Script");
 	plugin.source      = QStringLiteral("worlds/plugins/runtime_plugin.xml");
 	plugin.directory   = QStringLiteral("worlds/plugins/");
-	state.plugins.push_back(plugin);
+	runtime.pluginsMutable().push_back(plugin);
 
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
 	LuaExecutorWorker executor;
@@ -2409,8 +1779,7 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryIsAvailableWithoutShadowPlugin()
 	QVERIFY(soundFile.open(QIODevice::WriteOnly));
 	soundFile.write("RIFF");
 	soundFile.close();
-	runtimeStubState(&runtime).startupDirectory = soundRoot.path();
-	runtimeStubState(&runtime).soundStatusByBuffer.insert(9, 1);
+	runtime.setStartupDirectory(soundRoot.path());
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
 	LuaExecutorWorker executor;
 	const QString     shimId = QMudNativePluginRegistry::mushReaderPluginId();
@@ -2456,7 +1825,6 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryIsAvailableWithoutShadowPlugin()
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("MushReader|false|LuaAudio|true|100|1|false"));
-	QCOMPARE(runtimeStubState(&runtime).soundStatusByBuffer.value(9), 1);
 	QVERIFY(runtime.pluginIdList().contains(shimId, Qt::CaseInsensitive));
 	QVERIFY(
 	    runtime.pluginIdList().contains(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive));
@@ -2477,7 +1845,7 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QVERIFY(soundFile.open(QIODevice::WriteOnly));
 	soundFile.write("RIFF");
 	soundFile.close();
-	runtimeStubState(&runtime).startupDirectory = soundRoot.path();
+	runtime.setStartupDirectory(soundRoot.path());
 
 	const QMudNativePluginRegistry::NativeCallResult nativeDelayed = QMudNativePluginRegistry::callRoutine(
 	    &runtime, QMudNativePluginRegistry::luaAudioPluginId(), QStringLiteral("playDelay"),
@@ -2549,25 +1917,6 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	teardownWorkerEngine(executor, pendingEngine);
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 
-	auto loopEngine = QSharedPointer<LuaCallbackEngine>::create();
-	initializeWorkerEngine(executor, loopEngine, QStringLiteral(R"lua(
-	function OnPluginEnable()
-	end
-	)lua"),
-	                       &runtime);
-	QMudNativePluginRegistry::LuaAudioRuntimeBufferState loopState;
-	loopState.volume   = 100.0;
-	loopState.loop     = true;
-	loopState.ownerKey = loopEngine.data();
-	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 1, loopState);
-	QCOMPARE(runtime.playSound(1, QStringLiteral("coin.wav"), true, 0.0, 0.0), eOK);
-	QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).size(), 1);
-	QCOMPARE(runtimeStubState(&runtime).soundStatusByBuffer.value(1), 2);
-
-	teardownWorkerEngine(executor, loopEngine);
-	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
-	QCOMPARE(runtimeStubState(&runtime).soundStatusByBuffer.value(1, -2), -2);
-
 	auto timedEngine = QSharedPointer<LuaCallbackEngine>::create();
 	initializeWorkerEngine(executor, timedEngine, QStringLiteral(R"lua(
 	function OnPluginEnable()
@@ -2598,8 +1947,6 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	fadeState.volume   = 100.0;
 	fadeState.ownerKey = timedEngine.data();
 	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 2, fadeState);
-	runtimeStubState(&runtime).soundStatusByBuffer.insert(1, 1);
-	runtimeStubState(&runtime).soundStatusByBuffer.insert(2, 1);
 	auto timedSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 	timedSnapshot->soundStatusByBuffer.insert(1, 1);
 	timedSnapshot->soundStatusByBuffer.insert(2, 1);
@@ -2620,7 +1967,7 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QCOMPARE(timedState.volume, 40.0);
 	QCOMPARE(timedState.pan, 7.0);
 	QCOMPARE(timedState.pitch, 5.0);
-	QCOMPARE(runtimeStubState(&runtime).soundStatusByBuffer.value(2, -2), -2);
+	QVERIFY(runtime.soundStatus(2) <= 0);
 	teardownWorkerEngine(executor, timedEngine);
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 }
@@ -2640,7 +1987,7 @@ void tst_LuaCallbackEngine::blacklistedPluginsAreHiddenFromPluginApis()
 	plugin.attributes.insert(QStringLiteral("id"), blacklistedId);
 	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Automatic Backup"));
 	plugin.enabled = true;
-	runtimeStubState(&runtime).plugins.push_back(plugin);
+	runtime.pluginsMutable().push_back(plugin);
 
 	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
 	function OnPluginEnable()
@@ -2687,13 +2034,12 @@ end
 	                       &runtime);
 
 	const QString           prompt = QStringLiteral("[Library][SAFE]<2084hp 1806sp 1695st> ");
-	RuntimeStubState       &state  = runtimeStubState(&runtime);
 	WorldRuntime::LineEntry promptEntry;
 	promptEntry.text       = prompt;
 	promptEntry.flags      = WorldRuntime::LineOutput;
 	promptEntry.hardReturn = true;
 	promptEntry.lineNumber = 42;
-	state.lineEntries.push_back(promptEntry);
+	runtime.replaceOutputLines({promptEntry});
 
 	LuaBatchDispatchRequest request;
 	request.engines        = {engine};
@@ -2715,8 +2061,8 @@ end
 	QVERIFY(!result.deferredRuntimeMutationBatches.isEmpty());
 	executeDeferredMutations(result);
 
-	const QStringList logicalLines = logicalOutputLinesFromEntries(state.lineEntries);
-	QCOMPARE(logicalLines, QStringList({QStringLiteral("[435, 1226]"), prompt}));
+	const QVector<WorldRuntime::LineEntry> &lines = runtime.lines();
+	QCOMPARE(logicalOutputLinesFromEntries(lines), QStringList({QStringLiteral("[435, 1226]"), prompt}));
 	teardownWorkerEngine(executor, engine);
 }
 
@@ -2858,15 +2204,13 @@ end
 
 	const auto makeSnapshot = [&runtime](const int mouseX, const int mouseY)
 	{
-		const RuntimeStubState    &state    = runtimeStubState(&runtime);
-		const QString              windowId = QStringLiteral("win");
-		const QHash<int, QVariant> info     = state.windowInfo.value(windowId);
-		const int                  left     = info.value(1).toInt();
-		const int                  top      = info.value(2).toInt();
-		const int                  width    = info.value(3).toInt();
-		const int                  height   = info.value(4).toInt();
+		const QString windowId = QStringLiteral("win");
+		const int     left     = runtime.windowInfo(windowId, 1).toInt();
+		const int     top      = runtime.windowInfo(windowId, 2).toInt();
+		const int     width    = runtime.windowInfo(windowId, 3).toInt();
+		const int     height   = runtime.windowInfo(windowId, 4).toInt();
 
-		auto                       snapshot   = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+		auto          snapshot                = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 		snapshot->hasCommandUiSnapshot        = true;
 		snapshot->commandUiHasView            = true;
 		snapshot->commandUiHasFrameData       = true;
@@ -2886,8 +2230,8 @@ end
 		windowInfo.locationY                   = top;
 		windowInfo.width                       = width;
 		windowInfo.height                      = height;
-		windowInfo.position                    = info.value(7).toInt();
-		windowInfo.flags                       = info.value(8).toInt();
+		windowInfo.position                    = runtime.windowInfo(windowId, 7).toInt();
+		windowInfo.flags                       = runtime.windowInfo(windowId, 8).toInt();
 		windowInfo.rectLeft                    = left;
 		windowInfo.rectTop                     = top;
 		windowInfo.rectRight                   = left + width;
@@ -2915,8 +2259,8 @@ end
 	QVERIFY(moveResult.boolResultValid);
 	QVERIFY(!moveResult.boolResult);
 	executeDeferredMutations(moveResult);
-	QCOMPARE(runtimeStubState(&runtime).windowInfo.value(QStringLiteral("win")).value(3).toInt(), 240);
-	QCOMPARE(runtimeStubState(&runtime).windowInfo.value(QStringLiteral("win")).value(4).toInt(), 160);
+	QCOMPARE(runtime.windowInfo(QStringLiteral("win"), 3).toInt(), 240);
+	QCOMPARE(runtime.windowInfo(QStringLiteral("win"), 4).toInt(), 160);
 
 	request.functionName                 = QStringLiteral("OnResizeRelease");
 	request.miniWindowSnapshotArg        = makeSnapshot(145, 165);

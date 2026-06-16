@@ -9,6 +9,7 @@
 #include "dialogs/WorldPreferencesDialog.h"
 #include "AppController.h"
 #include "FileExtensions.h"
+#include "FontUtils.h"
 #include "StringUtils.h"
 #include "Version.h"
 #include "WorldDocument.h"
@@ -34,7 +35,6 @@
 #include <QEvent>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFontDialog>
 #include <QFontMetrics>
 #include <QFormLayout>
 #include <QFrame>
@@ -5163,7 +5163,7 @@ void WorldPreferencesDialog::buildUi()
 		        if (m_outputFontWeight > 0)
 			        current.setWeight(WorldView::mapFontWeight(m_outputFontWeight));
 		        bool        ok   = false;
-		        const QFont font = QFontDialog::getFont(&ok, current, this, QStringLiteral("Output font"));
+		        const QFont font = qmudGetFont(&ok, current, this, QStringLiteral("Output font"));
 		        if (!ok)
 			        return;
 		        if (m_outputFontName)
@@ -5757,7 +5757,7 @@ void WorldPreferencesDialog::buildUi()
 			        current.setWeight(WorldView::mapFontWeight(m_inputFontWeight));
 		        current.setItalic(m_inputFontItalic);
 		        bool        ok   = false;
-		        const QFont font = QFontDialog::getFont(&ok, current, this, QStringLiteral("Input font"));
+		        const QFont font = qmudGetFont(&ok, current, this, QStringLiteral("Input font"));
 		        if (!ok)
 			        return;
 		        if (m_inputFontName)

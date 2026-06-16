@@ -66,7 +66,6 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontDatabase>
-#include <QFontDialog>
 #include <QFontMetrics>
 #include <QGuiApplication>
 #include <QHostInfo>
@@ -10575,26 +10574,6 @@ static int yieldModalStringResult(lua_State *L, const LuaCallbackEngine *engine,
 	return lua_yieldk(L, 0, 0, continuation);
 }
 
-#ifdef QMUD_LUACALLBACKENGINE_TEST_MINIMAL_BINDINGS
-static int luaTestYieldModalNumber(lua_State *L)
-{
-	const auto *engine = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	LuaPendingModalStringRequest request;
-	request.guiCallable    = []() -> QString { return {}; };
-	request.resultCallback = [](quint64, const QString &) {};
-	return yieldModalStringResult(L, engine, std::move(request), luaModalNumberContinuation);
-}
-
-static int luaTestYieldModalString(lua_State *L)
-{
-	const auto *engine = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	LuaPendingModalStringRequest request;
-	request.guiCallable    = []() -> QString { return {}; };
-	request.resultCallback = [](quint64, const QString &) {};
-	return yieldModalStringResult(L, engine, std::move(request));
-}
-#endif
-
 #ifndef NDEBUG
 static QString qmudMmStartupDiagEngineLabel(const LuaCallbackEngine *engine)
 {
@@ -20527,7 +20506,7 @@ static int luaPlaySound(lua_State *L)
 	const double  pan      = luaL_optnumber(L, 5, 0.0);
 	if (activeCallbackContextConst(engine))
 	{
-#ifdef QMUD_ENABLE_QSOUND
+#if QMUD_ENABLE_SOUND
 		if (buffer < 0 || buffer > WorldRuntime::kMaxSoundBuffers)
 		{
 			lua_pushnumber(L, eBadParameter);
@@ -20588,7 +20567,7 @@ static int luaPlaySoundMemory(lua_State *L)
 	const QByteArray payload(data, static_cast<int>(length));
 	if (activeCallbackContextConst(engine))
 	{
-#ifdef QMUD_ENABLE_QSOUND
+#if QMUD_ENABLE_SOUND
 		if (buffer < 0 || buffer > WorldRuntime::kMaxSoundBuffers || payload.isEmpty())
 		{
 			lua_pushnumber(L, eBadParameter);
@@ -20636,7 +20615,7 @@ static int luaStopSound(lua_State *L)
 	const int buffer = static_cast<int>(luaL_optnumber(L, 1, 0));
 	if (activeCallbackContextConst(engine))
 	{
-#ifdef QMUD_ENABLE_QSOUND
+#if QMUD_ENABLE_SOUND
 		if (buffer < 0 || buffer > WorldRuntime::kMaxSoundBuffers)
 		{
 			lua_pushnumber(L, eBadParameter);
@@ -20792,7 +20771,7 @@ static int playLuaAudioBuffer(const LuaCallbackEngine *engine, WorldRuntime *run
 	int result = eCannotPlaySound;
 	if (activeCallbackContextConst(engine))
 	{
-#ifdef QMUD_ENABLE_QSOUND
+#if QMUD_ENABLE_SOUND
 		if (callbackScopeSyncBridgeForbidden())
 		{
 			enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime, [play](WorldRuntime &targetRuntime)
@@ -22916,7 +22895,7 @@ static int luaSound(lua_State *L)
 	}
 	if (activeCallbackContextConst(engine))
 	{
-#ifdef QMUD_ENABLE_QSOUND
+#if QMUD_ENABLE_SOUND
 		if (callbackScopeSyncBridgeForbidden())
 		{
 			return enqueueRuntimeThreadAsyncStatusResult(
@@ -25999,7 +25978,7 @@ static int luaUtilsFontPicker(lua_State *L)
 	{
 		FontPickerResult pickerResult;
 		bool             ok = false;
-		pickerResult.font   = QFontDialog::getFont(&ok, initialFont, frame, QStringLiteral("Select Font"));
+		pickerResult.font   = qmudGetFont(&ok, initialFont, frame, QStringLiteral("Select Font"));
 		if (!ok)
 			return pickerResult;
 		pickerResult.accepted = true;
@@ -27881,15 +27860,6 @@ static MultiListBoxRequest parseUtilsMultiListBoxRequest(lua_State *L)
 	}
 	return request;
 }
-
-#ifdef QMUD_LUACALLBACKENGINE_TEST_MINIMAL_BINDINGS
-static int luaTestUtilsMultiListBox(lua_State *L)
-{
-	(void)parseUtilsMultiListBoxRequest(L);
-	lua_pushnil(L);
-	return 1;
-}
-#endif
 
 static int luaUtilsMultiListBox(lua_State *L)
 {
@@ -44620,393 +44590,12 @@ static void extendLuaPackagePath(lua_State *L, const QString &appDir)
 }
 #endif
 
-#ifdef QMUD_LUACALLBACKENGINE_TEST_MINIMAL_BINDINGS
-static int luaTestGetInfo(lua_State *L)
-{
-	auto *engine = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	if (!engine)
-	{
-		lua_pushnil(L);
-		return 1;
-	}
-	WorldRuntime *runtime  = engine->worldRuntimeForBridgedCall();
-	const int     infoType = static_cast<int>(luaL_checkinteger(L, 1));
-	if (infoType == 56)
-	{
-		pushLuaString(L, qmudHomeDirectoryForGetInfo56(engine));
-		return 1;
-	}
-	if (!runtime)
-	{
-		lua_pushnil(L);
-		return 1;
-	}
-	if (infoType == 86)
-	{
-		if (const auto *snapshot = engine->currentDispatchMiniWindowSnapshot();
-		    snapshot && snapshot->commandUiHasFrameData &&
-		    snapshot->commandUiValues.value(QStringLiteral("selectedWordResolved")).toBool())
-		{
-			const QByteArray bytes =
-			    snapshot->commandUiValues.value(QStringLiteral("selectedWord")).toString().toLocal8Bit();
-			lua_pushlstring(L, bytes.constData(), bytes.size());
-			return 1;
-		}
-		pushLuaUtf8String(L, "");
-		return 1;
-	}
-	if (infoType >= 290 && infoType <= 293)
-	{
-		const auto *snapshot = engine->currentDispatchMiniWindowSnapshot();
-		if (!snapshot)
-		{
-			lua_pushnumber(L, 0);
-			return 1;
-		}
-		const QString key = [infoType]()
-		{
-			switch (infoType)
-			{
-			case 290:
-				return QStringLiteral("outputTextRectLeft");
-			case 291:
-				return QStringLiteral("outputTextRectTop");
-			case 292:
-				return QStringLiteral("outputTextRectRight");
-			default:
-				return QStringLiteral("outputTextRectBottom");
-			}
-		}();
-		lua_pushnumber(L, snapshot->commandUiValues.value(key).toInt());
-		return 1;
-	}
-	if (infoType == 283 || infoType == 284)
-	{
-		const auto *snapshot = engine->currentDispatchMiniWindowSnapshot();
-		if (!snapshot)
-		{
-			lua_pushnumber(L, -1);
-			return 1;
-		}
-		const QString key = (infoType == 283) ? QStringLiteral("lastMouseX") : QStringLiteral("lastMouseY");
-		lua_pushnumber(L, snapshot->commandUiValues.value(key, -1).toInt());
-		return 1;
-	}
-
-	const auto pushRelative = [L, engine](const QString &path, const bool trailingSlash)
-	{
-		pushLuaString(L, qmudHomeRelativePathForGetInfo(engine, path, trailingSlash));
-		return 1;
-	};
-	const auto pushAttribute = [&](const QString &key, const bool trailingSlash)
-	{ return pushRelative(runtime->worldAttributeValue(key), trailingSlash); };
-
-	switch (infoType)
-	{
-	case 9:
-		return pushAttribute(QStringLiteral("new_activity_sound"), false);
-	case 10:
-		return pushAttribute(QStringLiteral("script_editor"), false);
-	case 35:
-		return pushAttribute(QStringLiteral("script_filename"), false);
-	case 40:
-		return pushAttribute(QStringLiteral("auto_log_file_name"), false);
-	case 50:
-		return pushAttribute(QStringLiteral("beep_sound"), false);
-	case 59:
-	case 64:
-		return pushRelative(qmudHomeForLuaFileApi(engine), true);
-	case 78:
-		return pushAttribute(QStringLiteral("foreground_image"), false);
-	case 79:
-		return pushAttribute(QStringLiteral("background_image"), false);
-	default:
-		break;
-	}
-
-	const WorldRuntime::RuntimeCountersSnapshot snapshot = runtime->runtimeCountersSnapshot(true);
-	switch (infoType)
-	{
-	case 51:
-		return pushRelative(snapshot.logFileName, false);
-	case 54:
-		return pushRelative(snapshot.worldFilePath, false);
-	case 57:
-		return pushRelative(snapshot.defaultWorldDirectory, true);
-	case 58:
-		return pushRelative(snapshot.defaultLogDirectory, true);
-	case 60:
-		return pushRelative(snapshot.pluginsDirectory, true);
-	case 66:
-	case 68:
-		return pushRelative(snapshot.startupDirectory, true);
-	case 67:
-		return pushRelative(
-		    QFileInfo(QMudPluginPathUtils::normalizeSeparators(snapshot.worldFilePath)).path(), true);
-	case 69:
-		return pushRelative(snapshot.translatorFile, false);
-	case 74:
-		return pushRelative(QDir(snapshot.startupDirectory).filePath(QStringLiteral("sounds")), true);
-	case 76:
-		return pushRelative(snapshot.firstSpecialFontPath, false);
-	case 82:
-		return pushRelative(snapshot.preferencesDatabaseName, false);
-	case 84:
-		return pushRelative(snapshot.fileBrowsingDirectory, true);
-	case 85:
-		return pushRelative(snapshot.stateFilesDirectory, true);
-	default:
-		lua_pushnil(L);
-		return 1;
-	}
-}
-
-static int luaTestNote(lua_State *L)
-{
-	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
-	if (!runtime)
-		return 0;
-	const QString text = QString::fromUtf8(luaL_optstring(L, 1, ""));
-	enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime, [text](WorldRuntime &targetRuntime)
-	                                             { targetRuntime.outputText(text, true, true); });
-	return 0;
-}
-
-static int luaTestSaveState(lua_State *L)
-{
-	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
-	if (!runtime)
-	{
-		lua_pushnumber(L, ePluginCouldNotSaveState);
-		return 1;
-	}
-	const QString pluginId = engine->pluginId();
-	enqueueRuntimeThreadDeferredMutationNoResult(
-	    engine, runtime, [pluginId](WorldRuntime &targetRuntime)
-	    { static_cast<void>(targetRuntime.savePluginState(pluginId, true)); });
-	lua_pushnumber(L, eOK);
-	lua_pushnumber(L, 1);
-	return 2;
-}
-
-static int luaTestWindowCreate(lua_State *L)
-{
-	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
-	if (!runtime)
-	{
-		lua_pushnumber(L, eNoSuchWindow);
-		return 1;
-	}
-	const QString name     = QString::fromUtf8(luaL_checkstring(L, 1));
-	const int     left     = static_cast<int>(luaL_checkinteger(L, 2));
-	const int     top      = static_cast<int>(luaL_checkinteger(L, 3));
-	const int     width    = static_cast<int>(luaL_checkinteger(L, 4));
-	const int     height   = static_cast<int>(luaL_checkinteger(L, 5));
-	const int     position = static_cast<int>(luaL_checkinteger(L, 6));
-	const int     flags    = static_cast<int>(luaL_checkinteger(L, 7));
-	const QString pluginId = engine->pluginId();
-	enqueueRuntimeThreadDeferredMutationNoResult(
-	    engine, runtime,
-	    [name, left, top, width, height, position, flags, pluginId](WorldRuntime &targetRuntime)
-	    {
-		    static_cast<void>(targetRuntime.windowCreate(name, left, top, width, height, position, flags,
-		                                                 QColor(), pluginId));
-	    });
-	lua_pushnumber(L, eOK);
-	return 1;
-}
-
-static int luaTestWindowPosition(lua_State *L)
-{
-	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
-	if (!runtime)
-	{
-		lua_pushnumber(L, eNoSuchWindow);
-		return 1;
-	}
-	const QString name     = QString::fromUtf8(luaL_checkstring(L, 1));
-	const int     left     = static_cast<int>(luaL_checkinteger(L, 2));
-	const int     top      = static_cast<int>(luaL_checkinteger(L, 3));
-	const int     position = static_cast<int>(luaL_checkinteger(L, 4));
-	const int     flags    = static_cast<int>(luaL_checkinteger(L, 5));
-	enqueueRuntimeThreadDeferredMutationNoResult(
-	    engine, runtime, [name, left, top, position, flags](WorldRuntime &targetRuntime)
-	    { static_cast<void>(targetRuntime.windowPosition(name, left, top, position, flags)); });
-	lua_pushnumber(L, eOK);
-	return 1;
-}
-
-static int luaTestWindowResize(lua_State *L)
-{
-	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
-	if (!runtime)
-	{
-		lua_pushnumber(L, eNoSuchWindow);
-		return 1;
-	}
-	const QString name   = QString::fromUtf8(luaL_checkstring(L, 1));
-	const int     width  = static_cast<int>(luaL_checkinteger(L, 2));
-	const int     height = static_cast<int>(luaL_checkinteger(L, 3));
-	const long    colour = static_cast<long>(luaL_optinteger(L, 4, -1));
-	enqueueRuntimeThreadDeferredMutationNoResult(
-	    engine, runtime, [name, width, height, colour](WorldRuntime &targetRuntime)
-	    { static_cast<void>(targetRuntime.windowResize(name, width, height, colour)); });
-	lua_pushnumber(L, eOK);
-	return 1;
-}
-
-static int luaTestWindowAddHotspot(lua_State *L)
-{
-	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
-	if (!runtime)
-	{
-		lua_pushnumber(L, eNoSuchWindow);
-		return 1;
-	}
-	const QString name      = QString::fromUtf8(luaL_checkstring(L, 1));
-	const QString hotspotId = QString::fromUtf8(luaL_checkstring(L, 2));
-	const int     left      = static_cast<int>(luaL_checkinteger(L, 3));
-	const int     top       = static_cast<int>(luaL_checkinteger(L, 4));
-	const int     right     = static_cast<int>(luaL_checkinteger(L, 5));
-	const int     bottom    = static_cast<int>(luaL_checkinteger(L, 6));
-	const QString pluginId  = engine->pluginId();
-	enqueueRuntimeThreadDeferredMutationNoResult(
-	    engine, runtime,
-	    [name, hotspotId, left, top, right, bottom, pluginId](WorldRuntime &targetRuntime)
-	    {
-		    static_cast<void>(targetRuntime.windowAddHotspot(name, hotspotId, left, top, right, bottom,
-		                                                     QString(), QString(), QString(), QString(),
-		                                                     QString(), QString(), 0, 0, pluginId));
-	    });
-	lua_pushnumber(L, eOK);
-	return 1;
-}
-
-static int luaTestWindowList(lua_State *L)
-{
-	auto *engine = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	if (const auto *snapshot = engine ? engine->currentDispatchMiniWindowSnapshot() : nullptr)
-		return pushOptionalStringList(L, snapshot->windowNames);
-	return pushOptionalStringList(L, QStringList());
-}
-
-static int luaTestWindowInfo(lua_State *L)
-{
-	auto         *engine   = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	const QString name     = QString::fromUtf8(luaL_checkstring(L, 1));
-	const int     info     = static_cast<int>(luaL_checkinteger(L, 2));
-	const auto   *snapshot = engine ? engine->currentDispatchMiniWindowSnapshot() : nullptr;
-	const auto    window   = snapshot ? snapshot->windowInfoByWindow.value(name)
-	                                  : LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot{};
-	QVariant      value;
-	switch (info)
-	{
-	case 1:
-		value = window.locationX;
-		break;
-	case 2:
-		value = window.locationY;
-		break;
-	case 3:
-		value = window.width;
-		break;
-	case 4:
-		value = window.height;
-		break;
-	case 14:
-		value = window.lastMouseX;
-		break;
-	case 15:
-		value = window.lastMouseY;
-		break;
-	case 16:
-		value = window.lastMouseUpdate;
-		break;
-	case 17:
-		value = window.clientMouseX;
-		break;
-	case 18:
-		value = window.clientMouseY;
-		break;
-	default:
-		value = QVariant();
-		break;
-	}
-	pushVariant(L, value);
-	return 1;
-}
-
-static int luaTestWindowHotspotList(lua_State *L)
-{
-	auto         *engine = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	const QString name   = QString::fromUtf8(luaL_checkstring(L, 1));
-	if (const auto *snapshot = engine ? engine->currentDispatchMiniWindowSnapshot() : nullptr)
-		return pushOptionalStringList(L, snapshot->hotspotIdsByWindow.value(name));
-	return pushOptionalStringList(L, QStringList());
-}
-#endif
-
 void LuaCallbackEngine::registerWorldBindings()
 {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 	if (!m_state)
 		return;
 
-#ifdef QMUD_LUACALLBACKENGINE_TEST_MINIMAL_BINDINGS
-	auto registerWorldFn = [this](const char *name, const lua_CFunction fn)
-	{
-		lua_pushlightuserdata(m_state, this);
-		lua_pushcclosure(m_state, fn, 1);
-		lua_setglobal(m_state, name);
-	};
-	static const LuaBindingEntry kMinimalWorldBindings[] = {
-	    {"ColourNote",            luaColourNote           },
-	    {"ColourTell",            luaColourTell           },
-	    {"GetInfo",               luaTestGetInfo          },
-	    {"GetPluginID",           luaGetPluginID          },
-	    {"GetPluginInfo",         luaGetPluginInfo        },
-	    {"GetPluginName",         luaGetPluginName        },
-	    {"GetPluginVariable",     luaGetPluginVariable    },
-	    {"GetPluginVariableList", luaGetPluginVariableList},
-	    {"Note",	              luaNote                 },
-	    {"SaveState",             luaTestSaveState        },
-	    {"Tell",	              luaTell                 },
-	    {"TestYieldModalNumber",  luaTestYieldModalNumber },
-	    {"TestYieldModalString",  luaTestYieldModalString },
-	    {"WindowAddHotspot",      luaTestWindowAddHotspot },
-	    {"WindowCreate",          luaTestWindowCreate     },
-	    {"WindowHotspotList",     luaTestWindowHotspotList},
-	    {"WindowInfo",            luaTestWindowInfo       },
-	    {"WindowList",            luaTestWindowList       },
-	    {"WindowPosition",        luaTestWindowPosition   },
-	    {"WindowResize",          luaTestWindowResize     },
-	    {nullptr,                 nullptr                 },
-	};
-	for (const LuaBindingEntry *entry = kMinimalWorldBindings; entry->name != nullptr; ++entry)
-		registerWorldFn(entry->name, entry->function);
-	registerAudioLibrary(m_state, this);
-	lua_newtable(m_state);
-	lua_pushlightuserdata(m_state, this);
-	lua_pushcclosure(m_state, luaUtilsInfo, 1);
-	lua_setfield(m_state, -2, "info");
-	lua_pushlightuserdata(m_state, this);
-	lua_pushcclosure(m_state, luaTestUtilsMultiListBox, 1);
-	lua_setfield(m_state, -2, "multilistbox");
-	lua_pushlightuserdata(m_state, this);
-	lua_pushcclosure(m_state, luaUtilsReadDir, 1);
-	lua_setfield(m_state, -2, "readdir");
-	lua_setglobal(m_state, "utils");
-	lua_pushnumber(m_state, eOK);
-	lua_setglobal(m_state, "eOK");
-	m_worldBindingsReady = true;
-	return;
-#else
 	registerErrorDescriptions(m_state);
 	registerColourNames(m_state);
 	registerExtendedColours(m_state);
@@ -45593,7 +45182,6 @@ void LuaCallbackEngine::registerWorldBindings()
 	registerCheckFunction(m_state);
 
 	m_worldBindingsReady = true;
-#endif
 #endif
 }
 

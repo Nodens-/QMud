@@ -13,6 +13,7 @@
 #include <QString>
 
 class QFont;
+class QWidget;
 
 /**
  * @brief Applies fallback monospace family to font when needed.
@@ -27,6 +28,20 @@ void    qmudApplyMonospaceFallback(QFont &font, const QString &preferredFamily =
  * @return Selected monospace font.
  */
 QFont   qmudPreferredMonospaceFont(const QString &preferredFamily = QString(), int pointSize = 0);
+/**
+ * @brief Returns whether QMud uses the Qt font dialog instead of the native platform dialog.
+ * @return `true` when QMud intentionally uses the Qt font dialog.
+ */
+bool    qmudFontDialogUsesQtDialog();
+/**
+ * @brief Opens QMud's standard font picker with platform-correct dialog options.
+ * @param ok Receives whether the user accepted the dialog.
+ * @param initial Initial font selection.
+ * @param parent Parent widget for the dialog.
+ * @param title Dialog title.
+ * @return Chosen font when accepted, otherwise an undefined dialog result.
+ */
+QFont   qmudGetFont(bool *ok, const QFont &initial, QWidget *parent, const QString &title);
 /**
  * @brief Maps Windows charset id to Qt writing system.
  * @param charset Windows charset id.
