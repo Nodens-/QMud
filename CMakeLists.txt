@@ -190,6 +190,7 @@ set(QMUD_SOURCES
         helpers/HyperlinkActionUtils.cpp
         helpers/NoteColourUtils.cpp
         helpers/WorldCommandProcessorUtils.cpp
+        helpers/SoundFileRoutingUtils.cpp
         helpers/LuaExecutionUtils.cpp
         helpers/LuaModalDialogUtils.cpp
         helpers/AccessibleTextUtils.cpp
@@ -283,6 +284,7 @@ set(QMUD_HEADERS
         helpers/NoteColourUtils.h
         CommandMappingTypes.h
         helpers/WorldCommandProcessorUtils.h
+        helpers/SoundFileRoutingUtils.h
         ErrorDescriptions.h
         InfoTypesMetadata.h
         InfoTypeData.inc

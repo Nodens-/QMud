@@ -52,6 +52,7 @@
 #include "helpers/NoteColourUtils.h"
 #include "helpers/OutputWrapUtils.h"
 #include "helpers/PluginPathUtils.h"
+#include "helpers/SoundFileRoutingUtils.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QApplication>
@@ -98,6 +99,8 @@
 #include <QtSql/QSqlError>
 #include <QtSql/QSqlRecord>
 #if QMUD_ENABLE_SOUND
+#include <QAudioOutput>
+#include <QMediaPlayer>
 #include <QSoundEffect>
 #include <QTemporaryFile>
 #endif
@@ -4326,19 +4329,7 @@ WorldRuntime::~WorldRuntime()
 
 #if QMUD_ENABLE_SOUND
 	for (SoundBuffer &buffer : m_soundBuffers)
-	{
-		if (buffer.effect)
-		{
-			buffer.effect->stop();
-			delete buffer.effect;
-			buffer.effect = nullptr;
-		}
-		if (buffer.tempFile)
-		{
-			delete buffer.tempFile;
-			buffer.tempFile = nullptr;
-		}
-	}
+		clearSoundBuffer(buffer);
 #endif
 
 	for (int const fontId : std::as_const(m_specialFontIds))
@@ -10781,6 +10772,50 @@ static double normalizeSoundVolume(double volume)
 	return qBound(0.0, scaled, 1.0);
 }
 
+bool WorldRuntime::soundBufferHasBackend(const SoundBuffer &entry)
+{
+	return entry.effect || entry.player;
+}
+
+bool WorldRuntime::soundBufferIsPlaying(const SoundBuffer &entry)
+{
+	if (entry.effect)
+		return entry.effect->isPlaying();
+	if (entry.player)
+		return entry.player->playbackState() == QMediaPlayer::PlayingState;
+	return false;
+}
+
+void WorldRuntime::clearSoundBuffer(SoundBuffer &entry)
+{
+	if (entry.effect)
+	{
+		entry.effect->stop();
+		delete entry.effect;
+		entry.effect = nullptr;
+	}
+	if (entry.player)
+	{
+		entry.player->stop();
+		delete entry.player;
+		entry.player      = nullptr;
+		entry.audioOutput = nullptr;
+	}
+	if (entry.tempFile)
+	{
+		delete entry.tempFile;
+		entry.tempFile = nullptr;
+	}
+	entry.looping = false;
+	entry.volume  = 1.0;
+	entry.pan     = 0.0;
+}
+
+bool WorldRuntime::shouldUseMediaPlayerForSoundFile(const QString &fileName)
+{
+	return soundFilePlaybackBackendForFile(fileName) == SoundFilePlaybackBackend::QMediaPlayer;
+}
+
 int WorldRuntime::playSound(int buffer, const QString &fileName, bool loop, double volume, double pan)
 {
 	if (QThread::currentThread() != thread())
@@ -10817,15 +10852,22 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 	if (buffer >= 1 && buffer <= kMaxSoundBuffers && fileName.isEmpty())
 	{
 		SoundBuffer &entry = m_soundBuffers[buffer - 1];
-		if (!entry.effect)
+		if (!soundBufferHasBackend(entry))
 			return eBadParameter;
-		if (!entry.effect->isPlaying())
+		if (!soundBufferIsPlaying(entry))
 			return eCannotPlaySound;
 		entry.looping = loop;
 		entry.volume  = normalizeSoundVolume(volume);
 		entry.pan     = pan;
-		entry.effect->setLoopCount(loop ? QSoundEffect::Infinite : 1);
-		entry.effect->setVolume(static_cast<float>(entry.volume));
+		if (entry.effect)
+		{
+			entry.effect->setLoopCount(loop ? QSoundEffect::Infinite : 1);
+			entry.effect->setVolume(static_cast<float>(entry.volume));
+		}
+		if (entry.player)
+			entry.player->setLoops(loop ? QMediaPlayer::Infinite : QMediaPlayer::Once);
+		if (entry.audioOutput)
+			entry.audioOutput->setVolume(static_cast<float>(entry.volume));
 		return eOK;
 	}
 
@@ -10837,7 +10879,7 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 	{
 		for (int i = 0; i < (kMaxSoundBuffers / 2); ++i)
 		{
-			if (!m_soundBuffers[i].effect)
+			if (!soundBufferHasBackend(m_soundBuffers[i]))
 			{
 				targetBuffer = i + 1;
 				break;
@@ -10848,7 +10890,7 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 	{
 		for (int i = 0; i < kMaxSoundBuffers; ++i)
 		{
-			if (!m_soundBuffers[i].effect || !m_soundBuffers[i].effect->isPlaying())
+			if (!soundBufferHasBackend(m_soundBuffers[i]) || !soundBufferIsPlaying(m_soundBuffers[i]))
 			{
 				targetBuffer = i + 1;
 				break;
@@ -10862,17 +10904,7 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 		return eBadParameter;
 
 	SoundBuffer &entry = m_soundBuffers[targetBuffer - 1];
-	if (entry.effect)
-	{
-		entry.effect->stop();
-		delete entry.effect;
-		entry.effect = nullptr;
-	}
-	if (entry.tempFile)
-	{
-		delete entry.tempFile;
-		entry.tempFile = nullptr;
-	}
+	clearSoundBuffer(entry);
 
 	const QString relative = QMudPluginPathUtils::legacyPathRelativeToQmudHome(fileName);
 	QString       resolved;
@@ -10903,26 +10935,104 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 	    QMudNativePluginRegistry::luaAudioRuntimeBufferState(this, targetBuffer, luaAudioState)
 	        ? luaAudioState.generation
 	        : 0;
-	auto *effect = new QSoundEffect(this);
-	if (luaAudioGeneration != 0)
+	entry.looping = loop;
+	entry.volume  = normalizeSoundVolume(volume);
+	entry.pan     = pan;
+	if (shouldUseMediaPlayerForSoundFile(resolved))
 	{
-		connect(effect, &QSoundEffect::statusChanged, this,
-		        [this, effect, targetBuffer, luaAudioGeneration]
+		auto *player      = new QMediaPlayer(this);
+		auto *audioOutput = new QAudioOutput(player);
+		player->setAudioOutput(audioOutput);
+		player->setLoops(loop ? QMediaPlayer::Infinite : QMediaPlayer::Once);
+		audioOutput->setVolume(static_cast<float>(entry.volume));
+		connect(player, &QMediaPlayer::errorOccurred, this,
+		        [this, player, targetBuffer, luaAudioGeneration](QMediaPlayer::Error, const QString &)
 		        {
-			        if (effect->status() == QSoundEffect::Error)
+			        if (luaAudioGeneration != 0)
 				        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
 				            this, targetBuffer, luaAudioGeneration);
+			        if (targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
+				        return;
+
+			        SoundBuffer &current = m_soundBuffers[targetBuffer - 1];
+			        if (current.player != player)
+				        return;
+
+			        player->stop();
+			        player->setSource(QUrl());
+			        current.player      = nullptr;
+			        current.audioOutput = nullptr;
+			        if (current.tempFile)
+			        {
+				        delete current.tempFile;
+				        current.tempFile = nullptr;
+			        }
+			        current.looping = false;
+			        current.volume  = 1.0;
+			        current.pan     = 0.0;
+			        player->deleteLater();
 		        });
+		if (luaAudioGeneration != 0)
+		{
+			connect(player, &QMediaPlayer::playbackStateChanged, this,
+			        [this, loop, targetBuffer, luaAudioGeneration](const QMediaPlayer::PlaybackState state)
+			        {
+				        if (!loop && state == QMediaPlayer::StoppedState)
+					        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
+					            this, targetBuffer, luaAudioGeneration);
+			        });
+		}
+		player->setSource(QUrl::fromLocalFile(resolved));
+		if (player->error() != QMediaPlayer::NoError)
+		{
+			delete player;
+			entry.looping = false;
+			entry.volume  = 1.0;
+			entry.pan     = 0.0;
+			return eCannotPlaySound;
+		}
+		entry.player      = player;
+		entry.audioOutput = audioOutput;
+		player->play();
+		return eOK;
 	}
+
+	auto *effect = new QSoundEffect(this);
+	connect(effect, &QSoundEffect::statusChanged, this,
+	        [this, effect, targetBuffer, luaAudioGeneration]
+	        {
+		        if (effect->status() != QSoundEffect::Error)
+			        return;
+		        if (luaAudioGeneration != 0)
+			        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(this, targetBuffer,
+			                                                                           luaAudioGeneration);
+		        if (targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
+			        return;
+
+		        SoundBuffer &current = m_soundBuffers[targetBuffer - 1];
+		        if (current.effect != effect)
+			        return;
+
+		        current.effect = nullptr;
+		        if (current.tempFile)
+		        {
+			        delete current.tempFile;
+			        current.tempFile = nullptr;
+		        }
+		        current.looping = false;
+		        current.volume  = 1.0;
+		        current.pan     = 0.0;
+		        effect->deleteLater();
+	        });
 	effect->setSource(QUrl::fromLocalFile(resolved));
 	if (effect->status() == QSoundEffect::Error)
 	{
 		delete effect;
+		entry.looping = false;
+		entry.volume  = 1.0;
+		entry.pan     = 0.0;
 		return eCannotPlaySound;
 	}
-	entry.looping = loop;
-	entry.volume  = normalizeSoundVolume(volume);
-	entry.pan     = pan;
 	effect->setLoopCount(loop ? QSoundEffect::Infinite : 1);
 	effect->setVolume(static_cast<float>(entry.volume));
 	if (luaAudioGeneration != 0)
@@ -10956,7 +11066,7 @@ int WorldRuntime::playSoundMemory(int buffer, const QByteArray &data, bool loop,
 	{
 		for (int i = 0; i < (kMaxSoundBuffers / 2); ++i)
 		{
-			if (!m_soundBuffers[i].effect)
+			if (!soundBufferHasBackend(m_soundBuffers[i]))
 			{
 				targetBuffer = i + 1;
 				break;
@@ -10967,7 +11077,7 @@ int WorldRuntime::playSoundMemory(int buffer, const QByteArray &data, bool loop,
 	{
 		for (int i = 0; i < kMaxSoundBuffers; ++i)
 		{
-			if (!m_soundBuffers[i].effect || !m_soundBuffers[i].effect->isPlaying())
+			if (!soundBufferHasBackend(m_soundBuffers[i]) || !soundBufferIsPlaying(m_soundBuffers[i]))
 			{
 				targetBuffer = i + 1;
 				break;
@@ -10981,17 +11091,7 @@ int WorldRuntime::playSoundMemory(int buffer, const QByteArray &data, bool loop,
 		return eBadParameter;
 
 	SoundBuffer &entry = m_soundBuffers[targetBuffer - 1];
-	if (entry.effect)
-	{
-		entry.effect->stop();
-		delete entry.effect;
-		entry.effect = nullptr;
-	}
-	if (entry.tempFile)
-	{
-		delete entry.tempFile;
-		entry.tempFile = nullptr;
-	}
+	clearSoundBuffer(entry);
 
 	auto *temp = new QTemporaryFile(this);
 	temp->setAutoRemove(true);
@@ -11009,7 +11109,36 @@ int WorldRuntime::playSoundMemory(int buffer, const QByteArray &data, bool loop,
 	entry.tempFile = temp;
 
 	auto *effect = new QSoundEffect(this);
+	connect(effect, &QSoundEffect::statusChanged, this,
+	        [this, effect, targetBuffer]
+	        {
+		        if (effect->status() != QSoundEffect::Error)
+			        return;
+		        if (targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
+			        return;
+
+		        SoundBuffer &current = m_soundBuffers[targetBuffer - 1];
+		        if (current.effect != effect)
+			        return;
+
+		        current.effect = nullptr;
+		        if (current.tempFile)
+		        {
+			        delete current.tempFile;
+			        current.tempFile = nullptr;
+		        }
+		        current.looping = false;
+		        current.volume  = 1.0;
+		        current.pan     = 0.0;
+		        effect->deleteLater();
+	        });
 	effect->setSource(QUrl::fromLocalFile(temp->fileName()));
+	if (effect->status() == QSoundEffect::Error)
+	{
+		delete effect;
+		clearSoundBuffer(entry);
+		return eCannotPlaySound;
+	}
 	entry.looping = loop;
 	entry.volume  = normalizeSoundVolume(volume);
 	entry.pan     = pan;
@@ -11049,19 +11178,7 @@ int WorldRuntime::stopSoundBypassingPluginCallbacks(int buffer)
 	if (buffer == 0)
 	{
 		for (SoundBuffer &entry : m_soundBuffers)
-		{
-			if (entry.effect)
-			{
-				entry.effect->stop();
-				delete entry.effect;
-				entry.effect = nullptr;
-			}
-			if (entry.tempFile)
-			{
-				delete entry.tempFile;
-				entry.tempFile = nullptr;
-			}
-		}
+			clearSoundBuffer(entry);
 		return eOK;
 	}
 
@@ -11069,17 +11186,7 @@ int WorldRuntime::stopSoundBypassingPluginCallbacks(int buffer)
 		return eBadParameter;
 
 	SoundBuffer &entry = m_soundBuffers[buffer - 1];
-	if (entry.effect)
-	{
-		entry.effect->stop();
-		delete entry.effect;
-		entry.effect = nullptr;
-	}
-	if (entry.tempFile)
-	{
-		delete entry.tempFile;
-		entry.tempFile = nullptr;
-	}
+	clearSoundBuffer(entry);
 	return eOK;
 }
 
@@ -11093,9 +11200,9 @@ int WorldRuntime::soundStatus(int buffer) const
 	if (buffer < 1 || buffer > kMaxSoundBuffers)
 		return -1;
 	const SoundBuffer &entry = m_soundBuffers[buffer - 1];
-	if (!entry.effect)
+	if (!soundBufferHasBackend(entry))
 		return -2;
-	if (!entry.effect->isPlaying())
+	if (!soundBufferIsPlaying(entry))
 		return 0;
 	return entry.looping ? 2 : 1;
 }

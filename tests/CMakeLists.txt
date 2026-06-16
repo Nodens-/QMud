@@ -381,6 +381,13 @@ qmud_add_qtest(tst_WorldRuntimeAttributeUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_SoundFileRoutingUtils
+        SOURCES
+        unit/tst_SoundFileRoutingUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/helpers/SoundFileRoutingUtils.cpp"
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_StartTlsFallbackUtils
         SOURCES
         unit/tst_StartTlsFallbackUtils.cpp

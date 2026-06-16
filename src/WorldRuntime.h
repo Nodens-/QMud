@@ -49,6 +49,8 @@ class ILuaExecutor;
 class WorldCommandProcessor;
 class WorldView;
 class QUdpSocket;
+class QAudioOutput;
+class QMediaPlayer;
 class QSoundEffect;
 class QTemporaryFile;
 class QTcpServer;
@@ -530,6 +532,8 @@ class WorldRuntime : public QObject
 		struct SoundBuffer
 		{
 				QSoundEffect   *effect{nullptr};
+				QMediaPlayer   *player{nullptr};
+				QAudioOutput   *audioOutput{nullptr};
 				QTemporaryFile *tempFile{nullptr};
 				bool            looping{false};
 				double          volume{1.0};
@@ -5702,6 +5706,10 @@ class WorldRuntime : public QObject
 		bool                                    m_outputFrozen{false};
 		TextRectangleSettings                   m_textRectangle;
 		QMap<int, UdpListener>                  m_udpListeners;
+		[[nodiscard]] static bool               soundBufferHasBackend(const SoundBuffer &entry);
+		[[nodiscard]] static bool               soundBufferIsPlaying(const SoundBuffer &entry);
+		static void                             clearSoundBuffer(SoundBuffer &entry);
+		[[nodiscard]] static bool               shouldUseMediaPlayerForSoundFile(const QString &fileName);
 		QVector<SoundBuffer>                    m_soundBuffers;
 		int                                     m_outputFontHeight{0};
 		int                                     m_outputFontWidth{0};
