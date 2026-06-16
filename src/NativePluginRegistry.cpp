@@ -1869,6 +1869,7 @@ namespace QMudNativePluginRegistry
 			bool             enabled;
 			if (state.mushReaderPluginEnabled)
 			{
+				state.passiveSpeechEnabled    = false;
 				state.mushReaderSpeechEnabled = !state.mushReaderSpeechEnabled;
 				enabled                       = state.mushReaderSpeechEnabled;
 			}
@@ -2053,9 +2054,14 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime)
 			return;
-		MushReaderState &state        = stateFor(runtime);
+		MushReaderState &state       = stateFor(runtime);
+		const bool stopPassiveSpeech = enable && !state.mushReaderPluginEnabled && state.passiveSpeechEnabled;
 		state.mushReaderPluginEnabled = enable;
 		state.mushReaderSpeechEnabled = enable;
+		if (enable)
+			state.passiveSpeechEnabled = false;
+		if (stopPassiveSpeech)
+			stopSpeech(runtime);
 		if (!enable)
 			stopSpeech(runtime);
 	}
@@ -2074,7 +2080,7 @@ namespace QMudNativePluginRegistry
 		if (!runtime)
 			return;
 		MushReaderState &state     = stateFor(runtime);
-		state.passiveSpeechEnabled = enable;
+		state.passiveSpeechEnabled = enable && !state.mushReaderPluginEnabled;
 		if (!enable)
 			stopSpeech(runtime);
 	}
