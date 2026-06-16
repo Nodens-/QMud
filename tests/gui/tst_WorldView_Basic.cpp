@@ -7000,6 +7000,33 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void repeatLastCommandSendsHistoryTailAndPreservesInput()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			view.addToHistoryForced(QStringLiteral("qcmd-older-a14"));
+			view.addToHistoryForced(QStringLiteral("qcmd-repeat-b92"));
+			view.setInputText(QStringLiteral("qcmd-partial-c37"), true);
+			QCoreApplication::processEvents();
+
+			QSignalSpy sendSpy(&view, &WorldView::sendText);
+			view.repeatLastCommand();
+
+			QCOMPARE(sendSpy.size(), 1);
+			QCOMPARE(sendSpy.constFirst().constFirst().toString(), QStringLiteral("qcmd-repeat-b92"));
+			QCOMPARE(view.inputText(), QStringLiteral("qcmd-partial-c37"));
+			QCOMPARE(view.commandHistoryList(),
+			         (QStringList{QStringLiteral("qcmd-older-a14"), QStringLiteral("qcmd-repeat-b92")}));
+
+			resetTestState();
+		}
+
 		void lineInformationTooltipShowsUnknownTimeWhenRuntimeLineHasNoTimestamp()
 		{
 			resetTestState();
