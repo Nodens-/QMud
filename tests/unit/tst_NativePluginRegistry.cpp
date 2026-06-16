@@ -56,8 +56,8 @@ namespace
 
 	QString writePluginXml(const QTemporaryDir &dir, const QString &id, const QString &script)
 	{
-		const QString path = dir.filePath(QStringLiteral("%1.xml").arg(id));
-		QFile         file(path);
+		QString path = dir.filePath(QStringLiteral("%1.xml").arg(id));
+		QFile   file(path);
 		if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 			return {};
 		const QString xml = QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
@@ -211,13 +211,15 @@ bool WorldRuntime::enablePlugin(const QString &pluginId, const bool enable)
 	{
 		if (plugin.attributes.value(QStringLiteral("id")).compare(id, Qt::CaseInsensitive) != 0)
 			continue;
-		if (plugin.nativeShim && id == QMudNativePluginRegistry::mushReaderPluginId())
-			QMudNativePluginRegistry::setMushReaderPassiveSpeechEnabled(this, enable);
-		if (plugin.nativeShim && id == QMudNativePluginRegistry::luaAudioPluginId() && !enable)
-			QMudNativePluginRegistry::luaAudioStopRuntime(this);
+		if (plugin.enabled == enable)
+			return true;
 		plugin.enabled = enable;
 		plugin.attributes.insert(QStringLiteral("enabled"),
 		                         enable ? QStringLiteral("1") : QStringLiteral("0"));
+		if (plugin.nativeShim && id == QMudNativePluginRegistry::mushReaderPluginId())
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(this, enable);
+		if (plugin.nativeShim && id == QMudNativePluginRegistry::luaAudioPluginId() && !enable)
+			QMudNativePluginRegistry::luaAudioStopRuntime(this);
 		return true;
 	}
 	return QMudNativePluginRegistry::isShimId(id);
@@ -233,7 +235,7 @@ bool WorldRuntime::unloadPlugin(const QString &pluginId, QString *error)
 		if (state.plugins.at(i).attributes.value(QStringLiteral("id")).compare(id, Qt::CaseInsensitive) != 0)
 			continue;
 		if (state.plugins.at(i).nativeShim && id == QMudNativePluginRegistry::mushReaderPluginId())
-			QMudNativePluginRegistry::setMushReaderPassiveSpeechEnabled(this, false);
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(this, false);
 		if (state.plugins.at(i).nativeShim && id == QMudNativePluginRegistry::luaAudioPluginId())
 			QMudNativePluginRegistry::luaAudioStopRuntime(this);
 		state.plugins.removeAt(i);
@@ -747,37 +749,96 @@ class tst_NativePluginRegistry : public QObject
 			QVERIFY(found);
 		}
 
-		void passiveSpeechEnabledStateTracksTtsToggle()
+		void ttsToggleUsesMushReaderSpeechGateOnlyWhenMushReaderIsEnabled()
 		{
-			WorldRuntime runtime;
+			WorldRuntime                                       runtime;
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
 			QMudNativePluginRegistry::setTestSpeechSink(
-			    [](const QMudNativePluginRegistry::TestSpeechEvent &) {});
+			    [&events](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { events.push_back(event); });
+
+			QVERIFY(!QMudNativePluginRegistry::isMushReaderPluginEnabled(&runtime));
 			QVERIFY(!QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
 
 			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
 			QVERIFY(QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
+			QVERIFY(!QMudNativePluginRegistry::isMushReaderPluginEnabled(&runtime));
+			QVERIFY(events.size() >= 2);
+			QVERIFY(events.at(events.size() - 2).stop);
+			QCOMPARE(events.constLast().text, QStringLiteral("speech on"));
 
 			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
 			QVERIFY(!QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
+			QVERIFY(!QMudNativePluginRegistry::isMushReaderPluginEnabled(&runtime));
+
+			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
 
 			WorldRuntime::Plugin mushReaderPlugin;
 			mushReaderPlugin.nativeShim = true;
-			mushReaderPlugin.enabled    = true;
+			mushReaderPlugin.enabled    = false;
 			mushReaderPlugin.attributes.insert(QStringLiteral("id"),
 			                                   QMudNativePluginRegistry::mushReaderPluginId());
 			stateFor(&runtime).plugins.push_back(mushReaderPlugin);
 
 			QVERIFY(runtime.enablePlugin(QMudNativePluginRegistry::mushReaderPluginId(), true));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderPluginEnabled(&runtime));
 			QVERIFY(QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
-			QVERIFY(runtime.enablePlugin(QMudNativePluginRegistry::mushReaderPluginId(), false));
-			QVERIFY(!QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
+
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0,
+			                                                     QStringLiteral("mushreader line"));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constFirst().text, QStringLiteral("mushreader line"));
+
+			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderPluginEnabled(&runtime));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
+			QVERIFY(events.size() >= 3);
+			QVERIFY(events.at(events.size() - 2).stop);
+			QCOMPARE(events.constLast().text, QStringLiteral("speech off"));
+
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0,
+			                                                     QStringLiteral("muted line"));
+			QVERIFY(events.isEmpty());
+
 			QVERIFY(runtime.enablePlugin(QMudNativePluginRegistry::mushReaderPluginId(), true));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderPluginEnabled(&runtime));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0,
+			                                                     QStringLiteral("still muted line"));
+			QVERIFY(events.isEmpty());
+
+			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderPluginEnabled(&runtime));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
+
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0,
+			                                                     QStringLiteral("enabled line"));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constFirst().text, QStringLiteral("enabled line"));
+
+			QVERIFY(runtime.enablePlugin(QMudNativePluginRegistry::mushReaderPluginId(), false));
+			QVERIFY(!QMudNativePluginRegistry::isMushReaderPluginEnabled(&runtime));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
+
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0,
+			                                                     QStringLiteral("passive line"));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constFirst().text, QStringLiteral("passive line"));
+
+			QVERIFY(runtime.enablePlugin(QMudNativePluginRegistry::mushReaderPluginId(), true));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderPluginEnabled(&runtime));
 			QVERIFY(QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
 
 			QString unloadError;
 			QVERIFY(runtime.unloadPlugin(QMudNativePluginRegistry::mushReaderPluginId(), &unloadError));
 			QVERIFY(unloadError.isEmpty());
-			QVERIFY(!QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
+			QVERIFY(!QMudNativePluginRegistry::isMushReaderPluginEnabled(&runtime));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(&runtime));
 		}
 
 		void blacklistAndProtectedPluginXmlClassification()

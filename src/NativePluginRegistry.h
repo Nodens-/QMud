@@ -367,13 +367,25 @@ namespace QMudNativePluginRegistry
 	 */
 	void handleMushReaderTabComplete(const WorldRuntime *runtime, const QString &text);
 	/**
-	 * @brief Enables or disables passive native MushReader screen/tab speech.
+	 * @brief Marks whether the native MushReader shim plugin is enabled.
+	 * @param runtime Owning runtime.
+	 * @param enable Enable the native MushReader shim when `true`.
+	 */
+	void setMushReaderPluginEnabled(const WorldRuntime *runtime, bool enable);
+	/**
+	 * @brief Returns whether the native MushReader shim plugin is enabled.
+	 * @param runtime Owning runtime.
+	 * @return `true` when the native MushReader shim plugin is enabled for the runtime.
+	 */
+	[[nodiscard]] bool isMushReaderPluginEnabled(const WorldRuntime *runtime);
+	/**
+	 * @brief Enables or disables passive screen/tab speech used when MushReader is not enabled.
 	 * @param runtime Owning runtime.
 	 * @param enable Enable passive screen/tab speech when `true`.
 	 */
-	void setMushReaderPassiveSpeechEnabled(const WorldRuntime *runtime, bool enable);
+	void               setMushReaderPassiveSpeechEnabled(const WorldRuntime *runtime, bool enable);
 	/**
-	 * @brief Returns whether passive native MushReader screen/tab speech is active.
+	 * @brief Returns whether passive screen/tab speech is enabled outside the MushReader shim.
 	 * @param runtime Owning runtime.
 	 * @return `true` when passive speech is enabled for the runtime.
 	 */

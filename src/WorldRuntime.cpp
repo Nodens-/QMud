@@ -10238,7 +10238,8 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 		const int  shadowIndex = findPluginIndex(m_plugins, shimId);
 		const bool enabled =
 		    shimId.compare(QMudNativePluginRegistry::mushReaderPluginId(), Qt::CaseInsensitive) == 0
-		        ? QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(this) ||
+		        ? QMudNativePluginRegistry::isMushReaderPluginEnabled(this) ||
+		              QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(this) ||
 		              (shadowIndex >= 0 && m_plugins.at(shadowIndex).enabled)
 		        : true;
 		if (!snapshot->pluginIdsSnapshot.contains(shimId, Qt::CaseInsensitive))
@@ -17535,6 +17536,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	m_pluginCallbackRecipientIndices.clear();
 	m_pluginCallbackPresencePluginCount = -1;
 	invalidatePluginCallbackPresenceCache();
+	QMudNativePluginRegistry::setMushReaderPluginEnabled(this, false);
 	QMudNativePluginRegistry::setMushReaderPassiveSpeechEnabled(this, false);
 	QVector<LuaEngineObservedInitializationRequest> pluginLuaInitRequests;
 	pluginLuaInitRequests.reserve(safeQSizeToInt(doc.plugins().size()));
@@ -17572,7 +17574,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 			if (findPluginIndex(m_plugins, metadata.id) < 0)
 				m_plugins.push_back(shadow);
 			if (pluginId == QMudNativePluginRegistry::mushReaderPluginId())
-				QMudNativePluginRegistry::setMushReaderPassiveSpeechEnabled(this, requestedEnabled);
+				QMudNativePluginRegistry::setMushReaderPluginEnabled(this, requestedEnabled);
 			continue;
 		}
 		for (const auto &t : p.triggers)
@@ -19337,13 +19339,13 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 			m_plugins[existingShimIndex].attributes.insert(
 			    QStringLiteral("enabled"), wasEnabled ? QStringLiteral("1") : QStringLiteral("0"));
 			if (pluginId == QMudNativePluginRegistry::mushReaderPluginId())
-				QMudNativePluginRegistry::setMushReaderPassiveSpeechEnabled(this, wasEnabled);
+				QMudNativePluginRegistry::setMushReaderPluginEnabled(this, wasEnabled);
 		}
 		else
 		{
 			m_plugins.push_back(makeNativeShimShadowPlugin(metadata, markGlobal));
 			if (pluginId == QMudNativePluginRegistry::mushReaderPluginId())
-				QMudNativePluginRegistry::setMushReaderPassiveSpeechEnabled(this, true);
+				QMudNativePluginRegistry::setMushReaderPluginEnabled(this, true);
 		}
 		sortPluginsBySequence();
 		m_pluginCount = safeQSizeToInt(m_plugins.size());
@@ -19546,7 +19548,7 @@ bool WorldRuntime::unloadPlugin(const QString &pluginId, QString *error)
 
 	Plugin &plugin = m_plugins[index];
 	if (plugin.nativeShim && resolvedPluginId == QMudNativePluginRegistry::mushReaderPluginId())
-		QMudNativePluginRegistry::setMushReaderPassiveSpeechEnabled(this, false);
+		QMudNativePluginRegistry::setMushReaderPluginEnabled(this, false);
 	if (plugin.nativeShim && resolvedPluginId == QMudNativePluginRegistry::luaAudioPluginId())
 		QMudNativePluginRegistry::luaAudioStopRuntime(this);
 	if (plugin.lua)
@@ -19591,10 +19593,6 @@ bool WorldRuntime::enablePlugin(const QString &pluginId, bool enable)
 	if (index < 0)
 		return QMudNativePluginRegistry::isShimId(resolvedPluginId);
 	Plugin &plugin = m_plugins[index];
-	if (plugin.nativeShim && resolvedPluginId == QMudNativePluginRegistry::mushReaderPluginId())
-		QMudNativePluginRegistry::setMushReaderPassiveSpeechEnabled(this, enable);
-	if (plugin.nativeShim && resolvedPluginId == QMudNativePluginRegistry::luaAudioPluginId() && !enable)
-		QMudNativePluginRegistry::luaAudioStopRuntime(this);
 	if (plugin.enabled == enable)
 	{
 		if (enable && plugin.disableAfterInstall)
@@ -19612,6 +19610,10 @@ bool WorldRuntime::enablePlugin(const QString &pluginId, bool enable)
 	if (!enable)
 		plugin.disableAfterInstall = false;
 	plugin.attributes.insert(QStringLiteral("enabled"), enable ? QStringLiteral("1") : QStringLiteral("0"));
+	if (plugin.nativeShim && resolvedPluginId == QMudNativePluginRegistry::mushReaderPluginId())
+		QMudNativePluginRegistry::setMushReaderPluginEnabled(this, enable);
+	if (plugin.nativeShim && resolvedPluginId == QMudNativePluginRegistry::luaAudioPluginId() && !enable)
+		QMudNativePluginRegistry::luaAudioStopRuntime(this);
 	invalidateLuaCallbackDispatchSnapshot();
 	if (enable)
 	{
@@ -21667,7 +21669,8 @@ QVariant WorldRuntime::pluginInfo(const QString &pluginId, int infoType) const
 		const int         shadowIndex  = findPluginIndex(m_plugins, shimId);
 		const bool        enabled =
 		    shimId.compare(QMudNativePluginRegistry::mushReaderPluginId(), Qt::CaseInsensitive) == 0
-		        ? QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(this) ||
+		        ? QMudNativePluginRegistry::isMushReaderPluginEnabled(this) ||
+		              QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(this) ||
 		              (shadowIndex >= 0 && m_plugins.at(shadowIndex).enabled)
 		        : true;
 		for (int i = 0; i < ids.size(); ++i)
