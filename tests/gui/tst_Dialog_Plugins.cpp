@@ -16,6 +16,8 @@
 #include "dialogs/PluginsDialog.h"
 #include "scripting/ScriptingErrors.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QApplication>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QtTest/QSignalSpy>
@@ -269,6 +271,27 @@ class tst_Dialog_Plugins : public QObject
 			QVERIFY(table->item(0, 0));
 			QCOMPARE(table->item(0, 0)->text(), QStringLiteral("Visible"));
 			QCOMPARE(table->item(0, 0)->data(Qt::UserRole).toString(), QStringLiteral("visible"));
+		}
+
+		void tabLeavesPluginTableForActionButtons()
+		{
+			WorldRuntime runtime;
+			runtime.pluginsMutable().push_back(makePlugin(QStringLiteral("plug"), QStringLiteral("Plugin")));
+
+			PluginsDialog dialog(&runtime, nullptr);
+			dialog.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+
+			auto *table = dialog.findChild<QTableWidget *>();
+			QVERIFY(table);
+			QPushButton *addButton = findButtonByText(dialog, QStringLiteral("Add..."));
+			QVERIFY(addButton);
+
+			table->setFocus();
+			QTRY_COMPARE(QApplication::focusWidget(), table);
+
+			QTest::keyClick(table, Qt::Key_Tab);
+			QTRY_COMPARE(QApplication::focusWidget(), addButton);
 		}
 
 		void enableDisableAndReloadActOnSelectedPlugin()

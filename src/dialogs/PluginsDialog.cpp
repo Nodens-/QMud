@@ -121,6 +121,7 @@ PluginsDialog::PluginsDialog(WorldRuntime *runtime, MainWindow *main, QWidget *p
 	m_table->setColumnCount(kColumnCount);
 	m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
 	m_table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+	m_table->setTabKeyNavigation(false);
 	m_table->setSortingEnabled(true);
 	m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
 	m_table->horizontalHeader()->setStretchLastSection(false);
@@ -228,7 +229,7 @@ PluginsDialog::PluginsDialog(WorldRuntime *runtime, MainWindow *main, QWidget *p
 		clampColumnsToViewport(m_table);
 		const int  sortColumn = settings.value(QStringLiteral("SortColumn"), kColumnName).toInt();
 		const auto sortOrder  = static_cast<Qt::SortOrder>(
-		    settings.value(QStringLiteral("SortOrder"), Qt::AscendingOrder).toInt());
+            settings.value(QStringLiteral("SortOrder"), Qt::AscendingOrder).toInt());
 		if (sortColumn >= 0)
 			m_table->sortByColumn(sortColumn, sortOrder);
 		settings.endGroup();
@@ -263,10 +264,10 @@ void PluginsDialog::reloadList() const
 			continue;
 		visiblePluginRows.push_back(pluginIndex);
 	}
-	constexpr qsizetype maxPluginRows = static_cast<qsizetype>(std::numeric_limits<int>::max());
-	const int           pluginCount   = visiblePluginRows.size() > maxPluginRows
-	                                        ? std::numeric_limits<int>::max()
-	                                        : static_cast<int>(visiblePluginRows.size());
+	constexpr auto maxPluginRows = static_cast<qsizetype>(std::numeric_limits<int>::max());
+	const int      pluginCount   = visiblePluginRows.size() > maxPluginRows
+	                                   ? std::numeric_limits<int>::max()
+	                                   : static_cast<int>(visiblePluginRows.size());
 	m_table->setRowCount(pluginCount);
 
 	for (int row = 0; row < pluginCount; ++row)
@@ -275,7 +276,7 @@ void PluginsDialog::reloadList() const
 		const QString               pluginId = plugin.attributes.value(QStringLiteral("id"));
 		const QString               name     = plugin.attributes.value(QStringLiteral("name"));
 		const QString               purpose =
-		    plugin.nativeShim ? plugin.nativeShimMarker : plugin.attributes.value(QStringLiteral("purpose"));
+            plugin.nativeShim ? plugin.nativeShimMarker : plugin.attributes.value(QStringLiteral("purpose"));
 		const QString author  = plugin.attributes.value(QStringLiteral("author"));
 		const QString file    = plugin.source;
 		const QString enabled = plugin.enabled ? QStringLiteral("Yes") : QStringLiteral("No");
