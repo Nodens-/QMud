@@ -717,8 +717,8 @@ static void browseSoundFile(WorldRuntime *runtime, QWidget *parent, QLineEdit *t
 	const QString startDir    = runtime ? runtime->fileBrowsingDirectory() : QString();
 	const QString initialPath = start.isEmpty() ? startDir : start;
 	const QString fileName    = QFileDialog::getOpenFileName(
-        parent, QStringLiteral("Select sound to play"), initialPath,
-        QStringLiteral("Waveaudio files (*.wav);;MIDI files (*.mid);;Sequencer files (*.rmi)"));
+	    parent, QStringLiteral("Select sound to play"), initialPath,
+	    QStringLiteral("Waveaudio files (*.wav);;MIDI files (*.mid);;Sequencer files (*.rmi)"));
 	if (!fileName.isEmpty())
 	{
 		if (runtime)
@@ -6273,7 +6273,7 @@ void WorldPreferencesDialog::buildUi()
 			        AppController *app              = AppController::instance();
 			        const QString  resolvedFileName = app ? app->makeAbsolutePath(fileName) : fileName;
 			        const QString  editorWindowName =
-                        m_editorWindowName ? m_editorWindowName->text().trimmed() : QString();
+			            m_editorWindowName ? m_editorWindowName->text().trimmed() : QString();
 			        const auto tryRaiseConfiguredEditorWindow = [&]
 			        {
 				        if (editorWindowName.isEmpty())
@@ -7185,8 +7185,8 @@ void WorldPreferencesDialog::buildUi()
 	// Printing
 	auto *printingLayout     = new QVBoxLayout(printingPage);
 	auto  buildPrintingGroup = [](const QString &title, QVector<QCheckBox *> &boldChecks,
-                                 QVector<QCheckBox *> &italicChecks, QVector<QCheckBox *> &underlineChecks,
-                                 QWidget *parent) -> QGroupBox *
+	                              QVector<QCheckBox *> &italicChecks, QVector<QCheckBox *> &underlineChecks,
+	                              QWidget *parent) -> QGroupBox *
 	{
 		static const QStringList colours = {QStringLiteral("Black"), QStringLiteral("Red"),
 		                                    QStringLiteral("Green"), QStringLiteral("Yellow"),
@@ -7437,7 +7437,7 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
 		        const QString dirName  = QFileDialog::getExistingDirectory(
-                    this, QStringLiteral("Save chat files folder"), startDir);
+		            this, QStringLiteral("Save chat files folder"), startDir);
 		        if (!dirName.isEmpty())
 		        {
 			        if (m_runtime)
@@ -8932,8 +8932,8 @@ void WorldPreferencesDialog::buildUi()
 	const int      treeHeight = rowHeight * treeItems + (m_pageTree->frameWidth() * 2) + 12;
 	const QMargins margins    = layout->contentsMargins();
 	const int      minHeight  = treeHeight + buttons->sizeHint().height() + margins.top() + margins.bottom() +
-	                      (layout->spacing() * 2);
-	const int minHeightWithPadding = minHeight + ((minHeight * 2) / 10);
+	                            (layout->spacing() * 2);
+	const int      minHeightWithPadding = minHeight + ((minHeight * 2) / 10);
 	setMinimumHeight(qMax(minHeightWithPadding, minimumHeight()));
 	int baseWidth = qMax(minimumWidth(), sizeHint().width());
 	baseWidth += (baseWidth * 1) / 20;

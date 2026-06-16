@@ -218,46 +218,13 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
     target_compile_definitions(tst_LuaExecution PRIVATE QMUD_ENABLE_LUA_SCRIPTING)
 
     qmud_add_qtest(tst_LuaCallbackEngine
+            GUI
             SOURCES
             unit/tst_LuaCallbackEngine.cpp
-            "${CMAKE_SOURCE_DIR}/src/WorldRuntime.h"
-            "${CMAKE_SOURCE_DIR}/src/LuaCallbackEngine.cpp"
-            "${CMAKE_SOURCE_DIR}/src/LuaExecutor.cpp"
-            "${CMAKE_SOURCE_DIR}/src/LuaExecutorWorker.cpp"
-            "${CMAKE_SOURCE_DIR}/src/LuaSupport.cpp"
-            "${CMAKE_SOURCE_DIR}/src/LuaLuacomShim.cpp"
-            "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
-            "${CMAKE_SOURCE_DIR}/src/TtsEngine.cpp"
-            "${CMAKE_SOURCE_DIR}/src/Sqlite3Lua.cpp"
-            "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/AcceleratorUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/FontUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/LuaExecutionUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
             LIBRARIES
-            ${LUA_LIBRARIES}
-            Qt6::Gui
-            Qt6::Widgets
-            Qt6::Network
-            Qt6::Sql
-            ${QMUD_QT_TEXTTOSPEECH_TARGET}
+            qmud_app_core
             LABELS
             unit)
-    if (TARGET Lua::Lua)
-        target_link_libraries(tst_LuaCallbackEngine PRIVATE Lua::Lua)
-    endif ()
-    if (DEFINED LUA_INCLUDE_DIR)
-        target_include_directories(tst_LuaCallbackEngine SYSTEM BEFORE PRIVATE ${LUA_INCLUDE_DIR})
-    elseif (DEFINED LUA_INCLUDE_DIRS)
-        target_include_directories(tst_LuaCallbackEngine SYSTEM BEFORE PRIVATE ${LUA_INCLUDE_DIRS})
-    endif ()
-    target_compile_definitions(tst_LuaCallbackEngine
-            PRIVATE
-            QMUD_ENABLE_LUA_SCRIPTING
-            QMUD_LUACALLBACKENGINE_TEST_MINIMAL_BINDINGS
-            QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
-    target_compile_options(tst_LuaCallbackEngine PRIVATE -ffunction-sections -fdata-sections)
-    target_link_options(tst_LuaCallbackEngine PRIVATE -Wl,--gc-sections)
 
     qmud_add_qtest(tst_LuaLuacomShim
             SOURCES

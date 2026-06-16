@@ -521,7 +521,7 @@ QWidget *GlobalPreferencesDialog::buildWorldsPage()
 			                 app->changeToFileBrowsingDirectory();
 		                 const QString startDir = m_worldDefaultDir ? m_worldDefaultDir->text() : QString();
 		                 const QString dir      = QFileDialog::getExistingDirectory(
-                             this, QStringLiteral("Select Default World Files Directory"), startDir);
+		                     this, QStringLiteral("Select Default World Files Directory"), startDir);
 		                 if (app)
 			                 app->changeToStartupDirectory();
 		                 if (!dir.isEmpty())
@@ -1060,7 +1060,7 @@ QWidget *GlobalPreferencesDialog::buildDefaultsPage()
 	auto *layout = new QVBoxLayout(page);
 
 	auto  connectBrowse = [this](const QPushButton *button, QLineEdit *target, const QString &title,
-                                const QString &filter, const QString &suggestedName)
+	                             const QString &filter, const QString &suggestedName)
 	{
 		QObject::connect(button, &QPushButton::clicked, this,
 		                 [this, target, title, filter, suggestedName]()
