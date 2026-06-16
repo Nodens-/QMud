@@ -20506,7 +20506,7 @@ static int luaPlaySound(lua_State *L)
 	const double  pan      = luaL_optnumber(L, 5, 0.0);
 	if (activeCallbackContextConst(engine))
 	{
-#ifdef QMUD_ENABLE_QSOUND
+#if QMUD_ENABLE_SOUND
 		if (buffer < 0 || buffer > WorldRuntime::kMaxSoundBuffers)
 		{
 			lua_pushnumber(L, eBadParameter);
@@ -20567,7 +20567,7 @@ static int luaPlaySoundMemory(lua_State *L)
 	const QByteArray payload(data, static_cast<int>(length));
 	if (activeCallbackContextConst(engine))
 	{
-#ifdef QMUD_ENABLE_QSOUND
+#if QMUD_ENABLE_SOUND
 		if (buffer < 0 || buffer > WorldRuntime::kMaxSoundBuffers || payload.isEmpty())
 		{
 			lua_pushnumber(L, eBadParameter);
@@ -20615,7 +20615,7 @@ static int luaStopSound(lua_State *L)
 	const int buffer = static_cast<int>(luaL_optnumber(L, 1, 0));
 	if (activeCallbackContextConst(engine))
 	{
-#ifdef QMUD_ENABLE_QSOUND
+#if QMUD_ENABLE_SOUND
 		if (buffer < 0 || buffer > WorldRuntime::kMaxSoundBuffers)
 		{
 			lua_pushnumber(L, eBadParameter);
@@ -20771,7 +20771,7 @@ static int playLuaAudioBuffer(const LuaCallbackEngine *engine, WorldRuntime *run
 	int result = eCannotPlaySound;
 	if (activeCallbackContextConst(engine))
 	{
-#ifdef QMUD_ENABLE_QSOUND
+#if QMUD_ENABLE_SOUND
 		if (callbackScopeSyncBridgeForbidden())
 		{
 			enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime, [play](WorldRuntime &targetRuntime)
@@ -22895,7 +22895,7 @@ static int luaSound(lua_State *L)
 	}
 	if (activeCallbackContextConst(engine))
 	{
-#ifdef QMUD_ENABLE_QSOUND
+#if QMUD_ENABLE_SOUND
 		if (callbackScopeSyncBridgeForbidden())
 		{
 			return enqueueRuntimeThreadAsyncStatusResult(

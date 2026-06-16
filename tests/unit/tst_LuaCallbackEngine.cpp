@@ -921,18 +921,18 @@ void tst_LuaCallbackEngine::worldLuaFileApisUseRuntimeHomeAcrossThreadAffinity()
 	WorldRuntime runtime;
 	QThread     *mainThread = QThread::currentThread();
 	const auto   cleanup    = qScopeGuard(
-        [&]()
-        {
-            if (runtime.thread() == &worker)
-            {
-                const bool moved = QMetaObject::invokeMethod(
-                    &runtime, [&runtime, mainThread]() { runtime.moveToThread(mainThread); },
-                    Qt::BlockingQueuedConnection);
-                QVERIFY(moved);
-            }
-            worker.quit();
-            worker.wait();
-        });
+	    [&]()
+	    {
+		    if (runtime.thread() == &worker)
+		    {
+			    const bool moved = QMetaObject::invokeMethod(
+			        &runtime, [&runtime, mainThread]() { runtime.moveToThread(mainThread); },
+			        Qt::BlockingQueuedConnection);
+			    QVERIFY(moved);
+		    }
+		    worker.quit();
+		    worker.wait();
+	    });
 	worker.start();
 	QVERIFY(worker.isRunning());
 	runtime.setStartupDirectory(root.absolutePath());
