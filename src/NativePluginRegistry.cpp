@@ -405,8 +405,6 @@ namespace
 			bool stop() override
 			{
 				if (!m_tts)
-					m_tts = QMudTtsEngine::TtsEngine::create();
-				if (!m_tts)
 					return false;
 				m_tts->enqueueUtterance(QString(), true);
 				return true;
@@ -434,9 +432,9 @@ namespace
 		return mutex;
 	}
 
-	std::unordered_map<const WorldRuntime *, std::unique_ptr<MushReaderState>> &states()
+	std::unordered_map<const WorldRuntime *, std::shared_ptr<MushReaderState>> &states()
 	{
-		static std::unordered_map<const WorldRuntime *, std::unique_ptr<MushReaderState>> runtimeStates;
+		static std::unordered_map<const WorldRuntime *, std::shared_ptr<MushReaderState>> runtimeStates;
 		return runtimeStates;
 	}
 
@@ -468,13 +466,20 @@ namespace
 	}
 #endif
 
-	MushReaderState &stateFor(const WorldRuntime *runtime)
+	std::shared_ptr<MushReaderState> stateFor(const WorldRuntime *runtime)
 	{
 		QMutexLocker locker(&stateMutex());
 		auto        &slot = states()[runtime];
 		if (!slot)
-			slot = std::make_unique<MushReaderState>();
-		return *slot;
+			slot = std::make_shared<MushReaderState>();
+		return slot;
+	}
+
+	std::shared_ptr<const MushReaderState> existingStateFor(const WorldRuntime *runtime)
+	{
+		QMutexLocker locker(&stateMutex());
+		const auto   it = states().find(runtime);
+		return it == states().end() ? std::shared_ptr<const MushReaderState>() : it->second;
 	}
 
 	QString substitutionsFilePath(const WorldRuntime *runtime)
@@ -542,9 +547,9 @@ namespace
 		if (dispatchTestSpeechEvent(makeTestSpeechEvent(text, interrupt, false)))
 			return true;
 #endif
-		MushReaderState &state = stateFor(runtime);
-		ensureBackends(state);
-		for (const auto &backend : state.backends)
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		ensureBackends(*state);
+		for (const auto &backend : state->backends)
 		{
 			if (backend && backend->speak(text, interrupt))
 				return true;
@@ -560,10 +565,11 @@ namespace
 		if (dispatchTestSpeechEvent(makeTestSpeechEvent(QString(), true, true)))
 			return true;
 #endif
-		MushReaderState &state = stateFor(runtime);
-		ensureBackends(state);
+		const std::shared_ptr<const MushReaderState> state = existingStateFor(runtime);
+		if (!state)
+			return false;
 		bool stopped = false;
-		for (const auto &backend : state.backends)
+		for (const auto &backend : state->backends)
 		{
 			if (backend)
 				stopped = backend->stop() || stopped;
@@ -609,8 +615,8 @@ namespace
 
 	void handleSubstitutionCommand(WorldRuntime *runtime, const QString &argument)
 	{
-		MushReaderState &state = stateFor(runtime);
-		loadSubstitutions(runtime, state);
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		loadSubstitutions(runtime, *state);
 
 		const QString trimmed = argument.trimmed();
 		const QString lower   = trimmed.toLower();
@@ -622,39 +628,39 @@ namespace
 		}
 		if (lower == QStringLiteral("on"))
 		{
-			state.substitutionsEnabled = true;
-			saveSubstitutions(runtime, state);
+			state->substitutionsEnabled = true;
+			saveSubstitutions(runtime, *state);
 			outputLine(*runtime, QStringLiteral("Substitutions on."));
 			return;
 		}
 		if (lower == QStringLiteral("off"))
 		{
-			state.substitutionsEnabled = false;
-			saveSubstitutions(runtime, state);
+			state->substitutionsEnabled = false;
+			saveSubstitutions(runtime, *state);
 			outputLine(*runtime, QStringLiteral("Substitutions off."));
 			return;
 		}
 		if (lower == QStringLiteral("list"))
 		{
-			if (state.substitutions.isEmpty())
+			if (state->substitutions.isEmpty())
 			{
 				outputLine(*runtime, QStringLiteral("No substitutions."));
 				return;
 			}
-			for (auto it = state.substitutions.constBegin(); it != state.substitutions.constEnd(); ++it)
+			for (auto it = state->substitutions.constBegin(); it != state->substitutions.constEnd(); ++it)
 				outputLine(*runtime, QStringLiteral("%1 == %2").arg(it.key(), it.value()));
 			return;
 		}
 		if (lower == QStringLiteral("clear"))
 		{
-			state.substitutions.clear();
-			saveSubstitutions(runtime, state);
+			state->substitutions.clear();
+			saveSubstitutions(runtime, *state);
 			outputLine(*runtime, QStringLiteral("Substitutions cleared."));
 			return;
 		}
 		if (lower == QStringLiteral("save"))
 		{
-			outputLine(*runtime, saveSubstitutions(runtime, state)
+			outputLine(*runtime, saveSubstitutions(runtime, *state)
 			                         ? QStringLiteral("Substitutions saved.")
 			                         : QStringLiteral("Unable to save substitutions."));
 			return;
@@ -662,8 +668,8 @@ namespace
 		if (lower.startsWith(QStringLiteral("remove ")))
 		{
 			const QString key = trimmed.mid(7).trimmed();
-			state.substitutions.remove(key);
-			saveSubstitutions(runtime, state);
+			state->substitutions.remove(key);
+			saveSubstitutions(runtime, *state);
 			outputLine(*runtime, QStringLiteral("Substitution removed."));
 			return;
 		}
@@ -683,8 +689,8 @@ namespace
 				outputLine(*runtime, QStringLiteral("Substitution text cannot be empty."));
 				return;
 			}
-			state.substitutions.insert(key, value);
-			saveSubstitutions(runtime, state);
+			state->substitutions.insert(key, value);
+			saveSubstitutions(runtime, *state);
 			outputLine(*runtime, QStringLiteral("Substitution added."));
 			return;
 		}
@@ -693,16 +699,16 @@ namespace
 
 	QString substitutionAppliedText(const WorldRuntime *runtime, const QString &text, bool &skip)
 	{
-		skip                   = false;
-		MushReaderState &state = stateFor(runtime);
-		loadSubstitutions(runtime, state);
-		if (!state.substitutionsEnabled)
+		skip                                         = false;
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		loadSubstitutions(runtime, *state);
+		if (!state->substitutionsEnabled)
 		{
 			skip = true;
 			return {};
 		}
-		const auto it = state.substitutions.constFind(text);
-		if (it == state.substitutions.constEnd())
+		const auto it = state->substitutions.constFind(text);
+		if (it == state->substitutions.constEnd())
 			return text;
 		if (it.value() == QStringLiteral("!skip"))
 		{
@@ -1865,18 +1871,18 @@ namespace QMudNativePluginRegistry
 		}
 		if (lower == QStringLiteral("tts"))
 		{
-			MushReaderState &state = stateFor(runtime);
-			bool             enabled;
-			if (state.mushReaderPluginEnabled)
+			const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+			bool                                   enabled;
+			if (state->mushReaderPluginEnabled)
 			{
-				state.passiveSpeechEnabled    = false;
-				state.mushReaderSpeechEnabled = !state.mushReaderSpeechEnabled;
-				enabled                       = state.mushReaderSpeechEnabled;
+				state->passiveSpeechEnabled    = false;
+				state->mushReaderSpeechEnabled = !state->mushReaderSpeechEnabled;
+				enabled                        = state->mushReaderSpeechEnabled;
 			}
 			else
 			{
-				state.passiveSpeechEnabled = !state.passiveSpeechEnabled;
-				enabled                    = state.passiveSpeechEnabled;
+				state->passiveSpeechEnabled = !state->passiveSpeechEnabled;
+				enabled                     = state->passiveSpeechEnabled;
 			}
 			runtime->notifyNativePluginStateChanged();
 			stopSpeech(runtime);
@@ -2032,8 +2038,8 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime || (type != 0 && type != 1) || text.trimmed().isEmpty())
 			return;
-		MushReaderState &state = stateFor(runtime);
-		if (!effectiveMushReaderSpeechEnabled(state))
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		if (!effectiveMushReaderSpeechEnabled(*state))
 			return;
 		bool    skip = false;
 		QString line = substitutionAppliedText(runtime, text, skip);
@@ -2045,8 +2051,8 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime || text.trimmed().isEmpty())
 			return;
-		MushReaderState &state = stateFor(runtime);
-		if (effectiveMushReaderSpeechEnabled(state))
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		if (effectiveMushReaderSpeechEnabled(*state))
 			speak(runtime, text, false);
 	}
 
@@ -2054,12 +2060,13 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime)
 			return;
-		MushReaderState &state       = stateFor(runtime);
-		const bool stopPassiveSpeech = enable && !state.mushReaderPluginEnabled && state.passiveSpeechEnabled;
-		state.mushReaderPluginEnabled = enable;
-		state.mushReaderSpeechEnabled = enable;
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		const bool                             stopPassiveSpeech =
+		    enable && !state->mushReaderPluginEnabled && state->passiveSpeechEnabled;
+		state->mushReaderPluginEnabled = enable;
+		state->mushReaderSpeechEnabled = enable;
 		if (enable)
-			state.passiveSpeechEnabled = false;
+			state->passiveSpeechEnabled = false;
 		if (stopPassiveSpeech)
 			stopSpeech(runtime);
 		if (!enable)
@@ -2079,8 +2086,8 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime)
 			return;
-		MushReaderState &state     = stateFor(runtime);
-		state.passiveSpeechEnabled = enable && !state.mushReaderPluginEnabled;
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		state->passiveSpeechEnabled                  = enable && !state->mushReaderPluginEnabled;
 		if (!enable)
 			stopSpeech(runtime);
 	}
@@ -2098,18 +2105,32 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime)
 			return;
-		MushReaderState &state = stateFor(runtime);
-		installMushReaderAccelerator(runtime, state);
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		installMushReaderAccelerator(runtime, *state);
 	}
 
 	void discardRuntimeState(const WorldRuntime *runtime)
 	{
-		QMutexLocker locker(&stateMutex());
-		states().erase(runtime);
-		luaAudioNativeStates().erase(runtime);
+		std::shared_ptr<MushReaderState> removedMushReaderState;
+		{
+			QMutexLocker locker(&stateMutex());
+			if (const auto it = states().find(runtime); it != states().end())
+			{
+				removedMushReaderState = std::move(it->second);
+				states().erase(it);
+			}
+			luaAudioNativeStates().erase(runtime);
+		}
+		removedMushReaderState.reset();
 	}
 
 #ifdef QMUD_NATIVEPLUGINREGISTRY_TEST_HOOKS
+	std::size_t mushReaderTestBackendCount(const WorldRuntime *runtime)
+	{
+		const std::shared_ptr<const MushReaderState> state = existingStateFor(runtime);
+		return state ? state->backends.size() : 0U;
+	}
+
 	void setTestSpeechSink(std::function<void(const TestSpeechEvent &)> sink)
 	{
 		QMutexLocker locker(&stateMutex());

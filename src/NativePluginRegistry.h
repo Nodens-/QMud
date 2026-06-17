@@ -17,6 +17,7 @@
 #include <QVariant>
 #include <QVector>
 #include <atomic>
+#include <cstddef>
 #include <functional>
 #include <memory>
 
@@ -416,7 +417,13 @@ namespace QMudNativePluginRegistry
 	 * @brief Installs a test-only speech sink that bypasses platform reader backends.
 	 * @param sink Event receiver; empty sink restores normal backend routing.
 	 */
-	void setTestSpeechSink(std::function<void(const TestSpeechEvent &)> sink);
+	void                      setTestSpeechSink(std::function<void(const TestSpeechEvent &)> sink);
+	/**
+	 * @brief Returns the number of initialized MushReader speech backends for tests.
+	 * @param runtime Runtime to inspect.
+	 * @return Initialized backend count, or zero when no speech state exists.
+	 */
+	[[nodiscard]] std::size_t mushReaderTestBackendCount(const WorldRuntime *runtime);
 #endif
 } // namespace QMudNativePluginRegistry
 

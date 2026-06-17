@@ -728,6 +728,21 @@ class tst_NativePluginRegistry : public QObject
 			QCOMPARE(events.size(), 6);
 		}
 
+		void silentStopPathsDoNotInitializeSpeechBackends()
+		{
+			WorldRuntime runtime;
+			QCOMPARE(QMudNativePluginRegistry::mushReaderTestBackendCount(&runtime), std::size_t{0});
+
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, false);
+			QCOMPARE(QMudNativePluginRegistry::mushReaderTestBackendCount(&runtime), std::size_t{0});
+
+			QMudNativePluginRegistry::setMushReaderPassiveSpeechEnabled(&runtime, false);
+			QCOMPARE(QMudNativePluginRegistry::mushReaderTestBackendCount(&runtime), std::size_t{0});
+
+			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts_stop")));
+			QCOMPARE(QMudNativePluginRegistry::mushReaderTestBackendCount(&runtime), std::size_t{0});
+		}
+
 		void runtimeSetupRegistersNativeAccelerator()
 		{
 			WorldRuntime runtime;
