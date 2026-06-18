@@ -1251,6 +1251,11 @@ class WorldRuntime : public QObject
 		 */
 		void                      notifyNativePluginStateChanged();
 		/**
+		 * @brief Returns whether MushReader owns live speech for this runtime.
+		 * @return `true` when the native MushReader shim is installed or currently enabled for the runtime.
+		 */
+		[[nodiscard]] bool        hasMushReaderLiveSpeechOwner() const;
+		/**
 		 * @brief Lists installed plugin ids in current order.
 		 * @return Plugin id list.
 		 */

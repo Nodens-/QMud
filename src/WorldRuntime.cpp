@@ -17132,6 +17132,18 @@ void WorldRuntime::notifyNativePluginStateChanged()
 	invalidateLuaCallbackDispatchSnapshot();
 }
 
+bool WorldRuntime::hasMushReaderLiveSpeechOwner() const
+{
+	if (QThread::currentThread() != thread())
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), false,
+		                          [this] { return hasMushReaderLiveSpeechOwner(); });
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::hasMushReaderLiveSpeechOwner");
+	const QString mushReaderId = QMudNativePluginRegistry::mushReaderPluginId();
+	return findPluginIndex(m_plugins, mushReaderId) >= 0 ||
+	       QMudNativePluginRegistry::isMushReaderPluginEnabled(this);
+}
+
 void WorldRuntime::firePluginPartialLine(const QString &text)
 {
 	callPluginCallbacks(QStringLiteral("OnPluginPartialLine"), text, true);

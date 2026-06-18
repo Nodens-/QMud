@@ -88,6 +88,7 @@ namespace
 	bool                                g_connected{false};
 	bool                                g_nawsNegotiated{false};
 	bool                                g_useFakeAppController{false};
+	bool                                g_hasMushReaderLiveSpeechOwner{false};
 	QHash<quint64, quint16>             g_virtualKeyMap;
 	QHash<qint64, int>                  g_acceleratorCommands;
 	int                                 g_acceleratorExecutionCount{0};
@@ -248,6 +249,7 @@ namespace
 		g_connected                       = false;
 		g_nawsNegotiated                  = false;
 		g_useFakeAppController            = false;
+		g_hasMushReaderLiveSpeechOwner    = false;
 		g_virtualKeyMap.clear();
 		g_acceleratorCommands.clear();
 		g_acceleratorExecutionCount      = 0;
@@ -996,6 +998,11 @@ void WorldRuntime::notifyWorldOutputResized()
 	++g_worldOutputResizedNotifyCount;
 }
 
+bool WorldRuntime::hasMushReaderLiveSpeechOwner() const
+{
+	return g_hasMushReaderLiveSpeechOwner;
+}
+
 void WorldRuntime::refreshNawsWindowSize()
 {
 }
@@ -1583,6 +1590,44 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 2);
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 2);
 			QCOMPARE(g_accessibleValueChangedCount, 0);
+		}
+
+		void worldOutputAccessibleLiveEventsSuppressedWhenMushReaderOwnsSpeech()
+		{
+			qmudInstallWorldOutputAccessibility();
+			resetTestState();
+			g_hasMushReaderLiveSpeechOwner = true;
+
+			WorldView view;
+			view.resize(640, 360);
+			view.setRuntime(fakeRuntimePointer());
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			QCOMPARE(textInterface->characterCount(), 0);
+
+			ScopedAccessibleUpdateCapture capture;
+
+			appendFakeRuntimeOutputText(view, QStringLiteral("alpha"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(g_accessibleValueChangedCount, 0);
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha"));
+
+			appendFakeRuntimeOutputText(view, QStringLiteral("beta"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(g_accessibleValueChangedCount, 0);
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha\nbeta"));
 		}
 
 		void worldOutputAccessibleNonAppendMutationsUseContentChangedFallback()

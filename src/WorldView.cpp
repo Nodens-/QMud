@@ -3155,7 +3155,8 @@ void WorldView::notifyAccessibleOutputPresented(const QVector<NativeOutputRender
 	const bool exactTailAppend = m_accessibleOutputPendingTailAppend &&
 	                             (m_nativeRenderCacheDelta.kind == NativeRenderCacheDeltaKind::TailAppend ||
 	                              !m_nativeRenderLineCacheFromRuntime);
-	auto       announceCanvasText = [this](const QString &message)
+	const bool suppressLiveAccessibilityEvents = m_runtime && m_runtime->hasMushReaderLiveSpeechOwner();
+	auto       announceCanvasText              = [this](const QString &message)
 	{
 		const QString announcement = trimLeadingAnnouncementBreaks(message);
 		if (!m_nativeOutputCanvas || !m_nativeOutputCanvas->isVisible() || announcement.isEmpty())
@@ -3164,7 +3165,8 @@ void WorldView::notifyAccessibleOutputPresented(const QVector<NativeOutputRender
 		event.setPoliteness(QAccessible::AnnouncementPoliteness::Polite);
 		QAccessible::updateAccessibility(&event);
 	};
-	if (currentCharacterCount > m_accessibleOutputCharacterCount && exactTailAppend)
+	if (!suppressLiveAccessibilityEvents && currentCharacterCount > m_accessibleOutputCharacterCount &&
+	    exactTailAppend)
 	{
 		const QString insertedText = map.text(m_accessibleOutputCharacterCount, currentCharacterCount);
 		if (!insertedText.isEmpty())
@@ -3178,7 +3180,7 @@ void WorldView::notifyAccessibleOutputPresented(const QVector<NativeOutputRender
 			announceCanvasText(insertedText);
 		}
 	}
-	else if (m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible())
+	else if (!suppressLiveAccessibilityEvents && m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible())
 	{
 		if (m_accessibleOutputText != currentText)
 		{
