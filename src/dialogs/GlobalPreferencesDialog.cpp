@@ -143,9 +143,11 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 	root->addLayout(tabRows);
 
 	m_tabs = new QTabWidget(this);
+	m_tabs->setFocusPolicy(Qt::NoFocus);
 	m_tabs->setUsesScrollButtons(false);
 	m_tabs->tabBar()->setExpanding(false);
 	m_tabs->tabBar()->setElideMode(Qt::ElideNone);
+	m_tabs->tabBar()->setFocusPolicy(Qt::NoFocus);
 	m_tabs->tabBar()->hide();
 	m_tabs->addTab(buildWorldsPage(), QStringLiteral("Worlds"));
 	m_tabs->addTab(buildGeneralPage(), QStringLiteral("General"));
@@ -1498,6 +1500,7 @@ QWidget *GlobalPreferencesDialog::buildLuaPage()
 	layout->addWidget(label);
 
 	m_luaScript = new QTextEdit;
+	m_luaScript->setTabChangesFocus(true);
 	layout->addWidget(m_luaScript);
 
 	auto *bottom     = new QHBoxLayout;
@@ -1516,6 +1519,7 @@ QWidget *GlobalPreferencesDialog::buildLuaPage()
 		                 dlg.setWindowTitle(QStringLiteral("Edit Lua Script"));
 		                 auto *layout = new QVBoxLayout(&dlg);
 		                 auto *editor = new QTextEdit(&dlg);
+		                 editor->setTabChangesFocus(true);
 		                 editor->setPlainText(m_luaScript ? m_luaScript->toPlainText() : QString());
 		                 layout->addWidget(editor);
 		                 auto *buttons =
