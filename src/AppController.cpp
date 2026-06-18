@@ -2736,7 +2736,7 @@ QString AppController::worldSessionStateFilePath(const WorldRuntime *runtime) co
 	    .filePath(worldId + QString::fromLatin1(kWorldSessionStateSuffix));
 }
 
-void AppController::saveWorldSessionStateAsync(const WorldRuntime *runtime, const WorldView *view,
+void AppController::saveWorldSessionStateAsync(WorldRuntime *runtime, const WorldView *view,
                                                std::function<void(bool, const QString &)> completion) const
 {
 	const auto completionFn =
@@ -2768,10 +2768,13 @@ void AppController::saveWorldSessionStateAsync(const WorldRuntime *runtime, cons
 
 	QMudWorldSessionState::WorldSessionStateData state;
 	const TelnetProcessor::MxpSessionState       mxpState = runtime->mxpSessionState();
-	state.hasOutputBuffer                                 = persistOutputBuffer;
-	state.hasCommandHistory                               = persistCommandHistory;
-	state.hasCustomMxpElements                            = runtime->customElementCount() > 0;
-	state.hasMxpSessionState                              = mxpState.enabled;
+	QPointer<WorldRuntime>                       runtimeGuard(runtime);
+	if (persistOutputBuffer)
+		runtime->setSessionStateOutputBufferSealed(true);
+	state.hasOutputBuffer      = persistOutputBuffer;
+	state.hasCommandHistory    = persistCommandHistory;
+	state.hasCustomMxpElements = runtime->customElementCount() > 0;
+	state.hasMxpSessionState   = mxpState.enabled;
 	if (persistOutputBuffer)
 		state.outputLines = runtime->lines();
 	if (persistCommandHistory)
@@ -2782,7 +2785,7 @@ void AppController::saveWorldSessionStateAsync(const WorldRuntime *runtime, cons
 		state.mxpSessionState = mxpState;
 
 	QThreadPool::globalInstance()->start(
-	    [filePath, state = std::move(state), completionFn]
+	    [filePath, state = std::move(state), completionFn, runtimeGuard, persistOutputBuffer]
 	    {
 		    QString error;
 		    bool    ok = true;
@@ -2794,8 +2797,10 @@ void AppController::saveWorldSessionStateAsync(const WorldRuntime *runtime, cons
 
 		    QMetaObject::invokeMethod(
 		        qApp,
-		        [completionFn, ok, error]
+		        [completionFn, runtimeGuard, persistOutputBuffer, ok, error]
 		        {
+			        if (persistOutputBuffer && runtimeGuard)
+				        runtimeGuard->setSessionStateOutputBufferSealed(false);
 			        if (completionFn && *completionFn)
 				        (*completionFn)(ok, error);
 		        },
@@ -8960,10 +8965,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 
 		WorldPreferencesDialog dlg(runtime, view, m_mainWindow);
 		dlg.setInitialPage(page);
-		if (dlg.exec() == QDialog::Accepted)
-		{
-			saveWorldSessionStateAsync(runtime, view, [](const bool, const QString &) {});
-		}
+		dlg.exec();
 		m_mainWindow->updateStatusBar();
 		m_mainWindow->refreshActionState();
 	}
@@ -10751,7 +10753,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 
 		if (view->hasOutputSelection())
 		{
-			const QVector<WorldRuntime::LineEntry> &lines = runtime->lines();
+			const auto &lines = runtime->lines();
 			if (const int lineIndex = view->outputSelectionStartLine() - 1;
 			    lineIndex >= 0 && lineIndex < lines.size())
 			{
@@ -10879,8 +10881,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			return;
 		constexpr int kBookmarkFlag = 0x08;
 		bool          isBookmarked  = false;
-		if (const QVector<WorldRuntime::LineEntry> &lines = runtime->lines();
-		    line >= 1 && line <= lines.size())
+		if (const auto &lines = runtime->lines(); line >= 1 && line <= lines.size())
 			isBookmarked = lines.at(line - 1).flags & kBookmarkFlag;
 		runtime->bookmarkLine(line, !isBookmarked);
 		view->selectOutputLine(line - 1);
@@ -13090,7 +13091,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			}
 		};
 
-		auto printRuntimeLines = [&](const QVector<WorldRuntime::LineEntry> &lines)
+		auto printRuntimeLines = [&](const auto &lines)
 		{
 			if (lines.isEmpty())
 				return;
@@ -13831,8 +13832,8 @@ void AppController::handleLogSession() const
 
 	if (lines > 0)
 	{
-		const QVector<WorldRuntime::LineEntry> &buffer = runtime->lines();
-		const int start = buffer.size() > lines ? static_cast<int>(buffer.size()) - lines : 0;
+		const auto &buffer = runtime->lines();
+		const int   start  = buffer.size() > lines ? static_cast<int>(buffer.size()) - lines : 0;
 		for (int i = start; i < buffer.size(); ++i)
 		{
 			const WorldRuntime::LineEntry &entry = buffer.at(i);

@@ -37,6 +37,27 @@ namespace
 		    routine, [](const QChar ch)
 		    { return ch.isLetterOrNumber() || ch == QLatin1Char('_') || ch == QLatin1Char('.'); });
 	}
+	template <typename Lines>
+	MxpHyperlinkDispatchPolicy resolveMxpHyperlinkDispatchPolicyForLines(const Lines   &lines,
+	                                                                     const QString &normalizedHref)
+	{
+		for (qsizetype i = lines.size(); i > 0; --i)
+		{
+			const WorldRuntime::LineEntry &line = lines.at(i - 1);
+			for (const WorldRuntime::StyleSpan &span : line.spans)
+			{
+				if (decodeMxpActionText(span.action) != normalizedHref)
+					continue;
+				if (span.actionType == WorldRuntime::ActionPrompt)
+					return MxpHyperlinkDispatchPolicy::PromptInput;
+				if (span.actionType == WorldRuntime::ActionSend && (line.flags & WorldRuntime::LineNote) != 0)
+					return MxpHyperlinkDispatchPolicy::CommandProcessing;
+				break;
+			}
+		}
+
+		return MxpHyperlinkDispatchPolicy::DirectSend;
+	}
 } // namespace
 
 QString decodeMxpActionText(QString text)
@@ -153,20 +174,12 @@ bool parsePluginHyperlinkCall(const QString &action, PluginHyperlinkCall &parsed
 MxpHyperlinkDispatchPolicy resolveMxpHyperlinkDispatchPolicy(const QVector<WorldRuntime::LineEntry> &lines,
                                                              const QString &normalizedHref)
 {
-	for (qsizetype i = lines.size(); i > 0; --i)
-	{
-		const WorldRuntime::LineEntry &line = lines.at(i - 1);
-		for (const WorldRuntime::StyleSpan &span : line.spans)
-		{
-			if (decodeMxpActionText(span.action) != normalizedHref)
-				continue;
-			if (span.actionType == WorldRuntime::ActionPrompt)
-				return MxpHyperlinkDispatchPolicy::PromptInput;
-			if (span.actionType == WorldRuntime::ActionSend && (line.flags & WorldRuntime::LineNote) != 0)
-				return MxpHyperlinkDispatchPolicy::CommandProcessing;
-			break;
-		}
-	}
+	return resolveMxpHyperlinkDispatchPolicyForLines(lines, normalizedHref);
+}
 
-	return MxpHyperlinkDispatchPolicy::DirectSend;
+MxpHyperlinkDispatchPolicy
+resolveMxpHyperlinkDispatchPolicy(const IndexedRingBuffer<WorldRuntime::LineEntry> &lines,
+                                  const QString                                    &normalizedHref)
+{
+	return resolveMxpHyperlinkDispatchPolicyForLines(lines, normalizedHref);
 }

@@ -9025,6 +9025,8 @@ void WorldRuntime::bookmarkLine(int lineNumber, bool set)
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::bookmarkLine");
+	if (m_sessionStateOutputBufferSealed)
+		return;
 	if (lineNumber <= 0 || lineNumber > m_lines.size())
 		return;
 
@@ -13087,12 +13089,14 @@ void WorldRuntime::deleteLines(int count)
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::deleteLines");
+	if (m_sessionStateOutputBufferSealed)
+		return;
 	if (count <= 0 || m_lines.isEmpty())
 		return;
 	if (count >= m_lines.size())
 		m_lines.clear();
 	else
-		m_lines.erase(m_lines.end() - count, m_lines.end());
+		m_lines.remove(m_lines.size() - count, count);
 	invalidateLuaCallbackLineBufferSnapshot();
 	if (m_view)
 		m_view->rebuildOutputFromLines(m_lines);
@@ -13107,6 +13111,8 @@ void WorldRuntime::deleteOutput()
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::deleteOutput");
+	if (m_sessionStateOutputBufferSealed)
+		return;
 	m_lines.clear();
 	invalidateLuaCallbackLineBufferSnapshot();
 	if (m_view)
@@ -22408,6 +22414,9 @@ QString WorldRuntime::comments() const
 
 void WorldRuntime::addLine(const QString &text, int flags, bool hardReturn, const QDateTime &time)
 {
+	if (m_sessionStateOutputBufferSealed)
+		return;
+
 	LineEntry entry;
 	entry.text       = text;
 	entry.flags      = flags;
@@ -22436,6 +22445,9 @@ void WorldRuntime::addLine(const QString &text, int flags, bool hardReturn, cons
 void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSpan> &spans, bool hardReturn,
                            const QDateTime &time)
 {
+	if (m_sessionStateOutputBufferSealed)
+		return;
+
 	LineEntry entry;
 	entry.text       = text;
 	entry.flags      = flags;
@@ -22507,12 +22519,15 @@ int WorldRuntime::maxOutputLinesLimit() const
 
 int WorldRuntime::enforceOutputLineLimit()
 {
+	if (m_sessionStateOutputBufferSealed)
+		return 0;
+
 	const int maxLines = maxOutputLinesLimit();
 	if (maxLines <= 0 || m_lines.size() <= maxLines)
 		return 0;
 
 	const int removed = safeQSizeToInt(m_lines.size() - maxLines);
-	m_lines.erase(m_lines.begin(), m_lines.begin() + removed);
+	m_lines.remove(0, removed);
 	invalidateLuaCallbackLineBufferSnapshot();
 
 	if (m_lastGoTo > m_lines.size())
@@ -22545,13 +22560,33 @@ int WorldRuntime::enforceOutputLineLimit()
 	return removed;
 }
 
-const QVector<WorldRuntime::LineEntry> &WorldRuntime::lines() const
+const IndexedRingBuffer<WorldRuntime::LineEntry> &WorldRuntime::lines() const
 {
 	return m_lines;
 }
 
-void WorldRuntime::replaceOutputLines(const QVector<LineEntry> &lines)
+void WorldRuntime::setSessionStateOutputBufferSealed(const bool sealed)
 {
+	if (QThread::currentThread() != thread())
+	{
+		qmudInvokeMethodChecked(this, [this, sealed] { setSessionStateOutputBufferSealed(sealed); });
+		return;
+	}
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setSessionStateOutputBufferSealed");
+	m_sessionStateOutputBufferSealed = sealed;
+}
+
+bool WorldRuntime::isSessionStateOutputBufferSealed() const
+{
+	return m_sessionStateOutputBufferSealed;
+}
+
+void WorldRuntime::replaceOutputLines(const IndexedRingBuffer<LineEntry> &lines)
+{
+	if (m_sessionStateOutputBufferSealed)
+		return;
+
 	m_lines = lines;
 	invalidateLuaCallbackLineBufferSnapshot();
 
@@ -22566,8 +22601,16 @@ void WorldRuntime::replaceOutputLines(const QVector<LineEntry> &lines)
 		m_view->restoreOutputFromPersistedLines(m_lines);
 }
 
+void WorldRuntime::replaceOutputLines(const QVector<LineEntry> &lines)
+{
+	replaceOutputLines(IndexedRingBuffer<LineEntry>(lines));
+}
+
 void WorldRuntime::finalizePendingInputLineHardReturn()
 {
+	if (m_sessionStateOutputBufferSealed)
+		return;
+
 	if (m_lines.isEmpty())
 		return;
 
@@ -22583,6 +22626,9 @@ void WorldRuntime::finalizePendingInputLineHardReturn()
 
 void WorldRuntime::clearLastLineHardReturn()
 {
+	if (m_sessionStateOutputBufferSealed)
+		return;
+
 	if (m_lines.isEmpty())
 		return;
 
@@ -22626,6 +22672,9 @@ void WorldRuntime::beginIncomingLineLuaContext(const QString &text, int flags,
 
 bool WorldRuntime::reserveIncomingLineLuaContextInBuffer()
 {
+	if (m_sessionStateOutputBufferSealed)
+		return false;
+
 	if (!m_luaContextLineActive)
 		return false;
 	if (m_luaContextLineBuffered)
@@ -22648,6 +22697,9 @@ bool WorldRuntime::reserveIncomingLineLuaContextInBuffer()
 bool WorldRuntime::updateBufferedIncomingLineLuaContext(const QString &text, int flags,
                                                         const QVector<StyleSpan> &spans, bool hardReturn)
 {
+	if (m_sessionStateOutputBufferSealed)
+		return false;
+
 	if (!m_luaContextLineActive || !m_luaContextLineBuffered)
 		return false;
 	if (m_luaContextLineBufferIndex <= 0 || m_luaContextLineBufferIndex > m_lines.size())
@@ -22667,6 +22719,9 @@ bool WorldRuntime::updateBufferedIncomingLineLuaContext(const QString &text, int
 
 bool WorldRuntime::removeBufferedIncomingLineLuaContext()
 {
+	if (m_sessionStateOutputBufferSealed)
+		return false;
+
 	if (!m_luaContextLineActive || !m_luaContextLineBuffered)
 		return false;
 	if (m_luaContextLineBufferIndex <= 0 || m_luaContextLineBufferIndex > m_lines.size())
@@ -22683,6 +22738,9 @@ bool WorldRuntime::removeBufferedIncomingLineLuaContext()
 
 bool WorldRuntime::hideBufferedIncomingLineLuaContextForReplacement()
 {
+	if (m_sessionStateOutputBufferSealed)
+		return false;
+
 	if (!m_luaContextLineActive || !m_luaContextLineBuffered)
 		return false;
 	if (m_luaContextLineBufferIndex <= 0 || m_luaContextLineBufferIndex > m_lines.size())
@@ -22707,6 +22765,9 @@ qint64 WorldRuntime::incomingLineLuaContextAbsoluteNumber() const
 
 bool WorldRuntime::removeHiddenLuaContextLineByAbsoluteNumber(const qint64 absoluteLineNumber)
 {
+	if (m_sessionStateOutputBufferSealed)
+		return false;
+
 	if (absoluteLineNumber <= 0)
 		return false;
 	for (int i = 0; i < m_lines.size(); ++i)
@@ -22842,6 +22903,9 @@ bool WorldRuntime::writeLuaCallbackOutputAtLineAnchor(const qint64 anchorLineNum
                                                       int flags, const QVector<StyleSpan> &spans,
                                                       const bool hardReturn)
 {
+	if (m_sessionStateOutputBufferSealed)
+		return false;
+
 	if (text.isEmpty() && spans.isEmpty() && !hardReturn)
 		return false;
 

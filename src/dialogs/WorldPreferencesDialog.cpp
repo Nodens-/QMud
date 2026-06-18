@@ -9753,10 +9753,10 @@ void WorldPreferencesDialog::calculateMemoryUsage(const bool allowProgress)
 	if (!m_runtime || !m_infoMemoryUsed || !m_infoBufferLines)
 		return;
 
-	const QVector<WorldRuntime::LineEntry> &lines     = m_runtime->lines();
-	const int                               lineCount = saturatingToInt(lines.size());
-	const int                               maxLines  = worldMaxOutputLines(m_runtime->worldAttributes());
-	QProgressDialog                        *progress  = nullptr;
+	const auto      &lines     = m_runtime->lines();
+	const int        lineCount = saturatingToInt(lines.size());
+	const int        maxLines  = worldMaxOutputLines(m_runtime->worldAttributes());
+	QProgressDialog *progress  = nullptr;
 	if (allowProgress && lineCount > 1000)
 	{
 		progress = new QProgressDialog(QStringLiteral("Calculating memory usage..."),
@@ -9972,9 +9972,9 @@ void WorldPreferencesDialog::populateInfo()
 		        ? m_runtime->dateSaved().toString(QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"))
 		        : QStringLiteral("-"));
 
-	const QVector<WorldRuntime::LineEntry> &lines     = m_runtime->lines();
-	const int                               lineCount = saturatingToInt(lines.size());
-	const int                               maxLines  = worldMaxOutputLines(m_runtime->worldAttributes());
+	const auto &lines     = m_runtime->lines();
+	const int   lineCount = saturatingToInt(lines.size());
+	const int   maxLines  = worldMaxOutputLines(m_runtime->worldAttributes());
 	if (m_infoBufferLines)
 	{
 		if (maxLines > 0)

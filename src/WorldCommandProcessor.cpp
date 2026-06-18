@@ -2845,7 +2845,7 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 		// the previous non-note line.
 		if (m_runtime)
 		{
-			if (const QVector<WorldRuntime::LineEntry> &lines = m_runtime->lines();
+			if (const auto &lines = m_runtime->lines();
 			    !lines.isEmpty() && (lines.last().flags & WorldRuntime::LineNote) == 0)
 			{
 				m_runtime->outputText(QString(), true, true);

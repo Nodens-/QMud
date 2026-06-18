@@ -970,7 +970,7 @@ class AppController : public QObject
 		 * @param view World view.
 		 * @param completion Completion callback executed on the GUI thread.
 		 */
-		void saveWorldSessionStateAsync(const WorldRuntime *runtime, const WorldView *view,
+		void saveWorldSessionStateAsync(WorldRuntime *runtime, const WorldView *view,
 		                                std::function<void(bool, const QString &)> completion) const;
 		/**
 		 * @brief Loads one world's session state on a worker thread and applies it.

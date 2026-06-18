@@ -122,7 +122,7 @@ namespace
 		return size > kMaxInt ? std::numeric_limits<int>::max() : static_cast<int>(size);
 	}
 
-	QStringList logicalOutputLinesFromEntries(const QVector<WorldRuntime::LineEntry> &entries)
+	template <typename Entries> QStringList logicalOutputLinesFromEntries(const Entries &entries)
 	{
 		QStringList lines;
 		QString     currentLine;
@@ -2061,7 +2061,7 @@ end
 	QVERIFY(!result.deferredRuntimeMutationBatches.isEmpty());
 	executeDeferredMutations(result);
 
-	const QVector<WorldRuntime::LineEntry> &lines = runtime.lines();
+	const auto &lines = runtime.lines();
 	QCOMPARE(logicalOutputLinesFromEntries(lines), QStringList({QStringLiteral("[435, 1226]"), prompt}));
 	teardownWorkerEngine(executor, engine);
 }

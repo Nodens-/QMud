@@ -11,6 +11,7 @@
 #define QMUD_WORLDRUNTIME_H
 
 #include "AnsiSgrParseUtils.h"
+#include "IndexedRingBuffer.h"
 #include "LuaExecutor.h"
 #include "MemoryImageDecodeCacheUtils.h"
 #include "MiniWindow.h"
@@ -1447,12 +1448,31 @@ class WorldRuntime : public QObject
 		 * @brief Returns immutable output line buffer.
 		 * @return Immutable buffered line list.
 		 */
-		[[nodiscard]] const QVector<LineEntry> &lines() const;
+		[[nodiscard]] const IndexedRingBuffer<LineEntry> &lines() const;
+		/**
+		 * @brief Enables/disables the session-state output-buffer save seal.
+		 * @param sealed Seal state.
+		 *
+		 * While sealed, runtime line-buffer mutations are ignored so an async session-state
+		 * writer can serialize a shallow ring-buffer snapshot without detaching the backing
+		 * store.
+		 */
+		void                                              setSessionStateOutputBufferSealed(bool sealed);
+		/**
+		 * @brief Returns whether the output buffer is sealed for session-state persistence.
+		 * @return `true` when line-buffer mutations are currently ignored.
+		 */
+		[[nodiscard]] bool                                isSessionStateOutputBufferSealed() const;
 		/**
 		 * @brief Replaces buffered output lines and rebuilds the attached view.
 		 * @param lines Replacement buffered output lines.
 		 */
-		void                                    replaceOutputLines(const QVector<LineEntry> &lines);
+		void replaceOutputLines(const IndexedRingBuffer<LineEntry> &lines);
+		/**
+		 * @brief Replaces buffered output lines and rebuilds the attached view.
+		 * @param lines Replacement buffered output lines.
+		 */
+		void replaceOutputLines(const QVector<LineEntry> &lines);
 		/**
 		 * @brief Marks the last buffered input line as hard-return terminated when pending.
 		 *
@@ -1460,14 +1480,14 @@ class WorldRuntime : public QObject
 		 * keeping echoed commands on the same line) so runtime line state remains consistent
 		 * with the rendered document after rebuilds.
 		 */
-		void                                    finalizePendingInputLineHardReturn();
+		void finalizePendingInputLineHardReturn();
 		/**
 		 * @brief Clears hard-return termination flag on the last buffered line when set.
 		 *
 		 * Used by keep-on-same-line echo flow when the view consumes a trailing
 		 * line break from the existing rendered output.
 		 */
-		void                                    clearLastLineHardReturn();
+		void clearLastLineHardReturn();
 		/**
 		 * @brief Begins temporary incoming-line context for Lua callbacks.
 		 * @param text Incoming line text.
@@ -5613,7 +5633,8 @@ class WorldRuntime : public QObject
 		QList<Include>                                  m_includes;
 		QList<Script>                                   m_scripts;
 		QString                                         m_comments;
-		QVector<LineEntry>                              m_lines;
+		IndexedRingBuffer<LineEntry>                    m_lines;
+		bool                                            m_sessionStateOutputBufferSealed{false};
 		QMap<qint64, int>                               m_acceleratorKeyToCommand;
 		QMap<int, AcceleratorEntry>                     m_commandToAcceleratorEntry;
 		int                                             m_nextAcceleratorCommand{kAcceleratorFirstCommand};

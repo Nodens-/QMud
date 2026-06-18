@@ -60,45 +60,45 @@ namespace
 	using QMudOutputWrapUtils::splitOutputTextAtLineBreaks;
 	using QMudOutputWrapUtils::wrapPlainLineForColumn;
 	using QMudOutputWrapUtils::wrapStyledLineForColumn;
-	QMap<QString, QString>              g_worldAttrs;
-	QMap<QString, QString>              g_worldMultilineAttrs;
-	QMap<QString, QVariant>             g_globalOptions;
-	QVector<WorldRuntime::LineEntry>    g_runtimeLines;
-	QList<WorldRuntime::Macro>          g_testMacros;
-	WorldRuntime::TextRectangleSettings g_textRectangle;
-	int                                 g_outputFontHeight{0};
-	int                                 g_drawOutputNotifyCount{0};
-	int                                 g_lastDrawOutputFirstLine{0};
-	int                                 g_lastDrawOutputAdjustedScroll{0};
-	int                                 g_worldOutputResizedNotifyCount{0};
-	QVector<MiniWindow>                 g_testMiniWindows;
-	int                                 g_worldHotspotCallbackCount{0};
-	QString                             g_lastWorldHotspotFunction;
-	QString                             g_lastWorldHotspotId;
-	long                                g_lastWorldHotspotFlags{0};
-	bool                                g_lastWorldHotspotQueueWhenBusy{false};
-	QVector<QString>                    g_worldHotspotCallbackFunctions;
-	QVector<bool>                       g_worldHotspotCallbackQueueWhenBusy;
-	QPoint                              g_lastResizeHotspotPressOffset;
-	QSize                               g_expectedReleaseResizeSize;
-	QPoint                              g_expectedReleaseMousePosition;
-	int                                 g_resizeMoveCallbackCount{0};
-	bool                                g_releaseCallbackSawFlushedResize{false};
-	WorldView                          *g_runtimeView{nullptr};
-	unsigned short                      g_currentActionSource{WorldRuntime::eUnknownActionSource};
-	bool                                g_connected{false};
-	bool                                g_nawsNegotiated{false};
-	bool                                g_useFakeAppController{false};
-	bool                                g_hasMushReaderLiveSpeechOwner{false};
-	QHash<quint64, quint16>             g_virtualKeyMap;
-	QHash<qint64, int>                  g_acceleratorCommands;
-	int                                 g_acceleratorExecutionCount{0};
-	int                                 g_lastExecutedAcceleratorCommand{-1};
-	int                                 g_sendCommandCount{0};
-	int                                 g_executeCommandCount{0};
-	QString                             g_lastExecutedCommand;
-	bool                                g_lastUserMacroHistory{false};
-	unsigned short                      g_actionSourceDuringExecute{WorldRuntime::eUnknownActionSource};
+	QMap<QString, QString>                     g_worldAttrs;
+	QMap<QString, QString>                     g_worldMultilineAttrs;
+	QMap<QString, QVariant>                    g_globalOptions;
+	IndexedRingBuffer<WorldRuntime::LineEntry> g_runtimeLines;
+	QList<WorldRuntime::Macro>                 g_testMacros;
+	WorldRuntime::TextRectangleSettings        g_textRectangle;
+	int                                        g_outputFontHeight{0};
+	int                                        g_drawOutputNotifyCount{0};
+	int                                        g_lastDrawOutputFirstLine{0};
+	int                                        g_lastDrawOutputAdjustedScroll{0};
+	int                                        g_worldOutputResizedNotifyCount{0};
+	QVector<MiniWindow>                        g_testMiniWindows;
+	int                                        g_worldHotspotCallbackCount{0};
+	QString                                    g_lastWorldHotspotFunction;
+	QString                                    g_lastWorldHotspotId;
+	long                                       g_lastWorldHotspotFlags{0};
+	bool                                       g_lastWorldHotspotQueueWhenBusy{false};
+	QVector<QString>                           g_worldHotspotCallbackFunctions;
+	QVector<bool>                              g_worldHotspotCallbackQueueWhenBusy;
+	QPoint                                     g_lastResizeHotspotPressOffset;
+	QSize                                      g_expectedReleaseResizeSize;
+	QPoint                                     g_expectedReleaseMousePosition;
+	int                                        g_resizeMoveCallbackCount{0};
+	bool                                       g_releaseCallbackSawFlushedResize{false};
+	WorldView                                 *g_runtimeView{nullptr};
+	unsigned short                             g_currentActionSource{WorldRuntime::eUnknownActionSource};
+	bool                                       g_connected{false};
+	bool                                       g_nawsNegotiated{false};
+	bool                                       g_useFakeAppController{false};
+	bool                                       g_hasMushReaderLiveSpeechOwner{false};
+	QHash<quint64, quint16>                    g_virtualKeyMap;
+	QHash<qint64, int>                         g_acceleratorCommands;
+	int                                        g_acceleratorExecutionCount{0};
+	int                                        g_lastExecutedAcceleratorCommand{-1};
+	int                                        g_sendCommandCount{0};
+	int                                        g_executeCommandCount{0};
+	QString                                    g_lastExecutedCommand;
+	bool                                       g_lastUserMacroHistory{false};
+	unsigned short g_actionSourceDuringExecute{WorldRuntime::eUnknownActionSource};
 
 	struct AccessibleTextInsertRecord
 	{
@@ -208,7 +208,7 @@ namespace
 		return attrs;
 	}
 
-	const QVector<WorldRuntime::LineEntry> &lineStorage()
+	const IndexedRingBuffer<WorldRuntime::LineEntry> &lineStorage()
 	{
 		return g_runtimeLines;
 	}
@@ -973,7 +973,7 @@ int WorldRuntime::foregroundImageMode() const
 	return 0;
 }
 
-const QVector<WorldRuntime::LineEntry> &WorldRuntime::lines() const
+const IndexedRingBuffer<WorldRuntime::LineEntry> &WorldRuntime::lines() const
 {
 	return lineStorage();
 }
@@ -6079,6 +6079,83 @@ class tst_WorldView_Basic : public QObject
 			    measuredDelta <= 64,
 			    qPrintable(
 			        QStringLiteral("Expected local layout remeasure only, delta=%1").arg(measuredDelta)));
+			resetTestState();
+		}
+
+		void nativeOutputRendererHeadTrimKeepsLayoutGeometryAligned()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("12"));
+			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+
+			WorldView view;
+			view.resize(420, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(nativeCanvas);
+
+			QString firstRemainingHref;
+			for (int i = 0; i < 12; ++i)
+			{
+				const QString lineText = QStringLiteral("trim-geometry-%1 ").arg(i, 2, 10, QLatin1Char('0')) +
+				                         QString(190, QLatin1Char('g'));
+				const QString href =
+				    QStringLiteral("https://example.org/trim-geometry/%1").arg(i, 2, 10, QLatin1Char('0'));
+				if (i == 1)
+					firstRemainingHref = href;
+				WorldRuntime::StyleSpan span;
+				span.length     = boundedSizeToInt(lineText.size());
+				span.actionType = WorldRuntime::ActionHyperlink;
+				span.action     = href;
+				view.appendOutputTextStyled(lineText, {span}, true);
+			}
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *scrollBar = browser->verticalScrollBar();
+			QVERIFY(scrollBar);
+			scrollBar->setValue(0);
+			nativeCanvas->update();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 12);
+			const int     rebuildsBefore  = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
+			const int     trimDropsBefore = nativeCanvas->property("qmud_native_cache_trim_drops").toInt();
+
+			const QString tailText = QStringLiteral("trim-geometry-tail ") + QString(190, QLatin1Char('t'));
+			WorldRuntime::StyleSpan tailSpan;
+			tailSpan.length     = boundedSizeToInt(tailText.size());
+			tailSpan.actionType = WorldRuntime::ActionHyperlink;
+			tailSpan.action     = QStringLiteral("https://example.org/trim-geometry/tail");
+			view.appendOutputTextStyled(tailText, {tailSpan}, true);
+
+			scrollBar->setValue(0);
+			nativeCanvas->update();
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 12);
+			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(), rebuildsBefore);
+			QTRY_VERIFY(nativeCanvas->property("qmud_native_cache_trim_drops").toInt() > trimDropsBefore);
+			QVERIFY(!view.outputLines().contains(QStringLiteral("trim-geometry-00 ") +
+			                                     QString(190, QLatin1Char('g'))));
+			QVERIFY(view.outputLines().contains(QStringLiteral("trim-geometry-01 ") +
+			                                    QString(190, QLatin1Char('g'))));
+
+			const QPoint firstRemainingPoint = findHyperlinkPoint(view, *browser, firstRemainingHref);
+			QVERIFY2(firstRemainingPoint.x() >= 0 && firstRemainingPoint.y() >= 0,
+			         "Expected first remaining wrapped hyperlink to stay hittable after native head trim.");
+
+			QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
+			QTest::mouseClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, firstRemainingPoint);
+			QTRY_COMPARE(activatedSpy.count(), 1);
+			QCOMPARE(QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8()),
+			         firstRemainingHref);
+
 			resetTestState();
 		}
 

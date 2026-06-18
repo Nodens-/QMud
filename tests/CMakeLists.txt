@@ -93,6 +93,12 @@ qmud_add_qtest(tst_EncodingUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_IndexedRingBuffer
+        SOURCES
+        unit/tst_IndexedRingBuffer.cpp
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_OutputWrapUtils
         SOURCES
         unit/tst_OutputWrapUtils.cpp
