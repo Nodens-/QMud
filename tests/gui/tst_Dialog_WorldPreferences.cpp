@@ -233,6 +233,67 @@ class tst_Dialog_WorldPreferences : public QObject
 			}
 		}
 
+		void listedEditorsAndTablesAllowTabFocusTraversal()
+		{
+			const QString sourcePath =
+			    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
+			        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
+			QFile sourceFile(sourcePath);
+			QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
+			         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
+			const QString sourceText = QString::fromUtf8(sourceFile.readAll());
+
+			auto          firstMatchLine = [&sourceText](const QString &pattern) -> int
+			{
+				const QRegularExpression      regex(pattern);
+				const QRegularExpressionMatch match = regex.match(sourceText);
+				if (!match.hasMatch())
+					return -1;
+				return static_cast<int>(sourceText.left(match.capturedStart()).count(QLatin1Char('\n'))) + 1;
+			};
+
+			const QStringList textEditNames = {QStringLiteral("m_connectText"),
+			                                   QStringLiteral("m_logFilePreamble"),
+			                                   QStringLiteral("m_logFilePostamble"),
+			                                   QStringLiteral("m_notes"),
+			                                   QStringLiteral("m_pastePreamble"),
+			                                   QStringLiteral("m_pastePostamble"),
+			                                   QStringLiteral("m_sendToWorldFilePreamble"),
+			                                   QStringLiteral("m_sendToWorldFilePostamble")};
+			for (const QString &editName : textEditNames)
+			{
+				const QString escaped = QRegularExpression::escape(editName);
+				const int createLine  = firstMatchLine(QStringLiteral("\\b%1\\s*=\\s*new\\b").arg(escaped));
+				const int tabLine     = firstMatchLine(
+				    QStringLiteral("\\b%1\\s*->\\s*setTabChangesFocus\\s*\\(\\s*true\\s*\\)").arg(escaped));
+
+				QVERIFY2(createLine > 0,
+				         qPrintable(QStringLiteral("No construction found for %1").arg(editName)));
+				QVERIFY2(
+				    tabLine > createLine,
+				    qPrintable(
+				        QStringLiteral("No setTabChangesFocus(true) after %1 construction.").arg(editName)));
+			}
+			QVERIFY2(sourceText.contains(QStringLiteral("words->setTabChangesFocus(true);")),
+			         "Expected Tab Completion word list editor to pass Tab to focus traversal.");
+
+			const QStringList tableNames = {QStringLiteral("m_macrosTable"),
+			                                QStringLiteral("m_variablesTable")};
+			for (const QString &tableName : tableNames)
+			{
+				const QString escaped    = QRegularExpression::escape(tableName);
+				const int     createLine = firstMatchLine(QStringLiteral("\\b%1\\s*=").arg(escaped));
+				const int     tabLine    = firstMatchLine(
+				    QStringLiteral("\\b%1\\s*->\\s*setTabKeyNavigation\\s*\\(\\s*false\\s*\\)").arg(escaped));
+
+				QVERIFY2(createLine > 0,
+				         qPrintable(QStringLiteral("No construction found for %1").arg(tableName)));
+				QVERIFY2(tabLine > createLine,
+				         qPrintable(QStringLiteral("No setTabKeyNavigation(false) after %1 construction.")
+				                        .arg(tableName)));
+			}
+		}
+
 		void scriptingNoteColourApplyUpdatesRuntimeState()
 		{
 			const QString sourcePath =
