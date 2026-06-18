@@ -36,7 +36,7 @@ namespace
 	constexpr qint64  kInvalidTimeMarker             = std::numeric_limits<qint64>::min();
 	constexpr quint32 kMaxPersistedOutputLineCount   = 500000u;
 	constexpr quint32 kMaxPersistedSpanCountPerLine  = 100000u;
-	constexpr quint32 kMaxPersistedHistoryEntryCount = 5000u;
+	constexpr quint32 kMaxPersistedHistoryEntryCount = 50000u;
 	constexpr quint32 kMaxPersistedCustomMxpElements = 2048u;
 
 	quint32           crc32ForBytes(const QByteArray &bytes)

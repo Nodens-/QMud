@@ -5586,7 +5586,7 @@ void WorldPreferencesDialog::buildUi()
 	auto *historyKeepLabel = new QLabel(QStringLiteral("Keep:"), historyBox);
 	historyKeepLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 	m_historyLines = new QSpinBox(historyBox);
-	m_historyLines->setRange(20, 5000);
+	m_historyLines->setRange(20, 50000);
 	configureSpinBoxWidthForRange(m_historyLines);
 	historyLayout->addWidget(historyKeepLabel, 0, 0);
 	historyLayout->addWidget(m_historyLines, 0, 1);
