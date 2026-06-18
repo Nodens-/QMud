@@ -293,7 +293,9 @@ namespace QMudUpdateCheck
 		}
 		result.releaseVersion = releaseVersionCore;
 
-		if (compareVersions(releaseVersionCore, currentVersionCore) <= 0)
+		const int  versionComparison = compareVersions(releaseVersionCore, currentVersionCore);
+		const bool currentIsCiBuild  = currentVersion.contains(QStringLiteral("-ci"), Qt::CaseInsensitive);
+		if (versionComparison < 0 || (versionComparison == 0 && !currentIsCiBuild))
 		{
 			result.status = ReleaseEvaluationStatus::UpToDate;
 			return result;

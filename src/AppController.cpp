@@ -5565,7 +5565,7 @@ void AppController::handleUpdateCheckResponse(const bool manual, const QByteArra
 		return;
 	}
 
-	const QString currentVersion = versionCore(m_version);
+	const QString currentVersion = m_version;
 	const QString skipVersion =
 	    versionCore(getGlobalOption(QStringLiteral("SkipUpdateNotificationVersion")).toString());
 
