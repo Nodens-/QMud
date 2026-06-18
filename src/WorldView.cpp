@@ -12760,7 +12760,7 @@ bool WorldView::executeMacroByName(const QString &name)
 	{
 		if (!confirmReplaceTyping(send))
 			return true;
-		setInputText(send, true);
+		setInputText(send, false);
 		return true;
 	}
 	if (type == QStringLiteral("send_now"))
@@ -12771,7 +12771,7 @@ bool WorldView::executeMacroByName(const QString &name)
 		                           noHistoryFlag.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
 		                           noHistoryFlag.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
 		m_runtime->setCurrentActionSource(WorldRuntime::eUserMacro);
-		(void)m_runtime->sendCommand(send, true, false, true, !noHistory, true);
+		(void)m_runtime->executeUserMacroSendNow(send, !noHistory);
 		m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
 		return true;
 	}

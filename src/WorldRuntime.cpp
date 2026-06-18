@@ -13182,6 +13182,18 @@ int WorldRuntime::executeCommand(const QString &text) const
 	return m_commandProcessor->executeCommand(text);
 }
 
+int WorldRuntime::executeUserMacroSendNow(const QString &text, const bool history) const
+{
+	if (QThread::currentThread() != thread())
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), eWorldClosed,
+		                          [this, text, history] { return executeUserMacroSendNow(text, history); });
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::executeUserMacroSendNow");
+	if (!m_commandProcessor)
+		return eWorldClosed;
+	return m_commandProcessor->executeUserMacroSendNow(text, history);
+}
+
 int WorldRuntime::executeCommandWithTriggerPriority(const QString &text) const
 {
 	if (QThread::currentThread() != thread())

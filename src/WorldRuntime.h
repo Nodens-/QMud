@@ -2757,6 +2757,17 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] int            executeCommand(const QString &text) const;
 		/**
+		 * @brief Executes one Send Now macro via command processor.
+		 *
+		 * The caller owns action-source setup; set the runtime source to
+		 * `WorldRuntime::eUserMacro` when macro source semantics are required.
+		 *
+		 * @param text Macro Send Now text.
+		 * @param history Add original macro text to history when `true`.
+		 * @return API status code.
+		 */
+		[[nodiscard]] int            executeUserMacroSendNow(const QString &text, bool history) const;
+		/**
 		 * @brief Executes one direct trigger-script command with priority over queued movement.
 		 * @param text Command text.
 		 * @return API status code.

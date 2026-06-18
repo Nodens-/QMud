@@ -10,6 +10,7 @@
 
 #include "WorldCommandProcessorUtils.h"
 #include "WorldOptions.h"
+#include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QHostAddress>
@@ -280,6 +281,36 @@ class tst_WorldCommandProcessor_Trigger : public QObject
 			                      QStringLiteral("qcmd-priority-c83"), QStringLiteral("qcmd-priority-e05"),
 			                      QStringLiteral("qcmd-tail-9f31"), QStringLiteral("qcmd-normal-d64")}));
 			QCOMPARE(queuedTypes(processor), (QList<bool>{false, false, false, false, true, false}));
+		}
+
+		static void userMacroCommandSuppressesAutoSayDuringEvaluation()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_auto_say"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("auto_say_string"), QStringLiteral("say "));
+			runtime.setCurrentActionSource(WorldRuntime::eUserMacro);
+
+			WorldCommandProcessor processor;
+			processor.setRuntime(&runtime);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QCOMPARE(processor.executeUserMacroSendNow(QStringLiteral("hello"), false), eOK);
+			QVERIFY(acceptedSocket->waitForReadyRead(5000));
+			QCOMPARE(QString::fromUtf8(acceptedSocket->readAll()), QStringLiteral("hello\r\n"));
 		}
 };
 

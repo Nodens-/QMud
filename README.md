@@ -24,8 +24,10 @@ The official site and documentation of QMud is here: [qmud.dev](https://qmud.dev
 ## Project status
 
 QMud is fully functional and early porting issues have been ironed out.
-There are several improvements and new features implemented already.
-It is now also the first and only, at the time of this writing, MUD client with a multithreaded Lua engine.
+There are several improvements and new features implemented already and many more on TODO.
+It is now also the FIRST and ONLY, at the time of this writing, MUD client with a multithreaded Lua engine.
+v11.00 essentially marks the first production release. QMud started with a v10 versioning offset in order to guarrantee
+higher than MUSHclient versioning for compatibility/importing reasons.
 Please use the issue tracker, with the appropriate template to report issues, request features, etc.
 
 ## Features
@@ -33,11 +35,11 @@ Please use the issue tracker, with the appropriate template to report issues, re
 - Cross-platform (Linux, Windows, macOS).
 - Unicode, NAWS, Terminal Type, CHARSET, EOR, ECHO, MXP, MSP, MCCP, MMCP, OSC8, xterm256 color, Truecolor, TLS (Direct &
   Upgrade).
-- Lua scripting. The first and only MUD client with a multithreaded Lua engine that allows ridiculously heavy Lua plugin
-  workloads without lagging the client.
+- Lua scripting. The FIRST and ONLY, currently, MUD client with a multithreaded Lua engine that allows ridiculously
+  heavy Lua plugin workloads without lagging the client.
 - Copyover-style in-place reload on Linux/macOS (`File -> Reload QMud`).
 - MushReader and LuaAudio implemented natively for VI workflows and are activated by the presence of those plugins in
-  existing world files or by loading the included stud plugins.
+  existing world files or by loading the included stub plugins.
 - Passive TTS engine enabled automatically when a native screenreader is detected.
 - Split-pane scrollback buffer, persistent scrollback buffer/command history.
 - Autosave, autobackup, log rotation, log compression.
@@ -56,9 +58,9 @@ Do **NOT** use the issue tracker for general support requests.
 - Bug fix PRs are welcome.
 - Feature PRs have to be discussed first either on Issue tracker or Discord.
 - You can also contribute with documentation or translations (once work on translations is started; but you can apply to
-  help before that)
+  help before that).
 - You can test plugins of various MUDs and see if they're working right or not. Open detailed issues if something's not
-  working including a link to the source for the plugin in question.
+  working and make sure to include a link to the source for the plugin in question.
 - You can also contribute with funding as funds are needed for code signing certificate, Apple registration etc.
   in order to bring QMud to the Apple Store/avoid issues with Windows SmartScreen/WDAC.
 
@@ -85,7 +87,7 @@ QMud can migrate an existing MUSHclient data tree.
 4. Wait until it's done. At the end, it will show statistics on what was imported and will prompt to reload or restart
    depending on platform.
 
-### Old manual Migration method. (Outdated)
+### Old manual Migration method. (Still working but obsolete)
 
 Migration is copy-based, so source files are preserved and moved under a `migrated` marker
 path after successful import to avoid reprocessing.

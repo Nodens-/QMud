@@ -64,6 +64,7 @@ namespace
 	QMap<QString, QString>              g_worldMultilineAttrs;
 	QMap<QString, QVariant>             g_globalOptions;
 	QVector<WorldRuntime::LineEntry>    g_runtimeLines;
+	QList<WorldRuntime::Macro>          g_testMacros;
 	WorldRuntime::TextRectangleSettings g_textRectangle;
 	int                                 g_outputFontHeight{0};
 	int                                 g_drawOutputNotifyCount{0};
@@ -93,6 +94,11 @@ namespace
 	QHash<qint64, int>                  g_acceleratorCommands;
 	int                                 g_acceleratorExecutionCount{0};
 	int                                 g_lastExecutedAcceleratorCommand{-1};
+	int                                 g_sendCommandCount{0};
+	int                                 g_executeCommandCount{0};
+	QString                             g_lastExecutedCommand;
+	bool                                g_lastUserMacroHistory{false};
+	unsigned short                      g_actionSourceDuringExecute{WorldRuntime::eUnknownActionSource};
 
 	struct AccessibleTextInsertRecord
 	{
@@ -209,8 +215,7 @@ namespace
 
 	const QList<WorldRuntime::Macro> &macroStorage()
 	{
-		static const QList<WorldRuntime::Macro> macros;
-		return macros;
+		return g_testMacros;
 	}
 
 	const QList<WorldRuntime::Keypad> &keypadStorage()
@@ -225,6 +230,7 @@ namespace
 		g_worldMultilineAttrs.clear();
 		g_globalOptions.clear();
 		g_runtimeLines.clear();
+		g_testMacros.clear();
 		g_textRectangle                 = {};
 		g_outputFontHeight              = 0;
 		g_drawOutputNotifyCount         = 0;
@@ -254,6 +260,11 @@ namespace
 		g_acceleratorCommands.clear();
 		g_acceleratorExecutionCount      = 0;
 		g_lastExecutedAcceleratorCommand = -1;
+		g_sendCommandCount               = 0;
+		g_executeCommandCount            = 0;
+		g_lastExecutedCommand.clear();
+		g_lastUserMacroHistory      = false;
+		g_actionSourceDuringExecute = WorldRuntime::eUnknownActionSource;
 		g_accessibleTextInsertRecords.clear();
 		g_accessibleTextUpdateRecords.clear();
 		g_accessibleAnnouncementRecords.clear();
@@ -395,6 +406,15 @@ namespace
 		if (!bestBrowser)
 			bestBrowser = topBrowser ? topBrowser : bottomBrowser;
 		return bestBrowser;
+	}
+
+	WorldRuntime::Macro makeMacro(const QString &name, const QString &type, const QString &send)
+	{
+		WorldRuntime::Macro macro;
+		macro.attributes.insert(QStringLiteral("name"), name);
+		macro.attributes.insert(QStringLiteral("type"), type);
+		macro.children.insert(QStringLiteral("send"), send);
+		return macro;
 	}
 
 	QWidget *findNativeOutputCanvas(const WorldView &view)
@@ -1161,7 +1181,25 @@ void WorldRuntime::prepareInputEchoForDisplay(QString &, QVector<StyleSpan> &, b
 
 int WorldRuntime::sendCommand(const QString &, bool, bool, bool, bool, bool) const
 {
-	return 0;
+	++g_sendCommandCount;
+	return eOK;
+}
+
+int WorldRuntime::executeCommand(const QString &text) const
+{
+	++g_executeCommandCount;
+	g_lastExecutedCommand       = text;
+	g_actionSourceDuringExecute = g_currentActionSource;
+	return eOK;
+}
+
+int WorldRuntime::executeUserMacroSendNow(const QString &text, bool history) const
+{
+	++g_executeCommandCount;
+	g_lastExecutedCommand       = text;
+	g_lastUserMacroHistory      = history;
+	g_actionSourceDuringExecute = g_currentActionSource;
+	return eOK;
 }
 
 int WorldRuntime::acceleratorCommandForKey(qint64 key) const
@@ -2303,6 +2341,89 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_acceleratorExecutionCount, 1);
 			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
 			QCOMPARE(shortcutTriggerCount, 0);
+
+			resetTestState();
+		}
+
+		void replaceMacroClearsChangedStateAndMovesCaretToEnd()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("confirm_before_replacing_typing"), QStringLiteral("1"));
+			g_testMacros.push_back(
+			    makeMacro(QStringLiteral("F2"), QStringLiteral("replace"), QStringLiteral("look")));
+			g_testMacros.push_back(
+			    makeMacro(QStringLiteral("F3"), QStringLiteral("replace"), QStringLiteral("say")));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			QTest::keyClick(input, Qt::Key_F2);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.inputText(), QStringLiteral("look"));
+			QCOMPARE(input->textCursor().position(), view.inputText().size());
+
+			const auto sawDialog = std::make_shared<bool>(false);
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    {
+				    const auto *messageBox = qobject_cast<const QMessageBox *>(dialog);
+				    return messageBox &&
+				           messageBox->text().contains(QStringLiteral("Replace your typing of"));
+			    },
+			    [sawDialog](const QDialog *dialog)
+			    {
+				    *sawDialog = true;
+				    const_cast<QDialog *>(dialog)->reject();
+			    });
+
+			QTest::keyClick(input, Qt::Key_F3);
+			QCoreApplication::processEvents();
+
+			QVERIFY(!*sawDialog);
+			QCOMPARE(view.inputText(), QStringLiteral("say"));
+			QCOMPARE(input->textCursor().position(), view.inputText().size());
+
+			resetTestState();
+		}
+
+		void sendNowMacroUsesCommandEvaluationPath()
+		{
+			resetTestState();
+			g_testMacros.push_back(
+			    makeMacro(QStringLiteral("F2"), QStringLiteral("send_now"), QStringLiteral("north")));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			QTest::keyClick(input, Qt::Key_F2);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_executeCommandCount, 1);
+			QCOMPARE(g_lastExecutedCommand, QStringLiteral("north"));
+			QVERIFY(g_lastUserMacroHistory);
+			QCOMPARE(g_actionSourceDuringExecute, WorldRuntime::eUserMacro);
+			QCOMPARE(g_currentActionSource, WorldRuntime::eUnknownActionSource);
+			QCOMPARE(g_sendCommandCount, 0);
 
 			resetTestState();
 		}
