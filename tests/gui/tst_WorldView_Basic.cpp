@@ -2373,21 +2373,30 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.inputText(), QStringLiteral("look"));
 			QCOMPARE(input->textCursor().position(), view.inputText().size());
 
-			const auto sawDialog = std::make_shared<bool>(false);
-			scheduleDialogInteraction(
-			    [](const QDialog *dialog)
-			    {
-				    const auto *messageBox = qobject_cast<const QMessageBox *>(dialog);
-				    return messageBox &&
-				           messageBox->text().contains(QStringLiteral("Replace your typing of"));
-			    },
-			    [sawDialog](const QDialog *dialog)
-			    {
-				    *sawDialog = true;
-				    const_cast<QDialog *>(dialog)->reject();
-			    });
+			const auto sawDialog    = std::make_shared<bool>(false);
+			const auto keepWatching = std::make_shared<bool>(true);
+			auto       watcher      = std::make_shared<std::function<void()>>();
+			*watcher                = [watcher, sawDialog, keepWatching]
+			{
+				if (!*keepWatching)
+					return;
+				for (QWidget *widget : QApplication::topLevelWidgets())
+				{
+					auto *messageBox = qobject_cast<QMessageBox *>(widget);
+					if (!messageBox || !messageBox->text().contains(QStringLiteral("Replace your typing of")))
+						continue;
+					*sawDialog    = true;
+					*keepWatching = false;
+					messageBox->reject();
+					return;
+				}
+				QTimer::singleShot(10, qApp, [watcher] { (*watcher)(); });
+			};
+			QTimer::singleShot(0, qApp, [watcher] { (*watcher)(); });
 
 			QTest::keyClick(input, Qt::Key_F3);
+			QCoreApplication::processEvents();
+			*keepWatching = false;
 			QCoreApplication::processEvents();
 
 			QVERIFY(!*sawDialog);
