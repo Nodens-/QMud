@@ -24,6 +24,7 @@
 #include "MainFrame.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
+#include "MushclientImportUtils.h"
 #include "NameGeneration.h"
 #include "ReloadUtils.h"
 #include "SqliteCompat.h"
@@ -70,6 +71,7 @@ extern "C"
 #include <QByteArrayView>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QCloseEvent>
 #include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -119,7 +121,9 @@ extern "C"
 #include <QPointer>
 #include <QPrintDialog>
 #include <QPrinter>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -143,6 +147,8 @@ extern "C"
 #include <QTimer>
 #include <QTranslator>
 #include <QUrl>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QVBoxLayout>
 #include <QVariant>
 #include <QtSql/QSqlDatabase>
 #include <QtSql/QSqlError>
@@ -193,6 +199,22 @@ namespace
 			const char *mimeType;
 			const char *modernExtension;
 			const char *legacyExtension;
+	};
+
+	class ImportProgressDialog final : public QDialog
+	{
+		public:
+			using QDialog::QDialog;
+
+			void reject() override
+			{
+			}
+
+		protected:
+			void closeEvent(QCloseEvent *event) override
+			{
+				event->ignore();
+			}
 	};
 
 	constexpr quint8 kXtermCubeValues[6]         = {0, 95, 135, 175, 215, 255};
@@ -1314,11 +1336,6 @@ namespace
 		return transformed.join(QLatin1Char('*'));
 	}
 
-	QString normalizePathList(const QString &input)
-	{
-		return transformPathList(input, normalizePathString);
-	}
-
 	QString pathForRuntime(const QString &input)
 	{
 		return normalizePathString(input);
@@ -2057,111 +2074,6 @@ namespace
 		return QDir::cleanPath(QDir(baseDir).filePath(normalized));
 	}
 
-	QString archiveRelativePathFor(const QString &baseDir, const QString &absolutePath);
-
-	QString resolveExistingPathCaseInsensitive(const QString &path)
-	{
-		QString cleaned = QDir::cleanPath(path);
-		if (cleaned.isEmpty())
-			return {};
-		if (QFileInfo::exists(cleaned))
-			return cleaned;
-#ifdef Q_OS_WIN
-		return {};
-#else
-		if (!QDir::isAbsolutePath(cleaned))
-			return {};
-		QStringList segments = cleaned.split(QLatin1Char('/'), Qt::SkipEmptyParts);
-		QString     current  = QStringLiteral("/");
-		for (const QString &segment : segments)
-		{
-			const QDir      dir(current);
-			const QFileInfo matched = [&]() -> QFileInfo
-			{
-				const QFileInfoList entries =
-				    dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
-				for (const QFileInfo &entry : entries)
-				{
-					if (entry.fileName().compare(segment, Qt::CaseInsensitive) == 0)
-						return entry;
-				}
-				return {};
-			}();
-			if (!matched.exists())
-				return {};
-			current = matched.absoluteFilePath();
-		}
-		return QDir::cleanPath(current);
-#endif
-	}
-
-	QString storagePathFromAbsolute(const QString &baseDir, const QString &sourcePath,
-	                                const QString &absolutePath)
-	{
-		Q_UNUSED(sourcePath);
-		return dotRelativeStoragePath(baseDir, absolutePath, false);
-	}
-
-	QString remapLegacyWindowsWorldPathToBase(const QString &baseDir, const QString &path)
-	{
-		const QString normalized = normalizePathString(path.trimmed());
-		const bool    hasDrive =
-		    normalized.size() > 1 && normalized.at(0).isLetter() && normalized.at(1) == QLatin1Char(':');
-		if (!hasDrive)
-			return {};
-		const qsizetype worldsPos = normalized.indexOf(QStringLiteral("/worlds/"), 0, Qt::CaseInsensitive);
-		if (worldsPos < 0)
-			return {};
-		const QString relativeWorldPath = normalized.mid(worldsPos + 1); // strip leading '/'
-		return absolutePathFromBase(baseDir, relativeWorldPath);
-	}
-
-	QString stripOptionalQuotes(const QString &value)
-	{
-		if (value.size() < 2)
-			return value;
-		if (const QChar first = value.front(), last = value.back();
-		    (first == QLatin1Char('"') && last == QLatin1Char('"')) ||
-		    (first == QLatin1Char('\'') && last == QLatin1Char('\'')))
-			return value.mid(1, value.size() - 2);
-		return value;
-	}
-
-	QString archiveRelativePathFor(const QString &baseDir, const QString &absolutePath)
-	{
-		QString relative = QDir(baseDir).relativeFilePath(absolutePath);
-		if (relative == QStringLiteral("..") || relative.startsWith(QStringLiteral("../")) ||
-		    QDir::isAbsolutePath(relative))
-		{
-			relative = QDir::cleanPath(absolutePath);
-#ifdef Q_OS_WIN
-			if (relative.size() > 1 && relative.at(1) == QLatin1Char(':'))
-				relative.replace(1, 1, QStringLiteral("_"));
-#endif
-			while (relative.startsWith(QLatin1Char('/')))
-				relative.remove(0, 1);
-		}
-		return normalizePathString(relative);
-	}
-
-	bool moveFileToArchive(const QString &sourcePath, const QString &targetPath)
-	{
-		const QFileInfo targetInfo(targetPath);
-		if (const QString targetDir = targetInfo.absolutePath(); !QDir().mkpath(targetDir))
-			return false;
-
-		if (QFileInfo::exists(targetPath) && !QFile::remove(targetPath))
-			return false;
-
-		if (QFile::rename(sourcePath, targetPath))
-			return true;
-
-		if (!QFile::copy(sourcePath, targetPath))
-			return false;
-
-		return QFile::remove(sourcePath);
-	}
-
 	bool directoryContainsFileCaseInsensitive(const QString &directoryPath, const QString &fileName)
 	{
 		const QDir dir(directoryPath);
@@ -2270,342 +2182,42 @@ namespace
 
 	QString migrateLegacyWorldFilePath(const QString &baseDir, const QString &path)
 	{
-		QString normalizedPath = stripOptionalQuotes(normalizePathString(path).trimmed());
-		if (normalizedPath.startsWith(QStringLiteral("./")) && normalizedPath.size() > 3 &&
-		    normalizedPath.at(2).isLetter() && normalizedPath.at(3) == QLatin1Char(':'))
-		{
-			normalizedPath = normalizedPath.mid(2);
-		}
-		if (normalizedPath.startsWith(QLatin1Char('/')) && normalizedPath.size() > 3 &&
-		    normalizedPath.at(1).isLetter() && normalizedPath.at(2) == QLatin1Char(':'))
-		{
-			normalizedPath = normalizedPath.mid(1);
-		}
-		if (normalizedPath.trimmed().isEmpty())
-			return normalizedPath;
-
-		const QString suffix = QFileInfo(normalizedPath).suffix().toLower();
-		if (!QMudFileExtensions::isWorldSuffix(suffix))
-			return QMudFileExtensions::canonicalizePathExtension(normalizedPath);
-
-		QString canonicalPath = QMudFileExtensions::canonicalizePathExtension(normalizedPath);
-		if (!QMudFileExtensions::isLegacyWorldSuffix(suffix))
-		{
-			if (const QString modernAbsolutePath = absolutePathFromBase(baseDir, canonicalPath);
-			    QFileInfo::exists(modernAbsolutePath))
-				return storagePathFromAbsolute(baseDir, normalizedPath, modernAbsolutePath);
-			if (const QString resolvedModernPath =
-			        resolveExistingPathCaseInsensitive(absolutePathFromBase(baseDir, canonicalPath));
-			    !resolvedModernPath.isEmpty())
-				return storagePathFromAbsolute(baseDir, normalizedPath, resolvedModernPath);
-			if (const QString remappedModernPath = resolveExistingPathCaseInsensitive(
-			        remapLegacyWindowsWorldPathToBase(baseDir, canonicalPath));
-			    !remappedModernPath.isEmpty())
-			{
-				return storagePathFromAbsolute(baseDir, normalizedPath, remappedModernPath);
-			}
-			const QString legacyFallbackPath =
-			    QMudFileExtensions::replaceOrAppendExtension(normalizedPath, QStringLiteral("mcl"));
-			if (const QString legacyFallbackAbsolutePath = absolutePathFromBase(baseDir, legacyFallbackPath);
-			    QFileInfo::exists(legacyFallbackAbsolutePath) ||
-			    !resolveExistingPathCaseInsensitive(legacyFallbackAbsolutePath).isEmpty())
-				return migrateLegacyWorldFilePath(baseDir, legacyFallbackPath);
-			return canonicalPath;
-		}
-
-		const QString legacyAbsolutePath = absolutePathFromBase(baseDir, normalizedPath);
-		QString       resolvedLegacyPath = QFileInfo::exists(legacyAbsolutePath)
-		                                       ? QDir::cleanPath(legacyAbsolutePath)
-		                                       : resolveExistingPathCaseInsensitive(legacyAbsolutePath);
-		if (resolvedLegacyPath.isEmpty())
-		{
-			if (const QString remappedLegacyPath = resolveExistingPathCaseInsensitive(
-			        remapLegacyWindowsWorldPathToBase(baseDir, normalizedPath));
-			    !remappedLegacyPath.isEmpty())
-			{
-				resolvedLegacyPath = remappedLegacyPath;
-			}
-		}
-		const QString defaultModernAbsolutePath = absolutePathFromBase(baseDir, canonicalPath);
-		QString resolvedModernPath = QFileInfo::exists(defaultModernAbsolutePath)
-		                                 ? QDir::cleanPath(defaultModernAbsolutePath)
-		                                 : resolveExistingPathCaseInsensitive(defaultModernAbsolutePath);
-		if (resolvedModernPath.isEmpty())
-		{
-			if (const QString remappedModernPath = resolveExistingPathCaseInsensitive(
-			        remapLegacyWindowsWorldPathToBase(baseDir, canonicalPath));
-			    !remappedModernPath.isEmpty())
-			{
-				resolvedModernPath = remappedModernPath;
-			}
-		}
-
-		if (resolvedLegacyPath.isEmpty())
-		{
-			if (!resolvedModernPath.isEmpty())
-				return storagePathFromAbsolute(baseDir, normalizedPath, resolvedModernPath);
-			return normalizedPath;
-		}
-
-		QString effectiveModernAbsolutePath =
-		    !resolvedModernPath.isEmpty()
-		        ? resolvedModernPath
-		        : QMudFileExtensions::replaceOrAppendExtension(resolvedLegacyPath, QStringLiteral("qdl"));
-
-		if (!QFileInfo::exists(effectiveModernAbsolutePath))
-		{
-			if (const QString modernDir = QFileInfo(effectiveModernAbsolutePath).absolutePath();
-			    !QDir().mkpath(modernDir))
-			{
-				qWarning() << "Failed to create migrated world directory:" << modernDir;
-				return normalizedPath;
-			}
-
-			QFile legacyFile(resolvedLegacyPath);
-			if (!legacyFile.open(QIODevice::ReadOnly))
-			{
-				qWarning() << "Failed to read legacy world file:" << resolvedLegacyPath;
-				return normalizedPath;
-			}
-			const QByteArray data = legacyFile.readAll();
-			legacyFile.close();
-
-			QSaveFile modernFile(effectiveModernAbsolutePath);
-			if (!modernFile.open(QIODevice::WriteOnly))
-			{
-				qWarning() << "Failed to create migrated world file:" << effectiveModernAbsolutePath;
-				return normalizedPath;
-			}
-			if (modernFile.write(data) != data.size() || !modernFile.commit())
-			{
-				qWarning() << "Failed to write migrated world file:" << effectiveModernAbsolutePath;
-				return normalizedPath;
-			}
-		}
-
-		const QString relativeLegacy = archiveRelativePathFor(baseDir, resolvedLegacyPath);
-		const QString archivePath    = QDir(baseDir).filePath(QStringLiteral("migrated/") + relativeLegacy);
-		if (!moveFileToArchive(resolvedLegacyPath, archivePath))
-			qWarning() << "Failed to archive legacy world file:" << resolvedLegacyPath << "->" << archivePath;
-
-		return storagePathFromAbsolute(baseDir, normalizedPath, effectiveModernAbsolutePath);
+		return QMudMushclientImportUtils::migrateLegacyWorldFilePath(baseDir, baseDir, path, true);
 	}
 
 	QString migrateWorldListPaths(const QString &baseDir, const QString &worldList, bool *changed = nullptr)
 	{
-		const QStringList items = splitSerializedWorldList(worldList);
-		QStringList       migrated;
-		migrated.reserve(items.size());
-		bool anyChanged = false;
-		for (const QString &item : items)
-		{
-			const QString value = migrateLegacyWorldFilePath(baseDir, item);
-			if (value != item)
-				anyChanged = true;
-			migrated.push_back(value);
-		}
-		const QString joined = migrated.join(QLatin1Char('*'));
-		if (changed)
-			*changed = anyChanged || (joined != worldList);
-		return joined;
+		return QMudMushclientImportUtils::migrateWorldListPaths(baseDir, worldList, changed);
 	}
 
 	QString canonicalizeWorldListForRuntime(const QString &worldList)
 	{
-		return splitSerializedWorldList(worldList).join(QLatin1Char('*'));
-	}
-
-	QString migrateLegacyPluginFilePath(const QString &baseDir, const QString &path)
-	{
-		QString normalizedPath = stripOptionalQuotes(normalizePathString(path).trimmed());
-		if (normalizedPath.startsWith(QStringLiteral("./")) && normalizedPath.size() > 3 &&
-		    normalizedPath.at(2).isLetter() && normalizedPath.at(3) == QLatin1Char(':'))
-		{
-			normalizedPath = normalizedPath.mid(2);
-		}
-		if (normalizedPath.startsWith(QLatin1Char('/')) && normalizedPath.size() > 3 &&
-		    normalizedPath.at(1).isLetter() && normalizedPath.at(2) == QLatin1Char(':'))
-		{
-			normalizedPath = normalizedPath.mid(1);
-		}
-		if (normalizedPath.trimmed().isEmpty())
-			return normalizedPath;
-
-		const QString defaultAbsolutePath = absolutePathFromBase(baseDir, normalizedPath);
-		if (const QString resolvedPath = QFileInfo::exists(defaultAbsolutePath)
-		                                     ? QDir::cleanPath(defaultAbsolutePath)
-		                                     : resolveExistingPathCaseInsensitive(defaultAbsolutePath);
-		    !resolvedPath.isEmpty())
-		{
-			return storagePathFromAbsolute(baseDir, normalizedPath, resolvedPath);
-		}
-
-		if (const QString remappedPath = resolveExistingPathCaseInsensitive(
-		        remapLegacyWindowsWorldPathToBase(baseDir, normalizedPath));
-		    !remappedPath.isEmpty())
-		{
-			return storagePathFromAbsolute(baseDir, normalizedPath, remappedPath);
-		}
-
-		return normalizedPath;
+		return QMudMushclientImportUtils::canonicalizeWorldListForRuntime(worldList);
 	}
 
 	QString migratePluginListPaths(const QString &baseDir, const QString &pluginList, bool *changed = nullptr)
 	{
-		const QStringList items = splitSerializedPathList(pluginList);
-		QStringList       migrated;
-		migrated.reserve(items.size());
-		bool anyChanged = false;
-		for (const QString &item : items)
-		{
-			const QString value = migrateLegacyPluginFilePath(baseDir, item);
-			if (value != item)
-				anyChanged = true;
-			migrated.push_back(value);
-		}
-		const QString joined = migrated.join(QLatin1Char('*'));
-		if (changed)
-			*changed = anyChanged || (joined != pluginList);
-		return joined;
+		return QMudMushclientImportUtils::migratePluginListPaths(baseDir, pluginList, changed);
 	}
 
 	QString canonicalizePluginListForRuntime(const QString &pluginList)
 	{
-		return splitSerializedPathList(pluginList).join(QLatin1Char('*'));
+		return QMudMushclientImportUtils::canonicalizePluginListForRuntime(pluginList);
 	}
 
 	void migrateLegacyWorldTree(const QString &baseDir, const QString &worldDirectory)
 	{
-		const QString normalizedWorldDir = normalizePathString(worldDirectory.trimmed());
-		if (normalizedWorldDir.isEmpty())
-			return;
-
-		const QString absoluteWorldDir = absolutePathFromBase(baseDir, normalizedWorldDir);
-		const QDir    rootDir(absoluteWorldDir);
-		if (!rootDir.exists())
-			return;
-
-		QStringList  legacyWorldFiles;
-		QDirIterator iterator(rootDir.absolutePath(),
-		                      QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
-		                      QDirIterator::Subdirectories);
-		while (iterator.hasNext())
-		{
-			const QString filePath = iterator.next();
-			const QString suffix   = iterator.fileInfo().suffix().toLower();
-			if (!QMudFileExtensions::isLegacyWorldSuffix(suffix))
-				continue;
-			legacyWorldFiles.push_back(QDir::cleanPath(filePath));
-		}
-
-		for (const QString &legacyAbsolutePath : legacyWorldFiles)
-		{
-			const QString migrationInput = archiveRelativePathFor(baseDir, legacyAbsolutePath);
-			(void)migrateLegacyWorldFilePath(baseDir, migrationInput);
-		}
+		QMudMushclientImportUtils::migrateLegacyWorldTree(baseDir, worldDirectory);
 	}
 
 	QString migrateLegacyIniPathValue(const QString &baseDir, const QString &key, const QString &value)
 	{
-		const QString leaf = keyLeafName(key);
-		if (isPathListKey(leaf))
-		{
-			if (leaf.compare(QStringLiteral("WorldList"), Qt::CaseInsensitive) == 0)
-				return migrateWorldListPaths(baseDir, value);
-			if (leaf.compare(QStringLiteral("PluginList"), Qt::CaseInsensitive) == 0)
-				return migratePluginListPaths(baseDir, value);
-			return normalizePathList(value);
-		}
-
-		if (!shouldNormalizePathKey(leaf))
-			return value;
-
-		const QString normalized = normalizePathString(value);
-		if (const QString suffix = QFileInfo(normalized).suffix().toLower();
-		    QMudFileExtensions::isWorldSuffix(suffix))
-			return migrateLegacyWorldFilePath(baseDir, normalized);
-		return QMudFileExtensions::canonicalizePathExtension(normalized);
-	}
-
-	QVariant migrateLegacyIniValue(const QString &baseDir, const QString &key, const QVariant &value)
-	{
-		if (value.canConvert<QStringList>())
-		{
-			const QStringList list = value.toStringList();
-			QStringList       migrated;
-			migrated.reserve(list.size());
-			for (const QString &item : list)
-				migrated.push_back(migrateLegacyIniPathValue(baseDir, key, item));
-			return {migrated};
-		}
-
-		if (value.canConvert<QString>())
-			return migrateLegacyIniPathValue(baseDir, key, value.toString());
-
-		return value;
+		return QMudMushclientImportUtils::migrateLegacyIniPathValue(baseDir, key, value);
 	}
 
 	bool isLikelyCorruptedRelativeWorldPath(const QString &path)
 	{
-		const QString normalized = normalizePathString(path.trimmed());
-		if (normalized.isEmpty())
-			return false;
-		if (const QString suffix = QFileInfo(normalized).suffix().toLower();
-		    !QMudFileExtensions::isWorldSuffix(suffix))
-			return false;
-		if (!normalized.startsWith(QLatin1Char('.')))
-			return false;
-		return !normalized.contains(QLatin1Char('/'));
-	}
-
-	QHash<QString, QString> parseLegacyIniRawValues(const QString &iniPath)
-	{
-		QHash<QString, QString> values;
-		QFile                   file(iniPath);
-		if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-			return values;
-
-		QString           currentSection;
-		const QString     content = QString::fromUtf8(file.readAll());
-		const QStringList lines =
-		    content.split(QRegularExpression(QStringLiteral("[\r\n]+")), Qt::KeepEmptyParts);
-		for (QString line : lines)
-		{
-			line = line.trimmed();
-			if (line.isEmpty())
-				continue;
-			if (line.startsWith(QLatin1Char(';')) || line.startsWith(QLatin1Char('#')))
-				continue;
-
-			if (line.startsWith(QLatin1Char('[')) && line.endsWith(QLatin1Char(']')) && line.size() >= 2)
-			{
-				currentSection = line.mid(1, line.size() - 2).trimmed();
-				continue;
-			}
-
-			const qsizetype equalsPos = line.indexOf(QLatin1Char('='));
-			if (equalsPos < 0)
-				continue;
-
-			const QString key   = line.left(equalsPos).trimmed();
-			const QString value = line.mid(equalsPos + 1);
-			if (key.isEmpty())
-				continue;
-
-			const QString fullKey = currentSection.isEmpty() ? key : currentSection + QLatin1Char('/') + key;
-			values.insert(fullKey, value);
-		}
-		return values;
-	}
-
-	QVariant migrateLegacyIniValueWithRawSource(const QString &baseDir, const QString &key,
-	                                            const QVariant                &value,
-	                                            const QHash<QString, QString> &rawValues)
-	{
-		if (const QString leaf = keyLeafName(key);
-		    (isPathListKey(leaf) || shouldNormalizePathKey(leaf)) && rawValues.contains(key))
-			return migrateLegacyIniPathValue(baseDir, key, rawValues.value(key));
-		return migrateLegacyIniValue(baseDir, key, value);
+		return QMudMushclientImportUtils::isLikelyCorruptedRelativeWorldPath(path);
 	}
 
 	void pruneLegacyCtrlBarsGroups(QSettings &modern)
@@ -2622,33 +2234,7 @@ namespace
 
 	void migrateLegacyIniToQmudConf(const QString &workingDir)
 	{
-		const QString baseDir    = QDir::cleanPath(workingDir);
-		const QString legacyPath = QDir(baseDir).filePath(QStringLiteral("MUSHclient.ini"));
-		if (!QFileInfo::exists(legacyPath))
-			return;
-
-		const QString                 newPath = QDir(baseDir).filePath(QStringLiteral("QMud.conf"));
-		const QSettings               legacy(legacyPath, QSettings::IniFormat);
-		QSettings                     modern(newPath, QSettings::IniFormat);
-		const QHash<QString, QString> rawValues = parseLegacyIniRawValues(legacyPath);
-		for (const QStringList keys = legacy.allKeys(); const QString &key : keys)
-			modern.setValue(key,
-			                migrateLegacyIniValueWithRawSource(baseDir, key, legacy.value(key), rawValues));
-		pruneLegacyCtrlBarsGroups(modern);
-		modern.sync();
-
-		const QString migratedDir = QDir(baseDir).filePath(QStringLiteral("migrated"));
-		if (!QDir().mkpath(migratedDir))
-		{
-			qWarning() << "Failed to create migrated directory:" << migratedDir;
-			return;
-		}
-
-		const QString migratedPath = QDir(migratedDir).filePath(QStringLiteral("MUSHclient.ini"));
-		if (QFileInfo::exists(migratedPath))
-			QFile::remove(migratedPath);
-		if (!QFile::rename(legacyPath, migratedPath))
-			qWarning() << "Failed to archive legacy config file:" << legacyPath << "->" << migratedPath;
+		QMudMushclientImportUtils::migrateLegacyIniToQmudConf(workingDir, workingDir, true);
 	}
 } // namespace
 
@@ -8943,6 +8529,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		ImportXmlDialog dlg(this, m_mainWindow);
 		dlg.exec();
 	}
+	else if (cmdName == QStringLiteral("ImportFromMushclient"))
+		handleImportFromMushclient();
 	else if (cmdName == QStringLiteral("ResetToolbars"))
 	{
 		if (m_mainWindow)
@@ -14341,9 +13929,208 @@ void AppController::handleLogSession() const
 	}
 }
 
-void AppController::handleReloadQmud()
+void AppController::handleImportFromMushclient()
+{
+	if (!m_mainWindow)
+		return;
+
+	const QString selectedDir = QFileDialog::getExistingDirectory(
+	    m_mainWindow, QStringLiteral("Import from MUSHclient"),
+	    m_fileBrowsingDir.trimmed().isEmpty() ? QString() : m_fileBrowsingDir);
+	if (selectedDir.trimmed().isEmpty())
+		return;
+
+	const QFileInfo selectedInfo(selectedDir);
+	if (!selectedInfo.isDir())
+	{
+		QMessageBox::warning(m_mainWindow, QStringLiteral("Import from MUSHclient"),
+		                     QStringLiteral("Select a valid MUSHclient directory."));
+		return;
+	}
+	m_fileBrowsingDir = selectedInfo.absoluteFilePath();
+
+	const QString mushclientRoot    = QDir::cleanPath(selectedInfo.absoluteFilePath());
+	const QString qmudHome          = QDir::cleanPath(m_workingDir);
+	const QString selectedCanonical = selectedInfo.canonicalFilePath();
+	const QString qmudCanonical     = QFileInfo(qmudHome).canonicalFilePath();
+	if (!selectedCanonical.isEmpty() && !qmudCanonical.isEmpty() &&
+	    selectedCanonical.compare(qmudCanonical,
+#ifdef Q_OS_WIN
+	                              Qt::CaseInsensitive
+#else
+	                              Qt::CaseSensitive
+#endif
+	                              ) == 0)
+	{
+		QMessageBox::warning(m_mainWindow, QStringLiteral("Import from MUSHclient"),
+		                     QStringLiteral("Select the MUSHclient directory, not the QMud data directory."));
+		return;
+	}
+
+	ImportProgressDialog progressDialog(m_mainWindow);
+	progressDialog.setWindowTitle(QStringLiteral("Import from MUSHclient"));
+	progressDialog.setWindowModality(Qt::ApplicationModal);
+	progressDialog.setWindowFlag(Qt::WindowCloseButtonHint, false);
+	auto *layout = new QVBoxLayout(&progressDialog);
+	auto *label  = new QLabel(
+	    QStringLiteral("Please wait while MUSHclient data are being imported.\n"
+	                   "Do NOT close QMud until this process is finished.\n"
+	                   "If you do close it, you have to start with a fresh QMud installation and rerun "
+	                   "the \"Import from MUSHclient\" procedure."),
+	    &progressDialog);
+	label->setWordWrap(true);
+	layout->addWidget(label);
+	progressDialog.show();
+	QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
+	QMudMushclientImportUtils::ImportStats stats =
+	    QMudMushclientImportUtils::importDirectory(mushclientRoot, qmudHome);
+	QMudMushclientImportUtils::importPreferencesDatabase(mushclientRoot, m_db, stats);
+	progressDialog.hide();
+	if (stats.errors > 0)
+	{
+		QString details = stats.errorDetails.join(QLatin1Char('\n'));
+		if (stats.errors > stats.errorDetails.size())
+		{
+			details +=
+			    QStringLiteral("\n...and %1 more error(s).").arg(stats.errors - stats.errorDetails.size());
+		}
+		if (stats.warnings > 0)
+		{
+			QString warningDetails = stats.warningDetails.join(QLatin1Char('\n'));
+			if (stats.warnings > stats.warningDetails.size())
+			{
+				warningDetails += QStringLiteral("\n...and %1 more warning(s).")
+				                      .arg(stats.warnings - stats.warningDetails.size());
+			}
+			details += QStringLiteral("\n\nWarning(s):\n%1").arg(warningDetails);
+		}
+		QMessageBox::warning(
+		    m_mainWindow, QStringLiteral("Import from MUSHclient"),
+		    QStringLiteral("Import encountered %1 error(s).\n\n%2").arg(stats.errors).arg(details));
+		return;
+	}
+
+	const QString summary =
+	    QStringLiteral("Files copied: %1\nWorlds converted: %2\nExisting files skipped: "
+	                   "%3\nFiltered files skipped: %4\nConfig files imported: %5\nPreference databases "
+	                   "imported: %6")
+	        .arg(stats.filesCopied)
+	        .arg(stats.worldsConverted)
+	        .arg(stats.filesSkippedExisting)
+	        .arg(stats.filesSkippedFiltered)
+	        .arg(stats.configsImported)
+	        .arg(stats.preferenceDatabasesImported);
+	if (stats.warnings > 0)
+	{
+		QString details = stats.warningDetails.join(QLatin1Char('\n'));
+		if (stats.warnings > stats.warningDetails.size())
+		{
+			details += QStringLiteral("\n...and %1 more warning(s).")
+			               .arg(stats.warnings - stats.warningDetails.size());
+		}
+		QMessageBox::warning(
+		    m_mainWindow, QStringLiteral("Import from MUSHclient"),
+		    QStringLiteral("Import completed with %1 warning(s).\n\n%2\n\n%3\n\nQMud will now reload or "
+		                   "restart to use the imported data.")
+		        .arg(stats.warnings)
+		        .arg(summary, details));
+	}
+	else
+	{
+		QMessageBox::information(
+		    m_mainWindow, QStringLiteral("Import from MUSHclient"),
+		    QStringLiteral(
+		        "Import completed.\n\n%1\n\nQMud will now reload or restart to use the imported data.")
+		        .arg(summary));
+	}
+
+	reloadOrRestartAfterImport();
+}
+
+bool AppController::prepareForApplicationRestart(const QString &title, const bool persistRuntimePreferences)
+{
+	if (persistRuntimePreferences)
+		saveViewPreferences();
+	saveWindowPlacement();
+	saveSessionState();
+
+	QString error;
+	if (!saveDirtyAutoSaveWorldsBeforeRestart(&error))
+	{
+		QMessageBox::warning(m_mainWindow, title,
+		                     QStringLiteral("Failed to save dirty worlds before restart.\n%1").arg(error));
+		return false;
+	}
+	if (!closeOpenWorldLogsBeforeRestart(&error))
+	{
+		QMessageBox::warning(
+		    m_mainWindow, title,
+		    QStringLiteral("Failed to close active world logs before restart.\n%1").arg(error));
+		return false;
+	}
+	if (!saveOpenWorldPluginStatesBeforeRestart(&error))
+	{
+		QMessageBox::warning(m_mainWindow, title,
+		                     QStringLiteral("Failed to save plugin state before restart.\n%1").arg(error));
+		return false;
+	}
+	if (!saveOpenWorldSessionStatesBeforeRestart(&error))
+	{
+		QMessageBox::warning(
+		    m_mainWindow, title,
+		    QStringLiteral("Failed to persist world session state before restart.\n%1").arg(error));
+		return false;
+	}
+	return true;
+}
+
+void AppController::reloadOrRestartAfterImport()
+{
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+	if (getGlobalOption(QStringLiteral("EnableReloadFeature")).toInt() != 0)
+	{
+		const QByteArray previousReloadAssume = qgetenv("QMUD_RELOAD_ASSUME_YES");
+		qputenv("QMUD_RELOAD_ASSUME_YES", QByteArrayLiteral("1"));
+		handleReloadQmud(false);
+		if (previousReloadAssume.isNull())
+			qunsetenv("QMUD_RELOAD_ASSUME_YES");
+		else
+			qputenv("QMUD_RELOAD_ASSUME_YES", previousReloadAssume);
+		if (m_reloadInProgress)
+			return;
+	}
+#endif
+
+	const QString title = QStringLiteral("Import from MUSHclient");
+	if (!prepareForApplicationRestart(title, false))
+		return;
+
+	const QString executablePath = QCoreApplication::applicationFilePath();
+	QStringList   arguments      = QCoreApplication::arguments();
+	if (!arguments.isEmpty())
+		arguments.removeFirst();
+
+	QProcess            process;
+	QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+	environment.insert(QStringLiteral("QMUD_ALLOW_MULTI_INSTANCE"), QStringLiteral("1"));
+	environment.insert(QStringLiteral("QMUD_HOME"), QDir::cleanPath(m_workingDir));
+	process.setProcessEnvironment(environment);
+	process.setProgram(executablePath);
+	process.setArguments(arguments);
+	if (!process.startDetached())
+	{
+		QMessageBox::warning(m_mainWindow, title,
+		                     QStringLiteral("Import completed, but QMud could not restart automatically."));
+		return;
+	}
+	QCoreApplication::quit();
+}
+
+void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 {
 #if !defined(Q_OS_LINUX) && !defined(Q_OS_MACOS)
+	Q_UNUSED(persistRuntimePreferences);
 	QMessageBox::information(m_mainWindow, QStringLiteral("Reload QMud"),
 	                         QStringLiteral("Reload QMud is available only on Linux and macOS."));
 #else
@@ -14397,7 +14184,8 @@ void AppController::handleReloadQmud()
 	}
 
 	// Persist current frame visibility/layout before reload handoff.
-	saveViewPreferences();
+	if (persistRuntimePreferences)
+		saveViewPreferences();
 	saveWindowPlacement();
 	saveSessionState();
 

@@ -891,21 +891,37 @@ class AppController : public QObject
 		void                  handleLogSession() const;
 		/**
 		 * @brief Handles reload-QMud action with socket handoff/reconnect policies.
+		 * @param persistRuntimePreferences Persist current QMud DB-backed runtime preferences.
 		 */
-		void                  handleReloadQmud();
+		void                  handleReloadQmud(bool persistRuntimePreferences = true);
+		/**
+		 * @brief Handles explicit MUSHclient directory import.
+		 */
+		void                  handleImportFromMushclient();
+		/**
+		 * @brief Saves runtime state before a process restart.
+		 * @param title Dialog title used for errors.
+		 * @param persistRuntimePreferences Persist current QMud DB-backed runtime preferences.
+		 * @return `true` when state was prepared.
+		 */
+		[[nodiscard]] bool prepareForApplicationRestart(const QString &title, bool persistRuntimePreferences);
+		/**
+		 * @brief Reloads or restarts QMud after an import operation.
+		 */
+		void               reloadOrRestartAfterImport();
 		/**
 		 * @brief Handles output-find command variants.
 		 * @param again Repeat previous find operation.
 		 * @param forceDirection Force search direction when `true`.
 		 * @param forwards Search forward when `true`, backward otherwise.
 		 */
-		void                  handleOutputFind(bool again, bool forceDirection, bool forwards) const;
+		void               handleOutputFind(bool again, bool forceDirection, bool forwards) const;
 		/**
 		 * @brief Activates notepad by title.
 		 * @param title Notepad title.
 		 * @return `true` when a matching notepad is activated.
 		 */
-		[[nodiscard]] bool    activateNotepad(const QString &title) const;
+		[[nodiscard]] bool activateNotepad(const QString &title) const;
 		/**
 		 * @brief Appends/replaces notepad content.
 		 * @param title Notepad title.
@@ -913,30 +929,30 @@ class AppController : public QObject
 		 * @param replace Replace existing content when `true`; append otherwise.
 		 * @return `true` when destination notepad is found or created successfully.
 		 */
-		[[nodiscard]] bool    appendToNotepad(const QString &title, const QString &text, bool replace) const;
+		[[nodiscard]] bool appendToNotepad(const QString &title, const QString &text, bool replace) const;
 		/**
 		 * @brief Sends text to notepad, replacing existing content.
 		 * @param title Notepad title.
 		 * @param text Text payload.
 		 * @return `true` when destination notepad is found or created successfully.
 		 */
-		[[nodiscard]] bool    sendToNotepad(const QString &title, const QString &text) const;
+		[[nodiscard]] bool sendToNotepad(const QString &title, const QString &text) const;
 		/**
 		 * @brief Applies app-level initialization to a new world runtime.
 		 * @param runtime Runtime to initialize.
 		 */
-		void                  initializeWorldRuntime(WorldRuntime *runtime) const;
+		void               initializeWorldRuntime(WorldRuntime *runtime) const;
 		/**
 		 * @brief Emits startup banner lines to runtime output.
 		 * @param runtime Runtime that receives startup banner output.
 		 */
-		static void           emitStartupBanner(WorldRuntime *runtime);
+		static void        emitStartupBanner(WorldRuntime *runtime);
 		/**
 		 * @brief Opens and initializes one world document.
 		 * @param path World-document path.
 		 * @return `true` when world document opens successfully.
 		 */
-		bool                  openWorldDocument(const QString &path);
+		bool               openWorldDocument(const QString &path);
 		/**
 		 * @brief Resolves world session-state directory under the data directory.
 		 * @return Absolute world session-state directory path.

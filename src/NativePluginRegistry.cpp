@@ -2137,5 +2137,20 @@ namespace QMudNativePluginRegistry
 		testSpeechSink() = std::move(sink);
 	}
 #endif
+#else
+	bool isShimId(const QString &pluginId)
+	{
+		return shimIds().contains(normalizedId(pluginId));
+	}
+
+	bool isBlacklistedId(const QString &pluginId)
+	{
+		return blacklistedIds().contains(normalizedId(pluginId));
+	}
+
+	bool isProtectedId(const QString &pluginId)
+	{
+		return isShimId(pluginId) || isBlacklistedId(pluginId);
+	}
 #endif
 } // namespace QMudNativePluginRegistry

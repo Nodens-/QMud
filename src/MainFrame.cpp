@@ -669,6 +669,8 @@ void MainWindow::buildMenus()
 	addActionToMenu(helpMenu, QStringLiteral("TipOfTheDay"), QStringLiteral("&Tip Of The Day..."));
 	helpMenu->addSeparator();
 	addActionToMenu(helpMenu, QStringLiteral("GettingStarted"), QStringLiteral("&Getting Started..."));
+	addActionToMenu(helpMenu, QStringLiteral("ImportFromMushclient"),
+	                QStringLiteral("Import from &MUSHclient..."));
 	helpMenu->addSeparator();
 	addActionToMenu(helpMenu, QStringLiteral("HelpContents"), QStringLiteral("&Contents"));
 	addActionToMenu(helpMenu, QStringLiteral("HelpIndex"), QStringLiteral("&Index"));

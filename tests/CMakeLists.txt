@@ -511,6 +511,23 @@ qmud_add_qtest(tst_ReloadIntegration
         TIMEOUT
         20)
 
+qmud_add_qtest(tst_MushclientImportUtils
+        SOURCES
+        integration/tst_MushclientImportUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/helpers/MushclientImportUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/WorldDocument.cpp"
+        "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
+        LIBRARIES
+        Qt6::Sql
+        LABELS
+        integration
+        TIMEOUT
+        20)
+target_compile_definitions(tst_MushclientImportUtils
+        PRIVATE
+        QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY)
+
 qmud_add_qtest(tst_LuaBridgeDispatcherIntegration
         SOURCES
         integration/tst_LuaBridgeDispatcherIntegration.cpp

@@ -184,6 +184,7 @@ set(QMUD_SOURCES
         helpers/WorldSessionRestoreFlowUtils.cpp
         helpers/WorldSessionStateUtils.cpp
         helpers/ReloadUtils.cpp
+        helpers/MushclientImportUtils.cpp
         Environment.cpp
         Accelerators.cpp
         helpers/AliasMatchUtils.cpp
@@ -274,6 +275,7 @@ set(QMUD_HEADERS
         Environment.h
         helpers/LogCompressionUtils.h
         helpers/ReloadUtils.h
+        helpers/MushclientImportUtils.h
         helpers/WorldSessionRestoreFlowUtils.h
         helpers/WorldSessionStateUtils.h
         helpers/PluginCallbackCatalogUtils.h
