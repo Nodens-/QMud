@@ -14,20 +14,23 @@
 
 namespace
 {
-	QString escapePercent(const QString &value)
+	QString fixupOrIdentity(const QString &value, const bool fixHtml,
+	                        const TimeFormatUtils::HtmlFixupFn fixupHtml)
 	{
-		auto result = value;
-		result.replace(QStringLiteral("%"), QStringLiteral("%%"));
-		return result;
+		if (!fixHtml || !fixupHtml)
+			return value;
+		return fixupHtml(value);
 	}
 
-	QString toQtDateFormat(const QString &format)
+	QString toQtDateFormat(const QString &format, const TimeFormatUtils::WorldTimeFormatContext &context,
+	                       const bool fixHtml, const TimeFormatUtils::HtmlFixupFn fixupHtml)
 	{
 		QString result;
 		result.reserve(format.size() + 16);
 
 		QString literal;
 		literal.reserve(format.size());
+		// Single-quote accumulated literal text so QLocale::toString renders it verbatim rather than as format codes.
 		const auto flushLiteral = [&]
 		{
 			if (literal.isEmpty())
@@ -69,6 +72,24 @@ namespace
 			case '%':
 				literal += QLatin1Char('%');
 				break;
+			case 'E':
+				literal += fixupOrIdentity(context.workingDir, fixHtml, fixupHtml);
+				break;
+			case 'N':
+				literal += fixupOrIdentity(context.worldName, fixHtml, fixupHtml);
+				break;
+			case 'P':
+				literal += fixupOrIdentity(context.playerName, fixHtml, fixupHtml);
+				break;
+			case 'F':
+				literal += fixupOrIdentity(context.worldDir, fixHtml, fixupHtml);
+				break;
+			case 'L':
+				literal += fixupOrIdentity(context.logDir, fixHtml, fixupHtml);
+				break;
+			case 'a':
+				token = QStringLiteral("ddd");
+				break;
 			case 'A':
 				token = QStringLiteral("dddd");
 				break;
@@ -87,6 +108,9 @@ namespace
 			case 'Y':
 				token = QStringLiteral("yyyy");
 				break;
+			case 'y':
+				token = QStringLiteral("yy");
+				break;
 			case 'H':
 				token = noPad ? QStringLiteral("H") : QStringLiteral("HH");
 				break;
@@ -101,6 +125,9 @@ namespace
 				break;
 			case 'p':
 				token = QStringLiteral("AP");
+				break;
+			case 'Z':
+				token = QStringLiteral("t");
 				break;
 			default:
 				literal += QLatin1Char('%');
@@ -175,21 +202,6 @@ QString TimeFormatUtils::formatWorldTime(const QDateTime &time, const QString &f
                                          const WorldTimeFormatContext &context, const bool fixHtml,
                                          HtmlFixupFn fixupHtml)
 {
-	auto       strFormat = format;
-
-	const auto fixupOrIdentity = [&](const QString &value)
-	{
-		if (!fixHtml || !fixupHtml)
-			return value;
-		return fixupHtml(value);
-	};
-
-	strFormat.replace(QStringLiteral("%E"), escapePercent(fixupOrIdentity(context.workingDir)));
-	strFormat.replace(QStringLiteral("%N"), escapePercent(fixupOrIdentity(context.worldName)));
-	strFormat.replace(QStringLiteral("%P"), escapePercent(fixupOrIdentity(context.playerName)));
-	strFormat.replace(QStringLiteral("%F"), escapePercent(fixupOrIdentity(context.worldDir)));
-	strFormat.replace(QStringLiteral("%L"), escapePercent(fixupOrIdentity(context.logDir)));
-
-	const auto qtFormat = toQtDateFormat(strFormat);
+	const auto qtFormat = toQtDateFormat(format, context, fixHtml, fixupHtml);
 	return QLocale::system().toString(time, qtFormat);
 }

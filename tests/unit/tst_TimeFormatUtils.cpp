@@ -57,6 +57,22 @@ class tst_TimeFormatUtils : public QObject
 			const QString formatted = TimeFormatUtils::formatWorldTime(
 			    time, QStringLiteral("%E|%N|%P|%F|%L|%%"), context, false, nullptr);
 			QCOMPARE(formatted, QStringLiteral("work%dir|world%name|player%name|worlds%dir|logs%dir|%"));
+
+			const QString escapedDirective =
+			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%%E"), context, false, nullptr);
+			QCOMPARE(escapedDirective, QStringLiteral("%E"));
+
+			context.workingDir = QStringLiteral("~/QMudWorkingDir/");
+			const QString workingDirExpansion =
+			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%E"), context, false, nullptr);
+
+			QCOMPARE(workingDirExpansion, QStringLiteral("~/QMudWorkingDir/"));
+
+			context.worldName = QStringLiteral("Lara's mud");
+			const QString literalName =
+			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%N"), context, false, nullptr);
+			QCOMPARE(literalName, QStringLiteral("Lara's mud"));
+
 		}
 
 		void formatWorldTimeFixHtmlUsesProvidedCallback()
@@ -80,12 +96,24 @@ class tst_TimeFormatUtils : public QObject
 
 		void formatWorldTimeNoPadTokensAndUnknownTokenFallback()
 		{
-			const QDateTime time = QDateTime::fromString(QStringLiteral("2026-03-04T05:06:07"), Qt::ISODate);
+			const QDateTime time = QDateTime::fromString(QStringLiteral("2026-03-04T05:06:07Z"), Qt::ISODate);
 			QVERIFY(time.isValid());
 
 			const QString noPad = TimeFormatUtils::formatWorldTime(
 			    time, QStringLiteral("%#d-%#m-%Y %#H:%#M:%#S %#I"), {}, false, nullptr);
 			QCOMPARE(noPad, QStringLiteral("4-3-2026 5:6:7 5"));
+
+			const QString twoDigitYear =
+			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%y-%m-%d"), {}, false, nullptr);
+			QCOMPARE(twoDigitYear, QStringLiteral("26-03-04"));
+
+			const QString abbrevWeekday =
+			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%a"), {}, false, nullptr);
+			QCOMPARE(abbrevWeekday, QStringLiteral("Wed"));
+
+			const QString zoneName =
+			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%Z"), {}, false, nullptr);
+			QCOMPARE(zoneName, QStringLiteral("UTC"));
 
 			const QString unknown =
 			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%q %Y"), {}, false, nullptr);
