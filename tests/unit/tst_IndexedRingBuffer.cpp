@@ -117,6 +117,102 @@ class tst_IndexedRingBuffer : public QObject
 			QCOMPARE(buffer.toVector(), QVector<int>({3, 4, 5, 8, 9}));
 		}
 
+		void wrappedReplaceGrowthNearFrontShiftsPrefixOnce()
+		{
+			IndexedRingBuffer<int> buffer(QVector<int>({1, 2, 3, 4, 8, 9}));
+			buffer.remove(0, 2);
+			buffer.push_back(10);
+			buffer.push_back(11);
+
+			buffer.replace(1, 1, 3, 7);
+
+			QCOMPARE(buffer.toVector(), QVector<int>({3, 7, 7, 7, 8, 9, 10, 11}));
+		}
+
+		void wrappedReplaceGrowthNearBackShiftsSuffixOnce()
+		{
+			IndexedRingBuffer<int> buffer(QVector<int>({1, 2, 3, 4, 5, 9}));
+			buffer.remove(0, 2);
+			buffer.push_back(10);
+			buffer.push_back(11);
+
+			buffer.replace(3, 1, 3, 8);
+
+			QCOMPARE(buffer.toVector(), QVector<int>({3, 4, 5, 8, 8, 8, 10, 11}));
+		}
+
+		void wrappedReplaceShrinkNearFrontShiftsPrefixOnce()
+		{
+			IndexedRingBuffer<int> buffer(QVector<int>({1, 2, 3, 4, 5, 6, 7, 8}));
+			buffer.remove(0, 2);
+			buffer.push_back(9);
+			buffer.push_back(10);
+
+			buffer.replace(1, 3, 1, 11);
+
+			QCOMPARE(buffer.toVector(), QVector<int>({3, 11, 7, 8, 9, 10}));
+		}
+
+		void wrappedReplaceShrinkNearBackShiftsSuffixOnce()
+		{
+			IndexedRingBuffer<int> buffer(QVector<int>({1, 2, 3, 4, 5, 6, 7, 8}));
+			buffer.remove(0, 2);
+			buffer.push_back(9);
+			buffer.push_back(10);
+
+			buffer.replace(4, 3, 1, 11);
+
+			QCOMPARE(buffer.toVector(), QVector<int>({3, 4, 5, 6, 11, 10}));
+		}
+
+		void replaceInsertOnlyAtFront()
+		{
+			IndexedRingBuffer<int> buffer(QVector<int>({1, 2, 3, 4}));
+			buffer.remove(0, 2);
+			buffer.push_back(5);
+			buffer.push_back(6);
+
+			buffer.replace(0, 0, 2, 9);
+
+			QCOMPARE(buffer.toVector(), QVector<int>({9, 9, 3, 4, 5, 6}));
+		}
+
+		void replaceAppendOnlyAtBack()
+		{
+			IndexedRingBuffer<int> buffer(QVector<int>({1, 2, 3, 4}));
+			buffer.remove(0, 2);
+			buffer.push_back(5);
+			buffer.push_back(6);
+
+			buffer.replace(buffer.size(), 0, 2, 9);
+
+			QCOMPARE(buffer.toVector(), QVector<int>({3, 4, 5, 6, 9, 9}));
+		}
+
+		void replaceEqualSizeKeepsUnchangedSides()
+		{
+			IndexedRingBuffer<int> buffer(QVector<int>({1, 2, 3, 4, 5, 6}));
+			buffer.remove(0, 2);
+			buffer.push_back(7);
+			buffer.push_back(8);
+
+			buffer.replace(2, 2, 2, 9);
+
+			QCOMPARE(buffer.toVector(), QVector<int>({3, 4, 9, 9, 7, 8}));
+		}
+
+		void replaceRemoveOnlyInMiddle()
+		{
+			IndexedRingBuffer<int> buffer(QVector<int>({1, 2, 3, 4, 5, 6, 7}));
+			buffer.remove(0, 2);
+			buffer.push_back(8);
+			buffer.push_back(9);
+
+			buffer.replace(2, 3, 0, 0);
+
+			QCOMPARE(buffer.toVector(), QVector<int>({3, 4, 8, 9}));
+		}
+
 		void iteratorsSupportAlgorithmsInLogicalOrder()
 		{
 			IndexedRingBuffer<int> buffer(QVector<int>({1, 3, 5, 7, 9}));

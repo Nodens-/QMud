@@ -271,6 +271,15 @@ qmud_add_qtest(tst_WorldSessionStateUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_WorldRuntime_OutputBufferSeal
+        GUI
+        SOURCES
+        unit/tst_WorldRuntime_OutputBufferSeal.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_WorldSessionRestoreFlowUtils
         SOURCES
         unit/tst_WorldSessionRestoreFlowUtils.cpp

@@ -5,6 +5,7 @@
 #include <QtGlobal>
 
 #include <iterator>
+#include <type_traits>
 #include <utility>
 
 /**
@@ -211,6 +212,15 @@ template <typename T> class IndexedRingBuffer
 			m_size = newSize;
 		}
 
+		void truncateBack(const size_type newSize)
+		    requires std::is_trivially_destructible_v<T>
+		{
+			Q_ASSERT(newSize >= 0 && newSize <= m_size);
+			m_size = newSize;
+			if (m_size == 0)
+				m_head = 0;
+		}
+
 		void assign(const size_type count, const T &value)
 		{
 			clear();
@@ -373,6 +383,98 @@ template <typename T> class IndexedRingBuffer
 					storageAtLogical(i) = T{};
 			}
 			m_size -= boundedCount;
+		}
+
+		/**
+		 * @brief Replaces a logical range with repeated values in one structural mutation.
+		 * @param index First logical index to replace.
+		 * @param removeCount Number of existing elements to remove from `index`.
+		 * @param insertCount Number of replacement elements to insert at `index`.
+		 * @param value Value copied into each inserted slot.
+		 *
+		 * This shifts either the retained prefix or retained suffix once, whichever is
+		 * smaller, so middle range replacement does not degrade into repeated
+		 * single-element insert/remove operations.
+		 */
+		void replace(const size_type index, const size_type removeCount, const size_type insertCount,
+		             const T &value)
+		{
+			Q_ASSERT(index >= 0 && index <= m_size);
+			Q_ASSERT(removeCount >= 0);
+			Q_ASSERT(insertCount >= 0);
+
+			const size_type boundedRemoveCount = qBound<size_type>(0, removeCount, m_size - index);
+			const size_type boundedInsertCount = qMax<size_type>(0, insertCount);
+			if (boundedRemoveCount == 0 && boundedInsertCount == 0)
+				return;
+
+			const size_type oldSize     = m_size;
+			const size_type suffixFirst = index + boundedRemoveCount;
+			const size_type suffixCount = oldSize - suffixFirst;
+			const size_type newSize     = oldSize - boundedRemoveCount + boundedInsertCount;
+			reserve(newSize);
+
+			if (boundedInsertCount > boundedRemoveCount)
+			{
+				const size_type growth = boundedInsertCount - boundedRemoveCount;
+				if (index < suffixCount)
+				{
+					const size_type oldHead = m_head;
+					const size_type newHead = (m_head + capacity() - growth % capacity()) % capacity();
+					for (size_type source = 0; source < index; ++source)
+					{
+						const size_type sourcePhysical         = (oldHead + source) % capacity();
+						const size_type destinationPhysical    = (newHead + source) % capacity();
+						storageAtPhysical(destinationPhysical) = std::move(storageAtPhysical(sourcePhysical));
+					}
+					m_head = newHead;
+				}
+				else
+				{
+					for (size_type offset = suffixCount; offset > 0; --offset)
+					{
+						const size_type source            = suffixFirst + offset - 1;
+						storageAtLogical(source + growth) = std::move(storageAtLogical(source));
+					}
+				}
+			}
+			else if (boundedRemoveCount > boundedInsertCount)
+			{
+				const size_type shrink = boundedRemoveCount - boundedInsertCount;
+				if (index < suffixCount)
+				{
+					const size_type oldHead = m_head;
+					for (size_type source = index; source > 0; --source)
+					{
+						const size_type sourceLogical       = source - 1;
+						const size_type sourcePhysical      = (oldHead + sourceLogical) % capacity();
+						const size_type destinationPhysical = (oldHead + sourceLogical + shrink) % capacity();
+						storageAtPhysical(destinationPhysical) = std::move(storageAtPhysical(sourcePhysical));
+					}
+					for (size_type i = 0; i < shrink; ++i)
+						storageAtPhysical((oldHead + i) % capacity()) = T{};
+					m_head = (oldHead + shrink) % capacity();
+				}
+				else
+				{
+					for (size_type offset = 0; offset < suffixCount; ++offset)
+					{
+						const size_type source            = suffixFirst + offset;
+						storageAtLogical(source - shrink) = std::move(storageAtLogical(source));
+					}
+					for (size_type i = newSize; i < oldSize; ++i)
+						storageAtLogical(i) = T{};
+				}
+			}
+
+			m_size = newSize;
+			if (m_size == 0)
+			{
+				m_head = 0;
+				return;
+			}
+			for (size_type i = 0; i < boundedInsertCount; ++i)
+				storageAtLogical(index + i) = value;
 		}
 
 		void insert(const size_type index, const T &value)
