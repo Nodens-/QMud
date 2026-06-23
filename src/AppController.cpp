@@ -14184,6 +14184,18 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 			qInfo() << kReloadLogTag << "Auto-confirm enabled by QMUD_RELOAD_ASSUME_YES.";
 	}
 
+	++m_reloadAttempts;
+	m_reloadInProgress = true;
+	if (m_mainWindow)
+		m_mainWindow->showStatusMessage(QStringLiteral("Preparing Reload QMud..."), 0);
+
+	const auto abortReloadPreparation = [this]()
+	{
+		m_reloadInProgress = false;
+		if (m_mainWindow)
+			m_mainWindow->setStatusNormal();
+	};
+
 	// Persist current frame visibility/layout before reload handoff.
 	if (persistRuntimePreferences)
 		saveViewPreferences();
@@ -14193,6 +14205,7 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 	QString preReloadSaveError;
 	if (!saveDirtyAutoSaveWorldsBeforeRestart(&preReloadSaveError))
 	{
+		abortReloadPreparation();
 		QMessageBox::warning(
 		    m_mainWindow, QStringLiteral("Reload QMud"),
 		    QStringLiteral("Failed to save dirty worlds before reload.\n%1").arg(preReloadSaveError));
@@ -14202,6 +14215,7 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 	QString preReloadPluginStateError;
 	if (!closeOpenWorldLogsBeforeRestart(&preReloadLogCloseError))
 	{
+		abortReloadPreparation();
 		QMessageBox::warning(m_mainWindow, QStringLiteral("Reload QMud"),
 		                     QStringLiteral("Failed to close active world logs before reload.\n%1")
 		                         .arg(preReloadLogCloseError));
@@ -14209,6 +14223,7 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 	}
 	if (!saveOpenWorldPluginStatesBeforeRestart(&preReloadPluginStateError))
 	{
+		abortReloadPreparation();
 		QMessageBox::warning(
 		    m_mainWindow, QStringLiteral("Reload QMud"),
 		    QStringLiteral("Failed to save plugin state before reload.\n%1").arg(preReloadPluginStateError));
@@ -14217,16 +14232,13 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 	QString preReloadSessionStateError;
 	if (!saveOpenWorldSessionStatesBeforeRestart(&preReloadSessionStateError))
 	{
+		abortReloadPreparation();
 		QMessageBox::warning(m_mainWindow, QStringLiteral("Reload QMud"),
 		                     QStringLiteral("Failed to persist world session state before reload.\n%1")
 		                         .arg(preReloadSessionStateError));
 		return;
 	}
 
-	++m_reloadAttempts;
-	m_reloadInProgress = true;
-	if (m_mainWindow)
-		m_mainWindow->showStatusMessage(QStringLiteral("Preparing Reload QMud..."), 0);
 	qInfo() << kReloadLogTag << "Preparing reload handoff. attempt=" << m_reloadAttempts
 	        << "exec_failures=" << m_reloadExecFailures << "recoveries=" << m_reloadRecoveryRuns
 	        << "mccp_disable_timeout_ms=" << mccpDisableTimeoutMs;
