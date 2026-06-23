@@ -309,8 +309,15 @@ class tst_WorldCommandProcessor_Trigger : public QObject
 			QVERIFY(!acceptedSocket.isNull());
 
 			QCOMPARE(processor.executeUserMacroSendNow(QStringLiteral("hello"), false), eOK);
-			QVERIFY(acceptedSocket->waitForReadyRead(5000));
-			QCOMPARE(QString::fromUtf8(acceptedSocket->readAll()), QStringLiteral("hello\r\n"));
+			QByteArray received;
+			auto       receivedMacroCommand = [&acceptedSocket, &received]
+			{
+				if (acceptedSocket->bytesAvailable() == 0)
+					acceptedSocket->waitForReadyRead(10);
+				received += acceptedSocket->readAll();
+				return received;
+			};
+			QTRY_COMPARE_WITH_TIMEOUT(receivedMacroCommand(), QByteArrayLiteral("hello\r\n"), 5000);
 		}
 };
 
