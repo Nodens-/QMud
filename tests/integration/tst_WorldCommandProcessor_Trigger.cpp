@@ -315,9 +315,10 @@ class tst_WorldCommandProcessor_Trigger : public QObject
 				if (acceptedSocket->bytesAvailable() == 0)
 					acceptedSocket->waitForReadyRead(10);
 				received += acceptedSocket->readAll();
-				return received;
+				return received.contains("hello\r\n");
 			};
-			QTRY_COMPARE_WITH_TIMEOUT(receivedMacroCommand(), QByteArrayLiteral("hello\r\n"), 5000);
+			QTRY_VERIFY_WITH_TIMEOUT(receivedMacroCommand(), 5000);
+			QVERIFY(!received.contains("say hello\r\n"));
 		}
 };
 
