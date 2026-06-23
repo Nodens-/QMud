@@ -1113,6 +1113,16 @@ class WorldView : public QWidget
 				int                        insertedLineCount{0};
 		};
 		/**
+		 * @brief Deferred split-pane head-trim adjustment computed from pre-mutation layout state.
+		 */
+		struct NativeSplitTopHeadTrimAdjustment
+		{
+				bool    valid{false};
+				quint64 revision{0};
+				int     pixels{0};
+				int     lines{0};
+		};
+		/**
 		 * @brief Last fully trusted native-output paint state for one pane.
 		 */
 		struct NativeOutputPanePaintState
@@ -1208,6 +1218,19 @@ class WorldView : public QWidget
 		                                             int wrapWidthPixels, int localWrapWidthPixels,
 		                                             int lineSpacingSetting, const QFont &layoutFont) const;
 		/**
+		 * @brief Returns whether native layout slot/index structures match current render inputs.
+		 * @param lines Current native render lines.
+		 * @param wrapWidthPixels Effective wrap width for runtime output.
+		 * @param localWrapWidthPixels Effective wrap width for local echo/note output.
+		 * @param lineSpacingSetting Current line-spacing percentage delta.
+		 * @param layoutFont Current output font.
+		 * @return `true` when exact range materialization can use the current slot/index structures.
+		 */
+		[[nodiscard]] bool nativeLayoutRangeStateReadyFor(const NativeOutputRenderLines &lines,
+		                                                  int wrapWidthPixels, int localWrapWidthPixels,
+		                                                  int          lineSpacingSetting,
+		                                                  const QFont &layoutFont) const;
+		/**
 		 * @brief Estimates visual rows for a native render line without shaping text.
 		 * @param line Native render line.
 		 * @param effectiveWrapWidth Effective wrap width for the line.
@@ -1231,6 +1254,41 @@ class WorldView : public QWidget
 		bool ensureNativeLayoutRange(const NativeOutputRenderLines &lines, int firstLine, int lastLine,
 		                             int wrapWidthPixels, int localWrapWidthPixels, int lineSpacingSetting,
 		                             const QFont &layoutFont) const;
+		/**
+		 * @brief Prepares native layout slot metadata without exact line shaping.
+		 * @param lines Current native render lines.
+		 * @param wrapWidthPixels Effective wrap width for runtime output.
+		 * @param localWrapWidthPixels Effective wrap width for local echo/note output.
+		 * @param lineSpacingSetting Current line-spacing percentage delta.
+		 * @param layoutFont Current output font.
+		 * @return `true` when range layout may proceed with slot and height metadata.
+		 */
+		bool prepareNativeLayoutRangeState(const NativeOutputRenderLines &lines, int wrapWidthPixels,
+		                                   int localWrapWidthPixels, int lineSpacingSetting,
+		                                   const QFont &layoutFont) const;
+		/**
+		 * @brief Computes split-pane head-trim adjustment from pre-trim layout state.
+		 * @param delta Render cache delta that trimmed head lines.
+		 * @param defaultLineAdvance Fallback line advance for exact-row metadata.
+		 * @param targetRevision Render revision that will consume the adjustment.
+		 * @return Deferred adjustment; invalid when current layout state cannot produce one.
+		 */
+		[[nodiscard]] NativeSplitTopHeadTrimAdjustment
+		nativeSplitTopHeadTrimAdjustmentForDelta(const NativeRenderCacheDelta &delta,
+		                                         qreal defaultLineAdvance, quint64 targetRevision = 0) const;
+		/**
+		 * @brief Clears pending split-pane head-trim compensation.
+		 */
+		void clearNativeSplitTopHeadTrimAdjustment() const;
+		/**
+		 * @brief Clears pending split-pane head-trim compensation for the current render revision.
+		 */
+		void clearCurrentNativeSplitTopHeadTrimAdjustment() const;
+		/**
+		 * @brief Applies a successfully replayed split-pane head-trim adjustment.
+		 * @param adjustment Deferred adjustment to commit.
+		 */
+		void applyNativeSplitTopHeadTrimAdjustment(const NativeSplitTopHeadTrimAdjustment &adjustment) const;
 		int  ensureNativeLineLayout(const NativeOutputRenderLines &lines, int index, int wrapWidthPixels,
 		                            int localWrapWidthPixels, qreal defaultLineAdvance,
 		                            const QFont &layoutFont, quint64 layoutContentSalt) const;
@@ -1421,6 +1479,15 @@ class WorldView : public QWidget
 				quint64                      renderRevision{0};
 		};
 		/**
+		 * @brief Result of resolving stored native output selection against current render lines.
+		 */
+		enum class NativeOutputSelectionResolveResult
+		{
+			Unmapped,
+			MappedCollapsed,
+			MappedSelection,
+		};
+		/**
 		 * @brief Returns the output word at a previously resolved native-output hit position.
 		 * @param position Native output hit position.
 		 * @return Word at @p position, or an empty string when no word is present.
@@ -1433,7 +1500,8 @@ class WorldView : public QWidget
 		 * @param position Output line/column position.
 		 * @param href Optional hyperlink href at hit point.
 		 * @param hint Optional hyperlink hint at hit point.
-		 * @param allowCacheBuild `true` to rebuild layout caches on demand, `false` to query only when cache is ready.
+		 * @param allowCacheBuild `true` to materialize the needed layout range on demand, `false` to
+		 *        query only when cache is ready.
 		 * @param requireTextHit `true` to require the point to fall inside rendered text glyph bounds.
 		 * @param textHit Optional output set to `true` when the point is over rendered text glyph bounds.
 		 * @return `true` when hit maps inside the rendered output surface.
@@ -1468,7 +1536,8 @@ class WorldView : public QWidget
 		 * @param position Output line/column hit position.
 		 * @param href Optional hyperlink href at hit point.
 		 * @param hint Optional hyperlink hint at hit point.
-		 * @param allowCacheBuild `true` to rebuild layout caches on demand, `false` to query only when cache is ready.
+		 * @param allowCacheBuild `true` to materialize the needed layout range on demand, `false` to
+		 *        query only when cache is ready.
 		 * @param textHit Optional output set to `true` when the event point is over rendered text glyph bounds.
 		 * @return `true` when event position maps to native output text.
 		 */
@@ -1485,7 +1554,7 @@ class WorldView : public QWidget
 		 * @param position Output line/column position.
 		 * @param href Optional hyperlink href at hit point.
 		 * @param hint Optional hyperlink hint at hit point.
-		 * @param allowCacheBuild `true` to rebuild layout caches on demand.
+		 * @param allowCacheBuild `true` to materialize the needed layout range on demand.
 		 * @param requireTextHit `true` to require the point to fall inside rendered text glyph bounds.
 		 * @param textHit Optional output set to `true` when the point is over rendered text glyph bounds.
 		 * @return `true` when point maps to native output.
@@ -1505,6 +1574,15 @@ class WorldView : public QWidget
 		 * @param lines Current native render lines.
 		 */
 		void               applyPendingNativeSelectionRenderDelta(const NativeOutputRenderLines &lines);
+		/**
+		 * @brief Resolves current native selection state without mutating stored selection.
+		 * @param lines Current native render lines.
+		 * @param selection Receives resolved selection state.
+		 * @return Resolution status for current render lines.
+		 */
+		[[nodiscard]] NativeOutputSelectionResolveResult
+		resolveNativeOutputSelectionStateForLines(const NativeOutputRenderLines &lines,
+		                                          NativeOutputSelectionState    &selection) const;
 		/**
 		 * @brief Captures stable line identity for a native output position.
 		 * @param lines Current native render lines.
@@ -1540,6 +1618,11 @@ class WorldView : public QWidget
 		                              const NativeOutputPosition &cursor, bool dragging);
 		/**
 		 * @brief Resolves native output selection bounds using legacy API coordinate semantics.
+		 * @param startLine Receives the one-based selection start line.
+		 * @param startColumn Receives the one-based selection start column.
+		 * @param endLine Receives the one-based selection end line.
+		 * @param endColumn Receives the one-based selection end column.
+		 * @return `true` when a native output selection is active.
 		 */
 		[[nodiscard]] bool    nativeOutputSelectionBounds(int &startLine, int &startColumn, int &endLine,
 		                                                  int &endColumn) const;
@@ -1558,9 +1641,15 @@ class WorldView : public QWidget
 		bool                  handleNativeOutputMouseEvent(const QEvent *event, const QWidget *watched);
 		/**
 		 * @brief Applies output-selection changed side effects and notifications.
+		 * @param hasSelection Whether a non-empty output selection is active.
+		 * @param startLine One-based inclusive selection start line.
+		 * @param startColumn One-based inclusive selection start column.
+		 * @param endLine One-based inclusive selection end line.
+		 * @param endColumn One-based exclusive selection end column.
+		 * @param allowClipboardCopy Allow auto-copy side effects for user-initiated selection changes.
 		 */
 		void applyResolvedOutputSelection(bool hasSelection, int startLine, int startColumn, int endLine,
-		                                  int endColumn);
+		                                  int endColumn, bool allowClipboardCopy = true);
 		/**
 		 * @brief Marks that user initiated a manual scroll action.
 		 */
@@ -1760,7 +1849,8 @@ class WorldView : public QWidget
 		 * @param precomputedPosInView Optional viewport-local position for @p precomputedView.
 		 * @param precomputedHit Optional precomputed native-output hit position.
 		 * @param precomputedTextHit Optional precomputed text-hit state for @p precomputedHit.
-		 * @param allowCacheBuild `true` to rebuild layout caches on demand, `false` to query only when cache is ready.
+		 * @param allowCacheBuild `true` to materialize the needed layout range on demand, `false` to
+		 *        query only when cache is ready.
 		 */
 		void              updateLineInformationTooltip(const QWidget *watched, const QMouseEvent *event,
 		                                               const WrapTextBrowser      *precomputedView = nullptr,
@@ -1965,6 +2055,7 @@ class WorldView : public QWidget
 		mutable NativeAppendDiagnosticBucket        m_nativeRestitchFailHeadTrimDiag;
 		mutable quint64                             m_nativeSplitTopHeadTrimPixelsRevision{0};
 		mutable int                                 m_nativeSplitTopHeadTrimPixels{0};
+		mutable int                                 m_nativeSplitTopHeadTrimLines{0};
 		mutable quint64                             m_nativeSplitTopHeadTrimAdjustedRevision{0};
 		mutable IndexedRingBuffer<NativeLayoutSlot> m_nativeLayoutSlots;
 		mutable NativeLayoutHeightIndex             m_nativeLayoutHeightIndex;
@@ -1977,6 +2068,8 @@ class WorldView : public QWidget
 		mutable qreal                               m_nativeLayoutCachedLineAdvance{0.0};
 		mutable QFont                               m_nativeLayoutCachedFont;
 		mutable quint64                             m_nativeLayoutCachedRenderRevision{0};
+		mutable quint64                             m_nativeLayoutRangePreparedRevision{0};
+		mutable bool                                m_nativeLayoutRangePreparedOnly{false};
 		mutable int                                 m_nativeLayoutCacheResets{0};
 		mutable int                                 m_nativeLayoutRowMeasurements{0};
 		IndexedRingBuffer<WorldRuntime::LineEntry>  m_nativeStandaloneOutputLines;

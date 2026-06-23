@@ -99,6 +99,8 @@ namespace
 	QString                                    g_lastExecutedCommand;
 	bool                                       g_lastUserMacroHistory{false};
 	unsigned short g_actionSourceDuringExecute{WorldRuntime::eUnknownActionSource};
+	QString        g_wordUnderMenu;
+	bool           g_wordUnderMenuResolved{false};
 
 	struct AccessibleTextInsertRecord
 	{
@@ -272,6 +274,8 @@ namespace
 		g_lastExecutedCommand.clear();
 		g_lastUserMacroHistory      = false;
 		g_actionSourceDuringExecute = WorldRuntime::eUnknownActionSource;
+		g_wordUnderMenu.clear();
+		g_wordUnderMenuResolved = false;
 		g_accessibleTextInsertRecords.clear();
 		g_accessibleTextUpdateRecords.clear();
 		g_accessibleAnnouncementRecords.clear();
@@ -1016,6 +1020,20 @@ WorldView *WorldRuntime::view() const
 	return g_runtimeView;
 }
 
+WorldRuntime::CommandUiSnapshot WorldRuntime::commandUiSnapshot(bool, bool, bool) const
+{
+	CommandUiSnapshot snapshot;
+	if (!g_runtimeView)
+		return snapshot;
+
+	snapshot.hasView                    = true;
+	snapshot.outputSelectionEndColumn   = g_runtimeView->outputSelectionEndColumn();
+	snapshot.outputSelectionEndLine     = g_runtimeView->outputSelectionEndLine();
+	snapshot.outputSelectionStartColumn = g_runtimeView->outputSelectionStartColumn();
+	snapshot.outputSelectionStartLine   = g_runtimeView->outputSelectionStartLine();
+	return snapshot;
+}
+
 void WorldRuntime::installPendingPlugins()
 {
 }
@@ -1126,8 +1144,20 @@ bool WorldRuntime::callWorldHotspotFunction(const QString &functionName, long fl
 	return true;
 }
 
-void WorldRuntime::setWordUnderMenu(const QString &, bool)
+void WorldRuntime::setWordUnderMenu(const QString &value, const bool resolved)
 {
+	g_wordUnderMenu         = value;
+	g_wordUnderMenuResolved = resolved;
+}
+
+QString WorldRuntime::wordUnderMenu() const
+{
+	return g_wordUnderMenu;
+}
+
+bool WorldRuntime::wordUnderMenuResolved() const
+{
+	return g_wordUnderMenuResolved;
 }
 
 void WorldRuntime::notifyMiniWindowMouseMoved(int, int, const QString &)
@@ -1590,6 +1620,66 @@ class tst_WorldView_Basic : public QObject
 			         WorldView::nativeRuntimeLineKey(view.m_nativeRenderLineCache.at(2)));
 		}
 
+		void nativeLayoutRejectsInvalidRangePreparedRuntimeRangeRestitch()
+		{
+			WorldView view;
+			auto      makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			for (int i = 0; i < 6; ++i)
+				view.m_nativeRenderLineCache.push_back(
+				    makeRenderLine(QStringLiteral("range-restitch-invalid-old-%1").arg(i), i + 1));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+
+			const QFont layoutFont;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			QVERIFY(lineAdvance > 0.0);
+			view.m_nativeLayoutSlots[0].visualRows = 9;
+			view.m_nativeLayoutSlots[0].rowsExact  = 1;
+			view.m_nativeLayoutSlots[1].visualRows = 11;
+			view.m_nativeLayoutSlots[1].rowsExact  = 1;
+			view.m_nativeLayoutHeightIndex.setHeight(0, 9.0 * lineAdvance);
+			view.m_nativeLayoutHeightIndex.setHeight(1, 11.0 * lineAdvance);
+
+			const int                          oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			WorldView::NativeOutputRenderLines restitchedLines;
+			restitchedLines.push_back(makeRenderLine(QStringLiteral("range-restitch-invalid-old-1"), 2));
+			restitchedLines.push_back(makeRenderLine(QStringLiteral("range-restitch-invalid-old-2"), 3));
+			restitchedLines.push_back(makeRenderLine(QStringLiteral("range-restitch-invalid-new"), 99));
+			restitchedLines.push_back(makeRenderLine(QStringLiteral("range-restitch-invalid-old-5"), 6));
+			view.m_nativeRenderLineCache = std::move(restitchedLines);
+			view.bumpNativeRuntimeRangeRestitchRenderLineCacheRevision(oldLineCount, false, 1, 1, false, 1, 1,
+			                                                           1);
+			view.m_nativeSplitTopHeadTrimPixelsRevision = view.m_nativeRenderLineCacheRevision;
+			view.m_nativeSplitTopHeadTrimPixels         = 123;
+			view.m_nativeSplitTopHeadTrimLines          = 1;
+
+			QVERIFY(
+			    view.prepareNativeLayoutRangeState(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont));
+
+			QVERIFY(view.m_nativeLayoutRangePreparedOnly);
+			QCOMPARE(view.m_nativeLayoutRangePreparedRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()),
+			         sizeToInt(view.m_nativeRenderLineCache.size()));
+			QCOMPARE(sizeToInt(view.m_nativeLayoutHeightIndex.size()),
+			         sizeToInt(view.m_nativeRenderLineCache.size()));
+			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, -1);
+			QCOMPARE(view.m_nativeLayoutSlots.at(1).visualRows, -1);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, quint64{0});
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 0);
+		}
+
 		void nativeLayoutConsumesQueuedRuntimeLineRestitchWithoutReset()
 		{
 			WorldView view;
@@ -1646,6 +1736,832 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.m_nativeLayoutSlots.at(2).visualRows, 1);
 		}
 
+		void nativeOutputSelectionBoundsRemapPendingRenderDeltasWithoutLayoutSync()
+		{
+			WorldView view;
+			auto      makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			for (int i = 0; i < 5; ++i)
+				view.appendOutputText(QStringLiteral("selection-snapshot-old-%1").arg(i), true);
+			static_cast<void>(view.nativeOutputRenderLines());
+
+			view.selectOutputRange(2, 0, 24);
+			QCOMPARE(view.outputSelectionStartLine(), 3);
+			QCOMPARE(view.outputSelectionEndLine(), 3);
+
+			const int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 2);
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("selection-snapshot-tail-5"), 6));
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("selection-snapshot-tail-6"), 7));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 2);
+
+			const quint64 layoutRevisionBefore = view.m_nativeLayoutCachedRenderRevision;
+			QCOMPARE(view.m_nativeSelectionPendingHeadTrimLines, 2);
+			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 1);
+
+			QSignalSpy selectionChangedSpy(&view, &WorldView::outputSelectionChanged);
+			QCOMPARE(view.outputSelectionStartLine(), 1);
+			QCOMPARE(view.outputSelectionEndLine(), 1);
+			QCOMPARE(view.m_nativeSelectionPendingHeadTrimLines, 2);
+			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 1);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, layoutRevisionBefore);
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("selection-snapshot-old-2"));
+			QCOMPARE(view.m_nativeSelectionPendingHeadTrimLines, 2);
+			QCOMPARE(selectionChangedSpy.size(), 0);
+
+			static_cast<void>(view.synchronizeNativeRuntimeOutputPresentation(false, false));
+			QCOMPARE(selectionChangedSpy.size(), 1);
+			QCOMPARE(view.m_nativeSelectionPendingHeadTrimLines, 0);
+			QCOMPARE(view.outputSelectionStartLine(), 1);
+			QCOMPARE(view.outputSelectionEndLine(), 1);
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("selection-snapshot-old-2"));
+		}
+
+		void nativeOutputSelectionCollapseAfterRemapCommitsNoSelection()
+		{
+			WorldView view;
+
+			for (int i = 0; i < 5; ++i)
+				view.appendOutputText(QStringLiteral("selection-collapse-old-%1").arg(i), true);
+			static_cast<void>(view.nativeOutputRenderLines());
+
+			view.selectOutputRange(2, 4, 18);
+			QCOMPARE(view.outputSelectionStartLine(), 3);
+			QCOMPARE(view.outputSelectionEndLine(), 3);
+			QCOMPARE(view.m_hasOutputSelection, true);
+
+			const int oldLineCount               = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache[2].text = QStringLiteral("x");
+			view.m_nativeRenderLineCache[2].spans.clear();
+			view.m_nativeRenderLineCache[2].visualHash = 0;
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::RuntimeLineRestitch,
+			                                       oldLineCount, false, 0, 2);
+
+			QSignalSpy selectionChangedSpy(&view, &WorldView::outputSelectionChanged);
+			static_cast<void>(view.synchronizeNativeRuntimeOutputPresentation(false, false));
+
+			QCOMPARE(selectionChangedSpy.size(), 1);
+			QCOMPARE(view.m_nativeSelectionPendingHeadTrimLines, 0);
+			QCOMPARE(view.m_nativeOutputSelection.hasSelection, false);
+			QCOMPARE(view.m_hasOutputSelection, false);
+			QCOMPARE(view.outputSelectionStartLine(), 0);
+			QCOMPARE(view.outputSelectionEndLine(), 0);
+			QCOMPARE(view.outputSelectionText(), QString());
+		}
+
+		void commandUiSnapshotSelectionBoundsRemapPendingRenderDeltasWithoutLayoutSync()
+		{
+			WorldView view;
+			fakeRuntimePointer()->setView(&view);
+			auto makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			for (int i = 0; i < 5; ++i)
+				view.appendOutputText(QStringLiteral("runtime-selection-snapshot-old-%1").arg(i), true);
+			static_cast<void>(view.nativeOutputRenderLines());
+
+			view.selectOutputRange(2, 0, 32);
+			const WorldRuntime::CommandUiSnapshot initialSnapshot =
+			    fakeRuntimePointer()->commandUiSnapshot(false, false, false);
+			QVERIFY(initialSnapshot.hasView);
+			QCOMPARE(initialSnapshot.outputSelectionStartLine, 3);
+			QCOMPARE(initialSnapshot.outputSelectionEndLine, 3);
+
+			const int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 2);
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("runtime-selection-snapshot-tail-5"), 6));
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("runtime-selection-snapshot-tail-6"), 7));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 2);
+
+			const quint64 layoutRevisionBefore = view.m_nativeLayoutCachedRenderRevision;
+			QCOMPARE(view.m_nativeSelectionPendingHeadTrimLines, 2);
+			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 1);
+
+			const WorldRuntime::CommandUiSnapshot pendingSnapshot =
+			    fakeRuntimePointer()->commandUiSnapshot(false, false, false);
+			QVERIFY(pendingSnapshot.hasView);
+			QCOMPARE(pendingSnapshot.outputSelectionStartLine, 1);
+			QCOMPARE(pendingSnapshot.outputSelectionEndLine, 1);
+			QCOMPARE(view.m_nativeSelectionPendingHeadTrimLines, 2);
+			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 1);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, layoutRevisionBefore);
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("runtime-selection-snapshot-old-2"));
+			QCOMPARE(view.m_nativeSelectionPendingHeadTrimLines, 2);
+
+			static_cast<void>(view.synchronizeNativeRuntimeOutputPresentation(false, false));
+			const WorldRuntime::CommandUiSnapshot remappedSnapshot =
+			    fakeRuntimePointer()->commandUiSnapshot(false, false, false);
+			QCOMPARE(view.m_nativeSelectionPendingHeadTrimLines, 0);
+			QCOMPARE(remappedSnapshot.outputSelectionStartLine, 1);
+			QCOMPARE(remappedSnapshot.outputSelectionEndLine, 1);
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("runtime-selection-snapshot-old-2"));
+			fakeRuntimePointer()->setView(nullptr);
+		}
+
+		void nativeOutputHitTestUsesRangeLayoutWithoutFullCacheSync()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(720, 420);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 96; ++i)
+				view.appendOutputText(
+				    QStringLiteral("hit-test-range-layout-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+
+			const WorldView::NativeOutputRenderLines &initialLines = view.nativeOutputRenderLines();
+			QVERIFY(!initialLines.isEmpty());
+			auto *const browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QVERIFY(browser->viewport());
+
+			QRect viewportRect = browser->viewport()->rect();
+			QVERIFY(!viewportRect.isEmpty());
+			constexpr bool wrapEnabled     = true;
+			int            wrapWidthPixels = view.nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
+			int localWrapWidthPixels = view.nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
+			const int   lineSpacing  = qMax(0, view.m_lineSpacing);
+			const QFont layoutFont   = browser->font();
+
+			view.ensureNativeLayoutCaches(initialLines, wrapWidthPixels, localWrapWidthPixels, lineSpacing,
+			                              layoutFont);
+			static_cast<void>(view.ensureNativeLayoutRange(initialLines, 0, 8, wrapWidthPixels,
+			                                               localWrapWidthPixels, lineSpacing, layoutFont));
+			QVERIFY(view.m_nativeLayoutSlots.at(0).rowsExact != 0);
+			QVERIFY(view.nativeLayoutCacheReadyFor(initialLines, wrapWidthPixels, localWrapWidthPixels,
+			                                       lineSpacing, layoutFont));
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), sizeToInt(initialLines.size()));
+
+			const int                         resetsBefore         = view.m_nativeLayoutCacheResets;
+			const int                         measurementsBefore   = view.m_nativeLayoutRowMeasurements;
+			const quint64                     cachedRevisionBefore = view.m_nativeLayoutCachedRenderRevision;
+			WorldView::NativeOutputRenderLine tailLine;
+			tailLine.text                   = QStringLiteral("hit-test-range-layout-tail");
+			tailLine.opacity                = 1.0;
+			tailLine.firstRuntimeLineNumber = 97;
+			tailLine.lastRuntimeLineNumber  = 97;
+			tailLine.flags                  = WorldRuntime::LineOutput;
+			const int oldLineCount          = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 2);
+			view.m_nativeRenderLineCache.push_back(std::move(tailLine));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 2);
+			QCOMPARE(view.m_nativeRenderCacheDelta.fromRevision, cachedRevisionBefore);
+			QCOMPARE(view.m_nativeRenderCacheDelta.oldLineCount, oldLineCount);
+			QCOMPARE(view.m_nativeRenderCacheDelta.newLineCount, oldLineCount - 1);
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), oldLineCount);
+
+			WorldView::NativeOutputPosition position;
+			const QPoint                    hitPoint = viewportRect.center();
+			QVERIFY(view.nativeOutputHitTest(reinterpret_cast<WrapTextBrowser *>(browser), hitPoint, position,
+			                                 nullptr, nullptr, true));
+
+			QCOMPARE(view.m_nativeLayoutCacheResets, resetsBefore);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, cachedRevisionBefore);
+			QCOMPARE(view.m_nativeLayoutRangePreparedRevision, view.m_nativeRenderLineCacheRevision);
+			QVERIFY(view.m_nativeLayoutRangePreparedOnly);
+			QVERIFY(!view.m_nativeRenderCacheDeltas.isEmpty());
+			QVERIFY(view.m_nativeLayoutRowMeasurements <= measurementsBefore + 6);
+			QVERIFY(position.line >= 0);
+			QVERIFY(position.line < view.m_nativeRenderLineCache.size());
+
+			wrapWidthPixels               = view.m_nativeLayoutCachedWrapWidth;
+			localWrapWidthPixels          = view.m_nativeLayoutCachedLocalWrapWidth;
+			const QFont rangePreparedFont = view.m_nativeLayoutCachedFont;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, wrapWidthPixels, localWrapWidthPixels,
+			                              lineSpacing, rangePreparedFont);
+			QCOMPARE(view.m_nativeLayoutCacheResets, resetsBefore);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
+			QVERIFY(!view.m_nativeLayoutRangePreparedOnly);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, quint64{0});
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 0);
+		}
+
+		void nativeOutputCharacterRectUsesRangeLayoutWithoutFullCacheSync()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(720, 420);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 24; ++i)
+				view.appendOutputText(
+				    QStringLiteral("character-rect-range-layout-%1").arg(i, 2, 10, QLatin1Char('0')), true);
+
+			const WorldView::NativeOutputRenderLines &initialLines = view.nativeOutputRenderLines();
+			QVERIFY(!initialLines.isEmpty());
+			auto *const browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QVERIFY(browser->viewport());
+
+			const QRect viewportRect = browser->viewport()->rect();
+			QVERIFY(!viewportRect.isEmpty());
+			constexpr bool wrapEnabled     = true;
+			const int      wrapWidthPixels = view.nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
+			const int      localWrapWidthPixels =
+			    view.nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
+			const int   lineSpacing = qMax(0, view.m_lineSpacing);
+			const QFont layoutFont  = browser->font();
+			view.ensureNativeLayoutCaches(initialLines, wrapWidthPixels, localWrapWidthPixels, lineSpacing,
+			                              layoutFont);
+			QVERIFY(view.nativeLayoutCacheReadyFor(initialLines, wrapWidthPixels, localWrapWidthPixels,
+			                                       lineSpacing, layoutFont));
+
+			WorldView::NativeOutputRenderLine tailLine;
+			tailLine.text                      = QStringLiteral("character-rect-range-layout-tail");
+			tailLine.opacity                   = 1.0;
+			tailLine.firstRuntimeLineNumber    = 25;
+			tailLine.lastRuntimeLineNumber     = 25;
+			tailLine.flags                     = WorldRuntime::LineOutput;
+			const int     oldLineCount         = sizeToInt(view.m_nativeRenderLineCache.size());
+			const int     resetsBefore         = view.m_nativeLayoutCacheResets;
+			const quint64 cachedRevisionBefore = view.m_nativeLayoutCachedRenderRevision;
+			view.m_nativeRenderLineCache.push_back(std::move(tailLine));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::TailAppend,
+			                                       oldLineCount, false);
+
+			QRect globalRect;
+			QVERIFY(view.nativeOutputCharacterRect(reinterpret_cast<WrapTextBrowser *>(browser), {0, 0},
+			                                       globalRect));
+			QVERIFY(!globalRect.isEmpty());
+			QCOMPARE(view.m_nativeLayoutCacheResets, resetsBefore);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, cachedRevisionBefore);
+			QVERIFY(view.m_nativeLayoutRangePreparedOnly);
+			QCOMPARE(view.m_nativeLayoutRangePreparedRevision, view.m_nativeRenderLineCacheRevision);
+
+			resetTestState();
+		}
+
+		void nativeLayoutReplaysFromRangePreparedRevisionWithoutReset()
+		{
+			WorldView view;
+			auto      makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			for (int i = 0; i < 6; ++i)
+				view.m_nativeRenderLineCache.push_back(
+				    makeRenderLine(QStringLiteral("range-prepared-old-%1").arg(i), i + 1));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+
+			const QFont layoutFont;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 6);
+			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			QVERIFY(lineAdvance > 0.0);
+			view.m_nativeLayoutSlots[2].visualRows = 12;
+			view.m_nativeLayoutSlots[2].rowsExact  = 1;
+			view.m_nativeLayoutSlots[3].visualRows = 13;
+			view.m_nativeLayoutSlots[3].rowsExact  = 1;
+			view.m_nativeLayoutHeightIndex.setHeight(2, 12.0 * lineAdvance);
+			view.m_nativeLayoutHeightIndex.setHeight(3, 13.0 * lineAdvance);
+			const int expectedHeadTrimPixels =
+			    qMax(1, static_cast<int>(std::round(view.nativeLayoutCumulativeHeightAt(2))));
+
+			const quint64 exactRevisionBeforeRangePrep = view.m_nativeLayoutCachedRenderRevision;
+			const int     resetsBefore                 = view.m_nativeLayoutCacheResets;
+			int           oldLineCount                 = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 2);
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("range-prepared-tail-6"), 7));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 2);
+
+			QVERIFY(
+			    view.prepareNativeLayoutRangeState(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont));
+			QVERIFY(view.m_nativeLayoutRangePreparedOnly);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, exactRevisionBeforeRangePrep);
+			QCOMPARE(view.m_nativeLayoutRangePreparedRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 5);
+			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, 12);
+			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(0).rowsExact), 1);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(0), 12.0 * lineAdvance);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, expectedHeadTrimPixels);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 2);
+
+			const quint64 rangePreparedRevision = view.m_nativeLayoutRangePreparedRevision;
+			oldLineCount                        = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("range-prepared-tail-7"), 8));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::TailAppend,
+			                                       oldLineCount);
+			QCOMPARE(view.m_nativeLayoutRangePreparedRevision, rangePreparedRevision);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, expectedHeadTrimPixels);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 2);
+			QCOMPARE(view.m_nativeRenderCacheDelta.headTrimCount, 0);
+
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+
+			QCOMPARE(view.m_nativeLayoutCacheResets, resetsBefore);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
+			QVERIFY(!view.m_nativeLayoutRangePreparedOnly);
+			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 0);
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 6);
+			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, 12);
+			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(0).rowsExact), 1);
+			QCOMPARE(view.m_nativeLayoutSlots.at(1).visualRows, 13);
+			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(1).rowsExact), 1);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(0), 12.0 * lineAdvance);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(1), 13.0 * lineAdvance);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, expectedHeadTrimPixels);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 2);
+		}
+
+		void nativeSplitTopHeadTrimPixelsDoNotCarryAcrossFullReset()
+		{
+			WorldView view;
+			auto      makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("full-reset-old-0"), 1));
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("full-reset-old-1"), 2));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, QFont{});
+			int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("full-reset-old-2"), 3));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::TailAppend,
+			                                       oldLineCount);
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, QFont{});
+
+			QVERIFY(view.m_nativeRenderLineCacheRevision > 0);
+			QVERIFY(view.m_nativeLayoutCachedRenderRevision > 0);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimAdjustedRevision, quint64{0});
+			view.m_nativeSplitTopHeadTrimPixelsRevision = view.m_nativeRenderLineCacheRevision;
+			view.m_nativeSplitTopHeadTrimPixels         = 42;
+			view.m_nativeSplitTopHeadTrimLines          = 2;
+
+			oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.clear();
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("full-reset-new-0"), 100));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::FullReset,
+			                                       oldLineCount);
+
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, quint64{0});
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 0);
+		}
+
+		void nativeSplitTopHeadTrimPixelsClearWhenReplayHitsFullReset()
+		{
+			WorldView view;
+			auto      makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			for (int i = 0; i < 5; ++i)
+				view.m_nativeRenderLineCache.push_back(
+				    makeRenderLine(QStringLiteral("full-reset-replay-old-%1").arg(i), i + 1));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+			const QFont layoutFont;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			QVERIFY(lineAdvance > 0.0);
+			view.m_nativeLayoutSlots[2].visualRows = 12;
+			view.m_nativeLayoutSlots[2].rowsExact  = 1;
+			view.m_nativeLayoutHeightIndex.setHeight(2, 12.0 * lineAdvance);
+
+			int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 2);
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("full-reset-replay-tail-5"), 6));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 2);
+
+			oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.clear();
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("full-reset-replay-new"), 100));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::FullReset,
+			                                       oldLineCount);
+
+			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 2);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, quint64{0});
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 0);
+
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, quint64{0});
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 0);
+		}
+
+		void nativeSplitTopHeadTrimPixelsClearWhenRangeReplayFails()
+		{
+			WorldView view;
+			auto      makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			for (int i = 0; i < 5; ++i)
+				view.m_nativeRenderLineCache.push_back(
+				    makeRenderLine(QStringLiteral("range-replay-fail-old-%1").arg(i), i + 1));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+			const QFont layoutFont;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			QVERIFY(lineAdvance > 0.0);
+			view.m_nativeLayoutSlots[0].visualRows = 7;
+			view.m_nativeLayoutSlots[0].rowsExact  = 1;
+			view.m_nativeLayoutHeightIndex.setHeight(0, 7.0 * lineAdvance);
+
+			const int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 1);
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("range-replay-fail-tail"), 6));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 1);
+			view.m_nativeRenderCacheDelta.newLineCount         = oldLineCount - 1;
+			view.m_nativeRenderCacheDeltas.last().newLineCount = oldLineCount - 1;
+			view.m_nativeSplitTopHeadTrimPixelsRevision        = view.m_nativeRenderLineCacheRevision;
+			view.m_nativeSplitTopHeadTrimPixels                = 123;
+			view.m_nativeSplitTopHeadTrimLines                 = 1;
+
+			QVERIFY(
+			    view.prepareNativeLayoutRangeState(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont));
+
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()),
+			         sizeToInt(view.m_nativeRenderLineCache.size()));
+			QCOMPARE(sizeToInt(view.m_nativeLayoutHeightIndex.size()),
+			         sizeToInt(view.m_nativeRenderLineCache.size()));
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, quint64{0});
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 0);
+		}
+
+		void nativeSplitTopHeadTrimPixelsClearWhenFullReplayFails()
+		{
+			WorldView view;
+			auto      makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			for (int i = 0; i < 5; ++i)
+				view.m_nativeRenderLineCache.push_back(
+				    makeRenderLine(QStringLiteral("full-replay-fail-old-%1").arg(i), i + 1));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+			const QFont layoutFont;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			QVERIFY(lineAdvance > 0.0);
+			view.m_nativeLayoutSlots[0].visualRows = 7;
+			view.m_nativeLayoutSlots[0].rowsExact  = 1;
+			view.m_nativeLayoutHeightIndex.setHeight(0, 7.0 * lineAdvance);
+
+			const int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 1);
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("full-replay-fail-tail"), 6));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 1);
+			view.m_nativeRenderCacheDelta.newLineCount         = oldLineCount - 1;
+			view.m_nativeRenderCacheDeltas.last().newLineCount = oldLineCount - 1;
+			view.m_nativeSplitTopHeadTrimPixelsRevision        = view.m_nativeRenderLineCacheRevision;
+			view.m_nativeSplitTopHeadTrimPixels                = 123;
+			view.m_nativeSplitTopHeadTrimLines                 = 1;
+
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()),
+			         sizeToInt(view.m_nativeRenderLineCache.size()));
+			QCOMPARE(sizeToInt(view.m_nativeLayoutHeightIndex.size()),
+			         sizeToInt(view.m_nativeRenderLineCache.size()));
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, quint64{0});
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 0);
+		}
+
+		void nativeSplitTopHeadTrimPixelsDoNotCommitAcrossRangeKeyMismatch()
+		{
+			WorldView view;
+			auto      makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			for (int i = 0; i < 5; ++i)
+				view.m_nativeRenderLineCache.push_back(
+				    makeRenderLine(QStringLiteral("range-key-mismatch-old-%1").arg(i), i + 1));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+			const QFont layoutFont;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			QVERIFY(lineAdvance > 0.0);
+			view.m_nativeLayoutSlots[0].visualRows = 9;
+			view.m_nativeLayoutSlots[0].rowsExact  = 1;
+			view.m_nativeLayoutHeightIndex.setHeight(0, 9.0 * lineAdvance);
+
+			const int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 1);
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("range-key-mismatch-tail"), 6));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 1);
+
+			QVERIFY(
+			    view.prepareNativeLayoutRangeState(view.m_nativeRenderLineCache, 420, 420, 0, layoutFont));
+
+			QVERIFY(view.m_nativeLayoutRangePreparedOnly);
+			QCOMPARE(view.m_nativeLayoutRangePreparedRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()),
+			         sizeToInt(view.m_nativeRenderLineCache.size()));
+			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, -1);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, quint64{0});
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 0);
+		}
+
+		void nativeSplitTopHeadTrimPixelsDoNotCommitAcrossFullCacheKeyMismatch()
+		{
+			WorldView view;
+			auto      makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			for (int i = 0; i < 5; ++i)
+				view.m_nativeRenderLineCache.push_back(
+				    makeRenderLine(QStringLiteral("full-key-mismatch-old-%1").arg(i), i + 1));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+			const QFont layoutFont;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			QVERIFY(lineAdvance > 0.0);
+			view.m_nativeLayoutSlots[0].visualRows = 9;
+			view.m_nativeLayoutSlots[0].rowsExact  = 1;
+			view.m_nativeLayoutHeightIndex.setHeight(0, 9.0 * lineAdvance);
+
+			const int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 1);
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("full-key-mismatch-tail"), 6));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 1);
+
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 420, 420, 0, layoutFont);
+
+			QVERIFY(!view.m_nativeLayoutRangePreparedOnly);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()),
+			         sizeToInt(view.m_nativeRenderLineCache.size()));
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, quint64{0});
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 0);
+		}
+
+		void nativeSplitTopHeadTrimPixelsDoNotCommitAcrossFullCacheLocalWrapMismatch()
+		{
+			WorldView view;
+			auto      makeRenderLine =
+			    [](const QString &text, const qint64 lineNumber, const int flags = WorldRuntime::LineOutput)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = flags;
+				return line;
+			};
+
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(
+			    QStringLiteral("full-local-wrap-mismatch-old-local-line-with-enough-text-to-wrap"), 1,
+			    WorldRuntime::LineNote));
+			for (int i = 1; i < 5; ++i)
+				view.m_nativeRenderLineCache.push_back(
+				    makeRenderLine(QStringLiteral("full-local-wrap-mismatch-old-%1").arg(i), i + 1));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+			const QFont layoutFont;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 140, 0, layoutFont);
+			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
+			QVERIFY(lineAdvance > 0.0);
+			view.m_nativeLayoutSlots[0].visualRows = 4;
+			view.m_nativeLayoutSlots[0].rowsExact  = 1;
+			view.m_nativeLayoutHeightIndex.setHeight(0, 4.0 * lineAdvance);
+
+			const int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 1);
+			view.m_nativeRenderLineCache.push_back(
+			    makeRenderLine(QStringLiteral("full-local-wrap-mismatch-tail"), 6));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 1);
+
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 220, 0, layoutFont);
+
+			QVERIFY(!view.m_nativeLayoutRangePreparedOnly);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(view.m_nativeLayoutCachedLocalWrapWidth, 220);
+			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()),
+			         sizeToInt(view.m_nativeRenderLineCache.size()));
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, quint64{0});
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 0);
+		}
+
+		void hoverRefreshResolvesNativeOutputStateDeterministically()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(640, 360);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			QCoreApplication::processEvents();
+
+			view.appendOutputText(QStringLiteral("cached passive hover"), true);
+			static_cast<void>(view.nativeOutputRenderLines());
+			QTextBrowser *const browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QVERIFY(browser->viewport());
+			QCursor::setPos(browser->viewport()->mapToGlobal(browser->viewport()->rect().center()));
+
+			view.m_nativeRenderLineCacheValid  = false;
+			const quint64 renderRevisionBefore = view.m_nativeRenderLineCacheRevision;
+
+			view.applyHoveredHyperlink(QStringLiteral("https://example.invalid/cached"));
+			QVERIFY(view.hyperlinkHoverActive());
+			QCOMPARE(view.currentHoveredHyperlink(), QStringLiteral("https://example.invalid/cached"));
+			view.refreshHoveredHyperlinkFromCursor();
+			QVERIFY(!view.hyperlinkHoverActive());
+			QCOMPARE(view.currentHoveredHyperlink(), QString());
+			QVERIFY(view.m_nativeRenderLineCacheRevision > renderRevisionBefore);
+			QVERIFY(view.m_nativeRenderLineCacheValid);
+
+			resetTestState();
+		}
+
+		void nativeMouseMoveResolvesWordUnderMenuWithRangeLayout()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(640, 360);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			QCoreApplication::processEvents();
+
+			view.appendOutputText(QStringLiteral("hoverword marker"), true);
+			const WorldView::NativeOutputRenderLines &initialLines = view.nativeOutputRenderLines();
+			QVERIFY(!initialLines.isEmpty());
+
+			QTextBrowser *const browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QVERIFY(browser->viewport());
+
+			const QRect viewportRect = browser->viewport()->rect();
+			QVERIFY(!viewportRect.isEmpty());
+			constexpr bool wrapEnabled     = true;
+			const int      wrapWidthPixels = view.nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
+			const int      localWrapWidthPixels =
+			    view.nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
+			const int   lineSpacing = qMax(0, view.m_lineSpacing);
+			const QFont layoutFont  = browser->font();
+			view.ensureNativeLayoutCaches(initialLines, wrapWidthPixels, localWrapWidthPixels, lineSpacing,
+			                              layoutFont);
+
+			QPoint hoverPoint{-1, -1};
+			for (int y = viewportRect.top(); y <= viewportRect.bottom() && hoverPoint.x() < 0; y += 2)
+			{
+				for (int x = viewportRect.left(); x <= viewportRect.right(); x += 2)
+				{
+					WorldView::NativeOutputPosition position;
+					bool                            textHit = false;
+					if (!view.nativeOutputHitTest(reinterpret_cast<WrapTextBrowser *>(browser), {x, y},
+					                              position, nullptr, nullptr, true, true, &textHit) ||
+					    !textHit)
+					{
+						continue;
+					}
+					if (view.wordAtNativeOutputPosition(position) == QStringLiteral("hoverword"))
+					{
+						hoverPoint = {x, y};
+						break;
+					}
+				}
+			}
+			QVERIFY2(hoverPoint.x() >= 0 && hoverPoint.y() >= 0, "Expected point over hoverword.");
+
+			WorldView::NativeOutputRenderLine tailLine;
+			tailLine.text                   = QStringLiteral("mouse-move-range-tail");
+			tailLine.opacity                = 1.0;
+			tailLine.firstRuntimeLineNumber = 2;
+			tailLine.lastRuntimeLineNumber  = 2;
+			tailLine.flags                  = WorldRuntime::LineOutput;
+			const int oldLineCount          = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.push_back(std::move(tailLine));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::TailAppend,
+			                                       oldLineCount, false);
+			const int resetsBefore = view.m_nativeLayoutCacheResets;
+			g_wordUnderMenu.clear();
+			g_wordUnderMenuResolved = false;
+
+			const QPoint globalHoverPoint = browser->viewport()->mapToGlobal(hoverPoint);
+			QMouseEvent  moveEvent(QEvent::MouseMove, QPointF(hoverPoint), QPointF(hoverPoint),
+			                       QPointF(globalHoverPoint), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+			view.eventFilter(browser->viewport(), &moveEvent);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.m_nativeLayoutCacheResets, resetsBefore);
+			QVERIFY(fakeRuntimePointer()->wordUnderMenuResolved());
+			QCOMPARE(fakeRuntimePointer()->wordUnderMenu(), QStringLiteral("hoverword"));
+			fakeRuntimePointer()->setView(nullptr);
+			resetTestState();
+		}
+
 		void nativeLayoutConsumesMixedQueuedDeltasWithoutReset()
 		{
 			WorldView view;
@@ -1677,6 +2593,8 @@ class tst_WorldView_Basic : public QObject
 			view.m_nativeLayoutSlots[3].rowsExact  = 1;
 			view.m_nativeLayoutHeightIndex.setHeight(2, 12.0 * lineAdvance);
 			view.m_nativeLayoutHeightIndex.setHeight(3, 13.0 * lineAdvance);
+			const int expectedHeadTrimPixels =
+			    qMax(1, static_cast<int>(std::round(view.nativeLayoutCumulativeHeightAt(2))));
 
 			int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
 			view.m_nativeRenderLineCache.remove(0, 2);
@@ -1703,6 +2621,9 @@ class tst_WorldView_Basic : public QObject
 
 			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
 			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 0);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, expectedHeadTrimPixels);
+			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 2);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 7);
 			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, 12);
 			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(0).rowsExact), 1);
