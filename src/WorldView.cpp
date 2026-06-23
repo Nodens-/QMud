@@ -227,7 +227,7 @@ namespace
 		return true;
 	}
 
-	bool runtimeLineNumbersAreContiguous(const QVector<WorldRuntime::LineEntry> &lines)
+	template <typename Lines> bool runtimeLineNumbersAreContiguous(const Lines &lines)
 	{
 		if (lines.isEmpty())
 			return true;
@@ -242,9 +242,9 @@ namespace
 		return true;
 	}
 
-	int findRuntimeLineIndexByNumberNear(const QVector<WorldRuntime::LineEntry> &runtimeLines,
-	                                     const qint64 lineNumber, const int preferredIndex,
-	                                     const bool searchBackwardFirst)
+	template <typename Lines>
+	int findRuntimeLineIndexByNumberNear(const Lines &runtimeLines, const qint64 lineNumber,
+	                                     const int preferredIndex, const bool searchBackwardFirst)
 	{
 		if (runtimeLines.isEmpty())
 			return -1;
@@ -310,6 +310,22 @@ namespace
 			seed *= 1099511628211ULL;
 		}
 		return hashCombine(seed, static_cast<quint64>(text.size()));
+	}
+
+	quint64 nativeLayoutContentSalt(const quint64 styleKey, const int lineSpacingSetting,
+	                                const QFont &layoutFont)
+	{
+		quint64 salt = styleKey;
+		salt         = hashCombine(salt, hashStringContent(layoutFont.toString()));
+		salt         = hashCombine(salt, static_cast<quint64>(lineSpacingSetting));
+		return salt;
+	}
+
+	quint64 nativeLayoutLineCacheHash(const quint64 visualHash, const int effectiveWrapWidth,
+	                                  const quint64 layoutContentSalt)
+	{
+		return hashCombine(hashCombine(visualHash, static_cast<quint64>(effectiveWrapWidth)),
+		                   layoutContentSalt);
 	}
 
 	bool isActionLinkType(const int actionType)
@@ -1560,7 +1576,7 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 			if (!view)
 				return {};
 
-			const QVector<WorldView::NativeOutputRenderLine> &renderLines = view->nativeOutputRenderLines();
+			const WorldView::NativeOutputRenderLines &renderLines = view->nativeOutputRenderLines();
 			return WorldView::accessibleNativeOutputTextMap(renderLines);
 		}
 };
@@ -2469,8 +2485,8 @@ void WorldView::syncOutputScrollSingleStep() const
 		m_outputScrollBar->setSingleStep(singleStep);
 }
 
-void WorldView::syncNativeOutputScrollBarsFromLayout(const QVector<NativeOutputRenderLine> &lines,
-                                                     const bool allowLayoutBuild) const
+void WorldView::syncNativeOutputScrollBarsFromLayout(const NativeOutputRenderLines &lines,
+                                                     const bool                     allowLayoutBuild) const
 {
 	if (!m_output || !m_nativeOutputCanvas)
 		return;
@@ -2522,11 +2538,11 @@ void WorldView::syncNativeOutputScrollBarsFromLayout(const QVector<NativeOutputR
 	const qreal effectiveLineAdvance = (lines.isEmpty() || m_nativeLayoutCachedLineAdvance <= 0.0)
 	                                       ? fallbackLineAdvance
 	                                       : m_nativeLayoutCachedLineAdvance;
-	const qreal docY          = (lines.isEmpty() || m_nativeLayoutCumulativeHeights.size() <= lines.size())
-	                                ? 0.0
-	                                : m_nativeLayoutCumulativeHeights.at(lines.size());
-	const int   contentHeight = qMax(0, static_cast<int>(std::ceil(docY)));
-	const int   lineStep      = qMax(1, static_cast<int>(std::round(effectiveLineAdvance)));
+	const qreal docY                 = (lines.isEmpty() || m_nativeLayoutHeightIndex.size() != lines.size())
+	                                       ? 0.0
+	                                       : m_nativeLayoutHeightIndex.totalHeight();
+	const int   contentHeight        = qMax(0, static_cast<int>(std::ceil(docY)));
+	const int   lineStep             = qMax(1, static_cast<int>(std::round(effectiveLineAdvance)));
 
 	{
 		QScopedValueRollback<bool> scrollSyncGuard(m_nativeScrollSyncInPaint, true);
@@ -2558,25 +2574,30 @@ void WorldView::syncNativeOutputScrollBarsFromLayout(const QVector<NativeOutputR
 			        m_nativePrimaryPaintState.visibleLineTops.size() &&
 			    m_nativePrimaryPaintState.visibleLineKeys.size() ==
 			        m_nativePrimaryPaintState.visibleFirstRuntimeLineNumbers.size() &&
-			    m_nativeLayoutRuntimeLineKeys.size() == lines.size() &&
-			    m_nativeLayoutCumulativeHeights.size() == lines.size() + 1)
+			    m_nativeLayoutSlots.size() == lines.size() &&
+			    m_nativeLayoutHeightIndex.size() == lines.size())
 			{
+				const bool pendingSplitTopHeadTrim =
+				    m_nativeSplitTopHeadTrimAdjustedRevision != m_nativeRenderLineCacheRevision &&
+				    m_nativeSplitTopHeadTrimPixelsRevision == m_nativeRenderLineCacheRevision &&
+				    m_nativeSplitTopHeadTrimLines > 0;
 				const int headTrimCount =
-				    (m_nativeRenderCacheDelta.revision == m_nativeRenderLineCacheRevision)
-				        ? qMax(0, m_nativeRenderCacheDelta.headTrimCount)
-				        : 0;
+				    pendingSplitTopHeadTrim
+				        ? m_nativeSplitTopHeadTrimLines
+				        : ((m_nativeRenderCacheDelta.revision == m_nativeRenderLineCacheRevision)
+				               ? qMax(0, m_nativeRenderCacheDelta.headTrimCount)
+				               : 0);
 				auto findAnchorLineIndex = [this, &lines, headTrimCount](const int     oldLineIndex,
 				                                                         const quint64 anchorKey,
 				                                                         const qint64 anchorRuntimeLineNumber)
 				{
-					if (m_nativeLayoutRuntimeLineKeys.isEmpty())
+					if (m_nativeLayoutSlots.isEmpty())
 						return -1;
 
 					auto matchesAnchor = [this, anchorKey](const int lineIndex)
 					{
-						return anchorKey != 0 && lineIndex >= 0 &&
-						       lineIndex < m_nativeLayoutRuntimeLineKeys.size() &&
-						       m_nativeLayoutRuntimeLineKeys.at(lineIndex) == anchorKey;
+						return anchorKey != 0 && lineIndex >= 0 && lineIndex < m_nativeLayoutSlots.size() &&
+						       m_nativeLayoutSlots.at(lineIndex).runtimeLineKey == anchorKey;
 					};
 					auto containsAnchorRuntimeLine = [&lines, anchorRuntimeLineNumber](const int lineIndex)
 					{
@@ -2585,14 +2606,14 @@ void WorldView::syncNativeOutputScrollBarsFromLayout(const QVector<NativeOutputR
 						                                                 anchorRuntimeLineNumber);
 					};
 
-					const int expectedIndex = qBound(0, oldLineIndex - headTrimCount,
-					                                 sizeToInt(m_nativeLayoutRuntimeLineKeys.size()) - 1);
+					const int expectedIndex =
+					    qBound(0, oldLineIndex - headTrimCount, sizeToInt(m_nativeLayoutSlots.size()) - 1);
 					if (matchesAnchor(expectedIndex))
 						return expectedIndex;
 					if (matchesAnchor(oldLineIndex))
 						return oldLineIndex;
 
-					const int searchRadius = qMin(256, sizeToInt(m_nativeLayoutRuntimeLineKeys.size()) - 1);
+					const int searchRadius = qMin(256, sizeToInt(m_nativeLayoutSlots.size()) - 1);
 					for (int distance = 1; distance <= searchRadius; ++distance)
 					{
 						const int beforeIndex = expectedIndex - distance;
@@ -2635,12 +2656,12 @@ void WorldView::syncNativeOutputScrollBarsFromLayout(const QVector<NativeOutputR
 						continue;
 
 					const int anchoredValue =
-					    static_cast<int>(std::round(m_nativeLayoutCumulativeHeights.at(newLineIndex))) -
+					    static_cast<int>(std::round(nativeLayoutCumulativeHeightAt(newLineIndex))) -
 					    anchorTopOffset;
 					targetValue           = qBound(0, anchoredValue, maxScroll);
 					splitTopAnchorApplied = true;
-					if (m_nativeRenderCacheDelta.revision == m_nativeRenderLineCacheRevision &&
-					    m_nativeRenderCacheDelta.headTrimCount > 0)
+					if (m_nativeSplitTopHeadTrimPixelsRevision == m_nativeRenderLineCacheRevision &&
+					    m_nativeSplitTopHeadTrimPixels > 0)
 					{
 						m_nativeSplitTopHeadTrimAdjustedRevision = m_nativeRenderLineCacheRevision;
 					}
@@ -2649,9 +2670,8 @@ void WorldView::syncNativeOutputScrollBarsFromLayout(const QVector<NativeOutputR
 			}
 			if (!splitTopAnchorApplied && !canAutoFollowTail &&
 			    m_nativeSplitTopHeadTrimAdjustedRevision != m_nativeRenderLineCacheRevision &&
-			    m_nativeRenderCacheDelta.revision == m_nativeRenderLineCacheRevision &&
-			    m_nativeRenderCacheDelta.headTrimCount > 0 &&
-			    m_nativeSplitTopHeadTrimPixelsRevision == m_nativeRenderLineCacheRevision)
+			    m_nativeSplitTopHeadTrimPixelsRevision == m_nativeRenderLineCacheRevision &&
+			    m_nativeSplitTopHeadTrimPixels > 0)
 			{
 				const int trimmedScroll                  = qMax(0, m_nativeSplitTopHeadTrimPixels);
 				targetValue                              = qMax(0, targetValue - trimmedScroll);
@@ -2780,8 +2800,7 @@ void WorldView::requestNativeOutputTailRepaint() const
 		requestNativeOutputRepaint();
 }
 
-bool WorldView::nativeOutputDeltaRepaintRect(const QVector<NativeOutputRenderLine> &lines,
-                                             QRect                                 &repaintRect) const
+bool WorldView::nativeOutputDeltaRepaintRect(const NativeOutputRenderLines &lines, QRect &repaintRect) const
 {
 	repaintRect = {};
 	if (!m_nativeOutputCanvas || !m_output || lines.isEmpty())
@@ -2791,12 +2810,11 @@ bool WorldView::nativeOutputDeltaRepaintRect(const QVector<NativeOutputRenderLin
 	{
 		return false;
 	}
-	if (!m_nativeLayoutCacheValid || m_nativeLayoutCachedRenderRevision != m_nativeRenderLineCacheRevision ||
-	    m_nativeLayoutCumulativeDirtyFrom < sizeToInt(lines.size()))
+	if (!m_nativeLayoutCacheValid || m_nativeLayoutCachedRenderRevision != m_nativeRenderLineCacheRevision)
 	{
 		return false;
 	}
-	if (m_nativeLayoutCumulativeHeights.size() <= lines.size())
+	if (m_nativeLayoutHeightIndex.size() != lines.size())
 		return false;
 
 	int       firstDirtyLine = -1;
@@ -2807,7 +2825,9 @@ bool WorldView::nativeOutputDeltaRepaintRect(const QVector<NativeOutputRenderLin
 	case NativeRenderCacheDeltaKind::TailRemove:
 	{
 		const int oldLineCount = qBound(0, m_nativeRenderCacheDelta.oldLineCount, lineCount);
-		firstDirtyLine         = qMax(0, oldLineCount - (m_nativeRenderCacheDelta.tailLineMutated ? 1 : 0));
+		firstDirtyLine = m_nativeRenderCacheDelta.headLineMutated
+		                     ? 0
+		                     : qMax(0, oldLineCount - (m_nativeRenderCacheDelta.tailLineMutated ? 1 : 0));
 		break;
 	}
 	case NativeRenderCacheDeltaKind::HeadTrimTailAppend:
@@ -2823,7 +2843,7 @@ bool WorldView::nativeOutputDeltaRepaintRect(const QVector<NativeOutputRenderLin
 	if (firstDirtyLine < 0 || firstDirtyLine >= lineCount)
 		return false;
 
-	const qreal documentHeight      = m_nativeLayoutCumulativeHeights.at(lines.size());
+	const qreal documentHeight      = m_nativeLayoutHeightIndex.totalHeight();
 	auto        appendPaneDirtyRect = [&](const WrapTextBrowser *view)
 	{
 		if (!view || !view->isVisible())
@@ -2835,13 +2855,18 @@ bool WorldView::nativeOutputDeltaRepaintRect(const QVector<NativeOutputRenderLin
 		const int nativeMaxScroll = qMax(0, static_cast<int>(std::ceil(documentHeight)) - paneRect.height());
 		const int scrollY =
 		    view->verticalScrollBar() ? qBound(0, view->verticalScrollBar()->value(), nativeMaxScroll) : 0;
-		const qreal dirtyTop = static_cast<qreal>(paneRect.top()) +
-		                       m_nativeLayoutCumulativeHeights.at(firstDirtyLine) -
-		                       static_cast<qreal>(scrollY);
-		const qreal dirtyBottom =
-		    static_cast<qreal>(paneRect.top()) + documentHeight - static_cast<qreal>(scrollY);
-		const int   dirtyY      = static_cast<int>(std::floor(dirtyTop)) - 2;
-		const int   dirtyHeight = qMax(1, static_cast<int>(std::ceil(dirtyBottom)) - dirtyY + 3);
+		const bool  dirtyTopExact = firstDirtyLine <= m_nativeLayoutExactPrefixCount;
+		const qreal dirtyTop      = dirtyTopExact ? static_cast<qreal>(paneRect.top()) +
+		                                                nativeLayoutCumulativeHeightAt(firstDirtyLine) -
+		                                                static_cast<qreal>(scrollY)
+		                                          : static_cast<qreal>(paneRect.top());
+		const auto  paneTop       = static_cast<qreal>(paneRect.top());
+		const auto  paneBottom    = static_cast<qreal>(paneRect.bottom() + 1);
+		if (dirtyTopExact && dirtyTop >= paneBottom)
+			return;
+		const qreal dirtyBottom = paneBottom;
+		const int dirtyY = dirtyTop <= paneTop ? paneRect.top() : static_cast<int>(std::floor(dirtyTop)) - 2;
+		const int dirtyHeight = qMax(1, static_cast<int>(std::ceil(dirtyBottom)) - dirtyY + 3);
 		const QRect paneDirtyRect =
 		    QRect(paneRect.left(), dirtyY, paneRect.width(), dirtyHeight).intersected(paneRect);
 		if (!paneDirtyRect.isEmpty())
@@ -2877,6 +2902,11 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 {
 	if (!m_nativeOutputCanvas || !m_output || !m_output->isVisible() || lines.isEmpty())
 		return false;
+	if (m_nativeRenderCacheDelta.kind != NativeRenderCacheDeltaKind::TailAppend ||
+	    m_nativeRenderCacheDelta.headTrimCount > 0 || m_nativeRenderCacheDelta.headLineMutated)
+	{
+		return false;
+	}
 	if (m_scrollbackSplitActive || m_nativeOutputRepaintQueued || m_nativeOutputScrollBlitPending)
 		return false;
 	if (m_nativeRenderCacheDelta.revision != m_nativeRenderLineCacheRevision ||
@@ -2918,17 +2948,7 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 		return false;
 	dirtyRect = dirtyRect.intersected(paneRect);
 
-	const bool hasHeadTrim =
-	    m_nativeRenderCacheDelta.kind == NativeRenderCacheDeltaKind::HeadTrimTailAppend ||
-	    m_nativeRenderCacheDelta.headTrimCount > 0;
-	int scrollDelta = currentScrollY - m_nativePrimaryPaintState.scrollY;
-	if (hasHeadTrim)
-	{
-		if (m_nativeSplitTopHeadTrimPixelsRevision != m_nativeRenderLineCacheRevision ||
-		    m_nativeSplitTopHeadTrimPixels <= 0)
-			return false;
-		scrollDelta += m_nativeSplitTopHeadTrimPixels;
-	}
+	const int scrollDelta = currentScrollY - m_nativePrimaryPaintState.scrollY;
 
 	if (scrollDelta == 0)
 	{
@@ -2962,8 +2982,7 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 	const QFont layoutFont           = m_output->font();
 	if (!nativeLayoutCacheReadyFor(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
 	                               layoutFont) ||
-	    m_nativeLayoutCumulativeHeights.size() <= lines.size() ||
-	    m_nativeLayoutRowsExact.size() != lines.size())
+	    m_nativeLayoutHeightIndex.size() != lines.size() || m_nativeLayoutSlots.size() != lines.size())
 	{
 		return false;
 	}
@@ -2973,17 +2992,8 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 	{
 		const auto visibleTop    = static_cast<qreal>(scrollY);
 		const auto visibleBottom = static_cast<qreal>(scrollY + paneHeight - 1);
-		auto       firstVisibleIt =
-		    std::ranges::upper_bound(std::ranges::subrange(m_nativeLayoutCumulativeHeights.cbegin() + 1,
-		                                                   m_nativeLayoutCumulativeHeights.cend()),
-		                             visibleTop);
-		firstLine = qMax(0, sizeToInt(firstVisibleIt - m_nativeLayoutCumulativeHeights.cbegin()) - 1);
-		auto lastVisibleIt =
-		    std::ranges::upper_bound(std::ranges::subrange(m_nativeLayoutCumulativeHeights.cbegin(),
-		                                                   m_nativeLayoutCumulativeHeights.cend()),
-		                             visibleBottom);
-		lastLine = qMin(sizeToInt(lines.size()) - 1,
-		                sizeToInt(lastVisibleIt - m_nativeLayoutCumulativeHeights.cbegin()) - 1);
+		firstLine                = nativeLayoutLineAtY(visibleTop);
+		lastLine                 = qMin(sizeToInt(lines.size()) - 1, nativeLayoutLineAtY(visibleBottom));
 		return firstLine <= lastLine;
 	};
 
@@ -3011,15 +3021,16 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 	currentLineKeys.reserve(currentLastVisibleLine - currentFirstVisibleLine + 1);
 	currentLineTops.reserve(currentLastVisibleLine - currentFirstVisibleLine + 1);
 	currentLineBottoms.reserve(currentLastVisibleLine - currentFirstVisibleLine + 1);
+	qreal currentLineTop = nativeLayoutCumulativeHeightAt(currentFirstVisibleLine);
 	for (int i = currentFirstVisibleLine; i <= currentLastVisibleLine; ++i)
 	{
-		if (m_nativeLayoutRowsExact.at(i) == 0)
+		if (m_nativeLayoutSlots.at(i).rowsExact == 0)
 			return false;
-		currentLineKeys.push_back(nativeRuntimeLineKey(lines.at(i)));
-		currentLineTops.push_back(
-		    static_cast<int>(std::round(m_nativeLayoutCumulativeHeights.at(i) - currentScrollY)));
-		currentLineBottoms.push_back(
-		    static_cast<int>(std::round(m_nativeLayoutCumulativeHeights.at(i + 1) - currentScrollY)));
+		const qreal currentLineBottom = currentLineTop + m_nativeLayoutHeightIndex.heightAt(i);
+		currentLineKeys.push_back(m_nativeLayoutSlots.at(i).runtimeLineKey);
+		currentLineTops.push_back(static_cast<int>(std::round(currentLineTop - currentScrollY)));
+		currentLineBottoms.push_back(static_cast<int>(std::round(currentLineBottom - currentScrollY)));
+		currentLineTop = currentLineBottom;
 	}
 
 	int mappedLineCount = 0;
@@ -3104,7 +3115,7 @@ void WorldView::requestNativeOutputPresentationRepaint(const bool repaintVisible
 }
 
 QMudAccessibleTextUtils::LineOffsetMap
-WorldView::accessibleNativeOutputTextMap(const QVector<NativeOutputRenderLine> &lines)
+WorldView::accessibleNativeOutputTextMap(const NativeOutputRenderLines &lines)
 {
 	QVector<QString> textLines;
 	textLines.reserve(lines.size());
@@ -3122,7 +3133,7 @@ void WorldView::primeAccessibleOutputTextState() const
 	m_accessibleOutputText           = map.text(0, map.characterCount());
 }
 
-void WorldView::notifyAccessibleOutputPresented(const QVector<NativeOutputRenderLine> &lines) const
+void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &lines) const
 {
 	if (!QAccessible::isActive())
 	{
@@ -3153,9 +3164,11 @@ void WorldView::notifyAccessibleOutputPresented(const QVector<NativeOutputRender
 	}
 
 	const bool exactTailAppend = m_accessibleOutputPendingTailAppend &&
+	                             !m_nativeRenderCacheDelta.headLineMutated &&
 	                             (m_nativeRenderCacheDelta.kind == NativeRenderCacheDeltaKind::TailAppend ||
 	                              !m_nativeRenderLineCacheFromRuntime);
-	auto       announceCanvasText = [this](const QString &message)
+	const bool suppressLiveAccessibilityEvents = m_runtime && m_runtime->hasMushReaderLiveSpeechOwner();
+	auto       announceCanvasText              = [this](const QString &message)
 	{
 		const QString announcement = trimLeadingAnnouncementBreaks(message);
 		if (!m_nativeOutputCanvas || !m_nativeOutputCanvas->isVisible() || announcement.isEmpty())
@@ -3164,7 +3177,8 @@ void WorldView::notifyAccessibleOutputPresented(const QVector<NativeOutputRender
 		event.setPoliteness(QAccessible::AnnouncementPoliteness::Polite);
 		QAccessible::updateAccessibility(&event);
 	};
-	if (currentCharacterCount > m_accessibleOutputCharacterCount && exactTailAppend)
+	if (!suppressLiveAccessibilityEvents && currentCharacterCount > m_accessibleOutputCharacterCount &&
+	    exactTailAppend)
 	{
 		const QString insertedText = map.text(m_accessibleOutputCharacterCount, currentCharacterCount);
 		if (!insertedText.isEmpty())
@@ -3178,7 +3192,7 @@ void WorldView::notifyAccessibleOutputPresented(const QVector<NativeOutputRender
 			announceCanvasText(insertedText);
 		}
 	}
-	else if (m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible())
+	else if (!suppressLiveAccessibilityEvents && m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible())
 	{
 		if (m_accessibleOutputText != currentText)
 		{
@@ -3203,9 +3217,10 @@ WorldView::nativeOutputPanePaintStateForView(const WrapTextBrowser *view) const
 	return nullptr;
 }
 
-void WorldView::refreshNativeOutputPanePaintStateFromLayout(
-    const WrapTextBrowser *view, const QRect &paneRect, const int scrollY, const int scrollMax,
-    const QVector<NativeOutputRenderLine> &lines) const
+void WorldView::refreshNativeOutputPanePaintStateFromLayout(const WrapTextBrowser *view,
+                                                            const QRect &paneRect, const int scrollY,
+                                                            const int                      scrollMax,
+                                                            const NativeOutputRenderLines &lines) const
 {
 	NativeOutputPanePaintState *const state = nativeOutputPanePaintStateForView(view);
 	if (!state || paneRect.isEmpty())
@@ -3217,23 +3232,13 @@ void WorldView::refreshNativeOutputPanePaintStateFromLayout(
 	QVector<qint64>  visibleLastRuntimeLineNumbers;
 	QVector<int>     visibleLineTops;
 	QVector<int>     visibleLineBottoms;
-	if (!lines.isEmpty() && m_nativeLayoutCumulativeHeights.size() > lines.size() &&
-	    m_nativeLayoutRowsExact.size() == lines.size())
+	if (!lines.isEmpty() && m_nativeLayoutHeightIndex.size() == lines.size() &&
+	    m_nativeLayoutSlots.size() == lines.size())
 	{
-		const auto visibleTop    = static_cast<qreal>(scrollY);
-		const auto visibleBottom = static_cast<qreal>(scrollY + paneRect.height() - 1);
-		auto       firstVisibleIt =
-		    std::ranges::upper_bound(std::ranges::subrange(m_nativeLayoutCumulativeHeights.cbegin() + 1,
-		                                                   m_nativeLayoutCumulativeHeights.cend()),
-		                             visibleTop);
-		int firstVisibleLine =
-		    qMax(0, sizeToInt(firstVisibleIt - m_nativeLayoutCumulativeHeights.cbegin()) - 1);
-		auto lastVisibleIt =
-		    std::ranges::upper_bound(std::ranges::subrange(m_nativeLayoutCumulativeHeights.cbegin(),
-		                                                   m_nativeLayoutCumulativeHeights.cend()),
-		                             visibleBottom);
-		int lastVisibleLine = qMin(sizeToInt(lines.size()) - 1,
-		                           sizeToInt(lastVisibleIt - m_nativeLayoutCumulativeHeights.cbegin()) - 1);
+		const auto visibleTop       = static_cast<qreal>(scrollY);
+		const auto visibleBottom    = static_cast<qreal>(scrollY + paneRect.height() - 1);
+		int        firstVisibleLine = nativeLayoutLineAtY(visibleTop);
+		int        lastVisibleLine  = qMin(sizeToInt(lines.size()) - 1, nativeLayoutLineAtY(visibleBottom));
 		if (firstVisibleLine <= lastVisibleLine)
 		{
 			visibleLineIndexes.reserve(lastVisibleLine - firstVisibleLine + 1);
@@ -3242,17 +3247,18 @@ void WorldView::refreshNativeOutputPanePaintStateFromLayout(
 			visibleLastRuntimeLineNumbers.reserve(lastVisibleLine - firstVisibleLine + 1);
 			visibleLineTops.reserve(lastVisibleLine - firstVisibleLine + 1);
 			visibleLineBottoms.reserve(lastVisibleLine - firstVisibleLine + 1);
+			qreal visibleLineTop = nativeLayoutCumulativeHeightAt(firstVisibleLine);
 			for (int i = firstVisibleLine; i <= lastVisibleLine; ++i)
 			{
 				const NativeOutputRenderLine &line = lines.at(i);
+				const qreal visibleLineBottom      = visibleLineTop + m_nativeLayoutHeightIndex.heightAt(i);
 				visibleLineIndexes.push_back(i);
-				visibleLineKeys.push_back(nativeRuntimeLineKey(line));
+				visibleLineKeys.push_back(m_nativeLayoutSlots.at(i).runtimeLineKey);
 				visibleFirstRuntimeLineNumbers.push_back(line.firstRuntimeLineNumber);
 				visibleLastRuntimeLineNumbers.push_back(line.lastRuntimeLineNumber);
-				visibleLineTops.push_back(
-				    static_cast<int>(std::round(m_nativeLayoutCumulativeHeights.at(i) - visibleTop)));
-				visibleLineBottoms.push_back(
-				    static_cast<int>(std::round(m_nativeLayoutCumulativeHeights.at(i + 1) - visibleTop)));
+				visibleLineTops.push_back(static_cast<int>(std::round(visibleLineTop - visibleTop)));
+				visibleLineBottoms.push_back(static_cast<int>(std::round(visibleLineBottom - visibleTop)));
+				visibleLineTop = visibleLineBottom;
 			}
 		}
 	}
@@ -3272,8 +3278,8 @@ void WorldView::refreshNativeOutputPanePaintStateFromLayout(
 
 void WorldView::updateNativeOutputPanePaintState(const WrapTextBrowser *view, const QRect &paneRect,
                                                  const QRegion &paintedRegion, const int scrollY,
-                                                 const int                              scrollMax,
-                                                 const QVector<NativeOutputRenderLine> &lines) const
+                                                 const int                      scrollMax,
+                                                 const NativeOutputRenderLines &lines) const
 {
 	NativeOutputPanePaintState *const state = nativeOutputPanePaintStateForView(view);
 	if (!state || paneRect.isEmpty())
@@ -3303,7 +3309,7 @@ void WorldView::primeNativeOutputCaches() const
 	if (viewportRect.width() <= 0 || viewportRect.height() <= 0)
 		return;
 
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (lines.isEmpty())
 		return;
 
@@ -3567,7 +3573,8 @@ void WorldView::logAndResetNativeAppendDiagnostics() const
 #endif
 }
 
-void WorldView::extendNativeRuntimeLineRange(NativeOutputRenderLine &line, const qint64 lineNumber)
+void WorldView::extendNativeRuntimeLineRange(NativeOutputRenderLine &line, const qint64 lineNumber,
+                                             const qint64 runtimeLineIndex)
 {
 	if (lineNumber <= 0)
 		return;
@@ -3591,6 +3598,11 @@ void WorldView::extendNativeRuntimeLineRange(NativeOutputRenderLine &line, const
 		line.sourceRuntimeLineNumbers.push_back(lineNumber);
 	line.sourceRuntimeLineKey = nativeRuntimeLineKey(line.sourceRuntimeLineNumbers,
 	                                                 line.firstRuntimeLineNumber, line.lastRuntimeLineNumber);
+	if (runtimeLineIndex >= 0)
+	{
+		if (line.firstRuntimeLineIndex < 0)
+			line.firstRuntimeLineIndex = runtimeLineIndex;
+	}
 }
 
 bool WorldView::nativeRuntimeLineRangeContains(const NativeOutputRenderLine &line, const qint64 lineNumber)
@@ -3740,7 +3752,7 @@ bool WorldView::nativeRenderBaseCacheMatchesCurrentSource() const
 	if (!m_runtime)
 		return !m_nativeRenderLineCacheFromRuntime;
 
-	const QVector<WorldRuntime::LineEntry> &runtimeLines = m_runtime->lines();
+	const auto &runtimeLines = m_runtime->lines();
 	if (!m_nativeRenderLineCacheFromRuntime)
 		return false;
 	if (runtimeLines.isEmpty())
@@ -3867,7 +3879,7 @@ void WorldView::applyNativePartialRenderLineOverlay() const
 	m_nativePartialRenderLineEffectiveRevision = m_nativeRenderLineCacheRevision;
 }
 
-const QVector<WorldView::NativeOutputRenderLine> &WorldView::finalizeNativeOutputRenderLines() const
+const WorldView::NativeOutputRenderLines &WorldView::finalizeNativeOutputRenderLines() const
 {
 	if (!m_nativeHasPartialOutput || m_nativePartialOutputText.isEmpty())
 	{
@@ -3994,27 +4006,505 @@ QVector<QTextLayout::FormatRange> WorldView::buildNativeFormatRanges(const Nativ
 	return ranges;
 }
 
-bool WorldView::nativeLayoutCacheReadyFor(const QVector<NativeOutputRenderLine> &lines,
-                                          const int wrapWidthPixels, const int localWrapWidthPixels,
-                                          const int lineSpacingSetting, const QFont &layoutFont) const
+qsizetype WorldView::NativeLayoutHeightIndex::size() const
+{
+	return m_heights.size();
+}
+
+bool WorldView::NativeLayoutHeightIndex::isEmpty() const
+{
+	return m_heights.isEmpty();
+}
+
+qreal WorldView::NativeLayoutHeightIndex::heightAt(const int index) const
+{
+	if (index < 0 || index >= sizeToInt(m_heights.size()))
+		return 0.0;
+	return m_heights.at(index);
+}
+
+qreal WorldView::NativeLayoutHeightIndex::prefixHeightAt(const int index) const
+{
+	const int heightCount  = sizeToInt(m_heights.size());
+	const int boundedIndex = qBound(0, index, heightCount);
+	if (boundedIndex <= 0)
+		return 0.0;
+	if (boundedIndex >= heightCount)
+		return totalHeight();
+
+	int       prefixLines = 0;
+	const int blockIndex  = blockForLine(boundedIndex - 1, &prefixLines);
+	qreal     height      = blockSumPrefix(blockIndex);
+	for (int i = prefixLines; i < boundedIndex; ++i)
+		height += m_heights.at(i);
+	return height;
+}
+
+qreal WorldView::NativeLayoutHeightIndex::totalHeight() const
+{
+	return blockSumPrefix(sizeToInt(m_blockSums.size()));
+}
+
+int WorldView::NativeLayoutHeightIndex::lineAtY(const qreal y) const
+{
+	if (m_heights.isEmpty())
+		return 0;
+
+	const int   heightCount = sizeToInt(m_heights.size());
+	const qreal boundedY    = qBound<qreal>(0.0, y, totalHeight());
+	qreal       prefix      = 0.0;
+	const int   block       = blockForY(boundedY, &prefix);
+	int         line        = blockLengthPrefix(block);
+	const int   blockEnd    = qMin(heightCount, line + m_blockLengths.at(block));
+	for (; line < blockEnd; ++line)
+	{
+		prefix += m_heights.at(line);
+		if (boundedY < prefix)
+			return line;
+	}
+	return heightCount - 1;
+}
+
+void WorldView::NativeLayoutHeightIndex::clear()
+{
+	m_heights.clear();
+	m_blockLengths.clear();
+	m_blockSums.clear();
+	m_lengthFenwick.clear();
+	m_sumFenwick.clear();
+}
+
+void WorldView::NativeLayoutHeightIndex::reserve(const qsizetype count)
+{
+	m_heights.reserve(count);
+}
+
+void WorldView::NativeLayoutHeightIndex::append(const qreal height)
+{
+	const qreal boundedHeight = qMax<qreal>(0.0, height);
+	m_heights.push_back(boundedHeight);
+	if (m_blockLengths.isEmpty() || m_blockLengths.constLast() >= kBlockSize)
+	{
+		m_blockLengths.push_back(1);
+		m_blockSums.push_back(boundedHeight);
+		const int blockCount = sizeToInt(m_blockLengths.size());
+		const int span       = blockCount & -blockCount;
+		int       lineSum    = 0;
+		qreal     heightSum  = 0.0;
+		for (int i = blockCount - span; i < blockCount; ++i)
+		{
+			lineSum += m_blockLengths.at(i);
+			heightSum += m_blockSums.at(i);
+		}
+		m_lengthFenwick.push_back(lineSum);
+		m_sumFenwick.push_back(heightSum);
+		return;
+	}
+
+	const int blockIndex = sizeToInt(m_blockLengths.size()) - 1;
+	++m_blockLengths[blockIndex];
+	m_blockSums[blockIndex] += boundedHeight;
+	addBlockLengthDelta(blockIndex, 1);
+	addBlockSumDelta(blockIndex, boundedHeight);
+}
+
+void WorldView::NativeLayoutHeightIndex::resize(const qsizetype count, const qreal defaultHeight)
+{
+	const qsizetype oldSize = m_heights.size();
+	if (count == oldSize)
+		return;
+
+	const qreal boundedDefaultHeight = qMax<qreal>(0.0, defaultHeight);
+	if (count < oldSize)
+	{
+		qsizetype remaining        = oldSize - count;
+		qsizetype currentSize      = oldSize;
+		bool      structureChanged = false;
+		while (remaining > 0 && !m_blockLengths.isEmpty())
+		{
+			const int  blockIndex  = sizeToInt(m_blockLengths.size()) - 1;
+			const int  blockLength = m_blockLengths.constLast();
+			const auto blockSize   = static_cast<qsizetype>(blockLength);
+			if (remaining >= blockSize)
+			{
+				remaining -= blockSize;
+				currentSize -= blockSize;
+				m_blockLengths.removeLast();
+				m_blockSums.removeLast();
+				structureChanged = true;
+				continue;
+			}
+
+			const int removeFromBlock = sizeToInt(remaining);
+			qreal     removedHeight   = 0.0;
+			for (int i = 0; i < removeFromBlock; ++i)
+				removedHeight += m_heights.at(currentSize - removeFromBlock + i);
+
+			m_blockLengths[blockIndex] -= removeFromBlock;
+			m_blockSums[blockIndex] -= removedHeight;
+			remaining = 0;
+			if (!structureChanged)
+			{
+				addBlockLengthDelta(blockIndex, -removeFromBlock);
+				addBlockSumDelta(blockIndex, -removedHeight);
+			}
+		}
+		m_heights.truncateBack(count);
+		if (structureChanged)
+			rebuildFenwick();
+		return;
+	}
+
+	m_heights.resize(count);
+	for (qsizetype i = oldSize; i < count; ++i)
+		m_heights[i] = boundedDefaultHeight;
+
+	qsizetype remaining        = count - oldSize;
+	bool      structureChanged = false;
+	while (remaining > 0)
+	{
+		if (m_blockLengths.isEmpty() || m_blockLengths.constLast() >= kBlockSize)
+		{
+			const int appendCount = sizeToInt(qMin<qsizetype>(remaining, kBlockSize));
+			m_blockLengths.push_back(appendCount);
+			m_blockSums.push_back(static_cast<qreal>(appendCount) * boundedDefaultHeight);
+			structureChanged = true;
+			remaining -= appendCount;
+		}
+		else
+		{
+			const int blockIndex = sizeToInt(m_blockLengths.size()) - 1;
+			const int appendCount =
+			    sizeToInt(qMin<qsizetype>(remaining, kBlockSize - m_blockLengths.constLast()));
+			const qreal addedHeight = static_cast<qreal>(appendCount) * boundedDefaultHeight;
+			m_blockLengths[blockIndex] += appendCount;
+			m_blockSums[blockIndex] += addedHeight;
+			if (!structureChanged)
+			{
+				addBlockLengthDelta(blockIndex, appendCount);
+				addBlockSumDelta(blockIndex, addedHeight);
+			}
+			remaining -= appendCount;
+		}
+	}
+	if (structureChanged)
+		rebuildFenwick();
+}
+
+void WorldView::NativeLayoutHeightIndex::assign(const qsizetype count, const qreal defaultHeight)
+{
+	m_heights.assign(count, qMax<qreal>(0.0, defaultHeight));
+	rebuildBlockSums();
+}
+
+void WorldView::NativeLayoutHeightIndex::removeFront(const qsizetype count)
+{
+	const qsizetype boundedCount = qBound<qsizetype>(0, count, m_heights.size());
+	if (boundedCount <= 0)
+		return;
+
+	qsizetype remaining        = boundedCount;
+	int       consumedLines    = 0;
+	bool      structureChanged = false;
+	int       fullBlockCount   = 0;
+	while (remaining > 0 && fullBlockCount < sizeToInt(m_blockLengths.size()))
+	{
+		const int firstBlockLength = m_blockLengths.at(fullBlockCount);
+		if (remaining < static_cast<qsizetype>(firstBlockLength))
+			break;
+		remaining -= firstBlockLength;
+		consumedLines += firstBlockLength;
+		++fullBlockCount;
+	}
+	if (fullBlockCount > 0)
+	{
+		m_blockLengths.remove(0, fullBlockCount);
+		m_blockSums.remove(0, fullBlockCount);
+		structureChanged = true;
+	}
+
+	if (remaining > 0 && !m_blockLengths.isEmpty())
+	{
+		const int removeFromBlock = sizeToInt(remaining);
+		qreal     removedHeight   = 0.0;
+		for (int i = 0; i < removeFromBlock; ++i)
+			removedHeight += m_heights.at(consumedLines + i);
+
+		m_blockLengths[0] -= removeFromBlock;
+		m_blockSums[0] -= removedHeight;
+		remaining = 0;
+
+		if (!structureChanged)
+		{
+			addBlockLengthDelta(0, -removeFromBlock);
+			addBlockSumDelta(0, -removedHeight);
+		}
+	}
+	m_heights.remove(0, boundedCount);
+	if (structureChanged)
+		rebuildFenwick();
+}
+
+void WorldView::NativeLayoutHeightIndex::replace(const int index, const int removeCount,
+                                                 const int insertCount, const qreal defaultHeight)
+{
+	const int oldSize            = sizeToInt(m_heights.size());
+	const int boundedIndex       = qBound(0, index, oldSize);
+	const int boundedRemoveCount = qBound(0, removeCount, oldSize - boundedIndex);
+	const int boundedInsertCount = qMax(0, insertCount);
+	if (boundedRemoveCount == 0 && boundedInsertCount == 0)
+		return;
+
+	int rebuildBlock = 0;
+	int rebuildLine  = 0;
+	if (!m_blockLengths.isEmpty() && oldSize > 0)
+	{
+		const int rebuildProbeLine = boundedIndex < oldSize ? boundedIndex : oldSize - 1;
+		rebuildBlock               = blockForLine(rebuildProbeLine, &rebuildLine);
+	}
+
+	m_heights.replace(boundedIndex, boundedRemoveCount, boundedInsertCount, qMax<qreal>(0.0, defaultHeight));
+	rebuildBlockSumsFromBlock(rebuildBlock, rebuildLine);
+}
+
+void WorldView::NativeLayoutHeightIndex::setHeight(const int index, const qreal height)
+{
+	if (index < 0 || index >= sizeToInt(m_heights.size()))
+		return;
+	const qreal boundedHeight = qMax<qreal>(0.0, height);
+	if (qFuzzyCompare(m_heights.at(index) + 1.0, boundedHeight + 1.0))
+		return;
+	const qreal delta    = boundedHeight - m_heights.at(index);
+	m_heights[index]     = boundedHeight;
+	int       prefix     = 0;
+	const int blockIndex = blockForLine(index, &prefix);
+	if (blockIndex >= 0 && blockIndex < sizeToInt(m_blockSums.size()))
+	{
+		m_blockSums[blockIndex] += delta;
+		addBlockSumDelta(blockIndex, delta);
+	}
+}
+
+void WorldView::NativeLayoutHeightIndex::setLayoutSlotHeightRange(
+    const int firstLine, const int lastLineExclusive, const IndexedRingBuffer<NativeLayoutSlot> &layoutSlots,
+    const qreal lineAdvance)
+{
+	const int lineCount = std::min(sizeToInt(m_heights.size()), sizeToInt(layoutSlots.size()));
+	if (lineCount <= 0 || m_blockLengths.isEmpty())
+		return;
+	const int boundedFirst = qBound(0, firstLine, lineCount);
+	const int boundedLast  = qBound(boundedFirst, lastLineExclusive, lineCount);
+	if (boundedLast <= boundedFirst)
+		return;
+
+	const qreal boundedLineAdvance = qMax<qreal>(0.0, lineAdvance);
+	int         blockFirstLine     = 0;
+	int         blockIndex         = blockForLine(boundedFirst, &blockFirstLine);
+	int         line               = boundedFirst;
+	while (line < boundedLast && blockIndex < sizeToInt(m_blockLengths.size()))
+	{
+		const int blockEnd   = qMin(boundedLast, blockFirstLine + m_blockLengths.at(blockIndex));
+		qreal     blockDelta = 0.0;
+		for (; line < blockEnd; ++line)
+		{
+			const qreal height =
+			    static_cast<qreal>(qMax(1, layoutSlots.at(line).visualRows)) * boundedLineAdvance;
+			const qreal boundedHeight = qMax<qreal>(0.0, height);
+			if (qFuzzyCompare(m_heights.at(line) + 1.0, boundedHeight + 1.0))
+				continue;
+			blockDelta += boundedHeight - m_heights.at(line);
+			m_heights[line] = boundedHeight;
+		}
+		if (!qFuzzyIsNull(blockDelta))
+		{
+			m_blockSums[blockIndex] += blockDelta;
+			addBlockSumDelta(blockIndex, blockDelta);
+		}
+		blockFirstLine = blockEnd;
+		++blockIndex;
+	}
+}
+
+void WorldView::NativeLayoutHeightIndex::swap(NativeLayoutHeightIndex &other) noexcept
+{
+	m_heights.swap(other.m_heights);
+	m_blockLengths.swap(other.m_blockLengths);
+	m_blockSums.swap(other.m_blockSums);
+	m_lengthFenwick.swap(other.m_lengthFenwick);
+	m_sumFenwick.swap(other.m_sumFenwick);
+}
+
+void WorldView::NativeLayoutHeightIndex::rebuildBlockSums()
+{
+	m_blockLengths.clear();
+	m_blockSums.clear();
+	const int heightCount = sizeToInt(m_heights.size());
+	int       line        = 0;
+	while (line < heightCount)
+	{
+		const int blockLength = qMin(kBlockSize, heightCount - line);
+		qreal     sum         = 0.0;
+		for (int i = line; i < line + blockLength; ++i)
+			sum += m_heights.at(i);
+		m_blockLengths.push_back(blockLength);
+		m_blockSums.push_back(sum);
+		line += blockLength;
+	}
+	rebuildFenwick();
+}
+
+void WorldView::NativeLayoutHeightIndex::rebuildBlockSumsFromBlock(const int firstBlock, const int firstLine)
+{
+	const int heightCount       = sizeToInt(m_heights.size());
+	const int boundedFirstBlock = qBound(0, firstBlock, sizeToInt(m_blockLengths.size()));
+	const int boundedFirstLine  = qBound(0, firstLine, heightCount);
+	m_blockLengths.resize(boundedFirstBlock);
+	m_blockSums.resize(boundedFirstBlock);
+
+	int line = boundedFirstLine;
+	while (line < heightCount)
+	{
+		const int blockLength = qMin(kBlockSize, heightCount - line);
+		qreal     sum         = 0.0;
+		for (int i = line; i < line + blockLength; ++i)
+			sum += m_heights.at(i);
+		m_blockLengths.push_back(blockLength);
+		m_blockSums.push_back(sum);
+		line += blockLength;
+	}
+	rebuildFenwick();
+}
+
+void WorldView::NativeLayoutHeightIndex::rebuildFenwick()
+{
+	m_lengthFenwick.assign(m_blockLengths.size(), 0);
+	m_sumFenwick.assign(m_blockSums.size(), 0.0);
+	const int blockCount = sizeToInt(m_blockLengths.size());
+	for (int blockIndex = 0; blockIndex < blockCount; ++blockIndex)
+	{
+		addBlockLengthDelta(blockIndex, m_blockLengths.at(blockIndex));
+		addBlockSumDelta(blockIndex, m_blockSums.at(blockIndex));
+	}
+}
+
+void WorldView::NativeLayoutHeightIndex::addBlockLengthDelta(const int blockIndex, const int delta)
+{
+	const int fenwickSize = sizeToInt(m_lengthFenwick.size());
+	for (int i = blockIndex + 1; i <= fenwickSize; i += i & -i)
+		m_lengthFenwick[i - 1] += delta;
+}
+
+void WorldView::NativeLayoutHeightIndex::addBlockSumDelta(const int blockIndex, const qreal delta)
+{
+	const int fenwickSize = sizeToInt(m_sumFenwick.size());
+	for (int i = blockIndex + 1; i <= fenwickSize; i += i & -i)
+		m_sumFenwick[i - 1] += delta;
+}
+
+int WorldView::NativeLayoutHeightIndex::blockLengthPrefix(const int blockCount) const
+{
+	int sum = 0;
+	for (int i = qBound(0, blockCount, sizeToInt(m_lengthFenwick.size())); i > 0; i -= i & -i)
+		sum += m_lengthFenwick.at(i - 1);
+	return sum;
+}
+
+qreal WorldView::NativeLayoutHeightIndex::blockSumPrefix(const int blockCount) const
+{
+	qreal sum = 0.0;
+	for (int i = qBound(0, blockCount, sizeToInt(m_sumFenwick.size())); i > 0; i -= i & -i)
+		sum += m_sumFenwick.at(i - 1);
+	return sum;
+}
+
+int WorldView::NativeLayoutHeightIndex::blockForLine(const int lineIndex, int *prefixLines) const
+{
+	if (prefixLines)
+		*prefixLines = 0;
+	if (m_blockLengths.isEmpty())
+		return 0;
+
+	const int boundedLine = qBound(0, lineIndex, sizeToInt(m_heights.size()) - 1);
+	int       block       = 0;
+	int       prefix      = 0;
+	int       bit         = 1;
+	const int fenwickSize = sizeToInt(m_lengthFenwick.size());
+	while ((bit << 1) <= fenwickSize)
+		bit <<= 1;
+	for (; bit > 0; bit >>= 1)
+	{
+		const int next = block + bit;
+		if (next <= fenwickSize && prefix + m_lengthFenwick.at(next - 1) <= boundedLine)
+		{
+			block = next;
+			prefix += m_lengthFenwick.at(next - 1);
+		}
+	}
+
+	const int boundedBlock = qMin(block, sizeToInt(m_blockLengths.size()) - 1);
+	if (prefixLines)
+		*prefixLines = blockLengthPrefix(boundedBlock);
+	return boundedBlock;
+}
+
+int WorldView::NativeLayoutHeightIndex::blockForY(const qreal y, qreal *prefixHeight) const
+{
+	if (prefixHeight)
+		*prefixHeight = 0.0;
+	if (m_blockSums.isEmpty())
+		return 0;
+
+	const qreal boundedY    = qMax<qreal>(0.0, y);
+	int         block       = 0;
+	qreal       prefix      = 0.0;
+	int         bit         = 1;
+	const int   fenwickSize = sizeToInt(m_sumFenwick.size());
+	while ((bit << 1) <= fenwickSize)
+		bit <<= 1;
+	for (; bit > 0; bit >>= 1)
+	{
+		const int next = block + bit;
+		if (next <= fenwickSize && prefix + m_sumFenwick.at(next - 1) <= boundedY)
+		{
+			block = next;
+			prefix += m_sumFenwick.at(next - 1);
+		}
+	}
+
+	const int boundedBlock = qMin(block, sizeToInt(m_blockSums.size()) - 1);
+	if (prefixHeight)
+		*prefixHeight = blockSumPrefix(boundedBlock);
+	return boundedBlock;
+}
+
+bool WorldView::nativeLayoutCacheReadyFor(const NativeOutputRenderLines &lines, const int wrapWidthPixels,
+                                          const int localWrapWidthPixels, const int lineSpacingSetting,
+                                          const QFont &layoutFont) const
+{
+	return !m_nativeLayoutRangePreparedOnly &&
+	       nativeLayoutRangeStateReadyFor(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
+	                                      layoutFont);
+}
+
+bool WorldView::nativeLayoutRangeStateReadyFor(const NativeOutputRenderLines &lines,
+                                               const int wrapWidthPixels, const int localWrapWidthPixels,
+                                               const int lineSpacingSetting, const QFont &layoutFont) const
 {
 	const qreal lineSpacingFactor = (100.0 + static_cast<qreal>(lineSpacingSetting)) / 100.0;
 	const qreal lineAdvance =
 	    static_cast<qreal>(qMax(1, QFontMetrics(layoutFont).lineSpacing())) * lineSpacingFactor;
-	const quint64 styleKey             = nativeLayoutStyleKey();
-	const bool    cacheDimensionsMatch = m_nativeLayoutCumulativeHeights.size() == lines.size() + 1 &&
-	                                     m_nativeLayoutVisualRows.size() == lines.size() &&
-	                                     m_nativeLayoutLineLayouts.size() == lines.size() &&
-	                                     m_nativeLayoutLineContentHashes.size() == lines.size() &&
-	                                     m_nativeLayoutRowsExact.size() == lines.size();
-	return m_nativeLayoutCacheValid && cacheDimensionsMatch &&
-	       m_nativeLayoutCachedRenderRevision == m_nativeRenderLineCacheRevision &&
+	const quint64 styleKey = nativeLayoutStyleKey();
+	const bool    cacheDimensionsMatch =
+	    m_nativeLayoutHeightIndex.size() == lines.size() && m_nativeLayoutSlots.size() == lines.size();
+	const bool revisionReady = m_nativeLayoutCachedRenderRevision == m_nativeRenderLineCacheRevision ||
+	                           (m_nativeLayoutRangePreparedOnly &&
+	                            m_nativeLayoutRangePreparedRevision == m_nativeRenderLineCacheRevision);
+	return m_nativeLayoutCacheValid && cacheDimensionsMatch && revisionReady &&
 	       m_nativeLayoutCachedWrapWidth == wrapWidthPixels &&
 	       m_nativeLayoutCachedLocalWrapWidth == localWrapWidthPixels &&
 	       m_nativeLayoutCachedLineSpacing == lineSpacingSetting &&
 	       m_nativeLayoutCachedStyleKey == styleKey && m_nativeLayoutCachedFont == layoutFont &&
-	       qFuzzyCompare(m_nativeLayoutCachedLineAdvance + 1.0, lineAdvance + 1.0) &&
-	       m_nativeLayoutCumulativeDirtyFrom >= sizeToInt(lines.size());
+	       qFuzzyCompare(m_nativeLayoutCachedLineAdvance + 1.0, lineAdvance + 1.0);
 }
 
 int WorldView::estimateNativeLineRows(const NativeOutputRenderLine &line, const int effectiveWrapWidth,
@@ -4096,19 +4586,279 @@ int WorldView::estimateNativeLineRows(const NativeOutputRenderLine &line, const 
 	return qMax(1, rows);
 }
 
-bool WorldView::ensureNativeLayoutRange(const QVector<NativeOutputRenderLine> &lines, int firstLine,
-                                        int lastLine, const int wrapWidthPixels,
-                                        const int localWrapWidthPixels, const int lineSpacingSetting,
-                                        const QFont &layoutFont) const
+bool WorldView::prepareNativeLayoutRangeState(const NativeOutputRenderLines &lines, const int wrapWidthPixels,
+                                              const int localWrapWidthPixels, const int lineSpacingSetting,
+                                              const QFont &layoutFont) const
 {
 	if (lines.isEmpty())
 		return false;
 
-	if (!nativeLayoutCacheReadyFor(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
-	                               layoutFont))
+	const qreal lineSpacingFactor = (100.0 + static_cast<qreal>(lineSpacingSetting)) / 100.0;
+	const qreal defaultLineAdvance =
+	    static_cast<qreal>(qMax(1, QFontMetrics(layoutFont).lineSpacing())) * lineSpacingFactor;
+	const quint64 styleKey = nativeLayoutStyleKey();
+
+	const bool    cacheWasValid = m_nativeLayoutCacheValid;
+	const bool    keyMatches = cacheWasValid && m_nativeLayoutCachedWrapWidth == wrapWidthPixels &&
+	                           m_nativeLayoutCachedLocalWrapWidth == localWrapWidthPixels &&
+	                           m_nativeLayoutCachedLineSpacing == lineSpacingSetting &&
+	                           m_nativeLayoutCachedStyleKey == styleKey &&
+	                           m_nativeLayoutCachedFont == layoutFont &&
+	                           qFuzzyCompare(m_nativeLayoutCachedLineAdvance + 1.0, defaultLineAdvance + 1.0);
+
+	auto          setCacheKey = [&]
 	{
-		ensureNativeLayoutCaches(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
-		                         layoutFont);
+		m_nativeLayoutCacheValid            = true;
+		m_nativeLayoutCachedWrapWidth       = wrapWidthPixels;
+		m_nativeLayoutCachedLocalWrapWidth  = localWrapWidthPixels;
+		m_nativeLayoutCachedLineSpacing     = lineSpacingSetting;
+		m_nativeLayoutCachedStyleKey        = styleKey;
+		m_nativeLayoutCachedLineAdvance     = defaultLineAdvance;
+		m_nativeLayoutCachedFont            = layoutFont;
+		m_nativeLayoutRangePreparedRevision = m_nativeRenderLineCacheRevision;
+		m_nativeLayoutRangePreparedOnly     = true;
+	};
+
+	auto resetAllMetadata = [&]
+	{
+		m_nativeLayoutSlots.assign(lines.size(), NativeLayoutSlot{});
+		m_nativeLayoutHeightIndex.assign(lines.size(), defaultLineAdvance);
+		m_nativeLayoutExactPrefixCount = 0;
+	};
+
+	auto resetSlot = [&](const int index)
+	{
+		if (index < 0 || index >= sizeToInt(m_nativeLayoutSlots.size()) ||
+		    index >= sizeToInt(m_nativeLayoutHeightIndex.size()))
+		{
+			return;
+		}
+		m_nativeLayoutSlots[index] = NativeLayoutSlot{};
+		m_nativeLayoutHeightIndex.setHeight(index, defaultLineAdvance);
+		if (index < m_nativeLayoutExactPrefixCount)
+			m_nativeLayoutExactPrefixCount = index;
+	};
+
+	auto replaceMetadataRange = [&](const int first, const int removeCount, const int insertCount)
+	{
+		const int lineCount     = sizeToInt(m_nativeLayoutSlots.size());
+		const int boundedFirst  = qBound(0, first, lineCount);
+		const int boundedRemove = qBound(0, removeCount, lineCount - boundedFirst);
+		const int boundedInsert = qMax(0, insertCount);
+		m_nativeLayoutSlots.replace(boundedFirst, boundedRemove, boundedInsert, NativeLayoutSlot{});
+		m_nativeLayoutHeightIndex.replace(boundedFirst, boundedRemove, boundedInsert, defaultLineAdvance);
+		if (boundedFirst < m_nativeLayoutExactPrefixCount)
+			m_nativeLayoutExactPrefixCount = boundedFirst;
+		else
+			m_nativeLayoutExactPrefixCount =
+			    qMin(m_nativeLayoutExactPrefixCount, sizeToInt(m_nativeLayoutSlots.size()));
+	};
+
+	auto dropHead = [&](const int requestedCount)
+	{
+		const int count = qBound(0, requestedCount, sizeToInt(m_nativeLayoutSlots.size()));
+		if (count <= 0)
+			return;
+		m_nativeLayoutSlots.remove(0, count);
+		m_nativeLayoutHeightIndex.removeFront(count);
+		m_nativeLayoutExactPrefixCount = qMax(0, m_nativeLayoutExactPrefixCount - count);
+	};
+
+	auto dimensionsMatch = [&](const int expectedSize)
+	{
+		return sizeToInt(m_nativeLayoutSlots.size()) == expectedSize &&
+		       sizeToInt(m_nativeLayoutHeightIndex.size()) == expectedSize;
+	};
+
+	if (!keyMatches)
+	{
+		resetAllMetadata();
+		clearCurrentNativeSplitTopHeadTrimAdjustment();
+		setCacheKey();
+		return true;
+	}
+
+	if (nativeLayoutRangeStateReadyFor(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
+	                                   layoutFont))
+	{
+		return true;
+	}
+
+	auto collectRangeReplayDeltas = [&]
+	{
+		QVector<NativeRenderCacheDelta> replayDeltas;
+		quint64 expectedRevision = m_nativeLayoutRangePreparedOnly ? m_nativeLayoutRangePreparedRevision
+		                                                           : m_nativeLayoutCachedRenderRevision;
+		for (const NativeRenderCacheDelta &delta : std::as_const(m_nativeRenderCacheDeltas))
+		{
+			if (delta.revision <= expectedRevision)
+				continue;
+			if (delta.fromRevision != expectedRevision)
+				return QVector<NativeRenderCacheDelta>{};
+			replayDeltas.push_back(delta);
+			expectedRevision = delta.revision;
+			if (expectedRevision == m_nativeRenderLineCacheRevision)
+				break;
+		}
+		if (expectedRevision != m_nativeRenderLineCacheRevision)
+			replayDeltas.clear();
+		return replayDeltas;
+	};
+
+	NativeSplitTopHeadTrimAdjustment pendingSplitTopHeadTrimAdjustment;
+	auto mergePendingSplitTopHeadTrimAdjustment = [&](const NativeSplitTopHeadTrimAdjustment &adjustment)
+	{
+		if (!adjustment.valid)
+			return;
+		if (pendingSplitTopHeadTrimAdjustment.valid &&
+		    pendingSplitTopHeadTrimAdjustment.revision == adjustment.revision)
+		{
+			pendingSplitTopHeadTrimAdjustment.pixels += adjustment.pixels;
+			pendingSplitTopHeadTrimAdjustment.lines += adjustment.lines;
+			return;
+		}
+		pendingSplitTopHeadTrimAdjustment = adjustment;
+	};
+
+	auto applyMetadataDelta = [&](const NativeRenderCacheDelta &delta)
+	{
+		const int                              oldSize = qMax(0, delta.oldLineCount);
+		const int                              newSize = qMax(0, delta.newLineCount);
+		const NativeSplitTopHeadTrimAdjustment splitTopHeadTrimAdjustment =
+		    nativeSplitTopHeadTrimAdjustmentForDelta(delta, defaultLineAdvance,
+		                                             m_nativeRenderLineCacheRevision);
+		auto applySuccessfulSplitTopHeadTrimAdjustment = [&]
+		{
+			mergePendingSplitTopHeadTrimAdjustment(splitTopHeadTrimAdjustment);
+			return true;
+		};
+		if (delta.kind == NativeRenderCacheDeltaKind::FullReset)
+		{
+			resetAllMetadata();
+			pendingSplitTopHeadTrimAdjustment = {};
+			clearNativeSplitTopHeadTrimAdjustment();
+			return true;
+		}
+		if (!dimensionsMatch(oldSize))
+			return false;
+
+		switch (delta.kind)
+		{
+		case NativeRenderCacheDeltaKind::TailAppend:
+		{
+			const int insertCount = qMax(0, newSize - oldSize);
+			replaceMetadataRange(oldSize, 0, insertCount);
+			if (delta.headLineMutated)
+				resetSlot(0);
+			if (delta.tailLineMutated && oldSize > 0)
+				resetSlot(oldSize - 1);
+			return dimensionsMatch(newSize) ? applySuccessfulSplitTopHeadTrimAdjustment() : false;
+		}
+		case NativeRenderCacheDeltaKind::TailRemove:
+		{
+			const int removeCount = qMax(0, oldSize - newSize);
+			replaceMetadataRange(newSize, removeCount, 0);
+			if (delta.tailLineMutated && newSize > 0)
+				resetSlot(newSize - 1);
+			return dimensionsMatch(newSize) ? applySuccessfulSplitTopHeadTrimAdjustment() : false;
+		}
+		case NativeRenderCacheDeltaKind::HeadMutation:
+		{
+			dropHead(qBound(0, delta.headTrimCount, oldSize));
+			if (dimensionsMatch(newSize))
+			{
+				if (newSize > 0)
+					resetSlot(0);
+				return applySuccessfulSplitTopHeadTrimAdjustment();
+			}
+			break;
+		}
+		case NativeRenderCacheDeltaKind::HeadTrimTailAppend:
+		{
+			const int headTrimCount = qBound(0, delta.headTrimCount, oldSize);
+			if (headTrimCount <= 0 || oldSize < headTrimCount)
+				return false;
+			const int preservedCount = qBound(0, oldSize - headTrimCount, newSize);
+			const int insertCount    = newSize - preservedCount;
+			if (insertCount < 0)
+				return false;
+			dropHead(headTrimCount);
+			replaceMetadataRange(preservedCount, 0, insertCount);
+			if (delta.headLineMutated && newSize > 0)
+				resetSlot(0);
+			if (delta.tailLineMutated && preservedCount > 0)
+				resetSlot(preservedCount - 1);
+			return dimensionsMatch(newSize) ? applySuccessfulSplitTopHeadTrimAdjustment() : false;
+		}
+		case NativeRenderCacheDeltaKind::RuntimeLineRestitch:
+		{
+			if (oldSize == newSize)
+			{
+				resetSlot(qBound(0, delta.stablePrefixCount, qMax(0, newSize - 1)));
+				return applySuccessfulSplitTopHeadTrimAdjustment();
+			}
+			break;
+		}
+		case NativeRenderCacheDeltaKind::RuntimeRangeRestitch:
+		{
+			const int headTrimCount = qBound(0, delta.headTrimCount, oldSize);
+			dropHead(headTrimCount);
+			const int  postTrimOldSize = oldSize - headTrimCount;
+			const int  replaceFirst    = qBound(0, delta.replaceFirstLine, postTrimOldSize);
+			const int  removeCount     = qBound(0, delta.removedLineCount, postTrimOldSize - replaceFirst);
+			const int  insertCount     = qBound(0, delta.insertedLineCount, newSize);
+			const bool structuralRemap = postTrimOldSize - removeCount + insertCount == newSize;
+			if (!structuralRemap)
+				return false;
+			replaceMetadataRange(replaceFirst, removeCount, insertCount);
+			if (delta.headLineMutated && newSize > 0)
+				resetSlot(0);
+			return dimensionsMatch(newSize) ? applySuccessfulSplitTopHeadTrimAdjustment() : false;
+		}
+		case NativeRenderCacheDeltaKind::FullReset:
+		case NativeRenderCacheDeltaKind::Unknown:
+			break;
+		}
+		return false;
+	};
+
+	const QVector<NativeRenderCacheDelta> replayDeltas  = collectRangeReplayDeltas();
+	bool                                  appliedDeltas = !replayDeltas.isEmpty();
+	for (const NativeRenderCacheDelta &delta : replayDeltas)
+	{
+		if (applyMetadataDelta(delta))
+			continue;
+		appliedDeltas = false;
+		break;
+	}
+
+	if (!appliedDeltas || !dimensionsMatch(sizeToInt(lines.size())))
+	{
+		resetAllMetadata();
+		clearCurrentNativeSplitTopHeadTrimAdjustment();
+	}
+	else
+	{
+		applyNativeSplitTopHeadTrimAdjustment(pendingSplitTopHeadTrimAdjustment);
+	}
+
+	setCacheKey();
+	return true;
+}
+
+bool WorldView::ensureNativeLayoutRange(const NativeOutputRenderLines &lines, int firstLine, int lastLine,
+                                        const int wrapWidthPixels, const int localWrapWidthPixels,
+                                        const int lineSpacingSetting, const QFont &layoutFont) const
+{
+	if (lines.isEmpty())
+		return false;
+
+	if (!nativeLayoutRangeStateReadyFor(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
+	                                    layoutFont))
+	{
+		if (!prepareNativeLayoutRangeState(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
+		                                   layoutFont))
+			return false;
 	}
 
 	firstLine = qBound(0, firstLine, sizeToInt(lines.size()) - 1);
@@ -4117,63 +4867,157 @@ bool WorldView::ensureNativeLayoutRange(const QVector<NativeOutputRenderLine> &l
 	const qreal lineSpacingFactor = (100.0 + static_cast<qreal>(lineSpacingSetting)) / 100.0;
 	const qreal defaultLineAdvance =
 	    static_cast<qreal>(qMax(1, QFontMetrics(layoutFont).lineSpacing())) * lineSpacingFactor;
+	const quint64 layoutContentSalt =
+	    nativeLayoutContentSalt(nativeLayoutStyleKey(), lineSpacingSetting, layoutFont);
 
-	int firstHeightChangedLine = -1;
+	bool heightChanged = false;
 	for (int i = firstLine; i <= lastLine; ++i)
 	{
-		const int   previousRows = (i < m_nativeLayoutVisualRows.size()) ? m_nativeLayoutVisualRows.at(i) : 0;
-		const uchar previousExact = (i < m_nativeLayoutRowsExact.size()) ? m_nativeLayoutRowsExact.at(i) : 0;
-		const int   exactRows     = ensureNativeLineLayout(lines, i, wrapWidthPixels, localWrapWidthPixels,
-		                                                   defaultLineAdvance, layoutFont);
-		if (firstHeightChangedLine < 0 &&
-		    (previousRows != exactRows || (previousExact == 0 && previousRows <= 0)))
+		const bool  hasPreviousSlot = i < sizeToInt(m_nativeLayoutSlots.size());
+		const int   previousRows    = hasPreviousSlot ? m_nativeLayoutSlots.at(i).visualRows : 0;
+		const uchar previousExact   = hasPreviousSlot ? m_nativeLayoutSlots.at(i).rowsExact : 0;
+		const int   exactRows = ensureNativeLineLayout(lines, i, wrapWidthPixels, localWrapWidthPixels,
+		                                               defaultLineAdvance, layoutFont, layoutContentSalt);
+		if (i < sizeToInt(m_nativeLayoutSlots.size()))
+			m_nativeLayoutSlots[i].runtimeLineKey = nativeRuntimeLineKey(lines.at(i));
+		const qreal exactHeight = static_cast<qreal>(qMax(1, exactRows)) * defaultLineAdvance;
+		if (!qFuzzyCompare(m_nativeLayoutHeightIndex.heightAt(i) + 1.0, exactHeight + 1.0))
 		{
-			firstHeightChangedLine = i;
+			m_nativeLayoutHeightIndex.setHeight(i, exactHeight);
+			heightChanged = true;
+		}
+		else if (previousRows != exactRows || (previousExact == 0 && previousRows <= 0))
+		{
+			heightChanged = true;
 		}
 	}
+	refreshNativeLayoutExactPrefixFrom(firstLine);
 
-	if (firstHeightChangedLine < 0)
-		return false;
-
-	qreal docY =
-	    firstHeightChangedLine > 0 ? m_nativeLayoutCumulativeHeights.at(firstHeightChangedLine) : 0.0;
-	if (firstHeightChangedLine == 0 && !m_nativeLayoutCumulativeHeights.isEmpty())
-		m_nativeLayoutCumulativeHeights[0] = 0.0;
-	for (int i = firstHeightChangedLine; i < lines.size(); ++i)
-	{
-		const int rows = (i < m_nativeLayoutVisualRows.size() && m_nativeLayoutVisualRows.at(i) > 0)
-		                     ? m_nativeLayoutVisualRows.at(i)
-		                     : 1;
-		docY += static_cast<qreal>(rows) * defaultLineAdvance;
-		if (i + 1 < m_nativeLayoutCumulativeHeights.size())
-			m_nativeLayoutCumulativeHeights[i + 1] = docY;
-	}
-	m_nativeLayoutCumulativeDirtyFrom = sizeToInt(lines.size());
-	return true;
+	return heightChanged;
 }
 
-int WorldView::ensureNativeLineLayout(const QVector<NativeOutputRenderLine> &lines, const int index,
-                                      const int wrapWidthPixels, const int localWrapWidthPixels,
-                                      const qreal defaultLineAdvance, const QFont &layoutFont) const
+void WorldView::refreshNativeLayoutExactPrefixFrom(const int firstLine) const
 {
-	if (index < 0 || index >= lines.size())
-		return 1;
-	if (index >= m_nativeLayoutLineLayouts.size() || index >= m_nativeLayoutLineContentHashes.size() ||
-	    index >= m_nativeLayoutVisualRows.size() || index >= m_nativeLayoutRowsExact.size())
+	const int lineCount = sizeToInt(m_nativeLayoutSlots.size());
+	if (lineCount <= 0)
 	{
-		return 1;
+		m_nativeLayoutExactPrefixCount = 0;
+		return;
 	}
+
+	int exactPrefix = qBound(0, m_nativeLayoutExactPrefixCount, lineCount);
+	if (firstLine > exactPrefix)
+	{
+		m_nativeLayoutExactPrefixCount = exactPrefix;
+		return;
+	}
+
+	exactPrefix = qBound(0, firstLine, lineCount);
+	while (exactPrefix < lineCount && m_nativeLayoutSlots.at(exactPrefix).rowsExact != 0)
+		++exactPrefix;
+	m_nativeLayoutExactPrefixCount = exactPrefix;
+}
+
+WorldView::NativeSplitTopHeadTrimAdjustment WorldView::nativeSplitTopHeadTrimAdjustmentForDelta(
+    const NativeRenderCacheDelta &delta, const qreal defaultLineAdvance, const quint64 targetRevision) const
+{
+	const quint64 recordedRevision = targetRevision != 0 ? targetRevision : m_nativeRenderLineCacheRevision;
+	if (recordedRevision == 0 || delta.revision == 0 || delta.revision > recordedRevision ||
+	    delta.headTrimCount <= 0)
+	{
+		return {};
+	}
+
+	const int oldSize       = qMax(0, delta.oldLineCount);
+	const int headTrimCount = qBound(0, delta.headTrimCount, oldSize);
+	if (headTrimCount <= 0 || sizeToInt(m_nativeLayoutSlots.size()) != oldSize)
+		return {};
+
+	qreal trimmedHeadDocY = -1.0;
+	if (sizeToInt(m_nativeLayoutHeightIndex.size()) == oldSize &&
+	    headTrimCount <= sizeToInt(m_nativeLayoutHeightIndex.size()))
+	{
+		trimmedHeadDocY = qMax<qreal>(0.0, nativeLayoutCumulativeHeightAt(headTrimCount));
+	}
+	else
+	{
+		const qreal oldLineAdvance =
+		    m_nativeLayoutCachedLineAdvance > 0.0 ? m_nativeLayoutCachedLineAdvance : defaultLineAdvance;
+		qreal sumRows       = 0.0;
+		bool  haveExactRows = true;
+		for (int i = 0; i < headTrimCount; ++i)
+		{
+			const int visualRows = m_nativeLayoutSlots.at(i).visualRows;
+			if (visualRows <= 0)
+			{
+				haveExactRows = false;
+				break;
+			}
+			sumRows += static_cast<qreal>(visualRows) * oldLineAdvance;
+		}
+		if (haveExactRows)
+			trimmedHeadDocY = sumRows;
+	}
+
+	if (trimmedHeadDocY < 0.0)
+		return {};
+
+	const int trimmedPixels = qMax(0, static_cast<int>(std::round(trimmedHeadDocY)));
+	return {.valid = true, .revision = recordedRevision, .pixels = trimmedPixels, .lines = headTrimCount};
+}
+
+void WorldView::clearNativeSplitTopHeadTrimAdjustment() const
+{
+	m_nativeSplitTopHeadTrimPixelsRevision = 0;
+	m_nativeSplitTopHeadTrimPixels         = 0;
+	m_nativeSplitTopHeadTrimLines          = 0;
+}
+
+void WorldView::clearCurrentNativeSplitTopHeadTrimAdjustment() const
+{
+	if (m_nativeSplitTopHeadTrimPixelsRevision != m_nativeRenderLineCacheRevision)
+		return;
+	clearNativeSplitTopHeadTrimAdjustment();
+}
+
+void WorldView::applyNativeSplitTopHeadTrimAdjustment(
+    const NativeSplitTopHeadTrimAdjustment &adjustment) const
+{
+	if (!adjustment.valid)
+		return;
+
+	if (m_nativeSplitTopHeadTrimPixelsRevision == adjustment.revision)
+	{
+		m_nativeSplitTopHeadTrimPixels += adjustment.pixels;
+		m_nativeSplitTopHeadTrimLines += adjustment.lines;
+		return;
+	}
+
+	m_nativeSplitTopHeadTrimPixelsRevision = adjustment.revision;
+	m_nativeSplitTopHeadTrimPixels         = adjustment.pixels;
+	m_nativeSplitTopHeadTrimLines          = adjustment.lines;
+}
+
+int WorldView::ensureNativeLineLayout(const NativeOutputRenderLines &lines, const int index,
+                                      const int wrapWidthPixels, const int localWrapWidthPixels,
+                                      const qreal defaultLineAdvance, const QFont &layoutFont,
+                                      const quint64 layoutContentSalt) const
+{
+	if (index < 0 || index >= sizeToInt(lines.size()))
+		return 1;
+	if (index >= sizeToInt(m_nativeLayoutSlots.size()))
+		return 1;
 
 	const NativeOutputRenderLine &line = lines.at(index);
 	const bool    hasLocalContent    = (line.flags & (WorldRuntime::LineNote | WorldRuntime::LineInput)) != 0;
 	const int     effectiveWrapWidth = hasLocalContent ? localWrapWidthPixels : wrapWidthPixels;
 	const quint64 visualHash         = line.visualHash != 0 ? line.visualHash : nativeLineContentHash(line);
-	const quint64 contentHash        = hashCombine(visualHash, static_cast<quint64>(effectiveWrapWidth));
-	if (const auto &cachedLayout = m_nativeLayoutLineLayouts.at(index);
-	    cachedLayout && m_nativeLayoutLineContentHashes.at(index) == contentHash)
+	const quint64 contentHash = nativeLayoutLineCacheHash(visualHash, effectiveWrapWidth, layoutContentSalt);
+	NativeLayoutSlot &slot    = m_nativeLayoutSlots[index];
+	if (const auto &cachedLayout = slot.lineLayout; cachedLayout && slot.lineContentHash == contentHash)
 	{
-		if (m_nativeLayoutRowsExact.at(index) != 0 && m_nativeLayoutVisualRows.at(index) > 0)
-			return m_nativeLayoutVisualRows.at(index);
+		if (slot.rowsExact != 0 && slot.visualRows > 0)
+			return slot.visualRows;
 
 		if (!cachedLayout->cacheEnabled())
 			cachedLayout->setCacheEnabled(true);
@@ -4194,19 +5038,19 @@ int WorldView::ensureNativeLineLayout(const QVector<NativeOutputRenderLine> &lin
 			++rowCount;
 		}
 		cachedLayout->endLayout();
-		rowCount                        = qMax(1, rowCount);
-		m_nativeLayoutVisualRows[index] = rowCount;
-		m_nativeLayoutRowsExact[index]  = 1;
+		rowCount        = qMax(1, rowCount);
+		slot.visualRows = rowCount;
+		slot.rowsExact  = 1;
 		++m_nativeLayoutRowMeasurements;
 		return rowCount;
 	}
 
 	if (line.text.isEmpty())
 	{
-		m_nativeLayoutLineLayouts[index].clear();
-		m_nativeLayoutLineContentHashes[index] = contentHash;
-		m_nativeLayoutVisualRows[index]        = 1;
-		m_nativeLayoutRowsExact[index]         = 1;
+		slot.lineLayout.clear();
+		slot.lineContentHash = contentHash;
+		slot.visualRows      = 1;
+		slot.rowsExact       = 1;
 		return 1;
 	}
 
@@ -4236,17 +5080,17 @@ int WorldView::ensureNativeLineLayout(const QVector<NativeOutputRenderLine> &lin
 	layout->endLayout();
 	rowCount = qMax(1, rowCount);
 
-	m_nativeLayoutLineLayouts[index]       = layout;
-	m_nativeLayoutLineContentHashes[index] = contentHash;
-	m_nativeLayoutVisualRows[index]        = rowCount;
-	m_nativeLayoutRowsExact[index]         = 1;
+	slot.lineLayout      = layout;
+	slot.lineContentHash = contentHash;
+	slot.visualRows      = rowCount;
+	slot.rowsExact       = 1;
 	++m_nativeLayoutRowMeasurements;
 	return rowCount;
 }
 
-void WorldView::ensureNativeLayoutCaches(const QVector<NativeOutputRenderLine> &lines,
-                                         const int wrapWidthPixels, const int localWrapWidthPixels,
-                                         const int lineSpacingSetting, const QFont &layoutFont) const
+void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, const int wrapWidthPixels,
+                                         const int localWrapWidthPixels, const int lineSpacingSetting,
+                                         const QFont &layoutFont) const
 {
 	const qreal lineSpacingFactor = (100.0 + static_cast<qreal>(lineSpacingSetting)) / 100.0;
 	const qreal defaultLineAdvance =
@@ -4265,452 +5109,470 @@ void WorldView::ensureNativeLayoutCaches(const QVector<NativeOutputRenderLine> &
 
 	const bool layoutCacheKeyChanged = !cacheWasValid || wrapChanged || lineSpacingChanged || fontChanged ||
 	                                   styleChanged || lineAdvanceChanged;
+	const bool rangePreparedOnly     = m_nativeLayoutRangePreparedOnly;
+	const bool rangePreparedAtCurrent =
+	    rangePreparedOnly && m_nativeLayoutRangePreparedRevision == m_nativeRenderLineCacheRevision;
 
-	const bool cacheDimensionsMatch = m_nativeLayoutCumulativeHeights.size() == lines.size() + 1 &&
-	                                  m_nativeLayoutVisualRows.size() == lines.size() &&
-	                                  m_nativeLayoutLineLayouts.size() == lines.size() &&
-	                                  m_nativeLayoutLineContentHashes.size() == lines.size() &&
-	                                  m_nativeLayoutRowsExact.size() == lines.size();
+	const bool cacheDimensionsMatch =
+	    m_nativeLayoutHeightIndex.size() == lines.size() && m_nativeLayoutSlots.size() == lines.size();
 	if (cacheWasValid && !layoutCacheKeyChanged && !localWrapChanged && !renderRevisionChanged &&
-	    cacheDimensionsMatch && m_nativeLayoutCumulativeDirtyFrom >= sizeToInt(lines.size()))
+	    cacheDimensionsMatch && !rangePreparedOnly)
 	{
 		return;
-	}
-
-	if (cacheWasValid && renderRevisionChanged &&
-	    m_nativeRenderCacheDelta.revision == m_nativeRenderLineCacheRevision &&
-	    m_nativeRenderCacheDelta.headTrimCount > 0)
-	{
-		const int oldSize       = qMax(0, m_nativeRenderCacheDelta.oldLineCount);
-		const int headTrimCount = qBound(0, m_nativeRenderCacheDelta.headTrimCount, oldSize);
-		if (headTrimCount > 0 && m_nativeLayoutVisualRows.size() == oldSize)
-		{
-			qreal trimmedHeadDocY = -1.0;
-			if (m_nativeLayoutCumulativeHeights.size() == oldSize + 1 &&
-			    headTrimCount < m_nativeLayoutCumulativeHeights.size() &&
-			    m_nativeLayoutCumulativeDirtyFrom >= headTrimCount)
-			{
-				trimmedHeadDocY = qMax<qreal>(0.0, m_nativeLayoutCumulativeHeights.at(headTrimCount));
-			}
-			else
-			{
-				const qreal oldLineAdvance = m_nativeLayoutCachedLineAdvance > 0.0
-				                                 ? m_nativeLayoutCachedLineAdvance
-				                                 : defaultLineAdvance;
-				qreal       sumRows        = 0.0;
-				bool        haveExactRows  = true;
-				for (int i = 0; i < headTrimCount; ++i)
-				{
-					const int visualRows = m_nativeLayoutVisualRows.at(i);
-					if (visualRows <= 0)
-					{
-						haveExactRows = false;
-						break;
-					}
-					sumRows += static_cast<qreal>(visualRows) * oldLineAdvance;
-				}
-				if (haveExactRows)
-					trimmedHeadDocY = sumRows;
-			}
-			if (trimmedHeadDocY >= 0.0)
-			{
-				m_nativeSplitTopHeadTrimPixelsRevision = m_nativeRenderLineCacheRevision;
-				m_nativeSplitTopHeadTrimPixels = qMax(0, static_cast<int>(std::round(trimmedHeadDocY)));
-			}
-		}
 	}
 
 	auto runtimeLineKeyForLine = [](const NativeOutputRenderLine &line)
 	{ return nativeRuntimeLineKey(line); };
 
-	auto lineContentHashForWidth = [&](const NativeOutputRenderLine &line)
+	const quint64 layoutContentSalt       = nativeLayoutContentSalt(styleKey, lineSpacingSetting, layoutFont);
+	auto          lineContentHashForWidth = [&](const NativeOutputRenderLine &line)
 	{
 		const bool hasLocalContent = (line.flags & (WorldRuntime::LineNote | WorldRuntime::LineInput)) != 0;
 		const int  effectiveWrapWidth = hasLocalContent ? localWrapWidthPixels : wrapWidthPixels;
 		const quint64 visualHash      = line.visualHash != 0 ? line.visualHash : nativeLineContentHash(line);
-		return hashCombine(visualHash, static_cast<quint64>(effectiveWrapWidth));
+		return nativeLayoutLineCacheHash(visualHash, effectiveWrapWidth, layoutContentSalt);
 	};
 
-	auto refreshLayoutRuntimeLineKeys = [this, &lines, &runtimeLineKeyForLine]
+	auto resetLayoutLineCaches = [this](const qsizetype count)
 	{
-		m_nativeLayoutRuntimeLineKeys.resize(lines.size());
-		for (int i = 0; i < lines.size(); ++i)
+		m_nativeLayoutSlots.assign(count, NativeLayoutSlot{});
+		m_nativeLayoutExactPrefixCount = 0;
+	};
+
+	QVector<QPair<int, int>> dirtyHeightRanges;
+	QVector<QPair<int, int>> layoutInvalidationRanges;
+	auto                     mergeRanges = [](QVector<QPair<int, int>> &ranges)
+	{
+		if (ranges.size() < 2)
+			return;
+		std::ranges::sort(ranges, {}, &QPair<int, int>::first);
+		const int rangeCount = sizeToInt(ranges.size());
+		int       writeIndex = 0;
+		for (int readIndex = 1; readIndex < rangeCount; ++readIndex)
 		{
-			m_nativeLayoutRuntimeLineKeys[i] = runtimeLineKeyForLine(lines.at(i));
+			QPair<int, int>       &current = ranges[writeIndex];
+			const QPair<int, int> &next    = ranges.at(readIndex);
+			if (next.first <= current.second)
+			{
+				current.second = qMax(current.second, next.second);
+				continue;
+			}
+			++writeIndex;
+			if (writeIndex != readIndex)
+				ranges[writeIndex] = next;
+		}
+		ranges.resize(writeIndex + 1);
+	};
+	auto markHeightRangeDirty = [&dirtyHeightRanges](const int first, const int lastExclusive)
+	{
+		if (lastExclusive <= first)
+			return;
+		dirtyHeightRanges.push_back({first, lastExclusive});
+	};
+
+	auto invalidateLayoutSlots =
+	    [this, &layoutInvalidationRanges, &markHeightRangeDirty](const int first, const int lastExclusive)
+	{
+		const int boundedFirst = qBound(0, first, sizeToInt(m_nativeLayoutSlots.size()));
+		const int boundedLast  = qBound(boundedFirst, lastExclusive, sizeToInt(m_nativeLayoutSlots.size()));
+		if (boundedLast <= boundedFirst)
+			return;
+		layoutInvalidationRanges.push_back({boundedFirst, boundedLast});
+		markHeightRangeDirty(boundedFirst, boundedLast);
+		if (boundedFirst < m_nativeLayoutExactPrefixCount)
+			m_nativeLayoutExactPrefixCount = boundedFirst;
+	};
+
+	auto applyLayoutInvalidationRanges = [this, &dirtyHeightRanges, &layoutInvalidationRanges, &mergeRanges]
+	{
+		if (layoutInvalidationRanges.isEmpty())
+			return;
+		mergeRanges(layoutInvalidationRanges);
+		const int lineCount = sizeToInt(m_nativeLayoutSlots.size());
+		for (const QPair<int, int> &range : layoutInvalidationRanges)
+		{
+			const int boundedFirst = qBound(0, range.first, lineCount);
+			const int boundedLast  = qBound(boundedFirst, range.second, lineCount);
+			if (boundedLast > boundedFirst)
+				dirtyHeightRanges.push_back({boundedFirst, boundedLast});
 		}
 	};
 
-	auto dropLayoutHead = [this](const int requestedHeadTrimCount)
+	auto mergeDirtyHeightRanges = [&dirtyHeightRanges, &mergeRanges] { mergeRanges(dirtyHeightRanges); };
+
+	auto layoutDimensionsMatch = [this](const int expectedSize)
 	{
-		const int headTrimCount =
-		    qBound(0, requestedHeadTrimCount, sizeToInt(m_nativeLayoutVisualRows.size()));
+		return sizeToInt(m_nativeLayoutSlots.size()) == expectedSize &&
+		       sizeToInt(m_nativeLayoutHeightIndex.size()) == expectedSize;
+	};
+
+	auto lineCanReuseCachedLayout = [this, &lines, &lineContentHashForWidth](const int i)
+	{
+		if (i < 0 || i >= sizeToInt(lines.size()) || i >= sizeToInt(m_nativeLayoutSlots.size()) ||
+		    i >= sizeToInt(m_nativeLayoutHeightIndex.size()))
+		{
+			return false;
+		}
+
+		const NativeOutputRenderLine &line = lines.at(i);
+		const NativeLayoutSlot       &slot = m_nativeLayoutSlots.at(i);
+		const bool                    exactLineHasLayout =
+		    slot.rowsExact == 0 || line.text.isEmpty() || static_cast<bool>(slot.lineLayout);
+		if (slot.visualRows <= 0 || !exactLineHasLayout)
+			return false;
+
+		return slot.runtimeLineKey == nativeRuntimeLineKey(line) &&
+		       slot.lineContentHash == lineContentHashForWidth(line);
+	};
+
+	auto reusableAlignedPrefix =
+	    [this, &lines, &runtimeLineKeyForLine, &lineCanReuseCachedLayout](const int requestedPrefix)
+	{
+		const int lineCount      = sizeToInt(lines.size());
+		const int prefixLimit    = qBound(0, requestedPrefix,
+		                                  std::min({lineCount, sizeToInt(m_nativeLayoutSlots.size()),
+		                                            sizeToInt(m_nativeLayoutHeightIndex.size())}));
+		int       reusablePrefix = 0;
+		while (reusablePrefix < prefixLimit)
+		{
+			if (m_nativeLayoutSlots.at(reusablePrefix).runtimeLineKey !=
+			        runtimeLineKeyForLine(lines.at(reusablePrefix)) ||
+			    !lineCanReuseCachedLayout(reusablePrefix))
+			{
+				break;
+			}
+			++reusablePrefix;
+		}
+		return reusablePrefix;
+	};
+
+	auto resetAllLayoutCachesForCurrentLines = [&]
+	{
+		resetLayoutLineCaches(lines.size());
+		m_nativeLayoutHeightIndex.assign(lines.size(), defaultLineAdvance);
+		markHeightRangeDirty(0, sizeToInt(lines.size()));
+	};
+
+	auto invalidateUnreusableAlignedRanges = [&](const int first, const int lastExclusive)
+	{
+		const int newSize = sizeToInt(lines.size());
+		if (m_nativeLayoutSlots.size() != lines.size())
+			m_nativeLayoutSlots.resize(lines.size());
+		const int boundedFirst    = qBound(0, first, newSize);
+		const int boundedLast     = qBound(boundedFirst, lastExclusive, newSize);
+		int       dirtyStart      = -1;
+		auto      flushDirtyRange = [&](const int end)
+		{
+			if (dirtyStart < 0)
+				return;
+			invalidateLayoutSlots(dirtyStart, end);
+			dirtyStart = -1;
+		};
+		for (int i = boundedFirst; i < boundedLast; ++i)
+		{
+			const quint64 currentRuntimeKey = runtimeLineKeyForLine(lines.at(i));
+			if (m_nativeLayoutSlots.at(i).runtimeLineKey != currentRuntimeKey)
+				m_nativeLayoutSlots[i].runtimeLineKey = currentRuntimeKey;
+			if (!lineCanReuseCachedLayout(i))
+			{
+				if (dirtyStart < 0)
+					dirtyStart = i;
+				continue;
+			}
+			flushDirtyRange(i);
+		}
+		flushDirtyRange(boundedLast);
+	};
+
+	auto transformDirtyRangesForReplace =
+	    [&dirtyHeightRanges](const int first, const int removeCount, const int insertCount)
+	{
+		if (dirtyHeightRanges.isEmpty() || (removeCount <= 0 && insertCount <= 0))
+			return;
+
+		const int replaceFirst = qMax(0, first);
+		const int removeLast   = replaceFirst + qMax(0, removeCount);
+		const int deltaCount   = qMax(0, insertCount) - qMax(0, removeCount);
+		for (QPair<int, int> &range : dirtyHeightRanges)
+		{
+			if (range.second <= replaceFirst)
+				continue;
+			if (range.first >= removeLast)
+			{
+				range.first += deltaCount;
+				range.second += deltaCount;
+				continue;
+			}
+
+			const int oldRightDirtyCount = qMax(0, range.second - removeLast);
+			range.first                  = qMin(range.first, replaceFirst);
+			range.second                 = replaceFirst + qMax(0, insertCount) + oldRightDirtyCount;
+		}
+	};
+
+	auto replaceLayoutRange =
+	    [&](const int first, const int removeCount, const int insertCount, const bool markInsertedDirty)
+	{
+		const int lineCount      = sizeToInt(m_nativeLayoutSlots.size());
+		const int boundedFirst   = qBound(0, first, lineCount);
+		const int boundedRemove  = qBound(0, removeCount, lineCount - boundedFirst);
+		const int boundedInsert  = qMax(0, insertCount);
+		const int oldExactPrefix = m_nativeLayoutExactPrefixCount;
+
+		transformDirtyRangesForReplace(boundedFirst, boundedRemove, boundedInsert);
+		m_nativeLayoutSlots.replace(boundedFirst, boundedRemove, boundedInsert, NativeLayoutSlot{});
+		m_nativeLayoutHeightIndex.replace(boundedFirst, boundedRemove, boundedInsert, defaultLineAdvance);
+
+		const int removeLast = boundedFirst + boundedRemove;
+		if (boundedFirst >= oldExactPrefix)
+		{
+			m_nativeLayoutExactPrefixCount = qBound(0, oldExactPrefix, sizeToInt(m_nativeLayoutSlots.size()));
+		}
+		else if (boundedInsert == 0 && removeLast <= oldExactPrefix)
+		{
+			m_nativeLayoutExactPrefixCount =
+			    qBound(0, oldExactPrefix - boundedRemove, sizeToInt(m_nativeLayoutSlots.size()));
+		}
+		else
+		{
+			m_nativeLayoutExactPrefixCount = boundedFirst;
+		}
+
+		if (markInsertedDirty && boundedInsert > 0)
+			markHeightRangeDirty(boundedFirst, boundedFirst + boundedInsert);
+	};
+
+	auto dropLayoutHead = [&](const int requestedHeadTrimCount)
+	{
+		const int headTrimCount = qBound(0, requestedHeadTrimCount, sizeToInt(m_nativeLayoutSlots.size()));
 		if (headTrimCount <= 0)
 			return;
 
-		qreal trimmedDocY = 0.0;
-		if (m_nativeLayoutCumulativeHeights.size() > headTrimCount)
-			trimmedDocY = qMax<qreal>(0.0, m_nativeLayoutCumulativeHeights.at(headTrimCount));
-
-		m_nativeLayoutVisualRows.remove(0, headTrimCount);
-		m_nativeLayoutLineLayouts.remove(0, headTrimCount);
-		m_nativeLayoutLineContentHashes.remove(0, headTrimCount);
-		m_nativeLayoutRuntimeLineKeys.remove(0, headTrimCount);
-		m_nativeLayoutRowsExact.remove(0, headTrimCount);
-
-		if (m_nativeLayoutCumulativeHeights.size() > headTrimCount)
-		{
-			m_nativeLayoutCumulativeHeights.remove(0, headTrimCount);
-			for (qreal &height : m_nativeLayoutCumulativeHeights)
-				height = qMax<qreal>(0.0, height - trimmedDocY);
-			if (!m_nativeLayoutCumulativeHeights.isEmpty())
-				m_nativeLayoutCumulativeHeights[0] = 0.0;
-		}
-		else
-		{
-			m_nativeLayoutCumulativeHeights = QVector<qreal>(1, 0.0);
-		}
-
-		m_nativeLayoutCumulativeDirtyFrom = qMax(0, m_nativeLayoutCumulativeDirtyFrom - headTrimCount);
+		transformDirtyRangesForReplace(0, headTrimCount, 0);
+		m_nativeLayoutSlots.remove(0, headTrimCount);
+		m_nativeLayoutHeightIndex.removeFront(headTrimCount);
+		m_nativeLayoutExactPrefixCount = qMax(0, m_nativeLayoutExactPrefixCount - headTrimCount);
 	};
 
-	auto preserveVerifiedLayoutPrefix =
-	    [this, &lines, &runtimeLineKeyForLine, &lineContentHashForWidth, &dropLayoutHead,
-	     defaultLineAdvance](const int newSize, const int headTrimCount, const int requestedStablePrefix)
+	auto dropLayoutHeadForReplay = [&](const int requestedHeadTrimCount)
 	{
-		if (newSize < 0 || headTrimCount < 0 || requestedStablePrefix < 0)
-			return false;
+		const int headTrimCount = qBound(0, requestedHeadTrimCount, sizeToInt(m_nativeLayoutSlots.size()));
+		if (headTrimCount <= 0)
+			return;
+		dropLayoutHead(headTrimCount);
+	};
 
-		const int       sourceOffset = qMax(0, headTrimCount);
-		const qsizetype availableSourceSize =
-		    std::min({m_nativeLayoutVisualRows.size(), m_nativeLayoutLineLayouts.size(),
-		              m_nativeLayoutLineContentHashes.size(), m_nativeLayoutRuntimeLineKeys.size(),
-		              m_nativeLayoutRowsExact.size()});
-		const int availableSourceCount =
-		    sizeToInt(qMax<qsizetype>(0, availableSourceSize - static_cast<qsizetype>(sourceOffset)));
-		const int prefixLimit = qBound(0, requestedStablePrefix, qMin(newSize, availableSourceCount));
-		if (prefixLimit <= 0 && newSize > 0)
-			return false;
-
-		int reusablePrefix = 0;
-		for (; reusablePrefix < prefixLimit; ++reusablePrefix)
+	auto collectLayoutReplayDeltas = [&]
+	{
+		QVector<NativeRenderCacheDelta> replayDeltas;
+		quint64 expectedRevision = m_nativeLayoutRangePreparedOnly ? m_nativeLayoutRangePreparedRevision
+		                                                           : m_nativeLayoutCachedRenderRevision;
+		for (const NativeRenderCacheDelta &delta : std::as_const(m_nativeRenderCacheDeltas))
 		{
-			const int sourceIndex = sourceOffset + reusablePrefix;
-			if (m_nativeLayoutRuntimeLineKeys.at(sourceIndex) !=
-			    runtimeLineKeyForLine(lines.at(reusablePrefix)))
-			{
+			if (delta.revision <= expectedRevision)
+				continue;
+			if (delta.fromRevision != expectedRevision)
+				return QVector<NativeRenderCacheDelta>{};
+			replayDeltas.push_back(delta);
+			expectedRevision = delta.revision;
+			if (expectedRevision == m_nativeRenderLineCacheRevision)
 				break;
-			}
-
-			const NativeOutputRenderLine &line = lines.at(reusablePrefix);
-			const bool exactLineHasLayout      = m_nativeLayoutRowsExact.at(sourceIndex) == 0 ||
-			                                     line.text.isEmpty() ||
-			                                     static_cast<bool>(m_nativeLayoutLineLayouts.at(sourceIndex));
-			if (m_nativeLayoutVisualRows.at(sourceIndex) <= 0 || !exactLineHasLayout ||
-			    m_nativeLayoutLineContentHashes.at(sourceIndex) != lineContentHashForWidth(line))
-			{
-				break;
-			}
 		}
-		if (reusablePrefix <= 0 && newSize > 0)
+		if (expectedRevision != m_nativeRenderLineCacheRevision)
+			replayDeltas.clear();
+		return replayDeltas;
+	};
+
+	NativeSplitTopHeadTrimAdjustment pendingSplitTopHeadTrimAdjustment;
+	auto mergePendingSplitTopHeadTrimAdjustment = [&](const NativeSplitTopHeadTrimAdjustment &adjustment)
+	{
+		if (!adjustment.valid)
+			return;
+		if (pendingSplitTopHeadTrimAdjustment.valid &&
+		    pendingSplitTopHeadTrimAdjustment.revision == adjustment.revision)
+		{
+			pendingSplitTopHeadTrimAdjustment.pixels += adjustment.pixels;
+			pendingSplitTopHeadTrimAdjustment.lines += adjustment.lines;
+			return;
+		}
+		pendingSplitTopHeadTrimAdjustment = adjustment;
+	};
+
+	auto applyExactRenderDelta = [&](const NativeRenderCacheDelta &delta)
+	{
+		const int                              oldSize = qMax(0, delta.oldLineCount);
+		const int                              newSize = qMax(0, delta.newLineCount);
+		const NativeSplitTopHeadTrimAdjustment splitTopHeadTrimAdjustment =
+		    nativeSplitTopHeadTrimAdjustmentForDelta(delta, defaultLineAdvance,
+		                                             m_nativeRenderLineCacheRevision);
+		auto applySuccessfulSplitTopHeadTrimAdjustment = [&]
+		{
+			mergePendingSplitTopHeadTrimAdjustment(splitTopHeadTrimAdjustment);
+			return true;
+		};
+		if (delta.kind != NativeRenderCacheDeltaKind::FullReset && !layoutDimensionsMatch(oldSize))
 			return false;
 
-		bool cumulativePrefixPreserved = false;
-		if (sourceOffset > 0)
+		switch (delta.kind)
 		{
-			if (reusablePrefix == availableSourceCount)
-			{
-				dropLayoutHead(sourceOffset);
-				cumulativePrefixPreserved = true;
-			}
-			else
-			{
-				for (int i = 0; i < reusablePrefix; ++i)
-				{
-					const int sourceIndex              = sourceOffset + i;
-					m_nativeLayoutVisualRows[i]        = m_nativeLayoutVisualRows.at(sourceIndex);
-					m_nativeLayoutLineLayouts[i]       = std::move(m_nativeLayoutLineLayouts[sourceIndex]);
-					m_nativeLayoutLineContentHashes[i] = m_nativeLayoutLineContentHashes.at(sourceIndex);
-					m_nativeLayoutRuntimeLineKeys[i]   = m_nativeLayoutRuntimeLineKeys.at(sourceIndex);
-					m_nativeLayoutRowsExact[i]         = m_nativeLayoutRowsExact.at(sourceIndex);
-				}
-			}
-		}
-
-		m_nativeLayoutVisualRows.resize(newSize);
-		m_nativeLayoutLineLayouts.resize(newSize);
-		m_nativeLayoutLineContentHashes.resize(newSize);
-		m_nativeLayoutRuntimeLineKeys.resize(newSize);
-		m_nativeLayoutRowsExact.resize(newSize);
-		for (int i = reusablePrefix; i < newSize; ++i)
+		case NativeRenderCacheDeltaKind::FullReset:
+			resetLayoutLineCaches(newSize);
+			m_nativeLayoutHeightIndex.assign(newSize, defaultLineAdvance);
+			markHeightRangeDirty(0, newSize);
+			pendingSplitTopHeadTrimAdjustment = {};
+			clearNativeSplitTopHeadTrimAdjustment();
+			return true;
+		case NativeRenderCacheDeltaKind::TailAppend:
 		{
-			m_nativeLayoutVisualRows[i] = -1;
-			m_nativeLayoutLineLayouts[i].clear();
-			m_nativeLayoutLineContentHashes[i] = 0;
-			m_nativeLayoutRuntimeLineKeys[i]   = runtimeLineKeyForLine(lines.at(i));
-			m_nativeLayoutRowsExact[i]         = 0;
+			if (newSize < oldSize)
+				return false;
+			const int  insertCount     = newSize - oldSize;
+			const bool tailLineMutated = delta.tailLineMutated && oldSize > 0;
+			const bool headLineMutated = delta.headLineMutated && newSize > 0;
+			replaceLayoutRange(oldSize, 0, insertCount, true);
+			const int stablePrefix =
+			    headLineMutated ? 0 : qBound(0, oldSize - (tailLineMutated ? 1 : 0), newSize);
+			markHeightRangeDirty(stablePrefix, newSize);
+			return layoutDimensionsMatch(newSize) ? applySuccessfulSplitTopHeadTrimAdjustment() : false;
 		}
-
-		m_nativeLayoutCumulativeHeights.resize(newSize + 1);
-		if (!m_nativeLayoutCumulativeHeights.isEmpty())
-			m_nativeLayoutCumulativeHeights[0] = 0.0;
-		if (cumulativePrefixPreserved)
+		case NativeRenderCacheDeltaKind::TailRemove:
 		{
-			m_nativeLayoutCumulativeDirtyFrom =
-			    qBound(0, qMin(m_nativeLayoutCumulativeDirtyFrom, reusablePrefix), newSize);
+			if (newSize > oldSize)
+				return false;
+			replaceLayoutRange(newSize, oldSize - newSize, 0, false);
+			const bool tailLineMutated = delta.tailLineMutated && newSize > 0;
+			const int  stablePrefix    = qBound(0, newSize - (tailLineMutated ? 1 : 0), newSize);
+			markHeightRangeDirty(stablePrefix, newSize);
+			return layoutDimensionsMatch(newSize) ? applySuccessfulSplitTopHeadTrimAdjustment() : false;
 		}
-		else
+		case NativeRenderCacheDeltaKind::HeadTrimTailAppend:
 		{
-			qreal prefixDocY = 0.0;
-			for (int i = 0; i < reusablePrefix; ++i)
-			{
-				prefixDocY += static_cast<qreal>(m_nativeLayoutVisualRows.at(i)) * defaultLineAdvance;
-				m_nativeLayoutCumulativeHeights[i + 1] = prefixDocY;
-			}
-			m_nativeLayoutCumulativeDirtyFrom = qBound(0, reusablePrefix, newSize);
+			const int headTrimCount = qBound(0, delta.headTrimCount, oldSize);
+			if (headTrimCount <= 0 || oldSize < headTrimCount)
+				return false;
+			dropLayoutHeadForReplay(headTrimCount);
+			const int preservedCount = qBound(0, oldSize - headTrimCount, newSize);
+			const int insertCount    = newSize - preservedCount;
+			if (insertCount < 0)
+				return false;
+			replaceLayoutRange(preservedCount, 0, insertCount, true);
+			if (delta.headLineMutated && newSize > 0)
+				markHeightRangeDirty(0, 1);
+			const bool tailLineMutated = delta.tailLineMutated && preservedCount > 0;
+			const int  tailDirtyFirst  = qBound(0, preservedCount - (tailLineMutated ? 1 : 0), newSize);
+			markHeightRangeDirty(tailDirtyFirst, newSize);
+			return layoutDimensionsMatch(newSize) ? applySuccessfulSplitTopHeadTrimAdjustment() : false;
 		}
-		return true;
+		case NativeRenderCacheDeltaKind::RuntimeLineRestitch:
+		{
+			if (oldSize != newSize || newSize <= 0)
+				return false;
+			const int changedIndex = qBound(0, delta.stablePrefixCount, newSize - 1);
+			replaceLayoutRange(changedIndex, 1, 1, true);
+			return layoutDimensionsMatch(newSize) ? applySuccessfulSplitTopHeadTrimAdjustment() : false;
+		}
+		case NativeRenderCacheDeltaKind::RuntimeRangeRestitch:
+		{
+			const int headTrimCount = qBound(0, delta.headTrimCount, oldSize);
+			dropLayoutHeadForReplay(headTrimCount);
+			const int  postTrimOldSize = oldSize - headTrimCount;
+			const int  replaceFirst    = qBound(0, delta.replaceFirstLine, postTrimOldSize);
+			const int  removeCount     = qBound(0, delta.removedLineCount, postTrimOldSize - replaceFirst);
+			const int  insertCount     = qBound(0, delta.insertedLineCount, newSize);
+			const bool structuralRemap = postTrimOldSize - removeCount + insertCount == newSize;
+			if (!structuralRemap)
+				return false;
+			replaceLayoutRange(replaceFirst, removeCount, insertCount, insertCount > 0);
+			if (insertCount > 0)
+				markHeightRangeDirty(replaceFirst, replaceFirst + insertCount);
+			if (delta.headLineMutated && newSize > 0)
+				markHeightRangeDirty(0, 1);
+			return layoutDimensionsMatch(newSize) ? applySuccessfulSplitTopHeadTrimAdjustment() : false;
+		}
+		case NativeRenderCacheDeltaKind::HeadMutation:
+		{
+			const int headTrimCount = qBound(0, delta.headTrimCount, oldSize);
+			dropLayoutHeadForReplay(headTrimCount);
+			if (!layoutDimensionsMatch(newSize))
+				return false;
+			if ((delta.headLineMutated || headTrimCount <= 0) && newSize > 0)
+				markHeightRangeDirty(0, 1);
+			return applySuccessfulSplitTopHeadTrimAdjustment();
+		}
+		case NativeRenderCacheDeltaKind::Unknown:
+			return false;
+		}
+		return false;
 	};
 
 	bool renderDeltaFastPathApplied = false;
-	if (cacheWasValid && !layoutCacheKeyChanged && !localWrapChanged && renderRevisionChanged &&
-	    m_nativeRenderCacheDelta.revision == m_nativeRenderLineCacheRevision &&
-	    m_nativeRenderCacheDelta.kind == NativeRenderCacheDeltaKind::TailAppend &&
-	    m_nativeRenderCacheDelta.newLineCount == sizeToInt(lines.size()))
+	if (cacheWasValid && !layoutCacheKeyChanged && !localWrapChanged && renderRevisionChanged)
 	{
-		const int  oldSize = qBound(0, m_nativeRenderCacheDelta.oldLineCount, sizeToInt(lines.size()));
-		const bool oldDimensionsMatch =
-		    m_nativeLayoutVisualRows.size() == oldSize && m_nativeLayoutLineLayouts.size() == oldSize &&
-		    m_nativeLayoutLineContentHashes.size() == oldSize &&
-		    m_nativeLayoutRuntimeLineKeys.size() == oldSize && m_nativeLayoutRowsExact.size() == oldSize &&
-		    m_nativeLayoutCumulativeHeights.size() == oldSize + 1;
-		if (oldDimensionsMatch)
+		if (rangePreparedAtCurrent)
 		{
-			const int  newSize         = sizeToInt(lines.size());
-			const bool tailLineMutated = m_nativeRenderCacheDelta.tailLineMutated && oldSize > 0;
-			const int  stablePrefix    = qBound(0, oldSize - (tailLineMutated ? 1 : 0), newSize);
-
-			m_nativeLayoutVisualRows.resize(lines.size());
-			m_nativeLayoutLineLayouts.resize(lines.size());
-			m_nativeLayoutLineContentHashes.resize(lines.size());
-			m_nativeLayoutRuntimeLineKeys.resize(lines.size());
-			m_nativeLayoutRowsExact.resize(lines.size());
-			for (int i = stablePrefix; i < newSize; ++i)
+			invalidateUnreusableAlignedRanges(0, sizeToInt(lines.size()));
+			renderDeltaFastPathApplied = true;
+		}
+		else
+		{
+			const QVector<NativeRenderCacheDelta> replayDeltas  = collectLayoutReplayDeltas();
+			bool                                  replayApplied = !replayDeltas.isEmpty();
+			for (const NativeRenderCacheDelta &delta : replayDeltas)
 			{
-				m_nativeLayoutVisualRows[i] = -1;
-				m_nativeLayoutLineLayouts[i].clear();
-				m_nativeLayoutLineContentHashes[i] = 0;
-				m_nativeLayoutRuntimeLineKeys[i]   = runtimeLineKeyForLine(lines.at(i));
-				m_nativeLayoutRowsExact[i]         = 0;
+				if (!applyExactRenderDelta(delta))
+				{
+					replayApplied = false;
+					break;
+				}
 			}
-
-			m_nativeLayoutCumulativeHeights.resize(lines.size() + 1);
-			if (stablePrefix == 0 && !m_nativeLayoutCumulativeHeights.isEmpty())
-				m_nativeLayoutCumulativeHeights[0] = 0.0;
-			m_nativeLayoutCumulativeDirtyFrom =
-			    qBound(0, qMin(m_nativeLayoutCumulativeDirtyFrom, stablePrefix), newSize);
-			renderDeltaFastPathApplied = true;
-		}
-		else
-		{
-			const int newSize = sizeToInt(lines.size());
-			const int stablePrefix =
-			    qBound(0, oldSize - (m_nativeRenderCacheDelta.tailLineMutated ? 1 : 0), newSize);
-			renderDeltaFastPathApplied = preserveVerifiedLayoutPrefix(newSize, 0, stablePrefix);
-		}
-	}
-	else if (cacheWasValid && !layoutCacheKeyChanged && !localWrapChanged && renderRevisionChanged &&
-	         m_nativeRenderCacheDelta.revision == m_nativeRenderLineCacheRevision &&
-	         m_nativeRenderCacheDelta.kind == NativeRenderCacheDeltaKind::TailRemove &&
-	         m_nativeRenderCacheDelta.newLineCount == sizeToInt(lines.size()))
-	{
-		const int  oldSize = qMax(0, m_nativeRenderCacheDelta.oldLineCount);
-		const int  newSize = sizeToInt(lines.size());
-		const bool oldDimensionsMatch =
-		    m_nativeLayoutVisualRows.size() == oldSize && m_nativeLayoutLineLayouts.size() == oldSize &&
-		    m_nativeLayoutLineContentHashes.size() == oldSize &&
-		    m_nativeLayoutRuntimeLineKeys.size() == oldSize && m_nativeLayoutRowsExact.size() == oldSize &&
-		    m_nativeLayoutCumulativeHeights.size() == oldSize + 1;
-		const bool tailLineMutated = m_nativeRenderCacheDelta.tailLineMutated && newSize > 0;
-		const int  stablePrefix    = qBound(0, newSize - (tailLineMutated ? 1 : 0), newSize);
-		if (oldDimensionsMatch)
-		{
-			m_nativeLayoutVisualRows.resize(newSize);
-			m_nativeLayoutLineLayouts.resize(newSize);
-			m_nativeLayoutLineContentHashes.resize(newSize);
-			m_nativeLayoutRuntimeLineKeys.resize(newSize);
-			m_nativeLayoutRowsExact.resize(newSize);
-			for (int i = stablePrefix; i < newSize; ++i)
+			if (replayApplied && !layoutDimensionsMatch(sizeToInt(lines.size())))
+				replayApplied = false;
+			if (!replayApplied)
 			{
-				m_nativeLayoutVisualRows[i] = -1;
-				m_nativeLayoutLineLayouts[i].clear();
-				m_nativeLayoutLineContentHashes[i] = 0;
-				m_nativeLayoutRuntimeLineKeys[i]   = runtimeLineKeyForLine(lines.at(i));
-				m_nativeLayoutRowsExact[i]         = 0;
+				resetAllLayoutCachesForCurrentLines();
+				clearCurrentNativeSplitTopHeadTrimAdjustment();
 			}
-
-			m_nativeLayoutCumulativeHeights.resize(newSize + 1);
-			if (stablePrefix == 0 && !m_nativeLayoutCumulativeHeights.isEmpty())
-				m_nativeLayoutCumulativeHeights[0] = 0.0;
-			m_nativeLayoutCumulativeDirtyFrom =
-			    qBound(0, qMin(m_nativeLayoutCumulativeDirtyFrom, stablePrefix), newSize);
-			renderDeltaFastPathApplied = true;
-		}
-		else
-		{
-			renderDeltaFastPathApplied = preserveVerifiedLayoutPrefix(newSize, 0, stablePrefix);
-		}
-	}
-	else if (cacheWasValid && !layoutCacheKeyChanged && !localWrapChanged && renderRevisionChanged &&
-	         m_nativeRenderCacheDelta.revision == m_nativeRenderLineCacheRevision &&
-	         m_nativeRenderCacheDelta.kind == NativeRenderCacheDeltaKind::HeadTrimTailAppend &&
-	         m_nativeRenderCacheDelta.newLineCount == sizeToInt(lines.size()))
-	{
-		const int  oldSize       = qMax(0, m_nativeRenderCacheDelta.oldLineCount);
-		const int  newSize       = sizeToInt(lines.size());
-		const int  headTrimCount = qBound(0, m_nativeRenderCacheDelta.headTrimCount, oldSize);
-		const bool oldDimensionsMatch =
-		    m_nativeLayoutVisualRows.size() == oldSize && m_nativeLayoutLineLayouts.size() == oldSize &&
-		    m_nativeLayoutLineContentHashes.size() == oldSize &&
-		    m_nativeLayoutRuntimeLineKeys.size() == oldSize && m_nativeLayoutRowsExact.size() == oldSize &&
-		    m_nativeLayoutCumulativeHeights.size() == oldSize + 1;
-		if (oldDimensionsMatch && headTrimCount > 0 && oldSize >= headTrimCount)
-		{
-			const int preservedCount = qBound(0, oldSize - headTrimCount, newSize);
-			dropLayoutHead(headTrimCount);
-
-			m_nativeLayoutVisualRows.resize(newSize);
-			m_nativeLayoutLineLayouts.resize(newSize);
-			m_nativeLayoutLineContentHashes.resize(newSize);
-			m_nativeLayoutRuntimeLineKeys.resize(newSize);
-			m_nativeLayoutRowsExact.resize(newSize);
-			for (int i = preservedCount; i < newSize; ++i)
+			else
 			{
-				m_nativeLayoutVisualRows[i] = -1;
-				m_nativeLayoutLineLayouts[i].clear();
-				m_nativeLayoutLineContentHashes[i] = 0;
-				m_nativeLayoutRuntimeLineKeys[i]   = runtimeLineKeyForLine(lines.at(i));
-				m_nativeLayoutRowsExact[i]         = 0;
+				applyNativeSplitTopHeadTrimAdjustment(pendingSplitTopHeadTrimAdjustment);
 			}
-
-			m_nativeLayoutCumulativeHeights.resize(newSize + 1);
-			if (!m_nativeLayoutCumulativeHeights.isEmpty())
-				m_nativeLayoutCumulativeHeights[0] = 0.0;
-			m_nativeLayoutCumulativeDirtyFrom =
-			    qBound(0, qMin(m_nativeLayoutCumulativeDirtyFrom, preservedCount), newSize);
 			renderDeltaFastPathApplied = true;
-		}
-		else
-		{
-			const int preservedCount   = qBound(0, oldSize - headTrimCount, newSize);
-			renderDeltaFastPathApplied = preserveVerifiedLayoutPrefix(newSize, headTrimCount, preservedCount);
-		}
-	}
-	else if (cacheWasValid && !layoutCacheKeyChanged && !localWrapChanged && renderRevisionChanged &&
-	         m_nativeRenderCacheDelta.revision == m_nativeRenderLineCacheRevision &&
-	         m_nativeRenderCacheDelta.kind == NativeRenderCacheDeltaKind::RuntimeLineRestitch &&
-	         m_nativeRenderCacheDelta.newLineCount == sizeToInt(lines.size()))
-	{
-		const int  oldSize            = qMax(0, m_nativeRenderCacheDelta.oldLineCount);
-		const int  newSize            = sizeToInt(lines.size());
-		const bool oldDimensionsMatch = oldSize == newSize && m_nativeLayoutVisualRows.size() == oldSize &&
-		                                m_nativeLayoutLineLayouts.size() == oldSize &&
-		                                m_nativeLayoutLineContentHashes.size() == oldSize &&
-		                                m_nativeLayoutRuntimeLineKeys.size() == oldSize &&
-		                                m_nativeLayoutRowsExact.size() == oldSize &&
-		                                m_nativeLayoutCumulativeHeights.size() == oldSize + 1;
-		if (oldDimensionsMatch && newSize > 0)
-		{
-			const int changedIndex = qBound(0, m_nativeRenderCacheDelta.stablePrefixCount, newSize - 1);
-			m_nativeLayoutVisualRows[changedIndex] = -1;
-			m_nativeLayoutLineLayouts[changedIndex].clear();
-			m_nativeLayoutLineContentHashes[changedIndex] = 0;
-			m_nativeLayoutRuntimeLineKeys[changedIndex]   = runtimeLineKeyForLine(lines.at(changedIndex));
-			m_nativeLayoutRowsExact[changedIndex]         = 0;
-			m_nativeLayoutCumulativeDirtyFrom =
-			    qBound(0, qMin(m_nativeLayoutCumulativeDirtyFrom, changedIndex), newSize);
-			renderDeltaFastPathApplied = true;
-		}
-		else
-		{
-			const int stablePrefix =
-			    qBound(0, m_nativeRenderCacheDelta.stablePrefixCount, qMin(oldSize, newSize));
-			renderDeltaFastPathApplied = preserveVerifiedLayoutPrefix(newSize, 0, stablePrefix);
-		}
-	}
-	else if (cacheWasValid && !layoutCacheKeyChanged && !localWrapChanged && renderRevisionChanged &&
-	         m_nativeRenderCacheDelta.revision == m_nativeRenderLineCacheRevision &&
-	         m_nativeRenderCacheDelta.kind == NativeRenderCacheDeltaKind::RuntimeRangeRestitch &&
-	         m_nativeRenderCacheDelta.newLineCount == sizeToInt(lines.size()))
-	{
-		const int oldSize          = qMax(0, m_nativeRenderCacheDelta.oldLineCount);
-		const int newSize          = sizeToInt(lines.size());
-		const int headTrimCount    = qBound(0, m_nativeRenderCacheDelta.headTrimCount, oldSize);
-		const int preservedOldSize = qMax(0, oldSize - headTrimCount);
-		const int stablePrefix =
-		    qBound(0, m_nativeRenderCacheDelta.stablePrefixCount, qMin(preservedOldSize, newSize));
-		const bool oldDimensionsMatch =
-		    m_nativeLayoutVisualRows.size() == oldSize && m_nativeLayoutLineLayouts.size() == oldSize &&
-		    m_nativeLayoutLineContentHashes.size() == oldSize &&
-		    m_nativeLayoutRuntimeLineKeys.size() == oldSize && m_nativeLayoutRowsExact.size() == oldSize &&
-		    m_nativeLayoutCumulativeHeights.size() == oldSize + 1;
-		if (oldDimensionsMatch)
-		{
-			if (headTrimCount > 0)
-				dropLayoutHead(headTrimCount);
-
-			m_nativeLayoutVisualRows.resize(newSize);
-			m_nativeLayoutLineLayouts.resize(newSize);
-			m_nativeLayoutLineContentHashes.resize(newSize);
-			m_nativeLayoutRuntimeLineKeys.resize(newSize);
-			m_nativeLayoutRowsExact.resize(newSize);
-			for (int i = stablePrefix; i < newSize; ++i)
-			{
-				m_nativeLayoutVisualRows[i] = -1;
-				m_nativeLayoutLineLayouts[i].clear();
-				m_nativeLayoutLineContentHashes[i] = 0;
-				m_nativeLayoutRuntimeLineKeys[i]   = runtimeLineKeyForLine(lines.at(i));
-				m_nativeLayoutRowsExact[i]         = 0;
-			}
-
-			m_nativeLayoutCumulativeHeights.resize(newSize + 1);
-			if (!m_nativeLayoutCumulativeHeights.isEmpty())
-				m_nativeLayoutCumulativeHeights[0] = 0.0;
-			m_nativeLayoutCumulativeDirtyFrom =
-			    qBound(0, qMin(m_nativeLayoutCumulativeDirtyFrom, stablePrefix), newSize);
-			renderDeltaFastPathApplied = true;
-		}
-		else
-		{
-			renderDeltaFastPathApplied = preserveVerifiedLayoutPrefix(newSize, headTrimCount, stablePrefix);
 		}
 	}
 
-	const bool layoutRangesMatch      = renderDeltaFastPathApplied ? true : [&]
+	auto pruneConsumedRenderDeltas = [this]
 	{
-		if (m_nativeLayoutRuntimeLineKeys.size() != lines.size())
+		const int deltaCount    = sizeToInt(m_nativeRenderCacheDeltas.size());
+		int       consumedCount = 0;
+		while (consumedCount < deltaCount &&
+		       m_nativeRenderCacheDeltas.at(consumedCount).revision <= m_nativeLayoutCachedRenderRevision)
+		{
+			++consumedCount;
+		}
+		if (consumedCount > 0)
+			m_nativeRenderCacheDeltas.remove(0, consumedCount);
+	};
+
+	const bool layoutRangesMatch = renderDeltaFastPathApplied ? true : [&]
+	{
+		if (rangePreparedOnly)
+			return true;
+		if (renderRevisionChanged)
+			return false;
+		if (m_nativeLayoutSlots.size() != lines.size())
 			return false;
 		if (lines.isEmpty())
 			return true;
-		return m_nativeLayoutRuntimeLineKeys.constFirst() == runtimeLineKeyForLine(lines.constFirst()) &&
-		       m_nativeLayoutRuntimeLineKeys.constLast() == runtimeLineKeyForLine(lines.constLast());
+		return m_nativeLayoutSlots.constFirst().runtimeLineKey == runtimeLineKeyForLine(lines.constFirst()) &&
+		       m_nativeLayoutSlots.constLast().runtimeLineKey == runtimeLineKeyForLine(lines.constLast());
 	}();
-	const bool layoutRangesFullyMatch = (!renderDeltaFastPathApplied && renderRevisionChanged) ? [&]
-	{
-		if (m_nativeLayoutRuntimeLineKeys.size() != lines.size())
-			return false;
-		for (int i = 0; i < lines.size(); ++i)
-		{
-			if (m_nativeLayoutRuntimeLineKeys.at(i) != runtimeLineKeyForLine(lines.at(i)))
-				return false;
-		}
-		return true;
-	}()
-	                                                                                           : false;
 	if (cacheWasValid && !layoutCacheKeyChanged && !localWrapChanged && renderRevisionChanged &&
-	    ((cacheDimensionsMatch && layoutRangesFullyMatch) ||
-	     (renderDeltaFastPathApplied && m_nativeLayoutCumulativeDirtyFrom >= sizeToInt(lines.size()))))
+	    renderDeltaFastPathApplied && dirtyHeightRanges.isEmpty() && !rangePreparedOnly)
 	{
-		m_nativeLayoutCachedRenderRevision = m_nativeRenderLineCacheRevision;
+		m_nativeLayoutCachedRenderRevision  = m_nativeRenderLineCacheRevision;
+		m_nativeLayoutRangePreparedOnly     = false;
+		m_nativeLayoutRangePreparedRevision = 0;
+		pruneConsumedRenderDeltas();
 		return;
 	}
 
@@ -4719,27 +5581,24 @@ void WorldView::ensureNativeLayoutCaches(const QVector<NativeOutputRenderLine> &
 		if (const bool preserveLineLayouts = cacheWasValid && !fontChanged && !styleChanged;
 		    preserveLineLayouts)
 		{
-			if (m_nativeLayoutVisualRows.size() != lines.size())
-				m_nativeLayoutVisualRows = QVector<int>(lines.size(), -1);
+			if (const bool lineCacheSizeChanged = m_nativeLayoutSlots.size() != lines.size();
+			    lineCacheSizeChanged)
+			{
+				const int oldSize = sizeToInt(m_nativeLayoutSlots.size());
+				m_nativeLayoutSlots.resize(lines.size());
+				invalidateLayoutSlots(oldSize, sizeToInt(lines.size()));
+			}
 			else if (wrapChanged)
-				std::ranges::fill(m_nativeLayoutVisualRows, -1);
-
-			if (m_nativeLayoutLineLayouts.size() != lines.size())
-				m_nativeLayoutLineLayouts = QVector<QSharedPointer<QTextLayout>>(lines.size());
-			if (m_nativeLayoutLineContentHashes.size() != lines.size())
-				m_nativeLayoutLineContentHashes = QVector<quint64>(lines.size(), 0);
-			if (m_nativeLayoutRowsExact.size() != lines.size())
-				m_nativeLayoutRowsExact = QVector<uchar>(lines.size(), 0);
+			{
+				invalidateLayoutSlots(0, sizeToInt(lines.size()));
+			}
 		}
 		else
 		{
-			m_nativeLayoutVisualRows        = QVector<int>(lines.size(), -1);
-			m_nativeLayoutLineLayouts       = QVector<QSharedPointer<QTextLayout>>(lines.size());
-			m_nativeLayoutLineContentHashes = QVector<quint64>(lines.size(), 0);
-			m_nativeLayoutRowsExact         = QVector<uchar>(lines.size(), 0);
+			resetLayoutLineCaches(lines.size());
 		}
-		m_nativeLayoutCumulativeHeights    = QVector<qreal>(lines.size() + 1, 0.0);
-		m_nativeLayoutCumulativeDirtyFrom  = 0;
+		m_nativeLayoutHeightIndex.assign(lines.size(), defaultLineAdvance);
+		markHeightRangeDirty(0, sizeToInt(lines.size()));
 		m_nativeLayoutCacheValid           = true;
 		m_nativeLayoutCachedWrapWidth      = wrapWidthPixels;
 		m_nativeLayoutCachedLocalWrapWidth = localWrapWidthPixels;
@@ -4748,28 +5607,24 @@ void WorldView::ensureNativeLayoutCaches(const QVector<NativeOutputRenderLine> &
 		m_nativeLayoutCachedLineAdvance    = defaultLineAdvance;
 		m_nativeLayoutCachedFont           = layoutFont;
 		m_nativeLayoutCachedRenderRevision = m_nativeRenderLineCacheRevision;
-		refreshLayoutRuntimeLineKeys();
+		clearCurrentNativeSplitTopHeadTrimAdjustment();
 		++m_nativeLayoutCacheResets;
 	}
 	else if ((renderRevisionChanged && !renderDeltaFastPathApplied) || !layoutRangesMatch)
 	{
-		bool       remappedFastPath = false;
-		const bool oldDimensionsMatch =
-		    m_nativeLayoutRuntimeLineKeys.size() == m_nativeLayoutVisualRows.size() &&
-		    m_nativeLayoutRuntimeLineKeys.size() == m_nativeLayoutLineLayouts.size() &&
-		    m_nativeLayoutRuntimeLineKeys.size() == m_nativeLayoutLineContentHashes.size() &&
-		    m_nativeLayoutRuntimeLineKeys.size() == m_nativeLayoutRowsExact.size();
+		bool remappedFastPath = false;
 
-		if (oldDimensionsMatch && !m_nativeLayoutRuntimeLineKeys.isEmpty() && !lines.isEmpty())
+		if (const bool oldDimensionsMatch = m_nativeLayoutSlots.size() == m_nativeLayoutHeightIndex.size();
+		    oldDimensionsMatch && !m_nativeLayoutSlots.isEmpty() && !lines.isEmpty())
 		{
-			const int     oldSize = sizeToInt(m_nativeLayoutRuntimeLineKeys.size());
+			const int     oldSize = sizeToInt(m_nativeLayoutSlots.size());
 			const int     newSize = sizeToInt(lines.size());
 
 			const quint64 firstNewLineKey = runtimeLineKeyForLine(lines.constFirst());
 			int           oldStartIndex   = -1;
 			for (int i = 0; i < oldSize; ++i)
 			{
-				if (m_nativeLayoutRuntimeLineKeys.at(i) == firstNewLineKey)
+				if (m_nativeLayoutSlots.at(i).runtimeLineKey == firstNewLineKey)
 				{
 					oldStartIndex = i;
 					break;
@@ -4780,7 +5635,7 @@ void WorldView::ensureNativeLayoutCaches(const QVector<NativeOutputRenderLine> &
 			{
 				int mappedCount = 0;
 				while (mappedCount < newSize && oldStartIndex + mappedCount < oldSize &&
-				       m_nativeLayoutRuntimeLineKeys.at(oldStartIndex + mappedCount) ==
+				       m_nativeLayoutSlots.at(oldStartIndex + mappedCount).runtimeLineKey ==
 				           runtimeLineKeyForLine(lines.at(mappedCount)))
 				{
 					++mappedCount;
@@ -4791,65 +5646,18 @@ void WorldView::ensureNativeLayoutCaches(const QVector<NativeOutputRenderLine> &
 				        mappedCount > 0 && (oldSuffixFullyMapped || mappedCount == newSize);
 				    simpleRemap)
 				{
+					const int oldExactPrefix      = qBound(0, m_nativeLayoutExactPrefixCount, oldSize);
+					const int remappedExactPrefix = oldStartIndex < oldExactPrefix
+					                                    ? qMin(mappedCount, oldExactPrefix - oldStartIndex)
+					                                    : 0;
 					if (oldStartIndex > 0)
-					{
-						for (int i = 0; i < mappedCount; ++i)
-						{
-							const int sourceIndex        = oldStartIndex + i;
-							m_nativeLayoutVisualRows[i]  = m_nativeLayoutVisualRows.at(sourceIndex);
-							m_nativeLayoutLineLayouts[i] = std::move(m_nativeLayoutLineLayouts[sourceIndex]);
-							m_nativeLayoutLineContentHashes[i] =
-							    m_nativeLayoutLineContentHashes.at(sourceIndex);
-							m_nativeLayoutRuntimeLineKeys[i] = m_nativeLayoutRuntimeLineKeys.at(sourceIndex);
-							m_nativeLayoutRowsExact[i]       = m_nativeLayoutRowsExact.at(sourceIndex);
-						}
-					}
+						dropLayoutHead(oldStartIndex);
 
-					m_nativeLayoutVisualRows.resize(newSize);
-					m_nativeLayoutLineLayouts.resize(newSize);
-					m_nativeLayoutLineContentHashes.resize(newSize);
-					m_nativeLayoutRuntimeLineKeys.resize(newSize);
-					m_nativeLayoutRowsExact.resize(newSize);
-					for (int i = mappedCount; i < newSize; ++i)
-					{
-						m_nativeLayoutVisualRows[i] = -1;
-						m_nativeLayoutLineLayouts[i].clear();
-						m_nativeLayoutLineContentHashes[i] = 0;
-						m_nativeLayoutRuntimeLineKeys[i]   = runtimeLineKeyForLine(lines.at(i));
-						m_nativeLayoutRowsExact[i]         = 0;
-					}
-
-					m_nativeLayoutCumulativeHeights.resize(newSize + 1);
-					if (oldStartIndex == 0)
-					{
-						m_nativeLayoutCumulativeDirtyFrom =
-						    qBound(0, qMin(m_nativeLayoutCumulativeDirtyFrom, mappedCount), newSize);
-					}
-					else
-					{
-						m_nativeLayoutCumulativeHeights[0] = 0.0;
-						qreal prefixDocY                   = 0.0;
-						int   firstChangedVisualLine       = mappedCount;
-						for (int i = 0; i < mappedCount; ++i)
-						{
-							const NativeOutputRenderLine &line = lines.at(i);
-							const bool                    exactLineHasLayout =
-							    m_nativeLayoutRowsExact.at(i) == 0 || line.text.isEmpty() ||
-							    static_cast<bool>(m_nativeLayoutLineLayouts.at(i));
-							if (m_nativeLayoutVisualRows.at(i) <= 0 || !exactLineHasLayout ||
-							    m_nativeLayoutLineContentHashes.at(i) != lineContentHashForWidth(line))
-							{
-								firstChangedVisualLine = i;
-								break;
-							}
-
-							prefixDocY +=
-							    static_cast<qreal>(m_nativeLayoutVisualRows.at(i)) * defaultLineAdvance;
-							m_nativeLayoutCumulativeHeights[i + 1] = prefixDocY;
-						}
-						m_nativeLayoutCumulativeDirtyFrom =
-						    qBound(0, firstChangedVisualLine, sizeToInt(lines.size()));
-					}
+					m_nativeLayoutHeightIndex.resize(newSize, defaultLineAdvance);
+					m_nativeLayoutSlots.resize(newSize);
+					const int reusablePrefix = reusableAlignedPrefix(mappedCount);
+					invalidateUnreusableAlignedRanges(reusablePrefix, newSize);
+					m_nativeLayoutExactPrefixCount = qMin(remappedExactPrefix, reusablePrefix);
 
 					remappedFastPath = true;
 				}
@@ -4858,197 +5666,237 @@ void WorldView::ensureNativeLayoutCaches(const QVector<NativeOutputRenderLine> &
 
 		if (!remappedFastPath)
 		{
-			QVector<int>                         oldRows;
-			QVector<quint64>                     oldLineKeys;
-			QVector<QSharedPointer<QTextLayout>> oldLayouts;
-			QVector<quint64>                     oldHashes;
-			QVector<uchar>                       oldExactRows;
-			oldRows.swap(m_nativeLayoutVisualRows);
-			oldLineKeys.swap(m_nativeLayoutRuntimeLineKeys);
-			oldLayouts.swap(m_nativeLayoutLineLayouts);
-			oldHashes.swap(m_nativeLayoutLineContentHashes);
-			oldExactRows.swap(m_nativeLayoutRowsExact);
+			IndexedRingBuffer<NativeLayoutSlot> oldSlots;
+			NativeLayoutHeightIndex             oldHeightIndex;
+			oldSlots.swap(m_nativeLayoutSlots);
+			oldHeightIndex.swap(m_nativeLayoutHeightIndex);
 
-			m_nativeLayoutVisualRows        = QVector<int>(lines.size(), -1);
-			m_nativeLayoutLineLayouts       = QVector<QSharedPointer<QTextLayout>>(lines.size());
-			m_nativeLayoutLineContentHashes = QVector<quint64>(lines.size(), 0);
-			m_nativeLayoutRowsExact         = QVector<uchar>(lines.size(), 0);
-			QVector<int> remappedOldIndexes(lines.size(), -1);
+			const int newSize = sizeToInt(lines.size());
+			m_nativeLayoutSlots.clear();
+			m_nativeLayoutHeightIndex.clear();
+			m_nativeLayoutSlots.reserve(lines.size());
+			m_nativeLayoutHeightIndex.reserve(lines.size());
 
-			const bool   oldDimensionsStillMatch =
-			    !oldLineKeys.isEmpty() && oldLineKeys.size() == oldRows.size() &&
-			    oldLineKeys.size() == oldLayouts.size() && oldLineKeys.size() == oldHashes.size() &&
-			    oldLineKeys.size() == oldExactRows.size();
-			auto mapLineFromOld = [&](const int newIndex, const int oldIndex)
+			const bool oldDimensionsStillMatch =
+			    !oldSlots.isEmpty() && oldSlots.size() == oldHeightIndex.size();
+			auto appendInvalidLine = [&](const quint64 newLineKey)
 			{
-				if (newIndex < 0 || newIndex >= lines.size() || oldIndex < 0 ||
-				    oldIndex >= oldLineKeys.size())
-				{
-					return;
-				}
-				m_nativeLayoutVisualRows[newIndex]        = oldRows.at(oldIndex);
-				m_nativeLayoutLineLayouts[newIndex]       = std::move(oldLayouts[oldIndex]);
-				m_nativeLayoutLineContentHashes[newIndex] = oldHashes.at(oldIndex);
-				m_nativeLayoutRowsExact[newIndex]         = oldExactRows.at(oldIndex);
-				remappedOldIndexes[newIndex]              = oldIndex;
+				NativeLayoutSlot slot;
+				slot.runtimeLineKey = newLineKey;
+				m_nativeLayoutSlots.push_back(std::move(slot));
+				m_nativeLayoutHeightIndex.append(defaultLineAdvance);
 			};
-			if (oldDimensionsStillMatch && !lines.isEmpty())
+			auto appendLineFromOld = [&](const int oldIndex)
 			{
-				int oldIndex = 0;
-				for (int newIndex = 0; newIndex < lines.size() && oldIndex < oldLineKeys.size(); ++newIndex)
+				m_nativeLayoutSlots.push_back(std::move(oldSlots[oldIndex]));
+				m_nativeLayoutHeightIndex.append(oldHeightIndex.heightAt(oldIndex));
+			};
+			int       oldIndex = 0;
+			const int oldSize  = sizeToInt(oldSlots.size());
+			for (int newIndex = 0; newIndex < newSize; ++newIndex)
+			{
+				const quint64 newLineKey = runtimeLineKeyForLine(lines.at(newIndex));
+				if (oldDimensionsStillMatch)
 				{
-					const quint64 newLineKey = runtimeLineKeyForLine(lines.at(newIndex));
-					while (oldIndex < oldLineKeys.size() && oldLineKeys.at(oldIndex) != newLineKey)
-					{
+					while (oldIndex < oldSize && oldSlots.at(oldIndex).runtimeLineKey != newLineKey)
 						++oldIndex;
+					if (oldIndex < oldSize)
+					{
+						appendLineFromOld(oldIndex);
+						++oldIndex;
+						continue;
 					}
-					if (oldIndex >= oldLineKeys.size())
-						break;
-					mapLineFromOld(newIndex, oldIndex);
-					++oldIndex;
 				}
+				appendInvalidLine(newLineKey);
 			}
 
-			refreshLayoutRuntimeLineKeys();
-			m_nativeLayoutCumulativeHeights.resize(lines.size() + 1);
-			m_nativeLayoutCumulativeHeights[0] = 0.0;
-			auto lineCanReuseMappedLayout      = [&](const int i)
+			int  dirtyStart      = -1;
+			int  exactPrefix     = 0;
+			bool exactPrefixOpen = true;
+			auto flushDirtyRange = [&](const int end)
 			{
-				if (i < 0 || i >= lines.size())
-					return false;
-
-				const NativeOutputRenderLine &line = lines.at(i);
-				const bool exactLineHasLayout = m_nativeLayoutRowsExact.at(i) == 0 || line.text.isEmpty() ||
-				                                static_cast<bool>(m_nativeLayoutLineLayouts.at(i));
-				if (m_nativeLayoutVisualRows.at(i) <= 0 || !exactLineHasLayout)
-					return false;
-
-				return m_nativeLayoutLineContentHashes.at(i) == lineContentHashForWidth(line);
+				if (dirtyStart < 0)
+					return;
+				markHeightRangeDirty(dirtyStart, end);
+				dirtyStart = -1;
 			};
-
-			int   firstChangedVisualLine = 0;
-			qreal prefixDocY             = 0.0;
-			while (firstChangedVisualLine < lines.size())
+			const int remappedSize = sizeToInt(lines.size());
+			for (int i = 0; i < remappedSize; ++i)
 			{
-				if (remappedOldIndexes.at(firstChangedVisualLine) < 0 ||
-				    !lineCanReuseMappedLayout(firstChangedVisualLine))
+				const bool canReuse = lineCanReuseCachedLayout(i);
+				if (exactPrefixOpen)
 				{
-					break;
+					if (canReuse && m_nativeLayoutSlots.at(i).rowsExact != 0)
+						++exactPrefix;
+					else
+						exactPrefixOpen = false;
 				}
-				prefixDocY += static_cast<qreal>(m_nativeLayoutVisualRows.at(firstChangedVisualLine)) *
-				              defaultLineAdvance;
-				m_nativeLayoutCumulativeHeights[firstChangedVisualLine + 1] = prefixDocY;
-				++firstChangedVisualLine;
+				if (!canReuse)
+				{
+					const quint64 currentRuntimeKey       = m_nativeLayoutSlots.at(i).runtimeLineKey;
+					m_nativeLayoutSlots[i]                = NativeLayoutSlot{};
+					m_nativeLayoutSlots[i].runtimeLineKey = currentRuntimeKey;
+					if (dirtyStart < 0)
+						dirtyStart = i;
+					continue;
+				}
+				flushDirtyRange(i);
 			}
-			m_nativeLayoutCumulativeDirtyFrom = qBound(0, firstChangedVisualLine, sizeToInt(lines.size()));
+			flushDirtyRange(remappedSize);
+			m_nativeLayoutExactPrefixCount = exactPrefix;
 		}
 	}
 	else
 	{
-		if (m_nativeLayoutVisualRows.size() != lines.size())
+		if (m_nativeLayoutSlots.size() != lines.size())
 		{
-			m_nativeLayoutVisualRows          = QVector<int>(lines.size(), -1);
-			m_nativeLayoutCumulativeDirtyFrom = 0;
+			resetLayoutLineCaches(lines.size());
+			m_nativeLayoutHeightIndex.assign(lines.size(), defaultLineAdvance);
+			markHeightRangeDirty(0, sizeToInt(lines.size()));
 		}
-		if (m_nativeLayoutRowsExact.size() != lines.size())
+		if (m_nativeLayoutHeightIndex.size() != lines.size())
 		{
-			m_nativeLayoutRowsExact           = QVector<uchar>(lines.size(), 0);
-			m_nativeLayoutCumulativeDirtyFrom = 0;
+			m_nativeLayoutHeightIndex.resize(lines.size(), defaultLineAdvance);
+			markHeightRangeDirty(0, sizeToInt(lines.size()));
 		}
-		if (m_nativeLayoutRuntimeLineKeys.size() != lines.size())
-			refreshLayoutRuntimeLineKeys();
-		if (m_nativeLayoutCumulativeHeights.size() != lines.size() + 1)
-		{
-			m_nativeLayoutCumulativeHeights.resize(lines.size() + 1);
-			m_nativeLayoutCumulativeDirtyFrom = 0;
-		}
-		if (m_nativeLayoutLineLayouts.size() != lines.size())
-		{
-			m_nativeLayoutLineLayouts         = QVector<QSharedPointer<QTextLayout>>(lines.size());
-			m_nativeLayoutLineContentHashes   = QVector<quint64>(lines.size(), 0);
-			m_nativeLayoutCumulativeDirtyFrom = 0;
-		}
-		else if (m_nativeLayoutLineContentHashes.size() != lines.size())
-		{
-			m_nativeLayoutLineContentHashes   = QVector<quint64>(lines.size(), 0);
-			m_nativeLayoutCumulativeDirtyFrom = 0;
-		}
+		if (rangePreparedOnly && !renderDeltaFastPathApplied)
+			invalidateUnreusableAlignedRanges(0, sizeToInt(lines.size()));
 	}
 
 	if (cacheWasValid && localWrapChanged)
 	{
 		m_nativeLayoutCachedLocalWrapWidth = localWrapWidthPixels;
-		m_nativeLayoutCumulativeDirtyFrom  = 0;
+		invalidateLayoutSlots(0, sizeToInt(lines.size()));
+		clearCurrentNativeSplitTopHeadTrimAdjustment();
 	}
 
-	if (m_nativeLayoutCumulativeHeights.size() != lines.size() + 1)
+	if (m_nativeLayoutHeightIndex.size() != lines.size())
 	{
-		m_nativeLayoutCumulativeHeights.resize(lines.size() + 1);
-		m_nativeLayoutCumulativeDirtyFrom = 0;
+		m_nativeLayoutHeightIndex.resize(lines.size(), defaultLineAdvance);
+		markHeightRangeDirty(0, sizeToInt(lines.size()));
 	}
 
-	const int dirtyFrom = qBound(0, m_nativeLayoutCumulativeDirtyFrom, sizeToInt(lines.size()));
-	if (dirtyFrom == 0)
-		m_nativeLayoutCumulativeHeights[0] = 0.0;
-
-	qreal              docY = (dirtyFrom > 0 && dirtyFrom < m_nativeLayoutCumulativeHeights.size())
-	                              ? m_nativeLayoutCumulativeHeights.at(dirtyFrom)
-	                              : 0.0;
 	const QFontMetrics layoutFontMetrics(layoutFont);
-	for (int i = dirtyFrom; i < lines.size(); ++i)
+	auto               refreshHeightRange = [&](const int first, const int lastExclusive)
 	{
-		const NativeOutputRenderLine &line = lines.at(i);
-		const bool hasLocalContent = (line.flags & (WorldRuntime::LineNote | WorldRuntime::LineInput)) != 0;
-		const int  effectiveWrapWidth = hasLocalContent ? localWrapWidthPixels : wrapWidthPixels;
-		const quint64 contentHash     = lineContentHashForWidth(line);
-		const bool    hashMatches     = i < m_nativeLayoutLineContentHashes.size() &&
-		                                m_nativeLayoutLineContentHashes.at(i) == contentHash;
-		if (!hashMatches)
+		const int boundedFirst = qBound(0, first, sizeToInt(lines.size()));
+		const int boundedLast  = qBound(boundedFirst, lastExclusive, sizeToInt(lines.size()));
+		for (int i = boundedFirst; i < boundedLast; ++i)
 		{
-			m_nativeLayoutLineLayouts[i].clear();
-			m_nativeLayoutLineContentHashes[i] = contentHash;
-			m_nativeLayoutVisualRows[i] = estimateNativeLineRows(line, effectiveWrapWidth, layoutFontMetrics);
-			m_nativeLayoutRowsExact[i]  = line.text.isEmpty() ? 1 : 0;
+			const NativeOutputRenderLine &line = lines.at(i);
+			const bool                    hasLocalContent =
+			    (line.flags & (WorldRuntime::LineNote | WorldRuntime::LineInput)) != 0;
+			const int         effectiveWrapWidth = hasLocalContent ? localWrapWidthPixels : wrapWidthPixels;
+			const quint64     contentHash        = lineContentHashForWidth(line);
+			NativeLayoutSlot &slot               = m_nativeLayoutSlots[i];
+			slot.runtimeLineKey                  = runtimeLineKeyForLine(line);
+			const bool hashMatches               = slot.lineContentHash == contentHash;
+			if (!hashMatches)
+			{
+				slot.lineLayout.clear();
+				slot.lineContentHash = contentHash;
+				slot.visualRows      = estimateNativeLineRows(line, effectiveWrapWidth, layoutFontMetrics);
+				slot.rowsExact       = line.text.isEmpty() ? 1 : 0;
+			}
+			else if (slot.visualRows <= 0)
+			{
+				slot.visualRows = estimateNativeLineRows(line, effectiveWrapWidth, layoutFontMetrics);
+				slot.rowsExact  = line.text.isEmpty() ? 1 : 0;
+			}
 		}
-		else if (m_nativeLayoutVisualRows.at(i) <= 0)
-		{
-			m_nativeLayoutVisualRows[i] = estimateNativeLineRows(line, effectiveWrapWidth, layoutFontMetrics);
-			m_nativeLayoutRowsExact[i]  = line.text.isEmpty() ? 1 : 0;
-		}
-		const int visualRowsForLine = qMax(1, m_nativeLayoutVisualRows.at(i));
-		docY += static_cast<qreal>(visualRowsForLine) * defaultLineAdvance;
-		if (i + 1 < m_nativeLayoutCumulativeHeights.size())
-			m_nativeLayoutCumulativeHeights[i + 1] = docY;
-	}
-	m_nativeLayoutCumulativeDirtyFrom  = sizeToInt(lines.size());
-	m_nativeLayoutCachedRenderRevision = m_nativeRenderLineCacheRevision;
+		m_nativeLayoutHeightIndex.setLayoutSlotHeightRange(boundedFirst, boundedLast, m_nativeLayoutSlots,
+		                                                   defaultLineAdvance);
+	};
+	applyLayoutInvalidationRanges();
+	mergeDirtyHeightRanges();
+	for (const QPair<int, int> &range : dirtyHeightRanges)
+		refreshHeightRange(range.first, range.second);
+	if (!dirtyHeightRanges.isEmpty())
+		refreshNativeLayoutExactPrefixFrom(dirtyHeightRanges.constFirst().first);
+	m_nativeLayoutCachedRenderRevision  = m_nativeRenderLineCacheRevision;
+	m_nativeLayoutRangePreparedOnly     = false;
+	m_nativeLayoutRangePreparedRevision = 0;
+	pruneConsumedRenderDeltas();
+}
+
+qreal WorldView::nativeLayoutCumulativeHeightAt(const int index) const
+{
+	return m_nativeLayoutHeightIndex.prefixHeightAt(index);
+}
+
+int WorldView::nativeLayoutLineAtY(const qreal y) const
+{
+	return m_nativeLayoutHeightIndex.lineAtY(y);
 }
 
 const QTextLayout *WorldView::nativeLayoutForLine(const int index) const
 {
-	if (index < 0 || index >= m_nativeLayoutLineLayouts.size())
+	if (index < 0 || index >= m_nativeLayoutSlots.size())
 		return nullptr;
-	if (const auto &layout = m_nativeLayoutLineLayouts.at(index); layout)
+	if (const auto &layout = m_nativeLayoutSlots.at(index).lineLayout; layout)
 		return layout.data();
 	return nullptr;
 }
 
 void WorldView::bumpNativeRenderLineCacheRevision(const NativeRenderCacheDeltaKind kind,
                                                   const int oldLineCount, const bool tailLineMutated,
-                                                  const int headTrimCount, const int stablePrefixCount) const
+                                                  const int headTrimCount, const int stablePrefixCount,
+                                                  const bool headLineMutated) const
 {
+	NativeRenderCacheDelta delta;
+	delta.kind              = kind;
+	delta.oldLineCount      = qMax(0, oldLineCount);
+	delta.newLineCount      = sizeToInt(m_nativeRenderLineCache.size());
+	delta.tailLineMutated   = tailLineMutated;
+	delta.headLineMutated   = headLineMutated;
+	delta.headTrimCount     = qMax(0, headTrimCount);
+	delta.stablePrefixCount = qMax(0, stablePrefixCount);
+	commitNativeRenderCacheDelta(delta);
+}
+
+void WorldView::bumpNativeRuntimeRangeRestitchRenderLineCacheRevision(
+    const int oldLineCount, const bool tailLineMutated, const int headTrimCount, const int stablePrefixCount,
+    const bool headLineMutated, const int replaceFirstLine, const int removedLineCount,
+    const int insertedLineCount) const
+{
+	NativeRenderCacheDelta delta;
+	delta.kind                     = NativeRenderCacheDeltaKind::RuntimeRangeRestitch;
+	delta.oldLineCount             = qMax(0, oldLineCount);
+	delta.newLineCount             = sizeToInt(m_nativeRenderLineCache.size());
+	delta.tailLineMutated          = tailLineMutated;
+	delta.headLineMutated          = headLineMutated;
+	delta.headTrimCount            = qBound(0, headTrimCount, delta.oldLineCount);
+	delta.stablePrefixCount        = qMax(0, stablePrefixCount);
+	const int postTrimOldLineCount = delta.oldLineCount - delta.headTrimCount;
+	delta.replaceFirstLine         = qBound(0, replaceFirstLine, postTrimOldLineCount);
+	delta.removedLineCount  = qBound(0, removedLineCount, postTrimOldLineCount - delta.replaceFirstLine);
+	delta.insertedLineCount = qBound(0, insertedLineCount, delta.newLineCount);
+	commitNativeRenderCacheDelta(delta);
+}
+
+void WorldView::commitNativeRenderCacheDelta(NativeRenderCacheDelta delta) const
+{
+	const quint64 previousRevision         = m_nativeRenderLineCacheRevision;
+	const bool    canCarrySplitTopHeadTrim = delta.kind != NativeRenderCacheDeltaKind::FullReset &&
+	                                         delta.kind != NativeRenderCacheDeltaKind::Unknown;
+	const bool    carryPendingSplitTopHeadTrim =
+	    canCarrySplitTopHeadTrim && m_nativeSplitTopHeadTrimPixelsRevision == previousRevision &&
+	    m_nativeSplitTopHeadTrimAdjustedRevision != previousRevision && m_nativeSplitTopHeadTrimPixels > 0 &&
+	    m_nativeSplitTopHeadTrimLines > 0;
 	++m_nativeRenderLineCacheRevision;
-	m_nativeRenderCacheDelta.kind              = kind;
-	m_nativeRenderCacheDelta.revision          = m_nativeRenderLineCacheRevision;
-	m_nativeRenderCacheDelta.oldLineCount      = qMax(0, oldLineCount);
-	m_nativeRenderCacheDelta.newLineCount      = sizeToInt(m_nativeRenderLineCache.size());
-	m_nativeRenderCacheDelta.tailLineMutated   = tailLineMutated;
-	m_nativeRenderCacheDelta.headTrimCount     = qMax(0, headTrimCount);
-	m_nativeRenderCacheDelta.stablePrefixCount = qMax(0, stablePrefixCount);
-	if (m_nativeRenderCacheDelta.headTrimCount > 0)
-		m_nativeSelectionPendingHeadTrimLines += m_nativeRenderCacheDelta.headTrimCount;
-	m_nativeSplitTopHeadTrimPixelsRevision = 0;
-	m_nativeSplitTopHeadTrimPixels         = 0;
+	delta.fromRevision = previousRevision;
+	delta.revision     = m_nativeRenderLineCacheRevision;
+
+	m_nativeRenderCacheDelta = delta;
+	if (!m_nativeLayoutCacheValid)
+		m_nativeRenderCacheDeltas.clear();
+	m_nativeRenderCacheDeltas.push_back(delta);
+	if (delta.headTrimCount > 0)
+		m_nativeSelectionPendingHeadTrimLines += delta.headTrimCount;
+	if (carryPendingSplitTopHeadTrim)
+		m_nativeSplitTopHeadTrimPixelsRevision = m_nativeRenderLineCacheRevision;
+	else
+		clearNativeSplitTopHeadTrimAdjustment();
 }
 
 void WorldView::markNativeRuntimeTailRestitchPending() const
@@ -5058,11 +5906,6 @@ void WorldView::markNativeRuntimeTailRestitchPending() const
 
 	m_nativeRenderLineCacheFromRuntime = true;
 	m_nativeRuntimeTailRestitchPending = true;
-	if (m_nativeLayoutCacheValid)
-	{
-		const int tailIndex               = qMax(0, sizeToInt(m_nativeLayoutVisualRows.size()) - 1);
-		m_nativeLayoutCumulativeDirtyFrom = qMin(m_nativeLayoutCumulativeDirtyFrom, tailIndex);
-	}
 	requestNativeOutputTailRepaint();
 }
 
@@ -5085,25 +5928,29 @@ void WorldView::markNativeRuntimeLineRestitchPending(const int runtimeLineIndex)
 	}
 }
 
-void WorldView::rebuildNativeRenderCacheFromLineEntries(const QVector<WorldRuntime::LineEntry> &lines,
-                                                        const bool fromRuntimeSource) const
+void WorldView::rebuildNativeRenderCacheFromLineEntries(
+    const IndexedRingBuffer<WorldRuntime::LineEntry> &lines, const bool fromRuntimeSource) const
 {
 	removeNativePartialRenderLineOverlay(false);
 	const int oldLineCount = sizeToInt(m_nativeRenderLineCache.size());
 	m_nativeRenderLineCache.clear();
 	m_nativeRenderLineCache.reserve(lines.size());
+	m_nativeRenderRuntimeIndexBase = 0;
 
 	QDateTime                        previousLineTime;
 	QString                          currentLineText;
 	QVector<WorldRuntime::StyleSpan> currentLineSpans;
-	double                           currentLineOpacity      = 1.0;
-	qint64                           currentFirstRuntimeLine = 0;
-	qint64                           currentLastRuntimeLine  = 0;
+	double                           currentLineOpacity       = 1.0;
+	qint64                           currentFirstRuntimeLine  = 0;
+	qint64                           currentLastRuntimeLine   = 0;
+	qint64                           currentFirstRuntimeIndex = -1;
 	QVector<qint64>                  currentSourceRuntimeLines;
 	int                              currentLineFlags            = 0;
 	bool                             currentLogicalLineHasSource = false;
-	for (const WorldRuntime::LineEntry &entry : lines)
+	const int                        runtimeLineCount            = sizeToInt(lines.size());
+	for (int runtimeIndex = 0; runtimeIndex < runtimeLineCount; ++runtimeIndex)
 	{
+		const WorldRuntime::LineEntry &entry = lines.at(runtimeIndex);
 		if ((entry.flags & WorldRuntime::LineHidden) != 0)
 			continue;
 
@@ -5115,6 +5962,7 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(const QVector<WorldRunti
 		{
 			currentFirstRuntimeLine     = entry.lineNumber;
 			currentLastRuntimeLine      = entry.lineNumber;
+			currentFirstRuntimeIndex    = m_nativeRenderRuntimeIndexBase + runtimeIndex;
 			currentLineFlags            = entry.flags;
 			currentLogicalLineHasSource = true;
 		}
@@ -5148,6 +5996,7 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(const QVector<WorldRunti
 			renderLine.sourceRuntimeLineKey =
 			    nativeRuntimeLineKey(renderLine.sourceRuntimeLineNumbers, renderLine.firstRuntimeLineNumber,
 			                         renderLine.lastRuntimeLineNumber);
+			renderLine.firstRuntimeLineIndex = currentFirstRuntimeIndex;
 			m_nativeRenderLineCache.push_back(std::move(renderLine));
 			currentLineText.clear();
 			currentLineSpans.clear();
@@ -5155,6 +6004,7 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(const QVector<WorldRunti
 			currentLineOpacity          = 1.0;
 			currentFirstRuntimeLine     = 0;
 			currentLastRuntimeLine      = 0;
+			currentFirstRuntimeIndex    = -1;
 			currentLineFlags            = 0;
 			currentLogicalLineHasSource = false;
 		}
@@ -5177,6 +6027,7 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(const QVector<WorldRunti
 		renderLine.sourceRuntimeLineKey =
 		    nativeRuntimeLineKey(renderLine.sourceRuntimeLineNumbers, renderLine.firstRuntimeLineNumber,
 		                         renderLine.lastRuntimeLineNumber);
+		renderLine.firstRuntimeLineIndex = currentFirstRuntimeIndex;
 		m_nativeRenderLineCache.push_back(std::move(renderLine));
 	}
 
@@ -5208,7 +6059,7 @@ void WorldView::rebuildNativeRenderCacheFromLineEntries(const QVector<WorldRunti
 	bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::FullReset, oldLineCount);
 }
 
-const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderLines() const
+const WorldView::NativeOutputRenderLines &WorldView::nativeOutputRenderLines() const
 {
 	enum class RuntimeRebuildReason
 	{
@@ -5250,6 +6101,7 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 		    m_nativeCachedRuntimeFirstLineNumber != 0 || m_nativeCachedRuntimeLastLineNumber != 0 ||
 		    !m_nativeCachedRuntimeLastHardReturn || !m_nativeCachedRuntimeLineNumbersContiguous;
 		m_nativeRenderLineCache.clear();
+		m_nativeRenderRuntimeIndexBase             = 0;
 		m_nativeRenderLineCacheValid               = true;
 		m_nativeRenderLineCacheFromRuntime         = true;
 		m_nativeCachedRuntimeCount                 = 0;
@@ -5270,7 +6122,7 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 		rebuildNativeRenderCacheFromLineEntries(m_nativeStandaloneOutputLines, false);
 	};
 
-	auto fullRebuildFromRuntime = [this](const QVector<WorldRuntime::LineEntry> &runtimeLines)
+	auto fullRebuildFromRuntime = [this](const auto &runtimeLines)
 	{
 		m_nativeRuntimeTailRestitchPending     = false;
 		m_nativeRuntimeLineRestitchIndex       = -1;
@@ -5290,7 +6142,7 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 			fullRebuildFromStandalone();
 		return finalizeNativeOutputRenderLines();
 	}
-	const QVector<WorldRuntime::LineEntry> &runtimeLines = m_runtime->lines();
+	const auto &runtimeLines = m_runtime->lines();
 	if (m_nativeRenderLineCacheValid && !m_nativeRenderLineCacheFromRuntime)
 	{
 		// Recover from stale pinned state: if runtime lines exist but the pinned
@@ -5501,7 +6353,7 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 				tailMutated                  = true;
 				line.text += displayText;
 				line.opacity = lineOpacityForTimestamp(entry.time);
-				extendNativeRuntimeLineRange(line, entry.lineNumber);
+				extendNativeRuntimeLineRange(line, entry.lineNumber, m_nativeRenderRuntimeIndexBase + i);
 				line.flags |= entry.flags;
 				cacheChanged = true;
 				if (!displaySpans.isEmpty())
@@ -5525,6 +6377,7 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 				renderLine.sourceRuntimeLineKey =
 				    nativeRuntimeLineKey(renderLine.sourceRuntimeLineNumbers,
 				                         renderLine.firstRuntimeLineNumber, renderLine.lastRuntimeLineNumber);
+				renderLine.firstRuntimeLineIndex = m_nativeRenderRuntimeIndexBase + i;
 				m_nativeRenderLineCache.push_back(std::move(renderLine));
 				cacheChanged = true;
 			}
@@ -5563,65 +6416,49 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 		}
 	};
 
-	auto restitchTrimmedHeadLogicalLine =
-	    [this, &runtimeLines](const qint64 newFirstLineNumber, const bool suppressRevisionBump = false)
+	auto restitchTrimmedHeadLogicalLineFromIndex =
+	    [this, &runtimeLines, &nextRenderableRuntimeIndex](const int  requestedStartIndex,
+	                                                       const bool suppressRevisionBump = false)
 	{
 		if (m_nativeRenderLineCache.isEmpty())
 			return true;
 
-		const NativeOutputRenderLine &existingHead = m_nativeRenderLineCache.first();
-		if (!existingHead.sourceRuntimeLineNumbers.isEmpty())
-		{
-			bool hasTrimmedSource   = false;
-			bool hasRemainingSource = false;
-			for (const qint64 lineNumber : existingHead.sourceRuntimeLineNumbers)
-			{
-				if (lineNumber < newFirstLineNumber)
-					hasTrimmedSource = true;
-				else
-					hasRemainingSource = true;
-			}
-			if (!hasTrimmedSource)
-				return true;
-			if (!hasRemainingSource)
-				return false;
-		}
-		else
-		{
-			if (existingHead.firstRuntimeLineNumber >= newFirstLineNumber)
-				return true;
-			if (existingHead.lastRuntimeLineNumber < newFirstLineNumber)
-				return false;
-		}
-
-		const int startIndex = findRuntimeLineIndexByNumberNear(runtimeLines, newFirstLineNumber, 0, false);
+		const int startIndex = nextRenderableRuntimeIndex(requestedStartIndex);
 		if (startIndex < 0 || startIndex >= runtimeLines.size())
 			return false;
 
+		const NativeOutputRenderLine &existingHead            = m_nativeRenderLineCache.first();
+		const qint64                  firstRetainedLineNumber = runtimeLines.at(startIndex).lineNumber;
+		if (!nativeRuntimeLineRangeContains(existingHead, firstRetainedLineNumber))
+			return existingHead.firstRuntimeLineIndex >= m_nativeRenderRuntimeIndexBase;
+
 		QString                          rebuiltText;
 		QVector<WorldRuntime::StyleSpan> rebuiltSpans;
-		double                           rebuiltOpacity      = 1.0;
-		qint64                           rebuiltFirstRuntime = 0;
-		qint64                           rebuiltLastRuntime  = 0;
+		double                           rebuiltOpacity           = 1.0;
+		qint64                           rebuiltFirstRuntime      = 0;
+		qint64                           rebuiltLastRuntime       = 0;
+		qint64                           rebuiltFirstRuntimeIndex = -1;
 		QVector<qint64>                  rebuiltSourceRuntimeLines;
 		int                              rebuiltFlags = 0;
 		bool                             hasSource    = false;
-		bool                             closed       = false;
 		QDateTime                        previousLineTime;
 
 		for (int i = startIndex; i < runtimeLines.size(); ++i)
 		{
-			const WorldRuntime::LineEntry   &entry = runtimeLines.at(i);
+			const WorldRuntime::LineEntry &entry = runtimeLines.at(i);
+			if ((entry.flags & WorldRuntime::LineHidden) != 0)
+				continue;
 			QString                          displayText(entry.text);
 			QVector<WorldRuntime::StyleSpan> displaySpans(entry.spans);
 			buildDisplayLine(entry, previousLineTime, displayText, displaySpans);
 
 			if (!hasSource)
 			{
-				rebuiltFirstRuntime = entry.lineNumber;
-				rebuiltLastRuntime  = entry.lineNumber;
-				rebuiltFlags        = entry.flags;
-				hasSource           = true;
+				rebuiltFirstRuntime      = entry.lineNumber;
+				rebuiltLastRuntime       = entry.lineNumber;
+				rebuiltFirstRuntimeIndex = m_nativeRenderRuntimeIndexBase + i;
+				rebuiltFlags             = entry.flags;
+				hasSource                = true;
 			}
 			else
 			{
@@ -5637,32 +6474,22 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 
 			if (entry.hardReturn)
 			{
-				closed = true;
 				break;
 			}
 			previousLineTime = entry.time;
 		}
 
 		if (!hasSource || rebuiltSourceRuntimeLines.isEmpty() ||
-		    rebuiltSourceRuntimeLines.constFirst() != newFirstLineNumber)
-			return false;
-		if (!existingHead.sourceRuntimeLineNumbers.isEmpty())
-		{
-			const qsizetype suffixStart = existingHead.sourceRuntimeLineNumbers.indexOf(newFirstLineNumber);
-			if (suffixStart < 0)
-				return false;
-			const QVector<qint64> expectedSourceRuntimeLines =
-			    existingHead.sourceRuntimeLineNumbers.sliced(suffixStart);
-			if (rebuiltSourceRuntimeLines != expectedSourceRuntimeLines)
-				return false;
-		}
-		else if (rebuiltLastRuntime != existingHead.lastRuntimeLineNumber)
-		{
-			return false;
-		}
-		if (!closed && rebuiltLastRuntime != runtimeLines.last().lineNumber)
+		    rebuiltSourceRuntimeLines.constFirst() != firstRetainedLineNumber)
 			return false;
 
+		const QVector<qint64> existingSourceRuntimeLines = nativeRuntimeLineNumbers(existingHead);
+		const qsizetype       suffixStart = existingSourceRuntimeLines.indexOf(firstRetainedLineNumber);
+		if (suffixStart < 0)
+			return false;
+		const QVector<qint64> expectedSourceRuntimeLines = existingSourceRuntimeLines.sliced(suffixStart);
+		if (rebuiltSourceRuntimeLines != expectedSourceRuntimeLines)
+			return false;
 		NativeOutputRenderLine rebuiltLine{
 		    std::move(rebuiltText),
 		    std::move(rebuiltSpans),
@@ -5677,14 +6504,25 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 		rebuiltLine.sourceRuntimeLineKey =
 		    nativeRuntimeLineKey(rebuiltLine.sourceRuntimeLineNumbers, rebuiltLine.firstRuntimeLineNumber,
 		                         rebuiltLine.lastRuntimeLineNumber);
-		const int oldLineCount          = sizeToInt(m_nativeRenderLineCache.size());
-		m_nativeRenderLineCache.first() = std::move(rebuiltLine);
+		rebuiltLine.firstRuntimeLineIndex = rebuiltFirstRuntimeIndex;
+		const int oldLineCount            = sizeToInt(m_nativeRenderLineCache.size());
+		m_nativeRenderLineCache.first()   = std::move(rebuiltLine);
 		if (!suppressRevisionBump)
 		{
 			++m_nativeRenderCacheIncrementalUpdates;
 			bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::HeadMutation, oldLineCount);
 		}
 		return true;
+	};
+
+	auto restitchTrimmedHeadLogicalLine =
+	    [&runtimeLines, &restitchTrimmedHeadLogicalLineFromIndex](const qint64 newFirstLineNumber,
+	                                                              const bool   suppressRevisionBump = false)
+	{
+		const int startIndex = findRuntimeLineIndexByNumberNear(runtimeLines, newFirstLineNumber, 0, false);
+		if (startIndex < 0 || startIndex >= runtimeLines.size())
+			return false;
+		return restitchTrimmedHeadLogicalLineFromIndex(startIndex, suppressRevisionBump);
 	};
 
 	if (!m_nativeRenderLineCacheValid || !m_nativeRenderLineCacheFromRuntime)
@@ -5722,6 +6560,25 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 		m_nativeCachedRuntimeLineNumbersContiguous = contiguous;
 		m_nativeCachedRuntimeFirstEntry            = runtimeLines.first();
 		m_nativeCachedRuntimeLastEntry             = runtimeLines.last();
+	};
+
+	auto removedRuntimeHeadCountFromCachedLast = [this, &runtimeLines]() -> int
+	{
+		if (m_nativeCachedRuntimeCount <= 0 || runtimeLines.isEmpty())
+			return -1;
+
+		for (qsizetype i = runtimeLines.size(); i > 0; --i)
+		{
+			const qsizetype                index       = i - 1;
+			const WorldRuntime::LineEntry &runtimeLine = runtimeLines.at(index);
+			if (runtimeLine.lineNumber == m_nativeCachedRuntimeLastEntry.lineNumber &&
+			    lineEntriesEquivalentForCache(runtimeLine, m_nativeCachedRuntimeLastEntry))
+			{
+				return qMax(0, m_nativeCachedRuntimeCount - 1 - sizeToInt(index));
+			}
+		}
+
+		return -1;
 	};
 
 	auto softRebuildFromRuntime = [this, &appendRuntimeRange, &clearRuntimeCache,
@@ -5837,10 +6694,22 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 		if (restitchStartIndex >= runtimeLines.size())
 			return true;
 
-		const int oldLineCount     = sizeToInt(m_nativeRenderLineCache.size());
-		int       trimmedHeadCount = 0;
+		const int oldLineCount       = sizeToInt(m_nativeRenderLineCache.size());
+		bool      headLineRestitched = false;
+		int       trimmedHeadCount   = 0;
 		if (newFirstLineNumber > oldFirstLineNumber)
 		{
+			const qint64 removedRuntimeHeadCount =
+			    m_nativeCachedRuntimeLineNumbersContiguous && runtimeNowContiguous
+			        ? qMax<qint64>(0, newFirstLineNumber - oldFirstLineNumber)
+			        : removedRuntimeHeadCountFromCachedLast();
+			if (removedRuntimeHeadCount < 0)
+			{
+				recordNativeRestitchFailureDiagnostic(NativeRestitchFailureDiagnosticKind::RangeHeadTrim,
+				                                      restitchStartIndex);
+				return false;
+			}
+			m_nativeRenderRuntimeIndexBase += removedRuntimeHeadCount;
 			while (
 			    trimmedHeadCount < m_nativeRenderLineCache.size() &&
 			    renderLineBeforeRuntimeLine(m_nativeRenderLineCache.at(trimmedHeadCount), newFirstLineNumber))
@@ -5861,6 +6730,7 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 					                                      restitchStartIndex);
 					return false;
 				}
+				headLineRestitched = true;
 			}
 		}
 		if (m_nativeRenderLineCache.isEmpty())
@@ -5875,6 +6745,14 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 		const int nextRenderableIndex = nextRenderableRuntimeIndex(restitchStartIndex);
 		if (nextRenderableIndex < 0)
 		{
+			if (headLineRestitched || trimmedHeadCount > 0)
+			{
+				const int stablePrefixCount =
+				    headLineRestitched ? 0 : sizeToInt(m_nativeRenderLineCache.size());
+				bumpNativeRuntimeRangeRestitchRenderLineCacheRevision(oldLineCount, false, trimmedHeadCount,
+				                                                      stablePrefixCount, headLineRestitched,
+				                                                      stablePrefixCount, 0, 0);
+			}
 			runtimeRangeRestitchApplied = true;
 			return true;
 		}
@@ -6029,7 +6907,7 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 		m_nativeRangeRestitchDiagDroppedMax = qMax(m_nativeRangeRestitchDiagDroppedMax, droppedNativeCount);
 #endif
 
-		QVector<NativeOutputRenderLine> preservedSuffix;
+		NativeOutputRenderLines preservedSuffix;
 		if (preserveSuffix && suffixRenderIndex < m_nativeRenderLineCache.size())
 		{
 			preservedSuffix.reserve(m_nativeRenderLineCache.size() - suffixRenderIndex);
@@ -6068,21 +6946,33 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 			for (NativeOutputRenderLine &line : preservedSuffix)
 				m_nativeRenderLineCache.push_back(std::move(line));
 		}
+		const int newLineCount         = sizeToInt(m_nativeRenderLineCache.size());
+		const int preservedSuffixCount = sizeToInt(preservedSuffix.size());
+		const int postTrimOldLineCount = qMax(0, oldLineCount - trimmedHeadCount);
+		const int replaceFirstLine     = qBound(0, dropRenderIndex, postTrimOldLineCount);
+		const int removedLastLine      = qBound(replaceFirstLine, removeEndIndex, postTrimOldLineCount);
+		const int removedLineCount     = removedLastLine - replaceFirstLine;
+		const int dirtyFirstLine       = qBound(0, dropRenderIndex, newLineCount);
+		const int insertedLineCount =
+		    qBound(0, newLineCount - preservedSuffixCount - dirtyFirstLine, newLineCount - dirtyFirstLine);
 		if (!appendChanged)
 		{
-			if (dropRenderIndex >= oldLineCount && preservedSuffix.isEmpty())
+			if (dropRenderIndex >= oldLineCount && preservedSuffix.isEmpty() && !headLineRestitched &&
+			    trimmedHeadCount == 0)
 			{
 				runtimeRangeRestitchApplied = true;
 				return true;
 			}
-			bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::RuntimeRangeRestitch, oldLineCount,
-			                                  true, trimmedHeadCount, dropRenderIndex);
+			bumpNativeRuntimeRangeRestitchRenderLineCacheRevision(
+			    oldLineCount, true, trimmedHeadCount, headLineRestitched ? 0 : dropRenderIndex,
+			    headLineRestitched, replaceFirstLine, removedLineCount, insertedLineCount);
 			runtimeRangeRestitchApplied = true;
 			return true;
 		}
 
-		bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::RuntimeRangeRestitch, oldLineCount,
-		                                  true, trimmedHeadCount, dropRenderIndex);
+		bumpNativeRuntimeRangeRestitchRenderLineCacheRevision(
+		    oldLineCount, true, trimmedHeadCount, headLineRestitched ? 0 : dropRenderIndex,
+		    headLineRestitched, replaceFirstLine, removedLineCount, insertedLineCount);
 		runtimeRangeRestitchApplied = true;
 		return true;
 	};
@@ -6157,6 +7047,7 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 		renderLine.sourceRuntimeLineKey =
 		    nativeRuntimeLineKey(renderLine.sourceRuntimeLineNumbers, renderLine.firstRuntimeLineNumber,
 		                         renderLine.lastRuntimeLineNumber);
+		renderLine.firstRuntimeLineIndex = m_nativeRenderRuntimeIndexBase + runtimeIndex;
 
 		const int oldLineCount               = sizeToInt(m_nativeRenderLineCache.size());
 		m_nativeRenderLineCache[renderIndex] = std::move(renderLine);
@@ -6253,10 +7144,60 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 
 			if (overlapLastIndex >= 0)
 			{
-				const int oldLineCountBeforeHeadTrim = sizeToInt(m_nativeRenderLineCache.size());
-				bool      cacheTrimmed               = false;
-				int       trimmedHeadCount           = 0;
-				if (newFirstLineNumber > oldFirstLineNumber)
+				const int  oldLineCountBeforeHeadTrim = sizeToInt(m_nativeRenderLineCache.size());
+				bool       cacheTrimmed               = false;
+				bool       headLineRestitched         = false;
+				int        trimmedHeadCount           = 0;
+				const int  appendStartIndex           = overlapLastIndex + 1;
+				const bool appendWillFollow           = appendStartIndex < runtimeLines.size();
+				const int  removedRuntimeHeadCount =
+				    qMax(0, m_nativeCachedRuntimeCount - 1 - overlapLastIndex);
+				if (removedRuntimeHeadCount > 0)
+				{
+					m_nativeRenderRuntimeIndexBase += removedRuntimeHeadCount;
+					const int    firstRetainedRenderableIndex = nextRenderableRuntimeIndex(0);
+					const qint64 firstRetainedLineNumber =
+					    firstRetainedRenderableIndex >= 0
+					        ? runtimeLines.at(firstRetainedRenderableIndex).lineNumber
+					        : 0;
+					int dropCount = 0;
+					while (dropCount < m_nativeRenderLineCache.size())
+					{
+						const NativeOutputRenderLine &line = m_nativeRenderLineCache.at(dropCount);
+						if (line.firstRuntimeLineIndex >= m_nativeRenderRuntimeIndexBase)
+							break;
+						if (firstRetainedLineNumber > 0 &&
+						    nativeRuntimeLineRangeContains(line, firstRetainedLineNumber))
+						{
+							break;
+						}
+						++dropCount;
+					}
+					if (dropCount > 0)
+					{
+						m_nativeRenderLineCache.remove(0, dropCount);
+						++m_nativeRenderCacheTrimDrops;
+						cacheTrimmed     = true;
+						trimmedHeadCount = dropCount;
+					}
+					if (firstRetainedRenderableIndex >= 0 && !m_nativeRenderLineCache.isEmpty() &&
+					    m_nativeRenderLineCache.first().firstRuntimeLineIndex <
+					        m_nativeRenderRuntimeIndexBase)
+					{
+						if (!restitchTrimmedHeadLogicalLineFromIndex(firstRetainedRenderableIndex,
+						                                             cacheTrimmed || appendWillFollow))
+						{
+							recordNativeRestitchFailureDiagnostic(
+							    NativeRestitchFailureDiagnosticKind::HeadTrim, qMax(0, overlapLastIndex));
+							incrementRebuildReason(RuntimeRebuildReason::RestitchFailure);
+							softRebuildFromRuntime(runtimeNowContiguous, finalizeRuntimeCacheMetadata,
+							                       NativeAppendDiagnosticKind::SoftRestitchFailure);
+							return;
+						}
+						headLineRestitched = true;
+					}
+				}
+				else if (newFirstLineNumber > oldFirstLineNumber)
 				{
 					int dropCount = 0;
 					while (dropCount < m_nativeRenderLineCache.size() &&
@@ -6275,7 +7216,8 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 					if (!m_nativeRenderLineCache.isEmpty() &&
 					    renderLineStraddlesRuntimeLine(m_nativeRenderLineCache.first(), newFirstLineNumber))
 					{
-						if (!restitchTrimmedHeadLogicalLine(newFirstLineNumber))
+						if (!restitchTrimmedHeadLogicalLine(newFirstLineNumber,
+						                                    cacheTrimmed || appendWillFollow))
 						{
 							recordNativeRestitchFailureDiagnostic(
 							    NativeRestitchFailureDiagnosticKind::HeadTrim, qMax(0, overlapLastIndex));
@@ -6284,29 +7226,35 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 							                       NativeAppendDiagnosticKind::SoftRestitchFailure);
 							return;
 						}
+						headLineRestitched = true;
 					}
 				}
 
-				const int appendStartIndex = overlapLastIndex + 1;
 				if (appendStartIndex < runtimeLines.size())
 				{
-					if (cacheTrimmed)
+					if (cacheTrimmed || headLineRestitched)
 					{
-						bool appendChanged     = false;
-						bool appendTailMutated = false;
+						bool                             appendChanged     = false;
+						bool                             appendTailMutated = false;
+						const NativeAppendDiagnosticKind diagnosticKind =
+						    cacheTrimmed ? NativeAppendDiagnosticKind::HeadTrimTailAppend
+						                 : NativeAppendDiagnosticKind::NonContiguousTailAppend;
 						appendRuntimeRange(appendStartIndex, true, &appendChanged, &appendTailMutated,
-						                   nullptr, -1, NativeAppendDiagnosticKind::HeadTrimTailAppend);
+						                   nullptr, -1, diagnosticKind);
 						if (appendChanged)
 						{
-							bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::HeadTrimTailAppend,
-							                                  oldLineCountBeforeHeadTrim, appendTailMutated,
-							                                  trimmedHeadCount);
+							const NativeRenderCacheDeltaKind deltaKind =
+							    cacheTrimmed ? NativeRenderCacheDeltaKind::HeadTrimTailAppend
+							                 : NativeRenderCacheDeltaKind::TailAppend;
+							bumpNativeRenderLineCacheRevision(deltaKind, oldLineCountBeforeHeadTrim,
+							                                  appendTailMutated, trimmedHeadCount, 0,
+							                                  headLineRestitched);
 						}
 						else
 						{
 							bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::HeadMutation,
 							                                  oldLineCountBeforeHeadTrim, false,
-							                                  trimmedHeadCount);
+							                                  trimmedHeadCount, 0, headLineRestitched);
 						}
 					}
 					else
@@ -6318,7 +7266,8 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 				else if (cacheTrimmed)
 				{
 					bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::HeadMutation,
-					                                  oldLineCountBeforeHeadTrim, false, trimmedHeadCount);
+					                                  oldLineCountBeforeHeadTrim, false, trimmedHeadCount, 0,
+					                                  headLineRestitched);
 				}
 
 				finalizeRuntimeCacheMetadata(runtimeNowContiguous);
@@ -6372,9 +7321,11 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 
 	const int oldLineCountBeforeHeadTrim = sizeToInt(m_nativeRenderLineCache.size());
 	bool      cacheTrimmed               = false;
+	bool      headLineRestitched         = false;
 	int       trimmedHeadCount           = 0;
 	if (newFirstLineNumber > oldFirstLineNumber)
 	{
+		m_nativeRenderRuntimeIndexBase += qMax<qint64>(0, newFirstLineNumber - oldFirstLineNumber);
 		int dropCount = 0;
 		while (dropCount < m_nativeRenderLineCache.size() &&
 		       renderLineBeforeRuntimeLine(m_nativeRenderLineCache.at(dropCount), newFirstLineNumber))
@@ -6391,7 +7342,8 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 		if (!m_nativeRenderLineCache.isEmpty() &&
 		    renderLineStraddlesRuntimeLine(m_nativeRenderLineCache.first(), newFirstLineNumber))
 		{
-			if (!restitchTrimmedHeadLogicalLine(newFirstLineNumber))
+			const bool appendWillFollow = newLastLineNumber > oldLastLineNumber;
+			if (!restitchTrimmedHeadLogicalLine(newFirstLineNumber, cacheTrimmed || appendWillFollow))
 			{
 				recordNativeRestitchFailureDiagnostic(NativeRestitchFailureDiagnosticKind::HeadTrim,
 				                                      qMax(0, trimmedHeadCount));
@@ -6400,6 +7352,7 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 				                       NativeAppendDiagnosticKind::SoftRestitchFailure);
 				return finalizeNativeOutputRenderLines();
 			}
+			headLineRestitched = true;
 		}
 	}
 
@@ -6425,22 +7378,28 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 			m_nativeCachedRuntimeLastHardReturn                 = runtimePreviousEntry.hardReturn;
 			m_nativeCachedRuntimeLastEntry                      = runtimePreviousEntry;
 		}
-		if (cacheTrimmed)
+		if (cacheTrimmed || headLineRestitched)
 		{
-			bool appendChanged     = false;
-			bool appendTailMutated = false;
+			bool                             appendChanged     = false;
+			bool                             appendTailMutated = false;
+			const NativeAppendDiagnosticKind diagnosticKind =
+			    cacheTrimmed ? NativeAppendDiagnosticKind::HeadTrimTailAppend
+			                 : NativeAppendDiagnosticKind::TailAppend;
 			appendRuntimeRange(appendStartIndex, true, &appendChanged, &appendTailMutated, nullptr, -1,
-			                   NativeAppendDiagnosticKind::HeadTrimTailAppend);
+			                   diagnosticKind);
 			if (appendChanged)
 			{
-				bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::HeadTrimTailAppend,
-				                                  oldLineCountBeforeHeadTrim, appendTailMutated,
-				                                  trimmedHeadCount);
+				const NativeRenderCacheDeltaKind deltaKind =
+				    cacheTrimmed ? NativeRenderCacheDeltaKind::HeadTrimTailAppend
+				                 : NativeRenderCacheDeltaKind::TailAppend;
+				bumpNativeRenderLineCacheRevision(deltaKind, oldLineCountBeforeHeadTrim, appendTailMutated,
+				                                  trimmedHeadCount, 0, headLineRestitched);
 			}
 			else
 			{
 				bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::HeadMutation,
-				                                  oldLineCountBeforeHeadTrim, false, trimmedHeadCount);
+				                                  oldLineCountBeforeHeadTrim, false, trimmedHeadCount, 0,
+				                                  headLineRestitched);
 			}
 		}
 		else
@@ -6452,7 +7411,8 @@ const QVector<WorldView::NativeOutputRenderLine> &WorldView::nativeOutputRenderL
 	else if (cacheTrimmed)
 	{
 		bumpNativeRenderLineCacheRevision(NativeRenderCacheDeltaKind::HeadMutation,
-		                                  oldLineCountBeforeHeadTrim, false, trimmedHeadCount);
+		                                  oldLineCountBeforeHeadTrim, false, trimmedHeadCount, 0,
+		                                  headLineRestitched);
 	}
 
 	finalizeRuntimeCacheMetadata(true);
@@ -6486,7 +7446,7 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 	if (!nativeOutputInteractionActive() || !view || !view->viewport())
 		return false;
 
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (lines.isEmpty())
 		return false;
 
@@ -6505,16 +7465,19 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 	                           ((100.0 + static_cast<qreal>(lineSpacing)) / 100.0);
 	const QFont &layoutFont  = view->font();
 	const bool   cacheReadyForHitTest =
-	    nativeLayoutCacheReadyFor(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacing, layoutFont);
+	    nativeLayoutRangeStateReadyFor(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacing, layoutFont);
 	if (!allowCacheBuild && !cacheReadyForHitTest)
 		return false;
 	if (!cacheReadyForHitTest)
-		ensureNativeLayoutCaches(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacing, layoutFont);
+	{
+		if (!prepareNativeLayoutRangeState(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacing,
+		                                   layoutFont))
+			return false;
+	}
 	const qreal effectiveLineAdvance =
 	    m_nativeLayoutCachedLineAdvance > 0.0 ? m_nativeLayoutCachedLineAdvance : lineAdvance;
-	qreal     docY = m_nativeLayoutCumulativeHeights.size() > lines.size()
-	                     ? m_nativeLayoutCumulativeHeights.at(lines.size())
-	                     : 0.0;
+	qreal docY =
+	    m_nativeLayoutHeightIndex.size() == lines.size() ? m_nativeLayoutHeightIndex.totalHeight() : 0.0;
 
 	const int nativeMaxScroll = qMax(0, static_cast<int>(std::ceil(docY)) - viewportRect.height());
 	int       scrollY         = 0;
@@ -6537,24 +7500,20 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 			effectiveScrollY = qBound(0, scrollY, nativeMaxScroll);
 	}
 
-	const qreal yDoc       = static_cast<qreal>(effectiveScrollY) + static_cast<qreal>(y);
-	int         lineIndex  = sizeToInt(lines.size()) - 1;
-	qreal       lineY      = 0.0;
-	qreal       lineYEnd   = docY;
-	const auto  firstAbove = std::upper_bound(m_nativeLayoutCumulativeHeights.cbegin() + 1,
-	                                          m_nativeLayoutCumulativeHeights.cend(), yDoc);
-	lineIndex = qBound(0, static_cast<int>(firstAbove - m_nativeLayoutCumulativeHeights.cbegin()) - 1,
-	                   sizeToInt(lines.size()) - 1);
-	lineY     = m_nativeLayoutCumulativeHeights.at(lineIndex);
-	lineYEnd  = m_nativeLayoutCumulativeHeights.at(lineIndex + 1);
+	qreal yDoc      = static_cast<qreal>(effectiveScrollY) + static_cast<qreal>(y);
+	int   lineIndex = sizeToInt(lines.size()) - 1;
+	qreal lineY     = 0.0;
+	qreal lineYEnd  = docY;
+	lineIndex       = qBound(0, nativeLayoutLineAtY(yDoc), sizeToInt(lines.size()) - 1);
+	lineY           = nativeLayoutCumulativeHeightAt(lineIndex);
+	lineYEnd        = nativeLayoutCumulativeHeightAt(lineIndex + 1);
 	if (allowCacheBuild &&
 	    ensureNativeLayoutRange(lines, qMax(0, lineIndex - 2),
 	                            qMin(sizeToInt(lines.size()) - 1, lineIndex + 2), wrapWidthPixels,
 	                            localWrapWidthPixels, lineSpacing, layoutFont))
 	{
-		docY                             = m_nativeLayoutCumulativeHeights.size() > lines.size()
-		                                       ? m_nativeLayoutCumulativeHeights.at(lines.size())
-		                                       : 0.0;
+		docY =
+		    m_nativeLayoutHeightIndex.size() == lines.size() ? m_nativeLayoutHeightIndex.totalHeight() : 0.0;
 		const int updatedNativeMaxScroll = qMax(0, static_cast<int>(std::ceil(docY)) - viewportRect.height());
 		if (updatedNativeMaxScroll > 0)
 		{
@@ -6567,14 +7526,14 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 			else
 				effectiveScrollY = qBound(0, scrollY, updatedNativeMaxScroll);
 		}
-		const qreal updatedYDoc       = static_cast<qreal>(effectiveScrollY) + static_cast<qreal>(y);
-		const auto  updatedFirstAbove = std::upper_bound(m_nativeLayoutCumulativeHeights.cbegin() + 1,
-		                                                 m_nativeLayoutCumulativeHeights.cend(), updatedYDoc);
-		lineIndex =
-		    qBound(0, static_cast<int>(updatedFirstAbove - m_nativeLayoutCumulativeHeights.cbegin()) - 1,
-		           sizeToInt(lines.size()) - 1);
-		lineY    = m_nativeLayoutCumulativeHeights.at(lineIndex);
-		lineYEnd = m_nativeLayoutCumulativeHeights.at(lineIndex + 1);
+		else
+		{
+			effectiveScrollY = 0;
+		}
+		yDoc      = static_cast<qreal>(effectiveScrollY) + static_cast<qreal>(y);
+		lineIndex = qBound(0, nativeLayoutLineAtY(yDoc), sizeToInt(lines.size()) - 1);
+		lineY     = nativeLayoutCumulativeHeightAt(lineIndex);
+		lineYEnd  = nativeLayoutCumulativeHeightAt(lineIndex + 1);
 	}
 
 	const NativeOutputRenderLine &line = lines.at(lineIndex);
@@ -6678,7 +7637,7 @@ bool WorldView::nativeOutputCharacterRect(const WrapTextBrowser *view, const Nat
 	if (!nativeOutputInteractionActive() || !view || !view->viewport())
 		return false;
 
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (lines.isEmpty())
 		return false;
 
@@ -6686,7 +7645,8 @@ bool WorldView::nativeOutputCharacterRect(const WrapTextBrowser *view, const Nat
 	if (viewportRect.width() <= 0 || viewportRect.height() <= 0)
 		return false;
 
-	const int    lineIndex = qBound(0, position.line, sizeToInt(lines.size()) - 1);
+	const int    lineCount = sizeToInt(lines.size());
+	const int    lineIndex = qBound(0, position.line, lineCount - 1);
 
 	const bool   wrapEnabled          = view->lineWrapMode() != WrapTextBrowser::NoWrap;
 	const int    wrapWidthPixels      = nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
@@ -6696,26 +7656,20 @@ bool WorldView::nativeOutputCharacterRect(const WrapTextBrowser *view, const Nat
 	const qreal  fallbackLineAdvance  = static_cast<qreal>(qMax(1, QFontMetrics(layoutFont).lineSpacing())) *
 	                                    ((100.0 + static_cast<qreal>(lineSpacing)) / 100.0);
 
-	if (!nativeLayoutCacheReadyFor(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacing, layoutFont))
-		ensureNativeLayoutCaches(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacing, layoutFont);
-	if (ensureNativeLayoutRange(lines, qMax(0, lineIndex - 2),
-	                            qMin(sizeToInt(lines.size()) - 1, lineIndex + 2), wrapWidthPixels,
-	                            localWrapWidthPixels, lineSpacing, layoutFont))
-	{
-		syncNativeOutputScrollBarsFromLayout(lines, false);
-	}
+	static_cast<void>(ensureNativeLayoutRange(
+	    lines, qMax(0, lineIndex - 2), qMin(sizeToInt(lines.size()) - 1, lineIndex + 2), wrapWidthPixels,
+	    localWrapWidthPixels, lineSpacing, layoutFont));
 
-	if (lineIndex + 1 >= m_nativeLayoutCumulativeHeights.size())
+	if (m_nativeLayoutHeightIndex.size() != lines.size())
 		return false;
 
 	const qreal effectiveLineAdvance =
 	    m_nativeLayoutCachedLineAdvance > 0.0 ? m_nativeLayoutCachedLineAdvance : fallbackLineAdvance;
-	const qreal docY            = m_nativeLayoutCumulativeHeights.size() > lines.size()
-	                                  ? m_nativeLayoutCumulativeHeights.at(lines.size())
-	                                  : 0.0;
-	const int   nativeMaxScroll = qMax(0, static_cast<int>(std::ceil(docY)) - viewportRect.height());
-	int         scrollY         = 0;
-	int         scrollMax       = 0;
+	const qreal docY =
+	    m_nativeLayoutHeightIndex.size() == lines.size() ? m_nativeLayoutHeightIndex.totalHeight() : 0.0;
+	const int nativeMaxScroll = qMax(0, static_cast<int>(std::ceil(docY)) - viewportRect.height());
+	int       scrollY         = 0;
+	int       scrollMax       = 0;
 	if (const QScrollBar *const bar = view->verticalScrollBar())
 	{
 		scrollY   = qMax(0, bar->value());
@@ -6735,8 +7689,8 @@ bool WorldView::nativeOutputCharacterRect(const WrapTextBrowser *view, const Nat
 			effectiveScrollY = qBound(0, scrollY, nativeMaxScroll);
 	}
 
-	const qreal                   lineTop    = m_nativeLayoutCumulativeHeights.at(lineIndex);
-	const qreal                   lineBottom = m_nativeLayoutCumulativeHeights.at(lineIndex + 1);
+	const qreal                   lineTop    = nativeLayoutCumulativeHeightAt(lineIndex);
+	const qreal                   lineBottom = nativeLayoutCumulativeHeightAt(lineIndex + 1);
 	const qreal                   lineHeight = qMax<qreal>(1.0, lineBottom - lineTop);
 	const NativeOutputRenderLine &line       = lines.at(lineIndex);
 
@@ -6794,7 +7748,7 @@ bool WorldView::nativeOutputCharacterRect(const WrapTextBrowser *view, const Nat
 void WorldView::scrollNativeOutputRangeIntoView(const WrapTextBrowser *view, int firstLine,
                                                 int lastLine) const
 {
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (lines.isEmpty() || !view || !view->viewport())
 		return;
 
@@ -6822,12 +7776,12 @@ void WorldView::scrollNativeOutputRangeIntoView(const WrapTextBrowser *view, int
 	if (layoutHeightChanged)
 		syncNativeOutputScrollBarsFromLayout(lines, false);
 
-	if (lastLine + 1 >= m_nativeLayoutCumulativeHeights.size())
+	if (m_nativeLayoutHeightIndex.size() != lines.size())
 		return;
 
-	const int rangeTop = qMax(0, static_cast<int>(std::floor(m_nativeLayoutCumulativeHeights.at(firstLine))));
+	const int rangeTop = qMax(0, static_cast<int>(std::floor(nativeLayoutCumulativeHeightAt(firstLine))));
 	const int rangeBottom =
-	    qMax(rangeTop + 1, static_cast<int>(std::ceil(m_nativeLayoutCumulativeHeights.at(lastLine + 1))));
+	    qMax(rangeTop + 1, static_cast<int>(std::ceil(nativeLayoutCumulativeHeightAt(lastLine + 1))));
 
 	const int currentTop    = bar->value();
 	const int pageStep      = qMax(1, bar->pageStep());
@@ -6920,7 +7874,8 @@ bool WorldView::nativeOutputHitTestForMouseEvent(const QWidget *watched, const Q
 }
 
 void WorldView::applyResolvedOutputSelection(const bool hasSelection, const int startLine,
-                                             const int startColumn, const int endLine, const int endColumn)
+                                             const int startColumn, const int endLine, const int endColumn,
+                                             const bool allowClipboardCopy)
 {
 	const bool selectionSame =
 	    (hasSelection == m_hasOutputSelection && startLine == m_lastSelectionStartLine &&
@@ -6935,7 +7890,7 @@ void WorldView::applyResolvedOutputSelection(const bool hasSelection, const int 
 	m_lastSelectionEndLine     = endLine;
 	m_lastSelectionEndColumn   = endColumn;
 
-	if (hasSelection && m_runtime)
+	if (allowClipboardCopy && hasSelection && m_runtime)
 	{
 		const QMap<QString, QString> &attrs   = m_runtime->worldAttributes();
 		auto                          enabled = [](const QString &value)
@@ -6970,32 +7925,113 @@ void WorldView::clearNativeOutputSelection(const bool notify)
 		applyResolvedOutputSelection(false, 0, 0, 0, 0);
 }
 
-void WorldView::applyPendingNativeSelectionHeadTrim(const QVector<NativeOutputRenderLine> &lines)
+WorldView::NativeOutputPositionIdentity
+WorldView::nativeOutputSelectionIdentityForPosition(const NativeOutputRenderLines &lines,
+                                                    const NativeOutputPosition    &position)
 {
-	const int trimCount = m_nativeSelectionPendingHeadTrimLines;
-	if (trimCount <= 0)
-		return;
-	m_nativeSelectionPendingHeadTrimLines = 0;
+	if (position.line < 0 || position.line >= sizeToInt(lines.size()))
+		return {};
 
-	if (!m_nativeOutputSelection.hasSelection && !m_nativeOutputSelection.dragging)
-		return;
+	const NativeOutputRenderLine &line = lines.at(position.line);
+	if (line.firstRuntimeLineNumber <= 0 && line.lastRuntimeLineNumber <= 0)
+		return {};
+	return {
+	    nativeRuntimeLineKey(line),
+	    line.firstRuntimeLineNumber,
+	    line.lastRuntimeLineNumber,
+	};
+}
+
+bool WorldView::remapNativeOutputSelectionPosition(NativeOutputPosition               &position,
+                                                   const NativeOutputPositionIdentity &identity,
+                                                   const NativeOutputRenderLines      &lines) const
+{
 	if (lines.isEmpty())
+		return false;
+
+	auto lineMatchesIdentity = [&lines, &identity](const int lineIndex)
 	{
-		clearNativeOutputSelection(true);
-		return;
+		if (lineIndex < 0 || lineIndex >= sizeToInt(lines.size()))
+			return false;
+		if (identity.firstRuntimeLineNumber <= 0 && identity.lastRuntimeLineNumber <= 0)
+			return false;
+		const NativeOutputRenderLine &line = lines.at(lineIndex);
+		if (identity.lineKey != 0 && nativeRuntimeLineKey(line) == identity.lineKey)
+			return true;
+		if (identity.firstRuntimeLineNumber > 0 &&
+		    nativeRuntimeLineRangeContains(line, identity.firstRuntimeLineNumber))
+		{
+			return true;
+		}
+		return identity.lastRuntimeLineNumber > 0 &&
+		       nativeRuntimeLineRangeContains(line, identity.lastRuntimeLineNumber);
+	};
+
+	const int maxLine       = sizeToInt(lines.size()) - 1;
+	const int expectedIndex = qBound(0, position.line - m_nativeSelectionPendingHeadTrimLines, maxLine);
+	if (lineMatchesIdentity(expectedIndex))
+	{
+		position.line   = expectedIndex;
+		position.column = qBound(0, position.column, sizeToInt(lines.at(position.line).text.size()));
+		return true;
+	}
+	if (lineMatchesIdentity(position.line))
+	{
+		position.line   = qBound(0, position.line, maxLine);
+		position.column = qBound(0, position.column, sizeToInt(lines.at(position.line).text.size()));
+		return true;
 	}
 
-	auto shiftLineIndex = [trimCount](NativeOutputPosition &position) { position.line -= trimCount; };
-	shiftLineIndex(m_nativeOutputSelection.anchor);
-	shiftLineIndex(m_nativeOutputSelection.cursor);
-	shiftLineIndex(m_nativeOutputSelection.start);
-	shiftLineIndex(m_nativeOutputSelection.end);
-
-	if (m_nativeOutputSelection.anchor.line < 0 || m_nativeOutputSelection.cursor.line < 0 ||
-	    m_nativeOutputSelection.start.line < 0 || m_nativeOutputSelection.end.line < 0)
+	const int searchRadius = qMin(512, maxLine);
+	for (int distance = 1; distance <= searchRadius; ++distance)
 	{
-		clearNativeOutputSelection(true);
-		return;
+		const int beforeIndex = expectedIndex - distance;
+		if (lineMatchesIdentity(beforeIndex))
+		{
+			position.line   = beforeIndex;
+			position.column = qBound(0, position.column, sizeToInt(lines.at(position.line).text.size()));
+			return true;
+		}
+		const int afterIndex = expectedIndex + distance;
+		if (lineMatchesIdentity(afterIndex))
+		{
+			position.line   = afterIndex;
+			position.column = qBound(0, position.column, sizeToInt(lines.at(position.line).text.size()));
+			return true;
+		}
+	}
+
+	const int lineCount = sizeToInt(lines.size());
+	for (int lineIndex = 0; lineIndex < lineCount; ++lineIndex)
+	{
+		if (!lineMatchesIdentity(lineIndex))
+			continue;
+		position.line   = lineIndex;
+		position.column = qBound(0, position.column, sizeToInt(lines.at(position.line).text.size()));
+		return true;
+	}
+	return false;
+}
+
+WorldView::NativeOutputSelectionResolveResult
+WorldView::resolveNativeOutputSelectionStateForLines(const NativeOutputRenderLines &lines,
+                                                     NativeOutputSelectionState    &selection) const
+{
+	selection = m_nativeOutputSelection;
+	if (!selection.hasSelection && !selection.dragging)
+		return NativeOutputSelectionResolveResult::Unmapped;
+	if (lines.isEmpty())
+		return NativeOutputSelectionResolveResult::Unmapped;
+
+	const bool needsRemap = m_nativeSelectionPendingHeadTrimLines > 0 ||
+	                        selection.renderRevision != m_nativeRenderLineCacheRevision;
+	if (needsRemap)
+	{
+		if (!remapNativeOutputSelectionPosition(selection.anchor, selection.anchorIdentity, lines) ||
+		    !remapNativeOutputSelectionPosition(selection.cursor, selection.cursorIdentity, lines))
+		{
+			return NativeOutputSelectionResolveResult::Unmapped;
+		}
 	}
 
 	const int maxLine       = sizeToInt(lines.size()) - 1;
@@ -7005,20 +8041,65 @@ void WorldView::applyPendingNativeSelectionHeadTrim(const QVector<NativeOutputRe
 		const int maxCol = sizeToInt(lines.at(position.line).text.size());
 		position.column  = qBound(0, position.column, maxCol);
 	};
-	clampPosition(m_nativeOutputSelection.anchor);
-	clampPosition(m_nativeOutputSelection.cursor);
-	clampPosition(m_nativeOutputSelection.start);
-	clampPosition(m_nativeOutputSelection.end);
+	clampPosition(selection.anchor);
+	clampPosition(selection.cursor);
 
-	NativeOutputPosition start = m_nativeOutputSelection.anchor;
-	NativeOutputPosition end   = m_nativeOutputSelection.cursor;
+	NativeOutputPosition start = selection.anchor;
+	NativeOutputPosition end   = selection.cursor;
 	if (start.line > end.line || (start.line == end.line && start.column > end.column))
 		qSwap(start, end);
-	m_nativeOutputSelection.start        = start;
-	m_nativeOutputSelection.end          = end;
-	m_nativeOutputSelection.hasSelection = start.line != end.line || start.column != end.column;
-	if (!m_nativeOutputSelection.hasSelection)
+
+	selection.start          = start;
+	selection.end            = end;
+	selection.hasSelection   = start.line != end.line || start.column != end.column;
+	selection.anchorIdentity = nativeOutputSelectionIdentityForPosition(lines, selection.anchor);
+	selection.cursorIdentity = nativeOutputSelectionIdentityForPosition(lines, selection.cursor);
+	selection.renderRevision = m_nativeRenderLineCacheRevision;
+	return selection.hasSelection ? NativeOutputSelectionResolveResult::MappedSelection
+	                              : NativeOutputSelectionResolveResult::MappedCollapsed;
+}
+
+void WorldView::applyPendingNativeSelectionRenderDelta(const NativeOutputRenderLines &lines)
+{
+	const int  trimCount       = m_nativeSelectionPendingHeadTrimLines;
+	const bool revisionChanged = m_nativeOutputSelection.renderRevision != m_nativeRenderLineCacheRevision;
+	if (trimCount <= 0 && !revisionChanged)
+		return;
+
+	if (!m_nativeOutputSelection.hasSelection && !m_nativeOutputSelection.dragging)
+	{
+		m_nativeSelectionPendingHeadTrimLines = 0;
+		return;
+	}
+	if (lines.isEmpty())
+	{
 		clearNativeOutputSelection(true);
+		return;
+	}
+
+	NativeOutputSelectionState               resolvedSelection;
+	const NativeOutputSelectionResolveResult resolveResult =
+	    resolveNativeOutputSelectionStateForLines(lines, resolvedSelection);
+	if (resolveResult == NativeOutputSelectionResolveResult::Unmapped)
+	{
+		clearNativeOutputSelection(true);
+		return;
+	}
+
+	const QRect oldPaneRect               = nativeOutputPaneRect(m_nativeOutputSelection.sourceView);
+	m_nativeOutputSelection               = resolvedSelection;
+	m_nativeSelectionPendingHeadTrimLines = 0;
+	if (resolveResult == NativeOutputSelectionResolveResult::MappedSelection)
+	{
+		applyResolvedOutputSelection(true, resolvedSelection.start.line + 1,
+		                             resolvedSelection.start.column + 1, resolvedSelection.end.line + 1,
+		                             resolvedSelection.end.column + 1, false);
+	}
+	else
+	{
+		requestNativeOutputRepaint(oldPaneRect);
+		applyResolvedOutputSelection(false, 0, 0, 0, 0, false);
+	}
 }
 
 void WorldView::clearNativeSelectionIfOutsideVisibleViewport(const WrapTextBrowser *const view)
@@ -7035,24 +8116,13 @@ void WorldView::clearNativeSelectionIfOutsideVisibleViewport(const WrapTextBrows
 		clearNativeOutputSelection(true);
 		return;
 	}
-
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
-	if (lines.isEmpty())
-	{
-		clearNativeOutputSelection(true);
-		return;
-	}
-
-	applyPendingNativeSelectionHeadTrim(lines);
-	if (!m_nativeOutputSelection.hasSelection)
-		return;
 }
 
 void WorldView::setNativeOutputSelection(const WrapTextBrowser      *sourceView,
                                          const NativeOutputPosition &anchor,
                                          const NativeOutputPosition &cursor, const bool dragging)
 {
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (lines.isEmpty() || !sourceView)
 	{
 		clearNativeOutputSelection(true);
@@ -7100,6 +8170,11 @@ void WorldView::setNativeOutputSelection(const WrapTextBrowser      *sourceView,
 	m_nativeOutputSelection.cursor       = {cursorLine, cursorCol};
 	m_nativeOutputSelection.start        = start;
 	m_nativeOutputSelection.end          = end;
+	m_nativeOutputSelection.anchorIdentity =
+	    nativeOutputSelectionIdentityForPosition(lines, m_nativeOutputSelection.anchor);
+	m_nativeOutputSelection.cursorIdentity =
+	    nativeOutputSelectionIdentityForPosition(lines, m_nativeOutputSelection.cursor);
+	m_nativeOutputSelection.renderRevision = m_nativeRenderLineCacheRevision;
 	if (hasSelection)
 		m_lastOutputSelectionView = const_cast<WrapTextBrowser *>(sourceView);
 	else if (m_lastOutputSelectionView == sourceView)
@@ -7121,56 +8196,59 @@ bool WorldView::nativeOutputSelectionBounds(int &startLine, int &startColumn, in
 	startColumn = 0;
 	endLine     = 0;
 	endColumn   = 0;
-	if (!m_nativeOutputSelection.hasSelection)
-		return false;
-	if (m_nativeOutputSelection.sourceView == m_liveOutput &&
-	    (!m_scrollbackSplitActive || !m_liveOutput || !m_liveOutput->isVisible()))
-		return false;
 
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
-	if (lines.isEmpty())
-		return false;
-	const_cast<WorldView *>(this)->applyPendingNativeSelectionHeadTrim(lines);
-	if (!m_nativeOutputSelection.hasSelection)
-		return false;
-
-	auto clampLineColumn = [&lines](int line, int column, int *clampedLine = nullptr)
+	NativeOutputSelectionState selection = m_nativeOutputSelection;
+	if (selection.hasSelection || selection.dragging)
 	{
-		const int boundedLine = qBound(0, line, sizeToInt(lines.size()) - 1);
-		if (clampedLine)
-			*clampedLine = boundedLine;
-		const int maxColumn = sizeToInt(lines.at(boundedLine).text.size());
-		return qBound(0, column, maxColumn);
-	};
+		const bool needsRemap = m_nativeSelectionPendingHeadTrimLines > 0 ||
+		                        selection.renderRevision != m_nativeRenderLineCacheRevision;
+		if (needsRemap)
+		{
+			const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+			if (resolveNativeOutputSelectionStateForLines(lines, selection) !=
+			    NativeOutputSelectionResolveResult::MappedSelection)
+				return false;
+		}
+	}
+	if (!selection.hasSelection)
+		return false;
+	if (selection.sourceView == m_liveOutput &&
+	    (!m_scrollbackSplitActive || !m_liveOutput || !m_liveOutput->isVisible()))
+	{
+		return false;
+	}
 
-	int startLineZero = m_nativeOutputSelection.start.line;
-	int endLineZero   = m_nativeOutputSelection.end.line;
-	int startColZero  = clampLineColumn(startLineZero, m_nativeOutputSelection.start.column, &startLineZero);
-	int endColZero    = clampLineColumn(endLineZero, m_nativeOutputSelection.end.column, &endLineZero);
-	if (startLineZero > endLineZero || (startLineZero == endLineZero && startColZero >= endColZero))
+	if (!m_hasOutputSelection)
 		return false;
 
-	startLine   = startLineZero + 1;
-	startColumn = startColZero + 1;
-	endLine     = endLineZero + 1;
-	endColumn   = endColZero + 1;
+	startLine   = selection.start.line + 1;
+	startColumn = selection.start.column + 1;
+	endLine     = selection.end.line + 1;
+	endColumn   = selection.end.column + 1;
 	return true;
 }
 
 QString WorldView::nativeOutputSelectionText() const
 {
-	int startLine   = 0;
-	int startColumn = 0;
-	int endLine     = 0;
-	int endColumn   = 0;
-	if (!nativeOutputSelectionBounds(startLine, startColumn, endLine, endColumn))
-		return {};
-
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (lines.isEmpty())
 		return {};
 
-	QString text;
+	NativeOutputSelectionState selection;
+	if (resolveNativeOutputSelectionStateForLines(lines, selection) !=
+	    NativeOutputSelectionResolveResult::MappedSelection)
+		return {};
+	if (selection.sourceView == m_liveOutput &&
+	    (!m_scrollbackSplitActive || !m_liveOutput || !m_liveOutput->isVisible()))
+	{
+		return {};
+	}
+
+	QString   text;
+	const int startLine   = selection.start.line + 1;
+	const int startColumn = selection.start.column + 1;
+	const int endLine     = selection.end.line + 1;
+	const int endColumn   = selection.end.column + 1;
 	for (int lineIndex = startLine - 1; lineIndex <= endLine - 1 && lineIndex < lines.size(); ++lineIndex)
 	{
 		const NativeOutputRenderLine &line = lines.at(lineIndex);
@@ -7187,18 +8265,26 @@ QString WorldView::nativeOutputSelectionText() const
 
 QString WorldView::nativeOutputSelectionHtml() const
 {
-	int startLine   = 0;
-	int startColumn = 0;
-	int endLine     = 0;
-	int endColumn   = 0;
-	if (!nativeOutputSelectionBounds(startLine, startColumn, endLine, endColumn))
-		return {};
-
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (lines.isEmpty())
 		return {};
 
-	QColor defaultTextColour = m_outputTextColour;
+	NativeOutputSelectionState selection;
+	if (resolveNativeOutputSelectionStateForLines(lines, selection) !=
+	    NativeOutputSelectionResolveResult::MappedSelection)
+		return {};
+	if (selection.sourceView == m_liveOutput &&
+	    (!m_scrollbackSplitActive || !m_liveOutput || !m_liveOutput->isVisible()))
+	{
+		return {};
+	}
+
+	const int startLine   = selection.start.line + 1;
+	const int startColumn = selection.start.column + 1;
+	const int endLine     = selection.end.line + 1;
+	const int endColumn   = selection.end.column + 1;
+
+	QColor    defaultTextColour = m_outputTextColour;
 	if (!defaultTextColour.isValid())
 		defaultTextColour =
 		    m_output ? m_output->palette().color(QPalette::Text) : palette().color(QPalette::Text);
@@ -7385,7 +8471,7 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 			return false;
 		cacheWordUnderMouse(hit, textHit);
 
-		const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+		const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 		if (hit.line < 0 || hit.line >= lines.size())
 			return false;
 		const QString text = lines.at(hit.line).text;
@@ -7515,18 +8601,20 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 	paintNativeOutputBackground(painter, clippedUpdateRegion);
 	paintMiniWindows(painter, true, clippedUpdateRegion);
 
-	const bool renderCacheNeedsSync = !nativeRenderBaseCacheMatchesCurrentSource();
-	if (renderCacheNeedsSync)
-		const_cast<WorldView *>(this)->requestNativeRuntimeOutputPresentationSync(false, false);
-
-	const QVector<NativeOutputRenderLine> &lines =
-	    renderCacheNeedsSync ? m_nativeRenderLineCache : finalizeNativeOutputRenderLines();
-	const bool diagnosticsEnabled = nativeCanvasDiagnosticsEnabled();
+	const NativeOutputRenderLines &lines              = nativeOutputRenderLines();
+	const bool                     diagnosticsEnabled = nativeCanvasDiagnosticsEnabled();
 	if (diagnosticsEnabled)
 	{
+		QStringList tailLines;
+		const int   tailStart = qMax(0, sizeToInt(lines.size()) - 8);
+		tailLines.reserve(sizeToInt(lines.size()) - tailStart);
+		const int lineCount = sizeToInt(lines.size());
+		for (int i = tailStart; i < lineCount; ++i)
+			tailLines.push_back(lines.at(i).text);
 		m_nativeOutputCanvas->setProperty("qmud_native_plain_line_count", lines.size());
 		m_nativeOutputCanvas->setProperty("qmud_native_plain_last_line",
 		                                  lines.isEmpty() ? QString() : lines.constLast().text);
+		m_nativeOutputCanvas->setProperty("qmud_native_plain_tail_lines", tailLines);
 		m_nativeOutputCanvas->setProperty("qmud_native_visual_row_count", 0);
 		m_nativeOutputCanvas->setProperty("qmud_native_cache_full_rebuilds", m_nativeRenderCacheFullRebuilds);
 		m_nativeOutputCanvas->setProperty("qmud_native_cache_soft_rebuilds", m_nativeRenderCacheSoftRebuilds);
@@ -7628,9 +8716,8 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 	}
 	const qreal effectiveLineAdvance =
 	    m_nativeLayoutCachedLineAdvance > 0.0 ? m_nativeLayoutCachedLineAdvance : fallbackLineAdvance;
-	qreal     docY = m_nativeLayoutCumulativeHeights.size() > lines.size()
-	                     ? m_nativeLayoutCumulativeHeights.at(lines.size())
-	                     : 0.0;
+	qreal docY =
+	    m_nativeLayoutHeightIndex.size() == lines.size() ? m_nativeLayoutHeightIndex.totalHeight() : 0.0;
 	const int totalVisualRows =
 	    effectiveLineAdvance > 0.0 ? qMax(0, static_cast<int>(std::round(docY / effectiveLineAdvance))) : 0;
 	for (RenderPane &pane : panes)
@@ -7677,18 +8764,8 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 		painter->setClipRegion(clippedPaneRegion);
 		const bool drawSelectionForPane =
 		    hasNativeSelection && pane.view && pane.view == m_nativeOutputSelection.sourceView;
-		auto firstVisibleIt =
-		    std::ranges::upper_bound(std::ranges::subrange(m_nativeLayoutCumulativeHeights.cbegin() + 1,
-		                                                   m_nativeLayoutCumulativeHeights.cend()),
-		                             visibleTop);
-		int firstVisibleLine =
-		    qMax(0, sizeToInt(firstVisibleIt - m_nativeLayoutCumulativeHeights.cbegin()) - 1);
-		auto lastVisibleIt =
-		    std::ranges::upper_bound(std::ranges::subrange(m_nativeLayoutCumulativeHeights.cbegin(),
-		                                                   m_nativeLayoutCumulativeHeights.cend()),
-		                             visibleBottom);
-		int lastVisibleLine = qMin(sizeToInt(lines.size()) - 1,
-		                           sizeToInt(lastVisibleIt - m_nativeLayoutCumulativeHeights.cbegin()) - 1);
+		int firstVisibleLine = nativeLayoutLineAtY(visibleTop);
+		int lastVisibleLine  = qMin(sizeToInt(lines.size()) - 1, nativeLayoutLineAtY(visibleBottom));
 		if (firstVisibleLine > lastVisibleLine)
 		{
 			painter->restore();
@@ -7700,33 +8777,22 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 		                            qMin(sizeToInt(lines.size()) - 1, lastVisibleLine + 2), wrapWidthPixels,
 		                            localWrapWidthPixels, lineSpacingSetting, layoutFont))
 		{
-			docY             = m_nativeLayoutCumulativeHeights.size() > lines.size()
-			                       ? m_nativeLayoutCumulativeHeights.at(lines.size())
-			                       : 0.0;
+			docY = m_nativeLayoutHeightIndex.size() == lines.size() ? m_nativeLayoutHeightIndex.totalHeight()
+			                                                        : 0.0;
 			nativeMaxScroll  = qMax(0, static_cast<int>(std::ceil(docY)) - pane.textRect.height());
 			effectiveScrollY = nativeMaxScroll > 0 ? qBound(0, pane.scrollY, nativeMaxScroll) : 0;
 			visibleTop       = static_cast<qreal>(effectiveScrollY) +
 			                   static_cast<qreal>(clippedPaneRect.top() - pane.textRect.top());
 			visibleBottom    = static_cast<qreal>(effectiveScrollY) +
 			                   static_cast<qreal>(clippedPaneRect.bottom() - pane.textRect.top());
-			firstVisibleIt =
-			    std::ranges::upper_bound(std::ranges::subrange(m_nativeLayoutCumulativeHeights.cbegin() + 1,
-			                                                   m_nativeLayoutCumulativeHeights.cend()),
-			                             visibleTop);
-			firstVisibleLine =
-			    qMax(0, sizeToInt(firstVisibleIt - m_nativeLayoutCumulativeHeights.cbegin()) - 1);
-			lastVisibleIt =
-			    std::ranges::upper_bound(std::ranges::subrange(m_nativeLayoutCumulativeHeights.cbegin(),
-			                                                   m_nativeLayoutCumulativeHeights.cend()),
-			                             visibleBottom);
-			lastVisibleLine = qMin(sizeToInt(lines.size()) - 1,
-			                       sizeToInt(lastVisibleIt - m_nativeLayoutCumulativeHeights.cbegin()) - 1);
+			firstVisibleLine = nativeLayoutLineAtY(visibleTop);
+			lastVisibleLine  = qMin(sizeToInt(lines.size()) - 1, nativeLayoutLineAtY(visibleBottom));
 		}
+		qreal lineTop = nativeLayoutCumulativeHeightAt(firstVisibleLine);
 		for (int i = firstVisibleLine; i <= lastVisibleLine; ++i)
 		{
 			const NativeOutputRenderLine &line        = lines.at(i);
-			const qreal                   lineTop     = m_nativeLayoutCumulativeHeights.at(i);
-			const qreal                   lineBottom  = m_nativeLayoutCumulativeHeights.at(i + 1);
+			const qreal                   lineBottom  = lineTop + m_nativeLayoutHeightIndex.heightAt(i);
 			const qreal                   lineOpacity = qBound(0.0, line.opacity, 1.0);
 			const int                     lineY       = static_cast<int>(
 			    std::floor(static_cast<qreal>(pane.textRect.top() - effectiveScrollY) + lineTop));
@@ -7736,7 +8802,10 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 			                         qMax(1, lineBottomY - lineY));
 			lineBackgroundRect = lineBackgroundRect.intersected(clippedPaneRect);
 			if (lineBackgroundRect.isEmpty() || !clippedPaneRegion.intersects(lineBackgroundRect))
+			{
+				lineTop = lineBottom;
 				continue;
+			}
 			if (clearScrollBlitLineBackgrounds)
 			{
 				if (!lineBackgroundRect.isEmpty() && !scrollBlitExposedRect.contains(lineBackgroundRect))
@@ -7765,11 +8834,17 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 			}
 
 			if (line.text.isEmpty())
+			{
+				lineTop = lineBottom;
 				continue;
+			}
 
 			const QTextLayout *layout = nativeLayoutForLine(i);
 			if (!layout || layout->lineCount() <= 0)
+			{
+				lineTop = lineBottom;
 				continue;
+			}
 
 			QVector<QRectF> selectionRects;
 			if (drawSelectionForPane && i >= selectionStartLineZero && i <= selectionEndLineZero)
@@ -7821,6 +8896,7 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 
 			for (const QRectF &rect : std::as_const(selectionRects))
 				painter->fillRect(rect, selectionColour);
+			lineTop = lineBottom;
 		}
 		painter->restore();
 		updateNativeOutputPanePaintState(pane.view, pane.textRect, clippedPaneRegion, effectiveScrollY,
@@ -7989,7 +9065,7 @@ void WorldView::markNativeRuntimeRangeRestitchPending(const int runtimeLineIndex
 const WorldView::NativeOutputRenderLines &
 WorldView::synchronizeNativeRuntimeOutputPresentation(const bool allowLayoutBuild, const bool followTail)
 {
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	syncNativeOutputScrollBarsFromLayout(lines, allowLayoutBuild);
 	if (followTail && !m_frozen)
 	{
@@ -7998,6 +9074,7 @@ WorldView::synchronizeNativeRuntimeOutputPresentation(const bool allowLayoutBuil
 		else
 			scrollViewToEnd(m_output);
 	}
+	applyPendingNativeSelectionRenderDelta(lines);
 	clearNativeSelectionIfOutsideVisibleViewport(m_output);
 	clearNativeSelectionIfOutsideVisibleViewport(m_liveOutput);
 	notifyAccessibleOutputPresented(lines);
@@ -8025,7 +9102,7 @@ void WorldView::requestNativeRuntimeOutputPresentationSync(const bool allowLayou
 		    that->m_nativeRuntimeOutputPresentationQueued          = false;
 		    that->m_nativeRuntimeOutputPresentationNeedsLayoutSync = false;
 		    that->m_nativeRuntimeOutputPresentationFollowTail      = false;
-		    const QVector<NativeOutputRenderLine> &lines =
+		    const NativeOutputRenderLines &lines =
 		        that->synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, followTail);
 #ifndef NDEBUG
 		    if (that->m_nativeRangeRestitchDiagCount > 0)
@@ -8053,7 +9130,7 @@ void WorldView::requestNativeRuntimeOutputPresentationSync(const bool allowLayou
 		m_nativeRuntimeOutputPresentationQueued          = false;
 		m_nativeRuntimeOutputPresentationNeedsLayoutSync = false;
 		m_nativeRuntimeOutputPresentationFollowTail      = false;
-		const QVector<NativeOutputRenderLine> &lines =
+		const NativeOutputRenderLines &lines =
 		    synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, followTail);
 #ifndef NDEBUG
 		if (m_nativeRangeRestitchDiagCount > 0)
@@ -8129,7 +9206,7 @@ void WorldView::requestOutputScrollToEnd(const bool allowLayoutBuild)
 			                             .arg(that->m_scrollbackSplitActive ? QStringLiteral("1")
 			                                                                : QStringLiteral("0"));
 		    }
-		    const QVector<NativeOutputRenderLine> &lines =
+		    const NativeOutputRenderLines &lines =
 		        that->synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, true);
 		    that->requestNativeOutputPresentationRepaint(true, lines);
 	    },
@@ -8138,7 +9215,7 @@ void WorldView::requestOutputScrollToEnd(const bool allowLayoutBuild)
 	{
 		m_scrollToEndQueued          = false;
 		m_scrollToEndNeedsLayoutSync = false;
-		const QVector<NativeOutputRenderLine> &lines =
+		const NativeOutputRenderLines &lines =
 		    synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, true);
 		requestNativeOutputPresentationRepaint(true, lines);
 	}
@@ -8488,8 +9565,8 @@ void WorldView::echoInputText(const QString &text)
 
 QStringList WorldView::outputLines() const
 {
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
-	QStringList                            result;
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+	QStringList                    result;
 	result.reserve(lines.size());
 	for (const NativeOutputRenderLine &line : lines)
 		result.push_back(line.text);
@@ -8552,12 +9629,7 @@ bool WorldView::hasInputSelection() const
 
 QString WorldView::currentHoveredHyperlink() const
 {
-	WrapTextBrowser     *view = nullptr;
-	NativeOutputPosition position;
-	QString              href;
-	if (nativeOutputHitTestGlobal(QCursor::pos(), view, position, &href, nullptr))
-		return href;
-	return {};
+	return m_hoveredHyperlinkHref;
 }
 
 void WorldView::applyHoveredHyperlink(const QString &href)
@@ -8581,12 +9653,21 @@ void WorldView::applyHoveredHyperlink(const QString &href)
 
 void WorldView::refreshHoveredHyperlinkFromCursor()
 {
-	applyHoveredHyperlink(currentHoveredHyperlink());
+	WrapTextBrowser     *view = nullptr;
+	NativeOutputPosition position;
+	QString              href;
+	const QPoint         cursorPos = QCursor::pos();
+	if (!nativeOutputHitTestGlobal(cursorPos, view, position, &href, nullptr, true))
+	{
+		applyHoveredHyperlink(QString());
+		return;
+	}
+	applyHoveredHyperlink(href);
 }
 
 bool WorldView::hyperlinkHoverActive() const
 {
-	return !m_hoveredHyperlinkHref.isEmpty() || !currentHoveredHyperlink().isEmpty();
+	return !m_hoveredHyperlinkHref.isEmpty();
 }
 
 bool WorldView::isAtBufferEnd() const
@@ -8601,7 +9682,7 @@ bool WorldView::isAtBufferEnd() const
 
 void WorldView::selectOutputLine(int zeroBasedLine) const
 {
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (lines.isEmpty())
 		return;
 
@@ -8613,7 +9694,7 @@ void WorldView::selectOutputLine(int zeroBasedLine) const
 
 void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endColumn) const
 {
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (lines.isEmpty())
 		return;
 
@@ -8647,13 +9728,12 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 	if (layoutHeightChanged)
 		syncNativeOutputScrollBarsFromLayout(lines, false);
 
-	if (zeroBasedLine + 1 >= m_nativeLayoutCumulativeHeights.size())
+	if (m_nativeLayoutHeightIndex.size() != lines.size())
 		return;
 
-	const int lineTop =
-	    qMax(0, static_cast<int>(std::floor(m_nativeLayoutCumulativeHeights.at(zeroBasedLine))));
+	const int lineTop = qMax(0, static_cast<int>(std::floor(nativeLayoutCumulativeHeightAt(zeroBasedLine))));
 	const int lineBottom =
-	    qMax(lineTop + 1, static_cast<int>(std::ceil(m_nativeLayoutCumulativeHeights.at(zeroBasedLine + 1))));
+	    qMax(lineTop + 1, static_cast<int>(std::ceil(nativeLayoutCumulativeHeightAt(zeroBasedLine + 1))));
 
 	const int currentTop    = bar->value();
 	const int pageStep      = qMax(1, bar->pageStep());
@@ -8678,7 +9758,7 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 
 void WorldView::setOutputSelection(int startLine, int endLine, int startColumn, int endColumn) const
 {
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (lines.isEmpty())
 		return;
 
@@ -8743,10 +9823,10 @@ bool WorldView::doOutputFind(bool again)
 	if (!m_outputFind)
 		m_outputFind.reset(new OutputFindState());
 
-	OutputFindState                       &state      = *m_outputFind;
-	const QVector<NativeOutputRenderLine> &lines      = nativeOutputRenderLines();
-	const int                              totalLines = sizeToInt(lines.size());
-	auto                                   lineTextAt = [&lines](const int zeroBasedLine)
+	OutputFindState               &state      = *m_outputFind;
+	const NativeOutputRenderLines &lines      = nativeOutputRenderLines();
+	const int                      totalLines = sizeToInt(lines.size());
+	auto                           lineTextAt = [&lines](const int zeroBasedLine)
 	{
 		if (zeroBasedLine < 0 || zeroBasedLine >= lines.size())
 			return QString{};
@@ -9029,7 +10109,7 @@ QString WorldView::wordUnderCursor() const
 {
 	WrapTextBrowser     *view = nullptr;
 	NativeOutputPosition position;
-	if (!nativeOutputHitTestGlobal(QCursor::pos(), view, position, nullptr, nullptr))
+	if (!nativeOutputHitTestGlobal(QCursor::pos(), view, position, nullptr, nullptr, true))
 		return {};
 
 	return wordAtNativeOutputPosition(position);
@@ -9037,7 +10117,7 @@ QString WorldView::wordUnderCursor() const
 
 QString WorldView::wordAtNativeOutputPosition(const NativeOutputPosition &position) const
 {
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 	if (position.line < 0 || position.line >= lines.size())
 		return {};
 	const QString text = lines.at(position.line).text;
@@ -9367,8 +10447,8 @@ QString WorldView::inputSelectionText() const
 
 QString WorldView::outputPlainText() const
 {
-	const QVector<NativeOutputRenderLine> &lines = nativeOutputRenderLines();
-	QStringList                            joined;
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+	QStringList                    joined;
 	joined.reserve(lines.size());
 	for (const NativeOutputRenderLine &line : lines)
 		joined.push_back(line.text);
@@ -9513,7 +10593,7 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 		else
 			m_runtime->addLine(text, recordedFlags, displaySpans, newLine);
 
-		const QVector<WorldRuntime::LineEntry> &lines = m_runtime->lines();
+		const auto &lines = m_runtime->lines();
 		if (!lines.isEmpty())
 		{
 			displayEntry = lines.last();
@@ -9615,11 +10695,6 @@ void WorldView::updatePartialOutputText(const QString &text, const QVector<World
 			m_nativePartialOutputSpans.push_back(span);
 		}
 	}
-	if (m_nativeLayoutCacheValid)
-	{
-		const int tailIndex               = qMax(0, sizeToInt(m_nativeLayoutVisualRows.size()) - 1);
-		m_nativeLayoutCumulativeDirtyFrom = qMin(m_nativeLayoutCumulativeDirtyFrom, tailIndex);
-	}
 	syncOutputTextVisibilityForNativeCanvas();
 	requestOutputScrollToEnd();
 	requestNativeOutputTailRepaint();
@@ -9637,15 +10712,10 @@ void WorldView::clearPartialOutput()
 	m_nativeHasPartialOutput = false;
 	m_nativePartialOutputText.clear();
 	m_nativePartialOutputSpans.clear();
-	removeNativePartialRenderLineOverlay(false);
+	removeNativePartialRenderLineOverlay(true);
 	m_hasPartialOutput    = false;
 	m_partialOutputStart  = 0;
 	m_partialOutputLength = 0;
-	if (m_nativeLayoutCacheValid)
-	{
-		const int tailIndex               = qMax(0, sizeToInt(m_nativeLayoutVisualRows.size()) - 1);
-		m_nativeLayoutCumulativeDirtyFrom = qMin(m_nativeLayoutCumulativeDirtyFrom, tailIndex);
-	}
 	syncOutputTextVisibilityForNativeCanvas();
 	requestNativeOutputTailRepaint();
 	requestOutputScrollToEnd();
@@ -9661,14 +10731,9 @@ bool WorldView::commitPendingIncomingPartialOutput()
 	m_nativeHasPartialOutput = false;
 	m_nativePartialOutputText.clear();
 	m_nativePartialOutputSpans.clear();
-	m_hasPartialOutput    = false;
-	m_partialOutputStart  = 0;
-	m_partialOutputLength = 0;
-	if (m_nativeLayoutCacheValid)
-	{
-		const int tailIndex               = qMax(0, sizeToInt(m_nativeLayoutVisualRows.size()) - 1);
-		m_nativeLayoutCumulativeDirtyFrom = qMin(m_nativeLayoutCumulativeDirtyFrom, tailIndex);
-	}
+	m_hasPartialOutput                  = false;
+	m_partialOutputStart                = 0;
+	m_partialOutputLength               = 0;
 	m_nativeRenderLineCacheFromRuntime  = true;
 	m_accessibleOutputPendingTailAppend = true;
 	syncOutputTextVisibilityForNativeCanvas();
@@ -9765,7 +10830,7 @@ void WorldView::clearOutputBuffer()
 	requestDrawOutputWindowNotification();
 }
 
-void WorldView::restoreOutputFromPersistedLines(const QVector<WorldRuntime::LineEntry> &lines)
+void WorldView::restoreOutputFromPersistedLines(const IndexedRingBuffer<WorldRuntime::LineEntry> &lines)
 {
 	stopIncrementalHyperlinkRestyle();
 	m_pendingOutput.clear();
@@ -9815,6 +10880,16 @@ void WorldView::restoreOutputFromPersistedLines(const QVector<WorldRuntime::Line
 	primeNativeOutputCaches();
 	requestDrawOutputWindowNotification();
 	requestNativeOutputRepaint();
+}
+
+void WorldView::restoreOutputFromPersistedLines(const QVector<WorldRuntime::LineEntry> &lines)
+{
+	restoreOutputFromPersistedLines(IndexedRingBuffer<WorldRuntime::LineEntry>(lines));
+}
+
+void WorldView::rebuildOutputFromLines(const IndexedRingBuffer<WorldRuntime::LineEntry> &lines)
+{
+	restoreOutputFromPersistedLines(lines);
 }
 
 void WorldView::rebuildOutputFromLines(const QVector<WorldRuntime::LineEntry> &lines)
@@ -11684,7 +12759,7 @@ bool WorldView::fadeRebuildNeededNow() const
 	if (!m_runtime || m_fadeOutputBufferAfterSeconds <= 0 || m_fadeOutputSeconds <= 0 || m_frozen)
 		return false;
 
-	const QVector<WorldRuntime::LineEntry> &lines = m_runtime->lines();
+	const auto &lines = m_runtime->lines();
 	if (lines.isEmpty())
 		return false;
 
@@ -11783,24 +12858,36 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 		return;
 	}
 
-	const QVector<NativeOutputRenderLine> &renderLines = nativeOutputRenderLines();
-	if (hit.line < 0 || hit.line >= renderLines.size())
+	const NativeOutputRenderLines &renderLines = nativeOutputRenderLines();
+	if (hit.line < 0 || hit.line >= sizeToInt(renderLines.size()))
 	{
 		hideLineInfoTooltip();
 		return;
 	}
 
-	const NativeOutputRenderLine           &renderLine   = renderLines.at(hit.line);
-	const QVector<WorldRuntime::LineEntry> &runtimeLines = m_runtime->lines();
-	const WorldRuntime::LineEntry          *resolvedLine = nullptr;
-	if (renderLine.firstRuntimeLineNumber > 0)
+	const NativeOutputRenderLine  &renderLine   = renderLines.at(hit.line);
+	const auto                    &runtimeLines = m_runtime->lines();
+	const WorldRuntime::LineEntry *resolvedLine = nullptr;
+	const qint64 expectedRuntimeLineNumber      = renderLine.sourceRuntimeLineNumbers.isEmpty()
+	                                                  ? renderLine.firstRuntimeLineNumber
+	                                                  : renderLine.sourceRuntimeLineNumbers.constFirst();
+	if (expectedRuntimeLineNumber > 0 && renderLine.firstRuntimeLineIndex >= 0)
 	{
-		const int runtimeIndex = findRuntimeLineIndexByNumberNear(
-		    runtimeLines, renderLine.firstRuntimeLineNumber, hit.line, false);
-		if (runtimeIndex >= 0 && runtimeIndex < runtimeLines.size())
+		const qint64 runtimeIndex = renderLine.firstRuntimeLineIndex - m_nativeRenderRuntimeIndexBase;
+		if (runtimeIndex >= 0 && runtimeIndex < runtimeLines.size() &&
+		    runtimeLines.at(runtimeIndex).lineNumber == expectedRuntimeLineNumber)
+		{
+			resolvedLine = &runtimeLines.at(runtimeIndex);
+		}
+	}
+	if (!resolvedLine && expectedRuntimeLineNumber > 0)
+	{
+		const int runtimeIndex =
+		    findRuntimeLineIndexByNumberNear(runtimeLines, expectedRuntimeLineNumber, hit.line, false);
+		if (runtimeIndex >= 0 && runtimeIndex < sizeToInt(runtimeLines.size()))
 			resolvedLine = &runtimeLines.at(runtimeIndex);
 	}
-	if (!resolvedLine && hit.line < runtimeLines.size())
+	if (!resolvedLine && hit.line < sizeToInt(runtimeLines.size()))
 		resolvedLine = &runtimeLines.at(hit.line);
 	if (!resolvedLine)
 	{
@@ -12076,33 +13163,37 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 		NativeOutputPosition mouseMoveHit;
 		bool                 mouseMoveTextHit = false;
 
-		if (event->type() == QEvent::MouseMove)
+		auto                 resolveMouseMoveNativeHit = [&]
 		{
-			if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
+			if (event->type() != QEvent::MouseMove)
+				return;
+			auto *mouseEvent = dynamic_cast<QMouseEvent *>(event);
+			if (!mouseEvent)
 			{
-				QString mouseMoveHref;
-				if (nativeOutputHitTestForMouseEvent(watchedWidget, mouseEvent, mouseMoveHitView,
-				                                     mouseMoveHitPosInView, mouseMoveHit, &mouseMoveHref,
-				                                     nullptr, false, &mouseMoveTextHit))
+				refreshHoveredHyperlinkFromCursor();
+				return;
+			}
+
+			QString mouseMoveHref;
+			if (nativeOutputHitTestForMouseEvent(watchedWidget, mouseEvent, mouseMoveHitView,
+			                                     mouseMoveHitPosInView, mouseMoveHit, &mouseMoveHref, nullptr,
+			                                     true, &mouseMoveTextHit))
+			{
+				hasMouseMoveNativeHit = true;
+				applyHoveredHyperlink(mouseMoveHref);
+				if (m_runtime)
 				{
-					hasMouseMoveNativeHit = true;
-					applyHoveredHyperlink(mouseMoveHref);
-					if (m_runtime)
-					{
-						m_runtime->setWordUnderMenu(
-						    mouseMoveTextHit ? wordAtNativeOutputPosition(mouseMoveHit) : QString(), true);
-					}
-				}
-				else
-				{
-					refreshHoveredHyperlinkFromCursor();
-					if (m_runtime)
-						m_runtime->setWordUnderMenu(QString(), false);
+					m_runtime->setWordUnderMenu(
+					    mouseMoveTextHit ? wordAtNativeOutputPosition(mouseMoveHit) : QString(), true);
 				}
 			}
 			else
+			{
 				refreshHoveredHyperlinkFromCursor();
-		}
+				if (m_runtime)
+					m_runtime->setWordUnderMenu(QString(), false);
+			}
+		};
 
 		bool handled = false;
 		switch (event->type())
@@ -12153,6 +13244,9 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 		default:
 			break;
 		}
+
+		if (!handled)
+			resolveMouseMoveNativeHit();
 
 		if (!handled &&
 		    (event->type() == QEvent::MouseMove || event->type() == QEvent::MouseButtonPress ||
@@ -12758,7 +13852,7 @@ bool WorldView::executeMacroByName(const QString &name)
 	{
 		if (!confirmReplaceTyping(send))
 			return true;
-		setInputText(send, true);
+		setInputText(send, false);
 		return true;
 	}
 	if (type == QStringLiteral("send_now"))
@@ -12769,7 +13863,7 @@ bool WorldView::executeMacroByName(const QString &name)
 		                           noHistoryFlag.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
 		                           noHistoryFlag.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
 		m_runtime->setCurrentActionSource(WorldRuntime::eUserMacro);
-		(void)m_runtime->sendCommand(send, true, false, true, !noHistory, true);
+		(void)m_runtime->executeUserMacroSendNow(send, !noHistory);
 		m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
 		return true;
 	}
@@ -13542,8 +14636,8 @@ bool WorldView::handleTabCompletionKeyPress()
 			return false;
 		}
 
-		const QVector<WorldRuntime::LineEntry> &lines     = m_runtime->lines();
-		int                                     startLine = sizeToInt(lines.size()) - 1;
+		const auto &lines     = m_runtime->lines();
+		int         startLine = sizeToInt(lines.size()) - 1;
 		if (continueCycle)
 		{
 			if (lastSource >= 0)

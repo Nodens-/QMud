@@ -184,12 +184,14 @@ set(QMUD_SOURCES
         helpers/WorldSessionRestoreFlowUtils.cpp
         helpers/WorldSessionStateUtils.cpp
         helpers/ReloadUtils.cpp
+        helpers/MushclientImportUtils.cpp
         Environment.cpp
         Accelerators.cpp
         helpers/AliasMatchUtils.cpp
         helpers/HyperlinkActionUtils.cpp
         helpers/NoteColourUtils.cpp
         helpers/WorldCommandProcessorUtils.cpp
+        helpers/SoundFileRoutingUtils.cpp
         helpers/LuaExecutionUtils.cpp
         helpers/LuaModalDialogUtils.cpp
         helpers/AccessibleTextUtils.cpp
@@ -273,6 +275,7 @@ set(QMUD_HEADERS
         Environment.h
         helpers/LogCompressionUtils.h
         helpers/ReloadUtils.h
+        helpers/MushclientImportUtils.h
         helpers/WorldSessionRestoreFlowUtils.h
         helpers/WorldSessionStateUtils.h
         helpers/PluginCallbackCatalogUtils.h
@@ -283,6 +286,7 @@ set(QMUD_HEADERS
         helpers/NoteColourUtils.h
         CommandMappingTypes.h
         helpers/WorldCommandProcessorUtils.h
+        helpers/SoundFileRoutingUtils.h
         ErrorDescriptions.h
         InfoTypesMetadata.h
         InfoTypeData.inc

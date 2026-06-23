@@ -11,6 +11,7 @@
 #define QMUD_WORLDRUNTIME_H
 
 #include "AnsiSgrParseUtils.h"
+#include "IndexedRingBuffer.h"
 #include "LuaExecutor.h"
 #include "MemoryImageDecodeCacheUtils.h"
 #include "MiniWindow.h"
@@ -49,6 +50,8 @@ class ILuaExecutor;
 class WorldCommandProcessor;
 class WorldView;
 class QUdpSocket;
+class QAudioOutput;
+class QMediaPlayer;
 class QSoundEffect;
 class QTemporaryFile;
 class QTcpServer;
@@ -530,6 +533,8 @@ class WorldRuntime : public QObject
 		struct SoundBuffer
 		{
 				QSoundEffect   *effect{nullptr};
+				QMediaPlayer   *player{nullptr};
+				QAudioOutput   *audioOutput{nullptr};
 				QTemporaryFile *tempFile{nullptr};
 				bool            looping{false};
 				double          volume{1.0};
@@ -1247,6 +1252,11 @@ class WorldRuntime : public QObject
 		 */
 		void                      notifyNativePluginStateChanged();
 		/**
+		 * @brief Returns whether MushReader owns live speech for this runtime.
+		 * @return `true` when the native MushReader shim is installed or currently enabled for the runtime.
+		 */
+		[[nodiscard]] bool        hasMushReaderLiveSpeechOwner() const;
+		/**
 		 * @brief Lists installed plugin ids in current order.
 		 * @return Plugin id list.
 		 */
@@ -1438,12 +1448,31 @@ class WorldRuntime : public QObject
 		 * @brief Returns immutable output line buffer.
 		 * @return Immutable buffered line list.
 		 */
-		[[nodiscard]] const QVector<LineEntry> &lines() const;
+		[[nodiscard]] const IndexedRingBuffer<LineEntry> &lines() const;
+		/**
+		 * @brief Enables/disables the session-state output-buffer save seal.
+		 * @param sealed Seal state.
+		 *
+		 * While sealed, runtime line-buffer mutations are ignored so an async session-state
+		 * writer can serialize a shallow ring-buffer snapshot without detaching the backing
+		 * store.
+		 */
+		void                                              setSessionStateOutputBufferSealed(bool sealed);
+		/**
+		 * @brief Returns whether the output buffer is sealed for session-state persistence.
+		 * @return `true` when line-buffer mutations are currently ignored.
+		 */
+		[[nodiscard]] bool                                isSessionStateOutputBufferSealed() const;
 		/**
 		 * @brief Replaces buffered output lines and rebuilds the attached view.
 		 * @param lines Replacement buffered output lines.
 		 */
-		void                                    replaceOutputLines(const QVector<LineEntry> &lines);
+		void replaceOutputLines(const IndexedRingBuffer<LineEntry> &lines);
+		/**
+		 * @brief Replaces buffered output lines and rebuilds the attached view.
+		 * @param lines Replacement buffered output lines.
+		 */
+		void replaceOutputLines(const QVector<LineEntry> &lines);
 		/**
 		 * @brief Marks the last buffered input line as hard-return terminated when pending.
 		 *
@@ -1451,14 +1480,14 @@ class WorldRuntime : public QObject
 		 * keeping echoed commands on the same line) so runtime line state remains consistent
 		 * with the rendered document after rebuilds.
 		 */
-		void                                    finalizePendingInputLineHardReturn();
+		void finalizePendingInputLineHardReturn();
 		/**
 		 * @brief Clears hard-return termination flag on the last buffered line when set.
 		 *
 		 * Used by keep-on-same-line echo flow when the view consumes a trailing
 		 * line break from the existing rendered output.
 		 */
-		void                                    clearLastLineHardReturn();
+		void clearLastLineHardReturn();
 		/**
 		 * @brief Begins temporary incoming-line context for Lua callbacks.
 		 * @param text Incoming line text.
@@ -2747,6 +2776,17 @@ class WorldRuntime : public QObject
 		 * @return API status code.
 		 */
 		[[nodiscard]] int            executeCommand(const QString &text) const;
+		/**
+		 * @brief Executes one Send Now macro via command processor.
+		 *
+		 * The caller owns action-source setup; set the runtime source to
+		 * `WorldRuntime::eUserMacro` when macro source semantics are required.
+		 *
+		 * @param text Macro Send Now text.
+		 * @param history Add original macro text to history when `true`.
+		 * @return API status code.
+		 */
+		[[nodiscard]] int            executeUserMacroSendNow(const QString &text, bool history) const;
 		/**
 		 * @brief Executes one direct trigger-script command with priority over queued movement.
 		 * @param text Command text.
@@ -5593,7 +5633,8 @@ class WorldRuntime : public QObject
 		QList<Include>                                  m_includes;
 		QList<Script>                                   m_scripts;
 		QString                                         m_comments;
-		QVector<LineEntry>                              m_lines;
+		IndexedRingBuffer<LineEntry>                    m_lines;
+		bool                                            m_sessionStateOutputBufferSealed{false};
 		QMap<qint64, int>                               m_acceleratorKeyToCommand;
 		QMap<int, AcceleratorEntry>                     m_commandToAcceleratorEntry;
 		int                                             m_nextAcceleratorCommand{kAcceleratorFirstCommand};
@@ -5702,6 +5743,10 @@ class WorldRuntime : public QObject
 		bool                                    m_outputFrozen{false};
 		TextRectangleSettings                   m_textRectangle;
 		QMap<int, UdpListener>                  m_udpListeners;
+		[[nodiscard]] static bool               soundBufferHasBackend(const SoundBuffer &entry);
+		[[nodiscard]] static bool               soundBufferIsPlaying(const SoundBuffer &entry);
+		static void                             clearSoundBuffer(SoundBuffer &entry);
+		[[nodiscard]] static bool               shouldUseMediaPlayerForSoundFile(const QString &fileName);
 		QVector<SoundBuffer>                    m_soundBuffers;
 		int                                     m_outputFontHeight{0};
 		int                                     m_outputFontWidth{0};

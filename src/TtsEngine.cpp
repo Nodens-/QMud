@@ -16,10 +16,14 @@
 #include <QAudioDevice>
 #include <QCryptographicHash>
 #include <QDataStream>
+#include <QDebug>
+#include <QEvent>
 #include <QEventLoop>
 #include <QMediaDevices>
+#include <QMutex>
 #include <QPointer>
 #include <QTimer>
+#include <QWaitCondition>
 #endif
 
 namespace
@@ -28,6 +32,69 @@ namespace
 	constexpr int kMaxPendingChars      = 512 * 1024;
 
 #if QMUD_ENABLE_TEXT_TO_SPEECH
+	constexpr int kSpeechShutdownWaitMs = 1500;
+
+	struct SpeechShutdownState
+	{
+			QMutex         mutex;
+			QWaitCondition wake;
+			bool           completed{false};
+	};
+
+	class SpeechObjectCleanup final : public QObject
+	{
+		public:
+			SpeechObjectCleanup(std::unique_ptr<QTextToSpeech>       speechObject,
+			                    std::shared_ptr<SpeechShutdownState> shutdownState,
+			                    QPointer<QThread> ownerThread, const bool stopOwnerThread)
+			    : m_speechObject(std::move(speechObject)), m_shutdownState(std::move(shutdownState)),
+			      m_ownerThread(std::move(ownerThread)), m_stopOwnerThread(stopOwnerThread)
+			{
+			}
+
+			~SpeechObjectCleanup() override
+			{
+				destroySpeechObject();
+			}
+
+			void complete()
+			{
+				destroySpeechObject();
+				{
+					QMutexLocker locker(&m_shutdownState->mutex);
+					m_shutdownState->completed = true;
+					m_shutdownState->wake.wakeAll();
+				}
+				deleteLater();
+				if (m_stopOwnerThread && m_ownerThread)
+					m_ownerThread->quit();
+			}
+
+		private:
+			void destroySpeechObject()
+			{
+				if (!m_speechObject)
+					return;
+				m_speechObject->stop();
+				m_speechObject.reset();
+			}
+
+			std::unique_ptr<QTextToSpeech>       m_speechObject;
+			std::shared_ptr<SpeechShutdownState> m_shutdownState;
+			QPointer<QThread>                    m_ownerThread;
+			bool                                 m_stopOwnerThread{false};
+	};
+
+	[[nodiscard]] SpeechObjectCleanup *
+	releaseCleanupContextToOwnerThread(std::unique_ptr<SpeechObjectCleanup> &cleanupContext,
+	                                   const SpeechObjectCleanup            *expectedContext)
+	{
+		SpeechObjectCleanup *releasedContext = cleanupContext.release();
+		Q_ASSERT(releasedContext == expectedContext);
+		Q_UNUSED(expectedContext);
+		return releasedContext;
+	}
+
 	QString buildVoiceIdBase(const QVoice &voice)
 	{
 		const QString locale = voice.locale().name().trimmed();
@@ -113,6 +180,9 @@ namespace QMudTtsEngine
 		runtime->initializeAudioOutputs();
 
 #if QMUD_ENABLE_TEXT_TO_SPEECH
+		if (!QCoreApplication::instance())
+			return runtime;
+
 		const QStringList engines = QTextToSpeech::availableEngines();
 		if (engines.isEmpty())
 			return runtime;
@@ -146,12 +216,18 @@ namespace QMudTtsEngine
 	TtsEngine::~TtsEngine()
 	{
 #if QMUD_ENABLE_TEXT_TO_SPEECH
-		destroySpeechObject();
+		const bool speechDestroyed = destroySpeechObject(true);
 		if (speechThread && speechThread->isRunning())
 		{
-			speechThread->quit();
-			if (QThread::currentThread() != speechThread.get())
-				speechThread->wait();
+			if (speechDestroyed)
+				speechThread->quit();
+			if (QThread::currentThread() == speechThread.get())
+			{
+				releaseSpeechThreadAfterFailedShutdown("destructor is running on TTS worker thread");
+				return;
+			}
+			if (!speechThread->wait(kSpeechShutdownWaitMs))
+				releaseSpeechThreadAfterFailedShutdown("TTS worker did not stop during teardown");
 		}
 #endif
 	}
@@ -183,12 +259,15 @@ namespace QMudTtsEngine
 		if (!speech)
 			return;
 		QObject *callbackContext = callbackDispatcher ? callbackDispatcher.get() : speech.get();
-		const std::weak_ptr<TtsEngine> weakRuntime = shared_from_this();
+		const QPointer<QTextToSpeech>  speechSource = speech.get();
+		const std::weak_ptr<TtsEngine> weakRuntime  = shared_from_this();
 		QObject::connect(speech.get(), &QTextToSpeech::stateChanged, callbackContext,
-		                 [weakRuntime](const QTextToSpeech::State state)
+		                 [weakRuntime, speechSource](const QTextToSpeech::State state)
 		                 {
 			                 const auto runtime = weakRuntime.lock();
 			                 if (!runtime)
+				                 return;
+			                 if (!speechSource || runtime->speech.get() != speechSource)
 				                 return;
 			                 if (state == QTextToSpeech::Speaking || state == QTextToSpeech::Synthesizing)
 			                 {
@@ -217,22 +296,122 @@ namespace QMudTtsEngine
 		                 });
 	}
 
-	void TtsEngine::destroySpeechObject()
+	bool TtsEngine::destroySpeechObject(const bool stopOwnerThread)
 	{
 		if (!speech)
-			return;
-		QTextToSpeech *speechObject = speech.release();
+			return true;
+		std::unique_ptr<QTextToSpeech> speechObject = std::move(speech);
 		if (!speechObject)
-			return;
+			return true;
+		QObject::disconnect(speechObject.get(), nullptr, nullptr, nullptr);
+		QCoreApplication::removePostedEvents(speechObject.get(), QEvent::MetaCall);
 		if (speechObject->thread() == QThread::currentThread())
 		{
-			delete speechObject;
+			speechObject->stop();
+			speechObject.reset();
+			return true;
+		}
+		QPointer<QThread> ownerThread = speechObject->thread();
+		if (!ownerThread || !ownerThread->isRunning())
+		{
+			speechObject->stop();
+			speechObject.reset();
+			if (stopOwnerThread && ownerThread)
+				ownerThread->quit();
+			return true;
+		}
+
+		const auto shutdownState = std::make_shared<SpeechShutdownState>();
+		auto  cleanupContext = std::make_unique<SpeechObjectCleanup>(std::move(speechObject), shutdownState,
+		                                                             ownerThread, stopOwnerThread);
+		auto *cleanupContextPtr = cleanupContext.get();
+		cleanupContext->moveToThread(ownerThread);
+		QObject::connect(ownerThread, &QThread::finished, cleanupContextPtr, &QObject::deleteLater,
+		                 Qt::UniqueConnection);
+		[[maybe_unused]] SpeechObjectCleanup *releasedCleanupContext =
+		    releaseCleanupContextToOwnerThread(cleanupContext, cleanupContextPtr);
+		const bool invoked = QMetaObject::invokeMethod(
+		    cleanupContextPtr, [cleanupContextPtr] { cleanupContextPtr->complete(); }, Qt::QueuedConnection);
+		if (!invoked)
+		{
+			cleanupContextPtr->deleteLater();
+			if (stopOwnerThread && ownerThread)
+				ownerThread->quit();
+			return false;
+		}
+
+		bool completed = false;
+		{
+			QMutexLocker locker(&shutdownState->mutex);
+			if (!shutdownState->completed)
+				shutdownState->wake.wait(&shutdownState->mutex, kSpeechShutdownWaitMs);
+			completed = shutdownState->completed;
+		}
+		if (!completed && stopOwnerThread && ownerThread)
+			ownerThread->quit();
+		return completed;
+	}
+
+	bool TtsEngine::retireSpeechObject(std::unique_ptr<QTextToSpeech> &retiredSpeech)
+	{
+		if (!retiredSpeech)
+			return true;
+		QTextToSpeech *speechObject = retiredSpeech.get();
+		if (!speechObject)
+			return true;
+		if (speechObject->thread() == QThread::currentThread())
+		{
+			speechObject->stop();
+			retiredSpeech.reset();
+			return true;
+		}
+		const QPointer<QThread> ownerThread = speechObject->thread();
+		if (!ownerThread || !ownerThread->isRunning())
+		{
+			speechObject->stop();
+			retiredSpeech.reset();
+			return true;
+		}
+
+		if (!QMetaObject::invokeMethod(speechObject, [] {}, Qt::QueuedConnection))
+			return false;
+
+		QObject::disconnect(speechObject, nullptr, nullptr, nullptr);
+		QCoreApplication::removePostedEvents(speechObject, QEvent::MetaCall);
+
+		const bool cleanupQueued = QMetaObject::invokeMethod(
+		    speechObject,
+		    [speechObject]
+		    {
+			    speechObject->stop();
+			    speechObject->deleteLater();
+		    },
+		    Qt::QueuedConnection);
+		if (!cleanupQueued)
+			speechObject->deleteLater();
+
+		[[maybe_unused]] QTextToSpeech *releasedSpeech = retiredSpeech.release();
+		Q_ASSERT(releasedSpeech == speechObject);
+		return true;
+	}
+
+	void TtsEngine::releaseSpeechThreadAfterFailedShutdown(const char *context)
+	{
+		if (!speechThread)
+			return;
+		QThread *thread = speechThread.release();
+		if (!thread)
+			return;
+		if (!thread->isRunning())
+		{
+			delete thread;
 			return;
 		}
-		const bool invoked = QMetaObject::invokeMethod(
-		    speechObject, [speechObject]() { delete speechObject; }, Qt::BlockingQueuedConnection);
-		if (!invoked)
-			delete speechObject;
+		QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater, Qt::UniqueConnection);
+		thread->requestInterruption();
+		thread->quit();
+		qWarning().noquote() << QStringLiteral("[QMud][TTS] Releasing TTS worker during shutdown: %1")
+		                            .arg(QString::fromLatin1(context ? context : "unknown reason"));
 	}
 
 	void TtsEngine::enqueueBoundedUtterance(QString utterance)
@@ -299,10 +478,14 @@ namespace QMudTtsEngine
 		if (!replacementSpeech || replacementSpeech->errorReason() != QTextToSpeech::ErrorReason::NoError)
 			return false;
 
+		std::unique_ptr<QTextToSpeech> retiredSpeech = std::move(speech);
+		if (!retireSpeechObject(retiredSpeech))
+		{
+			speech = std::move(retiredSpeech);
+			return false;
+		}
 		if (speechThread && speechThread->isRunning())
 			replacementSpeech->moveToThread(speechThread.get());
-
-		destroySpeechObject();
 		speech = std::move(replacementSpeech);
 		invokeSpeechBlocking(
 		    [this](QTextToSpeech &speechObject)
@@ -340,7 +523,7 @@ namespace QMudTtsEngine
 				continue;
 			const QString idSuffix = QString::fromLatin1(rawId.toHex());
 			const QString tokenId  = QStringLiteral("QMUD\\TTS\\Audio\\Device\\%1")
-			                            .arg(idSuffix.isEmpty() ? QStringLiteral("unknown") : idSuffix);
+			                             .arg(idSuffix.isEmpty() ? QStringLiteral("unknown") : idSuffix);
 			const QString description =
 			    device.description().trimmed().isEmpty() ? tokenId : device.description().trimmed();
 			audioOutputIds.push_back(tokenId);

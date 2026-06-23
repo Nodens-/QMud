@@ -78,6 +78,17 @@ class WorldCommandProcessor : public QObject
 		 */
 		int                executeCommand(const QString &text);
 		/**
+		 * @brief Executes one Send Now macro through alias/queue/send pipeline.
+		 *
+		 * The caller owns action-source setup; set the runtime source to
+		 * `WorldRuntime::eUserMacro` when macro source semantics are required.
+		 *
+		 * @param text Macro Send Now text.
+		 * @param history Add original macro text to history when `true`.
+		 * @return Execution status/result code.
+		 */
+		int                executeUserMacroSendNow(const QString &text, bool history);
+		/**
 		 * @brief Executes one direct trigger-script command with priority over queued movement.
 		 * @param text Command text.
 		 * @return Execution status/result code.

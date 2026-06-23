@@ -21,14 +21,14 @@ namespace QMudWorldSessionState
 	 */
 	struct WorldSessionStateData
 	{
-			bool                                      hasOutputBuffer{false};
-			bool                                      hasCommandHistory{false};
-			bool                                      hasCustomMxpElements{false};
-			bool                                      hasMxpSessionState{false};
-			QVector<WorldRuntime::LineEntry>          outputLines;
-			QStringList                               commandHistory;
-			QList<TelnetProcessor::CustomElementInfo> customMxpElements;
-			TelnetProcessor::MxpSessionState          mxpSessionState;
+			bool                                       hasOutputBuffer{false};
+			bool                                       hasCommandHistory{false};
+			bool                                       hasCustomMxpElements{false};
+			bool                                       hasMxpSessionState{false};
+			IndexedRingBuffer<WorldRuntime::LineEntry> outputLines;
+			QStringList                                commandHistory;
+			QList<TelnetProcessor::CustomElementInfo>  customMxpElements;
+			TelnetProcessor::MxpSessionState           mxpSessionState;
 	};
 
 	/**

@@ -67,8 +67,8 @@ namespace QMudTtsEngine
 			 * @param platform Platform policy. `Auto` uses build target platform.
 			 * @return Preferred engine id or empty string when no suitable engine exists.
 			 */
-			static QString                    preferredEngineIdFor(const QStringList   &engines,
-			                                                       EnginePlatformPolicy platform = EnginePlatformPolicy::Auto);
+			static QString preferredEngineIdFor(const QStringList   &engines,
+			                                    EnginePlatformPolicy platform = EnginePlatformPolicy::Auto);
 
 			/**
 			 * @brief Tears down the speech object and worker thread.
@@ -246,8 +246,8 @@ namespace QMudTtsEngine
 			TtsEngine() = default;
 
 			[[nodiscard]] virtual bool supportsSynthesizeCapability() const;
-			virtual bool               queueSynthesizeUtterance(QString                                utterance,
-			                                                    const std::function<void(QByteArray)> &onChunk);
+			virtual bool queueSynthesizeUtterance(QString                                utterance,
+			                                      const std::function<void(QByteArray)> &onChunk);
 
 #if QMUD_ENABLE_TEXT_TO_SPEECH
 			std::unique_ptr<QTextToSpeech> speech;
@@ -335,11 +335,13 @@ namespace QMudTtsEngine
 			virtual bool rebindSpeechForAudioOutput(int outputIndex);
 
 		private:
-			void initializeAudioOutputs();
-			void wireSpeechStateCallbacks();
-			void destroySpeechObject();
-			void resolveStopTransitionIfTerminal();
-			void enqueueBoundedUtterance(QString utterance);
+			void        initializeAudioOutputs();
+			void        wireSpeechStateCallbacks();
+			bool        destroySpeechObject(bool stopOwnerThread);
+			static bool retireSpeechObject(std::unique_ptr<QTextToSpeech> &retiredSpeech);
+			void        releaseSpeechThreadAfterFailedShutdown(const char *context);
+			void        resolveStopTransitionIfTerminal();
+			void        enqueueBoundedUtterance(QString utterance);
 #else
 			void initializeAudioOutputs();
 #endif

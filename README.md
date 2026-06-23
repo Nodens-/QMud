@@ -23,19 +23,24 @@ The official site and documentation of QMud is here: [qmud.dev](https://qmud.dev
 
 ## Project status
 
-The porting has been completed. Behavior aims for high compatibility
-with original persistence and Lua workflows while using a modern Qt
-implementation. There are several improvements and new features implemented
-already. Please use the issue tracker, with the appropriate template to report
-issues, request features, etc.
+QMud is fully functional and early porting issues have been ironed out.
+There are several improvements and new features implemented already and many more on TODO.
+It is now also the FIRST and ONLY, at the time of this writing, MUD client with a multithreaded Lua engine.
+v11.00 essentially marks the first production release. QMud started with a v10 versioning offset in order to guarrantee
+higher than MUSHclient versioning for compatibility/importing reasons.
+Please use the issue tracker, with the appropriate template to report issues, request features, etc.
 
 ## Features
 
 - Cross-platform (Linux, Windows, macOS).
 - Unicode, NAWS, Terminal Type, CHARSET, EOR, ECHO, MXP, MSP, MCCP, MMCP, OSC8, xterm256 color, Truecolor, TLS (Direct &
   Upgrade).
-- Lua scripting.
+- Lua scripting. The FIRST and ONLY, currently, MUD client with a multithreaded Lua engine that allows ridiculously
+  heavy Lua plugin workloads without lagging the client.
 - Copyover-style in-place reload on Linux/macOS (`File -> Reload QMud`).
+- MushReader and LuaAudio implemented natively for VI workflows and are activated by the presence of those plugins in
+  existing world files or by loading the included stub plugins.
+- Passive TTS engine enabled automatically when a native screenreader is detected.
 - Split-pane scrollback buffer, persistent scrollback buffer/command history.
 - Autosave, autobackup, log rotation, log compression.
 - Autoupdates.
@@ -52,10 +57,10 @@ Do **NOT** use the issue tracker for general support requests.
 
 - Bug fix PRs are welcome.
 - Feature PRs have to be discussed first either on Issue tracker or Discord.
-- You can also contribute with documentation or translations (once work on both is started; but you can apply to help
-  before that)
+- You can also contribute with documentation or translations (once work on translations is started; but you can apply to
+  help before that).
 - You can test plugins of various MUDs and see if they're working right or not. Open detailed issues if something's not
-  working including a source for the plugin in question.
+  working and make sure to include a link to the source for the plugin in question.
 - You can also contribute with funding as funds are needed for code signing certificate, Apple registration etc.
   in order to bring QMud to the Apple Store/avoid issues with Windows SmartScreen/WDAC.
 
@@ -72,8 +77,19 @@ touching AND be able to make requested changes after review. "Vibe coding" is NO
 
 ## Migration from MUSHclient data
 
-QMud can migrate an existing MUSHclient data tree on first run. Migration is
-copy-based, so source files are preserved and moved under a `migrated` marker
+QMud can migrate an existing MUSHclient data tree.
+
+### How to Migrate
+
+1. Run QMud.
+2. Go to Help → Import from MUSHclient.
+3. Select the MUSHclient directory. Migration treats the source directory as READONLY.
+4. Wait until it's done. At the end, it will show statistics on what was imported and will prompt to reload or restart
+   depending on platform.
+
+### Old manual Migration method. (Still working but obsolete)
+
+Migration is copy-based, so source files are preserved and moved under a `migrated` marker
 path after successful import to avoid reprocessing.
 
 What is migrated:
@@ -85,8 +101,6 @@ What is migrated:
 Path handling during migration normalizes legacy Windows-style paths (for
 example `C:\...`) so migrated worlds resolve correctly on the active platform.
 
-### How to Migrate
-
 1. Install/Run QMud (depending on platform) to create fresh QMud home directory.
 2. Copy your MUSHclient's lua contents into QMud/lua directory without overwriting anything. (*IF* you have placed any
    custom lua modules there)
@@ -95,12 +109,14 @@ example `C:\...`) so migrated worlds resolve correctly on the active platform.
 4. Copy your MUSHclient world directory into QMud/ without overwriting anything.
 5. Delete QMud.conf and QMud.sqlite from QMud/ directory.
 6. Copy your mushclient.ini and mushclient_prefs.sqlite to QMud/ directory.
-7. Run QMud.
-8. Change Terminal Type (TTYPE) in world preferences to "QMud" unless you have a reason to keep it mushclient (e.g. Mud
+7. Copy your *.db sqlite databases to QMud/ directory.
+8. Run QMud.
+9. Change Terminal Type (TTYPE) in world preferences to "QMud" unless you have a reason to keep it mushclient (e.g. Mud
    does some special handling on TTYPE).
-9. (Optional) Do a manual check on your .qdl world files with a text editor to make sure paths have migrated normally.
-   QMud saves paths ALWAYS as RELATIVE to the QMUD_HOME directory and with FORWARD slashes even on Windows. So all paths
-   in the world file should look like: `<include name="./worlds/plugins/CthulhuMUD/CthulhuMUD_Mapper.xml" plugin="y" />`
+10. (Optional) Do a manual check on your .qdl world files with a text editor to make sure paths have migrated normally.
+    QMud saves paths ALWAYS as RELATIVE to the QMUD_HOME directory and with FORWARD slashes even on Windows. So all
+    paths in the world file should look like:
+    `<include name="./worlds/plugins/CthulhuMUD/CthulhuMUD_Mapper.xml" plugin="y" />`
 
 Always keep a copy of your original MUSHclient directory. Extensive testing has been done but better safe than sorry.
 

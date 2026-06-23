@@ -93,6 +93,12 @@ qmud_add_qtest(tst_EncodingUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_IndexedRingBuffer
+        SOURCES
+        unit/tst_IndexedRingBuffer.cpp
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_OutputWrapUtils
         SOURCES
         unit/tst_OutputWrapUtils.cpp
@@ -265,6 +271,15 @@ qmud_add_qtest(tst_WorldSessionStateUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_WorldRuntime_OutputBufferSeal
+        GUI
+        SOURCES
+        unit/tst_WorldRuntime_OutputBufferSeal.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        unit)
+
 qmud_add_qtest(tst_WorldSessionRestoreFlowUtils
         SOURCES
         unit/tst_WorldSessionRestoreFlowUtils.cpp
@@ -378,6 +393,13 @@ qmud_add_qtest(tst_LuaUtf8Utils
 qmud_add_qtest(tst_WorldRuntimeAttributeUtils
         SOURCES
         unit/tst_WorldRuntimeAttributeUtils.cpp
+        LABELS
+        unit)
+
+qmud_add_qtest(tst_SoundFileRoutingUtils
+        SOURCES
+        unit/tst_SoundFileRoutingUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/helpers/SoundFileRoutingUtils.cpp"
         LABELS
         unit)
 
@@ -503,6 +525,23 @@ qmud_add_qtest(tst_ReloadIntegration
         integration
         TIMEOUT
         20)
+
+qmud_add_qtest(tst_MushclientImportUtils
+        SOURCES
+        integration/tst_MushclientImportUtils.cpp
+        "${CMAKE_SOURCE_DIR}/src/helpers/MushclientImportUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/WorldDocument.cpp"
+        "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
+        LIBRARIES
+        Qt6::Sql
+        LABELS
+        integration
+        TIMEOUT
+        20)
+target_compile_definitions(tst_MushclientImportUtils
+        PRIVATE
+        QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY)
 
 qmud_add_qtest(tst_LuaBridgeDispatcherIntegration
         SOURCES

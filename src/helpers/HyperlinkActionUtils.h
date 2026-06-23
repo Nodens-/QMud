@@ -72,5 +72,14 @@ enum class MxpHyperlinkDispatchPolicy
 [[nodiscard]] MxpHyperlinkDispatchPolicy
 resolveMxpHyperlinkDispatchPolicy(const QVector<WorldRuntime::LineEntry> &lines,
                                   const QString                          &normalizedHref);
+/**
+ * @brief Chooses hyperlink dispatch policy using indexed rendered line/span context.
+ * @param lines Runtime line buffer.
+ * @param normalizedHref Decoded/trimmed activated href/action.
+ * @return Selected dispatch policy.
+ */
+[[nodiscard]] MxpHyperlinkDispatchPolicy
+resolveMxpHyperlinkDispatchPolicy(const IndexedRingBuffer<WorldRuntime::LineEntry> &lines,
+                                  const QString                                    &normalizedHref);
 
 #endif // QMUD_HYPERLINKACTIONUTILS_H

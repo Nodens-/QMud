@@ -1200,6 +1200,27 @@ int WorldCommandProcessor::executeCommand(const QString &text)
 	return eOK;
 }
 
+int WorldCommandProcessor::executeUserMacroSendNow(const QString &text, const bool history)
+{
+	m_omitFromHistoryForEnteredCommand = false;
+	m_enteredCommandSendFailed         = false;
+
+	QString commandText = text;
+	if (m_translateBackslashSequences)
+		commandText = fixupEscapeSequences(commandText);
+
+	const int result = executeCommand(commandText);
+	if (result == eOK && history && !m_omitFromHistoryForEnteredCommand && !m_enteredCommandSendFailed &&
+	    m_view)
+	{
+		m_view->addToHistoryForced(text);
+	}
+
+	m_omitFromHistoryForEnteredCommand = false;
+	m_enteredCommandSendFailed         = false;
+	return result;
+}
+
 int WorldCommandProcessor::executeCommandWithTriggerPriority(const QString &text)
 {
 	++m_triggerCommandPriorityDepth;
@@ -2003,7 +2024,9 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 	};
 
 	// ----------------------------- AUTO SAY ------------------------------
-	bool          autoSay = !m_processingAutoSay && isEnabled(attrs.value(QStringLiteral("enable_auto_say")));
+	const bool userMacroSource = m_runtime && m_runtime->currentActionSource() == WorldRuntime::eUserMacro;
+	bool       autoSay =
+	    !userMacroSource && !m_processingAutoSay && isEnabled(attrs.value(QStringLiteral("enable_auto_say")));
 	const QString autoSayString     = attrs.value(QStringLiteral("auto_say_string"));
 	const QString overridePrefix    = attrs.value(QStringLiteral("auto_say_override_prefix"));
 	const bool    excludeNonAlpha   = isEnabled(attrs.value(QStringLiteral("autosay_exclude_non_alpha")));
@@ -2822,7 +2845,7 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 		// the previous non-note line.
 		if (m_runtime)
 		{
-			if (const QVector<WorldRuntime::LineEntry> &lines = m_runtime->lines();
+			if (const auto &lines = m_runtime->lines();
 			    !lines.isEmpty() && (lines.last().flags & WorldRuntime::LineNote) == 0)
 			{
 				m_runtime->outputText(QString(), true, true);

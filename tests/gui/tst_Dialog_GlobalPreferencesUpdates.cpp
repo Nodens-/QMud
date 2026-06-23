@@ -23,6 +23,9 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTabBar>
+#include <QTabWidget>
+#include <QTextEdit>
 #include <QWidget>
 #include <QtTest/QTest>
 
@@ -392,6 +395,49 @@ class tst_Dialog_GlobalPreferencesUpdates : public QObject
 			QVERIFY(enableReload->isEnabled());
 			QVERIFY(timeoutSpin->isEnabled());
 			QCOMPARE(autoCheck->toolTip(), QStringLiteral("Updates are disabled."));
+		}
+
+		/**
+		 * @brief Verifies hidden tab container does not trap keyboard focus traversal.
+		 */
+		void hiddenTabContainerIsNotFocusable()
+		{
+			resetStubState();
+
+			GlobalPreferencesDialog dialog;
+
+			auto                   *tabs = dialog.findChild<QTabWidget *>();
+			QVERIFY(tabs);
+			QCOMPARE(tabs->focusPolicy(), Qt::NoFocus);
+			QVERIFY(tabs->tabBar());
+			QCOMPARE(tabs->tabBar()->focusPolicy(), Qt::NoFocus);
+		}
+
+		/**
+		 * @brief Verifies Lua page script editor passes Tab to focus traversal.
+		 */
+		void luaScriptEditorAllowsTabFocusTraversal()
+		{
+			resetStubState();
+			stubState().globalOptions.insert(QStringLiteral("LuaScript"),
+			                                 QStringLiteral("test-lua-script-editor-tab-focus"));
+
+			GlobalPreferencesDialog dialog;
+
+			const auto              editors = dialog.findChildren<QTextEdit *>();
+			QTextEdit              *luaEditor{nullptr};
+			for (QTextEdit *editor : editors)
+			{
+				if (editor &&
+				    editor->toPlainText().contains(QStringLiteral("test-lua-script-editor-tab-focus")))
+				{
+					luaEditor = editor;
+					break;
+				}
+			}
+
+			QVERIFY(luaEditor);
+			QVERIFY(luaEditor->tabChangesFocus());
 		}
 
 		/**

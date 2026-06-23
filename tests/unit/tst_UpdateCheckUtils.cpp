@@ -99,7 +99,7 @@ class tst_UpdateCheckUtils : public QObject
 		{
 			const QByteArray payload = makeLatestReleasePayload(QStringLiteral("v10.08-ci"), QJsonArray());
 			const auto       result  = QMudUpdateCheck::evaluateLatestReleasePayload(
-                payload, QStringLiteral("10.04"), QString(), QMudUpdateCheck::InstallTarget::LinuxAppImage);
+			    payload, QStringLiteral("10.04"), QString(), QMudUpdateCheck::InstallTarget::LinuxAppImage);
 			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::NoStableRelease);
 		}
 
@@ -110,8 +110,26 @@ class tst_UpdateCheckUtils : public QObject
 		{
 			const QByteArray payload = makeLatestReleasePayload(QStringLiteral("v10.04"), QJsonArray());
 			const auto       result  = QMudUpdateCheck::evaluateLatestReleasePayload(
-                payload, QStringLiteral("10.04"), QString(), QMudUpdateCheck::InstallTarget::LinuxAppImage);
+			    payload, QStringLiteral("10.04"), QString(), QMudUpdateCheck::InstallTarget::LinuxAppImage);
 			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::UpToDate);
+		}
+
+		/**
+		 * @brief Verifies stable same-version release replaces a running CI build.
+		 */
+		void evaluateLatestReleasePayloadOffersStableReleaseForEqualCiVersion()
+		{
+			QJsonArray assets;
+			assets.push_back(makeAsset(QStringLiteral("QMud-10.04-x86_64.AppImage"),
+			                           QStringLiteral("https://example.invalid/qmud.appimage"),
+			                           QStringLiteral("sha256:%1").arg(sampleSha256())));
+			const QByteArray payload = makeLatestReleasePayload(QStringLiteral("v10.04"), assets);
+			const auto       result =
+			    QMudUpdateCheck::evaluateLatestReleasePayload(payload, QStringLiteral("10.04-ci"), QString(),
+			                                                  QMudUpdateCheck::InstallTarget::LinuxAppImage);
+			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::UpdateAvailable);
+			QCOMPARE(result.releaseVersion, QStringLiteral("10.04"));
+			QCOMPARE(result.asset.name, QStringLiteral("QMud-10.04-x86_64.AppImage"));
 		}
 
 		/**
@@ -127,8 +145,8 @@ class tst_UpdateCheckUtils : public QObject
 			                                                    QStringLiteral("fixes and features"));
 
 			const auto       result = QMudUpdateCheck::evaluateLatestReleasePayload(
-                payload, QStringLiteral("10.04"), QStringLiteral("10.06"),
-                QMudUpdateCheck::InstallTarget::LinuxAppImage);
+			    payload, QStringLiteral("10.04"), QStringLiteral("10.06"),
+			    QMudUpdateCheck::InstallTarget::LinuxAppImage);
 
 			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::UpdateAvailable);
 			QCOMPARE(result.releaseVersion, QStringLiteral("10.07"));
@@ -152,8 +170,8 @@ class tst_UpdateCheckUtils : public QObject
 			const QByteArray payload = makeLatestReleasePayload(QStringLiteral("v10.07"), assets);
 
 			const auto       result = QMudUpdateCheck::evaluateLatestReleasePayload(
-                payload, QStringLiteral("10.04"), QStringLiteral("10.07"),
-                QMudUpdateCheck::InstallTarget::LinuxAppImage);
+			    payload, QStringLiteral("10.04"), QStringLiteral("10.07"),
+			    QMudUpdateCheck::InstallTarget::LinuxAppImage);
 
 			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::UpdateAvailable);
 			QVERIFY(!result.clearSkipVersion);
@@ -171,7 +189,7 @@ class tst_UpdateCheckUtils : public QObject
 			const QByteArray payload = makeLatestReleasePayload(QStringLiteral("v10.07"), assets);
 
 			const auto       result = QMudUpdateCheck::evaluateLatestReleasePayload(
-                payload, QStringLiteral("10.04"), QString(), QMudUpdateCheck::InstallTarget::LinuxAppImage);
+			    payload, QStringLiteral("10.04"), QString(), QMudUpdateCheck::InstallTarget::LinuxAppImage);
 
 			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::NoCompatibleAsset);
 			QCOMPARE(result.releaseVersion, QStringLiteral("10.07"));
@@ -205,7 +223,7 @@ class tst_UpdateCheckUtils : public QObject
 			const QByteArray payload = makeLatestReleasePayload(QStringLiteral("v10.07"), assets);
 
 			const auto       result = QMudUpdateCheck::evaluateLatestReleasePayload(
-                payload, QStringLiteral("10.04"), QString(), QMudUpdateCheck::InstallTarget::LinuxAppImage);
+			    payload, QStringLiteral("10.04"), QString(), QMudUpdateCheck::InstallTarget::LinuxAppImage);
 
 			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::NoCompatibleAsset);
 		}
@@ -225,8 +243,8 @@ class tst_UpdateCheckUtils : public QObject
 
 			const QByteArray payload = makeLatestReleasePayload(QStringLiteral("v10.07"), assets);
 			const auto       result  = QMudUpdateCheck::evaluateLatestReleasePayload(
-                payload, QStringLiteral("10.04"), QString(),
-                QMudUpdateCheck::InstallTarget::WindowsInstaller);
+			    payload, QStringLiteral("10.04"), QString(),
+			    QMudUpdateCheck::InstallTarget::WindowsInstaller);
 
 			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::UpdateAvailable);
 			QCOMPARE(result.asset.name, QStringLiteral("QMud-10.07-win-setup.exe"));
@@ -245,8 +263,8 @@ class tst_UpdateCheckUtils : public QObject
 
 			const QByteArray payload = makeLatestReleasePayload(QStringLiteral("v10.07"), assets);
 			const auto       result  = QMudUpdateCheck::evaluateLatestReleasePayload(
-                payload, QStringLiteral("10.04"), QString(),
-                QMudUpdateCheck::InstallTarget::WindowsInstaller);
+			    payload, QStringLiteral("10.04"), QString(),
+			    QMudUpdateCheck::InstallTarget::WindowsInstaller);
 
 			QCOMPARE(result.status, QMudUpdateCheck::ReleaseEvaluationStatus::NoCompatibleAsset);
 		}
@@ -254,7 +272,6 @@ class tst_UpdateCheckUtils : public QObject
 };
 
 QTEST_MAIN(tst_UpdateCheckUtils)
-
 
 #if __has_include("tst_UpdateCheckUtils.moc")
 #include "tst_UpdateCheckUtils.moc"

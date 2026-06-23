@@ -3854,12 +3854,12 @@ void WorldPreferencesDialog::buildUi()
 	customMainRow->addStretch();
 	auto *customButtons     = new QGridLayout();
 	m_customDefaults        = new QPushButton(QStringLiteral("De&faults..."), customColoursPage);
-	m_customInvert          = new QPushButton(QStringLiteral("&Invert"), customColoursPage);
-	m_customRandom          = new QPushButton(QStringLiteral("&Random..."), customColoursPage);
 	m_customLighter         = new QPushButton(QStringLiteral("&Lighter"), customColoursPage);
 	m_customDarker          = new QPushButton(QStringLiteral("&Darker"), customColoursPage);
 	m_customMoreColour      = new QPushButton(QStringLiteral("&More colour"), customColoursPage);
 	m_customLessColour      = new QPushButton(QStringLiteral("L&ess colour"), customColoursPage);
+	m_customInvert          = new QPushButton(QStringLiteral("&Invert"), customColoursPage);
+	m_customRandom          = new QPushButton(QStringLiteral("&Random..."), customColoursPage);
 	auto shrinkCustomButton = [](QPushButton *button)
 	{
 		if (!button)
@@ -3969,7 +3969,15 @@ void WorldPreferencesDialog::buildUi()
 	updateTlsEncryptionState();
 
 	// Logging
-	auto *loggingLayout   = new QGridLayout(loggingPage);
+	auto *loggingLayout = new QGridLayout(loggingPage);
+	m_logFilePreamble   = new QTextEdit(loggingPage);
+	m_substitutionHelp  = new QPushButton(QStringLiteral("?"), loggingPage);
+	m_editPreamble      = new QPushButton(QStringLiteral("..."), loggingPage);
+	m_logFilePostamble  = new QTextEdit(loggingPage);
+	m_editPostamble     = new QPushButton(QStringLiteral("..."), loggingPage);
+	m_standardPreamble  = new QPushButton(QStringLiteral("Standard HTML preamble/postamble"), loggingPage);
+	m_logFilePreamble->setTabChangesFocus(true);
+	m_logFilePostamble->setTabChangesFocus(true);
 	m_logOutput           = new QCheckBox(QStringLiteral("Log Output"), loggingPage);
 	m_logInput            = new QCheckBox(QStringLiteral("Log Commands"), loggingPage);
 	m_logNotes            = new QCheckBox(QStringLiteral("Log Notes"), loggingPage);
@@ -3981,17 +3989,11 @@ void WorldPreferencesDialog::buildUi()
 	m_logRotateGzip       = new QCheckBox(QStringLiteral("Gzip logs on close"), loggingPage);
 	m_autoLogFileName     = new QLineEdit(loggingPage);
 	m_browseLogFile       = new QPushButton(QStringLiteral("&Browse..."), loggingPage);
-	m_logFilePreamble     = new QTextEdit(loggingPage);
-	m_logFilePostamble    = new QTextEdit(loggingPage);
-	m_standardPreamble    = new QPushButton(QStringLiteral("Standard HTML preamble/postamble"), loggingPage);
-	m_editPreamble        = new QPushButton(QStringLiteral("..."), loggingPage);
-	m_editPostamble       = new QPushButton(QStringLiteral("..."), loggingPage);
-	m_substitutionHelp    = new QPushButton(QStringLiteral("?"), loggingPage);
 	m_editPreamble->setFixedWidth(24);
 	m_editPostamble->setFixedWidth(24);
 	m_substitutionHelp->setFixedWidth(24);
 
-	loggingLayout->addWidget(new QLabel(QStringLiteral("File"), loggingPage), 0, 0);
+	loggingLayout->addWidget(new QLabel(QStringLiteral("File Preamble"), loggingPage), 0, 0);
 	loggingLayout->addWidget(m_logFilePreamble, 0, 1);
 	auto *preambleButtons = new QVBoxLayout();
 	preambleButtons->addWidget(m_substitutionHelp);
@@ -3999,7 +4001,7 @@ void WorldPreferencesDialog::buildUi()
 	preambleButtons->addStretch();
 	loggingLayout->addLayout(preambleButtons, 0, 2);
 
-	loggingLayout->addWidget(new QLabel(QStringLiteral("File"), loggingPage), 1, 0);
+	loggingLayout->addWidget(new QLabel(QStringLiteral("File Postamble"), loggingPage), 1, 0);
 	loggingLayout->addWidget(m_logFilePostamble, 1, 1);
 	auto *postambleButtons = new QVBoxLayout();
 	postambleButtons->addWidget(m_editPostamble);
@@ -4493,18 +4495,21 @@ void WorldPreferencesDialog::buildUi()
 				        return;
 			        applyCustomRandom();
 		        });
-	auto *ansiButtons  = new QGridLayout();
-	m_ansiDefaults     = new QPushButton(QStringLiteral("&ANSI colours..."), ansiColoursPage);
-	m_ansiSwap         = new QPushButton(QStringLiteral("<- Swap ->"), ansiColoursPage);
-	m_ansiInvert       = new QPushButton(QStringLiteral("Invert"), ansiColoursPage);
-	m_ansiRandom       = new QPushButton(QStringLiteral("&Random..."), ansiColoursPage);
-	m_ansiLighter      = new QPushButton(QStringLiteral("L&ighter"), ansiColoursPage);
-	m_ansiDarker       = new QPushButton(QStringLiteral("&Darker"), ansiColoursPage);
-	m_ansiMoreColour   = new QPushButton(QStringLiteral("&More colour"), ansiColoursPage);
-	m_ansiLessColour   = new QPushButton(QStringLiteral("L&ess colour"), ansiColoursPage);
-	m_ansiLoad         = new QPushButton(QStringLiteral("&Load..."), ansiColoursPage);
-	m_ansiSave         = new QPushButton(QStringLiteral("&Save..."), ansiColoursPage);
-	m_copyAnsiToCustom = new QPushButton(QStringLiteral("&Copy to custom..."), ansiColoursPage);
+	auto *ansiButtons = new QGridLayout();
+	m_ansiSwap        = new QPushButton(QStringLiteral("<- Swap ->"), ansiColoursPage);
+	m_custom16IsDefaultColour =
+	    new QCheckBox(QStringLiteral("Use Custom Colour 16 as default"), ansiColoursPage);
+	m_useDefaultColours = new QCheckBox(QStringLiteral("Override with default colours"), ansiColoursPage);
+	m_ansiDefaults      = new QPushButton(QStringLiteral("&ANSI colours..."), ansiColoursPage);
+	m_ansiLoad          = new QPushButton(QStringLiteral("&Load..."), ansiColoursPage);
+	m_ansiSave          = new QPushButton(QStringLiteral("&Save..."), ansiColoursPage);
+	m_ansiLighter       = new QPushButton(QStringLiteral("L&ighter"), ansiColoursPage);
+	m_ansiDarker        = new QPushButton(QStringLiteral("&Darker"), ansiColoursPage);
+	m_ansiMoreColour    = new QPushButton(QStringLiteral("&More colour"), ansiColoursPage);
+	m_ansiLessColour    = new QPushButton(QStringLiteral("L&ess colour"), ansiColoursPage);
+	m_copyAnsiToCustom  = new QPushButton(QStringLiteral("&Copy to custom..."), ansiColoursPage);
+	m_ansiInvert        = new QPushButton(QStringLiteral("Invert"), ansiColoursPage);
+	m_ansiRandom        = new QPushButton(QStringLiteral("&Random..."), ansiColoursPage);
 	if (ansiSwatchGrid)
 		ansiSwatchGrid->addWidget(m_ansiSwap, 10, 1, 1, 2, Qt::AlignHCenter);
 	auto shrinkAnsiButton = [](QPushButton *button)
@@ -4539,10 +4544,7 @@ void WorldPreferencesDialog::buildUi()
 	ansiButtonsColumn->addLayout(ansiButtons);
 	ansiButtonsColumn->addStretch();
 	ansiTop->addLayout(ansiButtonsColumn);
-	auto *ansiOptions   = new QVBoxLayout();
-	m_useDefaultColours = new QCheckBox(QStringLiteral("Override with default colours"), ansiColoursPage);
-	m_custom16IsDefaultColour =
-	    new QCheckBox(QStringLiteral("Use Custom Colour 16 as default"), ansiColoursPage);
+	auto *ansiOptions = new QVBoxLayout();
 	if (m_useDefaultColours)
 		connect(m_useDefaultColours, &QCheckBox::toggled, this, [this] { updateDefaultColoursState(); });
 	ansiOptions->setContentsMargins(0, 0, 0, 0);
@@ -4730,6 +4732,7 @@ void WorldPreferencesDialog::buildUi()
 	m_macrosTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
 	m_macrosTable->setSelectionBehavior(QAbstractItemView::SelectRows);
 	m_macrosTable->setSelectionMode(QAbstractItemView::SingleSelection);
+	m_macrosTable->setTabKeyNavigation(false);
 	macrosLayout->addWidget(m_macrosTable);
 	auto *macrosHint =
 	    new QLabel(QStringLiteral("Customise output from function keys and \"Game\" menu."), macrosPage);
@@ -5583,7 +5586,7 @@ void WorldPreferencesDialog::buildUi()
 	auto *historyKeepLabel = new QLabel(QStringLiteral("Keep:"), historyBox);
 	historyKeepLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 	m_historyLines = new QSpinBox(historyBox);
-	m_historyLines->setRange(20, 5000);
+	m_historyLines->setRange(20, 50000);
 	configureSpinBoxWidthForRange(m_historyLines);
 	historyLayout->addWidget(historyKeepLabel, 0, 0);
 	historyLayout->addWidget(m_historyLines, 0, 1);
@@ -5816,6 +5819,7 @@ void WorldPreferencesDialog::buildUi()
 		        detail->setWordWrap(true);
 		        dialogLayout->addWidget(detail);
 		        auto *words = new QTextEdit(&dialog);
+		        words->setTabChangesFocus(true);
 		        if (m_tabCompletionDefaults)
 			        words->setPlainText(m_tabCompletionDefaults->toPlainText());
 		        dialogLayout->addWidget(words, 1);
@@ -5987,11 +5991,13 @@ void WorldPreferencesDialog::buildUi()
 	    });
 
 	// Send to world
-	auto *sendLayout           = new QVBoxLayout(sendToWorldPage);
-	m_sendToWorldFilePreamble  = new QTextEdit(sendToWorldPage);
-	m_sendToWorldFilePostamble = new QTextEdit(sendToWorldPage);
+	auto *sendLayout          = new QVBoxLayout(sendToWorldPage);
+	m_sendToWorldFilePreamble = new QTextEdit(sendToWorldPage);
+	m_sendToWorldFilePreamble->setTabChangesFocus(true);
 	m_sendToWorldLinePreamble  = new QLineEdit(sendToWorldPage);
 	m_sendToWorldLinePostamble = new QLineEdit(sendToWorldPage);
+	m_sendToWorldFilePostamble = new QTextEdit(sendToWorldPage);
+	m_sendToWorldFilePostamble->setTabChangesFocus(true);
 	sendLayout->addWidget(
 	    new QLabel(QStringLiteral("1. Send this at the start of a \"send file to\""), sendToWorldPage));
 	sendLayout->addWidget(m_sendToWorldFilePreamble);
@@ -6025,29 +6031,30 @@ void WorldPreferencesDialog::buildUi()
 	sendLayout->addStretch();
 
 	// Scripting
-	auto *scriptingLayout = new QVBoxLayout(scriptingPage);
-	m_enableScripts       = new QCheckBox(QStringLiteral("Enable scripting"), scriptingPage);
-	m_scriptLanguage      = new QComboBox(scriptingPage);
+	auto *scriptingLayout     = new QVBoxLayout(scriptingPage);
+	m_scriptPrefix            = new QLineEdit(scriptingPage);
+	m_enableScripts           = new QCheckBox(QStringLiteral("Enable scripting"), scriptingPage);
+	m_warnIfScriptingInactive = new QCheckBox(QStringLiteral("Warn if inactive"), scriptingPage);
+	m_scriptIsActive          = new QLabel(QStringLiteral("(inactive)"), scriptingPage);
+	m_scriptLanguage          = new QComboBox(scriptingPage);
 	m_scriptLanguage->addItem(QStringLiteral("Lua"), QStringLiteral("Lua"));
 	m_scriptLanguage->setVisible(false);
-	m_scriptFile         = new QLineEdit(scriptingPage);
-	m_browseScriptFile   = new QPushButton(QStringLiteral("&Browse..."), scriptingPage);
-	m_newScriptFile      = new QPushButton(QStringLiteral("&New..."), scriptingPage);
-	m_editScriptFile     = new QPushButton(QStringLiteral("Edit &Script"), scriptingPage);
-	m_scriptPrefix       = new QLineEdit(scriptingPage);
-	m_scriptEditor       = new QLineEdit(scriptingPage);
-	m_editorWindowName   = new QLineEdit(scriptingPage);
-	m_chooseScriptEditor = new QPushButton(QStringLiteral("Choose &Editor..."), scriptingPage);
+	m_scriptFile       = new QLineEdit(scriptingPage);
+	m_browseScriptFile = new QPushButton(QStringLiteral("&Browse..."), scriptingPage);
+	m_newScriptFile    = new QPushButton(QStringLiteral("&New..."), scriptingPage);
+	m_editScriptFile   = new QPushButton(QStringLiteral("Edit &Script"), scriptingPage);
 	m_editScriptWithNotepad =
 	    new QCheckBox(QStringLiteral("Use inbuilt notepad to edit script"), scriptingPage);
-	m_warnIfScriptingInactive = new QCheckBox(QStringLiteral("Warn if inactive"), scriptingPage);
-	m_scriptErrorsToOutput    = new QCheckBox(QStringLiteral("Note errors"), scriptingPage);
-	m_logScriptErrors         = new QCheckBox(QStringLiteral("Log script errors"), scriptingPage);
-	m_scriptReloadOption      = new QComboBox(scriptingPage);
+	m_chooseScriptEditor   = new QPushButton(QStringLiteral("Choose &Editor..."), scriptingPage);
+	m_scriptEditor         = new QLineEdit(scriptingPage);
+	m_editorWindowName     = new QLineEdit(scriptingPage);
+	m_scriptReloadOption   = new QComboBox(scriptingPage);
+	m_scriptErrorsToOutput = new QCheckBox(QStringLiteral("Note errors"), scriptingPage);
+	m_logScriptErrors      = new QCheckBox(QStringLiteral("Log script errors"), scriptingPage);
+	m_scriptTextColour     = new QComboBox(scriptingPage);
 	m_scriptReloadOption->addItem(QStringLiteral("Confirm"), eReloadConfirm);
 	m_scriptReloadOption->addItem(QStringLiteral("Reload always"), eReloadAlways);
 	m_scriptReloadOption->addItem(QStringLiteral("Reload never"), eReloadNever);
-	m_scriptTextColour = new QComboBox(scriptingPage);
 	m_scriptTextSwatch = new QPushButton(scriptingPage);
 	m_scriptTextSwatch->setFixedSize(16, 16);
 	m_scriptTextSwatch->setFlat(true);
@@ -6058,7 +6065,6 @@ void WorldPreferencesDialog::buildUi()
 	m_scriptBackSwatch->setFlat(true);
 	m_scriptBackSwatch->setEnabled(false);
 	m_scriptBackSwatch->setFocusPolicy(Qt::NoFocus);
-	m_scriptIsActive      = new QLabel(QStringLiteral("(inactive)"), scriptingPage);
 	m_scriptExecutionTime = new QLabel(QStringLiteral("-"), scriptingPage);
 
 	auto *scriptPrefixLabel = new QLabel(QStringLiteral("Script"), scriptingPage);
@@ -6125,19 +6131,20 @@ void WorldPreferencesDialog::buildUi()
 		callbackLayout->addWidget(label, row, 0);
 		callbackLayout->addWidget(edit, row, 1, 1, 2);
 	};
-	m_onWorldOpen       = new QLineEdit(callbackBox);
-	m_onWorldClose      = new QLineEdit(callbackBox);
-	m_onWorldConnect    = new QLineEdit(callbackBox);
-	m_onWorldDisconnect = new QLineEdit(callbackBox);
-	m_onWorldSave       = new QLineEdit(callbackBox);
-	m_onWorldGetFocus   = new QLineEdit(callbackBox);
-	m_onWorldLoseFocus  = new QLineEdit(callbackBox);
-	m_onMxpStart        = new QLineEdit(callbackBox);
-	m_onMxpStop         = new QLineEdit(callbackBox);
-	m_onMxpOpenTag      = new QLineEdit(callbackBox);
-	m_onMxpCloseTag     = new QLineEdit(callbackBox);
-	m_onMxpSetVariable  = new QLineEdit(callbackBox);
-	m_onMxpError        = new QLineEdit(callbackBox);
+	m_onWorldOpen          = new QLineEdit(callbackBox);
+	m_onWorldConnect       = new QLineEdit(callbackBox);
+	m_onWorldGetFocus      = new QLineEdit(callbackBox);
+	m_onWorldLoseFocus     = new QLineEdit(callbackBox);
+	m_onWorldDisconnect    = new QLineEdit(callbackBox);
+	m_onWorldClose         = new QLineEdit(callbackBox);
+	m_onWorldSave          = new QLineEdit(callbackBox);
+	auto *mxpScriptsButton = new QPushButton(QStringLiteral("MXP..."), callbackBox);
+	m_onMxpStart           = new QLineEdit(callbackBox);
+	m_onMxpStop            = new QLineEdit(callbackBox);
+	m_onMxpOpenTag         = new QLineEdit(callbackBox);
+	m_onMxpCloseTag        = new QLineEdit(callbackBox);
+	m_onMxpSetVariable     = new QLineEdit(callbackBox);
+	m_onMxpError           = new QLineEdit(callbackBox);
 	m_onMxpStart->setVisible(false);
 	m_onMxpStop->setVisible(false);
 	m_onMxpOpenTag->setVisible(false);
@@ -6151,7 +6158,6 @@ void WorldPreferencesDialog::buildUi()
 	addCallbackRow(QStringLiteral("Disconnect"), m_onWorldDisconnect, 4);
 	addCallbackRow(QStringLiteral("Close"), m_onWorldClose, 5);
 	addCallbackRow(QStringLiteral("Save"), m_onWorldSave, 6);
-	auto *mxpScriptsButton = new QPushButton(QStringLiteral("MXP..."), callbackBox);
 	auto *mxpHint = new QLabel(QStringLiteral("(Click for MXP-related script handlers)"), callbackBox);
 	callbackLayout->addWidget(mxpScriptsButton, 7, 1, Qt::AlignLeft);
 	callbackLayout->addWidget(mxpHint, 7, 2, Qt::AlignLeft);
@@ -6364,6 +6370,7 @@ void WorldPreferencesDialog::buildUi()
 	// Notes
 	auto *notesLayout = new QVBoxLayout(notesPage);
 	m_notes           = new QTextEdit(notesPage);
+	m_notes->setTabChangesFocus(true);
 	notesLayout->addWidget(m_notes);
 	auto *notesButtons    = new QHBoxLayout();
 	m_loadNotesButton     = new QPushButton(QStringLiteral("&Load..."), notesPage);
@@ -6755,6 +6762,7 @@ void WorldPreferencesDialog::buildUi()
 
 	auto *varsLayout = new QVBoxLayout(variablesPage);
 	m_variablesTable = makeTable(variablesPage, {QStringLiteral("Name"), QStringLiteral("Value")});
+	m_variablesTable->setTabKeyNavigation(false);
 	varsLayout->addWidget(m_variablesTable);
 	auto *variableOptions = new QHBoxLayout();
 	m_variablesCount      = new QLabel(QStringLiteral("0 items."), variablesPage);
@@ -6811,7 +6819,6 @@ void WorldPreferencesDialog::buildUi()
 	};
 	addKeypadField(keypadContent, keypadBlock, QStringLiteral("/"), 0, 0);
 	addKeypadField(keypadContent, keypadBlock, QStringLiteral("*"), 0, 2);
-	addKeypadField(keypadContent, keypadBlock, QStringLiteral("-"), 0, 3);
 	auto *keypadGroup =
 	    new QGroupBox(QStringLiteral("\"NumLock\" must be active for these keys to work"), keypadContent);
 	auto *keypadGrid = new QGridLayout(keypadGroup);
@@ -6826,6 +6833,7 @@ void WorldPreferencesDialog::buildUi()
 	addKeypadField(keypadGroup, keypadGrid, QStringLiteral("3"), 4, 2);
 	addKeypadField(keypadGroup, keypadGrid, QStringLiteral("0"), 6, 0, 2);
 	addKeypadField(keypadGroup, keypadGrid, QStringLiteral("."), 6, 2);
+	addKeypadField(keypadContent, keypadBlock, QStringLiteral("-"), 0, 3);
 	auto *plusWidget = new QWidget(keypadContent);
 	auto *plusGrid   = new QGridLayout(plusWidget);
 	plusGrid->setContentsMargins(0, 0, 0, 0);
@@ -6859,11 +6867,13 @@ void WorldPreferencesDialog::buildUi()
 	        });
 
 	// Paste
-	auto *pasteLayout    = new QVBoxLayout(pastePage);
-	m_pastePreamble      = new QTextEdit(pastePage);
-	m_pastePostamble     = new QTextEdit(pastePage);
+	auto *pasteLayout = new QVBoxLayout(pastePage);
+	m_pastePreamble   = new QTextEdit(pastePage);
+	m_pastePreamble->setTabChangesFocus(true);
 	m_pasteLinePreamble  = new QLineEdit(pastePage);
 	m_pasteLinePostamble = new QLineEdit(pastePage);
+	m_pastePostamble     = new QTextEdit(pastePage);
+	m_pastePostamble->setTabChangesFocus(true);
 	pasteLayout->addWidget(
 	    new QLabel(QStringLiteral("1. Send this at the start of a \"paste to\""), pastePage));
 	pasteLayout->addWidget(m_pastePreamble);
@@ -7260,7 +7270,8 @@ void WorldPreferencesDialog::buildUi()
 	auto *connectTextGroup  = new QGroupBox(QStringLiteral("Connect Text"), connectingPage);
 	auto *connectTextLayout = new QVBoxLayout(connectTextGroup);
 	m_connectText           = new QTextEdit(connectTextGroup);
-	m_connectLineCount      = new QLabel(formatLineCountLabel(0), connectTextGroup);
+	m_connectText->setTabChangesFocus(true);
+	m_connectLineCount = new QLabel(formatLineCountLabel(0), connectTextGroup);
 	m_connectLineCount->setAlignment(Qt::AlignRight);
 	connectTextLayout->addWidget(m_connectText);
 	connectTextLayout->addWidget(m_connectLineCount);
@@ -9742,10 +9753,10 @@ void WorldPreferencesDialog::calculateMemoryUsage(const bool allowProgress)
 	if (!m_runtime || !m_infoMemoryUsed || !m_infoBufferLines)
 		return;
 
-	const QVector<WorldRuntime::LineEntry> &lines     = m_runtime->lines();
-	const int                               lineCount = saturatingToInt(lines.size());
-	const int                               maxLines  = worldMaxOutputLines(m_runtime->worldAttributes());
-	QProgressDialog                        *progress  = nullptr;
+	const auto      &lines     = m_runtime->lines();
+	const int        lineCount = saturatingToInt(lines.size());
+	const int        maxLines  = worldMaxOutputLines(m_runtime->worldAttributes());
+	QProgressDialog *progress  = nullptr;
 	if (allowProgress && lineCount > 1000)
 	{
 		progress = new QProgressDialog(QStringLiteral("Calculating memory usage..."),
@@ -9961,9 +9972,9 @@ void WorldPreferencesDialog::populateInfo()
 		        ? m_runtime->dateSaved().toString(QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"))
 		        : QStringLiteral("-"));
 
-	const QVector<WorldRuntime::LineEntry> &lines     = m_runtime->lines();
-	const int                               lineCount = saturatingToInt(lines.size());
-	const int                               maxLines  = worldMaxOutputLines(m_runtime->worldAttributes());
+	const auto &lines     = m_runtime->lines();
+	const int   lineCount = saturatingToInt(lines.size());
+	const int   maxLines  = worldMaxOutputLines(m_runtime->worldAttributes());
 	if (m_infoBufferLines)
 	{
 		if (maxLines > 0)
