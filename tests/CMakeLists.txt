@@ -196,7 +196,6 @@ qmud_add_qtest(tst_NativePluginRegistry
         unit)
 target_compile_definitions(tst_NativePluginRegistry
         PRIVATE
-        QMUD_NATIVEPLUGINREGISTRY_TEST_HOOKS
         QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
 
 if (QMUD_ENABLE_LUA_SCRIPTING)
@@ -531,17 +530,13 @@ qmud_add_qtest(tst_MushclientImportUtils
         integration/tst_MushclientImportUtils.cpp
         "${CMAKE_SOURCE_DIR}/src/helpers/MushclientImportUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
-        "${CMAKE_SOURCE_DIR}/src/WorldDocument.cpp"
-        "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
         LIBRARIES
+        qmud_app_core
         Qt6::Sql
         LABELS
         integration
         TIMEOUT
         20)
-target_compile_definitions(tst_MushclientImportUtils
-        PRIVATE
-        QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY)
 
 qmud_add_qtest(tst_LuaBridgeDispatcherIntegration
         SOURCES
@@ -579,62 +574,46 @@ qmud_add_qtest(tst_WorldRuntime_PluginLifecycle
 qmud_add_qtest(tst_WorldDocument_Load
         SOURCES
         integration/tst_WorldDocument_Load.cpp
-        "${CMAKE_SOURCE_DIR}/src/WorldDocument.cpp"
-        "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
         LIBRARIES
         qmud_test_support
+        qmud_app_core
         LABELS
         integration
         TIMEOUT
         20)
-target_compile_definitions(tst_WorldDocument_Load
-        PRIVATE
-        QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY)
 
 qmud_add_qtest(tst_WorldDocument_Masks
         SOURCES
         integration/tst_WorldDocument_Masks.cpp
-        "${CMAKE_SOURCE_DIR}/src/WorldDocument.cpp"
-        "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
         LIBRARIES
         qmud_test_support
+        qmud_app_core
         LABELS
         integration
         TIMEOUT
         20)
-target_compile_definitions(tst_WorldDocument_Masks
-        PRIVATE
-        QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY)
 
 qmud_add_qtest(tst_WorldDocument_Includes
         SOURCES
         integration/tst_WorldDocument_Includes.cpp
-        "${CMAKE_SOURCE_DIR}/src/WorldDocument.cpp"
-        "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
         LIBRARIES
         qmud_test_support
+        qmud_app_core
         LABELS
         integration
         TIMEOUT
         20)
-target_compile_definitions(tst_WorldDocument_Includes
-        PRIVATE
-        QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY)
 
 qmud_add_qtest(tst_WorldDocument_RoundTrip
         SOURCES
         integration/tst_WorldDocument_RoundTrip.cpp
-        "${CMAKE_SOURCE_DIR}/src/WorldDocument.cpp"
-        "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
         LIBRARIES
         qmud_test_support
+        qmud_app_core
         LABELS
         integration
         TIMEOUT
         20)
-target_compile_definitions(tst_WorldDocument_RoundTrip
-        PRIVATE
-        QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY)
 
 qmud_add_qtest(tst_WorldCommandProcessor_Speedwalk
         SOURCES

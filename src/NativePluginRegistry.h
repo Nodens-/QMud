@@ -21,10 +21,6 @@
 #include <functional>
 #include <memory>
 
-#ifdef QMUD_NATIVEPLUGINREGISTRY_TEST_HOOKS
-#include <functional>
-#endif
-
 class WorldRuntime;
 
 namespace QMudNativePluginRegistry
@@ -59,7 +55,6 @@ namespace QMudNativePluginRegistry
 			QVector<QVariant> returnValues;
 	};
 
-#ifndef QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY
 	/**
 	 * @brief Runtime-level LuaAudio playback settings shared by direct `audio.*` and native CallPlugin paths.
 	 */
@@ -83,7 +78,6 @@ namespace QMudNativePluginRegistry
 			double pan{0.0};
 			double pitch{0.0};
 	};
-#endif
 
 	/**
 	 * @brief Returns the exact UI marker used for native shim shadow rows.
@@ -156,8 +150,7 @@ namespace QMudNativePluginRegistry
 	 * @param pluginId Shim id.
 	 * @return Routine names in stable order.
 	 */
-	[[nodiscard]] QStringList supportedRoutines(const QString &pluginId);
-#ifndef QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY
+	[[nodiscard]] QStringList                supportedRoutines(const QString &pluginId);
 	/**
 	 * @brief Returns runtime-level LuaAudio master volume, pan, and pitch.
 	 * @param runtime Owning runtime.
@@ -281,37 +274,36 @@ namespace QMudNativePluginRegistry
 	 * @param runtime Owning runtime.
 	 * @param buffers Buffer ids.
 	 */
-	void luaAudioReleaseRuntimeBuffers(const WorldRuntime *runtime, const QList<int> &buffers);
+	void              luaAudioReleaseRuntimeBuffers(const WorldRuntime *runtime, const QList<int> &buffers);
 	/**
 	 * @brief Releases all runtime LuaAudio buffers owned by a specific caller token.
 	 * @param runtime Owning runtime.
 	 * @param ownerKey Owner token to release.
 	 */
-	void luaAudioReleaseRuntimeOwner(const WorldRuntime *runtime, const void *ownerKey);
+	void              luaAudioReleaseRuntimeOwner(const WorldRuntime *runtime, const void *ownerKey);
 	/**
 	 * @brief Stops and releases all runtime LuaAudio buffers.
 	 * @param runtime Owning runtime.
 	 */
-	void luaAudioStopRuntime(const WorldRuntime *runtime);
+	void              luaAudioStopRuntime(const WorldRuntime *runtime);
 	/**
 	 * @brief Stops and releases all runtime LuaAudio buffers owned by a specific caller token.
 	 * @param runtime Owning runtime.
 	 * @param ownerKey Owner token to stop and release.
 	 */
-	void luaAudioStopRuntimeOwner(const WorldRuntime *runtime, const void *ownerKey);
+	void              luaAudioStopRuntimeOwner(const WorldRuntime *runtime, const void *ownerKey);
 	/**
 	 * @brief Stops LuaAudio playback and resets runtime-level LuaAudio state.
 	 * @param runtime Owning runtime.
 	 */
-	void luaAudioResetRuntime(const WorldRuntime *runtime);
-#endif
+	void              luaAudioResetRuntime(const WorldRuntime *runtime);
 	/**
 	 * @brief Returns a legacy PluginSupports code for a native shim routine.
 	 * @param pluginId Shim id.
 	 * @param routine Routine name.
 	 * @return Legacy scripting error/status code.
 	 */
-	[[nodiscard]] int      pluginSupports(const QString &pluginId, const QString &routine);
+	[[nodiscard]] int pluginSupports(const QString &pluginId, const QString &routine);
 	/**
 	 * @brief Returns a legacy GetPluginInfo value for a native shim.
 	 * @param pluginId Shim id.
@@ -402,7 +394,6 @@ namespace QMudNativePluginRegistry
 	 */
 	void               discardRuntimeState(const WorldRuntime *runtime);
 
-#ifdef QMUD_NATIVEPLUGINREGISTRY_TEST_HOOKS
 	/**
 	 * @brief Speech event captured by native registry test hooks.
 	 */
@@ -424,7 +415,6 @@ namespace QMudNativePluginRegistry
 	 * @return Initialized backend count, or zero when no speech state exists.
 	 */
 	[[nodiscard]] std::size_t mushReaderTestBackendCount(const WorldRuntime *runtime);
-#endif
 } // namespace QMudNativePluginRegistry
 
 #endif // QMUD_NATIVEPLUGINREGISTRY_H

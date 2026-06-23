@@ -8,17 +8,14 @@
 
 #include "NativePluginRegistry.h"
 
-#include <QDir>
-#ifndef QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY
 #include "AcceleratorUtils.h"
 #include "TtsEngine.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "helpers/PluginPathUtils.h"
 #include "scripting/ScriptingErrors.h"
-#endif
+#include <QDir>
 
-#ifndef QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY
 #include <QCoreApplication>
 #include <QFile>
 #include <QLibrary>
@@ -28,9 +25,7 @@
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSaveFile>
-#endif
 #include <QSet>
-#ifndef QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY
 #include <QTextStream>
 #include <QTimer>
 #include <algorithm>
@@ -43,7 +38,6 @@
 #include <objbase.h>
 #include <oleauto.h>
 #include <windows.h>
-#endif
 #endif
 
 namespace
@@ -164,7 +158,6 @@ namespace
 		    QStringLiteral("slidePan"),  QStringLiteral("playLooped"), QStringLiteral("plugin_update_url")};
 	}
 
-#ifndef QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY
 	QString luaQuote(const QString &value)
 	{
 		QString quoted;
@@ -438,7 +431,6 @@ namespace
 		return runtimeStates;
 	}
 
-#ifdef QMUD_NATIVEPLUGINREGISTRY_TEST_HOOKS
 	QMudNativePluginRegistry::TestSpeechEvent makeTestSpeechEvent(const QString &text, const bool interrupt,
 	                                                              const bool stop)
 	{
@@ -464,7 +456,6 @@ namespace
 		sink(event);
 		return true;
 	}
-#endif
 
 	std::shared_ptr<MushReaderState> stateFor(const WorldRuntime *runtime)
 	{
@@ -543,10 +534,8 @@ namespace
 	{
 		if (!runtime)
 			return false;
-#ifdef QMUD_NATIVEPLUGINREGISTRY_TEST_HOOKS
 		if (dispatchTestSpeechEvent(makeTestSpeechEvent(text, interrupt, false)))
 			return true;
-#endif
 		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
 		ensureBackends(*state);
 		for (const auto &backend : state->backends)
@@ -561,10 +550,8 @@ namespace
 	{
 		if (!runtime)
 			return false;
-#ifdef QMUD_NATIVEPLUGINREGISTRY_TEST_HOOKS
 		if (dispatchTestSpeechEvent(makeTestSpeechEvent(QString(), true, true)))
 			return true;
-#endif
 		const std::shared_ptr<const MushReaderState> state = existingStateFor(runtime);
 		if (!state)
 			return false;
@@ -1290,7 +1277,6 @@ namespace
 		        .arg(routine, QStringLiteral("LuaAudio"), QMudNativePluginRegistry::luaAudioPluginId());
 		return result;
 	}
-#endif
 } // namespace
 
 namespace QMudNativePluginRegistry
@@ -1376,7 +1362,6 @@ namespace QMudNativePluginRegistry
 		return {};
 	}
 
-#ifndef QMUD_NATIVEPLUGINREGISTRY_METADATA_ONLY
 	LuaAudioRuntimeMasterState luaAudioRuntimeMasterState(const WorldRuntime *runtime)
 	{
 		if (!runtime)
@@ -2124,7 +2109,6 @@ namespace QMudNativePluginRegistry
 		removedMushReaderState.reset();
 	}
 
-#ifdef QMUD_NATIVEPLUGINREGISTRY_TEST_HOOKS
 	std::size_t mushReaderTestBackendCount(const WorldRuntime *runtime)
 	{
 		const std::shared_ptr<const MushReaderState> state = existingStateFor(runtime);
@@ -2136,21 +2120,4 @@ namespace QMudNativePluginRegistry
 		QMutexLocker locker(&stateMutex());
 		testSpeechSink() = std::move(sink);
 	}
-#endif
-#else
-	bool isShimId(const QString &pluginId)
-	{
-		return shimIds().contains(normalizedId(pluginId));
-	}
-
-	bool isBlacklistedId(const QString &pluginId)
-	{
-		return blacklistedIds().contains(normalizedId(pluginId));
-	}
-
-	bool isProtectedId(const QString &pluginId)
-	{
-		return isShimId(pluginId) || isBlacklistedId(pluginId);
-	}
-#endif
 } // namespace QMudNativePluginRegistry
