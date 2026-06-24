@@ -126,13 +126,19 @@ void tst_MushclientImportUtils::importsDirectoryReadOnlyWithFiltersAndNoOverwrit
 	writeFile(QDir(mush).filePath(QStringLiteral("worlds/nested/child.mcl")),
 	          QByteArrayLiteral("<?xml version=\"1.0\" encoding=\"utf-8\"?><muclient><world "
 	                            "name=\"nested-child\" /></muclient>"));
+	writeFile(QDir(mush).filePath(QStringLiteral("worlds/TestSubdir/existing.mcl")),
+	          QByteArrayLiteral("<?xml version=\"1.0\" encoding=\"utf-8\"?><muclient><world "
+	                            "name=\"mm-existing\" /></muclient>"));
 
 	writeFile(QDir(mush).filePath(QStringLiteral("worlds/main.mcl")),
 	          QStringLiteral(
 	              R"(<?xml version="1.0" encoding="utf-8"?>
 <muclient>
-<world script_file="lua/module.lua" log_file_name="%1" world_file="%2" missing_file="%3" fallback_file="%4" root_file="%5" relative_root_file="../shared/relative.mcl" nested_file="%6" />
+<world script_file="scripts/run.lua" module_file="lua/module.lua" log_file_name="%1" world_file="%2" missing_file="%3" fallback_file="%4" root_file="%5" relative_root_file="../shared/relative.mcl" nested_file="%6" fixture_existing_file="TestSubdir\existing.mcl" fixture_missing_file="TestSubdir\missing.mcl" fixture_absolute_missing_file="C:\MUSHclient\worlds\TestSubdir\missing_abs.mcl" fixture_portable_missing_file=".\worlds\TestSubdir\missing_portable.mcl" flat_missing_file="flat_missing.mcl" />
 <include name="plugins/Good.xml" plugin="y" />
+<include name="TestSubdir\fixture-plugin.xml" plugin="y" />
+<include name="C:\MUSHclient\worlds\plugins\TestSubdir\Absolute.xml" plugin="y" />
+<include name=".\worlds\plugins\TestSubdir\Portable.xml" plugin="y" />
 <plugin source="%7" />
 <plugin source="lua/module.lua" />
 <variables>
@@ -153,6 +159,15 @@ void tst_MushclientImportUtils::importsDirectoryReadOnlyWithFiltersAndNoOverwrit
 
 	writeFile(QDir(mush).filePath(QStringLiteral("worlds/plugins/Good.xml")),
 	          pluginXml(QStringLiteral("GoodPlugin"), QStringLiteral("0123456789abcdef01234567"),
+	                    QStringLiteral("Lua")));
+	writeFile(QDir(mush).filePath(QStringLiteral("worlds/plugins/TestSubdir/fixture-plugin.xml")),
+	          pluginXml(QStringLiteral("AcceleratorsPlugin"), QStringLiteral("2123456789abcdef01234567"),
+	                    QStringLiteral("Lua")));
+	writeFile(QDir(mush).filePath(QStringLiteral("worlds/plugins/TestSubdir/Absolute.xml")),
+	          pluginXml(QStringLiteral("AbsolutePlugin"), QStringLiteral("3123456789abcdef01234567"),
+	                    QStringLiteral("Lua")));
+	writeFile(QDir(mush).filePath(QStringLiteral("worlds/plugins/TestSubdir/Portable.xml")),
+	          pluginXml(QStringLiteral("PortablePlugin"), QStringLiteral("4123456789abcdef01234567"),
 	                    QStringLiteral("Lua")));
 	writeFile(QDir(mush).filePath(QStringLiteral("worlds/plugins/NotAPlugin.xml")),
 	          QByteArrayLiteral("<muclient><world name=\"x\"/></muclient>"));
@@ -216,10 +231,15 @@ void tst_MushclientImportUtils::importsDirectoryReadOnlyWithFiltersAndNoOverwrit
 	QMudMushclientImportUtils::importPreferencesDatabase(mush, destinationPreferencesDb, stats);
 
 	QCOMPARE(stats.errors, 0);
-	QCOMPARE(stats.warnings, 2);
+	QCOMPARE(stats.warnings, 7);
 	const QString warningText = stats.warningDetails.join(QLatin1Char('\n'));
 	QVERIFY(warningText.contains(QStringLiteral("missing.mcl")));
+	QVERIFY(warningText.contains(QStringLiteral("../shared/relative.mcl")));
 	QVERIFY(warningText.contains(QStringLiteral("ini-missing.mcl")));
+	QVERIFY(warningText.contains(QStringLiteral("TestSubdir/missing.mcl")));
+	QVERIFY(warningText.contains(QStringLiteral("TestSubdir/missing_abs.mcl")));
+	QVERIFY(warningText.contains(QStringLiteral("TestSubdir/missing_portable.mcl")));
+	QVERIFY(warningText.contains(QStringLiteral("flat_missing.mcl")));
 	QCOMPARE(stats.worldsConverted, 9);
 	QCOMPARE(stats.configsImported, 1);
 	QCOMPARE(stats.preferenceDatabasesImported, 1);
@@ -233,7 +253,8 @@ void tst_MushclientImportUtils::importsDirectoryReadOnlyWithFiltersAndNoOverwrit
 	QFile converted(QDir(home).filePath(QStringLiteral("worlds/main.qdl")));
 	QVERIFY(converted.open(QIODevice::ReadOnly));
 	const QByteArray convertedData = converted.readAll();
-	QVERIFY(convertedData.contains(R"(script_file="./lua/module.lua")"));
+	QVERIFY(convertedData.contains(R"(script_file="./scripts/run.lua")"));
+	QVERIFY(convertedData.contains(R"(module_file="./lua/module.lua")"));
 	QVERIFY(convertedData.contains(R"(log_file_name="./logs/main.log")"));
 	QVERIFY(convertedData.contains(R"(world_file="./worlds/outside.qdl")"));
 	QVERIFY(convertedData.contains(R"(missing_file="./worlds/missing.qdl")"));
@@ -241,7 +262,16 @@ void tst_MushclientImportUtils::importsDirectoryReadOnlyWithFiltersAndNoOverwrit
 	QVERIFY(convertedData.contains(R"(root_file="./worlds/shared.qdl")"));
 	QVERIFY(convertedData.contains(R"(relative_root_file="./worlds/relative.qdl")"));
 	QVERIFY(convertedData.contains(R"(nested_file="./worlds/nested/child.qdl")"));
+	QVERIFY(convertedData.contains(R"(fixture_existing_file="./worlds/TestSubdir/existing.qdl")"));
+	QVERIFY(convertedData.contains(R"(fixture_missing_file="./worlds/TestSubdir/missing.qdl")"));
+	QVERIFY(convertedData.contains(R"(fixture_absolute_missing_file="./worlds/TestSubdir/missing_abs.qdl")"));
+	QVERIFY(convertedData.contains(
+	    R"(fixture_portable_missing_file="./worlds/TestSubdir/missing_portable.qdl")"));
+	QVERIFY(convertedData.contains(R"(flat_missing_file="./worlds/flat_missing.qdl")"));
 	QVERIFY(convertedData.contains(R"(name="./worlds/plugins/Good.xml")"));
+	QVERIFY(convertedData.contains(R"(name="./worlds/plugins/TestSubdir/fixture-plugin.xml")"));
+	QVERIFY(convertedData.contains(R"(name="./worlds/plugins/TestSubdir/Absolute.xml")"));
+	QVERIFY(convertedData.contains(R"(name="./worlds/plugins/TestSubdir/Portable.xml")"));
 	QVERIFY(convertedData.contains(R"(source="./worlds/plugins/ExternalPlugin.xml")"));
 	QVERIFY(convertedData.contains(R"(source="./worlds/plugins/module.lua")"));
 	QVERIFY(convertedData.contains(QByteArrayLiteral(">./map.DB<")));
@@ -255,9 +285,15 @@ void tst_MushclientImportUtils::importsDirectoryReadOnlyWithFiltersAndNoOverwrit
 	QVERIFY(QFileInfo(QDir(home).filePath(QStringLiteral("worlds/outside.qdl"))).exists());
 	QVERIFY(QFileInfo(QDir(home).filePath(QStringLiteral("worlds/shared.qdl"))).exists());
 	QVERIFY(!QFileInfo(QDir(home).filePath(QStringLiteral("shared.qdl"))).exists());
-	QVERIFY(QFileInfo(QDir(home).filePath(QStringLiteral("worlds/relative.qdl"))).exists());
+	QVERIFY(!QFileInfo(QDir(home).filePath(QStringLiteral("worlds/relative.qdl"))).exists());
 	QVERIFY(!QFileInfo(QDir(home).filePath(QStringLiteral("shared/relative.qdl"))).exists());
 	QVERIFY(QFileInfo(QDir(home).filePath(QStringLiteral("worlds/nested/child.qdl"))).exists());
+	QVERIFY(QFileInfo(QDir(home).filePath(QStringLiteral("worlds/TestSubdir/existing.qdl"))).exists());
+	QVERIFY(!QFileInfo(QDir(home).filePath(QStringLiteral("worlds/TestSubdir/missing.qdl"))).exists());
+	QVERIFY(!QFileInfo(QDir(home).filePath(QStringLiteral("worlds/TestSubdir/missing_abs.qdl"))).exists());
+	QVERIFY(
+	    !QFileInfo(QDir(home).filePath(QStringLiteral("worlds/TestSubdir/missing_portable.qdl"))).exists());
+	QVERIFY(!QFileInfo(QDir(home).filePath(QStringLiteral("worlds/flat_missing.qdl"))).exists());
 	QVERIFY(QFileInfo(QDir(home).filePath(QStringLiteral("worlds/ini-only.qdl"))).exists());
 	QVERIFY(QFileInfo(QDir(home).filePath(QStringLiteral("worlds/caf\u00e9.qdl"))).exists());
 	QVERIFY(QFileInfo(QDir(home).filePath(QStringLiteral("worlds/price\u20ac.qdl"))).exists());
@@ -285,6 +321,12 @@ void tst_MushclientImportUtils::importsDirectoryReadOnlyWithFiltersAndNoOverwrit
 	QCOMPARE(existing.readAll(), QByteArrayLiteral("destination"));
 
 	QVERIFY(QFileInfo(QDir(home).filePath(QStringLiteral("worlds/plugins/Good.xml"))).exists());
+	QVERIFY(QFileInfo(QDir(home).filePath(QStringLiteral("worlds/plugins/TestSubdir/fixture-plugin.xml")))
+	            .exists());
+	QVERIFY(
+	    QFileInfo(QDir(home).filePath(QStringLiteral("worlds/plugins/TestSubdir/Absolute.xml"))).exists());
+	QVERIFY(
+	    QFileInfo(QDir(home).filePath(QStringLiteral("worlds/plugins/TestSubdir/Portable.xml"))).exists());
 	QVERIFY(QFileInfo(QDir(home).filePath(QStringLiteral("worlds/plugins/data.dat"))).exists());
 	QVERIFY(!QFileInfo(QDir(home).filePath(QStringLiteral("worlds/plugins/NotAPlugin.xml"))).exists());
 	QVERIFY(!QFileInfo(QDir(home).filePath(QStringLiteral("worlds/plugins/VbPlugin.xml"))).exists());

@@ -207,11 +207,26 @@ namespace
 		QString normalizedRelative = normalized;
 		while (normalizedRelative.startsWith(QStringLiteral("./")))
 			normalizedRelative = normalizedRelative.mid(2);
-		if (!QFileInfo(normalizedRelative).isAbsolute() && !hasWindowsDrivePath(normalizedRelative) &&
-		    normalizedRelative.startsWith(QStringLiteral("worlds/"), Qt::CaseInsensitive))
+		const bool isAbsolute =
+		    QFileInfo(normalizedRelative).isAbsolute() || hasWindowsDrivePath(normalizedRelative);
+		QString portableRelative = QMudPluginPathUtils::legacyPathRelativeToQmudHome(normalizedRelative);
+		if (portableRelative.startsWith(QStringLiteral("worlds/"), Qt::CaseInsensitive))
 		{
-			return dotRelativeStoragePath(destinationBaseDir,
-			                              QDir(destinationBaseDir).filePath(normalizedRelative));
+			const QString relativeWorld =
+			    QMudFileExtensions::canonicalizePathExtension(portableRelative.mid(7));
+			return dotRelativeStoragePath(
+			    destinationBaseDir,
+			    QDir(destinationBaseDir).filePath(QStringLiteral("worlds/") + relativeWorld));
+		}
+
+		if (!isAbsolute && !portableRelative.isEmpty() &&
+		    !portableRelative.startsWith(QStringLiteral("../")) && !QDir::isAbsolutePath(portableRelative))
+		{
+			return dotRelativeStoragePath(
+			    destinationBaseDir,
+			    QDir(destinationBaseDir)
+			        .filePath(QStringLiteral("worlds/") +
+			                  QMudFileExtensions::canonicalizePathExtension(portableRelative)));
 		}
 
 		const QString fileName = QFileInfo(normalized).fileName();
@@ -690,16 +705,16 @@ namespace
 	}
 
 	QString mappedSourcePluginStoragePath(const QString &sourceBaseDir, const QString &destinationBaseDir,
-	                                      const QString &relativeBaseDir, const QString &path)
+	                                      const QString &path)
 	{
 		QString normalized = stripOptionalQuotes(normalizePathString(path).trimmed());
 		if (normalized.isEmpty())
 			return normalized;
 
-		QStringList bases;
-		if (!relativeBaseDir.trimmed().isEmpty())
-			bases.push_back(relativeBaseDir);
-		bases.push_back(sourceBaseDir);
+		QStringList   bases;
+		const QString sourcePluginsDir = QDir(sourceBaseDir).filePath(QStringLiteral("worlds/plugins"));
+		if (!sourcePluginsDir.trimmed().isEmpty())
+			bases.push_back(sourcePluginsDir);
 
 		for (const QString &base : bases)
 		{
@@ -734,7 +749,7 @@ namespace
 		bool anyChanged = false;
 		for (const QString &item : items)
 		{
-			const QString value = mappedSourcePluginStoragePath(sourceBaseDir, destinationBaseDir, {}, item);
+			const QString value = mappedSourcePluginStoragePath(sourceBaseDir, destinationBaseDir, item);
 			if (value != item)
 				anyChanged = true;
 			migrated.push_back(value);
@@ -754,19 +769,63 @@ namespace
 		if (relativeBaseDir.trimmed().isEmpty())
 			return normalized;
 
-		const QString relativeBaseAbsolute = absolutePathFromBase(relativeBaseDir, normalized);
-		if (const QString relative = relativePathUnderBase(sourceBaseDir, relativeBaseAbsolute);
-		    !relative.isEmpty())
+		QString normalizedRelative = normalized;
+		while (normalizedRelative.startsWith(QStringLiteral("./")))
+			normalizedRelative = normalizedRelative.mid(2);
+		const bool hasLeadingSlashWindowsDrive =
+		    normalizedRelative.size() > 2 && normalizedRelative.at(0) == QLatin1Char('/') &&
+		    normalizedRelative.at(1).isLetter() && normalizedRelative.at(2) == QLatin1Char(':');
+		const bool isWindowsAbsolute = hasWindowsDrivePath(normalizedRelative) || hasLeadingSlashWindowsDrive;
+		const bool isNativeAbsolute  = QFileInfo(normalizedRelative).isAbsolute() && !isWindowsAbsolute;
+		const bool isAbsolute        = isNativeAbsolute || isWindowsAbsolute;
+		const QString sourceWorlds   = QDir(sourceBaseDir).filePath(QStringLiteral("worlds"));
+		if (isNativeAbsolute)
 		{
-			return relative;
+			const QString absolutePath = absolutePathFromBase(relativeBaseDir, normalized);
+			if (const QString relativeWorld = relativePathUnderBase(sourceWorlds, absolutePath);
+			    !relativeWorld.isEmpty())
+			{
+				return QStringLiteral("worlds/") + relativeWorld;
+			}
 		}
+
+		QString portableRelative = QMudPluginPathUtils::legacyPathRelativeToQmudHome(normalizedRelative);
+		if (portableRelative.startsWith(QStringLiteral("worlds/"), Qt::CaseInsensitive))
+			return portableRelative;
+		if (!isAbsolute && !portableRelative.isEmpty() &&
+		    !portableRelative.startsWith(QStringLiteral("../")) && !QDir::isAbsolutePath(portableRelative))
+		{
+			const QString baseRelative = relativePathUnderBase(sourceWorlds, relativeBaseDir);
+			if (!baseRelative.isEmpty() || QDir::cleanPath(relativeBaseDir) == QDir::cleanPath(sourceWorlds))
+			{
+				const QString combined =
+				    QDir::cleanPath(QDir(baseRelative.isEmpty() ? QStringLiteral(".") : baseRelative)
+				                        .filePath(portableRelative));
+				if (combined != QStringLiteral("..") && !combined.startsWith(QStringLiteral("../")) &&
+				    !QDir::isAbsolutePath(combined))
+				{
+					return QStringLiteral("worlds/") + combined;
+				}
+			}
+		}
+
+		if (!isAbsolute)
+		{
+			const QString relativeBaseAbsolute = absolutePathFromBase(relativeBaseDir, normalized);
+			if (const QString relativeWorld = relativePathUnderBase(sourceWorlds, relativeBaseAbsolute);
+			    !relativeWorld.isEmpty())
+			{
+				return QStringLiteral("worlds/") + relativeWorld;
+			}
+		}
+
 		return normalized;
 	}
 
 	QString migrateLegacyXmlPluginPathValue(const QString &sourceBaseDir, const QString &destinationBaseDir,
-	                                        const QString &relativeBaseDir, const QString &value)
+	                                        const QString &value)
 	{
-		return mappedSourcePluginStoragePath(sourceBaseDir, destinationBaseDir, relativeBaseDir, value);
+		return mappedSourcePluginStoragePath(sourceBaseDir, destinationBaseDir, value);
 	}
 
 	struct LegacyWorldMigrationResult
@@ -815,8 +874,7 @@ namespace
 			QStringList       migrated;
 			migrated.reserve(items.size());
 			for (const QString &item : items)
-				migrated.push_back(migrateLegacyXmlPluginPathValue(sourceBaseDir, destinationBaseDir,
-				                                                   relativeBaseDir, item));
+				migrated.push_back(migrateLegacyXmlPluginPathValue(sourceBaseDir, destinationBaseDir, item));
 			return migrated.join(QLatin1Char('*'));
 		}
 
@@ -954,19 +1012,18 @@ namespace
 					if (elementName.compare(QStringLiteral("include"), Qt::CaseInsensitive) == 0 &&
 					    attributeName.compare(QStringLiteral("name"), Qt::CaseInsensitive) == 0)
 					{
-						value = isPluginInclude
-						            ? migrateLegacyXmlPluginPathValue(sourceBaseDir, destinationBaseDir,
-						                                              relativeBaseDir, value)
-						            : migrateLegacyXmlPathValue(sourceBaseDir, destinationBaseDir,
-						                                        relativeBaseDir, QStringLiteral("File"),
-						                                        value, archiveLegacySource, activeConversions,
-						                                        warnings, convertedWorlds);
+						value =
+						    isPluginInclude
+						        ? migrateLegacyXmlPluginPathValue(sourceBaseDir, destinationBaseDir, value)
+						        : migrateLegacyXmlPathValue(sourceBaseDir, destinationBaseDir,
+						                                    relativeBaseDir, QStringLiteral("File"), value,
+						                                    archiveLegacySource, activeConversions, warnings,
+						                                    convertedWorlds);
 					}
 					else if (elementName.compare(QStringLiteral("plugin"), Qt::CaseInsensitive) == 0 &&
 					         attributeName.compare(QStringLiteral("source"), Qt::CaseInsensitive) == 0)
 					{
-						value = migrateLegacyXmlPluginPathValue(sourceBaseDir, destinationBaseDir,
-						                                        relativeBaseDir, value);
+						value = migrateLegacyXmlPluginPathValue(sourceBaseDir, destinationBaseDir, value);
 					}
 					else if (isPathListKey(attributeName) || shouldNormalizePathKey(attributeName))
 					{
