@@ -62,11 +62,11 @@ class tst_TimeFormatUtils : public QObject
 			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%%E"), context, false, nullptr);
 			QCOMPARE(escapedDirective, QStringLiteral("%E"));
 
-			context.workingDir = QStringLiteral("~/QMudWorkingDir/");
+			context.workingDir = QStringLiteral("work'dir%value");
 			const QString workingDirExpansion =
 			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%E"), context, false, nullptr);
 
-			QCOMPARE(workingDirExpansion, QStringLiteral("~/QMudWorkingDir/"));
+			QCOMPARE(workingDirExpansion, QStringLiteral("work'dir%value"));
 
 			context.worldName = QStringLiteral("Lara's mud");
 			const QString literalName =
@@ -109,11 +109,11 @@ class tst_TimeFormatUtils : public QObject
 
 			const QString abbrevWeekday =
 			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%a"), {}, false, nullptr);
-			QCOMPARE(abbrevWeekday, QStringLiteral("Wed"));
+			QCOMPARE(abbrevWeekday, QLocale::system().toString(time, "ddd"));
 
 			const QString zoneName =
 			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%Z"), {}, false, nullptr);
-			QCOMPARE(zoneName, QStringLiteral("UTC"));
+			QCOMPARE(zoneName, QLocale::system().toString(time, "t"));
 
 			const QString unknown =
 			    TimeFormatUtils::formatWorldTime(time, QStringLiteral("%q %Y"), {}, false, nullptr);

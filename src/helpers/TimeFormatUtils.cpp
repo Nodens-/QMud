@@ -14,15 +14,15 @@
 
 namespace
 {
-	QString fixupOrIdentity(const QString &value, const bool fixHtml,
+	QString contextLiteral(const QString &value, const bool htmlFixupEnabled,
 	                        const TimeFormatUtils::HtmlFixupFn fixupHtml)
 	{
-		if (!fixHtml || !fixupHtml)
+		if (!htmlFixupEnabled || !fixupHtml)
 			return value;
 		return fixupHtml(value);
 	}
 
-	QString toQtDateFormat(const QString &format, const TimeFormatUtils::WorldTimeFormatContext &context,
+	QString toQtDateTimeFormat(const QString &format, const TimeFormatUtils::WorldTimeFormatContext &context,
 	                       const bool fixHtml, const TimeFormatUtils::HtmlFixupFn fixupHtml)
 	{
 		QString result;
@@ -73,19 +73,19 @@ namespace
 				literal += QLatin1Char('%');
 				break;
 			case 'E':
-				literal += fixupOrIdentity(context.workingDir, fixHtml, fixupHtml);
+				literal += contextLiteral(context.workingDir, fixHtml, fixupHtml);
 				break;
 			case 'N':
-				literal += fixupOrIdentity(context.worldName, fixHtml, fixupHtml);
+				literal += contextLiteral(context.worldName, fixHtml, fixupHtml);
 				break;
 			case 'P':
-				literal += fixupOrIdentity(context.playerName, fixHtml, fixupHtml);
+				literal += contextLiteral(context.playerName, fixHtml, fixupHtml);
 				break;
 			case 'F':
-				literal += fixupOrIdentity(context.worldDir, fixHtml, fixupHtml);
+				literal += contextLiteral(context.worldDir, fixHtml, fixupHtml);
 				break;
 			case 'L':
-				literal += fixupOrIdentity(context.logDir, fixHtml, fixupHtml);
+				literal += contextLiteral(context.logDir, fixHtml, fixupHtml);
 				break;
 			case 'a':
 				token = QStringLiteral("ddd");
@@ -202,6 +202,6 @@ QString TimeFormatUtils::formatWorldTime(const QDateTime &time, const QString &f
                                          const WorldTimeFormatContext &context, const bool fixHtml,
                                          HtmlFixupFn fixupHtml)
 {
-	const auto qtFormat = toQtDateFormat(format, context, fixHtml, fixupHtml);
+	const auto qtFormat = toQtDateTimeFormat(format, context, fixHtml, fixupHtml);
 	return QLocale::system().toString(time, qtFormat);
 }
