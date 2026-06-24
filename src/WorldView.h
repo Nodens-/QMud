@@ -951,6 +951,12 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] int outputScrollUnitsPerLine() const;
 		/**
+		 * @brief Returns the split top pane seam scroll value for a full output scrollbar maximum.
+		 * @param fullMaximum Full-buffer output scrollbar maximum.
+		 * @return Effective bottom value for the split top pane while the live pane owns the tail.
+		 */
+		[[nodiscard]] int nativeSplitTopScrollSeamValue(int fullMaximum) const;
+		/**
 		 * @brief Synchronizes output scrollbar single-step values to line-height units.
 		 */
 		void              syncOutputScrollSingleStep() const;

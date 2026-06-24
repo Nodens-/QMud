@@ -2468,6 +2468,17 @@ int WorldView::outputScrollUnitsPerLine() const
 	return qMax(1, QFontMetrics(view->font()).lineSpacing());
 }
 
+int WorldView::nativeSplitTopScrollSeamValue(const int fullMaximum) const
+{
+	if (!m_scrollbackSplitActive || !m_liveOutput || !m_liveOutput->isVisible())
+		return fullMaximum;
+
+	const QRect liveTextRect = nativeOutputPaneRect(m_liveOutput);
+	if (liveTextRect.isEmpty())
+		return fullMaximum;
+	return qMax(0, fullMaximum - liveTextRect.height());
+}
+
 void WorldView::syncOutputScrollSingleStep() const
 {
 	const int singleStep = outputScrollUnitsPerLine();
@@ -2560,8 +2571,10 @@ void WorldView::syncNativeOutputScrollBarsFromLayout(const NativeOutputRenderLin
 			const int  oldMax            = bar->maximum();
 			const bool wasAtEnd          = oldValue >= oldMax;
 			const bool canAutoFollowTail = !(m_scrollbackSplitActive && pane.view == m_output);
+			const int  splitTopSeamValue =
+			    canAutoFollowTail ? maxScroll : nativeSplitTopScrollSeamValue(maxScroll);
 
-			int        targetValue = qBound(0, oldValue, maxScroll);
+			int targetValue = qBound(0, oldValue, maxScroll);
 			if (wasAtEnd && !m_frozen && canAutoFollowTail)
 				targetValue = maxScroll;
 			bool splitTopAnchorApplied = false;
@@ -2677,6 +2690,9 @@ void WorldView::syncNativeOutputScrollBarsFromLayout(const NativeOutputRenderLin
 				targetValue                              = qMax(0, targetValue - trimmedScroll);
 				m_nativeSplitTopHeadTrimAdjustedRevision = m_nativeRenderLineCacheRevision;
 			}
+
+			if (!canAutoFollowTail)
+				targetValue = qMin(targetValue, splitTopSeamValue);
 
 			const bool needsSingleStepUpdate = bar->singleStep() != lineStep;
 			const bool needsPageStepUpdate   = bar->pageStep() != pageStep;
@@ -9677,7 +9693,7 @@ bool WorldView::isAtBufferEnd() const
 	QScrollBar *const bar = m_output->verticalScrollBar();
 	if (!bar)
 		return true;
-	return bar->value() >= bar->maximum();
+	return bar->value() >= nativeSplitTopScrollSeamValue(bar->maximum());
 }
 
 void WorldView::selectOutputLine(int zeroBasedLine) const

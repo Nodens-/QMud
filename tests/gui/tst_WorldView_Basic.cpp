@@ -4185,7 +4185,12 @@ class tst_WorldView_Basic : public QObject
 			QTRY_VERIFY(view.isScrollbackSplitActive());
 			QTRY_VERIFY(topBar->value() > topBar->minimum());
 
-			topBar->setValue(qMax(topBar->minimum(), topBar->maximum() - qMax(1, topBar->pageStep() / 2)));
+			const int livePaneHeight = qMax(1, splitBottom->viewport()->height());
+			QVERIFY(topBar->maximum() > livePaneHeight);
+			const int splitMergeZoneValue =
+			    qMax(topBar->minimum(), topBar->maximum() - qMax(1, livePaneHeight / 2));
+			QVERIFY(splitMergeZoneValue < topBar->maximum());
+			topBar->setValue(splitMergeZoneValue);
 			QTest::keyClick(input, Qt::Key_PageDown);
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(!view.isScrollbackSplitActive());
