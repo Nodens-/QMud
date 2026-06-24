@@ -99,6 +99,13 @@ namespace
 		return text;
 	}
 
+	void appendValidRepaintRect(QRect &target, const QRect &rect)
+	{
+		if (!rect.isValid())
+			return;
+		target = target.isValid() ? target.united(rect) : rect;
+	}
+
 	QVector<int> prefixTableForText(const QString &text)
 	{
 		QVector<int> table(text.size(), 0);
@@ -1869,7 +1876,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 					    return;
 				    QSignalBlocker block(m_outputScrollBar);
 				    m_outputScrollBar->setValue(value);
-				    clearNativeSelectionIfOutsideVisibleViewport(m_output);
+				    clearNativeSelectionIfSourceViewportMissing(m_output);
 				    if (!m_nativeScrollSyncInPaint)
 					    requestNativeOutputRepaint();
 			    });
@@ -1894,7 +1901,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 		connect(m_liveOutput->verticalScrollBar(), &QScrollBar::valueChanged, this,
 		        [this](int)
 		        {
-			        clearNativeSelectionIfOutsideVisibleViewport(m_liveOutput);
+			        clearNativeSelectionIfSourceViewportMissing(m_liveOutput);
 			        if (!m_nativeScrollSyncInPaint)
 				        requestNativeOutputRepaint();
 		        });
@@ -3348,6 +3355,79 @@ QRect WorldView::nativeOutputPaneRect(const WrapTextBrowser *view) const
 		return {};
 	const QPoint globalTopLeft = view->viewport()->mapToGlobal(QPoint(0, 0));
 	return {m_nativeOutputCanvas->mapFromGlobal(globalTopLeft), view->viewport()->size()};
+}
+
+QRect WorldView::nativeOutputSelectionFallbackRepaintRect(const WrapTextBrowser *sourceView) const
+{
+	QRect repaintRect;
+	appendValidRepaintRect(repaintRect, nativeOutputPaneRect(sourceView));
+	if (m_output && m_output->isVisible())
+		appendValidRepaintRect(repaintRect, nativeOutputPaneRect(m_output));
+	if (m_scrollbackSplitActive && m_liveOutput && m_liveOutput->isVisible())
+		appendValidRepaintRect(repaintRect, nativeOutputPaneRect(m_liveOutput));
+	return repaintRect;
+}
+
+QRect WorldView::nativeOutputSelectionRepaintRect(const NativeOutputSelectionState &selection) const
+{
+	if (!selection.hasSelection)
+		return {};
+	if (selection.renderRevision != m_nativeRenderLineCacheRevision)
+		return nativeOutputSelectionFallbackRepaintRect(selection.sourceView);
+
+	const int selectionStartLine = qMin(selection.start.line, selection.end.line);
+	const int selectionEndLine   = qMax(selection.start.line, selection.end.line);
+	if (selectionStartLine < 0 || selectionEndLine < selectionStartLine)
+		return nativeOutputSelectionFallbackRepaintRect(selection.sourceView);
+
+	QRect repaintRect;
+	auto  appendPaneSelectionRect =
+	    [this, &repaintRect, selectionStartLine, selectionEndLine](const WrapTextBrowser *view)
+	{
+		if (!view || !view->isVisible())
+			return;
+		const QRect paneRect = nativeOutputPaneRect(view);
+		if (paneRect.isEmpty())
+			return;
+
+		const NativeOutputPanePaintState *const state     = nativeOutputPanePaintStateForView(view);
+		const QScrollBar *const                 scrollBar = view->verticalScrollBar();
+		const int currentScrollY = scrollBar ? qMax(0, scrollBar->value()) : qMax(0, outputScrollPosition());
+		const int currentScrollMax = scrollBar ? qMax(0, scrollBar->maximum()) : 0;
+		const int currentEffectiveScroll =
+		    currentScrollMax > 0 ? qBound(0, currentScrollY, currentScrollMax) : 0;
+		const bool stateUsable = state && state->valid &&
+		                         state->renderRevision == m_nativeRenderLineCacheRevision &&
+		                         state->paneRect == paneRect && state->scrollY == currentEffectiveScroll &&
+		                         state->scrollMax == currentScrollMax &&
+		                         state->visibleLineIndexes.size() == state->visibleLineTops.size() &&
+		                         state->visibleLineIndexes.size() == state->visibleLineBottoms.size();
+		if (!stateUsable)
+		{
+			appendValidRepaintRect(repaintRect, paneRect);
+			return;
+		}
+
+		QRect paneSelectionRect;
+		for (int i = 0; i < state->visibleLineIndexes.size(); ++i)
+		{
+			const int lineIndex = state->visibleLineIndexes.at(i);
+			if (lineIndex < selectionStartLine || lineIndex > selectionEndLine)
+				continue;
+			const int   top    = paneRect.top() + state->visibleLineTops.at(i) - 2;
+			const int   bottom = paneRect.top() + state->visibleLineBottoms.at(i) + 2;
+			const QRect lineRect(paneRect.left(), top, paneRect.width(), qMax(1, bottom - top));
+			appendValidRepaintRect(paneSelectionRect, lineRect);
+		}
+		paneSelectionRect = paneSelectionRect.intersected(paneRect);
+		if (!paneSelectionRect.isEmpty())
+			appendValidRepaintRect(repaintRect, paneSelectionRect);
+	};
+
+	appendPaneSelectionRect(m_output);
+	if (m_scrollbackSplitActive && m_liveOutput && m_liveOutput->isVisible())
+		appendPaneSelectionRect(m_liveOutput);
+	return repaintRect;
 }
 
 bool WorldView::nativeServerSideWrapActive() const
@@ -7853,6 +7933,89 @@ bool WorldView::nativeOutputHitTestGlobal(const QPoint &globalPos, WrapTextBrows
 	return tryView(m_output);
 }
 
+bool WorldView::nativeOutputDragHitTestGlobal(const QPoint &globalPos, NativeOutputPosition &position,
+                                              QString *href, QString *hint, bool *const textHit) const
+{
+	WrapTextBrowser *matchedView = nullptr;
+	if (nativeOutputHitTestGlobal(globalPos, matchedView, position, href, hint, true, false, textHit))
+		return true;
+
+	position = {};
+	if (href)
+		href->clear();
+	if (hint)
+		hint->clear();
+	if (textHit)
+		*textHit = false;
+	if (!nativeOutputInteractionActive())
+		return false;
+
+	struct Candidate
+	{
+			WrapTextBrowser *view{nullptr};
+			int              order{0};
+			qint64           distance{std::numeric_limits<qint64>::max()};
+	};
+
+	auto viewportGlobalRect = [](const WrapTextBrowser *candidate)
+	{
+		if (!candidate || !candidate->isVisible() || !candidate->viewport() ||
+		    !candidate->viewport()->isVisible())
+			return QRect();
+		return QRect(candidate->viewport()->mapToGlobal(QPoint(0, 0)), candidate->viewport()->size());
+	};
+
+	auto distanceToViewport = [&globalPos, &viewportGlobalRect](const WrapTextBrowser *candidate)
+	{
+		const QRect globalRect = viewportGlobalRect(candidate);
+		if (globalRect.isEmpty())
+			return std::numeric_limits<qint64>::max();
+		const int    clampedX = qBound(globalRect.left(), globalPos.x(), globalRect.right());
+		const int    clampedY = qBound(globalRect.top(), globalPos.y(), globalRect.bottom());
+		const qint64 dx       = static_cast<qint64>(globalPos.x()) - clampedX;
+		const qint64 dy       = static_cast<qint64>(globalPos.y()) - clampedY;
+		return (dx * dx) + (dy * dy);
+	};
+
+	QVector<Candidate> candidates;
+	candidates.reserve(2);
+	int outputOrder = 0;
+	int liveOrder   = 1;
+	if (m_scrollbackSplitActive && m_output && m_liveOutput && m_liveOutput->isVisible())
+	{
+		const QRect liveRect = viewportGlobalRect(m_liveOutput);
+		if (!liveRect.isEmpty() && globalPos.y() >= liveRect.top())
+			qSwap(outputOrder, liveOrder);
+	}
+	if (m_output)
+		candidates.push_back({m_output, outputOrder, distanceToViewport(m_output)});
+	if (m_scrollbackSplitActive && m_liveOutput && m_liveOutput->isVisible())
+		candidates.push_back({m_liveOutput, liveOrder, distanceToViewport(m_liveOutput)});
+	std::ranges::sort(candidates,
+	                  [](const Candidate &lhs, const Candidate &rhs)
+	                  {
+		                  if (lhs.distance != rhs.distance)
+			                  return lhs.distance < rhs.distance;
+		                  return lhs.order < rhs.order;
+	                  });
+
+	for (const Candidate &candidate : std::as_const(candidates))
+	{
+		if (!candidate.view || candidate.distance == std::numeric_limits<qint64>::max())
+			continue;
+		const QRect viewportRect = candidate.view->viewport()->rect();
+		if (viewportRect.isEmpty())
+			continue;
+		QPoint local = candidate.view->viewport()->mapFromGlobal(globalPos);
+		local.setX(qBound(viewportRect.left(), local.x(), viewportRect.right()));
+		local.setY(qBound(viewportRect.top(), local.y(), viewportRect.bottom()));
+		if (!nativeOutputHitTest(candidate.view, local, position, href, hint, true, false, textHit))
+			continue;
+		return true;
+	}
+	return false;
+}
+
 bool WorldView::nativeOutputHitTestForMouseEvent(const QWidget *watched, const QMouseEvent *event,
                                                  WrapTextBrowser *&view, QPoint &viewPos,
                                                  NativeOutputPosition &position, QString *href, QString *hint,
@@ -7933,10 +8096,11 @@ void WorldView::clearNativeOutputSelection(const bool notify)
 {
 	const bool  hadNativeState = m_nativeOutputSelection.hasSelection || m_nativeOutputSelection.dragging ||
 	                             m_nativeOutputSelection.sourceView != nullptr;
-	const QRect oldPaneRect    = nativeOutputPaneRect(m_nativeOutputSelection.sourceView);
+	const QRect oldPaneRect    = nativeOutputSelectionRepaintRect(m_nativeOutputSelection);
 	m_nativeOutputSelection    = {};
 	m_nativeSelectionPendingHeadTrimLines = 0;
-	requestNativeOutputRepaint(oldPaneRect);
+	if (oldPaneRect.isValid())
+		requestNativeOutputRepaint(oldPaneRect);
 	if (notify && hadNativeState)
 		applyResolvedOutputSelection(false, 0, 0, 0, 0);
 }
@@ -8102,32 +8266,32 @@ void WorldView::applyPendingNativeSelectionRenderDelta(const NativeOutputRenderL
 		return;
 	}
 
-	const QRect oldPaneRect               = nativeOutputPaneRect(m_nativeOutputSelection.sourceView);
+	const QRect oldPaneRect               = nativeOutputSelectionRepaintRect(m_nativeOutputSelection);
 	m_nativeOutputSelection               = resolvedSelection;
 	m_nativeSelectionPendingHeadTrimLines = 0;
 	if (resolveResult == NativeOutputSelectionResolveResult::MappedSelection)
 	{
+		QRect repaintRect = oldPaneRect;
+		appendValidRepaintRect(repaintRect, nativeOutputSelectionRepaintRect(resolvedSelection));
+		if (repaintRect.isValid())
+			requestNativeOutputRepaint(repaintRect);
 		applyResolvedOutputSelection(true, resolvedSelection.start.line + 1,
 		                             resolvedSelection.start.column + 1, resolvedSelection.end.line + 1,
 		                             resolvedSelection.end.column + 1, false);
 	}
 	else
 	{
-		requestNativeOutputRepaint(oldPaneRect);
+		if (oldPaneRect.isValid())
+			requestNativeOutputRepaint(oldPaneRect);
 		applyResolvedOutputSelection(false, 0, 0, 0, 0, false);
 	}
 }
 
-void WorldView::clearNativeSelectionIfOutsideVisibleViewport(const WrapTextBrowser *const view)
+void WorldView::clearNativeSelectionIfSourceViewportMissing(const WrapTextBrowser *const view)
 {
 	if (!view || !m_nativeOutputSelection.hasSelection || m_nativeOutputSelection.sourceView != view)
 		return;
 	if (!view->viewport())
-	{
-		clearNativeOutputSelection(true);
-		return;
-	}
-	if (view == m_liveOutput && (!m_scrollbackSplitActive || !m_liveOutput || !m_liveOutput->isVisible()))
 	{
 		clearNativeOutputSelection(true);
 		return;
@@ -8164,9 +8328,9 @@ void WorldView::setNativeOutputSelection(const WrapTextBrowser      *sourceView,
 	if (start.line > end.line || (start.line == end.line && start.column > end.column))
 		qSwap(start, end);
 
-	const bool                   hasSelection       = start.line != end.line || start.column != end.column;
-	const WrapTextBrowser *const previousSourceView = m_nativeOutputSelection.sourceView;
-	const bool                   changed =
+	const bool                       hasSelection      = start.line != end.line || start.column != end.column;
+	const NativeOutputSelectionState previousSelection = m_nativeOutputSelection;
+	const bool                       changed =
 	    m_nativeOutputSelection.hasSelection != hasSelection ||
 	    m_nativeOutputSelection.dragging != dragging || m_nativeOutputSelection.sourceView != sourceView ||
 	    m_nativeOutputSelection.anchor.line != anchorLine ||
@@ -8196,9 +8360,10 @@ void WorldView::setNativeOutputSelection(const WrapTextBrowser      *sourceView,
 	else if (m_lastOutputSelectionView == sourceView)
 		m_lastOutputSelectionView = nullptr;
 
-	QRect repaintRect = nativeOutputPaneRect(previousSourceView);
-	repaintRect       = repaintRect.united(nativeOutputPaneRect(m_nativeOutputSelection.sourceView));
-	requestNativeOutputRepaint(repaintRect);
+	QRect repaintRect = nativeOutputSelectionRepaintRect(previousSelection);
+	appendValidRepaintRect(repaintRect, nativeOutputSelectionRepaintRect(m_nativeOutputSelection));
+	if (repaintRect.isValid())
+		requestNativeOutputRepaint(repaintRect);
 	if (hasSelection)
 		applyResolvedOutputSelection(true, start.line + 1, start.column + 1, end.line + 1, end.column + 1);
 	else
@@ -8228,12 +8393,6 @@ bool WorldView::nativeOutputSelectionBounds(int &startLine, int &startColumn, in
 	}
 	if (!selection.hasSelection)
 		return false;
-	if (selection.sourceView == m_liveOutput &&
-	    (!m_scrollbackSplitActive || !m_liveOutput || !m_liveOutput->isVisible()))
-	{
-		return false;
-	}
-
 	if (!m_hasOutputSelection)
 		return false;
 
@@ -8254,12 +8413,6 @@ QString WorldView::nativeOutputSelectionText() const
 	if (resolveNativeOutputSelectionStateForLines(lines, selection) !=
 	    NativeOutputSelectionResolveResult::MappedSelection)
 		return {};
-	if (selection.sourceView == m_liveOutput &&
-	    (!m_scrollbackSplitActive || !m_liveOutput || !m_liveOutput->isVisible()))
-	{
-		return {};
-	}
-
 	QString   text;
 	const int startLine   = selection.start.line + 1;
 	const int startColumn = selection.start.column + 1;
@@ -8289,12 +8442,6 @@ QString WorldView::nativeOutputSelectionHtml() const
 	if (resolveNativeOutputSelectionStateForLines(lines, selection) !=
 	    NativeOutputSelectionResolveResult::MappedSelection)
 		return {};
-	if (selection.sourceView == m_liveOutput &&
-	    (!m_scrollbackSplitActive || !m_liveOutput || !m_liveOutput->isVisible()))
-	{
-		return {};
-	}
-
 	const int startLine   = selection.start.line + 1;
 	const int startColumn = selection.start.column + 1;
 	const int endLine     = selection.end.line + 1;
@@ -8379,16 +8526,6 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 	    (!m_scrollbackSplitActive || !m_liveOutput || !m_liveOutput->isVisible()))
 		return false;
 
-	auto clampedPosForView = [](const WrapTextBrowser *view, const QPoint &globalPos)
-	{
-		const QRect rect  = view->viewport()->rect();
-		QPoint      local = view->viewport()->mapFromGlobal(globalPos);
-		if (rect.width() <= 0 || rect.height() <= 0)
-			return QPoint(0, 0);
-		local.setX(qBound(0, local.x(), rect.width() - 1));
-		local.setY(qBound(0, local.y(), rect.height() - 1));
-		return local;
-	};
 	auto cacheWordUnderMouse = [this](const NativeOutputPosition &position, const bool textHit)
 	{
 		if (!m_runtime)
@@ -8427,21 +8564,20 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 			return false;
 		}
 
-		WrapTextBrowser *dragView =
+		const WrapTextBrowser *selectionSource =
 		    m_nativeOutputSelection.sourceView ? m_nativeOutputSelection.sourceView : sourceView;
-		if (!dragView || !dragView->viewport())
+		if (!selectionSource)
 			return false;
 		NativeOutputPosition position;
 		bool                 textHit = false;
-		if (!nativeOutputHitTest(dragView,
-		                         clampedPosForView(dragView, mouseEvent->globalPosition().toPoint()),
-		                         position, nullptr, nullptr, true, false, &textHit))
+		if (!nativeOutputDragHitTestGlobal(mouseEvent->globalPosition().toPoint(), position, nullptr, nullptr,
+		                                   &textHit))
 		{
 			return true;
 		}
 		cacheWordUnderMouse(position, textHit);
 
-		setNativeOutputSelection(dragView, m_nativeOutputSelection.anchor, position, true);
+		setNativeOutputSelection(selectionSource, m_nativeOutputSelection.anchor, position, true);
 		return true;
 	}
 	case QEvent::MouseButtonRelease:
@@ -8450,18 +8586,17 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 		if (!mouseEvent || mouseEvent->button() != Qt::LeftButton || !m_nativeOutputSelection.dragging)
 			return false;
 
-		WrapTextBrowser *dragView =
+		const WrapTextBrowser *selectionSource =
 		    m_nativeOutputSelection.sourceView ? m_nativeOutputSelection.sourceView : sourceView;
-		if (!dragView || !dragView->viewport())
+		if (!selectionSource)
 			return false;
 
 		NativeOutputPosition position;
 		QString              href;
 		QString              hint;
 		bool                 textHit = false;
-		if (!nativeOutputHitTest(dragView,
-		                         clampedPosForView(dragView, mouseEvent->globalPosition().toPoint()),
-		                         position, &href, &hint, true, false, &textHit))
+		if (!nativeOutputDragHitTestGlobal(mouseEvent->globalPosition().toPoint(), position, &href, &hint,
+		                                   &textHit))
 		{
 			m_nativeOutputSelection.dragging = false;
 			return true;
@@ -8469,7 +8604,7 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 		cacheWordUnderMouse(position, textHit);
 		const bool wasClick = m_nativeOutputSelection.anchor.line == position.line &&
 		                      m_nativeOutputSelection.anchor.column == position.column;
-		setNativeOutputSelection(dragView, m_nativeOutputSelection.anchor, position, false);
+		setNativeOutputSelection(selectionSource, m_nativeOutputSelection.anchor, position, false);
 		if (wasClick && !href.isEmpty())
 			emit hyperlinkActivated(href);
 		return true;
@@ -8778,10 +8913,9 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 
 		painter->save();
 		painter->setClipRegion(clippedPaneRegion);
-		const bool drawSelectionForPane =
-		    hasNativeSelection && pane.view && pane.view == m_nativeOutputSelection.sourceView;
-		int firstVisibleLine = nativeLayoutLineAtY(visibleTop);
-		int lastVisibleLine  = qMin(sizeToInt(lines.size()) - 1, nativeLayoutLineAtY(visibleBottom));
+		const bool drawSelectionForPane = hasNativeSelection && pane.view;
+		int        firstVisibleLine     = nativeLayoutLineAtY(visibleTop);
+		int        lastVisibleLine = qMin(sizeToInt(lines.size()) - 1, nativeLayoutLineAtY(visibleBottom));
 		if (firstVisibleLine > lastVisibleLine)
 		{
 			painter->restore();
@@ -9054,9 +9188,17 @@ void WorldView::setScrollbackSplitActive(bool active)
 			m_lastLiveSplitSize = sizes.at(1);
 		m_outputSplitter->setSizes(QList<int>() << 1 << 0);
 		if (m_lastOutputSelectionView == m_liveOutput)
-			m_lastOutputSelectionView = nullptr;
+			m_lastOutputSelectionView = m_output;
 		if (m_nativeOutputSelection.sourceView == m_liveOutput)
-			clearNativeOutputSelection(true);
+		{
+			const NativeOutputSelectionState previousSelection = m_nativeOutputSelection;
+			const QRect oldRepaintRect         = nativeOutputSelectionRepaintRect(previousSelection);
+			m_nativeOutputSelection.sourceView = m_output;
+			QRect repaintRect                  = oldRepaintRect;
+			appendValidRepaintRect(repaintRect, nativeOutputSelectionRepaintRect(m_nativeOutputSelection));
+			if (repaintRect.isValid())
+				requestNativeOutputRepaint(repaintRect);
+		}
 		m_userScrollAction = false;
 		if (!m_frozen)
 			scrollViewToEnd(m_output);
@@ -9091,8 +9233,8 @@ WorldView::synchronizeNativeRuntimeOutputPresentation(const bool allowLayoutBuil
 			scrollViewToEnd(m_output);
 	}
 	applyPendingNativeSelectionRenderDelta(lines);
-	clearNativeSelectionIfOutsideVisibleViewport(m_output);
-	clearNativeSelectionIfOutsideVisibleViewport(m_liveOutput);
+	clearNativeSelectionIfSourceViewportMissing(m_output);
+	clearNativeSelectionIfSourceViewportMissing(m_liveOutput);
 	notifyAccessibleOutputPresented(lines);
 	return lines;
 }

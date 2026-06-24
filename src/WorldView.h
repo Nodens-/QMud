@@ -981,6 +981,7 @@ class WorldView : public QWidget
 		 */
 		void              requestNativeOutputTailRepaint() const;
 		struct NativeOutputPanePaintState;
+		struct NativeOutputSelectionState;
 		/**
 		 * @brief Calculates the visible dirty rectangle for the latest native render-cache delta.
 		 * @param lines Current native render lines.
@@ -1030,6 +1031,19 @@ class WorldView : public QWidget
 		 */
 		void                notifyAccessibleOutputPresented(const NativeOutputRenderLines &lines) const;
 		[[nodiscard]] QRect nativeOutputPaneRect(const WrapTextBrowser *view) const;
+		/**
+		 * @brief Returns the visible native output area to repaint when selection geometry is unavailable.
+		 * @param sourceView Selection source view to include when it has geometry.
+		 * @return Canvas-local repaint rectangle for selection changes.
+		 */
+		[[nodiscard]] QRect nativeOutputSelectionFallbackRepaintRect(const WrapTextBrowser *sourceView) const;
+		/**
+		 * @brief Returns visible line bands affected by a native output selection.
+		 * @param selection Selection state to map to visible pane repaint bands.
+		 * @return Canvas-local repaint rectangle for visible selection changes.
+		 */
+		[[nodiscard]] QRect
+		nativeOutputSelectionRepaintRect(const NativeOutputSelectionState &selection) const;
 		/**
 		 * @brief Returns mutable paint state for a native output pane.
 		 * @param view Output pane view.
@@ -1220,9 +1234,9 @@ class WorldView : public QWidget
 		 * @param layoutFont Current output font.
 		 * @return `true` when layout caches can be used without rebuild.
 		 */
-		[[nodiscard]] bool nativeLayoutCacheReadyFor(const NativeOutputRenderLines &lines,
-		                                             int wrapWidthPixels, int localWrapWidthPixels,
-		                                             int lineSpacingSetting, const QFont &layoutFont) const;
+		[[nodiscard]] bool       nativeLayoutCacheReadyFor(const NativeOutputRenderLines &lines,
+		                                                   int wrapWidthPixels, int localWrapWidthPixels,
+		                                                   int lineSpacingSetting, const QFont &layoutFont) const;
 		/**
 		 * @brief Returns whether native layout slot/index structures match current render inputs.
 		 * @param lines Current native render lines.
@@ -1232,10 +1246,10 @@ class WorldView : public QWidget
 		 * @param layoutFont Current output font.
 		 * @return `true` when exact range materialization can use the current slot/index structures.
 		 */
-		[[nodiscard]] bool nativeLayoutRangeStateReadyFor(const NativeOutputRenderLines &lines,
-		                                                  int wrapWidthPixels, int localWrapWidthPixels,
-		                                                  int          lineSpacingSetting,
-		                                                  const QFont &layoutFont) const;
+		[[nodiscard]] bool       nativeLayoutRangeStateReadyFor(const NativeOutputRenderLines &lines,
+		                                                        int wrapWidthPixels, int localWrapWidthPixels,
+		                                                        int          lineSpacingSetting,
+		                                                        const QFont &layoutFont) const;
 		/**
 		 * @brief Estimates visual rows for a native render line without shaping text.
 		 * @param line Native render line.
@@ -1280,8 +1294,8 @@ class WorldView : public QWidget
 		 * @return Deferred adjustment; invalid when current layout state cannot produce one.
 		 */
 		[[nodiscard]] NativeSplitTopHeadTrimAdjustment
-		nativeSplitTopHeadTrimAdjustmentForDelta(const NativeRenderCacheDelta &delta,
-		                                         qreal defaultLineAdvance, quint64 targetRevision = 0) const;
+		     nativeSplitTopHeadTrimAdjustmentForDelta(const NativeRenderCacheDelta &delta,
+		                                              qreal defaultLineAdvance, quint64 targetRevision = 0) const;
 		/**
 		 * @brief Clears pending split-pane head-trim compensation.
 		 */
@@ -1571,6 +1585,19 @@ class WorldView : public QWidget
 		                                             bool  requireTextHit = false,
 		                                             bool *textHit        = nullptr) const;
 		/**
+		 * @brief Hit-tests a global drag point against visible native output panes, clamping to nearest pane.
+		 * @param globalPos Global screen coordinate.
+		 * @param position Output line/column position.
+		 * @param href Optional hyperlink href at hit point.
+		 * @param hint Optional hyperlink hint at hit point.
+		 * @param textHit Optional output set to `true` when the point is over rendered text glyph bounds.
+		 * @return `true` when point maps to native output.
+		 */
+		[[nodiscard]] bool nativeOutputDragHitTestGlobal(const QPoint         &globalPos,
+		                                                 NativeOutputPosition &position,
+		                                                 QString *href = nullptr, QString *hint = nullptr,
+		                                                 bool *textHit = nullptr) const;
+		/**
 		 * @brief Clears native output selection state.
 		 * @param notify Emit selection changed flow when state changes.
 		 */
@@ -1609,10 +1636,10 @@ class WorldView : public QWidget
 		                                                      const NativeOutputPositionIdentity &identity,
 		                                                      const NativeOutputRenderLines &lines) const;
 		/**
-		 * @brief Applies native selection maintenance after viewport/scroll updates.
+		 * @brief Clears native selection when its source view no longer has a viewport.
 		 * @param view Output view associated with the current selection.
 		 */
-		void               clearNativeSelectionIfOutsideVisibleViewport(const WrapTextBrowser *view);
+		void               clearNativeSelectionIfSourceViewportMissing(const WrapTextBrowser *view);
 		/**
 		 * @brief Updates native output selection state from anchor/cursor positions.
 		 * @param sourceView Originating output view.
@@ -1825,28 +1852,28 @@ class WorldView : public QWidget
 		 * @brief Returns hotspot tooltip start delay.
 		 * @return Tooltip start delay in milliseconds.
 		 */
-		[[nodiscard]] int tooltipStartDelayMs() const;
+		[[nodiscard]] int    tooltipStartDelayMs() const;
 		/**
 		 * @brief Returns hotspot tooltip visible duration.
 		 * @return Tooltip visible duration in milliseconds.
 		 */
-		[[nodiscard]] int tooltipVisibleDurationMs() const;
+		[[nodiscard]] int    tooltipVisibleDurationMs() const;
 		/**
 		 * @brief Schedules tooltip display for hotspot.
 		 * @param hotspotId Hotspot identifier.
 		 * @param tooltipText Tooltip text.
 		 * @param globalPos Tooltip anchor position in global coordinates.
 		 */
-		void              scheduleHotspotTooltip(const QString &hotspotId, const QString &tooltipText,
-		                                         const QPoint &globalPos);
+		void                 scheduleHotspotTooltip(const QString &hotspotId, const QString &tooltipText,
+		                                            const QPoint &globalPos);
 		/**
 		 * @brief Shows previously scheduled hotspot tooltip.
 		 */
-		void              showScheduledHotspotTooltip();
+		void                 showScheduledHotspotTooltip();
 		/**
 		 * @brief Clears any pending hotspot tooltip request.
 		 */
-		void              clearPendingHotspotTooltip();
+		void                 clearPendingHotspotTooltip();
 		/**
 		 * @brief Updates line-information tooltip from mouse position.
 		 * @param watched Widget receiving mouse events.
@@ -1858,12 +1885,12 @@ class WorldView : public QWidget
 		 * @param allowCacheBuild `true` to materialize the needed layout range on demand, `false` to
 		 *        query only when cache is ready.
 		 */
-		void              updateLineInformationTooltip(const QWidget *watched, const QMouseEvent *event,
-		                                               const WrapTextBrowser      *precomputedView = nullptr,
-		                                               const QPoint               *precomputedPosInView = nullptr,
-		                                               const NativeOutputPosition *precomputedHit = nullptr,
-		                                               const bool                 *precomputedTextHit = nullptr,
-		                                               bool                        allowCacheBuild = true);
+		void                 updateLineInformationTooltip(const QWidget *watched, const QMouseEvent *event,
+		                                                  const WrapTextBrowser      *precomputedView = nullptr,
+		                                                  const QPoint               *precomputedPosInView = nullptr,
+		                                                  const NativeOutputPosition *precomputedHit = nullptr,
+		                                                  const bool                 *precomputedTextHit = nullptr,
+		                                                  bool                        allowCacheBuild = true);
 		/**
 		 * @brief Computes line fade opacity for timestamp.
 		 * @param when Line timestamp.
