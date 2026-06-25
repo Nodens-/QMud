@@ -29,6 +29,8 @@ namespace
 			QStringList                 outputLines;
 			QList<WorldRuntime::Plugin> plugins;
 			QHash<int, int>             soundStatusByBuffer;
+			QHash<int, bool>            reusableByBuffer;
+			QStringList                 failingDirectPlayFiles;
 			int                         publicPlaySoundCalls{0};
 			int                         directPlaySoundCalls{0};
 			int                         publicStopSoundCalls{0};
@@ -156,6 +158,8 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(const int buffer, const QStr
 		stateFor(this).soundStatusByBuffer.insert(buffer, loop ? 2 : 1);
 		return eOK;
 	}
+	if (stateFor(this).failingDirectPlayFiles.contains(fileName))
+		return eCannotPlaySound;
 	const int                                            targetBuffer = buffer > 0 ? buffer : 1;
 	QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
 	const bool                                           hasLuaAudioState =
@@ -191,6 +195,17 @@ int WorldRuntime::soundStatus(const int buffer) const
 	if (buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
 		return -1;
 	return stateFor(this).soundStatusByBuffer.value(buffer, -2);
+}
+
+bool WorldRuntime::soundBufferReusableForNativeAudio(const int buffer) const
+{
+	if (buffer < 1 || buffer > WorldRuntime::kMaxSoundBuffers)
+		return false;
+	const RuntimeStubState &state = stateFor(this);
+	if (state.reusableByBuffer.contains(buffer))
+		return state.reusableByBuffer.value(buffer);
+	const int status = state.soundStatusByBuffer.value(buffer, -2);
+	return status == -2 || status == 0;
 }
 
 const QList<WorldRuntime::Plugin> &WorldRuntime::plugins() const
@@ -442,7 +457,7 @@ class tst_NativePluginRegistry : public QObject
 			QCOMPARE(volume.returnValues.constFirst().toDouble(), 25.0);
 
 			const int reserved = QMudNativePluginRegistry::luaAudioReserveRuntimeBuffer(
-			    &runtime, [](const int) { return -2; });
+			    &runtime, [](const int) { return true; });
 			QCOMPARE(reserved, 2);
 			QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(&runtime, reserved);
 
@@ -484,6 +499,7 @@ class tst_NativePluginRegistry : public QObject
 			QCOMPARE(stateFor(&runtime).soundStatusByBuffer.value(1), 1);
 
 			stateFor(&runtime).soundStatusByBuffer.insert(1, 0);
+			stateFor(&runtime).reusableByBuffer.insert(1, false);
 			const QMudNativePluginRegistry::NativeCallResult transientStoppedPlay =
 			    QMudNativePluginRegistry::callRoutine(&runtime, audioId, QStringLiteral("play"),
 			                                          {QStringLiteral("coin.wav"), false, 0.0, 44.0});
@@ -492,6 +508,7 @@ class tst_NativePluginRegistry : public QObject
 			QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).size(), 2);
 			QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(&runtime, 2);
 			static_cast<void>(runtime.stopSoundBypassingPluginCallbacks(2));
+			stateFor(&runtime).reusableByBuffer.remove(1);
 
 			QVERIFY(QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
 			    &runtime, 1, postResetState.generation));
@@ -571,6 +588,12 @@ class tst_NativePluginRegistry : public QObject
 			QCOMPARE(runtime.soundStatus(1), 1);
 			QCOMPARE(stateFor(&runtime).publicPlaySoundCalls, 0);
 			QCOMPARE(stateFor(&runtime).directPlaySoundCalls, 1);
+			stateFor(&runtime).failingDirectPlayFiles.push_back(QStringLiteral("coin.wav"));
+			QVERIFY(!QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime, QStringLiteral("coin.wav")));
+			QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).size(), 1);
+			QCOMPARE(runtime.soundStatus(1), 1);
+			QCOMPARE(stateFor(&runtime).directPlaySoundCalls, 2);
+			stateFor(&runtime).failingDirectPlayFiles.clear();
 			QVERIFY(QMudNativePluginRegistry::handleLuaAudioPlaySound(&runtime, QString()));
 			QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 			QCOMPARE(runtime.soundStatus(1), -2);

@@ -516,6 +516,7 @@ struct LuaCallbackMiniWindowSnapshot
 		QSet<int>                                             usedUdpPortsSnapshot;
 		QHash<int, int>                                       usedUdpPortReferenceCountsSnapshot;
 		QHash<int, int>                                       soundStatusByBuffer;
+		QHash<int, bool>                                      soundBufferReusableByBuffer;
 		bool                                                  hasLineBufferSnapshot{false};
 		int                                                   lineBufferCount{0};
 		QSharedPointer<const LuaCallbackLineBufferSnapshot>   lineBufferSnapshot;

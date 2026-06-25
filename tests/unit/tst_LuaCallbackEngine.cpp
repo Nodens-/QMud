@@ -2086,7 +2086,9 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryIsAvailableWithoutShadowPlugin()
 
 	auto snapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 	snapshot->soundStatusByBuffer.insert(1, -2);
+	snapshot->soundBufferReusableByBuffer.insert(1, true);
 	snapshot->soundStatusByBuffer.insert(9, 1);
+	snapshot->soundBufferReusableByBuffer.insert(9, false);
 
 	LuaBatchDispatchRequest request;
 	request.engines               = {engine};
@@ -2154,7 +2156,9 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 
 	auto snapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 	snapshot->soundStatusByBuffer.insert(1, -2);
+	snapshot->soundBufferReusableByBuffer.insert(1, true);
 	snapshot->soundStatusByBuffer.insert(2, -2);
+	snapshot->soundBufferReusableByBuffer.insert(2, true);
 
 	LuaBatchDispatchRequest request;
 	request.engines               = {engine};
@@ -2172,6 +2176,202 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QCOMPARE(result.stringResult, QStringLiteral("2|25|100"));
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 
+	auto preStartEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, preStartEngine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  prestart_id = audio.play("coin.wav")
+	end
+	function prestart_audio_status(value)
+	  return tostring(prestart_id)
+	end
+	)lua"),
+	                       &runtime);
+	auto preStartSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	preStartSnapshot->soundStatusByBuffer.insert(1, 0);
+	preStartSnapshot->soundBufferReusableByBuffer.insert(1, false);
+	preStartSnapshot->soundStatusByBuffer.insert(2, -2);
+	preStartSnapshot->soundBufferReusableByBuffer.insert(2, true);
+	request.engines               = {preStartEngine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = preStartSnapshot;
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("prestart_audio_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("2"));
+	teardownWorkerEngine(executor, preStartEngine);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+
+	auto callPluginPreStartEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, callPluginPreStartEngine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local code, id = CallPlugin("aedf0cb0be5bf045860d54b7", "play", "coin.wav")
+	  callplugin_prestart_info = tostring(code) .. "|" .. tostring(id)
+	end
+	function callplugin_prestart_audio_status(value)
+	  return callplugin_prestart_info
+	end
+	)lua"),
+	                       &runtime);
+	auto callPluginPreStartSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	callPluginPreStartSnapshot->soundStatusByBuffer.insert(1, 0);
+	callPluginPreStartSnapshot->soundBufferReusableByBuffer.insert(1, false);
+	callPluginPreStartSnapshot->soundStatusByBuffer.insert(2, -2);
+	callPluginPreStartSnapshot->soundBufferReusableByBuffer.insert(2, true);
+	request.engines               = {callPluginPreStartEngine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = callPluginPreStartSnapshot;
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("callplugin_prestart_audio_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("0.0|2"));
+	teardownWorkerEngine(executor, callPluginPreStartEngine);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+
+	auto callPluginStringBoolEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, callPluginStringBoolEngine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local code, id = CallPlugin("aedf0cb0be5bf045860d54b7", "play", "coin.wav", "1")
+	  callplugin_string_bool_info = tostring(code) .. "|" .. tostring(id) .. "|" .. tostring(audio.isPlaying(id))
+	end
+	function callplugin_string_bool_status(value)
+	  return callplugin_string_bool_info
+	end
+	)lua"),
+	                       &runtime);
+	auto callPluginStringBoolSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	callPluginStringBoolSnapshot->soundStatusByBuffer.insert(1, -2);
+	callPluginStringBoolSnapshot->soundBufferReusableByBuffer.insert(1, true);
+	request.engines               = {callPluginStringBoolEngine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = callPluginStringBoolSnapshot;
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("callplugin_string_bool_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("0.0|1|true"));
+	teardownWorkerEngine(executor, callPluginStringBoolEngine);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+
+	auto callPluginBadArgumentEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, callPluginBadArgumentEngine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local code, message = CallPlugin("aedf0cb0be5bf045860d54b7", "play", {})
+	  callplugin_bad_argument_info = tostring(code == eBadParameter) .. "|" .. tostring(message)
+	end
+	function callplugin_bad_argument_status(value)
+	  return callplugin_bad_argument_info
+	end
+	)lua"),
+	                       &runtime);
+	auto callPluginBadArgumentSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	callPluginBadArgumentSnapshot->soundStatusByBuffer.insert(1, -2);
+	callPluginBadArgumentSnapshot->soundBufferReusableByBuffer.insert(1, true);
+	request.engines               = {callPluginBadArgumentEngine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = callPluginBadArgumentSnapshot;
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("callplugin_bad_argument_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("true|Cannot pass argument #3 (table type) to CallPlugin"));
+	teardownWorkerEngine(executor, callPluginBadArgumentEngine);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+
+	auto callPluginBranchEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, callPluginBranchEngine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local audio_id = "aedf0cb0be5bf045860d54b7"
+	  local delay_code, delayed_id = CallPlugin(audio_id, "playDelayLooped", "coin.wav", 10, 4, 60)
+	  local set_code = CallPlugin(audio_id, "setVol", 44, 1)
+	  local slide_vol_code = CallPlugin(audio_id, "slideVol", 35, 1, 0.02)
+	  local slide_pan_code = CallPlugin(audio_id, "slidePan", 6, 1, 0.02)
+	  local slide_pitch_code = CallPlugin(audio_id, "slidePitch", 7, 1, 0.02)
+	  local fade_code = CallPlugin(audio_id, "fadeout", 2, 0.02)
+	  local stop_code = CallPlugin(audio_id, "stop", 3)
+	  local playing_code, stopped_playing = CallPlugin(audio_id, "isPlaying", 3)
+	  local get_code, volume_before = CallPlugin(audio_id, "getVolume", 1)
+	  callplugin_branch_info = table.concat({
+	    tostring(delay_code),
+	    tostring(delayed_id),
+	    string.format("%.0f", volume_before),
+	    tostring(set_code),
+	    tostring(slide_vol_code),
+	    tostring(slide_pan_code),
+	    tostring(slide_pitch_code),
+	    tostring(fade_code),
+	    tostring(stop_code),
+	    tostring(playing_code),
+	    tostring(stopped_playing)
+	  }, "|")
+	end
+	function callplugin_branch_status(value)
+	  return callplugin_branch_info
+	end
+	)lua"),
+	                       &runtime);
+	QMudNativePluginRegistry::LuaAudioRuntimeBufferState callPluginBranchState;
+	callPluginBranchState.volume   = 100.0;
+	callPluginBranchState.ownerKey = callPluginBranchEngine.data();
+	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 1, callPluginBranchState);
+	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 2, callPluginBranchState);
+	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 3, callPluginBranchState);
+	auto callPluginBranchSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	callPluginBranchSnapshot->soundStatusByBuffer.insert(1, 1);
+	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(1, false);
+	callPluginBranchSnapshot->soundStatusByBuffer.insert(2, 1);
+	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(2, false);
+	callPluginBranchSnapshot->soundStatusByBuffer.insert(3, 1);
+	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(3, false);
+	callPluginBranchSnapshot->soundStatusByBuffer.insert(4, -2);
+	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(4, true);
+	request.engines               = {callPluginBranchEngine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = callPluginBranchSnapshot;
+	LuaBatchDispatchResult callPluginBranchResult;
+	dispatchWorkerAndWait(executor, request, callPluginBranchResult);
+	executeDeferredMutations(callPluginBranchResult);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("callplugin_branch_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("0.0|4|44|0.0|0.0|0.0|0.0|0.0|0.0|0.0|false"));
+	QTRY_VERIFY_WITH_TIMEOUT(
+	    (
+	        [&]
+	        {
+		        if (!QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, callPluginBranchState))
+			        return false;
+		        QMudNativePluginRegistry::LuaAudioRuntimeBufferState stoppedState;
+		        return callPluginBranchState.volume == 35.0 && callPluginBranchState.pan == 6.0 &&
+		               callPluginBranchState.pitch == 7.0 &&
+		               !QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 2, stoppedState) &&
+		               !QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 3, stoppedState);
+	        })(),
+	    3000);
+	teardownWorkerEngine(executor, callPluginBranchEngine);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+
 	teardownWorkerEngine(executor, engine);
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 
@@ -2184,6 +2384,7 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	                       &runtime);
 	auto pendingSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 	pendingSnapshot->soundStatusByBuffer.insert(1, -2);
+	pendingSnapshot->soundBufferReusableByBuffer.insert(1, true);
 	request.engines               = {pendingEngine};
 	request.kind                  = LuaBatchDispatchKind::NoArgs;
 	request.functionName          = QStringLiteral("OnPluginEnable");
@@ -2226,7 +2427,9 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 2, fadeState);
 	auto timedSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 	timedSnapshot->soundStatusByBuffer.insert(1, 1);
+	timedSnapshot->soundBufferReusableByBuffer.insert(1, false);
 	timedSnapshot->soundStatusByBuffer.insert(2, 1);
+	timedSnapshot->soundBufferReusableByBuffer.insert(2, false);
 	request.engines               = {timedEngine};
 	request.kind                  = LuaBatchDispatchKind::NoArgs;
 	request.functionName          = QStringLiteral("OnPluginEnable");
