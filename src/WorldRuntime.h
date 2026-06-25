@@ -4747,8 +4747,16 @@ class WorldRuntime : public QObject
 
 	private:
 		/**
-		 * @brief Internal plugin-callback, chat, save-snapshot, and log-rotation helpers.
+		 * @brief Captures runtime counters using already-resolved Note colours.
+		 * @param includeStrings When `true`, includes string-valued runtime metadata fields.
+		 * @param noteColourFore Resolved Note foreground colour.
+		 * @param noteColourBack Resolved Note background colour.
+		 * @return Captured runtime counters snapshot.
 		 */
+		[[nodiscard]] RuntimeCountersSnapshot
+		     runtimeCountersSnapshotWithResolvedNoteColours(bool includeStrings, long noteColourFore,
+		                                                    long noteColourBack) const;
+		// Internal plugin-callback, chat, save-snapshot, and log-rotation helpers.
 		/**
 		 * @brief Runs plugin callbacks until one returns false.
 		 * @param functionName Callback function name.

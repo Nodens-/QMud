@@ -121,28 +121,52 @@
 
 Q_DECLARE_OPAQUE_POINTER(sqlite3 *)
 
-static long        colorToLong(const QColor &color);
-static int         colourSeqFromAttributes(const QMap<QString, QString> &attributes);
-static QString     convertToRegularExpression(const QString &text);
-static void        buildCustomColours(const QList<WorldRuntime::Colour> &colours, QVector<QColor> &normalAnsi,
-                                      QVector<QColor> &customText, QVector<QColor> &customBack);
-static int         publicNoteColourIndexFromWorldAttribute(const QString                     &value,
-                                                           const QList<WorldRuntime::Colour> &colours,
-                                                           int                                fallbackPublicIndex);
-static QStringList macroDescriptionList();
-static QStringList keypadNameList();
+struct ResolvedWorldColourTables
+{
+		QVector<QColor> normalAnsi;
+		QVector<QColor> boldAnsi;
+		QVector<QColor> customText;
+		QVector<QColor> customBack;
+};
 
-constexpr int      kChatLoopDiscardSeconds           = 5;
-constexpr int      ADJUST_COLOUR_INVERT              = 1;
-constexpr int      ADJUST_COLOUR_LIGHTER             = 2;
-constexpr int      ADJUST_COLOUR_DARKER              = 3;
-constexpr int      ADJUST_COLOUR_LESS_COLOUR         = 4;
-constexpr int      ADJUST_COLOUR_MORE_COLOUR         = 5;
-constexpr int      kPacketDebugChars                 = 16;
-constexpr int      kMaxMxpTextBufferBytes            = 256 * 1024;
-constexpr int      kMaxMxpStackDepth                 = 512;
-constexpr int      kMemoryImageDecodeCacheMaxEntries = 48;
-constexpr qint64   kMemoryImageDecodeCacheMaxBytes   = 64LL * 1024LL * 1024LL;
+struct ResolvedNoteColours
+{
+		long fore{0};
+		long back{0};
+};
+
+static long    colorToLong(const QColor &color);
+static int     colourSeqFromAttributes(const QMap<QString, QString> &attributes);
+static QString convertToRegularExpression(const QString &text);
+static void    buildCustomColours(const QList<WorldRuntime::Colour> &colours, QVector<QColor> &normalAnsi,
+                                  QVector<QColor> &customText, QVector<QColor> &customBack);
+static void    buildResolvedColourTables(const QList<WorldRuntime::Colour> &colours,
+                                         ResolvedWorldColourTables         &tables);
+static ResolvedWorldColourTables buildResolvedWorldColourTables(const QList<WorldRuntime::Colour> &colours);
+static ResolvedNoteColours       resolveNoteColours(bool notesInRgb, int noteTextColour, long noteColourFore,
+                                                    long                             noteColourBack,
+                                                    const ResolvedWorldColourTables &colourTables,
+                                                    const QMap<QString, QString>    &worldAttributes);
+static ResolvedNoteColours resolveNoteColours(bool notesInRgb, int noteTextColour, long noteColourFore,
+                                              long noteColourBack, const QList<WorldRuntime::Colour> &colours,
+                                              const QMap<QString, QString> &worldAttributes);
+static int                 publicNoteColourIndexFromWorldAttribute(const QString                     &value,
+                                                                   const QList<WorldRuntime::Colour> &colours,
+                                                                   int                                fallbackPublicIndex);
+static QStringList         macroDescriptionList();
+static QStringList         keypadNameList();
+
+constexpr int              kChatLoopDiscardSeconds           = 5;
+constexpr int              ADJUST_COLOUR_INVERT              = 1;
+constexpr int              ADJUST_COLOUR_LIGHTER             = 2;
+constexpr int              ADJUST_COLOUR_DARKER              = 3;
+constexpr int              ADJUST_COLOUR_LESS_COLOUR         = 4;
+constexpr int              ADJUST_COLOUR_MORE_COLOUR         = 5;
+constexpr int              kPacketDebugChars                 = 16;
+constexpr int              kMaxMxpTextBufferBytes            = 256 * 1024;
+constexpr int              kMaxMxpStackDepth                 = 512;
+constexpr int              kMemoryImageDecodeCacheMaxEntries = 48;
+constexpr qint64           kMemoryImageDecodeCacheMaxBytes   = 64LL * 1024LL * 1024LL;
 
 namespace
 {
@@ -9263,10 +9287,14 @@ void WorldRuntime::populateLuaCallbackDispatchVolatileSnapshot(
 	                                commandUi.worldChildWindowHeight);
 	snapshot.commandUiValues.insert(QStringLiteral("worldChildWindowWidth"), commandUi.worldChildWindowWidth);
 
-	const RuntimeCountersSnapshot counters = runtimeCountersSnapshot(true);
-	snapshot.hasRuntimeCountersSnapshot    = true;
-	snapshot.runtimeOutputFontHeight       = counters.outputFontHeight;
-	snapshot.runtimeOutputFontWidth        = counters.outputFontWidth;
+	const ResolvedWorldColourTables colourTables = buildResolvedWorldColourTables(m_colours);
+	const ResolvedNoteColours       noteColours  = resolveNoteColours(
+	    m_notesInRgb, m_noteTextColour, m_noteColourFore, m_noteColourBack, colourTables, m_worldAttributes);
+	const RuntimeCountersSnapshot counters =
+	    runtimeCountersSnapshotWithResolvedNoteColours(true, noteColours.fore, noteColours.back);
+	snapshot.hasRuntimeCountersSnapshot = true;
+	snapshot.runtimeOutputFontHeight    = counters.outputFontHeight;
+	snapshot.runtimeOutputFontWidth     = counters.outputFontWidth;
 	snapshot.runtimeCounterValues.reserve(88);
 	snapshot.runtimeCounterValues.insert(QStringLiteral("newLines"), counters.newLines);
 	snapshot.runtimeCounterValues.insert(QStringLiteral("totalLinesSent"), counters.totalLinesSent);
@@ -9828,10 +9856,14 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 	snapshot->commandUiValues.insert(QStringLiteral("worldChildWindowWidth"),
 	                                 commandUi.worldChildWindowWidth);
 
-	const RuntimeCountersSnapshot counters = runtimeCountersSnapshot(true);
-	snapshot->hasRuntimeCountersSnapshot   = true;
-	snapshot->runtimeOutputFontHeight      = counters.outputFontHeight;
-	snapshot->runtimeOutputFontWidth       = counters.outputFontWidth;
+	const ResolvedWorldColourTables colourTables = buildResolvedWorldColourTables(m_colours);
+	const ResolvedNoteColours       noteColours  = resolveNoteColours(
+	    m_notesInRgb, m_noteTextColour, m_noteColourFore, m_noteColourBack, colourTables, m_worldAttributes);
+	const RuntimeCountersSnapshot counters =
+	    runtimeCountersSnapshotWithResolvedNoteColours(true, noteColours.fore, noteColours.back);
+	snapshot->hasRuntimeCountersSnapshot = true;
+	snapshot->runtimeOutputFontHeight    = counters.outputFontHeight;
+	snapshot->runtimeOutputFontWidth     = counters.outputFontWidth;
 	snapshot->runtimeCounterValues.reserve(88);
 	snapshot->runtimeCounterValues.insert(QStringLiteral("newLines"), counters.newLines);
 	snapshot->runtimeCounterValues.insert(QStringLiteral("totalLinesSent"), counters.totalLinesSent);
@@ -10039,14 +10071,9 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 	snapshot->hasChatSnapshot = true;
 	for (int index = 1; index <= 8; ++index)
 	{
-		const QColor boldColour = ansiColour(true, index);
-		snapshot->boldAnsiColoursByIndex.insert(index, boldColour.isValid() ? colorToLong(boldColour) : 0);
+		snapshot->boldAnsiColoursByIndex.insert(index, colorToLong(colourTables.boldAnsi.value(index - 1)));
 		snapshot->normalAnsiColoursByIndex.insert(index, normalColour(index));
 	}
-	QVector<QColor> normalAnsi;
-	QVector<QColor> customText;
-	QVector<QColor> customBack;
-	buildCustomColours(m_colours, normalAnsi, customText, customBack);
 	QVector<QString> customNames(MAX_CUSTOM);
 	QVector<uchar>   customNameResolved(MAX_CUSTOM, 0);
 	for (const auto &colour : m_colours)
@@ -10062,8 +10089,10 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 	}
 	for (int index = 1; index <= MAX_CUSTOM; ++index)
 	{
-		snapshot->customTextColoursByIndex.insert(index, colorToLong(customText.value(index - 1)));
-		snapshot->customBackgroundColoursByIndex.insert(index, colorToLong(customBack.value(index - 1)));
+		snapshot->customTextColoursByIndex.insert(index,
+		                                          colorToLong(colourTables.customText.value(index - 1)));
+		snapshot->customBackgroundColoursByIndex.insert(
+		    index, colorToLong(colourTables.customBack.value(index - 1)));
 		const QString customName = customNames.value(index - 1);
 		snapshot->customColourNamesByIndex.insert(
 		    index, customName.isEmpty() ? QStringLiteral("Custom%1").arg(index) : customName);
@@ -12540,41 +12569,60 @@ static QColor parseColourValue(const QString &value)
 static void buildCustomColours(const QList<WorldRuntime::Colour> &colours, QVector<QColor> &normalAnsi,
                                QVector<QColor> &customText, QVector<QColor> &customBack)
 {
-	normalAnsi = QVector<QColor>(8);
-	customText = QVector<QColor>(16);
-	customBack = QVector<QColor>(16);
+	ResolvedWorldColourTables tables;
+	buildResolvedColourTables(colours, tables);
+	normalAnsi = tables.normalAnsi;
+	customText = tables.customText;
+	customBack = tables.customBack;
+}
 
-	normalAnsi[0] = QColor(0, 0, 0);
-	normalAnsi[1] = QColor(128, 0, 0);
-	normalAnsi[2] = QColor(0, 128, 0);
-	normalAnsi[3] = QColor(128, 128, 0);
-	normalAnsi[4] = QColor(0, 0, 128);
-	normalAnsi[5] = QColor(128, 0, 128);
-	normalAnsi[6] = QColor(0, 128, 128);
-	normalAnsi[7] = QColor(192, 192, 192);
+static void buildResolvedColourTables(const QList<WorldRuntime::Colour> &colours,
+                                      ResolvedWorldColourTables         &tables)
+{
+	tables.normalAnsi = QVector<QColor>(8);
+	tables.boldAnsi   = QVector<QColor>(8);
+	tables.customText = QVector<QColor>(16);
+	tables.customBack = QVector<QColor>(16);
 
-	for (int i = 0; i < customText.size(); ++i)
+	tables.normalAnsi[0] = QColor(0, 0, 0);
+	tables.normalAnsi[1] = QColor(128, 0, 0);
+	tables.normalAnsi[2] = QColor(0, 128, 0);
+	tables.normalAnsi[3] = QColor(128, 128, 0);
+	tables.normalAnsi[4] = QColor(0, 0, 128);
+	tables.normalAnsi[5] = QColor(128, 0, 128);
+	tables.normalAnsi[6] = QColor(0, 128, 128);
+	tables.normalAnsi[7] = QColor(192, 192, 192);
+	tables.boldAnsi[0]   = QColor(128, 128, 128);
+	tables.boldAnsi[1]   = QColor(255, 0, 0);
+	tables.boldAnsi[2]   = QColor(0, 255, 0);
+	tables.boldAnsi[3]   = QColor(255, 255, 0);
+	tables.boldAnsi[4]   = QColor(0, 0, 255);
+	tables.boldAnsi[5]   = QColor(255, 0, 255);
+	tables.boldAnsi[6]   = QColor(0, 255, 255);
+	tables.boldAnsi[7]   = QColor(255, 255, 255);
+
+	for (int i = 0; i < tables.customText.size(); ++i)
 	{
-		customText[i] = QColor(255, 255, 255);
-		customBack[i] = QColor(0, 0, 0);
+		tables.customText[i] = QColor(255, 255, 255);
+		tables.customBack[i] = QColor(0, 0, 0);
 	}
 
-	customText[0]  = QColor(255, 128, 128);
-	customText[1]  = QColor(255, 255, 128);
-	customText[2]  = QColor(128, 255, 128);
-	customText[3]  = QColor(128, 255, 255);
-	customText[4]  = QColor(0, 128, 255);
-	customText[5]  = QColor(255, 128, 192);
-	customText[6]  = QColor(255, 0, 0);
-	customText[7]  = QColor(0, 128, 192);
-	customText[8]  = QColor(255, 0, 255);
-	customText[9]  = QColor(128, 64, 64);
-	customText[10] = QColor(255, 128, 64);
-	customText[11] = QColor(0, 128, 128);
-	customText[12] = QColor(0, 64, 128);
-	customText[13] = QColor(255, 0, 128);
-	customText[14] = QColor(0, 128, 0);
-	customText[15] = QColor(0, 0, 255);
+	tables.customText[0]  = QColor(255, 128, 128);
+	tables.customText[1]  = QColor(255, 255, 128);
+	tables.customText[2]  = QColor(128, 255, 128);
+	tables.customText[3]  = QColor(128, 255, 255);
+	tables.customText[4]  = QColor(0, 128, 255);
+	tables.customText[5]  = QColor(255, 128, 192);
+	tables.customText[6]  = QColor(255, 0, 0);
+	tables.customText[7]  = QColor(0, 128, 192);
+	tables.customText[8]  = QColor(255, 0, 255);
+	tables.customText[9]  = QColor(128, 64, 64);
+	tables.customText[10] = QColor(255, 128, 64);
+	tables.customText[11] = QColor(0, 128, 128);
+	tables.customText[12] = QColor(0, 64, 128);
+	tables.customText[13] = QColor(255, 0, 128);
+	tables.customText[14] = QColor(0, 128, 0);
+	tables.customText[15] = QColor(0, 0, 255);
 
 	for (const auto &colour : colours)
 	{
@@ -12584,34 +12632,44 @@ static void buildCustomColours(const QList<WorldRuntime::Colour> &colours, QVect
 		const int     index = ok ? seq - 1 : -1;
 		if (index < 0)
 			continue;
-		if (group == QStringLiteral("ansi/normal") && index < normalAnsi.size())
+		if (group == QStringLiteral("ansi/normal") && index < tables.normalAnsi.size())
 		{
 			const QColor rgb = parseColourValue(colour.attributes.value(QStringLiteral("rgb")));
 			if (rgb.isValid())
-				normalAnsi[index] = rgb;
+				tables.normalAnsi[index] = rgb;
+		}
+		else if (group == QStringLiteral("ansi/bold") && index < tables.boldAnsi.size())
+		{
+			const QColor rgb = parseColourValue(colour.attributes.value(QStringLiteral("rgb")));
+			if (rgb.isValid())
+				tables.boldAnsi[index] = rgb;
 		}
 		else if ((group == QStringLiteral("custom/custom") || group == QStringLiteral("custom")) &&
-		         index < customText.size())
+		         index < tables.customText.size())
 		{
 			const QColor text = parseColourValue(colour.attributes.value(QStringLiteral("text")));
 			const QColor back = parseColourValue(colour.attributes.value(QStringLiteral("back")));
 			if (text.isValid())
-				customText[index] = text;
+				tables.customText[index] = text;
 			if (back.isValid())
-				customBack[index] = back;
+				tables.customBack[index] = back;
 		}
 	}
+}
+
+static ResolvedWorldColourTables buildResolvedWorldColourTables(const QList<WorldRuntime::Colour> &colours)
+{
+	ResolvedWorldColourTables tables;
+	buildResolvedColourTables(colours, tables);
+	return tables;
 }
 
 static int publicNoteColourIndexFromWorldAttribute(const QString                     &value,
                                                    const QList<WorldRuntime::Colour> &colours,
                                                    const int                          fallbackPublicIndex)
 {
-	QVector<QColor> normalAnsi;
-	QVector<QColor> customText;
-	QVector<QColor> customBack;
-	buildCustomColours(colours, normalAnsi, customText, customBack);
-	return QMudNoteColour::publicIndexFromWorldAttribute(value, customText, fallbackPublicIndex);
+	const ResolvedWorldColourTables tables = buildResolvedWorldColourTables(colours);
+	return QMudNoteColour::publicIndexFromWorldAttribute(value, tables.customText, fallbackPublicIndex);
 }
 
 static long colorToLong(const QColor &color)
@@ -12658,10 +12716,45 @@ static QString convertToRegularExpression(const QString &text)
 	return QString::fromLatin1(out);
 }
 
-constexpr int kAnsiBlack = 0;
-constexpr int kAnsiWhite = 7;
+constexpr int              kAnsiBlack = 0;
+constexpr int              kAnsiWhite = 7;
 
-bool          WorldRuntime::notesInRgb() const
+static ResolvedNoteColours resolveNoteColours(const bool notesInRgb, const int noteTextColour,
+                                              const long noteColourFore, const long noteColourBack,
+                                              const ResolvedWorldColourTables &colourTables,
+                                              const QMap<QString, QString>    &worldAttributes)
+{
+	if (notesInRgb)
+		return {noteColourFore, noteColourBack};
+
+	const bool custom16Default =
+	    isEnabledFlag(worldAttributes.value(QStringLiteral("custom_16_is_default_colour")));
+	if (const bool sameColour = (noteTextColour == WorldRuntime::kSameColour || noteTextColour < 0);
+	    sameColour)
+	{
+		return {custom16Default ? colorToLong(colourTables.customText.value(15))
+		                        : colorToLong(colourTables.normalAnsi.value(kAnsiWhite)),
+		        custom16Default ? colorToLong(colourTables.customBack.value(15))
+		                        : colorToLong(colourTables.normalAnsi.value(kAnsiBlack))};
+	}
+	if (noteTextColour >= 0 && noteTextColour < colourTables.customText.size() &&
+	    noteTextColour < colourTables.customBack.size())
+		return {colorToLong(colourTables.customText.value(noteTextColour)),
+		        colorToLong(colourTables.customBack.value(noteTextColour))};
+	return {};
+}
+
+static ResolvedNoteColours resolveNoteColours(const bool notesInRgb, const int noteTextColour,
+                                              const long noteColourFore, const long noteColourBack,
+                                              const QList<WorldRuntime::Colour> &colours,
+                                              const QMap<QString, QString>      &worldAttributes)
+{
+	const ResolvedWorldColourTables colourTables = buildResolvedWorldColourTables(colours);
+	return resolveNoteColours(notesInRgb, noteTextColour, noteColourFore, noteColourBack, colourTables,
+	                          worldAttributes);
+}
+
+bool WorldRuntime::notesInRgb() const
 {
 	if (QThread::currentThread() != thread())
 		return qmudInvokeMethodTrueOnSuccess(const_cast<WorldRuntime *>(this),
@@ -12707,18 +12800,9 @@ long WorldRuntime::noteColourFore() const
 	if (m_notesInRgb)
 		return m_noteColourFore;
 
-	QVector<QColor> normalAnsi;
-	QVector<QColor> customText;
-	QVector<QColor> customBack;
-	buildCustomColours(m_colours, normalAnsi, customText, customBack);
-	const bool custom16Default =
-	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("custom_16_is_default_colour")));
-	if (const bool sameColour = (m_noteTextColour == kSameColour || m_noteTextColour < 0); sameColour)
-		return custom16Default ? colorToLong(customText.value(15))
-		                       : colorToLong(normalAnsi.value(kAnsiWhite));
-	if (m_noteTextColour >= 0 && m_noteTextColour < customText.size())
-		return colorToLong(customText.value(m_noteTextColour));
-	return 0;
+	return resolveNoteColours(m_notesInRgb, m_noteTextColour, m_noteColourFore, m_noteColourBack, m_colours,
+	                          m_worldAttributes)
+	    .fore;
 }
 
 long WorldRuntime::noteColourBack() const
@@ -12730,18 +12814,9 @@ long WorldRuntime::noteColourBack() const
 	if (m_notesInRgb)
 		return m_noteColourBack;
 
-	QVector<QColor> normalAnsi;
-	QVector<QColor> customText;
-	QVector<QColor> customBack;
-	buildCustomColours(m_colours, normalAnsi, customText, customBack);
-	const bool custom16Default =
-	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("custom_16_is_default_colour")));
-	if (const bool sameColour = (m_noteTextColour == kSameColour || m_noteTextColour < 0); sameColour)
-		return custom16Default ? colorToLong(customBack.value(15))
-		                       : colorToLong(normalAnsi.value(kAnsiBlack));
-	if (m_noteTextColour >= 0 && m_noteTextColour < customBack.size())
-		return colorToLong(customBack.value(m_noteTextColour));
-	return 0;
+	return resolveNoteColours(m_notesInRgb, m_noteTextColour, m_noteColourFore, m_noteColourBack, m_colours,
+	                          m_worldAttributes)
+	    .back;
 }
 
 void WorldRuntime::setNoteColourFore(long value)
@@ -12898,25 +12973,7 @@ long WorldRuntime::normalColour(int index) const
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::normalColour");
 	if (index < 1 || index > 8)
 		return 0;
-	const int seq = index;
-	for (const auto &colour : m_colours)
-	{
-		if (colour.group.trimmed().compare(QStringLiteral("ansi/normal"), Qt::CaseInsensitive) != 0)
-			continue;
-		bool      ok      = false;
-		const int itemSeq = colour.attributes.value(QStringLiteral("seq")).toInt(&ok);
-		if (!ok || itemSeq != seq)
-			continue;
-		const QString rgb       = colour.attributes.value(QStringLiteral("rgb"));
-		bool          numericOk = false;
-		const int     numeric   = rgb.toInt(&numericOk);
-		if (numericOk)
-			return numeric;
-		QColor const parsed(rgb);
-		if (parsed.isValid())
-			return (parsed.red() | (parsed.green() << 8) | (parsed.blue() << 16));
-	}
-	return 0;
+	return colorToLong(ansiColour(false, index));
 }
 
 void WorldRuntime::setNormalColour(int index, long value)
@@ -12930,23 +12987,8 @@ void WorldRuntime::setNormalColour(int index, long value)
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setNormalColour");
 	if (index < 1 || index > 8)
 		return;
-	const int seq = index;
-	for (auto &colour : m_colours)
-	{
-		if (colour.group.trimmed().compare(QStringLiteral("ansi/normal"), Qt::CaseInsensitive) != 0)
-			continue;
-		bool      ok      = false;
-		const int itemSeq = colour.attributes.value(QStringLiteral("seq")).toInt(&ok);
-		if (!ok || itemSeq != seq)
-			continue;
-		colour.attributes.insert(QStringLiteral("rgb"), QString::number(value & 0x00FFFFFF));
-		return;
-	}
-	Colour entry;
-	entry.group = QStringLiteral("ansi/normal");
-	entry.attributes.insert(QStringLiteral("seq"), QString::number(seq));
-	entry.attributes.insert(QStringLiteral("rgb"), QString::number(value & 0x00FFFFFF));
-	m_colours.push_back(entry);
+	const auto packed = static_cast<QMudColorRef>(value & 0x00FFFFFF);
+	setAnsiColour(false, index, QColor(qmudRed(packed), qmudGreen(packed), qmudBlue(packed)));
 }
 
 int WorldRuntime::addToMapper(const QString &direction, const QString &reverse)
@@ -16772,6 +16814,15 @@ WorldRuntime::RuntimeCountersSnapshot WorldRuntime::runtimeCountersSnapshot(cons
 		                          [this, includeStrings] { return runtimeCountersSnapshot(includeStrings); });
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::runtimeCountersSnapshot");
+	const ResolvedNoteColours noteColours = resolveNoteColours(
+	    m_notesInRgb, m_noteTextColour, m_noteColourFore, m_noteColourBack, m_colours, m_worldAttributes);
+	return runtimeCountersSnapshotWithResolvedNoteColours(includeStrings, noteColours.fore, noteColours.back);
+}
+
+WorldRuntime::RuntimeCountersSnapshot WorldRuntime::runtimeCountersSnapshotWithResolvedNoteColours(
+    const bool includeStrings, const long noteColourFore, const long noteColourBack) const
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::runtimeCountersSnapshotWithResolvedNoteColours");
 	RuntimeCountersSnapshot snapshot;
 	snapshot.newLines               = m_newLines;
 	snapshot.totalLinesSent         = m_totalLinesSent;
@@ -16830,8 +16881,8 @@ WorldRuntime::RuntimeCountersSnapshot WorldRuntime::runtimeCountersSnapshot(cons
 	snapshot.isChatAcceptingCalls   = m_chatServer != nullptr;
 	snapshot.noteStyle              = m_noteStyle;
 	snapshot.noteTextColour         = m_noteTextColour;
-	snapshot.noteColourBack         = m_noteColourBack;
-	snapshot.noteColourFore         = m_noteColourFore;
+	snapshot.noteColourBack         = noteColourBack;
+	snapshot.noteColourFore         = noteColourFore;
 	snapshot.backgroundColour       = m_backgroundColour;
 	snapshot.utf8ErrorCount         = m_utf8ErrorCount;
 	snapshot.triggersEvaluatedCount = m_triggersEvaluatedCount;
@@ -19230,22 +19281,7 @@ namespace
 {
 	QColor parseColorValueRuntime(const QString &value)
 	{
-		if (value.isEmpty())
-			return {};
-
-		QColor color(value);
-		if (color.isValid())
-			return color;
-
-		bool      ok      = false;
-		const int numeric = value.toInt(&ok);
-		if (!ok)
-			return {};
-
-		const int r = (numeric >> 16) & 0xFF;
-		const int g = (numeric >> 8) & 0xFF;
-		const int b = numeric & 0xFF;
-		return {r, g, b};
+		return parseColourValue(value);
 	}
 
 	QVector<QColor> defaultAnsiColours(bool bold)
@@ -19305,7 +19341,7 @@ void WorldRuntime::setAnsiColour(bool bold, int index, const QColor &color)
 		return;
 
 	const QString targetGroup = bold ? QStringLiteral("ansi/bold") : QStringLiteral("ansi/normal");
-	const QString rgb         = QString::number((color.red() << 16) | (color.green() << 8) | color.blue());
+	const QString rgb         = color.name(QColor::HexRgb);
 
 	for (auto &colour : m_colours)
 	{

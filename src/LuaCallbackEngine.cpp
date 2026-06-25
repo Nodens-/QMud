@@ -1759,25 +1759,87 @@ namespace
 		                              });
 	}
 
+	bool resolveIndexedCallbackNoteColours(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+	                                       const int noteTextColour, long &fore, long &back)
+	{
+		fore = 0;
+		back = 0;
+		if (const bool sameColour = (noteTextColour == WorldRuntime::kSameColour || noteTextColour < 0);
+		    sameColour)
+		{
+			const bool custom16Default = isEnabledValue(resolveWorldAttributeValueForApi(
+			    engine, runtime, QStringLiteral("custom_16_is_default_colour")));
+			if (custom16Default)
+			{
+				const bool foreResolved = resolveCustomColourTextForApi(engine, runtime, MAX_CUSTOM, fore);
+				const bool backResolved =
+				    resolveCustomColourBackgroundForApi(engine, runtime, MAX_CUSTOM, back);
+				return foreResolved && backResolved;
+			}
+			const bool foreResolved = resolveNormalColourForApi(engine, runtime, 8, fore);
+			const bool backResolved = resolveNormalColourForApi(engine, runtime, 1, back);
+			return foreResolved && backResolved;
+		}
+
+		const int  customIndex  = noteTextColour + 1;
+		const bool foreResolved = resolveCustomColourTextForApi(engine, runtime, customIndex, fore);
+		const bool backResolved = resolveCustomColourBackgroundForApi(engine, runtime, customIndex, back);
+		return foreResolved && backResolved;
+	}
+
 	void updateCallbackNoteColourSnapshot(const LuaCallbackEngine *engine, WorldRuntime *runtime,
 	                                      const std::optional<long> fore, const std::optional<long> back,
 	                                      const std::optional<int>  colour,
 	                                      const std::optional<bool> notesInRgb)
 	{
+		if (!activeCallbackContext(engine))
+			return;
+
 		WorldRuntime::RuntimeCountersSnapshot snapshot;
-		static_cast<void>(resolveRuntimeCountersSnapshotForApi(engine, runtime, snapshot));
+		const bool          hasSnapshot  = resolveRuntimeCountersSnapshotForApi(engine, runtime, snapshot);
+		std::optional<long> resolvedFore = fore;
+		std::optional<long> resolvedBack = back;
+		const bool resultingNotesInRgb   = notesInRgb.value_or(hasSnapshot ? snapshot.notesInRgb : false);
+		const int  resultingColour =
+		    colour.value_or(hasSnapshot ? snapshot.noteTextColour : WorldRuntime::kSameColour);
+		if (!resultingNotesInRgb)
+		{
+			long indexedFore = 0;
+			long indexedBack = 0;
+			if (resolveIndexedCallbackNoteColours(engine, runtime, resultingColour, indexedFore, indexedBack))
+			{
+				resolvedFore = indexedFore;
+				resolvedBack = indexedBack;
+			}
+		}
 		updateCallbackRuntimeSnapshot(engine,
 		                              [&](WorldRuntime::RuntimeCountersSnapshot &targetSnapshot)
 		                              {
-			                              if (fore.has_value())
-				                              targetSnapshot.noteColourFore = *fore & 0x00FFFFFF;
-			                              if (back.has_value())
-				                              targetSnapshot.noteColourBack = *back & 0x00FFFFFF;
+			                              if (resolvedFore.has_value())
+				                              targetSnapshot.noteColourFore = *resolvedFore & 0x00FFFFFF;
+			                              if (resolvedBack.has_value())
+				                              targetSnapshot.noteColourBack = *resolvedBack & 0x00FFFFFF;
 			                              if (colour.has_value())
 				                              targetSnapshot.noteTextColour = *colour;
 			                              if (notesInRgb.has_value())
 				                              targetSnapshot.notesInRgb = *notesInRgb;
 		                              });
+	}
+
+	void refreshCallbackIndexedNoteColourSnapshot(const LuaCallbackEngine *engine, WorldRuntime *runtime)
+	{
+		updateCallbackNoteColourSnapshot(engine, runtime, std::nullopt, std::nullopt, std::nullopt,
+		                                 std::nullopt);
+	}
+
+	void refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(const LuaCallbackEngine *engine,
+	                                                                       WorldRuntime            *runtime,
+	                                                                       const QString           &key,
+	                                                                       const bool isMultiline)
+	{
+		if (isMultiline || key != QStringLiteral("custom_16_is_default_colour"))
+			return;
+		refreshCallbackIndexedNoteColourSnapshot(engine, runtime);
 	}
 
 	void setCallbackNoteStyleSnapshot(const LuaCallbackEngine *engine, const unsigned short style)
@@ -2433,9 +2495,26 @@ namespace
 		return QStringLiteral("%1|%2").arg(id).arg(option.trimmed().toLower());
 	}
 
+	bool isCallbackAnsiColourIndex(const int index)
+	{
+		return index >= 1 && index <= 8;
+	}
+
+	bool isCallbackCustomColourIndex(const int index)
+	{
+		return index >= 1 && index <= MAX_CUSTOM;
+	}
+
+	long normalizedCallbackColourValue(const long value)
+	{
+		return value & 0x00FFFFFF;
+	}
+
 	bool tryResolveCallbackBoldAnsiColourFromCache(const LuaCallbackEngine *engine, const int index,
 	                                               long &value)
 	{
+		if (!isCallbackAnsiColourIndex(index))
+			return false;
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
@@ -2448,15 +2527,19 @@ namespace
 
 	void cacheCallbackBoldAnsiColour(const LuaCallbackEngine *engine, const int index, const long value)
 	{
+		if (!isCallbackAnsiColourIndex(index))
+			return;
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->boldAnsiColoursByIndex.insert(index, value);
+		context->boldAnsiColoursByIndex.insert(index, normalizedCallbackColourValue(value));
 	}
 
 	bool tryResolveCallbackNormalAnsiColourFromCache(const LuaCallbackEngine *engine, const int index,
 	                                                 long &value)
 	{
+		if (!isCallbackAnsiColourIndex(index))
+			return false;
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
@@ -2469,10 +2552,12 @@ namespace
 
 	void cacheCallbackNormalAnsiColour(const LuaCallbackEngine *engine, const int index, const long value)
 	{
+		if (!isCallbackAnsiColourIndex(index))
+			return;
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->normalAnsiColoursByIndex.insert(index, value);
+		context->normalAnsiColoursByIndex.insert(index, normalizedCallbackColourValue(value));
 	}
 
 	bool tryResolveCallbackChatIdFromCache(const LuaCallbackEngine *engine, const QString &who, long &chatId)
@@ -3538,6 +3623,8 @@ namespace
 	bool tryResolveCallbackCustomBackgroundColourFromCache(const LuaCallbackEngine *engine, const int index,
 	                                                       long &value)
 	{
+		if (!isCallbackCustomColourIndex(index))
+			return false;
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
@@ -3551,6 +3638,8 @@ namespace
 	bool tryResolveCallbackCustomTextColourFromCache(const LuaCallbackEngine *engine, const int index,
 	                                                 long &value)
 	{
+		if (!isCallbackCustomColourIndex(index))
+			return false;
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
@@ -3577,18 +3666,22 @@ namespace
 	void cacheCallbackCustomBackgroundColour(const LuaCallbackEngine *engine, const int index,
 	                                         const long value)
 	{
+		if (!isCallbackCustomColourIndex(index))
+			return;
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->customBackgroundColoursByIndex.insert(index, value);
+		context->customBackgroundColoursByIndex.insert(index, normalizedCallbackColourValue(value));
 	}
 
 	void cacheCallbackCustomTextColour(const LuaCallbackEngine *engine, const int index, const long value)
 	{
+		if (!isCallbackCustomColourIndex(index))
+			return;
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->customTextColoursByIndex.insert(index, value);
+		context->customTextColoursByIndex.insert(index, normalizedCallbackColourValue(value));
 	}
 
 	void cacheCallbackCustomColourName(const LuaCallbackEngine *engine, const int index, const QString &value)
@@ -9106,34 +9199,10 @@ namespace
 		return {qmudRed(packed), qmudGreen(packed), qmudBlue(packed)};
 	}
 
-	long resolveCallbackNoteColourValue(const LuaCallbackEngine *engine, WorldRuntime *runtime,
-	                                    const WorldRuntime::RuntimeCountersSnapshot &snapshot,
+	long resolveCallbackNoteColourValue(const WorldRuntime::RuntimeCountersSnapshot &snapshot,
 	                                    const bool                                   foreground)
 	{
-		if (snapshot.notesInRgb)
-			return foreground ? snapshot.noteColourFore : snapshot.noteColourBack;
-
-		const bool sameColour =
-		    snapshot.noteTextColour == WorldRuntime::kSameColour || snapshot.noteTextColour < 0;
-		if (sameColour)
-		{
-			const bool custom16Default = isEnabledValue(resolveWorldAttributeValueForApi(
-			    engine, runtime, QStringLiteral("custom_16_is_default_colour")));
-			long       value           = 0;
-			if (custom16Default)
-			{
-				if (foreground)
-					return resolveCustomColourTextForApi(engine, runtime, MAX_CUSTOM, value) ? value : 0;
-				return resolveCustomColourBackgroundForApi(engine, runtime, MAX_CUSTOM, value) ? value : 0;
-			}
-			return resolveNormalColourForApi(engine, runtime, foreground ? 7 : 0, value) ? value : 0;
-		}
-
-		const int customIndex = snapshot.noteTextColour + 1;
-		long      value       = 0;
-		if (foreground)
-			return resolveCustomColourTextForApi(engine, runtime, customIndex, value) ? value : 0;
-		return resolveCustomColourBackgroundForApi(engine, runtime, customIndex, value) ? value : 0;
+		return foreground ? snapshot.noteColourFore : snapshot.noteColourBack;
 	}
 
 	QVector<WorldRuntime::StyleSpan> makeCallbackNoteSpans(const LuaCallbackEngine *engine,
@@ -9150,8 +9219,8 @@ namespace
 
 		WorldRuntime::StyleSpan span;
 		span.length    = sizeToInt(text.size());
-		span.fore      = colorFromValue(resolveCallbackNoteColourValue(engine, runtime, snapshot, true));
-		span.back      = colorFromValue(resolveCallbackNoteColourValue(engine, runtime, snapshot, false));
+		span.fore      = colorFromValue(resolveCallbackNoteColourValue(snapshot, true));
+		span.back      = colorFromValue(resolveCallbackNoteColourValue(snapshot, false));
 		span.bold      = (snapshot.noteStyle & kStyleHilite) != 0;
 		span.underline = (snapshot.noteStyle & kStyleUnderline) != 0;
 		span.blink     = (snapshot.noteStyle & kStyleBlink) != 0;
@@ -13031,48 +13100,42 @@ struct ColourOutputSegment
 		bool    newline{false};
 };
 
-static void outputColourSegment(WorldRuntime &targetRuntime, const ColourOutputSegment &segment)
+bool colourOutputSegmentProducesLine(const ColourOutputSegment &segment)
 {
-	if (segment.text.isEmpty() && !segment.newline)
-		return;
+	return !segment.text.isEmpty() || segment.newline;
+}
 
-	const bool           oldNotesInRgb     = targetRuntime.notesInRgb();
-	const long           oldFore           = targetRuntime.noteColourFore();
-	const long           oldBack           = targetRuntime.noteColourBack();
-	const int            oldNoteTextColour = targetRuntime.noteTextColour();
-	const unsigned short noteStyle         = targetRuntime.noteStyle();
+struct ResolvedCallbackNoteStyle
+{
+		QColor         fore{colorFromValue(0xFFFFFF)};
+		QColor         back{colorFromValue(0)};
+		unsigned short style{0};
+};
 
-	if (!targetRuntime.notesInRgb())
-	{
-		targetRuntime.setNoteColourFore(targetRuntime.noteColourFore());
-		targetRuntime.setNoteColourBack(targetRuntime.noteColourBack());
-	}
+ResolvedCallbackNoteStyle resolveCallbackNoteStyleForOutput(const LuaCallbackEngine *engine,
+                                                            WorldRuntime            *runtime)
+{
+	WorldRuntime::RuntimeCountersSnapshot snapshot;
+	snapshot.noteColourFore = 0xFFFFFF;
+	snapshot.noteColourBack = 0;
+	static_cast<void>(resolveRuntimeCountersSnapshotForApi(engine, runtime, snapshot));
+	return {colorFromValue(resolveCallbackNoteColourValue(snapshot, true)),
+	        colorFromValue(resolveCallbackNoteColourValue(snapshot, false)), snapshot.noteStyle};
+}
 
-	if (segment.fore.isValid())
-		targetRuntime.setNoteColourFore(colorValue(segment.fore));
-	if (segment.back.isValid())
-		targetRuntime.setNoteColourBack(colorValue(segment.back));
-
+WorldRuntime::StyleSpan makeColourOutputSpan(const ColourOutputSegment       &segment,
+                                             const ResolvedCallbackNoteStyle &noteStyle)
+{
 	WorldRuntime::StyleSpan span;
 	span.length    = sizeToInt(segment.text.size());
-	span.fore      = colorFromValue(targetRuntime.noteColourFore());
-	span.back      = colorFromValue(targetRuntime.noteColourBack());
-	span.bold      = (noteStyle & kStyleHilite) != 0;
-	span.underline = (noteStyle & kStyleUnderline) != 0;
-	span.blink     = (noteStyle & kStyleBlink) != 0;
-	span.inverse   = (noteStyle & kStyleInverse) != 0;
+	span.fore      = segment.fore.isValid() ? segment.fore : noteStyle.fore;
+	span.back      = segment.back.isValid() ? segment.back : noteStyle.back;
+	span.bold      = (noteStyle.style & kStyleHilite) != 0;
+	span.underline = (noteStyle.style & kStyleUnderline) != 0;
+	span.blink     = (noteStyle.style & kStyleBlink) != 0;
+	span.inverse   = (noteStyle.style & kStyleInverse) != 0;
 	span.changed   = true;
-	targetRuntime.outputStyledText(segment.text, {span}, true, segment.newline);
-
-	if (oldNotesInRgb)
-	{
-		targetRuntime.setNoteColourFore(oldFore);
-		targetRuntime.setNoteColourBack(oldBack);
-	}
-	else
-	{
-		targetRuntime.setNoteTextColour(oldNoteTextColour);
-	}
+	return span;
 }
 
 static void outputStyledCallbackLine(WorldRuntime &targetRuntime, const QString &text,
@@ -13100,23 +13163,36 @@ static int luaColourOutput(lua_State *L, const bool noteLastSegment)
 	QVector<ColourOutputSegment> segments;
 	const int                    top                  = lua_gettop(L);
 	const int                    completeSegmentCount = top / 3;
+	bool                         hasOutputSegment     = false;
 	for (int segmentIndex = 0; segmentIndex < completeSegmentCount; ++segmentIndex)
 	{
-		const int     index      = segmentIndex * 3 + 1;
-		const QString textColour = QString::fromUtf8(luaL_optstring(L, index, ""));
-		const QString backColour = QString::fromUtf8(luaL_optstring(L, index + 1, ""));
-		const QString text       = QString::fromUtf8(luaL_checkstring(L, index + 2));
-		segments.push_back({text, WorldView::parseColor(textColour), WorldView::parseColor(backColour),
-		                    noteLastSegment && segmentIndex + 1 == completeSegmentCount});
+		const int           index      = segmentIndex * 3 + 1;
+		const QString       textColour = QString::fromUtf8(luaL_optstring(L, index, ""));
+		const QString       backColour = QString::fromUtf8(luaL_optstring(L, index + 1, ""));
+		const QString       text       = QString::fromUtf8(luaL_checkstring(L, index + 2));
+		ColourOutputSegment segment;
+		segment.text    = text;
+		segment.newline = noteLastSegment && segmentIndex + 1 == completeSegmentCount;
+		if (colourOutputSegmentProducesLine(segment))
+		{
+			segment.fore     = WorldView::parseColor(textColour);
+			segment.back     = WorldView::parseColor(backColour);
+			hasOutputSegment = true;
+		}
+		segments.push_back(std::move(segment));
 	}
+
+	if (!hasOutputSegment)
+		return 0;
+
+	const ResolvedCallbackNoteStyle noteStyle = resolveCallbackNoteStyleForOutput(engine, runtime);
 
 	for (const ColourOutputSegment &segment : segments)
 	{
-		WorldRuntime::StyleSpan span;
-		span.length  = sizeToInt(segment.text.size());
-		span.fore    = segment.fore.isValid() ? segment.fore : colorFromValue(0xFFFFFF);
-		span.back    = segment.back.isValid() ? segment.back : colorFromValue(0);
-		span.changed = true;
+		if (!colourOutputSegmentProducesLine(segment))
+			continue;
+
+		const WorldRuntime::StyleSpan      span  = makeColourOutputSpan(segment, noteStyle);
 		const int                          flags = callbackOutputFlags(engine, runtime, true, false);
 		const CallbackOutputMutationTarget target =
 		    appendCallbackOutputLine(engine, runtime, segment.text, {span}, flags, segment.newline);
@@ -13131,7 +13207,7 @@ static int luaColourOutput(lua_State *L, const bool noteLastSegment)
 				        segment.text, flags, {span}, segment.newline);
 				    return;
 			    }
-			    outputColourSegment(targetRuntime, segment);
+			    targetRuntime.outputStyledText(segment.text, {span}, true, segment.newline);
 		    });
 	}
 
@@ -13163,7 +13239,10 @@ static int luaSetCustomColourBackground(lua_State *L)
 	enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime, [index, color](WorldRuntime &targetRuntime)
 	                                             { targetRuntime.setCustomColourBackground(index, color); });
 	if (activeCallbackContextConst(engine))
+	{
 		cacheCallbackCustomBackgroundColour(engine, index, colorValue(color));
+		refreshCallbackIndexedNoteColourSnapshot(engine, runtime);
+	}
 	return 0;
 }
 
@@ -13204,7 +13283,10 @@ static int luaSetCustomColourText(lua_State *L)
 	enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime, [index, color](WorldRuntime &targetRuntime)
 	                                             { targetRuntime.setCustomColourText(index, color); });
 	if (activeCallbackContextConst(engine))
+	{
 		cacheCallbackCustomTextColour(engine, index, colorValue(color));
+		refreshCallbackIndexedNoteColourSnapshot(engine, runtime);
+	}
 	return 0;
 }
 
@@ -19603,6 +19685,7 @@ static int luaSetNormalColour(lua_State *L)
 	enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime, [which, value](WorldRuntime &targetRuntime)
 	                                             { targetRuntime.setNormalColour(which, value); });
 	cacheCallbackNormalAnsiColour(engine, which, value);
+	refreshCallbackIndexedNoteColourSnapshot(engine, runtime);
 	return 0;
 }
 
@@ -41170,6 +41253,7 @@ static int luaSetOption(lua_State *L)
 		    engine, runtime, [canonical, storedValue](WorldRuntime &targetRuntime)
 		    { targetRuntime.setWorldAttribute(canonical, QString::number(storedValue)); });
 		updateCallbackWorldAttributeSnapshot(engine, canonical, QString::number(storedValue), false);
+		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical, false);
 		lua_pushnumber(L, eOK);
 		return 1;
 	}
@@ -41184,6 +41268,7 @@ static int luaSetOption(lua_State *L)
 	if (result == eOK)
 	{
 		updateCallbackWorldAttributeSnapshot(engine, canonical, QString::number(storedValue), false);
+		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical, false);
 	}
 	lua_pushnumber(L, result);
 	return 1;
@@ -41426,6 +41511,8 @@ static int luaSetAlphaOption(lua_State *L)
 				    targetRuntime.setWorldAttribute(canonical, value);
 		    });
 		updateCallbackWorldAttributeSnapshot(engine, canonical, value, isMultiline);
+		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical,
+		                                                                  isMultiline);
 		lua_pushnumber(L, eOK);
 		return 1;
 	}
@@ -41442,7 +41529,11 @@ static int luaSetAlphaOption(lua_State *L)
 	    },
 	    eWorldClosed);
 	if (result == eOK)
+	{
 		updateCallbackWorldAttributeSnapshot(engine, canonical, value, isMultiline);
+		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical,
+		                                                                  isMultiline);
+	}
 	lua_pushnumber(L, result);
 	return 1;
 }

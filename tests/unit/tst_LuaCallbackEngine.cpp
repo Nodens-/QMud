@@ -6,11 +6,13 @@
  * Role: Unit coverage for Lua callback-engine dispatch, catalog, and callback-context semantics.
  */
 
+#include "ColorPacking.h"
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
 #include "LuaExecutorWorker.h"
 #include "LuaSupport.h"
 #include "NativePluginRegistry.h"
+#include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "helpers/LuaExecutionUtils.h"
 #include "helpers/PluginPathUtils.h"
@@ -74,6 +76,9 @@ namespace
 			void workerDispatchesPluginLifecycleCallbacksOnRealEngines();
 			void workerCallbackBatchCapturesOutputMiniWindowAndSaveStateMutations();
 			void workerColourOutputMatchesMushclientGroupingAndNewlineSemantics();
+			void workerColourOutputPreservesIndexedNoteColour();
+			void normalColourDefaultsMatchMushclientAcrossRuntimeAndCallbackPaths();
+			void emptyColourTellDoesNotMutateCallbackOutputCache();
 			void colourTellIgnoresTrailingLuaGsubReturnAndKeepsFollowingNote();
 			void executeScriptNoteUsesRuntimeNoteColour();
 			void selfPluginInfoMetadataFallsThroughToRuntime();
@@ -112,6 +117,12 @@ namespace
 		const QString value = QString::fromUtf8(lua_tostring(state, -1));
 		lua_pop(state, 1);
 		return value;
+	}
+
+	QColor colorFromPackedValue(const long value)
+	{
+		const auto packed = static_cast<QMudColorRef>(value);
+		return {qmudRed(packed), qmudGreen(packed), qmudBlue(packed)};
 	}
 
 	int safeQSizeToInt(const qsizetype size)
@@ -156,6 +167,35 @@ namespace
 		auto snapshot                       = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 		snapshot->worldVariablesSnapshot    = runtime.variableSnapshot();
 		snapshot->hasWorldVariablesSnapshot = true;
+		return snapshot;
+	}
+
+	QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+	captureRuntimeCounterDispatchSnapshotForTest(const WorldRuntime &runtime)
+	{
+		auto snapshot                        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+		snapshot->hasRuntimeCountersSnapshot = true;
+		snapshot->runtimeCounterValues.insert(QStringLiteral("notesInRgb"), runtime.notesInRgb());
+		snapshot->runtimeCounterValues.insert(QStringLiteral("noteTextColour"), runtime.noteTextColour());
+		snapshot->runtimeCounterValues.insert(QStringLiteral("noteColourFore"),
+		                                      QVariant::fromValue<qlonglong>(runtime.noteColourFore()));
+		snapshot->runtimeCounterValues.insert(QStringLiteral("noteColourBack"),
+		                                      QVariant::fromValue<qlonglong>(runtime.noteColourBack()));
+		snapshot->runtimeCounterValues.insert(QStringLiteral("noteStyle"), runtime.noteStyle());
+		for (int index = 1; index <= 8; ++index)
+		{
+			const QColor boldColour = runtime.ansiColour(true, index);
+			snapshot->boldAnsiColoursByIndex.insert(
+			    index, boldColour.isValid() ? static_cast<long>(qmudRgb(boldColour.red(), boldColour.green(),
+			                                                            boldColour.blue()))
+			                                : 0);
+			snapshot->normalAnsiColoursByIndex.insert(index, runtime.normalColour(index));
+		}
+		for (int index = 1; index <= MAX_CUSTOM; ++index)
+		{
+			snapshot->customTextColoursByIndex.insert(index, runtime.customColourText(index));
+			snapshot->customBackgroundColoursByIndex.insert(index, runtime.customColourBackground(index));
+		}
 		return snapshot;
 	}
 
@@ -1511,9 +1551,10 @@ end
 	                       &runtime);
 
 	LuaBatchDispatchRequest request;
-	request.engines      = {engine};
-	request.kind         = LuaBatchDispatchKind::NoArgs;
-	request.functionName = QStringLiteral("OnPluginEnable");
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	executeDeferredMutations(result);
@@ -1523,6 +1564,242 @@ end
 	                      QStringLiteral("tell-a"), QStringLiteral("tell-b")}));
 	QCOMPARE(outputNewLines, QList<bool>({false, false, true, false, false}));
 	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::workerColourOutputPreservesIndexedNoteColour()
+{
+	WorldRuntime runtime;
+	runtime.setNoteTextColour(1);
+	const QColor expectedChangedFore = colorFromPackedValue(runtime.noteColourFore());
+	const QColor expectedChangedBack = colorFromPackedValue(runtime.noteColourBack());
+	runtime.setNoteTextColour(5);
+	QCOMPARE(runtime.notesInRgb(), false);
+	QCOMPARE(runtime.noteTextColour(), 4);
+	const QColor                                expectedFore = colorFromPackedValue(runtime.noteColourFore());
+	const QColor                                expectedBack = colorFromPackedValue(runtime.noteColourBack());
+	const WorldRuntime::RuntimeCountersSnapshot counters     = runtime.runtimeCountersSnapshot(false);
+	QCOMPARE(colorFromPackedValue(counters.noteColourFore), expectedFore);
+	QCOMPARE(colorFromPackedValue(counters.noteColourBack), expectedBack);
+
+	QStringList                               outputTexts;
+	QVector<QVector<WorldRuntime::StyleSpan>> outputSpans;
+	QObject::connect(
+	    &runtime, &WorldRuntime::outputStyledRequested, &runtime,
+	    [&](const QString &text, const QVector<WorldRuntime::StyleSpan> &spans, const bool, const bool)
+	    {
+		    outputTexts.push_back(text);
+		    outputSpans.push_back(spans);
+	    });
+
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor;
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function OnPluginEnable()
+  ColourNote("", "", "note")
+  ColourTell("not-a-colour", "", "tell")
+  SetNoteColour(1)
+  Note("after")
+end
+)lua"),
+	                       &runtime);
+
+	LuaBatchDispatchRequest request;
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	executeDeferredMutations(result);
+
+	QCOMPARE(outputTexts,
+	         QStringList({QStringLiteral("note"), QStringLiteral("tell"), QStringLiteral("after")}));
+	QCOMPARE(outputSpans.size(), 3);
+	for (const QVector<WorldRuntime::StyleSpan> &spans : std::as_const(outputSpans))
+		QVERIFY(!spans.isEmpty());
+	QCOMPARE(outputSpans.at(0).constFirst().fore, expectedFore);
+	QCOMPARE(outputSpans.at(0).constFirst().back, expectedBack);
+	QCOMPARE(outputSpans.at(1).constFirst().fore, expectedFore);
+	QCOMPARE(outputSpans.at(1).constFirst().back, expectedBack);
+	QCOMPARE(outputSpans.at(2).constFirst().fore, expectedChangedFore);
+	QCOMPARE(outputSpans.at(2).constFirst().back, expectedChangedBack);
+	QCOMPARE(runtime.notesInRgb(), false);
+	QCOMPARE(runtime.noteTextColour(), 0);
+	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::normalColourDefaultsMatchMushclientAcrossRuntimeAndCallbackPaths()
+{
+	WorldRuntime runtime;
+	runtime.setColours({});
+
+	const QString expected = QStringList{QString::number(static_cast<long>(qmudRgb(0, 0, 0))),
+	                                     QString::number(static_cast<long>(qmudRgb(128, 0, 0))),
+	                                     QString::number(static_cast<long>(qmudRgb(0, 128, 0))),
+	                                     QString::number(static_cast<long>(qmudRgb(128, 128, 0))),
+	                                     QString::number(static_cast<long>(qmudRgb(0, 0, 128))),
+	                                     QString::number(static_cast<long>(qmudRgb(128, 0, 128))),
+	                                     QString::number(static_cast<long>(qmudRgb(0, 128, 128))),
+	                                     QString::number(static_cast<long>(qmudRgb(192, 192, 192))),
+	                                     QStringLiteral("0"),
+	                                     QStringLiteral("0")}
+	                             .join(QLatin1Char('|'));
+
+	QStringList   runtimeValues;
+	for (int index = 1; index <= 8; ++index)
+		runtimeValues.push_back(QString::number(runtime.normalColour(index)));
+	runtimeValues.push_back(QString::number(runtime.normalColour(0)));
+	runtimeValues.push_back(QString::number(runtime.normalColour(9)));
+	QCOMPARE(runtimeValues.join(QLatin1Char('|')), expected);
+
+	auto engine = QSharedPointer<LuaCallbackEngine>::create();
+	engine->setWorldRuntime(&runtime);
+	setEngineScript(*engine, QStringLiteral(R"lua(
+function normal_colour_status(value)
+  local values = {}
+  local function add(value)
+    values[#values + 1] = string.format("%.0f", value)
+  end
+  for index = 1, 8 do
+    add(GetNormalColour(index))
+  end
+  add(GetNormalColour(0))
+  add(GetNormalColour(9))
+  return table.concat(values, "|")
+end
+function selected_colour_status(value)
+  return string.format("%.0f|%.0f", GetNormalColour(2), GetBoldColour(2))
+end
+function same_colour_note_status(value)
+  SetNoteColour(0)
+  return string.format("%.0f|%.0f", GetNoteColourFore(), GetNoteColourBack())
+end
+function indexed_note_palette_status(value)
+  SetNoteColour(1)
+  SetCustomColourText(1, 460809)
+  SetCustomColourBackground(1, 263430)
+  return string.format("%.0f|%.0f", GetNoteColourFore(), GetNoteColourBack())
+end
+function same_colour_normal_palette_status(value)
+  SetNoteColour(0)
+  SetNormalColour(8, 855051)
+  SetNormalColour(1, 1052430)
+  return string.format("%.0f|%.0f", GetNoteColourFore(), GetNoteColourBack())
+end
+function same_colour_custom16_option_status(value)
+  SetNoteColour(0)
+  SetCustomColourText(16, 1118739)
+  SetCustomColourBackground(16, 1316118)
+  SetOption("custom_16_is_default_colour", 1)
+  return string.format("%.0f|%.0f", GetNoteColourFore(), GetNoteColourBack())
+end
+function invalid_colour_cache_status(value)
+  SetNormalColour(0, 123)
+  SetNormalColour(9, 456)
+  SetBoldColour(0, 123)
+  SetBoldColour(9, 456)
+  SetCustomColourText(0, 123)
+  SetCustomColourText(17, 456)
+  SetCustomColourBackground(0, 123)
+  SetCustomColourBackground(17, 456)
+  SetNormalColour(2, 16909060)
+  return string.format("%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f",
+    GetNormalColour(0), GetNormalColour(9), GetBoldColour(0), GetBoldColour(9),
+    GetCustomColourText(0), GetCustomColourText(17),
+    GetCustomColourBackground(0), GetCustomColourBackground(17), GetNormalColour(2))
+end
+)lua"));
+
+	LuaExecutorDirect       executor;
+	LuaBatchDispatchRequest request;
+	request.engines                       = {engine};
+	request.kind                          = LuaBatchDispatchKind::StringInOut;
+	request.functionName                  = QStringLiteral("normal_colour_status");
+	request.stringArg                     = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult snapshotResult = executor.dispatchBatch(request);
+	QCOMPARE(snapshotResult.stringResult, expected);
+
+	request.functionName                  = QStringLiteral("same_colour_note_status");
+	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult sameNoteResult = executor.dispatchBatch(request);
+	QCOMPARE(sameNoteResult.stringResult, QStringLiteral("%1|%2")
+	                                          .arg(static_cast<long>(qmudRgb(192, 192, 192)))
+	                                          .arg(static_cast<long>(qmudRgb(0, 0, 0))));
+
+	request.functionName                     = QStringLiteral("indexed_note_palette_status");
+	request.miniWindowSnapshotArg            = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult indexedNoteResult = executor.dispatchBatch(request);
+	QCOMPARE(indexedNoteResult.stringResult, QStringLiteral("%1|%2")
+	                                             .arg(static_cast<long>(qmudRgb(9, 8, 7)))
+	                                             .arg(static_cast<long>(qmudRgb(6, 5, 4))));
+
+	request.functionName                    = QStringLiteral("same_colour_normal_palette_status");
+	request.miniWindowSnapshotArg           = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult sameColourResult = executor.dispatchBatch(request);
+	QCOMPARE(sameColourResult.stringResult, QStringLiteral("%1|%2")
+	                                            .arg(static_cast<long>(qmudRgb(11, 12, 13)))
+	                                            .arg(static_cast<long>(qmudRgb(14, 15, 16))));
+
+	request.functionName                        = QStringLiteral("same_colour_custom16_option_status");
+	request.miniWindowSnapshotArg               = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult custom16OptionResult = executor.dispatchBatch(request);
+	QCOMPARE(custom16OptionResult.stringResult, QStringLiteral("%1|%2")
+	                                                .arg(static_cast<long>(qmudRgb(19, 18, 17)))
+	                                                .arg(static_cast<long>(qmudRgb(22, 21, 20))));
+
+	request.functionName                      = QStringLiteral("invalid_colour_cache_status");
+	request.miniWindowSnapshotArg             = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult invalidCacheResult = executor.dispatchBatch(request);
+	QCOMPARE(invalidCacheResult.stringResult,
+	         QStringLiteral("0|0|0|0|0|0|0|0|%1").arg(static_cast<long>(qmudRgb(4, 3, 2))));
+
+	runtime.setNormalColour(2, qmudRgb(1, 2, 3));
+	runtime.setAnsiColour(true, 2, QColor(1, 2, 3));
+	QCOMPARE(runtime.normalColour(2), static_cast<long>(qmudRgb(1, 2, 3)));
+	QCOMPARE(runtime.ansiColour(false, 2), QColor(1, 2, 3));
+	QCOMPARE(runtime.ansiColour(true, 2), QColor(1, 2, 3));
+
+	request.functionName                  = QStringLiteral("selected_colour_status");
+	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult selectedResult = executor.dispatchBatch(request);
+	QCOMPARE(selectedResult.stringResult, QStringLiteral("%1|%2")
+	                                          .arg(static_cast<long>(qmudRgb(1, 2, 3)))
+	                                          .arg(static_cast<long>(qmudRgb(1, 2, 3))));
+}
+
+void tst_LuaCallbackEngine::emptyColourTellDoesNotMutateCallbackOutputCache()
+{
+	WorldRuntime runtime;
+
+	QStringList  outputTexts;
+	QObject::connect(&runtime, &WorldRuntime::outputStyledRequested, &runtime,
+	                 [&](const QString &text, const QVector<WorldRuntime::StyleSpan> &, const bool,
+	                     const bool) { outputTexts.push_back(text); });
+
+	auto engine = QSharedPointer<LuaCallbackEngine>::create();
+	engine->setWorldRuntime(&runtime);
+	setEngineScript(*engine, QStringLiteral(R"lua(
+function empty_colour_tell_status(value)
+  local before = GetLinesInBufferCount()
+  ColourTell("", "", "")
+  return string.format("%.0f|%.0f|%s", before, GetLinesInBufferCount(), GetRecentLines(1))
+end
+)lua"));
+
+	LuaExecutorDirect       executor;
+	LuaBatchDispatchRequest request;
+	request.engines                       = {engine};
+	request.kind                          = LuaBatchDispatchKind::StringInOut;
+	request.functionName                  = QStringLiteral("empty_colour_tell_status");
+	request.stringArg                     = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult callbackResult = executor.dispatchBatch(request);
+
+	QCOMPARE(callbackResult.stringResult, QStringLiteral("0|0|"));
+	executeDeferredMutations(callbackResult);
+	QVERIFY(outputTexts.isEmpty());
+	QCOMPARE(runtime.luaContextLinesInBufferCount(), 0);
 }
 
 void tst_LuaCallbackEngine::colourTellIgnoresTrailingLuaGsubReturnAndKeepsFollowingNote()
