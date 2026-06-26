@@ -10806,6 +10806,24 @@ static double normalizeSoundVolume(double volume)
 	return qBound(0.0, scaled, 1.0);
 }
 
+static QString mediaPlayerErrorName(const QMediaPlayer::Error error)
+{
+	switch (error)
+	{
+	case QMediaPlayer::NoError:
+		return QStringLiteral("NoError");
+	case QMediaPlayer::ResourceError:
+		return QStringLiteral("ResourceError");
+	case QMediaPlayer::FormatError:
+		return QStringLiteral("FormatError");
+	case QMediaPlayer::NetworkError:
+		return QStringLiteral("NetworkError");
+	case QMediaPlayer::AccessDeniedError:
+		return QStringLiteral("AccessDeniedError");
+	}
+	return QStringLiteral("UnknownError");
+}
+
 bool WorldRuntime::soundBufferHasBackend(const SoundBuffer &entry)
 {
 	return entry.effect || entry.player;
@@ -11007,8 +11025,24 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 		player->setAudioOutput(audioOutput);
 		player->setLoops(loop ? QMediaPlayer::Infinite : QMediaPlayer::Once);
 		audioOutput->setVolume(static_cast<float>(entry.volume));
+		const QString mediaBackend = QString::fromUtf8(qgetenv("QT_MEDIA_BACKEND")).trimmed();
+		const QString backendText  = mediaBackend.isEmpty() ? QStringLiteral("default") : mediaBackend;
+		const auto    reportMediaPlayerError =
+		    [this, resolved, backendText](const QMediaPlayer::Error error, const QString &errorText)
+		{
+			const QString trimmedError = errorText.trimmed();
+			const QString detail =
+			    trimmedError.isEmpty() ? QStringLiteral("unknown media-player error") : trimmedError;
+			const QString message =
+			    QStringLiteral("QMud sound playback failed: %1 (file: %2, Qt media backend: %3, error: "
+			                   "%4)")
+			        .arg(detail, resolved, backendText, mediaPlayerErrorName(error));
+			qWarning().noquote() << message;
+			outputText(message, true, true);
+		};
 		connect(player, &QMediaPlayer::errorOccurred, this,
-		        [this, player, targetBuffer, luaAudioGeneration](QMediaPlayer::Error, const QString &)
+		        [this, player, targetBuffer, luaAudioGeneration,
+		         reportMediaPlayerError](const QMediaPlayer::Error error, const QString &errorText)
 		        {
 			        if (luaAudioGeneration != 0)
 				        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
@@ -11020,6 +11054,7 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 			        if (current.player != player)
 				        return;
 
+			        reportMediaPlayerError(error, errorText);
 			        player->stop();
 			        player->setSource(QUrl());
 			        current.player      = nullptr;
@@ -11058,6 +11093,7 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 		player->setSource(QUrl::fromLocalFile(resolved));
 		if (player->error() != QMediaPlayer::NoError)
 		{
+			reportMediaPlayerError(player->error(), player->errorString());
 			delete player;
 			entry.playbackStarted = false;
 			entry.looping         = false;

@@ -136,6 +136,8 @@ int main(int argc, char *argv[])
 	configureWindowsDllSearchPath();
 	if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
 		qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("windows:darkmode=2"));
+	if (qEnvironmentVariableIsEmpty("QT_MEDIA_BACKEND"))
+		qputenv("QT_MEDIA_BACKEND", QByteArrayLiteral("ffmpeg"));
 #endif
 
 	if (qEnvironmentVariableIsEmpty("QT_PLUGIN_PATH"))
