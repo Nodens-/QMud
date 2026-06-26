@@ -40,6 +40,7 @@ namespace
 	const QString           kNestedCallPluginId      = QStringLiteral("2233445566778899aabbccdd");
 	const QString           kTelnetOrderingPluginId  = QStringLiteral("00112233445566778899aabb");
 	const QString           kTimerCommandPluginId    = QStringLiteral("33445566778899aabbccddee");
+	const QString           kFocusCallbackPluginId   = QStringLiteral("445566778899aabbccddeeff");
 	const QString           kTelnetTriggerLine       = QStringLiteral("qxv-lattice-17");
 	const QString           kTelnetAfterLine         = QStringLiteral("qxv-after-64");
 
@@ -232,6 +233,58 @@ function OnPluginCommand(command)
   end
   SetVariable("timer_commands", current .. command)
   return false
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml"));
+	}
+
+	/**
+	 * @brief Writes a plugin fixture that records focus lifecycle callback order.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writeFocusCallbackPlugin(const QString &pluginsDir)
+	{
+		const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("focus_callbacks.xml"));
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="FocusCallbacks"
+    author="QMud Test"
+    id=")xml") + kFocusCallbackPluginId + QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function qcb_append_plugin_focus(marker)
+  local current = GetVariable("plugin_focus_order") or ""
+  if current ~= "" then
+    current = current .. ","
+  end
+  SetVariable("plugin_focus_order", current .. marker)
+
+  local states = GetVariable("plugin_focus_active_values") or ""
+  if states ~= "" then
+    states = states .. ","
+  end
+  SetVariable("plugin_focus_active_values", states .. tostring(GetInfo(113)))
+
+  local sources = GetVariable("plugin_focus_action_sources") or ""
+  if sources ~= "" then
+    sources = sources .. ","
+  end
+  SetVariable("plugin_focus_action_sources", sources .. string.format("%.0f", GetInfo(239)))
+end
+
+function OnPluginGetFocus()
+  qcb_append_plugin_focus("plugin_get")
+end
+
+function OnPluginLoseFocus()
+  qcb_append_plugin_focus("plugin_lose")
 end
 ]]></script>
   </plugin>
@@ -498,6 +551,66 @@ end
 	}
 
 	/**
+	 * @brief Reads a world variable from the runtime.
+	 * @param runtime Runtime to inspect.
+	 * @param name World variable name.
+	 * @return Variable value, or empty when missing.
+	 */
+	QString worldVariable(const WorldRuntime &runtime, const QString &name)
+	{
+		QString value;
+		if (!runtime.findVariable(name, value))
+			return {};
+		return value;
+	}
+
+	/**
+	 * @brief Configures a runtime with world and plugin focus callback recorders.
+	 * @param runtime Runtime to configure.
+	 * @param tempDir Temporary root directory.
+	 */
+	void configureFocusCallbackRuntime(WorldRuntime &runtime, const QTemporaryDir &tempDir)
+	{
+		runtime.setStartupDirectory(tempDir.path());
+		runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+		runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+		runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+		runtime.setWorldAttribute(QStringLiteral("on_world_get_focus"),
+		                          QStringLiteral("qcb_world_get_focus"));
+		runtime.setWorldAttribute(QStringLiteral("on_world_lose_focus"),
+		                          QStringLiteral("qcb_world_lose_focus"));
+		runtime.setLuaScriptText(QStringLiteral(R"lua(
+function qcb_append_world_focus(marker)
+  local current = GetVariable("world_focus_order") or ""
+  if current ~= "" then
+    current = current .. ","
+  end
+  SetVariable("world_focus_order", current .. marker)
+
+  local states = GetVariable("world_focus_active_values") or ""
+  if states ~= "" then
+    states = states .. ","
+  end
+  SetVariable("world_focus_active_values", states .. tostring(GetInfo(113)))
+
+  local sources = GetVariable("world_focus_action_sources") or ""
+  if sources ~= "" then
+    sources = sources .. ","
+  end
+  SetVariable("world_focus_action_sources", sources .. string.format("%.0f", GetInfo(239)))
+end
+
+function qcb_world_get_focus()
+  qcb_append_world_focus("world_get")
+end
+
+function qcb_world_lose_focus()
+  qcb_append_world_focus("world_lose")
+end
+)lua"));
+	}
+
+	/**
 	 * @brief Verifies callback order and socket send order for telnet ordering tests.
 	 * @param runtime Runtime to inspect.
 	 * @param acceptedSocket Accepted test-server socket receiving client commands.
@@ -665,6 +778,155 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    pluginVariable(runtime, kHiddenMessagePluginId, QStringLiteral("disconnect_marker")),
 			    QStringLiteral("disconnected"), 5000);
+		}
+
+		static void focusCallbacksFollowMushclientWorldThenPluginOrder()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeFocusCallbackPlugin(pluginsDir));
+
+			WorldRuntime runtime;
+			configureFocusCallbackRuntime(runtime, tempDir);
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("focus_callbacks.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			runtime.requestActiveState(true);
+			QTRY_COMPARE_WITH_TIMEOUT(worldVariable(runtime, QStringLiteral("world_focus_order")),
+			                          QStringLiteral("world_get"), 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kFocusCallbackPluginId, QStringLiteral("plugin_focus_order")),
+			    QStringLiteral("plugin_get"), 5000);
+			QCOMPARE(worldVariable(runtime, QStringLiteral("world_focus_active_values")),
+			         QStringLiteral("true"));
+			QCOMPARE(
+			    pluginVariable(runtime, kFocusCallbackPluginId, QStringLiteral("plugin_focus_active_values")),
+			    QStringLiteral("true"));
+			QCOMPARE(worldVariable(runtime, QStringLiteral("world_focus_action_sources")),
+			         QString::number(WorldRuntime::eWorldAction));
+			QCOMPARE(pluginVariable(runtime, kFocusCallbackPluginId,
+			                        QStringLiteral("plugin_focus_action_sources")),
+			         QString::number(WorldRuntime::eWorldAction));
+
+			runtime.requestActiveState(true);
+			QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+			QCOMPARE(worldVariable(runtime, QStringLiteral("world_focus_order")),
+			         QStringLiteral("world_get"));
+			QCOMPARE(pluginVariable(runtime, kFocusCallbackPluginId, QStringLiteral("plugin_focus_order")),
+			         QStringLiteral("plugin_get"));
+
+			runtime.requestActiveState(false);
+			QTRY_COMPARE_WITH_TIMEOUT(worldVariable(runtime, QStringLiteral("world_focus_order")),
+			                          QStringLiteral("world_get,world_lose"), 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kFocusCallbackPluginId, QStringLiteral("plugin_focus_order")),
+			    QStringLiteral("plugin_get,plugin_lose"), 5000);
+			QCOMPARE(worldVariable(runtime, QStringLiteral("world_focus_active_values")),
+			         QStringLiteral("true,false"));
+			QCOMPARE(
+			    pluginVariable(runtime, kFocusCallbackPluginId, QStringLiteral("plugin_focus_active_values")),
+			    QStringLiteral("true,false"));
+			QCOMPARE(worldVariable(runtime, QStringLiteral("world_focus_action_sources")),
+			         QStringLiteral("%1,%1").arg(WorldRuntime::eWorldAction));
+			QCOMPARE(pluginVariable(runtime, kFocusCallbackPluginId,
+			                        QStringLiteral("plugin_focus_action_sources")),
+			         QStringLiteral("%1,%1").arg(WorldRuntime::eWorldAction));
+		}
+
+		static void focusCallbacksPreserveRapidOppositeTransitions()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeFocusCallbackPlugin(pluginsDir));
+
+			WorldRuntime runtime;
+			configureFocusCallbackRuntime(runtime, tempDir);
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("focus_callbacks.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			runtime.requestActiveState(true);
+			runtime.requestActiveState(false);
+			runtime.requestActiveState(true);
+
+			QTRY_COMPARE_WITH_TIMEOUT(worldVariable(runtime, QStringLiteral("world_focus_order")),
+			                          QStringLiteral("world_get,world_lose,world_get"), 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kFocusCallbackPluginId, QStringLiteral("plugin_focus_order")),
+			    QStringLiteral("plugin_get,plugin_lose,plugin_get"), 5000);
+			QCOMPARE(worldVariable(runtime, QStringLiteral("world_focus_active_values")),
+			         QStringLiteral("true,false,true"));
+			QCOMPARE(
+			    pluginVariable(runtime, kFocusCallbackPluginId, QStringLiteral("plugin_focus_active_values")),
+			    QStringLiteral("true,false,true"));
+		}
+
+		static void asyncExecuteScriptActionSourceDoesNotLeakToNextCallback()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+
+			QSharedPointer<LuaCallbackEngine> engine(runtime.luaCallbacks(),
+			                                         [](LuaCallbackEngine * /*unused*/) {});
+			QVERIFY(engine);
+
+			bool executeCompleted = false;
+			bool executeOk        = false;
+			runtime.dispatchLuaExecuteScriptAsync(engine, QStringLiteral(R"lua(
+SetVariable("async_execute_source", string.format("%.0f", GetInfo(239)))
+function qcb_record_post_async_source(label)
+  SetVariable(label .. "_source", string.format("%.0f", GetInfo(239)))
+end
+)lua"),
+			                                      QStringLiteral("async action source isolation"), nullptr,
+			                                      false, false, 0, 0,
+			                                      [&executeCompleted, &executeOk](const bool ok)
+			                                      {
+				                                      executeOk        = ok;
+				                                      executeCompleted = true;
+			                                      });
+
+			QTRY_VERIFY_WITH_TIMEOUT(executeCompleted, 5000);
+			QVERIFY(executeOk);
+			QCOMPARE(worldVariable(runtime, QStringLiteral("async_execute_source")),
+			         QString::number(WorldRuntime::eLuaSandbox));
+			QCOMPARE(runtime.currentActionSource(), WorldRuntime::eUnknownActionSource);
+
+			bool callbackCompleted = false;
+			runtime.dispatchLuaStringsAndWildcardsAsync(
+			    engine, QStringLiteral("qcb_record_post_async_source"),
+			    {QStringLiteral("post_async_callback")}, {}, {}, nullptr, -1, false, 0, 0,
+			    [&callbackCompleted](const LuaBatchDispatchResult & /*unused*/)
+			    { callbackCompleted = true; });
+
+			QTRY_VERIFY_WITH_TIMEOUT(callbackCompleted, 5000);
+			QCOMPARE(worldVariable(runtime, QStringLiteral("post_async_callback_source")),
+			         QString::number(WorldRuntime::eUnknownActionSource));
+			QCOMPARE(runtime.currentActionSource(), WorldRuntime::eUnknownActionSource);
 		}
 
 		static void executeTriggerSendCommandEntersPriorityQueueBand()

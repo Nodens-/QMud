@@ -45913,7 +45913,8 @@ void LuaCallbackEngine::callMxpSetVariable(const QString &functionName, const QS
 }
 
 bool LuaCallbackEngine::callFunctionNoArgs(const QString &functionName, bool *hasFunction, bool defaultResult,
-                                           bool *suspended, quint64 *modalResumeId,
+                                           const int actionSourceOverride, bool *suspended,
+                                           quint64                      *modalResumeId,
                                            LuaPendingModalStringRequest *pendingModalStringRequest)
 {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
@@ -45935,6 +45936,8 @@ bool LuaCallbackEngine::callFunctionNoArgs(const QString &functionName, bool *ha
 	if (hasFunction)
 		*hasFunction = true;
 	LuaCallbackExecutionContext context;
+	context.actionSourceOverride    = actionSourceOverride;
+	context.hasActionSourceOverride = actionSourceOverride >= 0;
 	pushActiveCallbackContext(this, std::move(context));
 	if (const auto *snapshot = currentDispatchMiniWindowSnapshot(); snapshot)
 		seedCallbackMiniWindowSnapshot(this, snapshot);
@@ -45944,6 +45947,7 @@ bool LuaCallbackEngine::callFunctionNoArgs(const QString &functionName, bool *ha
 	Q_UNUSED(functionName);
 	Q_UNUSED(hasFunction);
 	Q_UNUSED(defaultResult);
+	Q_UNUSED(actionSourceOverride);
 	Q_UNUSED(suspended);
 	Q_UNUSED(modalResumeId);
 	Q_UNUSED(pendingModalStringRequest);
@@ -46547,13 +46551,11 @@ bool LuaCallbackEngine::callFunctionWithStringsAndWildcards(
 #endif
 }
 
-bool LuaCallbackEngine::executeScript(const QString &code, const QString &description,
-                                      const QVector<LuaStyleRun> *styleRuns, const bool hasTriggerContext,
-                                      const bool   triggerOutputReplacesMatchedLine,
-                                      const int    triggerMatchedLineBufferIndex,
-                                      const qint64 triggerMatchedLineAbsoluteNumber, bool *suspended,
-                                      quint64                      *modalResumeId,
-                                      LuaPendingModalStringRequest *pendingModalStringRequest)
+bool LuaCallbackEngine::executeScript(
+    const QString &code, const QString &description, const QVector<LuaStyleRun> *styleRuns,
+    const bool hasTriggerContext, const int actionSourceOverride, const bool triggerOutputReplacesMatchedLine,
+    const int triggerMatchedLineBufferIndex, const qint64 triggerMatchedLineAbsoluteNumber, bool *suspended,
+    quint64 *modalResumeId, LuaPendingModalStringRequest *pendingModalStringRequest)
 {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 	if (suspended)
@@ -46580,10 +46582,13 @@ bool LuaCallbackEngine::executeScript(const QString &code, const QString &descri
 	const CallbackWildcardDomain wildcardDomain = hasTriggerContext && !triggerLine.isEmpty()
 	                                                  ? CallbackWildcardDomain::Trigger
 	                                                  : CallbackWildcardDomain::None;
-	LuaCallbackExecutionContext  context;
+	const int effectiveActionSource = actionSourceOverride >= 0
+	                                      ? actionSourceOverride
+	                                      : (hasTriggerContext ? WorldRuntime::eTriggerFired : -1);
+	LuaCallbackExecutionContext context;
 	context.wildcardDomain                    = wildcardDomain;
-	context.actionSourceOverride              = hasTriggerContext ? WorldRuntime::eTriggerFired : -1;
-	context.hasActionSourceOverride           = hasTriggerContext;
+	context.actionSourceOverride              = effectiveActionSource;
+	context.hasActionSourceOverride           = effectiveActionSource >= 0;
 	context.directTriggerScriptActionPriority = hasTriggerContext;
 	context.triggerOutputReplacesMatchedLine  = triggerOutputReplacesMatchedLine;
 	pushActiveCallbackContext(this, std::move(context));
@@ -46637,6 +46642,7 @@ bool LuaCallbackEngine::executeScript(const QString &code, const QString &descri
 	Q_UNUSED(description);
 	Q_UNUSED(styleRuns);
 	Q_UNUSED(hasTriggerContext);
+	Q_UNUSED(actionSourceOverride);
 	Q_UNUSED(triggerOutputReplacesMatchedLine);
 	Q_UNUSED(triggerMatchedLineBufferIndex);
 	Q_UNUSED(triggerMatchedLineAbsoluteNumber);

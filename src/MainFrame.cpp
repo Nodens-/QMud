@@ -2013,9 +2013,7 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 			if (!runtime)
 				continue;
 			const bool active = sub == window;
-			runtime->setActive(active);
-			if (active)
-				runtime->clearNewLines();
+			runtime->requestActiveState(active);
 			if (active)
 				activeRuntime = runtime;
 		}

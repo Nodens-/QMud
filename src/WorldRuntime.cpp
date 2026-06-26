@@ -7506,11 +7506,14 @@ void WorldRuntime::clearNewLines()
 	m_newLines = 0;
 }
 
-void WorldRuntime::setActive(bool active)
+void WorldRuntime::requestActiveState(const bool active)
 {
-	m_active = active;
-	if (active)
-		clearNewLines();
+	if (QThread::currentThread() != thread())
+	{
+		qmudInvokeMethodQueued(this, [this, active] { requestActiveState(active); });
+		return;
+	}
+	enqueueActiveStateTransition(active);
 }
 
 bool WorldRuntime::isActive() const
@@ -9608,15 +9611,22 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
     const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
     const LuaCallbackLineSnapshotPolicy               lineSnapshotPolicy) const
 {
+	return captureLuaCallbackSnapshotForDispatchMutable(recipients, lineSnapshotPolicy);
+}
+
+QSharedPointer<LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCallbackSnapshotForDispatchMutable(
+    const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
+    const LuaCallbackLineSnapshotPolicy               lineSnapshotPolicy) const
+{
 	if (QThread::currentThread() != thread())
 	{
 		return qmudInvokeMethodOr(
-		    const_cast<WorldRuntime *>(this), QSharedPointer<const LuaCallbackMiniWindowSnapshot>{},
+		    const_cast<WorldRuntime *>(this), QSharedPointer<LuaCallbackMiniWindowSnapshot>{},
 		    [this, recipients, lineSnapshotPolicy]
-		    { return captureLuaCallbackSnapshotForDispatch(recipients, lineSnapshotPolicy); });
+		    { return captureLuaCallbackSnapshotForDispatchMutable(recipients, lineSnapshotPolicy); });
 	}
 
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::captureLuaCallbackSnapshotForDispatch");
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::captureLuaCallbackSnapshotForDispatchMutable");
 	if (auto *mutableRuntime = const_cast<WorldRuntime *>(this);
 	    mutableRuntime->applyPendingObservedPluginCallbackPresenceSnapshots())
 	{
@@ -9639,7 +9649,7 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 		return cachedSnapshot;
 	}
 
-	const QSharedPointer<LuaCallbackMiniWindowSnapshot> snapshot =
+	QSharedPointer<LuaCallbackMiniWindowSnapshot> snapshot =
 	    captureMiniWindowSnapshotForLuaDispatch(m_miniWindows);
 	if (!snapshot)
 		return {};
@@ -10340,6 +10350,29 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 	return snapshot;
 }
 
+void WorldRuntime::stampLuaCallbackSnapshotActionSource(LuaCallbackMiniWindowSnapshot &snapshot,
+                                                        const int                      actionSourceOverride)
+{
+	if (actionSourceOverride < 0)
+		return;
+	snapshot.hasActionSourceOverride = true;
+	snapshot.actionSourceOverride    = actionSourceOverride;
+	if (snapshot.hasRuntimeCountersSnapshot)
+		snapshot.runtimeCounterValues.insert(QStringLiteral("currentActionSource"), actionSourceOverride);
+}
+
+QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+WorldRuntime::captureLuaCallbackSnapshotForDispatchWithActionSource(
+    const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
+    const LuaCallbackLineSnapshotPolicy lineSnapshotPolicy, const int actionSourceOverride) const
+{
+	QSharedPointer<LuaCallbackMiniWindowSnapshot> snapshot =
+	    captureLuaCallbackSnapshotForDispatchMutable(recipients, lineSnapshotPolicy);
+	if (snapshot)
+		stampLuaCallbackSnapshotActionSource(*snapshot, actionSourceOverride);
+	return snapshot;
+}
+
 LuaBatchDispatchResult WorldRuntime::dispatchLuaStringsAndWildcards(
     const QSharedPointer<LuaCallbackEngine> &engine, const QString &functionName, const QStringList &args,
     const QStringList &wildcards, const QMap<QString, QString> &namedWildcards,
@@ -10363,13 +10396,14 @@ LuaBatchDispatchResult WorldRuntime::dispatchLuaStringsAndWildcards(
 	request.triggerMatchedLineAbsoluteNumber = triggerMatchedLineAbsoluteNumber;
 	request.inputCritical                    = triggerMatchedLineAbsoluteNumber > 0;
 	request.lineSnapshotPolicy               = LuaCallbackLineSnapshotPolicy::CountAndRecentText;
-	request.miniWindowSnapshotArg =
-	    captureLuaCallbackSnapshotForDispatch(request.engines, request.lineSnapshotPolicy);
 	if (const unsigned short actionSource = currentActionSource(); actionSource != eUnknownActionSource)
 	{
 		request.actionSourceOverride    = actionSource;
 		request.hasActionSourceOverride = true;
 	}
+	request.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatchWithActionSource(
+	    request.engines, request.lineSnapshotPolicy,
+	    request.hasActionSourceOverride ? request.actionSourceOverride : -1);
 	return const_cast<WorldRuntime *>(this)->queuePluginCallbackDispatch(request, true);
 }
 
@@ -10425,13 +10459,19 @@ void WorldRuntime::dispatchLuaStringsAndWildcardsAsync(
 	request.triggerMatchedLineAbsoluteNumber = triggerMatchedLineAbsoluteNumber;
 	request.inputCritical                    = triggerMatchedLineAbsoluteNumber > 0;
 	request.lineSnapshotPolicy               = LuaCallbackLineSnapshotPolicy::CountAndRecentText;
-	request.miniWindowSnapshotArg =
-	    captureLuaCallbackSnapshotForDispatch(request.engines, request.lineSnapshotPolicy);
 	if (actionSourceOverride >= 0)
 	{
 		request.actionSourceOverride    = actionSourceOverride;
 		request.hasActionSourceOverride = true;
 	}
+	else if (const unsigned short actionSource = currentActionSource(); actionSource != eUnknownActionSource)
+	{
+		request.actionSourceOverride    = actionSource;
+		request.hasActionSourceOverride = true;
+	}
+	request.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatchWithActionSource(
+	    request.engines, request.lineSnapshotPolicy,
+	    request.hasActionSourceOverride ? request.actionSourceOverride : -1);
 	const_cast<WorldRuntime *>(this)->queuePluginCallbackDispatchAsync(request, completion);
 }
 
@@ -10459,15 +10499,10 @@ bool WorldRuntime::dispatchLuaExecuteScript(const QSharedPointer<LuaCallbackEngi
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::dispatchLuaExecuteScript");
 
 	const unsigned short previousActionSource = currentActionSource();
-	const bool           changedActionSource  = previousActionSource == eUnknownActionSource;
-	if (changedActionSource)
-		const_cast<WorldRuntime *>(this)->setCurrentActionSource(eLuaSandbox);
-	[[maybe_unused]] const auto restoreActionSource = qScopeGuard(
-	    [this, changedActionSource, previousActionSource]
-	    {
-		    if (changedActionSource)
-			    const_cast<WorldRuntime *>(this)->setCurrentActionSource(previousActionSource);
-	    });
+	const int effectiveActionSource = hasTriggerContext ? eTriggerFired
+	                                                    : (previousActionSource == eUnknownActionSource
+	                                                           ? eLuaSandbox
+	                                                           : static_cast<int>(previousActionSource));
 
 	LuaBatchDispatchRequest request;
 	request.kind         = LuaBatchDispatchKind::ExecuteScript;
@@ -10482,10 +10517,12 @@ bool WorldRuntime::dispatchLuaExecuteScript(const QSharedPointer<LuaCallbackEngi
 	request.triggerMatchedLineBufferIndex    = triggerMatchedLineBufferIndex;
 	request.triggerMatchedLineAbsoluteNumber = triggerMatchedLineAbsoluteNumber;
 	request.inputCritical                    = hasTriggerContext;
-	request.lineSnapshotPolicy = hasTriggerContext ? LuaCallbackLineSnapshotPolicy::CountAndRecentText
-	                                               : LuaCallbackLineSnapshotPolicy::None;
-	request.miniWindowSnapshotArg =
-	    captureLuaCallbackSnapshotForDispatch(request.engines, request.lineSnapshotPolicy);
+	request.lineSnapshotPolicy      = hasTriggerContext ? LuaCallbackLineSnapshotPolicy::CountAndRecentText
+	                                                    : LuaCallbackLineSnapshotPolicy::None;
+	request.hasActionSourceOverride = true;
+	request.actionSourceOverride    = effectiveActionSource;
+	request.miniWindowSnapshotArg   = captureLuaCallbackSnapshotForDispatchWithActionSource(
+	    request.engines, request.lineSnapshotPolicy, effectiveActionSource);
 
 	const LuaBatchDispatchResult result =
 	    hasTriggerContext ? const_cast<WorldRuntime *>(this)->queuePluginCallbackDispatch(request, true)
@@ -10508,9 +10545,10 @@ void WorldRuntime::dispatchLuaExecuteScriptAsync(
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::dispatchLuaExecuteScriptAsync");
 
 	const unsigned short previousActionSource = currentActionSource();
-	const bool           changedActionSource  = previousActionSource == eUnknownActionSource;
-	if (changedActionSource)
-		const_cast<WorldRuntime *>(this)->setCurrentActionSource(eLuaSandbox);
+	const int effectiveActionSource = hasTriggerContext ? eTriggerFired
+	                                                    : (previousActionSource == eUnknownActionSource
+	                                                           ? eLuaSandbox
+	                                                           : static_cast<int>(previousActionSource));
 
 	LuaBatchDispatchRequest request;
 	request.kind         = LuaBatchDispatchKind::ExecuteScript;
@@ -10525,18 +10563,17 @@ void WorldRuntime::dispatchLuaExecuteScriptAsync(
 	request.triggerMatchedLineBufferIndex    = triggerMatchedLineBufferIndex;
 	request.triggerMatchedLineAbsoluteNumber = triggerMatchedLineAbsoluteNumber;
 	request.inputCritical                    = hasTriggerContext;
-	request.lineSnapshotPolicy = hasTriggerContext ? LuaCallbackLineSnapshotPolicy::CountAndRecentText
-	                                               : LuaCallbackLineSnapshotPolicy::None;
-	request.miniWindowSnapshotArg =
-	    captureLuaCallbackSnapshotForDispatch(request.engines, request.lineSnapshotPolicy);
+	request.lineSnapshotPolicy      = hasTriggerContext ? LuaCallbackLineSnapshotPolicy::CountAndRecentText
+	                                                    : LuaCallbackLineSnapshotPolicy::None;
+	request.hasActionSourceOverride = true;
+	request.actionSourceOverride    = effectiveActionSource;
+	request.miniWindowSnapshotArg   = captureLuaCallbackSnapshotForDispatchWithActionSource(
+	    request.engines, request.lineSnapshotPolicy, effectiveActionSource);
 
 	const_cast<WorldRuntime *>(this)->queuePluginCallbackDispatchAsync(
 	    request,
-	    [this, changedActionSource, previousActionSource,
-	     completion = std::move(completion)](const LuaBatchDispatchResult &result) mutable
+	    [completion = std::move(completion)](const LuaBatchDispatchResult &result) mutable
 	    {
-		    if (changedActionSource)
-			    const_cast<WorldRuntime *>(this)->setCurrentActionSource(previousActionSource);
 		    if (completion)
 			    completion(result.boolResultValid ? result.boolResult : false);
 	    });
@@ -13504,20 +13541,12 @@ void WorldRuntime::fireWorldSaveHandlers()
 
 void WorldRuntime::fireWorldGetFocusHandlers()
 {
-	const unsigned short previousActionSource = m_currentActionSource;
-	m_currentActionSource                     = eWorldAction;
-	dispatchWorldNoArgCallbackByAttribute(QStringLiteral("on_world_get_focus"), false);
-	callPluginCallbacksNoArgs(QStringLiteral("OnPluginGetFocus"), false);
-	m_currentActionSource = previousActionSource;
+	requestActiveState(true);
 }
 
 void WorldRuntime::fireWorldLoseFocusHandlers()
 {
-	const unsigned short previousActionSource = m_currentActionSource;
-	m_currentActionSource                     = eWorldAction;
-	dispatchWorldNoArgCallbackByAttribute(QStringLiteral("on_world_lose_focus"), false);
-	callPluginCallbacksNoArgs(QStringLiteral("OnPluginLoseFocus"), false);
-	m_currentActionSource = previousActionSource;
+	requestActiveState(false);
 }
 
 void WorldRuntime::mxpError(int level, long messageNumber, const QString &message)
@@ -14957,6 +14986,7 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 		return fallback;
 	if (!m_luaExecutor)
 		return fallback;
+	applyCurrentActionSourceOverride(callbackRequest);
 	if (!callbackRequest.miniWindowSnapshotArg)
 		callbackRequest.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatch(
 		    callbackRequest.engines, callbackRequest.lineSnapshotPolicy);
@@ -14967,11 +14997,12 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 	const bool mmStartupDiag              = qmudMmStartupDiagShouldLogRequest(callbackRequest);
 	const bool dispatchDiagnosticsEnabled = m_traceEnabled;
 #endif
-	const bool inputCritical      = pluginCallbackDispatchIsInputCritical(callbackRequest);
-	callbackRequest.inputCritical = inputCritical;
+	const bool inputCritical         = pluginCallbackDispatchIsInputCritical(callbackRequest);
+	callbackRequest.inputCritical    = inputCritical;
+	const bool mustWaitForCompletion = inputCritical;
 	const bool canRetainQueuedResult =
-	    completionBarrier && (inputCritical || (!m_pluginCallbackDispatchWorkerInFlight &&
-	                                            m_pluginCallbackDispatchQueue.isEmpty()));
+	    completionBarrier && (mustWaitForCompletion || (!m_pluginCallbackDispatchWorkerInFlight &&
+	                                                    m_pluginCallbackDispatchQueue.isEmpty()));
 
 	if (completionBarrier && !m_pluginCallbackDispatchActive && !m_pluginCallbackDispatchWorkerInFlight &&
 	    m_pluginCallbackDispatchQueue.isEmpty() && !m_pluginCallbackDispatchDrainQueued)
@@ -14999,7 +15030,7 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 #ifndef NDEBUG
 		const qint64 executeStartNs = pluginCallbackDispatchNowNs();
 #endif
-		LuaBatchDispatchResult directResult = m_luaExecutor->dispatchBatch(callbackRequest);
+		LuaBatchDispatchResult directResult = m_luaExecutor->dispatchBatch(directCommand.request);
 		applyLuaDeferredRuntimeMutationBatches(directResult);
 		if (directResult.suspended)
 		{
@@ -15035,9 +15066,8 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 				{
 					timeoutLogged = true;
 					qWarning().noquote()
-					    << QStringLiteral(
-					           "[QMud][LuaDispatchDiag] input-critical barrier waiting for suspended "
-					           "callback work for %1 ms; id=%2 callback=%3 kind=%4")
+					    << QStringLiteral("[QMud][LuaDispatchDiag] retained barrier waiting for suspended "
+					                      "callback work for %1 ms; id=%2 callback=%3 kind=%4")
 					           .arg(waitTimer.elapsed())
 					           .arg(directCommandId)
 					           .arg(callbackRequest.functionName,
@@ -15095,13 +15125,20 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 	if (inputCritical)
 	{
 		auto insertIt = m_pluginCallbackDispatchQueue.begin();
-		while (insertIt != m_pluginCallbackDispatchQueue.end() && !insertIt->request.lowPriority)
+		while (insertIt != m_pluginCallbackDispatchQueue.end() &&
+		       pluginCallbackLaneCommandBlocksInputCriticalInsertion(*insertIt))
 			++insertIt;
-		m_pluginCallbackDispatchQueue.insert(insertIt, command);
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = command;
+		m_pluginCallbackDispatchQueue.insert(insertIt, laneCommand);
 	}
 	else
 	{
-		m_pluginCallbackDispatchQueue.enqueue(command);
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = command;
+		m_pluginCallbackDispatchQueue.enqueue(laneCommand);
 	}
 #ifndef NDEBUG
 	if (mmStartupDiag)
@@ -15139,7 +15176,7 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 			if (m_pluginCallbackDispatchResults.contains(command.id))
 				break;
 
-			if (!inputCritical && !hasSuspendedPluginCallbackDispatchCommand(command.id))
+			if (!mustWaitForCompletion && !hasSuspendedPluginCallbackDispatchCommand(command.id))
 				break;
 
 			QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
@@ -15158,9 +15195,8 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 			{
 				timeoutLogged = true;
 				qWarning().noquote()
-				    << QStringLiteral(
-				           "[QMud][LuaDispatchDiag] input-critical barrier queued behind callback work "
-				           "for %1 ms; waiting for completion id=%2 callback=%3 kind=%4")
+				    << QStringLiteral("[QMud][LuaDispatchDiag] retained barrier queued behind callback work "
+				                      "for %1 ms; waiting for completion id=%2 callback=%3 kind=%4")
 				           .arg(waitTimer.elapsed())
 				           .arg(command.id)
 				           .arg(callbackRequest.functionName,
@@ -15298,6 +15334,7 @@ bool WorldRuntime::tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(
 			completion(fallback);
 		return false;
 	}
+	applyCurrentActionSourceOverride(callbackRequest);
 	if (!callbackRequest.miniWindowSnapshotArg)
 		callbackRequest.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatch(
 		    callbackRequest.engines, callbackRequest.lineSnapshotPolicy);
@@ -15326,13 +15363,20 @@ bool WorldRuntime::tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(
 	if (inputCritical)
 	{
 		auto insertIt = m_pluginCallbackDispatchQueue.begin();
-		while (insertIt != m_pluginCallbackDispatchQueue.end() && !insertIt->request.lowPriority)
+		while (insertIt != m_pluginCallbackDispatchQueue.end() &&
+		       pluginCallbackLaneCommandBlocksInputCriticalInsertion(*insertIt))
 			++insertIt;
-		m_pluginCallbackDispatchQueue.insert(insertIt, std::move(command));
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = std::move(command);
+		m_pluginCallbackDispatchQueue.insert(insertIt, std::move(laneCommand));
 	}
 	else
 	{
-		m_pluginCallbackDispatchQueue.enqueue(std::move(command));
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = std::move(command);
+		m_pluginCallbackDispatchQueue.enqueue(std::move(laneCommand));
 	}
 #ifndef NDEBUG
 	if (mmStartupDiag)
@@ -15355,6 +15399,17 @@ bool WorldRuntime::tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(
 #endif
 	queuePluginCallbackDispatchDrain();
 	return true;
+}
+
+void WorldRuntime::applyCurrentActionSourceOverride(LuaBatchDispatchRequest &request) const
+{
+	if (request.hasActionSourceOverride)
+		return;
+	const unsigned short actionSource = currentActionSource();
+	if (actionSource == eUnknownActionSource)
+		return;
+	request.hasActionSourceOverride = true;
+	request.actionSourceOverride    = actionSource;
 }
 
 LuaBatchDispatchResult WorldRuntime::dispatchLuaBatch(const LuaBatchDispatchRequest &request) const
@@ -15452,6 +15507,129 @@ void WorldRuntime::dispatchWorldNoArgCallbackByAttribute(const QString &attribut
 	                                  completionBarrier);
 }
 
+void WorldRuntime::enqueueActiveStateTransition(const bool active)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::enqueueActiveStateTransition");
+	if (m_pluginCallbackDispatchShuttingDown)
+		return;
+	if (m_pendingActiveStateTransitionCount == 0 && m_active == active)
+	{
+		if (active)
+		{
+			clearNewLines();
+			invalidateLuaCallbackDispatchSnapshot();
+		}
+		return;
+	}
+	if (m_pendingActiveStateTransitionCount > 0 && m_lastPendingActiveState == active)
+		return;
+
+	m_active = active;
+	if (active)
+		clearNewLines();
+	invalidateLuaCallbackDispatchSnapshot();
+
+	ActiveStateTransitionCommand command;
+	command.id     = m_nextPluginCallbackDispatchId++;
+	command.active = active;
+#ifndef NDEBUG
+	command.enqueuedAtNs        = pluginCallbackDispatchNowNs();
+	command.queueDepthAtEnqueue = safeQSizeToInt(m_pluginCallbackDispatchQueue.size()) + 1;
+#endif
+
+	PluginCallbackLaneCommand laneCommand;
+	laneCommand.kind        = PluginCallbackLaneCommand::Kind::ActiveStateTransition;
+	laneCommand.activeState = command;
+	auto insertIt           = m_pluginCallbackDispatchQueue.begin();
+	while (insertIt != m_pluginCallbackDispatchQueue.end() &&
+	       pluginCallbackLaneCommandBlocksInputCriticalInsertion(*insertIt))
+		++insertIt;
+	m_pluginCallbackDispatchQueue.insert(insertIt, laneCommand);
+	++m_pendingActiveStateTransitionCount;
+	m_lastPendingActiveState = active;
+	queuePluginCallbackDispatchDrain();
+}
+
+bool WorldRuntime::buildActiveStateNoArgCallbackCommand(
+    const QVector<QSharedPointer<LuaCallbackEngine>> &engines, const QString &functionName,
+    const bool revalidateObservedRecipients, PluginCallbackDispatchCommand &command)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::buildActiveStateNoArgCallbackCommand");
+	if (!m_luaExecutor || functionName.isEmpty() || engines.isEmpty())
+		return false;
+
+	LuaBatchDispatchRequest request;
+	request.kind                         = LuaBatchDispatchKind::NoArgs;
+	request.lane                         = LuaBatchDispatchLane::Callback;
+	request.engines                      = engines;
+	request.functionName                 = functionName;
+	request.defaultResult                = true;
+	request.revalidateObservedRecipients = revalidateObservedRecipients;
+	request.hasActionSourceOverride      = true;
+	request.actionSourceOverride         = eWorldAction;
+	if (revalidateObservedRecipients)
+		revalidateObservedCallbackRecipients(request);
+	if (request.engines.isEmpty())
+		return false;
+	request.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatchWithActionSource(
+	    request.engines, request.lineSnapshotPolicy, request.actionSourceOverride);
+
+	command.id           = m_nextPluginCallbackDispatchId++;
+	command.request      = std::move(request);
+	command.retainResult = false;
+#ifndef NDEBUG
+	command.enqueuedAtNs        = pluginCallbackDispatchNowNs();
+	command.queueDepthAtEnqueue = safeQSizeToInt(m_pluginCallbackDispatchQueue.size()) + 1;
+#endif
+	return true;
+}
+
+void WorldRuntime::processActiveStateTransitionCommand(const ActiveStateTransitionCommand &command)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::processActiveStateTransitionCommand");
+	if (m_pendingActiveStateTransitionCount > 0)
+		--m_pendingActiveStateTransitionCount;
+
+	const QString worldCallbackName =
+	    command.active ? m_worldAttributes.value(QStringLiteral("on_world_get_focus")).trimmed()
+	                   : m_worldAttributes.value(QStringLiteral("on_world_lose_focus")).trimmed();
+	const QString pluginCallbackName =
+	    command.active ? QStringLiteral("OnPluginGetFocus") : QStringLiteral("OnPluginLoseFocus");
+	const bool currentActive = m_active;
+	m_active                 = command.active;
+	invalidateLuaCallbackDispatchSnapshot();
+	const auto restoreActive = qScopeGuard(
+	    [this, currentActive]
+	    {
+		    m_active = currentActive;
+		    invalidateLuaCallbackDispatchSnapshot();
+	    });
+
+	PluginCallbackDispatchCommand worldCommand;
+	const bool                    hasWorldCommand =
+	    isLuaScriptingEnabled(m_worldAttributes) && m_luaCallbacks &&
+	    buildActiveStateNoArgCallbackCommand({makeNonOwningLuaEngineRef(m_luaCallbacks)}, worldCallbackName,
+	                                         false, worldCommand);
+	PluginCallbackDispatchCommand pluginCommand;
+	const bool                    hasPluginCommand = buildActiveStateNoArgCallbackCommand(
+	    collectPluginCallbackRecipients(pluginCallbackName), pluginCallbackName, true, pluginCommand);
+
+	if (hasPluginCommand)
+	{
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = std::move(pluginCommand);
+		m_pluginCallbackDispatchQueue.insert(m_pluginCallbackDispatchQueue.begin(), std::move(laneCommand));
+	}
+	if (hasWorldCommand)
+	{
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = std::move(worldCommand);
+		m_pluginCallbackDispatchQueue.insert(m_pluginCallbackDispatchQueue.begin(), std::move(laneCommand));
+	}
+}
+
 void WorldRuntime::drainPluginCallbackDispatchQueue(const quint64 completionCommandId)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::drainPluginCallbackDispatchQueue");
@@ -15519,6 +15697,14 @@ void WorldRuntime::queuePluginCallbackDispatchDrain()
 		drainPluginCallbackDispatchQueue();
 }
 
+bool WorldRuntime::pluginCallbackLaneCommandBlocksInputCriticalInsertion(
+    const PluginCallbackLaneCommand &command)
+{
+	if (command.kind == PluginCallbackLaneCommand::Kind::ActiveStateTransition)
+		return true;
+	return !command.callback.request.lowPriority;
+}
+
 void WorldRuntime::processNextPluginCallbackDispatchCommand()
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::processNextPluginCallbackDispatchCommand");
@@ -15526,7 +15712,18 @@ void WorldRuntime::processNextPluginCallbackDispatchCommand()
 		return;
 	if (m_pluginCallbackDispatchWorkerInFlight)
 		return;
-	PluginCallbackDispatchCommand command = m_pluginCallbackDispatchQueue.dequeue();
+	PluginCallbackLaneCommand command = m_pluginCallbackDispatchQueue.dequeue();
+	if (command.kind == PluginCallbackLaneCommand::Kind::ActiveStateTransition)
+	{
+		processActiveStateTransitionCommand(command.activeState);
+		return;
+	}
+	processPluginCallbackDispatchCommand(std::move(command.callback));
+}
+
+void WorldRuntime::processPluginCallbackDispatchCommand(PluginCallbackDispatchCommand &&command)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::processPluginCallbackDispatchCommand");
 	revalidateObservedCallbackRecipients(command.request);
 #ifndef NDEBUG
 	const bool mmStartupDiag = qmudMmStartupDiagShouldLogRequest(command.request);
@@ -15549,6 +15746,9 @@ void WorldRuntime::processNextPluginCallbackDispatchCommand()
 		finishPluginCallbackDispatchCommand(std::move(command), LuaBatchDispatchResult(fallback));
 		return;
 	}
+	if (!command.request.miniWindowSnapshotArg)
+		command.request.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatch(
+		    command.request.engines, command.request.lineSnapshotPolicy);
 #ifndef NDEBUG
 	if (mmStartupDiag)
 	{

@@ -759,11 +759,7 @@ bool WorldChildWindow::event(QEvent *event)
 {
 	if (WorldRuntime *runtime = m_runtime; runtime && event)
 	{
-		if (event->type() == QEvent::WindowActivate)
-			runtime->fireWorldGetFocusHandlers();
-		else if (event->type() == QEvent::WindowDeactivate)
-			runtime->fireWorldLoseFocusHandlers();
-		else if (event->type() == QEvent::WindowStateChange)
+		if (event->type() == QEvent::WindowStateChange)
 		{
 			if (m_view)
 				m_view->refreshMiniWindows(true);
