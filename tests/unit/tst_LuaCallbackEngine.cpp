@@ -6,11 +6,13 @@
  * Role: Unit coverage for Lua callback-engine dispatch, catalog, and callback-context semantics.
  */
 
+#include "ColorPacking.h"
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
 #include "LuaExecutorWorker.h"
 #include "LuaSupport.h"
 #include "NativePluginRegistry.h"
+#include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "helpers/LuaExecutionUtils.h"
 #include "helpers/PluginPathUtils.h"
@@ -74,6 +76,9 @@ namespace
 			void workerDispatchesPluginLifecycleCallbacksOnRealEngines();
 			void workerCallbackBatchCapturesOutputMiniWindowAndSaveStateMutations();
 			void workerColourOutputMatchesMushclientGroupingAndNewlineSemantics();
+			void workerColourOutputPreservesIndexedNoteColour();
+			void normalColourDefaultsMatchMushclientAcrossRuntimeAndCallbackPaths();
+			void emptyColourTellDoesNotMutateCallbackOutputCache();
 			void colourTellIgnoresTrailingLuaGsubReturnAndKeepsFollowingNote();
 			void executeScriptNoteUsesRuntimeNoteColour();
 			void selfPluginInfoMetadataFallsThroughToRuntime();
@@ -112,6 +117,12 @@ namespace
 		const QString value = QString::fromUtf8(lua_tostring(state, -1));
 		lua_pop(state, 1);
 		return value;
+	}
+
+	QColor colorFromPackedValue(const long value)
+	{
+		const auto packed = static_cast<QMudColorRef>(value);
+		return {qmudRed(packed), qmudGreen(packed), qmudBlue(packed)};
 	}
 
 	int safeQSizeToInt(const qsizetype size)
@@ -156,6 +167,35 @@ namespace
 		auto snapshot                       = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 		snapshot->worldVariablesSnapshot    = runtime.variableSnapshot();
 		snapshot->hasWorldVariablesSnapshot = true;
+		return snapshot;
+	}
+
+	QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+	captureRuntimeCounterDispatchSnapshotForTest(const WorldRuntime &runtime)
+	{
+		auto snapshot                        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+		snapshot->hasRuntimeCountersSnapshot = true;
+		snapshot->runtimeCounterValues.insert(QStringLiteral("notesInRgb"), runtime.notesInRgb());
+		snapshot->runtimeCounterValues.insert(QStringLiteral("noteTextColour"), runtime.noteTextColour());
+		snapshot->runtimeCounterValues.insert(QStringLiteral("noteColourFore"),
+		                                      QVariant::fromValue<qlonglong>(runtime.noteColourFore()));
+		snapshot->runtimeCounterValues.insert(QStringLiteral("noteColourBack"),
+		                                      QVariant::fromValue<qlonglong>(runtime.noteColourBack()));
+		snapshot->runtimeCounterValues.insert(QStringLiteral("noteStyle"), runtime.noteStyle());
+		for (int index = 1; index <= 8; ++index)
+		{
+			const QColor boldColour = runtime.ansiColour(true, index);
+			snapshot->boldAnsiColoursByIndex.insert(
+			    index, boldColour.isValid() ? static_cast<long>(qmudRgb(boldColour.red(), boldColour.green(),
+			                                                            boldColour.blue()))
+			                                : 0);
+			snapshot->normalAnsiColoursByIndex.insert(index, runtime.normalColour(index));
+		}
+		for (int index = 1; index <= MAX_CUSTOM; ++index)
+		{
+			snapshot->customTextColoursByIndex.insert(index, runtime.customColourText(index));
+			snapshot->customBackgroundColoursByIndex.insert(index, runtime.customColourBackground(index));
+		}
 		return snapshot;
 	}
 
@@ -1511,9 +1551,10 @@ end
 	                       &runtime);
 
 	LuaBatchDispatchRequest request;
-	request.engines      = {engine};
-	request.kind         = LuaBatchDispatchKind::NoArgs;
-	request.functionName = QStringLiteral("OnPluginEnable");
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	executeDeferredMutations(result);
@@ -1523,6 +1564,242 @@ end
 	                      QStringLiteral("tell-a"), QStringLiteral("tell-b")}));
 	QCOMPARE(outputNewLines, QList<bool>({false, false, true, false, false}));
 	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::workerColourOutputPreservesIndexedNoteColour()
+{
+	WorldRuntime runtime;
+	runtime.setNoteTextColour(1);
+	const QColor expectedChangedFore = colorFromPackedValue(runtime.noteColourFore());
+	const QColor expectedChangedBack = colorFromPackedValue(runtime.noteColourBack());
+	runtime.setNoteTextColour(5);
+	QCOMPARE(runtime.notesInRgb(), false);
+	QCOMPARE(runtime.noteTextColour(), 4);
+	const QColor                                expectedFore = colorFromPackedValue(runtime.noteColourFore());
+	const QColor                                expectedBack = colorFromPackedValue(runtime.noteColourBack());
+	const WorldRuntime::RuntimeCountersSnapshot counters     = runtime.runtimeCountersSnapshot(false);
+	QCOMPARE(colorFromPackedValue(counters.noteColourFore), expectedFore);
+	QCOMPARE(colorFromPackedValue(counters.noteColourBack), expectedBack);
+
+	QStringList                               outputTexts;
+	QVector<QVector<WorldRuntime::StyleSpan>> outputSpans;
+	QObject::connect(
+	    &runtime, &WorldRuntime::outputStyledRequested, &runtime,
+	    [&](const QString &text, const QVector<WorldRuntime::StyleSpan> &spans, const bool, const bool)
+	    {
+		    outputTexts.push_back(text);
+		    outputSpans.push_back(spans);
+	    });
+
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor;
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function OnPluginEnable()
+  ColourNote("", "", "note")
+  ColourTell("not-a-colour", "", "tell")
+  SetNoteColour(1)
+  Note("after")
+end
+)lua"),
+	                       &runtime);
+
+	LuaBatchDispatchRequest request;
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	executeDeferredMutations(result);
+
+	QCOMPARE(outputTexts,
+	         QStringList({QStringLiteral("note"), QStringLiteral("tell"), QStringLiteral("after")}));
+	QCOMPARE(outputSpans.size(), 3);
+	for (const QVector<WorldRuntime::StyleSpan> &spans : std::as_const(outputSpans))
+		QVERIFY(!spans.isEmpty());
+	QCOMPARE(outputSpans.at(0).constFirst().fore, expectedFore);
+	QCOMPARE(outputSpans.at(0).constFirst().back, expectedBack);
+	QCOMPARE(outputSpans.at(1).constFirst().fore, expectedFore);
+	QCOMPARE(outputSpans.at(1).constFirst().back, expectedBack);
+	QCOMPARE(outputSpans.at(2).constFirst().fore, expectedChangedFore);
+	QCOMPARE(outputSpans.at(2).constFirst().back, expectedChangedBack);
+	QCOMPARE(runtime.notesInRgb(), false);
+	QCOMPARE(runtime.noteTextColour(), 0);
+	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::normalColourDefaultsMatchMushclientAcrossRuntimeAndCallbackPaths()
+{
+	WorldRuntime runtime;
+	runtime.setColours({});
+
+	const QString expected = QStringList{QString::number(static_cast<long>(qmudRgb(0, 0, 0))),
+	                                     QString::number(static_cast<long>(qmudRgb(128, 0, 0))),
+	                                     QString::number(static_cast<long>(qmudRgb(0, 128, 0))),
+	                                     QString::number(static_cast<long>(qmudRgb(128, 128, 0))),
+	                                     QString::number(static_cast<long>(qmudRgb(0, 0, 128))),
+	                                     QString::number(static_cast<long>(qmudRgb(128, 0, 128))),
+	                                     QString::number(static_cast<long>(qmudRgb(0, 128, 128))),
+	                                     QString::number(static_cast<long>(qmudRgb(192, 192, 192))),
+	                                     QStringLiteral("0"),
+	                                     QStringLiteral("0")}
+	                             .join(QLatin1Char('|'));
+
+	QStringList   runtimeValues;
+	for (int index = 1; index <= 8; ++index)
+		runtimeValues.push_back(QString::number(runtime.normalColour(index)));
+	runtimeValues.push_back(QString::number(runtime.normalColour(0)));
+	runtimeValues.push_back(QString::number(runtime.normalColour(9)));
+	QCOMPARE(runtimeValues.join(QLatin1Char('|')), expected);
+
+	auto engine = QSharedPointer<LuaCallbackEngine>::create();
+	engine->setWorldRuntime(&runtime);
+	setEngineScript(*engine, QStringLiteral(R"lua(
+function normal_colour_status(value)
+  local values = {}
+  local function add(value)
+    values[#values + 1] = string.format("%.0f", value)
+  end
+  for index = 1, 8 do
+    add(GetNormalColour(index))
+  end
+  add(GetNormalColour(0))
+  add(GetNormalColour(9))
+  return table.concat(values, "|")
+end
+function selected_colour_status(value)
+  return string.format("%.0f|%.0f", GetNormalColour(2), GetBoldColour(2))
+end
+function same_colour_note_status(value)
+  SetNoteColour(0)
+  return string.format("%.0f|%.0f", GetNoteColourFore(), GetNoteColourBack())
+end
+function indexed_note_palette_status(value)
+  SetNoteColour(1)
+  SetCustomColourText(1, 460809)
+  SetCustomColourBackground(1, 263430)
+  return string.format("%.0f|%.0f", GetNoteColourFore(), GetNoteColourBack())
+end
+function same_colour_normal_palette_status(value)
+  SetNoteColour(0)
+  SetNormalColour(8, 855051)
+  SetNormalColour(1, 1052430)
+  return string.format("%.0f|%.0f", GetNoteColourFore(), GetNoteColourBack())
+end
+function same_colour_custom16_option_status(value)
+  SetNoteColour(0)
+  SetCustomColourText(16, 1118739)
+  SetCustomColourBackground(16, 1316118)
+  SetOption("custom_16_is_default_colour", 1)
+  return string.format("%.0f|%.0f", GetNoteColourFore(), GetNoteColourBack())
+end
+function invalid_colour_cache_status(value)
+  SetNormalColour(0, 123)
+  SetNormalColour(9, 456)
+  SetBoldColour(0, 123)
+  SetBoldColour(9, 456)
+  SetCustomColourText(0, 123)
+  SetCustomColourText(17, 456)
+  SetCustomColourBackground(0, 123)
+  SetCustomColourBackground(17, 456)
+  SetNormalColour(2, 16909060)
+  return string.format("%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f",
+    GetNormalColour(0), GetNormalColour(9), GetBoldColour(0), GetBoldColour(9),
+    GetCustomColourText(0), GetCustomColourText(17),
+    GetCustomColourBackground(0), GetCustomColourBackground(17), GetNormalColour(2))
+end
+)lua"));
+
+	LuaExecutorDirect       executor;
+	LuaBatchDispatchRequest request;
+	request.engines                       = {engine};
+	request.kind                          = LuaBatchDispatchKind::StringInOut;
+	request.functionName                  = QStringLiteral("normal_colour_status");
+	request.stringArg                     = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult snapshotResult = executor.dispatchBatch(request);
+	QCOMPARE(snapshotResult.stringResult, expected);
+
+	request.functionName                  = QStringLiteral("same_colour_note_status");
+	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult sameNoteResult = executor.dispatchBatch(request);
+	QCOMPARE(sameNoteResult.stringResult, QStringLiteral("%1|%2")
+	                                          .arg(static_cast<long>(qmudRgb(192, 192, 192)))
+	                                          .arg(static_cast<long>(qmudRgb(0, 0, 0))));
+
+	request.functionName                     = QStringLiteral("indexed_note_palette_status");
+	request.miniWindowSnapshotArg            = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult indexedNoteResult = executor.dispatchBatch(request);
+	QCOMPARE(indexedNoteResult.stringResult, QStringLiteral("%1|%2")
+	                                             .arg(static_cast<long>(qmudRgb(9, 8, 7)))
+	                                             .arg(static_cast<long>(qmudRgb(6, 5, 4))));
+
+	request.functionName                    = QStringLiteral("same_colour_normal_palette_status");
+	request.miniWindowSnapshotArg           = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult sameColourResult = executor.dispatchBatch(request);
+	QCOMPARE(sameColourResult.stringResult, QStringLiteral("%1|%2")
+	                                            .arg(static_cast<long>(qmudRgb(11, 12, 13)))
+	                                            .arg(static_cast<long>(qmudRgb(14, 15, 16))));
+
+	request.functionName                        = QStringLiteral("same_colour_custom16_option_status");
+	request.miniWindowSnapshotArg               = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult custom16OptionResult = executor.dispatchBatch(request);
+	QCOMPARE(custom16OptionResult.stringResult, QStringLiteral("%1|%2")
+	                                                .arg(static_cast<long>(qmudRgb(19, 18, 17)))
+	                                                .arg(static_cast<long>(qmudRgb(22, 21, 20))));
+
+	request.functionName                      = QStringLiteral("invalid_colour_cache_status");
+	request.miniWindowSnapshotArg             = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult invalidCacheResult = executor.dispatchBatch(request);
+	QCOMPARE(invalidCacheResult.stringResult,
+	         QStringLiteral("0|0|0|0|0|0|0|0|%1").arg(static_cast<long>(qmudRgb(4, 3, 2))));
+
+	runtime.setNormalColour(2, qmudRgb(1, 2, 3));
+	runtime.setAnsiColour(true, 2, QColor(1, 2, 3));
+	QCOMPARE(runtime.normalColour(2), static_cast<long>(qmudRgb(1, 2, 3)));
+	QCOMPARE(runtime.ansiColour(false, 2), QColor(1, 2, 3));
+	QCOMPARE(runtime.ansiColour(true, 2), QColor(1, 2, 3));
+
+	request.functionName                  = QStringLiteral("selected_colour_status");
+	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult selectedResult = executor.dispatchBatch(request);
+	QCOMPARE(selectedResult.stringResult, QStringLiteral("%1|%2")
+	                                          .arg(static_cast<long>(qmudRgb(1, 2, 3)))
+	                                          .arg(static_cast<long>(qmudRgb(1, 2, 3))));
+}
+
+void tst_LuaCallbackEngine::emptyColourTellDoesNotMutateCallbackOutputCache()
+{
+	WorldRuntime runtime;
+
+	QStringList  outputTexts;
+	QObject::connect(&runtime, &WorldRuntime::outputStyledRequested, &runtime,
+	                 [&](const QString &text, const QVector<WorldRuntime::StyleSpan> &, const bool,
+	                     const bool) { outputTexts.push_back(text); });
+
+	auto engine = QSharedPointer<LuaCallbackEngine>::create();
+	engine->setWorldRuntime(&runtime);
+	setEngineScript(*engine, QStringLiteral(R"lua(
+function empty_colour_tell_status(value)
+  local before = GetLinesInBufferCount()
+  ColourTell("", "", "")
+  return string.format("%.0f|%.0f|%s", before, GetLinesInBufferCount(), GetRecentLines(1))
+end
+)lua"));
+
+	LuaExecutorDirect       executor;
+	LuaBatchDispatchRequest request;
+	request.engines                       = {engine};
+	request.kind                          = LuaBatchDispatchKind::StringInOut;
+	request.functionName                  = QStringLiteral("empty_colour_tell_status");
+	request.stringArg                     = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult callbackResult = executor.dispatchBatch(request);
+
+	QCOMPARE(callbackResult.stringResult, QStringLiteral("0|0|"));
+	executeDeferredMutations(callbackResult);
+	QVERIFY(outputTexts.isEmpty());
+	QCOMPARE(runtime.luaContextLinesInBufferCount(), 0);
 }
 
 void tst_LuaCallbackEngine::colourTellIgnoresTrailingLuaGsubReturnAndKeepsFollowingNote()
@@ -1809,7 +2086,9 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryIsAvailableWithoutShadowPlugin()
 
 	auto snapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 	snapshot->soundStatusByBuffer.insert(1, -2);
+	snapshot->soundBufferReusableByBuffer.insert(1, true);
 	snapshot->soundStatusByBuffer.insert(9, 1);
+	snapshot->soundBufferReusableByBuffer.insert(9, false);
 
 	LuaBatchDispatchRequest request;
 	request.engines               = {engine};
@@ -1877,7 +2156,9 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 
 	auto snapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 	snapshot->soundStatusByBuffer.insert(1, -2);
+	snapshot->soundBufferReusableByBuffer.insert(1, true);
 	snapshot->soundStatusByBuffer.insert(2, -2);
+	snapshot->soundBufferReusableByBuffer.insert(2, true);
 
 	LuaBatchDispatchRequest request;
 	request.engines               = {engine};
@@ -1895,6 +2176,202 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QCOMPARE(result.stringResult, QStringLiteral("2|25|100"));
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 
+	auto preStartEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, preStartEngine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  prestart_id = audio.play("coin.wav")
+	end
+	function prestart_audio_status(value)
+	  return tostring(prestart_id)
+	end
+	)lua"),
+	                       &runtime);
+	auto preStartSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	preStartSnapshot->soundStatusByBuffer.insert(1, 0);
+	preStartSnapshot->soundBufferReusableByBuffer.insert(1, false);
+	preStartSnapshot->soundStatusByBuffer.insert(2, -2);
+	preStartSnapshot->soundBufferReusableByBuffer.insert(2, true);
+	request.engines               = {preStartEngine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = preStartSnapshot;
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("prestart_audio_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("2"));
+	teardownWorkerEngine(executor, preStartEngine);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+
+	auto callPluginPreStartEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, callPluginPreStartEngine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local code, id = CallPlugin("aedf0cb0be5bf045860d54b7", "play", "coin.wav")
+	  callplugin_prestart_info = tostring(code) .. "|" .. tostring(id)
+	end
+	function callplugin_prestart_audio_status(value)
+	  return callplugin_prestart_info
+	end
+	)lua"),
+	                       &runtime);
+	auto callPluginPreStartSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	callPluginPreStartSnapshot->soundStatusByBuffer.insert(1, 0);
+	callPluginPreStartSnapshot->soundBufferReusableByBuffer.insert(1, false);
+	callPluginPreStartSnapshot->soundStatusByBuffer.insert(2, -2);
+	callPluginPreStartSnapshot->soundBufferReusableByBuffer.insert(2, true);
+	request.engines               = {callPluginPreStartEngine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = callPluginPreStartSnapshot;
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("callplugin_prestart_audio_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("0.0|2"));
+	teardownWorkerEngine(executor, callPluginPreStartEngine);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+
+	auto callPluginStringBoolEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, callPluginStringBoolEngine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local code, id = CallPlugin("aedf0cb0be5bf045860d54b7", "play", "coin.wav", "1")
+	  callplugin_string_bool_info = tostring(code) .. "|" .. tostring(id) .. "|" .. tostring(audio.isPlaying(id))
+	end
+	function callplugin_string_bool_status(value)
+	  return callplugin_string_bool_info
+	end
+	)lua"),
+	                       &runtime);
+	auto callPluginStringBoolSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	callPluginStringBoolSnapshot->soundStatusByBuffer.insert(1, -2);
+	callPluginStringBoolSnapshot->soundBufferReusableByBuffer.insert(1, true);
+	request.engines               = {callPluginStringBoolEngine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = callPluginStringBoolSnapshot;
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("callplugin_string_bool_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("0.0|1|true"));
+	teardownWorkerEngine(executor, callPluginStringBoolEngine);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+
+	auto callPluginBadArgumentEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, callPluginBadArgumentEngine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local code, message = CallPlugin("aedf0cb0be5bf045860d54b7", "play", {})
+	  callplugin_bad_argument_info = tostring(code == eBadParameter) .. "|" .. tostring(message)
+	end
+	function callplugin_bad_argument_status(value)
+	  return callplugin_bad_argument_info
+	end
+	)lua"),
+	                       &runtime);
+	auto callPluginBadArgumentSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	callPluginBadArgumentSnapshot->soundStatusByBuffer.insert(1, -2);
+	callPluginBadArgumentSnapshot->soundBufferReusableByBuffer.insert(1, true);
+	request.engines               = {callPluginBadArgumentEngine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = callPluginBadArgumentSnapshot;
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("callplugin_bad_argument_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("true|Cannot pass argument #3 (table type) to CallPlugin"));
+	teardownWorkerEngine(executor, callPluginBadArgumentEngine);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+
+	auto callPluginBranchEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, callPluginBranchEngine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local audio_id = "aedf0cb0be5bf045860d54b7"
+	  local delay_code, delayed_id = CallPlugin(audio_id, "playDelayLooped", "coin.wav", 10, 4, 60)
+	  local set_code = CallPlugin(audio_id, "setVol", 44, 1)
+	  local slide_vol_code = CallPlugin(audio_id, "slideVol", 35, 1, 0.02)
+	  local slide_pan_code = CallPlugin(audio_id, "slidePan", 6, 1, 0.02)
+	  local slide_pitch_code = CallPlugin(audio_id, "slidePitch", 7, 1, 0.02)
+	  local fade_code = CallPlugin(audio_id, "fadeout", 2, 0.02)
+	  local stop_code = CallPlugin(audio_id, "stop", 3)
+	  local playing_code, stopped_playing = CallPlugin(audio_id, "isPlaying", 3)
+	  local get_code, volume_before = CallPlugin(audio_id, "getVolume", 1)
+	  callplugin_branch_info = table.concat({
+	    tostring(delay_code),
+	    tostring(delayed_id),
+	    string.format("%.0f", volume_before),
+	    tostring(set_code),
+	    tostring(slide_vol_code),
+	    tostring(slide_pan_code),
+	    tostring(slide_pitch_code),
+	    tostring(fade_code),
+	    tostring(stop_code),
+	    tostring(playing_code),
+	    tostring(stopped_playing)
+	  }, "|")
+	end
+	function callplugin_branch_status(value)
+	  return callplugin_branch_info
+	end
+	)lua"),
+	                       &runtime);
+	QMudNativePluginRegistry::LuaAudioRuntimeBufferState callPluginBranchState;
+	callPluginBranchState.volume   = 100.0;
+	callPluginBranchState.ownerKey = callPluginBranchEngine.data();
+	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 1, callPluginBranchState);
+	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 2, callPluginBranchState);
+	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 3, callPluginBranchState);
+	auto callPluginBranchSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	callPluginBranchSnapshot->soundStatusByBuffer.insert(1, 1);
+	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(1, false);
+	callPluginBranchSnapshot->soundStatusByBuffer.insert(2, 1);
+	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(2, false);
+	callPluginBranchSnapshot->soundStatusByBuffer.insert(3, 1);
+	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(3, false);
+	callPluginBranchSnapshot->soundStatusByBuffer.insert(4, -2);
+	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(4, true);
+	request.engines               = {callPluginBranchEngine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = callPluginBranchSnapshot;
+	LuaBatchDispatchResult callPluginBranchResult;
+	dispatchWorkerAndWait(executor, request, callPluginBranchResult);
+	executeDeferredMutations(callPluginBranchResult);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("callplugin_branch_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("0.0|4|44|0.0|0.0|0.0|0.0|0.0|0.0|0.0|false"));
+	QTRY_VERIFY_WITH_TIMEOUT(
+	    (
+	        [&]
+	        {
+		        if (!QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, callPluginBranchState))
+			        return false;
+		        QMudNativePluginRegistry::LuaAudioRuntimeBufferState stoppedState;
+		        return callPluginBranchState.volume == 35.0 && callPluginBranchState.pan == 6.0 &&
+		               callPluginBranchState.pitch == 7.0 &&
+		               !QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 2, stoppedState) &&
+		               !QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 3, stoppedState);
+	        })(),
+	    3000);
+	teardownWorkerEngine(executor, callPluginBranchEngine);
+	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+
 	teardownWorkerEngine(executor, engine);
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
 
@@ -1907,6 +2384,7 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	                       &runtime);
 	auto pendingSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 	pendingSnapshot->soundStatusByBuffer.insert(1, -2);
+	pendingSnapshot->soundBufferReusableByBuffer.insert(1, true);
 	request.engines               = {pendingEngine};
 	request.kind                  = LuaBatchDispatchKind::NoArgs;
 	request.functionName          = QStringLiteral("OnPluginEnable");
@@ -1949,7 +2427,9 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 2, fadeState);
 	auto timedSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
 	timedSnapshot->soundStatusByBuffer.insert(1, 1);
+	timedSnapshot->soundBufferReusableByBuffer.insert(1, false);
 	timedSnapshot->soundStatusByBuffer.insert(2, 1);
+	timedSnapshot->soundBufferReusableByBuffer.insert(2, false);
 	request.engines               = {timedEngine};
 	request.kind                  = LuaBatchDispatchKind::NoArgs;
 	request.functionName          = QStringLiteral("OnPluginEnable");

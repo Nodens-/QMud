@@ -870,6 +870,35 @@ QString AcceleratorUtils::acceleratorToString(quint32, quint16)
 	return {};
 }
 
+qint64 AcceleratorUtils::acceleratorMapKey(const quint32 virt, const quint16 key)
+{
+	return (static_cast<qint64>(virt) << 16) | key;
+}
+
+bool AcceleratorUtils::keySequenceToAcceleratorMapKey(const QKeySequence &sequence, qint64 &mapKey)
+{
+	if (sequence.isEmpty() || sequence.count() != 1)
+		return false;
+	const QKeyCombination combination = sequence[0];
+	Qt::KeyboardModifiers modifiers   = combination.keyboardModifiers();
+	const bool            keypad      = (modifiers & Qt::KeypadModifier) != 0;
+	modifiers &= ~Qt::KeypadModifier;
+	if ((modifiers & Qt::MetaModifier) != 0)
+		return false;
+	const quint16 key = AcceleratorUtils::qtKeyToVirtualKey(combination.key(), keypad);
+	if (key == 0)
+		return false;
+	quint32 virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
+	if ((modifiers & Qt::ShiftModifier) != 0)
+		virt |= AcceleratorUtils::kShiftFlag;
+	if ((modifiers & Qt::ControlModifier) != 0)
+		virt |= AcceleratorUtils::kControlFlag;
+	if ((modifiers & Qt::AltModifier) != 0)
+		virt |= AcceleratorUtils::kAltFlag;
+	mapKey = AcceleratorUtils::acceleratorMapKey(virt, key);
+	return true;
+}
+
 void qmudApplyMonospaceFallback(QFont &font, const QString &preferredFamily)
 {
 	if (!preferredFamily.isEmpty())
@@ -3577,6 +3606,40 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void pluginAcceleratorOverridesAllTypingDisplayShortcut()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			for (int i = 0; i < 120; ++i)
+				view.appendOutputText(QStringLiteral("accelerator-display-shortcut-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			constexpr Qt::Key key        = Qt::Key_PageUp;
+			constexpr quint16 virtualKey = 0x21;
+			constexpr int     commandId  = 78;
+			const qint64      mapKey     = makeAcceleratorMapKey(key, Qt::NoModifier, virtualKey);
+			g_acceleratorCommands.insert(mapKey, commandId);
+
+			QTest::keyClick(input, key);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_acceleratorExecutionCount, 1);
+			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
+			QVERIFY(!view.isScrollbackSplitActive());
+
+			resetTestState();
+		}
+
 		void replaceMacroClearsChangedStateAndMovesCaretToEnd()
 		{
 			resetTestState();
@@ -4185,7 +4248,12 @@ class tst_WorldView_Basic : public QObject
 			QTRY_VERIFY(view.isScrollbackSplitActive());
 			QTRY_VERIFY(topBar->value() > topBar->minimum());
 
-			topBar->setValue(qMax(topBar->minimum(), topBar->maximum() - qMax(1, topBar->pageStep() / 2)));
+			const int livePaneHeight = qMax(1, splitBottom->viewport()->height());
+			QVERIFY(topBar->maximum() > livePaneHeight);
+			const int splitMergeZoneValue =
+			    qMax(topBar->minimum(), topBar->maximum() - qMax(1, livePaneHeight / 2));
+			QVERIFY(splitMergeZoneValue < topBar->maximum());
+			topBar->setValue(splitMergeZoneValue);
 			QTest::keyClick(input, Qt::Key_PageDown);
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(!view.isScrollbackSplitActive());
@@ -4901,6 +4969,120 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void splitSelectionDragSpansTopAndLivePanes()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 280; ++i)
+				view.appendOutputText(QStringLiteral("cross-pane-select-%1").arg(i, 3, 10, QLatin1Char('0')),
+				                      true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
+			QVERIFY(topBrowser);
+			const QPointF localPos(topBrowser->viewport()->rect().center());
+			const QPointF globalPos(topBrowser->viewport()->mapToGlobal(localPos.toPoint()));
+			QWheelEvent   wheelUp(localPos, globalPos, QPoint(0, 0), QPoint(0, 120), Qt::NoButton,
+			                      Qt::NoModifier, Qt::NoScrollPhase, false);
+			QCoreApplication::sendEvent(topBrowser->viewport(), &wheelUp);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+
+			const auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+
+			auto findWordPoint = [&view](const QTextBrowser *target, const QVector<QPoint> &points)
+			{
+				for (const QPoint &point : points)
+				{
+					QTest::mouseDClick(target->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+					QCoreApplication::processEvents();
+					const QString selected = view.outputSelectionText();
+					if (selected.startsWith(QStringLiteral("cross-pane-select-")))
+						return QPair<QString, QPoint>{selected, point};
+				}
+				return QPair<QString, QPoint>{};
+			};
+
+			const QVector<QPoint> topProbePoints{
+			    QPoint(24, qMax(8, splitTop->viewport()->rect().height() / 2)),
+			    QPoint(24, qMax(8, (splitTop->viewport()->rect().height() * 3) / 4)),
+			    splitTop->viewport()->rect().center(),
+			};
+			const QVector<QPoint> bottomProbePoints{
+			    QPoint(24, qMax(8, splitBottom->viewport()->rect().height() / 3)),
+			    splitBottom->viewport()->rect().center(),
+			    QPoint(24, qMax(8, splitBottom->viewport()->rect().height() - 12)),
+			};
+
+			const auto [topWord, topWordPoint]       = findWordPoint(splitTop, topProbePoints);
+			const auto [bottomWord, bottomWordPoint] = findWordPoint(splitBottom, bottomProbePoints);
+			QVERIFY(topWord.startsWith(QStringLiteral("cross-pane-select-")));
+			QVERIFY(bottomWord.startsWith(QStringLiteral("cross-pane-select-")));
+			QVERIFY(topWord != bottomWord);
+
+			const QPoint startPoint(1, topWordPoint.y());
+			const QPoint endPoint(qMax(1, splitBottom->viewport()->width() - 2), bottomWordPoint.y());
+			const QPoint endGlobal = splitBottom->viewport()->mapToGlobal(endPoint);
+			const QPoint endInTop  = splitTop->viewport()->mapFromGlobal(endGlobal);
+
+			QTest::mousePress(splitTop->viewport(), Qt::LeftButton, Qt::NoModifier, startPoint);
+			QCoreApplication::processEvents();
+			QMouseEvent moveEvent(QEvent::MouseMove, QPointF(endInTop), QPointF(endGlobal), Qt::NoButton,
+			                      Qt::LeftButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(splitTop->viewport(), &moveEvent);
+			QCoreApplication::processEvents();
+			QMouseEvent releaseEvent(QEvent::MouseButtonRelease, QPointF(endInTop), QPointF(endGlobal),
+			                         Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+			QCoreApplication::sendEvent(splitTop->viewport(), &releaseEvent);
+			QCoreApplication::processEvents();
+
+			const QString selectedText = view.outputSelectionText();
+			QVERIFY(selectedText.contains(topWord));
+			QVERIFY(selectedText.contains(bottomWord));
+			QVERIFY(selectedText.contains(QLatin1Char('\n')));
+
+			view.copySelection();
+			QTRY_COMPARE(QGuiApplication::clipboard()->text(), selectedText);
+
+			const QPoint reverseStartPoint(qMax(1, splitBottom->viewport()->width() - 2),
+			                               bottomWordPoint.y());
+			const QPoint reverseEndPoint(1, topWordPoint.y());
+			const QPoint reverseEndGlobal   = splitTop->viewport()->mapToGlobal(reverseEndPoint);
+			const QPoint reverseEndInBottom = splitBottom->viewport()->mapFromGlobal(reverseEndGlobal);
+
+			QTest::mousePress(splitBottom->viewport(), Qt::LeftButton, Qt::NoModifier, reverseStartPoint);
+			QCoreApplication::processEvents();
+			QMouseEvent reverseMoveEvent(QEvent::MouseMove, QPointF(reverseEndInBottom),
+			                             QPointF(reverseEndGlobal), Qt::NoButton, Qt::LeftButton,
+			                             Qt::NoModifier);
+			QCoreApplication::sendEvent(splitBottom->viewport(), &reverseMoveEvent);
+			QCoreApplication::processEvents();
+			QMouseEvent reverseReleaseEvent(QEvent::MouseButtonRelease, QPointF(reverseEndInBottom),
+			                                QPointF(reverseEndGlobal), Qt::LeftButton, Qt::NoButton,
+			                                Qt::NoModifier);
+			QCoreApplication::sendEvent(splitBottom->viewport(), &reverseReleaseEvent);
+			QCoreApplication::processEvents();
+
+			const QString reverseSelectedText = view.outputSelectionText();
+			QVERIFY(reverseSelectedText.contains(topWord));
+			QVERIFY(reverseSelectedText.contains(bottomWord));
+			QVERIFY(reverseSelectedText.contains(QLatin1Char('\n')));
+
+			view.copySelection();
+			QTRY_COMPARE(QGuiApplication::clipboard()->text(), reverseSelectedText);
+			resetTestState();
+		}
+
 		void selectionTracksAcrossHeadTrimWhileVisibleThenPersistsOutOfViewport()
 		{
 			resetTestState();
@@ -4983,6 +5165,59 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void clearingOffscreenSelectionDoesNotRequestFullNativeRepaint()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 260; ++i)
+				view.appendOutputText(QStringLiteral("offscreen-repaint-%1").arg(i, 3, 10, QLatin1Char('0')),
+				                      true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QVERIFY(view.m_nativeOutputCanvas);
+
+			view.m_nativeOutputCanvas->repaint();
+			QCoreApplication::processEvents();
+			QVERIFY(view.m_nativePrimaryPaintState.valid);
+
+			const QStringList lines = view.outputLines();
+			QVERIFY(lines.size() >= 4);
+			const qsizetype selectedLineIndex = lines.size() - 2;
+			const QString  &selectedText      = lines.at(selectedLineIndex);
+			view.selectOutputRange(boundedSizeToInt(selectedLineIndex), 0,
+			                       boundedSizeToInt(selectedText.size()));
+			QTRY_COMPARE(view.outputSelectionText(), selectedText);
+
+			bar->setValue(bar->minimum());
+			QCoreApplication::processEvents();
+			view.m_nativeOutputCanvas->repaint();
+			QCoreApplication::processEvents();
+			QVERIFY(view.hasOutputSelection());
+			QCOMPARE(view.outputSelectionText(), selectedText);
+			QVERIFY(!view.nativeOutputSelectionRepaintRect(view.m_nativeOutputSelection).isValid());
+
+			view.m_nativeOutputRepaintQueued = false;
+			view.m_nativeOutputRepaintAll    = false;
+			view.m_nativeOutputRepaintRegion = {};
+			view.clearNativeOutputSelection(true);
+			QVERIFY(!view.m_nativeOutputRepaintQueued);
+			QVERIFY(!view.m_nativeOutputRepaintAll);
+			QVERIFY(view.m_nativeOutputRepaintRegion.isEmpty());
+			QVERIFY(!view.hasOutputSelection());
+			resetTestState();
+		}
+
 		void splitTopSelectionPersistsWhenManualScrollMovesItOutOfView()
 		{
 			resetTestState();
@@ -5047,7 +5282,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void collapsedSplitIgnoresHiddenLiveSelection()
+		void collapsedSplitPreservesLivePaneSelection()
 		{
 			resetTestState();
 			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
@@ -5082,18 +5317,18 @@ class tst_WorldView_Basic : public QObject
 			    splitBottom->viewport()->rect().center(),
 			    QPoint(24, qMax(8, splitBottom->viewport()->rect().height() / 2)),
 			};
-			bool selectedLiveWord = false;
+			QString selectedText;
 			for (const QPoint &point : liveProbePoints)
 			{
 				QTest::mouseDClick(splitBottom->viewport(), Qt::LeftButton, Qt::NoModifier, point);
 				QCoreApplication::processEvents();
 				if (view.hasOutputSelection() && !view.outputSelectionText().isEmpty())
 				{
-					selectedLiveWord = true;
+					selectedText = view.outputSelectionText();
 					break;
 				}
 			}
-			QVERIFY(selectedLiveWord);
+			QVERIFY(!selectedText.isEmpty());
 
 			for (int i = 0; i < 120 && view.isScrollbackSplitActive(); ++i)
 			{
@@ -5103,8 +5338,8 @@ class tst_WorldView_Basic : public QObject
 				QCoreApplication::processEvents();
 			}
 			QTRY_VERIFY(!view.isScrollbackSplitActive());
-			QTRY_COMPARE(view.outputSelectionText(), QString());
-			QVERIFY(!view.hasOutputSelection());
+			QTRY_COMPARE(view.outputSelectionText(), selectedText);
+			QVERIFY(view.hasOutputSelection());
 			resetTestState();
 		}
 

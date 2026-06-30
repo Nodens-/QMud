@@ -580,7 +580,7 @@ namespace
 		if (!AcceleratorUtils::stringToAccelerator(QStringLiteral("Ctrl+Shift+F12"), virt, key))
 			return;
 
-		const qint64 mapKey = (static_cast<qint64>(virt) << 16) | key;
+		const qint64 mapKey = AcceleratorUtils::acceleratorMapKey(virt, key);
 		if (runtime->acceleratorCommandForKey(mapKey) >= 0)
 			return;
 
@@ -988,7 +988,8 @@ namespace
 		if (fileName.isEmpty() || !luaAudioFileExists(runtime, fileName))
 			return 0;
 		const int buffer = QMudNativePluginRegistry::luaAudioReserveRuntimeBuffer(
-		    runtime, [runtime](const int candidate) { return runtime->soundStatus(candidate); });
+		    runtime,
+		    [runtime](const int candidate) { return runtime->soundBufferReusableForNativeAudio(candidate); });
 		if (buffer < 1)
 			return 0;
 		if (delayMs > 0)
@@ -1395,10 +1396,10 @@ namespace QMudNativePluginRegistry
 		luaAudioNativeStateFor(runtime).master.pitch = pitch;
 	}
 
-	int luaAudioReserveRuntimeBuffer(const WorldRuntime            *runtime,
-	                                 const std::function<int(int)> &soundStatusResolver)
+	int luaAudioReserveRuntimeBuffer(const WorldRuntime             *runtime,
+	                                 const std::function<bool(int)> &bufferReusableResolver)
 	{
-		if (!runtime || !soundStatusResolver)
+		if (!runtime || !bufferReusableResolver)
 			return 0;
 		for (int buffer = 1; buffer <= WorldRuntime::kMaxSoundBuffers; ++buffer)
 		{
@@ -1411,16 +1412,16 @@ namespace QMudNativePluginRegistry
 				if (owned)
 					ownedState = it->second.buffers.value(buffer);
 			}
-			const int status = soundStatusResolver(buffer);
+			const bool reusable = bufferReusableResolver(buffer);
 			if (owned)
 			{
 				const bool hasPendingDelayedPlay =
 				    ownedState.pendingCancel && !ownedState.pendingCancel->load(std::memory_order_acquire);
-				if (hasPendingDelayedPlay || status != -2)
+				if (hasPendingDelayedPlay || !reusable)
 					continue;
 				luaAudioReleaseRuntimeBuffer(runtime, buffer);
 			}
-			if (status != -2 && status != 0)
+			if (!reusable)
 				continue;
 			QMutexLocker         locker(&stateMutex());
 			LuaAudioNativeState &state = luaAudioNativeStateFor(runtime);
@@ -2014,8 +2015,7 @@ namespace QMudNativePluginRegistry
 		}
 
 		const LuaAudioRuntimeMasterState master = luaAudioRuntimeMasterState(runtime);
-		static_cast<void>(playLuaAudioNativeBuffer(runtime, trimmed, false, master.volume, master.pan, 0));
-		return true;
+		return playLuaAudioNativeBuffer(runtime, trimmed, false, master.volume, master.pan, 0) != 0;
 	}
 
 	void handleMushReaderScreenDraw(const WorldRuntime *runtime, const int type, const int /*log*/,

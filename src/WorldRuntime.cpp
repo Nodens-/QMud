@@ -121,28 +121,52 @@
 
 Q_DECLARE_OPAQUE_POINTER(sqlite3 *)
 
-static long        colorToLong(const QColor &color);
-static int         colourSeqFromAttributes(const QMap<QString, QString> &attributes);
-static QString     convertToRegularExpression(const QString &text);
-static void        buildCustomColours(const QList<WorldRuntime::Colour> &colours, QVector<QColor> &normalAnsi,
-                                      QVector<QColor> &customText, QVector<QColor> &customBack);
-static int         publicNoteColourIndexFromWorldAttribute(const QString                     &value,
-                                                           const QList<WorldRuntime::Colour> &colours,
-                                                           int                                fallbackPublicIndex);
-static QStringList macroDescriptionList();
-static QStringList keypadNameList();
+struct ResolvedWorldColourTables
+{
+		QVector<QColor> normalAnsi;
+		QVector<QColor> boldAnsi;
+		QVector<QColor> customText;
+		QVector<QColor> customBack;
+};
 
-constexpr int      kChatLoopDiscardSeconds           = 5;
-constexpr int      ADJUST_COLOUR_INVERT              = 1;
-constexpr int      ADJUST_COLOUR_LIGHTER             = 2;
-constexpr int      ADJUST_COLOUR_DARKER              = 3;
-constexpr int      ADJUST_COLOUR_LESS_COLOUR         = 4;
-constexpr int      ADJUST_COLOUR_MORE_COLOUR         = 5;
-constexpr int      kPacketDebugChars                 = 16;
-constexpr int      kMaxMxpTextBufferBytes            = 256 * 1024;
-constexpr int      kMaxMxpStackDepth                 = 512;
-constexpr int      kMemoryImageDecodeCacheMaxEntries = 48;
-constexpr qint64   kMemoryImageDecodeCacheMaxBytes   = 64LL * 1024LL * 1024LL;
+struct ResolvedNoteColours
+{
+		long fore{0};
+		long back{0};
+};
+
+static long    colorToLong(const QColor &color);
+static int     colourSeqFromAttributes(const QMap<QString, QString> &attributes);
+static QString convertToRegularExpression(const QString &text);
+static void    buildCustomColours(const QList<WorldRuntime::Colour> &colours, QVector<QColor> &normalAnsi,
+                                  QVector<QColor> &customText, QVector<QColor> &customBack);
+static void    buildResolvedColourTables(const QList<WorldRuntime::Colour> &colours,
+                                         ResolvedWorldColourTables         &tables);
+static ResolvedWorldColourTables buildResolvedWorldColourTables(const QList<WorldRuntime::Colour> &colours);
+static ResolvedNoteColours       resolveNoteColours(bool notesInRgb, int noteTextColour, long noteColourFore,
+                                                    long                             noteColourBack,
+                                                    const ResolvedWorldColourTables &colourTables,
+                                                    const QMap<QString, QString>    &worldAttributes);
+static ResolvedNoteColours resolveNoteColours(bool notesInRgb, int noteTextColour, long noteColourFore,
+                                              long noteColourBack, const QList<WorldRuntime::Colour> &colours,
+                                              const QMap<QString, QString> &worldAttributes);
+static int                 publicNoteColourIndexFromWorldAttribute(const QString                     &value,
+                                                                   const QList<WorldRuntime::Colour> &colours,
+                                                                   int                                fallbackPublicIndex);
+static QStringList         macroDescriptionList();
+static QStringList         keypadNameList();
+
+constexpr int              kChatLoopDiscardSeconds           = 5;
+constexpr int              ADJUST_COLOUR_INVERT              = 1;
+constexpr int              ADJUST_COLOUR_LIGHTER             = 2;
+constexpr int              ADJUST_COLOUR_DARKER              = 3;
+constexpr int              ADJUST_COLOUR_LESS_COLOUR         = 4;
+constexpr int              ADJUST_COLOUR_MORE_COLOUR         = 5;
+constexpr int              kPacketDebugChars                 = 16;
+constexpr int              kMaxMxpTextBufferBytes            = 256 * 1024;
+constexpr int              kMaxMxpStackDepth                 = 512;
+constexpr int              kMemoryImageDecodeCacheMaxEntries = 48;
+constexpr qint64           kMemoryImageDecodeCacheMaxBytes   = 64LL * 1024LL * 1024LL;
 
 namespace
 {
@@ -7482,11 +7506,14 @@ void WorldRuntime::clearNewLines()
 	m_newLines = 0;
 }
 
-void WorldRuntime::setActive(bool active)
+void WorldRuntime::requestActiveState(const bool active)
 {
-	m_active = active;
-	if (active)
-		clearNewLines();
+	if (QThread::currentThread() != thread())
+	{
+		qmudInvokeMethodQueued(this, [this, active] { requestActiveState(active); });
+		return;
+	}
+	enqueueActiveStateTransition(active);
 }
 
 bool WorldRuntime::isActive() const
@@ -9263,10 +9290,14 @@ void WorldRuntime::populateLuaCallbackDispatchVolatileSnapshot(
 	                                commandUi.worldChildWindowHeight);
 	snapshot.commandUiValues.insert(QStringLiteral("worldChildWindowWidth"), commandUi.worldChildWindowWidth);
 
-	const RuntimeCountersSnapshot counters = runtimeCountersSnapshot(true);
-	snapshot.hasRuntimeCountersSnapshot    = true;
-	snapshot.runtimeOutputFontHeight       = counters.outputFontHeight;
-	snapshot.runtimeOutputFontWidth        = counters.outputFontWidth;
+	const ResolvedWorldColourTables colourTables = buildResolvedWorldColourTables(m_colours);
+	const ResolvedNoteColours       noteColours  = resolveNoteColours(
+	    m_notesInRgb, m_noteTextColour, m_noteColourFore, m_noteColourBack, colourTables, m_worldAttributes);
+	const RuntimeCountersSnapshot counters =
+	    runtimeCountersSnapshotWithResolvedNoteColours(true, noteColours.fore, noteColours.back);
+	snapshot.hasRuntimeCountersSnapshot = true;
+	snapshot.runtimeOutputFontHeight    = counters.outputFontHeight;
+	snapshot.runtimeOutputFontWidth     = counters.outputFontWidth;
 	snapshot.runtimeCounterValues.reserve(88);
 	snapshot.runtimeCounterValues.insert(QStringLiteral("newLines"), counters.newLines);
 	snapshot.runtimeCounterValues.insert(QStringLiteral("totalLinesSent"), counters.totalLinesSent);
@@ -9580,15 +9611,22 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
     const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
     const LuaCallbackLineSnapshotPolicy               lineSnapshotPolicy) const
 {
+	return captureLuaCallbackSnapshotForDispatchMutable(recipients, lineSnapshotPolicy);
+}
+
+QSharedPointer<LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCallbackSnapshotForDispatchMutable(
+    const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
+    const LuaCallbackLineSnapshotPolicy               lineSnapshotPolicy) const
+{
 	if (QThread::currentThread() != thread())
 	{
 		return qmudInvokeMethodOr(
-		    const_cast<WorldRuntime *>(this), QSharedPointer<const LuaCallbackMiniWindowSnapshot>{},
+		    const_cast<WorldRuntime *>(this), QSharedPointer<LuaCallbackMiniWindowSnapshot>{},
 		    [this, recipients, lineSnapshotPolicy]
-		    { return captureLuaCallbackSnapshotForDispatch(recipients, lineSnapshotPolicy); });
+		    { return captureLuaCallbackSnapshotForDispatchMutable(recipients, lineSnapshotPolicy); });
 	}
 
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::captureLuaCallbackSnapshotForDispatch");
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::captureLuaCallbackSnapshotForDispatchMutable");
 	if (auto *mutableRuntime = const_cast<WorldRuntime *>(this);
 	    mutableRuntime->applyPendingObservedPluginCallbackPresenceSnapshots())
 	{
@@ -9611,7 +9649,7 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 		return cachedSnapshot;
 	}
 
-	const QSharedPointer<LuaCallbackMiniWindowSnapshot> snapshot =
+	QSharedPointer<LuaCallbackMiniWindowSnapshot> snapshot =
 	    captureMiniWindowSnapshotForLuaDispatch(m_miniWindows);
 	if (!snapshot)
 		return {};
@@ -9828,10 +9866,14 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 	snapshot->commandUiValues.insert(QStringLiteral("worldChildWindowWidth"),
 	                                 commandUi.worldChildWindowWidth);
 
-	const RuntimeCountersSnapshot counters = runtimeCountersSnapshot(true);
-	snapshot->hasRuntimeCountersSnapshot   = true;
-	snapshot->runtimeOutputFontHeight      = counters.outputFontHeight;
-	snapshot->runtimeOutputFontWidth       = counters.outputFontWidth;
+	const ResolvedWorldColourTables colourTables = buildResolvedWorldColourTables(m_colours);
+	const ResolvedNoteColours       noteColours  = resolveNoteColours(
+	    m_notesInRgb, m_noteTextColour, m_noteColourFore, m_noteColourBack, colourTables, m_worldAttributes);
+	const RuntimeCountersSnapshot counters =
+	    runtimeCountersSnapshotWithResolvedNoteColours(true, noteColours.fore, noteColours.back);
+	snapshot->hasRuntimeCountersSnapshot = true;
+	snapshot->runtimeOutputFontHeight    = counters.outputFontHeight;
+	snapshot->runtimeOutputFontWidth     = counters.outputFontWidth;
 	snapshot->runtimeCounterValues.reserve(88);
 	snapshot->runtimeCounterValues.insert(QStringLiteral("newLines"), counters.newLines);
 	snapshot->runtimeCounterValues.insert(QStringLiteral("totalLinesSent"), counters.totalLinesSent);
@@ -10039,14 +10081,9 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 	snapshot->hasChatSnapshot = true;
 	for (int index = 1; index <= 8; ++index)
 	{
-		const QColor boldColour = ansiColour(true, index);
-		snapshot->boldAnsiColoursByIndex.insert(index, boldColour.isValid() ? colorToLong(boldColour) : 0);
+		snapshot->boldAnsiColoursByIndex.insert(index, colorToLong(colourTables.boldAnsi.value(index - 1)));
 		snapshot->normalAnsiColoursByIndex.insert(index, normalColour(index));
 	}
-	QVector<QColor> normalAnsi;
-	QVector<QColor> customText;
-	QVector<QColor> customBack;
-	buildCustomColours(m_colours, normalAnsi, customText, customBack);
 	QVector<QString> customNames(MAX_CUSTOM);
 	QVector<uchar>   customNameResolved(MAX_CUSTOM, 0);
 	for (const auto &colour : m_colours)
@@ -10062,8 +10099,10 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 	}
 	for (int index = 1; index <= MAX_CUSTOM; ++index)
 	{
-		snapshot->customTextColoursByIndex.insert(index, colorToLong(customText.value(index - 1)));
-		snapshot->customBackgroundColoursByIndex.insert(index, colorToLong(customBack.value(index - 1)));
+		snapshot->customTextColoursByIndex.insert(index,
+		                                          colorToLong(colourTables.customText.value(index - 1)));
+		snapshot->customBackgroundColoursByIndex.insert(
+		    index, colorToLong(colourTables.customBack.value(index - 1)));
 		const QString customName = customNames.value(index - 1);
 		snapshot->customColourNamesByIndex.insert(
 		    index, customName.isEmpty() ? QStringLiteral("Custom%1").arg(index) : customName);
@@ -10139,7 +10178,10 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 		snapshot->databaseSnapshotsByName.insert(databaseName, database);
 	}
 	for (int buffer = 1; buffer <= kMaxSoundBuffers; ++buffer)
+	{
 		snapshot->soundStatusByBuffer.insert(buffer, soundStatus(buffer));
+		snapshot->soundBufferReusableByBuffer.insert(buffer, soundBufferReusableForNativeAudio(buffer));
+	}
 	for (const Macro &macro : m_macros)
 	{
 		LuaCallbackAttributeChildrenSnapshot row;
@@ -10308,6 +10350,29 @@ QSharedPointer<const LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCall
 	return snapshot;
 }
 
+void WorldRuntime::stampLuaCallbackSnapshotActionSource(LuaCallbackMiniWindowSnapshot &snapshot,
+                                                        const int                      actionSourceOverride)
+{
+	if (actionSourceOverride < 0)
+		return;
+	snapshot.hasActionSourceOverride = true;
+	snapshot.actionSourceOverride    = actionSourceOverride;
+	if (snapshot.hasRuntimeCountersSnapshot)
+		snapshot.runtimeCounterValues.insert(QStringLiteral("currentActionSource"), actionSourceOverride);
+}
+
+QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+WorldRuntime::captureLuaCallbackSnapshotForDispatchWithActionSource(
+    const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
+    const LuaCallbackLineSnapshotPolicy lineSnapshotPolicy, const int actionSourceOverride) const
+{
+	QSharedPointer<LuaCallbackMiniWindowSnapshot> snapshot =
+	    captureLuaCallbackSnapshotForDispatchMutable(recipients, lineSnapshotPolicy);
+	if (snapshot)
+		stampLuaCallbackSnapshotActionSource(*snapshot, actionSourceOverride);
+	return snapshot;
+}
+
 LuaBatchDispatchResult WorldRuntime::dispatchLuaStringsAndWildcards(
     const QSharedPointer<LuaCallbackEngine> &engine, const QString &functionName, const QStringList &args,
     const QStringList &wildcards, const QMap<QString, QString> &namedWildcards,
@@ -10331,13 +10396,14 @@ LuaBatchDispatchResult WorldRuntime::dispatchLuaStringsAndWildcards(
 	request.triggerMatchedLineAbsoluteNumber = triggerMatchedLineAbsoluteNumber;
 	request.inputCritical                    = triggerMatchedLineAbsoluteNumber > 0;
 	request.lineSnapshotPolicy               = LuaCallbackLineSnapshotPolicy::CountAndRecentText;
-	request.miniWindowSnapshotArg =
-	    captureLuaCallbackSnapshotForDispatch(request.engines, request.lineSnapshotPolicy);
 	if (const unsigned short actionSource = currentActionSource(); actionSource != eUnknownActionSource)
 	{
 		request.actionSourceOverride    = actionSource;
 		request.hasActionSourceOverride = true;
 	}
+	request.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatchWithActionSource(
+	    request.engines, request.lineSnapshotPolicy,
+	    request.hasActionSourceOverride ? request.actionSourceOverride : -1);
 	return const_cast<WorldRuntime *>(this)->queuePluginCallbackDispatch(request, true);
 }
 
@@ -10393,13 +10459,19 @@ void WorldRuntime::dispatchLuaStringsAndWildcardsAsync(
 	request.triggerMatchedLineAbsoluteNumber = triggerMatchedLineAbsoluteNumber;
 	request.inputCritical                    = triggerMatchedLineAbsoluteNumber > 0;
 	request.lineSnapshotPolicy               = LuaCallbackLineSnapshotPolicy::CountAndRecentText;
-	request.miniWindowSnapshotArg =
-	    captureLuaCallbackSnapshotForDispatch(request.engines, request.lineSnapshotPolicy);
 	if (actionSourceOverride >= 0)
 	{
 		request.actionSourceOverride    = actionSourceOverride;
 		request.hasActionSourceOverride = true;
 	}
+	else if (const unsigned short actionSource = currentActionSource(); actionSource != eUnknownActionSource)
+	{
+		request.actionSourceOverride    = actionSource;
+		request.hasActionSourceOverride = true;
+	}
+	request.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatchWithActionSource(
+	    request.engines, request.lineSnapshotPolicy,
+	    request.hasActionSourceOverride ? request.actionSourceOverride : -1);
 	const_cast<WorldRuntime *>(this)->queuePluginCallbackDispatchAsync(request, completion);
 }
 
@@ -10427,15 +10499,10 @@ bool WorldRuntime::dispatchLuaExecuteScript(const QSharedPointer<LuaCallbackEngi
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::dispatchLuaExecuteScript");
 
 	const unsigned short previousActionSource = currentActionSource();
-	const bool           changedActionSource  = previousActionSource == eUnknownActionSource;
-	if (changedActionSource)
-		const_cast<WorldRuntime *>(this)->setCurrentActionSource(eLuaSandbox);
-	[[maybe_unused]] const auto restoreActionSource = qScopeGuard(
-	    [this, changedActionSource, previousActionSource]
-	    {
-		    if (changedActionSource)
-			    const_cast<WorldRuntime *>(this)->setCurrentActionSource(previousActionSource);
-	    });
+	const int effectiveActionSource = hasTriggerContext ? eTriggerFired
+	                                                    : (previousActionSource == eUnknownActionSource
+	                                                           ? eLuaSandbox
+	                                                           : static_cast<int>(previousActionSource));
 
 	LuaBatchDispatchRequest request;
 	request.kind         = LuaBatchDispatchKind::ExecuteScript;
@@ -10450,10 +10517,12 @@ bool WorldRuntime::dispatchLuaExecuteScript(const QSharedPointer<LuaCallbackEngi
 	request.triggerMatchedLineBufferIndex    = triggerMatchedLineBufferIndex;
 	request.triggerMatchedLineAbsoluteNumber = triggerMatchedLineAbsoluteNumber;
 	request.inputCritical                    = hasTriggerContext;
-	request.lineSnapshotPolicy = hasTriggerContext ? LuaCallbackLineSnapshotPolicy::CountAndRecentText
-	                                               : LuaCallbackLineSnapshotPolicy::None;
-	request.miniWindowSnapshotArg =
-	    captureLuaCallbackSnapshotForDispatch(request.engines, request.lineSnapshotPolicy);
+	request.lineSnapshotPolicy      = hasTriggerContext ? LuaCallbackLineSnapshotPolicy::CountAndRecentText
+	                                                    : LuaCallbackLineSnapshotPolicy::None;
+	request.hasActionSourceOverride = true;
+	request.actionSourceOverride    = effectiveActionSource;
+	request.miniWindowSnapshotArg   = captureLuaCallbackSnapshotForDispatchWithActionSource(
+	    request.engines, request.lineSnapshotPolicy, effectiveActionSource);
 
 	const LuaBatchDispatchResult result =
 	    hasTriggerContext ? const_cast<WorldRuntime *>(this)->queuePluginCallbackDispatch(request, true)
@@ -10476,9 +10545,10 @@ void WorldRuntime::dispatchLuaExecuteScriptAsync(
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::dispatchLuaExecuteScriptAsync");
 
 	const unsigned short previousActionSource = currentActionSource();
-	const bool           changedActionSource  = previousActionSource == eUnknownActionSource;
-	if (changedActionSource)
-		const_cast<WorldRuntime *>(this)->setCurrentActionSource(eLuaSandbox);
+	const int effectiveActionSource = hasTriggerContext ? eTriggerFired
+	                                                    : (previousActionSource == eUnknownActionSource
+	                                                           ? eLuaSandbox
+	                                                           : static_cast<int>(previousActionSource));
 
 	LuaBatchDispatchRequest request;
 	request.kind         = LuaBatchDispatchKind::ExecuteScript;
@@ -10493,18 +10563,17 @@ void WorldRuntime::dispatchLuaExecuteScriptAsync(
 	request.triggerMatchedLineBufferIndex    = triggerMatchedLineBufferIndex;
 	request.triggerMatchedLineAbsoluteNumber = triggerMatchedLineAbsoluteNumber;
 	request.inputCritical                    = hasTriggerContext;
-	request.lineSnapshotPolicy = hasTriggerContext ? LuaCallbackLineSnapshotPolicy::CountAndRecentText
-	                                               : LuaCallbackLineSnapshotPolicy::None;
-	request.miniWindowSnapshotArg =
-	    captureLuaCallbackSnapshotForDispatch(request.engines, request.lineSnapshotPolicy);
+	request.lineSnapshotPolicy      = hasTriggerContext ? LuaCallbackLineSnapshotPolicy::CountAndRecentText
+	                                                    : LuaCallbackLineSnapshotPolicy::None;
+	request.hasActionSourceOverride = true;
+	request.actionSourceOverride    = effectiveActionSource;
+	request.miniWindowSnapshotArg   = captureLuaCallbackSnapshotForDispatchWithActionSource(
+	    request.engines, request.lineSnapshotPolicy, effectiveActionSource);
 
 	const_cast<WorldRuntime *>(this)->queuePluginCallbackDispatchAsync(
 	    request,
-	    [this, changedActionSource, previousActionSource,
-	     completion = std::move(completion)](const LuaBatchDispatchResult &result) mutable
+	    [completion = std::move(completion)](const LuaBatchDispatchResult &result) mutable
 	    {
-		    if (changedActionSource)
-			    const_cast<WorldRuntime *>(this)->setCurrentActionSource(previousActionSource);
 		    if (completion)
 			    completion(result.boolResultValid ? result.boolResult : false);
 	    });
@@ -10774,6 +10843,24 @@ static double normalizeSoundVolume(double volume)
 	return qBound(0.0, scaled, 1.0);
 }
 
+static QString mediaPlayerErrorName(const QMediaPlayer::Error error)
+{
+	switch (error)
+	{
+	case QMediaPlayer::NoError:
+		return QStringLiteral("NoError");
+	case QMediaPlayer::ResourceError:
+		return QStringLiteral("ResourceError");
+	case QMediaPlayer::FormatError:
+		return QStringLiteral("FormatError");
+	case QMediaPlayer::NetworkError:
+		return QStringLiteral("NetworkError");
+	case QMediaPlayer::AccessDeniedError:
+		return QStringLiteral("AccessDeniedError");
+	}
+	return QStringLiteral("UnknownError");
+}
+
 bool WorldRuntime::soundBufferHasBackend(const SoundBuffer &entry)
 {
 	return entry.effect || entry.player;
@@ -10786,6 +10873,22 @@ bool WorldRuntime::soundBufferIsPlaying(const SoundBuffer &entry)
 	if (entry.player)
 		return entry.player->playbackState() == QMediaPlayer::PlayingState;
 	return false;
+}
+
+bool WorldRuntime::soundBufferIsReusable(const SoundBuffer &entry)
+{
+	if (!soundBufferHasBackend(entry))
+		return true;
+	if (!entry.playbackStarted)
+		return false;
+	if (entry.looping)
+		return false;
+	return !soundBufferIsPlaying(entry);
+}
+
+bool WorldRuntime::soundBufferIsStealable(const SoundBuffer &entry)
+{
+	return soundBufferHasBackend(entry) && entry.playbackStarted;
 }
 
 void WorldRuntime::clearSoundBuffer(SoundBuffer &entry)
@@ -10808,9 +10911,10 @@ void WorldRuntime::clearSoundBuffer(SoundBuffer &entry)
 		delete entry.tempFile;
 		entry.tempFile = nullptr;
 	}
-	entry.looping = false;
-	entry.volume  = 1.0;
-	entry.pan     = 0.0;
+	entry.playbackStarted = false;
+	entry.looping         = false;
+	entry.volume          = 1.0;
+	entry.pan             = 0.0;
 }
 
 bool WorldRuntime::shouldUseMediaPlayerForSoundFile(const QString &fileName)
@@ -10892,7 +10996,7 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 	{
 		for (int i = 0; i < kMaxSoundBuffers; ++i)
 		{
-			if (!soundBufferHasBackend(m_soundBuffers[i]) || !soundBufferIsPlaying(m_soundBuffers[i]))
+			if (soundBufferIsReusable(m_soundBuffers[i]))
 			{
 				targetBuffer = i + 1;
 				break;
@@ -10900,7 +11004,18 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 		}
 	}
 	if (targetBuffer == 0)
-		targetBuffer = 1;
+	{
+		for (int i = 0; i < kMaxSoundBuffers; ++i)
+		{
+			if (soundBufferIsStealable(m_soundBuffers[i]))
+			{
+				targetBuffer = i + 1;
+				break;
+			}
+		}
+	}
+	if (targetBuffer == 0)
+		return eCannotPlaySound;
 
 	if (targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
 		return eBadParameter;
@@ -10947,8 +11062,24 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 		player->setAudioOutput(audioOutput);
 		player->setLoops(loop ? QMediaPlayer::Infinite : QMediaPlayer::Once);
 		audioOutput->setVolume(static_cast<float>(entry.volume));
+		const QString mediaBackend = QString::fromUtf8(qgetenv("QT_MEDIA_BACKEND")).trimmed();
+		const QString backendText  = mediaBackend.isEmpty() ? QStringLiteral("default") : mediaBackend;
+		const auto    reportMediaPlayerError =
+		    [this, resolved, backendText](const QMediaPlayer::Error error, const QString &errorText)
+		{
+			const QString trimmedError = errorText.trimmed();
+			const QString detail =
+			    trimmedError.isEmpty() ? QStringLiteral("unknown media-player error") : trimmedError;
+			const QString message =
+			    QStringLiteral("QMud sound playback failed: %1 (file: %2, Qt media backend: %3, error: "
+			                   "%4)")
+			        .arg(detail, resolved, backendText, mediaPlayerErrorName(error));
+			qWarning().noquote() << message;
+			outputText(message, true, true);
+		};
 		connect(player, &QMediaPlayer::errorOccurred, this,
-		        [this, player, targetBuffer, luaAudioGeneration](QMediaPlayer::Error, const QString &)
+		        [this, player, targetBuffer, luaAudioGeneration,
+		         reportMediaPlayerError](const QMediaPlayer::Error error, const QString &errorText)
 		        {
 			        if (luaAudioGeneration != 0)
 				        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
@@ -10960,6 +11091,7 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 			        if (current.player != player)
 				        return;
 
+			        reportMediaPlayerError(error, errorText);
 			        player->stop();
 			        player->setSource(QUrl());
 			        current.player      = nullptr;
@@ -10969,28 +11101,41 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 				        delete current.tempFile;
 				        current.tempFile = nullptr;
 			        }
-			        current.looping = false;
-			        current.volume  = 1.0;
-			        current.pan     = 0.0;
+			        current.playbackStarted = false;
+			        current.looping         = false;
+			        current.volume          = 1.0;
+			        current.pan             = 0.0;
 			        player->deleteLater();
 		        });
-		if (luaAudioGeneration != 0)
-		{
-			connect(player, &QMediaPlayer::playbackStateChanged, this,
-			        [this, loop, targetBuffer, luaAudioGeneration](const QMediaPlayer::PlaybackState state)
-			        {
-				        if (!loop && state == QMediaPlayer::StoppedState)
-					        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
-					            this, targetBuffer, luaAudioGeneration);
-			        });
-		}
+		connect(
+		    player, &QMediaPlayer::playbackStateChanged, this,
+		    [this, player, loop, targetBuffer, luaAudioGeneration](const QMediaPlayer::PlaybackState state)
+		    {
+			    if (targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
+				    return;
+			    SoundBuffer &current = m_soundBuffers[targetBuffer - 1];
+			    if (current.player != player)
+				    return;
+			    if (state == QMediaPlayer::PlayingState)
+			    {
+				    current.playbackStarted = true;
+				    return;
+			    }
+			    if (loop || state != QMediaPlayer::StoppedState || !current.playbackStarted ||
+			        luaAudioGeneration == 0)
+				    return;
+			    QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(this, targetBuffer,
+			                                                                       luaAudioGeneration);
+		    });
 		player->setSource(QUrl::fromLocalFile(resolved));
 		if (player->error() != QMediaPlayer::NoError)
 		{
+			reportMediaPlayerError(player->error(), player->errorString());
 			delete player;
-			entry.looping = false;
-			entry.volume  = 1.0;
-			entry.pan     = 0.0;
+			entry.playbackStarted = false;
+			entry.looping         = false;
+			entry.volume          = 1.0;
+			entry.pan             = 0.0;
 			return eCannotPlaySound;
 		}
 		entry.player      = player;
@@ -11021,9 +11166,10 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 			        delete current.tempFile;
 			        current.tempFile = nullptr;
 		        }
-		        current.looping = false;
-		        current.volume  = 1.0;
-		        current.pan     = 0.0;
+		        current.playbackStarted = false;
+		        current.looping         = false;
+		        current.volume          = 1.0;
+		        current.pan             = 0.0;
 		        effect->deleteLater();
 	        });
 	effect->setSource(QUrl::fromLocalFile(resolved));
@@ -11037,16 +11183,24 @@ int WorldRuntime::playSoundBypassingPluginCallbacks(int buffer, const QString &f
 	}
 	effect->setLoopCount(loop ? QSoundEffect::Infinite : 1);
 	effect->setVolume(static_cast<float>(entry.volume));
-	if (luaAudioGeneration != 0)
-	{
-		connect(effect, &QSoundEffect::playingChanged, this,
-		        [this, effect, loop, targetBuffer, luaAudioGeneration]
+	connect(effect, &QSoundEffect::playingChanged, this,
+	        [this, effect, loop, targetBuffer, luaAudioGeneration]
+	        {
+		        if (targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
+			        return;
+		        SoundBuffer &current = m_soundBuffers[targetBuffer - 1];
+		        if (current.effect != effect)
+			        return;
+		        if (effect->isPlaying())
 		        {
-			        if (!loop && !effect->isPlaying())
-				        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
-				            this, targetBuffer, luaAudioGeneration);
-		        });
-	}
+			        current.playbackStarted = true;
+			        return;
+		        }
+		        if (loop || !current.playbackStarted || luaAudioGeneration == 0)
+			        return;
+		        QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(this, targetBuffer,
+		                                                                           luaAudioGeneration);
+	        });
 	entry.effect = effect;
 	effect->play();
 	return eOK;
@@ -11079,7 +11233,7 @@ int WorldRuntime::playSoundMemory(int buffer, const QByteArray &data, bool loop,
 	{
 		for (int i = 0; i < kMaxSoundBuffers; ++i)
 		{
-			if (!soundBufferHasBackend(m_soundBuffers[i]) || !soundBufferIsPlaying(m_soundBuffers[i]))
+			if (soundBufferIsReusable(m_soundBuffers[i]))
 			{
 				targetBuffer = i + 1;
 				break;
@@ -11087,7 +11241,18 @@ int WorldRuntime::playSoundMemory(int buffer, const QByteArray &data, bool loop,
 		}
 	}
 	if (targetBuffer == 0)
-		targetBuffer = 1;
+	{
+		for (int i = 0; i < kMaxSoundBuffers; ++i)
+		{
+			if (soundBufferIsStealable(m_soundBuffers[i]))
+			{
+				targetBuffer = i + 1;
+				break;
+			}
+		}
+	}
+	if (targetBuffer == 0)
+		return eCannotPlaySound;
 
 	if (targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
 		return eBadParameter;
@@ -11129,9 +11294,10 @@ int WorldRuntime::playSoundMemory(int buffer, const QByteArray &data, bool loop,
 			        delete current.tempFile;
 			        current.tempFile = nullptr;
 		        }
-		        current.looping = false;
-		        current.volume  = 1.0;
-		        current.pan     = 0.0;
+		        current.playbackStarted = false;
+		        current.looping         = false;
+		        current.volume          = 1.0;
+		        current.pan             = 0.0;
 		        effect->deleteLater();
 	        });
 	effect->setSource(QUrl::fromLocalFile(temp->fileName()));
@@ -11146,8 +11312,17 @@ int WorldRuntime::playSoundMemory(int buffer, const QByteArray &data, bool loop,
 	entry.pan     = pan;
 	effect->setLoopCount(loop ? QSoundEffect::Infinite : 1);
 	effect->setVolume(static_cast<float>(entry.volume));
-	effect->play();
+	connect(effect, &QSoundEffect::playingChanged, this,
+	        [this, effect, targetBuffer]
+	        {
+		        if (!effect->isPlaying() || targetBuffer < 1 || targetBuffer > kMaxSoundBuffers)
+			        return;
+		        SoundBuffer &current = m_soundBuffers[targetBuffer - 1];
+		        if (current.effect == effect)
+			        current.playbackStarted = true;
+	        });
 	entry.effect = effect;
+	effect->play();
 	return eOK;
 }
 
@@ -11208,6 +11383,18 @@ int WorldRuntime::soundStatus(int buffer) const
 		return 0;
 	return entry.looping ? 2 : 1;
 }
+
+bool WorldRuntime::soundBufferReusableForNativeAudio(int buffer) const
+{
+	if (QThread::currentThread() != thread())
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), false,
+		                          [this, buffer] { return soundBufferReusableForNativeAudio(buffer); });
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::soundBufferReusableForNativeAudio");
+	if (buffer < 1 || buffer > kMaxSoundBuffers)
+		return false;
+	return soundBufferIsReusable(m_soundBuffers[buffer - 1]);
+}
 #else
 int WorldRuntime::playSound(int, const QString &, bool, double, double)
 {
@@ -11266,6 +11453,16 @@ int WorldRuntime::soundStatus(int) const
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::soundStatus");
 	return -3;
+}
+
+bool WorldRuntime::soundBufferReusableForNativeAudio(int) const
+{
+	if (QThread::currentThread() != thread())
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), false,
+		                          [this] { return soundBufferReusableForNativeAudio(0); });
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::soundBufferReusableForNativeAudio");
+	return false;
 }
 #endif
 
@@ -12540,41 +12737,60 @@ static QColor parseColourValue(const QString &value)
 static void buildCustomColours(const QList<WorldRuntime::Colour> &colours, QVector<QColor> &normalAnsi,
                                QVector<QColor> &customText, QVector<QColor> &customBack)
 {
-	normalAnsi = QVector<QColor>(8);
-	customText = QVector<QColor>(16);
-	customBack = QVector<QColor>(16);
+	ResolvedWorldColourTables tables;
+	buildResolvedColourTables(colours, tables);
+	normalAnsi = tables.normalAnsi;
+	customText = tables.customText;
+	customBack = tables.customBack;
+}
 
-	normalAnsi[0] = QColor(0, 0, 0);
-	normalAnsi[1] = QColor(128, 0, 0);
-	normalAnsi[2] = QColor(0, 128, 0);
-	normalAnsi[3] = QColor(128, 128, 0);
-	normalAnsi[4] = QColor(0, 0, 128);
-	normalAnsi[5] = QColor(128, 0, 128);
-	normalAnsi[6] = QColor(0, 128, 128);
-	normalAnsi[7] = QColor(192, 192, 192);
+static void buildResolvedColourTables(const QList<WorldRuntime::Colour> &colours,
+                                      ResolvedWorldColourTables         &tables)
+{
+	tables.normalAnsi = QVector<QColor>(8);
+	tables.boldAnsi   = QVector<QColor>(8);
+	tables.customText = QVector<QColor>(16);
+	tables.customBack = QVector<QColor>(16);
 
-	for (int i = 0; i < customText.size(); ++i)
+	tables.normalAnsi[0] = QColor(0, 0, 0);
+	tables.normalAnsi[1] = QColor(128, 0, 0);
+	tables.normalAnsi[2] = QColor(0, 128, 0);
+	tables.normalAnsi[3] = QColor(128, 128, 0);
+	tables.normalAnsi[4] = QColor(0, 0, 128);
+	tables.normalAnsi[5] = QColor(128, 0, 128);
+	tables.normalAnsi[6] = QColor(0, 128, 128);
+	tables.normalAnsi[7] = QColor(192, 192, 192);
+	tables.boldAnsi[0]   = QColor(128, 128, 128);
+	tables.boldAnsi[1]   = QColor(255, 0, 0);
+	tables.boldAnsi[2]   = QColor(0, 255, 0);
+	tables.boldAnsi[3]   = QColor(255, 255, 0);
+	tables.boldAnsi[4]   = QColor(0, 0, 255);
+	tables.boldAnsi[5]   = QColor(255, 0, 255);
+	tables.boldAnsi[6]   = QColor(0, 255, 255);
+	tables.boldAnsi[7]   = QColor(255, 255, 255);
+
+	for (int i = 0; i < tables.customText.size(); ++i)
 	{
-		customText[i] = QColor(255, 255, 255);
-		customBack[i] = QColor(0, 0, 0);
+		tables.customText[i] = QColor(255, 255, 255);
+		tables.customBack[i] = QColor(0, 0, 0);
 	}
 
-	customText[0]  = QColor(255, 128, 128);
-	customText[1]  = QColor(255, 255, 128);
-	customText[2]  = QColor(128, 255, 128);
-	customText[3]  = QColor(128, 255, 255);
-	customText[4]  = QColor(0, 128, 255);
-	customText[5]  = QColor(255, 128, 192);
-	customText[6]  = QColor(255, 0, 0);
-	customText[7]  = QColor(0, 128, 192);
-	customText[8]  = QColor(255, 0, 255);
-	customText[9]  = QColor(128, 64, 64);
-	customText[10] = QColor(255, 128, 64);
-	customText[11] = QColor(0, 128, 128);
-	customText[12] = QColor(0, 64, 128);
-	customText[13] = QColor(255, 0, 128);
-	customText[14] = QColor(0, 128, 0);
-	customText[15] = QColor(0, 0, 255);
+	tables.customText[0]  = QColor(255, 128, 128);
+	tables.customText[1]  = QColor(255, 255, 128);
+	tables.customText[2]  = QColor(128, 255, 128);
+	tables.customText[3]  = QColor(128, 255, 255);
+	tables.customText[4]  = QColor(0, 128, 255);
+	tables.customText[5]  = QColor(255, 128, 192);
+	tables.customText[6]  = QColor(255, 0, 0);
+	tables.customText[7]  = QColor(0, 128, 192);
+	tables.customText[8]  = QColor(255, 0, 255);
+	tables.customText[9]  = QColor(128, 64, 64);
+	tables.customText[10] = QColor(255, 128, 64);
+	tables.customText[11] = QColor(0, 128, 128);
+	tables.customText[12] = QColor(0, 64, 128);
+	tables.customText[13] = QColor(255, 0, 128);
+	tables.customText[14] = QColor(0, 128, 0);
+	tables.customText[15] = QColor(0, 0, 255);
 
 	for (const auto &colour : colours)
 	{
@@ -12584,34 +12800,44 @@ static void buildCustomColours(const QList<WorldRuntime::Colour> &colours, QVect
 		const int     index = ok ? seq - 1 : -1;
 		if (index < 0)
 			continue;
-		if (group == QStringLiteral("ansi/normal") && index < normalAnsi.size())
+		if (group == QStringLiteral("ansi/normal") && index < tables.normalAnsi.size())
 		{
 			const QColor rgb = parseColourValue(colour.attributes.value(QStringLiteral("rgb")));
 			if (rgb.isValid())
-				normalAnsi[index] = rgb;
+				tables.normalAnsi[index] = rgb;
+		}
+		else if (group == QStringLiteral("ansi/bold") && index < tables.boldAnsi.size())
+		{
+			const QColor rgb = parseColourValue(colour.attributes.value(QStringLiteral("rgb")));
+			if (rgb.isValid())
+				tables.boldAnsi[index] = rgb;
 		}
 		else if ((group == QStringLiteral("custom/custom") || group == QStringLiteral("custom")) &&
-		         index < customText.size())
+		         index < tables.customText.size())
 		{
 			const QColor text = parseColourValue(colour.attributes.value(QStringLiteral("text")));
 			const QColor back = parseColourValue(colour.attributes.value(QStringLiteral("back")));
 			if (text.isValid())
-				customText[index] = text;
+				tables.customText[index] = text;
 			if (back.isValid())
-				customBack[index] = back;
+				tables.customBack[index] = back;
 		}
 	}
+}
+
+static ResolvedWorldColourTables buildResolvedWorldColourTables(const QList<WorldRuntime::Colour> &colours)
+{
+	ResolvedWorldColourTables tables;
+	buildResolvedColourTables(colours, tables);
+	return tables;
 }
 
 static int publicNoteColourIndexFromWorldAttribute(const QString                     &value,
                                                    const QList<WorldRuntime::Colour> &colours,
                                                    const int                          fallbackPublicIndex)
 {
-	QVector<QColor> normalAnsi;
-	QVector<QColor> customText;
-	QVector<QColor> customBack;
-	buildCustomColours(colours, normalAnsi, customText, customBack);
-	return QMudNoteColour::publicIndexFromWorldAttribute(value, customText, fallbackPublicIndex);
+	const ResolvedWorldColourTables tables = buildResolvedWorldColourTables(colours);
+	return QMudNoteColour::publicIndexFromWorldAttribute(value, tables.customText, fallbackPublicIndex);
 }
 
 static long colorToLong(const QColor &color)
@@ -12658,10 +12884,45 @@ static QString convertToRegularExpression(const QString &text)
 	return QString::fromLatin1(out);
 }
 
-constexpr int kAnsiBlack = 0;
-constexpr int kAnsiWhite = 7;
+constexpr int              kAnsiBlack = 0;
+constexpr int              kAnsiWhite = 7;
 
-bool          WorldRuntime::notesInRgb() const
+static ResolvedNoteColours resolveNoteColours(const bool notesInRgb, const int noteTextColour,
+                                              const long noteColourFore, const long noteColourBack,
+                                              const ResolvedWorldColourTables &colourTables,
+                                              const QMap<QString, QString>    &worldAttributes)
+{
+	if (notesInRgb)
+		return {noteColourFore, noteColourBack};
+
+	const bool custom16Default =
+	    isEnabledFlag(worldAttributes.value(QStringLiteral("custom_16_is_default_colour")));
+	if (const bool sameColour = (noteTextColour == WorldRuntime::kSameColour || noteTextColour < 0);
+	    sameColour)
+	{
+		return {custom16Default ? colorToLong(colourTables.customText.value(15))
+		                        : colorToLong(colourTables.normalAnsi.value(kAnsiWhite)),
+		        custom16Default ? colorToLong(colourTables.customBack.value(15))
+		                        : colorToLong(colourTables.normalAnsi.value(kAnsiBlack))};
+	}
+	if (noteTextColour >= 0 && noteTextColour < colourTables.customText.size() &&
+	    noteTextColour < colourTables.customBack.size())
+		return {colorToLong(colourTables.customText.value(noteTextColour)),
+		        colorToLong(colourTables.customBack.value(noteTextColour))};
+	return {};
+}
+
+static ResolvedNoteColours resolveNoteColours(const bool notesInRgb, const int noteTextColour,
+                                              const long noteColourFore, const long noteColourBack,
+                                              const QList<WorldRuntime::Colour> &colours,
+                                              const QMap<QString, QString>      &worldAttributes)
+{
+	const ResolvedWorldColourTables colourTables = buildResolvedWorldColourTables(colours);
+	return resolveNoteColours(notesInRgb, noteTextColour, noteColourFore, noteColourBack, colourTables,
+	                          worldAttributes);
+}
+
+bool WorldRuntime::notesInRgb() const
 {
 	if (QThread::currentThread() != thread())
 		return qmudInvokeMethodTrueOnSuccess(const_cast<WorldRuntime *>(this),
@@ -12707,18 +12968,9 @@ long WorldRuntime::noteColourFore() const
 	if (m_notesInRgb)
 		return m_noteColourFore;
 
-	QVector<QColor> normalAnsi;
-	QVector<QColor> customText;
-	QVector<QColor> customBack;
-	buildCustomColours(m_colours, normalAnsi, customText, customBack);
-	const bool custom16Default =
-	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("custom_16_is_default_colour")));
-	if (const bool sameColour = (m_noteTextColour == kSameColour || m_noteTextColour < 0); sameColour)
-		return custom16Default ? colorToLong(customText.value(15))
-		                       : colorToLong(normalAnsi.value(kAnsiWhite));
-	if (m_noteTextColour >= 0 && m_noteTextColour < customText.size())
-		return colorToLong(customText.value(m_noteTextColour));
-	return 0;
+	return resolveNoteColours(m_notesInRgb, m_noteTextColour, m_noteColourFore, m_noteColourBack, m_colours,
+	                          m_worldAttributes)
+	    .fore;
 }
 
 long WorldRuntime::noteColourBack() const
@@ -12730,18 +12982,9 @@ long WorldRuntime::noteColourBack() const
 	if (m_notesInRgb)
 		return m_noteColourBack;
 
-	QVector<QColor> normalAnsi;
-	QVector<QColor> customText;
-	QVector<QColor> customBack;
-	buildCustomColours(m_colours, normalAnsi, customText, customBack);
-	const bool custom16Default =
-	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("custom_16_is_default_colour")));
-	if (const bool sameColour = (m_noteTextColour == kSameColour || m_noteTextColour < 0); sameColour)
-		return custom16Default ? colorToLong(customBack.value(15))
-		                       : colorToLong(normalAnsi.value(kAnsiBlack));
-	if (m_noteTextColour >= 0 && m_noteTextColour < customBack.size())
-		return colorToLong(customBack.value(m_noteTextColour));
-	return 0;
+	return resolveNoteColours(m_notesInRgb, m_noteTextColour, m_noteColourFore, m_noteColourBack, m_colours,
+	                          m_worldAttributes)
+	    .back;
 }
 
 void WorldRuntime::setNoteColourFore(long value)
@@ -12898,25 +13141,7 @@ long WorldRuntime::normalColour(int index) const
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::normalColour");
 	if (index < 1 || index > 8)
 		return 0;
-	const int seq = index;
-	for (const auto &colour : m_colours)
-	{
-		if (colour.group.trimmed().compare(QStringLiteral("ansi/normal"), Qt::CaseInsensitive) != 0)
-			continue;
-		bool      ok      = false;
-		const int itemSeq = colour.attributes.value(QStringLiteral("seq")).toInt(&ok);
-		if (!ok || itemSeq != seq)
-			continue;
-		const QString rgb       = colour.attributes.value(QStringLiteral("rgb"));
-		bool          numericOk = false;
-		const int     numeric   = rgb.toInt(&numericOk);
-		if (numericOk)
-			return numeric;
-		QColor const parsed(rgb);
-		if (parsed.isValid())
-			return (parsed.red() | (parsed.green() << 8) | (parsed.blue() << 16));
-	}
-	return 0;
+	return colorToLong(ansiColour(false, index));
 }
 
 void WorldRuntime::setNormalColour(int index, long value)
@@ -12930,23 +13155,8 @@ void WorldRuntime::setNormalColour(int index, long value)
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setNormalColour");
 	if (index < 1 || index > 8)
 		return;
-	const int seq = index;
-	for (auto &colour : m_colours)
-	{
-		if (colour.group.trimmed().compare(QStringLiteral("ansi/normal"), Qt::CaseInsensitive) != 0)
-			continue;
-		bool      ok      = false;
-		const int itemSeq = colour.attributes.value(QStringLiteral("seq")).toInt(&ok);
-		if (!ok || itemSeq != seq)
-			continue;
-		colour.attributes.insert(QStringLiteral("rgb"), QString::number(value & 0x00FFFFFF));
-		return;
-	}
-	Colour entry;
-	entry.group = QStringLiteral("ansi/normal");
-	entry.attributes.insert(QStringLiteral("seq"), QString::number(seq));
-	entry.attributes.insert(QStringLiteral("rgb"), QString::number(value & 0x00FFFFFF));
-	m_colours.push_back(entry);
+	const auto packed = static_cast<QMudColorRef>(value & 0x00FFFFFF);
+	setAnsiColour(false, index, QColor(qmudRed(packed), qmudGreen(packed), qmudBlue(packed)));
 }
 
 int WorldRuntime::addToMapper(const QString &direction, const QString &reverse)
@@ -13331,20 +13541,12 @@ void WorldRuntime::fireWorldSaveHandlers()
 
 void WorldRuntime::fireWorldGetFocusHandlers()
 {
-	const unsigned short previousActionSource = m_currentActionSource;
-	m_currentActionSource                     = eWorldAction;
-	dispatchWorldNoArgCallbackByAttribute(QStringLiteral("on_world_get_focus"), false);
-	callPluginCallbacksNoArgs(QStringLiteral("OnPluginGetFocus"), false);
-	m_currentActionSource = previousActionSource;
+	requestActiveState(true);
 }
 
 void WorldRuntime::fireWorldLoseFocusHandlers()
 {
-	const unsigned short previousActionSource = m_currentActionSource;
-	m_currentActionSource                     = eWorldAction;
-	dispatchWorldNoArgCallbackByAttribute(QStringLiteral("on_world_lose_focus"), false);
-	callPluginCallbacksNoArgs(QStringLiteral("OnPluginLoseFocus"), false);
-	m_currentActionSource = previousActionSource;
+	requestActiveState(false);
 }
 
 void WorldRuntime::mxpError(int level, long messageNumber, const QString &message)
@@ -14784,6 +14986,7 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 		return fallback;
 	if (!m_luaExecutor)
 		return fallback;
+	applyCurrentActionSourceOverride(callbackRequest);
 	if (!callbackRequest.miniWindowSnapshotArg)
 		callbackRequest.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatch(
 		    callbackRequest.engines, callbackRequest.lineSnapshotPolicy);
@@ -14794,11 +14997,12 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 	const bool mmStartupDiag              = qmudMmStartupDiagShouldLogRequest(callbackRequest);
 	const bool dispatchDiagnosticsEnabled = m_traceEnabled;
 #endif
-	const bool inputCritical      = pluginCallbackDispatchIsInputCritical(callbackRequest);
-	callbackRequest.inputCritical = inputCritical;
+	const bool inputCritical         = pluginCallbackDispatchIsInputCritical(callbackRequest);
+	callbackRequest.inputCritical    = inputCritical;
+	const bool mustWaitForCompletion = inputCritical;
 	const bool canRetainQueuedResult =
-	    completionBarrier && (inputCritical || (!m_pluginCallbackDispatchWorkerInFlight &&
-	                                            m_pluginCallbackDispatchQueue.isEmpty()));
+	    completionBarrier && (mustWaitForCompletion || (!m_pluginCallbackDispatchWorkerInFlight &&
+	                                                    m_pluginCallbackDispatchQueue.isEmpty()));
 
 	if (completionBarrier && !m_pluginCallbackDispatchActive && !m_pluginCallbackDispatchWorkerInFlight &&
 	    m_pluginCallbackDispatchQueue.isEmpty() && !m_pluginCallbackDispatchDrainQueued)
@@ -14826,7 +15030,7 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 #ifndef NDEBUG
 		const qint64 executeStartNs = pluginCallbackDispatchNowNs();
 #endif
-		LuaBatchDispatchResult directResult = m_luaExecutor->dispatchBatch(callbackRequest);
+		LuaBatchDispatchResult directResult = m_luaExecutor->dispatchBatch(directCommand.request);
 		applyLuaDeferredRuntimeMutationBatches(directResult);
 		if (directResult.suspended)
 		{
@@ -14862,9 +15066,8 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 				{
 					timeoutLogged = true;
 					qWarning().noquote()
-					    << QStringLiteral(
-					           "[QMud][LuaDispatchDiag] input-critical barrier waiting for suspended "
-					           "callback work for %1 ms; id=%2 callback=%3 kind=%4")
+					    << QStringLiteral("[QMud][LuaDispatchDiag] retained barrier waiting for suspended "
+					                      "callback work for %1 ms; id=%2 callback=%3 kind=%4")
 					           .arg(waitTimer.elapsed())
 					           .arg(directCommandId)
 					           .arg(callbackRequest.functionName,
@@ -14922,13 +15125,20 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 	if (inputCritical)
 	{
 		auto insertIt = m_pluginCallbackDispatchQueue.begin();
-		while (insertIt != m_pluginCallbackDispatchQueue.end() && !insertIt->request.lowPriority)
+		while (insertIt != m_pluginCallbackDispatchQueue.end() &&
+		       pluginCallbackLaneCommandBlocksInputCriticalInsertion(*insertIt))
 			++insertIt;
-		m_pluginCallbackDispatchQueue.insert(insertIt, command);
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = command;
+		m_pluginCallbackDispatchQueue.insert(insertIt, laneCommand);
 	}
 	else
 	{
-		m_pluginCallbackDispatchQueue.enqueue(command);
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = command;
+		m_pluginCallbackDispatchQueue.enqueue(laneCommand);
 	}
 #ifndef NDEBUG
 	if (mmStartupDiag)
@@ -14966,7 +15176,7 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 			if (m_pluginCallbackDispatchResults.contains(command.id))
 				break;
 
-			if (!inputCritical && !hasSuspendedPluginCallbackDispatchCommand(command.id))
+			if (!mustWaitForCompletion && !hasSuspendedPluginCallbackDispatchCommand(command.id))
 				break;
 
 			QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
@@ -14985,9 +15195,8 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 			{
 				timeoutLogged = true;
 				qWarning().noquote()
-				    << QStringLiteral(
-				           "[QMud][LuaDispatchDiag] input-critical barrier queued behind callback work "
-				           "for %1 ms; waiting for completion id=%2 callback=%3 kind=%4")
+				    << QStringLiteral("[QMud][LuaDispatchDiag] retained barrier queued behind callback work "
+				                      "for %1 ms; waiting for completion id=%2 callback=%3 kind=%4")
 				           .arg(waitTimer.elapsed())
 				           .arg(command.id)
 				           .arg(callbackRequest.functionName,
@@ -15125,6 +15334,7 @@ bool WorldRuntime::tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(
 			completion(fallback);
 		return false;
 	}
+	applyCurrentActionSourceOverride(callbackRequest);
 	if (!callbackRequest.miniWindowSnapshotArg)
 		callbackRequest.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatch(
 		    callbackRequest.engines, callbackRequest.lineSnapshotPolicy);
@@ -15153,13 +15363,20 @@ bool WorldRuntime::tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(
 	if (inputCritical)
 	{
 		auto insertIt = m_pluginCallbackDispatchQueue.begin();
-		while (insertIt != m_pluginCallbackDispatchQueue.end() && !insertIt->request.lowPriority)
+		while (insertIt != m_pluginCallbackDispatchQueue.end() &&
+		       pluginCallbackLaneCommandBlocksInputCriticalInsertion(*insertIt))
 			++insertIt;
-		m_pluginCallbackDispatchQueue.insert(insertIt, std::move(command));
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = std::move(command);
+		m_pluginCallbackDispatchQueue.insert(insertIt, std::move(laneCommand));
 	}
 	else
 	{
-		m_pluginCallbackDispatchQueue.enqueue(std::move(command));
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = std::move(command);
+		m_pluginCallbackDispatchQueue.enqueue(std::move(laneCommand));
 	}
 #ifndef NDEBUG
 	if (mmStartupDiag)
@@ -15182,6 +15399,17 @@ bool WorldRuntime::tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(
 #endif
 	queuePluginCallbackDispatchDrain();
 	return true;
+}
+
+void WorldRuntime::applyCurrentActionSourceOverride(LuaBatchDispatchRequest &request) const
+{
+	if (request.hasActionSourceOverride)
+		return;
+	const unsigned short actionSource = currentActionSource();
+	if (actionSource == eUnknownActionSource)
+		return;
+	request.hasActionSourceOverride = true;
+	request.actionSourceOverride    = actionSource;
 }
 
 LuaBatchDispatchResult WorldRuntime::dispatchLuaBatch(const LuaBatchDispatchRequest &request) const
@@ -15279,6 +15507,129 @@ void WorldRuntime::dispatchWorldNoArgCallbackByAttribute(const QString &attribut
 	                                  completionBarrier);
 }
 
+void WorldRuntime::enqueueActiveStateTransition(const bool active)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::enqueueActiveStateTransition");
+	if (m_pluginCallbackDispatchShuttingDown)
+		return;
+	if (m_pendingActiveStateTransitionCount == 0 && m_active == active)
+	{
+		if (active)
+		{
+			clearNewLines();
+			invalidateLuaCallbackDispatchSnapshot();
+		}
+		return;
+	}
+	if (m_pendingActiveStateTransitionCount > 0 && m_lastPendingActiveState == active)
+		return;
+
+	m_active = active;
+	if (active)
+		clearNewLines();
+	invalidateLuaCallbackDispatchSnapshot();
+
+	ActiveStateTransitionCommand command;
+	command.id     = m_nextPluginCallbackDispatchId++;
+	command.active = active;
+#ifndef NDEBUG
+	command.enqueuedAtNs        = pluginCallbackDispatchNowNs();
+	command.queueDepthAtEnqueue = safeQSizeToInt(m_pluginCallbackDispatchQueue.size()) + 1;
+#endif
+
+	PluginCallbackLaneCommand laneCommand;
+	laneCommand.kind        = PluginCallbackLaneCommand::Kind::ActiveStateTransition;
+	laneCommand.activeState = command;
+	auto insertIt           = m_pluginCallbackDispatchQueue.begin();
+	while (insertIt != m_pluginCallbackDispatchQueue.end() &&
+	       pluginCallbackLaneCommandBlocksInputCriticalInsertion(*insertIt))
+		++insertIt;
+	m_pluginCallbackDispatchQueue.insert(insertIt, laneCommand);
+	++m_pendingActiveStateTransitionCount;
+	m_lastPendingActiveState = active;
+	queuePluginCallbackDispatchDrain();
+}
+
+bool WorldRuntime::buildActiveStateNoArgCallbackCommand(
+    const QVector<QSharedPointer<LuaCallbackEngine>> &engines, const QString &functionName,
+    const bool revalidateObservedRecipients, PluginCallbackDispatchCommand &command)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::buildActiveStateNoArgCallbackCommand");
+	if (!m_luaExecutor || functionName.isEmpty() || engines.isEmpty())
+		return false;
+
+	LuaBatchDispatchRequest request;
+	request.kind                         = LuaBatchDispatchKind::NoArgs;
+	request.lane                         = LuaBatchDispatchLane::Callback;
+	request.engines                      = engines;
+	request.functionName                 = functionName;
+	request.defaultResult                = true;
+	request.revalidateObservedRecipients = revalidateObservedRecipients;
+	request.hasActionSourceOverride      = true;
+	request.actionSourceOverride         = eWorldAction;
+	if (revalidateObservedRecipients)
+		revalidateObservedCallbackRecipients(request);
+	if (request.engines.isEmpty())
+		return false;
+	request.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatchWithActionSource(
+	    request.engines, request.lineSnapshotPolicy, request.actionSourceOverride);
+
+	command.id           = m_nextPluginCallbackDispatchId++;
+	command.request      = std::move(request);
+	command.retainResult = false;
+#ifndef NDEBUG
+	command.enqueuedAtNs        = pluginCallbackDispatchNowNs();
+	command.queueDepthAtEnqueue = safeQSizeToInt(m_pluginCallbackDispatchQueue.size()) + 1;
+#endif
+	return true;
+}
+
+void WorldRuntime::processActiveStateTransitionCommand(const ActiveStateTransitionCommand &command)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::processActiveStateTransitionCommand");
+	if (m_pendingActiveStateTransitionCount > 0)
+		--m_pendingActiveStateTransitionCount;
+
+	const QString worldCallbackName =
+	    command.active ? m_worldAttributes.value(QStringLiteral("on_world_get_focus")).trimmed()
+	                   : m_worldAttributes.value(QStringLiteral("on_world_lose_focus")).trimmed();
+	const QString pluginCallbackName =
+	    command.active ? QStringLiteral("OnPluginGetFocus") : QStringLiteral("OnPluginLoseFocus");
+	const bool currentActive = m_active;
+	m_active                 = command.active;
+	invalidateLuaCallbackDispatchSnapshot();
+	const auto restoreActive = qScopeGuard(
+	    [this, currentActive]
+	    {
+		    m_active = currentActive;
+		    invalidateLuaCallbackDispatchSnapshot();
+	    });
+
+	PluginCallbackDispatchCommand worldCommand;
+	const bool                    hasWorldCommand =
+	    isLuaScriptingEnabled(m_worldAttributes) && m_luaCallbacks &&
+	    buildActiveStateNoArgCallbackCommand({makeNonOwningLuaEngineRef(m_luaCallbacks)}, worldCallbackName,
+	                                         false, worldCommand);
+	PluginCallbackDispatchCommand pluginCommand;
+	const bool                    hasPluginCommand = buildActiveStateNoArgCallbackCommand(
+	    collectPluginCallbackRecipients(pluginCallbackName), pluginCallbackName, true, pluginCommand);
+
+	if (hasPluginCommand)
+	{
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = std::move(pluginCommand);
+		m_pluginCallbackDispatchQueue.insert(m_pluginCallbackDispatchQueue.begin(), std::move(laneCommand));
+	}
+	if (hasWorldCommand)
+	{
+		PluginCallbackLaneCommand laneCommand;
+		laneCommand.kind     = PluginCallbackLaneCommand::Kind::CallbackDispatch;
+		laneCommand.callback = std::move(worldCommand);
+		m_pluginCallbackDispatchQueue.insert(m_pluginCallbackDispatchQueue.begin(), std::move(laneCommand));
+	}
+}
+
 void WorldRuntime::drainPluginCallbackDispatchQueue(const quint64 completionCommandId)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::drainPluginCallbackDispatchQueue");
@@ -15346,6 +15697,14 @@ void WorldRuntime::queuePluginCallbackDispatchDrain()
 		drainPluginCallbackDispatchQueue();
 }
 
+bool WorldRuntime::pluginCallbackLaneCommandBlocksInputCriticalInsertion(
+    const PluginCallbackLaneCommand &command)
+{
+	if (command.kind == PluginCallbackLaneCommand::Kind::ActiveStateTransition)
+		return true;
+	return !command.callback.request.lowPriority;
+}
+
 void WorldRuntime::processNextPluginCallbackDispatchCommand()
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::processNextPluginCallbackDispatchCommand");
@@ -15353,7 +15712,18 @@ void WorldRuntime::processNextPluginCallbackDispatchCommand()
 		return;
 	if (m_pluginCallbackDispatchWorkerInFlight)
 		return;
-	PluginCallbackDispatchCommand command = m_pluginCallbackDispatchQueue.dequeue();
+	PluginCallbackLaneCommand command = m_pluginCallbackDispatchQueue.dequeue();
+	if (command.kind == PluginCallbackLaneCommand::Kind::ActiveStateTransition)
+	{
+		processActiveStateTransitionCommand(command.activeState);
+		return;
+	}
+	processPluginCallbackDispatchCommand(std::move(command.callback));
+}
+
+void WorldRuntime::processPluginCallbackDispatchCommand(PluginCallbackDispatchCommand &&command)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::processPluginCallbackDispatchCommand");
 	revalidateObservedCallbackRecipients(command.request);
 #ifndef NDEBUG
 	const bool mmStartupDiag = qmudMmStartupDiagShouldLogRequest(command.request);
@@ -15376,6 +15746,9 @@ void WorldRuntime::processNextPluginCallbackDispatchCommand()
 		finishPluginCallbackDispatchCommand(std::move(command), LuaBatchDispatchResult(fallback));
 		return;
 	}
+	if (!command.request.miniWindowSnapshotArg)
+		command.request.miniWindowSnapshotArg = captureLuaCallbackSnapshotForDispatch(
+		    command.request.engines, command.request.lineSnapshotPolicy);
 #ifndef NDEBUG
 	if (mmStartupDiag)
 	{
@@ -16772,6 +17145,15 @@ WorldRuntime::RuntimeCountersSnapshot WorldRuntime::runtimeCountersSnapshot(cons
 		                          [this, includeStrings] { return runtimeCountersSnapshot(includeStrings); });
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::runtimeCountersSnapshot");
+	const ResolvedNoteColours noteColours = resolveNoteColours(
+	    m_notesInRgb, m_noteTextColour, m_noteColourFore, m_noteColourBack, m_colours, m_worldAttributes);
+	return runtimeCountersSnapshotWithResolvedNoteColours(includeStrings, noteColours.fore, noteColours.back);
+}
+
+WorldRuntime::RuntimeCountersSnapshot WorldRuntime::runtimeCountersSnapshotWithResolvedNoteColours(
+    const bool includeStrings, const long noteColourFore, const long noteColourBack) const
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::runtimeCountersSnapshotWithResolvedNoteColours");
 	RuntimeCountersSnapshot snapshot;
 	snapshot.newLines               = m_newLines;
 	snapshot.totalLinesSent         = m_totalLinesSent;
@@ -16830,8 +17212,8 @@ WorldRuntime::RuntimeCountersSnapshot WorldRuntime::runtimeCountersSnapshot(cons
 	snapshot.isChatAcceptingCalls   = m_chatServer != nullptr;
 	snapshot.noteStyle              = m_noteStyle;
 	snapshot.noteTextColour         = m_noteTextColour;
-	snapshot.noteColourBack         = m_noteColourBack;
-	snapshot.noteColourFore         = m_noteColourFore;
+	snapshot.noteColourBack         = noteColourBack;
+	snapshot.noteColourFore         = noteColourFore;
 	snapshot.backgroundColour       = m_backgroundColour;
 	snapshot.utf8ErrorCount         = m_utf8ErrorCount;
 	snapshot.triggersEvaluatedCount = m_triggersEvaluatedCount;
@@ -16962,8 +17344,26 @@ void WorldRuntime::registerAccelerator(qint64 key, int commandId, const Accelera
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::registerAccelerator");
+	const auto existing = m_acceleratorKeyToCommand.constFind(key);
+	if (existing != m_acceleratorKeyToCommand.constEnd())
+	{
+		const int previousCommandId = existing.value();
+		if (previousCommandId == commandId)
+		{
+			const auto existingEntry = m_commandToAcceleratorEntry.constFind(commandId);
+			if (existingEntry != m_commandToAcceleratorEntry.constEnd() &&
+			    existingEntry->text == entry.text && existingEntry->sendTo == entry.sendTo &&
+			    existingEntry->pluginId == entry.pluginId)
+				return;
+		}
+		else
+		{
+			m_commandToAcceleratorEntry.remove(previousCommandId);
+		}
+	}
 	m_acceleratorKeyToCommand[key]         = commandId;
 	m_commandToAcceleratorEntry[commandId] = entry;
+	emit acceleratorsChanged();
 }
 
 void WorldRuntime::removeAccelerator(qint64 key)
@@ -16980,6 +17380,7 @@ void WorldRuntime::removeAccelerator(qint64 key)
 		return;
 	m_commandToAcceleratorEntry.remove(it.value());
 	m_acceleratorKeyToCommand.erase(it);
+	emit acceleratorsChanged();
 }
 
 int WorldRuntime::acceleratorCommandForKey(qint64 key) const
@@ -19230,22 +19631,7 @@ namespace
 {
 	QColor parseColorValueRuntime(const QString &value)
 	{
-		if (value.isEmpty())
-			return {};
-
-		QColor color(value);
-		if (color.isValid())
-			return color;
-
-		bool      ok      = false;
-		const int numeric = value.toInt(&ok);
-		if (!ok)
-			return {};
-
-		const int r = (numeric >> 16) & 0xFF;
-		const int g = (numeric >> 8) & 0xFF;
-		const int b = numeric & 0xFF;
-		return {r, g, b};
+		return parseColourValue(value);
 	}
 
 	QVector<QColor> defaultAnsiColours(bool bold)
@@ -19305,7 +19691,7 @@ void WorldRuntime::setAnsiColour(bool bold, int index, const QColor &color)
 		return;
 
 	const QString targetGroup = bold ? QStringLiteral("ansi/bold") : QStringLiteral("ansi/normal");
-	const QString rgb         = QString::number((color.red() << 16) | (color.green() << 8) | color.blue());
+	const QString rgb         = color.name(QColor::HexRgb);
 
 	for (auto &colour : m_colours)
 	{

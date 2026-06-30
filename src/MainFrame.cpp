@@ -8,10 +8,12 @@
 
 #include "MainFrame.h"
 
+#include "AcceleratorUtils.h"
 #include "ActivityWindow.h"
 #include "AppController.h"
 #include "MainFrameActionUtils.h"
 #include "MainFrameMdiUtils.h"
+#include "ShortcutPreferenceUtils.h"
 #include "WorldChildWindow.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
@@ -46,6 +48,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 // We need two timers, because processing a tick shouldn't reset timer processing nor vice versa
 
@@ -101,6 +104,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 	setWindowTitle(QStringLiteral("QMud"));
 	setWindowIcon(QIcon(QStringLiteral(":/qmud/res/QMud.png")));
 	resize(1024, 768);
+	rebuildEffectiveActionShortcutCache();
 
 	buildMenus();
 	buildMdiArea();
@@ -200,6 +204,141 @@ QAction *MainWindow::actionForCommand(const QString &cmdName) const
 	return m_actions.value(cmdName, nullptr);
 }
 
+const QList<QKeySequence> &MainWindow::effectiveActionShortcuts(const QString &id) const
+{
+	const auto cached = m_effectiveActionShortcutCache.constFind(id);
+	if (cached != m_effectiveActionShortcutCache.constEnd())
+		return cached.value();
+
+	static const QList<QKeySequence> emptyShortcuts;
+	return emptyShortcuts;
+}
+
+void MainWindow::rebuildEffectiveActionShortcutCache()
+{
+	m_effectiveActionShortcutCache.clear();
+	m_effectiveActionShortcutCache.reserve(QMudShortcutPreferenceUtils::shortcutDefinitions().size());
+	const AppController *app = AppController::instance();
+	for (const QMudShortcutPreferenceUtils::ShortcutDefinition &definition :
+	     QMudShortcutPreferenceUtils::shortcutDefinitions())
+	{
+		QList<QKeySequence> shortcuts = QMudShortcutPreferenceUtils::effectiveShortcuts(
+		    definition, app ? app->getGlobalOption(definition.preferenceKey).toString() : QString());
+		if (!shortcuts.isEmpty() && !m_activeWorldAcceleratorKeys.isEmpty())
+		{
+			QList<QKeySequence> filtered;
+			filtered.reserve(shortcuts.size());
+			for (const QKeySequence &shortcut : std::as_const(shortcuts))
+			{
+				qint64 mapKey = 0;
+				if (AcceleratorUtils::keySequenceToAcceleratorMapKey(shortcut, mapKey) &&
+				    m_activeWorldAcceleratorKeys.contains(mapKey))
+					continue;
+				filtered.push_back(shortcut);
+			}
+			shortcuts = filtered;
+		}
+		m_effectiveActionShortcutCache.insert(definition.id, shortcuts);
+	}
+	m_preferencesShortcuts       = effectiveActionShortcuts(QStringLiteral("Preferences"));
+	m_selectPreviousTabShortcuts = effectiveActionShortcuts(QStringLiteral("SelectPreviousTab"));
+	m_selectNextTabShortcuts     = effectiveActionShortcuts(QStringLiteral("SelectNextTab"));
+}
+
+void MainWindow::setActiveShortcutAcceleratorRuntime(WorldRuntime *runtime)
+{
+	if (m_activeShortcutAcceleratorRuntime == runtime)
+	{
+		rebuildActiveWorldAcceleratorCache();
+		applyActionShortcutPreferences();
+		return;
+	}
+
+	if (m_activeShortcutAcceleratorRuntime)
+	{
+		disconnect(m_activeShortcutAcceleratorRuntime, &WorldRuntime::acceleratorsChanged, this,
+		           &MainWindow::onActiveWorldAcceleratorsChanged);
+		disconnect(m_activeShortcutAcceleratorDestroyedConnection);
+		m_activeShortcutAcceleratorDestroyedConnection = {};
+	}
+
+	m_activeShortcutAcceleratorRuntime = runtime;
+	if (m_activeShortcutAcceleratorRuntime)
+	{
+		connect(m_activeShortcutAcceleratorRuntime, &WorldRuntime::acceleratorsChanged, this,
+		        &MainWindow::onActiveWorldAcceleratorsChanged, Qt::UniqueConnection);
+		m_activeShortcutAcceleratorDestroyedConnection =
+		    connect(m_activeShortcutAcceleratorRuntime, &QObject::destroyed, this,
+		            [this]
+		            {
+			            m_activeShortcutAcceleratorRuntime             = nullptr;
+			            m_activeShortcutAcceleratorDestroyedConnection = {};
+			            m_activeWorldAcceleratorKeys.clear();
+			            applyActionShortcutPreferences();
+		            });
+	}
+
+	rebuildActiveWorldAcceleratorCache();
+	applyActionShortcutPreferences();
+}
+
+void MainWindow::rebuildActiveWorldAcceleratorCache()
+{
+	m_activeWorldAcceleratorKeys.clear();
+	if (!m_activeShortcutAcceleratorRuntime)
+		return;
+
+	const QVector<qint64> keys = m_activeShortcutAcceleratorRuntime->acceleratorKeys();
+	m_activeWorldAcceleratorKeys.reserve(keys.size());
+	for (const qint64 key : keys)
+		m_activeWorldAcceleratorKeys.insert(key);
+}
+
+void MainWindow::refreshActionShortcutTooltip(QAction *action, const QString &cmdName) const
+{
+	if (!action || !QMudShortcutPreferenceUtils::definitionForId(cmdName))
+		return;
+	const QString baseText = action->property("qmudShortcutTooltipBase").toString();
+	if (baseText.isEmpty())
+		return;
+
+	QString       tip = baseText;
+	const QString suffix =
+	    QMudShortcutPreferenceUtils::shortcutListToNativeText(effectiveActionShortcuts(cmdName));
+	if (!suffix.isEmpty())
+		tip = QStringLiteral("%1 (%2)").arg(tip, suffix);
+	action->setToolTip(tip);
+	action->setStatusTip(tip);
+}
+
+void MainWindow::applyActionShortcutPreferences()
+{
+	rebuildEffectiveActionShortcutCache();
+	const QList<QAction *> actions = findChildren<QAction *>();
+	for (QAction *action : actions)
+	{
+		if (!action)
+			continue;
+		const QString id = action->objectName();
+		if (!QMudShortcutPreferenceUtils::definitionForId(id))
+			continue;
+		action->setShortcuts(effectiveActionShortcuts(id));
+		action->setShortcutContext(Qt::ApplicationShortcut);
+		refreshActionShortcutTooltip(action, id);
+	}
+}
+
+void MainWindow::applyShortcutPreferences()
+{
+	applyActionShortcutPreferences();
+	const QList<WorldView *> views = findChildren<WorldView *>();
+	for (WorldView *view : views)
+	{
+		if (view)
+			view->applyShortcutPreferences();
+	}
+}
+
 static void applyExplicitMacMenuRole(QAction *action)
 {
 #ifdef Q_OS_MACOS
@@ -226,18 +365,34 @@ static QMenu *addMainFrameSubMenu(QMenu *parent, const QString &title)
 	return menu;
 }
 
+static QString menuTextWithoutEmbeddedShortcut(QString text)
+{
+	const qsizetype tab = text.indexOf(QLatin1Char('\t'));
+	if (tab >= 0)
+		text.truncate(tab);
+	return text;
+}
+
 QAction *MainWindow::addActionToMenu(QMenu *menu, const QString &cmdName, const QString &text,
                                      const QKeySequence &shortcut)
 {
-	auto              *a                = new QAction(text, this);
-	const QKeySequence resolvedShortcut = QMudMainFrameActionUtils::shortcutForCommand(cmdName, shortcut);
-	if (!resolvedShortcut.isEmpty())
-		a->setShortcut(resolvedShortcut);
+	auto      *a                     = new QAction(menuTextWithoutEmbeddedShortcut(text), this);
+	const bool hasShortcutDefinition = QMudShortcutPreferenceUtils::definitionForId(cmdName) != nullptr;
+	QList<QKeySequence> resolvedShortcuts =
+	    hasShortcutDefinition ? effectiveActionShortcuts(cmdName) : QList<QKeySequence>{};
+	if (!hasShortcutDefinition && resolvedShortcuts.isEmpty())
+	{
+		const QKeySequence resolvedShortcut = QMudMainFrameActionUtils::shortcutForCommand(cmdName, shortcut);
+		if (!resolvedShortcut.isEmpty())
+			resolvedShortcuts.push_back(resolvedShortcut);
+	}
+	if (!resolvedShortcuts.isEmpty())
+		a->setShortcuts(resolvedShortcuts);
 	a->setShortcutContext(Qt::ApplicationShortcut);
 	a->setMenuRole(QMudMainFrameActionUtils::menuRoleForCommand(cmdName));
 	a->setObjectName(cmdName); // preserve original command-name for lookup
 	a->setIconVisibleInMenu(false);
-	QString tipText = text;
+	QString tipText = a->text();
 	tipText.remove(QLatin1Char('&'));
 	if (tipText.endsWith(QStringLiteral("...")))
 		tipText.chop(3);
@@ -293,9 +448,7 @@ void MainWindow::buildMenus()
 	auto *worldPropertiesAction = addActionToMenu(m_fileMenu, QStringLiteral("Preferences"),
 	                                              QStringLiteral("&World Properties...\tAlt+Enter"),
 	                                              QKeySequence(QStringLiteral("Alt+Return")));
-	worldPropertiesAction->setShortcuts({QKeySequence(QStringLiteral("Alt+Return")),
-	                                     QKeySequence(QStringLiteral("Alt+Enter")),
-	                                     QKeySequence(QStringLiteral("Ctrl+G"))});
+	worldPropertiesAction->setShortcuts(effectiveActionShortcuts(QStringLiteral("Preferences")));
 	addActionToMenu(m_fileMenu, QStringLiteral("WindowsSocketInfo"),
 	                QStringLiteral("Windows Socket Info..."));
 	m_fileMenu->addSeparator();
@@ -549,9 +702,7 @@ void MainWindow::buildMenus()
 	QAction *allConfigurationAction = addActionToMenu(configureMenu, QStringLiteral("Preferences"),
 	                                                  QStringLiteral("All &Configuration...\tAlt+Enter"),
 	                                                  QKeySequence(QStringLiteral("Alt+Return")));
-	allConfigurationAction->setShortcuts({QKeySequence(QStringLiteral("Alt+Return")),
-	                                      QKeySequence(QStringLiteral("Alt+Enter")),
-	                                      QKeySequence(QStringLiteral("Ctrl+G"))});
+	allConfigurationAction->setShortcuts(effectiveActionShortcuts(QStringLiteral("Preferences")));
 	configureMenu->addSeparator();
 	addActionToMenu(configureMenu, QStringLiteral("ConfigureMudAddress"),
 	                QStringLiteral("MUD Name/IP address...\tAlt+1"), QKeySequence(QStringLiteral("Alt+1")));
@@ -951,7 +1102,7 @@ void MainWindow::buildToolbars()
 		return text.trimmed();
 	};
 
-	auto applyTooltip = [tooltipOverrides, tooltipShortcutOverrides, prettyName,
+	auto applyTooltip = [this, tooltipOverrides, tooltipShortcutOverrides, prettyName,
 	                     sanitizeTip](QAction *action, const QString &cmdName, const QString &fallback)
 	{
 		if (!action)
@@ -962,7 +1113,15 @@ void MainWindow::buildToolbars()
 		else
 			tip = fallback.isEmpty() ? prettyName(cmdName) : fallback;
 		tip = sanitizeTip(tip);
-		if (tooltipShortcutOverrides.contains(cmdName))
+		action->setProperty("qmudShortcutTooltipBase", tip);
+		if (QMudShortcutPreferenceUtils::definitionForId(cmdName))
+		{
+			const QString shortcutText =
+			    QMudShortcutPreferenceUtils::shortcutListToNativeText(effectiveActionShortcuts(cmdName));
+			if (!shortcutText.isEmpty())
+				tip = QStringLiteral("%1 (%2)").arg(tip, shortcutText);
+		}
+		else if (tooltipShortcutOverrides.contains(cmdName))
 			tip = QMudMainFrameActionUtils::toolbarTooltipWithShortcut(
 			    tip, tooltipShortcutOverrides.value(cmdName));
 		if (tip.isEmpty())
@@ -2013,9 +2172,7 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 			if (!runtime)
 				continue;
 			const bool active = sub == window;
-			runtime->setActive(active);
-			if (active)
-				runtime->clearNewLines();
+			runtime->requestActiveState(active);
 			if (active)
 				activeRuntime = runtime;
 		}
@@ -2026,6 +2183,7 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 		if (AppController *app = AppController::instance())
 			app->processScriptFileChange(activeRuntime);
 	}
+	setActiveShortcutAcceleratorRuntime(activeRuntime);
 	updateStatusBar();
 	updateEditActions();
 	refreshActionState();
@@ -2040,6 +2198,12 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 			view->focusInput();
 		}
 	}
+}
+
+void MainWindow::onActiveWorldAcceleratorsChanged()
+{
+	rebuildActiveWorldAcceleratorCache();
+	applyActionShortcutPreferences();
 }
 
 int MainWindow::worldWindowCount() const
@@ -2607,9 +2771,11 @@ void MainWindow::updateActivityToolbarButtons()
 		auto     *action = new QAction(this);
 		action->setObjectName(QMudMainFrameActionUtils::worldCommandNameForSlot(slot));
 		action->setText(QString::number(slot));
-		const QString tooltip = QMudMainFrameActionUtils::worldButtonTooltipForSlot(slot);
-		action->setToolTip(tooltip);
-		action->setStatusTip(tooltip);
+		const QString tooltip = QStringLiteral("Activates world #%1").arg(slot);
+		action->setProperty("qmudShortcutTooltipBase", tooltip);
+		action->setShortcuts(effectiveActionShortcuts(action->objectName()));
+		action->setShortcutContext(Qt::ApplicationShortcut);
+		refreshActionShortcutTooltip(action, action->objectName());
 		connect(action, &QAction::triggered, this, &MainWindow::onActionTriggered);
 		m_actions.insert(action->objectName(), action);
 		m_activityToolbarWidget->addAction(action);
@@ -3221,17 +3387,15 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 	auto *keyEvent = dynamic_cast<QKeyEvent *>(event);
 	if (!keyEvent)
 		return QMainWindow::eventFilter(watched, event);
-	const Qt::KeyboardModifiers mods = keyEvent->modifiers();
-	const bool hasOnlyAlt  = mods.testFlag(Qt::AltModifier) && !mods.testFlag(Qt::ControlModifier) &&
-	                         !mods.testFlag(Qt::ShiftModifier) && !mods.testFlag(Qt::MetaModifier);
-	const bool hasOnlyCtrl = mods.testFlag(Qt::ControlModifier) && !mods.testFlag(Qt::AltModifier) &&
-	                         !mods.testFlag(Qt::ShiftModifier) && !mods.testFlag(Qt::MetaModifier);
-	const bool altEnter =
-	    hasOnlyAlt && (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter);
-	const bool ctrlG       = hasOnlyCtrl && keyEvent->key() == Qt::Key_G;
-	const int  tabShortcut = QMudMainFrameActionUtils::adjacentTabShortcutStep(keyEvent->key(), mods);
+	const bool preferencesShortcut =
+	    QMudShortcutPreferenceUtils::eventMatchesAnyShortcut(keyEvent, m_preferencesShortcuts);
+	const int tabShortcut =
+	    QMudShortcutPreferenceUtils::eventMatchesAnyShortcut(keyEvent, m_selectPreviousTabShortcuts)
+	        ? -1
+	        : (QMudShortcutPreferenceUtils::eventMatchesAnyShortcut(keyEvent, m_selectNextTabShortcuts) ? 1
+	                                                                                                    : 0);
 
-	if (!altEnter && !ctrlG && tabShortcut == 0)
+	if (!preferencesShortcut && tabShortcut == 0)
 		return QMainWindow::eventFilter(watched, event);
 
 	if (event->type() == QEvent::ShortcutOverride)
@@ -3264,7 +3428,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 		return true;
 	}
 
-	if ((altEnter || ctrlG) && triggerWorldPreferencesFromShortcut())
+	if (preferencesShortcut && triggerWorldPreferencesFromShortcut())
 	{
 		keyEvent->accept();
 		return true;

@@ -248,14 +248,15 @@ class LuaCallbackEngine
 		 * @param functionName Callback function name.
 		 * @param hasFunction Optional output flag indicating function existence.
 		 * @param defaultResult Result when function is missing/error.
+		 * @param actionSourceOverride Optional callback-local action source, or `-1` to use runtime state.
 		 * @param suspended Optional output flag set when callback yielded at a modal API.
 		 * @param modalResumeId Optional output id for the suspended modal callback.
 		 * @param pendingModalStringRequest Optional output request for the yielded modal API.
 		 * @return Callback result.
 		 */
 		bool callFunctionNoArgs(const QString &functionName, bool *hasFunction = nullptr,
-		                        bool defaultResult = true, bool *suspended = nullptr,
-		                        quint64                      *modalResumeId             = nullptr,
+		                        bool defaultResult = true, int actionSourceOverride = -1,
+		                        bool *suspended = nullptr, quint64 *modalResumeId = nullptr,
 		                        LuaPendingModalStringRequest *pendingModalStringRequest = nullptr);
 		/**
 		 * @brief Calls function with one string argument and ignores return value semantics.
@@ -467,6 +468,7 @@ class LuaCallbackEngine
 		 * @param description Description used for diagnostics.
 		 * @param styleRuns Optional style-run context.
 		 * @param hasTriggerContext Whether the script executes with trigger-line context.
+		 * @param actionSourceOverride Optional callback-local action source, or `-1` to use runtime state.
 		 * @param triggerOutputReplacesMatchedLine Whether trigger output should replace the matched line.
 		 * @param triggerMatchedLineBufferIndex Buffer index of the trigger-matched line.
 		 * @param triggerMatchedLineAbsoluteNumber Absolute line number of the trigger-matched line.
@@ -477,7 +479,7 @@ class LuaCallbackEngine
 		 */
 		bool executeScript(const QString &code, const QString &description,
 		                   const QVector<LuaStyleRun> *styleRuns = nullptr, bool hasTriggerContext = false,
-		                   bool triggerOutputReplacesMatchedLine = false,
+		                   int actionSourceOverride = -1, bool triggerOutputReplacesMatchedLine = false,
 		                   int triggerMatchedLineBufferIndex = 0, qint64 triggerMatchedLineAbsoluteNumber = 0,
 		                   bool *suspended = nullptr, quint64 *modalResumeId = nullptr,
 		                   LuaPendingModalStringRequest *pendingModalStringRequest = nullptr);

@@ -12,6 +12,7 @@
 #include "FontUtils.h"
 #include "LogCompressionUtils.h"
 #include "MainFrame.h"
+#include "ShortcutPreferenceUtils.h"
 #include "WorldChildWindow.h"
 #include "WorldRuntime.h"
 
@@ -21,14 +22,18 @@
 #include <QComboBox>
 #include <QCoreApplication>
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QAbstractItemView>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QDialogButtonBox>
 #include <QDirIterator>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFocusEvent>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
@@ -47,8 +52,13 @@
 #include <QStyle>
 #include <QTabBar>
 #include <QTabWidget>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QTextEdit>
 #include <QThreadPool>
+
+#include <limits>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -151,6 +161,7 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 	m_tabs->tabBar()->hide();
 	m_tabs->addTab(buildWorldsPage(), QStringLiteral("Worlds"));
 	m_tabs->addTab(buildGeneralPage(), QStringLiteral("General"));
+	m_tabs->addTab(buildShortcutsPage(), QStringLiteral("Shortcuts"));
 	m_tabs->addTab(buildClosingPage(), QStringLiteral("Closing"));
 	m_tabs->addTab(buildPrintingPage(), QStringLiteral("Printing"));
 	m_tabs->addTab(buildLoggingPage(), QStringLiteral("Logging"));
@@ -186,7 +197,7 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 	connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 	root->addWidget(buttons);
 
-	setFixedSize(650, 600);
+	setFixedSize(748, 600);
 
 	loadPreferences();
 
@@ -217,6 +228,28 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 
 namespace
 {
+	class ShortcutsTableWidget final : public QTableWidget
+	{
+		public:
+			explicit ShortcutsTableWidget(QWidget *parent = nullptr) : QTableWidget(parent)
+			{
+			}
+
+		protected:
+			void focusInEvent(QFocusEvent *event) override
+			{
+				QTableWidget::focusInEvent(event);
+				if (!event ||
+				    (event->reason() != Qt::TabFocusReason && event->reason() != Qt::BacktabFocusReason))
+					return;
+				if (rowCount() <= 0 || columnCount() <= 0)
+					return;
+				setCurrentCell(0, 0);
+				selectRow(0);
+				scrollToTop();
+			}
+	};
+
 	bool isFileOpenForWriteByAnotherProcess(const QString &path)
 	{
 		if (path.trimmed().isEmpty())
@@ -726,6 +759,95 @@ QWidget *GlobalPreferencesDialog::buildGeneralPage()
 	layout->addLayout(bottomRow);
 
 	layout->addStretch();
+	return page;
+}
+
+QWidget *GlobalPreferencesDialog::buildShortcutsPage()
+{
+	auto *page   = new QWidget;
+	auto *layout = new QVBoxLayout(page);
+
+	m_shortcutsTable = new ShortcutsTableWidget(page);
+	m_shortcutsTable->setColumnCount(4);
+	m_shortcutsTable->setHorizontalHeaderLabels({QStringLiteral("Category"), QStringLiteral("Action"),
+	                                             QStringLiteral("Default"), QStringLiteral("Override")});
+	m_shortcutsTable->verticalHeader()->setVisible(false);
+	m_shortcutsTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+	m_shortcutsTable->setSelectionMode(QAbstractItemView::SingleSelection);
+	m_shortcutsTable->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
+	m_shortcutsTable->setAlternatingRowColors(true);
+	m_shortcutsTable->setTabKeyNavigation(false);
+
+	const auto     &definitions = QMudShortcutPreferenceUtils::shortcutDefinitions();
+	const qsizetype boundedDefinitionCount =
+	    qMin<qsizetype>(definitions.size(), std::numeric_limits<int>::max());
+	const int rowCount = static_cast<int>(boundedDefinitionCount);
+	m_shortcutsTable->setRowCount(rowCount);
+	auto makeReadOnlyShortcutItem = [](const QString &text)
+	{
+		auto *item = new QTableWidgetItem(text);
+		item->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+		return item;
+	};
+	auto makeOverrideShortcutItem = [](const QString &preferenceKey)
+	{
+		auto *item = new QTableWidgetItem;
+		item->setData(Qt::UserRole, preferenceKey);
+		item->setToolTip(QStringLiteral("Use Qt portable shortcut text, e.g. Ctrl+Alt+G. "
+		                                "Separate alternate shortcuts with semicolons."));
+		item->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsEditable);
+		return item;
+	};
+	for (int row = 0; row < rowCount; ++row)
+	{
+		const auto &definition = definitions.at(row);
+
+		m_shortcutsTable->setItem(row, 0, makeReadOnlyShortcutItem(definition.category));
+		m_shortcutsTable->setItem(row, 1, makeReadOnlyShortcutItem(definition.label));
+		m_shortcutsTable->setItem(
+		    row, 2,
+		    makeReadOnlyShortcutItem(
+		        QMudShortcutPreferenceUtils::shortcutListToNativeText(definition.defaults)));
+		auto *overrideItem = makeOverrideShortcutItem(definition.preferenceKey);
+		m_shortcutsTable->setItem(row, 3, overrideItem);
+		m_shortcutOverrideItems.insert(definition.preferenceKey, overrideItem);
+	}
+	m_shortcutsTable->setSortingEnabled(true);
+	m_shortcutsTable->sortItems(0, Qt::AscendingOrder);
+	m_shortcutsTable->resizeColumnsToContents();
+	m_shortcutsTable->horizontalHeader()->setStretchLastSection(true);
+	layout->addWidget(m_shortcutsTable);
+
+	auto *buttons = new QHBoxLayout;
+	auto *clear   = new QPushButton(QStringLiteral("Clear Override"), page);
+	auto *reset   = new QPushButton(QStringLiteral("Reset All Overrides"), page);
+	buttons->addWidget(clear);
+	buttons->addWidget(reset);
+	buttons->addStretch();
+	layout->addLayout(buttons);
+
+	connect(clear, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        if (!m_shortcutsTable)
+			        return;
+		        const int row = m_shortcutsTable->currentRow();
+		        if (row < 0)
+			        return;
+		        if (auto *item = m_shortcutsTable->item(row, 3))
+			        item->setText(QString());
+	        });
+	connect(reset, &QPushButton::clicked, this,
+	        [this]
+	        {
+		        for (auto it = m_shortcutOverrideItems.constBegin(); it != m_shortcutOverrideItems.constEnd();
+		             ++it)
+		        {
+			        if (it.value())
+				        it.value()->setText(QString());
+		        }
+	        });
+
 	return page;
 }
 
@@ -1715,6 +1837,12 @@ void GlobalPreferencesDialog::loadPreferences()
 	for (auto it = m_stringLabels.constBegin(); it != m_stringLabels.constEnd(); ++it)
 		it.value()->setText(app->getGlobalOption(it.key()).toString());
 
+	for (auto it = m_shortcutOverrideItems.constBegin(); it != m_shortcutOverrideItems.constEnd(); ++it)
+	{
+		if (it.value())
+			it.value()->setText(app->getGlobalOption(it.key()).toString());
+	}
+
 	const QString worldList = app->getGlobalOption(QStringLiteral("WorldList")).toString();
 	setListFromStrings(m_worldList, canonicalWorldPathList(worldList.split('*', Qt::SkipEmptyParts)));
 	syncWorldListSelection();
@@ -1835,6 +1963,98 @@ void GlobalPreferencesDialog::updatePrinterFontStyleLabel() const
 		    fontStyleSummary(m_printerFontSize, m_printerFontWeight, m_printerFontItalic != 0));
 }
 
+bool GlobalPreferencesDialog::validateShortcutOverrides()
+{
+	struct ShortcutOwner
+	{
+			QString label;
+			bool    hasOverride{false};
+	};
+
+	QHash<QString, ShortcutOwner> ownerByPortable;
+	auto                          focusOverrideItem = [this](QTableWidgetItem *item)
+	{
+		if (m_tabs)
+			m_tabs->setCurrentIndex(2);
+		if (!m_shortcutsTable || !item)
+			return;
+		m_shortcutsTable->setCurrentItem(item);
+		m_shortcutsTable->scrollToItem(item);
+		m_shortcutsTable->setFocus(Qt::OtherFocusReason);
+		m_shortcutsTable->editItem(item);
+	};
+	for (const auto &definition : QMudShortcutPreferenceUtils::shortcutDefinitions())
+	{
+		QTableWidgetItem         *item = m_shortcutOverrideItems.value(definition.preferenceKey, nullptr);
+		const QString             overrideText = item ? item->text().trimmed() : QString();
+		const bool                hasOverride  = !overrideText.isEmpty();
+		const QList<QKeySequence> parsedOverrides =
+		    hasOverride ? QMudShortcutPreferenceUtils::parseShortcutList(overrideText)
+		                : QList<QKeySequence>{};
+		if (hasOverride && parsedOverrides.isEmpty())
+		{
+			QMessageBox::warning(
+			    this, QStringLiteral("Global Preferences"),
+			    QStringLiteral("Shortcut override for \"%1\" is invalid.").arg(definition.label));
+			focusOverrideItem(item);
+			return false;
+		}
+
+		for (const QKeySequence &shortcut : parsedOverrides)
+		{
+			if (shortcut.isEmpty() || shortcut.count() != 1)
+			{
+				QMessageBox::warning(
+				    this, QStringLiteral("Global Preferences"),
+				    QStringLiteral("Shortcut override for \"%1\" is invalid.").arg(definition.label));
+				focusOverrideItem(item);
+				return false;
+			}
+			if (QMudShortcutPreferenceUtils::isReservedMacroShortcut(shortcut))
+			{
+				QMessageBox::warning(
+				    this, QStringLiteral("Global Preferences"),
+				    QStringLiteral(
+				        "\"%1\" is reserved for world macros and cannot be used as a global shortcut.")
+				        .arg(shortcut.toString(QKeySequence::NativeText)));
+				focusOverrideItem(item);
+				return false;
+			}
+		}
+
+		const QList<QKeySequence> effective = hasOverride ? parsedOverrides : definition.defaults;
+		for (const QKeySequence &shortcut : effective)
+		{
+			if (shortcut.isEmpty())
+				continue;
+			const QString portable = shortcut.toString(QKeySequence::PortableText);
+			if (portable.isEmpty())
+				continue;
+			if (ownerByPortable.contains(portable))
+			{
+				const ShortcutOwner previous = ownerByPortable.value(portable);
+				if (previous.hasOverride || hasOverride)
+				{
+					QMessageBox::warning(
+					    this, QStringLiteral("Global Preferences"),
+					    QStringLiteral(
+					        "\"%1\" is already used by \"%2\" and cannot also be assigned to \"%3\".")
+					        .arg(shortcut.toString(QKeySequence::NativeText), previous.label,
+					             definition.label));
+					focusOverrideItem(item);
+					return false;
+				}
+			}
+			else
+			{
+				ownerByPortable.insert(portable,
+				                       ShortcutOwner{.label = definition.label, .hasOverride = hasOverride});
+			}
+		}
+	}
+	return true;
+}
+
 bool GlobalPreferencesDialog::applyPreferences()
 {
 	AppController *app = AppController::instance();
@@ -1854,6 +2074,9 @@ bool GlobalPreferencesDialog::applyPreferences()
 		}
 	}
 
+	if (!validateShortcutOverrides())
+		return false;
+
 	for (auto it = m_intChecks.constBegin(); it != m_intChecks.constEnd(); ++it)
 		app->setGlobalOptionInt(it.key(), it.value()->isChecked() ? 1 : 0);
 
@@ -1868,6 +2091,9 @@ bool GlobalPreferencesDialog::applyPreferences()
 
 	for (auto it = m_stringLabels.constBegin(); it != m_stringLabels.constEnd(); ++it)
 		app->setGlobalOptionString(it.key(), it.value()->text());
+
+	for (auto it = m_shortcutOverrideItems.constBegin(); it != m_shortcutOverrideItems.constEnd(); ++it)
+		app->setGlobalOptionString(it.key(), it.value() ? it.value()->text().trimmed() : QString());
 
 	if (m_worldList)
 		app->setGlobalOptionString(

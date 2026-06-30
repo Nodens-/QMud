@@ -178,11 +178,11 @@ namespace QMudNativePluginRegistry
 	/**
 	 * @brief Reserves the first available LuaAudio buffer using shared runtime ownership.
 	 * @param runtime Owning runtime.
-	 * @param soundStatusResolver Callback returning current QMud sound status for a buffer.
+	 * @param bufferReusableResolver Callback returning whether a buffer may be reused.
 	 * @return Reserved buffer id, or zero when none is available.
 	 */
-	[[nodiscard]] int luaAudioReserveRuntimeBuffer(const WorldRuntime            *runtime,
-	                                               const std::function<int(int)> &soundStatusResolver);
+	[[nodiscard]] int luaAudioReserveRuntimeBuffer(const WorldRuntime             *runtime,
+	                                               const std::function<bool(int)> &bufferReusableResolver);
 	/**
 	 * @brief Marks a runtime LuaAudio buffer as owned and stores current playback settings.
 	 * @param runtime Owning runtime.

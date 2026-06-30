@@ -589,6 +589,7 @@ namespace
 			bool                                                  hasDatabaseListSnapshot{false};
 			bool                                                  databaseListSnapshotDirty{false};
 			QHash<int, int>                                       soundStatusByBuffer;
+			QHash<int, bool>                                      soundBufferReusableByBuffer;
 			QHash<QString, QList<int>>                            udpPortListByRuntimeKey;
 			QHash<QString, QHash<int, QString>>                   udpListenerPluginIdsByRuntimeKey;
 			QSet<QString>                                         dirtyUdpSnapshotRuntimeKeys;
@@ -1759,25 +1760,87 @@ namespace
 		                              });
 	}
 
+	bool resolveIndexedCallbackNoteColours(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+	                                       const int noteTextColour, long &fore, long &back)
+	{
+		fore = 0;
+		back = 0;
+		if (const bool sameColour = (noteTextColour == WorldRuntime::kSameColour || noteTextColour < 0);
+		    sameColour)
+		{
+			const bool custom16Default = isEnabledValue(resolveWorldAttributeValueForApi(
+			    engine, runtime, QStringLiteral("custom_16_is_default_colour")));
+			if (custom16Default)
+			{
+				const bool foreResolved = resolveCustomColourTextForApi(engine, runtime, MAX_CUSTOM, fore);
+				const bool backResolved =
+				    resolveCustomColourBackgroundForApi(engine, runtime, MAX_CUSTOM, back);
+				return foreResolved && backResolved;
+			}
+			const bool foreResolved = resolveNormalColourForApi(engine, runtime, 8, fore);
+			const bool backResolved = resolveNormalColourForApi(engine, runtime, 1, back);
+			return foreResolved && backResolved;
+		}
+
+		const int  customIndex  = noteTextColour + 1;
+		const bool foreResolved = resolveCustomColourTextForApi(engine, runtime, customIndex, fore);
+		const bool backResolved = resolveCustomColourBackgroundForApi(engine, runtime, customIndex, back);
+		return foreResolved && backResolved;
+	}
+
 	void updateCallbackNoteColourSnapshot(const LuaCallbackEngine *engine, WorldRuntime *runtime,
 	                                      const std::optional<long> fore, const std::optional<long> back,
 	                                      const std::optional<int>  colour,
 	                                      const std::optional<bool> notesInRgb)
 	{
+		if (!activeCallbackContext(engine))
+			return;
+
 		WorldRuntime::RuntimeCountersSnapshot snapshot;
-		static_cast<void>(resolveRuntimeCountersSnapshotForApi(engine, runtime, snapshot));
+		const bool          hasSnapshot  = resolveRuntimeCountersSnapshotForApi(engine, runtime, snapshot);
+		std::optional<long> resolvedFore = fore;
+		std::optional<long> resolvedBack = back;
+		const bool resultingNotesInRgb   = notesInRgb.value_or(hasSnapshot ? snapshot.notesInRgb : false);
+		const int  resultingColour =
+		    colour.value_or(hasSnapshot ? snapshot.noteTextColour : WorldRuntime::kSameColour);
+		if (!resultingNotesInRgb)
+		{
+			long indexedFore = 0;
+			long indexedBack = 0;
+			if (resolveIndexedCallbackNoteColours(engine, runtime, resultingColour, indexedFore, indexedBack))
+			{
+				resolvedFore = indexedFore;
+				resolvedBack = indexedBack;
+			}
+		}
 		updateCallbackRuntimeSnapshot(engine,
 		                              [&](WorldRuntime::RuntimeCountersSnapshot &targetSnapshot)
 		                              {
-			                              if (fore.has_value())
-				                              targetSnapshot.noteColourFore = *fore & 0x00FFFFFF;
-			                              if (back.has_value())
-				                              targetSnapshot.noteColourBack = *back & 0x00FFFFFF;
+			                              if (resolvedFore.has_value())
+				                              targetSnapshot.noteColourFore = *resolvedFore & 0x00FFFFFF;
+			                              if (resolvedBack.has_value())
+				                              targetSnapshot.noteColourBack = *resolvedBack & 0x00FFFFFF;
 			                              if (colour.has_value())
 				                              targetSnapshot.noteTextColour = *colour;
 			                              if (notesInRgb.has_value())
 				                              targetSnapshot.notesInRgb = *notesInRgb;
 		                              });
+	}
+
+	void refreshCallbackIndexedNoteColourSnapshot(const LuaCallbackEngine *engine, WorldRuntime *runtime)
+	{
+		updateCallbackNoteColourSnapshot(engine, runtime, std::nullopt, std::nullopt, std::nullopt,
+		                                 std::nullopt);
+	}
+
+	void refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(const LuaCallbackEngine *engine,
+	                                                                       WorldRuntime            *runtime,
+	                                                                       const QString           &key,
+	                                                                       const bool isMultiline)
+	{
+		if (isMultiline || key != QStringLiteral("custom_16_is_default_colour"))
+			return;
+		refreshCallbackIndexedNoteColourSnapshot(engine, runtime);
 	}
 
 	void setCallbackNoteStyleSnapshot(const LuaCallbackEngine *engine, const unsigned short style)
@@ -2433,9 +2496,26 @@ namespace
 		return QStringLiteral("%1|%2").arg(id).arg(option.trimmed().toLower());
 	}
 
+	bool isCallbackAnsiColourIndex(const int index)
+	{
+		return index >= 1 && index <= 8;
+	}
+
+	bool isCallbackCustomColourIndex(const int index)
+	{
+		return index >= 1 && index <= MAX_CUSTOM;
+	}
+
+	long normalizedCallbackColourValue(const long value)
+	{
+		return value & 0x00FFFFFF;
+	}
+
 	bool tryResolveCallbackBoldAnsiColourFromCache(const LuaCallbackEngine *engine, const int index,
 	                                               long &value)
 	{
+		if (!isCallbackAnsiColourIndex(index))
+			return false;
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
@@ -2448,15 +2528,19 @@ namespace
 
 	void cacheCallbackBoldAnsiColour(const LuaCallbackEngine *engine, const int index, const long value)
 	{
+		if (!isCallbackAnsiColourIndex(index))
+			return;
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->boldAnsiColoursByIndex.insert(index, value);
+		context->boldAnsiColoursByIndex.insert(index, normalizedCallbackColourValue(value));
 	}
 
 	bool tryResolveCallbackNormalAnsiColourFromCache(const LuaCallbackEngine *engine, const int index,
 	                                                 long &value)
 	{
+		if (!isCallbackAnsiColourIndex(index))
+			return false;
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
@@ -2469,10 +2553,12 @@ namespace
 
 	void cacheCallbackNormalAnsiColour(const LuaCallbackEngine *engine, const int index, const long value)
 	{
+		if (!isCallbackAnsiColourIndex(index))
+			return;
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->normalAnsiColoursByIndex.insert(index, value);
+		context->normalAnsiColoursByIndex.insert(index, normalizedCallbackColourValue(value));
 	}
 
 	bool tryResolveCallbackChatIdFromCache(const LuaCallbackEngine *engine, const QString &who, long &chatId)
@@ -3065,6 +3151,28 @@ namespace
 		context->soundStatusByBuffer.insert(buffer, status);
 	}
 
+	bool tryResolveCallbackSoundBufferReusableFromCache(const LuaCallbackEngine *engine, const int buffer,
+	                                                    bool &reusable)
+	{
+		const auto *context = activeCallbackContextConst(engine);
+		if (!context)
+			return false;
+		const auto it = context->soundBufferReusableByBuffer.constFind(buffer);
+		if (it == context->soundBufferReusableByBuffer.constEnd())
+			return false;
+		reusable = it.value();
+		return true;
+	}
+
+	void cacheCallbackSoundBufferReusable(const LuaCallbackEngine *engine, const int buffer,
+	                                      const bool reusable)
+	{
+		auto *context = activeCallbackContext(engine);
+		if (!context)
+			return;
+		context->soundBufferReusableByBuffer.insert(buffer, reusable);
+	}
+
 	bool tryResolveCallbackUdpPortListFromCache(const LuaCallbackEngine *engine, const WorldRuntime *runtime,
 	                                            QList<int> &ports)
 	{
@@ -3538,6 +3646,8 @@ namespace
 	bool tryResolveCallbackCustomBackgroundColourFromCache(const LuaCallbackEngine *engine, const int index,
 	                                                       long &value)
 	{
+		if (!isCallbackCustomColourIndex(index))
+			return false;
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
@@ -3551,6 +3661,8 @@ namespace
 	bool tryResolveCallbackCustomTextColourFromCache(const LuaCallbackEngine *engine, const int index,
 	                                                 long &value)
 	{
+		if (!isCallbackCustomColourIndex(index))
+			return false;
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
@@ -3577,18 +3689,22 @@ namespace
 	void cacheCallbackCustomBackgroundColour(const LuaCallbackEngine *engine, const int index,
 	                                         const long value)
 	{
+		if (!isCallbackCustomColourIndex(index))
+			return;
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->customBackgroundColoursByIndex.insert(index, value);
+		context->customBackgroundColoursByIndex.insert(index, normalizedCallbackColourValue(value));
 	}
 
 	void cacheCallbackCustomTextColour(const LuaCallbackEngine *engine, const int index, const long value)
 	{
+		if (!isCallbackCustomColourIndex(index))
+			return;
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->customTextColoursByIndex.insert(index, value);
+		context->customTextColoursByIndex.insert(index, normalizedCallbackColourValue(value));
 	}
 
 	void cacheCallbackCustomColourName(const LuaCallbackEngine *engine, const int index, const QString &value)
@@ -7528,6 +7644,11 @@ namespace
 		{
 			snapshot.soundStatusByBuffer.insert(it.key(), it.value());
 		}
+		for (auto it = context.soundBufferReusableByBuffer.constBegin();
+		     it != context.soundBufferReusableByBuffer.constEnd(); ++it)
+		{
+			snapshot.soundBufferReusableByBuffer.insert(it.key(), it.value());
+		}
 
 		overlayCallbackDatabaseCachesForCallPlugin(context, snapshot);
 		overlayCallbackPluginMetadataForCallPlugin(context, snapshot);
@@ -7593,10 +7714,10 @@ namespace
 		       !snapshot.udpPortsSnapshot.isEmpty() || !snapshot.udpListenerPluginIdsByPort.isEmpty() ||
 		       snapshot.hasUsedUdpPortsSnapshot || !snapshot.usedUdpPortsSnapshot.isEmpty() ||
 		       !snapshot.usedUdpPortReferenceCountsSnapshot.isEmpty() ||
-		       !snapshot.soundStatusByBuffer.isEmpty() || snapshot.hasLineBufferSnapshot ||
-		       !snapshot.lineEntriesByBufferIndex.isEmpty() || snapshot.hasCallbackOutputAnchor ||
-		       snapshot.hasLineBufferDeltaSnapshot || snapshot.hasLineBufferCountDelta ||
-		       !snapshot.lineEntryDeltasByBufferIndex.isEmpty() ||
+		       !snapshot.soundStatusByBuffer.isEmpty() || !snapshot.soundBufferReusableByBuffer.isEmpty() ||
+		       snapshot.hasLineBufferSnapshot || !snapshot.lineEntriesByBufferIndex.isEmpty() ||
+		       snapshot.hasCallbackOutputAnchor || snapshot.hasLineBufferDeltaSnapshot ||
+		       snapshot.hasLineBufferCountDelta || !snapshot.lineEntryDeltasByBufferIndex.isEmpty() ||
 		       !snapshot.missingLineEntryDeltasByBufferIndex.isEmpty() || snapshot.hasRecentLinesSnapshot ||
 		       !snapshot.recentLinesSnapshot.isEmpty() || callbackSnapshotHasDatabasePayload(snapshot) ||
 		       snapshot.hasMacroEntriesSnapshot || !snapshot.macroEntriesSnapshot.isEmpty() ||
@@ -7908,6 +8029,8 @@ namespace
 		}
 
 		context->miniWindowImageHasAlphaByKey = snapshot->imageHasAlphaByKey;
+		context->soundStatusByBuffer          = snapshot->soundStatusByBuffer;
+		context->soundBufferReusableByBuffer  = snapshot->soundBufferReusableByBuffer;
 		if (snapshot->hasFramePointer)
 			cacheCallbackFrame(engine, static_cast<MainWindow *>(snapshot->framePointer));
 		context->triggerWildcardsSnapshot                = snapshot->triggerWildcardsSnapshot;
@@ -8851,6 +8974,7 @@ namespace
 		context->hasDatabaseListSnapshot   = false;
 		context->databaseListSnapshotDirty = false;
 		context->soundStatusByBuffer.clear();
+		context->soundBufferReusableByBuffer.clear();
 		context->udpPortListByRuntimeKey.clear();
 		context->usedUdpPortsSnapshot.clear();
 		context->hasUsedUdpPortsSnapshot = false;
@@ -9106,34 +9230,10 @@ namespace
 		return {qmudRed(packed), qmudGreen(packed), qmudBlue(packed)};
 	}
 
-	long resolveCallbackNoteColourValue(const LuaCallbackEngine *engine, WorldRuntime *runtime,
-	                                    const WorldRuntime::RuntimeCountersSnapshot &snapshot,
+	long resolveCallbackNoteColourValue(const WorldRuntime::RuntimeCountersSnapshot &snapshot,
 	                                    const bool                                   foreground)
 	{
-		if (snapshot.notesInRgb)
-			return foreground ? snapshot.noteColourFore : snapshot.noteColourBack;
-
-		const bool sameColour =
-		    snapshot.noteTextColour == WorldRuntime::kSameColour || snapshot.noteTextColour < 0;
-		if (sameColour)
-		{
-			const bool custom16Default = isEnabledValue(resolveWorldAttributeValueForApi(
-			    engine, runtime, QStringLiteral("custom_16_is_default_colour")));
-			long       value           = 0;
-			if (custom16Default)
-			{
-				if (foreground)
-					return resolveCustomColourTextForApi(engine, runtime, MAX_CUSTOM, value) ? value : 0;
-				return resolveCustomColourBackgroundForApi(engine, runtime, MAX_CUSTOM, value) ? value : 0;
-			}
-			return resolveNormalColourForApi(engine, runtime, foreground ? 7 : 0, value) ? value : 0;
-		}
-
-		const int customIndex = snapshot.noteTextColour + 1;
-		long      value       = 0;
-		if (foreground)
-			return resolveCustomColourTextForApi(engine, runtime, customIndex, value) ? value : 0;
-		return resolveCustomColourBackgroundForApi(engine, runtime, customIndex, value) ? value : 0;
+		return foreground ? snapshot.noteColourFore : snapshot.noteColourBack;
 	}
 
 	QVector<WorldRuntime::StyleSpan> makeCallbackNoteSpans(const LuaCallbackEngine *engine,
@@ -9150,8 +9250,8 @@ namespace
 
 		WorldRuntime::StyleSpan span;
 		span.length    = sizeToInt(text.size());
-		span.fore      = colorFromValue(resolveCallbackNoteColourValue(engine, runtime, snapshot, true));
-		span.back      = colorFromValue(resolveCallbackNoteColourValue(engine, runtime, snapshot, false));
+		span.fore      = colorFromValue(resolveCallbackNoteColourValue(snapshot, true));
+		span.back      = colorFromValue(resolveCallbackNoteColourValue(snapshot, false));
 		span.bold      = (snapshot.noteStyle & kStyleHilite) != 0;
 		span.underline = (snapshot.noteStyle & kStyleUnderline) != 0;
 		span.blink     = (snapshot.noteStyle & kStyleBlink) != 0;
@@ -13031,48 +13131,42 @@ struct ColourOutputSegment
 		bool    newline{false};
 };
 
-static void outputColourSegment(WorldRuntime &targetRuntime, const ColourOutputSegment &segment)
+bool colourOutputSegmentProducesLine(const ColourOutputSegment &segment)
 {
-	if (segment.text.isEmpty() && !segment.newline)
-		return;
+	return !segment.text.isEmpty() || segment.newline;
+}
 
-	const bool           oldNotesInRgb     = targetRuntime.notesInRgb();
-	const long           oldFore           = targetRuntime.noteColourFore();
-	const long           oldBack           = targetRuntime.noteColourBack();
-	const int            oldNoteTextColour = targetRuntime.noteTextColour();
-	const unsigned short noteStyle         = targetRuntime.noteStyle();
+struct ResolvedCallbackNoteStyle
+{
+		QColor         fore{colorFromValue(0xFFFFFF)};
+		QColor         back{colorFromValue(0)};
+		unsigned short style{0};
+};
 
-	if (!targetRuntime.notesInRgb())
-	{
-		targetRuntime.setNoteColourFore(targetRuntime.noteColourFore());
-		targetRuntime.setNoteColourBack(targetRuntime.noteColourBack());
-	}
+ResolvedCallbackNoteStyle resolveCallbackNoteStyleForOutput(const LuaCallbackEngine *engine,
+                                                            WorldRuntime            *runtime)
+{
+	WorldRuntime::RuntimeCountersSnapshot snapshot;
+	snapshot.noteColourFore = 0xFFFFFF;
+	snapshot.noteColourBack = 0;
+	static_cast<void>(resolveRuntimeCountersSnapshotForApi(engine, runtime, snapshot));
+	return {colorFromValue(resolveCallbackNoteColourValue(snapshot, true)),
+	        colorFromValue(resolveCallbackNoteColourValue(snapshot, false)), snapshot.noteStyle};
+}
 
-	if (segment.fore.isValid())
-		targetRuntime.setNoteColourFore(colorValue(segment.fore));
-	if (segment.back.isValid())
-		targetRuntime.setNoteColourBack(colorValue(segment.back));
-
+WorldRuntime::StyleSpan makeColourOutputSpan(const ColourOutputSegment       &segment,
+                                             const ResolvedCallbackNoteStyle &noteStyle)
+{
 	WorldRuntime::StyleSpan span;
 	span.length    = sizeToInt(segment.text.size());
-	span.fore      = colorFromValue(targetRuntime.noteColourFore());
-	span.back      = colorFromValue(targetRuntime.noteColourBack());
-	span.bold      = (noteStyle & kStyleHilite) != 0;
-	span.underline = (noteStyle & kStyleUnderline) != 0;
-	span.blink     = (noteStyle & kStyleBlink) != 0;
-	span.inverse   = (noteStyle & kStyleInverse) != 0;
+	span.fore      = segment.fore.isValid() ? segment.fore : noteStyle.fore;
+	span.back      = segment.back.isValid() ? segment.back : noteStyle.back;
+	span.bold      = (noteStyle.style & kStyleHilite) != 0;
+	span.underline = (noteStyle.style & kStyleUnderline) != 0;
+	span.blink     = (noteStyle.style & kStyleBlink) != 0;
+	span.inverse   = (noteStyle.style & kStyleInverse) != 0;
 	span.changed   = true;
-	targetRuntime.outputStyledText(segment.text, {span}, true, segment.newline);
-
-	if (oldNotesInRgb)
-	{
-		targetRuntime.setNoteColourFore(oldFore);
-		targetRuntime.setNoteColourBack(oldBack);
-	}
-	else
-	{
-		targetRuntime.setNoteTextColour(oldNoteTextColour);
-	}
+	return span;
 }
 
 static void outputStyledCallbackLine(WorldRuntime &targetRuntime, const QString &text,
@@ -13100,23 +13194,36 @@ static int luaColourOutput(lua_State *L, const bool noteLastSegment)
 	QVector<ColourOutputSegment> segments;
 	const int                    top                  = lua_gettop(L);
 	const int                    completeSegmentCount = top / 3;
+	bool                         hasOutputSegment     = false;
 	for (int segmentIndex = 0; segmentIndex < completeSegmentCount; ++segmentIndex)
 	{
-		const int     index      = segmentIndex * 3 + 1;
-		const QString textColour = QString::fromUtf8(luaL_optstring(L, index, ""));
-		const QString backColour = QString::fromUtf8(luaL_optstring(L, index + 1, ""));
-		const QString text       = QString::fromUtf8(luaL_checkstring(L, index + 2));
-		segments.push_back({text, WorldView::parseColor(textColour), WorldView::parseColor(backColour),
-		                    noteLastSegment && segmentIndex + 1 == completeSegmentCount});
+		const int           index      = segmentIndex * 3 + 1;
+		const QString       textColour = QString::fromUtf8(luaL_optstring(L, index, ""));
+		const QString       backColour = QString::fromUtf8(luaL_optstring(L, index + 1, ""));
+		const QString       text       = QString::fromUtf8(luaL_checkstring(L, index + 2));
+		ColourOutputSegment segment;
+		segment.text    = text;
+		segment.newline = noteLastSegment && segmentIndex + 1 == completeSegmentCount;
+		if (colourOutputSegmentProducesLine(segment))
+		{
+			segment.fore     = WorldView::parseColor(textColour);
+			segment.back     = WorldView::parseColor(backColour);
+			hasOutputSegment = true;
+		}
+		segments.push_back(std::move(segment));
 	}
+
+	if (!hasOutputSegment)
+		return 0;
+
+	const ResolvedCallbackNoteStyle noteStyle = resolveCallbackNoteStyleForOutput(engine, runtime);
 
 	for (const ColourOutputSegment &segment : segments)
 	{
-		WorldRuntime::StyleSpan span;
-		span.length  = sizeToInt(segment.text.size());
-		span.fore    = segment.fore.isValid() ? segment.fore : colorFromValue(0xFFFFFF);
-		span.back    = segment.back.isValid() ? segment.back : colorFromValue(0);
-		span.changed = true;
+		if (!colourOutputSegmentProducesLine(segment))
+			continue;
+
+		const WorldRuntime::StyleSpan      span  = makeColourOutputSpan(segment, noteStyle);
 		const int                          flags = callbackOutputFlags(engine, runtime, true, false);
 		const CallbackOutputMutationTarget target =
 		    appendCallbackOutputLine(engine, runtime, segment.text, {span}, flags, segment.newline);
@@ -13131,7 +13238,7 @@ static int luaColourOutput(lua_State *L, const bool noteLastSegment)
 				        segment.text, flags, {span}, segment.newline);
 				    return;
 			    }
-			    outputColourSegment(targetRuntime, segment);
+			    targetRuntime.outputStyledText(segment.text, {span}, true, segment.newline);
 		    });
 	}
 
@@ -13163,7 +13270,10 @@ static int luaSetCustomColourBackground(lua_State *L)
 	enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime, [index, color](WorldRuntime &targetRuntime)
 	                                             { targetRuntime.setCustomColourBackground(index, color); });
 	if (activeCallbackContextConst(engine))
+	{
 		cacheCallbackCustomBackgroundColour(engine, index, colorValue(color));
+		refreshCallbackIndexedNoteColourSnapshot(engine, runtime);
+	}
 	return 0;
 }
 
@@ -13204,7 +13314,10 @@ static int luaSetCustomColourText(lua_State *L)
 	enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime, [index, color](WorldRuntime &targetRuntime)
 	                                             { targetRuntime.setCustomColourText(index, color); });
 	if (activeCallbackContextConst(engine))
+	{
 		cacheCallbackCustomTextColour(engine, index, colorValue(color));
+		refreshCallbackIndexedNoteColourSnapshot(engine, runtime);
+	}
 	return 0;
 }
 
@@ -19603,6 +19716,7 @@ static int luaSetNormalColour(lua_State *L)
 	enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime, [which, value](WorldRuntime &targetRuntime)
 	                                             { targetRuntime.setNormalColour(which, value); });
 	cacheCallbackNormalAnsiColour(engine, which, value);
+	refreshCallbackIndexedNoteColourSnapshot(engine, runtime);
 	return 0;
 }
 
@@ -20691,11 +20805,58 @@ static int luaAudioSoundStatus(const LuaCallbackEngine *engine, WorldRuntime *ru
 	return status;
 }
 
+static bool resolveCallbackSoundBufferReusableForLuaAudio(const LuaCallbackEngine *engine, const int buffer,
+                                                          bool &reusable)
+{
+	reusable = false;
+	if (!engine)
+		return false;
+	if (tryResolveCallbackSoundBufferReusableFromCache(engine, buffer, reusable))
+		return true;
+	if (const auto *dispatchSnapshot = engine->currentDispatchMiniWindowSnapshot())
+	{
+		if (const auto reusableIt = dispatchSnapshot->soundBufferReusableByBuffer.constFind(buffer);
+		    reusableIt != dispatchSnapshot->soundBufferReusableByBuffer.constEnd())
+		{
+			reusable = reusableIt.value();
+			cacheCallbackSoundBufferReusable(engine, buffer, reusable);
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool resolveSoundBufferReusableForLuaAudio(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+                                                  const int buffer, bool &reusable)
+{
+	reusable = false;
+	if (!engine || !runtime)
+		return false;
+	if (const bool inCallback = activeCallbackContextConst(engine) != nullptr; inCallback)
+		return resolveCallbackSoundBufferReusableForLuaAudio(engine, buffer, reusable);
+
+	return runOnRuntimeThread(
+	    runtime,
+	    [&]() -> bool
+	    {
+		    reusable = runtime->soundBufferReusableForNativeAudio(buffer);
+		    return true;
+	    },
+	    false);
+}
+
 static int allocateLuaAudioBuffer(const LuaCallbackEngine *engine, WorldRuntime *runtime)
 {
 	return QMudNativePluginRegistry::luaAudioReserveRuntimeBuffer(
 	    runtime,
-	    [engine, runtime](const int buffer) { return luaAudioSoundStatus(engine, runtime, buffer); });
+	    [engine, runtime](const int buffer)
+	    {
+		    bool reusable = false;
+		    if (!resolveSoundBufferReusableForLuaAudio(engine, runtime, buffer, reusable) || !reusable)
+			    return false;
+		    cacheCallbackSoundBufferReusable(engine, buffer, false);
+		    return true;
+	    });
 }
 
 static void cacheLuaAudioPlaybackState(const LuaCallbackEngine *engine, const int buffer, const bool loop,
@@ -20722,6 +20883,7 @@ static int playLuaAudioBuffer(const LuaCallbackEngine *engine, WorldRuntime *run
 	    !luaAudioFileExists(runtime, fileName))
 	{
 		QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(runtime, buffer);
+		cacheCallbackSoundBufferReusable(engine, buffer, true);
 		return 0;
 	}
 
@@ -20741,6 +20903,7 @@ static int playLuaAudioBuffer(const LuaCallbackEngine *engine, WorldRuntime *run
 		if (!QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, pendingState))
 		{
 			QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(runtime, buffer);
+			cacheCallbackSoundBufferReusable(engine, buffer, true);
 			return 0;
 		}
 		const quint64 generation = pendingState.generation;
@@ -20768,14 +20931,25 @@ static int playLuaAudioBuffer(const LuaCallbackEngine *engine, WorldRuntime *run
 	{ return targetRuntime.playSoundBypassingPluginCallbacks(buffer, fileName, loop, qmudVolume, pan); };
 
 	cacheLuaAudioPlaybackState(engine, buffer, loop, volume, pan);
+	QMudNativePluginRegistry::LuaAudioRuntimeBufferState pendingState;
+	const quint64                                        generation =
+	    QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, pendingState)
+	        ? pendingState.generation
+	        : 0;
 	int result = eCannotPlaySound;
 	if (activeCallbackContextConst(engine))
 	{
 #if QMUD_ENABLE_SOUND
 		if (callbackScopeSyncBridgeForbidden())
 		{
-			enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime, [play](WorldRuntime &targetRuntime)
-			                                             { static_cast<void>(play(targetRuntime)); });
+			enqueueRuntimeThreadDeferredMutationNoResult(
+			    engine, runtime,
+			    [play, buffer, generation](WorldRuntime &targetRuntime)
+			    {
+				    if (play(targetRuntime) != eOK)
+					    QMudNativePluginRegistry::luaAudioReleaseRuntimeBufferIfGeneration(
+					        &targetRuntime, buffer, generation);
+			    });
 			return buffer;
 		}
 		result = runOnRuntimeThreadDeferredMutation(engine, runtime, play, eCannotPlaySound);
@@ -20792,6 +20966,7 @@ static int playLuaAudioBuffer(const LuaCallbackEngine *engine, WorldRuntime *run
 	{
 		QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffer(runtime, buffer);
 		cacheCallbackSoundStatus(engine, buffer, -2);
+		cacheCallbackSoundBufferReusable(engine, buffer, true);
 		return 0;
 	}
 	return buffer;
@@ -20897,7 +21072,10 @@ static int luaAudioStop(lua_State *L)
 
 	QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffers(runtime, buffersToStop);
 	for (const int ownedBuffer : buffersToStop)
+	{
 		cacheCallbackSoundStatus(engine, ownedBuffer, -2);
+		cacheCallbackSoundBufferReusable(engine, ownedBuffer, true);
+	}
 	return 0;
 }
 
@@ -21173,9 +21351,300 @@ static int luaAudioFree(lua_State *L)
 	QMudNativePluginRegistry::luaAudioSetRuntimeMasterPan(runtime, 0.0);
 	QMudNativePluginRegistry::luaAudioSetRuntimeMasterPitch(runtime, 0.0);
 	for (const int buffer : buffersToStop)
+	{
 		cacheCallbackSoundStatus(engine, buffer, -2);
+		cacheCallbackSoundBufferReusable(engine, buffer, true);
+	}
 	lua_pushinteger(L, 0);
 	return 1;
+}
+
+static QString luaCallPluginArgumentString(lua_State *L, const int index)
+{
+	if (index > lua_gettop(L) || lua_isnil(L, index))
+		return {};
+	switch (lua_type(L, index))
+	{
+	case LUA_TSTRING:
+	{
+		size_t      length = 0;
+		const char *data   = lua_tolstring(L, index, &length);
+		return QString::fromUtf8(data, static_cast<qsizetype>(length));
+	}
+	case LUA_TNUMBER:
+		return QString::number(lua_tonumber(L, index));
+	case LUA_TBOOLEAN:
+		return lua_toboolean(L, index) != 0 ? QStringLiteral("true") : QStringLiteral("false");
+	default:
+		return {};
+	}
+}
+
+static double luaCallPluginArgumentNumber(lua_State *L, const int index, const double fallback)
+{
+	if (index > lua_gettop(L) || lua_isnil(L, index))
+		return fallback;
+	if (lua_isnumber(L, index))
+		return lua_tonumber(L, index);
+	if (lua_isboolean(L, index))
+		return lua_toboolean(L, index) != 0 ? 1.0 : 0.0;
+	if (lua_isstring(L, index))
+	{
+		bool         ok    = false;
+		const double value = QString::fromUtf8(lua_tostring(L, index)).toDouble(&ok);
+		return ok ? value : fallback;
+	}
+	return fallback;
+}
+
+static bool luaCallPluginArgumentBoolOrFalse(lua_State *L, const int index)
+{
+	if (index > lua_gettop(L) || lua_isnil(L, index))
+		return false;
+	if (lua_isboolean(L, index))
+		return lua_toboolean(L, index) != 0;
+	if (lua_isnumber(L, index))
+		return lua_tonumber(L, index) != 0.0;
+	const QString text  = luaCallPluginArgumentString(L, index).trimmed().toLower();
+	bool          ok    = false;
+	const double  value = text.toDouble(&ok);
+	if (ok)
+		return value != 0.0;
+	if (text == QStringLiteral("true") || text == QStringLiteral("yes") || text == QStringLiteral("y"))
+		return true;
+	if (text == QStringLiteral("false") || text == QStringLiteral("no") || text == QStringLiteral("n"))
+		return false;
+	return false;
+}
+
+static void pushLuaCallPluginSuccess(lua_State *L)
+{
+	lua_pushnumber(L, eOK);
+}
+
+static std::optional<int> validateLuaAudioCallPluginArgumentsInCallback(lua_State *L)
+{
+	const int top = lua_gettop(L);
+	for (int index = 1; index <= top; ++index)
+	{
+		switch (lua_type(L, index))
+		{
+		case LUA_TSTRING:
+		case LUA_TNUMBER:
+		case LUA_TBOOLEAN:
+		case LUA_TNIL:
+			break;
+		default:
+		{
+			lua_pushnumber(L, eBadParameter);
+			const QString error = QStringLiteral("Cannot pass argument #%1 (%2 type) to CallPlugin")
+			                          .arg(index + 2)
+			                          .arg(QString::fromLatin1(lua_typename(L, lua_type(L, index))));
+			pushLuaUtf8String(L, error);
+			return 2;
+		}
+		}
+	}
+	return std::nullopt;
+}
+
+static std::optional<int> tryHandleLuaAudioCallPluginInCallback(lua_State *L, LuaCallbackEngine *engine,
+                                                                WorldRuntime *runtime, const QString &routine)
+{
+	if (!engine || !runtime || !activeCallbackContextConst(engine))
+		return std::nullopt;
+	if (std::optional<int> validationResult = validateLuaAudioCallPluginArgumentsInCallback(L);
+	    validationResult.has_value())
+	{
+		return validationResult;
+	}
+
+	const QString name = routine.trimmed().toLower();
+	if (name == QStringLiteral("plugin_update_url"))
+	{
+		pushLuaCallPluginSuccess(L);
+		pushLuaUtf8String(L, QStringLiteral("qmud:native/LuaAudio"));
+		return 2;
+	}
+	if (name == QStringLiteral("isplaying"))
+	{
+		const int buffer = static_cast<int>(luaCallPluginArgumentNumber(L, 1, 0.0));
+		QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
+		const int                                            status =
+		    (buffer > 0 && QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, bufferState))
+		        ? luaAudioSoundStatus(engine, runtime, buffer)
+		        : -3;
+		pushLuaCallPluginSuccess(L);
+		lua_pushboolean(L, status == 1 || status == 2);
+		return 2;
+	}
+	if (name == QStringLiteral("getvolume"))
+	{
+		const int buffer = static_cast<int>(luaCallPluginArgumentNumber(L, 1, 0.0));
+		QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
+		pushLuaCallPluginSuccess(L);
+		if (buffer > 0 && QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, bufferState))
+			lua_pushnumber(L, bufferState.volume);
+		else
+			lua_pushnumber(L, QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime).volume);
+		return 2;
+	}
+	if (name == QStringLiteral("stop") || name == QStringLiteral("fadeout"))
+	{
+		const int buffer = static_cast<int>(luaCallPluginArgumentNumber(L, 1, 0.0));
+		const int delay  = qMax(0, qRound(luaCallPluginArgumentNumber(L, 2, 0.0) * 1000.0));
+		if (buffer < 0 || buffer > WorldRuntime::kMaxSoundBuffers)
+		{
+			pushLuaCallPluginSuccess(L);
+			return 1;
+		}
+		if (delay > 0)
+		{
+			scheduleLuaAudioDelayedStop(runtime, buffer, delay);
+		}
+		else
+		{
+			QList<int> buffersToStop;
+			if (buffer == 0)
+			{
+				buffersToStop = QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(runtime);
+			}
+			else
+			{
+				QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
+				if (QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, bufferState))
+					buffersToStop.push_back(buffer);
+			}
+			if (!buffersToStop.isEmpty())
+			{
+				const auto stop = [buffersToStop](WorldRuntime &targetRuntime) -> int
+				{
+					for (const int ownedBuffer : buffersToStop)
+						static_cast<void>(targetRuntime.stopSoundBypassingPluginCallbacks(ownedBuffer));
+					return eOK;
+				};
+				enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime,
+				                                             [stop](WorldRuntime &targetRuntime)
+				                                             { static_cast<void>(stop(targetRuntime)); });
+				QMudNativePluginRegistry::luaAudioReleaseRuntimeBuffers(runtime, buffersToStop);
+				for (const int ownedBuffer : buffersToStop)
+				{
+					cacheCallbackSoundStatus(engine, ownedBuffer, -2);
+					cacheCallbackSoundBufferReusable(engine, ownedBuffer, true);
+				}
+			}
+		}
+		pushLuaCallPluginSuccess(L);
+		return 1;
+	}
+	if (name == QStringLiteral("play") || name == QStringLiteral("playlooped") ||
+	    name == QStringLiteral("playdelay") || name == QStringLiteral("playdelaylooped"))
+	{
+		const QString fileName = luaCallPluginArgumentString(L, 1);
+		if (fileName.isEmpty())
+		{
+			pushLuaCallPluginSuccess(L);
+			lua_pushinteger(L, 0);
+			return 2;
+		}
+		const auto master = QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime);
+		const bool isDelayed =
+		    name == QStringLiteral("playdelay") || name == QStringLiteral("playdelaylooped");
+		const bool loop = name == QStringLiteral("playlooped") || name == QStringLiteral("playdelaylooped") ||
+		                  (!isDelayed && luaCallPluginArgumentBoolOrFalse(L, 2));
+		const int  delay = isDelayed ? qMax(0, qRound(luaCallPluginArgumentNumber(L, 2, 0.0) * 1000.0)) : 0;
+		const double pan = luaCallPluginArgumentNumber(L, 3, master.pan);
+		const double volume = luaCallPluginArgumentNumber(L, 4, master.volume);
+		const int    buffer = allocateLuaAudioBuffer(engine, runtime);
+		pushLuaCallPluginSuccess(L);
+		lua_pushinteger(L, playLuaAudioBuffer(engine, runtime, buffer, fileName, loop, volume, pan, delay));
+		return 2;
+	}
+	if (name == QStringLiteral("setpitch") || name == QStringLiteral("slidepitch") ||
+	    name == QStringLiteral("setpan") || name == QStringLiteral("slidepan") ||
+	    name == QStringLiteral("setvol") || name == QStringLiteral("slidevol"))
+	{
+		const auto   master = QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime);
+		const double value  = luaCallPluginArgumentNumber(
+		    L, 1,
+		    name.endsWith(QStringLiteral("pitch"))
+		        ? master.pitch
+		        : (name.endsWith(QStringLiteral("pan")) ? master.pan : master.volume));
+		const int  buffer  = static_cast<int>(luaCallPluginArgumentNumber(L, 2, 0.0));
+		const bool delayed = name == QStringLiteral("slidepitch") || name == QStringLiteral("slidepan") ||
+		                     name == QStringLiteral("slidevol");
+		const int  delay   = delayed ? qMax(0, qRound(luaCallPluginArgumentNumber(L, 3, 0.0) * 1000.0)) : 0;
+		QMudNativePluginRegistry::LuaAudioRuntimeBufferState bufferState;
+		if (buffer > 0 && QMudNativePluginRegistry::luaAudioRuntimeBufferState(runtime, buffer, bufferState))
+		{
+			if (delay > 0)
+			{
+				static_cast<void>(scheduleLuaAudioDelayedStateUpdate(
+				    runtime, buffer, delay,
+				    [buffer, name, value](WorldRuntime                                         &targetRuntime,
+				                          QMudNativePluginRegistry::LuaAudioRuntimeBufferState &state)
+				    {
+					    if (name == QStringLiteral("slidepitch"))
+						    state.pitch = value;
+					    else if (name == QStringLiteral("slidepan"))
+						    state.pan = value;
+					    else
+					    {
+						    state.volume     = clampLuaAudioVolume(value);
+						    const int status = targetRuntime.soundStatus(buffer);
+						    if (status == 1 || status == 2)
+						    {
+							    static_cast<void>(targetRuntime.playSoundBypassingPluginCallbacks(
+							        buffer, QString(), state.loop, luaAudioVolumeToQmudVolume(state.volume),
+							        state.pan));
+						    }
+					    }
+				    }));
+			}
+			else
+			{
+				if (name == QStringLiteral("setpitch"))
+					bufferState.pitch = value;
+				else if (name == QStringLiteral("setpan"))
+					bufferState.pan = value;
+				else
+					bufferState.volume = clampLuaAudioVolume(value);
+				QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(runtime, buffer, bufferState);
+				if (name == QStringLiteral("setvol"))
+				{
+					const int status = luaAudioSoundStatus(engine, runtime, buffer);
+					if (status == 1 || status == 2)
+					{
+						const auto update = [buffer, bufferState](WorldRuntime &targetRuntime) -> int
+						{
+							return targetRuntime.playSoundBypassingPluginCallbacks(
+							    buffer, QString(), bufferState.loop,
+							    luaAudioVolumeToQmudVolume(bufferState.volume), bufferState.pan);
+						};
+						enqueueRuntimeThreadDeferredMutationNoResult(
+						    engine, runtime, [update](WorldRuntime &targetRuntime)
+						    { static_cast<void>(update(targetRuntime)); });
+					}
+				}
+			}
+		}
+		else if (buffer <= 0)
+		{
+			if (name == QStringLiteral("setpitch") || name == QStringLiteral("slidepitch"))
+				QMudNativePluginRegistry::luaAudioSetRuntimeMasterPitch(runtime, value);
+			else if (name == QStringLiteral("setpan") || name == QStringLiteral("slidepan"))
+				QMudNativePluginRegistry::luaAudioSetRuntimeMasterPan(runtime, value);
+			else
+				QMudNativePluginRegistry::luaAudioSetRuntimeMasterVolume(runtime, value);
+		}
+		pushLuaCallPluginSuccess(L);
+		return 1;
+	}
+
+	lua_pushnumber(L, eNoSuchRoutine);
+	pushLuaUtf8String(L, QStringLiteral("No function '%1' in native shim 'LuaAudio' (%2)")
+	                         .arg(routine, QMudNativePluginRegistry::luaAudioPluginId()));
+	return 2;
 }
 
 static void registerAudioLibrary(lua_State *L, LuaCallbackEngine *engine)
@@ -31266,7 +31735,7 @@ static int luaAcceleratorTo(lua_State *L)
 		return 1;
 	}
 
-	const qint64 mapKey = static_cast<qint64>(virt) << 16 | key;
+	const qint64 mapKey = AcceleratorUtils::acceleratorMapKey(virt, key);
 	return pushAcceleratorRegistrationResult(L, engine, runtime, QStringLiteral("AcceleratorTo"), mapKey,
 	                                         sendTextValue, sendTo);
 }
@@ -31297,7 +31766,7 @@ static int luaAccelerator(lua_State *L)
 		return 1;
 	}
 
-	const qint64  mapKey        = static_cast<qint64>(virt) << 16 | key;
+	const qint64  mapKey        = AcceleratorUtils::acceleratorMapKey(virt, key);
 	const QString sendTextValue = QString::fromUtf8(sendText);
 	return pushAcceleratorRegistrationResult(L, engine, runtime, QStringLiteral("Accelerator"), mapKey,
 	                                         sendTextValue, eSendToExecute);
@@ -40898,7 +41367,18 @@ static int luaCallPlugin(lua_State *L)
 		return 2;
 	}
 	if (const QString shimId = QMudNativePluginRegistry::resolveShimIdOrName(pluginId); !shimId.isEmpty())
+	{
+		if (shimId.compare(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive) == 0)
+		{
+			if (const std::optional<int> handled =
+			        tryHandleLuaAudioCallPluginInCallback(L, engine, runtime, routine);
+			    handled.has_value())
+			{
+				return *handled;
+			}
+		}
 		return runtime->callPluginLua(shimId, routine, L, 1, engine->pluginId());
+	}
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 	const auto pushCodeAndMessage = [L](const int code, const QString &message)
 	{
@@ -41170,6 +41650,7 @@ static int luaSetOption(lua_State *L)
 		    engine, runtime, [canonical, storedValue](WorldRuntime &targetRuntime)
 		    { targetRuntime.setWorldAttribute(canonical, QString::number(storedValue)); });
 		updateCallbackWorldAttributeSnapshot(engine, canonical, QString::number(storedValue), false);
+		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical, false);
 		lua_pushnumber(L, eOK);
 		return 1;
 	}
@@ -41184,6 +41665,7 @@ static int luaSetOption(lua_State *L)
 	if (result == eOK)
 	{
 		updateCallbackWorldAttributeSnapshot(engine, canonical, QString::number(storedValue), false);
+		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical, false);
 	}
 	lua_pushnumber(L, result);
 	return 1;
@@ -41426,6 +41908,8 @@ static int luaSetAlphaOption(lua_State *L)
 				    targetRuntime.setWorldAttribute(canonical, value);
 		    });
 		updateCallbackWorldAttributeSnapshot(engine, canonical, value, isMultiline);
+		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical,
+		                                                                  isMultiline);
 		lua_pushnumber(L, eOK);
 		return 1;
 	}
@@ -41442,7 +41926,11 @@ static int luaSetAlphaOption(lua_State *L)
 	    },
 	    eWorldClosed);
 	if (result == eOK)
+	{
 		updateCallbackWorldAttributeSnapshot(engine, canonical, value, isMultiline);
+		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical,
+		                                                                  isMultiline);
+	}
 	lua_pushnumber(L, result);
 	return 1;
 }
@@ -45425,7 +45913,8 @@ void LuaCallbackEngine::callMxpSetVariable(const QString &functionName, const QS
 }
 
 bool LuaCallbackEngine::callFunctionNoArgs(const QString &functionName, bool *hasFunction, bool defaultResult,
-                                           bool *suspended, quint64 *modalResumeId,
+                                           const int actionSourceOverride, bool *suspended,
+                                           quint64                      *modalResumeId,
                                            LuaPendingModalStringRequest *pendingModalStringRequest)
 {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
@@ -45447,6 +45936,8 @@ bool LuaCallbackEngine::callFunctionNoArgs(const QString &functionName, bool *ha
 	if (hasFunction)
 		*hasFunction = true;
 	LuaCallbackExecutionContext context;
+	context.actionSourceOverride    = actionSourceOverride;
+	context.hasActionSourceOverride = actionSourceOverride >= 0;
 	pushActiveCallbackContext(this, std::move(context));
 	if (const auto *snapshot = currentDispatchMiniWindowSnapshot(); snapshot)
 		seedCallbackMiniWindowSnapshot(this, snapshot);
@@ -45456,6 +45947,7 @@ bool LuaCallbackEngine::callFunctionNoArgs(const QString &functionName, bool *ha
 	Q_UNUSED(functionName);
 	Q_UNUSED(hasFunction);
 	Q_UNUSED(defaultResult);
+	Q_UNUSED(actionSourceOverride);
 	Q_UNUSED(suspended);
 	Q_UNUSED(modalResumeId);
 	Q_UNUSED(pendingModalStringRequest);
@@ -46059,13 +46551,11 @@ bool LuaCallbackEngine::callFunctionWithStringsAndWildcards(
 #endif
 }
 
-bool LuaCallbackEngine::executeScript(const QString &code, const QString &description,
-                                      const QVector<LuaStyleRun> *styleRuns, const bool hasTriggerContext,
-                                      const bool   triggerOutputReplacesMatchedLine,
-                                      const int    triggerMatchedLineBufferIndex,
-                                      const qint64 triggerMatchedLineAbsoluteNumber, bool *suspended,
-                                      quint64                      *modalResumeId,
-                                      LuaPendingModalStringRequest *pendingModalStringRequest)
+bool LuaCallbackEngine::executeScript(
+    const QString &code, const QString &description, const QVector<LuaStyleRun> *styleRuns,
+    const bool hasTriggerContext, const int actionSourceOverride, const bool triggerOutputReplacesMatchedLine,
+    const int triggerMatchedLineBufferIndex, const qint64 triggerMatchedLineAbsoluteNumber, bool *suspended,
+    quint64 *modalResumeId, LuaPendingModalStringRequest *pendingModalStringRequest)
 {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 	if (suspended)
@@ -46092,10 +46582,13 @@ bool LuaCallbackEngine::executeScript(const QString &code, const QString &descri
 	const CallbackWildcardDomain wildcardDomain = hasTriggerContext && !triggerLine.isEmpty()
 	                                                  ? CallbackWildcardDomain::Trigger
 	                                                  : CallbackWildcardDomain::None;
-	LuaCallbackExecutionContext  context;
+	const int effectiveActionSource = actionSourceOverride >= 0
+	                                      ? actionSourceOverride
+	                                      : (hasTriggerContext ? WorldRuntime::eTriggerFired : -1);
+	LuaCallbackExecutionContext context;
 	context.wildcardDomain                    = wildcardDomain;
-	context.actionSourceOverride              = hasTriggerContext ? WorldRuntime::eTriggerFired : -1;
-	context.hasActionSourceOverride           = hasTriggerContext;
+	context.actionSourceOverride              = effectiveActionSource;
+	context.hasActionSourceOverride           = effectiveActionSource >= 0;
 	context.directTriggerScriptActionPriority = hasTriggerContext;
 	context.triggerOutputReplacesMatchedLine  = triggerOutputReplacesMatchedLine;
 	pushActiveCallbackContext(this, std::move(context));
@@ -46149,6 +46642,7 @@ bool LuaCallbackEngine::executeScript(const QString &code, const QString &descri
 	Q_UNUSED(description);
 	Q_UNUSED(styleRuns);
 	Q_UNUSED(hasTriggerContext);
+	Q_UNUSED(actionSourceOverride);
 	Q_UNUSED(triggerOutputReplacesMatchedLine);
 	Q_UNUSED(triggerMatchedLineBufferIndex);
 	Q_UNUSED(triggerMatchedLineAbsoluteNumber);

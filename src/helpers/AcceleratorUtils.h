@@ -10,6 +10,7 @@
 #ifndef QMUD_ACCELERATORUTILS_H
 #define QMUD_ACCELERATORUTILS_H
 
+#include <QKeySequence>
 #include <QString>
 #include <QtCore/Qt>
 #include <QtGlobal>
@@ -17,11 +18,11 @@
 namespace AcceleratorUtils
 {
 
-	constexpr quint32 kVirtKeyFlag  = 0x0001;
-	constexpr quint32 kNoInvertFlag = 0x0000;
-	constexpr quint32 kShiftFlag    = 0x0004;
-	constexpr quint32 kControlFlag  = 0x0008;
-	constexpr quint32 kAltFlag      = 0x0010;
+	constexpr quint32    kVirtKeyFlag  = 0x0001;
+	constexpr quint32    kNoInvertFlag = 0x0000;
+	constexpr quint32    kShiftFlag    = 0x0004;
+	constexpr quint32    kControlFlag  = 0x0008;
+	constexpr quint32    kAltFlag      = 0x0010;
 
 	/**
 	 * @brief Parses textual accelerator into virtual-key flags and key code.
@@ -30,33 +31,47 @@ namespace AcceleratorUtils
 	 * @param key Output virtual-key code.
 	 * @return `true` when parse succeeds.
 	 */
-	bool              stringToAccelerator(const QString &text, quint32 &virt, quint16 &key);
+	bool                 stringToAccelerator(const QString &text, quint32 &virt, quint16 &key);
 	/**
 	 * @brief Returns true when virtual key implies keypad modifier usage.
 	 * @param key Virtual-key code.
 	 * @return `true` when keypad modifier should be used.
 	 */
-	bool              virtualKeyUsesKeypadModifier(quint16 key);
+	bool                 virtualKeyUsesKeypadModifier(quint16 key);
 	/**
 	 * @brief Formats accelerator flags/key to display string.
 	 * @param virt Virtual-key flags.
 	 * @param key Virtual-key code.
 	 * @return Formatted accelerator text.
 	 */
-	QString           acceleratorToString(quint32 virt, quint16 key);
+	QString              acceleratorToString(quint32 virt, quint16 key);
 	/**
 	 * @brief Converts Windows-style virtual key to Qt key enum.
 	 * @param key Virtual-key code.
 	 * @return Equivalent Qt key.
 	 */
-	Qt::Key           virtualKeyToQtKey(quint16 key);
+	Qt::Key              virtualKeyToQtKey(quint16 key);
 	/**
 	 * @brief Converts Qt key enum to Windows-style virtual key.
 	 * @param key Qt key.
 	 * @param keypad Treat as keypad key when `true`.
 	 * @return Equivalent virtual-key code.
 	 */
-	quint16           qtKeyToVirtualKey(Qt::Key key, bool keypad);
+	quint16              qtKeyToVirtualKey(Qt::Key key, bool keypad);
+	/**
+	 * @brief Builds accelerator map key from virtual-key flags and key code.
+	 * @param virt Virtual-key flags.
+	 * @param key Virtual-key code.
+	 * @return Packed accelerator map key.
+	 */
+	[[nodiscard]] qint64 acceleratorMapKey(quint32 virt, quint16 key);
+	/**
+	 * @brief Converts a single-stroke Qt key sequence to accelerator map key form.
+	 * @param sequence Key sequence.
+	 * @param mapKey Output accelerator map key.
+	 * @return `true` when conversion succeeds.
+	 */
+	[[nodiscard]] bool   keySequenceToAcceleratorMapKey(const QKeySequence &sequence, qint64 &mapKey);
 
 } // namespace AcceleratorUtils
 

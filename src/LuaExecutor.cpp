@@ -202,9 +202,10 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			bool                         suspended   = false;
 			quint64                      resumeId    = 0;
 			LuaPendingModalStringRequest modalRequest;
-			const bool                   ok =
-			    engine->callFunctionNoArgs(request.functionName, &hasFunction, request.defaultResult,
-			                               &suspended, &resumeId, &modalRequest);
+			const bool                   ok = engine->callFunctionNoArgs(
+			    request.functionName, &hasFunction, request.defaultResult,
+			    request.hasActionSourceOverride ? request.actionSourceOverride : -1, &suspended, &resumeId,
+			    &modalRequest);
 			collectDeferredBatches(engine);
 #ifndef NDEBUG
 			if (qmudMmStartupDiagShouldLogEngine(engine, request.functionName))
@@ -831,9 +832,10 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			    result.boolResult = engine->executeScript(
 			        request.stringArg, request.stringArg2,
 			        request.styleRunsArg ? request.styleRunsArg.data() : nullptr,
-			        request.executeScriptHasTriggerContext, request.triggerOutputReplacesMatchedLine,
-			        request.triggerMatchedLineBufferIndex, request.triggerMatchedLineAbsoluteNumber,
-			        &suspended, &resumeId, &modalRequest);
+			        request.executeScriptHasTriggerContext,
+			        request.hasActionSourceOverride ? request.actionSourceOverride : -1,
+			        request.triggerOutputReplacesMatchedLine, request.triggerMatchedLineBufferIndex,
+			        request.triggerMatchedLineAbsoluteNumber, &suspended, &resumeId, &modalRequest);
 			    if (suspended)
 			    {
 				    storeSuspension(engineIndex, resumeId, std::move(modalRequest));

@@ -713,6 +713,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             "${CMAKE_SOURCE_DIR}/src/helpers/AccessibleTextUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/OutputWrapUtils.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/ShortcutPreferenceUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/TimeFormatUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/WorldView.h"
@@ -796,6 +797,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             gui/tst_Dialog_GlobalPreferencesUpdates.cpp
             "${CMAKE_SOURCE_DIR}/src/dialogs/GlobalPreferencesDialog.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/FontUtils.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/ShortcutPreferenceUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/AppController.h"
             LIBRARIES
             Qt6::Sql

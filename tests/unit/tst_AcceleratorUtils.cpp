@@ -8,6 +8,8 @@
 
 #include "AcceleratorUtils.h"
 
+#include <limits>
+
 #include <QtTest/QTest>
 
 /**
@@ -64,6 +66,33 @@ class tst_AcceleratorUtils : public QObject
 			QVERIFY((virt & AcceleratorUtils::kControlFlag) != 0);
 			QVERIFY((virt & AcceleratorUtils::kAltFlag) != 0);
 			QCOMPARE(key, AcceleratorUtils::qtKeyToVirtualKey(Qt::Key_Plus, true));
+		}
+
+		void keySequenceMapKeyMatchesStringAccelerator()
+		{
+			quint32 virt = 0;
+			quint16 key  = 0;
+			QVERIFY(AcceleratorUtils::stringToAccelerator(QStringLiteral("Ctrl+Shift+K"), virt, key));
+
+			qint64 mapKey = 0;
+			QVERIFY(AcceleratorUtils::keySequenceToAcceleratorMapKey(
+			    QKeySequence(QStringLiteral("Ctrl+Shift+K")), mapKey));
+			QCOMPARE(mapKey, AcceleratorUtils::acceleratorMapKey(virt, key));
+		}
+
+		void keySequenceMapKeyPreservesRawQtKeyFallback()
+		{
+			constexpr auto fallbackKey = Qt::Key_exclamdown;
+			static_assert(static_cast<int>(fallbackKey) <= std::numeric_limits<quint16>::max());
+
+			const QKeySequence fallbackSequence(QKeyCombination(Qt::ControlModifier, fallbackKey));
+
+			qint64             mapKey = 0;
+			QVERIFY(AcceleratorUtils::keySequenceToAcceleratorMapKey(fallbackSequence, mapKey));
+			QCOMPARE(mapKey, AcceleratorUtils::acceleratorMapKey(AcceleratorUtils::kVirtKeyFlag |
+			                                                         AcceleratorUtils::kNoInvertFlag |
+			                                                         AcceleratorUtils::kControlFlag,
+			                                                     static_cast<quint16>(fallbackKey)));
 		}
 
 		void virtualKeySymmetry()
