@@ -4377,7 +4377,7 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Resolves command id for accelerator key.
 		 * @param key Accelerator key value.
-		 * @return Command id, or 0 when unbound.
+		 * @return Command id, or `-1` when unbound.
 		 */
 		[[nodiscard]] int  acceleratorCommandForKey(qint64 key) const;
 		/**
@@ -4664,8 +4664,9 @@ class WorldRuntime : public QObject
 
 	signals:
 		/**
-		 * @brief Emitted for line/output/socket/world state changes.
+		 * @brief Emitted when registered accelerator keys change.
 		 */
+		void acceleratorsChanged();
 		/**
 		 * @brief Emitted when full line text arrives.
 		 * @param line Incoming line text.

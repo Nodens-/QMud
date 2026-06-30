@@ -31735,7 +31735,7 @@ static int luaAcceleratorTo(lua_State *L)
 		return 1;
 	}
 
-	const qint64 mapKey = static_cast<qint64>(virt) << 16 | key;
+	const qint64 mapKey = AcceleratorUtils::acceleratorMapKey(virt, key);
 	return pushAcceleratorRegistrationResult(L, engine, runtime, QStringLiteral("AcceleratorTo"), mapKey,
 	                                         sendTextValue, sendTo);
 }
@@ -31766,7 +31766,7 @@ static int luaAccelerator(lua_State *L)
 		return 1;
 	}
 
-	const qint64  mapKey        = static_cast<qint64>(virt) << 16 | key;
+	const qint64  mapKey        = AcceleratorUtils::acceleratorMapKey(virt, key);
 	const QString sendTextValue = QString::fromUtf8(sendText);
 	return pushAcceleratorRegistrationResult(L, engine, runtime, QStringLiteral("Accelerator"), mapKey,
 	                                         sendTextValue, eSendToExecute);

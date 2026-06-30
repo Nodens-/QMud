@@ -54,6 +54,7 @@
 #include "dialogs/WelcomeUpgradeDialog.h"
 #include "dialogs/WorldPreferencesDialog.h"
 #include "helpers/PluginPathUtils.h"
+#include "helpers/ShortcutPreferenceUtils.h"
 #include "helpers/WorldEditUtils.h"
 #include "scripting/ScriptingErrors.h"
 
@@ -3294,6 +3295,13 @@ QVariant AppController::getGlobalOption(const QString &name) const
 		return QString::fromUtf8(kAlphaGlobalOptionsTable[stringIndex].defaultValue);
 	}
 
+	if (const auto *shortcutDefinition = QMudShortcutPreferenceUtils::definitionForPreferenceKey(lookupName))
+	{
+		if (m_globalStringPrefs.contains(shortcutDefinition->preferenceKey))
+			return m_globalStringPrefs.value(shortcutDefinition->preferenceKey);
+		return QString();
+	}
+
 	return {};
 }
 
@@ -3304,6 +3312,8 @@ QStringList AppController::globalOptionList()
 		result.append(QString::fromUtf8(kGlobalOptionsTable[i].name));
 	for (int i = 0; kAlphaGlobalOptionsTable[i].name; ++i)
 		result.append(QString::fromUtf8(kAlphaGlobalOptionsTable[i].name));
+	for (const auto &definition : QMudShortcutPreferenceUtils::shortcutDefinitions())
+		result.append(definition.preferenceKey);
 	return result;
 }
 
@@ -5398,6 +5408,8 @@ void AppController::applyGlobalPreferences()
 	applyLocalePreferences();
 	applyListViewPreferences();
 	applyInputPreferences();
+	if (m_mainWindow)
+		m_mainWindow->applyShortcutPreferences();
 	applyNotificationPreferences();
 	applyTypingPreferences();
 	applyRegexPreferences();
@@ -8064,6 +8076,16 @@ int AppController::populateDatabase() const
 			return db_rc;
 	}
 
+	for (const auto &definition : QMudShortcutPreferenceUtils::shortcutDefinitions())
+	{
+		db_rc = dbExecute(QStringLiteral("INSERT INTO prefs (name, value) VALUES ('%1', '')")
+		                      .arg(escapeSql(definition.preferenceKey)),
+		                  true);
+
+		if (db_rc != SQLITE_OK)
+			return db_rc;
+	}
+
 	// Seed DB-only prefs that are not part of canonical global option tables.
 	for (const auto &[prefKey, prefDefault] : kDbOnlyGlobalIntPrefs)
 	{
@@ -8213,6 +8235,14 @@ void AppController::loadGlobalsFromDatabase()
 			m_fixedPitchFont = dbValue;
 		if (key == QStringLiteral("LuaScript"))
 			m_luaScript = dbValue;
+	}
+
+	for (const auto &definition : QMudShortcutPreferenceUtils::shortcutDefinitions())
+	{
+		if (!readPrefsValue(definition.preferenceKey, dbValue))
+			dbValue.clear();
+		QMutexLocker locker(&m_globalPrefsMutex);
+		m_globalStringPrefs.insert(definition.preferenceKey, dbValue);
 	}
 
 	migrateLegacyWorldTree(m_workingDir,

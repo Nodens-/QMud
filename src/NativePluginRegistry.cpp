@@ -580,7 +580,7 @@ namespace
 		if (!AcceleratorUtils::stringToAccelerator(QStringLiteral("Ctrl+Shift+F12"), virt, key))
 			return;
 
-		const qint64 mapKey = (static_cast<qint64>(virt) << 16) | key;
+		const qint64 mapKey = AcceleratorUtils::acceleratorMapKey(virt, key);
 		if (runtime->acceleratorCommandForKey(mapKey) >= 0)
 			return;
 

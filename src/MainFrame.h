@@ -14,11 +14,14 @@
 #include "TabActivationHistory.h"
 #include <QDockWidget>
 #include <QElapsedTimer>
+#include <QHash>
+#include <QKeySequence>
 #include <QLabel>
 #include <QList>
 #include <QMainWindow>
 #include <QMap>
 #include <QRect>
+#include <QSet>
 #include <QStatusBar>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QStringList>
@@ -107,6 +110,10 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @return Matching action pointer, or `nullptr`.
 		 */
 		[[nodiscard]] QAction *actionForCommand(const QString &cmdName) const override;
+		/**
+		 * @brief Reapplies global shortcut preferences to existing actions.
+		 */
+		void                   applyShortcutPreferences();
 		/**
 		 * @brief Creates generic MDI child container.
 		 * @param title Initial child window title.
@@ -584,60 +591,67 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		unsigned int m_backgroundColour{0xFFFFFFFF}; // MDI frame background color, 0xFFFFFFFF for the default
 
 	protected: // control bar embedded members
-		bool                     m_fullScreenMode{false};
-		MdiTabs                  m_mdiTabs;
+		bool                                m_fullScreenMode{false};
+		MdiTabs                             m_mdiTabs;
 
-		QMdiArea                *m_mdiArea{nullptr};
-		QPointer<QMdiSubWindow>  m_lastActiveSubWindow;
-		TabActivationHistory     m_tabActivationHistory;
+		QMdiArea                           *m_mdiArea{nullptr};
+		QPointer<QMdiSubWindow>             m_lastActiveSubWindow;
+		TabActivationHistory                m_tabActivationHistory;
 
-		bool                     m_initialShowHandled{false};
-		QRect                    m_lastNormalGeometry;
+		bool                                m_initialShowHandled{false};
+		QRect                               m_lastNormalGeometry;
 
-		QWidget                 *m_centralContainer{nullptr};
-		QVBoxLayout             *m_centralLayout{nullptr};
+		QWidget                            *m_centralContainer{nullptr};
+		QVBoxLayout                        *m_centralLayout{nullptr};
 
-		QSystemTrayIcon         *m_trayIcon{nullptr};
+		QSystemTrayIcon                    *m_trayIcon{nullptr};
 
-		QMenu                   *m_fileMenu{nullptr};
-		QMenu                   *m_windowMenu{nullptr};
+		QMenu                              *m_fileMenu{nullptr};
+		QMenu                              *m_windowMenu{nullptr};
 
-		QVector<QAction *>       m_recentActions;
-		int                      m_recentMax{4};
+		QVector<QAction *>                  m_recentActions;
+		int                                 m_recentMax{4};
 
-		QMap<QString, QAction *> m_actions;
-		QVector<QAction *>       m_worldActions;
-		QByteArray               m_defaultToolbarState;
-		QStatusBar              *m_qtStatusBar{nullptr};
-		StatusPaneLabel         *m_statusMessage{nullptr};
-		StatusPaneLabel         *m_statusFreeze{nullptr};
-		StatusPaneLabel         *m_statusMushName{nullptr};
-		StatusPaneLabel         *m_statusTime{nullptr};
-		StatusPaneLabel         *m_statusLines{nullptr};
-		StatusPaneLabel         *m_statusLog{nullptr};
-		StatusPaneLabel         *m_statusCaps{nullptr};
-		QDockWidget             *m_infoDock{nullptr};
-		QTextEdit               *m_infoText{nullptr};
-		QTimer                  *m_statusTimer{nullptr};
-		QTimer                  *m_statusMessageTimer{nullptr};
-		mutable bool             m_statusTipOwnsMessage{false};
-		bool                     m_hyperlinkStatusLocked{false};
-		QTimer                  *m_activityTimer{nullptr};
-		QTimer                  *m_tickTimer{nullptr};
-		QElapsedTimer            m_timerFallbackClock;
-		qint64                   m_lastTimerProcessNs{0};
-		qint64                   m_lastTickProcessNs{0};
-		int                      m_windowTabsStyle{1};
-		int                      m_activityToolbarStyle{0};
-		int                      m_activityRefreshType{0};
-		int                      m_activityRefreshInterval{15};
-		bool                     m_disableKeyboardMenuActivation{false};
-		bool                     m_deferredUiRefreshQueued{false};
-		bool                     m_deferredUiRefreshStatus{false};
-		bool                     m_deferredUiRefreshTabs{false};
-		bool                     m_deferredUiRefreshActivity{false};
-		bool                     m_lastKnownApplicationFocused{true};
-		bool                     m_taskbarFlashRequestedInBackgroundSession{false};
+		QMap<QString, QAction *>            m_actions;
+		QVector<QAction *>                  m_worldActions;
+		QByteArray                          m_defaultToolbarState;
+		QStatusBar                         *m_qtStatusBar{nullptr};
+		StatusPaneLabel                    *m_statusMessage{nullptr};
+		StatusPaneLabel                    *m_statusFreeze{nullptr};
+		StatusPaneLabel                    *m_statusMushName{nullptr};
+		StatusPaneLabel                    *m_statusTime{nullptr};
+		StatusPaneLabel                    *m_statusLines{nullptr};
+		StatusPaneLabel                    *m_statusLog{nullptr};
+		StatusPaneLabel                    *m_statusCaps{nullptr};
+		QDockWidget                        *m_infoDock{nullptr};
+		QTextEdit                          *m_infoText{nullptr};
+		QTimer                             *m_statusTimer{nullptr};
+		QTimer                             *m_statusMessageTimer{nullptr};
+		mutable bool                        m_statusTipOwnsMessage{false};
+		bool                                m_hyperlinkStatusLocked{false};
+		QTimer                             *m_activityTimer{nullptr};
+		QTimer                             *m_tickTimer{nullptr};
+		QElapsedTimer                       m_timerFallbackClock;
+		qint64                              m_lastTimerProcessNs{0};
+		qint64                              m_lastTickProcessNs{0};
+		int                                 m_windowTabsStyle{1};
+		int                                 m_activityToolbarStyle{0};
+		int                                 m_activityRefreshType{0};
+		int                                 m_activityRefreshInterval{15};
+		bool                                m_disableKeyboardMenuActivation{false};
+		bool                                m_deferredUiRefreshQueued{false};
+		bool                                m_deferredUiRefreshStatus{false};
+		bool                                m_deferredUiRefreshTabs{false};
+		bool                                m_deferredUiRefreshActivity{false};
+		bool                                m_lastKnownApplicationFocused{true};
+		bool                                m_taskbarFlashRequestedInBackgroundSession{false};
+		QPointer<WorldRuntime>              m_activeShortcutAcceleratorRuntime;
+		QMetaObject::Connection             m_activeShortcutAcceleratorDestroyedConnection;
+		QSet<qint64>                        m_activeWorldAcceleratorKeys;
+		QHash<QString, QList<QKeySequence>> m_effectiveActionShortcutCache;
+		QList<QKeySequence>                 m_preferencesShortcuts;
+		QList<QKeySequence>                 m_selectPreviousTabShortcuts;
+		QList<QKeySequence>                 m_selectNextTabShortcuts;
 
 	private slots:
 		/**
@@ -689,19 +703,52 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @param state New application state.
 		 */
 		void onApplicationStateChanged(Qt::ApplicationState state);
+		/**
+		 * @brief Handles active-world accelerator key changes.
+		 */
+		void onActiveWorldAcceleratorsChanged();
 
 	private:
 		/**
 		 * @brief Internal UI construction and routing helpers.
 		 * @return `true` when world preferences shortcut was handled.
 		 */
-		bool                         triggerWorldPreferencesFromShortcut();
+		bool                                     triggerWorldPreferencesFromShortcut();
 		/**
 		 * @brief Activates adjacent MDI tab from keyboard navigation.
 		 * @param step Signed direction (`-1` for left, `+1` for right).
 		 * @return `true` when tab activation changed.
 		 */
-		bool                         triggerAdjacentMdiTabFromShortcut(int step);
+		bool                                     triggerAdjacentMdiTabFromShortcut(int step);
+		/**
+		 * @brief Returns effective action shortcuts after active-world accelerator precedence filtering.
+		 * @param id Stable shortcut/action identifier.
+		 * @return Shortcut list with active-world accelerator conflicts removed.
+		 */
+		[[nodiscard]] const QList<QKeySequence> &effectiveActionShortcuts(const QString &id) const;
+		/**
+		 * @brief Rebuilds effective action shortcut cache from preferences and active accelerator keys.
+		 */
+		void                                     rebuildEffectiveActionShortcutCache();
+		/**
+		 * @brief Reapplies cached shortcuts to main-frame actions only.
+		 */
+		void                                     applyActionShortcutPreferences();
+		/**
+		 * @brief Updates active-world accelerator cache for shortcut precedence.
+		 * @param runtime Active world runtime, or `nullptr`.
+		 */
+		void                                     setActiveShortcutAcceleratorRuntime(WorldRuntime *runtime);
+		/**
+		 * @brief Rebuilds cached active-world accelerator key set.
+		 */
+		void                                     rebuildActiveWorldAcceleratorCache();
+		/**
+		 * @brief Refreshes toolbar tooltip shortcut suffix for an action.
+		 * @param action Action to update.
+		 * @param cmdName Command/action id.
+		 */
+		void refreshActionShortcutTooltip(QAction *action, const QString &cmdName) const;
 		/**
 		 * @brief Returns active MDI subwindow or last active fallback.
 		 * @return Active or fallback MDI subwindow, or `nullptr`.

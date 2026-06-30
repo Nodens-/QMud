@@ -15,6 +15,9 @@
 
 #include <QFont>
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QKeySequence>
+#include <QList>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QPair>
 #include <QPoint>
 #include <QRegion>
@@ -353,6 +356,10 @@ class WorldView : public QWidget
 		 */
 		void                          recallLastWord();
 		/**
+		 * @brief Rebuilds cached global shortcut preferences used by this view.
+		 */
+		void                          applyShortcutPreferences();
+		/**
 		 * @brief Requests redraw/update for active miniwindows.
 		 * @param forceFullRepaint Repaint the full miniwindow/output layer instead of changed bounds.
 		 */
@@ -376,89 +383,97 @@ class WorldView : public QWidget
 		 * @return Ordered list of (`action`, `label`) entries.
 		 */
 		[[nodiscard]] static QVector<QPair<QString, QString>>
-		                     parseMxpContextMenuActions(const QString &rawHref, const QString &rawHint);
+		                          parseMxpContextMenuActions(const QString &rawHref, const QString &rawHint);
 		/**
 		 * @brief Shows generic context menu at global position.
 		 * @param globalPos Global screen position.
 		 * @return `true` when a menu action was handled.
 		 */
-		bool                 showContextMenuAtGlobalPos(const QPoint &globalPos);
+		bool                      showContextMenuAtGlobalPos(const QPoint &globalPos);
 		/**
 		 * @brief Shows world context menu at global position.
 		 * @param globalPos Global screen position.
 		 * @return `true` when a menu action was handled.
 		 */
-		bool                 showWorldContextMenuAtGlobalPos(const QPoint &globalPos);
+		bool                      showWorldContextMenuAtGlobalPos(const QPoint &globalPos);
 		/**
 		 * @brief Replays right-click event against miniwindow hotspots.
 		 * @param globalPos Global click position.
 		 * @return `true` when a hotspot handled the click.
 		 */
-		bool                 replayMiniWindowRightClickAtGlobalPos(const QPoint &globalPos);
+		bool                      replayMiniWindowRightClickAtGlobalPos(const QPoint &globalPos);
 		/**
 		 * @brief Handles world hotkey keypress.
 		 * @param event Key event to process.
 		 * @return `true` when the hotkey is consumed.
 		 */
-		bool                 handleWorldHotkey(QKeyEvent *event);
+		bool                      handleWorldHotkey(QKeyEvent *event);
 		/**
 		 * @brief Returns whether a key event has a registered world accelerator binding.
 		 * @param event Key event to inspect.
 		 * @return `true` when accelerator dispatch should preempt Qt shortcuts.
 		 */
-		[[nodiscard]] bool   hasWorldAcceleratorBinding(const QKeyEvent *event) const;
+		[[nodiscard]] bool        hasWorldAcceleratorBinding(const QKeyEvent *event) const;
 		/**
 		 * @brief Returns whether a key event is claimed by command option settings.
 		 * @param event Key event to inspect.
 		 * @return `true` when a command option shortcut should preempt Qt shortcuts.
 		 */
-		[[nodiscard]] bool   hasCommandOptionShortcut(const QKeyEvent *event) const;
+		[[nodiscard]] bool        hasCommandOptionShortcut(const QKeyEvent *event) const;
 		/**
 		 * @brief Handles command option shortcuts.
 		 * @param event Key event to process.
 		 * @return `true` when the shortcut is consumed.
 		 */
-		bool                 handleCommandOptionShortcut(QKeyEvent *event);
+		bool                      handleCommandOptionShortcut(QKeyEvent *event);
 		/**
 		 * @brief Returns whether a key event is a command-history shortcut.
 		 * @param event Key event to inspect.
 		 * @return `true` when command-history routing should preempt Qt shortcuts.
 		 */
-		[[nodiscard]] bool   hasCommandHistoryShortcut(const QKeyEvent *event) const;
+		[[nodiscard]] bool        hasCommandHistoryShortcut(const QKeyEvent *event) const;
 		/**
 		 * @brief Handles command-history shortcuts.
 		 * @param event Key event to process.
 		 * @return `true` when the shortcut is consumed.
 		 */
-		bool                 handleCommandHistoryShortcut(QKeyEvent *event);
+		bool                      handleCommandHistoryShortcut(QKeyEvent *event);
+		/**
+		 * @brief Tests a key event against a cached shortcut list.
+		 * @param event Key event to inspect.
+		 * @param shortcuts Cached shortcut list.
+		 * @return `true` when the event matches one cached shortcut.
+		 */
+		[[nodiscard]] static bool eventMatchesCachedShortcut(const QKeyEvent           *event,
+		                                                     const QList<QKeySequence> &shortcuts);
 		/**
 		 * @brief Returns true when miniwindow mouse capture is active.
 		 * @return `true` when miniwindow mouse capture is active.
 		 */
-		[[nodiscard]] bool   isMiniWindowCaptureActive() const;
+		[[nodiscard]] bool        isMiniWindowCaptureActive() const;
 		/**
 		 * @brief Returns true when last mouse position is known.
 		 * @return `true` when last mouse position is available.
 		 */
-		[[nodiscard]] bool   hasLastMousePosition() const;
+		[[nodiscard]] bool        hasLastMousePosition() const;
 		/**
 		 * @brief Returns cached last mouse position.
 		 * @return Cached last mouse position.
 		 */
-		[[nodiscard]] QPoint lastMousePosition() const;
+		[[nodiscard]] QPoint      lastMousePosition() const;
 		/**
 		 * @brief Re-evaluates miniwindow hover state.
 		 */
-		void                 recheckMiniWindowHover();
+		void                      recheckMiniWindowHover();
 		/**
 		 * @brief Returns true when scrollback split view is active.
 		 * @return `true` when split view is active.
 		 */
-		[[nodiscard]] bool   isScrollbackSplitActive() const;
+		[[nodiscard]] bool        isScrollbackSplitActive() const;
 		/**
 		 * @brief Collapses split output view back to live-only output.
 		 */
-		void                 collapseScrollbackSplitToLiveOutput();
+		void                      collapseScrollbackSplitToLiveOutput();
 
 	signals:
 		/**
@@ -2124,6 +2139,16 @@ class WorldView : public QWidget
 		bool                                        m_ctrlZGoesToEndOfBuffer{false};
 		bool                                        m_ctrlPGoesToPreviousCommand{false};
 		bool                                        m_ctrlNGoesToNextCommand{false};
+		QList<QKeySequence>                         m_commandOptionNextShortcuts;
+		QList<QKeySequence>                         m_commandOptionPreviousShortcuts;
+		QList<QKeySequence>                         m_commandOptionBufferEndShortcuts;
+		QList<QKeySequence>                         m_nextCommandShortcuts;
+		QList<QKeySequence>                         m_previousCommandShortcuts;
+		QList<QKeySequence>                         m_displayPageUpShortcuts;
+		QList<QKeySequence>                         m_displayPageDownShortcuts;
+		QList<QKeySequence>                         m_outputSplitStartShortcuts;
+		QList<QKeySequence>                         m_outputSplitEndShortcuts;
+		QList<QKeySequence>                         m_recallLastWordShortcuts;
 		bool                                        m_confirmBeforeReplacingTyping{false};
 		bool                                        m_doubleClickInserts{false};
 		bool                                        m_doubleClickSends{false};

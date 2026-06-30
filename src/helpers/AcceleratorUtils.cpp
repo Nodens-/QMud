@@ -422,6 +422,39 @@ namespace AcceleratorUtils
 		       key == kVkSeparator || key == kVkSubtract || key == kVkDecimal || key == kVkDivide;
 	}
 
+	bool keyCombinationToAccelerator(const QKeyCombination combination, quint32 &virt, quint16 &key)
+	{
+		if (combination.key() == static_cast<Qt::Key>(0) || combination.key() == Qt::Key_unknown)
+			return false;
+
+		Qt::KeyboardModifiers modifiers = combination.keyboardModifiers();
+		const bool            keypad    = (modifiers & Qt::KeypadModifier) != 0;
+		modifiers &= ~Qt::KeypadModifier;
+		if ((modifiers & Qt::MetaModifier) != 0)
+			return false;
+
+		const quint16 mappedKey = qtKeyToVirtualKey(combination.key(), keypad);
+		if (mappedKey != 0)
+			key = mappedKey;
+		else
+		{
+			const int keyPart = static_cast<int>(combination.key());
+			if (keyPart <= 0 || keyPart > std::numeric_limits<quint16>::max())
+				return false;
+			key = static_cast<quint16>(keyPart);
+		}
+
+		virt = kVirtKeyFlag | kNoInvertFlag;
+		if ((modifiers & Qt::ShiftModifier) != 0)
+			virt |= kShiftFlag;
+		if ((modifiers & Qt::ControlModifier) != 0)
+			virt |= kControlFlag;
+		if ((modifiers & Qt::AltModifier) != 0)
+			virt |= kAltFlag;
+
+		return true;
+	}
+
 	bool stringToAccelerator(const QString &text, quint32 &virt, quint16 &key)
 	{
 		const QKeySequence seq = QKeySequence::fromString(text, QKeySequence::PortableText);
@@ -432,31 +465,25 @@ namespace AcceleratorUtils
 		if (combo.key() == static_cast<Qt::Key>(0) || combo.key() == Qt::Key_unknown)
 			return parseLegacyAccelerator(text, virt, key);
 
-		Qt::KeyboardModifiers mods   = combo.keyboardModifiers();
-		const bool            keypad = (mods & Qt::KeypadModifier) != 0;
-		mods &= ~Qt::KeypadModifier;
-		if ((mods & Qt::MetaModifier) != 0)
+		return keyCombinationToAccelerator(combo, virt, key);
+	}
+
+	qint64 acceleratorMapKey(const quint32 virt, const quint16 key)
+	{
+		return (static_cast<qint64>(virt) << 16) | key;
+	}
+
+	bool keySequenceToAcceleratorMapKey(const QKeySequence &sequence, qint64 &mapKey)
+	{
+		if (sequence.isEmpty() || sequence.count() != 1)
 			return false;
 
-		const quint16 mappedKey = qtKeyToVirtualKey(combo.key(), keypad);
-		if (mappedKey != 0)
-			key = mappedKey;
-		else
-		{
-			const int keyPart = static_cast<int>(combo.key());
-			if (keyPart <= 0 || keyPart > std::numeric_limits<quint16>::max())
-				return false;
-			key = static_cast<quint16>(keyPart);
-		}
+		quint32 virt = 0;
+		quint16 key  = 0;
+		if (!keyCombinationToAccelerator(sequence[0], virt, key))
+			return false;
 
-		virt = kVirtKeyFlag | kNoInvertFlag;
-		if (mods & Qt::ShiftModifier)
-			virt |= kShiftFlag;
-		if (mods & Qt::ControlModifier)
-			virt |= kControlFlag;
-		if (mods & Qt::AltModifier)
-			virt |= kAltFlag;
-
+		mapKey = acceleratorMapKey(virt, key);
 		return true;
 	}
 

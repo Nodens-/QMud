@@ -17344,8 +17344,26 @@ void WorldRuntime::registerAccelerator(qint64 key, int commandId, const Accelera
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::registerAccelerator");
+	const auto existing = m_acceleratorKeyToCommand.constFind(key);
+	if (existing != m_acceleratorKeyToCommand.constEnd())
+	{
+		const int previousCommandId = existing.value();
+		if (previousCommandId == commandId)
+		{
+			const auto existingEntry = m_commandToAcceleratorEntry.constFind(commandId);
+			if (existingEntry != m_commandToAcceleratorEntry.constEnd() &&
+			    existingEntry->text == entry.text && existingEntry->sendTo == entry.sendTo &&
+			    existingEntry->pluginId == entry.pluginId)
+				return;
+		}
+		else
+		{
+			m_commandToAcceleratorEntry.remove(previousCommandId);
+		}
+	}
 	m_acceleratorKeyToCommand[key]         = commandId;
 	m_commandToAcceleratorEntry[commandId] = entry;
+	emit acceleratorsChanged();
 }
 
 void WorldRuntime::removeAccelerator(qint64 key)
@@ -17362,6 +17380,7 @@ void WorldRuntime::removeAccelerator(qint64 key)
 		return;
 	m_commandToAcceleratorEntry.remove(it.value());
 	m_acceleratorKeyToCommand.erase(it);
+	emit acceleratorsChanged();
 }
 
 int WorldRuntime::acceleratorCommandForKey(qint64 key) const

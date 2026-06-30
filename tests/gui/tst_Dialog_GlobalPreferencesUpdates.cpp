@@ -10,6 +10,7 @@
 #include "MainFrame.h"
 // ReSharper disable once CppUnusedIncludeDirective
 #include "NameGeneration.h"
+#include "ShortcutPreferenceUtils.h"
 #include "WorldChildWindow.h"
 #include "WorldRuntime.h"
 #include "dialogs/GlobalPreferencesDialog.h"
@@ -19,12 +20,17 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 #include <QFile>
+#include <QFocusEvent>
 #include <QFont>
+#include <QHeaderView>
 #include <QLabel>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTabBar>
 #include <QTabWidget>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QTextEdit>
 #include <QWidget>
 #include <QtTest/QTest>
@@ -139,6 +145,27 @@ namespace
 		{
 			if (button && button->text() == text)
 				return button;
+		}
+		return nullptr;
+	}
+
+	/**
+	 * @brief Finds shortcut override item by global preference key.
+	 * @param table Table to scan.
+	 * @param preferenceKey Shortcut preference key.
+	 * @return Matching table item, or `nullptr`.
+	 */
+	QTableWidgetItem *findShortcutOverrideItemByPreferenceKey(const QTableWidget &table,
+	                                                          const QString      &preferenceKey)
+	{
+		for (int row = 0; row < table.rowCount(); ++row)
+		{
+			for (int column = 0; column < table.columnCount(); ++column)
+			{
+				QTableWidgetItem *item = table.item(row, column);
+				if (item && item->data(Qt::UserRole).toString() == preferenceKey)
+					return item;
+			}
 		}
 		return nullptr;
 	}
@@ -411,6 +438,145 @@ class tst_Dialog_GlobalPreferencesUpdates : public QObject
 			QCOMPARE(tabs->focusPolicy(), Qt::NoFocus);
 			QVERIFY(tabs->tabBar());
 			QCOMPARE(tabs->tabBar()->focusPolicy(), Qt::NoFocus);
+		}
+
+		/**
+		 * @brief Verifies Shortcuts page is placed between General and Closing.
+		 */
+		void shortcutsTabIsBetweenGeneralAndClosing()
+		{
+			resetStubState();
+
+			GlobalPreferencesDialog dialog;
+
+			auto                   *tabs = dialog.findChild<QTabWidget *>();
+			QVERIFY(tabs);
+			QCOMPARE(tabs->tabText(1), QStringLiteral("General"));
+			QCOMPARE(tabs->tabText(2), QStringLiteral("Shortcuts"));
+			QCOMPARE(tabs->tabText(3), QStringLiteral("Closing"));
+		}
+
+		/**
+		 * @brief Verifies Shortcuts table sorts by category and leaves Tab for focus traversal.
+		 */
+		void shortcutsTableSortsAndDoesNotConsumeTabNavigation()
+		{
+			resetStubState();
+
+			GlobalPreferencesDialog dialog;
+
+			auto                   *table = dialog.findChild<QTableWidget *>();
+			QVERIFY(table);
+			QVERIFY(table->isSortingEnabled());
+			QVERIFY(!table->tabKeyNavigation());
+			QVERIFY(table->horizontalHeader());
+			QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 0);
+			QCOMPARE(table->horizontalHeader()->sortIndicatorOrder(), Qt::AscendingOrder);
+			for (int row = 0; row < table->rowCount(); ++row)
+				QVERIFY(!table->cellWidget(row, 3));
+
+			QString previousCategory;
+			for (int row = 0; row < table->rowCount(); ++row)
+			{
+				QTableWidgetItem *categoryItem = table->item(row, 0);
+				QVERIFY(categoryItem);
+				const QString category = categoryItem->text();
+				QVERIFY(previousCategory <= category);
+				previousCategory = category;
+				for (int column = 1; column < table->columnCount(); ++column)
+					QVERIFY(table->item(row, column));
+			}
+
+			table->sortItems(1, Qt::AscendingOrder);
+			QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 1);
+			QString previousAction;
+			for (int row = 0; row < table->rowCount(); ++row)
+			{
+				const QString action = table->item(row, 1)->text();
+				QVERIFY(previousAction <= action);
+				previousAction = action;
+			}
+
+			QTableWidgetItem *worldShortcut =
+			    findShortcutOverrideItemByPreferenceKey(*table, QStringLiteral("Shortcut.World10"));
+			QVERIFY(worldShortcut);
+			worldShortcut->setText(QStringLiteral("Ctrl+Alt+0"));
+
+			table->sortItems(3, Qt::DescendingOrder);
+			QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 3);
+			QVERIFY(table->item(0, 3));
+			QCOMPARE(table->item(0, 3)->text(), QStringLiteral("Ctrl+Alt+0"));
+
+			table->setCurrentCell(table->rowCount() - 1, 0);
+			QFocusEvent tabFocusEvent(QEvent::FocusIn, Qt::TabFocusReason);
+			QCoreApplication::sendEvent(table, &tabFocusEvent);
+			QCOMPARE(table->currentRow(), 0);
+			QCOMPARE(table->currentColumn(), 0);
+		}
+
+		/**
+		 * @brief Verifies shortcut overrides persist through existing global preferences.
+		 */
+		void acceptPersistsShortcutOverride()
+		{
+			resetStubState();
+
+			GlobalPreferencesDialog dialog;
+			dialog.show();
+
+			auto *table = dialog.findChild<QTableWidget *>();
+			QVERIFY(table);
+			QTableWidgetItem *displayStart =
+			    findShortcutOverrideItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayStart"));
+			QVERIFY(displayStart);
+			displayStart->setText(QStringLiteral("Ctrl+Alt+Home"));
+
+			dialog.accept();
+
+			QCOMPARE(stubState().globalOptions.value(QStringLiteral("Shortcut.DisplayStart")).toString(),
+			         QStringLiteral("Ctrl+Alt+Home"));
+			QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
+		}
+
+		/**
+		 * @brief Verifies world-slot actions are configurable shortcut preferences.
+		 */
+		void worldSlotShortcutsArePreferenceDefinitions()
+		{
+			resetStubState();
+
+			const auto *firstWorld = QMudShortcutPreferenceUtils::definitionForId(QStringLiteral("World1"));
+			QVERIFY(firstWorld);
+			QCOMPARE(firstWorld->preferenceKey, QStringLiteral("Shortcut.World1"));
+			QCOMPARE(QMudShortcutPreferenceUtils::shortcutListToPortableText(firstWorld->defaults),
+			         QStringLiteral("Ctrl+1"));
+
+			const auto *tenthWorld = QMudShortcutPreferenceUtils::definitionForId(QStringLiteral("World10"));
+			QVERIFY(tenthWorld);
+			QCOMPARE(tenthWorld->preferenceKey, QStringLiteral("Shortcut.World10"));
+			QCOMPARE(QMudShortcutPreferenceUtils::shortcutListToPortableText(tenthWorld->defaults),
+			         QStringLiteral("Ctrl+0"));
+
+			GlobalPreferencesDialog dialog;
+			auto                   *table = dialog.findChild<QTableWidget *>();
+			QVERIFY(table);
+			QVERIFY(findShortcutOverrideItemByPreferenceKey(*table, firstWorld->preferenceKey));
+			QVERIFY(findShortcutOverrideItemByPreferenceKey(*table, tenthWorld->preferenceKey));
+		}
+
+		/**
+		 * @brief Verifies global shortcut validation reserves per-world macro slots.
+		 */
+		void macroShortcutReservations()
+		{
+			QVERIFY(QMudShortcutPreferenceUtils::isReservedMacroShortcut(
+			    QKeySequence::fromString(QStringLiteral("F2"), QKeySequence::PortableText)));
+			QVERIFY(QMudShortcutPreferenceUtils::isReservedMacroShortcut(
+			    QKeySequence::fromString(QStringLiteral("Ctrl+F6"), QKeySequence::PortableText)));
+			QVERIFY(QMudShortcutPreferenceUtils::isReservedMacroShortcut(
+			    QKeySequence::fromString(QStringLiteral("Alt+N"), QKeySequence::PortableText)));
+			QVERIFY(!QMudShortcutPreferenceUtils::isReservedMacroShortcut(
+			    QKeySequence::fromString(QStringLiteral("Ctrl+Alt+Home"), QKeySequence::PortableText)));
 		}
 
 		/**

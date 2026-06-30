@@ -870,6 +870,35 @@ QString AcceleratorUtils::acceleratorToString(quint32, quint16)
 	return {};
 }
 
+qint64 AcceleratorUtils::acceleratorMapKey(const quint32 virt, const quint16 key)
+{
+	return (static_cast<qint64>(virt) << 16) | key;
+}
+
+bool AcceleratorUtils::keySequenceToAcceleratorMapKey(const QKeySequence &sequence, qint64 &mapKey)
+{
+	if (sequence.isEmpty() || sequence.count() != 1)
+		return false;
+	const QKeyCombination combination = sequence[0];
+	Qt::KeyboardModifiers modifiers   = combination.keyboardModifiers();
+	const bool            keypad      = (modifiers & Qt::KeypadModifier) != 0;
+	modifiers &= ~Qt::KeypadModifier;
+	if ((modifiers & Qt::MetaModifier) != 0)
+		return false;
+	const quint16 key = AcceleratorUtils::qtKeyToVirtualKey(combination.key(), keypad);
+	if (key == 0)
+		return false;
+	quint32 virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
+	if ((modifiers & Qt::ShiftModifier) != 0)
+		virt |= AcceleratorUtils::kShiftFlag;
+	if ((modifiers & Qt::ControlModifier) != 0)
+		virt |= AcceleratorUtils::kControlFlag;
+	if ((modifiers & Qt::AltModifier) != 0)
+		virt |= AcceleratorUtils::kAltFlag;
+	mapKey = AcceleratorUtils::acceleratorMapKey(virt, key);
+	return true;
+}
+
 void qmudApplyMonospaceFallback(QFont &font, const QString &preferredFamily)
 {
 	if (!preferredFamily.isEmpty())
@@ -3573,6 +3602,40 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_acceleratorExecutionCount, 1);
 			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
 			QCOMPARE(shortcutTriggerCount, 0);
+
+			resetTestState();
+		}
+
+		void pluginAcceleratorOverridesAllTypingDisplayShortcut()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			for (int i = 0; i < 120; ++i)
+				view.appendOutputText(QStringLiteral("accelerator-display-shortcut-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			constexpr Qt::Key key        = Qt::Key_PageUp;
+			constexpr quint16 virtualKey = 0x21;
+			constexpr int     commandId  = 78;
+			const qint64      mapKey     = makeAcceleratorMapKey(key, Qt::NoModifier, virtualKey);
+			g_acceleratorCommands.insert(mapKey, commandId);
+
+			QTest::keyClick(input, key);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_acceleratorExecutionCount, 1);
+			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
+			QVERIFY(!view.isScrollbackSplitActive());
 
 			resetTestState();
 		}

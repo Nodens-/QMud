@@ -18,6 +18,7 @@
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
 #include "MiniWindowUtils.h"
+#include "ShortcutPreferenceUtils.h"
 #include "Version.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
@@ -1686,6 +1687,7 @@ struct WorldView::OutputFindState
 
 WorldView::WorldView(QWidget *parent) : QWidget(parent)
 {
+	applyShortcutPreferences();
 	auto *layout   = new QVBoxLayout(this);
 	auto *splitter = new QSplitter(Qt::Vertical, this);
 	m_splitter     = splitter;
@@ -13925,6 +13927,30 @@ void WorldView::recallLastWord()
 	requestInputViewportSync();
 }
 
+void WorldView::applyShortcutPreferences()
+{
+	m_commandOptionNextShortcuts =
+	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("CommandOptionNext"));
+	m_commandOptionPreviousShortcuts =
+	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("CommandOptionPrevious"));
+	m_commandOptionBufferEndShortcuts =
+	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("CommandOptionBufferEnd"));
+	m_nextCommandShortcuts =
+	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("NextCommand"));
+	m_previousCommandShortcuts =
+	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("PreviousCommand"));
+	m_displayPageUpShortcuts =
+	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayPageUp"));
+	m_displayPageDownShortcuts =
+	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayPageDown"));
+	m_outputSplitStartShortcuts =
+	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("OutputSplitStart"));
+	m_outputSplitEndShortcuts =
+	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("OutputSplitEnd"));
+	m_recallLastWordShortcuts =
+	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("RecallLastWord"));
+}
+
 void WorldView::removeLastHistoryEntry()
 {
 	if (m_history.isEmpty())
@@ -14121,7 +14147,7 @@ namespace
 		if (lookup.keyCode == 0)
 			return false;
 
-		lookup.mapKey = (static_cast<qint64>(lookup.virt) << 16) | lookup.keyCode;
+		lookup.mapKey = AcceleratorUtils::acceleratorMapKey(lookup.virt, lookup.keyCode);
 		return true;
 	}
 
@@ -14157,25 +14183,10 @@ bool WorldView::hasCommandOptionShortcut(const QKeyEvent *event) const
 {
 	if (!event)
 		return false;
-
-	const Qt::KeyboardModifiers modifiers = event->modifiers();
-	const bool hasOnlyCtrl = modifiers.testFlag(Qt::ControlModifier) &&
-	                         !modifiers.testFlag(Qt::AltModifier) && !modifiers.testFlag(Qt::ShiftModifier) &&
-	                         !modifiers.testFlag(Qt::MetaModifier);
-	if (!hasOnlyCtrl)
-		return false;
-
-	switch (event->key())
-	{
-	case Qt::Key_N:
-		return m_ctrlNGoesToNextCommand;
-	case Qt::Key_P:
-		return m_ctrlPGoesToPreviousCommand;
-	case Qt::Key_Z:
-		return m_ctrlZGoesToEndOfBuffer;
-	default:
-		return false;
-	}
+	return (m_ctrlNGoesToNextCommand && eventMatchesCachedShortcut(event, m_commandOptionNextShortcuts)) ||
+	       (m_ctrlPGoesToPreviousCommand &&
+	        eventMatchesCachedShortcut(event, m_commandOptionPreviousShortcuts)) ||
+	       (m_ctrlZGoesToEndOfBuffer && eventMatchesCachedShortcut(event, m_commandOptionBufferEndShortcuts));
 }
 
 bool WorldView::handleCommandOptionShortcut(QKeyEvent *event)
@@ -14183,22 +14194,25 @@ bool WorldView::handleCommandOptionShortcut(QKeyEvent *event)
 	if (!hasCommandOptionShortcut(event))
 		return false;
 
-	switch (event->key())
+	if (m_ctrlNGoesToNextCommand && eventMatchesCachedShortcut(event, m_commandOptionNextShortcuts))
 	{
-	case Qt::Key_N:
 		recallNextCommand();
-		break;
-	case Qt::Key_P:
+	}
+	else if (m_ctrlPGoesToPreviousCommand &&
+	         eventMatchesCachedShortcut(event, m_commandOptionPreviousShortcuts))
+	{
 		recallPreviousCommand();
-		break;
-	case Qt::Key_Z:
+	}
+	else if (m_ctrlZGoesToEndOfBuffer && eventMatchesCachedShortcut(event, m_commandOptionBufferEndShortcuts))
+	{
 		if (m_scrollbackSplitActive)
 			collapseScrollbackSplitToLiveOutput();
 		else
 			scrollOutputToEnd();
 		clearNativeOutputSelection(true);
-		break;
-	default:
+	}
+	else
+	{
 		return false;
 	}
 
@@ -14213,10 +14227,8 @@ bool WorldView::hasCommandHistoryShortcut(const QKeyEvent *event) const
 	if (!m_altArrowRecallsPartial && !m_arrowRecallsPartial)
 		return false;
 
-	const Qt::KeyboardModifiers modifiers = event->modifiers();
-	const bool hasOnlyAlt = modifiers.testFlag(Qt::AltModifier) && !modifiers.testFlag(Qt::ControlModifier) &&
-	                        !modifiers.testFlag(Qt::ShiftModifier) && !modifiers.testFlag(Qt::MetaModifier);
-	return hasOnlyAlt && (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down);
+	return eventMatchesCachedShortcut(event, m_nextCommandShortcuts) ||
+	       eventMatchesCachedShortcut(event, m_previousCommandShortcuts);
 }
 
 bool WorldView::handleCommandHistoryShortcut(QKeyEvent *event)
@@ -14224,11 +14236,16 @@ bool WorldView::handleCommandHistoryShortcut(QKeyEvent *event)
 	if (!hasCommandHistoryShortcut(event))
 		return false;
 
-	const int direction = event->key() == Qt::Key_Up ? -1 : 1;
+	const int direction = eventMatchesCachedShortcut(event, m_previousCommandShortcuts) ? -1 : 1;
 	recallPartialHistory(direction);
 
 	event->accept();
 	return true;
+}
+
+bool WorldView::eventMatchesCachedShortcut(const QKeyEvent *event, const QList<QKeySequence> &shortcuts)
+{
+	return QMudShortcutPreferenceUtils::eventMatchesAnyShortcut(event, shortcuts);
 }
 
 bool WorldView::handleWorldHotkey(QKeyEvent *event)
@@ -14872,13 +14889,18 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 		return;
 	}
 
+	if (m_view && m_view->handleWorldHotkey(event))
+	{
+#ifdef Q_OS_WIN
+		if (windowsAltNumpadDigitKey)
+			m_suppressNextAltNumpadCommit = true;
+#endif
+		return;
+	}
+
 	if (m_view && m_view->m_allTypingToCommandWindow)
 	{
-		const Qt::KeyboardModifiers modifiers = event->modifiers();
-		const bool ctrlShiftOnlyScroll        = (modifiers & Qt::ControlModifier) != 0 &&
-		                                        (modifiers & Qt::ShiftModifier) != 0 &&
-		                                        (modifiers & (Qt::AltModifier | Qt::MetaModifier)) == 0;
-		auto       topScrollBar               = [this]() -> QScrollBar *
+		auto topScrollBar = [this]() -> QScrollBar *
 		{
 			if (!m_view || !m_view->m_output)
 				return nullptr;
@@ -14886,16 +14908,16 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 		};
 
 		bool handled = true;
-		switch (event->key())
+		if (WorldView::eventMatchesCachedShortcut(event, m_view->m_displayPageUpShortcuts))
 		{
-		case Qt::Key_PageUp:
 			m_view->setScrollbackSplitActive(true);
 			if (QScrollBar *const topBar = topScrollBar())
 				topBar->setValue(topBar->value() - topBar->pageStep());
 			else
 				handled = false;
-			break;
-		case Qt::Key_PageDown:
+		}
+		else if (WorldView::eventMatchesCachedShortcut(event, m_view->m_displayPageDownShortcuts))
+		{
 			if (QScrollBar *const topBar = topScrollBar())
 			{
 				topBar->setValue(topBar->value() + topBar->pageStep());
@@ -14904,35 +14926,23 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 			}
 			else
 				handled = false;
-			break;
-		case Qt::Key_Home:
-			if (ctrlShiftOnlyScroll)
+		}
+		else if (WorldView::eventMatchesCachedShortcut(event, m_view->m_outputSplitStartShortcuts))
+		{
+			m_view->setScrollbackSplitActive(true);
+			if (QScrollBar *const topBar = topScrollBar())
 			{
-				m_view->setScrollbackSplitActive(true);
-				if (QScrollBar *const topBar = topScrollBar())
-				{
-					topBar->setValue(topBar->minimum());
-				}
+				topBar->setValue(topBar->minimum());
 			}
-			else
-			{
-				handled = false;
-			}
-			break;
-		case Qt::Key_End:
-			if (ctrlShiftOnlyScroll)
-			{
-				m_view->setScrollbackSplitActive(false);
-				m_view->scrollOutputToEnd();
-			}
-			else
-			{
-				handled = false;
-			}
-			break;
-		default:
+		}
+		else if (WorldView::eventMatchesCachedShortcut(event, m_view->m_outputSplitEndShortcuts))
+		{
+			m_view->setScrollbackSplitActive(false);
+			m_view->scrollOutputToEnd();
+		}
+		else
+		{
 			handled = false;
-			break;
 		}
 
 		if (handled)
@@ -14943,14 +14953,6 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 		}
 	}
 
-	if (m_view && m_view->handleWorldHotkey(event))
-	{
-#ifdef Q_OS_WIN
-		if (windowsAltNumpadDigitKey)
-			m_suppressNextAltNumpadCommit = true;
-#endif
-		return;
-	}
 	if (m_view && m_view->handleCommandOptionShortcut(event))
 	{
 #ifdef Q_OS_WIN
@@ -15030,12 +15032,7 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 		m_view->pasteCommand(pasteText);
 		return;
 	}
-	const Qt::KeyboardModifiers keyModifiers = event->modifiers();
-	const bool                  ctrlBackspace =
-	    event->key() == Qt::Key_Backspace && keyModifiers.testFlag(Qt::ControlModifier) &&
-	    !keyModifiers.testFlag(Qt::AltModifier) && !keyModifiers.testFlag(Qt::ShiftModifier) &&
-	    !keyModifiers.testFlag(Qt::MetaModifier);
-	if (m_view && ctrlBackspace)
+	if (m_view && WorldView::eventMatchesCachedShortcut(event, m_view->m_recallLastWordShortcuts))
 	{
 		m_view->recallLastWord();
 		return;
@@ -15123,12 +15120,13 @@ bool InputTextEdit::event(QEvent *event)
 			const bool                  hasOnlyCtrl =
 			    (modifiers & Qt::ControlModifier) != 0 &&
 			    (modifiers & (Qt::AltModifier | Qt::ShiftModifier | Qt::MetaModifier)) == 0;
-			const bool isCtrlBackspace = hasOnlyCtrl && keyEvent->key() == Qt::Key_Backspace;
+			const bool isRecallLastWord =
+			    WorldView::eventMatchesCachedShortcut(keyEvent, m_view->m_recallLastWordShortcuts);
 			const bool isCopyShortcut =
 			    keyEvent->matches(QKeySequence::Copy) || (hasOnlyCtrl && keyEvent->key() == Qt::Key_C);
 			const bool isPasteShortcut = keyEvent->matches(QKeySequence::Paste);
 			const bool isPlainTab      = modifiers == Qt::NoModifier && keyEvent->key() == Qt::Key_Tab;
-			if (isCtrlBackspace)
+			if (isRecallLastWord)
 			{
 				event->accept();
 				return true;
