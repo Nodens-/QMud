@@ -314,19 +314,19 @@ class WorldView : public QWidget
 		/**
 		 * @brief Scrolls output to beginning.
 		 */
-		void                          scrollOutputToStart() const;
+		void                          scrollOutputToStart();
 		/**
 		 * @brief Scrolls output to end.
 		 */
-		void                          scrollOutputToEnd() const;
+		void                          scrollOutputToEnd();
 		/**
 		 * @brief Scrolls output one page up.
 		 */
-		void                          scrollOutputPageUp() const;
+		void                          scrollOutputPageUp();
 		/**
 		 * @brief Scrolls output one page down.
 		 */
-		void                          scrollOutputPageDown() const;
+		void                          scrollOutputPageDown();
 		/**
 		 * @brief Focuses input editor.
 		 */
@@ -334,11 +334,11 @@ class WorldView : public QWidget
 		/**
 		 * @brief Scrolls output one line up.
 		 */
-		void                          scrollOutputLineUp() const;
+		void                          scrollOutputLineUp();
 		/**
 		 * @brief Scrolls output one line down.
 		 */
-		void                          scrollOutputLineDown() const;
+		void                          scrollOutputLineDown();
 		/**
 		 * @brief Recalls next command in history navigation.
 		 */
@@ -438,6 +438,37 @@ class WorldView : public QWidget
 		 * @return `true` when the shortcut is consumed.
 		 */
 		bool                      handleCommandHistoryShortcut(QKeyEvent *event);
+		/**
+		 * @brief Output navigation shortcut action resolved from a key event.
+		 */
+		enum class OutputNavigationShortcut
+		{
+			None,     ///< No output navigation shortcut matched.
+			Start,    ///< Scroll output to start.
+			PageUp,   ///< Scroll output one page up.
+			PageDown, ///< Scroll output one page down.
+			End,      ///< Scroll output to end.
+			LineUp,   ///< Scroll output one line up.
+			LineDown, ///< Scroll output one line down.
+		};
+		/**
+		 * @brief Resolves an output-navigation shortcut from a key event.
+		 * @param event Key event to inspect.
+		 * @return Matched output-navigation shortcut, or `None`.
+		 */
+		[[nodiscard]] OutputNavigationShortcut outputNavigationShortcutForEvent(const QKeyEvent *event) const;
+		/**
+		 * @brief Returns whether a key event is an output-navigation shortcut.
+		 * @param event Key event to inspect.
+		 * @return `true` when the shortcut should preempt Qt shortcuts.
+		 */
+		[[nodiscard]] bool                     hasOutputNavigationShortcut(const QKeyEvent *event) const;
+		/**
+		 * @brief Handles output-navigation shortcuts.
+		 * @param event Key event to process.
+		 * @return `true` when the shortcut is consumed.
+		 */
+		bool                                   handleOutputNavigationShortcut(QKeyEvent *event);
 		/**
 		 * @brief Tests a key event against a cached shortcut list.
 		 * @param event Key event to inspect.
@@ -2144,8 +2175,12 @@ class WorldView : public QWidget
 		QList<QKeySequence>                         m_commandOptionBufferEndShortcuts;
 		QList<QKeySequence>                         m_nextCommandShortcuts;
 		QList<QKeySequence>                         m_previousCommandShortcuts;
+		QList<QKeySequence>                         m_displayStartShortcuts;
 		QList<QKeySequence>                         m_displayPageUpShortcuts;
 		QList<QKeySequence>                         m_displayPageDownShortcuts;
+		QList<QKeySequence>                         m_displayEndShortcuts;
+		QList<QKeySequence>                         m_displayLineUpShortcuts;
+		QList<QKeySequence>                         m_displayLineDownShortcuts;
 		QList<QKeySequence>                         m_outputSplitStartShortcuts;
 		QList<QKeySequence>                         m_outputSplitEndShortcuts;
 		QList<QKeySequence>                         m_recallLastWordShortcuts;
