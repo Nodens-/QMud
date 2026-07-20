@@ -112,6 +112,16 @@ namespace
 		return static_cast<int>(qBound(kMin, value, kMax));
 	}
 
+	int saturatedAccessibleAdd(const int value, const int amount)
+	{
+		if (amount <= 0)
+			return value;
+		constexpr int kMax = std::numeric_limits<int>::max();
+		if (value >= kMax - amount)
+			return kMax;
+		return value + amount;
+	}
+
 	QString trimLeadingAnnouncementBreaks(QString text)
 	{
 		while (!text.isEmpty() && (text.front() == QLatin1Char('\n') || text.front() == QLatin1Char('\r')))
@@ -1491,7 +1501,8 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 
 		[[nodiscard]] int cursorPosition() const override
 		{
-			return characterCount();
+			const WorldView *view = worldView();
+			return view ? view->accessibleOutputCursorPosition() : characterCount();
 		}
 
 		void setCursorPosition(int position) override
@@ -1582,7 +1593,7 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 		[[nodiscard]] WrapTextBrowser *targetBrowser() const
 		{
 			WorldView *view = worldView();
-			return view ? view->activeOutputView() : nullptr;
+			return view ? view->accessibleOutputTargetView() : nullptr;
 		}
 
 		[[nodiscard]] WorldView *worldView() const
@@ -2478,8 +2489,14 @@ void WorldView::noteUserScrollAction()
 	m_timeFadeCancelled = QDateTime::currentDateTime();
 	if (!m_autoPause || !m_outputScrollBar)
 		return;
-	const bool atEnd = isAtBufferEnd();
-	setScrollbackSplitActive(!atEnd);
+	syncOutputScrollbackReviewState();
+}
+
+void WorldView::syncOutputScrollbackReviewState()
+{
+	setScrollbackSplitActive(!isAtBufferEnd());
+	if (m_scrollbackSplitActive)
+		updateAccessibleOutputReviewCursor();
 }
 
 int WorldView::outputScrollUnitsPerLine() const
@@ -3243,6 +3260,174 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 	m_accessibleOutputRevision          = m_nativeRenderLineCacheRevision;
 	m_accessibleOutputText              = currentText;
 	m_accessibleOutputPendingTailAppend = false;
+}
+
+WrapTextBrowser *WorldView::accessibleOutputTargetView() const
+{
+	if (m_scrollbackSplitActive && m_output)
+		return m_output;
+	return activeOutputView();
+}
+
+int WorldView::accessibleOutputCursorPosition() const
+{
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+	if (!m_accessibleOutputReviewActive || !m_scrollbackSplitActive)
+		return accessibleOutputCharacterCount(lines);
+	return accessibleOutputReviewCursorPositionForTopPane();
+}
+
+void WorldView::updateAccessibleOutputReviewCursor()
+{
+	if (!m_scrollbackSplitActive)
+	{
+		clearAccessibleOutputReviewCursor();
+		return;
+	}
+
+	m_accessibleOutputReviewActive = true;
+	if (!QAccessible::isActive())
+	{
+		m_accessibleOutputReviewLastNotifiedCursorOffset = -1;
+		return;
+	}
+
+	const int  cursorOffset = accessibleOutputReviewCursorPositionForTopPane();
+	const bool changed      = m_accessibleOutputReviewLastNotifiedCursorOffset != cursorOffset;
+	m_accessibleOutputReviewLastNotifiedCursorOffset = cursorOffset;
+	if (changed)
+		notifyAccessibleOutputCaretMoved(cursorOffset);
+}
+
+void WorldView::clearAccessibleOutputReviewCursor()
+{
+	if (!m_accessibleOutputReviewActive && m_accessibleOutputReviewLastNotifiedCursorOffset < 0)
+		return;
+
+	const bool wasActive           = m_accessibleOutputReviewActive;
+	m_accessibleOutputReviewActive = false;
+	if (!QAccessible::isActive())
+	{
+		m_accessibleOutputReviewLastNotifiedCursorOffset = -1;
+		return;
+	}
+
+	const NativeOutputRenderLines &lines        = nativeOutputRenderLines();
+	const int                      cursorOffset = accessibleOutputCharacterCount(lines);
+	const bool changed = wasActive && m_accessibleOutputReviewLastNotifiedCursorOffset != cursorOffset;
+	m_accessibleOutputReviewLastNotifiedCursorOffset = -1;
+	if (changed)
+		notifyAccessibleOutputCaretMoved(cursorOffset);
+}
+
+void WorldView::notifyAccessibleOutputCaretMoved(const int cursorOffset) const
+{
+	if (!QAccessible::isActive() || !m_nativeOutputCanvas || !m_nativeOutputCanvas->isVisible())
+		return;
+	QAccessibleTextCursorEvent event(m_nativeOutputCanvas, cursorOffset);
+	QAccessible::updateAccessibility(&event);
+}
+
+int WorldView::accessibleOutputReviewCursorPositionForTopPane() const
+{
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+	if (lines.isEmpty() || !m_output || !m_output->viewport())
+		return accessibleOutputCharacterCount(lines);
+
+	const QScrollBar *const bar = m_output->verticalScrollBar();
+	if (!bar)
+		return accessibleOutputCharacterCount(lines);
+
+	const QRect viewportRect = m_output->viewport()->rect();
+	if (viewportRect.isEmpty())
+		return accessibleOutputCharacterCount(lines);
+
+	const bool   wrapEnabled          = m_output->lineWrapMode() != WrapTextBrowser::NoWrap;
+	const int    wrapWidthPixels      = nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
+	const int    localWrapWidthPixels = nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
+	const int    lineSpacingSetting   = qMax(0, m_lineSpacing);
+	const QFont &layoutFont           = m_output->font();
+	ensureNativeLayoutCaches(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting, layoutFont);
+	if (m_nativeLayoutHeightIndex.size() != lines.size())
+		return accessibleOutputCharacterCount(lines);
+
+	const int lineCount = sizeToInt(lines.size());
+	int       lineIndex =
+	    qBound(0, nativeLayoutLineAtY(qBound(bar->minimum(), bar->value(), bar->maximum())), lineCount - 1);
+	static_cast<void>(ensureNativeLayoutRange(lines, qMax(0, lineIndex - 2),
+	                                          qMin(lineCount - 1, lineIndex + 2), wrapWidthPixels,
+	                                          localWrapWidthPixels, lineSpacingSetting, layoutFont));
+	if (m_nativeLayoutHeightIndex.size() == lines.size())
+		lineIndex = qBound(0, nativeLayoutLineAtY(qBound(bar->minimum(), bar->value(), bar->maximum())),
+		                   lineCount - 1);
+	return accessibleOutputOffsetForLine(lines, lineIndex);
+}
+
+int WorldView::accessibleOutputOffsetForLine(const NativeOutputRenderLines &lines, const int lineIndex) const
+{
+	if (lines.isEmpty())
+		return 0;
+	if (lineIndex <= 0)
+		return 0;
+	const int lineCount = sizeToInt(lines.size());
+	if (lineIndex >= lineCount)
+		return accessibleOutputCharacterCount(lines);
+
+	ensureAccessibleOutputOffsetCachePrefix(lines, lineIndex);
+	return m_accessibleOutputLineStartCache.at(static_cast<qsizetype>(lineIndex));
+}
+
+int WorldView::accessibleOutputCharacterCount(const NativeOutputRenderLines &lines) const
+{
+	if (m_accessibleOutputRevision == m_nativeRenderLineCacheRevision &&
+	    m_accessibleOutputCharacterCount >= 0)
+		return m_accessibleOutputCharacterCount;
+	if (m_accessibleOutputLineStartCacheRevision == m_nativeRenderLineCacheRevision &&
+	    m_accessibleOutputLineStartCacheCharacterCount >= 0)
+	{
+		return m_accessibleOutputLineStartCacheCharacterCount;
+	}
+	if (lines.isEmpty())
+		return 0;
+
+	ensureAccessibleOutputOffsetCachePrefix(lines, sizeToInt(lines.size()) - 1);
+	return m_accessibleOutputLineStartCacheCharacterCount;
+}
+
+void WorldView::ensureAccessibleOutputOffsetCachePrefix(const NativeOutputRenderLines &lines,
+                                                        const int                      lineIndex) const
+{
+	if (m_accessibleOutputLineStartCacheRevision != m_nativeRenderLineCacheRevision ||
+	    m_accessibleOutputLineStartCache.size() > lines.size())
+	{
+		m_accessibleOutputLineStartCache.clear();
+		m_accessibleOutputLineStartCacheRevision       = m_nativeRenderLineCacheRevision;
+		m_accessibleOutputLineStartCacheNextOffset     = 0;
+		m_accessibleOutputLineStartCacheCharacterCount = -1;
+	}
+
+	if (lines.isEmpty())
+	{
+		m_accessibleOutputLineStartCacheCharacterCount = 0;
+		return;
+	}
+
+	const int       boundedLineIndex   = qBound(0, lineIndex, sizeToInt(lines.size()) - 1);
+	const qsizetype requiredLineStarts = static_cast<qsizetype>(boundedLineIndex) + 1;
+
+	while (m_accessibleOutputLineStartCache.size() < requiredLineStarts)
+	{
+		const qsizetype i = m_accessibleOutputLineStartCache.size();
+		m_accessibleOutputLineStartCache.push_back(m_accessibleOutputLineStartCacheNextOffset);
+		m_accessibleOutputLineStartCacheNextOffset = saturatedAccessibleAdd(
+		    m_accessibleOutputLineStartCacheNextOffset, sizeToInt(lines.at(i).text.size()));
+		if (i + 1 < lines.size())
+			m_accessibleOutputLineStartCacheNextOffset =
+			    saturatedAccessibleAdd(m_accessibleOutputLineStartCacheNextOffset, 1);
+	}
+
+	if (m_accessibleOutputLineStartCache.size() == lines.size())
+		m_accessibleOutputLineStartCacheCharacterCount = m_accessibleOutputLineStartCacheNextOffset;
 }
 
 WorldView::NativeOutputPanePaintState *
@@ -7903,15 +8088,20 @@ void WorldView::scrollNativeOutputRangeIntoView(const WrapTextBrowser *view, int
 	else if (rangeBottom > currentBottom)
 		target = rangeBottom - pageStep;
 
-	target = qBound(bar->minimum(), target, bar->maximum());
-	if (view == m_output && target < bar->maximum())
-		const_cast<WorldView *>(this)->setScrollbackSplitActive(true);
+	target                   = qBound(bar->minimum(), target, bar->maximum());
+	const bool primaryOutput = view == m_output;
 	if (target == bar->value())
+	{
+		if (primaryOutput)
+			const_cast<WorldView *>(this)->syncOutputScrollbackReviewState();
 		return;
+	}
 	if (view == m_output && m_outputScrollBar)
 		m_outputScrollBar->setValue(target);
 	else
 		bar->setValue(target);
+	if (primaryOutput)
+		const_cast<WorldView *>(this)->syncOutputScrollbackReviewState();
 }
 
 bool WorldView::nativeOutputHitTestGlobal(const QPoint &globalPos, WrapTextBrowser *&view,
@@ -9199,6 +9389,7 @@ void WorldView::setScrollbackSplitActive(bool active)
 	}
 	else
 	{
+		clearAccessibleOutputReviewCursor();
 		if (const QList<int> sizes = m_outputSplitter->sizes(); sizes.size() >= 2)
 			m_lastLiveSplitSize = sizes.at(1);
 		m_outputSplitter->setSizes(QList<int>() << 1 << 0);
@@ -9405,9 +9596,9 @@ void WorldView::scrollOutputToStart()
 {
 	if (!m_output)
 		return;
-	setScrollbackSplitActive(true);
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 		bar->setValue(bar->minimum());
+	syncOutputScrollbackReviewState();
 	requestNativeOutputRepaint();
 }
 
@@ -9416,7 +9607,10 @@ void WorldView::scrollOutputToEnd()
 	if (m_scrollbackSplitActive)
 		collapseScrollbackSplitToLiveOutput();
 	else
+	{
 		scrollViewToEnd(m_output);
+		clearAccessibleOutputReviewCursor();
+	}
 	requestNativeOutputRepaint();
 }
 
@@ -9424,9 +9618,9 @@ void WorldView::scrollOutputPageUp()
 {
 	if (!m_output)
 		return;
-	setScrollbackSplitActive(true);
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 		bar->setValue(bar->value() - bar->pageStep());
+	syncOutputScrollbackReviewState();
 	requestNativeOutputRepaint();
 }
 
@@ -9434,16 +9628,9 @@ void WorldView::scrollOutputPageDown()
 {
 	if (!m_output)
 		return;
-	setScrollbackSplitActive(true);
 	if (QScrollBar *bar = m_output->verticalScrollBar())
-	{
 		bar->setValue(bar->value() + bar->pageStep());
-		if (bar->value() >= bar->maximum())
-		{
-			collapseScrollbackSplitToLiveOutput();
-			return;
-		}
-	}
+	syncOutputScrollbackReviewState();
 	requestNativeOutputRepaint();
 }
 
@@ -9451,9 +9638,9 @@ void WorldView::scrollOutputLineUp()
 {
 	if (!m_output)
 		return;
-	setScrollbackSplitActive(true);
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 		bar->setValue(bar->value() - outputScrollUnitsPerLine());
+	syncOutputScrollbackReviewState();
 	requestNativeOutputRepaint();
 }
 
@@ -9461,16 +9648,9 @@ void WorldView::scrollOutputLineDown()
 {
 	if (!m_output)
 		return;
-	setScrollbackSplitActive(true);
 	if (QScrollBar *bar = m_output->verticalScrollBar())
-	{
 		bar->setValue(bar->value() + outputScrollUnitsPerLine());
-		if (bar->value() >= bar->maximum())
-		{
-			collapseScrollbackSplitToLiveOutput();
-			return;
-		}
-	}
+	syncOutputScrollbackReviewState();
 	requestNativeOutputRepaint();
 }
 
@@ -9941,8 +10121,6 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 		target = lineBottom - pageStep;
 
 	target = qBound(bar->minimum(), target, bar->maximum());
-	if (target < bar->maximum())
-		const_cast<WorldView *>(this)->setScrollbackSplitActive(true);
 	if (target != bar->value())
 	{
 		if (m_outputScrollBar)
@@ -9950,6 +10128,7 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 		else
 			bar->setValue(target);
 	}
+	const_cast<WorldView *>(this)->syncOutputScrollbackReviewState();
 }
 
 void WorldView::setOutputSelection(int startLine, int endLine, int startColumn, int endColumn) const
@@ -10007,6 +10186,7 @@ int WorldView::setOutputScroll(int position, bool visible)
 			m_outputScrollBar->setValue(target);
 		else
 			bar->setValue(target);
+		syncOutputScrollbackReviewState();
 	}
 	return eOK;
 }
