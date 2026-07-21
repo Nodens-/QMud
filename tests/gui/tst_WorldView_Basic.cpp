@@ -123,9 +123,16 @@ namespace
 			QString  message;
 	};
 
+	struct AccessibleTextCursorRecord
+	{
+			QObject *object{nullptr};
+			int      position{0};
+	};
+
 	QVector<AccessibleTextInsertRecord>   g_accessibleTextInsertRecords;
 	QVector<AccessibleTextUpdateRecord>   g_accessibleTextUpdateRecords;
 	QVector<AccessibleAnnouncementRecord> g_accessibleAnnouncementRecords;
+	QVector<AccessibleTextCursorRecord>   g_accessibleTextCursorRecords;
 	int                                   g_accessibleValueChangedCount{0};
 
 	int                                   sizeToInt(const qsizetype value)
@@ -142,6 +149,14 @@ namespace
 		if (event->type() == QAccessible::ValueChanged)
 		{
 			++g_accessibleValueChangedCount;
+			return;
+		}
+		if (event->type() == QAccessible::TextCaretMoved)
+		{
+			const auto *cursorEvent = dynamic_cast<QAccessibleTextCursorEvent *>(event);
+			if (!cursorEvent)
+				return;
+			g_accessibleTextCursorRecords.push_back({event->object(), cursorEvent->cursorPosition()});
 			return;
 		}
 		if (event->type() == QAccessible::TextInserted)
@@ -182,6 +197,7 @@ namespace
 				g_accessibleTextInsertRecords.clear();
 				g_accessibleTextUpdateRecords.clear();
 				g_accessibleAnnouncementRecords.clear();
+				g_accessibleTextCursorRecords.clear();
 				g_accessibleValueChangedCount = 0;
 				QAccessible::setActive(true);
 			}
@@ -193,12 +209,31 @@ namespace
 				g_accessibleTextInsertRecords.clear();
 				g_accessibleTextUpdateRecords.clear();
 				g_accessibleAnnouncementRecords.clear();
+				g_accessibleTextCursorRecords.clear();
 				g_accessibleValueChangedCount = 0;
 			}
 
 		private:
 			bool                       m_previousActive{false};
 			QAccessible::UpdateHandler m_previousHandler{nullptr};
+	};
+
+	class ScopedAccessibleActiveState
+	{
+		public:
+			explicit ScopedAccessibleActiveState(const bool active)
+			    : m_previousActive(QAccessible::isActive())
+			{
+				QAccessible::setActive(active);
+			}
+
+			~ScopedAccessibleActiveState()
+			{
+				QAccessible::setActive(m_previousActive);
+			}
+
+		private:
+			bool m_previousActive{false};
 	};
 
 	AppController *fakeAppControllerPointer()
@@ -279,8 +314,20 @@ namespace
 		g_accessibleTextInsertRecords.clear();
 		g_accessibleTextUpdateRecords.clear();
 		g_accessibleAnnouncementRecords.clear();
+		g_accessibleTextCursorRecords.clear();
 		g_accessibleValueChangedCount = 0;
 	}
+
+	class ScopedTestStateReset
+	{
+		public:
+			ScopedTestStateReset() = default;
+
+			~ScopedTestStateReset()
+			{
+				resetTestState();
+			}
+	};
 
 	qint64 makeAcceleratorMapKey(const Qt::Key key, const Qt::KeyboardModifiers modifiers,
 	                             const quint16 virtualKey, const bool keypad = false)
@@ -2836,11 +2883,248 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(accessible);
 			QAccessibleTextInterface *textInterface = accessible->textInterface();
 			QVERIFY(textInterface);
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
 
+			ScopedAccessibleUpdateCapture capture;
 			textInterface->scrollToSubstring(0, 8);
 			QCoreApplication::processEvents();
 
 			QVERIFY(browser->verticalScrollBar()->value() < tailScrollValue);
+			QVERIFY(view.isScrollbackSplitActive());
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, 0);
+			QCOMPARE(textInterface->cursorPosition(), 0);
+		}
+
+		void worldOutputAccessibleScrollToSubstringUsesTopPaneAfterAutoPauseScroll()
+		{
+			resetTestState();
+			const ScopedTestStateReset resetState;
+			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(
+				    QStringLiteral("auto-pause-accessible-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+
+			ScopedAccessibleUpdateCapture capture;
+			const QPointF                 localPos(viewport->rect().center());
+			const QPointF                 globalPos(viewport->mapToGlobal(localPos.toPoint()));
+			for (int i = 0; i < 6 && !view.isScrollbackSplitActive(); ++i)
+			{
+				QWheelEvent wheelUp(localPos, globalPos, QPoint(0, 0), QPoint(0, 120), Qt::NoButton,
+				                    Qt::NoModifier, Qt::NoScrollPhase, false);
+				QCoreApplication::sendEvent(viewport, &wheelUp);
+				QCoreApplication::processEvents();
+			}
+
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QVERIFY(textInterface->cursorPosition() < textInterface->characterCount());
+
+			g_accessibleTextCursorRecords.clear();
+			textInterface->scrollToSubstring(0, 8);
+			QCoreApplication::processEvents();
+
+			QVERIFY(view.isScrollbackSplitActive());
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, 0);
+			QCOMPARE(textInterface->cursorPosition(), 0);
+		}
+
+		void worldOutputAccessibleSetOutputScrollSynchronizesReviewCaret()
+		{
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(
+				    QStringLiteral("accessible-set-scroll-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+			QCOMPARE(view.setOutputScroll(-1, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+
+			ScopedAccessibleUpdateCapture capture;
+			QCOMPARE(view.setOutputScroll(0, true), 0);
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, 0);
+			QCOMPARE(textInterface->cursorPosition(), 0);
+
+			const int eventsBeforeEnd = g_accessibleTextCursorRecords.size();
+			QCOMPARE(view.setOutputScroll(-1, true), 0);
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY(!view.isScrollbackSplitActive());
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), eventsBeforeEnd + 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, textInterface->characterCount());
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+		}
+
+		void worldOutputAccessiblePageUpMovesReviewCaretWithoutLiveAnnouncements()
+		{
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(
+				    QStringLiteral("accessible-review-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			const QString outputText = textInterface->text(0, textInterface->characterCount());
+			QVERIFY(outputText.endsWith(QStringLiteral("accessible-review-line-219")));
+			const int lastLineStart = outputText.lastIndexOf(QLatin1Char('\n')) + 1;
+			QVERIFY(lastLineStart > 0);
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+
+			ScopedAccessibleUpdateCapture capture;
+			QTest::keyClick(viewport, Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			const int reviewCursor = textInterface->cursorPosition();
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, reviewCursor);
+			QVERIFY(reviewCursor >= 0);
+			QVERIFY(reviewCursor < lastLineStart);
+			QVERIFY(view.isScrollbackSplitActive());
+			QVERIFY(!view.m_accessibleOutputLineStartCache.isEmpty());
+			QVERIFY(view.m_accessibleOutputLineStartCache.size() < view.nativeOutputRenderLines().size());
+			QCOMPARE(view.m_accessibleOutputLineStartCacheCharacterCount, -1);
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+
+			auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar = splitTop->verticalScrollBar();
+			QVERIFY(topBar);
+			topBar->setValue(topBar->maximum());
+			const int eventsBeforeCollapse = g_accessibleTextCursorRecords.size();
+			QTest::keyClick(splitTop->viewport(), Qt::Key_PageDown);
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY(!view.isScrollbackSplitActive());
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), eventsBeforeCollapse + 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, textInterface->characterCount());
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+		}
+
+		void outputNavigationDoesNotBuildAccessibleReviewOffsetsWhenAccessibilityInactive()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+
+			const ScopedAccessibleActiveState accessibleActive(false);
+
+			WorldView                         view;
+			view.resize(720, 360);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(
+				    QStringLiteral("inactive-accessible-review-line-%1").arg(i, 3, 10, QLatin1Char('0')),
+				    true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+
+			QTest::keyClick(viewport, Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+
+			QVERIFY(view.isScrollbackSplitActive());
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+			QCOMPARE(view.m_accessibleOutputReviewLastNotifiedCursorOffset, -1);
 		}
 
 		void worldOutputAccessibleInsertNotificationUsesPresentedAppendPayload()
@@ -3425,13 +3709,114 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(view.outputScrollPosition() > bar->minimum());
 
-			QTest::keyClick(viewport, Qt::Key_End);
+			QTest::keyClick(viewport, Qt::Key_End, Qt::ControlModifier);
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
 
-			QTest::keyClick(viewport, Qt::Key_Home);
+			QTest::keyClick(viewport, Qt::Key_Home, Qt::ControlModifier);
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(view.outputScrollPosition(), bar->minimum());
+
+			resetTestState();
+		}
+
+		void outputKeyboardNavigationUsesEffectiveShortcutOverrides()
+		{
+			resetTestState();
+			g_useFakeAppController = true;
+			g_globalOptions.insert(QStringLiteral("Shortcut.DisplayStart"), QStringLiteral("PgUp"));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyShortcutPreferences();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 320; ++i)
+				view.appendOutputText(QStringLiteral("output-effective-shortcut-scroll-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+
+			int       shortcutTriggerCount = 0;
+			QShortcut pageUpShortcut(QKeySequence(QStringLiteral("PageUp")), &view);
+			pageUpShortcut.setContext(Qt::ApplicationShortcut);
+			connect(&pageUpShortcut, &QShortcut::activated, this,
+			        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QTest::keyClick(viewport, Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(shortcutTriggerCount, 0);
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar = splitTop->verticalScrollBar();
+			QVERIFY(topBar);
+			QTRY_COMPARE(topBar->value(), topBar->minimum());
+
+			resetTestState();
+		}
+
+		void outputKeyboardNavigationIgnoresDefaultKeyRemovedByOverride()
+		{
+			resetTestState();
+			g_useFakeAppController = true;
+			g_globalOptions.insert(QStringLiteral("Shortcut.DisplayPageUp"), QStringLiteral("Ctrl+Alt+U"));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyShortcutPreferences();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 520; ++i)
+				view.appendOutputText(QStringLiteral("output-removed-default-shortcut-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QTest::keyClick(viewport, Qt::Key_U, Qt::ControlModifier | Qt::AltModifier);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar = splitTop->verticalScrollBar();
+			QVERIFY(topBar);
+			QTRY_VERIFY(topBar->maximum() > topBar->minimum());
+			QTRY_VERIFY(topBar->value() > topBar->minimum());
+
+			const int positionAfterConfiguredShortcut = topBar->value();
+
+			QTest::keyClick(splitTop->viewport(), Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+			QCOMPARE(topBar->value(), positionAfterConfiguredShortcut);
+
+			QTest::keyClick(splitTop->viewport(), Qt::Key_U, Qt::ControlModifier | Qt::AltModifier);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(topBar->value() < positionAfterConfiguredShortcut);
 
 			resetTestState();
 		}
@@ -4222,6 +4607,16 @@ class tst_WorldView_Basic : public QObject
 			input->setFocus(Qt::OtherFocusReason);
 			QTRY_VERIFY(input->hasFocus());
 
+			int       shortcutTriggerCount = 0;
+			QShortcut pageUpShortcut(QKeySequence(QStringLiteral("PageUp")), &view);
+			QShortcut pageDownShortcut(QKeySequence(QStringLiteral("PageDown")), &view);
+			for (QShortcut *shortcut : {&pageUpShortcut, &pageDownShortcut})
+			{
+				shortcut->setContext(Qt::ApplicationShortcut);
+				connect(shortcut, &QShortcut::activated, this,
+				        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+			}
+
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
 			QVERIFY(browser);
 			QScrollBar *bar = browser->verticalScrollBar();
@@ -4235,6 +4630,7 @@ class tst_WorldView_Basic : public QObject
 			QTest::keyClick(input, Qt::Key_PageUp);
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(view.isScrollbackSplitActive());
+			QCOMPARE(shortcutTriggerCount, 0);
 			auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
 			QVERIFY(splitTop);
 			QVERIFY(splitBottom);
@@ -4246,6 +4642,7 @@ class tst_WorldView_Basic : public QObject
 			QTest::keyClick(input, Qt::Key_PageDown);
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(view.isScrollbackSplitActive());
+			QCOMPARE(shortcutTriggerCount, 0);
 			QTRY_VERIFY(topBar->value() > topBar->minimum());
 
 			const int livePaneHeight = qMax(1, splitBottom->viewport()->height());
@@ -4257,6 +4654,7 @@ class tst_WorldView_Basic : public QObject
 			QTest::keyClick(input, Qt::Key_PageDown);
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(!view.isScrollbackSplitActive());
+			QCOMPARE(shortcutTriggerCount, 0);
 			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
 
 			view.setInputText(QStringLiteral("home-end-input"), true);
@@ -4298,6 +4696,59 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(!view.isScrollbackSplitActive());
 			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			resetTestState();
+		}
+
+		void outputNavigationKeysFromInputUseEffectiveShortcutOverrides()
+		{
+			resetTestState();
+			g_useFakeAppController = true;
+			g_globalOptions.insert(QStringLiteral("Shortcut.DisplayStart"), QStringLiteral("PgUp"));
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.setAllTypingToCommandWindow(true);
+			view.applyShortcutPreferences();
+			QCoreApplication::processEvents();
+
+			for (int i = 0; i < 320; ++i)
+				view.appendOutputText(QStringLiteral("input-effective-shortcut-scroll-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus(Qt::OtherFocusReason);
+			QTRY_VERIFY(input->hasFocus());
+
+			int       shortcutTriggerCount = 0;
+			QShortcut pageUpShortcut(QKeySequence(QStringLiteral("PageUp")), &view);
+			pageUpShortcut.setContext(Qt::ApplicationShortcut);
+			connect(&pageUpShortcut, &QShortcut::activated, this,
+			        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QTest::keyClick(input, Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(shortcutTriggerCount, 0);
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar = splitTop->verticalScrollBar();
+			QVERIFY(topBar);
+			QTRY_COMPARE(topBar->value(), topBar->minimum());
 
 			resetTestState();
 		}
@@ -4843,7 +5294,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void scrollCommandsTargetLivePaneWhenSplitActive()
+		void scrollCommandsTargetTopPaneAndCollapseAtEndWhenSplitActive()
 		{
 			resetTestState();
 			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
@@ -4877,19 +5328,24 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(topBar);
 			QVERIFY(liveBar);
 
-			const int topBefore = topBar->value();
+			const int liveBefore = liveBar->value();
 			view.scrollOutputToStart();
-			QTRY_COMPARE(liveBar->value(), liveBar->minimum());
-			QCOMPARE(topBar->value(), topBefore);
+			QTRY_COMPARE(topBar->value(), topBar->minimum());
+			QCOMPARE(liveBar->value(), liveBefore);
 
 			view.scrollOutputLineDown();
-			QTRY_VERIFY(liveBar->value() > liveBar->minimum());
+			QTRY_VERIFY(topBar->value() > topBar->minimum());
+			QCOMPARE(liveBar->value(), liveBefore);
 
+			const int topBeforePageDown = topBar->value();
 			view.scrollOutputPageDown();
-			QTRY_VERIFY(liveBar->value() > liveBar->minimum());
+			QTRY_VERIFY(topBar->value() > topBeforePageDown);
+			QCOMPARE(liveBar->value(), liveBefore);
 
-			view.scrollOutputToEnd();
-			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
+			topBar->setValue(topBar->maximum());
+			view.scrollOutputPageDown();
+			QTRY_VERIFY(!view.isScrollbackSplitActive());
+			QTRY_COMPARE(view.outputScrollPosition(), topBar->maximum());
 
 			resetTestState();
 		}

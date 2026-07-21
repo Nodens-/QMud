@@ -24,6 +24,8 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QAbstractItemView>
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QApplication>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QDialogButtonBox>
 #include <QDirIterator>
 #include <QFileDialog>
@@ -40,6 +42,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QPainter>
 #include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
@@ -50,6 +53,7 @@
 #include <QSizePolicy>
 #include <QSpinBox>
 #include <QStyle>
+#include <QStyledItemDelegate>
 #include <QTabBar>
 #include <QTabWidget>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -228,6 +232,11 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 
 namespace
 {
+	constexpr int kShortcutDefaultPreferenceKeyRole         = Qt::UserRole + 1;
+	constexpr int kShortcutDefaultNativeTextsRole           = Qt::UserRole + 2;
+	constexpr int kShortcutDefaultPortableTextsRole         = Qt::UserRole + 3;
+	constexpr int kShortcutDisabledDefaultPortableTextsRole = Qt::UserRole + 4;
+
 	class ShortcutsTableWidget final : public QTableWidget
 	{
 		public:
@@ -249,6 +258,156 @@ namespace
 				scrollToTop();
 			}
 	};
+
+	class ShortcutDefaultItemDelegate final : public QStyledItemDelegate
+	{
+		public:
+			explicit ShortcutDefaultItemDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent)
+			{
+			}
+
+			void paint(QPainter *painter, const QStyleOptionViewItem &option,
+			           const QModelIndex &index) const override
+			{
+				const QStringList nativeTexts = index.data(kShortcutDefaultNativeTextsRole).toStringList();
+				const QStringList portableTexts =
+				    index.data(kShortcutDefaultPortableTextsRole).toStringList();
+				if (!painter || nativeTexts.isEmpty() || nativeTexts.size() != portableTexts.size())
+				{
+					QStyledItemDelegate::paint(painter, option, index);
+					return;
+				}
+
+				QStyleOptionViewItem itemOption(option);
+				initStyleOption(&itemOption, index);
+				itemOption.text.clear();
+
+				const QWidget *widget = itemOption.widget;
+				QStyle        *style  = widget ? widget->style() : QApplication::style();
+				style->drawControl(QStyle::CE_ItemViewItem, &itemOption, painter, widget);
+
+				const QStringList disabledPortableTexts =
+				    index.data(kShortcutDisabledDefaultPortableTextsRole).toStringList();
+				QSet<QString> disabled;
+				disabled.reserve(disabledPortableTexts.size());
+				for (const QString &portableText : disabledPortableTexts)
+					disabled.insert(portableText);
+
+				const QRect textRect =
+				    style->subElementRect(QStyle::SE_ItemViewItemText, &itemOption, widget);
+				const QFontMetrics metrics(itemOption.font);
+				const int          baseline =
+				    textRect.top() + ((textRect.height() - metrics.height()) / 2) + metrics.ascent();
+				const QColor normalColor = itemOption.palette.color(
+				    (itemOption.state & QStyle::State_Selected) != 0 ? QPalette::HighlightedText
+				                                                     : QPalette::Text);
+				constexpr QColor disabledColor(200, 0, 0);
+
+				painter->save();
+				painter->setClipRect(textRect);
+				painter->setFont(itemOption.font);
+
+				int x = textRect.left();
+				for (qsizetype i = 0; i < nativeTexts.size(); ++i)
+				{
+					const QString nativeText   = nativeTexts.at(i);
+					const QString portableText = portableTexts.at(i);
+					painter->setPen(disabled.contains(portableText) ? disabledColor : normalColor);
+					painter->drawText(QPoint(x, baseline), nativeText);
+					x += metrics.horizontalAdvance(nativeText);
+
+					if (i + 1 < nativeTexts.size())
+					{
+						const QString separator = QStringLiteral("; ");
+						painter->setPen(normalColor);
+						painter->drawText(QPoint(x, baseline), separator);
+						x += metrics.horizontalAdvance(separator);
+					}
+				}
+
+				painter->restore();
+			}
+	};
+
+	QString portableShortcutText(const QKeySequence &shortcut)
+	{
+		return shortcut.toString(QKeySequence::PortableText);
+	}
+
+	QStringList portableShortcutTexts(const QList<QKeySequence> &shortcuts)
+	{
+		QStringList texts;
+		texts.reserve(shortcuts.size());
+		for (const QKeySequence &shortcut : shortcuts)
+		{
+			const QString text = portableShortcutText(shortcut);
+			if (!text.isEmpty())
+				texts.push_back(text);
+		}
+		return texts;
+	}
+
+	QStringList nativeShortcutTexts(const QList<QKeySequence> &shortcuts)
+	{
+		QStringList texts;
+		texts.reserve(shortcuts.size());
+		for (const QKeySequence &shortcut : shortcuts)
+		{
+			const QString text = shortcut.toString(QKeySequence::NativeText);
+			if (!text.isEmpty())
+				texts.push_back(text);
+		}
+		return texts;
+	}
+
+	void refreshShortcutDefaultDisableState(QTableWidget                             *table,
+	                                        const QHash<QString, QTableWidgetItem *> &shortcutOverrideItems)
+	{
+		if (!table)
+			return;
+
+		QHash<QString, QString> overrideTextByPreferenceKey;
+		overrideTextByPreferenceKey.reserve(shortcutOverrideItems.size());
+		for (auto it = shortcutOverrideItems.constBegin(); it != shortcutOverrideItems.constEnd(); ++it)
+		{
+			const QString overrideText = it.value() ? it.value()->text().trimmed() : QString();
+			if (!overrideText.isEmpty())
+				overrideTextByPreferenceKey.insert(it.key(), overrideText);
+		}
+
+		const QSignalBlocker          blocker(table);
+		const QHash<QString, QString> acceptedOwners =
+		    QMudShortcutPreferenceUtils::acceptedOverrideOwnersByPortableShortcut(
+		        overrideTextByPreferenceKey);
+
+		for (int row = 0; row < table->rowCount(); ++row)
+		{
+			QTableWidgetItem *item = table->item(row, 2);
+			if (!item)
+				continue;
+
+			const QString preferenceKey = item->data(kShortcutDefaultPreferenceKeyRole).toString();
+			const auto   *definition = QMudShortcutPreferenceUtils::definitionForPreferenceKey(preferenceKey);
+			if (!definition)
+			{
+				item->setData(kShortcutDisabledDefaultPortableTextsRole, QStringList{});
+				continue;
+			}
+
+			QStringList disabledDefaults;
+			for (const QKeySequence &shortcut : definition->defaults)
+			{
+				const QString portableText = portableShortcutText(shortcut);
+				if (portableText.isEmpty())
+					continue;
+				const auto owner = acceptedOwners.constFind(portableText);
+				if (owner != acceptedOwners.constEnd() && owner.value() != definition->id)
+					disabledDefaults.push_back(portableText);
+			}
+			item->setData(kShortcutDisabledDefaultPortableTextsRole, disabledDefaults);
+		}
+		table->viewport()->update();
+	}
 
 	bool isFileOpenForWriteByAnotherProcess(const QString &path)
 	{
@@ -777,6 +936,7 @@ QWidget *GlobalPreferencesDialog::buildShortcutsPage()
 	m_shortcutsTable->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
 	m_shortcutsTable->setAlternatingRowColors(true);
 	m_shortcutsTable->setTabKeyNavigation(false);
+	m_shortcutsTable->setItemDelegateForColumn(2, new ShortcutDefaultItemDelegate(m_shortcutsTable));
 
 	const auto     &definitions = QMudShortcutPreferenceUtils::shortcutDefinitions();
 	const qsizetype boundedDefinitionCount =
@@ -798,16 +958,24 @@ QWidget *GlobalPreferencesDialog::buildShortcutsPage()
 		item->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsEditable);
 		return item;
 	};
+	auto makeDefaultShortcutItem =
+	    [makeReadOnlyShortcutItem](const QMudShortcutPreferenceUtils::ShortcutDefinition &definition)
+	{
+		auto *item = makeReadOnlyShortcutItem(
+		    QMudShortcutPreferenceUtils::shortcutListToNativeText(definition.defaults));
+		item->setData(kShortcutDefaultPreferenceKeyRole, definition.preferenceKey);
+		item->setData(kShortcutDefaultNativeTextsRole, nativeShortcutTexts(definition.defaults));
+		item->setData(kShortcutDefaultPortableTextsRole, portableShortcutTexts(definition.defaults));
+		item->setData(kShortcutDisabledDefaultPortableTextsRole, QStringList{});
+		return item;
+	};
 	for (int row = 0; row < rowCount; ++row)
 	{
 		const auto &definition = definitions.at(row);
 
 		m_shortcutsTable->setItem(row, 0, makeReadOnlyShortcutItem(definition.category));
 		m_shortcutsTable->setItem(row, 1, makeReadOnlyShortcutItem(definition.label));
-		m_shortcutsTable->setItem(
-		    row, 2,
-		    makeReadOnlyShortcutItem(
-		        QMudShortcutPreferenceUtils::shortcutListToNativeText(definition.defaults)));
+		m_shortcutsTable->setItem(row, 2, makeDefaultShortcutItem(definition));
 		auto *overrideItem = makeOverrideShortcutItem(definition.preferenceKey);
 		m_shortcutsTable->setItem(row, 3, overrideItem);
 		m_shortcutOverrideItems.insert(definition.preferenceKey, overrideItem);
@@ -817,6 +985,14 @@ QWidget *GlobalPreferencesDialog::buildShortcutsPage()
 	m_shortcutsTable->resizeColumnsToContents();
 	m_shortcutsTable->horizontalHeader()->setStretchLastSection(true);
 	layout->addWidget(m_shortcutsTable);
+	connect(m_shortcutsTable, &QTableWidget::itemChanged, this,
+	        [this](const QTableWidgetItem *item)
+	        {
+		        if (!item || item->column() != 3)
+			        return;
+		        refreshShortcutDefaultDisableState(m_shortcutsTable, m_shortcutOverrideItems);
+	        });
+	refreshShortcutDefaultDisableState(m_shortcutsTable, m_shortcutOverrideItems);
 
 	auto *buttons = new QHBoxLayout;
 	auto *clear   = new QPushButton(QStringLiteral("Clear Override"), page);
@@ -840,12 +1016,14 @@ QWidget *GlobalPreferencesDialog::buildShortcutsPage()
 	connect(reset, &QPushButton::clicked, this,
 	        [this]
 	        {
+		        const QSignalBlocker blocker(m_shortcutsTable);
 		        for (auto it = m_shortcutOverrideItems.constBegin(); it != m_shortcutOverrideItems.constEnd();
 		             ++it)
 		        {
 			        if (it.value())
 				        it.value()->setText(QString());
 		        }
+		        refreshShortcutDefaultDisableState(m_shortcutsTable, m_shortcutOverrideItems);
 	        });
 
 	return page;
@@ -1837,11 +2015,15 @@ void GlobalPreferencesDialog::loadPreferences()
 	for (auto it = m_stringLabels.constBegin(); it != m_stringLabels.constEnd(); ++it)
 		it.value()->setText(app->getGlobalOption(it.key()).toString());
 
-	for (auto it = m_shortcutOverrideItems.constBegin(); it != m_shortcutOverrideItems.constEnd(); ++it)
 	{
-		if (it.value())
-			it.value()->setText(app->getGlobalOption(it.key()).toString());
+		const QSignalBlocker blocker(m_shortcutsTable);
+		for (auto it = m_shortcutOverrideItems.constBegin(); it != m_shortcutOverrideItems.constEnd(); ++it)
+		{
+			if (it.value())
+				it.value()->setText(app->getGlobalOption(it.key()).toString());
+		}
 	}
+	refreshShortcutDefaultDisableState(m_shortcutsTable, m_shortcutOverrideItems);
 
 	const QString worldList = app->getGlobalOption(QStringLiteral("WorldList")).toString();
 	setListFromStrings(m_worldList, canonicalWorldPathList(worldList.split('*', Qt::SkipEmptyParts)));
@@ -1968,7 +2150,6 @@ bool GlobalPreferencesDialog::validateShortcutOverrides()
 	struct ShortcutOwner
 	{
 			QString label;
-			bool    hasOverride{false};
 	};
 
 	QHash<QString, ShortcutOwner> ownerByPortable;
@@ -2022,8 +2203,7 @@ bool GlobalPreferencesDialog::validateShortcutOverrides()
 			}
 		}
 
-		const QList<QKeySequence> effective = hasOverride ? parsedOverrides : definition.defaults;
-		for (const QKeySequence &shortcut : effective)
+		for (const QKeySequence &shortcut : parsedOverrides)
 		{
 			if (shortcut.isEmpty())
 				continue;
@@ -2033,22 +2213,16 @@ bool GlobalPreferencesDialog::validateShortcutOverrides()
 			if (ownerByPortable.contains(portable))
 			{
 				const ShortcutOwner previous = ownerByPortable.value(portable);
-				if (previous.hasOverride || hasOverride)
-				{
-					QMessageBox::warning(
-					    this, QStringLiteral("Global Preferences"),
-					    QStringLiteral(
-					        "\"%1\" is already used by \"%2\" and cannot also be assigned to \"%3\".")
-					        .arg(shortcut.toString(QKeySequence::NativeText), previous.label,
-					             definition.label));
-					focusOverrideItem(item);
-					return false;
-				}
+				QMessageBox::warning(
+				    this, QStringLiteral("Global Preferences"),
+				    QStringLiteral("\"%1\" is already used by \"%2\" and cannot also be assigned to \"%3\".")
+				        .arg(shortcut.toString(QKeySequence::NativeText), previous.label, definition.label));
+				focusOverrideItem(item);
+				return false;
 			}
 			else
 			{
-				ownerByPortable.insert(portable,
-				                       ShortcutOwner{.label = definition.label, .hasOverride = hasOverride});
+				ownerByPortable.insert(portable, ShortcutOwner{.label = definition.label});
 			}
 		}
 	}

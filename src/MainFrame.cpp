@@ -218,12 +218,12 @@ void MainWindow::rebuildEffectiveActionShortcutCache()
 {
 	m_effectiveActionShortcutCache.clear();
 	m_effectiveActionShortcutCache.reserve(QMudShortcutPreferenceUtils::shortcutDefinitions().size());
-	const AppController *app = AppController::instance();
+	const QHash<QString, QList<QKeySequence>> shortcutsById =
+	    QMudShortcutPreferenceUtils::effectiveShortcutMapForAppPreferences();
 	for (const QMudShortcutPreferenceUtils::ShortcutDefinition &definition :
 	     QMudShortcutPreferenceUtils::shortcutDefinitions())
 	{
-		QList<QKeySequence> shortcuts = QMudShortcutPreferenceUtils::effectiveShortcuts(
-		    definition, app ? app->getGlobalOption(definition.preferenceKey).toString() : QString());
+		QList<QKeySequence> shortcuts = shortcutsById.value(definition.id);
 		if (!shortcuts.isEmpty() && !m_activeWorldAcceleratorKeys.isEmpty())
 		{
 			QList<QKeySequence> filtered;

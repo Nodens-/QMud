@@ -86,11 +86,40 @@ namespace
 {
 	constexpr const char *kWorldOutputAccessibleProperty = "qmud_world_output_widget";
 
-	int                   sizeToInt(const qsizetype value)
+	bool                  isPhysicalOutputNavigationKey(const QKeyEvent *event)
+	{
+		if (!event)
+			return false;
+
+		switch (event->key())
+		{
+		case Qt::Key_PageUp:
+		case Qt::Key_PageDown:
+		case Qt::Key_Up:
+		case Qt::Key_Down:
+		case Qt::Key_Home:
+		case Qt::Key_End:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	int sizeToInt(const qsizetype value)
 	{
 		constexpr qsizetype kMin = 0;
 		constexpr qsizetype kMax = std::numeric_limits<int>::max();
 		return static_cast<int>(qBound(kMin, value, kMax));
+	}
+
+	int saturatedAccessibleAdd(const int value, const int amount)
+	{
+		if (amount <= 0)
+			return value;
+		constexpr int kMax = std::numeric_limits<int>::max();
+		if (value >= kMax - amount)
+			return kMax;
+		return value + amount;
 	}
 
 	QString trimLeadingAnnouncementBreaks(QString text)
@@ -1293,26 +1322,20 @@ class WrapTextBrowser : public QAbstractScrollArea
 				return;
 			if (m_view && m_view->handleCommandHistoryShortcut(event))
 				return;
+			if (m_view && m_view->handleOutputNavigationShortcut(event))
+			{
+				m_view->noteUserScrollAction();
+				return;
+			}
 			if (m_isLive)
 			{
 				event->accept();
 				return;
 			}
-			if (m_view)
+			if (isPhysicalOutputNavigationKey(event))
 			{
-				switch (event->key())
-				{
-				case Qt::Key_PageUp:
-				case Qt::Key_PageDown:
-				case Qt::Key_Up:
-				case Qt::Key_Down:
-				case Qt::Key_Home:
-				case Qt::Key_End:
-					m_view->noteUserScrollAction();
-					break;
-				default:
-					break;
-				}
+				event->accept();
+				return;
 			}
 			QAbstractScrollArea::keyPressEvent(event);
 		}
@@ -1478,7 +1501,8 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 
 		[[nodiscard]] int cursorPosition() const override
 		{
-			return characterCount();
+			const WorldView *view = worldView();
+			return view ? view->accessibleOutputCursorPosition() : characterCount();
 		}
 
 		void setCursorPosition(int position) override
@@ -1569,7 +1593,7 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 		[[nodiscard]] WrapTextBrowser *targetBrowser() const
 		{
 			WorldView *view = worldView();
-			return view ? view->activeOutputView() : nullptr;
+			return view ? view->accessibleOutputTargetView() : nullptr;
 		}
 
 		[[nodiscard]] WorldView *worldView() const
@@ -2465,8 +2489,14 @@ void WorldView::noteUserScrollAction()
 	m_timeFadeCancelled = QDateTime::currentDateTime();
 	if (!m_autoPause || !m_outputScrollBar)
 		return;
-	const bool atEnd = isAtBufferEnd();
-	setScrollbackSplitActive(!atEnd);
+	syncOutputScrollbackReviewState();
+}
+
+void WorldView::syncOutputScrollbackReviewState()
+{
+	setScrollbackSplitActive(!isAtBufferEnd());
+	if (m_scrollbackSplitActive)
+		updateAccessibleOutputReviewCursor();
 }
 
 int WorldView::outputScrollUnitsPerLine() const
@@ -3230,6 +3260,174 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 	m_accessibleOutputRevision          = m_nativeRenderLineCacheRevision;
 	m_accessibleOutputText              = currentText;
 	m_accessibleOutputPendingTailAppend = false;
+}
+
+WrapTextBrowser *WorldView::accessibleOutputTargetView() const
+{
+	if (m_scrollbackSplitActive && m_output)
+		return m_output;
+	return activeOutputView();
+}
+
+int WorldView::accessibleOutputCursorPosition() const
+{
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+	if (!m_accessibleOutputReviewActive || !m_scrollbackSplitActive)
+		return accessibleOutputCharacterCount(lines);
+	return accessibleOutputReviewCursorPositionForTopPane();
+}
+
+void WorldView::updateAccessibleOutputReviewCursor()
+{
+	if (!m_scrollbackSplitActive)
+	{
+		clearAccessibleOutputReviewCursor();
+		return;
+	}
+
+	m_accessibleOutputReviewActive = true;
+	if (!QAccessible::isActive())
+	{
+		m_accessibleOutputReviewLastNotifiedCursorOffset = -1;
+		return;
+	}
+
+	const int  cursorOffset = accessibleOutputReviewCursorPositionForTopPane();
+	const bool changed      = m_accessibleOutputReviewLastNotifiedCursorOffset != cursorOffset;
+	m_accessibleOutputReviewLastNotifiedCursorOffset = cursorOffset;
+	if (changed)
+		notifyAccessibleOutputCaretMoved(cursorOffset);
+}
+
+void WorldView::clearAccessibleOutputReviewCursor()
+{
+	if (!m_accessibleOutputReviewActive && m_accessibleOutputReviewLastNotifiedCursorOffset < 0)
+		return;
+
+	const bool wasActive           = m_accessibleOutputReviewActive;
+	m_accessibleOutputReviewActive = false;
+	if (!QAccessible::isActive())
+	{
+		m_accessibleOutputReviewLastNotifiedCursorOffset = -1;
+		return;
+	}
+
+	const NativeOutputRenderLines &lines        = nativeOutputRenderLines();
+	const int                      cursorOffset = accessibleOutputCharacterCount(lines);
+	const bool changed = wasActive && m_accessibleOutputReviewLastNotifiedCursorOffset != cursorOffset;
+	m_accessibleOutputReviewLastNotifiedCursorOffset = -1;
+	if (changed)
+		notifyAccessibleOutputCaretMoved(cursorOffset);
+}
+
+void WorldView::notifyAccessibleOutputCaretMoved(const int cursorOffset) const
+{
+	if (!QAccessible::isActive() || !m_nativeOutputCanvas || !m_nativeOutputCanvas->isVisible())
+		return;
+	QAccessibleTextCursorEvent event(m_nativeOutputCanvas, cursorOffset);
+	QAccessible::updateAccessibility(&event);
+}
+
+int WorldView::accessibleOutputReviewCursorPositionForTopPane() const
+{
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+	if (lines.isEmpty() || !m_output || !m_output->viewport())
+		return accessibleOutputCharacterCount(lines);
+
+	const QScrollBar *const bar = m_output->verticalScrollBar();
+	if (!bar)
+		return accessibleOutputCharacterCount(lines);
+
+	const QRect viewportRect = m_output->viewport()->rect();
+	if (viewportRect.isEmpty())
+		return accessibleOutputCharacterCount(lines);
+
+	const bool   wrapEnabled          = m_output->lineWrapMode() != WrapTextBrowser::NoWrap;
+	const int    wrapWidthPixels      = nativeWrapWidthPixels(viewportRect.width(), wrapEnabled);
+	const int    localWrapWidthPixels = nativeLocalWrapWidthPixels(viewportRect.width(), wrapEnabled);
+	const int    lineSpacingSetting   = qMax(0, m_lineSpacing);
+	const QFont &layoutFont           = m_output->font();
+	ensureNativeLayoutCaches(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting, layoutFont);
+	if (m_nativeLayoutHeightIndex.size() != lines.size())
+		return accessibleOutputCharacterCount(lines);
+
+	const int lineCount = sizeToInt(lines.size());
+	int       lineIndex =
+	    qBound(0, nativeLayoutLineAtY(qBound(bar->minimum(), bar->value(), bar->maximum())), lineCount - 1);
+	static_cast<void>(ensureNativeLayoutRange(lines, qMax(0, lineIndex - 2),
+	                                          qMin(lineCount - 1, lineIndex + 2), wrapWidthPixels,
+	                                          localWrapWidthPixels, lineSpacingSetting, layoutFont));
+	if (m_nativeLayoutHeightIndex.size() == lines.size())
+		lineIndex = qBound(0, nativeLayoutLineAtY(qBound(bar->minimum(), bar->value(), bar->maximum())),
+		                   lineCount - 1);
+	return accessibleOutputOffsetForLine(lines, lineIndex);
+}
+
+int WorldView::accessibleOutputOffsetForLine(const NativeOutputRenderLines &lines, const int lineIndex) const
+{
+	if (lines.isEmpty())
+		return 0;
+	if (lineIndex <= 0)
+		return 0;
+	const int lineCount = sizeToInt(lines.size());
+	if (lineIndex >= lineCount)
+		return accessibleOutputCharacterCount(lines);
+
+	ensureAccessibleOutputOffsetCachePrefix(lines, lineIndex);
+	return m_accessibleOutputLineStartCache.at(static_cast<qsizetype>(lineIndex));
+}
+
+int WorldView::accessibleOutputCharacterCount(const NativeOutputRenderLines &lines) const
+{
+	if (m_accessibleOutputRevision == m_nativeRenderLineCacheRevision &&
+	    m_accessibleOutputCharacterCount >= 0)
+		return m_accessibleOutputCharacterCount;
+	if (m_accessibleOutputLineStartCacheRevision == m_nativeRenderLineCacheRevision &&
+	    m_accessibleOutputLineStartCacheCharacterCount >= 0)
+	{
+		return m_accessibleOutputLineStartCacheCharacterCount;
+	}
+	if (lines.isEmpty())
+		return 0;
+
+	ensureAccessibleOutputOffsetCachePrefix(lines, sizeToInt(lines.size()) - 1);
+	return m_accessibleOutputLineStartCacheCharacterCount;
+}
+
+void WorldView::ensureAccessibleOutputOffsetCachePrefix(const NativeOutputRenderLines &lines,
+                                                        const int                      lineIndex) const
+{
+	if (m_accessibleOutputLineStartCacheRevision != m_nativeRenderLineCacheRevision ||
+	    m_accessibleOutputLineStartCache.size() > lines.size())
+	{
+		m_accessibleOutputLineStartCache.clear();
+		m_accessibleOutputLineStartCacheRevision       = m_nativeRenderLineCacheRevision;
+		m_accessibleOutputLineStartCacheNextOffset     = 0;
+		m_accessibleOutputLineStartCacheCharacterCount = -1;
+	}
+
+	if (lines.isEmpty())
+	{
+		m_accessibleOutputLineStartCacheCharacterCount = 0;
+		return;
+	}
+
+	const int       boundedLineIndex   = qBound(0, lineIndex, sizeToInt(lines.size()) - 1);
+	const qsizetype requiredLineStarts = static_cast<qsizetype>(boundedLineIndex) + 1;
+
+	while (m_accessibleOutputLineStartCache.size() < requiredLineStarts)
+	{
+		const qsizetype i = m_accessibleOutputLineStartCache.size();
+		m_accessibleOutputLineStartCache.push_back(m_accessibleOutputLineStartCacheNextOffset);
+		m_accessibleOutputLineStartCacheNextOffset = saturatedAccessibleAdd(
+		    m_accessibleOutputLineStartCacheNextOffset, sizeToInt(lines.at(i).text.size()));
+		if (i + 1 < lines.size())
+			m_accessibleOutputLineStartCacheNextOffset =
+			    saturatedAccessibleAdd(m_accessibleOutputLineStartCacheNextOffset, 1);
+	}
+
+	if (m_accessibleOutputLineStartCache.size() == lines.size())
+		m_accessibleOutputLineStartCacheCharacterCount = m_accessibleOutputLineStartCacheNextOffset;
 }
 
 WorldView::NativeOutputPanePaintState *
@@ -7890,15 +8088,20 @@ void WorldView::scrollNativeOutputRangeIntoView(const WrapTextBrowser *view, int
 	else if (rangeBottom > currentBottom)
 		target = rangeBottom - pageStep;
 
-	target = qBound(bar->minimum(), target, bar->maximum());
-	if (view == m_output && target < bar->maximum())
-		const_cast<WorldView *>(this)->setScrollbackSplitActive(true);
+	target                   = qBound(bar->minimum(), target, bar->maximum());
+	const bool primaryOutput = view == m_output;
 	if (target == bar->value())
+	{
+		if (primaryOutput)
+			const_cast<WorldView *>(this)->syncOutputScrollbackReviewState();
 		return;
+	}
 	if (view == m_output && m_outputScrollBar)
 		m_outputScrollBar->setValue(target);
 	else
 		bar->setValue(target);
+	if (primaryOutput)
+		const_cast<WorldView *>(this)->syncOutputScrollbackReviewState();
 }
 
 bool WorldView::nativeOutputHitTestGlobal(const QPoint &globalPos, WrapTextBrowser *&view,
@@ -9186,6 +9389,7 @@ void WorldView::setScrollbackSplitActive(bool active)
 	}
 	else
 	{
+		clearAccessibleOutputReviewCursor();
 		if (const QList<int> sizes = m_outputSplitter->sizes(); sizes.size() >= 2)
 			m_lastLiveSplitSize = sizes.at(1);
 		m_outputSplitter->setSizes(QList<int>() << 1 << 0);
@@ -9388,54 +9592,66 @@ WrapTextBrowser *WorldView::activeOutputView() const
 	return m_output;
 }
 
-void WorldView::scrollOutputToStart() const
+void WorldView::scrollOutputToStart()
 {
-	WrapTextBrowser *const view = activeOutputView();
-	if (!view)
+	if (!m_output)
 		return;
-	if (QScrollBar *bar = view->verticalScrollBar())
+	if (QScrollBar *bar = m_output->verticalScrollBar())
 		bar->setValue(bar->minimum());
+	syncOutputScrollbackReviewState();
+	requestNativeOutputRepaint();
 }
 
-void WorldView::scrollOutputToEnd() const
+void WorldView::scrollOutputToEnd()
 {
-	scrollViewToEnd(activeOutputView());
+	if (m_scrollbackSplitActive)
+		collapseScrollbackSplitToLiveOutput();
+	else
+	{
+		scrollViewToEnd(m_output);
+		clearAccessibleOutputReviewCursor();
+	}
+	requestNativeOutputRepaint();
 }
 
-void WorldView::scrollOutputPageUp() const
+void WorldView::scrollOutputPageUp()
 {
-	WrapTextBrowser *const view = activeOutputView();
-	if (!view)
+	if (!m_output)
 		return;
-	if (QScrollBar *bar = view->verticalScrollBar())
+	if (QScrollBar *bar = m_output->verticalScrollBar())
 		bar->setValue(bar->value() - bar->pageStep());
+	syncOutputScrollbackReviewState();
+	requestNativeOutputRepaint();
 }
 
-void WorldView::scrollOutputPageDown() const
+void WorldView::scrollOutputPageDown()
 {
-	WrapTextBrowser *const view = activeOutputView();
-	if (!view)
+	if (!m_output)
 		return;
-	if (QScrollBar *bar = view->verticalScrollBar())
+	if (QScrollBar *bar = m_output->verticalScrollBar())
 		bar->setValue(bar->value() + bar->pageStep());
+	syncOutputScrollbackReviewState();
+	requestNativeOutputRepaint();
 }
 
-void WorldView::scrollOutputLineUp() const
+void WorldView::scrollOutputLineUp()
 {
-	WrapTextBrowser *const view = activeOutputView();
-	if (!view)
+	if (!m_output)
 		return;
-	if (QScrollBar *bar = view->verticalScrollBar())
+	if (QScrollBar *bar = m_output->verticalScrollBar())
 		bar->setValue(bar->value() - outputScrollUnitsPerLine());
+	syncOutputScrollbackReviewState();
+	requestNativeOutputRepaint();
 }
 
-void WorldView::scrollOutputLineDown() const
+void WorldView::scrollOutputLineDown()
 {
-	WrapTextBrowser *const view = activeOutputView();
-	if (!view)
+	if (!m_output)
 		return;
-	if (QScrollBar *bar = view->verticalScrollBar())
+	if (QScrollBar *bar = m_output->verticalScrollBar())
 		bar->setValue(bar->value() + outputScrollUnitsPerLine());
+	syncOutputScrollbackReviewState();
+	requestNativeOutputRepaint();
 }
 
 void WorldView::addHyperlinkToHistory(const QString &text)
@@ -9905,8 +10121,6 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 		target = lineBottom - pageStep;
 
 	target = qBound(bar->minimum(), target, bar->maximum());
-	if (target < bar->maximum())
-		const_cast<WorldView *>(this)->setScrollbackSplitActive(true);
 	if (target != bar->value())
 	{
 		if (m_outputScrollBar)
@@ -9914,6 +10128,7 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 		else
 			bar->setValue(target);
 	}
+	const_cast<WorldView *>(this)->syncOutputScrollbackReviewState();
 }
 
 void WorldView::setOutputSelection(int startLine, int endLine, int startColumn, int endColumn) const
@@ -9971,6 +10186,7 @@ int WorldView::setOutputScroll(int position, bool visible)
 			m_outputScrollBar->setValue(target);
 		else
 			bar->setValue(target);
+		syncOutputScrollbackReviewState();
 	}
 	return eOK;
 }
@@ -13197,7 +13413,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 	{
 		if (const auto *keyEvent = dynamic_cast<QKeyEvent *>(event);
 		    keyEvent && (hasWorldAcceleratorBinding(keyEvent) || hasCommandOptionShortcut(keyEvent) ||
-		                 hasCommandHistoryShortcut(keyEvent)))
+		                 hasCommandHistoryShortcut(keyEvent) || hasOutputNavigationShortcut(keyEvent)))
 		{
 			event->accept();
 			return true;
@@ -13230,54 +13446,10 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 				return true;
 			}
 
-			auto targetOutputView = [&]() -> WrapTextBrowser *
+			if (handleOutputNavigationShortcut(keyEvent))
 			{
-				if (watched == m_liveOutput || watched == liveOutputViewport)
-					return m_liveOutput;
-				if (watched == m_output || watched == outputViewport)
-					return m_output;
-				return activeOutputView();
-			};
-
-			if (WrapTextBrowser *const targetView = targetOutputView())
-			{
-				if (QScrollBar *const bar = targetView->verticalScrollBar())
-				{
-					const int lineStep = outputScrollUnitsPerLine();
-					bool      handled  = true;
-					switch (keyEvent->key())
-					{
-					case Qt::Key_PageUp:
-						bar->setValue(bar->value() - bar->pageStep());
-						break;
-					case Qt::Key_PageDown:
-						bar->setValue(bar->value() + bar->pageStep());
-						break;
-					case Qt::Key_Up:
-						bar->setValue(bar->value() - lineStep);
-						break;
-					case Qt::Key_Down:
-						bar->setValue(bar->value() + lineStep);
-						break;
-					case Qt::Key_Home:
-						bar->setValue(bar->minimum());
-						break;
-					case Qt::Key_End:
-						bar->setValue(bar->maximum());
-						break;
-					default:
-						handled = false;
-						break;
-					}
-
-					if (handled)
-					{
-						noteUserScrollAction();
-						requestNativeOutputRepaint();
-						event->accept();
-						return true;
-					}
-				}
+				noteUserScrollAction();
+				return true;
 			}
 
 			if (m_allTypingToCommandWindow && m_input)
@@ -13929,26 +14101,22 @@ void WorldView::recallLastWord()
 
 void WorldView::applyShortcutPreferences()
 {
-	m_commandOptionNextShortcuts =
-	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("CommandOptionNext"));
-	m_commandOptionPreviousShortcuts =
-	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("CommandOptionPrevious"));
-	m_commandOptionBufferEndShortcuts =
-	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("CommandOptionBufferEnd"));
-	m_nextCommandShortcuts =
-	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("NextCommand"));
-	m_previousCommandShortcuts =
-	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("PreviousCommand"));
-	m_displayPageUpShortcuts =
-	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayPageUp"));
-	m_displayPageDownShortcuts =
-	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayPageDown"));
-	m_outputSplitStartShortcuts =
-	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("OutputSplitStart"));
-	m_outputSplitEndShortcuts =
-	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("OutputSplitEnd"));
-	m_recallLastWordShortcuts =
-	    QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("RecallLastWord"));
+	const QHash<QString, QList<QKeySequence>> shortcutsById =
+	    QMudShortcutPreferenceUtils::effectiveShortcutMapForAppPreferences();
+	m_commandOptionNextShortcuts      = shortcutsById.value(QStringLiteral("CommandOptionNext"));
+	m_commandOptionPreviousShortcuts  = shortcutsById.value(QStringLiteral("CommandOptionPrevious"));
+	m_commandOptionBufferEndShortcuts = shortcutsById.value(QStringLiteral("CommandOptionBufferEnd"));
+	m_nextCommandShortcuts            = shortcutsById.value(QStringLiteral("NextCommand"));
+	m_previousCommandShortcuts        = shortcutsById.value(QStringLiteral("PreviousCommand"));
+	m_displayStartShortcuts           = shortcutsById.value(QStringLiteral("DisplayStart"));
+	m_displayPageUpShortcuts          = shortcutsById.value(QStringLiteral("DisplayPageUp"));
+	m_displayPageDownShortcuts        = shortcutsById.value(QStringLiteral("DisplayPageDown"));
+	m_displayEndShortcuts             = shortcutsById.value(QStringLiteral("DisplayEnd"));
+	m_displayLineUpShortcuts          = shortcutsById.value(QStringLiteral("DisplayLineUp"));
+	m_displayLineDownShortcuts        = shortcutsById.value(QStringLiteral("DisplayLineDown"));
+	m_outputSplitStartShortcuts       = shortcutsById.value(QStringLiteral("OutputSplitStart"));
+	m_outputSplitEndShortcuts         = shortcutsById.value(QStringLiteral("OutputSplitEnd"));
+	m_recallLastWordShortcuts         = shortcutsById.value(QStringLiteral("RecallLastWord"));
 }
 
 void WorldView::removeLastHistoryEntry()
@@ -14240,6 +14408,63 @@ bool WorldView::handleCommandHistoryShortcut(QKeyEvent *event)
 	recallPartialHistory(direction);
 
 	event->accept();
+	return true;
+}
+
+WorldView::OutputNavigationShortcut WorldView::outputNavigationShortcutForEvent(const QKeyEvent *event) const
+{
+	if (!event)
+		return OutputNavigationShortcut::None;
+	if (eventMatchesCachedShortcut(event, m_displayStartShortcuts) ||
+	    eventMatchesCachedShortcut(event, m_outputSplitStartShortcuts))
+		return OutputNavigationShortcut::Start;
+	if (eventMatchesCachedShortcut(event, m_displayPageUpShortcuts))
+		return OutputNavigationShortcut::PageUp;
+	if (eventMatchesCachedShortcut(event, m_displayPageDownShortcuts))
+		return OutputNavigationShortcut::PageDown;
+	if (eventMatchesCachedShortcut(event, m_displayEndShortcuts) ||
+	    eventMatchesCachedShortcut(event, m_outputSplitEndShortcuts))
+		return OutputNavigationShortcut::End;
+	if (eventMatchesCachedShortcut(event, m_displayLineUpShortcuts))
+		return OutputNavigationShortcut::LineUp;
+	if (eventMatchesCachedShortcut(event, m_displayLineDownShortcuts))
+		return OutputNavigationShortcut::LineDown;
+	return OutputNavigationShortcut::None;
+}
+
+bool WorldView::hasOutputNavigationShortcut(const QKeyEvent *event) const
+{
+	return outputNavigationShortcutForEvent(event) != OutputNavigationShortcut::None;
+}
+
+bool WorldView::handleOutputNavigationShortcut(QKeyEvent *event)
+{
+	switch (outputNavigationShortcutForEvent(event))
+	{
+	case OutputNavigationShortcut::Start:
+		scrollOutputToStart();
+		break;
+	case OutputNavigationShortcut::PageUp:
+		scrollOutputPageUp();
+		break;
+	case OutputNavigationShortcut::PageDown:
+		scrollOutputPageDown();
+		break;
+	case OutputNavigationShortcut::End:
+		scrollOutputToEnd();
+		break;
+	case OutputNavigationShortcut::LineUp:
+		scrollOutputLineUp();
+		break;
+	case OutputNavigationShortcut::LineDown:
+		scrollOutputLineDown();
+		break;
+	case OutputNavigationShortcut::None:
+		return false;
+	}
+
+	if (event)
+		event->accept();
 	return true;
 }
 
@@ -14900,55 +15125,9 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 
 	if (m_view && m_view->m_allTypingToCommandWindow)
 	{
-		auto topScrollBar = [this]() -> QScrollBar *
-		{
-			if (!m_view || !m_view->m_output)
-				return nullptr;
-			return m_view->m_output->verticalScrollBar();
-		};
-
-		bool handled = true;
-		if (WorldView::eventMatchesCachedShortcut(event, m_view->m_displayPageUpShortcuts))
-		{
-			m_view->setScrollbackSplitActive(true);
-			if (QScrollBar *const topBar = topScrollBar())
-				topBar->setValue(topBar->value() - topBar->pageStep());
-			else
-				handled = false;
-		}
-		else if (WorldView::eventMatchesCachedShortcut(event, m_view->m_displayPageDownShortcuts))
-		{
-			if (QScrollBar *const topBar = topScrollBar())
-			{
-				topBar->setValue(topBar->value() + topBar->pageStep());
-				if (m_view->m_scrollbackSplitActive && topBar->value() >= topBar->maximum())
-					m_view->setScrollbackSplitActive(false);
-			}
-			else
-				handled = false;
-		}
-		else if (WorldView::eventMatchesCachedShortcut(event, m_view->m_outputSplitStartShortcuts))
-		{
-			m_view->setScrollbackSplitActive(true);
-			if (QScrollBar *const topBar = topScrollBar())
-			{
-				topBar->setValue(topBar->minimum());
-			}
-		}
-		else if (WorldView::eventMatchesCachedShortcut(event, m_view->m_outputSplitEndShortcuts))
-		{
-			m_view->setScrollbackSplitActive(false);
-			m_view->scrollOutputToEnd();
-		}
-		else
-		{
-			handled = false;
-		}
-
-		if (handled)
+		if (m_view->handleOutputNavigationShortcut(event))
 		{
 			m_view->noteUserScrollAction();
-			m_view->requestNativeOutputRepaint();
 			return;
 		}
 	}
@@ -15126,6 +15305,8 @@ bool InputTextEdit::event(QEvent *event)
 			    keyEvent->matches(QKeySequence::Copy) || (hasOnlyCtrl && keyEvent->key() == Qt::Key_C);
 			const bool isPasteShortcut = keyEvent->matches(QKeySequence::Paste);
 			const bool isPlainTab      = modifiers == Qt::NoModifier && keyEvent->key() == Qt::Key_Tab;
+			const bool isAllTypingOutputNavigationShortcut =
+			    m_view->m_allTypingToCommandWindow && m_view->hasOutputNavigationShortcut(keyEvent);
 			if (isRecallLastWord)
 			{
 				event->accept();
@@ -15136,8 +15317,9 @@ bool InputTextEdit::event(QEvent *event)
 				event->accept();
 				return true;
 			}
-			if (isPasteShortcut || isPlainTab || m_view->hasWorldAcceleratorBinding(keyEvent) ||
-			    m_view->hasCommandOptionShortcut(keyEvent) || m_view->hasCommandHistoryShortcut(keyEvent))
+			if (isPasteShortcut || isPlainTab || isAllTypingOutputNavigationShortcut ||
+			    m_view->hasWorldAcceleratorBinding(keyEvent) || m_view->hasCommandOptionShortcut(keyEvent) ||
+			    m_view->hasCommandHistoryShortcut(keyEvent))
 			{
 				event->accept();
 				return true;

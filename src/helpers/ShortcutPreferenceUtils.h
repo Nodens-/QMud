@@ -9,6 +9,7 @@
 #ifndef QMUD_SHORTCUTPREFERENCEUTILS_H
 #define QMUD_SHORTCUTPREFERENCEUTILS_H
 
+#include <QHash>
 #include <QKeySequence>
 #include <QList>
 #include <QString>
@@ -63,27 +64,31 @@ namespace QMudShortcutPreferenceUtils
 	 * @param shortcuts Shortcut list.
 	 * @return Portable persistence/display text.
 	 */
-	[[nodiscard]] QString             shortcutListToPortableText(const QList<QKeySequence> &shortcuts);
+	[[nodiscard]] QString shortcutListToPortableText(const QList<QKeySequence> &shortcuts);
 	/**
 	 * @brief Formats shortcut list as semicolon-separated native text.
 	 * @param shortcuts Shortcut list.
 	 * @return Native display text.
 	 */
-	[[nodiscard]] QString             shortcutListToNativeText(const QList<QKeySequence> &shortcuts);
+	[[nodiscard]] QString shortcutListToNativeText(const QList<QKeySequence> &shortcuts);
 	/**
-	 * @brief Resolves effective shortcuts from definition defaults and a persisted override string.
-	 * @param definition Shortcut definition.
-	 * @param overrideText Stored override text. Empty means use defaults.
-	 * @return Effective shortcuts; invalid or reserved overrides fall back to defaults.
+	 * @brief Resolves accepted explicit override ownership from override strings.
+	 * @param overrideTextByPreferenceKey Override text keyed by global shortcut preference key.
+	 * @return Accepted override owners keyed by portable shortcut text, with action id as value.
 	 */
-	[[nodiscard]] QList<QKeySequence> effectiveShortcuts(const ShortcutDefinition &definition,
-	                                                     const QString            &overrideText);
+	[[nodiscard]] QHash<QString, QString>
+	acceptedOverrideOwnersByPortableShortcut(const QHash<QString, QString> &overrideTextByPreferenceKey);
+	/**
+	 * @brief Resolves all effective shortcuts using AppController global preferences.
+	 * @return Shortcut lists keyed by stable shortcut/action identifier.
+	 */
+	[[nodiscard]] QHash<QString, QList<QKeySequence>> effectiveShortcutMapForAppPreferences();
 	/**
 	 * @brief Returns whether sequence is reserved for per-world macro slots.
 	 * @param sequence Shortcut sequence.
 	 * @return `true` when the sequence must not be assigned globally.
 	 */
-	[[nodiscard]] bool                isReservedMacroShortcut(const QKeySequence &sequence);
+	[[nodiscard]] bool                                isReservedMacroShortcut(const QKeySequence &sequence);
 	/**
 	 * @brief Returns whether event matches a sequence exactly.
 	 * @param event Key event.

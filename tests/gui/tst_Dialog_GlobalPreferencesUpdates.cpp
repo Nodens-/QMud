@@ -37,11 +37,14 @@
 
 namespace
 {
+	constexpr int kShortcutDefaultPreferenceKeyRole         = Qt::UserRole + 1;
+	constexpr int kShortcutDisabledDefaultPortableTextsRole = Qt::UserRole + 4;
+
 	/**
 	 * @brief Returns per-process test INI file path.
 	 * @return Absolute INI path under temporary directory.
 	 */
-	QString testIniFilePath()
+	QString       testIniFilePath()
 	{
 		static const QString path =
 		    QDir::temp().filePath(QStringLiteral("qmud-test-global-preferences-dialog-%1.ini")
@@ -166,6 +169,24 @@ namespace
 				if (item && item->data(Qt::UserRole).toString() == preferenceKey)
 					return item;
 			}
+		}
+		return nullptr;
+	}
+
+	/**
+	 * @brief Finds shortcut default item by global preference key.
+	 * @param table Table to scan.
+	 * @param preferenceKey Shortcut preference key.
+	 * @return Matching default-column table item, or `nullptr`.
+	 */
+	QTableWidgetItem *findShortcutDefaultItemByPreferenceKey(const QTableWidget &table,
+	                                                         const QString      &preferenceKey)
+	{
+		for (int row = 0; row < table.rowCount(); ++row)
+		{
+			QTableWidgetItem *item = table.item(row, 2);
+			if (item && item->data(kShortcutDefaultPreferenceKeyRole).toString() == preferenceKey)
+				return item;
 		}
 		return nullptr;
 	}
@@ -536,6 +557,81 @@ class tst_Dialog_GlobalPreferencesUpdates : public QObject
 			QCOMPARE(stubState().globalOptions.value(QStringLiteral("Shortcut.DisplayStart")).toString(),
 			         QStringLiteral("Ctrl+Alt+Home"));
 			QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
+		}
+
+		/**
+		 * @brief Verifies explicit overrides can claim another action's default shortcut.
+		 */
+		void overrideClaimsDefaultShortcut()
+		{
+			resetStubState();
+
+			GlobalPreferencesDialog dialog;
+			dialog.show();
+
+			auto *table = dialog.findChild<QTableWidget *>();
+			QVERIFY(table);
+			QTableWidgetItem *displayStart =
+			    findShortcutOverrideItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayStart"));
+			QVERIFY(displayStart);
+			displayStart->setText(QStringLiteral("PgUp"));
+			QTableWidgetItem *displayStartDefault =
+			    findShortcutDefaultItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayStart"));
+			QVERIFY(displayStartDefault);
+			QCOMPARE(displayStartDefault->data(kShortcutDisabledDefaultPortableTextsRole).toStringList(),
+			         QStringList{});
+			QTableWidgetItem *displayPageUpDefault =
+			    findShortcutDefaultItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayPageUp"));
+			QVERIFY(displayPageUpDefault);
+			QCOMPARE(displayPageUpDefault->data(kShortcutDisabledDefaultPortableTextsRole).toStringList(),
+			         QStringList{QStringLiteral("PgUp")});
+
+			dialog.accept();
+
+			QCOMPARE(stubState().globalOptions.value(QStringLiteral("Shortcut.DisplayStart")).toString(),
+			         QStringLiteral("PgUp"));
+			QCOMPARE(
+			    QMudShortcutPreferenceUtils::shortcutListToPortableText(
+			        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayStart"))),
+			    QStringLiteral("PgUp"));
+			QCOMPARE(
+			    QMudShortcutPreferenceUtils::shortcutListToPortableText(
+			        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayPageUp"))),
+			    QString());
+			QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
+		}
+
+		/**
+		 * @brief Verifies stored duplicate explicit overrides do not become active duplicate shortcuts.
+		 */
+		void duplicateStoredOverridesFallBackToDefaults()
+		{
+			resetStubState();
+			stubState().globalOptions.insert(QStringLiteral("Shortcut.DisplayStart"), QStringLiteral("PgUp"));
+			stubState().globalOptions.insert(QStringLiteral("Shortcut.DisplayPageDown"),
+			                                 QStringLiteral("PgUp"));
+
+			GlobalPreferencesDialog dialog;
+			auto                   *table = dialog.findChild<QTableWidget *>();
+			QVERIFY(table);
+			QTableWidgetItem *displayPageUpDefault =
+			    findShortcutDefaultItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayPageUp"));
+			QVERIFY(displayPageUpDefault);
+			QCOMPARE(displayPageUpDefault->data(kShortcutDisabledDefaultPortableTextsRole).toStringList(),
+			         QStringList{});
+
+			QCOMPARE(
+			    QMudShortcutPreferenceUtils::shortcutListToPortableText(
+			        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayStart"))),
+			    QStringLiteral("Ctrl+Home"));
+			QCOMPARE(
+			    QMudShortcutPreferenceUtils::shortcutListToPortableText(
+			        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayPageDown"))),
+			    QStringLiteral("PgDown"));
+			QCOMPARE(
+			    QMudShortcutPreferenceUtils::shortcutListToPortableText(
+			        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayPageUp"))),
+			    QStringLiteral("PgUp"));
 		}
 
 		/**

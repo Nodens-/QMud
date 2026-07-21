@@ -314,19 +314,19 @@ class WorldView : public QWidget
 		/**
 		 * @brief Scrolls output to beginning.
 		 */
-		void                          scrollOutputToStart() const;
+		void                          scrollOutputToStart();
 		/**
 		 * @brief Scrolls output to end.
 		 */
-		void                          scrollOutputToEnd() const;
+		void                          scrollOutputToEnd();
 		/**
 		 * @brief Scrolls output one page up.
 		 */
-		void                          scrollOutputPageUp() const;
+		void                          scrollOutputPageUp();
 		/**
 		 * @brief Scrolls output one page down.
 		 */
-		void                          scrollOutputPageDown() const;
+		void                          scrollOutputPageDown();
 		/**
 		 * @brief Focuses input editor.
 		 */
@@ -334,11 +334,11 @@ class WorldView : public QWidget
 		/**
 		 * @brief Scrolls output one line up.
 		 */
-		void                          scrollOutputLineUp() const;
+		void                          scrollOutputLineUp();
 		/**
 		 * @brief Scrolls output one line down.
 		 */
-		void                          scrollOutputLineDown() const;
+		void                          scrollOutputLineDown();
 		/**
 		 * @brief Recalls next command in history navigation.
 		 */
@@ -383,61 +383,92 @@ class WorldView : public QWidget
 		 * @return Ordered list of (`action`, `label`) entries.
 		 */
 		[[nodiscard]] static QVector<QPair<QString, QString>>
-		                          parseMxpContextMenuActions(const QString &rawHref, const QString &rawHint);
+		                   parseMxpContextMenuActions(const QString &rawHref, const QString &rawHint);
 		/**
 		 * @brief Shows generic context menu at global position.
 		 * @param globalPos Global screen position.
 		 * @return `true` when a menu action was handled.
 		 */
-		bool                      showContextMenuAtGlobalPos(const QPoint &globalPos);
+		bool               showContextMenuAtGlobalPos(const QPoint &globalPos);
 		/**
 		 * @brief Shows world context menu at global position.
 		 * @param globalPos Global screen position.
 		 * @return `true` when a menu action was handled.
 		 */
-		bool                      showWorldContextMenuAtGlobalPos(const QPoint &globalPos);
+		bool               showWorldContextMenuAtGlobalPos(const QPoint &globalPos);
 		/**
 		 * @brief Replays right-click event against miniwindow hotspots.
 		 * @param globalPos Global click position.
 		 * @return `true` when a hotspot handled the click.
 		 */
-		bool                      replayMiniWindowRightClickAtGlobalPos(const QPoint &globalPos);
+		bool               replayMiniWindowRightClickAtGlobalPos(const QPoint &globalPos);
 		/**
 		 * @brief Handles world hotkey keypress.
 		 * @param event Key event to process.
 		 * @return `true` when the hotkey is consumed.
 		 */
-		bool                      handleWorldHotkey(QKeyEvent *event);
+		bool               handleWorldHotkey(QKeyEvent *event);
 		/**
 		 * @brief Returns whether a key event has a registered world accelerator binding.
 		 * @param event Key event to inspect.
 		 * @return `true` when accelerator dispatch should preempt Qt shortcuts.
 		 */
-		[[nodiscard]] bool        hasWorldAcceleratorBinding(const QKeyEvent *event) const;
+		[[nodiscard]] bool hasWorldAcceleratorBinding(const QKeyEvent *event) const;
 		/**
 		 * @brief Returns whether a key event is claimed by command option settings.
 		 * @param event Key event to inspect.
 		 * @return `true` when a command option shortcut should preempt Qt shortcuts.
 		 */
-		[[nodiscard]] bool        hasCommandOptionShortcut(const QKeyEvent *event) const;
+		[[nodiscard]] bool hasCommandOptionShortcut(const QKeyEvent *event) const;
 		/**
 		 * @brief Handles command option shortcuts.
 		 * @param event Key event to process.
 		 * @return `true` when the shortcut is consumed.
 		 */
-		bool                      handleCommandOptionShortcut(QKeyEvent *event);
+		bool               handleCommandOptionShortcut(QKeyEvent *event);
 		/**
 		 * @brief Returns whether a key event is a command-history shortcut.
 		 * @param event Key event to inspect.
 		 * @return `true` when command-history routing should preempt Qt shortcuts.
 		 */
-		[[nodiscard]] bool        hasCommandHistoryShortcut(const QKeyEvent *event) const;
+		[[nodiscard]] bool hasCommandHistoryShortcut(const QKeyEvent *event) const;
 		/**
 		 * @brief Handles command-history shortcuts.
 		 * @param event Key event to process.
 		 * @return `true` when the shortcut is consumed.
 		 */
-		bool                      handleCommandHistoryShortcut(QKeyEvent *event);
+		bool               handleCommandHistoryShortcut(QKeyEvent *event);
+		/**
+		 * @brief Output navigation shortcut action resolved from a key event.
+		 */
+		enum class OutputNavigationShortcut
+		{
+			None,     ///< No output navigation shortcut matched.
+			Start,    ///< Scroll output to start.
+			PageUp,   ///< Scroll output one page up.
+			PageDown, ///< Scroll output one page down.
+			End,      ///< Scroll output to end.
+			LineUp,   ///< Scroll output one line up.
+			LineDown, ///< Scroll output one line down.
+		};
+		/**
+		 * @brief Resolves an output-navigation shortcut from a key event.
+		 * @param event Key event to inspect.
+		 * @return Matched output-navigation shortcut, or `None`.
+		 */
+		[[nodiscard]] OutputNavigationShortcut outputNavigationShortcutForEvent(const QKeyEvent *event) const;
+		/**
+		 * @brief Returns whether a key event is an output-navigation shortcut.
+		 * @param event Key event to inspect.
+		 * @return `true` when the shortcut should preempt Qt shortcuts.
+		 */
+		[[nodiscard]] bool                     hasOutputNavigationShortcut(const QKeyEvent *event) const;
+		/**
+		 * @brief Handles output-navigation shortcuts.
+		 * @param event Key event to process.
+		 * @return `true` when the shortcut is consumed.
+		 */
+		bool                                   handleOutputNavigationShortcut(QKeyEvent *event);
 		/**
 		 * @brief Tests a key event against a cached shortcut list.
 		 * @param event Key event to inspect.
@@ -1035,16 +1066,65 @@ class WorldView : public QWidget
 		 * @return Accessible text map over the current logical output.
 		 */
 		[[nodiscard]] static QMudAccessibleTextUtils::LineOffsetMap
-		                    accessibleNativeOutputTextMap(const NativeOutputRenderLines &lines);
+		     accessibleNativeOutputTextMap(const NativeOutputRenderLines &lines);
 		/**
 		 * @brief Primes the accessible text length without emitting backlog events.
 		 */
-		void                primeAccessibleOutputTextState() const;
+		void primeAccessibleOutputTextState() const;
 		/**
 		 * @brief Emits active-only accessibility notifications for newly presented native output.
 		 * @param lines Native render lines after presentation synchronization.
 		 */
-		void                notifyAccessibleOutputPresented(const NativeOutputRenderLines &lines) const;
+		void notifyAccessibleOutputPresented(const NativeOutputRenderLines &lines) const;
+		/**
+		 * @brief Returns the output pane used for accessibility text geometry.
+		 * @return Scrollback review pane while reviewing, otherwise the active output pane.
+		 */
+		[[nodiscard]] WrapTextBrowser *accessibleOutputTargetView() const;
+		/**
+		 * @brief Returns the accessible caret offset for the world output.
+		 * @return Review caret offset while scrollback review is active, otherwise EOF.
+		 */
+		[[nodiscard]] int              accessibleOutputCursorPosition() const;
+		/**
+		 * @brief Updates the accessible review caret from the top scrollback pane.
+		 */
+		void                           updateAccessibleOutputReviewCursor();
+		/**
+		 * @brief Clears scrollback review mode for accessibility.
+		 */
+		void                           clearAccessibleOutputReviewCursor();
+		/**
+		 * @brief Emits a text-caret accessibility event when assistive technology is active.
+		 * @param cursorOffset Accessible text cursor offset.
+		 */
+		void                           notifyAccessibleOutputCaretMoved(int cursorOffset) const;
+		/**
+		 * @brief Calculates the accessible text offset of the first top-pane review line.
+		 * @return Accessible offset for the top scrollback pane, or EOF when unavailable.
+		 */
+		[[nodiscard]] int              accessibleOutputReviewCursorPositionForTopPane() const;
+		/**
+		 * @brief Returns the accessible text offset for a render line.
+		 * @param lines Native render lines.
+		 * @param lineIndex Zero-based render line index.
+		 * @return Linear accessible text offset.
+		 */
+		[[nodiscard]] int              accessibleOutputOffsetForLine(const NativeOutputRenderLines &lines,
+		                                                             int                            lineIndex) const;
+		/**
+		 * @brief Returns current accessible text character count without constructing full text.
+		 * @param lines Native render lines.
+		 * @return Accessible text character count.
+		 */
+		[[nodiscard]] int   accessibleOutputCharacterCount(const NativeOutputRenderLines &lines) const;
+		/**
+		 * @brief Extends cached accessible text line offsets through a render line.
+		 * @param lines Native render lines.
+		 * @param lineIndex Zero-based render line index required by the caller.
+		 */
+		void                ensureAccessibleOutputOffsetCachePrefix(const NativeOutputRenderLines &lines,
+		                                                            int                            lineIndex) const;
 		[[nodiscard]] QRect nativeOutputPaneRect(const WrapTextBrowser *view) const;
 		/**
 		 * @brief Returns the visible native output area to repaint when selection geometry is unavailable.
@@ -1249,9 +1329,9 @@ class WorldView : public QWidget
 		 * @param layoutFont Current output font.
 		 * @return `true` when layout caches can be used without rebuild.
 		 */
-		[[nodiscard]] bool       nativeLayoutCacheReadyFor(const NativeOutputRenderLines &lines,
-		                                                   int wrapWidthPixels, int localWrapWidthPixels,
-		                                                   int lineSpacingSetting, const QFont &layoutFont) const;
+		[[nodiscard]] bool nativeLayoutCacheReadyFor(const NativeOutputRenderLines &lines,
+		                                             int wrapWidthPixels, int localWrapWidthPixels,
+		                                             int lineSpacingSetting, const QFont &layoutFont) const;
 		/**
 		 * @brief Returns whether native layout slot/index structures match current render inputs.
 		 * @param lines Current native render lines.
@@ -1261,10 +1341,10 @@ class WorldView : public QWidget
 		 * @param layoutFont Current output font.
 		 * @return `true` when exact range materialization can use the current slot/index structures.
 		 */
-		[[nodiscard]] bool       nativeLayoutRangeStateReadyFor(const NativeOutputRenderLines &lines,
-		                                                        int wrapWidthPixels, int localWrapWidthPixels,
-		                                                        int          lineSpacingSetting,
-		                                                        const QFont &layoutFont) const;
+		[[nodiscard]] bool nativeLayoutRangeStateReadyFor(const NativeOutputRenderLines &lines,
+		                                                  int wrapWidthPixels, int localWrapWidthPixels,
+		                                                  int          lineSpacingSetting,
+		                                                  const QFont &layoutFont) const;
 		/**
 		 * @brief Estimates visual rows for a native render line without shaping text.
 		 * @param line Native render line.
@@ -1309,8 +1389,8 @@ class WorldView : public QWidget
 		 * @return Deferred adjustment; invalid when current layout state cannot produce one.
 		 */
 		[[nodiscard]] NativeSplitTopHeadTrimAdjustment
-		     nativeSplitTopHeadTrimAdjustmentForDelta(const NativeRenderCacheDelta &delta,
-		                                              qreal defaultLineAdvance, quint64 targetRevision = 0) const;
+		nativeSplitTopHeadTrimAdjustmentForDelta(const NativeRenderCacheDelta &delta,
+		                                         qreal defaultLineAdvance, quint64 targetRevision = 0) const;
 		/**
 		 * @brief Clears pending split-pane head-trim compensation.
 		 */
@@ -1703,6 +1783,10 @@ class WorldView : public QWidget
 		 */
 		void noteUserScrollAction();
 		/**
+		 * @brief Synchronizes split and accessibility review state after top-pane output scrolling.
+		 */
+		void syncOutputScrollbackReviewState();
+		/**
 		 * @brief Enables/disables scrollback split mode.
 		 * @param active Activate split mode when `true`.
 		 */
@@ -1867,28 +1951,28 @@ class WorldView : public QWidget
 		 * @brief Returns hotspot tooltip start delay.
 		 * @return Tooltip start delay in milliseconds.
 		 */
-		[[nodiscard]] int    tooltipStartDelayMs() const;
+		[[nodiscard]] int tooltipStartDelayMs() const;
 		/**
 		 * @brief Returns hotspot tooltip visible duration.
 		 * @return Tooltip visible duration in milliseconds.
 		 */
-		[[nodiscard]] int    tooltipVisibleDurationMs() const;
+		[[nodiscard]] int tooltipVisibleDurationMs() const;
 		/**
 		 * @brief Schedules tooltip display for hotspot.
 		 * @param hotspotId Hotspot identifier.
 		 * @param tooltipText Tooltip text.
 		 * @param globalPos Tooltip anchor position in global coordinates.
 		 */
-		void                 scheduleHotspotTooltip(const QString &hotspotId, const QString &tooltipText,
-		                                            const QPoint &globalPos);
+		void              scheduleHotspotTooltip(const QString &hotspotId, const QString &tooltipText,
+		                                         const QPoint &globalPos);
 		/**
 		 * @brief Shows previously scheduled hotspot tooltip.
 		 */
-		void                 showScheduledHotspotTooltip();
+		void              showScheduledHotspotTooltip();
 		/**
 		 * @brief Clears any pending hotspot tooltip request.
 		 */
-		void                 clearPendingHotspotTooltip();
+		void              clearPendingHotspotTooltip();
 		/**
 		 * @brief Updates line-information tooltip from mouse position.
 		 * @param watched Widget receiving mouse events.
@@ -1900,12 +1984,12 @@ class WorldView : public QWidget
 		 * @param allowCacheBuild `true` to materialize the needed layout range on demand, `false` to
 		 *        query only when cache is ready.
 		 */
-		void                 updateLineInformationTooltip(const QWidget *watched, const QMouseEvent *event,
-		                                                  const WrapTextBrowser      *precomputedView = nullptr,
-		                                                  const QPoint               *precomputedPosInView = nullptr,
-		                                                  const NativeOutputPosition *precomputedHit = nullptr,
-		                                                  const bool                 *precomputedTextHit = nullptr,
-		                                                  bool                        allowCacheBuild = true);
+		void              updateLineInformationTooltip(const QWidget *watched, const QMouseEvent *event,
+		                                               const WrapTextBrowser      *precomputedView = nullptr,
+		                                               const QPoint               *precomputedPosInView = nullptr,
+		                                               const NativeOutputPosition *precomputedHit = nullptr,
+		                                               const bool                 *precomputedTextHit = nullptr,
+		                                               bool                        allowCacheBuild = true);
 		/**
 		 * @brief Computes line fade opacity for timestamp.
 		 * @param when Line timestamp.
@@ -2051,6 +2135,12 @@ class WorldView : public QWidget
 		mutable quint64                             m_accessibleOutputRevision{0};
 		mutable QString                             m_accessibleOutputText;
 		mutable bool                                m_accessibleOutputPendingTailAppend{false};
+		bool                                        m_accessibleOutputReviewActive{false};
+		int                                         m_accessibleOutputReviewLastNotifiedCursorOffset{-1};
+		mutable QVector<int>                        m_accessibleOutputLineStartCache;
+		mutable quint64                             m_accessibleOutputLineStartCacheRevision{0};
+		mutable int                                 m_accessibleOutputLineStartCacheNextOffset{0};
+		mutable int                                 m_accessibleOutputLineStartCacheCharacterCount{-1};
 		mutable bool                                m_nativePartialRenderLineApplied{false};
 		mutable bool                                m_nativePartialRenderLineAppended{false};
 		mutable bool                                m_nativePartialRenderBaseLastHardReturn{true};
@@ -2144,8 +2234,12 @@ class WorldView : public QWidget
 		QList<QKeySequence>                         m_commandOptionBufferEndShortcuts;
 		QList<QKeySequence>                         m_nextCommandShortcuts;
 		QList<QKeySequence>                         m_previousCommandShortcuts;
+		QList<QKeySequence>                         m_displayStartShortcuts;
 		QList<QKeySequence>                         m_displayPageUpShortcuts;
 		QList<QKeySequence>                         m_displayPageDownShortcuts;
+		QList<QKeySequence>                         m_displayEndShortcuts;
+		QList<QKeySequence>                         m_displayLineUpShortcuts;
+		QList<QKeySequence>                         m_displayLineDownShortcuts;
 		QList<QKeySequence>                         m_outputSplitStartShortcuts;
 		QList<QKeySequence>                         m_outputSplitEndShortcuts;
 		QList<QKeySequence>                         m_recallLastWordShortcuts;

@@ -333,34 +333,34 @@ build_universal_lua_deps() {
   verify_arch "$QMUD_MAC_DOCKER_OPENSSL_PREFIX/lib/libcrypto.a" x86_64
   verify_arch "$QMUD_MAC_DOCKER_OPENSSL_PREFIX/lib/libcrypto.a" arm64
 
-  local luasec_src luasec_c_dir luasec_c_sources luasec_socket_sources
+  local luasec_src luasec_c_dir
+  local -a luasec_c_sources=()
+  local -a luasec_socket_sources=()
   luasec_src="$(find "$src_root" -maxdepth 1 -type d -name "luasec*${LUASEC_VERSION}*" | head -n 1 || true)"
   [[ -n "$luasec_src" ]]
   luasec_c_dir="$luasec_src/src"
   [[ -d "$luasec_c_dir" ]]
   cd "$luasec_c_dir"
-  luasec_c_sources=""
   for src in config.c context.c ec.c options.c ssl.c x509.c; do
     if [[ -f "$src" ]]; then
-      luasec_c_sources="$luasec_c_sources $src"
+      luasec_c_sources+=("$src")
     fi
   done
-  if [[ -z "$luasec_c_sources" ]]; then
+  if [[ "${#luasec_c_sources[@]}" -eq 0 ]]; then
     echo "Error: could not resolve LuaSec C sources in ${luasec_c_dir}" >&2
     exit 1
   fi
-  luasec_socket_sources=""
   for src in luasocket/buffer.c luasocket/io.c luasocket/timeout.c; do
     if [[ -f "$src" ]]; then
-      luasec_socket_sources="$luasec_socket_sources $src"
+      luasec_socket_sources+=("$src")
     fi
   done
   if [[ -f "luasocket/usocket.c" ]]; then
-    luasec_socket_sources="$luasec_socket_sources luasocket/usocket.c"
+    luasec_socket_sources+=("luasocket/usocket.c")
   elif [[ -f "luasocket/wsocket.c" ]]; then
-    luasec_socket_sources="$luasec_socket_sources luasocket/wsocket.c"
+    luasec_socket_sources+=("luasocket/wsocket.c")
   fi
-  if [[ -z "$luasec_socket_sources" ]]; then
+  if [[ "${#luasec_socket_sources[@]}" -eq 0 ]]; then
     echo "Error: could not resolve bundled LuaSocket sources in ${luasec_c_dir}/luasocket" >&2
     exit 1
   fi
@@ -369,7 +369,7 @@ build_universal_lua_deps() {
     -I"$QMUD_MAC_DOCKER_OPENSSL_PREFIX/include" \
     -I"$luasec_c_dir" \
     -bundle -undefined dynamic_lookup \
-    $luasec_c_sources $luasec_socket_sources \
+    "${luasec_c_sources[@]}" "${luasec_socket_sources[@]}" \
     "$QMUD_MAC_DOCKER_OPENSSL_PREFIX/lib/libssl.a" \
     "$QMUD_MAC_DOCKER_OPENSSL_PREFIX/lib/libcrypto.a" \
     -lz \
@@ -518,6 +518,8 @@ for QT_FRAMEWORK in \
   QtNetwork \
   QtSql \
   QtPrintSupport \
+  QtConcurrent \
+  QtDBus \
   QtMultimedia \
   QtTextToSpeech
 do
@@ -610,4 +612,5 @@ if [ -f "$APP_MACOS_DIR/lua/lpeg.so" ]; then
   verify_universal "$APP_MACOS_DIR/lua/lpeg.so"
 fi
 
+bash "$PROJECT_DIR/tools/scripts/mac_validate_qt_frameworks.sh" "$APP_STAGE_DIR"
 bash "$PROJECT_DIR/tools/scripts/package_mac_dmg.sh" "$APP_STAGE_DIR" "$BUILD_DIR/macapp-out/QMud.dmg"

@@ -344,6 +344,98 @@ namespace
 			                                  !QMudShortcutPreferenceUtils::isReservedMacroShortcut(shortcut);
 		                           });
 	}
+
+	QString portableShortcutKey(const QKeySequence &shortcut)
+	{
+		return shortcut.toString(QKeySequence::PortableText);
+	}
+
+	struct ShortcutOverrideResolution
+	{
+			QHash<QString, QList<QKeySequence>> acceptedOverridesById;
+			QHash<QString, QString>             acceptedOwnerByPortableShortcut;
+	};
+
+	ShortcutOverrideResolution
+	resolveShortcutOverrides(const QHash<QString, QString> &overrideTextByPreferenceKey)
+	{
+		QHash<QString, QList<QKeySequence>> candidateOverridesById;
+		QHash<QString, QString>             overrideOwnerByKey;
+		QSet<QString>                       duplicateOverrideIds;
+		for (const ShortcutDefinition &definition : QMudShortcutPreferenceUtils::shortcutDefinitions())
+		{
+			const QString overrideText =
+			    overrideTextByPreferenceKey.value(definition.preferenceKey).trimmed();
+			if (overrideText.isEmpty())
+				continue;
+
+			const QList<QKeySequence> overrideShortcuts =
+			    QMudShortcutPreferenceUtils::parseShortcutList(overrideText);
+			if (!sequenceListIsValid(overrideShortcuts))
+				continue;
+
+			candidateOverridesById.insert(definition.id, overrideShortcuts);
+			for (const QKeySequence &shortcut : overrideShortcuts)
+			{
+				const QString key = portableShortcutKey(shortcut);
+				if (key.isEmpty())
+					continue;
+				const auto previousOwner = overrideOwnerByKey.constFind(key);
+				if (previousOwner != overrideOwnerByKey.constEnd())
+				{
+					duplicateOverrideIds.insert(previousOwner.value());
+					duplicateOverrideIds.insert(definition.id);
+					continue;
+				}
+				overrideOwnerByKey.insert(key, definition.id);
+			}
+		}
+
+		ShortcutOverrideResolution resolution;
+		for (auto it = candidateOverridesById.constBegin(); it != candidateOverridesById.constEnd(); ++it)
+		{
+			if (duplicateOverrideIds.contains(it.key()))
+				continue;
+			resolution.acceptedOverridesById.insert(it.key(), it.value());
+			for (const QKeySequence &shortcut : it.value())
+			{
+				const QString key = portableShortcutKey(shortcut);
+				if (!key.isEmpty())
+					resolution.acceptedOwnerByPortableShortcut.insert(key, it.key());
+			}
+		}
+		return resolution;
+	}
+
+	QHash<QString, QList<QKeySequence>>
+	effectiveShortcutMapFromOverrides(const QHash<QString, QString> &overrideTextByPreferenceKey)
+	{
+		const ShortcutOverrideResolution resolution = resolveShortcutOverrides(overrideTextByPreferenceKey);
+
+		QHash<QString, QList<QKeySequence>> effectiveById;
+		effectiveById.reserve(QMudShortcutPreferenceUtils::shortcutDefinitions().size());
+		for (const ShortcutDefinition &definition : QMudShortcutPreferenceUtils::shortcutDefinitions())
+		{
+			const auto explicitOverride = resolution.acceptedOverridesById.constFind(definition.id);
+			if (explicitOverride != resolution.acceptedOverridesById.constEnd())
+			{
+				effectiveById.insert(definition.id, explicitOverride.value());
+				continue;
+			}
+
+			QList<QKeySequence> filteredDefaults;
+			filteredDefaults.reserve(definition.defaults.size());
+			for (const QKeySequence &shortcut : definition.defaults)
+			{
+				const QString key = portableShortcutKey(shortcut);
+				if (!key.isEmpty() && resolution.acceptedOwnerByPortableShortcut.contains(key))
+					continue;
+				filteredDefaults.push_back(shortcut);
+			}
+			effectiveById.insert(definition.id, filteredDefaults);
+		}
+		return effectiveById;
+	}
 } // namespace
 
 namespace QMudShortcutPreferenceUtils
@@ -412,16 +504,26 @@ namespace QMudShortcutPreferenceUtils
 		return parts.join(QStringLiteral("; "));
 	}
 
-	QList<QKeySequence> effectiveShortcuts(const ShortcutDefinition &definition, const QString &overrideText)
+	QHash<QString, QString>
+	acceptedOverrideOwnersByPortableShortcut(const QHash<QString, QString> &overrideTextByPreferenceKey)
 	{
-		const QString trimmed = overrideText.trimmed();
-		if (trimmed.isEmpty())
-			return definition.defaults;
+		return resolveShortcutOverrides(overrideTextByPreferenceKey).acceptedOwnerByPortableShortcut;
+	}
 
-		QList<QKeySequence> overrideShortcuts = parseShortcutList(trimmed);
-		if (!sequenceListIsValid(overrideShortcuts))
-			return definition.defaults;
-		return overrideShortcuts;
+	QHash<QString, QList<QKeySequence>> effectiveShortcutMapForAppPreferences()
+	{
+		QHash<QString, QString> overrideTextByPreferenceKey;
+		if (const AppController *app = AppController::instance())
+		{
+			overrideTextByPreferenceKey.reserve(shortcutDefinitions().size());
+			for (const ShortcutDefinition &definition : shortcutDefinitions())
+			{
+				const QString overrideText = app->getGlobalOption(definition.preferenceKey).toString();
+				if (!overrideText.trimmed().isEmpty())
+					overrideTextByPreferenceKey.insert(definition.preferenceKey, overrideText);
+			}
+		}
+		return effectiveShortcutMapFromOverrides(overrideTextByPreferenceKey);
 	}
 
 	bool isReservedMacroShortcut(const QKeySequence &sequence)
@@ -484,12 +586,8 @@ namespace QMudShortcutPreferenceUtils
 
 	QList<QKeySequence> effectiveShortcutsForId(const QString &id)
 	{
-		const ShortcutDefinition *definition = definitionForId(id);
-		if (!definition)
-			return {};
-		const AppController *app = AppController::instance();
-		return effectiveShortcuts(
-		    *definition, app ? app->getGlobalOption(definition->preferenceKey).toString() : QString());
+		const QHash<QString, QList<QKeySequence>> shortcutsById = effectiveShortcutMapForAppPreferences();
+		return shortcutsById.value(id);
 	}
 
 	bool eventMatchesShortcutId(const QKeyEvent *event, const QString &id)

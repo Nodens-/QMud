@@ -174,6 +174,8 @@ for QT_FRAMEWORK in \
   QtNetwork \
   QtSql \
   QtPrintSupport \
+  QtConcurrent \
+  QtDBus \
   QtMultimedia \
   QtTextToSpeech
 do
@@ -257,4 +259,5 @@ if [ -d "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl" ]; then
   cp -R "$QMUD_MAC_DOCKER_LUA_MODULES_PREFIX/ssl/." "$APP_MACOS_DIR/lua/ssl/"
 fi
 
+sh "$PROJECT_DIR/tools/scripts/mac_validate_qt_frameworks.sh" "$APP_STAGE_DIR"
 bash "$PROJECT_DIR/tools/scripts/package_mac_dmg.sh" "$APP_STAGE_DIR" "$BUILD_DIR/macapp-out/QMud.dmg"
