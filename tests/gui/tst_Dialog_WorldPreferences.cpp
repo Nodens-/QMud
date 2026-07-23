@@ -7,7 +7,12 @@
  */
 
 #include "WorldPreferencesRoutingUtils.h"
+#include "WorldRuntime.h"
+#include "dialogs/WorldPreferencesDialog.h"
+#include "helpers/EncodingUtils.h"
 
+#include <QCheckBox>
+#include <QComboBox>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 #include <QFile>
@@ -294,6 +299,72 @@ class tst_Dialog_WorldPreferences : public QObject
 			}
 		}
 
+		void legacyEncodingControlFollowsUtf8Option()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Legacy Encoding Test"));
+			runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("localhost"));
+			runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+			runtime.setWorldAttribute(QStringLiteral("utf_8"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("legacy_encoding"), QStringLiteral("GB18030"));
+			runtime.setWorldAttribute(QStringLiteral("proxy_type"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("connect_method"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("enable_command_stack"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("command_stack_character"), QStringLiteral(";"));
+			runtime.setWorldAttribute(QStringLiteral("enable_speed_walk"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("speed_walk_prefix"), QStringLiteral("#"));
+			runtime.setWorldAttribute(QStringLiteral("enable_auto_say"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("auto_say_string"), QStringLiteral("say "));
+			runtime.setWorldAttribute(QStringLiteral("log_output"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("log_raw"), QStringLiteral("0"));
+
+			WorldPreferencesDialog dialog(&runtime, nullptr);
+			auto *combo = dialog.findChild<QComboBox *>(QStringLiteral("legacyEncodingCombo"));
+			QVERIFY(combo);
+
+			QCheckBox *utf8 = nullptr;
+			for (QCheckBox *box : dialog.findChildren<QCheckBox *>())
+			{
+				if (box->text() == QStringLiteral("UTF-8 (Unicode)"))
+				{
+					utf8 = box;
+					break;
+				}
+			}
+			if (utf8 == nullptr)
+				QFAIL("UTF-8 checkbox not found");
+			QCheckBox        &utf8CheckBox = *utf8;
+
+			const QStringList encodings = qmudAvailableWorldTextEncodings();
+			QCOMPARE(combo->count(), encodings.size());
+			for (const QString &encodingName : encodings)
+			{
+				const int index = combo->findData(encodingName);
+				QVERIFY2(index >= 0,
+				         qPrintable(QStringLiteral("Missing legacy encoding item for %1").arg(encodingName)));
+				QCOMPARE(combo->itemText(index), qmudWorldTextEncodingDisplayName(encodingName));
+				QVERIFY(combo->itemText(index).contains(QLatin1Char('(')));
+				QVERIFY(combo->itemText(index).endsWith(QLatin1Char(')')));
+			}
+
+			QCOMPARE(combo->currentData().toString(), QStringLiteral("GB18030"));
+			QVERIFY(combo->isEnabled());
+
+			utf8CheckBox.setChecked(true);
+			QVERIFY(!combo->isEnabled());
+			utf8CheckBox.setChecked(false);
+			QVERIFY(combo->isEnabled());
+
+			const QString targetEncoding = qmudNormalizeWorldTextEncodingName(QStringLiteral("windows-1252"));
+			const int     targetIndex    = combo->findData(targetEncoding);
+			QVERIFY(targetIndex >= 0);
+			combo->setCurrentIndex(targetIndex);
+
+			dialog.accept();
+
+			QCOMPARE(runtime.worldAttributes().value(QStringLiteral("legacy_encoding")), targetEncoding);
+		}
+
 		void scriptingNoteColourApplyUpdatesRuntimeState()
 		{
 			const QString sourcePath =
@@ -330,7 +401,7 @@ class tst_Dialog_WorldPreferences : public QObject
 };
 // NOLINTEND(readability-convert-member-functions-to-static)
 
-QTEST_APPLESS_MAIN(tst_Dialog_WorldPreferences)
+QTEST_MAIN(tst_Dialog_WorldPreferences)
 
 #if __has_include("tst_Dialog_WorldPreferences.moc")
 #include "tst_Dialog_WorldPreferences.moc"

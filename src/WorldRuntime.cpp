@@ -112,6 +112,7 @@
 #include <cctype>
 #include <cmath>
 #include <exception>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -537,6 +538,7 @@ namespace
 		       key.compare(QStringLiteral("spam_message"), Qt::CaseInsensitive) == 0 ||
 		       key.compare(QStringLiteral("do_not_translate_iac_to_iac_iac"), Qt::CaseInsensitive) == 0 ||
 		       key.compare(QStringLiteral("regexp_match_empty"), Qt::CaseInsensitive) == 0 ||
+		       key.compare(QStringLiteral("legacy_encoding"), Qt::CaseInsensitive) == 0 ||
 		       key.compare(QStringLiteral("utf_8"), Qt::CaseInsensitive) == 0;
 	}
 
@@ -2960,9 +2962,11 @@ namespace
 
 	struct MxpArgument
 	{
-			QString name;
-			QString value;
-			int     position{0};
+			QString    name;
+			QString    value;
+			QByteArray rawName;
+			QByteArray rawValue;
+			int        position{0};
 	};
 
 	struct ParsedMxpArguments
@@ -2971,13 +2975,21 @@ namespace
 			QList<MxpArgument> args;
 	};
 
-	ParsedMxpArguments parseMxpArguments(const QByteArray &rawTag)
+	using MxpArgumentDecoder = std::function<QString(const QByteArray &)>;
+
+	QString decodeMxpInternalArgumentBytes(const QByteArray &bytes)
+	{
+		return QString::fromUtf8(bytes);
+	}
+
+	ParsedMxpArguments parseMxpArguments(const QByteArray         &rawTag,
+	                                     const MxpArgumentDecoder &decodeArgumentBytes)
 	{
 		ParsedMxpArguments parsed;
 		QByteArray         input = rawTag;
 		QByteArray         tagName;
 		mxpGetWord(tagName, input);
-		parsed.rawArguments = QString::fromLocal8Bit(input);
+		parsed.rawArguments = decodeArgumentBytes(input);
 
 		int        position = 0;
 		QByteArray pending;
@@ -3012,8 +3024,10 @@ namespace
 				if (mxpGetWord(value, input))
 					break;
 				MxpArgument arg;
-				arg.name     = QString::fromLocal8Bit(argName).toLower();
-				arg.value    = QString::fromLocal8Bit(value);
+				arg.name     = QString::fromLatin1(argName).toLower();
+				arg.value    = decodeArgumentBytes(value);
+				arg.rawName  = argName;
+				arg.rawValue = value;
 				arg.position = 0;
 				parsed.args.push_back(arg);
 				if (atEnd)
@@ -3023,7 +3037,9 @@ namespace
 			{
 				MxpArgument arg;
 				arg.name.clear();
-				arg.value    = QString::fromLocal8Bit(argName);
+				arg.value = decodeArgumentBytes(argName);
+				arg.rawName.clear();
+				arg.rawValue = argName;
 				arg.position = ++position;
 				parsed.args.push_back(arg);
 				if (atEnd)
@@ -3036,8 +3052,26 @@ namespace
 		return parsed;
 	}
 
+	ParsedMxpArguments parseMxpArguments(const QByteArray &rawTag)
+	{
+		return parseMxpArguments(rawTag, decodeMxpInternalArgumentBytes);
+	}
+
 	QMap<QString, QString>       buildArgumentTable(const QList<MxpArgument> &args);
 	QMap<QByteArray, QByteArray> buildArgumentTableBytes(const QList<MxpArgument> &args);
+
+	QList<MxpArgument> internalizeMxpArgumentRawValues(const QList<MxpArgument> &args,
+	                                                   const MxpArgumentDecoder &decodeArgumentBytes)
+	{
+		QList<MxpArgument> internalized;
+		internalized.reserve(args.size());
+		for (MxpArgument arg : args)
+		{
+			arg.rawValue = decodeArgumentBytes(arg.rawValue).toUtf8();
+			internalized.push_back(arg);
+		}
+		return internalized;
+	}
 
 	QMap<QByteArray, QByteArray> mergeAttributeDefaultsBytes(const QByteArray         &defaults,
 	                                                         const QList<MxpArgument> &provided)
@@ -3057,12 +3091,12 @@ namespace
 			QByteArray defaultValue;
 			if (attribute.name.isEmpty())
 			{
-				nameKey = attribute.value.toLocal8Bit().trimmed().toLower();
+				nameKey = attribute.rawValue.trimmed().toLower();
 			}
 			else
 			{
-				nameKey      = attribute.name.toLocal8Bit().trimmed().toLower();
-				defaultValue = attribute.value.toLocal8Bit();
+				nameKey      = attribute.rawName.trimmed().toLower();
+				defaultValue = attribute.rawValue;
 			}
 			if (nameKey.isEmpty())
 				continue;
@@ -3073,16 +3107,15 @@ namespace
 			bool       hasNamedValue      = false;
 			for (const MxpArgument &providedArg : provided)
 			{
-				if (!providedArg.name.isEmpty() &&
-				    providedArg.name.compare(QString::fromLocal8Bit(nameKey), Qt::CaseInsensitive) == 0)
+				if (!providedArg.rawName.isEmpty() && providedArg.rawName.trimmed().toLower() == nameKey)
 				{
-					namedValue    = providedArg.value.toLocal8Bit();
+					namedValue    = providedArg.rawValue;
 					hasNamedValue = true;
 					break;
 				}
 				if (!hasPositionalValue && providedArg.position == sequence)
 				{
-					positionalValue    = providedArg.value.toLocal8Bit();
+					positionalValue    = providedArg.rawValue;
 					hasPositionalValue = true;
 				}
 			}
@@ -3098,28 +3131,36 @@ namespace
 		return merged;
 	}
 
-	QByteArray resolveDefinitionEntities(const QByteArray &source, const QMap<QByteArray, QByteArray> &values,
-	                                     const TelnetProcessor &telnet)
-	{
-		auto decodeNumericEntity = [](const QByteArray &name, QByteArray &decoded) -> bool
-		{
-			if (!name.startsWith('#'))
-				return false;
-			bool     ok   = false;
-			uint32_t code = 0;
-			if (name.size() > 2 && (name.at(1) == 'x' || name.at(1) == 'X'))
-				code = name.mid(2).toUInt(&ok, 16);
-			else
-				code = name.mid(1).toUInt(&ok, 10);
-			if (!ok || code > 0x10FFFFu)
-				return false;
-			QString out;
-			out.reserve(2);
-			out.append(QChar::fromUcs4(code));
-			decoded = out.toUtf8();
-			return !decoded.isEmpty();
-		};
+	using MxpEntityResolver    = std::function<bool(const QByteArray &, QByteArray &)>;
+	using MxpEntityTextEncoder = std::function<QByteArray(const QString &)>;
 
+	QByteArray encodeMxpInternalEntityText(const QString &text)
+	{
+		return text.toUtf8();
+	}
+
+	bool decodeNumericEntityText(const QByteArray &name, QString &decoded)
+	{
+		if (!name.startsWith('#'))
+			return false;
+		bool     ok   = false;
+		uint32_t code = 0;
+		if (name.size() > 2 && (name.at(1) == 'x' || name.at(1) == 'X'))
+			code = name.mid(2).toUInt(&ok, 16);
+		else
+			code = name.mid(1).toUInt(&ok, 10);
+		if (!ok || code > 0x10FFFFu)
+			return false;
+		decoded.clear();
+		decoded.reserve(2);
+		decoded.append(QChar::fromUcs4(code));
+		return !decoded.isEmpty();
+	}
+
+	QByteArray resolveDefinitionEntities(const QByteArray &source, const QMap<QByteArray, QByteArray> &values,
+	                                     const MxpEntityResolver    &entityResolver,
+	                                     const MxpEntityTextEncoder &textEncoder)
+	{
 		QByteArray output;
 		output.reserve(source.size());
 		for (qsizetype i = 0; i < source.size(); ++i)
@@ -3150,8 +3191,11 @@ namespace
 				output.append(values.value(key));
 			else
 			{
-				QByteArray resolved;
-				if (decodeNumericEntity(name, resolved) || telnet.resolveEntityValue(name, resolved))
+				QString decodedText;
+				if (decodeNumericEntityText(name, decodedText))
+					output.append(textEncoder ? textEncoder(decodedText)
+					                          : encodeMxpInternalEntityText(decodedText));
+				else if (QByteArray resolved; entityResolver && entityResolver(name, resolved))
 					output.append(resolved);
 				else
 				{
@@ -3165,76 +3209,24 @@ namespace
 		return output;
 	}
 
-	QByteArray
-	resolveDefinitionEntities(const QByteArray &source, const QMap<QByteArray, QByteArray> &values,
-	                          const std::function<bool(const QByteArray &, QByteArray &)> &entityResolver)
+	QByteArray resolveDefinitionEntities(const QByteArray &source, const QMap<QByteArray, QByteArray> &values,
+	                                     const TelnetProcessor      &telnet,
+	                                     const MxpEntityTextEncoder &textEncoder)
 	{
-		auto decodeNumericEntity = [](const QByteArray &name, QByteArray &decoded) -> bool
-		{
-			if (!name.startsWith('#'))
-				return false;
-			bool     ok   = false;
-			uint32_t code = 0;
-			if (name.size() > 2 && (name.at(1) == 'x' || name.at(1) == 'X'))
-				code = name.mid(2).toUInt(&ok, 16);
-			else
-				code = name.mid(1).toUInt(&ok, 10);
-			if (!ok || code > 0x10FFFFu)
-				return false;
-			QString out;
-			out.reserve(2);
-			out.append(QChar::fromUcs4(code));
-			decoded = out.toUtf8();
-			return !decoded.isEmpty();
-		};
+		const MxpEntityResolver resolver = [&telnet](const QByteArray &name, QByteArray &resolved) -> bool
+		{ return telnet.resolveEntityValue(name, resolved); };
+		return resolveDefinitionEntities(source, values, resolver, textEncoder);
+	}
 
-		QByteArray output;
-		output.reserve(source.size());
-		for (qsizetype i = 0; i < source.size(); ++i)
-		{
-			const char ch = source.at(i);
-			if (ch != '&')
-			{
-				output.append(ch);
-				continue;
-			}
-			const qsizetype semi = source.indexOf(';', i + 1);
-			if (semi < 0)
-			{
-				output.append(ch);
-				continue;
-			}
-			const QByteArray name = source.mid(i + 1, semi - i - 1);
-			if (name == "text")
-			{
-				output.append('&');
-				output.append(name);
-				output.append(';');
-				i = semi;
-				continue;
-			}
-			const QByteArray key = name.toLower();
-			if (values.contains(key))
-				output.append(values.value(key));
-			else
-			{
-				QByteArray resolved;
-				if (decodeNumericEntity(name, resolved) || (entityResolver && entityResolver(name, resolved)))
-					output.append(resolved);
-				else
-				{
-					output.append('&');
-					output.append(name);
-					output.append(';');
-				}
-			}
-			i = semi;
-		}
-		return output;
+	QByteArray resolveDefinitionEntities(const QByteArray &source, const QMap<QByteArray, QByteArray> &values,
+	                                     const MxpEntityResolver &entityResolver)
+	{
+		return resolveDefinitionEntities(source, values, entityResolver, encodeMxpInternalEntityText);
 	}
 
 	bool parseDefinitionAlias(const QByteArray &definition, QByteArray &aliasTag,
-	                          QMap<QByteArray, QByteArray> &aliasAttributes)
+	                          QMap<QByteArray, QByteArray> &aliasAttributes,
+	                          const MxpArgumentDecoder     &decodeArgumentBytes)
 	{
 		if (definition.isEmpty())
 			return false;
@@ -3242,7 +3234,7 @@ namespace
 		if (!trimmed.startsWith('<') || !trimmed.endsWith('>'))
 			return false;
 		trimmed                         = trimmed.mid(1, trimmed.size() - 2);
-		ParsedMxpArguments const parsed = parseMxpArguments(trimmed);
+		ParsedMxpArguments const parsed = parseMxpArguments(trimmed, decodeArgumentBytes);
 		QByteArray               name;
 		QByteArray               temp = trimmed;
 		mxpGetWord(name, temp);
@@ -3251,6 +3243,12 @@ namespace
 		aliasTag        = name.toLower();
 		aliasAttributes = buildArgumentTableBytes(parsed.args);
 		return true;
+	}
+
+	bool parseDefinitionAlias(const QByteArray &definition, QByteArray &aliasTag,
+	                          QMap<QByteArray, QByteArray> &aliasAttributes)
+	{
+		return parseDefinitionAlias(definition, aliasTag, aliasAttributes, decodeMxpInternalArgumentBytes);
 	}
 
 	QVector<QByteArray> extractDefinitionTags(const QByteArray &definition)
@@ -3315,10 +3313,10 @@ namespace
 		QMap<QByteArray, QByteArray> table;
 		for (const auto &arg : args)
 		{
-			QByteArray key = arg.name.isEmpty() ? QByteArray::number(arg.position) : arg.name.toLocal8Bit();
+			QByteArray key = arg.rawName.isEmpty() ? QByteArray::number(arg.position) : arg.rawName;
 			if (!arg.name.isEmpty())
-				key = key.toLower();
-			table.insert(key, arg.value.toLocal8Bit());
+				key = key.trimmed().toLower();
+			table.insert(key, arg.rawValue);
 		}
 		return table;
 	}
@@ -4400,6 +4398,8 @@ void WorldRuntime::resetAnsiRenderState()
 	m_ansiRenderState                = AnsiRenderState{};
 	m_streamUtf8Carry.clear();
 	m_streamUtf8DecoderEnabled = false;
+	m_streamLegacyEncodingName.clear();
+	m_streamLegacyDecoder = QStringDecoder();
 	resetMxpRenderState();
 }
 
@@ -4506,8 +4506,10 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 	beginInboundCommandDeferralScope();
 	const auto    closeInboundCommandDeferral = qScopeGuard([this] { endInboundCommandDeferralScope(); });
 
-	const QString utf8Flag  = m_worldAttributes.value(QStringLiteral("utf_8"));
-	const bool    useUtf8   = isEnabledFlag(utf8Flag);
+	const QString utf8Flag = m_worldAttributes.value(QStringLiteral("utf_8"));
+	const bool    useUtf8  = isEnabledFlag(utf8Flag);
+	const QString legacyEncodingName =
+	    qmudNormalizeWorldTextEncodingName(m_worldAttributes.value(QStringLiteral("legacy_encoding")));
 	const QString gaFlag    = m_worldAttributes.value(QStringLiteral("convert_ga_to_newline"));
 	const bool    convertGA = isEnabledFlag(gaFlag);
 	const bool    carriageReturnClears =
@@ -4522,6 +4524,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 	const QString terminalId = m_worldAttributes.value(QStringLiteral("terminal_identification"));
 
 	m_telnet.setUseUtf8(useUtf8);
+	m_telnet.setLegacyEncodingName(legacyEncodingName);
+	m_telnet.setPreferredCharsetNames(qmudWorldTextTelnetCharsetNames(useUtf8, legacyEncodingName));
 	m_telnet.setConvertGAtoNewline(convertGA);
 	m_telnet.setNoEchoOff(noEchoOff);
 	m_telnet.setDisableCompression(disableCompression);
@@ -4794,6 +4798,20 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 		}
 	}
 
+	QList<TelnetProcessor::MxpEvent>      events;
+	QList<TelnetProcessor::MxpModeChange> modeChanges;
+	if (simulatedInput && m_reloadReattachUseDeferredMxpReplay)
+	{
+		events.swap(m_reloadReattachMxpProbeEvents);
+		modeChanges.swap(m_reloadReattachMxpProbeModeChanges);
+		m_reloadReattachUseDeferredMxpReplay = false;
+	}
+	else
+	{
+		events      = m_telnet.takeMxpEvents();
+		modeChanges = m_telnet.takeMxpModeChanges();
+	}
+
 	std::ranges::sort(
 	    telnetPluginEvents,
 	    [](const TelnetProcessor::TelnetPluginEvent &a, const TelnetProcessor::TelnetPluginEvent &b)
@@ -4822,27 +4840,32 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 	};
 	if (processed.isEmpty())
 	{
-		for (const TelnetProcessor::TelnetPluginEvent &event : std::as_const(telnetPluginEvents))
-			dispatchTelnetPluginEvent(event);
-		if (simulatedInput && m_reloadReattachUseDeferredMxpReplay)
+		if (events.isEmpty() && modeChanges.isEmpty())
 		{
-			m_reloadReattachUseDeferredMxpReplay = false;
-			m_reloadReattachMxpProbeEvents.clear();
-			m_reloadReattachMxpProbeModeChanges.clear();
+			for (const TelnetProcessor::TelnetPluginEvent &event : std::as_const(telnetPluginEvents))
+				dispatchTelnetPluginEvent(event);
+			m_currentActionSource = previousActionSource;
+			return;
 		}
-		m_currentActionSource = previousActionSource;
-		return;
 	}
 
-	if (useUtf8 != m_streamUtf8DecoderEnabled)
+	const bool utf8ModeChanged       = useUtf8 != m_streamUtf8DecoderEnabled;
+	const bool legacyEncodingChanged = legacyEncodingName != m_streamLegacyEncodingName;
+	if (utf8ModeChanged)
 	{
 		m_streamUtf8DecoderEnabled = useUtf8;
 		m_streamUtf8Carry.clear();
+	}
+	if (legacyEncodingChanged || (utf8ModeChanged && !useUtf8))
+	{
+		m_streamLegacyEncodingName = legacyEncodingName;
+		m_streamLegacyDecoder      = qmudCreateWorldTextDecoder(legacyEncodingName);
 	}
 	auto decodeIncomingDisplayBytes = [&](const QByteArrayView bytes) -> QString
 	{
 		if (bytes.isEmpty())
 			return {};
+
 		if (useUtf8)
 		{
 			bool          hadInvalidBytes = false;
@@ -4852,12 +4875,19 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				++m_utf8ErrorCount;
 			return decoded;
 		}
-		return qmudDecodeWindows1252(bytes);
+
+		bool          hadInvalidBytes = false;
+		const QString decoded         = qmudDecodeWorldText(bytes, m_streamLegacyDecoder, &hadInvalidBytes);
+		if (hadInvalidBytes)
+			++m_utf8ErrorCount;
+		return decoded;
 	};
+
 	auto decodeIncomingIsolatedBytes = [&](const QByteArray &bytes) -> QString
 	{
 		if (bytes.isEmpty())
 			return {};
+
 		if (useUtf8)
 		{
 			QStringDecoder decoder(QStringConverter::Utf8);
@@ -4866,22 +4896,14 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				++m_utf8ErrorCount;
 			return decoded;
 		}
-		return qmudDecodeWindows1252(bytes);
+
+		bool          hadInvalidBytes = false;
+		const QString decoded = qmudDecodeWorldTextIsolated(bytes, legacyEncodingName, &hadInvalidBytes);
+		if (hadInvalidBytes)
+			++m_utf8ErrorCount;
+		return decoded;
 	};
 
-	QList<TelnetProcessor::MxpEvent>      events;
-	QList<TelnetProcessor::MxpModeChange> modeChanges;
-	if (simulatedInput && m_reloadReattachUseDeferredMxpReplay)
-	{
-		events.swap(m_reloadReattachMxpProbeEvents);
-		modeChanges.swap(m_reloadReattachMxpProbeModeChanges);
-		m_reloadReattachUseDeferredMxpReplay = false;
-	}
-	else
-	{
-		events      = m_telnet.takeMxpEvents();
-		modeChanges = m_telnet.takeMxpModeChanges();
-	}
 	auto resetMxpTrackingState = [this]
 	{
 		m_mxpTagStack.clear();
@@ -5115,13 +5137,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				if (!lineSpans.isEmpty())
 				{
 					StyleSpan &lastSpan = lineSpans.last();
-					if (lastSpan.fore == span.fore && lastSpan.back == span.back &&
-					    lastSpan.bold == span.bold && lastSpan.italic == span.italic &&
-					    lastSpan.blink == span.blink && lastSpan.underline == span.underline &&
-					    lastSpan.inverse == span.inverse && lastSpan.strike == span.strike &&
-					    lastSpan.changed == span.changed && lastSpan.actionType == span.actionType &&
-					    lastSpan.action == span.action && lastSpan.hint == span.hint &&
-					    lastSpan.variable == span.variable && lastSpan.startTag == span.startTag)
+					if (lastSpan.hasSameStyleAttributes(span))
 						lastSpan.length += span.length;
 					else
 						lineSpans.push_back(span);
@@ -5308,6 +5324,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 		int                                       preDepth              = m_mxpRenderPreDepth;
 		QString                                   lineText              = m_partialLineText;
 		QVector<StyleSpan>                        lineSpans             = m_partialLineSpans;
+		QString                                   notifiedLineText      = m_partialLineText;
+		QVector<StyleSpan>                        notifiedLineSpans     = m_partialLineSpans;
 		bool                                      carriageReturnPending = m_pendingCarriageReturnOverwrite;
 		bool                                      mxpTrackingReset{false};
 		auto                                      restoreCurrentFromAnsiState = [&]
@@ -5399,10 +5417,13 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 		if (!hasPersistedMxpRenderContext)
 			restoreCurrentFromAnsiState();
 
+		auto decodeMxpAttributeBytes = [&](const QByteArray &value, const bool internalUtf8) -> QString
+		{ return internalUtf8 ? QString::fromUtf8(value) : decodeIncomingIsolatedBytes(value); };
+
 		static const QRegularExpression kHexColor6(QStringLiteral("^[0-9A-Fa-f]{6}$"));
-		auto                            normalizeColorBytes = [](const QByteArray &value) -> QString
+		auto normalizeColorBytes = [&](const QByteArray &value, const bool internalUtf8) -> QString
 		{
-			QString name = QString::fromLocal8Bit(value).trimmed();
+			QString name = decodeMxpAttributeBytes(value, internalUtf8).trimmed();
 			if (name.isEmpty())
 				return {};
 			if (kHexColor6.match(name).hasMatch())
@@ -5435,23 +5456,30 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 		const int processedSize = safeQSizeToInt(processed.size());
 		int       last          = 0;
 
-		auto      applyStartTag =
-		    [&](const QByteArray &activeTag, const QMap<QByteArray, QByteArray> &activeAttributes)
+		auto      applyStartTag = [&](const QByteArray                   &activeTag,
+		                              const QMap<QByteArray, QByteArray> &activeAttributes,
+		                              const bool                          attributesAreInternalUtf8)
 		{
 			const QByteArray unnamedForeLocal = activeAttributes.value("1");
 			const QByteArray unnamedBackLocal = activeAttributes.value("2");
 
 			if (activeTag == "send" || activeTag == "a")
 			{
-				QString href = QString::fromLocal8Bit(activeAttributes.value("href"));
+				QString href =
+				    decodeMxpAttributeBytes(activeAttributes.value("href"), attributesAreInternalUtf8);
 				if (href.isEmpty())
-					href = QString::fromLocal8Bit(activeAttributes.value("xch_cmd"));
-				QString xchPrompt = QString::fromLocal8Bit(activeAttributes.value("xch_prompt"));
+					href =
+					    decodeMxpAttributeBytes(activeAttributes.value("xch_cmd"), attributesAreInternalUtf8);
+				QString xchPrompt =
+				    decodeMxpAttributeBytes(activeAttributes.value("xch_prompt"), attributesAreInternalUtf8);
 				if (xchPrompt.isEmpty())
-					xchPrompt = QString::fromLocal8Bit(activeAttributes.value("prompt"));
-				QString hint = QString::fromLocal8Bit(activeAttributes.value("hint"));
+					xchPrompt =
+					    decodeMxpAttributeBytes(activeAttributes.value("prompt"), attributesAreInternalUtf8);
+				QString hint =
+				    decodeMxpAttributeBytes(activeAttributes.value("hint"), attributesAreInternalUtf8);
 				if (hint.isEmpty())
-					hint = QString::fromLocal8Bit(activeAttributes.value("xch_hint"));
+					hint = decodeMxpAttributeBytes(activeAttributes.value("xch_hint"),
+					                               attributesAreInternalUtf8);
 				linkOpen = true;
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
@@ -5462,13 +5490,16 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 					current.actionType = ActionPrompt;
 				else
 					current.actionType = ActionSend;
-				current.action   = href;
-				current.hint     = hint.isEmpty() ? xchPrompt : hint;
-				QString variable = QString::fromLocal8Bit(activeAttributes.value("xch_set"));
+				current.action = href;
+				current.hint   = hint.isEmpty() ? xchPrompt : hint;
+				QString variable =
+				    decodeMxpAttributeBytes(activeAttributes.value("xch_set"), attributesAreInternalUtf8);
 				if (variable.isEmpty())
-					variable = QString::fromLocal8Bit(activeAttributes.value("variable"));
+					variable = decodeMxpAttributeBytes(activeAttributes.value("variable"),
+					                                   attributesAreInternalUtf8);
 				if (variable.isEmpty())
-					variable = QString::fromLocal8Bit(activeAttributes.value("set"));
+					variable =
+					    decodeMxpAttributeBytes(activeAttributes.value("set"), attributesAreInternalUtf8);
 				current.variable = variable;
 				current.startTag = true;
 			}
@@ -5509,12 +5540,14 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				stack.push_back({activeTag, current});
 				if (!ignoreMxpColourChanges)
 				{
-					QString fore = normalizeColorBytes(activeAttributes.value("fore"));
+					QString fore =
+					    normalizeColorBytes(activeAttributes.value("fore"), attributesAreInternalUtf8);
 					if (fore.isEmpty())
-						fore = normalizeColorBytes(unnamedForeLocal);
-					QString back = normalizeColorBytes(activeAttributes.value("back"));
+						fore = normalizeColorBytes(unnamedForeLocal, attributesAreInternalUtf8);
+					QString back =
+					    normalizeColorBytes(activeAttributes.value("back"), attributesAreInternalUtf8);
 					if (back.isEmpty())
-						back = normalizeColorBytes(unnamedBackLocal);
+						back = normalizeColorBytes(unnamedBackLocal, attributesAreInternalUtf8);
 					if (!fore.isEmpty())
 						current.fore = fore;
 					if (!back.isEmpty())
@@ -5528,8 +5561,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				stack.push_back({activeTag, current});
 				if (!ignoreMxpColourChanges)
 				{
-					QString const fore = normalizeColorBytes(unnamedForeLocal);
-					QString const back = normalizeColorBytes(unnamedBackLocal);
+					QString const fore = normalizeColorBytes(unnamedForeLocal, attributesAreInternalUtf8);
+					QString const back = normalizeColorBytes(unnamedBackLocal, attributesAreInternalUtf8);
 					if (!fore.isEmpty())
 						current.fore = fore;
 					if (!back.isEmpty())
@@ -5541,9 +5574,11 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
 				stack.push_back({activeTag, current});
-				QString colorSpec = QString::fromLocal8Bit(activeAttributes.value("color"));
+				QString colorSpec =
+				    decodeMxpAttributeBytes(activeAttributes.value("color"), attributesAreInternalUtf8);
 				if (colorSpec.isEmpty())
-					colorSpec = QString::fromLocal8Bit(activeAttributes.value("fgcolor"));
+					colorSpec =
+					    decodeMxpAttributeBytes(activeAttributes.value("fgcolor"), attributesAreInternalUtf8);
 				QStringList const parts = colorSpec.split(',', Qt::SkipEmptyParts);
 				for (QString part : parts)
 				{
@@ -5572,9 +5607,11 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 						}
 					}
 				}
-				QString back = QString::fromLocal8Bit(activeAttributes.value("back"));
+				QString back =
+				    decodeMxpAttributeBytes(activeAttributes.value("back"), attributesAreInternalUtf8);
 				if (back.isEmpty())
-					back = QString::fromLocal8Bit(activeAttributes.value("bgcolor"));
+					back =
+					    decodeMxpAttributeBytes(activeAttributes.value("bgcolor"), attributesAreInternalUtf8);
 				if (!ignoreMxpColourChanges)
 				{
 					QString const backColor = normalizeColorText(back);
@@ -5759,6 +5796,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 					span.blink      = segmentState.blink;
 					span.underline  = segmentState.underline;
 					span.inverse    = segmentState.inverse;
+					span.strike     = segmentState.strike;
 					span.actionType = segmentState.actionType;
 					span.action     = segmentState.action;
 					span.hint       = segmentState.hint;
@@ -5768,12 +5806,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 					if (!lineSpans.isEmpty())
 					{
 						StyleSpan &lastSpan = lineSpans.last();
-						if (lastSpan.fore == span.fore && lastSpan.back == span.back &&
-						    lastSpan.bold == span.bold && lastSpan.italic == span.italic &&
-						    lastSpan.blink == span.blink && lastSpan.underline == span.underline &&
-						    lastSpan.inverse == span.inverse && lastSpan.actionType == span.actionType &&
-						    lastSpan.action == span.action && lastSpan.hint == span.hint &&
-						    lastSpan.variable == span.variable && lastSpan.startTag == span.startTag)
+						if (lastSpan.hasSameStyleAttributes(span))
 						{
 							lastSpan.length += span.length;
 						}
@@ -5919,7 +5952,12 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			m_partialLineText                = lineText;
 			m_partialLineSpans               = lineSpans;
 			m_pendingCarriageReturnOverwrite = carriageReturnPending;
-			emit incomingStyledLinePartialReceived(lineText, lineSpans);
+			if (lineText != notifiedLineText || lineSpans != notifiedLineSpans)
+			{
+				notifiedLineText  = lineText;
+				notifiedLineSpans = lineSpans;
+				emit incomingStyledLinePartialReceived(lineText, lineSpans);
+			}
 		};
 
 		auto isAtomicTag = [](const QByteArray &tag)
@@ -5999,10 +6037,11 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				last = ev.offset;
 			}
 
-			const QByteArray                   tag          = ev.name.toLower();
-			const QString                      tagText      = QString::fromLatin1(tag);
-			QMap<QByteArray, QByteArray>       attributes   = ev.attributes;
-			QByteArray                         effectiveTag = tag;
+			const QByteArray                   tag                       = ev.name.toLower();
+			const QString                      tagText                   = QString::fromLatin1(tag);
+			QMap<QByteArray, QByteArray>       attributes                = ev.attributes;
+			bool                               attributesAreInternalUtf8 = false;
+			QByteArray                         effectiveTag              = tag;
 			TelnetProcessor::CustomElementInfo customInfo;
 			AtomicTagInfo                      atomicInfo;
 			bool                               hasCustomElement = false;
@@ -6015,18 +6054,24 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				hasAtomicTag     = lookupAtomicTagInfo(tag, atomicInfo);
 				if (hasCustomElement)
 				{
-					const ParsedMxpArguments           providedArgs = parseMxpArguments(ev.raw);
+					const ParsedMxpArguments providedArgs =
+					    parseMxpArguments(ev.raw, decodeIncomingIsolatedBytes);
+					const QList<MxpArgument> internalProvidedArgs =
+					    internalizeMxpArgumentRawValues(providedArgs.args, decodeIncomingIsolatedBytes);
 					const QMap<QByteArray, QByteArray> mergedDefaults =
-					    mergeAttributeDefaultsBytes(customInfo.attributes, providedArgs.args);
-					QByteArray const resolvedDefinition =
-					    resolveDefinitionEntities(customInfo.definition, mergedDefaults, m_telnet);
+					    mergeAttributeDefaultsBytes(customInfo.attributes, internalProvidedArgs);
+					QByteArray const resolvedDefinition = resolveDefinitionEntities(
+					    customInfo.definition, mergedDefaults, m_telnet, encodeMxpInternalEntityText);
 					QMap<QByteArray, QByteArray> aliasAttributes;
 					QByteArray                   aliasTag;
 					if (parseDefinitionAlias(resolvedDefinition, aliasTag, aliasAttributes))
 					{
 						effectiveTag = aliasTag;
 						if (!aliasAttributes.isEmpty())
-							attributes = aliasAttributes;
+						{
+							attributes                = aliasAttributes;
+							attributesAreInternalUtf8 = true;
+						}
 					}
 				}
 				if (!hasCustomElement && !hasAtomicTag)
@@ -6054,9 +6099,6 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 					continue;
 				}
 			}
-			const QByteArray unnamedFore = attributes.value("1");
-			const QByteArray unnamedBack = attributes.value("2");
-
 			if (ev.type == TelnetProcessor::MxpEvent::Definition)
 			{
 				QByteArray definition = ev.raw;
@@ -6074,6 +6116,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 						QByteArray value;
 						if (m_telnet.getCustomEntityValue(name, value))
 						{
+							// Custom MXP entity storage is internal UTF-8; keep this plugin payload in that form.
 							QByteArray payload = name.toLower();
 							payload.append('=');
 							payload.append(value);
@@ -6087,7 +6130,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 
 			if (ev.type == TelnetProcessor::MxpEvent::StartTag)
 			{
-				const ParsedMxpArguments parsed        = parseMxpArguments(ev.raw);
+				const ParsedMxpArguments parsed = parseMxpArguments(ev.raw, decodeIncomingIsolatedBytes);
 				QString                  argsForScript = parsed.rawArguments;
 				if (isAtomicTag(tag))
 					argsForScript = buildArgumentString(parsed.args);
@@ -6134,13 +6177,15 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				QVector<QMap<QByteArray, QByteArray>> customTagAttributes;
 				if (hasCustomElement)
 				{
+					const QList<MxpArgument> internalProvidedArgs =
+					    internalizeMxpArgumentRawValues(parsed.args, decodeIncomingIsolatedBytes);
 					const QMap<QByteArray, QByteArray> mergedDefaults =
-					    mergeAttributeDefaultsBytes(customInfo.attributes, parsed.args);
+					    mergeAttributeDefaultsBytes(customInfo.attributes, internalProvidedArgs);
 					const QVector<QByteArray> rawTags = extractDefinitionTags(customInfo.definition);
 					for (const QByteArray &rawTag : rawTags)
 					{
-						const QByteArray resolved =
-						    resolveDefinitionEntities(rawTag, mergedDefaults, m_telnet);
+						const QByteArray resolved = resolveDefinitionEntities(
+						    rawTag, mergedDefaults, m_telnet, encodeMxpInternalEntityText);
 						ParsedMxpArguments const defParsed = parseMxpArguments(resolved);
 						QByteArray               tagName;
 						QByteArray               temp = resolved;
@@ -6170,7 +6215,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 					{
 						const QByteArray                  &childTag   = customTagSequence.at(i);
 						const QMap<QByteArray, QByteArray> childAttrs = customTagAttributes.value(i);
-						applyStartTag(childTag, childAttrs);
+						applyStartTag(childTag, childAttrs, true);
 						if (mxpTrackingReset)
 							break;
 						appliedCloseTags.push_back(childTag);
@@ -6186,7 +6231,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 						frame.tag          = tag;
 						frame.contentStart = mxpBaseOffset + ev.offset;
 						if (frame.variableName.isEmpty() && !customInfo.flag.isEmpty())
-							frame.variableName = QString::fromLocal8Bit(customInfo.flag).toLower();
+							frame.variableName = QString::fromUtf8(customInfo.flag).toLower();
 						frame.closeTags = appliedCloseTags;
 						m_mxpTagStack.push_back(frame);
 					}
@@ -6212,11 +6257,11 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 						}
 					}
 					if (frame.variableName.isEmpty() && hasCustomElement && !customInfo.flag.isEmpty())
-						frame.variableName = QString::fromLocal8Bit(customInfo.flag).toLower();
+						frame.variableName = QString::fromUtf8(customInfo.flag).toLower();
 					m_mxpTagStack.push_back(frame);
 				}
 
-				applyStartTag(effectiveTag, attributes);
+				applyStartTag(effectiveTag, attributes, attributesAreInternalUtf8);
 				if (mxpTrackingReset)
 					continue;
 
@@ -6231,10 +6276,14 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 					{
 						if (payload.isEmpty())
 							return;
-						sendToWorld(payload.toLocal8Bit());
+						if (useUtf8)
+							sendToWorld(payload.toUtf8());
+						else
+							sendToWorld(qmudEncodeWorldText(payload, legacyEncodingName, nullptr));
 					};
 
-					auto extractArgumentTokens = [&](const QMap<QByteArray, QByteArray> &attrs)
+					auto extractArgumentTokens =
+					    [&](const QMap<QByteArray, QByteArray> &attrs, const bool attrsAreInternalUtf8)
 					{
 						QList<int>  numericKeys;
 						QStringList tokens;
@@ -6243,14 +6292,14 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 							if (it.key() == "_tag")
 								continue;
 							bool      ok    = false;
-							const int index = QString::fromLocal8Bit(it.key()).toInt(&ok);
+							const int index = QString::fromLatin1(it.key()).toInt(&ok);
 							if (ok)
 							{
 								numericKeys.append(index);
 								continue;
 							}
-							const QString key   = QString::fromLocal8Bit(it.key());
-							const QString value = QString::fromLocal8Bit(it.value());
+							const QString key   = QString::fromLatin1(it.key());
+							const QString value = decodeMxpAttributeBytes(it.value(), attrsAreInternalUtf8);
 							if (value.isEmpty())
 								tokens.append(key);
 							else
@@ -6259,8 +6308,9 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 						std::ranges::sort(numericKeys);
 						for (int const idx : numericKeys)
 						{
-							const QByteArray key   = QByteArray::number(idx);
-							const QString    value = QString::fromLocal8Bit(attrs.value(key));
+							const QByteArray key = QByteArray::number(idx);
+							const QString    value =
+							    decodeMxpAttributeBytes(attrs.value(key), attrsAreInternalUtf8);
 							if (!value.isEmpty())
 								tokens.append(value);
 						}
@@ -6366,10 +6416,11 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 						      sendFlag.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
 						if (allowResponse)
 						{
-							const QStringList args      = extractArgumentTokens(attributes);
-							const QString     challenge = args.isEmpty() ? QString() : args.first();
-							const QDateTime   now       = QDateTime::currentDateTime();
-							const qint64      seconds =
+							const QStringList args =
+							    extractArgumentTokens(attributes, attributesAreInternalUtf8);
+							const QString   challenge = args.isEmpty() ? QString() : args.first();
+							const QDateTime now       = QDateTime::currentDateTime();
+							const qint64    seconds =
 							    (m_lastUserInput.isValid() ? m_lastUserInput.secsTo(now) : 0);
 							const QString packet = QStringLiteral("\x1B[1z<AFK %1 %2>%3")
 							                           .arg(seconds)
@@ -6382,7 +6433,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 					else if (effectiveTag == "support")
 					{
 						// From mxpOpenAtomic.cpp: reply with supported tags and arguments.
-						const QStringList args = extractArgumentTokens(attributes);
+						const QStringList args = extractArgumentTokens(attributes, attributesAreInternalUtf8);
 						QString           supports;
 						const auto       *supported              = mxpSupports();
 						bool              invalidSupportArgument = false;
@@ -6475,7 +6526,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 					else if (effectiveTag == "option")
 					{
 						// From mxpOpenAtomic.cpp: reply with options requested (if any).
-						const QStringList args = extractArgumentTokens(attributes);
+						const QStringList args = extractArgumentTokens(attributes, attributesAreInternalUtf8);
 						QString           options;
 						if (args.isEmpty())
 						{
@@ -6511,7 +6562,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 						if (!isEnabledFlag(m_worldAttributes.value(QStringLiteral("mud_can_change_options"))))
 							continue;
 
-						const QStringList args = extractArgumentTokens(ev.attributes);
+						const QStringList args = extractArgumentTokens(ev.attributes, false);
 						for (const QString &raw : args)
 						{
 							const QString key       = raw.section('=', 0, 0).trimmed();
@@ -6579,7 +6630,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 					}
 					else if (effectiveTag == "mxp")
 					{
-						const QStringList args       = extractArgumentTokens(attributes);
+						const QStringList args = extractArgumentTokens(attributes, attributesAreInternalUtf8);
 						auto              hasKeyword = [&](const QString &keyword)
 						{
 							return std::ranges::any_of(
@@ -13404,7 +13455,7 @@ int WorldRuntime::executeCommandWithTriggerPriority(const QString &text) const
 QString WorldRuntime::getEntityValue(const QString &name) const
 {
 	QByteArray value;
-	if (m_telnet.getCustomEntityValue(name.toLocal8Bit(), value))
+	if (m_telnet.getCustomEntityValue(name.toUtf8(), value))
 		return QString::fromUtf8(value);
 	return {};
 }
@@ -13414,17 +13465,14 @@ QMap<QString, QString> WorldRuntime::customEntitySnapshot() const
 	QMap<QString, QString>             snapshot;
 	const QMap<QByteArray, QByteArray> entities = m_telnet.customEntitySnapshot();
 	for (auto it = entities.constBegin(); it != entities.constEnd(); ++it)
-	{
-		snapshot.insert(QString::fromLocal8Bit(it.key()), QString::fromUtf8(it.value()));
-	}
+		snapshot.insert(QString::fromUtf8(it.key()), QString::fromUtf8(it.value()));
 	return snapshot;
 }
 
 void WorldRuntime::setEntityValue(const QString &name, const QString &value)
 {
-	const QByteArray key      = name.toUtf8();
-	const QByteArray contents = value.toUtf8();
-	m_telnet.setCustomEntity(key, contents);
+	const QByteArray key = name.toUtf8();
+	m_telnet.setCustomEntity(key, value.toUtf8());
 }
 
 void WorldRuntime::addTriggerTimeNs(qint64 ns)
@@ -16367,7 +16415,14 @@ void WorldRuntime::sendText(const QString &text, bool addNewline)
 {
 	if (!addNewline)
 	{
-		sendToWorld(text.toUtf8());
+		if (isEnabledFlag(m_worldAttributes.value(QStringLiteral("utf_8"))))
+			sendToWorld(text.toUtf8());
+		else
+		{
+			const QString legacyEncoding = qmudNormalizeWorldTextEncodingName(
+			    m_worldAttributes.value(QStringLiteral("legacy_encoding")));
+			sendToWorld(qmudEncodeWorldText(text, legacyEncoding, nullptr));
+		}
 		return;
 	}
 
@@ -16656,11 +16711,7 @@ void WorldRuntime::outputAnsiText(const QString &text, bool note)
 				if (!lineSpans.isEmpty())
 				{
 					StyleSpan &lastSpan = lineSpans.last();
-					if (lastSpan.fore == span.fore && lastSpan.back == span.back &&
-					    lastSpan.bold == span.bold && lastSpan.italic == span.italic &&
-					    lastSpan.blink == span.blink && lastSpan.underline == span.underline &&
-					    lastSpan.inverse == span.inverse && lastSpan.strike == span.strike &&
-					    lastSpan.changed == span.changed)
+					if (lastSpan.hasSameStyleAttributes(span))
 						lastSpan.length += span.length;
 					else
 						lineSpans.push_back(span);
@@ -24254,14 +24305,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 			WorldRuntime::StyleSpan style;
 	};
 	QVector<ParsedRun> parsedRuns;
-	auto styleEquivalent = [](const WorldRuntime::StyleSpan &lhs, const WorldRuntime::StyleSpan &rhs)
-	{
-		return lhs.fore == rhs.fore && lhs.back == rhs.back && lhs.bold == rhs.bold &&
-		       lhs.underline == rhs.underline && lhs.italic == rhs.italic && lhs.blink == rhs.blink &&
-		       lhs.strike == rhs.strike && lhs.inverse == rhs.inverse && lhs.actionType == rhs.actionType &&
-		       lhs.action == rhs.action && lhs.hint == rhs.hint && lhs.variable == rhs.variable;
-	};
-	auto appendRun = [&](const QString &segment, const QMudStyledTextState &state)
+	auto               appendRun = [&](const QString &segment, const QMudStyledTextState &state)
 	{
 		if (segment.isEmpty())
 			return;
@@ -24279,7 +24323,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		span.action     = state.action;
 		span.hint       = state.hint;
 		span.variable   = state.variable;
-		if (!parsedRuns.isEmpty() && styleEquivalent(parsedRuns.last().style, span))
+		if (!parsedRuns.isEmpty() && parsedRuns.last().style.hasSameStyleAttributes(span))
 		{
 			parsedRuns.last().text += segment;
 			parsedRuns.last().style.length = safeQSizeToInt(parsedRuns.last().text.size());
@@ -24363,7 +24407,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 	static const QRegularExpression kHexColor6(QStringLiteral("^[0-9A-Fa-f]{6}$"));
 	auto                            normalizeColorBytes = [](const QByteArray &value) -> QString
 	{
-		QString name = QString::fromLocal8Bit(value).trimmed();
+		QString name = decodeMxpInternalArgumentBytes(value).trimmed();
 		if (name.isEmpty())
 			return {};
 		if (kHexColor6.match(name).hasMatch())
@@ -24387,6 +24431,13 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 			return true;
 		return (lhs == "send" && rhs == "a") || (lhs == "a" && rhs == "send");
 	};
+	auto resolveAttributeEntities = [&](QMap<QByteArray, QByteArray> attributes)
+	{
+		const QMap<QByteArray, QByteArray> noLocalValues;
+		for (auto it = attributes.begin(); it != attributes.end(); ++it)
+			it.value() = resolveDefinitionEntities(it.value(), noLocalValues, renderContext.entityResolver);
+		return attributes;
+	};
 	auto applyStartTag =
 	    [&](const QByteArray &activeTag, const QMap<QByteArray, QByteArray> &activeAttributes)
 	{
@@ -24394,15 +24445,15 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		const QByteArray unnamedBack = activeAttributes.value("2");
 		if (activeTag == "send" || activeTag == "a")
 		{
-			QString href = QString::fromLocal8Bit(activeAttributes.value("href"));
+			QString href = decodeMxpInternalArgumentBytes(activeAttributes.value("href"));
 			if (href.isEmpty())
-				href = QString::fromLocal8Bit(activeAttributes.value("xch_cmd"));
-			QString xchPrompt = QString::fromLocal8Bit(activeAttributes.value("xch_prompt"));
+				href = decodeMxpInternalArgumentBytes(activeAttributes.value("xch_cmd"));
+			QString xchPrompt = decodeMxpInternalArgumentBytes(activeAttributes.value("xch_prompt"));
 			if (xchPrompt.isEmpty())
-				xchPrompt = QString::fromLocal8Bit(activeAttributes.value("prompt"));
-			QString hint = QString::fromLocal8Bit(activeAttributes.value("hint"));
+				xchPrompt = decodeMxpInternalArgumentBytes(activeAttributes.value("prompt"));
+			QString hint = decodeMxpInternalArgumentBytes(activeAttributes.value("hint"));
 			if (hint.isEmpty())
-				hint = QString::fromLocal8Bit(activeAttributes.value("xch_hint"));
+				hint = decodeMxpInternalArgumentBytes(activeAttributes.value("xch_hint"));
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
 			mxpStyleStack.push_back({activeTag, current});
@@ -24415,11 +24466,11 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 				current.actionType = ActionSend;
 			current.action   = href;
 			current.hint     = hint.isEmpty() ? xchPrompt : hint;
-			QString variable = QString::fromLocal8Bit(activeAttributes.value("xch_set"));
+			QString variable = decodeMxpInternalArgumentBytes(activeAttributes.value("xch_set"));
 			if (variable.isEmpty())
-				variable = QString::fromLocal8Bit(activeAttributes.value("variable"));
+				variable = decodeMxpInternalArgumentBytes(activeAttributes.value("variable"));
 			if (variable.isEmpty())
-				variable = QString::fromLocal8Bit(activeAttributes.value("set"));
+				variable = decodeMxpInternalArgumentBytes(activeAttributes.value("set"));
 			current.variable = variable;
 			current.startTag = true;
 			return;
@@ -24499,9 +24550,9 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
 			mxpStyleStack.push_back({activeTag, current});
-			QString colorSpec = QString::fromLocal8Bit(activeAttributes.value("color"));
+			QString colorSpec = decodeMxpInternalArgumentBytes(activeAttributes.value("color"));
 			if (colorSpec.isEmpty())
-				colorSpec = QString::fromLocal8Bit(activeAttributes.value("fgcolor"));
+				colorSpec = decodeMxpInternalArgumentBytes(activeAttributes.value("fgcolor"));
 			const QStringList parts = colorSpec.split(',', Qt::SkipEmptyParts);
 			for (QString part : parts)
 			{
@@ -24527,9 +24578,9 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 						current.fore = resolved;
 				}
 			}
-			QString back = QString::fromLocal8Bit(activeAttributes.value("back"));
+			QString back = decodeMxpInternalArgumentBytes(activeAttributes.value("back"));
 			if (back.isEmpty())
-				back = QString::fromLocal8Bit(activeAttributes.value("bgcolor"));
+				back = decodeMxpInternalArgumentBytes(activeAttributes.value("bgcolor"));
 			if (!ignoreMxpColourChanges)
 			{
 				const QString resolvedBack = normalizeColorText(back);
@@ -24638,7 +24689,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 	QVector<LogicalCustomFrame> logicalFrames;
 	auto                        applyMarkerTag = [&](const QString &tagContent, const bool closing)
 	{
-		const QByteArray rawTag = tagContent.trimmed().toLocal8Bit();
+		const QByteArray rawTag = tagContent.trimmed().toUtf8();
 		if (rawTag.isEmpty())
 			return;
 
@@ -24724,7 +24775,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 
 		const bool trackable = !(hasCustomElement ? customInfo.command : atomicInfo.command);
 		if (customTagSequence.isEmpty())
-			applyStartTag(effectiveTag, attributes);
+			applyStartTag(effectiveTag, resolveAttributeEntities(attributes));
 
 		if (!trackable)
 			return;

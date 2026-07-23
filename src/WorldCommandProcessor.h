@@ -599,6 +599,7 @@ class WorldCommandProcessor : public QObject
 		bool                                         m_doNotTranslateIac{false};
 		bool                                         m_regexpMatchEmpty{true};
 		bool                                         m_utf8{false};
+		QString                                      m_legacyEncodingName;
 		int                                          m_spamLineCount{0};
 		quint64                                      m_autoConnectDelayGeneration{0};
 		QString                                      m_spamMessage;

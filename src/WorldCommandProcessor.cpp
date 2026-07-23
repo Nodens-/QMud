@@ -24,6 +24,7 @@
 #include "WorldRuleEnableUtils.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
+#include "helpers/EncodingUtils.h"
 #include "helpers/OutputWrapUtils.h"
 #include "scripting/ScriptingErrors.h"
 
@@ -977,12 +978,13 @@ void WorldCommandProcessor::setRuntime(WorldRuntime *runtime)
 	const QString noTranslateIac        = attrs.value(QStringLiteral("do_not_translate_iac_to_iac_iac"));
 	m_doNotTranslateIac                 = isEnabledValue(noTranslateIac);
 	const QString matchEmpty            = attrs.value(QStringLiteral("regexp_match_empty"));
-	m_regexpMatchEmpty = !(matchEmpty == QStringLiteral("0") ||
-	                       matchEmpty.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
-	                       matchEmpty.compare(QStringLiteral("no"), Qt::CaseInsensitive) == 0 ||
-	                       matchEmpty.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
-	const QString utf8 = attrs.value(QStringLiteral("utf_8"));
-	m_utf8             = isEnabledValue(utf8);
+	m_regexpMatchEmpty   = !(matchEmpty == QStringLiteral("0") ||
+	                         matchEmpty.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+	                         matchEmpty.compare(QStringLiteral("no"), Qt::CaseInsensitive) == 0 ||
+	                         matchEmpty.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+	const QString utf8   = attrs.value(QStringLiteral("utf_8"));
+	m_utf8               = isEnabledValue(utf8);
+	m_legacyEncodingName = qmudNormalizeWorldTextEncodingName(attrs.value(QStringLiteral("legacy_encoding")));
 
 	if (m_speedWalkDelay <= 0 && !m_queuedCommands.isEmpty())
 		processQueuedCommands(true);
@@ -4100,7 +4102,7 @@ void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, cons
 
 	if (m_runtime)
 	{
-		QByteArray payload = m_utf8 ? str.toUtf8() : str.toLocal8Bit();
+		QByteArray payload = m_utf8 ? str.toUtf8() : qmudEncodeWorldText(str, m_legacyEncodingName, nullptr);
 		if (!m_doNotTranslateIac)
 			payload.replace(static_cast<char>(0xFF), QByteArray("\xFF\xFF", 2));
 		m_runtime->sendToWorld(payload);

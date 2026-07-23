@@ -458,6 +458,7 @@ qmud_add_qtest(tst_TelnetProcessor_Options
         SOURCES
         integration/tst_TelnetProcessor_Options.cpp
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
         qmud_test_support
         ${QMUD_ZLIB_TARGET}
@@ -470,6 +471,7 @@ qmud_add_qtest(tst_TelnetProcessor_Mxp
         SOURCES
         integration/tst_TelnetProcessor_Mxp.cpp
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
         qmud_test_support
         ${QMUD_ZLIB_TARGET}
@@ -482,6 +484,7 @@ qmud_add_qtest(tst_TelnetProcessor_Subnegotiation
         SOURCES
         integration/tst_TelnetProcessor_Subnegotiation.cpp
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
         qmud_test_support
         ${QMUD_ZLIB_TARGET}
@@ -494,6 +497,7 @@ qmud_add_qtest(tst_TelnetProcessor_Encoding
         SOURCES
         integration/tst_TelnetProcessor_Encoding.cpp
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
         qmud_test_support
         ${QMUD_ZLIB_TARGET}
@@ -506,6 +510,7 @@ qmud_add_qtest(tst_TelnetProcessor_Compression
         SOURCES
         integration/tst_TelnetProcessor_Compression.cpp
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
         qmud_test_support
         ${QMUD_ZLIB_TARGET}
@@ -518,6 +523,7 @@ qmud_add_qtest(tst_TelnetProcessor_Malformed
         SOURCES
         integration/tst_TelnetProcessor_Malformed.cpp
         "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
         LIBRARIES
         qmud_test_support
         ${QMUD_ZLIB_TARGET}
@@ -708,7 +714,8 @@ if (QMUD_ENABLE_GUI_TESTS)
             GUI
             SOURCES
             gui/tst_Dialog_WorldPreferences.cpp
-            "${CMAKE_SOURCE_DIR}/src/helpers/WorldPreferencesRoutingUtils.cpp"
+            LIBRARIES
+            qmud_app_core
             LABELS
             gui
             TIMEOUT
@@ -720,6 +727,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             gui/tst_WorldView_Basic.cpp
             "${CMAKE_SOURCE_DIR}/src/WorldView.cpp"
             "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/AnsiSgrParseUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/AccessibleTextUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowUtils.cpp"

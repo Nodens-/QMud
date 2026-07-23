@@ -38,6 +38,7 @@
 #include "WorldRuntime.h"
 #include "WorldView.h"
 #include "dialogs/SpellCheckDialog.h"
+#include "helpers/EncodingUtils.h"
 #include "helpers/LuaExecutionUtils.h"
 #include "helpers/LuaModalDialogUtils.h"
 #include "helpers/MainFrameMdiUtils.h"
@@ -1711,9 +1712,12 @@ namespace
 			payloadText += QStringLiteral("\r\n");
 		const bool utf8 =
 		    isEnabledValue(resolveWorldAttributeValueForApi(engine, runtime, QStringLiteral("utf_8")));
-		const bool doNotTranslateIac = isEnabledValue(resolveWorldAttributeValueForApi(
+		const bool    doNotTranslateIac = isEnabledValue(resolveWorldAttributeValueForApi(
 		    engine, runtime, QStringLiteral("do_not_translate_iac_to_iac_iac")));
-		QByteArray payload           = utf8 ? payloadText.toUtf8() : payloadText.toLocal8Bit();
+		const QString legacyEncoding    = qmudNormalizeWorldTextEncodingName(
+		    resolveWorldAttributeValueForApi(engine, runtime, QStringLiteral("legacy_encoding")));
+		QByteArray payload =
+		    utf8 ? payloadText.toUtf8() : qmudEncodeWorldText(payloadText, legacyEncoding, nullptr);
 		if (!doNotTranslateIac)
 			payload.replace(static_cast<char>(0xFF), QByteArray("\xFF\xFF", 2));
 		return payload.size();
@@ -5972,6 +5976,23 @@ namespace
 		if (!snapshot || !snapshot->hasWindowOutputTextRenderSnapshot)
 			return false;
 
+		QMap<QString, QString>  renderWorldAttributes = snapshot->worldAttributesSnapshot;
+		QHash<QString, QString> renderEntities =
+		    snapshot->hasEntitySnapshot ? snapshot->entityValuesByName : QHash<QString, QString>{};
+		if (const auto *callbackContext = activeCallbackContextConst(engine))
+		{
+			for (auto it = callbackContext->worldAttributeValuesByKey.constBegin();
+			     it != callbackContext->worldAttributeValuesByKey.constEnd(); ++it)
+			{
+				renderWorldAttributes.insert(it.key(), it.value());
+			}
+			for (auto it = callbackContext->entityValuesByName.constBegin();
+			     it != callbackContext->entityValuesByName.constEnd(); ++it)
+			{
+				renderEntities.insert(it.key(), it.value());
+			}
+		}
+
 		context.ansiStreamState = snapshot->windowOutputTextAnsiStreamState;
 		context.ansiRenderState =
 		    ansiRenderStateFromCallbackSnapshot(snapshot->windowOutputTextAnsiRenderState);
@@ -5979,7 +6000,7 @@ namespace
 		context.mxpBlockStack   = snapshot->windowOutputTextMxpBlockStack;
 		context.mxpLinkOpen     = snapshot->windowOutputTextMxpLinkOpen;
 		context.mxpPreDepth     = snapshot->windowOutputTextMxpPreDepth;
-		context.worldAttributes = snapshot->worldAttributesSnapshot;
+		context.worldAttributes = renderWorldAttributes;
 		context.mxpStyleStack.reserve(snapshot->windowOutputTextMxpStyleStack.size());
 		for (const LuaCallbackMxpStyleFrameSnapshot &frameSnapshot : snapshot->windowOutputTextMxpStyleStack)
 		{
@@ -6032,13 +6053,10 @@ namespace
 		};
 
 		const auto telnet = QSharedPointer<TelnetProcessor>::create();
-		if (snapshot->hasEntitySnapshot)
+		if (!renderEntities.isEmpty())
 		{
-			for (auto it = snapshot->entityValuesByName.constBegin();
-			     it != snapshot->entityValuesByName.constEnd(); ++it)
-			{
-				telnet->setCustomEntity(it.key().toLocal8Bit(), it.value().toUtf8());
-			}
+			for (auto it = renderEntities.constBegin(); it != renderEntities.constEnd(); ++it)
+				telnet->setCustomEntity(it.key().toUtf8(), it.value().toUtf8());
 		}
 		context.entityResolver = [telnet](const QByteArray &entityName, QByteArray &value) -> bool
 		{ return telnet && telnet->resolveEntityValue(entityName, value); };

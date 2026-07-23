@@ -184,26 +184,10 @@ namespace
 			history.remove(0, history.size() - historyLimit);
 	}
 
-	bool styleSpansEquivalent(const WorldRuntime::StyleSpan &lhs, const WorldRuntime::StyleSpan &rhs)
-	{
-		return lhs.length == rhs.length && lhs.fore == rhs.fore && lhs.back == rhs.back &&
-		       lhs.bold == rhs.bold && lhs.underline == rhs.underline && lhs.italic == rhs.italic &&
-		       lhs.blink == rhs.blink && lhs.strike == rhs.strike && lhs.inverse == rhs.inverse &&
-		       lhs.changed == rhs.changed && lhs.actionType == rhs.actionType && lhs.action == rhs.action &&
-		       lhs.hint == rhs.hint && lhs.variable == rhs.variable && lhs.startTag == rhs.startTag;
-	}
-
 	bool styleSpanVectorsEquivalent(const QVector<WorldRuntime::StyleSpan> &lhs,
 	                                const QVector<WorldRuntime::StyleSpan> &rhs)
 	{
-		if (lhs.size() != rhs.size())
-			return false;
-		for (int i = 0; i < lhs.size(); ++i)
-		{
-			if (!styleSpansEquivalent(lhs.at(i), rhs.at(i)))
-				return false;
-		}
-		return true;
+		return lhs == rhs;
 	}
 
 	bool hasNonPositiveStyleSpan(const QVector<WorldRuntime::StyleSpan> &spans)
@@ -256,12 +240,7 @@ namespace
 		{
 			return false;
 		}
-		for (int i = 0; i < lhs.spans.size(); ++i)
-		{
-			if (!styleSpansEquivalent(lhs.spans.at(i), rhs.spans.at(i)))
-				return false;
-		}
-		return true;
+		return lhs.spans == rhs.spans;
 	}
 
 	template <typename Lines> bool runtimeLineNumbersAreContiguous(const Lines &lines)

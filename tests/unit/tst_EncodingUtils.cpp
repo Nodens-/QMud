@@ -95,6 +95,77 @@ class tst_EncodingUtils : public QObject
 			const QByteArray bytes = QByteArrayLiteral("Crystal map");
 			QCOMPARE(qmudDecodeWindows1252(bytes), QStringLiteral("Crystal map"));
 		}
+
+		void availableWorldTextEncodingsContainGb18030()
+		{
+			const QString encoding = qmudNormalizeWorldTextEncodingName(QStringLiteral("GB18030"));
+			QCOMPARE(encoding, QStringLiteral("GB18030"));
+			QVERIFY(qmudAvailableWorldTextEncodings().contains(encoding));
+		}
+
+		void availableWorldTextEncodingsExcludeProtocolUnsafeCodecs()
+		{
+			const QStringList encodings = qmudAvailableWorldTextEncodings();
+			QVERIFY(!encodings.contains(QStringLiteral("UTF-8")));
+			QVERIFY(!encodings.contains(QStringLiteral("UTF-16")));
+			QVERIFY(!encodings.contains(QStringLiteral("UTF-16LE")));
+			QVERIFY(!encodings.contains(QStringLiteral("UTF-32")));
+			QVERIFY(!encodings.contains(QStringLiteral("System")));
+			QVERIFY(!encodings.contains(QStringLiteral("ISO-2022-JP")));
+			for (const QString &encoding : encodings)
+			{
+				QVERIFY2(!qmudWorldTextEncodingDisplayName(encoding).endsWith(
+				             QStringLiteral("(Multiple languages)")),
+				         qPrintable(encoding));
+			}
+		}
+
+		void normalizeRejectsProtocolUnsafeCodecs()
+		{
+			QCOMPARE(qmudNormalizeWorldTextEncodingName(QStringLiteral("UTF-16")),
+			         qmudDefaultLegacyWorldEncodingName());
+			QCOMPARE(qmudNormalizeWorldTextEncodingName(QStringLiteral("System")),
+			         qmudDefaultLegacyWorldEncodingName());
+		}
+
+		void worldTextEncodingDisplayNamesIncludeLanguageHints()
+		{
+			QCOMPARE(qmudWorldTextEncodingDisplayName(QStringLiteral("GB18030")),
+			         QStringLiteral("GB18030 (Simplified Chinese)"));
+			QCOMPARE(qmudWorldTextEncodingDisplayName(QStringLiteral("windows-1252")),
+			         QStringLiteral("windows-1252 (Western European)"));
+			QVERIFY(qmudWorldTextEncodingDisplayName(QStringLiteral("Shift_JIS"))
+			            .contains(QStringLiteral("(Japanese)")));
+		}
+
+		void decodeGb18030KeepsSplitMultibyteCarry()
+		{
+			const QByteArray encoded    = QByteArray::fromHex("D6D0CEC4");
+			QStringDecoder   decoder    = qmudCreateWorldTextDecoder(QStringLiteral("GB18030"));
+			bool             hadInvalid = false;
+
+			QCOMPARE(qmudDecodeWorldText(encoded.left(1), decoder, &hadInvalid), QString());
+			QVERIFY(!hadInvalid);
+			QCOMPARE(qmudDecodeWorldText(encoded.mid(1), decoder, &hadInvalid), QStringLiteral("中文"));
+			QVERIFY(!hadInvalid);
+		}
+
+		void encodeGb18030()
+		{
+			bool             hadInvalid = false;
+			const QByteArray encoded =
+			    qmudEncodeWorldText(QStringLiteral("中文"), QStringLiteral("GB18030"), &hadInvalid);
+			QCOMPARE(encoded, QByteArray::fromHex("D6D0CEC4"));
+			QVERIFY(!hadInvalid);
+		}
+
+		void telnetCharsetNamesIncludeLegacyAliases()
+		{
+			QCOMPARE(qmudWorldTextTelnetCharsetNames(true, QStringLiteral("GB18030")),
+			         (QList<QByteArray>{QByteArrayLiteral("UTF-8"), QByteArrayLiteral("UTF8")}));
+			QCOMPARE(qmudWorldTextTelnetCharsetNames(false, QStringLiteral("GB18030")),
+			         (QList<QByteArray>{QByteArrayLiteral("GB18030"), QByteArrayLiteral("GBK")}));
+		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 

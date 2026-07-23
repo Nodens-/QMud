@@ -76,10 +76,7 @@ namespace
 
 	bool sameStyleForWrap(const WorldRuntime::StyleSpan &a, const WorldRuntime::StyleSpan &b)
 	{
-		return a.fore == b.fore && a.back == b.back && a.bold == b.bold && a.underline == b.underline &&
-		       a.italic == b.italic && a.blink == b.blink && a.strike == b.strike && a.inverse == b.inverse &&
-		       a.changed == b.changed && a.actionType == b.actionType && a.action == b.action &&
-		       a.hint == b.hint && a.variable == b.variable && a.startTag == b.startTag;
+		return a.hasSameStyleAttributes(b);
 	}
 
 	void appendMergedStyleSpan(QVector<WorldRuntime::StyleSpan> &spans, const WorldRuntime::StyleSpan &span)

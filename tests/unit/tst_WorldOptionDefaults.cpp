@@ -44,6 +44,7 @@ class tst_WorldOptionDefaults : public QObject
 			QCOMPARE(attrs.value(QStringLiteral("beep_sound")), QStringLiteral("sounds/QMud/beep.wav"));
 			QCOMPARE(attrs.value(QStringLiteral("confirm_before_replacing_typing")), QStringLiteral("n"));
 			QCOMPARE(attrs.value(QStringLiteral("utf_8")), QStringLiteral("y"));
+			QCOMPARE(attrs.value(QStringLiteral("legacy_encoding")), QStringLiteral("windows-1252"));
 			QCOMPARE(attrs.value(QStringLiteral("persist_output_buffer")), QStringLiteral("y"));
 			QCOMPARE(attrs.value(QStringLiteral("persist_command_history")), QStringLiteral("y"));
 			QCOMPARE(attrs.value(QStringLiteral("regexp_match_empty")), QStringLiteral("y"));

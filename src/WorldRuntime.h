@@ -34,6 +34,7 @@
 #include <QSet>
 #include <QSharedPointer>
 #include <QString>
+#include <QStringDecoder>
 #include <QVariant>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
@@ -404,21 +405,36 @@ class WorldRuntime : public QObject
 		 */
 		struct StyleSpan
 		{
-				int     length{0};
-				QColor  fore;
-				QColor  back;
-				bool    bold{false};
-				bool    underline{false};
-				bool    italic{false};
-				bool    blink{false};
-				bool    strike{false};
-				bool    inverse{false};
-				bool    changed{false};
-				int     actionType{ActionNone};
-				QString action;
-				QString hint;
-				QString variable;
-				bool    startTag{false};
+				int                length{0};
+				QColor             fore;
+				QColor             back;
+				bool               bold{false};
+				bool               underline{false};
+				bool               italic{false};
+				bool               blink{false};
+				bool               strike{false};
+				bool               inverse{false};
+				bool               changed{false};
+				int                actionType{ActionNone};
+				QString            action;
+				QString            hint;
+				QString            variable;
+				bool               startTag{false};
+
+				bool               operator==(const StyleSpan &) const = default;
+				/**
+				 * @brief Compares style attributes while ignoring run length.
+				 * @param other Span to compare with this span.
+				 * @return `true` when both spans can be merged without changing presentation or actions.
+				 */
+				[[nodiscard]] bool hasSameStyleAttributes(const StyleSpan &other) const
+				{
+					if (length == other.length)
+						return *this == other;
+					StyleSpan normalizedOther = other;
+					normalizedOther.length    = length;
+					return *this == normalizedOther;
+				}
 		};
 		/**
 		 * @brief Incremental ANSI rendering state carried across parsed text chunks.
@@ -5624,6 +5640,8 @@ class WorldRuntime : public QObject
 		AnsiRenderState                                            m_ansiRenderState;
 		QByteArray                                                 m_streamUtf8Carry;
 		bool                                                       m_streamUtf8DecoderEnabled{false};
+		QString                                                    m_streamLegacyEncodingName;
+		QStringDecoder                                             m_streamLegacyDecoder;
 		MxpStyleState                                              m_mxpRenderStyle;
 		QVector<MxpStyleFrame>                                     m_mxpRenderStack;
 		QVector<QByteArray>                                        m_mxpRenderBlockStack;

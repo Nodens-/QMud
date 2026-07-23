@@ -22,10 +22,11 @@ namespace
 	constexpr unsigned char TELOPT_TERMINAL_TYPE = 24;
 	constexpr unsigned char CHARSET_REQUEST      = 1;
 	constexpr unsigned char CHARSET_ACCEPTED     = 2;
+	constexpr unsigned char CHARSET_REJECTED     = 3;
 	constexpr unsigned char TTYPE_SEND           = 1;
 	constexpr unsigned char TTYPE_IS             = 0;
 
-	QByteArray bytes(std::initializer_list<unsigned char> raw)
+	QByteArray              bytes(std::initializer_list<unsigned char> raw)
 	{
 		QByteArray out;
 		for (const unsigned char c : raw)
@@ -41,13 +42,13 @@ class tst_TelnetProcessor_Encoding : public QObject
 {
 		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
 		void escapedIacInNormalText()
 		{
-			TelnetProcessor processor;
+			TelnetProcessor  processor;
 			const QByteArray output = processor.processBytes(bytes({'a', IAC, IAC, 'b'}));
-			QByteArray expected;
+			QByteArray       expected;
 			expected.append('a');
 			expected.append(static_cast<char>(IAC));
 			expected.append('b');
@@ -56,7 +57,7 @@ class tst_TelnetProcessor_Encoding : public QObject
 
 		void gaHandlingWithAndWithoutNewline()
 		{
-			TelnetProcessor  processor;
+			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
 
@@ -73,18 +74,91 @@ class tst_TelnetProcessor_Encoding : public QObject
 			TelnetProcessor processor;
 
 			processor.setUseUtf8(false);
-			processor.processBytes(
-			    bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REQUEST, ',', 'U', 'T', 'F', '-', '8', ',', 'U', 'S', '-',
-			           'A', 'S', 'C', 'I', 'I', IAC, SE}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, SB, TELOPT_CHARSET, CHARSET_ACCEPTED, 'U', 'S', '-', 'A', 'S', 'C', 'I', 'I', IAC, SE}));
+			processor.processBytes(bytes({IAC,
+			                              SB,
+			                              TELOPT_CHARSET,
+			                              CHARSET_REQUEST,
+			                              ',',
+			                              'U',
+			                              'T',
+			                              'F',
+			                              '-',
+			                              '8',
+			                              ',',
+			                              'U',
+			                              'S',
+			                              '-',
+			                              'A',
+			                              'S',
+			                              'C',
+			                              'I',
+			                              'I',
+			                              IAC,
+			                              SE}));
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, SB, TELOPT_CHARSET, CHARSET_ACCEPTED, 'U', 'S',
+			                                              '-', 'A', 'S', 'C', 'I', 'I', IAC, SE}));
 
 			processor.setUseUtf8(true);
-			processor.processBytes(
-			    bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REQUEST, ',', 'U', 'T', 'F', '-', '8', ',', 'U', 'S', '-',
-			           'A', 'S', 'C', 'I', 'I', IAC, SE}));
+			processor.processBytes(bytes({IAC,
+			                              SB,
+			                              TELOPT_CHARSET,
+			                              CHARSET_REQUEST,
+			                              ',',
+			                              'U',
+			                              'T',
+			                              'F',
+			                              '-',
+			                              '8',
+			                              ',',
+			                              'U',
+			                              'S',
+			                              '-',
+			                              'A',
+			                              'S',
+			                              'C',
+			                              'I',
+			                              'I',
+			                              IAC,
+			                              SE}));
 			QCOMPARE(processor.takeOutboundData(),
 			         bytes({IAC, SB, TELOPT_CHARSET, CHARSET_ACCEPTED, 'U', 'T', 'F', '-', '8', IAC, SE}));
+		}
+
+		void charsetSelectionUsesPreferredNames()
+		{
+			TelnetProcessor processor;
+			processor.setUseUtf8(false);
+			processor.setPreferredCharsetNames({QByteArrayLiteral("GB18030"), QByteArrayLiteral("GBK")});
+
+			processor.processBytes(bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REQUEST, ',', 'U', 'T', 'F', '-',
+			                              '8', ',', 'G', 'B', 'K', IAC, SE}));
+			QCOMPARE(processor.takeOutboundData(),
+			         bytes({IAC, SB, TELOPT_CHARSET, CHARSET_ACCEPTED, 'G', 'B', 'K', IAC, SE}));
+
+			processor.processBytes(bytes({IAC,
+			                              SB,
+			                              TELOPT_CHARSET,
+			                              CHARSET_REQUEST,
+			                              ',',
+			                              'U',
+			                              'T',
+			                              'F',
+			                              '-',
+			                              '8',
+			                              ',',
+			                              'S',
+			                              'h',
+			                              'i',
+			                              'f',
+			                              't',
+			                              '-',
+			                              'J',
+			                              'I',
+			                              'S',
+			                              IAC,
+			                              SE}));
+			QCOMPARE(processor.takeOutboundData(),
+			         bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REJECTED, IAC, SE}));
 		}
 
 		void terminalTypeSequenceChangesWithUtf8()
@@ -104,14 +178,13 @@ class tst_TelnetProcessor_Encoding : public QObject
 			         bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_IS, 'A', 'N', 'S', 'I', IAC, SE}));
 
 			processor.processBytes(bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_SEND, IAC, SE}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_IS, 'M', 'T', 'T', 'S', ' ', '2', '6', '9', IAC, SE}));
+			QCOMPARE(processor.takeOutboundData(), bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_IS, 'M', 'T',
+			                                              'T', 'S', ' ', '2', '6', '9', IAC, SE}));
 		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
+		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Encoding)
-
 
 #if __has_include("tst_TelnetProcessor_Encoding.moc")
 #include "tst_TelnetProcessor_Encoding.moc"
