@@ -733,6 +733,9 @@ if (QMUD_ENABLE_GUI_TESTS)
             "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/OutputWrapUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/ShortcutPreferenceUtils.cpp"
+            "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
+            "${CMAKE_SOURCE_DIR}/src/TtsEngine.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/TimeFormatUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/WorldView.h"
@@ -740,11 +743,15 @@ if (QMUD_ENABLE_GUI_TESTS)
             "${CMAKE_SOURCE_DIR}/src/dialogs/FindDialog.cpp"
             LIBRARIES
             Qt6::Sql
+            ${QMUD_NATIVE_PLUGIN_REGISTRY_TEST_LIBRARIES}
             ${QMUD_ZLIB_TARGET}
             LABELS
             gui
             TIMEOUT
             120)
+    target_compile_definitions(tst_WorldView_Basic
+            PRIVATE
+            QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
     target_compile_options(tst_WorldView_Basic PRIVATE -ffunction-sections -fdata-sections)
     target_link_options(tst_WorldView_Basic PRIVATE -Wl,--gc-sections)
 

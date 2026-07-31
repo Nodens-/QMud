@@ -949,6 +949,19 @@ class WorldView : public QWidget
 		friend class ::tst_WorldView_Basic;
 		struct NativeOutputRenderLine;
 		using NativeOutputRenderLines = IndexedRingBuffer<NativeOutputRenderLine>;
+		enum class AccessibleOutputReviewTargetKind
+		{
+			None,
+			SplitTopPane,
+			Selection,
+			Transient,
+		};
+		enum class AccessibleOutputReviewSpeechTarget
+		{
+			None,
+			QtAccessibility,
+			MushReader,
+		};
 
 		/**
 		 * @brief Miniwindow rendering/input hit-testing and output view internals.
@@ -1080,38 +1093,107 @@ class WorldView : public QWidget
 		 * @brief Returns the output pane used for accessibility text geometry.
 		 * @return Scrollback review pane while reviewing, otherwise the active output pane.
 		 */
-		[[nodiscard]] WrapTextBrowser *accessibleOutputTargetView() const;
+		[[nodiscard]] WrapTextBrowser                   *accessibleOutputTargetView() const;
+		/**
+		 * @brief Returns whether Qt accessibility speech events may be emitted for output review.
+		 * @return `true` when Qt accessibility speech events are enabled for this view.
+		 */
+		[[nodiscard]] bool                               qtAccessibilityOutputSpeechEnabled() const;
+		/**
+		 * @brief Resolves the current output-review speech/event owner.
+		 * @return Active review speech target, or `None` when review speech is muted.
+		 */
+		[[nodiscard]] AccessibleOutputReviewSpeechTarget accessibleOutputReviewSpeechTarget() const;
+		/**
+		 * @brief Returns whether output cursor and selection accessibility events may be emitted.
+		 * @return `true` when the current review target allows events.
+		 */
+		[[nodiscard]] bool                               accessibleOutputCursorEventsEnabled() const;
+		/**
+		 * @brief Returns whether output cursor and selection accessibility events may be emitted.
+		 * @param speechTarget Resolved review speech/event target.
+		 * @return `true` when @p speechTarget allows events.
+		 */
+		[[nodiscard]] static bool
+		accessibleOutputCursorEventsEnabled(AccessibleOutputReviewSpeechTarget speechTarget);
 		/**
 		 * @brief Returns the accessible caret offset for the world output.
 		 * @return Review caret offset while scrollback review is active, otherwise EOF.
 		 */
-		[[nodiscard]] int              accessibleOutputCursorPosition() const;
+		[[nodiscard]] int accessibleOutputCursorPosition() const;
 		/**
 		 * @brief Updates the accessible review caret from the top scrollback pane.
 		 */
-		void                           updateAccessibleOutputReviewCursor();
+		void              updateAccessibleOutputReviewCursor() const;
 		/**
 		 * @brief Clears scrollback review mode for accessibility.
 		 */
-		void                           clearAccessibleOutputReviewCursor();
+		void              clearAccessibleOutputReviewCursor() const;
 		/**
 		 * @brief Emits a text-caret accessibility event when assistive technology is active.
 		 * @param cursorOffset Accessible text cursor offset.
 		 */
-		void                           notifyAccessibleOutputCaretMoved(int cursorOffset) const;
+		void              notifyAccessibleOutputCaretMoved(int cursorOffset) const;
+		/**
+		 * @brief Emits a collapsed text-selection accessibility event after native output selection clears.
+		 */
+		void              notifyAccessibleOutputSelectionCleared() const;
+		/**
+		 * @brief Emits review/search speech and accessible events for a resolved output target.
+		 * @param cursorOffset Accessible text cursor offset.
+		 * @param announcement Text to speak for the review target.
+		 * @param speechTarget Resolved review speech/event target.
+		 * @param selectionStart Accessible selection start offset, or `-1` when unchanged.
+		 * @param selectionEnd Accessible selection end offset, or `-1` when unchanged.
+		 */
+		void notifyAccessibleOutputReviewTarget(int cursorOffset, const QString &announcement,
+		                                        AccessibleOutputReviewSpeechTarget speechTarget,
+		                                        int selectionStart = -1, int selectionEnd = -1) const;
+		/**
+		 * @brief Emits review/search speech and accessible events for an accessible text range.
+		 * @param lines Native render lines.
+		 * @param lineIndex Zero-based render line that should be spoken.
+		 * @param cursorOffset Accessible cursor offset.
+		 * @param selectionStart Accessible selection start offset.
+		 * @param selectionEnd Accessible selection end offset.
+		 * @param targetKind Review target lifetime semantics.
+		 */
+		void notifyAccessibleOutputReviewRangeTarget(const NativeOutputRenderLines &lines, int lineIndex,
+		                                             int cursorOffset, int selectionStart, int selectionEnd,
+		                                             AccessibleOutputReviewTargetKind targetKind) const;
+		/**
+		 * @brief Emits review/search speech and accessible events for a selected output line range.
+		 * @param lines Native render lines.
+		 * @param lineIndex Zero-based selected render line.
+		 * @param startColumn Zero-based selected start column.
+		 * @param endColumn Zero-based selected end column.
+		 */
+		void notifyAccessibleOutputSelectionReviewTarget(const NativeOutputRenderLines &lines, int lineIndex,
+		                                                 int startColumn, int endColumn) const;
+		/**
+		 * @brief Clears stale selection-driven review cursor state after native output selection ends.
+		 */
+		void clearAccessibleOutputSelectionReviewState() const;
 		/**
 		 * @brief Calculates the accessible text offset of the first top-pane review line.
 		 * @return Accessible offset for the top scrollback pane, or EOF when unavailable.
 		 */
-		[[nodiscard]] int              accessibleOutputReviewCursorPositionForTopPane() const;
+		[[nodiscard]] int accessibleOutputReviewCursorPositionForTopPane() const;
+		/**
+		 * @brief Calculates the render-line index of the first top-pane review line.
+		 * @param lines Native render lines.
+		 * @return Zero-based render-line index, or `-1` when unavailable.
+		 */
+		[[nodiscard]] int
+		accessibleOutputReviewLineIndexForTopPane(const NativeOutputRenderLines &lines) const;
 		/**
 		 * @brief Returns the accessible text offset for a render line.
 		 * @param lines Native render lines.
 		 * @param lineIndex Zero-based render line index.
 		 * @return Linear accessible text offset.
 		 */
-		[[nodiscard]] int              accessibleOutputOffsetForLine(const NativeOutputRenderLines &lines,
-		                                                             int                            lineIndex) const;
+		[[nodiscard]] int   accessibleOutputOffsetForLine(const NativeOutputRenderLines &lines,
+		                                                  int                            lineIndex) const;
 		/**
 		 * @brief Returns current accessible text character count without constructing full text.
 		 * @param lines Native render lines.
@@ -1640,8 +1722,11 @@ class WorldView : public QWidget
 		 * @param view Output pane to scroll.
 		 * @param firstLine First zero-based native render line to reveal.
 		 * @param lastLine Last zero-based native render line to reveal.
+		 * @param notifyReviewTarget Emit review speech/accessibility updates when the primary output
+		 * remains split.
 		 */
-		void scrollNativeOutputRangeIntoView(const WrapTextBrowser *view, int firstLine, int lastLine) const;
+		void scrollNativeOutputRangeIntoView(const WrapTextBrowser *view, int firstLine, int lastLine,
+		                                     bool notifyReviewTarget = true) const;
 		/**
 		 * @brief Resolves native-output hit-test information for a mouse event source widget.
 		 * @param watched Event source widget from the installed event filter.
@@ -1784,8 +1869,9 @@ class WorldView : public QWidget
 		void noteUserScrollAction();
 		/**
 		 * @brief Synchronizes split and accessibility review state after top-pane output scrolling.
+		 * @param notifyReviewTarget Emit review speech/accessibility updates when the view remains split.
 		 */
-		void syncOutputScrollbackReviewState();
+		void syncOutputScrollbackReviewState(bool notifyReviewTarget = true);
 		/**
 		 * @brief Enables/disables scrollback split mode.
 		 * @param active Activate split mode when `true`.
@@ -2135,8 +2221,10 @@ class WorldView : public QWidget
 		mutable quint64                             m_accessibleOutputRevision{0};
 		mutable QString                             m_accessibleOutputText;
 		mutable bool                                m_accessibleOutputPendingTailAppend{false};
-		bool                                        m_accessibleOutputReviewActive{false};
-		int                                         m_accessibleOutputReviewLastNotifiedCursorOffset{-1};
+		mutable bool                                m_accessibleOutputReviewActive{false};
+		mutable AccessibleOutputReviewTargetKind    m_accessibleOutputReviewTargetKind{
+		    AccessibleOutputReviewTargetKind::None};
+		mutable int                                 m_accessibleOutputReviewLastNotifiedCursorOffset{-1};
 		mutable QVector<int>                        m_accessibleOutputLineStartCache;
 		mutable quint64                             m_accessibleOutputLineStartCacheRevision{0};
 		mutable int                                 m_accessibleOutputLineStartCacheNextOffset{0};

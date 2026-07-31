@@ -36,6 +36,14 @@
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+extern "C"
+{
+#include <lauxlib.h>
+#include <lua.h>
+}
+#endif
+
 namespace
 {
 	const QString           kDeferredConnectPluginId   = QStringLiteral("abcdeffedcbaabcdeffedcba");
@@ -2121,6 +2129,180 @@ end
 			QCOMPARE(reloaded.plugins().size(), 1);
 			QCOMPARE(reloaded.plugins().constFirst().attributes.value(QStringLiteral("id")),
 			         QMudNativePluginRegistry::mushReaderPluginId());
+		}
+
+		static void mushReaderPluginInfoEnabledIgnoresQtAccessibilitySpeechToggle()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString worldsDir  = QDir(tempDir.path()).filePath(QStringLiteral("worlds"));
+			const QString pluginsDir = QDir(worldsDir).filePath(QStringLiteral("plugins"));
+			const QString stateDir   = QDir(tempDir.path()).filePath(QStringLiteral("state"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(QDir().mkpath(stateDir));
+
+			const QString worldPath = QDir(worldsDir).filePath(QStringLiteral("native_disabled.qdl"));
+			QVERIFY(writeTextFile(worldPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<qmud>
+  <world id="bbbbbbbbbbbbbbbbbbbbbbbb" name="Native Disabled"/>
+  <include name="qmud:native/MushReader" plugin="y" enabled="n"/>
+</qmud>
+)xml")));
+
+			WorldDocument doc;
+			QVERIFY2(doc.loadFromFile(worldPath), qPrintable(doc.errorString()));
+			QVERIFY2(doc.expandIncludes(worldPath, pluginsDir, tempDir.path(), stateDir),
+			         qPrintable(doc.errorString()));
+
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { speechEvents.push_back(event); });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setStateFilesDirectory(stateDir);
+			runtime.applyFromDocument(doc);
+			speechEvents.clear();
+
+			const QString mushReaderId = QMudNativePluginRegistry::mushReaderPluginId();
+			QCOMPARE(runtime.plugins().size(), 1);
+			QCOMPARE(runtime.plugins().constFirst().attributes.value(QStringLiteral("id")), mushReaderId);
+			QVERIFY(!runtime.plugins().constFirst().enabled);
+			QVERIFY(!runtime.hasMushReaderLiveSpeechOwner());
+			QVERIFY(runtime.isQtAccessibilitySpeechEnabled());
+			QVERIFY(runtime.isPluginInstalled(mushReaderId));
+			QVERIFY(runtime.pluginIdList().contains(mushReaderId, Qt::CaseInsensitive));
+			QCOMPARE(runtime.pluginInfo(mushReaderId, 17).toBool(), false);
+			QCOMPARE(runtime.pluginSupports(mushReaderId, QStringLiteral("say")), eOK);
+
+			WorldRuntime absentMushReaderRuntime;
+			QVERIFY(!absentMushReaderRuntime.isPluginInstalled(mushReaderId));
+			QVERIFY(!absentMushReaderRuntime.pluginIdList().contains(mushReaderId, Qt::CaseInsensitive));
+			QVERIFY(!absentMushReaderRuntime.pluginInfo(mushReaderId, 1).isValid());
+			QCOMPARE(absentMushReaderRuntime.pluginSupports(mushReaderId, QStringLiteral("say")),
+			         eNoSuchPlugin);
+			QCOMPARE(absentMushReaderRuntime.callPlugin(mushReaderId, QStringLiteral("say"),
+			                                            QStringLiteral("absent")),
+			         eNoSuchPlugin);
+			QVERIFY(speechEvents.isEmpty());
+
+			QCOMPARE(runtime.callPlugin(mushReaderId, QStringLiteral("say"), QStringLiteral("blocked")),
+			         ePluginDisabled);
+			QVERIFY(speechEvents.isEmpty());
+
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+			lua_State *luaState = luaL_newstate();
+			QVERIFY(luaState != nullptr);
+			const auto closeLuaState = qScopeGuard([luaState] { lua_close(luaState); });
+
+			lua_pushstring(luaState, "lua blocked");
+			QCOMPARE(runtime.callPluginLua(mushReaderId, QStringLiteral("say"), luaState, 1), 2);
+			QCOMPARE(lua_gettop(luaState), 3);
+			QCOMPARE(static_cast<int>(lua_tointeger(luaState, -2)), ePluginDisabled);
+			QVERIFY(QString::fromUtf8(lua_tostring(luaState, -1)).contains(QStringLiteral("disabled")));
+			lua_settop(luaState, 0);
+			QVERIFY(speechEvents.isEmpty());
+
+			lua_pushstring(luaState, "lua absent");
+			QCOMPARE(absentMushReaderRuntime.callPluginLua(mushReaderId, QStringLiteral("say"), luaState, 1),
+			         2);
+			QCOMPARE(lua_gettop(luaState), 3);
+			QCOMPARE(static_cast<int>(lua_tointeger(luaState, -2)), eNoSuchPlugin);
+			lua_settop(luaState, 0);
+			QVERIFY(speechEvents.isEmpty());
+
+			lua_newtable(luaState);
+			QCOMPARE(runtime.callPluginLua(mushReaderId, QStringLiteral("say"), luaState, 1), 2);
+			QCOMPARE(lua_gettop(luaState), 3);
+			QCOMPARE(static_cast<int>(lua_tointeger(luaState, -2)), ePluginDisabled);
+			lua_settop(luaState, 0);
+			QVERIFY(speechEvents.isEmpty());
+#endif
+
+			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
+			QVERIFY(!runtime.isQtAccessibilitySpeechEnabled());
+			QVERIFY(!runtime.hasMushReaderLiveSpeechOwner());
+			QCOMPARE(runtime.pluginInfo(mushReaderId, 17).toBool(), false);
+
+			QVERIFY(runtime.enablePlugin(mushReaderId, true));
+			QVERIFY(runtime.hasMushReaderLiveSpeechOwner());
+			QVERIFY(!runtime.isQtAccessibilitySpeechEnabled());
+			QCOMPARE(runtime.pluginInfo(mushReaderId, 17).toBool(), true);
+			QCOMPARE(runtime.callPlugin(mushReaderId, QStringLiteral("say"), QStringLiteral("direct")), eOK);
+			QCOMPARE(speechEvents.size(), 1);
+			QCOMPARE(speechEvents.constLast().text, QStringLiteral("       direct"));
+			speechEvents.clear();
+
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+			lua_pushstring(luaState, "lua");
+			QCOMPARE(runtime.callPluginLua(mushReaderId, QStringLiteral("say"), luaState, 1), 1);
+			QCOMPARE(lua_gettop(luaState), 2);
+			QCOMPARE(static_cast<int>(lua_tointeger(luaState, -1)), eOK);
+			lua_settop(luaState, 0);
+			QCOMPARE(speechEvents.size(), 1);
+			QCOMPARE(speechEvents.constLast().text, QStringLiteral("       lua"));
+			speechEvents.clear();
+#endif
+
+			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
+			QVERIFY(runtime.hasMushReaderLiveSpeechOwner());
+			QCOMPARE(runtime.pluginInfo(mushReaderId, 17).toBool(), true);
+
+			QVERIFY(runtime.enablePlugin(mushReaderId, false));
+			QVERIFY(!runtime.hasMushReaderLiveSpeechOwner());
+			QCOMPARE(runtime.pluginInfo(mushReaderId, 17).toBool(), false);
+		}
+
+		static void luaAudioNativeCallPluginRespectsShadowEnabledState()
+		{
+			const QString audioId = QMudNativePluginRegistry::luaAudioPluginId();
+
+			WorldRuntime  absentRuntime;
+			QVERIFY(absentRuntime.isPluginInstalled(audioId));
+			QVERIFY(absentRuntime.pluginIdList().contains(audioId, Qt::CaseInsensitive));
+			QCOMPARE(absentRuntime.pluginInfo(audioId, 17).toBool(), true);
+			QCOMPARE(absentRuntime.pluginSupports(audioId, QStringLiteral("plugin_update_url")), eOK);
+			QCOMPARE(absentRuntime.callPlugin(audioId, QStringLiteral("plugin_update_url"), QString()), eOK);
+
+			WorldRuntime::Plugin audioPlugin;
+			audioPlugin.enabled    = false;
+			audioPlugin.nativeShim = true;
+			audioPlugin.attributes.insert(QStringLiteral("id"), audioId);
+			audioPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("LuaAudio"));
+
+			WorldRuntime runtime;
+			runtime.pluginsMutable().push_back(audioPlugin);
+			QCOMPARE(runtime.pluginInfo(audioId, 17).toBool(), false);
+			QCOMPARE(runtime.callPlugin(audioId, QStringLiteral("plugin_update_url"), QString()),
+			         ePluginDisabled);
+
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+			lua_State *luaState = luaL_newstate();
+			QVERIFY(luaState != nullptr);
+			const auto closeLuaState = qScopeGuard([luaState] { lua_close(luaState); });
+
+			lua_newtable(luaState);
+			QCOMPARE(runtime.callPluginLua(audioId, QStringLiteral("plugin_update_url"), luaState, 1), 2);
+			QCOMPARE(lua_gettop(luaState), 3);
+			QCOMPARE(static_cast<int>(lua_tointeger(luaState, -2)), ePluginDisabled);
+			lua_settop(luaState, 0);
+#endif
+
+			QVERIFY(runtime.enablePlugin(audioId, true));
+			QCOMPARE(runtime.pluginInfo(audioId, 17).toBool(), true);
+			QCOMPARE(runtime.callPlugin(audioId, QStringLiteral("plugin_update_url"), QString()), eOK);
+
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+			QCOMPARE(runtime.callPluginLua(audioId, QStringLiteral("plugin_update_url"), luaState, 1), 2);
+			QCOMPARE(lua_gettop(luaState), 2);
+			QCOMPARE(static_cast<int>(lua_tointeger(luaState, -2)), eOK);
+			QCOMPARE(QString::fromUtf8(lua_tostring(luaState, -1)), QStringLiteral("qmud:native/LuaAudio"));
+#endif
 		}
 
 		static void deferredWorldConnectHandlersRunOnceAfterPluginInstallCompletes()

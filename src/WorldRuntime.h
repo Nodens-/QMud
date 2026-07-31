@@ -56,6 +56,10 @@ class QMediaPlayer;
 class QSoundEffect;
 class QTemporaryFile;
 class QTcpServer;
+namespace QMudNativePluginRegistry
+{
+	struct NativeCallContext;
+}
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 struct lua_State;
 #endif
@@ -1264,16 +1268,39 @@ class WorldRuntime : public QObject
 		 * @param infoType Info selector code.
 		 * @return Requested metadata value.
 		 */
-		[[nodiscard]] QVariant    pluginInfo(const QString &pluginId, int infoType) const;
+		[[nodiscard]] QVariant pluginInfo(const QString &pluginId, int infoType) const;
+		/**
+		 * @brief Returns current native shim CallPlugin routing state.
+		 * @param pluginId Native shim id or name.
+		 * @return Native CallPlugin context resolved on the runtime thread.
+		 */
+		[[nodiscard]] QMudNativePluginRegistry::NativeCallContext
+		                          nativePluginCallContext(const QString &pluginId) const;
 		/**
 		 * @brief Invalidates plugin metadata caches after native shim runtime state changes.
 		 */
 		void                      notifyNativePluginStateChanged();
 		/**
 		 * @brief Returns whether MushReader owns live speech for this runtime.
-		 * @return `true` when the native MushReader shim is installed or currently enabled for the runtime.
+		 * @return `true` when the native MushReader shim is enabled for the runtime.
 		 */
 		[[nodiscard]] bool        hasMushReaderLiveSpeechOwner() const;
+		/**
+		 * @brief Returns whether the enabled MushReader shim may currently speak.
+		 * @return `true` when MushReader owns speech and its speech gate is enabled.
+		 */
+		[[nodiscard]] bool        isMushReaderSpeechEnabled() const;
+		/**
+		 * @brief Speaks user-initiated scrollback review text through MushReader when it owns speech.
+		 * @param text Review or search-result text to speak.
+		 * @return `true` when MushReader consumed the review speech request.
+		 */
+		[[nodiscard]] bool        speakMushReaderReviewText(const QString &text) const;
+		/**
+		 * @brief Returns whether Qt accessibility speech is enabled when MushReader does not own speech.
+		 * @return `true` when Qt accessibility speech announcements are enabled.
+		 */
+		[[nodiscard]] bool        isQtAccessibilitySpeechEnabled() const;
 		/**
 		 * @brief Lists installed plugin ids in current order.
 		 * @return Plugin id list.

@@ -3513,6 +3513,62 @@ namespace
 		return plugin;
 	}
 
+	int nativeShimShadowPluginIndex(const QList<WorldRuntime::Plugin> &plugins, const QString &shimId)
+	{
+		const int index = findPluginIndex(plugins, shimId);
+		return index >= 0 && plugins.at(index).nativeShim ? index : -1;
+	}
+
+	bool nativeShimAvailableWithoutShadowPlugin(const QString &shimId)
+	{
+		return shimId.compare(QMudNativePluginRegistry::mushReaderPluginId(), Qt::CaseInsensitive) != 0;
+	}
+
+	bool nativeShimVisibleForPluginApi(const QList<WorldRuntime::Plugin> &plugins, const QString &shimId)
+	{
+		return nativeShimShadowPluginIndex(plugins, shimId) >= 0 ||
+		       nativeShimAvailableWithoutShadowPlugin(shimId);
+	}
+
+	bool nativeShimPluginInfoEnabled(const QList<WorldRuntime::Plugin> &plugins, const QString &shimId)
+	{
+		if (const int shadowIndex = nativeShimShadowPluginIndex(plugins, shimId); shadowIndex >= 0)
+			return plugins.at(shadowIndex).enabled;
+		return nativeShimAvailableWithoutShadowPlugin(shimId);
+	}
+
+	QMudNativePluginRegistry::NativeCallContext
+	nativeShimCallContext(const WorldRuntime *runtime, const QList<WorldRuntime::Plugin> &plugins,
+	                      const QString &shimId)
+	{
+		QMudNativePluginRegistry::NativeCallContext context;
+		context.installed     = nativeShimVisibleForPluginApi(plugins, shimId);
+		context.pluginEnabled = nativeShimPluginInfoEnabled(plugins, shimId);
+		context.mushReaderSpeechEnabled =
+		    shimId.compare(QMudNativePluginRegistry::mushReaderPluginId(), Qt::CaseInsensitive) == 0
+		        ? QMudNativePluginRegistry::isMushReaderSpeechEnabled(runtime)
+		        : true;
+		const int shadowIndex = nativeShimShadowPluginIndex(plugins, shimId);
+		if (shadowIndex >= 0)
+			context.pluginName = plugins.at(shadowIndex).attributes.value(QStringLiteral("name"));
+		if (context.pluginName.trimmed().isEmpty())
+		{
+			QMudNativePluginRegistry::NativePluginMetadata metadata;
+			if (QMudNativePluginRegistry::metadataForShim(shimId, metadata))
+				context.pluginName = metadata.name;
+		}
+		return context;
+	}
+
+	QMudNativePluginRegistry::NativeCallResult nativeShimCallGateSynchronizationError()
+	{
+		QMudNativePluginRegistry::NativeCallResult result;
+		result.errorCode = eErrorCallingPluginRoutine;
+		result.errorText =
+		    QStringLiteral("Failed to synchronize native CallPlugin state with runtime thread");
+		return result;
+	}
+
 	QString fixHtmlString(const QString &source)
 	{
 		QString cleaned;
@@ -10318,16 +10374,12 @@ QSharedPointer<LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCallbackSn
 	for (const QString &shimId :
 	     {QMudNativePluginRegistry::mushReaderPluginId(), QMudNativePluginRegistry::luaAudioPluginId()})
 	{
+		if (!nativeShimVisibleForPluginApi(m_plugins, shimId))
+			continue;
 		QMudNativePluginRegistry::NativePluginMetadata metadata;
 		if (!QMudNativePluginRegistry::metadataForShim(shimId, metadata))
 			continue;
-		const int  shadowIndex = findPluginIndex(m_plugins, shimId);
-		const bool enabled =
-		    shimId.compare(QMudNativePluginRegistry::mushReaderPluginId(), Qt::CaseInsensitive) == 0
-		        ? QMudNativePluginRegistry::isMushReaderPluginEnabled(this) ||
-		              QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(this) ||
-		              (shadowIndex >= 0 && m_plugins.at(shadowIndex).enabled)
-		        : true;
+		const bool enabled = nativeShimPluginInfoEnabled(m_plugins, shimId);
 		if (!snapshot->pluginIdsSnapshot.contains(shimId, Qt::CaseInsensitive))
 			snapshot->pluginIdsSnapshot.push_back(shimId);
 		int visibleIndex = 0;
@@ -10344,6 +10396,11 @@ QSharedPointer<LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCallbackSn
 		snapshot->pluginNamesById.insert(shimId, metadata.name);
 		snapshot->pluginDirectoriesById.insert(shimId, metadata.directory);
 		snapshot->pluginEnabledById.insert(shimId, enabled);
+		if (shimId.compare(QMudNativePluginRegistry::mushReaderPluginId(), Qt::CaseInsensitive) == 0)
+		{
+			snapshot->nativePluginSpeechEnabledById.insert(
+			    shimId, QMudNativePluginRegistry::isMushReaderSpeechEnabled(this));
+		}
 		QSet<QString> functions;
 		for (const QString &routine : QMudNativePluginRegistry::supportedRoutines(shimId))
 			functions.insert(routine);
@@ -17589,8 +17646,39 @@ bool WorldRuntime::hasMushReaderLiveSpeechOwner() const
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::hasMushReaderLiveSpeechOwner");
 	const QString mushReaderId = QMudNativePluginRegistry::mushReaderPluginId();
-	return findPluginIndex(m_plugins, mushReaderId) >= 0 ||
-	       QMudNativePluginRegistry::isMushReaderPluginEnabled(this);
+	if (const int index = findPluginIndex(m_plugins, mushReaderId); index >= 0)
+		return m_plugins.at(index).enabled;
+	return QMudNativePluginRegistry::isMushReaderPluginEnabled(this);
+}
+
+bool WorldRuntime::isMushReaderSpeechEnabled() const
+{
+	if (QThread::currentThread() != thread())
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), false,
+		                          [this] { return isMushReaderSpeechEnabled(); });
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::isMushReaderSpeechEnabled");
+	return hasMushReaderLiveSpeechOwner() && QMudNativePluginRegistry::isMushReaderSpeechEnabled(this);
+}
+
+bool WorldRuntime::speakMushReaderReviewText(const QString &text) const
+{
+	if (QThread::currentThread() != thread())
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), false,
+		                          [this, text] { return speakMushReaderReviewText(text); });
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::speakMushReaderReviewText");
+	return QMudNativePluginRegistry::speakMushReaderReviewText(this, text);
+}
+
+bool WorldRuntime::isQtAccessibilitySpeechEnabled() const
+{
+	if (QThread::currentThread() != thread())
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), true,
+		                          [this] { return isQtAccessibilitySpeechEnabled(); });
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::isQtAccessibilitySpeechEnabled");
+	return QMudNativePluginRegistry::isQtAccessibilitySpeechEnabled(this);
 }
 
 void WorldRuntime::firePluginPartialLine(const QString &text)
@@ -18105,7 +18193,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	m_pluginCallbackPresencePluginCount = -1;
 	invalidatePluginCallbackPresenceCache();
 	QMudNativePluginRegistry::setMushReaderPluginEnabled(this, false);
-	QMudNativePluginRegistry::setMushReaderPassiveSpeechEnabled(this, false);
+	QMudNativePluginRegistry::setQtAccessibilitySpeechEnabled(this, true);
 	QVector<LuaEngineObservedInitializationRequest> pluginLuaInitRequests;
 	pluginLuaInitRequests.reserve(safeQSizeToInt(doc.plugins().size()));
 	for (const auto &p : doc.plugins())
@@ -20093,7 +20181,7 @@ bool WorldRuntime::unloadPlugin(const QString &pluginId, QString *error)
 	if (index < 0)
 	{
 		if (QMudNativePluginRegistry::isShimId(resolvedPluginId))
-			return true;
+			return nativeShimAvailableWithoutShadowPlugin(resolvedPluginId);
 		if (error)
 			*error = QStringLiteral("Plugin not found");
 		return false;
@@ -20144,7 +20232,8 @@ bool WorldRuntime::enablePlugin(const QString &pluginId, bool enable)
 	const QString resolvedPluginId = resolvePluginIdOrName(pluginId);
 	const int     index            = findPluginIndex(m_plugins, resolvedPluginId);
 	if (index < 0)
-		return QMudNativePluginRegistry::isShimId(resolvedPluginId);
+		return QMudNativePluginRegistry::isShimId(resolvedPluginId) &&
+		       nativeShimAvailableWithoutShadowPlugin(resolvedPluginId);
 	Plugin &plugin = m_plugins[index];
 	if (plugin.enabled == enable)
 	{
@@ -20207,7 +20296,7 @@ int WorldRuntime::reloadPlugin(const QString &pluginId, QString *error)
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::reloadPlugin");
 	const QString resolvedPluginId = resolvePluginIdOrName(pluginId);
 	if (QMudNativePluginRegistry::isShimId(resolvedPluginId))
-		return eOK;
+		return nativeShimVisibleForPluginApi(m_plugins, resolvedPluginId) ? eOK : eNoSuchPlugin;
 	const int index = findPluginIndex(m_plugins, resolvedPluginId);
 	if (index < 0)
 		return eNoSuchPlugin;
@@ -20253,9 +20342,26 @@ bool WorldRuntime::isPluginInstalled(const QString &pluginId) const
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::isPluginInstalled");
 	if (QMudNativePluginRegistry::isBlacklistedId(pluginId))
 		return false;
-	if (!QMudNativePluginRegistry::resolveShimIdOrName(pluginId).isEmpty())
-		return true;
+	if (const QString shimId = QMudNativePluginRegistry::resolveShimIdOrName(pluginId); !shimId.isEmpty())
+		return nativeShimVisibleForPluginApi(m_plugins, shimId);
 	return findPluginIndex(m_plugins, pluginId) >= 0;
+}
+
+QMudNativePluginRegistry::NativeCallContext
+WorldRuntime::nativePluginCallContext(const QString &pluginId) const
+{
+	if (QThread::currentThread() != thread())
+	{
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this),
+		                          QMudNativePluginRegistry::NativeCallContext{},
+		                          [this, pluginId] { return nativePluginCallContext(pluginId); });
+	}
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::nativePluginCallContext");
+	const QString shimId = QMudNativePluginRegistry::resolveShimIdOrName(pluginId);
+	if (shimId.isEmpty() || QMudNativePluginRegistry::isBlacklistedId(shimId))
+		return {};
+	return nativeShimCallContext(this, m_plugins, shimId);
 }
 
 QString WorldRuntime::resolvePluginIdOrName(const QString &pluginIdOrName) const
@@ -20294,7 +20400,17 @@ int WorldRuntime::pluginSupports(const QString &pluginId, const QString &routine
 	if (QMudNativePluginRegistry::isBlacklistedId(pluginId))
 		return eNoSuchPlugin;
 	if (const QString shimId = QMudNativePluginRegistry::resolveShimIdOrName(pluginId); !shimId.isEmpty())
+	{
+		if (QThread::currentThread() != thread())
+		{
+			return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this), eNoSuchPlugin,
+			                          [this, shimId, routine] { return pluginSupports(shimId, routine); });
+		}
+		qmudAssertObjectThreadAffinity(this, "WorldRuntime::pluginSupports");
+		if (!nativeShimVisibleForPluginApi(m_plugins, shimId))
+			return eNoSuchPlugin;
 		return QMudNativePluginRegistry::pluginSupports(shimId, routine);
+	}
 
 	const auto supportsRoutine = [this, &routine](const QSharedPointer<LuaCallbackEngine> &engine) -> int
 	{
@@ -20367,8 +20483,8 @@ int WorldRuntime::callPlugin(const QString &pluginId, const QString &routine, co
 			return qmudInvokeMethodOr(this, eErrorCallingPluginRoutine,
 			                          [this, shimId, routine, argument, callingPluginId]
 			                          { return callPlugin(shimId, routine, argument, callingPluginId); });
-		const QMudNativePluginRegistry::NativeCallResult result =
-		    QMudNativePluginRegistry::callRoutine(this, shimId, routine, {QVariant(argument)});
+		const QMudNativePluginRegistry::NativeCallResult result = QMudNativePluginRegistry::callRoutine(
+		    this, shimId, routine, {QVariant(argument)}, nativeShimCallContext(this, m_plugins, shimId));
 		return result.errorCode;
 	}
 
@@ -20494,6 +20610,18 @@ int WorldRuntime::callPluginLua(const QString &pluginId, const QString &routine,
 
 	if (const QString shimId = QMudNativePluginRegistry::resolveShimIdOrName(pluginId); !shimId.isEmpty())
 	{
+		const auto nativeContext = [this, &shimId] { return nativeShimCallContext(this, m_plugins, shimId); };
+		const QMudNativePluginRegistry::NativeCallContext context =
+		    QThread::currentThread() == thread()
+		        ? nativeContext()
+		        : qmudInvokeMethodOr(this, QMudNativePluginRegistry::NativeCallContext{}, nativeContext);
+		if (!context.installed || !context.pluginEnabled)
+		{
+			const QMudNativePluginRegistry::NativeCallResult result =
+			    QMudNativePluginRegistry::callRoutine(this, shimId, routine, {}, context);
+			return pushCodeAndMessage(result.errorCode, result.errorText);
+		}
+
 		QVector<QVariant> arguments;
 		const int         top = lua_gettop(callerState);
 		arguments.reserve(std::max(0, top - firstArg + 1));
@@ -20526,11 +20654,14 @@ int WorldRuntime::callPluginLua(const QString &pluginId, const QString &routine,
 			}
 		}
 		const auto invokeNative = [this, shimId, routine, arguments]
-		{ return QMudNativePluginRegistry::callRoutine(this, shimId, routine, arguments); };
+		{
+			return QMudNativePluginRegistry::callRoutine(this, shimId, routine, arguments,
+			                                             nativeShimCallContext(this, m_plugins, shimId));
+		};
 		const QMudNativePluginRegistry::NativeCallResult result =
 		    QThread::currentThread() == thread()
 		        ? invokeNative()
-		        : qmudInvokeMethodOr(this, QMudNativePluginRegistry::NativeCallResult{}, invokeNative);
+		        : qmudInvokeMethodOr(this, nativeShimCallGateSynchronizationError(), invokeNative);
 		if (result.errorCode != eOK)
 			return pushCodeAndMessage(result.errorCode, result.errorText);
 		const qsizetype returnValueCount      = result.returnValues.size();
@@ -22217,15 +22348,11 @@ QVariant WorldRuntime::pluginInfo(const QString &pluginId, int infoType) const
 		return {};
 	if (const QString shimId = QMudNativePluginRegistry::resolveShimIdOrName(pluginId); !shimId.isEmpty())
 	{
+		if (!nativeShimVisibleForPluginApi(m_plugins, shimId))
+			return {};
 		int               visibleIndex = 0;
 		const QStringList ids          = pluginIdList();
-		const int         shadowIndex  = findPluginIndex(m_plugins, shimId);
-		const bool        enabled =
-		    shimId.compare(QMudNativePluginRegistry::mushReaderPluginId(), Qt::CaseInsensitive) == 0
-		        ? QMudNativePluginRegistry::isMushReaderPluginEnabled(this) ||
-		              QMudNativePluginRegistry::isMushReaderPassiveSpeechEnabled(this) ||
-		              (shadowIndex >= 0 && m_plugins.at(shadowIndex).enabled)
-		        : true;
+		const bool        enabled      = nativeShimPluginInfoEnabled(m_plugins, shimId);
 		for (int i = 0; i < ids.size(); ++i)
 		{
 			if (ids.at(i).compare(shimId, Qt::CaseInsensitive) == 0)
@@ -22322,7 +22449,7 @@ QStringList WorldRuntime::pluginIdList() const
 	for (const QString &shimId :
 	     {QMudNativePluginRegistry::mushReaderPluginId(), QMudNativePluginRegistry::luaAudioPluginId()})
 	{
-		if (!ids.contains(shimId, Qt::CaseInsensitive))
+		if (nativeShimVisibleForPluginApi(m_plugins, shimId) && !ids.contains(shimId, Qt::CaseInsensitive))
 			ids.push_back(shimId);
 	}
 	return ids;

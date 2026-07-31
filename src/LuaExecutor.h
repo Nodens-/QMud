@@ -567,6 +567,7 @@ struct LuaCallbackMiniWindowSnapshot
 		QHash<QString, QString>                               pluginNamesById;
 		QHash<QString, QString>                               pluginDirectoriesById;
 		QHash<QString, bool>                                  pluginEnabledById;
+		QHash<QString, bool>                                  nativePluginSpeechEnabledById;
 		QHash<QString, QSharedPointer<LuaCallbackEngine>>     pluginEnginesById;
 		QHash<QString, QSet<QString>>                         pluginLuaFunctionsById;
 		QStringList                                           broadcastPluginIdsSnapshot;
