@@ -1610,6 +1610,8 @@ void WorldCommandProcessor::onHyperlinkActivated(const QString &href)
 	const QString normalizedHref = normalizeMxpActionText(href);
 	if (normalizedHref.isEmpty())
 		return;
+	if (hasUnresolvedMxpTextEntityReference(normalizedHref))
+		return;
 
 	if (const QString lower = normalizedHref.toLower(); lower.startsWith(QStringLiteral("http://")) ||
 	                                                    lower.startsWith(QStringLiteral("https://")) ||
@@ -1704,6 +1706,8 @@ void WorldCommandProcessor::onMiniWindowOutputActionActivated(const int actionTy
 	{
 		const QString normalizedAction = normalizeMxpActionText(action);
 		if (normalizedAction.isEmpty())
+			return;
+		if (hasUnresolvedMxpTextEntityReference(normalizedAction))
 			return;
 		if (m_view)
 			m_view->setInputText(normalizedAction, true);

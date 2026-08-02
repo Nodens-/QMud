@@ -6,25 +6,50 @@
  * Role: QTest coverage for TelnetProcessor MXP behavior.
  */
 
+#include "MxpDiagnostics.h"
 #include "TelnetCallbackSpy.h"
 #include "TelnetProcessor.h"
+#include "WorldOptions.h"
 
 #include <QtTest/QTest>
+
+#include <algorithm>
 
 namespace
 {
 	constexpr unsigned char ESC        = 0x1B;
 	constexpr unsigned char IAC        = 0xFF;
+	constexpr unsigned char GA         = 0xF9;
+	constexpr unsigned char EOR        = 0xEF;
 	constexpr unsigned char SB         = 0xFA;
 	constexpr unsigned char SE         = 0xF0;
 	constexpr unsigned char TELOPT_MXP = 91;
 
-	QByteArray              bytes(std::initializer_list<unsigned char> raw)
+	using MxpMode = TelnetProcessor::MxpMode;
+
+	QByteArray bytes(std::initializer_list<unsigned char> raw)
 	{
 		QByteArray out;
 		for (const unsigned char c : raw)
 			out.append(static_cast<char>(c));
 		return out;
+	}
+
+	bool hasMxpCollectionTooLongErrorDiagnostic(const TelnetCallbackSpy &spy)
+	{
+		return std::ranges::any_of(spy.mxpDiagnostics,
+		                           [](const TelnetCallbackSpy::MxpDiagnostic &diagnostic)
+		                           {
+			                           return diagnostic.level == DBG_ERROR &&
+			                                  diagnostic.messageNumber == errMXP_CollectionTooLong;
+		                           });
+	}
+
+	void expectOnlyMxpErrorDiagnostic(const TelnetCallbackSpy &spy, const long messageNumber)
+	{
+		QCOMPARE(spy.mxpDiagnostics.size(), 1);
+		QCOMPARE(spy.mxpDiagnostics.constFirst().level, DBG_ERROR);
+		QCOMPARE(spy.mxpDiagnostics.constFirst().messageNumber, messageNumber);
 	}
 } // namespace
 
@@ -40,7 +65,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 		void parseStartAndEndTags()
 		{
 			TelnetProcessor processor;
-			processor.setUseMxp(2); // eUseMXP
+			processor.setUseMxp(eUseMXP);
 
 			const QByteArray output = processor.processBytes(QByteArrayLiteral("<bold>Hello</bold>"));
 			QCOMPARE(output, QByteArrayLiteral("Hello"));
@@ -56,7 +81,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 		void customEntityExpansion()
 		{
 			TelnetProcessor processor;
-			processor.setUseMxp(2);
+			processor.setUseMxp(eUseMXP);
 			processor.setCustomEntity(QByteArrayLiteral("foo"), QByteArrayLiteral("BAR"));
 
 			QByteArray value;
@@ -74,7 +99,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
-			processor.setUseMxp(0); // eOnCommandMXP
+			processor.setUseMxp(eOnCommandMXP);
 
 			QVERIFY(!processor.isMxpEnabled());
 			processor.processBytes(bytes({IAC, SB, TELOPT_MXP, IAC, SE}));
@@ -90,7 +115,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
 
-			processor.setUseMxp(2);
+			processor.setUseMxp(eUseMXP);
 			QVERIFY(processor.isMxpEnabled());
 			QCOMPARE(spy.mxpStarts.size(), 1);
 
@@ -120,7 +145,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 		void permLockedModeTreatsTagsAsPlainText()
 		{
 			TelnetProcessor processor;
-			processor.setUseMxp(2); // eUseMXP
+			processor.setUseMxp(eUseMXP);
 
 			QByteArray input;
 			input.append(static_cast<char>(ESC));
@@ -137,7 +162,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 		void secureFlagIsCapturedPerEventWithinSinglePacket()
 		{
 			TelnetProcessor processor;
-			processor.setUseMxp(2); // eUseMXP
+			processor.setUseMxp(eUseMXP);
 
 			QByteArray input;
 			input.append(static_cast<char>(ESC));
@@ -167,7 +192,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 		void permLockedModeKeepsEntitiesLiteralAcrossLines()
 		{
 			TelnetProcessor processor;
-			processor.setUseMxp(0); // eOnCommandMXP
+			processor.setUseMxp(eOnCommandMXP);
 			processor.processBytes(bytes({IAC, SB, TELOPT_MXP, IAC, SE}));
 			QVERIFY(processor.isMxpEnabled());
 
@@ -192,7 +217,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 		void mixedAnsiAndMxpKeepsAnsiDataAndTracksTagOffsets()
 		{
 			TelnetProcessor processor;
-			processor.setUseMxp(0); // eOnCommandMXP
+			processor.setUseMxp(eOnCommandMXP);
 			processor.processBytes(bytes({IAC, SB, TELOPT_MXP, IAC, SE}));
 			QVERIFY(processor.isMxpEnabled());
 
@@ -221,7 +246,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 		void modeBoundaryOffsetsTrackEscZWithinMixedStream()
 		{
 			TelnetProcessor processor;
-			processor.setUseMxp(0); // eOnCommandMXP
+			processor.setUseMxp(eOnCommandMXP);
 			processor.processBytes(bytes({IAC, SB, TELOPT_MXP, IAC, SE}));
 			QVERIFY(processor.isMxpEnabled());
 
@@ -240,9 +265,9 @@ class tst_TelnetProcessor_Mxp : public QObject
 
 			const QList<TelnetProcessor::MxpModeChange> modeChanges = processor.takeMxpModeChanges();
 			QCOMPARE(modeChanges.size(), 2);
-			QCOMPARE(modeChanges.at(0).newMode, 1); // eMXP_secure
+			QCOMPARE(modeChanges.at(0).newMode, TelnetProcessor::mxpModeCode(MxpMode::Secure));
 			QCOMPARE(modeChanges.at(0).offset, 0);
-			QCOMPARE(modeChanges.at(1).newMode, 7); // eMXP_perm_locked
+			QCOMPARE(modeChanges.at(1).newMode, TelnetProcessor::mxpModeCode(MxpMode::PermanentLocked));
 			QCOMPARE(modeChanges.at(1).offset, static_cast<int>(QByteArrayLiteral("Testuser").size()));
 			QVERIFY(modeChanges.at(0).sequence < modeChanges.at(1).sequence);
 		}
@@ -250,7 +275,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 		void resetConnectionStateClearsStaleMxpLockedMode()
 		{
 			TelnetProcessor processor;
-			processor.setUseMxp(2); // eUseMXP
+			processor.setUseMxp(eUseMXP);
 
 			// Move to permanently locked mode (server-side state before reconnect).
 			QByteArray lockMode;
@@ -267,7 +292,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 			processor.resetConnectionState();
 			// Runtime reapplies world setting every packet; keep same mode and verify
 			// "same value" path can re-enable MXP after reset.
-			processor.setUseMxp(2); // eUseMXP
+			processor.setUseMxp(eUseMXP);
 
 			// After reset + reapply, MXP should parse again, not leak raw tags.
 			QCOMPARE(processor.processBytes(QByteArrayLiteral("<send href='look'>go</send>")),
@@ -281,7 +306,7 @@ class tst_TelnetProcessor_Mxp : public QObject
 		void customElementDefinitionParsesAndIsQueryable()
 		{
 			TelnetProcessor processor;
-			processor.setUseMxp(2); // eUseMXP
+			processor.setUseMxp(eUseMXP);
 
 			QByteArray input;
 			input.append(static_cast<char>(ESC));
@@ -311,15 +336,15 @@ class tst_TelnetProcessor_Mxp : public QObject
 		void mxpSessionStateRestoresDetailedModes()
 		{
 			TelnetProcessor processor;
-			processor.setUseMxp(2); // eUseMXP
+			processor.setUseMxp(eUseMXP);
 
 			TelnetProcessor::MxpSessionState saved;
 			saved.enabled      = true;
 			saved.puebloActive = false;
 			saved.secureMode   = true;
-			saved.mode         = 6; // eMXP_perm_secure
-			saved.defaultMode  = 6; // eMXP_perm_secure
-			saved.previousMode = 5; // eMXP_perm_open
+			saved.mode         = TelnetProcessor::mxpModeCode(MxpMode::PermanentSecure);
+			saved.defaultMode  = TelnetProcessor::mxpModeCode(MxpMode::PermanentSecure);
+			saved.previousMode = TelnetProcessor::mxpModeCode(MxpMode::PermanentOpen);
 
 			processor.setMxpSessionState(saved);
 			const TelnetProcessor::MxpSessionState restored = processor.mxpSessionState();
@@ -329,6 +354,265 @@ class tst_TelnetProcessor_Mxp : public QObject
 			QCOMPARE(restored.defaultMode, saved.defaultMode);
 			QCOMPARE(restored.previousMode, saved.previousMode);
 		}
+
+		void unterminatedMxpElementDoesNotSwallowNewline()
+		{
+			TelnetProcessor   processor;
+			TelnetCallbackSpy spy;
+			processor.setCallbacks(spy.callbacks());
+			processor.setUseMxp(eUseMXP);
+
+			const QByteArray output =
+			    processor.processBytes(QByteArrayLiteral("before <unterminated\nprompt"));
+
+			QCOMPARE(output, QByteArrayLiteral("before \nprompt"));
+			QVERIFY(processor.takeMxpEvents().isEmpty());
+			expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedElement);
+		}
+
+		void unterminatedMxpEntityDoesNotSwallowNewline()
+		{
+			TelnetProcessor   processor;
+			TelnetCallbackSpy spy;
+			processor.setCallbacks(spy.callbacks());
+			processor.setUseMxp(eUseMXP);
+
+			const QByteArray output =
+			    processor.processBytes(QByteArrayLiteral("before &unterminated\nprompt"));
+
+			QCOMPARE(output, QByteArrayLiteral("before \nprompt"));
+			QVERIFY(processor.takeMxpEvents().isEmpty());
+			expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedEntity);
+		}
+
+		void unterminatedMxpQuoteDoesNotSwallowIacGa()
+		{
+			TelnetProcessor   processor;
+			TelnetCallbackSpy spy;
+			processor.setCallbacks(spy.callbacks());
+			processor.setUseMxp(eUseMXP);
+			processor.setConvertGAtoNewline(true);
+
+			QByteArray input = QByteArrayLiteral("prompt <send href='unterminated");
+			input.append(bytes({IAC, GA}));
+
+			const QByteArray output = processor.processBytes(input);
+
+			QCOMPARE(output, QByteArrayLiteral("prompt \n"));
+			QCOMPARE(spy.iacGaCount, 1);
+			const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::IacGa);
+			QCOMPARE(events.constFirst().option, static_cast<int>(GA));
+			QCOMPARE(events.constFirst().offset, static_cast<int>(QByteArrayLiteral("prompt ").size()));
+			expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedQuote);
+		}
+
+		void unterminatedMxpElementDoesNotSwallowIacEor()
+		{
+			TelnetProcessor   processor;
+			TelnetCallbackSpy spy;
+			processor.setCallbacks(spy.callbacks());
+			processor.setUseMxp(eUseMXP);
+			processor.setConvertGAtoNewline(true);
+
+			QByteArray input = QByteArrayLiteral("prompt <unterminated");
+			input.append(bytes({IAC, EOR}));
+
+			const QByteArray output = processor.processBytes(input);
+
+			QCOMPARE(output, QByteArrayLiteral("prompt \n"));
+			QCOMPARE(spy.iacGaCount, 1);
+			const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::IacGa);
+			QCOMPARE(events.constFirst().option, static_cast<int>(EOR));
+			QCOMPARE(events.constFirst().offset, static_cast<int>(QByteArrayLiteral("prompt ").size()));
+			expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedElement);
+		}
+
+		void unterminatedMxpElementDoesNotSwallowAnsiEscape()
+		{
+			TelnetProcessor   processor;
+			TelnetCallbackSpy spy;
+			processor.setCallbacks(spy.callbacks());
+			processor.setUseMxp(eUseMXP);
+
+			QByteArray input = QByteArrayLiteral("before <unterminated");
+			input.append(static_cast<char>(ESC));
+			input.append(QByteArrayLiteral("[31mred"));
+
+			const QByteArray output = processor.processBytes(input);
+
+			QCOMPARE(output, QByteArrayLiteral("before \x1b[31mred"));
+			QVERIFY(processor.takeMxpEvents().isEmpty());
+			expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedElement);
+		}
+
+		void splitPacketUnterminatedMxpElementDoesNotSwallowNewline()
+		{
+			TelnetProcessor   processor;
+			TelnetCallbackSpy spy;
+			processor.setCallbacks(spy.callbacks());
+			processor.setUseMxp(eUseMXP);
+
+			QCOMPARE(processor.processBytes(QByteArrayLiteral("before <unterminated")),
+			         QByteArrayLiteral("before "));
+			QCOMPARE(processor.processBytes(QByteArrayLiteral("\nprompt")), QByteArrayLiteral("\nprompt"));
+
+			QVERIFY(processor.takeMxpEvents().isEmpty());
+			expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedElement);
+		}
+
+		void splitPacketUnterminatedMxpElementDoesNotSwallowIacGa()
+		{
+			TelnetProcessor   processor;
+			TelnetCallbackSpy spy;
+			processor.setCallbacks(spy.callbacks());
+			processor.setUseMxp(eUseMXP);
+			processor.setConvertGAtoNewline(true);
+
+			QCOMPARE(processor.processBytes(QByteArrayLiteral("prompt <unterminated")),
+			         QByteArrayLiteral("prompt "));
+			QCOMPARE(processor.processBytes(bytes({IAC})), QByteArray());
+			QCOMPARE(processor.processBytes(bytes({GA})), QByteArrayLiteral("\n"));
+
+			QCOMPARE(spy.iacGaCount, 1);
+			const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::IacGa);
+			QCOMPARE(events.constFirst().option, static_cast<int>(GA));
+			QCOMPARE(events.constFirst().offset, 0);
+			expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedElement);
+		}
+
+		void unterminatedMxpElementRestoresSecureOnceBeforeIacGa()
+		{
+			TelnetProcessor   processor;
+			TelnetCallbackSpy spy;
+			processor.setCallbacks(spy.callbacks());
+			processor.setUseMxp(eUseMXP);
+			processor.setConvertGAtoNewline(true);
+
+			QByteArray input;
+			input.append(static_cast<char>(ESC));
+			input.append(QByteArrayLiteral("[4z<unterminated"));
+			input.append(bytes({IAC, GA}));
+			input.append(QByteArrayLiteral("<send href='look'>go</send>"));
+
+			const QByteArray output = processor.processBytes(input);
+
+			QCOMPARE(output, QByteArrayLiteral("\ngo"));
+			QCOMPARE(spy.iacGaCount, 1);
+			expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedElement);
+			const QList<TelnetProcessor::MxpEvent> events = processor.takeMxpEvents();
+			QCOMPARE(events.size(), 2);
+			QCOMPARE(events.at(0).type, TelnetProcessor::MxpEvent::StartTag);
+			QCOMPARE(events.at(1).type, TelnetProcessor::MxpEvent::EndTag);
+			QVERIFY(!events.at(0).secure);
+			QVERIFY(!events.at(1).secure);
+		}
+
+		void secureOnceRestoredBeforeMxpDiagnosticCallbacks()
+		{
+			TelnetProcessor            processor;
+			TelnetCallbackSpy          spy;
+			TelnetProcessor::Callbacks callbacks              = spy.callbacks();
+			int                        observedNeededMode     = -1;
+			int                        observedDiagnosticMode = -1;
+			callbacks.onMxpDiagnosticNeeded                   = [&](int)
+			{
+				observedNeededMode = processor.mxpSessionState().mode;
+				return true;
+			};
+			callbacks.onMxpDiagnostic = [&](const int level, const long messageNumber, const QString &message)
+			{
+				observedDiagnosticMode = processor.mxpSessionState().mode;
+				spy.mxpDiagnostics.append({level, messageNumber, message});
+			};
+			processor.setCallbacks(callbacks);
+			processor.setUseMxp(eUseMXP);
+
+			QByteArray lockMode;
+			lockMode.append(static_cast<char>(ESC));
+			lockMode.append(QByteArrayLiteral("[7z"));
+			QCOMPARE(processor.processBytes(lockMode), QByteArray());
+			const int  lockedMode = processor.mxpSessionState().mode;
+
+			QByteArray input;
+			input.append(static_cast<char>(ESC));
+			input.append(QByteArrayLiteral("[4z<unterminated\n"));
+
+			QCOMPARE(processor.processBytes(input), QByteArrayLiteral("\n"));
+			expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedElement);
+			QCOMPARE(observedNeededMode, lockedMode);
+			QCOMPARE(observedDiagnosticMode, lockedMode);
+			QCOMPARE(processor.mxpSessionState().mode, lockedMode);
+		}
+
+		void overlongMxpElementRestoresSecureOnceBeforeNextTag()
+		{
+			TelnetProcessor   probeProcessor;
+			TelnetCallbackSpy probeSpy;
+			probeProcessor.setCallbacks(probeSpy.callbacks());
+			probeProcessor.setUseMxp(eUseMXP);
+			QByteArray probePrefix;
+			probePrefix.append(static_cast<char>(ESC));
+			probePrefix.append(QByteArrayLiteral("[4z<"));
+			QCOMPARE(probeProcessor.processBytes(probePrefix), QByteArray());
+
+			int overflowBytes = 0;
+			for (; overflowBytes < 20000 && !hasMxpCollectionTooLongErrorDiagnostic(probeSpy);
+			     ++overflowBytes)
+				probeProcessor.processBytes(QByteArrayLiteral("x"));
+
+			expectOnlyMxpErrorDiagnostic(probeSpy, errMXP_CollectionTooLong);
+
+			TelnetProcessor   processor;
+			TelnetCallbackSpy spy;
+			processor.setCallbacks(spy.callbacks());
+			processor.setUseMxp(eUseMXP);
+
+			QByteArray input;
+			input.append(static_cast<char>(ESC));
+			input.append(QByteArrayLiteral("[4z<"));
+			input.append(QByteArray(overflowBytes, 'x'));
+			input.append(QByteArrayLiteral("<send href='look'>go</send>"));
+			const QByteArray output = processor.processBytes(input);
+
+			QCOMPARE(output, QByteArrayLiteral("go"));
+			expectOnlyMxpErrorDiagnostic(spy, errMXP_CollectionTooLong);
+			const QList<TelnetProcessor::MxpEvent> events = processor.takeMxpEvents();
+			QCOMPARE(events.size(), 2);
+			QCOMPARE(events.at(0).type, TelnetProcessor::MxpEvent::StartTag);
+			QCOMPARE(events.at(1).type, TelnetProcessor::MxpEvent::EndTag);
+			QVERIFY(!events.at(0).secure);
+			QVERIFY(!events.at(1).secure);
+		}
+
+		void nestedMxpElementRestoresSecureOnceLockedModeBeforeStarter()
+		{
+			TelnetProcessor   processor;
+			TelnetCallbackSpy spy;
+			processor.setCallbacks(spy.callbacks());
+			processor.setUseMxp(eUseMXP);
+
+			QByteArray input;
+			input.append(static_cast<char>(ESC));
+			input.append(QByteArrayLiteral("[7z"));
+			input.append(static_cast<char>(ESC));
+			input.append(QByteArrayLiteral("[4z<unterminated<send href='look'>go</send>"));
+
+			const QByteArray output = processor.processBytes(input);
+
+			QCOMPARE(output, QByteArrayLiteral("go</send>"));
+			expectOnlyMxpErrorDiagnostic(spy, errMXP_UnterminatedElement);
+			const QList<TelnetProcessor::MxpEvent> events = processor.takeMxpEvents();
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.at(0).type, TelnetProcessor::MxpEvent::StartTag);
+			QVERIFY(!events.at(0).secure);
+		}
+
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 

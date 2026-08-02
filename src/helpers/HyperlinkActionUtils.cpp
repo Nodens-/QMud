@@ -125,6 +125,15 @@ QString normalizeMxpActionText(const QString &text)
 	return decodeMxpActionText(text).trimmed();
 }
 
+bool hasUnresolvedMxpTextEntityReference(const QString &text)
+{
+	if (text.contains(QStringLiteral("&text;")))
+		return true;
+	if (!text.contains(QStringLiteral("&amp;")))
+		return false;
+	return decodeMxpActionText(text).contains(QStringLiteral("&text;"));
+}
+
 QString firstMxpSendAction(const QString &href)
 {
 	const QStringList parts = href.split(QLatin1Char('|'), Qt::KeepEmptyParts);

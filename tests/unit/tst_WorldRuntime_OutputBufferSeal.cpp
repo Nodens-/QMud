@@ -6,9 +6,11 @@
  * Role: Unit coverage for WorldRuntime session-state output-buffer sealing.
  */
 
+#include "NativePluginRegistry.h"
 #include "WorldRuntime.h"
 
 #include <QDateTime>
+#include <QScopeGuard>
 #include <QtTest/QTest>
 
 namespace
@@ -120,6 +122,23 @@ class tst_WorldRuntime_OutputBufferSeal : public QObject
 			QVERIFY(!runtime.lines().at(0).hardReturn);
 		}
 
+		void sealBlocksPendingIncomingPartialCommitWithoutClearing()
+		{
+			WorldRuntime runtime;
+			runtime.receiveRawData(QByteArrayLiteral("prompt> "));
+			QCOMPARE(runtime.lines().size(), 0);
+
+			runtime.setSessionStateOutputBufferSealed(true);
+			QVERIFY(!runtime.commitPendingIncomingPartialLine());
+			QCOMPARE(runtime.lines().size(), 0);
+
+			runtime.setSessionStateOutputBufferSealed(false);
+			QVERIFY(runtime.commitPendingIncomingPartialLine());
+			QCOMPARE(runtime.lines().size(), 1);
+			QCOMPARE(runtime.lines().at(0).text, QStringLiteral("prompt> "));
+			QVERIFY(runtime.lines().at(0).hardReturn);
+		}
+
 		void sealBlocksLuaContextLineMutations()
 		{
 			WorldRuntime runtime;
@@ -179,6 +198,78 @@ class tst_WorldRuntime_OutputBufferSeal : public QObject
 			    anchorLineNumber, 1, false, QStringLiteral("inserted"), WorldRuntime::LineOutput, {}, true));
 			QCOMPARE(runtime.lines().size(), 2);
 			QCOMPARE(runtime.lines().at(1).text, QStringLiteral("inserted"));
+		}
+
+		void luaContextOmittedLineCleanupClearsMushReaderPartialSuppression()
+		{
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&events](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { events.push_back(event); });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+
+			auto verifyCleanupAllowsScreenDraw = [&events](const QString &text, const bool hideForReplacement)
+			{
+				WorldRuntime runtime;
+				QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+				events.clear();
+				QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, text);
+				QCOMPARE(events.size(), 1);
+				QCOMPARE(events.constLast().text, text);
+
+				runtime.beginIncomingLineLuaContext(text, WorldRuntime::LineOutput, {});
+				QVERIFY(runtime.reserveIncomingLineLuaContextInBuffer());
+				QCOMPARE(runtime.lines().size(), 1);
+				QCOMPARE(runtime.lines().at(0).text, text);
+
+				if (hideForReplacement)
+				{
+					QVERIFY(runtime.hideBufferedIncomingLineLuaContextForReplacement());
+					QVERIFY((runtime.lines().at(0).flags & WorldRuntime::LineHidden) != 0);
+				}
+				else
+				{
+					QVERIFY(runtime.removeBufferedIncomingLineLuaContext());
+					QCOMPARE(runtime.lines().size(), 0);
+				}
+
+				events.clear();
+				QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0, text);
+				QCOMPARE(events.size(), 1);
+				QCOMPARE(events.constLast().text, text);
+			};
+
+			verifyCleanupAllowsScreenDraw(QStringLiteral("<omitted> "), false);
+			verifyCleanupAllowsScreenDraw(QStringLiteral("<replacement> "), true);
+		}
+
+		void committedPendingPartialClearsMushReaderPartialSuppression()
+		{
+			WorldRuntime                                       runtime;
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&events](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { events.push_back(event); });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+			const QString prompt = QStringLiteral("<committed> ");
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, prompt);
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, prompt);
+
+			runtime.receiveRawData(prompt.toUtf8());
+			QVERIFY(runtime.commitPendingIncomingPartialLine());
+			QCOMPARE(runtime.lines().size(), 1);
+			QCOMPARE(runtime.lines().constLast().text, prompt);
+
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0, prompt);
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, prompt);
 		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };

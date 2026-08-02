@@ -14,6 +14,7 @@
 #include "AppController.h"
 #include "Environment.h"
 #include "FontUtils.h"
+#include "HyperlinkActionUtils.h"
 #include "MainFrame.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
@@ -400,7 +401,8 @@ namespace
 				qSwap(foreground, background);
 		}
 
-		const bool hasLinkAction = isActionLinkType(span.actionType) && !span.action.isEmpty();
+		const bool hasLinkAction = isActionLinkType(span.actionType) && !span.action.isEmpty() &&
+		                           !hasUnresolvedMxpTextEntityReference(span.action);
 		if (!foreground.isValid())
 		{
 			if (hasLinkAction && useCustomLinkColour && hyperlinkColour.isValid())
@@ -3162,13 +3164,220 @@ WorldView::accessibleNativeOutputTextMap(const NativeOutputRenderLines &lines)
 	return QMudAccessibleTextUtils::LineOffsetMap(std::move(textLines));
 }
 
+int WorldView::accessibleNativeOutputCharacterCount(const NativeOutputRenderLines &lines)
+{
+	int       characterCount = 0;
+	const int lineCount      = sizeToInt(lines.size());
+	for (int i = 0; i < lineCount; ++i)
+	{
+		if (i > 0)
+			characterCount = saturatedAccessibleAdd(characterCount, 1);
+		characterCount = saturatedAccessibleAdd(characterCount, sizeToInt(lines.at(i).text.size()));
+	}
+	return characterCount;
+}
+
+int WorldView::accessibleRetainedLineCountForTailDelta(const NativeRenderCacheDelta &delta,
+                                                       const int                     lineCount)
+{
+	if (delta.newLineCount != lineCount)
+		return -1;
+	switch (delta.kind)
+	{
+	case NativeRenderCacheDeltaKind::TailAppend:
+		return qBound(0, delta.oldLineCount, delta.newLineCount);
+	case NativeRenderCacheDeltaKind::HeadTrimTailAppend:
+		return delta.headTrimCount > 0
+		           ? qBound(0, delta.oldLineCount - qBound(0, delta.headTrimCount, delta.oldLineCount),
+		                    delta.newLineCount)
+		           : -1;
+	default:
+		return -1;
+	}
+}
+
 void WorldView::primeAccessibleOutputTextState() const
 {
-	const QMudAccessibleTextUtils::LineOffsetMap map =
-	    accessibleNativeOutputTextMap(nativeOutputRenderLines());
-	m_accessibleOutputCharacterCount = map.characterCount();
+	const NativeOutputRenderLines               &lines = nativeOutputRenderLines();
+	const QMudAccessibleTextUtils::LineOffsetMap map   = accessibleNativeOutputTextMap(lines);
+	m_accessibleOutputCharacterCount                   = map.characterCount();
+	m_accessibleOutputRevision                         = m_nativeRenderLineCacheRevision;
+	m_accessibleOutputText                             = map.text(0, map.characterCount());
+	recordAccessibleOutputTailBaseline(lines);
+	m_accessibleOutputBaselineLineLengths.clear();
+}
+
+void WorldView::recordAccessibleOutputTailBaseline(const NativeOutputRenderLines &lines) const
+{
+	m_accessibleOutputBaselineLineCount = sizeToInt(lines.size());
+	m_accessibleOutputBaselineTailText  = lines.isEmpty() ? QString() : lines.constLast().text;
+}
+
+void WorldView::recordSuppressedAccessibleOutputLengthBaseline(const NativeOutputRenderLines &lines) const
+{
+	m_accessibleOutputBaselineLineLengths.clear();
+	m_accessibleOutputBaselineLineLengths.reserve(lines.size());
+	for (const NativeOutputRenderLine &line : lines)
+		m_accessibleOutputBaselineLineLengths.push_back(sizeToInt(line.text.size()));
+	recordAccessibleOutputTailBaseline(lines);
+}
+
+bool WorldView::updateSuppressedAccessibleOutputBaseline(const NativeOutputRenderLines &lines) const
+{
+	auto rebuildBaseline = [this, &lines]
+	{
+		m_accessibleOutputCharacterCount = accessibleNativeOutputCharacterCount(lines);
+		m_accessibleOutputRevision       = m_nativeRenderLineCacheRevision;
+		recordSuppressedAccessibleOutputLengthBaseline(lines);
+		return false;
+	};
+
+	if (lines.isEmpty())
+	{
+		m_accessibleOutputCharacterCount = 0;
+		m_accessibleOutputRevision       = m_nativeRenderLineCacheRevision;
+		recordAccessibleOutputTailBaseline(lines);
+		m_accessibleOutputBaselineLineLengths.clear();
+		return true;
+	}
+
+	const NativeRenderCacheDelta &delta = m_nativeRenderCacheDelta;
+	if (m_accessibleOutputRevision != delta.fromRevision || m_accessibleOutputCharacterCount < 0)
+		return rebuildBaseline();
+
+	int       characterCount      = m_accessibleOutputCharacterCount;
+	const int lineCount           = sizeToInt(lines.size());
+	const int baselineLengthCount = sizeToInt(m_accessibleOutputBaselineLineLengths.size());
+	auto updateBaselineLineLength = [this, &lines, &characterCount, lineCount](const int lineIndex) -> bool
+	{
+		if (lineIndex < 0 || lineIndex >= lineCount ||
+		    lineIndex >= sizeToInt(m_accessibleOutputBaselineLineLengths.size()))
+		{
+			return false;
+		}
+		const int previousLength = m_accessibleOutputBaselineLineLengths.at(lineIndex);
+		const int currentLength  = sizeToInt(lines.at(lineIndex).text.size());
+		characterCount           = qMax(0, characterCount - previousLength);
+		characterCount           = saturatedAccessibleAdd(characterCount, currentLength);
+		m_accessibleOutputBaselineLineLengths[lineIndex] = currentLength;
+		return true;
+	};
+	switch (delta.kind)
+	{
+	case NativeRenderCacheDeltaKind::TailAppend:
+	{
+		if (delta.newLineCount < delta.oldLineCount || delta.newLineCount != lineCount)
+			return rebuildBaseline();
+		if (baselineLengthCount != m_accessibleOutputBaselineLineCount)
+			return rebuildBaseline();
+		if (m_accessibleOutputBaselineLineCount == lineCount && !lines.isEmpty())
+		{
+			if (delta.headLineMutated && lineCount > 1 && !updateBaselineLineLength(0))
+				return rebuildBaseline();
+			if (!updateBaselineLineLength(lineCount - 1))
+				return rebuildBaseline();
+			break;
+		}
+		if (m_accessibleOutputBaselineLineCount != delta.oldLineCount)
+			return rebuildBaseline();
+		if (delta.headLineMutated && !updateBaselineLineLength(0))
+			return rebuildBaseline();
+		int firstInsertedLine = delta.oldLineCount;
+		if (delta.tailLineMutated && delta.oldLineCount > 0)
+		{
+			firstInsertedLine                   = delta.oldLineCount - 1;
+			const bool alreadyUpdatedAsHeadLine = delta.headLineMutated && firstInsertedLine == 0;
+			if (!alreadyUpdatedAsHeadLine && !updateBaselineLineLength(firstInsertedLine))
+				return rebuildBaseline();
+		}
+		for (int i = qMax(0, firstInsertedLine); i < lineCount; ++i)
+		{
+			if (delta.tailLineMutated && delta.oldLineCount > 0 && i == firstInsertedLine)
+				continue;
+			if (i > 0)
+				characterCount = saturatedAccessibleAdd(characterCount, 1);
+			characterCount = saturatedAccessibleAdd(characterCount, sizeToInt(lines.at(i).text.size()));
+			m_accessibleOutputBaselineLineLengths.push_back(sizeToInt(lines.at(i).text.size()));
+		}
+		break;
+	}
+	case NativeRenderCacheDeltaKind::TailRemove:
+	{
+		if (delta.newLineCount > delta.oldLineCount || delta.newLineCount != lineCount)
+			return rebuildBaseline();
+		if (m_accessibleOutputBaselineLineCount != delta.oldLineCount)
+			return rebuildBaseline();
+		if (baselineLengthCount != delta.oldLineCount)
+			return rebuildBaseline();
+		if (delta.tailLineMutated && delta.newLineCount > 0)
+		{
+			characterCount = qMax(0, characterCount - sizeToInt(m_accessibleOutputBaselineTailText.size()));
+			characterCount = saturatedAccessibleAdd(characterCount, sizeToInt(lines.constLast().text.size()));
+			m_accessibleOutputBaselineLineLengths.last() = sizeToInt(lines.constLast().text.size());
+			break;
+		}
+		if (delta.oldLineCount != delta.newLineCount + 1)
+			return rebuildBaseline();
+		const int removedCharacters =
+		    sizeToInt(m_accessibleOutputBaselineTailText.size()) + (delta.newLineCount > 0 ? 1 : 0);
+		characterCount = qMax(0, characterCount - removedCharacters);
+		m_accessibleOutputBaselineLineLengths.removeLast();
+		break;
+	}
+	case NativeRenderCacheDeltaKind::HeadTrimTailAppend:
+	{
+		if (delta.newLineCount != lineCount || delta.headTrimCount <= 0)
+			return rebuildBaseline();
+		if (m_accessibleOutputBaselineLineCount != delta.oldLineCount)
+			return rebuildBaseline();
+		if (baselineLengthCount != delta.oldLineCount)
+			return rebuildBaseline();
+
+		const int headTrimCount = qBound(0, delta.headTrimCount, delta.oldLineCount);
+		if (headTrimCount <= 0)
+			return rebuildBaseline();
+
+		int removedCharacters = 0;
+		for (int i = 0; i < headTrimCount; ++i)
+			removedCharacters =
+			    saturatedAccessibleAdd(removedCharacters, m_accessibleOutputBaselineLineLengths.at(i));
+		const int removedSeparators =
+		    delta.oldLineCount > headTrimCount ? headTrimCount : qMax(0, headTrimCount - 1);
+		removedCharacters = saturatedAccessibleAdd(removedCharacters, removedSeparators);
+		characterCount    = qMax(0, characterCount - removedCharacters);
+		m_accessibleOutputBaselineLineLengths.remove(0, headTrimCount);
+
+		int preservedLineCount = accessibleRetainedLineCountForTailDelta(delta, lineCount);
+		if (preservedLineCount < 0)
+			return rebuildBaseline();
+		if (delta.headLineMutated && preservedLineCount > 0 && !updateBaselineLineLength(0))
+			return rebuildBaseline();
+		if (delta.tailLineMutated && preservedLineCount > 0)
+		{
+			const int  tailMutatedLineIndex     = preservedLineCount - 1;
+			const bool alreadyUpdatedAsHeadLine = delta.headLineMutated && tailMutatedLineIndex == 0;
+			if (!alreadyUpdatedAsHeadLine && !updateBaselineLineLength(tailMutatedLineIndex))
+				return rebuildBaseline();
+		}
+		if (sizeToInt(m_accessibleOutputBaselineLineLengths.size()) != preservedLineCount)
+			return rebuildBaseline();
+		for (int i = preservedLineCount; i < lineCount; ++i)
+		{
+			if (i > 0)
+				characterCount = saturatedAccessibleAdd(characterCount, 1);
+			characterCount = saturatedAccessibleAdd(characterCount, sizeToInt(lines.at(i).text.size()));
+			m_accessibleOutputBaselineLineLengths.push_back(sizeToInt(lines.at(i).text.size()));
+		}
+		break;
+	}
+	default:
+		return rebuildBaseline();
+	}
+
+	m_accessibleOutputCharacterCount = characterCount;
 	m_accessibleOutputRevision       = m_nativeRenderLineCacheRevision;
-	m_accessibleOutputText           = map.text(0, map.characterCount());
+	recordAccessibleOutputTailBaseline(lines);
+	return true;
 }
 
 void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &lines) const
@@ -3188,6 +3397,24 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 		m_accessibleOutputRevision       = 0;
 		m_accessibleOutputText.clear();
 		m_accessibleOutputPendingTailAppend = false;
+		m_accessibleOutputLastAnnouncedPartialText.clear();
+		m_accessibleOutputLiveEventsSuppressed = false;
+		m_accessibleOutputBaselineLineCount    = -1;
+		m_accessibleOutputBaselineTailText.clear();
+		m_accessibleOutputBaselineLineLengths.clear();
+		clearTransientReview();
+		return;
+	}
+
+	const bool suppressLiveAccessibilityEvents =
+	    (m_runtime && m_runtime->hasMushReaderLiveSpeechOwner()) || !qtAccessibilityOutputSpeechEnabled();
+	if (suppressLiveAccessibilityEvents)
+	{
+		static_cast<void>(updateSuppressedAccessibleOutputBaseline(lines));
+		m_accessibleOutputText.clear();
+		m_accessibleOutputPendingTailAppend = false;
+		m_accessibleOutputLastAnnouncedPartialText.clear();
+		m_accessibleOutputLiveEventsSuppressed = true;
 		clearTransientReview();
 		return;
 	}
@@ -3195,11 +3422,15 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 	const QMudAccessibleTextUtils::LineOffsetMap map                   = accessibleNativeOutputTextMap(lines);
 	const int                                    currentCharacterCount = map.characterCount();
 	const QString                                currentText           = map.text(0, currentCharacterCount);
+	const bool wasLiveAccessibilitySuppressed = m_accessibleOutputLiveEventsSuppressed;
+	m_accessibleOutputLiveEventsSuppressed    = false;
 	if (m_accessibleOutputCharacterCount < 0)
 	{
 		m_accessibleOutputCharacterCount = currentCharacterCount;
 		m_accessibleOutputRevision       = m_nativeRenderLineCacheRevision;
 		m_accessibleOutputText           = currentText;
+		recordAccessibleOutputTailBaseline(lines);
+		m_accessibleOutputBaselineLineLengths.clear();
 		clearTransientReview();
 		return;
 	}
@@ -3209,6 +3440,8 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 	{
 		m_accessibleOutputCharacterCount = currentCharacterCount;
 		m_accessibleOutputText           = currentText;
+		recordAccessibleOutputTailBaseline(lines);
+		m_accessibleOutputBaselineLineLengths.clear();
 		clearTransientReview();
 		return;
 	}
@@ -3217,21 +3450,52 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 	                             !m_nativeRenderCacheDelta.headLineMutated &&
 	                             (m_nativeRenderCacheDelta.kind == NativeRenderCacheDeltaKind::TailAppend ||
 	                              !m_nativeRenderLineCacheFromRuntime);
-	const bool suppressLiveAccessibilityEvents =
-	    (m_runtime && m_runtime->hasMushReaderLiveSpeechOwner()) || !qtAccessibilityOutputSpeechEnabled();
-	auto announceCanvasText = [this](const QString &message)
+	auto       announceCanvasText = [this](const QString &announcement) -> bool
 	{
-		const QString announcement = trimLeadingAnnouncementBreaks(message);
 		if (!m_nativeOutputCanvas || !m_nativeOutputCanvas->isVisible() || announcement.isEmpty())
-			return;
+			return false;
 		QAccessibleAnnouncementEvent event(m_nativeOutputCanvas, announcement);
 		event.setPoliteness(QAccessible::AnnouncementPoliteness::Polite);
 		QAccessible::updateAccessibility(&event);
+		return true;
 	};
-	if (!suppressLiveAccessibilityEvents && currentCharacterCount > m_accessibleOutputCharacterCount &&
-	    exactTailAppend)
+	auto announceSuppressedResumeTailAppend = [this, &lines, &announceCanvasText]() -> bool
+	{
+		const NativeRenderCacheDelta &delta     = m_nativeRenderCacheDelta;
+		const int                     lineCount = sizeToInt(lines.size());
+		if (delta.headLineMutated && delta.kind != NativeRenderCacheDeltaKind::HeadTrimTailAppend)
+			return false;
+
+		int preservedLineCount = accessibleRetainedLineCountForTailDelta(delta, lineCount);
+		if (delta.tailLineMutated && preservedLineCount > 0)
+			--preservedLineCount;
+		if (preservedLineCount < 0 || preservedLineCount >= lineCount)
+			return false;
+
+		QStringList insertedLines;
+		insertedLines.reserve(lineCount - preservedLineCount);
+		for (int i = preservedLineCount; i < lineCount; ++i)
+			insertedLines.push_back(lines.at(i).text);
+		return announceCanvasText(trimLeadingAnnouncementBreaks(insertedLines.join(QLatin1Char('\n'))));
+	};
+	if (wasLiveAccessibilitySuppressed && !exactTailAppend)
+	{
+		static_cast<void>(announceSuppressedResumeTailAppend());
+		m_accessibleOutputCharacterCount    = currentCharacterCount;
+		m_accessibleOutputRevision          = m_nativeRenderLineCacheRevision;
+		m_accessibleOutputText              = currentText;
+		m_accessibleOutputPendingTailAppend = false;
+		m_accessibleOutputLastAnnouncedPartialText.clear();
+		recordAccessibleOutputTailBaseline(lines);
+		m_accessibleOutputBaselineLineLengths.clear();
+		clearTransientReview();
+		return;
+	}
+	if (currentCharacterCount > m_accessibleOutputCharacterCount && exactTailAppend)
 	{
 		const QString insertedText = map.text(m_accessibleOutputCharacterCount, currentCharacterCount);
+		const QString announcement = trimLeadingAnnouncementBreaks(insertedText);
+		bool          announced    = false;
 		if (!insertedText.isEmpty())
 		{
 			if (m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible())
@@ -3240,22 +3504,45 @@ void WorldView::notifyAccessibleOutputPresented(const NativeOutputRenderLines &l
 				                                 insertedText);
 				QAccessible::updateAccessibility(&event);
 			}
-			announceCanvasText(insertedText);
+			announced = announceCanvasText(announcement);
+		}
+		const QString partialAnnouncement =
+		    m_nativeHasPartialOutput ? trimLeadingAnnouncementBreaks(m_nativePartialOutputText) : QString();
+		if (announced && !partialAnnouncement.isEmpty() && announcement == partialAnnouncement)
+		{
+			m_accessibleOutputLastAnnouncedPartialText = announcement;
+		}
+		else
+		{
+			m_accessibleOutputLastAnnouncedPartialText.clear();
 		}
 	}
-	else if (!suppressLiveAccessibilityEvents && m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible())
+	else if (m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible())
 	{
 		if (m_accessibleOutputText != currentText)
 		{
 			QAccessibleTextUpdateEvent event(m_nativeOutputCanvas, 0, m_accessibleOutputText, currentText);
 			QAccessible::updateAccessibility(&event);
-			announceCanvasText(accessibleAnnouncementDelta(m_accessibleOutputText, currentText));
+			const QString announcement = trimLeadingAnnouncementBreaks(
+			    accessibleAnnouncementDelta(m_accessibleOutputText, currentText));
+			if (!announcement.isEmpty() && announcement == m_accessibleOutputLastAnnouncedPartialText)
+			{
+				m_accessibleOutputLastAnnouncedPartialText.clear();
+			}
+			else
+			{
+				announceCanvasText(announcement);
+				if (!announcement.isEmpty())
+					m_accessibleOutputLastAnnouncedPartialText.clear();
+			}
 		}
 	}
 	m_accessibleOutputCharacterCount    = currentCharacterCount;
 	m_accessibleOutputRevision          = m_nativeRenderLineCacheRevision;
 	m_accessibleOutputText              = currentText;
 	m_accessibleOutputPendingTailAppend = false;
+	recordAccessibleOutputTailBaseline(lines);
+	m_accessibleOutputBaselineLineLengths.clear();
 	clearTransientReview();
 }
 
@@ -4399,7 +4686,8 @@ QVector<QTextLayout::FormatRange> WorldView::buildNativeFormatRanges(const Nativ
 				qSwap(foreground, background);
 		}
 
-		const bool hasLinkAction = isActionLinkType(span.actionType) && !span.action.isEmpty();
+		const bool hasLinkAction = isActionLinkType(span.actionType) && !span.action.isEmpty() &&
+		                           !hasUnresolvedMxpTextEntityReference(span.action);
 		if (!foreground.isValid())
 		{
 			if (hasLinkAction && m_useCustomLinkColour && m_hyperlinkColour.isValid())
@@ -8071,7 +8359,8 @@ bool WorldView::nativeOutputHitTest(const WrapTextBrowser *view, const QPoint &v
 			offset              = spanEnd;
 			if (probe < spanStart || probe >= spanEnd)
 				continue;
-			if (!isActionLinkType(span.actionType) || span.action.isEmpty())
+			if (!isActionLinkType(span.actionType) || span.action.isEmpty() ||
+			    hasUnresolvedMxpTextEntityReference(span.action))
 				break;
 			if (href)
 				*href = span.action.trimmed();
@@ -10022,6 +10311,8 @@ void WorldView::echoInputText(const QString &text)
 {
 	if (!m_displayMyInput || !m_output)
 		return;
+	if (m_runtime)
+		static_cast<void>(commitPendingIncomingPartialOutput());
 	QString trimmed = text;
 	if (trimmed.endsWith(QStringLiteral("\r\n")))
 		trimmed.chop(2);
@@ -11073,6 +11364,9 @@ void WorldView::appendStandaloneOutputEntry(const QString                       
 void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool recordLine, int flags,
                                          const QVector<WorldRuntime::StyleSpan> &spans)
 {
+	if (recordLine && m_runtime && (flags & WorldRuntime::LineOutput) == 0)
+		static_cast<void>(commitPendingIncomingPartialOutput());
+
 	const bool shouldBreakAfterInlineInput =
 	    (flags & (WorldRuntime::LineOutput | WorldRuntime::LineNote)) != 0;
 	bool injectPendingBreakBeforeRender = false;
@@ -11211,6 +11505,7 @@ void WorldView::updatePartialOutputText(const QString &text, const QVector<World
 
 	if (text.isEmpty())
 	{
+		m_accessibleOutputLastAnnouncedPartialText.clear();
 		clearPartialOutput();
 		return;
 	}
@@ -11221,9 +11516,7 @@ void WorldView::updatePartialOutputText(const QString &text, const QVector<World
 	if (m_breakBeforeNextServerOutput && !text.isEmpty())
 		commitPendingInlineInputBreak();
 
-	m_nativeHasPartialOutput  = true;
-	m_nativePartialOutputText = text;
-	m_nativePartialOutputSpans.clear();
+	QVector<WorldRuntime::StyleSpan> partialSpans;
 	if (spans.isEmpty())
 	{
 		WorldRuntime::StyleSpan span;
@@ -11233,21 +11526,31 @@ void WorldView::updatePartialOutputText(const QString &text, const QVector<World
 		outputDefaultSpanColours(fore, back);
 		span.fore = fore;
 		span.back = back;
-		m_nativePartialOutputSpans.push_back(span);
+		partialSpans.push_back(span);
 	}
 	else
 	{
-		m_nativePartialOutputSpans.reserve(spans.size());
+		partialSpans.reserve(spans.size());
 		for (const WorldRuntime::StyleSpan &span : spans)
 		{
 			if (span.length <= 0)
 				continue;
-			m_nativePartialOutputSpans.push_back(span);
+			partialSpans.push_back(span);
 		}
 	}
+
+	if (m_nativeHasPartialOutput && m_nativePartialOutputText == text &&
+	    styleSpanVectorsEquivalent(m_nativePartialOutputSpans, partialSpans))
+	{
+		return;
+	}
+
+	m_nativeHasPartialOutput            = true;
+	m_nativePartialOutputText           = text;
+	m_nativePartialOutputSpans          = std::move(partialSpans);
+	m_accessibleOutputPendingTailAppend = true;
 	syncOutputTextVisibilityForNativeCanvas();
-	requestOutputScrollToEnd();
-	requestNativeOutputTailRepaint();
+	requestNativeRuntimeOutputPresentationSync(false, true);
 }
 
 void WorldView::clearPartialOutput()
@@ -11267,8 +11570,9 @@ void WorldView::clearPartialOutput()
 	m_partialOutputStart  = 0;
 	m_partialOutputLength = 0;
 	syncOutputTextVisibilityForNativeCanvas();
-	requestNativeOutputTailRepaint();
-	requestOutputScrollToEnd();
+	m_accessibleOutputPendingTailAppend  = false;
+	const NativeOutputRenderLines &lines = synchronizeNativeRuntimeOutputPresentation(false, !m_frozen);
+	requestNativeOutputPresentationRepaint(!m_frozen, lines);
 }
 
 bool WorldView::commitPendingIncomingPartialOutput()
@@ -11286,9 +11590,9 @@ bool WorldView::commitPendingIncomingPartialOutput()
 	m_partialOutputLength               = 0;
 	m_nativeRenderLineCacheFromRuntime  = true;
 	m_accessibleOutputPendingTailAppend = true;
+	m_accessibleOutputLastAnnouncedPartialText.clear();
 	syncOutputTextVisibilityForNativeCanvas();
-	requestNativeOutputTailRepaint();
-	requestOutputScrollToEnd();
+	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
 	requestDrawOutputWindowNotification();
 	return true;
 }
@@ -11337,6 +11641,7 @@ void WorldView::notifyRuntimeOutputRangeChanged(const int runtimeLineIndex)
 	m_nativePartialOutputSpans.clear();
 	m_nativeRenderLineCacheFromRuntime  = true;
 	m_accessibleOutputPendingTailAppend = false;
+	m_accessibleOutputLastAnnouncedPartialText.clear();
 	markNativeRuntimeRangeRestitchPending(runtimeLineIndex);
 	syncOutputTextVisibilityForNativeCanvas();
 	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
@@ -11358,6 +11663,7 @@ void WorldView::clearOutputBuffer()
 		m_nativeRenderLineCacheFromRuntime  = true;
 		m_nativeRenderLineCacheValid        = false;
 		m_accessibleOutputPendingTailAppend = false;
+		m_accessibleOutputLastAnnouncedPartialText.clear();
 	}
 	else
 	{
@@ -11366,6 +11672,7 @@ void WorldView::clearOutputBuffer()
 		m_nativeRenderLineCacheFromRuntime  = false;
 		m_nativeRenderLineCacheValid        = false;
 		m_accessibleOutputPendingTailAppend = false;
+		m_accessibleOutputLastAnnouncedPartialText.clear();
 	}
 	syncNativeOutputScrollBarsFromLayout(nativeOutputRenderLines());
 	clearNativeOutputSelection(true);
@@ -11393,6 +11700,7 @@ void WorldView::restoreOutputFromPersistedLines(const IndexedRingBuffer<WorldRun
 
 	const bool runtimeAttached          = m_runtime && m_runtime->view() == this;
 	m_accessibleOutputPendingTailAppend = false;
+	m_accessibleOutputLastAnnouncedPartialText.clear();
 	if (runtimeAttached)
 	{
 		// Runtime-attached views always render from runtime-owned line state.

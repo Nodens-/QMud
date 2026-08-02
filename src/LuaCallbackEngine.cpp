@@ -6089,8 +6089,12 @@ namespace
 		for (const LuaCallbackMxpStyleFrameSnapshot &frameSnapshot : snapshot->windowOutputTextMxpStyleStack)
 		{
 			WorldRuntime::MxpStyleFrame frame;
-			frame.tag   = frameSnapshot.tag;
-			frame.state = mxpStyleStateFromCallbackSnapshot(frameSnapshot.state);
+			frame.tag                         = frameSnapshot.tag;
+			frame.state                       = mxpStyleStateFromCallbackSnapshot(frameSnapshot.state);
+			frame.actionState                 = mxpStyleStateFromCallbackSnapshot(frameSnapshot.actionState);
+			frame.actionTextLineNumber        = frameSnapshot.actionTextLineNumber;
+			frame.actionTextStartColumn       = frameSnapshot.actionTextStartColumn;
+			frame.actionTextRuntimeLineNumber = frameSnapshot.actionTextRuntimeLineNumber;
 			context.mxpStyleStack.push_back(frame);
 		}
 		context.normalAnsi.resize(8);

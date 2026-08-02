@@ -18,6 +18,7 @@
 #include "EncodingUtils.h"
 #include "ErrorDescriptions.h"
 #include "GuiSystemUtils.h"
+#include "HyperlinkActionUtils.h"
 #include "LogCompressionUtils.h"
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
@@ -202,6 +203,96 @@ namespace
 			return 0;
 		constexpr qsizetype kMaxInt = std::numeric_limits<int>::max();
 		return size > kMaxInt ? std::numeric_limits<int>::max() : static_cast<int>(size);
+	}
+
+	bool isMxpModeCode(const int mode, const TelnetProcessor::MxpMode expected)
+	{
+		return mode == TelnetProcessor::mxpModeCode(expected);
+	}
+
+	bool isMxpLockedModeCode(const int mode)
+	{
+		return isMxpModeCode(mode, TelnetProcessor::MxpMode::Locked) ||
+		       isMxpModeCode(mode, TelnetProcessor::MxpMode::PermanentLocked);
+	}
+
+	bool isMxpOpenModeCode(const int mode)
+	{
+		return isMxpModeCode(mode, TelnetProcessor::MxpMode::Open) ||
+		       isMxpModeCode(mode, TelnetProcessor::MxpMode::PermanentOpen);
+	}
+
+	bool isMxpResetModeCode(const int mode)
+	{
+		return isMxpModeCode(mode, TelnetProcessor::MxpMode::Reset);
+	}
+
+	QString replaceMxpTextEntityReferences(const QString &text, const QString &replacement)
+	{
+		static constexpr QLatin1StringView kEscapedTextEntity{"&amp;text;"};
+		static constexpr QLatin1StringView kTextEntity{"&text;"};
+
+		QString                            result;
+		result.reserve(text.size());
+		const QStringView textView{text};
+		for (qsizetype i = 0; i < text.size();)
+		{
+			if (textView.mid(i, kEscapedTextEntity.size()) == kEscapedTextEntity)
+			{
+				result.append(replacement);
+				i += kEscapedTextEntity.size();
+				continue;
+			}
+			if (textView.mid(i, kTextEntity.size()) == kTextEntity)
+			{
+				result.append(replacement);
+				i += kTextEntity.size();
+				continue;
+			}
+			result.append(text.at(i));
+			++i;
+		}
+		return result;
+	}
+
+	bool resolveMxpTextActionReferences(QVector<WorldRuntime::StyleSpan> &spans, const int startColumn,
+	                                    const int endColumn, const WorldRuntime::MxpStyleState &actionState,
+	                                    const QString &replacement)
+	{
+		if (startColumn < 0 || endColumn <= startColumn)
+			return false;
+
+		const QString resolvedAction = actionState.action.isEmpty()
+		                                   ? replacement
+		                                   : replaceMxpTextEntityReferences(actionState.action, replacement);
+		const QString resolvedHint   = replaceMxpTextEntityReferences(actionState.hint, replacement);
+
+		int           spanStart = 0;
+		bool          changed   = false;
+		for (WorldRuntime::StyleSpan &span : spans)
+		{
+			const int spanLength = qMax(0, span.length);
+			const int spanEnd    = spanStart + spanLength;
+			if (spanLength > 0 && spanEnd > startColumn && spanStart < endColumn &&
+			    span.actionType == actionState.actionType && span.action == actionState.action &&
+			    span.hint == actionState.hint)
+			{
+				span.action = resolvedAction;
+				span.hint   = resolvedHint;
+				changed     = true;
+			}
+			spanStart = spanEnd;
+		}
+		return changed;
+	}
+
+	WorldRuntime::MxpStyleFrame makeMxpStyleFrame(const QByteArray                  &tag,
+	                                              const WorldRuntime::MxpStyleState &state)
+	{
+		WorldRuntime::MxpStyleFrame frame;
+		frame.tag   = tag;
+		frame.state = state;
+		return frame;
 	}
 
 	template <typename Func>
@@ -4191,11 +4282,10 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 	};
 	callbacks.onMxpModeChange = [this](int oldMode, int newMode, bool shouldLog)
 	{
-		auto isLockedMode = [](const int mode) { return mode == 2 || mode == 7; };
 		// Defensive state barrier: when MXP transitions to a locked/reset mode,
 		// drop open render/tag state so secure link/style spans cannot leak into
 		// subsequent plain text.
-		if (newMode == 3 || isLockedMode(newMode))
+		if (isMxpResetModeCode(newMode) || isMxpLockedModeCode(newMode))
 		{
 			m_mxpTagStack.clear();
 			m_mxpOpenTags.clear();
@@ -5305,7 +5395,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			m_partialLineText                = lineText;
 			m_partialLineSpans               = lineSpans;
 			m_pendingCarriageReturnOverwrite = carriageReturnPending;
-			emit incomingStyledLinePartialReceived(lineText, lineSpans);
+			publishIncomingStyledLinePartial(lineText, lineSpans);
 		};
 
 		constexpr QMudOscActionIds oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
@@ -5508,6 +5598,12 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				return true;
 			return (lhs == "send" && rhs == "a") || (lhs == "a" && rhs == "send");
 		};
+		auto updateLinkOpenFromStack = [&]
+		{
+			linkOpen =
+			    std::ranges::any_of(stack, [&](const MxpStyleFrame &frame)
+			                        { return mxpTagsEquivalent(frame.tag, QByteArrayLiteral("send")); });
+		};
 
 		const int processedSize = safeQSizeToInt(processed.size());
 		int       last          = 0;
@@ -5536,18 +5632,17 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				if (hint.isEmpty())
 					hint = decodeMxpAttributeBytes(activeAttributes.value("xch_hint"),
 					                               attributesAreInternalUtf8);
-				linkOpen = true;
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
-				stack.push_back({activeTag, current});
+				MxpStyleState actionState = current;
 				if (activeTag == "a")
-					current.actionType = ActionHyperlink;
+					actionState.actionType = ActionHyperlink;
 				else if (!xchPrompt.isEmpty())
-					current.actionType = ActionPrompt;
+					actionState.actionType = ActionPrompt;
 				else
-					current.actionType = ActionSend;
-				current.action = href;
-				current.hint   = hint.isEmpty() ? xchPrompt : hint;
+					actionState.actionType = ActionSend;
+				actionState.action = href;
+				actionState.hint   = hint.isEmpty() ? xchPrompt : hint;
 				QString variable =
 				    decodeMxpAttributeBytes(activeAttributes.value("xch_set"), attributesAreInternalUtf8);
 				if (variable.isEmpty())
@@ -5556,8 +5651,18 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				if (variable.isEmpty())
 					variable =
 					    decodeMxpAttributeBytes(activeAttributes.value("set"), attributesAreInternalUtf8);
-				current.variable = variable;
-				current.startTag = true;
+				actionState.variable = variable;
+				actionState.startTag = true;
+				MxpStyleFrame frame;
+				frame.tag                         = activeTag;
+				frame.state                       = current;
+				frame.actionState                 = actionState;
+				frame.actionTextLineNumber        = m_linesReceived;
+				frame.actionTextStartColumn       = safeQSizeToInt(lineText.size());
+				frame.actionTextRuntimeLineNumber = m_nextLineNumber;
+				stack.push_back(frame);
+				linkOpen = true;
+				current  = actionState;
 			}
 			else if (activeTag == "bold" || activeTag == "b" || activeTag == "strong" || activeTag == "h1" ||
 			         activeTag == "h2" || activeTag == "h3" || activeTag == "h4" || activeTag == "h5" ||
@@ -5565,35 +5670,35 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			{
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
-				stack.push_back({activeTag, current});
+				stack.push_back(makeMxpStyleFrame(activeTag, current));
 				current.bold = true;
 			}
 			else if (activeTag == "underline" || activeTag == "u")
 			{
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
-				stack.push_back({activeTag, current});
+				stack.push_back(makeMxpStyleFrame(activeTag, current));
 				current.underline = true;
 			}
 			else if (activeTag == "italic" || activeTag == "i" || activeTag == "em")
 			{
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
-				stack.push_back({activeTag, current});
+				stack.push_back(makeMxpStyleFrame(activeTag, current));
 				current.italic = true;
 			}
 			else if (activeTag == "strike" || activeTag == "s")
 			{
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
-				stack.push_back({activeTag, current});
+				stack.push_back(makeMxpStyleFrame(activeTag, current));
 				current.strike = true;
 			}
 			else if (activeTag == "color")
 			{
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
-				stack.push_back({activeTag, current});
+				stack.push_back(makeMxpStyleFrame(activeTag, current));
 				if (!ignoreMxpColourChanges)
 				{
 					QString fore =
@@ -5614,7 +5719,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			{
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
-				stack.push_back({activeTag, current});
+				stack.push_back(makeMxpStyleFrame(activeTag, current));
 				if (!ignoreMxpColourChanges)
 				{
 					QString const fore = normalizeColorBytes(unnamedForeLocal, attributesAreInternalUtf8);
@@ -5629,7 +5734,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			{
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
-				stack.push_back({activeTag, current});
+				stack.push_back(makeMxpStyleFrame(activeTag, current));
 				QString colorSpec =
 				    decodeMxpAttributeBytes(activeAttributes.value("color"), attributesAreInternalUtf8);
 				if (colorSpec.isEmpty())
@@ -5679,7 +5784,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			{
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
-				stack.push_back({activeTag, current});
+				stack.push_back(makeMxpStyleFrame(activeTag, current));
 				if (!current.fore.isEmpty())
 				{
 					QColor const color(current.fore);
@@ -5691,7 +5796,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			{
 				if (!ensureRenderStackCapacity(activeTag))
 					return;
-				stack.push_back({activeTag, current});
+				stack.push_back(makeMxpStyleFrame(activeTag, current));
 				current.monospace = true;
 			}
 			else if (activeTag == "pre")
@@ -5727,23 +5832,123 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			}
 		};
 
-		auto applyEndTag = [&](const QByteArray &closeTag)
+		auto findMxpTextActionBufferedStartIndex = [&](const qint64 runtimeLineNumber)
+		{
+			if (runtimeLineNumber <= 0)
+				return -1;
+
+			for (int index = safeQSizeToInt(m_lines.size()) - 1; index >= 0; --index)
+			{
+				if (m_lines.at(index).lineNumber == runtimeLineNumber)
+					return index;
+			}
+
+			for (int index = 0; index < m_lines.size(); ++index)
+			{
+				if (m_lines.at(index).lineNumber > runtimeLineNumber)
+					return index;
+			}
+			return -1;
+		};
+
+		auto resolveBufferedMxpTextActionReferences =
+		    [&](const MxpStyleFrame &frame, const QString &replacement)
+		{
+			const int startIndex = findMxpTextActionBufferedStartIndex(frame.actionTextRuntimeLineNumber);
+			if (startIndex < 0)
+				return;
+
+			int firstChangedIndex = -1;
+			for (int i = startIndex; i < m_lines.size(); ++i)
+			{
+				LineEntry &entry = m_lines[i];
+				if ((entry.flags & LineOutput) == 0)
+					continue;
+				const int startColumn =
+				    entry.lineNumber == frame.actionTextRuntimeLineNumber
+				        ? qBound(0, frame.actionTextStartColumn, safeQSizeToInt(entry.text.size()))
+				        : 0;
+				if (resolveMxpTextActionReferences(entry.spans, startColumn,
+				                                   safeQSizeToInt(entry.text.size()), frame.actionState,
+				                                   replacement) &&
+				    firstChangedIndex < 0)
+				{
+					firstChangedIndex = i;
+				}
+			}
+			if (firstChangedIndex < 0)
+				return;
+			invalidateLuaCallbackLineBufferSnapshot();
+			notifyOutputViewRangeChanged(firstChangedIndex);
+		};
+
+		auto appendMxpBodyLine = [](QString &body, bool &hasBodyLine, const QString &line)
+		{
+			if (hasBodyLine)
+				body.append(QLatin1Char('\n'));
+			body.append(line);
+			hasBodyLine = true;
+		};
+
+		auto collectMxpTextActionBody = [&](const MxpStyleFrame &frame)
+		{
+			QString body;
+			bool    hasBodyLine = false;
+			if (frame.actionTextRuntimeLineNumber >= 0)
+			{
+				const int startIndex = findMxpTextActionBufferedStartIndex(frame.actionTextRuntimeLineNumber);
+				if (startIndex >= 0)
+				{
+					for (int i = startIndex; i < m_lines.size(); ++i)
+					{
+						const LineEntry &entry = m_lines.at(i);
+						if ((entry.flags & LineOutput) == 0)
+							continue;
+						const int startColumn =
+						    entry.lineNumber == frame.actionTextRuntimeLineNumber
+						        ? qBound(0, frame.actionTextStartColumn, safeQSizeToInt(entry.text.size()))
+						        : 0;
+						appendMxpBodyLine(body, hasBodyLine, entry.text.mid(startColumn));
+					}
+				}
+			}
+
+			const int startColumn =
+			    frame.actionTextLineNumber == m_linesReceived
+			        ? qBound(0, frame.actionTextStartColumn, safeQSizeToInt(lineText.size()))
+			        : 0;
+			appendMxpBodyLine(body, hasBodyLine, lineText.mid(startColumn));
+			return body;
+		};
+
+		auto applyEndTag = [&](const QByteArray &closeTag, const QString *resolvedBodyText)
 		{
 			if (closeTag == "send" || closeTag == "a")
 			{
-				if (linkOpen)
-				{
-					linkOpen = false;
-				}
+				bool closedActionTag = false;
 				for (int i = safeQSizeToInt(stack.size()) - 1; i >= 0; --i)
 				{
 					if (mxpTagsEquivalent(stack.at(i).tag, closeTag))
 					{
-						current = stack.at(i).state;
+						const MxpStyleFrame frame = stack.at(i);
+						const QString       replacement =
+						    resolvedBodyText ? *resolvedBodyText : collectMxpTextActionBody(frame);
+						const int startColumn =
+						    frame.actionTextLineNumber == m_linesReceived
+						        ? qBound(0, frame.actionTextStartColumn, safeQSizeToInt(lineText.size()))
+						        : 0;
+						resolveMxpTextActionReferences(lineSpans, startColumn,
+						                               safeQSizeToInt(lineText.size()), frame.actionState,
+						                               replacement);
+						resolveBufferedMxpTextActionReferences(frame, replacement);
+						current = frame.state;
 						stack.removeAt(i);
+						closedActionTag = true;
 						break;
 					}
 				}
+				if (closedActionTag || linkOpen)
+					updateLinkOpenFromStack();
 			}
 			else if (closeTag == "pre" || closeTag == "center" || closeTag == "ul" || closeTag == "ol" ||
 			         closeTag == "li")
@@ -5782,11 +5987,10 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 
 		auto applyMxpModeBarrier = [&](const TelnetProcessor::MxpModeChange &modeChange)
 		{
-			auto       isLockedMode = [](const int mode) { return mode == 2 || mode == 7; };
-			auto       isOpenMode   = [](const int mode) { return mode == 0 || mode == 5; };
 			const bool closeOpenTagsForModeTransition =
-			    isOpenMode(modeChange.oldMode) && !isOpenMode(modeChange.newMode);
-			const bool resetOrLockedTransition = modeChange.newMode == 3 || isLockedMode(modeChange.newMode);
+			    isMxpOpenModeCode(modeChange.oldMode) && !isMxpOpenModeCode(modeChange.newMode);
+			const bool resetOrLockedTransition =
+			    isMxpResetModeCode(modeChange.newMode) || isMxpLockedModeCode(modeChange.newMode);
 
 			if (!closeOpenTagsForModeTransition && !resetOrLockedTransition)
 				return;
@@ -6012,7 +6216,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			{
 				notifiedLineText  = lineText;
 				notifiedLineSpans = lineSpans;
-				emit incomingStyledLinePartialReceived(lineText, lineSpans);
+				publishIncomingStyledLinePartial(lineText, lineSpans);
 			}
 		};
 
@@ -6813,6 +7017,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 
 				int                 matchIndex = -1;
 				QVector<QByteArray> closeTagsToApply;
+				QString             closeTagBodyText;
+				bool                hasCloseTagBodyText = false;
 				for (int i = safeQSizeToInt(m_mxpTagStack.size()) - 1; i >= 0; --i)
 				{
 					if (mxpTagsEquivalent(m_mxpTagStack.at(i).tag, closeTag))
@@ -6828,10 +7034,11 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 					while (m_mxpTagStack.size() - 1 >= matchIndex)
 					{
 						const MxpTagFrame frame = m_mxpTagStack.takeLast();
-						QByteArray        textBytes;
+						QByteArray        fullTextBytes;
 						if (eventOffset > frame.contentStart && frame.contentStart >= 0)
-							textBytes =
+							fullTextBytes =
 							    m_mxpTextBuffer.mid(frame.contentStart, eventOffset - frame.contentStart);
+						QByteArray textBytes = fullTextBytes;
 						if (textBytes.size() > 1000)
 							textBytes = textBytes.left(1000);
 						QString const text          = decodeIncomingIsolatedBytes(textBytes);
@@ -6880,19 +7087,27 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 								                    true);
 						}
 
-						if (mxpTagsEquivalent(frame.tag, closeTag) && closeTagsToApply.isEmpty() &&
-						    !frame.closeTags.isEmpty())
-							closeTagsToApply = frame.closeTags;
+						if (mxpTagsEquivalent(frame.tag, closeTag))
+						{
+							closeTagBodyText = sanitizedText;
+							if (textBytes.size() != fullTextBytes.size())
+								closeTagBodyText =
+								    qmudStripAnsiEscapeCodes(decodeIncomingIsolatedBytes(fullTextBytes));
+							hasCloseTagBodyText = true;
+							if (closeTagsToApply.isEmpty() && !frame.closeTags.isEmpty())
+								closeTagsToApply = frame.closeTags;
+						}
 					}
 				}
+				const QString *closeTagBodyTextPtr = hasCloseTagBodyText ? &closeTagBodyText : nullptr;
 				if (!closeTagsToApply.isEmpty())
 				{
 					for (int i = safeQSizeToInt(closeTagsToApply.size()) - 1; i >= 0; --i)
-						applyEndTag(closeTagsToApply.at(i));
+						applyEndTag(closeTagsToApply.at(i), closeTagBodyTextPtr);
 				}
 				else
 				{
-					applyEndTag(closeTag);
+					applyEndTag(closeTag, closeTagBodyTextPtr);
 				}
 			}
 		}
@@ -9574,8 +9789,12 @@ void WorldRuntime::populateLuaCallbackDispatchVolatileSnapshot(
 	const auto makeMxpStyleFrameSnapshot = [&makeMxpStyleSnapshot](const MxpStyleFrame &frame)
 	{
 		LuaCallbackMxpStyleFrameSnapshot row;
-		row.tag   = frame.tag;
-		row.state = makeMxpStyleSnapshot(frame.state);
+		row.tag                         = frame.tag;
+		row.state                       = makeMxpStyleSnapshot(frame.state);
+		row.actionState                 = makeMxpStyleSnapshot(frame.actionState);
+		row.actionTextLineNumber        = frame.actionTextLineNumber;
+		row.actionTextStartColumn       = frame.actionTextStartColumn;
+		row.actionTextRuntimeLineNumber = frame.actionTextRuntimeLineNumber;
 		return row;
 	};
 
@@ -9889,8 +10108,12 @@ QSharedPointer<LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCallbackSn
 	const auto makeMxpStyleFrameSnapshot = [&makeMxpStyleSnapshot](const MxpStyleFrame &frame)
 	{
 		LuaCallbackMxpStyleFrameSnapshot row;
-		row.tag   = frame.tag;
-		row.state = makeMxpStyleSnapshot(frame.state);
+		row.tag                         = frame.tag;
+		row.state                       = makeMxpStyleSnapshot(frame.state);
+		row.actionState                 = makeMxpStyleSnapshot(frame.actionState);
+		row.actionTextLineNumber        = frame.actionTextLineNumber;
+		row.actionTextStartColumn       = frame.actionTextStartColumn;
+		row.actionTextRuntimeLineNumber = frame.actionTextRuntimeLineNumber;
 		return row;
 	};
 
@@ -17684,6 +17907,7 @@ bool WorldRuntime::isQtAccessibilitySpeechEnabled() const
 void WorldRuntime::firePluginPartialLine(const QString &text)
 {
 	callPluginCallbacks(QStringLiteral("OnPluginPartialLine"), text, true);
+	QMudNativePluginRegistry::handleMushReaderPartialLine(this, text);
 }
 
 void WorldRuntime::notifyMiniWindowMouseMoved(int x, int y, const QString &windowName)
@@ -23022,6 +23246,8 @@ bool WorldRuntime::commitPendingIncomingPartialLine()
 		return qmudInvokeMethodOr(this, false, [this] { return commitPendingIncomingPartialLine(); });
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::commitPendingIncomingPartialLine");
+	if (m_sessionStateOutputBufferSealed)
+		return false;
 	if (m_partialLineText.isEmpty() && m_partialLineSpans.isEmpty())
 		return false;
 
@@ -23048,6 +23274,7 @@ bool WorldRuntime::commitPendingIncomingPartialLine()
 		addLine(text, LineOutput, true);
 	else
 		addLine(text, LineOutput, spans, true);
+	QMudNativePluginRegistry::clearMushReaderPartialLine(this);
 	return true;
 }
 
@@ -23275,6 +23502,7 @@ bool WorldRuntime::removeBufferedIncomingLineLuaContext()
 	m_luaContextLineBuffered    = false;
 	m_luaContextLineBufferIndex = safeQSizeToInt(m_lines.size() + 1);
 	invalidateLuaCallbackLineBufferSnapshot();
+	QMudNativePluginRegistry::clearMushReaderPartialLine(this);
 	notifyOutputViewRangeChanged(qMax(0, qMin(removedIndex, safeQSizeToInt(m_lines.size()) - 1)));
 	return true;
 }
@@ -23293,6 +23521,7 @@ bool WorldRuntime::hideBufferedIncomingLineLuaContextForReplacement()
 	entry.flags |= LineHidden;
 	m_luaContextLineEntry = entry;
 	invalidateLuaCallbackLineBufferSnapshot();
+	QMudNativePluginRegistry::clearMushReaderPartialLine(this);
 	notifyOutputViewRangeChanged(m_luaContextLineBufferIndex - 1);
 	return true;
 }
@@ -23421,6 +23650,14 @@ void WorldRuntime::flushOutputViewMutationBatch()
 		else
 			m_view->notifyRuntimeOutputLineChanged();
 	}
+}
+
+void WorldRuntime::publishIncomingStyledLinePartial(const QString &line, const QVector<StyleSpan> &spans)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::publishIncomingStyledLinePartial");
+	if (m_outputViewLineChangedPending || m_outputViewRangeChangedPending)
+		flushOutputViewMutationBatch();
+	emit incomingStyledLinePartialReceived(line, spans);
 }
 
 void WorldRuntime::beginOutputViewMutationBatch()
@@ -24432,7 +24669,8 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 			WorldRuntime::StyleSpan style;
 	};
 	QVector<ParsedRun> parsedRuns;
-	auto               appendRun = [&](const QString &segment, const QMudStyledTextState &state)
+	int                parsedTextLength = 0;
+	auto               appendRun        = [&](const QString &segment, const QMudStyledTextState &state)
 	{
 		if (segment.isEmpty())
 			return;
@@ -24454,9 +24692,11 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		{
 			parsedRuns.last().text += segment;
 			parsedRuns.last().style.length = safeQSizeToInt(parsedRuns.last().text.size());
+			parsedTextLength += safeQSizeToInt(segment.size());
 			return;
 		}
 		parsedRuns.push_back({segment, span});
+		parsedTextLength += safeQSizeToInt(segment.size());
 	};
 
 	auto colorFromXtermIndex = [](const int index) -> QString
@@ -24558,6 +24798,62 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 			return true;
 		return (lhs == "send" && rhs == "a") || (lhs == "a" && rhs == "send");
 	};
+	auto updateLinkOpenFromStack = [&]
+	{
+		mxpLinkOpen =
+		    std::ranges::any_of(mxpStyleStack, [&](const MxpStyleFrame &frame)
+		                        { return mxpTagsEquivalent(frame.tag, QByteArrayLiteral("send")); });
+	};
+	auto textFromParsedRuns = [&](const int startColumn, const int endColumn)
+	{
+		QString extractedText;
+		if (startColumn < 0 || endColumn <= startColumn)
+			return extractedText;
+		extractedText.reserve(endColumn - startColumn);
+
+		int runStart = 0;
+		for (const ParsedRun &run : std::as_const(parsedRuns))
+		{
+			const int runLength = safeQSizeToInt(run.text.size());
+			const int runEnd    = runStart + runLength;
+			if (runLength > 0 && runEnd > startColumn && runStart < endColumn)
+			{
+				const int localStart = qMax(0, startColumn - runStart);
+				const int localEnd   = qMin(runLength, endColumn - runStart);
+				extractedText += run.text.mid(localStart, localEnd - localStart);
+			}
+			runStart = runEnd;
+		}
+		return extractedText;
+	};
+	auto resolveParsedRunMxpAction = [&](const MxpStyleFrame &frame)
+	{
+		const int     startColumn = qBound(0, frame.actionTextStartColumn, parsedTextLength);
+		const int     endColumn   = parsedTextLength;
+		const QString replacement = textFromParsedRuns(startColumn, endColumn);
+		if (replacement.isEmpty() && frame.actionState.action.isEmpty())
+			return;
+		const QString resolvedAction =
+		    frame.actionState.action.isEmpty()
+		        ? replacement
+		        : replaceMxpTextEntityReferences(frame.actionState.action, replacement);
+		const QString resolvedHint = replaceMxpTextEntityReferences(frame.actionState.hint, replacement);
+
+		int           runStart = 0;
+		for (ParsedRun &run : parsedRuns)
+		{
+			const int runLength = safeQSizeToInt(run.text.size());
+			const int runEnd    = runStart + runLength;
+			if (runLength > 0 && runEnd > startColumn && runStart < endColumn &&
+			    run.style.actionType == frame.actionState.actionType &&
+			    run.style.action == frame.actionState.action && run.style.hint == frame.actionState.hint)
+			{
+				run.style.action = resolvedAction;
+				run.style.hint   = resolvedHint;
+			}
+			runStart = runEnd;
+		}
+	};
 	auto resolveAttributeEntities = [&](QMap<QByteArray, QByteArray> attributes)
 	{
 		const QMap<QByteArray, QByteArray> noLocalValues;
@@ -24583,23 +24879,31 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 				hint = decodeMxpInternalArgumentBytes(activeAttributes.value("xch_hint"));
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
-			mxpStyleStack.push_back({activeTag, current});
-			mxpLinkOpen = true;
+			MxpStyleState actionState = current;
 			if (activeTag == "a")
-				current.actionType = ActionHyperlink;
+				actionState.actionType = ActionHyperlink;
 			else if (!xchPrompt.isEmpty())
-				current.actionType = ActionPrompt;
+				actionState.actionType = ActionPrompt;
 			else
-				current.actionType = ActionSend;
-			current.action   = href;
-			current.hint     = hint.isEmpty() ? xchPrompt : hint;
-			QString variable = decodeMxpInternalArgumentBytes(activeAttributes.value("xch_set"));
+				actionState.actionType = ActionSend;
+			actionState.action = href;
+			actionState.hint   = hint.isEmpty() ? xchPrompt : hint;
+			QString variable   = decodeMxpInternalArgumentBytes(activeAttributes.value("xch_set"));
 			if (variable.isEmpty())
 				variable = decodeMxpInternalArgumentBytes(activeAttributes.value("variable"));
 			if (variable.isEmpty())
 				variable = decodeMxpInternalArgumentBytes(activeAttributes.value("set"));
-			current.variable = variable;
-			current.startTag = true;
+			actionState.variable = variable;
+			actionState.startTag = true;
+			MxpStyleFrame frame;
+			frame.tag                   = activeTag;
+			frame.state                 = current;
+			frame.actionState           = actionState;
+			frame.actionTextLineNumber  = 0;
+			frame.actionTextStartColumn = parsedTextLength;
+			mxpStyleStack.push_back(frame);
+			mxpLinkOpen = true;
+			current     = actionState;
 			return;
 		}
 		if (activeTag == "bold" || activeTag == "b" || activeTag == "strong" || activeTag == "h1" ||
@@ -24608,7 +24912,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		{
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
-			mxpStyleStack.push_back({activeTag, current});
+			mxpStyleStack.push_back(makeMxpStyleFrame(activeTag, current));
 			current.bold = true;
 			return;
 		}
@@ -24616,7 +24920,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		{
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
-			mxpStyleStack.push_back({activeTag, current});
+			mxpStyleStack.push_back(makeMxpStyleFrame(activeTag, current));
 			current.underline = true;
 			return;
 		}
@@ -24624,7 +24928,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		{
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
-			mxpStyleStack.push_back({activeTag, current});
+			mxpStyleStack.push_back(makeMxpStyleFrame(activeTag, current));
 			current.italic = true;
 			return;
 		}
@@ -24632,7 +24936,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		{
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
-			mxpStyleStack.push_back({activeTag, current});
+			mxpStyleStack.push_back(makeMxpStyleFrame(activeTag, current));
 			current.strike = true;
 			return;
 		}
@@ -24640,7 +24944,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		{
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
-			mxpStyleStack.push_back({activeTag, current});
+			mxpStyleStack.push_back(makeMxpStyleFrame(activeTag, current));
 			if (!ignoreMxpColourChanges)
 			{
 				QString fore = normalizeColorBytes(activeAttributes.value("fore"));
@@ -24660,7 +24964,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		{
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
-			mxpStyleStack.push_back({activeTag, current});
+			mxpStyleStack.push_back(makeMxpStyleFrame(activeTag, current));
 			if (!ignoreMxpColourChanges)
 			{
 				const QString fore = normalizeColorBytes(unnamedFore);
@@ -24676,7 +24980,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		{
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
-			mxpStyleStack.push_back({activeTag, current});
+			mxpStyleStack.push_back(makeMxpStyleFrame(activeTag, current));
 			QString colorSpec = decodeMxpInternalArgumentBytes(activeAttributes.value("color"));
 			if (colorSpec.isEmpty())
 				colorSpec = decodeMxpInternalArgumentBytes(activeAttributes.value("fgcolor"));
@@ -24720,7 +25024,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		{
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
-			mxpStyleStack.push_back({activeTag, current});
+			mxpStyleStack.push_back(makeMxpStyleFrame(activeTag, current));
 			if (!current.fore.isEmpty())
 			{
 				const QColor color(current.fore);
@@ -24733,7 +25037,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		{
 			if (mxpStyleStack.size() >= kMaxMxpStackDepth)
 				return;
-			mxpStyleStack.push_back({activeTag, current});
+			mxpStyleStack.push_back(makeMxpStyleFrame(activeTag, current));
 			current.monospace = true;
 			return;
 		}
@@ -24767,16 +25071,21 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 	{
 		if (closeTag == "send" || closeTag == "a")
 		{
-			mxpLinkOpen = false;
+			bool closedActionTag = false;
 			for (int i = safeQSizeToInt(mxpStyleStack.size()) - 1; i >= 0; --i)
 			{
 				if (mxpTagsEquivalent(mxpStyleStack.at(i).tag, closeTag))
 				{
-					current = mxpStyleStack.at(i).state;
+					const MxpStyleFrame frame = mxpStyleStack.at(i);
+					resolveParsedRunMxpAction(frame);
+					current = frame.state;
 					mxpStyleStack.removeAt(i);
+					closedActionTag = true;
 					break;
 				}
 			}
+			if (closedActionTag || mxpLinkOpen)
+				updateLinkOpenFromStack();
 			return;
 		}
 		if (closeTag == "pre" || closeTag == "center" || closeTag == "ul" || closeTag == "ol" ||
@@ -24984,8 +25293,10 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 		QColor backColor = run.style.back;
 		if (run.style.inverse)
 			qSwap(foreColor, backColor);
-		const bool hasLinkAction = run.style.actionType == ActionHyperlink ||
-		                           run.style.actionType == ActionSend || run.style.actionType == ActionPrompt;
+		const bool hasLinkAction =
+		    (run.style.actionType == ActionHyperlink || run.style.actionType == ActionSend ||
+		     run.style.actionType == ActionPrompt) &&
+		    !run.style.action.trimmed().isEmpty() && !hasUnresolvedMxpTextEntityReference(run.style.action);
 		if (hasLinkAction && useCustomLinkColour && configuredHyperlinkColour.isValid())
 			foreColor = configuredHyperlinkColour;
 
@@ -25042,7 +25353,7 @@ int WorldRuntime::renderWindowOutputText(MiniWindow &targetWindow, const QString
 				countedLineY    = y;
 				hasCountedLineY = true;
 			}
-			if (hasLinkAction && !run.style.action.trimmed().isEmpty())
+			if (hasLinkAction)
 			{
 				const int addResult = MiniWindowUtils::addGeneratedOutputHotspot(
 				    *window, normalizedPrefix, runLeft, y, runRight, y + lineHeight, mouseUp, pluginId,

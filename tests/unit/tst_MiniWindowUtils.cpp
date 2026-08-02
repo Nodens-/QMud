@@ -54,6 +54,12 @@ class tst_MiniWindowUtils : public QObject
 			QVERIFY(MiniWindowUtils::hasActivatableAction(1, QStringLiteral("say hi"), 0));
 		}
 
+		void hasActivatableActionRejectsUnresolvedMxpTextEntityReference()
+		{
+			QVERIFY(!MiniWindowUtils::hasActivatableAction(1, QStringLiteral("help &text;"), 0));
+			QVERIFY(!MiniWindowUtils::hasActivatableAction(1, QStringLiteral("help &amp;text;"), 0));
+		}
+
 		void colorFromRefRoundTripsRgbTriplet()
 		{
 			const QColor color = MiniWindowUtils::colorFromRef(0x563412);

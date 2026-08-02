@@ -262,6 +262,10 @@ struct LuaCallbackMxpStyleFrameSnapshot
 {
 		QByteArray                       tag;
 		LuaCallbackMxpStyleStateSnapshot state;
+		LuaCallbackMxpStyleStateSnapshot actionState;
+		int                              actionTextLineNumber{-1};
+		int                              actionTextStartColumn{0};
+		qint64                           actionTextRuntimeLineNumber{-1};
 };
 
 /**

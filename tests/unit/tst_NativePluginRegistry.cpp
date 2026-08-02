@@ -785,11 +785,16 @@ class tst_NativePluginRegistry : public QObject
 			                                                     QStringLiteral("source line"));
 			QCOMPARE(events.size(), 1);
 			QCOMPARE(events.constFirst().text, QStringLiteral("replacement line"));
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QStringLiteral("source line"));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constFirst().text, QStringLiteral("replacement line"));
 
 			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(
 			    &runtime, QStringLiteral("subst add muted==!skip")));
 			events.clear();
 			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0, QStringLiteral("muted"));
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QStringLiteral("muted"));
 			QVERIFY(events.isEmpty());
 
 			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("subst off")));
@@ -813,6 +818,8 @@ class tst_NativePluginRegistry : public QObject
 			QVERIFY(events.isEmpty());
 			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0, QStringLiteral("spoken"));
 			QVERIFY(events.isEmpty());
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QStringLiteral("<prompt> "));
+			QVERIFY(events.isEmpty());
 
 			QMudNativePluginRegistry::handleMushReaderTabComplete(&runtime, QStringLiteral("north"));
 			QVERIFY(events.isEmpty());
@@ -831,14 +838,162 @@ class tst_NativePluginRegistry : public QObject
 			QCOMPARE(events.size(), 2);
 			QCOMPARE(events.at(1).text, QStringLiteral("north"));
 
-			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QStringLiteral("<prompt> "));
+			QCOMPARE(events.size(), 3);
+			QCOMPARE(events.at(2).text, QStringLiteral("<prompt> "));
+			QVERIFY(!events.at(2).interrupt);
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QStringLiteral("<prompt> "));
+			QCOMPARE(events.size(), 3);
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0, QStringLiteral("<prompt> "));
+			QCOMPARE(events.size(), 3);
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0, QStringLiteral("<prompt> "));
 			QCOMPARE(events.size(), 4);
-			QVERIFY(events.at(2).stop);
-			QCOMPARE(events.at(3).text, QStringLiteral("speech off"));
-			QVERIFY(events.at(3).interrupt);
+			QCOMPARE(events.at(3).text, QStringLiteral("<prompt> "));
+
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QStringLiteral("<cleared> "));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, QStringLiteral("<cleared> "));
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QString());
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0,
+			                                                     QStringLiteral("<cleared> "));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, QStringLiteral("<cleared> "));
+
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QStringLiteral("<stale> "));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, QStringLiteral("<stale> "));
+			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
+			QVERIFY(!QMudNativePluginRegistry::isMushReaderSpeechEnabled(&runtime));
+			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
+			QVERIFY(QMudNativePluginRegistry::isMushReaderSpeechEnabled(&runtime));
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0, QStringLiteral("<stale> "));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, QStringLiteral("<stale> "));
+
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime,
+			                                                      QStringLiteral("<plugin-toggle> "));
+			QCOMPARE(events.size(), 1);
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, false);
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0,
+			                                                     QStringLiteral("<plugin-toggle> "));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, QStringLiteral("<plugin-toggle> "));
+
+			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
+			QCOMPARE(events.size(), 3);
+			QVERIFY(events.at(1).stop);
+			QCOMPARE(events.at(2).text, QStringLiteral("speech off"));
+			QVERIFY(events.at(2).interrupt);
 
 			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0, QStringLiteral("muted"));
-			QCOMPARE(events.size(), 4);
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QStringLiteral("<muted> "));
+			QCOMPARE(events.size(), 3);
+		}
+
+		void partialLineDeliveryFailureDoesNotSuppressScreenDraw()
+		{
+			WorldRuntime                                       runtime;
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			bool                                               acceptSpeech = false;
+			QMudNativePluginRegistry::setTestSpeechSinkWithResult(
+			    [&events, &acceptSpeech](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    {
+				    events.push_back(event);
+				    return acceptSpeech;
+			    });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QStringLiteral("<failed> "));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, QStringLiteral("<failed> "));
+
+			events.clear();
+			acceptSpeech = true;
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0, QStringLiteral("<failed> "));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, QStringLiteral("<failed> "));
+		}
+
+		void clearPartialLineAllowsLaterScreenDrawOfSameText()
+		{
+			WorldRuntime                                       runtime;
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&events](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { events.push_back(event); });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QStringLiteral("<omitted> "));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, QStringLiteral("<omitted> "));
+
+			QMudNativePluginRegistry::clearMushReaderPartialLine(&runtime);
+			events.clear();
+
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0,
+			                                                     QStringLiteral("<omitted> "));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, QStringLiteral("<omitted> "));
+		}
+
+		void blankScreenDrawClearsPartialLineSuppression()
+		{
+			WorldRuntime                                       runtime;
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&events](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { events.push_back(event); });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+			const QString prompt = QStringLiteral("<blank-cleared> ");
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, prompt);
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, prompt);
+
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0, QString());
+			events.clear();
+
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0, prompt);
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, prompt);
+		}
+
+		void stopSpeechKeepsPartialScreenDrawSuppression()
+		{
+			WorldRuntime                                       runtime;
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&events](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { events.push_back(event); });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+			QMudNativePluginRegistry::handleMushReaderPartialLine(&runtime, QStringLiteral("<stopped> "));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, QStringLiteral("<stopped> "));
+
+			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts_stop")));
+			QCOMPARE(events.size(), 2);
+			QVERIFY(events.constLast().stop);
+
+			events.clear();
+			QMudNativePluginRegistry::handleMushReaderScreenDraw(&runtime, 1, 0,
+			                                                     QStringLiteral("<stopped> "));
+			QVERIFY(events.isEmpty());
 		}
 
 		void reviewSpeechUsesActiveMushReaderState()

@@ -487,6 +487,10 @@ class WorldRuntime : public QObject
 		{
 				QByteArray    tag;
 				MxpStyleState state;
+				MxpStyleState actionState;
+				int           actionTextLineNumber{-1};
+				int           actionTextStartColumn{0};
+				qint64        actionTextRuntimeLineNumber{-1};
 		};
 		/**
 		 * @brief Context needed by `WindowOutputText` to parse ANSI/MXP and custom MXP definitions.
@@ -5164,6 +5168,12 @@ class WorldRuntime : public QObject
 		 * @brief Flushes pending batched runtime output view refresh.
 		 */
 		void flushOutputViewMutationBatch();
+		/**
+		 * @brief Publishes a partial incoming line after presenting completed output first.
+		 * @param line Partial line text to publish.
+		 * @param spans Style spans for the partial line.
+		 */
+		void publishIncomingStyledLinePartial(const QString &line, const QVector<StyleSpan> &spans);
 		/**
 		 * @brief Captures or reuses immutable callback output-line snapshot data.
 		 * @param lineSnapshotPolicy Output-line snapshot depth to attach.

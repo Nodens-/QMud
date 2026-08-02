@@ -49,6 +49,13 @@ enum class MxpHyperlinkDispatchPolicy
 [[nodiscard]] QString normalizeMxpActionText(const QString &text);
 
 /**
+ * @brief Returns whether action text still contains the deferred MXP body-text entity.
+ * @param text MXP action or hint text.
+ * @return `true` when the text still needs close-tag `&text;` substitution.
+ */
+[[nodiscard]] bool    hasUnresolvedMxpTextEntityReference(const QString &text);
+
+/**
  * @brief Returns first executable send action from a potentially piped MXP action string.
  * @param href Decoded href/action text.
  * @return First non-empty action segment (or trimmed input when no segments found).

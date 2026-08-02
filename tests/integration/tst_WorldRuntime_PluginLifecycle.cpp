@@ -687,6 +687,25 @@ end
 	}
 
 	/**
+	 * @brief Verifies a two-line MXP send action resolved from closed body text.
+	 * @param lines Runtime output buffer.
+	 * @param expectedAction Expected resolved action text.
+	 */
+	void verifyTwoLineResolvedMxpAction(const IndexedRingBuffer<WorldRuntime::LineEntry> &lines,
+	                                    const QString                                    &expectedAction)
+	{
+		QTRY_COMPARE_WITH_TIMEOUT(lines.size(), qsizetype{2}, 1000);
+		QCOMPARE(lines.at(0).text, QStringLiteral("start-"));
+		QCOMPARE(lines.at(1).text, QStringLiteral("newbie"));
+		QVERIFY(!lines.at(0).spans.isEmpty());
+		QVERIFY(!lines.at(1).spans.isEmpty());
+		QCOMPARE(lines.at(0).spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
+		QCOMPARE(lines.at(1).spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
+		QCOMPARE(lines.at(0).spans.first().action, expectedAction);
+		QCOMPARE(lines.at(1).spans.first().action, expectedAction);
+	}
+
+	/**
 	 * @brief Configures a runtime with world and plugin focus callback recorders.
 	 * @param runtime Runtime to configure.
 	 * @param tempDir Temporary root directory.
@@ -958,6 +977,184 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QCOMPARE(spans.first().action, QStringLiteral("look é 中 中文"));
 		}
 
+		static void mxpSendTextEntityResolvesFromClosedBody()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+
+			QString                          line;
+			QVector<WorldRuntime::StyleSpan> spans;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &runtime,
+			                 [&line, &spans](const QString                          &incomingLine,
+			                                 const QVector<WorldRuntime::StyleSpan> &incomingSpans)
+			                 {
+				                 line  = incomingLine;
+				                 spans = incomingSpans;
+			                 });
+
+			runtime.receiveRawData(
+			    QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-newbie</send>\n"));
+
+			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+		}
+
+		static void mxpSendTextEntityReplacementIsNotRecursive()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+
+			QString                          line;
+			QVector<WorldRuntime::StyleSpan> spans;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &runtime,
+			                 [&line, &spans](const QString                          &incomingLine,
+			                                 const QVector<WorldRuntime::StyleSpan> &incomingSpans)
+			                 {
+				                 line  = incomingLine;
+				                 spans = incomingSpans;
+			                 });
+
+			runtime.receiveRawData(
+			    QByteArrayLiteral("\x1B[1z<send href=\"say &text;\">literal &amp;text;</send>\n"));
+
+			QCOMPARE(line, QStringLiteral("literal &text;"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
+			QCOMPARE(spans.first().action, QStringLiteral("say literal &text;"));
+		}
+
+		static void mxpCustomElementTextEntityResolvesFromClosedBody()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+
+			QString                          line;
+			QVector<WorldRuntime::StyleSpan> spans;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &runtime,
+			                 [&line, &spans](const QString                          &incomingLine,
+			                                 const QVector<WorldRuntime::StyleSpan> &incomingSpans)
+			                 {
+				                 line  = incomingLine;
+				                 spans = incomingSpans;
+			                 });
+
+			runtime.receiveRawData(QByteArrayLiteral("\x1B[1z<!ELEMENT help '<send href=\"help &text;\">'>"));
+			runtime.receiveRawData(QByteArrayLiteral("<help>start-newbie</help>\n"));
+
+			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+		}
+
+		static void mxpSendTextEntityResolvesAcrossCompletedLines()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			runtime.receiveRawData(QByteArrayLiteral("\x1B[6z<send href=\"help &text;\">start-\n"));
+			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+
+			const IndexedRingBuffer<WorldRuntime::LineEntry> &lines = runtime.lines();
+			verifyTwoLineResolvedMxpAction(lines, QStringLiteral("help start-\nnewbie"));
+		}
+
+		static void mxpSendTextEntityIgnoresCallbackLinesInsertedBeforeActionStart()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			runtime.receiveRawData(QByteArrayLiteral("\x1B[6z<send href=\"help &text;\">start-\n"));
+			QTRY_COMPARE_WITH_TIMEOUT(runtime.lines().size(), qsizetype{1}, 1000);
+			const qint64 actionStartLineNumber = runtime.lines().at(0).lineNumber;
+
+			QVERIFY(runtime.writeLuaCallbackOutputAtLineAnchor(actionStartLineNumber, 0, false,
+			                                                   QStringLiteral("callback"),
+			                                                   WorldRuntime::LineNote, {}, true));
+			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+
+			const IndexedRingBuffer<WorldRuntime::LineEntry> &lines = runtime.lines();
+			QTRY_COMPARE_WITH_TIMEOUT(lines.size(), qsizetype{3}, 1000);
+			QCOMPARE(lines.at(0).text, QStringLiteral("callback"));
+			QCOMPARE(lines.at(1).text, QStringLiteral("start-"));
+			QCOMPARE(lines.at(2).text, QStringLiteral("newbie"));
+			QVERIFY(lines.at(0).spans.isEmpty());
+			QVERIFY(!lines.at(1).spans.isEmpty());
+			QVERIFY(!lines.at(2).spans.isEmpty());
+			QCOMPARE(lines.at(1).spans.first().action, QStringLiteral("help start-\nnewbie"));
+			QCOMPARE(lines.at(2).spans.first().action, QStringLiteral("help start-\nnewbie"));
+		}
+
+		static void mxpCustomElementTextEntityResolvesAcrossCompletedLines()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			runtime.receiveRawData(QByteArrayLiteral("\x1B[6z<!ELEMENT help '<send href=\"help &text;\">'>"));
+			runtime.receiveRawData(QByteArrayLiteral("<help>start-\n"));
+			runtime.receiveRawData(QByteArrayLiteral("newbie</help>\n"));
+
+			const IndexedRingBuffer<WorldRuntime::LineEntry> &lines = runtime.lines();
+			verifyTwoLineResolvedMxpAction(lines, QStringLiteral("help start-\nnewbie"));
+		}
+
+		static void mxpSendTextEntityResolutionUsesCompleteBodyText()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+
+			QString                          line;
+			QVector<WorldRuntime::StyleSpan> spans;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &runtime,
+			                 [&line, &spans](const QString                          &incomingLine,
+			                                 const QVector<WorldRuntime::StyleSpan> &incomingSpans)
+			                 {
+				                 line  = incomingLine;
+				                 spans = incomingSpans;
+			                 });
+
+			const QString body    = QString(1001, QLatin1Char('x'));
+			QByteArray    payload = QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">") + body.toUtf8() +
+			                        QByteArrayLiteral("</send>\n");
+			runtime.receiveRawData(payload);
+
+			QCOMPARE(line, body);
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
+			QCOMPARE(spans.first().action, QStringLiteral("help ") + body);
+		}
+
+		static void mxpSendWithoutHrefUsesClosedBodyAsAction()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+
+			QString                          line;
+			QVector<WorldRuntime::StyleSpan> spans;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &runtime,
+			                 [&line, &spans](const QString                          &incomingLine,
+			                                 const QVector<WorldRuntime::StyleSpan> &incomingSpans)
+			                 {
+				                 line  = incomingLine;
+				                 spans = incomingSpans;
+			                 });
+
+			runtime.receiveRawData(QByteArrayLiteral("\x1B[1z<send>look portal</send>\n"));
+
+			QCOMPARE(line, QStringLiteral("look portal"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
+			QCOMPARE(spans.first().action, QStringLiteral("look portal"));
+		}
+
 		static void legacyEncodingExpandsBuiltinMxpEntityOutputAsWorldBytes()
 		{
 			WorldRuntime runtime;
@@ -1004,6 +1201,39 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 				offset += span.length;
 			}
 			QCOMPARE(offset, static_cast<int>(line.size()));
+		}
+
+		static void mxpResetPromptPartialIsPresentedWithoutLineTerminator()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("0"));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QStringList partialLines;
+			QObject::connect(
+			    &runtime, &WorldRuntime::incomingStyledLinePartialReceived, &runtime,
+			    [&partialLines](const QString &line, const QVector<WorldRuntime::StyleSpan> & /*spans*/)
+			    { partialLines.push_back(line); });
+
+			runtime.receiveRawData(bytes({IAC, SB, 91, IAC, SE}));
+
+			QByteArray payload = QByteArrayLiteral("There are 10 characters on.\r\n\r\n");
+			payload.append(
+			    QByteArrayLiteral("\x1B[3z\x1B[0;32m\x1B[1;33m<Ex>N</Ex><Ex>Sw</Ex>\x1B[0;32m 2:30pm "
+			                      "\x1B[1;31m32/32hp \x1B[1;34m100/100m \x1B[0;35m300mv "
+			                      "\x1B[0;32m2000xp\x1B[0;32m&gt; \x1B[0;37m"));
+			runtime.receiveRawData(payload);
+
+			const QString expectedPrompt = QStringLiteral("NSw 2:30pm 32/32hp 100/100m 300mv 2000xp> ");
+			QTRY_VERIFY(!partialLines.isEmpty());
+			QCOMPARE(partialLines.constLast(), expectedPrompt);
+			auto outputLastLine = [&harness]
+			{
+				const QStringList lines = harness.view.outputLines();
+				return lines.isEmpty() ? QString() : lines.constLast();
+			};
+			QTRY_COMPARE(outputLastLine(), expectedPrompt);
 		}
 
 		static void legacyEncodingMxpSetEntityCallbackPayloadUsesInternalUtf8()
@@ -1163,6 +1393,49 @@ end
 			const QList<QVariant> action = actionSpy.takeFirst();
 			QCOMPARE(action.at(0).toInt(), static_cast<int>(WorldRuntime::ActionSend));
 			QCOMPARE(action.at(1).toString(), QStringLiteral("look 中文"));
+		}
+
+		static void miniWindowMxpTextEntityResolvesFromClosedBody()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+			QVERIFY(createWindowOutputTextTarget(runtime));
+
+			QSignalSpy actionSpy(&runtime, &WorldRuntime::miniWindowOutputActionActivated);
+			QVERIFY(actionSpy.isValid());
+
+			WorldRuntime::WindowOutputMetrics metrics;
+			const int                         width = runtime.windowOutputText(
+			    QStringLiteral("output"), QStringLiteral("font"),
+			    QStringLiteral("\3send href=\"help &text;\"\4start-newbie\3/send\4"), 0, 0, 319, 79,
+			    0x00FFFFFF, QString(), QStringLiteral("link"), QString(), &metrics);
+
+			QVERIFY(width >= 0);
+			QCOMPARE(metrics.hotspotCount, 1);
+			const QStringList hotspots = runtime.windowHotspotList(QStringLiteral("output"));
+			QCOMPARE(hotspots.size(), 1);
+			QCOMPARE(runtime.windowOutputActivate(QStringLiteral("output"), hotspots.first(), false), eOK);
+			QCOMPARE(actionSpy.count(), 1);
+			const QList<QVariant> action = actionSpy.takeFirst();
+			QCOMPARE(action.at(0).toInt(), static_cast<int>(WorldRuntime::ActionSend));
+			QCOMPARE(action.at(1).toString(), QStringLiteral("help start-newbie"));
+		}
+
+		static void miniWindowUnclosedTextEntityActionIsNotHotspot()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+			QVERIFY(createWindowOutputTextTarget(runtime));
+
+			WorldRuntime::WindowOutputMetrics metrics;
+			const int                         width = runtime.windowOutputText(
+			    QStringLiteral("output"), QStringLiteral("font"),
+			    QStringLiteral("\3send href=\"help &text;\"\4start-newbie"), 0, 0, 319, 79, 0x00FFFFFF,
+			    QString(), QStringLiteral("link"), QString(), &metrics);
+
+			QVERIFY(width >= 0);
+			QCOMPARE(metrics.hotspotCount, 0);
+			QVERIFY(runtime.windowHotspotList(QStringLiteral("output")).isEmpty());
 		}
 
 		static void hiddenConnectDisconnectMessagesDoNotSuppressPluginLifecycleCallbacks()

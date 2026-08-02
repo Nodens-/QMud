@@ -30,6 +30,7 @@
 #include <QTimer>
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -415,6 +416,7 @@ namespace
 			bool                                        substitutionsEnabled{true};
 			bool                                        substitutionsLoaded{false};
 			bool                                        runtimeSetupComplete{false};
+			QString                                     lastSpokenPartialLine;
 			QMap<QString, QString>                      substitutions;
 			std::vector<std::unique_ptr<ReaderBackend>> backends;
 	};
@@ -441,20 +443,22 @@ namespace
 		return event;
 	}
 
-	std::function<void(const QMudNativePluginRegistry::TestSpeechEvent &)> &testSpeechSink()
+	std::function<bool(const QMudNativePluginRegistry::TestSpeechEvent &)> &testSpeechSink()
 	{
-		static std::function<void(const QMudNativePluginRegistry::TestSpeechEvent &)> sink;
+		static std::function<bool(const QMudNativePluginRegistry::TestSpeechEvent &)> sink;
 		return sink;
 	}
 
-	bool dispatchTestSpeechEvent(const QMudNativePluginRegistry::TestSpeechEvent &event)
+	std::optional<bool> dispatchTestSpeechEvent(const QMudNativePluginRegistry::TestSpeechEvent &event)
 	{
-		QMutexLocker locker(&stateMutex());
-		auto        &sink = testSpeechSink();
+		std::function<bool(const QMudNativePluginRegistry::TestSpeechEvent &)> sink;
+		{
+			QMutexLocker locker(&stateMutex());
+			sink = testSpeechSink();
+		}
 		if (!sink)
-			return false;
-		sink(event);
-		return true;
+			return std::nullopt;
+		return sink(event);
 	}
 
 	std::shared_ptr<MushReaderState> stateFor(const WorldRuntime *runtime)
@@ -471,6 +475,13 @@ namespace
 		QMutexLocker locker(&stateMutex());
 		const auto   it = states().find(runtime);
 		return it == states().end() ? std::shared_ptr<const MushReaderState>() : it->second;
+	}
+
+	void clearExistingLastSpokenPartialLine(const WorldRuntime *runtime)
+	{
+		QMutexLocker locker(&stateMutex());
+		if (const auto it = states().find(runtime); it != states().end() && it->second)
+			it->second->lastSpokenPartialLine.clear();
 	}
 
 	QString substitutionsFilePath(const WorldRuntime *runtime)
@@ -534,8 +545,12 @@ namespace
 	{
 		if (!runtime)
 			return false;
-		if (dispatchTestSpeechEvent(makeTestSpeechEvent(text, interrupt, false)))
-			return true;
+		if (const std::optional<bool> testResult =
+		        dispatchTestSpeechEvent(makeTestSpeechEvent(text, interrupt, false));
+		    testResult.has_value())
+		{
+			return testResult.value();
+		}
 		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
 		ensureBackends(*state);
 		for (const auto &backend : state->backends)
@@ -550,8 +565,12 @@ namespace
 	{
 		if (!runtime)
 			return false;
-		if (dispatchTestSpeechEvent(makeTestSpeechEvent(QString(), true, true)))
-			return true;
+		if (const std::optional<bool> testResult =
+		        dispatchTestSpeechEvent(makeTestSpeechEvent(QString(), true, true));
+		    testResult.has_value())
+		{
+			return testResult.value();
+		}
 		const std::shared_ptr<const MushReaderState> state = existingStateFor(runtime);
 		if (!state)
 			return false;
@@ -1922,6 +1941,7 @@ namespace QMudNativePluginRegistry
 			const std::shared_ptr<MushReaderState> state = stateFor(runtime);
 			if (state->mushReaderPluginEnabled)
 			{
+				state->lastSpokenPartialLine.clear();
 				state->mushReaderSpeechEnabled = !state->mushReaderSpeechEnabled;
 				const bool enabled             = state->mushReaderSpeechEnabled;
 				runtime->notifyNativePluginStateChanged();
@@ -2079,15 +2099,55 @@ namespace QMudNativePluginRegistry
 	void handleMushReaderScreenDraw(const WorldRuntime *runtime, const int type, const int /*log*/,
 	                                const QString &text)
 	{
-		if (!runtime || (type != 0 && type != 1) || text.trimmed().isEmpty())
+		if (!runtime || (type != 0 && type != 1))
 			return;
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		if (!effectiveMushReaderSpeechEnabled(*state))
+			return;
+		if (text.trimmed().isEmpty())
+		{
+			state->lastSpokenPartialLine.clear();
+			return;
+		}
+		bool    skip = false;
+		QString line = substitutionAppliedText(runtime, text, skip);
+		if (line == state->lastSpokenPartialLine)
+		{
+			state->lastSpokenPartialLine.clear();
+			return;
+		}
+		state->lastSpokenPartialLine.clear();
+		if (!skip && !line.isEmpty())
+			speak(runtime, line, false);
+	}
+
+	void handleMushReaderPartialLine(const WorldRuntime *runtime, const QString &text)
+	{
+		if (!runtime)
+			return;
+		if (text.trimmed().isEmpty())
+		{
+			clearExistingLastSpokenPartialLine(runtime);
+			return;
+		}
 		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
 		if (!effectiveMushReaderSpeechEnabled(*state))
 			return;
 		bool    skip = false;
 		QString line = substitutionAppliedText(runtime, text, skip);
+		if (line == state->lastSpokenPartialLine)
+			return;
+		state->lastSpokenPartialLine.clear();
 		if (!skip && !line.isEmpty())
-			speak(runtime, line, false);
+		{
+			if (speak(runtime, line, false))
+				state->lastSpokenPartialLine = line;
+		}
+	}
+
+	void clearMushReaderPartialLine(const WorldRuntime *runtime)
+	{
+		clearExistingLastSpokenPartialLine(runtime);
 	}
 
 	bool speakMushReaderReviewText(const WorldRuntime *runtime, const QString &text)
@@ -2119,8 +2179,9 @@ namespace QMudNativePluginRegistry
 		if (!runtime)
 			return;
 		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
-		state->mushReaderPluginEnabled               = enable;
-		state->mushReaderSpeechEnabled               = enable;
+		state->lastSpokenPartialLine.clear();
+		state->mushReaderPluginEnabled = enable;
+		state->mushReaderSpeechEnabled = enable;
 		if (!enable)
 			stopSpeech(runtime);
 	}
@@ -2190,6 +2251,21 @@ namespace QMudNativePluginRegistry
 	}
 
 	void setTestSpeechSink(std::function<void(const TestSpeechEvent &)> sink)
+	{
+		QMutexLocker locker(&stateMutex());
+		if (!sink)
+		{
+			testSpeechSink() = {};
+			return;
+		}
+		testSpeechSink() = [sink = std::move(sink)](const TestSpeechEvent &event)
+		{
+			sink(event);
+			return true;
+		};
+	}
+
+	void setTestSpeechSinkWithResult(std::function<bool(const TestSpeechEvent &)> sink)
 	{
 		QMutexLocker locker(&stateMutex());
 		testSpeechSink() = std::move(sink);

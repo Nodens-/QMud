@@ -389,6 +389,17 @@ namespace QMudNativePluginRegistry
 	 */
 	void handleMushReaderScreenDraw(const WorldRuntime *runtime, int type, int log, const QString &text);
 	/**
+	 * @brief Handles native partial-line speech for MushReader parity.
+	 * @param runtime Owning runtime.
+	 * @param text Current unterminated output line.
+	 */
+	void handleMushReaderPartialLine(const WorldRuntime *runtime, const QString &text);
+	/**
+	 * @brief Clears pending native MushReader partial-line suppression state.
+	 * @param runtime Owning runtime.
+	 */
+	void clearMushReaderPartialLine(const WorldRuntime *runtime);
+	/**
 	 * @brief Speaks user-initiated scrollback review text through the active MushReader speech state.
 	 * @param runtime Owning runtime.
 	 * @param text Review or search-result text to speak.
@@ -457,6 +468,11 @@ namespace QMudNativePluginRegistry
 	 * @param sink Event receiver; empty sink restores normal backend routing.
 	 */
 	void                      setTestSpeechSink(std::function<void(const TestSpeechEvent &)> sink);
+	/**
+	 * @brief Installs a test-only speech sink with explicit delivery status.
+	 * @param sink Event receiver returning true when the test speech event was accepted.
+	 */
+	void                      setTestSpeechSinkWithResult(std::function<bool(const TestSpeechEvent &)> sink);
 	/**
 	 * @brief Returns the number of initialized MushReader speech backends for tests.
 	 * @param runtime Runtime to inspect.

@@ -1079,11 +1079,34 @@ class WorldView : public QWidget
 		 * @return Accessible text map over the current logical output.
 		 */
 		[[nodiscard]] static QMudAccessibleTextUtils::LineOffsetMap
-		     accessibleNativeOutputTextMap(const NativeOutputRenderLines &lines);
+		                         accessibleNativeOutputTextMap(const NativeOutputRenderLines &lines);
+		/**
+		 * @brief Counts accessible native output text without materializing an offset map.
+		 * @param lines Native render lines to count.
+		 * @return UTF-16 code-unit count including inserted newline separators.
+		 */
+		[[nodiscard]] static int accessibleNativeOutputCharacterCount(const NativeOutputRenderLines &lines);
 		/**
 		 * @brief Primes the accessible text length without emitting backlog events.
 		 */
-		void primeAccessibleOutputTextState() const;
+		void                     primeAccessibleOutputTextState() const;
+		/**
+		 * @brief Records tail metadata for incremental accessible character-count tracking.
+		 * @param lines Native render lines for the current accessible baseline.
+		 */
+		void recordAccessibleOutputTailBaseline(const NativeOutputRenderLines &lines) const;
+		/**
+		 * @brief Records line lengths for muted live-accessibility baseline tracking.
+		 * @param lines Native render lines for the current accessible baseline.
+		 */
+		void recordSuppressedAccessibleOutputLengthBaseline(const NativeOutputRenderLines &lines) const;
+		/**
+		 * @brief Updates the muted live-accessibility baseline without building full accessible text.
+		 * @param lines Native render lines after presentation synchronization.
+		 * @return `true` when the baseline was advanced incrementally.
+		 */
+		[[nodiscard]] bool
+		     updateSuppressedAccessibleOutputBaseline(const NativeOutputRenderLines &lines) const;
 		/**
 		 * @brief Emits active-only accessibility notifications for newly presented native output.
 		 * @param lines Native render lines after presentation synchronization.
@@ -1309,6 +1332,14 @@ class WorldView : public QWidget
 				int                        removedLineCount{0};
 				int                        insertedLineCount{0};
 		};
+		/**
+		 * @brief Returns the retained line count for incremental accessible tail-delta handling.
+		 * @param delta Native render cache delta to inspect.
+		 * @param lineCount Current native render-line count.
+		 * @return Number of current lines retained from the previous accessible baseline, or `-1`.
+		 */
+		[[nodiscard]] static int accessibleRetainedLineCountForTailDelta(const NativeRenderCacheDelta &delta,
+		                                                                 int lineCount);
 		/**
 		 * @brief Deferred split-pane head-trim adjustment computed from pre-mutation layout state.
 		 */
@@ -2221,6 +2252,11 @@ class WorldView : public QWidget
 		mutable quint64                             m_accessibleOutputRevision{0};
 		mutable QString                             m_accessibleOutputText;
 		mutable bool                                m_accessibleOutputPendingTailAppend{false};
+		mutable QString                             m_accessibleOutputLastAnnouncedPartialText;
+		mutable bool                                m_accessibleOutputLiveEventsSuppressed{false};
+		mutable int                                 m_accessibleOutputBaselineLineCount{-1};
+		mutable QString                             m_accessibleOutputBaselineTailText;
+		mutable QVector<int>                        m_accessibleOutputBaselineLineLengths;
 		mutable bool                                m_accessibleOutputReviewActive{false};
 		mutable AccessibleOutputReviewTargetKind    m_accessibleOutputReviewTargetKind{
 		    AccessibleOutputReviewTargetKind::None};

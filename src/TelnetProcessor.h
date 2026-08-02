@@ -13,6 +13,8 @@
 #ifndef QMUD_TELNETPROCESSOR_H
 #define QMUD_TELNETPROCESSOR_H
 
+#include "WorldOptions.h"
+
 #include <QByteArray>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QList>
@@ -36,6 +38,31 @@ class TelnetProcessor
 			Secure,
 			Locked
 		};
+
+		/**
+		 * @brief Detailed MXP parser/session modes used by MUSHclient-compatible MXP handling.
+		 */
+		enum class MxpMode : int
+		{
+			Open            = 0,
+			Secure          = 1,
+			Locked          = 2,
+			Reset           = 3,
+			SecureOnce      = 4,
+			PermanentOpen   = 5,
+			PermanentSecure = 6,
+			PermanentLocked = 7
+		};
+
+		/**
+		 * @brief Returns the persisted numeric code for an MXP parser/session mode.
+		 * @param mode MXP mode to encode.
+		 * @return Numeric mode code used in MXP stream commands and session state.
+		 */
+		[[nodiscard]] static constexpr int mxpModeCode(const MxpMode mode) noexcept
+		{
+			return static_cast<int>(mode);
+		}
 
 		/**
 		 * @brief Creates telnet processor with default negotiation state.
@@ -528,12 +555,18 @@ class TelnetProcessor
 		template <typename MessageBuilder>
 		void emitMxpDiagnosticLazy(const int level, const long messageNumber, MessageBuilder &&buildMessage)
 		{
+			restoreMxpModeForDiagnosticLevel(level);
 			if (!m_callbacks.onMxpDiagnostic)
 				return;
 			if (m_callbacks.onMxpDiagnosticNeeded && !m_callbacks.onMxpDiagnosticNeeded(level))
 				return;
 			m_callbacks.onMxpDiagnostic(level, messageNumber, buildMessage());
 		}
+		/**
+		 * @brief Applies MXP mode side effects required before diagnostic callbacks.
+		 * @param level MXP diagnostic level.
+		 */
+		void               restoreMxpModeForDiagnosticLevel(int level);
 		/**
 		 * @brief Parses one MXP definition command.
 		 * @param definition Definition payload bytes.
@@ -686,7 +719,7 @@ class TelnetProcessor
 		bool                     m_utf8{false};
 		QString                  m_legacyEncodingName;
 		QList<QByteArray>        m_preferredCharsetNames;
-		int                      m_useMxp{3}; // eNoMXP by default
+		int                      m_useMxp{eNoMXP};
 		bool                     m_naws{false};
 		bool                     m_nawsWanted{false};
 		int                      m_wrapColumns{0};
@@ -715,9 +748,9 @@ class TelnetProcessor
 			HAVE_MXP_ENTITY
 		};
 
-		int                          m_mxpMode{2}; // default locked until enabled
-		int                          m_mxpDefaultMode{0};
-		int                          m_mxpPreviousMode{0};
+		int                          m_mxpMode{mxpModeCode(MxpMode::Locked)};
+		int                          m_mxpDefaultMode{mxpModeCode(MxpMode::Open)};
+		int                          m_mxpPreviousMode{mxpModeCode(MxpMode::Open)};
 		bool                         m_mxpEnabled{false};
 		bool                         m_puebloActive{false};
 		MxpPhase                     m_mxpPhase{MXP_NONE};

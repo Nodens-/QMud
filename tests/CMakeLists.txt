@@ -135,6 +135,7 @@ qmud_add_qtest(tst_MiniWindowUtils
         SOURCES
         unit/tst_MiniWindowUtils.cpp
         "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowUtils.cpp"
+        "${CMAKE_SOURCE_DIR}/src/helpers/HyperlinkActionUtils.cpp"
         "${CMAKE_SOURCE_DIR}/src/helpers/FontUtils.cpp"
         LIBRARIES
         Qt6::Widgets
@@ -267,6 +268,8 @@ qmud_add_qtest(tst_WorldSessionStateUtils
         SOURCES
         unit/tst_WorldSessionStateUtils.cpp
         "${CMAKE_SOURCE_DIR}/src/helpers/WorldSessionStateUtils.cpp"
+        LIBRARIES
+        ${QMUD_ZLIB_TARGET}
         LABELS
         unit)
 
@@ -731,6 +734,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             "${CMAKE_SOURCE_DIR}/src/helpers/AnsiSgrParseUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/AccessibleTextUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowUtils.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/HyperlinkActionUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/OutputWrapUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/ShortcutPreferenceUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
