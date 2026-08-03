@@ -9219,7 +9219,7 @@ namespace
 		{
 			flushed = runOnRuntimeThread(
 			    targetRuntime,
-			    [&]() -> bool
+			    [targetRuntime, &pendingMutations, hadOpenMiniWindowBatch]() -> bool
 			    {
 				    const bool openedBatchForFlush = !hadOpenMiniWindowBatch;
 				    if (openedBatchForFlush)

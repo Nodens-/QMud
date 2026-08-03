@@ -10958,6 +10958,86 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void incomingLinePartialClearDoesNotPresentPromptBeforeAnchoredPluginOutput()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(nativeCanvas);
+
+			view.appendOutputText(QStringLiteral("(Mount: 2614st)"), true);
+			const QString prompt = QStringLiteral("[SAFE]<2083hp 2220sp 1990st> ");
+			view.updatePartialOutputText(prompt);
+			QCoreApplication::processEvents();
+			nativeCanvas->repaint();
+			QCoreApplication::processEvents();
+			QCOMPARE(view.outputLines().constLast(), prompt);
+
+			WorldRuntime::LineEntry promptEntry;
+			promptEntry.text       = prompt;
+			promptEntry.flags      = WorldRuntime::LineOutput;
+			promptEntry.hardReturn = true;
+			promptEntry.time       = QDateTime::currentDateTime();
+			promptEntry.lineNumber =
+			    g_runtimeLines.isEmpty() ? 1 : (g_runtimeLines.constLast().lineNumber + 1);
+			g_runtimeLines.push_back(promptEntry);
+
+			view.m_nativeRuntimeOutputPresentationQueued          = false;
+			view.m_nativeRuntimeOutputPresentationNeedsLayoutSync = false;
+			view.m_nativeRuntimeOutputPresentationFollowTail      = false;
+			view.clearPartialOutputForIncomingLineCommit();
+			QVERIFY(!view.m_nativeRuntimeOutputPresentationQueued);
+			QVERIFY(!view.m_nativeRuntimeOutputPresentationNeedsLayoutSync);
+			QVERIFY(!view.m_nativeRuntimeOutputPresentationFollowTail);
+
+			qint64 nextInsertedLineNumber = promptEntry.lineNumber + 1;
+			auto   insertPluginLine =
+			    [&nextInsertedLineNumber](const int insertIndex, const QStringList &segments)
+			{
+				int position = insertIndex;
+				for (int i = 0; i < segments.size(); ++i)
+				{
+					WorldRuntime::LineEntry entry;
+					entry.text       = segments.at(i);
+					entry.flags      = WorldRuntime::LineNote;
+					entry.hardReturn = i == segments.size() - 1;
+					entry.time       = QDateTime::currentDateTime();
+					entry.lineNumber = nextInsertedLineNumber++;
+					g_runtimeLines.insert(g_runtimeLines.begin() + position, entry);
+					++position;
+				}
+			};
+
+			const int promptIndex = sizeToInt(g_runtimeLines.size()) - 1;
+			QVERIFY(promptIndex >= 0);
+			insertPluginLine(promptIndex, {QStringLiteral("["), QStringLiteral("695"), QStringLiteral(", "),
+			                               QStringLiteral("770"), QStringLiteral("]")});
+			insertPluginLine(promptIndex + 5, {QStringLiteral("0"), QStringLiteral(" "), QStringLiteral("0"),
+			                                   QStringLiteral(" "), QStringLiteral("+196"), QString()});
+			view.notifyRuntimeOutputRangeChanged(promptIndex);
+			QCoreApplication::processEvents();
+			nativeCanvas->repaint();
+			QCoreApplication::processEvents();
+
+			const QStringList lines = view.outputLines();
+			QVERIFY(lines.size() >= 4);
+			const QStringList tailLines = lines.sliced(lines.size() - 4);
+			QCOMPARE(tailLines.at(0), QStringLiteral("(Mount: 2614st)"));
+			QCOMPARE(tailLines.at(1), QStringLiteral("[695, 770]"));
+			QCOMPARE(tailLines.at(2), QStringLiteral("0 0 +196"));
+			QCOMPARE(tailLines.at(3), prompt);
+			QVERIFY(std::ranges::none_of(tailLines, [](const QString &line) { return line.isEmpty(); }));
+
+			resetTestState();
+		}
+
 		void runtimeObserverAttachKeepsOutputDocumentEmpty()
 		{
 			resetTestState();

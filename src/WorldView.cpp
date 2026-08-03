@@ -11555,6 +11555,16 @@ void WorldView::updatePartialOutputText(const QString &text, const QVector<World
 
 void WorldView::clearPartialOutput()
 {
+	clearPartialOutput(true);
+}
+
+void WorldView::clearPartialOutputForIncomingLineCommit()
+{
+	clearPartialOutput(false);
+}
+
+void WorldView::clearPartialOutput(const bool synchronizePresentation)
+{
 	if (!m_nativeHasPartialOutput && m_nativePartialOutputText.isEmpty() &&
 	    m_nativePartialOutputSpans.isEmpty() && !m_hasPartialOutput && m_partialOutputStart == 0 &&
 	    m_partialOutputLength == 0)
@@ -11570,7 +11580,9 @@ void WorldView::clearPartialOutput()
 	m_partialOutputStart  = 0;
 	m_partialOutputLength = 0;
 	syncOutputTextVisibilityForNativeCanvas();
-	m_accessibleOutputPendingTailAppend  = false;
+	m_accessibleOutputPendingTailAppend = false;
+	if (!synchronizePresentation)
+		return;
 	const NativeOutputRenderLines &lines = synchronizeNativeRuntimeOutputPresentation(false, !m_frozen);
 	requestNativeOutputPresentationRepaint(!m_frozen, lines);
 }

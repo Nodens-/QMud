@@ -188,6 +188,10 @@ class WorldView : public QWidget
 		 */
 		void clearPartialOutput();
 		/**
+		 * @brief Clears pending partial output while an incoming runtime line is still being processed.
+		 */
+		void clearPartialOutputForIncomingLineCommit();
+		/**
 		 * @brief Commits pending incoming partial output into the runtime line buffer.
 		 * @return `true` when a partial line was committed.
 		 */
@@ -982,6 +986,11 @@ class WorldView : public QWidget
 		 * @param updateRegion Dirty region in output-stack coordinates.
 		 */
 		void paintNativeOutputBackground(class QPainter *painter, const QRegion &updateRegion) const;
+		/**
+		 * @brief Clears pending partial output and optionally synchronizes runtime presentation.
+		 * @param synchronizePresentation `true` to present the current runtime buffer immediately.
+		 */
+		void clearPartialOutput(bool synchronizePresentation);
 		/**
 		 * @brief Applies runtime settings with policy-driven rebuild selection.
 		 * @param allowRebuild `true` to run semantic rebuild policy, `false` to force no rebuild.
