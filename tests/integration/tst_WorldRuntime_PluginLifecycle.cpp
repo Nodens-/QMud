@@ -25,6 +25,7 @@
 #include <QFile>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QHostAddress>
+#include <QRegularExpression>
 #include <QScopeGuard>
 #include <QScopedPointer>
 #include <QTcpServer>
@@ -446,6 +447,25 @@ end
 		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
 		trigger.children.insert(QStringLiteral("send"),
 		                        QStringLiteral("Send(\"qcmd-lua-a91\")\nSend(\"qcmd-lua-b26\")"));
+		return trigger;
+	}
+
+	/**
+	 * @brief Creates a direct script trigger that inserts note lines above the matched prompt.
+	 * @param prompt Prompt text to match.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makePromptNoteInjectionTrigger(const QString &prompt)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"),
+		                          QStringLiteral("^%1$").arg(QRegularExpression::escape(prompt)));
+		trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		trigger.children.insert(QStringLiteral("send"),
+		                        QStringLiteral("Note(\"[695, 770]\")\nNote(\"0 0 +196\")"));
 		return trigger;
 	}
 
@@ -1845,6 +1865,43 @@ end
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    pluginVariable(runtime, kTimerCommandPluginId, QStringLiteral("timer_commands")),
 			    QStringLiteral("qcmd-timer-multi-a23,qcmd-timer-multi-b58"), 5000);
+		}
+
+		static void promptPartialCommitPresentsTriggerInjectedLinesWithoutBlankRows()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+
+			const QString prompt = QStringLiteral("[SAFE]<2083hp 2220sp 1990st> ");
+			runtime.triggersMutable().push_back(makePromptNoteInjectionTrigger(prompt));
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			harness.processor.onIncomingStyledLineReceived(QStringLiteral("(Mount: 2614st)"), {});
+			QTRY_VERIFY_WITH_TIMEOUT(harness.view.outputLines().contains(QStringLiteral("(Mount: 2614st)")),
+			                         5000);
+
+			harness.processor.onIncomingStyledLinePartialReceived(prompt, {});
+			QTRY_COMPARE_WITH_TIMEOUT(harness.view.outputLines().constLast(), prompt, 5000);
+
+			harness.processor.onIncomingStyledLineReceived(prompt, {});
+			auto tailLinesMatch = [&harness, &prompt]
+			{
+				const QStringList lines = harness.view.outputLines();
+				if (lines.size() < 4)
+					return false;
+				const QStringList tailLines = lines.sliced(lines.size() - 4);
+				return tailLines == QStringList{QStringLiteral("(Mount: 2614st)"),
+				                                QStringLiteral("[695, 770]"), QStringLiteral("0 0 +196"),
+				                                prompt} &&
+				       std::ranges::none_of(tailLines, [](const QString &line) { return line.isEmpty(); });
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(tailLinesMatch(), 5000);
 		}
 
 		static void directLuaTriggerSendCommandsEnterPriorityQueueBand()

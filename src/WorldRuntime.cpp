@@ -23663,6 +23663,12 @@ void WorldRuntime::publishIncomingStyledLinePartial(const QString &line, const Q
 void WorldRuntime::beginOutputViewMutationBatch()
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::beginOutputViewMutationBatch");
+	if (m_outputViewMutationBatchDepth == 0)
+	{
+		m_outputViewMutationBatchView = m_view;
+		if (m_outputViewMutationBatchView)
+			m_outputViewMutationBatchView->beginRuntimeOutputMutationBatch();
+	}
 	++m_outputViewMutationBatchDepth;
 }
 
@@ -23674,7 +23680,11 @@ void WorldRuntime::endOutputViewMutationBatch()
 	--m_outputViewMutationBatchDepth;
 	if (m_outputViewMutationBatchDepth > 0)
 		return;
+	const QPointer<WorldView> batchView = m_outputViewMutationBatchView;
+	m_outputViewMutationBatchView.clear();
 	flushOutputViewMutationBatch();
+	if (batchView)
+		batchView->endRuntimeOutputMutationBatch();
 }
 
 bool WorldRuntime::writeLuaCallbackOutputAtLineAnchor(const qint64 anchorLineNumber,

@@ -188,10 +188,6 @@ class WorldView : public QWidget
 		 */
 		void clearPartialOutput();
 		/**
-		 * @brief Clears pending partial output while an incoming runtime line is still being processed.
-		 */
-		void clearPartialOutputForIncomingLineCommit();
-		/**
 		 * @brief Commits pending incoming partial output into the runtime line buffer.
 		 * @return `true` when a partial line was committed.
 		 */
@@ -950,6 +946,7 @@ class WorldView : public QWidget
 
 	private:
 		friend class WorldOutputCanvas;
+		friend class WorldRuntime;
 		friend class ::tst_WorldView_Basic;
 		struct NativeOutputRenderLine;
 		using NativeOutputRenderLines = IndexedRingBuffer<NativeOutputRenderLine>;
@@ -987,10 +984,13 @@ class WorldView : public QWidget
 		 */
 		void paintNativeOutputBackground(class QPainter *painter, const QRegion &updateRegion) const;
 		/**
-		 * @brief Clears pending partial output and optionally synchronizes runtime presentation.
-		 * @param synchronizePresentation `true` to present the current runtime buffer immediately.
+		 * @brief Begins a runtime-owned output presentation mutation batch.
 		 */
-		void clearPartialOutput(bool synchronizePresentation);
+		void beginRuntimeOutputMutationBatch();
+		/**
+		 * @brief Ends a runtime-owned output presentation mutation batch.
+		 */
+		void endRuntimeOutputMutationBatch();
 		/**
 		 * @brief Applies runtime settings with policy-driven rebuild selection.
 		 * @param allowRebuild `true` to run semantic rebuild policy, `false` to force no rebuild.
@@ -2522,6 +2522,8 @@ class WorldView : public QWidget
 		bool                                    m_nativeRuntimeOutputPresentationQueued{false};
 		bool                                    m_nativeRuntimeOutputPresentationNeedsLayoutSync{false};
 		bool                                    m_nativeRuntimeOutputPresentationFollowTail{false};
+		int                                     m_runtimeOutputMutationBatchDepth{0};
+		bool                                    m_runtimeBatchPartialClearPending{false};
 		bool                                    m_scrollToEndQueued{false};
 		bool                                    m_scrollToEndNeedsLayoutSync{false};
 		bool                                    m_destroying{false};

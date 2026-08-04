@@ -30,6 +30,7 @@
 #include <QMetaObject>
 #include <QMutex>
 #include <QObject>
+#include <QPointer>
 #include <QQueue>
 #include <QSet>
 #include <QSharedPointer>
@@ -5809,6 +5810,7 @@ class WorldRuntime : public QObject
 		int                                             m_outputViewLineChangedIndex{-1};
 		bool                                            m_outputViewRangeChangedPending{false};
 		int                                             m_outputViewFirstChangedIndex{-1};
+		QPointer<WorldView>                             m_outputViewMutationBatchView;
 		QVector<QMudMemoryImageDecodeCacheEntry>        m_memoryImageDecodeCache;
 		qint64                                          m_memoryImageDecodeCacheBytes{0};
 		int                                             m_absoluteReferenceRightOver{0};

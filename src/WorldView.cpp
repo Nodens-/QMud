@@ -2036,6 +2036,8 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 	if (m_runtime && m_runtime->view() == this)
 		m_runtime->setView(nullptr);
 
+	m_runtimeOutputMutationBatchDepth = 0;
+	m_runtimeBatchPartialClearPending = false;
 	if (runtime)
 	{
 		// Runtime/native mode must clear stale standalone output state.
@@ -2077,6 +2079,8 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 	m_pendingMiniWindowOverlayDirtyRegion  = {};
 	m_wrapMarginReservationCacheValid      = false;
 	m_wrapMarginReservationPixels          = 0;
+	m_runtimeOutputMutationBatchDepth      = 0;
+	m_runtimeBatchPartialClearPending      = false;
 	m_runtime                              = runtime;
 	resetRuntimeSettingsSnapshot();
 	applyRuntimeSettings();
@@ -2111,6 +2115,8 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 		m_nativeRenderLineCacheFromRuntime = true;
 		m_nativeRenderLineCacheValid       = false;
 		m_nativeLayoutCacheValid           = false;
+		m_runtimeOutputMutationBatchDepth  = 0;
+		m_runtimeBatchPartialClearPending  = false;
 		m_lastQueuedOutputClientSize       = {};
 		m_lastQueuedOutputClientSizeValid  = false;
 		clearNativeOutputSelection(true);
@@ -11743,16 +11749,6 @@ void WorldView::updatePartialOutputText(const QString &text, const QVector<World
 
 void WorldView::clearPartialOutput()
 {
-	clearPartialOutput(true);
-}
-
-void WorldView::clearPartialOutputForIncomingLineCommit()
-{
-	clearPartialOutput(false);
-}
-
-void WorldView::clearPartialOutput(const bool synchronizePresentation)
-{
 	if (!m_nativeHasPartialOutput && m_nativePartialOutputText.isEmpty() &&
 	    m_nativePartialOutputSpans.isEmpty() && !m_hasPartialOutput && m_partialOutputStart == 0 &&
 	    m_partialOutputLength == 0)
@@ -11769,8 +11765,31 @@ void WorldView::clearPartialOutput(const bool synchronizePresentation)
 	m_partialOutputLength = 0;
 	syncOutputTextVisibilityForNativeCanvas();
 	m_accessibleOutputPendingTailAppend = false;
-	if (!synchronizePresentation)
+	if (m_runtimeOutputMutationBatchDepth > 0)
+	{
+		m_runtimeBatchPartialClearPending = true;
 		return;
+	}
+	const NativeOutputRenderLines &lines = synchronizeNativeRuntimeOutputPresentation(false, !m_frozen);
+	requestNativeOutputPresentationRepaint(!m_frozen, lines);
+}
+
+void WorldView::beginRuntimeOutputMutationBatch()
+{
+	++m_runtimeOutputMutationBatchDepth;
+}
+
+void WorldView::endRuntimeOutputMutationBatch()
+{
+	if (m_runtimeOutputMutationBatchDepth <= 0)
+		return;
+	--m_runtimeOutputMutationBatchDepth;
+	if (m_runtimeOutputMutationBatchDepth > 0)
+		return;
+	if (!m_runtimeBatchPartialClearPending)
+		return;
+
+	m_runtimeBatchPartialClearPending    = false;
 	const NativeOutputRenderLines &lines = synchronizeNativeRuntimeOutputPresentation(false, !m_frozen);
 	requestNativeOutputPresentationRepaint(!m_frozen, lines);
 }
@@ -11807,6 +11826,7 @@ void WorldView::notifyRuntimeOutputLineChanged()
 	m_nativePartialOutputSpans.clear();
 	m_nativeRenderLineCacheFromRuntime  = true;
 	m_accessibleOutputPendingTailAppend = false;
+	m_runtimeBatchPartialClearPending   = false;
 	syncOutputTextVisibilityForNativeCanvas();
 	if (!m_frozen)
 		requestOutputScrollToEnd();
@@ -11825,6 +11845,7 @@ void WorldView::notifyRuntimeOutputLineChanged(const int runtimeLineIndex)
 	m_nativePartialOutputSpans.clear();
 	m_nativeRenderLineCacheFromRuntime  = true;
 	m_accessibleOutputPendingTailAppend = false;
+	m_runtimeBatchPartialClearPending   = false;
 	markNativeRuntimeLineRestitchPending(runtimeLineIndex);
 	syncOutputTextVisibilityForNativeCanvas();
 	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
@@ -11842,6 +11863,7 @@ void WorldView::notifyRuntimeOutputRangeChanged(const int runtimeLineIndex)
 	m_nativeRenderLineCacheFromRuntime  = true;
 	m_accessibleOutputPendingTailAppend = false;
 	m_accessibleOutputLastAnnouncedPartialText.clear();
+	m_runtimeBatchPartialClearPending = false;
 	markNativeRuntimeRangeRestitchPending(runtimeLineIndex);
 	syncOutputTextVisibilityForNativeCanvas();
 	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);

@@ -1395,7 +1395,7 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 
 	if (m_view)
 	{
-		m_view->clearPartialOutputForIncomingLineCommit();
+		m_view->clearPartialOutput();
 		if (!triggerResult.omitFromOutput)
 		{
 			QString                          displayLine  = line;
