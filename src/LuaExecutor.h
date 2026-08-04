@@ -266,6 +266,7 @@ struct LuaCallbackMxpStyleFrameSnapshot
 		int                              actionTextLineNumber{-1};
 		int                              actionTextStartColumn{0};
 		qint64                           actionTextRuntimeLineNumber{-1};
+		quint64                          actionTextPartialLineRevision{0};
 };
 
 /**

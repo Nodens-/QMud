@@ -6095,6 +6095,7 @@ namespace
 			frame.actionTextLineNumber        = frameSnapshot.actionTextLineNumber;
 			frame.actionTextStartColumn       = frameSnapshot.actionTextStartColumn;
 			frame.actionTextRuntimeLineNumber = frameSnapshot.actionTextRuntimeLineNumber;
+			frame.actionTextPartialLineRevision = frameSnapshot.actionTextPartialLineRevision;
 			context.mxpStyleStack.push_back(frame);
 		}
 		context.normalAnsi.resize(8);

@@ -269,7 +269,7 @@ namespace
 	}
 } // namespace
 
-QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArray &bytes, QMudAnsiStreamState &streamState,
+QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArrayView bytes, QMudAnsiStreamState &streamState,
                                                 const QString &defaultFore, const QString &defaultBack,
                                                 const std::function<QString(int)> &normalAnsiColorFromIndex,
                                                 const std::function<QString(int)> &boldAnsiColorFromIndex,
@@ -358,7 +358,7 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArray &bytes, QMudAns
 
 	QByteArray plainBytes;
 	plainBytes.reserve(bytes.size());
-	for (int i = 0; i < bytes.size(); ++i)
+	for (qsizetype i = 0; i < bytes.size(); ++i)
 	{
 		const char ch = bytes.at(i);
 

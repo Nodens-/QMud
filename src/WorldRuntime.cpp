@@ -145,6 +145,7 @@ static void    buildCustomColours(const QList<WorldRuntime::Colour> &colours, QV
 static void    buildResolvedColourTables(const QList<WorldRuntime::Colour> &colours,
                                          ResolvedWorldColourTables         &tables);
 static ResolvedWorldColourTables buildResolvedWorldColourTables(const QList<WorldRuntime::Colour> &colours);
+static bool                      worldAttributeAffectsResolvedOutputColours(const QString &key);
 static ResolvedNoteColours       resolveNoteColours(bool notesInRgb, int noteTextColour, long noteColourFore,
                                                     long                             noteColourBack,
                                                     const ResolvedWorldColourTables &colourTables,
@@ -169,6 +170,8 @@ constexpr int              kMaxMxpTextBufferBytes            = 256 * 1024;
 constexpr int              kMaxMxpStackDepth                 = 512;
 constexpr int              kMemoryImageDecodeCacheMaxEntries = 48;
 constexpr qint64           kMemoryImageDecodeCacheMaxBytes   = 64LL * 1024LL * 1024LL;
+constexpr int              kAnsiBlack                        = 0;
+constexpr int              kAnsiWhite                        = 7;
 
 namespace
 {
@@ -4541,7 +4544,8 @@ void WorldRuntime::resetAnsiRenderState()
 	m_partialLineText.clear();
 	m_partialLineSpans.clear();
 	m_pendingCarriageReturnOverwrite = false;
-	m_ansiRenderState                = AnsiRenderState{};
+	++m_incomingPartialLineRevision;
+	m_ansiRenderState = AnsiRenderState{};
 	m_streamUtf8Carry.clear();
 	m_streamUtf8DecoderEnabled = false;
 	m_streamLegacyEncodingName.clear();
@@ -5086,113 +5090,16 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 		mxpStartUp();
 	const bool luaEnabled = isLuaScriptingEnabled(m_worldAttributes);
 
-	auto       parseColorValue = [](const QString &value) -> QColor
-	{
-		if (value.isEmpty())
-			return {};
-		QColor color(value);
-		if (color.isValid())
-			return color;
-		bool      ok      = false;
-		const int numeric = value.toInt(&ok);
-		if (!ok)
-			return {};
-		const int r = numeric & 0xFF;
-		const int g = (numeric >> 8) & 0xFF;
-		const int b = (numeric >> 16) & 0xFF;
-		return {r, g, b};
-	};
-
-	QVector<QColor> normalAnsi(8);
-	QVector<QColor> boldAnsi(8);
-	QVector<QColor> customText(16);
-	QVector<QColor> customBack(16);
-	normalAnsi[0] = QColor(0, 0, 0);
-	normalAnsi[1] = QColor(128, 0, 0);
-	normalAnsi[2] = QColor(0, 128, 0);
-	normalAnsi[3] = QColor(128, 128, 0);
-	normalAnsi[4] = QColor(0, 0, 128);
-	normalAnsi[5] = QColor(128, 0, 128);
-	normalAnsi[6] = QColor(0, 128, 128);
-	normalAnsi[7] = QColor(192, 192, 192);
-	boldAnsi[0]   = QColor(128, 128, 128);
-	boldAnsi[1]   = QColor(255, 0, 0);
-	boldAnsi[2]   = QColor(0, 255, 0);
-	boldAnsi[3]   = QColor(255, 255, 0);
-	boldAnsi[4]   = QColor(0, 0, 255);
-	boldAnsi[5]   = QColor(255, 0, 255);
-	boldAnsi[6]   = QColor(0, 255, 255);
-	boldAnsi[7]   = QColor(255, 255, 255);
-	for (int i = 0; i < customText.size(); ++i)
-	{
-		customText[i] = QColor(255, 255, 255);
-		customBack[i] = QColor(0, 0, 0);
-	}
-	customText[0]  = QColor(255, 128, 128);
-	customText[1]  = QColor(255, 255, 128);
-	customText[2]  = QColor(128, 255, 128);
-	customText[3]  = QColor(128, 255, 255);
-	customText[4]  = QColor(0, 128, 255);
-	customText[5]  = QColor(255, 128, 192);
-	customText[6]  = QColor(255, 0, 0);
-	customText[7]  = QColor(0, 128, 192);
-	customText[8]  = QColor(255, 0, 255);
-	customText[9]  = QColor(128, 64, 64);
-	customText[10] = QColor(255, 128, 64);
-	customText[11] = QColor(0, 128, 128);
-	customText[12] = QColor(0, 64, 128);
-	customText[13] = QColor(255, 0, 128);
-	customText[14] = QColor(0, 128, 0);
-	customText[15] = QColor(0, 0, 255);
-
-	for (const auto &colour : m_colours)
-	{
-		const QString group = colour.group.trimmed().toLower();
-		bool          ok    = false;
-		const int     seq   = colour.attributes.value(QStringLiteral("seq")).toInt(&ok);
-		const int     index = ok ? seq - 1 : -1;
-		if (index < 0)
-			continue;
-		if (group == QStringLiteral("ansi/normal") && index < normalAnsi.size())
-		{
-			const QColor rgb = parseColorValue(colour.attributes.value(QStringLiteral("rgb")));
-			if (rgb.isValid())
-				normalAnsi[index] = rgb;
-		}
-		else if (group == QStringLiteral("ansi/bold") && index < boldAnsi.size())
-		{
-			const QColor rgb = parseColorValue(colour.attributes.value(QStringLiteral("rgb")));
-			if (rgb.isValid())
-				boldAnsi[index] = rgb;
-		}
-		else if ((group == QStringLiteral("custom/custom") || group == QStringLiteral("custom")) &&
-		         index < customText.size())
-		{
-			const QColor text = parseColorValue(colour.attributes.value(QStringLiteral("text")));
-			const QColor back = parseColorValue(colour.attributes.value(QStringLiteral("back")));
-			if (text.isValid())
-				customText[index] = text;
-			if (back.isValid())
-				customBack[index] = back;
-		}
-	}
-
-	const bool custom16Default =
-	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("custom_16_is_default_colour")));
 	const bool ignoreMxpColourChanges =
 	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("ignore_mxp_colour_changes")));
-	QColor defaultForeColor = parseColorValue(m_worldAttributes.value(QStringLiteral("output_text_colour")));
-	QColor defaultBackColor =
-	    parseColorValue(m_worldAttributes.value(QStringLiteral("output_background_colour")));
-	if (!defaultForeColor.isValid())
-		defaultForeColor = custom16Default ? customText.value(15) : normalAnsi.value(7);
-	if (!defaultBackColor.isValid())
-		defaultBackColor = custom16Default ? customBack.value(15) : normalAnsi.value(0);
+	const ResolvedOutputColourCache &outputColours               = resolvedOutputColourCache();
+	const QVector<QColor>           &normalAnsi                  = outputColours.normalAnsi;
+	const QVector<QColor>           &boldAnsi                    = outputColours.boldAnsi;
+	const QString                   &defaultFore                 = outputColours.defaultFore;
+	const QString                   &defaultBack                 = outputColours.defaultBack;
+	quint64                          incomingPartialLineRevision = m_incomingPartialLineRevision;
 
-	const QString defaultFore = defaultForeColor.isValid() ? defaultForeColor.name() : QString();
-	const QString defaultBack = defaultBackColor.isValid() ? defaultBackColor.name() : QString();
-
-	auto          emitCompletedLine = [&](QString &lineText, QVector<StyleSpan> &lineSpans)
+	auto                             emitCompletedLine = [&](QString &lineText, QVector<StyleSpan> &lineSpans)
 	{
 		applyMappingFailureIfMatched(*this, lineText);
 		if (!m_active)
@@ -5203,6 +5110,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 		m_newlinesReceived++;
 		lineText.clear();
 		lineSpans.clear();
+		++incomingPartialLineRevision;
 	};
 
 	const bool hasActiveMxpRenderContext =
@@ -5395,12 +5303,13 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			m_partialLineText                = lineText;
 			m_partialLineSpans               = lineSpans;
 			m_pendingCarriageReturnOverwrite = carriageReturnPending;
+			m_incomingPartialLineRevision    = incomingPartialLineRevision;
 			publishIncomingStyledLinePartial(lineText, lineSpans);
 		};
 
 		constexpr QMudOscActionIds oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
 		bool                       ansiRenderStateDirty = false;
-		auto                       appendAnsiBytes      = [&](const QByteArray &bytes)
+		auto                       appendAnsiBytes      = [&](const QByteArrayView bytes)
 		{
 			if (bytes.isEmpty())
 				return;
@@ -5412,15 +5321,16 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			ansiRenderStateDirty = true;
 		};
 
-		const int processedSize    = safeQSizeToInt(processed.size());
-		int       telnetEventIndex = 0;
-		int       lastTelnetOffset = 0;
+		const int            processedSize = safeQSizeToInt(processed.size());
+		const QByteArrayView processedView(processed);
+		int                  telnetEventIndex = 0;
+		int                  lastTelnetOffset = 0;
 		for (; telnetEventIndex < telnetPluginEvents.size(); ++telnetEventIndex)
 		{
 			const TelnetProcessor::TelnetPluginEvent &event       = telnetPluginEvents.at(telnetEventIndex);
 			const int                                 eventOffset = qBound(0, event.offset, processedSize);
 			if (eventOffset > lastTelnetOffset)
-				appendAnsiBytes(processed.mid(lastTelnetOffset, eventOffset - lastTelnetOffset));
+				appendAnsiBytes(processedView.sliced(lastTelnetOffset, eventOffset - lastTelnetOffset));
 			lastTelnetOffset = eventOffset;
 			if (ansiRenderStateDirty)
 			{
@@ -5430,7 +5340,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			dispatchTelnetPluginEvent(event);
 		}
 		if (lastTelnetOffset < processedSize)
-			appendAnsiBytes(processed.mid(lastTelnetOffset));
+			appendAnsiBytes(processedView.sliced(lastTelnetOffset));
 
 		commitAnsiRenderState();
 		if (m_mxpTagStack.isEmpty() && !hasActiveMxpRenderContext)
@@ -5654,12 +5564,13 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				actionState.variable = variable;
 				actionState.startTag = true;
 				MxpStyleFrame frame;
-				frame.tag                         = activeTag;
-				frame.state                       = current;
-				frame.actionState                 = actionState;
-				frame.actionTextLineNumber        = m_linesReceived;
-				frame.actionTextStartColumn       = safeQSizeToInt(lineText.size());
-				frame.actionTextRuntimeLineNumber = m_nextLineNumber;
+				frame.tag                           = activeTag;
+				frame.state                         = current;
+				frame.actionState                   = actionState;
+				frame.actionTextLineNumber          = m_linesReceived;
+				frame.actionTextStartColumn         = safeQSizeToInt(lineText.size());
+				frame.actionTextRuntimeLineNumber   = m_nextLineNumber;
+				frame.actionTextPartialLineRevision = incomingPartialLineRevision;
 				stack.push_back(frame);
 				linkOpen = true;
 				current  = actionState;
@@ -5890,10 +5801,28 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			hasBodyLine = true;
 		};
 
+		auto mxpActionBodyStillOnlyInCurrentPartialLine = [&](const MxpStyleFrame &frame)
+		{
+			return frame.actionTextLineNumber == m_linesReceived &&
+			       frame.actionTextPartialLineRevision == incomingPartialLineRevision;
+		};
+		auto mxpCurrentPartialActionStartColumn = [&](const MxpStyleFrame &frame)
+		{
+			return mxpActionBodyStillOnlyInCurrentPartialLine(frame)
+			           ? qBound(0, frame.actionTextStartColumn, safeQSizeToInt(lineText.size()))
+			           : 0;
+		};
+
 		auto collectMxpTextActionBody = [&](const MxpStyleFrame &frame)
 		{
 			QString body;
 			bool    hasBodyLine = false;
+			if (mxpActionBodyStillOnlyInCurrentPartialLine(frame))
+			{
+				const int startColumn = mxpCurrentPartialActionStartColumn(frame);
+				appendMxpBodyLine(body, hasBodyLine, lineText.mid(startColumn));
+				return body;
+			}
 			if (frame.actionTextRuntimeLineNumber >= 0)
 			{
 				const int startIndex = findMxpTextActionBufferedStartIndex(frame.actionTextRuntimeLineNumber);
@@ -5913,10 +5842,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				}
 			}
 
-			const int startColumn =
-			    frame.actionTextLineNumber == m_linesReceived
-			        ? qBound(0, frame.actionTextStartColumn, safeQSizeToInt(lineText.size()))
-			        : 0;
+			const int startColumn = mxpCurrentPartialActionStartColumn(frame);
 			appendMxpBodyLine(body, hasBodyLine, lineText.mid(startColumn));
 			return body;
 		};
@@ -5933,14 +5859,12 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 						const MxpStyleFrame frame = stack.at(i);
 						const QString       replacement =
 						    resolvedBodyText ? *resolvedBodyText : collectMxpTextActionBody(frame);
-						const int startColumn =
-						    frame.actionTextLineNumber == m_linesReceived
-						        ? qBound(0, frame.actionTextStartColumn, safeQSizeToInt(lineText.size()))
-						        : 0;
+						const int startColumn = mxpCurrentPartialActionStartColumn(frame);
 						resolveMxpTextActionReferences(lineSpans, startColumn,
 						                               safeQSizeToInt(lineText.size()), frame.actionState,
 						                               replacement);
-						resolveBufferedMxpTextActionReferences(frame, replacement);
+						if (!mxpActionBodyStillOnlyInCurrentPartialLine(frame))
+							resolveBufferedMxpTextActionReferences(frame, replacement);
 						current = frame.state;
 						stack.removeAt(i);
 						closedActionTag = true;
@@ -6012,7 +5936,9 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			current.startTag = false;
 		};
 
-		auto appendStyled = [&](const QByteArray &bytes)
+		const QByteArrayView processedView(processed);
+
+		auto                 appendStyled = [&](const QByteArrayView bytes)
 		{
 			if (bytes.isEmpty())
 				return;
@@ -6212,6 +6138,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			m_partialLineText                = lineText;
 			m_partialLineSpans               = lineSpans;
 			m_pendingCarriageReturnOverwrite = carriageReturnPending;
+			m_incomingPartialLineRevision    = incomingPartialLineRevision;
 			if (lineText != notifiedLineText || lineSpans != notifiedLineSpans)
 			{
 				notifiedLineText  = lineText;
@@ -6264,7 +6191,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 					    sortedModeChanges.at(modeChangeIndex++);
 					if (modeChange.offset > last)
 					{
-						appendStyled(processed.mid(last, modeChange.offset - last));
+						appendStyled(processedView.sliced(last, modeChange.offset - last));
 						last = modeChange.offset;
 					}
 					applyMxpModeBarrier(modeChange);
@@ -6276,7 +6203,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				const int telnetOffset = qBound(0, telnetEvent.offset, processedSize);
 				if (telnetOffset > last)
 				{
-					appendStyled(processed.mid(last, telnetOffset - last));
+					appendStyled(processedView.sliced(last, telnetOffset - last));
 					last = telnetOffset;
 				}
 				commitMxpRenderState();
@@ -6293,7 +6220,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 
 			if (ev.offset > last)
 			{
-				appendStyled(processed.mid(last, ev.offset - last));
+				appendStyled(processedView.sliced(last, ev.offset - last));
 				last = ev.offset;
 			}
 
@@ -6883,6 +6810,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 								continue;
 							}
 							m_worldAttributes.insert(key, QString::number(value));
+							if (worldAttributeAffectsResolvedOutputColours(key))
+								invalidateResolvedOutputColourCache();
 							mxpError(
 							    DBG_INFO, infoMXP_OptionChanged,
 							    QStringLiteral("Option named '%1' changed to '%2'.").arg(key, valueText));
@@ -7115,7 +7044,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 		drainTelnetAndModeBoundariesBefore(std::numeric_limits<int>::max(), std::numeric_limits<int>::max());
 
 		if (last < processedSize)
-			appendStyled(processed.mid(last));
+			appendStyled(processedView.sliced(last));
 
 		const bool hasActiveMxpRenderContextAfterProcessing =
 		    !stack.isEmpty() || !blockStack.isEmpty() || linkOpen || preDepth > 0;
@@ -9789,12 +9718,13 @@ void WorldRuntime::populateLuaCallbackDispatchVolatileSnapshot(
 	const auto makeMxpStyleFrameSnapshot = [&makeMxpStyleSnapshot](const MxpStyleFrame &frame)
 	{
 		LuaCallbackMxpStyleFrameSnapshot row;
-		row.tag                         = frame.tag;
-		row.state                       = makeMxpStyleSnapshot(frame.state);
-		row.actionState                 = makeMxpStyleSnapshot(frame.actionState);
-		row.actionTextLineNumber        = frame.actionTextLineNumber;
-		row.actionTextStartColumn       = frame.actionTextStartColumn;
-		row.actionTextRuntimeLineNumber = frame.actionTextRuntimeLineNumber;
+		row.tag                           = frame.tag;
+		row.state                         = makeMxpStyleSnapshot(frame.state);
+		row.actionState                   = makeMxpStyleSnapshot(frame.actionState);
+		row.actionTextLineNumber          = frame.actionTextLineNumber;
+		row.actionTextStartColumn         = frame.actionTextStartColumn;
+		row.actionTextRuntimeLineNumber   = frame.actionTextRuntimeLineNumber;
+		row.actionTextPartialLineRevision = frame.actionTextPartialLineRevision;
 		return row;
 	};
 
@@ -10108,12 +10038,13 @@ QSharedPointer<LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCallbackSn
 	const auto makeMxpStyleFrameSnapshot = [&makeMxpStyleSnapshot](const MxpStyleFrame &frame)
 	{
 		LuaCallbackMxpStyleFrameSnapshot row;
-		row.tag                         = frame.tag;
-		row.state                       = makeMxpStyleSnapshot(frame.state);
-		row.actionState                 = makeMxpStyleSnapshot(frame.actionState);
-		row.actionTextLineNumber        = frame.actionTextLineNumber;
-		row.actionTextStartColumn       = frame.actionTextStartColumn;
-		row.actionTextRuntimeLineNumber = frame.actionTextRuntimeLineNumber;
+		row.tag                           = frame.tag;
+		row.state                         = makeMxpStyleSnapshot(frame.state);
+		row.actionState                   = makeMxpStyleSnapshot(frame.actionState);
+		row.actionTextLineNumber          = frame.actionTextLineNumber;
+		row.actionTextStartColumn         = frame.actionTextStartColumn;
+		row.actionTextRuntimeLineNumber   = frame.actionTextRuntimeLineNumber;
+		row.actionTextPartialLineRevision = frame.actionTextPartialLineRevision;
 		return row;
 	};
 
@@ -12289,6 +12220,7 @@ int WorldRuntime::setCustomColourText(int index, const QColor &color)
 		colour.attributes.insert(QStringLiteral("seq_index"), seqIndex);
 		colour.attributes.insert(QStringLiteral("text"), value);
 		m_worldFileModified = true;
+		invalidateResolvedOutputColourCache();
 		if (m_view)
 		{
 			m_view->applyRuntimeSettings();
@@ -12305,6 +12237,7 @@ int WorldRuntime::setCustomColourText(int index, const QColor &color)
 	m_colours.push_back(entry);
 	m_colourCount       = safeQSizeToInt(m_colours.size());
 	m_worldFileModified = true;
+	invalidateResolvedOutputColourCache();
 	if (m_view)
 	{
 		m_view->applyRuntimeSettings();
@@ -12340,6 +12273,7 @@ int WorldRuntime::setCustomColourBackground(int index, const QColor &color)
 		colour.attributes.insert(QStringLiteral("seq_index"), seqIndex);
 		colour.attributes.insert(QStringLiteral("back"), value);
 		m_worldFileModified = true;
+		invalidateResolvedOutputColourCache();
 		if (m_view)
 		{
 			m_view->applyRuntimeSettings();
@@ -12356,6 +12290,7 @@ int WorldRuntime::setCustomColourBackground(int index, const QColor &color)
 	m_colours.push_back(entry);
 	m_colourCount       = safeQSizeToInt(m_colours.size());
 	m_worldFileModified = true;
+	invalidateResolvedOutputColourCache();
 	if (m_view)
 	{
 		m_view->applyRuntimeSettings();
@@ -13142,6 +13077,48 @@ static ResolvedWorldColourTables buildResolvedWorldColourTables(const QList<Worl
 	return tables;
 }
 
+static bool worldAttributeAffectsResolvedOutputColours(const QString &key)
+{
+	return key == QStringLiteral("custom_16_is_default_colour") ||
+	       key == QStringLiteral("output_text_colour") || key == QStringLiteral("output_background_colour");
+}
+
+void WorldRuntime::invalidateResolvedOutputColourCache()
+{
+	m_resolvedOutputColourCache.valid = false;
+}
+
+const WorldRuntime::ResolvedOutputColourCache &WorldRuntime::resolvedOutputColourCache()
+{
+	if (m_resolvedOutputColourCache.valid)
+		return m_resolvedOutputColourCache;
+
+	const ResolvedWorldColourTables tables = buildResolvedWorldColourTables(m_colours);
+	m_resolvedOutputColourCache.normalAnsi = tables.normalAnsi;
+	m_resolvedOutputColourCache.boldAnsi   = tables.boldAnsi;
+	m_resolvedOutputColourCache.customText = tables.customText;
+	m_resolvedOutputColourCache.customBack = tables.customBack;
+
+	const bool custom16Default =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("custom_16_is_default_colour")));
+	QColor defaultForeColor = parseColourValue(m_worldAttributes.value(QStringLiteral("output_text_colour")));
+	QColor defaultBackColor =
+	    parseColourValue(m_worldAttributes.value(QStringLiteral("output_background_colour")));
+	if (!defaultForeColor.isValid())
+		defaultForeColor = custom16Default ? m_resolvedOutputColourCache.customText.value(15)
+		                                   : m_resolvedOutputColourCache.normalAnsi.value(kAnsiWhite);
+	if (!defaultBackColor.isValid())
+		defaultBackColor = custom16Default ? m_resolvedOutputColourCache.customBack.value(15)
+		                                   : m_resolvedOutputColourCache.normalAnsi.value(kAnsiBlack);
+
+	m_resolvedOutputColourCache.defaultFore =
+	    defaultForeColor.isValid() ? defaultForeColor.name() : QString();
+	m_resolvedOutputColourCache.defaultBack =
+	    defaultBackColor.isValid() ? defaultBackColor.name() : QString();
+	m_resolvedOutputColourCache.valid = true;
+	return m_resolvedOutputColourCache;
+}
+
 static int publicNoteColourIndexFromWorldAttribute(const QString                     &value,
                                                    const QList<WorldRuntime::Colour> &colours,
                                                    const int                          fallbackPublicIndex)
@@ -13193,9 +13170,6 @@ static QString convertToRegularExpression(const QString &text)
 
 	return QString::fromLatin1(out);
 }
-
-constexpr int              kAnsiBlack = 0;
-constexpr int              kAnsiWhite = 7;
 
 static ResolvedNoteColours resolveNoteColours(const bool notesInRgb, const int noteTextColour,
                                               const long noteColourFore, const long noteColourBack,
@@ -18360,6 +18334,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	setNoteTextColour(
 	    publicNoteColourIndexFromWorldAttribute(m_worldAttributes.value(QStringLiteral("note_text_colour")),
 	                                            m_colours, QMudNoteColour::kDefaultPublicIndex));
+	invalidateResolvedOutputColourCache();
 	m_keypadEntries.clear();
 	const QStringList keypadNames = keypadNameList();
 	for (const auto &k : doc.keypadEntries())
@@ -18665,6 +18640,8 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 		return;
 	}
 	m_worldAttributes.insert(key, normalizedValue);
+	if (worldAttributeAffectsResolvedOutputColours(key))
+		invalidateResolvedOutputColourCache();
 	invalidateLuaCallbackDispatchSnapshot();
 	if (key == QStringLiteral("max_output_lines"))
 		static_cast<void>(enforceOutputLineLimit());
@@ -19966,6 +19943,7 @@ void WorldRuntime::setColours(const QList<Colour> &colours)
 	m_colours           = colours;
 	m_colourCount       = safeQSizeToInt(m_colours.size());
 	m_worldFileModified = true;
+	invalidateResolvedOutputColourCache();
 	invalidateLuaCallbackDispatchSnapshot();
 }
 
@@ -20046,6 +20024,7 @@ void WorldRuntime::setAnsiColour(bool bold, int index, const QColor &color)
 		colour.attributes.insert(QStringLiteral("seq_index"), QString::number(index - 1));
 		colour.attributes.insert(QStringLiteral("rgb"), rgb);
 		m_worldFileModified = true;
+		invalidateResolvedOutputColourCache();
 		invalidateLuaCallbackDispatchSnapshot();
 		return;
 	}
@@ -20058,6 +20037,7 @@ void WorldRuntime::setAnsiColour(bool bold, int index, const QColor &color)
 	m_colours.push_back(entry);
 	m_colourCount       = safeQSizeToInt(m_colours.size());
 	m_worldFileModified = true;
+	invalidateResolvedOutputColourCache();
 	invalidateLuaCallbackDispatchSnapshot();
 }
 
@@ -23256,6 +23236,7 @@ bool WorldRuntime::commitPendingIncomingPartialLine()
 	m_partialLineText.clear();
 	m_partialLineSpans.clear();
 	m_pendingCarriageReturnOverwrite = false;
+	++m_incomingPartialLineRevision;
 
 	const bool                  serverSideWrapActive = isConnected() && m_telnet.isNawsNegotiated();
 	const FixedColumnWrapConfig wrapConfig =

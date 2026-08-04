@@ -870,6 +870,65 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QCOMPARE(lineSpy.takeFirst().at(0).toString(), QStringLiteral("中文"));
 		}
 
+		static void outputColourCacheRefreshesAfterRuntimeColourChanges()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("utf_8"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("output_background_colour"), QStringLiteral("#000000"));
+
+			QString                          line;
+			QVector<WorldRuntime::StyleSpan> spans;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &runtime,
+			                 [&line, &spans](const QString                          &incomingLine,
+			                                 const QVector<WorldRuntime::StyleSpan> &incomingSpans)
+			                 {
+				                 line  = incomingLine;
+				                 spans = incomingSpans;
+			                 });
+			auto receiveLine = [&](const QByteArray &payload)
+			{
+				line.clear();
+				spans.clear();
+				runtime.receiveRawData(payload);
+			};
+
+			runtime.setWorldAttribute(QStringLiteral("output_text_colour"), QStringLiteral("#112233"));
+			receiveLine(QByteArrayLiteral("\x1b[0mA\n"));
+			QCOMPARE(line, QStringLiteral("A"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().fore, QColor(QStringLiteral("#112233")));
+
+			runtime.setWorldAttribute(QStringLiteral("output_text_colour"), QStringLiteral("#445566"));
+			receiveLine(QByteArrayLiteral("\x1b[0mB\n"));
+			QCOMPARE(line, QStringLiteral("B"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().fore, QColor(QStringLiteral("#445566")));
+
+			WorldRuntime::Colour red;
+			red.group = QStringLiteral("ansi/normal");
+			red.attributes.insert(QStringLiteral("seq"), QStringLiteral("2"));
+			red.attributes.insert(QStringLiteral("rgb"), QStringLiteral("#123456"));
+			runtime.setColours({red});
+			receiveLine(QByteArrayLiteral("\x1b[0;31mC\n"));
+			QCOMPARE(line, QStringLiteral("C"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().fore, QColor(QStringLiteral("#123456")));
+
+			runtime.setAnsiColour(false, 2, QColor(QStringLiteral("#654321")));
+			receiveLine(QByteArrayLiteral("\x1b[0;31mD\n"));
+			QCOMPARE(line, QStringLiteral("D"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().fore, QColor(QStringLiteral("#654321")));
+
+			runtime.setWorldAttribute(QStringLiteral("output_text_colour"), QString());
+			runtime.setWorldAttribute(QStringLiteral("custom_16_is_default_colour"), QStringLiteral("1"));
+			QCOMPARE(runtime.setCustomColourText(16, QColor(QStringLiteral("#abcdef"))), eOK);
+			receiveLine(QByteArrayLiteral("\x1b[0mE\n"));
+			QCOMPARE(line, QStringLiteral("E"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().fore, QColor(QStringLiteral("#abcdef")));
+		}
+
 		static void legacyDecoderStateResetsWhenLegacyEncodingChanges()
 		{
 			WorldRuntime runtime;
@@ -1016,6 +1075,84 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			    QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-newbie</send>\n"));
 
 			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+		}
+
+		static void mxpSendTextEntityResolvesCurrentPartialLineWithExistingBuffer()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+
+			constexpr int existingLineCount = 2048;
+			for (int i = 0; i < existingLineCount; ++i)
+				runtime.addLine(QStringLiteral("old line %1").arg(i), WorldRuntime::LineOutput);
+
+			QString                          line;
+			QVector<WorldRuntime::StyleSpan> spans;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &runtime,
+			                 [&line, &spans](const QString                          &incomingLine,
+			                                 const QVector<WorldRuntime::StyleSpan> &incomingSpans)
+			                 {
+				                 line  = incomingLine;
+				                 spans = incomingSpans;
+			                 });
+
+			runtime.receiveRawData(
+			    QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-newbie</send>\n"));
+
+			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+		}
+
+		static void mxpSendTextEntityIgnoresInsertedOutputWhileBodyStaysPartial()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+
+			QString                          line;
+			QVector<WorldRuntime::StyleSpan> spans;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &runtime,
+			                 [&line, &spans](const QString                          &incomingLine,
+			                                 const QVector<WorldRuntime::StyleSpan> &incomingSpans)
+			                 {
+				                 line  = incomingLine;
+				                 spans = incomingSpans;
+			                 });
+
+			runtime.receiveRawData(QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">start-"));
+			runtime.addLine(QStringLiteral("inserted-output"), WorldRuntime::LineOutput);
+			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+
+			QCOMPARE(line, QStringLiteral("start-newbie"));
+			QVERIFY(!spans.isEmpty());
+			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
+			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));
+		}
+
+		static void mxpSendTextEntityTreatsCommittedPartialAsStaleCurrentLine()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+
+			QString                          line;
+			QVector<WorldRuntime::StyleSpan> spans;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &runtime,
+			                 [&line, &spans](const QString                          &incomingLine,
+			                                 const QVector<WorldRuntime::StyleSpan> &incomingSpans)
+			                 {
+				                 line  = incomingLine;
+				                 spans = incomingSpans;
+			                 });
+
+			runtime.receiveRawData(QByteArrayLiteral("\x1B[1zprefix <send href=\"help &text;\">start-"));
+			QVERIFY(runtime.commitPendingIncomingPartialLine());
+			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
+
+			QCOMPARE(line, QStringLiteral("newbie"));
 			QVERIFY(!spans.isEmpty());
 			QCOMPARE(spans.first().actionType, static_cast<int>(WorldRuntime::ActionSend));
 			QCOMPARE(spans.first().action, QStringLiteral("help start-newbie"));

@@ -492,6 +492,7 @@ class WorldRuntime : public QObject
 				int           actionTextLineNumber{-1};
 				int           actionTextStartColumn{0};
 				qint64        actionTextRuntimeLineNumber{-1};
+				quint64       actionTextPartialLineRevision{0};
 		};
 		/**
 		 * @brief Context needed by `WindowOutputText` to parse ANSI/MXP and custom MXP definitions.
@@ -5636,6 +5637,19 @@ class WorldRuntime : public QObject
 				bool       openedSecure{false};
 				bool       noReset{false};
 		};
+		struct ResolvedOutputColourCache
+		{
+				bool            valid{false};
+				QVector<QColor> normalAnsi;
+				QVector<QColor> boldAnsi;
+				QVector<QColor> customText;
+				QVector<QColor> customBack;
+				QString         defaultFore;
+				QString         defaultBack;
+		};
+
+		void                                                       invalidateResolvedOutputColourCache();
+		[[nodiscard]] const ResolvedOutputColourCache             &resolvedOutputColourCache();
 
 		QMap<QString, QString>                                     m_worldAttributes;
 		QMap<QString, QString>                                     m_worldMultilineAttributes;
@@ -5680,6 +5694,7 @@ class WorldRuntime : public QObject
 		bool                                                       m_streamUtf8DecoderEnabled{false};
 		QString                                                    m_streamLegacyEncodingName;
 		QStringDecoder                                             m_streamLegacyDecoder;
+		ResolvedOutputColourCache                                  m_resolvedOutputColourCache;
 		MxpStyleState                                              m_mxpRenderStyle;
 		QVector<MxpStyleFrame>                                     m_mxpRenderStack;
 		QVector<QByteArray>                                        m_mxpRenderBlockStack;
@@ -5689,6 +5704,7 @@ class WorldRuntime : public QObject
 		QString                                                    m_partialLineText;
 		QVector<StyleSpan>                                         m_partialLineSpans;
 		bool                                                       m_pendingCarriageReturnOverwrite{false};
+		quint64                                                    m_incomingPartialLineRevision{0};
 
 		QList<Trigger>                                             m_triggers;
 		QList<Alias>                                               m_aliases;
