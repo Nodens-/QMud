@@ -11,6 +11,8 @@
 #include <QtTest/QTest>
 
 using QMudAccessibleTextUtils::LineOffsetMap;
+using QMudAccessibleTextUtils::TextBoundaryKind;
+using QMudAccessibleTextUtils::TextBoundaryQuery;
 using QMudAccessibleTextUtils::TextPosition;
 
 /**
@@ -117,6 +119,118 @@ class tst_AccessibleTextUtils : public QObject
 			QCOMPARE(map.selectedText(anchor, cursor), QStringLiteral("rth\neast\nsou"));
 			QCOMPARE(map.selectedText(cursor, anchor), QStringLiteral("rth\neast\nsou"));
 			QCOMPARE(map.selectedText({1, 1}, {1, 1}), QString());
+		}
+
+		void lineBoundaryQueriesUseLogicalOutputLines()
+		{
+			const LineOffsetMap map(
+			    {QStringLiteral("north"), QStringLiteral("east"), QStringLiteral("south")});
+
+			const QMudAccessibleTextUtils::TextBoundaryResult at =
+			    map.boundaryText(7, TextBoundaryKind::Line, TextBoundaryQuery::At);
+			QCOMPARE(at.text, QStringLiteral("east"));
+			QCOMPARE(at.startOffset, 6);
+			QCOMPARE(at.endOffset, 10);
+
+			const QMudAccessibleTextUtils::TextBoundaryResult before =
+			    map.boundaryText(7, TextBoundaryKind::Line, TextBoundaryQuery::Before);
+			QCOMPARE(before.text, QStringLiteral("north"));
+			QCOMPARE(before.startOffset, 0);
+			QCOMPARE(before.endOffset, 5);
+
+			const QMudAccessibleTextUtils::TextBoundaryResult after =
+			    map.boundaryText(7, TextBoundaryKind::Line, TextBoundaryQuery::After);
+			QCOMPARE(after.text, QStringLiteral("south"));
+			QCOMPARE(after.startOffset, 11);
+			QCOMPARE(after.endOffset, 16);
+		}
+
+		void lineBoundaryQueriesClampAtBufferEdges()
+		{
+			const LineOffsetMap map({QStringLiteral("north"), QStringLiteral("east")});
+
+			const QMudAccessibleTextUtils::TextBoundaryResult beforeStart =
+			    map.boundaryText(0, TextBoundaryKind::Line, TextBoundaryQuery::Before);
+			QCOMPARE(beforeStart.text, QString());
+			QCOMPARE(beforeStart.startOffset, 0);
+			QCOMPARE(beforeStart.endOffset, 0);
+
+			const QMudAccessibleTextUtils::TextBoundaryResult afterEnd =
+			    map.boundaryText(map.characterCount(), TextBoundaryKind::Line, TextBoundaryQuery::After);
+			QCOMPARE(afterEnd.text, QString());
+			QCOMPARE(afterEnd.startOffset, map.characterCount());
+			QCOMPARE(afterEnd.endOffset, map.characterCount());
+		}
+
+		void characterBoundaryQueriesExposeLineSeparators()
+		{
+			const LineOffsetMap                               map({QStringLiteral("a"), QStringLiteral("b")});
+
+			const QMudAccessibleTextUtils::TextBoundaryResult atFirst =
+			    map.boundaryText(0, TextBoundaryKind::Character, TextBoundaryQuery::At);
+			QCOMPARE(atFirst.text, QStringLiteral("a"));
+			QCOMPARE(atFirst.startOffset, 0);
+			QCOMPARE(atFirst.endOffset, 1);
+
+			const QMudAccessibleTextUtils::TextBoundaryResult afterFirst =
+			    map.boundaryText(0, TextBoundaryKind::Character, TextBoundaryQuery::After);
+			QCOMPARE(afterFirst.text, QStringLiteral("\n"));
+			QCOMPARE(afterFirst.startOffset, 1);
+			QCOMPARE(afterFirst.endOffset, 2);
+
+			const QMudAccessibleTextUtils::TextBoundaryResult afterSeparator =
+			    map.boundaryText(1, TextBoundaryKind::Character, TextBoundaryQuery::After);
+			QCOMPARE(afterSeparator.text, QStringLiteral("b"));
+			QCOMPARE(afterSeparator.startOffset, 2);
+			QCOMPARE(afterSeparator.endOffset, 3);
+		}
+
+		void wordBoundaryQueriesSkipBlankLines()
+		{
+			const LineOffsetMap map(
+			    {QStringLiteral("alpha beta"), QStringLiteral("   "), QStringLiteral("gamma delta")});
+
+			const int                                         betaStart = map.offsetForPosition({0, 6});
+			const QMudAccessibleTextUtils::TextBoundaryResult at =
+			    map.boundaryText(betaStart, TextBoundaryKind::Word, TextBoundaryQuery::At);
+			QCOMPARE(at.text, QStringLiteral("beta"));
+			QCOMPARE(at.startOffset, betaStart);
+			QCOMPARE(at.endOffset, map.offsetForPosition({0, 10}));
+
+			const QMudAccessibleTextUtils::TextBoundaryResult before =
+			    map.boundaryText(betaStart, TextBoundaryKind::Word, TextBoundaryQuery::Before);
+			QCOMPARE(before.text, QStringLiteral("alpha"));
+			QCOMPARE(before.startOffset, 0);
+			QCOMPARE(before.endOffset, 5);
+
+			const QMudAccessibleTextUtils::TextBoundaryResult after = map.boundaryText(
+			    map.offsetForPosition({0, 10}), TextBoundaryKind::Word, TextBoundaryQuery::After);
+			QCOMPARE(after.text, QStringLiteral("gamma"));
+			QCOMPARE(after.startOffset, map.offsetForPosition({2, 0}));
+			QCOMPARE(after.endOffset, map.offsetForPosition({2, 5}));
+		}
+
+		void sentenceBoundaryQueriesUseTargetedText()
+		{
+			const LineOffsetMap map({QStringLiteral("One."), QStringLiteral("   "), QStringLiteral("Two.")});
+
+			const QMudAccessibleTextUtils::TextBoundaryResult at =
+			    map.boundaryText(0, TextBoundaryKind::Sentence, TextBoundaryQuery::At);
+			QCOMPARE(at.text.trimmed(), QStringLiteral("One."));
+			QCOMPARE(at.startOffset, 0);
+			QVERIFY(at.endOffset > at.startOffset);
+
+			const QMudAccessibleTextUtils::TextBoundaryResult after =
+			    map.boundaryText(0, TextBoundaryKind::Sentence, TextBoundaryQuery::After);
+			QCOMPARE(after.text.trimmed(), QStringLiteral("Two."));
+			QVERIFY(after.startOffset > at.startOffset);
+			QVERIFY(after.endOffset > after.startOffset);
+
+			const QMudAccessibleTextUtils::TextBoundaryResult final = map.boundaryText(
+			    map.offsetForPosition({2, 0}), TextBoundaryKind::Sentence, TextBoundaryQuery::At);
+			QCOMPARE(final.text.trimmed(), QStringLiteral("Two."));
+			QCOMPARE(final.startOffset, map.offsetForPosition({2, 0}));
+			QCOMPARE(final.endOffset, map.offsetForPosition({2, 4}));
 		}
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };

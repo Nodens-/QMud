@@ -2848,6 +2848,31 @@ class tst_WorldView_Basic : public QObject
 			QAccessibleTextInterface *textInterface = accessible->textInterface();
 			QVERIFY(textInterface);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha\nbeta"));
+			int boundaryStart = -1;
+			int boundaryEnd   = -1;
+			QCOMPARE(textInterface->textAtOffset(0, QAccessible::WordBoundary, &boundaryStart, &boundaryEnd),
+			         QStringLiteral("alpha"));
+			QCOMPARE(boundaryStart, 0);
+			QCOMPARE(boundaryEnd, 5);
+			QCOMPARE(
+			    textInterface->textAfterOffset(0, QAccessible::WordBoundary, &boundaryStart, &boundaryEnd),
+			    QStringLiteral("beta"));
+			QCOMPARE(boundaryStart, 6);
+			QCOMPARE(boundaryEnd, 10);
+			QCOMPARE(textInterface->textAtOffset(-2, QAccessible::WordBoundary, &boundaryStart, &boundaryEnd),
+			         QStringLiteral("beta"));
+			QCOMPARE(boundaryStart, 6);
+			QCOMPARE(boundaryEnd, 10);
+			QCOMPARE(
+			    textInterface->textAtOffset(0, QAccessible::SentenceBoundary, &boundaryStart, &boundaryEnd),
+			    QStringLiteral("alpha"));
+			QCOMPARE(boundaryStart, 0);
+			QCOMPARE(boundaryEnd, 5);
+			QCOMPARE(textInterface->textAfterOffset(0, QAccessible::SentenceBoundary, &boundaryStart,
+			                                        &boundaryEnd),
+			         QStringLiteral("beta"));
+			QCOMPARE(boundaryStart, 6);
+			QCOMPARE(boundaryEnd, 10);
 			QCOMPARE(textInterface->selectionCount(), 0);
 
 			textInterface->setSelection(0, 2, 8);
@@ -3514,10 +3539,59 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
 			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
 			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, reviewLine);
+			int atLineStart = -1;
+			int atLineEnd   = -1;
+			QCOMPARE(textInterface->textAtOffset(reviewCursor, QAccessible::LineBoundary, &atLineStart,
+			                                     &atLineEnd),
+			         reviewLine);
+			QCOMPARE(atLineStart, reviewCursor);
+			QCOMPARE(atLineEnd, reviewEnd);
+			QCOMPARE(textInterface->textAtOffset(-2, QAccessible::LineBoundary, &atLineStart, &atLineEnd),
+			         reviewLine);
+			QCOMPARE(atLineStart, reviewCursor);
+			QCOMPARE(atLineEnd, reviewEnd);
+			const int followingLineStart = reviewEnd + 1;
+			QVERIFY(followingLineStart < textInterface->characterCount());
+			const int followingNextBreak =
+			    stringIndexToInt(outputText.indexOf(QLatin1Char('\n'), followingLineStart));
+			const int followingLineEnd =
+			    followingNextBreak < 0 ? sizeToInt(outputText.size()) : followingNextBreak;
+			const QString followingLine =
+			    outputText.mid(followingLineStart, followingLineEnd - followingLineStart);
+			int afterLineStart = -1;
+			int afterLineEnd   = -1;
+			QCOMPARE(textInterface->textAfterOffset(reviewCursor, QAccessible::LineBoundary, &afterLineStart,
+			                                        &afterLineEnd),
+			         followingLine);
+			QCOMPARE(afterLineStart, followingLineStart);
+			QCOMPARE(afterLineEnd, followingLineEnd);
+			QCOMPARE(
+			    textInterface->textAfterOffset(-2, QAccessible::LineBoundary, &afterLineStart, &afterLineEnd),
+			    followingLine);
+			QCOMPARE(afterLineStart, followingLineStart);
+			QCOMPARE(afterLineEnd, followingLineEnd);
 
 			auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
 			QVERIFY(splitTop);
 			QVERIFY(splitBottom);
+			QTest::keyClick(splitTop->viewport(), Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 2);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			const int secondReviewCursor = textInterface->cursorPosition();
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, secondReviewCursor);
+			QVERIFY(secondReviewCursor >= 0);
+			QVERIFY(secondReviewCursor < reviewCursor);
+			const int secondNextBreak =
+			    stringIndexToInt(outputText.indexOf(QLatin1Char('\n'), secondReviewCursor));
+			const int secondReviewEnd = secondNextBreak < 0 ? sizeToInt(outputText.size()) : secondNextBreak;
+			const QString secondReviewLine =
+			    outputText.mid(secondReviewCursor, secondReviewEnd - secondReviewCursor);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 2);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, secondReviewLine);
+
 			QScrollBar *topBar = splitTop->verticalScrollBar();
 			QVERIFY(topBar);
 			topBar->setValue(topBar->maximum());
@@ -3532,7 +3606,107 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 2);
+		}
+
+		void worldOutputAccessibleReviewSkipsBarelyVisibleTopLine()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 120; ++i)
+				view.appendOutputText(
+				    QStringLiteral("readable-review-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+			QCoreApplication::processEvents();
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar = splitTop->verticalScrollBar();
+			QVERIFY(topBar);
+
+			const WorldView::NativeOutputRenderLines &lines = view.nativeOutputRenderLines();
+			QVERIFY(lines.size() > 40);
+			constexpr int sliverLine = 30;
+			topBar->setValue(view.outputScrollUnitsPerLine() * sliverLine);
+			static_cast<void>(view.accessibleOutputReviewLineIndexForTopPane(lines));
+			QVERIFY(view.m_nativeLayoutHeightIndex.size() == lines.size());
+			const int sliverTarget =
+			    static_cast<int>(std::ceil(view.nativeLayoutCumulativeHeightAt(sliverLine + 1))) - 1;
+			QVERIFY(sliverTarget > 0);
+			QVERIFY(sliverTarget <= topBar->maximum());
+			topBar->setValue(sliverTarget);
+			view.syncOutputScrollbackReviewState(false);
+			QVERIFY(view.isScrollbackSplitActive());
+
+			ScopedAccessibleUpdateCapture capture;
+			view.syncOutputScrollbackReviewState();
+			QCoreApplication::processEvents();
+
+			constexpr int expectedLine   = sliverLine + 1;
+			const int     expectedCursor = view.accessibleOutputOffsetForLine(lines, expectedLine);
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, expectedCursor);
+			QCOMPARE(textInterface->cursorPosition(), expectedCursor);
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, lines.at(expectedLine).text);
+		}
+
+		void worldOutputAccessibleSetCursorPositionMovesReviewCursor()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 140; ++i)
+				view.appendOutputText(
+				    QStringLiteral("accessible-cursor-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+			QCoreApplication::processEvents();
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			const QString targetLine   = QStringLiteral("accessible-cursor-line-050");
+			const QString outputText   = textInterface->text(0, textInterface->characterCount());
+			const int     targetCursor = stringIndexToInt(outputText.indexOf(targetLine));
+			QVERIFY(targetCursor >= 0);
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+
+			ScopedAccessibleUpdateCapture capture;
+			textInterface->setCursorPosition(targetCursor);
+			QCoreApplication::processEvents();
+
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
+			         WorldView::AccessibleOutputReviewTargetKind::Transient);
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, targetCursor);
+			QCOMPARE(textInterface->cursorPosition(), targetCursor);
+			QVERIFY(view.isScrollbackSplitActive());
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
 		}
 
 		void worldOutputAccessiblePageUpDoesNotSpeakWhenQtAccessibilitySpeechDisabled()
