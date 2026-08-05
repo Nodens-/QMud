@@ -3,183 +3,275 @@
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
  * File: tst_MainFrameMdiUtils.cpp
- * Role: QTest coverage for MainFrame MDI fallback/restore helper behavior.
+ * Role: QTest coverage for MainFrame MDI layout, fallback, and restore helper behavior.
  */
 
 #include "MainFrameMdiUtils.h"
 
+#include <QCoreApplication>
+#include <QMdiArea>
 #include <QMdiSubWindow>
 #include <QVariant>
+#include <QWidget>
 #include <QtTest/QTest>
 
-/**
- * @brief QTest fixture covering MainFrame MDI helper scenarios.
- */
-class tst_MainFrameMdiUtils : public QObject
+namespace
 {
-		Q_OBJECT
+	QMdiSubWindow *addVisibleSubWindow(QMdiArea &mdiArea)
+	{
+		auto *window = mdiArea.addSubWindow(new QWidget);
+		window->show();
+		return window;
+	}
 
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void resolveCurrentOrLastPrefersCurrentActive()
-		{
-			QMdiSubWindow                current;
-			QMdiSubWindow                last;
-			const QList<QMdiSubWindow *> windows{&current, &last};
-			QCOMPARE(QMudMainFrameMdiUtils::resolveCurrentOrLastActiveSubWindow(&current, &last, windows),
-			         &current);
-		}
+	/**
+	 * @brief QTest fixture covering MainFrame MDI helper scenarios.
+	 */
+	class tst_MainFrameMdiUtils : public QObject
+	{
+			Q_OBJECT
 
-		void resolveCurrentOrLastFallsBackToLastActive()
-		{
-			QMdiSubWindow                last;
-			const QList<QMdiSubWindow *> windows{&last};
-			QCOMPARE(QMudMainFrameMdiUtils::resolveCurrentOrLastActiveSubWindow(nullptr, &last, windows),
-			         &last);
-		}
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void tileSubWindowsSurvivesWindowActivation_data()
+			{
+				QTest::addColumn<QMudMainFrameMdiUtils::TileDirection>("direction");
 
-		void resolveCurrentOrLastReturnsNullWhenLastMissing()
-		{
-			QMdiSubWindow                last;
-			const QList<QMdiSubWindow *> windows;
-			QCOMPARE(QMudMainFrameMdiUtils::resolveCurrentOrLastActiveSubWindow(nullptr, &last, windows),
-			         nullptr);
-		}
+				QTest::newRow("horizontal") << QMudMainFrameMdiUtils::TileDirection::Horizontal;
+				QTest::newRow("vertical") << QMudMainFrameMdiUtils::TileDirection::Vertical;
+			}
 
-		void resolveBackgroundAddRestoreTargetUsesLastWhenCurrentIsNull()
-		{
-			QMdiSubWindow                last;
-			QMdiSubWindow                added;
-			const QList<QMdiSubWindow *> windows{&last};
-			QCOMPARE(
-			    QMudMainFrameMdiUtils::resolveBackgroundAddRestoreTarget(nullptr, &last, windows, &added),
-			    &last);
-		}
+			void tileSubWindowsSurvivesWindowActivation()
+			{
+				QFETCH(QMudMainFrameMdiUtils::TileDirection, direction);
 
-		void resolveBackgroundAddRestoreTargetIgnoresAddedWindow()
-		{
-			QMdiSubWindow                added;
-			const QList<QMdiSubWindow *> windows{&added};
-			QCOMPARE(
-			    QMudMainFrameMdiUtils::resolveBackgroundAddRestoreTarget(&added, &added, windows, &added),
-			    nullptr);
-		}
+				QMdiArea mdiArea;
+				mdiArea.resize(643, 487);
+				mdiArea.show();
 
-		void windowMatchesRuntimeIdentityPrefersRuntimeToken()
-		{
-			QMdiSubWindow notepad;
-			notepad.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(42));
-			notepad.setProperty("worldId", QStringLiteral("other-world"));
+				QMdiSubWindow *first     = addVisibleSubWindow(mdiArea);
+				QMdiSubWindow *second    = addVisibleSubWindow(mdiArea);
+				QMdiSubWindow *third     = addVisibleSubWindow(mdiArea);
+				QMdiSubWindow *minimized = addVisibleSubWindow(mdiArea);
+				minimized->showMinimized();
+				mdiArea.setActiveSubWindow(first);
+				first->showMaximized();
+				QCoreApplication::processEvents();
+				QVERIFY(first->isMaximized());
 
-			QVERIFY(QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&notepad, 42,
-			                                                            QStringLiteral("world-a"), false));
-		}
+				QMudMainFrameMdiUtils::tileSubWindows(&mdiArea, direction);
+				QCoreApplication::processEvents();
 
-		void windowMatchesRuntimeIdentityRejectsMismatchedRuntimeToken()
-		{
-			QMdiSubWindow notepad;
-			notepad.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(7));
+				QVERIFY(!first->isMaximized());
+				QVERIFY(!second->isMaximized());
+				QVERIFY(!third->isMaximized());
+				QVERIFY(minimized->isMinimized());
 
-			QVERIFY(!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&notepad, 42,
-			                                                             QStringLiteral("world-a"), true));
-		}
+				const QRect                  area = mdiArea.viewport()->rect();
+				const QList<QMdiSubWindow *> tiled{first, second, third};
+				if (direction == QMudMainFrameMdiUtils::TileDirection::Horizontal)
+				{
+					QCOMPARE(first->geometry().top(), area.top());
+					QCOMPARE(third->geometry().bottom(), area.bottom());
+					for (qsizetype index = 0; index < tiled.size(); ++index)
+					{
+						QCOMPARE(tiled.at(index)->geometry().left(), area.left());
+						QCOMPARE(tiled.at(index)->geometry().width(), area.width());
+						if (index > 0)
+							QCOMPARE(tiled.at(index)->geometry().top(),
+							         tiled.at(index - 1)->geometry().bottom() + 1);
+					}
+				}
+				else
+				{
+					QCOMPARE(first->geometry().left(), area.left());
+					QCOMPARE(third->geometry().right(), area.right());
+					for (qsizetype index = 0; index < tiled.size(); ++index)
+					{
+						QCOMPARE(tiled.at(index)->geometry().top(), area.top());
+						QCOMPARE(tiled.at(index)->geometry().height(), area.height());
+						if (index > 0)
+							QCOMPARE(tiled.at(index)->geometry().left(),
+							         tiled.at(index - 1)->geometry().right() + 1);
+					}
+				}
 
-		void windowMatchesRuntimeIdentityUsesWorldIdWhenTokenIsAbsent()
-		{
-			QMdiSubWindow notepad;
-			notepad.setProperty("worldId", QStringLiteral("WORLD-A"));
+				QList<QRect> tiledGeometry;
+				tiledGeometry.reserve(tiled.size());
+				for (const QMdiSubWindow *window : tiled)
+					tiledGeometry.push_back(window->geometry());
 
-			QVERIFY(QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&notepad, 42,
-			                                                            QStringLiteral("world-a"), false));
-		}
+				mdiArea.setActiveSubWindow(third);
+				QCoreApplication::processEvents();
 
-		void windowMatchesRuntimeIdentityKeepsUnownedOutOfStrictMatches()
-		{
-			QMdiSubWindow notepad;
+				QCOMPARE(mdiArea.activeSubWindow(), third);
+				for (qsizetype index = 0; index < tiled.size(); ++index)
+				{
+					QVERIFY(!tiled.at(index)->isMaximized());
+					QCOMPARE(tiled.at(index)->geometry(), tiledGeometry.at(index));
+				}
+			}
 
-			QVERIFY(!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&notepad, 42,
-			                                                             QStringLiteral("world-a"), false));
-			QVERIFY(QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&notepad, 42,
-			                                                            QStringLiteral("world-a"), true));
-		}
+			void resolveCurrentOrLastPrefersCurrentActive()
+			{
+				QMdiSubWindow                current;
+				QMdiSubWindow                last;
+				const QList<QMdiSubWindow *> windows{&current, &last};
+				QCOMPARE(QMudMainFrameMdiUtils::resolveCurrentOrLastActiveSubWindow(&current, &last, windows),
+				         &current);
+			}
 
-		void windowMatchesRuntimeIdentityWithoutOwnerOnlyAcceptsUnownedWindows()
-		{
-			QMdiSubWindow unowned;
-			QVERIFY(QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&unowned, 0, QString(), false));
+			void resolveCurrentOrLastFallsBackToLastActive()
+			{
+				QMdiSubWindow                last;
+				const QList<QMdiSubWindow *> windows{&last};
+				QCOMPARE(QMudMainFrameMdiUtils::resolveCurrentOrLastActiveSubWindow(nullptr, &last, windows),
+				         &last);
+			}
 
-			QMdiSubWindow relatedByToken;
-			relatedByToken.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(42));
-			QVERIFY(
-			    !QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&relatedByToken, 0, QString(), false));
+			void resolveCurrentOrLastReturnsNullWhenLastMissing()
+			{
+				QMdiSubWindow                last;
+				const QList<QMdiSubWindow *> windows;
+				QCOMPARE(QMudMainFrameMdiUtils::resolveCurrentOrLastActiveSubWindow(nullptr, &last, windows),
+				         nullptr);
+			}
 
-			QMdiSubWindow relatedByWorldId;
-			relatedByWorldId.setProperty("worldId", QStringLiteral("world-a"));
-			QVERIFY(
-			    !QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&relatedByWorldId, 0, QString(), false));
-		}
+			void resolveBackgroundAddRestoreTargetUsesLastWhenCurrentIsNull()
+			{
+				QMdiSubWindow                last;
+				QMdiSubWindow                added;
+				const QList<QMdiSubWindow *> windows{&last};
+				QCOMPARE(
+				    QMudMainFrameMdiUtils::resolveBackgroundAddRestoreTarget(nullptr, &last, windows, &added),
+				    &last);
+			}
 
-		void firstWindowMatchingRuntimeIdentityUsesCreationOrder()
-		{
-			QMdiSubWindow unrelated;
-			unrelated.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(7));
-			QMdiSubWindow first;
-			first.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(42));
-			QMdiSubWindow second;
-			second.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(42));
+			void resolveBackgroundAddRestoreTargetIgnoresAddedWindow()
+			{
+				QMdiSubWindow                added;
+				const QList<QMdiSubWindow *> windows{&added};
+				QCOMPARE(
+				    QMudMainFrameMdiUtils::resolveBackgroundAddRestoreTarget(&added, &added, windows, &added),
+				    nullptr);
+			}
 
-			const QList<QMdiSubWindow *> windows{&unrelated, &first, &second};
-			QCOMPARE(QMudMainFrameMdiUtils::firstWindowMatchingRuntimeIdentity(
-			             windows, 42, QStringLiteral("world-a"), false),
-			         &first);
-		}
+			void windowMatchesRuntimeIdentityPrefersRuntimeToken()
+			{
+				QMdiSubWindow notepad;
+				notepad.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(42));
+				notepad.setProperty("worldId", QStringLiteral("other-world"));
 
-		void prepareOpenWorldStateBeforeChildCloseAllowsCloseWithoutController()
-		{
-			QString error = QStringLiteral("stale");
-			QVERIFY(QMudMainFrameMdiUtils::prepareOpenWorldStateBeforeChildClose({}, &error));
-			QVERIFY(error.isEmpty());
-		}
+				QVERIFY(QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(
+				    &notepad, 42, QStringLiteral("world-a"), false));
+			}
 
-		void prepareOpenWorldStateBeforeChildCloseRunsSaveBeforeAllowingClose()
-		{
-			QString    error   = QStringLiteral("stale");
-			bool       saved   = false;
-			const bool proceed = QMudMainFrameMdiUtils::prepareOpenWorldStateBeforeChildClose(
-			    [&saved](QString *errorMessage)
-			    {
-				    saved = true;
-				    if (errorMessage)
-					    errorMessage->clear();
-				    return true;
-			    },
-			    &error);
+			void windowMatchesRuntimeIdentityRejectsMismatchedRuntimeToken()
+			{
+				QMdiSubWindow notepad;
+				notepad.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(7));
 
-			QVERIFY(proceed);
-			QVERIFY(saved);
-			QVERIFY(error.isEmpty());
-		}
+				QVERIFY(!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(
+				    &notepad, 42, QStringLiteral("world-a"), true));
+			}
 
-		void prepareOpenWorldStateBeforeChildCloseStopsCloseOnSaveFailure()
-		{
-			QString    error;
-			bool       saved   = false;
-			const bool proceed = QMudMainFrameMdiUtils::prepareOpenWorldStateBeforeChildClose(
-			    [&saved](QString *errorMessage)
-			    {
-				    saved = true;
-				    if (errorMessage)
-					    *errorMessage = QStringLiteral("session write failed");
-				    return false;
-			    },
-			    &error);
+			void windowMatchesRuntimeIdentityUsesWorldIdWhenTokenIsAbsent()
+			{
+				QMdiSubWindow notepad;
+				notepad.setProperty("worldId", QStringLiteral("WORLD-A"));
 
-			QVERIFY(!proceed);
-			QVERIFY(saved);
-			QCOMPARE(error, QStringLiteral("session write failed"));
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
+				QVERIFY(QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(
+				    &notepad, 42, QStringLiteral("world-a"), false));
+			}
+
+			void windowMatchesRuntimeIdentityKeepsUnownedOutOfStrictMatches()
+			{
+				QMdiSubWindow notepad;
+
+				QVERIFY(!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(
+				    &notepad, 42, QStringLiteral("world-a"), false));
+				QVERIFY(QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&notepad, 42,
+				                                                            QStringLiteral("world-a"), true));
+			}
+
+			void windowMatchesRuntimeIdentityWithoutOwnerOnlyAcceptsUnownedWindows()
+			{
+				QMdiSubWindow unowned;
+				QVERIFY(QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&unowned, 0, QString(), false));
+
+				QMdiSubWindow relatedByToken;
+				relatedByToken.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(42));
+				QVERIFY(!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&relatedByToken, 0, QString(),
+				                                                             false));
+
+				QMdiSubWindow relatedByWorldId;
+				relatedByWorldId.setProperty("worldId", QStringLiteral("world-a"));
+				QVERIFY(!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(&relatedByWorldId, 0, QString(),
+				                                                             false));
+			}
+
+			void firstWindowMatchingRuntimeIdentityUsesCreationOrder()
+			{
+				QMdiSubWindow unrelated;
+				unrelated.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(7));
+				QMdiSubWindow first;
+				first.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(42));
+				QMdiSubWindow second;
+				second.setProperty("worldRuntimeToken", QVariant::fromValue<qulonglong>(42));
+
+				const QList<QMdiSubWindow *> windows{&unrelated, &first, &second};
+				QCOMPARE(QMudMainFrameMdiUtils::firstWindowMatchingRuntimeIdentity(
+				             windows, 42, QStringLiteral("world-a"), false),
+				         &first);
+			}
+
+			void prepareOpenWorldStateBeforeChildCloseAllowsCloseWithoutController()
+			{
+				QString error = QStringLiteral("stale");
+				QVERIFY(QMudMainFrameMdiUtils::prepareOpenWorldStateBeforeChildClose({}, &error));
+				QVERIFY(error.isEmpty());
+			}
+
+			void prepareOpenWorldStateBeforeChildCloseRunsSaveBeforeAllowingClose()
+			{
+				QString    error   = QStringLiteral("stale");
+				bool       saved   = false;
+				const bool proceed = QMudMainFrameMdiUtils::prepareOpenWorldStateBeforeChildClose(
+				    [&saved](QString *errorMessage)
+				    {
+					    saved = true;
+					    if (errorMessage)
+						    errorMessage->clear();
+					    return true;
+				    },
+				    &error);
+
+				QVERIFY(proceed);
+				QVERIFY(saved);
+				QVERIFY(error.isEmpty());
+			}
+
+			void prepareOpenWorldStateBeforeChildCloseStopsCloseOnSaveFailure()
+			{
+				QString    error;
+				bool       saved   = false;
+				const bool proceed = QMudMainFrameMdiUtils::prepareOpenWorldStateBeforeChildClose(
+				    [&saved](QString *errorMessage)
+				    {
+					    saved = true;
+					    if (errorMessage)
+						    *errorMessage = QStringLiteral("session write failed");
+					    return false;
+				    },
+				    &error);
+
+				QVERIFY(!proceed);
+				QVERIFY(saved);
+				QCOMPARE(error, QStringLiteral("session write failed"));
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+} // namespace
 
 QTEST_MAIN(tst_MainFrameMdiUtils)
 

@@ -805,7 +805,7 @@ void MainWindow::buildMenus()
 	addActionToMenu(m_windowMenu, QStringLiteral("NewWindow"), QStringLiteral("&New Window"));
 	addActionToMenu(m_windowMenu, QStringLiteral("CascadeWindows"), QStringLiteral("&Cascade"));
 	addActionToMenu(m_windowMenu, QStringLiteral("TileWindows"), QStringLiteral("&Tile Horizontally"));
-	addActionToMenu(m_windowMenu, QStringLiteral("TileWindowsVert"), QStringLiteral("Tile Vertically"));
+	addActionToMenu(m_windowMenu, QStringLiteral("TileWindowsVertically"), QStringLiteral("Tile Vertically"));
 	addActionToMenu(m_windowMenu, QStringLiteral("ArrangeIcons"), QStringLiteral("&Arrange Icons"));
 	addActionToMenu(m_windowMenu, QStringLiteral("WindowMinimize"), QStringLiteral("&Minimize\tShift+Ctrl+M"),
 	                QKeySequence(QStringLiteral("Shift+Ctrl+M")));
@@ -1932,44 +1932,12 @@ void MainWindow::onActionTriggered()
 	}
 	if (cmd == QStringLiteral("TileWindows"))
 	{
-		if (m_mdiArea)
-		{
-			const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
-			if (const int count = sizeToInt(windows.size()); count > 0)
-			{
-				const QRect area   = m_mdiArea->viewport()->rect();
-				const int   height = area.height() / count;
-				int         y      = area.top();
-				for (QMdiSubWindow *sub : windows)
-				{
-					if (!sub)
-						continue;
-					sub->setGeometry(area.left(), y, area.width(), height);
-					y += height;
-				}
-			}
-		}
+		QMudMainFrameMdiUtils::tileSubWindows(m_mdiArea, QMudMainFrameMdiUtils::TileDirection::Horizontal);
 		return;
 	}
-	if (cmd == QStringLiteral("TileWindowsVert"))
+	if (cmd == QStringLiteral("TileWindowsVertically"))
 	{
-		if (m_mdiArea)
-		{
-			const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
-			if (const int count = sizeToInt(windows.size()); count > 0)
-			{
-				const QRect area  = m_mdiArea->viewport()->rect();
-				const int   width = area.width() / count;
-				int         x     = area.left();
-				for (QMdiSubWindow *sub : windows)
-				{
-					if (!sub)
-						continue;
-					sub->setGeometry(x, area.top(), width, area.height());
-					x += width;
-				}
-			}
-		}
+		QMudMainFrameMdiUtils::tileSubWindows(m_mdiArea, QMudMainFrameMdiUtils::TileDirection::Vertical);
 		return;
 	}
 	if (cmd == QStringLiteral("ArrangeIcons"))
@@ -2056,7 +2024,7 @@ void MainWindow::updateWindowMenu()
 	QAction *newWindow        = actionForCommand(QStringLiteral("NewWindow"));
 	QAction *cascade          = actionForCommand(QStringLiteral("CascadeWindows"));
 	QAction *tile             = actionForCommand(QStringLiteral("TileWindows"));
-	QAction *tileVert         = actionForCommand(QStringLiteral("TileWindowsVert"));
+	QAction *tileVert         = actionForCommand(QStringLiteral("TileWindowsVertically"));
 	QAction *arrangeIcons     = actionForCommand(QStringLiteral("ArrangeIcons"));
 	QAction *minimize         = actionForCommand(QStringLiteral("WindowMinimize"));
 	QAction *closeAllNotepads = actionForCommand(QStringLiteral("CloseAllNotepads"));

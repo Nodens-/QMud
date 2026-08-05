@@ -3,19 +3,67 @@
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
  * File: MainFrameMdiUtils.cpp
- * Role: Pure helpers for main-frame MDI state and shutdown preparation behavior.
+ * Role: Helpers for main-frame MDI layout, state, and shutdown preparation behavior.
  */
 
 #include "MainFrameMdiUtils.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QList>
+#include <QMdiArea>
 #include <QMdiSubWindow>
 #include <QString>
 #include <QVariant>
 
 namespace QMudMainFrameMdiUtils
 {
+	void tileSubWindows(const QMdiArea *mdiArea, const TileDirection direction)
+	{
+		if (!mdiArea)
+			return;
+
+		const QRect area = mdiArea->viewport()->rect();
+		if (area.isEmpty())
+			return;
+
+		QList<QMdiSubWindow *> windows;
+		for (QMdiSubWindow *window : mdiArea->subWindowList(QMdiArea::CreationOrder))
+		{
+			if (window && window->isVisible() && !window->isMinimized())
+				windows.push_back(window);
+		}
+		if (windows.isEmpty())
+			return;
+
+		for (QMdiSubWindow *window : windows)
+		{
+			if (window->isMaximized())
+				window->showNormal();
+		}
+
+		const qsizetype count = windows.size();
+		for (qsizetype index = 0; index < count; ++index)
+		{
+			const auto partitionStart = [index, count](const int origin, const int extent)
+			{ return origin + static_cast<int>((static_cast<qint64>(extent) * index) / count); };
+			const auto partitionEnd = [index, count](const int origin, const int extent)
+			{ return origin + static_cast<int>((static_cast<qint64>(extent) * (index + 1)) / count); };
+
+			if (direction == TileDirection::Horizontal)
+			{
+				const int top    = partitionStart(area.top(), area.height());
+				const int bottom = partitionEnd(area.top(), area.height());
+				windows.at(index)->setGeometry(area.left(), top, area.width(), bottom - top);
+			}
+			else
+			{
+				const int left  = partitionStart(area.left(), area.width());
+				const int right = partitionEnd(area.left(), area.width());
+				windows.at(index)->setGeometry(left, area.top(), right - left, area.height());
+			}
+		}
+	}
+
 	QMdiSubWindow *resolveCurrentOrLastActiveSubWindow(QMdiSubWindow *active, QMdiSubWindow *lastActive,
 	                                                   const QList<QMdiSubWindow *> &creationOrder)
 	{

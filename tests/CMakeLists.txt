@@ -713,6 +713,17 @@ if (QMUD_ENABLE_GUI_TESTS)
             TIMEOUT
             20)
 
+    qmud_add_qtest(tst_MainFrame_WindowTiling
+            GUI
+            SOURCES
+            gui/tst_MainFrame_WindowTiling.cpp
+            LIBRARIES
+            qmud_app_core
+            LABELS
+            integration
+            TIMEOUT
+            20)
+
     qmud_add_qtest(tst_Dialog_WorldPreferences
             GUI
             SOURCES

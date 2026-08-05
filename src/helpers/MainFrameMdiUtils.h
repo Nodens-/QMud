@@ -3,12 +3,13 @@
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
  * File: MainFrameMdiUtils.h
- * Role: Pure helpers for main-frame MDI state and shutdown preparation behavior.
+ * Role: Helpers for main-frame MDI layout, state, and shutdown preparation behavior.
  */
 
 #ifndef QMUD_MAINFRAMEMDIUTILS_H
 #define QMUD_MAINFRAMEMDIUTILS_H
 
+class QMdiArea;
 class QMdiSubWindow;
 class QString;
 template <typename T> class QList;
@@ -18,6 +19,22 @@ template <typename T> class QList;
 
 namespace QMudMainFrameMdiUtils
 {
+	/**
+	 * @brief Direction in which MDI child windows are arranged as non-overlapping tiles.
+	 */
+	enum class TileDirection
+	{
+		Horizontal,
+		Vertical
+	};
+
+	/**
+	 * @brief Tiles visible, non-minimized MDI child windows while leaving minimized children unchanged.
+	 * @param mdiArea MDI area whose child windows should be tiled.
+	 * @param direction Direction in which the tiles should be arranged.
+	 */
+	void               tileSubWindows(const QMdiArea *mdiArea, TileDirection direction);
+
 	/**
 	 * @brief Resolves the effective active subwindow using current active first, then last active fallback.
 	 * @param active Current active subwindow from QMdiArea.
