@@ -9,6 +9,7 @@
 #include "MxpDiagnostics.h"
 #include "TelnetCallbackSpy.h"
 #include "TelnetProcessor.h"
+#include "WorldOptions.h"
 
 #include <QtTest/QTest>
 
@@ -57,7 +58,7 @@ class tst_TelnetProcessor_Malformed : public QObject
 			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
-			processor.setUseMxp(2);
+			processor.setUseMxp(eUseMXP);
 
 			// The nested '<' inside an element forces an MXP unterminated-element diagnostic path.
 			processor.processBytes(QByteArrayLiteral("<<a>"));
@@ -70,7 +71,7 @@ class tst_TelnetProcessor_Malformed : public QObject
 			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
-			processor.setUseMxp(2);
+			processor.setUseMxp(eUseMXP);
 
 			auto oversized = QByteArrayLiteral("<");
 			oversized.append(QByteArray(9000, 'a'));
@@ -95,7 +96,7 @@ class tst_TelnetProcessor_Malformed : public QObject
 			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
-			processor.setUseMxp(2);
+			processor.setUseMxp(eUseMXP);
 
 			auto oversized = QByteArrayLiteral("&");
 			oversized.append(QByteArray(9000, 'a'));
@@ -120,7 +121,7 @@ class tst_TelnetProcessor_Malformed : public QObject
 			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
-			processor.setUseMxp(2);
+			processor.setUseMxp(eUseMXP);
 
 			QByteArray burst;
 			burst.reserve(2500 * 8);
@@ -192,7 +193,7 @@ class tst_TelnetProcessor_Malformed : public QObject
 			TelnetProcessor   processor;
 			TelnetCallbackSpy spy;
 			processor.setCallbacks(spy.callbacks());
-			processor.setUseMxp(2);
+			processor.setUseMxp(eUseMXP);
 
 			processor.processBytes(QByteArrayLiteral("\x1b[1z<!ELEMENT foo>"));
 			for (int i = 0; i < 80; ++i)
@@ -244,7 +245,6 @@ class tst_TelnetProcessor_Malformed : public QObject
 };
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Malformed)
-
 
 #if __has_include("tst_TelnetProcessor_Malformed.moc")
 #include "tst_TelnetProcessor_Malformed.moc"

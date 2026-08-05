@@ -13,8 +13,10 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
+#include <QtEndian>
 #include <array>
 #include <limits>
+#include <zlib.h>
 
 namespace
 {
@@ -46,7 +48,7 @@ namespace
 			std::array<quint32, 256> result{};
 			for (size_t i = 0; i < result.size(); ++i)
 			{
-				quint32 value = static_cast<quint32>(i);
+				auto value = static_cast<quint32>(i);
 				for (int bit = 0; bit < 8; ++bit)
 				{
 					if (value & 1u)
@@ -63,6 +65,60 @@ namespace
 		for (const unsigned char byte : bytes)
 			crc = table[(crc ^ byte) & 0xFFu] ^ (crc >> 8u);
 		return crc ^ 0xFFFFFFFFu;
+	}
+
+	bool uncompressQtPayload(const QByteArray &compressedPayload, const quint32 payloadSize,
+	                         QByteArray &payload, QString *errorMessage)
+	{
+		static constexpr qsizetype kQtCompressedSizeHeaderBytes = 4;
+		if (compressedPayload.size() < kQtCompressedSizeHeaderBytes)
+		{
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Compressed session-state payload is truncated.");
+			return false;
+		}
+
+		const auto expectedPayloadSize = static_cast<quint32>(
+		    qFromBigEndian<quint32>(reinterpret_cast<const uchar *>(compressedPayload.constData())));
+		if (expectedPayloadSize != payloadSize)
+		{
+			if (errorMessage)
+			{
+				*errorMessage =
+				    QStringLiteral("Compressed session-state payload size mismatch (expected %1, got %2).")
+				        .arg(payloadSize)
+				        .arg(expectedPayloadSize);
+			}
+			return false;
+		}
+
+		QByteArray decompressedPayload;
+		decompressedPayload.resize(static_cast<qsizetype>(payloadSize));
+		uLongf               decompressedSize = payloadSize;
+		const QByteArrayView zlibPayload(compressedPayload.constData() + kQtCompressedSizeHeaderBytes,
+		                                 compressedPayload.size() - kQtCompressedSizeHeaderBytes);
+		const int            status = ::uncompress(
+		    reinterpret_cast<Bytef *>(decompressedPayload.data()), &decompressedSize,
+		    reinterpret_cast<const Bytef *>(zlibPayload.data()), static_cast<uLong>(zlibPayload.size()));
+		if (status != Z_OK)
+		{
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Failed to decompress session-state payload.");
+			return false;
+		}
+		if (decompressedSize != payloadSize)
+		{
+			if (errorMessage)
+			{
+				*errorMessage = QStringLiteral("Session-state payload size mismatch (expected %1, got %2).")
+				                    .arg(payloadSize)
+				                    .arg(static_cast<quint32>(decompressedSize));
+			}
+			return false;
+		}
+
+		payload = decompressedPayload;
+		return true;
 	}
 
 	void writeColor(QDataStream &stream, const QColor &color)
@@ -415,13 +471,8 @@ namespace QMudWorldSessionState
 		QByteArray payload = storedPayload;
 		if ((containerFlags & kContainerFlagCompressed) != 0)
 		{
-			payload = qUncompress(storedPayload);
-			if (payload.isNull())
-			{
-				if (errorMessage)
-					*errorMessage = QStringLiteral("Failed to decompress session-state payload.");
+			if (!uncompressQtPayload(storedPayload, payloadSize, payload, errorMessage))
 				return false;
-			}
 		}
 		if (payloadSize != static_cast<quint32>(payload.size()))
 		{
@@ -534,7 +585,9 @@ namespace QMudWorldSessionState
 			}
 			else
 			{
-				const int fallbackMode              = state->mxpSessionState.secureMode ? 1 : 0;
+				const int fallbackMode = state->mxpSessionState.secureMode
+				                             ? TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Secure)
+				                             : TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 				state->mxpSessionState.mode         = fallbackMode;
 				state->mxpSessionState.defaultMode  = fallbackMode;
 				state->mxpSessionState.previousMode = fallbackMode;

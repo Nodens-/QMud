@@ -13,6 +13,8 @@
 #ifndef QMUD_TELNETPROCESSOR_H
 #define QMUD_TELNETPROCESSOR_H
 
+#include "WorldOptions.h"
+
 #include <QByteArray>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QList>
@@ -36,6 +38,31 @@ class TelnetProcessor
 			Secure,
 			Locked
 		};
+
+		/**
+		 * @brief Detailed MXP parser/session modes used by MUSHclient-compatible MXP handling.
+		 */
+		enum class MxpMode : int
+		{
+			Open            = 0,
+			Secure          = 1,
+			Locked          = 2,
+			Reset           = 3,
+			SecureOnce      = 4,
+			PermanentOpen   = 5,
+			PermanentSecure = 6,
+			PermanentLocked = 7
+		};
+
+		/**
+		 * @brief Returns the persisted numeric code for an MXP parser/session mode.
+		 * @param mode MXP mode to encode.
+		 * @return Numeric mode code used in MXP stream commands and session state.
+		 */
+		[[nodiscard]] static constexpr int mxpModeCode(const MxpMode mode) noexcept
+		{
+			return static_cast<int>(mode);
+		}
 
 		/**
 		 * @brief Creates telnet processor with default negotiation state.
@@ -78,6 +105,16 @@ class TelnetProcessor
 		 * @param enabled Enable UTF-8 decode mode when `true`.
 		 */
 		void       setUseUtf8(bool enabled);
+		/**
+		 * @brief Sets the legacy world text encoding used for incoming MXP text decoding.
+		 * @param encodingName Canonical Qt encoding name.
+		 */
+		void       setLegacyEncodingName(const QString &encodingName);
+		/**
+		 * @brief Sets preferred CHARSET negotiation names in priority order.
+		 * @param names Accepted charset names.
+		 */
+		void       setPreferredCharsetNames(const QList<QByteArray> &names);
 		/**
 		 * @brief Converts received GA commands into newline output when enabled.
 		 * @param enabled Convert GA to newline when `true`.
@@ -518,6 +555,7 @@ class TelnetProcessor
 		template <typename MessageBuilder>
 		void emitMxpDiagnosticLazy(const int level, const long messageNumber, MessageBuilder &&buildMessage)
 		{
+			restoreMxpModeForDiagnosticLevel(level);
 			if (!m_callbacks.onMxpDiagnostic)
 				return;
 			if (m_callbacks.onMxpDiagnosticNeeded && !m_callbacks.onMxpDiagnosticNeeded(level))
@@ -525,138 +563,181 @@ class TelnetProcessor
 			m_callbacks.onMxpDiagnostic(level, messageNumber, buildMessage());
 		}
 		/**
+		 * @brief Applies MXP mode side effects required before diagnostic callbacks.
+		 * @param level MXP diagnostic level.
+		 */
+		void               restoreMxpModeForDiagnosticLevel(int level);
+		/**
 		 * @brief Parses one MXP definition command.
 		 * @param definition Definition payload bytes.
 		 */
-		void                     mxpDefinition(QByteArray definition);
+		void               mxpDefinition(QByteArray definition);
 		/**
 		 * @brief Parses one MXP element declaration.
 		 * @param name Element name.
 		 * @param tagRemainder Remaining declaration bytes.
 		 */
-		void                     mxpElement(const QByteArray &name, const QByteArray &tagRemainder);
+		void               mxpElement(const QByteArray &name, const QByteArray &tagRemainder);
 		/**
 		 * @brief Parses one MXP ATTLIST declaration.
 		 * @param name Element name.
 		 * @param tagRemainder Remaining declaration bytes.
 		 */
-		void                     mxpAttlist(const QByteArray &name, const QByteArray &tagRemainder);
+		void               mxpAttlist(const QByteArray &name, const QByteArray &tagRemainder);
 		/**
 		 * @brief Parses one MXP entity declaration.
 		 * @param name Entity name.
 		 * @param tagRemainder Remaining declaration bytes.
 		 */
-		void                     mxpEntity(const QByteArray &name, const QByteArray &tagRemainder);
-		/**
-		 * @brief Resolves an MXP entity from custom or built-in tables.
-		 * @param name Entity name.
-		 * @return Resolved entity bytes.
-		 */
-		[[nodiscard]] QByteArray mxpGetEntity(const QByteArray &name) const;
+		void               mxpEntity(const QByteArray &name, const QByteArray &tagRemainder);
 		/**
 		 * @brief Enters MXP mode and dispatches start callback.
 		 * @param pueblo Activate pueblo mode when `true`.
 		 * @param manual Mark as manual activation when `true`.
 		 */
-		void                     mxpOn(bool pueblo, bool manual);
+		void               mxpOn(bool pueblo, bool manual);
 		/**
 		 * @brief Exits MXP mode and dispatches stop callback.
 		 * @param completely Stop completely when `true`.
 		 */
-		void                     mxpOff(bool completely);
+		void               mxpOff(bool completely);
 		/**
 		 * @brief Applies MXP mode transition and notifies callback.
 		 * @param newMode Target MXP mode.
 		 */
-		void                     mxpModeChange(int newMode);
+		void               mxpModeChange(int newMode);
 		/**
 		 * @brief Restores MXP mode after temporary changes.
 		 */
-		void                     mxpRestoreMode();
+		void               mxpRestoreMode();
 		/**
 		 * @brief Reports whether current MXP mode is open.
 		 * @return `true` when current mode is open.
 		 */
-		[[nodiscard]] bool       mxpOpen() const;
+		[[nodiscard]] bool mxpOpen() const;
 		/**
 		 * @brief Reports whether current MXP mode is secure.
 		 * @return `true` when current mode is secure.
 		 */
-		[[nodiscard]] bool       mxpSecure() const;
+		[[nodiscard]] bool mxpSecure() const;
 		/**
 		 * @brief Queues IAC DO option negotiation command.
 		 * @param option Telnet option code.
 		 */
-		void                     sendIacDo(unsigned char option);
+		void               sendIacDo(unsigned char option);
 		/**
 		 * @brief Queues IAC DONT option negotiation command.
 		 * @param option Telnet option code.
 		 */
-		void                     sendIacDont(unsigned char option);
+		void               sendIacDont(unsigned char option);
 		/**
 		 * @brief Queues IAC WILL option negotiation command.
 		 * @param option Telnet option code.
 		 */
-		void                     sendIacWill(unsigned char option);
+		void               sendIacWill(unsigned char option);
 		/**
 		 * @brief Queues IAC WONT option negotiation command.
 		 * @param option Telnet option code.
 		 */
-		void                     sendIacWont(unsigned char option);
+		void               sendIacWont(unsigned char option);
 		/**
 		 * @brief Sends START-TLS FOLLOWS subnegotiation.
 		 */
-		void                     sendStartTlsFollows();
+		void               sendStartTlsFollows();
 		/**
 		 * @brief Sends CHARSET ACCEPTED subnegotiation.
 		 * @param charset Accepted charset name.
 		 */
-		void                     sendCharsetAccepted(const QByteArray &charset);
+		void               sendCharsetAccepted(const QByteArray &charset);
 		/**
 		 * @brief Sends CHARSET REJECTED subnegotiation.
 		 */
-		void                     sendCharsetRejected();
+		void               sendCharsetRejected();
 		/**
 		 * @brief Sends terminal type response subnegotiation.
 		 */
-		void                     sendTerminalType();
+		void               sendTerminalType();
 		/**
 		 * @brief Sends current NAWS window size.
 		 */
-		void                     sendWindowSize();
+		void               sendWindowSize();
 		/**
 		 * @brief Records a plugin-visible telnet event at the current output position.
 		 * @param type Plugin event type.
 		 * @param option Telnet option number.
 		 * @param data Telnet event payload bytes.
 		 */
-		void       appendTelnetPluginEvent(TelnetPluginEvent::Type type, int option, const QByteArray &data);
+		void appendTelnetPluginEvent(TelnetPluginEvent::Type type, int option, const QByteArray &data);
+		/**
+		 * @brief Returns the active CHARSET negotiation preference list.
+		 * @return Charset names in priority order.
+		 */
+		[[nodiscard]] QList<QByteArray> effectiveCharsetNames() const;
+		/**
+		 * @brief Converts a legacy MXP builtin entity byte value to internal UTF-8 storage.
+		 * @param bytes Builtin entity bytes using the MXP Latin-1 codepoint table.
+		 * @return UTF-8 internal bytes.
+		 */
+		[[nodiscard]] static QByteArray decodeBuiltinMxpTextToInternalBytes(const QByteArray &bytes);
+		/**
+		 * @brief Encodes a legacy MXP builtin entity byte value for the raw processed text stream.
+		 * @param bytes Builtin entity bytes using the MXP Latin-1 codepoint table.
+		 * @return Bytes suitable for the raw processed text stream.
+		 */
+		[[nodiscard]] QByteArray        encodeBuiltinMxpTextToIncomingBytes(const QByteArray &bytes) const;
+		/**
+		 * @brief Decodes incoming MXP text bytes to QMud's internal UTF-8 storage.
+		 * @param bytes Incoming world text bytes.
+		 * @return UTF-8 internal bytes.
+		 */
+		[[nodiscard]] QByteArray        decodeIncomingMxpTextToInternalBytes(const QByteArray &bytes) const;
+		/**
+		 * @brief Encodes internal UTF-8 MXP text back to current incoming world bytes.
+		 * @param bytes Internal UTF-8 bytes.
+		 * @return Bytes suitable for the raw processed text stream.
+		 */
+		[[nodiscard]] QByteArray        encodeInternalMxpTextToIncomingBytes(const QByteArray &bytes) const;
+		/**
+		 * @brief Resolves only custom MXP entity values from internal storage.
+		 * @param name Entity name.
+		 * @param value Output internal UTF-8 value.
+		 * @return `true` when a custom entity exists.
+		 */
+		[[nodiscard]] bool       resolveCustomEntityValue(const QByteArray &name, QByteArray &value) const;
+		/**
+		 * @brief Resolves an entity for insertion into the raw processed output stream.
+		 * @param name Entity name.
+		 * @return Raw stream bytes, or empty when unresolved.
+		 */
+		[[nodiscard]] QByteArray mxpGetEntityForOutput(const QByteArray &name) const;
 
-		Phase      m_phase{NONE};
-		int        m_code{0};
-		bool       m_convertGAtoNewline{false};
-		bool       m_noEchoOff{false};
-		bool       m_noEcho{false};
-		bool       m_utf8{false};
-		int        m_useMxp{3}; // eNoMXP by default
-		bool       m_naws{false};
-		bool       m_nawsWanted{false};
-		int        m_wrapColumns{0};
-		int        m_wrapRows{0};
-		int        m_ttypeSequence{0};
-		QString    m_terminalIdentification{QStringLiteral("QMud")};
+		Phase                    m_phase{NONE};
+		int                      m_code{0};
+		bool                     m_convertGAtoNewline{false};
+		bool                     m_noEchoOff{false};
+		bool                     m_noEcho{false};
+		bool                     m_utf8{false};
+		QString                  m_legacyEncodingName;
+		QList<QByteArray>        m_preferredCharsetNames;
+		int                      m_useMxp{eNoMXP};
+		bool                     m_naws{false};
+		bool                     m_nawsWanted{false};
+		int                      m_wrapColumns{0};
+		int                      m_wrapRows{0};
+		int                      m_ttypeSequence{0};
+		QString                  m_terminalIdentification{QStringLiteral("QMud")};
 
-		int        m_subnegotiationType{0};
-		QByteArray m_subnegotiationData;
-		QByteArray m_outbound;
-		QByteArray m_ansiBuffer;
-		QByteArray m_pendingPacketTransformBytes;
-		QByteArray m_pendingCompressed;
-		QByteArray m_compressInput;
-		QByteArray m_compressOutputChunk;
-		QByteArray m_postCompressionRemainder;
-		int        m_compressInputOffset{0};
-		int        m_outputSize{0};
+		int                      m_subnegotiationType{0};
+		QByteArray               m_subnegotiationData;
+		QByteArray               m_outbound;
+		QByteArray               m_ansiBuffer;
+		QByteArray               m_pendingPacketTransformBytes;
+		QByteArray               m_pendingCompressed;
+		QByteArray               m_compressInput;
+		QByteArray               m_compressOutputChunk;
+		QByteArray               m_postCompressionRemainder;
+		int                      m_compressInputOffset{0};
+		int                      m_outputSize{0};
 
 		enum MxpPhase
 		{
@@ -667,9 +748,9 @@ class TelnetProcessor
 			HAVE_MXP_ENTITY
 		};
 
-		int                          m_mxpMode{2}; // default locked until enabled
-		int                          m_mxpDefaultMode{0};
-		int                          m_mxpPreviousMode{0};
+		int                          m_mxpMode{mxpModeCode(MxpMode::Locked)};
+		int                          m_mxpDefaultMode{mxpModeCode(MxpMode::Open)};
+		int                          m_mxpPreviousMode{mxpModeCode(MxpMode::Open)};
 		bool                         m_mxpEnabled{false};
 		bool                         m_puebloActive{false};
 		MxpPhase                     m_mxpPhase{MXP_NONE};

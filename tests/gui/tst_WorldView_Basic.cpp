@@ -10,8 +10,10 @@
 #include "AnsiSgrParseUtils.h"
 #include "AppController.h"
 #include "MiniWindowUtils.h"
+#include "NativePluginRegistry.h"
 #include "OutputWrapUtils.h"
 #include "TelnetProcessor.h"
+#include "WorldOptions.h"
 #include "WorldView.h"
 #include "scripting/ScriptingErrors.h"
 
@@ -64,6 +66,9 @@ namespace
 	QMap<QString, QString>                     g_worldMultilineAttrs;
 	QMap<QString, QVariant>                    g_globalOptions;
 	IndexedRingBuffer<WorldRuntime::LineEntry> g_runtimeLines;
+	QString                                    g_pendingIncomingPartialText;
+	QVector<WorldRuntime::StyleSpan>           g_pendingIncomingPartialSpans;
+	int                                        g_pendingIncomingPartialCommitCount{0};
 	QList<WorldRuntime::Macro>                 g_testMacros;
 	WorldRuntime::TextRectangleSettings        g_textRectangle;
 	int                                        g_outputFontHeight{0};
@@ -90,6 +95,7 @@ namespace
 	bool                                       g_nawsNegotiated{false};
 	bool                                       g_useFakeAppController{false};
 	bool                                       g_hasMushReaderLiveSpeechOwner{false};
+	bool                                       g_qtAccessibilitySpeechEnabled{true};
 	QHash<quint64, quint16>                    g_virtualKeyMap;
 	QHash<qint64, int>                         g_acceleratorCommands;
 	int                                        g_acceleratorExecutionCount{0};
@@ -129,15 +135,30 @@ namespace
 			int      position{0};
 	};
 
-	QVector<AccessibleTextInsertRecord>   g_accessibleTextInsertRecords;
-	QVector<AccessibleTextUpdateRecord>   g_accessibleTextUpdateRecords;
-	QVector<AccessibleAnnouncementRecord> g_accessibleAnnouncementRecords;
-	QVector<AccessibleTextCursorRecord>   g_accessibleTextCursorRecords;
-	int                                   g_accessibleValueChangedCount{0};
+	struct AccessibleTextSelectionRecord
+	{
+			QObject *object{nullptr};
+			int      start{0};
+			int      end{0};
+	};
 
-	int                                   sizeToInt(const qsizetype value)
+	QVector<AccessibleTextInsertRecord>    g_accessibleTextInsertRecords;
+	QVector<AccessibleTextUpdateRecord>    g_accessibleTextUpdateRecords;
+	QVector<AccessibleAnnouncementRecord>  g_accessibleAnnouncementRecords;
+	QVector<AccessibleTextCursorRecord>    g_accessibleTextCursorRecords;
+	QVector<AccessibleTextSelectionRecord> g_accessibleTextSelectionRecords;
+	int                                    g_accessibleValueChangedCount{0};
+
+	int                                    sizeToInt(const qsizetype value)
 	{
 		constexpr qsizetype kMin = 0;
+		constexpr qsizetype kMax = std::numeric_limits<int>::max();
+		return static_cast<int>(qBound(kMin, value, kMax));
+	}
+
+	int stringIndexToInt(const qsizetype value)
+	{
+		constexpr qsizetype kMin = -1;
 		constexpr qsizetype kMax = std::numeric_limits<int>::max();
 		return static_cast<int>(qBound(kMin, value, kMax));
 	}
@@ -178,6 +199,15 @@ namespace
 			                                         updateEvent->textInserted()});
 			return;
 		}
+		if (event->type() == QAccessible::TextSelectionChanged)
+		{
+			const auto *selectionEvent = dynamic_cast<QAccessibleTextSelectionEvent *>(event);
+			if (!selectionEvent)
+				return;
+			g_accessibleTextSelectionRecords.push_back(
+			    {event->object(), selectionEvent->selectionStart(), selectionEvent->selectionEnd()});
+			return;
+		}
 		if (event->type() == QAccessible::Announcement)
 		{
 			const auto *announcementEvent = dynamic_cast<QAccessibleAnnouncementEvent *>(event);
@@ -198,6 +228,7 @@ namespace
 				g_accessibleTextUpdateRecords.clear();
 				g_accessibleAnnouncementRecords.clear();
 				g_accessibleTextCursorRecords.clear();
+				g_accessibleTextSelectionRecords.clear();
 				g_accessibleValueChangedCount = 0;
 				QAccessible::setActive(true);
 			}
@@ -210,6 +241,7 @@ namespace
 				g_accessibleTextUpdateRecords.clear();
 				g_accessibleAnnouncementRecords.clear();
 				g_accessibleTextCursorRecords.clear();
+				g_accessibleTextSelectionRecords.clear();
 				g_accessibleValueChangedCount = 0;
 			}
 
@@ -246,6 +278,12 @@ namespace
 		return reinterpret_cast<WorldRuntime *>(static_cast<quintptr>(1));
 	}
 
+	void setFakeMushReaderLiveSpeechOwner(const bool enable)
+	{
+		g_hasMushReaderLiveSpeechOwner = enable;
+		QMudNativePluginRegistry::setMushReaderPluginEnabled(fakeRuntimePointer(), enable);
+	}
+
 	const QMap<QString, QString> &emptyAttributes()
 	{
 		static const QMap<QString, QString> attrs;
@@ -274,6 +312,9 @@ namespace
 		g_worldMultilineAttrs.clear();
 		g_globalOptions.clear();
 		g_runtimeLines.clear();
+		g_pendingIncomingPartialText.clear();
+		g_pendingIncomingPartialSpans.clear();
+		g_pendingIncomingPartialCommitCount = 0;
 		g_testMacros.clear();
 		g_textRectangle                 = {};
 		g_outputFontHeight              = 0;
@@ -300,6 +341,7 @@ namespace
 		g_nawsNegotiated                  = false;
 		g_useFakeAppController            = false;
 		g_hasMushReaderLiveSpeechOwner    = false;
+		g_qtAccessibilitySpeechEnabled    = true;
 		g_virtualKeyMap.clear();
 		g_acceleratorCommands.clear();
 		g_acceleratorExecutionCount      = 0;
@@ -315,7 +357,10 @@ namespace
 		g_accessibleTextUpdateRecords.clear();
 		g_accessibleAnnouncementRecords.clear();
 		g_accessibleTextCursorRecords.clear();
+		g_accessibleTextSelectionRecords.clear();
 		g_accessibleValueChangedCount = 0;
+		QMudNativePluginRegistry::discardRuntimeState(fakeRuntimePointer());
+		QMudNativePluginRegistry::setTestSpeechSink({});
 	}
 
 	class ScopedTestStateReset
@@ -886,6 +931,12 @@ namespace
 			}
 		}
 	}
+
+	void setFakeRuntimePendingPartial(QString text, QVector<WorldRuntime::StyleSpan> spans = {})
+	{
+		g_pendingIncomingPartialText  = std::move(text);
+		g_pendingIncomingPartialSpans = std::move(spans);
+	}
 } // namespace
 
 // NOLINTBEGIN(readability-convert-member-functions-to-static)
@@ -943,6 +994,11 @@ bool AcceleratorUtils::keySequenceToAcceleratorMapKey(const QKeySequence &sequen
 	if ((modifiers & Qt::AltModifier) != 0)
 		virt |= AcceleratorUtils::kAltFlag;
 	mapKey = AcceleratorUtils::acceleratorMapKey(virt, key);
+	return true;
+}
+
+bool WorldRuntime::soundBufferReusableForNativeAudio(int) const
+{
 	return true;
 }
 
@@ -1114,6 +1170,10 @@ void WorldRuntime::installPendingPlugins()
 {
 }
 
+void WorldRuntime::notifyNativePluginStateChanged()
+{
+}
+
 void WorldRuntime::notifyWorldOutputResized()
 {
 	++g_worldOutputResizedNotifyCount;
@@ -1122,6 +1182,25 @@ void WorldRuntime::notifyWorldOutputResized()
 bool WorldRuntime::hasMushReaderLiveSpeechOwner() const
 {
 	return g_hasMushReaderLiveSpeechOwner;
+}
+
+bool WorldRuntime::isMushReaderSpeechEnabled() const
+{
+	return g_hasMushReaderLiveSpeechOwner && QMudNativePluginRegistry::isMushReaderSpeechEnabled(this);
+}
+
+bool WorldRuntime::speakMushReaderReviewText(const QString &text) const
+{
+	return QMudNativePluginRegistry::speakMushReaderReviewText(this, text);
+}
+
+bool WorldRuntime::isQtAccessibilitySpeechEnabled() const
+{
+	return g_qtAccessibilitySpeechEnabled;
+}
+
+void WorldRuntime::outputText(const QString &, bool, bool)
+{
 }
 
 void WorldRuntime::refreshNawsWindowSize()
@@ -1404,7 +1483,20 @@ void WorldRuntime::clearLastLineHardReturn()
 
 bool WorldRuntime::commitPendingIncomingPartialLine()
 {
-	return false;
+	if (g_pendingIncomingPartialText.isEmpty() && g_pendingIncomingPartialSpans.isEmpty())
+		return false;
+
+	++g_pendingIncomingPartialCommitCount;
+	const QString                          text  = std::move(g_pendingIncomingPartialText);
+	const QVector<WorldRuntime::StyleSpan> spans = std::move(g_pendingIncomingPartialSpans);
+	g_pendingIncomingPartialText.clear();
+	g_pendingIncomingPartialSpans.clear();
+	if (spans.isEmpty())
+		addLine(text, LineOutput, true);
+	else
+		addLine(text, LineOutput, spans, true);
+	QMudNativePluginRegistry::clearMushReaderPartialLine(this);
+	return true;
 }
 
 // NOLINTEND(readability-convert-member-functions-to-static)
@@ -2756,6 +2848,31 @@ class tst_WorldView_Basic : public QObject
 			QAccessibleTextInterface *textInterface = accessible->textInterface();
 			QVERIFY(textInterface);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha\nbeta"));
+			int boundaryStart = -1;
+			int boundaryEnd   = -1;
+			QCOMPARE(textInterface->textAtOffset(0, QAccessible::WordBoundary, &boundaryStart, &boundaryEnd),
+			         QStringLiteral("alpha"));
+			QCOMPARE(boundaryStart, 0);
+			QCOMPARE(boundaryEnd, 5);
+			QCOMPARE(
+			    textInterface->textAfterOffset(0, QAccessible::WordBoundary, &boundaryStart, &boundaryEnd),
+			    QStringLiteral("beta"));
+			QCOMPARE(boundaryStart, 6);
+			QCOMPARE(boundaryEnd, 10);
+			QCOMPARE(textInterface->textAtOffset(-2, QAccessible::WordBoundary, &boundaryStart, &boundaryEnd),
+			         QStringLiteral("beta"));
+			QCOMPARE(boundaryStart, 6);
+			QCOMPARE(boundaryEnd, 10);
+			QCOMPARE(
+			    textInterface->textAtOffset(0, QAccessible::SentenceBoundary, &boundaryStart, &boundaryEnd),
+			    QStringLiteral("alpha"));
+			QCOMPARE(boundaryStart, 0);
+			QCOMPARE(boundaryEnd, 5);
+			QCOMPARE(textInterface->textAfterOffset(0, QAccessible::SentenceBoundary, &boundaryStart,
+			                                        &boundaryEnd),
+			         QStringLiteral("beta"));
+			QCOMPARE(boundaryStart, 6);
+			QCOMPARE(boundaryEnd, 10);
 			QCOMPARE(textInterface->selectionCount(), 0);
 
 			textInterface->setSelection(0, 2, 8);
@@ -2816,6 +2933,219 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleAnnouncementRecords.at(0).object, canvas);
 			QCOMPARE(g_accessibleAnnouncementRecords.at(0).message, QStringLiteral("alpha"));
 			QCOMPARE(g_accessibleValueChangedCount, 0);
+		}
+
+		void worldOutputAccessibleCanvasReceivesPartialPromptNotifications()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(640, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			ScopedAccessibleUpdateCapture capture;
+
+			view.appendOutputText(QStringLiteral("room"), true);
+			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 1);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().text, QStringLiteral("room"));
+			g_accessibleTextInsertRecords.clear();
+			g_accessibleAnnouncementRecords.clear();
+
+			const QString prompt = QStringLiteral("N Sw 12:30pm 32/32hp 100/100m 300mv 2000xp> ");
+			view.updatePartialOutputText(prompt);
+
+			QTRY_COMPARE(view.outputLines().constLast(), prompt);
+			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 1);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().position, 4);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().text, QStringLiteral("\n") + prompt);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, prompt);
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()),
+			         QStringLiteral("room\n") + prompt);
+
+			view.updatePartialOutputText(prompt);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+
+			view.clearPartialOutput();
+			QTRY_COMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("room"));
+			g_accessibleTextInsertRecords.clear();
+			g_accessibleTextUpdateRecords.clear();
+			g_accessibleAnnouncementRecords.clear();
+
+			view.appendOutputText(QStringLiteral("final-line"), true);
+			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 1);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().position,
+			         sizeToInt(QStringLiteral("room").size()));
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().text, QStringLiteral("\nfinal-line"));
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, QStringLiteral("final-line"));
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()),
+			         QStringLiteral("room\nfinal-line"));
+
+			resetTestState();
+		}
+
+		void worldOutputAccessiblePartialPromptFinalizedAsSameRuntimeLineIsNotAnnouncedTwice()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(640, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			ScopedAccessibleUpdateCapture capture;
+
+			view.appendOutputText(QStringLiteral("room"), true);
+			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 1);
+			g_accessibleTextInsertRecords.clear();
+			g_accessibleAnnouncementRecords.clear();
+
+			WorldRuntime::LineEntry pendingEntry;
+			pendingEntry.flags      = WorldRuntime::LineOutput;
+			pendingEntry.hardReturn = false;
+			pendingEntry.lineNumber = 2;
+			g_runtimeLines.push_back(pendingEntry);
+
+			const QString prompt = QStringLiteral("N Sw 12:30pm 32/32hp 100/100m 300mv 2000xp> ");
+			view.updatePartialOutputText(prompt);
+			QTRY_COMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, prompt);
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()),
+			         QStringLiteral("room\n") + prompt);
+
+			view.clearPartialOutput();
+			QTRY_COMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("room\n"));
+			g_accessibleTextInsertRecords.clear();
+			g_accessibleTextUpdateRecords.clear();
+			g_accessibleAnnouncementRecords.clear();
+
+			g_runtimeLines.last().text       = prompt;
+			g_runtimeLines.last().hardReturn = true;
+			view.notifyRuntimeOutputLineChanged(sizeToInt(g_runtimeLines.size()) - 1);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()),
+			         QStringLiteral("room\n") + prompt);
+
+			resetTestState();
+		}
+
+		void worldOutputAccessiblePartialPromptDoesNotEmitQtSpeechWhenMushReaderOwnsSpeech()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+			setFakeMushReaderLiveSpeechOwner(true);
+
+			WorldView view;
+			view.resize(640, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			ScopedAccessibleUpdateCapture capture;
+
+			view.appendOutputText(QStringLiteral("room"), true);
+			const QString prompt = QStringLiteral("<mushreader-prompt> ");
+			view.updatePartialOutputText(prompt);
+
+			QTRY_COMPARE(view.outputLines().constLast(), prompt);
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()),
+			         QStringLiteral("room\n") + prompt);
+
+			resetTestState();
+		}
+
+		void worldOutputAccessibleSuppressedPartialUpdatesDoNotBuildLineOffsetCache()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(640, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+
+			for (int i = 0; i < 200; ++i)
+				view.appendOutputText(QStringLiteral("suppressed-partial-baseline-%1").arg(i), true);
+			QCoreApplication::processEvents();
+			view.primeAccessibleOutputTextState();
+			view.m_accessibleOutputLineStartCache.clear();
+			view.m_accessibleOutputLineStartCacheRevision       = 0;
+			view.m_accessibleOutputLineStartCacheNextOffset     = 0;
+			view.m_accessibleOutputLineStartCacheCharacterCount = -1;
+
+			const int baselineCharacterCount = view.m_accessibleOutputCharacterCount;
+			QVERIFY(baselineCharacterCount > 0);
+			const qsizetype               lineStartCacheSize = view.m_accessibleOutputLineStartCache.size();
+
+			ScopedAccessibleUpdateCapture capture;
+			setFakeMushReaderLiveSpeechOwner(true);
+
+			const QString firstPrompt = QStringLiteral("<p> ");
+			view.updatePartialOutputText(firstPrompt);
+			QTRY_COMPARE(view.m_accessibleOutputCharacterCount,
+			             baselineCharacterCount + 1 + sizeToInt(firstPrompt.size()));
+			QCOMPARE(view.m_accessibleOutputLineStartCache.size(), lineStartCacheSize);
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+
+			const QString secondPrompt = QStringLiteral("<prompt> ");
+			view.updatePartialOutputText(secondPrompt);
+			QTRY_COMPARE(view.m_accessibleOutputCharacterCount,
+			             baselineCharacterCount + 1 + sizeToInt(secondPrompt.size()));
+			QCOMPARE(view.m_accessibleOutputLineStartCache.size(), lineStartCacheSize);
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+
+			resetTestState();
 		}
 
 		void worldOutputAccessibleGeometryUsesNativeTextHitTesting()
@@ -2895,7 +3225,136 @@ class tst_WorldView_Basic : public QObject
 			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
 			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
 			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, 0);
+			QCOMPARE(g_accessibleTextSelectionRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, QStringLiteral("line-000"));
 			QCOMPARE(textInterface->cursorPosition(), 0);
+		}
+
+		void worldOutputAccessibleScrollToSubstringUsesMushReaderSpeechWhenItOwnsOutput()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+			setFakeMushReaderLiveSpeechOwner(true);
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
+			const ScopedTestStateReset                         resetState;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { speechEvents.push_back(event); });
+
+			WorldView view;
+			view.resize(640, 240);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 120; ++i)
+				view.appendOutputText(QStringLiteral("mush-scroll-line-%1").arg(i, 3, 10, QLatin1Char('0')),
+				                      true);
+			QCoreApplication::processEvents();
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			ScopedAccessibleUpdateCapture capture;
+			textInterface->scrollToSubstring(0, 16);
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(g_accessibleTextSelectionRecords.size(), 0);
+			QCOMPARE(speechEvents.size(), 1);
+			QCOMPARE(speechEvents.constLast().text, QStringLiteral("mush-scroll-line-000"));
+			QVERIFY(speechEvents.constLast().interrupt);
+			QCOMPARE(textInterface->cursorPosition(), 0);
+		}
+
+		void worldOutputAccessibleScrollToSubstringTailReviewClearsOnLiveAppend()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(640, 240);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			view.appendOutputText(QStringLiteral("visible-tail-review-line"), true);
+			QCoreApplication::processEvents();
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			QVERIFY(!view.isScrollbackSplitActive());
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+
+			ScopedAccessibleUpdateCapture capture;
+			textInterface->scrollToSubstring(0, sizeToInt(QStringLiteral("visible-tail").size()));
+			QCoreApplication::processEvents();
+
+			QVERIFY(!view.isScrollbackSplitActive());
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
+			         WorldView::AccessibleOutputReviewTargetKind::Transient);
+			QCOMPARE(textInterface->cursorPosition(), 0);
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, 0);
+
+			g_accessibleTextCursorRecords.clear();
+			view.appendOutputText(QStringLiteral("new-live-output"), true);
+			QCoreApplication::processEvents();
+
+			QVERIFY(!view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
+			         WorldView::AccessibleOutputReviewTargetKind::None);
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+			QVERIFY(!g_accessibleTextCursorRecords.isEmpty());
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, textInterface->characterCount());
+
+			resetTestState();
+		}
+
+		void transientReviewStateClearsOnPresentationWhenQtAccessibilityInactive()
+		{
+			resetTestState();
+			const ScopedTestStateReset        resetState;
+			const ScopedAccessibleActiveState accessibleActive(false);
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [](const QMudNativePluginRegistry::TestSpeechEvent &) {});
+			setFakeMushReaderLiveSpeechOwner(true);
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.appendOutputText(QStringLiteral("inactive-transient-review-line"), true);
+			QCoreApplication::processEvents();
+
+			const WorldView::NativeOutputRenderLines &lines = view.nativeOutputRenderLines();
+			QVERIFY(!lines.isEmpty());
+			view.notifyAccessibleOutputReviewRangeTarget(
+			    lines, 0, 0, -1, -1, WorldView::AccessibleOutputReviewTargetKind::Transient);
+
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
+			         WorldView::AccessibleOutputReviewTargetKind::Transient);
+
+			view.appendOutputText(QStringLiteral("inactive-live-output"), true);
+			QCoreApplication::processEvents();
+
+			QVERIFY(!view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
+			         WorldView::AccessibleOutputReviewTargetKind::None);
 		}
 
 		void worldOutputAccessibleScrollToSubstringUsesTopPaneAfterAutoPauseScroll()
@@ -2951,6 +3410,8 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(textInterface->cursorPosition() < textInterface->characterCount());
 
 			g_accessibleTextCursorRecords.clear();
+			g_accessibleTextSelectionRecords.clear();
+			g_accessibleAnnouncementRecords.clear();
 			textInterface->scrollToSubstring(0, 8);
 			QCoreApplication::processEvents();
 
@@ -2959,6 +3420,11 @@ class tst_WorldView_Basic : public QObject
 			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
 			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
 			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, 0);
+			QCOMPARE(g_accessibleTextSelectionRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message,
+			         QStringLiteral("auto-pause-accessible-line-000"));
 			QCOMPARE(textInterface->cursorPosition(), 0);
 		}
 
@@ -3003,7 +3469,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, 0);
 			QCOMPARE(textInterface->cursorPosition(), 0);
 
-			const int eventsBeforeEnd = g_accessibleTextCursorRecords.size();
+			const qsizetype eventsBeforeEnd = g_accessibleTextCursorRecords.size();
 			QCOMPARE(view.setOutputScroll(-1, true), 0);
 			QCoreApplication::processEvents();
 
@@ -3014,7 +3480,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
 		}
 
-		void worldOutputAccessiblePageUpMovesReviewCaretWithoutLiveAnnouncements()
+		void worldOutputAccessiblePageUpAnnouncesReviewLineWithoutLiveOutputEvents()
 		{
 			qmudInstallWorldOutputAccessibility();
 
@@ -3046,7 +3512,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(textInterface);
 			const QString outputText = textInterface->text(0, textInterface->characterCount());
 			QVERIFY(outputText.endsWith(QStringLiteral("accessible-review-line-219")));
-			const int lastLineStart = outputText.lastIndexOf(QLatin1Char('\n')) + 1;
+			const int lastLineStart = stringIndexToInt(outputText.lastIndexOf(QLatin1Char('\n')) + 1);
 			QVERIFY(lastLineStart > 0);
 			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
 			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
@@ -3061,21 +3527,75 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, reviewCursor);
 			QVERIFY(reviewCursor >= 0);
 			QVERIFY(reviewCursor < lastLineStart);
+			const int     nextBreak  = stringIndexToInt(outputText.indexOf(QLatin1Char('\n'), reviewCursor));
+			const int     reviewEnd  = nextBreak < 0 ? sizeToInt(outputText.size()) : nextBreak;
+			const QString reviewLine = outputText.mid(reviewCursor, reviewEnd - reviewCursor);
 			QVERIFY(view.isScrollbackSplitActive());
 			QVERIFY(!view.m_accessibleOutputLineStartCache.isEmpty());
 			QVERIFY(view.m_accessibleOutputLineStartCache.size() < view.nativeOutputRenderLines().size());
 			QCOMPARE(view.m_accessibleOutputLineStartCacheCharacterCount, -1);
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
-			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, reviewLine);
+			int atLineStart = -1;
+			int atLineEnd   = -1;
+			QCOMPARE(textInterface->textAtOffset(reviewCursor, QAccessible::LineBoundary, &atLineStart,
+			                                     &atLineEnd),
+			         reviewLine);
+			QCOMPARE(atLineStart, reviewCursor);
+			QCOMPARE(atLineEnd, reviewEnd);
+			QCOMPARE(textInterface->textAtOffset(-2, QAccessible::LineBoundary, &atLineStart, &atLineEnd),
+			         reviewLine);
+			QCOMPARE(atLineStart, reviewCursor);
+			QCOMPARE(atLineEnd, reviewEnd);
+			const int followingLineStart = reviewEnd + 1;
+			QVERIFY(followingLineStart < textInterface->characterCount());
+			const int followingNextBreak =
+			    stringIndexToInt(outputText.indexOf(QLatin1Char('\n'), followingLineStart));
+			const int followingLineEnd =
+			    followingNextBreak < 0 ? sizeToInt(outputText.size()) : followingNextBreak;
+			const QString followingLine =
+			    outputText.mid(followingLineStart, followingLineEnd - followingLineStart);
+			int afterLineStart = -1;
+			int afterLineEnd   = -1;
+			QCOMPARE(textInterface->textAfterOffset(reviewCursor, QAccessible::LineBoundary, &afterLineStart,
+			                                        &afterLineEnd),
+			         followingLine);
+			QCOMPARE(afterLineStart, followingLineStart);
+			QCOMPARE(afterLineEnd, followingLineEnd);
+			QCOMPARE(
+			    textInterface->textAfterOffset(-2, QAccessible::LineBoundary, &afterLineStart, &afterLineEnd),
+			    followingLine);
+			QCOMPARE(afterLineStart, followingLineStart);
+			QCOMPARE(afterLineEnd, followingLineEnd);
 
 			auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
 			QVERIFY(splitTop);
 			QVERIFY(splitBottom);
+			QTest::keyClick(splitTop->viewport(), Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 2);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			const int secondReviewCursor = textInterface->cursorPosition();
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, secondReviewCursor);
+			QVERIFY(secondReviewCursor >= 0);
+			QVERIFY(secondReviewCursor < reviewCursor);
+			const int secondNextBreak =
+			    stringIndexToInt(outputText.indexOf(QLatin1Char('\n'), secondReviewCursor));
+			const int secondReviewEnd = secondNextBreak < 0 ? sizeToInt(outputText.size()) : secondNextBreak;
+			const QString secondReviewLine =
+			    outputText.mid(secondReviewCursor, secondReviewEnd - secondReviewCursor);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 2);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, secondReviewLine);
+
 			QScrollBar *topBar = splitTop->verticalScrollBar();
 			QVERIFY(topBar);
 			topBar->setValue(topBar->maximum());
-			const int eventsBeforeCollapse = g_accessibleTextCursorRecords.size();
+			const qsizetype eventsBeforeCollapse = g_accessibleTextCursorRecords.size();
 			QTest::keyClick(splitTop->viewport(), Qt::Key_PageDown);
 			QCoreApplication::processEvents();
 
@@ -3086,6 +3606,381 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 2);
+		}
+
+		void worldOutputAccessibleReviewSkipsBarelyVisibleTopLine()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 120; ++i)
+				view.appendOutputText(
+				    QStringLiteral("readable-review-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+			QCoreApplication::processEvents();
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar = splitTop->verticalScrollBar();
+			QVERIFY(topBar);
+
+			const WorldView::NativeOutputRenderLines &lines = view.nativeOutputRenderLines();
+			QVERIFY(lines.size() > 40);
+			constexpr int sliverLine = 30;
+			topBar->setValue(view.outputScrollUnitsPerLine() * sliverLine);
+			static_cast<void>(view.accessibleOutputReviewLineIndexForTopPane(lines));
+			QVERIFY(view.m_nativeLayoutHeightIndex.size() == lines.size());
+			const int sliverTarget =
+			    static_cast<int>(std::ceil(view.nativeLayoutCumulativeHeightAt(sliverLine + 1))) - 1;
+			QVERIFY(sliverTarget > 0);
+			QVERIFY(sliverTarget <= topBar->maximum());
+			topBar->setValue(sliverTarget);
+			view.syncOutputScrollbackReviewState(false);
+			QVERIFY(view.isScrollbackSplitActive());
+
+			ScopedAccessibleUpdateCapture capture;
+			view.syncOutputScrollbackReviewState();
+			QCoreApplication::processEvents();
+
+			constexpr int expectedLine   = sliverLine + 1;
+			const int     expectedCursor = view.accessibleOutputOffsetForLine(lines, expectedLine);
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, expectedCursor);
+			QCOMPARE(textInterface->cursorPosition(), expectedCursor);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, lines.at(expectedLine).text);
+		}
+
+		void worldOutputAccessibleSetCursorPositionMovesReviewCursor()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 140; ++i)
+				view.appendOutputText(
+				    QStringLiteral("accessible-cursor-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+			QCoreApplication::processEvents();
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			const QString targetLine   = QStringLiteral("accessible-cursor-line-050");
+			const QString outputText   = textInterface->text(0, textInterface->characterCount());
+			const int     targetCursor = stringIndexToInt(outputText.indexOf(targetLine));
+			QVERIFY(targetCursor >= 0);
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+
+			ScopedAccessibleUpdateCapture capture;
+			textInterface->setCursorPosition(targetCursor);
+			QCoreApplication::processEvents();
+
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
+			         WorldView::AccessibleOutputReviewTargetKind::Transient);
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, targetCursor);
+			QCOMPARE(textInterface->cursorPosition(), targetCursor);
+			QVERIFY(view.isScrollbackSplitActive());
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+		}
+
+		void worldOutputAccessiblePageUpDoesNotSpeakWhenQtAccessibilitySpeechDisabled()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+			const ScopedTestStateReset resetState;
+			g_qtAccessibilitySpeechEnabled = false;
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(
+				    QStringLiteral("muted-accessible-review-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+
+			ScopedAccessibleUpdateCapture capture;
+			QTest::keyClick(viewport, Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+
+			QVERIFY(view.isScrollbackSplitActive());
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewLastNotifiedCursorOffset, -1);
+			int canvasCursorEventCount = 0;
+			for (const AccessibleTextCursorRecord &record : g_accessibleTextCursorRecords)
+			{
+				if (record.object == canvas)
+					++canvasCursorEventCount;
+			}
+			QCOMPARE(canvasCursorEventCount, 0);
+			int canvasSelectionEventCount = 0;
+			for (const AccessibleTextSelectionRecord &record : g_accessibleTextSelectionRecords)
+			{
+				if (record.object == canvas)
+					++canvasSelectionEventCount;
+			}
+			QCOMPARE(canvasSelectionEventCount, 0);
+			int canvasInsertEventCount = 0;
+			for (const AccessibleTextInsertRecord &record : g_accessibleTextInsertRecords)
+			{
+				if (record.object == canvas)
+					++canvasInsertEventCount;
+			}
+			QCOMPARE(canvasInsertEventCount, 0);
+			int canvasUpdateEventCount = 0;
+			for (const AccessibleTextUpdateRecord &record : g_accessibleTextUpdateRecords)
+			{
+				if (record.object == canvas)
+					++canvasUpdateEventCount;
+			}
+			QCOMPARE(canvasUpdateEventCount, 0);
+			int canvasAnnouncementEventCount = 0;
+			for (const AccessibleAnnouncementRecord &record : g_accessibleAnnouncementRecords)
+			{
+				if (record.object == canvas)
+					++canvasAnnouncementEventCount;
+			}
+			QCOMPARE(canvasAnnouncementEventCount, 0);
+		}
+
+		void worldOutputAccessiblePageUpUsesMushReaderSpeechWhenItOwnsOutput()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+			setFakeMushReaderLiveSpeechOwner(true);
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
+			const ScopedTestStateReset                         resetState;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { speechEvents.push_back(event); });
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(
+				    QStringLiteral("mushreader-review-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			ScopedAccessibleUpdateCapture capture;
+			QTest::keyClick(viewport, Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(speechEvents.size(), 1);
+			QVERIFY(speechEvents.constLast().interrupt);
+			const QString outputText   = textInterface->text(0, textInterface->characterCount());
+			const int     reviewCursor = textInterface->cursorPosition();
+			const int     nextBreak  = stringIndexToInt(outputText.indexOf(QLatin1Char('\n'), reviewCursor));
+			const int     reviewEnd  = nextBreak < 0 ? sizeToInt(outputText.size()) : nextBreak;
+			const QString reviewLine = outputText.mid(reviewCursor, reviewEnd - reviewCursor);
+			QCOMPARE(speechEvents.constLast().text, reviewLine);
+		}
+
+		void worldOutputAccessiblePageUpDoesNotNotifyWhenMushReaderSpeechDisabled()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+			setFakeMushReaderLiveSpeechOwner(true);
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
+			const ScopedTestStateReset                         resetState;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { speechEvents.push_back(event); });
+			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(fakeRuntimePointer(),
+			                                                          QStringLiteral("tts")));
+			QVERIFY(!QMudNativePluginRegistry::isMushReaderSpeechEnabled(fakeRuntimePointer()));
+			speechEvents.clear();
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(
+				    QStringLiteral("mushreader-speech-off-review-line-%1").arg(i, 3, 10, QLatin1Char('0')),
+				    true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+
+			ScopedAccessibleUpdateCapture capture;
+			QTest::keyClick(viewport, Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+
+			QVERIFY(view.isScrollbackSplitActive());
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewLastNotifiedCursorOffset, -1);
+			QVERIFY(view.m_accessibleOutputLineStartCache.isEmpty());
+			QCOMPARE(g_accessibleTextCursorRecords.size(), 0);
+			QCOMPARE(g_accessibleTextSelectionRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(speechEvents.size(), 0);
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+		}
+
+		void worldOutputAccessibleMushReaderCursorCleanupWorksAfterQtSpeechDisabled()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+			g_qtAccessibilitySpeechEnabled = false;
+			setFakeMushReaderLiveSpeechOwner(true);
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
+			const ScopedTestStateReset                         resetState;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { speechEvents.push_back(event); });
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(
+				    QStringLiteral("mushreader-muted-qt-review-line-%1").arg(i, 3, 10, QLatin1Char('0')),
+				    true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QWidget *viewport = browser->viewport();
+			QVERIFY(viewport);
+			QScrollBar *bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+			QCOMPARE(view.setOutputScroll(999999, true), 0);
+			QTRY_COMPARE(view.outputScrollPosition(), bar->maximum());
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			auto canvasCursorEventCount = [canvas]
+			{
+				int count = 0;
+				for (const AccessibleTextCursorRecord &record : g_accessibleTextCursorRecords)
+				{
+					if (record.object == canvas)
+						++count;
+				}
+				return count;
+			};
+
+			ScopedAccessibleUpdateCapture capture;
+			QTest::keyClick(viewport, Qt::Key_PageUp);
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY(view.isScrollbackSplitActive());
+			QTRY_COMPARE(canvasCursorEventCount(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(speechEvents.size(), 1);
+			QVERIFY(speechEvents.constLast().interrupt);
+
+			auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+			QVERIFY(splitTop);
+			QVERIFY(splitBottom);
+			QScrollBar *topBar = splitTop->verticalScrollBar();
+			QVERIFY(topBar);
+			topBar->setValue(topBar->maximum());
+			QTest::keyClick(splitTop->viewport(), Qt::Key_PageDown);
+			QCoreApplication::processEvents();
+
+			QTRY_VERIFY(!view.isScrollbackSplitActive());
+			QTRY_COMPARE(canvasCursorEventCount(), 2);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, textInterface->characterCount());
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
 		}
 
@@ -3179,7 +4074,8 @@ class tst_WorldView_Basic : public QObject
 		{
 			qmudInstallWorldOutputAccessibility();
 			resetTestState();
-			g_hasMushReaderLiveSpeechOwner = true;
+			const ScopedTestStateReset resetState;
+			setFakeMushReaderLiveSpeechOwner(true);
 
 			WorldView view;
 			view.resize(640, 360);
@@ -3211,6 +4107,297 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
 			QCOMPARE(g_accessibleValueChangedCount, 0);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha\nbeta"));
+
+			setFakeMushReaderLiveSpeechOwner(false);
+			appendFakeRuntimeOutputText(view, QStringLiteral("gamma"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 1);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().position,
+			         sizeToInt(QStringLiteral("alpha\nbeta").size()));
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().text, QStringLiteral("\ngamma"));
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, QStringLiteral("gamma"));
+		}
+
+		void worldOutputAccessibleLiveEventsSuppressedWhenQtAccessibilitySpeechDisabled()
+		{
+			qmudInstallWorldOutputAccessibility();
+			resetTestState();
+			const ScopedTestStateReset resetState;
+			g_qtAccessibilitySpeechEnabled = false;
+
+			WorldView view;
+			view.resize(640, 360);
+			view.setRuntime(fakeRuntimePointer());
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			QCOMPARE(textInterface->characterCount(), 0);
+
+			ScopedAccessibleUpdateCapture capture;
+
+			appendFakeRuntimeOutputText(view, QStringLiteral("alpha"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(g_accessibleValueChangedCount, 0);
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha"));
+
+			appendFakeRuntimeOutputText(view, QStringLiteral("beta"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(g_accessibleValueChangedCount, 0);
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha\nbeta"));
+
+			g_qtAccessibilitySpeechEnabled = true;
+			appendFakeRuntimeOutputText(view, QStringLiteral("gamma"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 1);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().position,
+			         sizeToInt(QStringLiteral("alpha\nbeta").size()));
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().text, QStringLiteral("\ngamma"));
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, QStringLiteral("gamma"));
+		}
+
+		void worldOutputAccessibleSuppressedEmptyResetKeepsTailAppendBaseline()
+		{
+			qmudInstallWorldOutputAccessibility();
+			resetTestState();
+			const ScopedTestStateReset resetState;
+			g_qtAccessibilitySpeechEnabled = false;
+
+			WorldView view;
+			view.resize(640, 360);
+			view.setRuntime(fakeRuntimePointer());
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			ScopedAccessibleUpdateCapture capture;
+
+			appendFakeRuntimeOutputText(view, QStringLiteral("discarded"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+
+			g_runtimeLines.clear();
+			view.clearOutputBuffer();
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(textInterface->characterCount(), 0);
+
+			appendFakeRuntimeOutputText(view, QStringLiteral("muted"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("muted"));
+
+			g_qtAccessibilitySpeechEnabled = true;
+			appendFakeRuntimeOutputText(view, QStringLiteral("announced"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 1);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().position,
+			         sizeToInt(QStringLiteral("muted").size()));
+			QCOMPARE(g_accessibleTextInsertRecords.constLast().text, QStringLiteral("\nannounced"));
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, QStringLiteral("announced"));
+		}
+
+		void worldOutputAccessibleSuppressedHeadTrimAnnouncesFirstResumedTailLine()
+		{
+			qmudInstallWorldOutputAccessibility();
+			resetTestState();
+			const ScopedTestStateReset resetState;
+			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("2"));
+			g_qtAccessibilitySpeechEnabled = false;
+
+			WorldView view;
+			view.resize(640, 360);
+			view.setRuntime(fakeRuntimePointer());
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+
+			ScopedAccessibleUpdateCapture capture;
+			const qsizetype               lineStartCacheSize = view.m_accessibleOutputLineStartCache.size();
+
+			appendFakeRuntimeOutputText(view, QStringLiteral("alpha"), {}, false, true);
+			appendFakeRuntimeOutputText(view, QStringLiteral("beta"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha\nbeta"));
+
+			appendFakeRuntimeOutputText(view, QStringLiteral("gamma"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("beta\ngamma"));
+			QCOMPARE(view.m_accessibleOutputCharacterCount, sizeToInt(QStringLiteral("beta\ngamma").size()));
+			QCOMPARE(view.m_accessibleOutputLineStartCache.size(), lineStartCacheSize);
+
+			g_qtAccessibilitySpeechEnabled = true;
+			appendFakeRuntimeOutputText(view, QStringLiteral("delta"), {}, false, true);
+			QCoreApplication::processEvents();
+			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("gamma\ndelta"));
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, QStringLiteral("delta"));
+		}
+
+		void worldOutputAccessibleSuppressedHeadRestitchTrimAnnouncesOnlyResumedTailLine()
+		{
+			qmudInstallWorldOutputAccessibility();
+			resetTestState();
+			const ScopedTestStateReset resetState;
+			g_qtAccessibilitySpeechEnabled = false;
+
+			WorldView view;
+			view.resize(640, 360);
+			view.setRuntime(fakeRuntimePointer());
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+
+			auto makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("trimmed-head"), 1));
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("trimmed-fragment"), 2));
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("retained-tail"), 3));
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("old-tail"), 4));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+
+			ScopedAccessibleUpdateCapture capture;
+			view.notifyAccessibleOutputPresented(view.m_nativeRenderLineCache);
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+
+			const int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 2);
+			view.m_nativeRenderLineCache[0].text = QStringLiteral("restitched-head");
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("resumed-tail"), 5));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 2, 0, true);
+
+			g_qtAccessibilitySpeechEnabled = true;
+			view.notifyAccessibleOutputPresented(view.m_nativeRenderLineCache);
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, QStringLiteral("resumed-tail"));
+		}
+
+		void worldOutputAccessibleSuppressedHeadRestitchTrimUpdatesBaselineIncrementally()
+		{
+			qmudInstallWorldOutputAccessibility();
+			resetTestState();
+			const ScopedTestStateReset resetState;
+			g_qtAccessibilitySpeechEnabled = false;
+
+			WorldView view;
+			view.resize(640, 360);
+			view.setRuntime(fakeRuntimePointer());
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+
+			auto makeRenderLine = [](const QString &text, const qint64 lineNumber)
+			{
+				WorldView::NativeOutputRenderLine line;
+				line.text                   = text;
+				line.opacity                = 1.0;
+				line.firstRuntimeLineNumber = lineNumber;
+				line.lastRuntimeLineNumber  = lineNumber;
+				line.flags                  = WorldRuntime::LineOutput;
+				return line;
+			};
+
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("trimmed-head"), 1));
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("trimmed-fragment"), 2));
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("retained-tail"), 3));
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("old-tail"), 4));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+
+			ScopedAccessibleUpdateCapture capture;
+			view.notifyAccessibleOutputPresented(view.m_nativeRenderLineCache);
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(
+			    view.m_accessibleOutputCharacterCount,
+			    sizeToInt(QStringLiteral("trimmed-head\ntrimmed-fragment\nretained-tail\nold-tail").size()));
+			QCOMPARE(sizeToInt(view.m_accessibleOutputBaselineLineLengths.size()), 4);
+			const qsizetype lineStartCacheSize = view.m_accessibleOutputLineStartCache.size();
+
+			const int       oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
+			view.m_nativeRenderLineCache.remove(0, 2);
+			view.m_nativeRenderLineCache[0].text = QStringLiteral("restitched-head");
+			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("resumed-tail"), 5));
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
+			                                       oldLineCount, false, 2, 0, true);
+
+			view.notifyAccessibleOutputPresented(view.m_nativeRenderLineCache);
+			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(view.m_accessibleOutputCharacterCount,
+			         sizeToInt(QStringLiteral("restitched-head\nold-tail\nresumed-tail").size()));
+			QCOMPARE(sizeToInt(view.m_accessibleOutputBaselineLineLengths.size()), 3);
+			QCOMPARE(view.m_accessibleOutputBaselineLineLengths.at(0),
+			         sizeToInt(QStringLiteral("restitched-head").size()));
+			QCOMPARE(view.m_accessibleOutputBaselineLineLengths.at(1),
+			         sizeToInt(QStringLiteral("old-tail").size()));
+			QCOMPARE(view.m_accessibleOutputBaselineLineLengths.at(2),
+			         sizeToInt(QStringLiteral("resumed-tail").size()));
+			QCOMPARE(view.m_accessibleOutputLineStartCache.size(), lineStartCacheSize);
 		}
 
 		void worldOutputAccessibleNonAppendMutationsUseContentChangedFallback()
@@ -5873,7 +7060,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			WorldRuntime::StyleSpan span;
-			span.length = QStringLiteral("styled-background").size();
+			span.length = boundedSizeToInt(QStringLiteral("styled-background").size());
 			span.fore   = QColor(QStringLiteral("#ffffff"));
 			span.back   = QColor(QStringLiteral("#ff0000"));
 			span.bold   = true;
@@ -6393,7 +7580,7 @@ class tst_WorldView_Basic : public QObject
 				view.appendOutputText(QStringLiteral("mxp-primer-%1").arg(i), true);
 
 			TelnetProcessor processor;
-			processor.setUseMxp(0);
+			processor.setUseMxp(eOnCommandMXP);
 			QByteArray mxpStart;
 			mxpStart.append(static_cast<char>(0xFF));
 			mxpStart.append(static_cast<char>(0xFA));
@@ -6410,7 +7597,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(events.size(), 2);
 
 			WorldRuntime::StyleSpan span;
-			span.length     = static_cast<int>(QByteArrayLiteral("look portal").size());
+			span.length     = boundedSizeToInt(QByteArrayLiteral("look portal").size());
 			span.actionType = WorldRuntime::ActionSend;
 			span.action = QString::fromUtf8(events.constFirst().attributes.value(QByteArrayLiteral("href")));
 			appendFakeRuntimeOutputText(view, QString::fromUtf8(output.chopped(1)), {span}, false, true);
@@ -8902,6 +10089,385 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void outputFindAnnouncesSelectedResultToQtAccessibility()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 30; ++i)
+				view.appendOutputText(QStringLiteral("find-accessible-fill-before-%1").arg(i), true);
+			const QString targetLine = QStringLiteral("prefix search-target-word suffix");
+			view.appendOutputText(targetLine, true);
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(QStringLiteral("find-accessible-fill-after-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			const QString targetText  = QStringLiteral("search-target-word");
+			const QString outputText  = textInterface->text(0, textInterface->characterCount());
+			const int     targetStart = stringIndexToInt(outputText.indexOf(targetText));
+			QVERIFY(targetStart >= 0);
+			const int targetEnd = targetStart + sizeToInt(targetText.size());
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [targetText](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(targetText);
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			ScopedAccessibleUpdateCapture capture;
+			QVERIFY(view.doOutputFind(false));
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.outputSelectionText(), targetText);
+			int                        canvasCursorEventCount = 0;
+			AccessibleTextCursorRecord lastCanvasCursorRecord;
+			for (const AccessibleTextCursorRecord &record : g_accessibleTextCursorRecords)
+			{
+				if (record.object != canvas)
+					continue;
+				++canvasCursorEventCount;
+				lastCanvasCursorRecord = record;
+			}
+			QCOMPARE(canvasCursorEventCount, 1);
+			QCOMPARE(lastCanvasCursorRecord.position, targetStart);
+			QCOMPARE(textInterface->cursorPosition(), targetStart);
+			int                           canvasSelectionEventCount = 0;
+			AccessibleTextSelectionRecord lastCanvasSelectionRecord;
+			for (const AccessibleTextSelectionRecord &record : g_accessibleTextSelectionRecords)
+			{
+				if (record.object != canvas)
+					continue;
+				++canvasSelectionEventCount;
+				lastCanvasSelectionRecord = record;
+			}
+			QCOMPARE(canvasSelectionEventCount, 1);
+			QCOMPARE(lastCanvasSelectionRecord.start, targetStart);
+			QCOMPARE(lastCanvasSelectionRecord.end, targetEnd);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, targetLine);
+			int canvasInsertEventCount = 0;
+			for (const AccessibleTextInsertRecord &record : g_accessibleTextInsertRecords)
+			{
+				if (record.object == canvas)
+					++canvasInsertEventCount;
+			}
+			QCOMPARE(canvasInsertEventCount, 0);
+			int canvasUpdateEventCount = 0;
+			for (const AccessibleTextUpdateRecord &record : g_accessibleTextUpdateRecords)
+			{
+				if (record.object == canvas)
+					++canvasUpdateEventCount;
+			}
+			QCOMPARE(canvasUpdateEventCount, 0);
+
+			const int reviewCursorAfterClear = view.accessibleOutputReviewCursorPositionForTopPane();
+			QVERIFY(reviewCursorAfterClear >= 0);
+			QVERIFY(reviewCursorAfterClear != targetStart);
+			g_accessibleTextCursorRecords.clear();
+			g_accessibleTextSelectionRecords.clear();
+			g_accessibleAnnouncementRecords.clear();
+			view.clearNativeOutputSelection(true);
+			QCoreApplication::processEvents();
+
+			QVERIFY(view.isScrollbackSplitActive());
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
+			         WorldView::AccessibleOutputReviewTargetKind::SplitTopPane);
+			QCOMPARE(textInterface->cursorPosition(), reviewCursorAfterClear);
+			QTRY_COMPARE(g_accessibleTextCursorRecords.size(), 1);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, reviewCursorAfterClear);
+			QTRY_COMPARE(g_accessibleTextSelectionRecords.size(), 1);
+			QCOMPARE(g_accessibleTextSelectionRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextSelectionRecords.constLast().start, reviewCursorAfterClear);
+			QCOMPARE(g_accessibleTextSelectionRecords.constLast().end, reviewCursorAfterClear);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+
+			resetTestState();
+		}
+
+		void outputFindDoesNotSpeakWhenQtAccessibilitySpeechDisabled()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+			const ScopedTestStateReset resetState;
+			g_qtAccessibilitySpeechEnabled = false;
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 30; ++i)
+				view.appendOutputText(QStringLiteral("find-muted-fill-before-%1").arg(i), true);
+			const QString targetLine = QStringLiteral("prefix muted-search-target suffix");
+			view.appendOutputText(targetLine, true);
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(QStringLiteral("find-muted-fill-after-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			const QString targetText = QStringLiteral("muted-search-target");
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [targetText](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(targetText);
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			ScopedAccessibleUpdateCapture capture;
+			QVERIFY(view.doOutputFind(false));
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.outputSelectionText(), targetText);
+			int canvasCursorEventCount = 0;
+			for (const AccessibleTextCursorRecord &record : g_accessibleTextCursorRecords)
+			{
+				if (record.object == canvas)
+					++canvasCursorEventCount;
+			}
+			QCOMPARE(canvasCursorEventCount, 0);
+			int canvasSelectionEventCount = 0;
+			for (const AccessibleTextSelectionRecord &record : g_accessibleTextSelectionRecords)
+			{
+				if (record.object == canvas)
+					++canvasSelectionEventCount;
+			}
+			QCOMPARE(canvasSelectionEventCount, 0);
+			int canvasInsertEventCount = 0;
+			for (const AccessibleTextInsertRecord &record : g_accessibleTextInsertRecords)
+			{
+				if (record.object == canvas)
+					++canvasInsertEventCount;
+			}
+			QCOMPARE(canvasInsertEventCount, 0);
+			int canvasUpdateEventCount = 0;
+			for (const AccessibleTextUpdateRecord &record : g_accessibleTextUpdateRecords)
+			{
+				if (record.object == canvas)
+					++canvasUpdateEventCount;
+			}
+			QCOMPARE(canvasUpdateEventCount, 0);
+			int canvasAnnouncementEventCount = 0;
+			for (const AccessibleAnnouncementRecord &record : g_accessibleAnnouncementRecords)
+			{
+				if (record.object == canvas)
+					++canvasAnnouncementEventCount;
+			}
+			QCOMPARE(canvasAnnouncementEventCount, 0);
+		}
+
+		void outputFindUsesMushReaderSpeechForSelectedResultWhenItOwnsOutput()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+			setFakeMushReaderLiveSpeechOwner(true);
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
+			const ScopedTestStateReset                         resetState;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { speechEvents.push_back(event); });
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			for (int i = 0; i < 30; ++i)
+				view.appendOutputText(QStringLiteral("find-mushreader-fill-before-%1").arg(i), true);
+			const QString targetLine = QStringLiteral("prefix mushreader-search-target suffix");
+			view.appendOutputText(targetLine, true);
+			for (int i = 0; i < 220; ++i)
+				view.appendOutputText(QStringLiteral("find-mushreader-fill-after-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			const QString targetText  = QStringLiteral("mushreader-search-target");
+			const QString outputText  = textInterface->text(0, textInterface->characterCount());
+			const int     targetStart = stringIndexToInt(outputText.indexOf(targetText));
+			QVERIFY(targetStart >= 0);
+			const int targetEnd = targetStart + sizeToInt(targetText.size());
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [targetText](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(targetText);
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			ScopedAccessibleUpdateCapture capture;
+			QVERIFY(view.doOutputFind(false));
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.outputSelectionText(), targetText);
+			int                        canvasCursorEventCount = 0;
+			AccessibleTextCursorRecord lastCanvasCursorRecord;
+			for (const AccessibleTextCursorRecord &record : g_accessibleTextCursorRecords)
+			{
+				if (record.object != canvas)
+					continue;
+				++canvasCursorEventCount;
+				lastCanvasCursorRecord = record;
+			}
+			QCOMPARE(canvasCursorEventCount, 1);
+			QCOMPARE(lastCanvasCursorRecord.position, targetStart);
+			QCOMPARE(textInterface->cursorPosition(), targetStart);
+			int                           canvasSelectionEventCount = 0;
+			AccessibleTextSelectionRecord lastCanvasSelectionRecord;
+			for (const AccessibleTextSelectionRecord &record : g_accessibleTextSelectionRecords)
+			{
+				if (record.object != canvas)
+					continue;
+				++canvasSelectionEventCount;
+				lastCanvasSelectionRecord = record;
+			}
+			QCOMPARE(canvasSelectionEventCount, 1);
+			QCOMPARE(lastCanvasSelectionRecord.start, targetStart);
+			QCOMPARE(lastCanvasSelectionRecord.end, targetEnd);
+			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
+			QCOMPARE(speechEvents.size(), 1);
+			QCOMPARE(speechEvents.constLast().text, targetLine);
+			QVERIFY(speechEvents.constLast().interrupt);
+		}
+
+		void outputFindAnnouncesVisibleTailResultWithoutStaleReviewCursor()
+		{
+			resetTestState();
+			qmudInstallWorldOutputAccessibility();
+
+			WorldView view;
+			view.resize(720, 360);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			view.appendOutputText(QStringLiteral("visible-tail-filler"), true);
+			const QString targetLine = QStringLiteral("prefix visible-tail-search-target suffix");
+			view.appendOutputText(targetLine, true);
+			QCoreApplication::processEvents();
+
+			QWidget *canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QAccessibleInterface *accessible = QAccessible::queryAccessibleInterface(canvas);
+			QVERIFY(accessible);
+			QAccessibleTextInterface *textInterface = accessible->textInterface();
+			QVERIFY(textInterface);
+			const QString targetText  = QStringLiteral("visible-tail-search-target");
+			const QString outputText  = textInterface->text(0, textInterface->characterCount());
+			const int     targetStart = stringIndexToInt(outputText.indexOf(targetText));
+			QVERIFY(targetStart >= 0);
+			const int targetEnd = targetStart + sizeToInt(targetText.size());
+			QVERIFY(!view.isScrollbackSplitActive());
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [targetText](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(targetText);
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			ScopedAccessibleUpdateCapture capture;
+			QVERIFY(view.doOutputFind(false));
+			QCoreApplication::processEvents();
+
+			QCOMPARE(view.outputSelectionText(), targetText);
+			QVERIFY(!view.isScrollbackSplitActive());
+			QVERIFY(view.m_accessibleOutputReviewActive);
+			QCOMPARE(textInterface->cursorPosition(), targetStart);
+			int                        canvasCursorEventCount = 0;
+			AccessibleTextCursorRecord lastCanvasCursorRecord;
+			for (const AccessibleTextCursorRecord &record : g_accessibleTextCursorRecords)
+			{
+				if (record.object != canvas)
+					continue;
+				++canvasCursorEventCount;
+				lastCanvasCursorRecord = record;
+			}
+			QCOMPARE(canvasCursorEventCount, 1);
+			QCOMPARE(lastCanvasCursorRecord.position, targetStart);
+			int                           canvasSelectionEventCount = 0;
+			AccessibleTextSelectionRecord lastCanvasSelectionRecord;
+			for (const AccessibleTextSelectionRecord &record : g_accessibleTextSelectionRecords)
+			{
+				if (record.object != canvas)
+					continue;
+				++canvasSelectionEventCount;
+				lastCanvasSelectionRecord = record;
+			}
+			QCOMPARE(canvasSelectionEventCount, 1);
+			QCOMPARE(lastCanvasSelectionRecord.start, targetStart);
+			QCOMPARE(lastCanvasSelectionRecord.end, targetEnd);
+			int                          canvasAnnouncementEventCount = 0;
+			AccessibleAnnouncementRecord lastCanvasAnnouncementRecord;
+			for (const AccessibleAnnouncementRecord &record : g_accessibleAnnouncementRecords)
+			{
+				if (record.object != canvas)
+					continue;
+				++canvasAnnouncementEventCount;
+				lastCanvasAnnouncementRecord = record;
+			}
+			QCOMPARE(canvasAnnouncementEventCount, 1);
+			QCOMPARE(lastCanvasAnnouncementRecord.message, targetLine);
+
+			g_accessibleTextSelectionRecords.clear();
+			view.clearNativeOutputSelection(true);
+			QCoreApplication::processEvents();
+
+			QVERIFY(!view.m_accessibleOutputReviewActive);
+			QCOMPARE(textInterface->cursorPosition(), textInterface->characterCount());
+			QTRY_COMPARE(g_accessibleTextSelectionRecords.size(), 1);
+			QCOMPARE(g_accessibleTextSelectionRecords.constLast().object, canvas);
+			QCOMPARE(g_accessibleTextSelectionRecords.constLast().start, textInterface->characterCount());
+			QCOMPARE(g_accessibleTextSelectionRecords.constLast().end, textInterface->characterCount());
+
+			resetTestState();
+		}
+
 		void outputFindAgainKeepsDirectionFromInitialSearch()
 		{
 			resetTestState();
@@ -9498,6 +11064,74 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void runtimePartialOutputCommitsBeforeLocalOutputBoundary()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("1"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
+
+			view.appendOutputText(QStringLiteral("room"), true);
+			const QString prompt = QStringLiteral("<2060hp 1694sp> ");
+			setFakeRuntimePendingPartial(prompt);
+			view.updatePartialOutputText(prompt);
+			QCoreApplication::processEvents();
+
+			QCOMPARE(g_pendingIncomingPartialCommitCount, 0);
+			QCOMPARE(view.outputLines().constLast(), prompt);
+
+			view.appendNoteText(QStringLiteral("[gmcp: update]"), true);
+			QCoreApplication::processEvents();
+
+			QStringList lines = view.outputLines();
+			QCOMPARE(g_pendingIncomingPartialCommitCount, 1);
+			QVERIFY(g_pendingIncomingPartialText.isEmpty());
+			QVERIFY(lines.size() >= 3);
+			QCOMPARE(lines.at(lines.size() - 2), prompt);
+			QCOMPARE(lines.constLast(), QStringLiteral("[gmcp: update]"));
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
+
+			const QString secondPrompt = QStringLiteral("<2060hp 1694sp> ");
+			setFakeRuntimePendingPartial(secondPrompt);
+			view.updatePartialOutputText(secondPrompt);
+			g_currentActionSource = WorldRuntime::eUserTyping;
+			view.echoInputText(QStringLiteral("look\r\n"));
+			QCoreApplication::processEvents();
+
+			lines = view.outputLines();
+			QCOMPARE(g_pendingIncomingPartialCommitCount, 2);
+			QVERIFY(lines.size() >= 5);
+			QCOMPARE(lines.at(lines.size() - 2), secondPrompt);
+			QCOMPARE(lines.constLast(), QStringLiteral("look"));
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
+
+			g_worldAttrs.insert(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
+			view.applyRuntimeSettings();
+			const QString thirdPrompt = QStringLiteral("<2060hp 1694sp> ");
+			setFakeRuntimePendingPartial(thirdPrompt);
+			view.updatePartialOutputText(thirdPrompt);
+			g_currentActionSource = WorldRuntime::eUserTyping;
+			view.echoInputText(QStringLiteral("north\r\n"));
+			QCoreApplication::processEvents();
+
+			lines = view.outputLines();
+			QCOMPARE(g_pendingIncomingPartialCommitCount, 3);
+			QVERIFY(lines.size() >= 6);
+			QCOMPARE(lines.constLast(), thirdPrompt + QStringLiteral("north"));
+			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
+
+			resetTestState();
+		}
+
 		void runtimeObserverAttachKeepsOutputDocumentEmpty()
 		{
 			resetTestState();
@@ -9549,7 +11183,7 @@ class tst_WorldView_Basic : public QObject
 			const QString                    href = QStringLiteral("https://example.org/osc8-layout");
 
 			QVector<WorldRuntime::StyleSpan> spans;
-			spans.reserve(static_cast<int>(text.size()));
+			spans.reserve(sizeToInt(text.size()));
 			for (qsizetype i = 0; i < text.size(); ++i)
 			{
 				WorldRuntime::StyleSpan span;
@@ -9588,7 +11222,7 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 
 			WorldRuntime::StyleSpan linkSpan;
-			linkSpan.length     = QStringLiteral("example-link").size();
+			linkSpan.length     = boundedSizeToInt(QStringLiteral("example-link").size());
 			linkSpan.actionType = WorldRuntime::ActionHyperlink;
 			linkSpan.action     = QStringLiteral("https://example.org/status-lock");
 
@@ -9644,7 +11278,7 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 
 			WorldRuntime::StyleSpan span;
-			span.length     = QStringLiteral("assistant").size();
+			span.length     = boundedSizeToInt(QStringLiteral("assistant").size());
 			span.actionType = WorldRuntime::ActionSend;
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
@@ -9678,7 +11312,7 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 
 			WorldRuntime::StyleSpan span;
-			span.length     = QStringLiteral("assistant").size();
+			span.length     = boundedSizeToInt(QStringLiteral("assistant").size());
 			span.actionType = WorldRuntime::ActionSend;
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
@@ -9711,7 +11345,7 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 
 			WorldRuntime::StyleSpan span;
-			span.length     = QStringLiteral("assistant").size();
+			span.length     = boundedSizeToInt(QStringLiteral("assistant").size());
 			span.actionType = WorldRuntime::ActionSend;
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"

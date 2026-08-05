@@ -30,6 +30,7 @@
 #include <QTimer>
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -411,10 +412,11 @@ namespace
 	{
 			bool                                        mushReaderPluginEnabled{false};
 			bool                                        mushReaderSpeechEnabled{true};
-			bool                                        passiveSpeechEnabled{false};
+			bool                                        qtAccessibilitySpeechEnabled{true};
 			bool                                        substitutionsEnabled{true};
 			bool                                        substitutionsLoaded{false};
 			bool                                        runtimeSetupComplete{false};
+			QString                                     lastSpokenPartialLine;
 			QMap<QString, QString>                      substitutions;
 			std::vector<std::unique_ptr<ReaderBackend>> backends;
 	};
@@ -441,20 +443,22 @@ namespace
 		return event;
 	}
 
-	std::function<void(const QMudNativePluginRegistry::TestSpeechEvent &)> &testSpeechSink()
+	std::function<bool(const QMudNativePluginRegistry::TestSpeechEvent &)> &testSpeechSink()
 	{
-		static std::function<void(const QMudNativePluginRegistry::TestSpeechEvent &)> sink;
+		static std::function<bool(const QMudNativePluginRegistry::TestSpeechEvent &)> sink;
 		return sink;
 	}
 
-	bool dispatchTestSpeechEvent(const QMudNativePluginRegistry::TestSpeechEvent &event)
+	std::optional<bool> dispatchTestSpeechEvent(const QMudNativePluginRegistry::TestSpeechEvent &event)
 	{
-		QMutexLocker locker(&stateMutex());
-		auto        &sink = testSpeechSink();
+		std::function<bool(const QMudNativePluginRegistry::TestSpeechEvent &)> sink;
+		{
+			QMutexLocker locker(&stateMutex());
+			sink = testSpeechSink();
+		}
 		if (!sink)
-			return false;
-		sink(event);
-		return true;
+			return std::nullopt;
+		return sink(event);
 	}
 
 	std::shared_ptr<MushReaderState> stateFor(const WorldRuntime *runtime)
@@ -471,6 +475,13 @@ namespace
 		QMutexLocker locker(&stateMutex());
 		const auto   it = states().find(runtime);
 		return it == states().end() ? std::shared_ptr<const MushReaderState>() : it->second;
+	}
+
+	void clearExistingLastSpokenPartialLine(const WorldRuntime *runtime)
+	{
+		QMutexLocker locker(&stateMutex());
+		if (const auto it = states().find(runtime); it != states().end() && it->second)
+			it->second->lastSpokenPartialLine.clear();
 	}
 
 	QString substitutionsFilePath(const WorldRuntime *runtime)
@@ -534,8 +545,12 @@ namespace
 	{
 		if (!runtime)
 			return false;
-		if (dispatchTestSpeechEvent(makeTestSpeechEvent(text, interrupt, false)))
-			return true;
+		if (const std::optional<bool> testResult =
+		        dispatchTestSpeechEvent(makeTestSpeechEvent(text, interrupt, false));
+		    testResult.has_value())
+		{
+			return testResult.value();
+		}
 		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
 		ensureBackends(*state);
 		for (const auto &backend : state->backends)
@@ -550,8 +565,12 @@ namespace
 	{
 		if (!runtime)
 			return false;
-		if (dispatchTestSpeechEvent(makeTestSpeechEvent(QString(), true, true)))
-			return true;
+		if (const std::optional<bool> testResult =
+		        dispatchTestSpeechEvent(makeTestSpeechEvent(QString(), true, true));
+		    testResult.has_value())
+		{
+			return testResult.value();
+		}
 		const std::shared_ptr<const MushReaderState> state = existingStateFor(runtime);
 		if (!state)
 			return false;
@@ -566,7 +585,12 @@ namespace
 
 	bool effectiveMushReaderSpeechEnabled(const MushReaderState &state)
 	{
-		return state.mushReaderPluginEnabled ? state.mushReaderSpeechEnabled : state.passiveSpeechEnabled;
+		return state.mushReaderPluginEnabled && state.mushReaderSpeechEnabled;
+	}
+
+	bool effectiveMushReaderSpeechEnabled(const QMudNativePluginRegistry::NativeCallContext &context)
+	{
+		return context.pluginEnabled && context.mushReaderSpeechEnabled;
 	}
 
 	void installMushReaderAccelerator(WorldRuntime *runtime, MushReaderState &state)
@@ -1103,13 +1127,16 @@ namespace
 		setLuaAudioMasterVolumeAndCommandVolume(runtime, volume);
 	}
 
-	QMudNativePluginRegistry::NativeCallResult callLuaAudioRoutine(const WorldRuntime      *runtime,
-	                                                               const QString           &routine,
-	                                                               const QVector<QVariant> &arguments)
+	QMudNativePluginRegistry::NativeCallResult
+	callLuaAudioRoutine(const WorldRuntime *runtime, const QString &routine,
+	                    const QVector<QVariant>                                &arguments,
+	                    const QMudNativePluginRegistry::NativeCallExecutionMode executionMode)
 	{
 		QMudNativePluginRegistry::NativeCallResult result;
 		result.errorCode   = eOK;
 		const QString name = normalizedRoutine(routine);
+		const bool    executeSideEffects =
+		    executionMode == QMudNativePluginRegistry::NativeCallExecutionMode::ExecuteSideEffects;
 		if (name == QStringLiteral("plugin_update_url"))
 		{
 			result.returnValues.push_back(QStringLiteral("qmud:native/LuaAudio"));
@@ -1141,7 +1168,7 @@ namespace
 		}
 		if (name == QStringLiteral("stop") || name == QStringLiteral("fadeout"))
 		{
-			if (runtime)
+			if (executeSideEffects && runtime)
 			{
 				const int buffer = static_cast<int>(argumentNumber(arguments, 0, 0.0));
 				const int delay  = qMax(0, qRound(argumentNumber(arguments, 1, 0.0) * 1000.0));
@@ -1157,7 +1184,7 @@ namespace
 		if (name == QStringLiteral("play") || name == QStringLiteral("playlooped") ||
 		    name == QStringLiteral("playdelay") || name == QStringLiteral("playdelaylooped"))
 		{
-			if (!runtime)
+			if (!executeSideEffects || !runtime)
 			{
 				result.returnValues.push_back(0);
 				return result;
@@ -1184,7 +1211,7 @@ namespace
 		}
 		if (name == QStringLiteral("setpitch") || name == QStringLiteral("slidepitch"))
 		{
-			if (runtime)
+			if (executeSideEffects && runtime)
 			{
 				const QMudNativePluginRegistry::LuaAudioRuntimeMasterState master =
 				    QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime);
@@ -1212,7 +1239,7 @@ namespace
 		}
 		if (name == QStringLiteral("setpan") || name == QStringLiteral("slidepan"))
 		{
-			if (runtime)
+			if (executeSideEffects && runtime)
 			{
 				const QMudNativePluginRegistry::LuaAudioRuntimeMasterState master =
 				    QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime);
@@ -1240,7 +1267,7 @@ namespace
 		}
 		if (name == QStringLiteral("setvol") || name == QStringLiteral("slidevol"))
 		{
-			if (runtime)
+			if (executeSideEffects && runtime)
 			{
 				const QMudNativePluginRegistry::LuaAudioRuntimeMasterState master =
 				    QMudNativePluginRegistry::luaAudioRuntimeMasterState(runtime);
@@ -1788,14 +1815,36 @@ namespace QMudNativePluginRegistry
 	}
 
 	NativeCallResult callRoutine(const WorldRuntime *runtime, const QString &pluginId, const QString &routine,
-	                             const QVector<QVariant> &arguments)
+	                             const QVector<QVariant> &arguments, const NativeCallContext &context,
+	                             const NativeCallExecutionMode executionMode)
 	{
 		NativeCallResult result;
 		result.errorCode = eOK;
 		const QString id = normalizedId(pluginId);
+		if (!context.installed)
+		{
+			result.errorCode = eNoSuchPlugin;
+			result.errorText = QStringLiteral("Plugin ID (%1) is not installed").arg(pluginId);
+			return result;
+		}
+		if (!context.pluginEnabled)
+		{
+			QString pluginName = context.pluginName.trimmed();
+			if (pluginName.isEmpty())
+			{
+				NativePluginMetadata metadata;
+				if (metadataForShim(id, metadata))
+					pluginName = metadata.name;
+			}
+			if (pluginName.isEmpty())
+				pluginName = pluginId;
+			result.errorCode = ePluginDisabled;
+			result.errorText = QStringLiteral("Plugin '%1' (%2) disabled").arg(pluginName, id);
+			return result;
+		}
 		if (id == luaAudioPluginId())
 		{
-			return callLuaAudioRoutine(runtime, routine, arguments);
+			return callLuaAudioRoutine(runtime, routine, arguments, executionMode);
 		}
 
 		if (id != mushReaderPluginId())
@@ -1808,17 +1857,22 @@ namespace QMudNativePluginRegistry
 		const QString name = normalizedRoutine(routine);
 		if (name == QStringLiteral("say"))
 		{
-			speak(runtime, QStringLiteral("       ") + firstArgumentString(arguments), false);
+			if (executionMode == NativeCallExecutionMode::ExecuteSideEffects &&
+			    effectiveMushReaderSpeechEnabled(context))
+				speak(runtime, QStringLiteral("       ") + firstArgumentString(arguments), false);
 			return result;
 		}
 		if (name == QStringLiteral("interrupt"))
 		{
-			speak(runtime, firstArgumentString(arguments), true);
+			if (executionMode == NativeCallExecutionMode::ExecuteSideEffects &&
+			    effectiveMushReaderSpeechEnabled(context))
+				speak(runtime, firstArgumentString(arguments), true);
 			return result;
 		}
 		if (name == QStringLiteral("stop"))
 		{
-			stopSpeech(runtime);
+			if (executionMode == NativeCallExecutionMode::ExecuteSideEffects)
+				stopSpeech(runtime);
 			return result;
 		}
 		if (name == QStringLiteral("plugin_update_url"))
@@ -1830,6 +1884,25 @@ namespace QMudNativePluginRegistry
 		result.errorText = QStringLiteral("No function '%1' in native shim '%2' (%3)")
 		                       .arg(routine, QStringLiteral("MushReader"), id);
 		return result;
+	}
+
+	bool callRoutineRequiresRuntimeThread(const QString &pluginId, const QString &routine)
+	{
+		const QString id   = normalizedId(pluginId);
+		const QString name = normalizedRoutine(routine);
+		if (id == luaAudioPluginId())
+		{
+			return name == QStringLiteral("stop") || name == QStringLiteral("fadeout") ||
+			       name == QStringLiteral("play") || name == QStringLiteral("playlooped") ||
+			       name == QStringLiteral("playdelay") || name == QStringLiteral("playdelaylooped") ||
+			       name == QStringLiteral("setpitch") || name == QStringLiteral("slidepitch") ||
+			       name == QStringLiteral("setpan") || name == QStringLiteral("slidepan") ||
+			       name == QStringLiteral("setvol") || name == QStringLiteral("slidevol");
+		}
+		if (id != mushReaderPluginId())
+			return false;
+		return name == QStringLiteral("say") || name == QStringLiteral("interrupt") ||
+		       name == QStringLiteral("stop");
 	}
 
 	bool handleMushReaderCommand(WorldRuntime *runtime, const QString &command)
@@ -1845,34 +1918,39 @@ namespace QMudNativePluginRegistry
 		}
 		if (lower == QStringLiteral("tts_interrupt") || lower.startsWith(QStringLiteral("tts_interrupt ")))
 		{
-			QString text = trimmed.mid(QStringLiteral("tts_interrupt").size()).trimmed();
-			speak(runtime, text, true);
+			const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+			if (effectiveMushReaderSpeechEnabled(*state))
+			{
+				QString text = trimmed.mid(QStringLiteral("tts_interrupt").size()).trimmed();
+				speak(runtime, text, true);
+			}
 			return true;
 		}
 		if (lower == QStringLiteral("tts_note") || lower.startsWith(QStringLiteral("tts_note ")))
 		{
-			QString text = trimmed.mid(QStringLiteral("tts_note").size()).trimmed();
-			speak(runtime, text, false);
+			const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+			if (effectiveMushReaderSpeechEnabled(*state))
+			{
+				QString text = trimmed.mid(QStringLiteral("tts_note").size()).trimmed();
+				speak(runtime, text, false);
+			}
 			return true;
 		}
 		if (lower == QStringLiteral("tts"))
 		{
 			const std::shared_ptr<MushReaderState> state = stateFor(runtime);
-			bool                                   enabled;
 			if (state->mushReaderPluginEnabled)
 			{
-				state->passiveSpeechEnabled    = false;
+				state->lastSpokenPartialLine.clear();
 				state->mushReaderSpeechEnabled = !state->mushReaderSpeechEnabled;
-				enabled                        = state->mushReaderSpeechEnabled;
+				const bool enabled             = state->mushReaderSpeechEnabled;
+				runtime->notifyNativePluginStateChanged();
+				stopSpeech(runtime);
+				speak(runtime, enabled ? QStringLiteral("speech on") : QStringLiteral("speech off"), true);
+				return true;
 			}
-			else
-			{
-				state->passiveSpeechEnabled = !state->passiveSpeechEnabled;
-				enabled                     = state->passiveSpeechEnabled;
-			}
+			state->qtAccessibilitySpeechEnabled = !state->qtAccessibilitySpeechEnabled;
 			runtime->notifyNativePluginStateChanged();
-			stopSpeech(runtime);
-			speak(runtime, enabled ? QStringLiteral("speech on") : QStringLiteral("speech off"), true);
 			return true;
 		}
 		if (lower == QStringLiteral("mushreader help") || lower == QStringLiteral("mushreader:help"))
@@ -2021,15 +2099,70 @@ namespace QMudNativePluginRegistry
 	void handleMushReaderScreenDraw(const WorldRuntime *runtime, const int type, const int /*log*/,
 	                                const QString &text)
 	{
-		if (!runtime || (type != 0 && type != 1) || text.trimmed().isEmpty())
+		if (!runtime || (type != 0 && type != 1))
 			return;
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		if (!effectiveMushReaderSpeechEnabled(*state))
+			return;
+		if (text.trimmed().isEmpty())
+		{
+			state->lastSpokenPartialLine.clear();
+			return;
+		}
+		bool    skip = false;
+		QString line = substitutionAppliedText(runtime, text, skip);
+		if (line == state->lastSpokenPartialLine)
+		{
+			state->lastSpokenPartialLine.clear();
+			return;
+		}
+		state->lastSpokenPartialLine.clear();
+		if (!skip && !line.isEmpty())
+			speak(runtime, line, false);
+	}
+
+	void handleMushReaderPartialLine(const WorldRuntime *runtime, const QString &text)
+	{
+		if (!runtime)
+			return;
+		if (text.trimmed().isEmpty())
+		{
+			clearExistingLastSpokenPartialLine(runtime);
+			return;
+		}
 		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
 		if (!effectiveMushReaderSpeechEnabled(*state))
 			return;
 		bool    skip = false;
 		QString line = substitutionAppliedText(runtime, text, skip);
+		if (line == state->lastSpokenPartialLine)
+			return;
+		state->lastSpokenPartialLine.clear();
 		if (!skip && !line.isEmpty())
-			speak(runtime, line, false);
+		{
+			if (speak(runtime, line, false))
+				state->lastSpokenPartialLine = line;
+		}
+	}
+
+	void clearMushReaderPartialLine(const WorldRuntime *runtime)
+	{
+		clearExistingLastSpokenPartialLine(runtime);
+	}
+
+	bool speakMushReaderReviewText(const WorldRuntime *runtime, const QString &text)
+	{
+		if (!runtime || text.trimmed().isEmpty())
+			return false;
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		if (!effectiveMushReaderSpeechEnabled(*state))
+			return false;
+		bool    skip = false;
+		QString line = substitutionAppliedText(runtime, text, skip);
+		if (skip || line.isEmpty())
+			return true;
+		static_cast<void>(speak(runtime, line, true));
+		return true;
 	}
 
 	void handleMushReaderTabComplete(const WorldRuntime *runtime, const QString &text)
@@ -2046,14 +2179,9 @@ namespace QMudNativePluginRegistry
 		if (!runtime)
 			return;
 		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
-		const bool                             stopPassiveSpeech =
-		    enable && !state->mushReaderPluginEnabled && state->passiveSpeechEnabled;
+		state->lastSpokenPartialLine.clear();
 		state->mushReaderPluginEnabled = enable;
 		state->mushReaderSpeechEnabled = enable;
-		if (enable)
-			state->passiveSpeechEnabled = false;
-		if (stopPassiveSpeech)
-			stopSpeech(runtime);
 		if (!enable)
 			stopSpeech(runtime);
 	}
@@ -2067,23 +2195,30 @@ namespace QMudNativePluginRegistry
 		return it != states().end() && it->second && it->second->mushReaderPluginEnabled;
 	}
 
-	void setMushReaderPassiveSpeechEnabled(const WorldRuntime *runtime, const bool enable)
-	{
-		if (!runtime)
-			return;
-		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
-		state->passiveSpeechEnabled                  = enable && !state->mushReaderPluginEnabled;
-		if (!enable)
-			stopSpeech(runtime);
-	}
-
-	bool isMushReaderPassiveSpeechEnabled(const WorldRuntime *runtime)
+	bool isMushReaderSpeechEnabled(const WorldRuntime *runtime)
 	{
 		if (!runtime)
 			return false;
 		QMutexLocker locker(&stateMutex());
 		const auto   it = states().find(runtime);
-		return it != states().end() && it->second && it->second->passiveSpeechEnabled;
+		return it != states().end() && it->second && it->second->mushReaderSpeechEnabled;
+	}
+
+	void setQtAccessibilitySpeechEnabled(const WorldRuntime *runtime, const bool enable)
+	{
+		if (!runtime)
+			return;
+		const std::shared_ptr<MushReaderState> state = stateFor(runtime);
+		state->qtAccessibilitySpeechEnabled          = enable;
+	}
+
+	bool isQtAccessibilitySpeechEnabled(const WorldRuntime *runtime)
+	{
+		if (!runtime)
+			return true;
+		QMutexLocker locker(&stateMutex());
+		const auto   it = states().find(runtime);
+		return it == states().end() || !it->second || it->second->qtAccessibilitySpeechEnabled;
 	}
 
 	void ensureMushReaderRuntimeSetup(WorldRuntime *runtime)
@@ -2116,6 +2251,21 @@ namespace QMudNativePluginRegistry
 	}
 
 	void setTestSpeechSink(std::function<void(const TestSpeechEvent &)> sink)
+	{
+		QMutexLocker locker(&stateMutex());
+		if (!sink)
+		{
+			testSpeechSink() = {};
+			return;
+		}
+		testSpeechSink() = [sink = std::move(sink)](const TestSpeechEvent &event)
+		{
+			sink(event);
+			return true;
+		};
+	}
+
+	void setTestSpeechSinkWithResult(std::function<bool(const TestSpeechEvent &)> sink)
 	{
 		QMutexLocker locker(&stateMutex());
 		testSpeechSink() = std::move(sink);

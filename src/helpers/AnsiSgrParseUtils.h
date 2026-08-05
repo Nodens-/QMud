@@ -55,11 +55,11 @@ struct QMudAnsiStreamState
 {
 		enum class Mode
 		{
-				Normal,
-				Escape,
-				Csi,
-				Osc,
-				OscEsc
+			Normal,
+			Escape,
+			Csi,
+			Osc,
+			OscEsc
 		};
 
 		Mode       mode{Mode::Normal};
@@ -95,13 +95,13 @@ struct QMudOscActionIds
  * @param oscActionIds Action mapping used when OSC8 hyperlinks are parsed.
  * @return Decoded chunks with the style active at each emission point.
  */
-QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArray &bytes, QMudAnsiStreamState &streamState,
+QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(QByteArrayView bytes, QMudAnsiStreamState &streamState,
                                                 const QString &defaultFore, const QString &defaultBack,
                                                 const std::function<QString(int)> &normalAnsiColorFromIndex,
                                                 const std::function<QString(int)> &boldAnsiColorFromIndex,
                                                 const std::function<QString(int)> &colorFromIndex,
                                                 const std::function<QString(QByteArrayView)> &decodeBytes,
-                                                QMudStyledTextState &state,
+                                                QMudStyledTextState                          &state,
                                                 const QMudOscActionIds &oscActionIds = {});
 
 #endif // QMUD_ANSISGRPARSEUTILS_H

@@ -320,6 +320,10 @@ class WorldPreferencesDialog : public QDialog
 		 */
 		void                          updateAutoCopyHtmlState() const;
 		/**
+		 * @brief Updates legacy text encoding option dependencies.
+		 */
+		void                          updateLegacyEncodingState() const;
+		/**
 		 * @brief Updates output font controls.
 		 */
 		void                          updateOutputFontControls() const;
@@ -565,6 +569,7 @@ class WorldPreferencesDialog : public QDialog
 		QCheckBox                    *m_copySelectionToClipboard{nullptr};
 		QCheckBox                    *m_autoCopyHtml{nullptr};
 		QCheckBox                    *m_utf8{nullptr};
+		QComboBox                    *m_legacyEncoding{nullptr};
 		QCheckBox                    *m_carriageReturnClearsLine{nullptr};
 		QCheckBox                    *m_convertGaToNewline{nullptr};
 		QCheckBox                    *m_sendKeepAlives{nullptr};

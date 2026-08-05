@@ -13,6 +13,8 @@
 #include "TelnetProcessor.h"
 
 #include "MxpDiagnostics.h"
+#include "WorldOptions.h"
+#include "helpers/EncodingUtils.h"
 
 #include <QList>
 #include <QSet>
@@ -74,20 +76,6 @@ static constexpr unsigned char TELOPT_MXP           = 91;
 static constexpr unsigned char SGA                  = 3; // suppress go-ahead
 static constexpr unsigned char WILL_END_OF_RECORD   = 25;
 
-static constexpr int           eMXP_open        = 0;
-static constexpr int           eMXP_secure      = 1;
-static constexpr int           eMXP_locked      = 2;
-static constexpr int           eMXP_reset       = 3;
-static constexpr int           eMXP_secure_once = 4;
-static constexpr int           eMXP_perm_open   = 5;
-static constexpr int           eMXP_perm_secure = 6;
-static constexpr int           eMXP_perm_locked = 7;
-
-static constexpr int           eOnCommandMXP = 0;
-static constexpr int           eQueryMXP     = 1;
-static constexpr int           eUseMXP       = 2;
-static constexpr int           eNoMXP        = 3;
-
 static constexpr unsigned char CHARSET_REQUEST          = 1;
 static constexpr unsigned char CHARSET_ACCEPTED         = 2;
 static constexpr unsigned char CHARSET_REJECTED         = 3;
@@ -99,9 +87,6 @@ static constexpr int           kMaxMxpPendingBytes      = 8192;
 static constexpr int           kMaxMxpEventsPending     = 4096;
 static constexpr int           kMaxMxpCustomDefinitions = 1024;
 static constexpr int           kMaxMxpAttlistBytes      = 16384;
-static constexpr int           DBG_ERROR                = 1;
-static constexpr int           DBG_WARNING              = 2;
-static constexpr int           DBG_INFO                 = 3;
 
 namespace
 {
@@ -359,7 +344,8 @@ struct TelnetProcessor::ZStreamWrapper
 
 TelnetProcessor::TelnetProcessor()
 {
-	m_zlib = new ZStreamWrapper;
+	m_zlib               = new ZStreamWrapper;
+	m_legacyEncodingName = qmudDefaultLegacyWorldEncodingName();
 }
 
 void TelnetProcessor::setCallbacks(const Callbacks &callbacks)
@@ -375,6 +361,22 @@ void TelnetProcessor::setConvertGAtoNewline(const bool enabled)
 void TelnetProcessor::setUseUtf8(const bool enabled)
 {
 	m_utf8 = enabled;
+}
+
+void TelnetProcessor::setLegacyEncodingName(const QString &encodingName)
+{
+	m_legacyEncodingName = qmudNormalizeWorldTextEncodingName(encodingName);
+}
+
+void TelnetProcessor::setPreferredCharsetNames(const QList<QByteArray> &names)
+{
+	m_preferredCharsetNames.clear();
+	for (const QByteArray &name : names)
+	{
+		const QByteArray trimmed = name.trimmed();
+		if (!trimmed.isEmpty())
+			m_preferredCharsetNames.push_back(trimmed);
+	}
 }
 
 void TelnetProcessor::setNoEchoOff(const bool enabled)
@@ -529,8 +531,8 @@ void TelnetProcessor::resetConnectionState()
 	m_mxpEventSequence    = 0;
 	m_mxpEnabled          = false;
 	m_puebloActive        = false;
-	m_mxpDefaultMode      = eMXP_open;
-	m_mxpMode             = eMXP_open;
+	m_mxpDefaultMode      = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
+	m_mxpMode             = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 	m_customElements.clear();
 	m_customEntities.clear();
 	m_nawsWanted          = false;
@@ -920,10 +922,69 @@ void TelnetProcessor::setCustomEntity(const QByteArray &name, const QByteArray &
 	}
 }
 
+QByteArray TelnetProcessor::decodeIncomingMxpTextToInternalBytes(const QByteArray &bytes) const
+{
+	if (bytes.isEmpty())
+		return {};
+	if (m_utf8)
+		return QString::fromUtf8(bytes).toUtf8();
+	return qmudDecodeWorldTextIsolated(bytes, m_legacyEncodingName, nullptr).toUtf8();
+}
+
+QByteArray TelnetProcessor::decodeBuiltinMxpTextToInternalBytes(const QByteArray &bytes)
+{
+	if (bytes.isEmpty())
+		return {};
+	return QString::fromLatin1(bytes).toUtf8();
+}
+
+QByteArray TelnetProcessor::encodeInternalMxpTextToIncomingBytes(const QByteArray &bytes) const
+{
+	if (bytes.isEmpty())
+		return {};
+	const QString text = QString::fromUtf8(bytes);
+	if (m_utf8)
+		return text.toUtf8();
+	return qmudEncodeWorldText(text, m_legacyEncodingName, nullptr);
+}
+
+QByteArray TelnetProcessor::encodeBuiltinMxpTextToIncomingBytes(const QByteArray &bytes) const
+{
+	if (bytes.isEmpty())
+		return {};
+	const QString text = QString::fromLatin1(bytes);
+	if (m_utf8)
+		return text.toUtf8();
+	return qmudEncodeWorldText(text, m_legacyEncodingName, nullptr);
+}
+
+bool TelnetProcessor::resolveCustomEntityValue(const QByteArray &name, QByteArray &value) const
+{
+	const QByteArray lower = name.toLower();
+	const auto       it    = m_customEntities.constFind(lower);
+	if (it == m_customEntities.constEnd())
+		return false;
+	value = it.value();
+	return true;
+}
+
+QByteArray TelnetProcessor::mxpGetEntityForOutput(const QByteArray &name) const
+{
+	if (QByteArray builtin; resolveBuiltinEntity(name, builtin))
+		return encodeBuiltinMxpTextToIncomingBytes(builtin);
+	if (QByteArray custom; resolveCustomEntityValue(name, custom))
+		return encodeInternalMxpTextToIncomingBytes(custom);
+	return {};
+}
+
 bool TelnetProcessor::resolveEntityValue(const QByteArray &name, QByteArray &value) const
 {
-	value = mxpGetEntity(name);
-	return !value.isEmpty();
+	if (QByteArray builtin; resolveBuiltinEntity(name, builtin))
+	{
+		value = decodeBuiltinMxpTextToInternalBytes(builtin);
+		return !value.isEmpty();
+	}
+	return resolveCustomEntityValue(name, value);
 }
 
 bool TelnetProcessor::getCustomElementInfo(const QByteArray &name, CustomElementInfo &info) const
@@ -1005,8 +1066,8 @@ void TelnetProcessor::setMxpSessionState(const MxpSessionState &state)
 	if (!state.enabled)
 	{
 		m_puebloActive   = false;
-		m_mxpMode        = eMXP_open;
-		m_mxpDefaultMode = eMXP_open;
+		m_mxpMode        = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
+		m_mxpDefaultMode = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 		m_mxpPhase       = MXP_NONE;
 		m_mxpString.clear();
 		m_mxpModeChanges.clear();
@@ -1020,21 +1081,22 @@ void TelnetProcessor::setMxpSessionState(const MxpSessionState &state)
 	{
 		switch (mode)
 		{
-		case eMXP_open:
-		case eMXP_secure:
-		case eMXP_locked:
-		case eMXP_secure_once:
-		case eMXP_perm_open:
-		case eMXP_perm_secure:
-		case eMXP_perm_locked:
+		case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open):
+		case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Secure):
+		case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Locked):
+		case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::SecureOnce):
+		case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentOpen):
+		case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentSecure):
+		case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentLocked):
 			return true;
 		default:
 			return false;
 		}
 	};
 
-	const int fallbackMode         = state.secureMode ? eMXP_secure : eMXP_open;
-	const int restoredMode         = isValidMxpMode(state.mode) ? state.mode : fallbackMode;
+	const int fallbackMode = state.secureMode ? TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Secure)
+	                                          : TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
+	const int restoredMode = isValidMxpMode(state.mode) ? state.mode : fallbackMode;
 	const int restoredDefaultMode  = isValidMxpMode(state.defaultMode) ? state.defaultMode : fallbackMode;
 	const int restoredPreviousMode = isValidMxpMode(state.previousMode) ? state.previousMode : restoredMode;
 
@@ -1145,13 +1207,13 @@ void TelnetProcessor::setMxpDefaultMode(const MxpDefaultMode mode)
 	switch (mode)
 	{
 	case MxpDefaultMode::Open:
-		m_mxpDefaultMode = eMXP_open;
+		m_mxpDefaultMode = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 		break;
 	case MxpDefaultMode::Secure:
-		m_mxpDefaultMode = eMXP_secure;
+		m_mxpDefaultMode = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Secure);
 		break;
 	case MxpDefaultMode::Locked:
-		m_mxpDefaultMode = eMXP_locked;
+		m_mxpDefaultMode = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Locked);
 		break;
 	}
 }
@@ -1370,10 +1432,44 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 		abortMxpCollectionOnOverflow();
 		return false;
 	};
+	auto isTelnetSubnegotiationPhase = [this]
+	{ return m_phase == HAVE_SB || m_phase == HAVE_SUBNEGOTIATION || m_phase == HAVE_SUBNEGOTIATION_IAC; };
+	auto mxpCollectionBoundaryReason = [](const unsigned char byte) -> const char *
+	{
+		switch (byte)
+		{
+		case '\n':
+		case '\r':
+			return "got <NEWLINE>";
+		case 0x1B:
+			return "got <ESC>";
+		case IAC:
+			return "got <IAC>";
+		default:
+			return nullptr;
+		}
+	};
+	auto mxpCanStartCollection = [this]
+	{ return m_mxpEnabled && m_useMxp != eNoMXP && (mxpOpen() || mxpSecure()); };
+	auto restartMxpCollectionFromStarter = [&](const MxpPhase phase)
+	{
+		m_mxpPhase = phase;
+		m_mxpString.clear();
+	};
 
 	for (int i = 0; i < data.size(); ++i)
 	{
 		const auto c = static_cast<unsigned char>(data.at(i));
+
+		if (m_mxpPhase != MXP_NONE && !isTelnetSubnegotiationPhase() && !(m_phase == HAVE_IAC && c == IAC))
+		{
+			if (const char *reason = mxpCollectionBoundaryReason(c); reason != nullptr)
+			{
+				mxpUnterminatedElement(reason);
+				m_mxpPhase = MXP_NONE;
+				m_mxpString.clear();
+			}
+		}
 
 		// mxp phases
 		// MXP phase-state transition handling.
@@ -1396,7 +1492,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				case '<':
 					// shouldn't have a < inside a <
 					mxpUnterminatedElement(R"(Got "<" inside "<")");
-					m_mxpString.clear();
+					restartMxpCollectionFromStarter(HAVE_MXP_ELEMENT);
 					break;
 				case '\'':
 				case '\"':
@@ -1462,13 +1558,12 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				case '&':
 					// shouldn't have a & inside a &
 					mxpUnterminatedElement(R"(Got "&" inside "&")");
-					m_mxpString.clear();
+					restartMxpCollectionFromStarter(HAVE_MXP_ENTITY);
 					break;
 				case '<':
 					// shouldn't have a < inside a &
 					mxpUnterminatedElement(R"(Got "<" inside "&")");
-					m_mxpPhase = HAVE_MXP_ELEMENT; // however we are now collecting an element
-					m_mxpString.clear();
+					restartMxpCollectionFromStarter(HAVE_MXP_ELEMENT);
 					break;
 				default:
 					if (!appendMxpPendingByte(c))
@@ -1501,18 +1596,17 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				continue;
 			}
 
-			if (m_mxpEnabled && m_mxpMode == eMXP_secure_once && c != '<')
+			if (m_mxpEnabled &&
+			    m_mxpMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::SecureOnce) && c != '<')
 				mxpRestoreMode();
 
-			if (m_mxpEnabled && m_useMxp != eNoMXP && (mxpOpen() || mxpSecure()) &&
-			    c == '<') // MXP element start
+			if (mxpCanStartCollection() && c == '<') // MXP element start
 			{
 				m_mxpPhase = HAVE_MXP_ELEMENT;
 				m_mxpString.clear();
 				continue;
 			}
-			if (m_mxpEnabled && m_useMxp != eNoMXP && (mxpOpen() || mxpSecure()) &&
-			    c == '&') // MXP entity start
+			if (mxpCanStartCollection() && c == '&') // MXP entity start
 			{
 				m_mxpPhase = HAVE_MXP_ENTITY;
 				m_mxpString.clear();
@@ -1578,7 +1672,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				}
 				else if (c == 'z') // MXP line security mode
 				{
-					if (m_code == eMXP_reset)
+					if (m_code == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Reset))
 						mxpOff(false);
 					else
 						mxpModeChange(m_code);
@@ -2006,21 +2100,28 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 					if (const auto request = static_cast<unsigned char>(m_subnegotiationData.at(0));
 					    request == CHARSET_REQUEST)
 					{
-						const char              delim   = m_subnegotiationData.at(1);
-						const QByteArray        names   = m_subnegotiationData.mid(2);
-						const QList<QByteArray> options = names.split(delim);
-						QByteArray desired = m_utf8 ? QByteArray("UTF-8") : QByteArray("US-ASCII");
-						bool       found   = false;
-						for (const QByteArray &opt : options)
+						const char              delim      = m_subnegotiationData.at(1);
+						const QByteArray        names      = m_subnegotiationData.mid(2);
+						const QList<QByteArray> options    = names.split(delim);
+						const QList<QByteArray> candidates = effectiveCharsetNames();
+						QByteArray              accepted;
+						for (const QByteArray &candidate : candidates)
 						{
-							if (opt.trimmed().toUpper() == desired)
+							const QByteArray candidateKey = candidate.trimmed().toUpper();
+							for (const QByteArray &opt : options)
 							{
-								found = true;
-								break;
+								const QByteArray offered = opt.trimmed();
+								if (offered.toUpper() == candidateKey)
+								{
+									accepted = offered;
+									break;
+								}
 							}
+							if (!accepted.isEmpty())
+								break;
 						}
-						if (found)
-							sendCharsetAccepted(desired);
+						if (!accepted.isEmpty())
+							sendCharsetAccepted(accepted);
 						else
 							sendCharsetRejected();
 					}
@@ -2351,6 +2452,15 @@ void TelnetProcessor::appendTelnetPluginEvent(const TelnetPluginEvent::Type type
 	m_telnetPluginEvents.append(event);
 }
 
+QList<QByteArray> TelnetProcessor::effectiveCharsetNames() const
+{
+	if (!m_preferredCharsetNames.isEmpty())
+		return m_preferredCharsetNames;
+	if (m_utf8)
+		return {QByteArrayLiteral("UTF-8")};
+	return {QByteArrayLiteral("US-ASCII")};
+}
+
 // here when element collection complete
 //
 // here at end of element collection
@@ -2360,7 +2470,8 @@ void TelnetProcessor::mxpCollectedElement()
 {
 	m_mxpString = trimMxp(m_mxpString);
 
-	const bool wasSecureOnce = m_mxpMode == eMXP_secure_once;
+	const bool wasSecureOnce =
+	    m_mxpMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::SecureOnce);
 
 	//  TRACE1 ("MXP collected element: <%s>\n", (LPCTSTR) m_strMXPstring);
 	//
@@ -2587,11 +2698,11 @@ QByteArray TelnetProcessor::mxpCollectedEntity()
 				return {};
 			}
 		}
-		const unsigned char cOneCharacterLine[2] = {static_cast<unsigned char>(iResult), 0};
-		return QByteArray{reinterpret_cast<const char *>(cOneCharacterLine), 1};
+		const char c = static_cast<char>(iResult);
+		return encodeBuiltinMxpTextToIncomingBytes(QByteArray{&c, 1});
 	} // end of entity starting with #
 
-	if (QByteArray resolved = mxpGetEntity(m_mxpString); !resolved.isEmpty())
+	if (QByteArray resolved = mxpGetEntityForOutput(m_mxpString); !resolved.isEmpty())
 		return resolved;
 
 	emitMxpDiagnosticLazy(
@@ -2825,7 +2936,7 @@ QMap<QByteArray, QByteArray> TelnetProcessor::parseTagArguments(QByteArray input
 void TelnetProcessor::mxpDefinition(QByteArray definition)
 {
 	const bool isSecure = mxpSecure();
-	if (m_mxpMode == eMXP_secure_once)
+	if (m_mxpMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::SecureOnce))
 		mxpRestoreMode();
 
 	if (!isSecure)
@@ -2939,11 +3050,20 @@ void TelnetProcessor::mxpEntity(const QByteArray &name, const QByteArray &tagRem
 
 	const char *p = strEntityContents.constData();
 	QByteArray  strFixedValue;
+	QByteArray  rawRun;
+	auto        flushRawRun = [this, &strFixedValue, &rawRun]
+	{
+		if (rawRun.isEmpty())
+			return;
+		strFixedValue += decodeIncomingMxpTextToInternalBytes(rawRun);
+		rawRun.clear();
+	};
 
 	for (; *p; p++)
 	{
 		if (*p == '&')
 		{
+			flushRawRun();
 			p++; // skip ampersand
 			const char *pStart = p;
 			for (; *p && *p != ';'; p++) // look for closing semicolon
@@ -2961,12 +3081,16 @@ void TelnetProcessor::mxpEntity(const QByteArray &name, const QByteArray &tagRem
 			}
 
 			QByteArray s(pStart, p - pStart);
-			strFixedValue += mxpGetEntity(s); // add to list
+			if (QByteArray builtin; resolveBuiltinEntity(s, builtin))
+				strFixedValue += decodeBuiltinMxpTextToInternalBytes(builtin);
+			else if (QByteArray custom; resolveCustomEntityValue(s, custom))
+				strFixedValue += custom;
 		} // end of having an ampersand
 		else
-			strFixedValue += *p; // just add ordinary characters to list
+			rawRun += *p; // just add ordinary characters to list
 
 	} // end of processing the value
+	flushRawRun();
 
 	// add entity to map
 	if (!m_customEntities.contains(lowerName) && m_customEntities.size() >= kMaxMxpCustomDefinitions)
@@ -3158,8 +3282,9 @@ void TelnetProcessor::mxpElement(const QByteArray &name, const QByteArray &tagRe
 	element.open    = getKeyword(args, QByteArrayLiteral("open"));
 	element.command = getKeyword(args, QByteArrayLiteral("empty"));
 
-	element.definition = getArgument(args, QByteArray(), 1, false);
-	element.attributes = getArgument(args, QByteArrayLiteral("att"), 2, false);
+	element.definition = decodeIncomingMxpTextToInternalBytes(getArgument(args, QByteArray(), 1, false));
+	element.attributes =
+	    decodeIncomingMxpTextToInternalBytes(getArgument(args, QByteArrayLiteral("att"), 2, false));
 
 	// get tag (TAG=22)
 	if (const QByteArray tagValue = getArgument(args, QByteArrayLiteral("tag"), 3, true); !tagValue.isEmpty())
@@ -3173,9 +3298,9 @@ void TelnetProcessor::mxpElement(const QByteArray &name, const QByteArray &tagRe
 	if (const QByteArray flag = getArgument(args, QByteArrayLiteral("flag"), 4, true); !flag.isEmpty())
 	{
 		if (flag.left(4).toLower() == "set ")
-			element.flag = flag.mid(4);
+			element.flag = decodeIncomingMxpTextToInternalBytes(flag.mid(4));
 		else
-			element.flag = flag;
+			element.flag = decodeIncomingMxpTextToInternalBytes(flag);
 
 		element.flag = trimMxp(element.flag);
 		element.flag.replace(' ', '_');
@@ -3294,30 +3419,28 @@ void TelnetProcessor::mxpAttlist(const QByteArray &name, const QByteArray &tagRe
 	m_customElements.insert(lowerName, element);
 }
 
-QByteArray TelnetProcessor::mxpGetEntity(const QByteArray &name) const
-{
-	if (QByteArray builtin; resolveBuiltinEntity(name, builtin))
-		return builtin;
-
-	if (const QByteArray lower = name.toLower(); m_customEntities.contains(lower))
-		return m_customEntities.value(lower);
-
-	return {};
-}
-
 bool TelnetProcessor::mxpOpen() const
 {
-	return m_mxpMode == eMXP_open || m_mxpMode == eMXP_perm_open;
+	return m_mxpMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open) ||
+	       m_mxpMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentOpen);
 }
 
 bool TelnetProcessor::mxpSecure() const
 {
-	return m_mxpMode == eMXP_secure || m_mxpMode == eMXP_secure_once || m_mxpMode == eMXP_perm_secure;
+	return m_mxpMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Secure) ||
+	       m_mxpMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::SecureOnce) ||
+	       m_mxpMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentSecure);
+}
+
+void TelnetProcessor::restoreMxpModeForDiagnosticLevel(const int level)
+{
+	if (level == DBG_ERROR)
+		mxpRestoreMode();
 }
 
 void TelnetProcessor::mxpRestoreMode()
 {
-	if (m_mxpMode == eMXP_secure_once)
+	if (m_mxpMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::SecureOnce))
 		m_mxpMode = m_mxpPreviousMode;
 }
 
@@ -3328,24 +3451,28 @@ void TelnetProcessor::mxpModeChange(int newMode)
 
 	const int  oldMode = m_mxpMode;
 	const bool oldPermanent =
-	    oldMode == eMXP_perm_open || oldMode == eMXP_perm_secure || oldMode == eMXP_perm_locked;
+	    oldMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentOpen) ||
+	    oldMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentSecure) ||
+	    oldMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentLocked);
 	const bool newPermanent =
-	    newMode == eMXP_perm_open || newMode == eMXP_perm_secure || newMode == eMXP_perm_locked;
+	    newMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentOpen) ||
+	    newMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentSecure) ||
+	    newMode == TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentLocked);
 	const bool shouldLog = newMode != oldMode && (oldPermanent || newPermanent);
 
 	switch (newMode)
 	{
-	case eMXP_open:
-	case eMXP_secure:
-	case eMXP_locked:
-		m_mxpDefaultMode = eMXP_open;
+	case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open):
+	case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Secure):
+	case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Locked):
+		m_mxpDefaultMode = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 		break;
-	case eMXP_secure_once:
+	case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::SecureOnce):
 		m_mxpPreviousMode = m_mxpMode;
 		break;
-	case eMXP_perm_open:
-	case eMXP_perm_secure:
-	case eMXP_perm_locked:
+	case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentOpen):
+	case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentSecure):
+	case TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::PermanentLocked):
 		m_mxpDefaultMode = newMode;
 		break;
 	default:
@@ -3379,8 +3506,8 @@ void TelnetProcessor::mxpOn(const bool pueblo, const bool manual)
 
 	if (!manual)
 	{
-		m_mxpDefaultMode = eMXP_open;
-		m_mxpMode        = eMXP_open;
+		m_mxpDefaultMode = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
+		m_mxpMode        = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 		m_customElements.clear();
 		m_customEntities.clear();
 	}
@@ -3397,7 +3524,7 @@ void TelnetProcessor::mxpOff(const bool completely)
 	if (completely)
 	{
 		const bool wasPuebloActive = m_puebloActive;
-		mxpModeChange(eMXP_open);
+		mxpModeChange(TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open));
 		if (m_mxpPhase != MXP_NONE)
 		{
 			m_mxpPhase = MXP_NONE;

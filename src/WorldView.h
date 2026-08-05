@@ -946,9 +946,23 @@ class WorldView : public QWidget
 
 	private:
 		friend class WorldOutputCanvas;
+		friend class WorldRuntime;
 		friend class ::tst_WorldView_Basic;
 		struct NativeOutputRenderLine;
 		using NativeOutputRenderLines = IndexedRingBuffer<NativeOutputRenderLine>;
+		enum class AccessibleOutputReviewTargetKind
+		{
+			None,
+			SplitTopPane,
+			Selection,
+			Transient,
+		};
+		enum class AccessibleOutputReviewSpeechTarget
+		{
+			None,
+			QtAccessibility,
+			MushReader,
+		};
 
 		/**
 		 * @brief Miniwindow rendering/input hit-testing and output view internals.
@@ -969,6 +983,14 @@ class WorldView : public QWidget
 		 * @param updateRegion Dirty region in output-stack coordinates.
 		 */
 		void paintNativeOutputBackground(class QPainter *painter, const QRegion &updateRegion) const;
+		/**
+		 * @brief Begins a runtime-owned output presentation mutation batch.
+		 */
+		void beginRuntimeOutputMutationBatch();
+		/**
+		 * @brief Ends a runtime-owned output presentation mutation batch.
+		 */
+		void endRuntimeOutputMutationBatch();
 		/**
 		 * @brief Applies runtime settings with policy-driven rebuild selection.
 		 * @param allowRebuild `true` to run semantic rebuild policy, `false` to force no rebuild.
@@ -1066,11 +1088,39 @@ class WorldView : public QWidget
 		 * @return Accessible text map over the current logical output.
 		 */
 		[[nodiscard]] static QMudAccessibleTextUtils::LineOffsetMap
-		     accessibleNativeOutputTextMap(const NativeOutputRenderLines &lines);
+		accessibleNativeOutputTextMap(const NativeOutputRenderLines &lines);
+		/**
+		 * @brief Returns a revision-cached accessible text offset map for the current native output.
+		 * @return Cached accessible text map over the current logical output.
+		 */
+		[[nodiscard]] const QMudAccessibleTextUtils::LineOffsetMap &accessibleNativeOutputTextMap() const;
+		/**
+		 * @brief Counts accessible native output text without materializing an offset map.
+		 * @param lines Native render lines to count.
+		 * @return UTF-16 code-unit count including inserted newline separators.
+		 */
+		[[nodiscard]] static int accessibleNativeOutputCharacterCount(const NativeOutputRenderLines &lines);
 		/**
 		 * @brief Primes the accessible text length without emitting backlog events.
 		 */
-		void primeAccessibleOutputTextState() const;
+		void                     primeAccessibleOutputTextState() const;
+		/**
+		 * @brief Records tail metadata for incremental accessible character-count tracking.
+		 * @param lines Native render lines for the current accessible baseline.
+		 */
+		void recordAccessibleOutputTailBaseline(const NativeOutputRenderLines &lines) const;
+		/**
+		 * @brief Records line lengths for muted live-accessibility baseline tracking.
+		 * @param lines Native render lines for the current accessible baseline.
+		 */
+		void recordSuppressedAccessibleOutputLengthBaseline(const NativeOutputRenderLines &lines) const;
+		/**
+		 * @brief Updates the muted live-accessibility baseline without building full accessible text.
+		 * @param lines Native render lines after presentation synchronization.
+		 * @return `true` when the baseline was advanced incrementally.
+		 */
+		[[nodiscard]] bool
+		     updateSuppressedAccessibleOutputBaseline(const NativeOutputRenderLines &lines) const;
 		/**
 		 * @brief Emits active-only accessibility notifications for newly presented native output.
 		 * @param lines Native render lines after presentation synchronization.
@@ -1080,51 +1130,134 @@ class WorldView : public QWidget
 		 * @brief Returns the output pane used for accessibility text geometry.
 		 * @return Scrollback review pane while reviewing, otherwise the active output pane.
 		 */
-		[[nodiscard]] WrapTextBrowser *accessibleOutputTargetView() const;
+		[[nodiscard]] WrapTextBrowser                   *accessibleOutputTargetView() const;
+		/**
+		 * @brief Returns whether Qt accessibility speech events may be emitted for output review.
+		 * @return `true` when Qt accessibility speech events are enabled for this view.
+		 */
+		[[nodiscard]] bool                               qtAccessibilityOutputSpeechEnabled() const;
+		/**
+		 * @brief Resolves the current output-review speech/event owner.
+		 * @return Active review speech target, or `None` when review speech is muted.
+		 */
+		[[nodiscard]] AccessibleOutputReviewSpeechTarget accessibleOutputReviewSpeechTarget() const;
+		/**
+		 * @brief Returns whether output cursor and selection accessibility events may be emitted.
+		 * @return `true` when the current review target allows events.
+		 */
+		[[nodiscard]] bool                               accessibleOutputCursorEventsEnabled() const;
+		/**
+		 * @brief Returns whether output cursor and selection accessibility events may be emitted.
+		 * @param speechTarget Resolved review speech/event target.
+		 * @return `true` when @p speechTarget allows events.
+		 */
+		[[nodiscard]] static bool
+		accessibleOutputCursorEventsEnabled(AccessibleOutputReviewSpeechTarget speechTarget);
 		/**
 		 * @brief Returns the accessible caret offset for the world output.
 		 * @return Review caret offset while scrollback review is active, otherwise EOF.
 		 */
-		[[nodiscard]] int              accessibleOutputCursorPosition() const;
+		[[nodiscard]] int accessibleOutputCursorPosition() const;
 		/**
 		 * @brief Updates the accessible review caret from the top scrollback pane.
+		 * @param forceNotify Emit review speech/accessibility even when the caret offset is unchanged.
 		 */
-		void                           updateAccessibleOutputReviewCursor();
+		void              updateAccessibleOutputReviewCursor(bool forceNotify = false) const;
 		/**
 		 * @brief Clears scrollback review mode for accessibility.
 		 */
-		void                           clearAccessibleOutputReviewCursor();
+		void              clearAccessibleOutputReviewCursor() const;
+		/**
+		 * @brief Moves the accessible review caret to a requested text offset.
+		 * @param cursorOffset Accessible text offset requested by assistive technology.
+		 */
+		void              setAccessibleOutputCursorPosition(int cursorOffset) const;
 		/**
 		 * @brief Emits a text-caret accessibility event when assistive technology is active.
 		 * @param cursorOffset Accessible text cursor offset.
 		 */
-		void                           notifyAccessibleOutputCaretMoved(int cursorOffset) const;
+		void              notifyAccessibleOutputCaretMoved(int cursorOffset) const;
+		/**
+		 * @brief Emits a collapsed text-selection accessibility event after native output selection clears.
+		 */
+		void              notifyAccessibleOutputSelectionCleared() const;
+		/**
+		 * @brief Emits review/search speech and accessible events for a resolved output target.
+		 * @param cursorOffset Accessible text cursor offset.
+		 * @param announcement Text to speak for the review target.
+		 * @param speechTarget Resolved review speech/event target.
+		 * @param selectionStart Accessible selection start offset, or `-1` when unchanged.
+		 * @param selectionEnd Accessible selection end offset, or `-1` when unchanged.
+		 */
+		void notifyAccessibleOutputReviewTarget(int cursorOffset, const QString &announcement,
+		                                        AccessibleOutputReviewSpeechTarget speechTarget,
+		                                        int selectionStart = -1, int selectionEnd = -1) const;
+		/**
+		 * @brief Emits review/search speech and accessible events for an accessible text range.
+		 * @param lines Native render lines.
+		 * @param lineIndex Zero-based render line that should be spoken.
+		 * @param cursorOffset Accessible cursor offset.
+		 * @param selectionStart Accessible selection start offset.
+		 * @param selectionEnd Accessible selection end offset.
+		 * @param targetKind Review target lifetime semantics.
+		 */
+		void notifyAccessibleOutputReviewRangeTarget(const NativeOutputRenderLines &lines, int lineIndex,
+		                                             int cursorOffset, int selectionStart, int selectionEnd,
+		                                             AccessibleOutputReviewTargetKind targetKind) const;
+		/**
+		 * @brief Emits review/search speech and accessible events for a selected output line range.
+		 * @param lines Native render lines.
+		 * @param lineIndex Zero-based selected render line.
+		 * @param startColumn Zero-based selected start column.
+		 * @param endColumn Zero-based selected end column.
+		 */
+		void notifyAccessibleOutputSelectionReviewTarget(const NativeOutputRenderLines &lines, int lineIndex,
+		                                                 int startColumn, int endColumn) const;
+		/**
+		 * @brief Clears stale selection-driven review cursor state after native output selection ends.
+		 */
+		void clearAccessibleOutputSelectionReviewState() const;
 		/**
 		 * @brief Calculates the accessible text offset of the first top-pane review line.
 		 * @return Accessible offset for the top scrollback pane, or EOF when unavailable.
 		 */
-		[[nodiscard]] int              accessibleOutputReviewCursorPositionForTopPane() const;
+		[[nodiscard]] int accessibleOutputReviewCursorPositionForTopPane() const;
+		/**
+		 * @brief Calculates the render-line index of the first top-pane review line.
+		 * @param lines Native render lines.
+		 * @return Zero-based render-line index, or `-1` when unavailable.
+		 */
+		[[nodiscard]] int
+		accessibleOutputReviewLineIndexForTopPane(const NativeOutputRenderLines &lines) const;
+		/**
+		 * @brief Calculates the first readable render-line index for an output review pane.
+		 * @param view Output pane used for review.
+		 * @param lines Native render lines.
+		 * @return Zero-based render-line index, or `-1` when unavailable.
+		 */
+		[[nodiscard]] int accessibleOutputReviewLineIndexForPane(const WrapTextBrowser         *view,
+		                                                         const NativeOutputRenderLines &lines) const;
 		/**
 		 * @brief Returns the accessible text offset for a render line.
 		 * @param lines Native render lines.
 		 * @param lineIndex Zero-based render line index.
 		 * @return Linear accessible text offset.
 		 */
-		[[nodiscard]] int              accessibleOutputOffsetForLine(const NativeOutputRenderLines &lines,
-		                                                             int                            lineIndex) const;
+		[[nodiscard]] int accessibleOutputOffsetForLine(const NativeOutputRenderLines &lines,
+		                                                int                            lineIndex) const;
 		/**
 		 * @brief Returns current accessible text character count without constructing full text.
 		 * @param lines Native render lines.
 		 * @return Accessible text character count.
 		 */
-		[[nodiscard]] int   accessibleOutputCharacterCount(const NativeOutputRenderLines &lines) const;
+		[[nodiscard]] int accessibleOutputCharacterCount(const NativeOutputRenderLines &lines) const;
 		/**
 		 * @brief Extends cached accessible text line offsets through a render line.
 		 * @param lines Native render lines.
 		 * @param lineIndex Zero-based render line index required by the caller.
 		 */
-		void                ensureAccessibleOutputOffsetCachePrefix(const NativeOutputRenderLines &lines,
-		                                                            int                            lineIndex) const;
+		void              ensureAccessibleOutputOffsetCachePrefix(const NativeOutputRenderLines &lines,
+		                                                          int                            lineIndex) const;
 		[[nodiscard]] QRect nativeOutputPaneRect(const WrapTextBrowser *view) const;
 		/**
 		 * @brief Returns the visible native output area to repaint when selection geometry is unavailable.
@@ -1227,6 +1360,14 @@ class WorldView : public QWidget
 				int                        removedLineCount{0};
 				int                        insertedLineCount{0};
 		};
+		/**
+		 * @brief Returns the retained line count for incremental accessible tail-delta handling.
+		 * @param delta Native render cache delta to inspect.
+		 * @param lineCount Current native render-line count.
+		 * @return Number of current lines retained from the previous accessible baseline, or `-1`.
+		 */
+		[[nodiscard]] static int accessibleRetainedLineCountForTailDelta(const NativeRenderCacheDelta &delta,
+		                                                                 int lineCount);
 		/**
 		 * @brief Deferred split-pane head-trim adjustment computed from pre-mutation layout state.
 		 */
@@ -1640,8 +1781,11 @@ class WorldView : public QWidget
 		 * @param view Output pane to scroll.
 		 * @param firstLine First zero-based native render line to reveal.
 		 * @param lastLine Last zero-based native render line to reveal.
+		 * @param notifyReviewTarget Emit review speech/accessibility updates when the primary output
+		 * remains split.
 		 */
-		void scrollNativeOutputRangeIntoView(const WrapTextBrowser *view, int firstLine, int lastLine) const;
+		void scrollNativeOutputRangeIntoView(const WrapTextBrowser *view, int firstLine, int lastLine,
+		                                     bool notifyReviewTarget = true) const;
 		/**
 		 * @brief Resolves native-output hit-test information for a mouse event source widget.
 		 * @param watched Event source widget from the installed event filter.
@@ -1784,8 +1928,11 @@ class WorldView : public QWidget
 		void noteUserScrollAction();
 		/**
 		 * @brief Synchronizes split and accessibility review state after top-pane output scrolling.
+		 * @param notifyReviewTarget Emit review speech/accessibility updates when the view remains split.
+		 * @param forceReviewTargetNotify Emit review speech/accessibility even when the caret is unchanged.
 		 */
-		void syncOutputScrollbackReviewState();
+		void syncOutputScrollbackReviewState(bool notifyReviewTarget      = true,
+		                                     bool forceReviewTargetNotify = false);
 		/**
 		 * @brief Enables/disables scrollback split mode.
 		 * @param active Activate split mode when `true`.
@@ -2135,188 +2282,199 @@ class WorldView : public QWidget
 		mutable quint64                             m_accessibleOutputRevision{0};
 		mutable QString                             m_accessibleOutputText;
 		mutable bool                                m_accessibleOutputPendingTailAppend{false};
-		bool                                        m_accessibleOutputReviewActive{false};
-		int                                         m_accessibleOutputReviewLastNotifiedCursorOffset{-1};
-		mutable QVector<int>                        m_accessibleOutputLineStartCache;
-		mutable quint64                             m_accessibleOutputLineStartCacheRevision{0};
-		mutable int                                 m_accessibleOutputLineStartCacheNextOffset{0};
-		mutable int                                 m_accessibleOutputLineStartCacheCharacterCount{-1};
-		mutable bool                                m_nativePartialRenderLineApplied{false};
-		mutable bool                                m_nativePartialRenderLineAppended{false};
-		mutable bool                                m_nativePartialRenderBaseLastHardReturn{true};
-		mutable quint64                             m_nativePartialRenderLineEffectiveRevision{0};
-		mutable NativeOutputRenderLine              m_nativePartialRenderLineBaseTail;
-		mutable QString                             m_nativePartialRenderLineText;
-		mutable QVector<WorldRuntime::StyleSpan>    m_nativePartialRenderLineSpans;
-		mutable int                                 m_nativeCachedRuntimeCount{0};
-		mutable qint64                              m_nativeCachedRuntimeFirstLineNumber{0};
-		mutable qint64                              m_nativeCachedRuntimeLastLineNumber{0};
-		mutable bool                                m_nativeCachedRuntimeLastHardReturn{true};
-		mutable bool                                m_nativeCachedRuntimeLineNumbersContiguous{true};
-		mutable WorldRuntime::LineEntry             m_nativeCachedRuntimeFirstEntry;
-		mutable WorldRuntime::LineEntry             m_nativeCachedRuntimeLastEntry;
-		mutable int                                 m_nativeRenderCacheFullRebuilds{0};
-		mutable int                                 m_nativeRenderCacheSoftRebuilds{0};
-		mutable int                                 m_nativeRenderCacheIncrementalUpdates{0};
-		mutable int                                 m_nativeRenderCacheTrimDrops{0};
-		mutable int                                 m_nativeRenderCacheRebuildReasonCacheInvalid{0};
-		mutable int                                 m_nativeRenderCacheRebuildReasonRuntimeDisjoint{0};
-		mutable int                                 m_nativeRenderCacheRebuildReasonNonContigNoOverlap{0};
-		mutable int                                 m_nativeRenderCacheRebuildReasonRestitchFailure{0};
-		mutable int                                 m_nativeRenderCacheRebuildReasonAppendIndex{0};
-		mutable int                                 m_nativeRangeRestitchDiagCount{0};
-		mutable int                                 m_nativeRangeRestitchDiagMinStart{-1};
-		mutable int                                 m_nativeRangeRestitchDiagRebuiltTotal{0};
-		mutable int                                 m_nativeRangeRestitchDiagRebuiltMax{0};
-		mutable int                                 m_nativeRangeRestitchDiagDroppedTotal{0};
-		mutable int                                 m_nativeRangeRestitchDiagDroppedMax{0};
-		mutable NativeAppendDiagnosticBucket        m_nativeTailAppendDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeNonContiguousTailAppendDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeHeadTrimAppendDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeTailRestitchAppendDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeRangeRestitchAppendDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeSoftCacheInvalidDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeSoftRuntimeDisjointDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeSoftNonContiguousNoOverlapDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeSoftRestitchFailureDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeSoftAppendStartOutOfRangeDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeFullRebuildAppendDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeRestitchFailRangeHeadTrimDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeRestitchFailRangeEmptyDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeRestitchFailRangeDropMissDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeRestitchFailRangeAppendNoChangeDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeRestitchFailLineHiddenOrOpenDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeRestitchFailLineRenderMissDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeRestitchFailLineCompositeDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeRestitchFailTailIndexMissDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeRestitchFailTailAppendNoChangeDiag;
-		mutable NativeAppendDiagnosticBucket        m_nativeRestitchFailHeadTrimDiag;
-		mutable quint64                             m_nativeSplitTopHeadTrimPixelsRevision{0};
-		mutable int                                 m_nativeSplitTopHeadTrimPixels{0};
-		mutable int                                 m_nativeSplitTopHeadTrimLines{0};
-		mutable quint64                             m_nativeSplitTopHeadTrimAdjustedRevision{0};
-		mutable IndexedRingBuffer<NativeLayoutSlot> m_nativeLayoutSlots;
-		mutable NativeLayoutHeightIndex             m_nativeLayoutHeightIndex;
-		mutable int                                 m_nativeLayoutExactPrefixCount{0};
-		mutable bool                                m_nativeLayoutCacheValid{false};
-		mutable int                                 m_nativeLayoutCachedWrapWidth{0};
-		mutable int                                 m_nativeLayoutCachedLocalWrapWidth{0};
-		mutable int                                 m_nativeLayoutCachedLineSpacing{0};
-		mutable quint64                             m_nativeLayoutCachedStyleKey{0};
-		mutable qreal                               m_nativeLayoutCachedLineAdvance{0.0};
-		mutable QFont                               m_nativeLayoutCachedFont;
-		mutable quint64                             m_nativeLayoutCachedRenderRevision{0};
-		mutable quint64                             m_nativeLayoutRangePreparedRevision{0};
-		mutable bool                                m_nativeLayoutRangePreparedOnly{false};
-		mutable int                                 m_nativeLayoutCacheResets{0};
-		mutable int                                 m_nativeLayoutRowMeasurements{0};
-		IndexedRingBuffer<WorldRuntime::LineEntry>  m_nativeStandaloneOutputLines;
-		qint64                                      m_nativeStandaloneNextLineNumber{1};
-		bool                                        m_wrapInput{false};
-		int                                         m_inputPixelOffset{0};
-		WorldRuntime                               *m_runtime{nullptr};
-		QFont                                       m_defaultOutputFont;
-		QFont                                       m_defaultInputFont;
-		bool                                        m_displayMyInput{false};
-		bool                                        m_escapeDeletesInput{false};
-		bool                                        m_saveDeletedCommand{false};
-		bool                                        m_confirmOnPaste{false};
-		bool                                        m_ctrlBackspaceDeletesLastWord{false};
-		bool                                        m_arrowsChangeHistory{false};
-		bool                                        m_arrowKeysWrap{false};
-		bool                                        m_arrowRecallsPartial{false};
-		bool                                        m_altArrowRecallsPartial{false};
-		bool                                        m_ctrlZGoesToEndOfBuffer{false};
-		bool                                        m_ctrlPGoesToPreviousCommand{false};
-		bool                                        m_ctrlNGoesToNextCommand{false};
-		QList<QKeySequence>                         m_commandOptionNextShortcuts;
-		QList<QKeySequence>                         m_commandOptionPreviousShortcuts;
-		QList<QKeySequence>                         m_commandOptionBufferEndShortcuts;
-		QList<QKeySequence>                         m_nextCommandShortcuts;
-		QList<QKeySequence>                         m_previousCommandShortcuts;
-		QList<QKeySequence>                         m_displayStartShortcuts;
-		QList<QKeySequence>                         m_displayPageUpShortcuts;
-		QList<QKeySequence>                         m_displayPageDownShortcuts;
-		QList<QKeySequence>                         m_displayEndShortcuts;
-		QList<QKeySequence>                         m_displayLineUpShortcuts;
-		QList<QKeySequence>                         m_displayLineDownShortcuts;
-		QList<QKeySequence>                         m_outputSplitStartShortcuts;
-		QList<QKeySequence>                         m_outputSplitEndShortcuts;
-		QList<QKeySequence>                         m_recallLastWordShortcuts;
-		bool                                        m_confirmBeforeReplacingTyping{false};
-		bool                                        m_doubleClickInserts{false};
-		bool                                        m_doubleClickSends{false};
-		bool                                        m_showBold{true};
-		bool                                        m_showItalic{true};
-		bool                                        m_showUnderline{true};
-		bool                                        m_alternativeInverse{false};
-		bool                                        m_lineInformation{false};
-		int                                         m_lineSpacing{0};
-		bool                                        m_lowerCaseTabCompletion{false};
-		bool                                        m_tabCompletionSpace{false};
-		bool                                        m_autoRepeat{false};
-		bool                                        m_keepCommandsOnSameLine{false};
-		bool                                        m_noEchoOff{false};
-		bool                                        m_noEcho{false};
-		bool                                        m_alwaysRecordCommandHistory{false};
-		bool                                        m_hyperlinkAddsToCommandHistory{false};
-		bool                                        m_inputChanged{false};
-		bool                                        m_settingText{false};
-		bool                                        m_notifyingPluginCommandChanged{false};
-		bool                                        m_frozen{false};
-		bool                                        m_autoPause{false};
-		QString                                     m_wordDelimiters;
-		QString                                     m_wordDelimitersDblClick;
-		bool                                        m_smoothScrolling{false};
-		bool                                        m_smootherScrolling{false};
-		bool                                        m_allTypingToCommandWindow{false};
-		bool                                        m_autoResizeCommandWindow{false};
-		int                                         m_autoResizeMinimumLines{1};
-		int                                         m_autoResizeMaximumLines{20};
-		int                                         m_tabCompletionLines{200};
-		QString                                     m_tabCompletionDefaults;
-		QString                                     m_tabCompletionCycleTargetLower;
-		int                                         m_tabCompletionCycleStartColumn{-1};
-		int                                         m_tabCompletionCycleEndColumn{-1};
-		int                                         m_tabCompletionCycleLastSource{-2};
-		bool                                        m_tabCompletionCycleActive{false};
-		QSet<QString>                               m_tabCompletionCycleSeenCompletions;
-		int                                         m_fadeOutputBufferAfterSeconds{0};
-		int                                         m_fadeOutputOpacityPercent{100};
-		int                                         m_fadeOutputSeconds{1};
-		QTimer                                     *m_fadeTimer{nullptr};
-		QDateTime                                   m_timeFadeCancelled;
-		bool                                        m_breakBeforeNextServerOutput{false};
-		bool                                        m_keepPauseAtBottom{false};
-		bool                                        m_userScrollAction{false};
-		bool                                        m_startPausedApplied{false};
-		bool                                        m_defaultInputHeightApplied{false};
-		bool                                        m_scrollbackSplitActive{false};
-		int                                         m_lastLiveSplitSize{0};
-		int                                         m_wrapColumn{0};
-		int                                         m_historyLimit{0};
-		bool                                        m_useCustomLinkColour{false};
-		bool                                        m_underlineHyperlinks{true};
-		QColor                                      m_hyperlinkColour;
-		QColor                                      m_outputBackground;
-		QColor                                      m_outputTextColour;
-		TimestampRenderSettings                     m_outputTimestampRenderSettings;
-		TimestampRenderSettings                     m_inputTimestampRenderSettings;
-		TimestampRenderSettings                     m_notesTimestampRenderSettings;
-		bool                                        m_bleedBackground{false};
-		int                                         m_historyIndex{-1};
-		int                                         m_partialIndex{-1};
-		QString                                     m_partialCommand;
-		QString                                     m_lastCommand;
-		QVector<QString>                            m_history;
-		QVector<PendingOutput>                      m_pendingOutput;
-		bool                                        m_flushingPending{false};
-		bool                                        m_hasPartialOutput{false};
-		int                                         m_partialOutputStart{0};
-		int                                         m_partialOutputLength{0};
-		bool                                        m_nativeHasPartialOutput{false};
-		QString                                     m_nativePartialOutputText;
-		QVector<WorldRuntime::StyleSpan>            m_nativePartialOutputSpans;
+		mutable QString                             m_accessibleOutputLastAnnouncedPartialText;
+		mutable bool                                m_accessibleOutputLiveEventsSuppressed{false};
+		mutable int                                 m_accessibleOutputBaselineLineCount{-1};
+		mutable QString                             m_accessibleOutputBaselineTailText;
+		mutable QVector<int>                        m_accessibleOutputBaselineLineLengths;
+		mutable bool                                m_accessibleOutputReviewActive{false};
+		mutable AccessibleOutputReviewTargetKind    m_accessibleOutputReviewTargetKind{
+		    AccessibleOutputReviewTargetKind::None};
+		mutable int                                    m_accessibleOutputReviewLastNotifiedCursorOffset{-1};
+		mutable int                                    m_accessibleOutputReviewLastNotifiedScrollValue{-1};
+		mutable QVector<int>                           m_accessibleOutputLineStartCache;
+		mutable quint64                                m_accessibleOutputLineStartCacheRevision{0};
+		mutable int                                    m_accessibleOutputLineStartCacheNextOffset{0};
+		mutable int                                    m_accessibleOutputLineStartCacheCharacterCount{-1};
+		mutable QMudAccessibleTextUtils::LineOffsetMap m_accessibleOutputTextMapCache;
+		mutable quint64                                m_accessibleOutputTextMapCacheRevision{0};
+		mutable bool                                   m_accessibleOutputTextMapCacheValid{false};
+		mutable bool                                   m_nativePartialRenderLineApplied{false};
+		mutable bool                                   m_nativePartialRenderLineAppended{false};
+		mutable bool                                   m_nativePartialRenderBaseLastHardReturn{true};
+		mutable quint64                                m_nativePartialRenderLineEffectiveRevision{0};
+		mutable NativeOutputRenderLine                 m_nativePartialRenderLineBaseTail;
+		mutable QString                                m_nativePartialRenderLineText;
+		mutable QVector<WorldRuntime::StyleSpan>       m_nativePartialRenderLineSpans;
+		mutable int                                    m_nativeCachedRuntimeCount{0};
+		mutable qint64                                 m_nativeCachedRuntimeFirstLineNumber{0};
+		mutable qint64                                 m_nativeCachedRuntimeLastLineNumber{0};
+		mutable bool                                   m_nativeCachedRuntimeLastHardReturn{true};
+		mutable bool                                   m_nativeCachedRuntimeLineNumbersContiguous{true};
+		mutable WorldRuntime::LineEntry                m_nativeCachedRuntimeFirstEntry;
+		mutable WorldRuntime::LineEntry                m_nativeCachedRuntimeLastEntry;
+		mutable int                                    m_nativeRenderCacheFullRebuilds{0};
+		mutable int                                    m_nativeRenderCacheSoftRebuilds{0};
+		mutable int                                    m_nativeRenderCacheIncrementalUpdates{0};
+		mutable int                                    m_nativeRenderCacheTrimDrops{0};
+		mutable int                                    m_nativeRenderCacheRebuildReasonCacheInvalid{0};
+		mutable int                                    m_nativeRenderCacheRebuildReasonRuntimeDisjoint{0};
+		mutable int                                    m_nativeRenderCacheRebuildReasonNonContigNoOverlap{0};
+		mutable int                                    m_nativeRenderCacheRebuildReasonRestitchFailure{0};
+		mutable int                                    m_nativeRenderCacheRebuildReasonAppendIndex{0};
+		mutable int                                    m_nativeRangeRestitchDiagCount{0};
+		mutable int                                    m_nativeRangeRestitchDiagMinStart{-1};
+		mutable int                                    m_nativeRangeRestitchDiagRebuiltTotal{0};
+		mutable int                                    m_nativeRangeRestitchDiagRebuiltMax{0};
+		mutable int                                    m_nativeRangeRestitchDiagDroppedTotal{0};
+		mutable int                                    m_nativeRangeRestitchDiagDroppedMax{0};
+		mutable NativeAppendDiagnosticBucket           m_nativeTailAppendDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeNonContiguousTailAppendDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeHeadTrimAppendDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeTailRestitchAppendDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeRangeRestitchAppendDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeSoftCacheInvalidDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeSoftRuntimeDisjointDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeSoftNonContiguousNoOverlapDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeSoftRestitchFailureDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeSoftAppendStartOutOfRangeDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeFullRebuildAppendDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailRangeHeadTrimDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailRangeEmptyDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailRangeDropMissDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailRangeAppendNoChangeDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailLineHiddenOrOpenDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailLineRenderMissDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailLineCompositeDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailTailIndexMissDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailTailAppendNoChangeDiag;
+		mutable NativeAppendDiagnosticBucket           m_nativeRestitchFailHeadTrimDiag;
+		mutable quint64                                m_nativeSplitTopHeadTrimPixelsRevision{0};
+		mutable int                                    m_nativeSplitTopHeadTrimPixels{0};
+		mutable int                                    m_nativeSplitTopHeadTrimLines{0};
+		mutable quint64                                m_nativeSplitTopHeadTrimAdjustedRevision{0};
+		mutable IndexedRingBuffer<NativeLayoutSlot>    m_nativeLayoutSlots;
+		mutable NativeLayoutHeightIndex                m_nativeLayoutHeightIndex;
+		mutable int                                    m_nativeLayoutExactPrefixCount{0};
+		mutable bool                                   m_nativeLayoutCacheValid{false};
+		mutable int                                    m_nativeLayoutCachedWrapWidth{0};
+		mutable int                                    m_nativeLayoutCachedLocalWrapWidth{0};
+		mutable int                                    m_nativeLayoutCachedLineSpacing{0};
+		mutable quint64                                m_nativeLayoutCachedStyleKey{0};
+		mutable qreal                                  m_nativeLayoutCachedLineAdvance{0.0};
+		mutable QFont                                  m_nativeLayoutCachedFont;
+		mutable quint64                                m_nativeLayoutCachedRenderRevision{0};
+		mutable quint64                                m_nativeLayoutRangePreparedRevision{0};
+		mutable bool                                   m_nativeLayoutRangePreparedOnly{false};
+		mutable int                                    m_nativeLayoutCacheResets{0};
+		mutable int                                    m_nativeLayoutRowMeasurements{0};
+		IndexedRingBuffer<WorldRuntime::LineEntry>     m_nativeStandaloneOutputLines;
+		qint64                                         m_nativeStandaloneNextLineNumber{1};
+		bool                                           m_wrapInput{false};
+		int                                            m_inputPixelOffset{0};
+		WorldRuntime                                  *m_runtime{nullptr};
+		QFont                                          m_defaultOutputFont;
+		QFont                                          m_defaultInputFont;
+		bool                                           m_displayMyInput{false};
+		bool                                           m_escapeDeletesInput{false};
+		bool                                           m_saveDeletedCommand{false};
+		bool                                           m_confirmOnPaste{false};
+		bool                                           m_ctrlBackspaceDeletesLastWord{false};
+		bool                                           m_arrowsChangeHistory{false};
+		bool                                           m_arrowKeysWrap{false};
+		bool                                           m_arrowRecallsPartial{false};
+		bool                                           m_altArrowRecallsPartial{false};
+		bool                                           m_ctrlZGoesToEndOfBuffer{false};
+		bool                                           m_ctrlPGoesToPreviousCommand{false};
+		bool                                           m_ctrlNGoesToNextCommand{false};
+		QList<QKeySequence>                            m_commandOptionNextShortcuts;
+		QList<QKeySequence>                            m_commandOptionPreviousShortcuts;
+		QList<QKeySequence>                            m_commandOptionBufferEndShortcuts;
+		QList<QKeySequence>                            m_nextCommandShortcuts;
+		QList<QKeySequence>                            m_previousCommandShortcuts;
+		QList<QKeySequence>                            m_displayStartShortcuts;
+		QList<QKeySequence>                            m_displayPageUpShortcuts;
+		QList<QKeySequence>                            m_displayPageDownShortcuts;
+		QList<QKeySequence>                            m_displayEndShortcuts;
+		QList<QKeySequence>                            m_displayLineUpShortcuts;
+		QList<QKeySequence>                            m_displayLineDownShortcuts;
+		QList<QKeySequence>                            m_outputSplitStartShortcuts;
+		QList<QKeySequence>                            m_outputSplitEndShortcuts;
+		QList<QKeySequence>                            m_recallLastWordShortcuts;
+		bool                                           m_confirmBeforeReplacingTyping{false};
+		bool                                           m_doubleClickInserts{false};
+		bool                                           m_doubleClickSends{false};
+		bool                                           m_showBold{true};
+		bool                                           m_showItalic{true};
+		bool                                           m_showUnderline{true};
+		bool                                           m_alternativeInverse{false};
+		bool                                           m_lineInformation{false};
+		int                                            m_lineSpacing{0};
+		bool                                           m_lowerCaseTabCompletion{false};
+		bool                                           m_tabCompletionSpace{false};
+		bool                                           m_autoRepeat{false};
+		bool                                           m_keepCommandsOnSameLine{false};
+		bool                                           m_noEchoOff{false};
+		bool                                           m_noEcho{false};
+		bool                                           m_alwaysRecordCommandHistory{false};
+		bool                                           m_hyperlinkAddsToCommandHistory{false};
+		bool                                           m_inputChanged{false};
+		bool                                           m_settingText{false};
+		bool                                           m_notifyingPluginCommandChanged{false};
+		bool                                           m_frozen{false};
+		bool                                           m_autoPause{false};
+		QString                                        m_wordDelimiters;
+		QString                                        m_wordDelimitersDblClick;
+		bool                                           m_smoothScrolling{false};
+		bool                                           m_smootherScrolling{false};
+		bool                                           m_allTypingToCommandWindow{false};
+		bool                                           m_autoResizeCommandWindow{false};
+		int                                            m_autoResizeMinimumLines{1};
+		int                                            m_autoResizeMaximumLines{20};
+		int                                            m_tabCompletionLines{200};
+		QString                                        m_tabCompletionDefaults;
+		QString                                        m_tabCompletionCycleTargetLower;
+		int                                            m_tabCompletionCycleStartColumn{-1};
+		int                                            m_tabCompletionCycleEndColumn{-1};
+		int                                            m_tabCompletionCycleLastSource{-2};
+		bool                                           m_tabCompletionCycleActive{false};
+		QSet<QString>                                  m_tabCompletionCycleSeenCompletions;
+		int                                            m_fadeOutputBufferAfterSeconds{0};
+		int                                            m_fadeOutputOpacityPercent{100};
+		int                                            m_fadeOutputSeconds{1};
+		QTimer                                        *m_fadeTimer{nullptr};
+		QDateTime                                      m_timeFadeCancelled;
+		bool                                           m_breakBeforeNextServerOutput{false};
+		bool                                           m_keepPauseAtBottom{false};
+		bool                                           m_userScrollAction{false};
+		bool                                           m_startPausedApplied{false};
+		bool                                           m_defaultInputHeightApplied{false};
+		bool                                           m_scrollbackSplitActive{false};
+		int                                            m_lastLiveSplitSize{0};
+		int                                            m_wrapColumn{0};
+		int                                            m_historyLimit{0};
+		bool                                           m_useCustomLinkColour{false};
+		bool                                           m_underlineHyperlinks{true};
+		QColor                                         m_hyperlinkColour;
+		QColor                                         m_outputBackground;
+		QColor                                         m_outputTextColour;
+		TimestampRenderSettings                        m_outputTimestampRenderSettings;
+		TimestampRenderSettings                        m_inputTimestampRenderSettings;
+		TimestampRenderSettings                        m_notesTimestampRenderSettings;
+		bool                                           m_bleedBackground{false};
+		int                                            m_historyIndex{-1};
+		int                                            m_partialIndex{-1};
+		QString                                        m_partialCommand;
+		QString                                        m_lastCommand;
+		QVector<QString>                               m_history;
+		QVector<PendingOutput>                         m_pendingOutput;
+		bool                                           m_flushingPending{false};
+		bool                                           m_hasPartialOutput{false};
+		int                                            m_partialOutputStart{0};
+		int                                            m_partialOutputLength{0};
+		bool                                           m_nativeHasPartialOutput{false};
+		QString                                        m_nativePartialOutputText;
+		QVector<WorldRuntime::StyleSpan>               m_nativePartialOutputSpans;
 		struct OutputFindState;
 		QScopedPointer<OutputFindState>         m_outputFind;
 		QScopedPointer<CommandHistoryFindState> m_commandHistoryFind;
@@ -2364,6 +2522,8 @@ class WorldView : public QWidget
 		bool                                    m_nativeRuntimeOutputPresentationQueued{false};
 		bool                                    m_nativeRuntimeOutputPresentationNeedsLayoutSync{false};
 		bool                                    m_nativeRuntimeOutputPresentationFollowTail{false};
+		int                                     m_runtimeOutputMutationBatchDepth{0};
+		bool                                    m_runtimeBatchPartialClearPending{false};
 		bool                                    m_scrollToEndQueued{false};
 		bool                                    m_scrollToEndNeedsLayoutSync{false};
 		bool                                    m_destroying{false};

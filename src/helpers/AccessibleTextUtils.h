@@ -19,6 +19,39 @@
 namespace QMudAccessibleTextUtils
 {
 	/**
+	 * @brief Accessible text boundary granularity.
+	 */
+	enum class TextBoundaryKind
+	{
+		Character, ///< Single UTF-16 code unit.
+		Word,      ///< Word boundary.
+		Sentence,  ///< Sentence boundary.
+		Paragraph, ///< Logical output paragraph.
+		Line,      ///< Logical output line.
+		WholeText  ///< Entire accessible text.
+	};
+
+	/**
+	 * @brief Accessible text boundary query direction.
+	 */
+	enum class TextBoundaryQuery
+	{
+		Before, ///< Boundary before the supplied offset.
+		At,     ///< Boundary containing the supplied offset.
+		After   ///< Boundary after the supplied offset.
+	};
+
+	/**
+	 * @brief Text and offsets returned for an accessible boundary query.
+	 */
+	struct TextBoundaryResult
+	{
+			QString text;           ///< Text covered by the boundary.
+			int     startOffset{0}; ///< Inclusive start offset.
+			int     endOffset{0};   ///< Exclusive end offset.
+	};
+
+	/**
 	 * @brief Line and column position in the accessible text model.
 	 */
 	struct TextPosition
@@ -47,58 +80,72 @@ namespace QMudAccessibleTextUtils
 			 * @brief Replaces the mapped output lines.
 			 * @param lines Output lines without implicit trailing newline.
 			 */
-			void                       reset(QVector<QString> lines);
+			void                             reset(QVector<QString> lines);
 
 			/**
 			 * @brief Returns the number of mapped logical lines.
 			 * @return Line count clamped to the accessibility API integer range.
 			 */
-			[[nodiscard]] int          lineCount() const;
+			[[nodiscard]] int                lineCount() const;
 			/**
 			 * @brief Returns the total accessible character count.
 			 * @return UTF-16 code-unit count including inserted newline separators.
 			 */
-			[[nodiscard]] int          characterCount() const;
+			[[nodiscard]] int                characterCount() const;
 			/**
 			 * @brief Returns whether the accessible text is empty.
 			 * @return True when there are no accessible characters.
 			 */
-			[[nodiscard]] bool         isEmpty() const;
+			[[nodiscard]] bool               isEmpty() const;
 
 			/**
 			 * @brief Converts a line position to a linear accessible offset.
 			 * @param position Line and column position to convert.
 			 * @return Clamped linear offset.
 			 */
-			[[nodiscard]] int          offsetForPosition(TextPosition position) const;
+			[[nodiscard]] int                offsetForPosition(TextPosition position) const;
 			/**
 			 * @brief Converts a linear accessible offset to a line position.
 			 * @param offset Linear offset to convert.
 			 * @return Clamped line and column position.
 			 */
-			[[nodiscard]] TextPosition positionForOffset(int offset) const;
+			[[nodiscard]] TextPosition       positionForOffset(int offset) const;
 			/**
 			 * @brief Extracts accessible text in a linear offset range.
 			 * @param startOffset Inclusive start offset.
 			 * @param endOffset Exclusive end offset.
 			 * @return Text slice with logical line separators inserted as newlines.
 			 */
-			[[nodiscard]] QString      text(int startOffset, int endOffset) const;
+			[[nodiscard]] QString            text(int startOffset, int endOffset) const;
 			/**
 			 * @brief Extracts text between two line positions.
 			 * @param anchor First selection endpoint.
 			 * @param cursor Second selection endpoint.
 			 * @return Selected text with logical line separators inserted as newlines.
 			 */
-			[[nodiscard]] QString      selectedText(TextPosition anchor, TextPosition cursor) const;
+			[[nodiscard]] QString            selectedText(TextPosition anchor, TextPosition cursor) const;
+			/**
+			 * @brief Returns text and offsets for an accessible text boundary query.
+			 * @param offset Linear text offset.
+			 * @param boundary Boundary granularity to query.
+			 * @param query Boundary relation to the supplied offset.
+			 * @return Boundary text and inclusive/exclusive offsets.
+			 */
+			[[nodiscard]] TextBoundaryResult boundaryText(int offset, TextBoundaryKind boundary,
+			                                              TextBoundaryQuery query) const;
 
 		private:
-			QVector<QString>  m_lines;
-			QVector<int>      m_lineStarts;
-			int               m_characterCount{0};
+			QVector<QString>                 m_lines;
+			QVector<int>                     m_lineStarts;
+			int                              m_characterCount{0};
 
-			void              rebuildPrefixes();
-			[[nodiscard]] int clampedLineLength(int line) const;
+			void                             rebuildPrefixes();
+			[[nodiscard]] int                clampedLineLength(int line) const;
+			[[nodiscard]] TextBoundaryResult lineBoundaryText(int offset, TextBoundaryQuery query) const;
+			[[nodiscard]] TextBoundaryResult characterBoundaryText(int offset, TextBoundaryQuery query) const;
+			[[nodiscard]] TextBoundaryResult wholeTextBoundaryText(TextBoundaryQuery query) const;
+			[[nodiscard]] TextBoundaryResult qtBoundaryText(int offset, TextBoundaryKind boundary,
+			                                                TextBoundaryQuery query) const;
 	};
 } // namespace QMudAccessibleTextUtils
 

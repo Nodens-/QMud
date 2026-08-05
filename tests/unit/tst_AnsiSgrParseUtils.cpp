@@ -53,6 +53,7 @@ class tst_AnsiSgrParseUtils : public QObject
 		void trueColorSemicolonSgrParses();
 		void trueColorColonSgrParses();
 		void indexedColorColonSgrParses();
+		void byteArrayViewSubrangeIsParsedWithoutSurroundingBytes();
 		// NOLINTEND(readability-convert-member-functions-to-static)
 };
 
@@ -356,10 +357,28 @@ void tst_AnsiSgrParseUtils::indexedColorColonSgrParses()
 	QCOMPARE(chunks.size(), 1);
 	QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#ff0000"));
 }
+
+void tst_AnsiSgrParseUtils::byteArrayViewSubrangeIsParsedWithoutSurroundingBytes()
+{
+	const QByteArray               storage = QByteArrayLiteral("xx\x1b[31mVisible\x1b[0myy");
+	const QByteArrayView           view(storage.constData() + 2, storage.size() - 4);
+	QMudAnsiStreamState            streamState;
+	QMudStyledTextState            state;
+
+	const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+	    view, streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
+	    [](int) { return QString(); }, [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); },
+	    state);
+
+	QCOMPARE(chunks.size(), 1);
+	QCOMPARE(chunks.at(0).text, QStringLiteral("Visible"));
+	QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#800000"));
+	QCOMPARE(state.fore, QStringLiteral("#ffffff"));
+	QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
+}
 // NOLINTEND(readability-convert-member-functions-to-static)
 
 QTEST_APPLESS_MAIN(tst_AnsiSgrParseUtils)
-
 
 #if __has_include("tst_AnsiSgrParseUtils.moc")
 #include "tst_AnsiSgrParseUtils.moc"

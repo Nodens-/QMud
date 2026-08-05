@@ -56,6 +56,30 @@ namespace QMudNativePluginRegistry
 	};
 
 	/**
+	 * @brief Runtime-resolved state used to gate native CallPlugin dispatch.
+	 */
+	struct NativeCallContext
+	{
+			/** Whether the native shim is visible as an installed plugin. */
+			bool    installed{false};
+			/** Whether the native shim plugin row is enabled. */
+			bool    pluginEnabled{false};
+			/** Whether MushReader speech output is enabled; ignored by non-MushReader shims. */
+			bool    mushReaderSpeechEnabled{true};
+			/** User-facing plugin name used in legacy error text. */
+			QString pluginName;
+	};
+
+	/**
+	 * @brief Controls whether native CallPlugin handlers execute external side effects.
+	 */
+	enum class NativeCallExecutionMode
+	{
+		ExecuteSideEffects, /**< Execute the native routine normally. */
+		ValidateOnly        /**< Return legacy status/values without executing side effects. */
+	};
+
+	/**
 	 * @brief Runtime-level LuaAudio playback settings shared by direct `audio.*` and native CallPlugin paths.
 	 */
 	struct LuaAudioRuntimeBufferState
@@ -320,31 +344,42 @@ namespace QMudNativePluginRegistry
 	 * @param pluginId Shim id.
 	 * @param routine Routine name.
 	 * @param arguments Routine arguments converted to variants.
+	 * @param context Runtime-visible shim state.
+	 * @param executionMode Whether the routine should execute side effects or only validate.
 	 * @return Legacy status plus optional return values.
 	 */
-	NativeCallResult callRoutine(const WorldRuntime *runtime, const QString &pluginId, const QString &routine,
-	                             const QVector<QVariant> &arguments);
+	NativeCallResult
+	callRoutine(const WorldRuntime *runtime, const QString &pluginId, const QString &routine,
+	            const QVector<QVariant> &arguments, const NativeCallContext &context,
+	            NativeCallExecutionMode executionMode = NativeCallExecutionMode::ExecuteSideEffects);
+	/**
+	 * @brief Returns whether a native CallPlugin routine must execute on the runtime thread.
+	 * @param pluginId Shim id.
+	 * @param routine Routine name.
+	 * @return `true` when the routine owns thread-affine runtime side effects.
+	 */
+	[[nodiscard]] bool callRoutineRequiresRuntimeThread(const QString &pluginId, const QString &routine);
 	/**
 	 * @brief Handles native command aliases that would normally be installed by MushReader XML.
 	 * @param runtime Owning runtime.
 	 * @param command Entered command line.
 	 * @return `true` when the command was consumed.
 	 */
-	bool             handleMushReaderCommand(WorldRuntime *runtime, const QString &command);
+	bool               handleMushReaderCommand(WorldRuntime *runtime, const QString &command);
 	/**
 	 * @brief Handles native command aliases that would normally be installed by LuaAudio XML.
 	 * @param runtime Owning runtime.
 	 * @param command Entered command line.
 	 * @return `true` when the command was consumed.
 	 */
-	bool             handleLuaAudioCommand(WorldRuntime *runtime, const QString &command);
+	bool               handleLuaAudioCommand(WorldRuntime *runtime, const QString &command);
 	/**
 	 * @brief Handles native LuaAudio `OnPluginPlaySound` interception.
 	 * @param runtime Owning runtime.
 	 * @param sound Sound path or LuaAudio control string.
 	 * @return `true` when LuaAudio consumed the sound event.
 	 */
-	bool             handleLuaAudioPlaySound(const WorldRuntime *runtime, const QString &sound);
+	bool               handleLuaAudioPlaySound(const WorldRuntime *runtime, const QString &sound);
 	/**
 	 * @brief Handles native screen-draw speech for MushReader parity.
 	 * @param runtime Owning runtime.
@@ -353,6 +388,24 @@ namespace QMudNativePluginRegistry
 	 * @param text Text drawn to the output surface.
 	 */
 	void handleMushReaderScreenDraw(const WorldRuntime *runtime, int type, int log, const QString &text);
+	/**
+	 * @brief Handles native partial-line speech for MushReader parity.
+	 * @param runtime Owning runtime.
+	 * @param text Current unterminated output line.
+	 */
+	void handleMushReaderPartialLine(const WorldRuntime *runtime, const QString &text);
+	/**
+	 * @brief Clears pending native MushReader partial-line suppression state.
+	 * @param runtime Owning runtime.
+	 */
+	void clearMushReaderPartialLine(const WorldRuntime *runtime);
+	/**
+	 * @brief Speaks user-initiated scrollback review text through the active MushReader speech state.
+	 * @param runtime Owning runtime.
+	 * @param text Review or search-result text to speak.
+	 * @return `true` when MushReader consumed the review speech request.
+	 */
+	bool speakMushReaderReviewText(const WorldRuntime *runtime, const QString &text);
 	/**
 	 * @brief Handles native tab-completion speech for MushReader parity.
 	 * @param runtime Owning runtime.
@@ -372,17 +425,23 @@ namespace QMudNativePluginRegistry
 	 */
 	[[nodiscard]] bool isMushReaderPluginEnabled(const WorldRuntime *runtime);
 	/**
-	 * @brief Enables or disables passive screen/tab speech used when MushReader is not enabled.
+	 * @brief Returns whether MushReader speech output is enabled for an enabled native shim row.
 	 * @param runtime Owning runtime.
-	 * @param enable Enable passive screen/tab speech when `true`.
+	 * @return `true` when MushReader speech calls may emit speech.
 	 */
-	void               setMushReaderPassiveSpeechEnabled(const WorldRuntime *runtime, bool enable);
+	[[nodiscard]] bool isMushReaderSpeechEnabled(const WorldRuntime *runtime);
 	/**
-	 * @brief Returns whether passive screen/tab speech is enabled outside the MushReader shim.
+	 * @brief Enables or disables Qt accessibility speech when MushReader does not own speech.
 	 * @param runtime Owning runtime.
-	 * @return `true` when passive speech is enabled for the runtime.
+	 * @param enable Enable Qt accessibility speech announcements when `true`.
 	 */
-	[[nodiscard]] bool isMushReaderPassiveSpeechEnabled(const WorldRuntime *runtime);
+	void               setQtAccessibilitySpeechEnabled(const WorldRuntime *runtime, bool enable);
+	/**
+	 * @brief Returns whether Qt accessibility speech is enabled outside the MushReader workflow.
+	 * @param runtime Owning runtime.
+	 * @return `true` when Qt accessibility speech announcements are enabled for the runtime.
+	 */
+	[[nodiscard]] bool isQtAccessibilitySpeechEnabled(const WorldRuntime *runtime);
 	/**
 	 * @brief Installs runtime-level native behavior that must exist even without a shadow row.
 	 * @param runtime Owning runtime.
@@ -409,6 +468,11 @@ namespace QMudNativePluginRegistry
 	 * @param sink Event receiver; empty sink restores normal backend routing.
 	 */
 	void                      setTestSpeechSink(std::function<void(const TestSpeechEvent &)> sink);
+	/**
+	 * @brief Installs a test-only speech sink with explicit delivery status.
+	 * @param sink Event receiver returning true when the test speech event was accepted.
+	 */
+	void                      setTestSpeechSinkWithResult(std::function<bool(const TestSpeechEvent &)> sink);
 	/**
 	 * @brief Returns the number of initialized MushReader speech backends for tests.
 	 * @param runtime Runtime to inspect.

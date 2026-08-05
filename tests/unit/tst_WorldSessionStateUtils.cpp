@@ -17,6 +17,8 @@
 
 namespace
 {
+	using MxpMode = TelnetProcessor::MxpMode;
+
 	/**
 	 * @brief Builds one styled sample line used by round-trip assertions.
 	 * @return Line entry with style metadata.
@@ -86,7 +88,12 @@ class tst_WorldSessionStateUtils : public QObject
 			writeData.hasCommandHistory    = true;
 			writeData.hasCustomMxpElements = true;
 			writeData.hasMxpSessionState   = true;
-			writeData.mxpSessionState      = {true, false, false, 0, 1, 6};
+			writeData.mxpSessionState      = {true,
+			                                  false,
+			                                  false,
+			                                  TelnetProcessor::mxpModeCode(MxpMode::Open),
+			                                  TelnetProcessor::mxpModeCode(MxpMode::Secure),
+			                                  TelnetProcessor::mxpModeCode(MxpMode::PermanentSecure)};
 			writeData.outputLines.push_back(makeSampleLine());
 			writeData.commandHistory = {QStringLiteral("north"), QStringLiteral("look")};
 			writeData.customMxpElements.push_back(makeSampleCustomElement());
@@ -177,7 +184,12 @@ class tst_WorldSessionStateUtils : public QObject
 			QMudWorldSessionState::WorldSessionStateData customOnly;
 			customOnly.hasCustomMxpElements = true;
 			customOnly.hasMxpSessionState   = true;
-			customOnly.mxpSessionState      = {true, true, true, 6, 6, 6};
+			customOnly.mxpSessionState      = {true,
+			                                   true,
+			                                   true,
+			                                   TelnetProcessor::mxpModeCode(MxpMode::PermanentSecure),
+			                                   TelnetProcessor::mxpModeCode(MxpMode::PermanentSecure),
+			                                   TelnetProcessor::mxpModeCode(MxpMode::PermanentSecure)};
 			customOnly.customMxpElements.push_back(makeSampleCustomElement());
 			QVERIFY(QMudWorldSessionState::writeSessionStateFile(customOnlyPath, customOnly, &error));
 			QMudWorldSessionState::WorldSessionStateData customOnlyRead;

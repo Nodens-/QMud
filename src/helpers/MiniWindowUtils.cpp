@@ -10,6 +10,7 @@
 
 #include "Blending.h"
 #include "FontUtils.h"
+#include "HyperlinkActionUtils.h"
 #include "MemoryImageDecodeCacheUtils.h"
 #include "MiniWindow.h"
 #include "scripting/ScriptingErrors.h"
@@ -24,6 +25,7 @@
 #include <QFile>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QMutex>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QMutexLocker>
 #include <QPainter>
 #include <QPainterPath>
@@ -2185,7 +2187,7 @@ namespace MiniWindowUtils
 				const int    blendedG = (a.green() * mask + b.green() * (255 - mask)) / 255;
 				const int    blendedB = (a.blue() * mask + b.blue() * (255 - mask)) / 255;
 				const int    outR =
-				    (opacity < 1.0) ? QMudBlend::simpleOpacity(b.red(), blendedR, opacity) : blendedR;
+                    (opacity < 1.0) ? QMudBlend::simpleOpacity(b.red(), blendedR, opacity) : blendedR;
 				const int outG =
 				    (opacity < 1.0) ? QMudBlend::simpleOpacity(b.green(), blendedG, opacity) : blendedG;
 				const int outB =
@@ -2438,10 +2440,10 @@ namespace MiniWindowUtils
 				const long blendPixel = static_cast<long>(qRed(blendLine[x])) |
 				                        (static_cast<long>(qGreen(blendLine[x])) << 8) |
 				                        (static_cast<long>(qBlue(blendLine[x])) << 16);
-				const long basePixel  = static_cast<long>(qRed(baseLine[x])) |
-				                        (static_cast<long>(qGreen(baseLine[x])) << 8) |
-				                        (static_cast<long>(qBlue(baseLine[x])) << 16);
-				long       result{0};
+				const long basePixel = static_cast<long>(qRed(baseLine[x])) |
+				                       (static_cast<long>(qGreen(baseLine[x])) << 8) |
+				                       (static_cast<long>(qBlue(baseLine[x])) << 16);
+				long result{0};
 				if (!blendPixelInternal(blendPixel, basePixel, static_cast<short>(mode), opacity, result,
 				                        randomUnit))
 					return eUnknownOption;
@@ -2847,6 +2849,7 @@ namespace MiniWindowUtils
 
 	bool hasActivatableAction(const int actionType, const QString &action, const int actionNoneType)
 	{
-		return actionType != actionNoneType && !action.trimmed().isEmpty();
+		return actionType != actionNoneType && !action.trimmed().isEmpty() &&
+		       !hasUnresolvedMxpTextEntityReference(action);
 	}
 } // namespace MiniWindowUtils

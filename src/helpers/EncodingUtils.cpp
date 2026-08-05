@@ -8,6 +8,13 @@
 
 #include "EncodingUtils.h"
 
+#include <QStringConverter>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QStringEncoder>
+
+#include <algorithm>
+#include <utility>
+
 namespace
 {
 	constexpr char16_t kWindows1252C1Map[32] = {
@@ -45,6 +52,165 @@ namespace
 				wrapped.append("\r\n");
 		}
 		return wrapped;
+	}
+
+	QByteArray normalizedEncodingKey(const QString &name)
+	{
+		return name.trimmed().toLatin1().toUpper().replace('_', '-');
+	}
+
+	QString languageHintForEncodingKey(const QByteArray &key);
+
+	bool    isProtocolSafeLegacyEncodingKey(const QByteArray &key)
+	{
+		if (key.isEmpty())
+			return false;
+		if (key.startsWith("UTF") || key.startsWith("UCS"))
+			return false;
+		if (key == QByteArrayLiteral("SYSTEM") || key == QByteArrayLiteral("CESU-8") ||
+		    key == QByteArrayLiteral("BOCU-1") || key == QByteArrayLiteral("SCSU"))
+			return false;
+		if (key.startsWith("ISO-2022"))
+			return false;
+		return languageHintForEncodingKey(key) != QStringLiteral("Multiple languages");
+	}
+
+	QString languageHintForEncodingKey(const QByteArray &key)
+	{
+		if (key == QByteArrayLiteral("US-ASCII") || key == QByteArrayLiteral("ASCII") ||
+		    key == QByteArrayLiteral("ANSI-X3.4-1968"))
+			return QStringLiteral("English/ASCII");
+
+		if (key == QByteArrayLiteral("GB18030") || key == QByteArrayLiteral("GBK") ||
+		    key == QByteArrayLiteral("GB2312") || key == QByteArrayLiteral("EUC-CN") ||
+		    key == QByteArrayLiteral("CP936") || key == QByteArrayLiteral("WINDOWS-936") ||
+		    key == QByteArrayLiteral("IBM-936"))
+			return QStringLiteral("Simplified Chinese");
+		if (key == QByteArrayLiteral("BIG5") || key == QByteArrayLiteral("BIG5-HKSCS") ||
+		    key == QByteArrayLiteral("CP950") || key == QByteArrayLiteral("WINDOWS-950") ||
+		    key == QByteArrayLiteral("IBM-950"))
+			return QStringLiteral("Traditional Chinese");
+		if (key == QByteArrayLiteral("SHIFT-JIS") || key == QByteArrayLiteral("SHIFT-JISX0213") ||
+		    key == QByteArrayLiteral("SJIS") || key == QByteArrayLiteral("MS-KANJI") ||
+		    key == QByteArrayLiteral("CP932") || key == QByteArrayLiteral("WINDOWS-31J") ||
+		    key == QByteArrayLiteral("EUC-JP") || key == QByteArrayLiteral("EUCJP"))
+			return QStringLiteral("Japanese");
+		if (key == QByteArrayLiteral("EUC-KR") || key == QByteArrayLiteral("CP949") ||
+		    key == QByteArrayLiteral("WINDOWS-949") || key == QByteArrayLiteral("IBM-949") ||
+		    key == QByteArrayLiteral("KS-C-5601") || key == QByteArrayLiteral("KSC5601"))
+			return QStringLiteral("Korean");
+		if (key == QByteArrayLiteral("TIS-620") || key == QByteArrayLiteral("ISO-8859-11") ||
+		    key == QByteArrayLiteral("CP874") || key == QByteArrayLiteral("WINDOWS-874"))
+			return QStringLiteral("Thai");
+		if (key == QByteArrayLiteral("VISCII") || key == QByteArrayLiteral("TCVN") ||
+		    key == QByteArrayLiteral("CP1258") || key == QByteArrayLiteral("WINDOWS-1258"))
+			return QStringLiteral("Vietnamese");
+
+		if (key == QByteArrayLiteral("ISO-8859-1") || key == QByteArrayLiteral("ISO8859-1") ||
+		    key == QByteArrayLiteral("LATIN1") || key == QByteArrayLiteral("CP1252") ||
+		    key == QByteArrayLiteral("WINDOWS-1252") || key == QByteArrayLiteral("IBM-1252") ||
+		    key == QByteArrayLiteral("MACROMAN") || key == QByteArrayLiteral("MACINTOSH") ||
+		    key == QByteArrayLiteral("CP437") || key == QByteArrayLiteral("IBM437") ||
+		    key == QByteArrayLiteral("CP850") || key == QByteArrayLiteral("IBM850"))
+			return QStringLiteral("Western European");
+		if (key == QByteArrayLiteral("ISO-8859-15") || key == QByteArrayLiteral("ISO8859-15") ||
+		    key == QByteArrayLiteral("LATIN9"))
+			return QStringLiteral("Western European");
+		if (key == QByteArrayLiteral("ISO-8859-2") || key == QByteArrayLiteral("ISO8859-2") ||
+		    key == QByteArrayLiteral("LATIN2") || key == QByteArrayLiteral("CP1250") ||
+		    key == QByteArrayLiteral("WINDOWS-1250") || key == QByteArrayLiteral("IBM-1250") ||
+		    key == QByteArrayLiteral("CP852") || key == QByteArrayLiteral("IBM852"))
+			return QStringLiteral("Central/Eastern European");
+		if (key == QByteArrayLiteral("ISO-8859-3") || key == QByteArrayLiteral("ISO8859-3") ||
+		    key == QByteArrayLiteral("LATIN3"))
+			return QStringLiteral("South European");
+		if (key == QByteArrayLiteral("ISO-8859-4") || key == QByteArrayLiteral("ISO8859-4") ||
+		    key == QByteArrayLiteral("LATIN4") || key == QByteArrayLiteral("ISO-8859-13") ||
+		    key == QByteArrayLiteral("ISO8859-13") || key == QByteArrayLiteral("CP1257") ||
+		    key == QByteArrayLiteral("WINDOWS-1257"))
+			return QStringLiteral("Baltic");
+		if (key == QByteArrayLiteral("ISO-8859-5") || key == QByteArrayLiteral("ISO8859-5") ||
+		    key == QByteArrayLiteral("CP1251") || key == QByteArrayLiteral("WINDOWS-1251") ||
+		    key == QByteArrayLiteral("IBM-1251") || key == QByteArrayLiteral("CP866") ||
+		    key == QByteArrayLiteral("IBM866") || key == QByteArrayLiteral("KOI8-R") ||
+		    key == QByteArrayLiteral("KOI8-U") || key == QByteArrayLiteral("KOI8-RU") ||
+		    key == QByteArrayLiteral("MACCYRILLIC"))
+			return QStringLiteral("Cyrillic");
+		if (key == QByteArrayLiteral("ISO-8859-6") || key == QByteArrayLiteral("ISO8859-6") ||
+		    key == QByteArrayLiteral("CP1256") || key == QByteArrayLiteral("WINDOWS-1256"))
+			return QStringLiteral("Arabic");
+		if (key == QByteArrayLiteral("ISO-8859-7") || key == QByteArrayLiteral("ISO8859-7") ||
+		    key == QByteArrayLiteral("CP1253") || key == QByteArrayLiteral("WINDOWS-1253"))
+			return QStringLiteral("Greek");
+		if (key == QByteArrayLiteral("ISO-8859-8") || key == QByteArrayLiteral("ISO8859-8") ||
+		    key == QByteArrayLiteral("CP1255") || key == QByteArrayLiteral("WINDOWS-1255"))
+			return QStringLiteral("Hebrew");
+		if (key == QByteArrayLiteral("ISO-8859-9") || key == QByteArrayLiteral("ISO8859-9") ||
+		    key == QByteArrayLiteral("LATIN5") || key == QByteArrayLiteral("CP1254") ||
+		    key == QByteArrayLiteral("WINDOWS-1254"))
+			return QStringLiteral("Turkish");
+		if (key == QByteArrayLiteral("ISO-8859-10") || key == QByteArrayLiteral("ISO8859-10") ||
+		    key == QByteArrayLiteral("LATIN6"))
+			return QStringLiteral("Nordic");
+		if (key == QByteArrayLiteral("ISO-8859-14") || key == QByteArrayLiteral("ISO8859-14") ||
+		    key == QByteArrayLiteral("LATIN8"))
+			return QStringLiteral("Celtic");
+		if (key == QByteArrayLiteral("ISO-8859-16") || key == QByteArrayLiteral("ISO8859-16") ||
+		    key == QByteArrayLiteral("LATIN10"))
+			return QStringLiteral("South-Eastern European");
+
+		return QStringLiteral("Multiple languages");
+	}
+
+	const QStringList &cachedAvailableWorldTextEncodings()
+	{
+		static const QStringList codecs = []
+		{
+			QStringList available = QStringConverter::availableCodecs();
+			available.removeDuplicates();
+			available.erase(std::ranges::remove_if(
+			                    available, [](const QString &codec)
+			                    { return !isProtocolSafeLegacyEncodingKey(normalizedEncodingKey(codec)); })
+			                    .begin(),
+			                available.end());
+			std::ranges::sort(available, [](const QString &left, const QString &right)
+			                  { return QString::compare(left, right, Qt::CaseInsensitive) < 0; });
+			return available;
+		}();
+		return codecs;
+	}
+
+	bool isWindows1252EncodingName(const QString &name)
+	{
+		const QByteArray key = normalizedEncodingKey(name);
+		return key == QByteArrayLiteral("WINDOWS-1252") || key == QByteArrayLiteral("CP1252") ||
+		       key == QByteArrayLiteral("IBM-1252");
+	}
+
+	QString supportedEncodingNameForKey(const QByteArray &key)
+	{
+		if (!isProtocolSafeLegacyEncodingKey(key))
+			return {};
+		for (const QString &codec : cachedAvailableWorldTextEncodings())
+		{
+			if (normalizedEncodingKey(codec) == key)
+				return codec;
+		}
+		return {};
+	}
+
+	void appendUniqueCharsetName(QList<QByteArray> &names, const QByteArray &name)
+	{
+		const QByteArray trimmed = name.trimmed();
+		if (trimmed.isEmpty())
+			return;
+		const QByteArray key = trimmed.toUpper();
+		for (const QByteArray &existing : std::as_const(names))
+		{
+			if (existing.toUpper() == key)
+				return;
+		}
+		names.push_back(trimmed);
 	}
 } // namespace
 
@@ -164,4 +330,111 @@ QString qmudDecodeUtf8WithWindows1252Fallback(const QByteArrayView bytes, QByteA
 	}
 
 	return output;
+}
+
+QString qmudDefaultLegacyWorldEncodingName()
+{
+	return QStringLiteral("windows-1252");
+}
+
+QStringList qmudAvailableWorldTextEncodings()
+{
+	return cachedAvailableWorldTextEncodings();
+}
+
+QString qmudWorldTextEncodingDisplayName(const QString &encodingName)
+{
+	const QString canonical = qmudNormalizeWorldTextEncodingName(encodingName);
+	const QString language  = languageHintForEncodingKey(normalizedEncodingKey(canonical));
+	return QStringLiteral("%1 (%2)").arg(canonical, language);
+}
+
+QString qmudNormalizeWorldTextEncodingName(const QString &name)
+{
+	const QByteArray key = normalizedEncodingKey(name);
+	if (!key.isEmpty())
+	{
+		if (const QString supported = supportedEncodingNameForKey(key); !supported.isEmpty())
+			return supported;
+	}
+
+	if (const QString defaultEncoding =
+	        supportedEncodingNameForKey(normalizedEncodingKey(qmudDefaultLegacyWorldEncodingName()));
+	    !defaultEncoding.isEmpty())
+		return defaultEncoding;
+
+	return qmudDefaultLegacyWorldEncodingName();
+}
+
+QStringDecoder qmudCreateWorldTextDecoder(const QString &encodingName)
+{
+	return QStringDecoder(qmudNormalizeWorldTextEncodingName(encodingName));
+}
+
+QString qmudDecodeWorldText(const QByteArrayView bytes, QStringDecoder &decoder, bool *hadInvalidBytes)
+{
+	if (hadInvalidBytes)
+		*hadInvalidBytes = false;
+	if (bytes.isEmpty())
+		return {};
+
+	const QString decoded = decoder.decode(bytes);
+	if (hadInvalidBytes && decoder.hasError())
+		*hadInvalidBytes = true;
+	return decoded;
+}
+
+QString qmudDecodeWorldTextIsolated(const QByteArrayView bytes, const QString &encodingName,
+                                    bool *hadInvalidBytes)
+{
+	if (isWindows1252EncodingName(encodingName))
+	{
+		if (hadInvalidBytes)
+			*hadInvalidBytes = false;
+		return qmudDecodeWindows1252(bytes);
+	}
+
+	QStringDecoder decoder = qmudCreateWorldTextDecoder(encodingName);
+	return qmudDecodeWorldText(bytes, decoder, hadInvalidBytes);
+}
+
+QByteArray qmudEncodeWorldText(const QString &text, const QString &encodingName, bool *hadInvalidCharacters)
+{
+	if (hadInvalidCharacters)
+		*hadInvalidCharacters = false;
+	if (text.isEmpty())
+		return {};
+
+	QStringEncoder encoder(qmudNormalizeWorldTextEncodingName(encodingName));
+	QByteArray     encoded = encoder.encode(text);
+	if (hadInvalidCharacters && encoder.hasError())
+		*hadInvalidCharacters = true;
+	return encoded;
+}
+
+QList<QByteArray> qmudWorldTextTelnetCharsetNames(const bool useUtf8, const QString &legacyEncodingName)
+{
+	QList<QByteArray> names;
+	if (useUtf8)
+	{
+		appendUniqueCharsetName(names, QByteArrayLiteral("UTF-8"));
+		appendUniqueCharsetName(names, QByteArrayLiteral("UTF8"));
+		return names;
+	}
+
+	const QString    normalized = qmudNormalizeWorldTextEncodingName(legacyEncodingName);
+	const QByteArray canonical  = normalized.toLatin1();
+	appendUniqueCharsetName(names, canonical);
+
+	const QByteArray key = normalizedEncodingKey(normalized);
+	if (key == QByteArrayLiteral("GB18030"))
+		appendUniqueCharsetName(names, QByteArrayLiteral("GBK"));
+	else if (key == QByteArrayLiteral("GBK"))
+		appendUniqueCharsetName(names, QByteArrayLiteral("GB18030"));
+	else if (key == QByteArrayLiteral("WINDOWS-1252"))
+		appendUniqueCharsetName(names, QByteArrayLiteral("CP1252"));
+	else if (key == QByteArrayLiteral("SHIFT-JIS"))
+		appendUniqueCharsetName(names, QByteArrayLiteral("SHIFT_JIS"));
+
+	return names;
 }

@@ -21,6 +21,7 @@
 #include "dialogs/WorldAliasDialog.h"
 #include "dialogs/WorldTimerDialog.h"
 #include "dialogs/WorldTriggerDialog.h"
+#include "helpers/EncodingUtils.h"
 #include "helpers/NoteColourUtils.h"
 #include "scripting/ScriptingErrors.h"
 
@@ -1469,6 +1470,9 @@ void WorldPreferencesDialog::accept()
 		if (m_utf8)
 			m_runtime->setWorldAttribute(QStringLiteral("utf_8"),
 			                             m_utf8->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+		if (m_legacyEncoding)
+			m_runtime->setWorldAttribute(QStringLiteral("legacy_encoding"),
+			                             m_legacyEncoding->currentData().toString());
 		if (m_carriageReturnClearsLine)
 			m_runtime->setWorldAttribute(QStringLiteral("carriage_return_clears_line"),
 			                             m_carriageReturnClearsLine->isChecked() ? QStringLiteral("1")
@@ -2208,6 +2212,13 @@ void WorldPreferencesDialog::updateAutoCopyHtmlState() const
 	if (!m_copySelectionToClipboard || !m_autoCopyHtml)
 		return;
 	m_autoCopyHtml->setEnabled(m_copySelectionToClipboard->isChecked());
+}
+
+void WorldPreferencesDialog::updateLegacyEncodingState() const
+{
+	if (!m_legacyEncoding)
+		return;
+	m_legacyEncoding->setEnabled(!m_utf8 || !m_utf8->isChecked());
 }
 
 void WorldPreferencesDialog::updateOutputFontControls() const
@@ -5322,7 +5333,16 @@ void WorldPreferencesDialog::buildUi()
 	m_naws               = new QCheckBox(QStringLiteral("Negotiate About Window Size"), outputOptionsWidget);
 	m_carriageReturnClearsLine =
 	    new QCheckBox(QStringLiteral("Carriage-return clears line"), outputOptionsWidget);
-	m_utf8           = new QCheckBox(QStringLiteral("UTF-8 (Unicode)"), outputOptionsWidget);
+	m_utf8                    = new QCheckBox(QStringLiteral("UTF-8 (Unicode)"), outputOptionsWidget);
+	auto *legacyEncodingLabel = new QLabel(QStringLiteral("Legacy encoding:"), outputOptionsWidget);
+	m_legacyEncoding          = new QComboBox(outputOptionsWidget);
+	m_legacyEncoding->setObjectName(QStringLiteral("legacyEncodingCombo"));
+	m_legacyEncoding->setAccessibleName(legacyEncodingLabel->text());
+	m_legacyEncoding->setMinimumContentsLength(20);
+	m_legacyEncoding->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+	for (const QString &encodingName : qmudAvailableWorldTextEncodings())
+		m_legacyEncoding->addItem(qmudWorldTextEncodingDisplayName(encodingName), encodingName);
+	legacyEncodingLabel->setBuddy(m_legacyEncoding);
 	m_autoWrapWindow = new QCheckBox(QStringLiteral("Auto-wrap to window size"), outputOptionsWidget);
 	m_alternativeInverse =
 	    new QCheckBox(QStringLiteral("Alternative inverse/highlight display"), outputOptionsWidget);
@@ -5348,6 +5368,12 @@ void WorldPreferencesDialog::buildUi()
 	outputOptionsLayout->addWidget(m_naws);
 	outputOptionsLayout->addWidget(m_carriageReturnClearsLine);
 	outputOptionsLayout->addWidget(m_utf8);
+	auto *legacyEncodingLayout = new QHBoxLayout();
+	legacyEncodingLayout->setContentsMargins(24, 0, 0, 0);
+	legacyEncodingLayout->addWidget(legacyEncodingLabel);
+	legacyEncodingLayout->addWidget(m_legacyEncoding);
+	legacyEncodingLayout->addStretch();
+	outputOptionsLayout->addLayout(legacyEncodingLayout);
 	outputOptionsLayout->addWidget(m_autoWrapWindow);
 	outputOptionsLayout->addWidget(m_alternativeInverse);
 	outputOptionsLayout->addWidget(m_showConnectDisconnect);
@@ -5363,6 +5389,8 @@ void WorldPreferencesDialog::buildUi()
 	outputRight->addWidget(outputOptionsWidget);
 	if (m_copySelectionToClipboard && m_autoCopyHtml)
 		connect(m_copySelectionToClipboard, &QCheckBox::toggled, this, [this] { updateAutoCopyHtmlState(); });
+	if (m_utf8 && m_legacyEncoding)
+		connect(m_utf8, &QCheckBox::toggled, this, [this] { updateLegacyEncodingState(); });
 
 	auto *outputTelnetBox    = new QWidget(outputPage);
 	auto *outputTelnetLayout = new QGridLayout(outputTelnetBox);
@@ -9398,6 +9426,16 @@ void WorldPreferencesDialog::populateOutput()
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("auto_copy_to_clipboard_in_html"))));
 	if (m_utf8)
 		m_utf8->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("utf_8"))));
+	if (m_legacyEncoding)
+	{
+		const QString legacyEncoding =
+		    qmudNormalizeWorldTextEncodingName(attrs.value(QStringLiteral("legacy_encoding")));
+		int index = m_legacyEncoding->findData(legacyEncoding);
+		if (index < 0)
+			index = m_legacyEncoding->findData(qmudDefaultLegacyWorldEncodingName());
+		if (index >= 0)
+			m_legacyEncoding->setCurrentIndex(index);
+	}
 	if (m_carriageReturnClearsLine)
 		m_carriageReturnClearsLine->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("carriage_return_clears_line"))));
@@ -9428,6 +9466,7 @@ void WorldPreferencesDialog::populateOutput()
 		m_fadeOutputSeconds->setValue(value);
 	}
 	updateAutoCopyHtmlState();
+	updateLegacyEncodingState();
 	updateOutputFontControls();
 }
 

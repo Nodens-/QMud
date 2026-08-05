@@ -8,11 +8,20 @@
 
 #include "AccessibleTextUtils.h"
 
+#include <QTextBoundaryFinder>
+
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace
 {
+	struct BoundaryLookupResult
+	{
+			bool                                        found{false};
+			QMudAccessibleTextUtils::TextBoundaryResult result;
+	};
+
 	int safeQSizeToInt(const qsizetype size)
 	{
 		if (size <= 0)
@@ -35,6 +44,84 @@ namespace
 	{
 		return qBound(0, offset, characterCount);
 	}
+
+	bool hasNonSpaceText(const QString &text, const int start, const int end)
+	{
+		for (int i = start; i < end; ++i)
+		{
+			if (!text.at(i).isSpace())
+				return true;
+		}
+		return false;
+	}
+
+	BoundaryLookupResult boundaryTextInLine(const QString &lineText, const int lineStartOffset,
+	                                        const int                                        localOffset,
+	                                        const QMudAccessibleTextUtils::TextBoundaryKind  boundary,
+	                                        const QMudAccessibleTextUtils::TextBoundaryQuery query)
+	{
+		if (lineText.isEmpty())
+			return {};
+
+		const QTextBoundaryFinder::BoundaryType finderType =
+		    boundary == QMudAccessibleTextUtils::TextBoundaryKind::Sentence ? QTextBoundaryFinder::Sentence
+		                                                                    : QTextBoundaryFinder::Word;
+		QTextBoundaryFinder finder(finderType, lineText);
+		constexpr qsizetype kNoBoundary   = -1;
+		qsizetype           start         = 0;
+		int                 selectedStart = -1;
+		int                 selectedEnd   = -1;
+		for (qsizetype end = finder.toNextBoundary(); end != kNoBoundary;
+		     start = end, end = finder.toNextBoundary())
+		{
+			const int rangeStart = safeQSizeToInt(start);
+			const int rangeEnd   = safeQSizeToInt(end);
+			if (rangeEnd <= rangeStart || !hasNonSpaceText(lineText, rangeStart, rangeEnd))
+				continue;
+
+			switch (query)
+			{
+			case QMudAccessibleTextUtils::TextBoundaryQuery::Before:
+				if (rangeEnd <= localOffset)
+				{
+					selectedStart = rangeStart;
+					selectedEnd   = rangeEnd;
+					continue;
+				}
+				break;
+			case QMudAccessibleTextUtils::TextBoundaryQuery::At:
+				if (localOffset >= rangeStart && localOffset < rangeEnd)
+				{
+					selectedStart = rangeStart;
+					selectedEnd   = rangeEnd;
+				}
+				else if (rangeEnd <= localOffset)
+				{
+					selectedStart = rangeStart;
+					selectedEnd   = rangeEnd;
+					continue;
+				}
+				break;
+			case QMudAccessibleTextUtils::TextBoundaryQuery::After:
+				if (rangeStart > localOffset)
+				{
+					selectedStart = rangeStart;
+					selectedEnd   = rangeEnd;
+				}
+				break;
+			}
+			break;
+		}
+
+		if (selectedStart < 0)
+			return {};
+		const int globalStart = saturatedAdd(lineStartOffset, selectedStart);
+		const int globalEnd   = saturatedAdd(lineStartOffset, selectedEnd);
+		const QMudAccessibleTextUtils::TextBoundaryResult result{
+		    lineText.mid(selectedStart, selectedEnd - selectedStart), globalStart, globalEnd};
+		return {true, result};
+	}
+
 } // namespace
 
 QMudAccessibleTextUtils::LineOffsetMap::LineOffsetMap(QVector<QString> lines)
@@ -135,6 +222,26 @@ QString QMudAccessibleTextUtils::LineOffsetMap::selectedText(const TextPosition 
 	return text(qMin(anchorOffset, cursorOffset), qMax(anchorOffset, cursorOffset));
 }
 
+QMudAccessibleTextUtils::TextBoundaryResult
+QMudAccessibleTextUtils::LineOffsetMap::boundaryText(const int offset, const TextBoundaryKind boundary,
+                                                     const TextBoundaryQuery query) const
+{
+	switch (boundary)
+	{
+	case TextBoundaryKind::Character:
+		return characterBoundaryText(offset, query);
+	case TextBoundaryKind::Paragraph:
+	case TextBoundaryKind::Line:
+		return lineBoundaryText(offset, query);
+	case TextBoundaryKind::WholeText:
+		return wholeTextBoundaryText(query);
+	case TextBoundaryKind::Word:
+	case TextBoundaryKind::Sentence:
+		return qtBoundaryText(offset, boundary, query);
+	}
+	return {};
+}
+
 void QMudAccessibleTextUtils::LineOffsetMap::rebuildPrefixes()
 {
 	m_lineStarts.clear();
@@ -156,4 +263,141 @@ int QMudAccessibleTextUtils::LineOffsetMap::clampedLineLength(const int line) co
 	if (line < 0 || line >= m_lines.size())
 		return 0;
 	return safeQSizeToInt(m_lines.at(line).size());
+}
+
+QMudAccessibleTextUtils::TextBoundaryResult
+QMudAccessibleTextUtils::LineOffsetMap::lineBoundaryText(const int               offset,
+                                                         const TextBoundaryQuery query) const
+{
+	if (m_lines.isEmpty())
+		return {{}, 0, 0};
+
+	const int          boundedOffset = clampedOffset(offset, m_characterCount);
+	const TextPosition position      = positionForOffset(boundedOffset);
+	int                line          = position.line;
+	switch (query)
+	{
+	case TextBoundaryQuery::Before:
+		--line;
+		break;
+	case TextBoundaryQuery::After:
+		++line;
+		break;
+	case TextBoundaryQuery::At:
+		break;
+	}
+
+	if (line < 0)
+		return {{}, 0, 0};
+	if (line >= lineCount())
+		return {{}, m_characterCount, m_characterCount};
+
+	const int start = m_lineStarts.at(line);
+	const int end   = saturatedAdd(start, clampedLineLength(line));
+	return {m_lines.at(line), start, end};
+}
+
+QMudAccessibleTextUtils::TextBoundaryResult
+QMudAccessibleTextUtils::LineOffsetMap::characterBoundaryText(const int               offset,
+                                                              const TextBoundaryQuery query) const
+{
+	if (m_characterCount <= 0)
+		return {{}, 0, 0};
+
+	const int boundedOffset = clampedOffset(offset, m_characterCount);
+	int       start         = boundedOffset;
+	switch (query)
+	{
+	case TextBoundaryQuery::Before:
+		start = boundedOffset - 1;
+		break;
+	case TextBoundaryQuery::After:
+		start = boundedOffset + 1;
+		break;
+	case TextBoundaryQuery::At:
+		break;
+	}
+
+	if (start < 0)
+		return {{}, 0, 0};
+	if (start >= m_characterCount)
+		return {{}, m_characterCount, m_characterCount};
+
+	const TextPosition position   = positionForOffset(start);
+	const int          lineLength = clampedLineLength(position.line);
+	if (position.column == lineLength && position.line + 1 < lineCount())
+		return {QString(QLatin1Char('\n')), start, saturatedAdd(start, 1)};
+	return {m_lines.at(position.line).mid(position.column, 1), start, saturatedAdd(start, 1)};
+}
+
+QMudAccessibleTextUtils::TextBoundaryResult
+QMudAccessibleTextUtils::LineOffsetMap::wholeTextBoundaryText(const TextBoundaryQuery query) const
+{
+	if (query != TextBoundaryQuery::At || m_characterCount <= 0)
+		return {{}, 0, 0};
+	return {text(0, m_characterCount), 0, m_characterCount};
+}
+
+QMudAccessibleTextUtils::TextBoundaryResult
+QMudAccessibleTextUtils::LineOffsetMap::qtBoundaryText(const int offset, const TextBoundaryKind boundary,
+                                                       const TextBoundaryQuery query) const
+{
+	if (m_characterCount <= 0)
+		return {{}, 0, 0};
+
+	const int          boundedOffset = clampedOffset(offset, m_characterCount);
+	const TextPosition position      = positionForOffset(boundedOffset);
+	const int          totalLines    = lineCount();
+	switch (query)
+	{
+	case TextBoundaryQuery::Before:
+		for (int line = qMin(position.line, totalLines - 1); line >= 0; --line)
+		{
+			const int localOffset = line == position.line ? position.column : clampedLineLength(line);
+			if (const BoundaryLookupResult result =
+			        boundaryTextInLine(m_lines.at(line), m_lineStarts.at(line), localOffset, boundary, query);
+			    result.found)
+			{
+				return result.result;
+			}
+		}
+		break;
+	case TextBoundaryQuery::At:
+		if (position.line >= 0 && position.line < totalLines)
+		{
+			if (const BoundaryLookupResult result =
+			        boundaryTextInLine(m_lines.at(position.line), m_lineStarts.at(position.line),
+			                           position.column, boundary, query);
+			    result.found)
+			{
+				return result.result;
+			}
+		}
+		for (int line = qMin(position.line - 1, totalLines - 1); line >= 0; --line)
+		{
+			if (const BoundaryLookupResult result =
+			        boundaryTextInLine(m_lines.at(line), m_lineStarts.at(line), clampedLineLength(line),
+			                           boundary, TextBoundaryQuery::Before);
+			    result.found)
+			{
+				return result.result;
+			}
+		}
+		break;
+	case TextBoundaryQuery::After:
+		for (int line = qMax(0, position.line); line < totalLines; ++line)
+		{
+			const int localOffset = line == position.line ? position.column : -1;
+			if (const BoundaryLookupResult result =
+			        boundaryTextInLine(m_lines.at(line), m_lineStarts.at(line), localOffset, boundary, query);
+			    result.found)
+			{
+				return result.result;
+			}
+		}
+		break;
+	}
+
+	return query == TextBoundaryQuery::After ? TextBoundaryResult{{}, m_characterCount, m_characterCount}
+	                                         : TextBoundaryResult{{}, 0, 0};
 }

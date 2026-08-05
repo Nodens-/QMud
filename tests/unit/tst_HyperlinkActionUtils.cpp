@@ -49,6 +49,13 @@ class tst_HyperlinkActionUtils : public QObject
 			QCOMPARE(firstMxpSendAction(href), QStringLiteral("mapper goto 72930"));
 		}
 
+		void unresolvedMxpTextEntityReferenceIsDetected()
+		{
+			QVERIFY(hasUnresolvedMxpTextEntityReference(QStringLiteral("help &text;")));
+			QVERIFY(hasUnresolvedMxpTextEntityReference(QStringLiteral("help &amp;text;")));
+			QVERIFY(!hasUnresolvedMxpTextEntityReference(QStringLiteral("help start-newbie")));
+		}
+
 		void parsePluginHyperlinkCallAcceptsMushclientPayload()
 		{
 			const QString action = QStringLiteral(

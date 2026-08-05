@@ -30,10 +30,12 @@
 #include <QMetaObject>
 #include <QMutex>
 #include <QObject>
+#include <QPointer>
 #include <QQueue>
 #include <QSet>
 #include <QSharedPointer>
 #include <QString>
+#include <QStringDecoder>
 #include <QVariant>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
@@ -55,6 +57,10 @@ class QMediaPlayer;
 class QSoundEffect;
 class QTemporaryFile;
 class QTcpServer;
+namespace QMudNativePluginRegistry
+{
+	struct NativeCallContext;
+}
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 struct lua_State;
 #endif
@@ -404,21 +410,36 @@ class WorldRuntime : public QObject
 		 */
 		struct StyleSpan
 		{
-				int     length{0};
-				QColor  fore;
-				QColor  back;
-				bool    bold{false};
-				bool    underline{false};
-				bool    italic{false};
-				bool    blink{false};
-				bool    strike{false};
-				bool    inverse{false};
-				bool    changed{false};
-				int     actionType{ActionNone};
-				QString action;
-				QString hint;
-				QString variable;
-				bool    startTag{false};
+				int                length{0};
+				QColor             fore;
+				QColor             back;
+				bool               bold{false};
+				bool               underline{false};
+				bool               italic{false};
+				bool               blink{false};
+				bool               strike{false};
+				bool               inverse{false};
+				bool               changed{false};
+				int                actionType{ActionNone};
+				QString            action;
+				QString            hint;
+				QString            variable;
+				bool               startTag{false};
+
+				bool               operator==(const StyleSpan &) const = default;
+				/**
+				 * @brief Compares style attributes while ignoring run length.
+				 * @param other Span to compare with this span.
+				 * @return `true` when both spans can be merged without changing presentation or actions.
+				 */
+				[[nodiscard]] bool hasSameStyleAttributes(const StyleSpan &other) const
+				{
+					if (length == other.length)
+						return *this == other;
+					StyleSpan normalizedOther = other;
+					normalizedOther.length    = length;
+					return *this == normalizedOther;
+				}
 		};
 		/**
 		 * @brief Incremental ANSI rendering state carried across parsed text chunks.
@@ -467,6 +488,11 @@ class WorldRuntime : public QObject
 		{
 				QByteArray    tag;
 				MxpStyleState state;
+				MxpStyleState actionState;
+				int           actionTextLineNumber{-1};
+				int           actionTextStartColumn{0};
+				qint64        actionTextRuntimeLineNumber{-1};
+				quint64       actionTextPartialLineRevision{0};
 		};
 		/**
 		 * @brief Context needed by `WindowOutputText` to parse ANSI/MXP and custom MXP definitions.
@@ -1248,16 +1274,39 @@ class WorldRuntime : public QObject
 		 * @param infoType Info selector code.
 		 * @return Requested metadata value.
 		 */
-		[[nodiscard]] QVariant    pluginInfo(const QString &pluginId, int infoType) const;
+		[[nodiscard]] QVariant pluginInfo(const QString &pluginId, int infoType) const;
+		/**
+		 * @brief Returns current native shim CallPlugin routing state.
+		 * @param pluginId Native shim id or name.
+		 * @return Native CallPlugin context resolved on the runtime thread.
+		 */
+		[[nodiscard]] QMudNativePluginRegistry::NativeCallContext
+		                          nativePluginCallContext(const QString &pluginId) const;
 		/**
 		 * @brief Invalidates plugin metadata caches after native shim runtime state changes.
 		 */
 		void                      notifyNativePluginStateChanged();
 		/**
 		 * @brief Returns whether MushReader owns live speech for this runtime.
-		 * @return `true` when the native MushReader shim is installed or currently enabled for the runtime.
+		 * @return `true` when the native MushReader shim is enabled for the runtime.
 		 */
 		[[nodiscard]] bool        hasMushReaderLiveSpeechOwner() const;
+		/**
+		 * @brief Returns whether the enabled MushReader shim may currently speak.
+		 * @return `true` when MushReader owns speech and its speech gate is enabled.
+		 */
+		[[nodiscard]] bool        isMushReaderSpeechEnabled() const;
+		/**
+		 * @brief Speaks user-initiated scrollback review text through MushReader when it owns speech.
+		 * @param text Review or search-result text to speak.
+		 * @return `true` when MushReader consumed the review speech request.
+		 */
+		[[nodiscard]] bool        speakMushReaderReviewText(const QString &text) const;
+		/**
+		 * @brief Returns whether Qt accessibility speech is enabled when MushReader does not own speech.
+		 * @return `true` when Qt accessibility speech announcements are enabled.
+		 */
+		[[nodiscard]] bool        isQtAccessibilitySpeechEnabled() const;
 		/**
 		 * @brief Lists installed plugin ids in current order.
 		 * @return Plugin id list.
@@ -5122,6 +5171,12 @@ class WorldRuntime : public QObject
 		 */
 		void flushOutputViewMutationBatch();
 		/**
+		 * @brief Publishes a partial incoming line after presenting completed output first.
+		 * @param line Partial line text to publish.
+		 * @param spans Style spans for the partial line.
+		 */
+		void publishIncomingStyledLinePartial(const QString &line, const QVector<StyleSpan> &spans);
+		/**
 		 * @brief Captures or reuses immutable callback output-line snapshot data.
 		 * @param lineSnapshotPolicy Output-line snapshot depth to attach.
 		 * @return Shared line-buffer snapshot for line API dispatches.
@@ -5582,6 +5637,19 @@ class WorldRuntime : public QObject
 				bool       openedSecure{false};
 				bool       noReset{false};
 		};
+		struct ResolvedOutputColourCache
+		{
+				bool            valid{false};
+				QVector<QColor> normalAnsi;
+				QVector<QColor> boldAnsi;
+				QVector<QColor> customText;
+				QVector<QColor> customBack;
+				QString         defaultFore;
+				QString         defaultBack;
+		};
+
+		void                                                       invalidateResolvedOutputColourCache();
+		[[nodiscard]] const ResolvedOutputColourCache             &resolvedOutputColourCache();
 
 		QMap<QString, QString>                                     m_worldAttributes;
 		QMap<QString, QString>                                     m_worldMultilineAttributes;
@@ -5624,6 +5692,9 @@ class WorldRuntime : public QObject
 		AnsiRenderState                                            m_ansiRenderState;
 		QByteArray                                                 m_streamUtf8Carry;
 		bool                                                       m_streamUtf8DecoderEnabled{false};
+		QString                                                    m_streamLegacyEncodingName;
+		QStringDecoder                                             m_streamLegacyDecoder;
+		ResolvedOutputColourCache                                  m_resolvedOutputColourCache;
 		MxpStyleState                                              m_mxpRenderStyle;
 		QVector<MxpStyleFrame>                                     m_mxpRenderStack;
 		QVector<QByteArray>                                        m_mxpRenderBlockStack;
@@ -5633,6 +5704,7 @@ class WorldRuntime : public QObject
 		QString                                                    m_partialLineText;
 		QVector<StyleSpan>                                         m_partialLineSpans;
 		bool                                                       m_pendingCarriageReturnOverwrite{false};
+		quint64                                                    m_incomingPartialLineRevision{0};
 
 		QList<Trigger>                                             m_triggers;
 		QList<Alias>                                               m_aliases;
@@ -5754,6 +5826,7 @@ class WorldRuntime : public QObject
 		int                                             m_outputViewLineChangedIndex{-1};
 		bool                                            m_outputViewRangeChangedPending{false};
 		int                                             m_outputViewFirstChangedIndex{-1};
+		QPointer<WorldView>                             m_outputViewMutationBatchView;
 		QVector<QMudMemoryImageDecodeCacheEntry>        m_memoryImageDecodeCache;
 		qint64                                          m_memoryImageDecodeCacheBytes{0};
 		int                                             m_absoluteReferenceRightOver{0};

@@ -8,17 +8,18 @@
 
 #ifdef QMUD_INCLUDE_WORLD_OPTION_DEFAULTS_ALPHA_ROWS
 
-	{"auto_log_file_name", ""}, {"auto_say_override_prefix", "-"}, {"auto_say_string", "say ", OPT_KEEP_SPACES},
+{"auto_log_file_name", ""}, {"auto_say_override_prefix", "-"}, {"auto_say_string", "say ", OPT_KEEP_SPACES},
     {"beep_sound", "sounds/QMud/beep.wav"}, {"chat_file_save_directory", ""}, {"chat_name", ""},
     {"chat_message_prefix", "", OPT_KEEP_SPACES}, {"command_stack_character", ";", OPT_COMMAND_STACK},
     {"connect_text", "", OPT_MULTLINE}, {"editor_window_name", ""}, {"filter_aliases", "", OPT_MULTLINE},
     {"filter_timers", "", OPT_MULTLINE}, {"filter_triggers", "", OPT_MULTLINE},
     {"filter_variables", "", OPT_MULTLINE}, {"id", "", OPT_WORLD_ID},
     {"input_font_name", "DejaVu Sans Mono", OPT_UPDATE_VIEWS | OPT_UPDATE_INPUT_FONT},
-    {"log_file_postamble", "", OPT_MULTLINE}, {"log_file_preamble", "", OPT_MULTLINE},
-    {"log_line_postamble_input", "", OPT_KEEP_SPACES}, {"log_line_postamble_notes", "", OPT_KEEP_SPACES},
-    {"log_line_postamble_output", "", OPT_KEEP_SPACES}, {"log_line_preamble_input", "", OPT_KEEP_SPACES},
-    {"log_line_preamble_notes", "", OPT_KEEP_SPACES}, {"log_line_preamble_output", "", OPT_KEEP_SPACES},
+    {"legacy_encoding", "windows-1252"}, {"log_file_postamble", "", OPT_MULTLINE},
+    {"log_file_preamble", "", OPT_MULTLINE}, {"log_line_postamble_input", "", OPT_KEEP_SPACES},
+    {"log_line_postamble_notes", "", OPT_KEEP_SPACES}, {"log_line_postamble_output", "", OPT_KEEP_SPACES},
+    {"log_line_preamble_input", "", OPT_KEEP_SPACES}, {"log_line_preamble_notes", "", OPT_KEEP_SPACES},
+    {"log_line_preamble_output", "", OPT_KEEP_SPACES},
     {"mapping_failure", "Alas, you cannot go that way.", OPT_KEEP_SPACES},
     {"name", "CthulhuMUD", OPT_PLUGIN_CANNOT_WRITE}, {"new_activity_sound", kNoSoundLiteral},
     {"notes", "", OPT_MULTLINE}, {"on_mxp_close_tag", ""}, {"on_mxp_error", ""}, {"on_mxp_open_tag", ""},

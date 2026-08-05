@@ -38,6 +38,7 @@
 #include "WorldRuntime.h"
 #include "WorldView.h"
 #include "dialogs/SpellCheckDialog.h"
+#include "helpers/EncodingUtils.h"
 #include "helpers/LuaExecutionUtils.h"
 #include "helpers/LuaModalDialogUtils.h"
 #include "helpers/MainFrameMdiUtils.h"
@@ -1711,9 +1712,12 @@ namespace
 			payloadText += QStringLiteral("\r\n");
 		const bool utf8 =
 		    isEnabledValue(resolveWorldAttributeValueForApi(engine, runtime, QStringLiteral("utf_8")));
-		const bool doNotTranslateIac = isEnabledValue(resolveWorldAttributeValueForApi(
+		const bool    doNotTranslateIac = isEnabledValue(resolveWorldAttributeValueForApi(
 		    engine, runtime, QStringLiteral("do_not_translate_iac_to_iac_iac")));
-		QByteArray payload           = utf8 ? payloadText.toUtf8() : payloadText.toLocal8Bit();
+		const QString legacyEncoding    = qmudNormalizeWorldTextEncodingName(
+		    resolveWorldAttributeValueForApi(engine, runtime, QStringLiteral("legacy_encoding")));
+		QByteArray payload =
+		    utf8 ? payloadText.toUtf8() : qmudEncodeWorldText(payloadText, legacyEncoding, nullptr);
 		if (!doNotTranslateIac)
 			payload.replace(static_cast<char>(0xFF), QByteArray("\xFF\xFF", 2));
 		return payload.size();
@@ -4916,6 +4920,39 @@ namespace
 		return true;
 	}
 
+	bool resolveNativePluginInstalledForCallback(const LuaCallbackEngine *engine, const QString &pluginId,
+	                                             bool &installed)
+	{
+		const QString shimId = QMudNativePluginRegistry::resolveShimIdOrName(pluginId);
+		if (shimId.compare(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive) == 0)
+		{
+			installed = true;
+			return true;
+		}
+		if (shimId.isEmpty())
+			return false;
+		return tryResolveCallbackPluginInstalledFromCache(engine, shimId, installed) ||
+		       tryBackfillCallbackPluginInstalledFromDispatch(engine, shimId, installed);
+	}
+
+	bool tryResolveCallbackNativePluginSpeechEnabledFromDispatch(const LuaCallbackEngine *engine,
+	                                                             const QString &pluginId, bool &enabled)
+	{
+		const auto *snapshot = engine ? engine->currentDispatchMiniWindowSnapshot() : nullptr;
+		if (!snapshot)
+			return false;
+		const QString key = pluginId.trimmed().toLower();
+		if (key.isEmpty() || callbackPluginMetadataDispatchDirty(engine, key))
+			return false;
+		if (const auto it = snapshot->nativePluginSpeechEnabledById.constFind(key);
+		    it != snapshot->nativePluginSpeechEnabledById.constEnd())
+		{
+			enabled = it.value();
+			return true;
+		}
+		return false;
+	}
+
 	bool tryBackfillCallbackPluginInfoValueFromDispatch(const LuaCallbackEngine *engine,
 	                                                    const QString &pluginId, const int infoType,
 	                                                    QVariant &value, bool &hasValue)
@@ -4962,6 +4999,57 @@ namespace
 		value    = {};
 		cacheCallbackPluginInfoValue(engine, key, infoType, value, false);
 		return true;
+	}
+
+	bool resolveNativePluginInfoForCallback(const LuaCallbackEngine *engine, const QString &shimId,
+	                                        const int infoType, QVariant &value)
+	{
+		bool cacheHit = false;
+		if (tryResolveCallbackPluginInfoValueFromCache(engine, shimId, infoType, value, cacheHit))
+			return true;
+		if (cacheHit)
+			return false;
+		bool hasValue = false;
+		if (!tryBackfillCallbackPluginInfoValueFromDispatch(engine, shimId, infoType, value, hasValue))
+			return false;
+		return hasValue;
+	}
+
+	QMudNativePluginRegistry::NativeCallContext
+	resolveNativeCallContextForCallback(const LuaCallbackEngine *engine, const QString &shimId)
+	{
+		QMudNativePluginRegistry::NativeCallContext    context;
+		QMudNativePluginRegistry::NativePluginMetadata metadata;
+		if (QMudNativePluginRegistry::metadataForShim(shimId, metadata))
+			context.pluginName = metadata.name;
+
+		bool installed = false;
+		if (resolveNativePluginInstalledForCallback(engine, shimId, installed))
+			context.installed = installed;
+		if (!context.installed)
+			return context;
+
+		QVariant enabled;
+		if (resolveNativePluginInfoForCallback(engine, shimId, 17, enabled))
+			context.pluginEnabled = enabled.toBool();
+		else
+			context.pluginEnabled =
+			    shimId.compare(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive) == 0;
+
+		QVariant pluginName;
+		if (resolveNativePluginInfoForCallback(engine, shimId, 1, pluginName) &&
+		    !pluginName.toString().trimmed().isEmpty())
+		{
+			context.pluginName = pluginName.toString();
+		}
+
+		if (shimId.compare(QMudNativePluginRegistry::mushReaderPluginId(), Qt::CaseInsensitive) == 0)
+		{
+			bool speechEnabled = true;
+			if (tryResolveCallbackNativePluginSpeechEnabledFromDispatch(engine, shimId, speechEnabled))
+				context.mushReaderSpeechEnabled = speechEnabled;
+		}
+		return context;
 	}
 
 	bool tryResolveCallbackPluginCallTargetFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
@@ -5972,6 +6060,23 @@ namespace
 		if (!snapshot || !snapshot->hasWindowOutputTextRenderSnapshot)
 			return false;
 
+		QMap<QString, QString>  renderWorldAttributes = snapshot->worldAttributesSnapshot;
+		QHash<QString, QString> renderEntities =
+		    snapshot->hasEntitySnapshot ? snapshot->entityValuesByName : QHash<QString, QString>{};
+		if (const auto *callbackContext = activeCallbackContextConst(engine))
+		{
+			for (auto it = callbackContext->worldAttributeValuesByKey.constBegin();
+			     it != callbackContext->worldAttributeValuesByKey.constEnd(); ++it)
+			{
+				renderWorldAttributes.insert(it.key(), it.value());
+			}
+			for (auto it = callbackContext->entityValuesByName.constBegin();
+			     it != callbackContext->entityValuesByName.constEnd(); ++it)
+			{
+				renderEntities.insert(it.key(), it.value());
+			}
+		}
+
 		context.ansiStreamState = snapshot->windowOutputTextAnsiStreamState;
 		context.ansiRenderState =
 		    ansiRenderStateFromCallbackSnapshot(snapshot->windowOutputTextAnsiRenderState);
@@ -5979,13 +6084,18 @@ namespace
 		context.mxpBlockStack   = snapshot->windowOutputTextMxpBlockStack;
 		context.mxpLinkOpen     = snapshot->windowOutputTextMxpLinkOpen;
 		context.mxpPreDepth     = snapshot->windowOutputTextMxpPreDepth;
-		context.worldAttributes = snapshot->worldAttributesSnapshot;
+		context.worldAttributes = renderWorldAttributes;
 		context.mxpStyleStack.reserve(snapshot->windowOutputTextMxpStyleStack.size());
 		for (const LuaCallbackMxpStyleFrameSnapshot &frameSnapshot : snapshot->windowOutputTextMxpStyleStack)
 		{
 			WorldRuntime::MxpStyleFrame frame;
-			frame.tag   = frameSnapshot.tag;
-			frame.state = mxpStyleStateFromCallbackSnapshot(frameSnapshot.state);
+			frame.tag                         = frameSnapshot.tag;
+			frame.state                       = mxpStyleStateFromCallbackSnapshot(frameSnapshot.state);
+			frame.actionState                 = mxpStyleStateFromCallbackSnapshot(frameSnapshot.actionState);
+			frame.actionTextLineNumber        = frameSnapshot.actionTextLineNumber;
+			frame.actionTextStartColumn       = frameSnapshot.actionTextStartColumn;
+			frame.actionTextRuntimeLineNumber = frameSnapshot.actionTextRuntimeLineNumber;
+			frame.actionTextPartialLineRevision = frameSnapshot.actionTextPartialLineRevision;
 			context.mxpStyleStack.push_back(frame);
 		}
 		context.normalAnsi.resize(8);
@@ -6032,13 +6142,10 @@ namespace
 		};
 
 		const auto telnet = QSharedPointer<TelnetProcessor>::create();
-		if (snapshot->hasEntitySnapshot)
+		if (!renderEntities.isEmpty())
 		{
-			for (auto it = snapshot->entityValuesByName.constBegin();
-			     it != snapshot->entityValuesByName.constEnd(); ++it)
-			{
-				telnet->setCustomEntity(it.key().toLocal8Bit(), it.value().toUtf8());
-			}
+			for (auto it = renderEntities.constBegin(); it != renderEntities.constEnd(); ++it)
+				telnet->setCustomEntity(it.key().toUtf8(), it.value().toUtf8());
 		}
 		context.entityResolver = [telnet](const QByteArray &entityName, QByteArray &value) -> bool
 		{ return telnet && telnet->resolveEntityValue(entityName, value); };
@@ -7239,6 +7346,7 @@ namespace
 			snapshot.pluginEnabledById.clear();
 			snapshot.pluginEnginesById.clear();
 			snapshot.pluginInfoValuesById.clear();
+			snapshot.nativePluginSpeechEnabledById.clear();
 		}
 		else if (context.hasPluginIdListSnapshot)
 		{
@@ -7253,6 +7361,7 @@ namespace
 			snapshot.pluginEnabledById.remove(pluginId);
 			snapshot.pluginEnginesById.remove(pluginId);
 			snapshot.pluginInfoValuesById.remove(pluginId);
+			snapshot.nativePluginSpeechEnabledById.remove(pluginId);
 		}
 		for (auto it = context.pluginInstalledById.constBegin(); it != context.pluginInstalledById.constEnd();
 		     ++it)
@@ -7270,6 +7379,7 @@ namespace
 				snapshot.pluginEnabledById.remove(it.key());
 				snapshot.pluginEnginesById.remove(it.key());
 				snapshot.pluginInfoValuesById.remove(it.key());
+				snapshot.nativePluginSpeechEnabledById.remove(it.key());
 			}
 		}
 		for (auto it = context.pluginInfoValuesByKey.constBegin();
@@ -7730,6 +7840,7 @@ namespace
 		       snapshot.hasBroadcastPluginSnapshot || !snapshot.broadcastPluginIdsSnapshot.isEmpty() ||
 		       !snapshot.broadcastPluginEnginesSnapshot.isEmpty() ||
 		       !snapshot.pluginIdsByLookupKey.isEmpty() || !snapshot.pluginInfoValuesById.isEmpty() ||
+		       !snapshot.nativePluginSpeechEnabledById.isEmpty() ||
 		       !snapshot.pluginCallbackPresenceByName.isEmpty() || snapshot.hasEntitySnapshot ||
 		       !snapshot.entityValuesByName.isEmpty() || snapshot.hasUiSnapshot ||
 		       !snapshot.guiSystemValues.isEmpty() || snapshot.hasClipboardText ||
@@ -9109,7 +9220,7 @@ namespace
 		{
 			flushed = runOnRuntimeThread(
 			    targetRuntime,
-			    [&]() -> bool
+			    [targetRuntime, &pendingMutations, hadOpenMiniWindowBatch]() -> bool
 			    {
 				    const bool openedBatchForFlush = !hadOpenMiniWindowBatch;
 				    if (openedBatchForFlush)
@@ -13607,6 +13718,8 @@ static void    cacheCallbackVariableEntryAfterSet(const LuaCallbackEngine *engin
 static QString pluginIdFromLua(lua_State *L);
 static bool    resolvePluginContextById(WorldRuntime *runtime, const QString &pluginId,
                                         WorldRuntime::Plugin *&plugin, int &errorCode);
+static bool    resolvePluginInstalledForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
+                                            const QString &pluginId);
 static int     queryPluginSupportsForCallback(const LuaCallbackEngine *engine, WorldRuntime *runtime,
                                               const QString &pluginId, const QString &scriptName,
                                               int fallbackCode);
@@ -21446,6 +21559,69 @@ static std::optional<int> validateLuaAudioCallPluginArgumentsInCallback(lua_Stat
 		}
 	}
 	return std::nullopt;
+}
+
+static std::optional<int> luaCallPluginArgumentsToVariants(lua_State *L, QVector<QVariant> &arguments)
+{
+	const int top = lua_gettop(L);
+	arguments.reserve(top);
+	for (int index = 1; index <= top; ++index)
+	{
+		switch (lua_type(L, index))
+		{
+		case LUA_TSTRING:
+			arguments.push_back(luaCallPluginArgumentString(L, index));
+			break;
+		case LUA_TNUMBER:
+			arguments.push_back(lua_tonumber(L, index));
+			break;
+		case LUA_TBOOLEAN:
+			arguments.push_back(lua_toboolean(L, index) != 0);
+			break;
+		case LUA_TNIL:
+			arguments.push_back(QVariant());
+			break;
+		default:
+		{
+			lua_pushnumber(L, eBadParameter);
+			const QString error = QStringLiteral("Cannot pass argument #%1 (%2 type) to CallPlugin")
+			                          .arg(index + 2)
+			                          .arg(QString::fromLatin1(lua_typename(L, lua_type(L, index))));
+			pushLuaUtf8String(L, error);
+			return 2;
+		}
+		}
+	}
+	return std::nullopt;
+}
+
+static QMudNativePluginRegistry::NativeCallResult queueNativeCallPluginRuntimeThreadSideEffect(
+    const LuaCallbackEngine *engine, WorldRuntime *runtime, const QString &shimId, const QString &routine,
+    const QVector<QVariant> &arguments, const QMudNativePluginRegistry::NativeCallContext &context)
+{
+	QMudNativePluginRegistry::NativeCallResult validationResult = QMudNativePluginRegistry::callRoutine(
+	    runtime, shimId, routine, arguments, context,
+	    QMudNativePluginRegistry::NativeCallExecutionMode::ValidateOnly);
+	if (validationResult.errorCode != eOK ||
+	    !QMudNativePluginRegistry::callRoutineRequiresRuntimeThread(shimId, routine))
+	{
+		return validationResult;
+	}
+	if (!enqueueRuntimeThreadDeferredMutationNoResult(
+	        engine, runtime,
+	        [shimId, routine, arguments](const WorldRuntime &targetRuntime)
+	        {
+		        const QMudNativePluginRegistry::NativeCallContext runtimeContext =
+		            targetRuntime.nativePluginCallContext(shimId);
+		        static_cast<void>(QMudNativePluginRegistry::callRoutine(&targetRuntime, shimId, routine,
+		                                                                arguments, runtimeContext));
+	        }))
+	{
+		validationResult.errorCode = eErrorCallingPluginRoutine;
+		validationResult.errorText =
+		    QStringLiteral("Failed to queue native plugin routine '%1' on the runtime thread").arg(routine);
+	}
+	return validationResult;
 }
 
 static std::optional<int> tryHandleLuaAudioCallPluginInCallback(lua_State *L, LuaCallbackEngine *engine,
@@ -33573,7 +33749,14 @@ static int queryPluginSupportsForCallback(const LuaCallbackEngine *engine, World
 	if (QMudNativePluginRegistry::isBlacklistedId(pluginId))
 		return eNoSuchPlugin;
 	if (const QString shimId = QMudNativePluginRegistry::resolveShimIdOrName(pluginId); !shimId.isEmpty())
+	{
+		bool installed = false;
+		if (!resolveNativePluginInstalledForCallback(engine, shimId, installed) || !installed)
+		{
+			return eNoSuchPlugin;
+		}
 		return QMudNativePluginRegistry::pluginSupports(shimId, scriptName);
+	}
 	int cachedStatus = fallbackCode;
 	if (tryResolveCallbackPluginSupportStatusFromCache(engine, pluginId, scriptName, cachedStatus))
 		return cachedStatus;
@@ -33624,7 +33807,8 @@ static void cacheCallbackPluginIdListAfterUnload(const LuaCallbackEngine *engine
 {
 	QStringList ids = resolvePluginIdListForApi(engine, runtime);
 	ids.removeIf([&pluginId](const QString &id) { return id.compare(pluginId, Qt::CaseInsensitive) == 0; });
-	if (QMudNativePluginRegistry::isShimId(pluginId) && !ids.contains(pluginId, Qt::CaseInsensitive))
+	if (pluginId.compare(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive) == 0 &&
+	    !ids.contains(pluginId, Qt::CaseInsensitive))
 		ids.push_back(pluginId.trimmed().toLower());
 	cacheCallbackPluginIdList(engine, ids);
 }
@@ -33638,10 +33822,11 @@ static QVariant resolvePluginInfoValueForApi(const LuaCallbackEngine *engine, Wo
 		return {};
 	const QString shimId            = QMudNativePluginRegistry::resolveShimIdOrName(pluginId);
 	const QString effectivePluginId = shimId.isEmpty() ? pluginId : shimId;
-	if (!shimId.isEmpty() && infoType == 17 &&
-	    shimId.compare(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive) == 0)
+	if (!shimId.isEmpty() &&
+	    shimId.compare(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive) != 0 &&
+	    !resolvePluginInstalledForApi(engine, runtime, shimId))
 	{
-		return true;
+		return {};
 	}
 	if (!shimId.isEmpty() && infoType != 17)
 	{
@@ -33722,18 +33907,20 @@ static bool resolvePluginInstalledForApi(const LuaCallbackEngine *engine, WorldR
 		return false;
 	if (QMudNativePluginRegistry::isBlacklistedId(pluginId))
 		return false;
-	if (!QMudNativePluginRegistry::resolveShimIdOrName(pluginId).isEmpty())
+	const QString shimId            = QMudNativePluginRegistry::resolveShimIdOrName(pluginId);
+	const QString effectivePluginId = shimId.isEmpty() ? pluginId : shimId;
+	if (shimId.compare(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive) == 0)
 		return true;
 	const bool inCallback          = activeCallbackContextConst(engine) != nullptr;
 	const bool syncBridgeForbidden = callbackScopeSyncBridgeForbidden();
 	const bool needsThreadBridge   = runtime->thread() && QThread::currentThread() != runtime->thread();
 	bool       installed           = false;
-	if (tryResolveCallbackPluginInstalledFromCache(engine, pluginId, installed))
+	if (tryResolveCallbackPluginInstalledFromCache(engine, effectivePluginId, installed))
 		return installed;
 	if (needsThreadBridge &&
 	    (callbackNoFlushRuntimeReadBridgeForbidden(engine, inCallback) || syncBridgeForbidden))
 	{
-		if (tryBackfillCallbackPluginInstalledFromDispatch(engine, pluginId, installed))
+		if (tryBackfillCallbackPluginInstalledFromDispatch(engine, effectivePluginId, installed))
 			return installed;
 		return false;
 	}
@@ -33741,7 +33928,7 @@ static bool resolvePluginInstalledForApi(const LuaCallbackEngine *engine, WorldR
 	                                       runtime,
 	                                       [&]() -> bool
 	                                       {
-		                                       installed = runtime->isPluginInstalled(pluginId);
+		                                       installed = runtime->isPluginInstalled(effectivePluginId);
 		                                       return true;
 	                                       },
 	                                       false)
@@ -33749,13 +33936,13 @@ static bool resolvePluginInstalledForApi(const LuaCallbackEngine *engine, WorldR
 	                                       runtime,
 	                                       [&]() -> bool
 	                                       {
-		                                       installed = runtime->isPluginInstalled(pluginId);
+		                                       installed = runtime->isPluginInstalled(effectivePluginId);
 		                                       return true;
 	                                       },
 	                                       false);
 	if (!resolved)
 		return false;
-	cacheCallbackPluginInstalled(engine, pluginId, installed);
+	cacheCallbackPluginInstalled(engine, effectivePluginId, installed);
 	return installed;
 }
 
@@ -41080,19 +41267,20 @@ static int luaEnablePlugin(lua_State *L)
 	const bool    enable   = optBool(L, 2, true);
 	if (activeCallbackContextConst(engine))
 	{
-		if (!resolvePluginInstalledForApi(engine, runtime, pluginId))
+		const QString resolvedPluginId = resolvePluginIdOrNameForLifecycleApi(engine, runtime, pluginId);
+		if (resolvedPluginId.isEmpty() || !resolvePluginInstalledForApi(engine, runtime, resolvedPluginId))
 		{
 			lua_pushnumber(L, eNoSuchPlugin);
 			return 1;
 		}
-		cacheCallbackPluginInstalled(engine, pluginId, true);
-		invalidateCallbackPluginInfoCacheForPlugin(engine, pluginId);
-		invalidateCallbackPluginSupportStatusForPlugin(engine, pluginId);
-		invalidateCallbackPluginCallTargetForPlugin(engine, pluginId);
-		cacheCallbackPluginEnabledState(engine, pluginId, enable);
+		cacheCallbackPluginInstalled(engine, resolvedPluginId, true);
+		invalidateCallbackPluginInfoCacheForPlugin(engine, resolvedPluginId);
+		invalidateCallbackPluginSupportStatusForPlugin(engine, resolvedPluginId);
+		invalidateCallbackPluginCallTargetForPlugin(engine, resolvedPluginId);
+		cacheCallbackPluginEnabledState(engine, resolvedPluginId, enable);
 		enqueueRuntimeThreadDeferredMutationNoResult(
-		    engine, runtime, [pluginId, enable](WorldRuntime &targetRuntime)
-		    { static_cast<void>(targetRuntime.enablePlugin(pluginId, enable)); });
+		    engine, runtime, [resolvedPluginId, enable](WorldRuntime &targetRuntime)
+		    { static_cast<void>(targetRuntime.enablePlugin(resolvedPluginId, enable)); });
 		lua_pushnumber(L, eOK);
 		return 1;
 	}
@@ -41209,8 +41397,9 @@ static int luaUnloadPlugin(lua_State *L)
 			lua_pushnumber(L, eBadParameter);
 			return 1;
 		}
-		cacheCallbackPluginInstalled(engine, resolvedPluginId,
-		                             QMudNativePluginRegistry::isShimId(resolvedPluginId));
+		cacheCallbackPluginInstalled(
+		    engine, resolvedPluginId,
+		    resolvedPluginId.compare(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive) == 0);
 		cacheCallbackPluginIdListAfterUnload(engine, runtime, resolvedPluginId);
 		QList<WorldRuntime::Trigger> emptyTriggers;
 		QList<WorldRuntime::Alias>   emptyAliases;
@@ -41366,10 +41555,98 @@ static int luaCallPlugin(lua_State *L)
 		                      : reason);
 		return 2;
 	}
+	const auto pushCodeAndMessage = [L](const int code, const QString &message)
+	{
+		lua_pushnumber(L, code);
+		pushLuaUtf8String(L, message);
+		return 2;
+	};
+	const auto pushNativeCallResult =
+	    [L, &pushCodeAndMessage](const QString                                    &routine,
+	                             const QMudNativePluginRegistry::NativeCallResult &result) -> int
+	{
+		if (result.errorCode != eOK)
+			return pushCodeAndMessage(result.errorCode, result.errorText);
+		const qsizetype returnValueCount      = result.returnValues.size();
+		constexpr int   kErrorCodeReturnCount = 1;
+		if (returnValueCount > std::numeric_limits<int>::max() - kErrorCodeReturnCount)
+		{
+			return pushCodeAndMessage(
+			    eErrorCallingPluginRoutine,
+			    QStringLiteral("Native plugin routine '%1' returned too many values").arg(routine));
+		}
+		const int pushedValueCount = static_cast<int>(returnValueCount) + kErrorCodeReturnCount;
+		if (lua_checkstack(L, pushedValueCount) == 0)
+		{
+			return pushCodeAndMessage(
+			    eErrorCallingPluginRoutine,
+			    QStringLiteral("Unable to reserve Lua stack space for native plugin routine '%1'")
+			        .arg(routine));
+		}
+		lua_pushnumber(L, result.errorCode);
+		for (const QVariant &value : result.returnValues)
+		{
+			switch (value.typeId())
+			{
+			case QMetaType::Bool:
+				lua_pushboolean(L, value.toBool());
+				break;
+			case QMetaType::Int:
+			case QMetaType::LongLong:
+				lua_pushinteger(L, static_cast<lua_Integer>(value.toLongLong()));
+				break;
+			case QMetaType::Double:
+				lua_pushnumber(L, value.toDouble());
+				break;
+			default:
+				pushLuaUtf8String(L, value.toString());
+				break;
+			}
+		}
+		return pushedValueCount;
+	};
 	if (const QString shimId = QMudNativePluginRegistry::resolveShimIdOrName(pluginId); !shimId.isEmpty())
 	{
+		if (activeCallbackContextConst(engine))
+		{
+			const QMudNativePluginRegistry::NativeCallContext context =
+			    resolveNativeCallContextForCallback(engine, shimId);
+			if (!context.installed || !context.pluginEnabled)
+			{
+				const QMudNativePluginRegistry::NativeCallResult result =
+				    QMudNativePluginRegistry::callRoutine(runtime, shimId, routine, {}, context);
+				return pushNativeCallResult(routine, result);
+			}
+			if (shimId.compare(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive) == 0)
+			{
+				if (const std::optional<int> handled =
+				        tryHandleLuaAudioCallPluginInCallback(L, engine, runtime, routine);
+				    handled.has_value())
+				{
+					return *handled;
+				}
+			}
+
+			QVector<QVariant> arguments;
+			if (const std::optional<int> conversionResult = luaCallPluginArgumentsToVariants(L, arguments);
+			    conversionResult.has_value())
+			{
+				return *conversionResult;
+			}
+			const QMudNativePluginRegistry::NativeCallResult result =
+			    queueNativeCallPluginRuntimeThreadSideEffect(engine, runtime, shimId, routine, arguments,
+			                                                 context);
+			return pushNativeCallResult(routine, result);
+		}
 		if (shimId.compare(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive) == 0)
 		{
+			const QVariant enabled = resolvePluginInfoValueForApi(engine, runtime, shimId, 17);
+			if (enabled.isValid() && !enabled.toBool())
+			{
+				return pushCodeAndMessage(
+				    ePluginDisabled,
+				    QStringLiteral("Plugin '%1' (%2) disabled").arg(QStringLiteral("LuaAudio"), shimId));
+			}
 			if (const std::optional<int> handled =
 			        tryHandleLuaAudioCallPluginInCallback(L, engine, runtime, routine);
 			    handled.has_value())
@@ -41380,12 +41657,6 @@ static int luaCallPlugin(lua_State *L)
 		return runtime->callPluginLua(shimId, routine, L, 1, engine->pluginId());
 	}
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
-	const auto pushCodeAndMessage = [L](const int code, const QString &message)
-	{
-		lua_pushnumber(L, code);
-		pushLuaUtf8String(L, message);
-		return 2;
-	};
 	const CallbackDispatchSnapshot callPluginSnapshot = buildActiveCallbackDispatchSnapshot(engine, runtime);
 	const QSharedPointer<const LuaCallbackMiniWindowSnapshot> callPluginMiniWindowSnapshot =
 	    callPluginSnapshot.snapshot;

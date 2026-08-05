@@ -12,6 +12,7 @@
 #include "LuaExecutorWorker.h"
 #include "LuaSupport.h"
 #include "NativePluginRegistry.h"
+#include "WorldCommandProcessor.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "helpers/LuaExecutionUtils.h"
@@ -84,8 +85,13 @@ namespace
 			void selfPluginInfoMetadataFallsThroughToRuntime();
 			void emptyPluginVariableIdReadsWorldVariables();
 			void deleteVariableInvalidatesCallbackVariableSnapshot();
-			void nativeShimDiscoveryIsAvailableWithoutShadowPlugin();
+			void nativeShimDiscoveryRespectsShadowPluginVisibility();
+			void nativeMushReaderEnableByNameUpdatesResolvedCallbackMetadata();
+			void nativeMushReaderCallPluginUsesCallbackSpeechSnapshot();
+			void nativeMushReaderCallPluginDefersSpeechToRuntimeThread();
+			void nativeMushReaderDeferredCallPluginUsesRuntimeSpeechState();
 			void nativeLuaAudioSharedRuntimeStateCoversDirectAndCallPlugin();
+			void disabledNativeLuaAudioShadowBlocksCallbackCallPluginFastPath();
 			void blacklistedPluginsAreHiddenFromPluginApis();
 			void triggerAnchoredColourOutputKeepsNativePromptText();
 			void stringsAndWildcardsDispatchSuppliesSnapshotForCallbackReads();
@@ -168,6 +174,36 @@ namespace
 		snapshot->worldVariablesSnapshot    = runtime.variableSnapshot();
 		snapshot->hasWorldVariablesSnapshot = true;
 		return snapshot;
+	}
+
+	void
+	seedPluginMetadataDispatchSnapshotForTest(const QSharedPointer<LuaCallbackMiniWindowSnapshot> &snapshot,
+	                                          const WorldRuntime                                  &runtime)
+	{
+		Q_ASSERT(snapshot);
+		if (!snapshot)
+			return;
+		snapshot->pluginIdsSnapshot = runtime.pluginIdList();
+		for (const QString &pluginId : snapshot->pluginIdsSnapshot)
+		{
+			const QString key = pluginId.trimmed().toLower();
+			if (key.isEmpty())
+				continue;
+			const QString pluginName = runtime.pluginInfo(key, 1).toString();
+			snapshot->pluginIdsByLookupKey.insert(key, key);
+			if (!pluginName.trimmed().isEmpty())
+				snapshot->pluginIdsByLookupKey.insert(pluginName.trimmed().toLower(), key);
+			snapshot->pluginNamesById.insert(key, pluginName);
+			snapshot->pluginDirectoriesById.insert(key, runtime.pluginInfo(key, 20).toString());
+			snapshot->pluginEnabledById.insert(key, runtime.pluginInfo(key, 17).toBool());
+			if (key.compare(QMudNativePluginRegistry::mushReaderPluginId(), Qt::CaseInsensitive) == 0)
+			{
+				snapshot->nativePluginSpeechEnabledById.insert(
+				    key, QMudNativePluginRegistry::isMushReaderSpeechEnabled(&runtime));
+			}
+			for (int infoType = 1; infoType <= 25; ++infoType)
+				snapshot->pluginInfoValuesById[key].insert(infoType, runtime.pluginInfo(key, infoType));
+		}
 	}
 
 	QSharedPointer<const LuaCallbackMiniWindowSnapshot>
@@ -2046,7 +2082,7 @@ void tst_LuaCallbackEngine::deleteVariableInvalidatesCallbackVariableSnapshot()
 	QVERIFY(!after->worldVariablesSnapshot.contains(QStringLiteral("stale")));
 }
 
-void tst_LuaCallbackEngine::nativeShimDiscoveryIsAvailableWithoutShadowPlugin()
+void tst_LuaCallbackEngine::nativeShimDiscoveryRespectsShadowPluginVisibility()
 {
 	WorldRuntime  runtime;
 	QTemporaryDir soundRoot;
@@ -2069,8 +2105,12 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryIsAvailableWithoutShadowPlugin()
 	  local delayed_playing = audio.isPlaying(delay_id)
 	  audio.free()
 	  shim_info = table.concat({
+	    tostring(IsPluginInstalled(id)),
+	    tostring(IsPluginInstalled("MushReader")),
 	    GetPluginInfo(id, 1) or "",
 	    tostring(GetPluginInfo(id, 17) or false),
+	    string.format("%.0f", PluginSupports(id, "say")),
+	    string.format("%.0f", PluginSupports("MushReader", "say")),
 	    GetPluginInfo(audio_id, 1) or "",
 	    tostring(GetPluginInfo(audio_id, 17) or false),
 	    string.format("%.0f", audio.getVolume()),
@@ -2089,6 +2129,7 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryIsAvailableWithoutShadowPlugin()
 	snapshot->soundBufferReusableByBuffer.insert(1, true);
 	snapshot->soundStatusByBuffer.insert(9, 1);
 	snapshot->soundBufferReusableByBuffer.insert(9, false);
+	seedPluginMetadataDispatchSnapshotForTest(snapshot, runtime);
 
 	LuaBatchDispatchRequest request;
 	request.engines               = {engine};
@@ -2103,14 +2144,285 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryIsAvailableWithoutShadowPlugin()
 	request.miniWindowSnapshotArg = {};
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
-	QCOMPARE(result.stringResult, QStringLiteral("MushReader|false|LuaAudio|true|100|1|false"));
-	QVERIFY(runtime.pluginIdList().contains(shimId, Qt::CaseInsensitive));
+	QCOMPARE(result.stringResult,
+	         QStringLiteral("false|false||false|%1|%1|LuaAudio|true|100|1|false").arg(eNoSuchPlugin));
+	QVERIFY(!runtime.pluginIdList().contains(shimId, Qt::CaseInsensitive));
 	QVERIFY(
 	    runtime.pluginIdList().contains(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive));
-	QCOMPARE(QMudNativePluginRegistry::pluginSupports(shimId, QStringLiteral("say")), eOK);
-	QCOMPARE(QMudNativePluginRegistry::pluginSupports(shimId, QStringLiteral("interrupt")), eOK);
-	QCOMPARE(QMudNativePluginRegistry::pluginSupports(shimId, QStringLiteral("stop")), eOK);
-	QCOMPARE(QMudNativePluginRegistry::pluginSupports(shimId, QStringLiteral("missing")), eNoSuchRoutine);
+	QVERIFY(!runtime.isPluginInstalled(shimId));
+	QVERIFY(!runtime.pluginInfo(shimId, 1).isValid());
+	QCOMPARE(runtime.pluginSupports(shimId, QStringLiteral("say")), eNoSuchPlugin);
+	QVERIFY(runtime.isPluginInstalled(QMudNativePluginRegistry::luaAudioPluginId()));
+	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::nativeMushReaderEnableByNameUpdatesResolvedCallbackMetadata()
+{
+	const QString        mushReaderId = QMudNativePluginRegistry::mushReaderPluginId();
+
+	WorldRuntime::Plugin mushReaderPlugin;
+	mushReaderPlugin.enabled    = true;
+	mushReaderPlugin.nativeShim = true;
+	mushReaderPlugin.attributes.insert(QStringLiteral("id"), mushReaderId);
+	mushReaderPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("MushReader"));
+
+	WorldRuntime runtime;
+	runtime.pluginsMutable().push_back(mushReaderPlugin);
+
+	QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
+	QMudNativePluginRegistry::setTestSpeechSink(
+	    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
+	    { speechEvents.push_back(event); });
+	const auto restoreSpeechSink = qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+
+	auto       engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor;
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local id = "925cdd0331023d9f0b8f05a7"
+	  local code = EnablePlugin("MushReader", false)
+	  local call_code, message = CallPlugin(id, "say", "blocked")
+	  mushreader_enable_by_name_status = table.concat({
+	    string.format("%.0f", code),
+	    tostring(IsPluginInstalled(id)),
+	    tostring(GetPluginInfo(id, 17) or false),
+	    string.format("%.0f", PluginSupports(id, "say")),
+	    string.format("%.0f", call_code),
+	    tostring((message or ""):find("disabled", 1, true) ~= nil)
+	  }, "|")
+	end
+	function mushreader_enable_by_name_result(value)
+	  return mushreader_enable_by_name_status
+	end
+	)lua"),
+	                       &runtime);
+
+	LuaBatchDispatchRequest request;
+	request.engines      = {engine};
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.functionName = QStringLiteral("OnPluginEnable");
+	auto snapshot        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	seedPluginMetadataDispatchSnapshotForTest(snapshot, runtime);
+	request.miniWindowSnapshotArg = snapshot;
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("mushreader_enable_by_name_result");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult,
+	         QStringLiteral("%1|true|false|%2|%3|true").arg(eOK).arg(eOK).arg(ePluginDisabled));
+	QVERIFY(speechEvents.isEmpty());
+	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::nativeMushReaderCallPluginUsesCallbackSpeechSnapshot()
+{
+	const QString        mushReaderId = QMudNativePluginRegistry::mushReaderPluginId();
+
+	WorldRuntime::Plugin mushReaderPlugin;
+	mushReaderPlugin.enabled    = true;
+	mushReaderPlugin.nativeShim = true;
+	mushReaderPlugin.attributes.insert(QStringLiteral("id"), mushReaderId);
+	mushReaderPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("MushReader"));
+
+	WorldRuntime runtime;
+	runtime.pluginsMutable().push_back(mushReaderPlugin);
+	QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
+	QMudNativePluginRegistry::setTestSpeechSink(
+	    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
+	    { speechEvents.push_back(event); });
+	const auto restoreSpeechSink = qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+	QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+	QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(&runtime, QStringLiteral("tts")));
+	QVERIFY(!QMudNativePluginRegistry::isMushReaderSpeechEnabled(&runtime));
+	speechEvents.clear();
+
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor;
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local id = "925cdd0331023d9f0b8f05a7"
+	  local say_code = CallPlugin(id, "say", "muted")
+	  local interrupt_code = CallPlugin("MushReader", "interrupt", "muted interrupt")
+	  local update_code, update_url = CallPlugin(id, "plugin_update_url")
+	  mushreader_muted_call_status = table.concat({
+	    string.format("%.0f", say_code),
+	    string.format("%.0f", interrupt_code),
+	    string.format("%.0f", update_code),
+	    tostring(update_url)
+	  }, "|")
+	end
+	function mushreader_muted_call_result(value)
+	  return mushreader_muted_call_status
+	end
+	)lua"),
+	                       &runtime);
+
+	LuaBatchDispatchRequest request;
+	request.engines      = {engine};
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.functionName = QStringLiteral("OnPluginEnable");
+	auto snapshot        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	seedPluginMetadataDispatchSnapshotForTest(snapshot, runtime);
+	request.miniWindowSnapshotArg = snapshot;
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("mushreader_muted_call_result");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("%1|%1|%1|qmud:native/MushReader").arg(eOK));
+	QVERIFY(speechEvents.isEmpty());
+	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::nativeMushReaderCallPluginDefersSpeechToRuntimeThread()
+{
+	const QString        mushReaderId = QMudNativePluginRegistry::mushReaderPluginId();
+
+	WorldRuntime::Plugin mushReaderPlugin;
+	mushReaderPlugin.enabled    = true;
+	mushReaderPlugin.nativeShim = true;
+	mushReaderPlugin.attributes.insert(QStringLiteral("id"), mushReaderId);
+	mushReaderPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("MushReader"));
+
+	WorldRuntime runtime;
+	runtime.pluginsMutable().push_back(mushReaderPlugin);
+	QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
+	QMudNativePluginRegistry::setTestSpeechSink(
+	    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
+	    { speechEvents.push_back(event); });
+	const auto restoreSpeechSink = qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+	QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+	speechEvents.clear();
+
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor;
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local id = "925cdd0331023d9f0b8f05a7"
+	  local say_code = CallPlugin(id, "say", "deferred")
+	  local interrupt_code = CallPlugin("MushReader", "interrupt", "deferred interrupt")
+	  mushreader_deferred_call_status = table.concat({
+	    string.format("%.0f", say_code),
+	    string.format("%.0f", interrupt_code)
+	  }, "|")
+	end
+	function mushreader_deferred_call_result(value)
+	  return mushreader_deferred_call_status
+	end
+	)lua"),
+	                       &runtime);
+
+	LuaBatchDispatchRequest request;
+	request.engines      = {engine};
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.functionName = QStringLiteral("OnPluginEnable");
+	auto snapshot        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	seedPluginMetadataDispatchSnapshotForTest(snapshot, runtime);
+	request.miniWindowSnapshotArg = snapshot;
+	LuaBatchDispatchResult dispatchResult;
+	dispatchWorkerAndWait(executor, request, dispatchResult);
+	QVERIFY(speechEvents.isEmpty());
+	QVERIFY(!dispatchResult.deferredRuntimeMutationBatches.isEmpty());
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("mushreader_deferred_call_result");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("%1|%1").arg(eOK));
+	QVERIFY(speechEvents.isEmpty());
+
+	executeDeferredMutations(dispatchResult);
+	QCOMPARE(speechEvents.size(), 2);
+	QCOMPARE(speechEvents.at(0).text, QStringLiteral("       deferred"));
+	QVERIFY(!speechEvents.at(0).interrupt);
+	QCOMPARE(speechEvents.at(1).text, QStringLiteral("deferred interrupt"));
+	QVERIFY(speechEvents.at(1).interrupt);
+	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::nativeMushReaderDeferredCallPluginUsesRuntimeSpeechState()
+{
+	const QString        mushReaderId = QMudNativePluginRegistry::mushReaderPluginId();
+
+	WorldRuntime::Plugin mushReaderPlugin;
+	mushReaderPlugin.enabled    = true;
+	mushReaderPlugin.nativeShim = true;
+	mushReaderPlugin.attributes.insert(QStringLiteral("id"), mushReaderId);
+	mushReaderPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("MushReader"));
+
+	WorldRuntime          runtime;
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	runtime.setCommandProcessor(&processor);
+	const auto clearCommandProcessor = qScopeGuard(
+	    [&runtime, &processor]
+	    {
+		    runtime.setCommandProcessor(nullptr);
+		    processor.setRuntime(nullptr);
+	    });
+	runtime.pluginsMutable().push_back(mushReaderPlugin);
+
+	QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
+	QMudNativePluginRegistry::setTestSpeechSink(
+	    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
+	    { speechEvents.push_back(event); });
+	const auto restoreSpeechSink = qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+	QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+	speechEvents.clear();
+
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor;
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local id = "925cdd0331023d9f0b8f05a7"
+	  local execute_code = Execute("tts")
+	  local say_code = CallPlugin(id, "say", "must not speak")
+	  mushreader_runtime_state_status = table.concat({
+	    string.format("%.0f", execute_code),
+	    string.format("%.0f", say_code)
+	  }, "|")
+	end
+	function mushreader_runtime_state_result(value)
+	  return mushreader_runtime_state_status
+	end
+	)lua"),
+	                       &runtime);
+
+	LuaBatchDispatchRequest request;
+	request.engines      = {engine};
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.functionName = QStringLiteral("OnPluginEnable");
+	auto snapshot        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	seedPluginMetadataDispatchSnapshotForTest(snapshot, runtime);
+	request.miniWindowSnapshotArg = snapshot;
+	LuaBatchDispatchResult dispatchResult;
+	dispatchWorkerAndWait(executor, request, dispatchResult);
+	QVERIFY(speechEvents.isEmpty());
+	QVERIFY(!dispatchResult.deferredRuntimeMutationBatches.isEmpty());
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("mushreader_runtime_state_result");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("%1|%1").arg(eOK));
+
+	executeDeferredMutations(dispatchResult);
+	QVERIFY(!QMudNativePluginRegistry::isMushReaderSpeechEnabled(&runtime));
+	QCOMPARE(speechEvents.size(), 2);
+	QVERIFY(speechEvents.at(0).stop);
+	QCOMPARE(speechEvents.at(1).text, QStringLiteral("speech off"));
+	QVERIFY(speechEvents.at(1).interrupt);
 	teardownWorkerEngine(executor, engine);
 }
 
@@ -2126,9 +2438,13 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	soundFile.close();
 	runtime.setStartupDirectory(soundRoot.path());
 
+	QMudNativePluginRegistry::NativeCallContext audioContext;
+	audioContext.installed                                         = true;
+	audioContext.pluginEnabled                                     = true;
+	audioContext.pluginName                                        = QStringLiteral("LuaAudio");
 	const QMudNativePluginRegistry::NativeCallResult nativeDelayed = QMudNativePluginRegistry::callRoutine(
 	    &runtime, QMudNativePluginRegistry::luaAudioPluginId(), QStringLiteral("playDelay"),
-	    {QStringLiteral("coin.wav"), 10.0, 0.0, 100.0});
+	    {QStringLiteral("coin.wav"), 10.0, 0.0, 100.0}, audioContext);
 	QCOMPARE(nativeDelayed.errorCode, eOK);
 	QCOMPARE(nativeDelayed.returnValues.size(), 1);
 	QCOMPARE(nativeDelayed.returnValues.constFirst().toInt(), 1);
@@ -2450,6 +2766,57 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QVERIFY(runtime.soundStatus(2) <= 0);
 	teardownWorkerEngine(executor, timedEngine);
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).isEmpty());
+}
+
+void tst_LuaCallbackEngine::disabledNativeLuaAudioShadowBlocksCallbackCallPluginFastPath()
+{
+	const QString        audioId = QMudNativePluginRegistry::luaAudioPluginId();
+
+	WorldRuntime::Plugin audioPlugin;
+	audioPlugin.enabled    = false;
+	audioPlugin.nativeShim = true;
+	audioPlugin.attributes.insert(QStringLiteral("id"), audioId);
+	audioPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("LuaAudio"));
+
+	WorldRuntime runtime;
+	runtime.pluginsMutable().push_back(audioPlugin);
+
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor;
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+	function OnPluginEnable()
+	  local audio_id = "aedf0cb0be5bf045860d54b7"
+	  local enabled = tostring(GetPluginInfo(audio_id, 17) or false)
+	  local code, message = CallPlugin(audio_id, "plugin_update_url")
+	  lua_audio_disabled_call = table.concat({
+	    enabled,
+	    string.format("%.0f", code),
+	    tostring((message or ""):find("disabled", 1, true) ~= nil)
+	  }, "|")
+	end
+	function lua_audio_disabled_status(value)
+	  return lua_audio_disabled_call
+	end
+	)lua"),
+	                       &runtime);
+
+	LuaBatchDispatchRequest request;
+	request.engines      = {engine};
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.functionName = QStringLiteral("OnPluginEnable");
+	auto snapshot        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	seedPluginMetadataDispatchSnapshotForTest(snapshot, runtime);
+	request.miniWindowSnapshotArg = snapshot;
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("lua_audio_disabled_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("false|%1|true").arg(ePluginDisabled));
+	teardownWorkerEngine(executor, engine);
 }
 
 void tst_LuaCallbackEngine::blacklistedPluginsAreHiddenFromPluginApis()
