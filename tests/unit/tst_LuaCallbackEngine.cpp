@@ -75,6 +75,7 @@ namespace
 			void callPluginMarshallingUsesTargetEngineState();
 			void noArgsDispatchReportsCallbackFailure();
 			void workerDispatchesPluginLifecycleCallbacksOnRealEngines();
+			void workerSqliteResourcesOutliveCreatingCallbackCoroutine();
 			void workerCallbackBatchCapturesOutputMiniWindowAndSaveStateMutations();
 			void workerColourOutputMatchesMushclientGroupingAndNewlineSemantics();
 			void workerColourOutputPreservesIndexedNoteColour();
@@ -1485,6 +1486,147 @@ end
 	request.engines = {engine};
 	dispatchWorkerAndWait(executor, request);
 	QVERIFY(engine->luaState() == nullptr);
+}
+
+void tst_LuaCallbackEngine::workerSqliteResourcesOutliveCreatingCallbackCoroutine()
+{
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor;
+	const auto teardown = qScopeGuard([&executor, &engine] { teardownWorkerEngine(executor, engine); });
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+retained_sqlite = nil
+closing_sqlite = nil
+abandoned_sqlite = nil
+abandoned_weak = nil
+
+local function new_database(value)
+  local db = assert(sqlite3.open_memory())
+  assert(db:execute(string.format([[
+    CREATE TABLE values_table(value INTEGER);
+    INSERT INTO values_table(value) VALUES (%d);
+  ]], value)))
+  return db
+end
+
+local function retain_resources(global_name, value)
+  local db = new_database(value)
+  local db_next, db_iter = db:nrows("SELECT value FROM values_table")
+  local stmt = assert(db:prepare("SELECT value FROM values_table"))
+  local stmt_next, stmt_iter = stmt:nrows()
+  local resources = {
+    db = db,
+    db_next = db_next,
+    db_iter = db_iter,
+    stmt = stmt,
+    stmt_next = stmt_next,
+    stmt_iter = stmt_iter,
+  }
+  _G[global_name] = resources
+  return resources
+end
+
+function retain_sqlite_resources()
+  retain_resources("retained_sqlite", 7)
+end
+
+function consume_retained_sqlite_resources(_)
+  collectgarbage("collect")
+  collectgarbage("collect")
+
+  local db_row = assert(retained_sqlite.db_next())
+  assert(db_row.value == 7)
+  assert(retained_sqlite.db_next() == nil)
+
+  local stmt_row = assert(retained_sqlite.stmt_next())
+  assert(stmt_row.value == 7)
+  assert(retained_sqlite.stmt_next() == nil)
+
+  assert(retained_sqlite.stmt:finalize() == 0)
+  assert(retained_sqlite.db:close() == 0)
+  retained_sqlite = nil
+  collectgarbage("collect")
+  return "consumed"
+end
+
+function retain_sqlite_resources_for_close()
+  retain_resources("closing_sqlite", 13)
+end
+
+function close_sqlite_with_active_resources(_)
+  collectgarbage("collect")
+  collectgarbage("collect")
+
+  assert(closing_sqlite.db:close() == 0)
+  assert(closing_sqlite.db_next() == nil)
+  assert(closing_sqlite.stmt_next() == nil)
+  closing_sqlite = nil
+  collectgarbage("collect")
+  return "closed"
+end
+
+function retain_abandoned_sqlite_resources()
+  local resources = retain_resources("abandoned_sqlite", 11)
+  abandoned_weak = setmetatable({}, { __mode = "v" })
+  for name, value in pairs(resources) do
+    abandoned_weak[name] = value
+  end
+end
+
+function collect_abandoned_sqlite_resources(_)
+  collectgarbage("collect")
+  collectgarbage("collect")
+
+  abandoned_sqlite = nil
+  for _ = 1, 6 do
+    collectgarbage("collect")
+  end
+  local resources_collected = next(abandoned_weak) == nil
+  abandoned_weak = nil
+
+  local db = new_database(19)
+  local value = nil
+  for row in db:nrows("SELECT value FROM values_table") do
+    value = row.value
+  end
+  assert(db:close() == 0)
+  return tostring(value) .. ":" .. tostring(resources_collected)
+end
+)lua"));
+
+	LuaBatchDispatchRequest request;
+	request.engines      = {engine};
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.functionName = QStringLiteral("retain_sqlite_resources");
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind         = LuaBatchDispatchKind::StringInOut;
+	request.functionName = QStringLiteral("consume_retained_sqlite_resources");
+	request.stringArg    = QStringLiteral("ignored");
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("consumed"));
+
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.functionName = QStringLiteral("retain_sqlite_resources_for_close");
+	request.stringArg.clear();
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind         = LuaBatchDispatchKind::StringInOut;
+	request.functionName = QStringLiteral("close_sqlite_with_active_resources");
+	request.stringArg    = QStringLiteral("ignored");
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("closed"));
+
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.functionName = QStringLiteral("retain_abandoned_sqlite_resources");
+	request.stringArg.clear();
+	dispatchWorkerAndWait(executor, request);
+
+	request.kind         = LuaBatchDispatchKind::StringInOut;
+	request.functionName = QStringLiteral("collect_abandoned_sqlite_resources");
+	request.stringArg    = QStringLiteral("ignored");
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("19:true"));
 }
 
 void tst_LuaCallbackEngine::workerCallbackBatchCapturesOutputMiniWindowAndSaveStateMutations()

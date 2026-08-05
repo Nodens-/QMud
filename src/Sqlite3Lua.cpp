@@ -45,7 +45,6 @@ namespace
 			bool         hasRow{false};
 			int          columns{0};
 			QStringList  paramNames;
-			lua_State   *ownerState{nullptr};
 			int          dbRef{LUA_NOREF};
 	};
 
@@ -57,7 +56,6 @@ namespace
 			bool         unpacked{false};
 			bool         active{false};
 			int          columns{0};
-			lua_State   *ownerState{nullptr};
 			int          dbRef{LUA_NOREF};
 	};
 
@@ -66,7 +64,6 @@ namespace
 			LuaSqliteStmt *stmt{nullptr};
 			bool           named{false};
 			bool           unpacked{false};
-			lua_State     *ownerState{nullptr};
 			int            stmtRef{LUA_NOREF};
 	};
 
@@ -170,10 +167,13 @@ namespace
 		db->iterators.remove(iter);
 	}
 
-	void releaseDbRef(lua_State *L, int &ref)
+	void releaseRegistryRef(lua_State *L, int &ref)
 	{
-		if (!L || ref == LUA_NOREF)
+		if (ref == LUA_NOREF)
 			return;
+		// The registry is shared by every coroutine in a Lua main state. Use the
+		// currently active state because callback coroutines are short-lived.
+		Q_ASSERT(L);
 		luaL_unref(L, LUA_REGISTRYINDEX, ref);
 		ref = LUA_NOREF;
 	}
@@ -200,13 +200,12 @@ namespace
 		stmt->db = nullptr;
 	}
 
-	void destroyStatement(LuaSqliteStmt *stmt)
+	void destroyStatement(lua_State *L, LuaSqliteStmt *stmt)
 	{
 		if (!stmt)
 			return;
 		invalidateStatement(stmt);
-		releaseDbRef(stmt->ownerState, stmt->dbRef);
-		stmt->ownerState = nullptr;
+		releaseRegistryRef(L, stmt->dbRef);
 		stmt->~LuaSqliteStmt();
 	}
 
@@ -224,37 +223,35 @@ namespace
 		iter->db = nullptr;
 	}
 
-	void releaseIterator(LuaSqliteIter *iter)
+	void releaseIterator(lua_State *L, LuaSqliteIter *iter)
 	{
 		if (!iter)
 			return;
 		invalidateIterator(iter);
-		releaseDbRef(iter->ownerState, iter->dbRef);
-		iter->ownerState = nullptr;
+		releaseRegistryRef(L, iter->dbRef);
 	}
 
-	void destroyIterator(LuaSqliteIter *iter)
+	void destroyIterator(lua_State *L, LuaSqliteIter *iter)
 	{
 		if (!iter)
 			return;
-		releaseIterator(iter);
+		releaseIterator(L, iter);
 		iter->~LuaSqliteIter();
 	}
 
-	void releaseStatementIterator(LuaSqliteStmtIter *iter)
+	void releaseStatementIterator(lua_State *L, LuaSqliteStmtIter *iter)
 	{
 		if (!iter)
 			return;
-		releaseDbRef(iter->ownerState, iter->stmtRef);
-		iter->ownerState = nullptr;
-		iter->stmt       = nullptr;
+		releaseRegistryRef(L, iter->stmtRef);
+		iter->stmt = nullptr;
 	}
 
-	void destroyStatementIterator(LuaSqliteStmtIter *iter)
+	void destroyStatementIterator(lua_State *L, LuaSqliteStmtIter *iter)
 	{
 		if (!iter)
 			return;
-		releaseStatementIterator(iter);
+		releaseStatementIterator(L, iter);
 		iter->~LuaSqliteStmtIter();
 	}
 
@@ -654,8 +651,7 @@ namespace
 			for (LuaSqliteStmt *stmt : statements)
 			{
 				invalidateStatement(stmt);
-				releaseDbRef(stmt->ownerState, stmt->dbRef);
-				stmt->ownerState = nullptr;
+				releaseRegistryRef(L, stmt->dbRef);
 			}
 			db->statements.clear();
 		}
@@ -669,8 +665,7 @@ namespace
 			for (LuaSqliteIter *iter : iterators)
 			{
 				invalidateIterator(iter);
-				releaseDbRef(iter->ownerState, iter->dbRef);
-				iter->ownerState = nullptr;
+				releaseRegistryRef(L, iter->dbRef);
 			}
 			db->iterators.clear();
 		}
@@ -725,15 +720,14 @@ namespace
 	{
 		LuaSqliteStmt *stmt = checkstmt(L);
 		invalidateStatement(stmt);
-		releaseDbRef(stmt->ownerState, stmt->dbRef);
-		stmt->ownerState = nullptr;
+		releaseRegistryRef(L, stmt->dbRef);
 		lua_pushnumber(L, SQLITE_OK);
 		return 1;
 	}
 
 	int stmtGc(lua_State *L)
 	{
-		destroyStatement(checkstmt(L));
+		destroyStatement(L, checkstmt(L));
 		return 0;
 	}
 
@@ -1243,13 +1237,13 @@ namespace
 
 	int iterGc(lua_State *L)
 	{
-		destroyIterator(static_cast<LuaSqliteIter *>(lua_touserdata(L, 1)));
+		destroyIterator(L, static_cast<LuaSqliteIter *>(lua_touserdata(L, 1)));
 		return 0;
 	}
 
 	int stmtIterGc(lua_State *L)
 	{
-		destroyStatementIterator(static_cast<LuaSqliteStmtIter *>(lua_touserdata(L, 1)));
+		destroyStatementIterator(L, static_cast<LuaSqliteStmtIter *>(lua_touserdata(L, 1)));
 		return 0;
 	}
 
@@ -1261,9 +1255,7 @@ namespace
 		if (!isDbUsable(iter->db))
 		{
 			setDbStatus(iter->db, SQLITE_MISUSE, QStringLiteral("attempt to use closed sqlite database"));
-			invalidateIterator(iter);
-			releaseDbRef(iter->ownerState, iter->dbRef);
-			iter->ownerState = nullptr;
+			releaseIterator(L, iter);
 			return 0;
 		}
 		if (!iter->query.next())
@@ -1272,13 +1264,13 @@ namespace
 			{
 				setDbStatusFromError(iter->db, iter->query.lastError());
 				const QByteArray msg = iter->query.lastError().text().toUtf8();
-				releaseIterator(iter);
+				releaseIterator(L, iter);
 				lua_pushlstring(L, msg.constData(), msg.size());
 				lua_error(L);
 				return 0;
 			}
 			setDbStatus(iter->db, SQLITE_OK, QString());
-			releaseIterator(iter);
+			releaseIterator(L, iter);
 			return 0;
 		}
 		const QSqlRecord record = iter->query.record();
@@ -1319,9 +1311,7 @@ namespace
 		{
 			setDbStatus(iter->stmt->db, SQLITE_MISUSE,
 			            QStringLiteral("attempt to use closed sqlite database"));
-			releaseDbRef(iter->ownerState, iter->stmtRef);
-			iter->ownerState = nullptr;
-			iter->stmt       = nullptr;
+			releaseStatementIterator(L, iter);
 			return 0;
 		}
 		if (!advanceStmt(iter->stmt))
@@ -1331,12 +1321,12 @@ namespace
 			{
 				setDbStatusFromError(iter->stmt->db, iter->stmt->query.lastError());
 				const QByteArray msg = iter->stmt->query.lastError().text().toUtf8();
-				releaseStatementIterator(iter);
+				releaseStatementIterator(L, iter);
 				lua_pushlstring(L, msg.constData(), msg.size());
 				lua_error(L);
 				return 0;
 			}
-			releaseStatementIterator(iter);
+			releaseStatementIterator(L, iter);
 			return 0;
 		}
 		iter->stmt->columns = iter->stmt->query.record().count();
@@ -1380,10 +1370,9 @@ namespace
 
 		auto *iter = static_cast<LuaSqliteIter *>(lua_newuserdata(L, sizeof(LuaSqliteIter)));
 		new (iter) LuaSqliteIter;
-		iter->db         = db;
-		iter->named      = named;
-		iter->unpacked   = unpacked;
-		iter->ownerState = L;
+		iter->db       = db;
+		iter->named    = named;
+		iter->unpacked = unpacked;
 		lua_pushvalue(L, 1);
 		iter->dbRef = luaL_ref(L, LUA_REGISTRYINDEX);
 		trackIterator(db, iter);
@@ -1392,7 +1381,7 @@ namespace
 		{
 			setDbStatusFromError(db, iter->query.lastError());
 			const QByteArray msg = iter->query.lastError().text().toUtf8();
-			destroyIterator(iter);
+			destroyIterator(L, iter);
 			lua_pop(L, 1);
 			lua_pushlstring(L, msg.constData(), msg.size());
 			lua_error(L);
@@ -1434,10 +1423,9 @@ namespace
 		}
 		auto *iter = static_cast<LuaSqliteStmtIter *>(lua_newuserdata(L, sizeof(LuaSqliteStmtIter)));
 		new (iter) LuaSqliteStmtIter;
-		iter->stmt       = stmt;
-		iter->named      = named;
-		iter->unpacked   = unpacked;
-		iter->ownerState = L;
+		iter->stmt     = stmt;
+		iter->named    = named;
+		iter->unpacked = unpacked;
 		lua_pushvalue(L, 1);
 		iter->stmtRef = luaL_ref(L, LUA_REGISTRYINDEX);
 
@@ -1588,7 +1576,6 @@ namespace
 		stmt->hasRow     = false;
 		stmt->columns    = 0;
 		stmt->paramNames = collectParamNames(QString::fromUtf8(sql));
-		stmt->ownerState = L;
 		lua_pushvalue(L, 1);
 		stmt->dbRef = luaL_ref(L, LUA_REGISTRYINDEX);
 		trackStatement(db, stmt);
