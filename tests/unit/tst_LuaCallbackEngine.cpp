@@ -425,7 +425,8 @@ void tst_LuaCallbackEngine::wildcardAndStyleCallbackReceivesContextTables()
 	setEngineScript(engine, QStringLiteral(R"lua(
 function trigger_cb(first, second, wildcards, styles)
   trigger_seen = first .. "|" .. second .. "|" .. wildcards[0] .. "|" ..
-                 wildcards.named .. "|" .. styles[1].text .. "|" ..
+                 wildcards.named .. "|" .. tostring(wildcards.id == "") .. "|" ..
+                 styles[1].text .. "|" ..
                  tostring(styles[2].style)
 end
 )lua"));
@@ -436,7 +437,8 @@ end
 	const QStringList            args{QStringLiteral("line"), QStringLiteral("match")};
 	const QStringList            wildcards{QStringLiteral("whole"), QStringLiteral("capture")};
 	const QMap<QString, QString> namedWildcards{
-	    {QStringLiteral("named"), QStringLiteral("value")}
+	    {QStringLiteral("id"),    QStringLiteral("")     },
+        {QStringLiteral("named"), QStringLiteral("value")}
     };
 
 	bool hasFunction = false;
@@ -445,7 +447,7 @@ end
 	                                                   true, 12, 345));
 	QVERIFY(hasFunction);
 	QCOMPARE(luaGlobalString(engine.luaState(), "trigger_seen"),
-	         QStringLiteral("line|match|whole|value|room|4.0"));
+	         QStringLiteral("line|match|whole|value|true|room|4.0"));
 
 	QVERIFY(engine.executeScript(QStringLiteral(R"lua(
 assert(TriggerStyleRuns == nil)

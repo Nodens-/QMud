@@ -647,8 +647,8 @@ qmud_add_qtest(tst_WorldCommandProcessor_Speedwalk
 qmud_add_qtest(tst_WorldCommandProcessor_Alias
         SOURCES
         integration/tst_WorldCommandProcessor_Alias.cpp
-        "${CMAKE_SOURCE_DIR}/src/helpers/AliasMatchUtils.cpp"
-        "${CMAKE_SOURCE_DIR}/src/helpers/WorldCommandProcessorUtils.cpp"
+        LIBRARIES
+        qmud_app_core
         LABELS
         integration
         TIMEOUT
