@@ -15,6 +15,8 @@
 #include "WorldRuntime.h"
 #include "dialogs/GlobalPreferencesDialog.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QApplication>
 #include <QCheckBox>
 #include <QCoreApplication>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -24,6 +26,7 @@
 #include <QFont>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTabBar>
@@ -400,451 +403,509 @@ QString WorldRuntime::worldFilePath() const
 }
 // NOLINTEND(readability-convert-member-functions-to-static)
 
-/**
- * @brief QTest fixture covering Global Preferences update-settings behavior.
- */
-class tst_Dialog_GlobalPreferencesUpdates : public QObject
+namespace
 {
-		Q_OBJECT
+	/**
+	 * @brief QTest fixture covering Global Preferences update-settings behavior.
+	 */
+	class tst_Dialog_GlobalPreferencesUpdates : public QObject
+	{
+			Q_OBJECT
 
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		/**
-		 * @brief Verifies update-check controls are disabled when mechanism is unavailable.
-		 */
-		void updateControlsDisableWhenMechanismUnavailable()
-		{
-			resetStubState();
-			stubState().updateMechanismAvailable         = false;
-			stubState().updateMechanismUnavailableReason = QStringLiteral("Updates are disabled.");
-
-			GlobalPreferencesDialog dialog;
-			dialog.show();
-
-			QCheckBox *autoCheck =
-			    findCheckBoxByText(dialog, QStringLiteral("Automatically check for updates"));
-			QCheckBox *enableReload =
-			    findCheckBoxByText(dialog, QStringLiteral("Enable reload feature (Linux/MacOS)"));
-			QPushButton *checkNowButton  = findButtonByText(dialog, QStringLiteral("Check now"));
-			QSpinBox    *hoursSpin       = findSpinBySuffix(dialog, QStringLiteral(" hour(s)"));
-			QSpinBox    *timeoutSpin     = findSpinBySuffix(dialog, QStringLiteral(" ms"));
-			QLabel      *checkEveryLabel = findLabelByText(dialog, QStringLiteral("Check every:"));
-			QVERIFY(autoCheck);
-			QVERIFY(enableReload);
-			QVERIFY(checkNowButton);
-			QVERIFY(hoursSpin);
-			QVERIFY(timeoutSpin);
-			QVERIFY(checkEveryLabel);
-
-			QVERIFY(!autoCheck->isEnabled());
-			QVERIFY(!checkNowButton->isEnabled());
-			QVERIFY(!hoursSpin->isEnabled());
-			QVERIFY(!checkEveryLabel->isEnabled());
-			QVERIFY(enableReload->isEnabled());
-			QVERIFY(timeoutSpin->isEnabled());
-			QCOMPARE(autoCheck->toolTip(), QStringLiteral("Updates are disabled."));
-		}
-
-		/**
-		 * @brief Verifies hidden tab container does not trap keyboard focus traversal.
-		 */
-		void hiddenTabContainerIsNotFocusable()
-		{
-			resetStubState();
-
-			GlobalPreferencesDialog dialog;
-
-			auto                   *tabs = dialog.findChild<QTabWidget *>();
-			QVERIFY(tabs);
-			QCOMPARE(tabs->focusPolicy(), Qt::NoFocus);
-			QVERIFY(tabs->tabBar());
-			QCOMPARE(tabs->tabBar()->focusPolicy(), Qt::NoFocus);
-		}
-
-		/**
-		 * @brief Verifies Shortcuts page is placed between General and Closing.
-		 */
-		void shortcutsTabIsBetweenGeneralAndClosing()
-		{
-			resetStubState();
-
-			GlobalPreferencesDialog dialog;
-
-			auto                   *tabs = dialog.findChild<QTabWidget *>();
-			QVERIFY(tabs);
-			QCOMPARE(tabs->tabText(1), QStringLiteral("General"));
-			QCOMPARE(tabs->tabText(2), QStringLiteral("Shortcuts"));
-			QCOMPARE(tabs->tabText(3), QStringLiteral("Closing"));
-		}
-
-		/**
-		 * @brief Verifies Shortcuts table sorts by category and leaves Tab for focus traversal.
-		 */
-		void shortcutsTableSortsAndDoesNotConsumeTabNavigation()
-		{
-			resetStubState();
-
-			GlobalPreferencesDialog dialog;
-
-			auto                   *table = dialog.findChild<QTableWidget *>();
-			QVERIFY(table);
-			QVERIFY(table->isSortingEnabled());
-			QVERIFY(!table->tabKeyNavigation());
-			QVERIFY(table->horizontalHeader());
-			QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 0);
-			QCOMPARE(table->horizontalHeader()->sortIndicatorOrder(), Qt::AscendingOrder);
-			for (int row = 0; row < table->rowCount(); ++row)
-				QVERIFY(!table->cellWidget(row, 3));
-
-			QString previousCategory;
-			for (int row = 0; row < table->rowCount(); ++row)
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			/**
+			 * @brief Verifies update-check controls are disabled when mechanism is unavailable.
+			 */
+			void updateControlsDisableWhenMechanismUnavailable()
 			{
-				QTableWidgetItem *categoryItem = table->item(row, 0);
-				QVERIFY(categoryItem);
-				const QString category = categoryItem->text();
-				QVERIFY(previousCategory <= category);
-				previousCategory = category;
-				for (int column = 1; column < table->columnCount(); ++column)
-					QVERIFY(table->item(row, column));
+				resetStubState();
+				stubState().updateMechanismAvailable         = false;
+				stubState().updateMechanismUnavailableReason = QStringLiteral("Updates are disabled.");
+
+				GlobalPreferencesDialog dialog;
+				dialog.show();
+
+				QCheckBox *autoCheck =
+				    findCheckBoxByText(dialog, QStringLiteral("Automatically check for updates"));
+				QCheckBox *enableReload =
+				    findCheckBoxByText(dialog, QStringLiteral("Enable reload feature (Linux/MacOS)"));
+				QPushButton *checkNowButton  = findButtonByText(dialog, QStringLiteral("Check now"));
+				QSpinBox    *hoursSpin       = findSpinBySuffix(dialog, QStringLiteral(" hour(s)"));
+				QSpinBox    *timeoutSpin     = findSpinBySuffix(dialog, QStringLiteral(" ms"));
+				QLabel      *checkEveryLabel = findLabelByText(dialog, QStringLiteral("Check every:"));
+				QVERIFY(autoCheck);
+				QVERIFY(enableReload);
+				QVERIFY(checkNowButton);
+				QVERIFY(hoursSpin);
+				QVERIFY(timeoutSpin);
+				QVERIFY(checkEveryLabel);
+
+				QVERIFY(!autoCheck->isEnabled());
+				QVERIFY(!checkNowButton->isEnabled());
+				QVERIFY(!hoursSpin->isEnabled());
+				QVERIFY(!checkEveryLabel->isEnabled());
+				QVERIFY(enableReload->isEnabled());
+				QVERIFY(timeoutSpin->isEnabled());
+				QCOMPARE(autoCheck->toolTip(), QStringLiteral("Updates are disabled."));
 			}
 
-			table->sortItems(1, Qt::AscendingOrder);
-			QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 1);
-			QString previousAction;
-			for (int row = 0; row < table->rowCount(); ++row)
+			/**
+			 * @brief Verifies hidden tab container does not trap keyboard focus traversal.
+			 */
+			void hiddenTabContainerIsNotFocusable()
 			{
-				const QString action = table->item(row, 1)->text();
-				QVERIFY(previousAction <= action);
-				previousAction = action;
+				resetStubState();
+
+				GlobalPreferencesDialog dialog;
+
+				auto                   *tabs = dialog.findChild<QTabWidget *>();
+				QVERIFY(tabs);
+				QCOMPARE(tabs->focusPolicy(), Qt::NoFocus);
+				QVERIFY(tabs->tabBar());
+				QCOMPARE(tabs->tabBar()->focusPolicy(), Qt::NoFocus);
 			}
 
-			QTableWidgetItem *worldShortcut =
-			    findShortcutOverrideItemByPreferenceKey(*table, QStringLiteral("Shortcut.World10"));
-			QVERIFY(worldShortcut);
-			worldShortcut->setText(QStringLiteral("Ctrl+Alt+0"));
-
-			table->sortItems(3, Qt::DescendingOrder);
-			QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 3);
-			QVERIFY(table->item(0, 3));
-			QCOMPARE(table->item(0, 3)->text(), QStringLiteral("Ctrl+Alt+0"));
-
-			table->setCurrentCell(table->rowCount() - 1, 0);
-			QFocusEvent tabFocusEvent(QEvent::FocusIn, Qt::TabFocusReason);
-			QCoreApplication::sendEvent(table, &tabFocusEvent);
-			QCOMPARE(table->currentRow(), 0);
-			QCOMPARE(table->currentColumn(), 0);
-		}
-
-		/**
-		 * @brief Verifies shortcut overrides persist through existing global preferences.
-		 */
-		void acceptPersistsShortcutOverride()
-		{
-			resetStubState();
-
-			GlobalPreferencesDialog dialog;
-			dialog.show();
-
-			auto *table = dialog.findChild<QTableWidget *>();
-			QVERIFY(table);
-			QTableWidgetItem *displayStart =
-			    findShortcutOverrideItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayStart"));
-			QVERIFY(displayStart);
-			displayStart->setText(QStringLiteral("Ctrl+Alt+Home"));
-
-			dialog.accept();
-
-			QCOMPARE(stubState().globalOptions.value(QStringLiteral("Shortcut.DisplayStart")).toString(),
-			         QStringLiteral("Ctrl+Alt+Home"));
-			QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
-		}
-
-		/**
-		 * @brief Verifies explicit overrides can claim another action's default shortcut.
-		 */
-		void overrideClaimsDefaultShortcut()
-		{
-			resetStubState();
-
-			GlobalPreferencesDialog dialog;
-			dialog.show();
-
-			auto *table = dialog.findChild<QTableWidget *>();
-			QVERIFY(table);
-			QTableWidgetItem *displayStart =
-			    findShortcutOverrideItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayStart"));
-			QVERIFY(displayStart);
-			displayStart->setText(QStringLiteral("PgUp"));
-			QTableWidgetItem *displayStartDefault =
-			    findShortcutDefaultItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayStart"));
-			QVERIFY(displayStartDefault);
-			QCOMPARE(displayStartDefault->data(kShortcutDisabledDefaultPortableTextsRole).toStringList(),
-			         QStringList{});
-			QTableWidgetItem *displayPageUpDefault =
-			    findShortcutDefaultItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayPageUp"));
-			QVERIFY(displayPageUpDefault);
-			QCOMPARE(displayPageUpDefault->data(kShortcutDisabledDefaultPortableTextsRole).toStringList(),
-			         QStringList{QStringLiteral("PgUp")});
-
-			dialog.accept();
-
-			QCOMPARE(stubState().globalOptions.value(QStringLiteral("Shortcut.DisplayStart")).toString(),
-			         QStringLiteral("PgUp"));
-			QCOMPARE(
-			    QMudShortcutPreferenceUtils::shortcutListToPortableText(
-			        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayStart"))),
-			    QStringLiteral("PgUp"));
-			QCOMPARE(
-			    QMudShortcutPreferenceUtils::shortcutListToPortableText(
-			        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayPageUp"))),
-			    QString());
-			QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
-		}
-
-		/**
-		 * @brief Verifies stored duplicate explicit overrides do not become active duplicate shortcuts.
-		 */
-		void duplicateStoredOverridesFallBackToDefaults()
-		{
-			resetStubState();
-			stubState().globalOptions.insert(QStringLiteral("Shortcut.DisplayStart"), QStringLiteral("PgUp"));
-			stubState().globalOptions.insert(QStringLiteral("Shortcut.DisplayPageDown"),
-			                                 QStringLiteral("PgUp"));
-
-			GlobalPreferencesDialog dialog;
-			auto                   *table = dialog.findChild<QTableWidget *>();
-			QVERIFY(table);
-			QTableWidgetItem *displayPageUpDefault =
-			    findShortcutDefaultItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayPageUp"));
-			QVERIFY(displayPageUpDefault);
-			QCOMPARE(displayPageUpDefault->data(kShortcutDisabledDefaultPortableTextsRole).toStringList(),
-			         QStringList{});
-
-			QCOMPARE(
-			    QMudShortcutPreferenceUtils::shortcutListToPortableText(
-			        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayStart"))),
-			    QStringLiteral("Ctrl+Home"));
-			QCOMPARE(
-			    QMudShortcutPreferenceUtils::shortcutListToPortableText(
-			        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayPageDown"))),
-			    QStringLiteral("PgDown"));
-			QCOMPARE(
-			    QMudShortcutPreferenceUtils::shortcutListToPortableText(
-			        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayPageUp"))),
-			    QStringLiteral("PgUp"));
-		}
-
-		/**
-		 * @brief Verifies world-slot actions are configurable shortcut preferences.
-		 */
-		void worldSlotShortcutsArePreferenceDefinitions()
-		{
-			resetStubState();
-
-			const auto *firstWorld = QMudShortcutPreferenceUtils::definitionForId(QStringLiteral("World1"));
-			QVERIFY(firstWorld);
-			QCOMPARE(firstWorld->preferenceKey, QStringLiteral("Shortcut.World1"));
-			QCOMPARE(QMudShortcutPreferenceUtils::shortcutListToPortableText(firstWorld->defaults),
-			         QStringLiteral("Ctrl+1"));
-
-			const auto *tenthWorld = QMudShortcutPreferenceUtils::definitionForId(QStringLiteral("World10"));
-			QVERIFY(tenthWorld);
-			QCOMPARE(tenthWorld->preferenceKey, QStringLiteral("Shortcut.World10"));
-			QCOMPARE(QMudShortcutPreferenceUtils::shortcutListToPortableText(tenthWorld->defaults),
-			         QStringLiteral("Ctrl+0"));
-
-			GlobalPreferencesDialog dialog;
-			auto                   *table = dialog.findChild<QTableWidget *>();
-			QVERIFY(table);
-			QVERIFY(findShortcutOverrideItemByPreferenceKey(*table, firstWorld->preferenceKey));
-			QVERIFY(findShortcutOverrideItemByPreferenceKey(*table, tenthWorld->preferenceKey));
-		}
-
-		/**
-		 * @brief Verifies global shortcut validation reserves per-world macro slots.
-		 */
-		void macroShortcutReservations()
-		{
-			QVERIFY(QMudShortcutPreferenceUtils::isReservedMacroShortcut(
-			    QKeySequence::fromString(QStringLiteral("F2"), QKeySequence::PortableText)));
-			QVERIFY(QMudShortcutPreferenceUtils::isReservedMacroShortcut(
-			    QKeySequence::fromString(QStringLiteral("Ctrl+F6"), QKeySequence::PortableText)));
-			QVERIFY(QMudShortcutPreferenceUtils::isReservedMacroShortcut(
-			    QKeySequence::fromString(QStringLiteral("Alt+N"), QKeySequence::PortableText)));
-			QVERIFY(!QMudShortcutPreferenceUtils::isReservedMacroShortcut(
-			    QKeySequence::fromString(QStringLiteral("Ctrl+Alt+Home"), QKeySequence::PortableText)));
-		}
-
-		/**
-		 * @brief Verifies Lua page script editor passes Tab to focus traversal.
-		 */
-		void luaScriptEditorAllowsTabFocusTraversal()
-		{
-			resetStubState();
-			stubState().globalOptions.insert(QStringLiteral("LuaScript"),
-			                                 QStringLiteral("test-lua-script-editor-tab-focus"));
-
-			GlobalPreferencesDialog dialog;
-
-			const auto              editors = dialog.findChildren<QTextEdit *>();
-			QTextEdit              *luaEditor{nullptr};
-			for (QTextEdit *editor : editors)
+			/**
+			 * @brief Verifies Shortcuts page is placed between General and Closing.
+			 */
+			void shortcutsTabIsBetweenGeneralAndClosing()
 			{
-				if (editor &&
-				    editor->toPlainText().contains(QStringLiteral("test-lua-script-editor-tab-focus")))
+				resetStubState();
+
+				GlobalPreferencesDialog dialog;
+
+				auto                   *tabs = dialog.findChild<QTabWidget *>();
+				QVERIFY(tabs);
+				QCOMPARE(tabs->tabText(1), QStringLiteral("General"));
+				QCOMPARE(tabs->tabText(2), QStringLiteral("Shortcuts"));
+				QCOMPARE(tabs->tabText(3), QStringLiteral("Closing"));
+			}
+
+			/**
+			 * @brief Verifies Shortcuts table sorts by category and leaves Tab for focus traversal.
+			 */
+			void shortcutsTableSortsAndDoesNotConsumeTabNavigation()
+			{
+				resetStubState();
+
+				GlobalPreferencesDialog dialog;
+
+				auto                   *table = dialog.findChild<QTableWidget *>();
+				QVERIFY(table);
+				QVERIFY(table->isSortingEnabled());
+				QVERIFY(!table->tabKeyNavigation());
+				QVERIFY(table->horizontalHeader());
+				QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 0);
+				QCOMPARE(table->horizontalHeader()->sortIndicatorOrder(), Qt::AscendingOrder);
+				for (int row = 0; row < table->rowCount(); ++row)
+					QVERIFY(!table->cellWidget(row, 3));
+
+				QString previousCategory;
+				for (int row = 0; row < table->rowCount(); ++row)
 				{
-					luaEditor = editor;
-					break;
+					QTableWidgetItem *categoryItem = table->item(row, 0);
+					QVERIFY(categoryItem);
+					const QString category = categoryItem->text();
+					QVERIFY(previousCategory <= category);
+					previousCategory = category;
+					for (int column = 1; column < table->columnCount(); ++column)
+						QVERIFY(table->item(row, column));
 				}
+
+				table->sortItems(1, Qt::AscendingOrder);
+				QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 1);
+				QString previousAction;
+				for (int row = 0; row < table->rowCount(); ++row)
+				{
+					const QString action = table->item(row, 1)->text();
+					QVERIFY(previousAction <= action);
+					previousAction = action;
+				}
+
+				QTableWidgetItem *worldShortcut =
+				    findShortcutOverrideItemByPreferenceKey(*table, QStringLiteral("Shortcut.World10"));
+				QVERIFY(worldShortcut);
+				worldShortcut->setText(QStringLiteral("Ctrl+Alt+0"));
+
+				table->sortItems(3, Qt::DescendingOrder);
+				QCOMPARE(table->horizontalHeader()->sortIndicatorSection(), 3);
+				QVERIFY(table->item(0, 3));
+				QCOMPARE(table->item(0, 3)->text(), QStringLiteral("Ctrl+Alt+0"));
+
+				table->setCurrentCell(table->rowCount() - 1, 0);
+				QFocusEvent tabFocusEvent(QEvent::FocusIn, Qt::TabFocusReason);
+				QCoreApplication::sendEvent(table, &tabFocusEvent);
+				QCOMPARE(table->currentRow(), 0);
+				QCOMPARE(table->currentColumn(), 0);
 			}
 
-			QVERIFY(luaEditor);
-			QVERIFY(luaEditor->tabChangesFocus());
-		}
+			/**
+			 * @brief Supplies Return variants that should open the shortcut override editor.
+			 */
+			void shortcutsTableEnterStartsOverrideEditing_data()
+			{
+				QTest::addColumn<int>("key");
+				QTest::addColumn<Qt::KeyboardModifiers>("modifiers");
+				QTest::newRow("return")
+				    << static_cast<int>(Qt::Key_Return) << Qt::KeyboardModifiers(Qt::NoModifier);
+				QTest::newRow("keypad-enter")
+				    << static_cast<int>(Qt::Key_Enter) << Qt::KeyboardModifiers(Qt::KeypadModifier);
+			}
 
-		/**
-		 * @brief Verifies interval controls track auto-check toggle while check-now remains enabled.
-		 */
-		void updateIntervalTracksAutoCheckStateWhenMechanismAvailable()
-		{
-			resetStubState();
-			stubState().globalOptions.insert(QStringLiteral("AutoCheckForUpdates"), 1);
-			stubState().globalOptions.insert(QStringLiteral("UpdateCheckIntervalHours"), 6);
+			/**
+			 * @brief Verifies Enter opens the current row's override editor without accepting the dialog.
+			 */
+			void shortcutsTableEnterStartsOverrideEditing()
+			{
+				resetStubState();
+				QFETCH(int, key);
+				QFETCH(Qt::KeyboardModifiers, modifiers);
 
-			GlobalPreferencesDialog dialog;
-			dialog.show();
+				GlobalPreferencesDialog dialog;
+				auto                   *tabs  = dialog.findChild<QTabWidget *>();
+				auto                   *table = dialog.findChild<QTableWidget *>();
+				QVERIFY(tabs);
+				QVERIFY(table);
+				tabs->setCurrentIndex(2);
+				dialog.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&dialog));
 
-			QCheckBox *autoCheck =
-			    findCheckBoxByText(dialog, QStringLiteral("Automatically check for updates"));
-			QPushButton *checkNowButton  = findButtonByText(dialog, QStringLiteral("Check now"));
-			QSpinBox    *hoursSpin       = findSpinBySuffix(dialog, QStringLiteral(" hour(s)"));
-			QLabel      *checkEveryLabel = findLabelByText(dialog, QStringLiteral("Check every:"));
-			QVERIFY(autoCheck);
-			QVERIFY(checkNowButton);
-			QVERIFY(hoursSpin);
-			QVERIFY(checkEveryLabel);
+				QTableWidgetItem *overrideItem =
+				    findShortcutOverrideItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayStart"));
+				QVERIFY(overrideItem);
+				table->setCurrentCell(overrideItem->row(), 0);
+				table->setFocus(Qt::OtherFocusReason);
+				QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(table));
 
-			QVERIFY(autoCheck->isEnabled());
-			QVERIFY(checkNowButton->isEnabled());
-			QVERIFY(hoursSpin->isEnabled());
-			QVERIFY(checkEveryLabel->isEnabled());
-			QCOMPARE(hoursSpin->value(), 6);
+				QTest::keyClick(table, static_cast<Qt::Key>(key), modifiers);
 
-			autoCheck->setChecked(false);
-			QCoreApplication::processEvents();
-			QVERIFY(!hoursSpin->isEnabled());
-			QVERIFY(!checkEveryLabel->isEnabled());
-			QVERIFY(checkNowButton->isEnabled());
+				QVERIFY(dialog.isVisible());
+				QCOMPARE(table->currentItem(), overrideItem);
+				auto *editor = table->findChild<QLineEdit *>();
+				QTRY_VERIFY(editor);
+				QTRY_VERIFY(editor->hasFocus());
+				QTest::keyClicks(editor, QStringLiteral("Ctrl+Alt+G"));
+				QCOMPARE(editor->text(), QStringLiteral("Ctrl+Alt+G"));
+				QVERIFY(dialog.isVisible());
+			}
 
-			autoCheck->setChecked(true);
-			QCoreApplication::processEvents();
-			QVERIFY(hoursSpin->isEnabled());
-			QVERIFY(checkEveryLabel->isEnabled());
-			QVERIFY(checkNowButton->isEnabled());
-		}
+			/**
+			 * @brief Verifies shortcut overrides persist through existing global preferences.
+			 */
+			void acceptPersistsShortcutOverride()
+			{
+				resetStubState();
 
-		/**
-		 * @brief Verifies `Check now` forwards to AppController with this dialog as parent.
-		 */
-		void checkNowCallsAppController()
-		{
-			resetStubState();
+				GlobalPreferencesDialog dialog;
+				dialog.show();
 
-			GlobalPreferencesDialog dialog;
-			dialog.show();
+				auto *table = dialog.findChild<QTableWidget *>();
+				QVERIFY(table);
+				QTableWidgetItem *displayStart =
+				    findShortcutOverrideItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayStart"));
+				QVERIFY(displayStart);
+				displayStart->setText(QStringLiteral("Ctrl+Alt+Home"));
 
-			QPushButton *checkNowButton = findButtonByText(dialog, QStringLiteral("Check now"));
-			QVERIFY(checkNowButton);
-			QTest::mouseClick(checkNowButton, Qt::LeftButton);
+				dialog.accept();
 
-			QCOMPARE(stubState().checkForUpdatesNowCallCount, 1);
-			QCOMPARE(stubState().lastUpdateCheckParent.data(), static_cast<QWidget *>(&dialog));
-		}
+				QCOMPARE(stubState().globalOptions.value(QStringLiteral("Shortcut.DisplayStart")).toString(),
+				         QStringLiteral("Ctrl+Alt+Home"));
+				QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
+			}
 
-		/**
-		 * @brief Verifies update-related options persist through dialog acceptance.
-		 */
-		void acceptPersistsUpdateSettings()
-		{
-			resetStubState();
+			/**
+			 * @brief Verifies explicit overrides can claim another action's default shortcut.
+			 */
+			void overrideClaimsDefaultShortcut()
+			{
+				resetStubState();
 
-			GlobalPreferencesDialog dialog;
-			dialog.show();
+				GlobalPreferencesDialog dialog;
+				dialog.show();
 
-			QCheckBox *autoCheck =
-			    findCheckBoxByText(dialog, QStringLiteral("Automatically check for updates"));
-			QCheckBox *enableReload =
-			    findCheckBoxByText(dialog, QStringLiteral("Enable reload feature (Linux/MacOS)"));
-			QSpinBox *hoursSpin   = findSpinBySuffix(dialog, QStringLiteral(" hour(s)"));
-			QSpinBox *timeoutSpin = findSpinBySuffix(dialog, QStringLiteral(" ms"));
-			QVERIFY(autoCheck);
-			QVERIFY(enableReload);
-			QVERIFY(hoursSpin);
-			QVERIFY(timeoutSpin);
+				auto *table = dialog.findChild<QTableWidget *>();
+				QVERIFY(table);
+				QTableWidgetItem *displayStart =
+				    findShortcutOverrideItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayStart"));
+				QVERIFY(displayStart);
+				displayStart->setText(QStringLiteral("PgUp"));
+				QTableWidgetItem *displayStartDefault =
+				    findShortcutDefaultItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayStart"));
+				QVERIFY(displayStartDefault);
+				QCOMPARE(displayStartDefault->data(kShortcutDisabledDefaultPortableTextsRole).toStringList(),
+				         QStringList{});
+				QTableWidgetItem *displayPageUpDefault =
+				    findShortcutDefaultItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayPageUp"));
+				QVERIFY(displayPageUpDefault);
+				QCOMPARE(displayPageUpDefault->data(kShortcutDisabledDefaultPortableTextsRole).toStringList(),
+				         QStringList{QStringLiteral("PgUp")});
 
-			autoCheck->setChecked(false);
-			hoursSpin->setValue(24);
-			enableReload->setChecked(false);
-			timeoutSpin->setValue(850);
+				dialog.accept();
 
-			dialog.accept();
+				QCOMPARE(stubState().globalOptions.value(QStringLiteral("Shortcut.DisplayStart")).toString(),
+				         QStringLiteral("PgUp"));
+				QCOMPARE(
+				    QMudShortcutPreferenceUtils::shortcutListToPortableText(
+				        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayStart"))),
+				    QStringLiteral("PgUp"));
+				QCOMPARE(QMudShortcutPreferenceUtils::shortcutListToPortableText(
+				             QMudShortcutPreferenceUtils::effectiveShortcutsForId(
+				                 QStringLiteral("DisplayPageUp"))),
+				         QString());
+				QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
+			}
 
-			QCOMPARE(stubState().globalOptions.value(QStringLiteral("AutoCheckForUpdates")).toInt(), 0);
-			QCOMPARE(stubState().globalOptions.value(QStringLiteral("UpdateCheckIntervalHours")).toInt(), 24);
-			QCOMPARE(stubState().globalOptions.value(QStringLiteral("EnableReloadFeature")).toInt(), 0);
-			QCOMPARE(stubState().globalOptions.value(QStringLiteral("ReloadMccpDisableTimeoutMs")).toInt(),
-			         850);
-			QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
-		}
+			/**
+			 * @brief Verifies stored duplicate explicit overrides do not become active duplicate shortcuts.
+			 */
+			void duplicateStoredOverridesFallBackToDefaults()
+			{
+				resetStubState();
+				stubState().globalOptions.insert(QStringLiteral("Shortcut.DisplayStart"),
+				                                 QStringLiteral("PgUp"));
+				stubState().globalOptions.insert(QStringLiteral("Shortcut.DisplayPageDown"),
+				                                 QStringLiteral("PgUp"));
 
-		/**
-		 * @brief Verifies printer font family and style are displayed and persisted separately.
-		 */
-		void printerFontStyleLoadsAndPersists()
-		{
-			resetStubState();
-			stubState().globalOptions.insert(QStringLiteral("PrinterFont"), QStringLiteral("Menlo"));
-			stubState().globalOptions.insert(QStringLiteral("PrinterFontSize"), 11);
-			stubState().globalOptions.insert(QStringLiteral("PrinterFontWeight"), QFont::Bold);
-			stubState().globalOptions.insert(QStringLiteral("PrinterFontItalic"), 1);
+				GlobalPreferencesDialog dialog;
+				auto                   *table = dialog.findChild<QTableWidget *>();
+				QVERIFY(table);
+				QTableWidgetItem *displayPageUpDefault =
+				    findShortcutDefaultItemByPreferenceKey(*table, QStringLiteral("Shortcut.DisplayPageUp"));
+				QVERIFY(displayPageUpDefault);
+				QCOMPARE(displayPageUpDefault->data(kShortcutDisabledDefaultPortableTextsRole).toStringList(),
+				         QStringList{});
 
-			GlobalPreferencesDialog dialog;
-			dialog.show();
+				QCOMPARE(
+				    QMudShortcutPreferenceUtils::shortcutListToPortableText(
+				        QMudShortcutPreferenceUtils::effectiveShortcutsForId(QStringLiteral("DisplayStart"))),
+				    QStringLiteral("Ctrl+Home"));
+				QCOMPARE(QMudShortcutPreferenceUtils::shortcutListToPortableText(
+				             QMudShortcutPreferenceUtils::effectiveShortcutsForId(
+				                 QStringLiteral("DisplayPageDown"))),
+				         QStringLiteral("PgDown"));
+				QCOMPARE(QMudShortcutPreferenceUtils::shortcutListToPortableText(
+				             QMudShortcutPreferenceUtils::effectiveShortcutsForId(
+				                 QStringLiteral("DisplayPageUp"))),
+				         QStringLiteral("PgUp"));
+			}
 
-			QVERIFY(findLabelByText(dialog, QStringLiteral("Menlo")));
-			QVERIFY(findLabelByText(dialog, QStringLiteral("11 pt. Bold Italic")));
+			/**
+			 * @brief Verifies world-slot actions are configurable shortcut preferences.
+			 */
+			void worldSlotShortcutsArePreferenceDefinitions()
+			{
+				resetStubState();
 
-			dialog.accept();
+				const auto *firstWorld =
+				    QMudShortcutPreferenceUtils::definitionForId(QStringLiteral("World1"));
+				QVERIFY(firstWorld);
+				QCOMPARE(firstWorld->preferenceKey, QStringLiteral("Shortcut.World1"));
+				QCOMPARE(QMudShortcutPreferenceUtils::shortcutListToPortableText(firstWorld->defaults),
+				         QStringLiteral("Ctrl+1"));
 
-			QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFont")).toString(),
-			         QStringLiteral("Menlo"));
-			QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFontSize")).toInt(), 11);
-			QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFontWeight")).toInt(),
-			         static_cast<int>(QFont::Bold));
-			QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFontItalic")).toInt(), 1);
-		}
+				const auto *tenthWorld =
+				    QMudShortcutPreferenceUtils::definitionForId(QStringLiteral("World10"));
+				QVERIFY(tenthWorld);
+				QCOMPARE(tenthWorld->preferenceKey, QStringLiteral("Shortcut.World10"));
+				QCOMPARE(QMudShortcutPreferenceUtils::shortcutListToPortableText(tenthWorld->defaults),
+				         QStringLiteral("Ctrl+0"));
 
-		/**
-		 * @brief Verifies world-list entries persist relative to QMUD_HOME when possible.
-		 */
-		void acceptPersistsWorldListRelativeToQmudHome()
-		{
-			resetStubState();
+				GlobalPreferencesDialog dialog;
+				auto                   *table = dialog.findChild<QTableWidget *>();
+				QVERIFY(table);
+				QVERIFY(findShortcutOverrideItemByPreferenceKey(*table, firstWorld->preferenceKey));
+				QVERIFY(findShortcutOverrideItemByPreferenceKey(*table, tenthWorld->preferenceKey));
+			}
 
-			const QString qmudHome = QFileInfo(testIniFilePath()).absolutePath();
-			const QString worldPath =
-			    QDir::cleanPath(QDir(qmudHome).filePath(QStringLiteral("worlds/test-world.mcl")));
-			stubState().globalOptions.insert(QStringLiteral("WorldList"), worldPath);
+			/**
+			 * @brief Verifies global shortcut validation reserves per-world macro slots.
+			 */
+			void macroShortcutReservations()
+			{
+				QVERIFY(QMudShortcutPreferenceUtils::isReservedMacroShortcut(
+				    QKeySequence::fromString(QStringLiteral("F2"), QKeySequence::PortableText)));
+				QVERIFY(QMudShortcutPreferenceUtils::isReservedMacroShortcut(
+				    QKeySequence::fromString(QStringLiteral("Ctrl+F6"), QKeySequence::PortableText)));
+				QVERIFY(QMudShortcutPreferenceUtils::isReservedMacroShortcut(
+				    QKeySequence::fromString(QStringLiteral("Alt+N"), QKeySequence::PortableText)));
+				QVERIFY(!QMudShortcutPreferenceUtils::isReservedMacroShortcut(
+				    QKeySequence::fromString(QStringLiteral("Ctrl+Alt+Home"), QKeySequence::PortableText)));
+			}
 
-			GlobalPreferencesDialog dialog;
-			dialog.show();
-			dialog.accept();
+			/**
+			 * @brief Verifies Lua page script editor passes Tab to focus traversal.
+			 */
+			void luaScriptEditorAllowsTabFocusTraversal()
+			{
+				resetStubState();
+				stubState().globalOptions.insert(QStringLiteral("LuaScript"),
+				                                 QStringLiteral("test-lua-script-editor-tab-focus"));
 
-			QCOMPARE(stubState().globalOptions.value(QStringLiteral("WorldList")).toString(),
-			         QStringLiteral("./worlds/test-world.mcl"));
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
+				GlobalPreferencesDialog dialog;
+
+				const auto              editors = dialog.findChildren<QTextEdit *>();
+				QTextEdit              *luaEditor{nullptr};
+				for (QTextEdit *editor : editors)
+				{
+					if (editor &&
+					    editor->toPlainText().contains(QStringLiteral("test-lua-script-editor-tab-focus")))
+					{
+						luaEditor = editor;
+						break;
+					}
+				}
+
+				QVERIFY(luaEditor);
+				QVERIFY(luaEditor->tabChangesFocus());
+			}
+
+			/**
+			 * @brief Verifies interval controls track auto-check toggle while check-now remains enabled.
+			 */
+			void updateIntervalTracksAutoCheckStateWhenMechanismAvailable()
+			{
+				resetStubState();
+				stubState().globalOptions.insert(QStringLiteral("AutoCheckForUpdates"), 1);
+				stubState().globalOptions.insert(QStringLiteral("UpdateCheckIntervalHours"), 6);
+
+				GlobalPreferencesDialog dialog;
+				dialog.show();
+
+				QCheckBox *autoCheck =
+				    findCheckBoxByText(dialog, QStringLiteral("Automatically check for updates"));
+				QPushButton *checkNowButton  = findButtonByText(dialog, QStringLiteral("Check now"));
+				QSpinBox    *hoursSpin       = findSpinBySuffix(dialog, QStringLiteral(" hour(s)"));
+				QLabel      *checkEveryLabel = findLabelByText(dialog, QStringLiteral("Check every:"));
+				QVERIFY(autoCheck);
+				QVERIFY(checkNowButton);
+				QVERIFY(hoursSpin);
+				QVERIFY(checkEveryLabel);
+
+				QVERIFY(autoCheck->isEnabled());
+				QVERIFY(checkNowButton->isEnabled());
+				QVERIFY(hoursSpin->isEnabled());
+				QVERIFY(checkEveryLabel->isEnabled());
+				QCOMPARE(hoursSpin->value(), 6);
+
+				autoCheck->setChecked(false);
+				QCoreApplication::processEvents();
+				QVERIFY(!hoursSpin->isEnabled());
+				QVERIFY(!checkEveryLabel->isEnabled());
+				QVERIFY(checkNowButton->isEnabled());
+
+				autoCheck->setChecked(true);
+				QCoreApplication::processEvents();
+				QVERIFY(hoursSpin->isEnabled());
+				QVERIFY(checkEveryLabel->isEnabled());
+				QVERIFY(checkNowButton->isEnabled());
+			}
+
+			/**
+			 * @brief Verifies `Check now` forwards to AppController with this dialog as parent.
+			 */
+			void checkNowCallsAppController()
+			{
+				resetStubState();
+
+				GlobalPreferencesDialog dialog;
+				dialog.show();
+
+				QPushButton *checkNowButton = findButtonByText(dialog, QStringLiteral("Check now"));
+				QVERIFY(checkNowButton);
+				QTest::mouseClick(checkNowButton, Qt::LeftButton);
+
+				QCOMPARE(stubState().checkForUpdatesNowCallCount, 1);
+				QCOMPARE(stubState().lastUpdateCheckParent.data(), static_cast<QWidget *>(&dialog));
+			}
+
+			/**
+			 * @brief Verifies update-related options persist through dialog acceptance.
+			 */
+			void acceptPersistsUpdateSettings()
+			{
+				resetStubState();
+
+				GlobalPreferencesDialog dialog;
+				dialog.show();
+
+				QCheckBox *autoCheck =
+				    findCheckBoxByText(dialog, QStringLiteral("Automatically check for updates"));
+				QCheckBox *enableReload =
+				    findCheckBoxByText(dialog, QStringLiteral("Enable reload feature (Linux/MacOS)"));
+				QSpinBox *hoursSpin   = findSpinBySuffix(dialog, QStringLiteral(" hour(s)"));
+				QSpinBox *timeoutSpin = findSpinBySuffix(dialog, QStringLiteral(" ms"));
+				QVERIFY(autoCheck);
+				QVERIFY(enableReload);
+				QVERIFY(hoursSpin);
+				QVERIFY(timeoutSpin);
+
+				autoCheck->setChecked(false);
+				hoursSpin->setValue(24);
+				enableReload->setChecked(false);
+				timeoutSpin->setValue(850);
+
+				dialog.accept();
+
+				QCOMPARE(stubState().globalOptions.value(QStringLiteral("AutoCheckForUpdates")).toInt(), 0);
+				QCOMPARE(stubState().globalOptions.value(QStringLiteral("UpdateCheckIntervalHours")).toInt(),
+				         24);
+				QCOMPARE(stubState().globalOptions.value(QStringLiteral("EnableReloadFeature")).toInt(), 0);
+				QCOMPARE(
+				    stubState().globalOptions.value(QStringLiteral("ReloadMccpDisableTimeoutMs")).toInt(),
+				    850);
+				QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
+			}
+
+			/**
+			 * @brief Verifies printer font family and style are displayed and persisted separately.
+			 */
+			void printerFontStyleLoadsAndPersists()
+			{
+				resetStubState();
+				stubState().globalOptions.insert(QStringLiteral("PrinterFont"), QStringLiteral("Menlo"));
+				stubState().globalOptions.insert(QStringLiteral("PrinterFontSize"), 11);
+				stubState().globalOptions.insert(QStringLiteral("PrinterFontWeight"), QFont::Bold);
+				stubState().globalOptions.insert(QStringLiteral("PrinterFontItalic"), 1);
+
+				GlobalPreferencesDialog dialog;
+				dialog.show();
+
+				QVERIFY(findLabelByText(dialog, QStringLiteral("Menlo")));
+				QVERIFY(findLabelByText(dialog, QStringLiteral("11 pt. Bold Italic")));
+
+				dialog.accept();
+
+				QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFont")).toString(),
+				         QStringLiteral("Menlo"));
+				QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFontSize")).toInt(), 11);
+				QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFontWeight")).toInt(),
+				         static_cast<int>(QFont::Bold));
+				QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFontItalic")).toInt(), 1);
+			}
+
+			/**
+			 * @brief Verifies world-list entries persist relative to QMUD_HOME when possible.
+			 */
+			void acceptPersistsWorldListRelativeToQmudHome()
+			{
+				resetStubState();
+
+				const QString qmudHome = QFileInfo(testIniFilePath()).absolutePath();
+				const QString worldPath =
+				    QDir::cleanPath(QDir(qmudHome).filePath(QStringLiteral("worlds/test-world.mcl")));
+				stubState().globalOptions.insert(QStringLiteral("WorldList"), worldPath);
+
+				GlobalPreferencesDialog dialog;
+				dialog.show();
+				dialog.accept();
+
+				QCOMPARE(stubState().globalOptions.value(QStringLiteral("WorldList")).toString(),
+				         QStringLiteral("./worlds/test-world.mcl"));
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+} // namespace
 
 QTEST_MAIN(tst_Dialog_GlobalPreferencesUpdates)
 

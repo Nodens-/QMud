@@ -45,6 +45,10 @@ class GlobalPreferencesDialog : public QDialog
 		 */
 		explicit GlobalPreferencesDialog(QWidget *parent = nullptr);
 		/**
+		 * @brief Disconnects table callbacks before child-editor teardown can commit data.
+		 */
+		~GlobalPreferencesDialog() override;
+		/**
 		 * @brief Validates and applies global settings changes.
 		 */
 		void accept() override;

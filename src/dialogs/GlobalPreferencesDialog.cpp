@@ -37,6 +37,8 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -230,6 +232,12 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 	}
 }
 
+GlobalPreferencesDialog::~GlobalPreferencesDialog()
+{
+	if (m_shortcutsTable)
+		QObject::disconnect(m_shortcutsTable, nullptr, this, nullptr);
+}
+
 namespace
 {
 	constexpr int kShortcutDefaultPreferenceKeyRole         = Qt::UserRole + 1;
@@ -245,6 +253,40 @@ namespace
 			}
 
 		protected:
+			/**
+			 * @brief Opens the current row's shortcut override editor when Enter is pressed.
+			 * @param event Key event delivered to the table.
+			 */
+			void keyPressEvent(QKeyEvent *event) override
+			{
+				if (event->key() != Qt::Key_Return && event->key() != Qt::Key_Enter)
+				{
+					QTableWidget::keyPressEvent(event);
+					return;
+				}
+
+				Qt::KeyboardModifiers modifiers = event->modifiers();
+				modifiers.setFlag(Qt::KeypadModifier, false);
+				if (modifiers != Qt::NoModifier)
+				{
+					QTableWidget::keyPressEvent(event);
+					return;
+				}
+
+				const int row = currentRow() >= 0 ? currentRow() : 0;
+				if (QTableWidgetItem *overrideItem = item(row, 3);
+				    overrideItem && overrideItem->flags().testFlag(Qt::ItemIsEditable))
+				{
+					setCurrentItem(overrideItem);
+					scrollToItem(overrideItem);
+					editItem(overrideItem);
+					event->accept();
+					return;
+				}
+
+				QTableWidget::keyPressEvent(event);
+			}
+
 			void focusInEvent(QFocusEvent *event) override
 			{
 				QTableWidget::focusInEvent(event);
@@ -310,8 +352,8 @@ namespace
 				int x = textRect.left();
 				for (qsizetype i = 0; i < nativeTexts.size(); ++i)
 				{
-					const QString nativeText   = nativeTexts.at(i);
-					const QString portableText = portableTexts.at(i);
+					const QString &nativeText   = nativeTexts.at(i);
+					const QString &portableText = portableTexts.at(i);
 					painter->setPen(disabled.contains(portableText) ? disabledColor : normalColor);
 					painter->drawText(QPoint(x, baseline), nativeText);
 					x += metrics.horizontalAdvance(nativeText);
