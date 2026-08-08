@@ -483,6 +483,16 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] bool        isMiniWindowCaptureActive() const;
 		/**
+		 * @brief Returns whether the current miniwindow capture began with a drag handler.
+		 * @return `true` while a constrained miniwindow drag gesture is active.
+		 */
+		[[nodiscard]] bool        isMiniWindowDragCaptureActive() const;
+		/**
+		 * @brief Returns the miniwindow whose drag callback currently receives constrained geometry APIs.
+		 * @return Drag-constraint target name, or an empty string outside a drag callback dispatch.
+		 */
+		[[nodiscard]] QString     geometryConstrainedMiniWindowName() const;
+		/**
 		 * @brief Returns true when last mouse position is known.
 		 * @return `true` when last mouse position is available.
 		 */
@@ -984,6 +994,28 @@ class WorldView : public QWidget
 		 */
 		void paintNativeOutputBackground(class QPainter *painter, const QRegion &updateRegion) const;
 		/**
+		 * @brief Computes static TextRectangle pixels inside a region that must not be scroll-blitted.
+		 * @param bounds Region affected by the native output scroll operation.
+		 * @return Compatibility-frame pixels in output-stack coordinates.
+		 */
+		[[nodiscard]] QRegion textRectangleCompatibilityRegionWithin(const QRect &bounds) const;
+		/**
+		 * @brief Computes output pixels affected by a TextRectangle settings change.
+		 * @param previousSettings Settings that were active before the change.
+		 * @param currentSettings Newly active settings.
+		 * @return Dirty region in output-stack coordinates.
+		 */
+		[[nodiscard]] QRegion
+		     textRectangleChangeDirtyRegion(const WorldRuntime::TextRectangleSettings &previousSettings,
+		                                    const WorldRuntime::TextRectangleSettings &currentSettings) const;
+		/**
+		 * @brief Invalidates pixels affected by a TextRectangle settings change.
+		 * @param previousSettings Settings that were active before the change.
+		 * @param currentSettings Newly active settings.
+		 */
+		void invalidateTextRectangleChange(const WorldRuntime::TextRectangleSettings &previousSettings,
+		                                   const WorldRuntime::TextRectangleSettings &currentSettings) const;
+		/**
 		 * @brief Begins a runtime-owned output presentation mutation batch.
 		 */
 		void beginRuntimeOutputMutationBatch();
@@ -1040,6 +1072,11 @@ class WorldView : public QWidget
 		 */
 		void              requestNativeOutputRepaint() const;
 		void              requestNativeOutputRepaint(const QRect &rect) const;
+		/**
+		 * @brief Requests an exact, potentially non-rectangular native-output repaint.
+		 * @param region Canvas region to invalidate.
+		 */
+		void              requestNativeOutputRepaintRegion(const QRegion &region) const;
 		/**
 		 * @brief Flushes a coalesced native output repaint request.
 		 */
@@ -1980,11 +2017,13 @@ class WorldView : public QWidget
 		/**
 		 * @brief Updates script-visible miniwindow mouse coordinates for a callback.
 		 * @param window Miniwindow receiving the callback.
-		 * @param callbackLocal Output-stack-local mouse coordinate to expose to Lua.
+		 * @param displayLocal Output-stack-local display coordinate.
 		 * @param updateWindowRelativePosition Update WindowInfo 14/15 when `true`.
+		 * @param exposeCanonicalClientPosition Convert WindowInfo 17/18 through the active layer scale.
 		 */
-		void        setMiniWindowCallbackMousePosition(MiniWindow &window, const QPoint &callbackLocal,
-		                                               bool updateWindowRelativePosition);
+		void        setMiniWindowCallbackMousePosition(MiniWindow &window, const QPoint &displayLocal,
+		                                               bool updateWindowRelativePosition,
+		                                               bool exposeCanonicalClientPosition) const;
 		/**
 		 * @brief Queues a captured miniwindow drag callback for the latest mouse position.
 		 * @param callbackLocal Output-stack-local mouse coordinate to expose to Lua.
@@ -2052,9 +2091,10 @@ class WorldView : public QWidget
 		bool handleMiniWindowWheel(const QWheelEvent *event, const QWidget *source) const;
 		/**
 		 * @brief Handles synthetic mouse-leave for miniwindow layer.
+		 * @param reportedPosition Position exposed to view snapshots and mouse-moved callbacks.
 		 * @return `true` when leave event handling changed hover/capture state.
 		 */
-		bool handleMiniWindowMouseLeave();
+		bool handleMiniWindowMouseLeave(const QPoint &reportedPosition = QPoint(-1, -1));
 		/**
 		 * @brief Invokes hotspot callback function for window/plugin.
 		 * @param window Target miniwindow.
@@ -2257,6 +2297,8 @@ class WorldView : public QWidget
 		mutable NativeOutputPanePaintState          m_nativeLivePaintState;
 		mutable bool                                m_nativeOutputScrollBlitPending{false};
 		mutable QRect                               m_nativeOutputScrollBlitExposedRect;
+		mutable QRegion                             m_nativeOutputScrollBlitBackgroundRegion;
+		mutable QRegion                             m_nativeOutputScrollBlitRepaintRegion;
 		quint64                                     m_miniWindowChangeSerial{0};
 		mutable bool                                m_miniWindowPaintBoundsValid{false};
 		mutable MiniWindowPaintBoundsSnapshot       m_miniWindowPaintBounds;
@@ -2480,6 +2522,7 @@ class WorldView : public QWidget
 		QScopedPointer<CommandHistoryFindState> m_commandHistoryFind;
 		QString                                 m_hoverWindowName;
 		QString                                 m_capturedWindowName;
+		QString                                 m_geometryConstrainedMiniWindowName;
 		QString                                 m_tooltipHotspot;
 		QString                                 m_pendingTooltipHotspot;
 		QString                                 m_pendingTooltipText;
@@ -2492,6 +2535,7 @@ class WorldView : public QWidget
 		NativeOutputSelectionState              m_nativeOutputSelection;
 		mutable int                             m_nativeSelectionPendingHeadTrimLines{0};
 		bool                                    m_mouseCaptured{false};
+		bool                                    m_capturedMiniWindowDragActive{false};
 		bool                                    m_miniWindowCaptureEventFilterInstalled{false};
 		bool                                    m_hasCapturedMiniWindowPressLocal{false};
 		bool                                    m_hasPendingCapturedMiniWindowDragMove{false};

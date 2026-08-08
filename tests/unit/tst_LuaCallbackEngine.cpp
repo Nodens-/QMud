@@ -11,11 +11,13 @@
 #include "LuaExecutor.h"
 #include "LuaExecutorWorker.h"
 #include "LuaSupport.h"
+#include "MiniWindow.h"
 #include "NativePluginRegistry.h"
 #include "WorldCommandProcessor.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "helpers/LuaExecutionUtils.h"
+#include "helpers/MiniWindowUtils.h"
 #include "helpers/PluginPathUtils.h"
 #include "scripting/ScriptingErrors.h"
 
@@ -97,7 +99,10 @@ namespace
 			void triggerAnchoredColourOutputKeepsNativePromptText();
 			void stringsAndWildcardsDispatchSuppliesSnapshotForCallbackReads();
 			void callbackSnapshotSuppliesGetInfoAndMiniWindowReads();
+			void callbackMiniWindowResourceIdentityIsExact();
+			void callbackMiniWindowStructuredCachesKeepDelimiterDistinctKeys();
 			void miniWindowDragReleaseSeesResizedCallbackState();
+			void absoluteMiniWindowBoundsRemainConsistentInsideCallback();
 			void deferredRuntimeMutationSkipsDestroyedRuntime();
 			// NOLINTEND(readability-convert-member-functions-to-static)
 	};
@@ -3164,6 +3169,132 @@ end
 	QCOMPARE(result.stringResult, QStringLiteral("sextant|120x80|33,44|map|move|19,14,318,252"));
 }
 
+void tst_LuaCallbackEngine::callbackMiniWindowResourceIdentityIsExact()
+{
+	WorldRuntime      runtime;
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor;
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+		identity_results = ""
+		function OnPluginEnable()
+		  identity_results = table.concat({
+		    tostring(WindowDeleteHotspot("Map", "move")),
+		    tostring(WindowDeleteHotspot("Map", "Move  ")),
+		    tostring(WindowDeleteHotspot("map|left", "drag")),
+		    tostring(WindowText("Map", "font", "x", 0, 0, 10, 10, 0)),
+		    tostring(WindowText("Map", "Font  ", "x", 0, 0, 10, 10, 0)),
+		    tostring(WindowText("map|left", "font", "x", 0, 0, 10, 10, 0))
+		  }, ":")
+		end
+		function identity_status(value)
+		  return identity_results
+		end
+		)lua"),
+	                       &runtime);
+
+	auto snapshot         = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	snapshot->windowNames = {QStringLiteral("Map"), QStringLiteral("map"), QStringLiteral("map|left")};
+	snapshot->fontIdsByWindow.insert(QStringLiteral("Map"),
+	                                 {QStringLiteral("Font"), QStringLiteral("Font ")});
+	snapshot->fontIdsByWindow.insert(QStringLiteral("map"), {QStringLiteral("left|font")});
+	snapshot->hotspotIdsByWindow.insert(QStringLiteral("Map"),
+	                                    {QStringLiteral("Move"), QStringLiteral("Move ")});
+	snapshot->hotspotIdsByWindow.insert(QStringLiteral("map"), {QStringLiteral("left|drag")});
+	snapshot->rebuildMiniWindowLookupCaches();
+
+	LuaBatchDispatchRequest request;
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = snapshot;
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QVERIFY(result.hasFunctionValid);
+	QVERIFY(result.hasFunction);
+	request.kind         = LuaBatchDispatchKind::StringInOut;
+	request.functionName = QStringLiteral("identity_status");
+	request.stringArg    = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg.reset();
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("%1.0:%1.0:%1.0:-2.0:-2.0:-2.0").arg(eHotspotNotInstalled));
+
+	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::callbackMiniWindowStructuredCachesKeepDelimiterDistinctKeys()
+{
+	WorldRuntime      runtime;
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor;
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function OnPluginEnable()
+  assert(WindowInfo("Map", 3) == 101)
+  assert(WindowInfo("map", 3) == 202)
+
+  assert(WindowImageInfo("image-a", "b|c", 2) == 3)
+  assert(WindowImageInfo("image-a|b", "c", 2) == 7)
+  assert(WindowCreateImage("image-a", "b|c", 0, 0, 0, 0, 0, 0, 0, 0) == 0)
+  assert(WindowImageInfo("image-a", "b|c", 2) == 8)
+  assert(WindowImageInfo("image-a|b", "c", 2) == 7)
+  structured_cache_result = "ok"
+end
+function structured_cache_status(value)
+  return structured_cache_result or ""
+end
+)lua"),
+	                       &runtime);
+
+	auto snapshot         = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	snapshot->windowNames = {QStringLiteral("Map"), QStringLiteral("map"), QStringLiteral("image-a"),
+	                         QStringLiteral("image-a|b")};
+	LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot upperInfo;
+	upperInfo.width = 101;
+	LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot lowerInfo;
+	lowerInfo.width = 202;
+	snapshot->windowInfoByWindow.insert(QStringLiteral("Map"), upperInfo);
+	snapshot->windowInfoByWindow.insert(QStringLiteral("map"), lowerInfo);
+
+	const auto makeImageWindow = [](const QString &windowName, const QString &imageId, const int imageWidth)
+	{
+		auto window = QSharedPointer<MiniWindow>::create();
+		MiniWindowUtils::create(*window, windowName, 0, 0, 20, 20, 0, 0, QColor(Qt::black), QString());
+		MiniWindowImage image;
+		image.image = QImage(imageWidth, 5, QImage::Format_ARGB32);
+		image.image.fill(Qt::transparent);
+		image.hasAlpha = true;
+		window->images.insert(imageId, image);
+		return window;
+	};
+	const auto firstImageWindow  = makeImageWindow(QStringLiteral("image-a"), QStringLiteral("b|c"), 3);
+	const auto secondImageWindow = makeImageWindow(QStringLiteral("image-a|b"), QStringLiteral("c"), 7);
+	snapshot->miniWindowsByWindow.insert(QStringLiteral("image-a"), firstImageWindow);
+	snapshot->miniWindowsByWindow.insert(QStringLiteral("image-a|b"), secondImageWindow);
+	snapshot->imageIdsByWindow.insert(QStringLiteral("image-a"), {QStringLiteral("b|c")});
+	snapshot->imageIdsByWindow.insert(QStringLiteral("image-a|b"), {QStringLiteral("c")});
+	snapshot->imageHasAlphaByKey.insert({QStringLiteral("image-a"), QStringLiteral("b|c")}, true);
+	snapshot->imageHasAlphaByKey.insert({QStringLiteral("image-a|b"), QStringLiteral("c")}, false);
+	QCOMPARE(snapshot->imageHasAlphaByKey.size(), 2);
+	snapshot->rebuildMiniWindowLookupCaches();
+
+	LuaBatchDispatchRequest request;
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::NoArgs;
+	request.functionName          = QStringLiteral("OnPluginEnable");
+	request.miniWindowSnapshotArg = snapshot;
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QVERIFY(result.hasFunctionValid);
+	QVERIFY(result.hasFunction);
+	request.kind         = LuaBatchDispatchKind::StringInOut;
+	request.functionName = QStringLiteral("structured_cache_status");
+	request.stringArg    = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg.reset();
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("ok"));
+
+	teardownWorkerEngine(executor, engine);
+}
+
 void tst_LuaCallbackEngine::miniWindowDragReleaseSeesResizedCallbackState()
 {
 	WorldRuntime runtime;
@@ -3265,6 +3396,276 @@ end
 	request.miniWindowSnapshotArg       = {};
 	const LuaBatchDispatchResult result = executor.dispatchBatch(request);
 	QCOMPARE(result.stringResult, QStringLiteral("move:145,165:125,135:145,165|release:240,160:145,165"));
+}
+
+void tst_LuaCallbackEngine::absoluteMiniWindowBoundsRemainConsistentInsideCallback()
+{
+	WorldRuntime      runtime;
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor;
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+observed = ""
+function OnResizeMove(flags, hotspot_id)
+  WindowResize("win", 240, 500, 0)
+  WindowCreate("win", 540, 30, 280, 500, 0, 2, 0)
+  WindowPosition("win", 700, 300, 0, 2)
+  observed = string.format("%dx%d@%d,%d",
+    WindowInfo("win", 3), WindowInfo("win", 4),
+    WindowInfo("win", 1), WindowInfo("win", 2))
+end
+function resize_status(value)
+  return observed
+end
+function OnOrdinaryCallback(flags, hotspot_id)
+  WindowResize("win", 240, 200, 0)
+end
+function OnAtomicRelocate(flags, hotspot_id)
+  WindowCreate("win", 300, 30, 280, 180, 0, 2, 0)
+end
+function OnFullyBlockedPosition(flags, hotspot_id)
+  assert(WindowInfo("win", 1) == 540)
+  assert(WindowInfo("win", 2) == 30)
+  assert(WindowInfo("win", 7) == 0)
+  assert(WindowInfo("win", 8) == 2)
+  WindowPosition("win", 700, 30, 0, 2)
+  return true
+end
+function OnFullyBlockedResize(flags, hotspot_id)
+  assert(WindowInfo("win", 3) == 100)
+  assert(WindowInfo("win", 4) == 80)
+  WindowResize("win", 140, 80, 0)
+  return true
+end
+function OnExactGeometryNoOps(flags, hotspot_id)
+  assert(WindowPosition("win", 540, 30, 0, 2) == 0)
+  assert(WindowResize("win", 100, 80, 0) == 0)
+  return true
+end
+function OnTinyScalePosition(flags, hotspot_id)
+  WindowPosition("win", 2147483647, 2147483647, 0, 2)
+  tiny_scale_observed = string.format("%d,%d", WindowInfo("win", 1), WindowInfo("win", 2))
+  return true
+end
+function tiny_scale_status(value)
+  return tiny_scale_observed or ""
+end
+function OnFullyBlockedLeftTopCreate(flags, hotspot_id)
+  assert(WindowInfo("win", 1) == 0)
+  assert(WindowInfo("win", 2) == 0)
+  assert(WindowInfo("win", 3) == 100)
+  assert(WindowInfo("win", 4) == 80)
+  WindowCreate("win", -20, -10, 120, 90, 0, 2, 0)
+  return true
+end
+function OnOutsideZeroWidthCreate(flags, hotspot_id)
+  assert(WindowCreate("win", 1000, 0, 0, 80, 0, 2, 0) == 0)
+  assert(WindowInfo("win", 1) == 640)
+  assert(WindowInfo("win", 3) == 0)
+  return true
+end
+)lua"),
+	                       &runtime);
+	LuaBatchDispatchRequest warmupRequest;
+	warmupRequest.engines      = {engine};
+	warmupRequest.kind         = LuaBatchDispatchKind::StringInOut;
+	warmupRequest.functionName = QStringLiteral("resize_status");
+	warmupRequest.stringArg    = QStringLiteral("ignored");
+	LuaBatchDispatchResult warmupResult;
+	dispatchWorkerAndWait(executor, warmupRequest, warmupResult);
+	QCOMPARE(warmupResult.stringResult, QString());
+	executeDeferredMutations(warmupResult);
+
+	const QString windowId = QStringLiteral("win");
+	QCOMPARE(runtime.windowCreate(windowId, 540, 30, 100, 80, 0, kMiniWindowAbsoluteLocation,
+	                              QColor(Qt::black), QString()),
+	         eOK);
+	const MiniWindow *runtimeWindow = runtime.miniWindow(windowId);
+	QVERIFY(runtimeWindow);
+
+	auto snapshot                                   = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	snapshot->hasCommandUiSnapshot                  = false;
+	snapshot->commandUiHasView                      = true;
+	snapshot->commandUiHasFrameData                 = true;
+	snapshot->commandUiOutputClientWidth            = 320;
+	snapshot->commandUiOutputClientHeight           = 240;
+	snapshot->geometryConstraintDisplayClientWidth  = 320;
+	snapshot->geometryConstraintDisplayClientHeight = 240;
+	snapshot->commandUiValues.insert(QStringLiteral("hasView"), true);
+	snapshot->commandUiValues.insert(QStringLiteral("hasFrameData"), true);
+	snapshot->commandUiValues.insert(QStringLiteral("outputClientWidth"), 320);
+	snapshot->commandUiValues.insert(QStringLiteral("outputClientHeight"), 240);
+	snapshot->geometryConstrainedMiniWindowName = windowId;
+	snapshot->absoluteMiniWindowScaleXOver      = 0.5;
+	snapshot->absoluteMiniWindowScaleYOver      = 0.5;
+	snapshot->windowNames.push_back(windowId);
+	snapshot->miniWindowsByWindow.insert(
+	    windowId, QSharedPointer<MiniWindow>::create(runtimeWindow->detachedImageCopy()));
+	LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot windowInfo;
+	windowInfo.locationX                   = runtimeWindow->location.x();
+	windowInfo.locationY                   = runtimeWindow->location.y();
+	windowInfo.width                       = runtimeWindow->width;
+	windowInfo.height                      = runtimeWindow->height;
+	windowInfo.position                    = runtimeWindow->position;
+	windowInfo.flags                       = runtimeWindow->flags;
+	windowInfo.rectLeft                    = runtimeWindow->location.x();
+	windowInfo.rectTop                     = runtimeWindow->location.y();
+	windowInfo.rectRight                   = runtimeWindow->location.x() + runtimeWindow->width;
+	windowInfo.rectBottom                  = runtimeWindow->location.y() + runtimeWindow->height;
+	snapshot->windowInfoByWindow[windowId] = windowInfo;
+	snapshot->rebuildMiniWindowLookupCaches();
+
+	LuaBatchDispatchRequest request;
+	request.engines                 = {engine};
+	request.kind                    = LuaBatchDispatchKind::NumberAndStringStopOnTrue;
+	request.numberArg1              = 0;
+	request.stringArg2              = QStringLiteral("resizer");
+	request.miniWindowSnapshotArg   = snapshot;
+	request.hasActionSourceOverride = true;
+	request.actionSourceOverride    = WorldRuntime::eHotspotCallback;
+	request.functionName            = QStringLiteral("OnFullyBlockedPosition");
+	LuaBatchDispatchResult blockedPositionResult;
+	dispatchWorkerAndWait(executor, request, blockedPositionResult);
+	QVERIFY(blockedPositionResult.boolResultValid);
+	QVERIFY(blockedPositionResult.boolResult);
+	QVERIFY(blockedPositionResult.deferredRuntimeMutationBatches.isEmpty());
+
+	request.functionName = QStringLiteral("OnFullyBlockedResize");
+	LuaBatchDispatchResult blockedResizeResult;
+	dispatchWorkerAndWait(executor, request, blockedResizeResult);
+	QVERIFY(blockedResizeResult.boolResultValid);
+	QVERIFY(blockedResizeResult.boolResult);
+	QVERIFY(blockedResizeResult.deferredRuntimeMutationBatches.isEmpty());
+
+	request.functionName = QStringLiteral("OnExactGeometryNoOps");
+	LuaBatchDispatchResult exactGeometryNoOpResult;
+	dispatchWorkerAndWait(executor, request, exactGeometryNoOpResult);
+	QVERIFY(exactGeometryNoOpResult.boolResultValid);
+	QVERIFY(exactGeometryNoOpResult.boolResult);
+	QVERIFY(exactGeometryNoOpResult.deferredRuntimeMutationBatches.isEmpty());
+
+	auto tinyScaleSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(*snapshot);
+	tinyScaleSnapshot->absoluteMiniWindowScaleXOver = std::numeric_limits<double>::min();
+	tinyScaleSnapshot->absoluteMiniWindowScaleYOver = std::numeric_limits<double>::min();
+	request.functionName                            = QStringLiteral("OnTinyScalePosition");
+	request.miniWindowSnapshotArg                   = tinyScaleSnapshot;
+	LuaBatchDispatchResult tinyScalePositionResult;
+	dispatchWorkerAndWait(executor, request, tinyScalePositionResult);
+	QVERIFY(tinyScalePositionResult.boolResultValid);
+	QVERIFY(tinyScalePositionResult.boolResult);
+	QVERIFY(!tinyScalePositionResult.deferredRuntimeMutationBatches.isEmpty());
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("tiny_scale_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	LuaBatchDispatchResult tinyScaleStatusResult;
+	dispatchWorkerAndWait(executor, request, tinyScaleStatusResult);
+	QCOMPARE(tinyScaleStatusResult.stringResult, QStringLiteral("%1,%2")
+	                                                 .arg(std::numeric_limits<int>::max() - 100)
+	                                                 .arg(std::numeric_limits<int>::max() - 80));
+
+	request.kind                    = LuaBatchDispatchKind::NumberAndStringStopOnTrue;
+	request.functionName            = QStringLiteral("OnResizeMove");
+	request.numberArg1              = 0;
+	request.stringArg2              = QStringLiteral("resizer");
+	request.miniWindowSnapshotArg   = snapshot;
+	request.hasActionSourceOverride = true;
+	request.actionSourceOverride    = WorldRuntime::eHotspotCallback;
+	LuaBatchDispatchResult moveResult;
+	dispatchWorkerAndWait(executor, request, moveResult);
+	QVERIFY(moveResult.boolResultValid);
+	QVERIFY(!moveResult.boolResult);
+	executeDeferredMutations(moveResult);
+
+	QCOMPARE(runtime.windowInfo(windowId, 1).toInt(), 540);
+	QCOMPARE(runtime.windowInfo(windowId, 2).toInt(), 30);
+	QCOMPARE(runtime.windowInfo(windowId, 3).toInt(), 100);
+	QCOMPARE(runtime.windowInfo(windowId, 4).toInt(), 450);
+
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("resize_status");
+	request.stringArg             = QStringLiteral("ignored");
+	request.miniWindowSnapshotArg = {};
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("100x450@540,30"));
+
+	request.kind                    = LuaBatchDispatchKind::NumberAndStringStopOnTrue;
+	request.functionName            = QStringLiteral("OnAtomicRelocate");
+	request.numberArg1              = 0;
+	request.stringArg2              = QStringLiteral("resizer");
+	request.miniWindowSnapshotArg   = snapshot;
+	request.hasActionSourceOverride = true;
+	request.actionSourceOverride    = WorldRuntime::eHotspotCallback;
+	LuaBatchDispatchResult relocateResult;
+	dispatchWorkerAndWait(executor, request, relocateResult);
+	QVERIFY(relocateResult.boolResultValid);
+	executeDeferredMutations(relocateResult);
+	QCOMPARE(runtime.windowInfo(windowId, 1).toInt(), 300);
+	QCOMPARE(runtime.windowInfo(windowId, 2).toInt(), 30);
+	QCOMPARE(runtime.windowInfo(windowId, 3).toInt(), 280);
+	QCOMPARE(runtime.windowInfo(windowId, 4).toInt(), 180);
+
+	auto unscopedHotspotSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(*snapshot);
+	unscopedHotspotSnapshot->geometryConstrainedMiniWindowName.clear();
+	request.kind                    = LuaBatchDispatchKind::NumberAndStringStopOnTrue;
+	request.functionName            = QStringLiteral("OnOrdinaryCallback");
+	request.numberArg1              = 0;
+	request.stringArg2              = QStringLiteral("ordinary-hotspot");
+	request.miniWindowSnapshotArg   = unscopedHotspotSnapshot;
+	request.hasActionSourceOverride = true;
+	request.actionSourceOverride    = WorldRuntime::eHotspotCallback;
+	LuaBatchDispatchResult ordinaryResult;
+	dispatchWorkerAndWait(executor, request, ordinaryResult);
+	QVERIFY(ordinaryResult.boolResultValid);
+	executeDeferredMutations(ordinaryResult);
+	QCOMPARE(runtime.windowInfo(windowId, 3).toInt(), 240);
+	QCOMPARE(runtime.windowInfo(windowId, 4).toInt(), 200);
+
+	QCOMPARE(runtime.windowCreate(windowId, 0, 0, 100, 80, 0, kMiniWindowAbsoluteLocation, QColor(Qt::black),
+	                              QStringLiteral("Plugin.Id")),
+	         eOK);
+	runtimeWindow = runtime.miniWindow(windowId);
+	QVERIFY(runtimeWindow);
+	auto leftTopSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(*snapshot);
+	leftTopSnapshot->miniWindowsByWindow[windowId] =
+	    QSharedPointer<MiniWindow>::create(runtimeWindow->detachedImageCopy());
+	auto &leftTopWindowInfo      = leftTopSnapshot->windowInfoByWindow[windowId];
+	leftTopWindowInfo.locationX  = runtimeWindow->location.x();
+	leftTopWindowInfo.locationY  = runtimeWindow->location.y();
+	leftTopWindowInfo.width      = runtimeWindow->width;
+	leftTopWindowInfo.height     = runtimeWindow->height;
+	leftTopWindowInfo.position   = runtimeWindow->position;
+	leftTopWindowInfo.flags      = runtimeWindow->flags;
+	leftTopWindowInfo.rectLeft   = runtimeWindow->location.x();
+	leftTopWindowInfo.rectTop    = runtimeWindow->location.y();
+	leftTopWindowInfo.rectRight  = runtimeWindow->location.x() + runtimeWindow->width;
+	leftTopWindowInfo.rectBottom = runtimeWindow->location.y() + runtimeWindow->height;
+	leftTopSnapshot->rebuildMiniWindowLookupCaches();
+	request.functionName          = QStringLiteral("OnFullyBlockedLeftTopCreate");
+	request.miniWindowSnapshotArg = leftTopSnapshot;
+	LuaBatchDispatchResult blockedLeftTopCreateResult;
+	dispatchWorkerAndWait(executor, request, blockedLeftTopCreateResult);
+	QVERIFY(blockedLeftTopCreateResult.boolResultValid);
+	QVERIFY(blockedLeftTopCreateResult.boolResult);
+	QVERIFY(blockedLeftTopCreateResult.deferredRuntimeMutationBatches.isEmpty());
+	QCOMPARE(runtime.windowInfo(windowId, 1).toInt(), 0);
+	QCOMPARE(runtime.windowInfo(windowId, 2).toInt(), 0);
+	QCOMPARE(runtime.windowInfo(windowId, 3).toInt(), 100);
+	QCOMPARE(runtime.windowInfo(windowId, 4).toInt(), 80);
+
+	request.functionName = QStringLiteral("OnOutsideZeroWidthCreate");
+	LuaBatchDispatchResult outsideZeroWidthCreateResult;
+	dispatchWorkerAndWait(executor, request, outsideZeroWidthCreateResult);
+	QVERIFY(outsideZeroWidthCreateResult.boolResultValid);
+	QVERIFY(outsideZeroWidthCreateResult.boolResult);
+	QVERIFY(!outsideZeroWidthCreateResult.deferredRuntimeMutationBatches.isEmpty());
+	executeDeferredMutations(outsideZeroWidthCreateResult);
+	QCOMPARE(runtime.windowInfo(windowId, 1).toInt(), 640);
+	QCOMPARE(runtime.windowInfo(windowId, 2).toInt(), 0);
+	QCOMPARE(runtime.windowInfo(windowId, 3).toInt(), 0);
+	QCOMPARE(runtime.windowInfo(windowId, 4).toInt(), 80);
+	teardownWorkerEngine(executor, engine);
 }
 
 void tst_LuaCallbackEngine::deferredRuntimeMutationSkipsDestroyedRuntime()

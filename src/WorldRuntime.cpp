@@ -123,19 +123,22 @@
 
 Q_DECLARE_OPAQUE_POINTER(sqlite3 *)
 
-struct ResolvedWorldColourTables
+namespace
 {
-		QVector<QColor> normalAnsi;
-		QVector<QColor> boldAnsi;
-		QVector<QColor> customText;
-		QVector<QColor> customBack;
-};
+	struct ResolvedWorldColourTables
+	{
+			QVector<QColor> normalAnsi;
+			QVector<QColor> boldAnsi;
+			QVector<QColor> customText;
+			QVector<QColor> customBack;
+	};
 
-struct ResolvedNoteColours
-{
-		long fore{0};
-		long back{0};
-};
+	struct ResolvedNoteColours
+	{
+			long fore{0};
+			long back{0};
+	};
+} // namespace
 
 static long    colorToLong(const QColor &color);
 static int     colourSeqFromAttributes(const QMap<QString, QString> &attributes);
@@ -537,7 +540,7 @@ namespace
 		snapshot->windowNames = miniWindows.keys();
 		for (auto windowIt = miniWindows.constBegin(); windowIt != miniWindows.constEnd(); ++windowIt)
 		{
-			const QString windowKey = windowIt.key().trimmed().toLower();
+			const QString &windowKey = windowIt.key();
 			if (windowKey.isEmpty())
 				continue;
 			const MiniWindow &window = windowIt.value();
@@ -547,11 +550,10 @@ namespace
 			snapshot->hotspotIdsByWindow.insert(windowKey, window.hotspots.keys());
 			for (auto imageIt = window.images.constBegin(); imageIt != window.images.constEnd(); ++imageIt)
 			{
-				const QString imageKey = imageIt.key().trimmed().toLower();
+				const QString &imageKey = imageIt.key();
 				if (imageKey.isEmpty())
 					continue;
-				snapshot->imageHasAlphaByKey.insert(QStringLiteral("%1|%2").arg(windowKey, imageKey),
-				                                    imageIt.value().hasAlpha);
+				snapshot->imageHasAlphaByKey.insert({windowKey, imageKey}, imageIt.value().hasAlpha);
 			}
 
 			LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot infoSnapshot;
@@ -591,7 +593,7 @@ namespace
 	{
 		for (auto windowIt = miniWindows.constBegin(); windowIt != miniWindows.constEnd(); ++windowIt)
 		{
-			const QString windowKey = windowIt.key().trimmed().toLower();
+			const QString &windowKey = windowIt.key();
 			if (windowKey.isEmpty())
 				continue;
 
@@ -1087,11 +1089,14 @@ constexpr int kChatPingRequest        = 26;
 constexpr int kChatPingResponse       = 27;
 constexpr int kChatPeekConnections    = 28;
 
-struct MxpSupportTag
+namespace
 {
-		const char *name;
-		const char *args;
-};
+	struct MxpSupportTag
+	{
+			const char *name;
+			const char *args;
+	};
+} // namespace
 
 static const MxpSupportTag *mxpSupportedTags()
 {
@@ -9400,6 +9405,13 @@ void WorldRuntime::clearLuaCallbackDispatchVolatileSnapshot(LuaCallbackMiniWindo
 	snapshot.commandUiOutputClientWidth  = 0;
 	snapshot.commandUiViewHeight         = 0;
 	snapshot.commandUiViewWidth          = 0;
+	snapshot.geometryConstrainedMiniWindowName.clear();
+	snapshot.geometryConstraintDisplayClientHeight = 0;
+	snapshot.geometryConstraintDisplayClientWidth  = 0;
+	snapshot.absoluteMiniWindowScaleXOver          = 1.0;
+	snapshot.absoluteMiniWindowScaleYOver          = 1.0;
+	snapshot.absoluteMiniWindowScaleXUnder         = 1.0;
+	snapshot.absoluteMiniWindowScaleYUnder         = 1.0;
 	snapshot.commandUiValues.clear();
 
 	snapshot.hasRuntimeCountersSnapshot = false;
@@ -9473,6 +9485,14 @@ void WorldRuntime::populateLuaCallbackDispatchVolatileSnapshot(
 	snapshot.commandUiOutputClientWidth  = commandUi.outputClientWidth;
 	snapshot.commandUiViewHeight         = commandUi.viewHeight;
 	snapshot.commandUiViewWidth          = commandUi.viewWidth;
+	snapshot.geometryConstrainedMiniWindowName =
+	    m_view ? m_view->geometryConstrainedMiniWindowName() : QString();
+	snapshot.geometryConstraintDisplayClientHeight = commandUi.outputClientHeight;
+	snapshot.geometryConstraintDisplayClientWidth  = commandUi.outputClientWidth;
+	snapshot.absoluteMiniWindowScaleXOver          = m_absoluteMiniWindowScaleXOver;
+	snapshot.absoluteMiniWindowScaleYOver          = m_absoluteMiniWindowScaleYOver;
+	snapshot.absoluteMiniWindowScaleXUnder         = m_absoluteMiniWindowScaleXUnder;
+	snapshot.absoluteMiniWindowScaleYUnder         = m_absoluteMiniWindowScaleYUnder;
 	snapshot.commandUiValues.reserve(53);
 	snapshot.commandUiValues.insert(QStringLiteral("queuedCommands"), commandUi.queuedCommands);
 	snapshot.commandUiValues.insert(QStringLiteral("triggerPriorityQueuedCommandCount"),
@@ -10056,6 +10076,14 @@ QSharedPointer<LuaCallbackMiniWindowSnapshot> WorldRuntime::captureLuaCallbackSn
 	snapshot->commandUiOutputClientWidth  = commandUi.outputClientWidth;
 	snapshot->commandUiViewHeight         = commandUi.viewHeight;
 	snapshot->commandUiViewWidth          = commandUi.viewWidth;
+	snapshot->geometryConstrainedMiniWindowName =
+	    m_view ? m_view->geometryConstrainedMiniWindowName() : QString();
+	snapshot->geometryConstraintDisplayClientHeight = commandUi.outputClientHeight;
+	snapshot->geometryConstraintDisplayClientWidth  = commandUi.outputClientWidth;
+	snapshot->absoluteMiniWindowScaleXOver          = m_absoluteMiniWindowScaleXOver;
+	snapshot->absoluteMiniWindowScaleYOver          = m_absoluteMiniWindowScaleYOver;
+	snapshot->absoluteMiniWindowScaleXUnder         = m_absoluteMiniWindowScaleXUnder;
+	snapshot->absoluteMiniWindowScaleYUnder         = m_absoluteMiniWindowScaleYUnder;
 	snapshot->commandUiValues.reserve(53);
 	snapshot->commandUiValues.insert(QStringLiteral("queuedCommands"), commandUi.queuedCommands);
 	snapshot->commandUiValues.insert(QStringLiteral("triggerPriorityQueuedCommandCount"),
@@ -10978,12 +11006,14 @@ void WorldRuntime::setTextRectangle(const TextRectangleSettings &settings)
 	if (textRectangleSettingsEqual(m_textRectangle, settings))
 		return;
 
-	m_textRectangle = settings;
+	const TextRectangleSettings previousSettings = m_textRectangle;
+	m_textRectangle                              = settings;
 	invalidateLuaCallbackDispatchSnapshot();
 	++m_suppressWorldOutputResizedCallbacks;
 	if (WorldView *view = this->view())
 	{
 		view->updateWrapMargin();
+		view->invalidateTextRectangleChange(previousSettings, settings);
 		view->update();
 	}
 	updateTelnetWindowSizeForNaws();
@@ -14725,6 +14755,13 @@ void WorldRuntime::beginPluginCallbackDispatchCommandGuard(PluginCallbackDispatc
 		return;
 	beginMiniWindowCallbackScriptExecution(command.request.miniWindowExecutionName);
 	command.miniWindowExecutionGuardActive = true;
+	if (command.request.miniWindowSnapshotArg)
+	{
+		auto guardedSnapshot =
+		    QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(*command.request.miniWindowSnapshotArg);
+		guardedSnapshot->activeMiniWindowExecutionName = command.request.miniWindowExecutionName;
+		command.request.miniWindowSnapshotArg          = std::move(guardedSnapshot);
+	}
 }
 
 void WorldRuntime::endPluginCallbackDispatchCommandGuard(PluginCallbackDispatchCommand &command)
@@ -16120,8 +16157,8 @@ void WorldRuntime::processPluginCallbackDispatchCommand(PluginCallbackDispatchCo
 		const QString diagCallback  = command.request.functionName;
 		const QString diagTargets   = qmudMmStartupDiagEngineLabels(command.request.engines);
 #endif
-		const LuaBatchDispatchRequest dispatchRequest = command.request;
 		beginPluginCallbackDispatchCommandGuard(command);
+		const LuaBatchDispatchRequest dispatchRequest = command.request;
 		m_luaExecutor->dispatchBatchAsync(
 		    dispatchRequest, this,
 		    [this, command = std::move(command)
@@ -16184,8 +16221,8 @@ void WorldRuntime::processPluginCallbackDispatchCommand(PluginCallbackDispatchCo
 	const QString diagCallback  = command.request.functionName;
 	const QString diagTargets   = qmudMmStartupDiagEngineLabels(command.request.engines);
 #endif
-	const LuaBatchDispatchRequest dispatchRequest = command.request;
 	beginPluginCallbackDispatchCommandGuard(command);
+	const LuaBatchDispatchRequest dispatchRequest = command.request;
 	m_luaExecutor->dispatchBatchAsync(
 	    dispatchRequest, this,
 	    [this, command = std::move(command)
@@ -23934,7 +23971,6 @@ int WorldRuntime::windowCreate(const QString &name, int left, int top, int width
 		return eNoNameSpecified;
 	if (width < 0 || height < 0)
 		return eBadParameter;
-
 	auto it = m_miniWindows.find(name);
 	if (it == m_miniWindows.end())
 	{
@@ -24125,9 +24161,14 @@ void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &owner
 	}
 	const QVector<MiniWindow *> &windows = *orderedWindows;
 
-	int                          absoluteMaxRight  = 0;
-	int                          absoluteMaxBottom = 0;
-	bool                         sawAbsolute       = false;
+	int                          absoluteMaxRight     = 0;
+	int                          absoluteMaxBottom    = 0;
+	bool                         sawAbsolute          = false;
+	const auto                   saturatedAbsoluteEnd = [](const int origin, const int extent)
+	{
+		const qint64 end = static_cast<qint64>(origin) + static_cast<qint64>(qMax(0, extent));
+		return static_cast<int>(qBound(qint64{0}, end, static_cast<qint64>(std::numeric_limits<int>::max())));
+	};
 	for (MiniWindow const *window : windows)
 	{
 		if (!window || !window->show)
@@ -24139,13 +24180,14 @@ void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &owner
 			continue;
 		sawAbsolute = true;
 
-		absoluteMaxRight  = qMax(absoluteMaxRight, window->location.x() + qMax(0, window->width));
-		absoluteMaxBottom = qMax(absoluteMaxBottom, window->location.y() + qMax(0, window->height));
+		absoluteMaxRight = qMax(absoluteMaxRight, saturatedAbsoluteEnd(window->location.x(), window->width));
+		absoluteMaxBottom =
+		    qMax(absoluteMaxBottom, saturatedAbsoluteEnd(window->location.y(), window->height));
 	}
 
 	int       &referenceRight  = underneath ? m_absoluteReferenceRightUnder : m_absoluteReferenceRightOver;
 	int       &referenceBottom = underneath ? m_absoluteReferenceBottomUnder : m_absoluteReferenceBottomOver;
-	const bool captureActive   = m_view && m_view->isMiniWindowCaptureActive();
+	const bool captureActive   = m_view && m_view->isMiniWindowDragCaptureActive();
 	if (!sawAbsolute)
 	{
 		referenceRight  = 0;
@@ -24184,6 +24226,16 @@ void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &owner
 		if (clientHeight > 0 && referenceBottom > clientHeight)
 			absoluteScaleY = static_cast<double>(clientHeight) / static_cast<double>(referenceBottom);
 	}
+	if (underneath)
+	{
+		m_absoluteMiniWindowScaleXUnder = absoluteScaleX;
+		m_absoluteMiniWindowScaleYUnder = absoluteScaleY;
+	}
+	else
+	{
+		m_absoluteMiniWindowScaleXOver = absoluteScaleX;
+		m_absoluteMiniWindowScaleYOver = absoluteScaleY;
+	}
 
 	auto scaledAbsoluteRect = [clientWidth, clientHeight, absoluteScaleX,
 	                           absoluteScaleY](const MiniWindow *window) -> QRect
@@ -24213,9 +24265,9 @@ void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &owner
 		if (scaledTop < 0)
 			scaledTop = 0;
 
-		if (scaledLeft + scaledWidth > clientWidth)
+		if (scaledLeft > clientWidth - scaledWidth)
 			scaledLeft = qMax(0, clientWidth - scaledWidth);
-		if (scaledTop + scaledHeight > clientHeight)
+		if (scaledTop > clientHeight - scaledHeight)
 			scaledTop = qMax(0, clientHeight - scaledHeight);
 
 		return {scaledLeft, scaledTop, scaledWidth, scaledHeight};
@@ -24252,9 +24304,12 @@ void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &owner
 
 		if (window->flags & kMiniWindowAbsoluteLocation)
 		{
-			// Keep canonical plugin coordinates in window->location, but fit absolute
-			// windows proportionally into the current client area when downsized.
-			window->rect = scaledAbsoluteRect(window);
+			// Unscaled absolute windows retain their canonical plugin geometry and are clipped by the
+			// output layers. The optional scaler alone may transform their displayed geometry.
+			window->rect =
+			    forceUnscaledAbsolute
+			        ? QRect(window->location, QSize(qMax(0, window->width), qMax(0, window->height)))
+			        : scaledAbsoluteRect(window);
 			continue;
 		}
 
@@ -24380,6 +24435,18 @@ void WorldRuntime::layoutMiniWindows(const QSize &clientSize, const QSize &owner
 	distribute(rightWindows, rightRoom, topRight.y(), true, clientWidth, 0, true, false);
 	distribute(bottomWindows, bottomRoom, bottomLeft.x(), false, 0, clientHeight, false, true);
 	distribute(leftWindows, leftRoom, topLeft.y(), true, 0, 0, false, false);
+}
+
+QPoint WorldRuntime::canonicalMiniWindowClientPosition(const QPoint &displayPosition,
+                                                       const int     windowFlags) const
+{
+	if ((windowFlags & kMiniWindowAbsoluteLocation) == 0)
+		return displayPosition;
+
+	const bool underneath = (windowFlags & kMiniWindowDrawUnderneath) != 0;
+	return MiniWindowUtils::capturedDragPositionToCanonical(
+	    displayPosition, underneath ? m_absoluteMiniWindowScaleXUnder : m_absoluteMiniWindowScaleXOver,
+	    underneath ? m_absoluteMiniWindowScaleYUnder : m_absoluteMiniWindowScaleYOver);
 }
 
 int WorldRuntime::windowRectOp(const QString &name, int action, int left, int top, int right, int bottom,
@@ -25858,27 +25925,8 @@ int WorldRuntime::windowPosition(const QString &name, int left, int top, int pos
 	MiniWindow *window = miniWindow(name);
 	if (!window)
 		return eNoSuchWindow;
-
-	if ((flags & kMiniWindowAbsoluteLocation) != 0 && m_view && m_view->isMiniWindowCaptureActive())
-	{
-		const int maxWidth  = m_view->outputClientWidth();
-		const int maxHeight = m_view->outputClientHeight();
-
-		if (maxWidth > 0)
-		{
-			if (window->width >= maxWidth)
-				left = 0;
-			else
-				left = qBound(0, left, maxWidth - window->width);
-		}
-		if (maxHeight > 0)
-		{
-			if (window->height >= maxHeight)
-				top = 0;
-			else
-				top = qBound(0, top, maxHeight - window->height);
-		}
-	}
+	if (window->location == QPoint(left, top) && window->position == position && window->flags == flags)
+		return eOK;
 
 	MiniWindowUtils::position(*window, left, top, position, flags);
 	emitMiniWindowsChangedCoalesced();

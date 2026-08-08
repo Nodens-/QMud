@@ -34,6 +34,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
@@ -84,12 +85,18 @@ namespace
 	bool                                       g_lastWorldHotspotQueueWhenBusy{false};
 	QVector<QString>                           g_worldHotspotCallbackFunctions;
 	QVector<bool>                              g_worldHotspotCallbackQueueWhenBusy;
+	QPoint                                     g_lastMiniWindowMouseMovePosition;
+	QString                                    g_lastMiniWindowMouseMoveWindow;
+	int                                        g_miniWindowMouseMoveNotifyCount{0};
 	QPoint                                     g_lastResizeHotspotPressOffset;
 	QSize                                      g_expectedReleaseResizeSize;
 	QPoint                                     g_expectedReleaseMousePosition;
 	int                                        g_resizeMoveCallbackCount{0};
+	int                                        g_resizeMouseDownConstraintState{-1};
+	int                                        g_resizeMoveConstraintState{-1};
 	bool                                       g_releaseCallbackSawFlushedResize{false};
 	WorldView                                 *g_runtimeView{nullptr};
+	const WorldView                           *g_expectedReleaseCaptureView{nullptr};
 	unsigned short                             g_currentActionSource{WorldRuntime::eUnknownActionSource};
 	bool                                       g_connected{false};
 	bool                                       g_nawsNegotiated{false};
@@ -330,12 +337,18 @@ namespace
 		g_lastWorldHotspotQueueWhenBusy = false;
 		g_worldHotspotCallbackFunctions.clear();
 		g_worldHotspotCallbackQueueWhenBusy.clear();
+		g_lastMiniWindowMouseMovePosition = {};
+		g_lastMiniWindowMouseMoveWindow.clear();
+		g_miniWindowMouseMoveNotifyCount  = 0;
 		g_lastResizeHotspotPressOffset    = {};
 		g_expectedReleaseResizeSize       = {};
 		g_expectedReleaseMousePosition    = {};
 		g_resizeMoveCallbackCount         = 0;
+		g_resizeMouseDownConstraintState  = -1;
+		g_resizeMoveConstraintState       = -1;
 		g_releaseCallbackSawFlushedResize = false;
 		g_runtimeView                     = nullptr;
+		g_expectedReleaseCaptureView      = nullptr;
 		g_currentActionSource             = WorldRuntime::eUnknownActionSource;
 		g_connected                       = false;
 		g_nawsNegotiated                  = false;
@@ -1002,27 +1015,6 @@ bool WorldRuntime::soundBufferReusableForNativeAudio(int) const
 	return true;
 }
 
-void qmudApplyMonospaceFallback(QFont &font, const QString &preferredFamily)
-{
-	if (!preferredFamily.isEmpty())
-		font.setFamily(preferredFamily);
-}
-
-QFont qmudPreferredMonospaceFont(const QString &preferredFamily, const int pointSize)
-{
-	QFont font;
-	if (!preferredFamily.isEmpty())
-		font.setFamily(preferredFamily);
-	if (pointSize > 0)
-		font.setPointSize(pointSize);
-	return font;
-}
-
-QString qmudFamilyForCharset(const QString &preferredFamily, int)
-{
-	return preferredFamily;
-}
-
 const QMap<QString, QString> &WorldRuntime::worldAttributes() const
 {
 	return g_worldAttrs.isEmpty() ? emptyAttributes() : g_worldAttrs;
@@ -1095,6 +1087,11 @@ int WorldRuntime::backgroundImageMode() const
 
 void WorldRuntime::layoutMiniWindows(const QSize &, const QSize &, bool, const QVector<MiniWindow *> *)
 {
+}
+
+QPoint WorldRuntime::canonicalMiniWindowClientPosition(const QPoint &displayPosition, int) const
+{
+	return displayPosition;
 }
 
 QVector<MiniWindow *> WorldRuntime::sortedMiniWindows()
@@ -1243,6 +1240,11 @@ bool WorldRuntime::callWorldHotspotFunction(const QString &functionName, long fl
 	g_worldHotspotCallbackQueueWhenBusy.push_back(queueWhenCallbackLaneBusy);
 	if (functionName == QStringLiteral("drag_test_resize_down"))
 	{
+		g_resizeMouseDownConstraintState =
+		    g_expectedReleaseCaptureView &&
+		            !g_expectedReleaseCaptureView->geometryConstrainedMiniWindowName().isEmpty()
+		        ? 1
+		        : 0;
 		for (const MiniWindow &window : g_testMiniWindows)
 		{
 			if (window.mouseDownHotspot != hotspotId)
@@ -1273,6 +1275,11 @@ bool WorldRuntime::callWorldHotspotFunction(const QString &functionName, long fl
 		{
 			if (window.mouseDownHotspot != hotspotId)
 				continue;
+			g_resizeMoveConstraintState =
+			    g_expectedReleaseCaptureView &&
+			            g_expectedReleaseCaptureView->geometryConstrainedMiniWindowName() == window.name
+			        ? 1
+			        : 0;
 			const QPoint delta  = window.clientMousePosition - window.rect.topLeft();
 			const int    width  = qMax(16, delta.x() + 1);
 			const int    height = qMax(16, delta.y() + 1);
@@ -1291,9 +1298,12 @@ bool WorldRuntime::callWorldHotspotFunction(const QString &functionName, long fl
 	{
 		if (!g_testMiniWindows.isEmpty())
 		{
-			const MiniWindow &window          = g_testMiniWindows.constFirst();
-			g_releaseCallbackSawFlushedResize = window.rect.size() == g_expectedReleaseResizeSize &&
-			                                    window.clientMousePosition == g_expectedReleaseMousePosition;
+			const MiniWindow &window = g_testMiniWindows.constFirst();
+			g_releaseCallbackSawFlushedResize =
+			    window.rect.size() == g_expectedReleaseResizeSize &&
+			    window.clientMousePosition == g_expectedReleaseMousePosition &&
+			    g_expectedReleaseCaptureView &&
+			    g_expectedReleaseCaptureView->geometryConstrainedMiniWindowName() == window.name;
 		}
 	}
 	return true;
@@ -1315,8 +1325,11 @@ bool WorldRuntime::wordUnderMenuResolved() const
 	return g_wordUnderMenuResolved;
 }
 
-void WorldRuntime::notifyMiniWindowMouseMoved(int, int, const QString &)
+void WorldRuntime::notifyMiniWindowMouseMoved(const int x, const int y, const QString &windowName)
 {
+	g_lastMiniWindowMouseMovePosition = QPoint(x, y);
+	g_lastMiniWindowMouseMoveWindow   = windowName;
+	++g_miniWindowMouseMoveNotifyCount;
 }
 
 MiniWindow *WorldRuntime::miniWindow(const QString &name)
@@ -8648,6 +8661,325 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void textRectangleRepaintsDirtyPixelsOutsideCurrentUnderlayBounds()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			QVERIFY(outputStack->width() > 400);
+			QVERIFY(outputStack->height() > 300);
+
+			g_textRectangle.left              = 40;
+			g_textRectangle.top               = 40;
+			g_textRectangle.right             = outputStack->width() / 2;
+			g_textRectangle.bottom            = outputStack->height() / 2;
+			g_textRectangle.borderOffset      = 5;
+			g_textRectangle.borderWidth       = 2;
+			g_textRectangle.borderColour      = 0x00FFFFFF;
+			g_textRectangle.outsideFillStyle  = 0;
+			g_textRectangle.outsideFillColour = 0x00334455;
+			view.updateWrapMargin();
+
+			appendTestMiniWindow(QStringLiteral("current-underlay"), QRect(35, 35, 180, 120),
+			                     kMiniWindowDrawUnderneath | kMiniWindowAbsoluteLocation, QColor(Qt::black));
+			view.onMiniWindowsChanged();
+			QCoreApplication::processEvents();
+
+			const QRect staleDirtyRect(outputStack->width() - 80, outputStack->height() - 80, 40, 40);
+			QVERIFY(outputStack->rect().contains(staleDirtyRect));
+			QVERIFY(!view.outputTextRectangleUnreserved().intersects(staleDirtyRect));
+
+			constexpr QColor staleColour(255, 0, 255);
+			QImage           image(outputStack->size(), QImage::Format_ARGB32);
+			image.fill(staleColour);
+			{
+				QPainter painter(&image);
+				view.paintNativeOutputBackground(&painter, QRegion(staleDirtyRect));
+			}
+
+			const QColor expected = MiniWindowUtils::colorFromRef(g_textRectangle.outsideFillColour);
+			for (int y = staleDirtyRect.top(); y <= staleDirtyRect.bottom(); ++y)
+			{
+				for (int x = staleDirtyRect.left(); x <= staleDirtyRect.right(); ++x)
+					QCOMPARE(image.pixelColor(x, y), expected);
+			}
+
+			resetTestState();
+		}
+
+		void patternedTextRectangleBorderColourChangeInvalidatesOutsideFill()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			QVERIFY(outputStack->width() > 400);
+			QVERIFY(outputStack->height() > 300);
+
+			WorldRuntime::TextRectangleSettings previousSettings;
+			previousSettings.left              = 100;
+			previousSettings.top               = 80;
+			previousSettings.right             = 400;
+			previousSettings.bottom            = 300;
+			previousSettings.borderOffset      = 4;
+			previousSettings.borderWidth       = 2;
+			previousSettings.borderColour      = 0x000000FF;
+			previousSettings.outsideFillStyle  = 2;
+			previousSettings.outsideFillColour = 0x00000000;
+			auto currentSettings               = previousSettings;
+			currentSettings.borderColour       = 0x00FF0000;
+
+			const QRegion dirtyRegion =
+			    view.textRectangleChangeDirtyRegion(previousSettings, currentSettings);
+			QVERIFY(dirtyRegion == QRegion(outputStack->rect()));
+
+			resetTestState();
+		}
+
+		void textRectangleGeometryChangeInvalidatesOldAndNewFrames()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			QVERIFY(outputStack->width() > 650);
+			QVERIFY(outputStack->height() > 400);
+
+			WorldRuntime::TextRectangleSettings previousSettings;
+			previousSettings.left              = 60;
+			previousSettings.top               = 60;
+			previousSettings.right             = 280;
+			previousSettings.bottom            = 220;
+			previousSettings.borderOffset      = 4;
+			previousSettings.borderWidth       = 2;
+			previousSettings.borderColour      = 0x000000FF;
+			previousSettings.outsideFillStyle  = 0;
+			previousSettings.outsideFillColour = 0x00FF00FF;
+			auto currentSettings               = previousSettings;
+			currentSettings.left               = 360;
+			currentSettings.top                = 120;
+			currentSettings.right              = 600;
+			currentSettings.bottom             = 320;
+
+			const QRegion dirtyRegion =
+			    view.textRectangleChangeDirtyRegion(previousSettings, currentSettings);
+			QVERIFY(dirtyRegion.contains(QPoint(previousSettings.left, previousSettings.top)));
+			QVERIFY(dirtyRegion.contains(QPoint(currentSettings.right, currentSettings.bottom)));
+			QVERIFY(!dirtyRegion.contains(outputStack->rect().bottomRight()));
+			QVERIFY(dirtyRegion != QRegion(outputStack->rect()));
+
+			resetTestState();
+		}
+
+		void textRectangleStaticScrollDamageOnlyIncludesPixelsInsidePane()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			g_textRectangle.left              = 70;
+			g_textRectangle.top               = 60;
+			g_textRectangle.right             = 480;
+			g_textRectangle.bottom            = 340;
+			g_textRectangle.borderOffset      = 0;
+			g_textRectangle.borderWidth       = 3;
+			g_textRectangle.borderColour      = 0x000000FF;
+			g_textRectangle.outsideFillStyle  = 0;
+			g_textRectangle.outsideFillColour = 0x00334455;
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+
+			const QRect paneRect = view.outputTextRectangleUnreserved();
+			QVERIFY(paneRect.width() > 300);
+			QVERIFY(paneRect.height() > 200);
+
+			const QRegion edgeDamage = view.textRectangleCompatibilityRegionWithin(paneRect);
+			QVERIFY(edgeDamage.contains(paneRect.topLeft()));
+			QVERIFY(edgeDamage.contains(paneRect.bottomRight()));
+			QVERIFY(!edgeDamage.contains(paneRect.center()));
+			QVERIFY(edgeDamage.boundingRect() == paneRect);
+			QVERIFY(edgeDamage.rectCount() <= 4);
+
+			g_textRectangle.borderOffset = 5;
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+			QVERIFY(
+			    view.textRectangleCompatibilityRegionWithin(view.outputTextRectangleUnreserved()).isEmpty());
+
+			resetTestState();
+		}
+
+		void textRectangleScrollBlitBackgroundPaintStaysRegionBounded()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			g_textRectangle.left              = 70;
+			g_textRectangle.top               = 60;
+			g_textRectangle.right             = 480;
+			g_textRectangle.bottom            = 340;
+			g_textRectangle.borderOffset      = 0;
+			g_textRectangle.borderWidth       = 2;
+			g_textRectangle.borderColour      = 0x000000FF;
+			g_textRectangle.outsideFillStyle  = 0;
+			g_textRectangle.outsideFillColour = 0x00334455;
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			const QRect paneRect = view.outputTextRectangleUnreserved();
+			QVERIFY(paneRect.width() > 300);
+			QVERIFY(paneRect.height() > 200);
+
+			constexpr int kExposedHeight = 8;
+			const QRect exposedRect(paneRect.left(), paneRect.bottom() - kExposedHeight + 1, paneRect.width(),
+			                        kExposedHeight);
+			const QRegion staticDamage     = view.textRectangleCompatibilityRegionWithin(paneRect);
+			const QRegion backgroundRegion = QRegion(exposedRect).united(staticDamage);
+			QVERIFY(backgroundRegion != QRegion(paneRect));
+			const QRect scrollContentRect(paneRect.center() - QPoint(10, 10), QSize(20, 20));
+			QVERIFY(paneRect.contains(scrollContentRect));
+			QVERIFY(!backgroundRegion.intersects(scrollContentRect));
+			const QRegion scrollRepaintRegion = backgroundRegion.united(QRegion(scrollContentRect));
+			const QRect   independentUpdateRect(8, 8, 12, 12);
+			QVERIFY(outputStack->rect().contains(independentUpdateRect));
+			QVERIFY(!scrollRepaintRegion.intersects(independentUpdateRect));
+
+			view.m_outputBackground                       = QColor(12, 34, 56);
+			view.m_miniWindowPaintBoundsValid             = true;
+			view.m_miniWindowPaintBounds.underlayBounds   = {};
+			view.m_nativeOutputScrollBlitPending          = true;
+			view.m_nativeOutputScrollBlitExposedRect      = exposedRect;
+			view.m_nativeOutputScrollBlitBackgroundRegion = backgroundRegion;
+			view.m_nativeOutputScrollBlitRepaintRegion    = scrollRepaintRegion;
+
+			constexpr QColor sentinel(255, 0, 255);
+			QImage           image(outputStack->size(), QImage::Format_ARGB32);
+			image.fill(sentinel);
+			{
+				QPainter painter(&image);
+				view.paintNativeOutputBackground(&painter,
+				                                 scrollRepaintRegion.united(QRegion(independentUpdateRect)));
+			}
+
+			const QPoint untouchedPoint = paneRect.center();
+			const QPoint exposedPoint(paneRect.center().x(), exposedRect.top());
+			const QPoint borderPoint(paneRect.center().x(), paneRect.top());
+			QCOMPARE(image.pixelColor(untouchedPoint), sentinel);
+			QCOMPARE(image.pixelColor(exposedPoint), view.m_outputBackground);
+			QCOMPARE(image.pixelColor(borderPoint),
+			         MiniWindowUtils::colorFromRef(g_textRectangle.borderColour));
+			QCOMPARE(image.pixelColor(independentUpdateRect.center()),
+			         MiniWindowUtils::colorFromRef(g_textRectangle.outsideFillColour));
+			QCOMPARE(image.pixelColor(scrollContentRect.center()), sentinel);
+
+			view.requestNativeOutputRepaintRegion(QRegion(scrollContentRect));
+			QVERIFY(view.m_nativeOutputScrollBlitPending);
+			QVERIFY(view.m_nativeOutputScrollBlitBackgroundRegion.isEmpty());
+			QVERIFY(view.m_nativeOutputScrollBlitRepaintRegion.isEmpty());
+			{
+				QPainter painter(&image);
+				view.paintNativeOutputBackground(&painter, QRegion(scrollContentRect));
+			}
+			QCOMPARE(image.pixelColor(scrollContentRect.center()), view.m_outputBackground);
+
+			resetTestState();
+		}
+
+		void textRectangleExtremeGeometryRemainsBounded()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			QVERIFY(outputStack->width() > 400);
+			QVERIFY(outputStack->height() > 300);
+
+			g_textRectangle.left             = 70;
+			g_textRectangle.top              = 60;
+			g_textRectangle.right            = 480;
+			g_textRectangle.bottom           = 340;
+			g_textRectangle.borderOffset     = std::numeric_limits<int>::max();
+			g_textRectangle.borderWidth      = std::numeric_limits<int>::max();
+			g_textRectangle.borderColour     = 0x000000FF;
+			g_textRectangle.outsideFillStyle = 1;
+			view.updateWrapMargin();
+			QCoreApplication::processEvents();
+
+			const QRect outputRect = outputStack->rect();
+			QVERIFY(view.textRectangleCompatibilityRegionWithin(outputRect) == QRegion(outputRect));
+			constexpr QColor sentinel(255, 0, 255);
+			QImage           frameImage(outputStack->size(), QImage::Format_ARGB32);
+			frameImage.fill(sentinel);
+			{
+				QPainter painter(&frameImage);
+				view.paintTextRectangleCompatibilityFrame(&painter, QRegion(outputRect));
+			}
+			QCOMPARE(frameImage.pixelColor(outputRect.topLeft()),
+			         MiniWindowUtils::colorFromRef(g_textRectangle.borderColour));
+
+			WorldRuntime::TextRectangleSettings extremeSettings;
+			extremeSettings.left   = std::numeric_limits<int>::max();
+			extremeSettings.top    = std::numeric_limits<int>::max();
+			extremeSettings.right  = -1;
+			extremeSettings.bottom = -1;
+			QVERIFY(view.textRectangleChangeDirtyRegion(extremeSettings, extremeSettings).isEmpty());
+
+			extremeSettings.left   = std::numeric_limits<int>::min();
+			extremeSettings.top    = std::numeric_limits<int>::min();
+			extremeSettings.right  = 0;
+			extremeSettings.bottom = 0;
+			QVERIFY(view.textRectangleChangeDirtyRegion(extremeSettings, extremeSettings) ==
+			        QRegion(outputRect));
+
+			resetTestState();
+		}
+
 		void overlayMiniWindowsRemainAboveNoWrapText()
 		{
 			resetTestState();
@@ -11807,7 +12139,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void nativeOutputRendererMiniWindowCapturedResizeUsesUnclampedDragPoint()
+		void nativeOutputRendererMiniWindowCapturedResizeClampsDragPointToOutputEdge()
 		{
 			resetTestState();
 
@@ -11836,7 +12168,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(viewportInStack.contains(startRect.bottomRight()));
 
 			MiniWindow &window =
-			    appendTestMiniWindow(QStringLiteral("native-resize-unclamped"), startRect, 0, overlayColour);
+			    appendTestMiniWindow(QStringLiteral("native-resize-clamped"), startRect, 0, overlayColour);
 			MiniWindowHotspot hotspot;
 			hotspot.rect         = QRect(startRect.width() - 12, startRect.height() - 12, 12, 12);
 			hotspot.mouseDown    = QStringLiteral("drag_test_resize_down");
@@ -11852,21 +12184,125 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(view.isMiniWindowCaptureActive());
 
-			const QPoint outsideMoveInStack(pressInStack.x() + 18, viewportInStack.bottom() + 32);
-			QVERIFY(!viewportInStack.contains(outsideMoveInStack));
+			const QPoint outsideMoveInStack(pressInStack.x() + 18, outputStack->height() + 32);
+			QVERIFY(!outputStack->rect().contains(outsideMoveInStack));
 			sendMiniWindowMouseMove(viewport, outputStack, outsideMoveInStack);
 			QCoreApplication::processEvents();
 
-			const QRect resizedRect = g_testMiniWindows.constFirst().rect;
+			const QPoint constrainedMoveInStack(outsideMoveInStack.x(), outputStack->height() - 1);
+			const QRect  resizedRect = g_testMiniWindows.constFirst().rect;
 			QCOMPARE(resizedRect.topLeft(), startRect.topLeft());
-			QCOMPARE(resizedRect.width(), outsideMoveInStack.x() - startRect.left() + 1);
-			QCOMPARE(resizedRect.height(), outsideMoveInStack.y() - startRect.top() + 1);
+			QCOMPARE(resizedRect.width(), constrainedMoveInStack.x() - startRect.left() + 1);
+			QCOMPARE(resizedRect.height(), constrainedMoveInStack.y() - startRect.top() + 1);
 			QCOMPARE(g_testMiniWindows.constFirst().lastMousePosition,
-			         outsideMoveInStack - startRect.topLeft());
-			QCOMPARE(g_testMiniWindows.constFirst().clientMousePosition, outsideMoveInStack);
+			         constrainedMoveInStack - startRect.topLeft());
+			QCOMPARE(g_testMiniWindows.constFirst().clientMousePosition, constrainedMoveInStack);
 
 			sendMiniWindowMouseRelease(viewport, outputStack, outsideMoveInStack);
 			QTRY_VERIFY(!view.isMiniWindowCaptureActive());
+			resetTestState();
+		}
+
+		void nativeOutputRendererOrdinaryHotspotRetainsUnboundedCaptureCoordinates()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			QVERIFY(outputStack->width() > 220);
+			QVERIFY(outputStack->height() > 140);
+
+			const QRect       startRect(40, 40, 120, 60);
+			MiniWindow       &window = appendTestMiniWindow(QStringLiteral("ordinary-capture"), startRect, 0,
+			                                                QColor(40, 90, 210, 255));
+			MiniWindowHotspot hotspot;
+			hotspot.rect            = QRect(QPoint(0, 0), startRect.size());
+			hotspot.mouseDown       = QStringLiteral("ordinary_capture_down");
+			hotspot.mouseUp         = QStringLiteral("ordinary_capture_up");
+			hotspot.cancelMouseDown = QStringLiteral("ordinary_capture_cancel");
+			window.hotspots.insert(QStringLiteral("ordinary"), hotspot);
+			view.onMiniWindowsChanged();
+			QCoreApplication::processEvents();
+
+			const QPoint pressInStack = startRect.center();
+			QTest::mousePress(outputStack, Qt::LeftButton, Qt::NoModifier, pressInStack);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isMiniWindowCaptureActive());
+
+			const QPoint outsideInStack(outputStack->width() + 30, pressInStack.y());
+			sendMiniWindowMouseMove(outputStack, outputStack, outsideInStack);
+			QCOMPARE(g_testMiniWindows.constFirst().clientMousePosition, outsideInStack);
+
+			sendMiniWindowMouseRelease(outputStack, outputStack, outsideInStack);
+			QTRY_VERIFY(!view.isMiniWindowCaptureActive());
+			QVERIFY(g_worldHotspotCallbackFunctions.contains(QStringLiteral("ordinary_capture_down")));
+			QVERIFY(g_worldHotspotCallbackFunctions.contains(QStringLiteral("ordinary_capture_cancel")));
+			QVERIFY(!g_worldHotspotCallbackFunctions.contains(QStringLiteral("ordinary_capture_up")));
+			resetTestState();
+		}
+
+		void nativeOutputRendererDragReleaseOutsideUsesRawHitTestPoint()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			QVERIFY(outputStack->width() > 220);
+			QVERIFY(outputStack->height() > 140);
+
+			const QRect startRect(outputStack->width() - 120, 40, 120, 60);
+			MiniWindow &window = appendTestMiniWindow(QStringLiteral("drag-release-hit-test"), startRect, 0,
+			                                          QColor(40, 90, 210, 255));
+			MiniWindowHotspot hotspot;
+			hotspot.rect            = QRect(QPoint(0, 0), startRect.size());
+			hotspot.mouseDown       = QStringLiteral("drag_release_down");
+			hotspot.mouseUp         = QStringLiteral("drag_release_up");
+			hotspot.cancelMouseDown = QStringLiteral("drag_release_cancel");
+			hotspot.moveCallback    = QStringLiteral("drag_release_move");
+			hotspot.releaseCallback = QStringLiteral("drag_release_callback");
+			window.hotspots.insert(QStringLiteral("drag"), hotspot);
+			view.onMiniWindowsChanged();
+			QCoreApplication::processEvents();
+
+			const QPoint pressInStack(startRect.right() - 2, startRect.center().y());
+			QTest::mousePress(outputStack, Qt::LeftButton, Qt::NoModifier, pressInStack);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(view.isMiniWindowCaptureActive());
+
+			const QPoint outsideInStack(outputStack->width() + 30, pressInStack.y());
+			sendMiniWindowMouseMove(outputStack, outputStack, outsideInStack);
+			QCOMPARE(view.lastMousePosition(), outsideInStack);
+			QCOMPARE(g_lastMiniWindowMouseMovePosition, outsideInStack);
+			QVERIFY(g_lastMiniWindowMouseMoveWindow.isEmpty());
+			QVERIFY(g_miniWindowMouseMoveNotifyCount > 0);
+			QCOMPARE(g_testMiniWindows.constFirst().clientMousePosition,
+			         QPoint(outputStack->width() - 1, outsideInStack.y()));
+			sendMiniWindowMouseRelease(outputStack, outputStack, outsideInStack);
+			QTRY_VERIFY(!view.isMiniWindowCaptureActive());
+			QCOMPARE(view.lastMousePosition(), outsideInStack);
+			QCOMPARE(g_lastMiniWindowMouseMovePosition, outsideInStack);
+			QVERIFY(g_lastMiniWindowMouseMoveWindow.isEmpty());
+			QCOMPARE(g_testMiniWindows.constFirst().clientMousePosition,
+			         QPoint(outputStack->width() - 1, outsideInStack.y()));
+			QVERIFY(g_worldHotspotCallbackFunctions.contains(QStringLiteral("drag_release_callback")));
+			QVERIFY(g_worldHotspotCallbackFunctions.contains(QStringLiteral("drag_release_cancel")));
+			QVERIFY(!g_worldHotspotCallbackFunctions.contains(QStringLiteral("drag_release_up")));
 			resetTestState();
 		}
 
@@ -11909,10 +12345,12 @@ class tst_WorldView_Basic : public QObject
 			const QPoint pressInStack    = QPoint(startRect.right() - 2, startRect.bottom() - 2);
 			const QPoint pressInViewport = viewport->mapFrom(outputStack, pressInStack);
 			QVERIFY(viewport->rect().contains(pressInViewport));
-			const int callbackBaseline = g_worldHotspotCallbackCount;
+			const int callbackBaseline   = g_worldHotspotCallbackCount;
+			g_expectedReleaseCaptureView = &view;
 			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, pressInViewport);
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(view.isMiniWindowCaptureActive());
+			QCOMPARE(g_resizeMouseDownConstraintState, 0);
 
 			const QPoint moveInStack    = pressInStack + QPoint(64, 28);
 			const QPoint moveInViewport = viewport->mapFrom(outputStack, moveInStack);
@@ -11929,6 +12367,7 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 
 			QCOMPARE(g_resizeMoveCallbackCount, 1);
+			QCOMPARE(g_resizeMoveConstraintState, 1);
 			QVERIFY(g_releaseCallbackSawFlushedResize);
 			QTRY_VERIFY(g_worldHotspotCallbackCount >= callbackBaseline + 3);
 			QCOMPARE(g_worldHotspotCallbackFunctions.at(callbackBaseline + 2),

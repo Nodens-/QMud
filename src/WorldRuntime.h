@@ -1717,6 +1717,14 @@ class WorldRuntime : public QObject
 		void layoutMiniWindows(const QSize &clientSize, const QSize &ownerSize, bool underneath,
 		                       const QVector<MiniWindow *> *orderedWindows = nullptr);
 		/**
+		 * @brief Converts an output display coordinate to canonical coordinates for an absolute miniwindow.
+		 * @param displayPosition Display-space output-client coordinate.
+		 * @param windowFlags Miniwindow flags selecting absolute positioning and the active paint layer.
+		 * @return Canonical client coordinate, or the input coordinate for a non-absolute miniwindow.
+		 */
+		[[nodiscard]] QPoint canonicalMiniWindowClientPosition(const QPoint &displayPosition,
+		                                                       int           windowFlags) const;
+		/**
 		 * @brief Draws rectangle/frame/fill operation on miniwindow.
 		 * @param name Miniwindow name.
 		 * @param action Drawing action code.
@@ -1728,8 +1736,8 @@ class WorldRuntime : public QObject
 		 * @param colour2 Secondary colour.
 		 * @return API status code.
 		 */
-		int  windowRectOp(const QString &name, int action, int left, int top, int right, int bottom,
-		                  long colour1, long colour2);
+		int windowRectOp(const QString &name, int action, int left, int top, int right, int bottom,
+		                 long colour1, long colour2);
 		/**
 		 * @brief Draws circle/ellipse operation on miniwindow.
 		 * @param name Miniwindow name.
@@ -1749,9 +1757,9 @@ class WorldRuntime : public QObject
 		 * @param extra4 Extra mode parameter 4.
 		 * @return API status code.
 		 */
-		int  windowCircleOp(const QString &name, int action, int left, int top, int right, int bottom,
-		                    long penColour, long penStyle, int penWidth, long brushColour, long brushStyle,
-		                    int extra1, int extra2, int extra3, int extra4);
+		int windowCircleOp(const QString &name, int action, int left, int top, int right, int bottom,
+		                   long penColour, long penStyle, int penWidth, long brushColour, long brushStyle,
+		                   int extra1, int extra2, int extra3, int extra4);
 		/**
 		 * @brief Draws line segment on miniwindow.
 		 * @param name Miniwindow name.
@@ -1764,8 +1772,8 @@ class WorldRuntime : public QObject
 		 * @param penWidth Pen width.
 		 * @return API status code.
 		 */
-		int  windowLine(const QString &name, int x1, int y1, int x2, int y2, long penColour, long penStyle,
-		                int penWidth);
+		int windowLine(const QString &name, int x1, int y1, int x2, int y2, long penColour, long penStyle,
+		               int penWidth);
 		/**
 		 * @brief Draws arc segment on miniwindow.
 		 * @param name Miniwindow name.
@@ -1782,8 +1790,8 @@ class WorldRuntime : public QObject
 		 * @param penWidth Pen width.
 		 * @return API status code.
 		 */
-		int  windowArc(const QString &name, int left, int top, int right, int bottom, int x1, int y1, int x2,
-		               int y2, long penColour, long penStyle, int penWidth);
+		int windowArc(const QString &name, int left, int top, int right, int bottom, int x1, int y1, int x2,
+		              int y2, long penColour, long penStyle, int penWidth);
 		/**
 		 * @brief Draws bezier polyline from point list.
 		 * @param name Miniwindow name.
@@ -1793,8 +1801,8 @@ class WorldRuntime : public QObject
 		 * @param penWidth Pen width.
 		 * @return API status code.
 		 */
-		int  windowBezier(const QString &name, const QString &points, long penColour, long penStyle,
-		                  int penWidth);
+		int windowBezier(const QString &name, const QString &points, long penColour, long penStyle,
+		                 int penWidth);
 		/**
 		 * @brief Draws polygon/polyline from point list.
 		 * @param name Miniwindow name.
@@ -1808,8 +1816,8 @@ class WorldRuntime : public QObject
 		 * @param winding Use winding fill rule when `true`.
 		 * @return API status code.
 		 */
-		int  windowPolygon(const QString &name, const QString &points, long penColour, long penStyle,
-		                   int penWidth, long brushColour, long brushStyle, bool closePolygon, bool winding);
+		int windowPolygon(const QString &name, const QString &points, long penColour, long penStyle,
+		                  int penWidth, long brushColour, long brushStyle, bool closePolygon, bool winding);
 		/**
 		 * @brief Paints gradient-filled rectangle.
 		 * @param name Miniwindow name.
@@ -1822,8 +1830,8 @@ class WorldRuntime : public QObject
 		 * @param mode Gradient mode code.
 		 * @return API status code.
 		 */
-		int  windowGradient(const QString &name, int left, int top, int right, int bottom, long startColour,
-		                    long endColour, int mode);
+		int windowGradient(const QString &name, int left, int top, int right, int bottom, long startColour,
+		                   long endColour, int mode);
 		/**
 		 * @brief Creates or updates named miniwindow font resource.
 		 * @param name Miniwindow name.
@@ -1838,9 +1846,9 @@ class WorldRuntime : public QObject
 		 * @param pitchAndFamily Pitch/family code.
 		 * @return API status code.
 		 */
-		int  windowFont(const QString &name, const QString &fontId, const QString &fontName, double size,
-		                bool bold, bool italic, bool underline, bool strikeout, int charset,
-		                int pitchAndFamily);
+		int windowFont(const QString &name, const QString &fontId, const QString &fontName, double size,
+		               bool bold, bool italic, bool underline, bool strikeout, int charset,
+		               int pitchAndFamily);
 		/**
 		 * @brief Returns miniwindow font metadata.
 		 * @param name Miniwindow name.
@@ -5833,6 +5841,10 @@ class WorldRuntime : public QObject
 		int                                             m_absoluteReferenceBottomOver{0};
 		int                                             m_absoluteReferenceRightUnder{0};
 		int                                             m_absoluteReferenceBottomUnder{0};
+		double                                          m_absoluteMiniWindowScaleXOver{1.0};
+		double                                          m_absoluteMiniWindowScaleYOver{1.0};
+		double                                          m_absoluteMiniWindowScaleXUnder{1.0};
+		double                                          m_absoluteMiniWindowScaleYUnder{1.0};
 		QSet<QString>                                   m_specialFontPaths;
 		QVector<QString>                                m_specialFontPathOrder;
 		QVector<int>                                    m_specialFontIds;

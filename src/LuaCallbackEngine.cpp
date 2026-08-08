@@ -630,23 +630,23 @@ namespace
 			const LuaCallbackMiniWindowSnapshot                  *miniWindowLookupBaseSnapshot{nullptr};
 			QSet<QString>                                         existingMiniWindowIds;
 			QSet<QString>                                         missingMiniWindowIds;
-			QSet<QString>                                         existingMiniWindowImages;
-			QSet<QString>                                         missingMiniWindowImages;
-			QSet<QString>                                         existingMiniWindowFonts;
-			QSet<QString>                                         missingMiniWindowFonts;
-			QHash<QString, int>                                   miniWindowTextWidthByKey;
+			QSet<LuaCallbackMiniWindowResourceKey>                existingMiniWindowImages;
+			QSet<LuaCallbackMiniWindowResourceKey>                missingMiniWindowImages;
+			QSet<LuaCallbackMiniWindowResourceKey>                existingMiniWindowFonts;
+			QSet<LuaCallbackMiniWindowResourceKey>                missingMiniWindowFonts;
+			QHash<LuaCallbackMiniWindowTextWidthKey, int>         miniWindowTextWidthByKey;
 			QStringList                                           miniWindowListSnapshot;
 			bool                                                  hasMiniWindowListSnapshot{false};
-			QHash<QString, QVariant>                              miniWindowInfoByKey;
+			QHash<LuaCallbackMiniWindowInfoKey, QVariant>         miniWindowInfoByKey;
 			QHash<QString, QStringList>                           miniWindowFontListByWindow;
 			QHash<QString, QStringList>                           miniWindowImageListByWindow;
 			QHash<QString, QStringList>                           miniWindowHotspotListByWindow;
-			QHash<QString, QVariant>                              miniWindowFontInfoByKey;
-			QHash<QString, QFont>                                 miniWindowPreviewFontsByKey;
+			QHash<LuaCallbackMiniWindowFontInfoKey, QVariant>     miniWindowFontInfoByKey;
+			QHash<LuaCallbackMiniWindowResourceKey, QFont>        miniWindowPreviewFontsByKey;
 			QHash<QString, MiniWindow>                            miniWindowShadowByWindow;
-			QHash<QString, bool>                                  miniWindowImageHasAlphaByKey;
-			QSet<QString>                                         existingMiniWindowHotspots;
-			QSet<QString>                                         missingMiniWindowHotspots;
+			QHash<LuaCallbackMiniWindowResourceKey, bool>         miniWindowImageHasAlphaByKey;
+			QSet<LuaCallbackMiniWindowResourceKey>                existingMiniWindowHotspots;
+			QSet<LuaCallbackMiniWindowResourceKey>                missingMiniWindowHotspots;
 			int                                                   actionSourceOverride{0};
 			bool                                                  hasActionSourceOverride{false};
 			bool                                                  directTriggerScriptActionPriority{false};
@@ -5247,12 +5247,13 @@ namespace
 	}
 
 	bool callbackMiniWindowBaseHasWindow(const LuaCallbackExecutionContext &context, const QString &key);
-	bool callbackMiniWindowBaseHasFont(const LuaCallbackExecutionContext &context, const QString &key);
-	bool callbackMiniWindowBaseHasHotspot(const LuaCallbackExecutionContext &context, const QString &key);
+	bool callbackMiniWindowBaseHasFont(const LuaCallbackExecutionContext      &context,
+	                                   const LuaCallbackMiniWindowResourceKey &key);
+	bool callbackMiniWindowBaseHasHotspot(const LuaCallbackExecutionContext      &context,
+	                                      const LuaCallbackMiniWindowResourceKey &key);
 	const LuaCallbackMiniWindowSnapshot      *
     callbackMiniWindowSnapshotForBackfill(const LuaCallbackEngine           *engine,
 	                                           const LuaCallbackExecutionContext &context);
-	bool stringListContainsCaseInsensitive(const QStringList &items, const QString &value);
 
 	bool tryResolveCallbackMiniWindowExistsFromCache(const LuaCallbackEngine *engine, const QString &name,
 	                                                 bool &exists)
@@ -5260,7 +5261,7 @@ namespace
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
-		const QString key = name.trimmed().toLower();
+		const QString &key = name;
 		if (key.isEmpty())
 		{
 			exists = false;
@@ -5290,7 +5291,7 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString key = name.trimmed().toLower();
+		const QString &key = name;
 		if (key.isEmpty())
 			return;
 		if (exists)
@@ -5305,46 +5306,50 @@ namespace
 		}
 	}
 
-	QString callbackMiniWindowHotspotKey(const QString &windowName, const QString &hotspotId)
+	LuaCallbackMiniWindowResourceKey callbackMiniWindowHotspotKey(const QString &windowName,
+	                                                              const QString &hotspotId)
 	{
-		return QStringLiteral("%1|%2").arg(windowName.trimmed().toLower(), hotspotId.trimmed().toLower());
+		return {windowName, hotspotId};
 	}
 
-	QString callbackMiniWindowImageKey(const QString &windowName, const QString &imageId)
+	LuaCallbackMiniWindowResourceKey callbackMiniWindowImageKey(const QString &windowName,
+	                                                            const QString &imageId)
 	{
-		return QStringLiteral("%1|%2").arg(windowName.trimmed().toLower(), imageId.trimmed().toLower());
+		return {windowName, imageId};
 	}
 
 	QString callbackMiniWindowWindowKey(const QString &windowName)
 	{
-		return windowName.trimmed().toLower();
+		return windowName;
 	}
 
-	QString callbackMiniWindowFontKey(const QString &windowName, const QString &fontId)
+	LuaCallbackMiniWindowResourceKey callbackMiniWindowFontKey(const QString &windowName,
+	                                                           const QString &fontId)
 	{
-		return QStringLiteral("%1|%2").arg(callbackMiniWindowWindowKey(windowName),
-		                                   fontId.trimmed().toLower());
+		return {callbackMiniWindowWindowKey(windowName), fontId};
 	}
 
 	bool callbackMiniWindowBaseHasWindow(const LuaCallbackExecutionContext &context, const QString &key)
 	{
 		return context.miniWindowLookupBaseSnapshot &&
 		       context.miniWindowLookupBaseSnapshot->miniWindowLookupCacheValid &&
-		       context.miniWindowLookupBaseSnapshot->normalizedMiniWindowIds.contains(key);
+		       context.miniWindowLookupBaseSnapshot->miniWindowIds.contains(key);
 	}
 
-	bool callbackMiniWindowBaseHasFont(const LuaCallbackExecutionContext &context, const QString &key)
+	bool callbackMiniWindowBaseHasFont(const LuaCallbackExecutionContext      &context,
+	                                   const LuaCallbackMiniWindowResourceKey &key)
 	{
 		return context.miniWindowLookupBaseSnapshot &&
 		       context.miniWindowLookupBaseSnapshot->miniWindowLookupCacheValid &&
-		       context.miniWindowLookupBaseSnapshot->normalizedMiniWindowFontKeys.contains(key);
+		       context.miniWindowLookupBaseSnapshot->miniWindowFontKeys.contains(key);
 	}
 
-	bool callbackMiniWindowBaseHasHotspot(const LuaCallbackExecutionContext &context, const QString &key)
+	bool callbackMiniWindowBaseHasHotspot(const LuaCallbackExecutionContext      &context,
+	                                      const LuaCallbackMiniWindowResourceKey &key)
 	{
 		return context.miniWindowLookupBaseSnapshot &&
 		       context.miniWindowLookupBaseSnapshot->miniWindowLookupCacheValid &&
-		       context.miniWindowLookupBaseSnapshot->normalizedMiniWindowHotspotKeys.contains(key);
+		       context.miniWindowLookupBaseSnapshot->miniWindowHotspotKeys.contains(key);
 	}
 
 	const LuaCallbackMiniWindowSnapshot *
@@ -5359,39 +5364,15 @@ namespace
 		return context.miniWindowLookupBaseSnapshot;
 	}
 
-	QString callbackMiniWindowTextWidthKey(const QString &windowName, const QString &fontId,
-	                                       const QString &text)
+	LuaCallbackMiniWindowTextWidthKey
+	callbackMiniWindowTextWidthKey(const QString &windowName, const QString &fontId, const QString &text)
 	{
-		return QStringLiteral("%1|%2|%3")
-		    .arg(windowName.trimmed().toLower(), fontId.trimmed().toLower(), text);
+		return {windowName, fontId, text};
 	}
 
-	QString callbackMiniWindowInfoKey(const QString &windowName, const int infoType)
+	LuaCallbackMiniWindowInfoKey callbackMiniWindowInfoKey(const QString &windowName, const int infoType)
 	{
-		return QStringLiteral("%1|%2").arg(windowName.trimmed().toLower()).arg(infoType);
-	}
-
-	bool decodeCallbackMiniWindowInfoKey(const QString &key, QString &windowName, int &infoType)
-	{
-		const qsizetype separator = key.lastIndexOf(QLatin1Char('|'));
-		if (separator <= 0 || separator + 1 >= key.size())
-			return false;
-		windowName = key.left(separator).trimmed().toLower();
-		if (windowName.isEmpty())
-			return false;
-		bool ok  = false;
-		infoType = key.mid(separator + 1).toInt(&ok);
-		return ok;
-	}
-
-	bool decodeCallbackMiniWindowItemKey(const QString &key, QString &windowName, QString &itemId)
-	{
-		const qsizetype separator = key.indexOf(QLatin1Char('|'));
-		if (separator <= 0 || separator + 1 >= key.size())
-			return false;
-		windowName = key.left(separator).trimmed().toLower();
-		itemId     = key.mid(separator + 1).trimmed().toLower();
-		return !windowName.isEmpty() && !itemId.isEmpty();
+		return {windowName, infoType};
 	}
 
 	void applyMiniWindowInfoValueToSnapshot(LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot &info,
@@ -5479,26 +5460,23 @@ namespace
 		for (auto it = context.miniWindowInfoByKey.constBegin(); it != context.miniWindowInfoByKey.constEnd();
 		     ++it)
 		{
-			QString windowKey;
-			int     infoType = 0;
-			if (!decodeCallbackMiniWindowInfoKey(it.key(), windowKey, infoType))
+			const QString &windowKey = it.key().windowName;
+			const int      infoType  = it.key().infoType;
+			if (windowKey.isEmpty())
 				continue;
 			auto infoIt = snapshot.windowInfoByWindow.find(windowKey);
 			if (infoIt == snapshot.windowInfoByWindow.end())
 				infoIt = snapshot.windowInfoByWindow.insert(windowKey, {});
 			applyMiniWindowInfoValueToSnapshot(infoIt.value(), infoType, it.value());
-			if (!std::ranges::any_of(snapshot.windowNames, [&windowKey](const QString &name)
-			                         { return name.compare(windowKey, Qt::CaseInsensitive) == 0; }))
+			if (!snapshot.windowNames.contains(windowKey))
 				snapshot.windowNames.push_back(windowKey);
 		}
 	}
 
-	QString callbackMiniWindowFontInfoKey(const QString &windowName, const QString &fontId,
-	                                      const int infoType)
+	LuaCallbackMiniWindowFontInfoKey callbackMiniWindowFontInfoKey(const QString &windowName,
+	                                                               const QString &fontId, const int infoType)
 	{
-		return QStringLiteral("%1|%2|%3")
-		    .arg(windowName.trimmed().toLower(), fontId.trimmed().toLower())
-		    .arg(infoType);
+		return {windowName, fontId, infoType};
 	}
 
 	bool tryResolveCallbackMiniWindowHotspotExistsFromCache(const LuaCallbackEngine *engine,
@@ -5508,8 +5486,8 @@ namespace
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
-		const QString key = callbackMiniWindowHotspotKey(windowName, hotspotId);
-		if (key == QStringLiteral("|"))
+		const auto key = callbackMiniWindowHotspotKey(windowName, hotspotId);
+		if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 		{
 			exists = false;
 			return true;
@@ -5538,8 +5516,8 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString key = callbackMiniWindowHotspotKey(windowName, hotspotId);
-		if (key == QStringLiteral("|"))
+		const auto key = callbackMiniWindowHotspotKey(windowName, hotspotId);
+		if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 			return;
 		if (exists)
 		{
@@ -5560,8 +5538,8 @@ namespace
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
-		const QString key = callbackMiniWindowFontKey(windowName, fontId);
-		if (key == QStringLiteral("|"))
+		const auto key = callbackMiniWindowFontKey(windowName, fontId);
+		if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 		{
 			exists = false;
 			return true;
@@ -5590,8 +5568,8 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString key = callbackMiniWindowFontKey(windowName, fontId);
-		if (key == QStringLiteral("|"))
+		const auto key = callbackMiniWindowFontKey(windowName, fontId);
+		if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 			return;
 		if (exists)
 		{
@@ -5612,8 +5590,8 @@ namespace
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
-		const QString key = callbackMiniWindowTextWidthKey(windowName, fontId, text);
-		const auto    it  = context->miniWindowTextWidthByKey.constFind(key);
+		const auto key = callbackMiniWindowTextWidthKey(windowName, fontId, text);
+		const auto it  = context->miniWindowTextWidthByKey.constFind(key);
 		if (it == context->miniWindowTextWidthByKey.constEnd())
 			return false;
 		width = it.value();
@@ -5626,7 +5604,7 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString key = callbackMiniWindowTextWidthKey(windowName, fontId, text);
+		const auto key = callbackMiniWindowTextWidthKey(windowName, fontId, text);
 		context->miniWindowTextWidthByKey.insert(key, width);
 	}
 
@@ -5654,8 +5632,8 @@ namespace
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
-		const QString key = callbackMiniWindowInfoKey(windowName, infoType);
-		const auto    it  = context->miniWindowInfoByKey.constFind(key);
+		const auto key = callbackMiniWindowInfoKey(windowName, infoType);
+		const auto it  = context->miniWindowInfoByKey.constFind(key);
 		if (it == context->miniWindowInfoByKey.constEnd())
 			return false;
 		value = it.value();
@@ -5787,7 +5765,7 @@ namespace
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
-		const auto it = context->miniWindowFontListByWindow.constFind(windowName.trimmed().toLower());
+		const auto it = context->miniWindowFontListByWindow.constFind(windowName);
 		if (it == context->miniWindowFontListByWindow.constEnd())
 			return false;
 		fontIds = it.value();
@@ -5800,7 +5778,7 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->miniWindowFontListByWindow.insert(windowName.trimmed().toLower(), fontIds);
+		context->miniWindowFontListByWindow.insert(windowName, fontIds);
 	}
 
 	bool tryResolveCallbackMiniWindowImageListFromCache(const LuaCallbackEngine *engine,
@@ -5809,7 +5787,7 @@ namespace
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
-		const auto it = context->miniWindowImageListByWindow.constFind(windowName.trimmed().toLower());
+		const auto it = context->miniWindowImageListByWindow.constFind(windowName);
 		if (it == context->miniWindowImageListByWindow.constEnd())
 			return false;
 		imageIds = it.value();
@@ -5822,7 +5800,7 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->miniWindowImageListByWindow.insert(windowName.trimmed().toLower(), imageIds);
+		context->miniWindowImageListByWindow.insert(windowName, imageIds);
 	}
 
 	bool tryResolveCallbackMiniWindowHotspotListFromCache(const LuaCallbackEngine *engine,
@@ -5831,7 +5809,7 @@ namespace
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
-		const auto it = context->miniWindowHotspotListByWindow.constFind(windowName.trimmed().toLower());
+		const auto it = context->miniWindowHotspotListByWindow.constFind(windowName);
 		if (it == context->miniWindowHotspotListByWindow.constEnd())
 			return false;
 		hotspotIds = it.value();
@@ -5844,7 +5822,7 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		context->miniWindowHotspotListByWindow.insert(windowName.trimmed().toLower(), hotspotIds);
+		context->miniWindowHotspotListByWindow.insert(windowName, hotspotIds);
 	}
 
 	void addCallbackMiniWindowHotspotListEntry(const LuaCallbackEngine *engine, const QString &windowName,
@@ -5853,14 +5831,14 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString windowKey  = windowName.trimmed().toLower();
-		const QString hotspotKey = hotspotId.trimmed();
+		const QString &windowKey  = windowName;
+		const QString &hotspotKey = hotspotId;
 		if (windowKey.isEmpty() || hotspotKey.isEmpty())
 			return;
 		auto it = context->miniWindowHotspotListByWindow.find(windowKey);
 		if (it == context->miniWindowHotspotListByWindow.end())
 			return;
-		if (!stringListContainsCaseInsensitive(it.value(), hotspotKey))
+		if (!it.value().contains(hotspotKey))
 			it.value().push_back(hotspotKey);
 	}
 
@@ -5870,17 +5848,14 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString windowKey  = windowName.trimmed().toLower();
-		const QString hotspotKey = hotspotId.trimmed();
+		const QString &windowKey  = windowName;
+		const QString &hotspotKey = hotspotId;
 		if (windowKey.isEmpty() || hotspotKey.isEmpty())
 			return;
 		auto it = context->miniWindowHotspotListByWindow.find(windowKey);
 		if (it == context->miniWindowHotspotListByWindow.end())
 			return;
-		const auto removed =
-		    std::ranges::remove_if(it.value(), [&hotspotKey](const QString &item)
-		                           { return item.trimmed().compare(hotspotKey, Qt::CaseInsensitive) == 0; });
-		it.value().erase(removed.begin(), removed.end());
+		it.value().removeAll(hotspotKey);
 	}
 
 	bool tryResolveCallbackMiniWindowFontInfoFromCache(const LuaCallbackEngine *engine,
@@ -5890,8 +5865,8 @@ namespace
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
-		const QString key = callbackMiniWindowFontInfoKey(windowName, fontId, infoType);
-		const auto    it  = context->miniWindowFontInfoByKey.constFind(key);
+		const auto key = callbackMiniWindowFontInfoKey(windowName, fontId, infoType);
+		const auto it  = context->miniWindowFontInfoByKey.constFind(key);
 		if (it == context->miniWindowFontInfoByKey.constEnd())
 			return false;
 		value = it.value();
@@ -6649,8 +6624,8 @@ namespace
 		const auto *context = activeCallbackContextConst(engine);
 		if (!context)
 			return false;
-		const QString key = callbackMiniWindowFontKey(windowName, fontId);
-		if (key == QStringLiteral("|"))
+		const auto key = callbackMiniWindowFontKey(windowName, fontId);
+		if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 			return false;
 		const auto it = context->miniWindowPreviewFontsByKey.constFind(key);
 		if (it == context->miniWindowPreviewFontsByKey.constEnd())
@@ -6669,8 +6644,8 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString key = callbackMiniWindowImageKey(windowName, imageId);
-		if (key == QStringLiteral("|"))
+		const auto key = callbackMiniWindowImageKey(windowName, imageId);
+		if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 			return;
 		if (exists)
 		{
@@ -6690,8 +6665,8 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString key = callbackMiniWindowImageKey(windowName, imageId);
-		if (key == QStringLiteral("|"))
+		const auto key = callbackMiniWindowImageKey(windowName, imageId);
+		if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 			return;
 		context->miniWindowImageHasAlphaByKey.insert(key, hasAlpha);
 	}
@@ -7860,7 +7835,7 @@ namespace
 	}
 
 	CallbackDispatchSnapshot buildActiveCallbackDispatchSnapshot(const LuaCallbackEngine *engine,
-	                                                             WorldRuntime            *runtime)
+	                                                             const WorldRuntime      *runtime)
 	{
 		CallbackDispatchSnapshot result;
 		const auto              *context = activeCallbackContextConst(engine);
@@ -7887,37 +7862,23 @@ namespace
 			    context->callbackOutputAnchorAbsoluteNumberAtDispatch;
 		}
 
-		const auto appendUniqueCaseInsensitive = [](QStringList &list, const QString &value)
+		const auto appendUniqueExact = [](QStringList &list, const QString &value)
 		{
-			if (value.trimmed().isEmpty())
-				return;
-			if (!std::ranges::any_of(list, [&value](const QString &item)
-			                         { return item.compare(value, Qt::CaseInsensitive) == 0; }))
-			{
+			if (!value.isEmpty() && !list.contains(value))
 				list.push_back(value);
-			}
 		};
-		const auto removeCaseInsensitive = [](QStringList &list, const QString &value)
-		{
-			const QString normalized = value.trimmed();
-			if (normalized.isEmpty())
-				return;
-			const auto removed = std::ranges::remove_if(
-			    list, [&normalized](const QString &item)
-			    { return item.trimmed().compare(normalized, Qt::CaseInsensitive) == 0; });
-			list.erase(removed.begin(), removed.end());
-		};
+		const auto removeExact = [](QStringList &list, const QString &value) { list.removeAll(value); };
 
 		if (context->hasMiniWindowListSnapshot)
 			snapshot->windowNames = context->miniWindowListSnapshot;
 		for (const QString &windowId : context->existingMiniWindowIds)
-			appendUniqueCaseInsensitive(snapshot->windowNames, windowId);
+			appendUniqueExact(snapshot->windowNames, windowId);
 		for (const QString &windowId : context->missingMiniWindowIds)
 		{
-			const QString windowKey = windowId.trimmed().toLower();
+			const QString &windowKey = windowId;
 			if (windowKey.isEmpty())
 				continue;
-			removeCaseInsensitive(snapshot->windowNames, windowKey);
+			removeExact(snapshot->windowNames, windowKey);
 			snapshot->miniWindowsByWindow.remove(windowKey);
 			snapshot->windowInfoByWindow.remove(windowKey);
 			snapshot->fontIdsByWindow.remove(windowKey);
@@ -7926,7 +7887,7 @@ namespace
 			for (auto alphaIt = snapshot->imageHasAlphaByKey.begin();
 			     alphaIt != snapshot->imageHasAlphaByKey.end();)
 			{
-				if (alphaIt.key().startsWith(windowKey + QLatin1Char('|')))
+				if (alphaIt.key().windowName == windowKey)
 					alphaIt = snapshot->imageHasAlphaByKey.erase(alphaIt);
 				else
 					++alphaIt;
@@ -7935,7 +7896,7 @@ namespace
 		for (auto it = context->miniWindowShadowByWindow.constBegin();
 		     it != context->miniWindowShadowByWindow.constEnd(); ++it)
 		{
-			const QString windowKey = it.key().trimmed().toLower();
+			const QString &windowKey = it.key();
 			if (windowKey.isEmpty() || context->missingMiniWindowIds.contains(windowKey))
 				continue;
 			const MiniWindow &window = it.value();
@@ -7945,32 +7906,31 @@ namespace
 			snapshot->hotspotIdsByWindow.insert(windowKey, window.hotspots.keys());
 			for (auto imageIt = window.images.constBegin(); imageIt != window.images.constEnd(); ++imageIt)
 			{
-				const QString imageKey = imageIt.key().trimmed().toLower();
+				const QString &imageKey = imageIt.key();
 				if (!imageKey.isEmpty())
 					snapshot->imageHasAlphaByKey.insert(callbackMiniWindowImageKey(windowKey, imageKey),
 					                                    imageIt.value().hasAlpha);
 			}
 			snapshot->windowInfoByWindow.insert(windowKey, miniWindowInfoSnapshotFromWindow(window));
-			appendUniqueCaseInsensitive(snapshot->windowNames,
-			                            window.name.isEmpty() ? windowKey : window.name);
+			appendUniqueExact(snapshot->windowNames, window.name.isEmpty() ? windowKey : window.name);
 		}
 		for (auto it = context->miniWindowFontListByWindow.constBegin();
 		     it != context->miniWindowFontListByWindow.constEnd(); ++it)
 		{
 			snapshot->fontIdsByWindow.insert(it.key(), it.value());
-			appendUniqueCaseInsensitive(snapshot->windowNames, it.key());
+			appendUniqueExact(snapshot->windowNames, it.key());
 		}
 		for (auto it = context->miniWindowImageListByWindow.constBegin();
 		     it != context->miniWindowImageListByWindow.constEnd(); ++it)
 		{
 			snapshot->imageIdsByWindow.insert(it.key(), it.value());
-			appendUniqueCaseInsensitive(snapshot->windowNames, it.key());
+			appendUniqueExact(snapshot->windowNames, it.key());
 		}
 		for (auto it = context->miniWindowHotspotListByWindow.constBegin();
 		     it != context->miniWindowHotspotListByWindow.constEnd(); ++it)
 		{
 			snapshot->hotspotIdsByWindow.insert(it.key(), it.value());
-			appendUniqueCaseInsensitive(snapshot->windowNames, it.key());
+			appendUniqueExact(snapshot->windowNames, it.key());
 		}
 		for (auto it = context->miniWindowImageHasAlphaByKey.constBegin();
 		     it != context->miniWindowImageHasAlphaByKey.constEnd(); ++it)
@@ -7982,65 +7942,54 @@ namespace
 			snapshot->framePointer    = context->framePointer;
 			snapshot->hasFramePointer = true;
 		}
-		for (const QString &key : context->existingMiniWindowFonts)
+		for (const LuaCallbackMiniWindowResourceKey &key : context->existingMiniWindowFonts)
 		{
-			QString windowKey;
-			QString fontId;
-			if (!decodeCallbackMiniWindowItemKey(key, windowKey, fontId))
+			if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 				continue;
-			QStringList &fontIds = snapshot->fontIdsByWindow[windowKey];
-			appendUniqueCaseInsensitive(fontIds, fontId);
-			appendUniqueCaseInsensitive(snapshot->windowNames, windowKey);
+			QStringList &fontIds = snapshot->fontIdsByWindow[key.windowName];
+			appendUniqueExact(fontIds, key.resourceId);
+			appendUniqueExact(snapshot->windowNames, key.windowName);
 		}
-		for (const QString &key : context->missingMiniWindowFonts)
+		for (const LuaCallbackMiniWindowResourceKey &key : context->missingMiniWindowFonts)
 		{
-			QString windowKey;
-			QString fontId;
-			if (!decodeCallbackMiniWindowItemKey(key, windowKey, fontId))
+			if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 				continue;
-			if (auto it = snapshot->fontIdsByWindow.find(windowKey); it != snapshot->fontIdsByWindow.end())
-				removeCaseInsensitive(it.value(), fontId);
+			if (auto it = snapshot->fontIdsByWindow.find(key.windowName);
+			    it != snapshot->fontIdsByWindow.end())
+				removeExact(it.value(), key.resourceId);
 		}
-		for (const QString &key : context->existingMiniWindowImages)
+		for (const LuaCallbackMiniWindowResourceKey &key : context->existingMiniWindowImages)
 		{
-			QString windowKey;
-			QString imageId;
-			if (!decodeCallbackMiniWindowItemKey(key, windowKey, imageId))
+			if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 				continue;
-			QStringList &imageIds = snapshot->imageIdsByWindow[windowKey];
-			appendUniqueCaseInsensitive(imageIds, imageId);
-			appendUniqueCaseInsensitive(snapshot->windowNames, windowKey);
+			QStringList &imageIds = snapshot->imageIdsByWindow[key.windowName];
+			appendUniqueExact(imageIds, key.resourceId);
+			appendUniqueExact(snapshot->windowNames, key.windowName);
 		}
-		for (const QString &key : context->missingMiniWindowImages)
+		for (const LuaCallbackMiniWindowResourceKey &key : context->missingMiniWindowImages)
 		{
-			QString windowKey;
-			QString imageId;
-			if (!decodeCallbackMiniWindowItemKey(key, windowKey, imageId))
+			if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 				continue;
-			if (auto imageIt = snapshot->imageIdsByWindow.find(windowKey);
+			if (auto imageIt = snapshot->imageIdsByWindow.find(key.windowName);
 			    imageIt != snapshot->imageIdsByWindow.end())
-				removeCaseInsensitive(imageIt.value(), imageId);
-			snapshot->imageHasAlphaByKey.remove(callbackMiniWindowImageKey(windowKey, imageId));
+				removeExact(imageIt.value(), key.resourceId);
+			snapshot->imageHasAlphaByKey.remove(key);
 		}
-		for (const QString &key : context->existingMiniWindowHotspots)
+		for (const LuaCallbackMiniWindowResourceKey &key : context->existingMiniWindowHotspots)
 		{
-			QString windowKey;
-			QString hotspotId;
-			if (!decodeCallbackMiniWindowItemKey(key, windowKey, hotspotId))
+			if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 				continue;
-			QStringList &hotspotIds = snapshot->hotspotIdsByWindow[windowKey];
-			appendUniqueCaseInsensitive(hotspotIds, hotspotId);
-			appendUniqueCaseInsensitive(snapshot->windowNames, windowKey);
+			QStringList &hotspotIds = snapshot->hotspotIdsByWindow[key.windowName];
+			appendUniqueExact(hotspotIds, key.resourceId);
+			appendUniqueExact(snapshot->windowNames, key.windowName);
 		}
-		for (const QString &key : context->missingMiniWindowHotspots)
+		for (const LuaCallbackMiniWindowResourceKey &key : context->missingMiniWindowHotspots)
 		{
-			QString windowKey;
-			QString hotspotId;
-			if (!decodeCallbackMiniWindowItemKey(key, windowKey, hotspotId))
+			if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 				continue;
-			if (auto it = snapshot->hotspotIdsByWindow.find(windowKey);
+			if (auto it = snapshot->hotspotIdsByWindow.find(key.windowName);
 			    it != snapshot->hotspotIdsByWindow.end())
-				removeCaseInsensitive(it.value(), hotspotId);
+				removeExact(it.value(), key.resourceId);
 		}
 		buildMiniWindowInfoSnapshotFromCallbackContext(*context, *snapshot);
 		overlayCallbackContextSnapshotsForCallPlugin(*context, *snapshot, runtime);
@@ -8069,7 +8018,7 @@ namespace
 		{
 			for (const QString &windowName : snapshot->windowNames)
 			{
-				const QString windowKey = windowName.trimmed().toLower();
+				const QString &windowKey = windowName;
 				if (windowKey.isEmpty())
 					continue;
 				context->existingMiniWindowIds.insert(windowKey);
@@ -8086,13 +8035,13 @@ namespace
 			for (auto it = snapshot->fontIdsByWindow.constBegin(); it != snapshot->fontIdsByWindow.constEnd();
 			     ++it)
 			{
-				const QString windowKey = it.key().trimmed().toLower();
+				const QString &windowKey = it.key();
 				if (windowKey.isEmpty())
 					continue;
 				for (const QString &fontId : it.value())
 				{
-					const QString key = callbackMiniWindowFontKey(windowKey, fontId);
-					if (key == QStringLiteral("|"))
+					const auto key = callbackMiniWindowFontKey(windowKey, fontId);
+					if (key.resourceId.isEmpty())
 						continue;
 					context->existingMiniWindowFonts.insert(key);
 				}
@@ -8106,13 +8055,13 @@ namespace
 			for (auto it = snapshot->imageIdsByWindow.constBegin();
 			     it != snapshot->imageIdsByWindow.constEnd(); ++it)
 			{
-				const QString windowKey = it.key().trimmed().toLower();
+				const QString &windowKey = it.key();
 				if (windowKey.isEmpty())
 					continue;
 				for (const QString &imageId : it.value())
 				{
-					const QString key = callbackMiniWindowImageKey(windowKey, imageId);
-					if (key == QStringLiteral("|"))
+					const auto key = callbackMiniWindowImageKey(windowKey, imageId);
+					if (key.resourceId.isEmpty())
 						continue;
 					context->existingMiniWindowImages.insert(key);
 				}
@@ -8126,13 +8075,13 @@ namespace
 			for (auto it = snapshot->hotspotIdsByWindow.constBegin();
 			     it != snapshot->hotspotIdsByWindow.constEnd(); ++it)
 			{
-				const QString windowKey = it.key().trimmed().toLower();
+				const QString &windowKey = it.key();
 				if (windowKey.isEmpty())
 					continue;
 				for (const QString &hotspotId : it.value())
 				{
-					const QString key = callbackMiniWindowHotspotKey(windowKey, hotspotId);
-					if (key == QStringLiteral("|"))
+					const auto key = callbackMiniWindowHotspotKey(windowKey, hotspotId);
+					if (key.resourceId.isEmpty())
 						continue;
 					context->existingMiniWindowHotspots.insert(key);
 				}
@@ -8377,7 +8326,7 @@ namespace
 		context->missingMiniWindowIds.clear();
 		for (const QString &windowName : windowNames)
 		{
-			const QString key = windowName.trimmed().toLower();
+			const QString &key = windowName;
 			if (!key.isEmpty())
 				context->existingMiniWindowIds.insert(key);
 		}
@@ -8528,7 +8477,7 @@ namespace
 		if (!snapshot)
 			return false;
 
-		const QString windowKey = windowName.trimmed().toLower();
+		const QString &windowKey = windowName;
 		if (windowKey.isEmpty())
 			return false;
 		const auto infoIt = snapshot->windowInfoByWindow.constFind(windowKey);
@@ -8544,23 +8493,16 @@ namespace
 		return true;
 	}
 
-	bool stringListContainsCaseInsensitive(const QStringList &items, const QString &value)
-	{
-		return std::ranges::any_of(items, [&value](const QString &item)
-		                           { return item.compare(value, Qt::CaseInsensitive) == 0; });
-	}
-
 	bool dispatchSnapshotContainsWindow(const LuaCallbackMiniWindowSnapshot &snapshot,
 	                                    const QString                       &windowKey)
 	{
 		if (windowKey.isEmpty())
 			return false;
 		if (snapshot.miniWindowLookupCacheValid)
-			return snapshot.normalizedMiniWindowIds.contains(windowKey);
+			return snapshot.miniWindowIds.contains(windowKey);
 		if (snapshot.windowInfoByWindow.contains(windowKey))
 			return true;
-		return std::ranges::any_of(snapshot.windowNames, [&windowKey](const QString &name)
-		                           { return name.trimmed().compare(windowKey, Qt::CaseInsensitive) == 0; });
+		return snapshot.windowNames.contains(windowKey);
 	}
 
 	bool tryBackfillCallbackMiniWindowListFromDispatch(const LuaCallbackEngine *engine, QStringList &names)
@@ -8584,9 +8526,8 @@ namespace
 		context->hasMiniWindowListSnapshot = true;
 		for (const QString &windowName : context->miniWindowListSnapshot)
 		{
-			const QString normalized = windowName.trimmed().toLower();
-			if (!normalized.isEmpty())
-				context->existingMiniWindowIds.insert(normalized);
+			if (!windowName.isEmpty())
+				context->existingMiniWindowIds.insert(windowName);
 		}
 
 		names = context->miniWindowListSnapshot;
@@ -8605,7 +8546,7 @@ namespace
 		if (!snapshot)
 			return false;
 
-		const QString windowKey = windowName.trimmed().toLower();
+		const QString &windowKey = windowName;
 		if (windowKey.isEmpty())
 		{
 			exists = false;
@@ -8628,7 +8569,7 @@ namespace
 		if (!snapshot)
 			return false;
 
-		const QString windowKey = windowName.trimmed().toLower();
+		const QString &windowKey = windowName;
 		if (windowKey.isEmpty())
 			return false;
 		const bool windowExists = dispatchSnapshotContainsWindow(*snapshot, windowKey);
@@ -8664,7 +8605,7 @@ namespace
 		if (!snapshot)
 			return false;
 
-		const QString windowKey = windowName.trimmed().toLower();
+		const QString &windowKey = windowName;
 		if (windowKey.isEmpty())
 			return false;
 		const bool windowExists = dispatchSnapshotContainsWindow(*snapshot, windowKey);
@@ -8701,7 +8642,7 @@ namespace
 		if (!snapshot)
 			return false;
 
-		const QString windowKey = windowName.trimmed().toLower();
+		const QString &windowKey = windowName;
 		if (windowKey.isEmpty())
 			return false;
 		const bool windowExists = dispatchSnapshotContainsWindow(*snapshot, windowKey);
@@ -8734,7 +8675,7 @@ namespace
 		QStringList fontIds;
 		if (!tryBackfillCallbackMiniWindowFontListFromDispatch(engine, windowName, fontIds))
 			return false;
-		exists = stringListContainsCaseInsensitive(fontIds, fontId);
+		exists = fontIds.contains(fontId);
 		cacheCallbackMiniWindowFontExists(engine, windowName, fontId, exists);
 		return true;
 	}
@@ -8748,7 +8689,7 @@ namespace
 		QStringList hotspotIds;
 		if (!tryBackfillCallbackMiniWindowHotspotListFromDispatch(engine, windowName, hotspotIds))
 			return false;
-		exists = stringListContainsCaseInsensitive(hotspotIds, hotspotId);
+		exists = hotspotIds.contains(hotspotId);
 		cacheCallbackMiniWindowHotspotExists(engine, windowName, hotspotId, exists);
 		return true;
 	}
@@ -8759,8 +8700,8 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString key = callbackMiniWindowImageKey(windowName, imageId);
-		if (key == QStringLiteral("|"))
+		const auto key = callbackMiniWindowImageKey(windowName, imageId);
+		if (key.windowName.isEmpty() || key.resourceId.isEmpty())
 			return;
 		context->miniWindowImageHasAlphaByKey.remove(key);
 	}
@@ -8771,31 +8712,30 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString normalizedWindow = windowName.trimmed().toLower();
-		if (normalizedWindow.isEmpty())
+		const QString &windowKey = windowName;
+		if (windowKey.isEmpty())
 			return;
-		const QString prefix           = QStringLiteral("%1|").arg(normalizedWindow);
-		auto          removeWithPrefix = [&prefix](QSet<QString> &items)
+		auto removeForWindow = [&windowKey](QSet<LuaCallbackMiniWindowResourceKey> &items)
 		{
 			for (auto it = items.begin(); it != items.end();)
 			{
-				if (it->startsWith(prefix))
+				if (it->windowName == windowKey)
 					it = items.erase(it);
 				else
 					++it;
 			}
 		};
-		removeWithPrefix(context->existingMiniWindowImages);
-		removeWithPrefix(context->missingMiniWindowImages);
+		removeForWindow(context->existingMiniWindowImages);
+		removeForWindow(context->missingMiniWindowImages);
 		for (auto it = context->miniWindowImageHasAlphaByKey.begin();
 		     it != context->miniWindowImageHasAlphaByKey.end();)
 		{
-			if (it.key().startsWith(prefix))
+			if (it.key().windowName == windowKey)
 				it = context->miniWindowImageHasAlphaByKey.erase(it);
 			else
 				++it;
 		}
-		context->miniWindowImageListByWindow.remove(normalizedWindow);
+		context->miniWindowImageListByWindow.remove(windowKey);
 	}
 
 	void invalidateCallbackMiniWindowFontCacheForWindow(const LuaCallbackEngine *engine,
@@ -8804,26 +8744,25 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString normalizedWindow = windowName.trimmed().toLower();
-		if (normalizedWindow.isEmpty())
+		const QString &windowKey = windowName;
+		if (windowKey.isEmpty())
 			return;
-		const QString prefix           = QStringLiteral("%1|").arg(normalizedWindow);
-		auto          removeWithPrefix = [&prefix](QSet<QString> &items)
+		auto removeForWindow = [&windowKey](QSet<LuaCallbackMiniWindowResourceKey> &items)
 		{
 			for (auto it = items.begin(); it != items.end();)
 			{
-				if (it->startsWith(prefix))
+				if (it->windowName == windowKey)
 					it = items.erase(it);
 				else
 					++it;
 			}
 		};
-		removeWithPrefix(context->existingMiniWindowFonts);
-		removeWithPrefix(context->missingMiniWindowFonts);
+		removeForWindow(context->existingMiniWindowFonts);
+		removeForWindow(context->missingMiniWindowFonts);
 		for (auto it = context->miniWindowPreviewFontsByKey.begin();
 		     it != context->miniWindowPreviewFontsByKey.end();)
 		{
-			if (it.key().startsWith(prefix))
+			if (it.key().windowName == windowKey)
 				it = context->miniWindowPreviewFontsByKey.erase(it);
 			else
 				++it;
@@ -8836,14 +8775,13 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString normalizedWindow = windowName.trimmed().toLower();
-		if (normalizedWindow.isEmpty())
+		const QString &windowKey = windowName;
+		if (windowKey.isEmpty())
 			return;
-		const QString prefix = QStringLiteral("%1|").arg(normalizedWindow);
 		for (auto it = context->miniWindowTextWidthByKey.begin();
 		     it != context->miniWindowTextWidthByKey.end();)
 		{
-			if (it.key().startsWith(prefix))
+			if (it.key().windowName == windowKey)
 				it = context->miniWindowTextWidthByKey.erase(it);
 			else
 				++it;
@@ -8865,14 +8803,13 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString normalizedWindow = windowName.trimmed().toLower();
-		if (normalizedWindow.isEmpty())
+		const QString &windowKey = windowName;
+		if (windowKey.isEmpty())
 			return;
 
-		const QString prefix = QStringLiteral("%1|").arg(normalizedWindow);
 		for (auto it = context->miniWindowInfoByKey.begin(); it != context->miniWindowInfoByKey.end();)
 		{
-			if (it.key().startsWith(prefix))
+			if (it.key().windowName == windowKey)
 				it = context->miniWindowInfoByKey.erase(it);
 			else
 				++it;
@@ -8886,12 +8823,12 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString normalizedWindow = windowName.trimmed().toLower();
-		if (normalizedWindow.isEmpty())
+		const QString &windowKey = windowName;
+		if (windowKey.isEmpty())
 			return;
-		context->miniWindowFontListByWindow.remove(normalizedWindow);
-		context->miniWindowImageListByWindow.remove(normalizedWindow);
-		context->miniWindowHotspotListByWindow.remove(normalizedWindow);
+		context->miniWindowFontListByWindow.remove(windowKey);
+		context->miniWindowImageListByWindow.remove(windowKey);
+		context->miniWindowHotspotListByWindow.remove(windowKey);
 	}
 
 	void invalidateCallbackMiniWindowReadCachesForWindow(const LuaCallbackEngine *engine,
@@ -8902,14 +8839,13 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString normalizedWindow = windowName.trimmed().toLower();
-		if (normalizedWindow.isEmpty())
+		const QString &windowKey = windowName;
+		if (windowKey.isEmpty())
 			return;
-		const QString prefix = QStringLiteral("%1|").arg(normalizedWindow);
 		for (auto it = context->miniWindowFontInfoByKey.begin();
 		     it != context->miniWindowFontInfoByKey.end();)
 		{
-			if (it.key().startsWith(prefix))
+			if (it.key().windowName == windowKey)
 				it = context->miniWindowFontInfoByKey.erase(it);
 			else
 				++it;
@@ -8917,7 +8853,7 @@ namespace
 		for (auto it = context->miniWindowPreviewFontsByKey.begin();
 		     it != context->miniWindowPreviewFontsByKey.end();)
 		{
-			if (it.key().startsWith(prefix))
+			if (it.key().windowName == windowKey)
 				it = context->miniWindowPreviewFontsByKey.erase(it);
 			else
 				++it;
@@ -8930,15 +8866,13 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString normalizedWindow = windowName.trimmed().toLower();
-		const QString normalizedFont   = fontId.trimmed().toLower();
-		if (normalizedWindow.isEmpty() || normalizedFont.isEmpty())
+		const QString &windowKey = windowName;
+		if (windowKey.isEmpty() || fontId.isEmpty())
 			return;
-		const QString prefix = QStringLiteral("%1|%2|").arg(normalizedWindow, normalizedFont);
 		for (auto it = context->miniWindowTextWidthByKey.begin();
 		     it != context->miniWindowTextWidthByKey.end();)
 		{
-			if (it.key().startsWith(prefix))
+			if (it.key().windowName == windowKey && it.key().fontId == fontId)
 				it = context->miniWindowTextWidthByKey.erase(it);
 			else
 				++it;
@@ -8951,17 +8885,15 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString normalizedWindow = windowName.trimmed().toLower();
-		const QString normalizedFont   = fontId.trimmed().toLower();
-		if (normalizedWindow.isEmpty() || normalizedFont.isEmpty())
+		const QString &windowKey = windowName;
+		if (windowKey.isEmpty() || fontId.isEmpty())
 			return;
-		context->miniWindowFontListByWindow.remove(normalizedWindow);
+		context->miniWindowFontListByWindow.remove(windowKey);
 		context->miniWindowPreviewFontsByKey.remove(callbackMiniWindowFontKey(windowName, fontId));
-		const QString prefix = QStringLiteral("%1|%2|").arg(normalizedWindow, normalizedFont);
 		for (auto it = context->miniWindowFontInfoByKey.begin();
 		     it != context->miniWindowFontInfoByKey.end();)
 		{
-			if (it.key().startsWith(prefix))
+			if (it.key().windowName == windowKey && it.key().fontId == fontId)
 				it = context->miniWindowFontInfoByKey.erase(it);
 			else
 				++it;
@@ -8974,23 +8906,22 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		const QString normalizedWindow = windowName.trimmed().toLower();
-		if (normalizedWindow.isEmpty())
+		const QString &windowKey = windowName;
+		if (windowKey.isEmpty())
 			return;
-		const QString prefix           = QStringLiteral("%1|").arg(normalizedWindow);
-		auto          removeWithPrefix = [&prefix](QSet<QString> &items)
+		auto removeForWindow = [&windowKey](QSet<LuaCallbackMiniWindowResourceKey> &items)
 		{
 			for (auto it = items.begin(); it != items.end();)
 			{
-				if (it->startsWith(prefix))
+				if (it->windowName == windowKey)
 					it = items.erase(it);
 				else
 					++it;
 			}
 		};
-		removeWithPrefix(context->existingMiniWindowHotspots);
-		removeWithPrefix(context->missingMiniWindowHotspots);
-		context->miniWindowHotspotListByWindow.remove(normalizedWindow);
+		removeForWindow(context->existingMiniWindowHotspots);
+		removeForWindow(context->missingMiniWindowHotspots);
+		context->miniWindowHotspotListByWindow.remove(windowKey);
 	}
 
 	void invalidateCallbackRuntimeSnapshots(const LuaCallbackEngine *engine, const bool fullReset = false)
@@ -10483,20 +10414,23 @@ static QString luaModalAcceptedStringResult(const bool accepted, const QString &
 	return luaModalJsonResult(object);
 }
 
-enum class LuaChoiceKeyType
+namespace
 {
-	String,
-	Integer,
-	Number
-};
+	enum class LuaChoiceKeyType
+	{
+		String,
+		Integer,
+		Number
+	};
 
-struct LuaChoiceKey
-{
-		LuaChoiceKeyType type{LuaChoiceKeyType::String};
-		QString          stringValue;
-		lua_Integer      integerValue{0};
-		lua_Number       numberValue{0};
-};
+	struct LuaChoiceKey
+	{
+			LuaChoiceKeyType type{LuaChoiceKeyType::String};
+			QString          stringValue;
+			lua_Integer      integerValue{0};
+			lua_Number       numberValue{0};
+	};
+} // namespace
 
 static QString luaChoiceNumberText(const lua_Number value)
 {
@@ -10915,12 +10849,15 @@ runOnMainWindowThreadModalDialogSync(Func                                       
 	    std::move(dispatchFallback));
 }
 
-struct MainWindowMutationDispatchResult
+namespace
 {
-		bool accepted{false};
-		bool executed{false};
-		bool result{false};
-};
+	struct MainWindowMutationDispatchResult
+	{
+			bool accepted{false};
+			bool executed{false};
+			bool result{false};
+	};
+} // namespace
 
 template <typename Func> static MainWindowMutationDispatchResult dispatchMainWindowMutation(Func &&func)
 {
@@ -11259,28 +11196,31 @@ static void addScriptTimeForEngine(const LuaCallbackEngine &engine, const qint64
 	addScriptTimeForRuntime(&engine, runtime, nanos);
 }
 
-class ScriptExecutionDepthGuard
+namespace
 {
-	public:
-		explicit ScriptExecutionDepthGuard(LuaCallbackEngine *engine) : m_engine(engine)
-		{
-			if (m_engine)
-				m_engine->pushScriptExecutionDepth();
-		}
-
-		~ScriptExecutionDepthGuard()
-		{
-			if (m_engine)
+	class ScriptExecutionDepthGuard
+	{
+		public:
+			explicit ScriptExecutionDepthGuard(LuaCallbackEngine *engine) : m_engine(engine)
 			{
-				m_engine->popScriptExecutionDepth();
-				if (m_engine->scriptExecutionDepth() == 0)
-					m_engine->refreshLuaCallbackCatalogNow();
+				if (m_engine)
+					m_engine->pushScriptExecutionDepth();
 			}
-		}
 
-	private:
-		LuaCallbackEngine *m_engine{nullptr};
-};
+			~ScriptExecutionDepthGuard()
+			{
+				if (m_engine)
+				{
+					m_engine->popScriptExecutionDepth();
+					if (m_engine->scriptExecutionDepth() == 0)
+						m_engine->refreshLuaCallbackCatalogNow();
+				}
+			}
+
+		private:
+			LuaCallbackEngine *m_engine{nullptr};
+	};
+} // namespace
 
 bool LuaCallbackEngine::callPreparedYieldableCallback(const QString &functionName, const int argCount,
                                                       const int expectedResults, const bool defaultResult,
@@ -13234,51 +13174,54 @@ static int luaColourNameToRGB(lua_State *L)
 	return 1;
 }
 
-struct ColourOutputSegment
+namespace
 {
-		QString text;
-		QColor  fore;
-		QColor  back;
-		bool    newline{false};
-};
+	struct ColourOutputSegment
+	{
+			QString text;
+			QColor  fore;
+			QColor  back;
+			bool    newline{false};
+	};
 
-bool colourOutputSegmentProducesLine(const ColourOutputSegment &segment)
-{
-	return !segment.text.isEmpty() || segment.newline;
-}
+	bool colourOutputSegmentProducesLine(const ColourOutputSegment &segment)
+	{
+		return !segment.text.isEmpty() || segment.newline;
+	}
 
-struct ResolvedCallbackNoteStyle
-{
-		QColor         fore{colorFromValue(0xFFFFFF)};
-		QColor         back{colorFromValue(0)};
-		unsigned short style{0};
-};
+	struct ResolvedCallbackNoteStyle
+	{
+			QColor         fore{colorFromValue(0xFFFFFF)};
+			QColor         back{colorFromValue(0)};
+			unsigned short style{0};
+	};
 
-ResolvedCallbackNoteStyle resolveCallbackNoteStyleForOutput(const LuaCallbackEngine *engine,
-                                                            WorldRuntime            *runtime)
-{
-	WorldRuntime::RuntimeCountersSnapshot snapshot;
-	snapshot.noteColourFore = 0xFFFFFF;
-	snapshot.noteColourBack = 0;
-	static_cast<void>(resolveRuntimeCountersSnapshotForApi(engine, runtime, snapshot));
-	return {colorFromValue(resolveCallbackNoteColourValue(snapshot, true)),
-	        colorFromValue(resolveCallbackNoteColourValue(snapshot, false)), snapshot.noteStyle};
-}
+	ResolvedCallbackNoteStyle resolveCallbackNoteStyleForOutput(const LuaCallbackEngine *engine,
+	                                                            WorldRuntime            *runtime)
+	{
+		WorldRuntime::RuntimeCountersSnapshot snapshot;
+		snapshot.noteColourFore = 0xFFFFFF;
+		snapshot.noteColourBack = 0;
+		static_cast<void>(resolveRuntimeCountersSnapshotForApi(engine, runtime, snapshot));
+		return {colorFromValue(resolveCallbackNoteColourValue(snapshot, true)),
+		        colorFromValue(resolveCallbackNoteColourValue(snapshot, false)), snapshot.noteStyle};
+	}
 
-WorldRuntime::StyleSpan makeColourOutputSpan(const ColourOutputSegment       &segment,
-                                             const ResolvedCallbackNoteStyle &noteStyle)
-{
-	WorldRuntime::StyleSpan span;
-	span.length    = sizeToInt(segment.text.size());
-	span.fore      = segment.fore.isValid() ? segment.fore : noteStyle.fore;
-	span.back      = segment.back.isValid() ? segment.back : noteStyle.back;
-	span.bold      = (noteStyle.style & kStyleHilite) != 0;
-	span.underline = (noteStyle.style & kStyleUnderline) != 0;
-	span.blink     = (noteStyle.style & kStyleBlink) != 0;
-	span.inverse   = (noteStyle.style & kStyleInverse) != 0;
-	span.changed   = true;
-	return span;
-}
+	WorldRuntime::StyleSpan makeColourOutputSpan(const ColourOutputSegment       &segment,
+	                                             const ResolvedCallbackNoteStyle &noteStyle)
+	{
+		WorldRuntime::StyleSpan span;
+		span.length    = sizeToInt(segment.text.size());
+		span.fore      = segment.fore.isValid() ? segment.fore : noteStyle.fore;
+		span.back      = segment.back.isValid() ? segment.back : noteStyle.back;
+		span.bold      = (noteStyle.style & kStyleHilite) != 0;
+		span.underline = (noteStyle.style & kStyleUnderline) != 0;
+		span.blink     = (noteStyle.style & kStyleBlink) != 0;
+		span.inverse   = (noteStyle.style & kStyleInverse) != 0;
+		span.changed   = true;
+		return span;
+	}
+} // namespace
 
 static void outputStyledCallbackLine(WorldRuntime &targetRuntime, const QString &text,
                                      const QVector<WorldRuntime::StyleSpan> &spans, const int flags,
@@ -14169,18 +14112,22 @@ static bool resolveMiniWindowHotspotExistsForApi(const LuaCallbackEngine *engine
 static bool resolveCallbackMiniWindowExecutingForApi(const LuaCallbackEngine *engine,
                                                      const QString &windowName, bool &executing)
 {
-	executing = false;
+	executing            = false;
+	const auto *snapshot = engine ? engine->currentDispatchMiniWindowSnapshot() : nullptr;
+	if (snapshot && !snapshot->activeMiniWindowExecutionName.isEmpty() &&
+	    snapshot->activeMiniWindowExecutionName == windowName)
+	{
+		executing = true;
+		return true;
+	}
 	if (const MiniWindow *shadow = callbackMiniWindowShadowConst(engine, windowName))
 	{
 		executing = shadow->executingScript;
 		return true;
 	}
-	if (!engine)
-		return false;
-	const auto *snapshot = engine->currentDispatchMiniWindowSnapshot();
 	if (!snapshot)
 		return false;
-	const QString windowKey = windowName.trimmed().toLower();
+	const QString &windowKey = windowName;
 	if (windowKey.isEmpty())
 		return false;
 	if (const auto it = snapshot->miniWindowsByWindow.constFind(windowKey);
@@ -28448,19 +28395,22 @@ static int luaUtilsListBox(lua_State *L)
 	return luaUtilsListBoxInternal(L);
 }
 
-struct MultiListBoxEntry
+namespace
 {
-		LuaChoiceKey key;
-		QString      value;
-		bool         selected{false};
-};
+	struct MultiListBoxEntry
+	{
+			LuaChoiceKey key;
+			QString      value;
+			bool         selected{false};
+	};
 
-struct MultiListBoxRequest
-{
-		QString                    messageText;
-		QString                    titleText;
-		QVector<MultiListBoxEntry> entries;
-};
+	struct MultiListBoxRequest
+	{
+			QString                    messageText;
+			QString                    titleText;
+			QVector<MultiListBoxEntry> entries;
+	};
+} // namespace
 
 static MultiListBoxRequest parseUtilsMultiListBoxRequest(lua_State *L)
 {
@@ -30822,11 +30772,11 @@ static void registerProgressLibrary(lua_State *L, LuaCallbackEngine *engine)
 
 static void registerCheckFunction(lua_State *L)
 {
-	const auto code = "function check (result) "
-	                  "if result ~= error_code.eOK then "
-	                  "error (error_desc [result] or "
-	                  "string.format (\"Unknown error code: %i\", result), 2) "
-	                  "end end";
+	static constexpr char code[] = "function check (result) "
+	                               "if result ~= error_code.eOK then "
+	                               "error (error_desc [result] or "
+	                               "string.format (\"Unknown error code: %i\", result), 2) "
+	                               "end end";
 	if (luaL_dostring(L, code) != 0)
 	{
 		const char *err = lua_tostring(L, -1);
@@ -42206,6 +42156,48 @@ static int luaSetAlphaOption(lua_State *L)
 	return 1;
 }
 
+static QSize miniWindowCanonicalClientSizeForCallbackBounds(const LuaCallbackEngine *engine,
+                                                            const int                windowFlags)
+{
+	if (!engine)
+		return {};
+	const LuaCallbackMiniWindowSnapshot *snapshot = engine->currentDispatchMiniWindowSnapshot();
+	if (!snapshot)
+		return {};
+
+	const bool   underneath = (windowFlags & kMiniWindowDrawUnderneath) != 0;
+	const double scaleX =
+	    underneath ? snapshot->absoluteMiniWindowScaleXUnder : snapshot->absoluteMiniWindowScaleXOver;
+	const double scaleY =
+	    underneath ? snapshot->absoluteMiniWindowScaleYUnder : snapshot->absoluteMiniWindowScaleYOver;
+	const auto canonicalExtent = [](const int displayExtent, const double scale)
+	{
+		if (displayExtent <= 0 || !std::isfinite(scale) || scale <= 0.0)
+			return 0;
+		const double canonical = static_cast<double>(displayExtent) / scale;
+		if (!std::isfinite(canonical) || canonical >= static_cast<double>(std::numeric_limits<int>::max()))
+		{
+			return std::numeric_limits<int>::max();
+		}
+		return qMax(0, qRound(canonical));
+	};
+	return {canonicalExtent(snapshot->geometryConstraintDisplayClientWidth, scaleX),
+	        canonicalExtent(snapshot->geometryConstraintDisplayClientHeight, scaleY)};
+}
+
+static bool callbackTargetsCapturedMiniWindow(const LuaCallbackEngine *engine, const QString &windowName)
+{
+	const auto *context = activeCallbackContextConst(engine);
+	if (!context)
+		return false;
+	const CallbackActionSourceOverride actionSource = callbackActionSourceOverride(context);
+	if (!actionSource.active || actionSource.source != WorldRuntime::eHotspotCallback)
+		return false;
+	const LuaCallbackMiniWindowSnapshot *snapshot = engine->currentDispatchMiniWindowSnapshot();
+	return snapshot && !snapshot->geometryConstrainedMiniWindowName.isEmpty() &&
+	       snapshot->geometryConstrainedMiniWindowName == windowName;
+}
+
 static int luaWindowCreate(lua_State *L)
 {
 	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
@@ -42238,15 +42230,49 @@ static int luaWindowCreate(lua_State *L)
 			lua_pushnumber(L, eBadParameter);
 			return 1;
 		}
+		int  constrainedLeft   = left;
+		int  constrainedTop    = top;
+		int  constrainedWidth  = width;
+		int  constrainedHeight = height;
+		bool constrainedCreateIsNoOp{false};
+		if ((flags & kMiniWindowAbsoluteLocation) != 0 && callbackTargetsCapturedMiniWindow(engine, name))
+		{
+			if (const MiniWindow *window = callbackMiniWindowShadowConst(engine, name))
+			{
+				const QRect constrainedGeometry = MiniWindowUtils::constrainCapturedAbsoluteGeometry(
+				    window->location, QSize(window->width, window->height), QPoint(left, top),
+				    QSize(width, height), miniWindowCanonicalClientSizeForCallbackBounds(engine, flags));
+				const QPoint constrainedLocation    = constrainedGeometry.topLeft();
+				const QSize  constrainedSize        = constrainedGeometry.size();
+				constrainedLeft                     = constrainedLocation.x();
+				constrainedTop                      = constrainedLocation.y();
+				constrainedWidth                    = constrainedSize.width();
+				constrainedHeight                   = constrainedSize.height();
+				const bool rejectedCapturedGeometry = constrainedLeft != left || constrainedTop != top ||
+				                                      constrainedWidth != width ||
+				                                      constrainedHeight != height;
+				constrainedCreateIsNoOp =
+				    rejectedCapturedGeometry && window->location == constrainedLocation &&
+				    window->logicalSize() == constrainedSize && window->position == position &&
+				    window->flags == flags && window->background == background &&
+				    window->creatingPlugin == pluginId;
+			}
+		}
+		if (constrainedCreateIsNoOp)
+		{
+			lua_pushnumber(L, eOK);
+			return 1;
+		}
 		const bool existedBefore = resolveMiniWindowExistsForApi(engine, runtime, name);
 		const bool keepHotspots  = (flags & kMiniWindowKeepHotspots) != 0;
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
-		    [name, left, top, width, height, position, flags, background,
-		     pluginId](WorldRuntime &targetRuntime)
+		    [name, constrainedLeft, constrainedTop, constrainedWidth, constrainedHeight, position, flags,
+		     background, pluginId](WorldRuntime &targetRuntime)
 		    {
-			    static_cast<void>(targetRuntime.windowCreate(name, left, top, width, height, position, flags,
-			                                                 background, pluginId));
+			    static_cast<void>(targetRuntime.windowCreate(name, constrainedLeft, constrainedTop,
+			                                                 constrainedWidth, constrainedHeight, position,
+			                                                 flags, background, pluginId));
 		    });
 		invalidateCallbackMiniWindowTextWidthCacheForWindow(engine, name);
 		invalidateCallbackMiniWindowListSnapshot(engine);
@@ -42262,13 +42288,13 @@ static int luaWindowCreate(lua_State *L)
 		{
 			invalidateCallbackMiniWindowHotspotCacheForWindow(engine, name);
 		}
-		createCallbackMiniWindowShadow(engine, name, left, top, width, height, position, flags, background,
-		                               pluginId);
+		createCallbackMiniWindowShadow(engine, name, constrainedLeft, constrainedTop, constrainedWidth,
+		                               constrainedHeight, position, flags, background, pluginId);
 		cacheCallbackMiniWindowExists(engine, name, true);
-		cacheCallbackMiniWindowInfo(engine, name, 1, left);
-		cacheCallbackMiniWindowInfo(engine, name, 2, top);
-		cacheCallbackMiniWindowInfo(engine, name, 3, width);
-		cacheCallbackMiniWindowInfo(engine, name, 4, height);
+		cacheCallbackMiniWindowInfo(engine, name, 1, constrainedLeft);
+		cacheCallbackMiniWindowInfo(engine, name, 2, constrainedTop);
+		cacheCallbackMiniWindowInfo(engine, name, 3, constrainedWidth);
+		cacheCallbackMiniWindowInfo(engine, name, 4, constrainedHeight);
 		cacheCallbackMiniWindowInfo(engine, name, 5, false);
 		cacheCallbackMiniWindowInfo(engine, name, 6, false);
 		cacheCallbackMiniWindowInfo(engine, name, 7, position);
@@ -44395,13 +44421,37 @@ static int luaWindowPosition(lua_State *L)
 			lua_pushnumber(L, eNoSuchWindow);
 			return 1;
 		}
+		int               constrainedLeft = left;
+		int               constrainedTop  = top;
+		const MiniWindow *shadowWindow    = callbackMiniWindowShadowConst(engine, name);
+		if ((flags & kMiniWindowAbsoluteLocation) != 0 && callbackTargetsCapturedMiniWindow(engine, name))
+		{
+			if (shadowWindow)
+			{
+				const QPoint constrainedLocation = MiniWindowUtils::constrainCapturedAbsolutePosition(
+				    QPoint(left, top), QSize(shadowWindow->width, shadowWindow->height),
+				    miniWindowCanonicalClientSizeForCallbackBounds(engine, flags));
+				constrainedLeft = constrainedLocation.x();
+				constrainedTop  = constrainedLocation.y();
+			}
+		}
+		if (shadowWindow && shadowWindow->location == QPoint(constrainedLeft, constrainedTop) &&
+		    shadowWindow->position == position && shadowWindow->flags == flags)
+		{
+			lua_pushnumber(L, eOK);
+			return 1;
+		}
 		enqueueRuntimeThreadDeferredMutationNoResult(
-		    engine, runtime, [name, left, top, position, flags](WorldRuntime &targetRuntime)
-		    { static_cast<void>(targetRuntime.windowPosition(name, left, top, position, flags)); });
-		setCallbackMiniWindowShadowPosition(engine, name, left, top, position, flags);
+		    engine, runtime,
+		    [name, constrainedLeft, constrainedTop, position, flags](WorldRuntime &targetRuntime)
+		    {
+			    static_cast<void>(
+			        targetRuntime.windowPosition(name, constrainedLeft, constrainedTop, position, flags));
+		    });
+		setCallbackMiniWindowShadowPosition(engine, name, constrainedLeft, constrainedTop, position, flags);
 		invalidateCallbackMiniWindowListCachesForWindow(engine, name);
-		cacheCallbackMiniWindowInfo(engine, name, 1, left);
-		cacheCallbackMiniWindowInfo(engine, name, 2, top);
+		cacheCallbackMiniWindowInfo(engine, name, 1, constrainedLeft);
+		cacheCallbackMiniWindowInfo(engine, name, 2, constrainedTop);
 		cacheCallbackMiniWindowInfo(engine, name, 7, position);
 		cacheCallbackMiniWindowInfo(engine, name, 8, flags);
 		lua_pushnumber(L, eOK);
@@ -44446,13 +44496,36 @@ static int luaWindowResize(lua_State *L)
 			lua_pushnumber(L, eNoSuchWindow);
 			return 1;
 		}
+		int               constrainedWidth  = width;
+		int               constrainedHeight = height;
+		const MiniWindow *shadowWindow      = callbackMiniWindowShadowConst(engine, name);
+		if (shadowWindow && (shadowWindow->flags & kMiniWindowAbsoluteLocation) != 0 &&
+		    callbackTargetsCapturedMiniWindow(engine, name))
+		{
+			const QSize constrainedSize = MiniWindowUtils::constrainCapturedAbsoluteResize(
+			    shadowWindow->location, QSize(shadowWindow->width, shadowWindow->height),
+			    QSize(width, height),
+			    miniWindowCanonicalClientSizeForCallbackBounds(engine, shadowWindow->flags));
+			constrainedWidth  = constrainedSize.width();
+			constrainedHeight = constrainedSize.height();
+		}
+		if (shadowWindow &&
+		    QSize(shadowWindow->width, shadowWindow->height) == QSize(constrainedWidth, constrainedHeight))
+		{
+			lua_pushnumber(L, eOK);
+			return 1;
+		}
 		enqueueRuntimeThreadDeferredMutationNoResult(
-		    engine, runtime, [name, width, height, colour](WorldRuntime &targetRuntime)
-		    { static_cast<void>(targetRuntime.windowResize(name, width, height, colour)); });
-		resizeCallbackMiniWindowShadow(engine, name, width, height, colour);
+		    engine, runtime,
+		    [name, constrainedWidth, constrainedHeight, colour](WorldRuntime &targetRuntime)
+		    {
+			    static_cast<void>(
+			        targetRuntime.windowResize(name, constrainedWidth, constrainedHeight, colour));
+		    });
+		resizeCallbackMiniWindowShadow(engine, name, constrainedWidth, constrainedHeight, colour);
 		invalidateCallbackMiniWindowListCachesForWindow(engine, name);
-		cacheCallbackMiniWindowInfo(engine, name, 3, width);
-		cacheCallbackMiniWindowInfo(engine, name, 4, height);
+		cacheCallbackMiniWindowInfo(engine, name, 3, constrainedWidth);
+		cacheCallbackMiniWindowInfo(engine, name, 4, constrainedHeight);
 		lua_pushnumber(L, eOK);
 		return 1;
 	}
@@ -44950,8 +45023,8 @@ static int luaWindowMenu(lua_State *L)
 		const MiniWindow *window = callbackMiniWindowShadowConst(engine, name);
 		if (!window)
 		{
-			const auto   *snapshot = engine ? engine->currentDispatchMiniWindowSnapshot() : nullptr;
-			const QString key      = name.trimmed().toLower();
+			const auto    *snapshot = engine ? engine->currentDispatchMiniWindowSnapshot() : nullptr;
+			const QString &key      = name;
 			if (snapshot && !key.isEmpty())
 			{
 				const auto it = snapshot->miniWindowsByWindow.constFind(key);

@@ -34,6 +34,7 @@
 #include <QAccessible>
 #include <QAccessibleWidget>
 #include <QApplication>
+#include <QBrush>
 #include <QClipboard>
 #include <QColor>
 #include <QCoreApplication>
@@ -435,6 +436,43 @@ namespace
 		return settings.left != 0 || settings.top != 0 || settings.right != 0 || settings.bottom != 0;
 	}
 
+	[[nodiscard]] int saturatedIntAdd(const int value, const int increment)
+	{
+		const qint64 result = static_cast<qint64>(value) + static_cast<qint64>(increment);
+		return static_cast<int>(qBound(static_cast<qint64>(std::numeric_limits<int>::min()), result,
+		                               static_cast<qint64>(std::numeric_limits<int>::max())));
+	}
+
+	[[nodiscard]] QRect expandedTextRectangleFrame(const QRect &textRect, const int borderOffset,
+	                                               const QRect &clipRect)
+	{
+		if (textRect.isEmpty() || clipRect.isEmpty())
+			return {};
+
+		const qint64 extent = qMax(0, borderOffset);
+		const qint64 left =
+		    qMax(static_cast<qint64>(clipRect.left()), static_cast<qint64>(textRect.left()) - extent);
+		const qint64 top =
+		    qMax(static_cast<qint64>(clipRect.top()), static_cast<qint64>(textRect.top()) - extent);
+		const qint64 right =
+		    qMin(static_cast<qint64>(clipRect.right()), static_cast<qint64>(textRect.right()) + extent);
+		const qint64 bottom =
+		    qMin(static_cast<qint64>(clipRect.bottom()), static_cast<qint64>(textRect.bottom()) + extent);
+		if (left > right || top > bottom)
+			return {};
+		return {QPoint(static_cast<int>(left), static_cast<int>(top)),
+		        QPoint(static_cast<int>(right), static_cast<int>(bottom))};
+	}
+
+	[[nodiscard]] int effectiveTextRectangleBorderWidth(const QRect &frameRect, const int requestedWidth)
+	{
+		if (frameRect.isEmpty() || requestedWidth <= 0)
+			return 0;
+		const int minimumDimension = qMin(frameRect.width(), frameRect.height());
+		const int maximumLayers    = minimumDimension / 2 + minimumDimension % 2;
+		return qMin(requestedWidth, maximumLayers);
+	}
+
 	[[nodiscard]] QRect normalizeTextRectangleForClient(const WorldRuntime::TextRectangleSettings &settings,
 	                                                    const QSize                               &clientSize)
 	{
@@ -453,14 +491,14 @@ namespace
 
 		if (right <= 0)
 		{
-			right += clientWidth;
-			right = qMax(right, left + 20);
+			right = saturatedIntAdd(right, clientWidth);
+			right = qMax(right, saturatedIntAdd(left, 20));
 		}
 
 		if (bottom <= 0)
 		{
-			bottom += clientHeight;
-			bottom = qMax(bottom, top + 20);
+			bottom = saturatedIntAdd(bottom, clientHeight);
+			bottom = qMax(bottom, saturatedIntAdd(top, 20));
 		}
 
 		left   = qBound(0, left, clientWidth);
@@ -1675,15 +1713,18 @@ class WorldOutputAccessible final : public QAccessibleWidget, public QAccessible
 		}
 };
 
-QAccessibleInterface *worldOutputAccessibleFactory(const QString &className, QObject *object)
+namespace
 {
-	Q_UNUSED(className);
-	auto *widget = qobject_cast<QWidget *>(object);
-	if (!widget || !widget->property(kWorldOutputAccessibleProperty).toBool())
-		return nullptr;
-	auto *canvas = dynamic_cast<WorldOutputCanvas *>(widget);
-	return canvas ? new WorldOutputAccessible(canvas) : nullptr;
-}
+	QAccessibleInterface *worldOutputAccessibleFactory(const QString &className, QObject *object)
+	{
+		Q_UNUSED(className);
+		auto *widget = qobject_cast<QWidget *>(object);
+		if (!widget || !widget->property(kWorldOutputAccessibleProperty).toBool())
+			return nullptr;
+		auto *canvas = dynamic_cast<WorldOutputCanvas *>(widget);
+		return canvas ? new WorldOutputAccessible(canvas) : nullptr;
+	}
+} // namespace
 
 void qmudInstallWorldOutputAccessibility()
 {
@@ -2056,32 +2097,36 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 		m_lastQueuedOutputClientSizeValid  = false;
 		clearNativeOutputSelection(true);
 		m_nativeStandaloneOutputLines.clear();
-		m_nativeStandaloneNextLineNumber       = 1;
-		m_nativePrimaryPaintState              = {};
-		m_nativeLivePaintState                 = {};
-		m_nativeOutputScrollBlitPending        = false;
-		m_nativeOutputScrollBlitExposedRect    = {};
-		m_miniWindowChangeSerial               = 0;
-		m_miniWindowPaintBoundsValid           = false;
-		m_pendingMiniWindowUnderlayDirtyRegion = {};
-		m_pendingMiniWindowOverlayDirtyRegion  = {};
-		m_wrapMarginReservationCacheValid      = false;
-		m_wrapMarginReservationPixels          = 0;
+		m_nativeStandaloneNextLineNumber         = 1;
+		m_nativePrimaryPaintState                = {};
+		m_nativeLivePaintState                   = {};
+		m_nativeOutputScrollBlitPending          = false;
+		m_nativeOutputScrollBlitExposedRect      = {};
+		m_nativeOutputScrollBlitBackgroundRegion = {};
+		m_nativeOutputScrollBlitRepaintRegion    = {};
+		m_miniWindowChangeSerial                 = 0;
+		m_miniWindowPaintBoundsValid             = false;
+		m_pendingMiniWindowUnderlayDirtyRegion   = {};
+		m_pendingMiniWindowOverlayDirtyRegion    = {};
+		m_wrapMarginReservationCacheValid        = false;
+		m_wrapMarginReservationPixels            = 0;
 	}
 
-	m_miniWindowChangeSerial               = 0;
-	m_nativePrimaryPaintState              = {};
-	m_nativeLivePaintState                 = {};
-	m_nativeOutputScrollBlitPending        = false;
-	m_nativeOutputScrollBlitExposedRect    = {};
-	m_miniWindowPaintBoundsValid           = false;
-	m_pendingMiniWindowUnderlayDirtyRegion = {};
-	m_pendingMiniWindowOverlayDirtyRegion  = {};
-	m_wrapMarginReservationCacheValid      = false;
-	m_wrapMarginReservationPixels          = 0;
-	m_runtimeOutputMutationBatchDepth      = 0;
-	m_runtimeBatchPartialClearPending      = false;
-	m_runtime                              = runtime;
+	m_miniWindowChangeSerial                 = 0;
+	m_nativePrimaryPaintState                = {};
+	m_nativeLivePaintState                   = {};
+	m_nativeOutputScrollBlitPending          = false;
+	m_nativeOutputScrollBlitExposedRect      = {};
+	m_nativeOutputScrollBlitBackgroundRegion = {};
+	m_nativeOutputScrollBlitRepaintRegion    = {};
+	m_miniWindowPaintBoundsValid             = false;
+	m_pendingMiniWindowUnderlayDirtyRegion   = {};
+	m_pendingMiniWindowOverlayDirtyRegion    = {};
+	m_wrapMarginReservationCacheValid        = false;
+	m_wrapMarginReservationPixels            = 0;
+	m_runtimeOutputMutationBatchDepth        = 0;
+	m_runtimeBatchPartialClearPending        = false;
+	m_runtime                                = runtime;
 	resetRuntimeSettingsSnapshot();
 	applyRuntimeSettings();
 	if (m_runtime)
@@ -2263,7 +2308,7 @@ void WorldView::refreshMiniWindows(const bool forceFullRepaint) const
 		{
 			m_pendingMiniWindowUnderlayDirtyRegion = QRegion(canvasRect);
 			m_pendingMiniWindowOverlayDirtyRegion  = QRegion(canvasRect);
-			m_nativeOutputCanvas->update();
+			requestNativeOutputRepaint();
 			if (m_miniOverlay)
 				m_miniOverlay->update();
 			m_miniWindowPaintBounds      = currentBounds;
@@ -2281,7 +2326,7 @@ void WorldView::refreshMiniWindows(const bool forceFullRepaint) const
 		{
 			m_pendingMiniWindowUnderlayDirtyRegion =
 			    m_pendingMiniWindowUnderlayDirtyRegion.united(QRegion(underlayDirty));
-			m_nativeOutputCanvas->update(m_pendingMiniWindowUnderlayDirtyRegion);
+			requestNativeOutputRepaintRegion(m_pendingMiniWindowUnderlayDirtyRegion);
 		}
 		if (m_miniOverlay)
 		{
@@ -2465,6 +2510,16 @@ bool WorldView::replayMiniWindowRightClickAtGlobalPos(const QPoint &globalPos)
 bool WorldView::isMiniWindowCaptureActive() const
 {
 	return !m_capturedWindowName.isEmpty();
+}
+
+bool WorldView::isMiniWindowDragCaptureActive() const
+{
+	return !m_capturedWindowName.isEmpty() && m_capturedMiniWindowDragActive;
+}
+
+QString WorldView::geometryConstrainedMiniWindowName() const
+{
+	return m_geometryConstrainedMiniWindowName;
 }
 
 bool WorldView::hasLastMousePosition() const
@@ -2852,29 +2907,51 @@ void WorldView::requestNativeOutputRepaint(const QRect &rect) const
 {
 	if (!m_nativeOutputCanvas)
 		return;
+	if (rect.isValid())
+	{
+		requestNativeOutputRepaintRegion(QRegion(rect));
+		return;
+	}
+	if (m_nativeOutputScrollBlitPending)
+	{
+		m_nativeOutputScrollBlitBackgroundRegion = {};
+		m_nativeOutputScrollBlitRepaintRegion    = {};
+	}
 	if (!m_nativeOutputRepaintQueued)
 	{
 		m_nativeOutputRepaintQueued = true;
 		QMetaObject::invokeMethod(
 		    const_cast<WorldView *>(this), [this] { flushQueuedNativeOutputRepaint(); },
 		    Qt::QueuedConnection);
-		if (rect.isValid())
-			m_nativeOutputCanvas->update(rect);
-		else
-			m_nativeOutputCanvas->update();
+		m_nativeOutputCanvas->update();
 		return;
 	}
 
-	if (rect.isValid())
+	m_nativeOutputRepaintAll    = true;
+	m_nativeOutputRepaintRegion = {};
+	m_nativeOutputCanvas->update();
+}
+
+void WorldView::requestNativeOutputRepaintRegion(const QRegion &region) const
+{
+	if (!m_nativeOutputCanvas || region.isEmpty())
+		return;
+	if (m_nativeOutputScrollBlitPending)
 	{
-		m_nativeOutputRepaintRegion += rect;
+		m_nativeOutputScrollBlitBackgroundRegion = {};
+		m_nativeOutputScrollBlitRepaintRegion    = {};
 	}
-	else
+	if (!m_nativeOutputRepaintQueued)
 	{
-		m_nativeOutputRepaintAll    = true;
-		m_nativeOutputRepaintRegion = {};
-		m_nativeOutputCanvas->update();
+		m_nativeOutputRepaintQueued = true;
+		QMetaObject::invokeMethod(
+		    const_cast<WorldView *>(this), [this] { flushQueuedNativeOutputRepaint(); },
+		    Qt::QueuedConnection);
+		m_nativeOutputCanvas->update(region);
+		return;
 	}
+	if (!m_nativeOutputRepaintAll)
+		m_nativeOutputRepaintRegion += region;
 }
 
 void WorldView::flushQueuedNativeOutputRepaint() const
@@ -3189,21 +3266,25 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 	m_nativeOutputCanvas->scroll(0, -scrollDelta, paneRect);
 	const QRect exposedRect(paneRect.left(), paneRect.bottom() - scrollDelta + 1, paneRect.width(),
 	                        scrollDelta);
-	QRect       repaintRect = exposedRect;
+	QRegion     backgroundRegion(exposedRect);
+	backgroundRegion += textRectangleCompatibilityRegionWithin(paneRect);
+	QRegion repaintRegion = backgroundRegion;
 	if (dirtyRect.isValid())
-		repaintRect = repaintRect.united(dirtyRect);
+		repaintRegion += dirtyRect;
 	if (m_miniWindowPaintBoundsValid && !m_miniWindowPaintBounds.underlayBounds.isEmpty())
-		repaintRect = repaintRect.united(m_miniWindowPaintBounds.underlayBounds.intersected(paneRect));
-	repaintRect = repaintRect.intersected(paneRect);
-	if (!repaintRect.isValid())
+		repaintRegion += m_miniWindowPaintBounds.underlayBounds.intersected(paneRect);
+	repaintRegion = repaintRegion.intersected(paneRect);
+	if (repaintRegion.isEmpty())
 		return false;
 
+	requestNativeOutputRepaintRegion(repaintRegion);
 	m_nativePrimaryPaintState.scrollY        = currentScrollY;
 	m_nativePrimaryPaintState.scrollMax      = currentScrollMax;
 	m_nativePrimaryPaintState.renderRevision = m_nativeRenderLineCacheRevision;
 	m_nativeOutputScrollBlitPending          = true;
 	m_nativeOutputScrollBlitExposedRect      = exposedRect.intersected(paneRect);
-	requestNativeOutputRepaint(repaintRect);
+	m_nativeOutputScrollBlitBackgroundRegion = backgroundRegion.intersected(paneRect);
+	m_nativeOutputScrollBlitRepaintRegion    = repaintRegion;
 	return true;
 }
 
@@ -9517,9 +9598,7 @@ void WorldView::paintTextRectangleCompatibilityFrame(QPainter *painter, const QR
 	if (textRect.isEmpty())
 		return;
 
-	const int borderOffset = qMax(0, settings.borderOffset);
-	QRect     frameRect =
-	    textRect.adjusted(-borderOffset, -borderOffset, borderOffset, borderOffset).intersected(outputRect);
+	const QRect frameRect = expandedTextRectangleFrame(textRect, settings.borderOffset, outputRect);
 	if (frameRect.isEmpty())
 		return;
 
@@ -9537,7 +9616,7 @@ void WorldView::paintTextRectangleCompatibilityFrame(QPainter *painter, const QR
 		painter->restore();
 	}
 
-	const int borderWidth = qMax(0, settings.borderWidth);
+	const int borderWidth = effectiveTextRectangleBorderWidth(frameRect, settings.borderWidth);
 	if (borderWidth <= 0)
 		return;
 
@@ -9578,8 +9657,10 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 			{
 				if (view)
 				{
-					view->m_nativeOutputScrollBlitPending     = false;
-					view->m_nativeOutputScrollBlitExposedRect = {};
+					view->m_nativeOutputScrollBlitPending          = false;
+					view->m_nativeOutputScrollBlitExposedRect      = {};
+					view->m_nativeOutputScrollBlitBackgroundRegion = {};
+					view->m_nativeOutputScrollBlitRepaintRegion    = {};
 				}
 			}
 	};
@@ -12235,39 +12316,21 @@ void WorldView::paintNativeOutputBackground(QPainter *painter, const QRegion &up
 	if (clippedUpdateRegion.isEmpty())
 		return;
 
-	bool  requiresFullBackground = false;
-	QRect requiredBackgroundRect = nativeOutputVisiblePaneRepaintRect();
-	if (m_runtime)
-	{
-		requiresFullBackground = !m_runtime->backgroundImage().isNull();
-		if (!requiresFullBackground)
-		{
-			if (!m_miniWindowPaintBoundsValid)
-			{
-				requiresFullBackground = true;
-			}
-			else if (!m_miniWindowPaintBounds.underlayBounds.isEmpty())
-			{
-				requiredBackgroundRect =
-				    requiredBackgroundRect.united(m_miniWindowPaintBounds.underlayBounds);
-			}
-		}
-	}
-	if (!requiresFullBackground)
-	{
-		clippedUpdateRegion = clippedUpdateRegion.intersected(requiredBackgroundRect);
-		if (clippedUpdateRegion.isEmpty())
-			return;
-	}
-
-	QRegion    backgroundFillRegion = clippedUpdateRegion;
-	const bool limitScrollBlitBackground =
-	    m_nativeOutputScrollBlitPending && !m_bleedBackground &&
-	    (!m_runtime || m_runtime->backgroundImage().isNull()) && m_miniWindowPaintBoundsValid &&
-	    m_miniWindowPaintBounds.underlayBounds.isEmpty() && !m_nativeOutputScrollBlitExposedRect.isEmpty();
+	QRegion    backgroundFillRegion      = clippedUpdateRegion;
+	const bool limitScrollBlitBackground = m_nativeOutputScrollBlitPending && !m_bleedBackground &&
+	                                       (!m_runtime || m_runtime->backgroundImage().isNull()) &&
+	                                       m_miniWindowPaintBoundsValid &&
+	                                       m_miniWindowPaintBounds.underlayBounds.isEmpty() &&
+	                                       !m_nativeOutputScrollBlitBackgroundRegion.isEmpty() &&
+	                                       !m_nativeOutputScrollBlitRepaintRegion.isEmpty();
 	if (limitScrollBlitBackground)
 	{
-		backgroundFillRegion = backgroundFillRegion.intersected(m_nativeOutputScrollBlitExposedRect);
+		const QRegion scrollBlitUpdate =
+		    backgroundFillRegion.intersected(m_nativeOutputScrollBlitRepaintRegion);
+		const QRegion independentUpdate =
+		    backgroundFillRegion.subtracted(m_nativeOutputScrollBlitRepaintRegion);
+		backgroundFillRegion =
+		    independentUpdate.united(scrollBlitUpdate.intersected(m_nativeOutputScrollBlitBackgroundRegion));
 		if (backgroundFillRegion.isEmpty())
 			return;
 	}
@@ -12330,6 +12393,83 @@ void WorldView::paintNativeOutputBackground(QPainter *painter, const QRegion &up
 	}
 
 	painter->restore();
+}
+
+QRegion WorldView::textRectangleCompatibilityRegionWithin(const QRect &bounds) const
+{
+	if (bounds.isEmpty() || !m_outputStack || !m_runtime)
+		return {};
+
+	const WorldRuntime::TextRectangleSettings &settings = m_runtime->textRectangle();
+	if (!hasConfiguredTextRectangle(settings))
+		return {};
+
+	const QRect outputRect = m_outputStack->rect();
+	const QRect textRect   = outputTextRectangleUnreserved().intersected(outputRect);
+	if (outputRect.isEmpty() || textRect.isEmpty())
+		return {};
+
+	const QRect frameRect = expandedTextRectangleFrame(textRect, settings.borderOffset, outputRect);
+	if (frameRect.isEmpty())
+		return {};
+
+	QRegion      compatibilityRegion;
+	const QBrush outsideBrush = MiniWindowUtils::makeBrush(settings.outsideFillStyle, settings.borderColour,
+	                                                       settings.outsideFillColour);
+	if (outsideBrush.style() != Qt::NoBrush)
+		compatibilityRegion += QRegion(bounds.intersected(outputRect)).subtracted(QRegion(frameRect));
+
+	const int    borderWidth = effectiveTextRectangleBorderWidth(frameRect, settings.borderWidth);
+	const QColor borderColor = MiniWindowUtils::colorFromRefOrTransparent(settings.borderColour);
+	if (borderWidth > 0 && borderColor.alpha() != 0)
+	{
+		const QRect innerRect = frameRect.adjusted(borderWidth, borderWidth, -borderWidth, -borderWidth);
+		compatibilityRegion += QRegion(frameRect).subtracted(QRegion(innerRect));
+	}
+
+	return compatibilityRegion.intersected(bounds);
+}
+
+QRegion
+WorldView::textRectangleChangeDirtyRegion(const WorldRuntime::TextRectangleSettings &previousSettings,
+                                          const WorldRuntime::TextRectangleSettings &currentSettings) const
+{
+	if (!m_outputStack)
+		return {};
+
+	const QRect clientRect(QPoint(0, 0), m_outputStack->size());
+	if (clientRect.isEmpty())
+		return {};
+
+	const QBrush previousOutsideBrush = MiniWindowUtils::makeBrush(
+	    previousSettings.outsideFillStyle, previousSettings.borderColour, previousSettings.outsideFillColour);
+	const QBrush currentOutsideBrush = MiniWindowUtils::makeBrush(
+	    currentSettings.outsideFillStyle, currentSettings.borderColour, currentSettings.outsideFillColour);
+	if (previousOutsideBrush != currentOutsideBrush)
+		return clientRect;
+
+	const auto affectedFrame = [&clientRect](const WorldRuntime::TextRectangleSettings &settings)
+	{
+		if (!hasConfiguredTextRectangle(settings))
+			return clientRect;
+		const QRect textRect = normalizeTextRectangleForClient(settings, clientRect.size());
+		return expandedTextRectangleFrame(textRect, settings.borderOffset, clientRect);
+	};
+
+	const QRect dirtyRect = affectedFrame(previousSettings).united(affectedFrame(currentSettings));
+	return dirtyRect.isEmpty() ? QRegion() : QRegion(expandedTextRectangleFrame(dirtyRect, 1, clientRect));
+}
+
+void WorldView::invalidateTextRectangleChange(
+    const WorldRuntime::TextRectangleSettings &previousSettings,
+    const WorldRuntime::TextRectangleSettings &currentSettings) const
+{
+	if (!m_nativeOutputCanvas)
+		return;
+
+	const QRegion dirtyRegion = textRectangleChangeDirtyRegion(previousSettings, currentSettings);
+	if (!dirtyRegion.isEmpty())
+		requestNativeOutputRepaintRegion(dirtyRegion);
 }
 
 void WorldView::paintMiniWindows(QPainter *painter, bool underneath, const QRegion &updateRegion) const
@@ -12492,7 +12632,7 @@ void WorldView::miniWindowLayerPainted(const bool underneath, const QRegion &pai
 		return;
 
 	if (underneath && m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible())
-		m_nativeOutputCanvas->update(pendingDirtyRegion);
+		requestNativeOutputRepaintRegion(pendingDirtyRegion);
 	else if (underneath && m_miniUnderlay)
 		m_miniUnderlay->update(pendingDirtyRegion);
 	else if (!underneath && m_miniOverlay)
@@ -12616,16 +12756,18 @@ void WorldView::clearHotspotCursor()
 	applyOutputCursor(nullptr);
 }
 
-void WorldView::setMiniWindowCallbackMousePosition(MiniWindow &window, const QPoint &callbackLocal,
-                                                   const bool updateWindowRelativePosition)
+void WorldView::setMiniWindowCallbackMousePosition(MiniWindow &window, const QPoint &displayLocal,
+                                                   const bool updateWindowRelativePosition,
+                                                   const bool exposeCanonicalClientPosition) const
 {
-	m_lastMousePos             = callbackLocal;
-	m_hasLastMousePos          = true;
-	window.clientMousePosition = callbackLocal;
+	window.clientMousePosition =
+	    exposeCanonicalClientPosition && m_runtime
+	        ? m_runtime->canonicalMiniWindowClientPosition(displayLocal, window.flags)
+	        : displayLocal;
 	if (updateWindowRelativePosition)
 	{
 		window.lastMousePosition =
-		    miniWindowDisplayToContentUnbounded(&window, callbackLocal - window.rect.topLeft());
+		    miniWindowDisplayToContentUnbounded(&window, displayLocal - window.rect.topLeft());
 		window.lastMouseUpdate++;
 	}
 }
@@ -12670,7 +12812,7 @@ void WorldView::dispatchPendingCapturedMiniWindowDragMove()
 	if (!captured || captured->mouseDownHotspot.isEmpty())
 		return;
 
-	setMiniWindowCallbackMousePosition(*captured, m_pendingCapturedMiniWindowDragMoveLocal, true);
+	setMiniWindowCallbackMousePosition(*captured, m_pendingCapturedMiniWindowDragMoveLocal, true, true);
 	const QString down = captured->mouseDownHotspot;
 	auto          it   = captured->hotspots.find(down);
 	if (it == captured->hotspots.end())
@@ -12678,8 +12820,11 @@ void WorldView::dispatchPendingCapturedMiniWindowDragMove()
 
 	const QString moveCallback = it->moveCallback;
 	if (!moveCallback.isEmpty())
+	{
+		QScopedValueRollback constraintTarget(m_geometryConstrainedMiniWindowName, captured->name);
 		callHotspotCallback(captured, down, moveCallback,
 		                    withMiniWindowModifierFlags(captured->flagsOnMouseDown));
+	}
 }
 
 void WorldView::startMiniWindowMouseCapture()
@@ -12802,7 +12947,7 @@ int WorldView::computeMiniWindowMouseFlags(const QMouseEvent *event, bool double
 	return withMiniWindowModifierFlags(flags);
 }
 
-bool WorldView::handleMiniWindowMouseLeave()
+bool WorldView::handleMiniWindowMouseLeave(const QPoint &reportedPosition)
 {
 	if (!m_runtime)
 	{
@@ -12810,9 +12955,9 @@ bool WorldView::handleMiniWindowMouseLeave()
 		m_hoverWindowName.clear();
 		return false;
 	}
-	m_lastMousePos    = QPoint(-1, -1);
+	m_lastMousePos    = reportedPosition;
 	m_hasLastMousePos = true;
-	m_runtime->notifyMiniWindowMouseMoved(-1, -1, QString());
+	m_runtime->notifyMiniWindowMouseMoved(reportedPosition.x(), reportedPosition.y(), QString());
 	if (m_hoverWindowName.isEmpty())
 		return false;
 	MiniWindow *window = m_runtime->miniWindow(m_hoverWindowName);
@@ -12840,13 +12985,16 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 			return false;
 		}
 	}
-	m_lastMousePos             = hitLocal;
-	m_hasLastMousePos          = true;
-	const QPoint callbackLocal = hitLocal;
+	const bool   dragCaptureActive = isMiniWindowDragCaptureActive();
+	const QPoint callbackLocal =
+	    dragCaptureActive ? MiniWindowUtils::constrainCapturedDragPosition(hitLocal, m_outputStack->size())
+	                      : hitLocal;
+	m_lastMousePos    = hitLocal;
+	m_hasLastMousePos = true;
 
-	QString      hotspotId;
-	QString      windowName;
-	MiniWindow  *window = hitTestMiniWindow(hitLocal, hotspotId, windowName);
+	QString     hotspotId;
+	QString     windowName;
+	MiniWindow *window = hitTestMiniWindow(hitLocal, hotspotId, windowName);
 	if (miniWindowMouseDebugEnabled())
 	{
 		miniWindowMouseDebug(
@@ -12860,13 +13008,13 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 		        .arg(m_capturedWindowName.isEmpty() ? QStringLiteral("<none>") : m_capturedWindowName));
 	}
 	if (m_runtime)
-		m_runtime->notifyMiniWindowMouseMoved(callbackLocal.x(), callbackLocal.y(), windowName);
+		m_runtime->notifyMiniWindowMouseMoved(hitLocal.x(), hitLocal.y(), windowName);
 
 	if (!m_capturedWindowName.isEmpty())
 	{
 		MiniWindow *captured = m_runtime->miniWindow(m_capturedWindowName);
 		if (captured)
-			setMiniWindowCallbackMousePosition(*captured, callbackLocal, true);
+			setMiniWindowCallbackMousePosition(*captured, callbackLocal, true, dragCaptureActive);
 		if (!m_tooltipHotspot.isEmpty())
 		{
 			QToolTip::hideText();
@@ -12875,6 +13023,8 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 		clearPendingHotspotTooltip();
 		if (captured && !captured->mouseDownHotspot.isEmpty())
 		{
+			if (!dragCaptureActive)
+				return true;
 			if (m_hasCapturedMiniWindowPressLocal && callbackLocal == m_capturedMiniWindowPressLocal)
 				return true;
 			scheduleCapturedMiniWindowDragMove(callbackLocal);
@@ -12989,8 +13139,12 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 	if (!window)
 		return false;
 
-	m_hoverWindowName = windowName;
-	setMiniWindowCallbackMousePosition(*window, local, true);
+	m_hoverWindowName         = windowName;
+	const auto initialHotspot = window->hotspots.constFind(hotspotId);
+	const bool dragHandler =
+	    initialHotspot != window->hotspots.constEnd() &&
+	    (!initialHotspot->moveCallback.isEmpty() || !initialHotspot->releaseCallback.isEmpty());
+	setMiniWindowCallbackMousePosition(*window, local, true, dragHandler);
 	if (!window->mouseOverHotspot.isEmpty())
 		cancelMouseOver(window, window->mouseOverHotspot);
 
@@ -13026,6 +13180,7 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 	window->flagsOnMouseDown =
 	    flags & (kMiniMouseLeft | kMiniMouseRight | kMiniMouseDouble | kMiniMouseMiddle);
 	m_capturedWindowName                    = window->name;
+	m_capturedMiniWindowDragActive          = dragHandler;
 	m_capturedMiniWindowPressLocal          = local;
 	m_hasCapturedMiniWindowPressLocal       = true;
 	m_hasPendingCapturedMiniWindowDragMove  = false;
@@ -13053,12 +13208,20 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 	if (!m_runtime || !m_mouseCaptured)
 		return false;
 
-	const QPoint local = mapEventToOutputStack(event->position(), source);
-	m_lastMousePos     = local;
+	const QPoint rawLocal = mapEventToOutputStack(event->position(), source);
+	MiniWindow  *pressedWindow =
+	    !m_capturedWindowName.isEmpty() ? m_runtime->miniWindow(m_capturedWindowName) : nullptr;
+	const bool   dragCaptureActive = isMiniWindowDragCaptureActive();
+	const QPoint local = dragCaptureActive
+	                         ? MiniWindowUtils::constrainCapturedDragPosition(rawLocal, m_outputStack->size())
+	                         : rawLocal;
+	m_lastMousePos     = rawLocal;
 	m_hasLastMousePos  = true;
 	QString     hotspotId;
 	QString     windowName;
-	MiniWindow *windowUnderCursor = hitTestMiniWindow(local, hotspotId, windowName, true);
+	MiniWindow *windowUnderCursor = m_outputStack->rect().contains(rawLocal)
+	                                    ? hitTestMiniWindow(rawLocal, hotspotId, windowName, true)
+	                                    : nullptr;
 	if (miniWindowMouseDebugEnabled())
 	{
 		miniWindowMouseDebug(
@@ -13071,8 +13234,6 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 		        .arg(m_capturedWindowName.isEmpty() ? QStringLiteral("<none>") : m_capturedWindowName));
 	}
 
-	MiniWindow *pressedWindow =
-	    !m_capturedWindowName.isEmpty() ? m_runtime->miniWindow(m_capturedWindowName) : nullptr;
 	if (pressedWindow && m_hasPendingCapturedMiniWindowDragMove)
 	{
 		flushPendingCapturedMiniWindowDragMove(local);
@@ -13082,15 +13243,12 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 	QString previousDownHotspot;
 	if (pressedWindow)
 	{
-		setMiniWindowCallbackMousePosition(*pressedWindow, local, true);
+		setMiniWindowCallbackMousePosition(*pressedWindow, local, true, dragCaptureActive);
 		previousDownHotspot = pressedWindow->mouseDownHotspot;
 		pressedWindow->mouseDownHotspot.clear();
 	}
 
 	stopMiniWindowMouseCapture();
-	m_capturedWindowName.clear();
-	m_hasCapturedMiniWindowPressLocal      = false;
-	m_hasPendingCapturedMiniWindowDragMove = false;
 
 	if (pressedWindow && !previousDownHotspot.isEmpty())
 	{
@@ -13100,7 +13258,11 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 		{
 			const QString releaseCallback = it->releaseCallback;
 			if (!releaseCallback.isEmpty())
+			{
+				QScopedValueRollback constraintTarget(m_geometryConstrainedMiniWindowName,
+				                                      pressedWindow->name);
 				callHotspotCallback(pressedWindow, previousDownHotspot, releaseCallback, flags);
+			}
 			it = pressedWindow->hotspots.find(previousDownHotspot);
 			if (it != pressedWindow->hotspots.end())
 			{
@@ -13121,15 +13283,26 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 			}
 		}
 	}
+	m_capturedWindowName.clear();
+	m_capturedMiniWindowDragActive         = false;
+	m_hasCapturedMiniWindowPressLocal      = false;
+	m_hasPendingCapturedMiniWindowDragMove = false;
 
-	if (windowUnderCursor)
+	if (dragCaptureActive)
+	{
+		refreshMiniWindows();
+		if (m_outputStack->rect().contains(rawLocal))
+			handleMiniWindowMouseMove(event, source);
+		else
+			handleMiniWindowMouseLeave(rawLocal);
+	}
+	else if (windowUnderCursor)
 	{
 		windowUnderCursor->lastMousePosition =
 		    miniWindowDisplayToContent(windowUnderCursor, local - windowUnderCursor->rect.topLeft());
 		windowUnderCursor->lastMouseUpdate++;
-	}
-	if (windowUnderCursor)
 		handleMiniWindowMouseMove(event, source);
+	}
 
 	return true;
 }

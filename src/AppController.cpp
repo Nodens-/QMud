@@ -2357,6 +2357,8 @@ AppController::~AppController()
 		m_spellCheckerLua = nullptr;
 	}
 #endif
+	if (s_instance == this)
+		s_instance = nullptr;
 }
 
 AppController *AppController::instance()

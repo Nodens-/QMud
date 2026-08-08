@@ -364,6 +364,74 @@ enum class LuaCallbackLineSnapshotPolicy
 };
 
 /**
+ * @brief Exact miniwindow resource identity used by callback snapshots and caches.
+ */
+struct LuaCallbackMiniWindowResourceKey
+{
+		QString       windowName;
+		QString       resourceId;
+
+		bool          operator==(const LuaCallbackMiniWindowResourceKey &) const = default;
+		friend size_t qHash(const LuaCallbackMiniWindowResourceKey &key, size_t seed = 0) noexcept
+		{
+			seed = ::qHash(key.windowName, seed);
+			return ::qHash(key.resourceId, seed);
+		}
+};
+
+/**
+ * @brief Exact miniwindow identity paired with a WindowInfo selector.
+ */
+struct LuaCallbackMiniWindowInfoKey
+{
+		QString       windowName;
+		int           infoType{0};
+
+		bool          operator==(const LuaCallbackMiniWindowInfoKey &) const = default;
+		friend size_t qHash(const LuaCallbackMiniWindowInfoKey &key, size_t seed = 0) noexcept
+		{
+			seed = ::qHash(key.windowName, seed);
+			return ::qHash(key.infoType, seed);
+		}
+};
+
+/**
+ * @brief Exact miniwindow/font identity paired with a WindowFontInfo selector.
+ */
+struct LuaCallbackMiniWindowFontInfoKey
+{
+		QString       windowName;
+		QString       fontId;
+		int           infoType{0};
+
+		bool          operator==(const LuaCallbackMiniWindowFontInfoKey &) const = default;
+		friend size_t qHash(const LuaCallbackMiniWindowFontInfoKey &key, size_t seed = 0) noexcept
+		{
+			seed = ::qHash(key.windowName, seed);
+			seed = ::qHash(key.fontId, seed);
+			return ::qHash(key.infoType, seed);
+		}
+};
+
+/**
+ * @brief Exact miniwindow/font/text identity used by callback text-width caches.
+ */
+struct LuaCallbackMiniWindowTextWidthKey
+{
+		QString       windowName;
+		QString       fontId;
+		QString       text;
+
+		bool          operator==(const LuaCallbackMiniWindowTextWidthKey &) const = default;
+		friend size_t qHash(const LuaCallbackMiniWindowTextWidthKey &key, size_t seed = 0) noexcept
+		{
+			seed = ::qHash(key.windowName, seed);
+			seed = ::qHash(key.fontId, seed);
+			return ::qHash(key.text, seed);
+		}
+};
+
+/**
  * @brief Runtime-thread miniwindow snapshot used to satisfy callback-lane read validation without
  *        forbidden reentrant runtime bridges.
  */
@@ -396,45 +464,48 @@ struct LuaCallbackMiniWindowSnapshot
 				QString   creatingPlugin;
 		};
 
-		QStringList                                windowNames;
-		QHash<QString, QStringList>                fontIdsByWindow;
-		QHash<QString, QStringList>                imageIdsByWindow;
-		QHash<QString, QStringList>                hotspotIdsByWindow;
-		QHash<QString, bool>                       imageHasAlphaByKey;
-		QHash<QString, WindowInfoSnapshot>         windowInfoByWindow;
-		QHash<QString, QSharedPointer<MiniWindow>> miniWindowsByWindow;
-		bool                                       miniWindowLookupCacheValid{false};
-		QSet<QString>                              normalizedMiniWindowIds;
-		QSet<QString>                              normalizedMiniWindowFontKeys;
-		QSet<QString>                              normalizedMiniWindowImageKeys;
-		QSet<QString>                              normalizedMiniWindowHotspotKeys;
-		void                                      *framePointer{nullptr};
-		bool                                       hasFramePointer{false};
-		bool                                       hasCommandUiSnapshot{false};
-		bool                                       commandUiHasView{false};
-		bool                                       commandUiHasFrameData{false};
-		int                                        commandUiOutputClientHeight{0};
-		int                                        commandUiOutputClientWidth{0};
-		int                                        commandUiViewHeight{0};
-		int                                        commandUiViewWidth{0};
-		bool                                       hasRuntimeCountersSnapshot{false};
-		int                                        runtimeOutputFontHeight{0};
-		int                                        runtimeOutputFontWidth{0};
-		void                                       rebuildMiniWindowLookupCaches()
+		QStringList                                   windowNames;
+		QHash<QString, QStringList>                   fontIdsByWindow;
+		QHash<QString, QStringList>                   imageIdsByWindow;
+		QHash<QString, QStringList>                   hotspotIdsByWindow;
+		QHash<LuaCallbackMiniWindowResourceKey, bool> imageHasAlphaByKey;
+		QHash<QString, WindowInfoSnapshot>            windowInfoByWindow;
+		QHash<QString, QSharedPointer<MiniWindow>>    miniWindowsByWindow;
+		bool                                          miniWindowLookupCacheValid{false};
+		QSet<QString>                                 miniWindowIds;
+		QSet<LuaCallbackMiniWindowResourceKey>        miniWindowFontKeys;
+		QSet<LuaCallbackMiniWindowResourceKey>        miniWindowImageKeys;
+		QSet<LuaCallbackMiniWindowResourceKey>        miniWindowHotspotKeys;
+		void                                         *framePointer{nullptr};
+		bool                                          hasFramePointer{false};
+		bool                                          hasCommandUiSnapshot{false};
+		bool                                          commandUiHasView{false};
+		bool                                          commandUiHasFrameData{false};
+		int                                           commandUiOutputClientHeight{0};
+		int                                           commandUiOutputClientWidth{0};
+		int                                           commandUiViewHeight{0};
+		int                                           commandUiViewWidth{0};
+		QString                                       activeMiniWindowExecutionName;
+		QString                                       geometryConstrainedMiniWindowName;
+		int                                           geometryConstraintDisplayClientHeight{0};
+		int                                           geometryConstraintDisplayClientWidth{0};
+		double                                        absoluteMiniWindowScaleXOver{1.0};
+		double                                        absoluteMiniWindowScaleYOver{1.0};
+		double                                        absoluteMiniWindowScaleXUnder{1.0};
+		double                                        absoluteMiniWindowScaleYUnder{1.0};
+		bool                                          hasRuntimeCountersSnapshot{false};
+		int                                           runtimeOutputFontHeight{0};
+		int                                           runtimeOutputFontWidth{0};
+		void                                          rebuildMiniWindowLookupCaches()
 		{
-			const auto normalized = [](const QString &value) { return value.trimmed().toLower(); };
-			const auto itemKey    = [](const QString &windowKey, const QString &itemId)
-			{ return windowKey + QLatin1Char('|') + itemId; };
-			auto addWindowKey = [this, &normalized](const QString &windowName)
+			auto addWindowKey = [this](const QString &windowName)
 			{
-				const QString windowKey = normalized(windowName);
-				if (!windowKey.isEmpty())
-					normalizedMiniWindowIds.insert(windowKey);
-				return windowKey;
+				if (!windowName.isEmpty())
+					miniWindowIds.insert(windowName);
+				return windowName;
 			};
-			auto addItemKeys =
-			    [&addWindowKey, &normalized, &itemKey](const QHash<QString, QStringList> &itemsByWindow,
-			                                           QSet<QString>                     &destination)
+			auto addItemKeys = [&addWindowKey](const QHash<QString, QStringList>      &itemsByWindow,
+			                                   QSet<LuaCallbackMiniWindowResourceKey> &destination)
 			{
 				for (auto it = itemsByWindow.constBegin(); it != itemsByWindow.constEnd(); ++it)
 				{
@@ -443,17 +514,16 @@ struct LuaCallbackMiniWindowSnapshot
 						continue;
 					for (const QString &item : it.value())
 					{
-						const QString itemId = normalized(item);
-						if (!itemId.isEmpty())
-							destination.insert(itemKey(windowKey, itemId));
+						if (!item.isEmpty())
+							destination.insert({windowKey, item});
 					}
 				}
 			};
 
-			normalizedMiniWindowIds.clear();
-			normalizedMiniWindowFontKeys.clear();
-			normalizedMiniWindowImageKeys.clear();
-			normalizedMiniWindowHotspotKeys.clear();
+			miniWindowIds.clear();
+			miniWindowFontKeys.clear();
+			miniWindowImageKeys.clear();
+			miniWindowHotspotKeys.clear();
 
 			for (const QString &windowName : windowNames)
 				addWindowKey(windowName);
@@ -462,9 +532,9 @@ struct LuaCallbackMiniWindowSnapshot
 			for (auto it = windowInfoByWindow.constBegin(); it != windowInfoByWindow.constEnd(); ++it)
 				addWindowKey(it.key());
 
-			addItemKeys(fontIdsByWindow, normalizedMiniWindowFontKeys);
-			addItemKeys(imageIdsByWindow, normalizedMiniWindowImageKeys);
-			addItemKeys(hotspotIdsByWindow, normalizedMiniWindowHotspotKeys);
+			addItemKeys(fontIdsByWindow, miniWindowFontKeys);
+			addItemKeys(imageIdsByWindow, miniWindowImageKeys);
+			addItemKeys(hotspotIdsByWindow, miniWindowHotspotKeys);
 			miniWindowLookupCacheValid = true;
 		}
 		bool                                                  hasWorldVariablesSnapshot{false};

@@ -591,6 +591,28 @@ qmud_add_qtest(tst_WorldRuntime_PluginLifecycle
         TIMEOUT
         120)
 
+qmud_add_qtest(tst_WorldRuntime_MiniWindowGeometry
+        GUI
+        SOURCES
+        integration/tst_WorldRuntime_MiniWindowGeometry.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        integration
+        TIMEOUT
+        30)
+
+qmud_add_qtest(tst_WorldRuntime_TextRectangle
+        GUI
+        SOURCES
+        integration/tst_WorldRuntime_TextRectangle.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        integration
+        TIMEOUT
+        30)
+
 qmud_add_qtest(tst_WorldDocument_Load
         SOURCES
         integration/tst_WorldDocument_Load.cpp
@@ -744,6 +766,7 @@ if (QMUD_ENABLE_GUI_TESTS)
             "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/AnsiSgrParseUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/AccessibleTextUtils.cpp"
+            "${CMAKE_SOURCE_DIR}/src/helpers/FontUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/HyperlinkActionUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/OutputWrapUtils.cpp"
