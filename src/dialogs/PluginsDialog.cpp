@@ -11,58 +11,217 @@
 #include "AppController.h"
 #include "MainFrame.h"
 #include "WorldRuntime.h"
+#include "helpers/DialogSizingUtils.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QAbstractItemView>
 #include <QBrush>
 #include <QColor>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QMessageBox>
+#include <QMetaObject>
+#include <QMouseEvent>
 #include <QPalette>
 #include <QPushButton>
 #include <QSettings>
-#include <QTimer>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QVector>
+#include <QWindow>
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <utility>
 
 namespace
 {
-	constexpr int kColumnName    = 0;
-	constexpr int kColumnPurpose = 1;
-	constexpr int kColumnAuthor  = 2;
-	constexpr int kColumnFile    = 3;
-	constexpr int kColumnEnabled = 4;
-	constexpr int kColumnVersion = 5;
-	constexpr int kColumnCount   = 6;
-	constexpr int kHeaderVersion = 2;
+	constexpr int   kColumnName    = 0;
+	constexpr int   kColumnPurpose = 1;
+	constexpr int   kColumnAuthor  = 2;
+	constexpr int   kColumnFile    = 3;
+	constexpr int   kColumnEnabled = 4;
+	constexpr int   kColumnVersion = 5;
+	constexpr int   kColumnCount   = 6;
+	constexpr int   kHeaderVersion = 2;
+	constexpr QSize kPluginsBaselineMinimum(1250, 420);
 
-	void          applyDefaultColumnWidths(QTableWidget *table)
+	/**
+	 * @brief Header exposing fresh content metrics and reporting only completed user resizes.
+	 */
+	class FontAwareHeaderView final : public QHeaderView
+	{
+		public:
+			using UserResizeCallback = std::function<void(const QVector<int> &, const QVector<int> &)>;
+
+			explicit FontAwareHeaderView(QWidget *parent) : QHeaderView(Qt::Horizontal, parent)
+			{
+			}
+
+			/**
+			 * @brief Returns the style-derived content width for a logical section.
+			 * @param section Logical section index.
+			 * @return Width required by the section's current text, icon, font, and sort indicator.
+			 */
+			[[nodiscard]] int sectionContentsWidth(const int section) const
+			{
+				return sectionSizeFromContents(section).width();
+			}
+
+			/**
+			 * @brief Installs the callback invoked after a user changes section widths.
+			 * @param callback Callback to invoke after a completed mouse resize.
+			 */
+			void setUserResizeCallback(UserResizeCallback callback)
+			{
+				m_userResizeCallback = std::move(callback);
+			}
+
+		protected:
+			/**
+			 * @brief Reports whether a point lies on a visible section-resize grip.
+			 * @param position Header viewport position to inspect.
+			 * @return `true` when the position is within the current style's grip margin.
+			 */
+			[[nodiscard]] bool isSectionResizeHandle(const QPoint position) const
+			{
+				const int gripMargin =
+				    qMax(2, style()->pixelMetric(QStyle::PM_HeaderGripMargin, nullptr, this));
+				for (int section = 0; section < count(); ++section)
+				{
+					if (isSectionHidden(section))
+						continue;
+					const qint64 boundary =
+					    static_cast<qint64>(sectionViewportPosition(section)) + sectionSize(section);
+					if (qAbs(static_cast<qint64>(position.x()) - boundary) <= gripMargin)
+						return true;
+				}
+				return false;
+			}
+
+			/**
+			 * @brief Captures section widths at the start of a possible user resize.
+			 * @param event Mouse press event.
+			 */
+			void mousePressEvent(QMouseEvent *event) override
+			{
+				m_widthsBeforeUserInteraction.clear();
+				if (event && event->button() == Qt::LeftButton &&
+				    isSectionResizeHandle(event->position().toPoint()))
+				{
+					m_widthsBeforeUserInteraction.reserve(count());
+					for (int section = 0; section < count(); ++section)
+						m_widthsBeforeUserInteraction.push_back(sectionSize(section));
+				}
+				QHeaderView::mousePressEvent(event);
+			}
+
+			/**
+			 * @brief Reports a completed user resize while ignoring programmatic section changes.
+			 * @param event Mouse release event.
+			 */
+			void mouseReleaseEvent(QMouseEvent *event) override
+			{
+				QHeaderView::mouseReleaseEvent(event);
+				QVector<int> widthsAfterUserInteraction;
+				widthsAfterUserInteraction.reserve(count());
+				for (int section = 0; section < count(); ++section)
+					widthsAfterUserInteraction.push_back(sectionSize(section));
+				if (m_widthsBeforeUserInteraction.size() == count() &&
+				    m_widthsBeforeUserInteraction != widthsAfterUserInteraction && m_userResizeCallback)
+				{
+					m_userResizeCallback(m_widthsBeforeUserInteraction, widthsAfterUserInteraction);
+				}
+				m_widthsBeforeUserInteraction.clear();
+			}
+
+		private:
+			QVector<int>       m_widthsBeforeUserInteraction;
+			UserResizeCallback m_userResizeCallback;
+	};
+
+	int headerSectionWidth(const QTableWidget *table, const int column)
+	{
+		if (!table || !table->horizontalHeaderItem(column))
+			return 0;
+		const auto *header = dynamic_cast<const FontAwareHeaderView *>(table->horizontalHeader());
+		return header ? header->sectionContentsWidth(column) : 0;
+	}
+
+	QVector<int> columnWidths(const QTableWidget *table)
+	{
+		QVector<int> widths;
+		if (!table)
+			return widths;
+		widths.reserve(table->columnCount());
+		for (int column = 0; column < table->columnCount(); ++column)
+			widths.push_back(table->columnWidth(column));
+		return widths;
+	}
+
+	QVector<int> columnWidthsFromSettings(const QVariant &value)
+	{
+		const QVariantList values = value.toList();
+		QVector<int>       widths;
+		widths.reserve(values.size());
+		for (const QVariant &entry : values)
+		{
+			const int width = entry.toInt();
+			if (width <= 0)
+				return {};
+			widths.push_back(width);
+		}
+		return widths;
+	}
+
+	QVariantList columnWidthsForSettings(const QVector<int> &widths)
+	{
+		QVariantList values;
+		values.reserve(widths.size());
+		for (const int width : widths)
+			values.push_back(width);
+		return values;
+	}
+
+	void applyPreferredColumnWidths(QTableWidget *table, const QVector<int> &preferredWidths)
+	{
+		if (!table || preferredWidths.size() != table->columnCount())
+			return;
+		for (int column = 0; column < table->columnCount(); ++column)
+		{
+			const int effectiveWidth = qMax(preferredWidths.at(column), headerSectionWidth(table, column));
+			table->setColumnWidth(column, effectiveWidth);
+		}
+	}
+
+	void applyDefaultColumnWidths(QTableWidget *table)
 	{
 		if (!table)
 			return;
 		const int total = table->viewport()->width();
 		if (total <= 0)
 			return;
-		const int     nameWidth    = qMin(200, qMax(120, static_cast<int>(total * 0.18)));
-		const int     authorWidth  = qMax(120, static_cast<int>(total * 0.12));
-		constexpr int enabledWidth = 70;
-		constexpr int versionWidth = 60;
-		int           remaining    = total - (nameWidth + authorWidth + enabledWidth + versionWidth);
+		const int nameWidth = qMax(headerSectionWidth(table, kColumnName),
+		                           qMin(200, qMax(120, static_cast<int>(total * 0.18))));
+		const int authorWidth =
+		    qMax(headerSectionWidth(table, kColumnAuthor), qMax(120, static_cast<int>(total * 0.12)));
+		const int enabledWidth = qMax(70, headerSectionWidth(table, kColumnEnabled));
+		const int versionWidth = qMax(60, headerSectionWidth(table, kColumnVersion));
+		int       remaining    = total - (nameWidth + authorWidth + enabledWidth + versionWidth);
 		if (remaining < 200)
 			remaining = 200;
-		int fileWidth    = qMax(220, static_cast<int>(remaining * 0.55));
-		int purposeWidth = remaining - fileWidth;
+		int fileWidth =
+		    qMax(headerSectionWidth(table, kColumnFile), qMax(220, static_cast<int>(remaining * 0.55)));
+		int purposeWidth = qMax(headerSectionWidth(table, kColumnPurpose), remaining - fileWidth);
 		if (purposeWidth < 180)
 		{
 			purposeWidth = 180;
-			fileWidth    = qMax(200, remaining - purposeWidth);
+			fileWidth    = qMax(headerSectionWidth(table, kColumnFile), qMax(200, remaining - purposeWidth));
 		}
 		table->setColumnWidth(kColumnName, nameWidth);
 		table->setColumnWidth(kColumnPurpose, purposeWidth);
@@ -110,14 +269,17 @@ PluginsDialog::PluginsDialog(WorldRuntime *runtime, MainWindow *main, QWidget *p
 {
 	setWindowTitle(QStringLiteral("Plugins"));
 	setModal(true);
-	setMinimumSize(1250, 420);
+	resize(kPluginsBaselineMinimum);
 
 	auto  root    = std::make_unique<QVBoxLayout>();
 	auto *rootPtr = root.get();
 	setLayout(root.release());
 
-	auto *table = new QTableWidget(this);
-	m_table     = table;
+	auto *table  = new QTableWidget(this);
+	m_table      = table;
+	auto *header = new FontAwareHeaderView(m_table);
+	m_table->setHorizontalHeader(header);
+	header->setSectionsClickable(true);
 	m_table->setColumnCount(kColumnCount);
 	m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
 	m_table->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -159,24 +321,11 @@ PluginsDialog::PluginsDialog(WorldRuntime *runtime, MainWindow *main, QWidget *p
 	m_enableButton          = enableButton;
 	m_disableButton         = disableButton;
 	m_editButton            = editButton;
+	m_closeButton           = closeButtonPtr;
 
 	m_moveUpButton->setVisible(false);
 	m_moveDownButton->setVisible(false);
 
-	QPushButton *const buttons[] = {
-	    m_addButton,    m_removeButton,  m_deleteStateButton, m_reloadButton, m_showDescriptionButton,
-	    m_enableButton, m_disableButton, m_editButton,        closeButtonPtr};
-	int buttonWidth = 0;
-	for (QPushButton *const button : buttons)
-	{
-		if (button)
-			buttonWidth = qMax(buttonWidth, button->sizeHint().width());
-	}
-	for (QPushButton *const button : buttons)
-	{
-		if (button)
-			button->setFixedWidth(buttonWidth);
-	}
 	QPalette deletePalette = m_deleteStateButton->palette();
 	deletePalette.setColor(QPalette::ButtonText, Qt::red);
 	m_deleteStateButton->setPalette(deletePalette);
@@ -224,24 +373,205 @@ PluginsDialog::PluginsDialog(WorldRuntime *runtime, MainWindow *main, QWidget *p
 		bool             restored      = false;
 		if (headerVersion == kHeaderVersion && !headerState.isEmpty())
 			restored = m_table->horizontalHeader()->restoreState(headerState);
-		if (!restored)
+		m_usingDefaultColumnWidths =
+		    !restored || settings.value(QStringLiteral("UsingDefaultColumnWidths"), false).toBool();
+		m_preferredColumnWidths =
+		    columnWidthsFromSettings(settings.value(QStringLiteral("PreferredColumnWidths")));
+		if (m_usingDefaultColumnWidths)
+		{
 			applyDefaultColumnWidths(m_table);
-		clampColumnsToViewport(m_table);
+			clampColumnsToViewport(m_table);
+		}
+		else
+		{
+			if (m_preferredColumnWidths.size() != m_table->columnCount())
+				m_preferredColumnWidths = columnWidths(m_table);
+			applyPreferredColumnWidths(m_table, m_preferredColumnWidths);
+		}
 		const int  sortColumn = settings.value(QStringLiteral("SortColumn"), kColumnName).toInt();
 		const auto sortOrder  = static_cast<Qt::SortOrder>(
-            settings.value(QStringLiteral("SortOrder"), Qt::AscendingOrder).toInt());
+		    settings.value(QStringLiteral("SortOrder"), Qt::AscendingOrder).toInt());
 		if (sortColumn >= 0)
 			m_table->sortByColumn(sortColumn, sortOrder);
 		settings.endGroup();
 	}
 	onSelectionChanged();
+	header->setUserResizeCallback(
+	    [this](const QVector<int> &before, const QVector<int> &after)
+	    {
+		    if (before.size() != m_table->columnCount() || after.size() != m_table->columnCount())
+			    return;
+		    if (m_usingDefaultColumnWidths || m_preferredColumnWidths.size() != m_table->columnCount())
+			    m_preferredColumnWidths = before;
+		    for (int column = 0; column < m_table->columnCount(); ++column)
+		    {
+			    if (before.at(column) != after.at(column))
+				    m_preferredColumnWidths[column] = after.at(column);
+		    }
+		    m_usingDefaultColumnWidths = false;
+		    applyPreferredColumnWidths(m_table, m_preferredColumnWidths);
+	    });
+	connect(header, SIGNAL(sortIndicatorChanged(int, Qt::SortOrder)), this,
+	        SLOT(refreshColumnWidthsForSortChange()));
+	refreshDialogSizing();
 
-	QTimer::singleShot(0, this,
-	                   [this]
-	                   {
-		                   applyDefaultColumnWidths(m_table);
-		                   clampColumnsToViewport(m_table);
-	                   });
+	QMetaObject::invokeMethod(
+	    this,
+	    [this]
+	    {
+		    if (m_usingDefaultColumnWidths)
+		    {
+			    applyDefaultColumnWidths(m_table);
+			    clampColumnsToViewport(m_table);
+		    }
+	    },
+	    Qt::QueuedConnection);
+}
+
+bool PluginsDialog::event(QEvent *event)
+{
+	if (!event)
+		return QDialog::event(event);
+
+	const bool  firstShow              = event->type() == QEvent::Show && !m_initialDialogSizingFinalized;
+	const bool  applicationFontChanged = event->type() == QEvent::ApplicationFontChange;
+	const QSize sizeBeforeShow         = firstShow ? size() : QSize();
+	if (applicationFontChanged && m_initialDialogSizingFinalized && !m_dialogSizingRefreshPending)
+		m_dialogSizeBeforeRefresh = size();
+	const bool handled = QDialog::event(event);
+	if (firstShow)
+	{
+		m_dialogSizeBeforeRefresh = sizeBeforeShow;
+		if (QWindow *const nativeWindow = windowHandle())
+		{
+			nativeWindow->installEventFilter(this);
+			if (nativeWindow->isExposed())
+				finalizeInitialDialogSizing();
+		}
+	}
+	if (applicationFontChanged && m_initialDialogSizingFinalized)
+		scheduleDialogSizingRefresh();
+	return handled;
+}
+
+bool PluginsDialog::eventFilter(QObject *watched, QEvent *event)
+{
+	QWindow *const nativeWindow = windowHandle();
+	if (event && nativeWindow && watched == nativeWindow && event->type() == QEvent::Expose &&
+	    nativeWindow->isExposed())
+		finalizeInitialDialogSizing();
+	return QDialog::eventFilter(watched, event);
+}
+
+void PluginsDialog::refreshDialogSizing()
+{
+	QLayout *const dialogLayout = layout();
+	if (!dialogLayout)
+		return;
+	const QLayout::SizeConstraint originalSizeConstraint = dialogLayout->sizeConstraint();
+	dialogLayout->setSizeConstraint(QLayout::SetNoConstraint);
+
+	QPushButton *const buttons[] = {
+	    m_addButton,    m_removeButton,  m_deleteStateButton, m_reloadButton, m_showDescriptionButton,
+	    m_enableButton, m_disableButton, m_editButton,        m_closeButton};
+	for (QPushButton *const button : buttons)
+	{
+		if (!button)
+			continue;
+		button->setMinimumWidth(0);
+		button->setMaximumWidth(QWIDGETSIZE_MAX);
+	}
+
+	int buttonWidth = 0;
+	for (QPushButton *const button : buttons)
+	{
+		if (button)
+			buttonWidth = qMax(buttonWidth, button->sizeHint().width());
+	}
+	for (QPushButton *const button : buttons)
+	{
+		if (button)
+			button->setFixedWidth(buttonWidth);
+	}
+
+	dialogLayout->invalidate();
+	dialogLayout->activate();
+
+	const QSize unboundedMinimum =
+	    dialogLayout->minimumSize().expandedTo(dialogLayout->sizeHint()).expandedTo(kPluginsBaselineMinimum);
+	applyDialogContentSize(unboundedMinimum);
+	if (m_usingDefaultColumnWidths)
+	{
+		applyDefaultColumnWidths(m_table);
+		clampColumnsToViewport(m_table);
+	}
+	else
+		applyPreferredColumnWidths(m_table, m_preferredColumnWidths);
+	dialogLayout->setSizeConstraint(originalSizeConstraint);
+}
+
+void PluginsDialog::refreshColumnWidthsForSortChange() const
+{
+	if (m_usingDefaultColumnWidths)
+	{
+		applyDefaultColumnWidths(m_table);
+		clampColumnsToViewport(m_table);
+	}
+	else
+	{
+		applyPreferredColumnWidths(m_table, m_preferredColumnWidths);
+	}
+}
+
+void PluginsDialog::applyDialogContentSize(const QSize contentMinimum)
+{
+	if (!contentMinimum.isValid())
+		return;
+	const QSize maximumSize      = DialogSizingUtils::maximumClientSize(this);
+	const QSize requiredMinimum  = contentMinimum.boundedTo(maximumSize);
+	const QSize sizeBeforeChange = m_dialogSizeBeforeRefresh.isValid() ? m_dialogSizeBeforeRefresh : size();
+	const QSize desiredSize      = DialogSizingUtils::desiredClientSizeForContentChange(
+	    sizeBeforeChange, m_lastAppliedDialogSize, m_desiredDialogSize, m_lastDialogContentMinimum,
+	    contentMinimum);
+	const QSize targetSize     = desiredSize.boundedTo(maximumSize);
+	m_lastDialogContentMinimum = contentMinimum;
+	m_desiredDialogSize        = desiredSize;
+	m_dialogSizeBeforeRefresh  = {};
+	const QSize relaxedMinimum = minimumSize().boundedTo(requiredMinimum);
+	if (minimumSize() != relaxedMinimum)
+		setMinimumSize(relaxedMinimum);
+	if (isVisible())
+		DialogSizingUtils::applyAvailableGeometry(this, targetSize);
+	else
+		resize(targetSize);
+	m_lastAppliedDialogSize = size();
+	if (minimumSize() != requiredMinimum)
+		setMinimumSize(requiredMinimum);
+}
+
+void PluginsDialog::scheduleDialogSizingRefresh()
+{
+	if (m_dialogSizingRefreshPending)
+		return;
+	m_dialogSizingRefreshPending = true;
+	QMetaObject::invokeMethod(
+	    this,
+	    [this]
+	    {
+		    m_dialogSizingRefreshPending = false;
+		    refreshDialogSizing();
+	    },
+	    Qt::QueuedConnection);
+}
+
+void PluginsDialog::finalizeInitialDialogSizing()
+{
+	if (m_initialDialogSizingFinalized)
+		return;
+	m_initialDialogSizingFinalized = true;
+	if (QWindow *const nativeWindow = windowHandle())
+		nativeWindow->removeEventFilter(this);
+	scheduleDialogSizingRefresh();
 }
 
 void PluginsDialog::reloadList() const
@@ -276,7 +606,7 @@ void PluginsDialog::reloadList() const
 		const QString               pluginId = plugin.attributes.value(QStringLiteral("id"));
 		const QString               name     = plugin.attributes.value(QStringLiteral("name"));
 		const QString               purpose =
-            plugin.nativeShim ? plugin.nativeShimMarker : plugin.attributes.value(QStringLiteral("purpose"));
+		    plugin.nativeShim ? plugin.nativeShimMarker : plugin.attributes.value(QStringLiteral("purpose"));
 		const QString author  = plugin.attributes.value(QStringLiteral("author"));
 		const QString file    = plugin.source;
 		const QString enabled = plugin.enabled ? QStringLiteral("Yes") : QStringLiteral("No");
@@ -653,6 +983,12 @@ void PluginsDialog::saveSettings() const
 	settings.setValue(QStringLiteral("Geometry"), saveGeometry());
 	settings.setValue(QStringLiteral("HeaderVersion"), kHeaderVersion);
 	settings.setValue(QStringLiteral("HeaderState"), m_table->horizontalHeader()->saveState());
+	settings.setValue(QStringLiteral("UsingDefaultColumnWidths"), m_usingDefaultColumnWidths);
+	if (m_usingDefaultColumnWidths)
+		settings.remove(QStringLiteral("PreferredColumnWidths"));
+	else
+		settings.setValue(QStringLiteral("PreferredColumnWidths"),
+		                  columnWidthsForSettings(m_preferredColumnWidths));
 	settings.setValue(QStringLiteral("SortColumn"), m_table->horizontalHeader()->sortIndicatorSection());
 	settings.setValue(QStringLiteral("SortOrder"), m_table->horizontalHeader()->sortIndicatorOrder());
 	settings.endGroup();

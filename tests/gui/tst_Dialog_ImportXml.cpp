@@ -137,6 +137,16 @@ PluginsDialog::PluginsDialog(WorldRuntime *, MainWindow *, QWidget *parent) : QD
 {
 }
 
+bool PluginsDialog::event(QEvent *event)
+{
+	return QDialog::event(event);
+}
+
+bool PluginsDialog::eventFilter(QObject *watched, QEvent *event)
+{
+	return QDialog::eventFilter(watched, event);
+}
+
 void PluginsDialog::onAddPlugin()
 {
 }
@@ -182,107 +192,109 @@ void PluginsDialog::onMoveDown() const
 }
 // NOLINTEND(readability-convert-member-functions-to-static)
 
-/**
- * @brief QTest fixture covering Dialog ImportXml scenarios.
- */
-class tst_Dialog_ImportXml : public QObject
+namespace
 {
-		Q_OBJECT
+	/**
+	 * @brief QTest fixture covering Dialog ImportXml scenarios.
+	 */
+	class tst_Dialog_ImportXml : public QObject
+	{
+			Q_OBJECT
 
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void clipboardButtonTracksXmlValidity()
-		{
-			auto &state               = stubState();
-			state.importTextCallCount = 0;
-			state.lastMask            = 0;
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void clipboardButtonTracksXmlValidity()
+			{
+				auto &state               = stubState();
+				state.importTextCallCount = 0;
+				state.lastMask            = 0;
 
-			QClipboard *clipboard = QGuiApplication::clipboard();
-			QVERIFY(clipboard);
+				QClipboard *clipboard = QGuiApplication::clipboard();
+				QVERIFY(clipboard);
 
-			clipboard->setText(QStringLiteral("plain text"));
-			ImportXmlDialog dialog(nullptr);
-			QPushButton    *importClipboard = findButtonByText(dialog, QStringLiteral("Import Clipboard"));
-			QVERIFY(importClipboard);
-			QVERIFY(!importClipboard->isEnabled());
+				clipboard->setText(QStringLiteral("plain text"));
+				ImportXmlDialog dialog(nullptr);
+				QPushButton *importClipboard = findButtonByText(dialog, QStringLiteral("Import Clipboard"));
+				QVERIFY(importClipboard);
+				QVERIFY(!importClipboard->isEnabled());
 
-			clipboard->setText(QStringLiteral("<?xml version=\"1.0\"?><qmud><x/></qmud>"));
-			QCoreApplication::processEvents();
-			QVERIFY(importClipboard->isEnabled());
-		}
+				clipboard->setText(QStringLiteral("<?xml version=\"1.0\"?><qmud><x/></qmud>"));
+				QCoreApplication::processEvents();
+				QVERIFY(importClipboard->isEnabled());
+			}
 
-		void closeButtonRejectsDialog()
-		{
-			ImportXmlDialog dialog(nullptr);
-			dialog.show();
+			void closeButtonRejectsDialog()
+			{
+				ImportXmlDialog dialog(nullptr);
+				dialog.show();
 
-			QPushButton *closeButton = findButtonByText(dialog, QStringLiteral("Close"));
-			QVERIFY(closeButton);
-			QTest::mouseClick(closeButton, Qt::LeftButton);
-			QCOMPARE(dialog.result(), static_cast<int>(QDialog::Rejected));
-		}
+				QPushButton *closeButton = findButtonByText(dialog, QStringLiteral("Close"));
+				QVERIFY(closeButton);
+				QTest::mouseClick(closeButton, Qt::LeftButton);
+				QCOMPARE(dialog.result(), static_cast<int>(QDialog::Rejected));
+			}
 
-		void importClipboardAcceptsOnSuccessAndUsesMask()
-		{
-			auto &state               = stubState();
-			state.importTextOk        = true;
-			state.importTextCallCount = 0;
-			state.lastMask            = 0;
+			void importClipboardAcceptsOnSuccessAndUsesMask()
+			{
+				auto &state               = stubState();
+				state.importTextOk        = true;
+				state.importTextCallCount = 0;
+				state.lastMask            = 0;
 
-			QClipboard *clipboard = QGuiApplication::clipboard();
-			QVERIFY(clipboard);
-			clipboard->setText(QStringLiteral("<?xml version=\"1.0\"?><triggers></triggers>"));
+				QClipboard *clipboard = QGuiApplication::clipboard();
+				QVERIFY(clipboard);
+				clipboard->setText(QStringLiteral("<?xml version=\"1.0\"?><triggers></triggers>"));
 
-			AppController   app;
-			ImportXmlDialog dialog(&app);
-			dialog.show();
+				AppController   app;
+				ImportXmlDialog dialog(&app);
+				dialog.show();
 
-			QCheckBox *triggers = findCheckBoxByText(dialog, QStringLiteral("Triggers"));
-			QCheckBox *aliases  = findCheckBoxByText(dialog, QStringLiteral("Aliases"));
-			QVERIFY(triggers);
-			QVERIFY(aliases);
-			triggers->setChecked(true);
-			aliases->setChecked(true);
+				QCheckBox *triggers = findCheckBoxByText(dialog, QStringLiteral("Triggers"));
+				QCheckBox *aliases  = findCheckBoxByText(dialog, QStringLiteral("Aliases"));
+				QVERIFY(triggers);
+				QVERIFY(aliases);
+				triggers->setChecked(true);
+				aliases->setChecked(true);
 
-			closeAnyMessageBoxSoon();
-			QVERIFY(QMetaObject::invokeMethod(&dialog, "onImportClipboard", Qt::DirectConnection));
+				closeAnyMessageBoxSoon();
+				QVERIFY(QMetaObject::invokeMethod(&dialog, "onImportClipboard", Qt::DirectConnection));
 
-			QCOMPARE(state.importTextCallCount, 1);
-			QCOMPARE(state.lastMask, WorldDocument::XML_TRIGGERS | WorldDocument::XML_ALIASES);
-			QCOMPARE(dialog.result(), static_cast<int>(QDialog::Accepted));
-		}
+				QCOMPARE(state.importTextCallCount, 1);
+				QCOMPARE(state.lastMask, WorldDocument::XML_TRIGGERS | WorldDocument::XML_ALIASES);
+				QCOMPARE(dialog.result(), static_cast<int>(QDialog::Accepted));
+			}
 
-		void importClipboardFailureDoesNotAcceptDialog()
-		{
-			auto &state               = stubState();
-			state.importTextOk        = false;
-			state.importTextCallCount = 0;
-			state.lastMask            = 0;
+			void importClipboardFailureDoesNotAcceptDialog()
+			{
+				auto &state               = stubState();
+				state.importTextOk        = false;
+				state.importTextCallCount = 0;
+				state.lastMask            = 0;
 
-			QClipboard *clipboard = QGuiApplication::clipboard();
-			QVERIFY(clipboard);
-			clipboard->setText(QStringLiteral("<?xml version=\"1.0\"?><aliases></aliases>"));
+				QClipboard *clipboard = QGuiApplication::clipboard();
+				QVERIFY(clipboard);
+				clipboard->setText(QStringLiteral("<?xml version=\"1.0\"?><aliases></aliases>"));
 
-			AppController   app;
-			ImportXmlDialog dialog(&app);
-			dialog.show();
+				AppController   app;
+				ImportXmlDialog dialog(&app);
+				dialog.show();
 
-			QCheckBox *aliases = findCheckBoxByText(dialog, QStringLiteral("Aliases"));
-			QVERIFY(aliases);
-			aliases->setChecked(true);
+				QCheckBox *aliases = findCheckBoxByText(dialog, QStringLiteral("Aliases"));
+				QVERIFY(aliases);
+				aliases->setChecked(true);
 
-			closeAnyMessageBoxSoon();
-			QVERIFY(QMetaObject::invokeMethod(&dialog, "onImportClipboard", Qt::DirectConnection));
+				closeAnyMessageBoxSoon();
+				QVERIFY(QMetaObject::invokeMethod(&dialog, "onImportClipboard", Qt::DirectConnection));
 
-			QCOMPARE(state.importTextCallCount, 1);
-			QCOMPARE(state.lastMask, WorldDocument::XML_ALIASES);
-			QVERIFY(dialog.result() != static_cast<int>(QDialog::Accepted));
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
+				QCOMPARE(state.importTextCallCount, 1);
+				QCOMPARE(state.lastMask, WorldDocument::XML_ALIASES);
+				QVERIFY(dialog.result() != static_cast<int>(QDialog::Accepted));
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+} // namespace
 
 QTEST_MAIN(tst_Dialog_ImportXml)
-
 
 #if __has_include("tst_Dialog_ImportXml.moc")
 #include "tst_Dialog_ImportXml.moc"

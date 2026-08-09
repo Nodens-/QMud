@@ -18,7 +18,9 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QCoreApplication>
+#include <QDialogButtonBox>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 #include <QFile>
@@ -26,8 +28,11 @@
 #include <QFont>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScopeGuard>
+#include <QScreen>
 #include <QSpinBox>
 #include <QTabBar>
 #include <QTabWidget>
@@ -44,10 +49,50 @@ namespace
 	constexpr int kShortcutDisabledDefaultPortableTextsRole = Qt::UserRole + 4;
 
 	/**
+	 * @brief Counts top-level resize events emitted during one application-font update.
+	 */
+	class ResizeEventCounter final : public QObject
+	{
+		public:
+			/**
+			 * @brief Clears the accumulated resize-event count.
+			 */
+			void reset()
+			{
+				m_count = 0;
+			}
+
+			/**
+			 * @brief Returns the accumulated resize-event count.
+			 * @return Number of observed resize events.
+			 */
+			[[nodiscard]] int count() const
+			{
+				return m_count;
+			}
+
+			/**
+			 * @brief Counts resize events without consuming them.
+			 * @param watched Object receiving the event.
+			 * @param event Event delivered to the watched object.
+			 * @return Base event-filter result.
+			 */
+			bool eventFilter(QObject *watched, QEvent *event) override
+			{
+				if (event && event->type() == QEvent::Resize)
+					++m_count;
+				return QObject::eventFilter(watched, event);
+			}
+
+		private:
+			int m_count{0};
+	};
+
+	/**
 	 * @brief Returns per-process test INI file path.
 	 * @return Absolute INI path under temporary directory.
 	 */
-	QString       testIniFilePath()
+	QString testIniFilePath()
 	{
 		static const QString path =
 		    QDir::temp().filePath(QStringLiteral("qmud-test-global-preferences-dialog-%1.ini")
@@ -464,6 +509,182 @@ namespace
 				QCOMPARE(tabs->focusPolicy(), Qt::NoFocus);
 				QVERIFY(tabs->tabBar());
 				QCOMPARE(tabs->tabBar()->focusPolicy(), Qt::NoFocus);
+			}
+
+			/**
+			 * @brief Verifies the dialog and combo boxes follow enlarged application fonts.
+			 */
+			void dialogMinimumTracksFontChanges()
+			{
+				resetStubState();
+
+				const QFont originalApplicationFont = QApplication::font();
+				const auto  restoreApplicationFont  = qScopeGuard(
+                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+
+				QList<QSize> initialPageHints;
+				QList<QSize> initialComboHints;
+				QSize        initialDialogMinimum;
+				QSize        initialDialogSize;
+				{
+					GlobalPreferencesDialog baselineDialog;
+					baselineDialog.show();
+					QVERIFY(QTest::qWaitForWindowExposed(&baselineDialog));
+					QCoreApplication::processEvents();
+					initialDialogMinimum = baselineDialog.minimumSize();
+					initialDialogSize    = baselineDialog.size();
+					auto *baselineTabs   = baselineDialog.findChild<QTabWidget *>();
+					QVERIFY(baselineTabs);
+					initialPageHints.reserve(baselineTabs->count());
+					for (int index = 0; index < baselineTabs->count(); ++index)
+					{
+						QWidget *const page = baselineTabs->widget(index);
+						QVERIFY(page);
+						QVERIFY(page->layout());
+						initialPageHints.push_back(page->layout()->sizeHint());
+					}
+					for (const QComboBox *combo : baselineDialog.findChildren<QComboBox *>())
+						initialComboHints.push_back(combo->minimumSizeHint());
+				}
+
+				QFont enlargedFont = originalApplicationFont;
+				if (enlargedFont.pointSizeF() > 0.0)
+					enlargedFont.setPointSizeF(enlargedFont.pointSizeF() * 6.0);
+				else
+					enlargedFont.setPixelSize(qMax(1, enlargedFont.pixelSize() * 6));
+				QApplication::setFont(enlargedFont);
+
+				GlobalPreferencesDialog dialog;
+				dialog.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+				QCoreApplication::processEvents();
+				QVERIFY(dialog.screen());
+
+				constexpr QSize baselineMinimum(748, 600);
+				QVERIFY(dialog.minimumWidth() >= baselineMinimum.width() ||
+				        dialog.frameGeometry().width() >= dialog.screen()->availableGeometry().width());
+				QVERIFY(dialog.minimumHeight() >= baselineMinimum.height() ||
+				        dialog.frameGeometry().height() >= dialog.screen()->availableGeometry().height());
+				QVERIFY(dialog.maximumWidth() > dialog.minimumWidth());
+				QVERIFY(dialog.maximumHeight() > dialog.minimumHeight());
+
+				const QList<QComboBox *> combos = dialog.findChildren<QComboBox *>();
+				QVERIFY(!combos.isEmpty());
+				QCOMPARE(combos.size(), initialComboHints.size());
+				for (qsizetype index = 0; index < combos.size(); ++index)
+				{
+					const QComboBox *const combo = combos.at(index);
+					QVERIFY(combo->minimumSizeHint().height() >= combo->fontMetrics().height());
+					QVERIFY(combo->minimumSizeHint().width() > initialComboHints.at(index).width());
+					QVERIFY(combo->minimumSizeHint().height() > initialComboHints.at(index).height());
+				}
+
+				auto *tabs    = dialog.findChild<QTabWidget *>();
+				auto *buttons = dialog.findChild<QDialogButtonBox *>();
+				QVERIFY(tabs);
+				QVERIFY(buttons);
+				QVERIFY(dialog.rect().contains(tabs->geometry()));
+				QVERIFY(dialog.rect().contains(buttons->geometry()));
+				QCOMPARE(static_cast<qsizetype>(tabs->count()), initialPageHints.size());
+				const QSize dialogSize    = dialog.size();
+				const QSize dialogMinimum = dialog.minimumSize();
+				bool        pageHintGrew  = false;
+				for (int index = 0; index < tabs->count(); ++index)
+				{
+					tabs->setCurrentIndex(index);
+					QCoreApplication::processEvents();
+					QCOMPARE(dialog.size(), dialogSize);
+					QCOMPARE(dialog.minimumSize(), dialogMinimum);
+					QWidget *const page = tabs->widget(index);
+					QVERIFY(page);
+					QVERIFY(page->layout());
+					const int frameWidth =
+					    tabs->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, tabs);
+					const int pageOuterHint   = page->layout()->sizeHint().width() + (frameWidth * 2);
+					const int maximumTabWidth = dialog.width() - tabs->mapTo(&dialog, QPoint()).x() -
+					                            dialog.layout()->contentsMargins().right();
+					QVERIFY(tabs->minimumWidth() >= qMin(pageOuterHint, maximumTabWidth));
+					QVERIFY(tabs->width() <= maximumTabWidth);
+					const int pageOuterHeight = page->layout()->sizeHint().height() + (frameWidth * 2);
+					QVERIFY(tabs->minimumHeight() >= qMin(pageOuterHeight, tabs->height()));
+					for (const QTabBar *tabBar : dialog.findChildren<QTabBar *>())
+					{
+						if (tabBar->isVisible())
+							QVERIFY(tabBar->width() >= tabBar->sizeHint().width());
+					}
+					pageHintGrew = pageHintGrew ||
+					               page->layout()->sizeHint().width() > initialPageHints.at(index).width() ||
+					               page->layout()->sizeHint().height() > initialPageHints.at(index).height();
+				}
+				QVERIFY(pageHintGrew);
+				QVERIFY(dialog.width() >= dialog.minimumWidth());
+				QVERIFY(dialog.height() >= dialog.minimumHeight());
+				QTRY_VERIFY(dialog.screen()->availableGeometry().contains(dialog.frameGeometry()));
+
+				ResizeEventCounter resizeEvents;
+				dialog.installEventFilter(&resizeEvents);
+				QCoreApplication::processEvents();
+				resizeEvents.reset();
+				QApplication::setFont(originalApplicationFont);
+				QTRY_VERIFY(dialog.minimumWidth() < dialogMinimum.width() ||
+				            dialog.minimumHeight() < dialogMinimum.height() ||
+				            dialog.frameGeometry().width() >= dialog.screen()->availableGeometry().width() ||
+				            dialog.frameGeometry().height() >= dialog.screen()->availableGeometry().height());
+				QVERIFY(dialog.minimumWidth() >= initialDialogMinimum.width());
+				QVERIFY(dialog.minimumHeight() >= initialDialogMinimum.height());
+				QTRY_VERIFY(dialog.width() < dialogSize.width() || dialog.height() < dialogSize.height() ||
+				            dialog.frameGeometry().width() >= dialog.screen()->availableGeometry().width() ||
+				            dialog.frameGeometry().height() >= dialog.screen()->availableGeometry().height());
+				QVERIFY(dialog.width() >= initialDialogSize.width());
+				QVERIFY(dialog.height() >= initialDialogSize.height());
+				QCoreApplication::processEvents();
+				QVERIFY(resizeEvents.count() <= 1);
+			}
+
+			/**
+			 * @brief Verifies long user paths wrap without determining dialog width.
+			 */
+			void longPathsDoNotExpandDialogWidth()
+			{
+				resetStubState();
+				GlobalPreferencesDialog baselineDialog;
+				const int               baselineMinimumWidth = baselineDialog.minimumWidth();
+
+				resetStubState();
+				const QString longPath = QStringLiteral("/") + QStringLiteral("directory/").repeated(20) +
+				                         QStringLiteral("file.xml");
+				stubState().globalOptions.insert(QStringLiteral("WorldList"), longPath);
+				stubState().globalOptions.insert(QStringLiteral("PluginList"), longPath);
+				stubState().globalOptions.insert(QStringLiteral("DefaultWorldFileDirectory"), longPath);
+				stubState().globalOptions.insert(QStringLiteral("DefaultLogFileDirectory"), longPath);
+				stubState().globalOptions.insert(QStringLiteral("PluginsDirectory"), longPath);
+
+				GlobalPreferencesDialog longPathDialog;
+				QVERIFY(longPathDialog.minimumWidth() <= baselineMinimumWidth);
+				longPathDialog.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&longPathDialog));
+				auto *tabs = longPathDialog.findChild<QTabWidget *>();
+				QVERIFY(tabs);
+				int verifiedLabels = 0;
+				for (int index = 0; index < tabs->count(); ++index)
+				{
+					tabs->setCurrentIndex(index);
+					QCoreApplication::processEvents();
+					for (const QLabel *label : tabs->widget(index)->findChildren<QLabel *>())
+					{
+						if (label->text() != longPath)
+							continue;
+						QVERIFY(label->wordWrap());
+						QVERIFY(label->width() > 0);
+						const int requiredHeight = label->heightForWidth(label->width());
+						QVERIFY(requiredHeight < 0 || label->height() >= requiredHeight);
+						++verifiedLabels;
+					}
+				}
+				QCOMPARE(verifiedLabels, 5);
+				QVERIFY(longPathDialog.screen());
+				QTRY_VERIFY(
+				    longPathDialog.screen()->availableGeometry().contains(longPathDialog.frameGeometry()));
 			}
 
 			/**

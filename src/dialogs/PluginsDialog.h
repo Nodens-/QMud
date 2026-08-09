@@ -11,6 +11,7 @@
 
 #include <QDialog>
 #include <QTableWidget>
+#include <QVector>
 
 class WorldRuntime;
 class MainWindow;
@@ -30,6 +31,21 @@ class PluginsDialog : public QDialog
 		 * @param parent Optional Qt parent widget.
 		 */
 		explicit PluginsDialog(WorldRuntime *runtime, MainWindow *main, QWidget *parent = nullptr);
+
+	protected:
+		/**
+		 * @brief Schedules sizing after first display or an application-font change.
+		 * @param event Event being delivered to the dialog.
+		 * @return Result returned by the base dialog event handler.
+		 */
+		bool event(QEvent *event) override;
+		/**
+		 * @brief Finalizes first-display sizing when the native window becomes exposed.
+		 * @param watched Object receiving the event.
+		 * @param event Event delivered to the watched object.
+		 * @return Base event-filter result.
+		 */
+		bool eventFilter(QObject *watched, QEvent *event) override;
 
 	private slots:
 		/**
@@ -76,8 +92,29 @@ class PluginsDialog : public QDialog
 		 * @brief Moves selected plugin down in execution order.
 		 */
 		void onMoveDown() const;
+		/**
+		 * @brief Reapplies default or preferred column widths after the table sort indicator changes.
+		 */
+		void refreshColumnWidthsForSortChange() const;
 
 	private:
+		/**
+		 * @brief Recalculates font-aware button widths and minimum dialog size.
+		 */
+		void                     refreshDialogSizing();
+		/**
+		 * @brief Applies one content-driven resize while preserving user-added space.
+		 * @param contentMinimum Global content requirement for the dialog.
+		 */
+		void                     applyDialogContentSize(QSize contentMinimum);
+		/**
+		 * @brief Queues one sizing refresh after pending native and font metrics settle.
+		 */
+		void                     scheduleDialogSizingRefresh();
+		/**
+		 * @brief Queues the one-time native-frame-aware sizing pass after first exposure.
+		 */
+		void                     finalizeInitialDialogSizing();
 		/**
 		 * @brief Rebuilds plugin table from runtime state.
 		 */
@@ -121,6 +158,15 @@ class PluginsDialog : public QDialog
 		QPushButton             *m_reloadButton{nullptr};
 		QPushButton             *m_editButton{nullptr};
 		QPushButton             *m_showDescriptionButton{nullptr};
+		QPushButton             *m_closeButton{nullptr};
+		bool                     m_dialogSizingRefreshPending{false};
+		bool                     m_initialDialogSizingFinalized{false};
+		bool                     m_usingDefaultColumnWidths{true};
+		QVector<int>             m_preferredColumnWidths;
+		QSize                    m_dialogSizeBeforeRefresh;
+		QSize                    m_lastDialogContentMinimum;
+		QSize                    m_desiredDialogSize;
+		QSize                    m_lastAppliedDialogSize;
 };
 
 #endif // QMUD_PLUGINS_DIALOG_H

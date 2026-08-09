@@ -24,10 +24,12 @@ class QSpinBox;
 class QCheckBox;
 class QFrame;
 class QComboBox;
+class QGridLayout;
 class QTextEdit;
 class QTableWidget;
 class QLabel;
 class QPushButton;
+class QToolButton;
 
 class WorldRuntime;
 class WorldView;
@@ -88,6 +90,12 @@ class WorldPreferencesDialog : public QDialog
 
 	protected:
 		/**
+		 * @brief Schedules sizing after first display or an application-font change.
+		 * @param event Event being delivered to the dialog.
+		 * @return Result returned by the base dialog event handler.
+		 */
+		bool event(QEvent *event) override;
+		/**
 		 * @brief Handles dialog-level event filtering hooks.
 		 * @param obj Object that received the event.
 		 * @param event Event instance to inspect/handle.
@@ -96,6 +104,35 @@ class WorldPreferencesDialog : public QDialog
 		bool eventFilter(QObject *obj, QEvent *event) override;
 
 	private:
+		/**
+		 * @brief Recalculates the font- and style-aware minimum dialog size.
+		 */
+		void                          refreshDialogSizing();
+		/**
+		 * @brief Applies one content-driven resize while preserving user-added space.
+		 * @param contentMinimum Global content requirement across all pages.
+		 */
+		void                          applyDialogContentSize(QSize contentMinimum);
+		/**
+		 * @brief Queues one sizing refresh after pending native and font metrics settle.
+		 */
+		void                          scheduleDialogSizingRefresh();
+		/**
+		 * @brief Queues the one-time native-frame-aware sizing pass after first exposure.
+		 */
+		void                          finalizeInitialDialogSizing();
+		/**
+		 * @brief Keeps the Custom Colours swatch columns equally sized for exact swap-button alignment.
+		 */
+		void                          refreshCustomColourColumnWidths() const;
+		/**
+		 * @brief Recalculates ANSI colour headers and marker swatches from current font and style metrics.
+		 */
+		void                          refreshAnsiColourGeometry() const;
+		/**
+		 * @brief Reapplies the Info page's compact font relative to the current dialog font.
+		 */
+		void                          refreshInfoPageFont() const;
 		/**
 		 * @brief UI construction and import/export helpers.
 		 */
@@ -467,6 +504,12 @@ class WorldPreferencesDialog : public QDialog
 		QVector<QLineEdit *>          m_customColourNames;
 		QVector<QPushButton *>        m_customTextSwatches;
 		QVector<QPushButton *>        m_customBackSwatches;
+		QGridLayout                  *m_customColoursGrid{nullptr};
+		QLabel                       *m_customTextLabel{nullptr};
+		QLabel                       *m_customBackLabel{nullptr};
+		QGridLayout                  *m_ansiColoursGrid{nullptr};
+		QLabel                       *m_ansiNormalLabel{nullptr};
+		QLabel                       *m_ansiBoldLabel{nullptr};
 		QVector<QPushButton *>        m_ansiNormalSwatches;
 		QVector<QPushButton *>        m_ansiBoldSwatches;
 		QCheckBox                    *m_useDefaultColours{nullptr};
@@ -508,9 +551,9 @@ class WorldPreferencesDialog : public QDialog
 		QTextEdit                    *m_logFilePreamble{nullptr};
 		QTextEdit                    *m_logFilePostamble{nullptr};
 		QPushButton                  *m_standardPreamble{nullptr};
-		QPushButton                  *m_editPreamble{nullptr};
-		QPushButton                  *m_editPostamble{nullptr};
-		QPushButton                  *m_substitutionHelp{nullptr};
+		QToolButton                  *m_editPreamble{nullptr};
+		QToolButton                  *m_editPostamble{nullptr};
+		QToolButton                  *m_substitutionHelp{nullptr};
 		QLineEdit                    *m_logLinePreambleOutput{nullptr};
 		QLineEdit                    *m_logLinePreambleInput{nullptr};
 		QLineEdit                    *m_logLinePreambleNotes{nullptr};
@@ -729,6 +772,7 @@ class WorldPreferencesDialog : public QDialog
 		QCheckBox                    *m_pasteEcho{nullptr};
 
 		// Info
+		QWidget                      *m_infoPage{nullptr};
 		QLabel                       *m_infoWorldFile{nullptr};
 		QLabel                       *m_infoWorldFileVersion{nullptr};
 		QLabel                       *m_infoQmudVersion{nullptr};
@@ -831,7 +875,7 @@ class WorldPreferencesDialog : public QDialog
 		QStackedWidget               *m_timersViewStack{nullptr};
 		QTableWidget                 *m_variablesTable{nullptr};
 		QCheckBox                    *m_filterVariables{nullptr};
-		QPushButton                  *m_editVariablesFilter{nullptr};
+		QToolButton                  *m_editVariablesFilter{nullptr};
 		QLabel                       *m_variablesCount{nullptr};
 		QPushButton                  *m_addVariableButton{nullptr};
 		QPushButton                  *m_editVariableButton{nullptr};
@@ -857,7 +901,7 @@ class WorldPreferencesDialog : public QDialog
 		QCheckBox                    *m_useDefaultAliases{nullptr};
 		QCheckBox                    *m_filterAliases{nullptr};
 		QCheckBox                    *m_aliasTreeView{nullptr};
-		QPushButton                  *m_editAliasesFilter{nullptr};
+		QToolButton                  *m_editAliasesFilter{nullptr};
 		QPushButton                  *m_addAliasButton{nullptr};
 		QPushButton                  *m_editAliasButton{nullptr};
 		QPushButton                  *m_deleteAliasButton{nullptr};
@@ -872,7 +916,7 @@ class WorldPreferencesDialog : public QDialog
 		QCheckBox                    *m_useDefaultTriggers{nullptr};
 		QCheckBox                    *m_filterTriggers{nullptr};
 		QCheckBox                    *m_triggerTreeView{nullptr};
-		QPushButton                  *m_editTriggersFilter{nullptr};
+		QToolButton                  *m_editTriggersFilter{nullptr};
 		QPushButton                  *m_addTriggerButton{nullptr};
 		QPushButton                  *m_editTriggerButton{nullptr};
 		QPushButton                  *m_deleteTriggerButton{nullptr};
@@ -886,7 +930,7 @@ class WorldPreferencesDialog : public QDialog
 		QCheckBox                    *m_useDefaultTimers{nullptr};
 		QCheckBox                    *m_timerTreeView{nullptr};
 		QCheckBox                    *m_filterTimers{nullptr};
-		QPushButton                  *m_editTimersFilter{nullptr};
+		QToolButton                  *m_editTimersFilter{nullptr};
 		QPushButton                  *m_addTimerButton{nullptr};
 		QPushButton                  *m_editTimerButton{nullptr};
 		QPushButton                  *m_deleteTimerButton{nullptr};
@@ -933,6 +977,12 @@ class WorldPreferencesDialog : public QDialog
 		bool                          m_initialUseDefaultTimers{false};
 		bool                          m_useDefaultTimersLoaded{false};
 		bool                          m_syncingRuleSelection{false};
+		bool                          m_dialogSizingRefreshPending{false};
+		bool                          m_initialDialogSizingFinalized{false};
+		QSize                         m_dialogSizeBeforeRefresh;
+		QSize                         m_lastDialogContentMinimum;
+		QSize                         m_desiredDialogSize;
+		QSize                         m_lastAppliedDialogSize;
 };
 
 #endif // QMUD_WORLD_PREFERENCES_DIALOG_H
