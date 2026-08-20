@@ -27,6 +27,7 @@
 #include <QDebug>
 #include <QFontMetrics>
 #include <QGuiApplication>
+#include <QHash>
 #include <QIcon>
 #include <QImageReader>
 #include <QLabel>
@@ -1461,7 +1462,15 @@ void MainWindow::onApplicationStateChanged(const Qt::ApplicationState state)
 
 WorldChildWindow *MainWindow::activeWorldChildWindow() const
 {
-	return qobject_cast<WorldChildWindow *>(currentOrLastActiveSubWindow());
+	auto *world = qobject_cast<WorldChildWindow *>(currentOrLastActiveSubWindow());
+	return world && world->isPrimaryRuntimeBinding() ? world : nullptr;
+}
+
+WorldChildWindow *MainWindow::activeWorldPresentationWindow() const
+{
+	if (!m_mdiArea)
+		return nullptr;
+	return qobject_cast<WorldChildWindow *>(m_mdiArea->activeSubWindow());
 }
 
 TextChildWindow *MainWindow::activeTextChildWindow() const
@@ -1488,7 +1497,7 @@ WorldChildWindow *MainWindow::findWorldChildWindow(WorldRuntime *runtime) const
 		auto *world = qobject_cast<WorldChildWindow *>(sub);
 		if (!world)
 			continue;
-		if (world->runtime() == runtime)
+		if (world->runtime() == runtime && world->isPrimaryRuntimeBinding())
 			return world;
 	}
 
@@ -2129,29 +2138,20 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 	}
 
 	WorldRuntime *activeRuntime = nullptr;
-	if (m_mdiArea)
-	{
-		for (QMdiSubWindow *sub : m_mdiArea->subWindowList(QMdiArea::CreationOrder))
-		{
-			auto *world = qobject_cast<WorldChildWindow *>(sub);
-			if (!world)
-				continue;
-			WorldRuntime *runtime = world->runtime();
-			if (!runtime)
-				continue;
-			const bool active = sub == window;
-			runtime->requestActiveState(active);
-			if (active)
-				activeRuntime = runtime;
-		}
-	}
+	if (auto *world = qobject_cast<WorldChildWindow *>(window); world && world->isPrimaryRuntimeBinding())
+		activeRuntime = world->runtime();
+	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
+		if (entry.runtime)
+			entry.runtime->requestActiveState(entry.runtime == activeRuntime);
 	refreshTitleBar();
 	if (activeRuntime)
 	{
 		if (AppController *app = AppController::instance())
 			app->processScriptFileChange(activeRuntime);
 	}
-	setActiveShortcutAcceleratorRuntime(activeRuntime);
+	const auto *activeWorld = qobject_cast<WorldChildWindow *>(window);
+	setActiveShortcutAcceleratorRuntime(activeWorld && activeWorld->isPrimaryRuntimeBinding() ? activeRuntime
+	                                                                                         : nullptr);
 	updateStatusBar();
 	updateEditActions();
 	refreshActionState();
@@ -2337,7 +2337,7 @@ void MainWindow::processPluginTicks()
 		m_timerFallbackClock.start();
 	m_lastTickProcessNs = m_timerFallbackClock.nsecsElapsed();
 
-	for (const WorldWindowDescriptor &entry : worldWindowDescriptors())
+	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
 	{
 		WorldRuntime *runtime = entry.runtime;
 		if (!runtime)
@@ -2357,7 +2357,7 @@ void MainWindow::processTimers()
 		return;
 
 	const bool reconnectEnabled = app->getGlobalOption(QStringLiteral("ReconnectOnLinkFailure")).toInt() != 0;
-	for (const WorldWindowDescriptor &entry : worldWindowDescriptors())
+	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
 	{
 		WorldRuntime *runtime = entry.runtime;
 		if (!runtime)
@@ -2775,7 +2775,11 @@ void MainWindow::activateWorldSlot(const int slot)
 	if (slot > entries.size())
 		return;
 
-	WorldChildWindow *world = entries.at(slot - 1).window;
+	activateWorldWindow(entries.at(slot - 1).window);
+}
+
+void MainWindow::activateWorldWindow(WorldChildWindow *world)
+{
 	if (!world)
 		return;
 	if (m_mdiArea)
@@ -2810,6 +2814,28 @@ QVector<WorldWindowDescriptor> MainWindow::worldWindowDescriptors() const
 	}
 
 	return entries;
+}
+
+QVector<WorldWindowDescriptor> MainWindow::worldRuntimeDescriptors() const
+{
+	const QVector<WorldWindowDescriptor> windows = worldWindowDescriptors();
+	QVector<WorldWindowDescriptor>       runtimes;
+	QHash<WorldRuntime *, qsizetype>     runtimeIndexes;
+	runtimes.reserve(windows.size());
+
+	for (const WorldWindowDescriptor &window : windows)
+	{
+		if (!window.runtime || !window.window || !window.window->isPrimaryRuntimeBinding())
+			continue;
+		if (runtimeIndexes.contains(window.runtime))
+			continue;
+		WorldWindowDescriptor runtime = window;
+		runtime.sequence              = static_cast<int>(runtimes.size()) + 1;
+		runtimeIndexes.insert(window.runtime, runtimes.size());
+		runtimes.push_back(runtime);
+	}
+
+	return runtimes;
 }
 
 QList<TextChildWindow *> MainWindow::notepadWindows() const
@@ -3022,7 +3048,7 @@ static WorldRuntime *resolveRuntimeForNotepad(const MainWindow *frame, const Tex
 	                                   ? notepadTitle.mid(QStringLiteral("Notepad: ").size()).trimmed()
 	                                   : QString();
 
-	for (const WorldWindowDescriptor &descriptor : frame->worldWindowDescriptors())
+	for (const WorldWindowDescriptor &descriptor : frame->worldRuntimeDescriptors())
 	{
 		WorldRuntime *runtime = descriptor.runtime;
 		if (!runtime)

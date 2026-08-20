@@ -16,6 +16,7 @@
 #include <QByteArray>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QHash>
+#include <QPointer>
 #include <QSet>
 #include <QSharedPointer>
 #include <QString>
@@ -44,22 +45,13 @@ enum class LuaPreparedCallbackResultMode
 	Bool,
 	NoResult,
 	Bytes,
-	String
+	String,
+	CallPluginMarshalling
 };
 #endif
 
-/**
- * @brief Styled text run produced/consumed by Lua-facing text APIs.
- */
-struct LuaStyleRun
-{
-		QString text;
-		int     textColour{0};
-		int     backColour{0};
-		int     style{0};
-};
-
 struct LuaCallbackMiniWindowSnapshot;
+class WorldRuntime;
 
 /**
  * @brief Lua VM integration layer for world/plugin callback execution.
@@ -103,6 +95,11 @@ class LuaCallbackEngine
 		 * @return Bound runtime pointer, or `nullptr`.
 		 */
 		[[nodiscard]] class WorldRuntime *worldRuntimeForBridgedCall() const;
+		/**
+		 * @brief Returns the runtime that owns callback suspension and resume dispatch.
+		 * @return Permanently bound runtime pointer, or `nullptr`.
+		 */
+		[[nodiscard]] class WorldRuntime *callbackDispatchRuntime() const;
 		/**
 		 * @brief Sets plugin identity metadata used by callback context.
 		 * @param id Plugin id.
@@ -285,12 +282,32 @@ class LuaCallbackEngine
 		 * existence cache for bridge-forbidden callback contexts when full snapshot is unavailable.
 		 * @param miniWindowSnapshot Optional full callback dispatch snapshot used to seed
 		 * callback-scope API read caches.
+		 * @param suspended Optional output flag set when the routine yielded at a modal API.
+		 * @param modalResumeId Optional output id for the suspended modal callback.
+		 * @param pendingModalStringRequest Optional output request for the yielded modal API.
+		 * @param linePresentationRequiresRefresh Optional output flag indicating line presentation must be refreshed.
+		 * @param outputScrollPositionRequiresRefresh Optional output flag indicating output scroll position must be refreshed.
+		 * @param outputScrollPositionChanged Optional output flag indicating output scroll position changed.
+		 * @param commandUiPresentationRequiresRefresh Optional output flag indicating command UI presentation must be refreshed.
+		 * @param globalPresentationRequiresRefresh Optional output flag indicating global presentation must be refreshed.
+		 * @param commandHistoryChanged Optional output flag indicating command history changed.
+		 * @param notepadPresentationChanged Optional output flag indicating notepad presentation changed.
+		 * @param hasNotepadPresentationSnapshot Optional output flag indicating a notepad presentation snapshot is available.
+		 * @param notepadPresentationSnapshot Optional output snapshot of notepad presentations.
 		 * @return Marshaling/invocation result classification.
 		 */
 		CallPluginLuaMarshallingResult callPluginLuaWithMarshalling(
 		    lua_State *callerState, const QString &routine, int firstArg,
 		    const QStringList                                         &miniWindowNamesSnapshot = {},
-		    const QSharedPointer<const LuaCallbackMiniWindowSnapshot> &miniWindowSnapshot      = {});
+		    const QSharedPointer<const LuaCallbackMiniWindowSnapshot> &miniWindowSnapshot      = {},
+		    bool *suspended = nullptr, quint64 *modalResumeId = nullptr,
+		    LuaPendingModalStringRequest *pendingModalStringRequest       = nullptr,
+		    bool                         *linePresentationRequiresRefresh = nullptr,
+		    bool *outputScrollPositionRequiresRefresh = nullptr, bool *outputScrollPositionChanged = nullptr,
+		    bool *commandUiPresentationRequiresRefresh = nullptr,
+		    bool *globalPresentationRequiresRefresh = nullptr, bool *commandHistoryChanged = nullptr,
+		    bool *notepadPresentationChanged = nullptr, bool *hasNotepadPresentationSnapshot = nullptr,
+		    QVector<LuaCallbackNotepadSnapshot> *notepadPresentationSnapshot = nullptr);
 		/**
 		 * @brief Calls function with one string argument.
 		 * @param functionName Callback function name.
@@ -394,13 +411,28 @@ class LuaCallbackEngine
 		 * @param suspended Optional output flag set when callback yielded at a modal API.
 		 * @param modalResumeId Optional output id for the suspended modal callback.
 		 * @param pendingModalStringRequest Optional output request for the yielded modal API.
+		 * @param linePresentationRequiresRefresh Optional output flag indicating line presentation must be refreshed.
+		 * @param outputScrollPositionRequiresRefresh Optional output flag indicating output scroll position must be refreshed.
+		 * @param outputScrollPositionChanged Optional output flag indicating output scroll position changed.
+		 * @param commandUiPresentationRequiresRefresh Optional output flag indicating command UI presentation must be refreshed.
+		 * @param globalPresentationRequiresRefresh Optional output flag indicating global presentation must be refreshed.
+		 * @param commandHistoryChanged Optional output flag indicating command history changed.
+		 * @param notepadPresentationChanged Optional output flag indicating notepad presentation changed.
+		 * @param hasNotepadPresentationSnapshot Optional output flag indicating a notepad presentation snapshot is available.
+		 * @param notepadPresentationSnapshot Optional output snapshot of notepad presentations.
 		 * @return Callback result.
 		 */
 		bool callFunctionWithNumberAndUtf8Strings(
 		    const QString &functionName, long arg1, const QByteArray &arg2Utf8, const QByteArray &arg3Utf8,
 		    const QByteArray &arg4Utf8, bool *hasFunction = nullptr, bool defaultResult = true,
 		    bool *suspended = nullptr, quint64 *modalResumeId = nullptr,
-		    LuaPendingModalStringRequest *pendingModalStringRequest = nullptr);
+		    LuaPendingModalStringRequest *pendingModalStringRequest       = nullptr,
+		    bool                         *linePresentationRequiresRefresh = nullptr,
+		    bool *outputScrollPositionRequiresRefresh = nullptr, bool *outputScrollPositionChanged = nullptr,
+		    bool *commandUiPresentationRequiresRefresh = nullptr,
+		    bool *globalPresentationRequiresRefresh = nullptr, bool *commandHistoryChanged = nullptr,
+		    bool *notepadPresentationChanged = nullptr, bool *hasNotepadPresentationSnapshot = nullptr,
+		    QVector<LuaCallbackNotepadSnapshot> *notepadPresentationSnapshot = nullptr);
 		/**
 		 * @brief Calls function with two numbers and one string argument.
 		 * @param functionName Callback function name.
@@ -582,6 +614,49 @@ class LuaCallbackEngine
 		 * @return Ordered mutation batches for runtime-thread application.
 		 */
 		[[nodiscard]] QVector<LuaDeferredRuntimeMutationBatch> takeDeferredRuntimeMutationBatches();
+		void appendDeferredRuntimeMutationBatches(QVector<LuaDeferredRuntimeMutationBatch> batches);
+		/**
+		 * @brief Detaches external owners and resets all callback state for final teardown.
+		 * @return Deferred runtime cleanup produced while cancelling suspended callbacks.
+		 */
+		[[nodiscard]] QVector<LuaDeferredRuntimeMutationBatch> teardown();
+		/**
+		 * @brief Resolves an entry from the last bounded line page when its presentation is unchanged.
+		 * @param runtime Runtime whose presentation owns the page.
+		 * @param lineBufferGeneration Current output-buffer presentation generation.
+		 * @param lineNumber One-based presentation index.
+		 * @param entry Output cached entry.
+		 * @return `true` when the entry is present in the cached page.
+		 */
+		[[nodiscard]] bool tryGetCachedLinePageEntry(const WorldRuntime *runtime,
+		                                             quint64 lineBufferGeneration, int lineNumber,
+		                                             LuaCallbackLineEntrySnapshot &entry) const;
+		[[nodiscard]] bool cachedLinePageContainsEntry(const WorldRuntime *runtime,
+		                                               quint64 lineBufferGeneration, int lineNumber) const;
+		/**
+		 * @brief Returns the presentation range covered by the last bounded line page.
+		 * @param runtime Runtime whose presentation owns the page.
+		 * @param lineBufferGeneration Current output-buffer presentation generation.
+		 * @param firstLine Output first one-based presentation index.
+		 * @param lastLine Output last one-based presentation index.
+		 * @return `true` when a page for the requested generation is cached.
+		 */
+		[[nodiscard]] bool cachedLinePageRange(const WorldRuntime *runtime, quint64 lineBufferGeneration,
+		                                       int &firstLine, int &lastLine) const;
+		/**
+		 * @brief Replaces the bounded line-page cache for one runtime.
+		 * @param runtime Runtime whose presentation owns the page.
+		 * @param lineBufferGeneration Output-buffer presentation generation captured with the page.
+		 * @param firstLine First one-based presentation index covered by the page.
+		 * @param lastLine Last one-based presentation index covered by the page.
+		 * @param entries Page entries keyed by one-based presentation index.
+		 */
+		void replaceCachedLinePage(WorldRuntime *runtime, quint64 lineBufferGeneration, int firstLine,
+		                           int lastLine, QHash<int, LuaCallbackLineEntrySnapshot> entries);
+		/**
+		 * @brief Clears all bounded line-page caches retained by this engine.
+		 */
+		void clearCachedLinePage();
 		/**
 		 * @brief Resumes a callback previously suspended by a modal string-result API.
 		 * @param resumeId Suspended callback id.
@@ -594,7 +669,7 @@ class LuaCallbackEngine
 		 * @brief Cancels a callback coroutine previously suspended by a modal API.
 		 * @param resumeId Suspended callback id.
 		 */
-		void                                 cancelSuspendedModalString(quint64 resumeId);
+		[[nodiscard]] QVector<LuaDeferredRuntimeMutationBatch> cancelSuspendedModalString(quint64 resumeId);
 
 	private:
 		/**
@@ -634,13 +709,31 @@ class LuaCallbackEngine
 		 * @param resultMode Selects the expected return-value conversion mode.
 		 * @param bytesResult Optional output byte-array result when `resultMode` is `Bytes`.
 		 * @param stringResult Optional output string result when `resultMode` is `String`.
+		 * @param marshallingResult Optional output result for `CallPlugin` argument/return marshaling.
+		 * @param marshallingCallerState Optional caller Lua state used for `CallPlugin` marshaling.
+		 * @param linePresentationRequiresRefresh Optional output flag indicating line presentation must be refreshed.
+		 * @param outputScrollPositionRequiresRefresh Optional output flag indicating output scroll position must be refreshed.
+		 * @param outputScrollPositionChanged Optional output flag indicating output scroll position changed.
+		 * @param commandUiPresentationRequiresRefresh Optional output flag indicating command UI presentation must be refreshed.
+		 * @param globalPresentationRequiresRefresh Optional output flag indicating global presentation must be refreshed.
+		 * @param commandHistoryChanged Optional output flag indicating command history changed.
+		 * @param notepadPresentationChanged Optional output flag indicating notepad presentation changed.
+		 * @param hasNotepadPresentationSnapshot Optional output flag indicating a notepad presentation snapshot is available.
+		 * @param notepadPresentationSnapshot Optional output snapshot of notepad presentations.
 		 * @return Callback boolean result for non-suspended execution.
 		 */
 		bool callPreparedYieldableCallback(
 		    const QString &functionName, int argCount, int expectedResults, bool defaultResult,
 		    bool *suspended, quint64 *modalResumeId, LuaPendingModalStringRequest *pendingModalStringRequest,
 		    LuaPreparedCallbackResultMode resultMode = LuaPreparedCallbackResultMode::Bool,
-		    QByteArray *bytesResult = nullptr, QString *stringResult = nullptr);
+		    QByteArray *bytesResult = nullptr, QString *stringResult = nullptr,
+		    CallPluginLuaMarshallingResult *marshallingResult = nullptr,
+		    lua_State *marshallingCallerState = nullptr, bool *linePresentationRequiresRefresh = nullptr,
+		    bool *outputScrollPositionRequiresRefresh = nullptr, bool *outputScrollPositionChanged = nullptr,
+		    bool *commandUiPresentationRequiresRefresh = nullptr,
+		    bool *globalPresentationRequiresRefresh = nullptr, bool *commandHistoryChanged = nullptr,
+		    bool *notepadPresentationChanged = nullptr, bool *hasNotepadPresentationSnapshot = nullptr,
+		    QVector<LuaCallbackNotepadSnapshot> *notepadPresentationSnapshot = nullptr);
 		std::unique_ptr<lua_State, LuaStateDeleter>           m_ownedState;
 		lua_State                                            *m_state{nullptr};
 		bool                                                  m_packageRestrictionsApplied{false};
@@ -653,6 +746,15 @@ class LuaCallbackEngine
 		QHash<QString, bool>                     m_observedPluginCallbackPresence;
 		CallbackCatalogObserver                  m_callbackCatalogObserver;
 		QVector<LuaDeferredRuntimeMutationBatch> m_deferredRuntimeMutationBatches;
+		struct CachedLinePage
+		{
+				QPointer<WorldRuntime>                   runtime;
+				quint64                                  generation{0};
+				int                                      firstLine{0};
+				int                                      lastLine{0};
+				QHash<int, LuaCallbackLineEntrySnapshot> entries;
+		};
+		QHash<const WorldRuntime *, CachedLinePage> m_cachedLinePagesByRuntime;
 };
 
 #endif // QMUD_LUACALLBACKENGINE_H

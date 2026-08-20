@@ -35,6 +35,7 @@
 
 class MainWindow;
 class ActivityDocument;
+class WorldChildWindow;
 class WorldRuntime;
 class WorldView;
 class QMdiSubWindow;
@@ -741,7 +742,7 @@ class AppController : public QObject
 		 * @brief Executes startup recovery for reload-mode launches.
 		 * @return `true` when recovery path completed.
 		 */
-		bool        recoverReloadStartupState();
+		bool               recoverReloadStartupState();
 		/**
 		 * @brief Opens one runtime/window pair from serialized reload world state.
 		 * @param worldState Serialized world state.
@@ -750,20 +751,29 @@ class AppController : public QObject
 		 * @param view Optional output world view pointer.
 		 * @return `true` when world opening succeeds.
 		 */
-		bool        openWorldForReloadRecovery(const ReloadWorldState &worldState, bool activateWindow,
-		                                       WorldRuntime **runtime, WorldView **view = nullptr);
+		bool               openWorldForReloadRecovery(const ReloadWorldState &worldState, bool activateWindow,
+		                                              WorldRuntime **runtime, WorldView **view = nullptr);
+		/**
+		 * @brief Creates another presentation for an existing runtime.
+		 * @param runtime Runtime shared by the new presentation.
+		 * @param source Existing presentation used for title and window state.
+		 * @param activateWindow Activate the new presentation when `true`.
+		 * @return Created observer window, or `nullptr` on invalid input.
+		 */
+		WorldChildWindow  *createWorldObserverWindow(WorldRuntime *runtime, const WorldChildWindow *source,
+		                                             bool activateWindow) const;
 		/**
 		 * @brief Reconnects recovered runtime for `park_reconnect` fallback.
 		 * @param runtime Runtime to reconnect.
 		 * @param worldState Serialized host/port policy data.
 		 * @param closeSocketFirst Close inherited socket before reconnect when `true`.
 		 */
-		static void reconnectRecoveredWorld(WorldRuntime *runtime, const ReloadWorldState &worldState,
-		                                    bool closeSocketFirst);
+		static void        reconnectRecoveredWorld(WorldRuntime *runtime, const ReloadWorldState &worldState,
+		                                           bool closeSocketFirst);
 		/**
 		 * @brief Creates and shows splash screen.
 		 */
-		void        showSplashScreen();
+		void               showSplashScreen();
 		/**
 		 * @brief Hides splash screen.
 		 */

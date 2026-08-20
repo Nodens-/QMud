@@ -154,17 +154,8 @@ namespace
 			else if (code == 1)
 			{
 				state.bold = true;
-				if (!state.fore.isEmpty())
-				{
-					for (int idx = 0; idx < 8; ++idx)
-					{
-						if (state.fore == normalAnsiColorFromIndex(idx))
-						{
-							state.fore = boldAnsiColorFromIndex(idx);
-							break;
-						}
-					}
-				}
+				if (state.foregroundAnsiIndex >= 0 && !state.foregroundAnsiBright)
+					state.fore = boldAnsiColorFromIndex(state.foregroundAnsiIndex);
 			}
 			else if (code == 3)
 				state.italic = true;
@@ -173,27 +164,14 @@ namespace
 			else if (code == 4)
 				state.underline = true;
 			else if (code == 7)
-			{
 				state.inverse = true;
-				if (!state.fore.isEmpty() || !state.back.isEmpty())
-					qSwap(state.fore, state.back);
-			}
 			else if (code == 9)
 				state.strike = true;
 			else if (code == 22)
 			{
 				state.bold = false;
-				if (!state.fore.isEmpty())
-				{
-					for (int idx = 0; idx < 8; ++idx)
-					{
-						if (state.fore == boldAnsiColorFromIndex(idx))
-						{
-							state.fore = normalAnsiColorFromIndex(idx);
-							break;
-						}
-					}
-				}
+				if (state.foregroundAnsiIndex >= 0 && !state.foregroundAnsiBright)
+					state.fore = normalAnsiColorFromIndex(state.foregroundAnsiIndex);
 			}
 			else if (code == 23)
 				state.italic = false;
@@ -206,16 +184,28 @@ namespace
 			else if (code == 29)
 				state.strike = false;
 			else if (code == 39)
-				state.fore = defaultFore;
+			{
+				state.fore                 = defaultFore;
+				state.foregroundAnsiIndex  = -1;
+				state.foregroundAnsiBright = false;
+			}
 			else if (code == 49)
 				state.back = defaultBack;
 			else if (code >= 30 && code <= 37)
 			{
 				const int idx = code - 30;
 				if (idx >= 0 && idx < 8)
+				{
 					state.fore = state.bold ? boldAnsiColorFromIndex(idx) : normalAnsiColorFromIndex(idx);
+					state.foregroundAnsiIndex  = idx;
+					state.foregroundAnsiBright = false;
+				}
 				else
+				{
 					state.fore.clear();
+					state.foregroundAnsiIndex  = -1;
+					state.foregroundAnsiBright = false;
+				}
 			}
 			else if (code >= 40 && code <= 47)
 			{
@@ -229,7 +219,11 @@ namespace
 			{
 				const int idx = code - 90;
 				if (idx >= 0 && idx < 8)
-					state.fore = boldAnsiColorFromIndex(idx);
+				{
+					state.fore                 = boldAnsiColorFromIndex(idx);
+					state.foregroundAnsiIndex  = idx;
+					state.foregroundAnsiBright = true;
+				}
 			}
 			else if (code >= 100 && code <= 107)
 			{
@@ -247,7 +241,11 @@ namespace
 				{
 					const int idx = params.at(i + 2);
 					if (isFore)
-						state.fore = colorFromIndex(idx);
+					{
+						state.fore                 = colorFromIndex(idx);
+						state.foregroundAnsiIndex  = -1;
+						state.foregroundAnsiBright = false;
+					}
 					else
 						state.back = colorFromIndex(idx);
 					i += 2;
@@ -259,7 +257,11 @@ namespace
 					const int     b   = params.at(i + 4);
 					const QString rgb = rgbTripletToHex(r, g, b);
 					if (isFore)
-						state.fore = rgb;
+					{
+						state.fore                 = rgb;
+						state.foregroundAnsiIndex  = -1;
+						state.foregroundAnsiBright = false;
+					}
 					else
 						state.back = rgb;
 					i += 4;
@@ -302,7 +304,7 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArrayView bytes, QMud
 		if (!params.startsWith("8;"))
 			return;
 
-		const int secondSemicolon = params.indexOf(';', 2);
+		const auto secondSemicolon = params.indexOf(';', 2);
 		if (secondSemicolon < 0)
 			return;
 
@@ -395,7 +397,7 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArrayView bytes, QMud
 
 		case QMudAnsiStreamState::Mode::Csi:
 		{
-			const unsigned char byte = static_cast<unsigned char>(ch);
+			const auto byte = static_cast<unsigned char>(ch);
 			if (byte >= 0x40 && byte <= 0x7E)
 			{
 				if (ch == 'm')
@@ -413,7 +415,7 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArrayView bytes, QMud
 				if (streamState.pending.size() > kMaxCsiPendingBytes)
 				{
 					streamState.pending.clear();
-					streamState.mode = QMudAnsiStreamState::Mode::Normal;
+					streamState.mode = QMudAnsiStreamState::Mode::DiscardCsi;
 				}
 			}
 			else
@@ -423,6 +425,14 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArrayView bytes, QMud
 				streamState.mode = QMudAnsiStreamState::Mode::Normal;
 				--i;
 			}
+			break;
+		}
+
+		case QMudAnsiStreamState::Mode::DiscardCsi:
+		{
+			const auto byte = static_cast<unsigned char>(ch);
+			if (byte >= 0x40 && byte <= 0x7E)
+				streamState.mode = QMudAnsiStreamState::Mode::Normal;
 			break;
 		}
 
@@ -441,7 +451,7 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArrayView bytes, QMud
 				if (streamState.pending.size() > kMaxOscPendingBytes)
 				{
 					streamState.pending.clear();
-					streamState.mode = QMudAnsiStreamState::Mode::Normal;
+					streamState.mode = QMudAnsiStreamState::Mode::DiscardOsc;
 				}
 			}
 			break;
@@ -460,7 +470,7 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArrayView bytes, QMud
 				if (streamState.pending.size() > kMaxOscPendingBytes)
 				{
 					streamState.pending.clear();
-					streamState.mode = QMudAnsiStreamState::Mode::Normal;
+					streamState.mode = QMudAnsiStreamState::Mode::DiscardOsc;
 					break;
 				}
 				if (ch == '\a')
@@ -475,12 +485,26 @@ QVector<QMudStyledChunk> qmudParseAnsiSgrChunks(const QByteArrayView bytes, QMud
 					if (streamState.pending.size() > kMaxOscPendingBytes)
 					{
 						streamState.pending.clear();
-						streamState.mode = QMudAnsiStreamState::Mode::Normal;
+						streamState.mode = QMudAnsiStreamState::Mode::DiscardOsc;
 						break;
 					}
 					streamState.mode = QMudAnsiStreamState::Mode::Osc;
 				}
 			}
+			break;
+
+		case QMudAnsiStreamState::Mode::DiscardOsc:
+			if (ch == '\a')
+				streamState.mode = QMudAnsiStreamState::Mode::Normal;
+			else if (ch == '\x1b')
+				streamState.mode = QMudAnsiStreamState::Mode::DiscardOscEsc;
+			break;
+
+		case QMudAnsiStreamState::Mode::DiscardOscEsc:
+			if (ch == '\\' || ch == '\a')
+				streamState.mode = QMudAnsiStreamState::Mode::Normal;
+			else if (ch != '\x1b')
+				streamState.mode = QMudAnsiStreamState::Mode::DiscardOsc;
 			break;
 		}
 	}

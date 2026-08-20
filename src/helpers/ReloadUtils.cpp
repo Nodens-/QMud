@@ -177,6 +177,8 @@ bool writeReloadStateSnapshot(const QString &filePath, const ReloadStateSnapshot
 	{
 		QJsonObject entry;
 		entry.insert(QStringLiteral("sequence"), world.sequence);
+		entry.insert(QStringLiteral("presentation_count"), world.presentationCount);
+		entry.insert(QStringLiteral("active_presentation_ordinal"), world.activePresentationOrdinal);
 		entry.insert(QStringLiteral("world_id"), world.worldId);
 		entry.insert(QStringLiteral("display_name"), world.displayName);
 		entry.insert(QStringLiteral("world_file_path"), world.worldFilePath);
@@ -314,6 +316,27 @@ bool readReloadStateSnapshot(const QString &filePath, ReloadStateSnapshot *snaps
 		{
 			if (errorMessage)
 				*errorMessage = QStringLiteral("Reload world entry is missing required numeric fields.");
+			return false;
+		}
+		if (object.contains(QStringLiteral("presentation_count")) &&
+		    !parseIntField(object, "presentation_count", world.presentationCount))
+		{
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Reload world entry has invalid presentation count.");
+			return false;
+		}
+		if (object.contains(QStringLiteral("active_presentation_ordinal")) &&
+		    !parseIntField(object, "active_presentation_ordinal", world.activePresentationOrdinal))
+		{
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Reload world entry has invalid active presentation ordinal.");
+			return false;
+		}
+		if (world.presentationCount < 1 || world.activePresentationOrdinal < 0 ||
+		    world.activePresentationOrdinal > world.presentationCount)
+		{
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Reload world entry has inconsistent presentation state.");
 			return false;
 		}
 		world.worldId       = object.value(QStringLiteral("world_id")).toString().trimmed();

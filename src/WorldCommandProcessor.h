@@ -46,6 +46,11 @@ class WorldCommandProcessor : public QObject
 		 */
 		void               setRuntime(WorldRuntime *runtime);
 		/**
+		 * @brief Selects whether this processor owns session-wide timer evaluation.
+		 * @param owner `true` for the runtime's primary command processor.
+		 */
+		void               setRuntimeAutomationOwner(bool owner);
+		/**
 		 * @brief Binds the owning world view for UI interactions.
 		 * @param view World view instance.
 		 */
@@ -611,6 +616,7 @@ class WorldCommandProcessor : public QObject
 		bool                                         m_processingEnteredCommand{false};
 		bool                                         m_omitFromHistoryForEnteredCommand{false};
 		bool                                         m_enteredCommandSendFailed{false};
+		bool                                         m_runtimeAutomationOwner{true};
 		int                                          m_executionDepth{0};
 		mutable QHash<QString, QRegularExpression>   m_regexCache;
 		QHash<QString, QString>                      m_wildcardRegexCache;

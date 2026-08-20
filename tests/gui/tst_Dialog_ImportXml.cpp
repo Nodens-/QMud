@@ -12,8 +12,8 @@
 #include "NameGeneration.h"
 #include "WorldChildWindow.h"
 #include "WorldDocument.h"
+#include "WorldRuntime.h"
 #include "dialogs/ImportXmlDialog.h"
-#include "dialogs/PluginsDialog.h"
 
 #include <QCheckBox>
 #include <QClipboard>
@@ -35,6 +35,12 @@ namespace
 	{
 		static ImportStubState state;
 		return state;
+	}
+
+	QList<WorldRuntime::Plugin> &pluginStubStorage()
+	{
+		static QList<WorldRuntime::Plugin> plugins;
+		return plugins;
 	}
 
 	QPushButton *findButtonByText(const QObject &root, const QString &text)
@@ -80,6 +86,17 @@ AppController::AppController(QObject *parent) : QObject(parent)
 
 AppController::~AppController() = default;
 
+AppController *AppController::instance()
+{
+	static AppController app;
+	return &app;
+}
+
+QString AppController::iniFilePath() const
+{
+	return QStringLiteral("/tmp/qmud-test-import-xml.ini");
+}
+
 MainWindow *AppController::mainWindow() const
 {
 	return nullptr;
@@ -123,6 +140,11 @@ void AppController::onCommandTriggered(const QString &)
 {
 }
 
+bool AppController::openDocumentFile(const QString &)
+{
+	return true;
+}
+
 WorldChildWindow *MainWindow::activeWorldChildWindow() const
 {
 	return nullptr;
@@ -133,62 +155,60 @@ WorldRuntime *WorldChildWindow::runtime() const
 	return nullptr;
 }
 
-PluginsDialog::PluginsDialog(WorldRuntime *, MainWindow *, QWidget *parent) : QDialog(parent)
+bool MainWindow::sendToNotepad(const QString &, const QString &, WorldRuntime *)
 {
+	return true;
 }
 
-bool PluginsDialog::event(QEvent *event)
+const QMap<QString, QString> &WorldRuntime::worldAttributes() const
 {
-	return QDialog::event(event);
+	static const QMap<QString, QString> attributes;
+	return attributes;
 }
 
-bool PluginsDialog::eventFilter(QObject *watched, QEvent *event)
+const QList<WorldRuntime::Plugin> &WorldRuntime::plugins() const
 {
-	return QDialog::eventFilter(watched, event);
+	return pluginStubStorage();
 }
 
-void PluginsDialog::onAddPlugin()
+QList<WorldRuntime::Plugin> &WorldRuntime::pluginsMutable()
 {
+	return pluginStubStorage();
 }
 
-void PluginsDialog::onRemovePlugin()
+QStringList WorldRuntime::pluginIdList() const
 {
+	return {};
 }
 
-void PluginsDialog::onEnablePlugin() const
+bool WorldRuntime::loadPluginFile(const QString &, QString *, bool)
 {
+	return false;
 }
 
-void PluginsDialog::onDisablePlugin() const
+bool WorldRuntime::unloadPlugin(const QString &, QString *)
 {
+	return false;
 }
 
-void PluginsDialog::onReloadPlugin()
+bool WorldRuntime::enablePlugin(const QString &, bool)
 {
+	return false;
 }
 
-void PluginsDialog::onEditPlugin() const
+int WorldRuntime::reloadPlugin(const QString &, QString *)
 {
+	return 0;
 }
 
-void PluginsDialog::onShowDescription() const
+QString WorldRuntime::pluginsDirectory() const
 {
+	return {};
 }
 
-void PluginsDialog::onDeleteState()
+QString WorldRuntime::stateFilesDirectory() const
 {
-}
-
-void PluginsDialog::onSelectionChanged() const
-{
-}
-
-void PluginsDialog::onMoveUp() const
-{
-}
-
-void PluginsDialog::onMoveDown() const
-{
+	return {};
 }
 // NOLINTEND(readability-convert-member-functions-to-static)
 

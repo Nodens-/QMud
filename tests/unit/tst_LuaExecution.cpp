@@ -8,12 +8,14 @@
 
 #include "LuaExecutorWorker.h"
 #include "LuaSupport.h"
+#include "helpers/LuaCompletionDeliveryUtils.h"
 #include "helpers/LuaExecutionUtils.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QScopeGuard>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QPointer>
+#include <QSemaphore>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -29,6 +31,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 extern "C" int         luaopen_lsqlite3(lua_State *L);
@@ -44,40 +47,33 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	return result;
 }
 
-void ILuaExecutor::dispatchBatchAsync(const LuaBatchDispatchRequest &request) const
-{
-	static_cast<void>(dispatchBatch(request));
-}
-
 void ILuaExecutor::dispatchBatchAsync(
     const LuaBatchDispatchRequest &request, QObject *completionTarget,
     const std::function<void(const LuaBatchDispatchResult &)> &completion) const
 {
-	const LuaBatchDispatchResult result = dispatchBatch(request);
 	if (!completion)
 		return;
-	if (!completionTarget || completionTarget->thread() == QThread::currentThread())
-	{
-		completion(result);
-		return;
-	}
-	const QPointer<QObject> targetGuard(completionTarget);
-	auto completionState = std::make_shared<std::function<void(const LuaBatchDispatchResult &)>>(completion);
-	const bool queued    = QMetaObject::invokeMethod(
-	    completionTarget,
-	    [targetGuard, completionState, result]() mutable
-	    {
-		    if (!targetGuard || !completionState || !*completionState)
-			    return;
-		    (*completionState)(result);
-	    },
-	    Qt::QueuedConnection);
-	if (!queued && completionState && *completionState)
-		(*completionState)(result);
+	const LuaCompletionTarget target = qmudCaptureLuaCompletionTarget(completionTarget);
+	qmudDeliverLuaCompletion(target, completion, dispatchBatch(request));
 }
 
 namespace
 {
+	LuaDeferredRuntimeMutationConsumer recoveredMutationConsumerForTest()
+	{
+		return [](const QVector<LuaDeferredRuntimeMutationBatch> &batches)
+		{
+			for (const LuaDeferredRuntimeMutationBatch &batch : batches)
+			{
+				for (const std::function<void()> &mutation : batch.mutations)
+				{
+					if (mutation)
+						mutation();
+				}
+			}
+		};
+	}
+
 	class RawLuaStateOwner final
 	{
 		public:
@@ -477,9 +473,53 @@ namespace
 				QVERIFY(workDone);
 			}
 
+			void luaBridgeCooperativePumpSkipsAsynchronousPosts()
+			{
+				const LuaBridgeAsyncTarget target = qmudLuaBridgeCaptureAsyncTarget(QThread::currentThread());
+				std::atomic_bool           executed{false};
+				std::atomic_bool           canceled{false};
+				constexpr quintptr         kPumpKey = 0x1234;
+				QVERIFY(qmudLuaBridgePost(
+				    target, [&executed] { executed.store(true); }, [&canceled] { canceled.store(true); },
+				    kPumpKey));
+
+				static_cast<void>(qmudLuaBridgePumpCurrentThreadOnce());
+				QVERIFY(!executed.load());
+				QVERIFY(!canceled.load());
+				QVERIFY(!qmudLuaBridgePumpCurrentThreadAsyncOnce(kPumpKey + 1));
+				QVERIFY(!executed.load());
+				QVERIFY(qmudLuaBridgePumpCurrentThreadAsyncOnce(kPumpKey));
+				QVERIFY(executed.load());
+				QVERIFY(!canceled.load());
+			}
+
+			void luaBridgePumpYieldsToQueuedEventsDuringBacklog()
+			{
+				constexpr int              requestCount = 1024;
+				const LuaBridgeAsyncTarget target = qmudLuaBridgeCaptureAsyncTarget(QThread::currentThread());
+				int                        executed         = 0;
+				int                        canceled         = 0;
+				int                        executedAtMarker = -1;
+
+				for (int requestIndex = 0; requestIndex < requestCount; ++requestIndex)
+				{
+					QVERIFY(
+					    qmudLuaBridgePost(target, [&executed] { ++executed; }, [&canceled] { ++canceled; }));
+				}
+				QVERIFY(QMetaObject::invokeMethod(
+				    this, [&executed, &executedAtMarker] { executedAtMarker = executed; },
+				    Qt::QueuedConnection));
+
+				QTRY_VERIFY_WITH_TIMEOUT(executedAtMarker >= 0, 3000);
+				QVERIFY(executedAtMarker > 0);
+				QVERIFY(executedAtMarker < requestCount);
+				QTRY_COMPARE_WITH_TIMEOUT(executed, requestCount, 3000);
+				QCOMPARE(canceled, 0);
+			}
+
 			void luaExecutorWorkerReentrantDispatchPreservesQueueOrder()
 			{
-				LuaExecutorWorker executor;
+				LuaExecutorWorker executor(recoveredMutationConsumerForTest());
 				QObject           mainTarget;
 				QThread          *mainThread = QThread::currentThread();
 
@@ -547,6 +587,161 @@ namespace
 				QCOMPARE(order.at(1), 2);
 			}
 
+			void luaExecutorCompletionTargetDestroyedDuringDispatchIsNotInvoked()
+			{
+				static_assert(!std::is_default_constructible_v<LuaExecutorWorker>);
+				class TargetDestroyingExecutor final : public ILuaExecutor
+				{
+					public:
+						explicit TargetDestroyingExecutor(std::unique_ptr<QObject> &target) : m_target(target)
+						{
+						}
+
+						[[nodiscard]] LuaBatchDispatchResult
+						dispatchBatch(const LuaBatchDispatchRequest & /*request*/) const override
+						{
+							m_target.reset();
+							return {};
+						}
+
+					private:
+						std::unique_ptr<QObject> &m_target;
+				};
+
+				auto                     target        = std::make_unique<QObject>();
+				QObject *const           targetPointer = target.get();
+				TargetDestroyingExecutor executor(target);
+				bool                     completionCalled = false;
+				LuaBatchDispatchRequest  request;
+				executor.dispatchBatchAsync(request, targetPointer,
+				                            [&](const LuaBatchDispatchResult &) { completionCalled = true; });
+
+				QVERIFY(!target);
+				QVERIFY(!completionCalled);
+			}
+
+			void luaCompletionTargetDestructionFinishesFromBridgeQueue()
+			{
+				auto target                    = std::make_unique<QObject>();
+				bool destructionSignalActive   = false;
+				bool completionCalled          = false;
+				bool deliveryFinished          = false;
+				bool finishedDuringDestruction = false;
+				QObject::connect(target.get(), &QObject::destroyed,
+				                 [&destructionSignalActive] { destructionSignalActive = true; });
+				const LuaCompletionTarget captured = qmudCaptureLuaCompletionTarget(target.get());
+				qmudDeliverLuaCompletion(
+				    captured, [&](const LuaBatchDispatchResult &) { completionCalled = true; }, {},
+				    LuaCompletionDeliveryMode::AlwaysQueued,
+				    [&]
+				    {
+					    deliveryFinished          = true;
+					    finishedDuringDestruction = destructionSignalActive;
+				    });
+
+				target.reset();
+				QVERIFY(destructionSignalActive);
+				QVERIFY(!deliveryFinished);
+				destructionSignalActive = false;
+				QTRY_VERIFY_WITH_TIMEOUT(deliveryFinished, 3000);
+				QVERIFY(!completionCalled);
+				QVERIFY(!finishedDuringDestruction);
+			}
+
+			void luaWorkerStoppedCompletionThreadAdvancesSequence()
+			{
+				LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+				QThread           stoppedThread;
+				auto             *stoppedTarget = new QObject();
+				QPointer<QObject> stoppedGuard(stoppedTarget);
+				stoppedTarget->moveToThread(&stoppedThread);
+				QObject::connect(&stoppedThread, &QThread::finished, stoppedTarget, &QObject::deleteLater);
+				stoppedThread.start();
+
+				QSemaphore blocked;
+				QSemaphore release;
+				QVERIFY(QMetaObject::invokeMethod(
+				    stoppedTarget,
+				    [&]
+				    {
+					    blocked.release();
+					    release.acquire();
+				    },
+				    Qt::QueuedConnection));
+				QVERIFY(blocked.tryAcquire(1, 3000));
+
+				LuaBatchDispatchRequest request;
+				request.kind = LuaBatchDispatchKind::HasFunction;
+				QObject          followingTarget;
+				std::atomic_bool stoppedCompletion{false};
+				std::atomic_bool followingCompletion{false};
+				executor.dispatchBatchAsync(request, stoppedTarget, [&](const LuaBatchDispatchResult &)
+				                            { stoppedCompletion.store(true); });
+				executor.dispatchBatchAsync(request, &followingTarget, [&](const LuaBatchDispatchResult &)
+				                            { followingCompletion.store(true); });
+				static_cast<void>(executor.dispatchBatch(request));
+				QVERIFY(!followingCompletion.load());
+
+				stoppedThread.quit();
+				release.release();
+				QVERIFY(stoppedThread.wait(3000));
+				QTRY_VERIFY_WITH_TIMEOUT(followingCompletion.load(), 3000);
+				QVERIFY(!stoppedCompletion.load());
+				QTRY_VERIFY_WITH_TIMEOUT(stoppedGuard.isNull(), 3000);
+			}
+
+			void luaWorkerThrowingTargetlessCompletionDoesNotStopQueuePump()
+			{
+				LuaExecutorWorker       executor(recoveredMutationConsumerForTest());
+				LuaBatchDispatchRequest request;
+				request.kind = LuaBatchDispatchKind::HasFunction;
+				QObject          followingTarget;
+				std::atomic_bool followingCompletion{false};
+
+				QTest::ignoreMessage(
+				    QtWarningMsg,
+				    "[QMud][LuaExecutor] worker dispatch failed: exception while delivering a targetless "
+				    "asynchronous completion: queued completion failure");
+				executor.dispatchBatchAsync(request, nullptr, [](const LuaBatchDispatchResult &)
+				                            { throw std::runtime_error("queued completion failure"); });
+				executor.dispatchBatchAsync(request, &followingTarget, [&](const LuaBatchDispatchResult &)
+				                            { followingCompletion.store(true, std::memory_order_release); });
+				static_cast<void>(executor.dispatchBatch(request));
+
+				QTRY_VERIFY_WITH_TIMEOUT(followingCompletion.load(std::memory_order_acquire), 3000);
+			}
+
+			void luaWorkerReentrantThrowingCompletionResolvesTicket()
+			{
+				LuaExecutorWorker       executor(recoveredMutationConsumerForTest());
+				LuaBatchDispatchRequest request;
+				request.kind = LuaBatchDispatchKind::HasFunction;
+				QObject          followingTarget;
+				std::atomic_bool reentrantDispatchReturned{false};
+				std::atomic_bool followingCompletion{false};
+
+				QTest::ignoreMessage(
+				    QtWarningMsg,
+				    "[QMud][LuaExecutor] worker dispatch failed: exception while delivering a targetless "
+				    "asynchronous completion: reentrant completion failure");
+				executor.dispatchBatchAsync(
+				    request, nullptr,
+				    [&](const LuaBatchDispatchResult &)
+				    {
+					    executor.dispatchBatchAsync(
+					        request, nullptr, [](const LuaBatchDispatchResult &)
+					        { throw std::runtime_error("reentrant completion failure"); });
+					    executor.dispatchBatchAsync(
+					        request, &followingTarget, [&](const LuaBatchDispatchResult &)
+					        { followingCompletion.store(true, std::memory_order_release); });
+					    reentrantDispatchReturned.store(true, std::memory_order_release);
+				    });
+				static_cast<void>(executor.dispatchBatch(request));
+
+				QTRY_VERIFY_WITH_TIMEOUT(reentrantDispatchReturned.load(std::memory_order_acquire), 3000);
+				QTRY_VERIFY_WITH_TIMEOUT(followingCompletion.load(std::memory_order_acquire), 3000);
+			}
+
 			void luaExecutorWorkerShutdownDrainsAsyncCompletions()
 			{
 				constexpr int   requestCount = 128;
@@ -554,7 +749,7 @@ namespace
 				QObject         completionTarget;
 
 				{
-					auto                    executor = std::make_unique<LuaExecutorWorker>();
+					auto executor = std::make_unique<LuaExecutorWorker>(recoveredMutationConsumerForTest());
 					LuaBatchDispatchRequest request;
 					request.kind = LuaBatchDispatchKind::HasFunction;
 					for (int i = 0; i < requestCount; ++i)
@@ -601,7 +796,7 @@ namespace
 					LuaBatchDispatchRequest request;
 					request.kind                  = LuaBatchDispatchKind::HasFunction;
 					request.miniWindowSnapshotArg = snapshot;
-					LuaExecutorWorker executor;
+					LuaExecutorWorker executor(recoveredMutationConsumerForTest());
 					executor.dispatchBatchAsync(
 					    request, &completionTarget,
 					    [snapshot = request.miniWindowSnapshotArg, &completed, &observedWindowName,

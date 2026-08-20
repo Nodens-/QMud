@@ -203,6 +203,7 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
     qmud_add_qtest(tst_LuaExecution
             SOURCES
             unit/tst_LuaExecution.cpp
+            "${CMAKE_SOURCE_DIR}/src/helpers/LuaCompletionDeliveryUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/helpers/LuaExecutionUtils.cpp"
             "${CMAKE_SOURCE_DIR}/src/LuaExecutorWorker.cpp"
             "${CMAKE_SOURCE_DIR}/src/LuaSupport.cpp"
@@ -230,7 +231,9 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
             LIBRARIES
             qmud_app_core
             LABELS
-            unit)
+            unit
+            TIMEOUT
+            90)
 
     qmud_add_qtest(tst_LuaLuacomShim
             SOURCES
@@ -591,6 +594,18 @@ qmud_add_qtest(tst_WorldRuntime_PluginLifecycle
         TIMEOUT
         120)
 
+qmud_add_qtest(tst_WorldObserverLifecycle
+        GUI
+        SOURCES
+        gui/tst_WorldObserverLifecycle.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        gui
+        integration
+        TIMEOUT
+        30)
+
 qmud_add_qtest(tst_WorldRuntime_MiniWindowGeometry
         GUI
         SOURCES
@@ -798,8 +813,8 @@ if (QMUD_ENABLE_GUI_TESTS)
             SOURCES
             gui/tst_Dialog_ImportXml.cpp
             "${CMAKE_SOURCE_DIR}/src/dialogs/ImportXmlDialog.cpp"
+            "${CMAKE_SOURCE_DIR}/src/dialogs/PluginsDialog.cpp"
             "${CMAKE_SOURCE_DIR}/src/AppController.h"
-            "${CMAKE_SOURCE_DIR}/src/dialogs/PluginsDialog.h"
             LIBRARIES
             Qt6::Sql
             LABELS

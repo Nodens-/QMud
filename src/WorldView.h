@@ -46,6 +46,7 @@ class QPainter;
 class WorldOutputCanvas;
 class WorldOutputAccessible;
 class tst_WorldView_Basic;
+class tst_WorldRuntime_PluginLifecycle;
 
 /**
  * @brief Installs the custom accessibility factory for native world output widgets.
@@ -104,6 +105,11 @@ class WorldView : public QWidget
 		 * @param runtime Runtime instance to observe.
 		 */
 		void                        setRuntimeObserver(WorldRuntime *runtime);
+		/**
+		 * @brief Switches this presentation to or from passive buffer-view mode.
+		 * @param passive When `true`, only buffer selection and navigation remain available.
+		 */
+		void                        setPassiveBufferView(bool passive);
 		/**
 		 * @brief Returns currently bound runtime.
 		 * @return Bound runtime pointer, or `nullptr` when unbound.
@@ -201,6 +207,10 @@ class WorldView : public QWidget
 		 * @param runtimeLineIndex Zero-based runtime line index to restitch.
 		 */
 		void notifyRuntimeOutputLineChanged(int runtimeLineIndex);
+		/**
+		 * @brief Presents one or more newly appended runtime tail lines.
+		 */
+		void notifyRuntimeOutputLineAppended();
 		/**
 		 * @brief Restitches output presentation after runtime changes a known buffer range.
 		 * @param runtimeLineIndex Zero-based runtime line index where restitching starts.
@@ -795,6 +805,17 @@ class WorldView : public QWidget
 		 */
 		int  setOutputScroll(int position, bool visible);
 		/**
+		 * @brief Applies pending output presentation work and returns the resulting scroll position.
+		 * @return Current output scroll position after pending layout and tail-follow work.
+		 */
+		[[nodiscard]] int   synchronizePendingOutputScrollPosition();
+		/**
+		 * @brief Applies a queued command-input wrap and height update immediately.
+		 *
+		 * Geometry snapshots use this to observe the output client area produced by the latest command text.
+		 */
+		void                synchronizePendingInputViewportLayout();
+		/**
 		 * @brief Returns output selection start line.
 		 * @return Output selection start line.
 		 */
@@ -958,6 +979,7 @@ class WorldView : public QWidget
 		friend class WorldOutputCanvas;
 		friend class WorldRuntime;
 		friend class ::tst_WorldView_Basic;
+		friend class ::tst_WorldRuntime_PluginLifecycle;
 		struct NativeOutputRenderLine;
 		using NativeOutputRenderLines = IndexedRingBuffer<NativeOutputRenderLine>;
 		enum class AccessibleOutputReviewTargetKind
@@ -1018,11 +1040,30 @@ class WorldView : public QWidget
 		/**
 		 * @brief Begins a runtime-owned output presentation mutation batch.
 		 */
-		void beginRuntimeOutputMutationBatch();
+		void beginRuntimeOutputMutationBatch(bool suppressDrawNotifications);
 		/**
 		 * @brief Ends a runtime-owned output presentation mutation batch.
 		 */
 		void endRuntimeOutputMutationBatch();
+		/**
+		 * @brief Tracks entry to and exit from an OnPluginDrawOutputWindow callback.
+		 * @param active Whether the callback is currently executing.
+		 */
+		void setDrawOutputWindowCallbackActive(bool active);
+		/**
+		 * @brief Clears draw-callback notification state when changing runtime bindings.
+		 */
+		void resetDrawOutputWindowNotificationState();
+		/**
+		 * @brief Enables primary-only command and scripted output interactions.
+		 *
+		 * Observer presentations keep only passive buffer selection and navigation.
+		 */
+		void setCommandInteractionEnabled(bool enabled);
+		/**
+		 * @brief Replays one coalesced viewport notification when suppression has ended.
+		 */
+		void replayPendingDrawOutputWindowNotification();
 		/**
 		 * @brief Applies runtime settings with policy-driven rebuild selection.
 		 * @param allowRebuild `true` to run semantic rebuild policy, `false` to force no rebuild.
@@ -1686,7 +1727,52 @@ class WorldView : public QWidget
 		 * @param allowLayoutBuild `true` when range changes require current layout geometry now.
 		 * @param followTail `true` to keep the live output pane at the tail.
 		 */
-		void requestNativeRuntimeOutputPresentationSync(bool allowLayoutBuild, bool followTail);
+		void               requestNativeRuntimeOutputPresentationSync(bool allowLayoutBuild, bool followTail);
+		/**
+		 * @brief Returns whether the runtime tail advanced beyond the cached presentation tail.
+		 * @return `true` when the current runtime tail has not yet been presented.
+		 */
+		[[nodiscard]] bool runtimeOutputTailAdvanced() const;
+		/**
+		 * @brief Resets partial-line presentation before applying a runtime buffer mutation.
+		 * @param tailAdvanced Whether the runtime acquired a new presented tail line.
+		 * @param clearLastPartialAnnouncement Whether to discard partial-line accessibility history.
+		 */
+		void prepareRuntimeOutputMutationPresentation(bool tailAdvanced, bool clearLastPartialAnnouncement);
+		/**
+		 * @brief Returns whether queued output work must complete before draw callbacks run.
+		 * @return `true` while presentation, tail-scroll, or batched partial-clear work is pending.
+		 */
+		[[nodiscard]] bool hasPendingOutputPresentationWork() const;
+		/**
+		 * @brief Releases pending draw callbacks before requesting the repaint for completed presentation work.
+		 * @param repaintVisiblePanes `true` to repaint all visible output panes.
+		 */
+		void               finalizeNativeOutputPresentationUpdate(bool repaintVisiblePanes);
+		enum class SemanticOutputRepaint
+		{
+			None,
+			Tail,
+			PresentationDelta,
+			PresentationVisible,
+			Full
+		};
+		enum class SemanticOutputPaintLayer
+		{
+			NativeCanvas,
+			MiniWindowUnderlay,
+			MiniWindowOverlay
+		};
+		void               requestSemanticOutputRepaint(SemanticOutputRepaint repaint,
+		                                                bool                  preserveDuringCallbackSuppression = false);
+		void               queueSemanticOutputRepaint(SemanticOutputRepaint repaint);
+		void               releaseSemanticOutputRepaint();
+		[[nodiscard]] bool deferSemanticOutputPaintForDrawCallback(SemanticOutputPaintLayer layer,
+		                                                           const QRegion           &region);
+		/**
+		 * @brief Invalidates queued output-presentation work from the previous runtime binding.
+		 */
+		void               resetNativeOutputPresentationRequestState();
 		/**
 		 * @brief Records one native append/rebuild diagnostic sample.
 		 * @param kind Append caller classification.
@@ -1964,6 +2050,21 @@ class WorldView : public QWidget
 		 */
 		void noteUserScrollAction();
 		/**
+		 * @brief Applies a semantic output viewport scroll and notifies draw callbacks on change.
+		 * @param bar Scroll bar controlling the viewport.
+		 * @param target Requested scroll position.
+		 * @param preserveDuringCallbackSuppression Preserve user/accessibility changes made while a draw
+		 * callback is presenting its own output.
+		 * @return `true` when the viewport position changed.
+		 */
+		bool setSemanticOutputScrollPosition(QScrollBar *bar, int target,
+		                                     bool preserveDuringCallbackSuppression = true);
+		/**
+		 * @brief Notifies draw callbacks after a semantic viewport presentation change.
+		 * @param preserveDuringCallbackSuppression Preserve the notification across callback presentation.
+		 */
+		void notifySemanticOutputViewportChanged(bool preserveDuringCallbackSuppression);
+		/**
 		 * @brief Synchronizes split and accessibility review state after top-pane output scrolling.
 		 * @param notifyReviewTarget Emit review speech/accessibility updates when the view remains split.
 		 * @param forceReviewTargetNotify Emit review speech/accessibility even when the caret is unchanged.
@@ -2220,7 +2321,15 @@ class WorldView : public QWidget
 		/**
 		 * @brief Queues draw-output-window notification callback.
 		 */
-		void requestDrawOutputWindowNotification();
+		void requestDrawOutputWindowNotification(bool preserveDuringCallbackSuppression = false);
+		/**
+		 * @brief Queues a pending draw callback when callback and presentation state permit it.
+		 */
+		void schedulePendingDrawOutputWindowNotification();
+		/**
+		 * @brief Dispatches a pending draw callback after all presentation prerequisites complete.
+		 */
+		void dispatchPendingDrawOutputWindowNotification();
 		/**
 		 * @brief Queues coalesced input wrap/height/caret viewport synchronization.
 		 */
@@ -2232,7 +2341,7 @@ class WorldView : public QWidget
 		/**
 		 * @brief Fires draw-output-window notification callback.
 		 */
-		void notifyDrawOutputWindow() const;
+		void notifyDrawOutputWindow();
 		void appendStandaloneOutputEntry(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
 		                                 bool hardReturn, int flags, const QDateTime &time);
 		/**
@@ -2293,44 +2402,50 @@ class WorldView : public QWidget
 		mutable bool                                m_nativeOutputRepaintQueued{false};
 		mutable bool                                m_nativeOutputRepaintAll{false};
 		mutable QRegion                             m_nativeOutputRepaintRegion;
-		mutable NativeOutputPanePaintState          m_nativePrimaryPaintState;
-		mutable NativeOutputPanePaintState          m_nativeLivePaintState;
-		mutable bool                                m_nativeOutputScrollBlitPending{false};
-		mutable QRect                               m_nativeOutputScrollBlitExposedRect;
-		mutable QRegion                             m_nativeOutputScrollBlitBackgroundRegion;
-		mutable QRegion                             m_nativeOutputScrollBlitRepaintRegion;
-		quint64                                     m_miniWindowChangeSerial{0};
-		mutable bool                                m_miniWindowPaintBoundsValid{false};
-		mutable MiniWindowPaintBoundsSnapshot       m_miniWindowPaintBounds;
-		mutable QRegion                             m_pendingMiniWindowUnderlayDirtyRegion;
-		mutable QRegion                             m_pendingMiniWindowOverlayDirtyRegion;
-		mutable bool                                m_wrapMarginReservationCacheValid{false};
-		mutable QRect                               m_wrapMarginReservationRect;
-		mutable quint64                             m_wrapMarginReservationSerial{0};
-		mutable int                                 m_wrapMarginReservationPixels{0};
-		QSize                                       m_lastQueuedOutputClientSize;
-		bool                                        m_lastQueuedOutputClientSizeValid{false};
-		mutable NativeOutputRenderLines             m_nativeRenderLineCache;
-		mutable bool                                m_nativeRenderLineCacheValid{false};
-		mutable bool                                m_nativeRenderLineCacheFromRuntime{false};
-		mutable bool                                m_nativeRuntimeTailRestitchPending{false};
-		mutable int                                 m_nativeRuntimeLineRestitchIndex{-1};
-		mutable int                                 m_nativeRuntimeRangeRestitchStartIndex{-1};
-		mutable qint64                              m_nativeRenderRuntimeIndexBase{0};
-		mutable quint64                             m_nativeRenderLineCacheRevision{0};
-		mutable NativeRenderCacheDelta              m_nativeRenderCacheDelta;
-		mutable QVector<NativeRenderCacheDelta>     m_nativeRenderCacheDeltas;
-		mutable int                                 m_accessibleOutputCharacterCount{-1};
-		mutable quint64                             m_accessibleOutputRevision{0};
-		mutable QString                             m_accessibleOutputText;
-		mutable bool                                m_accessibleOutputPendingTailAppend{false};
-		mutable QString                             m_accessibleOutputLastAnnouncedPartialText;
-		mutable bool                                m_accessibleOutputLiveEventsSuppressed{false};
-		mutable int                                 m_accessibleOutputBaselineLineCount{-1};
-		mutable QString                             m_accessibleOutputBaselineTailText;
-		mutable QVector<int>                        m_accessibleOutputBaselineLineLengths;
-		mutable bool                                m_accessibleOutputReviewActive{false};
-		mutable AccessibleOutputReviewTargetKind    m_accessibleOutputReviewTargetKind{
+		SemanticOutputRepaint                    m_pendingSemanticOutputRepaint{SemanticOutputRepaint::None};
+		QRegion                                  m_deferredSemanticNativeCanvasPaintRegion;
+		QRegion                                  m_deferredSemanticMiniWindowUnderlayPaintRegion;
+		QRegion                                  m_deferredSemanticMiniWindowOverlayPaintRegion;
+		bool                                     m_semanticOutputPaintBarrierActive{false};
+		int                                      m_drawCallbackCompletionsPending{0};
+		mutable NativeOutputPanePaintState       m_nativePrimaryPaintState;
+		mutable NativeOutputPanePaintState       m_nativeLivePaintState;
+		mutable bool                             m_nativeOutputScrollBlitPending{false};
+		mutable QRect                            m_nativeOutputScrollBlitExposedRect;
+		mutable QRegion                          m_nativeOutputScrollBlitBackgroundRegion;
+		mutable QRegion                          m_nativeOutputScrollBlitRepaintRegion;
+		quint64                                  m_miniWindowChangeSerial{0};
+		mutable bool                             m_miniWindowPaintBoundsValid{false};
+		mutable MiniWindowPaintBoundsSnapshot    m_miniWindowPaintBounds;
+		mutable QRegion                          m_pendingMiniWindowUnderlayDirtyRegion;
+		mutable QRegion                          m_pendingMiniWindowOverlayDirtyRegion;
+		mutable bool                             m_wrapMarginReservationCacheValid{false};
+		mutable QRect                            m_wrapMarginReservationRect;
+		mutable quint64                          m_wrapMarginReservationSerial{0};
+		mutable int                              m_wrapMarginReservationPixels{0};
+		QSize                                    m_lastQueuedOutputClientSize;
+		bool                                     m_lastQueuedOutputClientSizeValid{false};
+		mutable NativeOutputRenderLines          m_nativeRenderLineCache;
+		mutable bool                             m_nativeRenderLineCacheValid{false};
+		mutable bool                             m_nativeRenderLineCacheFromRuntime{false};
+		mutable bool                             m_nativeRuntimeTailRestitchPending{false};
+		mutable int                              m_nativeRuntimeLineRestitchIndex{-1};
+		mutable int                              m_nativeRuntimeRangeRestitchStartIndex{-1};
+		mutable qint64                           m_nativeRenderRuntimeIndexBase{0};
+		mutable quint64                          m_nativeRenderLineCacheRevision{0};
+		mutable NativeRenderCacheDelta           m_nativeRenderCacheDelta;
+		mutable QVector<NativeRenderCacheDelta>  m_nativeRenderCacheDeltas;
+		mutable int                              m_accessibleOutputCharacterCount{-1};
+		mutable quint64                          m_accessibleOutputRevision{0};
+		mutable QString                          m_accessibleOutputText;
+		mutable bool                             m_accessibleOutputPendingTailAppend{false};
+		mutable QString                          m_accessibleOutputLastAnnouncedPartialText;
+		mutable bool                             m_accessibleOutputLiveEventsSuppressed{false};
+		mutable int                              m_accessibleOutputBaselineLineCount{-1};
+		mutable QString                          m_accessibleOutputBaselineTailText;
+		mutable QVector<int>                     m_accessibleOutputBaselineLineLengths;
+		mutable bool                             m_accessibleOutputReviewActive{false};
+		mutable AccessibleOutputReviewTargetKind m_accessibleOutputReviewTargetKind{
 		    AccessibleOutputReviewTargetKind::None};
 		mutable int                                    m_accessibleOutputReviewLastNotifiedCursorOffset{-1};
 		mutable int                                    m_accessibleOutputReviewLastNotifiedScrollValue{-1};
@@ -2415,6 +2530,7 @@ class WorldView : public QWidget
 		bool                                           m_wrapInput{false};
 		int                                            m_inputPixelOffset{0};
 		WorldRuntime                                  *m_runtime{nullptr};
+		bool                                           m_commandInteractionEnabled{true};
 		QFont                                          m_defaultOutputFont;
 		QFont                                          m_defaultInputFont;
 		bool                                           m_displayMyInput{false};
@@ -2551,6 +2667,11 @@ class WorldView : public QWidget
 		bool                                    m_hasAppliedOutputCursor{false};
 		QCursor                                 m_appliedOutputCursor;
 		bool                                    m_drawNotifyQueued{false};
+		bool                                    m_drawOutputWindowCallbackActive{false};
+		bool                                    m_drawCallbackOutputPresentationSuppressed{false};
+		bool                                    m_drawViewportNotificationPending{false};
+		quint64                                 m_drawNotificationBindingGeneration{0};
+		quint64                                 m_drawPresentationSuppressionGeneration{0};
 		bool                                    m_inputViewportSyncQueued{false};
 		mutable int                             m_autoResizeInputDocRevision{-1};
 		mutable int                             m_autoResizeInputBlockCount{0};
@@ -2566,15 +2687,18 @@ class WorldView : public QWidget
 		bool                                    m_nativeRuntimeOutputPresentationQueued{false};
 		bool                                    m_nativeRuntimeOutputPresentationNeedsLayoutSync{false};
 		bool                                    m_nativeRuntimeOutputPresentationFollowTail{false};
+		quint64                                 m_nativeOutputPresentationBindingGeneration{0};
 		int                                     m_runtimeOutputMutationBatchDepth{0};
-		bool                                    m_runtimeBatchPartialClearPending{false};
-		bool                                    m_scrollToEndQueued{false};
-		bool                                    m_scrollToEndNeedsLayoutSync{false};
-		bool                                    m_destroying{false};
-		int                                     m_wheelAngleRemainderY{0};
-		bool                                    m_keypadRepeatArmed{false};
-		int                                     m_keypadRepeatQtKey{0};
-		bool                                    m_keypadRepeatCtrl{false};
+		bool m_runtimeOutputMutationBatchSuppressesDrawNotifications{false};
+		bool m_runtimeBatchPartialClearPending{false};
+		bool m_scrollToEndQueued{false};
+		bool m_scrollToEndNeedsLayoutSync{false};
+		bool m_scrollToEndRequested{false};
+		bool m_destroying{false};
+		int  m_wheelAngleRemainderY{0};
+		bool m_keypadRepeatArmed{false};
+		int  m_keypadRepeatQtKey{0};
+		bool m_keypadRepeatCtrl{false};
 		/**
 		 * @brief Snapshot of global default fonts used to detect effective view-setting changes.
 		 */

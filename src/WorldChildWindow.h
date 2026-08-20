@@ -43,6 +43,7 @@ class WorldChildWindow : public QMdiSubWindow
 		 * @param parent Optional Qt parent widget.
 		 */
 		explicit WorldChildWindow(const QString &title, QWidget *parent = nullptr);
+		~WorldChildWindow() override;
 		/**
 		 * @brief Binds primary runtime/controller to this window.
 		 * @param runtime Runtime instance to bind.
@@ -58,6 +59,11 @@ class WorldChildWindow : public QMdiSubWindow
 		 * @return Bound runtime pointer, or `nullptr`.
 		 */
 		[[nodiscard]] WorldRuntime    *runtime() const;
+		/**
+		 * @brief Reports whether this presentation owns runtime automation.
+		 * @return `true` for the runtime's primary presentation.
+		 */
+		[[nodiscard]] bool             isPrimaryRuntimeBinding() const;
 		/**
 		 * @brief Returns world view widget hosted by this child window.
 		 * @return Hosted world view pointer, or `nullptr`.
@@ -117,6 +123,14 @@ class WorldChildWindow : public QMdiSubWindow
 		 * @param role Binding role.
 		 */
 		void                         bindRuntime(class WorldRuntime *worldRuntime, RuntimeBindingRole role);
+		/**
+		 * @brief Creates and wires the command processor for a primary presentation.
+		 */
+		void                         createCommandProcessor();
+		/**
+		 * @brief Detaches and destroys the primary-only command processor.
+		 */
+		void                         destroyCommandProcessor();
 		/**
 		 * @brief Installs deferred plugin packages for the bound runtime.
 		 */
@@ -204,9 +218,10 @@ class TextChildWindow : public QMdiSubWindow
 		 * @brief Saves content to specified file path.
 		 * @param path Destination file path.
 		 * @param error Optional output error text.
+		 * @param adoptPath Whether the destination becomes this notepad's current path and title.
 		 * @return `true` on successful save.
 		 */
-		bool                          saveToFile(const QString &path, QString *error);
+		bool                          saveToFile(const QString &path, QString *error, bool adoptPath = true);
 		/**
 		 * @brief Saves content to current associated file path.
 		 * @param error Optional output error text.

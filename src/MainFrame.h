@@ -133,6 +133,11 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		[[nodiscard]] WorldChildWindow *activeWorldChildWindow() const override;
 		/**
+		 * @brief Returns the currently focused world presentation, including a passive observer.
+		 * @return Focused world MDI child, or `nullptr` when another presentation is active.
+		 */
+		[[nodiscard]] WorldChildWindow *activeWorldPresentationWindow() const;
+		/**
 		 * @brief Returns active text child window.
 		 * @return Active text child window, or `nullptr`.
 		 */
@@ -478,6 +483,11 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		void                                         activateWorldSlot(int slot) override;
 		/**
+		 * @brief Activates a specific world presentation.
+		 * @param window World presentation to activate.
+		 */
+		void                                         activateWorldWindow(WorldChildWindow *window) override;
+		/**
 		 * @brief Returns last remembered normal geometry.
 		 * @return Last non-maximized geometry rectangle.
 		 */
@@ -487,6 +497,11 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @return Descriptor list for open world windows.
 		 */
 		[[nodiscard]] QVector<WorldWindowDescriptor> worldWindowDescriptors() const override;
+		/**
+		 * @brief Returns one primary presentation descriptor per runtime.
+		 * @return Ordered unique runtime descriptors.
+		 */
+		[[nodiscard]] QVector<WorldWindowDescriptor> worldRuntimeDescriptors() const override;
 		/**
 		 * @brief Returns open notepad child windows in MDI creation order.
 		 * @return Ordered notepad child window pointers.

@@ -17,6 +17,9 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
 
+#include <functional>
+#include <utility>
+
 /**
  * @brief Shared helpers for QMud's own fixed-column output wrapping.
  */
@@ -60,14 +63,53 @@ namespace QMudOutputWrapUtils
 	[[nodiscard]] int                   trailingLineColumnWidthForWrap(const QString &text);
 
 	/**
+	 * @brief Reports whether spans already form an unchanged exact presentation for text.
+	 * @param text Presented text.
+	 * @param spans Candidate spans.
+	 * @return True only when every span is positive and their combined length is exactly text.size().
+	 */
+	[[nodiscard]] bool styleSpansCoverTextExactly(const QString                          &text,
+	                                              const QVector<WorldRuntime::StyleSpan> &spans);
+
+	/**
+	 * @brief Clips style spans to text and fills any uncovered suffix with one fallback style.
+	 * @param text Text the returned spans must cover exactly.
+	 * @param spans Candidate spans.
+	 * @param fallback Style used for an uncovered suffix.
+	 * @return Positive-length spans whose combined length equals `text.size()`.
+	 */
+	[[nodiscard]] QVector<WorldRuntime::StyleSpan>
+	normalizeStyleSpansForText(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
+	                           const WorldRuntime::StyleSpan &fallback);
+
+	/**
+	 * @brief Preserves exact spans without evaluating a potentially expensive fallback provider.
+	 * @param text Text the returned spans must cover exactly.
+	 * @param spans Candidate spans.
+	 * @param fallbackProvider Callable producing the fallback style only when normalization is required.
+	 * @return Unchanged exact spans, or normalized spans using the lazily produced fallback.
+	 */
+	template <typename FallbackProvider>
+	[[nodiscard]] QVector<WorldRuntime::StyleSpan>
+	normalizeStyleSpansForTextLazily(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
+	                                 FallbackProvider &&fallbackProvider)
+	{
+		if (styleSpansCoverTextExactly(text, spans))
+			return spans;
+		return normalizeStyleSpansForText(text, spans,
+		                                  std::invoke(std::forward<FallbackProvider>(fallbackProvider)));
+	}
+
+	/**
 	 * @brief Applies fixed-column wrapping to plain text.
 	 * @param text Text to mutate in place.
 	 * @param wrapColumn Target wrap column.
 	 * @param indentParas Preserve indentation when wrapping at whitespace.
 	 * @param firstLinePrefixColumns Existing columns before `text` on the first row.
+	 * @param firstLinePrefixEndsWithSpace Whether `text` starts at a valid wrap boundary in the prefix.
 	 */
 	void wrapPlainLineForColumn(QString &text, int wrapColumn, bool indentParas,
-	                            int firstLinePrefixColumns = 0);
+	                            int firstLinePrefixColumns = 0, bool firstLinePrefixEndsWithSpace = false);
 
 	/**
 	 * @brief Applies fixed-column wrapping to styled text.
@@ -76,9 +118,11 @@ namespace QMudOutputWrapUtils
 	 * @param wrapColumn Target wrap column.
 	 * @param indentParas Preserve indentation when wrapping at whitespace.
 	 * @param firstLinePrefixColumns Existing columns before `text` on the first row.
+	 * @param firstLinePrefixEndsWithSpace Whether `text` starts at a valid wrap boundary in the prefix.
 	 */
 	void wrapStyledLineForColumn(QString &text, QVector<WorldRuntime::StyleSpan> &spans, int wrapColumn,
-	                             bool indentParas, int firstLinePrefixColumns = 0);
+	                             bool indentParas, int firstLinePrefixColumns = 0,
+	                             bool firstLinePrefixEndsWithSpace = false);
 
 	/**
 	 * @brief Splits output text into hard-return-delimited runtime line segments.

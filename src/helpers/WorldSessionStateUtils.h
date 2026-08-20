@@ -26,6 +26,7 @@ namespace QMudWorldSessionState
 			bool                                       hasCustomMxpElements{false};
 			bool                                       hasMxpSessionState{false};
 			IndexedRingBuffer<WorldRuntime::LineEntry> outputLines;
+			qint64                                     excludedOutputLineNumber{0};
 			QStringList                                commandHistory;
 			QList<TelnetProcessor::CustomElementInfo>  customMxpElements;
 			TelnetProcessor::MxpSessionState           mxpSessionState;

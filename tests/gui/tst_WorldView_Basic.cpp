@@ -41,6 +41,7 @@
 #include <QScrollBar>
 #include <QShortcut>
 #include <QSplitter>
+#include <QSplitterHandle>
 #include <QTextDocument>
 #include <QTimer>
 #include <QToolTip>
@@ -76,6 +77,11 @@ namespace
 	int                                        g_drawOutputNotifyCount{0};
 	int                                        g_lastDrawOutputFirstLine{0};
 	int                                        g_lastDrawOutputAdjustedScroll{0};
+	WorldView                                 *g_drawOutputPresentationView{nullptr};
+	bool                                       g_drawOutputNotificationSawPresentationPending{false};
+	bool                                       g_drawOutputCallbackActive{false};
+	bool                                       g_holdDrawOutputCompletion{false};
+	QVector<std::function<void()>>             g_drawOutputCompletions;
 	int                                        g_worldOutputResizedNotifyCount{0};
 	QVector<MiniWindow>                        g_testMiniWindows;
 	int                                        g_worldHotspotCallbackCount{0};
@@ -96,6 +102,8 @@ namespace
 	int                                        g_resizeMoveConstraintState{-1};
 	bool                                       g_releaseCallbackSawFlushedResize{false};
 	WorldView                                 *g_runtimeView{nullptr};
+	QVector<QPointer<WorldView>>               g_runtimePresentationViews;
+	qint64                                     g_nextRuntimeLineNumber{1};
 	const WorldView                           *g_expectedReleaseCaptureView{nullptr};
 	unsigned short                             g_currentActionSource{WorldRuntime::eUnknownActionSource};
 	bool                                       g_connected{false};
@@ -280,9 +288,9 @@ namespace
 		return reinterpret_cast<AppController *>(static_cast<quintptr>(1));
 	}
 
-	WorldRuntime *fakeRuntimePointer()
+	WorldRuntime *fakeRuntimePointer(const quintptr identity = 1)
 	{
-		return reinterpret_cast<WorldRuntime *>(static_cast<quintptr>(1));
+		return reinterpret_cast<WorldRuntime *>(identity);
 	}
 
 	void setFakeMushReaderLiveSpeechOwner(const bool enable)
@@ -323,11 +331,16 @@ namespace
 		g_pendingIncomingPartialSpans.clear();
 		g_pendingIncomingPartialCommitCount = 0;
 		g_testMacros.clear();
-		g_textRectangle                 = {};
-		g_outputFontHeight              = 0;
-		g_drawOutputNotifyCount         = 0;
-		g_lastDrawOutputFirstLine       = 0;
-		g_lastDrawOutputAdjustedScroll  = 0;
+		g_textRectangle                                = {};
+		g_outputFontHeight                             = 0;
+		g_drawOutputNotifyCount                        = 0;
+		g_lastDrawOutputFirstLine                      = 0;
+		g_lastDrawOutputAdjustedScroll                 = 0;
+		g_drawOutputPresentationView                   = nullptr;
+		g_drawOutputNotificationSawPresentationPending = false;
+		g_drawOutputCallbackActive                     = false;
+		g_holdDrawOutputCompletion                     = false;
+		g_drawOutputCompletions.clear();
 		g_worldOutputResizedNotifyCount = 0;
 		g_testMiniWindows.clear();
 		g_worldHotspotCallbackCount = 0;
@@ -348,13 +361,15 @@ namespace
 		g_resizeMoveConstraintState       = -1;
 		g_releaseCallbackSawFlushedResize = false;
 		g_runtimeView                     = nullptr;
-		g_expectedReleaseCaptureView      = nullptr;
-		g_currentActionSource             = WorldRuntime::eUnknownActionSource;
-		g_connected                       = false;
-		g_nawsNegotiated                  = false;
-		g_useFakeAppController            = false;
-		g_hasMushReaderLiveSpeechOwner    = false;
-		g_qtAccessibilitySpeechEnabled    = true;
+		g_runtimePresentationViews.clear();
+		g_nextRuntimeLineNumber        = 1;
+		g_expectedReleaseCaptureView   = nullptr;
+		g_currentActionSource          = WorldRuntime::eUnknownActionSource;
+		g_connected                    = false;
+		g_nawsNegotiated               = false;
+		g_useFakeAppController         = false;
+		g_hasMushReaderLiveSpeechOwner = false;
+		g_qtAccessibilitySpeechEnabled = true;
 		g_virtualKeyMap.clear();
 		g_acceleratorCommands.clear();
 		g_acceleratorExecutionCount      = 0;
@@ -537,6 +552,25 @@ namespace
 	{
 		return view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 	}
+
+	class PaintEventCounter final : public QObject
+	{
+		public:
+			[[nodiscard]] int count() const
+			{
+				return m_count;
+			}
+
+			bool eventFilter(QObject *watched, QEvent *event) override
+			{
+				if (watched && event && event->type() == QEvent::Paint)
+					++m_count;
+				return QObject::eventFilter(watched, event);
+			}
+
+		private:
+			int m_count{0};
+	};
 
 	QPoint findHyperlinkPoint(WorldView &view, QTextBrowser &browser, const QString &href)
 	{
@@ -909,6 +943,16 @@ namespace
 		g_runtimeLines.erase(g_runtimeLines.begin(), g_runtimeLines.begin() + removed);
 	}
 
+	void notifyFakeRuntimeLineAppended()
+	{
+		for (const QPointer<WorldView> &view : std::as_const(g_runtimePresentationViews))
+		{
+			if (!view)
+				continue;
+			view->notifyRuntimeOutputLineAppended();
+		}
+	}
+
 	void appendFakeRuntimeOutputText(WorldView &view, QString text, QVector<WorldRuntime::StyleSpan> spans,
 	                                 const bool note, const bool newLine)
 	{
@@ -1068,11 +1112,27 @@ long WorldRuntime::noteColourBack() const
 	return 0x000000;
 }
 
-void WorldRuntime::notifyDrawOutputWindow(int firstLine, int adjustedScroll)
+void WorldRuntime::notifyDrawOutputWindow(int firstLine, int adjustedScroll, std::function<void()> completion)
 {
 	++g_drawOutputNotifyCount;
 	g_lastDrawOutputFirstLine      = firstLine;
 	g_lastDrawOutputAdjustedScroll = adjustedScroll;
+	if (g_drawOutputPresentationView)
+	{
+		g_drawOutputNotificationSawPresentationPending =
+		    g_drawOutputPresentationView->hasPendingOutputPresentationWork();
+	}
+	if (!completion)
+		return;
+	if (g_holdDrawOutputCompletion)
+		g_drawOutputCompletions.push_back(std::move(completion));
+	else
+		completion();
+}
+
+bool WorldRuntime::drawOutputWindowCallbackActive() const
+{
+	return g_drawOutputCallbackActive;
 }
 
 QImage WorldRuntime::backgroundImage() const
@@ -1121,6 +1181,39 @@ const IndexedRingBuffer<WorldRuntime::LineEntry> &WorldRuntime::lines() const
 void WorldRuntime::setView(WorldView *view)
 {
 	g_runtimeView = view;
+	if (view)
+		registerPresentationView(view);
+}
+
+void WorldRuntime::registerPresentationView(WorldView *view)
+{
+	if (!view)
+		return;
+	for (auto it = g_runtimePresentationViews.begin(); it != g_runtimePresentationViews.end();)
+	{
+		if (it->isNull())
+		{
+			it = g_runtimePresentationViews.erase(it);
+			continue;
+		}
+		if (it->data() == view)
+			return;
+		++it;
+	}
+	g_runtimePresentationViews.push_back(view);
+}
+
+void WorldRuntime::unregisterPresentationView(WorldView *view)
+{
+	for (auto it = g_runtimePresentationViews.begin(); it != g_runtimePresentationViews.end();)
+	{
+		if (it->isNull() || it->data() == view)
+			it = g_runtimePresentationViews.erase(it);
+		else
+			++it;
+	}
+	if (g_runtimeView == view)
+		g_runtimeView = nullptr;
 }
 
 bool WorldRuntime::syncMiniWindowDevicePixelRatioForView()
@@ -1380,8 +1473,21 @@ bool WorldRuntime::isActive() const
 	return false;
 }
 
-void WorldRuntime::prepareInputEchoForDisplay(QString &, QVector<StyleSpan> &, bool) const
+bool WorldRuntime::prepareInputEchoForDisplay(QString &, QVector<StyleSpan> &, const bool appendToCurrentLine)
 {
+	if (!appendToCurrentLine)
+		return false;
+	for (int index = static_cast<int>(g_runtimeLines.size()) - 1; index >= 0; --index)
+	{
+		LineEntry &entry = g_runtimeLines[index];
+		if ((entry.flags & LineHidden) != 0)
+			continue;
+		if (!entry.hardReturn)
+			return false;
+		entry.hardReturn = false;
+		return true;
+	}
+	return false;
 }
 
 int WorldRuntime::sendCommand(const QString &, bool, bool, bool, bool, bool) const
@@ -1458,9 +1564,12 @@ void WorldRuntime::addLine(const QString &text, int flags, bool hardReturn, cons
 	entry.flags      = flags;
 	entry.hardReturn = hardReturn;
 	entry.time       = time;
-	entry.lineNumber = g_runtimeLines.isEmpty() ? 1 : (g_runtimeLines.last().lineNumber + 1);
+	if (!g_runtimeLines.isEmpty())
+		g_nextRuntimeLineNumber = qMax(g_nextRuntimeLineNumber, g_runtimeLines.last().lineNumber + 1);
+	entry.lineNumber = g_nextRuntimeLineNumber++;
 	g_runtimeLines.push_back(entry);
 	enforceFakeOutputLineLimit();
+	notifyFakeRuntimeLineAppended();
 }
 
 void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSpan> &spans, bool hardReturn,
@@ -1472,9 +1581,12 @@ void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSp
 	entry.hardReturn = hardReturn;
 	entry.spans      = spans;
 	entry.time       = time;
-	entry.lineNumber = g_runtimeLines.isEmpty() ? 1 : (g_runtimeLines.last().lineNumber + 1);
+	if (!g_runtimeLines.isEmpty())
+		g_nextRuntimeLineNumber = qMax(g_nextRuntimeLineNumber, g_runtimeLines.last().lineNumber + 1);
+	entry.lineNumber = g_nextRuntimeLineNumber++;
 	g_runtimeLines.push_back(entry);
 	enforceFakeOutputLineLimit();
+	notifyFakeRuntimeLineAppended();
 }
 
 void WorldRuntime::finalizePendingInputLineHardReturn()
@@ -1485,6 +1597,15 @@ void WorldRuntime::finalizePendingInputLineHardReturn()
 	if ((last.flags & LineInput) == 0)
 		return;
 	last.hardReturn = true;
+}
+
+void WorldRuntime::finalizeOpenOutputLineHardReturn()
+{
+	if (g_runtimeLines.isEmpty())
+		return;
+	LineEntry &last = g_runtimeLines.last();
+	if (!last.text.isEmpty())
+		last.hardReturn = true;
 }
 
 void WorldRuntime::clearLastLineHardReturn()
@@ -4786,6 +4907,134 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void drawOutputWindowNotificationRequiresSemanticViewportChange()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			for (int i = 0; i < 320; ++i)
+				view.appendOutputText(QStringLiteral("semantic-scroll-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *const browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *const bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+
+			view.scrollOutputToStart();
+			QTRY_COMPARE(bar->value(), bar->minimum());
+			QCoreApplication::processEvents();
+			const int afterFirstScroll = g_drawOutputNotifyCount;
+
+			view.scrollOutputToStart();
+			QCoreApplication::processEvents();
+			QCOMPARE(g_drawOutputNotifyCount, afterFirstScroll);
+
+			view.selectOutputRange(319, 0, 1);
+			QTRY_VERIFY(bar->value() > bar->minimum());
+			QTRY_COMPARE(g_drawOutputNotifyCount, afterFirstScroll + 1);
+
+			view.scrollNativeOutputRangeIntoView(view.m_output, 0, 0, false);
+			QTRY_COMPARE(bar->value(), bar->minimum());
+			QTRY_COMPARE(g_drawOutputNotifyCount, afterFirstScroll + 2);
+			QVERIFY(view.isScrollbackSplitActive());
+
+			view.collapseScrollbackSplitToLiveOutput();
+			QVERIFY(!view.isScrollbackSplitActive());
+			QTRY_COMPARE(g_drawOutputNotifyCount, afterFirstScroll + 3);
+
+			view.setScrollbackSplitActive(true);
+			QVERIFY(view.isScrollbackSplitActive());
+			QTRY_COMPARE(g_drawOutputNotifyCount, afterFirstScroll + 4);
+			const int beforeSettingsCollapse = g_drawOutputNotifyCount;
+			view.applyRuntimeSettingsWithoutOutputRebuild();
+			QVERIFY(!view.isScrollbackSplitActive());
+			QTRY_COMPARE(g_drawOutputNotifyCount, beforeSettingsCollapse + 1);
+			const int afterSettingsCollapse = g_drawOutputNotifyCount;
+
+			view.beginRuntimeOutputMutationBatch(true);
+			QCOMPARE(view.setOutputScroll(0, true), 0);
+			view.endRuntimeOutputMutationBatch();
+			QCoreApplication::processEvents();
+			QCOMPARE(g_drawOutputNotifyCount, afterSettingsCollapse);
+
+			view.beginRuntimeOutputMutationBatch(true);
+			view.scrollOutputToEnd();
+			view.endRuntimeOutputMutationBatch();
+			QTRY_COMPARE(g_drawOutputNotifyCount, afterSettingsCollapse + 1);
+
+			resetTestState();
+		}
+
+		void outputAfterDrawCallbackSuppressionQueuesNotification()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.appendOutputText(QStringLiteral("baseline"), true);
+			QCoreApplication::processEvents();
+			QVERIFY(!view.m_drawViewportNotificationPending);
+			const int baselineNotifications = g_drawOutputNotifyCount;
+
+			view.setDrawOutputWindowCallbackActive(true);
+			view.beginRuntimeOutputMutationBatch(true);
+			view.appendOutputText(QStringLiteral("draw callback output"), true);
+			view.endRuntimeOutputMutationBatch();
+			view.setDrawOutputWindowCallbackActive(false);
+			QVERIFY(!view.m_drawViewportNotificationPending);
+
+			view.appendOutputText(QStringLiteral("later output"), true);
+			QVERIFY(view.m_drawViewportNotificationPending);
+			QTRY_COMPARE(g_drawOutputNotifyCount, baselineNotifications + 1);
+
+			resetTestState();
+		}
+
+		void runtimeToObserverTransitionClearsActiveDrawCallbackState()
+		{
+			resetTestState();
+			g_drawOutputCallbackActive = true;
+
+			WorldView view;
+			view.setRuntime(fakeRuntimePointer());
+			QCOMPARE(g_runtimeView, &view);
+
+			view.setPassiveBufferView(true);
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCOMPARE(g_runtimeView, nullptr);
+			g_drawOutputCallbackActive = false;
+
+			const int baseline = g_drawOutputNotifyCount;
+			view.appendOutputText(QStringLiteral("observer-after-active-callback"), true);
+			QCOMPARE(g_drawOutputNotifyCount, baseline);
+
+			resetTestState();
+		}
+
+		void newObserverDoesNotInheritPrimaryViewDrawCallbackState()
+		{
+			resetTestState();
+			g_drawOutputCallbackActive = true;
+
+			WorldView view;
+			view.setPassiveBufferView(true);
+			view.setRuntimeObserver(fakeRuntimePointer());
+			g_drawOutputCallbackActive = false;
+
+			const int baseline = g_drawOutputNotifyCount;
+			view.appendOutputText(QStringLiteral("new-observer-during-active-callback"), true);
+			QCOMPARE(g_drawOutputNotifyCount, baseline);
+
+			resetTestState();
+		}
+
 		void drawOutputWindowNotificationCoalescesBurstUpdates()
 		{
 			resetTestState();
@@ -4803,6 +5052,418 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_drawOutputNotifyCount, baseline);
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 1);
+
+			resetTestState();
+		}
+
+		void semanticOutputPaintWaitsForDrawCallbackCompletion_data()
+		{
+			QTest::addColumn<int>("mutation");
+			QTest::newRow("append") << 0;
+			QTest::newRow("line-change") << 1;
+			QTest::newRow("clear") << 2;
+			QTest::newRow("partial") << 3;
+			QTest::newRow("committed-partial") << 4;
+			QTest::newRow("indexed-line-change") << 5;
+			QTest::newRow("range-change") << 6;
+		}
+
+		void semanticOutputPaintWaitsForDrawCallbackCompletion()
+		{
+			QFETCH(int, mutation);
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			WorldRuntime::LineEntry baselineLine;
+			baselineLine.text       = QStringLiteral("baseline");
+			baselineLine.flags      = WorldRuntime::LineOutput;
+			baselineLine.hardReturn = true;
+			baselineLine.lineNumber = 1;
+			g_runtimeLines.push_back(baselineLine);
+			view.rebuildOutputFromLines(g_runtimeLines);
+			QCoreApplication::processEvents();
+
+			QWidget *const canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QWidget *const overlay = view.m_miniOverlay;
+			QVERIFY(overlay);
+			QVERIFY(overlay->isVisible());
+			PaintEventCounter canvasPaintCounter;
+			PaintEventCounter overlayPaintCounter;
+			canvas->installEventFilter(&canvasPaintCounter);
+			overlay->installEventFilter(&overlayPaintCounter);
+			g_holdDrawOutputCompletion                  = true;
+			const int baselineNotifications             = g_drawOutputNotifyCount;
+			view.m_pendingMiniWindowUnderlayDirtyRegion = QRegion(canvas->rect());
+			view.m_pendingMiniWindowOverlayDirtyRegion  = QRegion(overlay->rect());
+			canvas->update();
+			overlay->update();
+
+			switch (mutation)
+			{
+			case 0:
+				view.appendOutputText(QStringLiteral("appended"), true);
+				break;
+			case 1:
+				view.notifyRuntimeOutputLineChanged();
+				break;
+			case 2:
+				view.clearOutputBuffer();
+				break;
+			case 3:
+				setFakeRuntimePendingPartial(QStringLiteral("partial"));
+				view.updatePartialOutputText(QStringLiteral("partial"));
+				break;
+			case 4:
+				setFakeRuntimePendingPartial(QStringLiteral("committed partial"));
+				QVERIFY(view.commitPendingIncomingPartialOutput());
+				break;
+			case 5:
+				g_runtimeLines.first().text = QStringLiteral("changed line");
+				view.notifyRuntimeOutputLineChanged(0);
+				break;
+			case 6:
+				g_runtimeLines.first().text = QStringLiteral("changed range");
+				view.notifyRuntimeOutputRangeChanged(0);
+				break;
+			default:
+				QFAIL("Unknown semantic output mutation");
+			}
+
+			QTRY_COMPARE(g_drawOutputNotifyCount, baselineNotifications + 1);
+			QCOMPARE(g_drawOutputCompletions.size(), 1);
+			QCoreApplication::processEvents();
+			QVERIFY(canvasPaintCounter.count() > 0);
+			QVERIFY(overlayPaintCounter.count() > 0);
+			QVERIFY(!view.m_deferredSemanticNativeCanvasPaintRegion.isEmpty());
+			QVERIFY(!view.m_deferredSemanticMiniWindowOverlayPaintRegion.isEmpty());
+			QVERIFY(!view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
+			QVERIFY(!view.m_pendingMiniWindowOverlayDirtyRegion.isEmpty());
+			const int             deferredCanvasPaintCount  = canvasPaintCounter.count();
+			const int             deferredOverlayPaintCount = overlayPaintCounter.count();
+
+			std::function<void()> completion = std::move(g_drawOutputCompletions.front());
+			g_drawOutputCompletions.clear();
+			completion();
+			QTRY_VERIFY(canvasPaintCounter.count() > deferredCanvasPaintCount);
+			QTRY_VERIFY(overlayPaintCounter.count() > deferredOverlayPaintCount);
+			QVERIFY(view.m_deferredSemanticNativeCanvasPaintRegion.isEmpty());
+			QVERIFY(view.m_deferredSemanticMiniWindowOverlayPaintRegion.isEmpty());
+			QTRY_VERIFY(view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
+			QTRY_VERIFY(view.m_pendingMiniWindowOverlayDirtyRegion.isEmpty());
+			canvas->removeEventFilter(&canvasPaintCounter);
+			overlay->removeEventFilter(&overlayPaintCounter);
+
+			resetTestState();
+		}
+
+		void semanticViewportPaintWaitsForDrawCallbackCompletion_data()
+		{
+			QTest::addColumn<int>("mutation");
+			QTest::newRow("scroll") << 0;
+			QTest::newRow("split") << 1;
+			QTest::newRow("resize") << 2;
+			QTest::newRow("show") << 3;
+			QTest::newRow("split-divider") << 4;
+		}
+
+		void semanticViewportPaintWaitsForDrawCallbackCompletion()
+		{
+			QFETCH(int, mutation);
+			resetTestState();
+
+			for (int line = 0; line < 200; ++line)
+			{
+				WorldRuntime::LineEntry entry;
+				entry.text       = QStringLiteral("viewport-%1").arg(line);
+				entry.flags      = WorldRuntime::LineOutput;
+				entry.hardReturn = true;
+				entry.lineNumber = line + 1;
+				g_runtimeLines.push_back(entry);
+			}
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.rebuildOutputFromLines(g_runtimeLines);
+			QCoreApplication::processEvents();
+			QTextBrowser *const browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *const bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+			view.scrollOutputToEnd();
+			QCoreApplication::processEvents();
+			if (mutation == 3)
+			{
+				view.hide();
+				QCoreApplication::processEvents();
+			}
+			else if (mutation == 4)
+			{
+				view.setScrollbackSplitActive(true);
+				QCoreApplication::processEvents();
+			}
+
+			QWidget *const canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+			QWidget *const overlay = view.m_miniOverlay;
+			QVERIFY(overlay);
+			PaintEventCounter canvasPaintCounter;
+			PaintEventCounter overlayPaintCounter;
+			canvas->installEventFilter(&canvasPaintCounter);
+			overlay->installEventFilter(&overlayPaintCounter);
+			g_holdDrawOutputCompletion                  = true;
+			const int baselineNotifications             = g_drawOutputNotifyCount;
+			view.m_pendingMiniWindowUnderlayDirtyRegion = QRegion(canvas->rect());
+			view.m_pendingMiniWindowOverlayDirtyRegion  = QRegion(overlay->rect());
+			canvas->update();
+			overlay->update();
+
+			switch (mutation)
+			{
+			case 0:
+				view.scrollOutputToStart();
+				break;
+			case 1:
+				view.setScrollbackSplitActive(true);
+				break;
+			case 2:
+				view.resize(view.width() + 31, view.height() + 17);
+				break;
+			case 3:
+				view.show();
+				break;
+			case 4:
+			{
+				QSplitter *const splitter = view.m_outputSplitter;
+				QVERIFY(splitter);
+				const QList<int> sizes = splitter->sizes();
+				QVERIFY(sizes.size() >= 2);
+				QSplitterHandle *const handle = splitter->handle(1);
+				QVERIFY(handle);
+				const QPoint pressPosition = handle->rect().center();
+				QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, pressPosition);
+				QTest::mouseMove(handle, pressPosition - QPoint(0, 20));
+				QTest::mouseRelease(handle, Qt::LeftButton, Qt::NoModifier, pressPosition - QPoint(0, 20));
+				QVERIFY(splitter->sizes() != sizes);
+				break;
+			}
+			default:
+				QFAIL("Unknown semantic viewport mutation");
+			}
+
+			QTRY_COMPARE(g_drawOutputNotifyCount, baselineNotifications + 1);
+			QCOMPARE(g_drawOutputCompletions.size(), 1);
+			QCoreApplication::processEvents();
+			QVERIFY(canvasPaintCounter.count() > 0);
+			QVERIFY(overlayPaintCounter.count() > 0);
+			QVERIFY(!view.m_deferredSemanticNativeCanvasPaintRegion.isEmpty());
+			QVERIFY(!view.m_deferredSemanticMiniWindowOverlayPaintRegion.isEmpty());
+			QVERIFY(!view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
+			QVERIFY(!view.m_pendingMiniWindowOverlayDirtyRegion.isEmpty());
+			const int             deferredCanvasPaintCount  = canvasPaintCounter.count();
+			const int             deferredOverlayPaintCount = overlayPaintCounter.count();
+
+			std::function<void()> completion = std::move(g_drawOutputCompletions.front());
+			g_drawOutputCompletions.clear();
+			completion();
+			QTRY_VERIFY(canvasPaintCounter.count() > deferredCanvasPaintCount);
+			QTRY_VERIFY(overlayPaintCounter.count() > deferredOverlayPaintCount);
+			QVERIFY(view.m_deferredSemanticNativeCanvasPaintRegion.isEmpty());
+			QVERIFY(view.m_deferredSemanticMiniWindowOverlayPaintRegion.isEmpty());
+			QTRY_VERIFY(view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
+			QTRY_VERIFY(view.m_pendingMiniWindowOverlayDirtyRegion.isEmpty());
+			canvas->removeEventFilter(&canvasPaintCounter);
+			overlay->removeEventFilter(&overlayPaintCounter);
+
+			resetTestState();
+		}
+
+		void detachedSemanticOutputPaintWaitsForPresentationOnly()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(700, 420);
+			view.show();
+			QCoreApplication::processEvents();
+			QWidget *const canvas = findNativeOutputCanvas(view);
+			QVERIFY(canvas);
+
+			for (int line = 0; line < 200; ++line)
+				view.appendOutputText(QStringLiteral("detached-%1").arg(line), true);
+			QVERIFY(view.m_semanticOutputPaintBarrierActive);
+			QVERIFY(view.hasPendingOutputPresentationWork());
+			QVERIFY(!view.m_drawViewportNotificationPending);
+			QVERIFY(!view.m_drawNotifyQueued);
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(!view.m_semanticOutputPaintBarrierActive);
+			QVERIFY(!view.hasPendingOutputPresentationWork());
+			QTextBrowser *const browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *const bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+			QCOMPARE(bar->value(), bar->maximum());
+			QVERIFY(!canvas->grab().isNull());
+			QCOMPARE(canvas->property("qmud_native_plain_last_line").toString(),
+			         QStringLiteral("detached-199"));
+			QCOMPARE(g_drawOutputNotifyCount, 0);
+
+			resetTestState();
+		}
+
+		void semanticMiniWindowUnderlayPaintWaitsForDrawCallbackCompletion()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(700, 420);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+			QWidget *const underlay = view.m_miniUnderlay;
+			QVERIFY(underlay);
+			QVERIFY(underlay->isVisible());
+			underlay->raise();
+			QCoreApplication::processEvents();
+
+			PaintEventCounter underlayPaintCounter;
+			underlay->installEventFilter(&underlayPaintCounter);
+			g_holdDrawOutputCompletion                  = true;
+			const int baselineNotifications             = g_drawOutputNotifyCount;
+			view.m_pendingMiniWindowUnderlayDirtyRegion = QRegion(underlay->rect());
+			underlay->update();
+			view.clearOutputBuffer();
+
+			QTRY_COMPARE(g_drawOutputNotifyCount, baselineNotifications + 1);
+			QCOMPARE(g_drawOutputCompletions.size(), 1);
+			QCoreApplication::processEvents();
+			QVERIFY(underlayPaintCounter.count() > 0);
+			QVERIFY(!view.m_deferredSemanticMiniWindowUnderlayPaintRegion.isEmpty());
+			QVERIFY(!view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
+			const int             deferredUnderlayPaintCount = underlayPaintCounter.count();
+
+			std::function<void()> completion = std::move(g_drawOutputCompletions.front());
+			g_drawOutputCompletions.clear();
+			completion();
+			QTRY_VERIFY(underlayPaintCounter.count() > deferredUnderlayPaintCount);
+			QVERIFY(view.m_deferredSemanticMiniWindowUnderlayPaintRegion.isEmpty());
+			QTRY_VERIFY(view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
+			underlay->removeEventFilter(&underlayPaintCounter);
+
+			resetTestState();
+		}
+
+		void partialOutputPresentationNotifiesDrawOutputWindow()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+			g_drawOutputPresentationView = &view;
+
+			const int baseline = g_drawOutputNotifyCount;
+			view.updatePartialOutputText(QStringLiteral("partial"));
+			QCOMPARE(g_drawOutputNotifyCount, baseline);
+			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 1);
+			QVERIFY(!g_drawOutputNotificationSawPresentationPending);
+			QCOMPARE(g_lastDrawOutputAdjustedScroll, view.outputScrollPosition());
+
+			view.clearPartialOutput();
+			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 2);
+
+			view.updatePartialOutputText(QStringLiteral("batched"));
+			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 3);
+			view.beginRuntimeOutputMutationBatch(false);
+			view.clearPartialOutput();
+			view.endRuntimeOutputMutationBatch();
+			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 4);
+
+			view.setDrawOutputWindowCallbackActive(true);
+			view.beginRuntimeOutputMutationBatch(true);
+			view.updatePartialOutputText(QStringLiteral("suppressed"));
+			view.clearPartialOutput();
+			view.endRuntimeOutputMutationBatch();
+			view.setDrawOutputWindowCallbackActive(false);
+			QCoreApplication::processEvents();
+			QCOMPARE(g_drawOutputNotifyCount, baseline + 4);
+
+			resetTestState();
+		}
+
+		void runtimeRebindingCancelsQueuedOutputPresentationWork()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			for (int i = 0; i < 320; ++i)
+				view.appendOutputText(QStringLiteral("binding-%1").arg(i), true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *const browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QScrollBar *const bar = browser->verticalScrollBar();
+			QVERIFY(bar);
+			QTRY_VERIFY(bar->maximum() > bar->minimum());
+
+			bar->setValue(bar->minimum());
+			QCOMPARE(bar->value(), bar->minimum());
+			view.requestOutputScrollToEnd(true);
+			QVERIFY(view.m_scrollToEndQueued);
+			view.setRuntimeObserver(fakeRuntimePointer(2));
+			QVERIFY(!view.m_scrollToEndQueued);
+			QVERIFY(!view.m_scrollToEndRequested);
+			bar->setValue(bar->minimum());
+			QCOMPARE(bar->value(), bar->minimum());
+			QCoreApplication::processEvents();
+			QCOMPARE(bar->value(), bar->minimum());
+
+			view.requestNativeRuntimeOutputPresentationSync(true, true);
+			QVERIFY(view.m_nativeRuntimeOutputPresentationQueued);
+			view.setRuntimeObserver(fakeRuntimePointer(3));
+			QVERIFY(!view.m_nativeRuntimeOutputPresentationQueued);
+			QVERIFY(!view.m_nativeRuntimeOutputPresentationFollowTail);
+			bar->setValue(bar->minimum());
+			QCoreApplication::processEvents();
+			QCOMPARE(bar->value(), bar->minimum());
+
+			view.setRuntime(nullptr);
+			resetTestState();
+		}
+
+		void coalescedCompletedAndPartialOutputWaitsForPresentation()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(900, 640);
+			view.show();
+			view.setRuntimeObserver(fakeRuntimePointer());
+			QCoreApplication::processEvents();
+			g_drawOutputPresentationView = &view;
+
+			const int baseline = g_drawOutputNotifyCount;
+			view.appendOutputText(QStringLiteral("complete"), true);
+			view.updatePartialOutputText(QStringLiteral("partial"));
+			QVERIFY(view.m_scrollToEndQueued);
+			QVERIFY(view.m_nativeRuntimeOutputPresentationQueued);
+			QCOMPARE(g_drawOutputNotifyCount, baseline);
+
+			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 1);
+			QVERIFY(!g_drawOutputNotificationSawPresentationPending);
+			QCOMPARE(g_lastDrawOutputAdjustedScroll, view.outputScrollPosition());
 
 			resetTestState();
 		}
@@ -9453,7 +10114,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void nativeOutputPaintSynchronizesPendingPromptPluginRestitch()
+		void nativeOutputPaintWaitsForPendingPromptPluginRestitchPresentation()
 		{
 			resetTestState();
 			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("14"));
@@ -9500,10 +10161,14 @@ class tst_WorldView_Basic : public QObject
 			view.notifyRuntimeOutputRangeChanged(changedIndex);
 
 			QVERIFY(!nativeCanvas->grab().isNull());
-			const QStringList tailLines =
-			    nativeCanvas->property("qmud_native_plain_tail_lines").toStringList();
-			QVERIFY(tailLines.contains(QStringLiteral("W <---(M)---> E")));
-			QCOMPARE(tailLines.constLast(), QStringLiteral("<paint-sync-prompt> look"));
+			QVERIFY(!nativeCanvas->property("qmud_native_plain_tail_lines")
+			             .toStringList()
+			             .contains(QStringLiteral("W <---(M)---> E")));
+			QTRY_VERIFY(nativeCanvas->property("qmud_native_plain_tail_lines")
+			                .toStringList()
+			                .contains(QStringLiteral("W <---(M)---> E")));
+			QCOMPARE(nativeCanvas->property("qmud_native_plain_tail_lines").toStringList().constLast(),
+			         QStringLiteral("<paint-sync-prompt> look"));
 			resetTestState();
 		}
 
@@ -10090,6 +10755,36 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(g_runtimeLines.size() >= 2);
 			QVERIFY(!g_runtimeLines.at(0).hardReturn);
 			QVERIFY(g_runtimeLines.at(1).hardReturn);
+
+			resetTestState();
+		}
+
+		void keepCommandsOnSameLineFinalizesEchoAfterOpenPrompt()
+		{
+			resetTestState();
+			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("1"));
+			g_worldAttrs.insert(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
+			g_currentActionSource = WorldRuntime::eUserTyping;
+
+			WorldView view;
+			view.setRuntimeObserver(fakeRuntimePointer());
+			view.applyRuntimeSettings();
+
+			view.appendOutputText(QStringLiteral("Prompt> "), false);
+			QVERIFY(!g_runtimeLines.constLast().hardReturn);
+			WorldRuntime::LineEntry hiddenTail;
+			hiddenTail.text       = QStringLiteral("hidden callback state");
+			hiddenTail.flags      = WorldRuntime::LineOutput | WorldRuntime::LineHidden;
+			hiddenTail.hardReturn = true;
+			hiddenTail.lineNumber = g_runtimeLines.constLast().lineNumber + 1;
+			g_runtimeLines.push_back(hiddenTail);
+			view.echoInputText(QStringLiteral("look\r\n"));
+
+			QCOMPARE(view.outputLines().last(), QStringLiteral("Prompt> look"));
+			QCOMPARE(g_runtimeLines.size(), 3);
+			QVERIFY(!g_runtimeLines.at(0).hardReturn);
+			QVERIFY(g_runtimeLines.at(1).hardReturn);
+			QVERIFY(g_runtimeLines.at(2).hardReturn);
 
 			resetTestState();
 		}

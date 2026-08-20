@@ -23,6 +23,8 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QMap>
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QPointer>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QRect>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QSet>
@@ -37,11 +39,11 @@
 #include <QVector>
 #include <functional>
 #include <memory>
+#include <utility>
 
 class LuaCallbackEngine;
 class WorldRuntime;
 class QObject;
-struct LuaStyleRun;
 struct LuaEngineObservedInitializationRequest;
 struct MiniWindow;
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
@@ -135,9 +137,9 @@ struct LuaCallbackAcceleratorSnapshot
  */
 struct LuaCallbackWorldRuntimeSnapshot
 {
-		WorldRuntime *runtime{nullptr};
-		QString       id;
-		QString       name;
+		QPointer<WorldRuntime> runtime;
+		QString                id;
+		QString                name;
 };
 
 /**
@@ -164,6 +166,8 @@ struct LuaCallbackNotepadSnapshot
 		QRect         geometry;
 		QString       text;
 		bool          hasEditor{false};
+		bool          hasGeometry{false};
+		bool          hasText{false};
 };
 
 /**
@@ -172,8 +176,10 @@ struct LuaCallbackNotepadSnapshot
 struct LuaCallbackLineStyleSnapshot
 {
 		int     length{0};
-		long    fore{0};
-		long    back{0};
+		quint32 foreRgba{0};
+		quint32 backRgba{0};
+		bool    foreValid{false};
+		bool    backValid{false};
 		bool    bold{false};
 		bool    underline{false};
 		bool    italic{false};
@@ -186,6 +192,24 @@ struct LuaCallbackLineStyleSnapshot
 		QString hint;
 		QString variable;
 		bool    startTag{false};
+
+		bool    operator==(const LuaCallbackLineStyleSnapshot &) const = default;
+};
+
+/**
+ * @brief Styled text run exposed to Lua together with its lossless source-span segmentation.
+ *
+ * The first four fields are the MUSHclient-compatible callback projection. `sourceSpans` is internal
+ * transport used when the same callback line must also back GetStyleInfo without losing action or style
+ * metadata while adjacent visually equivalent callback runs are merged.
+ */
+struct LuaStyleRun
+{
+		QString                               text;
+		int                                   textColour{0};
+		int                                   backColour{0};
+		int                                   style{0};
+		QVector<LuaCallbackLineStyleSnapshot> sourceSpans;
 };
 
 /**
@@ -208,7 +232,10 @@ struct LuaCallbackLineEntrySnapshot
  */
 struct LuaCallbackLineBufferSnapshot
 {
+		quint64                                  lineBufferGeneration{0};
 		int                                      lineBufferCount{0};
+		int                                      firstCapturedLineBufferIndex{0};
+		int                                      lastCapturedLineBufferIndex{0};
 		QHash<int, LuaCallbackLineEntrySnapshot> lineEntriesByBufferIndex;
 		QStringList                              recentLinesSnapshot;
 };
@@ -227,6 +254,8 @@ struct LuaCallbackAnsiRenderStateSnapshot
 		bool    monospace{false};
 		QString fore;
 		QString back;
+		int     foregroundAnsiIndex{-1};
+		bool    foregroundAnsiBright{false};
 		int     actionType{0};
 		QString action;
 		QString hint;
@@ -248,6 +277,8 @@ struct LuaCallbackMxpStyleStateSnapshot
 		bool    inverse{false};
 		QString fore;
 		QString back;
+		int     foregroundAnsiIndex{-1};
+		bool    foregroundAnsiBright{false};
 		int     actionType{0};
 		QString action;
 		QString hint;
@@ -358,6 +389,7 @@ enum class LuaBatchDispatchLane
 enum class LuaCallbackLineSnapshotPolicy
 {
 	None,
+	CountAndLast,
 	CountAndRecentText,
 	CountAndRecent,
 	Full
@@ -479,6 +511,8 @@ struct LuaCallbackMiniWindowSnapshot
 		void                                         *framePointer{nullptr};
 		bool                                          hasFramePointer{false};
 		bool                                          hasCommandUiSnapshot{false};
+		bool                                          hasCommandHistorySnapshot{false};
+		QStringList                                   commandHistorySnapshot;
 		bool                                          commandUiHasView{false};
 		bool                                          commandUiHasFrameData{false};
 		int                                           commandUiOutputClientHeight{0};
@@ -599,86 +633,95 @@ struct LuaCallbackMiniWindowSnapshot
 		bool                                                  hasCallbackOutputAnchor{false};
 		int                                                   callbackOutputAnchorBufferIndex{0};
 		qint64                                                callbackOutputAnchorAbsoluteNumber{0};
+		bool                                                  triggerMatchedLineSnapshotResolved{false};
+		bool                                                  hasTriggerMatchedLineSnapshot{false};
+		int                                                   triggerMatchedLineBufferIndex{0};
+		qint64                                                triggerMatchedLineAbsoluteNumber{0};
+		LuaCallbackLineEntrySnapshot                          triggerMatchedLineSnapshot;
 		bool                                                  hasLineBufferDeltaSnapshot{false};
 		bool                                                  hasLineBufferCountDelta{false};
 		int                                                   lineBufferDeltaCount{0};
 		QHash<int, LuaCallbackLineEntrySnapshot>              lineEntryDeltasByBufferIndex;
 		QSet<int>                                             missingLineEntryDeltasByBufferIndex;
-		bool                                                  hasRecentLinesSnapshot{false};
-		QStringList                                           recentLinesSnapshot;
-		bool                                                  hasDatabaseListSnapshot{false};
-		bool                                                  databaseListSnapshotDirty{false};
-		QStringList                                           databaseNamesSnapshot;
-		bool                                                  hasDatabaseSnapshot{false};
-		QHash<QString, LuaCallbackDatabaseSnapshot>           databaseSnapshotsByName;
-		QHash<QString, int>                                   databaseColumnsByName;
-		QHash<QString, QString>                               databaseErrorsByName;
-		QHash<QString, QString>                               databaseColumnNamesByKey;
-		QSet<QString>                                         missingDatabaseColumnNameKeys;
-		QHash<QString, QString>                               databaseColumnTextByKey;
-		QSet<QString>                                         missingDatabaseColumnTextKeys;
-		QHash<QString, QVariant>                              databaseColumnValuesByKey;
-		QSet<QString>                                         missingDatabaseColumnValueKeys;
-		QHash<QString, int>                                   databaseColumnTypesByKey;
-		QHash<QString, QVariant>                              databaseInfoByKey;
-		QSet<QString>                                         missingDatabaseInfoKeys;
-		QHash<QString, QStringList>                           databaseColumnNamesByName;
-		QSet<QString>                                         missingDatabaseColumnNamesByName;
-		QHash<QString, QVector<QVariant>>                     databaseColumnValuesByName;
-		QSet<QString>                                         missingDatabaseColumnValuesByName;
-		QHash<QString, int>                                   databaseTotalChangesByName;
-		QHash<QString, int>                                   databaseChangesByName;
-		QHash<QString, QString>                               databaseLastInsertRowidByName;
-		bool                                                  hasMacroEntriesSnapshot{false};
-		QList<LuaCallbackAttributeChildrenSnapshot>           macroEntriesSnapshot;
-		bool                                                  hasVariableEntriesSnapshot{false};
-		QList<LuaCallbackAttributeContentSnapshot>            variableEntriesSnapshot;
-		bool                                                  hasKeypadEntriesSnapshot{false};
-		QList<LuaCallbackAttributeContentSnapshot>            keypadEntriesSnapshot;
-		bool                                                  hasAcceleratorSnapshot{false};
-		QVector<LuaCallbackAcceleratorSnapshot>               acceleratorSnapshot;
-		QVariantHash                                          commandUiValues;
-		QVariantHash                                          runtimeCounterValues;
-		QHash<QString, QString>                               pluginNamesById;
-		QHash<QString, QString>                               pluginDirectoriesById;
-		QHash<QString, bool>                                  pluginEnabledById;
-		QHash<QString, bool>                                  nativePluginSpeechEnabledById;
-		QHash<QString, QSharedPointer<LuaCallbackEngine>>     pluginEnginesById;
-		QHash<QString, QSet<QString>>                         pluginLuaFunctionsById;
-		QStringList                                           broadcastPluginIdsSnapshot;
-		QVector<QSharedPointer<LuaCallbackEngine>>            broadcastPluginEnginesSnapshot;
-		bool                                                  hasBroadcastPluginSnapshot{false};
-		QStringList                                           pluginIdsSnapshot;
-		QHash<QString, QString>                               pluginIdsByLookupKey;
-		QHash<QString, QHash<int, QVariant>>                  pluginInfoValuesById;
-		QHash<QString, bool>                                  pluginCallbackPresenceByName;
-		bool                                                  hasEntitySnapshot{false};
-		QHash<QString, QString>                               entityValuesByName;
-		bool                                                  hasUiSnapshot{false};
-		QVariantMap                                           guiSystemValues;
-		bool                                                  hasClipboardText{false};
-		QString                                               clipboardText;
-		QHash<int, QRect>                                     mainWindowPositionsByMode;
-		bool                                                  mainWindowPositionsDirty{false};
-		QHash<QString, QRect>                                 worldWindowPositionsByKey;
-		QSet<QString>                                         missingWorldWindowPositionKeys;
-		QSet<int>                                             dirtyWorldWindowPositionOrdinals;
-		QHash<QString, QRect>                                 notepadWindowPositionsByKey;
-		QSet<QString>                                         missingNotepadWindowPositionKeys;
-		QSet<QString>                                         dirtyNotepadWindowPositionKeys;
-		QSet<QString>                                         dirtyNotepadDocumentKeys;
-		QHash<QString, int>                                   notepadLengthByKey;
-		QSet<QString>                                         missingNotepadLengthKeys;
-		QHash<QString, QString>                               notepadTextByKey;
-		QSet<QString>                                         missingNotepadTextKeys;
-		QSet<QString>                                         dirtyNotepadListKeys;
-		QHash<QString, QStringList>                           notepadListByKey;
-		QSet<QString>                                         missingNotepadListKeys;
-		QVector<LuaCallbackWorldRuntimeSnapshot>              worldRuntimeSnapshot;
-		QVector<LuaCallbackWorldWindowPositionSnapshot>       worldWindowPositionSnapshot;
-		QVector<LuaCallbackNotepadSnapshot>                   notepadSnapshot;
-		int                                                   actionSourceOverride{0};
-		bool                                                  hasActionSourceOverride{false};
+		bool                                                  linePresentationRequiresRefresh{false};
+		bool                                                  outputScrollPositionRequiresRefresh{false};
+		bool                                              miniWindowGeometryConstraintRequiresRefresh{false};
+		bool                                              hasRecentLinesSnapshot{false};
+		QStringList                                       recentLinesSnapshot;
+		bool                                              hasDatabaseListSnapshot{false};
+		bool                                              databaseListSnapshotDirty{false};
+		QStringList                                       databaseNamesSnapshot;
+		bool                                              hasDatabaseSnapshot{false};
+		QHash<QString, LuaCallbackDatabaseSnapshot>       databaseSnapshotsByName;
+		QHash<QString, int>                               databaseColumnsByName;
+		QHash<QString, QString>                           databaseErrorsByName;
+		QHash<QString, QString>                           databaseColumnNamesByKey;
+		QSet<QString>                                     missingDatabaseColumnNameKeys;
+		QHash<QString, QString>                           databaseColumnTextByKey;
+		QSet<QString>                                     missingDatabaseColumnTextKeys;
+		QHash<QString, QVariant>                          databaseColumnValuesByKey;
+		QSet<QString>                                     missingDatabaseColumnValueKeys;
+		QHash<QString, int>                               databaseColumnTypesByKey;
+		QHash<QString, QVariant>                          databaseInfoByKey;
+		QSet<QString>                                     missingDatabaseInfoKeys;
+		QHash<QString, QStringList>                       databaseColumnNamesByName;
+		QSet<QString>                                     missingDatabaseColumnNamesByName;
+		QHash<QString, QVector<QVariant>>                 databaseColumnValuesByName;
+		QSet<QString>                                     missingDatabaseColumnValuesByName;
+		QHash<QString, int>                               databaseTotalChangesByName;
+		QHash<QString, int>                               databaseChangesByName;
+		QHash<QString, QString>                           databaseLastInsertRowidByName;
+		bool                                              hasMacroEntriesSnapshot{false};
+		QList<LuaCallbackAttributeChildrenSnapshot>       macroEntriesSnapshot;
+		bool                                              hasVariableEntriesSnapshot{false};
+		QList<LuaCallbackAttributeContentSnapshot>        variableEntriesSnapshot;
+		bool                                              hasKeypadEntriesSnapshot{false};
+		QList<LuaCallbackAttributeContentSnapshot>        keypadEntriesSnapshot;
+		bool                                              hasAcceleratorSnapshot{false};
+		QVector<LuaCallbackAcceleratorSnapshot>           acceleratorSnapshot;
+		QVariantHash                                      commandUiValues;
+		QVariantHash                                      runtimeCounterValues;
+		QHash<QString, QString>                           pluginNamesById;
+		QHash<QString, QString>                           pluginDirectoriesById;
+		QHash<QString, bool>                              pluginEnabledById;
+		QHash<QString, bool>                              nativePluginSpeechEnabledById;
+		QHash<QString, QSharedPointer<LuaCallbackEngine>> pluginEnginesById;
+		QHash<QString, QSet<QString>>                     pluginLuaFunctionsById;
+		QStringList                                       broadcastPluginIdsSnapshot;
+		QVector<QSharedPointer<LuaCallbackEngine>>        broadcastPluginEnginesSnapshot;
+		bool                                              hasBroadcastPluginSnapshot{false};
+		QStringList                                       pluginIdsSnapshot;
+		QHash<QString, QString>                           pluginIdsByLookupKey;
+		QHash<QString, QHash<int, QVariant>>              pluginInfoValuesById;
+		QHash<QString, bool>                              pluginCallbackPresenceByName;
+		bool                                              hasEntitySnapshot{false};
+		QHash<QString, QString>                           entityValuesByName;
+		bool                                              hasUiSnapshot{false};
+		QVariantMap                                       guiSystemValues;
+		bool                                              hasClipboardText{false};
+		QString                                           clipboardText;
+		QHash<int, QRect>                                 mainWindowPositionsByMode;
+		bool                                              mainWindowPositionsDirty{false};
+		QHash<QString, QRect>                             worldWindowPositionsByKey;
+		QSet<QString>                                     missingWorldWindowPositionKeys;
+		QSet<int>                                         dirtyWorldWindowPositionOrdinals;
+		QHash<QString, QRect>                             notepadWindowPositionsByKey;
+		QSet<QString>                                     missingNotepadWindowPositionKeys;
+		QSet<QString>                                     dirtyNotepadWindowPositionKeys;
+		QSet<QString>                                     dirtyNotepadDocumentKeys;
+		QHash<QString, int>                               notepadLengthByKey;
+		QSet<QString>                                     missingNotepadLengthKeys;
+		QHash<QString, QString>                           notepadTextByKey;
+		QSet<QString>                                     missingNotepadTextKeys;
+		QSet<QString>                                     dirtyNotepadListKeys;
+		QHash<QString, QStringList>                       notepadListByKey;
+		QSet<QString>                                     missingNotepadListKeys;
+		QVector<LuaCallbackWorldRuntimeSnapshot>          worldRuntimeSnapshot;
+		QVector<LuaCallbackWorldWindowPositionSnapshot>   worldWindowPositionSnapshot;
+		bool                                              hasNotepadPresentationSnapshot{false};
+		QVector<LuaCallbackNotepadSnapshot>               notepadSnapshot;
+		int                                               actionSourceOverride{0};
+		bool                                              hasActionSourceOverride{false};
 };
 
 /**
@@ -686,14 +729,14 @@ struct LuaCallbackMiniWindowSnapshot
  */
 struct LuaBatchDispatchRequest
 {
-		LuaBatchDispatchKind                       kind{LuaBatchDispatchKind::NoArgs};
-		LuaBatchDispatchLane                       lane{LuaBatchDispatchLane::Callback};
-		LuaCallbackLineSnapshotPolicy              lineSnapshotPolicy{LuaCallbackLineSnapshotPolicy::None};
-		QVector<QSharedPointer<LuaCallbackEngine>> engines;
-		QString                                    functionName;
-		QString                                    stringArg;
-		QString                                    stringArg2;
-		QString                                    miniWindowExecutionName;
+		LuaBatchDispatchKind          kind{LuaBatchDispatchKind::NoArgs};
+		LuaBatchDispatchLane          lane{LuaBatchDispatchLane::Callback};
+		LuaCallbackLineSnapshotPolicy lineSnapshotPolicy{LuaCallbackLineSnapshotPolicy::CountAndLast};
+		QVector<QSharedPointer<LuaCallbackEngine>>                            engines;
+		QString                                                               functionName;
+		QString                                                               stringArg;
+		QString                                                               stringArg2;
+		QString                                                               miniWindowExecutionName;
 		QSharedPointer<const QVector<LuaEngineObservedInitializationRequest>> initRequestsArg;
 		QSet<QString>                                                         observedCallbackNamesArg;
 		QStringList                                                           stringListArg;
@@ -723,6 +766,8 @@ struct LuaBatchDispatchRequest
 		bool    executeScriptHasTriggerContext{false};
 		bool    triggerOutputReplacesMatchedLine{false};
 		bool    applyCallingPluginContext{false};
+		bool    screendrawExecutionGuard{false};
+		bool    drawOutputWindowExecutionGuard{false};
 		QString callingPluginId;
 		quint64 modalResumeId{0};
 		quint64 runtimeModalResumeId{0};
@@ -740,8 +785,67 @@ struct LuaBatchDispatchRequest
  */
 struct LuaDeferredRuntimeMutationBatch
 {
-		WorldRuntime                  *runtime{nullptr};
+		QPointer<WorldRuntime>         runtime;
 		QVector<std::function<void()>> mutations;
+};
+
+using LuaDeferredRuntimeMutationConsumer = std::function<void(QVector<LuaDeferredRuntimeMutationBatch>)>;
+
+/**
+ * @brief Recovery ownership for deferred mutations carried by an asynchronous dispatch result.
+ *
+ * Normal result consumption and worker shutdown atomically compete for the same backup. This
+ * guarantees that an undelivered completion cannot lose mutations or apply them twice.
+ */
+class LuaDeferredRuntimeMutationDelivery final
+{
+	public:
+		using DeliveryAction   = std::function<void(QVector<LuaDeferredRuntimeMutationBatch>)>;
+		using DeliveryConsumer = std::function<bool(const DeliveryAction &)>;
+
+		LuaDeferredRuntimeMutationDelivery(QVector<LuaDeferredRuntimeMutationBatch> backup,
+		                                   DeliveryConsumer                         deliveryConsumer)
+		    : m_backup(std::move(backup)), m_deliveryConsumer(std::move(deliveryConsumer))
+		{
+		}
+
+		[[nodiscard]] bool consumeForDelivery(const DeliveryAction &consumer) const
+		{
+			return m_deliveryConsumer && m_deliveryConsumer(consumer);
+		}
+
+		[[nodiscard]] bool recoverUndelivered(const LuaDeferredRuntimeMutationConsumer &consumer)
+		{
+			return consumeForDelivery(
+			    [this, consumer](QVector<LuaDeferredRuntimeMutationBatch> earlierBatches)
+			    {
+				    QVector<LuaDeferredRuntimeMutationBatch> backup = takeBackupForRecovery();
+				    earlierBatches += std::move(backup);
+				    if (!earlierBatches.isEmpty() && consumer)
+					    consumer(std::move(earlierBatches));
+			    });
+		}
+
+		[[nodiscard]] QVector<LuaDeferredRuntimeMutationBatch> takeBackupForRecovery()
+		{
+			QVector<LuaDeferredRuntimeMutationBatch> backup;
+			backup.swap(m_backup);
+			return backup;
+		}
+
+	private:
+		QVector<LuaDeferredRuntimeMutationBatch> m_backup;
+		DeliveryConsumer                         m_deliveryConsumer;
+};
+
+/**
+ * @brief Shared presentation produced by an internal callback line-page request.
+ */
+struct LuaCallbackLinePageResult
+{
+		QPointer<WorldRuntime>                              runtime;
+		QSharedPointer<const LuaCallbackLineBufferSnapshot> presentation;
+		bool                                                hasRecentLinesSnapshot{false};
 };
 
 /**
@@ -752,7 +856,10 @@ struct LuaPendingModalStringRequest
 		std::function<QString()>                             guiCallable;
 		std::function<void(WorldRuntime &, const QString &)> beforeRuntimeResumeCallback;
 		std::function<void(const QString &)>                 beforeResumeCallback;
+		std::function<void()>                                beforeCancelCallback;
 		std::function<void(quint64, QString)>                resultCallback;
+		QSharedPointer<LuaCallbackLinePageResult>            linePageResult;
+		bool                                                 internalImmediateResume{false};
 };
 
 /**
@@ -760,50 +867,421 @@ struct LuaPendingModalStringRequest
  */
 struct LuaBatchDispatchResult
 {
-		bool                                     boolResult{false};
-		bool                                     boolResultValid{false};
-		bool                                     hasFunction{false};
-		bool                                     hasFunctionValid{false};
-		int                                      countResult{0};
-		bool                                     countResultValid{false};
-		QString                                  stringResult;
-		QByteArray                               bytesResult;
-		int                                      marshallingError{0};
-		bool                                     marshallingErrorValid{false};
-		int                                      marshallingIndex{0};
-		QByteArray                               marshallingTypeName;
-		QString                                  marshallingRuntimeError;
-		int                                      marshallingReturnCount{0};
-		bool                                     marshallingSameState{false};
-		bool                                     suspended{false};
-		quint64                                  modalResumeId{0};
-		int                                      suspendedEngineIndex{-1};
-		bool                                     hasPendingModalStringRequest{false};
-		LuaPendingModalStringRequest             pendingModalStringRequest;
-		QVector<LuaDeferredRuntimeMutationBatch> deferredRuntimeMutationBatches;
+		bool                                               boolResult{false};
+		bool                                               boolResultValid{false};
+		bool                                               hasFunction{false};
+		bool                                               hasFunctionValid{false};
+		int                                                countResult{0};
+		bool                                               countResultValid{false};
+		QString                                            stringResult;
+		QByteArray                                         bytesResult;
+		int                                                marshallingError{0};
+		bool                                               marshallingErrorValid{false};
+		int                                                marshallingIndex{0};
+		QByteArray                                         marshallingTypeName;
+		QString                                            marshallingRuntimeError;
+		int                                                marshallingReturnCount{0};
+		bool                                               marshallingSameState{false};
+		bool                                               suspended{false};
+		bool                                               recipientMutationBoundary{false};
+		int                                                nextEngineIndex{-1};
+		bool                                               linePresentationRequiresRefresh{false};
+		bool                                               outputScrollPositionRequiresRefresh{false};
+		bool                                               outputScrollPositionChanged{false};
+		bool                                               commandUiPresentationRequiresRefresh{false};
+		bool                                               globalPresentationRequiresRefresh{false};
+		bool                                               commandHistoryChanged{false};
+		bool                                               notepadPresentationChanged{false};
+		bool                                               hasNotepadPresentationSnapshot{false};
+		QVector<LuaCallbackNotepadSnapshot>                notepadPresentationSnapshot;
+		quint64                                            modalResumeId{0};
+		int                                                suspendedEngineIndex{-1};
+		bool                                               hasPendingModalStringRequest{false};
+		LuaPendingModalStringRequest                       pendingModalStringRequest;
+		QVector<LuaDeferredRuntimeMutationBatch>           deferredRuntimeMutationBatches;
+		QSharedPointer<LuaDeferredRuntimeMutationDelivery> deferredRuntimeMutationDelivery;
 };
+
+enum class LuaBatchRecipientStopCondition
+{
+	Never,
+	FalseResult,
+	TrueResult,
+	FunctionPresent
+};
+
+/**
+ * @brief Aggregate result shape shared by initial, resumed, and fallback dispatch handling.
+ */
+enum class LuaBatchAggregateShape
+{
+	None,
+	BooleanAndFunction,
+	StopOnFalse,
+	FunctionHandled,
+	StopOnTrue,
+	FunctionCount,
+	FunctionAny,
+	BytesInOut,
+	StringInOut,
+	LastResult
+};
+
+/**
+ * @brief Returns the aggregate shape for a batch dispatch kind.
+ * @param kind Dispatch kind to classify.
+ * @return Shared aggregate result shape.
+ */
+[[nodiscard]] constexpr LuaBatchAggregateShape luaBatchDispatchAggregateShape(const LuaBatchDispatchKind kind)
+{
+	switch (kind)
+	{
+	case LuaBatchDispatchKind::NoArgs:
+		return LuaBatchAggregateShape::BooleanAndFunction;
+	case LuaBatchDispatchKind::StringStopOnFalse:
+	case LuaBatchDispatchKind::NumberAndStringStopOnFalse:
+	case LuaBatchDispatchKind::TwoNumbersAndStringStopOnFalse:
+		return LuaBatchAggregateShape::StopOnFalse;
+	case LuaBatchDispatchKind::StringHandled:
+		return LuaBatchAggregateShape::FunctionHandled;
+	case LuaBatchDispatchKind::NumberAndStringStopOnTrue:
+	case LuaBatchDispatchKind::NumberAndBytesStopOnTrue:
+		return LuaBatchAggregateShape::StopOnTrue;
+	case LuaBatchDispatchKind::NumberAndUtf8StringsCount:
+		return LuaBatchAggregateShape::FunctionCount;
+	case LuaBatchDispatchKind::StringsAndWildcards:
+		return LuaBatchAggregateShape::FunctionAny;
+	case LuaBatchDispatchKind::BytesInOut:
+		return LuaBatchAggregateShape::BytesInOut;
+	case LuaBatchDispatchKind::StringInOut:
+		return LuaBatchAggregateShape::StringInOut;
+	case LuaBatchDispatchKind::String:
+	case LuaBatchDispatchKind::Bytes:
+	case LuaBatchDispatchKind::NumberAndString:
+	case LuaBatchDispatchKind::TwoNumbersAndString:
+	case LuaBatchDispatchKind::NumberAndBytes:
+	case LuaBatchDispatchKind::ExecuteScript:
+	case LuaBatchDispatchKind::ProcedureWithString:
+	case LuaBatchDispatchKind::MxpError:
+	case LuaBatchDispatchKind::MxpStartTag:
+		return LuaBatchAggregateShape::LastResult;
+	default:
+		return LuaBatchAggregateShape::None;
+	}
+}
+
+/**
+ * @brief Builds the neutral result returned when a batch dispatch cannot run or continue.
+ * @param request Dispatch whose public result contract must be preserved.
+ * @return Neutral, fully initialized result for the dispatch kind.
+ */
+[[nodiscard]] inline LuaBatchDispatchResult
+makeLuaBatchDispatchFallback(const LuaBatchDispatchRequest &request)
+{
+	LuaBatchDispatchResult result{};
+	switch (luaBatchDispatchAggregateShape(request.kind))
+	{
+	case LuaBatchAggregateShape::BooleanAndFunction:
+	case LuaBatchAggregateShape::StopOnFalse:
+		result.boolResult       = true;
+		result.boolResultValid  = true;
+		result.hasFunction      = false;
+		result.hasFunctionValid = true;
+		break;
+	case LuaBatchAggregateShape::FunctionHandled:
+	case LuaBatchAggregateShape::StopOnTrue:
+		result.boolResult       = false;
+		result.boolResultValid  = true;
+		result.hasFunction      = false;
+		result.hasFunctionValid = true;
+		break;
+	case LuaBatchAggregateShape::FunctionCount:
+		result.countResult      = 0;
+		result.countResultValid = true;
+		break;
+	case LuaBatchAggregateShape::FunctionAny:
+		result.hasFunction      = false;
+		result.hasFunctionValid = true;
+		break;
+	case LuaBatchAggregateShape::BytesInOut:
+		result.bytesResult = request.bytesArg;
+		break;
+	case LuaBatchAggregateShape::StringInOut:
+		result.stringResult = request.stringArg;
+		break;
+	case LuaBatchAggregateShape::LastResult:
+	case LuaBatchAggregateShape::None:
+		break;
+	}
+
+	switch (request.kind)
+	{
+	case LuaBatchDispatchKind::HasFunction:
+		result.hasFunction      = false;
+		result.hasFunctionValid = true;
+		break;
+	case LuaBatchDispatchKind::ResetAndLoadScript:
+	case LuaBatchDispatchKind::ExecuteScript:
+	case LuaBatchDispatchKind::MxpError:
+	case LuaBatchDispatchKind::MxpStartTag:
+	case LuaBatchDispatchKind::CallPluginLuaMarshalling:
+		result.boolResult      = false;
+		result.boolResultValid = true;
+		break;
+	case LuaBatchDispatchKind::ProcedureWithString:
+		result.boolResult       = false;
+		result.boolResultValid  = true;
+		result.hasFunction      = false;
+		result.hasFunctionValid = true;
+		break;
+	default:
+		break;
+	}
+	return result;
+}
+
+/**
+ * @brief Returns the single stop policy shared by initial and continued callback dispatches.
+ */
+[[nodiscard]] constexpr LuaBatchRecipientStopCondition
+luaBatchDispatchRecipientStopCondition(const LuaBatchDispatchKind kind)
+{
+	switch (luaBatchDispatchAggregateShape(kind))
+	{
+	case LuaBatchAggregateShape::StopOnFalse:
+		return LuaBatchRecipientStopCondition::FalseResult;
+	case LuaBatchAggregateShape::FunctionHandled:
+		return LuaBatchRecipientStopCondition::FunctionPresent;
+	case LuaBatchAggregateShape::StopOnTrue:
+		return LuaBatchRecipientStopCondition::TrueResult;
+	default:
+		return LuaBatchRecipientStopCondition::Never;
+	}
+}
+
+[[nodiscard]] inline bool luaBatchDispatchStopsAfterRecipient(const LuaBatchDispatchKind kind,
+                                                              const bool hasFunction, const bool boolResult)
+{
+	switch (luaBatchDispatchRecipientStopCondition(kind))
+	{
+	case LuaBatchRecipientStopCondition::FalseResult:
+		return hasFunction && !boolResult;
+	case LuaBatchRecipientStopCondition::TrueResult:
+		return hasFunction && boolResult;
+	case LuaBatchRecipientStopCondition::FunctionPresent:
+		return hasFunction;
+	case LuaBatchRecipientStopCondition::Never:
+		return false;
+	}
+	return false;
+}
+
+[[nodiscard]] inline bool luaBatchDispatchStopsAfterRecipient(const LuaBatchDispatchKind    kind,
+                                                              const LuaBatchDispatchResult &result)
+{
+	switch (luaBatchDispatchRecipientStopCondition(kind))
+	{
+	case LuaBatchRecipientStopCondition::FalseResult:
+		return result.boolResultValid && !result.boolResult;
+	case LuaBatchRecipientStopCondition::TrueResult:
+		return result.boolResultValid && result.boolResult;
+	case LuaBatchRecipientStopCondition::FunctionPresent:
+		return result.hasFunctionValid && result.hasFunction;
+	case LuaBatchRecipientStopCondition::Never:
+		return false;
+	}
+	return false;
+}
+
+inline void mergeLuaBatchPresentationRefreshFlags(LuaBatchDispatchResult       &aggregate,
+                                                  const LuaBatchDispatchResult &result)
+{
+	aggregate.linePresentationRequiresRefresh |= result.linePresentationRequiresRefresh;
+	aggregate.outputScrollPositionRequiresRefresh |= result.outputScrollPositionRequiresRefresh;
+	aggregate.outputScrollPositionChanged |= result.outputScrollPositionChanged;
+	aggregate.commandUiPresentationRequiresRefresh |= result.commandUiPresentationRequiresRefresh;
+	aggregate.globalPresentationRequiresRefresh |= result.globalPresentationRequiresRefresh;
+	aggregate.commandHistoryChanged |= result.commandHistoryChanged;
+	if (result.notepadPresentationChanged)
+	{
+		aggregate.notepadPresentationChanged     = true;
+		aggregate.hasNotepadPresentationSnapshot = result.hasNotepadPresentationSnapshot;
+		aggregate.notepadPresentationSnapshot    = result.hasNotepadPresentationSnapshot
+		                                               ? result.notepadPresentationSnapshot
+		                                               : QVector<LuaCallbackNotepadSnapshot>{};
+	}
+}
+
+/**
+ * @brief Merges one completed recipient into a batch aggregate.
+ * @param kind Original batch dispatch kind.
+ * @param aggregate Aggregate to update.
+ * @param recipient Completed recipient result.
+ */
+inline void mergeLuaBatchRecipientResult(const LuaBatchDispatchKind kind, LuaBatchDispatchResult &aggregate,
+                                         const LuaBatchDispatchResult &recipient)
+{
+	mergeLuaBatchPresentationRefreshFlags(aggregate, recipient);
+	switch (luaBatchDispatchAggregateShape(kind))
+	{
+	case LuaBatchAggregateShape::BooleanAndFunction:
+		aggregate.boolResult      = aggregate.boolResult && recipient.boolResult;
+		aggregate.boolResultValid = true;
+		aggregate.hasFunction =
+		    aggregate.hasFunction || (recipient.hasFunctionValid && recipient.hasFunction);
+		aggregate.hasFunctionValid = true;
+		break;
+	case LuaBatchAggregateShape::StopOnFalse:
+		if (recipient.hasFunctionValid && recipient.hasFunction && recipient.boolResultValid &&
+		    !recipient.boolResult)
+			aggregate.boolResult = false;
+		aggregate.boolResultValid = true;
+		aggregate.hasFunction =
+		    aggregate.hasFunction || (recipient.hasFunctionValid && recipient.hasFunction);
+		aggregate.hasFunctionValid = true;
+		break;
+	case LuaBatchAggregateShape::FunctionHandled:
+		if (recipient.hasFunctionValid && recipient.hasFunction)
+			aggregate.boolResult = true;
+		aggregate.boolResultValid = true;
+		aggregate.hasFunction =
+		    aggregate.hasFunction || (recipient.hasFunctionValid && recipient.hasFunction);
+		aggregate.hasFunctionValid = true;
+		break;
+	case LuaBatchAggregateShape::StopOnTrue:
+		if (recipient.hasFunctionValid && recipient.hasFunction && recipient.boolResultValid &&
+		    recipient.boolResult)
+			aggregate.boolResult = true;
+		aggregate.boolResultValid = true;
+		aggregate.hasFunction =
+		    aggregate.hasFunction || (recipient.hasFunctionValid && recipient.hasFunction);
+		aggregate.hasFunctionValid = true;
+		break;
+	case LuaBatchAggregateShape::FunctionCount:
+		if (recipient.countResultValid)
+			aggregate.countResult += recipient.countResult;
+		else if (recipient.hasFunctionValid && recipient.hasFunction)
+			++aggregate.countResult;
+		aggregate.countResultValid = true;
+		break;
+	case LuaBatchAggregateShape::FunctionAny:
+		aggregate.hasFunction =
+		    aggregate.hasFunction || (recipient.hasFunctionValid && recipient.hasFunction);
+		aggregate.hasFunctionValid = true;
+		break;
+	case LuaBatchAggregateShape::BytesInOut:
+		aggregate.bytesResult = recipient.bytesResult;
+		break;
+	case LuaBatchAggregateShape::StringInOut:
+		aggregate.stringResult = recipient.stringResult;
+		break;
+	case LuaBatchAggregateShape::LastResult:
+		if (recipient.boolResultValid)
+		{
+			aggregate.boolResult      = recipient.boolResult;
+			aggregate.boolResultValid = true;
+		}
+		if (recipient.hasFunctionValid)
+		{
+			aggregate.hasFunction      = recipient.hasFunction;
+			aggregate.hasFunctionValid = true;
+		}
+		break;
+	case LuaBatchAggregateShape::None:
+		break;
+	}
+}
+
+/**
+ * @brief Preserves results produced before a suspended recipient when dispatch cannot resume.
+ * @param kind Original multi-recipient dispatch shape.
+ * @param fallback Request-level fallback to update.
+ * @param partial Aggregate produced before the suspended recipient completed.
+ */
+inline void preserveLuaBatchPartialResultOnFallback(const LuaBatchDispatchKind    kind,
+                                                    LuaBatchDispatchResult       &fallback,
+                                                    const LuaBatchDispatchResult &partial)
+{
+	mergeLuaBatchPresentationRefreshFlags(fallback, partial);
+	switch (luaBatchDispatchAggregateShape(kind))
+	{
+	case LuaBatchAggregateShape::BooleanAndFunction:
+	case LuaBatchAggregateShape::StopOnFalse:
+	case LuaBatchAggregateShape::StopOnTrue:
+	case LuaBatchAggregateShape::FunctionHandled:
+		fallback.boolResult       = partial.boolResult;
+		fallback.boolResultValid  = true;
+		fallback.hasFunction      = partial.hasFunction;
+		fallback.hasFunctionValid = true;
+		break;
+	case LuaBatchAggregateShape::FunctionCount:
+		fallback.countResult      = partial.countResult;
+		fallback.countResultValid = true;
+		break;
+	case LuaBatchAggregateShape::FunctionAny:
+		fallback.hasFunction      = partial.hasFunction;
+		fallback.hasFunctionValid = true;
+		break;
+	case LuaBatchAggregateShape::BytesInOut:
+		fallback.bytesResult = partial.bytesResult;
+		break;
+	case LuaBatchAggregateShape::StringInOut:
+		fallback.stringResult = partial.stringResult;
+		break;
+	case LuaBatchAggregateShape::LastResult:
+	case LuaBatchAggregateShape::None:
+		break;
+	}
+}
+
+[[nodiscard]] inline bool luaBatchPresentationRequiresRefresh(const LuaBatchDispatchResult &result)
+{
+	return result.linePresentationRequiresRefresh || result.outputScrollPositionRequiresRefresh ||
+	       result.outputScrollPositionChanged || result.commandUiPresentationRequiresRefresh ||
+	       result.globalPresentationRequiresRefresh || result.commandHistoryChanged ||
+	       result.notepadPresentationChanged;
+}
+
+namespace QMudLuaDeferredRuntimeMutation
+{
+	/**
+	 * @brief Applies ordered callback cleanup batches on their owning runtime threads.
+	 * @param batches Batches to consume.
+	 */
+	void apply(QVector<LuaDeferredRuntimeMutationBatch> batches);
+	/**
+	 * @brief Applies local batches immediately and queues foreign-thread batches without waiting.
+	 * @param batches Batches to consume.
+	 */
+	void applyLocallyOrQueue(QVector<LuaDeferredRuntimeMutationBatch> batches);
+	/**
+	 * @brief Takes and applies every deferred cleanup batch carried by a dispatch result.
+	 * @param result Dispatch result whose cleanup batches are consumed.
+	 */
+	void apply(LuaBatchDispatchResult &result);
+} // namespace QMudLuaDeferredRuntimeMutation
 
 /**
  * @brief Engine bootstrap payload used for batched plugin Lua initialization.
  */
 struct LuaEngineObservedInitializationRequest
 {
-		LuaCallbackEngine                                                                 *engine{nullptr};
-		WorldRuntime                                                                      *runtime{nullptr};
-		QString                                                                            scriptText;
-		QString                                                                            pluginId;
-		QString                                                                            pluginName;
-		QString                                                                            pluginDirectory;
-		QSet<QString>                                                                      callbackNames;
+		LuaCallbackEngine                *engine{nullptr};
+		QSharedPointer<LuaCallbackEngine> workerLifetimeOwner;
+		WorldRuntime                     *runtime{nullptr};
+		QString                           scriptText;
+		QString                           pluginId;
+		QString                           pluginName;
+		QString                           pluginDirectory;
+		QSet<QString>                     callbackNames;
 		std::function<void(const QString &, const QSet<QString> &, const QSet<QString> &)> observer;
 };
 
 /**
  * @brief Execution seam for invoking Lua callback engine operations.
  *
- * Production currently uses @ref LuaExecutorDirect (same-thread direct dispatch),
- * while future threaded backends can implement this interface with identical
- * call semantics.
+ * Runtime configuration selects either the worker-thread or same-thread direct
+ * backend while preserving identical call semantics through this interface.
  */
 class ILuaExecutor
 {
@@ -816,12 +1294,7 @@ class ILuaExecutor
 		 * @return Dispatch result payload.
 		 */
 		[[nodiscard]] virtual LuaBatchDispatchResult
-		             dispatchBatch(const LuaBatchDispatchRequest &request) const;
-		/**
-		 * @brief Dispatches one structured batch callback command asynchronously.
-		 * @param request Command payload and arguments.
-		 */
-		virtual void dispatchBatchAsync(const LuaBatchDispatchRequest &request) const;
+		dispatchBatch(const LuaBatchDispatchRequest &request) const;
 		/**
 		 * @brief Dispatches one structured batch callback command asynchronously with completion callback.
 		 * @param request Command payload and arguments.
@@ -843,9 +1316,9 @@ class LuaExecutorDirect final : public ILuaExecutor
 /**
  * @brief Creates the runtime Lua executor backend.
  *
- * Currently, returns the direct/same-thread backend; future threading work will
- * switch this factory based on configuration once parity gates are satisfied.
+ * Default builds return the worker-thread backend. Builds configured with
+ * `QMUD_ENABLE_EXPERIMENTAL_THREADED_LUA_EXECUTOR=OFF` return the direct backend.
  */
-std::unique_ptr<ILuaExecutor> makeLuaExecutor();
+std::unique_ptr<ILuaExecutor> makeLuaExecutor(LuaDeferredRuntimeMutationConsumer shutdownMutationConsumer);
 
 #endif // QMUD_LUAEXECUTOR_H

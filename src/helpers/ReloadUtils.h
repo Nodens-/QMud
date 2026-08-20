@@ -33,6 +33,8 @@ enum class ReloadSocketPolicy
 struct ReloadWorldState
 {
 		int                sequence{0};
+		int                presentationCount{1};
+		int                activePresentationOrdinal{0};
 		QString            worldId;
 		QString            displayName;
 		QString            worldFilePath;

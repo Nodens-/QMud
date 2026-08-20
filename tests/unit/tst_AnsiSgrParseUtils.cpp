@@ -31,352 +31,440 @@ namespace
 	}
 } // namespace
 
-/**
- * @brief QTest fixture covering ANSI SGR parser scenarios.
- */
-class tst_AnsiSgrParseUtils : public QObject
+namespace
 {
-		Q_OBJECT
-
-	private slots:
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-		void ansiParsingAppliesInMixedActionContext();
-		void splitEscapeSequenceCarriesAcrossCalls();
-		void osc8HyperlinkActionsApplyAndClose();
-		void osc8SendAndPromptDecodePayload();
-		void osc8UnknownSchemeIsInert();
-		void osc8CloseClearsActionScopedMetadata();
-		void osc8StTerminatorAcrossChunks();
-		void oversizedCsiSequenceIsDiscarded();
-		void oversizedOscSequenceIsDiscarded();
-		void unknownEscapePrefixPreservesFollowingByte();
-		void trueColorSemicolonSgrParses();
-		void trueColorColonSgrParses();
-		void indexedColorColonSgrParses();
-		void byteArrayViewSubrangeIsParsedWithoutSurroundingBytes();
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
-
-// NOLINTBEGIN(readability-convert-member-functions-to-static)
-void tst_AnsiSgrParseUtils::ansiParsingAppliesInMixedActionContext()
-{
-	QMudAnsiStreamState streamState;
-	QMudStyledTextState state;
-	state.actionType = 2;
-	state.action     = QStringLiteral("whois Testuser");
-	state.hint       = QStringLiteral("hint");
-	state.variable   = QStringLiteral("mxp_var");
-	state.startTag   = true;
-	state.monospace  = true;
-
-	const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b[0;31m[minimal\x1b[0m"), streamState, QStringLiteral("#ffffff"),
-	    QStringLiteral("#000000"), normalColor, boldColor,
-	    [](const int idx)
-	    {
-		    if (idx == 196)
-			    return QStringLiteral("#ff0000");
-		    return QString();
-	    },
-	    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
-
-	QCOMPARE(chunks.size(), 1);
-	QCOMPARE(chunks.at(0).text, QStringLiteral("[minimal"));
-	QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#800000"));
-	QCOMPARE(chunks.at(0).state.actionType, 2);
-	QCOMPARE(chunks.at(0).state.action, QStringLiteral("whois Testuser"));
-	QCOMPARE(chunks.at(0).state.hint, QStringLiteral("hint"));
-	QCOMPARE(chunks.at(0).state.variable, QStringLiteral("mxp_var"));
-	QVERIFY(chunks.at(0).state.startTag);
-	QVERIFY(chunks.at(0).state.monospace);
-
-	QCOMPARE(state.fore, QStringLiteral("#ffffff"));
-	QCOMPARE(state.back, QStringLiteral("#000000"));
-	QCOMPARE(state.actionType, 2);
-	QCOMPARE(state.action, QStringLiteral("whois Testuser"));
-	QCOMPARE(state.hint, QStringLiteral("hint"));
-	QCOMPARE(state.variable, QStringLiteral("mxp_var"));
-	QVERIFY(!state.startTag);
-	QVERIFY(state.monospace);
-	QVERIFY(streamState.pending.isEmpty());
-	QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
-}
-
-void tst_AnsiSgrParseUtils::splitEscapeSequenceCarriesAcrossCalls()
-{
-	QMudAnsiStreamState streamState;
-	QMudStyledTextState state;
-
-	const auto          defaultFore = QStringLiteral("#ffffff");
-	const auto          defaultBack = QStringLiteral("#000000");
-	auto                decode      = [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); };
-	auto                colorLookup = [](int) { return QString(); };
-
-	const QVector<QMudStyledChunk> first =
-	    qmudParseAnsiSgrChunks(QByteArrayLiteral("\x1b[0;3"), streamState, defaultFore, defaultBack,
-	                           normalColor, boldColor, colorLookup, decode, state);
-	QVERIFY(first.isEmpty());
-	QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Csi);
-	QCOMPARE(streamState.pending, QByteArrayLiteral("0;3"));
-
-	const QVector<QMudStyledChunk> second =
-	    qmudParseAnsiSgrChunks(QByteArrayLiteral("1mX"), streamState, defaultFore, defaultBack, normalColor,
-	                           boldColor, colorLookup, decode, state);
-	QCOMPARE(second.size(), 1);
-	QCOMPARE(second.at(0).text, QStringLiteral("X"));
-	QCOMPARE(second.at(0).state.fore, QStringLiteral("#800000"));
-	QVERIFY(streamState.pending.isEmpty());
-	QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
-}
-
-void tst_AnsiSgrParseUtils::osc8HyperlinkActionsApplyAndClose()
-{
-	QMudAnsiStreamState            streamState;
-	QMudStyledTextState            state;
-	QMudOscActionIds               actions{0, 1, 2, 3};
-
-	const QVector<QMudStyledChunk> opened = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b]8;;https://example.org\x07link"), streamState, QStringLiteral("#ffffff"),
-	    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); },
-	    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state, actions);
-	QCOMPARE(opened.size(), 1);
-	QCOMPARE(opened.at(0).text, QStringLiteral("link"));
-	QCOMPARE(opened.at(0).state.actionType, 3);
-	QCOMPARE(opened.at(0).state.action, QStringLiteral("https://example.org"));
-
-	const QVector<QMudStyledChunk> closed = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b]8;;\x07"), streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"),
-	    normalColor, boldColor, [](int) { return QString(); },
-	    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state, actions);
-	QVERIFY(closed.isEmpty());
-	QCOMPARE(state.actionType, 0);
-	QCOMPARE(state.action, QString());
-	QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
-}
-
-void tst_AnsiSgrParseUtils::osc8SendAndPromptDecodePayload()
-{
-	QMudAnsiStreamState streamState;
-	QMudStyledTextState state;
-	QMudOscActionIds    actions{0, 1, 2, 3};
-	auto                decode = [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); };
-
-	const QVector<QMudStyledChunk> sendChunks = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b]8;;send:buy%20bread\x07Send\x1b]8;;\x07"), streamState,
-	    QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
-	    [](int) { return QString(); }, decode, state, actions);
-	QCOMPARE(sendChunks.size(), 1);
-	QCOMPARE(sendChunks.at(0).text, QStringLiteral("Send"));
-	QCOMPARE(sendChunks.at(0).state.actionType, 1);
-	QCOMPARE(sendChunks.at(0).state.action, QStringLiteral("buy bread"));
-
-	const QVector<QMudStyledChunk> promptChunks = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b]8;;prompt:buy%20bread\x07Prompt\x1b]8;;\x07"), streamState,
-	    QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
-	    [](int) { return QString(); }, decode, state, actions);
-	QCOMPARE(promptChunks.size(), 1);
-	QCOMPARE(promptChunks.at(0).text, QStringLiteral("Prompt"));
-	QCOMPARE(promptChunks.at(0).state.actionType, 2);
-	QCOMPARE(promptChunks.at(0).state.action, QStringLiteral("buy bread"));
-}
-
-void tst_AnsiSgrParseUtils::osc8UnknownSchemeIsInert()
-{
-	QMudAnsiStreamState streamState;
-	QMudStyledTextState state;
-	QMudOscActionIds    actions{0, 1, 2, 3};
-	auto                decode = [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); };
-
-	const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b]8;;unknown://junk\x07ignored?\x1b]8;;\x07"), streamState,
-	    QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
-	    [](int) { return QString(); }, decode, state, actions);
-	QCOMPARE(chunks.size(), 1);
-	QCOMPARE(chunks.at(0).text, QStringLiteral("ignored?"));
-	QCOMPARE(chunks.at(0).state.actionType, 0);
-	QCOMPARE(chunks.at(0).state.action, QString());
-	QCOMPARE(state.actionType, 0);
-	QCOMPARE(state.action, QString());
-}
-
-void tst_AnsiSgrParseUtils::osc8CloseClearsActionScopedMetadata()
-{
-	QMudAnsiStreamState streamState;
-	QMudStyledTextState state;
-	QMudOscActionIds    actions{0, 1, 2, 3};
-	state.actionType = 3;
-	state.action     = QStringLiteral("https://example.org");
-	state.hint       = QStringLiteral("hint");
-	state.variable   = QStringLiteral("mxp_var");
-	state.startTag   = true;
-
-	const QVector<QMudStyledChunk> closed = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b]8;;\x07"), streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"),
-	    normalColor, boldColor, [](int) { return QString(); },
-	    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state, actions);
-	QVERIFY(closed.isEmpty());
-	QCOMPARE(state.actionType, 0);
-	QCOMPARE(state.action, QString());
-	QCOMPARE(state.hint, QString());
-	QCOMPARE(state.variable, QString());
-	QVERIFY(!state.startTag);
-}
-
-void tst_AnsiSgrParseUtils::osc8StTerminatorAcrossChunks()
-{
-	QMudAnsiStreamState streamState;
-	QMudStyledTextState state;
-	QMudOscActionIds    actions{0, 1, 2, 3};
-	auto                decode = [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); };
-
-	const QVector<QMudStyledChunk> first = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b]8;;send:look\x1b"), streamState, QStringLiteral("#ffffff"),
-	    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); }, decode, state,
-	    actions);
-	QVERIFY(first.isEmpty());
-	QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::OscEsc);
-
-	const QVector<QMudStyledChunk> second = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\\cmd"), streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"),
-	    normalColor, boldColor, [](int) { return QString(); }, decode, state, actions);
-	QCOMPARE(second.size(), 1);
-	QCOMPARE(second.at(0).text, QStringLiteral("cmd"));
-	QCOMPARE(second.at(0).state.actionType, 1);
-	QCOMPARE(second.at(0).state.action, QStringLiteral("look"));
-	QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
-}
-
-void tst_AnsiSgrParseUtils::oversizedCsiSequenceIsDiscarded()
-{
-	QMudAnsiStreamState streamState;
-	QMudStyledTextState state;
-
-	QByteArray          bytes("\x1b[");
-	bytes.append(QByteArray(256, '1'));
-	const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
-	    bytes, streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
-	    [](int) { return QString(); }, [](const QByteArrayView input) { return QString::fromLatin1(input); },
-	    state);
-	for (const QMudStyledChunk &chunk : chunks)
+	/**
+	 * @brief QTest fixture covering ANSI SGR parser scenarios.
+	 */
+	class tst_AnsiSgrParseUtils : public QObject
 	{
-		QCOMPARE(chunk.state.actionType, 0);
-		QCOMPARE(chunk.state.action, QString());
-	}
-	QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
-	QVERIFY(streamState.pending.isEmpty());
-	QCOMPARE(state.actionType, 0);
-	QCOMPARE(state.action, QString());
-}
+			Q_OBJECT
 
-void tst_AnsiSgrParseUtils::oversizedOscSequenceIsDiscarded()
-{
-	QMudAnsiStreamState streamState;
-	QMudStyledTextState state;
-	QMudOscActionIds    actions{0, 1, 2, 3};
+		private slots:
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+			void ansiParsingAppliesInMixedActionContext();
+			void splitEscapeSequenceCarriesAcrossCalls();
+			void osc8HyperlinkActionsApplyAndClose();
+			void osc8SendAndPromptDecodePayload();
+			void osc8UnknownSchemeIsInert();
+			void osc8CloseClearsActionScopedMetadata();
+			void osc8StTerminatorAcrossChunks();
+			void oversizedCsiSequenceIsDiscarded();
+			void oversizedOscSequenceIsDiscarded();
+			void unknownEscapePrefixPreservesFollowingByte();
+			void trueColorSemicolonSgrParses();
+			void trueColorColonSgrParses();
+			void indexedColorColonSgrParses();
+			void inverseStateDoesNotPreSwapStoredColours();
+			void intensityChangesRespectForegroundSource();
+			void byteArrayViewSubrangeIsParsedWithoutSurroundingBytes();
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
 
-	QByteArray          bytes("\x1b]8;;");
-	bytes.append(QByteArray(9000, 'x'));
-	const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
-	    bytes, streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
-	    [](int) { return QString(); }, [](const QByteArrayView input) { return QString::fromLatin1(input); },
-	    state, actions);
-	for (const QMudStyledChunk &chunk : chunks)
+	// NOLINTBEGIN(readability-convert-member-functions-to-static)
+	void tst_AnsiSgrParseUtils::ansiParsingAppliesInMixedActionContext()
 	{
-		QCOMPARE(chunk.state.actionType, 0);
-		QCOMPARE(chunk.state.action, QString());
+		QMudAnsiStreamState streamState;
+		QMudStyledTextState state;
+		state.actionType = 2;
+		state.action     = QStringLiteral("whois Testuser");
+		state.hint       = QStringLiteral("hint");
+		state.variable   = QStringLiteral("mxp_var");
+		state.startTag   = true;
+		state.monospace  = true;
+
+		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b[0;31m[minimal\x1b[0m"), streamState, QStringLiteral("#ffffff"),
+		    QStringLiteral("#000000"), normalColor, boldColor,
+		    [](const int idx)
+		    {
+			    if (idx == 196)
+				    return QStringLiteral("#ff0000");
+			    return QString();
+		    },
+		    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
+
+		QCOMPARE(chunks.size(), 1);
+		QCOMPARE(chunks.at(0).text, QStringLiteral("[minimal"));
+		QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#800000"));
+		QCOMPARE(chunks.at(0).state.actionType, 2);
+		QCOMPARE(chunks.at(0).state.action, QStringLiteral("whois Testuser"));
+		QCOMPARE(chunks.at(0).state.hint, QStringLiteral("hint"));
+		QCOMPARE(chunks.at(0).state.variable, QStringLiteral("mxp_var"));
+		QVERIFY(chunks.at(0).state.startTag);
+		QVERIFY(chunks.at(0).state.monospace);
+
+		QCOMPARE(state.fore, QStringLiteral("#ffffff"));
+		QCOMPARE(state.back, QStringLiteral("#000000"));
+		QCOMPARE(state.actionType, 2);
+		QCOMPARE(state.action, QStringLiteral("whois Testuser"));
+		QCOMPARE(state.hint, QStringLiteral("hint"));
+		QCOMPARE(state.variable, QStringLiteral("mxp_var"));
+		QVERIFY(!state.startTag);
+		QVERIFY(state.monospace);
+		QVERIFY(streamState.pending.isEmpty());
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
 	}
-	QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
-	QVERIFY(streamState.pending.isEmpty());
-	QCOMPARE(state.actionType, 0);
-	QCOMPARE(state.action, QString());
-}
 
-void tst_AnsiSgrParseUtils::unknownEscapePrefixPreservesFollowingByte()
-{
-	QMudAnsiStreamState            streamState;
-	QMudStyledTextState            state;
+	void tst_AnsiSgrParseUtils::splitEscapeSequenceCarriesAcrossCalls()
+	{
+		QMudAnsiStreamState streamState;
+		QMudStyledTextState state;
 
-	const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1bXabc"), streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"),
-	    normalColor, boldColor, [](int) { return QString(); },
-	    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
-	QCOMPARE(chunks.size(), 1);
-	QCOMPARE(chunks.at(0).text, QStringLiteral("Xabc"));
-}
+		const auto          defaultFore = QStringLiteral("#ffffff");
+		const auto          defaultBack = QStringLiteral("#000000");
+		auto                decode = [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); };
+		auto                colorLookup = [](int) { return QString(); };
 
-void tst_AnsiSgrParseUtils::trueColorSemicolonSgrParses()
-{
-	QMudAnsiStreamState            streamState;
-	QMudStyledTextState            state;
+		const QVector<QMudStyledChunk> first =
+		    qmudParseAnsiSgrChunks(QByteArrayLiteral("\x1b[0;3"), streamState, defaultFore, defaultBack,
+		                           normalColor, boldColor, colorLookup, decode, state);
+		QVERIFY(first.isEmpty());
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Csi);
+		QCOMPARE(streamState.pending, QByteArrayLiteral("0;3"));
 
-	const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b[38;2;1;2;3;48;2;4;5;6mX"), streamState, QStringLiteral("#ffffff"),
-	    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); },
-	    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
-	QCOMPARE(chunks.size(), 1);
-	QCOMPARE(chunks.at(0).text, QStringLiteral("X"));
-	QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#010203"));
-	QCOMPARE(chunks.at(0).state.back, QStringLiteral("#040506"));
-}
+		const QVector<QMudStyledChunk> second =
+		    qmudParseAnsiSgrChunks(QByteArrayLiteral("1mX"), streamState, defaultFore, defaultBack,
+		                           normalColor, boldColor, colorLookup, decode, state);
+		QCOMPARE(second.size(), 1);
+		QCOMPARE(second.at(0).text, QStringLiteral("X"));
+		QCOMPARE(second.at(0).state.fore, QStringLiteral("#800000"));
+		QVERIFY(streamState.pending.isEmpty());
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
+	}
 
-void tst_AnsiSgrParseUtils::trueColorColonSgrParses()
-{
-	QMudAnsiStreamState            streamState;
-	QMudStyledTextState            state;
+	void tst_AnsiSgrParseUtils::osc8HyperlinkActionsApplyAndClose()
+	{
+		QMudAnsiStreamState            streamState;
+		QMudStyledTextState            state;
+		QMudOscActionIds               actions{0, 1, 2, 3};
 
-	const QVector<QMudStyledChunk> noColorSpaceChunks = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b[38:2:7:8:9mA"), streamState, QStringLiteral("#ffffff"),
-	    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); },
-	    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
-	QCOMPARE(noColorSpaceChunks.size(), 1);
-	QCOMPARE(noColorSpaceChunks.at(0).state.fore, QStringLiteral("#070809"));
+		const QVector<QMudStyledChunk> opened = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b]8;;https://example.org\x07link"), streamState, QStringLiteral("#ffffff"),
+		    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); },
+		    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state, actions);
+		QCOMPARE(opened.size(), 1);
+		QCOMPARE(opened.at(0).text, QStringLiteral("link"));
+		QCOMPARE(opened.at(0).state.actionType, 3);
+		QCOMPARE(opened.at(0).state.action, QStringLiteral("https://example.org"));
 
-	const QVector<QMudStyledChunk> explicitColorSpaceChunks = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b[38:2::10:20:30mB"), streamState, QStringLiteral("#ffffff"),
-	    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); },
-	    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
-	QCOMPARE(explicitColorSpaceChunks.size(), 1);
-	QCOMPARE(explicitColorSpaceChunks.at(0).state.fore, QStringLiteral("#0a141e"));
-}
+		const QVector<QMudStyledChunk> closed = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b]8;;\x07"), streamState, QStringLiteral("#ffffff"),
+		    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); },
+		    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state, actions);
+		QVERIFY(closed.isEmpty());
+		QCOMPARE(state.actionType, 0);
+		QCOMPARE(state.action, QString());
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
+	}
 
-void tst_AnsiSgrParseUtils::indexedColorColonSgrParses()
-{
-	QMudAnsiStreamState            streamState;
-	QMudStyledTextState            state;
+	void tst_AnsiSgrParseUtils::osc8SendAndPromptDecodePayload()
+	{
+		QMudAnsiStreamState streamState;
+		QMudStyledTextState state;
+		QMudOscActionIds    actions{0, 1, 2, 3};
+		auto                decode = [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); };
 
-	const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
-	    QByteArrayLiteral("\x1b[38:5:196mX"), streamState, QStringLiteral("#ffffff"),
-	    QStringLiteral("#000000"), normalColor, boldColor,
-	    [](const int idx)
-	    {
-		    if (idx == 196)
-			    return QStringLiteral("#ff0000");
-		    return QString();
-	    },
-	    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
-	QCOMPARE(chunks.size(), 1);
-	QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#ff0000"));
-}
+		const QVector<QMudStyledChunk> sendChunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b]8;;send:buy%20bread\x07Send\x1b]8;;\x07"), streamState,
+		    QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
+		    [](int) { return QString(); }, decode, state, actions);
+		QCOMPARE(sendChunks.size(), 1);
+		QCOMPARE(sendChunks.at(0).text, QStringLiteral("Send"));
+		QCOMPARE(sendChunks.at(0).state.actionType, 1);
+		QCOMPARE(sendChunks.at(0).state.action, QStringLiteral("buy bread"));
 
-void tst_AnsiSgrParseUtils::byteArrayViewSubrangeIsParsedWithoutSurroundingBytes()
-{
-	const QByteArray               storage = QByteArrayLiteral("xx\x1b[31mVisible\x1b[0myy");
-	const QByteArrayView           view(storage.constData() + 2, storage.size() - 4);
-	QMudAnsiStreamState            streamState;
-	QMudStyledTextState            state;
+		const QVector<QMudStyledChunk> promptChunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b]8;;prompt:buy%20bread\x07Prompt\x1b]8;;\x07"), streamState,
+		    QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
+		    [](int) { return QString(); }, decode, state, actions);
+		QCOMPARE(promptChunks.size(), 1);
+		QCOMPARE(promptChunks.at(0).text, QStringLiteral("Prompt"));
+		QCOMPARE(promptChunks.at(0).state.actionType, 2);
+		QCOMPARE(promptChunks.at(0).state.action, QStringLiteral("buy bread"));
+	}
 
-	const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
-	    view, streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
-	    [](int) { return QString(); }, [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); },
-	    state);
+	void tst_AnsiSgrParseUtils::osc8UnknownSchemeIsInert()
+	{
+		QMudAnsiStreamState streamState;
+		QMudStyledTextState state;
+		QMudOscActionIds    actions{0, 1, 2, 3};
+		auto                decode = [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); };
 
-	QCOMPARE(chunks.size(), 1);
-	QCOMPARE(chunks.at(0).text, QStringLiteral("Visible"));
-	QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#800000"));
-	QCOMPARE(state.fore, QStringLiteral("#ffffff"));
-	QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
-}
-// NOLINTEND(readability-convert-member-functions-to-static)
+		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b]8;;unknown://junk\x07ignored?\x1b]8;;\x07"), streamState,
+		    QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
+		    [](int) { return QString(); }, decode, state, actions);
+		QCOMPARE(chunks.size(), 1);
+		QCOMPARE(chunks.at(0).text, QStringLiteral("ignored?"));
+		QCOMPARE(chunks.at(0).state.actionType, 0);
+		QCOMPARE(chunks.at(0).state.action, QString());
+		QCOMPARE(state.actionType, 0);
+		QCOMPARE(state.action, QString());
+	}
+
+	void tst_AnsiSgrParseUtils::osc8CloseClearsActionScopedMetadata()
+	{
+		QMudAnsiStreamState streamState;
+		QMudStyledTextState state;
+		QMudOscActionIds    actions{0, 1, 2, 3};
+		state.actionType = 3;
+		state.action     = QStringLiteral("https://example.org");
+		state.hint       = QStringLiteral("hint");
+		state.variable   = QStringLiteral("mxp_var");
+		state.startTag   = true;
+
+		const QVector<QMudStyledChunk> closed = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b]8;;\x07"), streamState, QStringLiteral("#ffffff"),
+		    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); },
+		    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state, actions);
+		QVERIFY(closed.isEmpty());
+		QCOMPARE(state.actionType, 0);
+		QCOMPARE(state.action, QString());
+		QCOMPARE(state.hint, QString());
+		QCOMPARE(state.variable, QString());
+		QVERIFY(!state.startTag);
+	}
+
+	void tst_AnsiSgrParseUtils::osc8StTerminatorAcrossChunks()
+	{
+		QMudAnsiStreamState streamState;
+		QMudStyledTextState state;
+		QMudOscActionIds    actions{0, 1, 2, 3};
+		auto                decode = [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); };
+
+		const QVector<QMudStyledChunk> first = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b]8;;send:look\x1b"), streamState, QStringLiteral("#ffffff"),
+		    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); }, decode, state,
+		    actions);
+		QVERIFY(first.isEmpty());
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::OscEsc);
+
+		const QVector<QMudStyledChunk> second = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\\cmd"), streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"),
+		    normalColor, boldColor, [](int) { return QString(); }, decode, state, actions);
+		QCOMPARE(second.size(), 1);
+		QCOMPARE(second.at(0).text, QStringLiteral("cmd"));
+		QCOMPARE(second.at(0).state.actionType, 1);
+		QCOMPARE(second.at(0).state.action, QStringLiteral("look"));
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
+	}
+
+	void tst_AnsiSgrParseUtils::oversizedCsiSequenceIsDiscarded()
+	{
+		QMudAnsiStreamState streamState;
+		QMudStyledTextState state;
+
+		QByteArray          bytes("\x1b[");
+		bytes.append(QByteArray(256, '1'));
+		const QVector<QMudStyledChunk> oversized = qmudParseAnsiSgrChunks(
+		    bytes, streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
+		    [](int) { return QString(); },
+		    [](const QByteArrayView input) { return QString::fromLatin1(input); }, state);
+		QVERIFY(oversized.isEmpty());
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::DiscardCsi);
+		QVERIFY(streamState.pending.isEmpty());
+
+		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("mvisible"), streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"),
+		    normalColor, boldColor, [](int) { return QString(); },
+		    [](const QByteArrayView input) { return QString::fromLatin1(input); }, state);
+		QCOMPARE(chunks.size(), 1);
+		QCOMPARE(chunks.constFirst().text, QStringLiteral("visible"));
+		QCOMPARE(chunks.constFirst().state.actionType, 0);
+		QCOMPARE(chunks.constFirst().state.action, QString());
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
+		QVERIFY(streamState.pending.isEmpty());
+		QCOMPARE(state.actionType, 0);
+		QCOMPARE(state.action, QString());
+	}
+
+	void tst_AnsiSgrParseUtils::oversizedOscSequenceIsDiscarded()
+	{
+		QMudAnsiStreamState streamState;
+		QMudStyledTextState state;
+		QMudOscActionIds    actions{0, 1, 2, 3};
+
+		QByteArray          bytes("\x1b]8;;");
+		bytes.append(QByteArray(9000, 'x'));
+		const QVector<QMudStyledChunk> oversized = qmudParseAnsiSgrChunks(
+		    bytes, streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
+		    [](int) { return QString(); },
+		    [](const QByteArrayView input) { return QString::fromLatin1(input); }, state, actions);
+		QVERIFY(oversized.isEmpty());
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::DiscardOsc);
+		QVERIFY(streamState.pending.isEmpty());
+
+		const QVector<QMudStyledChunk> stPrefix = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b"), streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"),
+		    normalColor, boldColor, [](int) { return QString(); },
+		    [](const QByteArrayView input) { return QString::fromLatin1(input); }, state, actions);
+		QVERIFY(stPrefix.isEmpty());
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::DiscardOscEsc);
+
+		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\\visible"), streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"),
+		    normalColor, boldColor, [](int) { return QString(); },
+		    [](const QByteArrayView input) { return QString::fromLatin1(input); }, state, actions);
+		QCOMPARE(chunks.size(), 1);
+		QCOMPARE(chunks.constFirst().text, QStringLiteral("visible"));
+		QCOMPARE(chunks.constFirst().state.actionType, 0);
+		QCOMPARE(chunks.constFirst().state.action, QString());
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
+		QVERIFY(streamState.pending.isEmpty());
+		QCOMPARE(state.actionType, 0);
+		QCOMPARE(state.action, QString());
+	}
+
+	void tst_AnsiSgrParseUtils::unknownEscapePrefixPreservesFollowingByte()
+	{
+		QMudAnsiStreamState            streamState;
+		QMudStyledTextState            state;
+
+		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1bXabc"), streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"),
+		    normalColor, boldColor, [](int) { return QString(); },
+		    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
+		QCOMPARE(chunks.size(), 1);
+		QCOMPARE(chunks.at(0).text, QStringLiteral("Xabc"));
+	}
+
+	void tst_AnsiSgrParseUtils::trueColorSemicolonSgrParses()
+	{
+		QMudAnsiStreamState            streamState;
+		QMudStyledTextState            state;
+
+		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b[38;2;1;2;3;48;2;4;5;6mX"), streamState, QStringLiteral("#ffffff"),
+		    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); },
+		    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
+		QCOMPARE(chunks.size(), 1);
+		QCOMPARE(chunks.at(0).text, QStringLiteral("X"));
+		QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#010203"));
+		QCOMPARE(chunks.at(0).state.back, QStringLiteral("#040506"));
+	}
+
+	void tst_AnsiSgrParseUtils::trueColorColonSgrParses()
+	{
+		QMudAnsiStreamState            streamState;
+		QMudStyledTextState            state;
+
+		const QVector<QMudStyledChunk> noColorSpaceChunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b[38:2:7:8:9mA"), streamState, QStringLiteral("#ffffff"),
+		    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); },
+		    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
+		QCOMPARE(noColorSpaceChunks.size(), 1);
+		QCOMPARE(noColorSpaceChunks.at(0).state.fore, QStringLiteral("#070809"));
+
+		const QVector<QMudStyledChunk> explicitColorSpaceChunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b[38:2::10:20:30mB"), streamState, QStringLiteral("#ffffff"),
+		    QStringLiteral("#000000"), normalColor, boldColor, [](int) { return QString(); },
+		    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
+		QCOMPARE(explicitColorSpaceChunks.size(), 1);
+		QCOMPARE(explicitColorSpaceChunks.at(0).state.fore, QStringLiteral("#0a141e"));
+	}
+
+	void tst_AnsiSgrParseUtils::indexedColorColonSgrParses()
+	{
+		QMudAnsiStreamState            streamState;
+		QMudStyledTextState            state;
+
+		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b[38:5:196mX"), streamState, QStringLiteral("#ffffff"),
+		    QStringLiteral("#000000"), normalColor, boldColor,
+		    [](const int idx)
+		    {
+			    if (idx == 196)
+				    return QStringLiteral("#ff0000");
+			    return QString();
+		    },
+		    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
+		QCOMPARE(chunks.size(), 1);
+		QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#ff0000"));
+	}
+
+	void tst_AnsiSgrParseUtils::inverseStateDoesNotPreSwapStoredColours()
+	{
+		QMudAnsiStreamState streamState;
+		QMudStyledTextState state;
+		state.fore = QStringLiteral("#800000");
+		state.back = QStringLiteral("#000000");
+
+		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+		    QByteArrayLiteral("\x1b[7mreversed\x1b[27mplain"), streamState, QStringLiteral("#ffffff"),
+		    QStringLiteral("#000000"), normalColor, boldColor, [](const int) { return QString(); },
+		    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
+
+		QCOMPARE(chunks.size(), 2);
+		QVERIFY(chunks.at(0).state.inverse);
+		QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#800000"));
+		QCOMPARE(chunks.at(0).state.back, QStringLiteral("#000000"));
+		QVERIFY(!chunks.at(1).state.inverse);
+		QCOMPARE(chunks.at(1).state.fore, QStringLiteral("#800000"));
+		QCOMPARE(chunks.at(1).state.back, QStringLiteral("#000000"));
+	}
+
+	void tst_AnsiSgrParseUtils::intensityChangesRespectForegroundSource()
+	{
+		QMudAnsiStreamState streamState;
+		QMudStyledTextState state;
+		state.fore = QStringLiteral("#ffffff");
+		state.back = QStringLiteral("#000000");
+
+		const auto parse = [&](const QByteArray &bytes)
+		{
+			return qmudParseAnsiSgrChunks(
+			    bytes, streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor,
+			    boldColor, [](const int) { return QString(); },
+			    [](const QByteArrayView value) { return QString::fromLatin1(value); }, state);
+		};
+
+		QVector<QMudStyledChunk> chunks = parse(QByteArrayLiteral("\x1b[38;2;128;0;0mtrue"));
+		QCOMPARE(chunks.size(), 1);
+		QCOMPARE(chunks.constFirst().state.fore, QStringLiteral("#800000"));
+		QCOMPARE(state.foregroundAnsiIndex, -1);
+
+		chunks = parse(QByteArrayLiteral("\x1b[1mboldtrue\x1b[22mplaintrue"));
+		QCOMPARE(chunks.size(), 2);
+		QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#800000"));
+		QVERIFY(chunks.at(0).state.bold);
+		QCOMPARE(chunks.at(1).state.fore, QStringLiteral("#800000"));
+		QVERIFY(!chunks.at(1).state.bold);
+
+		chunks = parse(QByteArrayLiteral("\x1b[1;91mbright\x1b[22mstillbright"));
+		QCOMPARE(chunks.size(), 2);
+		QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#ff0000"));
+		QVERIFY(chunks.at(0).state.bold);
+		QCOMPARE(chunks.at(1).state.fore, QStringLiteral("#ff0000"));
+		QVERIFY(!chunks.at(1).state.bold);
+
+		chunks = parse(QByteArrayLiteral("\x1b[31mnormal"));
+		QCOMPARE(chunks.constFirst().state.fore, QStringLiteral("#800000"));
+		QCOMPARE(state.foregroundAnsiIndex, 1);
+		chunks = parse(QByteArrayLiteral("\x1b[1mbold"));
+		QCOMPARE(chunks.constFirst().state.fore, QStringLiteral("#ff0000"));
+	}
+
+	void tst_AnsiSgrParseUtils::byteArrayViewSubrangeIsParsedWithoutSurroundingBytes()
+	{
+		const QByteArray               storage = QByteArrayLiteral("xx\x1b[31mVisible\x1b[0myy");
+		const QByteArrayView           view(storage.constData() + 2, storage.size() - 4);
+		QMudAnsiStreamState            streamState;
+		QMudStyledTextState            state;
+
+		const QVector<QMudStyledChunk> chunks = qmudParseAnsiSgrChunks(
+		    view, streamState, QStringLiteral("#ffffff"), QStringLiteral("#000000"), normalColor, boldColor,
+		    [](int) { return QString(); },
+		    [](const QByteArrayView bytes) { return QString::fromLatin1(bytes); }, state);
+
+		QCOMPARE(chunks.size(), 1);
+		QCOMPARE(chunks.at(0).text, QStringLiteral("Visible"));
+		QCOMPARE(chunks.at(0).state.fore, QStringLiteral("#800000"));
+		QCOMPARE(state.fore, QStringLiteral("#ffffff"));
+		QCOMPARE(streamState.mode, QMudAnsiStreamState::Mode::Normal);
+	}
+	// NOLINTEND(readability-convert-member-functions-to-static)
+} // namespace
 
 QTEST_APPLESS_MAIN(tst_AnsiSgrParseUtils)
 

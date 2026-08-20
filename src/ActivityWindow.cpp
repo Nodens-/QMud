@@ -98,7 +98,7 @@ void ActivityWindow::refresh() const
 	if (!host)
 		return;
 
-	const QVector<WorldWindowDescriptor> worlds     = host->worldWindowDescriptors();
+	const QVector<WorldWindowDescriptor> worlds     = host->worldRuntimeDescriptors();
 	const qsizetype                      worldCount = worlds.size();
 	const int rowCount = worldCount > std::numeric_limits<int>::max() ? std::numeric_limits<int>::max()
 	                                                                  : static_cast<int>(worldCount);
@@ -106,7 +106,9 @@ void ActivityWindow::refresh() const
 	m_table->setSortingEnabled(false);
 	m_table->setRowCount(rowCount);
 
-	int row = 0;
+	const WorldChildWindow *activeWorld   = host->activeWorldChildWindow();
+	const WorldRuntime     *activeRuntime = activeWorld ? activeWorld->runtime() : nullptr;
+	int                     row           = 0;
 	for (const auto &[sequence, world, runtime] : worlds)
 	{
 		const QString name =
@@ -167,7 +169,7 @@ void ActivityWindow::refresh() const
 		m_table->setItem(row, eColumnSince, sinceItem.release());
 		m_table->setItem(row, eColumnDuration, durationItem.release());
 
-		if (host->activeWorldChildWindow() == world)
+		if (activeRuntime && activeRuntime == runtime)
 			m_table->selectRow(row);
 
 		++row;
@@ -189,7 +191,8 @@ void ActivityWindow::onCellActivated(const int row, const int column) const
 	if (!host)
 		return;
 
-	host->activateWorldSlot(sequence);
+	Q_UNUSED(sequence);
+	host->activateWorldWindow(targetWindow);
 }
 
 void ActivityWindow::showContextMenu(const QPoint &pos)
@@ -229,7 +232,10 @@ void ActivityWindow::showContextMenu(const QPoint &pos)
 		return;
 
 	if (chosen == switchAction)
-		host->activateWorldSlot(sequence);
+	{
+		Q_UNUSED(sequence);
+		host->activateWorldWindow(targetWindow);
+	}
 	else if (chosen == connectAction && runtime)
 	{
 		const QMap<QString, QString> &attrs     = runtime->worldAttributes();

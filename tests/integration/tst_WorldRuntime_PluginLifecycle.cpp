@@ -47,16 +47,22 @@ extern "C"
 
 namespace
 {
-	const QString           kDeferredConnectPluginId   = QStringLiteral("abcdeffedcbaabcdeffedcba");
-	const QString           kTeardownStatePluginId     = QStringLiteral("fedcbaabcdeffedcbaabcdef");
-	const QString           kHiddenMessagePluginId     = QStringLiteral("112233445566778899aabbcc");
-	const QString           kNestedCallPluginId        = QStringLiteral("2233445566778899aabbccdd");
-	const QString           kTelnetOrderingPluginId    = QStringLiteral("00112233445566778899aabb");
-	const QString           kTimerCommandPluginId      = QStringLiteral("33445566778899aabbccddee");
-	const QString           kFocusCallbackPluginId     = QStringLiteral("445566778899aabbccddeeff");
-	const QString           kMxpEntityCallbackPluginId = QStringLiteral("5566778899aabbccddeeff00");
-	const QString           kTelnetTriggerLine         = QStringLiteral("qxv-lattice-17");
-	const QString           kTelnetAfterLine           = QStringLiteral("qxv-after-64");
+	const QString           kDeferredConnectPluginId      = QStringLiteral("abcdeffedcbaabcdeffedcba");
+	const QString           kTeardownStatePluginId        = QStringLiteral("fedcbaabcdeffedcbaabcdef");
+	const QString           kHiddenMessagePluginId        = QStringLiteral("112233445566778899aabbcc");
+	const QString           kNestedCallPluginId           = QStringLiteral("2233445566778899aabbccdd");
+	const QString           kTelnetOrderingPluginId       = QStringLiteral("00112233445566778899aabb");
+	const QString           kTimerCommandPluginId         = QStringLiteral("33445566778899aabbccddee");
+	const QString           kFocusCallbackPluginId        = QStringLiteral("445566778899aabbccddeeff");
+	const QString           kMxpEntityCallbackPluginId    = QStringLiteral("5566778899aabbccddeeff00");
+	const QString           kSnapshotMutatorPluginId      = QStringLiteral("66778899aabbccddeeff0011");
+	const QString           kSnapshotObserverPluginId     = QStringLiteral("778899aabbccddeeff001122");
+	const QString           kDispatchPolicyFirstPluginId  = QStringLiteral("8899aabbccddeeff00112233");
+	const QString           kDispatchPolicySecondPluginId = QStringLiteral("99aabbccddeeff0011223344");
+	const QString           kDispatchPolicyThirdPluginId  = QStringLiteral("aabbccddeeff001122334455");
+	const QString           kInstallDrawPluginId          = QStringLiteral("bbccddeeff00112233445566");
+	const QString           kTelnetTriggerLine            = QStringLiteral("qxv-lattice-17");
+	const QString           kTelnetAfterLine              = QStringLiteral("qxv-after-64");
 
 	constexpr unsigned char IAC  = 0xFF;
 	constexpr unsigned char SB   = 0xFA;
@@ -294,6 +300,143 @@ end
   </plugin>
 </muclient>
 )xml"));
+	}
+
+	/**
+	 * @brief Writes ordered callbacks that mutate output, suspend, and inspect the following snapshot.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when both plugin fixtures were written.
+	 */
+	bool writeSuspendedRecipientSnapshotPlugins(const QString &pluginsDir)
+	{
+		const QString mutatorPath  = QDir(pluginsDir).filePath(QStringLiteral("snapshot_mutator.xml"));
+		const QString observerPath = QDir(pluginsDir).filePath(QStringLiteral("snapshot_observer.xml"));
+		const bool    mutatorWritten =
+		    writeTextFile(mutatorPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="SnapshotMutator"
+    author="QMud Test"
+    id=")xml") + kSnapshotMutatorPluginId + QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function OnPluginConnect()
+  Note("fresh callback output")
+  GetLineInfo(1, 1)
+end
+function OnPluginDisconnect()
+  Note("fresh unsuspended callback output")
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml"));
+		const bool observerWritten =
+		    writeTextFile(observerPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="SnapshotObserver"
+    author="QMud Test"
+    id=")xml") + kSnapshotObserverPluginId + QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="200">
+    <script><![CDATA[
+function OnPluginConnect()
+  local count = GetLinesInBufferCount()
+  SetVariable("observed_count", string.format("%.0f", count))
+  SetVariable("observed_last_line", GetLineInfo(count, 1) or "<nil>")
+end
+function OnPluginDisconnect()
+  local count = GetLinesInBufferCount()
+  SetVariable("observed_unsuspended_count", string.format("%.0f", count))
+  SetVariable("observed_unsuspended_last_line", GetLineInfo(count, 1) or "<nil>")
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml"));
+		return mutatorWritten && observerWritten;
+	}
+
+	/**
+	 * @brief Writes ordered callbacks covering stop-policy continuations after mutation and suspension.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when all plugin fixtures were written.
+	 */
+	bool writeDispatchContinuationPolicyPlugins(const QString &pluginsDir)
+	{
+		const auto writePlugin = [&](const QString &fileName, const QString &name, const QString &id,
+		                             const int sequence, const QString &script)
+		{
+			return writeTextFile(
+			    QDir(pluginsDir).filePath(fileName),
+			    QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+			                   "<muclient>\n"
+			                   "  <plugin name=\"%1\" author=\"QMud Test\" id=\"%2\" language=\"lua\" "
+			                   "enabled=\"y\" save_state=\"n\" sequence=\"%3\">\n"
+			                   "    <script><![CDATA[%4]]></script>\n"
+			                   "  </plugin>\n"
+			                   "</muclient>\n")
+			        .arg(name, id, QString::number(sequence), script));
+		};
+
+		const bool firstWritten =
+		    writePlugin(QStringLiteral("dispatch_policy_first.xml"), QStringLiteral("DispatchPolicyFirst"),
+		                kDispatchPolicyFirstPluginId, 100, QStringLiteral(R"lua(
+function OnPluginCommand(command)
+  Note("dispatch policy mutation boundary")
+  return true
+end
+
+function OnPluginTrace(message)
+  GetLineInfo(1, 1)
+  SetVariable("trace_resumed", "yes")
+  return false
+end
+
+function OnPluginBroadcast(message, calling_id, calling_name, text)
+  GetLineInfo(120, 1)
+  SetVariable("broadcast_resumed", "yes")
+end
+)lua"));
+		const bool secondWritten =
+		    writePlugin(QStringLiteral("dispatch_policy_second.xml"), QStringLiteral("DispatchPolicySecond"),
+		                kDispatchPolicySecondPluginId, 200, QStringLiteral(R"lua(
+function OnPluginCommand(command)
+  SetVariable("command_called", "yes")
+  return false
+end
+
+function OnPluginTrace(message)
+  SetVariable("trace_called", "yes")
+end
+
+function OnPluginBroadcast(message, calling_id, calling_name, text)
+  SetVariable("broadcast_called", "yes")
+end
+)lua"));
+		const bool thirdWritten =
+		    writePlugin(QStringLiteral("dispatch_policy_third.xml"), QStringLiteral("DispatchPolicyThird"),
+		                kDispatchPolicyThirdPluginId, 300, QStringLiteral(R"lua(
+function OnPluginCommand(command)
+  SetVariable("command_called", "yes")
+  return true
+end
+
+function OnPluginTrace(message)
+  SetVariable("trace_called", "yes")
+end
+
+function OnPluginBroadcast(message, calling_id, calling_name, text)
+  SetVariable("broadcast_called", "yes")
+end
+)lua"));
+		return firstWritten && secondWritten && thirdWritten;
 	}
 
 	/**
@@ -840,6 +983,86 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 		Q_OBJECT
 
 	private slots:
+		static void inputEchoWrapUsesCompleteReopenedLinePrefix()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			runtime.setWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("10"));
+			runtime.addLine(QStringLiteral("123"), WorldRuntime::LineOutput, false);
+			runtime.addLine(QStringLiteral("4 "), WorldRuntime::LineOutput, true);
+
+			QString                          echo = QStringLiteral("abcdef");
+			QVector<WorldRuntime::StyleSpan> spans;
+			QVERIFY(runtime.prepareInputEchoForDisplay(echo, spans, true));
+
+			QCOMPARE(echo, QStringLiteral("\nabcdef"));
+			QVERIFY(spans.isEmpty());
+			QVERIFY(!runtime.lines().constLast().hardReturn);
+
+			WorldRuntime graphemeRuntime;
+			graphemeRuntime.setWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			graphemeRuntime.setWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			graphemeRuntime.setWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("11"));
+			graphemeRuntime.addLine(QStringLiteral("123456789\U0001F469\u200D"), WorldRuntime::LineOutput,
+			                        false);
+			graphemeRuntime.addLine(QStringLiteral("\U0001F4BB"), WorldRuntime::LineOutput, true);
+
+			QString graphemeEcho = QStringLiteral("x");
+			QVERIFY(graphemeRuntime.prepareInputEchoForDisplay(graphemeEcho, spans, true));
+			QCOMPARE(graphemeEcho, QStringLiteral("x"));
+
+			WorldRuntime hiddenTailRuntime;
+			hiddenTailRuntime.setWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			hiddenTailRuntime.setWorldAttribute(QStringLiteral("auto_wrap_window_width"),
+			                                    QStringLiteral("0"));
+			hiddenTailRuntime.setWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("10"));
+			hiddenTailRuntime.addLine(QStringLiteral("1234 "), WorldRuntime::LineOutput, true);
+			hiddenTailRuntime.addLine(QStringLiteral("hidden"),
+			                          WorldRuntime::LineOutput | WorldRuntime::LineHidden, true);
+
+			QString hiddenTailEcho = QStringLiteral("abcdef");
+			QVERIFY(hiddenTailRuntime.prepareInputEchoForDisplay(hiddenTailEcho, spans, true));
+			QCOMPARE(hiddenTailEcho, QStringLiteral("\nabcdef"));
+			QVERIFY(!hiddenTailRuntime.lines().at(0).hardReturn);
+			QVERIFY(hiddenTailRuntime.lines().at(1).hardReturn);
+		}
+
+		static void mxpInversePreservesStoredColourOrderAcrossRenderPaths()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+			runtime.setWorldAttribute(QStringLiteral("output_text_colour"), QStringLiteral("#ff0000"));
+			runtime.setWorldAttribute(QStringLiteral("output_background_colour"), QStringLiteral("#0000ff"));
+
+			QString                          line;
+			QVector<WorldRuntime::StyleSpan> spans;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &runtime,
+			                 [&line, &spans](const QString                          &receivedLine,
+			                                 const QVector<WorldRuntime::StyleSpan> &receivedSpans)
+			                 {
+				                 line  = receivedLine;
+				                 spans = receivedSpans;
+			                 });
+			runtime.receiveRawData(QByteArrayLiteral("\x1b[1z<font color=\"inverse\">X</font>\n"));
+			QCOMPARE(line, QStringLiteral("X"));
+			QCOMPARE(spans.size(), 1);
+			QCOMPARE(spans.constFirst().fore, QColor(QStringLiteral("#ff0000")));
+			QCOMPARE(spans.constFirst().back, QColor(QStringLiteral("#0000ff")));
+			QVERIFY(spans.constFirst().inverse);
+
+			QVERIFY(createWindowOutputTextTarget(runtime));
+			WorldRuntime::WindowOutputMetrics metrics;
+			const int width = runtime.windowOutputText(QStringLiteral("output"), QStringLiteral("font"),
+			                                           QStringLiteral("\3font color=\"inverse\"\4X\3/font\4"),
+			                                           0, 0, 319, 79, 0x00FFFFFF, QString(),
+			                                           QStringLiteral("inverse"), QString(), &metrics);
+			QVERIFY(width > 0);
+			const MiniWindow *const window = runtime.miniWindow(QStringLiteral("output"));
+			QVERIFY(window);
+			QCOMPARE(window->backingSurface().pixelColor(0, 0), QColor(QStringLiteral("#ff0000")));
+		}
+
 		static void utf8CarrySurvivesInactiveLegacyEncodingChange()
 		{
 			WorldRuntime runtime;
@@ -1845,6 +2068,401 @@ end
 			QCOMPARE(runtime.currentActionSource(), WorldRuntime::eUnknownActionSource);
 		}
 
+		static void asyncCallbackPagesOlderOutputThroughProductionResumePath()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			for (int lineNumber = 1; lineNumber <= 400; ++lineNumber)
+				runtime.addLine(QStringLiteral("line %1").arg(lineNumber), WorldRuntime::LineOutput);
+
+			QSharedPointer<LuaCallbackEngine> engine(runtime.luaCallbacks(),
+			                                         [](LuaCallbackEngine * /*unused*/) {});
+			QVERIFY(engine);
+
+			bool executeCompleted = false;
+			bool executeOk        = false;
+			runtime.dispatchLuaExecuteScriptAsync(engine, QStringLiteral(R"lua(
+function qcb_read_older_output(name, line, wildcards)
+  SetVariable("paged_older_output", GetLineInfo(20, 1) or "<nil>")
+end
+)lua"),
+			                                      QStringLiteral("paged callback line lookup"), nullptr,
+			                                      false, false, 0, 0,
+			                                      [&executeCompleted, &executeOk](const bool ok)
+			                                      {
+				                                      executeOk        = ok;
+				                                      executeCompleted = true;
+			                                      });
+
+			QTRY_VERIFY_WITH_TIMEOUT(executeCompleted, 5000);
+			QVERIFY(executeOk);
+
+			bool                   callbackCompleted = false;
+			LuaBatchDispatchResult callbackResult;
+			runtime.dispatchLuaStringsAndWildcardsAsync(
+			    engine, QStringLiteral("qcb_read_older_output"),
+			    {QStringLiteral("older_output"), QStringLiteral("ignored")}, {}, {}, nullptr, -1, false, 0, 0,
+			    [&callbackCompleted, &callbackResult](const LuaBatchDispatchResult &result)
+			    {
+				    callbackResult    = result;
+				    callbackCompleted = true;
+			    });
+
+			QTRY_VERIFY_WITH_TIMEOUT(callbackCompleted, 5000);
+			QVERIFY(callbackResult.hasFunctionValid);
+			QVERIFY(callbackResult.hasFunction);
+			QVERIFY(!callbackResult.suspended);
+			QCOMPARE(worldVariable(runtime, QStringLiteral("paged_older_output")), QStringLiteral("line 20"));
+		}
+
+		static void suspendedRecipientRefreshesSnapshotForFollowingPlugin()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeSuspendedRecipientSnapshotPlugins(pluginsDir));
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			for (int lineNumber = 1; lineNumber <= 150; ++lineNumber)
+				runtime.addLine(QStringLiteral("baseline output %1").arg(lineNumber),
+				                WorldRuntime::LineOutput);
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("snapshot_mutator.xml"), &loadError),
+			         qPrintable(loadError));
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("snapshot_observer.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_COMPARE_WITH_TIMEOUT(runtime.plugins().size(), 2, 5000);
+			QTRY_VERIFY_WITH_TIMEOUT(std::ranges::none_of(runtime.plugins(),
+			                                              [](const WorldRuntime::Plugin &plugin)
+			                                              { return plugin.installPending; }),
+			                         5000);
+
+			const int lineCountBefore = runtime.luaContextLinesInBufferCount();
+			runtime.fireWorldConnectHandlers();
+
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kSnapshotObserverPluginId, QStringLiteral("observed_count")),
+			    QString::number(lineCountBefore + 1), 5000);
+			QCOMPARE(pluginVariable(runtime, kSnapshotObserverPluginId, QStringLiteral("observed_last_line")),
+			         QStringLiteral("fresh callback output"));
+		}
+
+		static void deferredMutationRefreshesSnapshotBeforeFollowingPlugin()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeSuspendedRecipientSnapshotPlugins(pluginsDir));
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			for (int lineNumber = 1; lineNumber <= 20; ++lineNumber)
+				runtime.addLine(QStringLiteral("baseline output %1").arg(lineNumber),
+				                WorldRuntime::LineOutput);
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("snapshot_mutator.xml"), &loadError),
+			         qPrintable(loadError));
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("snapshot_observer.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_COMPARE_WITH_TIMEOUT(runtime.plugins().size(), 2, 5000);
+			QTRY_VERIFY_WITH_TIMEOUT(std::ranges::none_of(runtime.plugins(),
+			                                              [](const WorldRuntime::Plugin &plugin)
+			                                              { return plugin.installPending; }),
+			                         5000);
+
+			const int lineCountBefore = runtime.luaContextLinesInBufferCount();
+			runtime.fireWorldDisconnectHandlers();
+
+			QTRY_COMPARE_WITH_TIMEOUT(pluginVariable(runtime, kSnapshotObserverPluginId,
+			                                         QStringLiteral("observed_unsuspended_count")),
+			                          QString::number(lineCountBefore + 1), 5000);
+			QCOMPARE(pluginVariable(runtime, kSnapshotObserverPluginId,
+			                        QStringLiteral("observed_unsuspended_last_line")),
+			         QStringLiteral("fresh unsuspended callback output"));
+		}
+
+		static void continuedDispatchPreservesRecipientStopPolicies()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeDispatchContinuationPolicyPlugins(pluginsDir));
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			for (int lineNumber = 1; lineNumber <= 150; ++lineNumber)
+				runtime.addLine(QStringLiteral("dispatch baseline %1").arg(lineNumber),
+				                WorldRuntime::LineOutput);
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QString loadError;
+			for (const QString &fileName :
+			     {QStringLiteral("dispatch_policy_first.xml"), QStringLiteral("dispatch_policy_second.xml"),
+			      QStringLiteral("dispatch_policy_third.xml")})
+			{
+				QVERIFY2(runtime.loadPluginFile(fileName, &loadError), qPrintable(loadError));
+			}
+			QTRY_COMPARE_WITH_TIMEOUT(runtime.plugins().size(), 3, 5000);
+			QTRY_VERIFY_WITH_TIMEOUT(std::ranges::none_of(runtime.plugins(),
+			                                              [](const WorldRuntime::Plugin &plugin)
+			                                              { return plugin.installPending; }),
+			                         5000);
+
+			QVERIFY(!runtime.firePluginCommand(QStringLiteral("blocked command")));
+			QCOMPARE(pluginVariable(runtime, kDispatchPolicySecondPluginId, QStringLiteral("command_called")),
+			         QStringLiteral("yes"));
+			QVERIFY(pluginVariable(runtime, kDispatchPolicyThirdPluginId, QStringLiteral("command_called"))
+			            .isEmpty());
+
+			QVERIFY(runtime.firePluginTrace(QStringLiteral("handled trace")));
+			QCOMPARE(pluginVariable(runtime, kDispatchPolicyFirstPluginId, QStringLiteral("trace_resumed")),
+			         QStringLiteral("yes"));
+			QVERIFY(pluginVariable(runtime, kDispatchPolicySecondPluginId, QStringLiteral("trace_called"))
+			            .isEmpty());
+			QVERIFY(pluginVariable(runtime, kDispatchPolicyThirdPluginId, QStringLiteral("trace_called"))
+			            .isEmpty());
+
+			const quint64 nextResumeIdBeforeBroadcast = runtime.m_nextSuspendedPluginCallbackResumeId;
+			QCOMPARE(runtime.broadcastPlugin(7, QStringLiteral("payload"), QStringLiteral("sender-id"),
+			                                 QStringLiteral("Sender")),
+			         3);
+			QVERIFY(runtime.m_nextSuspendedPluginCallbackResumeId != nextResumeIdBeforeBroadcast);
+			QCOMPARE(
+			    pluginVariable(runtime, kDispatchPolicyFirstPluginId, QStringLiteral("broadcast_resumed")),
+			    QStringLiteral("yes"));
+			QCOMPARE(
+			    pluginVariable(runtime, kDispatchPolicySecondPluginId, QStringLiteral("broadcast_called")),
+			    QStringLiteral("yes"));
+			QCOMPARE(
+			    pluginVariable(runtime, kDispatchPolicyThirdPluginId, QStringLiteral("broadcast_called")),
+			    QStringLiteral("yes"));
+		}
+
+		static void suspendedDispatchTeardownPreservesUnrelatedCurrentRecipient()
+		{
+			WorldRuntime      runtime;
+			auto              currentRecipient = QSharedPointer<LuaCallbackEngine>::create();
+			auto              removedRecipient = QSharedPointer<LuaCallbackEngine>::create();
+			auto              laterRecipient   = QSharedPointer<LuaCallbackEngine>::create();
+
+			constexpr quint64 kResumeId = 41;
+			WorldRuntime::SuspendedPluginCallbackDispatch suspended;
+			suspended.command.request.engines = {currentRecipient, removedRecipient, laterRecipient};
+			suspended.nextEngineIndex         = 1;
+			suspended.engineModalResumeId     = 73;
+			runtime.m_suspendedPluginCallbackDispatches.insert(kResumeId, std::move(suspended));
+
+			runtime.cancelSuspendedPluginCallbackDispatchesForEngines({removedRecipient});
+
+			QVERIFY(runtime.m_suspendedPluginCallbackDispatches.contains(kResumeId));
+			const auto &stored = runtime.m_suspendedPluginCallbackDispatches.constFind(kResumeId).value();
+			QCOMPARE(stored.nextEngineIndex, 1);
+			QCOMPARE(stored.command.request.engines.size(), 3);
+			QVERIFY(stored.command.request.engines.at(0) == currentRecipient);
+			QVERIFY(stored.command.request.engines.at(1).isNull());
+			QVERIFY(stored.command.request.engines.at(2) == laterRecipient);
+
+			runtime.m_suspendedPluginCallbackDispatches.clear();
+		}
+
+		static void currentSuspendedRecipientTeardownCancelsCoroutineAndFinishesFallback()
+		{
+			WorldRuntime runtime;
+			runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+			for (int lineNumber = 1; lineNumber <= 200; ++lineNumber)
+				runtime.addLine(QStringLiteral("cancellation baseline %1").arg(lineNumber),
+				                WorldRuntime::LineOutput);
+
+			const QString                           pluginId = QStringLiteral("cancel-suspended-plugin");
+			const QSharedPointer<LuaCallbackEngine> engine   = QSharedPointer<LuaCallbackEngine>::create();
+			engine->setWorldRuntime(&runtime);
+			engine->setPluginInfo(pluginId, QStringLiteral("Cancellation plugin"), QString());
+			engine->setScriptText(QStringLiteral(R"lua(
+function qcb_cancel_suspended_recipient()
+  Note("cancellation output")
+  utils.inputbox("prompt", "title", "")
+  SetVariable("resumed_after_cancel", "yes")
+  return false
+end
+)lua"));
+			WorldRuntime::Plugin plugin;
+			plugin.attributes.insert(QStringLiteral("id"), pluginId);
+			plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Cancellation plugin"));
+			plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("Lua"));
+			plugin.lua = engine;
+			runtime.pluginsMutable().push_back(std::move(plugin));
+
+			LuaBatchDispatchRequest callbackRequest;
+			callbackRequest.kind                    = LuaBatchDispatchKind::NoArgs;
+			callbackRequest.engines                 = {engine};
+			callbackRequest.functionName            = QStringLiteral("qcb_cancel_suspended_recipient");
+			callbackRequest.defaultResult           = true;
+			bool                   completionCalled = false;
+			LuaBatchDispatchResult completionResult;
+			runtime.queuePluginCallbackDispatchAsync(
+			    callbackRequest,
+			    [&completionCalled, &completionResult](const LuaBatchDispatchResult &result)
+			    {
+				    completionCalled = true;
+				    completionResult = result;
+			    });
+			runtime.drainPluginCallbackDispatchQueue();
+
+			QCOMPARE(runtime.m_suspendedPluginCallbackDispatches.size(), 1);
+			const auto    suspendedIt     = runtime.m_suspendedPluginCallbackDispatches.constBegin();
+			const quint64 runtimeResumeId = suspendedIt.key();
+			const quint64 engineResumeId  = suspendedIt->engineModalResumeId;
+			QVERIFY(runtimeResumeId != 0);
+			QVERIFY(engineResumeId != 0);
+			QVERIFY(runtime.luaCallbackOutputCursorCount() > 0);
+			QVERIFY(!completionCalled);
+
+			runtime.cancelSuspendedPluginCallbackDispatchesForEngines({engine});
+
+			QVERIFY(!runtime.m_suspendedPluginCallbackDispatches.contains(runtimeResumeId));
+			QCOMPARE(runtime.luaCallbackOutputCursorCount(), qsizetype{0});
+			QVERIFY(completionCalled);
+			QVERIFY(completionResult.boolResultValid);
+			QVERIFY(completionResult.boolResult);
+			QVERIFY(completionResult.hasFunctionValid);
+			QVERIFY(!completionResult.hasFunction);
+			QVERIFY(worldVariable(runtime, QStringLiteral("resumed_after_cancel")).isEmpty());
+			QCoreApplication::processEvents();
+			QVERIFY(worldVariable(runtime, QStringLiteral("resumed_after_cancel")).isEmpty());
+
+			LuaBatchDispatchRequest staleResumeRequest;
+			staleResumeRequest.kind                  = LuaBatchDispatchKind::ResumeSuspendedModalString;
+			staleResumeRequest.engines               = {engine};
+			staleResumeRequest.modalResumeId         = engineResumeId;
+			const LuaBatchDispatchResult staleResume = runtime.dispatchLuaBatch(staleResumeRequest);
+			QVERIFY(!staleResume.suspended);
+			QVERIFY(!staleResume.boolResultValid);
+			QVERIFY(!staleResume.hasFunctionValid);
+		}
+
+		static void suspendedDispatchFallbackPreservesEveryPartialAggregateShape()
+		{
+			WorldRuntime runtime;
+			quint64      nextCommandId = 1;
+			quint64      nextResumeId  = 1;
+			auto         finishFallback =
+			    [&runtime, &nextCommandId,
+			     &nextResumeId](const LuaBatchDispatchKind kind,
+			                    LuaBatchDispatchResult     partial) -> std::pair<bool, LuaBatchDispatchResult>
+			{
+				const quint64                                 commandId = nextCommandId++;
+				const quint64                                 resumeId  = nextResumeId++;
+				WorldRuntime::SuspendedPluginCallbackDispatch suspended;
+				suspended.command.id           = commandId;
+				suspended.command.retainResult = true;
+				suspended.command.request.kind = kind;
+				suspended.partialResult        = std::move(partial);
+				runtime.m_suspendedPluginCallbackDispatches.insert(resumeId, std::move(suspended));
+				runtime.finishSuspendedPluginCallbackDispatchWithFallback(resumeId, false);
+				auto resultIt = runtime.m_pluginCallbackDispatchResults.find(commandId);
+				if (resultIt == runtime.m_pluginCallbackDispatchResults.end())
+					return {};
+				LuaBatchDispatchResult result = std::move(resultIt.value());
+				runtime.m_pluginCallbackDispatchResults.erase(resultIt);
+				return {true, std::move(result)};
+			};
+
+			LuaBatchDispatchResult partial;
+			partial.boolResult                      = false;
+			partial.hasFunction                     = true;
+			partial.linePresentationRequiresRefresh = true;
+			auto [noArgsFinished, noArgs]           = finishFallback(LuaBatchDispatchKind::NoArgs, partial);
+			QVERIFY(noArgsFinished);
+			QVERIFY(noArgs.boolResultValid);
+			QVERIFY(!noArgs.boolResult);
+			QVERIFY(noArgs.hasFunctionValid);
+			QVERIFY(noArgs.hasFunction);
+			QVERIFY(noArgs.linePresentationRequiresRefresh);
+
+			for (const LuaBatchDispatchKind kind :
+			     {LuaBatchDispatchKind::StringStopOnFalse, LuaBatchDispatchKind::NumberAndStringStopOnTrue,
+			      LuaBatchDispatchKind::NumberAndStringStopOnFalse,
+			      LuaBatchDispatchKind::TwoNumbersAndStringStopOnFalse,
+			      LuaBatchDispatchKind::NumberAndBytesStopOnTrue})
+			{
+				partial                 = {};
+				partial.boolResult      = luaBatchDispatchRecipientStopCondition(kind) ==
+				                          LuaBatchRecipientStopCondition::FalseResult;
+				partial.hasFunction     = true;
+				auto [finished, result] = finishFallback(kind, partial);
+				QVERIFY(finished);
+				QVERIFY(result.boolResultValid);
+				QCOMPARE(result.boolResult, partial.boolResult);
+				QVERIFY(result.hasFunctionValid);
+				QVERIFY(result.hasFunction);
+			}
+
+			partial                         = {};
+			partial.boolResult              = true;
+			partial.hasFunction             = true;
+			auto [handledFinished, handled] = finishFallback(LuaBatchDispatchKind::StringHandled, partial);
+			QVERIFY(handledFinished);
+			QVERIFY(handled.boolResultValid);
+			QVERIFY(handled.boolResult);
+			QVERIFY(handled.hasFunctionValid);
+			QVERIFY(handled.hasFunction);
+
+			partial             = {};
+			partial.countResult = 2;
+			auto [countFinished, count] =
+			    finishFallback(LuaBatchDispatchKind::NumberAndUtf8StringsCount, partial);
+			QVERIFY(countFinished);
+			QVERIFY(count.countResultValid);
+			QCOMPARE(count.countResult, 2);
+
+			partial             = {};
+			partial.hasFunction = true;
+			auto [wildcardsFinished, wildcards] =
+			    finishFallback(LuaBatchDispatchKind::StringsAndWildcards, partial);
+			QVERIFY(wildcardsFinished);
+			QVERIFY(wildcards.hasFunctionValid);
+			QVERIFY(wildcards.hasFunction);
+
+			partial                     = {};
+			partial.bytesResult         = QByteArray("transformed bytes");
+			auto [bytesFinished, bytes] = finishFallback(LuaBatchDispatchKind::BytesInOut, partial);
+			QVERIFY(bytesFinished);
+			QCOMPARE(bytes.bytesResult, QByteArray("transformed bytes"));
+
+			partial                       = {};
+			partial.stringResult          = QStringLiteral("transformed string");
+			auto [stringFinished, string] = finishFallback(LuaBatchDispatchKind::StringInOut, partial);
+			QVERIFY(stringFinished);
+			QCOMPARE(string.stringResult, QStringLiteral("transformed string"));
+		}
+
 		static void executeTriggerSendCommandEntersPriorityQueueBand()
 		{
 			QTcpServer server;
@@ -2842,6 +3460,184 @@ end
 			QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
 
 			QCOMPARE(pluginVariable(runtime, QStringLiteral("connect_count")), QStringLiteral("1"));
+		}
+
+		static void pluginInstallDrawNotificationUsesPresentedViewport()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("install_draw.xml"));
+			QVERIFY(writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="InstallDraw"
+    author="QMud Test"
+    id="bbccddeeff00112233445566"
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function OnPluginDrawOutputWindow(first_line, offset)
+  local calls = tonumber(GetVariable("draw_calls") or "0") or 0
+  SetVariable("draw_calls", tostring(calls + 1))
+  SetVariable("draw_first_line", tostring(first_line))
+  SetVariable("draw_offset", tostring(offset))
+  local started = os.clock()
+  while os.clock() - started < 0.25 do end
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml")));
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			for (int line = 0; line < 300; ++line)
+				runtime.addLine(QStringLiteral("install-draw-%1").arg(line), WorldRuntime::LineOutput, true);
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.rebuildOutputFromLines(runtime.lines());
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+			QTRY_COMPARE(view.setOutputScroll(100, true), eOK);
+
+			WorldView observer;
+			observer.resize(640, 480);
+			observer.setPassiveBufferView(true);
+			observer.setRuntimeObserver(&runtime);
+			observer.restoreOutputFromPersistedLines(runtime.lines());
+			observer.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&observer));
+			QTRY_COMPARE(observer.setOutputScroll(40, true), eOK);
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("install_draw.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(runtime.drawOutputWindowCallbackActive(), 5000);
+			QVERIFY(view.m_drawOutputWindowCallbackActive);
+			QVERIFY(!observer.m_drawOutputWindowCallbackActive);
+			QVERIFY(view.m_semanticOutputPaintBarrierActive);
+			QVERIFY(!observer.m_semanticOutputPaintBarrierActive);
+			QVERIFY(view.m_drawCallbackCompletionsPending > 0);
+			QCOMPARE(observer.m_drawCallbackCompletionsPending, 0);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kInstallDrawPluginId, QStringLiteral("draw_offset")),
+			    QStringLiteral("100"), 5000);
+			QVERIFY(pluginVariable(runtime, kInstallDrawPluginId, QStringLiteral("draw_first_line")).toInt() >
+			        1);
+			QVERIFY(pluginVariable(runtime, kInstallDrawPluginId, QStringLiteral("draw_calls")).toInt() >= 1);
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.drawOutputWindowCallbackActive(), 5000);
+			QTRY_VERIFY_WITH_TIMEOUT(!view.m_semanticOutputPaintBarrierActive, 5000);
+			QTRY_VERIFY_WITH_TIMEOUT(!observer.m_semanticOutputPaintBarrierActive, 5000);
+		}
+
+		static void sharedRuntimeOutputHasOneOwnerAndUpdatesEveryPresentation()
+		{
+			WorldRuntime     runtime;
+			WorldChildWindow primary(QStringLiteral("Primary"));
+			WorldChildWindow observer(QStringLiteral("Observer"));
+			primary.setRuntime(&runtime);
+			observer.setRuntimeObserver(&runtime);
+
+			QCOMPARE(runtime.presentationViews().size(), 2);
+			QCOMPARE(runtime.view(), primary.view());
+
+			runtime.outputText(QStringLiteral("single-runtime-write"), false, true);
+			QTRY_COMPARE_WITH_TIMEOUT(runtime.lines().size(), 1, 2000);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    primary.view()->outputLines().count(QStringLiteral("single-runtime-write")), 1, 2000);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    observer.view()->outputLines().count(QStringLiteral("single-runtime-write")), 1, 2000);
+
+			observer.view()->appendNoteText(QStringLiteral("observer-originated-write"), true);
+			QTest::qWait(100);
+			QCOMPARE(runtime.lines().size(), 1);
+			QVERIFY(!primary.view()->outputLines().contains(QStringLiteral("observer-originated-write")));
+			QVERIFY(!observer.view()->outputLines().contains(QStringLiteral("observer-originated-write")));
+
+			WorldRuntime::LineEntry replacement;
+			replacement.text       = QStringLiteral("replacement-buffer-line");
+			replacement.flags      = WorldRuntime::LineOutput;
+			replacement.hardReturn = true;
+			replacement.lineNumber = 91;
+			runtime.replaceOutputLines(QVector<WorldRuntime::LineEntry>{replacement});
+			QTRY_COMPARE_WITH_TIMEOUT(primary.view()->outputLines(),
+			                          QStringList{QStringLiteral("replacement-buffer-line")}, 2000);
+			QTRY_COMPARE_WITH_TIMEOUT(observer.view()->outputLines(),
+			                          QStringList{QStringLiteral("replacement-buffer-line")}, 2000);
+
+			runtime.deleteOutput();
+			QTRY_VERIFY_WITH_TIMEOUT(runtime.lines().isEmpty(), 2000);
+			QTRY_VERIFY_WITH_TIMEOUT(primary.view()->outputLines().isEmpty(), 2000);
+			QTRY_VERIFY_WITH_TIMEOUT(observer.view()->outputLines().isEmpty(), 2000);
+
+			primary.setRuntime(nullptr);
+			QCOMPARE(runtime.presentationViews().size(), 1);
+			QVERIFY(!runtime.view());
+
+			observer.setRuntimeObserver(nullptr);
+			QVERIFY(runtime.presentationViews().isEmpty());
+			QVERIFY(!runtime.view());
+		}
+
+		static void pluginInstallWithoutPresentationDoesNotSynthesizeDrawViewport()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("detached_install_draw.xml"));
+			QVERIFY(writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="DetachedInstallDraw"
+    author="QMud Test"
+    id="ccddeeff0011223344556677"
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function OnPluginInstall()
+  local started = os.clock()
+  while os.clock() - started < 0.25 do end
+end
+function OnPluginDrawOutputWindow(first_line, offset)
+  SetVariable("draw_position", string.format("%.0f,%.0f", first_line, offset))
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml")));
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+
+			WorldView view;
+			view.resize(640, 480);
+			view.setRuntime(&runtime);
+			view.show();
+			QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("detached_install_draw.xml"), &loadError),
+			         qPrintable(loadError));
+			view.setRuntime(nullptr);
+			QVERIFY(runtime.presentationViews().isEmpty());
+			QTRY_VERIFY_WITH_TIMEOUT(
+			    !runtime.plugins().isEmpty() && !runtime.plugins().constFirst().installPending, 5000);
+			QCOMPARE(pluginVariable(runtime, QStringLiteral("ccddeeff0011223344556677"),
+			                        QStringLiteral("draw_position")),
+			         QString());
 		}
 };
 

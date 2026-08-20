@@ -325,15 +325,10 @@ namespace
 	                                                    const QVector<WorldRuntime::StyleSpan> &spans,
 	                                                    const QColor &fore, const QColor &back)
 	{
-		if (!spans.isEmpty())
-			return spans;
-		if (line.isEmpty())
-			return spans;
-		WorldRuntime::StyleSpan span;
-		span.length = safeQSizeToInt(line.size());
-		span.fore   = fore;
-		span.back   = back;
-		return {span};
+		WorldRuntime::StyleSpan fallback;
+		fallback.fore = fore;
+		fallback.back = back;
+		return QMudOutputWrapUtils::normalizeStyleSpansForText(line, spans, fallback);
 	}
 
 	void applyStyleToSpans(QVector<WorldRuntime::StyleSpan> &spans, const int start, const int end,
@@ -430,7 +425,11 @@ namespace
 				style |= kStyleUnderline;
 			if (span.blink || span.italic)
 				style |= kStyleBlink;
-			run.style = style;
+			run.style                             = style;
+			WorldRuntime::StyleSpan presentedSpan = span;
+			presentedSpan.fore                    = fore;
+			presentedSpan.back                    = back;
+			run.sourceSpans.push_back(QMudLuaCallbackLineSnapshot::fromStyleSpan(presentedSpan));
 			if (!runs.isEmpty())
 			{
 				LuaStyleRun &previous = runs.last();
@@ -438,6 +437,7 @@ namespace
 				    previous.style == run.style)
 				{
 					previous.text += run.text;
+					previous.sourceSpans += run.sourceSpans;
 					pos += span.length;
 					continue;
 				}
@@ -990,6 +990,11 @@ void WorldCommandProcessor::setRuntime(WorldRuntime *runtime)
 		processQueuedCommands(true);
 }
 
+void WorldCommandProcessor::setRuntimeAutomationOwner(const bool owner)
+{
+	m_runtimeAutomationOwner = owner;
+}
+
 QString WorldCommandProcessor::wildcardToRegexCached(const QString &matchText)
 {
 	if (const auto cached = m_wildcardRegexCache.constFind(matchText);
@@ -1352,12 +1357,16 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 		            .compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
 	}
 
-	QVector<WorldRuntime::StyleSpan> normalizedSpans = spans;
-	if (normalizedSpans.isEmpty())
-	{
-		loadDefaultColors();
-		normalizedSpans = ensureSpansForLine(line, normalizedSpans, defaultFore, defaultBack);
-	}
+	QVector<WorldRuntime::StyleSpan> normalizedSpans =
+	    QMudOutputWrapUtils::normalizeStyleSpansForTextLazily(line, spans,
+	                                                          [&]
+	                                                          {
+		                                                          loadDefaultColors();
+		                                                          WorldRuntime::StyleSpan fallback;
+		                                                          fallback.fore = defaultFore;
+		                                                          fallback.back = defaultBack;
+		                                                          return fallback;
+	                                                          });
 
 	bool logOutput = false;
 	if (m_runtime)
@@ -1463,7 +1472,7 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 		styleRuns       = buildStyleRuns(line, triggerResult.spans, defaultFore, defaultBack);
 		styleRunsShared = QSharedPointer<QVector<LuaStyleRun>>::create(styleRuns);
 	}
-	const int    triggerMatchedLineBufferIndex = m_runtime ? m_runtime->luaContextLinesInBufferCount() : 0;
+	const int triggerMatchedLineBufferIndex = m_runtime ? m_runtime->incomingLineLuaContextBufferIndex() : 0;
 	const qint64 triggerMatchedLineAbsoluteNumber =
 	    m_runtime ? m_runtime->incomingLineLuaContextAbsoluteNumber() : 0;
 
@@ -3484,7 +3493,7 @@ void WorldCommandProcessor::checkTimers()
 {
 	processQueuedCommands(false);
 
-	if (!m_runtime)
+	if (!m_runtime || !m_runtimeAutomationOwner)
 		return;
 	const bool worldTimersEnabled =
 	    shouldEvaluateRuleCollection(m_runtime->worldAttributes(), WorldRuleKind::Timer, false);

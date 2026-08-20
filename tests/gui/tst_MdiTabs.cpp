@@ -26,6 +26,8 @@ WorldChildWindow::WorldChildWindow(const QString &title, QWidget *parent) : QMdi
 	setWindowTitle(title);
 }
 
+WorldChildWindow::~WorldChildWindow() = default;
+
 void WorldChildWindow::setRuntime(WorldRuntime *)
 {
 }
@@ -37,6 +39,11 @@ void WorldChildWindow::setRuntimeObserver(WorldRuntime *)
 WorldRuntime *WorldChildWindow::runtime() const
 {
 	return nullptr;
+}
+
+bool WorldChildWindow::isPrimaryRuntimeBinding() const
+{
+	return false;
 }
 
 WorldView *WorldChildWindow::view() const
@@ -110,7 +117,7 @@ void TextChildWindow::setFilePath(const QString &)
 {
 }
 
-bool TextChildWindow::saveToFile(const QString &, QString *error)
+bool TextChildWindow::saveToFile(const QString &, QString *error, const bool)
 {
 	if (error)
 		error->clear();
@@ -174,144 +181,144 @@ namespace
 			out.push_back(tabs.tabText(i));
 		return out;
 	}
+
+	/**
+	 * @brief QTest fixture covering MdiTabs scenarios.
+	 */
+	class tst_MdiTabs : public QObject
+	{
+			Q_OBJECT
+
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void tabCreationVisibilityAndActiveTab()
+			{
+				QWidget     host;
+				QVBoxLayout layout(&host);
+				QMdiArea    mdiArea;
+				MdiTabs     tabs;
+
+				layout.addWidget(&tabs);
+				layout.addWidget(&mdiArea);
+				host.resize(640, 480);
+				host.show();
+
+				tabs.create(&mdiArea, kMdiTabsTop | kMdiTabsHideLt2Views);
+
+				QMdiSubWindow *first = addWindow(mdiArea, QStringLiteral("One"));
+				tabs.updateTabs();
+				QCOMPARE(tabs.count(), 1);
+				QVERIFY(!tabs.isVisible());
+
+				QMdiSubWindow *second = addWindow(mdiArea, QStringLiteral("Two"));
+				tabs.updateTabs();
+				QCOMPARE(tabs.count(), 2);
+				QVERIFY(tabs.isVisible());
+
+				mdiArea.setActiveSubWindow(second);
+				tabs.updateTabs();
+				QCOMPARE(tabs.currentIndex(), 1);
+
+				QSignalSpy currentChangedSpy(&tabs, &QTabBar::currentChanged);
+				tabs.setCurrentIndex(0);
+				QCoreApplication::processEvents();
+				QCOMPARE(mdiArea.activeSubWindow(), first);
+				QVERIFY(currentChangedSpy.count() >= 1);
+			}
+
+			void tabReorderPersistsAcrossSyncs()
+			{
+				QWidget     host;
+				QVBoxLayout layout(&host);
+				QMdiArea    mdiArea;
+				MdiTabs     tabs;
+
+				layout.addWidget(&tabs);
+				layout.addWidget(&mdiArea);
+				host.resize(640, 480);
+				host.show();
+
+				tabs.create(&mdiArea, kMdiTabsTop);
+				addWindow(mdiArea, QStringLiteral("One"));
+				addWindow(mdiArea, QStringLiteral("Two"));
+				addWindow(mdiArea, QStringLiteral("Three"));
+				tabs.updateTabs();
+
+				QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("One"), QStringLiteral("Two"),
+				                                      QStringLiteral("Three")}));
+
+				tabs.moveTab(0, 2);
+				tabs.updateTabs();
+				QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("Two"), QStringLiteral("Three"),
+				                                      QStringLiteral("One")}));
+
+				addWindow(mdiArea, QStringLiteral("Four"));
+				tabs.updateTabs();
+				QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("Two"), QStringLiteral("Three"),
+				                                      QStringLiteral("One"), QStringLiteral("Four")}));
+			}
+
+			void middleClickClosesClickedTab()
+			{
+				QWidget     host;
+				QVBoxLayout layout(&host);
+				QMdiArea    mdiArea;
+				MdiTabs     tabs;
+
+				layout.addWidget(&tabs);
+				layout.addWidget(&mdiArea);
+				host.resize(640, 480);
+				host.show();
+
+				tabs.create(&mdiArea, kMdiTabsTop);
+				addWindow(mdiArea, QStringLiteral("One"));
+				addWindow(mdiArea, QStringLiteral("Two"));
+				tabs.updateTabs();
+				QCOMPARE(tabs.count(), 2);
+
+				QTest::mouseClick(&tabs, Qt::MiddleButton, Qt::NoModifier, tabs.tabRect(0).center());
+				QCoreApplication::processEvents();
+				tabs.updateTabs();
+
+				QCOMPARE(tabs.count(), 1);
+				QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("Two")}));
+			}
+
+			void mixedTabsKeepOrderAndActiveIndexAcrossWorldTitleUpdates()
+			{
+				QWidget     host;
+				QVBoxLayout layout(&host);
+				QMdiArea    mdiArea;
+				MdiTabs     tabs;
+
+				layout.addWidget(&tabs);
+				layout.addWidget(&mdiArea);
+				host.resize(640, 480);
+				host.show();
+
+				tabs.create(&mdiArea, kMdiTabsTop);
+				QMdiSubWindow *worldA  = addWindow(mdiArea, QStringLiteral("World A"));
+				QMdiSubWindow *notepad = addWindow(mdiArea, QStringLiteral("Notepad"));
+				addWindow(mdiArea, QStringLiteral("World B"));
+				tabs.updateTabs();
+
+				QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("World A"), QStringLiteral("Notepad"),
+				                                      QStringLiteral("World B")}));
+
+				mdiArea.setActiveSubWindow(notepad);
+				tabs.updateTabs();
+				QCOMPARE(tabs.currentIndex(), 1);
+
+				worldA->setWindowTitle(QStringLiteral("World A (active)"));
+				tabs.updateTabs();
+				QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("World A (active)"),
+				                                      QStringLiteral("Notepad"), QStringLiteral("World B")}));
+				QCOMPARE(tabs.currentIndex(), 1);
+				QCOMPARE(mdiArea.activeSubWindow(), notepad);
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
 } // namespace
-
-/**
- * @brief QTest fixture covering MdiTabs scenarios.
- */
-class tst_MdiTabs : public QObject
-{
-		Q_OBJECT
-
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void tabCreationVisibilityAndActiveTab()
-		{
-			QWidget     host;
-			QVBoxLayout layout(&host);
-			QMdiArea    mdiArea;
-			MdiTabs     tabs;
-
-			layout.addWidget(&tabs);
-			layout.addWidget(&mdiArea);
-			host.resize(640, 480);
-			host.show();
-
-			tabs.create(&mdiArea, kMdiTabsTop | kMdiTabsHideLt2Views);
-
-			QMdiSubWindow *first = addWindow(mdiArea, QStringLiteral("One"));
-			tabs.updateTabs();
-			QCOMPARE(tabs.count(), 1);
-			QVERIFY(!tabs.isVisible());
-
-			QMdiSubWindow *second = addWindow(mdiArea, QStringLiteral("Two"));
-			tabs.updateTabs();
-			QCOMPARE(tabs.count(), 2);
-			QVERIFY(tabs.isVisible());
-
-			mdiArea.setActiveSubWindow(second);
-			tabs.updateTabs();
-			QCOMPARE(tabs.currentIndex(), 1);
-
-			QSignalSpy currentChangedSpy(&tabs, &QTabBar::currentChanged);
-			tabs.setCurrentIndex(0);
-			QCoreApplication::processEvents();
-			QCOMPARE(mdiArea.activeSubWindow(), first);
-			QVERIFY(currentChangedSpy.count() >= 1);
-		}
-
-		void tabReorderPersistsAcrossSyncs()
-		{
-			QWidget     host;
-			QVBoxLayout layout(&host);
-			QMdiArea    mdiArea;
-			MdiTabs     tabs;
-
-			layout.addWidget(&tabs);
-			layout.addWidget(&mdiArea);
-			host.resize(640, 480);
-			host.show();
-
-			tabs.create(&mdiArea, kMdiTabsTop);
-			addWindow(mdiArea, QStringLiteral("One"));
-			addWindow(mdiArea, QStringLiteral("Two"));
-			addWindow(mdiArea, QStringLiteral("Three"));
-			tabs.updateTabs();
-
-			QCOMPARE(tabTexts(tabs),
-			         QStringList({QStringLiteral("One"), QStringLiteral("Two"), QStringLiteral("Three")}));
-
-			tabs.moveTab(0, 2);
-			tabs.updateTabs();
-			QCOMPARE(tabTexts(tabs),
-			         QStringList({QStringLiteral("Two"), QStringLiteral("Three"), QStringLiteral("One")}));
-
-			addWindow(mdiArea, QStringLiteral("Four"));
-			tabs.updateTabs();
-			QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("Two"), QStringLiteral("Three"),
-			                                      QStringLiteral("One"), QStringLiteral("Four")}));
-		}
-
-		void middleClickClosesClickedTab()
-		{
-			QWidget     host;
-			QVBoxLayout layout(&host);
-			QMdiArea    mdiArea;
-			MdiTabs     tabs;
-
-			layout.addWidget(&tabs);
-			layout.addWidget(&mdiArea);
-			host.resize(640, 480);
-			host.show();
-
-			tabs.create(&mdiArea, kMdiTabsTop);
-			addWindow(mdiArea, QStringLiteral("One"));
-			addWindow(mdiArea, QStringLiteral("Two"));
-			tabs.updateTabs();
-			QCOMPARE(tabs.count(), 2);
-
-			QTest::mouseClick(&tabs, Qt::MiddleButton, Qt::NoModifier, tabs.tabRect(0).center());
-			QCoreApplication::processEvents();
-			tabs.updateTabs();
-
-			QCOMPARE(tabs.count(), 1);
-			QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("Two")}));
-		}
-
-		void mixedTabsKeepOrderAndActiveIndexAcrossWorldTitleUpdates()
-		{
-			QWidget     host;
-			QVBoxLayout layout(&host);
-			QMdiArea    mdiArea;
-			MdiTabs     tabs;
-
-			layout.addWidget(&tabs);
-			layout.addWidget(&mdiArea);
-			host.resize(640, 480);
-			host.show();
-
-			tabs.create(&mdiArea, kMdiTabsTop);
-			QMdiSubWindow *worldA  = addWindow(mdiArea, QStringLiteral("World A"));
-			QMdiSubWindow *notepad = addWindow(mdiArea, QStringLiteral("Notepad"));
-			addWindow(mdiArea, QStringLiteral("World B"));
-			tabs.updateTabs();
-
-			QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("World A"), QStringLiteral("Notepad"),
-			                                      QStringLiteral("World B")}));
-
-			mdiArea.setActiveSubWindow(notepad);
-			tabs.updateTabs();
-			QCOMPARE(tabs.currentIndex(), 1);
-
-			worldA->setWindowTitle(QStringLiteral("World A (active)"));
-			tabs.updateTabs();
-			QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("World A (active)"),
-			                                      QStringLiteral("Notepad"), QStringLiteral("World B")}));
-			QCOMPARE(tabs.currentIndex(), 1);
-			QCOMPARE(mdiArea.activeSubWindow(), notepad);
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
 
 QTEST_MAIN(tst_MdiTabs)
 

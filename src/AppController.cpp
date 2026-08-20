@@ -2495,7 +2495,7 @@ QVector<WorldRuntime *> AppController::activeWorldRuntimes() const
 	const auto             *host = resolveMainWindowHost(m_mainWindow);
 	if (!host)
 		return runtimes;
-	const auto entries = host->worldWindowDescriptors();
+	const auto entries = host->worldRuntimeDescriptors();
 	runtimes.reserve(entries.size());
 	for (const auto &entry : entries)
 	{
@@ -2539,7 +2539,7 @@ bool AppController::saveDirtyAutoSaveWorldsBeforeRestart(QString *errorMessage) 
 	if (!host)
 		return true;
 
-	const QVector<WorldWindowDescriptor> entries = host->worldWindowDescriptors();
+	const QVector<WorldWindowDescriptor> entries = host->worldRuntimeDescriptors();
 	for (const WorldWindowDescriptor &entry : entries)
 	{
 		WorldRuntime *runtime = entry.runtime;
@@ -2591,7 +2591,7 @@ bool AppController::closeOpenWorldLogsBeforeRestart(QString *errorMessage) const
 	if (!host)
 		return true;
 
-	const QVector<WorldWindowDescriptor> entries = host->worldWindowDescriptors();
+	const QVector<WorldWindowDescriptor> entries = host->worldRuntimeDescriptors();
 	for (const WorldWindowDescriptor &entry : entries)
 	{
 		WorldRuntime *runtime = entry.runtime;
@@ -2621,7 +2621,7 @@ bool AppController::saveOpenWorldSessionStatesBeforeRestart(QString *errorMessag
 	if (!host)
 		return true;
 
-	const QVector<WorldWindowDescriptor> entries = host->worldWindowDescriptors();
+	const QVector<WorldWindowDescriptor> entries = host->worldRuntimeDescriptors();
 	for (const WorldWindowDescriptor &entry : entries)
 	{
 		WorldRuntime *runtime = entry.runtime;
@@ -2669,7 +2669,7 @@ bool AppController::saveOpenWorldPluginStatesBeforeRestart(QString *errorMessage
 	if (!host)
 		return true;
 
-	const QVector<WorldWindowDescriptor> entries = host->worldWindowDescriptors();
+	const QVector<WorldWindowDescriptor> entries = host->worldRuntimeDescriptors();
 	for (const WorldWindowDescriptor &entry : entries)
 	{
 		WorldRuntime *runtime = entry.runtime;
@@ -2779,7 +2779,11 @@ void AppController::saveWorldSessionStateAsync(WorldRuntime *runtime, const Worl
 	state.hasCustomMxpElements = runtime->customElementCount() > 0;
 	state.hasMxpSessionState   = mxpState.enabled;
 	if (persistOutputBuffer)
-		state.outputLines = runtime->lines();
+	{
+		WorldRuntime::SessionStateOutputSnapshot outputSnapshot = runtime->sessionStateOutputSnapshot();
+		state.outputLines                                       = std::move(outputSnapshot.lines);
+		state.excludedOutputLineNumber                          = outputSnapshot.excludedLineNumber;
+	}
 	if (persistCommandHistory)
 		state.commandHistory = view->commandHistoryList();
 	if (state.hasCustomMxpElements)
@@ -2788,7 +2792,7 @@ void AppController::saveWorldSessionStateAsync(WorldRuntime *runtime, const Worl
 		state.mxpSessionState = mxpState;
 
 	QThreadPool::globalInstance()->start(
-	    [filePath, state = std::move(state), completionFn, runtimeGuard, persistOutputBuffer]
+	    [filePath, state = std::move(state), completionFn, runtimeGuard, persistOutputBuffer]() mutable
 	    {
 		    QString error;
 		    bool    ok = true;
@@ -2797,6 +2801,7 @@ void AppController::saveWorldSessionStateAsync(WorldRuntime *runtime, const Worl
 			    ok = QMudWorldSessionState::removeSessionStateFile(filePath, &error);
 		    else
 			    ok = QMudWorldSessionState::writeSessionStateFile(filePath, state, &error);
+		    state.outputLines = IndexedRingBuffer<WorldRuntime::LineEntry>{};
 
 		    QMetaObject::invokeMethod(
 		        qApp,
@@ -4127,6 +4132,30 @@ bool AppController::openWorldForReloadRecovery(const ReloadWorldState &worldStat
 	return true;
 }
 
+WorldChildWindow *AppController::createWorldObserverWindow(WorldRuntime *runtime,
+                                                           const WorldChildWindow *source,
+                                                           const bool activateWindow) const
+{
+	if (!m_mainWindow || !runtime)
+		return nullptr;
+
+	QString title = source ? source->windowTitle() : QString();
+	if (title.isEmpty())
+		title = runtime->worldAttributes().value(QStringLiteral("name"), QStringLiteral("World"));
+	auto *window = new WorldChildWindow(title);
+	window->setRuntimeObserver(runtime);
+	if (WorldView *view = window->view())
+		view->restoreOutputFromPersistedLines(runtime->lines());
+	m_mainWindow->addMdiSubWindow(window);
+	if (source && source->isMaximized())
+		window->showMaximized();
+	else
+		window->show();
+	if (activateWindow)
+		m_mainWindow->activateWorldWindow(window);
+	return window;
+}
+
 void AppController::reconnectRecoveredWorld(WorldRuntime *runtime, const ReloadWorldState &worldState,
                                             const bool closeSocketFirst)
 {
@@ -4190,6 +4219,7 @@ bool AppController::recoverReloadStartupState()
 	};
 	QList<OpenedRecoveryWorld> openedWorlds;
 	QPointer<WorldRuntime>     requestedActiveRuntime;
+	QPointer<WorldChildWindow> requestedActiveWindow;
 	int                        openFailures      = 0;
 	const bool                 verboseReloadLogs = envFlagEnabled("QMUD_RELOAD_VERBOSE");
 	const bool                 previousSuppress  = m_suppressAutoConnect;
@@ -4199,9 +4229,10 @@ bool AppController::recoverReloadStartupState()
 	{
 		WorldRuntime *runtime = nullptr;
 		WorldView    *view    = nullptr;
-		const bool    activateWindow =
-		    snapshot.activeWorldSequence > 0 && worldState.sequence == snapshot.activeWorldSequence;
-		if (!openWorldForReloadRecovery(worldState, activateWindow, &runtime, &view) || !runtime || !view)
+		const bool activatePrimaryWindow = snapshot.activeWorldSequence > 0 &&
+		                                 worldState.sequence == snapshot.activeWorldSequence &&
+		                                 worldState.activePresentationOrdinal == 1;
+		if (!openWorldForReloadRecovery(worldState, activatePrimaryWindow, &runtime, &view) || !runtime || !view)
 		{
 			++openFailures;
 			qWarning() << kReloadLogTag << "World recovery open failed for"
@@ -4209,16 +4240,24 @@ bool AppController::recoverReloadStartupState()
 			                                                : worldState.displayName);
 			continue;
 		}
+		WorldChildWindow *primaryWindow =
+		    m_mainWindow ? m_mainWindow->findWorldChildWindow(runtime) : nullptr;
+		WorldChildWindow *activePresentation = primaryWindow;
+		for (int ordinal = 2; ordinal <= worldState.presentationCount; ++ordinal)
+		{
+			WorldChildWindow *observer = createWorldObserverWindow(runtime, primaryWindow, false);
+			if (!observer)
+				break;
+			if (worldState.activePresentationOrdinal == ordinal)
+				activePresentation = observer;
+		}
+		if (worldState.activePresentationOrdinal == 1)
+			activePresentation = primaryWindow;
 		if (!requestedActiveRuntime && snapshot.activeWorldSequence > 0 &&
 		    worldState.sequence == snapshot.activeWorldSequence)
 		{
 			requestedActiveRuntime = runtime;
-			if (m_mainWindow)
-				m_mainWindow->activateWorldRuntime(runtime);
-		}
-		else if (requestedActiveRuntime && m_mainWindow)
-		{
-			m_mainWindow->activateWorldRuntime(requestedActiveRuntime.data());
+			requestedActiveWindow  = activePresentation;
 		}
 		openedWorlds.push_back({runtime, view, worldState});
 	}
@@ -4227,14 +4266,15 @@ bool AppController::recoverReloadStartupState()
 
 	struct ReloadRecoveryAsyncContext
 	{
-			qint64                 pending{0};
-			qint64                 openedCount{0};
-			int                    openFailures{0};
-			int                    reattachedCount{0};
-			int                    reconnectCount{0};
-			int                    adoptFailures{0};
-			bool                   verboseReloadLogs{false};
-			QPointer<WorldRuntime> requestedActiveRuntime;
+			qint64                     pending{0};
+			qint64                     openedCount{0};
+			int                        openFailures{0};
+			int                        reattachedCount{0};
+			int                        reconnectCount{0};
+			int                        adoptFailures{0};
+			bool                       verboseReloadLogs{false};
+			QPointer<WorldRuntime>     requestedActiveRuntime;
+			QPointer<WorldChildWindow> requestedActiveWindow;
 	};
 	auto       asyncContext              = std::make_shared<ReloadRecoveryAsyncContext>();
 	const auto openedWorldCount          = static_cast<qint64>(openedWorlds.size());
@@ -4243,14 +4283,18 @@ bool AppController::recoverReloadStartupState()
 	asyncContext->openFailures           = openFailures;
 	asyncContext->verboseReloadLogs      = verboseReloadLogs;
 	asyncContext->requestedActiveRuntime = requestedActiveRuntime;
+	asyncContext->requestedActiveWindow  = requestedActiveWindow;
 
 	const auto finalizeRecovery = [this, asyncContext]
 	{
 		if (m_mainWindow)
 		{
 			bool activated = false;
-			if (asyncContext->requestedActiveRuntime)
-				activated = m_mainWindow->activateWorldRuntime(asyncContext->requestedActiveRuntime.data());
+			if (asyncContext->requestedActiveWindow)
+			{
+				m_mainWindow->activateWorldWindow(asyncContext->requestedActiveWindow);
+				activated = true;
+			}
 			if (!activated)
 				m_mainWindow->activateWorldSlot(1);
 		}
@@ -10264,7 +10308,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		const auto entries = m_mainWindow->worldWindowDescriptors();
+		const auto entries = m_mainWindow->worldRuntimeDescriptors();
 
 		QDialog    dlg(m_mainWindow);
 		dlg.setWindowTitle(QStringLiteral("Send To All Worlds"));
@@ -10599,15 +10643,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!runtime)
 			return;
 
-		auto *window = new WorldChildWindow(world->windowTitle());
-		window->setRuntimeObserver(runtime);
-		if (auto *view = window->view())
-			view->restoreOutputFromPersistedLines(runtime->lines());
-		m_mainWindow->addMdiSubWindow(window);
-		if (world->isMaximized())
-			window->showMaximized();
-		else
-			window->show();
+		createWorldObserverWindow(runtime, world, true);
 	}
 	else if (cmdName == QStringLiteral("HelpIndex") || cmdName == QStringLiteral("HelpUsing"))
 	{
@@ -14358,19 +14394,30 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 	snapshot.arguments.push_back(makeReloadArgument(QString::fromLatin1(kReloadTokenArgName), reloadToken));
 
 	MainWindowHost                      *host = resolveMainWindowHost(m_mainWindow);
-	const QVector<WorldWindowDescriptor> worlds =
+	const QVector<WorldWindowDescriptor> presentations =
 	    host ? host->worldWindowDescriptors() : QVector<WorldWindowDescriptor>{};
-	if (host)
+	const QVector<WorldWindowDescriptor> worlds =
+	    host ? host->worldRuntimeDescriptors() : QVector<WorldWindowDescriptor>{};
+	const WorldChildWindow *const activePresentation =
+	    m_mainWindow ? m_mainWindow->activeWorldPresentationWindow() : nullptr;
+	QHash<WorldRuntime *, int> presentationCounts;
+	QHash<WorldRuntime *, int> activePresentationOrdinals;
+	for (const WorldWindowDescriptor &entry : presentations)
 	{
-		if (const WorldChildWindow *activeWorld = host->activeWorldChildWindow(); activeWorld)
+		if (!entry.runtime)
+			continue;
+		const int ordinal = ++presentationCounts[entry.runtime];
+		if (entry.window == activePresentation)
+			activePresentationOrdinals.insert(entry.runtime, ordinal);
+	}
+	if (activePresentation)
+	{
+		for (const WorldWindowDescriptor &entry : worlds)
 		{
-			for (const WorldWindowDescriptor &entry : worlds)
+			if (entry.runtime == activePresentation->runtime())
 			{
-				if (entry.window == activeWorld)
-				{
-					snapshot.activeWorldSequence = entry.sequence;
-					break;
-				}
+				snapshot.activeWorldSequence = entry.sequence;
+				break;
 			}
 		}
 	}
@@ -14401,7 +14448,9 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 			continue;
 
 		ReloadWorldState world;
-		world.sequence = entry.sequence;
+		world.sequence                  = entry.sequence;
+		world.presentationCount         = qMax(1, presentationCounts.value(runtime));
+		world.activePresentationOrdinal = activePresentationOrdinals.value(runtime);
 		if (entry.window)
 			world.displayName = entry.window->windowTitle().trimmed();
 

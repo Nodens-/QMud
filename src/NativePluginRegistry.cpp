@@ -1679,22 +1679,18 @@ namespace QMudNativePluginRegistry
 	{
 		if (!runtime)
 			return;
-		const QList<int> buffers        = luaAudioRuntimeOwnedBuffers(runtime);
-		auto            *mutableRuntime = const_cast<WorldRuntime *>(runtime);
+		const QList<int> buffers = luaAudioRuntimeOwnedBuffers(runtime);
 		for (const int buffer : buffers)
-			static_cast<void>(mutableRuntime->stopSoundBypassingPluginCallbacks(buffer));
-		luaAudioReleaseRuntimeBuffers(runtime, buffers);
+			stopLuaAudioNativeBuffer(runtime, buffer);
 	}
 
 	void luaAudioStopRuntimeOwner(const WorldRuntime *runtime, const void *ownerKey)
 	{
 		if (!runtime || !ownerKey)
 			return;
-		const QList<int> buffers        = luaAudioRuntimeOwnedBuffers(runtime, ownerKey);
-		auto            *mutableRuntime = const_cast<WorldRuntime *>(runtime);
+		const QList<int> buffers = luaAudioRuntimeOwnedBuffers(runtime, ownerKey);
 		for (const int buffer : buffers)
-			static_cast<void>(mutableRuntime->stopSoundBypassingPluginCallbacks(buffer));
-		luaAudioReleaseRuntimeBuffers(runtime, buffers);
+			stopLuaAudioNativeBuffer(runtime, buffer);
 	}
 
 	void luaAudioResetRuntime(const WorldRuntime *runtime)

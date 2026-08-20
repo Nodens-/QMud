@@ -331,9 +331,32 @@ namespace QMudWorldSessionState
 			payloadStream << payloadFlags;
 			if (state.hasOutputBuffer)
 			{
-				payloadStream << static_cast<quint32>(state.outputLines.size());
+				bool excludeLine = false;
+				if (state.excludedOutputLineNumber > 0)
+				{
+					for (const WorldRuntime::LineEntry &line : state.outputLines)
+					{
+						if (line.lineNumber == state.excludedOutputLineNumber &&
+						    (line.flags & WorldRuntime::LineHidden) != 0)
+						{
+							excludeLine = true;
+							break;
+						}
+					}
+				}
+				payloadStream << static_cast<quint32>(state.outputLines.size() - (excludeLine ? 1 : 0));
+				bool exclusionWritten = false;
 				for (const WorldRuntime::LineEntry &line : state.outputLines)
+				{
+					if (excludeLine && !exclusionWritten &&
+					    line.lineNumber == state.excludedOutputLineNumber &&
+					    (line.flags & WorldRuntime::LineHidden) != 0)
+					{
+						exclusionWritten = true;
+						continue;
+					}
 					writeLineEntry(payloadStream, line);
+				}
 			}
 			if (state.hasCommandHistory)
 			{

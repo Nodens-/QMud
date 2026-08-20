@@ -248,6 +248,7 @@ set(QMUD_SOURCES
         helpers/FontUtils.cpp
         BraceMatch.cpp
         LuaExecutor.cpp
+        helpers/LuaCompletionDeliveryUtils.cpp
         LuaCallbackEngine.cpp
         LuaApiExport.cpp
         LuaFunctionMetadata.cpp
@@ -284,7 +285,9 @@ set(QMUD_HEADERS
         MainFrame.h
         helpers/MainFrameActionUtils.h
         helpers/MainFrameMdiUtils.h
+        helpers/LuaCallbackNotepadPresentationUtils.h
         helpers/LuaExecutionUtils.h
+        helpers/LuaCompletionDeliveryUtils.h
         helpers/LuaModalDialogUtils.h
         helpers/AccessibleTextUtils.h
         helpers/PluginPathUtils.h

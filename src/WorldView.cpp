@@ -1405,8 +1405,11 @@ class WorldOutputCanvas : public QWidget
 		{
 			if (!m_view)
 				return;
-			QPainter      painter(this);
 			const QRegion dirtyRegion = event ? event->region() : QRegion(rect());
+			if (m_view->deferSemanticOutputPaintForDrawCallback(
+			        WorldView::SemanticOutputPaintLayer::NativeCanvas, dirtyRegion))
+				return;
+			QPainter painter(this);
 			m_view->paintNativeOutputCanvas(&painter, dirtyRegion);
 			m_view->miniWindowLayerPainted(true, dirtyRegion);
 		}
@@ -1783,9 +1786,13 @@ class MiniWindowLayer : public QWidget
 		{
 			if (!m_view)
 				return;
+			const QRegion dirtyRegion = event ? event->region() : QRegion(rect());
+			const auto    layer       = m_underneath ? WorldView::SemanticOutputPaintLayer::MiniWindowUnderlay
+			                                         : WorldView::SemanticOutputPaintLayer::MiniWindowOverlay;
+			if (m_view->deferSemanticOutputPaintForDrawCallback(layer, dirtyRegion))
+				return;
 			QPainter painter(this);
 			painter.setRenderHint(QPainter::SmoothPixmapTransform);
-			const QRegion dirtyRegion = event ? event->region() : QRegion(rect());
 			m_view->paintMiniWindows(&painter, m_underneath, dirtyRegion);
 			m_view->miniWindowLayerPainted(m_underneath, dirtyRegion);
 		}
@@ -2010,11 +2017,11 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 					    requestNativeOutputRepaint();
 			    });
 			connect(m_outputScrollBar, &QScrollBar::valueChanged, this,
-			        [bar](int value)
+			        [this, bar](int value)
 			        {
 				        if (!bar)
 					        return;
-				        bar->setValue(value);
+				        setSemanticOutputScrollPosition(bar, value);
 			        });
 			connect(m_outputScrollBar, &QScrollBar::sliderPressed, this, [this] { noteUserScrollAction(); });
 			connect(m_outputScrollBar, &QScrollBar::sliderMoved, this,
@@ -2037,8 +2044,6 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	}
 	syncOutputScrollSingleStep();
 	connect(m_input, &QPlainTextEdit::selectionChanged, this, [this] { emit inputSelectionChanged(); });
-	connect(this, &WorldView::outputScrollChanged, this, [this] { requestDrawOutputWindowNotification(); });
-
 	if (m_outputSplitter)
 	{
 		connect(m_outputSplitter, &QSplitter::splitterMoved, this,
@@ -2048,8 +2053,8 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 				        return;
 			        if (const QList<int> sizes = m_outputSplitter->sizes(); sizes.size() >= 2)
 				        m_lastLiveSplitSize = sizes.at(1);
-			        if (m_scrollbackSplitActive)
-				        scrollViewToEnd(m_liveOutput);
+			        scrollViewToEnd(m_liveOutput);
+			        notifySemanticOutputViewportChanged(true);
 		        });
 	}
 }
@@ -2070,15 +2075,22 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 	if (runtime && m_runtime == runtime)
 	{
 		if (m_runtime->view() != this)
+		{
+			resetNativeOutputPresentationRequestState();
 			m_runtime->setView(this);
+		}
+		m_drawOutputWindowCallbackActive = m_runtime->drawOutputWindowCallbackActive();
 		return;
 	}
 
-	if (m_runtime && m_runtime->view() == this)
-		m_runtime->setView(nullptr);
+	if (m_runtime)
+		m_runtime->unregisterPresentationView(this);
 
-	m_runtimeOutputMutationBatchDepth = 0;
-	m_runtimeBatchPartialClearPending = false;
+	m_runtimeOutputMutationBatchDepth                       = 0;
+	m_runtimeOutputMutationBatchSuppressesDrawNotifications = false;
+	m_runtimeBatchPartialClearPending                       = false;
+	resetDrawOutputWindowNotificationState();
+	resetNativeOutputPresentationRequestState();
 	if (runtime)
 	{
 		// Runtime/native mode must clear stale standalone output state.
@@ -2112,21 +2124,23 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 		m_wrapMarginReservationPixels            = 0;
 	}
 
-	m_miniWindowChangeSerial                 = 0;
-	m_nativePrimaryPaintState                = {};
-	m_nativeLivePaintState                   = {};
-	m_nativeOutputScrollBlitPending          = false;
-	m_nativeOutputScrollBlitExposedRect      = {};
-	m_nativeOutputScrollBlitBackgroundRegion = {};
-	m_nativeOutputScrollBlitRepaintRegion    = {};
-	m_miniWindowPaintBoundsValid             = false;
-	m_pendingMiniWindowUnderlayDirtyRegion   = {};
-	m_pendingMiniWindowOverlayDirtyRegion    = {};
-	m_wrapMarginReservationCacheValid        = false;
-	m_wrapMarginReservationPixels            = 0;
-	m_runtimeOutputMutationBatchDepth        = 0;
-	m_runtimeBatchPartialClearPending        = false;
-	m_runtime                                = runtime;
+	m_miniWindowChangeSerial                                = 0;
+	m_nativePrimaryPaintState                               = {};
+	m_nativeLivePaintState                                  = {};
+	m_nativeOutputScrollBlitPending                         = false;
+	m_nativeOutputScrollBlitExposedRect                     = {};
+	m_nativeOutputScrollBlitBackgroundRegion                = {};
+	m_nativeOutputScrollBlitRepaintRegion                   = {};
+	m_miniWindowPaintBoundsValid                            = false;
+	m_pendingMiniWindowUnderlayDirtyRegion                  = {};
+	m_pendingMiniWindowOverlayDirtyRegion                   = {};
+	m_wrapMarginReservationCacheValid                       = false;
+	m_wrapMarginReservationPixels                           = 0;
+	m_runtimeOutputMutationBatchDepth                       = 0;
+	m_runtimeOutputMutationBatchSuppressesDrawNotifications = false;
+	m_runtimeBatchPartialClearPending                       = false;
+	m_runtime                                               = runtime;
+	m_drawOutputWindowCallbackActive = m_runtime && m_runtime->drawOutputWindowCallbackActive();
 	resetRuntimeSettingsSnapshot();
 	applyRuntimeSettings();
 	if (m_runtime)
@@ -2139,12 +2153,19 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 	if (runtime && m_runtime == runtime)
 	{
 		if (m_runtime->view() == this)
+		{
 			m_runtime->setView(nullptr);
+		}
+		resetDrawOutputWindowNotificationState();
+		resetNativeOutputPresentationRequestState();
+		m_runtime->registerPresentationView(this);
 		return;
 	}
 
-	if (m_runtime && m_runtime->view() == this)
-		m_runtime->setView(nullptr);
+	if (m_runtime)
+		m_runtime->unregisterPresentationView(this);
+	resetDrawOutputWindowNotificationState();
+	resetNativeOutputPresentationRequestState();
 
 	if (runtime)
 	{
@@ -2157,13 +2178,14 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 		m_nativeHasPartialOutput = false;
 		m_nativePartialOutputText.clear();
 		m_nativePartialOutputSpans.clear();
-		m_nativeRenderLineCacheFromRuntime = true;
-		m_nativeRenderLineCacheValid       = false;
-		m_nativeLayoutCacheValid           = false;
-		m_runtimeOutputMutationBatchDepth  = 0;
-		m_runtimeBatchPartialClearPending  = false;
-		m_lastQueuedOutputClientSize       = {};
-		m_lastQueuedOutputClientSizeValid  = false;
+		m_nativeRenderLineCacheFromRuntime                      = true;
+		m_nativeRenderLineCacheValid                            = false;
+		m_nativeLayoutCacheValid                                = false;
+		m_runtimeOutputMutationBatchDepth                       = 0;
+		m_runtimeOutputMutationBatchSuppressesDrawNotifications = false;
+		m_runtimeBatchPartialClearPending                       = false;
+		m_lastQueuedOutputClientSize                            = {};
+		m_lastQueuedOutputClientSizeValid                       = false;
 		clearNativeOutputSelection(true);
 		m_nativeStandaloneOutputLines.clear();
 		m_nativeStandaloneNextLineNumber  = 1;
@@ -2178,6 +2200,42 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 	m_runtime                         = runtime;
 	resetRuntimeSettingsSnapshot();
 	applyRuntimeSettings();
+	if (m_runtime)
+		m_runtime->registerPresentationView(this);
+}
+
+void WorldView::setPassiveBufferView(const bool passive)
+{
+	setCommandInteractionEnabled(!passive);
+}
+
+void WorldView::setCommandInteractionEnabled(const bool enabled)
+{
+	m_commandInteractionEnabled = enabled;
+	if (!enabled)
+	{
+		stopMiniWindowMouseCapture();
+		m_capturedWindowName.clear();
+		m_hoverWindowName.clear();
+		m_hasCapturedMiniWindowPressLocal       = false;
+		m_hasPendingCapturedMiniWindowDragMove  = false;
+		m_capturedMiniWindowDragMoveDrainQueued = false;
+		clearPendingHotspotTooltip();
+		clearHotspotCursor();
+	}
+
+	if (!m_input)
+		return;
+	if (!enabled && m_input->hasFocus())
+	{
+		if (WrapTextBrowser *output = activeOutputView())
+			output->setFocus(Qt::OtherFocusReason);
+	}
+	m_input->setFocusPolicy(enabled ? Qt::StrongFocus : Qt::NoFocus);
+	m_input->setEnabled(enabled);
+	m_input->setVisible(enabled);
+	if (enabled)
+		updateInputHeight();
 }
 
 QVector<QPair<QString, QString>> WorldView::parseMxpContextMenuActions(const QString &rawHref,
@@ -2411,11 +2469,12 @@ bool WorldView::showWorldContextMenuAtGlobalPos(const QPoint &globalPos)
 	QString              hint;
 	NativeOutputPosition hit;
 	bool                 textHit = false;
-	if (nativeOutputHitTest(source, sourcePos, hit, &href, &hint, true, false, &textHit) && m_runtime)
+	if (nativeOutputHitTest(source, sourcePos, hit, &href, &hint, true, false, &textHit) &&
+	    m_commandInteractionEnabled && m_runtime)
 		m_runtime->setWordUnderMenu(textHit ? wordAtNativeOutputPosition(hit) : QString(), true);
 	const QVector<QPair<QString, QString>> actions      = parseMxpContextMenuActions(href, hint);
 	const bool                             hasSelection = hasOutputSelection();
-	if (!hasSelection && !actions.isEmpty())
+	if (m_commandInteractionEnabled && !hasSelection && !actions.isEmpty())
 	{
 		menu = new QMenu(source);
 		for (int i = 0; i < actions.size(); ++i)
@@ -2552,8 +2611,6 @@ void WorldView::collapseScrollbackSplitToLiveOutput()
 	if (!m_scrollbackSplitActive)
 		return;
 	setScrollbackSplitActive(false);
-	// Return to current output immediately when collapsing split view.
-	scrollOutputToEnd();
 }
 
 WorldRuntime *WorldView::runtime() const
@@ -2613,6 +2670,27 @@ void WorldView::noteUserScrollAction()
 	if (!m_autoPause || !m_outputScrollBar)
 		return;
 	syncOutputScrollbackReviewState();
+}
+
+bool WorldView::setSemanticOutputScrollPosition(QScrollBar *bar, const int target,
+                                                const bool preserveDuringCallbackSuppression)
+{
+	if (!bar)
+		return false;
+
+	const int previousPosition = bar->value();
+	bar->setValue(qBound(bar->minimum(), target, bar->maximum()));
+	if (bar->value() == previousPosition)
+		return false;
+
+	notifySemanticOutputViewportChanged(preserveDuringCallbackSuppression);
+	return true;
+}
+
+void WorldView::notifySemanticOutputViewportChanged(const bool preserveDuringCallbackSuppression)
+{
+	requestSemanticOutputRepaint(SemanticOutputRepaint::PresentationVisible,
+	                             preserveDuringCallbackSuppression);
 }
 
 void WorldView::syncOutputScrollbackReviewState(const bool notifyReviewTarget,
@@ -8793,10 +8871,7 @@ void WorldView::scrollNativeOutputRangeIntoView(const WrapTextBrowser *view, int
 			const_cast<WorldView *>(this)->syncOutputScrollbackReviewState(notifyReviewTarget);
 		return;
 	}
-	if (view == m_output && m_outputScrollBar)
-		m_outputScrollBar->setValue(target);
-	else
-		bar->setValue(target);
+	const_cast<WorldView *>(this)->setSemanticOutputScrollPosition(bar, target);
 	if (primaryOutput)
 		const_cast<WorldView *>(this)->syncOutputScrollbackReviewState(notifyReviewTarget);
 }
@@ -9522,7 +9597,7 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 		const bool wasClick = m_nativeOutputSelection.anchor.line == position.line &&
 		                      m_nativeOutputSelection.anchor.column == position.column;
 		setNativeOutputSelection(selectionSource, m_nativeOutputSelection.anchor, position, false);
-		if (wasClick && !href.isEmpty())
+		if (m_commandInteractionEnabled && wasClick && !href.isEmpty())
 			emit hyperlinkActivated(href);
 		return true;
 	}
@@ -10069,7 +10144,8 @@ void WorldView::handleOutputWheel(const QWheelEvent *event)
 	}
 	if (!moved)
 		return;
-	m_outputScrollBar->setValue(value);
+	QScrollBar *const bar = m_output ? m_output->verticalScrollBar() : nullptr;
+	setSemanticOutputScrollPosition(bar, value);
 	noteUserScrollAction();
 }
 
@@ -10123,6 +10199,7 @@ void WorldView::setScrollbackSplitActive(bool active)
 	}
 	syncNativeOutputScrollBarsFromLayout(nativeOutputRenderLines());
 	requestNativeOutputRepaint();
+	notifySemanticOutputViewportChanged(true);
 }
 
 void WorldView::markNativeRuntimeRangeRestitchPending(const int runtimeLineIndex) const
@@ -10159,27 +10236,32 @@ WorldView::synchronizeNativeRuntimeOutputPresentation(const bool allowLayoutBuil
 
 void WorldView::requestNativeRuntimeOutputPresentationSync(const bool allowLayoutBuild, const bool followTail)
 {
+	queueSemanticOutputRepaint(followTail ? SemanticOutputRepaint::PresentationVisible
+	                                      : SemanticOutputRepaint::PresentationDelta);
 	m_nativeRuntimeOutputPresentationNeedsLayoutSync =
 	    m_nativeRuntimeOutputPresentationNeedsLayoutSync || allowLayoutBuild;
 	m_nativeRuntimeOutputPresentationFollowTail = m_nativeRuntimeOutputPresentationFollowTail || followTail;
 	if (m_nativeRuntimeOutputPresentationQueued)
+	{
+		requestDrawOutputWindowNotification();
 		return;
+	}
 
 	m_nativeRuntimeOutputPresentationQueued = true;
+	const quint64       bindingGeneration   = m_nativeOutputPresentationBindingGeneration;
 	QPointer<WorldView> that(this);
 	const bool          queued = QMetaObject::invokeMethod(
 	    this,
-	    [that]
+	    [that, bindingGeneration]
 	    {
-		    if (!that)
+		    if (!that || bindingGeneration != that->m_nativeOutputPresentationBindingGeneration)
 			    return;
 		    const bool allowLayoutBuild = that->m_nativeRuntimeOutputPresentationNeedsLayoutSync;
 		    const bool followTail       = that->m_nativeRuntimeOutputPresentationFollowTail;
 		    that->m_nativeRuntimeOutputPresentationQueued          = false;
 		    that->m_nativeRuntimeOutputPresentationNeedsLayoutSync = false;
 		    that->m_nativeRuntimeOutputPresentationFollowTail      = false;
-		    const NativeOutputRenderLines &lines =
-		        that->synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, followTail);
+		    static_cast<void>(that->synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, followTail));
 #ifndef NDEBUG
 		    if (that->m_nativeRangeRestitchDiagCount > 0)
 		    {
@@ -10198,7 +10280,7 @@ void WorldView::requestNativeRuntimeOutputPresentationSync(const bool allowLayou
 		    }
 		    that->logAndResetNativeAppendDiagnostics();
 #endif
-		    that->requestNativeOutputPresentationRepaint(followTail, lines);
+		    that->finalizeNativeOutputPresentationUpdate(followTail);
 	    },
 	    Qt::QueuedConnection);
 	if (!queued)
@@ -10206,8 +10288,7 @@ void WorldView::requestNativeRuntimeOutputPresentationSync(const bool allowLayou
 		m_nativeRuntimeOutputPresentationQueued          = false;
 		m_nativeRuntimeOutputPresentationNeedsLayoutSync = false;
 		m_nativeRuntimeOutputPresentationFollowTail      = false;
-		const NativeOutputRenderLines &lines =
-		    synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, followTail);
+		static_cast<void>(synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, followTail));
 #ifndef NDEBUG
 		if (m_nativeRangeRestitchDiagCount > 0)
 		{
@@ -10226,8 +10307,154 @@ void WorldView::requestNativeRuntimeOutputPresentationSync(const bool allowLayou
 		}
 		logAndResetNativeAppendDiagnostics();
 #endif
-		requestNativeOutputPresentationRepaint(followTail, lines);
+		requestDrawOutputWindowNotification();
+		finalizeNativeOutputPresentationUpdate(followTail);
+		return;
 	}
+	requestDrawOutputWindowNotification();
+}
+
+bool WorldView::hasPendingOutputPresentationWork() const
+{
+	return m_nativeRuntimeOutputPresentationQueued || m_scrollToEndQueued ||
+	       m_runtimeBatchPartialClearPending;
+}
+
+bool WorldView::runtimeOutputTailAdvanced() const
+{
+	if (!m_runtime || m_runtime->lines().isEmpty())
+		return false;
+	if (!m_nativeRenderLineCacheValid || !m_nativeRenderLineCacheFromRuntime)
+		return true;
+	return m_runtime->lines().constLast().lineNumber > m_nativeCachedRuntimeLastLineNumber;
+}
+
+void WorldView::prepareRuntimeOutputMutationPresentation(const bool tailAdvanced,
+                                                         const bool clearLastPartialAnnouncement)
+{
+	if (tailAdvanced)
+		removeNativePartialRenderLineOverlay(false);
+	m_hasPartialOutput       = false;
+	m_partialOutputStart     = 0;
+	m_partialOutputLength    = 0;
+	m_nativeHasPartialOutput = false;
+	m_nativePartialOutputText.clear();
+	m_nativePartialOutputSpans.clear();
+	m_nativeRenderLineCacheFromRuntime  = true;
+	m_accessibleOutputPendingTailAppend = tailAdvanced;
+	if (clearLastPartialAnnouncement)
+		m_accessibleOutputLastAnnouncedPartialText.clear();
+	m_runtimeBatchPartialClearPending = false;
+	syncOutputTextVisibilityForNativeCanvas();
+	if (tailAdvanced && !m_frozen)
+		requestOutputScrollToEnd();
+}
+
+void WorldView::finalizeNativeOutputPresentationUpdate(const bool repaintVisiblePanes)
+{
+	queueSemanticOutputRepaint(repaintVisiblePanes ? SemanticOutputRepaint::PresentationVisible
+	                                               : SemanticOutputRepaint::PresentationDelta);
+	dispatchPendingDrawOutputWindowNotification();
+	releaseSemanticOutputRepaint();
+}
+
+void WorldView::requestSemanticOutputRepaint(const SemanticOutputRepaint repaint,
+                                             const bool                  preserveDuringCallbackSuppression)
+{
+	queueSemanticOutputRepaint(repaint);
+	requestDrawOutputWindowNotification(preserveDuringCallbackSuppression);
+	releaseSemanticOutputRepaint();
+}
+
+void WorldView::queueSemanticOutputRepaint(const SemanticOutputRepaint repaint)
+{
+	if (static_cast<int>(repaint) > static_cast<int>(m_pendingSemanticOutputRepaint))
+		m_pendingSemanticOutputRepaint = repaint;
+	if (repaint != SemanticOutputRepaint::None)
+		m_semanticOutputPaintBarrierActive = true;
+}
+
+void WorldView::releaseSemanticOutputRepaint()
+{
+	if (!m_semanticOutputPaintBarrierActive)
+		return;
+	if (hasPendingOutputPresentationWork() ||
+	    (m_runtime && (m_drawNotifyQueued || m_drawViewportNotificationPending ||
+	                   m_drawOutputWindowCallbackActive || m_drawCallbackCompletionsPending > 0)))
+	{
+		return;
+	}
+
+	const SemanticOutputRepaint repaint      = m_pendingSemanticOutputRepaint;
+	const QRegion deferredNativeCanvasRegion = std::move(m_deferredSemanticNativeCanvasPaintRegion);
+	const QRegion deferredMiniWindowUnderlayRegion =
+	    std::move(m_deferredSemanticMiniWindowUnderlayPaintRegion);
+	const QRegion deferredMiniWindowOverlayRegion = std::move(m_deferredSemanticMiniWindowOverlayPaintRegion);
+	m_pendingSemanticOutputRepaint                = SemanticOutputRepaint::None;
+	m_deferredSemanticNativeCanvasPaintRegion     = {};
+	m_deferredSemanticMiniWindowUnderlayPaintRegion = {};
+	m_deferredSemanticMiniWindowOverlayPaintRegion  = {};
+	m_semanticOutputPaintBarrierActive              = false;
+
+	switch (repaint)
+	{
+	case SemanticOutputRepaint::Tail:
+		requestNativeOutputTailRepaint();
+		break;
+	case SemanticOutputRepaint::PresentationDelta:
+		requestNativeOutputPresentationRepaint(false);
+		break;
+	case SemanticOutputRepaint::PresentationVisible:
+		requestNativeOutputPresentationRepaint(true);
+		break;
+	case SemanticOutputRepaint::Full:
+		requestNativeOutputRepaint();
+		break;
+	case SemanticOutputRepaint::None:
+		break;
+	}
+	if (!deferredNativeCanvasRegion.isEmpty())
+		requestNativeOutputRepaintRegion(deferredNativeCanvasRegion);
+	if (!deferredMiniWindowUnderlayRegion.isEmpty() && m_miniUnderlay)
+		m_miniUnderlay->update(deferredMiniWindowUnderlayRegion);
+	if (!deferredMiniWindowOverlayRegion.isEmpty() && m_miniOverlay)
+		m_miniOverlay->update(deferredMiniWindowOverlayRegion);
+}
+
+bool WorldView::deferSemanticOutputPaintForDrawCallback(const SemanticOutputPaintLayer layer,
+                                                        const QRegion                 &region)
+{
+	if (!m_semanticOutputPaintBarrierActive)
+		return false;
+	if (region.isEmpty())
+		return true;
+
+	switch (layer)
+	{
+	case SemanticOutputPaintLayer::NativeCanvas:
+		m_deferredSemanticNativeCanvasPaintRegion += region;
+		break;
+	case SemanticOutputPaintLayer::MiniWindowUnderlay:
+		m_deferredSemanticMiniWindowUnderlayPaintRegion += region;
+		break;
+	case SemanticOutputPaintLayer::MiniWindowOverlay:
+		m_deferredSemanticMiniWindowOverlayPaintRegion += region;
+		break;
+	}
+	return true;
+}
+
+void WorldView::resetNativeOutputPresentationRequestState()
+{
+	++m_nativeOutputPresentationBindingGeneration;
+	m_nativeRuntimeOutputPresentationQueued          = false;
+	m_nativeRuntimeOutputPresentationNeedsLayoutSync = false;
+	m_nativeRuntimeOutputPresentationFollowTail      = false;
+	m_scrollToEndQueued                              = false;
+	m_scrollToEndNeedsLayoutSync                     = false;
+	m_scrollToEndRequested                           = false;
+	replayPendingDrawOutputWindowNotification();
+	releaseSemanticOutputRepaint();
 }
 
 void WorldView::scrollViewToEnd(const WrapTextBrowser *view)
@@ -10244,6 +10471,7 @@ void WorldView::requestOutputScrollToEnd(const bool allowLayoutBuild)
 {
 	if (m_frozen)
 		return;
+	m_scrollToEndRequested       = true;
 	m_scrollToEndNeedsLayoutSync = m_scrollToEndNeedsLayoutSync || allowLayoutBuild;
 	if (m_scrollToEndQueued)
 		return;
@@ -10257,19 +10485,25 @@ void WorldView::requestOutputScrollToEnd(const bool allowLayoutBuild)
 		                         .arg(bar ? bar->maximum() : -1)
 		                         .arg(m_scrollbackSplitActive ? QStringLiteral("1") : QStringLiteral("0"));
 	}
-	m_scrollToEndQueued = true;
+	m_scrollToEndQueued                   = true;
+	const quint64       bindingGeneration = m_nativeOutputPresentationBindingGeneration;
 	QPointer<WorldView> that(this);
 	const bool          queued = QMetaObject::invokeMethod(
 	    this,
-	    [that]
+	    [that, bindingGeneration]
 	    {
-		    if (!that)
+		    if (!that || bindingGeneration != that->m_nativeOutputPresentationBindingGeneration)
 			    return;
 		    const bool allowLayoutBuild        = that->m_scrollToEndNeedsLayoutSync;
+		    const bool scrollToEndRequested    = that->m_scrollToEndRequested;
 		    that->m_scrollToEndQueued          = false;
 		    that->m_scrollToEndNeedsLayoutSync = false;
-		    if (that->m_frozen)
+		    that->m_scrollToEndRequested       = false;
+		    if (that->m_frozen || !scrollToEndRequested)
+		    {
+			    that->replayPendingDrawOutputWindowNotification();
 			    return;
+		    }
 		    if (traceOutputBackfillEnabled())
 		    {
 			    const QScrollBar *const bar = that->m_output ? that->m_output->verticalScrollBar() : nullptr;
@@ -10282,18 +10516,23 @@ void WorldView::requestOutputScrollToEnd(const bool allowLayoutBuild)
 			                             .arg(that->m_scrollbackSplitActive ? QStringLiteral("1")
 			                                                                : QStringLiteral("0"));
 		    }
-		    const NativeOutputRenderLines &lines =
-		        that->synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, true);
-		    that->requestNativeOutputPresentationRepaint(true, lines);
+		    static_cast<void>(that->synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, true));
+		    that->finalizeNativeOutputPresentationUpdate(true);
 	    },
 	    Qt::QueuedConnection);
 	if (!queued)
 	{
-		m_scrollToEndQueued          = false;
-		m_scrollToEndNeedsLayoutSync = false;
-		const NativeOutputRenderLines &lines =
-		    synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, true);
-		requestNativeOutputPresentationRepaint(true, lines);
+		const bool scrollToEndRequested = m_scrollToEndRequested;
+		m_scrollToEndQueued             = false;
+		m_scrollToEndNeedsLayoutSync    = false;
+		m_scrollToEndRequested          = false;
+		if (!scrollToEndRequested)
+		{
+			replayPendingDrawOutputWindowNotification();
+			return;
+		}
+		static_cast<void>(synchronizeNativeRuntimeOutputPresentation(allowLayoutBuild, true));
+		finalizeNativeOutputPresentationUpdate(true);
 	}
 }
 
@@ -10310,9 +10549,8 @@ void WorldView::scrollOutputToStart()
 		return;
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 	{
-		const int oldValue = bar->value();
-		bar->setValue(bar->minimum());
-		syncOutputScrollbackReviewState(true, bar->value() != oldValue);
+		const bool changed = setSemanticOutputScrollPosition(bar, bar->minimum());
+		syncOutputScrollbackReviewState(true, changed);
 	}
 	else
 		syncOutputScrollbackReviewState();
@@ -10322,10 +10560,15 @@ void WorldView::scrollOutputToStart()
 void WorldView::scrollOutputToEnd()
 {
 	if (m_scrollbackSplitActive)
-		collapseScrollbackSplitToLiveOutput();
-	else
 	{
-		scrollViewToEnd(m_output);
+		collapseScrollbackSplitToLiveOutput();
+		requestNativeOutputRepaint();
+		return;
+	}
+	if (m_output)
+	{
+		if (QScrollBar *const bar = m_output->verticalScrollBar())
+			setSemanticOutputScrollPosition(bar, bar->maximum());
 		clearAccessibleOutputReviewCursor();
 	}
 	requestNativeOutputRepaint();
@@ -10337,9 +10580,8 @@ void WorldView::scrollOutputPageUp()
 		return;
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 	{
-		const int oldValue = bar->value();
-		bar->setValue(bar->value() - bar->pageStep());
-		syncOutputScrollbackReviewState(true, bar->value() != oldValue);
+		const bool changed = setSemanticOutputScrollPosition(bar, bar->value() - bar->pageStep());
+		syncOutputScrollbackReviewState(true, changed);
 	}
 	else
 		syncOutputScrollbackReviewState();
@@ -10352,9 +10594,8 @@ void WorldView::scrollOutputPageDown()
 		return;
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 	{
-		const int oldValue = bar->value();
-		bar->setValue(bar->value() + bar->pageStep());
-		syncOutputScrollbackReviewState(true, bar->value() != oldValue);
+		const bool changed = setSemanticOutputScrollPosition(bar, bar->value() + bar->pageStep());
+		syncOutputScrollbackReviewState(true, changed);
 	}
 	else
 		syncOutputScrollbackReviewState();
@@ -10367,9 +10608,8 @@ void WorldView::scrollOutputLineUp()
 		return;
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 	{
-		const int oldValue = bar->value();
-		bar->setValue(bar->value() - outputScrollUnitsPerLine());
-		syncOutputScrollbackReviewState(true, bar->value() != oldValue);
+		const bool changed = setSemanticOutputScrollPosition(bar, bar->value() - outputScrollUnitsPerLine());
+		syncOutputScrollbackReviewState(true, changed);
 	}
 	else
 		syncOutputScrollbackReviewState();
@@ -10382,9 +10622,8 @@ void WorldView::scrollOutputLineDown()
 		return;
 	if (QScrollBar *bar = m_output->verticalScrollBar())
 	{
-		const int oldValue = bar->value();
-		bar->setValue(bar->value() + outputScrollUnitsPerLine());
-		syncOutputScrollbackReviewState(true, bar->value() != oldValue);
+		const bool changed = setSemanticOutputScrollPosition(bar, bar->value() + outputScrollUnitsPerLine());
+		syncOutputScrollbackReviewState(true, changed);
 	}
 	else
 		syncOutputScrollbackReviewState();
@@ -10464,25 +10703,12 @@ void WorldView::appendNoteTextStyled(const QString &text, const QVector<WorldRun
 
 void WorldView::appendHorizontalRule()
 {
-	int flags = WorldRuntime::LineHorizontalRule;
-	if (m_runtime)
-	{
-		const QMap<QString, QString> &attrs   = m_runtime->worldAttributes();
-		auto                          enabled = [](const QString &value)
-		{
-			return value == QStringLiteral("1") ||
-			       value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-			       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-		};
-		if (enabled(attrs.value(QStringLiteral("log_notes"))))
-			flags |= WorldRuntime::LineLog;
-	}
-	appendOutputTextInternal(QString(), true, true, flags);
+	appendOutputTextInternal(QString(), true, true, WorldRuntime::LineHorizontalRule);
 }
 
 QString WorldView::pasteCommand(const QString &text)
 {
-	if (!m_input)
+	if (!m_commandInteractionEnabled || !m_input)
 		return {};
 
 	QTextCursor   cursor  = m_input->textCursor();
@@ -10503,7 +10729,7 @@ QString WorldView::pasteCommand(const QString &text)
 
 QString WorldView::pushCommand()
 {
-	if (!m_input)
+	if (!m_commandInteractionEnabled || !m_input)
 		return {};
 	const QString command     = m_input->toPlainText();
 	const bool    savedNoEcho = m_noEcho;
@@ -10604,6 +10830,7 @@ void WorldView::echoInputText(const QString &text)
 	}
 	const bool                       appendToCurrentLine = keepOnSameLine && !m_breakBeforeNextServerOutput;
 	QVector<WorldRuntime::StyleSpan> echoSpans;
+	bool                             reopenedPresentedHardReturn = false;
 	if (m_runtime && !trimmed.isEmpty())
 	{
 		bool      ok         = false;
@@ -10621,8 +10848,10 @@ void WorldView::echoInputText(const QString &text)
 			span.back   = fromColorRef(m_runtime->customColourBackground(echoColour));
 			echoSpans.push_back(span);
 		}
-		m_runtime->prepareInputEchoForDisplay(trimmed, echoSpans, appendToCurrentLine);
 	}
+	if (m_runtime)
+		reopenedPresentedHardReturn =
+		    m_runtime->prepareInputEchoForDisplay(trimmed, echoSpans, appendToCurrentLine);
 
 	if (keepOnSameLine)
 	{
@@ -10634,37 +10863,32 @@ void WorldView::echoInputText(const QString &text)
 		}
 		if (m_runtime)
 		{
-			bool consumedExistingBreak = false;
-			if (!insertedBreakBeforeEcho)
-			{
-				m_runtime->clearLastLineHardReturn();
-				consumedExistingBreak = true;
+			const bool finalizeEchoLine = !insertedBreakBeforeEcho;
+			if (reopenedPresentedHardReturn)
 				markNativeRuntimeTailRestitchPending();
-			}
 			appendOutputTextInternal(trimmed, false, true, WorldRuntime::LineInput, echoSpans);
-			if (consumedExistingBreak)
+			if (finalizeEchoLine)
 				commitPendingInlineInputBreak();
 			else
 				m_breakBeforeNextServerOutput = true;
 		}
 		else
 		{
-			bool consumedExistingBreak = false;
+			const bool finalizeEchoLine = !insertedBreakBeforeEcho;
 			if (!insertedBreakBeforeEcho)
 			{
 				if (!m_nativeStandaloneOutputLines.isEmpty() &&
 				    m_nativeStandaloneOutputLines.last().hardReturn)
 				{
 					m_nativeStandaloneOutputLines.last().hardReturn = false;
-					consumedExistingBreak                           = true;
 					m_nativeRenderLineCacheFromRuntime              = false;
 					m_nativeRenderLineCacheValid                    = false;
 				}
 			}
 			appendOutputTextInternal(trimmed, false, true, WorldRuntime::LineInput, echoSpans);
-			if (consumedExistingBreak)
+			if (finalizeEchoLine)
 				commitPendingInlineInputBreak();
-			if (!consumedExistingBreak)
+			else
 				m_breakBeforeNextServerOutput = true;
 		}
 	}
@@ -10749,7 +10973,7 @@ QString WorldView::currentHoveredHyperlink() const
 
 void WorldView::applyHoveredHyperlink(const QString &href)
 {
-	const QString normalized = href.trimmed();
+	const QString normalized = m_commandInteractionEnabled ? href.trimmed() : QString();
 	if (normalized == m_hoveredHyperlinkHref)
 		return;
 	m_hoveredHyperlinkHref = normalized;
@@ -10860,13 +11084,7 @@ void WorldView::selectOutputRange(int zeroBasedLine, int startColumn, int endCol
 		target = lineBottom - pageStep;
 
 	target = qBound(bar->minimum(), target, bar->maximum());
-	if (target != bar->value())
-	{
-		if (m_outputScrollBar)
-			m_outputScrollBar->setValue(target);
-		else
-			bar->setValue(target);
-	}
+	const_cast<WorldView *>(this)->setSemanticOutputScrollPosition(bar, target);
 	const_cast<WorldView *>(this)->syncOutputScrollbackReviewState(false);
 	notifyAccessibleOutputSelectionReviewTarget(lines, zeroBasedLine, startColumn, endColumn);
 }
@@ -10904,17 +11122,25 @@ int WorldView::setOutputScroll(int position, bool visible)
 {
 	if (!m_output)
 		return eBadParameter;
-	m_outputScrollBarWanted = visible;
+	const bool visibilityChanged = m_outputScrollBarWanted != visible;
+	m_outputScrollBarWanted      = visible;
 
 	if (m_outputScrollBar)
 		m_outputScrollBar->setVisible(visible);
+	if (visibilityChanged && m_outputContainer && m_outputContainer->layout())
+		static_cast<void>(m_outputContainer->layout()->activate());
 
 	QScrollBar *bar = m_output->verticalScrollBar();
 	if (!bar)
 		return eBadParameter;
+	const int previousPosition = bar->value();
+	bool      positionChanged  = false;
 
 	if (position != -2)
 	{
+		m_scrollToEndRequested                      = false;
+		m_nativeRuntimeOutputPresentationFollowTail = false;
+		static_cast<void>(synchronizeNativeRuntimeOutputPresentation(true, false));
 		int target = position;
 		if (position == -1)
 			target = bar->maximum();
@@ -10922,13 +11148,24 @@ int WorldView::setOutputScroll(int position, bool visible)
 			target = bar->minimum();
 		if (target > bar->maximum())
 			target = bar->maximum();
-		if (m_outputScrollBar)
-			m_outputScrollBar->setValue(target);
-		else
-			bar->setValue(target);
+		positionChanged = setSemanticOutputScrollPosition(bar, target, false);
 		syncOutputScrollbackReviewState();
 	}
+	if (visibilityChanged || (!positionChanged && bar->value() != previousPosition))
+		notifySemanticOutputViewportChanged(false);
 	return eOK;
+}
+
+int WorldView::synchronizePendingOutputScrollPosition()
+{
+	const bool followTail = m_nativeRuntimeOutputPresentationFollowTail || m_scrollToEndRequested;
+	m_nativeRuntimeOutputPresentationNeedsLayoutSync = false;
+	m_nativeRuntimeOutputPresentationFollowTail      = false;
+	m_scrollToEndNeedsLayoutSync                     = false;
+	m_scrollToEndRequested                           = false;
+	const NativeOutputRenderLines &lines = synchronizeNativeRuntimeOutputPresentation(true, followTail);
+	requestNativeOutputPresentationRepaint(followTail, lines);
+	return outputScrollPosition();
 }
 
 bool WorldView::doOutputFind(bool again)
@@ -11176,6 +11413,7 @@ void WorldView::setCommandHistoryList(const QStringList &historyEntries)
 void WorldView::clearCommandHistory()
 {
 	m_history.clear();
+	m_lastCommand.clear();
 	resetHistoryRecall();
 	if (m_commandHistoryFind)
 	{
@@ -11191,7 +11429,7 @@ bool WorldView::hasCommandHistory() const
 
 void WorldView::sendCommandFromHistory(const QString &text)
 {
-	if (text.isEmpty())
+	if (!m_commandInteractionEnabled || text.isEmpty())
 		return;
 	emit sendText(text);
 	if (m_autoRepeat)
@@ -11318,7 +11556,7 @@ int WorldView::inputSelectionEndColumn() const
 
 QPlainTextEdit *WorldView::inputEditor() const
 {
-	return m_input;
+	return m_commandInteractionEnabled ? m_input : nullptr;
 }
 
 int WorldView::outputSelectionStartLine() const
@@ -11426,7 +11664,7 @@ QFont WorldView::outputFont() const
 
 void WorldView::focusInput() const
 {
-	if (!m_input)
+	if (!m_commandInteractionEnabled || !m_input)
 		return;
 	m_input->setFocus(Qt::OtherFocusReason);
 }
@@ -11463,33 +11701,107 @@ void WorldView::requestInputViewportSync()
 	    {
 		    if (!guard)
 			    return;
-		    guard->m_inputViewportSyncQueued = false;
-		    if (!guard->m_input)
-			    return;
-		    guard->updateInputWrap();
-		    guard->updateInputHeight();
+		    guard->synchronizePendingInputViewportLayout();
 	    },
 	    Qt::QueuedConnection);
 }
 
-void WorldView::requestDrawOutputWindowNotification()
+void WorldView::synchronizePendingInputViewportLayout()
 {
-	if (m_drawNotifyQueued)
+	if (!m_input || !m_inputViewportSyncQueued)
 		return;
-	m_drawNotifyQueued = true;
+	m_inputViewportSyncQueued = false;
+	updateInputWrap();
+	updateInputHeight();
+}
+
+void WorldView::requestDrawOutputWindowNotification(const bool preserveDuringCallbackSuppression)
+{
+	if (!m_commandInteractionEnabled || !m_runtime)
+	{
+		m_drawViewportNotificationPending = false;
+		return;
+	}
+	if (m_drawCallbackOutputPresentationSuppressed &&
+	    (m_drawOutputWindowCallbackActive || m_runtimeOutputMutationBatchSuppressesDrawNotifications))
+	{
+		if (preserveDuringCallbackSuppression)
+			m_drawViewportNotificationPending = true;
+		return;
+	}
+	if (m_drawNotifyQueued)
+	{
+		if (hasPendingOutputPresentationWork())
+			m_drawViewportNotificationPending = true;
+		return;
+	}
+	m_drawViewportNotificationPending = true;
+	schedulePendingDrawOutputWindowNotification();
+}
+
+void WorldView::schedulePendingDrawOutputWindowNotification()
+{
+	if (!m_drawViewportNotificationPending || m_drawNotifyQueued || m_drawOutputWindowCallbackActive ||
+	    m_drawCallbackOutputPresentationSuppressed || hasPendingOutputPresentationWork())
+	{
+		return;
+	}
+	m_drawNotifyQueued              = true;
+	const quint64 bindingGeneration = m_drawNotificationBindingGeneration;
 	QMetaObject::invokeMethod(
 	    this,
-	    [this]
+	    [this, bindingGeneration]
 	    {
+		    if (bindingGeneration != m_drawNotificationBindingGeneration)
+			    return;
 		    m_drawNotifyQueued = false;
-		    notifyDrawOutputWindow();
+		    dispatchPendingDrawOutputWindowNotification();
 	    },
 	    Qt::QueuedConnection);
+}
+
+void WorldView::dispatchPendingDrawOutputWindowNotification()
+{
+	if (!m_drawViewportNotificationPending || m_drawNotifyQueued || m_drawOutputWindowCallbackActive ||
+	    m_drawCallbackOutputPresentationSuppressed || hasPendingOutputPresentationWork())
+	{
+		return;
+	}
+	m_drawViewportNotificationPending = false;
+	notifyDrawOutputWindow();
+}
+
+void WorldView::setDrawOutputWindowCallbackActive(const bool active)
+{
+	m_drawOutputWindowCallbackActive = m_commandInteractionEnabled && active;
+	if (!m_drawOutputWindowCallbackActive)
+	{
+		replayPendingDrawOutputWindowNotification();
+		releaseSemanticOutputRepaint();
+	}
+}
+
+void WorldView::resetDrawOutputWindowNotificationState()
+{
+	++m_drawNotificationBindingGeneration;
+	m_drawNotifyQueued                                      = false;
+	m_drawOutputWindowCallbackActive                        = false;
+	m_drawCallbackOutputPresentationSuppressed              = false;
+	m_drawViewportNotificationPending                       = false;
+	m_runtimeOutputMutationBatchSuppressesDrawNotifications = false;
+	m_drawCallbackCompletionsPending                        = 0;
+	++m_drawPresentationSuppressionGeneration;
+	releaseSemanticOutputRepaint();
+}
+
+void WorldView::replayPendingDrawOutputWindowNotification()
+{
+	schedulePendingDrawOutputWindowNotification();
 }
 
 void WorldView::requestWorldOutputResizedNotification()
 {
-	if (!m_runtime)
+	if (!m_commandInteractionEnabled || !m_runtime)
 		return;
 	const QSize clientSize(outputClientWidth(), outputClientHeight());
 	if (clientSize.width() <= 0 || clientSize.height() <= 0)
@@ -11512,10 +11824,13 @@ void WorldView::requestWorldOutputResizedNotification()
 	    Qt::QueuedConnection);
 }
 
-void WorldView::notifyDrawOutputWindow() const
+void WorldView::notifyDrawOutputWindow()
 {
-	if (!m_runtime)
+	if (!m_commandInteractionEnabled || !m_runtime)
+	{
+		releaseSemanticOutputRepaint();
 		return;
+	}
 	const int fontHeight     = m_runtime->outputFontHeight();
 	const int adjustedScroll = outputScrollPosition() - m_inputPixelOffset;
 	int       firstLine      = 1;
@@ -11525,7 +11840,19 @@ void WorldView::notifyDrawOutputWindow() const
 		if (firstLine < 1)
 			firstLine = 1;
 	}
-	m_runtime->notifyDrawOutputWindow(firstLine, adjustedScroll);
+	++m_drawCallbackCompletionsPending;
+	const quint64       bindingGeneration = m_drawNotificationBindingGeneration;
+	QPointer<WorldView> guard(this);
+	m_runtime->notifyDrawOutputWindow(firstLine, adjustedScroll,
+	                                  [guard, bindingGeneration]
+	                                  {
+		                                  if (!guard ||
+		                                      bindingGeneration != guard->m_drawNotificationBindingGeneration)
+			                                  return;
+		                                  if (guard->m_drawCallbackCompletionsPending > 0)
+			                                  --guard->m_drawCallbackCompletionsPending;
+		                                  guard->releaseSemanticOutputRepaint();
+	                                  });
 }
 
 void WorldView::copySelection() const
@@ -11639,8 +11966,13 @@ void WorldView::appendStandaloneOutputEntry(const QString                       
 void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool recordLine, int flags,
                                          const QVector<WorldRuntime::StyleSpan> &spans)
 {
+	if (m_runtime && !m_commandInteractionEnabled)
+		return;
+
 	if (recordLine && m_runtime && (flags & WorldRuntime::LineOutput) == 0)
 		static_cast<void>(commitPendingIncomingPartialOutput());
+	if (recordLine && m_runtime && (flags & WorldRuntime::LineHorizontalRule) != 0)
+		m_runtime->finalizeOpenOutputLineHardReturn();
 
 	const bool shouldBreakAfterInlineInput =
 	    (flags & (WorldRuntime::LineOutput | WorldRuntime::LineNote)) != 0;
@@ -11711,33 +12043,6 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 			m_runtime->addLine(text, recordedFlags, newLine);
 		else
 			m_runtime->addLine(text, recordedFlags, displaySpans, newLine);
-
-		const auto &lines = m_runtime->lines();
-		if (!lines.isEmpty())
-		{
-			displayEntry = lines.last();
-			if (lines.size() > 1)
-				previousLineTime = lines.at(lines.size() - 2).time;
-		}
-	}
-
-	if (recordLine && m_runtime)
-	{
-		Q_UNUSED(injectPendingBreakBeforeRender);
-		m_accessibleOutputPendingTailAppend = true;
-		removeNativePartialRenderLineOverlay(false);
-		m_hasPartialOutput       = false;
-		m_partialOutputStart     = 0;
-		m_partialOutputLength    = 0;
-		m_nativeHasPartialOutput = false;
-		m_nativePartialOutputText.clear();
-		m_nativePartialOutputSpans.clear();
-		m_nativeRenderLineCacheFromRuntime = true;
-		syncOutputTextVisibilityForNativeCanvas();
-		if (!m_frozen)
-			requestOutputScrollToEnd();
-		requestNativeOutputRepaint();
-		requestDrawOutputWindowNotification();
 		return;
 	}
 
@@ -11769,8 +12074,7 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 	syncOutputTextVisibilityForNativeCanvas();
 	if (!m_frozen)
 		requestOutputScrollToEnd();
-	requestNativeOutputTailRepaint();
-	requestDrawOutputWindowNotification();
+	requestSemanticOutputRepaint(SemanticOutputRepaint::Tail);
 }
 
 void WorldView::updatePartialOutputText(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans)
@@ -11849,14 +12153,26 @@ void WorldView::clearPartialOutput()
 	if (m_runtimeOutputMutationBatchDepth > 0)
 	{
 		m_runtimeBatchPartialClearPending = true;
+		requestDrawOutputWindowNotification();
 		return;
 	}
 	const NativeOutputRenderLines &lines = synchronizeNativeRuntimeOutputPresentation(false, !m_frozen);
-	requestNativeOutputPresentationRepaint(!m_frozen, lines);
+	Q_UNUSED(lines);
+	requestSemanticOutputRepaint(!m_frozen ? SemanticOutputRepaint::PresentationVisible
+	                                       : SemanticOutputRepaint::PresentationDelta);
 }
 
-void WorldView::beginRuntimeOutputMutationBatch()
+void WorldView::beginRuntimeOutputMutationBatch(const bool suppressDrawNotifications)
 {
+	if (m_runtimeOutputMutationBatchDepth == 0)
+		m_runtimeOutputMutationBatchSuppressesDrawNotifications = suppressDrawNotifications;
+	else if (suppressDrawNotifications)
+		m_runtimeOutputMutationBatchSuppressesDrawNotifications = true;
+	if (suppressDrawNotifications)
+	{
+		m_drawCallbackOutputPresentationSuppressed = true;
+		++m_drawPresentationSuppressionGeneration;
+	}
 	++m_runtimeOutputMutationBatchDepth;
 }
 
@@ -11867,12 +12183,33 @@ void WorldView::endRuntimeOutputMutationBatch()
 	--m_runtimeOutputMutationBatchDepth;
 	if (m_runtimeOutputMutationBatchDepth > 0)
 		return;
-	if (!m_runtimeBatchPartialClearPending)
+	m_runtimeOutputMutationBatchSuppressesDrawNotifications = false;
+	if (m_runtimeBatchPartialClearPending)
+	{
+		m_runtimeBatchPartialClearPending = false;
+		static_cast<void>(synchronizeNativeRuntimeOutputPresentation(false, !m_frozen));
+		finalizeNativeOutputPresentationUpdate(!m_frozen);
+	}
+	if (!m_drawCallbackOutputPresentationSuppressed)
 		return;
 
-	m_runtimeBatchPartialClearPending    = false;
-	const NativeOutputRenderLines &lines = synchronizeNativeRuntimeOutputPresentation(false, !m_frozen);
-	requestNativeOutputPresentationRepaint(!m_frozen, lines);
+	const quint64       suppressionGeneration = m_drawPresentationSuppressionGeneration;
+	const quint64       bindingGeneration     = m_drawNotificationBindingGeneration;
+	QPointer<WorldView> guard(this);
+	QMetaObject::invokeMethod(
+	    this,
+	    [guard, suppressionGeneration, bindingGeneration]
+	    {
+		    if (!guard || bindingGeneration != guard->m_drawNotificationBindingGeneration ||
+		        suppressionGeneration != guard->m_drawPresentationSuppressionGeneration)
+		    {
+			    return;
+		    }
+		    guard->m_drawCallbackOutputPresentationSuppressed = false;
+		    guard->replayPendingDrawOutputWindowNotification();
+		    guard->releaseSemanticOutputRepaint();
+	    },
+	    Qt::QueuedConnection);
 }
 
 bool WorldView::commitPendingIncomingPartialOutput()
@@ -11893,62 +12230,36 @@ bool WorldView::commitPendingIncomingPartialOutput()
 	m_accessibleOutputLastAnnouncedPartialText.clear();
 	syncOutputTextVisibilityForNativeCanvas();
 	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
-	requestDrawOutputWindowNotification();
 	return true;
 }
 
 void WorldView::notifyRuntimeOutputLineChanged()
 {
-	m_hasPartialOutput       = false;
-	m_partialOutputStart     = 0;
-	m_partialOutputLength    = 0;
-	m_nativeHasPartialOutput = false;
-	m_nativePartialOutputText.clear();
-	m_nativePartialOutputSpans.clear();
-	m_nativeRenderLineCacheFromRuntime  = true;
-	m_accessibleOutputPendingTailAppend = false;
-	m_runtimeBatchPartialClearPending   = false;
-	syncOutputTextVisibilityForNativeCanvas();
-	if (!m_frozen)
-		requestOutputScrollToEnd();
-	requestNativeOutputRepaint();
+	prepareRuntimeOutputMutationPresentation(runtimeOutputTailAdvanced(), false);
 	notifyAccessibleOutputPresented(nativeOutputRenderLines());
-	requestDrawOutputWindowNotification();
+	requestSemanticOutputRepaint(SemanticOutputRepaint::Full);
 }
 
 void WorldView::notifyRuntimeOutputLineChanged(const int runtimeLineIndex)
 {
-	m_hasPartialOutput       = false;
-	m_partialOutputStart     = 0;
-	m_partialOutputLength    = 0;
-	m_nativeHasPartialOutput = false;
-	m_nativePartialOutputText.clear();
-	m_nativePartialOutputSpans.clear();
-	m_nativeRenderLineCacheFromRuntime  = true;
-	m_accessibleOutputPendingTailAppend = false;
-	m_runtimeBatchPartialClearPending   = false;
+	const bool tailAdvanced = runtimeOutputTailAdvanced();
+	prepareRuntimeOutputMutationPresentation(tailAdvanced, false);
 	markNativeRuntimeLineRestitchPending(runtimeLineIndex);
-	syncOutputTextVisibilityForNativeCanvas();
 	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
-	requestDrawOutputWindowNotification();
+}
+
+void WorldView::notifyRuntimeOutputLineAppended()
+{
+	prepareRuntimeOutputMutationPresentation(true, false);
+	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
 }
 
 void WorldView::notifyRuntimeOutputRangeChanged(const int runtimeLineIndex)
 {
-	m_hasPartialOutput       = false;
-	m_partialOutputStart     = 0;
-	m_partialOutputLength    = 0;
-	m_nativeHasPartialOutput = false;
-	m_nativePartialOutputText.clear();
-	m_nativePartialOutputSpans.clear();
-	m_nativeRenderLineCacheFromRuntime  = true;
-	m_accessibleOutputPendingTailAppend = false;
-	m_accessibleOutputLastAnnouncedPartialText.clear();
-	m_runtimeBatchPartialClearPending = false;
+	const bool tailAdvanced = runtimeOutputTailAdvanced();
+	prepareRuntimeOutputMutationPresentation(tailAdvanced, true);
 	markNativeRuntimeRangeRestitchPending(runtimeLineIndex);
-	syncOutputTextVisibilityForNativeCanvas();
 	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
-	requestDrawOutputWindowNotification();
 }
 
 void WorldView::clearOutputBuffer()
@@ -11980,14 +12291,13 @@ void WorldView::clearOutputBuffer()
 	syncNativeOutputScrollBarsFromLayout(nativeOutputRenderLines());
 	clearNativeOutputSelection(true);
 	syncOutputTextVisibilityForNativeCanvas();
-	requestNativeOutputRepaint();
 	notifyAccessibleOutputPresented(nativeOutputRenderLines());
 
 	if (m_scrollbackSplitActive)
 		scrollViewToEnd(m_liveOutput);
 	else
 		scrollViewToEnd(m_output);
-	requestDrawOutputWindowNotification();
+	requestSemanticOutputRepaint(SemanticOutputRepaint::Full);
 }
 
 void WorldView::restoreOutputFromPersistedLines(const IndexedRingBuffer<WorldRuntime::LineEntry> &lines)
@@ -12039,8 +12349,7 @@ void WorldView::restoreOutputFromPersistedLines(const IndexedRingBuffer<WorldRun
 	else
 		scrollViewToEnd(m_output);
 	primeNativeOutputCaches();
-	requestDrawOutputWindowNotification();
-	requestNativeOutputRepaint();
+	requestSemanticOutputRepaint(SemanticOutputRepaint::Full);
 }
 
 void WorldView::restoreOutputFromPersistedLines(const QVector<WorldRuntime::LineEntry> &lines)
@@ -12474,7 +12783,7 @@ void WorldView::invalidateTextRectangleChange(
 
 void WorldView::paintMiniWindows(QPainter *painter, bool underneath, const QRegion &updateRegion) const
 {
-	if (!painter)
+	if (!m_commandInteractionEnabled || !painter)
 		return;
 	const QRect viewportRect = painter->viewport();
 	QRegion     clippedUpdateRegion =
@@ -12949,6 +13258,8 @@ int WorldView::computeMiniWindowMouseFlags(const QMouseEvent *event, bool double
 
 bool WorldView::handleMiniWindowMouseLeave(const QPoint &reportedPosition)
 {
+	if (!m_commandInteractionEnabled)
+		return false;
 	if (!m_runtime)
 	{
 		clearPendingHotspotTooltip();
@@ -12970,7 +13281,7 @@ bool WorldView::handleMiniWindowMouseLeave(const QPoint &reportedPosition)
 
 bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidget *source)
 {
-	if (!m_runtime || !m_outputStack)
+	if (!m_commandInteractionEnabled || !m_runtime || !m_outputStack)
 		return false;
 
 	const QPoint globalPos  = event->globalPosition().toPoint();
@@ -13106,7 +13417,7 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 
 bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool doubleClick, const QWidget *source)
 {
-	if (!m_runtime || !m_outputStack)
+	if (!m_commandInteractionEnabled || !m_runtime || !m_outputStack)
 		return false;
 
 	const QPoint globalPos = event->globalPosition().toPoint();
@@ -13205,7 +13516,7 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 
 bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWidget *source)
 {
-	if (!m_runtime || !m_mouseCaptured)
+	if (!m_commandInteractionEnabled || !m_runtime || !m_mouseCaptured)
 		return false;
 
 	const QPoint rawLocal = mapEventToOutputStack(event->position(), source);
@@ -13309,7 +13620,7 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 
 bool WorldView::handleMiniWindowWheel(const QWheelEvent *event, const QWidget *source) const
 {
-	if (!m_runtime || !m_outputStack)
+	if (!m_commandInteractionEnabled || !m_runtime || !m_outputStack)
 		return false;
 
 	const QPoint local = mapEventToOutputStack(event->position(), source);
@@ -14201,7 +14512,7 @@ void WorldView::resizeEvent(QResizeEvent *event)
 	}
 	if (!m_frozen)
 		requestOutputScrollToEnd();
-	requestDrawOutputWindowNotification();
+	requestSemanticOutputRepaint(SemanticOutputRepaint::PresentationVisible, true);
 }
 
 void WorldView::showEvent(QShowEvent *event)
@@ -14232,7 +14543,7 @@ void WorldView::showEvent(QShowEvent *event)
 		m_lastQueuedOutputClientSizeValid = false;
 		requestWorldOutputResizedNotification();
 	}
-	requestDrawOutputWindowNotification();
+	requestSemanticOutputRepaint(SemanticOutputRepaint::PresentationVisible, true);
 }
 
 void WorldView::mouseMoveEvent(QMouseEvent *event)
@@ -14301,7 +14612,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 	{
 		if (auto *keyEvent = dynamic_cast<QKeyEvent *>(event))
 		{
-			if (keyEvent->matches(QKeySequence::Copy) && hasOutputSelection())
+			if (m_commandInteractionEnabled && keyEvent->matches(QKeySequence::Copy) && hasOutputSelection())
 			{
 				copySelection();
 				event->accept();
@@ -14329,7 +14640,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 				return true;
 			}
 
-			if (m_allTypingToCommandWindow && m_input)
+			if (m_commandInteractionEnabled && m_allTypingToCommandWindow && m_input)
 			{
 				QKeyEvent forwarded(keyEvent->type(), keyEvent->key(), keyEvent->modifiers(),
 				                    keyEvent->nativeScanCode(), keyEvent->nativeVirtualKey(),
@@ -14390,7 +14701,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 			{
 				hasMouseMoveNativeHit = true;
 				applyHoveredHyperlink(mouseMoveHref);
-				if (m_runtime)
+				if (m_commandInteractionEnabled && m_runtime)
 				{
 					m_runtime->setWordUnderMenu(
 					    mouseMoveTextHit ? wordAtNativeOutputPosition(mouseMoveHit) : QString(), true);
@@ -14399,7 +14710,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 			else
 			{
 				refreshHoveredHyperlinkFromCursor();
-				if (m_runtime)
+				if (m_commandInteractionEnabled && m_runtime)
 					m_runtime->setWordUnderMenu(QString(), false);
 			}
 		};
@@ -14408,25 +14719,38 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 		switch (event->type())
 		{
 		case QEvent::MouseMove:
-			if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
-				handled = handleMiniWindowMouseMove(mouseEvent, watchedWidget);
+			if (m_commandInteractionEnabled)
+			{
+				if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
+					handled = handleMiniWindowMouseMove(mouseEvent, watchedWidget);
+			}
 			break;
 		case QEvent::MouseButtonPress:
-			if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
-				handled = handleMiniWindowMousePress(mouseEvent, false, watchedWidget);
+			if (m_commandInteractionEnabled)
+			{
+				if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
+					handled = handleMiniWindowMousePress(mouseEvent, false, watchedWidget);
+			}
 			break;
 		case QEvent::MouseButtonRelease:
-			if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
-				handled = handleMiniWindowMouseRelease(mouseEvent, watchedWidget);
+			if (m_commandInteractionEnabled)
+			{
+				if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
+					handled = handleMiniWindowMouseRelease(mouseEvent, watchedWidget);
+			}
 			break;
 		case QEvent::MouseButtonDblClick:
-			if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
-				handled = handleMiniWindowMousePress(mouseEvent, true, watchedWidget);
+			if (m_commandInteractionEnabled)
+			{
+				if (auto *mouseEvent = dynamic_cast<QMouseEvent *>(event))
+					handled = handleMiniWindowMousePress(mouseEvent, true, watchedWidget);
+			}
 			break;
 		case QEvent::Leave:
-			handleMiniWindowMouseLeave();
+			if (m_commandInteractionEnabled)
+				handleMiniWindowMouseLeave();
 			applyHoveredHyperlink(QString());
-			if (m_runtime)
+			if (m_commandInteractionEnabled && m_runtime)
 				m_runtime->setWordUnderMenu(QString(), false);
 			if (m_tooltipHotspot == kLineInfoTooltipId)
 			{
@@ -14441,11 +14765,14 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 				const QPoint local = mapEventToOutputStack(QPointF(contextEvent->pos()), watchedWidget);
 				if (m_outputStack && m_outputStack->rect().contains(local))
 				{
-					QString hotspotId;
-					QString windowName;
-					if (const auto *window = hitTestMiniWindow(local, hotspotId, windowName, true);
-					    window && !hotspotId.isEmpty())
-						handled = true;
+					if (m_commandInteractionEnabled)
+					{
+						QString hotspotId;
+						QString windowName;
+						if (const auto *window = hitTestMiniWindow(local, hotspotId, windowName, true);
+						    window && !hotspotId.isEmpty())
+							handled = true;
+					}
 				}
 			}
 		}
@@ -14490,6 +14817,9 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 					                       QChar::ParagraphSeparator, QLatin1Char(' '));
 					                   selected = selected.trimmed();
 					                   if (selected.isEmpty())
+						                   return;
+
+					                   if (!m_commandInteractionEnabled)
 						                   return;
 
 					                   if (m_doubleClickSends)
@@ -14902,17 +15232,21 @@ void WorldView::addToHistoryForced(const QString &text)
 
 void WorldView::recallNextCommand()
 {
+	if (!m_commandInteractionEnabled)
+		return;
 	recallHistory(1);
 }
 
 void WorldView::recallPreviousCommand()
 {
+	if (!m_commandInteractionEnabled)
+		return;
 	recallHistory(-1);
 }
 
 void WorldView::repeatLastCommand()
 {
-	if (!m_input || m_lastCommand.isEmpty())
+	if (!m_commandInteractionEnabled || !m_input || m_lastCommand.isEmpty())
 		return;
 	emit sendText(m_lastCommand);
 	resetHistoryRecall();
@@ -14920,7 +15254,7 @@ void WorldView::repeatLastCommand()
 
 void WorldView::recallLastWord()
 {
-	if (!m_input)
+	if (!m_commandInteractionEnabled || !m_input)
 		return;
 
 	if (m_ctrlBackspaceDeletesLastWord)
@@ -15052,7 +15386,7 @@ bool WorldView::confirmReplaceTyping(const QString &replacement)
 
 bool WorldView::executeMacroByName(const QString &name)
 {
-	if (!m_runtime || name.isEmpty())
+	if (!m_commandInteractionEnabled || !m_runtime || name.isEmpty())
 		return false;
 
 	const QList<WorldRuntime::Macro> &macros = m_runtime->macros();
@@ -15217,7 +15551,7 @@ namespace
 
 bool WorldView::hasWorldAcceleratorBinding(const QKeyEvent *event) const
 {
-	if (!m_runtime || !event)
+	if (!m_commandInteractionEnabled || !m_runtime || !event)
 		return false;
 
 	const bool keypad = (event->modifiers() & Qt::KeypadModifier) != 0;
@@ -15226,7 +15560,7 @@ bool WorldView::hasWorldAcceleratorBinding(const QKeyEvent *event) const
 
 bool WorldView::hasCommandOptionShortcut(const QKeyEvent *event) const
 {
-	if (!event)
+	if (!m_commandInteractionEnabled || !event)
 		return false;
 	return (m_ctrlNGoesToNextCommand && eventMatchesCachedShortcut(event, m_commandOptionNextShortcuts)) ||
 	       (m_ctrlPGoesToPreviousCommand &&
@@ -15267,7 +15601,7 @@ bool WorldView::handleCommandOptionShortcut(QKeyEvent *event)
 
 bool WorldView::hasCommandHistoryShortcut(const QKeyEvent *event) const
 {
-	if (!event)
+	if (!m_commandInteractionEnabled || !event)
 		return false;
 	if (!m_altArrowRecallsPartial && !m_arrowRecallsPartial)
 		return false;
@@ -15352,7 +15686,7 @@ bool WorldView::eventMatchesCachedShortcut(const QKeyEvent *event, const QList<Q
 
 bool WorldView::handleWorldHotkey(QKeyEvent *event)
 {
-	if (!m_runtime || !event)
+	if (!m_commandInteractionEnabled || !m_runtime || !event)
 		return false;
 
 	const Qt::KeyboardModifiers mods           = event->modifiers();
