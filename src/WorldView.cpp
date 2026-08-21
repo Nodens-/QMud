@@ -2083,8 +2083,14 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 		return;
 	}
 
+	QObject::disconnect(m_runtimeOutputConnection);
+	QObject::disconnect(m_runtimeStyledOutputConnection);
 	if (m_runtime)
+	{
 		m_runtime->unregisterPresentationView(this);
+		if (m_runtime->view() == this)
+			m_runtime->setView(nullptr);
+	}
 
 	m_runtimeOutputMutationBatchDepth                       = 0;
 	m_runtimeOutputMutationBatchSuppressesDrawNotifications = false;
@@ -2144,7 +2150,27 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 	resetRuntimeSettingsSnapshot();
 	applyRuntimeSettings();
 	if (m_runtime)
+	{
 		m_runtime->setView(this);
+		m_runtimeOutputConnection = connect(m_runtime, &WorldRuntime::outputRequested, this,
+		                                    [this](const QString &text, const bool newLine, const bool note)
+		                                    {
+			                                    if (note)
+				                                    appendNoteText(text, newLine);
+			                                    else
+				                                    appendOutputText(text, newLine);
+		                                    });
+		m_runtimeStyledOutputConnection =
+		    connect(m_runtime, &WorldRuntime::outputStyledRequested, this,
+		            [this](const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
+		                   const bool newLine, const bool note)
+		            {
+			            if (note)
+				            appendNoteTextStyled(text, spans, newLine);
+			            else
+				            appendOutputTextStyled(text, spans, newLine);
+		            });
+	}
 	syncMiniWindowDevicePixelRatio();
 }
 
@@ -2154,6 +2180,8 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 	{
 		if (m_runtime->view() == this)
 		{
+			QObject::disconnect(m_runtimeOutputConnection);
+			QObject::disconnect(m_runtimeStyledOutputConnection);
 			m_runtime->setView(nullptr);
 		}
 		resetDrawOutputWindowNotificationState();
@@ -2162,8 +2190,14 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 		return;
 	}
 
+	QObject::disconnect(m_runtimeOutputConnection);
+	QObject::disconnect(m_runtimeStyledOutputConnection);
 	if (m_runtime)
+	{
 		m_runtime->unregisterPresentationView(this);
+		if (m_runtime->view() == this)
+			m_runtime->setView(nullptr);
+	}
 	resetDrawOutputWindowNotificationState();
 	resetNativeOutputPresentationRequestState();
 
@@ -5675,8 +5709,10 @@ bool WorldView::prepareNativeLayoutRangeState(const NativeOutputRenderLines &lin
 	                           m_nativeLayoutCachedStyleKey == styleKey &&
 	                           m_nativeLayoutCachedFont == layoutFont &&
 	                           qFuzzyCompare(m_nativeLayoutCachedLineAdvance + 1.0, defaultLineAdvance + 1.0);
+	const auto    exactSlots =
+	    keyMatches ? captureNativeExactLayoutSlots() : QHash<quint64, NativeExactLayoutSlotSnapshot>{};
 
-	auto          setCacheKey = [&]
+	auto setCacheKey = [&]
 	{
 		m_nativeLayoutCacheValid            = true;
 		m_nativeLayoutCachedWrapWidth       = wrapWidthPixels;
@@ -5792,11 +5828,15 @@ bool WorldView::prepareNativeLayoutRangeState(const NativeOutputRenderLines &lin
 
 	auto applyMetadataDelta = [&](const NativeRenderCacheDelta &delta)
 	{
-		const int                              oldSize = qMax(0, delta.oldLineCount);
-		const int                              newSize = qMax(0, delta.newLineCount);
+		const int  oldSize = qMax(0, delta.oldLineCount);
+		const int  newSize = qMax(0, delta.newLineCount);
+		const bool splitTopHeadTrimAlreadyRecorded =
+		    m_nativeSplitTopHeadTrimPixelsRevision == m_nativeRenderLineCacheRevision &&
+		    m_nativeSplitTopHeadTrimPixels > 0 && m_nativeSplitTopHeadTrimLines > 0;
 		const NativeSplitTopHeadTrimAdjustment splitTopHeadTrimAdjustment =
-		    nativeSplitTopHeadTrimAdjustmentForDelta(delta, defaultLineAdvance,
-		                                             m_nativeRenderLineCacheRevision);
+		    splitTopHeadTrimAlreadyRecorded ? NativeSplitTopHeadTrimAdjustment{}
+		                                    : nativeSplitTopHeadTrimAdjustmentForDelta(
+		                                          delta, defaultLineAdvance, m_nativeRenderLineCacheRevision);
 		auto applySuccessfulSplitTopHeadTrimAdjustment = [&]
 		{
 			mergePendingSplitTopHeadTrimAdjustment(splitTopHeadTrimAdjustment);
@@ -5902,14 +5942,24 @@ bool WorldView::prepareNativeLayoutRangeState(const NativeOutputRenderLines &lin
 		break;
 	}
 
-	if (!appliedDeltas || !dimensionsMatch(sizeToInt(lines.size())))
+	const bool replayApplied = appliedDeltas && dimensionsMatch(sizeToInt(lines.size()));
+	const bool safeExactSnapshotReconciliation =
+	    !replayApplied && nativeExactLayoutSnapshotReconciliationIsSafe(lines, exactSlots);
+	if (!replayApplied)
 	{
 		resetAllMetadata();
-		clearCurrentNativeSplitTopHeadTrimAdjustment();
+		if (!safeExactSnapshotReconciliation ||
+		    m_nativeSplitTopHeadTrimCapturedRevision != m_nativeRenderLineCacheRevision)
+			clearCurrentNativeSplitTopHeadTrimAdjustment();
 	}
 	else
 	{
 		applyNativeSplitTopHeadTrimAdjustment(pendingSplitTopHeadTrimAdjustment);
+	}
+	if (replayApplied || safeExactSnapshotReconciliation)
+	{
+		restoreNativeExactLayoutSlots(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
+		                              layoutFont, exactSlots);
 	}
 
 	setCacheKey();
@@ -6038,9 +6088,10 @@ WorldView::NativeSplitTopHeadTrimAdjustment WorldView::nativeSplitTopHeadTrimAdj
 
 void WorldView::clearNativeSplitTopHeadTrimAdjustment() const
 {
-	m_nativeSplitTopHeadTrimPixelsRevision = 0;
-	m_nativeSplitTopHeadTrimPixels         = 0;
-	m_nativeSplitTopHeadTrimLines          = 0;
+	m_nativeSplitTopHeadTrimPixelsRevision   = 0;
+	m_nativeSplitTopHeadTrimPixels           = 0;
+	m_nativeSplitTopHeadTrimLines            = 0;
+	m_nativeSplitTopHeadTrimCapturedRevision = 0;
 }
 
 void WorldView::clearCurrentNativeSplitTopHeadTrimAdjustment() const
@@ -6158,6 +6209,97 @@ int WorldView::ensureNativeLineLayout(const NativeOutputRenderLines &lines, cons
 	return rowCount;
 }
 
+QHash<quint64, WorldView::NativeExactLayoutSlotSnapshot> WorldView::captureNativeExactLayoutSlots() const
+{
+	QHash<quint64, NativeExactLayoutSlotSnapshot> snapshots;
+	if (m_nativeLayoutSlots.size() != m_nativeLayoutHeightIndex.size())
+		return snapshots;
+
+	const int lineCount = sizeToInt(m_nativeLayoutSlots.size());
+	snapshots.reserve(lineCount);
+	for (int i = 0; i < lineCount; ++i)
+	{
+		const NativeLayoutSlot &slot = m_nativeLayoutSlots.at(i);
+		if (slot.runtimeLineKey == 0)
+			continue;
+		snapshots.insert(slot.runtimeLineKey,
+		                 {.slot = slot, .height = m_nativeLayoutHeightIndex.heightAt(i), .originalIndex = i});
+	}
+	return snapshots;
+}
+
+bool WorldView::nativeExactLayoutSnapshotReconciliationIsSafe(
+    const NativeOutputRenderLines &lines, const QHash<quint64, NativeExactLayoutSlotSnapshot> &snapshots)
+{
+	if (snapshots.isEmpty())
+		return false;
+
+	bool sawNewLine             = false;
+	int  previousOriginalIndex  = -1;
+	int  retainedExactLineCount = 0;
+	for (const NativeOutputRenderLine &line : lines)
+	{
+		const auto snapshotIterator = snapshots.constFind(nativeRuntimeLineKey(line));
+		if (snapshotIterator == snapshots.cend())
+		{
+			sawNewLine = true;
+			continue;
+		}
+		if (sawNewLine ||
+		    (previousOriginalIndex >= 0 && snapshotIterator->originalIndex != previousOriginalIndex + 1))
+		{
+			return false;
+		}
+		previousOriginalIndex = snapshotIterator->originalIndex;
+		if (snapshotIterator->slot.rowsExact != 0 && snapshotIterator->slot.visualRows > 0)
+			++retainedExactLineCount;
+	}
+	return retainedExactLineCount > 0;
+}
+
+void WorldView::restoreNativeExactLayoutSlots(
+    const NativeOutputRenderLines &lines, const int wrapWidthPixels, const int localWrapWidthPixels,
+    const int lineSpacingSetting, const QFont &layoutFont,
+    const QHash<quint64, NativeExactLayoutSlotSnapshot> &snapshots) const
+{
+	if (snapshots.isEmpty() || m_nativeLayoutSlots.size() != lines.size() ||
+	    m_nativeLayoutHeightIndex.size() != lines.size())
+	{
+		return;
+	}
+
+	const quint64 layoutContentSalt =
+	    nativeLayoutContentSalt(nativeLayoutStyleKey(), lineSpacingSetting, layoutFont);
+	bool      restoredExactSlot = false;
+	const int lineCount         = sizeToInt(lines.size());
+	for (int i = 0; i < lineCount; ++i)
+	{
+		const NativeOutputRenderLine &line             = lines.at(i);
+		const quint64                 runtimeLineKey   = nativeRuntimeLineKey(line);
+		const auto                    snapshotIterator = snapshots.constFind(runtimeLineKey);
+		if (snapshotIterator == snapshots.cend())
+			continue;
+
+		const bool hasLocalContent = (line.flags & (WorldRuntime::LineNote | WorldRuntime::LineInput)) != 0;
+		const int  effectiveWrapWidth = hasLocalContent ? localWrapWidthPixels : wrapWidthPixels;
+		const quint64 visualHash      = line.visualHash != 0 ? line.visualHash : nativeLineContentHash(line);
+		const quint64 contentHash =
+		    nativeLayoutLineCacheHash(visualHash, effectiveWrapWidth, layoutContentSalt);
+		const NativeExactLayoutSlotSnapshot &snapshot = *snapshotIterator;
+		if (snapshot.slot.rowsExact == 0 || snapshot.slot.visualRows <= 0 ||
+		    snapshot.slot.lineContentHash != contentHash)
+			continue;
+
+		NativeLayoutSlot restoredSlot = snapshot.slot;
+		restoredSlot.runtimeLineKey   = runtimeLineKey;
+		m_nativeLayoutSlots[i]        = std::move(restoredSlot);
+		m_nativeLayoutHeightIndex.setHeight(i, snapshot.height);
+		restoredExactSlot = true;
+	}
+	if (restoredExactSlot)
+		refreshNativeLayoutExactPrefixFrom(0);
+}
+
 void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, const int wrapWidthPixels,
                                          const int localWrapWidthPixels, const int lineSpacingSetting,
                                          const QFont &layoutFont) const
@@ -6190,8 +6332,11 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
 	{
 		return;
 	}
+	const auto exactSlots = cacheWasValid && !layoutCacheKeyChanged && !localWrapChanged
+	                            ? captureNativeExactLayoutSlots()
+	                            : QHash<quint64, NativeExactLayoutSlotSnapshot>{};
 
-	auto runtimeLineKeyForLine = [](const NativeOutputRenderLine &line)
+	auto       runtimeLineKeyForLine = [](const NativeOutputRenderLine &line)
 	{ return nativeRuntimeLineKey(line); };
 
 	const quint64 layoutContentSalt       = nativeLayoutContentSalt(styleKey, lineSpacingSetting, layoutFont);
@@ -6470,11 +6615,15 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
 
 	auto applyExactRenderDelta = [&](const NativeRenderCacheDelta &delta)
 	{
-		const int                              oldSize = qMax(0, delta.oldLineCount);
-		const int                              newSize = qMax(0, delta.newLineCount);
+		const int  oldSize = qMax(0, delta.oldLineCount);
+		const int  newSize = qMax(0, delta.newLineCount);
+		const bool splitTopHeadTrimAlreadyRecorded =
+		    m_nativeSplitTopHeadTrimPixelsRevision == m_nativeRenderLineCacheRevision &&
+		    m_nativeSplitTopHeadTrimPixels > 0 && m_nativeSplitTopHeadTrimLines > 0;
 		const NativeSplitTopHeadTrimAdjustment splitTopHeadTrimAdjustment =
-		    nativeSplitTopHeadTrimAdjustmentForDelta(delta, defaultLineAdvance,
-		                                             m_nativeRenderLineCacheRevision);
+		    splitTopHeadTrimAlreadyRecorded ? NativeSplitTopHeadTrimAdjustment{}
+		                                    : nativeSplitTopHeadTrimAdjustmentForDelta(
+		                                          delta, defaultLineAdvance, m_nativeRenderLineCacheRevision);
 		auto applySuccessfulSplitTopHeadTrimAdjustment = [&]
 		{
 			mergePendingSplitTopHeadTrimAdjustment(splitTopHeadTrimAdjustment);
@@ -6597,10 +6746,14 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
 			}
 			if (replayApplied && !layoutDimensionsMatch(sizeToInt(lines.size())))
 				replayApplied = false;
+			const bool safeExactSnapshotReconciliation =
+			    !replayApplied && nativeExactLayoutSnapshotReconciliationIsSafe(lines, exactSlots);
 			if (!replayApplied)
 			{
 				resetAllLayoutCachesForCurrentLines();
-				clearCurrentNativeSplitTopHeadTrimAdjustment();
+				if (!safeExactSnapshotReconciliation ||
+				    m_nativeSplitTopHeadTrimCapturedRevision != m_nativeRenderLineCacheRevision)
+					clearCurrentNativeSplitTopHeadTrimAdjustment();
 			}
 			else
 			{
@@ -6881,6 +7034,11 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
 	mergeDirtyHeightRanges();
 	for (const QPair<int, int> &range : dirtyHeightRanges)
 		refreshHeightRange(range.first, range.second);
+	if (renderDeltaFastPathApplied || nativeExactLayoutSnapshotReconciliationIsSafe(lines, exactSlots))
+	{
+		restoreNativeExactLayoutSlots(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
+		                              layoutFont, exactSlots);
+	}
 	if (!dirtyHeightRanges.isEmpty())
 		refreshNativeLayoutExactPrefixFrom(dirtyHeightRanges.constFirst().first);
 	m_nativeLayoutCachedRenderRevision  = m_nativeRenderLineCacheRevision;
@@ -6964,9 +7122,23 @@ void WorldView::commitNativeRenderCacheDelta(NativeRenderCacheDelta delta) const
 	if (delta.headTrimCount > 0)
 		m_nativeSelectionPendingHeadTrimLines += delta.headTrimCount;
 	if (carryPendingSplitTopHeadTrim)
+	{
 		m_nativeSplitTopHeadTrimPixelsRevision = m_nativeRenderLineCacheRevision;
+		if (m_nativeSplitTopHeadTrimCapturedRevision == previousRevision)
+			m_nativeSplitTopHeadTrimCapturedRevision = m_nativeRenderLineCacheRevision;
+	}
 	else
 		clearNativeSplitTopHeadTrimAdjustment();
+	if (delta.headTrimCount > 0)
+	{
+		const qreal defaultLineAdvance =
+		    m_nativeLayoutCachedLineAdvance > 0.0 ? m_nativeLayoutCachedLineAdvance : 1.0;
+		const NativeSplitTopHeadTrimAdjustment adjustment =
+		    nativeSplitTopHeadTrimAdjustmentForDelta(delta, defaultLineAdvance, delta.revision);
+		applyNativeSplitTopHeadTrimAdjustment(adjustment);
+		if (adjustment.valid)
+			m_nativeSplitTopHeadTrimCapturedRevision = delta.revision;
+	}
 }
 
 void WorldView::markNativeRuntimeTailRestitchPending() const

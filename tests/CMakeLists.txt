@@ -776,38 +776,12 @@ if (QMUD_ENABLE_GUI_TESTS)
             GUI
             SOURCES
             gui/tst_WorldView_Basic.cpp
-            "${CMAKE_SOURCE_DIR}/src/WorldView.cpp"
-            "${CMAKE_SOURCE_DIR}/src/TelnetProcessor.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/EncodingUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/AnsiSgrParseUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/AccessibleTextUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/FontUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/MiniWindowUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/HyperlinkActionUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/OutputWrapUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/ShortcutPreferenceUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
-            "${CMAKE_SOURCE_DIR}/src/TtsEngine.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/TimeFormatUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/WorldView.h"
-            "${CMAKE_SOURCE_DIR}/src/helpers/MainWindowHostResolver.cpp"
-            "${CMAKE_SOURCE_DIR}/src/dialogs/FindDialog.cpp"
             LIBRARIES
-            Qt6::Sql
-            ${QMUD_NATIVE_PLUGIN_REGISTRY_TEST_LIBRARIES}
-            ${QMUD_ZLIB_TARGET}
+            qmud_app_core
             LABELS
             gui
             TIMEOUT
             120)
-    target_compile_definitions(tst_WorldView_Basic
-            PRIVATE
-            QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
-    target_compile_options(tst_WorldView_Basic PRIVATE -ffunction-sections -fdata-sections)
-    target_link_options(tst_WorldView_Basic PRIVATE -Wl,--gc-sections)
-
     qmud_add_qtest(tst_Dialog_ImportXml
             GUI
             SOURCES

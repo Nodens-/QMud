@@ -17,6 +17,7 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QKeySequence>
 #include <QList>
+#include <QMetaObject>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QPair>
 #include <QPoint>
@@ -1644,6 +1645,43 @@ class WorldView : public QWidget
 				QSharedPointer<QTextLayout> lineLayout;
 				uchar                       rowsExact{0};
 		};
+		/**
+		 * @brief Slot topology and exact layout state retained by stable runtime-line identity during cache replay.
+		 */
+		struct NativeExactLayoutSlotSnapshot
+		{
+				NativeLayoutSlot slot;
+				qreal            height{0.0};
+				int              originalIndex{-1};
+		};
+		/**
+		 * @brief Captures slot topology and exact layouts that may survive a structural render-cache delta.
+		 * @return Slots keyed by stable runtime-line identity.
+		 */
+		[[nodiscard]] QHash<quint64, NativeExactLayoutSlotSnapshot> captureNativeExactLayoutSlots() const;
+		/**
+		 * @brief Returns whether exact slots can safely be reconciled after a failed structural replay.
+		 * @param lines Current native render lines.
+		 * @param snapshots Slot topology captured before the failed replay.
+		 * @return `true` when retained lines form one contiguous stable sequence before new lines.
+		 */
+		[[nodiscard]] static bool nativeExactLayoutSnapshotReconciliationIsSafe(
+		    const NativeOutputRenderLines                       &lines,
+		    const QHash<quint64, NativeExactLayoutSlotSnapshot> &snapshots);
+		/**
+		 * @brief Restores exact layouts whose stable identity and visual content still match.
+		 * @param lines Current native render lines.
+		 * @param wrapWidthPixels Effective wrap width for runtime output.
+		 * @param localWrapWidthPixels Effective wrap width for local echo/note output.
+		 * @param lineSpacingSetting Current line-spacing percentage delta.
+		 * @param layoutFont Current output font.
+		 * @param snapshots Slot topology and exact layouts captured before the structural delta.
+		 */
+		void
+		restoreNativeExactLayoutSlots(const NativeOutputRenderLines &lines, int wrapWidthPixels,
+		                              int localWrapWidthPixels, int lineSpacingSetting,
+		                              const QFont                                         &layoutFont,
+		                              const QHash<quint64, NativeExactLayoutSlotSnapshot> &snapshots) const;
 		struct NativeLayoutHeightIndex
 		{
 				[[nodiscard]] qsizetype size() const;
@@ -2510,6 +2548,7 @@ class WorldView : public QWidget
 		mutable int                                    m_nativeSplitTopHeadTrimPixels{0};
 		mutable int                                    m_nativeSplitTopHeadTrimLines{0};
 		mutable quint64                                m_nativeSplitTopHeadTrimAdjustedRevision{0};
+		mutable quint64                                m_nativeSplitTopHeadTrimCapturedRevision{0};
 		mutable IndexedRingBuffer<NativeLayoutSlot>    m_nativeLayoutSlots;
 		mutable NativeLayoutHeightIndex                m_nativeLayoutHeightIndex;
 		mutable int                                    m_nativeLayoutExactPrefixCount{0};
@@ -2530,6 +2569,8 @@ class WorldView : public QWidget
 		bool                                           m_wrapInput{false};
 		int                                            m_inputPixelOffset{0};
 		WorldRuntime                                  *m_runtime{nullptr};
+		QMetaObject::Connection                        m_runtimeOutputConnection;
+		QMetaObject::Connection                        m_runtimeStyledOutputConnection;
 		bool                                           m_commandInteractionEnabled{true};
 		QFont                                          m_defaultOutputFont;
 		QFont                                          m_defaultInputFont;

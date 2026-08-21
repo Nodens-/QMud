@@ -13,6 +13,7 @@
 #include "NativePluginRegistry.h"
 #include "OutputWrapUtils.h"
 #include "TelnetProcessor.h"
+#include "WorldCommandProcessor.h"
 #include "WorldOptions.h"
 #include "WorldView.h"
 #include "scripting/ScriptingErrors.h"
@@ -27,7 +28,10 @@
 #include <QComboBox>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDialog>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QLineEdit>
@@ -40,8 +44,11 @@
 #include <QRadioButton>
 #include <QScrollBar>
 #include <QShortcut>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QSplitter>
 #include <QSplitterHandle>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QTemporaryDir>
 #include <QTextDocument>
 #include <QTimer>
 #include <QToolTip>
@@ -55,73 +62,22 @@
 #include <array>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 
 namespace
 {
 	using QTextBrowser = QAbstractScrollArea;
-	using QMudOutputWrapUtils::localOutputWrapConfig;
-	using QMudOutputWrapUtils::splitOutputTextAtLineBreaks;
-	using QMudOutputWrapUtils::wrapPlainLineForColumn;
-	using QMudOutputWrapUtils::wrapStyledLineForColumn;
-	QMap<QString, QString>                     g_worldAttrs;
-	QMap<QString, QString>                     g_worldMultilineAttrs;
-	QMap<QString, QVariant>                    g_globalOptions;
-	IndexedRingBuffer<WorldRuntime::LineEntry> g_runtimeLines;
-	QString                                    g_pendingIncomingPartialText;
-	QVector<WorldRuntime::StyleSpan>           g_pendingIncomingPartialSpans;
-	int                                        g_pendingIncomingPartialCommitCount{0};
-	QList<WorldRuntime::Macro>                 g_testMacros;
-	WorldRuntime::TextRectangleSettings        g_textRectangle;
-	int                                        g_outputFontHeight{0};
-	int                                        g_drawOutputNotifyCount{0};
-	int                                        g_lastDrawOutputFirstLine{0};
-	int                                        g_lastDrawOutputAdjustedScroll{0};
-	WorldView                                 *g_drawOutputPresentationView{nullptr};
-	bool                                       g_drawOutputNotificationSawPresentationPending{false};
-	bool                                       g_drawOutputCallbackActive{false};
-	bool                                       g_holdDrawOutputCompletion{false};
-	QVector<std::function<void()>>             g_drawOutputCompletions;
-	int                                        g_worldOutputResizedNotifyCount{0};
-	QVector<MiniWindow>                        g_testMiniWindows;
-	int                                        g_worldHotspotCallbackCount{0};
-	QString                                    g_lastWorldHotspotFunction;
-	QString                                    g_lastWorldHotspotId;
-	long                                       g_lastWorldHotspotFlags{0};
-	bool                                       g_lastWorldHotspotQueueWhenBusy{false};
-	QVector<QString>                           g_worldHotspotCallbackFunctions;
-	QVector<bool>                              g_worldHotspotCallbackQueueWhenBusy;
-	QPoint                                     g_lastMiniWindowMouseMovePosition;
-	QString                                    g_lastMiniWindowMouseMoveWindow;
-	int                                        g_miniWindowMouseMoveNotifyCount{0};
-	QPoint                                     g_lastResizeHotspotPressOffset;
-	QSize                                      g_expectedReleaseResizeSize;
-	QPoint                                     g_expectedReleaseMousePosition;
-	int                                        g_resizeMoveCallbackCount{0};
-	int                                        g_resizeMouseDownConstraintState{-1};
-	int                                        g_resizeMoveConstraintState{-1};
-	bool                                       g_releaseCallbackSawFlushedResize{false};
-	WorldView                                 *g_runtimeView{nullptr};
-	QVector<QPointer<WorldView>>               g_runtimePresentationViews;
-	qint64                                     g_nextRuntimeLineNumber{1};
-	const WorldView                           *g_expectedReleaseCaptureView{nullptr};
-	unsigned short                             g_currentActionSource{WorldRuntime::eUnknownActionSource};
-	bool                                       g_connected{false};
-	bool                                       g_nawsNegotiated{false};
-	bool                                       g_useFakeAppController{false};
-	bool                                       g_hasMushReaderLiveSpeechOwner{false};
-	bool                                       g_qtAccessibilitySpeechEnabled{true};
-	QHash<quint64, quint16>                    g_virtualKeyMap;
-	QHash<qint64, int>                         g_acceleratorCommands;
-	int                                        g_acceleratorExecutionCount{0};
-	int                                        g_lastExecutedAcceleratorCommand{-1};
-	int                                        g_sendCommandCount{0};
-	int                                        g_executeCommandCount{0};
-	QString                                    g_lastExecutedCommand;
-	bool                                       g_lastUserMacroHistory{false};
-	unsigned short g_actionSourceDuringExecute{WorldRuntime::eUnknownActionSource};
-	QString        g_wordUnderMenu;
-	bool           g_wordUnderMenuResolved{false};
+	WorldRuntime::TextRectangleSettings g_textRectangle;
+	int                                 g_outputFontHeight{0};
+	bool                                g_hasMushReaderLiveSpeechOwner{false};
+	int                                 g_sendCommandCount{0};
+	int                                 g_executeCommandCount{0};
+	QString                             g_lastExecutedCommand;
+	bool                                g_lastUserMacroHistory{false};
+	unsigned short                      g_actionSourceDuringExecute{WorldRuntime::eUnknownActionSource};
+	QString                             g_wordUnderMenu;
+	bool                                g_wordUnderMenuResolved{false};
 
 	struct AccessibleTextInsertRecord
 	{
@@ -169,6 +125,73 @@ namespace
 		constexpr qsizetype kMin = 0;
 		constexpr qsizetype kMax = std::numeric_limits<int>::max();
 		return static_cast<int>(qBound(kMin, value, kMax));
+	}
+
+	/**
+	 * @brief Installs a Lua plugin that records output-resize callback invocations.
+	 * @param runtime Runtime that will own and dispatch the plugin.
+	 * @param temporaryHome Temporary QMud home containing the plugin fixture.
+	 * @param error Receives an error when installation cannot complete.
+	 * @return `true` when the plugin was loaded successfully.
+	 */
+	bool installOutputResizeRecordingPlugin(WorldRuntime &runtime, const QTemporaryDir &temporaryHome,
+	                                        QString &error)
+	{
+		const QString pluginsDirectory =
+		    QDir(temporaryHome.path()).filePath(QStringLiteral("worlds/plugins"));
+		if (!QDir().mkpath(pluginsDirectory))
+		{
+			error = QStringLiteral("Could not create plugin fixture directory");
+			return false;
+		}
+
+		QFile pluginFile(QDir(pluginsDirectory).filePath(QStringLiteral("output_resize_recorder.xml")));
+		if (!pluginFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+		{
+			error = pluginFile.errorString();
+			return false;
+		}
+		const QByteArray pluginXml = QByteArrayLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin name="OutputResizeRecorder" author="QMud Test" id="bc8f3aaec867497b827af799" language="lua" enabled="y" save_state="n" sequence="100">
+    <script><![CDATA[
+function OnPluginWorldOutputResized()
+  local count = tonumber(GetVariable("count") or "0") or 0
+  SetVariable("count", tostring(count + 1))
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml");
+		if (pluginFile.write(pluginXml) != pluginXml.size())
+		{
+			error = pluginFile.errorString();
+			return false;
+		}
+		pluginFile.close();
+
+		runtime.setStartupDirectory(temporaryHome.path());
+		runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+		if (!runtime.loadPluginFile(QStringLiteral("output_resize_recorder.xml"), &error))
+			return false;
+		runtime.installPendingPlugins();
+		return true;
+	}
+
+	/**
+	 * @brief Returns the output-resize callbacks recorded by the test plugin.
+	 * @param runtime Runtime that owns the recording plugin.
+	 * @return Recorded callback count, or `-1` until the plugin has written its first value.
+	 */
+	int outputResizeCallbackCount(const WorldRuntime &runtime)
+	{
+		QString value;
+		if (!runtime.findPluginVariable(QStringLiteral("bc8f3aaec867497b827af799"), QStringLiteral("count"),
+		                                value))
+			return -1;
+		bool      ok    = false;
+		const int count = value.toInt(&ok);
+		return ok ? count : -1;
 	}
 
 	int stringIndexToInt(const qsizetype value)
@@ -283,36 +306,96 @@ namespace
 			bool m_previousActive{false};
 	};
 
-	AppController *fakeAppControllerPointer()
+	std::map<quintptr, std::unique_ptr<WorldRuntime>>          g_testRuntimes;
+	std::map<const WorldRuntime *, std::unique_ptr<WorldView>> g_testRuntimePrimaryViews;
+	QVector<QPointer<WorldView>>                               g_testRuntimeViews;
+
+	void releaseTestRuntimePrimary(const WorldRuntime *runtime)
 	{
-		return reinterpret_cast<AppController *>(static_cast<quintptr>(1));
+		const auto iterator = g_testRuntimePrimaryViews.find(runtime);
+		if (iterator == g_testRuntimePrimaryViews.end())
+			return;
+		iterator->second->setRuntime(nullptr);
+		g_testRuntimePrimaryViews.erase(iterator);
 	}
 
-	WorldRuntime *fakeRuntimePointer(const quintptr identity = 1)
+	void ensureTestRuntimePrimary(WorldRuntime *runtime)
 	{
-		return reinterpret_cast<WorldRuntime *>(identity);
+		if (!runtime || runtime->view())
+			return;
+		std::unique_ptr<WorldView> &primaryView = g_testRuntimePrimaryViews[runtime];
+		if (!primaryView)
+			primaryView = std::make_unique<WorldView>();
+		primaryView->setRuntime(runtime);
+	}
+
+	WorldRuntime *runtimeForTest(const quintptr identity = 1)
+	{
+		std::unique_ptr<WorldRuntime> &runtime = g_testRuntimes[identity];
+		if (!runtime)
+			runtime = std::make_unique<WorldRuntime>();
+		return runtime.get();
+	}
+
+	void setTestWorldAttribute(const QString &key, const QString &value)
+	{
+		runtimeForTest()->setWorldAttribute(key, value);
+	}
+
+	void setTestQtAccessibilitySpeechEnabled(const bool enabled)
+	{
+		QMudNativePluginRegistry::setQtAccessibilitySpeechEnabled(runtimeForTest(), enabled);
+	}
+
+	void setTestTextRectangle(const WorldRuntime::TextRectangleSettings &settings)
+	{
+		runtimeForTest()->setTextRectangle(settings);
+	}
+
+	void trackTestRuntimeView(WorldView &view)
+	{
+		if (!g_testRuntimeViews.contains(&view))
+			g_testRuntimeViews.push_back(&view);
+	}
+
+	void setTestRuntimeObserver(WorldView &view, WorldRuntime *runtime)
+	{
+		if (runtime)
+		{
+			Q_ASSERT(runtime->view() != &view);
+			ensureTestRuntimePrimary(runtime);
+		}
+		view.setRuntimeObserver(runtime);
+		if (runtime)
+		{
+			trackTestRuntimeView(view);
+			QObject::connect(runtime, &WorldRuntime::miniWindowsChanged, &view,
+			                 &WorldView::onMiniWindowsChanged, Qt::UniqueConnection);
+		}
+	}
+
+	void setTestRuntime(WorldView &view, WorldRuntime *runtime)
+	{
+		releaseTestRuntimePrimary(runtime);
+		view.setRuntime(runtime);
+		if (runtime)
+		{
+			trackTestRuntimeView(view);
+			QObject::connect(runtime, &WorldRuntime::miniWindowsChanged, &view,
+			                 &WorldView::onMiniWindowsChanged, Qt::UniqueConnection);
+		}
 	}
 
 	void setFakeMushReaderLiveSpeechOwner(const bool enable)
 	{
 		g_hasMushReaderLiveSpeechOwner = enable;
-		QMudNativePluginRegistry::setMushReaderPluginEnabled(fakeRuntimePointer(), enable);
+		QMudNativePluginRegistry::setMushReaderPluginEnabled(runtimeForTest(), enable);
 	}
 
 	const QMap<QString, QString> &emptyAttributes()
 	{
 		static const QMap<QString, QString> attrs;
 		return attrs;
-	}
-
-	const IndexedRingBuffer<WorldRuntime::LineEntry> &lineStorage()
-	{
-		return g_runtimeLines;
-	}
-
-	const QList<WorldRuntime::Macro> &macroStorage()
-	{
-		return g_testMacros;
 	}
 
 	const QList<WorldRuntime::Keypad> &keypadStorage()
@@ -323,59 +406,11 @@ namespace
 
 	void resetTestState()
 	{
-		g_worldAttrs.clear();
-		g_worldMultilineAttrs.clear();
-		g_globalOptions.clear();
-		g_runtimeLines.clear();
-		g_pendingIncomingPartialText.clear();
-		g_pendingIncomingPartialSpans.clear();
-		g_pendingIncomingPartialCommitCount = 0;
-		g_testMacros.clear();
-		g_textRectangle                                = {};
-		g_outputFontHeight                             = 0;
-		g_drawOutputNotifyCount                        = 0;
-		g_lastDrawOutputFirstLine                      = 0;
-		g_lastDrawOutputAdjustedScroll                 = 0;
-		g_drawOutputPresentationView                   = nullptr;
-		g_drawOutputNotificationSawPresentationPending = false;
-		g_drawOutputCallbackActive                     = false;
-		g_holdDrawOutputCompletion                     = false;
-		g_drawOutputCompletions.clear();
-		g_worldOutputResizedNotifyCount = 0;
-		g_testMiniWindows.clear();
-		g_worldHotspotCallbackCount = 0;
-		g_lastWorldHotspotFunction.clear();
-		g_lastWorldHotspotId.clear();
-		g_lastWorldHotspotFlags         = 0;
-		g_lastWorldHotspotQueueWhenBusy = false;
-		g_worldHotspotCallbackFunctions.clear();
-		g_worldHotspotCallbackQueueWhenBusy.clear();
-		g_lastMiniWindowMouseMovePosition = {};
-		g_lastMiniWindowMouseMoveWindow.clear();
-		g_miniWindowMouseMoveNotifyCount  = 0;
-		g_lastResizeHotspotPressOffset    = {};
-		g_expectedReleaseResizeSize       = {};
-		g_expectedReleaseMousePosition    = {};
-		g_resizeMoveCallbackCount         = 0;
-		g_resizeMouseDownConstraintState  = -1;
-		g_resizeMoveConstraintState       = -1;
-		g_releaseCallbackSawFlushedResize = false;
-		g_runtimeView                     = nullptr;
-		g_runtimePresentationViews.clear();
-		g_nextRuntimeLineNumber        = 1;
-		g_expectedReleaseCaptureView   = nullptr;
-		g_currentActionSource          = WorldRuntime::eUnknownActionSource;
-		g_connected                    = false;
-		g_nawsNegotiated               = false;
-		g_useFakeAppController         = false;
+		g_textRectangle                = {};
+		g_outputFontHeight             = 0;
 		g_hasMushReaderLiveSpeechOwner = false;
-		g_qtAccessibilitySpeechEnabled = true;
-		g_virtualKeyMap.clear();
-		g_acceleratorCommands.clear();
-		g_acceleratorExecutionCount      = 0;
-		g_lastExecutedAcceleratorCommand = -1;
-		g_sendCommandCount               = 0;
-		g_executeCommandCount            = 0;
+		g_sendCommandCount             = 0;
+		g_executeCommandCount          = 0;
 		g_lastExecutedCommand.clear();
 		g_lastUserMacroHistory      = false;
 		g_actionSourceDuringExecute = WorldRuntime::eUnknownActionSource;
@@ -387,7 +422,25 @@ namespace
 		g_accessibleTextCursorRecords.clear();
 		g_accessibleTextSelectionRecords.clear();
 		g_accessibleValueChangedCount = 0;
-		QMudNativePluginRegistry::discardRuntimeState(fakeRuntimePointer());
+		for (const QPointer<WorldView> &view : std::as_const(g_testRuntimeViews))
+		{
+			if (view)
+				view->setRuntimeObserver(nullptr);
+		}
+		g_testRuntimeViews.clear();
+		for (auto &[runtime, primaryView] : g_testRuntimePrimaryViews)
+		{
+			Q_UNUSED(runtime);
+			primaryView->setRuntime(nullptr);
+		}
+		g_testRuntimePrimaryViews.clear();
+		for (const auto &[identity, runtime] : std::as_const(g_testRuntimes))
+		{
+			Q_UNUSED(identity);
+			if (runtime)
+				runtime->setView(nullptr);
+		}
+		g_testRuntimes.clear();
 		QMudNativePluginRegistry::setTestSpeechSink({});
 	}
 
@@ -402,8 +455,18 @@ namespace
 			}
 	};
 
-	qint64 makeAcceleratorMapKey(const Qt::Key key, const Qt::KeyboardModifiers modifiers,
-	                             const quint16 virtualKey, const bool keypad = false)
+	/**
+	 * @brief Registers an output-target accelerator through the production runtime API.
+	 * @param runtime Runtime that owns the accelerator.
+	 * @param key Qt key that activates the accelerator.
+	 * @param modifiers Required keyboard modifiers.
+	 * @param keypad Require keypad-originated input when `true`.
+	 * @param text Note text emitted when the accelerator executes.
+	 * @return Allocated accelerator command id, or `-1` when the key cannot be registered.
+	 */
+	int registerOutputAccelerator(WorldRuntime &runtime, const Qt::Key key,
+	                              const Qt::KeyboardModifiers modifiers, const bool keypad,
+	                              const QString &text)
 	{
 		quint32 virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
 		if ((modifiers & Qt::ShiftModifier) != 0)
@@ -412,10 +475,60 @@ namespace
 			virt |= AcceleratorUtils::kControlFlag;
 		if ((modifiers & Qt::AltModifier) != 0)
 			virt |= AcceleratorUtils::kAltFlag;
-		const quint64 mapId = (static_cast<quint64>(static_cast<quint32>(key)) << 1) | (keypad ? 1ULL : 0ULL);
-		g_virtualKeyMap.insert(mapId, virtualKey);
-		return (static_cast<qint64>(virt) << 16) | virtualKey;
+		const quint16 virtualKey = AcceleratorUtils::qtKeyToVirtualKey(key, keypad);
+		if (virtualKey == 0)
+			return -1;
+
+		const int commandId = runtime.allocateAcceleratorCommand();
+		if (commandId < 0)
+			return -1;
+		WorldRuntime::AcceleratorEntry entry;
+		entry.text   = text;
+		entry.sendTo = eSendToOutput;
+		runtime.registerAccelerator(AcceleratorUtils::acceleratorMapKey(virt, virtualKey), commandId, entry);
+		return commandId;
 	}
+
+	/**
+	 * @brief Temporarily binds the production command processor and inbound signal path to a primary view/runtime pair.
+	 */
+	class ScopedRuntimeCommandProcessor
+	{
+		public:
+			/**
+			 * @brief Wires one primary runtime to its command processor and view.
+			 * @param runtime Runtime to bind.
+			 * @param view Primary command-interaction view.
+			 */
+			ScopedRuntimeCommandProcessor(WorldRuntime &runtime, WorldView &view) : m_runtime(runtime)
+			{
+				m_processor.setView(&view);
+				m_processor.setRuntimeAutomationOwner(true);
+				m_processor.setRuntime(&runtime);
+				runtime.setCommandProcessor(&m_processor);
+				QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &m_processor,
+				                 &WorldCommandProcessor::onIncomingStyledLineReceived);
+				QObject::connect(&runtime, &WorldRuntime::incomingStyledLinePartialReceived, &m_processor,
+				                 &WorldCommandProcessor::onIncomingStyledLinePartialReceived);
+			}
+
+			/**
+			 * @brief Detaches the processor before its runtime or view can be destroyed.
+			 */
+			~ScopedRuntimeCommandProcessor()
+			{
+				m_runtime.clearCommandProcessor(&m_processor);
+				m_processor.setRuntime(nullptr);
+				m_processor.setView(nullptr);
+			}
+
+			ScopedRuntimeCommandProcessor(const ScopedRuntimeCommandProcessor &)            = delete;
+			ScopedRuntimeCommandProcessor &operator=(const ScopedRuntimeCommandProcessor &) = delete;
+
+		private:
+			WorldRuntime         &m_runtime;
+			WorldCommandProcessor m_processor;
+	};
 
 	int boundedSizeToInt(const qsizetype value)
 	{
@@ -768,21 +881,215 @@ namespace
 		return {-1, -1};
 	}
 
-	MiniWindow &appendTestMiniWindow(const QString &name, const QRect &rect, int flags, const QColor &fill)
+	/**
+	 * Creates a visible production miniwindow fixture at rect.
+	 *
+	 * @param name Unique miniwindow identifier.
+	 * @param rect Initial client-area geometry.
+	 * @param flags Additional miniwindow flags.
+	 * @param fill Backing-surface fill colour.
+	 * @param useAbsoluteLocation Whether rect is an absolute client-area position.
+	 * @return The created production miniwindow.
+	 */
+	MiniWindow &appendTestMiniWindow(const QString &name, const QRect &rect, const int flags,
+	                                 const QColor &fill, const bool useAbsoluteLocation = true)
 	{
-		MiniWindow window;
-		window.name            = name;
-		window.flags           = flags;
-		window.show            = true;
-		window.temporarilyHide = false;
-		window.width           = rect.width();
-		window.height          = rect.height();
-		window.rect            = rect;
-		QImage surface(qMax(1, rect.width()), qMax(1, rect.height()), QImage::Format_ARGB32_Premultiplied);
-		surface.fill(fill);
-		window.setBackingSurface(surface);
-		g_testMiniWindows.push_back(window);
-		return g_testMiniWindows.last();
+		WorldRuntime *const runtime     = runtimeForTest();
+		const int           windowFlags = useAbsoluteLocation ? flags | kMiniWindowAbsoluteLocation : flags;
+		if (runtime->windowCreate(name, rect.left(), rect.top(), rect.width(), rect.height(), 0, windowFlags,
+		                          fill, {}) != eOK)
+		{
+			qFatal("Could not create production miniwindow test fixture");
+		}
+		MiniWindow *const window = runtime->miniWindow(name);
+		if (!window)
+			qFatal("Production miniwindow fixture is missing after creation");
+		runtime->windowShow(name, true);
+		return *window;
+	}
+
+	struct MiniWindowCallbackInvocation
+	{
+			QString functionName;
+			long    flags{0};
+			QString hotspotId;
+	};
+
+	/**
+	 * Installs world-Lua callbacks that persist each hotspot invocation for assertions.
+	 *
+	 * @param runtime Runtime that owns the world Lua engine.
+	 */
+	void installMiniWindowCallbackTrace(WorldRuntime &runtime)
+	{
+		runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+		runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+		runtime.setLuaScriptText(QStringLiteral(R"lua(
+local callback_count = 0
+
+local function record_callback(name, flags, hotspot_id)
+	callback_count = callback_count + 1
+	SetVariable("test_miniwindow_callback_count", tostring(callback_count))
+	SetVariable("test_miniwindow_callback_" .. callback_count,
+		string.format("%s|%d|%s", name, flags, hotspot_id))
+end
+
+for _, name in ipairs({
+	"on_hotspot_down", "on_hotspot_up", "on_right_hotspot_down", "on_right_hotspot_up",
+	"ordinary_capture_down", "ordinary_capture_up", "ordinary_capture_cancel",
+	"drag_release_down", "drag_release_up", "drag_release_cancel", "drag_release_move",
+	"drag_release_callback"
+}) do
+	_G[name] = function(flags, hotspot_id)
+		record_callback(name, flags, hotspot_id)
+	end
+end
+)lua"));
+	}
+
+	/**
+	 * Reads the ordered callback trace emitted by installMiniWindowCallbackTrace.
+	 *
+	 * @param runtime Runtime that owns the callback trace variables.
+	 * @return Invocations observed by the production Lua engine.
+	 */
+	QVector<MiniWindowCallbackInvocation> miniWindowCallbackTrace(const WorldRuntime &runtime)
+	{
+		QString countValue;
+		if (!runtime.findVariable(QStringLiteral("test_miniwindow_callback_count"), countValue))
+			return {};
+
+		bool      countIsValid = false;
+		const int count        = countValue.toInt(&countIsValid);
+		if (!countIsValid || count < 0)
+			return {};
+
+		QVector<MiniWindowCallbackInvocation> result;
+		result.reserve(count);
+		for (int index = 1; index <= count; ++index)
+		{
+			QString value;
+			if (!runtime.findVariable(QStringLiteral("test_miniwindow_callback_%1").arg(index), value))
+				return {};
+			const QStringList fields = value.split(QLatin1Char('|'), Qt::KeepEmptyParts);
+			if (fields.size() != 3)
+				return {};
+			bool       flagsAreValid = false;
+			const long flags         = fields.at(1).toLong(&flagsAreValid);
+			if (!flagsAreValid)
+				return {};
+			result.push_back({fields.constFirst(), flags, fields.constLast()});
+		}
+		return result;
+	}
+
+	/**
+	 * Installs the production Lua callbacks used by a resize-drag miniwindow fixture.
+	 *
+	 * @param runtime Runtime that owns the world Lua engine.
+	 * @param windowName Test-controlled miniwindow identifier to resize.
+	 * @param fill Backing-surface fill colour retained while resizing.
+	 */
+	void installMiniWindowResizeCallbacks(WorldRuntime &runtime, const QString &windowName,
+	                                      const QColor &fill)
+	{
+		runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+		runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+		runtime.setLuaScriptText(QStringLiteral(R"lua(
+local window_name = "%1"
+local fill_colour = %2
+local callback_trace = ""
+
+local function record_callback(name)
+	callback_trace = callback_trace .. name .. ";"
+	SetVariable("test_miniwindow_resize_trace", callback_trace)
+end
+
+function drag_test_resize_down(flags, hotspot_id)
+	SetVariable("test_miniwindow_resize_press", string.format("%d:%d",
+		WindowInfo(window_name, 17), WindowInfo(window_name, 18)))
+	record_callback("down")
+end
+
+function drag_test_resize(flags, hotspot_id)
+	local mouse_x = WindowInfo(window_name, 17)
+	local mouse_y = WindowInfo(window_name, 18)
+	local width = mouse_x - WindowInfo(window_name, 1) + 1
+	local height = mouse_y - WindowInfo(window_name, 2) + 1
+	local result = WindowResize(window_name, width, height, fill_colour)
+	SetVariable("test_miniwindow_resize_move", string.format("%d:%d:%d:%d:%d",
+		result, width, height, mouse_x, mouse_y))
+	record_callback("move")
+end
+
+function drag_test_release_after_resize(flags, hotspot_id)
+	SetVariable("test_miniwindow_resize_release", string.format("%d:%d:%d:%d",
+		WindowInfo(window_name, 3), WindowInfo(window_name, 4),
+		WindowInfo(window_name, 17), WindowInfo(window_name, 18)))
+	record_callback("release")
+end
+)lua")
+		                             .arg(windowName)
+		                             .arg(MiniWindowUtils::colorToRef(fill)));
+	}
+
+	/**
+	 * Installs the production Lua callback used by a move-drag miniwindow fixture.
+	 *
+	 * @param runtime Runtime that owns the world Lua engine.
+	 * @param windowName Test-controlled miniwindow identifier to move.
+	 * @param pressOffset Pointer position relative to the miniwindow at mouse press.
+	 * @param flags Current miniwindow flags retained while moving.
+	 */
+	void installMiniWindowMoveCallback(WorldRuntime &runtime, const QString &windowName,
+	                                   const QPoint &pressOffset, const int flags)
+	{
+		runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+		runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+		runtime.setLuaScriptText(QStringLiteral(R"lua(
+local window_name = "%1"
+local press_offset_x = %2
+local press_offset_y = %3
+local window_flags = %4
+
+function drag_test_move(flags, hotspot_id)
+	local mouse_x = WindowInfo(window_name, 17)
+	local mouse_y = WindowInfo(window_name, 18)
+	WindowPosition(window_name, mouse_x - press_offset_x, mouse_y - press_offset_y, 0, window_flags)
+end
+)lua")
+		                             .arg(windowName)
+		                             .arg(pressOffset.x())
+		                             .arg(pressOffset.y())
+		                             .arg(flags));
+	}
+
+	/**
+	 * Installs a miniwindow hotspot through the production runtime API.
+	 *
+	 * @param runtime Runtime that owns the miniwindow.
+	 * @param window Miniwindow that receives the hotspot.
+	 * @param hotspotId Unique hotspot identifier.
+	 * @param rect Hotspot content rectangle.
+	 * @param mouseDown World-Lua mouse-down callback label.
+	 * @param cancelMouseDown World-Lua cancelled mouse-down callback label.
+	 * @param mouseUp World-Lua mouse-up callback label.
+	 * @param moveCallback World-Lua drag callback label.
+	 * @param releaseCallback World-Lua drag-release callback label.
+	 * @return Production API result.
+	 */
+	int installTestMiniWindowHotspot(WorldRuntime &runtime, const MiniWindow &window,
+	                                 const QString &hotspotId, const QRect &rect,
+	                                 const QString &mouseDown = {}, const QString &cancelMouseDown = {},
+	                                 const QString &mouseUp = {}, const QString &moveCallback = {},
+	                                 const QString &releaseCallback = {})
+	{
+		const int addResult = runtime.windowAddHotspot(window.name, hotspotId, rect.left(), rect.top(),
+		                                               rect.right() + 1, rect.bottom() + 1, {}, {}, mouseDown,
+		                                               cancelMouseDown, mouseUp, {}, 0, 0, {});
+		if (addResult != eOK || (moveCallback.isEmpty() && releaseCallback.isEmpty()))
+			return addResult;
+		return runtime.windowDragHandler(window.name, hotspotId, moveCallback, releaseCallback, 0, {});
 	}
 
 	QVector<WorldRuntime::LineEntry> makeBenchmarkLines(const QString &prefix, const int count,
@@ -925,715 +1232,74 @@ namespace
 		return countPixelsNearColor(image, target) * 100 >= totalPixels * percent;
 	}
 
-	int fakeMaxOutputLinesLimit()
+	void appendRuntimeOutputText(WorldView &view, const QString &text,
+	                             const QVector<WorldRuntime::StyleSpan> &spans, const bool note,
+	                             const bool newLine)
 	{
-		bool      ok         = false;
-		const int configured = g_worldAttrs.value(QStringLiteral("max_output_lines")).toInt(&ok);
-		if (!ok || configured <= 0)
-			return 0;
-		return qBound(0, configured, 500000);
-	}
-
-	void enforceFakeOutputLineLimit()
-	{
-		const int maxLines = fakeMaxOutputLinesLimit();
-		if (maxLines <= 0 || g_runtimeLines.size() <= maxLines)
-			return;
-		const qsizetype removed = g_runtimeLines.size() - maxLines;
-		g_runtimeLines.erase(g_runtimeLines.begin(), g_runtimeLines.begin() + removed);
-	}
-
-	void notifyFakeRuntimeLineAppended()
-	{
-		for (const QPointer<WorldView> &view : std::as_const(g_runtimePresentationViews))
-		{
-			if (!view)
-				continue;
-			view->notifyRuntimeOutputLineAppended();
-		}
-	}
-
-	void appendFakeRuntimeOutputText(WorldView &view, QString text, QVector<WorldRuntime::StyleSpan> spans,
-	                                 const bool note, const bool newLine)
-	{
-		const bool serverSideWrapActive = g_connected && g_nawsNegotiated;
-		const QMudOutputWrapUtils::FixedColumnWrapConfig wrapConfig =
-		    (!note && serverSideWrapActive) ? QMudOutputWrapUtils::FixedColumnWrapConfig{}
-		                                    : localOutputWrapConfig(g_worldAttrs, serverSideWrapActive, 80);
-		if (wrapConfig.enabled && !text.isEmpty())
+		if (WorldRuntime *const runtime = view.runtime(); runtime)
 		{
 			if (spans.isEmpty())
-				wrapPlainLineForColumn(text, wrapConfig.wrapColumn, wrapConfig.indentParas);
+				runtime->outputText(text, note, newLine);
 			else
-				wrapStyledLineForColumn(text, spans, wrapConfig.wrapColumn, wrapConfig.indentParas);
-		}
-
-		const QVector<QMudOutputWrapUtils::OutputLineSegment> segments =
-		    splitOutputTextAtLineBreaks(text, spans, newLine);
-		for (const QMudOutputWrapUtils::OutputLineSegment &segment : segments)
-		{
-			if (note)
-			{
-				if (segment.spans.isEmpty())
-					view.appendNoteText(segment.text, segment.hardReturn);
-				else
-					view.appendNoteTextStyled(segment.text, segment.spans, segment.hardReturn);
-			}
-			else
-			{
-				if (segment.spans.isEmpty())
-					view.appendOutputText(segment.text, segment.hardReturn);
-				else
-					view.appendOutputTextStyled(segment.text, segment.spans, segment.hardReturn);
-			}
-		}
-	}
-
-	void setFakeRuntimePendingPartial(QString text, QVector<WorldRuntime::StyleSpan> spans = {})
-	{
-		g_pendingIncomingPartialText  = std::move(text);
-		g_pendingIncomingPartialSpans = std::move(spans);
-	}
-} // namespace
-
-// NOLINTBEGIN(readability-convert-member-functions-to-static)
-AppController *AppController::instance()
-{
-	return g_useFakeAppController ? fakeAppControllerPointer() : nullptr;
-}
-
-QVariant AppController::getGlobalOption(const QString &name) const
-{
-	return g_globalOptions.value(name);
-}
-
-void AppController::onCommandTriggered(const QString &)
-{
-}
-
-quint16 AcceleratorUtils::qtKeyToVirtualKey(Qt::Key key, bool keypad)
-{
-	const quint64 mapId = (static_cast<quint64>(static_cast<quint32>(key)) << 1) | (keypad ? 1ULL : 0ULL);
-	if (const auto it = g_virtualKeyMap.constFind(mapId); it != g_virtualKeyMap.constEnd())
-		return it.value();
-	const quint64 fallbackId = static_cast<quint64>(static_cast<quint32>(key)) << 1;
-	return g_virtualKeyMap.value(fallbackId, 0);
-}
-
-QString AcceleratorUtils::acceleratorToString(quint32, quint16)
-{
-	return {};
-}
-
-qint64 AcceleratorUtils::acceleratorMapKey(const quint32 virt, const quint16 key)
-{
-	return (static_cast<qint64>(virt) << 16) | key;
-}
-
-bool AcceleratorUtils::keySequenceToAcceleratorMapKey(const QKeySequence &sequence, qint64 &mapKey)
-{
-	if (sequence.isEmpty() || sequence.count() != 1)
-		return false;
-	const QKeyCombination combination = sequence[0];
-	Qt::KeyboardModifiers modifiers   = combination.keyboardModifiers();
-	const bool            keypad      = (modifiers & Qt::KeypadModifier) != 0;
-	modifiers &= ~Qt::KeypadModifier;
-	if ((modifiers & Qt::MetaModifier) != 0)
-		return false;
-	const quint16 key = AcceleratorUtils::qtKeyToVirtualKey(combination.key(), keypad);
-	if (key == 0)
-		return false;
-	quint32 virt = AcceleratorUtils::kVirtKeyFlag | AcceleratorUtils::kNoInvertFlag;
-	if ((modifiers & Qt::ShiftModifier) != 0)
-		virt |= AcceleratorUtils::kShiftFlag;
-	if ((modifiers & Qt::ControlModifier) != 0)
-		virt |= AcceleratorUtils::kControlFlag;
-	if ((modifiers & Qt::AltModifier) != 0)
-		virt |= AcceleratorUtils::kAltFlag;
-	mapKey = AcceleratorUtils::acceleratorMapKey(virt, key);
-	return true;
-}
-
-bool WorldRuntime::soundBufferReusableForNativeAudio(int) const
-{
-	return true;
-}
-
-const QMap<QString, QString> &WorldRuntime::worldAttributes() const
-{
-	return g_worldAttrs.isEmpty() ? emptyAttributes() : g_worldAttrs;
-}
-
-const QMap<QString, QString> &WorldRuntime::worldMultilineAttributes() const
-{
-	return g_worldMultilineAttrs.isEmpty() ? emptyAttributes() : g_worldMultilineAttrs;
-}
-
-int WorldRuntime::outputFontHeight() const
-{
-	return g_outputFontHeight;
-}
-
-void WorldRuntime::setOutputFontMetrics(int, int)
-{
-}
-
-void WorldRuntime::setInputFontMetrics(int, int)
-{
-}
-
-long WorldRuntime::backgroundColour() const
-{
-	return 0;
-}
-
-long WorldRuntime::customColourText(int) const
-{
-	return 0;
-}
-
-long WorldRuntime::customColourBackground(int) const
-{
-	return 0;
-}
-
-unsigned short WorldRuntime::noteStyle() const
-{
-	return 0;
-}
-
-long WorldRuntime::noteColourFore() const
-{
-	return 0xFFFFFF;
-}
-
-long WorldRuntime::noteColourBack() const
-{
-	return 0x000000;
-}
-
-void WorldRuntime::notifyDrawOutputWindow(int firstLine, int adjustedScroll, std::function<void()> completion)
-{
-	++g_drawOutputNotifyCount;
-	g_lastDrawOutputFirstLine      = firstLine;
-	g_lastDrawOutputAdjustedScroll = adjustedScroll;
-	if (g_drawOutputPresentationView)
-	{
-		g_drawOutputNotificationSawPresentationPending =
-		    g_drawOutputPresentationView->hasPendingOutputPresentationWork();
-	}
-	if (!completion)
-		return;
-	if (g_holdDrawOutputCompletion)
-		g_drawOutputCompletions.push_back(std::move(completion));
-	else
-		completion();
-}
-
-bool WorldRuntime::drawOutputWindowCallbackActive() const
-{
-	return g_drawOutputCallbackActive;
-}
-
-QImage WorldRuntime::backgroundImage() const
-{
-	return {};
-}
-
-int WorldRuntime::backgroundImageMode() const
-{
-	return 0;
-}
-
-void WorldRuntime::layoutMiniWindows(const QSize &, const QSize &, bool, const QVector<MiniWindow *> *)
-{
-}
-
-QPoint WorldRuntime::canonicalMiniWindowClientPosition(const QPoint &displayPosition, int) const
-{
-	return displayPosition;
-}
-
-QVector<MiniWindow *> WorldRuntime::sortedMiniWindows()
-{
-	QVector<MiniWindow *> result;
-	result.reserve(g_testMiniWindows.size());
-	for (MiniWindow &window : g_testMiniWindows)
-		result.push_back(&window);
-	return result;
-}
-
-QImage WorldRuntime::foregroundImage() const
-{
-	return {};
-}
-
-int WorldRuntime::foregroundImageMode() const
-{
-	return 0;
-}
-
-const IndexedRingBuffer<WorldRuntime::LineEntry> &WorldRuntime::lines() const
-{
-	return lineStorage();
-}
-
-void WorldRuntime::setView(WorldView *view)
-{
-	g_runtimeView = view;
-	if (view)
-		registerPresentationView(view);
-}
-
-void WorldRuntime::registerPresentationView(WorldView *view)
-{
-	if (!view)
-		return;
-	for (auto it = g_runtimePresentationViews.begin(); it != g_runtimePresentationViews.end();)
-	{
-		if (it->isNull())
-		{
-			it = g_runtimePresentationViews.erase(it);
-			continue;
-		}
-		if (it->data() == view)
+				runtime->outputStyledText(text, spans, note, newLine);
 			return;
-		++it;
-	}
-	g_runtimePresentationViews.push_back(view);
-}
+		}
 
-void WorldRuntime::unregisterPresentationView(WorldView *view)
-{
-	for (auto it = g_runtimePresentationViews.begin(); it != g_runtimePresentationViews.end();)
-	{
-		if (it->isNull() || it->data() == view)
-			it = g_runtimePresentationViews.erase(it);
+		if (note)
+		{
+			if (spans.isEmpty())
+				view.appendNoteText(text, newLine);
+			else
+				view.appendNoteTextStyled(text, spans, newLine);
+		}
 		else
-			++it;
-	}
-	if (g_runtimeView == view)
-		g_runtimeView = nullptr;
-}
-
-bool WorldRuntime::syncMiniWindowDevicePixelRatioForView()
-{
-	if (!g_runtimeView)
-		return false;
-
-	const double ratio = g_runtimeView->devicePixelRatioF();
-	bool         changed{false};
-	for (MiniWindow &window : g_testMiniWindows)
-	{
-		const QSize physicalSize = MiniWindow::backingStoreSize(window.width, window.height, ratio);
-		if (!qFuzzyCompare(window.devicePixelRatio, ratio) ||
-		    !qFuzzyCompare(window.backingSurfaceDevicePixelRatio(), ratio) ||
-		    window.backingSurfaceSize() != physicalSize)
 		{
-			MiniWindowUtils::setDevicePixelRatio(window, ratio);
-			changed = true;
+			if (spans.isEmpty())
+				view.appendOutputText(text, newLine);
+			else
+				view.appendOutputTextStyled(text, spans, newLine);
 		}
 	}
-	return changed;
-}
 
-WorldView *WorldRuntime::view() const
-{
-	return g_runtimeView;
-}
-
-WorldRuntime::CommandUiSnapshot WorldRuntime::commandUiSnapshot(bool, bool, bool) const
-{
-	CommandUiSnapshot snapshot;
-	if (!g_runtimeView)
-		return snapshot;
-
-	snapshot.hasView                    = true;
-	snapshot.outputSelectionEndColumn   = g_runtimeView->outputSelectionEndColumn();
-	snapshot.outputSelectionEndLine     = g_runtimeView->outputSelectionEndLine();
-	snapshot.outputSelectionStartColumn = g_runtimeView->outputSelectionStartColumn();
-	snapshot.outputSelectionStartLine   = g_runtimeView->outputSelectionStartLine();
-	return snapshot;
-}
-
-void WorldRuntime::installPendingPlugins()
-{
-}
-
-void WorldRuntime::notifyNativePluginStateChanged()
-{
-}
-
-void WorldRuntime::notifyWorldOutputResized()
-{
-	++g_worldOutputResizedNotifyCount;
-}
-
-bool WorldRuntime::hasMushReaderLiveSpeechOwner() const
-{
-	return g_hasMushReaderLiveSpeechOwner;
-}
-
-bool WorldRuntime::isMushReaderSpeechEnabled() const
-{
-	return g_hasMushReaderLiveSpeechOwner && QMudNativePluginRegistry::isMushReaderSpeechEnabled(this);
-}
-
-bool WorldRuntime::speakMushReaderReviewText(const QString &text) const
-{
-	return QMudNativePluginRegistry::speakMushReaderReviewText(this, text);
-}
-
-bool WorldRuntime::isQtAccessibilitySpeechEnabled() const
-{
-	return g_qtAccessibilitySpeechEnabled;
-}
-
-void WorldRuntime::outputText(const QString &, bool, bool)
-{
-}
-
-void WorldRuntime::refreshNawsWindowSize()
-{
-}
-
-void WorldRuntime::firePluginCommandChanged()
-{
-}
-
-void WorldRuntime::firePluginTabComplete(QString &)
-{
-}
-
-bool WorldRuntime::isConnected() const
-{
-	return g_connected;
-}
-
-bool WorldRuntime::isNawsNegotiated() const
-{
-	return g_nawsNegotiated;
-}
-
-bool WorldRuntime::callPluginHotspotFunction(const QString &, const QString &, long, const QString &,
-                                             const QString &, bool)
-{
-	return false;
-}
-
-bool WorldRuntime::callWorldHotspotFunction(const QString &functionName, long flags, const QString &hotspotId,
-                                            const QString &, const bool queueWhenCallbackLaneBusy)
-{
-	++g_worldHotspotCallbackCount;
-	g_lastWorldHotspotFunction      = functionName;
-	g_lastWorldHotspotFlags         = flags;
-	g_lastWorldHotspotId            = hotspotId;
-	g_lastWorldHotspotQueueWhenBusy = queueWhenCallbackLaneBusy;
-	g_worldHotspotCallbackFunctions.push_back(functionName);
-	g_worldHotspotCallbackQueueWhenBusy.push_back(queueWhenCallbackLaneBusy);
-	if (functionName == QStringLiteral("drag_test_resize_down"))
+	class RuntimeOutputWriter
 	{
-		g_resizeMouseDownConstraintState =
-		    g_expectedReleaseCaptureView &&
-		            !g_expectedReleaseCaptureView->geometryConstrainedMiniWindowName().isEmpty()
-		        ? 1
-		        : 0;
-		for (const MiniWindow &window : g_testMiniWindows)
-		{
-			if (window.mouseDownHotspot != hotspotId)
-				continue;
-			g_lastResizeHotspotPressOffset = window.clientMousePosition - window.rect.topLeft();
-			break;
-		}
-	}
-	if (functionName == QStringLiteral("drag_test_move"))
+		public:
+			explicit RuntimeOutputWriter(WorldView &view) : m_view(view)
+			{
+			}
+
+			void appendOutputText(const QString &text, const bool newLine = true) const
+			{
+				appendRuntimeOutputText(m_view, text, {}, false, newLine);
+			}
+
+			void appendOutputTextStyled(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
+			                            const bool newLine = true) const
+			{
+				appendRuntimeOutputText(m_view, text, spans, false, newLine);
+			}
+
+			void appendNoteText(const QString &text, const bool newLine = true) const
+			{
+				appendRuntimeOutputText(m_view, text, {}, true, newLine);
+			}
+
+			void appendNoteTextStyled(const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
+			                          const bool newLine = true) const
+			{
+				appendRuntimeOutputText(m_view, text, spans, true, newLine);
+			}
+
+		private:
+			WorldView &m_view;
+	};
+
+	RuntimeOutputWriter runtimeOutputForTest(WorldView &view)
 	{
-		for (MiniWindow &window : g_testMiniWindows)
-		{
-			if (window.mouseDownHotspot != hotspotId)
-				continue;
-			QRect moved = window.rect;
-			moved.moveCenter(window.clientMousePosition);
-			window.rect     = moved;
-			window.location = moved.topLeft();
-			if (g_runtimeView)
-				g_runtimeView->onMiniWindowsChanged();
-			break;
-		}
+		return RuntimeOutputWriter(view);
 	}
-	else if (functionName == QStringLiteral("drag_test_resize"))
-	{
-		++g_resizeMoveCallbackCount;
-		for (MiniWindow &window : g_testMiniWindows)
-		{
-			if (window.mouseDownHotspot != hotspotId)
-				continue;
-			g_resizeMoveConstraintState =
-			    g_expectedReleaseCaptureView &&
-			            g_expectedReleaseCaptureView->geometryConstrainedMiniWindowName() == window.name
-			        ? 1
-			        : 0;
-			const QPoint delta  = window.clientMousePosition - window.rect.topLeft();
-			const int    width  = qMax(16, delta.x() + 1);
-			const int    height = qMax(16, delta.y() + 1);
-			window.width        = width;
-			window.height       = height;
-			window.rect.setSize(QSize(width, height));
-			QImage surface(width, height, QImage::Format_ARGB32_Premultiplied);
-			surface.fill(QColor(40, 90, 210, 255));
-			window.setBackingSurface(surface);
-			if (g_runtimeView)
-				g_runtimeView->onMiniWindowsChanged();
-			break;
-		}
-	}
-	else if (functionName == QStringLiteral("drag_test_release_after_resize"))
-	{
-		if (!g_testMiniWindows.isEmpty())
-		{
-			const MiniWindow &window = g_testMiniWindows.constFirst();
-			g_releaseCallbackSawFlushedResize =
-			    window.rect.size() == g_expectedReleaseResizeSize &&
-			    window.clientMousePosition == g_expectedReleaseMousePosition &&
-			    g_expectedReleaseCaptureView &&
-			    g_expectedReleaseCaptureView->geometryConstrainedMiniWindowName() == window.name;
-		}
-	}
-	return true;
-}
 
-void WorldRuntime::setWordUnderMenu(const QString &value, const bool resolved)
-{
-	g_wordUnderMenu         = value;
-	g_wordUnderMenuResolved = resolved;
-}
-
-QString WorldRuntime::wordUnderMenu() const
-{
-	return g_wordUnderMenu;
-}
-
-bool WorldRuntime::wordUnderMenuResolved() const
-{
-	return g_wordUnderMenuResolved;
-}
-
-void WorldRuntime::notifyMiniWindowMouseMoved(const int x, const int y, const QString &windowName)
-{
-	g_lastMiniWindowMouseMovePosition = QPoint(x, y);
-	g_lastMiniWindowMouseMoveWindow   = windowName;
-	++g_miniWindowMouseMoveNotifyCount;
-}
-
-MiniWindow *WorldRuntime::miniWindow(const QString &name)
-{
-	for (MiniWindow &window : g_testMiniWindows)
-	{
-		if (window.name == name)
-			return &window;
-	}
-	return nullptr;
-}
-
-void WorldRuntime::notifyOutputSelectionChanged()
-{
-}
-
-void WorldRuntime::setOutputFrozen(bool)
-{
-}
-
-const WorldRuntime::TextRectangleSettings &WorldRuntime::textRectangle() const
-{
-	return g_textRectangle;
-}
-
-void WorldRuntime::setTextRectangle(const TextRectangleSettings &settings)
-{
-	g_textRectangle = settings;
-}
-
-const QList<WorldRuntime::Macro> &WorldRuntime::macros() const
-{
-	return macroStorage();
-}
-
-void WorldRuntime::setCurrentActionSource(unsigned short source)
-{
-	g_currentActionSource = source;
-}
-
-unsigned short WorldRuntime::currentActionSource() const
-{
-	return g_currentActionSource;
-}
-
-bool WorldRuntime::isActive() const
-{
-	return false;
-}
-
-bool WorldRuntime::prepareInputEchoForDisplay(QString &, QVector<StyleSpan> &, const bool appendToCurrentLine)
-{
-	if (!appendToCurrentLine)
-		return false;
-	for (int index = static_cast<int>(g_runtimeLines.size()) - 1; index >= 0; --index)
-	{
-		LineEntry &entry = g_runtimeLines[index];
-		if ((entry.flags & LineHidden) != 0)
-			continue;
-		if (!entry.hardReturn)
-			return false;
-		entry.hardReturn = false;
-		return true;
-	}
-	return false;
-}
-
-int WorldRuntime::sendCommand(const QString &, bool, bool, bool, bool, bool) const
-{
-	++g_sendCommandCount;
-	return eOK;
-}
-
-int WorldRuntime::executeCommand(const QString &text) const
-{
-	++g_executeCommandCount;
-	g_lastExecutedCommand       = text;
-	g_actionSourceDuringExecute = g_currentActionSource;
-	return eOK;
-}
-
-int WorldRuntime::executeUserMacroSendNow(const QString &text, bool history) const
-{
-	++g_executeCommandCount;
-	g_lastExecutedCommand       = text;
-	g_lastUserMacroHistory      = history;
-	g_actionSourceDuringExecute = g_currentActionSource;
-	return eOK;
-}
-
-int WorldRuntime::acceleratorCommandForKey(qint64 key) const
-{
-	return g_acceleratorCommands.value(key, -1);
-}
-
-bool WorldRuntime::executeAcceleratorCommand(int commandId, const QString &)
-{
-	if (commandId < 0)
-		return false;
-	++g_acceleratorExecutionCount;
-	g_lastExecutedAcceleratorCommand = commandId;
-	return true;
-}
-
-const QList<WorldRuntime::Keypad> &WorldRuntime::keypadEntries() const
-{
-	return keypadStorage();
-}
-
-QDateTime WorldRuntime::worldStartTime() const
-{
-	return {};
-}
-
-QString WorldRuntime::startupDirectory() const
-{
-	return {};
-}
-
-QString WorldRuntime::defaultWorldDirectory() const
-{
-	return {};
-}
-
-QString WorldRuntime::defaultLogDirectory() const
-{
-	return {};
-}
-
-QString WorldRuntime::formatTime(const QDateTime &, const QString &format, bool) const
-{
-	return format;
-}
-
-void WorldRuntime::addLine(const QString &text, int flags, bool hardReturn, const QDateTime &time)
-{
-	LineEntry entry;
-	entry.text       = text;
-	entry.flags      = flags;
-	entry.hardReturn = hardReturn;
-	entry.time       = time;
-	if (!g_runtimeLines.isEmpty())
-		g_nextRuntimeLineNumber = qMax(g_nextRuntimeLineNumber, g_runtimeLines.last().lineNumber + 1);
-	entry.lineNumber = g_nextRuntimeLineNumber++;
-	g_runtimeLines.push_back(entry);
-	enforceFakeOutputLineLimit();
-	notifyFakeRuntimeLineAppended();
-}
-
-void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSpan> &spans, bool hardReturn,
-                           const QDateTime &time)
-{
-	LineEntry entry;
-	entry.text       = text;
-	entry.flags      = flags;
-	entry.hardReturn = hardReturn;
-	entry.spans      = spans;
-	entry.time       = time;
-	if (!g_runtimeLines.isEmpty())
-		g_nextRuntimeLineNumber = qMax(g_nextRuntimeLineNumber, g_runtimeLines.last().lineNumber + 1);
-	entry.lineNumber = g_nextRuntimeLineNumber++;
-	g_runtimeLines.push_back(entry);
-	enforceFakeOutputLineLimit();
-	notifyFakeRuntimeLineAppended();
-}
-
-void WorldRuntime::finalizePendingInputLineHardReturn()
-{
-	if (g_runtimeLines.isEmpty())
-		return;
-	LineEntry &last = g_runtimeLines.last();
-	if ((last.flags & LineInput) == 0)
-		return;
-	last.hardReturn = true;
-}
-
-void WorldRuntime::finalizeOpenOutputLineHardReturn()
-{
-	if (g_runtimeLines.isEmpty())
-		return;
-	LineEntry &last = g_runtimeLines.last();
-	if (!last.text.isEmpty())
-		last.hardReturn = true;
-}
-
-void WorldRuntime::clearLastLineHardReturn()
-{
-	if (g_runtimeLines.isEmpty())
-		return;
-	g_runtimeLines.last().hardReturn = false;
-}
-
-bool WorldRuntime::commitPendingIncomingPartialLine()
-{
-	if (g_pendingIncomingPartialText.isEmpty() && g_pendingIncomingPartialSpans.isEmpty())
-		return false;
-
-	++g_pendingIncomingPartialCommitCount;
-	const QString                          text  = std::move(g_pendingIncomingPartialText);
-	const QVector<WorldRuntime::StyleSpan> spans = std::move(g_pendingIncomingPartialSpans);
-	g_pendingIncomingPartialText.clear();
-	g_pendingIncomingPartialSpans.clear();
-	if (spans.isEmpty())
-		addLine(text, LineOutput, true);
-	else
-		addLine(text, LineOutput, spans, true);
-	QMudNativePluginRegistry::clearMushReaderPartialLine(this);
-	return true;
-}
-
-// NOLINTEND(readability-convert-member-functions-to-static)
+} // namespace
 
 /**
  * @brief QTest fixture covering WorldView Basic scenarios.
@@ -1641,6 +1307,17 @@ bool WorldRuntime::commitPendingIncomingPartialLine()
 class tst_WorldView_Basic : public QObject
 {
 		Q_OBJECT
+
+	private:
+		static void makeNativeLayoutCacheExact(const WorldView                          &view,
+		                                       const WorldView::NativeOutputRenderLines &lines,
+		                                       const int wrapWidthPixels, const int localWrapWidthPixels,
+		                                       const int lineSpacingSetting, const QFont &layoutFont)
+		{
+			static_cast<void>(view.ensureNativeLayoutRange(lines, 0, sizeToInt(lines.size()) - 1,
+			                                               wrapWidthPixels, localWrapWidthPixels,
+			                                               lineSpacingSetting, layoutFont));
+		}
 
 		// NOLINTBEGIN(readability-convert-member-functions-to-static)
 	private slots:
@@ -1682,27 +1359,29 @@ class tst_WorldView_Basic : public QObject
 
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("0"));
 			if (scenario == QStringLiteral("split"))
-				g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+				setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
 			if (scenario == QStringLiteral("fade"))
 			{
-				g_worldAttrs.insert(QStringLiteral("fade_output_buffer_after_seconds"), QStringLiteral("1"));
-				g_worldAttrs.insert(QStringLiteral("fade_output_opacity_percent"), QStringLiteral("40"));
-				g_worldAttrs.insert(QStringLiteral("fade_output_seconds"), QStringLiteral("8"));
+				setTestWorldAttribute(QStringLiteral("fade_output_buffer_after_seconds"),
+				                      QStringLiteral("1"));
+				setTestWorldAttribute(QStringLiteral("fade_output_opacity_percent"), QStringLiteral("40"));
+				setTestWorldAttribute(QStringLiteral("fade_output_seconds"), QStringLiteral("8"));
 			}
 
 			WorldView view;
 			view.resize(860, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			if (scenario == QStringLiteral("split"))
 			{
 				for (int i = 0; i < 320; ++i)
-					view.appendOutputText(QStringLiteral("split-primer-%1").arg(i), true);
+					runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-primer-%1").arg(i),
+					                                            true);
 				QCoreApplication::processEvents();
 
 				QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -1726,12 +1405,14 @@ class tst_WorldView_Basic : public QObject
 				if (scenario == QStringLiteral("sustained"))
 				{
 					for (int i = 0; i < 1400; ++i)
-						view.appendOutputText(QStringLiteral("sustained-bench-%1").arg(i), true);
+						runtimeOutputForTest(view).appendOutputText(
+						    QStringLiteral("sustained-bench-%1").arg(i), true);
 				}
 				else if (scenario == QStringLiteral("split"))
 				{
 					for (int i = 0; i < 900; ++i)
-						view.appendOutputText(QStringLiteral("split-bench-%1").arg(i), true);
+						runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-bench-%1").arg(i),
+						                                            true);
 				}
 				else
 					view.rebuildOutputFromLines(fadeLines);
@@ -1839,8 +1520,10 @@ class tst_WorldView_Basic : public QObject
 			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
 			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 3);
-
-			view.m_nativeLayoutSlots[0].rowsExact = 1;
+			makeNativeLayoutCacheExact(view, view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			const QTextLayout *const firstLayout       = view.nativeLayoutForLine(0);
+			const int                resetsBeforeDelta = view.m_nativeLayoutCacheResets;
+			QVERIFY(firstLayout);
 
 			int oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
 			view.m_nativeRenderLineCache.push_back(makeRenderLine(QStringLiteral("queued-delta-3"), 4));
@@ -1855,9 +1538,11 @@ class tst_WorldView_Basic : public QObject
 			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
 
 			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
+			QCOMPARE(view.m_nativeLayoutCacheResets, resetsBeforeDelta);
 			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 0);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 5);
 			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(0).rowsExact), 1);
+			QCOMPARE(view.nativeLayoutForLine(0), firstLayout);
 			QCOMPARE(view.m_nativeLayoutSlots.at(3).runtimeLineKey,
 			         WorldView::nativeRuntimeLineKey(view.m_nativeRenderLineCache.at(3)));
 			QCOMPARE(view.m_nativeLayoutSlots.at(4).runtimeLineKey,
@@ -1889,12 +1574,16 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 6);
 			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
 			QVERIFY(lineAdvance > 0.0);
-			view.m_nativeLayoutSlots[1].visualRows = 11;
-			view.m_nativeLayoutSlots[2].visualRows = 12;
-			view.m_nativeLayoutSlots[5].visualRows = 15;
-			view.m_nativeLayoutHeightIndex.setHeight(1, 11.0 * lineAdvance);
-			view.m_nativeLayoutHeightIndex.setHeight(2, 12.0 * lineAdvance);
-			view.m_nativeLayoutHeightIndex.setHeight(5, 15.0 * lineAdvance);
+			makeNativeLayoutCacheExact(view, view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			const int                expectedFirstRows  = view.m_nativeLayoutSlots.at(1).visualRows;
+			const int                expectedSecondRows = view.m_nativeLayoutSlots.at(2).visualRows;
+			const int                expectedLastRows   = view.m_nativeLayoutSlots.at(5).visualRows;
+			const QTextLayout *const firstLayout        = view.nativeLayoutForLine(1);
+			const QTextLayout *const secondLayout       = view.nativeLayoutForLine(2);
+			const QTextLayout *const lastLayout         = view.nativeLayoutForLine(5);
+			QVERIFY(firstLayout);
+			QVERIFY(secondLayout);
+			QVERIFY(lastLayout);
 
 			const int                          oldLineCount = sizeToInt(view.m_nativeRenderLineCache.size());
 			WorldView::NativeOutputRenderLines restitchedLines;
@@ -1912,12 +1601,15 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
 			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 0);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 4);
-			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, 11);
-			QCOMPARE(view.m_nativeLayoutSlots.at(1).visualRows, 12);
-			QCOMPARE(view.m_nativeLayoutSlots.at(3).visualRows, 15);
-			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(0), 11.0 * lineAdvance);
-			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(1), 12.0 * lineAdvance);
-			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(3), 15.0 * lineAdvance);
+			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, expectedFirstRows);
+			QCOMPARE(view.m_nativeLayoutSlots.at(1).visualRows, expectedSecondRows);
+			QCOMPARE(view.m_nativeLayoutSlots.at(3).visualRows, expectedLastRows);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(0), expectedFirstRows * lineAdvance);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(1), expectedSecondRows * lineAdvance);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(3), expectedLastRows * lineAdvance);
+			QCOMPARE(view.nativeLayoutForLine(0), firstLayout);
+			QCOMPARE(view.nativeLayoutForLine(1), secondLayout);
+			QCOMPARE(view.nativeLayoutForLine(3), lastLayout);
 			QCOMPARE(view.m_nativeLayoutSlots.at(2).runtimeLineKey,
 			         WorldView::nativeRuntimeLineKey(view.m_nativeRenderLineCache.at(2)));
 		}
@@ -2007,12 +1699,13 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 5);
 			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
 			QVERIFY(lineAdvance > 0.0);
-			view.m_nativeLayoutSlots[1].visualRows = 11;
-			view.m_nativeLayoutSlots[1].rowsExact  = 1;
-			view.m_nativeLayoutSlots[3].visualRows = 13;
-			view.m_nativeLayoutSlots[3].rowsExact  = 1;
-			view.m_nativeLayoutHeightIndex.setHeight(1, 11.0 * lineAdvance);
-			view.m_nativeLayoutHeightIndex.setHeight(3, 13.0 * lineAdvance);
+			makeNativeLayoutCacheExact(view, view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			const int                expectedFirstRows  = view.m_nativeLayoutSlots.at(1).visualRows;
+			const int                expectedSecondRows = view.m_nativeLayoutSlots.at(3).visualRows;
+			const QTextLayout *const firstLayout        = view.nativeLayoutForLine(1);
+			const QTextLayout *const secondLayout       = view.nativeLayoutForLine(3);
+			QVERIFY(firstLayout);
+			QVERIFY(secondLayout);
 
 			const int oldLineCount               = sizeToInt(view.m_nativeRenderLineCache.size());
 			view.m_nativeRenderLineCache[2].text = QStringLiteral("line-restitch-new");
@@ -2027,12 +1720,14 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
 			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 0);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 5);
-			QCOMPARE(view.m_nativeLayoutSlots.at(1).visualRows, 11);
+			QCOMPARE(view.m_nativeLayoutSlots.at(1).visualRows, expectedFirstRows);
 			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(1).rowsExact), 1);
-			QCOMPARE(view.m_nativeLayoutSlots.at(3).visualRows, 13);
+			QCOMPARE(view.m_nativeLayoutSlots.at(3).visualRows, expectedSecondRows);
 			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(3).rowsExact), 1);
-			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(1), 11.0 * lineAdvance);
-			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(3), 13.0 * lineAdvance);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(1), expectedFirstRows * lineAdvance);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(3), expectedSecondRows * lineAdvance);
+			QCOMPARE(view.nativeLayoutForLine(1), firstLayout);
+			QCOMPARE(view.nativeLayoutForLine(3), secondLayout);
 			QCOMPARE(view.m_nativeLayoutSlots.at(2).runtimeLineKey,
 			         WorldView::nativeRuntimeLineKey(view.m_nativeRenderLineCache.at(2)));
 			QCOMPARE(view.m_nativeLayoutSlots.at(2).visualRows, 1);
@@ -2053,7 +1748,8 @@ class tst_WorldView_Basic : public QObject
 			};
 
 			for (int i = 0; i < 5; ++i)
-				view.appendOutputText(QStringLiteral("selection-snapshot-old-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("selection-snapshot-old-%1").arg(i), true);
 			static_cast<void>(view.nativeOutputRenderLines());
 
 			view.selectOutputRange(2, 0, 24);
@@ -2096,7 +1792,8 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 
 			for (int i = 0; i < 5; ++i)
-				view.appendOutputText(QStringLiteral("selection-collapse-old-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("selection-collapse-old-%1").arg(i), true);
 			static_cast<void>(view.nativeOutputRenderLines());
 
 			view.selectOutputRange(2, 4, 18);
@@ -2126,7 +1823,7 @@ class tst_WorldView_Basic : public QObject
 		void commandUiSnapshotSelectionBoundsRemapPendingRenderDeltasWithoutLayoutSync()
 		{
 			WorldView view;
-			fakeRuntimePointer()->setView(&view);
+			runtimeForTest()->setView(&view);
 			auto makeRenderLine = [](const QString &text, const qint64 lineNumber)
 			{
 				WorldView::NativeOutputRenderLine line;
@@ -2139,12 +1836,13 @@ class tst_WorldView_Basic : public QObject
 			};
 
 			for (int i = 0; i < 5; ++i)
-				view.appendOutputText(QStringLiteral("runtime-selection-snapshot-old-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("runtime-selection-snapshot-old-%1").arg(i), true);
 			static_cast<void>(view.nativeOutputRenderLines());
 
 			view.selectOutputRange(2, 0, 32);
 			const WorldRuntime::CommandUiSnapshot initialSnapshot =
-			    fakeRuntimePointer()->commandUiSnapshot(false, false, false);
+			    runtimeForTest()->commandUiSnapshot(false, false, false);
 			QVERIFY(initialSnapshot.hasView);
 			QCOMPARE(initialSnapshot.outputSelectionStartLine, 3);
 			QCOMPARE(initialSnapshot.outputSelectionEndLine, 3);
@@ -2163,7 +1861,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 1);
 
 			const WorldRuntime::CommandUiSnapshot pendingSnapshot =
-			    fakeRuntimePointer()->commandUiSnapshot(false, false, false);
+			    runtimeForTest()->commandUiSnapshot(false, false, false);
 			QVERIFY(pendingSnapshot.hasView);
 			QCOMPARE(pendingSnapshot.outputSelectionStartLine, 1);
 			QCOMPARE(pendingSnapshot.outputSelectionEndLine, 1);
@@ -2175,12 +1873,12 @@ class tst_WorldView_Basic : public QObject
 
 			static_cast<void>(view.synchronizeNativeRuntimeOutputPresentation(false, false));
 			const WorldRuntime::CommandUiSnapshot remappedSnapshot =
-			    fakeRuntimePointer()->commandUiSnapshot(false, false, false);
+			    runtimeForTest()->commandUiSnapshot(false, false, false);
 			QCOMPARE(view.m_nativeSelectionPendingHeadTrimLines, 0);
 			QCOMPARE(remappedSnapshot.outputSelectionStartLine, 1);
 			QCOMPARE(remappedSnapshot.outputSelectionEndLine, 1);
 			QCOMPARE(view.outputSelectionText(), QStringLiteral("runtime-selection-snapshot-old-2"));
-			fakeRuntimePointer()->setView(nullptr);
+			runtimeForTest()->setView(nullptr);
 		}
 
 		void nativeOutputHitTestUsesRangeLayoutWithoutFullCacheSync()
@@ -2194,7 +1892,7 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 96; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("hit-test-range-layout-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 
 			const WorldView::NativeOutputRenderLines &initialLines = view.nativeOutputRenderLines();
@@ -2277,7 +1975,7 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 24; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("character-rect-range-layout-%1").arg(i, 2, 10, QLatin1Char('0')), true);
 
 			const WorldView::NativeOutputRenderLines &initialLines = view.nativeOutputRenderLines();
@@ -2349,12 +2047,13 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 6);
 			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
 			QVERIFY(lineAdvance > 0.0);
-			view.m_nativeLayoutSlots[2].visualRows = 12;
-			view.m_nativeLayoutSlots[2].rowsExact  = 1;
-			view.m_nativeLayoutSlots[3].visualRows = 13;
-			view.m_nativeLayoutSlots[3].rowsExact  = 1;
-			view.m_nativeLayoutHeightIndex.setHeight(2, 12.0 * lineAdvance);
-			view.m_nativeLayoutHeightIndex.setHeight(3, 13.0 * lineAdvance);
+			makeNativeLayoutCacheExact(view, view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			const int                expectedFirstRows  = view.m_nativeLayoutSlots.at(2).visualRows;
+			const int                expectedSecondRows = view.m_nativeLayoutSlots.at(3).visualRows;
+			const QTextLayout *const firstLayout        = view.nativeLayoutForLine(2);
+			const QTextLayout *const secondLayout       = view.nativeLayoutForLine(3);
+			QVERIFY(firstLayout);
+			QVERIFY(secondLayout);
 			const int expectedHeadTrimPixels =
 			    qMax(1, static_cast<int>(std::round(view.nativeLayoutCumulativeHeightAt(2))));
 
@@ -2373,9 +2072,10 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, exactRevisionBeforeRangePrep);
 			QCOMPARE(view.m_nativeLayoutRangePreparedRevision, view.m_nativeRenderLineCacheRevision);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 5);
-			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, 12);
+			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, expectedFirstRows);
 			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(0).rowsExact), 1);
-			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(0), 12.0 * lineAdvance);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(0), expectedFirstRows * lineAdvance);
+			QCOMPARE(view.nativeLayoutForLine(0), firstLayout);
 			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, view.m_nativeRenderLineCacheRevision);
 			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, expectedHeadTrimPixels);
 			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 2);
@@ -2399,12 +2099,14 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(!view.m_nativeLayoutRangePreparedOnly);
 			QCOMPARE(sizeToInt(view.m_nativeRenderCacheDeltas.size()), 0);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 6);
-			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, 12);
+			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, expectedFirstRows);
 			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(0).rowsExact), 1);
-			QCOMPARE(view.m_nativeLayoutSlots.at(1).visualRows, 13);
+			QCOMPARE(view.m_nativeLayoutSlots.at(1).visualRows, expectedSecondRows);
 			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(1).rowsExact), 1);
-			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(0), 12.0 * lineAdvance);
-			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(1), 13.0 * lineAdvance);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(0), expectedFirstRows * lineAdvance);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(1), expectedSecondRows * lineAdvance);
+			QCOMPARE(view.nativeLayoutForLine(0), firstLayout);
+			QCOMPARE(view.nativeLayoutForLine(1), secondLayout);
 			QCOMPARE(view.m_nativeSplitTopHeadTrimPixelsRevision, view.m_nativeRenderLineCacheRevision);
 			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, expectedHeadTrimPixels);
 			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 2);
@@ -2763,7 +2465,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 			QCoreApplication::processEvents();
 
-			view.appendOutputText(QStringLiteral("cached passive hover"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("cached passive hover"), true);
 			static_cast<void>(view.nativeOutputRenderLines());
 			QTextBrowser *const browser = findVisibleOutputBrowser(view);
 			QVERIFY(browser);
@@ -2790,13 +2492,13 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(640, 360);
 			view.show();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 			QCoreApplication::processEvents();
 
-			view.appendOutputText(QStringLiteral("hoverword marker"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("hoverword marker"), true);
 			const WorldView::NativeOutputRenderLines &initialLines = view.nativeOutputRenderLines();
 			QVERIFY(!initialLines.isEmpty());
 
@@ -2858,9 +2560,9 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 
 			QCOMPARE(view.m_nativeLayoutCacheResets, resetsBefore);
-			QVERIFY(fakeRuntimePointer()->wordUnderMenuResolved());
-			QCOMPARE(fakeRuntimePointer()->wordUnderMenu(), QStringLiteral("hoverword"));
-			fakeRuntimePointer()->setView(nullptr);
+			QVERIFY(runtimeForTest()->wordUnderMenuResolved());
+			QCOMPARE(runtimeForTest()->wordUnderMenu(), QStringLiteral("hoverword"));
+			runtimeForTest()->setView(nullptr);
 			resetTestState();
 		}
 
@@ -2889,12 +2591,13 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 6);
 			const qreal lineAdvance = view.m_nativeLayoutCachedLineAdvance;
 			QVERIFY(lineAdvance > 0.0);
-			view.m_nativeLayoutSlots[2].visualRows = 12;
-			view.m_nativeLayoutSlots[2].rowsExact  = 1;
-			view.m_nativeLayoutSlots[3].visualRows = 13;
-			view.m_nativeLayoutSlots[3].rowsExact  = 1;
-			view.m_nativeLayoutHeightIndex.setHeight(2, 12.0 * lineAdvance);
-			view.m_nativeLayoutHeightIndex.setHeight(3, 13.0 * lineAdvance);
+			makeNativeLayoutCacheExact(view, view.m_nativeRenderLineCache, 400, 400, 0, layoutFont);
+			const int                expectedFirstRows  = view.m_nativeLayoutSlots.at(2).visualRows;
+			const int                expectedSecondRows = view.m_nativeLayoutSlots.at(3).visualRows;
+			const QTextLayout *const firstLayout        = view.nativeLayoutForLine(2);
+			const QTextLayout *const secondLayout       = view.nativeLayoutForLine(3);
+			QVERIFY(firstLayout);
+			QVERIFY(secondLayout);
 			const int expectedHeadTrimPixels =
 			    qMax(1, static_cast<int>(std::round(view.nativeLayoutCumulativeHeightAt(2))));
 
@@ -2927,12 +2630,14 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.m_nativeSplitTopHeadTrimPixels, expectedHeadTrimPixels);
 			QCOMPARE(view.m_nativeSplitTopHeadTrimLines, 2);
 			QCOMPARE(sizeToInt(view.m_nativeLayoutSlots.size()), 7);
-			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, 12);
+			QCOMPARE(view.m_nativeLayoutSlots.at(0).visualRows, expectedFirstRows);
 			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(0).rowsExact), 1);
-			QCOMPARE(view.m_nativeLayoutSlots.at(1).visualRows, 13);
+			QCOMPARE(view.m_nativeLayoutSlots.at(1).visualRows, expectedSecondRows);
 			QCOMPARE(static_cast<int>(view.m_nativeLayoutSlots.at(1).rowsExact), 1);
-			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(0), 12.0 * lineAdvance);
-			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(1), 13.0 * lineAdvance);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(0), expectedFirstRows * lineAdvance);
+			QCOMPARE(view.m_nativeLayoutHeightIndex.heightAt(1), expectedSecondRows * lineAdvance);
+			QCOMPARE(view.nativeLayoutForLine(0), firstLayout);
+			QCOMPARE(view.nativeLayoutForLine(1), secondLayout);
 			QCOMPARE(view.m_nativeLayoutSlots.at(2).runtimeLineKey,
 			         WorldView::nativeRuntimeLineKey(view.m_nativeRenderLineCache.at(2)));
 			QCOMPARE(view.m_nativeLayoutSlots.at(5).runtimeLineKey,
@@ -2947,7 +2652,7 @@ class tst_WorldView_Basic : public QObject
 			view.setInputText(QStringLiteral("north"), true);
 			QCOMPARE(view.inputText(), QStringLiteral("north"));
 
-			view.appendOutputText(QStringLiteral("line-one"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("line-one"), true);
 			const QStringList lines = view.outputLines();
 			QVERIFY(!lines.isEmpty());
 			QVERIFY(lines.contains(QStringLiteral("line-one")));
@@ -2961,8 +2666,8 @@ class tst_WorldView_Basic : public QObject
 			view.resize(640, 360);
 			view.show();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
-			view.appendOutputText(QStringLiteral("alpha"), true);
-			view.appendOutputText(QStringLiteral("beta"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("alpha"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("beta"), true);
 			QCoreApplication::processEvents();
 
 			const auto [topBrowser, bottomBrowser] = findSplitOutputBrowsers(view);
@@ -3050,7 +2755,7 @@ class tst_WorldView_Basic : public QObject
 
 			ScopedAccessibleUpdateCapture capture;
 
-			view.appendOutputText(QStringLiteral("alpha"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("alpha"), true);
 			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 1);
 			QCOMPARE(g_accessibleTextInsertRecords.at(0).object, canvas);
 			QCOMPARE(g_accessibleTextInsertRecords.at(0).position, 0);
@@ -3077,7 +2782,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(640, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -3089,7 +2794,7 @@ class tst_WorldView_Basic : public QObject
 
 			ScopedAccessibleUpdateCapture capture;
 
-			view.appendOutputText(QStringLiteral("room"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("room"), true);
 			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 1);
 			QCOMPARE(g_accessibleTextInsertRecords.constLast().object, canvas);
 			QCOMPARE(g_accessibleTextInsertRecords.constLast().text, QStringLiteral("room"));
@@ -3121,7 +2826,7 @@ class tst_WorldView_Basic : public QObject
 			g_accessibleTextUpdateRecords.clear();
 			g_accessibleAnnouncementRecords.clear();
 
-			view.appendOutputText(QStringLiteral("final-line"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("final-line"), true);
 			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 1);
 			QCOMPARE(g_accessibleTextInsertRecords.constLast().object, canvas);
 			QCOMPARE(g_accessibleTextInsertRecords.constLast().position,
@@ -3139,12 +2844,13 @@ class tst_WorldView_Basic : public QObject
 		void worldOutputAccessiblePartialPromptFinalizedAsSameRuntimeLineIsNotAnnouncedTwice()
 		{
 			resetTestState();
+			const ScopedTestStateReset resetState;
 			qmudInstallWorldOutputAccessibility();
 
 			WorldView view;
 			view.resize(640, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -3156,42 +2862,32 @@ class tst_WorldView_Basic : public QObject
 
 			ScopedAccessibleUpdateCapture capture;
 
-			view.appendOutputText(QStringLiteral("room"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("room"), true);
 			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 1);
 			g_accessibleTextInsertRecords.clear();
 			g_accessibleAnnouncementRecords.clear();
 
-			WorldRuntime::LineEntry pendingEntry;
-			pendingEntry.flags      = WorldRuntime::LineOutput;
-			pendingEntry.hardReturn = false;
-			pendingEntry.lineNumber = 2;
-			g_runtimeLines.push_back(pendingEntry);
-
 			const QString prompt = QStringLiteral("N Sw 12:30pm 32/32hp 100/100m 300mv 2000xp> ");
-			view.updatePartialOutputText(prompt);
+			connect(runtimeForTest(), &WorldRuntime::incomingStyledLinePartialReceived, &view,
+			        &WorldView::updatePartialOutputText);
+			runtimeForTest()->receiveRawData(prompt.toUtf8());
 			QTRY_COMPARE(g_accessibleAnnouncementRecords.size(), 1);
 			QCOMPARE(g_accessibleAnnouncementRecords.constLast().message, prompt);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()),
 			         QStringLiteral("room\n") + prompt);
 
-			view.clearPartialOutput();
-			QTRY_COMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("room\n"));
 			g_accessibleTextInsertRecords.clear();
 			g_accessibleTextUpdateRecords.clear();
 			g_accessibleAnnouncementRecords.clear();
 
-			g_runtimeLines.last().text       = prompt;
-			g_runtimeLines.last().hardReturn = true;
-			view.notifyRuntimeOutputLineChanged(sizeToInt(g_runtimeLines.size()) - 1);
+			QVERIFY(runtimeForTest()->commitPendingIncomingPartialLine());
 			QCoreApplication::processEvents();
 
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
-			QCOMPARE(g_accessibleTextUpdateRecords.size(), 1);
+			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()),
 			         QStringLiteral("room\n") + prompt);
-
-			resetTestState();
 		}
 
 		void worldOutputAccessiblePartialPromptDoesNotEmitQtSpeechWhenMushReaderOwnsSpeech()
@@ -3203,7 +2899,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(640, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -3215,7 +2911,7 @@ class tst_WorldView_Basic : public QObject
 
 			ScopedAccessibleUpdateCapture capture;
 
-			view.appendOutputText(QStringLiteral("room"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("room"), true);
 			const QString prompt = QStringLiteral("<mushreader-prompt> ");
 			view.updatePartialOutputText(prompt);
 
@@ -3237,7 +2933,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(640, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -3246,7 +2942,8 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(accessible);
 
 			for (int i = 0; i < 200; ++i)
-				view.appendOutputText(QStringLiteral("suppressed-partial-baseline-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("suppressed-partial-baseline-%1").arg(i), true);
 			QCoreApplication::processEvents();
 			view.primeAccessibleOutputTextState();
 			view.m_accessibleOutputLineStartCache.clear();
@@ -3291,8 +2988,8 @@ class tst_WorldView_Basic : public QObject
 			view.show();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
-			view.appendOutputText(QStringLiteral("alpha"), true);
-			view.appendOutputText(QStringLiteral("beta"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("alpha"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("beta"), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -3330,7 +3027,8 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 120; ++i)
-				view.appendOutputText(QStringLiteral("line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -3380,13 +3078,14 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(640, 240);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 120; ++i)
-				view.appendOutputText(QStringLiteral("mush-scroll-line-%1").arg(i, 3, 10, QLatin1Char('0')),
-				                      true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("mush-scroll-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
+			speechEvents.clear();
 
 			QWidget *canvas = findNativeOutputCanvas(view);
 			QVERIFY(canvas);
@@ -3420,7 +3119,7 @@ class tst_WorldView_Basic : public QObject
 			view.show();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
-			view.appendOutputText(QStringLiteral("visible-tail-review-line"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("visible-tail-review-line"), true);
 			QCoreApplication::processEvents();
 
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -3446,7 +3145,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleTextCursorRecords.constLast().position, 0);
 
 			g_accessibleTextCursorRecords.clear();
-			view.appendOutputText(QStringLiteral("new-live-output"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("new-live-output"), true);
 			QCoreApplication::processEvents();
 
 			QVERIFY(!view.m_accessibleOutputReviewActive);
@@ -3470,8 +3169,9 @@ class tst_WorldView_Basic : public QObject
 			setFakeMushReaderLiveSpeechOwner(true);
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.appendOutputText(QStringLiteral("inactive-transient-review-line"), true);
+			setTestRuntimeObserver(view, runtimeForTest());
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("inactive-transient-review-line"),
+			                                            true);
 			QCoreApplication::processEvents();
 
 			const WorldView::NativeOutputRenderLines &lines = view.nativeOutputRenderLines();
@@ -3483,7 +3183,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.m_accessibleOutputReviewTargetKind,
 			         WorldView::AccessibleOutputReviewTargetKind::Transient);
 
-			view.appendOutputText(QStringLiteral("inactive-live-output"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("inactive-live-output"), true);
 			QCoreApplication::processEvents();
 
 			QVERIFY(!view.m_accessibleOutputReviewActive);
@@ -3495,18 +3195,18 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 			const ScopedTestStateReset resetState;
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
 			qmudInstallWorldOutputAccessibility();
 
 			WorldView view;
 			view.resize(720, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("auto-pause-accessible-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
@@ -3572,7 +3272,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("accessible-set-scroll-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
@@ -3624,7 +3324,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("accessible-review-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
@@ -3754,7 +3454,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 120; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("readable-review-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
@@ -3811,7 +3511,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 140; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("accessible-cursor-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
@@ -3848,16 +3548,16 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 			qmudInstallWorldOutputAccessibility();
 			const ScopedTestStateReset resetState;
-			g_qtAccessibilitySpeechEnabled = false;
+			setTestQtAccessibilitySpeechEnabled(false);
 
 			WorldView view;
 			view.resize(720, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("muted-accessible-review-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
@@ -3937,13 +3637,14 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(720, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("mushreader-review-line-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
+			speechEvents.clear();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
 			QVERIFY(browser);
@@ -3988,19 +3689,19 @@ class tst_WorldView_Basic : public QObject
 			QMudNativePluginRegistry::setTestSpeechSink(
 			    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
 			    { speechEvents.push_back(event); });
-			QVERIFY(QMudNativePluginRegistry::handleMushReaderCommand(fakeRuntimePointer(),
-			                                                          QStringLiteral("tts")));
-			QVERIFY(!QMudNativePluginRegistry::isMushReaderSpeechEnabled(fakeRuntimePointer()));
+			QVERIFY(
+			    QMudNativePluginRegistry::handleMushReaderCommand(runtimeForTest(), QStringLiteral("tts")));
+			QVERIFY(!QMudNativePluginRegistry::isMushReaderSpeechEnabled(runtimeForTest()));
 			speechEvents.clear();
 
 			WorldView view;
 			view.resize(720, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("mushreader-speech-off-review-line-%1").arg(i, 3, 10, QLatin1Char('0')),
 				    true);
 			QCoreApplication::processEvents();
@@ -4043,7 +3744,7 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 			qmudInstallWorldOutputAccessibility();
-			g_qtAccessibilitySpeechEnabled = false;
+			setTestQtAccessibilitySpeechEnabled(false);
 			setFakeMushReaderLiveSpeechOwner(true);
 			QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
 			const ScopedTestStateReset                         resetState;
@@ -4054,14 +3755,15 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(720, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("mushreader-muted-qt-review-line-%1").arg(i, 3, 10, QLatin1Char('0')),
 				    true);
 			QCoreApplication::processEvents();
+			speechEvents.clear();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
 			QVERIFY(browser);
@@ -4131,7 +3833,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("inactive-accessible-review-line-%1").arg(i, 3, 10, QLatin1Char('0')),
 				    true);
 			QCoreApplication::processEvents();
@@ -4178,7 +3880,7 @@ class tst_WorldView_Basic : public QObject
 
 			ScopedAccessibleUpdateCapture capture;
 
-			view.appendOutputText(QStringLiteral("alpha"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("alpha"), true);
 			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 1);
 			QCOMPARE(g_accessibleTextInsertRecords.at(0).object, canvas);
 			QCOMPARE(g_accessibleTextInsertRecords.at(0).position, 0);
@@ -4187,7 +3889,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleAnnouncementRecords.at(0).object, canvas);
 			QCOMPARE(g_accessibleAnnouncementRecords.at(0).message, QStringLiteral("alpha"));
 
-			view.appendOutputText(QStringLiteral("beta"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("beta"), true);
 			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 2);
 			QCOMPARE(g_accessibleTextInsertRecords.at(1).object, canvas);
 			QCOMPARE(g_accessibleTextInsertRecords.at(1).position, 5);
@@ -4197,7 +3899,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleAnnouncementRecords.at(1).message, QStringLiteral("beta"));
 
 			QAccessible::setActive(false);
-			view.appendOutputText(QStringLiteral("gamma"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("gamma"), true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 2);
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 2);
@@ -4213,7 +3915,7 @@ class tst_WorldView_Basic : public QObject
 
 			WorldView view;
 			view.resize(640, 360);
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			view.show();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -4226,7 +3928,7 @@ class tst_WorldView_Basic : public QObject
 
 			ScopedAccessibleUpdateCapture capture;
 
-			appendFakeRuntimeOutputText(view, QStringLiteral("alpha"), {}, false, true);
+			appendRuntimeOutputText(view, QStringLiteral("alpha"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
@@ -4234,7 +3936,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleValueChangedCount, 0);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha"));
 
-			appendFakeRuntimeOutputText(view, QStringLiteral("beta"), {}, false, true);
+			appendRuntimeOutputText(view, QStringLiteral("beta"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
@@ -4243,7 +3945,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha\nbeta"));
 
 			setFakeMushReaderLiveSpeechOwner(false);
-			appendFakeRuntimeOutputText(view, QStringLiteral("gamma"), {}, false, true);
+			appendRuntimeOutputText(view, QStringLiteral("gamma"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 1);
 			QCOMPARE(g_accessibleTextInsertRecords.constLast().object, canvas);
@@ -4260,11 +3962,11 @@ class tst_WorldView_Basic : public QObject
 			qmudInstallWorldOutputAccessibility();
 			resetTestState();
 			const ScopedTestStateReset resetState;
-			g_qtAccessibilitySpeechEnabled = false;
+			setTestQtAccessibilitySpeechEnabled(false);
 
 			WorldView view;
 			view.resize(640, 360);
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			view.show();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -4277,7 +3979,7 @@ class tst_WorldView_Basic : public QObject
 
 			ScopedAccessibleUpdateCapture capture;
 
-			appendFakeRuntimeOutputText(view, QStringLiteral("alpha"), {}, false, true);
+			appendRuntimeOutputText(view, QStringLiteral("alpha"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
@@ -4285,7 +3987,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleValueChangedCount, 0);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha"));
 
-			appendFakeRuntimeOutputText(view, QStringLiteral("beta"), {}, false, true);
+			appendRuntimeOutputText(view, QStringLiteral("beta"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
@@ -4293,8 +3995,8 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(g_accessibleValueChangedCount, 0);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha\nbeta"));
 
-			g_qtAccessibilitySpeechEnabled = true;
-			appendFakeRuntimeOutputText(view, QStringLiteral("gamma"), {}, false, true);
+			setTestQtAccessibilitySpeechEnabled(true);
+			appendRuntimeOutputText(view, QStringLiteral("gamma"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 1);
 			QCOMPARE(g_accessibleTextInsertRecords.constLast().object, canvas);
@@ -4311,11 +4013,11 @@ class tst_WorldView_Basic : public QObject
 			qmudInstallWorldOutputAccessibility();
 			resetTestState();
 			const ScopedTestStateReset resetState;
-			g_qtAccessibilitySpeechEnabled = false;
+			setTestQtAccessibilitySpeechEnabled(false);
 
 			WorldView view;
 			view.resize(640, 360);
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			view.show();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -4327,29 +4029,28 @@ class tst_WorldView_Basic : public QObject
 
 			ScopedAccessibleUpdateCapture capture;
 
-			appendFakeRuntimeOutputText(view, QStringLiteral("discarded"), {}, false, true);
+			appendRuntimeOutputText(view, QStringLiteral("discarded"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
 
-			g_runtimeLines.clear();
-			view.clearOutputBuffer();
+			runtimeForTest()->replaceOutputLines(QVector<WorldRuntime::LineEntry>{});
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
 			QCOMPARE(textInterface->characterCount(), 0);
 
-			appendFakeRuntimeOutputText(view, QStringLiteral("muted"), {}, false, true);
+			appendRuntimeOutputText(view, QStringLiteral("muted"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("muted"));
 
-			g_qtAccessibilitySpeechEnabled = true;
-			appendFakeRuntimeOutputText(view, QStringLiteral("announced"), {}, false, true);
+			setTestQtAccessibilitySpeechEnabled(true);
+			appendRuntimeOutputText(view, QStringLiteral("announced"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 1);
 			QCOMPARE(g_accessibleTextInsertRecords.constLast().object, canvas);
@@ -4366,12 +4067,12 @@ class tst_WorldView_Basic : public QObject
 			qmudInstallWorldOutputAccessibility();
 			resetTestState();
 			const ScopedTestStateReset resetState;
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("2"));
-			g_qtAccessibilitySpeechEnabled = false;
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("2"));
+			setTestQtAccessibilitySpeechEnabled(false);
 
 			WorldView view;
 			view.resize(640, 360);
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			view.show();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -4384,13 +4085,13 @@ class tst_WorldView_Basic : public QObject
 			ScopedAccessibleUpdateCapture capture;
 			const qsizetype               lineStartCacheSize = view.m_accessibleOutputLineStartCache.size();
 
-			appendFakeRuntimeOutputText(view, QStringLiteral("alpha"), {}, false, true);
-			appendFakeRuntimeOutputText(view, QStringLiteral("beta"), {}, false, true);
+			appendRuntimeOutputText(view, QStringLiteral("alpha"), {}, false, true);
+			appendRuntimeOutputText(view, QStringLiteral("beta"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 0);
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("alpha\nbeta"));
 
-			appendFakeRuntimeOutputText(view, QStringLiteral("gamma"), {}, false, true);
+			appendRuntimeOutputText(view, QStringLiteral("gamma"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
@@ -4399,8 +4100,8 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.m_accessibleOutputCharacterCount, sizeToInt(QStringLiteral("beta\ngamma").size()));
 			QCOMPARE(view.m_accessibleOutputLineStartCache.size(), lineStartCacheSize);
 
-			g_qtAccessibilitySpeechEnabled = true;
-			appendFakeRuntimeOutputText(view, QStringLiteral("delta"), {}, false, true);
+			setTestQtAccessibilitySpeechEnabled(true);
+			appendRuntimeOutputText(view, QStringLiteral("delta"), {}, false, true);
 			QCoreApplication::processEvents();
 			QCOMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("gamma\ndelta"));
 			QCOMPARE(g_accessibleAnnouncementRecords.size(), 1);
@@ -4413,11 +4114,11 @@ class tst_WorldView_Basic : public QObject
 			qmudInstallWorldOutputAccessibility();
 			resetTestState();
 			const ScopedTestStateReset resetState;
-			g_qtAccessibilitySpeechEnabled = false;
+			setTestQtAccessibilitySpeechEnabled(false);
 
 			WorldView view;
 			view.resize(640, 360);
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			view.show();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -4456,7 +4157,7 @@ class tst_WorldView_Basic : public QObject
 			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend,
 			                                       oldLineCount, false, 2, 0, true);
 
-			g_qtAccessibilitySpeechEnabled = true;
+			setTestQtAccessibilitySpeechEnabled(true);
 			view.notifyAccessibleOutputPresented(view.m_nativeRenderLineCache);
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);
 			QCOMPARE(g_accessibleTextUpdateRecords.size(), 0);
@@ -4470,11 +4171,11 @@ class tst_WorldView_Basic : public QObject
 			qmudInstallWorldOutputAccessibility();
 			resetTestState();
 			const ScopedTestStateReset resetState;
-			g_qtAccessibilitySpeechEnabled = false;
+			setTestQtAccessibilitySpeechEnabled(false);
 
 			WorldView view;
 			view.resize(640, 360);
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			view.show();
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -4555,7 +4256,7 @@ class tst_WorldView_Basic : public QObject
 
 			ScopedAccessibleUpdateCapture capture;
 
-			view.appendOutputText(QStringLiteral("alpha"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("alpha"), true);
 			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 1);
 			QTRY_COMPARE(g_accessibleAnnouncementRecords.size(), 1);
 			QCOMPARE(g_accessibleValueChangedCount, 0);
@@ -4604,11 +4305,11 @@ class tst_WorldView_Basic : public QObject
 		void worldOutputAccessibleHeadTrimAppendUsesContentChangedFallback()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("2"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("2"));
 			qmudInstallWorldOutputAccessibility();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			view.resize(640, 360);
 			view.show();
@@ -4622,14 +4323,14 @@ class tst_WorldView_Basic : public QObject
 
 			ScopedAccessibleUpdateCapture capture;
 
-			view.appendOutputText(QStringLiteral("one"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("one"), true);
 			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 1);
 			QTRY_COMPARE(g_accessibleAnnouncementRecords.size(), 1);
-			view.appendOutputText(QStringLiteral("two"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("two"), true);
 			QTRY_COMPARE(g_accessibleTextInsertRecords.size(), 2);
 			QTRY_COMPARE(g_accessibleAnnouncementRecords.size(), 2);
 
-			view.appendOutputText(QStringLiteral("three"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("three"), true);
 			QTRY_COMPARE(g_accessibleTextUpdateRecords.size(), 1);
 			QCOMPARE(g_accessibleTextUpdateRecords.at(0).object, canvas);
 			QCOMPARE(g_accessibleTextUpdateRecords.at(0).position, 0);
@@ -4645,19 +4346,20 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void runtimeObserverTransitionDetachesPreviouslyAttachedRuntime()
+		void runtimeObserverUsesSeparatePrimaryOutputBinding()
 		{
 			resetTestState();
 
 			WorldView view;
-			view.setRuntime(fakeRuntimePointer());
-			QCOMPARE(g_runtimeView, &view);
-
-			view.setRuntimeObserver(fakeRuntimePointer());
-			QCOMPARE(g_runtimeView, nullptr);
+			setTestRuntimeObserver(view, runtimeForTest());
+			QVERIFY(runtimeForTest()->view());
+			QVERIFY(runtimeForTest()->view() != &view);
+			runtimeForTest()->outputText(QStringLiteral("observer-buffer-line"), false, true);
+			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("observer-buffer-line")));
 
 			view.setRuntime(nullptr);
-			QCOMPARE(g_runtimeView, nullptr);
+			QVERIFY(runtimeForTest()->view());
+			QVERIFY(runtimeForTest()->view() != &view);
 
 			resetTestState();
 		}
@@ -4669,24 +4371,28 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(640, 360);
 			view.show();
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
-			MiniWindow  &window = appendTestMiniWindow(QStringLiteral("dpi-sync"), QRect(10, 10, 80, 40), 0,
-			                                           QColor(10, 20, 30));
+			WorldRuntime *const runtime = runtimeForTest();
+			QCOMPARE(runtime->windowCreate(QStringLiteral("dpi-sync"), 10, 10, 80, 40, 0, 0,
+			                               QColor(10, 20, 30), {}),
+			         eOK);
+			MiniWindow *const window = runtime->miniWindow(QStringLiteral("dpi-sync"));
+			QVERIFY(window);
 			const double targetRatio = view.devicePixelRatioF();
 			const double staleRatio  = qFuzzyCompare(targetRatio, 1.0) ? 2.0 : 1.0;
-			MiniWindowUtils::setDevicePixelRatio(window, staleRatio);
-			QVERIFY(!qFuzzyCompare(window.devicePixelRatio, targetRatio));
+			MiniWindowUtils::setDevicePixelRatio(*window, staleRatio);
+			QVERIFY(!qFuzzyCompare(window->devicePixelRatio, targetRatio));
 
 			QEvent event(QEvent::DevicePixelRatioChange);
 			QCoreApplication::sendEvent(&view, &event);
 			QCoreApplication::processEvents();
 
-			QVERIFY(qFuzzyCompare(window.devicePixelRatio, targetRatio));
-			QVERIFY(qFuzzyCompare(window.backingSurfaceDevicePixelRatio(), targetRatio));
-			QCOMPARE(window.backingSurfaceSize(),
-			         MiniWindow::backingStoreSize(window.width, window.height, targetRatio));
+			QVERIFY(qFuzzyCompare(window->devicePixelRatio, targetRatio));
+			QVERIFY(qFuzzyCompare(window->backingSurfaceDevicePixelRatio(), targetRatio));
+			QCOMPARE(window->backingSurfaceSize(),
+			         MiniWindow::backingStoreSize(window->width, window->height, targetRatio));
 
 			resetTestState();
 		}
@@ -4698,7 +4404,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			const QRect fullRect = view.outputTextRectangle();
@@ -4711,6 +4417,7 @@ class tst_WorldView_Basic : public QObject
 			g_textRectangle.top    = 11;
 			g_textRectangle.right  = 260;
 			g_textRectangle.bottom = 210;
+			setTestTextRectangle(g_textRectangle);
 			view.updateWrapMargin();
 			QCoreApplication::processEvents();
 
@@ -4730,7 +4437,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			const int baseWidth  = view.outputTextRectangle().width();
@@ -4742,6 +4449,7 @@ class tst_WorldView_Basic : public QObject
 			g_textRectangle.top    = 9;
 			g_textRectangle.right  = -13;
 			g_textRectangle.bottom = -17;
+			setTestTextRectangle(g_textRectangle);
 			view.updateWrapMargin();
 			QCoreApplication::processEvents();
 
@@ -4759,13 +4467,14 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(920, 660);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			g_textRectangle.left   = 17;
 			g_textRectangle.top    = 13;
 			g_textRectangle.right  = 320;
 			g_textRectangle.bottom = 250;
+			setTestTextRectangle(g_textRectangle);
 			view.updateWrapMargin();
 			QCoreApplication::processEvents();
 
@@ -4804,13 +4513,14 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			g_textRectangle.left   = 19;
 			g_textRectangle.top    = 14;
 			g_textRectangle.right  = 318;
 			g_textRectangle.bottom = 252;
+			setTestTextRectangle(g_textRectangle);
 			view.updateWrapMargin();
 			QCoreApplication::processEvents();
 
@@ -4836,9 +4546,10 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			for (int i = 0; i < 300; ++i)
-				view.appendOutputText(QStringLiteral("scrollbar-primer-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("scrollbar-primer-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -4865,7 +4576,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			QSplitter *outputSplitter = findOutputSplitter(view);
@@ -4873,615 +4584,27 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(outputSplitter->handleWidth(), 0);
 		}
 
-		void drawOutputWindowNotificationTracksScrollPosition()
-		{
-			resetTestState();
-			g_outputFontHeight = 10;
-
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			QCoreApplication::processEvents();
-
-			for (int i = 0; i < 320; ++i)
-				view.appendOutputText(QStringLiteral("draw-notify-%1").arg(i), true);
-			QCoreApplication::processEvents();
-
-			QTextBrowser *browser = findVisibleOutputBrowser(view);
-			QVERIFY(browser);
-			QScrollBar *bar = browser->verticalScrollBar();
-			QVERIFY(bar);
-			QTRY_VERIFY(bar->maximum() > bar->minimum());
-
-			const int baselineToTop = g_drawOutputNotifyCount;
-			QCOMPARE(view.setOutputScroll(0, true), 0);
-			QTRY_VERIFY(g_drawOutputNotifyCount > baselineToTop);
-
-			const int baselineToEnd = g_drawOutputNotifyCount;
-			QCOMPARE(view.setOutputScroll(-1, true), 0);
-			QTRY_VERIFY(g_drawOutputNotifyCount > baselineToEnd);
-			QCOMPARE(g_lastDrawOutputAdjustedScroll, view.outputScrollPosition());
-			QCOMPARE(g_lastDrawOutputFirstLine, (g_lastDrawOutputAdjustedScroll / g_outputFontHeight) + 1);
-
-			resetTestState();
-		}
-
-		void drawOutputWindowNotificationRequiresSemanticViewportChange()
-		{
-			resetTestState();
-
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			for (int i = 0; i < 320; ++i)
-				view.appendOutputText(QStringLiteral("semantic-scroll-%1").arg(i), true);
-			QCoreApplication::processEvents();
-
-			QTextBrowser *const browser = findVisibleOutputBrowser(view);
-			QVERIFY(browser);
-			QScrollBar *const bar = browser->verticalScrollBar();
-			QVERIFY(bar);
-			QTRY_VERIFY(bar->maximum() > bar->minimum());
-
-			view.scrollOutputToStart();
-			QTRY_COMPARE(bar->value(), bar->minimum());
-			QCoreApplication::processEvents();
-			const int afterFirstScroll = g_drawOutputNotifyCount;
-
-			view.scrollOutputToStart();
-			QCoreApplication::processEvents();
-			QCOMPARE(g_drawOutputNotifyCount, afterFirstScroll);
-
-			view.selectOutputRange(319, 0, 1);
-			QTRY_VERIFY(bar->value() > bar->minimum());
-			QTRY_COMPARE(g_drawOutputNotifyCount, afterFirstScroll + 1);
-
-			view.scrollNativeOutputRangeIntoView(view.m_output, 0, 0, false);
-			QTRY_COMPARE(bar->value(), bar->minimum());
-			QTRY_COMPARE(g_drawOutputNotifyCount, afterFirstScroll + 2);
-			QVERIFY(view.isScrollbackSplitActive());
-
-			view.collapseScrollbackSplitToLiveOutput();
-			QVERIFY(!view.isScrollbackSplitActive());
-			QTRY_COMPARE(g_drawOutputNotifyCount, afterFirstScroll + 3);
-
-			view.setScrollbackSplitActive(true);
-			QVERIFY(view.isScrollbackSplitActive());
-			QTRY_COMPARE(g_drawOutputNotifyCount, afterFirstScroll + 4);
-			const int beforeSettingsCollapse = g_drawOutputNotifyCount;
-			view.applyRuntimeSettingsWithoutOutputRebuild();
-			QVERIFY(!view.isScrollbackSplitActive());
-			QTRY_COMPARE(g_drawOutputNotifyCount, beforeSettingsCollapse + 1);
-			const int afterSettingsCollapse = g_drawOutputNotifyCount;
-
-			view.beginRuntimeOutputMutationBatch(true);
-			QCOMPARE(view.setOutputScroll(0, true), 0);
-			view.endRuntimeOutputMutationBatch();
-			QCoreApplication::processEvents();
-			QCOMPARE(g_drawOutputNotifyCount, afterSettingsCollapse);
-
-			view.beginRuntimeOutputMutationBatch(true);
-			view.scrollOutputToEnd();
-			view.endRuntimeOutputMutationBatch();
-			QTRY_COMPARE(g_drawOutputNotifyCount, afterSettingsCollapse + 1);
-
-			resetTestState();
-		}
-
-		void outputAfterDrawCallbackSuppressionQueuesNotification()
-		{
-			resetTestState();
-
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.appendOutputText(QStringLiteral("baseline"), true);
-			QCoreApplication::processEvents();
-			QVERIFY(!view.m_drawViewportNotificationPending);
-			const int baselineNotifications = g_drawOutputNotifyCount;
-
-			view.setDrawOutputWindowCallbackActive(true);
-			view.beginRuntimeOutputMutationBatch(true);
-			view.appendOutputText(QStringLiteral("draw callback output"), true);
-			view.endRuntimeOutputMutationBatch();
-			view.setDrawOutputWindowCallbackActive(false);
-			QVERIFY(!view.m_drawViewportNotificationPending);
-
-			view.appendOutputText(QStringLiteral("later output"), true);
-			QVERIFY(view.m_drawViewportNotificationPending);
-			QTRY_COMPARE(g_drawOutputNotifyCount, baselineNotifications + 1);
-
-			resetTestState();
-		}
-
-		void runtimeToObserverTransitionClearsActiveDrawCallbackState()
-		{
-			resetTestState();
-			g_drawOutputCallbackActive = true;
-
-			WorldView view;
-			view.setRuntime(fakeRuntimePointer());
-			QCOMPARE(g_runtimeView, &view);
-
-			view.setPassiveBufferView(true);
-			view.setRuntimeObserver(fakeRuntimePointer());
-			QCOMPARE(g_runtimeView, nullptr);
-			g_drawOutputCallbackActive = false;
-
-			const int baseline = g_drawOutputNotifyCount;
-			view.appendOutputText(QStringLiteral("observer-after-active-callback"), true);
-			QCOMPARE(g_drawOutputNotifyCount, baseline);
-
-			resetTestState();
-		}
-
-		void newObserverDoesNotInheritPrimaryViewDrawCallbackState()
-		{
-			resetTestState();
-			g_drawOutputCallbackActive = true;
-
-			WorldView view;
-			view.setPassiveBufferView(true);
-			view.setRuntimeObserver(fakeRuntimePointer());
-			g_drawOutputCallbackActive = false;
-
-			const int baseline = g_drawOutputNotifyCount;
-			view.appendOutputText(QStringLiteral("new-observer-during-active-callback"), true);
-			QCOMPARE(g_drawOutputNotifyCount, baseline);
-
-			resetTestState();
-		}
-
-		void drawOutputWindowNotificationCoalescesBurstUpdates()
-		{
-			resetTestState();
-
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			QCoreApplication::processEvents();
-
-			const int baseline = g_drawOutputNotifyCount;
-			for (int i = 0; i < 120; ++i)
-				view.appendOutputText(QStringLiteral("draw-burst-%1").arg(i), true);
-
-			QCOMPARE(g_drawOutputNotifyCount, baseline);
-			QCoreApplication::processEvents();
-			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 1);
-
-			resetTestState();
-		}
-
-		void semanticOutputPaintWaitsForDrawCallbackCompletion_data()
-		{
-			QTest::addColumn<int>("mutation");
-			QTest::newRow("append") << 0;
-			QTest::newRow("line-change") << 1;
-			QTest::newRow("clear") << 2;
-			QTest::newRow("partial") << 3;
-			QTest::newRow("committed-partial") << 4;
-			QTest::newRow("indexed-line-change") << 5;
-			QTest::newRow("range-change") << 6;
-		}
-
-		void semanticOutputPaintWaitsForDrawCallbackCompletion()
-		{
-			QFETCH(int, mutation);
-			resetTestState();
-
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			WorldRuntime::LineEntry baselineLine;
-			baselineLine.text       = QStringLiteral("baseline");
-			baselineLine.flags      = WorldRuntime::LineOutput;
-			baselineLine.hardReturn = true;
-			baselineLine.lineNumber = 1;
-			g_runtimeLines.push_back(baselineLine);
-			view.rebuildOutputFromLines(g_runtimeLines);
-			QCoreApplication::processEvents();
-
-			QWidget *const canvas = findNativeOutputCanvas(view);
-			QVERIFY(canvas);
-			QWidget *const overlay = view.m_miniOverlay;
-			QVERIFY(overlay);
-			QVERIFY(overlay->isVisible());
-			PaintEventCounter canvasPaintCounter;
-			PaintEventCounter overlayPaintCounter;
-			canvas->installEventFilter(&canvasPaintCounter);
-			overlay->installEventFilter(&overlayPaintCounter);
-			g_holdDrawOutputCompletion                  = true;
-			const int baselineNotifications             = g_drawOutputNotifyCount;
-			view.m_pendingMiniWindowUnderlayDirtyRegion = QRegion(canvas->rect());
-			view.m_pendingMiniWindowOverlayDirtyRegion  = QRegion(overlay->rect());
-			canvas->update();
-			overlay->update();
-
-			switch (mutation)
-			{
-			case 0:
-				view.appendOutputText(QStringLiteral("appended"), true);
-				break;
-			case 1:
-				view.notifyRuntimeOutputLineChanged();
-				break;
-			case 2:
-				view.clearOutputBuffer();
-				break;
-			case 3:
-				setFakeRuntimePendingPartial(QStringLiteral("partial"));
-				view.updatePartialOutputText(QStringLiteral("partial"));
-				break;
-			case 4:
-				setFakeRuntimePendingPartial(QStringLiteral("committed partial"));
-				QVERIFY(view.commitPendingIncomingPartialOutput());
-				break;
-			case 5:
-				g_runtimeLines.first().text = QStringLiteral("changed line");
-				view.notifyRuntimeOutputLineChanged(0);
-				break;
-			case 6:
-				g_runtimeLines.first().text = QStringLiteral("changed range");
-				view.notifyRuntimeOutputRangeChanged(0);
-				break;
-			default:
-				QFAIL("Unknown semantic output mutation");
-			}
-
-			QTRY_COMPARE(g_drawOutputNotifyCount, baselineNotifications + 1);
-			QCOMPARE(g_drawOutputCompletions.size(), 1);
-			QCoreApplication::processEvents();
-			QVERIFY(canvasPaintCounter.count() > 0);
-			QVERIFY(overlayPaintCounter.count() > 0);
-			QVERIFY(!view.m_deferredSemanticNativeCanvasPaintRegion.isEmpty());
-			QVERIFY(!view.m_deferredSemanticMiniWindowOverlayPaintRegion.isEmpty());
-			QVERIFY(!view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
-			QVERIFY(!view.m_pendingMiniWindowOverlayDirtyRegion.isEmpty());
-			const int             deferredCanvasPaintCount  = canvasPaintCounter.count();
-			const int             deferredOverlayPaintCount = overlayPaintCounter.count();
-
-			std::function<void()> completion = std::move(g_drawOutputCompletions.front());
-			g_drawOutputCompletions.clear();
-			completion();
-			QTRY_VERIFY(canvasPaintCounter.count() > deferredCanvasPaintCount);
-			QTRY_VERIFY(overlayPaintCounter.count() > deferredOverlayPaintCount);
-			QVERIFY(view.m_deferredSemanticNativeCanvasPaintRegion.isEmpty());
-			QVERIFY(view.m_deferredSemanticMiniWindowOverlayPaintRegion.isEmpty());
-			QTRY_VERIFY(view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
-			QTRY_VERIFY(view.m_pendingMiniWindowOverlayDirtyRegion.isEmpty());
-			canvas->removeEventFilter(&canvasPaintCounter);
-			overlay->removeEventFilter(&overlayPaintCounter);
-
-			resetTestState();
-		}
-
-		void semanticViewportPaintWaitsForDrawCallbackCompletion_data()
-		{
-			QTest::addColumn<int>("mutation");
-			QTest::newRow("scroll") << 0;
-			QTest::newRow("split") << 1;
-			QTest::newRow("resize") << 2;
-			QTest::newRow("show") << 3;
-			QTest::newRow("split-divider") << 4;
-		}
-
-		void semanticViewportPaintWaitsForDrawCallbackCompletion()
-		{
-			QFETCH(int, mutation);
-			resetTestState();
-
-			for (int line = 0; line < 200; ++line)
-			{
-				WorldRuntime::LineEntry entry;
-				entry.text       = QStringLiteral("viewport-%1").arg(line);
-				entry.flags      = WorldRuntime::LineOutput;
-				entry.hardReturn = true;
-				entry.lineNumber = line + 1;
-				g_runtimeLines.push_back(entry);
-			}
-
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.rebuildOutputFromLines(g_runtimeLines);
-			QCoreApplication::processEvents();
-			QTextBrowser *const browser = findVisibleOutputBrowser(view);
-			QVERIFY(browser);
-			QScrollBar *const bar = browser->verticalScrollBar();
-			QVERIFY(bar);
-			QTRY_VERIFY(bar->maximum() > bar->minimum());
-			view.scrollOutputToEnd();
-			QCoreApplication::processEvents();
-			if (mutation == 3)
-			{
-				view.hide();
-				QCoreApplication::processEvents();
-			}
-			else if (mutation == 4)
-			{
-				view.setScrollbackSplitActive(true);
-				QCoreApplication::processEvents();
-			}
-
-			QWidget *const canvas = findNativeOutputCanvas(view);
-			QVERIFY(canvas);
-			QWidget *const overlay = view.m_miniOverlay;
-			QVERIFY(overlay);
-			PaintEventCounter canvasPaintCounter;
-			PaintEventCounter overlayPaintCounter;
-			canvas->installEventFilter(&canvasPaintCounter);
-			overlay->installEventFilter(&overlayPaintCounter);
-			g_holdDrawOutputCompletion                  = true;
-			const int baselineNotifications             = g_drawOutputNotifyCount;
-			view.m_pendingMiniWindowUnderlayDirtyRegion = QRegion(canvas->rect());
-			view.m_pendingMiniWindowOverlayDirtyRegion  = QRegion(overlay->rect());
-			canvas->update();
-			overlay->update();
-
-			switch (mutation)
-			{
-			case 0:
-				view.scrollOutputToStart();
-				break;
-			case 1:
-				view.setScrollbackSplitActive(true);
-				break;
-			case 2:
-				view.resize(view.width() + 31, view.height() + 17);
-				break;
-			case 3:
-				view.show();
-				break;
-			case 4:
-			{
-				QSplitter *const splitter = view.m_outputSplitter;
-				QVERIFY(splitter);
-				const QList<int> sizes = splitter->sizes();
-				QVERIFY(sizes.size() >= 2);
-				QSplitterHandle *const handle = splitter->handle(1);
-				QVERIFY(handle);
-				const QPoint pressPosition = handle->rect().center();
-				QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, pressPosition);
-				QTest::mouseMove(handle, pressPosition - QPoint(0, 20));
-				QTest::mouseRelease(handle, Qt::LeftButton, Qt::NoModifier, pressPosition - QPoint(0, 20));
-				QVERIFY(splitter->sizes() != sizes);
-				break;
-			}
-			default:
-				QFAIL("Unknown semantic viewport mutation");
-			}
-
-			QTRY_COMPARE(g_drawOutputNotifyCount, baselineNotifications + 1);
-			QCOMPARE(g_drawOutputCompletions.size(), 1);
-			QCoreApplication::processEvents();
-			QVERIFY(canvasPaintCounter.count() > 0);
-			QVERIFY(overlayPaintCounter.count() > 0);
-			QVERIFY(!view.m_deferredSemanticNativeCanvasPaintRegion.isEmpty());
-			QVERIFY(!view.m_deferredSemanticMiniWindowOverlayPaintRegion.isEmpty());
-			QVERIFY(!view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
-			QVERIFY(!view.m_pendingMiniWindowOverlayDirtyRegion.isEmpty());
-			const int             deferredCanvasPaintCount  = canvasPaintCounter.count();
-			const int             deferredOverlayPaintCount = overlayPaintCounter.count();
-
-			std::function<void()> completion = std::move(g_drawOutputCompletions.front());
-			g_drawOutputCompletions.clear();
-			completion();
-			QTRY_VERIFY(canvasPaintCounter.count() > deferredCanvasPaintCount);
-			QTRY_VERIFY(overlayPaintCounter.count() > deferredOverlayPaintCount);
-			QVERIFY(view.m_deferredSemanticNativeCanvasPaintRegion.isEmpty());
-			QVERIFY(view.m_deferredSemanticMiniWindowOverlayPaintRegion.isEmpty());
-			QTRY_VERIFY(view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
-			QTRY_VERIFY(view.m_pendingMiniWindowOverlayDirtyRegion.isEmpty());
-			canvas->removeEventFilter(&canvasPaintCounter);
-			overlay->removeEventFilter(&overlayPaintCounter);
-
-			resetTestState();
-		}
-
-		void detachedSemanticOutputPaintWaitsForPresentationOnly()
-		{
-			resetTestState();
-
-			WorldView view;
-			view.resize(700, 420);
-			view.show();
-			QCoreApplication::processEvents();
-			QWidget *const canvas = findNativeOutputCanvas(view);
-			QVERIFY(canvas);
-
-			for (int line = 0; line < 200; ++line)
-				view.appendOutputText(QStringLiteral("detached-%1").arg(line), true);
-			QVERIFY(view.m_semanticOutputPaintBarrierActive);
-			QVERIFY(view.hasPendingOutputPresentationWork());
-			QVERIFY(!view.m_drawViewportNotificationPending);
-			QVERIFY(!view.m_drawNotifyQueued);
-			QCoreApplication::processEvents();
-			QTRY_VERIFY(!view.m_semanticOutputPaintBarrierActive);
-			QVERIFY(!view.hasPendingOutputPresentationWork());
-			QTextBrowser *const browser = findVisibleOutputBrowser(view);
-			QVERIFY(browser);
-			QScrollBar *const bar = browser->verticalScrollBar();
-			QVERIFY(bar);
-			QTRY_VERIFY(bar->maximum() > bar->minimum());
-			QCOMPARE(bar->value(), bar->maximum());
-			QVERIFY(!canvas->grab().isNull());
-			QCOMPARE(canvas->property("qmud_native_plain_last_line").toString(),
-			         QStringLiteral("detached-199"));
-			QCOMPARE(g_drawOutputNotifyCount, 0);
-
-			resetTestState();
-		}
-
-		void semanticMiniWindowUnderlayPaintWaitsForDrawCallbackCompletion()
-		{
-			resetTestState();
-
-			WorldView view;
-			view.resize(700, 420);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			QCoreApplication::processEvents();
-			QWidget *const underlay = view.m_miniUnderlay;
-			QVERIFY(underlay);
-			QVERIFY(underlay->isVisible());
-			underlay->raise();
-			QCoreApplication::processEvents();
-
-			PaintEventCounter underlayPaintCounter;
-			underlay->installEventFilter(&underlayPaintCounter);
-			g_holdDrawOutputCompletion                  = true;
-			const int baselineNotifications             = g_drawOutputNotifyCount;
-			view.m_pendingMiniWindowUnderlayDirtyRegion = QRegion(underlay->rect());
-			underlay->update();
-			view.clearOutputBuffer();
-
-			QTRY_COMPARE(g_drawOutputNotifyCount, baselineNotifications + 1);
-			QCOMPARE(g_drawOutputCompletions.size(), 1);
-			QCoreApplication::processEvents();
-			QVERIFY(underlayPaintCounter.count() > 0);
-			QVERIFY(!view.m_deferredSemanticMiniWindowUnderlayPaintRegion.isEmpty());
-			QVERIFY(!view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
-			const int             deferredUnderlayPaintCount = underlayPaintCounter.count();
-
-			std::function<void()> completion = std::move(g_drawOutputCompletions.front());
-			g_drawOutputCompletions.clear();
-			completion();
-			QTRY_VERIFY(underlayPaintCounter.count() > deferredUnderlayPaintCount);
-			QVERIFY(view.m_deferredSemanticMiniWindowUnderlayPaintRegion.isEmpty());
-			QTRY_VERIFY(view.m_pendingMiniWindowUnderlayDirtyRegion.isEmpty());
-			underlay->removeEventFilter(&underlayPaintCounter);
-
-			resetTestState();
-		}
-
-		void partialOutputPresentationNotifiesDrawOutputWindow()
-		{
-			resetTestState();
-
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			QCoreApplication::processEvents();
-			g_drawOutputPresentationView = &view;
-
-			const int baseline = g_drawOutputNotifyCount;
-			view.updatePartialOutputText(QStringLiteral("partial"));
-			QCOMPARE(g_drawOutputNotifyCount, baseline);
-			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 1);
-			QVERIFY(!g_drawOutputNotificationSawPresentationPending);
-			QCOMPARE(g_lastDrawOutputAdjustedScroll, view.outputScrollPosition());
-
-			view.clearPartialOutput();
-			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 2);
-
-			view.updatePartialOutputText(QStringLiteral("batched"));
-			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 3);
-			view.beginRuntimeOutputMutationBatch(false);
-			view.clearPartialOutput();
-			view.endRuntimeOutputMutationBatch();
-			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 4);
-
-			view.setDrawOutputWindowCallbackActive(true);
-			view.beginRuntimeOutputMutationBatch(true);
-			view.updatePartialOutputText(QStringLiteral("suppressed"));
-			view.clearPartialOutput();
-			view.endRuntimeOutputMutationBatch();
-			view.setDrawOutputWindowCallbackActive(false);
-			QCoreApplication::processEvents();
-			QCOMPARE(g_drawOutputNotifyCount, baseline + 4);
-
-			resetTestState();
-		}
-
-		void runtimeRebindingCancelsQueuedOutputPresentationWork()
-		{
-			resetTestState();
-
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			for (int i = 0; i < 320; ++i)
-				view.appendOutputText(QStringLiteral("binding-%1").arg(i), true);
-			QCoreApplication::processEvents();
-
-			QTextBrowser *const browser = findVisibleOutputBrowser(view);
-			QVERIFY(browser);
-			QScrollBar *const bar = browser->verticalScrollBar();
-			QVERIFY(bar);
-			QTRY_VERIFY(bar->maximum() > bar->minimum());
-
-			bar->setValue(bar->minimum());
-			QCOMPARE(bar->value(), bar->minimum());
-			view.requestOutputScrollToEnd(true);
-			QVERIFY(view.m_scrollToEndQueued);
-			view.setRuntimeObserver(fakeRuntimePointer(2));
-			QVERIFY(!view.m_scrollToEndQueued);
-			QVERIFY(!view.m_scrollToEndRequested);
-			bar->setValue(bar->minimum());
-			QCOMPARE(bar->value(), bar->minimum());
-			QCoreApplication::processEvents();
-			QCOMPARE(bar->value(), bar->minimum());
-
-			view.requestNativeRuntimeOutputPresentationSync(true, true);
-			QVERIFY(view.m_nativeRuntimeOutputPresentationQueued);
-			view.setRuntimeObserver(fakeRuntimePointer(3));
-			QVERIFY(!view.m_nativeRuntimeOutputPresentationQueued);
-			QVERIFY(!view.m_nativeRuntimeOutputPresentationFollowTail);
-			bar->setValue(bar->minimum());
-			QCoreApplication::processEvents();
-			QCOMPARE(bar->value(), bar->minimum());
-
-			view.setRuntime(nullptr);
-			resetTestState();
-		}
-
-		void coalescedCompletedAndPartialOutputWaitsForPresentation()
-		{
-			resetTestState();
-
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			QCoreApplication::processEvents();
-			g_drawOutputPresentationView = &view;
-
-			const int baseline = g_drawOutputNotifyCount;
-			view.appendOutputText(QStringLiteral("complete"), true);
-			view.updatePartialOutputText(QStringLiteral("partial"));
-			QVERIFY(view.m_scrollToEndQueued);
-			QVERIFY(view.m_nativeRuntimeOutputPresentationQueued);
-			QCOMPARE(g_drawOutputNotifyCount, baseline);
-
-			QTRY_COMPARE(g_drawOutputNotifyCount, baseline + 1);
-			QVERIFY(!g_drawOutputNotificationSawPresentationPending);
-			QCOMPARE(g_lastDrawOutputAdjustedScroll, view.outputScrollPosition());
-
-			resetTestState();
-		}
-
 		void worldOutputResizedNotificationFiresOnResize()
 		{
 			resetTestState();
 
-			WorldView view;
+			QTemporaryDir temporaryHome;
+			QVERIFY(temporaryHome.isValid());
+			WorldRuntime *const runtime = runtimeForTest();
+			WorldView           view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntime(view, runtime);
+			QString loadError;
+			QVERIFY2(installOutputResizeRecordingPlugin(*runtime, temporaryHome, loadError),
+			         qPrintable(loadError));
 			QCoreApplication::processEvents();
+			QTRY_VERIFY(outputResizeCallbackCount(*runtime) >= 0);
 
-			const int baseline = g_worldOutputResizedNotifyCount;
+			const int baseline = outputResizeCallbackCount(*runtime);
 			view.resize(1020, 700);
 			QCoreApplication::processEvents();
-			QTRY_VERIFY(g_worldOutputResizedNotifyCount > baseline);
+			QTRY_COMPARE(outputResizeCallbackCount(*runtime), baseline + 1);
 
 			resetTestState();
 		}
@@ -5490,21 +4613,28 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			WorldView view;
+			QTemporaryDir temporaryHome;
+			QVERIFY(temporaryHome.isValid());
+			WorldRuntime *const runtime = runtimeForTest();
+			WorldView           view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntime(view, runtime);
+			QString loadError;
+			QVERIFY2(installOutputResizeRecordingPlugin(*runtime, temporaryHome, loadError),
+			         qPrintable(loadError));
 			QCoreApplication::processEvents();
+			QTRY_VERIFY(outputResizeCallbackCount(*runtime) >= 0);
 
-			const int baseline = g_worldOutputResizedNotifyCount;
+			const int baseline = outputResizeCallbackCount(*runtime);
 
 			view.resize(1000, 650);
 			view.resize(1040, 680);
 			view.resize(1080, 700);
 
-			QCOMPARE(g_worldOutputResizedNotifyCount, baseline);
+			QCOMPARE(outputResizeCallbackCount(*runtime), baseline);
 			QCoreApplication::processEvents();
-			QTRY_COMPARE(g_worldOutputResizedNotifyCount, baseline + 1);
+			QTRY_COMPARE(outputResizeCallbackCount(*runtime), baseline + 1);
 
 			resetTestState();
 		}
@@ -5516,11 +4646,11 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 280; ++i)
-				view.appendOutputText(QStringLiteral("scroll-api-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("scroll-api-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -5547,11 +4677,12 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 320; ++i)
-				view.appendOutputText(QStringLiteral("keyboard-scroll-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("keyboard-scroll-%1").arg(i),
+				                                            true);
 			view.setAllTypingToCommandWindow(true);
 			QCoreApplication::processEvents();
 
@@ -5584,18 +4715,19 @@ class tst_WorldView_Basic : public QObject
 		void outputKeyboardNavigationUsesEffectiveShortcutOverrides()
 		{
 			resetTestState();
-			g_useFakeAppController = true;
-			g_globalOptions.insert(QStringLiteral("Shortcut.DisplayStart"), QStringLiteral("PgUp"));
+			AppController app;
+			app.setGlobalOptionString(QStringLiteral("Shortcut.DisplayStart"), QStringLiteral("PgUp"));
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyShortcutPreferences();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 320; ++i)
-				view.appendOutputText(QStringLiteral("output-effective-shortcut-scroll-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("output-effective-shortcut-scroll-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -5633,18 +4765,19 @@ class tst_WorldView_Basic : public QObject
 		void outputKeyboardNavigationIgnoresDefaultKeyRemovedByOverride()
 		{
 			resetTestState();
-			g_useFakeAppController = true;
-			g_globalOptions.insert(QStringLiteral("Shortcut.DisplayPageUp"), QStringLiteral("Ctrl+Alt+U"));
+			AppController app;
+			app.setGlobalOptionString(QStringLiteral("Shortcut.DisplayPageUp"), QStringLiteral("Ctrl+Alt+U"));
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyShortcutPreferences();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 520; ++i)
-				view.appendOutputText(QStringLiteral("output-removed-default-shortcut-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("output-removed-default-shortcut-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -5689,7 +4822,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.setAllTypingToCommandWindow(true);
 			QCoreApplication::processEvents();
 
@@ -5697,7 +4830,7 @@ class tst_WorldView_Basic : public QObject
 			if (QPlainTextEdit *input = view.inputEditor())
 				input->selectAll();
 
-			view.appendOutputText(QStringLiteral("output-copy-target"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("output-copy-target"), true);
 			QCoreApplication::processEvents();
 			view.selectOutputRange(0, 0, 6);
 			QTRY_VERIFY(view.hasOutputSelection());
@@ -5723,7 +4856,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.setAllTypingToCommandWindow(true);
 			QCoreApplication::processEvents();
 
@@ -5732,7 +4865,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(input);
 			input->selectAll();
 
-			view.appendOutputText(QStringLiteral("output-copy-target"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("output-copy-target"), true);
 			QCoreApplication::processEvents();
 			view.selectOutputRange(0, 0, 6);
 			QTRY_VERIFY(view.hasOutputSelection());
@@ -5752,12 +4885,12 @@ class tst_WorldView_Basic : public QObject
 		void ctrlBackspaceDeletesPreviousWordWhenOptionEnabled()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("ctrl_backspace_deletes_last_word"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("ctrl_backspace_deletes_last_word"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -5785,12 +4918,12 @@ class tst_WorldView_Basic : public QObject
 		void ctrlBackspaceRecallsLastHistoryWordWhenDeleteOptionDisabled()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			view.addToHistoryForced(QStringLiteral("cast fireball"));
 			QCoreApplication::processEvents();
@@ -5818,36 +4951,38 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.setAllTypingToCommandWindow(true);
-			QCoreApplication::processEvents();
+			{
+				WorldRuntime *const           runtime = runtimeForTest();
+				WorldView                     view;
+				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				view.resize(900, 640);
+				view.show();
+				setTestRuntime(view, runtime);
+				view.setAllTypingToCommandWindow(true);
+				QCoreApplication::processEvents();
 
-			QPlainTextEdit *input = view.inputEditor();
-			QVERIFY(input);
-			input->setFocus(Qt::OtherFocusReason);
-			QTRY_VERIFY(input->hasFocus());
+				QPlainTextEdit *input = view.inputEditor();
+				QVERIFY(input);
+				input->setFocus(Qt::OtherFocusReason);
+				QTRY_VERIFY(input->hasFocus());
 
-			constexpr Qt::Key key        = Qt::Key_K;
-			constexpr quint16 virtualKey = 0x4B;
-			constexpr int     commandId  = 77;
-			const qint64      mapKey     = makeAcceleratorMapKey(key, Qt::ControlModifier, virtualKey);
-			g_acceleratorCommands.insert(mapKey, commandId);
+				constexpr Qt::Key key             = Qt::Key_K;
+				const QString     acceleratorText = QStringLiteral("accelerator-ctrl-k");
+				QVERIFY(registerOutputAccelerator(*runtime, key, Qt::ControlModifier, false,
+				                                  acceleratorText) >= 0);
 
-			int       shortcutTriggerCount = 0;
-			QShortcut conflictingShortcut(QKeySequence(QStringLiteral("Ctrl+K")), input);
-			conflictingShortcut.setContext(Qt::WidgetWithChildrenShortcut);
-			connect(&conflictingShortcut, &QShortcut::activated, this,
-			        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+				int       shortcutTriggerCount = 0;
+				QShortcut conflictingShortcut(QKeySequence(QStringLiteral("Ctrl+K")), input);
+				conflictingShortcut.setContext(Qt::WidgetWithChildrenShortcut);
+				connect(&conflictingShortcut, &QShortcut::activated, this,
+				        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
 
-			QTest::keyClick(input, key, Qt::ControlModifier);
-			QCoreApplication::processEvents();
+				QTest::keyClick(input, key, Qt::ControlModifier);
+				QCoreApplication::processEvents();
 
-			QCOMPARE(g_acceleratorExecutionCount, 1);
-			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
-			QCOMPARE(shortcutTriggerCount, 0);
+				QCOMPARE(view.outputLines().count(acceleratorText), 1);
+				QCOMPARE(shortcutTriggerCount, 0);
+			}
 
 			resetTestState();
 		}
@@ -5856,32 +4991,35 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.setAllTypingToCommandWindow(true);
-			for (int i = 0; i < 120; ++i)
-				view.appendOutputText(QStringLiteral("accelerator-display-shortcut-%1").arg(i), true);
-			QCoreApplication::processEvents();
+			{
+				WorldRuntime *const           runtime = runtimeForTest();
+				WorldView                     view;
+				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				view.resize(900, 640);
+				view.show();
+				setTestRuntime(view, runtime);
+				view.setAllTypingToCommandWindow(true);
+				for (int i = 0; i < 120; ++i)
+					runtimeOutputForTest(view).appendOutputText(
+					    QStringLiteral("accelerator-display-shortcut-%1").arg(i), true);
+				QCoreApplication::processEvents();
 
-			QPlainTextEdit *input = view.inputEditor();
-			QVERIFY(input);
-			input->setFocus(Qt::OtherFocusReason);
-			QTRY_VERIFY(input->hasFocus());
+				QPlainTextEdit *input = view.inputEditor();
+				QVERIFY(input);
+				input->setFocus(Qt::OtherFocusReason);
+				QTRY_VERIFY(input->hasFocus());
 
-			constexpr Qt::Key key        = Qt::Key_PageUp;
-			constexpr quint16 virtualKey = 0x21;
-			constexpr int     commandId  = 78;
-			const qint64      mapKey     = makeAcceleratorMapKey(key, Qt::NoModifier, virtualKey);
-			g_acceleratorCommands.insert(mapKey, commandId);
+				constexpr Qt::Key key             = Qt::Key_PageUp;
+				const QString     acceleratorText = QStringLiteral("accelerator-page-up");
+				QVERIFY(registerOutputAccelerator(*runtime, key, Qt::NoModifier, false, acceleratorText) >=
+				        0);
 
-			QTest::keyClick(input, key);
-			QCoreApplication::processEvents();
+				QTest::keyClick(input, key);
+				QCoreApplication::processEvents();
 
-			QCOMPARE(g_acceleratorExecutionCount, 1);
-			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
-			QVERIFY(!view.isScrollbackSplitActive());
+				QCOMPARE(view.outputLines().count(acceleratorText), 1);
+				QVERIFY(!view.isScrollbackSplitActive());
+			}
 
 			resetTestState();
 		}
@@ -5889,16 +5027,15 @@ class tst_WorldView_Basic : public QObject
 		void replaceMacroClearsChangedStateAndMovesCaretToEnd()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("confirm_before_replacing_typing"), QStringLiteral("1"));
-			g_testMacros.push_back(
-			    makeMacro(QStringLiteral("F2"), QStringLiteral("replace"), QStringLiteral("look")));
-			g_testMacros.push_back(
-			    makeMacro(QStringLiteral("F3"), QStringLiteral("replace"), QStringLiteral("say")));
+			setTestWorldAttribute(QStringLiteral("confirm_before_replacing_typing"), QStringLiteral("1"));
+			runtimeForTest()->setMacros(
+			    {makeMacro(QStringLiteral("F2"), QStringLiteral("replace"), QStringLiteral("look")),
+			     makeMacro(QStringLiteral("F3"), QStringLiteral("replace"), QStringLiteral("say"))});
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			view.setAllTypingToCommandWindow(true);
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
@@ -5947,54 +5084,24 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void sendNowMacroUsesCommandEvaluationPath()
-		{
-			resetTestState();
-			g_testMacros.push_back(
-			    makeMacro(QStringLiteral("F2"), QStringLiteral("send_now"), QStringLiteral("north")));
-
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.setAllTypingToCommandWindow(true);
-			QCoreApplication::processEvents();
-
-			QPlainTextEdit *input = view.inputEditor();
-			QVERIFY(input);
-			input->setFocus(Qt::OtherFocusReason);
-			QTRY_VERIFY(input->hasFocus());
-
-			QTest::keyClick(input, Qt::Key_F2);
-			QCoreApplication::processEvents();
-
-			QCOMPARE(g_executeCommandCount, 1);
-			QCOMPARE(g_lastExecutedCommand, QStringLiteral("north"));
-			QVERIFY(g_lastUserMacroHistory);
-			QCOMPARE(g_actionSourceDuringExecute, WorldRuntime::eUserMacro);
-			QCOMPARE(g_currentActionSource, WorldRuntime::eUnknownActionSource);
-			QCOMPARE(g_sendCommandCount, 0);
-
-			resetTestState();
-		}
-
 		void commandOptionShortcutsOverrideConflictingShortcutsWithInputFocus()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("ctrl_p_goes_to_previous_command"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("ctrl_n_goes_to_next_command"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("ctrl_z_goes_to_end_of_buffer"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("ctrl_p_goes_to_previous_command"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("ctrl_n_goes_to_next_command"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("ctrl_z_goes_to_end_of_buffer"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			view.addToHistoryForced(QStringLiteral("north"));
 			view.addToHistoryForced(QStringLiteral("south"));
 			for (int i = 0; i < 320; ++i)
-				view.appendOutputText(QStringLiteral("command-option-input-scroll-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("command-option-input-scroll-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QPlainTextEdit *input = view.inputEditor();
@@ -6045,20 +5152,21 @@ class tst_WorldView_Basic : public QObject
 		void commandOptionShortcutsOverrideConflictingShortcutsWithOutputFocus()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("ctrl_p_goes_to_previous_command"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("ctrl_n_goes_to_next_command"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("ctrl_z_goes_to_end_of_buffer"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("ctrl_p_goes_to_previous_command"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("ctrl_n_goes_to_next_command"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("ctrl_z_goes_to_end_of_buffer"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			view.addToHistoryForced(QStringLiteral("north"));
 			view.addToHistoryForced(QStringLiteral("south"));
 			for (int i = 0; i < 320; ++i)
-				view.appendOutputText(QStringLiteral("command-option-output-scroll-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("command-option-output-scroll-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -6110,14 +5218,14 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			QKeyEvent ctrlPDisabled(QEvent::ShortcutOverride, Qt::Key_P, Qt::ControlModifier);
 			QVERIFY(!view.hasCommandOptionShortcut(&ctrlPDisabled));
 
-			g_worldAttrs.insert(QStringLiteral("ctrl_p_goes_to_previous_command"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("ctrl_p_goes_to_previous_command"), QStringLiteral("1"));
 			view.applyRuntimeSettings();
 			QKeyEvent ctrlPEnabled(QEvent::ShortcutOverride, Qt::Key_P, Qt::ControlModifier);
 			QVERIFY(view.hasCommandOptionShortcut(&ctrlPEnabled));
@@ -6132,13 +5240,13 @@ class tst_WorldView_Basic : public QObject
 		void commandHistoryShortcutsOverrideConflictingShortcutsWithInputFocus()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			view.addToHistoryForced(QStringLiteral("hitman"));
 			view.addToHistoryForced(QStringLiteral("hit 321"));
@@ -6171,17 +5279,17 @@ class tst_WorldView_Basic : public QObject
 		void commandHistoryShortcutsOverrideConflictingShortcutsWithOutputFocus()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			view.addToHistoryForced(QStringLiteral("hitman"));
 			view.addToHistoryForced(QStringLiteral("hit 321"));
-			view.appendOutputText(QStringLiteral("history-output-focus"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("history-output-focus"), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -6216,8 +5324,8 @@ class tst_WorldView_Basic : public QObject
 			QKeyEvent altUp(QEvent::ShortcutOverride, Qt::Key_Up, Qt::AltModifier);
 			QVERIFY(!view.hasCommandHistoryShortcut(&altUp));
 
-			g_worldAttrs.insert(QStringLiteral("alt_arrow_recalls_partial"), QStringLiteral("1"));
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestWorldAttribute(QStringLiteral("alt_arrow_recalls_partial"), QStringLiteral("1"));
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 
 			QVERIFY(view.hasCommandHistoryShortcut(&altUp));
@@ -6238,44 +5346,43 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.setAllTypingToCommandWindow(true);
-			QCoreApplication::processEvents();
+			{
+				WorldRuntime *const           runtime = runtimeForTest();
+				WorldView                     view;
+				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				view.resize(900, 640);
+				view.show();
+				setTestRuntime(view, runtime);
+				view.setAllTypingToCommandWindow(true);
+				QCoreApplication::processEvents();
 
-			QPlainTextEdit *input = view.inputEditor();
-			QVERIFY(input);
-			input->setFocus(Qt::OtherFocusReason);
-			QTRY_VERIFY(input->hasFocus());
+				QPlainTextEdit *input = view.inputEditor();
+				QVERIFY(input);
+				input->setFocus(Qt::OtherFocusReason);
+				QTRY_VERIFY(input->hasFocus());
 
-			constexpr Qt::Key key          = Qt::Key_6;
-			constexpr quint16 numpadVk     = 0x66;
-			constexpr int     commandId    = 88;
-			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::AltModifier, numpadVk, true);
-			g_acceleratorCommands.insert(numpadMapKey, commandId);
-			constexpr quint64 keypadMapId = (static_cast<quint64>(static_cast<quint32>(key)) << 1) | 1ULL;
-			g_virtualKeyMap.insert(keypadMapId, numpadVk);
+				constexpr Qt::Key key             = Qt::Key_6;
+				const QString     acceleratorText = QStringLiteral("accelerator-numpad-6");
+				QVERIFY(registerOutputAccelerator(*runtime, key, Qt::AltModifier, true, acceleratorText) >=
+				        0);
 
-			int       shortcutTriggerCount = 0;
-			QShortcut conflictingShortcut(QKeySequence(QStringLiteral("Alt+6")), input);
-			conflictingShortcut.setContext(Qt::WidgetWithChildrenShortcut);
-			connect(&conflictingShortcut, &QShortcut::activated, this,
-			        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
+				int       shortcutTriggerCount = 0;
+				QShortcut conflictingShortcut(QKeySequence(QStringLiteral("Alt+6")), input);
+				conflictingShortcut.setContext(Qt::WidgetWithChildrenShortcut);
+				connect(&conflictingShortcut, &QShortcut::activated, this,
+				        [&shortcutTriggerCount] { ++shortcutTriggerCount; });
 
-			QTest::keyClick(input, key, Qt::AltModifier);
-			QCoreApplication::processEvents();
+				QTest::keyClick(input, key, Qt::AltModifier);
+				QCoreApplication::processEvents();
 
-			QCOMPARE(g_acceleratorExecutionCount, 0);
-			QCOMPARE(g_lastExecutedAcceleratorCommand, -1);
-			QCOMPARE(shortcutTriggerCount, 1);
+				QCOMPARE(view.outputLines().count(acceleratorText), 0);
+				QCOMPARE(shortcutTriggerCount, 1);
 
-			QTest::keyClick(input, key, Qt::AltModifier | Qt::KeypadModifier);
-			QCoreApplication::processEvents();
+				QTest::keyClick(input, key, Qt::AltModifier | Qt::KeypadModifier);
+				QCoreApplication::processEvents();
 
-			QCOMPARE(g_acceleratorExecutionCount, 1);
-			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
+				QCOMPARE(view.outputLines().count(acceleratorText), 1);
+			}
 
 			resetTestState();
 		}
@@ -6287,38 +5394,40 @@ class tst_WorldView_Basic : public QObject
 #else
 			resetTestState();
 
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.setAllTypingToCommandWindow(true);
-			QCoreApplication::processEvents();
+			{
+				WorldRuntime *const           runtime = runtimeForTest();
+				WorldView                     view;
+				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				view.resize(900, 640);
+				view.show();
+				setTestRuntime(view, runtime);
+				view.setAllTypingToCommandWindow(true);
+				QCoreApplication::processEvents();
 
-			QPlainTextEdit *input = view.inputEditor();
-			QVERIFY(input);
-			input->setFocus(Qt::OtherFocusReason);
-			QTRY_VERIFY(input->hasFocus());
+				QPlainTextEdit *input = view.inputEditor();
+				QVERIFY(input);
+				input->setFocus(Qt::OtherFocusReason);
+				QTRY_VERIFY(input->hasFocus());
 
-			constexpr Qt::Key key          = Qt::Key_4;
-			constexpr quint16 numpadVk     = 0x64;
-			constexpr int     commandId    = 108;
-			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::AltModifier, numpadVk, true);
-			g_acceleratorCommands.insert(numpadMapKey, commandId);
+				constexpr Qt::Key key             = Qt::Key_4;
+				const QString     acceleratorText = QStringLiteral("accelerator-alt-numpad-ime");
+				QVERIFY(registerOutputAccelerator(*runtime, key, Qt::AltModifier, true, acceleratorText) >=
+				        0);
 
-			QKeyEvent keyPress(QEvent::KeyPress, key, Qt::AltModifier, 0, numpadVk, 0, QStringLiteral("4"),
-			                   false, 1);
-			QCoreApplication::sendEvent(input, &keyPress);
-			QCoreApplication::processEvents();
+				QKeyEvent keyPress(QEvent::KeyPress, key, Qt::AltModifier, 0, 0x64, 0, QStringLiteral("4"),
+				                   false, 1);
+				QCoreApplication::sendEvent(input, &keyPress);
+				QCoreApplication::processEvents();
 
-			QCOMPARE(g_acceleratorExecutionCount, 1);
-			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
+				QCOMPARE(view.outputLines().count(acceleratorText), 1);
 
-			QInputMethodEvent ime;
-			ime.setCommitString(QStringLiteral("\u2666"));
-			QCoreApplication::sendEvent(input, &ime);
-			QCoreApplication::processEvents();
+				QInputMethodEvent ime;
+				ime.setCommitString(QStringLiteral("\u2666"));
+				QCoreApplication::sendEvent(input, &ime);
+				QCoreApplication::processEvents();
 
-			QCOMPARE(input->toPlainText(), QString());
+				QCOMPARE(input->toPlainText(), QString());
+			}
 
 			resetTestState();
 #endif
@@ -6331,38 +5440,40 @@ class tst_WorldView_Basic : public QObject
 #else
 			resetTestState();
 
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.setAllTypingToCommandWindow(true);
-			QCoreApplication::processEvents();
+			{
+				WorldRuntime *const           runtime = runtimeForTest();
+				WorldView                     view;
+				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				view.resize(900, 640);
+				view.show();
+				setTestRuntime(view, runtime);
+				view.setAllTypingToCommandWindow(true);
+				QCoreApplication::processEvents();
 
-			QPlainTextEdit *input = view.inputEditor();
-			QVERIFY(input);
-			input->setFocus(Qt::OtherFocusReason);
-			QTRY_VERIFY(input->hasFocus());
+				QPlainTextEdit *input = view.inputEditor();
+				QVERIFY(input);
+				input->setFocus(Qt::OtherFocusReason);
+				QTRY_VERIFY(input->hasFocus());
 
-			constexpr Qt::Key key          = Qt::Key_4;
-			constexpr quint16 numpadVk     = 0x64;
-			constexpr int     commandId    = 109;
-			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::AltModifier, numpadVk, true);
-			g_acceleratorCommands.insert(numpadMapKey, commandId);
+				constexpr Qt::Key key             = Qt::Key_4;
+				const QString     acceleratorText = QStringLiteral("accelerator-alt-numpad-printable");
+				QVERIFY(registerOutputAccelerator(*runtime, key, Qt::AltModifier, true, acceleratorText) >=
+				        0);
 
-			QKeyEvent acceleratorPress(QEvent::KeyPress, key, Qt::AltModifier, 0, numpadVk, 0,
-			                           QStringLiteral("4"), false, 1);
-			QCoreApplication::sendEvent(input, &acceleratorPress);
-			QCoreApplication::processEvents();
+				QKeyEvent acceleratorPress(QEvent::KeyPress, key, Qt::AltModifier, 0, 0x64, 0,
+				                           QStringLiteral("4"), false, 1);
+				QCoreApplication::sendEvent(input, &acceleratorPress);
+				QCoreApplication::processEvents();
 
-			QCOMPARE(g_acceleratorExecutionCount, 1);
-			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
+				QCOMPARE(view.outputLines().count(acceleratorText), 1);
 
-			QKeyEvent followupPrintable(QEvent::KeyPress, Qt::Key_unknown, Qt::NoModifier, 0, 0, 0,
-			                            QStringLiteral("\u2666"), false, 1);
-			QCoreApplication::sendEvent(input, &followupPrintable);
-			QCoreApplication::processEvents();
+				QKeyEvent followupPrintable(QEvent::KeyPress, Qt::Key_unknown, Qt::NoModifier, 0, 0, 0,
+				                            QStringLiteral("\u2666"), false, 1);
+				QCoreApplication::sendEvent(input, &followupPrintable);
+				QCoreApplication::processEvents();
 
-			QCOMPARE(input->toPlainText(), QString());
+				QCOMPARE(input->toPlainText(), QString());
+			}
 
 			resetTestState();
 #endif
@@ -6375,38 +5486,40 @@ class tst_WorldView_Basic : public QObject
 #else
 			resetTestState();
 
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.setAllTypingToCommandWindow(true);
-			QCoreApplication::processEvents();
+			{
+				WorldRuntime *const           runtime = runtimeForTest();
+				WorldView                     view;
+				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				view.resize(900, 640);
+				view.show();
+				setTestRuntime(view, runtime);
+				view.setAllTypingToCommandWindow(true);
+				QCoreApplication::processEvents();
 
-			QPlainTextEdit *input = view.inputEditor();
-			QVERIFY(input);
-			input->setFocus(Qt::OtherFocusReason);
-			QTRY_VERIFY(input->hasFocus());
+				QPlainTextEdit *input = view.inputEditor();
+				QVERIFY(input);
+				input->setFocus(Qt::OtherFocusReason);
+				QTRY_VERIFY(input->hasFocus());
 
-			constexpr Qt::Key key          = Qt::Key_4;
-			constexpr quint16 numpadVk     = 0x64;
-			constexpr int     commandId    = 110;
-			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::AltModifier, numpadVk, true);
-			g_acceleratorCommands.insert(numpadMapKey, commandId);
+				constexpr Qt::Key key             = Qt::Key_4;
+				const QString     acceleratorText = QStringLiteral("accelerator-alt-numpad-alt-printable");
+				QVERIFY(registerOutputAccelerator(*runtime, key, Qt::AltModifier, true, acceleratorText) >=
+				        0);
 
-			QKeyEvent acceleratorPress(QEvent::KeyPress, key, Qt::AltModifier, 0, numpadVk, 0,
-			                           QStringLiteral("4"), false, 1);
-			QCoreApplication::sendEvent(input, &acceleratorPress);
-			QCoreApplication::processEvents();
+				QKeyEvent acceleratorPress(QEvent::KeyPress, key, Qt::AltModifier, 0, 0x64, 0,
+				                           QStringLiteral("4"), false, 1);
+				QCoreApplication::sendEvent(input, &acceleratorPress);
+				QCoreApplication::processEvents();
 
-			QCOMPARE(g_acceleratorExecutionCount, 1);
-			QCOMPARE(g_lastExecutedAcceleratorCommand, commandId);
+				QCOMPARE(view.outputLines().count(acceleratorText), 1);
 
-			QKeyEvent followupPrintable(QEvent::KeyPress, Qt::Key_unknown, Qt::AltModifier, 0, 0, 0,
-			                            QStringLiteral("\u2666"), false, 1);
-			QCoreApplication::sendEvent(input, &followupPrintable);
-			QCoreApplication::processEvents();
+				QKeyEvent followupPrintable(QEvent::KeyPress, Qt::Key_unknown, Qt::AltModifier, 0, 0, 0,
+				                            QStringLiteral("\u2666"), false, 1);
+				QCoreApplication::sendEvent(input, &followupPrintable);
+				QCoreApplication::processEvents();
 
-			QCOMPARE(input->toPlainText(), QString());
+				QCOMPARE(input->toPlainText(), QString());
+			}
 
 			resetTestState();
 #endif
@@ -6416,33 +5529,31 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			WorldView view;
-			view.resize(900, 640);
-			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.setAllTypingToCommandWindow(true);
-			QCoreApplication::processEvents();
+			{
+				WorldRuntime *const           runtime = runtimeForTest();
+				WorldView                     view;
+				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				view.resize(900, 640);
+				view.show();
+				setTestRuntime(view, runtime);
+				view.setAllTypingToCommandWindow(true);
+				QCoreApplication::processEvents();
 
-			QPlainTextEdit *input = view.inputEditor();
-			QVERIFY(input);
-			input->setFocus(Qt::OtherFocusReason);
-			QTRY_VERIFY(input->hasFocus());
+				QPlainTextEdit *input = view.inputEditor();
+				QVERIFY(input);
+				input->setFocus(Qt::OtherFocusReason);
+				QTRY_VERIFY(input->hasFocus());
 
-			constexpr Qt::Key key          = Qt::Key_8;
-			constexpr quint16 numpadVk     = 0x68;
-			constexpr quint16 topRowVk     = 0x38;
-			constexpr int     commandId    = 99;
-			const qint64      numpadMapKey = makeAcceleratorMapKey(key, Qt::NoModifier, numpadVk, true);
-			g_acceleratorCommands.insert(numpadMapKey, commandId);
-			constexpr quint64 topRowMapId = static_cast<quint64>(static_cast<quint32>(key)) << 1;
-			g_virtualKeyMap.insert(topRowMapId, topRowVk);
+				constexpr Qt::Key key             = Qt::Key_8;
+				const QString     acceleratorText = QStringLiteral("accelerator-numpad-8");
+				QVERIFY(registerOutputAccelerator(*runtime, key, Qt::NoModifier, true, acceleratorText) >= 0);
 
-			QTest::keyClick(input, key, Qt::NoModifier);
-			QCoreApplication::processEvents();
+				QTest::keyClick(input, key, Qt::NoModifier);
+				QCoreApplication::processEvents();
 
-			QCOMPARE(g_acceleratorExecutionCount, 0);
-			QCOMPARE(g_lastExecutedAcceleratorCommand, -1);
-			QCOMPARE(input->toPlainText(), QStringLiteral("8"));
+				QCOMPARE(view.outputLines().count(acceleratorText), 0);
+				QCOMPARE(input->toPlainText(), QStringLiteral("8"));
+			}
 
 			resetTestState();
 		}
@@ -6455,12 +5566,13 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.setAllTypingToCommandWindow(true);
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 320; ++i)
-				view.appendOutputText(QStringLiteral("input-key-scroll-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("input-key-scroll-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 
 			QPlainTextEdit *input = view.inputEditor();
@@ -6564,19 +5676,20 @@ class tst_WorldView_Basic : public QObject
 		void outputNavigationKeysFromInputUseEffectiveShortcutOverrides()
 		{
 			resetTestState();
-			g_useFakeAppController = true;
-			g_globalOptions.insert(QStringLiteral("Shortcut.DisplayStart"), QStringLiteral("PgUp"));
+			AppController app;
+			app.setGlobalOptionString(QStringLiteral("Shortcut.DisplayStart"), QStringLiteral("PgUp"));
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.setAllTypingToCommandWindow(true);
 			view.applyShortcutPreferences();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 320; ++i)
-				view.appendOutputText(QStringLiteral("input-effective-shortcut-scroll-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("input-effective-shortcut-scroll-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QPlainTextEdit *input = view.inputEditor();
@@ -6617,12 +5730,12 @@ class tst_WorldView_Basic : public QObject
 		void scrollbackSplitActivatesAndCollapsesWithAutoPause()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -6630,7 +5743,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(outputSplitter);
 
 			for (int i = 0; i < 300; ++i)
-				view.appendOutputText(QStringLiteral("split-activate-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-activate-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -6676,19 +5789,19 @@ class tst_WorldView_Basic : public QObject
 		{
 			QFETCH(bool, escapeDeletesInput);
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("escape_deletes_input"),
-			                    escapeDeletesInput ? QStringLiteral("1") : QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("escape_deletes_input"),
+			                      escapeDeletesInput ? QStringLiteral("1") : QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 300; ++i)
-				view.appendOutputText(QStringLiteral("split-escape-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-escape-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -6719,17 +5832,18 @@ class tst_WorldView_Basic : public QObject
 		void scrollbackSplitLivePaneSticksToBottomOnAppend()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 260; ++i)
-				view.appendOutputText(QStringLiteral("split-live-stick-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-live-stick-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -6756,7 +5870,7 @@ class tst_WorldView_Basic : public QObject
 			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
 			const int topBeforeAppend = splitTopBar->value();
 
-			view.appendOutputText(QStringLiteral("split-live-stick-new"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-live-stick-new"), true);
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
 			QCOMPARE(splitTopBar->value(), topBeforeAppend);
@@ -6767,18 +5881,18 @@ class tst_WorldView_Basic : public QObject
 		void scrollbackSplitTopPaneStaysAnchoredDuringHeadTrimAppends()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("220"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("220"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(QStringLiteral("split-anchor-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-anchor-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -6819,7 +5933,8 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(beforeAnchorWord.startsWith(QStringLiteral("split-anchor-")));
 
 			for (int i = 0; i < 40; ++i)
-				view.appendOutputText(QStringLiteral("split-anchor-tail-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-anchor-tail-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
 
@@ -6832,26 +5947,27 @@ class tst_WorldView_Basic : public QObject
 		void scrollbackSplitTopPanePreservesWrappedAnchorDuringVariableHeadTrimAppends()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("220"));
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("220"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(540, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 60; ++i)
 			{
-				view.appendOutputText(QStringLiteral("split-variable-trim-%1 ").arg(i) +
-				                          QStringLiteral("wide text ").repeated(48),
-				                      true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-variable-trim-%1 ").arg(i) +
+				                                                QStringLiteral("wide text ").repeated(48),
+				                                            true);
 			}
 			for (int i = 0; i < 160; ++i)
-				view.appendOutputText(QStringLiteral("split-variable-anchor-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-variable-anchor-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -6904,7 +6020,8 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(beforeAnchorWord.startsWith(QStringLiteral("split-variable-anchor-")));
 
 			for (int i = 0; i < 60; ++i)
-				view.appendOutputText(QStringLiteral("split-variable-tail-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-variable-tail-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
 
@@ -6917,18 +6034,19 @@ class tst_WorldView_Basic : public QObject
 		void scrollbackSplitTopPaneStaysAnchoredDuringCappedPluginPromptCycles()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("80"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("80"));
 
 			WorldView view;
 			view.resize(540, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 80; ++i)
-				view.appendOutputText(QStringLiteral("split-plugin-anchor-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-plugin-anchor-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -6974,15 +6092,17 @@ class tst_WorldView_Basic : public QObject
 
 			for (int cycle = 0; cycle < 8; ++cycle)
 			{
-				view.appendOutputText(QStringLiteral("split-plugin-room-%1").arg(cycle), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-plugin-room-%1").arg(cycle),
+				                                            true);
 				view.updatePartialOutputText(QStringLiteral("<split-plugin-prompt-%1> ").arg(cycle));
-				view.appendNoteText(QStringLiteral("W"), false);
-				view.appendNoteText(QStringLiteral(" <---("), false);
-				view.appendNoteText(QStringLiteral("M"), false);
-				view.appendNoteText(QStringLiteral(")---> "), false);
-				view.appendNoteText(QStringLiteral("E"), true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
 				view.updatePartialOutputText(QStringLiteral("<split-plugin-prompt-%1> ").arg(cycle));
-				view.appendOutputText(QStringLiteral("<split-plugin-prompt-%1> look").arg(cycle), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("<split-plugin-prompt-%1> look").arg(cycle), true);
 				QCoreApplication::processEvents();
 			}
 			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
@@ -6995,17 +6115,18 @@ class tst_WorldView_Basic : public QObject
 		void selectionPersistsDuringCappedPluginPromptCycles()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("80"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("80"));
 
 			WorldView view;
 			view.resize(540, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 80; ++i)
-				view.appendOutputText(QStringLiteral("select-plugin-anchor-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("select-plugin-anchor-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 
 			const QStringList lines = view.outputLines();
@@ -7017,15 +6138,17 @@ class tst_WorldView_Basic : public QObject
 
 			for (int cycle = 0; cycle < 6; ++cycle)
 			{
-				view.appendOutputText(QStringLiteral("select-plugin-room-%1").arg(cycle), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("select-plugin-room-%1").arg(cycle), true);
 				view.updatePartialOutputText(QStringLiteral("<select-plugin-prompt-%1> ").arg(cycle));
-				view.appendNoteText(QStringLiteral("W"), false);
-				view.appendNoteText(QStringLiteral(" <---("), false);
-				view.appendNoteText(QStringLiteral("M"), false);
-				view.appendNoteText(QStringLiteral(")---> "), false);
-				view.appendNoteText(QStringLiteral("E"), true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
 				view.updatePartialOutputText(QStringLiteral("<select-plugin-prompt-%1> ").arg(cycle));
-				view.appendOutputText(QStringLiteral("<select-plugin-prompt-%1> look").arg(cycle), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("<select-plugin-prompt-%1> look").arg(cycle), true);
 				QCoreApplication::processEvents();
 			}
 
@@ -7038,18 +6161,19 @@ class tst_WorldView_Basic : public QObject
 		void splitTopSelectionPersistsDuringCappedPluginPromptCycles()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("80"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("80"));
 
 			WorldView view;
 			view.resize(540, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 80; ++i)
-				view.appendOutputText(QStringLiteral("split-select-plugin-anchor-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("split-select-plugin-anchor-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -7090,16 +6214,17 @@ class tst_WorldView_Basic : public QObject
 
 			for (int cycle = 0; cycle < 6; ++cycle)
 			{
-				view.appendOutputText(QStringLiteral("split-select-plugin-room-%1").arg(cycle), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("split-select-plugin-room-%1").arg(cycle), true);
 				view.updatePartialOutputText(QStringLiteral("<split-select-plugin-prompt-%1> ").arg(cycle));
-				view.appendNoteText(QStringLiteral("W"), false);
-				view.appendNoteText(QStringLiteral(" <---("), false);
-				view.appendNoteText(QStringLiteral("M"), false);
-				view.appendNoteText(QStringLiteral(")---> "), false);
-				view.appendNoteText(QStringLiteral("E"), true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
 				view.updatePartialOutputText(QStringLiteral("<split-select-plugin-prompt-%1> ").arg(cycle));
-				view.appendOutputText(QStringLiteral("<split-select-plugin-prompt-%1> look").arg(cycle),
-				                      true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("<split-select-plugin-prompt-%1> look").arg(cycle), true);
 				QCoreApplication::processEvents();
 			}
 
@@ -7111,12 +6236,12 @@ class tst_WorldView_Basic : public QObject
 		void scrollbackSplitKeepsLivePaneSizeOnResize()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(760, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -7124,7 +6249,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(outputSplitter);
 
 			for (int i = 0; i < 260; ++i)
-				view.appendOutputText(QStringLiteral("split-resize-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-resize-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -7158,17 +6283,18 @@ class tst_WorldView_Basic : public QObject
 		void scrollCommandsTargetTopPaneAndCollapseAtEndWhenSplitActive()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 260; ++i)
-				view.appendOutputText(QStringLiteral("split-scroll-cmd-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-scroll-cmd-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -7214,19 +6340,20 @@ class tst_WorldView_Basic : public QObject
 		void splitSelectionAndCopyFollowLastSelectedPane()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
-			view.appendOutputText(QStringLiteral("unique_top_token"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("unique_top_token"), true);
 			for (int i = 0; i < 240; ++i)
-				view.appendOutputText(QStringLiteral("split-select-fill-%1").arg(i), true);
-			view.appendOutputText(QStringLiteral("unique_live_token"), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-select-fill-%1").arg(i),
+				                                            true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("unique_live_token"), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -7289,18 +6416,18 @@ class tst_WorldView_Basic : public QObject
 		void splitSelectionDragSpansTopAndLivePanes()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 280; ++i)
-				view.appendOutputText(QStringLiteral("cross-pane-select-%1").arg(i, 3, 10, QLatin1Char('0')),
-				                      true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("cross-pane-select-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -7403,17 +6530,18 @@ class tst_WorldView_Basic : public QObject
 		void selectionTracksAcrossHeadTrimWhileVisibleThenPersistsOutOfViewport()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("90"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("90"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 90; ++i)
-				view.appendOutputText(QStringLiteral("trim-track-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("trim-track-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
 			const QStringList lines = view.outputLines();
@@ -7424,7 +6552,7 @@ class tst_WorldView_Basic : public QObject
 			                       boundedSizeToInt(selectedText.size()));
 			QTRY_COMPARE(view.outputSelectionText(), selectedText);
 
-			view.appendOutputText(QStringLiteral("trim-track-tail-primer"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("trim-track-tail-primer"), true);
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(view.outputSelectionText(), selectedText);
 
@@ -7436,7 +6564,8 @@ class tst_WorldView_Basic : public QObject
 			const int visibleLinesEstimate    = qMax(1, bar->pageStep() / lineHeight);
 			const int appendCountForOutOfView = visibleLinesEstimate + 8;
 			for (int i = 0; i < appendCountForOutOfView; ++i)
-				view.appendOutputText(QStringLiteral("trim-track-tail-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("trim-track-tail-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 
 			QTRY_VERIFY(view.hasOutputSelection());
@@ -7452,13 +6581,13 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 260; ++i)
-				view.appendOutputText(QStringLiteral("manual-clear-%1").arg(i, 3, 10, QLatin1Char('0')),
-				                      true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("manual-clear-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
 			const QStringList lines = view.outputLines();
@@ -7489,13 +6618,13 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 260; ++i)
-				view.appendOutputText(QStringLiteral("offscreen-repaint-%1").arg(i, 3, 10, QLatin1Char('0')),
-				                      true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("offscreen-repaint-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -7538,17 +6667,18 @@ class tst_WorldView_Basic : public QObject
 		void splitTopSelectionPersistsWhenManualScrollMovesItOutOfView()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 320; ++i)
-				view.appendOutputText(QStringLiteral("split-clear-%1").arg(i, 3, 10, QLatin1Char('0')), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("split-clear-%1").arg(i, 3, 10, QLatin1Char('0')), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -7602,18 +6732,19 @@ class tst_WorldView_Basic : public QObject
 		void collapsedSplitPreservesLivePaneSelection()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(QStringLiteral("collapse-hidden-live-%1").arg(i), true);
-			view.appendOutputText(QStringLiteral("collapse_hidden_live_token"), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("collapse-hidden-live-%1").arg(i),
+				                                            true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("collapse_hidden_live_token"), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *topBrowser = findVisibleOutputBrowser(view);
@@ -7666,7 +6797,7 @@ class tst_WorldView_Basic : public QObject
 				WorldView view;
 				view.resize(900, 640);
 				view.show();
-				view.setRuntimeObserver(fakeRuntimePointer());
+				setTestRuntimeObserver(view, runtimeForTest());
 				QCoreApplication::processEvents();
 				auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 				QVERIFY(nativeCanvas);
@@ -7681,9 +6812,9 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
-			view.appendOutputText(QStringLiteral("toggle-runtime-output"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("toggle-runtime-output"), true);
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
@@ -7705,13 +6836,13 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendOutputText(QStringLiteral("native-plain-line"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("native-plain-line"), true);
 			nativeCanvas->update();
 
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 1);
@@ -7727,7 +6858,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
@@ -7740,7 +6871,8 @@ class tst_WorldView_Basic : public QObject
 			span.bold   = true;
 			span.italic = true;
 
-			view.appendOutputTextStyled(QStringLiteral("styled-background"), {span}, true);
+			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("styled-background"), {span},
+			                                                  true);
 			QCoreApplication::processEvents();
 
 			nativeCanvas->update();
@@ -7770,13 +6902,13 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(360, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -7784,7 +6916,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			const QString longLine = QStringLiteral("native wrap test ") + QString(180, QLatin1Char('w'));
-			view.appendOutputText(longLine, true);
+			runtimeOutputForTest(view).appendOutputText(longLine, true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -7798,14 +6930,14 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("80"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("80"));
 
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -7813,7 +6945,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			const QString wrappedLocalText = QStringLiteral("local one\nlocal two\nlocal three");
-			view.appendOutputText(wrappedLocalText, true);
+			runtimeForTest()->addLine(wrappedLocalText, WorldRuntime::LineOutput, true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -7827,22 +6959,22 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("12"));
-			g_worldAttrs.insert(QStringLiteral("indent_paras"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("12"));
+			setTestWorldAttribute(QStringLiteral("indent_paras"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			appendFakeRuntimeOutputText(view, QStringLiteral("alpha beta gamma\nshort"), {}, true, true);
+			appendRuntimeOutputText(view, QStringLiteral("alpha beta gamma\nshort"), {}, true, true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -7863,22 +6995,23 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendNoteText(QStringLiteral("lua-note-path"), true);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("lua-note-path"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
 
-			QCOMPARE(g_runtimeLines.size(), 1);
-			QCOMPARE(g_runtimeLines.constFirst().text, QStringLiteral("lua-note-path"));
-			QVERIFY((g_runtimeLines.constFirst().flags & WorldRuntime::LineNote) != 0);
-			QVERIFY(g_runtimeLines.constFirst().hardReturn);
-			QVERIFY(!g_runtimeLines.constFirst().spans.isEmpty());
+			const IndexedRingBuffer<WorldRuntime::LineEntry> &runtimeLines = runtimeForTest()->lines();
+			QCOMPARE(runtimeLines.size(), 1);
+			QCOMPARE(runtimeLines.constFirst().text, QStringLiteral("lua-note-path"));
+			QVERIFY((runtimeLines.constFirst().flags & WorldRuntime::LineNote) != 0);
+			QVERIFY(runtimeLines.constFirst().hardReturn);
+			QVERIFY(!runtimeLines.constFirst().spans.isEmpty());
 			QCOMPARE(view.outputLines(), QStringList{QStringLiteral("lua-note-path")});
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
 			             QStringLiteral("lua-note-path"));
@@ -7889,15 +7022,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("12"));
-			g_worldAttrs.insert(QStringLiteral("indent_paras"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("12"));
+			setTestWorldAttribute(QStringLiteral("indent_paras"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -7905,7 +7038,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			const QString text = QStringLiteral("alpha beta gamma");
-			appendFakeRuntimeOutputText(
+			appendRuntimeOutputText(
 			    view, text,
 			    {makeFullSpan(text, QColor(QStringLiteral("#ff0000")), QColor(QStringLiteral("#000000")))},
 			    true, true);
@@ -7921,31 +7054,29 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void nativeOutputRendererNawsEnabledPluginOutputUsesAutomaticLocalWrapColumn()
+		void nativeOutputRendererPluginOutputUsesAutomaticLocalWrapColumn()
 		{
 			resetTestState();
 
-			g_connected      = true;
-			g_nawsNegotiated = true;
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("40"));
-			g_worldAttrs.insert(QStringLiteral("indent_paras"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("40"));
+			setTestWorldAttribute(QStringLiteral("indent_paras"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			appendFakeRuntimeOutputText(view,
-			                            QStringLiteral("one two three four five six seven eight nine ten "
-			                                           "eleven twelve thirteen fourteen!"),
-			                            {}, true, true);
+			appendRuntimeOutputText(view,
+			                        QStringLiteral("one two three four five six seven eight nine ten "
+			                                       "eleven twelve thirteen fourteen!"),
+			                        {}, true, true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -7965,7 +7096,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
@@ -7981,9 +7112,7 @@ class tst_WorldView_Basic : public QObject
 			    makeRuntimeLine(QString(), WorldRuntime::LineNote, true, 106),
 			    makeRuntimeLine(QStringLiteral("<2060hp 1694sp 1595st>"), WorldRuntime::LineOutput, true,
 			                    107)};
-			g_runtimeLines = lines;
-
-			view.restoreOutputFromPersistedLines(lines);
+			runtimeForTest()->replaceOutputLines(lines);
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
 
@@ -8003,20 +7132,20 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendOutputText(QStringLiteral("A Trail of Two Tails"), true);
-			view.appendNoteText(QStringLiteral("W"), false);
-			view.appendNoteText(QStringLiteral(" <---("), false);
-			view.appendNoteText(QStringLiteral("M"), false);
-			view.appendNoteText(QStringLiteral(")---> "), false);
-			view.appendNoteText(QStringLiteral("E"), false);
-			view.appendNoteText(QString(), true);
-			view.appendOutputText(QStringLiteral("<2060hp 1694sp 1595st>"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("A Trail of Two Tails"), true);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), false);
+			runtimeOutputForTest(view).appendNoteText(QString(), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<2060hp 1694sp 1595st>"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -8037,13 +7166,13 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendOutputText(QStringLiteral("room description"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("room description"), true);
 			view.updatePartialOutputText(QStringLiteral("<2060hp 1694sp> "));
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
@@ -8051,7 +7180,7 @@ class tst_WorldView_Basic : public QObject
 
 			QVERIFY(view.outputLines().contains(QStringLiteral("<2060hp 1694sp> ")));
 
-			view.appendNoteText(QStringLiteral("[gmcp: no-npcs / city street]"), true);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("[gmcp: no-npcs / city street]"), true);
 			view.updatePartialOutputText(QStringLiteral("<2060hp 1694sp> "));
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
@@ -8062,7 +7191,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(lines.contains(QStringLiteral("[gmcp: no-npcs / city street]")));
 			QCOMPARE(lines.constLast(), QStringLiteral("<2060hp 1694sp> "));
 
-			view.appendOutputText(QStringLiteral("<2060hp 1694sp> look"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<2060hp 1694sp> look"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -8082,14 +7211,14 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
 			const QString prompt = QStringLiteral("[Library][SAFE]<2084hp 1806sp 1695st> ");
-			view.appendOutputText(QStringLiteral("room description"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("room description"), true);
 			view.updatePartialOutputText(prompt);
 			QCoreApplication::processEvents();
 			nativeCanvas->repaint();
@@ -8097,12 +7226,12 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(view.outputLines().contains(prompt));
 
 			view.clearPartialOutput();
-			view.appendNoteText(QStringLiteral("["), false);
-			view.appendNoteText(QStringLiteral("435"), false);
-			view.appendNoteText(QStringLiteral(", "), false);
-			view.appendNoteText(QStringLiteral("1226"), false);
-			view.appendNoteText(QStringLiteral("]"), true);
-			view.appendOutputText(prompt, true);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("["), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("435"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral(", "), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("1226"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("]"), true);
+			runtimeOutputForTest(view).appendOutputText(prompt, true);
 			QCoreApplication::processEvents();
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
@@ -8123,7 +7252,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
@@ -8135,9 +7264,7 @@ class tst_WorldView_Basic : public QObject
 			                    300),
 			    makeRuntimeLine(QStringLiteral("<2060hp 1694sp 1595st>"), WorldRuntime::LineOutput, true,
 			                    200)};
-			g_runtimeLines = lines;
-
-			view.restoreOutputFromPersistedLines(lines);
+			runtimeForTest()->replaceOutputLines(lines);
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
 
@@ -8152,29 +7279,29 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("12"));
-			g_worldAttrs.insert(QStringLiteral("indent_paras"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("12"));
+			setTestWorldAttribute(QStringLiteral("indent_paras"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendNoteText(QStringLiteral("tell "), false);
-			view.appendNoteTextStyled(
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("tell "), false);
+			runtimeOutputForTest(view).appendNoteTextStyled(
 			    QStringLiteral("colour-tell "),
 			    {makeFullSpan(QStringLiteral("colour-tell "), QColor(QStringLiteral("#00ff00")),
 			                  QColor(QStringLiteral("#000000")))},
 			    false);
-			appendFakeRuntimeOutputText(view, QStringLiteral("note alpha beta gamma"), {}, true, true);
-			appendFakeRuntimeOutputText(
+			appendRuntimeOutputText(view, QStringLiteral("note alpha beta gamma"), {}, true, true);
+			appendRuntimeOutputText(
 			    view, QStringLiteral("colour note delta epsilon"),
 			    {makeFullSpan(QStringLiteral("colour note delta epsilon"), QColor(QStringLiteral("#ff0000")),
 			                  QColor(QStringLiteral("#000000")))},
@@ -8190,7 +7317,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(lines.contains(QStringLiteral("colour note ")));
 			QVERIFY(lines.contains(QStringLiteral("delta ")));
 			QCOMPARE(lines.constLast(), QStringLiteral("epsilon"));
-			QVERIFY(std::ranges::any_of(g_runtimeLines, [](const WorldRuntime::LineEntry &line)
+			QVERIFY(std::ranges::any_of(runtimeForTest()->lines(), [](const WorldRuntime::LineEntry &line)
 			                            { return (line.flags & WorldRuntime::LineNote) != 0; }));
 			resetTestState();
 		}
@@ -8199,15 +7326,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("12"));
-			g_worldAttrs.insert(QStringLiteral("indent_paras"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("12"));
+			setTestWorldAttribute(QStringLiteral("indent_paras"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8221,7 +7348,7 @@ class tst_WorldView_Basic : public QObject
 			incoming.append(QByteArrayLiteral(" done"));
 			const QByteArray processed = processor.processBytes(incoming);
 
-			appendFakeRuntimeOutputText(view, QString::fromUtf8(processed), {}, false, false);
+			appendRuntimeOutputText(view, QString::fromUtf8(processed), {}, false, false);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -8238,12 +7365,12 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererMxpSendLinkSurvivesParserWrapAndRestitch()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("8"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("8"));
 
 			WorldView view;
 			view.resize(720, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8251,7 +7378,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			for (int i = 0; i < 8; ++i)
-				view.appendOutputText(QStringLiteral("mxp-primer-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("mxp-primer-%1").arg(i), true);
 
 			TelnetProcessor processor;
 			processor.setUseMxp(eOnCommandMXP);
@@ -8274,8 +7401,8 @@ class tst_WorldView_Basic : public QObject
 			span.length     = boundedSizeToInt(QByteArrayLiteral("look portal").size());
 			span.actionType = WorldRuntime::ActionSend;
 			span.action = QString::fromUtf8(events.constFirst().attributes.value(QByteArrayLiteral("href")));
-			appendFakeRuntimeOutputText(view, QString::fromUtf8(output.chopped(1)), {span}, false, true);
-			view.appendOutputText(QStringLiteral("<mxp-prompt>"), true);
+			appendRuntimeOutputText(view, QString::fromUtf8(output.chopped(1)), {span}, false, true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<mxp-prompt>"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -8295,12 +7422,12 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererOsc8LinkSurvivesParserWrapAndRestitch()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("8"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("8"));
 
 			WorldView view;
 			view.resize(720, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8308,7 +7435,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			for (int i = 0; i < 8; ++i)
-				view.appendOutputText(QStringLiteral("osc-primer-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("osc-primer-%1").arg(i), true);
 
 			const QString href = QStringLiteral("https://example.org/osc8-parser");
 			QByteArray    bytes;
@@ -8331,8 +7458,8 @@ class tst_WorldView_Basic : public QObject
 			    plainText);
 
 			QCOMPARE(plainText, QStringLiteral("open portal"));
-			appendFakeRuntimeOutputText(view, plainText, spans, false, true);
-			view.appendOutputText(QStringLiteral("<osc-prompt>"), true);
+			appendRuntimeOutputText(view, plainText, spans, false, true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<osc-prompt>"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -8356,7 +7483,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(720, 420);
 			view.show();
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
@@ -8365,15 +7492,14 @@ class tst_WorldView_Basic : public QObject
 			QVector<WorldRuntime::LineEntry> restoredLines{
 			    makeRuntimeLine(QStringLiteral("restore-room"), WorldRuntime::LineOutput, true, 10),
 			    makeRuntimeLine(QStringLiteral("<restore-prompt>"), WorldRuntime::LineOutput, true, 11)};
-			g_runtimeLines = restoredLines;
-			view.restoreOutputFromPersistedLines(restoredLines);
+			runtimeForTest()->replaceOutputLines(restoredLines);
 
 			const bool queued = QMetaObject::invokeMethod(
 			    &view,
 			    [&view]
 			    {
-				    view.appendNoteText(QStringLiteral("[queued-lua-output]"), true);
-				    view.appendOutputText(QStringLiteral("<queued-prompt>"), true);
+				    runtimeOutputForTest(view).appendNoteText(QStringLiteral("[queued-lua-output]"), true);
+				    runtimeOutputForTest(view).appendOutputText(QStringLiteral("<queued-prompt>"), true);
 			    },
 			    Qt::QueuedConnection);
 			QVERIFY(queued);
@@ -8395,14 +7521,14 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("80"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("80"));
 
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8410,7 +7536,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			const QString wrappedLine = QStringLiteral("first\nsecond\nthird");
-			view.appendOutputText(wrappedLine, true);
+			runtimeForTest()->addLine(wrappedLine, WorldRuntime::LineOutput, true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -8419,8 +7545,8 @@ class tst_WorldView_Basic : public QObject
 			QTRY_COMPARE(view.outputLines().size(), 1);
 			QCOMPARE(view.outputLines().constFirst(), wrappedLine);
 
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("120"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("120"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
@@ -8432,20 +7558,18 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void nawsMiniWindowMarginChangesDoNotRewrapExistingNativeOutput()
+		void miniWindowMarginChangesDoNotRewrapExistingNativeOutput()
 		{
 			resetTestState();
 
-			g_connected      = true;
-			g_nawsNegotiated = true;
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("80"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("80"));
 
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8453,7 +7577,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			const QString wrappedLine = QStringLiteral("alpha\nbeta\ngamma");
-			view.appendOutputText(wrappedLine, true);
+			runtimeForTest()->addLine(wrappedLine, WorldRuntime::LineOutput, true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -8463,9 +7587,10 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.outputLines().constFirst(), wrappedLine);
 
 			MiniWindow &dock = appendTestMiniWindow(QStringLiteral("dock"), QRect(0, 0, 120, 140), 0,
-			                                        QColor(20, 20, 20, 200));
-			dock.position    = 6;
-			view.onMiniWindowsChanged();
+			                                        QColor(20, 20, 20, 200), false);
+			QCOMPARE(runtimeForTest()->windowPosition(dock.name, dock.location.x(), dock.location.y(), 6,
+			                                          dock.flags),
+			         eOK);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -8474,9 +7599,9 @@ class tst_WorldView_Basic : public QObject
 			QTRY_COMPARE(view.outputLines().size(), 1);
 			QCOMPARE(view.outputLines().constFirst(), wrappedLine);
 
-			dock.width = 220;
-			dock.rect.setWidth(220);
-			view.onMiniWindowsChanged();
+			QCOMPARE(runtimeForTest()->windowResize(dock.name, 220, dock.height,
+			                                        MiniWindowUtils::colorToRef(dock.background)),
+			         eOK);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -8491,16 +7616,14 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_connected      = true;
-			g_nawsNegotiated = true;
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("80"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("80"));
 
 			WorldView view;
 			view.resize(900, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8510,9 +7633,10 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(viewportWidthBefore > 0);
 
 			MiniWindow &dock = appendTestMiniWindow(QStringLiteral("dock-clip"), QRect(0, 0, 150, 140), 0,
-			                                        QColor(20, 20, 20, 200));
-			dock.position    = 6;
-			view.onMiniWindowsChanged();
+			                                        QColor(20, 20, 20, 200), false);
+			QCOMPARE(runtimeForTest()->windowPosition(dock.name, dock.location.x(), dock.location.y(), 6,
+			                                          dock.flags),
+			         eOK);
 			QCoreApplication::processEvents();
 
 			browser = findVisibleOutputBrowser(view);
@@ -8526,13 +7650,13 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("20"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("20"));
 
 			WorldView view;
 			view.resize(1600, 480);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8558,13 +7682,13 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("pixel_offset"), QStringLiteral("8"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("pixel_offset"), QStringLiteral("8"));
 
 			WorldView view;
 			view.resize(700, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8580,15 +7704,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(360, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8610,15 +7734,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("50"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(340, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8662,7 +7786,7 @@ class tst_WorldView_Basic : public QObject
 			inputSplitter->setSizes(QList<int>() << 0 << 1000);
 
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8680,12 +7804,12 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(420, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8704,9 +7828,9 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY2(sizesBeforeToggle.at(1) >= qMax(expandedInputHeight - 4, 100),
 			         "Precondition failed: command pane did not expand before auto-resize toggle.");
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8726,15 +7850,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(340, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8750,14 +7874,14 @@ class tst_WorldView_Basic : public QObject
 			QTRY_VERIFY(input->height() > singleHeight);
 			const int expandedHeight = input->height();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("1"));
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 			QTRY_VERIFY2(input->height() < expandedHeight,
 			             "Reducing auto-resize maximum lines should shrink input without any text edit.");
 			QCOMPARE(input->height(), singleHeight);
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 			QTRY_VERIFY2(
@@ -8771,15 +7895,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(360, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8822,15 +7946,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(360, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8895,15 +8019,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("20"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(360, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -8962,15 +8086,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("8"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("8"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(360, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -9019,15 +8143,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("8"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("8"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(360, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -9104,15 +8228,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(420, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -9139,7 +8263,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(420, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -9162,15 +8286,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("12"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("12"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(380, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -9194,16 +8318,16 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("auto_repeat"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("6"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_repeat"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(360, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -9246,15 +8370,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("2"));
-			g_worldAttrs.insert(QStringLiteral("wrap_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_command_window"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_minimum_lines"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_resize_maximum_lines"), QStringLiteral("2"));
+			setTestWorldAttribute(QStringLiteral("wrap_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(360, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -9284,7 +8408,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			g_textRectangle.left              = 220;
@@ -9295,6 +8419,7 @@ class tst_WorldView_Basic : public QObject
 			g_textRectangle.borderWidth       = 0;
 			g_textRectangle.outsideFillStyle  = 0;        // solid
 			g_textRectangle.outsideFillColour = 0x00FF00; // green (COLORREF)
+			setTestTextRectangle(g_textRectangle);
 			view.updateWrapMargin();
 			QCoreApplication::processEvents();
 
@@ -9329,7 +8454,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			QSplitter *outputSplitter = findOutputSplitter(view);
@@ -9348,6 +8473,7 @@ class tst_WorldView_Basic : public QObject
 			g_textRectangle.borderColour      = 0x00FFFFFF;
 			g_textRectangle.outsideFillStyle  = 0;
 			g_textRectangle.outsideFillColour = 0x00334455;
+			setTestTextRectangle(g_textRectangle);
 			view.updateWrapMargin();
 
 			appendTestMiniWindow(QStringLiteral("current-underlay"), QRect(35, 35, 180, 120),
@@ -9384,7 +8510,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			QSplitter *outputSplitter = findOutputSplitter(view);
@@ -9421,7 +8547,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			QSplitter *outputSplitter = findOutputSplitter(view);
@@ -9464,7 +8590,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			g_textRectangle.left              = 70;
@@ -9476,6 +8602,7 @@ class tst_WorldView_Basic : public QObject
 			g_textRectangle.borderColour      = 0x000000FF;
 			g_textRectangle.outsideFillStyle  = 0;
 			g_textRectangle.outsideFillColour = 0x00334455;
+			setTestTextRectangle(g_textRectangle);
 			view.updateWrapMargin();
 			QCoreApplication::processEvents();
 
@@ -9491,6 +8618,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(edgeDamage.rectCount() <= 4);
 
 			g_textRectangle.borderOffset = 5;
+			setTestTextRectangle(g_textRectangle);
 			view.updateWrapMargin();
 			QCoreApplication::processEvents();
 			QVERIFY(
@@ -9506,7 +8634,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			g_textRectangle.left              = 70;
@@ -9518,6 +8646,7 @@ class tst_WorldView_Basic : public QObject
 			g_textRectangle.borderColour      = 0x000000FF;
 			g_textRectangle.outsideFillStyle  = 0;
 			g_textRectangle.outsideFillColour = 0x00334455;
+			setTestTextRectangle(g_textRectangle);
 			view.updateWrapMargin();
 			QCoreApplication::processEvents();
 
@@ -9591,7 +8720,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			QSplitter *outputSplitter = findOutputSplitter(view);
@@ -9609,6 +8738,7 @@ class tst_WorldView_Basic : public QObject
 			g_textRectangle.borderWidth      = std::numeric_limits<int>::max();
 			g_textRectangle.borderColour     = 0x000000FF;
 			g_textRectangle.outsideFillStyle = 1;
+			setTestTextRectangle(g_textRectangle);
 			view.updateWrapMargin();
 			QCoreApplication::processEvents();
 
@@ -9645,18 +8775,18 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(900, 640);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			// Force long unwrapped output that crosses the overlay miniwindow bounds.
-			view.appendOutputText(QStringLiteral("W").repeated(1200), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("W").repeated(1200), true);
 			QCoreApplication::processEvents();
 
 			constexpr QColor overlayColour(255, 0, 255, 255);
@@ -9696,13 +8826,13 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(640, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendOutputText(QStringLiteral("inc-one"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("inc-one"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -9711,7 +8841,7 @@ class tst_WorldView_Basic : public QObject
 			const int updatesBefore = nativeCanvas->property("qmud_native_cache_incremental_updates").toInt();
 			QVERIFY(rebuildsBefore > 0 || updatesBefore > 0);
 
-			view.appendOutputText(QStringLiteral("inc-two"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("inc-two"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -9725,20 +8855,22 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void nativeOutputRendererTreatsTailHardReturnFlipAsIncremental()
+		void nativeOutputRendererCommitsIncomingPartialLineIncrementally()
 		{
 			resetTestState();
 
-			WorldView view;
+			WorldRuntime *const           runtime = runtimeForTest();
+			WorldView                     view;
+			ScopedRuntimeCommandProcessor processor(*runtime, view);
 			view.resize(640, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntime(view, runtime);
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendOutputText(QStringLiteral("tail-open"), false);
+			runtime->receiveRawData(QByteArrayLiteral("tail-open"));
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -9749,8 +8881,7 @@ class tst_WorldView_Basic : public QObject
 
 			const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
 
-			QVERIFY(!g_runtimeLines.isEmpty());
-			g_runtimeLines.last().hardReturn = true;
+			QVERIFY(view.commitPendingIncomingPartialOutput());
 
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -9769,13 +8900,13 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(640, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendOutputText(QStringLiteral("settings-one"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("settings-one"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -9794,7 +8925,7 @@ class tst_WorldView_Basic : public QObject
 			const int updatesBeforeAppend =
 			    nativeCanvas->property("qmud_native_cache_incremental_updates").toInt();
 
-			view.appendOutputText(QStringLiteral("settings-two"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("settings-two"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -9817,7 +8948,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(640, 420);
 			view.show();
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -9835,9 +8966,7 @@ class tst_WorldView_Basic : public QObject
 				entry.lineNumber = (i + 1) * 10;
 				restoredLines.push_back(entry);
 			}
-			g_runtimeLines = restoredLines;
-
-			view.restoreOutputFromPersistedLines(restoredLines);
+			runtimeForTest()->replaceOutputLines(restoredLines);
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
 
@@ -9861,11 +8990,12 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererNonContiguousRollingWindowStaysIncremental()
 		{
 			resetTestState();
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("4"));
 
 			WorldView view;
 			view.resize(640, 420);
 			view.show();
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -9883,9 +9013,7 @@ class tst_WorldView_Basic : public QObject
 				entry.lineNumber = (i + 1) * 10;
 				restoredLines.push_back(entry);
 			}
-			g_runtimeLines = restoredLines;
-
-			view.restoreOutputFromPersistedLines(restoredLines);
+			runtimeForTest()->replaceOutputLines(restoredLines);
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
 
@@ -9894,13 +9022,7 @@ class tst_WorldView_Basic : public QObject
 			const int updatesBefore = nativeCanvas->property("qmud_native_cache_incremental_updates").toInt();
 			const int trimDropsBefore = nativeCanvas->property("qmud_native_cache_trim_drops").toInt();
 
-			g_runtimeLines.removeFirst();
-			WorldRuntime::LineEntry appended;
-			appended.text       = QStringLiteral("noncontig-roll-4");
-			appended.flags      = WorldRuntime::LineOutput;
-			appended.hardReturn = true;
-			appended.lineNumber = 50;
-			g_runtimeLines.push_back(appended);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("noncontig-roll-4"), true);
 
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
@@ -9918,12 +9040,12 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererCappedBufferKeepsPluginPromptTailIncremental()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("10"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("10"));
 
 			WorldView view;
 			view.resize(700, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -9931,28 +9053,28 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			for (int i = 0; i < 10; ++i)
-				view.appendOutputText(QStringLiteral("cap-primer-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("cap-primer-%1").arg(i), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
 
-			QTRY_COMPARE(g_runtimeLines.size(), 10);
+			QTRY_COMPARE(runtimeForTest()->lines().size(), 10);
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 10);
 			const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
 
-			view.appendOutputText(QStringLiteral("cap-room"), true);
-			view.appendNoteText(QStringLiteral("W"), false);
-			view.appendNoteText(QStringLiteral(" <---("), false);
-			view.appendNoteText(QStringLiteral("M"), false);
-			view.appendNoteText(QStringLiteral(")---> "), false);
-			view.appendNoteText(QStringLiteral("E"), true);
-			view.appendOutputText(QStringLiteral("<cap-prompt>"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("cap-room"), true);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<cap-prompt>"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
 
 			const QStringList lines = view.outputLines();
-			QCOMPARE(g_runtimeLines.size(), 10);
+			QCOMPARE(runtimeForTest()->lines().size(), 10);
 			QVERIFY(!lines.contains(QStringLiteral("cap-primer-0")));
 			QVERIFY(lines.contains(QStringLiteral("cap-room")));
 			QVERIFY(lines.contains(QStringLiteral("W <---(M)---> E")));
@@ -9966,12 +9088,12 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererRepeatedCappedPluginPromptCyclesStayIncremental()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("24"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("24"));
 
 			WorldView view;
 			view.resize(700, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -9979,29 +9101,30 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			for (int i = 0; i < 24; ++i)
-				view.appendOutputText(QStringLiteral("cycle-primer-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("cycle-primer-%1").arg(i), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
 
-			QTRY_COMPARE(g_runtimeLines.size(), 24);
+			QTRY_COMPARE(runtimeForTest()->lines().size(), 24);
 			const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
 
 			for (int cycle = 0; cycle < 5; ++cycle)
 			{
-				view.appendOutputText(QStringLiteral("cycle-room-%1").arg(cycle), true);
-				view.appendNoteText(QStringLiteral("W"), false);
-				view.appendNoteText(QStringLiteral(" <---("), false);
-				view.appendNoteText(QStringLiteral("M"), false);
-				view.appendNoteText(QStringLiteral(")---> "), false);
-				view.appendNoteText(QStringLiteral("E"), true);
-				view.appendOutputText(QStringLiteral("<cycle-prompt-%1>").arg(cycle), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("cycle-room-%1").arg(cycle), true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("<cycle-prompt-%1>").arg(cycle),
+				                                            true);
 				QCoreApplication::processEvents();
 				nativeCanvas->update();
 				QCoreApplication::processEvents();
 
 				const QStringList lines = view.outputLines();
-				QCOMPARE(g_runtimeLines.size(), 24);
+				QCOMPARE(runtimeForTest()->lines().size(), 24);
 				QVERIFY(lines.contains(QStringLiteral("W <---(M)---> E")));
 				QCOMPARE(lines.constLast(), QStringLiteral("<cycle-prompt-%1>").arg(cycle));
 				QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(),
@@ -10013,12 +9136,12 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererCappedLuaPluginWorkloadAvoidsFullRebuilds()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("80"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("80"));
 
 			WorldView view;
 			view.resize(720, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -10026,7 +9149,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			for (int i = 0; i < 80; ++i)
-				view.appendOutputText(QStringLiteral("guard-primer-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("guard-primer-%1").arg(i), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -10037,24 +9160,27 @@ class tst_WorldView_Basic : public QObject
 			const int layoutRowsBefore =
 			    nativeCanvas->property("qmud_native_layout_row_measurements").toInt();
 
-			for (int cycle = 0; cycle < 12; ++cycle)
+			constexpr int kWorkloadCycles = 12;
+			for (int cycle = 0; cycle < kWorkloadCycles; ++cycle)
 			{
-				view.appendOutputText(QStringLiteral("guard-room-%1").arg(cycle), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("guard-room-%1").arg(cycle), true);
 				view.updatePartialOutputText(QStringLiteral("<guard-prompt-%1> ").arg(cycle));
-				view.appendNoteText(QStringLiteral("[gmcp: no-npcs / city street]"), true);
-				view.appendNoteText(QStringLiteral("W"), false);
-				view.appendNoteText(QStringLiteral(" <---("), false);
-				view.appendNoteText(QStringLiteral("M"), false);
-				view.appendNoteText(QStringLiteral(")---> "), false);
-				view.appendNoteText(QStringLiteral("E"), true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("[gmcp: no-npcs / city street]"),
+				                                          true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("W"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral(" <---("), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("M"), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
 				view.updatePartialOutputText(QStringLiteral("<guard-prompt-%1> ").arg(cycle));
-				view.appendOutputText(QStringLiteral("<guard-prompt-%1> look").arg(cycle), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("<guard-prompt-%1> look").arg(cycle), true);
 				QCoreApplication::processEvents();
 				nativeCanvas->update();
 				QCoreApplication::processEvents();
 
 				const QStringList lines = view.outputLines();
-				QCOMPARE(g_runtimeLines.size(), 80);
+				QCOMPARE(runtimeForTest()->lines().size(), 80);
 				QVERIFY(lines.contains(QStringLiteral("[gmcp: no-npcs / city street]")));
 				QVERIFY(lines.contains(QStringLiteral("W <---(M)---> E")));
 				QCOMPARE(lines.constLast(), QStringLiteral("<guard-prompt-%1> look").arg(cycle));
@@ -10066,20 +9192,23 @@ class tst_WorldView_Basic : public QObject
 			         restitchFailuresBefore);
 			const int measuredDelta =
 			    nativeCanvas->property("qmud_native_layout_row_measurements").toInt() - layoutRowsBefore;
-			QVERIFY2(measuredDelta <= 256,
-			         qPrintable(QStringLiteral("Expected bounded layout work, delta=%1").arg(measuredDelta)));
+			constexpr int kMaximumLayoutMeasurementsPerCycle = 24;
+			QVERIFY2(
+			    measuredDelta <= kWorkloadCycles * kMaximumLayoutMeasurementsPerCycle,
+			    qPrintable(
+			        QStringLiteral("Expected bounded per-cycle layout work, delta=%1").arg(measuredDelta)));
 			resetTestState();
 		}
 
 		void nativeOutputRendererCappedPartialPromptPluginCycleKeepsPromptTail()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("14"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("14"));
 
 			WorldView view;
 			view.resize(700, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -10087,25 +9216,28 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			for (int i = 0; i < 14; ++i)
-				view.appendOutputText(QStringLiteral("partial-primer-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("partial-primer-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			for (int cycle = 0; cycle < 4; ++cycle)
 			{
-				view.appendOutputText(QStringLiteral("partial-room-%1").arg(cycle), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("partial-room-%1").arg(cycle),
+				                                            true);
 				view.updatePartialOutputText(QStringLiteral("<partial-prompt-%1> ").arg(cycle));
-				view.appendNoteText(QStringLiteral("[gmcp: no-npcs / city street]"), true);
+				runtimeOutputForTest(view).appendNoteText(QStringLiteral("[gmcp: no-npcs / city street]"),
+				                                          true);
 				view.updatePartialOutputText(QStringLiteral("<partial-prompt-%1> ").arg(cycle));
 				QCoreApplication::processEvents();
 				QCOMPARE(view.outputLines().constLast(), QStringLiteral("<partial-prompt-%1> ").arg(cycle));
 
-				view.appendOutputText(QStringLiteral("<partial-prompt-%1> look").arg(cycle), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("<partial-prompt-%1> look").arg(cycle), true);
 				QCoreApplication::processEvents();
 				nativeCanvas->update();
 				QCoreApplication::processEvents();
 
 				const QStringList lines = view.outputLines();
-				QCOMPARE(g_runtimeLines.size(), 14);
+				QCOMPARE(runtimeForTest()->lines().size(), 14);
 				QVERIFY(lines.contains(QStringLiteral("[gmcp: no-npcs / city street]")));
 				QCOMPARE(lines.constLast(), QStringLiteral("<partial-prompt-%1> look").arg(cycle));
 				QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
@@ -10117,12 +9249,12 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputPaintWaitsForPendingPromptPluginRestitchPresentation()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("14"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("14"));
 
 			WorldView view;
 			view.resize(700, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -10130,35 +9262,33 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			for (int i = 0; i < 14; ++i)
-				view.appendOutputText(QStringLiteral("paint-sync-primer-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("paint-sync-primer-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 			QVERIFY(!nativeCanvas->grab().isNull());
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
 			             QStringLiteral("paint-sync-primer-13"));
 
-			view.appendOutputText(QStringLiteral("paint-sync-room"), true);
-			view.appendOutputText(QStringLiteral("<paint-sync-prompt> look"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("paint-sync-room"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<paint-sync-prompt> look"), true);
 			QCoreApplication::processEvents();
 			QVERIFY(!nativeCanvas->grab().isNull());
 			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
 			             QStringLiteral("<paint-sync-prompt> look"));
 
-			const int promptIndex = sizeToInt(g_runtimeLines.size()) - 1;
+			WorldRuntime *const runtime     = runtimeForTest();
+			const int           promptIndex = sizeToInt(runtime->lines().size()) - 1;
 			QVERIFY(promptIndex >= 0);
 
 			WorldRuntime::LineEntry compassLine;
-			compassLine.text       = QStringLiteral("W <---(M)---> E");
-			compassLine.flags      = WorldRuntime::LineNote;
-			compassLine.hardReturn = true;
-			compassLine.time       = QDateTime::currentDateTime();
-			compassLine.lineNumber = g_runtimeLines.constLast().lineNumber + 1;
-			g_runtimeLines.insert(g_runtimeLines.begin() + promptIndex, compassLine);
-			const int insertedCount = sizeToInt(g_runtimeLines.size());
-			enforceFakeOutputLineLimit();
-			const int removedHeadCount = qMax(0, insertedCount - sizeToInt(g_runtimeLines.size()));
-			const int changedIndex =
-			    qBound(0, promptIndex - removedHeadCount, sizeToInt(g_runtimeLines.size()) - 1);
-			view.notifyRuntimeOutputRangeChanged(changedIndex);
+			compassLine.text                                 = QStringLiteral("W <---(M)---> E");
+			compassLine.flags                                = WorldRuntime::LineNote;
+			compassLine.hardReturn                           = true;
+			compassLine.time                                 = QDateTime::currentDateTime();
+			compassLine.lineNumber                           = runtime->lines().constLast().lineNumber + 1;
+			IndexedRingBuffer<WorldRuntime::LineEntry> lines = runtime->lines();
+			lines.insert(lines.begin() + promptIndex, compassLine);
+			runtime->replaceOutputLines(lines);
 
 			QVERIFY(!nativeCanvas->grab().isNull());
 			QVERIFY(!nativeCanvas->property("qmud_native_plain_tail_lines")
@@ -10179,15 +9309,15 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(640, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendOutputText(QStringLiteral("merge-a"), false);
-			view.appendOutputText(QStringLiteral("merge-b"), true);
-			view.appendOutputText(QStringLiteral("merge-c"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("merge-a"), false);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("merge-b"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("merge-c"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
@@ -10198,8 +9328,7 @@ class tst_WorldView_Basic : public QObject
 			const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
 			const int updatesBefore = nativeCanvas->property("qmud_native_cache_incremental_updates").toInt();
 
-			QVERIFY(!g_runtimeLines.isEmpty());
-			g_runtimeLines.removeFirst();
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("2"));
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
 
@@ -10219,7 +9348,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(640, 420);
 			view.show();
-			view.setRuntime(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -10252,9 +9381,7 @@ class tst_WorldView_Basic : public QObject
 				entry.lineNumber = 30;
 				restoredLines.push_back(entry);
 			}
-			g_runtimeLines = restoredLines;
-
-			view.restoreOutputFromPersistedLines(restoredLines);
+			runtimeForTest()->replaceOutputLines(restoredLines);
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
 
@@ -10264,7 +9391,7 @@ class tst_WorldView_Basic : public QObject
 			const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
 			const int updatesBefore = nativeCanvas->property("qmud_native_cache_incremental_updates").toInt();
 
-			g_runtimeLines.removeFirst();
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("2"));
 			nativeCanvas->repaint();
 			QCoreApplication::processEvents();
 
@@ -10284,15 +9411,15 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(640, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendOutputText(QStringLiteral("trim-a"), true);
-			view.appendOutputText(QStringLiteral("trim-b"), true);
-			view.appendOutputText(QStringLiteral("trim-c"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("trim-a"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("trim-b"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("trim-c"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -10302,7 +9429,7 @@ class tst_WorldView_Basic : public QObject
 			const int rebuildsBefore  = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
 			const int trimDropsBefore = nativeCanvas->property("qmud_native_cache_trim_drops").toInt();
 
-			g_runtimeLines.removeFirst();
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("2"));
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
 
@@ -10317,13 +9444,14 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererTrimAppendKeepsLayoutMeasurementsLocal()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("160"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(420, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -10331,7 +9459,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			for (int i = 0; i < 160; ++i)
-				view.appendOutputText(
+				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("trim-layout-%1 ").arg(i) + QString(180, QLatin1Char('z')), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
@@ -10343,8 +9471,8 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(lineCountBefore > 40);
 			QVERIFY(rowsBefore > 0);
 
-			g_runtimeLines.removeFirst();
-			view.appendOutputText(QStringLiteral("trim-layout-tail ") + QString(180, QLatin1Char('q')), true);
+			runtimeOutputForTest(view).appendOutputText(
+			    QStringLiteral("trim-layout-tail ") + QString(180, QLatin1Char('q')), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -10362,14 +9490,14 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererHeadTrimKeepsLayoutGeometryAligned()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("12"));
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("12"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(420, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -10389,7 +9517,7 @@ class tst_WorldView_Basic : public QObject
 				span.length     = boundedSizeToInt(lineText.size());
 				span.actionType = WorldRuntime::ActionHyperlink;
 				span.action     = href;
-				view.appendOutputTextStyled(lineText, {span}, true);
+				runtimeOutputForTest(view).appendOutputTextStyled(lineText, {span}, true);
 			}
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -10409,7 +9537,7 @@ class tst_WorldView_Basic : public QObject
 			tailSpan.length     = boundedSizeToInt(tailText.size());
 			tailSpan.actionType = WorldRuntime::ActionHyperlink;
 			tailSpan.action     = QStringLiteral("https://example.org/trim-geometry/tail");
-			view.appendOutputTextStyled(tailText, {tailSpan}, true);
+			runtimeOutputForTest(view).appendOutputTextStyled(tailText, {tailSpan}, true);
 
 			scrollBar->setValue(0);
 			nativeCanvas->update();
@@ -10439,20 +9567,21 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererReusesLayoutCacheWithoutGeometryChanges()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(420, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendOutputText(QStringLiteral("cache-row-") + QString(200, QLatin1Char('x')), true);
+			runtimeOutputForTest(view).appendOutputText(
+			    QStringLiteral("cache-row-") + QString(200, QLatin1Char('x')), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -10472,20 +9601,21 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererKeepsLayoutCacheStableOnResizeWhenNativeWrapIsDisabled()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(520, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendOutputText(QStringLiteral("resize-row-") + QString(220, QLatin1Char('y')), true);
+			runtimeOutputForTest(view).appendOutputText(
+			    QStringLiteral("resize-row-") + QString(220, QLatin1Char('y')), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -10506,12 +9636,12 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererPaintsWhenScrollbackSplitIsActive()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("auto_pause"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_pause"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(640, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -10519,7 +9649,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(nativeCanvas);
 
 			for (int i = 0; i < 260; ++i)
-				view.appendOutputText(QStringLiteral("split-native-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("split-native-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -10550,13 +9680,13 @@ class tst_WorldView_Basic : public QObject
 		void nativeOutputRendererWrapHandlesEdgeCases()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
 
 			WorldView view;
 			view.resize(260, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -10581,7 +9711,7 @@ class tst_WorldView_Basic : public QObject
 			spanC.italic = true;
 			spanC.fore   = QColor(QStringLiteral("#ffd080"));
 			styledWrapSpans.push_back(spanC);
-			view.appendOutputTextStyled(styledWrapLine, styledWrapSpans, true);
+			runtimeOutputForTest(view).appendOutputTextStyled(styledWrapLine, styledWrapSpans, true);
 
 			const QString unicodeLine =
 			    QString::fromUtf8("Αλφα βήτα 世界🙂🙂🙂 unicode-wrap ") + QString(100, QLatin1Char('u'));
@@ -10589,10 +9719,10 @@ class tst_WorldView_Basic : public QObject
 			    QStringLiteral("tabs\tand  spaces\tline ") + QString(80, QLatin1Char('t'));
 			const QString longWordLine = QString(260, QLatin1Char('w'));
 
-			view.appendOutputText(unicodeLine, true);
-			view.appendOutputText(tabAndSpaceLine, true);
-			view.appendOutputText(longWordLine, true);
-			view.appendOutputText(QString(), true);
+			runtimeOutputForTest(view).appendOutputText(unicodeLine, true);
+			runtimeOutputForTest(view).appendOutputText(tabAndSpaceLine, true);
+			runtimeOutputForTest(view).appendOutputText(longWordLine, true);
+			runtimeOutputForTest(view).appendOutputText(QString(), true);
 
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
@@ -10618,15 +9748,15 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(720, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
 			QVERIFY(nativeCanvas);
 
-			view.appendOutputText(QStringLiteral("alpha"), false);
-			view.appendOutputText(QStringLiteral("beta"), true);
-			view.appendOutputText(QStringLiteral("gamma delta"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("alpha"), false);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("beta"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("gamma delta"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
@@ -10656,7 +9786,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(720, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			QPlainTextEdit *input = view.inputEditor();
@@ -10680,16 +9810,16 @@ class tst_WorldView_Basic : public QObject
 		void applyRuntimeSettingsPreservesSyntheticInputBreaks()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
-			g_currentActionSource = WorldRuntime::eUserTyping;
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
+			runtimeForTest()->setCurrentActionSource(WorldRuntime::eUserTyping);
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntime(view, runtimeForTest());
 			view.applyRuntimeSettings();
 
 			view.echoInputText(QStringLiteral("look\r\n"));
-			view.appendOutputText(QStringLiteral("The room is quiet."), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("The room is quiet."), true);
 
 			const QStringList before = view.outputLines();
 			const qsizetype   lookAt = before.indexOf(QStringLiteral("look"));
@@ -10711,23 +9841,24 @@ class tst_WorldView_Basic : public QObject
 		void keepCommandsOnSameLineConsumesPreviousLineBreak()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
-			g_currentActionSource = WorldRuntime::eUserTyping;
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
+			WorldRuntime *const runtime = runtimeForTest();
+			runtime->setCurrentActionSource(WorldRuntime::eUserTyping);
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntime(view, runtime);
 			view.applyRuntimeSettings();
 
-			view.appendOutputText(QStringLiteral("Ready."), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("Ready."), true);
 			view.echoInputText(QStringLiteral("look\r\n"));
 
 			const QStringList lines      = view.outputLines();
 			const qsizetype   mergedLine = lines.indexOf(QStringLiteral("Ready.look"));
 			QVERIFY(mergedLine >= 0);
-			QVERIFY(g_runtimeLines.size() >= 2);
-			QVERIFY(!g_runtimeLines.at(0).hardReturn);
-			QVERIFY(g_runtimeLines.at(1).hardReturn);
+			QVERIFY(runtime->lines().size() >= 2);
+			QVERIFY(!runtime->lines().at(0).hardReturn);
+			QVERIFY(runtime->lines().at(1).hardReturn);
 
 			resetTestState();
 		}
@@ -10735,15 +9866,16 @@ class tst_WorldView_Basic : public QObject
 		void keepCommandsOnSameLineRemainsMergedAfterCachePrimed()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
-			g_currentActionSource = WorldRuntime::eUserTyping;
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
+			WorldRuntime *const runtime = runtimeForTest();
+			runtime->setCurrentActionSource(WorldRuntime::eUserTyping);
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntime(view, runtime);
 			view.applyRuntimeSettings();
 
-			view.appendOutputText(QStringLiteral("Ready."), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("Ready."), true);
 			QCOMPARE(view.outputLines().last(), QStringLiteral("Ready."));
 
 			view.echoInputText(QStringLiteral("look\r\n"));
@@ -10752,9 +9884,9 @@ class tst_WorldView_Basic : public QObject
 			const qsizetype   mergedLine = lines.indexOf(QStringLiteral("Ready.look"));
 			QVERIFY(mergedLine >= 0);
 			QCOMPARE(lines.indexOf(QStringLiteral("Ready.")), qsizetype{-1});
-			QVERIFY(g_runtimeLines.size() >= 2);
-			QVERIFY(!g_runtimeLines.at(0).hardReturn);
-			QVERIFY(g_runtimeLines.at(1).hardReturn);
+			QVERIFY(runtime->lines().size() >= 2);
+			QVERIFY(!runtime->lines().at(0).hardReturn);
+			QVERIFY(runtime->lines().at(1).hardReturn);
 
 			resetTestState();
 		}
@@ -10762,29 +9894,28 @@ class tst_WorldView_Basic : public QObject
 		void keepCommandsOnSameLineFinalizesEchoAfterOpenPrompt()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
-			g_currentActionSource = WorldRuntime::eUserTyping;
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
+			WorldRuntime *const runtime = runtimeForTest();
+			runtime->setCurrentActionSource(WorldRuntime::eUserTyping);
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntime(view, runtime);
 			view.applyRuntimeSettings();
 
-			view.appendOutputText(QStringLiteral("Prompt> "), false);
-			QVERIFY(!g_runtimeLines.constLast().hardReturn);
-			WorldRuntime::LineEntry hiddenTail;
-			hiddenTail.text       = QStringLiteral("hidden callback state");
-			hiddenTail.flags      = WorldRuntime::LineOutput | WorldRuntime::LineHidden;
-			hiddenTail.hardReturn = true;
-			hiddenTail.lineNumber = g_runtimeLines.constLast().lineNumber + 1;
-			g_runtimeLines.push_back(hiddenTail);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("Prompt> "), false);
+			QVERIFY(!runtime->lines().constLast().hardReturn);
+			runtime->beginIncomingLineLuaContext(QStringLiteral("hidden callback state"),
+			                                     WorldRuntime::LineOutput, {});
+			QVERIFY(runtime->reserveIncomingLineLuaContextInBuffer());
+			QVERIFY(runtime->hideBufferedIncomingLineLuaContextForReplacement());
 			view.echoInputText(QStringLiteral("look\r\n"));
 
 			QCOMPARE(view.outputLines().last(), QStringLiteral("Prompt> look"));
-			QCOMPARE(g_runtimeLines.size(), 3);
-			QVERIFY(!g_runtimeLines.at(0).hardReturn);
-			QVERIFY(g_runtimeLines.at(1).hardReturn);
-			QVERIFY(g_runtimeLines.at(2).hardReturn);
+			QCOMPARE(runtime->lines().size(), 3);
+			QVERIFY(!runtime->lines().at(0).hardReturn);
+			QVERIFY((runtime->lines().at(1).flags & WorldRuntime::LineHidden) != 0);
+			QVERIFY(runtime->lines().at(2).hardReturn);
 
 			resetTestState();
 		}
@@ -10798,7 +9929,7 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(freezeSpy.count(), 1);
 			QVERIFY(view.isFrozen());
 
-			view.appendOutputText(QStringLiteral("frozen-line"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("frozen-line"), true);
 			QVERIFY(!view.outputLines().contains(QStringLiteral("frozen-line")));
 
 			view.setFrozen(false);
@@ -10810,32 +9941,33 @@ class tst_WorldView_Basic : public QObject
 		void defaultFontsUseGlobalPreferences()
 		{
 			resetTestState();
-			g_useFakeAppController = true;
+			AppController app;
 
-			g_worldAttrs.insert(QStringLiteral("use_default_output_font"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("output_font_name"), QStringLiteral("WorldSpecificOutput"));
-			g_worldAttrs.insert(QStringLiteral("output_font_height"), QStringLiteral("27"));
-			g_worldAttrs.insert(QStringLiteral("output_font_weight"), QStringLiteral("700"));
-			g_worldAttrs.insert(QStringLiteral("output_font_charset"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("use_default_output_font"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("output_font_name"), QStringLiteral("WorldSpecificOutput"));
+			setTestWorldAttribute(QStringLiteral("output_font_height"), QStringLiteral("27"));
+			setTestWorldAttribute(QStringLiteral("output_font_weight"), QStringLiteral("700"));
+			setTestWorldAttribute(QStringLiteral("output_font_charset"), QStringLiteral("1"));
 
-			g_worldAttrs.insert(QStringLiteral("use_default_input_font"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("input_font_name"), QStringLiteral("WorldSpecificInput"));
-			g_worldAttrs.insert(QStringLiteral("input_font_height"), QStringLiteral("29"));
-			g_worldAttrs.insert(QStringLiteral("input_font_weight"), QStringLiteral("300"));
-			g_worldAttrs.insert(QStringLiteral("input_font_italic"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("input_font_charset"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("use_default_input_font"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("input_font_name"), QStringLiteral("WorldSpecificInput"));
+			setTestWorldAttribute(QStringLiteral("input_font_height"), QStringLiteral("29"));
+			setTestWorldAttribute(QStringLiteral("input_font_weight"), QStringLiteral("300"));
+			setTestWorldAttribute(QStringLiteral("input_font_italic"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("input_font_charset"), QStringLiteral("1"));
 
-			g_globalOptions.insert(QStringLiteral("DefaultOutputFont"), QStringLiteral("DejaVu Sans Mono"));
-			g_globalOptions.insert(QStringLiteral("DefaultOutputFontHeight"), 13);
-			g_globalOptions.insert(QStringLiteral("DefaultOutputFontCharset"), 1);
-			g_globalOptions.insert(QStringLiteral("DefaultInputFont"), QStringLiteral("DejaVu Sans Mono"));
-			g_globalOptions.insert(QStringLiteral("DefaultInputFontHeight"), 15);
-			g_globalOptions.insert(QStringLiteral("DefaultInputFontWeight"), 700);
-			g_globalOptions.insert(QStringLiteral("DefaultInputFontItalic"), 1);
-			g_globalOptions.insert(QStringLiteral("DefaultInputFontCharset"), 1);
+			app.setGlobalOptionString(QStringLiteral("DefaultOutputFont"),
+			                          QStringLiteral("DejaVu Sans Mono"));
+			app.setGlobalOptionInt(QStringLiteral("DefaultOutputFontHeight"), 13);
+			app.setGlobalOptionInt(QStringLiteral("DefaultOutputFontCharset"), 1);
+			app.setGlobalOptionString(QStringLiteral("DefaultInputFont"), QStringLiteral("DejaVu Sans Mono"));
+			app.setGlobalOptionInt(QStringLiteral("DefaultInputFontHeight"), 15);
+			app.setGlobalOptionInt(QStringLiteral("DefaultInputFontWeight"), 700);
+			app.setGlobalOptionInt(QStringLiteral("DefaultInputFontItalic"), 1);
+			app.setGlobalOptionInt(QStringLiteral("DefaultInputFontCharset"), 1);
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 
 			const QFont outputFont = view.outputFont();
 			QCOMPARE(outputFont.pointSize(), 13);
@@ -10855,30 +9987,17 @@ class tst_WorldView_Basic : public QObject
 		void tabCompletionCyclesUpwardAndResetsOnNonTabKey()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("tab_completion_space"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("tab_completion_space"), QStringLiteral("0"));
 
-			WorldRuntime::LineEntry older;
-			older.text       = QStringLiteral("stamina");
-			older.flags      = WorldRuntime::LineOutput;
-			older.hardReturn = true;
-			g_runtimeLines.push_back(older);
-
-			WorldRuntime::LineEntry middle;
-			middle.text       = QStringLiteral("starlight");
-			middle.flags      = WorldRuntime::LineOutput;
-			middle.hardReturn = true;
-			g_runtimeLines.push_back(middle);
-
-			WorldRuntime::LineEntry newer;
-			newer.text       = QStringLiteral("starch");
-			newer.flags      = WorldRuntime::LineOutput;
-			newer.hardReturn = true;
-			g_runtimeLines.push_back(newer);
+			WorldRuntime *const runtime = runtimeForTest();
+			runtime->addLine(QStringLiteral("stamina"), WorldRuntime::LineOutput);
+			runtime->addLine(QStringLiteral("starlight"), WorldRuntime::LineOutput);
+			runtime->addLine(QStringLiteral("starch"), WorldRuntime::LineOutput);
 
 			WorldView view;
 			view.resize(860, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtime);
 			QCoreApplication::processEvents();
 
 			QPlainTextEdit *input = view.inputEditor();
@@ -10912,30 +10031,17 @@ class tst_WorldView_Basic : public QObject
 		void tabCompletionSkipsDuplicateMatchesWithinCycleAndResetsAfterTyping()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("tab_completion_space"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("tab_completion_space"), QStringLiteral("0"));
 
-			WorldRuntime::LineEntry older;
-			older.text       = QStringLiteral("stamina");
-			older.flags      = WorldRuntime::LineOutput;
-			older.hardReturn = true;
-			g_runtimeLines.push_back(older);
-
-			WorldRuntime::LineEntry middle;
-			middle.text       = QStringLiteral("starch");
-			middle.flags      = WorldRuntime::LineOutput;
-			middle.hardReturn = true;
-			g_runtimeLines.push_back(middle);
-
-			WorldRuntime::LineEntry newer;
-			newer.text       = QStringLiteral("starch");
-			newer.flags      = WorldRuntime::LineOutput;
-			newer.hardReturn = true;
-			g_runtimeLines.push_back(newer);
+			WorldRuntime *const runtime = runtimeForTest();
+			runtime->addLine(QStringLiteral("stamina"), WorldRuntime::LineOutput);
+			runtime->addLine(QStringLiteral("starch"), WorldRuntime::LineOutput);
+			runtime->addLine(QStringLiteral("starch"), WorldRuntime::LineOutput);
 
 			WorldView view;
 			view.resize(860, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtime);
 			QCoreApplication::processEvents();
 
 			QPlainTextEdit *input = view.inputEditor();
@@ -10969,8 +10075,8 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.appendOutputText(QStringLiteral("Alpha beta gamma"), true);
+			setTestRuntimeObserver(view, runtimeForTest());
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("Alpha beta gamma"), true);
 
 			scheduleDialogInteraction(
 			    [](const QDialog *dialog)
@@ -11008,15 +10114,10 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			// Intentionally desync runtime text indices from rendered text to catch
-			// regressions where search scans runtime lines but highlights in document.
-			WorldRuntime::LineEntry runtimeLine;
-			runtimeLine.text = QStringLiteral("xxxxxnew staff");
-			g_runtimeLines.push_back(runtimeLine);
+			runtimeForTest()->addLine(QStringLiteral("xxxxxnew staff"), WorldRuntime::LineOutput);
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.appendOutputText(QStringLiteral("new staff"), true);
+			setTestRuntimeObserver(view, runtimeForTest());
 
 			scheduleDialogInteraction(
 			    [](const QDialog *dialog)
@@ -11040,8 +10141,8 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.appendOutputText(QStringLiteral("Alpha beta gamma"), true);
+			setTestRuntimeObserver(view, runtimeForTest());
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("Alpha beta gamma"), true);
 
 			scheduleDialogInteraction(
 			    [](const QDialog *dialog)
@@ -11082,15 +10183,12 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			WorldRuntime::LineEntry runtimeLine;
-			runtimeLine.text = QStringLiteral("xxxxxnew staff");
-			g_runtimeLines.push_back(runtimeLine);
+			runtimeForTest()->addLine(QStringLiteral("xxxxxnew staff"), WorldRuntime::LineOutput);
 
 			WorldView view;
 			view.resize(720, 420);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.appendOutputText(QStringLiteral("new staff"), true);
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
@@ -11124,15 +10222,17 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(720, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 30; ++i)
-				view.appendOutputText(QStringLiteral("find-accessible-fill-before-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("find-accessible-fill-before-%1").arg(i), true);
 			const QString targetLine = QStringLiteral("prefix search-target-word suffix");
-			view.appendOutputText(targetLine, true);
+			runtimeOutputForTest(view).appendOutputText(targetLine, true);
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(QStringLiteral("find-accessible-fill-after-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("find-accessible-fill-after-%1").arg(i), true);
 			QCoreApplication::processEvents();
 
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -11236,20 +10336,22 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 			qmudInstallWorldOutputAccessibility();
 			const ScopedTestStateReset resetState;
-			g_qtAccessibilitySpeechEnabled = false;
+			setTestQtAccessibilitySpeechEnabled(false);
 
 			WorldView view;
 			view.resize(720, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 30; ++i)
-				view.appendOutputText(QStringLiteral("find-muted-fill-before-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("find-muted-fill-before-%1").arg(i), true);
 			const QString targetLine = QStringLiteral("prefix muted-search-target suffix");
-			view.appendOutputText(targetLine, true);
+			runtimeOutputForTest(view).appendOutputText(targetLine, true);
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(QStringLiteral("find-muted-fill-after-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("find-muted-fill-after-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -11328,16 +10430,19 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(720, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
 			for (int i = 0; i < 30; ++i)
-				view.appendOutputText(QStringLiteral("find-mushreader-fill-before-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("find-mushreader-fill-before-%1").arg(i), true);
 			const QString targetLine = QStringLiteral("prefix mushreader-search-target suffix");
-			view.appendOutputText(targetLine, true);
+			runtimeOutputForTest(view).appendOutputText(targetLine, true);
 			for (int i = 0; i < 220; ++i)
-				view.appendOutputText(QStringLiteral("find-mushreader-fill-after-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("find-mushreader-fill-after-%1").arg(i), true);
 			QCoreApplication::processEvents();
+			speechEvents.clear();
 
 			QWidget *canvas = findNativeOutputCanvas(view);
 			QVERIFY(canvas);
@@ -11405,12 +10510,12 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(720, 360);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QVERIFY(QTest::qWaitForWindowExposed(&view));
 
-			view.appendOutputText(QStringLiteral("visible-tail-filler"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("visible-tail-filler"), true);
 			const QString targetLine = QStringLiteral("prefix visible-tail-search-target suffix");
-			view.appendOutputText(targetLine, true);
+			runtimeOutputForTest(view).appendOutputText(targetLine, true);
 			QCoreApplication::processEvents();
 
 			QWidget *canvas = findNativeOutputCanvas(view);
@@ -11500,9 +10605,10 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.appendOutputText(QStringLiteral("If you're new to CthulhuMUD"), true);
-			view.appendOutputText(QStringLiteral("Read through the entire Newbie School"), true);
+			setTestRuntimeObserver(view, runtimeForTest());
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("If you're new to CthulhuMUD"), true);
+			runtimeOutputForTest(view).appendOutputText(
+			    QStringLiteral("Read through the entire Newbie School"), true);
 
 			scheduleDialogInteraction(
 			    [](const QDialog *dialog)
@@ -11529,9 +10635,10 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.appendOutputText(QStringLiteral("new to CthulhuMUD"), true);
-			view.appendOutputText(QStringLiteral("Read through the entire Newbie School"), true);
+			setTestRuntimeObserver(view, runtimeForTest());
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("new to CthulhuMUD"), true);
+			runtimeOutputForTest(view).appendOutputText(
+			    QStringLiteral("Read through the entire Newbie School"), true);
 
 			scheduleDialogInteraction(
 			    [](const QDialog *dialog)
@@ -11560,8 +10667,8 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.appendOutputText(QStringLiteral("new new"), true);
+			setTestRuntimeObserver(view, runtimeForTest());
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("new new"), true);
 
 			scheduleDialogInteraction(
 			    [](const QDialog *dialog)
@@ -11596,8 +10703,8 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.appendOutputText(QStringLiteral("New new now"), true);
+			setTestRuntimeObserver(view, runtimeForTest());
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("New new now"), true);
 
 			scheduleDialogInteraction(
 			    [](const QDialog *dialog)
@@ -11649,15 +10756,17 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 320; ++i)
 			{
 				if (i == 48)
-					view.appendOutputText(QStringLiteral("find_split_target_alpha"), true);
+					runtimeOutputForTest(view).appendOutputText(QStringLiteral("find_split_target_alpha"),
+					                                            true);
 				else
-					view.appendOutputText(QStringLiteral("find-split-fill-%1").arg(i), true);
+					runtimeOutputForTest(view).appendOutputText(QStringLiteral("find-split-fill-%1").arg(i),
+					                                            true);
 			}
 			QCoreApplication::processEvents();
 			QVERIFY(!view.isScrollbackSplitActive());
@@ -11687,7 +10796,7 @@ class tst_WorldView_Basic : public QObject
 			QTRY_VERIFY(topBar->value() < topBar->maximum());
 			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
 
-			view.appendOutputText(QStringLiteral("find-split-live-tail"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("find-split-live-tail"), true);
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(liveBar->value(), liveBar->maximum());
 
@@ -11701,15 +10810,17 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 360; ++i)
 			{
 				if (i == 90 || i == 190)
-					view.appendOutputText(QStringLiteral("find_split_target_beta"), true);
+					runtimeOutputForTest(view).appendOutputText(QStringLiteral("find_split_target_beta"),
+					                                            true);
 				else
-					view.appendOutputText(QStringLiteral("find-next-split-fill-%1").arg(i), true);
+					runtimeOutputForTest(view).appendOutputText(
+					    QStringLiteral("find-next-split-fill-%1").arg(i), true);
 			}
 			QCoreApplication::processEvents();
 
@@ -11755,17 +10866,17 @@ class tst_WorldView_Basic : public QObject
 		void historyRecallWorksWhileOutputSelectionIsActive()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			view.addToHistoryForced(QStringLiteral("north"));
 			view.addToHistoryForced(QStringLiteral("south"));
-			view.appendOutputText(QStringLiteral("selection-source"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("selection-source"), true);
 			QCoreApplication::processEvents();
 
 			view.selectOutputLine(0);
@@ -11787,13 +10898,13 @@ class tst_WorldView_Basic : public QObject
 		void arrowKeysNavigateInputCursorWhenHistoryTraversalDisabled()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("arrows_change_history"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			view.addToHistoryForced(QStringLiteral("north"));
 			view.addToHistoryForced(QStringLiteral("south"));
@@ -11826,14 +10937,14 @@ class tst_WorldView_Basic : public QObject
 		void partialHistoryRecallUsesPrefixAndNewestFirst()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			view.addToHistoryForced(QStringLiteral("hitman"));
 			view.addToHistoryForced(QStringLiteral("hit man"));
@@ -11874,14 +10985,14 @@ class tst_WorldView_Basic : public QObject
 		void partialHistoryRecallReseedsAfterManualEdit()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			view.addToHistoryForced(QStringLiteral("hitman"));
 			view.addToHistoryForced(QStringLiteral("hit man"));
@@ -11914,12 +11025,12 @@ class tst_WorldView_Basic : public QObject
 		void commandHistoryKeepsOnlyNewestDuplicateEntry()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 
 			view.addToHistoryForced(QStringLiteral("look"));
@@ -11941,12 +11052,12 @@ class tst_WorldView_Basic : public QObject
 		void repeatLastCommandSendsHistoryTailAndPreservesInput()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			view.addToHistoryForced(QStringLiteral("qcmd-older-a14"));
 			view.addToHistoryForced(QStringLiteral("qcmd-repeat-b92"));
@@ -11969,23 +11080,18 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 			QToolTip::hideText();
-			g_worldAttrs.insert(QStringLiteral("line_information"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("tool_tip_start_time"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("tool_tip_visible_time"), QStringLiteral("5000"));
+			setTestWorldAttribute(QStringLiteral("line_information"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("tool_tip_start_time"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("tool_tip_visible_time"), QStringLiteral("5000"));
 
-			WorldRuntime::LineEntry entry;
-			entry.text       = QStringLiteral("tooltip-source-line");
-			entry.flags      = WorldRuntime::LineOutput;
-			entry.hardReturn = true;
-			entry.lineNumber = 1;
-			g_runtimeLines.push_back(entry);
+			runtimeForTest()->addLine(QStringLiteral("tooltip-source-line"), WorldRuntime::LineOutput, true,
+			                          QDateTime{});
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
-			view.rebuildOutputFromLines(g_runtimeLines);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -12006,23 +11112,17 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 			QToolTip::hideText();
-			g_worldAttrs.insert(QStringLiteral("line_information"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("tool_tip_start_time"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("tool_tip_visible_time"), QStringLiteral("5000"));
+			setTestWorldAttribute(QStringLiteral("line_information"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("tool_tip_start_time"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("tool_tip_visible_time"), QStringLiteral("5000"));
 
-			WorldRuntime::LineEntry entry;
-			entry.text       = QStringLiteral("tip");
-			entry.flags      = WorldRuntime::LineOutput;
-			entry.hardReturn = true;
-			entry.lineNumber = 1;
-			g_runtimeLines.push_back(entry);
+			runtimeForTest()->addLine(QStringLiteral("tip"), WorldRuntime::LineOutput);
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
-			view.rebuildOutputFromLines(g_runtimeLines);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -12052,7 +11152,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -12080,7 +11180,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
 			view.updatePartialOutputText(QStringLiteral("temp"));
-			view.appendOutputText(QStringLiteral("final"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("final"), true);
 			QCoreApplication::processEvents();
 			lines = view.outputLines();
 			QVERIFY(!lines.isEmpty());
@@ -12094,12 +11194,15 @@ class tst_WorldView_Basic : public QObject
 		void runtimePartialOutputCommitsBeforeLocalOutputBoundary()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("1"));
 
-			WorldView view;
+			WorldRuntime *const runtime = runtimeForTest();
+			WorldView           view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntime(view, runtime);
+			QObject::connect(runtime, &WorldRuntime::incomingStyledLinePartialReceived, &view,
+			                 &WorldView::updatePartialOutputText);
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -12107,51 +11210,47 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(browser);
 			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
-			view.appendOutputText(QStringLiteral("room"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("room"), true);
 			const QString prompt = QStringLiteral("<2060hp 1694sp> ");
-			setFakeRuntimePendingPartial(prompt);
-			view.updatePartialOutputText(prompt);
+			runtime->receiveRawData(prompt.toUtf8());
 			QCoreApplication::processEvents();
 
-			QCOMPARE(g_pendingIncomingPartialCommitCount, 0);
+			QCOMPARE(runtime->lines().size(), 1);
 			QCOMPARE(view.outputLines().constLast(), prompt);
 
-			view.appendNoteText(QStringLiteral("[gmcp: update]"), true);
+			runtimeOutputForTest(view).appendNoteText(QStringLiteral("[gmcp: update]"), true);
 			QCoreApplication::processEvents();
 
 			QStringList lines = view.outputLines();
-			QCOMPARE(g_pendingIncomingPartialCommitCount, 1);
-			QVERIFY(g_pendingIncomingPartialText.isEmpty());
+			QCOMPARE(runtime->lines().size(), 3);
 			QVERIFY(lines.size() >= 3);
 			QCOMPARE(lines.at(lines.size() - 2), prompt);
 			QCOMPARE(lines.constLast(), QStringLiteral("[gmcp: update]"));
 			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
 			const QString secondPrompt = QStringLiteral("<2060hp 1694sp> ");
-			setFakeRuntimePendingPartial(secondPrompt);
-			view.updatePartialOutputText(secondPrompt);
-			g_currentActionSource = WorldRuntime::eUserTyping;
+			runtime->receiveRawData(secondPrompt.toUtf8());
+			runtime->setCurrentActionSource(WorldRuntime::eUserTyping);
 			view.echoInputText(QStringLiteral("look\r\n"));
 			QCoreApplication::processEvents();
 
 			lines = view.outputLines();
-			QCOMPARE(g_pendingIncomingPartialCommitCount, 2);
+			QCOMPARE(runtime->lines().size(), 5);
 			QVERIFY(lines.size() >= 5);
 			QCOMPARE(lines.at(lines.size() - 2), secondPrompt);
 			QCOMPARE(lines.constLast(), QStringLiteral("look"));
 			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
-			g_worldAttrs.insert(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
 			view.applyRuntimeSettings();
 			const QString thirdPrompt = QStringLiteral("<2060hp 1694sp> ");
-			setFakeRuntimePendingPartial(thirdPrompt);
-			view.updatePartialOutputText(thirdPrompt);
-			g_currentActionSource = WorldRuntime::eUserTyping;
+			runtime->receiveRawData(thirdPrompt.toUtf8());
+			runtime->setCurrentActionSource(WorldRuntime::eUserTyping);
 			view.echoInputText(QStringLiteral("north\r\n"));
 			QCoreApplication::processEvents();
 
 			lines = view.outputLines();
-			QCOMPARE(g_pendingIncomingPartialCommitCount, 3);
+			QCOMPARE(runtime->lines().size(), 7);
 			QVERIFY(lines.size() >= 6);
 			QCOMPARE(lines.constLast(), thirdPrompt + QStringLiteral("north"));
 			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
@@ -12172,20 +11271,14 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(browser);
 			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
-			view.appendOutputText(QStringLiteral("pre-runtime-line"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("pre-runtime-line"), true);
 			QCoreApplication::processEvents();
 			QVERIFY(view.outputLines().contains(QStringLiteral("pre-runtime-line")));
 			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
-			WorldRuntime::LineEntry runtimeEntry;
-			runtimeEntry.text       = QStringLiteral("runtime-native-line");
-			runtimeEntry.flags      = WorldRuntime::LineOutput;
-			runtimeEntry.hardReturn = true;
-			runtimeEntry.lineNumber = 1;
-			runtimeEntry.time       = QDateTime::currentDateTime();
-			g_runtimeLines.push_back(runtimeEntry);
+			runtimeForTest()->addLine(QStringLiteral("runtime-native-line"), WorldRuntime::LineOutput);
 
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -12201,7 +11294,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(720, 420);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12222,7 +11315,7 @@ class tst_WorldView_Basic : public QObject
 				spans.push_back(span);
 			}
 
-			view.appendOutputTextStyled(text, spans, true);
+			runtimeOutputForTest(view).appendOutputTextStyled(text, spans, true);
 			QCoreApplication::processEvents();
 
 			const QStringList lines = view.outputLines();
@@ -12243,7 +11336,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(720, 420);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12253,7 +11346,8 @@ class tst_WorldView_Basic : public QObject
 			linkSpan.actionType = WorldRuntime::ActionHyperlink;
 			linkSpan.action     = QStringLiteral("https://example.org/status-lock");
 
-			view.appendOutputTextStyled(QStringLiteral("example-link"), {linkSpan}, true);
+			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("example-link"), {linkSpan},
+			                                                  true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -12299,7 +11393,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(720, 420);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12310,7 +11404,7 @@ class tst_WorldView_Basic : public QObject
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
 			                                 "Attack assistant");
-			view.appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
+			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -12333,7 +11427,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(720, 420);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12344,7 +11438,7 @@ class tst_WorldView_Basic : public QObject
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
 			                                 "Attack assistant");
-			view.appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
+			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -12366,7 +11460,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(720, 420);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12377,7 +11471,7 @@ class tst_WorldView_Basic : public QObject
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
 			                                 "Attack assistant");
-			view.appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
+			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -12450,7 +11544,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12492,7 +11586,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12501,51 +11595,41 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(outputSplitter);
 			QWidget *outputStack = outputSplitter->parentWidget();
 			QVERIFY(outputStack);
-			QTextBrowser *browser = findVisibleOutputBrowser(view);
-			QVERIFY(browser);
-			QWidget *viewport = browser->viewport();
-			QVERIFY(viewport);
+			WorldRuntime *const runtime = runtimeForTest();
+			installMiniWindowCallbackTrace(*runtime);
 
-			const QRect viewportInStack(viewport->mapTo(outputStack, QPoint(0, 0)), viewport->size());
-			QVERIFY(viewportInStack.width() > 80);
-			QVERIFY(viewportInStack.height() > 40);
-
-			const QRect windowRect(viewportInStack.left() + 20, viewportInStack.top() + 20, 80, 40);
-			QVERIFY(viewportInStack.contains(windowRect.adjusted(0, 0, -1, -1)));
+			const QRect windowRect(40, 40, 80, 40);
+			QVERIFY(outputStack->rect().contains(windowRect.adjusted(0, 0, -1, -1)));
 
 			MiniWindow &window =
 			    appendTestMiniWindow(QStringLiteral("native-hotspot"), windowRect, 0, QColor(0, 160, 0));
-			MiniWindowHotspot hotspot;
-			hotspot.rect      = QRect(0, 0, windowRect.width(), windowRect.height());
-			hotspot.mouseDown = QStringLiteral("on_hotspot_down");
-			hotspot.mouseUp   = QStringLiteral("on_hotspot_up");
-			window.hotspots.insert(QStringLiteral("hotspot_main"), hotspot);
-
-			const QPoint clickInStack    = windowRect.center();
-			const QPoint clickInViewport = viewport->mapFrom(outputStack, clickInStack);
-			QVERIFY(viewport->rect().contains(clickInViewport));
-
-			const int baseline = g_worldHotspotCallbackCount;
-			QTest::mouseClick(viewport, Qt::LeftButton, Qt::NoModifier, clickInViewport);
+			QCOMPARE(installTestMiniWindowHotspot(*runtime, window, QStringLiteral("hotspot_main"),
+			                                      QRect(QPoint(0, 0), windowRect.size()),
+			                                      QStringLiteral("on_hotspot_down"), {},
+			                                      QStringLiteral("on_hotspot_up")),
+			         eOK);
+			view.onMiniWindowsChanged();
 			QCoreApplication::processEvents();
 
-			QTRY_VERIFY(g_worldHotspotCallbackCount >= baseline + 2);
-			QCOMPARE(g_worldHotspotCallbackFunctions.at(baseline), QStringLiteral("on_hotspot_down"));
-			QCOMPARE(g_worldHotspotCallbackFunctions.at(baseline + 1), QStringLiteral("on_hotspot_up"));
-			QVERIFY(!g_worldHotspotCallbackQueueWhenBusy.at(baseline));
-			QVERIFY(!g_worldHotspotCallbackQueueWhenBusy.at(baseline + 1));
-			QCOMPARE(g_lastWorldHotspotFunction, QStringLiteral("on_hotspot_up"));
-			QCOMPARE(g_lastWorldHotspotId, QStringLiteral("hotspot_main"));
-			QVERIFY(!g_lastWorldHotspotQueueWhenBusy);
+			const QPoint clickInStack = windowRect.center();
+			QVERIFY(outputStack->rect().contains(clickInStack));
+
+			QTest::mouseClick(outputStack, Qt::LeftButton, Qt::NoModifier, clickInStack);
+			QTRY_COMPARE(miniWindowCallbackTrace(*runtime).size(), 2);
+			const auto trace = miniWindowCallbackTrace(*runtime);
+			QCOMPARE(trace.at(0).functionName, QStringLiteral("on_hotspot_down"));
+			QCOMPARE(trace.at(0).hotspotId, QStringLiteral("hotspot_main"));
+			QCOMPARE(trace.at(1).functionName, QStringLiteral("on_hotspot_up"));
+			QCOMPARE(trace.at(1).hotspotId, QStringLiteral("hotspot_main"));
 			resetTestState();
 		}
 
-		void nativeOutputRendererRightButtonMouseUpQueuesHotspotWhenLaneBusy()
+		void nativeOutputRendererRightButtonMouseUpRoutesHotspotCallback()
 		{
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12554,42 +11638,32 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(outputSplitter);
 			QWidget *outputStack = outputSplitter->parentWidget();
 			QVERIFY(outputStack);
-			QTextBrowser *browser = findVisibleOutputBrowser(view);
-			QVERIFY(browser);
-			QWidget *viewport = browser->viewport();
-			QVERIFY(viewport);
+			WorldRuntime *const runtime = runtimeForTest();
+			installMiniWindowCallbackTrace(*runtime);
 
-			const QRect viewportInStack(viewport->mapTo(outputStack, QPoint(0, 0)), viewport->size());
-			QVERIFY(viewportInStack.width() > 80);
-			QVERIFY(viewportInStack.height() > 40);
-
-			const QRect windowRect(viewportInStack.left() + 20, viewportInStack.top() + 20, 80, 40);
-			QVERIFY(viewportInStack.contains(windowRect.adjusted(0, 0, -1, -1)));
+			const QRect windowRect(40, 40, 80, 40);
+			QVERIFY(outputStack->rect().contains(windowRect.adjusted(0, 0, -1, -1)));
 
 			MiniWindow &window = appendTestMiniWindow(QStringLiteral("native-right-hotspot"), windowRect, 0,
 			                                          QColor(0, 160, 0));
-			MiniWindowHotspot hotspot;
-			hotspot.rect      = QRect(0, 0, windowRect.width(), windowRect.height());
-			hotspot.mouseDown = QStringLiteral("on_right_hotspot_down");
-			hotspot.mouseUp   = QStringLiteral("on_right_hotspot_up");
-			window.hotspots.insert(QStringLiteral("hotspot_context"), hotspot);
-
-			const QPoint clickInStack    = windowRect.center();
-			const QPoint clickInViewport = viewport->mapFrom(outputStack, clickInStack);
-			QVERIFY(viewport->rect().contains(clickInViewport));
-
-			const int baseline = g_worldHotspotCallbackCount;
-			QTest::mouseClick(viewport, Qt::RightButton, Qt::NoModifier, clickInViewport);
+			QCOMPARE(installTestMiniWindowHotspot(*runtime, window, QStringLiteral("hotspot_context"),
+			                                      QRect(QPoint(0, 0), windowRect.size()),
+			                                      QStringLiteral("on_right_hotspot_down"), {},
+			                                      QStringLiteral("on_right_hotspot_up")),
+			         eOK);
+			view.onMiniWindowsChanged();
 			QCoreApplication::processEvents();
 
-			QTRY_VERIFY(g_worldHotspotCallbackCount >= baseline + 2);
-			QCOMPARE(g_worldHotspotCallbackFunctions.at(baseline), QStringLiteral("on_right_hotspot_down"));
-			QCOMPARE(g_worldHotspotCallbackFunctions.at(baseline + 1), QStringLiteral("on_right_hotspot_up"));
-			QVERIFY(!g_worldHotspotCallbackQueueWhenBusy.at(baseline));
-			QVERIFY(g_worldHotspotCallbackQueueWhenBusy.at(baseline + 1));
-			QCOMPARE(g_lastWorldHotspotFunction, QStringLiteral("on_right_hotspot_up"));
-			QCOMPARE(g_lastWorldHotspotId, QStringLiteral("hotspot_context"));
-			QVERIFY(g_lastWorldHotspotQueueWhenBusy);
+			const QPoint clickInStack = windowRect.center();
+			QVERIFY(outputStack->rect().contains(clickInStack));
+
+			QTest::mouseClick(outputStack, Qt::RightButton, Qt::NoModifier, clickInStack);
+			QTRY_COMPARE(miniWindowCallbackTrace(*runtime).size(), 2);
+			const auto trace = miniWindowCallbackTrace(*runtime);
+			QCOMPARE(trace.at(0).functionName, QStringLiteral("on_right_hotspot_down"));
+			QCOMPARE(trace.at(0).hotspotId, QStringLiteral("hotspot_context"));
+			QCOMPARE(trace.at(1).functionName, QStringLiteral("on_right_hotspot_up"));
+			QCOMPARE(trace.at(1).hotspotId, QStringLiteral("hotspot_context"));
 			resetTestState();
 		}
 
@@ -12598,7 +11672,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12611,7 +11685,8 @@ class tst_WorldView_Basic : public QObject
 			constexpr QColor overlayColour(220, 30, 40, 255);
 			const QRect      oldRect(24, 24, 90, 48);
 			const QRect      newRect(180, 120, 90, 48);
-			appendTestMiniWindow(QStringLiteral("native-overlay-move"), oldRect, 0, overlayColour);
+			MiniWindow      &window =
+			    appendTestMiniWindow(QStringLiteral("native-overlay-move"), oldRect, 0, overlayColour);
 			view.onMiniWindowsChanged();
 			QCoreApplication::processEvents();
 			outputStack->update();
@@ -12619,8 +11694,9 @@ class tst_WorldView_Basic : public QObject
 
 			QTRY_VERIFY(widgetRectMostlyMatchesColor(outputStack, oldRect, overlayColour, 80));
 
-			g_testMiniWindows[0].rect     = newRect;
-			g_testMiniWindows[0].location = newRect.topLeft();
+			QCOMPARE(
+			    runtimeForTest()->windowPosition(window.name, newRect.left(), newRect.top(), 0, window.flags),
+			    eOK);
 			view.onMiniWindowsChanged();
 			QCoreApplication::processEvents();
 			outputStack->update();
@@ -12637,7 +11713,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12659,16 +11735,18 @@ class tst_WorldView_Basic : public QObject
 			const QRect      startRect(viewportInStack.left() + 24, viewportInStack.top() + 24, 100, 56);
 			MiniWindow      &window =
 			    appendTestMiniWindow(QStringLiteral("native-fast-drag"), startRect, 0, overlayColour);
-			MiniWindowHotspot hotspot;
-			hotspot.rect         = QRect(0, 0, startRect.width(), startRect.height());
-			hotspot.moveCallback = QStringLiteral("drag_test_move");
-			window.hotspots.insert(QStringLiteral("drag"), hotspot);
+			QCOMPARE(installTestMiniWindowHotspot(*runtimeForTest(), window, QStringLiteral("drag"),
+			                                      QRect(QPoint(0, 0), startRect.size()), {}, {}, {},
+			                                      QStringLiteral("drag_test_move")),
+			         eOK);
 			view.onMiniWindowsChanged();
 			QCoreApplication::processEvents();
 
 			const QPoint pressInStack    = startRect.center();
 			const QPoint pressInViewport = viewport->mapFrom(outputStack, pressInStack);
 			QVERIFY(viewport->rect().contains(pressInViewport));
+			installMiniWindowMoveCallback(*runtimeForTest(), window.name, pressInStack - startRect.topLeft(),
+			                              window.flags);
 			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, pressInViewport);
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(view.isMiniWindowCaptureActive());
@@ -12689,8 +11767,10 @@ class tst_WorldView_Basic : public QObject
 			}
 
 			QCoreApplication::processEvents();
-			QTRY_VERIFY(widgetRectMostlyMatchesColor(outputStack, g_testMiniWindows.constFirst().rect,
-			                                         overlayColour, 80));
+			const QRect expectedRect(dragPoints.constLast() - (pressInStack - startRect.topLeft()),
+			                         startRect.size());
+			QTRY_COMPARE(window.rect, expectedRect);
+			QTRY_VERIFY(widgetRectMostlyMatchesColor(outputStack, window.rect, overlayColour, 80));
 
 			const QPoint releaseLocal = viewport->mapFrom(outputStack, dragPoints.constLast());
 			QTest::mouseRelease(viewport, Qt::LeftButton, Qt::NoModifier, releaseLocal);
@@ -12704,7 +11784,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12728,16 +11808,18 @@ class tst_WorldView_Basic : public QObject
 			const QRect      startRect(viewportInStack.left() + 24, viewportInStack.top() + 24, 100, 56);
 			MiniWindow &window = appendTestMiniWindow(QStringLiteral("native-sibling-routed-drag"), startRect,
 			                                          0, overlayColour);
-			MiniWindowHotspot hotspot;
-			hotspot.rect         = QRect(0, 0, startRect.width(), startRect.height());
-			hotspot.moveCallback = QStringLiteral("drag_test_move");
-			window.hotspots.insert(QStringLiteral("drag"), hotspot);
+			QCOMPARE(installTestMiniWindowHotspot(*runtimeForTest(), window, QStringLiteral("drag"),
+			                                      QRect(QPoint(0, 0), startRect.size()), {}, {}, {},
+			                                      QStringLiteral("drag_test_move")),
+			         eOK);
 			view.onMiniWindowsChanged();
 			QCoreApplication::processEvents();
 
 			const QPoint pressInStack    = startRect.center();
 			const QPoint pressInViewport = viewport->mapFrom(outputStack, pressInStack);
 			QVERIFY(viewport->rect().contains(pressInViewport));
+			installMiniWindowMoveCallback(*runtimeForTest(), window.name, pressInStack - startRect.topLeft(),
+			                              window.flags);
 			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, pressInViewport);
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(view.isMiniWindowCaptureActive());
@@ -12750,9 +11832,10 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::sendEvent(input, &moveEvent);
 			QCoreApplication::processEvents();
 
-			QCOMPARE(g_testMiniWindows.constFirst().clientMousePosition, moveInStack);
-			QTRY_VERIFY(widgetRectMostlyMatchesColor(outputStack, g_testMiniWindows.constFirst().rect,
-			                                         overlayColour, 80));
+			QCOMPARE(window.clientMousePosition, moveInStack);
+			QTRY_COMPARE(window.rect,
+			             QRect(moveInStack - (pressInStack - startRect.topLeft()), startRect.size()));
+			QTRY_VERIFY(widgetRectMostlyMatchesColor(outputStack, window.rect, overlayColour, 80));
 
 			QMouseEvent releaseEvent(QEvent::MouseButtonRelease, QPointF(moveInInput), QPointF(moveInInput),
 			                         QPointF(moveGlobal), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
@@ -12767,7 +11850,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12785,15 +11868,17 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(viewportInStack.width() > 260);
 			QVERIFY(viewportInStack.height() > 160);
 
-			constexpr QColor overlayColour(40, 90, 210, 255);
-			const QRect      startRect(viewportInStack.left() + 30, viewportInStack.top() + 30, 96, 54);
-			MiniWindow      &window =
+			constexpr QColor    overlayColour(40, 90, 210, 255);
+			const QRect         startRect(viewportInStack.left() + 30, viewportInStack.top() + 30, 96, 54);
+			WorldRuntime *const runtime = runtimeForTest();
+			installMiniWindowResizeCallbacks(*runtime, QStringLiteral("native-resize-drag"), overlayColour);
+			MiniWindow &window =
 			    appendTestMiniWindow(QStringLiteral("native-resize-drag"), startRect, 0, overlayColour);
-			MiniWindowHotspot hotspot;
-			hotspot.rect         = QRect(startRect.width() - 12, startRect.height() - 12, 12, 12);
-			hotspot.mouseDown    = QStringLiteral("drag_test_resize_down");
-			hotspot.moveCallback = QStringLiteral("drag_test_resize");
-			window.hotspots.insert(QStringLiteral("resize"), hotspot);
+			QCOMPARE(installTestMiniWindowHotspot(
+			             *runtime, window, QStringLiteral("resize"),
+			             QRect(startRect.width() - 12, startRect.height() - 12, 12, 12),
+			             QStringLiteral("drag_test_resize_down"), {}, {}, QStringLiteral("drag_test_resize")),
+			         eOK);
 			view.onMiniWindowsChanged();
 			QCoreApplication::processEvents();
 
@@ -12803,28 +11888,34 @@ class tst_WorldView_Basic : public QObject
 			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, pressInViewport);
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(view.isMiniWindowCaptureActive());
-			QCOMPARE(g_testMiniWindows.constFirst().rect, startRect);
-			QCOMPARE(g_lastResizeHotspotPressOffset, pressInStack - startRect.topLeft());
+			QCOMPARE(window.rect, startRect);
+			QString pressPosition;
+			QTRY_VERIFY(runtime->findVariable(QStringLiteral("test_miniwindow_resize_press"), pressPosition));
+			QCOMPARE(pressPosition, QStringLiteral("%1:%2").arg(pressInStack.x()).arg(pressInStack.y()));
 
 			const QPoint firstMoveInStack = pressInStack + QPoint(18, 9);
 			sendMiniWindowMouseMove(viewport, outputStack, firstMoveInStack);
 			QCoreApplication::processEvents();
 
-			const QRect firstResizeRect = g_testMiniWindows.constFirst().rect;
+			const QRect firstResizeRect(startRect.topLeft(),
+			                            QSize(firstMoveInStack.x() - startRect.left() + 1,
+			                                  firstMoveInStack.y() - startRect.top() + 1));
+			QTRY_COMPARE(window.rect, firstResizeRect);
 			QCOMPARE(firstResizeRect.topLeft(), startRect.topLeft());
 			QCOMPARE(firstResizeRect.width(), firstMoveInStack.x() - startRect.left() + 1);
 			QCOMPARE(firstResizeRect.height(), firstMoveInStack.y() - startRect.top() + 1);
-			QCOMPARE(g_testMiniWindows.constFirst().lastMousePosition,
-			         firstMoveInStack - startRect.topLeft());
+			QCOMPARE(window.lastMousePosition, firstMoveInStack - startRect.topLeft());
 
 			const QPoint fastMoveInStack = pressInStack + QPoint(74, 33);
 			sendMiniWindowMouseMove(viewport, outputStack, fastMoveInStack);
 			QCoreApplication::processEvents();
-			const QRect fastResizeRect = g_testMiniWindows.constFirst().rect;
+			const QRect fastResizeRect(startRect.topLeft(), QSize(fastMoveInStack.x() - startRect.left() + 1,
+			                                                      fastMoveInStack.y() - startRect.top() + 1));
+			QTRY_COMPARE(window.rect, fastResizeRect);
 			QCOMPARE(fastResizeRect.topLeft(), startRect.topLeft());
 			QCOMPARE(fastResizeRect.width(), fastMoveInStack.x() - startRect.left() + 1);
 			QCOMPARE(fastResizeRect.height(), fastMoveInStack.y() - startRect.top() + 1);
-			QCOMPARE(g_testMiniWindows.constFirst().lastMousePosition, fastMoveInStack - startRect.topLeft());
+			QCOMPARE(window.lastMousePosition, fastMoveInStack - startRect.topLeft());
 			QTRY_VERIFY(widgetRectMostlyMatchesColor(outputStack, fastResizeRect, overlayColour, 75));
 
 			QTest::mouseRelease(viewport, Qt::LeftButton, Qt::NoModifier,
@@ -12839,7 +11930,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12861,14 +11952,17 @@ class tst_WorldView_Basic : public QObject
 			const QRect      startRect(viewportInStack.left() + 30, viewportInStack.bottom() - 58, 96, 54);
 			QVERIFY(viewportInStack.contains(startRect.topLeft()));
 			QVERIFY(viewportInStack.contains(startRect.bottomRight()));
+			WorldRuntime *const runtime = runtimeForTest();
+			installMiniWindowResizeCallbacks(*runtime, QStringLiteral("native-resize-clamped"),
+			                                 overlayColour);
 
 			MiniWindow &window =
 			    appendTestMiniWindow(QStringLiteral("native-resize-clamped"), startRect, 0, overlayColour);
-			MiniWindowHotspot hotspot;
-			hotspot.rect         = QRect(startRect.width() - 12, startRect.height() - 12, 12, 12);
-			hotspot.mouseDown    = QStringLiteral("drag_test_resize_down");
-			hotspot.moveCallback = QStringLiteral("drag_test_resize");
-			window.hotspots.insert(QStringLiteral("resize"), hotspot);
+			QCOMPARE(installTestMiniWindowHotspot(
+			             *runtime, window, QStringLiteral("resize"),
+			             QRect(startRect.width() - 12, startRect.height() - 12, 12, 12),
+			             QStringLiteral("drag_test_resize_down"), {}, {}, QStringLiteral("drag_test_resize")),
+			         eOK);
 			view.onMiniWindowsChanged();
 			QCoreApplication::processEvents();
 
@@ -12885,13 +11979,15 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 
 			const QPoint constrainedMoveInStack(outsideMoveInStack.x(), outputStack->height() - 1);
-			const QRect  resizedRect = g_testMiniWindows.constFirst().rect;
+			const QRect  resizedRect(startRect.topLeft(),
+			                         QSize(constrainedMoveInStack.x() - startRect.left() + 1,
+			                               constrainedMoveInStack.y() - startRect.top() + 1));
+			QTRY_COMPARE(window.rect, resizedRect);
 			QCOMPARE(resizedRect.topLeft(), startRect.topLeft());
 			QCOMPARE(resizedRect.width(), constrainedMoveInStack.x() - startRect.left() + 1);
 			QCOMPARE(resizedRect.height(), constrainedMoveInStack.y() - startRect.top() + 1);
-			QCOMPARE(g_testMiniWindows.constFirst().lastMousePosition,
-			         constrainedMoveInStack - startRect.topLeft());
-			QCOMPARE(g_testMiniWindows.constFirst().clientMousePosition, constrainedMoveInStack);
+			QCOMPARE(window.lastMousePosition, constrainedMoveInStack - startRect.topLeft());
+			QCOMPARE(window.clientMousePosition, constrainedMoveInStack);
 
 			sendMiniWindowMouseRelease(viewport, outputStack, outsideMoveInStack);
 			QTRY_VERIFY(!view.isMiniWindowCaptureActive());
@@ -12903,7 +11999,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12914,16 +12010,17 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(outputStack);
 			QVERIFY(outputStack->width() > 220);
 			QVERIFY(outputStack->height() > 140);
+			WorldRuntime *const runtime = runtimeForTest();
+			installMiniWindowCallbackTrace(*runtime);
 
-			const QRect       startRect(40, 40, 120, 60);
-			MiniWindow       &window = appendTestMiniWindow(QStringLiteral("ordinary-capture"), startRect, 0,
-			                                                QColor(40, 90, 210, 255));
-			MiniWindowHotspot hotspot;
-			hotspot.rect            = QRect(QPoint(0, 0), startRect.size());
-			hotspot.mouseDown       = QStringLiteral("ordinary_capture_down");
-			hotspot.mouseUp         = QStringLiteral("ordinary_capture_up");
-			hotspot.cancelMouseDown = QStringLiteral("ordinary_capture_cancel");
-			window.hotspots.insert(QStringLiteral("ordinary"), hotspot);
+			const QRect startRect(40, 40, 120, 60);
+			MiniWindow &window = appendTestMiniWindow(QStringLiteral("ordinary-capture"), startRect, 0,
+			                                          QColor(40, 90, 210, 255));
+			QCOMPARE(installTestMiniWindowHotspot(
+			             *runtime, window, QStringLiteral("ordinary"), QRect(QPoint(0, 0), startRect.size()),
+			             QStringLiteral("ordinary_capture_down"), QStringLiteral("ordinary_capture_cancel"),
+			             QStringLiteral("ordinary_capture_up")),
+			         eOK);
 			view.onMiniWindowsChanged();
 			QCoreApplication::processEvents();
 
@@ -12934,13 +12031,14 @@ class tst_WorldView_Basic : public QObject
 
 			const QPoint outsideInStack(outputStack->width() + 30, pressInStack.y());
 			sendMiniWindowMouseMove(outputStack, outputStack, outsideInStack);
-			QCOMPARE(g_testMiniWindows.constFirst().clientMousePosition, outsideInStack);
+			QCOMPARE(window.clientMousePosition, outsideInStack);
 
 			sendMiniWindowMouseRelease(outputStack, outputStack, outsideInStack);
 			QTRY_VERIFY(!view.isMiniWindowCaptureActive());
-			QVERIFY(g_worldHotspotCallbackFunctions.contains(QStringLiteral("ordinary_capture_down")));
-			QVERIFY(g_worldHotspotCallbackFunctions.contains(QStringLiteral("ordinary_capture_cancel")));
-			QVERIFY(!g_worldHotspotCallbackFunctions.contains(QStringLiteral("ordinary_capture_up")));
+			QTRY_COMPARE(miniWindowCallbackTrace(*runtime).size(), 2);
+			const auto trace = miniWindowCallbackTrace(*runtime);
+			QCOMPARE(trace.at(0).functionName, QStringLiteral("ordinary_capture_down"));
+			QCOMPARE(trace.at(1).functionName, QStringLiteral("ordinary_capture_cancel"));
 			resetTestState();
 		}
 
@@ -12949,7 +12047,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -12960,18 +12058,18 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(outputStack);
 			QVERIFY(outputStack->width() > 220);
 			QVERIFY(outputStack->height() > 140);
+			WorldRuntime *const runtime = runtimeForTest();
+			installMiniWindowCallbackTrace(*runtime);
 
 			const QRect startRect(outputStack->width() - 120, 40, 120, 60);
 			MiniWindow &window = appendTestMiniWindow(QStringLiteral("drag-release-hit-test"), startRect, 0,
 			                                          QColor(40, 90, 210, 255));
-			MiniWindowHotspot hotspot;
-			hotspot.rect            = QRect(QPoint(0, 0), startRect.size());
-			hotspot.mouseDown       = QStringLiteral("drag_release_down");
-			hotspot.mouseUp         = QStringLiteral("drag_release_up");
-			hotspot.cancelMouseDown = QStringLiteral("drag_release_cancel");
-			hotspot.moveCallback    = QStringLiteral("drag_release_move");
-			hotspot.releaseCallback = QStringLiteral("drag_release_callback");
-			window.hotspots.insert(QStringLiteral("drag"), hotspot);
+			QCOMPARE(installTestMiniWindowHotspot(
+			             *runtime, window, QStringLiteral("drag"), QRect(QPoint(0, 0), startRect.size()),
+			             QStringLiteral("drag_release_down"), QStringLiteral("drag_release_cancel"),
+			             QStringLiteral("drag_release_up"), QStringLiteral("drag_release_move"),
+			             QStringLiteral("drag_release_callback")),
+			         eOK);
 			view.onMiniWindowsChanged();
 			QCoreApplication::processEvents();
 
@@ -12983,21 +12081,17 @@ class tst_WorldView_Basic : public QObject
 			const QPoint outsideInStack(outputStack->width() + 30, pressInStack.y());
 			sendMiniWindowMouseMove(outputStack, outputStack, outsideInStack);
 			QCOMPARE(view.lastMousePosition(), outsideInStack);
-			QCOMPARE(g_lastMiniWindowMouseMovePosition, outsideInStack);
-			QVERIFY(g_lastMiniWindowMouseMoveWindow.isEmpty());
-			QVERIFY(g_miniWindowMouseMoveNotifyCount > 0);
-			QCOMPARE(g_testMiniWindows.constFirst().clientMousePosition,
-			         QPoint(outputStack->width() - 1, outsideInStack.y()));
+			QCOMPARE(window.clientMousePosition, QPoint(outputStack->width() - 1, outsideInStack.y()));
 			sendMiniWindowMouseRelease(outputStack, outputStack, outsideInStack);
 			QTRY_VERIFY(!view.isMiniWindowCaptureActive());
 			QCOMPARE(view.lastMousePosition(), outsideInStack);
-			QCOMPARE(g_lastMiniWindowMouseMovePosition, outsideInStack);
-			QVERIFY(g_lastMiniWindowMouseMoveWindow.isEmpty());
-			QCOMPARE(g_testMiniWindows.constFirst().clientMousePosition,
-			         QPoint(outputStack->width() - 1, outsideInStack.y()));
-			QVERIFY(g_worldHotspotCallbackFunctions.contains(QStringLiteral("drag_release_callback")));
-			QVERIFY(g_worldHotspotCallbackFunctions.contains(QStringLiteral("drag_release_cancel")));
-			QVERIFY(!g_worldHotspotCallbackFunctions.contains(QStringLiteral("drag_release_up")));
+			QCOMPARE(window.clientMousePosition, QPoint(outputStack->width() - 1, outsideInStack.y()));
+			QTRY_COMPARE(miniWindowCallbackTrace(*runtime).size(), 4);
+			const auto trace = miniWindowCallbackTrace(*runtime);
+			QCOMPARE(trace.at(0).functionName, QStringLiteral("drag_release_down"));
+			QCOMPARE(trace.at(1).functionName, QStringLiteral("drag_release_move"));
+			QCOMPARE(trace.at(2).functionName, QStringLiteral("drag_release_callback"));
+			QCOMPARE(trace.at(3).functionName, QStringLiteral("drag_release_cancel"));
 			resetTestState();
 		}
 
@@ -13006,7 +12100,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
@@ -13015,58 +12109,57 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(outputSplitter);
 			QWidget *outputStack = outputSplitter->parentWidget();
 			QVERIFY(outputStack);
-			QTextBrowser *browser = findVisibleOutputBrowser(view);
-			QVERIFY(browser);
-			QWidget *viewport = browser->viewport();
-			QVERIFY(viewport);
+			QVERIFY(outputStack->width() > 260);
+			QVERIFY(outputStack->height() > 160);
 
-			const QRect viewportInStack(viewport->mapTo(outputStack, QPoint(0, 0)), viewport->size());
-			QVERIFY(viewportInStack.width() > 260);
-			QVERIFY(viewportInStack.height() > 160);
-
-			constexpr QColor  overlayColour(40, 90, 210, 255);
-			const QRect       startRect(viewportInStack.left() + 30, viewportInStack.top() + 30, 96, 54);
-			MiniWindow       &window = appendTestMiniWindow(QStringLiteral("native-release-flush-resize"),
-			                                                startRect, 0, overlayColour);
-			MiniWindowHotspot hotspot;
-			hotspot.rect            = QRect(startRect.width() - 12, startRect.height() - 12, 12, 12);
-			hotspot.mouseDown       = QStringLiteral("drag_test_resize_down");
-			hotspot.moveCallback    = QStringLiteral("drag_test_resize");
-			hotspot.releaseCallback = QStringLiteral("drag_test_release_after_resize");
-			window.hotspots.insert(QStringLiteral("resize"), hotspot);
+			constexpr QColor    overlayColour(40, 90, 210, 255);
+			const QRect         startRect(40, 40, 96, 54);
+			WorldRuntime *const runtime = runtimeForTest();
+			installMiniWindowResizeCallbacks(*runtime, QStringLiteral("native-release-flush-resize"),
+			                                 overlayColour);
+			MiniWindow &window = appendTestMiniWindow(QStringLiteral("native-release-flush-resize"),
+			                                          startRect, 0, overlayColour);
+			QCOMPARE(installTestMiniWindowHotspot(
+			             *runtime, window, QStringLiteral("resize"),
+			             QRect(startRect.width() - 12, startRect.height() - 12, 12, 12),
+			             QStringLiteral("drag_test_resize_down"), {}, {}, QStringLiteral("drag_test_resize"),
+			             QStringLiteral("drag_test_release_after_resize")),
+			         eOK);
 			view.onMiniWindowsChanged();
 			QCoreApplication::processEvents();
 
-			const QPoint pressInStack    = QPoint(startRect.right() - 2, startRect.bottom() - 2);
-			const QPoint pressInViewport = viewport->mapFrom(outputStack, pressInStack);
-			QVERIFY(viewport->rect().contains(pressInViewport));
-			const int callbackBaseline   = g_worldHotspotCallbackCount;
-			g_expectedReleaseCaptureView = &view;
-			QTest::mousePress(viewport, Qt::LeftButton, Qt::NoModifier, pressInViewport);
+			const QPoint pressInStack = QPoint(startRect.right() - 2, startRect.bottom() - 2);
+			QTest::mousePress(outputStack, Qt::LeftButton, Qt::NoModifier, pressInStack);
 			QCoreApplication::processEvents();
 			QTRY_VERIFY(view.isMiniWindowCaptureActive());
-			QCOMPARE(g_resizeMouseDownConstraintState, 0);
+			QString pressPosition;
+			QTRY_VERIFY(runtime->findVariable(QStringLiteral("test_miniwindow_resize_press"), pressPosition));
+			QCOMPARE(pressPosition, QStringLiteral("%1:%2").arg(pressInStack.x()).arg(pressInStack.y()));
 
-			const QPoint moveInStack    = pressInStack + QPoint(64, 28);
-			const QPoint moveInViewport = viewport->mapFrom(outputStack, moveInStack);
-			const QPoint moveGlobal     = viewport->mapToGlobal(moveInViewport);
-			QMouseEvent  moveEvent(QEvent::MouseMove, QPointF(moveInViewport), QPointF(moveInViewport),
+			const QPoint moveInStack = pressInStack + QPoint(64, 28);
+			const QPoint moveGlobal  = outputStack->mapToGlobal(moveInStack);
+			QMouseEvent  moveEvent(QEvent::MouseMove, QPointF(moveInStack), QPointF(moveInStack),
 			                       QPointF(moveGlobal), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
-			QCoreApplication::sendEvent(viewport, &moveEvent);
-			QCOMPARE(g_resizeMoveCallbackCount, 0);
+			QCoreApplication::sendEvent(outputStack, &moveEvent);
+			QString moveResult;
+			QVERIFY(!runtime->findVariable(QStringLiteral("test_miniwindow_resize_move"), moveResult));
 
-			g_expectedReleaseResizeSize =
-			    QSize(moveInStack.x() - startRect.left() + 1, moveInStack.y() - startRect.top() + 1);
-			g_expectedReleaseMousePosition = moveInStack;
-			QTest::mouseRelease(viewport, Qt::LeftButton, Qt::NoModifier, moveInViewport);
-			QCoreApplication::processEvents();
+			const QSize expectedResizeSize(moveInStack.x() - startRect.left() + 1,
+			                               moveInStack.y() - startRect.top() + 1);
+			QTest::mouseRelease(outputStack, Qt::LeftButton, Qt::NoModifier, moveInStack);
 
-			QCOMPARE(g_resizeMoveCallbackCount, 1);
-			QCOMPARE(g_resizeMoveConstraintState, 1);
-			QVERIFY(g_releaseCallbackSawFlushedResize);
-			QTRY_VERIFY(g_worldHotspotCallbackCount >= callbackBaseline + 3);
-			QCOMPARE(g_worldHotspotCallbackFunctions.at(callbackBaseline + 2),
-			         QStringLiteral("drag_test_release_after_resize"));
+			QString callbackTrace;
+			QTRY_VERIFY(runtime->findVariable(QStringLiteral("test_miniwindow_resize_trace"), callbackTrace));
+			QCOMPARE(callbackTrace, QStringLiteral("down;move;release;"));
+			QTRY_COMPARE(window.rect, QRect(startRect.topLeft(), expectedResizeSize));
+			QString releaseState;
+			QTRY_VERIFY(
+			    runtime->findVariable(QStringLiteral("test_miniwindow_resize_release"), releaseState));
+			QCOMPARE(releaseState, QStringLiteral("%1:%2:%3:%4")
+			                           .arg(expectedResizeSize.width())
+			                           .arg(expectedResizeSize.height())
+			                           .arg(moveInStack.x())
+			                           .arg(moveInStack.y()));
 			QTRY_VERIFY(!view.isMiniWindowCaptureActive());
 			resetTestState();
 		}
@@ -13076,12 +12169,13 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
 
-			view.appendOutputText(QStringLiteral("native-selection-pass-through-target"), true);
+			runtimeOutputForTest(view).appendOutputText(
+			    QStringLiteral("native-selection-pass-through-target"), true);
 			QCoreApplication::processEvents();
 
 			QSplitter *outputSplitter = findOutputSplitter(view);
@@ -13120,12 +12214,12 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(760, 460);
 			view.show();
 			QCoreApplication::processEvents();
 
-			view.appendOutputText(
+			runtimeOutputForTest(view).appendOutputText(
 			    QStringLiteral("native-drag-stop-target-abcdefghijklmnopqrstuvwxyz-0123456789"), true);
 			QCoreApplication::processEvents();
 
@@ -13206,32 +12300,23 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(rebuildKeys.contains(QStringLiteral("line_spacing")));
 		}
 
-		void applyRuntimeSettingsWithoutOutputRebuildPreservesRenderedBuffer()
+		void applyRuntimeSettingsWithoutOutputRebuildPreservesRuntimeBuffer()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("output_font_height"), QStringLiteral("10"));
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("output_font_height"), QStringLiteral("10"));
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
-			view.appendOutputText(QStringLiteral("existing-buffer-line"), true);
+			setTestRuntimeObserver(view, runtimeForTest());
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("existing-buffer-line"), true);
 			QVERIFY(view.outputLines().contains(QStringLiteral("existing-buffer-line")));
-			g_runtimeLines.clear();
-
-			WorldRuntime::LineEntry runtimeLine;
-			runtimeLine.text       = QStringLiteral("runtime-only-line");
-			runtimeLine.flags      = WorldRuntime::LineOutput;
-			runtimeLine.hardReturn = true;
-			g_runtimeLines.push_back(runtimeLine);
 
 			view.applyRuntimeSettingsWithoutOutputRebuild();
 			QVERIFY(view.outputLines().contains(QStringLiteral("existing-buffer-line")));
-			QVERIFY(!view.outputLines().contains(QStringLiteral("runtime-only-line")));
 
-			g_worldAttrs.insert(QStringLiteral("output_font_height"), QStringLiteral("11"));
+			setTestWorldAttribute(QStringLiteral("output_font_height"), QStringLiteral("11"));
 			view.applyRuntimeSettings();
-			QVERIFY(view.outputLines().contains(QStringLiteral("runtime-only-line")));
-			QVERIFY(!view.outputLines().contains(QStringLiteral("existing-buffer-line")));
+			QVERIFY(view.outputLines().contains(QStringLiteral("existing-buffer-line")));
 
 			resetTestState();
 		}
@@ -13267,15 +12352,15 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("use_default_output_font"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("output_font_name"), QStringLiteral("Monospace"));
-			g_worldAttrs.insert(QStringLiteral("output_font_height"), QStringLiteral("10"));
-			g_worldAttrs.insert(QStringLiteral("output_font_weight"), QStringLiteral("400"));
-			g_worldAttrs.insert(QStringLiteral("output_font_charset"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("use_default_output_font"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("output_font_name"), QStringLiteral("Monospace"));
+			setTestWorldAttribute(QStringLiteral("output_font_height"), QStringLiteral("10"));
+			setTestWorldAttribute(QStringLiteral("output_font_weight"), QStringLiteral("400"));
+			setTestWorldAttribute(QStringLiteral("output_font_charset"), QStringLiteral("1"));
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(860, 520);
 			view.show();
 			QCoreApplication::processEvents();
@@ -13290,9 +12375,7 @@ class tst_WorldView_Basic : public QObject
 				entry.hardReturn = true;
 				lines.push_back(entry);
 			}
-			g_runtimeLines = lines;
-
-			view.restoreOutputFromPersistedLines(lines);
+			runtimeForTest()->replaceOutputLines(lines);
 			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("anchor-0000")));
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -13306,7 +12389,7 @@ class tst_WorldView_Basic : public QObject
 				QVERIFY(bar->value() >= (bar->maximum() - endTolerance));
 			}
 
-			g_worldAttrs.insert(QStringLiteral("output_font_height"), QStringLiteral("18"));
+			setTestWorldAttribute(QStringLiteral("output_font_height"), QStringLiteral("18"));
 			view.applyRuntimeSettings();
 
 			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("anchor-0000")));
@@ -13328,12 +12411,12 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("1"));
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(1080, 520);
 			view.show();
 			view.applyRuntimeSettings();
@@ -13343,7 +12426,7 @@ class tst_WorldView_Basic : public QObject
 			{
 				const QString line = QStringLiteral("resize-anchor-%1 ").arg(i, 4, 10, QLatin1Char('0')) +
 				                     QString(220, QLatin1Char('x'));
-				view.appendOutputText(line, true);
+				runtimeOutputForTest(view).appendOutputText(line, true);
 			}
 			QCoreApplication::processEvents();
 
@@ -13421,7 +12504,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(860, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -13462,7 +12545,7 @@ class tst_WorldView_Basic : public QObject
 			WorldView view;
 			view.resize(860, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -13498,12 +12581,12 @@ class tst_WorldView_Basic : public QObject
 		void nativeRestoreAppendRemainsAfterLargeRestore()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(860, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -13518,10 +12601,8 @@ class tst_WorldView_Basic : public QObject
 				entry.lineNumber = i + 1;
 				restoredLines.push_back(entry);
 			}
-			g_runtimeLines = restoredLines;
-
-			view.restoreOutputFromPersistedLines(restoredLines);
-			view.appendOutputText(QStringLiteral("native-live-tail-line"), true);
+			runtimeForTest()->replaceOutputLines(restoredLines);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("native-live-tail-line"), true);
 
 			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("native-live-tail-line")));
 			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("native-inflight-restore-21999")));
@@ -13531,13 +12612,13 @@ class tst_WorldView_Basic : public QObject
 		void nativeRestoreStyleChangeKeepsLatestSnapshot()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("output_text_colour"), QStringLiteral("#ff0000"));
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("output_text_colour"), QStringLiteral("#ff0000"));
 
 			WorldView view;
 			view.resize(860, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -13552,10 +12633,8 @@ class tst_WorldView_Basic : public QObject
 				entry.lineNumber = i + 1;
 				restoredLines.push_back(entry);
 			}
-			g_runtimeLines = restoredLines;
-
-			view.restoreOutputFromPersistedLines(restoredLines);
-			g_worldAttrs.insert(QStringLiteral("output_text_colour"), QStringLiteral("#00ff00"));
+			runtimeForTest()->replaceOutputLines(restoredLines);
+			setTestWorldAttribute(QStringLiteral("output_text_colour"), QStringLiteral("#00ff00"));
 			view.applyRuntimeSettingsWithoutOutputRebuild();
 
 			QTRY_VERIFY(view.outputLines().contains(QStringLiteral("native-epoch-31999")));
@@ -13610,14 +12689,14 @@ class tst_WorldView_Basic : public QObject
 		void restorePathAppliesPersistedOutputAndHistoryTogether()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(860, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -13662,14 +12741,14 @@ class tst_WorldView_Basic : public QObject
 		void outputRestoreDoesNotClearExistingCommandHistory()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(860, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -13705,18 +12784,18 @@ class tst_WorldView_Basic : public QObject
 		void historyRestoreDoesNotMutateOutputBuffer()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
 
 			WorldView view;
 			view.resize(760, 460);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 
-			view.appendOutputText(QStringLiteral("history-only-output-a"), true);
-			view.appendOutputText(QStringLiteral("history-only-output-b"), true);
-			view.appendOutputText(QStringLiteral("history-only-output-c"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("history-only-output-a"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("history-only-output-b"), true);
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("history-only-output-c"), true);
 			QCoreApplication::processEvents();
 
 			const QStringList outputBefore = view.outputLines();
@@ -13742,12 +12821,12 @@ class tst_WorldView_Basic : public QObject
 		void nativeRestoreFromPersistedLinesRendersWithoutDocumentFallback()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("0"));
 
 			WorldView view;
 			view.resize(860, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
@@ -13764,9 +12843,7 @@ class tst_WorldView_Basic : public QObject
 				entry.hardReturn = true;
 				restoredLines.push_back(entry);
 			}
-			g_runtimeLines = restoredLines;
-
-			view.restoreOutputFromPersistedLines(restoredLines);
+			runtimeForTest()->replaceOutputLines(restoredLines);
 			nativeCanvas->update();
 			QCoreApplication::processEvents();
 
@@ -13780,7 +12857,7 @@ class tst_WorldView_Basic : public QObject
 		void nativeRestoreFromPersistedLinesPreservesHyperlinkAnchors()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("display_my_input"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("0"));
 
 			WorldRuntime::LineEntry line;
 			line.text       = QStringLiteral("assistant");
@@ -13795,14 +12872,12 @@ class tst_WorldView_Basic : public QObject
 			line.spans.push_back(span);
 
 			QVector<WorldRuntime::LineEntry> restoredLines{line};
-			g_runtimeLines = restoredLines;
-
-			WorldView view;
+			WorldView                        view;
 			view.resize(860, 520);
 			view.show();
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.applyRuntimeSettings();
-			view.restoreOutputFromPersistedLines(restoredLines);
+			runtimeForTest()->replaceOutputLines(restoredLines);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -13821,21 +12896,22 @@ class tst_WorldView_Basic : public QObject
 		void nativeWrappedHyperlinkSurvivesCappedIncrementalRestitch()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("max_output_lines"), QStringLiteral("35"));
-			g_worldAttrs.insert(QStringLiteral("wrap"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("wrap_column"), QStringLiteral("28"));
-			g_worldAttrs.insert(QStringLiteral("indent_paras"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("35"));
+			setTestWorldAttribute(QStringLiteral("wrap"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("28"));
+			setTestWorldAttribute(QStringLiteral("indent_paras"), QStringLiteral("0"));
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(720, 420);
 			view.show();
 			view.applyRuntimeSettings();
 			QCoreApplication::processEvents();
 
 			for (int i = 0; i < 35; ++i)
-				view.appendOutputText(QStringLiteral("wrapped-link-primer-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("wrapped-link-primer-%1").arg(i),
+				                                            true);
 
 			const QString           prefix = QStringLiteral("before words ");
 			const QString           linked = QStringLiteral("click-target");
@@ -13849,10 +12925,11 @@ class tst_WorldView_Basic : public QObject
 			linkSpan.action     = QStringLiteral("https://example.org/restitch-link");
 			WorldRuntime::StyleSpan suffixSpan;
 			suffixSpan.length = boundedSizeToInt(suffix.size());
-			appendFakeRuntimeOutputText(view, text, {prefixSpan, linkSpan, suffixSpan}, false, true);
+			appendRuntimeOutputText(view, text, {prefixSpan, linkSpan, suffixSpan}, false, true);
 
 			for (int i = 0; i < 4; ++i)
-				view.appendOutputText(QStringLiteral("wrapped-link-tail-%1").arg(i), true);
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("wrapped-link-tail-%1").arg(i),
+				                                            true);
 			QCoreApplication::processEvents();
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
@@ -13877,11 +12954,11 @@ class tst_WorldView_Basic : public QObject
 		void hyperlinkPresentationSettingsRestyleInPlaceWithoutRebuild()
 		{
 			resetTestState();
-			g_worldAttrs.insert(QStringLiteral("use_custom_link_colour"), QStringLiteral("0"));
-			g_worldAttrs.insert(QStringLiteral("underline_hyperlinks"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("use_custom_link_colour"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("underline_hyperlinks"), QStringLiteral("0"));
 
 			WorldView view;
-			view.setRuntimeObserver(fakeRuntimePointer());
+			setTestRuntimeObserver(view, runtimeForTest());
 			view.resize(860, 520);
 			view.show();
 			view.applyRuntimeSettings();
@@ -13900,7 +12977,7 @@ class tst_WorldView_Basic : public QObject
 				span.length     = boundedSizeToInt(lineText.size());
 				span.actionType = WorldRuntime::ActionHyperlink;
 				span.action     = href;
-				view.appendOutputTextStyled(lineText, {span}, true);
+				runtimeOutputForTest(view).appendOutputTextStyled(lineText, {span}, true);
 			}
 			QCoreApplication::processEvents();
 
@@ -13917,11 +12994,9 @@ class tst_WorldView_Basic : public QObject
 			const QPoint newestPointBefore = findHyperlinkPoint(view, *browser, newestHref);
 			QVERIFY(newestPointBefore.x() >= 0 && newestPointBefore.y() >= 0);
 
-			g_worldAttrs.insert(QStringLiteral("use_custom_link_colour"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("underline_hyperlinks"), QStringLiteral("1"));
-			g_worldAttrs.insert(QStringLiteral("hyperlink_colour"), targetColour.name());
-			g_runtimeLines.clear();
-
+			setTestWorldAttribute(QStringLiteral("use_custom_link_colour"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("underline_hyperlinks"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("hyperlink_colour"), targetColour.name());
 			view.applyRuntimeSettingsWithoutOutputRebuild();
 
 			const QStringList linesAfter = view.outputLines();

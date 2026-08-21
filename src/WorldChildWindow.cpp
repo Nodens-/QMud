@@ -207,7 +207,7 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		}
 	}
 
-	const bool primary      = worldRuntime && role == RuntimeBindingRole::Primary;
+	const bool primary = worldRuntime && role == RuntimeBindingRole::Primary;
 	if (primary)
 		createCommandProcessor();
 	else
@@ -280,30 +280,6 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 	}
 	if (m_view)
 	{
-		if (primary)
-		{
-			connect(worldRuntime, &WorldRuntime::outputRequested, m_view,
-			        [this](const QString &text, const bool newLine, const bool note)
-			        {
-				        if (!m_view)
-					        return;
-				        if (note)
-					        m_view->appendNoteText(text, newLine);
-				        else
-					        m_view->appendOutputText(text, newLine);
-			        });
-			connect(worldRuntime, &WorldRuntime::outputStyledRequested, m_view,
-			        [this](const QString &text, const QVector<WorldRuntime::StyleSpan> &spans,
-			               const bool newLine, const bool note)
-			        {
-				        if (!m_view)
-					        return;
-				        if (note)
-					        m_view->appendNoteTextStyled(text, spans, newLine);
-				        else
-					        m_view->appendOutputTextStyled(text, spans, newLine);
-			        });
-		}
 		connect(worldRuntime, &WorldRuntime::miniWindowsChanged, m_view,
 		        [this]
 		        {
