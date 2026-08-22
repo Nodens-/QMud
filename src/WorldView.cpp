@@ -15520,34 +15520,34 @@ QString WorldView::inputText() const
 
 bool WorldView::confirmReplaceTyping(const QString &replacement)
 {
-	if (!m_confirmBeforeReplacingTyping)
-		return true;
-
 	if (!m_inputChanged || !m_input)
 		return true;
 
-	QString current = m_input->toPlainText();
+	const QString current = m_input->toPlainText();
 	if (current.isEmpty())
 		return true;
 
-	constexpr int limit              = 200;
-	QString       trimmedCurrent     = current;
-	QString       trimmedReplacement = replacement;
-	if (trimmedCurrent.size() > limit)
-		trimmedCurrent = trimmedCurrent.left(limit) + QStringLiteral(" ...");
-	if (trimmedReplacement.size() > limit)
-		trimmedReplacement = trimmedReplacement.left(limit) + QStringLiteral(" ...");
-
-	const int result =
-	    QMessageBox::question(this, QStringLiteral("QMud"),
-	                          QStringLiteral("Replace your typing of\n\n\"%1\"\n\nwith\n\n\"%2\"?")
-	                              .arg(trimmedCurrent, trimmedReplacement),
-	                          QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
-
-	if (result != QMessageBox::Ok)
+	if (m_confirmBeforeReplacingTyping)
 	{
-		resetHistoryRecall();
-		return false;
+		constexpr int limit              = 200;
+		QString       trimmedCurrent     = current;
+		QString       trimmedReplacement = replacement;
+		if (trimmedCurrent.size() > limit)
+			trimmedCurrent = trimmedCurrent.left(limit) + QStringLiteral(" ...");
+		if (trimmedReplacement.size() > limit)
+			trimmedReplacement = trimmedReplacement.left(limit) + QStringLiteral(" ...");
+
+		const int result =
+		    QMessageBox::question(this, QStringLiteral("QMud"),
+		                          QStringLiteral("Replace your typing of\n\n\"%1\"\n\nwith\n\n\"%2\"?")
+		                              .arg(trimmedCurrent, trimmedReplacement),
+		                          QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+
+		if (result != QMessageBox::Ok)
+		{
+			resetHistoryRecall();
+			return false;
+		}
 	}
 
 	if (m_saveDeletedCommand)
@@ -16154,7 +16154,8 @@ void WorldView::recallPartialHistory(int direction)
 	if (!confirmReplaceTyping(candidate))
 		return;
 
-	m_partialIndex = index;
+	const qsizetype candidateIndex = m_history.indexOf(candidate);
+	m_partialIndex                 = candidateIndex < 0 ? -1 : sizeToInt(candidateIndex);
 	setInputText(candidate);
 }
 
@@ -16219,7 +16220,11 @@ void WorldView::recallHistory(int direction)
 	{
 		const QString replacement = m_history.at(m_historyIndex);
 		if (confirmReplaceTyping(replacement))
+		{
+			const qsizetype replacementIndex = m_history.indexOf(replacement);
+			m_historyIndex                   = replacementIndex < 0 ? -1 : sizeToInt(replacementIndex);
 			setInputText(replacement);
+		}
 	}
 }
 

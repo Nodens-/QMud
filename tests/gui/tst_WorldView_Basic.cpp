@@ -19,6 +19,7 @@
 #include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QAbstractButton>
 #include <QAbstractScrollArea>
 #include <QAccessible>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -10891,6 +10892,182 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.inputText(), QStringLiteral("south"));
 			QTest::keyClick(input, Qt::Key_Up);
 			QCOMPARE(view.inputText(), QStringLiteral("north"));
+
+			resetTestState();
+		}
+
+		void historyTraversalSaveDeletedCommandIsIndependentOfConfirmation_data()
+		{
+			QTest::addColumn<bool>("saveDeletedCommand");
+			QTest::addColumn<bool>("confirmBeforeReplacingTyping");
+
+			QTest::newRow("save-without-confirmation") << true << false;
+			QTest::newRow("save-with-confirmation") << true << true;
+			QTest::newRow("discard-without-confirmation") << false << false;
+			QTest::newRow("discard-with-confirmation") << false << true;
+		}
+
+		void historyTraversalSaveDeletedCommandIsIndependentOfConfirmation()
+		{
+			QFETCH(bool, saveDeletedCommand);
+			QFETCH(bool, confirmBeforeReplacingTyping);
+			resetTestState();
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("arrow_keys_wrap"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("save_deleted_command"),
+			                      saveDeletedCommand ? QStringLiteral("1") : QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("confirm_before_replacing_typing"),
+			                      confirmBeforeReplacingTyping ? QStringLiteral("1") : QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.applyRuntimeSettings();
+			view.addToHistoryForced(QStringLiteral("north"));
+			view.addToHistoryForced(QStringLiteral("south"));
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus();
+			view.setInputText(QStringLiteral("unfinished command"), true);
+			QCoreApplication::processEvents();
+
+			const auto confirmationAcceptCount = std::make_shared<int>(0);
+			if (confirmBeforeReplacingTyping)
+			{
+				scheduleDialogInteraction(
+				    [](const QDialog *dialog)
+				    {
+					    const auto *messageBox = qobject_cast<const QMessageBox *>(dialog);
+					    return messageBox &&
+					           messageBox->text().contains(QStringLiteral("Replace your typing of"));
+				    },
+				    [confirmationAcceptCount](const QDialog *dialog)
+				    {
+					    auto *messageBox = qobject_cast<QMessageBox *>(const_cast<QDialog *>(dialog));
+					    if (messageBox)
+					    {
+						    if (QAbstractButton *button = messageBox->button(QMessageBox::Ok))
+						    {
+							    ++*confirmationAcceptCount;
+							    button->click();
+						    }
+					    }
+				    });
+			}
+
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(*confirmationAcceptCount, confirmBeforeReplacingTyping ? 1 : 0);
+			QCOMPARE(view.inputText(), QStringLiteral("south"));
+
+			QStringList expectedHistory{QStringLiteral("north"), QStringLiteral("south")};
+			if (saveDeletedCommand)
+				expectedHistory.push_back(QStringLiteral("unfinished command"));
+			QCOMPARE(view.commandHistoryList(), expectedHistory);
+
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(view.inputText(), QStringLiteral("north"));
+			QTest::keyClick(input, Qt::Key_Down);
+			QCOMPARE(view.inputText(), QStringLiteral("south"));
+			QTest::keyClick(input, Qt::Key_Down);
+			QCOMPARE(view.inputText(), saveDeletedCommand ? QStringLiteral("unfinished command") : QString());
+			QCOMPARE(view.commandHistoryList(), expectedHistory);
+
+			resetTestState();
+		}
+
+		void historyTraversalSavedDraftKeepsIndexAligned_data()
+		{
+			QTest::addColumn<int>("historyLimit");
+			QTest::addColumn<QStringList>("initialHistory");
+			QTest::addColumn<QStringList>("expectedHistory");
+
+			QTest::newRow("evict-oldest-at-limit")
+			    << 2 << QStringList{QStringLiteral("north"), QStringLiteral("south")}
+			    << QStringList{QStringLiteral("south"), QStringLiteral("unfinished command")};
+			QTest::newRow("deduplicate-older-draft")
+			    << 3
+			    << QStringList{QStringLiteral("unfinished command"), QStringLiteral("north"),
+			                   QStringLiteral("south")}
+			    << QStringList{QStringLiteral("north"), QStringLiteral("south"),
+			                   QStringLiteral("unfinished command")};
+		}
+
+		void historyTraversalSavedDraftKeepsIndexAligned()
+		{
+			QFETCH(int, historyLimit);
+			QFETCH(QStringList, initialHistory);
+			QFETCH(QStringList, expectedHistory);
+			resetTestState();
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("arrow_keys_wrap"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QString::number(historyLimit));
+			setTestWorldAttribute(QStringLiteral("save_deleted_command"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("confirm_before_replacing_typing"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.applyRuntimeSettings();
+			for (const QString &entry : initialHistory)
+				view.addToHistoryForced(entry);
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus();
+			view.setInputText(QStringLiteral("unfinished command"), true);
+			QCoreApplication::processEvents();
+
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(view.inputText(), QStringLiteral("south"));
+			QCOMPARE(view.commandHistoryList(), expectedHistory);
+
+			QTest::keyClick(input, Qt::Key_Down);
+			QCOMPARE(view.inputText(), QStringLiteral("unfinished command"));
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(view.inputText(), QStringLiteral("south"));
+			QCOMPARE(view.commandHistoryList(), expectedHistory);
+
+			resetTestState();
+		}
+
+		void partialHistoryTraversalSavedDraftKeepsIndexAlignedAfterDeduplication()
+		{
+			resetTestState();
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("3"));
+			setTestWorldAttribute(QStringLiteral("save_deleted_command"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("confirm_before_replacing_typing"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.applyRuntimeSettings();
+			view.addToHistoryForced(QStringLiteral("hit"));
+			view.addToHistoryForced(QStringLiteral("hit old"));
+			view.addToHistoryForced(QStringLiteral("hit newest"));
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus();
+			view.setInputText(QStringLiteral("hit"), true);
+			QCoreApplication::processEvents();
+
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(view.inputText(), QStringLiteral("hit newest"));
+			QCOMPARE(view.commandHistoryList(),
+			         QStringList(
+			             {QStringLiteral("hit old"), QStringLiteral("hit newest"), QStringLiteral("hit")}));
+
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(view.inputText(), QStringLiteral("hit old"));
+			QTest::keyClick(input, Qt::Key_Down);
+			QCOMPARE(view.inputText(), QStringLiteral("hit newest"));
 
 			resetTestState();
 		}
