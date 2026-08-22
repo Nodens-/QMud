@@ -1583,18 +1583,22 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			QCOMPARE(offset, static_cast<int>(line.size()));
 		}
 
-		static void mxpResetPromptPartialIsPresentedWithoutLineTerminator()
+		static void mxpResetPromptPartialIsRepublishedAfterIncomingLinesWithoutLineTerminator()
 		{
 			WorldRuntime runtime;
 			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("0"));
 			RuntimeCommandHarness harness(runtime);
 			QVERIFY(harness.showAndWait());
 
-			QStringList partialLines;
-			QObject::connect(
-			    &runtime, &WorldRuntime::incomingStyledLinePartialReceived, &runtime,
-			    [&partialLines](const QString &line, const QVector<WorldRuntime::StyleSpan> & /*spans*/)
-			    { partialLines.push_back(line); });
+			QStringList                               partialLines;
+			QVector<QVector<WorldRuntime::StyleSpan>> partialSpans;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLinePartialReceived, &runtime,
+			                 [&partialLines, &partialSpans](const QString                          &line,
+			                                                const QVector<WorldRuntime::StyleSpan> &spans)
+			                 {
+				                 partialLines.push_back(line);
+				                 partialSpans.push_back(spans);
+			                 });
 
 			runtime.receiveRawData(bytes({IAC, SB, 91, IAC, SE}));
 
@@ -1608,12 +1612,35 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			const QString expectedPrompt = QStringLiteral("NSw 2:30pm 32/32hp 100/100m 300mv 2000xp> ");
 			QTRY_VERIFY(!partialLines.isEmpty());
 			QCOMPARE(partialLines.constLast(), expectedPrompt);
+			QCOMPARE(partialSpans.size(), partialLines.size());
+			const QVector<WorldRuntime::StyleSpan> expectedPromptSpans = partialSpans.constLast();
+			QVERIFY(!expectedPromptSpans.isEmpty());
 			auto outputLastLine = [&harness]
 			{
 				const QStringList lines = harness.view.outputLines();
 				return lines.isEmpty() ? QString() : lines.constLast();
 			};
 			QTRY_COMPARE(outputLastLine(), expectedPrompt);
+
+			const qsizetype partialPublicationCount = partialLines.size();
+			QByteArray      unsolicitedPayload      = QByteArrayLiteral("\r\n");
+			unsolicitedPayload.append(payload);
+			runtime.receiveRawData(unsolicitedPayload);
+
+			QTRY_COMPARE(partialLines.size(), partialPublicationCount + 1);
+			QCOMPARE(partialLines.constLast(), expectedPrompt);
+			QCOMPARE(partialSpans.size(), partialLines.size());
+			QVERIFY(partialSpans.constLast() == expectedPromptSpans);
+			QTRY_COMPARE(outputLastLine(), expectedPrompt);
+
+			runtime.receiveRawData(QByteArrayLiteral("\r\n"));
+			QTRY_COMPARE(partialLines.constLast(), QString());
+			const qsizetype completedOutputPublicationCount = partialLines.size();
+
+			runtime.receiveRawData(QByteArrayLiteral("\x1B[3z<Ex>N</Ex>\r\n"));
+
+			QCOMPARE(partialLines.size(), completedOutputPublicationCount);
+			QTRY_COMPARE(outputLastLine(), QStringLiteral("N"));
 		}
 
 		static void legacyEncodingMxpSetEntityCallbackPayloadUsesInternalUtf8()
