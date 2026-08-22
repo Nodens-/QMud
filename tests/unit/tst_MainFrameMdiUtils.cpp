@@ -112,6 +112,37 @@ namespace
 				}
 			}
 
+			void restoreMaximizedSubWindowsHonorsCandidateScope()
+			{
+				QMdiArea mdiArea;
+				mdiArea.setOption(QMdiArea::DontMaximizeSubWindowOnActivation);
+				mdiArea.resize(643, 487);
+				mdiArea.show();
+
+				QMdiSubWindow *selected  = addVisibleSubWindow(mdiArea);
+				QMdiSubWindow *hidden    = addVisibleSubWindow(mdiArea);
+				QMdiSubWindow *minimized = addVisibleSubWindow(mdiArea);
+				selected->showMaximized();
+				hidden->showMaximized();
+				hidden->hide();
+				minimized->showMinimized();
+				mdiArea.setActiveSubWindow(selected);
+				QCoreApplication::processEvents();
+
+				QVERIFY(selected->isMaximized());
+				QVERIFY(!hidden->isVisible());
+				QVERIFY(hidden->isMaximized());
+				QVERIFY(minimized->isMinimized());
+
+				QMudMainFrameMdiUtils::restoreMaximizedSubWindows(&mdiArea, {selected, minimized});
+				QCoreApplication::processEvents();
+
+				QVERIFY(!selected->isMaximized());
+				QVERIFY(!hidden->isVisible());
+				QVERIFY(hidden->isMaximized());
+				QVERIFY(minimized->isMinimized());
+			}
+
 			void resolveCurrentOrLastPrefersCurrentActive()
 			{
 				QMdiSubWindow                current;

@@ -68,6 +68,13 @@ class MdiTabs : public QTabBar
 			m_minVisibleViews = minViews;
 		}
 
+	signals:
+		/**
+		 * @brief Requests activation through the owning MDI presentation state machine.
+		 * @param subWindow Child represented by the selected tab.
+		 */
+		void windowActivationRequested(QMdiSubWindow *subWindow);
+
 	private:
 		QMdiArea                        *m_mdiArea{nullptr};
 		int                              m_minVisibleViews{0}; // minimum number of views
@@ -75,6 +82,12 @@ class MdiTabs : public QTabBar
 		bool                             m_tabsOnTop{false};
 		bool                             m_userOrdered{false};
 		QVector<QPointer<QMdiSubWindow>> m_orderedWindows;
+		/**
+		 * @brief Selects a tab and requests activation exactly once.
+		 * @param index Tab index to select.
+		 * @param subWindow Child represented by the tab.
+		 */
+		void                             activateTabWindow(int index, QMdiSubWindow *subWindow);
 
 	protected:
 		/**

@@ -79,6 +79,10 @@ if (POLICY CMP0069)
     cmake_policy(SET CMP0069 NEW)
 endif ()
 option(QMUD_PROBE_IPO "Probe toolchain for IPO/LTO support at configure time" ON)
+if (CMAKE_GENERATOR MATCHES "Ninja")
+    set_property(GLOBAL PROPERTY JOB_POOLS link_pool=2)
+    set(CMAKE_JOB_POOL_LINK link_pool)
+endif ()
 include(ProcessorCount)
 ProcessorCount(QMUD_DETECTED_PROCESSOR_COUNT)
 if (QMUD_DETECTED_PROCESSOR_COUNT EQUAL 0)
@@ -87,6 +91,8 @@ else ()
     math(EXPR QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE "${QMUD_DETECTED_PROCESSOR_COUNT} - 4")
     if (QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE LESS 4)
         set(QMUD_COMPUTED_GCC_LTO_JOBS 4)
+    elseif (QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE GREATER 12)
+        set(QMUD_COMPUTED_GCC_LTO_JOBS 12)
     else ()
         set(QMUD_COMPUTED_GCC_LTO_JOBS "${QMUD_COMPUTED_GCC_LTO_JOBS_CANDIDATE}")
     endif ()
@@ -1208,7 +1214,7 @@ if (APPLE)
                 add_custom_command(
                         OUTPUT "${QMUD_MACAPP_ICON_SOURCE}"
                         COMMAND "${Python3_EXECUTABLE}" "${QMUD_MACAPP_ICON_GENERATOR}"
-                                "${QMUD_MACAPP_ICON_PNG_SOURCE}" "${QMUD_MACAPP_ICON_SOURCE}"
+                        "${QMUD_MACAPP_ICON_PNG_SOURCE}" "${QMUD_MACAPP_ICON_SOURCE}"
                         DEPENDS "${QMUD_MACAPP_ICON_GENERATOR}" "${QMUD_MACAPP_ICON_PNG_SOURCE}"
                         VERBATIM)
             endif ()

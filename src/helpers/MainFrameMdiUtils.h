@@ -33,7 +33,14 @@ namespace QMudMainFrameMdiUtils
 	 * @param mdiArea MDI area whose child windows should be tiled.
 	 * @param direction Direction in which the tiles should be arranged.
 	 */
-	void               tileSubWindows(const QMdiArea *mdiArea, TileDirection direction);
+	void           tileSubWindows(const QMdiArea *mdiArea, TileDirection direction);
+
+	/**
+	 * @brief Restores selected non-minimized maximized children without changing deliberately minimized children.
+	 * @param mdiArea MDI area that owns the candidate child windows.
+	 * @param windows Candidate child windows to restore.
+	 */
+	void           restoreMaximizedSubWindows(const QMdiArea *mdiArea, const QList<QMdiSubWindow *> &windows);
 
 	/**
 	 * @brief Resolves the effective active subwindow using current active first, then last active fallback.
@@ -42,8 +49,8 @@ namespace QMudMainFrameMdiUtils
 	 * @param creationOrder Current QMdiArea creation-order window list.
 	 * @return Active/fallback subwindow when valid, otherwise `nullptr`.
 	 */
-	QMdiSubWindow     *resolveCurrentOrLastActiveSubWindow(QMdiSubWindow *active, QMdiSubWindow *lastActive,
-	                                                       const QList<QMdiSubWindow *> &creationOrder);
+	QMdiSubWindow *resolveCurrentOrLastActiveSubWindow(QMdiSubWindow *active, QMdiSubWindow *lastActive,
+	                                                   const QList<QMdiSubWindow *> &creationOrder);
 
 	/**
 	 * @brief Resolves which subwindow should be restored after adding a window with activation disabled.
@@ -53,9 +60,9 @@ namespace QMudMainFrameMdiUtils
 	 * @param addedSubWindow Newly added subwindow.
 	 * @return Restore target, or `nullptr` when no restore is needed.
 	 */
-	QMdiSubWindow     *resolveBackgroundAddRestoreTarget(QMdiSubWindow *active, QMdiSubWindow *lastActive,
-	                                                     const QList<QMdiSubWindow *> &creationOrder,
-	                                                     const QMdiSubWindow          *addedSubWindow);
+	QMdiSubWindow *resolveBackgroundAddRestoreTarget(QMdiSubWindow *active, QMdiSubWindow *lastActive,
+	                                                 const QList<QMdiSubWindow *> &creationOrder,
+	                                                 const QMdiSubWindow          *addedSubWindow);
 
 	/**
 	 * @brief Checks whether an MDI subwindow is related to a world runtime identity.

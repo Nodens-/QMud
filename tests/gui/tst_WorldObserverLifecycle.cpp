@@ -6,6 +6,7 @@
  * Role: Regression coverage for shared-runtime MDI observer ownership and lifecycle behavior.
  */
 
+#include "AppController.h"
 #include "MainFrame.h"
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
@@ -33,6 +34,40 @@ namespace
 			Q_OBJECT
 
 		private slots:
+			static void newObserverPreservesWindowedPresentation()
+			{
+				AppController app;
+				MainWindow    frame;
+				app.setMainWindow(&frame);
+				frame.resize(900, 700);
+				frame.show();
+				frame.setWindowTabsStyle(kMdiTabsTop);
+
+				auto *runtime = new WorldRuntime(&frame);
+				auto *primary = new WorldChildWindow(QStringLiteral("Primary"));
+				primary->setRuntime(runtime);
+				frame.addMdiSubWindow(primary, true);
+				QCoreApplication::processEvents();
+				QVERIFY(frame.isTabbedWindowPresentationActive());
+
+				primary->showNormal();
+				QCoreApplication::processEvents();
+				QVERIFY(!frame.isTabbedWindowPresentationActive());
+				QVERIFY(!primary->isMaximized());
+
+				app.onCommandTriggered(QStringLiteral("NewWindow"));
+				QCoreApplication::processEvents();
+
+				WorldChildWindow *const observer = frame.activeWorldPresentationWindow();
+				QVERIFY(observer);
+				QVERIFY(observer != primary);
+				QVERIFY(!observer->isPrimaryRuntimeBinding());
+				QCOMPARE(observer->runtime(), runtime);
+				QVERIFY(!frame.isTabbedWindowPresentationActive());
+				QVERIFY(!primary->isMaximized());
+				QVERIFY(!observer->isMaximized());
+			}
+
 			static void runtimeEnumerationAndActivationAreUnique()
 			{
 				MainWindow frame;

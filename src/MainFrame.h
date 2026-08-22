@@ -262,6 +262,11 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		void               setWindowTabsStyle(int style);
 		/**
+		 * @brief Reports whether the MDI area is currently enforcing maximized tab presentation.
+		 * @return `true` when the tabbed presentation is active.
+		 */
+		[[nodiscard]] bool isTabbedWindowPresentationActive() const;
+		/**
 		 * @brief Sets style for activity toolbar.
 		 * @param style Activity-toolbar style value.
 		 */
@@ -654,6 +659,8 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		int                                 m_activityRefreshType{0};
 		int                                 m_activityRefreshInterval{15};
 		bool                                m_disableKeyboardMenuActivation{false};
+		mutable bool                        m_mdiPresentationTransitionActive{false};
+		bool                                m_mdiPresentationReconciliationQueued{false};
 		bool                                m_deferredUiRefreshQueued{false};
 		bool                                m_deferredUiRefreshStatus{false};
 		bool                                m_deferredUiRefreshTabs{false};
@@ -769,6 +776,25 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @return Active or fallback MDI subwindow, or `nullptr`.
 		 */
 		[[nodiscard]] QMdiSubWindow *currentOrLastActiveSubWindow() const;
+		/**
+		 * @brief Atomically enters maximized tab presentation or restores all maximized MDI children.
+		 * @param active Whether every MDI child must be maximized and presented as a tab.
+		 */
+		void                         setTabbedWindowPresentationActive(bool active);
+		/**
+		 * @brief Activates an MDI child while withholding intermediate maximized-state repaints.
+		 * @param subWindow Child window to activate.
+		 */
+		void                         activateMdiSubWindow(QMdiSubWindow *subWindow) const;
+		/**
+		 * @brief Establishes the maximized-state invariant for every MDI child.
+		 * @param preferredActiveWindow Active child to maximize before inactive children.
+		 */
+		void                         maximizeMdiSubWindows(QMdiSubWindow *preferredActiveWindow) const;
+		/**
+		 * @brief Reconciles presentation after Qt finishes the current MDI child state-change transaction.
+		 */
+		void                         queueMdiPresentationReconciliation();
 		/**
 		 * @brief Builds menu bar and command actions.
 		 */

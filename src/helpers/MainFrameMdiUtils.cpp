@@ -17,6 +17,22 @@
 
 namespace QMudMainFrameMdiUtils
 {
+	void restoreMaximizedSubWindows(const QMdiArea *mdiArea, const QList<QMdiSubWindow *> &windows)
+	{
+		if (!mdiArea)
+			return;
+
+		QMdiSubWindow *const activeWindow = mdiArea->activeSubWindow();
+		for (QMdiSubWindow *window : windows)
+		{
+			if (window && window != activeWindow && !window->isMinimized() && window->isMaximized())
+				window->showNormal();
+		}
+		if (activeWindow && windows.contains(activeWindow) && !activeWindow->isMinimized() &&
+		    activeWindow->isMaximized())
+			activeWindow->showNormal();
+	}
+
 	void tileSubWindows(const QMdiArea *mdiArea, const TileDirection direction)
 	{
 		if (!mdiArea)
@@ -35,11 +51,7 @@ namespace QMudMainFrameMdiUtils
 		if (windows.isEmpty())
 			return;
 
-		for (QMdiSubWindow *window : windows)
-		{
-			if (window->isMaximized())
-				window->showNormal();
-		}
+		restoreMaximizedSubWindows(mdiArea, windows);
 
 		const qsizetype count = windows.size();
 		for (qsizetype index = 0; index < count; ++index)

@@ -182,6 +182,14 @@ namespace
 		return out;
 	}
 
+	void createTabsForActivePresentation(MdiTabs &tabs, QMdiArea &mdiArea, const int style)
+	{
+		mdiArea.setOption(QMdiArea::DontMaximizeSubWindowOnActivation);
+		tabs.create(&mdiArea, style);
+		QObject::connect(&tabs, &MdiTabs::windowActivationRequested, &mdiArea,
+		                 [&mdiArea](QMdiSubWindow *subWindow) { mdiArea.setActiveSubWindow(subWindow); });
+	}
+
 	/**
 	 * @brief QTest fixture covering MdiTabs scenarios.
 	 */
@@ -203,7 +211,7 @@ namespace
 				host.resize(640, 480);
 				host.show();
 
-				tabs.create(&mdiArea, kMdiTabsTop | kMdiTabsHideLt2Views);
+				createTabsForActivePresentation(tabs, mdiArea, kMdiTabsTop | kMdiTabsHideLt2Views);
 
 				QMdiSubWindow *first = addWindow(mdiArea, QStringLiteral("One"));
 				tabs.updateTabs();
@@ -238,7 +246,7 @@ namespace
 				host.resize(640, 480);
 				host.show();
 
-				tabs.create(&mdiArea, kMdiTabsTop);
+				createTabsForActivePresentation(tabs, mdiArea, kMdiTabsTop);
 				addWindow(mdiArea, QStringLiteral("One"));
 				addWindow(mdiArea, QStringLiteral("Two"));
 				addWindow(mdiArea, QStringLiteral("Three"));
@@ -270,7 +278,7 @@ namespace
 				host.resize(640, 480);
 				host.show();
 
-				tabs.create(&mdiArea, kMdiTabsTop);
+				createTabsForActivePresentation(tabs, mdiArea, kMdiTabsTop);
 				addWindow(mdiArea, QStringLiteral("One"));
 				addWindow(mdiArea, QStringLiteral("Two"));
 				tabs.updateTabs();
@@ -296,7 +304,7 @@ namespace
 				host.resize(640, 480);
 				host.show();
 
-				tabs.create(&mdiArea, kMdiTabsTop);
+				createTabsForActivePresentation(tabs, mdiArea, kMdiTabsTop);
 				QMdiSubWindow *worldA  = addWindow(mdiArea, QStringLiteral("World A"));
 				QMdiSubWindow *notepad = addWindow(mdiArea, QStringLiteral("Notepad"));
 				addWindow(mdiArea, QStringLiteral("World B"));

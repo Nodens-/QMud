@@ -3204,7 +3204,7 @@ void AppController::restoreWorldWindowPlacement(const QString &worldName, QMdiSu
 	if (const auto height = bottom - top; width > 0 && height > 0)
 		window->setGeometry(QRect(left, top, width, height));
 
-	if (showCmd == 3)
+	if ((m_mainWindow && m_mainWindow->isTabbedWindowPresentationActive()) || showCmd == 3)
 		window->showMaximized();
 	else
 		window->showNormal();
@@ -4132,9 +4132,9 @@ bool AppController::openWorldForReloadRecovery(const ReloadWorldState &worldStat
 	return true;
 }
 
-WorldChildWindow *AppController::createWorldObserverWindow(WorldRuntime *runtime,
+WorldChildWindow *AppController::createWorldObserverWindow(WorldRuntime           *runtime,
                                                            const WorldChildWindow *source,
-                                                           const bool activateWindow) const
+                                                           const bool              activateWindow) const
 {
 	if (!m_mainWindow || !runtime)
 		return nullptr;
@@ -4150,7 +4150,7 @@ WorldChildWindow *AppController::createWorldObserverWindow(WorldRuntime *runtime
 	if (source && source->isMaximized())
 		window->showMaximized();
 	else
-		window->show();
+		window->showNormal();
 	if (activateWindow)
 		m_mainWindow->activateWorldWindow(window);
 	return window;
@@ -4227,12 +4227,13 @@ bool AppController::recoverReloadStartupState()
 
 	for (const ReloadWorldState &worldState : worlds)
 	{
-		WorldRuntime *runtime = nullptr;
-		WorldView    *view    = nullptr;
-		const bool activatePrimaryWindow = snapshot.activeWorldSequence > 0 &&
-		                                 worldState.sequence == snapshot.activeWorldSequence &&
-		                                 worldState.activePresentationOrdinal == 1;
-		if (!openWorldForReloadRecovery(worldState, activatePrimaryWindow, &runtime, &view) || !runtime || !view)
+		WorldRuntime *runtime               = nullptr;
+		WorldView    *view                  = nullptr;
+		const bool    activatePrimaryWindow = snapshot.activeWorldSequence > 0 &&
+		                                      worldState.sequence == snapshot.activeWorldSequence &&
+		                                      worldState.activePresentationOrdinal == 1;
+		if (!openWorldForReloadRecovery(worldState, activatePrimaryWindow, &runtime, &view) || !runtime ||
+		    !view)
 		{
 			++openFailures;
 			qWarning() << kReloadLogTag << "World recovery open failed for"
