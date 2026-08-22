@@ -3550,8 +3550,8 @@ end
 			QTRY_VERIFY_WITH_TIMEOUT(runtime.drawOutputWindowCallbackActive(), 5000);
 			QVERIFY(view.m_drawOutputWindowCallbackActive);
 			QVERIFY(!observer.m_drawOutputWindowCallbackActive);
-			QVERIFY(view.m_semanticOutputPaintBarrierActive);
-			QVERIFY(!observer.m_semanticOutputPaintBarrierActive);
+			QVERIFY(view.m_pendingSemanticOutputRepaint != WorldView::SemanticOutputRepaint::None);
+			QCOMPARE(observer.m_pendingSemanticOutputRepaint, WorldView::SemanticOutputRepaint::None);
 			QVERIFY(view.m_drawCallbackCompletionsPending > 0);
 			QCOMPARE(observer.m_drawCallbackCompletionsPending, 0);
 			QTRY_COMPARE_WITH_TIMEOUT(
@@ -3561,8 +3561,10 @@ end
 			        1);
 			QVERIFY(pluginVariable(runtime, kInstallDrawPluginId, QStringLiteral("draw_calls")).toInt() >= 1);
 			QTRY_VERIFY_WITH_TIMEOUT(!runtime.drawOutputWindowCallbackActive(), 5000);
-			QTRY_VERIFY_WITH_TIMEOUT(!view.m_semanticOutputPaintBarrierActive, 5000);
-			QTRY_VERIFY_WITH_TIMEOUT(!observer.m_semanticOutputPaintBarrierActive, 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(view.m_pendingSemanticOutputRepaint,
+			                          WorldView::SemanticOutputRepaint::None, 5000);
+			QTRY_COMPARE_WITH_TIMEOUT(observer.m_pendingSemanticOutputRepaint,
+			                          WorldView::SemanticOutputRepaint::None, 5000);
 		}
 
 		static void sharedRuntimeOutputHasOneOwnerAndUpdatesEveryPresentation()

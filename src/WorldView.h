@@ -1795,22 +1795,14 @@ class WorldView : public QWidget
 			PresentationVisible,
 			Full
 		};
-		enum class SemanticOutputPaintLayer
-		{
-			NativeCanvas,
-			MiniWindowUnderlay,
-			MiniWindowOverlay
-		};
-		void               requestSemanticOutputRepaint(SemanticOutputRepaint repaint,
-		                                                bool                  preserveDuringCallbackSuppression = false);
-		void               queueSemanticOutputRepaint(SemanticOutputRepaint repaint);
-		void               releaseSemanticOutputRepaint();
-		[[nodiscard]] bool deferSemanticOutputPaintForDrawCallback(SemanticOutputPaintLayer layer,
-		                                                           const QRegion           &region);
+		void requestSemanticOutputRepaint(SemanticOutputRepaint repaint,
+		                                  bool                  preserveDuringCallbackSuppression = false);
+		void queueSemanticOutputRepaint(SemanticOutputRepaint repaint);
+		void releaseSemanticOutputRepaint();
 		/**
 		 * @brief Invalidates queued output-presentation work from the previous runtime binding.
 		 */
-		void               resetNativeOutputPresentationRequestState();
+		void resetNativeOutputPresentationRequestState();
 		/**
 		 * @brief Records one native append/rebuild diagnostic sample.
 		 * @param kind Append caller classification.
@@ -2441,10 +2433,6 @@ class WorldView : public QWidget
 		mutable bool                                m_nativeOutputRepaintAll{false};
 		mutable QRegion                             m_nativeOutputRepaintRegion;
 		SemanticOutputRepaint                    m_pendingSemanticOutputRepaint{SemanticOutputRepaint::None};
-		QRegion                                  m_deferredSemanticNativeCanvasPaintRegion;
-		QRegion                                  m_deferredSemanticMiniWindowUnderlayPaintRegion;
-		QRegion                                  m_deferredSemanticMiniWindowOverlayPaintRegion;
-		bool                                     m_semanticOutputPaintBarrierActive{false};
 		int                                      m_drawCallbackCompletionsPending{0};
 		mutable NativeOutputPanePaintState       m_nativePrimaryPaintState;
 		mutable NativeOutputPanePaintState       m_nativeLivePaintState;

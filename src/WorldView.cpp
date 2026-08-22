@@ -1406,10 +1406,7 @@ class WorldOutputCanvas : public QWidget
 			if (!m_view)
 				return;
 			const QRegion dirtyRegion = event ? event->region() : QRegion(rect());
-			if (m_view->deferSemanticOutputPaintForDrawCallback(
-			        WorldView::SemanticOutputPaintLayer::NativeCanvas, dirtyRegion))
-				return;
-			QPainter painter(this);
+			QPainter      painter(this);
 			m_view->paintNativeOutputCanvas(&painter, dirtyRegion);
 			m_view->miniWindowLayerPainted(true, dirtyRegion);
 		}
@@ -1787,11 +1784,7 @@ class MiniWindowLayer : public QWidget
 			if (!m_view)
 				return;
 			const QRegion dirtyRegion = event ? event->region() : QRegion(rect());
-			const auto    layer       = m_underneath ? WorldView::SemanticOutputPaintLayer::MiniWindowUnderlay
-			                                         : WorldView::SemanticOutputPaintLayer::MiniWindowOverlay;
-			if (m_view->deferSemanticOutputPaintForDrawCallback(layer, dirtyRegion))
-				return;
-			QPainter painter(this);
+			QPainter      painter(this);
 			painter.setRenderHint(QPainter::SmoothPixmapTransform);
 			m_view->paintMiniWindows(&painter, m_underneath, dirtyRegion);
 			m_view->miniWindowLayerPainted(m_underneath, dirtyRegion);
@@ -10542,13 +10535,11 @@ void WorldView::queueSemanticOutputRepaint(const SemanticOutputRepaint repaint)
 {
 	if (static_cast<int>(repaint) > static_cast<int>(m_pendingSemanticOutputRepaint))
 		m_pendingSemanticOutputRepaint = repaint;
-	if (repaint != SemanticOutputRepaint::None)
-		m_semanticOutputPaintBarrierActive = true;
 }
 
 void WorldView::releaseSemanticOutputRepaint()
 {
-	if (!m_semanticOutputPaintBarrierActive)
+	if (m_pendingSemanticOutputRepaint == SemanticOutputRepaint::None)
 		return;
 	if (hasPendingOutputPresentationWork() ||
 	    (m_runtime && (m_drawNotifyQueued || m_drawViewportNotificationPending ||
@@ -10557,16 +10548,8 @@ void WorldView::releaseSemanticOutputRepaint()
 		return;
 	}
 
-	const SemanticOutputRepaint repaint      = m_pendingSemanticOutputRepaint;
-	const QRegion deferredNativeCanvasRegion = std::move(m_deferredSemanticNativeCanvasPaintRegion);
-	const QRegion deferredMiniWindowUnderlayRegion =
-	    std::move(m_deferredSemanticMiniWindowUnderlayPaintRegion);
-	const QRegion deferredMiniWindowOverlayRegion = std::move(m_deferredSemanticMiniWindowOverlayPaintRegion);
-	m_pendingSemanticOutputRepaint                = SemanticOutputRepaint::None;
-	m_deferredSemanticNativeCanvasPaintRegion     = {};
-	m_deferredSemanticMiniWindowUnderlayPaintRegion = {};
-	m_deferredSemanticMiniWindowOverlayPaintRegion  = {};
-	m_semanticOutputPaintBarrierActive              = false;
+	const SemanticOutputRepaint repaint = m_pendingSemanticOutputRepaint;
+	m_pendingSemanticOutputRepaint      = SemanticOutputRepaint::None;
 
 	switch (repaint)
 	{
@@ -10585,35 +10568,6 @@ void WorldView::releaseSemanticOutputRepaint()
 	case SemanticOutputRepaint::None:
 		break;
 	}
-	if (!deferredNativeCanvasRegion.isEmpty())
-		requestNativeOutputRepaintRegion(deferredNativeCanvasRegion);
-	if (!deferredMiniWindowUnderlayRegion.isEmpty() && m_miniUnderlay)
-		m_miniUnderlay->update(deferredMiniWindowUnderlayRegion);
-	if (!deferredMiniWindowOverlayRegion.isEmpty() && m_miniOverlay)
-		m_miniOverlay->update(deferredMiniWindowOverlayRegion);
-}
-
-bool WorldView::deferSemanticOutputPaintForDrawCallback(const SemanticOutputPaintLayer layer,
-                                                        const QRegion                 &region)
-{
-	if (!m_semanticOutputPaintBarrierActive)
-		return false;
-	if (region.isEmpty())
-		return true;
-
-	switch (layer)
-	{
-	case SemanticOutputPaintLayer::NativeCanvas:
-		m_deferredSemanticNativeCanvasPaintRegion += region;
-		break;
-	case SemanticOutputPaintLayer::MiniWindowUnderlay:
-		m_deferredSemanticMiniWindowUnderlayPaintRegion += region;
-		break;
-	case SemanticOutputPaintLayer::MiniWindowOverlay:
-		m_deferredSemanticMiniWindowOverlayPaintRegion += region;
-		break;
-	}
-	return true;
 }
 
 void WorldView::resetNativeOutputPresentationRequestState()

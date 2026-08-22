@@ -20,6 +20,7 @@
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QAbstractButton>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QAbstractScrollArea>
 #include <QAccessible>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -784,7 +785,7 @@ end
 
 		QWidget *root = browser.window();
 		auto    *nativeCanvas =
-		    root ? root->findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas")) : nullptr;
+            root ? root->findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas")) : nullptr;
 		QElapsedTimer readyTimer;
 		readyTimer.start();
 		constexpr qint64 kMaxReadyWaitMs       = 500;
@@ -9247,7 +9248,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void nativeOutputPaintWaitsForPendingPromptPluginRestitchPresentation()
+		void nativeOutputForcedPaintUsesPendingPromptPluginRestitchPresentation()
 		{
 			resetTestState();
 			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("14"));
@@ -9291,13 +9292,13 @@ class tst_WorldView_Basic : public QObject
 			lines.insert(lines.begin() + promptIndex, compassLine);
 			runtime->replaceOutputLines(lines);
 
+			QVERIFY(view.m_pendingSemanticOutputRepaint != WorldView::SemanticOutputRepaint::None);
 			QVERIFY(!nativeCanvas->grab().isNull());
-			QVERIFY(!nativeCanvas->property("qmud_native_plain_tail_lines")
-			             .toStringList()
-			             .contains(QStringLiteral("W <---(M)---> E")));
-			QTRY_VERIFY(nativeCanvas->property("qmud_native_plain_tail_lines")
-			                .toStringList()
-			                .contains(QStringLiteral("W <---(M)---> E")));
+			QVERIFY(nativeCanvas->property("qmud_native_plain_tail_lines")
+			            .toStringList()
+			            .contains(QStringLiteral("W <---(M)---> E")));
+			QCoreApplication::processEvents();
+			QTRY_COMPARE(view.m_pendingSemanticOutputRepaint, WorldView::SemanticOutputRepaint::None);
 			QCOMPARE(nativeCanvas->property("qmud_native_plain_tail_lines").toStringList().constLast(),
 			         QStringLiteral("<paint-sync-prompt> look"));
 			resetTestState();
@@ -10946,8 +10947,9 @@ class tst_WorldView_Basic : public QObject
 				    },
 				    [confirmationAcceptCount](const QDialog *dialog)
 				    {
-					    auto *messageBox = qobject_cast<QMessageBox *>(const_cast<QDialog *>(dialog));
-					    if (messageBox)
+					    if (auto *const messageBox =
+					            qobject_cast<QMessageBox *>(const_cast<QDialog *>(dialog));
+					        messageBox)
 					    {
 						    if (QAbstractButton *button = messageBox->button(QMessageBox::Ok))
 						    {
@@ -11580,7 +11582,7 @@ class tst_WorldView_Basic : public QObject
 			span.actionType = WorldRuntime::ActionSend;
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
-			                                 "Attack assistant");
+			                                       "Attack assistant");
 			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
 			QCoreApplication::processEvents();
 
@@ -11614,7 +11616,7 @@ class tst_WorldView_Basic : public QObject
 			span.actionType = WorldRuntime::ActionSend;
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
-			                                 "Attack assistant");
+			                                       "Attack assistant");
 			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
 			QCoreApplication::processEvents();
 
@@ -11647,7 +11649,7 @@ class tst_WorldView_Basic : public QObject
 			span.actionType = WorldRuntime::ActionSend;
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
-			                                 "Attack assistant");
+			                                       "Attack assistant");
 			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
 			QCoreApplication::processEvents();
 
@@ -11755,6 +11757,64 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(sampled.red() > 200);
 			QVERIFY(sampled.green() < 80);
 			QVERIFY(sampled.blue() < 80);
+			resetTestState();
+		}
+
+		void semanticRepaintDeferralNeverSuppressesRequiredWidgetPaints()
+		{
+			resetTestState();
+
+			WorldView view;
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QWidget *const nativeCanvas = view.m_nativeOutputCanvas;
+			QWidget *const overlayLayer = view.m_miniOverlay;
+			QVERIFY(nativeCanvas);
+			QVERIFY(overlayLayer);
+			QVERIFY(!nativeCanvas->size().isEmpty());
+			QVERIFY(!overlayLayer->size().isEmpty());
+
+			constexpr QColor currentWorldBackground(17, 43, 71);
+			constexpr QColor previousWorldBackground(211, 37, 173);
+			constexpr QColor currentWorldMiniWindow(219, 61, 29);
+			constexpr QColor previousWorldMiniWindow(31, 79, 223);
+			view.m_outputBackground = currentWorldBackground;
+
+			const QRect overlayRect(24, 24, 96, 56);
+			appendTestMiniWindow(QStringLiteral("semantic-paint-probe"), overlayRect, 0,
+			                     currentWorldMiniWindow);
+			view.onMiniWindowsChanged();
+			QCoreApplication::processEvents();
+
+			view.setDrawOutputWindowCallbackActive(true);
+			QVERIFY(view.m_drawOutputWindowCallbackActive);
+			view.queueSemanticOutputRepaint(WorldView::SemanticOutputRepaint::Tail);
+			QCOMPARE(view.m_pendingSemanticOutputRepaint, WorldView::SemanticOutputRepaint::Tail);
+
+			QImage nativeImage(nativeCanvas->size(), QImage::Format_ARGB32_Premultiplied);
+			nativeImage.fill(previousWorldBackground);
+			{
+				QPainter painter(&nativeImage);
+				nativeCanvas->render(&painter);
+			}
+			const QPoint nativeSample(nativeCanvas->width() - 2, nativeCanvas->height() - 2);
+			QCOMPARE(nativeImage.pixelColor(nativeSample), currentWorldBackground);
+
+			QImage overlayImage(overlayLayer->size(), QImage::Format_ARGB32_Premultiplied);
+			overlayImage.fill(previousWorldMiniWindow);
+			{
+				QPainter painter(&overlayImage);
+				overlayLayer->render(&painter);
+			}
+			QCOMPARE(overlayImage.pixelColor(overlayRect.center()), currentWorldMiniWindow);
+			QCOMPARE(view.m_pendingSemanticOutputRepaint, WorldView::SemanticOutputRepaint::Tail);
+
+			view.setDrawOutputWindowCallbackActive(false);
+			QVERIFY(!view.m_drawOutputWindowCallbackActive);
+			QCOMPARE(view.m_pendingSemanticOutputRepaint, WorldView::SemanticOutputRepaint::None);
 			resetTestState();
 		}
 
