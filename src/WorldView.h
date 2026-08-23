@@ -81,6 +81,13 @@ class WorldView : public QWidget
 		Q_OBJECT
 
 	public:
+		/** @brief Smallest supported scrollback split-view divider width in pixels. */
+		static constexpr int kMinimumSplitViewDividerWidth = 1;
+		/** @brief Default scrollback split-view divider width in pixels. */
+		static constexpr int kDefaultSplitViewDividerWidth = 1;
+		/** @brief Largest supported scrollback split-view divider width in pixels. */
+		static constexpr int kMaximumSplitViewDividerWidth = 200;
+
 		/**
 		 * @brief Creates world output/input composite widget.
 		 * @param parent Optional Qt parent widget.
@@ -307,6 +314,11 @@ class WorldView : public QWidget
 		 * @param enabled Enable bleed mode when `true`.
 		 */
 		void                          setBleedBackground(bool enabled);
+		/**
+		 * @brief Sets the divider width used while scrollback split view is active.
+		 * @param width Divider width in pixels, clamped to the supported preference range.
+		 */
+		void                          setSplitViewDividerWidth(int width);
 		/**
 		 * @brief Returns input selection start column.
 		 * @return Input selection start column.
@@ -2637,6 +2649,7 @@ class WorldView : public QWidget
 		bool                                           m_startPausedApplied{false};
 		bool                                           m_defaultInputHeightApplied{false};
 		bool                                           m_scrollbackSplitActive{false};
+		int                                            m_splitViewDividerWidth{kDefaultSplitViewDividerWidth};
 		int                                            m_lastLiveSplitSize{0};
 		int                                            m_wrapColumn{0};
 		int                                            m_historyLimit{0};

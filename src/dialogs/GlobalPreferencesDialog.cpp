@@ -15,6 +15,7 @@
 #include "ShortcutPreferenceUtils.h"
 #include "WorldChildWindow.h"
 #include "WorldRuntime.h"
+#include "WorldView.h"
 #include "helpers/DialogSizingUtils.h"
 
 #include <QButtonGroup>
@@ -215,6 +216,7 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 	m_tabs->addTab(buildPluginsPage(), QStringLiteral("Plugins"));
 	m_tabs->addTab(buildLuaPage(), QStringLiteral("Lua"));
 	m_tabs->addTab(buildUpdatesPage(), QStringLiteral("Updates"));
+	QWidget::setTabOrder(m_tabsStyle, m_splitViewDividerWidth);
 	rebuildExternalTabRows();
 	root->addWidget(m_tabs);
 
@@ -1160,15 +1162,31 @@ QWidget *GlobalPreferencesDialog::buildGeneralPage()
 	leftBottom->addWidget(wordGroup);
 	leftBottom->addWidget(spellGroup);
 
-	auto *rightBottom = new QVBoxLayout;
-	rightBottom->addWidget(new QLabel(QStringLiteral("Window Tabs:")));
+	auto *rightBottom              = new QVBoxLayout;
+	auto *windowPresentationLayout = new QGridLayout;
+	auto *windowTabsLabel          = new QLabel(QStringLiteral("Window Tabs:"));
+	windowPresentationLayout->addWidget(windowTabsLabel, 0, 0);
 	m_tabsStyle = new FontResponsiveComboBox;
 	m_tabsStyle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	m_tabsStyle->addItem(QStringLiteral("None"), 0);
 	m_tabsStyle->addItem(QStringLiteral("Top"), 1);
 	m_tabsStyle->addItem(QStringLiteral("Bottom"), 2);
 	registerCombo(QStringLiteral("WindowTabsStyle"), m_tabsStyle);
-	rightBottom->addWidget(m_tabsStyle);
+	windowTabsLabel->setBuddy(m_tabsStyle);
+	windowPresentationLayout->addWidget(m_tabsStyle, 1, 0);
+
+	auto *splitViewDividerLabel = new QLabel(QStringLiteral("Split-view divider:"));
+	windowPresentationLayout->addWidget(splitViewDividerLabel, 0, 1);
+	m_splitViewDividerWidth = new QSpinBox;
+	m_splitViewDividerWidth->setRange(WorldView::kMinimumSplitViewDividerWidth,
+	                                  WorldView::kMaximumSplitViewDividerWidth);
+	m_splitViewDividerWidth->setSuffix(QStringLiteral(" px"));
+	m_splitViewDividerWidth->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	registerSpin(QStringLiteral("SplitViewDividerWidth"), m_splitViewDividerWidth);
+	splitViewDividerLabel->setBuddy(m_splitViewDividerWidth);
+	windowPresentationLayout->addWidget(m_splitViewDividerWidth, 1, 1);
+	windowPresentationLayout->setColumnStretch(2, 1);
+	rightBottom->addLayout(windowPresentationLayout);
 	rightBottom->addSpacing(6);
 	auto *localeRow = new QHBoxLayout;
 	localeRow->addWidget(new QLabel(QStringLiteral("Locale:")));

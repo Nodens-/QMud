@@ -785,7 +785,7 @@ end
 
 		QWidget *root = browser.window();
 		auto    *nativeCanvas =
-            root ? root->findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas")) : nullptr;
+		    root ? root->findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas")) : nullptr;
 		QElapsedTimer readyTimer;
 		readyTimer.start();
 		constexpr qint64 kMaxReadyWaitMs       = 500;
@@ -5775,6 +5775,128 @@ class tst_WorldView_Basic : public QObject
 			}
 			QTRY_VERIFY(!view.isScrollbackSplitActive());
 			QCOMPARE(outputSplitter->handleWidth(), 0);
+
+			resetTestState();
+		}
+
+		/**
+		 * @brief Verifies divider width bounds and inactive split-handle suppression.
+		 */
+		void splitViewDividerWidthAppliesOnlyWhileSplitIsActive()
+		{
+			resetTestState();
+
+			WorldView  view;
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QCOMPARE(outputSplitter->handleWidth(), 0);
+
+			view.setSplitViewDividerWidth(12);
+			QCOMPARE(outputSplitter->handleWidth(), 0);
+			view.setScrollbackSplitActive(true);
+			QCOMPARE(outputSplitter->handleWidth(), 12);
+
+			view.setSplitViewDividerWidth(7);
+			QCOMPARE(outputSplitter->handleWidth(), 7);
+			view.setSplitViewDividerWidth(0);
+			QCOMPARE(outputSplitter->handleWidth(), WorldView::kMinimumSplitViewDividerWidth);
+			view.setSplitViewDividerWidth(201);
+			QCOMPARE(outputSplitter->handleWidth(), WorldView::kMaximumSplitViewDividerWidth);
+
+			view.setScrollbackSplitActive(false);
+			QCOMPARE(outputSplitter->handleWidth(), 0);
+			view.setSplitViewDividerWidth(12);
+			QCOMPARE(outputSplitter->handleWidth(), 0);
+			view.setScrollbackSplitActive(true);
+			QCOMPARE(outputSplitter->handleWidth(), 12);
+
+			resetTestState();
+		}
+
+		/**
+		 * @brief Supplies thin and thick divider widths for exact native-canvas paint coverage.
+		 */
+		void splitViewDividerPaintFillsConfiguredHandle_data()
+		{
+			QTest::addColumn<int>("dividerWidth");
+
+			QTest::newRow("one-pixel") << 1;
+			QTest::newRow("two-pixels") << 2;
+			QTest::newRow("three-pixels") << 3;
+			QTest::newRow("thick") << 18;
+		}
+
+		/**
+		 * @brief Verifies exact divider thickness and divider-only dirty-region repainting.
+		 */
+		void splitViewDividerPaintFillsConfiguredHandle()
+		{
+			QFETCH(int, dividerWidth);
+			resetTestState();
+
+			WorldView view;
+			view.resize(760, 460);
+			setTestRuntimeObserver(view, runtimeForTest());
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("divider-paint"), true);
+			view.m_outputBackground = QColor(7, 19, 31);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *nativeCanvas = view.m_nativeOutputCanvas;
+			QVERIFY(nativeCanvas);
+
+			view.setScrollbackSplitActive(true);
+			view.setSplitViewDividerWidth(dividerWidth);
+			QCoreApplication::processEvents();
+
+			QSplitterHandle *handle = outputSplitter->handle(1);
+			QVERIFY(handle);
+			const QRect handleRect(nativeCanvas->mapFromGlobal(handle->mapToGlobal(QPoint())),
+			                       handle->size());
+			const QRect visibleHandleRect = handleRect.intersected(nativeCanvas->rect());
+			QVERIFY(visibleHandleRect.height() >= dividerWidth);
+			QVERIFY(visibleHandleRect.width() > 0);
+
+			QImage image(nativeCanvas->size(), QImage::Format_ARGB32_Premultiplied);
+			image.fill(Qt::transparent);
+			{
+				QPainter painter(&image);
+				nativeCanvas->render(&painter);
+			}
+			const int    sampleX       = visibleHandleRect.center().x();
+			const QColor dividerColour = image.pixelColor(sampleX, visibleHandleRect.center().y());
+			QVERIFY(dividerColour.alpha() > 0);
+			QVERIFY(dividerColour != view.m_outputBackground);
+			int paintedDividerRows = 0;
+			int firstPaintedRow    = -1;
+			int lastPaintedRow     = -1;
+			for (int y = visibleHandleRect.top(); y <= visibleHandleRect.bottom(); ++y)
+			{
+				if (image.pixelColor(sampleX, y) != dividerColour)
+					continue;
+				if (firstPaintedRow < 0)
+					firstPaintedRow = y;
+				lastPaintedRow = y;
+				++paintedDividerRows;
+			}
+			QCOMPARE(paintedDividerRows, dividerWidth);
+			QVERIFY(firstPaintedRow >= visibleHandleRect.top());
+			QVERIFY(lastPaintedRow <= visibleHandleRect.bottom());
+			const int topGap    = firstPaintedRow - visibleHandleRect.top();
+			const int bottomGap = visibleHandleRect.bottom() - lastPaintedRow;
+			QVERIFY(qAbs(topGap - bottomGap) <= 1);
+
+			const QRect dividerOnlyDirtyRect(visibleHandleRect.left(), firstPaintedRow,
+			                                 visibleHandleRect.width(), paintedDividerRows);
+			QImage      dividerOnlyImage(nativeCanvas->size(), QImage::Format_ARGB32_Premultiplied);
+			dividerOnlyImage.fill(view.m_outputBackground);
+			{
+				QPainter painter(&dividerOnlyImage);
+				view.paintNativeOutputCanvas(&painter, QRegion(dividerOnlyDirtyRect));
+			}
+			QCOMPARE(dividerOnlyImage.pixelColor(sampleX, dividerOnlyDirtyRect.center().y()), dividerColour);
 
 			resetTestState();
 		}
@@ -11582,7 +11704,7 @@ class tst_WorldView_Basic : public QObject
 			span.actionType = WorldRuntime::ActionSend;
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
-			                                       "Attack assistant");
+			                                 "Attack assistant");
 			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
 			QCoreApplication::processEvents();
 
@@ -11616,7 +11738,7 @@ class tst_WorldView_Basic : public QObject
 			span.actionType = WorldRuntime::ActionSend;
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
-			                                       "Attack assistant");
+			                                 "Attack assistant");
 			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
 			QCoreApplication::processEvents();
 
@@ -11649,7 +11771,7 @@ class tst_WorldView_Basic : public QObject
 			span.actionType = WorldRuntime::ActionSend;
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
-			                                       "Attack assistant");
+			                                 "Attack assistant");
 			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
 			QCoreApplication::processEvents();
 

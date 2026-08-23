@@ -220,6 +220,7 @@ namespace
 
 	constexpr quint8 kXtermCubeValues[6]         = {0, 95, 135, 175, 215, 255};
 	constexpr int    kReloadStateStaleAgeSeconds = 10 * 60;
+	constexpr int    kSplitDividerDefault        = WorldView::kDefaultSplitViewDividerWidth;
 	constexpr char   kReloadStateArgName[]       = "--reload-state";
 	constexpr char   kReloadTokenArgName[]       = "--reload-token";
 	constexpr char   kReloadLogTag[]             = "[ReloadQMud]";
@@ -1951,6 +1952,7 @@ static const struct
     {"OpenActivityWindow",              0                       },
     {"OpenWorldsMaximised",             0                       },
     {"WindowTabsStyle",                 0                       },
+    {"SplitViewDividerWidth",           kSplitDividerDefault    },
     {"ReconnectOnLinkFailure",          0                       },
     {"EnableReloadFeature",             1                       },
     {"RegexpMatchEmpty",                1                       },
@@ -7679,7 +7681,8 @@ void AppController::applyMiscPreferences() const
 
 void AppController::applyRenderingPreferences() const
 {
-	const bool bleed = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
+	const bool bleed                 = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
+	const int  splitViewDividerWidth = getGlobalOption(QStringLiteral("SplitViewDividerWidth")).toInt();
 	if (!m_mainWindow)
 		return;
 	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
@@ -7689,6 +7692,7 @@ void AppController::applyRenderingPreferences() const
 			if (WorldView *view = child->view(); view)
 				view->setBleedBackground(bleed);
 		}
+		runtime->setPresentationSplitViewDividerWidth(splitViewDividerWidth);
 	}
 }
 

@@ -137,6 +137,7 @@ namespace
 		state.applyGlobalPreferencesCallCount  = 0;
 
 		state.globalOptions.insert(QStringLiteral("Locale"), QStringLiteral("en"));
+		state.globalOptions.insert(QStringLiteral("SplitViewDividerWidth"), 1);
 		state.globalOptions.insert(QStringLiteral("AutoCheckForUpdates"), 1);
 		state.globalOptions.insert(QStringLiteral("UpdateCheckIntervalHours"), 1);
 		state.globalOptions.insert(QStringLiteral("EnableReloadFeature"), 1);
@@ -512,6 +513,54 @@ namespace
 			}
 
 			/**
+			 * @brief Verifies split-view divider placement, focus order, range, and persistence.
+			 */
+			void splitViewDividerPreferenceFollowsWindowTabsAndPersists()
+			{
+				resetStubState();
+
+				{
+					GlobalPreferencesDialog dialog;
+					auto                   *tabs = dialog.findChild<QTabWidget *>();
+					QVERIFY(tabs);
+					tabs->setCurrentIndex(1);
+					dialog.show();
+					QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+					QCoreApplication::processEvents();
+
+					QLabel *windowTabsLabel = findLabelByText(dialog, QStringLiteral("Window Tabs:"));
+					QLabel *dividerLabel    = findLabelByText(dialog, QStringLiteral("Split-view divider:"));
+					QVERIFY(windowTabsLabel);
+					QVERIFY(dividerLabel);
+					auto *windowTabs = qobject_cast<QComboBox *>(windowTabsLabel->buddy());
+					auto *divider    = qobject_cast<QSpinBox *>(dividerLabel->buddy());
+					QVERIFY(windowTabs);
+					QVERIFY(divider);
+					QCOMPARE(divider->minimum(), 1);
+					QCOMPARE(divider->maximum(), 200);
+					QCOMPARE(divider->value(), 1);
+					QCOMPARE(divider->suffix(), QStringLiteral(" px"));
+					QVERIFY(divider->mapTo(&dialog, QPoint()).x() > windowTabs->mapTo(&dialog, QPoint()).x());
+					windowTabs->setFocus(Qt::OtherFocusReason);
+					QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(windowTabs));
+					QTest::keyClick(windowTabs, Qt::Key_Tab);
+					QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(divider));
+
+					divider->setValue(13);
+					dialog.accept();
+				}
+
+				QCOMPARE(stubState().globalOptions.value(QStringLiteral("SplitViewDividerWidth")).toInt(),
+				         13);
+				QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
+
+				GlobalPreferencesDialog restoredDialog;
+				QSpinBox *restoredDivider = findSpinBySuffix(restoredDialog, QStringLiteral(" px"));
+				QVERIFY(restoredDivider);
+				QCOMPARE(restoredDivider->value(), 13);
+			}
+
+			/**
 			 * @brief Verifies the dialog and combo boxes follow enlarged application fonts.
 			 */
 			void dialogMinimumTracksFontChanges()
@@ -520,7 +569,7 @@ namespace
 
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 
 				QList<QSize> initialPageHints;
 				QList<QSize> initialComboHints;

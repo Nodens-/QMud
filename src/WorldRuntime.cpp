@@ -27359,6 +27359,13 @@ void WorldRuntime::unregisterPresentationView(WorldView *view)
 	m_view = nullptr;
 }
 
+void WorldRuntime::setPresentationSplitViewDividerWidth(const int width) const
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setPresentationSplitViewDividerWidth");
+	for (WorldView *view : presentationViews())
+		view->setSplitViewDividerWidth(width);
+}
+
 QVector<WorldView *> WorldRuntime::presentationViews() const
 {
 	QVector<WorldView *> views;

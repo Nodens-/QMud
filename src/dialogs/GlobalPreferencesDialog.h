@@ -162,6 +162,7 @@ class GlobalPreferencesDialog : public QDialog
 		QCheckBox                         *m_parenDoubleEscape{nullptr};
 
 		QComboBox                         *m_tabsStyle{nullptr};
+		QSpinBox                          *m_splitViewDividerWidth{nullptr};
 		QLineEdit                         *m_localeEdit{nullptr};
 
 		QComboBox                         *m_iconPlacement{nullptr};

@@ -1888,6 +1888,12 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	m_outputSplitter->setCollapsible(1, true);
 	m_outputSplitter->setSizes(QList<int>() << 1 << 0);
 	m_outputSplitter->setHandleWidth(0);
+	if (const AppController *app = AppController::instance(); app)
+	{
+		const QVariant configuredWidth = app->getGlobalOption(QStringLiteral("SplitViewDividerWidth"));
+		setSplitViewDividerWidth(configuredWidth.isValid() ? configuredWidth.toInt()
+		                                                   : kDefaultSplitViewDividerWidth);
+	}
 
 	m_outputScrollBar = new QScrollBar(Qt::Vertical, m_outputContainer);
 	outputStackLayout->addWidget(m_miniUnderlay, 0, 0);
@@ -9982,12 +9988,27 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 		}
 	}
 
+	QRect dividerRect;
+	if (m_scrollbackSplitActive && m_outputSplitter && m_liveOutput && m_liveOutput->isVisible())
+	{
+		if (QSplitterHandle *const handle = m_outputSplitter->handle(1); handle && handle->isVisible())
+		{
+			const QRect handleRect(m_nativeOutputCanvas->mapFromGlobal(handle->mapToGlobal(QPoint(0, 0))),
+			                       handle->size());
+			const int   dividerHeight = qMin(m_splitViewDividerWidth, handleRect.height());
+			dividerRect               = handleRect;
+			dividerRect.setTop(handleRect.top() + ((handleRect.height() - dividerHeight) / 2));
+			dividerRect.setHeight(dividerHeight);
+		}
+	}
+
 	if (panes.isEmpty())
 		return;
 	const bool hasClippedPane =
 	    std::ranges::any_of(panes, [&clippedUpdateRegion](const RenderPane &pane)
 	                        { return clippedUpdateRegion.intersects(pane.textRect); });
-	if (!hasClippedPane)
+	const bool hasClippedDivider = !dividerRect.isEmpty() && clippedUpdateRegion.intersects(dividerRect);
+	if (!hasClippedPane && !hasClippedDivider)
 		return;
 
 	QColor defaultTextColour = m_outputTextColour;
@@ -10209,47 +10230,36 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 		updateNativeOutputPanePaintState(pane.view, pane.textRect, clippedPaneRegion, effectiveScrollY,
 		                                 nativeMaxScroll, lines);
 	}
-	if (m_scrollbackSplitActive && m_outputSplitter && m_liveOutput && m_liveOutput->isVisible())
+	if (!dividerRect.isEmpty())
 	{
-		if (QSplitterHandle *const handle = m_outputSplitter->handle(1); handle && handle->isVisible())
+		const QRegion clippedDividerRegion = clippedUpdateRegion.intersected(dividerRect);
+		if (!clippedDividerRegion.isEmpty())
 		{
-			const QRect   handleRect(m_nativeOutputCanvas->mapFromGlobal(handle->mapToGlobal(QPoint(0, 0))),
-			                         handle->size());
-			const QRegion clippedHandleRegion = clippedUpdateRegion.intersected(handleRect);
-			const QRect   clippedHandleRect   = clippedHandleRegion.boundingRect();
-			if (!clippedHandleRect.isEmpty())
+			QColor markerColor = m_input ? m_input->palette().color(QPalette::Mid) : QColor();
+			if (!markerColor.isValid() && m_input)
+				markerColor = m_input->palette().color(QPalette::Dark);
+			if (!markerColor.isValid())
+				markerColor = QColor(132, 132, 132);
+			markerColor = markerColor.lighter(165);
+			if (m_outputBackground.isValid())
 			{
-				QColor markerColor = m_input ? m_input->palette().color(QPalette::Mid) : QColor();
-				if (!markerColor.isValid() && m_input)
-					markerColor = m_input->palette().color(QPalette::Dark);
-				if (!markerColor.isValid())
-					markerColor = QColor(132, 132, 132);
-				markerColor = markerColor.lighter(165);
-				if (m_outputBackground.isValid())
+				const int bgLum     = qGray(m_outputBackground.rgb());
+				int       markerLum = qGray(markerColor.rgb());
+				if (qAbs(markerLum - bgLum) < 52)
 				{
-					const int bgLum     = qGray(m_outputBackground.rgb());
-					int       markerLum = qGray(markerColor.rgb());
+					if (bgLum < 128)
+						markerColor = markerColor.lighter(145);
+					else
+						markerColor = markerColor.darker(145);
+					markerLum = qGray(markerColor.rgb());
 					if (qAbs(markerLum - bgLum) < 52)
-					{
-						if (bgLum < 128)
-							markerColor = markerColor.lighter(145);
-						else
-							markerColor = markerColor.darker(145);
-						markerLum = qGray(markerColor.rgb());
-						if (qAbs(markerLum - bgLum) < 52)
-							markerColor = (bgLum < 128) ? QColor(190, 190, 190) : QColor(64, 64, 64);
-					}
+						markerColor = (bgLum < 128) ? QColor(190, 190, 190) : QColor(64, 64, 64);
 				}
-				QPen markerPen(markerColor);
-				markerPen.setCosmetic(true);
-				markerPen.setWidth(0);
-				painter->save();
-				painter->setClipRegion(clippedHandleRegion);
-				painter->setPen(markerPen);
-				const int y = handleRect.center().y();
-				painter->drawLine(handleRect.left(), y, handleRect.right(), y);
-				painter->restore();
 			}
+			painter->save();
+			painter->setClipRegion(clippedDividerRegion);
+			painter->fillRect(dividerRect, markerColor);
+			painter->restore();
 		}
 	}
 	if (diagnosticsEnabled)
@@ -10321,9 +10331,7 @@ void WorldView::setScrollbackSplitActive(bool active)
 	m_scrollbackSplitActive = active;
 	if (!m_outputSplitter || !m_liveOutput)
 		return;
-	const int defaultHandleWidth =
-	    qMax(1, style()->pixelMetric(QStyle::PM_SplitterWidth, nullptr, m_outputSplitter));
-	m_outputSplitter->setHandleWidth(m_scrollbackSplitActive ? defaultHandleWidth : 0);
+	m_outputSplitter->setHandleWidth(m_scrollbackSplitActive ? m_splitViewDividerWidth : 0);
 
 	if (m_scrollbackSplitActive)
 	{
@@ -11651,6 +11659,18 @@ void WorldView::setBleedBackground(bool enabled)
 		m_outputStack->update();
 	if (m_outputContainer)
 		m_outputContainer->update();
+}
+
+void WorldView::setSplitViewDividerWidth(const int width)
+{
+	const int boundedWidth = qBound(kMinimumSplitViewDividerWidth, width, kMaximumSplitViewDividerWidth);
+	if (m_splitViewDividerWidth == boundedWidth)
+		return;
+	m_splitViewDividerWidth = boundedWidth;
+	if (m_outputSplitter)
+		m_outputSplitter->setHandleWidth(m_scrollbackSplitActive ? m_splitViewDividerWidth : 0);
+	if (m_scrollbackSplitActive)
+		requestNativeOutputRepaint();
 }
 
 void WorldView::setAllTypingToCommandWindow(bool enabled)
