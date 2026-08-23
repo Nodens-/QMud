@@ -10195,6 +10195,90 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void tabCompletionCanExcludeEveryAsciiSymbolPrefixAndSuffix()
+		{
+			resetTestState();
+			setTestWorldAttribute(QStringLiteral("tab_completion_space"), QStringLiteral("0"));
+
+			WorldRuntime *const runtime = runtimeForTest();
+			runtime->addLine(QStringLiteral("Nodette!"), WorldRuntime::LineOutput);
+			runtime->addLine(QStringLiteral("Nodens:"), WorldRuntime::LineOutput);
+			const QString symbols = QStringLiteral("!@#$%^&*()_+-=[]{};:\"',./<>?`~\\|");
+			QCOMPARE(symbols.size(), 32);
+			for (int index = 0; index < symbols.size(); ++index)
+			{
+				const QString completion =
+				    QStringLiteral("Suffix%1Value").arg(index, 2, 10, QLatin1Char('0'));
+				runtime->addLine(completion + symbols.at(index), WorldRuntime::LineOutput);
+			}
+
+			WorldView view;
+			view.resize(860, 520);
+			view.show();
+			setTestRuntime(view, runtime);
+			QCoreApplication::processEvents();
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus();
+
+			for (const QChar prefix : symbols)
+			{
+				const QString prefixText(prefix);
+				view.setInputText(prefixText + QStringLiteral("node"), true);
+				QTextCursor cursor = input->textCursor();
+				cursor.movePosition(QTextCursor::End);
+				input->setTextCursor(cursor);
+
+				QTest::keyClick(input, Qt::Key_Tab);
+				QCOMPARE(view.inputText(), prefixText + QStringLiteral("Nodens"));
+			}
+
+			view.setInputText(QStringLiteral("@node"), true);
+			QTextCursor cursor = input->textCursor();
+			cursor.movePosition(QTextCursor::End);
+			input->setTextCursor(cursor);
+			QTest::keyClick(input, Qt::Key_Tab);
+			QCOMPARE(view.inputText(), QStringLiteral("@Nodens"));
+			QTest::keyClick(input, Qt::Key_Tab);
+			QCOMPARE(view.inputText(), QStringLiteral("@Nodette"));
+
+			for (int index = 0; index < symbols.size(); ++index)
+			{
+				const QString completion =
+				    QStringLiteral("Suffix%1Value").arg(index, 2, 10, QLatin1Char('0'));
+				view.setInputText(completion.chopped(1).toLower(), true);
+				cursor = input->textCursor();
+				cursor.movePosition(QTextCursor::End);
+				input->setTextCursor(cursor);
+
+				QTest::keyClick(input, Qt::Key_Tab);
+				QCOMPARE(view.inputText(), completion);
+			}
+
+			runtime->setWorldAttribute(QStringLiteral("tab_completion_excludes_symbol_prefix"),
+			                           QStringLiteral("0"));
+			view.setInputText(QStringLiteral("@node"), true);
+			cursor = input->textCursor();
+			cursor.movePosition(QTextCursor::End);
+			input->setTextCursor(cursor);
+			QTest::keyClick(input, Qt::Key_Tab);
+			QCOMPARE(view.inputText(), QStringLiteral("@node"));
+
+			runtime->setWorldAttribute(QStringLiteral("tab_completion_excludes_symbol_prefix"),
+			                           QStringLiteral("1"));
+			runtime->setWorldAttribute(QStringLiteral("tab_completion_excludes_symbol_suffix"),
+			                           QStringLiteral("0"));
+			view.setInputText(QStringLiteral("@node"), true);
+			cursor = input->textCursor();
+			cursor.movePosition(QTextCursor::End);
+			input->setTextCursor(cursor);
+			QTest::keyClick(input, Qt::Key_Tab);
+			QCOMPARE(view.inputText(), QStringLiteral("@Nodens:"));
+
+			resetTestState();
+		}
+
 		void outputFindNoMatchReturnsWithoutHanging()
 		{
 			resetTestState();

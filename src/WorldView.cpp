@@ -114,6 +114,12 @@ namespace
 		return static_cast<int>(qBound(kMin, value, kMax));
 	}
 
+	bool isTabCompletionSymbol(const QChar character)
+	{
+		static const QString symbols = QStringLiteral("!@#$%^&*()_+-=[]{};:\"',./<>?`~\\|");
+		return symbols.contains(character);
+	}
+
 	int saturatedAccessibleAdd(const int value, const int amount)
 	{
 		if (amount <= 0)
@@ -645,6 +651,8 @@ namespace
 		                                   QStringLiteral("double_click_sends"),
 		                                   QStringLiteral("auto_repeat"),
 		                                   QStringLiteral("lower_case_tab_completion"),
+		                                   QStringLiteral("tab_completion_excludes_symbol_prefix"),
+		                                   QStringLiteral("tab_completion_excludes_symbol_suffix"),
 		                                   QStringLiteral("tab_completion_space"),
 		                                   QStringLiteral("tab_completion_lines"),
 		                                   QStringLiteral("auto_resize_command_window"),
@@ -729,6 +737,8 @@ namespace
 		                                   QStringLiteral("double_click_sends"),
 		                                   QStringLiteral("auto_repeat"),
 		                                   QStringLiteral("lower_case_tab_completion"),
+		                                   QStringLiteral("tab_completion_excludes_symbol_prefix"),
+		                                   QStringLiteral("tab_completion_excludes_symbol_suffix"),
 		                                   QStringLiteral("tab_completion_space"),
 		                                   QStringLiteral("auto_resize_command_window"),
 		                                   QStringLiteral("keep_commands_on_same_line"),
@@ -11640,6 +11650,16 @@ void WorldView::setWordDelimiters(const QString &delimiters, const QString &doub
 	m_wordDelimitersDblClick = doubleClickDelimiters;
 }
 
+void WorldView::setTabCompletionExcludesSymbolPrefix(const bool enabled)
+{
+	m_tabCompletionExcludesSymbolPrefix = enabled;
+}
+
+void WorldView::setTabCompletionExcludesSymbolSuffix(const bool enabled)
+{
+	m_tabCompletionExcludesSymbolSuffix = enabled;
+}
+
 void WorldView::setSmoothScrolling(bool smooth, bool smoother)
 {
 	m_smoothScrolling   = smooth;
@@ -14254,9 +14274,15 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	m_autoRepeat                         = isEnabled(autoRepeat);
 	const QString lowerCaseTabCompletion = attrs.value(QStringLiteral("lower_case_tab_completion"));
 	m_lowerCaseTabCompletion             = isEnabled(lowerCaseTabCompletion);
-	const QString tabCompletionSpace     = attrs.value(QStringLiteral("tab_completion_space"));
-	m_tabCompletionSpace                 = isEnabled(tabCompletionSpace);
-	bool tabLinesOk                      = false;
+	const QString tabCompletionExcludesSymbolPrefix =
+	    attrs.value(QStringLiteral("tab_completion_excludes_symbol_prefix"), QStringLiteral("1"));
+	m_tabCompletionExcludesSymbolPrefix = isEnabled(tabCompletionExcludesSymbolPrefix);
+	const QString tabCompletionExcludesSymbolSuffix =
+	    attrs.value(QStringLiteral("tab_completion_excludes_symbol_suffix"), QStringLiteral("1"));
+	m_tabCompletionExcludesSymbolSuffix = isEnabled(tabCompletionExcludesSymbolSuffix);
+	const QString tabCompletionSpace    = attrs.value(QStringLiteral("tab_completion_space"));
+	m_tabCompletionSpace                = isEnabled(tabCompletionSpace);
+	bool tabLinesOk                     = false;
 	int  tabLines = attrs.value(QStringLiteral("tab_completion_lines")).toInt(&tabLinesOk);
 	if (!tabLinesOk || tabLines < 1)
 		tabLines = 200;
@@ -16259,7 +16285,14 @@ bool WorldView::tabCompleteOneLine(int startColumn, int endColumn, const QString
 		while (end < lineLength && !line.at(end).isSpace() && !m_wordDelimiters.contains(line.at(end)))
 			++end;
 
-		const int replacementLength = end - i;
+		int completionEnd = end;
+		if (m_tabCompletionExcludesSymbolSuffix)
+		{
+			while (completionEnd > i && isTabCompletionSymbol(line.at(completionEnd - 1)))
+				--completionEnd;
+		}
+
+		const int replacementLength = completionEnd - i;
 		if (replacementLength > targetWordLower.size())
 		{
 			QString replacement = line.mid(i, replacementLength);
@@ -16356,6 +16389,11 @@ bool WorldView::handleTabCompletionKeyPress()
 			--startColumn;
 		}
 		++startColumn;
+		if (m_tabCompletionExcludesSymbolPrefix)
+		{
+			while (startColumn < endColumn && isTabCompletionSymbol(currentText.at(startColumn)))
+				++startColumn;
+		}
 
 		if (startColumn >= endColumn)
 		{

@@ -983,6 +983,58 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 		Q_OBJECT
 
 	private slots:
+		static void tabCompletionSymbolPreferencesRoundTripThroughWorldFile()
+		{
+			const QString artifactDirectory =
+			    QDir(QCoreApplication::applicationDirPath())
+			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
+			                                 "tab-completion-symbol-options-round-trip"));
+			QVERIFY(QDir().mkpath(artifactDirectory));
+
+			const QString prefixOptionKey = QStringLiteral("tab_completion_excludes_symbol_prefix");
+			const QString suffixOptionKey = QStringLiteral("tab_completion_excludes_symbol_suffix");
+			WorldRuntime  runtime;
+			runtime.setStartupDirectory(artifactDirectory);
+			runtime.applyDefaultWorldOptions();
+			runtime.setWorldAttribute(prefixOptionKey, QStringLiteral("0"));
+			runtime.setWorldAttribute(suffixOptionKey, QStringLiteral("0"));
+
+			const QString disabledPath = QDir(artifactDirectory).filePath(QStringLiteral("disabled.qdl"));
+			QString       saveError;
+			QVERIFY2(runtime.saveWorldFile(disabledPath, &saveError), qPrintable(saveError));
+
+			QString disabledXml;
+			QVERIFY(readTextFile(disabledPath, disabledXml));
+			QVERIFY(disabledXml.contains(QStringLiteral("tab_completion_excludes_symbol_prefix=\"n\"")));
+			QVERIFY(disabledXml.contains(QStringLiteral("tab_completion_excludes_symbol_suffix=\"n\"")));
+
+			WorldDocument disabledDocument;
+			QVERIFY2(disabledDocument.loadFromFile(disabledPath), qPrintable(disabledDocument.errorString()));
+			WorldRuntime disabledRuntime;
+			disabledRuntime.setStartupDirectory(artifactDirectory);
+			disabledRuntime.applyFromDocument(disabledDocument);
+			QCOMPARE(disabledRuntime.worldAttributes().value(prefixOptionKey), QStringLiteral("n"));
+			QCOMPARE(disabledRuntime.worldAttributes().value(suffixOptionKey), QStringLiteral("n"));
+
+			disabledRuntime.setWorldAttribute(prefixOptionKey, QStringLiteral("1"));
+			disabledRuntime.setWorldAttribute(suffixOptionKey, QStringLiteral("1"));
+			const QString enabledPath = QDir(artifactDirectory).filePath(QStringLiteral("enabled.qdl"));
+			QVERIFY2(disabledRuntime.saveWorldFile(enabledPath, &saveError), qPrintable(saveError));
+
+			QString enabledXml;
+			QVERIFY(readTextFile(enabledPath, enabledXml));
+			QVERIFY(!enabledXml.contains(QStringLiteral("tab_completion_excludes_symbol_prefix=")));
+			QVERIFY(!enabledXml.contains(QStringLiteral("tab_completion_excludes_symbol_suffix=")));
+
+			WorldDocument enabledDocument;
+			QVERIFY2(enabledDocument.loadFromFile(enabledPath), qPrintable(enabledDocument.errorString()));
+			WorldRuntime enabledRuntime;
+			enabledRuntime.setStartupDirectory(artifactDirectory);
+			enabledRuntime.applyFromDocument(enabledDocument);
+			QCOMPARE(enabledRuntime.worldAttributes().value(prefixOptionKey), QStringLiteral("y"));
+			QCOMPARE(enabledRuntime.worldAttributes().value(suffixOptionKey), QStringLiteral("y"));
+		}
+
 		static void inputEchoWrapUsesCompleteReopenedLinePrefix()
 		{
 			WorldRuntime runtime;

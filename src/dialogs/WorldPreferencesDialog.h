@@ -655,9 +655,11 @@ class WorldPreferencesDialog : public QDialog
 		QSpinBox                     *m_autoResizeMinimumLines{nullptr};
 		QSpinBox                     *m_autoResizeMaximumLines{nullptr};
 		QCheckBox                    *m_autoRepeat{nullptr};
+		QCheckBox                    *m_lowerCaseTabCompletion{nullptr};
+		QCheckBox                    *m_tabCompletionExcludesSymbolPrefix{nullptr};
+		QCheckBox                    *m_tabCompletionExcludesSymbolSuffix{nullptr};
 		QCheckBox                    *m_translateGerman{nullptr};
 		QCheckBox                    *m_spellCheckOnSend{nullptr};
-		QCheckBox                    *m_lowerCaseTabCompletion{nullptr};
 		QCheckBox                    *m_translateBackslash{nullptr};
 		QTextEdit                    *m_tabCompletionDefaults{nullptr};
 		QSpinBox                     *m_tabCompletionLines{nullptr};

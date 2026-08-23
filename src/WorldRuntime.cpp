@@ -19248,6 +19248,13 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 		return;
 	}
 	m_worldAttributes.insert(key, normalizedValue);
+	if (m_view)
+	{
+		if (key == QStringLiteral("tab_completion_excludes_symbol_prefix"))
+			m_view->setTabCompletionExcludesSymbolPrefix(isEnabledFlag(normalizedValue));
+		else if (key == QStringLiteral("tab_completion_excludes_symbol_suffix"))
+			m_view->setTabCompletionExcludesSymbolSuffix(isEnabledFlag(normalizedValue));
+	}
 	if (worldAttributeAffectsResolvedOutputColours(key))
 		invalidateResolvedOutputColourCache();
 	invalidateLuaCallbackDispatchSnapshot();

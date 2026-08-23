@@ -1973,6 +1973,18 @@ void WorldPreferencesDialog::accept()
 			m_runtime->setWorldAttribute(QStringLiteral("auto_repeat"), m_autoRepeat->isChecked()
 			                                                                ? QStringLiteral("1")
 			                                                                : QStringLiteral("0"));
+		if (m_lowerCaseTabCompletion)
+			m_runtime->setWorldAttribute(QStringLiteral("lower_case_tab_completion"),
+			                             m_lowerCaseTabCompletion->isChecked() ? QStringLiteral("1")
+			                                                                   : QStringLiteral("0"));
+		if (m_tabCompletionExcludesSymbolPrefix)
+			m_runtime->setWorldAttribute(
+			    QStringLiteral("tab_completion_excludes_symbol_prefix"),
+			    m_tabCompletionExcludesSymbolPrefix->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+		if (m_tabCompletionExcludesSymbolSuffix)
+			m_runtime->setWorldAttribute(
+			    QStringLiteral("tab_completion_excludes_symbol_suffix"),
+			    m_tabCompletionExcludesSymbolSuffix->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
 		if (m_translateGerman)
 			m_runtime->setWorldAttribute(QStringLiteral("translate_german"), m_translateGerman->isChecked()
 			                                                                     ? QStringLiteral("1")
@@ -1981,10 +1993,6 @@ void WorldPreferencesDialog::accept()
 			m_runtime->setWorldAttribute(QStringLiteral("spell_check_on_send"),
 			                             m_spellCheckOnSend->isChecked() ? QStringLiteral("1")
 			                                                             : QStringLiteral("0"));
-		if (m_lowerCaseTabCompletion)
-			m_runtime->setWorldAttribute(QStringLiteral("lower_case_tab_completion"),
-			                             m_lowerCaseTabCompletion->isChecked() ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
 		if (m_translateBackslash)
 			m_runtime->setWorldAttribute(QStringLiteral("translate_backslash_sequences"),
 			                             m_translateBackslash->isChecked() ? QStringLiteral("1")
@@ -5915,6 +5923,10 @@ void WorldPreferencesDialog::buildUi()
 
 	m_autoRepeat             = new QCheckBox(QStringLiteral("Auto-repeat Command"), commandsPage);
 	m_lowerCaseTabCompletion = new QCheckBox(QStringLiteral("Tab Completion In Lower Case"), commandsPage);
+	m_tabCompletionExcludesSymbolPrefix =
+	    new QCheckBox(QStringLiteral("Tab Completion Excludes Symbol Prefix"), commandsPage);
+	m_tabCompletionExcludesSymbolSuffix =
+	    new QCheckBox(QStringLiteral("Tab Completion Excludes Symbol Suffix"), commandsPage);
 	m_translateGerman        = new QCheckBox(QStringLiteral("Translate German characters"), commandsPage);
 	m_spellCheckOnSend       = new QCheckBox(QStringLiteral("Spell Check On Send"), commandsPage);
 	m_translateBackslash     = new QCheckBox(QStringLiteral("&Translate Backslash Sequences"), commandsPage);
@@ -5922,6 +5934,8 @@ void WorldPreferencesDialog::buildUi()
 	m_noEchoOff              = new QCheckBox(QStringLiteral("Ignore 'Echo Off' messages"), commandsPage);
 	commandsRight->addWidget(m_autoRepeat);
 	commandsRight->addWidget(m_lowerCaseTabCompletion);
+	commandsRight->addWidget(m_tabCompletionExcludesSymbolPrefix);
+	commandsRight->addWidget(m_tabCompletionExcludesSymbolSuffix);
 	commandsRight->addWidget(m_translateGerman);
 	commandsRight->addWidget(m_spellCheckOnSend);
 	commandsRight->addWidget(m_translateBackslash);
@@ -9875,13 +9889,19 @@ void WorldPreferencesDialog::populateCommands()
 	}
 	if (m_autoRepeat)
 		m_autoRepeat->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("auto_repeat"))));
+	if (m_lowerCaseTabCompletion)
+		m_lowerCaseTabCompletion->setChecked(
+		    qmudIsEnabledFlag(attrs.value(QStringLiteral("lower_case_tab_completion"))));
+	if (m_tabCompletionExcludesSymbolPrefix)
+		m_tabCompletionExcludesSymbolPrefix->setChecked(qmudIsEnabledFlag(
+		    attrs.value(QStringLiteral("tab_completion_excludes_symbol_prefix"), QStringLiteral("1"))));
+	if (m_tabCompletionExcludesSymbolSuffix)
+		m_tabCompletionExcludesSymbolSuffix->setChecked(qmudIsEnabledFlag(
+		    attrs.value(QStringLiteral("tab_completion_excludes_symbol_suffix"), QStringLiteral("1"))));
 	if (m_translateGerman)
 		m_translateGerman->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("translate_german"))));
 	if (m_spellCheckOnSend)
 		m_spellCheckOnSend->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("spell_check_on_send"))));
-	if (m_lowerCaseTabCompletion)
-		m_lowerCaseTabCompletion->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("lower_case_tab_completion"))));
 	if (m_translateBackslash)
 		m_translateBackslash->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("translate_backslash_sequences"))));

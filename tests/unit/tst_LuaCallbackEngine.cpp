@@ -36,6 +36,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
+#include <QPlainTextEdit>
 #include <QScopeGuard>
 #include <QSemaphore>
 #include <QSet>
@@ -106,6 +107,7 @@ namespace
 			void utilsMultiListBoxAcceptsMushclientArgumentOrder();
 			void deferredRuntimeMutationBatchesPreserveOrderAndOwnership();
 			void directExecutorDispatchesRealEngines();
+			void setOptionUpdatesOnlyTabCompletionSymbolBehaviors();
 			void callPluginMarshallingUsesTargetEngineState();
 			void noArgsDispatchReportsCallbackFailure();
 			void workerDispatchesPluginLifecycleCallbacksOnRealEngines();
@@ -1238,18 +1240,18 @@ void tst_LuaCallbackEngine::directDestructionDoesNotWaitForForeignRuntimeCleanup
 	runtimeThread.start();
 	QThread *const testThread           = QThread::currentThread();
 	const auto     cleanupRuntimeThread = qScopeGuard(
-        [&]
-        {
-            unblockRuntime.release();
-            if (runtimeThread.isRunning() && runtime.thread() == &runtimeThread)
-            {
-                static_cast<void>(QMetaObject::invokeMethod(
-                    &runtime, [&runtime, testThread] { runtime.moveToThread(testThread); },
-                    Qt::BlockingQueuedConnection));
-            }
-            runtimeThread.quit();
-            runtimeThread.wait();
-        });
+	    [&]
+	    {
+		    unblockRuntime.release();
+		    if (runtimeThread.isRunning() && runtime.thread() == &runtimeThread)
+		    {
+			    static_cast<void>(QMetaObject::invokeMethod(
+			        &runtime, [&runtime, testThread] { runtime.moveToThread(testThread); },
+			        Qt::BlockingQueuedConnection));
+		    }
+		    runtimeThread.quit();
+		    runtimeThread.wait();
+	    });
 	QVERIFY(QMetaObject::invokeMethod(
 	    &runtime,
 	    [&runtimeBlocked, &unblockRuntime]
@@ -1283,12 +1285,12 @@ void tst_LuaCallbackEngine::workerOwnsInitializedEngineUntilWorkerTeardown()
 {
 	QThread *destructionThread = nullptr;
 	auto     executor          = std::make_unique<LuaExecutorWorker>(recoveredMutationConsumerForTest());
-	auto     engine            = QSharedPointer<LuaCallbackEngine>(new LuaCallbackEngine(),
-	                                                               [&destructionThread](const LuaCallbackEngine *value)
-	                                                               {
-                                                        destructionThread = QThread::currentThread();
-                                                        delete value;
-                                                    });
+	auto     engine = QSharedPointer<LuaCallbackEngine>(new LuaCallbackEngine(),
+	                                                    [&destructionThread](const LuaCallbackEngine *value)
+	                                                    {
+		                                                destructionThread = QThread::currentThread();
+		                                                delete value;
+	                                                    });
 	initializeWorkerEngine(*executor, engine, QStringLiteral("function retained() return true end"));
 
 	const QWeakPointer<LuaCallbackEngine> weakEngine = engine;
@@ -1308,19 +1310,19 @@ void tst_LuaCallbackEngine::workerShutdownReturnsCleanupBatchesToOwnerThread()
 	bool         mutationApplied = false;
 	QThread     *consumerThread  = nullptr;
 	auto         executor        = std::make_unique<LuaExecutorWorker>(
-        [&](const QVector<LuaDeferredRuntimeMutationBatch> &batches)
-        {
-            consumerCalled = true;
-            consumerThread = QThread::currentThread();
-            for (const LuaDeferredRuntimeMutationBatch &batch : batches)
-            {
-                for (const std::function<void()> &mutation : batch.mutations)
-                {
-                    if (mutation)
-                        mutation();
-                }
-            }
-        });
+	    [&](const QVector<LuaDeferredRuntimeMutationBatch> &batches)
+	    {
+		    consumerCalled = true;
+		    consumerThread = QThread::currentThread();
+		    for (const LuaDeferredRuntimeMutationBatch &batch : batches)
+		    {
+			    for (const std::function<void()> &mutation : batch.mutations)
+			    {
+				    if (mutation)
+					    mutation();
+			    }
+		    }
+	    });
 	auto engine = QSharedPointer<LuaCallbackEngine>::create();
 	initializeWorkerEngine(*executor, engine, QStringLiteral("function retained() return true end"),
 	                       &runtime);
@@ -1354,17 +1356,17 @@ void tst_LuaCallbackEngine::workerShutdownRecoversUndeliveredTeardownBatches()
 	WorldRuntime runtime;
 	QStringList  mutationOrder;
 	auto         executor = std::make_unique<LuaExecutorWorker>(
-        [](const QVector<LuaDeferredRuntimeMutationBatch> &batches)
-        {
-            for (const LuaDeferredRuntimeMutationBatch &batch : batches)
-            {
-                for (const std::function<void()> &mutation : batch.mutations)
-                {
-                    if (mutation)
-                        mutation();
-                }
-            }
-        });
+	    [](const QVector<LuaDeferredRuntimeMutationBatch> &batches)
+	    {
+		    for (const LuaDeferredRuntimeMutationBatch &batch : batches)
+		    {
+			    for (const std::function<void()> &mutation : batch.mutations)
+			    {
+				    if (mutation)
+					    mutation();
+			    }
+		    }
+	    });
 	auto engine = QSharedPointer<LuaCallbackEngine>::create();
 	initializeWorkerEngine(*executor, engine, QStringLiteral("function retained() return true end"),
 	                       &runtime);
@@ -1456,12 +1458,12 @@ void tst_LuaCallbackEngine::workerShutdownRecoveryExcludesConcurrentDelivery()
 	QSemaphore   recoveryEntered;
 	QSemaphore   allowRecovery;
 	auto         executor = std::make_unique<LuaExecutorWorker>(
-        [&](QVector<LuaDeferredRuntimeMutationBatch> batches)
-        {
-            recoveryEntered.release();
-            allowRecovery.acquire();
-            QMudLuaDeferredRuntimeMutation::apply(std::move(batches));
-        });
+	    [&](QVector<LuaDeferredRuntimeMutationBatch> batches)
+	    {
+		    recoveryEntered.release();
+		    allowRecovery.acquire();
+		    QMudLuaDeferredRuntimeMutation::apply(std::move(batches));
+	    });
 	auto engine = QSharedPointer<LuaCallbackEngine>::create();
 	initializeWorkerEngine(*executor, engine, QStringLiteral("function retained() return true end"),
 	                       &runtime);
@@ -1945,17 +1947,17 @@ void tst_LuaCallbackEngine::workerShutdownTeardownPreservesRetainedEngineOrder()
 	WorldRuntime runtime;
 	QStringList  teardownOrder;
 	auto         executor = std::make_unique<LuaExecutorWorker>(
-        [](const QVector<LuaDeferredRuntimeMutationBatch> &batches)
-        {
-            for (const LuaDeferredRuntimeMutationBatch &batch : batches)
-            {
-                for (const std::function<void()> &mutation : batch.mutations)
-                {
-                    if (mutation)
-                        mutation();
-                }
-            }
-        });
+	    [](const QVector<LuaDeferredRuntimeMutationBatch> &batches)
+	    {
+		    for (const LuaDeferredRuntimeMutationBatch &batch : batches)
+		    {
+			    for (const std::function<void()> &mutation : batch.mutations)
+			    {
+				    if (mutation)
+					    mutation();
+			    }
+		    }
+	    });
 	auto first  = QSharedPointer<LuaCallbackEngine>::create();
 	auto second = QSharedPointer<LuaCallbackEngine>::create();
 	auto third  = QSharedPointer<LuaCallbackEngine>::create();
@@ -2212,18 +2214,18 @@ void tst_LuaCallbackEngine::worldLuaFileApisUseRuntimeHomeAcrossThreadAffinity()
 	WorldRuntime runtime;
 	QThread     *mainThread = QThread::currentThread();
 	const auto   cleanup    = qScopeGuard(
-        [&]()
-        {
-            if (runtime.thread() == &worker)
-            {
-                const bool moved = QMetaObject::invokeMethod(
-                    &runtime, [&runtime, mainThread]() { runtime.moveToThread(mainThread); },
-                    Qt::BlockingQueuedConnection);
-                QVERIFY(moved);
-            }
-            worker.quit();
-            worker.wait();
-        });
+	    [&]()
+	    {
+		    if (runtime.thread() == &worker)
+		    {
+			    const bool moved = QMetaObject::invokeMethod(
+			        &runtime, [&runtime, mainThread]() { runtime.moveToThread(mainThread); },
+			        Qt::BlockingQueuedConnection);
+			    QVERIFY(moved);
+		    }
+		    worker.quit();
+		    worker.wait();
+	    });
 	worker.start();
 	QVERIFY(worker.isRunning());
 	runtime.setStartupDirectory(root.absolutePath());
@@ -2611,6 +2613,71 @@ end
 	QVERIFY(result.countResultValid);
 	QCOMPARE(result.countResult, 1);
 	QCOMPARE(luaGlobalString(engine->luaState(), "count_seen"), QStringLiteral("3:abc"));
+}
+
+void tst_LuaCallbackEngine::setOptionUpdatesOnlyTabCompletionSymbolBehaviors()
+{
+	WorldRuntime runtime;
+	runtime.applyDefaultWorldOptions();
+	runtime.setWorldAttribute(QStringLiteral("tab_completion_space"), QStringLiteral("0"));
+	runtime.addLine(QStringLiteral("Nodens:"), WorldRuntime::LineOutput);
+
+	WorldView view;
+	view.resize(860, 520);
+	view.setRuntime(&runtime);
+	view.show();
+	QCoreApplication::processEvents();
+
+	QPlainTextEdit *const input = view.inputEditor();
+	QVERIFY(input);
+	input->setFocus();
+	// Leave an unrelated runtime option deliberately out of sync with the view. SetOption must not
+	// reapply it while changing either symbol-exclusion option.
+	runtime.setWorldAttribute(QStringLiteral("lower_case_tab_completion"), QStringLiteral("1"));
+	view.setInputText(QStringLiteral("@node"), true);
+	QTest::keyClick(input, Qt::Key_Tab);
+	QCOMPARE(view.inputText(), QStringLiteral("@Nodens"));
+
+	auto engine = QSharedPointer<LuaCallbackEngine>::create();
+	engine->setWorldRuntime(&runtime);
+	setEngineScript(*engine, QStringLiteral(R"lua(
+function disable_symbol_suffix_exclusion()
+  SetOption("tab_completion_excludes_symbol_suffix", 0)
+end
+function disable_symbol_prefix_exclusion()
+  SetOption("tab_completion_excludes_symbol_prefix", 0)
+end
+)lua"));
+
+	LuaExecutorDirect       executor;
+	LuaBatchDispatchRequest request;
+	request.engines                       = {engine};
+	request.kind                          = LuaBatchDispatchKind::NoArgs;
+	request.functionName                  = QStringLiteral("disable_symbol_suffix_exclusion");
+	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult callbackResult = executor.dispatchBatch(request);
+	executeDeferredMutations(callbackResult);
+	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_suffix")),
+	         QStringLiteral("0"));
+
+	view.setInputText(QStringLiteral("@node"), true);
+	QTest::keyClick(input, Qt::Key_Tab);
+	QCOMPARE(view.inputText(), QStringLiteral("@Nodens:"));
+
+	request.functionName          = QStringLiteral("disable_symbol_prefix_exclusion");
+	request.miniWindowSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	callbackResult                = executor.dispatchBatch(request);
+	executeDeferredMutations(callbackResult);
+	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_prefix")),
+	         QStringLiteral("0"));
+
+	view.setInputText(QStringLiteral("@node"), true);
+	QTest::keyClick(input, Qt::Key_Tab);
+	QCOMPARE(view.inputText(), QStringLiteral("@node"));
+
+	view.setInputText(QStringLiteral("node"), true);
+	QTest::keyClick(input, Qt::Key_Tab);
+	QCOMPARE(view.inputText(), QStringLiteral("Nodens:"));
 }
 
 void tst_LuaCallbackEngine::callPluginMarshallingUsesTargetEngineState()
@@ -3158,7 +3225,7 @@ void tst_LuaCallbackEngine::normalColourDefaultsMatchMushclientAcrossRuntimeAndC
 	                                     QStringLiteral("0")}
 	                             .join(QLatin1Char('|'));
 
-	QStringList runtimeValues;
+	QStringList   runtimeValues;
 	for (int index = 1; index <= 8; ++index)
 		runtimeValues.push_back(QString::number(runtime.normalColour(index)));
 	runtimeValues.push_back(QString::number(runtime.normalColour(0)));
@@ -4785,9 +4852,9 @@ end
 	quint64                             lineBufferGeneration = 0;
 	QHash<int, WorldRuntime::LineEntry> ignoredEntries;
 	QStringList                         ignoredRecentLines;
-	const int lineBufferCount          = runtime.luaContextLinePageByBufferIndex(0, 0, lineBufferGeneration,
-	                                                                             ignoredEntries, ignoredRecentLines);
-	auto      lineSnapshot             = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
+	const int lineBufferCount = runtime.luaContextLinePageByBufferIndex(0, 0, lineBufferGeneration,
+	                                                                    ignoredEntries, ignoredRecentLines);
+	auto      lineSnapshot    = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration = lineBufferGeneration;
 	lineSnapshot->lineBufferCount      = lineBufferCount;
 	auto snapshot                      = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
@@ -4951,9 +5018,9 @@ end
 	quint64                             lineBufferGeneration = 0;
 	QHash<int, WorldRuntime::LineEntry> ignoredEntries;
 	QStringList                         ignoredRecentLines;
-	const int lineBufferCount          = runtime.luaContextLinePageByBufferIndex(0, 0, lineBufferGeneration,
-	                                                                             ignoredEntries, ignoredRecentLines);
-	auto      lineSnapshot             = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
+	const int lineBufferCount = runtime.luaContextLinePageByBufferIndex(0, 0, lineBufferGeneration,
+	                                                                    ignoredEntries, ignoredRecentLines);
+	auto      lineSnapshot    = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration = lineBufferGeneration;
 	lineSnapshot->lineBufferCount      = lineBufferCount;
 	auto snapshot                      = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
@@ -8540,9 +8607,9 @@ end
 	quint64                             lineBufferGeneration = 0;
 	QHash<int, WorldRuntime::LineEntry> ignoredEntries;
 	QStringList                         ignoredRecentLines;
-	const int lineBufferCount          = runtime.luaContextLinePageByBufferIndex(0, 0, lineBufferGeneration,
-	                                                                             ignoredEntries, ignoredRecentLines);
-	auto      lineSnapshot             = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
+	const int lineBufferCount = runtime.luaContextLinePageByBufferIndex(0, 0, lineBufferGeneration,
+	                                                                    ignoredEntries, ignoredRecentLines);
+	auto      lineSnapshot    = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration = lineBufferGeneration;
 	lineSnapshot->lineBufferCount      = lineBufferCount;
 	auto snapshot                      = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
@@ -8734,7 +8801,7 @@ end
 		QHash<int, WorldRuntime::LineEntry> ignoredEntries;
 		QStringList                         ignoredRecentLines;
 		const int                           lineBufferCount = runtime.luaContextLinePageByBufferIndex(
-            0, 0, lineBufferGeneration, ignoredEntries, ignoredRecentLines);
+		    0, 0, lineBufferGeneration, ignoredEntries, ignoredRecentLines);
 		auto lineSnapshot                         = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 		lineSnapshot->lineBufferGeneration        = lineBufferGeneration;
 		lineSnapshot->lineBufferCount             = lineBufferCount;

@@ -686,6 +686,16 @@ class WorldView : public QWidget
 		 */
 		void setWordDelimiters(const QString &delimiters, const QString &doubleClickDelimiters);
 		/**
+		 * @brief Changes whether Tab completion excludes leading symbol prefixes.
+		 * @param enabled Exclude leading symbols when `true`.
+		 */
+		void setTabCompletionExcludesSymbolPrefix(bool enabled);
+		/**
+		 * @brief Changes whether Tab completion excludes trailing symbol suffixes from results.
+		 * @param enabled Exclude trailing symbols when `true`.
+		 */
+		void setTabCompletionExcludesSymbolSuffix(bool enabled);
+		/**
 		 * @brief Sets smooth scrolling modes.
 		 * @param smooth Enable smooth scrolling when `true`.
 		 * @param smoother Enable smoother scrolling variant when `true`.
@@ -2610,6 +2620,8 @@ class WorldView : public QWidget
 		bool                                           m_lineInformation{false};
 		int                                            m_lineSpacing{0};
 		bool                                           m_lowerCaseTabCompletion{false};
+		bool                                           m_tabCompletionExcludesSymbolPrefix{true};
+		bool                                           m_tabCompletionExcludesSymbolSuffix{true};
 		bool                                           m_tabCompletionSpace{false};
 		bool                                           m_autoRepeat{false};
 		bool                                           m_keepCommandsOnSameLine{false};

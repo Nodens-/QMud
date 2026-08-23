@@ -1,4 +1,4 @@
-/*
+/*AVATAR
  * QMud Project
  *
  * File: WorldOptionsDataNumeric.inc
@@ -99,7 +99,9 @@
     {"show_underline", true, 0, 0, OPT_UPDATE_VIEWS | OPT_UPDATE_OUTPUT_FONT},
     {"spam_line_count", 20, 5, 500, 0}, {"speed_walk_delay", 0, 0, 30000, OPT_FIX_SPEEDWALK_DELAY},
     {"spell_check_on_send", false, 0, 0, 0}, {"start_paused", false, 0, 0, 0},
-    {"tab_completion_lines", 200, 1, 500000, 0}, {"tab_completion_space", false, 0, 0, 0},
+    {"tab_completion_excludes_symbol_prefix", true, 0, 0, 0},
+    {"tab_completion_excludes_symbol_suffix", true, 0, 0, 0}, {"tab_completion_lines", 200, 1, 500000, 0},
+    {"tab_completion_space", false, 0, 0, 0},
     {"timestamp_input_text_colour", RGB(128, 0, 0), 0, 0xFFFFFF, OPT_RGB_COLOUR | OPT_UPDATE_VIEWS},
     {"timestamp_notes_text_colour", RGB(0, 0, 255), 0, 0xFFFFFF, OPT_RGB_COLOUR | OPT_UPDATE_VIEWS},
     {"timestamp_output_text_colour", RGB(255, 255, 255), 0, 0xFFFFFF, OPT_RGB_COLOUR | OPT_UPDATE_VIEWS},

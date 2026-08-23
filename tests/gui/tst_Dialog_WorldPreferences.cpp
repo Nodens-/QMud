@@ -80,6 +80,22 @@ namespace
 	};
 
 	/**
+	 * @brief Finds a checkbox by its exact visible label.
+	 * @param root Root object to search.
+	 * @param text Checkbox label to match.
+	 * @return Matching checkbox, or `nullptr` when absent.
+	 */
+	QCheckBox *findCheckBoxByText(const QObject &root, const QString &text)
+	{
+		for (QCheckBox *checkbox : root.findChildren<QCheckBox *>())
+		{
+			if (checkbox && checkbox->text() == text)
+				return checkbox;
+		}
+		return nullptr;
+	}
+
+	/**
 	 * @brief QTest fixture covering Dialog WorldPreferences scenarios.
 	 */
 	class tst_Dialog_WorldPreferences : public QObject
@@ -754,6 +770,76 @@ namespace
 					         qPrintable(QStringLiteral("No setTabKeyNavigation(false) after %1 construction.")
 					                        .arg(tableName)));
 				}
+			}
+
+			void tabCompletionSymbolOptionsDefaultPersistAndFollowFocusOrder()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_prefix")),
+				    QStringLiteral("y"));
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_suffix")),
+				    QStringLiteral("y"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageCommands);
+				dialog.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+				QCoreApplication::processEvents();
+
+				QCheckBox *lowerCase =
+				    findCheckBoxByText(dialog, QStringLiteral("Tab Completion In Lower Case"));
+				QCheckBox *excludeSymbolPrefix =
+				    findCheckBoxByText(dialog, QStringLiteral("Tab Completion Excludes Symbol Prefix"));
+				QCheckBox *excludeSymbolSuffix =
+				    findCheckBoxByText(dialog, QStringLiteral("Tab Completion Excludes Symbol Suffix"));
+				QCheckBox *translateGerman =
+				    findCheckBoxByText(dialog, QStringLiteral("Translate German characters"));
+				QVERIFY(lowerCase);
+				QVERIFY(excludeSymbolPrefix);
+				QVERIFY(excludeSymbolSuffix);
+				QVERIFY(translateGerman);
+				QVERIFY(excludeSymbolPrefix->isChecked());
+				QVERIFY(excludeSymbolSuffix->isChecked());
+
+				const int lowerCaseTop = lowerCase->mapTo(&dialog, QPoint()).y();
+				const int excludeTop   = excludeSymbolPrefix->mapTo(&dialog, QPoint()).y();
+				const int suffixTop    = excludeSymbolSuffix->mapTo(&dialog, QPoint()).y();
+				const int germanTop    = translateGerman->mapTo(&dialog, QPoint()).y();
+				QVERIFY(excludeTop > lowerCaseTop);
+				QVERIFY(suffixTop > excludeTop);
+				QVERIFY(suffixTop < germanTop);
+
+				lowerCase->setFocus(Qt::OtherFocusReason);
+				QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(lowerCase));
+				QTest::keyClick(lowerCase, Qt::Key_Tab);
+				QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(excludeSymbolPrefix));
+				QTest::keyClick(excludeSymbolPrefix, Qt::Key_Tab);
+				QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(excludeSymbolSuffix));
+				QTest::keyClick(excludeSymbolSuffix, Qt::Key_Tab);
+				QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(translateGerman));
+
+				excludeSymbolPrefix->setChecked(false);
+				excludeSymbolSuffix->setChecked(false);
+				dialog.accept();
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_prefix")),
+				    QStringLiteral("0"));
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_suffix")),
+				    QStringLiteral("0"));
+
+				WorldPreferencesDialog restoredDialog(&runtime, nullptr);
+				QCheckBox             *restoredExcludeSymbolPrefix = findCheckBoxByText(
+				    restoredDialog, QStringLiteral("Tab Completion Excludes Symbol Prefix"));
+				QCheckBox *restoredExcludeSymbolSuffix = findCheckBoxByText(
+				    restoredDialog, QStringLiteral("Tab Completion Excludes Symbol Suffix"));
+				QVERIFY(restoredExcludeSymbolPrefix);
+				QVERIFY(restoredExcludeSymbolSuffix);
+				QVERIFY(!restoredExcludeSymbolPrefix->isChecked());
+				QVERIFY(!restoredExcludeSymbolSuffix->isChecked());
 			}
 
 			void legacyEncodingControlFollowsUtf8Option()
