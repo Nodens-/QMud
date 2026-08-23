@@ -6,8 +6,10 @@
  * Role: Integration coverage for WorldRuntime plugin lifecycle callback ordering.
  */
 
+#include "AppController.h"
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
+#include "MainFrame.h"
 #include "MiniWindow.h"
 #include "NativePluginRegistry.h"
 #include "WorldChildWindow.h"
@@ -64,10 +66,11 @@ namespace
 	const QString           kTelnetTriggerLine            = QStringLiteral("qxv-lattice-17");
 	const QString           kTelnetAfterLine              = QStringLiteral("qxv-after-64");
 
-	constexpr unsigned char IAC  = 0xFF;
-	constexpr unsigned char SB   = 0xFA;
-	constexpr unsigned char SE   = 0xF0;
-	constexpr unsigned char GMCP = 201;
+	constexpr unsigned char IAC   = 0xFF;
+	constexpr unsigned char SB    = 0xFA;
+	constexpr unsigned char SE    = 0xF0;
+	constexpr unsigned char GMCP  = 201;
+	constexpr unsigned char MCCP2 = 86;
 
 	/**
 	 * @brief Builds a byte array from unsigned byte literals.
@@ -80,6 +83,27 @@ namespace
 		for (const unsigned char c : raw)
 			out.append(static_cast<char>(c));
 		return out;
+	}
+
+	/**
+	 * @brief Activates an MCCP v2 stream without supplying compressed payload bytes.
+	 * @param runtime Runtime whose telnet processor receives the activation sequence.
+	 */
+	void activateMccp2(WorldRuntime &runtime)
+	{
+		runtime.receiveRawData(bytes({IAC, SB, MCCP2, IAC, SE}));
+	}
+
+	/**
+	 * @brief Produces a complete raw zlib stream suitable for MCCP input.
+	 * @param payload Uncompressed stream payload.
+	 * @return Raw zlib stream without Qt's uncompressed-size prefix.
+	 */
+	QByteArray completeMccpPayload(const QByteArray &payload)
+	{
+		QByteArray compressed = qCompress(payload);
+		compressed.remove(0, 4);
+		return compressed;
 	}
 
 	/**
@@ -983,6 +1007,184 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 		Q_OBJECT
 
 	private slots:
+		static void reloadMccpFatalInflatePreservesSocketAndRecordsFailure()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			QSignalSpy   connectedSpy(&runtime, &WorldRuntime::connected);
+			QSignalSpy   disconnectedSpy(&runtime, &WorldRuntime::disconnected);
+			QSignalSpy   serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(connectedSpy.isValid());
+			QVERIFY(disconnectedSpy.isValid());
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			activateMccp2(runtime);
+			QVERIFY(runtime.isCompressing());
+			runtime.queueMccpDisableForReload();
+			QCOMPARE(runtime.reloadMccpDisableStatus(), WorldRuntime::ReloadMccpDisableStatus::Pending);
+
+			runtime.receiveRawData(QByteArrayLiteral("not-a-zlib-stream"));
+
+			QCOMPARE(runtime.reloadMccpDisableStatus(), WorldRuntime::ReloadMccpDisableStatus::Failed);
+			QVERIFY(runtime.isMccpDisableCompleteForReload());
+			QVERIFY(runtime.isConnected());
+			QCOMPARE(disconnectedSpy.count(), 0);
+
+			runtime.clearReloadMccpDisableForReload();
+			QCOMPARE(runtime.reloadMccpDisableStatus(), WorldRuntime::ReloadMccpDisableStatus::Inactive);
+			activateMccp2(runtime);
+			QVERIFY(runtime.isCompressing());
+			runtime.receiveRawData(QByteArrayLiteral("not-a-zlib-stream"));
+
+			QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 1, 5000);
+			QVERIFY(!runtime.isConnected());
+		}
+
+		static void fatalMccpInflateOutsideReloadStillDisconnects()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			QSignalSpy   connectedSpy(&runtime, &WorldRuntime::connected);
+			QSignalSpy   disconnectedSpy(&runtime, &WorldRuntime::disconnected);
+			QSignalSpy   serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(connectedSpy.isValid());
+			QVERIFY(disconnectedSpy.isValid());
+			QVERIFY(serverAcceptedSpy.isValid());
+
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			activateMccp2(runtime);
+			QVERIFY(runtime.isCompressing());
+			runtime.receiveRawData(QByteArrayLiteral("not-a-zlib-stream"));
+
+			QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 1, 5000);
+			QVERIFY(!runtime.isConnected());
+			QCOMPARE(runtime.reloadMccpDisableStatus(), WorldRuntime::ReloadMccpDisableStatus::Inactive);
+		}
+
+		static void reloadMccpCleanEndRecordsSuccess()
+		{
+			WorldRuntime runtime;
+			activateMccp2(runtime);
+			QVERIFY(runtime.isCompressing());
+
+			runtime.queueMccpDisableForReload();
+			QCOMPARE(runtime.reloadMccpDisableStatus(), WorldRuntime::ReloadMccpDisableStatus::Pending);
+			runtime.receiveRawData(completeMccpPayload(QByteArrayLiteral("clean shutdown\r\n")));
+
+			QCOMPARE(runtime.reloadMccpDisableStatus(), WorldRuntime::ReloadMccpDisableStatus::Succeeded);
+			QVERIFY(runtime.isMccpDisableCompleteForReload());
+		}
+
+		static void reloadMccpNoResponseRemainsPendingUntilPreparationClears()
+		{
+			WorldRuntime runtime;
+			activateMccp2(runtime);
+			QVERIFY(runtime.isCompressing());
+
+			runtime.queueMccpDisableForReload();
+			QCOMPARE(runtime.reloadMccpDisableStatus(), WorldRuntime::ReloadMccpDisableStatus::Pending);
+			QVERIFY(!runtime.isMccpDisableCompleteForReload());
+
+			runtime.clearReloadMccpDisableForReload();
+			QCOMPARE(runtime.reloadMccpDisableStatus(), WorldRuntime::ReloadMccpDisableStatus::Inactive);
+			QVERIFY(!runtime.isMccpDisableCompleteForReload());
+		}
+
+		static void reloadControllerReturnClearsMccpPreparationState()
+		{
+			const QString artifactDirectory =
+			    QDir(QCoreApplication::applicationDirPath())
+			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
+			                                 "reload-controller-mccp-cleanup"));
+			QVERIFY(QDir().mkpath(artifactDirectory));
+
+			const QByteArray originalAssumeYes    = qgetenv("QMUD_RELOAD_ASSUME_YES");
+			const QByteArray originalReloadDryRun = qgetenv("QMUD_RELOAD_DRY_RUN");
+			const QString    originalCurrentPath  = QDir::currentPath();
+			const auto       restoreEnvironment   = qScopeGuard(
+			    [&]
+			    {
+				    const auto restoreVariable = [](const char *name, const QByteArray &value)
+				    {
+					    if (value.isNull())
+						    qunsetenv(name);
+					    else
+						    qputenv(name, value);
+				    };
+				    restoreVariable("QMUD_RELOAD_ASSUME_YES", originalAssumeYes);
+				    restoreVariable("QMUD_RELOAD_DRY_RUN", originalReloadDryRun);
+				    (void)QDir::setCurrent(originalCurrentPath);
+			    });
+			QVERIFY(QDir::setCurrent(artifactDirectory));
+			QVERIFY(qputenv("QMUD_RELOAD_ASSUME_YES", QByteArrayLiteral("1")));
+			QVERIFY(qputenv("QMUD_RELOAD_DRY_RUN", QByteArrayLiteral("1")));
+
+			AppController app;
+			MainWindow    frame;
+			app.setMainWindow(&frame);
+			app.setGlobalOptionInt(QStringLiteral("EnableReloadFeature"), 1);
+			app.setGlobalOptionInt(QStringLiteral("ReloadMccpDisableTimeoutMs"), 300);
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			auto *runtime = new WorldRuntime(&frame);
+			runtime->applyDefaultWorldOptions();
+			runtime->setStartupDirectory(artifactDirectory);
+			runtime->setReconnectOnLinkFailure(false);
+			runtime->setWorldAttribute(QStringLiteral("id"),
+			                           QStringLiteral("reload-controller-mccp-cleanup"));
+			auto *primary = new WorldChildWindow(QStringLiteral("Reload MCCP cleanup"));
+			primary->setRuntime(runtime);
+			frame.addMdiSubWindow(primary, true);
+
+			QSignalSpy connectedSpy(runtime, &WorldRuntime::connected);
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(connectedSpy.isValid());
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime->connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			activateMccp2(*runtime);
+			QVERIFY(runtime->isCompressing());
+			app.onCommandTriggered(QStringLiteral("ReloadQMud"));
+
+			QCOMPARE(runtime->reloadMccpDisableStatus(), WorldRuntime::ReloadMccpDisableStatus::Inactive);
+			QVERIFY(runtime->isCompressing());
+
+			runtime->disconnectFromWorld();
+			primary->setRuntime(nullptr);
+		}
+
+		static void reloadMccpRequestSucceedsWhenCompressionIsAlreadyInactive()
+		{
+			WorldRuntime runtime;
+			QVERIFY(runtime.isMccpDisableCompleteForReload());
+			QVERIFY(runtime.requestMccpDisableForReload(0));
+			QCOMPARE(runtime.reloadMccpDisableStatus(), WorldRuntime::ReloadMccpDisableStatus::Inactive);
+		}
+
 		static void tabCompletionSymbolPreferencesRoundTripThroughWorldFile()
 		{
 			const QString artifactDirectory =

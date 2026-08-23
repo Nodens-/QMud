@@ -4368,6 +4368,11 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 	callbacks.onNoEchoChanged      = [this](bool enabled) { setNoCommandEcho(enabled); };
 	callbacks.onFatalProtocolError = [this](const QString &message)
 	{
+		if (m_reloadMccpDisableForReloadArmed)
+		{
+			m_reloadMccpDisableForReloadFatal = true;
+			return;
+		}
 #ifndef NDEBUG
 		const QString worldName = m_worldAttributes.value(QStringLiteral("name")).trimmed();
 		qWarning().noquote() << QStringLiteral("[QMud][MCCP] fatal protocol error in world \"%1\": %2")
@@ -7640,8 +7645,10 @@ void WorldRuntime::cancelReloadMccpProbeTimeout()
 
 void WorldRuntime::queueMccpDisableForReload()
 {
-	if (isMccpDisableCompleteForReload())
+	if (!isCompressing() && mccpType() == 0)
 		return;
+	m_reloadMccpDisableForReloadArmed = true;
+	m_reloadMccpDisableForReloadFatal = false;
 
 	m_telnet.queueDisableCompressionNegotiation();
 	const QByteArray outbound = m_telnet.takeOutboundData();
@@ -7654,9 +7661,29 @@ bool WorldRuntime::isMccpDisableCompleteForReload() const
 	return !isCompressing() && mccpType() == 0;
 }
 
+WorldRuntime::ReloadMccpDisableStatus WorldRuntime::reloadMccpDisableStatus() const
+{
+	if (!m_reloadMccpDisableForReloadArmed)
+		return ReloadMccpDisableStatus::Inactive;
+	if (m_reloadMccpDisableForReloadFatal)
+		return ReloadMccpDisableStatus::Failed;
+	if (!isCompressing() && mccpType() == 0)
+		return ReloadMccpDisableStatus::Succeeded;
+	return ReloadMccpDisableStatus::Pending;
+}
+
+void WorldRuntime::clearReloadMccpDisableForReload()
+{
+	m_reloadMccpDisableForReloadArmed = false;
+	m_reloadMccpDisableForReloadFatal = false;
+}
+
 bool WorldRuntime::requestMccpDisableForReload(const int timeoutMs)
 {
 	queueMccpDisableForReload();
+	const auto clearReloadMccpDisable = qScopeGuard([this] { clearReloadMccpDisableForReload(); });
+	if (reloadMccpDisableStatus() == ReloadMccpDisableStatus::Inactive)
+		return isMccpDisableCompleteForReload();
 
 	QElapsedTimer timer;
 	timer.start();
@@ -7664,10 +7691,10 @@ bool WorldRuntime::requestMccpDisableForReload(const int timeoutMs)
 	while (timer.elapsed() < boundedTimeoutMs)
 	{
 		QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-		if (isMccpDisableCompleteForReload())
-			return true;
+		if (reloadMccpDisableStatus() != ReloadMccpDisableStatus::Pending)
+			return reloadMccpDisableStatus() == ReloadMccpDisableStatus::Succeeded;
 	}
-	return isMccpDisableCompleteForReload();
+	return reloadMccpDisableStatus() == ReloadMccpDisableStatus::Succeeded;
 }
 
 void WorldRuntime::sendToWorld(const QByteArray &payload)

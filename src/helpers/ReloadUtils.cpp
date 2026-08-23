@@ -473,6 +473,34 @@ bool shouldAttemptReloadMccpDisable(const bool connected, const int socketDescri
 	return connected && socketDescriptor >= 0 && !tlsEnabled && mccpWasActive;
 }
 
+ReloadMccpDisableDecision resolveReloadMccpDisableStatus(const ReloadMccpDisableStatus status)
+{
+	ReloadMccpDisableDecision decision;
+	switch (status)
+	{
+	case ReloadMccpDisableStatus::Inactive:
+		decision.waitComplete = true;
+		decision.statusLabel  = "inactive";
+		break;
+	case ReloadMccpDisableStatus::Pending:
+		decision.statusLabel = "pending";
+		break;
+	case ReloadMccpDisableStatus::Succeeded:
+		decision.waitComplete      = true;
+		decision.snapshotSucceeded = true;
+		decision.statusLabel       = "succeeded";
+		break;
+	case ReloadMccpDisableStatus::Failed:
+		decision.waitComplete = true;
+		decision.statusLabel  = "failed";
+		decision.failureNote =
+		    QStringLiteral("MCCP shutdown encountered a fatal compression error during reload "
+		                   "preparation; the socket was preserved for startup reattach validation.");
+		break;
+	}
+	return decision;
+}
+
 ReloadWorldPolicyDecision computeReloadWorldPolicy(const ReloadWorldPolicyInput &input)
 {
 	ReloadWorldPolicyDecision decision;

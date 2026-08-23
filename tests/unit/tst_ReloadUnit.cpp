@@ -531,6 +531,37 @@ namespace
 				QVERIFY(!shouldAttemptReloadMccpDisable(true, 10, true, true));
 			}
 
+			void mccpDisableStatusMapsToReloadSnapshotAndWaitDecision()
+			{
+				const ReloadMccpDisableDecision inactive =
+				    resolveReloadMccpDisableStatus(ReloadMccpDisableStatus::Inactive);
+				QVERIFY(inactive.waitComplete);
+				QVERIFY(!inactive.snapshotSucceeded);
+				QCOMPARE(inactive.statusLabel, "inactive");
+				QVERIFY(inactive.failureNote.isEmpty());
+
+				const ReloadMccpDisableDecision pending =
+				    resolveReloadMccpDisableStatus(ReloadMccpDisableStatus::Pending);
+				QVERIFY(!pending.waitComplete);
+				QVERIFY(!pending.snapshotSucceeded);
+				QCOMPARE(pending.statusLabel, "pending");
+				QVERIFY(pending.failureNote.isEmpty());
+
+				const ReloadMccpDisableDecision succeeded =
+				    resolveReloadMccpDisableStatus(ReloadMccpDisableStatus::Succeeded);
+				QVERIFY(succeeded.waitComplete);
+				QVERIFY(succeeded.snapshotSucceeded);
+				QCOMPARE(succeeded.statusLabel, "succeeded");
+				QVERIFY(succeeded.failureNote.isEmpty());
+
+				const ReloadMccpDisableDecision failed =
+				    resolveReloadMccpDisableStatus(ReloadMccpDisableStatus::Failed);
+				QVERIFY(failed.waitComplete);
+				QVERIFY(!failed.snapshotSucceeded);
+				QCOMPARE(failed.statusLabel, "failed");
+				QVERIFY(failed.failureNote.contains(QStringLiteral("fatal compression error")));
+			}
+
 			void disconnectedWorldIsNotRecovered()
 			{
 				const ReloadWorldPolicyDecision decision =

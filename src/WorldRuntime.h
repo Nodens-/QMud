@@ -15,6 +15,7 @@
 #include "LuaExecutor.h"
 #include "MemoryImageDecodeCacheUtils.h"
 #include "MiniWindow.h"
+#include "ReloadUtils.h"
 #include "SqliteCompat.h"
 #include "TelnetProcessor.h"
 
@@ -392,6 +393,7 @@ class WorldRuntime : public QObject
 			eConnectConnectedToMud         = 8,
 			eConnectDisconnecting          = 9
 		};
+		using ReloadMccpDisableStatus = ::ReloadMccpDisableStatus;
 		/**
 		 * @brief Command mapping entry used by accelerator command routing.
 		 */
@@ -2698,153 +2700,163 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] bool isMccpDisableCompleteForReload() const;
 		/**
+		 * @brief Returns the current reload MCCP shutdown outcome.
+		 * @return Reload MCCP shutdown status.
+		 */
+		[[nodiscard]] ReloadMccpDisableStatus reloadMccpDisableStatus() const;
+		/**
+		 * @brief Disarms reload-specific fatal-inflate handling after preparation ends.
+		 */
+		void                                  clearReloadMccpDisableForReload();
+		/**
 		 * @brief Requests MCCP shutdown and waits briefly for compression to stop.
 		 * @param timeoutMs Maximum wait duration in milliseconds.
-		 * @return `true` when compression is inactive after the request.
+		 * @return `true` when MCCP was already inactive or shut down cleanly; `false` on timeout or a
+		 * fatal compression failure.
 		 */
-		[[nodiscard]] bool requestMccpDisableForReload(int timeoutMs);
+		[[nodiscard]] bool                    requestMccpDisableForReload(int timeoutMs);
 		/**
 		 * @brief Sends raw bytes to world socket.
 		 * @param payload Bytes to send.
 		 */
-		void               sendToWorld(const QByteArray &payload);
+		void                                  sendToWorld(const QByteArray &payload);
 		/**
 		 * @brief Increments sent-line counter.
 		 */
-		void               incrementLinesSent();
+		void                                  incrementLinesSent();
 		/**
 		 * @brief Returns total sent lines for current session.
 		 * @return Total sent line count.
 		 */
-		[[nodiscard]] int  totalLinesSent() const;
+		[[nodiscard]] int                     totalLinesSent() const;
 		/**
 		 * @brief Returns total received lines for current session.
 		 * @return Total received line count.
 		 */
-		[[nodiscard]] int  totalLinesReceived() const;
+		[[nodiscard]] int                     totalLinesReceived() const;
 		/**
 		 * @brief Returns unread/new line counter.
 		 * @return New line counter.
 		 */
-		[[nodiscard]] int  newLines() const;
+		[[nodiscard]] int                     newLines() const;
 		/**
 		 * @brief Sets unread/new line counter.
 		 * @param value New unread line counter value.
 		 */
-		void               setNewLines(int value);
+		void                                  setNewLines(int value);
 		/**
 		 * @brief Increments unread/new line counter.
 		 */
-		void               incrementNewLines();
+		void                                  incrementNewLines();
 		/**
 		 * @brief Resets unread/new line counter.
 		 */
-		void               clearNewLines();
+		void                                  clearNewLines();
 		/**
 		 * @brief Requests an ordered script-visible active/inactive transition.
 		 * @param active Mark runtime active when `true`.
 		 */
-		void               requestActiveState(bool active);
+		void                                  requestActiveState(bool active);
 		/**
 		 * @brief Returns active/inactive UI state.
 		 * @return `true` when runtime is active.
 		 */
-		[[nodiscard]] bool isActive() const;
+		[[nodiscard]] bool                    isActive() const;
 		/**
 		 * @brief Returns whether outstanding-line badges are suppressed.
 		 * @return `true` when outstanding-line badges are hidden.
 		 */
-		[[nodiscard]] bool doNotShowOutstandingLines() const;
+		[[nodiscard]] bool                    doNotShowOutstandingLines() const;
 		/**
 		 * @brief Sets current action source for command dispatch context.
 		 * @param source Action source code.
 		 */
-		void               setCurrentActionSource(unsigned short source);
+		void                                  setCurrentActionSource(unsigned short source);
 		/**
 		 * @brief Returns current action source code.
 		 * @return Current action source code.
 		 */
-		[[nodiscard]] unsigned short currentActionSource() const;
+		[[nodiscard]] unsigned short          currentActionSource() const;
 		/**
 		 * @brief Increments UTF-8 decode error counter.
 		 */
-		void                         incrementUtf8ErrorCount();
+		void                                  incrementUtf8ErrorCount();
 		/**
 		 * @brief Returns UTF-8 decode error counter.
 		 * @return UTF-8 error count.
 		 */
-		[[nodiscard]] int            utf8ErrorCount() const;
+		[[nodiscard]] int                     utf8ErrorCount() const;
 		/**
 		 * @brief Records last line number that ended with IAC-GA.
 		 * @param lineNumber Line number ending with IAC-GA.
 		 */
-		void                         setLastLineWithIacGa(int lineNumber);
+		void                                  setLastLineWithIacGa(int lineNumber);
 		/**
 		 * @brief Returns last line number that ended with IAC-GA.
 		 * @return Last IAC-GA line number.
 		 */
-		[[nodiscard]] int            lastLineWithIacGa() const;
+		[[nodiscard]] int                     lastLineWithIacGa() const;
 		/**
 		 * @brief Increments evaluated-trigger counter.
 		 */
-		void                         incrementTriggersEvaluated();
+		void                                  incrementTriggersEvaluated();
 		/**
 		 * @brief Increments matched-trigger counter.
 		 */
-		void                         incrementTriggersMatched();
+		void                                  incrementTriggersMatched();
 		/**
 		 * @brief Increments evaluated-alias counter.
 		 */
-		void                         incrementAliasesEvaluated();
+		void                                  incrementAliasesEvaluated();
 		/**
 		 * @brief Increments matched-alias counter.
 		 */
-		void                         incrementAliasesMatched();
+		void                                  incrementAliasesMatched();
 		/**
 		 * @brief Increments fired-timer counter.
 		 */
-		void                         incrementTimersFired();
+		void                                  incrementTimersFired();
 		/**
 		 * @brief Returns total evaluated triggers this session.
 		 * @return Evaluated trigger count.
 		 */
-		[[nodiscard]] int            triggersEvaluatedCount() const;
+		[[nodiscard]] int                     triggersEvaluatedCount() const;
 		/**
 		 * @brief Returns total matched triggers this session.
 		 * @return Matched trigger count.
 		 */
-		[[nodiscard]] int            triggersMatchedThisSession() const;
+		[[nodiscard]] int                     triggersMatchedThisSession() const;
 		/**
 		 * @brief Returns total evaluated aliases this session.
 		 * @return Evaluated alias count.
 		 */
-		[[nodiscard]] int            aliasesEvaluatedCount() const;
+		[[nodiscard]] int                     aliasesEvaluatedCount() const;
 		/**
 		 * @brief Returns total matched aliases this session.
 		 * @return Matched alias count.
 		 */
-		[[nodiscard]] int            aliasesMatchedThisSession() const;
+		[[nodiscard]] int                     aliasesMatchedThisSession() const;
 		/**
 		 * @brief Returns total fired timers this session.
 		 * @return Fired timer count.
 		 */
-		[[nodiscard]] int            timersFiredThisSession() const;
+		[[nodiscard]] int                     timersFiredThisSession() const;
 		/**
 		 * @brief Records timestamp of last user-entered command.
 		 * @param when Timestamp to store.
 		 */
-		void                         setLastUserInput(const QDateTime &when);
+		void                                  setLastUserInput(const QDateTime &when);
 		/**
 		 * @brief Returns timestamp of last user-entered command.
 		 * @return Last user input timestamp.
 		 */
-		[[nodiscard]] QDateTime      lastUserInput() const;
+		[[nodiscard]] QDateTime               lastUserInput() const;
 		/**
 		 * @brief Loads font file and tracks it for cleanup.
 		 * @param path Font file path.
 		 * @return API status code.
 		 */
-		int                          addFontFromFile(const QString &path);
+		int                                   addFontFromFile(const QString &path);
 		/**
 		 * @brief Validates and optionally loads a world foreground/background image file.
 		 * @param fileName Image file path.
@@ -2852,91 +2864,91 @@ class WorldRuntime : public QObject
 		 * @param storedName Optional normalized path storage.
 		 * @return API status code.
 		 */
-		[[nodiscard]] static int     loadWorldImageFile(const QString &fileName, QImage *target = nullptr,
-		                                                QString *storedName = nullptr);
+		[[nodiscard]] static int  loadWorldImageFile(const QString &fileName, QImage *target = nullptr,
+		                                             QString *storedName = nullptr);
 		/**
 		 * @brief Returns first loaded special-font path.
 		 * @return First special-font path.
 		 */
-		[[nodiscard]] QString        firstSpecialFontPath() const;
+		[[nodiscard]] QString     firstSpecialFontPath() const;
 		/**
 		 * @brief Adds mapper direction pair.
 		 * @param direction Forward direction command.
 		 * @param reverse Reverse direction command.
 		 * @return API status code.
 		 */
-		int                          addToMapper(const QString &direction, const QString &reverse);
+		int                       addToMapper(const QString &direction, const QString &reverse);
 		/**
 		 * @brief Adds mapper comment entry.
 		 * @param comment Comment text.
 		 * @return API status code.
 		 */
-		int                          addMapperComment(const QString &comment);
+		int                       addMapperComment(const QString &comment);
 		/**
 		 * @brief Checks whether mapper text contains characters reserved by MUSHclient map syntax.
 		 * @param text Mapper direction, reverse direction, or comment text.
 		 * @return True when the text contains a reserved mapper character.
 		 */
-		[[nodiscard]] static bool    containsReservedMapperCharacter(const QString &text);
+		[[nodiscard]] static bool containsReservedMapperCharacter(const QString &text);
 		/**
 		 * @brief Moves item to front of shift-tab completion list.
 		 * @param item Completion item text.
 		 * @return API status code.
 		 */
-		int                          shiftTabCompleteItem(const QString &item);
+		int                       shiftTabCompleteItem(const QString &item);
 		/**
 		 * @brief Checks whether a shift-tab completion item matches MUSHclient syntax.
 		 * @param item Completion item text.
 		 * @return True when the item is accepted.
 		 */
-		[[nodiscard]] static bool    isValidShiftTabCompleteItem(const QString &item);
+		[[nodiscard]] static bool isValidShiftTabCompleteItem(const QString &item);
 		/**
 		 * @brief Deletes latest mapper entry.
 		 * @return API status code.
 		 */
-		int                          deleteLastMapItem();
+		int                       deleteLastMapItem();
 		/**
 		 * @brief Clears mapper history.
 		 * @return API status code.
 		 */
-		int                          deleteAllMapItems();
+		int                       deleteAllMapItems();
 		/**
 		 * @brief Removes last output lines from buffer.
 		 * @param count Number of trailing lines to remove.
 		 */
-		void                         deleteLines(int count);
+		void                      deleteLines(int count);
 		/**
 		 * @brief Clears output line buffer.
 		 */
-		void                         deleteOutput();
+		void                      deleteOutput();
 		/**
 		 * @brief Deletes world variable by name.
 		 * @param name Variable name.
 		 * @return API status code.
 		 */
-		int                          deleteVariable(const QString &name);
+		int                       deleteVariable(const QString &name);
 		/**
 		 * @brief Clears queued commands and returns discarded count.
 		 * @return Number of discarded commands.
 		 */
-		[[nodiscard]] int            discardQueuedCommands() const;
+		[[nodiscard]] int         discardQueuedCommands() const;
 		/**
 		 * @brief Enables/disables mapper collection.
 		 * @param enabled Enable mapping collection when `true`.
 		 */
-		void                         setMappingEnabled(bool enabled);
+		void                      setMappingEnabled(bool enabled);
 		/**
 		 * @brief Expands speedwalk notation into commands.
 		 * @param speedWalkString Speedwalk text.
 		 * @return Expanded command sequence.
 		 */
-		[[nodiscard]] QString        evaluateSpeedwalk(const QString &speedWalkString) const;
+		[[nodiscard]] QString     evaluateSpeedwalk(const QString &speedWalkString) const;
 		/**
 		 * @brief Executes one command via command processor.
 		 * @param text Command text.
 		 * @return API status code.
 		 */
-		[[nodiscard]] int            executeCommand(const QString &text) const;
+		[[nodiscard]] int         executeCommand(const QString &text) const;
 		/**
 		 * @brief Executes one Send Now macro via command processor.
 		 *
@@ -2947,19 +2959,19 @@ class WorldRuntime : public QObject
 		 * @param history Add original macro text to history when `true`.
 		 * @return API status code.
 		 */
-		[[nodiscard]] int            executeUserMacroSendNow(const QString &text, bool history) const;
+		[[nodiscard]] int         executeUserMacroSendNow(const QString &text, bool history) const;
 		/**
 		 * @brief Executes one direct trigger-script command with priority over queued movement.
 		 * @param text Command text.
 		 * @return API status code.
 		 */
-		[[nodiscard]] int            executeCommandWithTriggerPriority(const QString &text) const;
+		[[nodiscard]] int         executeCommandWithTriggerPriority(const QString &text) const;
 		/**
 		 * @brief Gets MXP entity value.
 		 * @param name Entity name.
 		 * @return Entity value.
 		 */
-		[[nodiscard]] QString        getEntityValue(const QString &name) const;
+		[[nodiscard]] QString     getEntityValue(const QString &name) const;
 		/**
 		 * @brief Returns custom MXP entity definitions.
 		 * @return Custom entity values keyed by normalized entity name.
@@ -6167,6 +6179,8 @@ class WorldRuntime : public QObject
 		QList<TelnetProcessor::MxpEvent>                m_reloadReattachMxpProbeEvents;
 		QList<TelnetProcessor::MxpModeChange>           m_reloadReattachMxpProbeModeChanges;
 		quint64                                         m_reloadMccpProbeGeneration{0};
+		bool                                            m_reloadMccpDisableForReloadArmed{false};
+		bool                                            m_reloadMccpDisableForReloadFatal{false};
 		struct DeferredInboundCommand
 		{
 				QString        text;
