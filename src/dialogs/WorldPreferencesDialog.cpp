@@ -604,6 +604,56 @@ static void selectRowByIndex(QTableWidget *table, const int index)
 		selectRow(table, row);
 }
 
+/**
+ * @brief Resolves the displayed item to select after a rule is removed.
+ * @param table Sorted rule table carrying runtime-list indices in `Qt::UserRole`.
+ * @param tree Grouped rule tree carrying runtime-list indices in `Qt::UserRole`.
+ * @param treeMode Whether the grouped tree is the active presentation.
+ * @param removedIndex Runtime-list index of the rule being removed.
+ * @return Runtime-list index of the previous displayed rule, the next rule when removing the first,
+ * or `-1` when no rule remains in the relevant list or group.
+ */
+static int displayedRuleIndexAfterRemoval(const QTableWidget *table, const QTreeWidget *tree,
+                                          const bool treeMode, const int removedIndex)
+{
+	int selectedIndex = -1;
+	if (treeMode)
+	{
+		QTreeWidgetItem *current           = tree ? tree->currentItem() : nullptr;
+		QTreeWidgetItem *group             = current ? current->parent() : nullptr;
+		bool             currentIndexValid = false;
+		const int currentIndex = current ? current->data(0, Qt::UserRole).toInt(&currentIndexValid) : -1;
+		if (!group || !currentIndexValid || currentIndex != removedIndex)
+			return -1;
+		const int childIndex         = group->indexOfChild(current);
+		bool      selectedIndexValid = false;
+		if (childIndex > 0)
+			selectedIndex = group->child(childIndex - 1)->data(0, Qt::UserRole).toInt(&selectedIndexValid);
+		else if (group->childCount() > 1)
+			selectedIndex = group->child(1)->data(0, Qt::UserRole).toInt(&selectedIndexValid);
+		else
+			return -1;
+		if (!selectedIndexValid)
+			return -1;
+	}
+	else
+	{
+		const int row = selectedRow(table);
+		if (row < 0 || rowToIndex(table, row) != removedIndex)
+			return -1;
+		if (row > 0)
+			selectedIndex = rowToIndex(table, row - 1);
+		else if (table && table->rowCount() > 1)
+			selectedIndex = rowToIndex(table, 1);
+		else
+			return -1;
+		if (selectedIndex < 0)
+			return -1;
+	}
+
+	return selectedIndex > removedIndex ? selectedIndex - 1 : selectedIndex;
+}
+
 static int currentTreeIndex(const QTreeWidget *tree)
 {
 	if (!tree)
@@ -8467,11 +8517,14 @@ void WorldPreferencesDialog::buildUi()
 		        QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
 		        if (index >= aliases.size())
 			        return;
+		        const bool treeMode =
+		            m_aliasesViewStack && m_aliasesViewStack->currentWidget() == m_aliasesTree;
+		        const int selectionIndex =
+		            displayedRuleIndexAfterRemoval(m_aliasesTable, m_aliasesTree, treeMode, index);
 		        aliases.removeAt(index);
 		        m_runtime->setAliases(aliases);
 		        populateAliases();
-		        const int lastIndex = saturatingToInt(aliases.size()) - 1;
-		        selectRowByIndex(m_aliasesTable, std::min(index, lastIndex));
+		        selectRowByIndex(m_aliasesTable, selectionIndex);
 		        updateAliasControls();
 	        });
 	connect(m_moveAliasUpButton, &QPushButton::clicked, this,
@@ -8589,11 +8642,14 @@ void WorldPreferencesDialog::buildUi()
 		        QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
 		        if (index >= triggers.size())
 			        return;
+		        const bool treeMode =
+		            m_triggersViewStack && m_triggersViewStack->currentWidget() == m_triggersTree;
+		        const int selectionIndex =
+		            displayedRuleIndexAfterRemoval(m_triggersTable, m_triggersTree, treeMode, index);
 		        triggers.removeAt(index);
 		        m_runtime->setTriggers(triggers);
 		        populateTriggers();
-		        const int lastIndex = saturatingToInt(triggers.size()) - 1;
-		        selectRowByIndex(m_triggersTable, std::min(index, lastIndex));
+		        selectRowByIndex(m_triggersTable, selectionIndex);
 		        updateTriggerControls();
 	        });
 	connect(m_moveTriggerUpButton, &QPushButton::clicked, this,
@@ -8710,11 +8766,13 @@ void WorldPreferencesDialog::buildUi()
 		        QList<WorldRuntime::Timer> timers = m_runtime->timers();
 		        if (index >= timers.size())
 			        return;
+		        const bool treeMode = m_timersViewStack && m_timersViewStack->currentWidget() == m_timersTree;
+		        const int  selectionIndex =
+		            displayedRuleIndexAfterRemoval(m_timersTable, m_timersTree, treeMode, index);
 		        timers.removeAt(index);
 		        m_runtime->setTimers(timers);
 		        populateTimers();
-		        const int lastIndex = saturatingToInt(timers.size()) - 1;
-		        selectRowByIndex(m_timersTable, std::min(index, lastIndex));
+		        selectRowByIndex(m_timersTable, selectionIndex);
 		        updateTimerControls();
 	        });
 	connect(m_copyTimerButton, &QPushButton::clicked, this,

@@ -32,6 +32,7 @@
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStyleOptionSpinBox>
+#include <QTableWidget>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
@@ -93,6 +94,196 @@ namespace
 				return checkbox;
 		}
 		return nullptr;
+	}
+
+	enum class RuleKind
+	{
+		Trigger,
+		Alias,
+		Timer
+	};
+
+	struct RuleViewWidgets
+	{
+			QTableWidget *table{nullptr};
+			QTreeWidget  *tree{nullptr};
+			QPushButton  *removeButton{nullptr};
+	};
+
+	/**
+	 * @brief Returns the preferences page containing one rule kind.
+	 * @param kind Rule kind to resolve.
+	 * @return Corresponding preferences page.
+	 */
+	WorldPreferencesDialog::Page rulePage(const RuleKind kind)
+	{
+		switch (kind)
+		{
+		case RuleKind::Trigger:
+			return WorldPreferencesDialog::PageTriggers;
+		case RuleKind::Alias:
+			return WorldPreferencesDialog::PageAliases;
+		case RuleKind::Timer:
+			return WorldPreferencesDialog::PageTimers;
+		}
+		return WorldPreferencesDialog::PageTriggers;
+	}
+
+	/**
+	 * @brief Returns the first-column heading identifying one rule table.
+	 * @param kind Rule kind to resolve.
+	 * @return Exact first-column heading.
+	 */
+	QString ruleTableHeading(const RuleKind kind)
+	{
+		switch (kind)
+		{
+		case RuleKind::Trigger:
+			return QStringLiteral("Trigger");
+		case RuleKind::Alias:
+			return QStringLiteral("Alias");
+		case RuleKind::Timer:
+			return QStringLiteral("Type");
+		}
+		return {};
+	}
+
+	/**
+	 * @brief Returns the column carrying the sortable display value for one rule kind.
+	 * @param kind Rule kind to resolve.
+	 * @return Display-value column.
+	 */
+	int ruleDisplayColumn(const RuleKind kind)
+	{
+		return kind == RuleKind::Timer ? 1 : 0;
+	}
+
+	/**
+	 * @brief Locates the table, grouped tree, and remove button for one rule page.
+	 * @param dialog Preferences dialog to inspect.
+	 * @param kind Rule kind to locate.
+	 * @return Located widgets; unavailable entries remain null.
+	 */
+	RuleViewWidgets findRuleViewWidgets(const WorldPreferencesDialog &dialog, const RuleKind kind)
+	{
+		RuleViewWidgets result;
+		for (QTableWidget *table : dialog.findChildren<QTableWidget *>())
+		{
+			if (!table || !table->horizontalHeaderItem(0) ||
+			    table->horizontalHeaderItem(0)->text() != ruleTableHeading(kind))
+				continue;
+			result.table = table;
+			break;
+		}
+		if (!result.table)
+			return result;
+
+		auto *stack = qobject_cast<QStackedWidget *>(result.table->parentWidget());
+		if (!stack)
+			return result;
+		result.tree   = stack->findChild<QTreeWidget *>(QString(), Qt::FindDirectChildrenOnly);
+		QWidget *page = stack->parentWidget();
+		if (!page)
+			return result;
+		for (QPushButton *button : page->findChildren<QPushButton *>())
+		{
+			if (button && button->text() == QStringLiteral("&Remove"))
+			{
+				result.removeButton = button;
+				break;
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * @brief Finds a grouped rule-tree parent by its exact group name.
+	 * @param tree Tree to search.
+	 * @param groupName Group name to match.
+	 * @return Matching group item, or `nullptr` when absent.
+	 */
+	QTreeWidgetItem *findRuleGroup(const QTreeWidget &tree, const QString &groupName)
+	{
+		for (int index = 0; index < tree.topLevelItemCount(); ++index)
+		{
+			QTreeWidgetItem *group = tree.topLevelItem(index);
+			if (group && group->text(0) == groupName)
+				return group;
+		}
+		return nullptr;
+	}
+
+	/**
+	 * @brief Populates one runtime with deliberately storage-unsorted rule fixtures.
+	 * @param runtime Runtime receiving the fixtures.
+	 * @param kind Rule kind to populate.
+	 * @param treeMode Enable grouped tree presentation when `true`.
+	 * @param includeSoleGroup Add a second group containing one rule when `true`.
+	 */
+	void populateRuleSelectionFixtures(WorldRuntime &runtime, const RuleKind kind, const bool treeMode,
+	                                   const bool includeSoleGroup)
+	{
+		const QString treeValue = treeMode ? QStringLiteral("1") : QStringLiteral("0");
+		switch (kind)
+		{
+		case RuleKind::Trigger:
+		{
+			auto makeTrigger = [](const QString &match, const QString &group)
+			{
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("match"), match);
+				trigger.attributes.insert(QStringLiteral("group"), group);
+				return trigger;
+			};
+			QList<WorldRuntime::Trigger> triggers = {
+			    makeTrigger(QStringLiteral("Mike"), QStringLiteral("primary")),
+			    makeTrigger(QStringLiteral("Zulu"), QStringLiteral("primary")),
+			    makeTrigger(QStringLiteral("Alpha"), QStringLiteral("primary"))};
+			if (includeSoleGroup)
+				triggers.push_back(makeTrigger(QStringLiteral("Only"), QStringLiteral("sole")));
+			runtime.setTriggers(triggers);
+			runtime.setWorldAttribute(QStringLiteral("treeview_triggers"), treeValue);
+			break;
+		}
+		case RuleKind::Alias:
+		{
+			auto makeAlias = [](const QString &match, const QString &group)
+			{
+				WorldRuntime::Alias alias;
+				alias.attributes.insert(QStringLiteral("match"), match);
+				alias.attributes.insert(QStringLiteral("group"), group);
+				return alias;
+			};
+			QList<WorldRuntime::Alias> aliases = {
+			    makeAlias(QStringLiteral("Mike"), QStringLiteral("primary")),
+			    makeAlias(QStringLiteral("Zulu"), QStringLiteral("primary")),
+			    makeAlias(QStringLiteral("Alpha"), QStringLiteral("primary"))};
+			if (includeSoleGroup)
+				aliases.push_back(makeAlias(QStringLiteral("Only"), QStringLiteral("sole")));
+			runtime.setAliases(aliases);
+			runtime.setWorldAttribute(QStringLiteral("treeview_aliases"), treeValue);
+			break;
+		}
+		case RuleKind::Timer:
+		{
+			auto makeTimer = [](const int hour, const QString &group)
+			{
+				WorldRuntime::Timer timer;
+				timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("1"));
+				timer.attributes.insert(QStringLiteral("hour"), QString::number(hour));
+				timer.attributes.insert(QStringLiteral("group"), group);
+				return timer;
+			};
+			QList<WorldRuntime::Timer> timers = {makeTimer(12, QStringLiteral("primary")),
+			                                     makeTimer(18, QStringLiteral("primary")),
+			                                     makeTimer(6, QStringLiteral("primary"))};
+			if (includeSoleGroup)
+				timers.push_back(makeTimer(23, QStringLiteral("sole")));
+			runtime.setTimers(timers);
+			runtime.setWorldAttribute(QStringLiteral("treeview_timers"), treeValue);
+			break;
+		}
+		}
 	}
 
 	/**
@@ -908,6 +1099,105 @@ namespace
 				dialog.accept();
 
 				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("legacy_encoding")), targetEncoding);
+			}
+
+			void ruleRemovalUsesAdjacentItemInDisplayedSortOrder()
+			{
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					WorldRuntime runtime;
+					populateRuleSelectionFixtures(runtime, kind, false, false);
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(rulePage(kind));
+					const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+					QVERIFY(widgets.table);
+					QVERIFY(widgets.tree);
+					QVERIFY(widgets.removeButton);
+					QCOMPARE(widgets.table->rowCount(), 3);
+
+					const int     displayColumn    = ruleDisplayColumn(kind);
+					const QString expectedPrevious = widgets.table->item(0, displayColumn)->text();
+					widgets.table->setCurrentCell(1, 0);
+					QVERIFY(widgets.removeButton->isEnabled());
+					widgets.removeButton->click();
+
+					QCOMPARE(widgets.table->rowCount(), 2);
+					QCOMPARE(widgets.table->currentRow(), 0);
+					QCOMPARE(widgets.table->item(widgets.table->currentRow(), displayColumn)->text(),
+					         expectedPrevious);
+
+					const QString expectedNext = widgets.table->item(1, displayColumn)->text();
+					widgets.removeButton->click();
+					QCOMPARE(widgets.table->rowCount(), 1);
+					QCOMPARE(widgets.table->currentRow(), 0);
+					QCOMPARE(widgets.table->item(widgets.table->currentRow(), displayColumn)->text(),
+					         expectedNext);
+
+					QVERIFY(widgets.removeButton->isEnabled());
+					widgets.removeButton->click();
+					QCOMPARE(widgets.table->rowCount(), 0);
+					QCOMPARE(widgets.table->currentRow(), -1);
+					QVERIFY(widgets.table->selectedItems().isEmpty());
+				}
+			}
+
+			void groupedRuleRemovalUsesSortedSiblingAndNotAnotherGroup()
+			{
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					WorldRuntime runtime;
+					populateRuleSelectionFixtures(runtime, kind, true, true);
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(rulePage(kind));
+					const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+					QVERIFY(widgets.table);
+					QVERIFY(widgets.tree);
+					QVERIFY(widgets.removeButton);
+
+					QTreeWidgetItem *primaryGroup = findRuleGroup(*widgets.tree, QStringLiteral("primary"));
+					QVERIFY(primaryGroup);
+					QCOMPARE(primaryGroup->childCount(), 3);
+					primaryGroup->setExpanded(true);
+					const QString expectedPrevious = primaryGroup->child(0)->text(0);
+					widgets.tree->setCurrentItem(primaryGroup->child(1));
+					QVERIFY(widgets.removeButton->isEnabled());
+					widgets.removeButton->click();
+
+					primaryGroup = findRuleGroup(*widgets.tree, QStringLiteral("primary"));
+					QVERIFY(primaryGroup);
+					QCOMPARE(primaryGroup->childCount(), 2);
+					QVERIFY(widgets.tree->currentItem());
+					QCOMPARE(widgets.tree->currentItem()->parent(), primaryGroup);
+					QCOMPARE(widgets.tree->currentItem()->text(0), expectedPrevious);
+					const QString expectedNext = primaryGroup->child(1)->text(0);
+					widgets.removeButton->click();
+
+					primaryGroup = findRuleGroup(*widgets.tree, QStringLiteral("primary"));
+					QVERIFY(primaryGroup);
+					QCOMPARE(primaryGroup->childCount(), 1);
+					QVERIFY(widgets.tree->currentItem());
+					QCOMPARE(widgets.tree->currentItem()->parent(), primaryGroup);
+					QCOMPARE(widgets.tree->currentItem()->text(0), expectedNext);
+					widgets.removeButton->click();
+
+					QVERIFY(!findRuleGroup(*widgets.tree, QStringLiteral("primary")));
+					QVERIFY(!widgets.tree->currentItem());
+					QVERIFY(widgets.table->selectedItems().isEmpty());
+
+					QTreeWidgetItem *soleGroup = findRuleGroup(*widgets.tree, QStringLiteral("sole"));
+					QVERIFY(soleGroup);
+					QCOMPARE(soleGroup->childCount(), 1);
+					soleGroup->setExpanded(true);
+					widgets.tree->setCurrentItem(soleGroup->child(0));
+					QVERIFY(widgets.removeButton->isEnabled());
+					widgets.removeButton->click();
+
+					QVERIFY(!findRuleGroup(*widgets.tree, QStringLiteral("sole")));
+					QVERIFY(!widgets.tree->currentItem());
+					QVERIFY(widgets.table->selectedItems().isEmpty());
+				}
 			}
 
 			void scriptingNoteColourApplyUpdatesRuntimeState()
