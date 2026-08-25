@@ -12,6 +12,8 @@
 #include "helpers/LuaExecutionUtils.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QCoreApplication>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QScopeGuard>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QPointer>
@@ -19,8 +21,9 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 // ReSharper disable once CppUnusedIncludeDirective
-#include <QTemporaryDir>
 #include <QThread>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QUuid>
 #include <QtTest/QTest>
 
 #include <array>
@@ -34,28 +37,7 @@
 #include <type_traits>
 #include <vector>
 
-extern "C" int         luaopen_lsqlite3(lua_State *L);
-
-LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest &request) const
-{
-	LuaBatchDispatchResult result{};
-	if (request.kind == LuaBatchDispatchKind::HasFunction)
-	{
-		result.hasFunction      = false;
-		result.hasFunctionValid = true;
-	}
-	return result;
-}
-
-void ILuaExecutor::dispatchBatchAsync(
-    const LuaBatchDispatchRequest &request, QObject *completionTarget,
-    const std::function<void(const LuaBatchDispatchResult &)> &completion) const
-{
-	if (!completion)
-		return;
-	const LuaCompletionTarget target = qmudCaptureLuaCompletionTarget(completionTarget);
-	qmudDeliverLuaCompletion(target, completion, dispatchBatch(request));
-}
+extern "C" int luaopen_lsqlite3(lua_State *L);
 
 namespace
 {
@@ -358,20 +340,20 @@ namespace
 				std::atomic_bool innerOnMain{false};
 
 				const bool       invokeOk = qmudLuaBridgeInvokeOnObjectThread(
-				    &workerTarget,
-				    [&]()
-				    {
-					    outerInvoked.store(true);
-					    outerOnWorker.store(QThread::currentThread() == &workerThread);
-					    const bool innerOk = qmudLuaBridgeInvokeOnObjectThread(
-					        &mainTarget,
-					        [&]()
-					        {
-						        innerInvoked.store(true);
-						        innerOnMain.store(QThread::currentThread() == mainThread);
-					        });
-					    nestedInvokeOk.store(innerOk);
-				    });
+                    &workerTarget,
+                    [&]()
+                    {
+                        outerInvoked.store(true);
+                        outerOnWorker.store(QThread::currentThread() == &workerThread);
+                        const bool innerOk = qmudLuaBridgeInvokeOnObjectThread(
+                            &mainTarget,
+                            [&]()
+                            {
+                                innerInvoked.store(true);
+                                innerOnMain.store(QThread::currentThread() == mainThread);
+                            });
+                        nestedInvokeOk.store(innerOk);
+                    });
 
 				QVERIFY(invokeOk);
 				QVERIFY(outerInvoked.load());
@@ -443,29 +425,29 @@ namespace
 				bool innerInvokeOk = false;
 				bool waitSucceeded = false;
 				outerInvokeOk      = qmudLuaBridgeInvokeOnObjectThread(
-				    &workerTarget,
-				    [&]()
-				    {
-					    innerInvokeOk = qmudLuaBridgeInvokeOnObjectThread(
-					        &mainTarget,
-					        [&]()
-					        {
-						        {
-							        std::lock_guard lock(workMutex);
-							        workQueue.emplace_back(
-							            [&]()
-							            {
-								            std::lock_guard doneLock(doneMutex);
-								            workDone = true;
-								            doneCv.notify_all();
-							            });
-						        }
-						        qmudLuaBridgeNotifyThreadWake(&workerThread);
-						        std::unique_lock waitLock(doneMutex);
-						        waitSucceeded = doneCv.wait_for(waitLock, std::chrono::milliseconds(1000),
-						                                        [&]() { return workDone; });
-					        });
-				    });
+                    &workerTarget,
+                    [&]()
+                    {
+                        innerInvokeOk = qmudLuaBridgeInvokeOnObjectThread(
+                            &mainTarget,
+                            [&]()
+                            {
+                                {
+                                    std::lock_guard lock(workMutex);
+                                    workQueue.emplace_back(
+                                        [&]()
+                                        {
+                                            std::lock_guard doneLock(doneMutex);
+                                            workDone = true;
+                                            doneCv.notify_all();
+                                        });
+                                }
+                                qmudLuaBridgeNotifyThreadWake(&workerThread);
+                                std::unique_lock waitLock(doneMutex);
+                                waitSucceeded = doneCv.wait_for(waitLock, std::chrono::milliseconds(1000),
+						                                             [&]() { return workDone; });
+                            });
+                    });
 
 				QVERIFY(outerInvokeOk);
 				QVERIFY(innerInvokeOk);
@@ -552,25 +534,25 @@ namespace
 				std::mutex      orderMutex;
 				std::deque<int> order;
 				const bool      invokeOk = qmudLuaBridgeInvokeOnObjectThread(
-				    &workerTarget,
-				    [&]()
-				    {
-					    const bool innerOk = qmudLuaBridgeInvokeOnObjectThread(
-					        &mainTarget,
-					        [&]()
-					        {
-						        executor.dispatchBatchAsync(asyncRequest, nullptr,
-						                                    [&](const LuaBatchDispatchResult &)
-						                                    {
-							                                    std::scoped_lock lock(orderMutex);
-							                                    order.push_back(1);
-						                                    });
-						        static_cast<void>(executor.dispatchBatch(syncRequest));
-						        std::scoped_lock lock(orderMutex);
-						        order.push_back(2);
-					        });
-					    QVERIFY(innerOk);
-				    });
+                    &workerTarget,
+                    [&]()
+                    {
+                        const bool innerOk = qmudLuaBridgeInvokeOnObjectThread(
+                            &mainTarget,
+                            [&]()
+                            {
+                                executor.dispatchBatchAsync(asyncRequest, nullptr,
+						                                         [&](const LuaBatchDispatchResult &)
+						                                         {
+                                                                std::scoped_lock lock(orderMutex);
+                                                                order.push_back(1);
+                                                            });
+                                static_cast<void>(executor.dispatchBatch(syncRequest));
+                                std::scoped_lock lock(orderMutex);
+                                order.push_back(2);
+                            });
+                        QVERIFY(innerOk);
+                    });
 				QVERIFY(invokeOk);
 
 				QTRY_VERIFY_WITH_TIMEOUT(
@@ -921,25 +903,25 @@ namespace
 
 				std::atomic_bool        firstInvokeOk{false};
 				std::thread             firstCaller(
-				    [&]()
-				    {
-					    firstInvokeOk.store(qmudLuaBridgeInvokeOnObjectThread(target.data(),
-					                                                          [&]()
-					                                                          {
-						                                                          {
-							                                                          std::lock_guard lock(
-							                                                              gateMutex);
-							                                                          firstEntered = true;
-						                                                          }
-						                                                          gateCv.notify_all();
-						                                                          QThread::msleep(100);
-						                                                          if (target)
-						                                                          {
-							                                                          delete target.data();
-							                                                          target.clear();
-						                                                          }
-					                                                          }));
-				    });
+                    [&]()
+                    {
+                        firstInvokeOk.store(qmudLuaBridgeInvokeOnObjectThread(target.data(),
+					                                                                      [&]()
+					                                                                      {
+                                                                                  {
+                                                                                      std::lock_guard lock(
+                                                                                          gateMutex);
+                                                                                      firstEntered = true;
+                                                                                  }
+                                                                                  gateCv.notify_all();
+                                                                                  QThread::msleep(100);
+                                                                                  if (target)
+                                                                                  {
+                                                                                      delete target.data();
+                                                                                      target.clear();
+                                                                                  }
+                                                                              }));
+                    });
 
 				{
 					std::unique_lock lock(gateMutex);
@@ -948,7 +930,7 @@ namespace
 
 				std::atomic_bool secondCallbackInvoked{false};
 				const bool       secondInvokeOk = qmudLuaBridgeInvokeOnObjectThread(
-				    target.data(), [&]() { secondCallbackInvoked.store(true); });
+                    target.data(), [&]() { secondCallbackInvoked.store(true); });
 
 				firstCaller.join();
 
@@ -1064,19 +1046,19 @@ namespace
 				std::atomic_bool        invokeBSuccess{false};
 
 				std::thread             callerA(
-				    [&]()
-				    {
-					    static_cast<void>(qmudLuaBridgeInvokeOnObjectThread(nullptr, [] {}));
-					    errorA1 = qmudLuaBridgeLastError();
-					    {
-						    std::lock_guard lock(gateMutex);
-						    aFailed = true;
-					    }
-					    gateCv.notify_all();
-					    std::unique_lock lock(gateMutex);
-					    gateCv.wait(lock, [&] { return bDone; });
-					    errorA2 = qmudLuaBridgeLastError();
-				    });
+                    [&]()
+                    {
+                        static_cast<void>(qmudLuaBridgeInvokeOnObjectThread(nullptr, [] {}));
+                        errorA1 = qmudLuaBridgeLastError();
+                        {
+                            std::lock_guard lock(gateMutex);
+                            aFailed = true;
+                        }
+                        gateCv.notify_all();
+                        std::unique_lock lock(gateMutex);
+                        gateCv.wait(lock, [&] { return bDone; });
+                        errorA2 = qmudLuaBridgeLastError();
+                    });
 
 				std::thread callerB(
 				    [&]()
@@ -2003,10 +1985,13 @@ namespace
 
 			void sqliteFileWritePersistsAfterLuaStateShutdown()
 			{
-				QTemporaryDir tempDir(
-				    QDir::current().filePath(QStringLiteral("tst_LuaExecution_sqlite_XXXXXX")));
-				QVERIFY(tempDir.isValid());
-				const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("plugin_state.sqlite"));
+				const QString artifactDirectory =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("test-artifacts/tst_LuaExecution/%1")
+				                      .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+				QVERIFY(QDir().mkpath(artifactDirectory));
+				const QString dbPath =
+				    QDir(artifactDirectory).filePath(QStringLiteral("plugin_state.sqlite"));
 
 				{
 					LuaStateOwner state = makeCompatLuaState();

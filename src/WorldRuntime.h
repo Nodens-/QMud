@@ -79,6 +79,7 @@ class WorldRuntime : public QObject
 		friend class WorldView;
 		class ChatConnection;
 		friend class ChatConnection;
+		friend class tst_LuaCallbackEngine;
 		friend class tst_WorldRuntime_SoundLifetime;
 		friend class tst_WorldRuntime_PluginLifecycle;
 
@@ -6006,6 +6007,7 @@ class WorldRuntime : public QObject
 				QMap<QString, QString>    worldAttributes;
 				QMap<QString, QString>    worldMultilineAttributes;
 				QList<Include>            includes;
+				QList<Script>             scripts;
 				QList<Trigger>            triggers;
 				QList<Alias>              aliases;
 				QList<Timer>              timers;

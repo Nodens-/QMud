@@ -8,40 +8,95 @@
 
 #include "AppController.h"
 #include "MainFrame.h"
-// ReSharper disable once CppUnusedIncludeDirective
-#include "NameGeneration.h"
 #include "WorldChildWindow.h"
-#include "WorldDocument.h"
 #include "WorldRuntime.h"
 #include "dialogs/ImportXmlDialog.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QCoreApplication>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDir>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QTimer>
 #include <QtTest/QTest>
 
 namespace
 {
-	struct ImportStubState
+	/**
+	 * @brief Captures and dismisses modal import results so GUI tests cannot block.
+	 */
+	class MessageBoxObserver final : public QObject
 	{
-			bool          importTextOk{true};
-			unsigned long lastMask{0};
-			int           importTextCallCount{0};
+		public:
+			/**
+			 * @brief Returns the first captured message-box text.
+			 * @return Captured text, or an empty string when no message box appeared.
+			 */
+			[[nodiscard]] QString message() const
+			{
+				return m_message;
+			}
+
+			/**
+			 * @brief Captures message text and queues rejection of the modal dialog.
+			 * @param watched Object receiving the event.
+			 * @param event Event delivered to the watched object.
+			 * @return Base event-filter result.
+			 */
+			bool eventFilter(QObject *watched, QEvent *event) override
+			{
+				if (event && event->type() == QEvent::Show)
+				{
+					if (auto *messageBox = qobject_cast<QMessageBox *>(watched))
+					{
+						if (m_message.isEmpty())
+							m_message = messageBox->text();
+						QMetaObject::invokeMethod(messageBox, &QDialog::reject, Qt::QueuedConnection);
+					}
+				}
+				return QObject::eventFilter(watched, event);
+			}
+
+		private:
+			QString m_message;
 	};
 
-	ImportStubState &stubState()
+	/**
+	 * @brief Production application/window/runtime harness for XML imports.
+	 */
+	struct ActiveWorldHarness
 	{
-		static ImportStubState state;
-		return state;
-	}
+			/**
+			 * @brief Creates and activates a production world presentation.
+			 */
+			ActiveWorldHarness()
+			{
+				app.setMainWindow(&frame);
+				runtime = new WorldRuntime(&frame);
+				runtime->setStartupDirectory(QDir::currentPath());
+				child = new WorldChildWindow(QStringLiteral("Import Test"));
+				child->setRuntime(runtime);
+				frame.addMdiSubWindow(child, true);
+				QCoreApplication::processEvents();
+			}
 
-	QList<WorldRuntime::Plugin> &pluginStubStorage()
-	{
-		static QList<WorldRuntime::Plugin> plugins;
-		return plugins;
-	}
+			/**
+			 * @brief Detaches the runtime before the owning frame destroys its children.
+			 */
+			~ActiveWorldHarness()
+			{
+				if (child)
+					child->setRuntime(nullptr);
+			}
+
+			AppController     app;
+			MainWindow        frame;
+			WorldRuntime     *runtime{nullptr};
+			WorldChildWindow *child{nullptr};
+	};
 
 	QPushButton *findButtonByText(const QObject &root, const QString &text)
 	{
@@ -65,152 +120,7 @@ namespace
 		return nullptr;
 	}
 
-	void closeAnyMessageBoxSoon()
-	{
-		QTimer::singleShot(0,
-		                   []
-		                   {
-			                   for (QWidget *widget : QApplication::topLevelWidgets())
-			                   {
-				                   if (auto *box = qobject_cast<QMessageBox *>(widget))
-					                   box->accept();
-			                   }
-		                   });
-	}
 } // namespace
-
-// NOLINTBEGIN(readability-convert-member-functions-to-static)
-AppController::AppController(QObject *parent) : QObject(parent)
-{
-}
-
-AppController::~AppController() = default;
-
-AppController *AppController::instance()
-{
-	static AppController app;
-	return &app;
-}
-
-QString AppController::iniFilePath() const
-{
-	return QStringLiteral("/tmp/qmud-test-import-xml.ini");
-}
-
-MainWindow *AppController::mainWindow() const
-{
-	return nullptr;
-}
-
-void AppController::changeToFileBrowsingDirectory() const
-{
-}
-
-void AppController::changeToStartupDirectory() const
-{
-}
-
-AppController::ImportResult AppController::importXmlFromFile(const QString &, unsigned long)
-{
-	return {};
-}
-
-AppController::ImportResult AppController::importXmlFromText(const QString &, unsigned long mask)
-{
-	auto &state = stubState();
-	++state.importTextCallCount;
-	state.lastMask = mask;
-
-	ImportResult result;
-	result.ok           = state.importTextOk;
-	result.errorMessage = state.importTextOk ? QString() : QStringLiteral("Synthetic import failure");
-	result.triggers     = 2;
-	result.aliases      = 1;
-	result.timers       = 0;
-	result.macros       = 0;
-	result.variables    = 0;
-	result.colours      = 0;
-	result.keypad       = 0;
-	result.printing     = 0;
-	result.duplicates   = 0;
-	return result;
-}
-
-void AppController::onCommandTriggered(const QString &)
-{
-}
-
-bool AppController::openDocumentFile(const QString &)
-{
-	return true;
-}
-
-WorldChildWindow *MainWindow::activeWorldChildWindow() const
-{
-	return nullptr;
-}
-
-WorldRuntime *WorldChildWindow::runtime() const
-{
-	return nullptr;
-}
-
-bool MainWindow::sendToNotepad(const QString &, const QString &, WorldRuntime *)
-{
-	return true;
-}
-
-const QMap<QString, QString> &WorldRuntime::worldAttributes() const
-{
-	static const QMap<QString, QString> attributes;
-	return attributes;
-}
-
-const QList<WorldRuntime::Plugin> &WorldRuntime::plugins() const
-{
-	return pluginStubStorage();
-}
-
-QList<WorldRuntime::Plugin> &WorldRuntime::pluginsMutable()
-{
-	return pluginStubStorage();
-}
-
-QStringList WorldRuntime::pluginIdList() const
-{
-	return {};
-}
-
-bool WorldRuntime::loadPluginFile(const QString &, QString *, bool)
-{
-	return false;
-}
-
-bool WorldRuntime::unloadPlugin(const QString &, QString *)
-{
-	return false;
-}
-
-bool WorldRuntime::enablePlugin(const QString &, bool)
-{
-	return false;
-}
-
-int WorldRuntime::reloadPlugin(const QString &, QString *)
-{
-	return 0;
-}
-
-QString WorldRuntime::pluginsDirectory() const
-{
-	return {};
-}
-
-QString WorldRuntime::stateFilesDirectory() const
-{
-	return {};
-}
-// NOLINTEND(readability-convert-member-functions-to-static)
 
 namespace
 {
@@ -223,12 +133,31 @@ namespace
 
 			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
+			void initTestCase()
+			{
+				m_originalCurrentPath = QDir::currentPath();
+				m_hadOriginalTmpDir   = qEnvironmentVariableIsSet("TMPDIR");
+				m_originalTmpDir      = qgetenv("TMPDIR");
+				const QString artifactDirectory =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("test-artifacts/tst_Dialog_ImportXml/%1")
+				                      .arg(QCoreApplication::applicationPid()));
+				QVERIFY(QDir().mkpath(artifactDirectory));
+				QVERIFY(QDir::setCurrent(artifactDirectory));
+				QVERIFY(qputenv("TMPDIR", artifactDirectory.toUtf8()));
+			}
+
+			void cleanupTestCase() const
+			{
+				if (m_hadOriginalTmpDir)
+					QVERIFY(qputenv("TMPDIR", m_originalTmpDir));
+				else
+					qunsetenv("TMPDIR");
+				QVERIFY(QDir::setCurrent(m_originalCurrentPath));
+			}
+
 			void clipboardButtonTracksXmlValidity()
 			{
-				auto &state               = stubState();
-				state.importTextCallCount = 0;
-				state.lastMask            = 0;
-
 				QClipboard *clipboard = QGuiApplication::clipboard();
 				QVERIFY(clipboard);
 
@@ -256,17 +185,24 @@ namespace
 
 			void importClipboardAcceptsOnSuccessAndUsesMask()
 			{
-				auto &state               = stubState();
-				state.importTextOk        = true;
-				state.importTextCallCount = 0;
-				state.lastMask            = 0;
-
 				QClipboard *clipboard = QGuiApplication::clipboard();
 				QVERIFY(clipboard);
-				clipboard->setText(QStringLiteral("<?xml version=\"1.0\"?><triggers></triggers>"));
+				clipboard->setText(QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<qmud>
+  <triggers>
+    <trigger name="first" match="^first$"><send>one</send></trigger>
+    <trigger name="second" match="^second$"><send>two</send></trigger>
+  </triggers>
+  <aliases>
+    <alias name="alias_one" match="^alias$"><send>alias</send></alias>
+  </aliases>
+  <timers>
+    <timer name="unchecked_timer" hour="0" minute="1" second="0"><send>timer</send></timer>
+  </timers>
+</qmud>)xml"));
 
-				AppController   app;
-				ImportXmlDialog dialog(&app);
+				ActiveWorldHarness harness;
+				ImportXmlDialog    dialog(&harness.app);
 				dialog.show();
 
 				QCheckBox *triggers = findCheckBoxByText(dialog, QStringLiteral("Triggers"));
@@ -276,41 +212,48 @@ namespace
 				triggers->setChecked(true);
 				aliases->setChecked(true);
 
-				closeAnyMessageBoxSoon();
+				MessageBoxObserver messageObserver;
+				QApplication::instance()->installEventFilter(&messageObserver);
 				QVERIFY(QMetaObject::invokeMethod(&dialog, "onImportClipboard", Qt::DirectConnection));
+				QApplication::instance()->removeEventFilter(&messageObserver);
 
-				QCOMPARE(state.importTextCallCount, 1);
-				QCOMPARE(state.lastMask, WorldDocument::XML_TRIGGERS | WorldDocument::XML_ALIASES);
+				QVERIFY(!messageObserver.message().isEmpty());
+				QCOMPARE(harness.runtime->triggers().size(), 2);
+				QCOMPARE(harness.runtime->aliases().size(), 1);
+				QVERIFY(harness.runtime->timers().isEmpty());
 				QCOMPARE(dialog.result(), static_cast<int>(QDialog::Accepted));
 			}
 
 			void importClipboardFailureDoesNotAcceptDialog()
 			{
-				auto &state               = stubState();
-				state.importTextOk        = false;
-				state.importTextCallCount = 0;
-				state.lastMask            = 0;
-
 				QClipboard *clipboard = QGuiApplication::clipboard();
 				QVERIFY(clipboard);
-				clipboard->setText(QStringLiteral("<?xml version=\"1.0\"?><aliases></aliases>"));
+				clipboard->setText(
+				    QStringLiteral("<?xml version=\"1.0\"?><qmud><aliases><alias name=\"broken\">"));
 
-				AppController   app;
-				ImportXmlDialog dialog(&app);
+				ActiveWorldHarness harness;
+				ImportXmlDialog    dialog(&harness.app);
 				dialog.show();
 
 				QCheckBox *aliases = findCheckBoxByText(dialog, QStringLiteral("Aliases"));
 				QVERIFY(aliases);
 				aliases->setChecked(true);
 
-				closeAnyMessageBoxSoon();
+				MessageBoxObserver messageObserver;
+				QApplication::instance()->installEventFilter(&messageObserver);
 				QVERIFY(QMetaObject::invokeMethod(&dialog, "onImportClipboard", Qt::DirectConnection));
+				QApplication::instance()->removeEventFilter(&messageObserver);
 
-				QCOMPARE(state.importTextCallCount, 1);
-				QCOMPARE(state.lastMask, WorldDocument::XML_ALIASES);
+				QVERIFY(!messageObserver.message().isEmpty());
+				QVERIFY(harness.runtime->aliases().isEmpty());
 				QVERIFY(dialog.result() != static_cast<int>(QDialog::Accepted));
 			}
 			// NOLINTEND(readability-convert-member-functions-to-static)
+
+		private:
+			QString    m_originalCurrentPath;
+			QByteArray m_originalTmpDir;
+			bool       m_hadOriginalTmpDir{false};
 	};
 } // namespace
 

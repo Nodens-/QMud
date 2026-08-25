@@ -7,20 +7,18 @@
  */
 
 #include "AppController.h"
-#include "LuaExecutor.h"
-#include "MainFrame.h"
-// ReSharper disable once CppUnusedIncludeDirective
-#include "NameGeneration.h"
-#include "TelnetProcessor.h"
 #include "WorldRuntime.h"
 #include "dialogs/PluginsDialog.h"
-#include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QApplication>
 #include <QCoreApplication>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDir>
+#include <QFile>
 #include <QFont>
 #include <QHeaderView>
+#include <QMessageBox>
 #include <QPoint>
 #include <QPushButton>
 #include <QScopeGuard>
@@ -28,6 +26,7 @@
 #include <QTableWidget>
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
+#include <memory>
 
 namespace
 {
@@ -71,26 +70,44 @@ namespace
 			int m_count{0};
 	};
 
-	struct RuntimeStubState
+	/**
+	 * @brief Captures and dismisses an unexpected modal warning so a failing GUI test cannot hang.
+	 */
+	class MessageBoxObserver final : public QObject
 	{
-			QList<WorldRuntime::Plugin> plugins;
-			QMap<QString, QString>      worldAttributes;
-			QString                     pluginsDirectory;
-			QString                     stateFilesDirectory;
-			int                         reloadCalls{0};
-			QString                     lastReloadPluginId;
+		public:
+			/**
+			 * @brief Returns the text from the first observed message box.
+			 * @return Captured message text, or an empty string when none was shown.
+			 */
+			[[nodiscard]] QString message() const
+			{
+				return m_message;
+			}
+
+			/**
+			 * @brief Captures message-box text and queues rejection of the modal dialog.
+			 * @param watched Object receiving the event.
+			 * @param event Event delivered to the watched object.
+			 * @return Base event-filter result.
+			 */
+			bool eventFilter(QObject *watched, QEvent *event) override
+			{
+				if (event && event->type() == QEvent::Show)
+				{
+					if (auto *messageBox = qobject_cast<QMessageBox *>(watched))
+					{
+						if (m_message.isEmpty())
+							m_message = messageBox->text();
+						QMetaObject::invokeMethod(messageBox, &QDialog::reject, Qt::QueuedConnection);
+					}
+				}
+				return QObject::eventFilter(watched, event);
+			}
+
+		private:
+			QString m_message;
 	};
-
-	QHash<const WorldRuntime *, RuntimeStubState> &runtimeStates()
-	{
-		static QHash<const WorldRuntime *, RuntimeStubState> states;
-		return states;
-	}
-
-	RuntimeStubState &stateFor(const WorldRuntime *runtime)
-	{
-		return runtimeStates()[runtime];
-	}
 
 	QPushButton *findButtonByText(const QObject &root, const QString &text)
 	{
@@ -108,18 +125,82 @@ namespace
 		WorldRuntime::Plugin plugin;
 		plugin.attributes.insert(QStringLiteral("id"), id);
 		plugin.attributes.insert(QStringLiteral("name"), name);
-		plugin.source  = QStringLiteral("/tmp/%1.xml").arg(id);
+		plugin.source  = QStringLiteral("plugins/%1.xml").arg(id);
 		plugin.enabled = enabled;
 		plugin.version = 1.0;
 		return plugin;
 	}
 
-	bool isBlacklistedPluginIdForDialogTest(const QString &pluginId)
+	/**
+	 * @brief Writes a minimal plugin document used by production plugin loading and reloading.
+	 * @param path Destination plugin file within the test artifact directory.
+	 * @param id Plugin identifier to write.
+	 * @param name Plugin display name to write.
+	 * @param version Plugin version to write.
+	 * @param error Receives a file-write failure description.
+	 * @return `true` when the complete plugin document was written.
+	 */
+	bool writePluginFixture(const QString &path, const QString &id, const QString &name, const double version,
+	                        QString &error)
 	{
-		const QString id = pluginId.trimmed().toLower();
-		return id == QStringLiteral("bb6a05ed7534b5db1ed40511") ||
-		       id == QStringLiteral("b8e6dac1ee7fe8e3de931fb7") ||
-		       id == QStringLiteral("8238deec7c06bade8ebc3819");
+		QFile file(path);
+		if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+		{
+			error = file.errorString();
+			return false;
+		}
+
+		const QString document =
+		    QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin name="%1" author="QMud Test" id="%2" enabled="y" save_state="n" sequence="100" version="%3"/>
+</muclient>
+)xml")
+		        .arg(name.toHtmlEscaped(), id.toHtmlEscaped(), QString::number(version, 'f', 2));
+		const QByteArray bytes = document.toUtf8();
+		if (file.write(bytes) != bytes.size())
+		{
+			error = file.errorString();
+			return false;
+		}
+		error.clear();
+		return true;
+	}
+
+	/**
+	 * @brief Configures a runtime and loads a plugin through the production loader.
+	 * @param runtime Runtime that will own the plugin.
+	 * @param id Plugin identifier to install.
+	 * @param name Plugin display name to install.
+	 * @param enabled Initial enabled state after loading.
+	 * @param error Receives setup or loading failure text.
+	 * @return Absolute source path on success, otherwise an empty string.
+	 */
+	QString installPluginFixture(WorldRuntime &runtime, const QString &id, const QString &name,
+	                             const bool enabled, QString &error)
+	{
+		const QString artifactDirectory = QDir::currentPath();
+		const QString pluginsDirectory  = QDir(artifactDirectory).filePath(QStringLiteral("plugins"));
+		if (!QDir().mkpath(pluginsDirectory))
+		{
+			error = QStringLiteral("Unable to create plugin fixture directory: %1").arg(pluginsDirectory);
+			return {};
+		}
+
+		runtime.setStartupDirectory(artifactDirectory);
+		runtime.setPluginsDirectory(pluginsDirectory);
+		runtime.setStateFilesDirectory(QDir(artifactDirectory).filePath(QStringLiteral("state")));
+		runtime.setWorldAttribute(QStringLiteral("id"), QStringLiteral("aaaaaaaaaaaaaaaaaaaaaaaa"));
+
+		QString path = QDir(pluginsDirectory).filePath(id + QStringLiteral(".xml"));
+		if (!writePluginFixture(path, id, name, 1.0, error) || !runtime.loadPluginFile(path, &error, false))
+			return {};
+		if (!enabled && !runtime.enablePlugin(id, false))
+		{
+			error = QStringLiteral("Unable to disable loaded plugin: %1").arg(id);
+			return {};
+		}
+		return path;
 	}
 
 	/**
@@ -161,141 +242,7 @@ namespace
 		}
 		return true;
 	}
-
 } // namespace
-
-// NOLINTBEGIN(readability-convert-member-functions-to-static,readability-make-member-function-const)
-AppController::AppController(QObject *parent) : QObject(parent)
-{
-}
-
-AppController::~AppController() = default;
-
-AppController *AppController::instance()
-{
-	static AppController app;
-	return &app;
-}
-
-QString AppController::iniFilePath() const
-{
-	return QStringLiteral("/tmp/qmud-test-plugins-dialog.ini");
-}
-
-bool AppController::openDocumentFile(const QString &)
-{
-	return true;
-}
-
-void AppController::onCommandTriggered(const QString &)
-{
-}
-
-TelnetProcessor::TelnetProcessor() = default;
-
-WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
-{
-	RuntimeStubState state;
-	state.pluginsDirectory    = QStringLiteral("/tmp");
-	state.stateFilesDirectory = QStringLiteral("/tmp");
-	state.worldAttributes.insert(QStringLiteral("id"), QStringLiteral("world-id"));
-	runtimeStates().insert(this, state);
-}
-
-WorldRuntime::~WorldRuntime()
-{
-	runtimeStates().remove(this);
-}
-
-const QMap<QString, QString> &WorldRuntime::worldAttributes() const
-{
-	return stateFor(this).worldAttributes;
-}
-
-const QList<WorldRuntime::Plugin> &WorldRuntime::plugins() const
-{
-	return stateFor(this).plugins;
-}
-
-QList<WorldRuntime::Plugin> &WorldRuntime::pluginsMutable()
-{
-	return stateFor(this).plugins;
-}
-
-QStringList WorldRuntime::pluginIdList() const
-{
-	QStringList ids;
-	for (const Plugin &plugin : stateFor(this).plugins)
-	{
-		const QString id = plugin.attributes.value(QStringLiteral("id"));
-		if (id.isEmpty() || isBlacklistedPluginIdForDialogTest(id) || ids.contains(id, Qt::CaseInsensitive))
-			continue;
-		ids.push_back(id);
-	}
-	return ids;
-}
-
-bool WorldRuntime::loadPluginFile(const QString &, QString *, bool)
-{
-	return true;
-}
-
-bool WorldRuntime::unloadPlugin(const QString &pluginId, QString *)
-{
-	QList<Plugin> &plugins = stateFor(this).plugins;
-	for (qsizetype i = 0; i < plugins.size(); ++i)
-	{
-		if (plugins.at(i).attributes.value(QStringLiteral("id")) == pluginId)
-		{
-			plugins.removeAt(i);
-			return true;
-		}
-	}
-	return false;
-}
-
-bool WorldRuntime::enablePlugin(const QString &pluginId, const bool enable)
-{
-	QList<Plugin> &plugins = stateFor(this).plugins;
-	for (Plugin &plugin : plugins)
-	{
-		if (plugin.attributes.value(QStringLiteral("id")) == pluginId)
-		{
-			plugin.enabled = enable;
-			return true;
-		}
-	}
-	return false;
-}
-
-int WorldRuntime::reloadPlugin(const QString &pluginId, QString *)
-{
-	RuntimeStubState &state = stateFor(this);
-	++state.reloadCalls;
-	state.lastReloadPluginId = pluginId;
-	return eOK;
-}
-
-QString WorldRuntime::pluginsDirectory() const
-{
-	return stateFor(this).pluginsDirectory;
-}
-
-QString WorldRuntime::stateFilesDirectory() const
-{
-	return stateFor(this).stateFilesDirectory;
-}
-
-WorldChildWindow *MainWindow::activeWorldChildWindow() const
-{
-	return nullptr;
-}
-
-bool MainWindow::sendToNotepad(const QString &, const QString &, WorldRuntime *)
-{
-	return true;
-}
-// NOLINTEND(readability-convert-member-functions-to-static,readability-make-member-function-const)
 
 namespace
 {
@@ -308,6 +255,24 @@ namespace
 
 			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
+			void initTestCase()
+			{
+				m_originalCurrentPath = QDir::currentPath();
+				const QString artifactDirectory =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("test-artifacts/tst_Dialog_Plugins/%1")
+				                      .arg(QCoreApplication::applicationPid()));
+				QVERIFY(QDir().mkpath(artifactDirectory));
+				QVERIFY(QDir::setCurrent(artifactDirectory));
+				m_app = std::make_unique<AppController>();
+			}
+
+			void cleanupTestCase()
+			{
+				m_app.reset();
+				QVERIFY(QDir::setCurrent(m_originalCurrentPath));
+			}
+
 			void tablePopulationAndSelectionState()
 			{
 				WorldRuntime runtime;
@@ -352,7 +317,7 @@ namespace
 				clearPluginsDialogSettings();
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 				WorldRuntime  runtime;
 				PluginsDialog dialog(&runtime, nullptr);
 				dialog.show();
@@ -630,7 +595,7 @@ namespace
 				const auto  clearSettings           = qScopeGuard([] { clearPluginsDialogSettings(); });
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 				QTableWidget legacyTable;
 				legacyTable.setColumnCount(6);
 				QVector<int> expectedWidths;
@@ -695,7 +660,7 @@ namespace
 				const auto  clearSettings           = qScopeGuard([] { clearPluginsDialogSettings(); });
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 				WorldRuntime runtime;
 				{
 					PluginsDialog dialog(&runtime, nullptr);
@@ -735,7 +700,7 @@ namespace
 				const auto  clearSettings           = qScopeGuard([] { clearPluginsDialogSettings(); });
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 				WorldRuntime  runtime;
 				PluginsDialog dialog(&runtime, nullptr);
 				dialog.show();
@@ -822,9 +787,12 @@ namespace
 
 			void enableDisableAndReloadActOnSelectedPlugin()
 			{
-				WorldRuntime runtime;
-				runtime.pluginsMutable().push_back(
-				    makePlugin(QStringLiteral("plug"), QStringLiteral("Plugin"), true));
+				WorldRuntime  runtime;
+				const QString pluginId = QStringLiteral("555555555555555555555555");
+				QString       error;
+				const QString pluginPath =
+				    installPluginFixture(runtime, pluginId, QStringLiteral("Plugin"), true, error);
+				QVERIFY2(!pluginPath.isEmpty(), qPrintable(error));
 
 				PluginsDialog dialog(&runtime, nullptr);
 				dialog.show();
@@ -848,12 +816,26 @@ namespace
 				QTest::mouseClick(enableButton, Qt::LeftButton);
 				QVERIFY(runtime.plugins().front().enabled);
 
+				QVERIFY2(
+				    writePluginFixture(pluginPath, pluginId, QStringLiteral("PluginReloaded"), 2.0, error),
+				    qPrintable(error));
 				table->selectRow(0);
+				MessageBoxObserver warningObserver;
+				QApplication::instance()->installEventFilter(&warningObserver);
 				QTest::mouseClick(reloadButton, Qt::LeftButton);
-				QCOMPARE(stateFor(&runtime).reloadCalls, 1);
-				QCOMPARE(stateFor(&runtime).lastReloadPluginId, QStringLiteral("plug"));
+				QApplication::instance()->removeEventFilter(&warningObserver);
+				QVERIFY2(warningObserver.message().isEmpty(), qPrintable(warningObserver.message()));
+				QCOMPARE(runtime.plugins().size(), 1);
+				QCOMPARE(runtime.plugins().front().attributes.value(QStringLiteral("id")), pluginId);
+				QCOMPARE(runtime.plugins().front().attributes.value(QStringLiteral("name")),
+				         QStringLiteral("PluginReloaded"));
+				QCOMPARE(runtime.plugins().front().version, 2.0);
 			}
 			// NOLINTEND(readability-convert-member-functions-to-static)
+
+		private:
+			std::unique_ptr<AppController> m_app;
+			QString                        m_originalCurrentPath;
 	};
 } // namespace
 

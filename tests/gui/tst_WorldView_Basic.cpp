@@ -13,6 +13,7 @@
 #include "NativePluginRegistry.h"
 #include "OutputWrapUtils.h"
 #include "TelnetProcessor.h"
+#include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
 #include "WorldOptions.h"
 #include "WorldView.h"
@@ -490,47 +491,6 @@ end
 		runtime.registerAccelerator(AcceleratorUtils::acceleratorMapKey(virt, virtualKey), commandId, entry);
 		return commandId;
 	}
-
-	/**
-	 * @brief Temporarily binds the production command processor and inbound signal path to a primary view/runtime pair.
-	 */
-	class ScopedRuntimeCommandProcessor
-	{
-		public:
-			/**
-			 * @brief Wires one primary runtime to its command processor and view.
-			 * @param runtime Runtime to bind.
-			 * @param view Primary command-interaction view.
-			 */
-			ScopedRuntimeCommandProcessor(WorldRuntime &runtime, WorldView &view) : m_runtime(runtime)
-			{
-				m_processor.setView(&view);
-				m_processor.setRuntimeAutomationOwner(true);
-				m_processor.setRuntime(&runtime);
-				runtime.setCommandProcessor(&m_processor);
-				QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &m_processor,
-				                 &WorldCommandProcessor::onIncomingStyledLineReceived);
-				QObject::connect(&runtime, &WorldRuntime::incomingStyledLinePartialReceived, &m_processor,
-				                 &WorldCommandProcessor::onIncomingStyledLinePartialReceived);
-			}
-
-			/**
-			 * @brief Detaches the processor before its runtime or view can be destroyed.
-			 */
-			~ScopedRuntimeCommandProcessor()
-			{
-				m_runtime.clearCommandProcessor(&m_processor);
-				m_processor.setRuntime(nullptr);
-				m_processor.setView(nullptr);
-			}
-
-			ScopedRuntimeCommandProcessor(const ScopedRuntimeCommandProcessor &)            = delete;
-			ScopedRuntimeCommandProcessor &operator=(const ScopedRuntimeCommandProcessor &) = delete;
-
-		private:
-			WorldRuntime         &m_runtime;
-			WorldCommandProcessor m_processor;
-	};
 
 	int boundedSizeToInt(const qsizetype value)
 	{
@@ -5468,12 +5428,12 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			{
-				WorldRuntime *const           runtime = runtimeForTest();
-				WorldView                     view;
-				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				WorldRuntime *const runtime = runtimeForTest();
+				WorldChildWindow    window(QStringLiteral("Accelerator"));
+				window.setRuntime(runtime);
+				WorldView &view = *window.view();
 				view.resize(900, 640);
 				view.show();
-				setTestRuntime(view, runtime);
 				view.setAllTypingToCommandWindow(true);
 				QCoreApplication::processEvents();
 
@@ -5508,12 +5468,12 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			{
-				WorldRuntime *const           runtime = runtimeForTest();
-				WorldView                     view;
-				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				WorldRuntime *const runtime = runtimeForTest();
+				WorldChildWindow    window(QStringLiteral("Accelerator"));
+				window.setRuntime(runtime);
+				WorldView &view = *window.view();
 				view.resize(900, 640);
 				view.show();
-				setTestRuntime(view, runtime);
 				view.setAllTypingToCommandWindow(true);
 				for (int i = 0; i < 120; ++i)
 					runtimeOutputForTest(view).appendOutputText(
@@ -5863,12 +5823,12 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			{
-				WorldRuntime *const           runtime = runtimeForTest();
-				WorldView                     view;
-				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				WorldRuntime *const runtime = runtimeForTest();
+				WorldChildWindow    window(QStringLiteral("Accelerator"));
+				window.setRuntime(runtime);
+				WorldView &view = *window.view();
 				view.resize(900, 640);
 				view.show();
-				setTestRuntime(view, runtime);
 				view.setAllTypingToCommandWindow(true);
 				QCoreApplication::processEvents();
 
@@ -5911,12 +5871,12 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			{
-				WorldRuntime *const           runtime = runtimeForTest();
-				WorldView                     view;
-				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				WorldRuntime *const runtime = runtimeForTest();
+				WorldChildWindow    window(QStringLiteral("Accelerator"));
+				window.setRuntime(runtime);
+				WorldView &view = *window.view();
 				view.resize(900, 640);
 				view.show();
-				setTestRuntime(view, runtime);
 				view.setAllTypingToCommandWindow(true);
 				QCoreApplication::processEvents();
 
@@ -5957,12 +5917,12 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			{
-				WorldRuntime *const           runtime = runtimeForTest();
-				WorldView                     view;
-				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				WorldRuntime *const runtime = runtimeForTest();
+				WorldChildWindow    window(QStringLiteral("Accelerator"));
+				window.setRuntime(runtime);
+				WorldView &view = *window.view();
 				view.resize(900, 640);
 				view.show();
-				setTestRuntime(view, runtime);
 				view.setAllTypingToCommandWindow(true);
 				QCoreApplication::processEvents();
 
@@ -6003,12 +5963,12 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			{
-				WorldRuntime *const           runtime = runtimeForTest();
-				WorldView                     view;
-				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				WorldRuntime *const runtime = runtimeForTest();
+				WorldChildWindow    window(QStringLiteral("Accelerator"));
+				window.setRuntime(runtime);
+				WorldView &view = *window.view();
 				view.resize(900, 640);
 				view.show();
-				setTestRuntime(view, runtime);
 				view.setAllTypingToCommandWindow(true);
 				QCoreApplication::processEvents();
 
@@ -6046,12 +6006,12 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 
 			{
-				WorldRuntime *const           runtime = runtimeForTest();
-				WorldView                     view;
-				ScopedRuntimeCommandProcessor processor(*runtime, view);
+				WorldRuntime *const runtime = runtimeForTest();
+				WorldChildWindow    window(QStringLiteral("Accelerator"));
+				window.setRuntime(runtime);
+				WorldView &view = *window.view();
 				view.resize(900, 640);
 				view.show();
-				setTestRuntime(view, runtime);
 				view.setAllTypingToCommandWindow(true);
 				QCoreApplication::processEvents();
 
@@ -9497,37 +9457,40 @@ class tst_WorldView_Basic : public QObject
 		{
 			resetTestState();
 
-			WorldRuntime *const           runtime = runtimeForTest();
-			WorldView                     view;
-			ScopedRuntimeCommandProcessor processor(*runtime, view);
-			view.resize(640, 420);
-			view.show();
-			setTestRuntime(view, runtime);
-			QCoreApplication::processEvents();
+			{
+				WorldRuntime *const runtime = runtimeForTest();
+				WorldChildWindow    window(QStringLiteral("Incoming partial output"));
+				window.setRuntime(runtime);
+				WorldView &view = *window.view();
+				view.resize(640, 420);
+				view.show();
+				QCoreApplication::processEvents();
 
-			auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
-			QVERIFY(nativeCanvas);
+				auto *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+				QVERIFY(nativeCanvas);
 
-			runtime->receiveRawData(QByteArrayLiteral("tail-open"));
-			QCoreApplication::processEvents();
-			nativeCanvas->update();
-			QCoreApplication::processEvents();
+				runtime->receiveRawData(QByteArrayLiteral("tail-open"));
+				QCoreApplication::processEvents();
+				nativeCanvas->update();
+				QCoreApplication::processEvents();
 
-			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 1);
-			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
-			             QStringLiteral("tail-open"));
+				QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 1);
+				QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
+				             QStringLiteral("tail-open"));
 
-			const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
+				const int rebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
 
-			QVERIFY(view.commitPendingIncomingPartialOutput());
+				QVERIFY(view.commitPendingIncomingPartialOutput());
 
-			nativeCanvas->update();
-			QCoreApplication::processEvents();
+				nativeCanvas->update();
+				QCoreApplication::processEvents();
 
-			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 1);
-			QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
-			             QStringLiteral("tail-open"));
-			QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(), rebuildsBefore);
+				QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_line_count").toInt(), 1);
+				QTRY_COMPARE(nativeCanvas->property("qmud_native_plain_last_line").toString(),
+				             QStringLiteral("tail-open"));
+				QTRY_COMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(),
+				             rebuildsBefore);
+			}
 			resetTestState();
 		}
 

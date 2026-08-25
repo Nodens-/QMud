@@ -48,7 +48,7 @@
   <printing>
     <ansi>
       <normal>
-        <style seq="1" textcolour="white" backcolour="black"/>
+        <style seq="1" bold="y"/>
       </normal>
     </ansi>
   </printing>

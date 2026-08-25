@@ -8292,6 +8292,7 @@ WorldRuntime::SaveSnapshot WorldRuntime::buildSaveSnapshot(const QString &fileNa
 	snapshot.worldAttributes          = m_worldAttributes;
 	snapshot.worldMultilineAttributes = m_worldMultilineAttributes;
 	snapshot.includes                 = m_includes;
+	snapshot.scripts                  = m_scripts;
 	snapshot.triggers                 = m_triggers;
 	snapshot.aliases                  = m_aliases;
 	snapshot.timers                   = m_timers;
@@ -8334,6 +8335,13 @@ bool WorldRuntime::saveStateMatchesSnapshot(const SaveSnapshot &snapshot) const
 	};
 	if (!includesEqual(m_includes, snapshot.includes))
 		return false;
+	if (m_scripts.size() != snapshot.scripts.size())
+		return false;
+	for (int i = 0; i < m_scripts.size(); ++i)
+	{
+		if (m_scripts.at(i).content != snapshot.scripts.at(i).content)
+			return false;
+	}
 
 	auto triggersEqual = [&](const QList<Trigger> &current, const QList<Trigger> &saved) -> bool
 	{
@@ -8681,6 +8689,8 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 
 	const auto &m_worldAttributes          = normalizedSnapshot.worldAttributes;
 	const auto &m_worldMultilineAttributes = normalizedSnapshot.worldMultilineAttributes;
+	const auto &m_includes                 = normalizedSnapshot.includes;
+	const auto &m_scripts                  = normalizedSnapshot.scripts;
 	const auto &m_triggers                 = normalizedSnapshot.triggers;
 	const auto &m_aliases                  = normalizedSnapshot.aliases;
 	const auto &m_timers                   = normalizedSnapshot.timers;
@@ -9292,6 +9302,21 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 	out << nl << "</ansi>" << nl;
 	saveFooter("printing");
 
+	for (const auto &include : m_includes)
+	{
+		if (isEnabledFlag(include.attributes.value(QStringLiteral("plugin"))))
+			continue;
+		out << nl << "<include ";
+		for (auto attribute = include.attributes.cbegin(); attribute != include.attributes.cend();
+		     ++attribute)
+		{
+			if (attribute.value().isEmpty())
+				continue;
+			out << attribute.key() << "=\"" << fixHtmlString(replaceNewlines(attribute.value())) << "\" ";
+		}
+		out << "/>" << nl;
+	}
+
 	bool wrotePlugins = false;
 	for (const auto &plugin : m_plugins)
 	{
@@ -9316,6 +9341,9 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 			out << "enabled=\"n\" ";
 		out << "/>" << nl;
 	}
+
+	for (const auto &script : m_scripts)
+		saveXmlMulti(out, nl, "script", script.content);
 
 	out << "</qmud>" << nl;
 

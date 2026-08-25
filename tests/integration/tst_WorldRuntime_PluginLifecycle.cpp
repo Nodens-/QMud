@@ -19,7 +19,6 @@
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
-#include "helpers/MiniWindowUtils.h"
 #include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
@@ -176,39 +175,6 @@ namespace
 		                     QStringLiteral("/tmp/plugin"));
 		engine.setScriptText(script);
 		return engine.loadScript();
-	}
-
-	/**
-	 * @brief Creates callback snapshot data for WindowOutputText shadow tests.
-	 * @return Snapshot containing one miniwindow, one font, render context state, and one entity.
-	 */
-	QSharedPointer<LuaCallbackMiniWindowSnapshot> captureWindowOutputTextDispatchSnapshotForTest()
-	{
-		MiniWindow window;
-		MiniWindowUtils::create(window, QStringLiteral("output"), 0, 0, 320, 80, 0, 0, QColor(Qt::black),
-		                        QString());
-		if (MiniWindowUtils::font(window, QStringLiteral("font"), QStringLiteral("Sans Serif"), 10.0, false,
-		                          false, false, false, 0, 0) != eOK)
-		{
-			return {};
-		}
-
-		auto snapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
-		snapshot->windowNames.push_back(QStringLiteral("output"));
-		snapshot->fontIdsByWindow.insert(QStringLiteral("output"), {QStringLiteral("font")});
-		snapshot->miniWindowsByWindow.insert(QStringLiteral("output"),
-		                                     QSharedPointer<MiniWindow>::create(window.detachedImageCopy()));
-		LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot windowInfo;
-		windowInfo.width  = window.width;
-		windowInfo.height = window.height;
-		snapshot->windowInfoByWindow.insert(QStringLiteral("output"), windowInfo);
-		snapshot->worldAttributesSnapshot.insert(QStringLiteral("use_mxp"), QStringLiteral("2"));
-		snapshot->hasWorldAttributeSnapshot         = true;
-		snapshot->hasEntitySnapshot                 = true;
-		snapshot->hasWindowOutputTextRenderSnapshot = true;
-		snapshot->entityValuesByName.insert(QStringLiteral("cmd"), QStringLiteral(" "));
-		snapshot->rebuildMiniWindowLookupCaches();
-		return snapshot;
 	}
 
 	/**
@@ -1119,19 +1085,19 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 			const QByteArray originalReloadDryRun = qgetenv("QMUD_RELOAD_DRY_RUN");
 			const QString    originalCurrentPath  = QDir::currentPath();
 			const auto       restoreEnvironment   = qScopeGuard(
-			    [&]
-			    {
-				    const auto restoreVariable = [](const char *name, const QByteArray &value)
-				    {
-					    if (value.isNull())
-						    qunsetenv(name);
-					    else
-						    qputenv(name, value);
-				    };
-				    restoreVariable("QMUD_RELOAD_ASSUME_YES", originalAssumeYes);
-				    restoreVariable("QMUD_RELOAD_DRY_RUN", originalReloadDryRun);
-				    (void)QDir::setCurrent(originalCurrentPath);
-			    });
+                [&]
+                {
+                    const auto restoreVariable = [](const char *name, const QByteArray &value)
+                    {
+                        if (value.isNull())
+                            qunsetenv(name);
+                        else
+                            qputenv(name, value);
+                    };
+                    restoreVariable("QMUD_RELOAD_ASSUME_YES", originalAssumeYes);
+                    restoreVariable("QMUD_RELOAD_DRY_RUN", originalReloadDryRun);
+                    (void)QDir::setCurrent(originalCurrentPath);
+                });
 			QVERIFY(QDir::setCurrent(artifactDirectory));
 			QVERIFY(qputenv("QMUD_RELOAD_ASSUME_YES", QByteArrayLiteral("1")));
 			QVERIFY(qputenv("QMUD_RELOAD_DRY_RUN", QByteArrayLiteral("1")));
@@ -1757,7 +1723,7 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 
 			const QString body    = QString(1001, QLatin1Char('x'));
 			QByteArray    payload = QByteArrayLiteral("\x1B[1z<send href=\"help &text;\">") + body.toUtf8() +
-			                        QByteArrayLiteral("</send>\n");
+			                     QByteArrayLiteral("</send>\n");
 			runtime.receiveRawData(payload);
 
 			QCOMPARE(line, body);
@@ -1966,9 +1932,9 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 
 			WorldRuntime::WindowOutputMetrics metrics;
 			const int                         width = runtime.windowOutputText(
-			    QStringLiteral("output"), QStringLiteral("font"),
-			    QStringLiteral("\3send href=\"look &cmd;\"\4Link\3/send\4"), 0, 0, 319, 79, 0x00FFFFFF,
-			    QString(), QStringLiteral("link"), QString(), &metrics);
+                QStringLiteral("output"), QStringLiteral("font"),
+                QStringLiteral("\3send href=\"look &cmd;\"\4Link\3/send\4"), 0, 0, 319, 79, 0x00FFFFFF,
+                QString(), QStringLiteral("link"), QString(), &metrics);
 
 			QVERIFY(width >= 0);
 			QCOMPARE(metrics.hotspotCount, 1);
@@ -1984,7 +1950,9 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 		static void callbackWindowOutputTextUsesEntityDeltaForShadowActivation()
 		{
 			WorldRuntime runtime;
-			auto         engine = QSharedPointer<LuaCallbackEngine>::create();
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+			QVERIFY(createWindowOutputTextTarget(runtime));
+			auto engine = QSharedPointer<LuaCallbackEngine>::create();
 			engine->setWorldRuntime(&runtime);
 			QVERIFY(loadCallbackEngineScript(*engine, QStringLiteral(R"lua(
 activation_status = ""
@@ -2005,17 +1973,14 @@ function activation_result(value)
 end
 )lua")));
 
-			const auto snapshot = captureWindowOutputTextDispatchSnapshotForTest();
-			QVERIFY(snapshot);
+			const LuaBatchDispatchResult callbackResult =
+			    runtime.dispatchLuaStringsAndWildcards(engine, QStringLiteral("OnPluginEnable"), {});
+			QVERIFY(callbackResult.hasFunctionValid);
+			QVERIFY(callbackResult.hasFunction);
 
 			LuaExecutorDirect       executor;
 			LuaBatchDispatchRequest request;
-			request.engines               = {engine};
-			request.kind                  = LuaBatchDispatchKind::NoArgs;
-			request.functionName          = QStringLiteral("OnPluginEnable");
-			request.miniWindowSnapshotArg = snapshot;
-			static_cast<void>(executor.dispatchBatch(request));
-
+			request.engines                     = {engine};
 			request.kind                        = LuaBatchDispatchKind::StringInOut;
 			request.functionName                = QStringLiteral("activation_result");
 			request.stringArg                   = QStringLiteral("ignored");
@@ -2042,8 +2007,8 @@ end
 
 			WorldRuntime::WindowOutputMetrics metrics;
 			const int                         width = runtime.windowOutputText(
-			    QStringLiteral("output"), QStringLiteral("font"), QStringLiteral("\3hi\4Link\3/hi\4"), 0, 0,
-			    319, 79, 0x00FFFFFF, QString(), QStringLiteral("link"), QString(), &metrics);
+                QStringLiteral("output"), QStringLiteral("font"), QStringLiteral("\3hi\4Link\3/hi\4"), 0, 0,
+                319, 79, 0x00FFFFFF, QString(), QStringLiteral("link"), QString(), &metrics);
 
 			QVERIFY(width >= 0);
 			QCOMPARE(metrics.hotspotCount, 1);
@@ -2067,9 +2032,9 @@ end
 
 			WorldRuntime::WindowOutputMetrics metrics;
 			const int                         width = runtime.windowOutputText(
-			    QStringLiteral("output"), QStringLiteral("font"),
-			    QStringLiteral("\3send href=\"help &text;\"\4start-newbie\3/send\4"), 0, 0, 319, 79,
-			    0x00FFFFFF, QString(), QStringLiteral("link"), QString(), &metrics);
+                QStringLiteral("output"), QStringLiteral("font"),
+                QStringLiteral("\3send href=\"help &text;\"\4start-newbie\3/send\4"), 0, 0, 319, 79,
+                0x00FFFFFF, QString(), QStringLiteral("link"), QString(), &metrics);
 
 			QVERIFY(width >= 0);
 			QCOMPARE(metrics.hotspotCount, 1);
@@ -2090,9 +2055,9 @@ end
 
 			WorldRuntime::WindowOutputMetrics metrics;
 			const int                         width = runtime.windowOutputText(
-			    QStringLiteral("output"), QStringLiteral("font"),
-			    QStringLiteral("\3send href=\"help &text;\"\4start-newbie"), 0, 0, 319, 79, 0x00FFFFFF,
-			    QString(), QStringLiteral("link"), QString(), &metrics);
+                QStringLiteral("output"), QStringLiteral("font"),
+                QStringLiteral("\3send href=\"help &text;\"\4start-newbie"), 0, 0, 319, 79, 0x00FFFFFF,
+                QString(), QStringLiteral("link"), QString(), &metrics);
 
 			QVERIFY(width >= 0);
 			QCOMPARE(metrics.hotspotCount, 0);
@@ -2693,9 +2658,9 @@ end
 			      LuaBatchDispatchKind::TwoNumbersAndStringStopOnFalse,
 			      LuaBatchDispatchKind::NumberAndBytesStopOnTrue})
 			{
-				partial                 = {};
-				partial.boolResult      = luaBatchDispatchRecipientStopCondition(kind) ==
-				                          LuaBatchRecipientStopCondition::FalseResult;
+				partial            = {};
+				partial.boolResult = luaBatchDispatchRecipientStopCondition(kind) ==
+				                     LuaBatchRecipientStopCondition::FalseResult;
 				partial.hasFunction     = true;
 				auto [finished, result] = finishFallback(kind, partial);
 				QVERIFY(finished);

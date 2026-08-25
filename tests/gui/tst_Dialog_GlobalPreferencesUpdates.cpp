@@ -7,12 +7,7 @@
  */
 
 #include "AppController.h"
-#include "MainFrame.h"
-// ReSharper disable once CppUnusedIncludeDirective
-#include "NameGeneration.h"
 #include "ShortcutPreferenceUtils.h"
-#include "WorldChildWindow.h"
-#include "WorldRuntime.h"
 #include "dialogs/GlobalPreferencesDialog.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
@@ -23,7 +18,8 @@
 #include <QDialogButtonBox>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
-#include <QFile>
+#include <QFileInfo>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QFocusEvent>
 #include <QFont>
 #include <QHeaderView>
@@ -33,6 +29,7 @@
 #include <QPushButton>
 #include <QScopeGuard>
 #include <QScreen>
+#include <QSettings>
 #include <QSpinBox>
 #include <QTabBar>
 #include <QTabWidget>
@@ -42,6 +39,8 @@
 #include <QTextEdit>
 #include <QWidget>
 #include <QtTest/QTest>
+
+#include <memory>
 
 namespace
 {
@@ -87,68 +86,6 @@ namespace
 		private:
 			int m_count{0};
 	};
-
-	/**
-	 * @brief Returns per-process test INI file path.
-	 * @return Absolute INI path under temporary directory.
-	 */
-	QString testIniFilePath()
-	{
-		static const QString path =
-		    QDir::temp().filePath(QStringLiteral("qmud-test-global-preferences-dialog-%1.ini")
-		                              .arg(QCoreApplication::applicationPid()));
-		return path;
-	}
-
-	/**
-	 * @brief Shared state for AppController/dialog test doubles.
-	 */
-	struct StubState
-	{
-			QHash<QString, QVariant> globalOptions;
-			bool                     updateMechanismAvailable{true};
-			QString                  updateMechanismUnavailableReason;
-			int                      checkForUpdatesNowCallCount{0};
-			QPointer<QWidget>        lastUpdateCheckParent;
-			int                      applyGlobalPreferencesCallCount{0};
-	};
-
-	/**
-	 * @brief Returns mutable singleton stub state.
-	 * @return Shared test-double state.
-	 */
-	StubState &stubState()
-	{
-		static StubState state;
-		return state;
-	}
-
-	/**
-	 * @brief Resets test-double state and seeds update defaults used by the dialog.
-	 */
-	void resetStubState()
-	{
-		StubState &state = stubState();
-		state.globalOptions.clear();
-		state.updateMechanismAvailable         = true;
-		state.updateMechanismUnavailableReason = QString();
-		state.checkForUpdatesNowCallCount      = 0;
-		state.lastUpdateCheckParent            = nullptr;
-		state.applyGlobalPreferencesCallCount  = 0;
-
-		state.globalOptions.insert(QStringLiteral("Locale"), QStringLiteral("en"));
-		state.globalOptions.insert(QStringLiteral("SplitViewDividerWidth"), 1);
-		state.globalOptions.insert(QStringLiteral("AutoCheckForUpdates"), 1);
-		state.globalOptions.insert(QStringLiteral("UpdateCheckIntervalHours"), 1);
-		state.globalOptions.insert(QStringLiteral("EnableReloadFeature"), 1);
-		state.globalOptions.insert(QStringLiteral("ReloadMccpDisableTimeoutMs"), 1000);
-		state.globalOptions.insert(QStringLiteral("PrinterFont"), QStringLiteral("Courier"));
-		state.globalOptions.insert(QStringLiteral("PrinterFontSize"), 10);
-		state.globalOptions.insert(QStringLiteral("PrinterFontWeight"), QFont::Normal);
-		state.globalOptions.insert(QStringLiteral("PrinterFontItalic"), 0);
-
-		QFile::remove(testIniFilePath());
-	}
 
 	/**
 	 * @brief Finds a checkbox by exact text within a widget tree.
@@ -258,197 +195,6 @@ namespace
 	}
 } // namespace
 
-// NOLINTBEGIN(readability-convert-member-functions-to-static)
-/**
- * @brief Creates AppController test double.
- * @param parent Optional Qt parent object.
- */
-AppController::AppController(QObject *parent) : QObject(parent)
-{
-}
-
-/**
- * @brief Destroys AppController test double.
- */
-AppController::~AppController() = default;
-
-/**
- * @brief Returns singleton AppController test double.
- * @return Singleton test-double instance.
- */
-AppController *AppController::instance()
-{
-	static AppController app;
-	return &app;
-}
-
-/**
- * @brief Returns stubbed main-window pointer.
- * @return Always `nullptr` for this test.
- */
-MainWindow *AppController::mainWindow() const
-{
-	return nullptr;
-}
-
-/**
- * @brief Returns test-specific INI path.
- * @return INI path in `/tmp` used by this test fixture.
- */
-QString AppController::iniFilePath() const
-{
-	return testIniFilePath();
-}
-
-/**
- * @brief Reads a stubbed global option.
- * @param name Option key.
- * @return Stubbed option value.
- */
-QVariant AppController::getGlobalOption(const QString &name) const
-{
-	return stubState().globalOptions.value(name);
-}
-
-/**
- * @brief Writes integer option into stub storage.
- * @param name Option key.
- * @param value Option value.
- */
-void AppController::setGlobalOptionInt(const QString &name, const int value)
-{
-	stubState().globalOptions.insert(name, value);
-}
-
-/**
- * @brief Writes string option into stub storage.
- * @param name Option key.
- * @param value Option value.
- */
-void AppController::setGlobalOptionString(const QString &name, const QString &value)
-{
-	stubState().globalOptions.insert(name, value);
-}
-
-/**
- * @brief Tracks apply-global-preferences invocations.
- */
-void AppController::applyGlobalPreferences()
-{
-	++stubState().applyGlobalPreferencesCallCount;
-}
-
-/**
- * @brief Stub no-op for dialog filesystem action.
- */
-void AppController::changeToFileBrowsingDirectory() const
-{
-}
-
-/**
- * @brief Stub no-op for dialog filesystem action.
- */
-void AppController::changeToStartupDirectory() const
-{
-}
-
-/**
- * @brief Returns unchanged file path for test usage.
- * @param fileName Candidate file path.
- * @return Unmodified input path.
- */
-QString AppController::makeAbsolutePath(const QString &fileName) const
-{
-	return fileName;
-}
-
-/**
- * @brief Returns stubbed list of currently open world log files.
- * @return Empty list for this test fixture.
- */
-QStringList AppController::activeOpenWorldLogFiles() const
-{
-	return {};
-}
-
-/**
- * @brief Tracks manual update-check invocations from dialog UI.
- * @param uiParent Parent widget passed by the dialog.
- */
-void AppController::checkForUpdatesNow(QWidget *uiParent)
-{
-	StubState &state = stubState();
-	++state.checkForUpdatesNowCallCount;
-	state.lastUpdateCheckParent = uiParent;
-}
-
-/**
- * @brief Stub slot required by AppController metaobject.
- * @param commandName Ignored command name.
- */
-void AppController::onCommandTriggered(const QString &commandName)
-{
-	Q_UNUSED(commandName);
-}
-
-/**
- * @brief Returns stubbed update-mechanism availability.
- * @return `true` when update mechanism is enabled in stub state.
- */
-bool AppController::isUpdateMechanismAvailable()
-{
-	return stubState().updateMechanismAvailable;
-}
-
-/**
- * @brief Returns stubbed update-unavailability reason.
- * @return Unavailability reason string.
- */
-QString AppController::updateMechanismUnavailableReason()
-{
-	return stubState().updateMechanismUnavailableReason;
-}
-
-/**
- * @brief Stub file-association registration.
- * @param errorMessage Optional output message cleared on success.
- * @return Always `true` in this test fixture.
- */
-bool AppController::registerFileAssociations(QString *errorMessage)
-{
-	if (errorMessage)
-		errorMessage->clear();
-	return true;
-}
-
-/**
- * @brief Stub active world-child lookup.
- * @return Always `nullptr` for this test fixture.
- */
-WorldChildWindow *MainWindow::activeWorldChildWindow() const
-{
-	return nullptr;
-}
-
-/**
- * @brief Stub runtime lookup.
- * @return Always `nullptr` for this test fixture.
- */
-WorldRuntime *WorldChildWindow::runtime() const
-{
-	return nullptr;
-}
-
-/**
- * @brief Stub world-file path lookup.
- * @return Empty path for this test fixture.
- */
-QString WorldRuntime::worldFilePath() const
-{
-	return {};
-}
-// NOLINTEND(readability-convert-member-functions-to-static)
-
 namespace
 {
 	/**
@@ -461,13 +207,56 @@ namespace
 			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
 			/**
+			 * @brief Creates an isolated production preferences store under the test binary directory.
+			 */
+			void initTestCase()
+			{
+				m_originalCurrentPath = QDir::currentPath();
+				m_hadOriginalQmudHome = qEnvironmentVariableIsSet("QMUD_HOME");
+				m_originalQmudHome    = qgetenv("QMUD_HOME");
+				const QString artifactDirectory =
+				    QDir(QCoreApplication::applicationDirPath())
+				        .filePath(QStringLiteral("test-artifacts/tst_Dialog_GlobalPreferencesUpdates/%1")
+				                      .arg(QCoreApplication::applicationPid()));
+				QVERIFY(QDir().mkpath(artifactDirectory));
+				QVERIFY(QDir::setCurrent(artifactDirectory));
+				QVERIFY(qputenv("QMUD_HOME", artifactDirectory.toUtf8()));
+
+				m_app = std::make_unique<AppController>();
+				QVERIFY(m_app->initialize());
+			}
+
+			/**
+			 * @brief Releases production state and restores the process environment.
+			 */
+			void cleanupTestCase()
+			{
+				m_app.reset();
+				if (m_hadOriginalQmudHome)
+					QVERIFY(qputenv("QMUD_HOME", m_originalQmudHome));
+				else
+					qunsetenv("QMUD_HOME");
+				QVERIFY(QDir::setCurrent(m_originalCurrentPath));
+			}
+
+			/**
 			 * @brief Verifies update-check controls are disabled when mechanism is unavailable.
 			 */
-			void updateControlsDisableWhenMechanismUnavailable()
+			void updateControlsDisableWhenMechanismUnavailable() const
 			{
-				resetStubState();
-				stubState().updateMechanismAvailable         = false;
-				stubState().updateMechanismUnavailableReason = QStringLiteral("Updates are disabled.");
+				resetPreferences();
+				const bool       hadDisableUpdate      = qEnvironmentVariableIsSet("QMUD_DISABLE_UPDATE");
+				const QByteArray originalDisableUpdate = qgetenv("QMUD_DISABLE_UPDATE");
+				QVERIFY(qputenv("QMUD_DISABLE_UPDATE", QByteArrayLiteral("1")));
+				const auto restoreDisableUpdate = qScopeGuard(
+				    [hadDisableUpdate, originalDisableUpdate]
+				    {
+					    if (hadDisableUpdate)
+						    (void)qputenv("QMUD_DISABLE_UPDATE", originalDisableUpdate);
+					    else
+						    qunsetenv("QMUD_DISABLE_UPDATE");
+				    });
+				QVERIFY(!AppController::isUpdateMechanismAvailable());
 
 				GlobalPreferencesDialog dialog;
 				dialog.show();
@@ -493,15 +282,15 @@ namespace
 				QVERIFY(!checkEveryLabel->isEnabled());
 				QVERIFY(enableReload->isEnabled());
 				QVERIFY(timeoutSpin->isEnabled());
-				QCOMPARE(autoCheck->toolTip(), QStringLiteral("Updates are disabled."));
+				QCOMPARE(autoCheck->toolTip(), AppController::updateMechanismUnavailableReason());
 			}
 
 			/**
 			 * @brief Verifies hidden tab container does not trap keyboard focus traversal.
 			 */
-			void hiddenTabContainerIsNotFocusable()
+			void hiddenTabContainerIsNotFocusable() const
 			{
-				resetStubState();
+				resetPreferences();
 
 				GlobalPreferencesDialog dialog;
 
@@ -515,9 +304,9 @@ namespace
 			/**
 			 * @brief Verifies split-view divider placement, focus order, range, and persistence.
 			 */
-			void splitViewDividerPreferenceFollowsWindowTabsAndPersists()
+			void splitViewDividerPreferenceFollowsWindowTabsAndPersists() const
 			{
-				resetStubState();
+				resetPreferences();
 
 				{
 					GlobalPreferencesDialog dialog;
@@ -550,9 +339,7 @@ namespace
 					dialog.accept();
 				}
 
-				QCOMPARE(stubState().globalOptions.value(QStringLiteral("SplitViewDividerWidth")).toInt(),
-				         13);
-				QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("SplitViewDividerWidth")).toInt(), 13);
 
 				GlobalPreferencesDialog restoredDialog;
 				QSpinBox *restoredDivider = findSpinBySuffix(restoredDialog, QStringLiteral(" px"));
@@ -563,13 +350,13 @@ namespace
 			/**
 			 * @brief Verifies the dialog and combo boxes follow enlarged application fonts.
 			 */
-			void dialogMinimumTracksFontChanges()
+			void dialogMinimumTracksFontChanges() const
 			{
-				resetStubState();
+				resetPreferences();
 
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 
 				QList<QSize> initialPageHints;
 				QList<QSize> initialComboHints;
@@ -693,20 +480,26 @@ namespace
 			/**
 			 * @brief Verifies long user paths wrap without determining dialog width.
 			 */
-			void longPathsDoNotExpandDialogWidth()
+			void longPathsDoNotExpandDialogWidth() const
 			{
-				resetStubState();
+				resetPreferences();
 				GlobalPreferencesDialog baselineDialog;
 				const int               baselineMinimumWidth = baselineDialog.minimumWidth();
 
-				resetStubState();
+				resetPreferences();
 				const QString longPath = QStringLiteral("/") + QStringLiteral("directory/").repeated(20) +
 				                         QStringLiteral("file.xml");
-				stubState().globalOptions.insert(QStringLiteral("WorldList"), longPath);
-				stubState().globalOptions.insert(QStringLiteral("PluginList"), longPath);
-				stubState().globalOptions.insert(QStringLiteral("DefaultWorldFileDirectory"), longPath);
-				stubState().globalOptions.insert(QStringLiteral("DefaultLogFileDirectory"), longPath);
-				stubState().globalOptions.insert(QStringLiteral("PluginsDirectory"), longPath);
+				m_app->setGlobalOptionString(QStringLiteral("WorldList"), longPath);
+				m_app->setGlobalOptionString(QStringLiteral("PluginList"), longPath);
+				m_app->setGlobalOptionString(QStringLiteral("DefaultWorldFileDirectory"), longPath);
+				m_app->setGlobalOptionString(QStringLiteral("DefaultLogFileDirectory"), longPath);
+				m_app->setGlobalOptionString(QStringLiteral("PluginsDirectory"), longPath);
+				QStringList unmatchedPaths{
+				    m_app->getGlobalOption(QStringLiteral("WorldList")).toString(),
+				    m_app->getGlobalOption(QStringLiteral("PluginList")).toString(),
+				    m_app->getGlobalOption(QStringLiteral("DefaultWorldFileDirectory")).toString(),
+				    m_app->getGlobalOption(QStringLiteral("DefaultLogFileDirectory")).toString(),
+				    m_app->getGlobalOption(QStringLiteral("PluginsDirectory")).toString()};
 
 				GlobalPreferencesDialog longPathDialog;
 				QVERIFY(longPathDialog.minimumWidth() <= baselineMinimumWidth);
@@ -721,7 +514,7 @@ namespace
 					QCoreApplication::processEvents();
 					for (const QLabel *label : tabs->widget(index)->findChildren<QLabel *>())
 					{
-						if (label->text() != longPath)
+						if (!unmatchedPaths.removeOne(label->text()))
 							continue;
 						QVERIFY(label->wordWrap());
 						QVERIFY(label->width() > 0);
@@ -731,6 +524,7 @@ namespace
 					}
 				}
 				QCOMPARE(verifiedLabels, 5);
+				QVERIFY(unmatchedPaths.isEmpty());
 				QVERIFY(longPathDialog.screen());
 				QTRY_VERIFY(
 				    longPathDialog.screen()->availableGeometry().contains(longPathDialog.frameGeometry()));
@@ -739,9 +533,9 @@ namespace
 			/**
 			 * @brief Verifies Shortcuts page is placed between General and Closing.
 			 */
-			void shortcutsTabIsBetweenGeneralAndClosing()
+			void shortcutsTabIsBetweenGeneralAndClosing() const
 			{
-				resetStubState();
+				resetPreferences();
 
 				GlobalPreferencesDialog dialog;
 
@@ -755,9 +549,9 @@ namespace
 			/**
 			 * @brief Verifies Shortcuts table sorts by category and leaves Tab for focus traversal.
 			 */
-			void shortcutsTableSortsAndDoesNotConsumeTabNavigation()
+			void shortcutsTableSortsAndDoesNotConsumeTabNavigation() const
 			{
-				resetStubState();
+				resetPreferences();
 
 				GlobalPreferencesDialog dialog;
 
@@ -826,9 +620,9 @@ namespace
 			/**
 			 * @brief Verifies Enter opens the current row's override editor without accepting the dialog.
 			 */
-			void shortcutsTableEnterStartsOverrideEditing()
+			void shortcutsTableEnterStartsOverrideEditing() const
 			{
-				resetStubState();
+				resetPreferences();
 				QFETCH(int, key);
 				QFETCH(Qt::KeyboardModifiers, modifiers);
 
@@ -863,9 +657,9 @@ namespace
 			/**
 			 * @brief Verifies shortcut overrides persist through existing global preferences.
 			 */
-			void acceptPersistsShortcutOverride()
+			void acceptPersistsShortcutOverride() const
 			{
-				resetStubState();
+				resetPreferences();
 
 				GlobalPreferencesDialog dialog;
 				dialog.show();
@@ -879,17 +673,16 @@ namespace
 
 				dialog.accept();
 
-				QCOMPARE(stubState().globalOptions.value(QStringLiteral("Shortcut.DisplayStart")).toString(),
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("Shortcut.DisplayStart")).toString(),
 				         QStringLiteral("Ctrl+Alt+Home"));
-				QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
 			}
 
 			/**
 			 * @brief Verifies explicit overrides can claim another action's default shortcut.
 			 */
-			void overrideClaimsDefaultShortcut()
+			void overrideClaimsDefaultShortcut() const
 			{
-				resetStubState();
+				resetPreferences();
 
 				GlobalPreferencesDialog dialog;
 				dialog.show();
@@ -913,7 +706,7 @@ namespace
 
 				dialog.accept();
 
-				QCOMPARE(stubState().globalOptions.value(QStringLiteral("Shortcut.DisplayStart")).toString(),
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("Shortcut.DisplayStart")).toString(),
 				         QStringLiteral("PgUp"));
 				QCOMPARE(
 				    QMudShortcutPreferenceUtils::shortcutListToPortableText(
@@ -923,19 +716,17 @@ namespace
 				             QMudShortcutPreferenceUtils::effectiveShortcutsForId(
 				                 QStringLiteral("DisplayPageUp"))),
 				         QString());
-				QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
 			}
 
 			/**
 			 * @brief Verifies stored duplicate explicit overrides do not become active duplicate shortcuts.
 			 */
-			void duplicateStoredOverridesFallBackToDefaults()
+			void duplicateStoredOverridesFallBackToDefaults() const
 			{
-				resetStubState();
-				stubState().globalOptions.insert(QStringLiteral("Shortcut.DisplayStart"),
-				                                 QStringLiteral("PgUp"));
-				stubState().globalOptions.insert(QStringLiteral("Shortcut.DisplayPageDown"),
-				                                 QStringLiteral("PgUp"));
+				resetPreferences();
+				m_app->setGlobalOptionString(QStringLiteral("Shortcut.DisplayStart"), QStringLiteral("PgUp"));
+				m_app->setGlobalOptionString(QStringLiteral("Shortcut.DisplayPageDown"),
+				                             QStringLiteral("PgUp"));
 
 				GlobalPreferencesDialog dialog;
 				auto                   *table = dialog.findChild<QTableWidget *>();
@@ -963,9 +754,9 @@ namespace
 			/**
 			 * @brief Verifies world-slot actions are configurable shortcut preferences.
 			 */
-			void worldSlotShortcutsArePreferenceDefinitions()
+			void worldSlotShortcutsArePreferenceDefinitions() const
 			{
-				resetStubState();
+				resetPreferences();
 
 				const auto *firstWorld =
 				    QMudShortcutPreferenceUtils::definitionForId(QStringLiteral("World1"));
@@ -1006,11 +797,11 @@ namespace
 			/**
 			 * @brief Verifies Lua page script editor passes Tab to focus traversal.
 			 */
-			void luaScriptEditorAllowsTabFocusTraversal()
+			void luaScriptEditorAllowsTabFocusTraversal() const
 			{
-				resetStubState();
-				stubState().globalOptions.insert(QStringLiteral("LuaScript"),
-				                                 QStringLiteral("test-lua-script-editor-tab-focus"));
+				resetPreferences();
+				m_app->setGlobalOptionString(QStringLiteral("LuaScript"),
+				                             QStringLiteral("test-lua-script-editor-tab-focus"));
 
 				GlobalPreferencesDialog dialog;
 
@@ -1033,11 +824,31 @@ namespace
 			/**
 			 * @brief Verifies interval controls track auto-check toggle while check-now remains enabled.
 			 */
-			void updateIntervalTracksAutoCheckStateWhenMechanismAvailable()
+			void updateIntervalTracksAutoCheckStateWhenMechanismAvailable() const
 			{
-				resetStubState();
-				stubState().globalOptions.insert(QStringLiteral("AutoCheckForUpdates"), 1);
-				stubState().globalOptions.insert(QStringLiteral("UpdateCheckIntervalHours"), 6);
+				resetPreferences();
+				m_app->setGlobalOptionInt(QStringLiteral("AutoCheckForUpdates"), 1);
+				m_app->setGlobalOptionInt(QStringLiteral("UpdateCheckIntervalHours"), 6);
+
+				const bool       hadDisableUpdate      = qEnvironmentVariableIsSet("QMUD_DISABLE_UPDATE");
+				const QByteArray originalDisableUpdate = qgetenv("QMUD_DISABLE_UPDATE");
+				const bool       hadAppImage           = qEnvironmentVariableIsSet("APPIMAGE");
+				const QByteArray originalAppImage      = qgetenv("APPIMAGE");
+				QVERIFY(qputenv("QMUD_DISABLE_UPDATE", QByteArrayLiteral("0")));
+				QVERIFY(qputenv("APPIMAGE", QByteArrayLiteral("qmud-test.AppImage")));
+				const auto restoreUpdateEnvironment = qScopeGuard(
+				    [hadDisableUpdate, originalDisableUpdate, hadAppImage, originalAppImage]
+				    {
+					    if (hadDisableUpdate)
+						    (void)qputenv("QMUD_DISABLE_UPDATE", originalDisableUpdate);
+					    else
+						    qunsetenv("QMUD_DISABLE_UPDATE");
+					    if (hadAppImage)
+						    (void)qputenv("APPIMAGE", originalAppImage);
+					    else
+						    qunsetenv("APPIMAGE");
+				    });
+				QVERIFY(AppController::isUpdateMechanismAvailable());
 
 				GlobalPreferencesDialog dialog;
 				dialog.show();
@@ -1072,29 +883,11 @@ namespace
 			}
 
 			/**
-			 * @brief Verifies `Check now` forwards to AppController with this dialog as parent.
-			 */
-			void checkNowCallsAppController()
-			{
-				resetStubState();
-
-				GlobalPreferencesDialog dialog;
-				dialog.show();
-
-				QPushButton *checkNowButton = findButtonByText(dialog, QStringLiteral("Check now"));
-				QVERIFY(checkNowButton);
-				QTest::mouseClick(checkNowButton, Qt::LeftButton);
-
-				QCOMPARE(stubState().checkForUpdatesNowCallCount, 1);
-				QCOMPARE(stubState().lastUpdateCheckParent.data(), static_cast<QWidget *>(&dialog));
-			}
-
-			/**
 			 * @brief Verifies update-related options persist through dialog acceptance.
 			 */
-			void acceptPersistsUpdateSettings()
+			void acceptPersistsUpdateSettings() const
 			{
-				resetStubState();
+				resetPreferences();
 
 				GlobalPreferencesDialog dialog;
 				dialog.show();
@@ -1117,26 +910,22 @@ namespace
 
 				dialog.accept();
 
-				QCOMPARE(stubState().globalOptions.value(QStringLiteral("AutoCheckForUpdates")).toInt(), 0);
-				QCOMPARE(stubState().globalOptions.value(QStringLiteral("UpdateCheckIntervalHours")).toInt(),
-				         24);
-				QCOMPARE(stubState().globalOptions.value(QStringLiteral("EnableReloadFeature")).toInt(), 0);
-				QCOMPARE(
-				    stubState().globalOptions.value(QStringLiteral("ReloadMccpDisableTimeoutMs")).toInt(),
-				    850);
-				QCOMPARE(stubState().applyGlobalPreferencesCallCount, 1);
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("AutoCheckForUpdates")).toInt(), 0);
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("UpdateCheckIntervalHours")).toInt(), 24);
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("EnableReloadFeature")).toInt(), 0);
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("ReloadMccpDisableTimeoutMs")).toInt(), 850);
 			}
 
 			/**
 			 * @brief Verifies printer font family and style are displayed and persisted separately.
 			 */
-			void printerFontStyleLoadsAndPersists()
+			void printerFontStyleLoadsAndPersists() const
 			{
-				resetStubState();
-				stubState().globalOptions.insert(QStringLiteral("PrinterFont"), QStringLiteral("Menlo"));
-				stubState().globalOptions.insert(QStringLiteral("PrinterFontSize"), 11);
-				stubState().globalOptions.insert(QStringLiteral("PrinterFontWeight"), QFont::Bold);
-				stubState().globalOptions.insert(QStringLiteral("PrinterFontItalic"), 1);
+				resetPreferences();
+				m_app->setGlobalOptionString(QStringLiteral("PrinterFont"), QStringLiteral("Menlo"));
+				m_app->setGlobalOptionInt(QStringLiteral("PrinterFontSize"), 11);
+				m_app->setGlobalOptionInt(QStringLiteral("PrinterFontWeight"), QFont::Bold);
+				m_app->setGlobalOptionInt(QStringLiteral("PrinterFontItalic"), 1);
 
 				GlobalPreferencesDialog dialog;
 				dialog.show();
@@ -1146,34 +935,73 @@ namespace
 
 				dialog.accept();
 
-				QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFont")).toString(),
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("PrinterFont")).toString(),
 				         QStringLiteral("Menlo"));
-				QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFontSize")).toInt(), 11);
-				QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFontWeight")).toInt(),
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("PrinterFontSize")).toInt(), 11);
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("PrinterFontWeight")).toInt(),
 				         static_cast<int>(QFont::Bold));
-				QCOMPARE(stubState().globalOptions.value(QStringLiteral("PrinterFontItalic")).toInt(), 1);
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("PrinterFontItalic")).toInt(), 1);
 			}
 
 			/**
 			 * @brief Verifies world-list entries persist relative to QMUD_HOME when possible.
 			 */
-			void acceptPersistsWorldListRelativeToQmudHome()
+			void acceptPersistsWorldListRelativeToQmudHome() const
 			{
-				resetStubState();
+				resetPreferences();
 
-				const QString qmudHome = QFileInfo(testIniFilePath()).absolutePath();
+				const QString qmudHome = QFileInfo(m_app->iniFilePath()).absolutePath();
 				const QString worldPath =
 				    QDir::cleanPath(QDir(qmudHome).filePath(QStringLiteral("worlds/test-world.mcl")));
-				stubState().globalOptions.insert(QStringLiteral("WorldList"), worldPath);
+				m_app->setGlobalOptionString(QStringLiteral("WorldList"), worldPath);
 
 				GlobalPreferencesDialog dialog;
 				dialog.show();
 				dialog.accept();
 
-				QCOMPARE(stubState().globalOptions.value(QStringLiteral("WorldList")).toString(),
-				         QStringLiteral("./worlds/test-world.mcl"));
+				QCOMPARE(m_app->getGlobalOption(QStringLiteral("WorldList")).toString(),
+				         QStringLiteral("./worlds/test-world.qdl"));
 			}
 			// NOLINTEND(readability-convert-member-functions-to-static)
+
+		private:
+			/**
+			 * @brief Restores production preference values used by this fixture.
+			 */
+			void resetPreferences() const
+			{
+				Q_ASSERT(m_app);
+				m_app->setGlobalOptionString(QStringLiteral("Locale"), QStringLiteral("en"));
+				m_app->setGlobalOptionInt(QStringLiteral("SplitViewDividerWidth"), 1);
+				m_app->setGlobalOptionInt(QStringLiteral("AutoCheckForUpdates"), 1);
+				m_app->setGlobalOptionInt(QStringLiteral("UpdateCheckIntervalHours"), 1);
+				m_app->setGlobalOptionInt(QStringLiteral("EnableReloadFeature"), 1);
+				m_app->setGlobalOptionInt(QStringLiteral("ReloadMccpDisableTimeoutMs"), 1000);
+				m_app->setGlobalOptionString(QStringLiteral("PrinterFont"), QStringLiteral("Courier"));
+				m_app->setGlobalOptionInt(QStringLiteral("PrinterFontSize"), 10);
+				m_app->setGlobalOptionInt(QStringLiteral("PrinterFontWeight"), QFont::Normal);
+				m_app->setGlobalOptionInt(QStringLiteral("PrinterFontItalic"), 0);
+				m_app->setGlobalOptionString(QStringLiteral("WorldList"), QString());
+				m_app->setGlobalOptionString(QStringLiteral("PluginList"), QString());
+				m_app->setGlobalOptionString(QStringLiteral("DefaultWorldFileDirectory"),
+				                             QStringLiteral("./worlds/"));
+				m_app->setGlobalOptionString(QStringLiteral("DefaultLogFileDirectory"),
+				                             QStringLiteral("./logs/"));
+				m_app->setGlobalOptionString(QStringLiteral("PluginsDirectory"),
+				                             QStringLiteral("./worlds/plugins/"));
+				m_app->setGlobalOptionString(QStringLiteral("LuaScript"), QString());
+				for (const auto &definition : QMudShortcutPreferenceUtils::shortcutDefinitions())
+					m_app->setGlobalOptionString(definition.preferenceKey, QString());
+
+				QSettings settings(m_app->iniFilePath(), QSettings::IniFormat);
+				settings.remove(QStringLiteral("GlobalPreferencesDialog"));
+				settings.sync();
+			}
+
+			std::unique_ptr<AppController> m_app;
+			QString                        m_originalCurrentPath;
+			QByteArray                     m_originalQmudHome;
+			bool                           m_hadOriginalQmudHome{false};
 	};
 } // namespace
 

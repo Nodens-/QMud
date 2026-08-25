@@ -175,54 +175,22 @@ target_compile_definitions(tst_TtsEngine
         PRIVATE
         QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
 
-set(QMUD_NATIVE_PLUGIN_REGISTRY_TEST_SOURCES
-        "${CMAKE_SOURCE_DIR}/src/WorldRuntime.h"
-        "${CMAKE_SOURCE_DIR}/src/NativePluginRegistry.cpp"
-        "${CMAKE_SOURCE_DIR}/src/TtsEngine.cpp"
-        "${CMAKE_SOURCE_DIR}/src/helpers/AcceleratorUtils.cpp"
-        "${CMAKE_SOURCE_DIR}/src/helpers/PluginPathUtils.cpp")
-
-set(QMUD_NATIVE_PLUGIN_REGISTRY_TEST_LIBRARIES
-        ${QMUD_QT_TEXTTOSPEECH_TARGET}
-        Qt6::Sql)
-
 qmud_add_qtest(tst_NativePluginRegistry
         SOURCES
         unit/tst_NativePluginRegistry.cpp
-        ${QMUD_NATIVE_PLUGIN_REGISTRY_TEST_SOURCES}
-        "${CMAKE_SOURCE_DIR}/src/WorldDocument.cpp"
         LIBRARIES
-        ${QMUD_NATIVE_PLUGIN_REGISTRY_TEST_LIBRARIES}
+        qmud_app_core
         LABELS
         unit)
-target_compile_definitions(tst_NativePluginRegistry
-        PRIVATE
-        QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
 
 if (QMUD_ENABLE_LUA_SCRIPTING)
     qmud_add_qtest(tst_LuaExecution
             SOURCES
             unit/tst_LuaExecution.cpp
-            "${CMAKE_SOURCE_DIR}/src/helpers/LuaCompletionDeliveryUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/LuaExecutionUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/LuaExecutorWorker.cpp"
-            "${CMAKE_SOURCE_DIR}/src/LuaSupport.cpp"
-            "${CMAKE_SOURCE_DIR}/src/Sqlite3Lua.cpp"
-            "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
             LIBRARIES
-            ${LUA_LIBRARIES}
-            Qt6::Sql
+            qmud_app_core
             LABELS
             unit)
-    if (TARGET Lua::Lua)
-        target_link_libraries(tst_LuaExecution PRIVATE Lua::Lua)
-    endif ()
-    if (DEFINED LUA_INCLUDE_DIR)
-        target_include_directories(tst_LuaExecution SYSTEM BEFORE PRIVATE ${LUA_INCLUDE_DIR})
-    elseif (DEFINED LUA_INCLUDE_DIRS)
-        target_include_directories(tst_LuaExecution SYSTEM BEFORE PRIVATE ${LUA_INCLUDE_DIRS})
-    endif ()
-    target_compile_definitions(tst_LuaExecution PRIVATE QMUD_ENABLE_LUA_SCRIPTING)
 
     qmud_add_qtest(tst_LuaCallbackEngine
             GUI
@@ -786,11 +754,8 @@ if (QMUD_ENABLE_GUI_TESTS)
             GUI
             SOURCES
             gui/tst_Dialog_ImportXml.cpp
-            "${CMAKE_SOURCE_DIR}/src/dialogs/ImportXmlDialog.cpp"
-            "${CMAKE_SOURCE_DIR}/src/dialogs/PluginsDialog.cpp"
-            "${CMAKE_SOURCE_DIR}/src/AppController.h"
             LIBRARIES
-            Qt6::Sql
+            qmud_app_core
             LABELS
             gui
             TIMEOUT
@@ -800,11 +765,8 @@ if (QMUD_ENABLE_GUI_TESTS)
             GUI
             SOURCES
             gui/tst_Dialog_Plugins.cpp
-            "${CMAKE_SOURCE_DIR}/src/dialogs/PluginsDialog.cpp"
-            "${CMAKE_SOURCE_DIR}/src/AppController.h"
-            "${CMAKE_SOURCE_DIR}/src/WorldRuntime.h"
             LIBRARIES
-            Qt6::Sql
+            qmud_app_core
             LABELS
             gui
             TIMEOUT
@@ -814,11 +776,8 @@ if (QMUD_ENABLE_GUI_TESTS)
             GUI
             SOURCES
             gui/tst_Dialog_PluginWizard.cpp
-            "${CMAKE_SOURCE_DIR}/src/dialogs/PluginWizardDialog.cpp"
-            "${CMAKE_SOURCE_DIR}/src/AppController.h"
-            "${CMAKE_SOURCE_DIR}/src/WorldRuntime.h"
             LIBRARIES
-            Qt6::Sql
+            qmud_app_core
             LABELS
             gui
             TIMEOUT
@@ -848,13 +807,8 @@ if (QMUD_ENABLE_GUI_TESTS)
             GUI
             SOURCES
             gui/tst_Dialog_GlobalPreferencesUpdates.cpp
-            "${CMAKE_SOURCE_DIR}/src/dialogs/GlobalPreferencesDialog.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/FontUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/helpers/ShortcutPreferenceUtils.cpp"
-            "${CMAKE_SOURCE_DIR}/src/AppController.h"
             LIBRARIES
-            Qt6::Sql
-            ${QMUD_ZLIB_TARGET}
+            qmud_app_core
             LABELS
             gui
             TIMEOUT
@@ -864,8 +818,8 @@ if (QMUD_ENABLE_GUI_TESTS)
             GUI
             SOURCES
             gui/tst_MdiTabs.cpp
-            "${CMAKE_SOURCE_DIR}/src/WorldChildWindow.h"
-            "${CMAKE_SOURCE_DIR}/src/MdiTabs.cpp"
+            LIBRARIES
+            qmud_app_core
             LABELS
             gui
             TIMEOUT
