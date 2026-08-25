@@ -33,6 +33,8 @@
 #include <QVector>
 #include <QWidget>
 
+#include <span>
+
 class QPlainTextEdit;
 class WrapTextBrowser;
 class InputTextEdit;
@@ -217,13 +219,26 @@ class WorldView : public QWidget
 		void notifyRuntimeOutputLineChanged(int runtimeLineIndex);
 		/**
 		 * @brief Presents one or more newly appended runtime tail lines.
+		 * @param firstAppendedIndex Zero-based inclusive start of the appended runtime range.
+		 * @param lastAppendedIndexExclusive Zero-based exclusive end of the appended runtime range.
+		 * @param structuralEdits Ordered physical-buffer edits since the preceding presentation state.
+		 * @param removedHeadCount Number of entries evicted from the previously presented runtime head.
 		 */
-		void notifyRuntimeOutputLineAppended();
+		void
+		notifyRuntimeOutputLineAppended(int firstAppendedIndex, int lastAppendedIndexExclusive,
+		                                std::span<const WorldRuntime::OutputBufferEdit> structuralEdits  = {},
+		                                int                                             removedHeadCount = 0);
 		/**
 		 * @brief Restitches output presentation after runtime changes a known buffer range.
 		 * @param runtimeLineIndex Zero-based runtime line index where restitching starts.
+		 * @param runtimeLineEndExclusive First runtime index known to be unchanged, or `-1` when unknown.
+		 * @param structuralEdits Ordered physical-buffer edits since the preceding presentation state.
+		 * @param removedHeadCount Number of entries evicted from the previously presented runtime head.
 		 */
-		void notifyRuntimeOutputRangeChanged(int runtimeLineIndex);
+		void
+		notifyRuntimeOutputRangeChanged(int runtimeLineIndex, int runtimeLineEndExclusive,
+		                                std::span<const WorldRuntime::OutputBufferEdit> structuralEdits  = {},
+		                                int                                             removedHeadCount = 0);
 		/**
 		 * @brief Rebuilds visible output from stored line entries.
 		 * @param lines Line entries to render.
@@ -1462,6 +1477,34 @@ class WorldView : public QWidget
 				int                        insertedLineCount{0};
 		};
 		/**
+		 * @brief Returns the final-layout ranges whose content or initial height changed for a render delta.
+		 * @param delta Normalized native render cache delta to inspect.
+		 * @return Sorted, merged half-open ranges in the delta's final layout topology.
+		 */
+		[[nodiscard]] static QVector<QPair<int, int>>
+		            nativeLayoutDirtyRangesForDelta(const NativeRenderCacheDelta &delta);
+		/**
+		 * @brief Sorts and merges overlapping or adjacent half-open layout ranges.
+		 * @param ranges Ranges to normalize in place.
+		 */
+		static void mergeNativeLayoutRanges(QVector<QPair<int, int>> &ranges);
+		/**
+		 * @brief Replaces aligned native layout slot and height topology in one bulk mutation.
+		 * @param first First layout index to replace.
+		 * @param removeCount Number of existing entries to remove.
+		 * @param insertCount Number of default entries to insert.
+		 * @param defaultHeight Initial height assigned to inserted entries.
+		 * @return `true` when both topology containers remain aligned at the expected size.
+		 */
+		bool        replaceNativeLayoutTopology(int first, int removeCount, int insertCount,
+		                                        qreal defaultHeight) const;
+		/**
+		 * @brief Advances cached native layout topology immediately with one render-cache mutation.
+		 * @param delta Render-cache delta whose source revision matches the current layout topology.
+		 * @return `true` when topology and approximate layout metadata advance exactly to the delta revision.
+		 */
+		bool        advanceNativeLayoutTopologyForDelta(const NativeRenderCacheDelta &delta) const;
+		/**
 		 * @brief Returns the retained line count for incremental accessible tail-delta handling.
 		 * @param delta Native render cache delta to inspect.
 		 * @param lineCount Current native render-line count.
@@ -1557,7 +1600,7 @@ class WorldView : public QWidget
 		[[nodiscard]] bool
 		     nativePartialRenderLineOverlayCurrent(const QVector<WorldRuntime::StyleSpan> &partialSpans,
 		                                           bool appendToLastBaseLine) const;
-		void removeNativePartialRenderLineOverlay(bool bumpRevision) const;
+		void removeNativePartialRenderLineOverlay() const;
 		void applyNativePartialRenderLineOverlay() const;
 		[[nodiscard]] const NativeOutputRenderLines &finalizeNativeOutputRenderLines() const;
 		[[nodiscard]] QVector<QTextLayout::FormatRange>
@@ -1597,6 +1640,20 @@ class WorldView : public QWidget
 		[[nodiscard]] static int estimateNativeLineRows(const NativeOutputRenderLine &line,
 		                                                int                           effectiveWrapWidth,
 		                                                const QFontMetrics           &fontMetrics);
+		/**
+		 * @brief Refreshes approximate layout metadata for normalized line ranges.
+		 * @param lines Current native render lines.
+		 * @param ranges Sorted, merged half-open ranges to refresh.
+		 * @param wrapWidthPixels Effective wrap width for runtime output.
+		 * @param localWrapWidthPixels Effective wrap width for local echo/note output.
+		 * @param lineSpacingSetting Current line-spacing percentage delta.
+		 * @param layoutFont Current output font.
+		 * @param defaultLineAdvance Cached height of one visual row.
+		 */
+		void refreshNativeLayoutMetadataRanges(const NativeOutputRenderLines  &lines,
+		                                       const QVector<QPair<int, int>> &ranges, int wrapWidthPixels,
+		                                       int localWrapWidthPixels, int lineSpacingSetting,
+		                                       const QFont &layoutFont, qreal defaultLineAdvance) const;
 		/**
 		 * @brief Ensures exact native layouts for a bounded line range.
 		 * @param lines Current native render lines.
@@ -1642,7 +1699,7 @@ class WorldView : public QWidget
 		 */
 		void clearCurrentNativeSplitTopHeadTrimAdjustment() const;
 		/**
-		 * @brief Applies a successfully replayed split-pane head-trim adjustment.
+		 * @brief Applies a successfully captured split-pane head-trim adjustment.
 		 * @param adjustment Deferred adjustment to commit.
 		 */
 		void applyNativeSplitTopHeadTrimAdjustment(const NativeSplitTopHeadTrimAdjustment &adjustment) const;
@@ -1668,7 +1725,18 @@ class WorldView : public QWidget
 				uchar                       rowsExact{0};
 		};
 		/**
-		 * @brief Slot topology and exact layout state retained by stable runtime-line identity during cache replay.
+		 * @brief One normalized structural replacement applied to both native layout topology containers.
+		 */
+		struct NativeLayoutTopologyReplacement
+		{
+				int   first{0};
+				int   removeCount{0};
+				int   insertCount{0};
+				int   expectedSize{0};
+				qreal defaultHeight{0.0};
+		};
+		/**
+		 * @brief Slot topology and exact layout state retained by stable runtime-line identity during reconciliation.
 		 */
 		struct NativeExactLayoutSlotSnapshot
 		{
@@ -1682,9 +1750,9 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] QHash<quint64, NativeExactLayoutSlotSnapshot> captureNativeExactLayoutSlots() const;
 		/**
-		 * @brief Returns whether exact slots can safely be reconciled after a failed structural replay.
+		 * @brief Returns whether exact slots can safely be reconciled after an unexpected topology mismatch.
 		 * @param lines Current native render lines.
-		 * @param snapshots Slot topology captured before the failed replay.
+		 * @param snapshots Slot topology captured before rebuilding mismatched metadata.
 		 * @return `true` when retained lines form one contiguous stable sequence before new lines.
 		 */
 		[[nodiscard]] static bool nativeExactLayoutSnapshotReconciliationIsSafe(
@@ -1718,8 +1786,8 @@ class WorldView : public QWidget
 				void                    resize(qsizetype count, qreal defaultHeight);
 				void                    assign(qsizetype count, qreal defaultHeight);
 				void                    removeFront(qsizetype count);
-				void replace(int index, int removeCount, int insertCount, qreal defaultHeight);
-				void setHeight(int index, qreal height);
+				void                    replace(const NativeLayoutTopologyReplacement &replacement);
+				void                    setHeight(int index, qreal height);
 				void setLayoutSlotHeightRange(int firstLine, int lastLineExclusive,
 				                              const IndexedRingBuffer<NativeLayoutSlot> &layoutSlots,
 				                              qreal                                      lineAdvance);
@@ -1773,8 +1841,24 @@ class WorldView : public QWidget
 		/**
 		 * @brief Marks runtime-backed native render cache for restitching from a runtime line.
 		 * @param runtimeLineIndex Zero-based runtime line index where restitching starts.
+		 * @param runtimeLineEndExclusive First runtime index known to be unchanged, or `-1` when unknown.
+		 * @param structuralEdits Ordered physical-buffer edits since the preceding presentation state.
+		 * @param removedHeadCount Number of entries evicted from the previously presented runtime head.
 		 */
-		void markNativeRuntimeRangeRestitchPending(int runtimeLineIndex) const;
+		void
+		markNativeRuntimeRangeRestitchPending(int runtimeLineIndex, int runtimeLineEndExclusive,
+		                                      std::span<const WorldRuntime::OutputBufferEdit> structuralEdits,
+		                                      int removedHeadCount) const;
+		/**
+		 * @brief Maps pending runtime restitch coordinates through physical-buffer edits.
+		 * @param structuralEdits Ordered physical-buffer edits to apply.
+		 */
+		void transformPendingNativeRuntimeRestitches(
+		    std::span<const WorldRuntime::OutputBufferEdit> structuralEdits) const;
+		/**
+		 * @brief Clears pending exact structural-edit presentation state.
+		 */
+		void                           clearPendingNativeRuntimeStructuralEdits() const;
 		/**
 		 * @brief Restitches runtime output and synchronizes native layout/scroll state immediately.
 		 * @param allowLayoutBuild `true` when range changes require current layout geometry now.
@@ -2479,10 +2563,14 @@ class WorldView : public QWidget
 		mutable bool                             m_nativeRuntimeTailRestitchPending{false};
 		mutable int                              m_nativeRuntimeLineRestitchIndex{-1};
 		mutable int                              m_nativeRuntimeRangeRestitchStartIndex{-1};
+		mutable int                              m_nativeRuntimeRangeRestitchEndIndexExclusive{-1};
+		mutable bool                             m_nativeRuntimeAppendPending{false};
+		mutable int                              m_nativeRuntimeFirstAppendedIndex{-1};
+		mutable int                              m_nativeRuntimeLastAppendedIndexExclusive{-1};
+		mutable int                              m_nativeRuntimeRemovedHeadCountPending{0};
 		mutable qint64                           m_nativeRenderRuntimeIndexBase{0};
 		mutable quint64                          m_nativeRenderLineCacheRevision{0};
 		mutable NativeRenderCacheDelta           m_nativeRenderCacheDelta;
-		mutable QVector<NativeRenderCacheDelta>  m_nativeRenderCacheDeltas;
 		mutable int                              m_accessibleOutputCharacterCount{-1};
 		mutable quint64                          m_accessibleOutputRevision{0};
 		mutable QString                          m_accessibleOutputText;
@@ -2570,10 +2658,11 @@ class WorldView : public QWidget
 		mutable qreal                                  m_nativeLayoutCachedLineAdvance{0.0};
 		mutable QFont                                  m_nativeLayoutCachedFont;
 		mutable quint64                                m_nativeLayoutCachedRenderRevision{0};
-		mutable quint64                                m_nativeLayoutRangePreparedRevision{0};
-		mutable bool                                   m_nativeLayoutRangePreparedOnly{false};
 		mutable int                                    m_nativeLayoutCacheResets{0};
+		mutable quint64                                m_nativeLayoutMetadataRefreshes{0};
 		mutable int                                    m_nativeLayoutRowMeasurements{0};
+		mutable int                                    m_nativeExactLayoutSnapshotCaptures{0};
+		mutable int                                    m_nativeExactLayoutSnapshotRestores{0};
 		IndexedRingBuffer<WorldRuntime::LineEntry>     m_nativeStandaloneOutputLines;
 		qint64                                         m_nativeStandaloneNextLineNumber{1};
 		bool                                           m_wrapInput{false};

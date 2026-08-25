@@ -126,6 +126,130 @@ Q_DECLARE_OPAQUE_POINTER(sqlite3 *)
 
 namespace
 {
+	[[nodiscard]] bool outputLineNumbersAdjacent(const WorldRuntime::LineEntry &first,
+	                                             const WorldRuntime::LineEntry &second)
+	{
+		return first.lineNumber < std::numeric_limits<qint64>::max() &&
+		       second.lineNumber == first.lineNumber + 1;
+	}
+
+	[[nodiscard]] int
+	outputLineNumberDiscontinuityCount(const IndexedRingBuffer<WorldRuntime::LineEntry> &lines)
+	{
+		int discontinuityCount = 0;
+		for (qsizetype index = 1; index < lines.size(); ++index)
+		{
+			if (!outputLineNumbersAdjacent(lines.at(index - 1), lines.at(index)))
+				++discontinuityCount;
+		}
+		return discontinuityCount;
+	}
+
+	struct OutputBufferOriginSpan
+	{
+			int  count{0};
+			int  originalStart{0};
+			bool original{false};
+	};
+
+	[[nodiscard]] int
+	outputBufferLineCountBeforeEdits(const int                                             finalLineCount,
+	                                 const std::span<const WorldRuntime::OutputBufferEdit> structuralEdits)
+	{
+		qint64 initialLineCount = qMax(0, finalLineCount);
+		for (const WorldRuntime::OutputBufferEdit &edit : structuralEdits)
+			initialLineCount += static_cast<qint64>(edit.removedCount) - edit.insertedCount;
+		return static_cast<int>(
+		    std::clamp(initialLineCount, qint64{0}, static_cast<qint64>(std::numeric_limits<int>::max())));
+	}
+
+	[[nodiscard]] int
+	previousOutputHeadRemovalCount(const int                                             initialLineCount,
+	                               const std::span<const WorldRuntime::OutputBufferEdit> structuralEdits)
+	{
+		const int boundedInitialLineCount = qMax(0, initialLineCount);
+		if (boundedInitialLineCount == 0 || structuralEdits.empty())
+			return 0;
+
+		QVector<OutputBufferOriginSpan> spans;
+		spans.push_back({boundedInitialLineCount, 0, true});
+		int  currentLineCount = boundedInitialLineCount;
+		auto splitAt          = [&spans, &currentLineCount](const int position)
+		{
+			if (position <= 0)
+				return 0;
+			if (position >= currentLineCount)
+				return static_cast<int>(spans.size());
+
+			int spanStart = 0;
+			for (int spanIndex = 0; spanIndex < spans.size(); ++spanIndex)
+			{
+				const OutputBufferOriginSpan span    = spans.at(spanIndex);
+				const int                    spanEnd = spanStart + span.count;
+				if (position == spanStart)
+					return spanIndex;
+				if (position >= spanEnd)
+				{
+					spanStart = spanEnd;
+					continue;
+				}
+
+				const int leftCount    = position - spanStart;
+				const int rightCount   = span.count - leftCount;
+				spans[spanIndex].count = leftCount;
+				spans.insert(spanIndex + 1, {rightCount, span.originalStart + (span.original ? leftCount : 0),
+				                             span.original});
+				return spanIndex + 1;
+			}
+			return static_cast<int>(spans.size());
+		};
+		auto mergeAdjacent = [&spans]
+		{
+			for (int index = 1; index < spans.size();)
+			{
+				OutputBufferOriginSpan       &previous = spans[index - 1];
+				const OutputBufferOriginSpan &current  = spans.at(index);
+				const bool                    contiguousOriginal =
+				    previous.original && current.original &&
+				    previous.originalStart + previous.count == current.originalStart;
+				if ((!previous.original && !current.original) || contiguousOriginal)
+				{
+					previous.count += current.count;
+					spans.removeAt(index);
+					continue;
+				}
+				++index;
+			}
+		};
+
+		for (const WorldRuntime::OutputBufferEdit &edit : structuralEdits)
+		{
+			const qint64 editEnd = static_cast<qint64>(edit.index) + edit.removedCount;
+			if (edit.index < 0 || edit.removedCount < 0 || edit.insertedCount < 0 ||
+			    edit.index > currentLineCount || editEnd > currentLineCount)
+			{
+				Q_ASSERT_X(false, "previousOutputHeadRemovalCount", "Invalid output-buffer structural edit");
+				return boundedInitialLineCount;
+			}
+
+			const int removeFirstSpan = splitAt(edit.index);
+			const int removeLastSpan  = splitAt(static_cast<int>(editEnd));
+			if (removeLastSpan > removeFirstSpan)
+				spans.remove(removeFirstSpan, removeLastSpan - removeFirstSpan);
+			if (edit.insertedCount > 0)
+				spans.insert(removeFirstSpan, {edit.insertedCount, 0, false});
+			currentLineCount += edit.insertedCount - edit.removedCount;
+			mergeAdjacent();
+		}
+
+		for (const OutputBufferOriginSpan &span : std::as_const(spans))
+		{
+			if (span.original)
+				return span.originalStart;
+		}
+		return boundedInitialLineCount;
+	}
+
 	struct ResolvedWorldColourTables
 	{
 			QVector<QColor> normalAnsi;
@@ -5823,7 +5947,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 			if (startIndex < 0)
 				return;
 
-			int firstChangedIndex = -1;
+			int firstChangedIndex         = -1;
+			int lastChangedIndexExclusive = -1;
 			for (int i = startIndex; i < m_lines.size(); ++i)
 			{
 				LineEntry &entry = m_lines[i];
@@ -5835,16 +5960,17 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 				        : 0;
 				if (resolveMxpTextActionReferences(entry.spans, startColumn,
 				                                   safeQSizeToInt(entry.text.size()), frame.actionState,
-				                                   replacement) &&
-				    firstChangedIndex < 0)
+				                                   replacement))
 				{
-					firstChangedIndex = i;
+					if (firstChangedIndex < 0)
+						firstChangedIndex = i;
+					lastChangedIndexExclusive = i + 1;
 				}
 			}
 			if (firstChangedIndex < 0)
 				return;
 			invalidateLuaCallbackLineBufferSnapshot();
-			notifyOutputViewRangeChanged(firstChangedIndex);
+			notifyOutputViewRangeChanged(firstChangedIndex, lastChangedIndexExclusive);
 		};
 
 		auto appendMxpBodyLine = [](QString &body, bool &hasBodyLine, const QString &line)
@@ -9448,6 +9574,26 @@ void WorldRuntime::insertOutputLineRange(const int insertionIndex, QVector<LineE
 	const int oldLineCount  = safeQSizeToInt(m_lines.size());
 	const int boundedIndex  = qBound(0, insertionIndex, oldLineCount);
 	const int insertedCount = safeQSizeToInt(entries.size());
+	if (boundedIndex > 0 && boundedIndex < oldLineCount &&
+	    !outputLineNumbersAdjacent(m_lines.at(boundedIndex - 1), m_lines.at(boundedIndex)))
+	{
+		--m_outputLineNumberDiscontinuityCount;
+	}
+	if (boundedIndex > 0 && !outputLineNumbersAdjacent(m_lines.at(boundedIndex - 1), entries.constFirst()))
+	{
+		++m_outputLineNumberDiscontinuityCount;
+	}
+	for (int index = 1; index < insertedCount; ++index)
+	{
+		if (!outputLineNumbersAdjacent(entries.at(index - 1), entries.at(index)))
+			++m_outputLineNumberDiscontinuityCount;
+	}
+	if (boundedIndex < oldLineCount &&
+	    !outputLineNumbersAdjacent(entries.constLast(), m_lines.at(boundedIndex)))
+	{
+		++m_outputLineNumberDiscontinuityCount;
+	}
+	Q_ASSERT(m_outputLineNumberDiscontinuityCount >= 0);
 	if (boundedIndex < oldLineCount)
 	{
 		const qint64 insertionPosition = m_luaCallbackOutputIndexOrigin + boundedIndex;
@@ -9468,9 +9614,16 @@ void WorldRuntime::insertOutputLineRange(const int insertionIndex, QVector<LineE
 		}
 	}
 
-	m_lines.replace(boundedIndex, 0, insertedCount, LineEntry{});
+	m_lines.replace({boundedIndex, 0, insertedCount}, LineEntry{});
 	for (int index = 0; index < insertedCount; ++index)
 		m_lines[boundedIndex + index] = std::move(entries[index]);
+}
+
+void WorldRuntime::appendOutputLine(LineEntry entry)
+{
+	if (!m_lines.isEmpty() && !outputLineNumbersAdjacent(m_lines.constLast(), entry))
+		++m_outputLineNumberDiscontinuityCount;
+	m_lines.push_back(std::move(entry));
 }
 
 int WorldRuntime::removeOutputLineRange(const int firstIndex, const int count)
@@ -9483,7 +9636,20 @@ int WorldRuntime::removeOutputLineRange(const int firstIndex, const int count)
 	const int boundedCount = qMin(count, lineCount - boundedFirst);
 	if (boundedCount <= 0)
 		return 0;
-	const int removalEnd = boundedFirst + boundedCount;
+	const int removalEnd       = boundedFirst + boundedCount;
+	const int firstRemovedEdge = qMax(1, boundedFirst);
+	const int lastRemovedEdge  = qMin(removalEnd, lineCount - 1);
+	for (int edgeEndIndex = firstRemovedEdge; edgeEndIndex <= lastRemovedEdge; ++edgeEndIndex)
+	{
+		if (!outputLineNumbersAdjacent(m_lines.at(edgeEndIndex - 1), m_lines.at(edgeEndIndex)))
+			--m_outputLineNumberDiscontinuityCount;
+	}
+	if (boundedFirst > 0 && removalEnd < lineCount &&
+	    !outputLineNumbersAdjacent(m_lines.at(boundedFirst - 1), m_lines.at(removalEnd)))
+	{
+		++m_outputLineNumberDiscontinuityCount;
+	}
+	Q_ASSERT(m_outputLineNumberDiscontinuityCount >= 0);
 
 	// Head eviction advances the shared position origin, so it only touches
 	// cursors whose anchors are actually removed. Less common middle/tail
@@ -9590,6 +9756,8 @@ int WorldRuntime::removeOutputLineRange(const int firstIndex, const int count)
 	}
 
 	m_lines.remove(boundedFirst, boundedCount);
+	if (m_lines.size() < 2)
+		m_outputLineNumberDiscontinuityCount = 0;
 	if (boundedFirst == 0)
 		m_luaCallbackOutputIndexOrigin += boundedCount;
 	if (m_lines.isEmpty())
@@ -10996,26 +11164,11 @@ WorldRuntime::captureLuaCallbackSnapshotForRequest(const LuaBatchDispatchRequest
 		return snapshot;
 	snapshot->triggerMatchedLineSnapshotResolved = true;
 
-	int       matchedIndex = request.triggerMatchedLineBufferIndex;
-	LineEntry matchedEntry;
-	bool      matched = matchedIndex > 0 && luaContextLineEntry(matchedIndex, matchedEntry) &&
-	                    matchedEntry.lineNumber == request.triggerMatchedLineAbsoluteNumber;
-	if (!matched)
-	{
-		matchedIndex        = 0;
-		const int lineCount = luaContextLinesInBufferCount();
-		for (int index = 1; index <= lineCount; ++index)
-		{
-			LineEntry candidate;
-			if (!luaContextLineEntry(index, candidate) ||
-			    candidate.lineNumber != request.triggerMatchedLineAbsoluteNumber)
-				continue;
-			matchedIndex = index;
-			matchedEntry = std::move(candidate);
-			matched      = true;
-			break;
-		}
-	}
+	int        matchedIndex = 0;
+	LineEntry  matchedEntry;
+	const bool matched = resolveLuaCallbackMatchedLineEntry(request.triggerMatchedLineBufferIndex,
+	                                                        request.triggerMatchedLineAbsoluteNumber,
+	                                                        matchedIndex, matchedEntry);
 	if (matched)
 	{
 		snapshot->hasTriggerMatchedLineSnapshot    = true;
@@ -14096,10 +14249,12 @@ void WorldRuntime::deleteLines(int count)
 		return;
 	const int boundedCount      = qMin(count, safeQSizeToInt(m_lines.size()));
 	const int firstRemovedIndex = safeQSizeToInt(m_lines.size()) - boundedCount;
-	static_cast<void>(removeOutputLineRange(firstRemovedIndex, boundedCount));
+	const int removedCount      = removeOutputLineRange(firstRemovedIndex, boundedCount);
 	const int firstChangedIndex =
 	    m_lines.isEmpty() ? 0 : qMin(firstRemovedIndex, safeQSizeToInt(m_lines.size()) - 1);
-	notifyOutputViewRangeChanged(firstChangedIndex);
+	notifyOutputViewRangeChanged(firstChangedIndex, safeQSizeToInt(m_lines.size()),
+	                             {firstRemovedIndex, removedCount, 0},
+	                             firstRemovedIndex == 0 ? removedCount : 0);
 }
 
 void WorldRuntime::deleteOutput()
@@ -19286,7 +19441,11 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 		invalidateResolvedOutputColourCache();
 	invalidateLuaCallbackDispatchSnapshot();
 	if (key == QStringLiteral("max_output_lines"))
-		static_cast<void>(enforceOutputLineLimit());
+	{
+		const int removedHeadCount = enforceOutputLineLimit();
+		if (removedHeadCount > 0 && !m_lines.isEmpty())
+			notifyOutputViewRangeChanged(0, 0, {0, removedHeadCount, 0}, removedHeadCount);
+	}
 	if (key == QStringLiteral("naws"))
 	{
 		updateTelnetWindowSizeForNaws();
@@ -23827,11 +23986,11 @@ void WorldRuntime::addLine(const QString &text, int flags, bool hardReturn, cons
 		entry.ticks           = fallback;
 		entry.elapsed         = fallback;
 	}
-	m_lines.push_back(entry);
-	static_cast<void>(enforceOutputLineLimit());
+	appendOutputLine(std::move(entry));
+	const int removedHeadCount = enforceOutputLineLimit();
 	invalidateLuaCallbackLineBufferSnapshot();
 	if (!m_lines.isEmpty())
-		notifyOutputViewLineAppended();
+		notifyOutputViewLineAppended(removedHeadCount);
 }
 
 void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSpan> &spans, bool hardReturn,
@@ -23860,11 +24019,11 @@ void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSp
 		entry.ticks           = fallback;
 		entry.elapsed         = fallback;
 	}
-	m_lines.push_back(entry);
-	static_cast<void>(enforceOutputLineLimit());
+	appendOutputLine(std::move(entry));
+	const int removedHeadCount = enforceOutputLineLimit();
 	invalidateLuaCallbackLineBufferSnapshot();
 	if (!m_lines.isEmpty())
-		notifyOutputViewLineAppended();
+		notifyOutputViewLineAppended(removedHeadCount);
 }
 
 bool WorldRuntime::commitPendingIncomingPartialLine()
@@ -23932,6 +24091,11 @@ const IndexedRingBuffer<WorldRuntime::LineEntry> &WorldRuntime::lines() const
 	return m_lines;
 }
 
+bool WorldRuntime::outputLineNumbersContiguous() const
+{
+	return m_outputLineNumberDiscontinuityCount == 0;
+}
+
 WorldRuntime::SessionStateOutputSnapshot WorldRuntime::sessionStateOutputSnapshot() const
 {
 	SessionStateOutputSnapshot snapshot;
@@ -23979,7 +24143,8 @@ void WorldRuntime::replaceOutputLines(const IndexedRingBuffer<LineEntry> &lines)
 	if (m_sessionStateOutputBufferSealed)
 		return;
 
-	m_lines = lines;
+	m_lines                              = lines;
+	m_outputLineNumberDiscontinuityCount = outputLineNumberDiscontinuityCount(m_lines);
 	m_luaCallbackAfterAnchorInsertionCursors.clear();
 	m_luaCallbackOutputIndexOrigin = 0;
 	reconcileIncomingLineAfterOutputReplacement();
@@ -24100,13 +24265,16 @@ bool WorldRuntime::reserveIncomingLineLuaContextInBuffer()
 		entry.lineNumber = m_nextLineNumber;
 	if (entry.lineNumber >= m_nextLineNumber)
 		m_nextLineNumber = entry.lineNumber + 1;
-	m_lines.push_back(entry);
+	const qint64 entryLineNumber = entry.lineNumber;
+	appendOutputLine(std::move(entry));
 	m_luaContextLineState        = LuaContextLineState::Buffered;
 	m_luaContextLineBufferIndex  = safeQSizeToInt(m_lines.size());
-	m_luaContextLineNumber       = entry.lineNumber;
+	m_luaContextLineNumber       = entryLineNumber;
 	m_luaPendingContextLineEntry = {};
-	static_cast<void>(enforceOutputLineLimit());
+	const int removedHeadCount   = enforceOutputLineLimit();
 	invalidateLuaCallbackLineBufferSnapshot();
+	if (!m_lines.isEmpty())
+		notifyOutputViewLineAppended(removedHeadCount);
 	return true;
 }
 
@@ -24119,18 +24287,23 @@ bool WorldRuntime::updateBufferedIncomingLineLuaContext(const QString &text, int
 	if (!luaContextLinePresentInBuffer())
 		return false;
 
-	LineEntry &entry      = m_lines[m_luaContextLineBufferIndex - 1];
-	const int  entryIndex = m_luaContextLineBufferIndex - 1;
-	entry.text            = text;
-	entry.flags           = flags;
-	entry.spans           = spans;
-	entry.hardReturn      = hardReturn;
+	LineEntry &entry             = m_lines[m_luaContextLineBufferIndex - 1];
+	const int  entryIndex        = m_luaContextLineBufferIndex - 1;
+	const bool visibilityChanged = ((entry.flags ^ flags) & LineHidden) != 0;
+	const bool hardReturnChanged = entry.hardReturn != hardReturn;
+	entry.text                   = text;
+	entry.flags                  = flags;
+	entry.spans                  = spans;
+	entry.hardReturn             = hardReturn;
 	if (m_luaContextLineState == LuaContextLineState::AwaitingReplacement && (entry.flags & LineHidden) == 0)
 	{
 		m_luaContextLineState = LuaContextLineState::Buffered;
 	}
 	invalidateLuaCallbackLineBufferSnapshot();
-	notifyOutputViewLineChanged(entryIndex);
+	if (visibilityChanged || hardReturnChanged)
+		notifyOutputViewRangeChanged(entryIndex, entryIndex + 1);
+	else
+		notifyOutputViewLineChanged(entryIndex);
 	return true;
 }
 
@@ -24143,9 +24316,11 @@ bool WorldRuntime::removeBufferedIncomingLineLuaContext()
 		return false;
 
 	const int removedIndex = m_luaContextLineBufferIndex - 1;
-	static_cast<void>(removeOutputLineRange(removedIndex, 1));
+	const int removedCount = removeOutputLineRange(removedIndex, 1);
 	QMudNativePluginRegistry::clearMushReaderPartialLine(this);
-	notifyOutputViewRangeChanged(qMax(0, qMin(removedIndex, safeQSizeToInt(m_lines.size()) - 1)));
+	const int firstChangedIndex = qMax(0, qMin(removedIndex, safeQSizeToInt(m_lines.size()) - 1));
+	notifyOutputViewRangeChanged(firstChangedIndex, removedIndex, {removedIndex, removedCount, 0},
+	                             removedIndex == 0 ? removedCount : 0);
 	return true;
 }
 
@@ -24162,7 +24337,7 @@ bool WorldRuntime::hideBufferedIncomingLineLuaContextForReplacement()
 	m_luaContextLineState = LuaContextLineState::AwaitingReplacement;
 	invalidateLuaCallbackLineBufferSnapshot();
 	QMudNativePluginRegistry::clearMushReaderPartialLine(this);
-	notifyOutputViewRangeChanged(m_luaContextLineBufferIndex - 1);
+	notifyOutputViewRangeChanged(m_luaContextLineBufferIndex - 1, m_luaContextLineBufferIndex);
 	return true;
 }
 
@@ -24188,8 +24363,9 @@ bool WorldRuntime::removeHiddenLuaContextLineByAbsoluteNumber(const qint64 absol
 			continue;
 		if ((m_lines.at(i).flags & LineHidden) == 0)
 			return false;
-		static_cast<void>(removeOutputLineRange(i, 1));
-		notifyOutputViewRangeChanged(qMax(0, qMin(i, safeQSizeToInt(m_lines.size()) - 1)));
+		const int removedCount      = removeOutputLineRange(i, 1);
+		const int firstChangedIndex = qMax(0, qMin(i, safeQSizeToInt(m_lines.size()) - 1));
+		notifyOutputViewRangeChanged(firstChangedIndex, i, {i, removedCount, 0}, i == 0 ? removedCount : 0);
 		return true;
 	}
 	return false;
@@ -24210,6 +24386,11 @@ void WorldRuntime::notifyOutputViewLineChanged(const int runtimeLineIndex)
 					m_outputViewFirstChangedIndex = runtimeLineIndex;
 				else
 					m_outputViewFirstChangedIndex = qMin(m_outputViewFirstChangedIndex, runtimeLineIndex);
+				if (m_outputViewLastChangedIndexExclusive >= 0)
+				{
+					m_outputViewLastChangedIndexExclusive =
+					    qMax(m_outputViewLastChangedIndexExclusive, runtimeLineIndex + 1);
+				}
 				return;
 			}
 			if (m_outputViewLineChangedPending && m_outputViewLineChangedIndex >= 0 &&
@@ -24217,7 +24398,10 @@ void WorldRuntime::notifyOutputViewLineChanged(const int runtimeLineIndex)
 			{
 				m_outputViewRangeChangedPending = true;
 				m_outputViewFirstChangedIndex   = qMin(m_outputViewLineChangedIndex, runtimeLineIndex);
-				m_outputViewLineChangedIndex    = -1;
+				m_outputViewLastChangedIndexExclusive =
+				    qMax(m_outputViewLineChangedIndex, runtimeLineIndex) + 1;
+				m_outputViewLineChangedPending = false;
+				m_outputViewLineChangedIndex   = -1;
 				return;
 			}
 			m_outputViewLineChangedPending = true;
@@ -24238,40 +24422,227 @@ void WorldRuntime::notifyOutputViewLineChanged(const int runtimeLineIndex)
 		view->notifyRuntimeOutputLineChanged();
 }
 
-void WorldRuntime::notifyOutputViewLineAppended()
+bool WorldRuntime::transformOutputBufferRange(int &firstIndex, int &lastIndexExclusive,
+                                              const std::span<const OutputBufferEdit> structuralEdits)
+{
+	if (firstIndex < 0 || lastIndexExclusive < firstIndex)
+		return false;
+
+	qint64 mappedFirst = firstIndex;
+	qint64 mappedLast  = lastIndexExclusive;
+	for (const OutputBufferEdit &edit : structuralEdits)
+	{
+		if (edit.index < 0 || edit.removedCount < 0 || edit.insertedCount < 0)
+			return false;
+		const qint64 editFirst = edit.index;
+		const qint64 editLast  = editFirst + static_cast<qint64>(edit.removedCount);
+		const qint64 delta     = static_cast<qint64>(edit.insertedCount) - edit.removedCount;
+
+		if (mappedFirst == mappedLast)
+		{
+			if (mappedFirst > editFirst)
+			{
+				if (mappedFirst >= editLast)
+					mappedFirst += delta;
+				else
+					mappedFirst = editFirst;
+			}
+			mappedLast = mappedFirst;
+		}
+		else
+		{
+			if (mappedFirst >= editLast)
+				mappedFirst += delta;
+			else if (mappedFirst >= editFirst)
+				mappedFirst = editFirst;
+
+			if (mappedLast > editFirst)
+			{
+				if (mappedLast >= editLast)
+					mappedLast += delta;
+				else
+					mappedLast = editFirst + edit.insertedCount;
+			}
+		}
+
+		if (mappedFirst < 0 || mappedLast < mappedFirst || mappedLast > std::numeric_limits<int>::max())
+		{
+			return false;
+		}
+	}
+
+	firstIndex         = static_cast<int>(mappedFirst);
+	lastIndexExclusive = static_cast<int>(mappedLast);
+	return true;
+}
+
+void WorldRuntime::transformPendingOutputViewRanges(const std::span<const OutputBufferEdit> structuralEdits)
+{
+	if (structuralEdits.empty())
+		return;
+
+	if (m_outputViewRangeChangedPending && m_outputViewFirstChangedIndex >= 0)
+	{
+		if (m_outputViewLastChangedIndexExclusive < m_outputViewFirstChangedIndex ||
+		    !transformOutputBufferRange(m_outputViewFirstChangedIndex, m_outputViewLastChangedIndexExclusive,
+		                                structuralEdits))
+		{
+			m_outputViewFirstChangedIndex         = 0;
+			m_outputViewLastChangedIndexExclusive = -1;
+		}
+	}
+	else if (m_outputViewLineChangedPending && m_outputViewLineChangedIndex >= 0)
+	{
+		int transformedFirst = m_outputViewLineChangedIndex;
+		int transformedLast  = transformedFirst + 1;
+		if (!transformOutputBufferRange(transformedFirst, transformedLast, structuralEdits))
+		{
+			m_outputViewRangeChangedPending       = true;
+			m_outputViewFirstChangedIndex         = 0;
+			m_outputViewLastChangedIndexExclusive = -1;
+			m_outputViewLineChangedPending        = false;
+			m_outputViewLineChangedIndex          = -1;
+		}
+		else if (transformedFirst == transformedLast)
+		{
+			m_outputViewLineChangedPending = false;
+			m_outputViewLineChangedIndex   = -1;
+		}
+		else if (transformedLast == transformedFirst + 1)
+		{
+			m_outputViewLineChangedIndex = transformedFirst;
+		}
+		else
+		{
+			m_outputViewRangeChangedPending       = true;
+			m_outputViewFirstChangedIndex         = transformedFirst;
+			m_outputViewLastChangedIndexExclusive = transformedLast;
+			m_outputViewLineChangedPending        = false;
+			m_outputViewLineChangedIndex          = -1;
+		}
+	}
+
+	if (m_outputViewTailAppendPending && m_outputViewFirstAppendedIndex >= 0)
+	{
+		if (m_outputViewLastAppendedIndexExclusive < m_outputViewFirstAppendedIndex ||
+		    !transformOutputBufferRange(m_outputViewFirstAppendedIndex,
+		                                m_outputViewLastAppendedIndexExclusive, structuralEdits))
+		{
+			m_outputViewFirstAppendedIndex         = 0;
+			m_outputViewLastAppendedIndexExclusive = -1;
+		}
+		else if (m_outputViewFirstAppendedIndex == m_outputViewLastAppendedIndexExclusive)
+		{
+			m_outputViewTailAppendPending          = false;
+			m_outputViewFirstAppendedIndex         = -1;
+			m_outputViewLastAppendedIndexExclusive = -1;
+		}
+	}
+
+	m_outputViewStructuralEditsPending.reserve(m_outputViewStructuralEditsPending.size() +
+	                                           std::ssize(structuralEdits));
+	for (const OutputBufferEdit &edit : structuralEdits)
+		m_outputViewStructuralEditsPending.push_back(edit);
+}
+
+void WorldRuntime::notifyOutputViewLineAppended(const int removedHeadCount)
 {
 	const QVector<WorldView *> views = presentationViews();
 	if (views.isEmpty())
 		return;
+	const int boundedRemovedHeadCount   = qMax(0, removedHeadCount);
+	const int postMutationSize          = safeQSizeToInt(m_lines.size());
+	const int appendIndexBeforeMutation = postMutationSize + boundedRemovedHeadCount - 1;
+	std::array<OutputBufferEdit, 2> structuralEdits{};
+	int                             structuralEditCount = 0;
+	if (appendIndexBeforeMutation >= 0)
+		structuralEdits[structuralEditCount++] = {appendIndexBeforeMutation, 0, 1};
+	if (boundedRemovedHeadCount > 0)
+		structuralEdits[structuralEditCount++] = {0, boundedRemovedHeadCount, 0};
+	const std::span<const OutputBufferEdit> editSpan(structuralEdits.data(),
+	                                                 static_cast<std::size_t>(structuralEditCount));
 	if (m_outputViewMutationBatchDepth > 0)
 	{
+		transformPendingOutputViewRanges(editSpan);
+		const int firstAppendedIndex         = postMutationSize - 1;
+		const int lastAppendedIndexExclusive = postMutationSize;
+		if (!m_outputViewTailAppendPending)
+		{
+			m_outputViewFirstAppendedIndex         = firstAppendedIndex;
+			m_outputViewLastAppendedIndexExclusive = lastAppendedIndexExclusive;
+		}
+		else if (m_outputViewLastAppendedIndexExclusive >= m_outputViewFirstAppendedIndex)
+		{
+			m_outputViewFirstAppendedIndex = qMin(m_outputViewFirstAppendedIndex, firstAppendedIndex);
+			m_outputViewLastAppendedIndexExclusive =
+			    qMax(m_outputViewLastAppendedIndexExclusive, lastAppendedIndexExclusive);
+		}
 		m_outputViewTailAppendPending = true;
 		return;
 	}
+	const int previousHeadRemovalCount = previousOutputHeadRemovalCount(
+	    outputBufferLineCountBeforeEdits(postMutationSize, editSpan), editSpan);
 	for (WorldView *view : views)
-		view->notifyRuntimeOutputLineAppended();
+		view->notifyRuntimeOutputLineAppended(postMutationSize - 1, postMutationSize, editSpan,
+		                                      previousHeadRemovalCount);
 }
 
-void WorldRuntime::notifyOutputViewRangeChanged(const int runtimeLineIndex)
+void WorldRuntime::notifyOutputViewRangeChanged(const int runtimeLineIndex, const int runtimeLineEndExclusive,
+                                                const OutputBufferEdit structuralEdit,
+                                                const int              removedHeadCount)
 {
 	const QVector<WorldView *> views = presentationViews();
 	if (views.isEmpty())
 		return;
+	const int                       boundedRemovedHeadCount = qMax(0, removedHeadCount);
+	std::array<OutputBufferEdit, 2> structuralEdits{};
+	int                             structuralEditCount = 0;
+	if (structuralEdit.index >= 0)
+		structuralEdits[structuralEditCount++] = structuralEdit;
+	const bool primaryEditIncludesHeadRemoval = structuralEdit.index == 0 &&
+	                                            structuralEdit.removedCount == boundedRemovedHeadCount &&
+	                                            structuralEdit.insertedCount == 0;
+	if (boundedRemovedHeadCount > 0 && !primaryEditIncludesHeadRemoval)
+		structuralEdits[structuralEditCount++] = {0, boundedRemovedHeadCount, 0};
+	const std::span<const OutputBufferEdit> editSpan(structuralEdits.data(),
+	                                                 static_cast<std::size_t>(structuralEditCount));
 	if (m_outputViewMutationBatchDepth > 0)
 	{
-		m_outputViewRangeChangedPending = true;
-		int firstChangedIndex           = runtimeLineIndex;
-		if (m_outputViewLineChangedPending && m_outputViewLineChangedIndex >= 0)
-			firstChangedIndex = qMin(firstChangedIndex, m_outputViewLineChangedIndex);
-		if (m_outputViewFirstChangedIndex < 0)
-			m_outputViewFirstChangedIndex = firstChangedIndex;
-		else
+		transformPendingOutputViewRanges(editSpan);
+		int firstChangedIndex = qMax(0, runtimeLineIndex);
+		int lastChangedIndexExclusive =
+		    runtimeLineEndExclusive >= runtimeLineIndex ? runtimeLineEndExclusive : -1;
+		if (m_outputViewRangeChangedPending)
+		{
 			m_outputViewFirstChangedIndex = qMin(m_outputViewFirstChangedIndex, firstChangedIndex);
-		m_outputViewLineChangedIndex = -1;
+			if (m_outputViewLastChangedIndexExclusive < 0 || lastChangedIndexExclusive < 0)
+				m_outputViewLastChangedIndexExclusive = -1;
+			else
+				m_outputViewLastChangedIndexExclusive =
+				    qMax(m_outputViewLastChangedIndexExclusive, lastChangedIndexExclusive);
+		}
+		else
+		{
+			if (m_outputViewLineChangedPending && m_outputViewLineChangedIndex >= 0)
+			{
+				firstChangedIndex = qMin(firstChangedIndex, m_outputViewLineChangedIndex);
+				if (lastChangedIndexExclusive >= 0)
+					lastChangedIndexExclusive =
+					    qMax(lastChangedIndexExclusive, m_outputViewLineChangedIndex + 1);
+			}
+			m_outputViewFirstChangedIndex         = firstChangedIndex;
+			m_outputViewLastChangedIndexExclusive = lastChangedIndexExclusive;
+		}
+		m_outputViewRangeChangedPending = true;
+		m_outputViewLineChangedPending  = false;
+		m_outputViewLineChangedIndex    = -1;
 		return;
 	}
+	const int previousHeadRemovalCount = previousOutputHeadRemovalCount(
+	    outputBufferLineCountBeforeEdits(safeQSizeToInt(m_lines.size()), editSpan), editSpan);
 	for (WorldView *view : views)
-		view->notifyRuntimeOutputRangeChanged(runtimeLineIndex);
+		view->notifyRuntimeOutputRangeChanged(runtimeLineIndex, runtimeLineEndExclusive, editSpan,
+		                                      previousHeadRemovalCount);
 }
 
 void WorldRuntime::rebuildOutputPresentationViews() const
@@ -24286,32 +24657,67 @@ void WorldRuntime::clearOutputPresentationViews() const
 		view->clearOutputBuffer();
 }
 
+void WorldRuntime::resetPendingOutputViewMutationNotifications()
+{
+	m_outputViewLineChangedPending         = false;
+	m_outputViewLineChangedIndex           = -1;
+	m_outputViewRangeChangedPending        = false;
+	m_outputViewFirstChangedIndex          = -1;
+	m_outputViewLastChangedIndexExclusive  = -1;
+	m_outputViewTailAppendPending          = false;
+	m_outputViewFirstAppendedIndex         = -1;
+	m_outputViewLastAppendedIndexExclusive = -1;
+	m_outputViewStructuralEditsPending.clear();
+}
+
 void WorldRuntime::flushOutputViewMutationBatch()
 {
 	const QVector<WorldView *> views = presentationViews();
 	if (views.isEmpty())
 	{
-		m_outputViewLineChangedPending  = false;
-		m_outputViewLineChangedIndex    = -1;
-		m_outputViewRangeChangedPending = false;
-		m_outputViewFirstChangedIndex   = -1;
-		m_outputViewTailAppendPending   = false;
+		resetPendingOutputViewMutationNotifications();
+		m_outputViewMutationBatchInitialLineCount = safeQSizeToInt(m_lines.size());
 		return;
 	}
-	const bool rangeChanged         = m_outputViewRangeChangedPending;
-	const int  firstChangedIndex    = m_outputViewFirstChangedIndex;
-	const bool changed              = m_outputViewLineChangedPending;
-	const int  changedIndex         = m_outputViewLineChangedIndex;
-	const bool tailAppended         = m_outputViewTailAppendPending;
-	m_outputViewLineChangedPending  = false;
-	m_outputViewLineChangedIndex    = -1;
-	m_outputViewRangeChangedPending = false;
-	m_outputViewFirstChangedIndex   = -1;
-	m_outputViewTailAppendPending   = false;
-	if (rangeChanged && firstChangedIndex >= 0)
+	bool                      rangeChanged               = m_outputViewRangeChangedPending;
+	const int                 firstChangedIndex          = m_outputViewFirstChangedIndex;
+	const int                 lastChangedIndexExclusive  = m_outputViewLastChangedIndexExclusive;
+	bool                      changed                    = m_outputViewLineChangedPending;
+	const int                 changedIndex               = m_outputViewLineChangedIndex;
+	const bool                tailAppended               = m_outputViewTailAppendPending;
+	const int                 firstAppendedIndex         = m_outputViewFirstAppendedIndex;
+	const int                 lastAppendedIndexExclusive = m_outputViewLastAppendedIndexExclusive;
+	QVector<OutputBufferEdit> structuralEdits            = std::move(m_outputViewStructuralEditsPending);
+	resetPendingOutputViewMutationNotifications();
+	const std::span<const OutputBufferEdit> editSpan(structuralEdits.constData(),
+	                                                 static_cast<std::size_t>(structuralEdits.size()));
+	const int                               previousHeadRemovalCount =
+	    previousOutputHeadRemovalCount(m_outputViewMutationBatchInitialLineCount, editSpan);
+	m_outputViewMutationBatchInitialLineCount = safeQSizeToInt(m_lines.size());
+	const bool exactAppendRange =
+	    tailAppended && firstAppendedIndex >= 0 && lastAppendedIndexExclusive > firstAppendedIndex;
+	if (rangeChanged && exactAppendRange && firstChangedIndex >= firstAppendedIndex &&
+	    lastChangedIndexExclusive >= firstChangedIndex &&
+	    lastChangedIndexExclusive <= lastAppendedIndexExclusive)
 	{
+		rangeChanged = false;
+	}
+	if (changed && exactAppendRange && changedIndex >= firstAppendedIndex &&
+	    changedIndex < lastAppendedIndexExclusive)
+	{
+		changed = false;
+	}
+	if (rangeChanged)
+	{
+		const int boundedFirstChangedIndex         = qMax(0, firstChangedIndex);
+		const int boundedLastChangedIndexExclusive = firstChangedIndex >= 0 ? lastChangedIndexExclusive : -1;
 		for (WorldView *view : views)
-			view->notifyRuntimeOutputRangeChanged(firstChangedIndex);
+		{
+			view->notifyRuntimeOutputRangeChanged(boundedFirstChangedIndex, boundedLastChangedIndexExclusive,
+			                                      editSpan, previousHeadRemovalCount);
+			if (tailAppended)
+				view->notifyRuntimeOutputLineAppended(firstAppendedIndex, lastAppendedIndexExclusive);
+		}
 		return;
 	}
 	if (changed)
@@ -24319,7 +24725,12 @@ void WorldRuntime::flushOutputViewMutationBatch()
 		for (WorldView *view : views)
 		{
 			if (tailAppended)
-				view->notifyRuntimeOutputRangeChanged(qMax(0, changedIndex));
+			{
+				const int firstChanged = qMax(0, changedIndex);
+				view->notifyRuntimeOutputRangeChanged(firstChanged, changedIndex >= 0 ? firstChanged + 1 : -1,
+				                                      editSpan, previousHeadRemovalCount);
+				view->notifyRuntimeOutputLineAppended(firstAppendedIndex, lastAppendedIndexExclusive);
+			}
 			else if (changedIndex >= 0)
 				view->notifyRuntimeOutputLineChanged(changedIndex);
 			else
@@ -24330,7 +24741,8 @@ void WorldRuntime::flushOutputViewMutationBatch()
 	if (tailAppended)
 	{
 		for (WorldView *view : views)
-			view->notifyRuntimeOutputLineAppended();
+			view->notifyRuntimeOutputLineAppended(firstAppendedIndex, lastAppendedIndexExclusive, editSpan,
+			                                      previousHeadRemovalCount);
 	}
 }
 
@@ -24347,6 +24759,7 @@ void WorldRuntime::beginOutputViewMutationBatch()
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::beginOutputViewMutationBatch");
 	if (m_outputViewMutationBatchDepth == 0)
 	{
+		m_outputViewMutationBatchInitialLineCount = safeQSizeToInt(m_lines.size());
 		m_outputViewMutationBatchViews.clear();
 		for (WorldView *view : presentationViews())
 		{
@@ -24526,6 +24939,16 @@ quint64 WorldRuntime::luaCallbackOutputPositionFullScanCount() const
 	return m_luaCallbackOutputPositionFullScanCount;
 }
 
+quint64 WorldRuntime::luaCallbackMatchedLineResolutionEntryCopyCount() const
+{
+	return m_luaCallbackMatchedLineResolutionEntryCopyCount;
+}
+
+quint64 WorldRuntime::luaCallbackMatchedLineResolutionFullScanCount() const
+{
+	return m_luaCallbackMatchedLineResolutionFullScanCount;
+}
+
 void WorldRuntime::releaseLuaCallbackOutputStream(const quint64 outputStreamId)
 {
 	if (outputStreamId == 0)
@@ -24684,7 +25107,10 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
 		{
 			const int notifyIndex =
 			    qBound(0, firstChangedIndex - removedHeadCount, safeQSizeToInt(m_lines.size()) - 1);
-			notifyOutputViewRangeChanged(notifyIndex);
+			const int changedEndExclusive = qBound(notifyIndex, anchorIndex + segmentCount - removedHeadCount,
+			                                       safeQSizeToInt(m_lines.size()));
+			notifyOutputViewRangeChanged(notifyIndex, changedEndExclusive, {anchorIndex, 1, segmentCount},
+			                             removedHeadCount);
 		}
 		if (closedPreviousLine)
 		{
@@ -24730,7 +25156,10 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
 	{
 		const int notifyIndex =
 		    qBound(0, firstChangedIndex - removedHeadCount, safeQSizeToInt(m_lines.size()) - 1);
-		notifyOutputViewRangeChanged(notifyIndex);
+		const int changedEndExclusive = qBound(notifyIndex, insertIndex + segmentCount - removedHeadCount,
+		                                       safeQSizeToInt(m_lines.size()));
+		notifyOutputViewRangeChanged(notifyIndex, changedEndExclusive, {insertIndex, 0, segmentCount},
+		                             removedHeadCount);
 	}
 	if (closedPreviousLine)
 	{
@@ -24760,9 +25189,11 @@ void WorldRuntime::endIncomingLineLuaContext()
 		    m_lines.at(hiddenIndex).lineNumber == m_luaContextLineNumber &&
 		    (m_lines.at(hiddenIndex).flags & LineHidden) != 0)
 		{
-			static_cast<void>(removeOutputLineRange(hiddenIndex, 1));
+			const int removedCount = removeOutputLineRange(hiddenIndex, 1);
 			QMudNativePluginRegistry::clearMushReaderPartialLine(this);
-			notifyOutputViewRangeChanged(qMax(0, qMin(hiddenIndex, safeQSizeToInt(m_lines.size()) - 1)));
+			const int firstChangedIndex = qMax(0, qMin(hiddenIndex, safeQSizeToInt(m_lines.size()) - 1));
+			notifyOutputViewRangeChanged(firstChangedIndex, hiddenIndex, {hiddenIndex, removedCount, 0},
+			                             hiddenIndex == 0 ? removedCount : 0);
 		}
 	}
 	resetIncomingLineLuaContext();
@@ -24798,9 +25229,11 @@ void WorldRuntime::removeDeferredHiddenIncomingLine()
 	}
 	if (hiddenIndex >= 0 && (m_lines.at(hiddenIndex).flags & LineHidden) != 0)
 	{
-		static_cast<void>(removeOutputLineRange(hiddenIndex, 1));
+		const int removedCount = removeOutputLineRange(hiddenIndex, 1);
 		QMudNativePluginRegistry::clearMushReaderPartialLine(this);
-		notifyOutputViewRangeChanged(qMax(0, qMin(hiddenIndex, safeQSizeToInt(m_lines.size()) - 1)));
+		const int firstChangedIndex = qMax(0, qMin(hiddenIndex, safeQSizeToInt(m_lines.size()) - 1));
+		notifyOutputViewRangeChanged(firstChangedIndex, hiddenIndex, {hiddenIndex, removedCount, 0},
+		                             hiddenIndex == 0 ? removedCount : 0);
 	}
 	m_deferredHiddenLuaContextLineBufferIndex = 0;
 	m_deferredHiddenLuaContextLineNumber      = 0;
@@ -24901,37 +25334,114 @@ bool WorldRuntime::luaContextLineEntry(int lineNumber, LineEntry &entry) const
 	if (lineNumber <= 0)
 		return false;
 
-	const bool pendingLineVisible  = m_luaContextLineState == LuaContextLineState::Pending ||
-	                                 m_luaContextLineState == LuaContextLineState::Buffered ||
-	                                 m_luaContextLineState == LuaContextLineState::AwaitingReplacement;
-	const bool pendingLineBuffered = pendingLineVisible && luaContextLinePresentInBuffer();
-	if (pendingLineVisible && pendingLineBuffered && lineNumber == m_luaContextLineBufferIndex)
+	const LuaContextBufferPresentation presentation = luaContextBufferPresentation();
+	if (const LineEntry *const storedEntry = luaContextStoredLineEntryAtBufferIndex(lineNumber, presentation))
 	{
-		entry = m_lines.at(m_luaContextLineBufferIndex - 1);
+		entry = *storedEntry;
 		return true;
 	}
 
-	const int deferredHiddenIndex = deferredHiddenIncomingLineIndex();
-	const int physicalLineCount   = safeQSizeToInt(m_lines.size()) - (deferredHiddenIndex >= 0 ? 1 : 0);
-	if (m_luaContextLineState == LuaContextLineState::Pending && lineNumber == physicalLineCount + 1)
+	if (presentation.hasPendingLine && lineNumber == presentation.lineCount())
 	{
 		entry            = m_luaPendingContextLineEntry;
 		entry.lineNumber = m_luaContextLineNumber;
 		return true;
 	}
-	if (lineNumber <= physicalLineCount)
-	{
-		const int physicalIndex =
-		    lineNumber - 1 + (deferredHiddenIndex >= 0 && lineNumber - 1 >= deferredHiddenIndex ? 1 : 0);
-		if (physicalIndex >= 0 && physicalIndex < m_lines.size())
-		{
-			entry = m_lines.at(physicalIndex);
-			return true;
-		}
+	return false;
+}
+
+WorldRuntime::LuaContextBufferPresentation WorldRuntime::luaContextBufferPresentation() const
+{
+	return {
+	    safeQSizeToInt(m_lines.size()),
+	    deferredHiddenIncomingLineIndex(),
+	    m_luaContextLineState == LuaContextLineState::Pending,
+	};
+}
+
+const WorldRuntime::LineEntry *
+WorldRuntime::luaContextStoredLineEntryAtBufferIndex(const int                           bufferIndex,
+                                                     const LuaContextBufferPresentation &presentation) const
+{
+	const int physicalIndex = presentation.physicalIndexForBufferIndex(bufferIndex);
+	if (physicalIndex < 0 || physicalIndex >= m_lines.size())
+		return nullptr;
+	return &m_lines.at(physicalIndex);
+}
+
+bool WorldRuntime::resolveLuaCallbackMatchedLineEntry(const int    preferredBufferIndex,
+                                                      const qint64 absoluteLineNumber,
+                                                      int &resolvedBufferIndex, LineEntry &entry) const
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::resolveLuaCallbackMatchedLineEntry");
+	resolvedBufferIndex = 0;
+	if (absoluteLineNumber <= 0)
 		return false;
+
+	const LuaContextBufferPresentation presentation = luaContextBufferPresentation();
+	auto acceptStoredEntry                          = [&](const int bufferIndex, const LineEntry &candidate)
+	{
+		entry               = candidate;
+		resolvedBufferIndex = bufferIndex;
+		++m_luaCallbackMatchedLineResolutionEntryCopyCount;
+		return true;
+	};
+	auto acceptPendingEntry = [&]
+	{
+		entry               = m_luaPendingContextLineEntry;
+		entry.lineNumber    = m_luaContextLineNumber;
+		resolvedBufferIndex = presentation.lineCount();
+		++m_luaCallbackMatchedLineResolutionEntryCopyCount;
+		return true;
+	};
+	if (m_luaContextLineNumber == absoluteLineNumber)
+	{
+		if (presentation.hasPendingLine)
+			return acceptPendingEntry();
+		const int physicalIndex      = m_luaContextLineBufferIndex - 1;
+		const int currentBufferIndex = presentation.bufferIndexForPhysicalIndex(physicalIndex);
+		if (currentBufferIndex > 0 && physicalIndex >= 0 && physicalIndex < m_lines.size() &&
+		    m_lines.at(physicalIndex).lineNumber == absoluteLineNumber)
+		{
+			return acceptStoredEntry(currentBufferIndex, m_lines.at(physicalIndex));
+		}
 	}
 
-	return false;
+	if (const LineEntry *const preferredEntry =
+	        luaContextStoredLineEntryAtBufferIndex(preferredBufferIndex, presentation);
+	    preferredEntry && preferredEntry->lineNumber == absoluteLineNumber)
+	{
+		return acceptStoredEntry(preferredBufferIndex, *preferredEntry);
+	}
+	if (presentation.hasPendingLine && preferredBufferIndex == presentation.lineCount() &&
+	    m_luaContextLineNumber == absoluteLineNumber)
+	{
+		return acceptPendingEntry();
+	}
+
+	++m_luaCallbackMatchedLineResolutionFullScanCount;
+	const LineEntry *matchedEntry         = nullptr;
+	const qsizetype  matchedPhysicalIndex = m_lines.findIndexIf(
+	    [&](const LineEntry &candidate, const qsizetype physicalIndex)
+	    {
+		    if (physicalIndex == presentation.deferredHiddenPhysicalIndex ||
+		        candidate.lineNumber != absoluteLineNumber)
+		    {
+			    return false;
+		    }
+		    matchedEntry = &candidate;
+		    return true;
+	    });
+	if (matchedPhysicalIndex >= 0 && matchedEntry)
+	{
+		const int matchedBufferIndex =
+		    presentation.bufferIndexForPhysicalIndex(safeQSizeToInt(matchedPhysicalIndex));
+		if (matchedBufferIndex > 0)
+			return acceptStoredEntry(matchedBufferIndex, *matchedEntry);
+	}
+
+	return presentation.hasPendingLine && m_luaContextLineNumber == absoluteLineNumber ? acceptPendingEntry()
+	                                                                                   : false;
 }
 
 bool WorldRuntime::luaContextLineEntryByAbsoluteNumber(const qint64 absoluteLineNumber,
@@ -25033,8 +25543,7 @@ int WorldRuntime::luaContextLinesInBufferCount() const
 		                          [this] { return luaContextLinesInBufferCount(); });
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::luaContextLinesInBufferCount");
-	return safeQSizeToInt(m_lines.size()) + (m_luaContextLineState == LuaContextLineState::Pending ? 1 : 0) -
-	       (deferredHiddenIncomingLineIndex() >= 0 ? 1 : 0);
+	return luaContextBufferPresentation().lineCount();
 }
 
 QSharedPointer<const LuaCallbackMiniWindowSnapshot>

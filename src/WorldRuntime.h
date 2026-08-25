@@ -44,6 +44,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <span>
 
 class WorldDocument;
 class WorldSocketService;
@@ -537,6 +538,29 @@ class WorldRuntime : public QObject
 				double             ticks{0.0};
 				double             elapsed{0.0};
 		};
+		/**
+		 * @brief One exact structural edit to the physical output buffer.
+		 *
+		 * Coordinates describe the buffer immediately before this edit. A sequence
+		 * therefore maps pending presentation ranges through the same mutations that
+		 * produced the runtime's final buffer state.
+		 */
+		struct OutputBufferEdit
+		{
+				int index{0};         ///< Zero-based pre-edit insertion/removal index.
+				int removedCount{0};  ///< Number of entries removed at @ref index.
+				int insertedCount{0}; ///< Number of entries inserted at @ref index.
+		};
+		/**
+		 * @brief Maps an exact half-open output-buffer range through ordered structural edits.
+		 * @param firstIndex In/out zero-based inclusive range start.
+		 * @param lastIndexExclusive In/out zero-based exclusive range end.
+		 * @param structuralEdits Ordered edits whose coordinates describe each preceding state.
+		 * @return `true` when the input range and every edit are structurally valid.
+		 */
+		[[nodiscard]] static bool
+		transformOutputBufferRange(int &firstIndex, int &lastIndexExclusive,
+		                           std::span<const OutputBufferEdit> structuralEdits);
 		/**
 		 * @brief Shallow session-state output snapshot with one transient line optionally excluded.
 		 */
@@ -1530,6 +1554,11 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] const IndexedRingBuffer<LineEntry> &lines() const;
 		/**
+		 * @brief Returns whether buffered output line numbers form one increasing consecutive sequence.
+		 * @return `true` when every adjacent buffered line number differs by exactly one.
+		 */
+		[[nodiscard]] bool                                outputLineNumbersContiguous() const;
+		/**
 		 * @brief Returns a shallow output snapshot suitable for session-state persistence.
 		 * @return Output buffer and transient hidden line identity to exclude while serializing.
 		 */
@@ -1660,6 +1689,20 @@ class WorldRuntime : public QObject
 		 * relying on wall-clock timing in regression tests.
 		 */
 		[[nodiscard]] quint64   luaCallbackOutputPositionFullScanCount() const;
+		/**
+		 * @brief Returns the number of line-entry copies made by callback matched-line resolution.
+		 *
+		 * The counter guards against copying every rejected candidate while resolving a stale
+		 * callback buffer index. A successful resolution copies only the selected entry.
+		 *
+		 * @return Cumulative matched-line resolution entry-copy count.
+		 */
+		[[nodiscard]] quint64   luaCallbackMatchedLineResolutionEntryCopyCount() const;
+		/**
+		 * @brief Returns the number of full-buffer scans used to repair stale callback matched-line indexes.
+		 * @return Cumulative matched-line resolution full-scan count.
+		 */
+		[[nodiscard]] quint64   luaCallbackMatchedLineResolutionFullScanCount() const;
 		/**
 		 * @brief Begins a runtime-output view notification batch.
 		 */
@@ -5015,6 +5058,11 @@ class WorldRuntime : public QObject
 		                                                    bool replaceAnchor, quint64 outputStreamId,
 		                                                    LuaCallbackOutputPosition &position);
 		void               insertOutputLineRange(int insertionIndex, QVector<LineEntry> entries);
+		/**
+		 * @brief Appends one output entry while maintaining line-number topology metadata.
+		 * @param entry Entry to append.
+		 */
+		void               appendOutputLine(LineEntry entry);
 		[[nodiscard]] int  openOutputPrefixColumnsBeforeIndex(int insertionIndex) const;
 		[[nodiscard]] QString openOutputTextBeforeIndex(int insertionIndex) const;
 		/**
@@ -5392,35 +5440,132 @@ class WorldRuntime : public QObject
 		 * @brief Populates the stable output anchor for a callback snapshot.
 		 */
 		void populateLuaCallbackOutputAnchorSnapshot(LuaCallbackMiniWindowSnapshot &snapshot) const;
+		/**
+		 * @brief Immutable mapping between physical output storage and Lua-visible buffer indexes.
+		 */
+		struct LuaContextBufferPresentation
+		{
+				int  physicalLineCount{0};            ///< Lines physically stored in the output buffer.
+				int  deferredHiddenPhysicalIndex{-1}; ///< Stored line excluded from Lua presentation.
+				bool hasPendingLine{false};           ///< Whether an unbuffered pending line follows storage.
+
+				/**
+				 * @brief Returns the number of physically stored lines visible to Lua.
+				 * @return Visible stored-line count.
+				 */
+				[[nodiscard]] int storedLineCount() const
+				{
+					return physicalLineCount - (deferredHiddenPhysicalIndex >= 0 ? 1 : 0);
+				}
+				/**
+				 * @brief Returns the complete Lua-visible line count, including a pending line.
+				 * @return Complete Lua-visible line count.
+				 */
+				[[nodiscard]] int lineCount() const
+				{
+					return storedLineCount() + (hasPendingLine ? 1 : 0);
+				}
+				/**
+				 * @brief Maps a one-based Lua buffer index to stored logical indexing.
+				 * @param bufferIndex One-based Lua buffer-presentation index.
+				 * @return Zero-based stored logical index, or `-1` for a non-stored index.
+				 */
+				[[nodiscard]] int physicalIndexForBufferIndex(const int bufferIndex) const
+				{
+					const int storedIndex = bufferIndex - 1;
+					if (storedIndex < 0 || storedIndex >= storedLineCount())
+						return -1;
+					return storedIndex +
+					       (deferredHiddenPhysicalIndex >= 0 && storedIndex >= deferredHiddenPhysicalIndex
+					            ? 1
+					            : 0);
+				}
+				/**
+				 * @brief Maps stored logical indexing to a one-based Lua buffer index.
+				 * @param physicalIndex Zero-based stored logical index.
+				 * @return One-based Lua buffer-presentation index, or `0` when excluded or invalid.
+				 */
+				[[nodiscard]] int bufferIndexForPhysicalIndex(const int physicalIndex) const
+				{
+					if (physicalIndex < 0 || physicalIndex >= physicalLineCount ||
+					    physicalIndex == deferredHiddenPhysicalIndex)
+					{
+						return 0;
+					}
+					return physicalIndex + 1 -
+					       (deferredHiddenPhysicalIndex >= 0 && physicalIndex > deferredHiddenPhysicalIndex
+					            ? 1
+					            : 0);
+				}
+		};
+		/**
+		 * @brief Captures the current Lua-visible output-buffer mapping once.
+		 * @return Current physical-to-presentation mapping.
+		 */
+		[[nodiscard]] LuaContextBufferPresentation luaContextBufferPresentation() const;
+		/**
+		 * @brief Returns a stored line at a one-based Lua buffer-presentation index without copying it.
+		 * @param bufferIndex One-based Lua buffer-presentation index.
+		 * @param presentation Previously captured Lua-visible buffer mapping.
+		 * @return Stored line pointer, or `nullptr` for an invalid index or an unbuffered pending line.
+		 */
+		[[nodiscard]] const LineEntry      *
+        luaContextStoredLineEntryAtBufferIndex(int                                 bufferIndex,
+		                                            const LuaContextBufferPresentation &presentation) const;
+		/**
+		 * @brief Resolves a callback matched line without copying rejected scan candidates.
+		 * @param preferredBufferIndex One-based dispatch-time index to check first.
+		 * @param absoluteLineNumber Stable absolute line identity to resolve.
+		 * @param resolvedBufferIndex Output current one-based buffer-presentation index.
+		 * @param entry Output copy of the selected line.
+		 * @return `true` when the matched line remains in the Lua buffer presentation.
+		 */
+		bool resolveLuaCallbackMatchedLineEntry(int preferredBufferIndex, qint64 absoluteLineNumber,
+		                                        int &resolvedBufferIndex, LineEntry &entry) const;
 		void resetIncomingLineLuaContext();
 		void removeDeferredHiddenIncomingLine();
-		[[nodiscard]] int                  deferredHiddenIncomingLineIndex() const;
+		[[nodiscard]] int deferredHiddenIncomingLineIndex() const;
 		/**
 		 * @brief Notifies or defers a runtime output-line refresh.
 		 * @param runtimeLineIndex Optional zero-based runtime line index that changed.
 		 */
-		void                               notifyOutputViewLineChanged(int runtimeLineIndex = -1);
+		void              notifyOutputViewLineChanged(int runtimeLineIndex = -1);
 		/**
 		 * @brief Notifies or defers presentation of newly appended runtime tail lines.
+		 * @param removedHeadCount Exact number of physical output-buffer head entries evicted by the append.
 		 */
-		void                               notifyOutputViewLineAppended();
+		void              notifyOutputViewLineAppended(int removedHeadCount = 0);
 		/**
 		 * @brief Notifies or defers a runtime output range restitch.
 		 * @param runtimeLineIndex Zero-based runtime line index where restitching starts.
+		 * @param runtimeLineEndExclusive First runtime index known to be unchanged, or `-1` when unknown.
+		 * @param structuralEdit Optional physical-buffer edit that produced the changed range.
+		 * @param removedHeadCount Exact number of physical output-buffer head entries evicted by the mutation.
 		 */
-		void                               notifyOutputViewRangeChanged(int runtimeLineIndex);
+		void              notifyOutputViewRangeChanged(int runtimeLineIndex, int runtimeLineEndExclusive,
+		                                               OutputBufferEdit structuralEdit   = {-1, 0, 0},
+		                                               int              removedHeadCount = 0);
+		/**
+		 * @brief Maps pending batched presentation coordinates through structural edits.
+		 * @param structuralEdits Ordered physical-buffer edits to apply.
+		 */
+		void              transformPendingOutputViewRanges(std::span<const OutputBufferEdit> structuralEdits);
+		/**
+		 * @brief Clears every pending runtime-output presentation notification.
+		 */
+		void              resetPendingOutputViewMutationNotifications();
 		/**
 		 * @brief Rebuilds every registered presentation from the runtime output buffer.
 		 */
-		void                               rebuildOutputPresentationViews() const;
+		void              rebuildOutputPresentationViews() const;
 		/**
 		 * @brief Clears presentation-local output state in every registered view.
 		 */
-		void                               clearOutputPresentationViews() const;
+		void              clearOutputPresentationViews() const;
 		/**
 		 * @brief Flushes pending batched runtime output view refresh.
 		 */
-		void                               flushOutputViewMutationBatch();
+		void              flushOutputViewMutationBatch();
 		/**
 		 * @brief Returns all currently live views presenting this runtime.
 		 * @return Registered presentation views in binding order.
@@ -6093,11 +6238,16 @@ class WorldRuntime : public QObject
 		bool                                            m_miniWindowsChangedPending{false};
 		bool                                            m_suppressMiniWindowsChangedSignal{false};
 		int                                             m_outputViewMutationBatchDepth{0};
+		int                                             m_outputViewMutationBatchInitialLineCount{0};
 		bool                                            m_outputViewLineChangedPending{false};
 		int                                             m_outputViewLineChangedIndex{-1};
 		bool                                            m_outputViewRangeChangedPending{false};
 		int                                             m_outputViewFirstChangedIndex{-1};
+		int                                             m_outputViewLastChangedIndexExclusive{-1};
 		bool                                            m_outputViewTailAppendPending{false};
+		int                                             m_outputViewFirstAppendedIndex{-1};
+		int                                             m_outputViewLastAppendedIndexExclusive{-1};
+		QVector<OutputBufferEdit>                       m_outputViewStructuralEditsPending;
 		QVector<QPointer<WorldView>>                    m_outputViewMutationBatchViews;
 		QVector<QMudMemoryImageDecodeCacheEntry>        m_memoryImageDecodeCache;
 		qint64                                          m_memoryImageDecodeCacheBytes{0};
@@ -6261,6 +6411,7 @@ class WorldRuntime : public QObject
 		qint64                         m_aliasTimeNs{0};
 		QElapsedTimer                  m_lineTimer;
 		qint64                         m_nextLineNumber{1};
+		int                            m_outputLineNumberDiscontinuityCount{0};
 		enum class LuaContextLineState : quint8
 		{
 			Inactive,
@@ -6280,6 +6431,8 @@ class WorldRuntime : public QObject
 		                m_luaCallbackAfterAnchorInsertionCursors;
 		qint64          m_luaCallbackOutputIndexOrigin{0};
 		quint64         m_luaCallbackOutputPositionFullScanCount{0};
+		mutable quint64 m_luaCallbackMatchedLineResolutionEntryCopyCount{0};
+		mutable quint64 m_luaCallbackMatchedLineResolutionFullScanCount{0};
 		mutable quint64 m_luaCallbackLineBufferSnapshotGeneration{0};
 		mutable quint64 m_luaCallbackLastLineBufferSnapshotCacheGeneration{0};
 		mutable QSharedPointer<const LuaCallbackLineBufferSnapshot> m_luaCallbackLastLineBufferSnapshotCache;

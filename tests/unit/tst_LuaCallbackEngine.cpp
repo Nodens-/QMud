@@ -135,6 +135,8 @@ namespace
 			void triggerSnapshotPreservesPresentationCountAndIndexes();
 			void triggerSnapshotPreservesMatchedMetadataAndRecentPresentation();
 			void runtimeTriggerDispatchRepairsStalePresentationIndex();
+			void runtimeTriggerCurrentMatchedLineAvoidsStaleIndexScan();
+			void runtimeTriggerMatchedLineResolutionCopiesOnlySelectedEntry();
 			void stringsAndWildcardsDispatchSuppliesSnapshotForCallbackReads();
 			void linePageBaselineCapturesOnlyLastPresentedLine();
 			void workerGetLineInfoFetchesBoundedPresentationPages();
@@ -4716,6 +4718,128 @@ end
 	    "variable|true|true|true|tched|5|3");
 	QVERIFY(std::ranges::any_of(runtime.lines(), [&expected](const WorldRuntime::LineEntry &entry)
 	                            { return entry.text == expected; }));
+}
+
+void tst_LuaCallbackEngine::runtimeTriggerCurrentMatchedLineAvoidsStaleIndexScan()
+{
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("3"));
+	for (int index = 0; index < 3; ++index)
+		runtime.addLine(QStringLiteral("retained %1").arg(index), WorldRuntime::LineOutput);
+
+	runtime.beginIncomingLineLuaContext(QStringLiteral("current matched line"), WorldRuntime::LineOutput, {});
+	const int    staleBufferIndex   = runtime.incomingLineLuaContextBufferIndex();
+	const qint64 absoluteLineNumber = runtime.incomingLineLuaContextAbsoluteNumber();
+	QCOMPARE(staleBufferIndex, 4);
+	QVERIFY(runtime.reserveIncomingLineLuaContextInBuffer());
+	QCOMPARE(runtime.incomingLineLuaContextBufferIndex(), 3);
+
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
+function current_matched_line_cb(name, line, wildcards)
+end
+)lua"));
+	QVERIFY(runtime.dispatchLuaResetAndLoadScript(runtime.luaCallbacks()));
+
+	const quint64                scansBefore = runtime.luaCallbackMatchedLineResolutionFullScanCount();
+	const LuaBatchDispatchResult result      = runtime.dispatchLuaStringsAndWildcards(
+	    runtime.luaCallbacks(), QStringLiteral("current_matched_line_cb"),
+	    {QStringLiteral("trigger"), QStringLiteral("current matched line")},
+	    {QStringLiteral("current matched line")}, {}, nullptr, false, staleBufferIndex, absoluteLineNumber);
+	QVERIFY(result.hasFunctionValid);
+	QVERIFY(result.hasFunction);
+	QCOMPARE(runtime.luaCallbackMatchedLineResolutionFullScanCount(), scansBefore);
+	runtime.endIncomingLineLuaContext();
+}
+
+void tst_LuaCallbackEngine::runtimeTriggerMatchedLineResolutionCopiesOnlySelectedEntry()
+{
+	constexpr int                    fillerLineCount     = 256;
+	constexpr int                    discardedLineCount  = 200;
+	constexpr int                    retainedFillerCount = 99;
+	WorldRuntime                     runtime;
+	QVector<WorldRuntime::LineEntry> initialLines;
+	initialLines.reserve(discardedLineCount + retainedFillerCount + 1);
+	for (int index = 0; index < discardedLineCount; ++index)
+	{
+		WorldRuntime::LineEntry discarded;
+		discarded.text       = QStringLiteral("discarded %1").arg(index);
+		discarded.lineNumber = 10000 + index;
+		initialLines.push_back(std::move(discarded));
+	}
+
+	WorldRuntime::LineEntry staleIndexEntry;
+	staleIndexEntry.text       = QStringLiteral("stale index entry");
+	staleIndexEntry.lineNumber = 99;
+	initialLines.push_back(staleIndexEntry);
+	for (int index = 0; index < retainedFillerCount; ++index)
+	{
+		WorldRuntime::LineEntry filler;
+		filler.text       = QStringLiteral("filler %1").arg(index);
+		filler.lineNumber = 1000 + index;
+		initialLines.push_back(std::move(filler));
+	}
+	IndexedRingBuffer<WorldRuntime::LineEntry> lines(initialLines);
+	lines.remove(0, discardedLineCount);
+	for (int index = retainedFillerCount; index < fillerLineCount; ++index)
+	{
+		WorldRuntime::LineEntry filler;
+		filler.text       = QStringLiteral("filler %1").arg(index);
+		filler.lineNumber = 1000 + index;
+		lines.push_back(std::move(filler));
+	}
+	WorldRuntime::LineEntry matched;
+	matched.text       = QStringLiteral("matched after out-of-order entries");
+	matched.lineNumber = 42;
+	lines.push_back(matched);
+	runtime.replaceOutputLines(lines);
+
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
+function matched_line_copy_cb(name, line, wildcards)
+end
+)lua"));
+	QVERIFY(runtime.dispatchLuaResetAndLoadScript(runtime.luaCallbacks()));
+
+	const quint64                copiesBefore = runtime.luaCallbackMatchedLineResolutionEntryCopyCount();
+	const quint64                scansBefore  = runtime.luaCallbackMatchedLineResolutionFullScanCount();
+	const LuaBatchDispatchResult result       = runtime.dispatchLuaStringsAndWildcards(
+	    runtime.luaCallbacks(), QStringLiteral("matched_line_copy_cb"),
+	    {QStringLiteral("trigger"), matched.text}, {matched.text}, {}, nullptr, false, 1, matched.lineNumber);
+	QVERIFY(result.hasFunctionValid);
+	QVERIFY(result.hasFunction);
+	QCOMPARE(runtime.luaCallbackMatchedLineResolutionEntryCopyCount() - copiesBefore, quint64{1});
+	QCOMPARE(runtime.luaCallbackMatchedLineResolutionFullScanCount() - scansBefore, quint64{1});
+
+	runtime.beginIncomingLineLuaContext(QStringLiteral("deferred hidden"), WorldRuntime::LineOutput, {});
+	QVERIFY(runtime.reserveIncomingLineLuaContextInBuffer());
+	const qint64 hiddenLineNumber = runtime.incomingLineLuaContextAbsoluteNumber();
+	QVERIFY(runtime.hideBufferedIncomingLineLuaContextForReplacement());
+	runtime.setSessionStateOutputBufferSealed(true);
+	runtime.endIncomingLineLuaContext();
+	QCOMPARE(runtime.luaContextLinesInBufferCount(), fillerLineCount + 2);
+
+	const quint64 hiddenCopiesBefore          = runtime.luaCallbackMatchedLineResolutionEntryCopyCount();
+	const LuaBatchDispatchResult hiddenResult = runtime.dispatchLuaStringsAndWildcards(
+	    runtime.luaCallbacks(), QStringLiteral("matched_line_copy_cb"),
+	    {QStringLiteral("trigger"), QStringLiteral("deferred hidden")}, {QStringLiteral("deferred hidden")},
+	    {}, nullptr, false, 1, hiddenLineNumber);
+	QVERIFY(hiddenResult.hasFunctionValid);
+	QVERIFY(hiddenResult.hasFunction);
+	QCOMPARE(runtime.luaCallbackMatchedLineResolutionEntryCopyCount(), hiddenCopiesBefore);
+	runtime.setSessionStateOutputBufferSealed(false);
+
+	runtime.beginIncomingLineLuaContext(QStringLiteral("pending match"), WorldRuntime::LineOutput, {});
+	const qint64  pendingLineNumber            = runtime.incomingLineLuaContextAbsoluteNumber();
+	const quint64 pendingCopiesBefore          = runtime.luaCallbackMatchedLineResolutionEntryCopyCount();
+	const quint64 pendingScansBefore           = runtime.luaCallbackMatchedLineResolutionFullScanCount();
+	const LuaBatchDispatchResult pendingResult = runtime.dispatchLuaStringsAndWildcards(
+	    runtime.luaCallbacks(), QStringLiteral("matched_line_copy_cb"),
+	    {QStringLiteral("trigger"), QStringLiteral("pending match")}, {QStringLiteral("pending match")}, {},
+	    nullptr, false, 1, pendingLineNumber);
+	QVERIFY(pendingResult.hasFunctionValid);
+	QVERIFY(pendingResult.hasFunction);
+	QCOMPARE(runtime.luaCallbackMatchedLineResolutionEntryCopyCount() - pendingCopiesBefore, quint64{1});
+	QCOMPARE(runtime.luaCallbackMatchedLineResolutionFullScanCount(), pendingScansBefore);
+	runtime.endIncomingLineLuaContext();
 }
 
 void tst_LuaCallbackEngine::stringsAndWildcardsDispatchSuppliesSnapshotForCallbackReads()

@@ -24,6 +24,15 @@ template <typename T> class IndexedRingBuffer
 	public:
 		using value_type = T;
 		using size_type  = qsizetype;
+		/**
+		 * @brief Logical range replacement dimensions.
+		 */
+		struct Replacement
+		{
+				size_type index{0};
+				size_type removeCount{0};
+				size_type insertCount{0};
+		};
 
 		template <typename Buffer, typename Reference, typename Pointer> class BasicIterator
 		{
@@ -387,18 +396,18 @@ template <typename T> class IndexedRingBuffer
 
 		/**
 		 * @brief Replaces a logical range with repeated values in one structural mutation.
-		 * @param index First logical index to replace.
-		 * @param removeCount Number of existing elements to remove from `index`.
-		 * @param insertCount Number of replacement elements to insert at `index`.
+		 * @param replacement Logical range and replacement count.
 		 * @param value Value copied into each inserted slot.
 		 *
 		 * This shifts either the retained prefix or retained suffix once, whichever is
 		 * smaller, so middle range replacement does not degrade into repeated
 		 * single-element insert/remove operations.
 		 */
-		void replace(const size_type index, const size_type removeCount, const size_type insertCount,
-		             const T &value)
+		void replace(const Replacement &replacement, const T &value)
 		{
+			const size_type index       = replacement.index;
+			const size_type removeCount = replacement.removeCount;
+			const size_type insertCount = replacement.insertCount;
 			Q_ASSERT(index >= 0 && index <= m_size);
 			Q_ASSERT(removeCount >= 0);
 			Q_ASSERT(insertCount >= 0);
@@ -534,6 +543,35 @@ template <typename T> class IndexedRingBuffer
 			for (size_type index = 0; index < m_size; ++index)
 				result.push_back(at(index));
 			return result;
+		}
+
+		/**
+		 * @brief Finds the first logical element accepted by an indexed predicate.
+		 * @tparam Predicate Callable type accepting a stored value and its logical index.
+		 * @param predicate Callable receiving `(const T &, logicalIndex)` and returning whether to stop.
+		 * @return Zero-based logical index of the first accepted element, or `-1` when none is accepted.
+		 *
+		 * The circular storage is traversed as at most two contiguous physical ranges, avoiding a
+		 * modulo operation for every logical element while preserving logical-order semantics.
+		 */
+		template <typename Predicate> [[nodiscard]] size_type findIndexIf(Predicate &&predicate) const
+		{
+			if (m_size <= 0)
+				return -1;
+
+			const T *const  storage               = m_storage.constData();
+			const size_type firstPhysicalRunCount = qMin(m_size, capacity() - m_head);
+			for (size_type logicalIndex = 0; logicalIndex < firstPhysicalRunCount; ++logicalIndex)
+			{
+				if (predicate(storage[m_head + logicalIndex], logicalIndex))
+					return logicalIndex;
+			}
+			for (size_type logicalIndex = firstPhysicalRunCount; logicalIndex < m_size; ++logicalIndex)
+			{
+				if (predicate(storage[logicalIndex - firstPhysicalRunCount], logicalIndex))
+					return logicalIndex;
+			}
+			return -1;
 		}
 
 		[[nodiscard]] iterator begin()
