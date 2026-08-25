@@ -1498,6 +1498,53 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(heightIndex.prefixHeightAt(secondExpectedCount), heightIndex.totalHeight());
 		}
 
+		void nativeLayoutContentSaltTracksOnlyItsAuthoritativeKey()
+		{
+			WorldView                         view;
+			WorldView::NativeOutputRenderLine line;
+			line.text                   = QStringLiteral("layout salt cache");
+			line.opacity                = 1.0;
+			line.firstRuntimeLineNumber = 1;
+			line.lastRuntimeLineNumber  = 1;
+			line.flags                  = WorldRuntime::LineOutput;
+			view.m_nativeRenderLineCache.push_back(std::move(line));
+			view.m_nativeRenderLineCacheValid       = true;
+			view.m_nativeRenderLineCacheFromRuntime = true;
+
+			QFont layoutFont;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 400, 360, 0, layoutFont);
+			QCOMPARE(view.m_nativeLayoutContentSaltComputations, 1);
+			const quint64 initialSalt = view.m_nativeLayoutCachedContentSalt;
+
+			makeNativeLayoutCacheExact(view, view.m_nativeRenderLineCache, 400, 360, 0, layoutFont);
+			makeNativeLayoutCacheExact(view, view.m_nativeRenderLineCache, 400, 360, 0, layoutFont);
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 420, 380, 0, layoutFont);
+			QCOMPARE(view.m_nativeLayoutContentSaltComputations, 1);
+			QCOMPARE(view.m_nativeLayoutCachedContentSalt, initialSalt);
+
+			view.bumpNativeRenderLineCacheRevision(WorldView::NativeRenderCacheDeltaKind::HeadMutation, 1,
+			                                       false, 0, 0, true);
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 420, 380, 0, layoutFont);
+			QCOMPARE(view.m_nativeLayoutContentSaltComputations, 1);
+			QCOMPARE(view.m_nativeLayoutCachedContentSalt, initialSalt);
+
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 420, 380, 10, layoutFont);
+			QCOMPARE(view.m_nativeLayoutContentSaltComputations, 2);
+			const quint64 spacedSalt = view.m_nativeLayoutCachedContentSalt;
+			QVERIFY(spacedSalt != initialSalt);
+
+			layoutFont.setPointSize(layoutFont.pointSize() + 1);
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 420, 380, 10, layoutFont);
+			QCOMPARE(view.m_nativeLayoutContentSaltComputations, 3);
+			const quint64 fontSalt = view.m_nativeLayoutCachedContentSalt;
+			QVERIFY(fontSalt != spacedSalt);
+
+			view.m_showBold = !view.m_showBold;
+			view.ensureNativeLayoutCaches(view.m_nativeRenderLineCache, 420, 380, 10, layoutFont);
+			QCOMPARE(view.m_nativeLayoutContentSaltComputations, 4);
+			QVERIFY(view.m_nativeLayoutCachedContentSalt != fontSalt);
+		}
+
 		void nativeLayoutAdvancesConsecutiveRenderDeltasWithoutReset()
 		{
 			WorldView view;

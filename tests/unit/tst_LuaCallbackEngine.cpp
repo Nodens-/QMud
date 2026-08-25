@@ -185,6 +185,7 @@ namespace
 			void freshNotepadSnapshotDoesNotReplayFlushedClose();
 			void workerNotepadCachesPreserveGlobalAndOwnerLists();
 			void workerUnavailableNotepadRefreshDoesNotExportStaleCaches();
+			void callbackRuleListsMaterializeOnlyOnDemandAndPreserveMutations() const;
 			void callbackSnapshotSuppliesGetInfoAndMiniWindowReads();
 			void callbackMiniWindowResourceIdentityIsExact();
 			void callbackMiniWindowStructuredCachesKeepDelimiterDistinctKeys();
@@ -10510,6 +10511,165 @@ end
 	LuaBatchDispatchResult statusResult;
 	dispatchWorkerAndWait(executor, status, statusResult);
 	QCOMPARE(statusResult.stringResult, QStringLiteral("true|true|<nil>"));
+
+	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::callbackRuleListsMaterializeOnlyOnDemandAndPreserveMutations() const
+{
+	WorldRuntime      runtime;
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function suspend_without_rule_access()
+  utils.inputbox("suspend", "rules", "")
+end
+function suspend_after_selective_rule_access()
+  local world_triggers = GetTriggerList()
+  local plugin_aliases = GetPluginAliasList("plugin.other")
+  selective_rule_summary = world_triggers[1] .. "|" .. plugin_aliases[1]
+  utils.inputbox("suspend", "rules", "")
+end
+function mutate_world_rules()
+  mutation_summary = tostring(
+    EnableTrigger("world_trigger", false) == error_code.eOK and
+    EnableAlias("world_alias", false) == error_code.eOK and
+    EnableTimer("world_timer", false) == error_code.eOK and
+    GetTriggerOption("world_trigger", "enabled") == 0 and
+    GetAliasOption("world_alias", "enabled") == 0 and
+    GetTimerOption("world_timer", "enabled") == 0)
+end
+function rule_status(value)
+  return (selective_rule_summary or "") .. "|" .. (mutation_summary or "")
+end
+)lua"),
+	                       &runtime, QString());
+
+	auto makeRuntimeTrigger = [](const QString &name)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("name"), name);
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		return trigger;
+	};
+	auto makeRuntimeAlias = [](const QString &name)
+	{
+		WorldRuntime::Alias alias;
+		alias.attributes.insert(QStringLiteral("name"), name);
+		alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		return alias;
+	};
+	auto makeRuntimeTimer = [](const QString &name)
+	{
+		WorldRuntime::Timer timer;
+		timer.attributes.insert(QStringLiteral("name"), name);
+		timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		return timer;
+	};
+	runtime.setTriggers({makeRuntimeTrigger(QStringLiteral("world_trigger"))});
+	runtime.setAliases({makeRuntimeAlias(QStringLiteral("world_alias"))});
+	runtime.setTimers({makeRuntimeTimer(QStringLiteral("world_timer"))});
+
+	auto snapshot        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto makeSnapshotRow = []<typename Item>(const QString &name)
+	{
+		Item item;
+		item.attributes.insert(QStringLiteral("name"), name);
+		item.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		return item;
+	};
+	snapshot->triggerListsByPluginId[QString()].push_back(
+	    makeSnapshotRow.operator()<LuaCallbackTriggerSnapshot>(QStringLiteral("world_trigger")));
+	snapshot->aliasListsByPluginId[QString()].push_back(
+	    makeSnapshotRow.operator()<LuaCallbackAliasSnapshot>(QStringLiteral("world_alias")));
+	snapshot->timerListsByPluginId[QString()].push_back(
+	    makeSnapshotRow.operator()<LuaCallbackTimerSnapshot>(QStringLiteral("world_timer")));
+	const QString otherPluginId = QStringLiteral("plugin.other");
+	snapshot->triggerListsByPluginId[otherPluginId].push_back(
+	    makeSnapshotRow.operator()<LuaCallbackTriggerSnapshot>(QStringLiteral("plugin_trigger")));
+	snapshot->aliasListsByPluginId[otherPluginId].push_back(
+	    makeSnapshotRow.operator()<LuaCallbackAliasSnapshot>(QStringLiteral("plugin_alias")));
+	snapshot->timerListsByPluginId[otherPluginId].push_back(
+	    makeSnapshotRow.operator()<LuaCallbackTimerSnapshot>(QStringLiteral("plugin_timer")));
+
+	auto attributesDetached = [](const auto &lists, const QString &pluginId)
+	{
+		const auto listIt = lists.constFind(pluginId);
+		return listIt != lists.constEnd() && !listIt->isEmpty() &&
+		       listIt->constFirst().attributes.isDetached();
+	};
+	auto dispatchSuspending = [&](const QString &functionName)
+	{
+		LuaBatchDispatchRequest request;
+		request.engines               = {engine};
+		request.kind                  = LuaBatchDispatchKind::NoArgs;
+		request.functionName          = functionName;
+		request.miniWindowSnapshotArg = snapshot;
+		LuaBatchDispatchResult result;
+		dispatchWorkerAndWait(executor, request, result);
+		return result;
+	};
+	auto resumeSuspended = [&](const LuaBatchDispatchResult &suspendedResult)
+	{
+		LuaBatchDispatchRequest resume;
+		resume.engines       = {engine};
+		resume.kind          = LuaBatchDispatchKind::ResumeSuspendedModalString;
+		resume.modalResumeId = suspendedResult.modalResumeId;
+		resume.stringArg     = acceptedModalStringResult(QStringLiteral("continue"));
+		LuaBatchDispatchResult resumed;
+		dispatchWorkerAndWait(executor, resume, resumed);
+		QVERIFY(!resumed.suspended);
+		executeDeferredMutations(resumed);
+	};
+
+	LuaBatchDispatchResult noAccess = dispatchSuspending(QStringLiteral("suspend_without_rule_access"));
+	QVERIFY(noAccess.suspended);
+	QVERIFY(noAccess.modalResumeId != 0);
+	QVERIFY(attributesDetached(snapshot->triggerListsByPluginId, QString()));
+	QVERIFY(attributesDetached(snapshot->aliasListsByPluginId, QString()));
+	QVERIFY(attributesDetached(snapshot->timerListsByPluginId, QString()));
+	QVERIFY(attributesDetached(snapshot->triggerListsByPluginId, otherPluginId));
+	QVERIFY(attributesDetached(snapshot->aliasListsByPluginId, otherPluginId));
+	QVERIFY(attributesDetached(snapshot->timerListsByPluginId, otherPluginId));
+	resumeSuspended(noAccess);
+
+	LuaBatchDispatchResult selective =
+	    dispatchSuspending(QStringLiteral("suspend_after_selective_rule_access"));
+	QVERIFY(selective.suspended);
+	QVERIFY(selective.modalResumeId != 0);
+	QVERIFY(!attributesDetached(snapshot->triggerListsByPluginId, QString()));
+	QVERIFY(attributesDetached(snapshot->aliasListsByPluginId, QString()));
+	QVERIFY(attributesDetached(snapshot->timerListsByPluginId, QString()));
+	QVERIFY(attributesDetached(snapshot->triggerListsByPluginId, otherPluginId));
+	QVERIFY(!attributesDetached(snapshot->aliasListsByPluginId, otherPluginId));
+	QVERIFY(attributesDetached(snapshot->timerListsByPluginId, otherPluginId));
+	resumeSuspended(selective);
+
+	LuaBatchDispatchRequest mutationRequest;
+	mutationRequest.engines               = {engine};
+	mutationRequest.kind                  = LuaBatchDispatchKind::NoArgs;
+	mutationRequest.functionName          = QStringLiteral("mutate_world_rules");
+	mutationRequest.miniWindowSnapshotArg = snapshot;
+	LuaBatchDispatchResult mutationResult;
+	dispatchWorkerAndWait(executor, mutationRequest, mutationResult);
+	QCOMPARE(runtime.triggers().constFirst().attributes.value(QStringLiteral("enabled")),
+	         QStringLiteral("1"));
+	QCOMPARE(runtime.aliases().constFirst().attributes.value(QStringLiteral("enabled")), QStringLiteral("1"));
+	QCOMPARE(runtime.timers().constFirst().attributes.value(QStringLiteral("enabled")), QStringLiteral("1"));
+	executeDeferredMutations(mutationResult);
+	QCOMPARE(runtime.triggers().constFirst().attributes.value(QStringLiteral("enabled")),
+	         QStringLiteral("0"));
+	QCOMPARE(runtime.aliases().constFirst().attributes.value(QStringLiteral("enabled")), QStringLiteral("0"));
+	QCOMPARE(runtime.timers().constFirst().attributes.value(QStringLiteral("enabled")), QStringLiteral("0"));
+
+	LuaBatchDispatchRequest statusRequest;
+	statusRequest.engines      = {engine};
+	statusRequest.kind         = LuaBatchDispatchKind::StringInOut;
+	statusRequest.functionName = QStringLiteral("rule_status");
+	statusRequest.stringArg    = QStringLiteral("ignored");
+	LuaBatchDispatchResult statusResult;
+	dispatchWorkerAndWait(executor, statusRequest, statusResult);
+	QCOMPARE(statusResult.stringResult, QStringLiteral("world_trigger|plugin_alias|true"));
 
 	teardownWorkerEngine(executor, engine);
 }

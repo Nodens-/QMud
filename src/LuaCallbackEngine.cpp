@@ -504,6 +504,14 @@ namespace
 			bool                            releaseScheduled{false};
 	};
 
+	template <typename SnapshotItem, typename Item> struct LazyCallbackListCache
+	{
+			QHash<QString, QList<SnapshotItem>> snapshotsByPluginId;
+			QHash<QString, QList<Item>>         materializedByPluginId;
+			QSet<QString>                       resolvedPluginIds;
+			QSet<QString>                       missingPluginIds;
+	};
+
 	struct LuaCallbackExecutionContext
 	{
 			CallbackWildcardDomain                              wildcardDomain{CallbackWildcardDomain::None};
@@ -636,62 +644,59 @@ namespace
 			QVector<LuaCallbackNotepadSnapshot>                   notepadPresentationSnapshot;
 			bool                                                  hasNotepadPresentationSnapshot{false};
 			bool                                                  notepadPresentationRequiresRefresh{false};
-			bool                                              notepadPresentationRefreshUnavailable{false};
-			bool                                              notepadPresentationChanged{false};
-			QVector<CallbackNotepadPresentationMutation>      pendingNotepadPresentationMutations;
-			QHash<QString, int>                               databaseColumnsByName;
-			QHash<QString, QString>                           databaseErrorsByName;
-			QHash<QString, QString>                           databaseColumnNamesByKey;
-			QSet<QString>                                     missingDatabaseColumnNameKeys;
-			QHash<QString, QString>                           databaseColumnTextByKey;
-			QSet<QString>                                     missingDatabaseColumnTextKeys;
-			QHash<QString, QVariant>                          databaseColumnValuesByKey;
-			QSet<QString>                                     missingDatabaseColumnValueKeys;
-			QHash<QString, int>                               databaseColumnTypesByKey;
-			QHash<QString, QVariant>                          databaseInfoByKey;
-			QSet<QString>                                     missingDatabaseInfoKeys;
-			QHash<QString, QStringList>                       databaseColumnNamesByName;
-			QSet<QString>                                     missingDatabaseColumnNamesByName;
-			QHash<QString, QVector<QVariant>>                 databaseColumnValuesByName;
-			QSet<QString>                                     missingDatabaseColumnValuesByName;
-			QHash<QString, LuaCallbackDatabaseSnapshot>       databaseSnapshotsByName;
-			bool                                              hasDatabaseSnapshot{false};
-			QSet<QString>                                     dirtyDatabaseSnapshotNames;
-			QHash<QString, int>                               databaseTotalChangesByName;
-			QHash<QString, int>                               databaseChangesByName;
-			QHash<QString, QString>                           databaseLastInsertRowidByName;
-			QStringList                                       databaseListSnapshot;
-			bool                                              hasDatabaseListSnapshot{false};
-			bool                                              databaseListSnapshotDirty{false};
-			QHash<int, int>                                   soundStatusByBuffer;
-			QHash<int, bool>                                  soundBufferReusableByBuffer;
-			QHash<QString, QList<int>>                        udpPortListByRuntimeKey;
-			QHash<QString, QHash<int, QString>>               udpListenerPluginIdsByRuntimeKey;
-			QSet<QString>                                     dirtyUdpSnapshotRuntimeKeys;
-			QSet<int>                                         usedUdpPortsSnapshot;
-			QHash<int, int>                                   usedUdpPortReferenceCountsSnapshot;
-			bool                                              hasUsedUdpPortsSnapshot{false};
-			bool                                              usedUdpPortsSnapshotDirty{false};
-			QHash<QString, QString>                           variableValuesByKey;
-			QSet<QString>                                     missingVariableValueKeys;
-			QSet<QString>                                     unavailablePluginVariableSnapshotIds;
-			QHash<QString, WorldRuntime::Trigger>             triggerSnapshotsByKey;
-			QSet<QString>                                     missingTriggerSnapshotKeys;
-			QSet<QString>                                     missingTriggerPluginIds;
-			QHash<QString, QList<WorldRuntime::Trigger>>      triggerListsByPluginId;
-			QSet<QString>                                     missingTriggerListPluginIds;
-			QHash<QString, WorldRuntime::Alias>               aliasSnapshotsByKey;
-			QSet<QString>                                     missingAliasSnapshotKeys;
-			QSet<QString>                                     missingAliasPluginIds;
-			QHash<QString, QList<WorldRuntime::Alias>>        aliasListsByPluginId;
-			QSet<QString>                                     missingAliasListPluginIds;
-			QHash<QString, WorldRuntime::Timer>               timerSnapshotsByKey;
-			QSet<QString>                                     missingTimerSnapshotKeys;
-			QSet<QString>                                     missingTimerPluginIds;
-			QHash<QString, QList<WorldRuntime::Timer>>        timerListsByPluginId;
-			QSet<QString>                                     missingTimerListPluginIds;
-			QHash<QString, int>                               pluginSupportStatusByKey;
-			QStringList                                       pluginIdListSnapshot;
+			bool                                         notepadPresentationRefreshUnavailable{false};
+			bool                                         notepadPresentationChanged{false};
+			QVector<CallbackNotepadPresentationMutation> pendingNotepadPresentationMutations;
+			QHash<QString, int>                          databaseColumnsByName;
+			QHash<QString, QString>                      databaseErrorsByName;
+			QHash<QString, QString>                      databaseColumnNamesByKey;
+			QSet<QString>                                missingDatabaseColumnNameKeys;
+			QHash<QString, QString>                      databaseColumnTextByKey;
+			QSet<QString>                                missingDatabaseColumnTextKeys;
+			QHash<QString, QVariant>                     databaseColumnValuesByKey;
+			QSet<QString>                                missingDatabaseColumnValueKeys;
+			QHash<QString, int>                          databaseColumnTypesByKey;
+			QHash<QString, QVariant>                     databaseInfoByKey;
+			QSet<QString>                                missingDatabaseInfoKeys;
+			QHash<QString, QStringList>                  databaseColumnNamesByName;
+			QSet<QString>                                missingDatabaseColumnNamesByName;
+			QHash<QString, QVector<QVariant>>            databaseColumnValuesByName;
+			QSet<QString>                                missingDatabaseColumnValuesByName;
+			QHash<QString, LuaCallbackDatabaseSnapshot>  databaseSnapshotsByName;
+			bool                                         hasDatabaseSnapshot{false};
+			QSet<QString>                                dirtyDatabaseSnapshotNames;
+			QHash<QString, int>                          databaseTotalChangesByName;
+			QHash<QString, int>                          databaseChangesByName;
+			QHash<QString, QString>                      databaseLastInsertRowidByName;
+			QStringList                                  databaseListSnapshot;
+			bool                                         hasDatabaseListSnapshot{false};
+			bool                                         databaseListSnapshotDirty{false};
+			QHash<int, int>                              soundStatusByBuffer;
+			QHash<int, bool>                             soundBufferReusableByBuffer;
+			QHash<QString, QList<int>>                   udpPortListByRuntimeKey;
+			QHash<QString, QHash<int, QString>>          udpListenerPluginIdsByRuntimeKey;
+			QSet<QString>                                dirtyUdpSnapshotRuntimeKeys;
+			QSet<int>                                    usedUdpPortsSnapshot;
+			QHash<int, int>                              usedUdpPortReferenceCountsSnapshot;
+			bool                                         hasUsedUdpPortsSnapshot{false};
+			bool                                         usedUdpPortsSnapshotDirty{false};
+			QHash<QString, QString>                      variableValuesByKey;
+			QSet<QString>                                missingVariableValueKeys;
+			QSet<QString>                                unavailablePluginVariableSnapshotIds;
+			QHash<QString, WorldRuntime::Trigger>        triggerSnapshotsByKey;
+			QSet<QString>                                missingTriggerSnapshotKeys;
+			QSet<QString>                                missingTriggerPluginIds;
+			LazyCallbackListCache<LuaCallbackTriggerSnapshot, WorldRuntime::Trigger> triggerListCache;
+			QHash<QString, WorldRuntime::Alias>                                      aliasSnapshotsByKey;
+			QSet<QString>                                                            missingAliasSnapshotKeys;
+			QSet<QString>                                                            missingAliasPluginIds;
+			LazyCallbackListCache<LuaCallbackAliasSnapshot, WorldRuntime::Alias>     aliasListCache;
+			QHash<QString, WorldRuntime::Timer>                                      timerSnapshotsByKey;
+			QSet<QString>                                                            missingTimerSnapshotKeys;
+			QSet<QString>                                                            missingTimerPluginIds;
+			LazyCallbackListCache<LuaCallbackTimerSnapshot, WorldRuntime::Timer>     timerListCache;
+			QHash<QString, int>                                                      pluginSupportStatusByKey;
+			QStringList                                                              pluginIdListSnapshot;
 			bool                                              hasPluginIdListSnapshot{false};
 			QHash<QString, QVariant>                          pluginInfoValuesByKey;
 			QSet<QString>                                     missingPluginInfoValueKeys;
@@ -5308,74 +5313,75 @@ namespace
 		}
 	}
 
-	template <typename Item>
-	bool tryResolveCallbackListSnapshotFromCache(const QString                     &pluginId,
-	                                             const QHash<QString, QList<Item>> &listsByPluginId,
-	                                             const QSet<QString> &missingPluginIds, QList<Item> &items,
-	                                             bool &pluginMissing, bool &cacheHit)
+	template <typename SnapshotItem, typename Item, typename Converter>
+	const QList<Item> *resolveLazyCallbackList(const QString                             &pluginId,
+	                                           LazyCallbackListCache<SnapshotItem, Item> &cache,
+	                                           Converter &&converter, bool &pluginMissing, bool &cacheHit)
 	{
 		cacheHit      = false;
 		pluginMissing = false;
-		if (!pluginId.isEmpty() && missingPluginIds.contains(pluginId))
+		if (!pluginId.isEmpty() && cache.missingPluginIds.contains(pluginId))
+		{
+			cacheHit      = true;
+			pluginMissing = true;
+			return nullptr;
+		}
+		if (const auto listIt = cache.materializedByPluginId.constFind(pluginId);
+		    listIt != cache.materializedByPluginId.constEnd())
+		{
+			cacheHit = true;
+			return &listIt.value();
+		}
+		if (cache.resolvedPluginIds.contains(pluginId))
+			return nullptr;
+
+		const auto snapshotIt = cache.snapshotsByPluginId.constFind(pluginId);
+		if (snapshotIt == cache.snapshotsByPluginId.constEnd())
+			return nullptr;
+
+		cache.resolvedPluginIds.insert(pluginId);
+		const auto materializedIt =
+		    cache.materializedByPluginId.insert(pluginId, converter(snapshotIt.value()));
+		cacheHit = true;
+		return &materializedIt.value();
+	}
+
+	template <typename SnapshotItem, typename Item, typename Converter>
+	bool tryResolveLazyCallbackListFromCache(const QString                             &pluginId,
+	                                         LazyCallbackListCache<SnapshotItem, Item> &cache,
+	                                         Converter &&converter, QList<Item> &items, bool &pluginMissing,
+	                                         bool &cacheHit)
+	{
+		const QList<Item> *view = resolveLazyCallbackList(pluginId, cache, std::forward<Converter>(converter),
+		                                                  pluginMissing, cacheHit);
+		if (!view)
 		{
 			items.clear();
-			cacheHit      = true;
-			pluginMissing = true;
 			return false;
 		}
-		if (const auto listIt = listsByPluginId.constFind(pluginId); listIt != listsByPluginId.constEnd())
-		{
-			items    = listIt.value();
-			cacheHit = true;
-			return true;
-		}
-		return false;
+		items = *view;
+		return true;
 	}
 
-	template <typename Item>
-	bool tryResolveCallbackListSnapshotViewFromCache(const QString                     &pluginId,
-	                                                 const QHash<QString, QList<Item>> &listsByPluginId,
-	                                                 const QSet<QString>               &missingPluginIds,
-	                                                 const QList<Item> *&itemsView, bool &pluginMissing,
-	                                                 bool &cacheHit)
+	template <typename SnapshotItem, typename Item>
+	void cacheLazyCallbackList(const QString &pluginId, const bool found, const QList<Item> &items,
+	                           const bool pluginMissing, LazyCallbackListCache<SnapshotItem, Item> &cache)
 	{
-		cacheHit      = false;
-		pluginMissing = false;
-		itemsView     = nullptr;
-		if (!pluginId.isEmpty() && missingPluginIds.contains(pluginId))
-		{
-			cacheHit      = true;
-			pluginMissing = true;
-			return false;
-		}
-		if (const auto listIt = listsByPluginId.constFind(pluginId); listIt != listsByPluginId.constEnd())
-		{
-			itemsView = &listIt.value();
-			cacheHit  = true;
-			return true;
-		}
-		return false;
-	}
-
-	template <typename Item>
-	void cacheCallbackListSnapshot(const QString &pluginId, const bool found, const QList<Item> &items,
-	                               const bool pluginMissing, QHash<QString, QList<Item>> &listsByPluginId,
-	                               QSet<QString> &missingPluginIds)
-	{
+		cache.resolvedPluginIds.insert(pluginId);
 		if (!pluginId.isEmpty())
 		{
 			if (pluginMissing)
 			{
-				missingPluginIds.insert(pluginId);
-				listsByPluginId.remove(pluginId);
+				cache.missingPluginIds.insert(pluginId);
+				cache.materializedByPluginId.remove(pluginId);
 				return;
 			}
-			missingPluginIds.remove(pluginId);
+			cache.missingPluginIds.remove(pluginId);
 		}
 		if (found)
-			listsByPluginId.insert(pluginId, items);
+			cache.materializedByPluginId.insert(pluginId, items);
 		else
-			listsByPluginId.remove(pluginId);
+			cache.materializedByPluginId.remove(pluginId);
 	}
 
 	bool tryResolveCallbackTriggerSnapshotFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
@@ -5497,23 +5503,23 @@ namespace
 	                                            QList<WorldRuntime::Trigger> &triggers, bool &pluginMissing,
 	                                            bool &cacheHit)
 	{
-		const auto *context = activeCallbackContextConst(engine);
+		auto *context = activeCallbackContext(engine);
 		if (!context)
 		{
 			cacheHit      = false;
 			pluginMissing = false;
 			return false;
 		}
-		return tryResolveCallbackListSnapshotFromCache(pluginId, context->triggerListsByPluginId,
-		                                               context->missingTriggerListPluginIds, triggers,
-		                                               pluginMissing, cacheHit);
+		return tryResolveLazyCallbackListFromCache(pluginId, context->triggerListCache,
+		                                           triggersFromCallbackSnapshots, triggers, pluginMissing,
+		                                           cacheHit);
 	}
 
 	bool tryResolveCallbackTriggerListViewFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
 	                                                const QList<WorldRuntime::Trigger> *&triggersView,
 	                                                bool &pluginMissing, bool &cacheHit)
 	{
-		const auto *context = activeCallbackContextConst(engine);
+		auto *context = activeCallbackContext(engine);
 		if (!context)
 		{
 			cacheHit      = false;
@@ -5521,9 +5527,9 @@ namespace
 			triggersView  = nullptr;
 			return false;
 		}
-		return tryResolveCallbackListSnapshotViewFromCache(pluginId, context->triggerListsByPluginId,
-		                                                   context->missingTriggerListPluginIds, triggersView,
-		                                                   pluginMissing, cacheHit);
+		triggersView = resolveLazyCallbackList(pluginId, context->triggerListCache,
+		                                       triggersFromCallbackSnapshots, pluginMissing, cacheHit);
+		return triggersView != nullptr;
 	}
 
 	void cacheCallbackTriggerList(const LuaCallbackEngine *engine, const QString &pluginId, const bool found,
@@ -5532,31 +5538,30 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		cacheCallbackListSnapshot(pluginId, found, triggers, pluginMissing, context->triggerListsByPluginId,
-		                          context->missingTriggerListPluginIds);
+		cacheLazyCallbackList(pluginId, found, triggers, pluginMissing, context->triggerListCache);
 	}
 
 	bool tryResolveCallbackAliasListFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
 	                                          QList<WorldRuntime::Alias> &aliases, bool &pluginMissing,
 	                                          bool &cacheHit)
 	{
-		const auto *context = activeCallbackContextConst(engine);
+		auto *context = activeCallbackContext(engine);
 		if (!context)
 		{
 			cacheHit      = false;
 			pluginMissing = false;
 			return false;
 		}
-		return tryResolveCallbackListSnapshotFromCache(pluginId, context->aliasListsByPluginId,
-		                                               context->missingAliasListPluginIds, aliases,
-		                                               pluginMissing, cacheHit);
+		return tryResolveLazyCallbackListFromCache(pluginId, context->aliasListCache,
+		                                           aliasesFromCallbackSnapshots, aliases, pluginMissing,
+		                                           cacheHit);
 	}
 
 	bool tryResolveCallbackAliasListViewFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
 	                                              const QList<WorldRuntime::Alias> *&aliasesView,
 	                                              bool &pluginMissing, bool &cacheHit)
 	{
-		const auto *context = activeCallbackContextConst(engine);
+		auto *context = activeCallbackContext(engine);
 		if (!context)
 		{
 			cacheHit      = false;
@@ -5564,9 +5569,9 @@ namespace
 			aliasesView   = nullptr;
 			return false;
 		}
-		return tryResolveCallbackListSnapshotViewFromCache(pluginId, context->aliasListsByPluginId,
-		                                                   context->missingAliasListPluginIds, aliasesView,
-		                                                   pluginMissing, cacheHit);
+		aliasesView = resolveLazyCallbackList(pluginId, context->aliasListCache, aliasesFromCallbackSnapshots,
+		                                      pluginMissing, cacheHit);
+		return aliasesView != nullptr;
 	}
 
 	void cacheCallbackAliasList(const LuaCallbackEngine *engine, const QString &pluginId, const bool found,
@@ -5575,31 +5580,29 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		cacheCallbackListSnapshot(pluginId, found, aliases, pluginMissing, context->aliasListsByPluginId,
-		                          context->missingAliasListPluginIds);
+		cacheLazyCallbackList(pluginId, found, aliases, pluginMissing, context->aliasListCache);
 	}
 
 	bool tryResolveCallbackTimerListFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
 	                                          QList<WorldRuntime::Timer> &timers, bool &pluginMissing,
 	                                          bool &cacheHit)
 	{
-		const auto *context = activeCallbackContextConst(engine);
+		auto *context = activeCallbackContext(engine);
 		if (!context)
 		{
 			cacheHit      = false;
 			pluginMissing = false;
 			return false;
 		}
-		return tryResolveCallbackListSnapshotFromCache(pluginId, context->timerListsByPluginId,
-		                                               context->missingTimerListPluginIds, timers,
-		                                               pluginMissing, cacheHit);
+		return tryResolveLazyCallbackListFromCache(
+		    pluginId, context->timerListCache, timersFromCallbackSnapshots, timers, pluginMissing, cacheHit);
 	}
 
 	bool tryResolveCallbackTimerListViewFromCache(const LuaCallbackEngine *engine, const QString &pluginId,
 	                                              const QList<WorldRuntime::Timer> *&timersView,
 	                                              bool &pluginMissing, bool &cacheHit)
 	{
-		const auto *context = activeCallbackContextConst(engine);
+		auto *context = activeCallbackContext(engine);
 		if (!context)
 		{
 			cacheHit      = false;
@@ -5607,9 +5610,9 @@ namespace
 			timersView    = nullptr;
 			return false;
 		}
-		return tryResolveCallbackListSnapshotViewFromCache(pluginId, context->timerListsByPluginId,
-		                                                   context->missingTimerListPluginIds, timersView,
-		                                                   pluginMissing, cacheHit);
+		timersView = resolveLazyCallbackList(pluginId, context->timerListCache, timersFromCallbackSnapshots,
+		                                     pluginMissing, cacheHit);
+		return timersView != nullptr;
 	}
 
 	void cacheCallbackTimerList(const LuaCallbackEngine *engine, const QString &pluginId, const bool found,
@@ -5618,8 +5621,7 @@ namespace
 		auto *context = activeCallbackContext(engine);
 		if (!context)
 			return;
-		cacheCallbackListSnapshot(pluginId, found, timers, pluginMissing, context->timerListsByPluginId,
-		                          context->missingTimerListPluginIds);
+		cacheLazyCallbackList(pluginId, found, timers, pluginMissing, context->timerListCache);
 	}
 
 	bool tryResolveCallbackPluginSupportStatusFromCache(const LuaCallbackEngine *engine,
@@ -9151,27 +9153,15 @@ namespace
 		}
 		context->pluginVariablesSnapshotById          = snapshot->pluginVariablesSnapshotById;
 		context->unavailablePluginVariableSnapshotIds = snapshot->unavailablePluginVariableSnapshotIds;
-		context->triggerListsByPluginId.clear();
-		for (auto it = snapshot->triggerListsByPluginId.constBegin();
-		     it != snapshot->triggerListsByPluginId.constEnd(); ++it)
-		{
-			context->triggerListsByPluginId.insert(it.key(), triggersFromCallbackSnapshots(it.value()));
-		}
-		context->missingTriggerListPluginIds = snapshot->missingTriggerListPluginIds;
-		context->aliasListsByPluginId.clear();
-		for (auto it = snapshot->aliasListsByPluginId.constBegin();
-		     it != snapshot->aliasListsByPluginId.constEnd(); ++it)
-		{
-			context->aliasListsByPluginId.insert(it.key(), aliasesFromCallbackSnapshots(it.value()));
-		}
-		context->missingAliasListPluginIds = snapshot->missingAliasListPluginIds;
-		context->timerListsByPluginId.clear();
-		for (auto it = snapshot->timerListsByPluginId.constBegin();
-		     it != snapshot->timerListsByPluginId.constEnd(); ++it)
-		{
-			context->timerListsByPluginId.insert(it.key(), timersFromCallbackSnapshots(it.value()));
-		}
-		context->missingTimerListPluginIds = snapshot->missingTimerListPluginIds;
+		context->triggerListCache                     = {};
+		context->triggerListCache.snapshotsByPluginId = snapshot->triggerListsByPluginId;
+		context->triggerListCache.missingPluginIds    = snapshot->missingTriggerListPluginIds;
+		context->aliasListCache                       = {};
+		context->aliasListCache.snapshotsByPluginId   = snapshot->aliasListsByPluginId;
+		context->aliasListCache.missingPluginIds      = snapshot->missingAliasListPluginIds;
+		context->timerListCache                       = {};
+		context->timerListCache.snapshotsByPluginId   = snapshot->timerListsByPluginId;
+		context->timerListCache.missingPluginIds      = snapshot->missingTimerListPluginIds;
 
 		if (snapshot->hasLineBufferSnapshot)
 		{
@@ -10096,18 +10086,15 @@ namespace
 		context->triggerSnapshotsByKey.clear();
 		context->missingTriggerSnapshotKeys.clear();
 		context->missingTriggerPluginIds.clear();
-		context->triggerListsByPluginId.clear();
-		context->missingTriggerListPluginIds.clear();
+		context->triggerListCache = {};
 		context->aliasSnapshotsByKey.clear();
 		context->missingAliasSnapshotKeys.clear();
 		context->missingAliasPluginIds.clear();
-		context->aliasListsByPluginId.clear();
-		context->missingAliasListPluginIds.clear();
+		context->aliasListCache = {};
 		context->timerSnapshotsByKey.clear();
 		context->missingTimerSnapshotKeys.clear();
 		context->missingTimerPluginIds.clear();
-		context->timerListsByPluginId.clear();
-		context->missingTimerListPluginIds.clear();
+		context->timerListCache = {};
 		context->pluginSupportStatusByKey.clear();
 		context->pluginIdListSnapshot.clear();
 		context->hasPluginIdListSnapshot = false;

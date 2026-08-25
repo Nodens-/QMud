@@ -5697,17 +5697,35 @@ int WorldView::estimateNativeLineRows(const NativeOutputRenderLine &line, const 
 	return qMax(1, rows);
 }
 
+void WorldView::commitNativeLayoutCacheState(const int wrapWidthPixels, const int localWrapWidthPixels,
+                                             const int lineSpacingSetting, const quint64 styleKey,
+                                             const qreal defaultLineAdvance, const QFont &layoutFont) const
+{
+	if (!m_nativeLayoutCacheValid || m_nativeLayoutCachedLineSpacing != lineSpacingSetting ||
+	    m_nativeLayoutCachedStyleKey != styleKey || m_nativeLayoutCachedFont != layoutFont)
+	{
+		m_nativeLayoutCachedContentSalt = nativeLayoutContentSalt(styleKey, lineSpacingSetting, layoutFont);
+		++m_nativeLayoutContentSaltComputations;
+	}
+	m_nativeLayoutCacheValid           = true;
+	m_nativeLayoutCachedWrapWidth      = wrapWidthPixels;
+	m_nativeLayoutCachedLocalWrapWidth = localWrapWidthPixels;
+	m_nativeLayoutCachedLineSpacing    = lineSpacingSetting;
+	m_nativeLayoutCachedStyleKey       = styleKey;
+	m_nativeLayoutCachedLineAdvance    = defaultLineAdvance;
+	m_nativeLayoutCachedFont           = layoutFont;
+	m_nativeLayoutCachedRenderRevision = m_nativeRenderLineCacheRevision;
+}
+
 void WorldView::refreshNativeLayoutMetadataRanges(const NativeOutputRenderLines  &lines,
                                                   const QVector<QPair<int, int>> &ranges,
                                                   const int wrapWidthPixels, const int localWrapWidthPixels,
-                                                  const int lineSpacingSetting, const QFont &layoutFont,
-                                                  const qreal defaultLineAdvance) const
+                                                  const QFont &layoutFont, const qreal defaultLineAdvance,
+                                                  const quint64 layoutContentSalt) const
 {
 	if (ranges.isEmpty())
 		return;
 
-	const quint64 layoutContentSalt =
-	    nativeLayoutContentSalt(nativeLayoutStyleKey(), lineSpacingSetting, layoutFont);
 	const QFontMetrics layoutFontMetrics(layoutFont);
 	const int          lineCount = std::min({sizeToInt(lines.size()), sizeToInt(m_nativeLayoutSlots.size()),
 	                                         sizeToInt(m_nativeLayoutHeightIndex.size())});
@@ -6008,8 +6026,8 @@ bool WorldView::advanceNativeLayoutTopologyForDelta(const NativeRenderCacheDelta
 
 	refreshNativeLayoutMetadataRanges(m_nativeRenderLineCache, deltaDirtyRanges,
 	                                  m_nativeLayoutCachedWrapWidth, m_nativeLayoutCachedLocalWrapWidth,
-	                                  m_nativeLayoutCachedLineSpacing, m_nativeLayoutCachedFont,
-	                                  defaultHeight);
+	                                  m_nativeLayoutCachedFont, defaultHeight,
+	                                  m_nativeLayoutCachedContentSalt);
 	m_nativeLayoutCachedRenderRevision = delta.revision;
 	return true;
 }
@@ -6032,19 +6050,7 @@ bool WorldView::prepareNativeLayoutRangeState(const NativeOutputRenderLines &lin
 	                           m_nativeLayoutCachedStyleKey == styleKey &&
 	                           m_nativeLayoutCachedFont == layoutFont &&
 	                           qFuzzyCompare(m_nativeLayoutCachedLineAdvance + 1.0, defaultLineAdvance + 1.0);
-	auto          setCacheKey = [&]
-	{
-		m_nativeLayoutCacheValid           = true;
-		m_nativeLayoutCachedWrapWidth      = wrapWidthPixels;
-		m_nativeLayoutCachedLocalWrapWidth = localWrapWidthPixels;
-		m_nativeLayoutCachedLineSpacing    = lineSpacingSetting;
-		m_nativeLayoutCachedStyleKey       = styleKey;
-		m_nativeLayoutCachedLineAdvance    = defaultLineAdvance;
-		m_nativeLayoutCachedFont           = layoutFont;
-		m_nativeLayoutCachedRenderRevision = m_nativeRenderLineCacheRevision;
-	};
-
-	auto resetAllMetadata = [&]
+	auto          resetAllMetadata = [&]
 	{
 		m_nativeLayoutSlots.assign(lines.size(), NativeLayoutSlot{});
 		m_nativeLayoutHeightIndex.assign(lines.size(), defaultLineAdvance);
@@ -6052,15 +6058,16 @@ bool WorldView::prepareNativeLayoutRangeState(const NativeOutputRenderLines &lin
 		const QVector<QPair<int, int>> allLines{
 		    {0, sizeToInt(lines.size())}
         };
-		refreshNativeLayoutMetadataRanges(lines, allLines, wrapWidthPixels, localWrapWidthPixels,
-		                                  lineSpacingSetting, layoutFont, defaultLineAdvance);
+		refreshNativeLayoutMetadataRanges(lines, allLines, wrapWidthPixels, localWrapWidthPixels, layoutFont,
+		                                  defaultLineAdvance, m_nativeLayoutCachedContentSalt);
 	};
 
 	if (!keyMatches)
 	{
+		commitNativeLayoutCacheState(wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting, styleKey,
+		                             defaultLineAdvance, layoutFont);
 		resetAllMetadata();
 		clearCurrentNativeSplitTopHeadTrimAdjustment();
-		setCacheKey();
 		return true;
 	}
 
@@ -6081,11 +6088,12 @@ bool WorldView::prepareNativeLayoutRangeState(const NativeOutputRenderLines &lin
 	}
 	if (safeExactSnapshotReconciliation)
 	{
-		restoreNativeExactLayoutSlots(lines, wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting,
-		                              layoutFont, exactSlots);
+		restoreNativeExactLayoutSlots(lines, wrapWidthPixels, localWrapWidthPixels,
+		                              m_nativeLayoutCachedContentSalt, exactSlots);
 	}
 
-	setCacheKey();
+	commitNativeLayoutCacheState(wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting, styleKey,
+	                             defaultLineAdvance, layoutFont);
 	return true;
 }
 
@@ -6107,13 +6115,10 @@ bool WorldView::ensureNativeLayoutRange(const NativeOutputRenderLines &lines, in
 	firstLine = qBound(0, firstLine, sizeToInt(lines.size()) - 1);
 	lastLine  = qBound(firstLine, lastLine, sizeToInt(lines.size()) - 1);
 
-	const qreal lineSpacingFactor = (100.0 + static_cast<qreal>(lineSpacingSetting)) / 100.0;
-	const qreal defaultLineAdvance =
-	    static_cast<qreal>(qMax(1, QFontMetrics(layoutFont).lineSpacing())) * lineSpacingFactor;
-	const quint64 layoutContentSalt =
-	    nativeLayoutContentSalt(nativeLayoutStyleKey(), lineSpacingSetting, layoutFont);
+	const qreal   defaultLineAdvance = m_nativeLayoutCachedLineAdvance;
+	const quint64 layoutContentSalt  = m_nativeLayoutCachedContentSalt;
 
-	bool heightChanged = false;
+	bool          heightChanged = false;
 	for (int i = firstLine; i <= lastLine; ++i)
 	{
 		const bool  hasPreviousSlot = i < sizeToInt(m_nativeLayoutSlots.size());
@@ -6383,8 +6388,7 @@ bool WorldView::nativeExactLayoutSnapshotReconciliationIsSafe(
 
 void WorldView::restoreNativeExactLayoutSlots(
     const NativeOutputRenderLines &lines, const int wrapWidthPixels, const int localWrapWidthPixels,
-    const int lineSpacingSetting, const QFont &layoutFont,
-    const QHash<quint64, NativeExactLayoutSlotSnapshot> &snapshots) const
+    const quint64 layoutContentSalt, const QHash<quint64, NativeExactLayoutSlotSnapshot> &snapshots) const
 {
 	if (snapshots.isEmpty() || m_nativeLayoutSlots.size() != lines.size() ||
 	    m_nativeLayoutHeightIndex.size() != lines.size())
@@ -6393,8 +6397,6 @@ void WorldView::restoreNativeExactLayoutSlots(
 	}
 
 	++m_nativeExactLayoutSnapshotRestores;
-	const quint64 layoutContentSalt =
-	    nativeLayoutContentSalt(nativeLayoutStyleKey(), lineSpacingSetting, layoutFont);
 	bool      restoredExactSlot = false;
 	const int lineCount         = sizeToInt(lines.size());
 	for (int i = 0; i < lineCount; ++i)
@@ -6454,10 +6456,12 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
 	{
 		return;
 	}
+	commitNativeLayoutCacheState(wrapWidthPixels, localWrapWidthPixels, lineSpacingSetting, styleKey,
+	                             defaultLineAdvance, layoutFont);
 	auto runtimeLineKeyForLine = [](const NativeOutputRenderLine &line)
 	{ return nativeRuntimeLineKey(line); };
 
-	const quint64 layoutContentSalt       = nativeLayoutContentSalt(styleKey, lineSpacingSetting, layoutFont);
+	const quint64 layoutContentSalt       = m_nativeLayoutCachedContentSalt;
 	auto          lineContentHashForWidth = [&](const NativeOutputRenderLine &line)
 	{
 		const bool hasLocalContent = (line.flags & (WorldRuntime::LineNote | WorldRuntime::LineInput)) != 0;
@@ -6627,14 +6631,6 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
 		}
 		m_nativeLayoutHeightIndex.assign(lines.size(), defaultLineAdvance);
 		markHeightRangeDirty(0, sizeToInt(lines.size()));
-		m_nativeLayoutCacheValid           = true;
-		m_nativeLayoutCachedWrapWidth      = wrapWidthPixels;
-		m_nativeLayoutCachedLocalWrapWidth = localWrapWidthPixels;
-		m_nativeLayoutCachedLineSpacing    = lineSpacingSetting;
-		m_nativeLayoutCachedStyleKey       = styleKey;
-		m_nativeLayoutCachedLineAdvance    = defaultLineAdvance;
-		m_nativeLayoutCachedFont           = layoutFont;
-		m_nativeLayoutCachedRenderRevision = m_nativeRenderLineCacheRevision;
 		clearCurrentNativeSplitTopHeadTrimAdjustment();
 		++m_nativeLayoutCacheResets;
 	}
@@ -6791,7 +6787,6 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
 
 	if (cacheWasValid && localWrapChanged)
 	{
-		m_nativeLayoutCachedLocalWrapWidth = localWrapWidthPixels;
 		invalidateLayoutSlots(0, sizeToInt(lines.size()));
 		clearCurrentNativeSplitTopHeadTrimAdjustment();
 	}
@@ -6805,8 +6800,7 @@ void WorldView::ensureNativeLayoutCaches(const NativeOutputRenderLines &lines, c
 	applyLayoutInvalidationRanges();
 	mergeDirtyHeightRanges();
 	refreshNativeLayoutMetadataRanges(lines, dirtyHeightRanges, wrapWidthPixels, localWrapWidthPixels,
-	                                  lineSpacingSetting, layoutFont, defaultLineAdvance);
-	m_nativeLayoutCachedRenderRevision = m_nativeRenderLineCacheRevision;
+	                                  layoutFont, defaultLineAdvance, layoutContentSalt);
 }
 
 qreal WorldView::nativeLayoutCumulativeHeightAt(const int index) const

@@ -1641,19 +1641,31 @@ class WorldView : public QWidget
 		                                                int                           effectiveWrapWidth,
 		                                                const QFontMetrics           &fontMetrics);
 		/**
+		 * @brief Commits the authoritative native-layout cache key and its derived content salt.
+		 * @param wrapWidthPixels Effective wrap width for runtime output.
+		 * @param localWrapWidthPixels Effective wrap width for local echo/note output.
+		 * @param lineSpacingSetting Current line-spacing percentage delta.
+		 * @param styleKey Current native-layout style key.
+		 * @param defaultLineAdvance Cached height of one visual row.
+		 * @param layoutFont Current output font.
+		 */
+		void commitNativeLayoutCacheState(int wrapWidthPixels, int localWrapWidthPixels,
+		                                  int lineSpacingSetting, quint64 styleKey, qreal defaultLineAdvance,
+		                                  const QFont &layoutFont) const;
+		/**
 		 * @brief Refreshes approximate layout metadata for normalized line ranges.
 		 * @param lines Current native render lines.
 		 * @param ranges Sorted, merged half-open ranges to refresh.
 		 * @param wrapWidthPixels Effective wrap width for runtime output.
 		 * @param localWrapWidthPixels Effective wrap width for local echo/note output.
-		 * @param lineSpacingSetting Current line-spacing percentage delta.
 		 * @param layoutFont Current output font.
 		 * @param defaultLineAdvance Cached height of one visual row.
+		 * @param layoutContentSalt Content salt committed with the native-layout cache key.
 		 */
 		void refreshNativeLayoutMetadataRanges(const NativeOutputRenderLines  &lines,
 		                                       const QVector<QPair<int, int>> &ranges, int wrapWidthPixels,
-		                                       int localWrapWidthPixels, int lineSpacingSetting,
-		                                       const QFont &layoutFont, qreal defaultLineAdvance) const;
+		                                       int localWrapWidthPixels, const QFont &layoutFont,
+		                                       qreal defaultLineAdvance, quint64 layoutContentSalt) const;
 		/**
 		 * @brief Ensures exact native layouts for a bounded line range.
 		 * @param lines Current native render lines.
@@ -1763,14 +1775,12 @@ class WorldView : public QWidget
 		 * @param lines Current native render lines.
 		 * @param wrapWidthPixels Effective wrap width for runtime output.
 		 * @param localWrapWidthPixels Effective wrap width for local echo/note output.
-		 * @param lineSpacingSetting Current line-spacing percentage delta.
-		 * @param layoutFont Current output font.
+		 * @param layoutContentSalt Content salt committed with the native-layout cache key.
 		 * @param snapshots Slot topology and exact layouts captured before the structural delta.
 		 */
 		void
 		restoreNativeExactLayoutSlots(const NativeOutputRenderLines &lines, int wrapWidthPixels,
-		                              int localWrapWidthPixels, int lineSpacingSetting,
-		                              const QFont                                         &layoutFont,
+		                              int localWrapWidthPixels, quint64 layoutContentSalt,
 		                              const QHash<quint64, NativeExactLayoutSlotSnapshot> &snapshots) const;
 		struct NativeLayoutHeightIndex
 		{
@@ -2657,9 +2667,11 @@ class WorldView : public QWidget
 		mutable quint64                                m_nativeLayoutCachedStyleKey{0};
 		mutable qreal                                  m_nativeLayoutCachedLineAdvance{0.0};
 		mutable QFont                                  m_nativeLayoutCachedFont;
+		mutable quint64                                m_nativeLayoutCachedContentSalt{0};
 		mutable quint64                                m_nativeLayoutCachedRenderRevision{0};
 		mutable int                                    m_nativeLayoutCacheResets{0};
 		mutable quint64                                m_nativeLayoutMetadataRefreshes{0};
+		mutable quint64                                m_nativeLayoutContentSaltComputations{0};
 		mutable int                                    m_nativeLayoutRowMeasurements{0};
 		mutable int                                    m_nativeExactLayoutSnapshotCaptures{0};
 		mutable int                                    m_nativeExactLayoutSnapshotRestores{0};
