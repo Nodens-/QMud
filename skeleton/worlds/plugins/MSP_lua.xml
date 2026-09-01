@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE muclient>
+
+<muclient>
+<plugin
+   name="MSP_Lua"
+   author="Nick Gammon"
+   id="7da63d78d9f91bebb5285127"
+   language="Lua"
+   purpose="Emulates MSP (MUD Sound Protocol)"
+   save_state="y"
+   date_written="2014-08-10 15:43"
+   requires="4.54"
+   version="1.0"
+   >
+<description trim="y">
+<![CDATA[
+Type: "msp:help" to see this help.
+
+See: http://www.gammon.com.au/forum/bbshowpost.php?bbsubject_id=783 for a more complete description.
+
+You will need to get the sound files manually (ie. from the MUD) and install them before using this. 
+The plugin is configured to look for them in the "sounds" directory of the MUSHclient installation,
+but you can change that by typing:
+
+  set_msp_path new_path
+
+eg.
+
+  set_msp_path d:\muds\mushclient\msp
+
+]]>
+
+</description>
+
+</plugin>
+
+
+<!--  Triggers  -->
+
+<triggers>
+  <trigger
+   enabled="y"
+   match="!!SOUND\(([A-Za-z0-9./]+).*\)"
+   name="sound"
+   omit_from_output="y"
+   regexp="y"
+   script="OnSound"
+   sequence="100"
+  >
+  </trigger>
+</triggers>
+
+<!--  Aliases  -->
+
+<aliases>
+  <alias
+   script="On_set_MSP_path"
+   match="set_msp_path *"
+   enabled="y"
+  >
+  </alias>
+  
+  <alias
+   script="OnHelp"
+   match="msp:help"
+   enabled="y"
+  >
+  </alias>
+
+</aliases>
+
+<!--  Script  -->
+
+<script>
+<![CDATA[
+
+function fSound (filename)
+  PlaySound (0, GetVariable ("msp_path") .. filename)
+  return "" -- omit MSP stuff from output
+end -- function fSound
+
+-- handle a line with !!SOUND in it
+function OnSound (name, line, wildcards, styles) 
+
+	-- echo existing line with colours, sending !!SOUND part to a function
+  for _, v in ipairs (styles) do
+    local text = string.gsub (v.text, "!!SOUND%(([%a%d./]+).-%)", fSound)
+    ColourTell (RGBColourToName (v.textcolour), 
+                  RGBColourToName (v.backcolour), 
+                  text)  
+  end -- for each style run
+
+  Note ("") -- finish the line
+end -- function OnSound
+
+-- change desired sound file path
+function On_set_MSP_path (name, line, wildcards) 
+  local path =  wildcards [1]
+  
+  --  ensure trailing backslash
+  if string.sub (path, -1) ~= "\\" then
+     path = path .. "\\"
+  end -- if
+
+  SetVariable ("msp_path", path) 
+  print ("MSP sound files will be obtained from " .. path)
+end -- function On_set_MSP_path
+
+-- do telnet negotiation
+function OnPluginTelnetRequest (type, data)
+  if type == 90 and data == "WILL" then
+    return true -- IAC DO MSP
+  else
+    return false
+  end -- if
+end -- function OnPluginTelnetRequest
+
+-- show help
+function OnHelp ()
+  print (GetPluginInfo (GetPluginID (), 3))
+end -- function OnHelp
+
+-- use supplied path or default
+msp_path = GetVariable ("msp_path") or GetInfo (74)
+
+]]>
+</script> 
+
+</muclient>
