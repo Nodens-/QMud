@@ -11,12 +11,38 @@
 #define QMUD_WORLDOPTIONS_H
 
 #include <QString>
+#include <optional>
 // Canonical world/runtime option constants
 constexpr int DEFAULT_CHAT_PORT        = 4050;
 constexpr int MAX_CUSTOM               = 16;
 constexpr int MAX_LINE_WIDTH           = 500;
 constexpr int DEFAULT_TRIGGER_SEQUENCE = 100;
 constexpr int DEFAULT_ALIAS_SEQUENCE   = 100;
+
+namespace QMudPluginSequence
+{
+	/** Default plugin dispatch sequence when no sequence is declared. */
+	inline constexpr int                    kDefault = 5000;
+	/** Lowest plugin dispatch sequence accepted by the legacy format. */
+	inline constexpr int                    kMinimum = -10000;
+	/** Highest plugin dispatch sequence accepted by the legacy format. */
+	inline constexpr int                    kMaximum = 10000;
+
+	/**
+	 * @brief Parses and validates a plugin dispatch sequence.
+	 * @param text Serialized sequence value.
+	 * @return Parsed sequence, or no value when malformed or outside the supported range.
+	 */
+	[[nodiscard]] inline std::optional<int> parse(const QString &text)
+	{
+		bool      ok       = false;
+		const int sequence = text.trimmed().toInt(&ok);
+		if (!ok || sequence < kMinimum || sequence > kMaximum)
+			return std::nullopt;
+		return sequence;
+	}
+} // namespace QMudPluginSequence
+
 #ifdef DEFAULT_CHARSET
 #undef DEFAULT_CHARSET
 #endif

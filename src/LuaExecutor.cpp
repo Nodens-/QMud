@@ -26,11 +26,10 @@ namespace
 #ifndef NDEBUG
 	bool qmudMmStartupDiagIsWatchedPluginId(const QString &pluginId)
 	{
-		const QString normalized = pluginId.trimmed().toLower();
-		return normalized == QStringLiteral("c97329b91f12ca48d14c3db2") ||
-		       normalized == QStringLiteral("adc3a873d4e47348da7cb426") ||
-		       normalized == QStringLiteral("f973af093e715dece34dc25f") ||
-		       normalized == QStringLiteral("f67c4339ed0591a5b010d05b");
+		return pluginId == QStringLiteral("c97329b91f12ca48d14c3db2") ||
+		       pluginId == QStringLiteral("adc3a873d4e47348da7cb426") ||
+		       pluginId == QStringLiteral("f973af093e715dece34dc25f") ||
+		       pluginId == QStringLiteral("f67c4339ed0591a5b010d05b");
 	}
 
 	bool qmudMmStartupDiagIsLifecycleCallback(const QString &functionName)
@@ -54,7 +53,7 @@ namespace
 	{
 		if (!engine)
 			return QStringLiteral("<null>");
-		const QString id   = engine->pluginId().trimmed();
+		const QString id   = engine->pluginId();
 		const QString name = engine->pluginName().trimmed();
 		if (name.isEmpty())
 			return id;
@@ -75,11 +74,27 @@ namespace
 
 LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest &request) const
 {
-	LuaBatchDispatchResult result;
-	const auto             collectDeferredBatches = [&](LuaCallbackEngine *engine) -> bool
+	LuaBatchDispatchResult    result;
+	// The completed snapshot is an operation result, not persistent engine state. Clear every target
+	// once at the common dispatch entry so switch cases cannot drift by bypassing a per-invocation
+	// helper. This also isolates executor requests from public direct engine calls.
+	QSet<LuaCallbackEngine *> preparedEngines;
+	for (const auto &engine : request.engines)
+	{
+		if (engine && !preparedEngines.contains(engine.data()))
+		{
+			preparedEngines.insert(engine.data());
+			static_cast<void>(engine->takeCompletedCallbackMutationSnapshot());
+		}
+	}
+	const auto collectMutationBoundaryResult = [&](LuaCallbackEngine *engine) -> bool
 	{
 		QVector<LuaDeferredRuntimeMutationBatch> batches    = engine->takeDeferredRuntimeMutationBatches();
 		const bool                               hasBatches = !batches.isEmpty();
+		auto       completedSnapshot                        = engine->takeCompletedCallbackMutationSnapshot();
+		const bool hasCompletedSnapshot                     = static_cast<bool>(completedSnapshot);
+		if (completedSnapshot)
+			result.callbackSnapshotAfterMutations = std::move(completedSnapshot);
 #ifndef NDEBUG
 		if (qmudMmStartupDiagShouldLogEngine(engine, request.functionName))
 		{
@@ -90,22 +105,22 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		}
 #endif
 		result.deferredRuntimeMutationBatches += batches;
-		return hasBatches;
+		return hasBatches || hasCompletedSnapshot;
 	};
 	const auto invokeForEngine = [&](LuaCallbackEngine *engine, auto &&fn)
 	{
 		if (!engine)
 			return;
-		if (request.miniWindowSnapshotArg)
+		if (request.callbackSnapshotArg)
 		{
-			engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
-			const auto popSnapshot = qScopeGuard([engine] { engine->popDispatchMiniWindowSnapshot(); });
+			engine->pushDispatchSnapshot(request.callbackSnapshotArg);
+			const auto popSnapshot = qScopeGuard([engine] { engine->popDispatchSnapshot(); });
 			fn(engine);
-			static_cast<void>(collectDeferredBatches(engine));
+			static_cast<void>(collectMutationBoundaryResult(engine));
 			return;
 		}
 		fn(engine);
-		static_cast<void>(collectDeferredBatches(engine));
+		static_cast<void>(collectMutationBoundaryResult(engine));
 	};
 	const auto forEachEngine = [&](auto &&fn)
 	{
@@ -139,9 +154,12 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 		return false;
 	};
 	const auto storeRecipientMutationBoundary = [&](const int  engineIndex,
-	                                                const bool hasDeferredMutations) -> bool
+	                                                const bool mutationBoundaryPublished) -> bool
 	{
-		if (!hasDeferredMutations || engineIndex + 1 >= request.engines.size())
+		// Workers keep their request snapshot immutable. Stop only when this recipient produced
+		// mutations: the runtime commits them, patches its stable base, clones again, and resumes at
+		// the next recipient. A non-mutating batch stays entirely on the worker lane.
+		if (!mutationBoundaryPublished || engineIndex + 1 >= request.engines.size())
 			return false;
 		result.recipientMutationBoundary = true;
 		result.nextEngineIndex           = engineIndex + 1;
@@ -168,13 +186,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         hasFunction = false;
@@ -182,10 +200,10 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			quint64                      resumeId    = 0;
 			LuaPendingModalStringRequest modalRequest;
 			const bool                   ok = engine->callFunctionNoArgs(
-                request.functionName, &hasFunction, request.defaultResult,
-                request.hasActionSourceOverride ? request.actionSourceOverride : -1, &suspended, &resumeId,
-                &modalRequest);
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			    request.functionName, &hasFunction, request.defaultResult,
+			    request.hasActionSourceOverride ? request.actionSourceOverride : -1, &suspended, &resumeId,
+			    &modalRequest);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 #ifndef NDEBUG
 			if (qmudMmStartupDiagShouldLogEngine(engine, request.functionName))
 			{
@@ -213,7 +231,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			recipient.hasFunction      = hasFunction;
 			recipient.hasFunctionValid = true;
 			mergeLuaBatchRecipientResult(request.kind, result, recipient);
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -232,13 +250,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         suspended = false;
@@ -247,13 +265,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			static_cast<void>(engine->callFunctionWithString(request.functionName, request.stringArg, nullptr,
 			                                                 request.defaultResult, &suspended, &resumeId,
 			                                                 &modalRequest));
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
 				return result;
 			}
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -265,13 +283,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         hasFunction = false;
@@ -281,7 +299,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			const bool                   ok =
 			    engine->callFunctionWithString(request.functionName, request.stringArg, &hasFunction,
 			                                   request.defaultResult, &suspended, &resumeId, &modalRequest);
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
@@ -296,7 +314,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			mergeLuaBatchRecipientResult(request.kind, result, recipient);
 			if (!result.boolResult)
 				break;
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -312,13 +330,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         hasFunction = false;
@@ -328,7 +346,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			static_cast<void>(engine->callFunctionWithString(request.functionName, request.stringArg,
 			                                                 &hasFunction, false, &suspended, &resumeId,
 			                                                 &modalRequest));
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
@@ -339,7 +357,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			recipient.hasFunction      = hasFunction;
 			recipient.hasFunctionValid = true;
 			mergeLuaBatchRecipientResult(request.kind, result, recipient);
-			if (!result.boolResult && storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (!result.boolResult && storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -349,13 +367,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         suspended = false;
@@ -364,13 +382,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			static_cast<void>(engine->callFunctionWithBytes(request.functionName, request.bytesArg, nullptr,
 			                                                request.defaultResult, &suspended, &resumeId,
 			                                                &modalRequest));
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
 				return result;
 			}
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -381,13 +399,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         suspended = false;
@@ -395,13 +413,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaPendingModalStringRequest modalRequest;
 			static_cast<void>(engine->callFunctionWithBytesInOut(
 			    request.functionName, result.bytesResult, nullptr, &suspended, &resumeId, &modalRequest));
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
 				return result;
 			}
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -412,13 +430,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         suspended = false;
@@ -426,13 +444,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaPendingModalStringRequest modalRequest;
 			static_cast<void>(engine->callFunctionWithStringInOut(
 			    request.functionName, result.stringResult, nullptr, &suspended, &resumeId, &modalRequest));
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
 				return result;
 			}
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -446,13 +464,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         hasFunction = false;
@@ -460,10 +478,10 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			quint64                      resumeId    = 0;
 			LuaPendingModalStringRequest modalRequest;
 			const bool                   ok = engine->callFunctionWithNumberAndString(
-                request.functionName, request.numberArg1, request.stringArg2, &hasFunction,
-                request.defaultResult, request.hasActionSourceOverride ? request.actionSourceOverride : -1,
-                &suspended, &resumeId, &modalRequest);
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			    request.functionName, request.numberArg1, request.stringArg2, &hasFunction,
+			    request.defaultResult, request.hasActionSourceOverride ? request.actionSourceOverride : -1,
+			    &suspended, &resumeId, &modalRequest);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				result.suspended                    = true;
@@ -480,7 +498,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			recipient.hasFunction      = hasFunction;
 			recipient.hasFunctionValid = true;
 			mergeLuaBatchRecipientResult(request.kind, result, recipient);
-			if (!result.boolResult && storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (!result.boolResult && storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -492,13 +510,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         hasFunction = false;
@@ -506,10 +524,10 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			quint64                      resumeId    = 0;
 			LuaPendingModalStringRequest modalRequest;
 			const bool                   ok = engine->callFunctionWithNumberAndString(
-                request.functionName, request.numberArg1, request.stringArg2, &hasFunction,
-                request.defaultResult, request.hasActionSourceOverride ? request.actionSourceOverride : -1,
-                &suspended, &resumeId, &modalRequest);
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			    request.functionName, request.numberArg1, request.stringArg2, &hasFunction,
+			    request.defaultResult, request.hasActionSourceOverride ? request.actionSourceOverride : -1,
+			    &suspended, &resumeId, &modalRequest);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				result.suspended                    = true;
@@ -528,7 +546,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			mergeLuaBatchRecipientResult(request.kind, result, recipient);
 			if (!result.boolResult)
 				break;
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -538,13 +556,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         suspended = false;
@@ -554,7 +572,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			    request.functionName, request.numberArg1, request.stringArg2, nullptr, request.defaultResult,
 			    request.hasActionSourceOverride ? request.actionSourceOverride : -1, &suspended, &resumeId,
 			    &modalRequest));
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				result.suspended                    = true;
@@ -564,7 +582,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 				result.pendingModalStringRequest    = std::move(modalRequest);
 				return result;
 			}
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -576,13 +594,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         hasFunction = false;
@@ -590,9 +608,9 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			quint64                      resumeId    = 0;
 			LuaPendingModalStringRequest modalRequest;
 			const bool                   ok = engine->callFunctionWithTwoNumbersAndString(
-                request.functionName, request.numberArg1, request.numberArg2, request.stringArg2,
-                &hasFunction, request.defaultResult, &suspended, &resumeId, &modalRequest);
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			    request.functionName, request.numberArg1, request.numberArg2, request.stringArg2,
+			    &hasFunction, request.defaultResult, &suspended, &resumeId, &modalRequest);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
@@ -607,7 +625,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			mergeLuaBatchRecipientResult(request.kind, result, recipient);
 			if (!result.boolResult)
 				break;
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -617,13 +635,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         suspended = false;
@@ -632,13 +650,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			static_cast<void>(engine->callFunctionWithTwoNumbersAndString(
 			    request.functionName, request.numberArg1, request.numberArg2, request.stringArg2, nullptr,
 			    request.defaultResult, &suspended, &resumeId, &modalRequest));
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
 				return result;
 			}
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -652,13 +670,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         hasFunction = false;
@@ -666,9 +684,9 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			quint64                      resumeId    = 0;
 			LuaPendingModalStringRequest modalRequest;
 			const bool                   ok = engine->callFunctionWithNumberAndBytes(
-                request.functionName, request.numberArg1, request.bytesArg, &hasFunction,
-                request.defaultResult, &suspended, &resumeId, &modalRequest);
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			    request.functionName, request.numberArg1, request.bytesArg, &hasFunction,
+			    request.defaultResult, &suspended, &resumeId, &modalRequest);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 #ifndef NDEBUG
 			if (qmudMmStartupDiagShouldLogEngine(engine, request.functionName))
 			{
@@ -695,7 +713,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			recipient.hasFunction      = hasFunction;
 			recipient.hasFunctionValid = true;
 			mergeLuaBatchRecipientResult(request.kind, result, recipient);
-			if (!result.boolResult && storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (!result.boolResult && storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -705,13 +723,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         hasFunction = false;
@@ -727,7 +745,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			    request.functionName, request.numberArg1, request.bytesArg, &hasFunction,
 			    request.defaultResult, &suspended, &resumeId, &modalRequest));
 #endif
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 #ifndef NDEBUG
 			if (qmudMmStartupDiagShouldLogEngine(engine, request.functionName))
 			{
@@ -747,7 +765,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
 				return result;
 			}
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -759,13 +777,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                                hasFunction                          = false;
@@ -802,7 +820,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 				                                            ? std::move(notepadPresentationSnapshot)
 				                                            : QVector<LuaCallbackNotepadSnapshot>{};
 			}
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 #ifndef NDEBUG
 			if (qmudMmStartupDiagShouldLogEngine(engine, request.functionName))
 			{
@@ -828,7 +846,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			recipient.hasFunction      = hasFunction;
 			recipient.hasFunctionValid = true;
 			mergeLuaBatchRecipientResult(request.kind, result, recipient);
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -840,13 +858,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         hasFunction = false;
@@ -856,11 +874,11 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			static_cast<void>(engine->callFunctionWithStringsAndWildcards(
 			    request.functionName, request.stringListArg, request.stringListArg2, request.mapArg,
 			    request.styleRunsArg ? request.styleRunsArg.data() : nullptr,
-			    request.miniWindowSnapshotArg ? request.miniWindowSnapshotArg.data() : nullptr, &hasFunction,
+			    request.callbackSnapshotArg ? request.callbackSnapshotArg.data() : nullptr, &hasFunction,
 			    request.hasActionSourceOverride ? request.actionSourceOverride : -1,
 			    request.triggerOutputReplacesMatchedLine, request.triggerMatchedLineBufferIndex,
 			    request.triggerMatchedLineAbsoluteNumber, &suspended, &resumeId, &modalRequest));
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
@@ -871,7 +889,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			recipient.hasFunction      = hasFunction;
 			recipient.hasFunctionValid = true;
 			mergeLuaBatchRecipientResult(request.kind, result, recipient);
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -1015,7 +1033,7 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			    LuaPendingModalStringRequest         modalRequest;
 			    const CallPluginLuaMarshallingResult marshalling = engine->callPluginLuaWithMarshalling(
 			        request.luaStateArg, request.functionName, request.intArg1, {},
-			        request.miniWindowSnapshotArg, &suspended, &resumeId, &modalRequest,
+			        request.callbackSnapshotArg, &suspended, &resumeId, &modalRequest,
 			        &linePresentationRequiresRefresh, &outputScrollPositionRequiresRefresh,
 			        &outputScrollPositionChanged, &commandUiPresentationRequiresRefresh,
 			        &globalPresentationRequiresRefresh, &commandHistoryChanged, &notepadPresentationChanged,
@@ -1125,26 +1143,26 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         suspended = false;
 			quint64                      resumeId  = 0;
 			LuaPendingModalStringRequest modalRequest;
 			engine->callMxpStartUp(request.functionName, &suspended, &resumeId, &modalRequest);
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
 				return result;
 			}
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -1154,26 +1172,26 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         suspended = false;
 			quint64                      resumeId  = 0;
 			LuaPendingModalStringRequest modalRequest;
 			engine->callMxpShutDown(request.functionName, &suspended, &resumeId, &modalRequest);
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
 				return result;
 			}
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -1206,13 +1224,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         suspended = false;
@@ -1220,13 +1238,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaPendingModalStringRequest modalRequest;
 			engine->callMxpEndTag(request.functionName, request.stringArg, request.stringArg2, &suspended,
 			                      &resumeId, &modalRequest);
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
 				return result;
 			}
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;
@@ -1236,13 +1254,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaCallbackEngine *engine = request.engines.at(engineIndex).data();
 			if (!engine)
 				continue;
-			if (request.miniWindowSnapshotArg)
-				engine->pushDispatchMiniWindowSnapshot(request.miniWindowSnapshotArg);
+			if (request.callbackSnapshotArg)
+				engine->pushDispatchSnapshot(request.callbackSnapshotArg);
 			const auto popSnapshot = qScopeGuard(
-			    [engine, hasSnapshot = static_cast<bool>(request.miniWindowSnapshotArg)]
+			    [engine, hasSnapshot = static_cast<bool>(request.callbackSnapshotArg)]
 			    {
 				    if (hasSnapshot)
-					    engine->popDispatchMiniWindowSnapshot();
+					    engine->popDispatchSnapshot();
 			    });
 			Q_UNUSED(popSnapshot);
 			bool                         suspended = false;
@@ -1250,13 +1268,13 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 			LuaPendingModalStringRequest modalRequest;
 			engine->callMxpSetVariable(request.functionName, request.stringArg, request.stringArg2,
 			                           &suspended, &resumeId, &modalRequest);
-			const bool hasDeferredMutations = collectDeferredBatches(engine);
+			const bool mutationBoundaryPublished = collectMutationBoundaryResult(engine);
 			if (suspended)
 			{
 				storeSuspension(engineIndex, resumeId, std::move(modalRequest));
 				return result;
 			}
-			if (storeRecipientMutationBoundary(engineIndex, hasDeferredMutations))
+			if (storeRecipientMutationBoundary(engineIndex, mutationBoundaryPublished))
 				return result;
 		}
 		return result;

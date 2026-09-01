@@ -250,11 +250,10 @@ namespace
 		if (!runtime)
 			return false;
 		const QList<WorldRuntime::Plugin> &plugins = runtime->plugins();
-		const QString                      key     = pluginId.trimmed().toLower();
 		for (const WorldRuntime::Plugin &plugin : plugins)
 		{
-			if (const QString id = plugin.attributes.value(QStringLiteral("id")).trimmed().toLower();
-			    id == key)
+			const QString id = plugin.attributes.value(QStringLiteral("id"));
+			if (id == pluginId)
 			{
 				out = plugin;
 				return true;
@@ -590,7 +589,7 @@ void PluginsDialog::reloadList() const
 	for (int pluginIndex = 0; pluginIndex < plugins.size(); ++pluginIndex)
 	{
 		const QString pluginId = plugins.at(pluginIndex).attributes.value(QStringLiteral("id"));
-		if (!pluginId.isEmpty() && !visibleIds.contains(pluginId, Qt::CaseInsensitive))
+		if (!pluginId.isEmpty() && !visibleIds.contains(pluginId))
 			continue;
 		visiblePluginRows.push_back(pluginIndex);
 	}
@@ -706,7 +705,13 @@ void PluginsDialog::onAddPlugin()
 	                                 QStringLiteral("Plugin files (*.xml);;All files (*.*)"));
 	if (path.isEmpty())
 		return;
+	installPluginFile(path);
+}
 
+void PluginsDialog::installPluginFile(const QString &path)
+{
+	if (!m_runtime)
+		return;
 	QString error;
 	if (!m_runtime->loadPluginFile(path, &error, false))
 	{
@@ -714,7 +719,6 @@ void PluginsDialog::onAddPlugin()
 		                     error.isEmpty() ? QStringLiteral("Unable to load plugin.") : error);
 		return;
 	}
-
 	reloadList();
 }
 
@@ -739,7 +743,6 @@ void PluginsDialog::onRemovePlugin()
 			                     error.isEmpty() ? QStringLiteral("Unable to unload plugin.") : error);
 		}
 	}
-
 	reloadList();
 }
 
@@ -764,16 +767,13 @@ void PluginsDialog::onDeleteState()
 	QStringList failures;
 	for (const int row : rows)
 	{
-		const QString pluginId = pluginIdForRow(row).trimmed();
+		const QString pluginId = pluginIdForRow(row);
 		if (pluginId.isEmpty())
 			continue;
 
-		QStringList candidates;
-		candidates << pluginId;
-		if (const QString lower = pluginId.toLower(); !candidates.contains(lower))
-			candidates << lower;
-		if (const QString upper = pluginId.toUpper(); !candidates.contains(upper))
-			candidates << upper;
+		// Canonical state filenames are lowercase. Retain the uppercase candidate only to remove
+		// files written by older releases; this does not alter the runtime plugin id.
+		const QStringList candidates{pluginId, pluginId.toUpper()};
 
 		for (const QString &candidateId : candidates)
 		{
@@ -922,38 +922,8 @@ void PluginsDialog::movePlugin(const int delta) const
 	if (pluginId.isEmpty())
 		return;
 
-	QList<WorldRuntime::Plugin> &plugins = m_runtime->pluginsMutable();
-	const QString                key     = pluginId.trimmed().toLower();
-	int                          index   = -1;
-	for (int i = 0; i < plugins.size(); ++i)
-	{
-		if (const QString id = plugins.at(i).attributes.value(QStringLiteral("id")).trimmed().toLower();
-		    id == key)
-		{
-			index = i;
-			break;
-		}
-	}
-	if (index < 0)
+	if (!m_runtime->reorderPlugin(pluginId, delta))
 		return;
-	const int other = index + delta;
-	if (other < 0 || other >= plugins.size())
-		return;
-
-	const int seqA = plugins.at(index).sequence;
-	int       seqB = plugins.at(other).sequence;
-	if (seqA == seqB)
-		seqB += delta < 0 ? 1 : -1;
-	plugins[index].sequence = seqB;
-	plugins[other].sequence = seqA;
-	std::ranges::stable_sort(plugins,
-	                         [](const WorldRuntime::Plugin &a, const WorldRuntime::Plugin &b)
-	                         {
-		                         if (a.sequence != b.sequence)
-			                         return a.sequence < b.sequence;
-		                         return a.attributes.value(QStringLiteral("id")) <
-		                                b.attributes.value(QStringLiteral("id"));
-	                         });
 	m_table->setSortingEnabled(false);
 	m_table->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
 	reloadList();

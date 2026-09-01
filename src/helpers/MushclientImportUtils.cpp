@@ -638,7 +638,7 @@ namespace
 		        .compare(QStringLiteral("lua"), Qt::CaseInsensitive) != 0)
 			return false;
 
-		const QString pluginId = plugin.attributes.value(QStringLiteral("id")).trimmed().toLower();
+		const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
 		return !QMudNativePluginRegistry::isBlacklistedId(pluginId);
 	}
 

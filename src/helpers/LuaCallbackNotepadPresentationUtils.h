@@ -72,9 +72,8 @@ namespace QMudLuaCallbackNotepadPresentation
 	 * @param snapshot Fresh callback snapshot containing the notepad presentation.
 	 * @return `true` when a notepad presentation was available.
 	 */
-	inline bool installFreshSnapshot(QVector<LuaCallbackNotepadSnapshot>       &presentation,
-	                                 QVector<Mutation>                         &mutations,
-	                                 const LuaCallbackMiniWindowSnapshot *const snapshot)
+	inline bool installFreshSnapshot(QVector<LuaCallbackNotepadSnapshot> &presentation,
+	                                 QVector<Mutation> &mutations, const LuaCallbackSnapshot *const snapshot)
 	{
 		presentation.clear();
 		const bool available = snapshot && snapshot->hasNotepadPresentationSnapshot;

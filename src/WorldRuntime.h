@@ -18,6 +18,7 @@
 #include "ReloadUtils.h"
 #include "SqliteCompat.h"
 #include "TelnetProcessor.h"
+#include "WorldOptions.h"
 
 #include <QByteArray>
 #include <QColor>
@@ -41,17 +42,22 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
 #include <QtSql/QSqlQuery>
+#include <array>
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 
 class WorldDocument;
 class WorldSocketService;
 class QFileSystemWatcher;
 class LuaCallbackEngine;
+class LuaCallbackRuntimeMutationAccess;
 class ILuaExecutor;
 class WorldCommandProcessor;
+class WorldCommandProcessorMutationAccess;
+class WorldRuntimeTestAccess;
 class WorldView;
 class QUdpSocket;
 class QAudioOutput;
@@ -72,6 +78,12 @@ struct lua_State;
  *
  * Manages world options, telnet/MXP processing, plugin/Lua callbacks, logging, and
  * miniwindow/chat/database utility surfaces consumed by the rest of the client.
+ *
+ * Plugin ids become trimmed lowercase values at exactly two external boundaries: XML validation and the
+ * argument decoder of an external API that accepts a plugin id. Runtime service methods consume canonical ids;
+ * runtime-owned state and every internal transfer, journal, snapshot, ownership field, overlay, and cache key
+ * copy that value unchanged. Internal code must neither normalize nor independently enforce a second spelling
+ * policy, because either would duplicate the authoritative boundary policy and create drift.
  */
 class WorldRuntime : public QObject
 {
@@ -79,6 +91,10 @@ class WorldRuntime : public QObject
 		friend class WorldView;
 		class ChatConnection;
 		friend class ChatConnection;
+		friend class LuaCallbackRuntimeMutationAccess;
+		friend class WorldCommandProcessor;
+		friend class WorldCommandProcessorMutationAccess;
+		friend class WorldRuntimeTestAccess;
 		friend class tst_LuaCallbackEngine;
 		friend class tst_WorldRuntime_SoundLifetime;
 		friend class tst_WorldRuntime_PluginLifecycle;
@@ -102,6 +118,26 @@ class WorldRuntime : public QObject
 				int  lineCount{0};
 				int  hotspotCount{0};
 				bool hasOutput{false};
+		};
+		/**
+		 * @brief Internal tagged result for the legacy WindowOutputText width/error integer domain.
+		 *
+		 * Pixel widths are unrestricted non-negative integers and can equal a positive scripting error
+		 * code. Internal control flow must use @ref succeeded, never classify @ref legacyValue by number.
+		 */
+		struct WindowOutputTextRenderResult
+		{
+				int                                                         legacyValue{0};
+				bool                                                        succeeded{false};
+
+				[[nodiscard]] static constexpr WindowOutputTextRenderResult success(const int width) noexcept
+				{
+					return {width, true};
+				}
+				[[nodiscard]] static constexpr WindowOutputTextRenderResult failure(const int error) noexcept
+				{
+					return {error, false};
+				}
 		};
 
 		enum ActionSource : unsigned short
@@ -309,7 +345,10 @@ class WorldRuntime : public QObject
 				bool                                  installPending{false};
 				bool                                  nativeShim{false};
 				QString                               nativeShimMarker;
-				int                                   sequence{5000};
+				/** Effective per-world dispatch sequence; plugin-declared metadata remains in attributes. */
+				int                                   sequence{QMudPluginSequence::kDefault};
+				/** Explicit world override for the effective sequence, absent when metadata supplies it. */
+				std::optional<int>                    dispatchSequenceOverride;
 				double                                version{0.0};
 				double                                requiredVersion{0.0};
 				QDateTime                             dateWritten;
@@ -637,11 +676,6 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] quint64                triggerRuleGeneration() const;
 		/**
-		 * @brief Returns mutable trigger list.
-		 * @return Mutable trigger list.
-		 */
-		QList<Trigger>                      &triggersMutable();
-		/**
 		 * @brief Replaces trigger list.
 		 * @param triggers New trigger list.
 		 */
@@ -651,19 +685,24 @@ class WorldRuntime : public QObject
 		 */
 		void                                 markTriggersChanged();
 		/**
+		 * @brief Publishes trigger execution/statistics state without treating it as a definition edit.
+		 * @param pluginId Owning plugin id, or empty for world triggers.
+		 */
+		void                                 markTriggerRuntimeStateChanged(const QString &pluginId = {});
+		/**
 		 * @brief Marks trigger evaluation rules as changed without changing save state.
 		 */
 		void                                 markTriggerRulesChanged();
+		/**
+		 * @brief Commits a plugin trigger mutation to rule generations and the stable callback snapshot.
+		 * @param pluginId Owning plugin id.
+		 */
+		void                                 markPluginTriggersChanged(const QString &pluginId);
 		/**
 		 * @brief Returns alias list.
 		 * @return Immutable alias list.
 		 */
 		[[nodiscard]] const QList<Alias>    &aliases() const;
-		/**
-		 * @brief Returns mutable alias list.
-		 * @return Mutable alias list.
-		 */
-		QList<Alias>                        &aliasesMutable();
 		/**
 		 * @brief Replaces alias list.
 		 * @param aliases New alias list.
@@ -674,15 +713,20 @@ class WorldRuntime : public QObject
 		 */
 		void                                 markAliasesChanged();
 		/**
+		 * @brief Publishes alias execution/statistics state without treating it as a definition edit.
+		 * @param pluginId Owning plugin id, or empty for world aliases.
+		 */
+		void                                 markAliasRuntimeStateChanged(const QString &pluginId = {});
+		/**
+		 * @brief Commits a plugin alias mutation to the stable callback snapshot.
+		 * @param pluginId Owning plugin id.
+		 */
+		void                                 markPluginAliasesChanged(const QString &pluginId);
+		/**
 		 * @brief Returns timer list.
 		 * @return Immutable timer list.
 		 */
 		[[nodiscard]] const QList<Timer>    &timers() const;
-		/**
-		 * @brief Returns mutable timer list.
-		 * @return Mutable timer list.
-		 */
-		QList<Timer>                        &timersMutable();
 		/**
 		 * @brief Replaces timer list.
 		 * @param timers New timer list.
@@ -693,6 +737,16 @@ class WorldRuntime : public QObject
 		 */
 		void                                 markTimersChanged();
 		/**
+		 * @brief Publishes timer firing/execution state without treating it as a definition edit.
+		 * @param pluginId Owning plugin id, or empty for world timers.
+		 */
+		void                                 markTimerRuntimeStateChanged(const QString &pluginId = {});
+		/**
+		 * @brief Commits a plugin timer mutation to the stable callback snapshot.
+		 * @param pluginId Owning plugin id.
+		 */
+		void                                 markPluginTimersChanged(const QString &pluginId);
+		/**
 		 * @brief Returns serial that increments on timer list structure mutations.
 		 * @return Monotonic timer-list structure mutation serial.
 		 */
@@ -701,6 +755,14 @@ class WorldRuntime : public QObject
 		 * @brief Marks timer list structure as changed (insert/remove/reorder).
 		 */
 		void                                 noteTimerStructureMutation();
+		/**
+		 * @brief Begins coalescing stable callback-snapshot patches for one owner-thread mutation batch.
+		 */
+		void                                 beginLuaCallbackSnapshotMutationBatch() const;
+		/**
+		 * @brief Applies coalesced stable callback-snapshot patches at the outer mutation boundary.
+		 */
+		void                                 endLuaCallbackSnapshotMutationBatch() const;
 		/**
 		 * @brief Returns macro list.
 		 * @return Immutable macro list.
@@ -1030,10 +1092,12 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] const QList<Plugin>        &plugins() const;
 		/**
-		 * @brief Returns mutable plugin list.
-		 * @return Mutable plugin list.
+		 * @brief Moves an installed non-global plugin one position among world plugins in dispatch order.
+		 * @param pluginId Plugin identifier to move.
+		 * @param delta Direction, exactly `-1` or `1`.
+		 * @return `true` when the plugin order changed.
 		 */
-		QList<Plugin>                            &pluginsMutable();
+		bool                                      reorderPlugin(const QString &pluginId, int delta);
 		/**
 		 * @brief Loads plugin file and installs plugin.
 		 * @param fileName Plugin XML file path.
@@ -1115,14 +1179,14 @@ class WorldRuntime : public QObject
 		 * @param callingPluginId Originating plugin id.
 		 * @param callingPluginName Originating plugin display name.
 		 * @param recipients Explicit Lua recipient engines.
-		 * @param miniWindowSnapshot Optional runtime-thread miniwindow snapshot propagated to callback
-		 * scopes.
+		 * @param callbackSnapshot Optional unified runtime snapshot propagated to callback scopes.
 		 * @return Number of plugins that handled `OnPluginBroadcast`.
 		 */
-		int broadcastPluginToRecipients(
-		    long message, const QString &text, const QString &callingPluginId,
-		    const QString &callingPluginName, const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
-		    const QSharedPointer<const LuaCallbackMiniWindowSnapshot> &miniWindowSnapshot = {});
+		int
+		broadcastPluginToRecipients(long message, const QString &text, const QString &callingPluginId,
+		                            const QString                                    &callingPluginName,
+		                            const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
+		                            const QSharedPointer<const LuaCallbackSnapshot>  &callbackSnapshot = {});
 		/**
 		 * @brief Computes the number of plugin recipients for `OnPluginBroadcast`.
 		 * @param callingPluginId Originating plugin id excluded from recipients.
@@ -1146,15 +1210,15 @@ class WorldRuntime : public QObject
 		int setPluginAsyncResultFilter(const QString &pluginId, const QSet<QString> &apiNames, bool allowAll);
 		/**
 		 * @brief Queues `OnPluginAsyncResult` callback to one plugin.
-		 * @param pluginId Target plugin id.
-		 * @param requestId Async completion request id.
+		 * @param asyncRequest Originating plugin-engine identity and completion request id.
 		 * @param apiName API function name.
 		 * @param ok Completion success flag.
 		 * @param errorCode Error code when `ok` is false.
 		 * @param payload Optional completion payload.
 		 */
-		void dispatchPluginAsyncResult(const QString &pluginId, quint64 requestId, const QString &apiName,
-		                               bool ok, int errorCode, const QString &payload = QString());
+		void                      dispatchPluginAsyncResult(const LuaPluginAsyncResultRequest &asyncRequest,
+		                                                    const QString &apiName, bool ok, int errorCode,
+		                                                    const QString &payload = QString());
 		/**
 		 * @brief In-client chat network APIs.
 		 */
@@ -1163,7 +1227,7 @@ class WorldRuntime : public QObject
 		 * @param port Local port to listen on.
 		 * @return Chat API status code.
 		 */
-		int  chatAcceptCalls(short port);
+		int                       chatAcceptCalls(short port);
 		/**
 		 * @brief Connects to remote chat server.
 		 * @param server Remote host or IP.
@@ -1171,25 +1235,25 @@ class WorldRuntime : public QObject
 		 * @param zChat Enable ZChat protocol mode when `true`.
 		 * @return Chat API status code.
 		 */
-		int  chatCall(const QString &server, long port, bool zChat);
+		int                       chatCall(const QString &server, long port, bool zChat);
 		/**
 		 * @brief Disconnects one chat connection by id.
 		 * @param id Chat connection id.
 		 * @return Chat API status code.
 		 */
-		int  chatDisconnect(long id);
+		int                       chatDisconnect(long id);
 		/**
 		 * @brief Disconnects all chat connections.
 		 * @return Chat API status code.
 		 */
-		int  chatDisconnectAll();
+		int                       chatDisconnectAll();
 		/**
 		 * @brief Sends chat message to all peers.
 		 * @param message Message text.
 		 * @param emote Send as emote when `true`.
 		 * @return Chat API status code.
 		 */
-		int  chatEverybody(const QString &message, bool emote);
+		int                       chatEverybody(const QString &message, bool emote);
 		/**
 		 * @brief Resolves chat connection id by peer name.
 		 * @param who Peer display name.
@@ -1389,6 +1453,13 @@ class WorldRuntime : public QObject
 		 */
 		void setPluginVariableValue(const QString &pluginId, const QString &name, const QString &value);
 		/**
+		 * @brief Deletes a plugin variable using the same case-insensitive scope as GetVariable/SetVariable.
+		 * @param pluginId Plugin id to update.
+		 * @param name Variable name.
+		 * @return API status code.
+		 */
+		int  deletePluginVariable(const QString &pluginId, const QString &name);
+		/**
 		 * @brief Lists variable names for plugin.
 		 * @param pluginId Plugin id to query.
 		 * @return Variable name list.
@@ -1419,12 +1490,6 @@ class WorldRuntime : public QObject
 		 * @return Timer name list.
 		 */
 		[[nodiscard]] QStringList   pluginTimerList(const QString &pluginId) const;
-		/**
-		 * @brief Returns mutable plugin pointer by id.
-		 * @param pluginId Plugin id to resolve.
-		 * @return Mutable plugin pointer, or `nullptr` when missing.
-		 */
-		[[nodiscard]] Plugin       *pluginForId(const QString &pluginId);
 		/**
 		 * @brief Returns immutable plugin pointer by id.
 		 * @param pluginId Plugin id to resolve.
@@ -1768,7 +1833,7 @@ class WorldRuntime : public QObject
 		 *        must use a coherent current client-size and scale tuple.
 		 * @return Target callback snapshot with a count-and-last-line presentation baseline.
 		 */
-		[[nodiscard]] QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+		[[nodiscard]] QSharedPointer<const LuaCallbackSnapshot>
 		     luaCallbackSnapshotForBridgedCall(const QString &geometryConstrainedMiniWindowName = {}) const;
 		/**
 		 * @brief Miniwindow graphics, text, image, and hotspot APIs.
@@ -1824,24 +1889,13 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] QVariant          windowInfo(const QString &name, int infoType) const;
 		/**
-		 * @brief Returns mutable miniwindow by name.
-		 * @param name Miniwindow name.
-		 * @return Mutable miniwindow pointer, or `nullptr` when missing.
-		 */
-		[[nodiscard]] MiniWindow       *miniWindow(const QString &name);
-		/**
 		 * @brief Returns immutable miniwindow by name.
 		 * @param name Miniwindow name.
 		 * @return Immutable miniwindow pointer, or `nullptr` when missing.
 		 */
 		[[nodiscard]] const MiniWindow *miniWindow(const QString &name) const;
 		/**
-		 * @brief Returns miniwindows sorted by z-order.
-		 * @return Miniwindows sorted by z-order.
-		 */
-		QVector<MiniWindow *>           sortedMiniWindows();
-		/**
-		 * @brief Lays out miniwindows for current viewport sizes.
+		 * @brief Lays out caller-supplied miniwindow presentation records for current viewport sizes.
 		 * @param clientSize Current output client size.
 		 * @param ownerSize Owning widget size.
 		 * @param underneath Layout behind output surface when `true`.
@@ -2045,6 +2099,16 @@ class WorldRuntime : public QObject
 		                     const QString &hotspotPrefix, const QString &pluginId,
 		                     WindowOutputMetrics *metricsOut = nullptr);
 		/**
+		 * @brief Authoritative tagged WindowOutputText operation used by internal control flow.
+		 * @return Tagged success/failure plus the legacy width-or-error value.
+		 */
+		WindowOutputTextRenderResult windowOutputTextResult(const QString &name, const QString &fontId,
+		                                                    const QString &text, int left, int top, int right,
+		                                                    int bottom, long colour, const QString &mouseUp,
+		                                                    const QString       &hotspotPrefix,
+		                                                    const QString       &pluginId,
+		                                                    WindowOutputMetrics *metricsOut = nullptr);
+		/**
 		 * @brief Computes `windowOutputText` result/metrics without committing rendered pixels, hotspots, or render state.
 		 * @param name Miniwindow name.
 		 * @param fontId Font resource id.
@@ -2065,7 +2129,11 @@ class WorldRuntime : public QObject
 		                            const QString &hotspotPrefix, const QString &pluginId,
 		                            WindowOutputMetrics *metricsOut = nullptr);
 		/**
-		 * @brief Draws parsed `WindowOutputText` content into a supplied miniwindow.
+		 * @brief Draws parsed `WindowOutputText` content into a supplied miniwindow atomically.
+		 *
+		 * Any error leaves the supplied window and output metrics unchanged/empty. This is the common mutation
+		 * boundary for authoritative windows and callback-local shadows; callers must not add a second rollback
+		 * policy that can drift from it.
 		 * @param window Target miniwindow.
 		 * @param fontId Font resource id.
 		 * @param text Text to parse and draw.
@@ -2081,12 +2149,12 @@ class WorldRuntime : public QObject
 		 * @param metricsOut Optional render metrics output.
 		 * @return Rendered width in pixels or API error code.
 		 */
-		static int renderWindowOutputText(MiniWindow &window, const QString &fontId, const QString &text,
-		                                  int left, int top, int right, int bottom, long colour,
-		                                  const QString &mouseUp, const QString &hotspotPrefix,
-		                                  const QString                &pluginId,
-		                                  WindowOutputTextRenderContext renderContext,
-		                                  WindowOutputMetrics          *metricsOut = nullptr);
+		static WindowOutputTextRenderResult
+		renderWindowOutputText(MiniWindow &window, const QString &fontId, const QString &text, int left,
+		                       int top, int right, int bottom, long colour, const QString &mouseUp,
+		                       const QString &hotspotPrefix, const QString &pluginId,
+		                       WindowOutputTextRenderContext renderContext,
+		                       WindowOutputMetrics          *metricsOut = nullptr);
 		/**
 		 * @brief Measures text width for a miniwindow font.
 		 * @param name Miniwindow name.
@@ -2354,7 +2422,7 @@ class WorldRuntime : public QObject
 		 * @param filename Destination image file path.
 		 * @return API status code.
 		 */
-		int windowWrite(const QString &name, const QString &filename);
+		int windowWrite(const QString &name, const QString &filename) const;
 		/**
 		 * @brief Captures a copy of the miniwindow surface image.
 		 * @param name Miniwindow name.
@@ -2499,7 +2567,7 @@ class WorldRuntime : public QObject
 		 * @return Selected menu item id, or empty when canceled.
 		 */
 		QString                  windowMenu(const QString &name, int left, int top, const QString &items,
-		                                    const QString &pluginId);
+		                                    const QString &pluginId) const;
 
 		/**
 		 * @brief View binding and runtime-mode/stat counters.
@@ -3439,10 +3507,11 @@ class WorldRuntime : public QObject
 		 * @param snapshot Callback dispatch snapshot for read-cache seeding.
 		 * @return Structured marshaling dispatch result.
 		 */
-		[[nodiscard]] LuaBatchDispatchResult dispatchLuaCallPluginMarshalling(
-		    const QSharedPointer<LuaCallbackEngine> &engine, const QString &routine, lua_State *callerState,
-		    int firstArg, const QString &callingPluginId,
-		    const QSharedPointer<const LuaCallbackMiniWindowSnapshot> &snapshot) const;
+		[[nodiscard]] LuaBatchDispatchResult
+		dispatchLuaCallPluginMarshalling(const QSharedPointer<LuaCallbackEngine> &engine,
+		                                 const QString &routine, lua_State *callerState, int firstArg,
+		                                 const QString                                   &callingPluginId,
+		                                 const QSharedPointer<const LuaCallbackSnapshot> &snapshot) const;
 #endif
 		/**
 		 * @brief Dispatches one nested plugin-broadcast recipient on the callback executor.
@@ -3454,10 +3523,11 @@ class WorldRuntime : public QObject
 		 * @param snapshot Callback snapshot used to seed recipient reads.
 		 * @return Structured result, including a recipient suspension when it requests more data.
 		 */
-		[[nodiscard]] LuaBatchDispatchResult dispatchLuaBroadcastRecipient(
-		    const QSharedPointer<LuaCallbackEngine> &engine, long message, const QString &text,
-		    const QString &callingPluginId, const QString &callingPluginName,
-		    const QSharedPointer<const LuaCallbackMiniWindowSnapshot> &snapshot) const;
+		[[nodiscard]] LuaBatchDispatchResult
+		dispatchLuaBroadcastRecipient(const QSharedPointer<LuaCallbackEngine> &engine, long message,
+		                              const QString &text, const QString &callingPluginId,
+		                              const QString                                   &callingPluginName,
+		                              const QSharedPointer<const LuaCallbackSnapshot> &snapshot) const;
 		/**
 		 * @brief Executes an immediate Lua script block on a target engine.
 		 * @param engine Target Lua engine reference.
@@ -5024,6 +5094,29 @@ class WorldRuntime : public QObject
 		void worldAttributeChanged(const QString &key);
 
 	private:
+		/**
+		 * @brief Internal unpublished collection access for the two production mutation dispatchers and the test seam.
+		 *
+		 * These references are intentionally private: ordinary callers cannot mutate authoritative collections while
+		 * bypassing persistence, generations, structure serials, or callback-snapshot publication. The command
+		 * processor and Lua mutation accessor must publish through the matching committed mutation API before another
+		 * callback boundary. Tests use the single `WorldRuntimeTestAccess` friend instead of widening this API.
+		 */
+		QList<Trigger>                     &triggersMutable();
+		QList<Alias>                       &aliasesMutable();
+		QList<Timer>                       &timersMutable();
+		QList<Plugin>                      &pluginsMutable();
+		[[nodiscard]] Plugin               *pluginForIdMutable(const QString &pluginId);
+		/**
+		 * @brief Internal mutable miniwindow access for WorldView, runtime implementation, and the test seam.
+		 *
+		 * Miniwindow pointers stay private so general callers cannot mutate callback-visible presentation state without
+		 * going through WorldRuntime's window APIs and their snapshot publication. WorldView is a friend because it owns
+		 * direct pointer-based hit testing and rendering, not authoritative collection mutation policy.
+		 */
+		[[nodiscard]] MiniWindow           *miniWindowMutable(const QString &name);
+		[[nodiscard]] QVector<MiniWindow *> sortedMiniWindowsMutable();
+
 		struct LuaCallbackOutputCursorKey
 		{
 				quint64       outputStreamId{0};
@@ -5302,7 +5395,7 @@ class WorldRuntime : public QObject
 		void invalidatePluginCallbackPresenceCache();
 		/**
 		 * @brief Records callback-catalog snapshots for one plugin.
-		 * @param pluginId Normalized plugin id.
+		 * @param pluginId Canonical plugin id from runtime-owned metadata; this internal sink does not normalize it.
 		 * @param presentCallbacks Present callback-name set for that plugin.
 		 * @param luaFunctions Full Lua function catalog for that plugin.
 		 */
@@ -5310,10 +5403,37 @@ class WorldRuntime : public QObject
 		                                                  const QSet<QString> &presentCallbacks,
 		                                                  const QSet<QString> &luaFunctions);
 		/**
-		 * @brief Applies pending callback-catalog snapshots queued by worker threads.
+		 * @brief Drains pending callback-catalog snapshots while the Plugins domain is already being populated.
 		 * @return `true` when cache content changed.
+		 *
+		 * Ordinary consumers must use publishPendingObservedPluginCallbackPresenceSnapshots() so draining cannot
+		 * lose the stable-domain publication signal. This raw operation exists only to avoid recursively patching
+		 * the Plugins domain from inside its own preparation step.
 		 */
-		[[nodiscard]] bool applyPendingObservedPluginCallbackPresenceSnapshots();
+		[[nodiscard]] bool drainPendingObservedPluginCallbackPresenceSnapshots();
+		/**
+		 * @brief Drains worker callback catalogs and publishes the complete Plugins stable domain.
+		 * @return `true` when authoritative catalog content changed.
+		 */
+		[[nodiscard]] bool publishPendingObservedPluginCallbackPresenceSnapshots();
+		/**
+		 * @brief Evaluates callback presence after the current Plugins preparation point without draining again.
+		 * @param functionName Callback name.
+		 * @return Whether an executable or warming plugin can receive the callback.
+		 *
+		 * Only Plugins-domain preparation uses this helper. A worker catalog arriving during conversion stays
+		 * pending for the next callback boundary instead of recursively patching the domain being populated.
+		 */
+		[[nodiscard]] bool hasAnyPluginCallbackFromPreparedCatalog(const QString &functionName);
+		/**
+		 * @brief Drains worker catalogs and prepares callback-presence state before plugin snapshot conversion.
+		 *
+		 * This is the only side-effecting preparation step. The subsequent population helper is a pure read, so a
+		 * worker catalog arriving during conversion remains pending for the next capture instead of being consumed
+		 * after part of the snapshot has already been copied.
+		 */
+		void               prepareLuaCallbackPluginSnapshotState();
+		[[nodiscard]] bool preparedPluginCallbackPresence(const QString &functionName) const;
 		void               rebuildPluginCallbackPresenceCache();
 		[[nodiscard]] bool isObservedPluginCallbackPropagationPending(const QString &functionName) const;
 		[[nodiscard]] bool hasAnyExecutableLuaPluginRecipient() const;
@@ -5331,10 +5451,12 @@ class WorldRuntime : public QObject
 		QVector<QSharedPointer<LuaCallbackEngine>>
 		                          collectPluginCallbackRecipients(const QString &functionName);
 		/**
-		 * @brief Revalidates observed-callback recipients against current executable plugin state.
+		 * @brief Revalidates an unprocessed observed-callback suffix against current executable plugin state.
 		 * @param request Batch request to trim when stale recipients are detected.
+		 * @param firstRecipientIndex First unprocessed recipient; the completed prefix remains positionally stable.
 		 */
-		void                      revalidateObservedCallbackRecipients(LuaBatchDispatchRequest &request);
+		void                      revalidateObservedCallbackRecipients(LuaBatchDispatchRequest &request,
+		                                                               int                      firstRecipientIndex = 0);
 		/**
 		 * @brief Checks whether plugin should receive async result callback for API name.
 		 * @param plugin Plugin state entry.
@@ -5359,7 +5481,7 @@ class WorldRuntime : public QObject
 		 * @param lineSnapshotPolicy Output-line snapshot depth to attach.
 		 * @return Snapshot payload for request-scoped callback caches.
 		 */
-		[[nodiscard]] QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+		[[nodiscard]] QSharedPointer<const LuaCallbackSnapshot>
 		captureLuaCallbackSnapshotForDispatch(const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
 		                                      LuaCallbackLineSnapshotPolicy lineSnapshotPolicy =
 		                                          LuaCallbackLineSnapshotPolicy::CountAndLast) const;
@@ -5369,8 +5491,7 @@ class WorldRuntime : public QObject
 		 * @param lineSnapshotPolicy Output-line snapshot depth to attach.
 		 * @return Mutable snapshot payload for request-scoped callback caches.
 		 */
-		[[nodiscard]] QSharedPointer<LuaCallbackMiniWindowSnapshot>
-		captureLuaCallbackSnapshotForDispatchMutable(
+		[[nodiscard]] QSharedPointer<LuaCallbackSnapshot> captureLuaCallbackSnapshotForDispatchMutable(
 		    const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
 		    LuaCallbackLineSnapshotPolicy                     lineSnapshotPolicy =
 		        LuaCallbackLineSnapshotPolicy::CountAndLast) const;
@@ -5381,7 +5502,7 @@ class WorldRuntime : public QObject
 		 * @param actionSourceOverride Callback-local action source, or `-1` for no override.
 		 * @return Snapshot payload for request-scoped callback caches.
 		 */
-		[[nodiscard]] QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+		[[nodiscard]] QSharedPointer<const LuaCallbackSnapshot>
 		captureLuaCallbackSnapshotForDispatchWithActionSource(
 		    const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
 		    LuaCallbackLineSnapshotPolicy lineSnapshotPolicy, int actionSourceOverride) const;
@@ -5390,38 +5511,223 @@ class WorldRuntime : public QObject
 		 * @param request Callback request whose recipients, line policy, and action source must agree.
 		 * @return Coherent request-scoped snapshot payload.
 		 */
-		[[nodiscard]] QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+		[[nodiscard]] QSharedPointer<const LuaCallbackSnapshot>
 		            captureLuaCallbackSnapshotForRequest(const LuaBatchDispatchRequest &request) const;
 		/**
 		 * @brief Applies request-local action source data to a mutable callback snapshot.
 		 * @param snapshot Snapshot to stamp.
 		 * @param actionSourceOverride Callback-local action source, or `-1` for no override.
 		 */
-		static void stampLuaCallbackSnapshotActionSource(LuaCallbackMiniWindowSnapshot &snapshot,
-		                                                 int                            actionSourceOverride);
+		static void stampLuaCallbackSnapshotActionSource(LuaCallbackSnapshot &snapshot,
+		                                                 int                  actionSourceOverride);
 		/**
-		 * @brief Invalidates cached stable callback dispatch snapshots.
+		 * @brief Exhaustive patch registry for stable callback-snapshot state.
+		 *
+		 * Adding a stable mutable field is not complete merely by adding it to the snapshot struct.
+		 * Assign it to one of these domains (or add a new registry entry) and populate it through the same helper
+		 * used by cold base construction. The registry's second value declares whether plugin load/unload must
+		 * repopulate the domain; this mechanically expands a Plugins patch and replaces a second hand-maintained
+		 * fanout list.
+		 * populateLuaCallbackStableSnapshotDomains() is the sole domain-to-population registry: cold builds
+		 * pass the complete mask derived from `Count`, while immediate and batched patches pass masks derived
+		 * from their enum values. Handle a new domain in that method's switch and patch it at every
+		 * authoritative mutation source. Plugin-indexed and item-scoped state uses the typed scope carried
+		 * by the same patch path and generic pending store; do not create a parallel enum, encoded composite
+		 * key, pending list, or build counter. Lua-originated writes additionally need their deferred
+		 * journal/overlay path.
+		 * See LuaCallbackSnapshot's extension contract for the required visibility tests.
 		 */
-		void        invalidateLuaCallbackDispatchSnapshot() const;
+#define QMUD_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN_REGISTRY(X)                                                 \
+	X(WorldVariables, false)                                                                                 \
+	X(PluginVariables, true)                                                                                 \
+	X(Triggers, true)                                                                                        \
+	X(Aliases, true)                                                                                         \
+	X(Timers, true)                                                                                          \
+	X(WorldAttributes, false)                                                                                \
+	X(Arrays, false)                                                                                         \
+	X(Colours, false)                                                                                        \
+	X(Mapper, false)                                                                                         \
+	X(Databases, false)                                                                                      \
+	X(Macros, false)                                                                                         \
+	X(Keypad, false)                                                                                         \
+	X(Accelerators, false)                                                                                   \
+	X(Plugins, false)                                                                                        \
+	X(MiniWindows, false)                                                                                    \
+	X(TriggerWildcards, true)                                                                                \
+	X(AliasWildcards, true)
+		enum class LuaCallbackStableSnapshotDomain : quint8
+		{
+#define QMUD_DECLARE_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN(name, pluginIndexed) name,
+			QMUD_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN_REGISTRY(
+			    QMUD_DECLARE_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN)
+#undef QMUD_DECLARE_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN
+			    Count
+		};
 		/**
-		 * @brief Returns a mutable copy of the cached stable callback dispatch snapshot.
+		 * @brief Optional narrowing for one stable-domain patch.
+		 *
+		 * An empty `pluginId` identifies world scope. `itemName` further narrows item-addressable domains.
+		 * Typed fields keep batching and population free of composite-key parsing conventions.
+		 */
+		struct LuaCallbackStableSnapshotPatchScope
+		{
+				QString       pluginId;
+				QString       itemName;
+
+				bool          operator==(const LuaCallbackStableSnapshotPatchScope &) const = default;
+
+				friend size_t qHash(const LuaCallbackStableSnapshotPatchScope &scope,
+				                    const size_t                               seed = 0) noexcept
+				{
+					return qHashMulti(seed, scope.pluginId, scope.itemName);
+				}
+		};
+		[[nodiscard]] static constexpr quint32
+		luaCallbackStableSnapshotDomainBit(const LuaCallbackStableSnapshotDomain domain)
+		{
+			return quint32{1} << static_cast<quint32>(domain);
+		}
+		[[nodiscard]] static constexpr quint32 luaCallbackAllStableSnapshotDomainsMask()
+		{
+			static_assert(static_cast<quint32>(LuaCallbackStableSnapshotDomain::Count) < 32U);
+			return luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::Count) - 1U;
+		}
+		[[nodiscard]] static constexpr quint32 luaCallbackPluginIndexedStableSnapshotDomainsMask()
+		{
+			return 0U
+#define QMUD_PLUGIN_INDEXED_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN(name, pluginIndexed)                         \
+	| (pluginIndexed ? luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::name) : 0U)
+			    QMUD_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN_REGISTRY(
+			        QMUD_PLUGIN_INDEXED_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN)
+#undef QMUD_PLUGIN_INDEXED_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN
+			        ;
+		}
+		[[nodiscard]] static constexpr quint32
+		luaCallbackExpandedStableSnapshotDomainMask(const quint32 domainMask)
+		{
+			return (domainMask &
+			        luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::Plugins)) != 0U
+			           ? domainMask | luaCallbackPluginIndexedStableSnapshotDomainsMask()
+			           : domainMask;
+		}
+#undef QMUD_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN_REGISTRY
+		/**
+		 * @brief Invalidates the cached stable callback-dispatch snapshot.
+		 */
+		void invalidateLuaCallbackDispatchSnapshot() const;
+		/**
+		 * @brief Applies and clears stable-domain patches coalesced by a mutation batch.
+		 */
+		void applyPendingLuaCallbackSnapshotPatches() const;
+		/**
+		 * @brief Queues or applies an owner-thread patch for one stable snapshot domain.
+		 */
+		void patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain domain) const;
+		/**
+		 * @brief Queues or applies a plugin-scoped patch through the stable-domain registry.
+		 * @param domain Stable domain supporting plugin scoping.
+		 * @param pluginId Empty for world scope; otherwise the owning plugin id.
+		 */
+		void patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain domain,
+		                                    const QString                  &pluginId) const;
+		/**
+		 * @brief Queues or applies a plugin-and-item-scoped patch through the stable-domain registry.
+		 */
+		void patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain domain, const QString &pluginId,
+		                                    const QString &itemName) const;
+		/**
+		 * @brief Refreshes one full or scoped stable snapshot domain from authoritative runtime state.
+		 */
+		void applyLuaCallbackStableSnapshotPatch(
+		    LuaCallbackStableSnapshotDomain                           domain,
+		    const std::optional<LuaCallbackStableSnapshotPatchScope> &scope) const;
+		/**
+		 * @brief Applies a stable-domain bit mask to the cached base.
+		 */
+		void applyLuaCallbackStableSnapshotPatches(quint32 domainMask) const;
+		/**
+		 * @brief Populates stable domains into any target snapshot through the single authoritative registry.
+		 */
+		void populateLuaCallbackStableSnapshotDomains(
+		    LuaCallbackSnapshot &snapshot, quint32 domainMask,
+		    const std::optional<LuaCallbackStableSnapshotPatchScope> &scope = std::nullopt) const;
+		/**
+		 * @brief Returns a mutable shallow copy of the cached stable dispatch snapshot.
 		 * @return Snapshot copy ready for dispatch-volatile fields, or null when the cache is stale.
 		 */
-		[[nodiscard]] QSharedPointer<LuaCallbackMiniWindowSnapshot>
-		            cloneLuaCallbackDispatchSnapshotBase() const;
+		[[nodiscard]] QSharedPointer<LuaCallbackSnapshot> cloneLuaCallbackDispatchSnapshotBase() const;
 		/**
 		 * @brief Clears fields rebuilt for each callback dispatch.
-		 * @param snapshot Snapshot object whose dispatch-volatile fields should be reset.
+		 * @param snapshot Snapshot whose dispatch-volatile fields should be reset.
 		 */
-		static void clearLuaCallbackDispatchVolatileSnapshot(LuaCallbackMiniWindowSnapshot &snapshot);
+		static void clearLuaCallbackDispatchVolatileSnapshot(LuaCallbackSnapshot &snapshot);
+		void populateLuaCallbackTriggerSnapshots(LuaCallbackSnapshot          &snapshot,
+		                                         const std::optional<QString> &pluginId = std::nullopt) const;
+		void populateLuaCallbackAliasSnapshots(LuaCallbackSnapshot          &snapshot,
+		                                       const std::optional<QString> &pluginId = std::nullopt) const;
+		void populateLuaCallbackTimerSnapshots(LuaCallbackSnapshot          &snapshot,
+		                                       const std::optional<QString> &pluginId = std::nullopt) const;
+		void populateLuaCallbackWorldVariableSnapshots(LuaCallbackSnapshot &snapshot) const;
+		void populateLuaCallbackPluginVariableSnapshots(
+		    LuaCallbackSnapshot                                      &snapshot,
+		    const std::optional<LuaCallbackStableSnapshotPatchScope> &scope = std::nullopt) const;
+		void populateLuaCallbackWorldAttributeSnapshots(LuaCallbackSnapshot &snapshot) const;
+		void populateLuaCallbackArraySnapshots(LuaCallbackSnapshot &snapshot) const;
+		void populateLuaCallbackColourSnapshots(LuaCallbackSnapshot &snapshot) const;
+		void populateLuaCallbackMapperSnapshots(LuaCallbackSnapshot &snapshot) const;
+		void populateLuaCallbackDatabaseSnapshots(LuaCallbackSnapshot &snapshot) const;
+		void populateLuaCallbackMacroSnapshots(LuaCallbackSnapshot &snapshot) const;
+		void populateLuaCallbackKeypadSnapshots(LuaCallbackSnapshot &snapshot) const;
+		void populateLuaCallbackAcceleratorSnapshots(LuaCallbackSnapshot &snapshot) const;
+		void populateLuaCallbackPluginSnapshots(LuaCallbackSnapshot &snapshot) const;
+		void populateLuaCallbackMiniWindowSnapshots(LuaCallbackSnapshot &snapshot) const;
+		/**
+		 * @brief Rebuilds stable trigger wildcard state, optionally for one rule.
+		 */
+		void populateLuaCallbackTriggerWildcardSnapshots(
+		    LuaCallbackSnapshot                                      &snapshot,
+		    const std::optional<LuaCallbackStableSnapshotPatchScope> &scope = std::nullopt) const;
+		/**
+		 * @brief Rebuilds stable alias wildcard state, optionally for one rule.
+		 */
+		void populateLuaCallbackAliasWildcardSnapshots(
+		    LuaCallbackSnapshot                                      &snapshot,
+		    const std::optional<LuaCallbackStableSnapshotPatchScope> &scope = std::nullopt) const;
+		/**
+		 * @brief Rebuilds mutable chat-connection snapshot state.
+		 * @param snapshot Snapshot to update.
+		 */
+		void populateLuaCallbackChatSnapshot(LuaCallbackSnapshot &snapshot) const;
+		/**
+		 * @brief Rebuilds mutable local and cross-world UDP snapshot state.
+		 * @param snapshot Snapshot to update.
+		 */
+		void populateLuaCallbackUdpSnapshot(LuaCallbackSnapshot &snapshot) const;
+		/**
+		 * @brief Applies a plugin enabled-state transition and optionally marks its per-world state modified.
+		 */
+		bool setPluginEnabledState(const QString &pluginId, bool enable, bool markWorldModified);
+		/**
+		 * @brief Marks a per-world plugin enabled-state change, including for automatically loaded global plugins.
+		 */
+		void markPluginEnabledStateChanged();
+		/**
+		 * @brief Marks a world-owned plugin include change; automatic global membership is not world-owned.
+		 */
+		void markLocalPluginIncludeChanged(bool global);
+		/**
+		 * @brief Rebuilds asynchronous sound-buffer snapshot state.
+		 * @param snapshot Snapshot to update.
+		 */
+		void populateLuaCallbackSoundSnapshot(LuaCallbackSnapshot &snapshot) const;
 		/**
 		 * @brief Populates fields that must reflect the current callback dispatch.
-		 * @param snapshot Snapshot object to update.
+		 * @param snapshot Snapshot to update.
 		 * @param lineSnapshotPolicy Output-line snapshot depth to attach.
 		 */
 		void
-		populateLuaCallbackDispatchVolatileSnapshot(LuaCallbackMiniWindowSnapshot &snapshot,
-		                                            LuaCallbackLineSnapshotPolicy  lineSnapshotPolicy) const;
+		populateLuaCallbackDispatchVolatileSnapshot(LuaCallbackSnapshot          &snapshot,
+		                                            LuaCallbackLineSnapshotPolicy lineSnapshotPolicy) const;
 		/**
 		 * @brief Invalidates cached callback output-line snapshots.
 		 */
@@ -5440,7 +5746,7 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Populates the stable output anchor for a callback snapshot.
 		 */
-		void populateLuaCallbackOutputAnchorSnapshot(LuaCallbackMiniWindowSnapshot &snapshot) const;
+		void populateLuaCallbackOutputAnchorSnapshot(LuaCallbackSnapshot &snapshot) const;
 		/**
 		 * @brief Immutable mapping between physical output storage and Lua-visible buffer indexes.
 		 */
@@ -5773,6 +6079,7 @@ class WorldRuntime : public QObject
 		 * @param plugin Plugin instance.
 		 */
 		void queuePluginInstall(Plugin &plugin);
+		void setPluginInstallPending(Plugin &plugin, bool pending);
 		/**
 		 * @brief Starts asynchronous queued installation for pending plugins.
 		 */
@@ -5954,12 +6261,12 @@ class WorldRuntime : public QObject
 		                              const QString &miniWindowName, bool queueWhenCallbackLaneBusy = false);
 		/**
 		 * @brief Saves one plugin state snapshot.
-		 * @param plugin Plugin instance.
+		 * @param pluginId Stable identifier of the plugin to save.
 		 * @param scripted Scripted-save flag.
 		 * @param error Optional output error message.
 		 * @return API status code.
 		 */
-		int  savePluginStateForPlugin(Plugin &plugin, bool scripted, QString *error);
+		int  savePluginStateForPlugin(const QString &pluginId, bool scripted, QString *error);
 		/**
 		 * @brief Sorts plugins by sequence ordering.
 		 */
@@ -5997,6 +6304,7 @@ class WorldRuntime : public QObject
 				QMap<QString, QString> attributes;
 				QString                source;
 				bool                   global{false};
+				std::optional<int>     dispatchSequenceOverride;
 		};
 		struct SaveSnapshot
 		{
@@ -6238,7 +6546,9 @@ class WorldRuntime : public QObject
 		QMap<QString, MiniWindow>                       m_miniWindows;
 		int                                             m_miniWindowMutationBatchDepth{0};
 		bool                                            m_miniWindowsChangedPending{false};
-		bool                                            m_suppressMiniWindowsChangedSignal{false};
+		// Preview rendering temporarily mutates an authoritative MiniWindow and then rolls it back. Suppress both
+		// stable-snapshot publication and the public change signal while that transaction is in progress.
+		bool                                            m_suppressMiniWindowsChangedPublication{false};
 		int                                             m_outputViewMutationBatchDepth{0};
 		int                                             m_outputViewMutationBatchInitialLineCount{0};
 		bool                                            m_outputViewLineChangedPending{false};
@@ -6404,6 +6714,11 @@ class WorldRuntime : public QObject
 		QString                        m_windowTitleOverride;
 		QString                        m_mainTitleOverride;
 		class LuaCallbackEngine       *m_luaCallbacks{nullptr};
+		/**
+		 * Owns asynchronous mutation-delivery recovery as well as the Lua worker lanes. Its recovery
+		 * consumer re-enters this WorldRuntime, so the destructor must reset it explicitly before
+		 * destroying callback engines or any runtime cache/state; declaration order is not sufficient.
+		 */
 		std::unique_ptr<ILuaExecutor>  m_luaExecutor;
 		QString                        m_luaScriptText;
 		WorldCommandProcessor         *m_commandProcessor{nullptr};
@@ -6448,8 +6763,37 @@ class WorldRuntime : public QObject
 		                m_luaCallbackRecentTextLineBufferSnapshotCache;
 		mutable quint64 m_luaCallbackDispatchSnapshotGeneration{0};
 		mutable quint64 m_luaCallbackDispatchSnapshotCacheGeneration{0};
-		mutable QSharedPointer<const LuaCallbackMiniWindowSnapshot> m_luaCallbackDispatchSnapshotBaseCache;
+		/** Number of complete dispatch snapshots requested; used to lock boundary recapture behavior. */
+		mutable quint64 m_luaCallbackDispatchSnapshotCaptureCount{0};
+		mutable quint64 m_luaCallbackDispatchSnapshotBaseBuildCount{0};
+		mutable quint64 m_luaCallbackDispatchSnapshotBasePatchCount{0};
+		mutable std::array<quint64, static_cast<size_t>(LuaCallbackStableSnapshotDomain::Count)>
+		                m_luaCallbackStableSnapshotDomainPopulationCounts{};
+		mutable int     m_luaCallbackSnapshotMutationBatchDepth{0};
+		mutable quint32 m_pendingLuaCallbackStableSnapshotPatchMask{0};
+		mutable QHash<LuaCallbackStableSnapshotDomain, QSet<LuaCallbackStableSnapshotPatchScope>>
+		                                            m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain;
+		/**
+		 * Runtime-owned mutable stable base. Workers never receive this object: capture always makes a
+		 * top-level copy first. Patching a Qt implicitly-shared member detaches that member, so snapshots
+		 * already running on the callback lane retain their immutable pre-patch data.
+		 */
+		mutable QSharedPointer<LuaCallbackSnapshot> m_luaCallbackDispatchSnapshotBaseCache;
 };
+
+/**
+ * @brief Lossless rule conversion shared by stable-base population and callback-local overlays.
+ *
+ * Keeping one conversion path is required: nested `CallPlugin` snapshots must serialize callback-local rule
+ * mutations with exactly the same fields used by cold construction and runtime-side stable patches.
+ */
+namespace QMudLuaCallbackRuleSnapshot
+{
+	[[nodiscard]] QList<LuaCallbackTriggerSnapshot>
+	                                              fromTriggers(const QList<WorldRuntime::Trigger> &triggers);
+	[[nodiscard]] QList<LuaCallbackAliasSnapshot> fromAliases(const QList<WorldRuntime::Alias> &aliases);
+	[[nodiscard]] QList<LuaCallbackTimerSnapshot> fromTimers(const QList<WorldRuntime::Timer> &timers);
+} // namespace QMudLuaCallbackRuleSnapshot
 
 namespace QMudLuaCallbackLineSnapshot
 {

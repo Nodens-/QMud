@@ -8,6 +8,7 @@
 
 #include "TimerSchedulingUtils.h"
 
+#include <QTimeZone>
 #include <QtMath>
 
 namespace
@@ -41,14 +42,19 @@ namespace QMudTimerScheduling
 		const int    secInt = qFloor(second);
 		const qint64 baseMs = static_cast<qint64>(hour) * 3600 * 1000 +
 		                      static_cast<qint64>(minute) * 60 * 1000 + static_cast<qint64>(secInt) * 1000;
-		const auto fracMs = static_cast<qint64>(qRound((second - secInt) * 1000.0));
+		const auto   fracMs = static_cast<qint64>(qRound((second - secInt) * 1000.0));
 		return baseMs + fracMs;
 	}
 
-	void resetTimerFields(WorldRuntime::Timer &timer, const QDateTime &now)
+	bool resetTimerFields(WorldRuntime::Timer &timer, const QDateTime &now)
 	{
+		const QDateTime previousLastFired    = timer.lastFired;
+		const QDateTime previousNextFireTime = timer.nextFireTime;
+		const auto      changed              = [&timer, &previousLastFired, &previousNextFireTime]
+		{ return timer.lastFired != previousLastFired || timer.nextFireTime != previousNextFireTime; };
+
 		if (!isEnabledValue(timer.attributes.value(QStringLiteral("enabled"))))
-			return;
+			return false;
 
 		const bool   atTime       = isEnabledValue(timer.attributes.value(QStringLiteral("at_time")));
 		const int    hour         = timer.attributes.value(QStringLiteral("hour")).toInt();
@@ -64,34 +70,37 @@ namespace QMudTimerScheduling
 		{
 			const QTime at = timeFromParts(hour, minute, second);
 			if (!at.isValid())
-				return;
+				return changed();
 
-			QDateTime fire(now.date(), at);
+			QDateTime fire(now.date(), at, now.timeZone());
 			if (fire < now)
 				fire = fire.addDays(1);
 			timer.nextFireTime = fire;
-			return;
+			return changed();
 		}
 
 		const qint64 intervalMs = intervalMsFromParts(hour, minute, second);
 		const qint64 offsetMs   = intervalMsFromParts(offsetHour, offsetMinute, offsetSecond);
 		timer.nextFireTime      = now.addMSecs(intervalMs - offsetMs);
+		return changed();
 	}
 
-	bool isTimerDue(WorldRuntime::Timer &timer, const QDateTime &now, const bool connected)
+	TimerDueEvaluation evaluateTimerDue(WorldRuntime::Timer &timer, const QDateTime &now,
+	                                    const bool connected)
 	{
 		if (!isEnabledValue(timer.attributes.value(QStringLiteral("enabled"))))
-			return false;
+			return {};
 		if (!isEnabledValue(timer.attributes.value(QStringLiteral("active_closed"))) && !connected)
-			return false;
+			return {};
+
+		bool runtimeStateChanged = false;
 		if (!timer.nextFireTime.isValid())
-			resetTimerFields(timer, now);
-		if (!timer.nextFireTime.isValid() || timer.nextFireTime > now)
-			return false;
-		return true;
+			runtimeStateChanged = resetTimerFields(timer, now);
+		return {.due                 = timer.nextFireTime.isValid() && timer.nextFireTime <= now,
+		        .runtimeStateChanged = runtimeStateChanged};
 	}
 
-	void applyTimerFiredState(WorldRuntime::Timer &timer, const QDateTime &now)
+	bool applyTimerFiredState(WorldRuntime::Timer &timer, const QDateTime &now)
 	{
 		timer.firedCount++;
 		timer.lastFired = now;
@@ -110,9 +119,8 @@ namespace QMudTimerScheduling
 		}
 
 		if (!timer.nextFireTime.isValid() || timer.nextFireTime <= now)
-			resetTimerFields(timer, now);
+			static_cast<void>(resetTimerFields(timer, now));
 
-		if (isEnabledValue(timer.attributes.value(QStringLiteral("one_shot"))))
-			timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
+		return isEnabledValue(timer.attributes.value(QStringLiteral("one_shot")));
 	}
 } // namespace QMudTimerScheduling

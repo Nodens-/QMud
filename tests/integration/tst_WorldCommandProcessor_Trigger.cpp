@@ -10,6 +10,7 @@
 
 #include "WorldCommandProcessorUtils.h"
 #include "WorldOptions.h"
+#include "WorldRuntimeTestAccess.h"
 #include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
@@ -136,7 +137,7 @@ namespace
 				runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.triggersMutable().push_back(makeMultilineWhitespaceTrigger());
+				WorldRuntimeTestAccess::triggers(runtime).push_back(makeMultilineWhitespaceTrigger());
 
 				WorldCommandProcessor processor;
 				processor.setRuntime(&runtime);
@@ -156,7 +157,7 @@ namespace
 				runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.triggersMutable().push_back(makeScriptTrigger());
+				WorldRuntimeTestAccess::triggers(runtime).push_back(makeScriptTrigger());
 
 				WorldCommandProcessor processor;
 				processor.setRuntime(&runtime);
@@ -248,7 +249,7 @@ namespace
 				runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.triggersMutable().push_back(makeScriptTrigger());
+				WorldRuntimeTestAccess::triggers(runtime).push_back(makeScriptTrigger());
 
 				WorldCommandProcessor processor;
 				processor.setRuntime(&runtime);

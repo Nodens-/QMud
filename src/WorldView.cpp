@@ -2343,7 +2343,7 @@ WorldView::MiniWindowPaintBoundsSnapshot WorldView::miniWindowPaintBoundsSnapsho
 	snapshot.foregroundImageMode = m_runtime->foregroundImageMode();
 
 	const QRect clientRect(QPoint(0, 0), snapshot.clientSize);
-	const auto  windows     = m_runtime->sortedMiniWindows();
+	const auto  windows     = m_runtime->sortedMiniWindowsMutable();
 	auto        layerBounds = [this, &snapshot, &clientRect, &windows](const bool underneath)
 	{
 		QRect bounds;
@@ -12872,7 +12872,7 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath, const QRegi
 		}
 	}
 
-	const auto windows = m_runtime->sortedMiniWindows();
+	const auto windows = m_runtime->sortedMiniWindowsMutable();
 	m_runtime->layoutMiniWindows(clientSize, ownerSize, underneath, &windows);
 
 	for (MiniWindow *window : windows)
@@ -12985,7 +12985,7 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 	if (!m_runtime || !m_outputStack)
 		return nullptr;
 
-	const auto  windows        = m_runtime->sortedMiniWindows();
+	const auto  windows        = m_runtime->sortedMiniWindowsMutable();
 	MiniWindow *fallbackWindow = nullptr;
 	QString     fallbackWindowName;
 	for (MiniWindow *window : windows | std::views::reverse)
@@ -13125,7 +13125,7 @@ void WorldView::dispatchPendingCapturedMiniWindowDragMove()
 	if (!m_runtime || m_capturedWindowName.isEmpty())
 		return;
 
-	MiniWindow *captured = m_runtime->miniWindow(m_capturedWindowName);
+	MiniWindow *captured = m_runtime->miniWindowMutable(m_capturedWindowName);
 	if (!captured || captured->mouseDownHotspot.isEmpty())
 		return;
 
@@ -13279,7 +13279,7 @@ bool WorldView::handleMiniWindowMouseLeave(const QPoint &reportedPosition)
 	m_runtime->notifyMiniWindowMouseMoved(reportedPosition.x(), reportedPosition.y(), QString());
 	if (m_hoverWindowName.isEmpty())
 		return false;
-	MiniWindow *window = m_runtime->miniWindow(m_hoverWindowName);
+	MiniWindow *window = m_runtime->miniWindowMutable(m_hoverWindowName);
 	if (window && !window->mouseOverHotspot.isEmpty())
 		cancelMouseOver(window, window->mouseOverHotspot);
 	clearPendingHotspotTooltip();
@@ -13331,7 +13331,7 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 
 	if (!m_capturedWindowName.isEmpty())
 	{
-		MiniWindow *captured = m_runtime->miniWindow(m_capturedWindowName);
+		MiniWindow *captured = m_runtime->miniWindowMutable(m_capturedWindowName);
 		if (captured)
 			setMiniWindowCallbackMousePosition(*captured, callbackLocal, true, dragCaptureActive);
 		if (!m_tooltipHotspot.isEmpty())
@@ -13355,7 +13355,7 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 	{
 		if (!previousHoverWindow.isEmpty())
 		{
-			if (MiniWindow *oldWindow = m_runtime->miniWindow(previousHoverWindow); oldWindow)
+			if (MiniWindow *oldWindow = m_runtime->miniWindowMutable(previousHoverWindow); oldWindow)
 			{
 				oldWindow->lastMousePosition =
 				    miniWindowDisplayToContent(oldWindow, hitLocal - oldWindow->rect.topLeft());
@@ -13450,7 +13450,7 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 	}
 	if (!m_hoverWindowName.isEmpty())
 	{
-		MiniWindow *hoverWindow = m_runtime->miniWindow(m_hoverWindowName);
+		MiniWindow *hoverWindow = m_runtime->miniWindowMutable(m_hoverWindowName);
 		if (hoverWindow && !hoverWindow->mouseOverHotspot.isEmpty())
 			cancelMouseOver(hoverWindow, hoverWindow->mouseOverHotspot);
 		m_hoverWindowName.clear();
@@ -13529,7 +13529,7 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 
 	const QPoint rawLocal = mapEventToOutputStack(event->position(), source);
 	MiniWindow  *pressedWindow =
-	    !m_capturedWindowName.isEmpty() ? m_runtime->miniWindow(m_capturedWindowName) : nullptr;
+	    !m_capturedWindowName.isEmpty() ? m_runtime->miniWindowMutable(m_capturedWindowName) : nullptr;
 	const bool   dragCaptureActive = isMiniWindowDragCaptureActive();
 	const QPoint local = dragCaptureActive
 	                         ? MiniWindowUtils::constrainCapturedDragPosition(rawLocal, m_outputStack->size())
@@ -13557,7 +13557,7 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 	{
 		flushPendingCapturedMiniWindowDragMove(local);
 		pressedWindow =
-		    !m_capturedWindowName.isEmpty() ? m_runtime->miniWindow(m_capturedWindowName) : nullptr;
+		    !m_capturedWindowName.isEmpty() ? m_runtime->miniWindowMutable(m_capturedWindowName) : nullptr;
 	}
 	QString previousDownHotspot;
 	if (pressedWindow)
@@ -14885,7 +14885,7 @@ void WorldView::updateWrapMargin() const
 		const bool textRectangleCompatActive = hasConfiguredTextRectangle(m_runtime->textRectangle());
 		if (!textRectangleCompatActive)
 		{
-			const auto windows = m_runtime->sortedMiniWindows();
+			const auto windows = m_runtime->sortedMiniWindowsMutable();
 			// Keep miniwindow rects current before calculating reserved margin so
 			// window moves/resizes are reflected immediately in NAWS sizing.
 			m_runtime->layoutMiniWindows(m_outputStack->size(), size(), false, &windows);

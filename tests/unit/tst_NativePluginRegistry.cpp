@@ -9,6 +9,7 @@
 #include "NativePluginRegistry.h"
 #include "WorldDocument.h"
 #include "WorldRuntime.h"
+#include "WorldRuntimeTestAccess.h"
 #include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
@@ -526,11 +527,11 @@ namespace
 				audioPlugin.nativeShim = true;
 				audioPlugin.attributes.insert(QStringLiteral("id"),
 				                              QMudNativePluginRegistry::luaAudioPluginId());
-				runtime.pluginsMutable().push_back(audioPlugin);
+				WorldRuntimeTestAccess::plugins(runtime).push_back(audioPlugin);
 				QVERIFY(
 				    !QMudNativePluginRegistry::handleLuaAudioCommand(&runtime, QStringLiteral("LuaAudio")));
 
-				runtime.pluginsMutable().back().enabled = true;
+				WorldRuntimeTestAccess::plugins(runtime).back().enabled = true;
 
 				QVERIFY(QMudNativePluginRegistry::handleLuaAudioCommand(&runtime,
 				                                                        QStringLiteral("LuaAudio help")));
@@ -1007,7 +1008,7 @@ namespace
 				mushReaderPlugin.enabled    = false;
 				mushReaderPlugin.attributes.insert(QStringLiteral("id"),
 				                                   QMudNativePluginRegistry::mushReaderPluginId());
-				runtime.pluginsMutable().push_back(mushReaderPlugin);
+				WorldRuntimeTestAccess::plugins(runtime).push_back(mushReaderPlugin);
 				QVERIFY(!runtime.hasMushReaderLiveSpeechOwner());
 
 				QVERIFY(runtime.enablePlugin(QMudNativePluginRegistry::mushReaderPluginId(), true));
@@ -1112,8 +1113,7 @@ namespace
 					WorldDocument doc;
 					QVERIFY(doc.loadFromPluginFile(path));
 					QVERIFY(!doc.plugins().isEmpty());
-					const QString parsedId =
-					    doc.plugins().front().attributes.value(QStringLiteral("id")).trimmed().toLower();
+					const QString parsedId = doc.plugins().front().attributes.value(QStringLiteral("id"));
 					QCOMPARE(parsedId, id);
 					QVERIFY(QMudNativePluginRegistry::isProtectedId(parsedId));
 				}

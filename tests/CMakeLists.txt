@@ -201,7 +201,7 @@ if (QMUD_ENABLE_LUA_SCRIPTING)
             LABELS
             unit
             TIMEOUT
-            90)
+            120)
 
     qmud_add_qtest(tst_LuaLuacomShim
             SOURCES

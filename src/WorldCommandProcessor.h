@@ -33,6 +33,8 @@ class WorldView;
 class WorldCommandProcessor : public QObject
 {
 		Q_OBJECT
+		friend class tst_LuaCallbackEngine;
+
 	public:
 		/**
 		 * @brief Creates a command processor for one world/session.
@@ -344,6 +346,11 @@ class WorldCommandProcessor : public QObject
 				QString description;
 				bool    replaceMatchedLineOutput{false};
 		};
+		struct RuleRef
+		{
+				quint64 runtimeId{0};
+				QString pluginId;
+		};
 		struct TriggerEvaluationResult
 		{
 				bool                             omitFromOutput{false};
@@ -352,7 +359,7 @@ class WorldCommandProcessor : public QObject
 				QString                          extraOutput;
 				QVector<DeferredScript>          deferredScripts;
 				QVector<TriggerScript>           triggerScripts;
-				QVector<quint64>                 oneShotTriggers;
+				QVector<RuleRef>                 oneShotTriggers;
 		};
 		/**
 		 * @brief Evaluates all trigger sets for an incoming line.

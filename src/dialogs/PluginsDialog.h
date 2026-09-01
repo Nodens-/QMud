@@ -53,6 +53,11 @@ class PluginsDialog : public QDialog
 		 */
 		void onAddPlugin();
 		/**
+		 * @brief Installs the selected plugin file and records persistent membership changes.
+		 * @param path Plugin XML file selected by the user.
+		 */
+		void installPluginFile(const QString &path);
+		/**
 		 * @brief Removes selected plugin entries.
 		 */
 		void onRemovePlugin();

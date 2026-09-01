@@ -47,12 +47,7 @@ namespace
 	constexpr auto kLuaAudioPluginId   = "aedf0cb0be5bf045860d54b7"; // LuaAudio.xml
 	constexpr auto kNativeShimMarker   = "QMud native compatibility shim - Legacy XML ignored.";
 
-	QString        normalizedId(const QString &value)
-	{
-		return value.trimmed().toLower();
-	}
-
-	QString normalizedRoutine(const QString &value)
+	QString        normalizedRoutine(const QString &value)
 	{
 		return value.trimmed().toLower();
 	}
@@ -115,7 +110,7 @@ namespace
 		metadata.directory       = QStringLiteral("qmud:native/");
 		metadata.version         = 1.10;
 		metadata.requiredVersion = 0.0;
-		metadata.sequence        = 5000;
+		metadata.sequence        = QMudPluginSequence::kDefault;
 		metadata.dateWritten     = QDateTime::fromString(QStringLiteral("2026-06-06T00:00:00Z"), Qt::ISODate);
 		metadata.dateModified    = metadata.dateWritten;
 		return metadata;
@@ -137,7 +132,7 @@ namespace
 		metadata.directory       = QStringLiteral("qmud:native/");
 		metadata.version         = 1.0;
 		metadata.requiredVersion = 0.0;
-		metadata.sequence        = 5000;
+		metadata.sequence        = QMudPluginSequence::kDefault;
 		metadata.dateWritten     = QDateTime::fromString(QStringLiteral("2026-06-07T00:00:00Z"), Qt::ISODate);
 		metadata.dateModified    = metadata.dateWritten;
 		return metadata;
@@ -1095,10 +1090,9 @@ namespace
 		return std::ranges::any_of(runtime->plugins(),
 		                           [&audioId](const WorldRuntime::Plugin &plugin)
 		                           {
+			                           const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
 			                           return plugin.enabled && !plugin.installPending &&
-			                                  plugin.sequence >= 0 &&
-			                                  normalizedId(plugin.attributes.value(QStringLiteral("id"))) ==
-			                                      audioId;
+			                                  plugin.sequence >= 0 && pluginId == audioId;
 		                           });
 	}
 
@@ -1326,7 +1320,7 @@ namespace QMudNativePluginRegistry
 
 	bool metadataForShim(const QString &pluginId, NativePluginMetadata &metadata)
 	{
-		const QString id = normalizedId(pluginId);
+		const QString &id = pluginId;
 		if (id == QString::fromLatin1(kMushReaderPluginId))
 		{
 			metadata = mushReaderMetadata();
@@ -1382,7 +1376,7 @@ namespace QMudNativePluginRegistry
 
 	QStringList supportedRoutines(const QString &pluginId)
 	{
-		const QString id = normalizedId(pluginId);
+		const QString &id = pluginId;
 		if (id == QString::fromLatin1(kMushReaderPluginId))
 			return mushReaderRoutines();
 		if (id == QString::fromLatin1(kLuaAudioPluginId))
@@ -1704,12 +1698,12 @@ namespace QMudNativePluginRegistry
 
 	bool isShimId(const QString &pluginId)
 	{
-		return shimIds().contains(normalizedId(pluginId));
+		return shimIds().contains(pluginId);
 	}
 
 	bool isBlacklistedId(const QString &pluginId)
 	{
-		return blacklistedIds().contains(normalizedId(pluginId));
+		return blacklistedIds().contains(pluginId);
 	}
 
 	bool isProtectedId(const QString &pluginId)
@@ -1719,7 +1713,7 @@ namespace QMudNativePluginRegistry
 
 	QString resolveShimIdOrName(const QString &pluginIdOrName)
 	{
-		QString key = normalizedId(pluginIdOrName);
+		const QString &key = pluginIdOrName;
 		if (key.isEmpty())
 			return {};
 		if (isShimId(key))
@@ -1728,7 +1722,7 @@ namespace QMudNativePluginRegistry
 		{
 			NativePluginMetadata metadata;
 			if (metadataForShim(shimId, metadata) &&
-			    metadata.name.compare(pluginIdOrName.trimmed(), Qt::CaseInsensitive) == 0)
+			    metadata.name.compare(pluginIdOrName, Qt::CaseInsensitive) == 0)
 			{
 				return metadata.id;
 			}
@@ -1815,8 +1809,8 @@ namespace QMudNativePluginRegistry
 	                             const NativeCallExecutionMode executionMode)
 	{
 		NativeCallResult result;
-		result.errorCode = eOK;
-		const QString id = normalizedId(pluginId);
+		result.errorCode  = eOK;
+		const QString &id = pluginId;
 		if (!context.installed)
 		{
 			result.errorCode = eNoSuchPlugin;
@@ -1884,8 +1878,8 @@ namespace QMudNativePluginRegistry
 
 	bool callRoutineRequiresRuntimeThread(const QString &pluginId, const QString &routine)
 	{
-		const QString id   = normalizedId(pluginId);
-		const QString name = normalizedRoutine(routine);
+		const QString &id   = pluginId;
+		const QString  name = normalizedRoutine(routine);
 		if (id == luaAudioPluginId())
 		{
 			return name == QStringLiteral("stop") || name == QStringLiteral("fadeout") ||

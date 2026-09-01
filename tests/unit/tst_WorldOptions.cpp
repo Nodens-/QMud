@@ -109,6 +109,17 @@ namespace
 				QCOMPARE(QMudWorldOptions::findWorldNumericOption(QStringLiteral("not_an_option")),
 				         static_cast<const WorldNumericOption *>(nullptr));
 			}
+
+			void pluginSequenceParserEnforcesLegacyRange()
+			{
+				QCOMPARE(QMudPluginSequence::parse(QStringLiteral("-10000")), std::optional<int>(-10000));
+				QCOMPARE(QMudPluginSequence::parse(QStringLiteral(" 5000 ")), std::optional<int>(5000));
+				QCOMPARE(QMudPluginSequence::parse(QStringLiteral("10000")), std::optional<int>(10000));
+				QVERIFY(!QMudPluginSequence::parse(QStringLiteral("-10001")));
+				QVERIFY(!QMudPluginSequence::parse(QStringLiteral("10001")));
+				QVERIFY(!QMudPluginSequence::parse(QStringLiteral("invalid")));
+				QVERIFY(!QMudPluginSequence::parse(QString()));
+			}
 			// NOLINTEND(readability-convert-member-functions-to-static)
 	};
 } // namespace

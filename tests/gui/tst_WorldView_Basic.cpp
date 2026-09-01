@@ -16,6 +16,7 @@
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
 #include "WorldOptions.h"
+#include "WorldRuntimeTestAccess.h"
 #include "WorldView.h"
 #include "scripting/ScriptingErrors.h"
 
@@ -161,6 +162,12 @@ namespace
 function OnPluginWorldOutputResized()
   local count = tonumber(GetVariable("count") or "0") or 0
   SetVariable("count", tostring(count + 1))
+  if WindowInfo("resize-layout", 1) ~= nil then
+    SetVariable("presentation", string.format("%s|%d|%d|%d|%d",
+      tostring(WindowInfo("resize-layout", 6)), WindowInfo("resize-layout", 10),
+      WindowInfo("resize-layout", 11), WindowInfo("resize-layout", 12),
+      WindowInfo("resize-layout", 13)))
+  end
 end
 ]]></script>
   </plugin>
@@ -195,6 +202,19 @@ end
 		bool      ok    = false;
 		const int count = value.toInt(&ok);
 		return ok ? count : -1;
+	}
+
+	/**
+	 * @brief Returns miniwindow presentation recorded by the output-resize callback.
+	 * @param runtime Runtime that owns the recording plugin.
+	 * @return Serialized presentation fields, or an empty string until recorded.
+	 */
+	QString outputResizePresentation(const WorldRuntime &runtime)
+	{
+		QString value;
+		static_cast<void>(runtime.findPluginVariable(QStringLiteral("bc8f3aaec867497b827af799"),
+		                                             QStringLiteral("presentation"), value));
+		return value;
 	}
 
 	int stringIndexToInt(const qsizetype value)
@@ -863,7 +883,7 @@ end
 		{
 			qFatal("Could not create production miniwindow test fixture");
 		}
-		MiniWindow *const window = runtime->miniWindow(name);
+		MiniWindow *const window = WorldRuntimeTestAccess::miniWindow(*runtime, name);
 		if (!window)
 			qFatal("Production miniwindow fixture is missing after creation");
 		runtime->windowShow(name, true);
@@ -4854,7 +4874,8 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(runtime->windowCreate(QStringLiteral("dpi-sync"), 10, 10, 80, 40, 0, 0,
 			                               QColor(10, 20, 30), {}),
 			         eOK);
-			MiniWindow *const window = runtime->miniWindow(QStringLiteral("dpi-sync"));
+			MiniWindow *const window =
+			    WorldRuntimeTestAccess::miniWindow(*runtime, QStringLiteral("dpi-sync"));
 			QVERIFY(window);
 			const double targetRatio = view.devicePixelRatioF();
 			const double staleRatio  = qFuzzyCompare(targetRatio, 1.0) ? 2.0 : 1.0;
@@ -5071,6 +5092,10 @@ class tst_WorldView_Basic : public QObject
 			view.resize(900, 640);
 			view.show();
 			setTestRuntime(view, runtime);
+			QCOMPARE(runtime->windowCreate(QStringLiteral("resize-layout"), 0, 0, 80, 20, 5, 0,
+			                               QColor(Qt::black), QString()),
+			         eOK);
+			QCOMPARE(runtime->windowShow(QStringLiteral("resize-layout"), true), eOK);
 			QString loadError;
 			QVERIFY2(installOutputResizeRecordingPlugin(*runtime, temporaryHome, loadError),
 			         qPrintable(loadError));
@@ -5081,6 +5106,16 @@ class tst_WorldView_Basic : public QObject
 			view.resize(1020, 700);
 			QCoreApplication::processEvents();
 			QTRY_COMPARE(outputResizeCallbackCount(*runtime), baseline + 1);
+			const QString expectedPresentation =
+			    QStringLiteral("%1|%2|%3|%4|%5")
+			        .arg(runtime->windowInfo(QStringLiteral("resize-layout"), 6).toBool()
+			                 ? QStringLiteral("true")
+			                 : QStringLiteral("false"))
+			        .arg(runtime->windowInfo(QStringLiteral("resize-layout"), 10).toInt())
+			        .arg(runtime->windowInfo(QStringLiteral("resize-layout"), 11).toInt())
+			        .arg(runtime->windowInfo(QStringLiteral("resize-layout"), 12).toInt())
+			        .arg(runtime->windowInfo(QStringLiteral("resize-layout"), 13).toInt());
+			QTRY_COMPARE(outputResizePresentation(*runtime), expectedPresentation);
 
 			resetTestState();
 		}

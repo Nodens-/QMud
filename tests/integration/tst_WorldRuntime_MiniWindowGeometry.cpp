@@ -11,6 +11,7 @@
 #include "LuaExecutor.h"
 #include "MiniWindow.h"
 #include "WorldRuntime.h"
+#include "WorldRuntimeTestAccess.h"
 #include "WorldView.h"
 #include "helpers/MiniWindowUtils.h"
 #include "scripting/ScriptingErrors.h"
@@ -55,7 +56,7 @@ namespace
 				                              kMiniWindowAbsoluteLocation, QColor(Qt::black), QString()),
 				         eOK);
 
-				MiniWindow *window = runtime.miniWindow(windowId);
+				MiniWindow *window = WorldRuntimeTestAccess::miniWindow(runtime, windowId);
 				QVERIFY(window);
 				QVERIFY(!window->show);
 				QCOMPARE(window->location, requestedLocation);
@@ -144,7 +145,7 @@ end
 					QCOMPARE(runtime.windowShow(anchorId, true), eOK);
 				}
 
-				const QVector<MiniWindow *> windows = runtime.sortedMiniWindows();
+				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
 				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), true, &windows);
 				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
 				const MiniWindow *window = runtime.miniWindow(windowId);
@@ -273,7 +274,7 @@ end
 					QCOMPARE(runtime.windowShow(anchorId, true), eOK);
 				}
 
-				const QVector<MiniWindow *> windows = runtime.sortedMiniWindows();
+				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
 				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), true, &windows);
 				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
 				const MiniWindow *window = runtime.miniWindow(windowId);
@@ -390,7 +391,7 @@ end
 				         eOK);
 				QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-				const QVector<MiniWindow *> windows = runtime.sortedMiniWindows();
+				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
 				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
 				const MiniWindow *window = runtime.miniWindow(windowId);
 				QVERIFY(window);
@@ -496,7 +497,7 @@ end
 				         eOK);
 				QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-				const QVector<MiniWindow *> windows = runtime.sortedMiniWindows();
+				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
 				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), true, &windows);
 				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
 				const MiniWindow *window = runtime.miniWindow(windowId);
@@ -586,12 +587,12 @@ end
 				         eOK);
 				QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-				MiniWindow *window = runtime.miniWindow(windowId);
+				MiniWindow *window = WorldRuntimeTestAccess::miniWindow(runtime, windowId);
 				QVERIFY(window);
 				MiniWindowUtils::setPixel(*window, 1, 1, MiniWindowUtils::colorToRef(QColor(Qt::red)));
 				const qint64                backingCacheKey = window->backingSurface().cacheKey();
 
-				const QVector<MiniWindow *> windows = runtime.sortedMiniWindows();
+				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
 				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), true, &windows);
 				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
 				QCOMPARE(window->rect, QRect(windowLocation, windowSize));
@@ -622,7 +623,7 @@ end
 				QCOMPARE(resultParts.at(1).toInt(), windowSize.width());
 				QCOMPARE(resultParts.at(2).toInt(), clientWidth - 1);
 
-				window = runtime.miniWindow(windowId);
+				window = WorldRuntimeTestAccess::miniWindow(runtime, windowId);
 				QVERIFY(window);
 				QCOMPARE(window->location, windowLocation);
 				QCOMPARE(window->logicalSize(), windowSize);
@@ -682,12 +683,12 @@ end
 				         eOK);
 				QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-				MiniWindow *window = runtime.miniWindow(windowId);
+				MiniWindow *window = WorldRuntimeTestAccess::miniWindow(runtime, windowId);
 				QVERIFY(window);
 				MiniWindowUtils::setPixel(*window, 1, 1, MiniWindowUtils::colorToRef(QColor(Qt::red)));
 				const QDateTime             installedAt = window->installedAt;
 
-				const QVector<MiniWindow *> windows = runtime.sortedMiniWindows();
+				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
 				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), true, &windows);
 				runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
 
@@ -713,7 +714,7 @@ end
 				    runtime.findVariable(QStringLiteral("blocked_create_result"), callbackResult), 5000);
 				QCOMPARE(callbackResult.toInt(), eOK);
 
-				window = runtime.miniWindow(windowId);
+				window = WorldRuntimeTestAccess::miniWindow(runtime, windowId);
 				QVERIFY(window);
 				QCOMPARE(window->location, windowLocation);
 				QCOMPARE(window->logicalSize(), windowSize);
@@ -736,7 +737,7 @@ end
 				                              QColor(Qt::black), QString()),
 				         eOK);
 
-				MiniWindow *window = runtime.miniWindow(windowId);
+				MiniWindow *window = WorldRuntimeTestAccess::miniWindow(runtime, windowId);
 				QVERIFY(window);
 				window->transparentSurfaceCache = QImage(4, 4, QImage::Format_ARGB32);
 				window->transparentSurfaceCache.fill(QColor(Qt::red));
@@ -819,7 +820,7 @@ end
 				QCOMPARE(runtime.windowShow(distinctWindowId, true), eOK);
 
 				const QSize                 clientSize(clientWidth, clientHeight);
-				const QVector<MiniWindow *> windows = runtime.sortedMiniWindows();
+				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
 				runtime.layoutMiniWindows(clientSize, view.size(), true, &windows);
 				runtime.layoutMiniWindows(clientSize, view.size(), false, &windows);
 				const MiniWindow *capturedWindow = runtime.miniWindow(capturedWindowId);
@@ -866,7 +867,7 @@ end
 				WorldRuntime runtime;
 				auto         engine = QSharedPointer<LuaCallbackEngine>::create();
 				engine->setWorldRuntime(&runtime);
-				engine->setPluginInfo(QStringLiteral("Plugin.Id"), QStringLiteral("Plugin Name"),
+				engine->setPluginInfo(QStringLiteral("plugin.id"), QStringLiteral("Plugin Name"),
 				                      QStringLiteral("/tmp/plugin"));
 				engine->setScriptText(QStringLiteral(R"lua(
 function OnPluginEnable()
@@ -890,7 +891,7 @@ end
 )lua"));
 				QVERIFY(engine->loadScript());
 
-				auto snapshot         = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+				auto snapshot         = QSharedPointer<LuaCallbackSnapshot>::create();
 				snapshot->windowNames = {QStringLiteral("font-a"), QStringLiteral("font-a|b"),
 				                         QStringLiteral("text-a"), QStringLiteral("text-a|b")};
 				snapshot->rebuildMiniWindowLookupCaches();
@@ -900,7 +901,7 @@ end
 				request.engines               = {engine};
 				request.kind                  = LuaBatchDispatchKind::NoArgs;
 				request.functionName          = QStringLiteral("OnPluginEnable");
-				request.miniWindowSnapshotArg = snapshot;
+				request.callbackSnapshotArg   = snapshot;
 				LuaBatchDispatchResult result = executor.dispatchBatch(request);
 				QVERIFY(result.hasFunctionValid);
 				QVERIFY(result.hasFunction);
@@ -908,7 +909,7 @@ end
 				request.kind         = LuaBatchDispatchKind::StringInOut;
 				request.functionName = QStringLiteral("structured_font_cache_status");
 				request.stringArg    = QStringLiteral("ignored");
-				request.miniWindowSnapshotArg.reset();
+				request.callbackSnapshotArg.reset();
 				result = executor.dispatchBatch(request);
 				QCOMPARE(result.stringResult, QStringLiteral("ok"));
 			}
@@ -946,7 +947,7 @@ end
 				QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
 				const QSize                 clientSize(view.outputClientWidth(), view.outputClientHeight());
-				const QVector<MiniWindow *> windows = runtime.sortedMiniWindows();
+				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
 				runtime.layoutMiniWindows(clientSize, view.size(), true, &windows);
 				runtime.layoutMiniWindows(clientSize, view.size(), false, &windows);
 				const MiniWindow *window = runtime.miniWindow(windowId);
@@ -1005,7 +1006,7 @@ end
 					         eOK);
 					QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-					const QVector<MiniWindow *> windows = runtime.sortedMiniWindows();
+					const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
 					runtime.layoutMiniWindows(clientSize, view.size(), false, &windows);
 					const MiniWindow *window = runtime.miniWindow(windowId);
 					QVERIFY(window);
@@ -1041,7 +1042,7 @@ end
 					         eOK);
 					QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
-					const QVector<MiniWindow *> windows = runtime.sortedMiniWindows();
+					const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
 					runtime.layoutMiniWindows(QSize(clientWidth, clientHeight), view.size(), false, &windows);
 					const MiniWindow *window = runtime.miniWindow(windowId);
 					QVERIFY(window);
@@ -1071,7 +1072,7 @@ end
 				QCOMPARE(runtime.windowShow(windowId, true), eOK);
 
 				constexpr QSize             clientSize(640, 480);
-				const QVector<MiniWindow *> windows = runtime.sortedMiniWindows();
+				const QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
 				runtime.layoutMiniWindows(clientSize, clientSize, false, &windows);
 
 				const MiniWindow *window = runtime.miniWindow(windowId);

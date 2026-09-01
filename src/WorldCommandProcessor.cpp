@@ -64,6 +64,37 @@ constexpr int kStyleBlink = BLINK;
 constexpr int kStyleBlink = 0x0004;
 #endif
 
+/**
+ * @brief Narrow internal access used by automation execution and one-shot removal.
+ *
+ * Collection references remain private in WorldRuntime; every mutation performed through this accessor is paired
+ * with the processor's definition/runtime-state publication guards.
+ */
+class WorldCommandProcessorMutationAccess final
+{
+	public:
+		static QList<WorldRuntime::Trigger> &triggers(WorldRuntime &runtime)
+		{
+			return runtime.triggersMutable();
+		}
+		static QList<WorldRuntime::Alias> &aliases(WorldRuntime &runtime)
+		{
+			return runtime.aliasesMutable();
+		}
+		static QList<WorldRuntime::Timer> &timers(WorldRuntime &runtime)
+		{
+			return runtime.timersMutable();
+		}
+		static QList<WorldRuntime::Plugin> &plugins(WorldRuntime &runtime)
+		{
+			return runtime.pluginsMutable();
+		}
+		static WorldRuntime::Plugin *plugin(WorldRuntime &runtime, const QString &pluginId)
+		{
+			return runtime.pluginForIdMutable(pluginId);
+		}
+};
+
 namespace
 {
 	const auto    kEndLine           = QStringLiteral("\r\n");
@@ -511,7 +542,7 @@ namespace
 
 	bool pluginHasValidId(const WorldRuntime::Plugin &plugin)
 	{
-		return !plugin.attributes.value(QStringLiteral("id")).trimmed().isEmpty();
+		return !plugin.attributes.value(QStringLiteral("id")).isEmpty();
 	}
 
 	quint64 nextRuleRuntimeId()
@@ -525,14 +556,17 @@ namespace
 
 	QString pluginIdOf(const WorldRuntime::Plugin *plugin)
 	{
-		return plugin ? plugin->attributes.value(QStringLiteral("id")) : QString();
+		if (!plugin)
+			return {};
+		const QString pluginId = plugin->attributes.value(QStringLiteral("id"));
+		return pluginId;
 	}
 
 	WorldRuntime::Plugin *resolveCapturedPlugin(WorldRuntime *runtime, const QString &pluginId)
 	{
 		if (!runtime || pluginId.isEmpty())
 			return nullptr;
-		return runtime->pluginForId(pluginId);
+		return WorldCommandProcessorMutationAccess::plugin(*runtime, pluginId);
 	}
 
 	bool aliasRuntimeIdUsedElsewhere(WorldRuntime *runtime, const quint64 runtimeId,
@@ -540,12 +574,12 @@ namespace
 	{
 		if (!runtime || runtimeId == 0)
 			return false;
-		for (WorldRuntime::Alias &alias : runtime->aliasesMutable())
+		for (WorldRuntime::Alias &alias : WorldCommandProcessorMutationAccess::aliases(*runtime))
 		{
 			if (&alias != current && alias.runtimeId == runtimeId)
 				return true;
 		}
-		for (WorldRuntime::Plugin &plugin : runtime->pluginsMutable())
+		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
 		{
 			for (WorldRuntime::Alias &alias : plugin.aliases)
 			{
@@ -561,12 +595,12 @@ namespace
 	{
 		if (!runtime || runtimeId == 0)
 			return false;
-		for (WorldRuntime::Trigger &trigger : runtime->triggersMutable())
+		for (WorldRuntime::Trigger &trigger : WorldCommandProcessorMutationAccess::triggers(*runtime))
 		{
 			if (&trigger != current && trigger.runtimeId == runtimeId)
 				return true;
 		}
-		for (WorldRuntime::Plugin &plugin : runtime->pluginsMutable())
+		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
 		{
 			for (WorldRuntime::Trigger &trigger : plugin.triggers)
 			{
@@ -582,12 +616,12 @@ namespace
 	{
 		if (!runtime || runtimeId == 0)
 			return false;
-		for (WorldRuntime::Timer &timer : runtime->timersMutable())
+		for (WorldRuntime::Timer &timer : WorldCommandProcessorMutationAccess::timers(*runtime))
 		{
 			if (&timer != current && timer.runtimeId == runtimeId)
 				return true;
 		}
-		for (WorldRuntime::Plugin &plugin : runtime->pluginsMutable())
+		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
 		{
 			for (WorldRuntime::Timer &timer : plugin.timers)
 			{
@@ -629,12 +663,12 @@ namespace
 	{
 		if (!runtime || runtimeId == 0)
 			return nullptr;
-		for (WorldRuntime::Alias &alias : runtime->aliasesMutable())
+		for (WorldRuntime::Alias &alias : WorldCommandProcessorMutationAccess::aliases(*runtime))
 		{
 			if (alias.runtimeId == runtimeId)
 				return &alias;
 		}
-		for (WorldRuntime::Plugin &plugin : runtime->pluginsMutable())
+		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
 		{
 			for (WorldRuntime::Alias &alias : plugin.aliases)
 			{
@@ -649,12 +683,12 @@ namespace
 	{
 		if (!runtime || runtimeId == 0)
 			return nullptr;
-		for (WorldRuntime::Trigger &trigger : runtime->triggersMutable())
+		for (WorldRuntime::Trigger &trigger : WorldCommandProcessorMutationAccess::triggers(*runtime))
 		{
 			if (trigger.runtimeId == runtimeId)
 				return &trigger;
 		}
-		for (WorldRuntime::Plugin &plugin : runtime->pluginsMutable())
+		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
 		{
 			for (WorldRuntime::Trigger &trigger : plugin.triggers)
 			{
@@ -669,12 +703,12 @@ namespace
 	{
 		if (!runtime || runtimeId == 0)
 			return nullptr;
-		for (WorldRuntime::Timer &timer : runtime->timersMutable())
+		for (WorldRuntime::Timer &timer : WorldCommandProcessorMutationAccess::timers(*runtime))
 		{
 			if (timer.runtimeId == runtimeId)
 				return &timer;
 		}
-		for (WorldRuntime::Plugin &plugin : runtime->pluginsMutable())
+		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
 		{
 			for (WorldRuntime::Timer &timer : plugin.timers)
 			{
@@ -689,7 +723,7 @@ namespace
 	{
 		if (!runtime || runtimeId == 0)
 			return false;
-		QList<WorldRuntime::Alias> &worldAliases = runtime->aliasesMutable();
+		QList<WorldRuntime::Alias> &worldAliases = WorldCommandProcessorMutationAccess::aliases(*runtime);
 		for (int i = safeQSizeToInt(worldAliases.size()) - 1; i >= 0; --i)
 		{
 			if (worldAliases.at(i).runtimeId == runtimeId)
@@ -698,7 +732,7 @@ namespace
 				return true;
 			}
 		}
-		for (WorldRuntime::Plugin &plugin : runtime->pluginsMutable())
+		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
 		{
 			for (int i = safeQSizeToInt(plugin.aliases.size()) - 1; i >= 0; --i)
 			{
@@ -716,7 +750,7 @@ namespace
 	{
 		if (!runtime || runtimeId == 0)
 			return false;
-		QList<WorldRuntime::Trigger> &worldTriggers = runtime->triggersMutable();
+		QList<WorldRuntime::Trigger> &worldTriggers = WorldCommandProcessorMutationAccess::triggers(*runtime);
 		for (int i = safeQSizeToInt(worldTriggers.size()) - 1; i >= 0; --i)
 		{
 			if (worldTriggers.at(i).runtimeId == runtimeId)
@@ -725,7 +759,7 @@ namespace
 				return true;
 			}
 		}
-		for (WorldRuntime::Plugin &plugin : runtime->pluginsMutable())
+		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
 		{
 			for (int i = safeQSizeToInt(plugin.triggers.size()) - 1; i >= 0; --i)
 			{
@@ -739,11 +773,39 @@ namespace
 		return false;
 	}
 
+	bool removeTimerByRuntimeId(WorldRuntime *runtime, const quint64 runtimeId)
+	{
+		if (!runtime || runtimeId == 0)
+			return false;
+		QList<WorldRuntime::Timer> &worldTimers = WorldCommandProcessorMutationAccess::timers(*runtime);
+		for (int i = safeQSizeToInt(worldTimers.size()) - 1; i >= 0; --i)
+		{
+			if (worldTimers.at(i).runtimeId == runtimeId)
+			{
+				worldTimers.removeAt(i);
+				return true;
+			}
+		}
+		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
+		{
+			for (int i = safeQSizeToInt(plugin.timers.size()) - 1; i >= 0; --i)
+			{
+				if (plugin.timers.at(i).runtimeId == runtimeId)
+				{
+					plugin.timers.removeAt(i);
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
 	class AliasExecutionScope final
 	{
 		public:
-			AliasExecutionScope(WorldRuntime *runtime, WorldRuntime::Alias *alias, const bool countInvocation)
-			    : m_runtime(runtime), m_countInvocation(countInvocation)
+			AliasExecutionScope(WorldRuntime *runtime, WorldRuntime::Alias *alias, QString pluginId,
+			                    const bool countInvocation)
+			    : m_runtime(runtime), m_pluginId(std::move(pluginId)), m_countInvocation(countInvocation)
 			{
 				if (!alias || !runtime)
 					return;
@@ -751,6 +813,7 @@ namespace
 				alias->executingScriptDepth++;
 				alias->executingScript = true;
 				m_active               = true;
+				runtime->markAliasRuntimeStateChanged(m_pluginId);
 			}
 
 			~AliasExecutionScope()
@@ -765,6 +828,7 @@ namespace
 					resolved->executingScript = resolved->executingScriptDepth > 0;
 					if (m_countInvocation)
 						resolved->invocationCount++;
+					m_runtime->markAliasRuntimeStateChanged(m_pluginId);
 				}
 			}
 
@@ -773,6 +837,7 @@ namespace
 
 		private:
 			QPointer<WorldRuntime> m_runtime;
+			QString                m_pluginId;
 			quint64                m_ruleRuntimeId{0};
 			bool                   m_countInvocation{false};
 			bool                   m_active{false};
@@ -781,9 +846,9 @@ namespace
 	class TriggerExecutionScope final
 	{
 		public:
-			TriggerExecutionScope(WorldRuntime *runtime, WorldRuntime::Trigger *trigger,
+			TriggerExecutionScope(WorldRuntime *runtime, WorldRuntime::Trigger *trigger, QString pluginId,
 			                      const bool countInvocation)
-			    : m_runtime(runtime), m_countInvocation(countInvocation)
+			    : m_runtime(runtime), m_pluginId(std::move(pluginId)), m_countInvocation(countInvocation)
 			{
 				if (!trigger || !runtime)
 					return;
@@ -791,6 +856,7 @@ namespace
 				trigger->executingScriptDepth++;
 				trigger->executingScript = true;
 				m_active                 = true;
+				runtime->markTriggerRuntimeStateChanged(m_pluginId);
 			}
 
 			~TriggerExecutionScope()
@@ -805,6 +871,7 @@ namespace
 					resolved->executingScript = resolved->executingScriptDepth > 0;
 					if (m_countInvocation)
 						resolved->invocationCount++;
+					m_runtime->markTriggerRuntimeStateChanged(m_pluginId);
 				}
 			}
 
@@ -813,6 +880,7 @@ namespace
 
 		private:
 			QPointer<WorldRuntime> m_runtime;
+			QString                m_pluginId;
 			quint64                m_ruleRuntimeId{0};
 			bool                   m_countInvocation{false};
 			bool                   m_active{false};
@@ -821,8 +889,9 @@ namespace
 	class TimerExecutionScope final
 	{
 		public:
-			TimerExecutionScope(WorldRuntime *runtime, WorldRuntime::Timer *timer, const bool countInvocation)
-			    : m_runtime(runtime), m_countInvocation(countInvocation)
+			TimerExecutionScope(WorldRuntime *runtime, WorldRuntime::Timer *timer, QString pluginId,
+			                    const bool countInvocation)
+			    : m_runtime(runtime), m_pluginId(std::move(pluginId)), m_countInvocation(countInvocation)
 			{
 				if (!timer || !runtime)
 					return;
@@ -830,6 +899,7 @@ namespace
 				timer->executingScriptDepth++;
 				timer->executingScript = true;
 				m_active               = true;
+				runtime->markTimerRuntimeStateChanged(m_pluginId);
 			}
 
 			~TimerExecutionScope()
@@ -844,6 +914,7 @@ namespace
 					resolved->executingScript = resolved->executingScriptDepth > 0;
 					if (m_countInvocation)
 						resolved->invocationCount++;
+					m_runtime->markTimerRuntimeStateChanged(m_pluginId);
 				}
 			}
 
@@ -852,6 +923,7 @@ namespace
 
 		private:
 			QPointer<WorldRuntime> m_runtime;
+			QString                m_pluginId;
 			quint64                m_ruleRuntimeId{0};
 			bool                   m_countInvocation{false};
 			bool                   m_active{false};
@@ -1015,7 +1087,7 @@ const QVector<int> &WorldCommandProcessor::sortedPluginIndices()
 	if (!m_runtime)
 		return kEmpty;
 
-	const QList<WorldRuntime::Plugin> &plugins   = m_runtime->pluginsMutable();
+	const QList<WorldRuntime::Plugin> &plugins   = WorldCommandProcessorMutationAccess::plugins(*m_runtime);
 	const quint64                      signature = pluginOrderSignature(plugins);
 	const int                          count     = safeQSizeToInt(plugins.size());
 	if (m_pluginOrderCache.count == count && m_pluginOrderCache.signature == signature)
@@ -1518,7 +1590,7 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 			continue;
 		const QSharedPointer<LuaCallbackEngine> dispatchLua =
 		    luaRef ? luaRef : QSharedPointer<LuaCallbackEngine>(lua, [](LuaCallbackEngine * /*unused*/) {});
-		TriggerExecutionScope executionScope(m_runtime, trigger, true);
+		TriggerExecutionScope executionScope(m_runtime, trigger, pluginIdOf(plugin), true);
 		m_runtime->setCurrentActionSource(WorldRuntime::eTriggerFired);
 		const auto result = m_runtime->dispatchLuaStringsAndWildcards(
 		    dispatchLua, scriptName, {label, scriptLine}, wildcards, namedWildcards, styleRunsShared.data(),
@@ -1540,13 +1612,22 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 
 	if (m_runtime && !triggerResult.oneShotTriggers.isEmpty())
 	{
-		bool removedTrigger = false;
-		for (const quint64 runtimeId : triggerResult.oneShotTriggers)
+		m_runtime->beginLuaCallbackSnapshotMutationBatch();
+		const auto finishSnapshotBatch = qScopeGuard(
+		    [runtime = QPointer<WorldRuntime>(m_runtime)]
+		    {
+			    if (runtime)
+				    runtime->endLuaCallbackSnapshotMutationBatch();
+		    });
+		for (const RuleRef &ref : triggerResult.oneShotTriggers)
 		{
-			removedTrigger = removeTriggerByRuntimeId(m_runtime, runtimeId) || removedTrigger;
+			if (!removeTriggerByRuntimeId(m_runtime, ref.runtimeId))
+				continue;
+			if (ref.pluginId.isEmpty())
+				m_runtime->markTriggersChanged();
+			else
+				m_runtime->markPluginTriggersChanged(ref.pluginId);
 		}
-		if (removedTrigger)
-			m_runtime->markTriggerRulesChanged();
 	}
 
 	if (m_runtime && !triggerResult.omitFromOutput)
@@ -2195,8 +2276,8 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 	QVector<AliasRef>            matchedAliases;
 	QVector<AliasRef>            oneShotAliases;
 	bool                         stopAliasEvaluation = false;
-	QList<WorldRuntime::Plugin> &pluginList          = m_runtime->pluginsMutable();
-	const QVector<int>          &pluginIndices       = sortedPluginIndices();
+	QList<WorldRuntime::Plugin> &pluginList    = WorldCommandProcessorMutationAccess::plugins(*m_runtime);
+	const QVector<int>          &pluginIndices = sortedPluginIndices();
 	for (int pluginIndex : pluginIndices)
 	{
 		if (pluginIndex < 0 || pluginIndex >= pluginList.size())
@@ -2294,7 +2375,7 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 			continue;
 		if (lua)
 		{
-			AliasExecutionScope executionScope(m_runtime, alias, true);
+			AliasExecutionScope executionScope(m_runtime, alias, pluginIdOf(plugin), true);
 			if (m_runtime)
 			{
 				const QSharedPointer<LuaCallbackEngine> dispatchLua =
@@ -2317,9 +2398,21 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 
 	if (m_runtime && !oneShotAliases.isEmpty())
 	{
+		m_runtime->beginLuaCallbackSnapshotMutationBatch();
+		const auto finishSnapshotBatch = qScopeGuard(
+		    [runtime = QPointer<WorldRuntime>(m_runtime)]
+		    {
+			    if (runtime)
+				    runtime->endLuaCallbackSnapshotMutationBatch();
+		    });
 		for (const AliasRef &ref : oneShotAliases)
 		{
-			removeAliasByRuntimeId(m_runtime, ref.runtimeId);
+			if (!removeAliasByRuntimeId(m_runtime, ref.runtimeId))
+				continue;
+			if (ref.pluginId.isEmpty())
+				m_runtime->markAliasesChanged();
+			else
+				m_runtime->markPluginAliasesChanged(ref.pluginId);
 		}
 	}
 
@@ -2770,7 +2863,16 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 	};
 
-	QList<WorldRuntime::Alias> &aliases    = plugin ? plugin->aliases : m_runtime->aliasesMutable();
+	QList<WorldRuntime::Alias> &aliases =
+	    plugin ? plugin->aliases : WorldCommandProcessorMutationAccess::aliases(*m_runtime);
+	const QString scopePluginId       = pluginIdOf(plugin);
+	bool          runtimeStateChanged = false;
+	const auto    publishRuntimeState = qScopeGuard(
+	    [runtime = QPointer<WorldRuntime>(m_runtime), &runtimeStateChanged, scopePluginId]
+	    {
+		    if (runtime && runtimeStateChanged)
+			    runtime->markAliasRuntimeStateChanged(scopePluginId);
+	    });
 	const auto                  cacheKey   = reinterpret_cast<quintptr>(&aliases);
 	const quint64               signature  = aliasOrderSignature(aliases);
 	const AliasOrderCacheEntry *cacheEntry = nullptr;
@@ -2829,6 +2931,7 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 			m_runtime->incrementAliasesEvaluated();
 		alias.matchAttempts++;
 		alias.lastMatchTarget = currentLine;
+		runtimeStateChanged   = true;
 
 		const QString matchText = alias.attributes.value(QStringLiteral("match"));
 		if (matchText.isEmpty())
@@ -2953,7 +3056,7 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 		Q_UNUSED(sendText);
 
 		const quint64       aliasRuntimeId = ensureAliasRuntimeId(m_runtime, &alias);
-		AliasExecutionScope executionScope(m_runtime, &alias, false);
+		AliasExecutionScope executionScope(m_runtime, &alias, pluginIdOf(plugin), false);
 		sendTo(sendToValue, sendText, omitFromOutput, omitFromLogValue, variableName, scriptLabel, plugin);
 
 		AliasRef ref;
@@ -3144,6 +3247,14 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 	auto processSequence = [&](QList<WorldRuntime::Trigger> &triggers, WorldRuntime::Plugin *plugin)
 	{
+		const QString scopePluginId       = pluginIdOf(plugin);
+		bool          runtimeStateChanged = false;
+		const auto    publishRuntimeState = qScopeGuard(
+		    [runtime = QPointer<WorldRuntime>(m_runtime), &runtimeStateChanged, scopePluginId]
+		    {
+			    if (runtime && runtimeStateChanged)
+				    runtime->markTriggerRuntimeStateChanged(scopePluginId);
+		    });
 		const TriggerEvaluationCacheEntry &cacheEntry = decodedTriggerEvaluationCache(triggers);
 		for (const DecodedTrigger &decoded : cacheEntry.triggers)
 		{
@@ -3158,6 +3269,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 			m_runtime->incrementTriggersEvaluated();
 			trigger.matchAttempts++;
+			runtimeStateChanged = true;
 
 			QString matchText = decoded.matchText;
 			if (matchText.isEmpty())
@@ -3269,7 +3381,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 			if (decoded.oneShot)
 			{
-				result.oneShotTriggers.push_back(triggerRuntimeId);
+				result.oneShotTriggers.push_back({triggerRuntimeId, scopePluginId});
 			}
 
 			if (decoded.label.isEmpty())
@@ -3332,7 +3444,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			}
 			else
 			{
-				TriggerExecutionScope executionScope(m_runtime, &trigger, false);
+				TriggerExecutionScope executionScope(m_runtime, &trigger, pluginIdOf(plugin), false);
 				unsigned short        previousActionSource = WorldRuntime::eUnknownActionSource;
 				if (m_runtime)
 				{
@@ -3437,7 +3549,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 		}
 	};
 
-	QList<WorldRuntime::Plugin> &pluginList    = m_runtime->pluginsMutable();
+	QList<WorldRuntime::Plugin> &pluginList    = WorldCommandProcessorMutationAccess::plugins(*m_runtime);
 	const QVector<int>          &pluginIndices = sortedPluginIndices();
 	for (int pluginIndex : pluginIndices)
 	{
@@ -3458,7 +3570,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 		if (worldTriggersEnabled)
 		{
 			m_runtime->setStopTriggerEvaluation(WorldRuntime::KeepEvaluating);
-			processSequence(m_runtime->triggersMutable(), nullptr);
+			processSequence(WorldCommandProcessorMutationAccess::triggers(*m_runtime), nullptr);
 		}
 	}
 
@@ -3513,12 +3625,13 @@ void WorldCommandProcessor::checkTimers()
 			const WorldRuntime::Plugin *plugin = nullptr;
 			if (!pluginScoped)
 			{
-				timers = &m_runtime->timersMutable();
+				timers = &WorldCommandProcessorMutationAccess::timers(*m_runtime);
 			}
 			else
 			{
 				WorldRuntime::Plugin *activePlugin =
-				    m_runtime ? m_runtime->pluginForId(contextPluginId) : nullptr;
+				    m_runtime ? WorldCommandProcessorMutationAccess::plugin(*m_runtime, contextPluginId)
+				              : nullptr;
 				if (!activePlugin || !pluginHasValidId(*activePlugin) || !activePlugin->enabled ||
 				    activePlugin->installPending)
 					return false;
@@ -3527,16 +3640,21 @@ void WorldCommandProcessor::checkTimers()
 			}
 
 			QVector<quint64> firedRuntimeIds;
+			bool             scheduleStateChanged = false;
 			for (int i = 0, size = safeQSizeToInt(timers->size()); i < size; ++i)
 			{
 				WorldRuntime::Timer &timer = (*timers)[i];
-				if (!QMudTimerScheduling::isTimerDue(timer, now, connected))
+				const auto evaluation      = QMudTimerScheduling::evaluateTimerDue(timer, now, connected);
+				scheduleStateChanged |= evaluation.runtimeStateChanged;
+				if (!evaluation.due)
 					continue;
 				const quint64 timerRuntimeId = ensureTimerRuntimeId(m_runtime, &timer);
 				if (timerRuntimeId == 0)
 					continue;
 				firedRuntimeIds.push_back(timerRuntimeId);
 			}
+			if (scheduleStateChanged)
+				m_runtime->markTimerRuntimeStateChanged(contextPluginId);
 
 			bool rescanNeeded = false;
 			for (const quint64 timerRuntimeId : std::as_const(firedRuntimeIds))
@@ -3553,7 +3671,25 @@ void WorldCommandProcessor::checkTimers()
 				if (!isEnabledValue(timer->attributes.value(QStringLiteral("enabled"))))
 					continue;
 
-				QMudTimerScheduling::applyTimerFiredState(*timer, now);
+				const bool deleteAfterFire = QMudTimerScheduling::applyTimerFiredState(*timer, now);
+				m_runtime->markTimerRuntimeStateChanged(contextPluginId);
+				// One-shot timers remain available while their action/script runs, then delete themselves.
+				// World deletion is a persisted definition mutation; plugin deletion stays plugin-owned.
+				const auto deleteOneShotTimer = qScopeGuard(
+				    [runtime = QPointer<WorldRuntime>(m_runtime), timerRuntimeId, contextPluginId,
+				     deleteAfterFire]
+				    {
+					    if (!deleteAfterFire || !runtime ||
+					        !removeTimerByRuntimeId(runtime.data(), timerRuntimeId))
+					    {
+						    return;
+					    }
+					    runtime->noteTimerStructureMutation();
+					    if (contextPluginId.isEmpty())
+						    runtime->markTimersChanged();
+					    else
+						    runtime->markPluginTimersChanged(contextPluginId);
+				    });
 				m_runtime->incrementTimersFired();
 
 				const int  sendToValue = timer->attributes.value(QStringLiteral("send_to")).toInt();
@@ -3572,7 +3708,7 @@ void WorldCommandProcessor::checkTimers()
 
 				const quint64 serialBeforeSend = m_runtime->timerStructureMutationSerial();
 				{
-					TimerExecutionScope executionScope(m_runtime, timer, false);
+					TimerExecutionScope executionScope(m_runtime, timer, contextPluginId, false);
 					m_runtime->setCurrentActionSource(WorldRuntime::eTimerFired);
 					sendTo(sendToValue, sendText, omitFromOutput, omitFromLog, variableName,
 					       QStringLiteral("Timer: %1").arg(label), plugin);
@@ -3605,7 +3741,7 @@ void WorldCommandProcessor::checkTimers()
 				           : QSharedPointer<LuaCallbackEngine>(lua, [](LuaCallbackEngine * /*unused*/) {});
 				const bool worldScript = plugin == nullptr;
 				{
-					TimerExecutionScope executionScope(m_runtime, timer, true);
+					TimerExecutionScope executionScope(m_runtime, timer, contextPluginId, true);
 					m_runtime->setCurrentActionSource(WorldRuntime::eTimerFired);
 					const LuaBatchDispatchResult result = m_runtime->dispatchLuaStringsAndWildcards(
 					    dispatchLua, scriptName, {label}, {}, {}, nullptr);
@@ -3633,12 +3769,12 @@ void WorldCommandProcessor::checkTimers()
 	{
 		if (!pluginHasValidId(plugin) || !plugin.enabled || plugin.installPending)
 			continue;
-		const QString pluginId = plugin.attributes.value(QStringLiteral("id")).trimmed().toLower();
+		const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
 		pluginIds.push_back(pluginId);
 	}
 	for (const QString &pluginId : std::as_const(pluginIds))
 	{
-		WorldRuntime::Plugin *plugin = m_runtime->pluginForId(pluginId);
+		WorldRuntime::Plugin *plugin = WorldCommandProcessorMutationAccess::plugin(*m_runtime, pluginId);
 		if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending)
 			continue;
 		if (processTimers(pluginId))

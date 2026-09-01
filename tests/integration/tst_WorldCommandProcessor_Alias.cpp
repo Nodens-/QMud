@@ -11,6 +11,7 @@
 #include "WorldCommandProcessorUtils.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
+#include "WorldRuntimeTestAccess.h"
 #include "WorldView.h"
 #include "scripting/ScriptingErrors.h"
 
@@ -217,7 +218,7 @@ end
 				alias.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
 				alias.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
 				alias.attributes.insert(QStringLiteral("script"), QStringLiteral("capture_mapper_signpost"));
-				runtime.aliasesMutable().push_back(alias);
+				WorldRuntimeTestAccess::aliases(runtime).push_back(alias);
 				runtime.markAliasesChanged();
 
 				WorldCommandProcessor processor;

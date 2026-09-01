@@ -17,7 +17,9 @@
 #include "TestSoundData.h"
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
+#include "WorldDocument.h"
 #include "WorldRuntime.h"
+#include "WorldRuntimeTestAccess.h"
 #include "WorldView.h"
 #include "helpers/LuaCallbackNotepadPresentationUtils.h"
 #include "helpers/LuaExecutionUtils.h"
@@ -26,11 +28,15 @@
 #include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QCoreApplication>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QCursor>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QHostAddress>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -40,15 +46,23 @@
 #include <QSemaphore>
 #include <QSet>
 // ReSharper disable once CppUnusedIncludeDirective
+#include <QTcpServer>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QTcpSocket>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
 #include <QThread>
+#include <QUdpSocket>
+#include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
+#include <algorithm>
 #include <atomic>
 #include <clocale>
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 
 extern "C"
 {
@@ -86,12 +100,14 @@ class tst_LuaCallbackEngine final : public QObject
 		void workerModalResumeDefersPostModalRuntimeMutations();
 		void modalYieldCancelPreventsCallbackContinuation();
 		void callbackCatalogObserverTracksFunctionPresence();
+		void pendingCallbackCatalogWarmupDoesNotTrustPartialRecipientCache();
 		void directDestructionDoesNotNotifyCallbackCatalogObserver();
 		void directDestructionDoesNotWaitForForeignRuntimeCleanup();
 		void workerOwnsInitializedEngineUntilWorkerTeardown();
 		void workerShutdownReturnsCleanupBatchesToOwnerThread();
 		void workerShutdownRecoversUndeliveredTeardownBatches();
 		void workerShutdownRecoveryExcludesConcurrentDelivery();
+		void worldRuntimeShutdownRecoversMutationsBeforeRuntimeStateDestruction();
 		void workerReentrantShutdownFromDeliveredMutationDoesNotDeadlock();
 		void workerMutationCompletionsPreserveDispatchOrderAcrossTargets();
 		void workerNullTargetMutationCompletionPreservesDispatchOrder();
@@ -122,7 +138,60 @@ class tst_LuaCallbackEngine final : public QObject
 		void executeScriptNoteUsesRuntimeNoteColour();
 		void selfPluginInfoMetadataFallsThroughToRuntime();
 		void emptyPluginVariableIdReadsWorldVariables();
-		void deleteVariableInvalidatesCallbackVariableSnapshot();
+		void deleteVariableIsReflectedInNextCallbackSnapshot();
+		void pluginDeleteVariableUsesPluginScopeAndPatchedSnapshot();
+		void worldVariableCountTracksIndividualMutations();
+		void duplicateWorldVariablesPreserveCallbackEntrySemantics();
+		void worldCollectionMutationsUpdateDerivedCallbackState();
+		void pluginRuleMutationsUpdateDerivedCallbackCounts();
+		void nestedCallPluginObservesCallbackRuleMutations();
+		void callbackUnloadRemovesEveryPluginTopologyView();
+		void callbackLoadRequestKeepsCurrentPluginTopologyCoherent();
+		void callbackLoadRefreshesNestedPluginDomains();
+		void callbackBroadcastFlushesBeforeSnapshotCapture();
+		void callbackCommittedMutationJournalsAreRetired();
+		void readOnlyNestedCallPreservesEntrySnapshot();
+		void executorDispatchEntryClearsStaleMutationResult();
+		void nestedBroadcastAdvancesSnapshotBetweenRecipients();
+		void nestedBroadcastPrunesLifecycleMutatedRecipients();
+		void workerNestedBroadcastPrunesAfterSuspendedMutation();
+		void callbackSelfDisableRejectsCallPlugin();
+		void workerNestedMutationBoundaryRebasesCallerView();
+		void workerNestedArrayAndMapperMutationsRemainAuthoritative();
+		void callbackReloadKeepsPrecommitPluginOrder();
+		void callbackEnableThenCallAndBroadcastUseCanonicalOverlay();
+		void callbackPendingPluginStaysExcludedAfterEnabledOverlay();
+		void laterRecipientObservesCustomColourMutations();
+		void productionRuleRuntimeMutationsPatchSnapshots();
+		void timerScheduleRuntimeMutationsPatchWithoutDirtyingWorld();
+		void luaTimerMutationApisReplayExactRuntimeState();
+		void deferredTimerCreationReplaysExactScheduleTimestamp();
+		void oneShotRulePersistenceRespectsWorldAndPluginScope();
+		void worldOneShotRuleApisDirtyOnCreationAndDeletion_data();
+		void worldOneShotRuleApisDirtyOnCreationAndDeletion();
+		void pluginOneShotRuleApisRemainPluginScoped_data();
+		void pluginOneShotRuleApisRemainPluginScoped();
+		void callbackDispatchSnapshotsReflectMutableRuntimeDomains();
+		void callbackDispatchSnapshotsReflectUdpState();
+		void callbackDispatchSnapshotsReflectChatState();
+		void callbackDispatchSnapshotsAreIndependent();
+		void callbackDispatchReusesStableAggregateSnapshot();
+		void laterRecipientObservesCommittedMutationThroughPatchedSnapshot();
+		void callbackDispatchSnapshotsReflectPluginMutations();
+		void previewRenderingDoesNotPublishRolledBackMiniWindowState();
+		void callbackWindowOutputTextReportsPositiveWidthAsAsyncSuccess();
+		void scopedStablePatchesDoNotRefreshUnrelatedState();
+		void pluginSnapshotPopulationDoesNotConsumePendingCatalogs();
+		void installPendingTransitionsPatchExecutablePluginSnapshot();
+		void workerCallPluginRejectsInstallPendingSnapshotTarget();
+		void batchedPluginExpansionPopulatesDependentDomainsOnce();
+		void pluginTopologyPatchesMatchColdSnapshotsAfterLoadAndUnload();
+		void existingPluginGlobalPromotionPatchesMetadata();
+		void callbackDispatchSnapshotUsesNativeEffectiveSequence();
+		void callbackDispatchSnapshotsIsolateMiniWindowMouseState();
+		void callbackDispatchSnapshotsRefreshMiniWindowPresentation();
+		void deletedMiniWindowCannotBeResolvedByWindowMenu();
+		void callbackDispatchSnapshotsReflectDatabaseExecState();
 		void nativeShimDiscoveryRespectsShadowPluginVisibility();
 		void nativeMushReaderEnableByNameUpdatesResolvedCallbackMetadata();
 		void nativeMushReaderCallPluginUsesCallbackSpeechSnapshot();
@@ -178,13 +247,14 @@ class tst_LuaCallbackEngine final : public QObject
 		void workerBroadcastCancellationReleasesTarget();
 		void workerResetCancelsSuspendedSelfCallPluginSafely();
 		void workerResetCancelsSuspendedCallPluginTarget();
-		void directDestructionCancelsSuspendedCallPluginTarget();
+		void executorTeardownCancelsSuspendedCallPluginTarget();
 		void workerWorldProxyPagesTargetAndRestoresCallerPresentation();
 		void workerVanishedRuntimeDoesNotPublishEmptyLinePage();
 		void notepadMutationReplayKeepsCreateClaimsAttachedAcrossErase();
 		void freshNotepadSnapshotDoesNotReplayFlushedClose();
 		void workerNotepadCachesPreserveGlobalAndOwnerLists();
 		void workerUnavailableNotepadRefreshDoesNotExportStaleCaches();
+		void workerUnavailableNotepadRefreshSurvivesNestedMutationBoundary();
 		void callbackRuleListsMaterializeOnlyOnDemandAndPreserveMutations() const;
 		void callbackSnapshotSuppliesGetInfoAndMiniWindowReads();
 		void callbackMiniWindowResourceIdentityIsExact();
@@ -194,11 +264,11 @@ class tst_LuaCallbackEngine final : public QObject
 		void deferredRuntimeMutationSkipsDestroyedRuntime();
 		// NOLINTEND(readability-convert-member-functions-to-static)
 	private:
-		[[nodiscard]] static QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+		[[nodiscard]] static QSharedPointer<const LuaCallbackSnapshot>
 		captureVariableDispatchSnapshotForTest(const WorldRuntime &runtime);
-		[[nodiscard]] static QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+		[[nodiscard]] static QSharedPointer<const LuaCallbackSnapshot>
 		captureRuntimeCounterDispatchSnapshotForTest(const WorldRuntime &runtime);
-		[[nodiscard]] static QSharedPointer<LuaCallbackMiniWindowSnapshot>
+		[[nodiscard]] static QSharedPointer<LuaCallbackSnapshot>
 		captureMutableDispatchSnapshotForTest(const WorldRuntime &runtime);
 };
 
@@ -229,7 +299,7 @@ namespace
 
 	void setEngineScript(LuaCallbackEngine &engine, const QString &script)
 	{
-		engine.setPluginInfo(QStringLiteral("Plugin.Id"), QStringLiteral("Plugin Name"),
+		engine.setPluginInfo(QStringLiteral("plugin.id"), QStringLiteral("Plugin Name"),
 		                     QStringLiteral("/tmp/plugin"));
 		engine.setScriptText(script);
 		QVERIFY(engine.loadScript());
@@ -316,7 +386,7 @@ namespace
 		return state;
 	}
 
-	void dispatchWorkerAndWait(const LuaExecutorWorker &executor, const LuaBatchDispatchRequest &request,
+	void dispatchWorkerAndWait(const ILuaExecutor &executor, const LuaBatchDispatchRequest &request,
 	                           LuaBatchDispatchResult &result)
 	{
 		QObject          completionTarget;
@@ -330,16 +400,15 @@ namespace
 		QTRY_VERIFY_WITH_TIMEOUT(completed.load(std::memory_order_acquire), 3000);
 	}
 
-	void dispatchWorkerAndWait(const LuaExecutorWorker &executor, const LuaBatchDispatchRequest &request)
+	void dispatchWorkerAndWait(const ILuaExecutor &executor, const LuaBatchDispatchRequest &request)
 	{
 		LuaBatchDispatchResult unusedResult;
 		dispatchWorkerAndWait(executor, request, unusedResult);
 	}
 
-	void initializeWorkerEngine(const LuaExecutorWorker                 &executor,
-	                            const QSharedPointer<LuaCallbackEngine> &engine, const QString &script,
-	                            WorldRuntime  *runtime  = nullptr,
-	                            const QString &pluginId = QStringLiteral("Plugin.Id"))
+	void initializeWorkerEngine(const ILuaExecutor &executor, const QSharedPointer<LuaCallbackEngine> &engine,
+	                            const QString &script, WorldRuntime *runtime = nullptr,
+	                            const QString &pluginId = QStringLiteral("plugin.id"))
 	{
 		QVERIFY(engine);
 		LuaEngineObservedInitializationRequest initRequest;
@@ -360,8 +429,21 @@ namespace
 		dispatchWorkerAndWait(executor, request);
 	}
 
-	void teardownWorkerEngine(const LuaExecutorWorker                 &executor,
-	                          const QSharedPointer<LuaCallbackEngine> &engine)
+	void addPluginSnapshotEntry(LuaCallbackSnapshot &snapshot, const QString &pluginId,
+	                            const QString &pluginName, const QSharedPointer<LuaCallbackEngine> &engine,
+	                            const bool enabled = true, const bool installPending = false)
+	{
+		if (!snapshot.pluginIdsSnapshot.contains(pluginId))
+			snapshot.pluginIdsSnapshot.push_back(pluginId);
+		snapshot.pluginIdsByLookupKey.insert(pluginId, pluginId);
+		snapshot.pluginNamesById.insert(pluginId, pluginName);
+		snapshot.pluginEnabledById.insert(pluginId, enabled);
+		snapshot.pluginInstallPendingById.insert(pluginId, installPending);
+		snapshot.pluginGlobalById.insert(pluginId, false);
+		snapshot.pluginEnginesById.insert(pluginId, engine);
+	}
+
+	void teardownWorkerEngine(const ILuaExecutor &executor, const QSharedPointer<LuaCallbackEngine> &engine)
 	{
 		QVERIFY(engine);
 		LuaBatchDispatchRequest request;
@@ -406,7 +488,7 @@ namespace
 		execute();
 	}
 
-	bool completeWorkerSuspensions(const LuaExecutorWorker                 &executor,
+	bool completeWorkerSuspensions(const ILuaExecutor                      &executor,
 	                               const QSharedPointer<LuaCallbackEngine> &engine, WorldRuntime &runtime,
 	                               LuaBatchDispatchResult &result, int &resumeCount,
 	                               const int maximumResumeCount = 8)
@@ -436,21 +518,21 @@ namespace
 	}
 } // namespace
 
-QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+QSharedPointer<const LuaCallbackSnapshot>
 tst_LuaCallbackEngine::captureVariableDispatchSnapshotForTest(const WorldRuntime &runtime)
 {
 	return runtime.captureLuaCallbackSnapshotForDispatchMutable({},
 	                                                            LuaCallbackLineSnapshotPolicy::CountAndLast);
 }
 
-QSharedPointer<const LuaCallbackMiniWindowSnapshot>
+QSharedPointer<const LuaCallbackSnapshot>
 tst_LuaCallbackEngine::captureRuntimeCounterDispatchSnapshotForTest(const WorldRuntime &runtime)
 {
 	return runtime.captureLuaCallbackSnapshotForDispatchMutable(
 	    {}, LuaCallbackLineSnapshotPolicy::CountAndRecentText);
 }
 
-QSharedPointer<LuaCallbackMiniWindowSnapshot>
+QSharedPointer<LuaCallbackSnapshot>
 tst_LuaCallbackEngine::captureMutableDispatchSnapshotForTest(const WorldRuntime &runtime)
 {
 	return runtime.captureLuaCallbackSnapshotForDispatchMutable({},
@@ -1133,7 +1215,7 @@ end
 void tst_LuaCallbackEngine::callbackCatalogObserverTracksFunctionPresence()
 {
 	LuaCallbackEngine engine;
-	engine.setPluginInfo(QStringLiteral("PLUGIN.ID"), QStringLiteral("Plugin"));
+	engine.setPluginInfo(QStringLiteral("plugin.id"), QStringLiteral("Plugin"));
 
 	QString       observedPluginId;
 	QSet<QString> observedPresent;
@@ -1168,6 +1250,30 @@ end
 	engine.setScriptText(QString());
 	QVERIFY(observedPresent.isEmpty());
 	QVERIFY(observedFunctions.isEmpty());
+}
+
+void tst_LuaCallbackEngine::pendingCallbackCatalogWarmupDoesNotTrustPartialRecipientCache()
+{
+	WorldRuntime runtime;
+	const auto   makePlugin = [](const QString &pluginId)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), pluginId);
+		plugin.lua = QSharedPointer<LuaCallbackEngine>::create();
+		return plugin;
+	};
+	runtime.m_plugins = {makePlugin(QStringLiteral("plugin.one")), makePlugin(QStringLiteral("plugin.two")),
+	                     makePlugin(QStringLiteral("plugin.three"))};
+
+	const QString callbackName = QStringLiteral("OnPluginCommand");
+	runtime.m_pluginCallbackRecipientIndices.insert(callbackName, {0});
+	runtime.m_observedPluginCallbacksPendingWarmup.insert(callbackName);
+	QCOMPARE(runtime.collectExecutablePluginRecipientIndicesWithWarmupFallback(callbackName),
+	         QVector<int>({0, 1, 2}));
+
+	runtime.m_observedPluginCallbacksPendingWarmup.remove(callbackName);
+	QCOMPARE(runtime.collectExecutablePluginRecipientIndicesWithWarmupFallback(callbackName),
+	         QVector<int>({0}));
 }
 
 void tst_LuaCallbackEngine::directDestructionDoesNotNotifyCallbackCatalogObserver()
@@ -1254,6 +1360,44 @@ void tst_LuaCallbackEngine::workerOwnsInitializedEngineUntilWorkerTeardown()
 	QVERIFY(weakEngine.isNull());
 	QVERIFY(destructionThread);
 	QVERIFY(destructionThread != QThread::currentThread());
+}
+
+void tst_LuaCallbackEngine::worldRuntimeShutdownRecoversMutationsBeforeRuntimeStateDestruction()
+{
+	auto                                   runtime = std::make_unique<WorldRuntime>();
+	auto                                   engine  = QSharedPointer<LuaCallbackEngine>::create();
+
+	LuaEngineObservedInitializationRequest initialization;
+	initialization.engine              = engine.data();
+	initialization.workerLifetimeOwner = engine;
+	initialization.runtime             = runtime.get();
+	initialization.scriptText          = QStringLiteral(R"lua(
+function leave_output_mutation_pending()
+  DeleteLines(1)
+end
+)lua");
+	runtime->dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
+	runtime->addLine(QStringLiteral("line deleted during shutdown recovery"), WorldRuntime::LineOutput);
+	static_cast<void>(runtime->luaCallbackSnapshotForBridgedCall());
+
+	QSemaphore              completionDelivered;
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("leave_output_mutation_pending");
+	request.callbackSnapshotArg = runtime->luaCallbackSnapshotForBridgedCall();
+	runtime->luaExecutor()->dispatchBatchAsync(request, runtime.get(),
+	                                           [&completionDelivered](const LuaBatchDispatchResult &result)
+	                                           {
+		                                           QVERIFY(!result.deferredRuntimeMutationBatches.isEmpty());
+		                                           QVERIFY(result.deferredRuntimeMutationDelivery);
+		                                           completionDelivered.release();
+	                                           });
+	QTRY_VERIFY_WITH_TIMEOUT(completionDelivered.available() == 1, 3000);
+
+	// Leave the delivered journal deliberately unconsumed. WorldRuntime destruction must shut the
+	// executor down and recover it before the cached line snapshot and the rest of runtime state die.
+	runtime.reset();
 }
 
 void tst_LuaCallbackEngine::workerShutdownReturnsCleanupBatchesToOwnerThread()
@@ -2315,7 +2459,7 @@ void tst_LuaCallbackEngine::luaVisiblePathApisReturnRelativePosix()
 	engine->setWorldRuntime(&runtime);
 	setEngineScript(*engine, QString());
 
-	auto snapshot                       = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                       = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasWorldAttributeSnapshot = true;
 	snapshot->worldAttributesSnapshot.insert(QStringLiteral("new_activity_sound"),
 	                                         QStringLiteral(R"(C:\MUSHclient\sounds\activity.wav)"));
@@ -2394,7 +2538,7 @@ utils_info_ok = utils_info_summary == "./|./"
 	request.kind                  = LuaBatchDispatchKind::ExecuteScript;
 	request.stringArg             = script;
 	request.stringArg2            = QStringLiteral("path visible api snapshot");
-	request.miniWindowSnapshotArg = snapshot;
+	request.callbackSnapshotArg   = snapshot;
 	LuaBatchDispatchResult result = executor.dispatchBatch(request);
 	QVERIFY(result.boolResultValid);
 	QVERIFY(result.boolResult);
@@ -2607,7 +2751,7 @@ end
 	request.engines                       = {engine};
 	request.kind                          = LuaBatchDispatchKind::NoArgs;
 	request.functionName                  = QStringLiteral("disable_symbol_suffix_exclusion");
-	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg           = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult callbackResult = executor.dispatchBatch(request);
 	executeDeferredMutations(callbackResult);
 	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_suffix")),
@@ -2617,9 +2761,9 @@ end
 	QTest::keyClick(input, Qt::Key_Tab);
 	QCOMPARE(view.inputText(), QStringLiteral("@Nodens:"));
 
-	request.functionName          = QStringLiteral("disable_symbol_prefix_exclusion");
-	request.miniWindowSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
-	callbackResult                = executor.dispatchBatch(request);
+	request.functionName        = QStringLiteral("disable_symbol_prefix_exclusion");
+	request.callbackSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	callbackResult              = executor.dispatchBatch(request);
 	executeDeferredMutations(callbackResult);
 	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_prefix")),
 	         QStringLiteral("0"));
@@ -2776,7 +2920,7 @@ end
 		auto      lineSnapshot             = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 		lineSnapshot->lineBufferGeneration = generation;
 		lineSnapshot->lineBufferCount      = count;
-		auto snapshot                      = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+		auto snapshot                      = QSharedPointer<LuaCallbackSnapshot>::create();
 		snapshot->hasLineBufferSnapshot    = true;
 		snapshot->lineBufferCount          = count;
 		snapshot->lineBufferSnapshot       = lineSnapshot;
@@ -2791,8 +2935,8 @@ end
 	auto dispatchAndApply =
 	    [&](LuaBatchDispatchRequest request, const QString &expectedOutput, LuaBatchDispatchResult &result)
 	{
-		request.engines               = {engine};
-		request.miniWindowSnapshotArg = captureSnapshot();
+		request.engines             = {engine};
+		request.callbackSnapshotArg = captureSnapshot();
 		dispatchWorkerAndWait(executor, request, result);
 		QVERIFY(!result.deferredRuntimeMutationBatches.isEmpty());
 		executeDeferredMutations(result);
@@ -3084,10 +3228,10 @@ end
 	                       &runtime);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	executeDeferredMutations(result);
@@ -3137,10 +3281,10 @@ end
 	                       &runtime);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	executeDeferredMutations(result);
@@ -3249,40 +3393,40 @@ end
 	request.kind                          = LuaBatchDispatchKind::StringInOut;
 	request.functionName                  = QStringLiteral("normal_colour_status");
 	request.stringArg                     = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg           = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult snapshotResult = executor.dispatchBatch(request);
 	QCOMPARE(snapshotResult.stringResult, expected);
 
 	request.functionName                  = QStringLiteral("same_colour_note_status");
-	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg           = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult sameNoteResult = executor.dispatchBatch(request);
 	QCOMPARE(sameNoteResult.stringResult, QStringLiteral("%1|%2")
 	                                          .arg(static_cast<long>(qmudRgb(192, 192, 192)))
 	                                          .arg(static_cast<long>(qmudRgb(0, 0, 0))));
 
 	request.functionName                     = QStringLiteral("indexed_note_palette_status");
-	request.miniWindowSnapshotArg            = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg              = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult indexedNoteResult = executor.dispatchBatch(request);
 	QCOMPARE(indexedNoteResult.stringResult, QStringLiteral("%1|%2")
 	                                             .arg(static_cast<long>(qmudRgb(9, 8, 7)))
 	                                             .arg(static_cast<long>(qmudRgb(6, 5, 4))));
 
 	request.functionName                    = QStringLiteral("same_colour_normal_palette_status");
-	request.miniWindowSnapshotArg           = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg             = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult sameColourResult = executor.dispatchBatch(request);
 	QCOMPARE(sameColourResult.stringResult, QStringLiteral("%1|%2")
 	                                            .arg(static_cast<long>(qmudRgb(11, 12, 13)))
 	                                            .arg(static_cast<long>(qmudRgb(14, 15, 16))));
 
 	request.functionName                        = QStringLiteral("same_colour_custom16_option_status");
-	request.miniWindowSnapshotArg               = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg                 = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult custom16OptionResult = executor.dispatchBatch(request);
 	QCOMPARE(custom16OptionResult.stringResult, QStringLiteral("%1|%2")
 	                                                .arg(static_cast<long>(qmudRgb(19, 18, 17)))
 	                                                .arg(static_cast<long>(qmudRgb(22, 21, 20))));
 
 	request.functionName                      = QStringLiteral("invalid_colour_cache_status");
-	request.miniWindowSnapshotArg             = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg               = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult invalidCacheResult = executor.dispatchBatch(request);
 	QCOMPARE(invalidCacheResult.stringResult,
 	         QStringLiteral("0|0|0|0|0|0|0|0|%1").arg(static_cast<long>(qmudRgb(4, 3, 2))));
@@ -3294,7 +3438,7 @@ end
 	QCOMPARE(runtime.ansiColour(true, 2), QColor(1, 2, 3));
 
 	request.functionName                  = QStringLiteral("selected_colour_status");
-	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg           = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult selectedResult = executor.dispatchBatch(request);
 	QCOMPARE(selectedResult.stringResult, QStringLiteral("%1|%2")
 	                                          .arg(static_cast<long>(qmudRgb(1, 2, 3)))
@@ -3326,7 +3470,7 @@ end
 	request.kind                          = LuaBatchDispatchKind::StringInOut;
 	request.functionName                  = QStringLiteral("empty_colour_tell_status");
 	request.stringArg                     = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg           = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult callbackResult = executor.dispatchBatch(request);
 
 	QCOMPARE(callbackResult.stringResult, QStringLiteral("0|0|"));
@@ -3395,7 +3539,7 @@ void tst_LuaCallbackEngine::executeScriptNoteUsesRuntimeNoteColour()
 	engine->setWorldRuntime(&runtime);
 	setEngineScript(*engine, QString());
 
-	auto snapshot                        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                        = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasRuntimeCountersSnapshot = true;
 	snapshot->runtimeCounterValues.insert(QStringLiteral("notesInRgb"), true);
 	snapshot->runtimeCounterValues.insert(QStringLiteral("noteColourFore"),
@@ -3410,7 +3554,7 @@ void tst_LuaCallbackEngine::executeScriptNoteUsesRuntimeNoteColour()
 	request.kind                  = LuaBatchDispatchKind::ExecuteScript;
 	request.stringArg             = QStringLiteral("Note('test')");
 	request.stringArg2            = QStringLiteral("immediate note colour");
-	request.miniWindowSnapshotArg = snapshot;
+	request.callbackSnapshotArg   = snapshot;
 	LuaBatchDispatchResult result = executor.dispatchBatch(request);
 	QVERIFY(result.boolResultValid);
 	QVERIFY(result.boolResult);
@@ -3427,7 +3571,7 @@ void tst_LuaCallbackEngine::selfPluginInfoMetadataFallsThroughToRuntime()
 	WorldRuntime         runtime;
 
 	WorldRuntime::Plugin plugin;
-	plugin.attributes.insert(QStringLiteral("id"), QStringLiteral("Plugin.Id"));
+	plugin.attributes.insert(QStringLiteral("id"), QStringLiteral("plugin.id"));
 	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Runtime Plugin Name"));
 	plugin.attributes.insert(QStringLiteral("author"), QStringLiteral("Runtime Author"));
 	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
@@ -3436,7 +3580,7 @@ void tst_LuaCallbackEngine::selfPluginInfoMetadataFallsThroughToRuntime()
 	plugin.script      = QStringLiteral("Runtime Script");
 	plugin.source      = QStringLiteral("worlds/plugins/runtime_plugin.xml");
 	plugin.directory   = QStringLiteral("worlds/plugins/");
-	runtime.pluginsMutable().push_back(plugin);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
 
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
 	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
@@ -3462,10 +3606,8 @@ void tst_LuaCallbackEngine::selfPluginInfoMetadataFallsThroughToRuntime()
 	                       &runtime);
 
 	const QString pluginKey = QStringLiteral("plugin.id");
-	auto          snapshot  = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
-	snapshot->pluginIdsSnapshot.push_back(pluginKey);
-	snapshot->pluginNamesById.insert(pluginKey, QStringLiteral("Runtime Plugin Name"));
-	snapshot->pluginEnabledById.insert(pluginKey, true);
+	auto          snapshot  = QSharedPointer<LuaCallbackSnapshot>::create();
+	addPluginSnapshotEntry(*snapshot, pluginKey, QStringLiteral("Runtime Plugin Name"), engine);
 	snapshot->pluginDirectoriesById.insert(pluginKey, QStringLiteral("worlds/plugins/"));
 	auto &pluginInfo = snapshot->pluginInfoValuesById[pluginKey];
 	pluginInfo.insert(1, QStringLiteral("Runtime Plugin Name"));
@@ -3474,26 +3616,26 @@ void tst_LuaCallbackEngine::selfPluginInfoMetadataFallsThroughToRuntime()
 	pluginInfo.insert(4, QStringLiteral("Runtime Script"));
 	pluginInfo.insert(5, QStringLiteral("lua"));
 	pluginInfo.insert(6, QStringLiteral("worlds/plugins/runtime_plugin.xml"));
-	pluginInfo.insert(7, QStringLiteral("Plugin.Id"));
+	pluginInfo.insert(7, QStringLiteral("plugin.id"));
 	pluginInfo.insert(8, QStringLiteral("Runtime Purpose"));
 	pluginInfo.insert(20, QStringLiteral("worlds/plugins/"));
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = snapshot;
 	dispatchWorkerAndWait(executor, request);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("self_info_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("self_info_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult,
 	         QStringLiteral("Plugin Name|Runtime Author|Runtime Description|Runtime Script|lua|"
-	                        "worlds/plugins/runtime_plugin.xml|Plugin.Id|Runtime Purpose|/tmp/plugin/"));
+	                        "worlds/plugins/runtime_plugin.xml|plugin.id|Runtime Purpose|/tmp/plugin/"));
 	teardownWorkerEngine(executor, engine);
 }
 
@@ -3539,10 +3681,10 @@ end
 	                       &runtime);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(result.boolResultValid);
@@ -3551,7 +3693,7 @@ end
 	statusRequest.kind                    = LuaBatchDispatchKind::StringInOut;
 	statusRequest.functionName            = QStringLiteral("empty_plugin_variable_status_value");
 	statusRequest.stringArg               = QStringLiteral("ignored");
-	statusRequest.miniWindowSnapshotArg   = {};
+	statusRequest.callbackSnapshotArg     = {};
 	LuaBatchDispatchResult statusResult;
 	dispatchWorkerAndWait(executor, statusRequest, statusResult);
 	QVERIFY2(result.boolResult, qPrintable(statusResult.stringResult));
@@ -3559,24 +3701,4322 @@ end
 	teardownWorkerEngine(executor, engine);
 }
 
-void tst_LuaCallbackEngine::deleteVariableInvalidatesCallbackVariableSnapshot()
+void tst_LuaCallbackEngine::deleteVariableIsReflectedInNextCallbackSnapshot()
 {
 	WorldRuntime runtime;
 	runtime.setVariable(QStringLiteral("stale"), QStringLiteral("present"));
 
-	const QSharedPointer<const LuaCallbackMiniWindowSnapshot> before =
-	    captureVariableDispatchSnapshotForTest(runtime);
+	const QSharedPointer<const LuaCallbackSnapshot> before = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(before);
 	QVERIFY(before->hasWorldVariablesSnapshot);
 	QCOMPARE(before->worldVariablesSnapshot.value(QStringLiteral("stale")), QStringLiteral("present"));
 
 	QCOMPARE(runtime.deleteVariable(QStringLiteral("stale")), eOK);
 
-	const QSharedPointer<const LuaCallbackMiniWindowSnapshot> after =
-	    captureVariableDispatchSnapshotForTest(runtime);
+	const QSharedPointer<const LuaCallbackSnapshot> after = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(after);
 	QVERIFY(after->hasWorldVariablesSnapshot);
 	QVERIFY(!after->worldVariablesSnapshot.contains(QStringLiteral("stale")));
+}
+
+void tst_LuaCallbackEngine::pluginDeleteVariableUsesPluginScopeAndPatchedSnapshot()
+{
+	WorldRuntime  runtime;
+	const QString firstId  = QStringLiteral("snapshot.delete.first");
+	const QString secondId = QStringLiteral("snapshot.delete.second");
+	auto          first    = QSharedPointer<LuaCallbackEngine>::create();
+	auto          second   = QSharedPointer<LuaCallbackEngine>::create();
+
+	auto          makePlugin =
+	    [](const QString &id, const int sequence, const QSharedPointer<LuaCallbackEngine> &engine)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.sequence = sequence;
+		plugin.enabled  = true;
+		plugin.lua      = engine;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(firstId, 100, first),
+	                                            makePlugin(secondId, 200, second)};
+	runtime.setVariable(QStringLiteral("Victim"), QStringLiteral("world-value"));
+	runtime.setPluginVariableValue(firstId, QStringLiteral("Victim"), QStringLiteral("plugin-value"));
+
+	QVector<LuaEngineObservedInitializationRequest> initRequests;
+	auto                                            appendInitializationRequest =
+	    [&](const QSharedPointer<LuaCallbackEngine> &engine, const QString &id, const QString &script)
+	{
+		LuaEngineObservedInitializationRequest request;
+		request.engine              = engine.data();
+		request.workerLifetimeOwner = engine;
+		request.runtime             = &runtime;
+		request.scriptText          = script;
+		request.pluginId            = id;
+		request.pluginName          = id;
+		initRequests.push_back(std::move(request));
+	};
+	appendInitializationRequest(first, firstId, QStringLiteral(R"lua(
+function OnPluginTick()
+  local before = GetVariable("victim")
+  local status = DeleteVariable("VICTIM")
+  local after = GetVariable("victim")
+  local count = GetPluginInfo("snapshot.delete.first", 12)
+  SetVariable("delete_report", table.concat({
+    tostring(before), string.format("%.0f", status), tostring(after), string.format("%.0f", count)
+  }, "|"))
+end
+)lua"));
+	appendInitializationRequest(second, secondId, QStringLiteral(R"lua(
+function OnPluginTick()
+  SetVariable("delete_observer", table.concat({
+    tostring(GetPluginVariable("snapshot.delete.first", "victim")),
+    string.format("%.0f", GetPluginInfo("snapshot.delete.first", 12))
+  }, "|"))
+end
+)lua"));
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks(initRequests, true);
+
+	const auto before = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(before);
+	QCOMPARE(before->pluginVariablesSnapshotById.value(firstId).value(QStringLiteral("Victim")),
+	         QStringLiteral("plugin-value"));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	LuaBatchDispatchRequest request;
+	request.kind          = LuaBatchDispatchKind::NoArgs;
+	request.engines       = {first, second};
+	request.functionName  = QStringLiteral("OnPluginTick");
+	request.defaultResult = true;
+	static_cast<void>(runtime.queuePluginCallbackDispatch(request, true));
+
+	QString value;
+	QVERIFY(runtime.findVariable(QStringLiteral("victim"), value));
+	QCOMPARE(value, QStringLiteral("world-value"));
+	QVERIFY(!runtime.findPluginVariable(firstId, QStringLiteral("victim"), value));
+	QCOMPARE(runtime.pluginVariableValue(firstId, QStringLiteral("delete_report")),
+	         QStringLiteral("plugin-value|0|nil|0"));
+	QCOMPARE(runtime.pluginVariableValue(secondId, QStringLiteral("delete_observer")),
+	         QStringLiteral("nil|1"));
+
+	const auto after = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(after);
+	QVERIFY(!after->pluginVariablesSnapshotById.value(firstId).contains(QStringLiteral("Victim")));
+	QVERIFY(before->pluginVariablesSnapshotById.value(firstId).contains(QStringLiteral("Victim")));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	runtime.setVariable(QStringLiteral("WorldVictim"), QStringLiteral("world-delete-value"));
+	const auto worldBefore = captureVariableDispatchSnapshotForTest(runtime);
+	QCOMPARE(worldBefore->worldVariablesSnapshot.value(QStringLiteral("WorldVictim")),
+	         QStringLiteral("world-delete-value"));
+	QVERIFY(runtime.dispatchLuaExecuteScript(runtime.luaCallbacks(), QStringLiteral(R"lua(
+local before = GetVariable("worldvictim")
+local status = DeleteVariable("WORLDVICTIM")
+local after = GetVariable("worldvictim")
+SetVariable("world_delete_report", table.concat({
+  tostring(before), string.format("%.0f", status), tostring(after)
+}, "|"))
+return true
+)lua"),
+	                                         QStringLiteral("world DeleteVariable scope"), nullptr, true,
+	                                         false, 0, 0));
+	QVERIFY(!runtime.findVariable(QStringLiteral("WorldVictim"), value));
+	QVERIFY(runtime.findVariable(QStringLiteral("world_delete_report"), value));
+	QCOMPARE(value, QStringLiteral("world-delete-value|0|nil"));
+	const auto worldAfter = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(!worldAfter->worldVariablesSnapshot.contains(QStringLiteral("WorldVictim")));
+	QVERIFY(worldBefore->worldVariablesSnapshot.contains(QStringLiteral("WorldVictim")));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+	runtime.dispatchTeardownLuaEngines({first, second}, true);
+}
+
+void tst_LuaCallbackEngine::worldVariableCountTracksIndividualMutations()
+{
+	WorldRuntime runtime;
+	const auto   initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+	QCOMPARE(runtime.variableCount(), 0);
+	QCOMPARE(initial->runtimeCounterValues.value(QStringLiteral("variableCount")).toInt(), 0);
+
+	runtime.setVariable(QStringLiteral("counted"), QStringLiteral("first"));
+	QCOMPARE(runtime.variableCount(), 1);
+	const auto added = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(added);
+	QCOMPARE(added->runtimeCounterValues.value(QStringLiteral("variableCount")).toInt(), 1);
+	QCOMPARE(added->worldVariablesSnapshot.size(), 1);
+	QCOMPARE(initial->runtimeCounterValues.value(QStringLiteral("variableCount")).toInt(), 0);
+	QVERIFY(initial->worldVariablesSnapshot.isEmpty());
+
+	runtime.setVariable(QStringLiteral("COUNTED"), QStringLiteral("replacement"));
+	QCOMPARE(runtime.variableCount(), 1);
+	const auto replaced = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(replaced);
+	QCOMPARE(replaced->runtimeCounterValues.value(QStringLiteral("variableCount")).toInt(), 1);
+	QCOMPARE(replaced->worldVariablesSnapshot.size(), 1);
+
+	QCOMPARE(runtime.deleteVariable(QStringLiteral("counted")), eOK);
+	QCOMPARE(runtime.variableCount(), 0);
+	const auto removed = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(removed);
+	QCOMPARE(removed->runtimeCounterValues.value(QStringLiteral("variableCount")).toInt(), 0);
+	QVERIFY(removed->worldVariablesSnapshot.isEmpty());
+}
+
+void tst_LuaCallbackEngine::duplicateWorldVariablesPreserveCallbackEntrySemantics()
+{
+	WorldRuntime           runtime;
+	WorldRuntime::Variable first;
+	first.attributes.insert(QStringLiteral("name"), QStringLiteral("duplicate"));
+	first.content = QStringLiteral("first");
+	WorldRuntime::Variable second;
+	second.attributes.insert(QStringLiteral("name"), QStringLiteral("duplicate"));
+	second.content = QStringLiteral("second");
+	WorldRuntime::Variable unnamed;
+	unnamed.content = QStringLiteral("unnamed");
+	runtime.setVariables({first, second, unnamed});
+	runtime.setVariablesChanged(false);
+
+	QVERIFY(runtime.dispatchLuaExecuteScript(runtime.luaCallbacks(), QStringLiteral(R"lua(
+local values = {string.format("%.0f", GetInfo(218)), GetVariable("duplicate") or "<nil>"}
+table.insert(values, string.format("%.0f", DeleteVariable("duplicate")))
+table.insert(values, string.format("%.0f", GetInfo(218)))
+table.insert(values, GetVariable("duplicate") or "<nil>")
+table.insert(values, tostring((ExportXML(4, "duplicate") or ""):find(">second<", 1, true) ~= nil))
+table.insert(values, string.format("%.0f", SetVariable("duplicate", "updated")))
+table.insert(values, string.format("%.0f", GetInfo(218)))
+table.insert(values, GetVariable("duplicate") or "<nil>")
+table.insert(values, tostring((ExportXML(4, "duplicate") or ""):find(">updated<", 1, true) ~= nil))
+SetVariable("duplicate_report", table.concat(values, "|"))
+return true
+)lua"),
+	                                         QStringLiteral("duplicate variable callback semantics"), nullptr,
+	                                         true, false, 0, 0));
+
+	QString report;
+	QVERIFY(runtime.findVariable(QStringLiteral("duplicate_report"), report));
+	QCOMPARE(report, QStringLiteral("3|first|0|2|second|true|0|2|updated|true"));
+	QString survivingValue;
+	QVERIFY(runtime.findVariable(QStringLiteral("duplicate"), survivingValue));
+	QCOMPARE(survivingValue, QStringLiteral("updated"));
+	QCOMPARE(runtime.variableCount(), 3);
+	QVERIFY(runtime.variablesChanged());
+}
+
+void tst_LuaCallbackEngine::worldCollectionMutationsUpdateDerivedCallbackState()
+{
+	WorldRuntime runtime;
+	runtime.setWorldFileModified(false);
+	runtime.setVariablesChanged(false);
+	auto engine =
+	    QSharedPointer<LuaCallbackEngine>(runtime.luaCallbacks(), [](LuaCallbackEngine * /*unused*/) {});
+	QVERIFY(engine);
+	engine->setPluginInfo(QString(), QString(), QString());
+	engine->setScriptText(QStringLiteral(R"lua(
+function mutate_world_derived_state(value)
+  local values = {
+    string.format("%.0f", GetInfo(218)), tostring(GetInfo(118)), tostring(GetInfo(111))
+  }
+  assert(SetVariable("derived_variable", "value") == 0)
+  table.insert(values, string.format("%.0f", GetInfo(218)))
+  table.insert(values, tostring(GetInfo(118)))
+  assert(AddTrigger("derived_trigger", "^derived$", "", 0, 0, 0, "", "") == 0)
+  assert(AddAlias("derived_alias", "^derived$", "", 0, "") == 0)
+  assert(AddTimer("derived_timer", 0, 0, 30, "", 0, "") == 0)
+  table.insert(values, string.format("%.0f", GetInfo(219)))
+  table.insert(values, string.format("%.0f", GetInfo(221)))
+  table.insert(values, string.format("%.0f", GetInfo(220)))
+  table.insert(values, tostring(GetInfo(111)))
+  assert(DeleteTrigger("derived_trigger") == 0)
+  assert(DeleteAlias("derived_alias") == 0)
+  assert(DeleteTimer("derived_timer") == 0)
+  assert(DeleteVariable("derived_variable") == 0)
+  table.insert(values, string.format("%.0f", GetInfo(219)))
+  table.insert(values, string.format("%.0f", GetInfo(221)))
+  table.insert(values, string.format("%.0f", GetInfo(220)))
+  table.insert(values, string.format("%.0f", GetInfo(218)))
+  table.insert(values, tostring(GetInfo(118)))
+  table.insert(values, tostring(GetInfo(111)))
+  return table.concat(values, "|")
+end
+)lua"));
+	QVERIFY(engine->loadScript());
+
+	const auto issued = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(issued);
+	QVERIFY(!issued->runtimeCounterValues.value(QStringLiteral("worldFileModified")).toBool());
+	QVERIFY(!issued->runtimeCounterValues.value(QStringLiteral("variablesChanged")).toBool());
+
+	LuaExecutorDirect       executor;
+	LuaBatchDispatchRequest request;
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("mutate_world_derived_state");
+	request.stringArg             = QStringLiteral("ignored");
+	request.callbackSnapshotArg   = issued;
+	LuaBatchDispatchResult result = executor.dispatchBatch(request);
+	QCOMPARE(result.stringResult, QStringLiteral("0|false|false|1|true|1|1|1|true|0|0|0|0|true|true"));
+	executeDeferredMutations(result);
+
+	QCOMPARE(runtime.variableCount(), 0);
+	QVERIFY(runtime.variablesChanged());
+	QVERIFY(runtime.worldFileModified());
+	QVERIFY(runtime.triggers().isEmpty());
+	QVERIFY(runtime.aliases().isEmpty());
+	QVERIFY(runtime.timers().isEmpty());
+	QVERIFY(!issued->runtimeCounterValues.value(QStringLiteral("worldFileModified")).toBool());
+	QVERIFY(!issued->runtimeCounterValues.value(QStringLiteral("variablesChanged")).toBool());
+	const auto committed = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(committed);
+	QVERIFY(committed->runtimeCounterValues.value(QStringLiteral("worldFileModified")).toBool());
+	QVERIFY(committed->runtimeCounterValues.value(QStringLiteral("variablesChanged")).toBool());
+}
+
+void tst_LuaCallbackEngine::pluginRuleMutationsUpdateDerivedCallbackCounts()
+{
+	WorldRuntime         runtime;
+	const QString        pluginId = QStringLiteral("derived.rule.counts");
+	auto                 engine   = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), pluginId);
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled = true;
+	plugin.lua     = engine;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+
+	LuaEngineObservedInitializationRequest initialization;
+	initialization.engine              = engine.data();
+	initialization.workerLifetimeOwner = engine;
+	initialization.runtime             = &runtime;
+	initialization.pluginId            = pluginId;
+	initialization.pluginName          = pluginId;
+	initialization.scriptText          = QStringLiteral(R"lua(
+function mutate_plugin_rule_counts(value)
+  local id = "derived.rule.counts"
+  assert(AddTrigger("derived_trigger", "^derived$", "", 0, 0, 0, "", "") == 0)
+  assert(AddAlias("derived_alias", "^derived$", "", 0, "") == 0)
+  assert(AddTimer("derived_timer", 0, 0, 30, "", 0, "") == 0)
+  local added = string.format("%.0f|%.0f|%.0f",
+    GetPluginInfo(id, 9), GetPluginInfo(id, 10), GetPluginInfo(id, 11))
+  assert(DeleteTrigger("derived_trigger") == 0)
+  assert(DeleteAlias("derived_alias") == 0)
+  assert(DeleteTimer("derived_timer") == 0)
+  return added .. string.format("|%.0f|%.0f|%.0f",
+    GetPluginInfo(id, 9), GetPluginInfo(id, 10), GetPluginInfo(id, 11))
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
+	runtime.setWorldFileModified(false);
+
+	LuaBatchDispatchRequest request;
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("mutate_plugin_rule_counts");
+	request.stringArg             = QStringLiteral("ignored");
+	request.callbackSnapshotArg   = captureVariableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("1|1|1|0|0|0"));
+
+	const WorldRuntime::Plugin *committedPlugin = runtime.pluginForId(pluginId);
+	QVERIFY(committedPlugin);
+	QVERIFY(committedPlugin->triggers.isEmpty());
+	QVERIFY(committedPlugin->aliases.isEmpty());
+	QVERIFY(committedPlugin->timers.isEmpty());
+	QVERIFY(!runtime.worldFileModified());
+	const auto committed = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(committed);
+	const auto pluginInfo = committed->pluginInfoValuesById.value(pluginId);
+	QCOMPARE(pluginInfo.value(9).toInt(), 0);
+	QCOMPARE(pluginInfo.value(10).toInt(), 0);
+	QCOMPARE(pluginInfo.value(11).toInt(), 0);
+	runtime.dispatchTeardownLuaEngines({engine}, true);
+}
+
+void tst_LuaCallbackEngine::nestedCallPluginObservesCallbackRuleMutations()
+{
+	WorldRuntime  runtime;
+	const QString callerId = QStringLiteral("nested.rules.caller");
+	const QString targetId = QStringLiteral("nested.rules.target");
+	auto          caller   = QSharedPointer<LuaCallbackEngine>::create();
+	auto          target   = QSharedPointer<LuaCallbackEngine>::create();
+
+	const auto    makePlugin = [](const QString &id, const QSharedPointer<LuaCallbackEngine> &engine)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.enabled = true;
+		plugin.lua     = engine;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(callerId, caller), makePlugin(targetId, target)};
+
+	LuaEngineObservedInitializationRequest callerInitialization;
+	callerInitialization.engine              = caller.data();
+	callerInitialization.workerLifetimeOwner = caller;
+	callerInitialization.runtime             = &runtime;
+	callerInitialization.pluginId            = callerId;
+	callerInitialization.pluginName          = callerId;
+	callerInitialization.scriptText          = QStringLiteral(R"lua(
+function mutate_then_call(value)
+  assert(AddTrigger("nested_trigger", "^nested$", "", 0, 0, 0, "", "") == 0)
+  assert(AddAlias("nested_alias", "^nested$", "", 0, "") == 0)
+  assert(AddTimer("nested_timer", 0, 0, 30, "", 0, "") == 0)
+  local code, report = CallPlugin("nested.rules.target", "read_caller_rules")
+  return string.format("%.0f|%s", code, report or "<nil>")
+end
+)lua");
+	LuaEngineObservedInitializationRequest targetInitialization;
+	targetInitialization.engine              = target.data();
+	targetInitialization.workerLifetimeOwner = target;
+	targetInitialization.runtime             = &runtime;
+	targetInitialization.pluginId            = targetId;
+	targetInitialization.pluginName          = targetId;
+	targetInitialization.scriptText          = QStringLiteral(R"lua(
+function read_caller_rules()
+  local id = "nested.rules.caller"
+  return table.concat(GetPluginTriggerList(id) or {}, ",") .. "|" ..
+         table.concat(GetPluginAliasList(id) or {}, ",") .. "|" ..
+         table.concat(GetPluginTimerList(id) or {}, ",") .. "|" ..
+         string.format("%.0f|%.0f|%.0f", GetPluginInfo(id, 9), GetPluginInfo(id, 10), GetPluginInfo(id, 11))
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({callerInitialization, targetInitialization},
+	                                                          true);
+
+	LuaBatchDispatchRequest request;
+	request.engines                     = {caller};
+	request.kind                        = LuaBatchDispatchKind::StringInOut;
+	request.functionName                = QStringLiteral("mutate_then_call");
+	request.stringArg                   = QStringLiteral("ignored");
+	request.callbackSnapshotArg         = captureVariableDispatchSnapshotForTest(runtime);
+	const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("0|nested_trigger|nested_alias|nested_timer|1|1|1"));
+
+	const WorldRuntime::Plugin *committedCaller = runtime.pluginForId(callerId);
+	QVERIFY(committedCaller);
+	QCOMPARE(committedCaller->triggers.size(), 1);
+	QCOMPARE(committedCaller->aliases.size(), 1);
+	QCOMPARE(committedCaller->timers.size(), 1);
+	runtime.dispatchTeardownLuaEngines({caller, target}, true);
+}
+
+void tst_LuaCallbackEngine::callbackUnloadRemovesEveryPluginTopologyView()
+{
+	WorldRuntime         runtime;
+	const QString        callerId = QStringLiteral("abcdefabcdefabcdefabcdea");
+	const QString        targetId = QStringLiteral("abcdefabcdefabcdefabcdeb");
+	auto                 caller   = QSharedPointer<LuaCallbackEngine>::create();
+	auto                 target   = QSharedPointer<LuaCallbackEngine>::create();
+
+	WorldRuntime::Plugin callerPlugin;
+	callerPlugin.attributes.insert(QStringLiteral("id"), callerId);
+	callerPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("TopologyCaller"));
+	callerPlugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	callerPlugin.enabled = true;
+	callerPlugin.lua     = caller;
+	WorldRuntime::Plugin targetPlugin;
+	targetPlugin.attributes.insert(QStringLiteral("id"), targetId);
+	targetPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("TopologyTarget"));
+	targetPlugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	targetPlugin.enabled = true;
+	targetPlugin.lua     = target;
+	targetPlugin.variables.insert(QStringLiteral("value"), QStringLiteral("stale"));
+	WorldRuntime::Trigger trigger;
+	trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("target_trigger"));
+	targetPlugin.triggers.push_back(trigger);
+	WorldRuntime::Alias alias;
+	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("target_alias"));
+	targetPlugin.aliases.push_back(alias);
+	WorldRuntime::Timer timer;
+	timer.attributes.insert(QStringLiteral("name"), QStringLiteral("target_timer"));
+	targetPlugin.timers.push_back(timer);
+	targetPlugin.triggerWildcards.insert(QStringLiteral("target_trigger"), {QStringLiteral("stale")});
+	targetPlugin.aliasWildcards.insert(QStringLiteral("target_alias"), {QStringLiteral("stale")});
+	WorldRuntimeTestAccess::plugins(runtime) = {callerPlugin, targetPlugin};
+
+	LuaEngineObservedInitializationRequest callerInitialization;
+	callerInitialization.engine              = caller.data();
+	callerInitialization.workerLifetimeOwner = caller;
+	callerInitialization.runtime             = &runtime;
+	callerInitialization.pluginId            = callerId;
+	callerInitialization.pluginName          = QStringLiteral("TopologyCaller");
+	callerInitialization.scriptText          = QStringLiteral(R"lua(
+local function probe_topology(id, lifecycle_status)
+  local installed = IsPluginInstalled(id)
+  local listed = false
+  for _, listed_id in ipairs(GetPluginList() or {}) do
+    if listed_id == string.lower(id) then listed = true end
+  end
+  local support = PluginSupports(id, "probe")
+  local call_status = CallPlugin(id, "probe", "ignored")
+  local variable = GetPluginVariable(id, "value")
+  local triggers = GetPluginTriggerList(id) or {}
+  local aliases = GetPluginAliasList(id) or {}
+  local timers = GetPluginTimerList(id) or {}
+  local trigger_info = GetPluginTriggerInfo(id, "target_trigger", 1)
+  local plugin_info = GetPluginInfo(id, 1)
+  local delivered = BroadcastPlugin(71, "must not reach unavailable target")
+  return string.format("%.0f|%s|%s|%.0f|%.0f|%s|%d|%d|%d|%s|%s|%.0f",
+    lifecycle_status, tostring(installed), tostring(listed), support, call_status,
+    variable or "<nil>", #triggers, #aliases, #timers, trigger_info or "<nil>",
+    plugin_info or "<nil>", delivered)
+end
+function reload_and_probe(id)
+  local reload_status = ReloadPlugin(id)
+  local ok, result = pcall(probe_topology, id, reload_status)
+  return ok and result or ("reload error: " .. tostring(result))
+end
+function unload_and_probe(id)
+  local ok, result = pcall(function()
+    local unload_status = UnloadPlugin(id)
+    return probe_topology(id, unload_status)
+  end)
+  return ok and result or ("unload error: " .. tostring(result))
+end
+)lua");
+	LuaEngineObservedInitializationRequest targetInitialization;
+	targetInitialization.engine              = target.data();
+	targetInitialization.workerLifetimeOwner = target;
+	targetInitialization.runtime             = &runtime;
+	targetInitialization.pluginId            = targetId;
+	targetInitialization.pluginName          = QStringLiteral("TopologyTarget");
+	targetInitialization.scriptText          = QStringLiteral(R"lua(
+function probe(value)
+  return "stale target call"
+end
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  error("unloaded target received broadcast")
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({callerInitialization, targetInitialization},
+	                                                          true);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(
+	    targetId, QSet<QString>{QStringLiteral("OnPluginBroadcast")},
+	    QSet<QString>{QStringLiteral("probe"), QStringLiteral("OnPluginBroadcast")});
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+
+	QCOMPARE(caller->pluginIdMetadata(), callerId);
+	QCOMPARE(target->pluginIdMetadata(), targetId);
+	LuaBatchDispatchRequest request;
+	request.engines                           = {caller};
+	request.kind                              = LuaBatchDispatchKind::StringInOut;
+	request.stringArg                         = targetId.toUpper();
+	request.callbackSnapshotArg               = captureVariableDispatchSnapshotForTest(runtime);
+	request.functionName                      = QStringLiteral("reload_and_probe");
+	request.inputCritical                     = true;
+	const LuaBatchDispatchResult reloadResult = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(reloadResult.stringResult,
+	         QStringLiteral("0|true|true|%1|%1|<nil>|0|0|0|<nil>|<nil>|0").arg(eNoSuchPlugin));
+	QVERIFY(runtime.isPluginInstalled(targetId));
+	QVERIFY(runtime.isPluginInstalled(callerId));
+	QVERIFY(caller->hasFunction(QStringLiteral("unload_and_probe")));
+
+	request.functionName                = QStringLiteral("unload_and_probe");
+	request.callbackSnapshotArg         = captureVariableDispatchSnapshotForTest(runtime);
+	const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult,
+	         QStringLiteral("0|false|false|%1|%1|<nil>|0|0|0|<nil>|<nil>|0").arg(eNoSuchPlugin));
+	QVERIFY(!runtime.isPluginInstalled(targetId));
+	runtime.dispatchTeardownLuaEngines({caller}, true);
+}
+
+void tst_LuaCallbackEngine::callbackLoadRequestKeepsCurrentPluginTopologyCoherent()
+{
+	WorldRuntime  runtime;
+	const QString callerId = QStringLiteral("111111111111111111111111");
+	const QString targetId = QStringLiteral("222222222222222222222222");
+	auto          caller   = QSharedPointer<LuaCallbackEngine>::create();
+	auto          target   = QSharedPointer<LuaCallbackEngine>::create();
+
+	const auto    makePlugin = [](const QString &id, const QString &name, const int sequence,
+                               const QSharedPointer<LuaCallbackEngine> &lua)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), name);
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.enabled  = true;
+		plugin.sequence = sequence;
+		plugin.lua      = lua;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {
+	    makePlugin(callerId, QStringLiteral("Caller"), 100, caller),
+	    makePlugin(targetId, QStringLiteral("Target"), 200, target),
+	};
+
+	LuaEngineObservedInitializationRequest callerInitialization;
+	callerInitialization.engine              = caller.data();
+	callerInitialization.workerLifetimeOwner = caller;
+	callerInitialization.runtime             = &runtime;
+	callerInitialization.pluginId            = callerId;
+	callerInitialization.pluginName          = QStringLiteral("Caller");
+	callerInitialization.scriptText          = QStringLiteral(R"lua(
+function load_then_call(value)
+  LoadPlugin("missing_callback_topology_plugin.xml")
+  local code, report = CallPlugin("222222222222222222222222", "report_topology")
+  return string.format("%.0f|%s", code, report or "<nil>")
+end
+)lua");
+	LuaEngineObservedInitializationRequest targetInitialization;
+	targetInitialization.engine              = target.data();
+	targetInitialization.workerLifetimeOwner = target;
+	targetInitialization.runtime             = &runtime;
+	targetInitialization.pluginId            = targetId;
+	targetInitialization.pluginName          = QStringLiteral("Target");
+	targetInitialization.scriptText          = QStringLiteral(R"lua(
+function report_topology()
+  local wanted = {
+    ["111111111111111111111111"] = true,
+    ["222222222222222222222222"] = true,
+  }
+  local listed = {}
+  for _, id in ipairs(GetPluginList() or {}) do
+    if wanted[id] then table.insert(listed, id) end
+  end
+  return table.concat({
+    tostring(IsPluginInstalled("222222222222222222222222")),
+    GetPluginInfo("222222222222222222222222", 1) or "<nil>",
+    table.concat(listed, ","),
+  }, "|")
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({callerInitialization, targetInitialization},
+	                                                          true);
+
+	LuaBatchDispatchRequest request;
+	request.engines                     = {caller};
+	request.kind                        = LuaBatchDispatchKind::StringInOut;
+	request.functionName                = QStringLiteral("load_then_call");
+	request.stringArg                   = QStringLiteral("ignored");
+	request.callbackSnapshotArg         = captureVariableDispatchSnapshotForTest(runtime);
+	const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult,
+	         QStringLiteral("0|true|Target|111111111111111111111111,222222222222222222222222"));
+	QVERIFY(runtime.isPluginInstalled(callerId));
+	QVERIFY(runtime.isPluginInstalled(targetId));
+	runtime.dispatchTeardownLuaEngines({caller, target}, true);
+}
+
+void tst_LuaCallbackEngine::callbackLoadRefreshesNestedPluginDomains()
+{
+	const QString temporaryTemplate = QDir(QCoreApplication::applicationDirPath())
+	                                      .filePath(QStringLiteral("callback-load-snapshot-XXXXXX"));
+	QTemporaryDir temporaryDirectory(temporaryTemplate);
+	QVERIFY(temporaryDirectory.isValid());
+	const QString callerId   = QStringLiteral("511111111111111111111111");
+	const QString loadedId   = QStringLiteral("522222222222222222222222");
+	const QString pluginPath = QDir(temporaryDirectory.path()).filePath(QStringLiteral("loaded.xml"));
+	QFile         pluginFile(pluginPath);
+	QVERIFY(pluginFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text));
+	const QByteArray pluginXml = QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+	  <plugin name="Loaded" id="%1" language="lua" enabled="y" save_state="n" sequence="200">
+	    <script><![CDATA[
+function report_loaded_topology()
+  local wanted = {
+    ["511111111111111111111111"] = true,
+    ["522222222222222222222222"] = true,
+  }
+  local listed = {}
+  for _, id in ipairs(GetPluginList() or {}) do
+    if wanted[id] then table.insert(listed, id) end
+  end
+  return table.concat({
+    tostring(IsPluginInstalled("522222222222222222222222")),
+	    GetPluginInfo("522222222222222222222222", 1) or "<nil>",
+	    table.concat(listed, ","),
+	    table.concat(GetTriggerList() or {}, ","),
+	  }, "|")
+end
+    ]]></script>
+	  </plugin>
+	  <triggers>
+	    <trigger name="loaded_trigger" match="^loaded$" enabled="y" />
+	  </triggers>
+</muclient>
+)xml")
+	                                 .arg(loadedId)
+	                                 .toUtf8();
+	QCOMPARE(pluginFile.write(pluginXml), pluginXml.size());
+	pluginFile.close();
+
+	WorldRuntime runtime;
+	runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+	runtime.setStartupDirectory(temporaryDirectory.path());
+	runtime.setPluginsDirectory(temporaryDirectory.path());
+	auto                 caller = QSharedPointer<LuaCallbackEngine>::create();
+
+	const QString        callerScript = QStringLiteral(R"lua(
+	function load_and_call(value)
+	  local before_installed = IsPluginInstalled("522222222222222222222222")
+	  local before_info = GetPluginInfo("522222222222222222222222", 1)
+	  local before_list = GetPluginList()
+	  local before_triggers = GetPluginTriggerList("522222222222222222222222")
+	  local before_call = CallPlugin("522222222222222222222222", "report_loaded_topology")
+	  local load_status = LoadPlugin("loaded.xml")
+	  local call_status = CallPlugin("522222222222222222222222", "report_loaded_topology")
+	  local after_installed = IsPluginInstalled("522222222222222222222222")
+	  local after_info = GetPluginInfo("522222222222222222222222", 1)
+	  local after_list = {}
+	  for _, id in ipairs(GetPluginList() or {}) do
+	    if id == "511111111111111111111111" or id == "522222222222222222222222" then
+	      table.insert(after_list, id)
+	    end
+	  end
+	  local after_triggers = GetPluginTriggerList("522222222222222222222222") or {}
+	  return string.format("%s|%s|%s|%s|%.0f|%.0f|%.0f|%s", tostring(before_installed),
+	                       tostring(before_info == nil), tostring(before_list ~= nil),
+	                       tostring(before_triggers == nil), before_call, load_status, call_status,
+	                       table.concat({tostring(after_installed), after_info or "<nil>",
+	                                     table.concat(after_list, ","), table.concat(after_triggers, ",")}, "|"))
+	end
+)lua");
+
+	WorldRuntime::Plugin callerPlugin;
+	callerPlugin.attributes.insert(QStringLiteral("id"), callerId);
+	callerPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Caller"));
+	callerPlugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	callerPlugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	callerPlugin.enabled  = true;
+	callerPlugin.sequence = 100;
+	callerPlugin.lua      = caller;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(callerPlugin);
+
+	LuaEngineObservedInitializationRequest callerInitialization;
+	callerInitialization.engine              = caller.data();
+	callerInitialization.workerLifetimeOwner = caller;
+	callerInitialization.runtime             = &runtime;
+	callerInitialization.pluginId            = callerId;
+	callerInitialization.pluginName          = QStringLiteral("Caller");
+	callerInitialization.pluginDirectory     = temporaryDirectory.path();
+	callerInitialization.scriptText          = callerScript;
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({callerInitialization}, true);
+
+	LuaBatchDispatchRequest request;
+	request.engines               = {caller};
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("load_and_call");
+	request.stringArg             = QStringLiteral("ignored");
+	request.callbackSnapshotArg   = captureVariableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult,
+	         QStringLiteral("false|true|true|true|%1|0|%2|true|Loaded|"
+	                        "511111111111111111111111,522222222222222222222222|loaded_trigger")
+	             .arg(eNoSuchPlugin)
+	             .arg(ePluginDisabled));
+	QVERIFY(runtime.isPluginInstalled(loadedId));
+
+	runtime.dispatchTeardownLuaEngines({caller}, true);
+	if (WorldRuntime::Plugin *storedCaller = WorldRuntimeTestAccess::plugin(runtime, callerId))
+		storedCaller->lua.clear();
+}
+
+void tst_LuaCallbackEngine::callbackBroadcastFlushesBeforeSnapshotCapture()
+{
+	WorldRuntime runtime;
+	runtime.m_luaExecutor         = std::make_unique<LuaExecutorDirect>();
+	const QString        callerId = QStringLiteral("611111111111111111111111");
+	const QString        targetId = QStringLiteral("622222222222222222222222");
+	auto                 caller   = QSharedPointer<LuaCallbackEngine>::create();
+
+	const QString        callerScript = QStringLiteral(R"lua(
+function mutate_and_broadcast(value)
+	  local colour_before_mutation = GetNormalColour(1)
+  local option_status = SetOption("wrap_column", 81)
+  local delivered = BroadcastPlugin(77, "after-commit")
+	  return string.format("%.0f|%.0f|%.0f", colour_before_mutation, option_status, delivered)
+end
+)lua");
+
+	auto                 target = QSharedPointer<LuaCallbackEngine>::create();
+
+	WorldRuntime::Plugin callerPlugin;
+	callerPlugin.attributes.insert(QStringLiteral("id"), callerId);
+	callerPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Caller"));
+	callerPlugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	callerPlugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	callerPlugin.enabled  = true;
+	callerPlugin.sequence = 100;
+	callerPlugin.lua      = caller;
+	WorldRuntime::Plugin targetPlugin;
+	targetPlugin.attributes.insert(QStringLiteral("id"), targetId);
+	targetPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Target"));
+	targetPlugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	targetPlugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("200"));
+	targetPlugin.enabled                     = true;
+	targetPlugin.sequence                    = 200;
+	targetPlugin.lua                         = target;
+	WorldRuntimeTestAccess::plugins(runtime) = {callerPlugin, targetPlugin};
+
+	LuaEngineObservedInitializationRequest callerInitialization;
+	callerInitialization.engine              = caller.data();
+	callerInitialization.workerLifetimeOwner = caller;
+	callerInitialization.runtime             = &runtime;
+	callerInitialization.pluginId            = callerId;
+	callerInitialization.pluginName          = QStringLiteral("Caller");
+	callerInitialization.scriptText          = callerScript;
+	LuaEngineObservedInitializationRequest targetInitialization;
+	targetInitialization.engine              = target.data();
+	targetInitialization.workerLifetimeOwner = target;
+	targetInitialization.runtime             = &runtime;
+	targetInitialization.pluginId            = targetId;
+	targetInitialization.pluginName          = QStringLiteral("Target");
+	targetInitialization.scriptText          = QStringLiteral(R"lua(
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  if GetNormalColour(1) == 654321 then
+    SetNormalColour(2, 123456)
+  end
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({callerInitialization, targetInitialization},
+	                                                          true);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(targetId,
+	                                                     QSet<QString>{QStringLiteral("OnPluginBroadcast")},
+	                                                     QSet<QString>{QStringLiteral("OnPluginBroadcast")});
+	runtime.setNormalColour(1, 111111);
+	runtime.setNormalColour(2, 222222);
+	QObject::connect(&runtime, &WorldRuntime::worldAttributeChanged, &runtime,
+	                 [&runtime](const QString &key)
+	                 {
+		                 if (key == QLatin1String("wrap_column"))
+			                 runtime.setNormalColour(1, 654321);
+	                 });
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+
+	LuaBatchDispatchRequest request;
+	request.engines               = {caller};
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("mutate_and_broadcast");
+	request.stringArg             = QStringLiteral("ignored");
+	request.callbackSnapshotArg   = captureVariableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("111111|0|1"));
+	QCOMPARE(runtime.normalColour(1), 654321L);
+	QCOMPARE(runtime.normalColour(2), 123456L);
+
+	runtime.dispatchTeardownLuaEngines({caller, target}, true);
+}
+
+void tst_LuaCallbackEngine::callbackCommittedMutationJournalsAreRetired()
+{
+	WorldRuntime  runtime;
+	const QString callerId = QStringLiteral("snapshot.retire.caller");
+	const QString targetId = QStringLiteral("snapshot.retire.target");
+	auto          caller   = QSharedPointer<LuaCallbackEngine>::create();
+	auto          target   = QSharedPointer<LuaCallbackEngine>::create();
+
+	const auto    makePlugin =
+	    [](const QString &id, const int sequence, const QSharedPointer<LuaCallbackEngine> &engine)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.enabled  = true;
+		plugin.sequence = sequence;
+		plugin.lua      = engine;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(callerId, 100, caller),
+	                                            makePlugin(targetId, 200, target)};
+	runtime.addLine(QStringLiteral("presentation line"), WorldRuntime::LineOutput);
+
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
+	initializeWorkerEngine(executor, caller, QStringLiteral(R"lua(
+function disable_call_then_read(value)
+  DeleteLines(1)
+  local disable_status = EnablePlugin("snapshot.retire.caller", false)
+  local first_status = CallPlugin("snapshot.retire.target", "enable_caller")
+  local second_status, enabled = CallPlugin("snapshot.retire.target", "read_caller_enabled")
+  return string.format("%.0f|%.0f|%.0f|%s", disable_status, first_status, second_status,
+                       enabled or "<nil>")
+end
+)lua"),
+	                       &runtime, callerId);
+	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
+function enable_caller()
+  EnablePlugin("snapshot.retire.caller", true)
+  CallPlugin("snapshot.retire.target", "read_only_noop")
+end
+function read_only_noop()
+  return "ok"
+end
+function read_caller_enabled()
+  return tostring(GetPluginInfo("snapshot.retire.caller", 17))
+end
+)lua"),
+	                       &runtime, targetId);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(
+	    targetId, {},
+	    QSet<QString>{QStringLiteral("enable_caller"), QStringLiteral("read_only_noop"),
+	                  QStringLiteral("read_caller_enabled")});
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("disable_call_then_read");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	executeDeferredMutations(result);
+	QCOMPARE(result.stringResult, QStringLiteral("0|0|0|true"));
+	QVERIFY(runtime.pluginForId(callerId));
+	QVERIFY(runtime.pluginForId(callerId)->enabled);
+
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	teardownWorkerEngine(executor, caller);
+	teardownWorkerEngine(executor, target);
+}
+
+void tst_LuaCallbackEngine::readOnlyNestedCallPreservesEntrySnapshot()
+{
+	WorldRuntime  runtime;
+	const QString callerId = QStringLiteral("snapshot.readonly.caller");
+	const QString targetId = QStringLiteral("snapshot.readonly.target");
+	auto          caller   = QSharedPointer<LuaCallbackEngine>::create();
+	auto          target   = QSharedPointer<LuaCallbackEngine>::create();
+
+	const auto    makePlugin = [](const QString &id, const QSharedPointer<LuaCallbackEngine> &engine)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.enabled = true;
+		plugin.lua     = engine;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(callerId, caller), makePlugin(targetId, target)};
+	runtime.setPluginVariableValue(callerId, QStringLiteral("entry_marker"), QStringLiteral("runtime"));
+
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
+	initializeWorkerEngine(executor, caller, QStringLiteral(R"lua(
+function read_across_noop_call(value)
+  local before = GetVariable("entry_marker")
+  local status = CallPlugin("snapshot.readonly.target", "noop")
+  local after = GetVariable("entry_marker")
+  return string.format("%s|%.0f|%s", before or "<nil>", status, after or "<nil>")
+end
+)lua"),
+	                       &runtime, callerId);
+	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
+function noop()
+  return "ok"
+end
+)lua"),
+	                       &runtime, targetId);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(targetId, {}, QSet<QString>{QStringLiteral("noop")});
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+
+	auto entrySnapshot = captureMutableDispatchSnapshotForTest(runtime);
+	QVERIFY(entrySnapshot);
+	entrySnapshot->pluginVariablesSnapshotById[callerId].insert(QStringLiteral("entry_marker"),
+	                                                            QStringLiteral("entry"));
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("read_across_noop_call");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = entrySnapshot;
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("entry|0|entry"));
+	QCOMPARE(runtime.pluginVariableValue(callerId, QStringLiteral("entry_marker")),
+	         QStringLiteral("runtime"));
+
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	teardownWorkerEngine(executor, caller);
+	teardownWorkerEngine(executor, target);
+}
+
+void tst_LuaCallbackEngine::executorDispatchEntryClearsStaleMutationResult()
+{
+	WorldRuntime runtime;
+	auto         engine = QSharedPointer<LuaCallbackEngine>::create();
+	engine->setWorldRuntime(&runtime);
+	engine->setScriptText(QStringLiteral(R"lua(
+function mutate_directly()
+  SetVariable("stale-boundary", "committed")
+end
+function read_only()
+  return true
+end
+)lua"));
+	QVERIFY(engine->loadScript());
+	bool hasFunction = false;
+	QVERIFY(engine->callFunctionNoArgs(QStringLiteral("mutate_directly"), &hasFunction));
+	QVERIFY(hasFunction);
+	const auto committedSnapshot = runtime.luaCallbackSnapshotForBridgedCall();
+	QVERIFY(committedSnapshot);
+	QCOMPARE(committedSnapshot->worldVariablesSnapshot.value(QStringLiteral("stale-boundary")),
+	         QStringLiteral("committed"));
+
+	LuaExecutorDirect       executor;
+	LuaBatchDispatchRequest request;
+	request.engines                     = {engine};
+	request.kind                        = LuaBatchDispatchKind::NoArgs;
+	request.functionName                = QStringLiteral("read_only");
+	const LuaBatchDispatchResult result = executor.dispatchBatch(request);
+	QVERIFY(result.boolResultValid);
+	QVERIFY(result.boolResult);
+	QVERIFY(!result.callbackSnapshotAfterMutations);
+	QVERIFY(result.deferredRuntimeMutationBatches.isEmpty());
+}
+
+void tst_LuaCallbackEngine::nestedBroadcastAdvancesSnapshotBetweenRecipients()
+{
+	WorldRuntime  runtime;
+	const QString callerId = QStringLiteral("snapshot.broadcast.caller");
+	const QString firstId  = QStringLiteral("snapshot.broadcast.first");
+	const QString secondId = QStringLiteral("snapshot.broadcast.second");
+	auto          caller   = QSharedPointer<LuaCallbackEngine>::create();
+	auto          first    = QSharedPointer<LuaCallbackEngine>::create();
+	auto          second   = QSharedPointer<LuaCallbackEngine>::create();
+
+	const auto    makePlugin =
+	    [](const QString &id, const int sequence, const QSharedPointer<LuaCallbackEngine> &engine)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.enabled  = true;
+		plugin.sequence = sequence;
+		plugin.lua      = engine;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(callerId, 100, caller),
+	                                            makePlugin(firstId, 200, first),
+	                                            makePlugin(secondId, 300, second)};
+	runtime.setPluginVariableValue(firstId, QStringLiteral("shared"), QStringLiteral("before"));
+
+	const auto makeInitialization =
+	    [&runtime](const QSharedPointer<LuaCallbackEngine> &engine, const QString &id, const QString &script)
+	{
+		LuaEngineObservedInitializationRequest request;
+		request.engine              = engine.data();
+		request.workerLifetimeOwner = engine;
+		request.runtime             = &runtime;
+		request.pluginId            = id;
+		request.pluginName          = id;
+		request.scriptText          = script;
+		return request;
+	};
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks(
+	    {makeInitialization(caller, callerId, QStringLiteral(R"lua(
+function broadcast_in_order(value)
+  local delivered = BroadcastPlugin(88, "ordered")
+  local after = GetPluginVariable("snapshot.broadcast.first", "shared")
+  return string.format("%.0f|%s", delivered, after or "<missing>")
+end
+)lua")),
+	     makeInitialization(first, firstId, QStringLiteral(R"lua(
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  SetVariable("shared", "after")
+end
+)lua")),
+	     makeInitialization(second, secondId, QStringLiteral(R"lua(
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  SetVariable("observed", GetPluginVariable("snapshot.broadcast.first", "shared") or "<missing>")
+end
+)lua"))},
+	    true);
+	for (const QString &pluginId : {firstId, secondId})
+	{
+		runtime.recordObservedPluginCallbackPresenceSnapshot(
+		    pluginId, QSet<QString>{QStringLiteral("OnPluginBroadcast")},
+		    QSet<QString>{QStringLiteral("OnPluginBroadcast")});
+	}
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+
+	LuaBatchDispatchRequest request;
+	request.engines                     = {caller};
+	request.kind                        = LuaBatchDispatchKind::StringInOut;
+	request.functionName                = QStringLiteral("broadcast_in_order");
+	request.stringArg                   = QStringLiteral("ignored");
+	request.callbackSnapshotArg         = captureVariableDispatchSnapshotForTest(runtime);
+	const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("2|after"));
+	QCOMPARE(runtime.pluginVariableValue(firstId, QStringLiteral("shared")), QStringLiteral("after"));
+	QCOMPARE(runtime.pluginVariableValue(secondId, QStringLiteral("observed")), QStringLiteral("after"));
+	runtime.dispatchTeardownLuaEngines({caller, first, second}, true);
+}
+
+void tst_LuaCallbackEngine::nestedBroadcastPrunesLifecycleMutatedRecipients()
+{
+	enum class Mutation
+	{
+		Disable,
+		Unload,
+		Reload,
+	};
+
+	QTemporaryDir temporaryDirectory;
+	QVERIFY(temporaryDirectory.isValid());
+	const QString callerId = QStringLiteral("711111111111111111111111");
+	const QString firstId  = QStringLiteral("722222222222222222222222");
+	const QString victimId = QStringLiteral("733333333333333333333333");
+	const QString victimPath =
+	    QDir(temporaryDirectory.path()).filePath(QStringLiteral("broadcast-victim.xml"));
+	QFile victimFile(victimPath);
+	QVERIFY(victimFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text));
+	const QByteArray victimXml = QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin name="ReplacementVictim" id="%1" language="lua" enabled="y" save_state="n">
+    <script><![CDATA[
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  SetNormalColour(1, 777)
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml")
+	                                 .arg(victimId)
+	                                 .toUtf8();
+	QCOMPARE(victimFile.write(victimXml), victimXml.size());
+	victimFile.close();
+
+	const auto runMutation = [&](const Mutation mutation)
+	{
+		WorldRuntime runtime;
+		runtime.setStartupDirectory(temporaryDirectory.path());
+		runtime.setPluginsDirectory(temporaryDirectory.path());
+		if (mutation == Mutation::Reload)
+			runtime.setPluginInstallDeferred(true);
+		auto       caller = QSharedPointer<LuaCallbackEngine>::create();
+		auto       first  = QSharedPointer<LuaCallbackEngine>::create();
+		auto       victim = QSharedPointer<LuaCallbackEngine>::create();
+
+		const auto makePlugin =
+		    [](const QString &id, const int sequence, const QSharedPointer<LuaCallbackEngine> &engine)
+		{
+			WorldRuntime::Plugin plugin;
+			plugin.attributes.insert(QStringLiteral("id"), id);
+			plugin.attributes.insert(QStringLiteral("name"), id);
+			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+			plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+			plugin.enabled  = true;
+			plugin.sequence = sequence;
+			plugin.lua      = engine;
+			return plugin;
+		};
+		WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(callerId, 50, caller),
+		                                            makePlugin(firstId, 100, first),
+		                                            makePlugin(victimId, 200, victim)};
+		if (mutation == Mutation::Reload)
+			WorldRuntimeTestAccess::plugin(runtime, victimId)->source = victimPath;
+
+		QString lifecycleCall;
+		switch (mutation)
+		{
+		case Mutation::Disable:
+			lifecycleCall = QStringLiteral("EnablePlugin(\"%1\", false)").arg(victimId);
+			break;
+		case Mutation::Unload:
+			lifecycleCall = QStringLiteral("UnloadPlugin(\"%1\")").arg(victimId);
+			break;
+		case Mutation::Reload:
+			lifecycleCall = QStringLiteral("ReloadPlugin(\"%1\")").arg(victimId);
+			break;
+		}
+		const auto makeInitialization = [&runtime](const QSharedPointer<LuaCallbackEngine> &engine,
+		                                           const QString &id, const QString &script)
+		{
+			LuaEngineObservedInitializationRequest request;
+			request.engine              = engine.data();
+			request.workerLifetimeOwner = engine;
+			request.runtime             = &runtime;
+			request.pluginId            = id;
+			request.pluginName          = id;
+			request.scriptText          = script;
+			return request;
+		};
+		runtime.dispatchInitializeLuaEnginesWithObservedCallbacks(
+		    {makeInitialization(caller, callerId, QStringLiteral(R"lua(
+function dispatch_lifecycle_broadcast(value)
+  return string.format("%.0f", BroadcastPlugin(188, "fixed roster"))
+end
+)lua")),
+		     makeInitialization(first, firstId,
+		                        QStringLiteral(R"lua(
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  local status = %1
+  SetNormalColour(1, status == 0 and 111 or 555)
+end
+)lua")
+		                            .arg(lifecycleCall)),
+		     makeInitialization(victim, victimId, QStringLiteral(R"lua(
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  SetNormalColour(1, 999)
+end
+)lua"))},
+		    true);
+		for (const QString &pluginId : {firstId, victimId})
+		{
+			runtime.recordObservedPluginCallbackPresenceSnapshot(
+			    pluginId, QSet<QString>{QStringLiteral("OnPluginBroadcast")},
+			    QSet<QString>{QStringLiteral("OnPluginBroadcast")});
+		}
+		runtime.invalidateLuaCallbackDispatchSnapshot();
+
+		LuaBatchDispatchRequest request;
+		request.engines                     = {caller};
+		request.kind                        = LuaBatchDispatchKind::StringInOut;
+		request.functionName                = QStringLiteral("dispatch_lifecycle_broadcast");
+		request.stringArg                   = QStringLiteral("ignored");
+		request.callbackSnapshotArg         = captureVariableDispatchSnapshotForTest(runtime);
+		const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+		QCOMPARE(result.stringResult, QStringLiteral("1"));
+		QCOMPARE(runtime.normalColour(1), 111L);
+
+		const WorldRuntime::Plugin *storedVictim = runtime.pluginForId(victimId);
+		if (mutation == Mutation::Disable)
+		{
+			QVERIFY(storedVictim);
+			QVERIFY(!storedVictim->enabled);
+		}
+		else if (mutation == Mutation::Unload)
+		{
+			QVERIFY(!storedVictim);
+		}
+		else
+		{
+			QVERIFY(storedVictim);
+			QVERIFY(storedVictim->lua);
+			QVERIFY(storedVictim->lua != victim);
+		}
+
+		QVector<QSharedPointer<LuaCallbackEngine>> currentEngines;
+		for (const WorldRuntime::Plugin &plugin : runtime.plugins())
+		{
+			if (plugin.lua && !currentEngines.contains(plugin.lua))
+				currentEngines.push_back(plugin.lua);
+		}
+		runtime.dispatchTeardownLuaEngines(currentEngines, true);
+	};
+
+	runMutation(Mutation::Disable);
+	runMutation(Mutation::Unload);
+	runMutation(Mutation::Reload);
+}
+
+void tst_LuaCallbackEngine::callbackSelfDisableRejectsCallPlugin()
+{
+	WorldRuntime         runtime;
+	const QString        callerId = QStringLiteral("744444444444444444444444");
+	auto                 caller   = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), callerId);
+	plugin.attributes.insert(QStringLiteral("name"), callerId);
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled = true;
+	plugin.lua     = caller;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+
+	LuaEngineObservedInitializationRequest initialization;
+	initialization.engine              = caller.data();
+	initialization.workerLifetimeOwner = caller;
+	initialization.runtime             = &runtime;
+	initialization.pluginId            = callerId;
+	initialization.pluginName          = callerId;
+	initialization.scriptText          = QStringLiteral(R"lua(
+self_probe_calls = 0
+function self_probe()
+  self_probe_calls = self_probe_calls + 1
+  return "unexpected"
+end
+function disable_then_call_self(value)
+  local disable_status = EnablePlugin("744444444444444444444444", false)
+  local call_status = CallPlugin("744444444444444444444444", "self_probe")
+  return string.format("%.0f|%.0f|%.0f", disable_status, call_status, self_probe_calls)
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(
+	    callerId, {}, QSet<QString>{QStringLiteral("disable_then_call_self"), QStringLiteral("self_probe")});
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+	runtime.setWorldFileModified(false);
+
+	LuaBatchDispatchRequest request;
+	request.engines                     = {caller};
+	request.kind                        = LuaBatchDispatchKind::StringInOut;
+	request.functionName                = QStringLiteral("disable_then_call_self");
+	request.stringArg                   = QStringLiteral("ignored");
+	request.callbackSnapshotArg         = captureVariableDispatchSnapshotForTest(runtime);
+	const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("0|%1|0").arg(ePluginDisabled));
+	const WorldRuntime::Plugin *storedPlugin = runtime.pluginForId(callerId);
+	QVERIFY(storedPlugin);
+	QVERIFY(!storedPlugin->enabled);
+	QVERIFY(runtime.worldFileModified());
+	runtime.dispatchTeardownLuaEngines({caller}, true);
+}
+
+void tst_LuaCallbackEngine::workerNestedBroadcastPrunesAfterSuspendedMutation()
+{
+	WorldRuntime runtime;
+	for (int lineNumber = 1; lineNumber <= 400; ++lineNumber)
+		runtime.addLine(QStringLiteral("line %1").arg(lineNumber), WorldRuntime::LineOutput);
+	const QString callerId = QStringLiteral("755555555555555555555555");
+	const QString firstId  = QStringLiteral("766666666666666666666666");
+	const QString victimId = QStringLiteral("777777777777777777777777");
+	auto          caller   = QSharedPointer<LuaCallbackEngine>::create();
+	auto          first    = QSharedPointer<LuaCallbackEngine>::create();
+	auto          victim   = QSharedPointer<LuaCallbackEngine>::create();
+	const auto    makePlugin =
+	    [](const QString &id, const int sequence, const QSharedPointer<LuaCallbackEngine> &engine)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.enabled  = true;
+		plugin.sequence = sequence;
+		plugin.lua      = engine;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {
+	    makePlugin(callerId, 50, caller), makePlugin(firstId, 100, first), makePlugin(victimId, 200, victim)};
+
+	const QString callerScript       = QStringLiteral(R"lua(
+function suspended_lifecycle_broadcast(value)
+  return string.format("%.0f", BroadcastPlugin(189, "suspended fixed roster"))
+end
+)lua");
+	const QString firstScript        = QStringLiteral(R"lua(
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  assert(GetLineInfo(20, 1) == "line 20")
+  EnablePlugin("777777777777777777777777", false)
+  SetNormalColour(1, 111)
+end
+)lua");
+	const QString victimScript       = QStringLiteral(R"lua(
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  SetNormalColour(1, 999)
+end
+)lua");
+	const auto    makeInitialization = [&runtime](const QSharedPointer<LuaCallbackEngine> &engine,
+                                               const QString &pluginId, const QString &script)
+	{
+		LuaEngineObservedInitializationRequest initialization;
+		initialization.engine              = engine.data();
+		initialization.workerLifetimeOwner = engine;
+		initialization.runtime             = &runtime;
+		initialization.scriptText          = script;
+		initialization.pluginId            = pluginId;
+		initialization.pluginName          = pluginId;
+		initialization.pluginDirectory     = QStringLiteral("/tmp/plugin");
+		return initialization;
+	};
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks(
+	    {makeInitialization(caller, callerId, callerScript), makeInitialization(first, firstId, firstScript),
+	     makeInitialization(victim, victimId, victimScript)},
+	    true);
+	for (const QString &pluginId : {firstId, victimId})
+	{
+		runtime.recordObservedPluginCallbackPresenceSnapshot(
+		    pluginId, QSet<QString>{QStringLiteral("OnPluginBroadcast")},
+		    QSet<QString>{QStringLiteral("OnPluginBroadcast")});
+	}
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+
+	quint64                             lineBufferGeneration = 0;
+	QHash<int, WorldRuntime::LineEntry> ignoredEntries;
+	QStringList                         ignoredRecentLines;
+	const int lineBufferCount          = runtime.luaContextLinePageByBufferIndex(0, 0, lineBufferGeneration,
+	                                                                             ignoredEntries, ignoredRecentLines);
+	auto      lineSnapshot             = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
+	lineSnapshot->lineBufferGeneration = lineBufferGeneration;
+	lineSnapshot->lineBufferCount      = lineBufferCount;
+	auto snapshot =
+	    QSharedPointer<LuaCallbackSnapshot>::create(*captureVariableDispatchSnapshotForTest(runtime));
+	snapshot->hasLineBufferSnapshot = true;
+	snapshot->lineBufferCount       = lineBufferCount;
+	snapshot->lineBufferSnapshot    = lineSnapshot;
+	snapshot->lineEntriesByBufferIndex.clear();
+
+	LuaBatchDispatchRequest request;
+	request.engines                     = {caller};
+	request.kind                        = LuaBatchDispatchKind::StringInOut;
+	request.functionName                = QStringLiteral("suspended_lifecycle_broadcast");
+	request.stringArg                   = QStringLiteral("ignored");
+	request.callbackSnapshotArg         = snapshot;
+	const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("1"));
+	QCOMPARE(runtime.normalColour(1), 111L);
+	const WorldRuntime::Plugin *storedVictim = runtime.pluginForId(victimId);
+	QVERIFY(storedVictim);
+	QVERIFY(!storedVictim->enabled);
+
+	runtime.dispatchTeardownLuaEngines({caller, first, victim}, true);
+}
+
+void tst_LuaCallbackEngine::workerNestedMutationBoundaryRebasesCallerView()
+{
+	WorldRuntime  runtime;
+	const QString callerId  = QStringLiteral("worker.snapshot.caller");
+	const QString targetId  = QStringLiteral("worker.snapshot.target");
+	const QString deepestId = QStringLiteral("worker.snapshot.deepest");
+	auto          caller    = QSharedPointer<LuaCallbackEngine>::create();
+	auto          target    = QSharedPointer<LuaCallbackEngine>::create();
+	auto          deepest   = QSharedPointer<LuaCallbackEngine>::create();
+
+	const auto    makePlugin =
+	    [](const QString &id, const int sequence, const QSharedPointer<LuaCallbackEngine> &engine)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.enabled  = true;
+		plugin.sequence = sequence;
+		plugin.lua      = engine;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(callerId, 100, caller),
+	                                            makePlugin(targetId, 200, target),
+	                                            makePlugin(deepestId, 300, deepest)};
+	runtime.setPluginVariableValue(targetId, QStringLiteral("shared"), QStringLiteral("before"));
+	runtime.addLine(QStringLiteral("worker presentation line"), WorldRuntime::LineOutput);
+
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
+	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
+function mutate_for_call()
+  SetVariable("SHARED", "after-call")
+  return "mutated"
+end
+function delete_for_call()
+  DeleteVariable("shared")
+  return "deleted"
+end
+function read_only_noop()
+  return "ok"
+end
+function mutate_then_deeper_read_only()
+  SetVariable("deep-shared", "deep-after")
+  WindowCreate("nested-lazy", 10, 20, 40, 50, 0, 0, 0)
+  WindowAddHotspot("nested-lazy", "deep-hotspot", 1, 2, 9, 10,
+                   "", "", "", "", "", "tip", 0, 0)
+  return CallPlugin("worker.snapshot.target", "read_only_noop")
+end
+function propagate_deepest_mutation()
+  return CallPlugin("worker.snapshot.deepest", "mutate_at_deepest_level")
+end
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  SetVariable("shared", "after-broadcast")
+end
+)lua"),
+	                       &runtime, targetId);
+	initializeWorkerEngine(executor, deepest, QStringLiteral(R"lua(
+function mutate_at_deepest_level()
+  SetVariable("deepest-shared", "deepest-after")
+  return "deepest-mutated"
+end
+)lua"),
+	                       &runtime, deepestId);
+	initializeWorkerEngine(executor, caller, QStringLiteral(R"lua(
+function mutate_self()
+  SetVariable("self-shared", "after-self-call")
+  return "ok"
+end
+function nested_mutation_boundary(value)
+  DeleteLines(1)
+  local call_status = CallPlugin("worker.snapshot.target", "mutate_for_call")
+  local after_call = GetPluginVariable("worker.snapshot.target", "shared")
+  local delivered = BroadcastPlugin(99, "mutate again")
+  local after_broadcast = GetPluginVariable("worker.snapshot.target", "shared")
+  local self_status = CallPlugin("worker.snapshot.caller", "mutate_self")
+  local after_self = GetVariable("self-shared")
+  local delete_status = CallPlugin("worker.snapshot.target", "delete_for_call")
+  local after_delete = GetPluginVariable("worker.snapshot.target", "shared")
+  local deep_status = CallPlugin("worker.snapshot.target", "mutate_then_deeper_read_only")
+  local deep_value = GetPluginVariable("worker.snapshot.target", "deep-shared")
+  local deep_width = WindowInfo("nested-lazy", 3)
+  local deep_hotspots = table.concat(WindowHotspotList("nested-lazy") or {}, ",")
+  local deepest_status = CallPlugin("worker.snapshot.target", "propagate_deepest_mutation")
+  local deepest_value = GetPluginVariable("worker.snapshot.deepest", "deepest-shared")
+  return string.format("%.0f|%s|%.0f|%s|%.0f|%s|%.0f|%s|%.0f|%s|%.0f|%s|%.0f|%s", call_status,
+                       after_call or "<missing>", delivered,
+                       after_broadcast or "<missing>", self_status,
+                       after_self or "<missing>", delete_status,
+                       after_delete or "<missing>", deep_status,
+                       deep_value or "<missing>", deep_width or -1, deep_hotspots,
+                       deepest_status, deepest_value or "<missing>")
+end
+)lua"),
+	                       &runtime, callerId);
+	for (const QSharedPointer<LuaCallbackEngine> &engine : {target, deepest, caller})
+	{
+		LuaBatchDispatchRequest load;
+		load.engines = {engine};
+		load.kind    = LuaBatchDispatchKind::ResetAndLoadScript;
+		LuaBatchDispatchResult loadResult;
+		dispatchWorkerAndWait(executor, load, loadResult);
+		QVERIFY(loadResult.boolResultValid);
+		QVERIFY(loadResult.boolResult);
+	}
+	runtime.recordObservedPluginCallbackPresenceSnapshot(
+	    targetId, QSet<QString>{QStringLiteral("OnPluginBroadcast")},
+	    QSet<QString>{QStringLiteral("mutate_for_call"), QStringLiteral("delete_for_call"),
+	                  QStringLiteral("read_only_noop"), QStringLiteral("mutate_then_deeper_read_only"),
+	                  QStringLiteral("propagate_deepest_mutation"), QStringLiteral("OnPluginBroadcast")});
+	runtime.recordObservedPluginCallbackPresenceSnapshot(
+	    deepestId, {}, QSet<QString>{QStringLiteral("mutate_at_deepest_level")});
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("nested_mutation_boundary");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QVERIFY(!result.suspended);
+	QCOMPARE(
+	    result.stringResult,
+	    QStringLiteral(
+	        "0|after-call|1|after-broadcast|0|after-self-call|0|<missing>|0|deep-after|40|deep-hotspot|0|"
+	        "deepest-after"));
+	executeDeferredMutations(result);
+	QVERIFY(runtime.pluginVariableValue(targetId, QStringLiteral("shared")).isNull());
+	QCOMPARE(runtime.pluginVariableValue(targetId, QStringLiteral("deep-shared")),
+	         QStringLiteral("deep-after"));
+	QCOMPARE(runtime.pluginVariableValue(deepestId, QStringLiteral("deepest-shared")),
+	         QStringLiteral("deepest-after"));
+	QCOMPARE(runtime.windowInfo(QStringLiteral("nested-lazy"), 3).toInt(), 40);
+	QCOMPARE(runtime.pluginVariableValue(callerId, QStringLiteral("self-shared")),
+	         QStringLiteral("after-self-call"));
+
+	teardownWorkerEngine(executor, caller);
+	teardownWorkerEngine(executor, target);
+	teardownWorkerEngine(executor, deepest);
+}
+
+void tst_LuaCallbackEngine::workerNestedArrayAndMapperMutationsRemainAuthoritative()
+{
+	WorldRuntime  runtime;
+	const QString callerId = QStringLiteral("611111111111111111111111");
+	const QString targetId = QStringLiteral("622222222222222222222222");
+	auto          caller   = QSharedPointer<LuaCallbackEngine>::create();
+	auto          target   = QSharedPointer<LuaCallbackEngine>::create();
+
+	const auto    makePlugin =
+	    [](const QString &id, const int sequence, const QSharedPointer<LuaCallbackEngine> &engine)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.enabled  = true;
+		plugin.sequence = sequence;
+		plugin.lua      = engine;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(callerId, 100, caller),
+	                                            makePlugin(targetId, 200, target)};
+
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
+	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
+function mutate_arrays_and_mapper()
+  assert(ArrayCreate("nested_array") == 0)
+  assert(ArraySet("nested_array", "key", "nested-value") == 0)
+  assert(AddToMapper("north", "south") == 0)
+  assert(AddMapperComment("checkpoint") == 0)
+  return table.concat({
+    ArrayGet("nested_array", "key") or "<missing>",
+    string.format("%.0f", ArrayCount()),
+    string.format("%.0f", GetMappingCount()),
+    GetMappingItem(0) or "<missing>",
+    GetMappingItem(1) or "<missing>"
+  }, "|")
+end
+function read_empty_arrays_and_mapper()
+  return table.concat({
+    tostring(ArrayExists("nested_array")),
+    string.format("%.0f", ArrayCount()),
+    string.format("%.0f", GetMappingCount()),
+    GetMappingItem(0) or "<missing>"
+  }, "|")
+end
+)lua"),
+	                       &runtime, targetId);
+	initializeWorkerEngine(executor, caller, QStringLiteral(R"lua(
+function mutate_nested_collections(value)
+  local code, target_report = CallPlugin("622222222222222222222222", "mutate_arrays_and_mapper")
+  local caller_report = table.concat({
+    ArrayGet("nested_array", "key") or "<missing>",
+    string.format("%.0f", ArrayCount()),
+    string.format("%.0f", GetMappingCount()),
+    GetMappingItem(0) or "<missing>",
+    GetMappingItem(1) or "<missing>"
+  }, "|")
+  return string.format("%.0f|%s|%s", code, target_report or "<missing>", caller_report)
+end
+function delete_nested_collections(value)
+  assert(ArrayDelete("nested_array") == 0)
+  assert(DeleteAllMapItems() == 0)
+  local code, target_report = CallPlugin("622222222222222222222222", "read_empty_arrays_and_mapper")
+  return string.format("%.0f|%s", code, target_report or "<missing>")
+end
+)lua"),
+	                       &runtime, callerId);
+	for (const QSharedPointer<LuaCallbackEngine> &engine : {target, caller})
+	{
+		LuaBatchDispatchRequest load;
+		load.engines = {engine};
+		load.kind    = LuaBatchDispatchKind::ResetAndLoadScript;
+		LuaBatchDispatchResult loadResult;
+		dispatchWorkerAndWait(executor, load, loadResult);
+		QVERIFY(loadResult.boolResultValid);
+		QVERIFY(loadResult.boolResult);
+	}
+	runtime.recordObservedPluginCallbackPresenceSnapshot(
+	    targetId, {},
+	    QSet<QString>{QStringLiteral("mutate_arrays_and_mapper"),
+	                  QStringLiteral("read_empty_arrays_and_mapper")});
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+
+	const auto issued = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(issued);
+	QVERIFY(!issued->arraysByName.contains(QStringLiteral("nested_array")));
+	QVERIFY(issued->mappingEntriesSnapshot.isEmpty());
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("mutate_nested_collections");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = issued;
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QVERIFY(!result.suspended);
+	QCOMPARE(result.stringResult,
+	         QStringLiteral("0|nested-value|1|2|north/south|{checkpoint}|nested-value|1|2|north/south|"
+	                        "{checkpoint}"));
+	QVERIFY(!issued->arraysByName.contains(QStringLiteral("nested_array")));
+	QVERIFY(issued->mappingEntriesSnapshot.isEmpty());
+	executeDeferredMutations(result);
+	QString committedValue;
+	QVERIFY(runtime.arrayGet(QStringLiteral("nested_array"), QStringLiteral("key"), committedValue));
+	QCOMPARE(committedValue, QStringLiteral("nested-value"));
+	QCOMPARE(runtime.mappingCount(), 2);
+	const auto committed = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(committed);
+	QCOMPARE(committed->arraysByName.value(QStringLiteral("nested_array")).value(QStringLiteral("key")),
+	         QStringLiteral("nested-value"));
+	QCOMPARE(committed->mappingEntriesSnapshot,
+	         QStringList({QStringLiteral("north/south"), QStringLiteral("{checkpoint}")}));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	request.functionName        = QStringLiteral("delete_nested_collections");
+	request.callbackSnapshotArg = committed;
+	dispatchWorkerAndWait(executor, request, result);
+	QVERIFY(!result.suspended);
+	QCOMPARE(result.stringResult, QStringLiteral("0|false|0|0|<missing>"));
+	QVERIFY(committed->arraysByName.contains(QStringLiteral("nested_array")));
+	QCOMPARE(committed->mappingEntriesSnapshot.size(), 2);
+	executeDeferredMutations(result);
+	QVERIFY(!runtime.arrayExists(QStringLiteral("nested_array")));
+	QCOMPARE(runtime.mappingCount(), 0);
+	const auto removed = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(removed);
+	QVERIFY(!removed->arraysByName.contains(QStringLiteral("nested_array")));
+	QVERIFY(removed->mappingEntriesSnapshot.isEmpty());
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	teardownWorkerEngine(executor, caller);
+	teardownWorkerEngine(executor, target);
+}
+
+void tst_LuaCallbackEngine::callbackReloadKeepsPrecommitPluginOrder()
+{
+	WorldRuntime  runtime;
+	const QString callerId   = QStringLiteral("311111111111111111111111");
+	const QString firstId    = QStringLiteral("322222222222222222222222");
+	const QString reloadedId = QStringLiteral("333333333333333333333333");
+	const QString lastId     = QStringLiteral("344444444444444444444444");
+	const QString observerId = QStringLiteral("355555555555555555555555");
+	auto          caller     = QSharedPointer<LuaCallbackEngine>::create();
+	auto          first      = QSharedPointer<LuaCallbackEngine>::create();
+	auto          reloaded   = QSharedPointer<LuaCallbackEngine>::create();
+	auto          last       = QSharedPointer<LuaCallbackEngine>::create();
+	auto          observer   = QSharedPointer<LuaCallbackEngine>::create();
+
+	const auto    makePlugin =
+	    [](const QString &id, const int sequence, const QSharedPointer<LuaCallbackEngine> &lua)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.enabled  = true;
+		plugin.sequence = sequence;
+		plugin.lua      = lua;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {
+	    makePlugin(callerId, 50, caller),      makePlugin(firstId, 100, first),
+	    makePlugin(reloadedId, 200, reloaded), makePlugin(lastId, 300, last),
+	    makePlugin(observerId, 400, observer),
+	};
+
+	const auto makeInitialization =
+	    [&runtime](const QSharedPointer<LuaCallbackEngine> &engine, const QString &id, const QString &script)
+	{
+		LuaEngineObservedInitializationRequest request;
+		request.engine              = engine.data();
+		request.workerLifetimeOwner = engine;
+		request.runtime             = &runtime;
+		request.pluginId            = id;
+		request.pluginName          = id;
+		request.scriptText          = script;
+		return request;
+	};
+	const QString callerScript   = QStringLiteral(R"lua(
+function reload_then_read(value)
+  ReloadPlugin("333333333333333333333333")
+  local code, order = CallPlugin("355555555555555555555555", "read_order")
+  return string.format("%.0f|%s", code, order or "<nil>")
+end
+)lua");
+	const QString observerScript = QStringLiteral(R"lua(
+function read_order()
+  local wanted = {
+    ["311111111111111111111111"] = true,
+    ["322222222222222222222222"] = true,
+    ["333333333333333333333333"] = true,
+    ["344444444444444444444444"] = true,
+    ["355555555555555555555555"] = true,
+  }
+  local listed = {}
+  for _, id in ipairs(GetPluginList() or {}) do
+    if wanted[id] then table.insert(listed, id) end
+  end
+  return table.concat(listed, ",")
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks(
+	    {makeInitialization(caller, callerId, callerScript), makeInitialization(first, firstId, QString()),
+	     makeInitialization(reloaded, reloadedId, QString()), makeInitialization(last, lastId, QString()),
+	     makeInitialization(observer, observerId, observerScript)},
+	    true);
+
+	LuaBatchDispatchRequest request;
+	request.engines                     = {caller};
+	request.kind                        = LuaBatchDispatchKind::StringInOut;
+	request.functionName                = QStringLiteral("reload_then_read");
+	request.stringArg                   = QStringLiteral("ignored");
+	request.callbackSnapshotArg         = captureVariableDispatchSnapshotForTest(runtime);
+	const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("0|311111111111111111111111,322222222222222222222222,"
+	                                             "333333333333333333333333,344444444444444444444444,"
+	                                             "355555555555555555555555"));
+	runtime.dispatchTeardownLuaEngines({caller, first, reloaded, last, observer}, true);
+}
+
+void tst_LuaCallbackEngine::callbackEnableThenCallAndBroadcastUseCanonicalOverlay()
+{
+	WorldRuntime  runtime;
+	const QString callerId = QStringLiteral("411111111111111111111111");
+	const QString firstId  = QStringLiteral("422222222222222222222222");
+	const QString middleId = QStringLiteral("433333333333333333333333");
+	const QString lastId   = QStringLiteral("444444444444444444444444");
+	auto          caller   = QSharedPointer<LuaCallbackEngine>::create();
+	auto          first    = QSharedPointer<LuaCallbackEngine>::create();
+	auto          middle   = QSharedPointer<LuaCallbackEngine>::create();
+	auto          last     = QSharedPointer<LuaCallbackEngine>::create();
+
+	const auto    makePlugin = [](const QString &id, const int sequence, const bool enabled,
+                               const QSharedPointer<LuaCallbackEngine> &lua)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("enabled"),
+		                         enabled ? QStringLiteral("1") : QStringLiteral("0"));
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.enabled  = enabled;
+		plugin.sequence = sequence;
+		plugin.lua      = lua;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {
+	    makePlugin(callerId, 50, true, caller),
+	    makePlugin(firstId, 100, true, first),
+	    makePlugin(middleId, 200, false, middle),
+	    makePlugin(lastId, 300, true, last),
+	};
+
+	const auto makeInitialization =
+	    [&runtime](const QSharedPointer<LuaCallbackEngine> &engine, const QString &id, const QString &script)
+	{
+		LuaEngineObservedInitializationRequest request;
+		request.engine              = engine.data();
+		request.workerLifetimeOwner = engine;
+		request.runtime             = &runtime;
+		request.pluginId            = id;
+		request.pluginName          = id;
+		request.scriptText          = script;
+		return request;
+	};
+	const QString callerScript = QStringLiteral(R"lua(
+function enable_call_and_broadcast(value)
+  local enable_status = EnablePlugin("433333333333333333333333", true)
+  local call_status, enabled = CallPlugin("433333333333333333333333", "probe_enabled")
+  local delivered = BroadcastPlugin(91, "ordered")
+  return string.format("%.0f|%.0f|%s|%.0f", enable_status, call_status,
+                       tostring(enabled), delivered)
+end
+)lua");
+	const QString firstScript  = QStringLiteral(R"lua(
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  SetNormalColour(1, 101)
+end
+)lua");
+	const QString middleScript = QStringLiteral(R"lua(
+function probe_enabled()
+  return tostring(GetPluginInfo("433333333333333333333333", 17))
+end
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  SetNormalColour(1, 202)
+end
+)lua");
+	const QString lastScript   = QStringLiteral(R"lua(
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  SetNormalColour(1, 303)
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks(
+	    {makeInitialization(caller, callerId, callerScript), makeInitialization(first, firstId, firstScript),
+	     makeInitialization(middle, middleId, middleScript), makeInitialization(last, lastId, lastScript)},
+	    true);
+	for (const QString &pluginId : {firstId, middleId, lastId})
+	{
+		QSet<QString> functions{QStringLiteral("OnPluginBroadcast")};
+		if (pluginId == middleId)
+			functions.insert(QStringLiteral("probe_enabled"));
+		runtime.recordObservedPluginCallbackPresenceSnapshot(
+		    pluginId, QSet<QString>{QStringLiteral("OnPluginBroadcast")}, functions);
+	}
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+
+	LuaBatchDispatchRequest request;
+	request.engines                     = {caller};
+	request.kind                        = LuaBatchDispatchKind::StringInOut;
+	request.functionName                = QStringLiteral("enable_call_and_broadcast");
+	request.stringArg                   = QStringLiteral("ignored");
+	request.callbackSnapshotArg         = captureVariableDispatchSnapshotForTest(runtime);
+	const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("0|0|true|3"));
+	QCOMPARE(runtime.normalColour(1), 303L);
+	QVERIFY(runtime.pluginForId(middleId));
+	QVERIFY(runtime.pluginForId(middleId)->enabled);
+	runtime.dispatchTeardownLuaEngines({caller, first, middle, last}, true);
+}
+
+void tst_LuaCallbackEngine::callbackPendingPluginStaysExcludedAfterEnabledOverlay()
+{
+	WorldRuntime  runtime;
+	const QString callerId    = QStringLiteral("451111111111111111111111");
+	const QString recipientId = QStringLiteral("452222222222222222222222");
+	const QString pendingId   = QStringLiteral("453333333333333333333333");
+	auto          caller      = QSharedPointer<LuaCallbackEngine>::create();
+	auto          recipient   = QSharedPointer<LuaCallbackEngine>::create();
+	auto          pending     = QSharedPointer<LuaCallbackEngine>::create();
+
+	const auto    makePlugin = [](const QString &id, const int sequence, const bool installPending,
+                               const QSharedPointer<LuaCallbackEngine> &lua)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.enabled        = true;
+		plugin.installPending = installPending;
+		plugin.sequence       = sequence;
+		plugin.lua            = lua;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(callerId, 50, false, caller),
+	                                            makePlugin(recipientId, 100, false, recipient),
+	                                            makePlugin(pendingId, 200, true, pending)};
+
+	const auto makeInitialization =
+	    [&runtime](const QSharedPointer<LuaCallbackEngine> &engine, const QString &id, const QString &script)
+	{
+		LuaEngineObservedInitializationRequest request;
+		request.engine              = engine.data();
+		request.workerLifetimeOwner = engine;
+		request.runtime             = &runtime;
+		request.pluginId            = id;
+		request.pluginName          = id;
+		request.scriptText          = script;
+		return request;
+	};
+	const QString callerScript    = QStringLiteral(R"lua(
+function enable_pending_and_broadcast(value)
+  local enable_status = EnablePlugin("453333333333333333333333", true)
+  local delivered = BroadcastPlugin(92, "pending must remain excluded")
+  return string.format("%.0f|%.0f", enable_status, delivered)
+end
+)lua");
+	const QString recipientScript = QStringLiteral(R"lua(
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  SetNormalColour(1, 111)
+end
+)lua");
+	const QString pendingScript   = QStringLiteral(R"lua(
+function OnPluginBroadcast(message, sender_id, sender_name, text)
+  SetNormalColour(1, 999)
+end
+function OnPluginTrace(message)
+  SetNormalColour(1, 998)
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks(
+	    {makeInitialization(caller, callerId, callerScript),
+	     makeInitialization(recipient, recipientId, recipientScript),
+	     makeInitialization(pending, pendingId, pendingScript)},
+	    true);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(recipientId,
+	                                                     QSet<QString>{QStringLiteral("OnPluginBroadcast")},
+	                                                     QSet<QString>{QStringLiteral("OnPluginBroadcast")});
+	runtime.recordObservedPluginCallbackPresenceSnapshot(
+	    pendingId, QSet<QString>{QStringLiteral("OnPluginBroadcast"), QStringLiteral("OnPluginTrace")},
+	    QSet<QString>{QStringLiteral("OnPluginBroadcast"), QStringLiteral("OnPluginTrace")});
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+
+	const auto initialSnapshot = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initialSnapshot);
+	QVERIFY(!initialSnapshot->broadcastPluginIdsSnapshot.contains(pendingId));
+	auto callbackSnapshot = QSharedPointer<LuaCallbackSnapshot>::create(*initialSnapshot);
+	callbackSnapshot->pluginCallbackPresenceByName.insert(QStringLiteral("OnPluginTrace"), false);
+
+	LuaBatchDispatchRequest request;
+	request.engines                     = {caller};
+	request.kind                        = LuaBatchDispatchKind::StringInOut;
+	request.functionName                = QStringLiteral("enable_pending_and_broadcast");
+	request.stringArg                   = QStringLiteral("ignored");
+	request.callbackSnapshotArg         = callbackSnapshot;
+	const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("0|1"));
+	QCOMPARE(runtime.normalColour(1), 111L);
+	QVERIFY(result.callbackSnapshotAfterMutations);
+	QVERIFY(!result.callbackSnapshotAfterMutations->broadcastPluginIdsSnapshot.contains(pendingId));
+	QVERIFY(!result.callbackSnapshotAfterMutations->pluginCallbackPresenceByName.value(
+	    QStringLiteral("OnPluginTrace")));
+	const WorldRuntime::Plugin *pendingPlugin = runtime.pluginForId(pendingId);
+	QVERIFY(pendingPlugin);
+	QVERIFY(pendingPlugin->installPending);
+	runtime.dispatchTeardownLuaEngines({caller, recipient, pending}, true);
+}
+
+void tst_LuaCallbackEngine::laterRecipientObservesCustomColourMutations()
+{
+	WorldRuntime  runtime;
+	const QString firstId  = QStringLiteral("snapshot.colour.first");
+	const QString secondId = QStringLiteral("snapshot.colour.second");
+	auto          first    = QSharedPointer<LuaCallbackEngine>::create();
+	auto          second   = QSharedPointer<LuaCallbackEngine>::create();
+
+	auto          makePlugin =
+	    [](const QString &id, const int sequence, const QSharedPointer<LuaCallbackEngine> &engine)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.sequence = sequence;
+		plugin.enabled  = true;
+		plugin.lua      = engine;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(firstId, 100, first),
+	                                            makePlugin(secondId, 200, second)};
+
+	QVector<LuaEngineObservedInitializationRequest> initRequests;
+	auto                                            appendInitializationRequest =
+	    [&](const QSharedPointer<LuaCallbackEngine> &engine, const QString &id, const QString &script)
+	{
+		LuaEngineObservedInitializationRequest request;
+		request.engine              = engine.data();
+		request.workerLifetimeOwner = engine;
+		request.runtime             = &runtime;
+		request.scriptText          = script;
+		request.pluginId            = id;
+		request.pluginName          = id;
+		initRequests.push_back(std::move(request));
+	};
+	appendInitializationRequest(first, firstId, QStringLiteral(R"lua(
+function OnPluginTick()
+  SetCustomColourText(3, 66051)
+  SetCustomColourBackground(3, 263430)
+  SetCustomColourName(3, "Snapshot Accent")
+end
+)lua"));
+	appendInitializationRequest(second, secondId, QStringLiteral(R"lua(
+function OnPluginTick()
+  SetVariable("colour_observer", table.concat({
+    string.format("%.0f", GetCustomColourText(3)),
+    string.format("%.0f", GetCustomColourBackground(3)),
+    GetCustomColourName(3)
+  }, "|"))
+end
+)lua"));
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks(initRequests, true);
+
+	const auto before = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(before);
+	QVERIFY(before->customTextColoursByIndex.value(3) != 66051);
+	QVERIFY(before->customBackgroundColoursByIndex.value(3) != 263430);
+	QVERIFY(before->customColourNamesByIndex.value(3) != QStringLiteral("Snapshot Accent"));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	LuaBatchDispatchRequest request;
+	request.kind          = LuaBatchDispatchKind::NoArgs;
+	request.engines       = {first, second};
+	request.functionName  = QStringLiteral("OnPluginTick");
+	request.defaultResult = true;
+	static_cast<void>(runtime.queuePluginCallbackDispatch(request, true));
+	QCOMPARE(runtime.pluginVariableValue(secondId, QStringLiteral("colour_observer")),
+	         QStringLiteral("66051|263430|Snapshot Accent"));
+
+	const auto after = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(after);
+	QCOMPARE(after->customTextColoursByIndex.value(3), 66051L);
+	QCOMPARE(after->customBackgroundColoursByIndex.value(3), 263430L);
+	QCOMPARE(after->customColourNamesByIndex.value(3), QStringLiteral("Snapshot Accent"));
+	QVERIFY(before->customTextColoursByIndex.value(3) != after->customTextColoursByIndex.value(3));
+	QVERIFY(before->customBackgroundColoursByIndex.value(3) !=
+	        after->customBackgroundColoursByIndex.value(3));
+	QVERIFY(before->customColourNamesByIndex.value(3) != after->customColourNamesByIndex.value(3));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+	runtime.dispatchTeardownLuaEngines({first, second}, true);
+}
+
+void tst_LuaCallbackEngine::productionRuleRuntimeMutationsPatchSnapshots()
+{
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_timers"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
+function snapshot_trigger()
+  SetVariable("trigger_runtime_report", table.concat({
+    tostring(GetTriggerInfo("runtime_trigger", 33)),
+    string.format("%.0f", GetTriggerInfo("runtime_trigger", 21)),
+    string.format("%.0f", GetTriggerInfo("runtime_trigger", 31))
+  }, "|"))
+end
+function snapshot_alias()
+  SetVariable("alias_runtime_report", table.concat({
+    tostring(GetAliasInfo("runtime_alias", 26)),
+    string.format("%.0f", GetAliasInfo("runtime_alias", 11)),
+    string.format("%.0f", GetAliasInfo("runtime_alias", 24))
+  }, "|"))
+end
+function snapshot_timer()
+  SetVariable("timer_runtime_report", table.concat({
+    tostring(GetTimerInfo("runtime_timer", 25)),
+    string.format("%.0f", GetTimerInfo("runtime_timer", 10))
+  }, "|"))
+end
+)lua"));
+
+	WorldRuntime::Trigger trigger;
+	trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("runtime_trigger"));
+	trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+	trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("runtime-trigger"));
+	trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
+	trigger.attributes.insert(QStringLiteral("script"), QStringLiteral("snapshot_trigger"));
+	runtime.setTriggers({trigger});
+
+	WorldRuntime::Alias alias;
+	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("runtime_alias"));
+	alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+	alias.attributes.insert(QStringLiteral("match"), QStringLiteral("runtime-alias"));
+	alias.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	alias.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
+	alias.attributes.insert(QStringLiteral("script"), QStringLiteral("snapshot_alias"));
+	runtime.setAliases({alias});
+
+	WorldRuntime::Timer timer;
+	timer.attributes.insert(QStringLiteral("name"), QStringLiteral("runtime_timer"));
+	timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+	timer.attributes.insert(QStringLiteral("active_closed"), QStringLiteral("y"));
+	timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("0"));
+	timer.attributes.insert(QStringLiteral("second"), QStringLiteral("60"));
+	timer.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
+	timer.attributes.insert(QStringLiteral("script"), QStringLiteral("snapshot_timer"));
+	runtime.setTimers({timer});
+	WorldRuntimeTestAccess::timers(runtime).first().nextFireTime = QDateTime::currentDateTime().addSecs(-1);
+	runtime.markTimerRuntimeStateChanged();
+
+	const QString        pluginId = QStringLiteral("snapshot.rules.plugin");
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), pluginId);
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	plugin.enabled                      = true;
+	plugin.sequence                     = 100;
+	WorldRuntime::Trigger pluginTrigger = trigger;
+	pluginTrigger.attributes.insert(QStringLiteral("name"), QStringLiteral("plugin_trigger"));
+	pluginTrigger.attributes.insert(QStringLiteral("match"), QStringLiteral("plugin-trigger"));
+	pluginTrigger.attributes.remove(QStringLiteral("script"));
+	plugin.triggers.push_back(pluginTrigger);
+	WorldRuntime::Alias pluginAlias = alias;
+	pluginAlias.attributes.insert(QStringLiteral("name"), QStringLiteral("plugin_alias"));
+	pluginAlias.attributes.insert(QStringLiteral("match"), QStringLiteral("plugin-alias"));
+	pluginAlias.attributes.remove(QStringLiteral("script"));
+	plugin.aliases.push_back(pluginAlias);
+	WorldRuntime::Timer pluginTimer = timer;
+	pluginTimer.attributes.insert(QStringLiteral("name"), QStringLiteral("plugin_timer"));
+	pluginTimer.attributes.remove(QStringLiteral("script"));
+	pluginTimer.nextFireTime = QDateTime::currentDateTime().addSecs(-1);
+	plugin.timers.push_back(pluginTimer);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+	QCOMPARE(initial->triggerListsByPluginId.value(QString()).constFirst().matchAttempts, 0);
+	QCOMPARE(initial->aliasListsByPluginId.value(QString()).constFirst().matchAttempts, 0);
+	QCOMPARE(initial->timerListsByPluginId.value(QString()).constFirst().firedCount, 0);
+
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	runtime.setCommandProcessor(&processor);
+	const auto detachProcessor = qScopeGuard(
+	    [&runtime, &processor]
+	    {
+		    runtime.setCommandProcessor(nullptr);
+		    processor.setRuntime(nullptr);
+	    });
+	QCOMPARE(processor.executeCommand(QStringLiteral("runtime-alias")), eOK);
+	processor.onIncomingLineReceived(QStringLiteral("runtime-trigger"));
+	QCOMPARE(processor.executeCommand(QStringLiteral("plugin-alias")), eOK);
+	processor.onIncomingLineReceived(QStringLiteral("plugin-trigger"));
+	processor.checkTimers();
+
+	QString value;
+	QVERIFY(runtime.findVariable(QStringLiteral("trigger_runtime_report"), value));
+	QCOMPARE(value, QStringLiteral("true|1|1"));
+	QVERIFY(runtime.findVariable(QStringLiteral("alias_runtime_report"), value));
+	QCOMPARE(value, QStringLiteral("true|1|1"));
+	QVERIFY(runtime.findVariable(QStringLiteral("timer_runtime_report"), value));
+	QCOMPARE(value, QStringLiteral("true|1"));
+
+	const auto after = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(after);
+	const auto &triggerAfter = after->triggerListsByPluginId.value(QString()).constFirst();
+	const auto &aliasAfter   = after->aliasListsByPluginId.value(QString()).constFirst();
+	const auto &timerAfter   = after->timerListsByPluginId.value(QString()).constFirst();
+	QCOMPARE(triggerAfter.matched, 1);
+	QCOMPARE(triggerAfter.matchAttempts, 2);
+	QCOMPARE(triggerAfter.invocationCount, 1);
+	QVERIFY(!triggerAfter.executingScript);
+	QCOMPARE(aliasAfter.matched, 1);
+	QCOMPARE(aliasAfter.matchAttempts, 2);
+	QCOMPARE(aliasAfter.invocationCount, 1);
+	QVERIFY(!aliasAfter.executingScript);
+	QCOMPARE(timerAfter.firedCount, 1);
+	QCOMPARE(timerAfter.invocationCount, 1);
+	QVERIFY(!timerAfter.executingScript);
+	QCOMPARE(after->triggerListsByPluginId.value(pluginId).constFirst().matched, 1);
+	QCOMPARE(after->aliasListsByPluginId.value(pluginId).constFirst().matched, 1);
+	QCOMPARE(after->timerListsByPluginId.value(pluginId).constFirst().firedCount, 1);
+	QCOMPARE(initial->triggerListsByPluginId.value(QString()).constFirst().matched, 0);
+	QCOMPARE(initial->aliasListsByPluginId.value(QString()).constFirst().matched, 0);
+	QCOMPARE(initial->timerListsByPluginId.value(QString()).constFirst().firedCount, 0);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	WorldRuntime::Trigger oneShotTrigger = trigger;
+	oneShotTrigger.attributes.insert(QStringLiteral("name"), QStringLiteral("one_shot_trigger"));
+	oneShotTrigger.attributes.insert(QStringLiteral("match"), QStringLiteral("remove-trigger"));
+	oneShotTrigger.attributes.insert(QStringLiteral("one_shot"), QStringLiteral("y"));
+	oneShotTrigger.attributes.remove(QStringLiteral("script"));
+	WorldRuntime::Alias oneShotAlias = alias;
+	oneShotAlias.attributes.insert(QStringLiteral("name"), QStringLiteral("one_shot_alias"));
+	oneShotAlias.attributes.insert(QStringLiteral("match"), QStringLiteral("remove-alias"));
+	oneShotAlias.attributes.insert(QStringLiteral("one_shot"), QStringLiteral("y"));
+	oneShotAlias.attributes.remove(QStringLiteral("script"));
+	runtime.setTriggers({oneShotTrigger});
+	runtime.setAliases({oneShotAlias});
+	const auto beforeRemoval = captureVariableDispatchSnapshotForTest(runtime);
+	QCOMPARE(beforeRemoval->triggerListsByPluginId.value(QString()).size(), 1);
+	QCOMPARE(beforeRemoval->aliasListsByPluginId.value(QString()).size(), 1);
+	processor.onIncomingLineReceived(QStringLiteral("remove-trigger"));
+	QCOMPARE(processor.executeCommand(QStringLiteral("remove-alias")), eOK);
+	const auto afterRemoval = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(afterRemoval->triggerListsByPluginId.value(QString()).isEmpty());
+	QVERIFY(afterRemoval->aliasListsByPluginId.value(QString()).isEmpty());
+	QCOMPARE(beforeRemoval->triggerListsByPluginId.value(QString()).size(), 1);
+	QCOMPARE(beforeRemoval->aliasListsByPluginId.value(QString()).size(), 1);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+}
+
+void tst_LuaCallbackEngine::timerScheduleRuntimeMutationsPatchWithoutDirtyingWorld()
+{
+	auto makeTimer = [](const QString &name)
+	{
+		WorldRuntime::Timer timer;
+		timer.attributes.insert(QStringLiteral("name"), name);
+		timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		timer.attributes.insert(QStringLiteral("active_closed"), QStringLiteral("1"));
+		timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("hour"), QStringLiteral("1"));
+		timer.attributes.insert(QStringLiteral("minute"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("second"), QStringLiteral("0"));
+		return timer;
+	};
+
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_timers"), QStringLiteral("y"));
+	runtime.setTimers({makeTimer(QStringLiteral("world_timer"))});
+	runtime.setWorldFileModified(false);
+	const auto beforeResetAll = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(beforeResetAll);
+	QVERIFY(!beforeResetAll->timerListsByPluginId.value(QString()).constFirst().nextFireTime.isValid());
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	runtime.resetAllTimers();
+	QVERIFY(!runtime.worldFileModified());
+	const auto afterResetAll = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(afterResetAll->timerListsByPluginId.value(QString()).constFirst().nextFireTime.isValid());
+	QVERIFY(!beforeResetAll->timerListsByPluginId.value(QString()).constFirst().nextFireTime.isValid());
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	WorldRuntimeTestAccess::timers(runtime).first().lastFired    = {};
+	WorldRuntimeTestAccess::timers(runtime).first().nextFireTime = {};
+	runtime.markTimerRuntimeStateChanged();
+	const auto beforeScheduler = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(!beforeScheduler->timerListsByPluginId.value(QString()).constFirst().nextFireTime.isValid());
+
+	const QString        pluginId = QStringLiteral("timer.schedule.plugin");
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), pluginId);
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	plugin.enabled  = true;
+	plugin.sequence = 100;
+	plugin.timers.push_back(makeTimer(QStringLiteral("plugin_timer")));
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	runtime.patchLuaCallbackStableSnapshot(WorldRuntime::LuaCallbackStableSnapshotDomain::Plugins);
+	const auto beforePluginScheduler = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(!beforePluginScheduler->timerListsByPluginId.value(pluginId).constFirst().nextFireTime.isValid());
+
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	runtime.setCommandProcessor(&processor);
+	const auto detachProcessor = qScopeGuard(
+	    [&runtime, &processor]
+	    {
+		    runtime.setCommandProcessor(nullptr);
+		    processor.setRuntime(nullptr);
+	    });
+	runtime.setWorldFileModified(false);
+	processor.checkTimers();
+	QVERIFY(!runtime.worldFileModified());
+	const auto afterScheduler = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(afterScheduler->timerListsByPluginId.value(QString()).constFirst().nextFireTime.isValid());
+	QVERIFY(afterScheduler->timerListsByPluginId.value(pluginId).constFirst().nextFireTime.isValid());
+	QVERIFY(!beforeScheduler->timerListsByPluginId.value(QString()).constFirst().nextFireTime.isValid());
+	QVERIFY(!beforePluginScheduler->timerListsByPluginId.value(pluginId).constFirst().nextFireTime.isValid());
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+}
+
+void tst_LuaCallbackEngine::luaTimerMutationApisReplayExactRuntimeState()
+{
+	auto makeTimer = [](const QString &name)
+	{
+		WorldRuntime::Timer timer;
+		timer.attributes.insert(QStringLiteral("name"), name);
+		timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("hour"), QStringLiteral("1"));
+		timer.attributes.insert(QStringLiteral("minute"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("second"), QStringLiteral("0"));
+		return timer;
+	};
+
+	WorldRuntime runtime;
+	runtime.setTimers({makeTimer(QStringLiteral("one")), makeTimer(QStringLiteral("two"))});
+	runtime.setWorldFileModified(false);
+	auto engine =
+	    QSharedPointer<LuaCallbackEngine>(runtime.luaCallbacks(), [](LuaCallbackEngine * /*unused*/) {});
+	QVERIFY(engine);
+	engine->setPluginInfo(QString(), QString(), QString());
+	engine->setScriptText(QStringLiteral(R"lua(
+function reset_one(value)
+	  return string.format("%.0f|%.0f|%.0f|%s", ResetTimer("one"),
+	                       GetTimerInfo("one", 11), GetTimerInfo("one", 12), tostring(GetInfo(111)))
+end
+function reset_all(value)
+	  ResetTimers()
+	  return string.format("%.0f|%.0f|%.0f|%.0f|%s",
+	                       GetTimerInfo("one", 11), GetTimerInfo("one", 12),
+	                       GetTimerInfo("two", 11), GetTimerInfo("two", 12), tostring(GetInfo(111)))
+end
+function set_interval(value)
+  local hour_status = SetTimerOption("one", "hour", 0)
+  local minute_status = SetTimerOption("one", "minute", 0)
+  local second_status = SetTimerOption("one", "second", 5.25)
+  return string.format("%.0f|%.0f|%.0f|%.0f|%.0f", hour_status, minute_status,
+                       second_status, GetTimerInfo("one", 11), GetTimerInfo("one", 12))
+end
+function set_at_time(value)
+  return string.format("%.0f|%.0f|%.0f", SetTimerOption("two", "at_time", 1),
+                       GetTimerInfo("two", 11), GetTimerInfo("two", 12))
+end
+)lua"));
+	QVERIFY(engine->loadScript());
+
+	LuaExecutorDirect executor;
+	auto              runMutation = [&](const QString &functionName)
+	{
+		LuaBatchDispatchRequest request;
+		request.engines               = {engine};
+		request.kind                  = LuaBatchDispatchKind::StringInOut;
+		request.functionName          = functionName;
+		request.stringArg             = QStringLiteral("ignored");
+		request.callbackSnapshotArg   = captureVariableDispatchSnapshotForTest(runtime);
+		LuaBatchDispatchResult result = executor.dispatchBatch(request);
+		executeDeferredMutations(result);
+		return result.stringResult.split(QLatin1Char('|'));
+	};
+	const auto verifyReportedSchedule = [](const QStringList &parts, const qsizetype lastIndex,
+	                                       const qsizetype nextIndex, const WorldRuntime::Timer &timer)
+	{
+		QVERIFY(timer.lastFired.isValid());
+		QVERIFY(timer.nextFireTime.isValid());
+		QCOMPARE(parts.at(lastIndex).toLongLong(), timer.lastFired.toSecsSinceEpoch());
+		QCOMPARE(parts.at(nextIndex).toLongLong(), timer.nextFireTime.toSecsSinceEpoch());
+	};
+
+	const auto beforeResetOne = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(!beforeResetOne->timerListsByPluginId.value(QString()).at(0).nextFireTime.isValid());
+	QVERIFY(!beforeResetOne->timerListsByPluginId.value(QString()).at(1).nextFireTime.isValid());
+	const QStringList resetOneResult = runMutation(QStringLiteral("reset_one"));
+	QCOMPARE(resetOneResult.size(), 4);
+	QCOMPARE(resetOneResult.at(0), QStringLiteral("0"));
+	QCOMPARE(resetOneResult.at(3), QStringLiteral("false"));
+	QVERIFY(!runtime.worldFileModified());
+	verifyReportedSchedule(resetOneResult, 1, 2, runtime.timers().at(0));
+	QCOMPARE(runtime.timers().at(0).nextFireTime, runtime.timers().at(0).lastFired.addSecs(3600));
+	const auto afterResetOne = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(afterResetOne->timerListsByPluginId.value(QString()).at(0).nextFireTime.isValid());
+	QVERIFY(!afterResetOne->timerListsByPluginId.value(QString()).at(1).nextFireTime.isValid());
+	QVERIFY(!beforeResetOne->timerListsByPluginId.value(QString()).at(0).nextFireTime.isValid());
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	const QStringList resetAllResult = runMutation(QStringLiteral("reset_all"));
+	QCOMPARE(resetAllResult.size(), 5);
+	QCOMPARE(resetAllResult.at(4), QStringLiteral("false"));
+	QVERIFY(!runtime.worldFileModified());
+	verifyReportedSchedule(resetAllResult, 0, 1, runtime.timers().at(0));
+	verifyReportedSchedule(resetAllResult, 2, 3, runtime.timers().at(1));
+	QCOMPARE(runtime.timers().at(0).lastFired, runtime.timers().at(1).lastFired);
+	QCOMPARE(runtime.timers().at(0).nextFireTime, runtime.timers().at(0).lastFired.addSecs(3600));
+	QCOMPARE(runtime.timers().at(1).nextFireTime, runtime.timers().at(1).lastFired.addSecs(3600));
+	const auto afterResetAll = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(afterResetAll->timerListsByPluginId.value(QString()).at(0).nextFireTime.isValid());
+	QVERIFY(afterResetAll->timerListsByPluginId.value(QString()).at(1).nextFireTime.isValid());
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	runtime.setWorldFileModified(false);
+	const QStringList setIntervalResult = runMutation(QStringLiteral("set_interval"));
+	QCOMPARE(setIntervalResult.size(), 5);
+	QCOMPARE(setIntervalResult.mid(0, 3),
+	         QStringList({QStringLiteral("0"), QStringLiteral("0"), QStringLiteral("0")}));
+	QVERIFY(runtime.worldFileModified());
+	verifyReportedSchedule(setIntervalResult, 3, 4, runtime.timers().at(0));
+	QCOMPARE(runtime.timers().at(0).attributes.value(QStringLiteral("hour")), QStringLiteral("0"));
+	QCOMPARE(runtime.timers().at(0).attributes.value(QStringLiteral("minute")), QStringLiteral("0"));
+	QCOMPARE(runtime.timers().at(0).attributes.value(QStringLiteral("second")), QStringLiteral("5.2500"));
+	QCOMPARE(runtime.timers().at(0).nextFireTime, runtime.timers().at(0).lastFired.addMSecs(5250));
+
+	runtime.setWorldFileModified(false);
+	const QStringList setAtTimeResult = runMutation(QStringLiteral("set_at_time"));
+	QCOMPARE(setAtTimeResult.size(), 3);
+	QCOMPARE(setAtTimeResult.at(0), QStringLiteral("0"));
+	QVERIFY(runtime.worldFileModified());
+	verifyReportedSchedule(setAtTimeResult, 1, 2, runtime.timers().at(1));
+	QCOMPARE(runtime.timers().at(1).attributes.value(QStringLiteral("at_time")), QStringLiteral("1"));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+}
+
+void tst_LuaCallbackEngine::deferredTimerCreationReplaysExactScheduleTimestamp()
+{
+	WorldRuntime runtime;
+	auto         engine =
+	    QSharedPointer<LuaCallbackEngine>(runtime.luaCallbacks(), [](LuaCallbackEngine * /*unused*/) {});
+	QVERIFY(engine);
+	engine->setPluginInfo(QString(), QString(), QString());
+	engine->setScriptText(QStringLiteral(R"lua(
+function create_scheduled_timers(value)
+  return string.format("%.0f", AddTimer("exact_timer", 0, 0, 5, "", 1, "")) .. "|" ..
+         string.format("%.0f", DoAfter(6.25, "temporary"))
+end
+)lua"));
+	QVERIFY(engine->loadScript());
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("create_scheduled_timers");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	LuaExecutorDirect      executor;
+	LuaBatchDispatchResult result = executor.dispatchBatch(request);
+	QCOMPARE(result.stringResult, QStringLiteral("0|0"));
+	executeDeferredMutations(result);
+
+	QCOMPARE(runtime.timers().size(), 2);
+	const auto namedIt = std::ranges::find_if(
+	    runtime.timers(), [](const WorldRuntime::Timer &timer)
+	    { return timer.attributes.value(QStringLiteral("name")) == QStringLiteral("exact_timer"); });
+	const auto temporaryIt = std::ranges::find_if(
+	    runtime.timers(), [](const WorldRuntime::Timer &timer)
+	    { return timer.attributes.value(QStringLiteral("temporary")) == QStringLiteral("1"); });
+	QVERIFY(namedIt != runtime.timers().cend());
+	QVERIFY(temporaryIt != runtime.timers().cend());
+	const WorldRuntime::Timer &named     = *namedIt;
+	const WorldRuntime::Timer &temporary = *temporaryIt;
+	QVERIFY(named.lastFired.isValid());
+	QVERIFY(temporary.lastFired.isValid());
+	QCOMPARE(named.nextFireTime, named.lastFired.addMSecs(5000));
+	QCOMPARE(temporary.nextFireTime, temporary.lastFired.addMSecs(6250));
+}
+
+void tst_LuaCallbackEngine::oneShotRulePersistenceRespectsWorldAndPluginScope()
+{
+	auto makeOneShotTrigger = [](const QString &name, const QString &match)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("name"), name);
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		trigger.attributes.insert(QStringLiteral("match"), match);
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
+		trigger.attributes.insert(QStringLiteral("one_shot"), QStringLiteral("1"));
+		return trigger;
+	};
+	auto makeOneShotAlias = [](const QString &name, const QString &match)
+	{
+		WorldRuntime::Alias alias;
+		alias.attributes.insert(QStringLiteral("name"), name);
+		alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		alias.attributes.insert(QStringLiteral("match"), match);
+		alias.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		alias.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
+		alias.attributes.insert(QStringLiteral("one_shot"), QStringLiteral("1"));
+		return alias;
+	};
+	auto makeOneShotTimer = [](const QString &name)
+	{
+		WorldRuntime::Timer timer;
+		timer.attributes.insert(QStringLiteral("name"), name);
+		timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		timer.attributes.insert(QStringLiteral("active_closed"), QStringLiteral("1"));
+		timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("hour"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("minute"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("second"), QStringLiteral("60"));
+		timer.attributes.insert(QStringLiteral("one_shot"), QStringLiteral("1"));
+		timer.nextFireTime = QDateTime::currentDateTime().addSecs(-1);
+		return timer;
+	};
+
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_timers"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
+function world_one_shot_trigger_callback()
+  SetVariable("one_shot_trigger_visible_during_callback",
+              tostring(GetTriggerInfo("world_one_shot_trigger", 33)))
+end
+function world_one_shot_alias_callback()
+  SetVariable("one_shot_alias_visible_during_callback",
+              tostring(GetAliasInfo("world_one_shot_alias", 26)))
+end
+function world_one_shot_timer_callback()
+  SetVariable("one_shot_timer_visible_during_callback",
+              tostring(GetTimerInfo("world_one_shot_timer", 25)))
+end
+)lua"));
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	runtime.setCommandProcessor(&processor);
+	const auto detachProcessor = qScopeGuard(
+	    [&runtime, &processor]
+	    {
+		    runtime.setCommandProcessor(nullptr);
+		    processor.setRuntime(nullptr);
+	    });
+
+	WorldRuntime::Trigger worldTrigger =
+	    makeOneShotTrigger(QStringLiteral("world_one_shot_trigger"), QStringLiteral("world-trigger"));
+	worldTrigger.attributes.insert(QStringLiteral("script"),
+	                               QStringLiteral("world_one_shot_trigger_callback"));
+	runtime.setTriggers({worldTrigger});
+	QVERIFY(runtime.worldFileModified());
+	runtime.setWorldFileModified(false);
+	processor.onIncomingLineReceived(QStringLiteral("world-trigger"));
+	QVERIFY(runtime.triggers().isEmpty());
+	QVERIFY(runtime.worldFileModified());
+	QString callbackReport;
+	QVERIFY(runtime.findVariable(QStringLiteral("one_shot_trigger_visible_during_callback"), callbackReport));
+	QCOMPARE(callbackReport, QStringLiteral("true"));
+
+	WorldRuntime::Alias worldAlias =
+	    makeOneShotAlias(QStringLiteral("world_one_shot_alias"), QStringLiteral("world-alias"));
+	worldAlias.attributes.insert(QStringLiteral("script"), QStringLiteral("world_one_shot_alias_callback"));
+	runtime.setAliases({worldAlias});
+	QVERIFY(runtime.worldFileModified());
+	runtime.setWorldFileModified(false);
+	QCOMPARE(processor.executeCommand(QStringLiteral("world-alias")), eOK);
+	QVERIFY(runtime.aliases().isEmpty());
+	QVERIFY(runtime.worldFileModified());
+	QVERIFY(runtime.findVariable(QStringLiteral("one_shot_alias_visible_during_callback"), callbackReport));
+	QCOMPARE(callbackReport, QStringLiteral("true"));
+
+	WorldRuntime::Timer worldTimer = makeOneShotTimer(QStringLiteral("world_one_shot_timer"));
+	worldTimer.attributes.insert(QStringLiteral("script"), QStringLiteral("world_one_shot_timer_callback"));
+	runtime.setTimers({worldTimer});
+	QVERIFY(runtime.worldFileModified());
+	runtime.setWorldFileModified(false);
+	processor.checkTimers();
+	QVERIFY(runtime.timers().isEmpty());
+	QVERIFY(runtime.worldFileModified());
+	QVERIFY(runtime.findVariable(QStringLiteral("one_shot_timer_visible_during_callback"), callbackReport));
+	QCOMPARE(callbackReport, QStringLiteral("true"));
+
+	runtime.setTimers({});
+	WorldRuntime::Plugin plugin;
+	const QString        pluginId = QStringLiteral("one.shot.timer.scope");
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), pluginId);
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	plugin.enabled    = true;
+	plugin.sequence   = 100;
+	auto pluginEngine = QSharedPointer<LuaCallbackEngine>::create();
+	plugin.lua        = pluginEngine;
+	WorldRuntime::Trigger pluginTrigger =
+	    makeOneShotTrigger(QStringLiteral("plugin_one_shot_trigger"), QStringLiteral("plugin-trigger"));
+	pluginTrigger.attributes.insert(QStringLiteral("script"),
+	                                QStringLiteral("plugin_one_shot_trigger_callback"));
+	WorldRuntime::Alias pluginAlias =
+	    makeOneShotAlias(QStringLiteral("plugin_one_shot_alias"), QStringLiteral("plugin-alias"));
+	pluginAlias.attributes.insert(QStringLiteral("script"), QStringLiteral("plugin_one_shot_alias_callback"));
+	WorldRuntime::Timer pluginTimer = makeOneShotTimer(QStringLiteral("plugin_one_shot_timer"));
+	pluginTimer.attributes.insert(QStringLiteral("script"), QStringLiteral("plugin_one_shot_timer_callback"));
+	plugin.triggers.push_back(pluginTrigger);
+	plugin.aliases.push_back(pluginAlias);
+	plugin.timers.push_back(pluginTimer);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	LuaEngineObservedInitializationRequest pluginInitialization;
+	pluginInitialization.engine              = pluginEngine.data();
+	pluginInitialization.workerLifetimeOwner = pluginEngine;
+	pluginInitialization.runtime             = &runtime;
+	pluginInitialization.pluginId            = pluginId;
+	pluginInitialization.pluginName          = pluginId;
+	pluginInitialization.scriptText          = QStringLiteral(R"lua(
+function plugin_one_shot_trigger_callback()
+  SetVariable("one_shot_trigger_visible_during_callback",
+              tostring(GetTriggerInfo("plugin_one_shot_trigger", 33)))
+end
+function plugin_one_shot_alias_callback()
+  SetVariable("one_shot_alias_visible_during_callback",
+              tostring(GetAliasInfo("plugin_one_shot_alias", 26)))
+end
+function plugin_one_shot_timer_callback()
+  SetVariable("one_shot_timer_visible_during_callback",
+              tostring(GetTimerInfo("plugin_one_shot_timer", 25)))
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({pluginInitialization}, true);
+	runtime.setWorldFileModified(false);
+
+	processor.onIncomingLineReceived(QStringLiteral("plugin-trigger"));
+	const WorldRuntime::Plugin *firedPlugin = runtime.pluginForId(pluginId);
+	QVERIFY(firedPlugin);
+	QVERIFY(firedPlugin->triggers.isEmpty());
+	QVERIFY(!runtime.worldFileModified());
+	QCOMPARE(
+	    runtime.pluginVariableValue(pluginId, QStringLiteral("one_shot_trigger_visible_during_callback")),
+	    QStringLiteral("true"));
+
+	QCOMPARE(processor.executeCommand(QStringLiteral("plugin-alias")), eOK);
+	firedPlugin = runtime.pluginForId(pluginId);
+	QVERIFY(firedPlugin);
+	QVERIFY(firedPlugin->aliases.isEmpty());
+	QVERIFY(!runtime.worldFileModified());
+	QCOMPARE(runtime.pluginVariableValue(pluginId, QStringLiteral("one_shot_alias_visible_during_callback")),
+	         QStringLiteral("true"));
+
+	processor.checkTimers();
+	firedPlugin = runtime.pluginForId(pluginId);
+	QVERIFY(firedPlugin);
+	QVERIFY(firedPlugin->timers.isEmpty());
+	QVERIFY(!runtime.worldFileModified());
+	QCOMPARE(runtime.pluginVariableValue(pluginId, QStringLiteral("one_shot_timer_visible_during_callback")),
+	         QStringLiteral("true"));
+	runtime.dispatchTeardownLuaEngines({pluginEngine}, true);
+}
+
+void tst_LuaCallbackEngine::worldOneShotRuleApisDirtyOnCreationAndDeletion_data()
+{
+	QTest::addColumn<int>("kind");
+	QTest::addColumn<QString>("createCall");
+	QTest::addColumn<QString>("deleteCall");
+
+	QTest::newRow("trigger") << 0
+	                         << QStringLiteral(
+	                                R"(AddTrigger("api_one_shot", "^api$", "", 32769, 0, 0, "", ""))")
+	                         << QStringLiteral(R"(DeleteTrigger("api_one_shot"))");
+	QTest::newRow("alias") << 1 << QStringLiteral(R"(AddAlias("api_one_shot", "^api$", "", 32769, ""))")
+	                       << QStringLiteral(R"(DeleteAlias("api_one_shot"))");
+	QTest::newRow("timer") << 2 << QStringLiteral(R"(AddTimer("api_one_shot", 0, 0, 30, "", 5, ""))")
+	                       << QStringLiteral(R"(DeleteTimer("api_one_shot"))");
+}
+
+void tst_LuaCallbackEngine::worldOneShotRuleApisDirtyOnCreationAndDeletion()
+{
+	QFETCH(int, kind);
+	QFETCH(QString, createCall);
+	QFETCH(QString, deleteCall);
+
+	WorldRuntime  runtime;
+	QTemporaryDir temporaryDirectory;
+	QVERIFY(temporaryDirectory.isValid());
+	runtime.setStartupDirectory(temporaryDirectory.path());
+	auto engine =
+	    QSharedPointer<LuaCallbackEngine>(runtime.luaCallbacks(), [](LuaCallbackEngine * /*unused*/) {});
+	QVERIFY(engine);
+	engine->setPluginInfo(QString(), QString(), QString());
+	engine->setScriptText(QStringLiteral(R"lua(
+function create_world_oneshot(value)
+  return string.format("%.0f", %1)
+end
+function delete_world_oneshot(value)
+  return string.format("%.0f", %2)
+end
+)lua")
+	                          .arg(createCall, deleteCall));
+	QVERIFY(engine->loadScript());
+	const auto ruleCount = [kind](const WorldRuntime &targetRuntime)
+	{
+		switch (kind)
+		{
+		case 0:
+			return targetRuntime.triggers().size();
+		case 1:
+			return targetRuntime.aliases().size();
+		case 2:
+			return targetRuntime.timers().size();
+		default:
+			Q_UNREACHABLE_RETURN(qsizetype{0});
+		}
+	};
+	const auto ruleAttributes = [kind](const WorldRuntime &targetRuntime)
+	{
+		switch (kind)
+		{
+		case 0:
+			return targetRuntime.triggers().constFirst().attributes;
+		case 1:
+			return targetRuntime.aliases().constFirst().attributes;
+		case 2:
+			return targetRuntime.timers().constFirst().attributes;
+		default:
+			Q_UNREACHABLE_RETURN(QMap<QString, QString>{});
+		}
+	};
+	const auto loadSavedRuntime = [](const QString &path)
+	{
+		WorldDocument document;
+		if (!document.loadFromFile(path))
+			return std::unique_ptr<WorldRuntime>{};
+		auto loaded = std::make_unique<WorldRuntime>();
+		loaded->applyFromDocument(document);
+		return loaded;
+	};
+
+	LuaExecutorDirect       executor;
+	LuaBatchDispatchRequest request;
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("create_world_oneshot");
+	request.stringArg             = QStringLiteral("ignored");
+	request.callbackSnapshotArg   = captureVariableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result = executor.dispatchBatch(request);
+	QCOMPARE(result.stringResult, QStringLiteral("0"));
+	executeDeferredMutations(result);
+	QCOMPARE(ruleCount(runtime), 1);
+	QVERIFY(runtime.worldFileModified());
+
+	const QString savePath = QDir(temporaryDirectory.path()).filePath(QStringLiteral("one_shot_world.qdl"));
+	QString       saveError;
+	QVERIFY2(runtime.saveWorldFile(savePath, &saveError), qPrintable(saveError));
+	std::unique_ptr<WorldRuntime> loaded = loadSavedRuntime(savePath);
+	QVERIFY(loaded);
+	QCOMPARE(ruleCount(*loaded), 1);
+	const QMap<QString, QString> attributes   = ruleAttributes(*loaded);
+	const auto                   enabledValue = [](const QString &value)
+	{
+		return value == QStringLiteral("1") || value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+	};
+	QVERIFY(enabledValue(attributes.value(QStringLiteral("enabled"))));
+	QVERIFY(enabledValue(attributes.value(QStringLiteral("one_shot"))));
+
+	runtime.setWorldFileModified(false);
+	request.functionName        = QStringLiteral("delete_world_oneshot");
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	result                      = executor.dispatchBatch(request);
+	QCOMPARE(result.stringResult, QStringLiteral("0"));
+	executeDeferredMutations(result);
+	QCOMPARE(ruleCount(runtime), 0);
+	QVERIFY(runtime.worldFileModified());
+	QVERIFY2(runtime.saveWorldFile(savePath, &saveError), qPrintable(saveError));
+	loaded = loadSavedRuntime(savePath);
+	QVERIFY(loaded);
+	QCOMPARE(ruleCount(*loaded), 0);
+}
+
+void tst_LuaCallbackEngine::pluginOneShotRuleApisRemainPluginScoped_data()
+{
+	worldOneShotRuleApisDirtyOnCreationAndDeletion_data();
+}
+
+void tst_LuaCallbackEngine::pluginOneShotRuleApisRemainPluginScoped()
+{
+	QFETCH(int, kind);
+	QFETCH(QString, createCall);
+	QFETCH(QString, deleteCall);
+
+	WorldRuntime         runtime;
+	const QString        pluginId = QStringLiteral("one.shot.api.plugin");
+	auto                 engine   = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), pluginId);
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled = true;
+	plugin.lua     = engine;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+
+	LuaEngineObservedInitializationRequest initialization;
+	initialization.engine              = engine.data();
+	initialization.workerLifetimeOwner = engine;
+	initialization.runtime             = &runtime;
+	initialization.pluginId            = pluginId;
+	initialization.pluginName          = pluginId;
+	initialization.scriptText          = QStringLiteral(R"lua(
+function create_plugin_oneshot(value)
+  return string.format("%.0f", %1)
+end
+function delete_plugin_oneshot(value)
+  return string.format("%.0f", %2)
+end
+)lua")
+	                                .arg(createCall, deleteCall);
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
+	runtime.setWorldFileModified(false);
+
+	const auto pluginRuleCount = [kind, &pluginId](const WorldRuntime &targetRuntime)
+	{
+		const WorldRuntime::Plugin *target = targetRuntime.pluginForId(pluginId);
+		if (!target)
+			return qsizetype{0};
+		switch (kind)
+		{
+		case 0:
+			return target->triggers.size();
+		case 1:
+			return target->aliases.size();
+		case 2:
+			return target->timers.size();
+		default:
+			Q_UNREACHABLE_RETURN(qsizetype{0});
+		}
+	};
+	LuaBatchDispatchRequest request;
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("create_plugin_oneshot");
+	request.stringArg             = QStringLiteral("ignored");
+	LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("0"));
+	QCOMPARE(pluginRuleCount(runtime), 1);
+	QVERIFY(!runtime.worldFileModified());
+
+	request.functionName = QStringLiteral("delete_plugin_oneshot");
+	result               = runtime.queuePluginCallbackDispatch(request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("0"));
+	QCOMPARE(pluginRuleCount(runtime), 0);
+	QVERIFY(!runtime.worldFileModified());
+	runtime.dispatchTeardownLuaEngines({engine}, true);
+}
+
+void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectMutableRuntimeDomains()
+{
+	WorldRuntime          runtime;
+
+	WorldRuntime::Trigger trigger;
+	trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("tracked_trigger"));
+	WorldRuntime::Alias alias;
+	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("tracked_alias"));
+	WorldRuntime::Timer timer;
+	timer.attributes.insert(QStringLiteral("name"), QStringLiteral("tracked_timer"));
+	runtime.setTriggers({trigger});
+	runtime.setAliases({alias});
+	runtime.setTimers({timer});
+	QCOMPARE(runtime.arrayCreate(QStringLiteral("tracked_array")), eOK);
+	QCOMPARE(
+	    runtime.arraySet(QStringLiteral("tracked_array"), QStringLiteral("key"), QStringLiteral("before")),
+	    eOK);
+	QCOMPARE(runtime.addToMapper(QStringLiteral("north"), QStringLiteral("south")), eOK);
+	WorldRuntime::Macro macro;
+	macro.attributes.insert(QStringLiteral("name"), QStringLiteral("F1"));
+	macro.children.insert(QStringLiteral("send"), QStringLiteral("macro-before"));
+	runtime.setMacros({macro});
+	WorldRuntime::Keypad keypad;
+	keypad.attributes.insert(QStringLiteral("name"), QStringLiteral("1"));
+	keypad.content = QStringLiteral("keypad-before");
+	runtime.setKeypadEntries({keypad});
+
+	const auto macroSend = [](const LuaCallbackSnapshot &snapshot, const QString &name)
+	{
+		const auto it = std::ranges::find_if(
+		    snapshot.macroEntriesSnapshot, [&name](const LuaCallbackAttributeChildrenSnapshot &entry)
+		    { return entry.attributes.value(QStringLiteral("name")) == name; });
+		return it == snapshot.macroEntriesSnapshot.cend() ? QString()
+		                                                  : it->children.value(QStringLiteral("send"));
+	};
+	const auto keypadSend = [](const LuaCallbackSnapshot &snapshot, const QString &name)
+	{
+		const auto it = std::ranges::find_if(
+		    snapshot.keypadEntriesSnapshot, [&name](const LuaCallbackAttributeContentSnapshot &entry)
+		    { return entry.attributes.value(QStringLiteral("name")) == name; });
+		return it == snapshot.keypadEntriesSnapshot.cend() ? QString() : it->content;
+	};
+
+	int                            soundStatus   = -2;
+	bool                           soundReusable = false;
+	WorldRuntime::TestSoundBackend soundBackend;
+	soundBackend.status   = [&soundStatus](const int buffer) { return buffer == 1 ? soundStatus : -2; };
+	soundBackend.reusable = [&soundReusable](const int buffer) { return buffer == 1 && soundReusable; };
+	runtime.setSoundBackendForTest(std::move(soundBackend));
+
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+	QCOMPARE(initial->triggerListsByPluginId.value(QString()).constFirst().matched, 0);
+	QCOMPARE(initial->aliasListsByPluginId.value(QString()).constFirst().matched, 0);
+	QCOMPARE(initial->timerListsByPluginId.value(QString()).constFirst().firedCount, 0);
+	QCOMPARE(initial->arraysByName.value(QStringLiteral("tracked_array")).value(QStringLiteral("key")),
+	         QStringLiteral("before"));
+	QCOMPARE(initial->mappingEntriesSnapshot, QStringList({QStringLiteral("north/south")}));
+	QCOMPARE(macroSend(*initial, QStringLiteral("F1")), QStringLiteral("macro-before"));
+	QCOMPARE(keypadSend(*initial, QStringLiteral("1")), QStringLiteral("keypad-before"));
+	QCOMPARE(initial->soundStatusByBuffer.value(1), -2);
+	QVERIFY(!initial->soundBufferReusableByBuffer.value(1));
+
+	WorldRuntime::Trigger &mutableTrigger = WorldRuntimeTestAccess::triggers(runtime).first();
+	mutableTrigger.matched                = 7;
+	mutableTrigger.matchAttempts          = 11;
+	WorldRuntime::Alias &mutableAlias     = WorldRuntimeTestAccess::aliases(runtime).first();
+	mutableAlias.matched                  = 5;
+	mutableAlias.matchAttempts            = 13;
+	WorldRuntime::Timer &mutableTimer     = WorldRuntimeTestAccess::timers(runtime).first();
+	mutableTimer.firedCount               = 3;
+	mutableTimer.invocationCount          = 2;
+	runtime.setTriggerWildcards(QStringLiteral("tracked_trigger"), {QStringLiteral("new-trigger")}, {});
+	runtime.setAliasWildcards(QStringLiteral("tracked_alias"), {QStringLiteral("new-alias")}, {});
+	runtime.markTriggersChanged();
+	runtime.markAliasesChanged();
+	runtime.markTimersChanged();
+
+	const auto rulesChanged = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(rulesChanged);
+	const LuaCallbackTriggerSnapshot &triggerSnapshot =
+	    rulesChanged->triggerListsByPluginId.value(QString()).constFirst();
+	const LuaCallbackAliasSnapshot &aliasSnapshot =
+	    rulesChanged->aliasListsByPluginId.value(QString()).constFirst();
+	const LuaCallbackTimerSnapshot &timerSnapshot =
+	    rulesChanged->timerListsByPluginId.value(QString()).constFirst();
+	QCOMPARE(triggerSnapshot.matched, 7);
+	QCOMPARE(triggerSnapshot.matchAttempts, 11);
+	QCOMPARE(aliasSnapshot.matched, 5);
+	QCOMPARE(aliasSnapshot.matchAttempts, 13);
+	QCOMPARE(timerSnapshot.firedCount, 3);
+	QCOMPARE(timerSnapshot.invocationCount, 2);
+	QCOMPARE(rulesChanged->triggerWildcardsSnapshot.value(QStringLiteral("tracked_trigger")).constFirst(),
+	         QStringLiteral("new-trigger"));
+	QCOMPARE(rulesChanged->aliasWildcardsSnapshot.value(QStringLiteral("tracked_alias")).constFirst(),
+	         QStringLiteral("new-alias"));
+	QCOMPARE(initial->triggerListsByPluginId.value(QString()).constFirst().matched, 0);
+
+	mutableTrigger.matched       = 17;
+	mutableAlias.matchAttempts   = 19;
+	mutableTimer.invocationCount = 23;
+	runtime.markTriggersChanged();
+	runtime.markAliasesChanged();
+	runtime.markTimersChanged();
+	const auto retainedHandlesChanged = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(retainedHandlesChanged);
+	QCOMPARE(retainedHandlesChanged->triggerListsByPluginId.value(QString()).constFirst().matched, 17);
+	QCOMPARE(retainedHandlesChanged->aliasListsByPluginId.value(QString()).constFirst().matchAttempts, 19);
+	QCOMPARE(retainedHandlesChanged->timerListsByPluginId.value(QString()).constFirst().invocationCount, 23);
+
+	QCOMPARE(
+	    runtime.arraySet(QStringLiteral("tracked_array"), QStringLiteral("key"), QStringLiteral("after")),
+	    eSetReplacingExistingValue);
+	QCOMPARE(runtime.arrayCreate(QStringLiteral("second_array")), eOK);
+	QCOMPARE(runtime.addMapperComment(QStringLiteral("checkpoint")), eOK);
+	macro.children.insert(QStringLiteral("send"), QStringLiteral("macro-after"));
+	runtime.setMacros({macro});
+	keypad.content = QStringLiteral("keypad-after");
+	runtime.setKeypadEntries({keypad});
+	const auto collectionsChanged = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(collectionsChanged);
+	QCOMPARE(
+	    collectionsChanged->arraysByName.value(QStringLiteral("tracked_array")).value(QStringLiteral("key")),
+	    QStringLiteral("after"));
+	QVERIFY(collectionsChanged->arraysByName.contains(QStringLiteral("second_array")));
+	QCOMPARE(collectionsChanged->mappingEntriesSnapshot,
+	         QStringList({QStringLiteral("north/south"), QStringLiteral("{checkpoint}")}));
+	QCOMPARE(macroSend(*collectionsChanged, QStringLiteral("F1")), QStringLiteral("macro-after"));
+	QCOMPARE(keypadSend(*collectionsChanged, QStringLiteral("1")), QStringLiteral("keypad-after"));
+	QCOMPARE(initial->arraysByName.value(QStringLiteral("tracked_array")).value(QStringLiteral("key")),
+	         QStringLiteral("before"));
+	QVERIFY(!initial->arraysByName.contains(QStringLiteral("second_array")));
+	QCOMPARE(initial->mappingEntriesSnapshot, QStringList({QStringLiteral("north/south")}));
+	QCOMPARE(macroSend(*initial, QStringLiteral("F1")), QStringLiteral("macro-before"));
+	QCOMPARE(keypadSend(*initial, QStringLiteral("1")), QStringLiteral("keypad-before"));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	runtime.mapColour(0x010203, 0x040506);
+	const auto mapChanged = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(mapChanged);
+	QCOMPARE(mapChanged->mapColourSnapshot.value(0x010203), 0x040506);
+
+	const int commandId = runtime.allocateAcceleratorCommand();
+	QVERIFY(commandId >= WorldRuntime::kAcceleratorFirstCommand);
+	WorldRuntime::AcceleratorEntry accelerator;
+	accelerator.text   = QStringLiteral("north");
+	accelerator.sendTo = eSendToWorld;
+	runtime.registerAccelerator(0x1234, commandId, accelerator);
+	const auto acceleratorChanged = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(acceleratorChanged);
+	QCOMPARE(acceleratorChanged->acceleratorSnapshot.size(), initial->acceleratorSnapshot.size() + 1);
+	const auto acceleratorIt = std::ranges::find_if(acceleratorChanged->acceleratorSnapshot,
+	                                                [commandId](const LuaCallbackAcceleratorSnapshot &row)
+	                                                { return row.commandId == commandId; });
+	QVERIFY(acceleratorIt != acceleratorChanged->acceleratorSnapshot.cend());
+	QCOMPARE(acceleratorIt->key, 0x1234);
+
+	soundStatus             = 2;
+	soundReusable           = true;
+	const auto soundChanged = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(soundChanged);
+	QCOMPARE(soundChanged->soundStatusByBuffer.value(1), 2);
+	QVERIFY(soundChanged->soundBufferReusableByBuffer.value(1));
+	QCOMPARE(acceleratorChanged->soundStatusByBuffer.value(1), -2);
+	QCOMPARE(initial->soundStatusByBuffer.value(1), -2);
+}
+
+void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectUdpState()
+{
+	WorldRuntime runtime;
+	const auto   initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+
+	QUdpSocket portProbe;
+	if (!portProbe.bind(QHostAddress::LocalHost, 0, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint))
+		QSKIP("Local UDP bind is unavailable in this environment.");
+	const int udpPort = portProbe.localPort();
+	QVERIFY(udpPort > 0);
+	QCOMPARE(runtime.udpListen(QStringLiteral("plugin.id"), QStringLiteral("127.0.0.1"), udpPort,
+	                           QStringLiteral("udp_callback")),
+	         eOK);
+	// Keep ownership of the ephemeral port until the runtime has co-bound it with the same sharing flags. Closing
+	// the probe before udpListen() would create a race in which an unrelated process could claim the port.
+	portProbe.close();
+	const auto udpChanged = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(udpChanged);
+	QVERIFY(udpChanged->udpPortsSnapshot.contains(udpPort));
+	QCOMPARE(udpChanged->udpListenerPluginIdsByPort.value(udpPort), QStringLiteral("plugin.id"));
+	QVERIFY(udpChanged->usedUdpPortsSnapshot.contains(udpPort));
+	QVERIFY(!initial->udpPortsSnapshot.contains(udpPort));
+}
+
+void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectChatState()
+{
+	WorldRuntime runtime;
+	const auto   initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+
+	QTcpServer chatServer;
+	if (!chatServer.listen(QHostAddress::LocalHost, 0))
+		QSKIP("Local TCP listen is unavailable in this environment.");
+	QCOMPARE(runtime.chatCall(QStringLiteral("127.0.0.1"), chatServer.serverPort(), false), eOK);
+	QTRY_VERIFY(chatServer.hasPendingConnections());
+	QTcpSocket *chatPeer = chatServer.nextPendingConnection();
+	QVERIFY(chatPeer);
+	QTRY_VERIFY(chatPeer->bytesAvailable() > 0);
+	static_cast<void>(chatPeer->readAll());
+	const QByteArray handshake = QByteArrayLiteral("YES:snapshot-peer\n");
+	QCOMPARE(chatPeer->write(handshake), handshake.size());
+	QVERIFY(chatPeer->flush());
+	QTRY_VERIFY(!runtime.chatList().isEmpty());
+	const auto chatChanged = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(chatChanged);
+	QCOMPARE(chatChanged->chatConnectionIdsSnapshot.size(), 1);
+	const long chatId = chatChanged->chatConnectionIdsSnapshot.constFirst();
+	QCOMPARE(chatChanged->chatIdsByLookupKey.value(QString::number(chatId)), chatId);
+	QVERIFY(initial->chatConnectionIdsSnapshot.isEmpty());
+	QCOMPARE(runtime.chatDisconnect(chatId), eOK);
+	QTRY_VERIFY(!runtime.chatInfo(chatId, 1).isValid());
+	QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void tst_LuaCallbackEngine::callbackDispatchSnapshotsAreIndependent()
+{
+	WorldRuntime                   runtime;
+	int                            soundStatus   = 2;
+	bool                           soundReusable = true;
+	WorldRuntime::TestSoundBackend soundBackend;
+	soundBackend.status   = [&soundStatus](const int buffer) { return buffer == 1 ? soundStatus : -2; };
+	soundBackend.reusable = [&soundReusable](const int buffer) { return buffer == 1 && soundReusable; };
+	runtime.setSoundBackendForTest(std::move(soundBackend));
+
+	const QString windowName = QStringLiteral("dispatch-state");
+	QCOMPARE(runtime.windowCreate(windowName, 0, 0, 80, 40, 0, 0, QColor(Qt::black), QString()), eOK);
+	MiniWindow &window         = runtime.m_miniWindows[windowName];
+	window.rect                = QRect(7, 11, 31, 17);
+	window.temporarilyHide     = true;
+	window.lastMousePosition   = QPoint(13, 17);
+	window.lastMouseUpdate     = 19;
+	window.clientMousePosition = QPoint(23, 29);
+	window.mouseOverHotspot    = QStringLiteral("over");
+	window.mouseDownHotspot    = QStringLiteral("down");
+	runtime.setVariable(QStringLiteral("dispatch-value"), QStringLiteral("first"));
+
+	const auto first = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(first);
+
+	window.rect                = QRect(31, 37, 41, 43);
+	window.temporarilyHide     = false;
+	window.lastMousePosition   = QPoint(47, 53);
+	window.lastMouseUpdate     = 59;
+	window.clientMousePosition = QPoint(61, 67);
+	window.mouseOverHotspot    = QStringLiteral("new-over");
+	window.mouseDownHotspot    = QStringLiteral("new-down");
+	soundStatus                = -2;
+	soundReusable              = false;
+	runtime.setVariable(QStringLiteral("dispatch-value"), QStringLiteral("second"));
+
+	const auto second = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(second);
+	QVERIFY(first.data() != second.data());
+	QVERIFY(first->miniWindowsByWindow.value(windowName));
+	QVERIFY(second->miniWindowsByWindow.value(windowName));
+	QCOMPARE(first->miniWindowsByWindow.value(windowName)->apiRect(), QRect(7, 11, 31, 17));
+	QCOMPARE(second->miniWindowsByWindow.value(windowName)->apiRect(), QRect(31, 37, 41, 43));
+	QVERIFY(first->miniWindowsByWindow.value(windowName)->temporarilyHide);
+	QVERIFY(!second->miniWindowsByWindow.value(windowName)->temporarilyHide);
+	QCOMPARE(first->miniWindowsByWindow.value(windowName)->lastMousePosition.x(), 13);
+	QCOMPARE(second->miniWindowsByWindow.value(windowName)->lastMousePosition.x(), 47);
+	QCOMPARE(first->miniWindowsByWindow.value(windowName)->mouseOverHotspot, QStringLiteral("over"));
+	QCOMPARE(second->miniWindowsByWindow.value(windowName)->mouseOverHotspot, QStringLiteral("new-over"));
+	QCOMPARE(first->soundStatusByBuffer.value(1), 2);
+	QCOMPARE(second->soundStatusByBuffer.value(1), -2);
+	QVERIFY(first->soundBufferReusableByBuffer.value(1));
+	QVERIFY(!second->soundBufferReusableByBuffer.value(1));
+	QCOMPARE(first->worldVariablesSnapshot.value(QStringLiteral("dispatch-value")), QStringLiteral("first"));
+	QCOMPARE(second->worldVariablesSnapshot.value(QStringLiteral("dispatch-value")),
+	         QStringLiteral("second"));
+}
+
+void tst_LuaCallbackEngine::callbackDispatchReusesStableAggregateSnapshot()
+{
+	WorldRuntime runtime;
+	runtime.setVariable(QStringLiteral("dispatch-probe"), QStringLiteral("first"));
+	const QString code = QStringLiteral("return true");
+
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{0});
+	QVERIFY(runtime.dispatchLuaExecuteScript(runtime.luaCallbacks(), code, QStringLiteral("snapshot reuse"),
+	                                         nullptr, true, false, 0, 0));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	QVERIFY(runtime.dispatchLuaExecuteScript(runtime.luaCallbacks(), code, QStringLiteral("snapshot reuse"),
+	                                         nullptr, true, false, 0, 0));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	runtime.setTriggerWildcards(QStringLiteral("dispatch-wildcards"), {QStringLiteral("current")}, {});
+	const auto wildcardSnapshot = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(wildcardSnapshot);
+	QCOMPARE(wildcardSnapshot->triggerWildcardsSnapshot.value(QStringLiteral("dispatch-wildcards")),
+	         QStringList({QStringLiteral("current")}));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	runtime.setVariable(QStringLiteral("dispatch-probe"), QStringLiteral("second"));
+	QVERIFY(runtime.dispatchLuaExecuteScript(runtime.luaCallbacks(), code, QStringLiteral("snapshot reuse"),
+	                                         nullptr, true, false, 0, 0));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+	QVERIFY(runtime.m_luaCallbackDispatchSnapshotBasePatchCount > 0);
+
+	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(snapshot);
+	QCOMPARE(snapshot->worldVariablesSnapshot.value(QStringLiteral("dispatch-probe")),
+	         QStringLiteral("second"));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+	const auto rebuilt = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(rebuilt);
+	QCOMPARE(rebuilt->worldVariablesSnapshot.value(QStringLiteral("dispatch-probe")),
+	         QStringLiteral("second"));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{2});
+}
+
+void tst_LuaCallbackEngine::laterRecipientObservesCommittedMutationThroughPatchedSnapshot()
+{
+	WorldRuntime  runtime;
+	const QString firstId  = QStringLiteral("snapshot.boundary.first");
+	const QString secondId = QStringLiteral("snapshot.boundary.second");
+	auto          first    = QSharedPointer<LuaCallbackEngine>::create();
+	auto          second   = QSharedPointer<LuaCallbackEngine>::create();
+
+	auto          makePlugin =
+	    [](const QString &id, const int sequence, const QSharedPointer<LuaCallbackEngine> &engine)
+	{
+		WorldRuntime::Plugin plugin;
+		plugin.attributes.insert(QStringLiteral("id"), id);
+		plugin.attributes.insert(QStringLiteral("name"), id);
+		plugin.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		plugin.sequence = sequence;
+		plugin.enabled  = true;
+		plugin.lua      = engine;
+		return plugin;
+	};
+	WorldRuntimeTestAccess::plugins(runtime) = {makePlugin(firstId, 100, first),
+	                                            makePlugin(secondId, 200, second)};
+	runtime.setPluginVariableValue(firstId, QStringLiteral("shared_snapshot_value"),
+	                               QStringLiteral("before"));
+
+	QVector<LuaEngineObservedInitializationRequest> initRequests;
+	auto                                            appendInitializationRequest =
+	    [&](const QSharedPointer<LuaCallbackEngine> &engine, const QString &id, const QString &script)
+	{
+		LuaEngineObservedInitializationRequest request;
+		request.engine              = engine.data();
+		request.workerLifetimeOwner = engine;
+		request.runtime             = &runtime;
+		request.scriptText          = script;
+		request.pluginId            = id;
+		request.pluginName          = id;
+		initRequests.push_back(std::move(request));
+	};
+	appendInitializationRequest(first, firstId, QStringLiteral(R"lua(
+function OnPluginTick()
+  SetVariable("shared_snapshot_value", "after")
+end
+)lua"));
+	appendInitializationRequest(second, secondId, QStringLiteral(R"lua(
+function OnPluginTick()
+  SetVariable("observed_snapshot_value",
+              GetPluginVariable("snapshot.boundary.first", "shared_snapshot_value") or "<missing>")
+end
+)lua"));
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks(initRequests, true);
+	QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	LuaBatchDispatchRequest callbackRequest;
+	callbackRequest.kind          = LuaBatchDispatchKind::NoArgs;
+	callbackRequest.engines       = {first, second};
+	callbackRequest.functionName  = QStringLiteral("OnPluginTick");
+	callbackRequest.defaultResult = true;
+	static_cast<void>(runtime.queuePluginCallbackDispatch(callbackRequest, true));
+	QCOMPARE(runtime.pluginVariableValue(firstId, QStringLiteral("shared_snapshot_value")),
+	         QStringLiteral("after"));
+	QCOMPARE(runtime.pluginVariableValue(secondId, QStringLiteral("observed_snapshot_value")),
+	         QStringLiteral("after"));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	runtime.dispatchTeardownLuaEngines({first, second}, true);
+}
+
+void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectPluginMutations()
+{
+	WorldRuntime         runtime;
+	const QString        firstId      = QStringLiteral("first.plugin");
+	const QString        secondId     = QStringLiteral("second.plugin");
+	auto                 firstEngine  = QSharedPointer<LuaCallbackEngine>::create();
+	auto                 secondEngine = QSharedPointer<LuaCallbackEngine>::create();
+
+	WorldRuntime::Plugin firstPlugin;
+	firstPlugin.attributes.insert(QStringLiteral("id"), firstId);
+	firstPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("First"));
+	firstPlugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	firstPlugin.sequence = 100;
+	firstPlugin.lua      = firstEngine;
+	WorldRuntime::Plugin secondPlugin;
+	secondPlugin.attributes.insert(QStringLiteral("id"), secondId);
+	secondPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Second"));
+	secondPlugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("200"));
+	secondPlugin.sequence                    = 200;
+	secondPlugin.lua                         = secondEngine;
+	WorldRuntimeTestAccess::plugins(runtime) = {firstPlugin, secondPlugin};
+
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+	const auto testedPluginOrder = [&firstId, &secondId](const QStringList &pluginIds)
+	{
+		QStringList order;
+		for (const QString &pluginId : pluginIds)
+		{
+			if (pluginId == firstId || pluginId == secondId)
+				order.push_back(pluginId);
+		}
+		return order;
+	};
+	QCOMPARE(testedPluginOrder(initial->pluginIdsSnapshot), QStringList({firstId, secondId}));
+	QCOMPARE(initial->pluginInfoValuesById.value(firstId).value(21).toInt(), 1);
+	QCOMPARE(initial->pluginInfoValuesById.value(firstId).value(25).toInt(), 100);
+	QCOMPARE(initial->pluginInfoValuesById.value(secondId).value(21).toInt(), 2);
+	QCOMPARE(initial->pluginInfoValuesById.value(secondId).value(25).toInt(), 200);
+	QCOMPARE(initial->broadcastPluginIdsSnapshot, QStringList({firstId, secondId}));
+	QCOMPARE(initial->broadcastPluginEnginesSnapshot,
+	         QVector<QSharedPointer<LuaCallbackEngine>>({firstEngine, secondEngine}));
+
+	QVERIFY(runtime.reorderPlugin(secondId, -1));
+	const auto reordered = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(reordered);
+	QCOMPARE(testedPluginOrder(reordered->pluginIdsSnapshot), QStringList({secondId, firstId}));
+	QCOMPARE(reordered->pluginInfoValuesById.value(secondId).value(21).toInt(), 1);
+	QCOMPARE(reordered->pluginInfoValuesById.value(secondId).value(25).toInt(), 100);
+	QCOMPARE(reordered->pluginInfoValuesById.value(firstId).value(21).toInt(), 2);
+	QCOMPARE(reordered->pluginInfoValuesById.value(firstId).value(25).toInt(), 200);
+	QCOMPARE(reordered->broadcastPluginIdsSnapshot, QStringList({secondId, firstId}));
+	QCOMPARE(reordered->broadcastPluginEnginesSnapshot,
+	         QVector<QSharedPointer<LuaCallbackEngine>>({secondEngine, firstEngine}));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+	QCOMPARE(testedPluginOrder(initial->pluginIdsSnapshot), QStringList({firstId, secondId}));
+	QCOMPARE(initial->broadcastPluginEnginesSnapshot,
+	         QVector<QSharedPointer<LuaCallbackEngine>>({firstEngine, secondEngine}));
+
+	QList<WorldRuntime::Plugin> &plugins = WorldRuntimeTestAccess::plugins(runtime);
+	for (WorldRuntime::Plugin &equalSequencePlugin : plugins)
+	{
+		const QString pluginId = equalSequencePlugin.attributes.value(QStringLiteral("id"));
+		if (pluginId == firstId || pluginId == secondId)
+		{
+			equalSequencePlugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("300"));
+			equalSequencePlugin.sequence = 300;
+			equalSequencePlugin.dispatchSequenceOverride.reset();
+		}
+	}
+	runtime.patchLuaCallbackStableSnapshot(WorldRuntime::LuaCallbackStableSnapshotDomain::Plugins);
+	const auto equalSequenceOrder = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(equalSequenceOrder);
+	QCOMPARE(testedPluginOrder(equalSequenceOrder->pluginIdsSnapshot), QStringList({secondId, firstId}));
+	QVERIFY(runtime.reorderPlugin(firstId, -1));
+	const auto equalSequenceReordered = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(equalSequenceReordered);
+	QCOMPARE(testedPluginOrder(equalSequenceReordered->pluginIdsSnapshot), QStringList({firstId, secondId}));
+	QCOMPARE(equalSequenceReordered->pluginInfoValuesById.value(firstId).value(21).toInt(), 1);
+	QCOMPARE(equalSequenceReordered->pluginInfoValuesById.value(firstId).value(25).toInt(), 300);
+	QCOMPARE(equalSequenceReordered->pluginInfoValuesById.value(secondId).value(21).toInt(), 2);
+	QCOMPARE(equalSequenceReordered->pluginInfoValuesById.value(secondId).value(25).toInt(), 300);
+	QCOMPARE(equalSequenceReordered->broadcastPluginEnginesSnapshot,
+	         QVector<QSharedPointer<LuaCallbackEngine>>({firstEngine, secondEngine}));
+	QCOMPARE(testedPluginOrder(equalSequenceOrder->pluginIdsSnapshot), QStringList({secondId, firstId}));
+
+	WorldRuntime::Plugin *plugin = WorldRuntimeTestAccess::plugin(runtime, firstId);
+	QVERIFY(plugin);
+	WorldRuntime::Trigger trigger;
+	trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("new-trigger"));
+	plugin->triggers.push_back(trigger);
+	runtime.markPluginTriggersChanged(firstId);
+	const auto triggerAdded = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(triggerAdded);
+	QCOMPARE(triggerAdded->triggerListsByPluginId.value(firstId).size(), 1);
+	QCOMPARE(triggerAdded->pluginInfoValuesById.value(firstId).value(9).toInt(), 1);
+	QCOMPARE(triggerAdded->pluginInfoValuesById.value(firstId).value(10).toInt(), 0);
+	QCOMPARE(triggerAdded->pluginInfoValuesById.value(firstId).value(11).toInt(), 0);
+	QCOMPARE(triggerAdded->pluginInfoValuesById.value(firstId).value(1).toString(), QStringLiteral("First"));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	WorldRuntime::Alias alias;
+	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("new-alias"));
+	plugin->aliases.push_back(alias);
+	runtime.markPluginAliasesChanged(firstId);
+	const auto aliasAdded = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(aliasAdded);
+	QCOMPARE(aliasAdded->aliasListsByPluginId.value(firstId).size(), 1);
+	QCOMPARE(aliasAdded->pluginInfoValuesById.value(firstId).value(9).toInt(), 1);
+	QCOMPARE(aliasAdded->pluginInfoValuesById.value(firstId).value(10).toInt(), 1);
+	QCOMPARE(aliasAdded->pluginInfoValuesById.value(firstId).value(11).toInt(), 0);
+
+	WorldRuntime::Timer timer;
+	timer.attributes.insert(QStringLiteral("name"), QStringLiteral("new-timer"));
+	plugin->timers.push_back(timer);
+	runtime.markPluginTimersChanged(firstId);
+	const auto timerAdded = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(timerAdded);
+	QCOMPARE(timerAdded->timerListsByPluginId.value(firstId).size(), 1);
+	QCOMPARE(timerAdded->pluginInfoValuesById.value(firstId).value(9).toInt(), 1);
+	QCOMPARE(timerAdded->pluginInfoValuesById.value(firstId).value(10).toInt(), 1);
+	QCOMPARE(timerAdded->pluginInfoValuesById.value(firstId).value(11).toInt(), 1);
+
+	plugin->triggers.clear();
+	plugin->aliases.clear();
+	plugin->timers.clear();
+	runtime.beginLuaCallbackSnapshotMutationBatch();
+	runtime.markPluginTriggersChanged(firstId);
+	runtime.markPluginAliasesChanged(firstId);
+	runtime.markPluginTimersChanged(firstId);
+	runtime.endLuaCallbackSnapshotMutationBatch();
+	const auto rulesDeleted = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(rulesDeleted);
+	QCOMPARE(rulesDeleted->triggerListsByPluginId.value(firstId).size(), 0);
+	QCOMPARE(rulesDeleted->aliasListsByPluginId.value(firstId).size(), 0);
+	QCOMPARE(rulesDeleted->timerListsByPluginId.value(firstId).size(), 0);
+	QCOMPARE(rulesDeleted->pluginInfoValuesById.value(firstId).value(9).toInt(), 0);
+	QCOMPARE(rulesDeleted->pluginInfoValuesById.value(firstId).value(10).toInt(), 0);
+	QCOMPARE(rulesDeleted->pluginInfoValuesById.value(firstId).value(11).toInt(), 0);
+	QCOMPARE(initial->pluginInfoValuesById.value(firstId).value(9).toInt(), 0);
+	QCOMPARE(triggerAdded->pluginInfoValuesById.value(firstId).value(9).toInt(), 1);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+	QVERIFY(runtime.m_luaCallbackDispatchSnapshotBasePatchCount > 0);
+}
+
+void tst_LuaCallbackEngine::previewRenderingDoesNotPublishRolledBackMiniWindowState()
+{
+	WorldRuntime  runtime;
+	const QString windowName = QStringLiteral("preview-rollback");
+	QCOMPARE(runtime.windowCreate(windowName, 0, 0, 160, 50, 0, 0, QColor(Qt::black), QString()), eOK);
+	QCOMPARE(runtime.windowFont(windowName, QStringLiteral("font"), QStringLiteral("Sans Serif"), 10.0, false,
+	                            false, false, false, 0, 0),
+	         eOK);
+	const auto issued = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(issued);
+	const auto issuedWindow = issued->miniWindowsByWindow.value(windowName);
+	QVERIFY(issuedWindow);
+	const QImage  originalSurface    = issuedWindow->backingSurface();
+	const quint64 originalPatchCount = runtime.m_luaCallbackDispatchSnapshotBasePatchCount;
+	QSignalSpy    changedSpy(&runtime, &WorldRuntime::miniWindowsChanged);
+	QVERIFY(changedSpy.isValid());
+
+	WorldRuntime::WindowOutputMetrics metrics;
+	QVERIFY(runtime.windowOutputTextPreview(windowName, QStringLiteral("font"), QStringLiteral("Preview"), 0,
+	                                        0, 159, 49, 0x00FFFFFF, QString(), QStringLiteral("preview"),
+	                                        QString(), &metrics) > 0);
+	QVERIFY(metrics.width > 0);
+	QCOMPARE(changedSpy.count(), 0);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBasePatchCount, originalPatchCount);
+	const MiniWindow *authoritative = runtime.miniWindow(windowName);
+	QVERIFY(authoritative);
+	QVERIFY(authoritative->backingSurface() == originalSurface);
+	QVERIFY(authoritative->hotspots.isEmpty());
+
+	const auto after = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(after);
+	const auto afterWindow = after->miniWindowsByWindow.value(windowName);
+	QVERIFY(afterWindow);
+	QVERIFY(afterWindow->backingSurface() == originalSurface);
+	QVERIFY(afterWindow->hotspots.isEmpty());
+	QVERIFY(issuedWindow->backingSurface() == originalSurface);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+	QCOMPARE(runtime.windowAddHotspot(windowName, QStringLiteral("owner"), 0, 0, 10, 10, QString(), QString(),
+	                                  QString(), QString(), QString(), QString(), 0, 0,
+	                                  QStringLiteral("plugin.owner")),
+	         eOK);
+	const auto beforeFailedRender = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(beforeFailedRender);
+	const QImage  surfaceBeforeFailedRender = runtime.miniWindow(windowName)->backingSurface();
+	const quint64 patchCountBeforeFailure   = runtime.m_luaCallbackDispatchSnapshotBasePatchCount;
+	changedSpy.clear();
+	metrics                = {};
+	const int failedResult = runtime.windowOutputText(
+	    windowName, QStringLiteral("font"), QStringLiteral("\3send href=\"look\"\4Link\3/send\4"), 0, 0, 159,
+	    49, 0x00FFFFFF, QString(), QStringLiteral("generated"), QStringLiteral("plugin.other"), &metrics);
+	QCOMPARE(failedResult, eHotspotPluginChanged);
+	QVERIFY(!metrics.hasOutput);
+	QCOMPARE(changedSpy.count(), 0);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBasePatchCount, patchCountBeforeFailure);
+	const MiniWindow *afterFailureWindow = runtime.miniWindow(windowName);
+	QVERIFY(afterFailureWindow);
+	QVERIFY(afterFailureWindow->backingSurface() == surfaceBeforeFailedRender);
+	QCOMPARE(afterFailureWindow->hotspots.keys(), QStringList{QStringLiteral("owner")});
+	const auto afterFailedRender = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(afterFailedRender);
+	QVERIFY(afterFailedRender->miniWindowsByWindow.value(windowName)->backingSurface() ==
+	        beforeFailedRender->miniWindowsByWindow.value(windowName)->backingSurface());
+	QCOMPARE(afterFailedRender->hotspotIdsByWindow.value(windowName), QStringList{QStringLiteral("owner")});
+}
+
+void tst_LuaCallbackEngine::callbackWindowOutputTextReportsPositiveWidthAsAsyncSuccess()
+{
+	constexpr auto widthMatchingLabelError =
+	    WorldRuntime::WindowOutputTextRenderResult::success(eInvalidObjectLabel);
+	QVERIFY(widthMatchingLabelError.succeeded);
+	QCOMPARE(widthMatchingLabelError.legacyValue, eInvalidObjectLabel);
+	constexpr auto widthMatchingOwnershipError =
+	    WorldRuntime::WindowOutputTextRenderResult::success(eHotspotPluginChanged);
+	QVERIFY(widthMatchingOwnershipError.succeeded);
+	QCOMPARE(widthMatchingOwnershipError.legacyValue, eHotspotPluginChanged);
+	QVERIFY(!WorldRuntime::WindowOutputTextRenderResult::failure(eInvalidObjectLabel).succeeded);
+	QVERIFY(!WorldRuntime::WindowOutputTextRenderResult::failure(eHotspotPluginChanged).succeeded);
+
+	WorldRuntime  runtime;
+	const QString pluginId   = QStringLiteral("window.output.async");
+	const QString windowName = QStringLiteral("async-output");
+	QCOMPARE(runtime.windowCreate(windowName, 0, 0, 200, 60, 0, 0, QColor(Qt::black), pluginId), eOK);
+	QCOMPARE(runtime.windowFont(windowName, QStringLiteral("font"), QStringLiteral("Sans Serif"), 10.0, false,
+	                            false, false, false, 0, 0),
+	         eOK);
+	const QString foreignWindowName = QStringLiteral("foreign-output");
+	runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+	QCOMPARE(runtime.windowCreate(foreignWindowName, 0, 0, 200, 60, 0, 0, QColor(Qt::black),
+	                              QStringLiteral("foreign.owner")),
+	         eOK);
+	QCOMPARE(runtime.windowFont(foreignWindowName, QStringLiteral("font"), QStringLiteral("Sans Serif"), 10.0,
+	                            false, false, false, false, 0, 0),
+	         eOK);
+	QCOMPARE(runtime.windowAddHotspot(foreignWindowName, QStringLiteral("owner"), 0, 0, 10, 10, QString(),
+	                                  QString(), QString(), QString(), QString(), QString(), 0, 0,
+	                                  QStringLiteral("foreign.owner")),
+	         eOK);
+
+	auto                 engine = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), pluginId);
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled = true;
+	plugin.lua     = engine;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+
+	LuaEngineObservedInitializationRequest initialization;
+	initialization.engine              = engine.data();
+	initialization.workerLifetimeOwner = engine;
+	initialization.runtime             = &runtime;
+	initialization.pluginId            = pluginId;
+	initialization.pluginName          = pluginId;
+	initialization.scriptText          = QStringLiteral(R"lua(
+async_report = ""
+function render_output(value)
+  local width, metrics, request_id = WindowOutputText(
+    "async-output", "font", "positive width", 0, 0, 199, 59, 0xFFFFFF, "", "async")
+  return string.format("%.0f|%.0f|%.0f", width, metrics.width or -1, request_id or 0)
+end
+local function pixel_checksum(window)
+  local checksum = 0
+  for y = 0, 30 do
+    for x = 0, 150 do
+      checksum = checksum + WindowGetPixel(window, x, y)
+    end
+  end
+  return checksum
+end
+function render_rejected_output(value)
+  local before = pixel_checksum("foreign-output")
+  local marker = string.char(3)
+  local status = WindowOutputText(
+    "foreign-output", "font", marker .. "send href=\"look\"" .. string.char(4) ..
+      "Link" .. marker .. "/send" .. string.char(4),
+    0, 0, 199, 59, 0xFFFFFF, "", "generated")
+  local after = pixel_checksum("foreign-output")
+  local hotspots = WindowHotspotList("foreign-output") or {}
+  return string.format("%.0f|%.0f|%.0f|%.0f", status, before, after, #hotspots)
+end
+function OnPluginAsyncResult(request_id, api_name, status, payload)
+  async_report = string.format("%.0f|%s|%s|%s", request_id, api_name, status, payload)
+  SetVariable("async_complete", "yes")
+end
+function read_async_report(value)
+  return async_report
+end
+)lua");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
+
+	LuaBatchDispatchRequest request;
+	request.engines                             = {engine};
+	request.kind                                = LuaBatchDispatchKind::StringInOut;
+	request.functionName                        = QStringLiteral("render_output");
+	request.stringArg                           = QStringLiteral("ignored");
+	request.callbackSnapshotArg                 = captureVariableDispatchSnapshotForTest(runtime);
+	request.functionName                        = QStringLiteral("render_rejected_output");
+	const LuaBatchDispatchResult rejectedResult = runtime.queuePluginCallbackDispatch(request, true);
+	const QStringList            rejectedParts  = rejectedResult.stringResult.split(QLatin1Char('|'));
+	QCOMPARE(rejectedParts.size(), 4);
+	QCOMPARE(rejectedParts.at(0).toInt(), eHotspotPluginChanged);
+	QCOMPARE(rejectedParts.at(2), rejectedParts.at(1));
+	QCOMPARE(rejectedParts.at(3).toInt(), 1);
+
+	request.functionName                      = QStringLiteral("render_output");
+	const LuaBatchDispatchResult renderResult = runtime.queuePluginCallbackDispatch(request, true);
+	const QStringList            renderParts  = renderResult.stringResult.split(QLatin1Char('|'));
+	QCOMPARE(renderParts.size(), 3);
+	QVERIFY(renderParts.at(0).toInt() > 0);
+	QCOMPARE(renderParts.at(1), renderParts.at(0));
+	QVERIFY(renderParts.at(2).toULongLong() > 0);
+	QTRY_COMPARE_WITH_TIMEOUT(runtime.pluginVariableValue(pluginId, QStringLiteral("async_complete")),
+	                          QStringLiteral("yes"), 5000);
+
+	request.functionName                     = QStringLiteral("read_async_report");
+	const LuaBatchDispatchResult asyncResult = runtime.queuePluginCallbackDispatch(request, true);
+	const QStringList            asyncParts  = asyncResult.stringResult.split(QLatin1Char('|'));
+	QCOMPARE(asyncParts.size(), 4);
+	QCOMPARE(asyncParts.at(0), renderParts.at(2));
+	QCOMPARE(asyncParts.at(1), QStringLiteral("WindowOutputText"));
+	QCOMPARE(asyncParts.at(2), QStringLiteral("ok"));
+	QVERIFY(asyncParts.at(3).contains(QStringLiteral("width=")));
+	QVERIFY(asyncParts.at(3).contains(QStringLiteral("has_output=1")));
+	runtime.dispatchTeardownLuaEngines({engine}, true);
+}
+
+void tst_LuaCallbackEngine::scopedStablePatchesDoNotRefreshUnrelatedState()
+{
+	WorldRuntime         runtime;
+	const QString        firstId  = QStringLiteral("scoped.patch.first");
+	const QString        secondId = QStringLiteral("scoped.patch.second");
+	WorldRuntime::Plugin first;
+	first.attributes.insert(QStringLiteral("id"), firstId);
+	first.variables.insert(QStringLiteral("value"), QStringLiteral("first-old"));
+	first.triggerWildcards.insert(QStringLiteral("trigger"), {QStringLiteral("first-trigger-old")});
+	first.aliasWildcards.insert(QStringLiteral("alias"), {QStringLiteral("first-alias-old")});
+	WorldRuntime::Plugin second;
+	second.attributes.insert(QStringLiteral("id"), secondId);
+	second.variables.insert(QStringLiteral("value"), QStringLiteral("second-old"));
+	second.triggerWildcards.insert(QStringLiteral("trigger"), {QStringLiteral("second-trigger-old")});
+	second.aliasWildcards.insert(QStringLiteral("alias"), {QStringLiteral("second-alias-old")});
+	WorldRuntimeTestAccess::plugins(runtime) = {first, second};
+	runtime.setTriggerWildcards(QStringLiteral("changed"), {QStringLiteral("world-changed-old")}, {});
+	runtime.setTriggerWildcards(QStringLiteral("untouched"), {QStringLiteral("world-untouched-old")}, {});
+	runtime.setAliasWildcards(QStringLiteral("changed"), {QStringLiteral("world-alias-changed-old")}, {});
+	runtime.setAliasWildcards(QStringLiteral("untouched"), {QStringLiteral("world-alias-untouched-old")}, {});
+
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+	WorldRuntime::Plugin *rawSecond = WorldRuntimeTestAccess::plugin(runtime, secondId);
+	QVERIFY(rawSecond);
+	rawSecond->variables.insert(QStringLiteral("value"), QStringLiteral("second-unpublished"));
+	rawSecond->triggerWildcards.insert(QStringLiteral("trigger"),
+	                                   {QStringLiteral("second-trigger-unpublished")});
+	rawSecond->aliasWildcards.insert(QStringLiteral("alias"), {QStringLiteral("second-alias-unpublished")});
+	runtime.m_triggerWildcards.insert(QStringLiteral("untouched"),
+	                                  {QStringLiteral("world-untouched-unpublished")});
+	runtime.m_aliasWildcards.insert(QStringLiteral("untouched"),
+	                                {QStringLiteral("world-alias-untouched-unpublished")});
+
+	runtime.setPluginVariableValue(firstId, QStringLiteral("value"), QStringLiteral("first-new"));
+	runtime.setPluginTriggerWildcards(firstId, QStringLiteral("trigger"),
+	                                  {QStringLiteral("first-trigger-new")}, {});
+	runtime.setPluginAliasWildcards(firstId, QStringLiteral("alias"), {QStringLiteral("first-alias-new")},
+	                                {});
+	runtime.setTriggerWildcards(QStringLiteral("changed"), {QStringLiteral("world-changed-new")}, {});
+	runtime.setAliasWildcards(QStringLiteral("changed"), {QStringLiteral("world-alias-changed-new")}, {});
+
+	const auto patched = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(patched);
+	QCOMPARE(patched->pluginVariablesSnapshotById.value(firstId).value(QStringLiteral("value")),
+	         QStringLiteral("first-new"));
+	QCOMPARE(patched->pluginVariablesSnapshotById.value(secondId).value(QStringLiteral("value")),
+	         QStringLiteral("second-old"));
+	QCOMPARE(patched->pluginTriggerWildcardsSnapshotById.value(firstId)
+	             .value(QStringLiteral("trigger"))
+	             .constFirst(),
+	         QStringLiteral("first-trigger-new"));
+	QCOMPARE(patched->pluginTriggerWildcardsSnapshotById.value(secondId)
+	             .value(QStringLiteral("trigger"))
+	             .constFirst(),
+	         QStringLiteral("second-trigger-old"));
+	QCOMPARE(
+	    patched->pluginAliasWildcardsSnapshotById.value(firstId).value(QStringLiteral("alias")).constFirst(),
+	    QStringLiteral("first-alias-new"));
+	QCOMPARE(
+	    patched->pluginAliasWildcardsSnapshotById.value(secondId).value(QStringLiteral("alias")).constFirst(),
+	    QStringLiteral("second-alias-old"));
+	QCOMPARE(patched->triggerWildcardsSnapshot.value(QStringLiteral("changed")).constFirst(),
+	         QStringLiteral("world-changed-new"));
+	QCOMPARE(patched->triggerWildcardsSnapshot.value(QStringLiteral("untouched")).constFirst(),
+	         QStringLiteral("world-untouched-old"));
+	QCOMPARE(patched->aliasWildcardsSnapshot.value(QStringLiteral("changed")).constFirst(),
+	         QStringLiteral("world-alias-changed-new"));
+	QCOMPARE(patched->aliasWildcardsSnapshot.value(QStringLiteral("untouched")).constFirst(),
+	         QStringLiteral("world-alias-untouched-old"));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+}
+
+void tst_LuaCallbackEngine::pluginSnapshotPopulationDoesNotConsumePendingCatalogs()
+{
+	WorldRuntime         runtime;
+	const QString        pluginId     = QStringLiteral("snapshot.catalog.pending");
+	auto                 pluginEngine = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Pending catalog"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled = true;
+	plugin.lua     = pluginEngine;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	runtime.m_observedPluginCallbacks.insert(QStringLiteral("OnPluginBroadcast"));
+	runtime.m_pluginObservedCallbackPresenceById.insert(pluginId, {QStringLiteral("OnPluginBroadcast")});
+	runtime.m_pluginLuaFunctionCatalogById.insert(pluginId, {QStringLiteral("OnPluginBroadcast")});
+	runtime.m_pluginCallbackPresenceDirty = true;
+	runtime.rebuildPluginCallbackPresenceCache();
+
+	const auto before = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(before);
+	QVERIFY(!before->pluginLuaFunctionsById.value(pluginId).contains(QStringLiteral("late_routine")));
+
+	runtime.beginLuaCallbackSnapshotMutationBatch();
+	const auto endSnapshotBatch = qScopeGuard([&runtime] { runtime.endLuaCallbackSnapshotMutationBatch(); });
+	runtime.recordObservedPluginCallbackPresenceSnapshot(
+	    pluginId, {QStringLiteral("OnPluginBroadcast")},
+	    {QStringLiteral("OnPluginBroadcast"), QStringLiteral("late_routine")});
+	// Recipient selection is an ordinary catalog consumer. Draining here must retain the Plugins publication
+	// signal even inside an outer mutation batch, and the following callback capture must flush that signal.
+	QVERIFY(runtime.hasAnyPluginCallback(QStringLiteral("OnPluginBroadcast")));
+	const auto published = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(published);
+	QVERIFY(published->pluginLuaFunctionsById.value(pluginId).contains(QStringLiteral("late_routine")));
+	QVERIFY(published->pluginCallbackPresenceByName.value(QStringLiteral("OnPluginBroadcast")));
+	QVERIFY(!before->pluginLuaFunctionsById.value(pluginId).contains(QStringLiteral("late_routine")));
+
+	auto worldEngine =
+	    QSharedPointer<LuaCallbackEngine>(runtime.luaCallbacks(), [](LuaCallbackEngine * /*unused*/) {});
+	QVERIFY(worldEngine);
+	worldEngine->setPluginInfo(QString(), QString(), QString());
+	worldEngine->setScriptText(QStringLiteral(R"lua(
+function catalog_support_status(value)
+  return string.format("%.0f", PluginSupports("%1", "late_routine"))
+end
+)lua")
+	                               .arg(pluginId));
+	QVERIFY(worldEngine->loadScript());
+	LuaBatchDispatchRequest request;
+	request.engines             = {worldEngine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("catalog_support_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = published;
+	LuaExecutorDirect executor;
+	QCOMPARE(executor.dispatchBatch(request).stringResult, QStringLiteral("0"));
+}
+
+void tst_LuaCallbackEngine::installPendingTransitionsPatchExecutablePluginSnapshot()
+{
+	WorldRuntime         runtime;
+	const QString        pluginId = QStringLiteral("snapshot.install.pending");
+	auto                 engine   = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Install pending"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled = true;
+	plugin.lua     = engine;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	runtime.m_observedPluginCallbacks.insert(QStringLiteral("OnPluginBroadcast"));
+	runtime.m_pluginObservedCallbackPresenceById.insert(pluginId, {QStringLiteral("OnPluginBroadcast")});
+	runtime.m_pluginLuaFunctionCatalogById.insert(pluginId, {QStringLiteral("OnPluginBroadcast")});
+	runtime.m_pluginCallbackPresenceDirty = true;
+	runtime.rebuildPluginCallbackPresenceCache();
+
+	const auto executable = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(executable->broadcastPluginIdsSnapshot.contains(pluginId));
+	QVERIFY(!executable->pluginInstallPendingById.value(pluginId));
+	WorldRuntime::Plugin *runtimePlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId);
+	QVERIFY(runtimePlugin);
+	runtime.setPluginInstallPending(*runtimePlugin, true);
+	const auto pending = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(!pending->broadcastPluginIdsSnapshot.contains(pluginId));
+	QVERIFY(pending->pluginInstallPendingById.value(pluginId));
+	QVERIFY(executable->broadcastPluginIdsSnapshot.contains(pluginId));
+
+	runtime.setPluginInstallPending(*runtimePlugin, false);
+	const auto installed = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(installed->broadcastPluginIdsSnapshot.contains(pluginId));
+	QVERIFY(!installed->pluginInstallPendingById.value(pluginId));
+
+	runtime.setPluginInstallPending(*runtimePlugin, true);
+	runtimePlugin->enabled = false;
+	runtimePlugin->attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
+	runtime.setPluginInstallPending(*runtimePlugin, false);
+	const auto disabledAfterInstall = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(!disabledAfterInstall->broadcastPluginIdsSnapshot.contains(pluginId));
+	QVERIFY(!disabledAfterInstall->pluginEnabledById.value(pluginId));
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+}
+
+void tst_LuaCallbackEngine::workerCallPluginRejectsInstallPendingSnapshotTarget()
+{
+	WorldRuntime              runtime;
+	auto                      caller          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      target          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
+	const QString       targetId = QStringLiteral("target.install.pending");
+	const QString       callerId = QStringLiteral("caller.install.pending");
+	initializeWorkerEngine(executor, target, QStringLiteral("function ping() return 'pong' end"), &runtime,
+	                       targetId);
+	initializeWorkerEngine(executor, caller, QStringLiteral(R"lua(
+function pending_target_status(value)
+	local code = CallPlugin("target.install.pending", "ping")
+	return string.format("%.0f", code)
+end
+function self_ping()
+	return "self pong"
+end
+function pending_self_status(value)
+	local code = CallPlugin("caller.install.pending", "self_ping")
+	return string.format("%.0f", code)
+end
+)lua"),
+	                       &runtime, callerId);
+
+	auto snapshot = QSharedPointer<LuaCallbackSnapshot>::create();
+	addPluginSnapshotEntry(*snapshot, callerId, QStringLiteral("Pending caller"), caller);
+	addPluginSnapshotEntry(*snapshot, targetId, QStringLiteral("Pending target"), target, true, true);
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("pending_target_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = snapshot;
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QString::number(ePluginDisabled));
+
+	snapshot->pluginInstallPendingById.insert(targetId, false);
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("0"));
+
+	request.functionName = QStringLiteral("pending_self_status");
+	snapshot->pluginInstallPendingById.insert(callerId, true);
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QString::number(ePluginDisabled));
+
+	snapshot->pluginInstallPendingById.insert(callerId, false);
+	dispatchWorkerAndWait(executor, request, result);
+	QCOMPARE(result.stringResult, QStringLiteral("0"));
+
+	teardownWorkerEngine(executor, caller);
+	teardownWorkerEngine(executor, target);
+}
+
+void tst_LuaCallbackEngine::batchedPluginExpansionPopulatesDependentDomainsOnce()
+{
+	WorldRuntime         runtime;
+	const QString        pluginId = QStringLiteral("snapshot.batch.expansion");
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Batch expansion"));
+	WorldRuntime::Timer timer;
+	timer.attributes.insert(QStringLiteral("name"), QStringLiteral("one"));
+	plugin.timers.push_back(timer);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+
+	constexpr auto pluginsIndex = static_cast<size_t>(WorldRuntime::LuaCallbackStableSnapshotDomain::Plugins);
+	constexpr auto timersIndex  = static_cast<size_t>(WorldRuntime::LuaCallbackStableSnapshotDomain::Timers);
+	const quint64  pluginsBefore = runtime.m_luaCallbackStableSnapshotDomainPopulationCounts.at(pluginsIndex);
+	const quint64  timersBefore  = runtime.m_luaCallbackStableSnapshotDomainPopulationCounts.at(timersIndex);
+	runtime.beginLuaCallbackSnapshotMutationBatch();
+	runtime.patchLuaCallbackStableSnapshot(WorldRuntime::LuaCallbackStableSnapshotDomain::Plugins);
+	runtime.patchLuaCallbackStableSnapshot(WorldRuntime::LuaCallbackStableSnapshotDomain::Timers, pluginId);
+	runtime.endLuaCallbackSnapshotMutationBatch();
+
+	QCOMPARE(runtime.m_luaCallbackStableSnapshotDomainPopulationCounts.at(pluginsIndex), pluginsBefore + 1);
+	QCOMPARE(runtime.m_luaCallbackStableSnapshotDomainPopulationCounts.at(timersIndex), timersBefore + 1);
+	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
+	QCOMPARE(snapshot->timerListsByPluginId.value(pluginId).size(), 1);
+}
+
+void tst_LuaCallbackEngine::pluginTopologyPatchesMatchColdSnapshotsAfterLoadAndUnload()
+{
+	QTemporaryDir temporaryDirectory;
+	QVERIFY(temporaryDirectory.isValid());
+	const QString pluginId   = QStringLiteral("89abcdef0123456789abcdef");
+	const QString pluginPath = QDir(temporaryDirectory.path()).filePath(QStringLiteral("snapshot.xml"));
+	QFile         pluginFile(pluginPath);
+	QVERIFY(pluginFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text));
+	const QByteArray pluginXml = QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin name="SnapshotTopology" id="%1" enabled="y" save_state="n" sequence="100" />
+  <triggers><trigger name="topology_trigger"><send>trigger</send></trigger></triggers>
+  <aliases><alias name="topology_alias"><send>alias</send></alias></aliases>
+  <timers><timer name="topology_timer" enabled="n"><send>timer</send></timer></timers>
+  <variables><variable name="topology_variable">value</variable></variables>
+</muclient>
+)xml")
+	                                 .arg(pluginId)
+	                                 .toUtf8();
+	QCOMPARE(pluginFile.write(pluginXml), pluginXml.size());
+	pluginFile.close();
+
+	WorldRuntime runtime;
+	runtime.setStartupDirectory(temporaryDirectory.path());
+	runtime.setPluginsDirectory(temporaryDirectory.path());
+	const auto beforeLoad = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(beforeLoad);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+
+	QString error;
+	QVERIFY2(runtime.loadPluginFile(QStringLiteral("snapshot.xml"), &error), qPrintable(error));
+	QTRY_VERIFY_WITH_TIMEOUT(runtime.isPluginInstalled(pluginId), 5000);
+	QTRY_VERIFY_WITH_TIMEOUT(runtime.pluginForId(pluginId) && !runtime.pluginForId(pluginId)->installPending,
+	                         5000);
+	runtime.setPluginTriggerWildcards(pluginId, QStringLiteral("topology_trigger"),
+	                                  {
+	                                      QStringLiteral("whole"), QStringLiteral("capture")
+    },
+	                                  {{QStringLiteral("named"), QStringLiteral("trigger-value")}});
+	runtime.setPluginAliasWildcards(pluginId, QStringLiteral("topology_alias"),
+	                                {
+	                                    QStringLiteral("whole"), QStringLiteral("capture")
+    },
+	                                {{QStringLiteral("named"), QStringLiteral("alias-value")}});
+
+	const auto patchedAfterLoad = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(patchedAfterLoad);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+	const auto coldAfterLoad = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(coldAfterLoad);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{2});
+
+	const auto compareLoadedPluginState =
+	    [&](const LuaCallbackSnapshot &patched, const LuaCallbackSnapshot &cold)
+	{
+		QCOMPARE(patched.pluginIdsSnapshot.contains(pluginId), cold.pluginIdsSnapshot.contains(pluginId));
+		QCOMPARE(patched.pluginNamesById.value(pluginId), cold.pluginNamesById.value(pluginId));
+		QCOMPARE(patched.pluginEnabledById.value(pluginId), cold.pluginEnabledById.value(pluginId));
+		QCOMPARE(patched.pluginGlobalById.value(pluginId), cold.pluginGlobalById.value(pluginId));
+		QCOMPARE(patched.pluginInfoValuesById.value(pluginId), cold.pluginInfoValuesById.value(pluginId));
+		QCOMPARE(patched.pluginVariablesSnapshotById.value(pluginId),
+		         cold.pluginVariablesSnapshotById.value(pluginId));
+		QCOMPARE(patched.triggerListsByPluginId.value(pluginId).size(),
+		         cold.triggerListsByPluginId.value(pluginId).size());
+		QCOMPARE(patched.aliasListsByPluginId.value(pluginId).size(),
+		         cold.aliasListsByPluginId.value(pluginId).size());
+		QCOMPARE(patched.timerListsByPluginId.value(pluginId).size(),
+		         cold.timerListsByPluginId.value(pluginId).size());
+		QCOMPARE(patched.triggerListsByPluginId.value(pluginId).constFirst().attributes,
+		         cold.triggerListsByPluginId.value(pluginId).constFirst().attributes);
+		QCOMPARE(patched.aliasListsByPluginId.value(pluginId).constFirst().attributes,
+		         cold.aliasListsByPluginId.value(pluginId).constFirst().attributes);
+		QCOMPARE(patched.timerListsByPluginId.value(pluginId).constFirst().attributes,
+		         cold.timerListsByPluginId.value(pluginId).constFirst().attributes);
+		QCOMPARE(patched.pluginTriggerWildcardsSnapshotById.value(pluginId),
+		         cold.pluginTriggerWildcardsSnapshotById.value(pluginId));
+		QCOMPARE(patched.pluginTriggerNamedWildcardsSnapshotById.value(pluginId),
+		         cold.pluginTriggerNamedWildcardsSnapshotById.value(pluginId));
+		QCOMPARE(patched.pluginAliasWildcardsSnapshotById.value(pluginId),
+		         cold.pluginAliasWildcardsSnapshotById.value(pluginId));
+		QCOMPARE(patched.pluginAliasNamedWildcardsSnapshotById.value(pluginId),
+		         cold.pluginAliasNamedWildcardsSnapshotById.value(pluginId));
+	};
+	compareLoadedPluginState(*patchedAfterLoad, *coldAfterLoad);
+	QVERIFY(!beforeLoad->pluginIdsSnapshot.contains(pluginId));
+
+	QVERIFY2(runtime.unloadPlugin(pluginId, &error), qPrintable(error));
+	const auto patchedAfterUnload = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(patchedAfterUnload);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{2});
+	runtime.invalidateLuaCallbackDispatchSnapshot();
+	const auto coldAfterUnload = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(coldAfterUnload);
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{3});
+
+	QCOMPARE(patchedAfterUnload->pluginIdsSnapshot, coldAfterUnload->pluginIdsSnapshot);
+	QVERIFY(!patchedAfterUnload->pluginNamesById.contains(pluginId));
+	QVERIFY(!patchedAfterUnload->pluginGlobalById.contains(pluginId));
+	QVERIFY(!patchedAfterUnload->pluginVariablesSnapshotById.contains(pluginId));
+	QVERIFY(!patchedAfterUnload->triggerListsByPluginId.contains(pluginId));
+	QVERIFY(!patchedAfterUnload->aliasListsByPluginId.contains(pluginId));
+	QVERIFY(!patchedAfterUnload->timerListsByPluginId.contains(pluginId));
+	QVERIFY(!patchedAfterUnload->pluginTriggerWildcardsSnapshotById.contains(pluginId));
+	QVERIFY(!patchedAfterUnload->pluginAliasWildcardsSnapshotById.contains(pluginId));
+	QCOMPARE(patchedAfterUnload->pluginNamesById, coldAfterUnload->pluginNamesById);
+	QCOMPARE(patchedAfterUnload->pluginVariablesSnapshotById, coldAfterUnload->pluginVariablesSnapshotById);
+}
+
+void tst_LuaCallbackEngine::existingPluginGlobalPromotionPatchesMetadata()
+{
+	QTemporaryDir temporaryDirectory;
+	QVERIFY(temporaryDirectory.isValid());
+	const QString pluginId   = QStringLiteral("fedcba9876543210fedcba98");
+	const QString pluginPath = QDir(temporaryDirectory.path()).filePath(QStringLiteral("promote.xml"));
+	QFile         pluginFile(pluginPath);
+	QVERIFY(pluginFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text));
+	const QByteArray xml = QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient><plugin name="Promoted" id="%1" enabled="y" sequence="100" /></muclient>
+)xml")
+	                           .arg(pluginId)
+	                           .toUtf8();
+	QCOMPARE(pluginFile.write(xml), xml.size());
+	pluginFile.close();
+
+	WorldRuntime runtime;
+	runtime.setStartupDirectory(temporaryDirectory.path());
+	runtime.setPluginsDirectory(temporaryDirectory.path());
+	QString error;
+	QVERIFY2(runtime.loadPluginFile(QStringLiteral("promote.xml"), &error), qPrintable(error));
+	WorldRuntime::Plugin *plugin = WorldRuntimeTestAccess::plugin(runtime, pluginId);
+	QVERIFY(plugin);
+	plugin->source.clear();
+	plugin->directory.clear();
+	const auto before = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(before->pluginInfoValuesById.value(pluginId).value(6).toString().isEmpty());
+	QVERIFY(before->pluginDirectoriesById.value(pluginId).isEmpty());
+	QVERIFY(!before->pluginGlobalById.value(pluginId));
+
+	runtime.setWorldFileModified(false);
+	QVERIFY2(runtime.loadPluginFile(QStringLiteral("promote.xml"), &error, true), qPrintable(error));
+	const auto promoted = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(!promoted->pluginInfoValuesById.value(pluginId).value(6).toString().isEmpty());
+	QVERIFY(!promoted->pluginDirectoriesById.value(pluginId).isEmpty());
+	QVERIFY(promoted->pluginGlobalById.value(pluginId));
+	QVERIFY(before->pluginInfoValuesById.value(pluginId).value(6).toString().isEmpty());
+	QVERIFY(!runtime.worldFileModified());
+	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+}
+
+void tst_LuaCallbackEngine::callbackDispatchSnapshotUsesNativeEffectiveSequence()
+{
+	QMudNativePluginRegistry::NativePluginMetadata metadata;
+	QVERIFY(
+	    QMudNativePluginRegistry::metadataForShim(QMudNativePluginRegistry::mushReaderPluginId(), metadata));
+
+	WorldRuntime         runtime;
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), metadata.id);
+	plugin.attributes.insert(QStringLiteral("name"), metadata.name);
+	plugin.nativeShim               = true;
+	plugin.enabled                  = true;
+	plugin.sequence                 = 123;
+	plugin.dispatchSequenceOverride = 123;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+
+	QCOMPARE(runtime.pluginInfo(metadata.id, 25).toInt(), 123);
+	const auto snapshot = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(snapshot);
+	QCOMPARE(snapshot->pluginInfoValuesById.value(metadata.id).value(25).toInt(), 123);
+
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, engine,
+	                       QStringLiteral(R"lua(
+function native_sequence(value)
+  return tostring(GetPluginInfo("%1", 25))
+end
+)lua")
+	                           .arg(metadata.id),
+	                       &runtime);
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("native_sequence");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = snapshot;
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	QVERIFY(!result.suspended);
+	bool         sequenceValid = false;
+	const double sequence      = result.stringResult.toDouble(&sequenceValid);
+	QVERIFY(sequenceValid);
+	QCOMPARE(sequence, 123.0);
+	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::callbackDispatchSnapshotsIsolateMiniWindowMouseState()
+{
+	WorldRuntime runtime;
+	auto         engine = QSharedPointer<LuaCallbackEngine>::create();
+	engine->setWorldRuntime(&runtime);
+	setEngineScript(*engine, QStringLiteral(R"lua(
+function mouse_state(value)
+  return string.format("%d|%d|%d|%d|%d|%s|%s",
+    WindowInfo("mouse-state", 14), WindowInfo("mouse-state", 15),
+    WindowInfo("mouse-state", 16), WindowInfo("mouse-state", 17),
+    WindowInfo("mouse-state", 18), WindowInfo("mouse-state", 19),
+    WindowInfo("mouse-state", 20))
+end
+function resource_state(value)
+  return table.concat(WindowImageList("mouse-state") or {}, ",") .. "|" ..
+         table.concat(WindowHotspotList("mouse-state") or {}, ",")
+end
+)lua"));
+	LuaExecutorDirect executor;
+	const auto        readMouseState =
+	    [&executor, &engine](const QSharedPointer<const LuaCallbackSnapshot> &snapshot)
+	{
+		LuaBatchDispatchRequest request;
+		request.engines             = {engine};
+		request.kind                = LuaBatchDispatchKind::StringInOut;
+		request.functionName        = QStringLiteral("mouse_state");
+		request.stringArg           = QStringLiteral("ignored");
+		request.callbackSnapshotArg = snapshot;
+		return executor.dispatchBatch(request).stringResult;
+	};
+	const auto readResourceState =
+	    [&executor, &engine](const QSharedPointer<const LuaCallbackSnapshot> &snapshot)
+	{
+		LuaBatchDispatchRequest request;
+		request.engines             = {engine};
+		request.kind                = LuaBatchDispatchKind::StringInOut;
+		request.functionName        = QStringLiteral("resource_state");
+		request.stringArg           = QStringLiteral("ignored");
+		request.callbackSnapshotArg = snapshot;
+		return executor.dispatchBatch(request).stringResult;
+	};
+	const QString windowName = QStringLiteral("mouse-state");
+	QCOMPARE(runtime.windowCreate(windowName, 0, 0, 80, 40, 0, 0, QColor(Qt::black), QString()), eOK);
+	QCOMPARE(runtime.windowShow(windowName, true), eOK);
+	MiniWindow &runtimeWindow         = runtime.m_miniWindows[windowName];
+	runtimeWindow.lastMousePosition   = QPoint(11, 12);
+	runtimeWindow.lastMouseUpdate     = 13;
+	runtimeWindow.clientMousePosition = QPoint(14, 15);
+	runtimeWindow.mouseOverHotspot    = QStringLiteral("old-over");
+	runtimeWindow.mouseDownHotspot    = QStringLiteral("old-down");
+
+	const QSharedPointer<const LuaCallbackSnapshot> first = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(first);
+	QVERIFY(first->miniWindowsByWindow.contains(windowName));
+	QCOMPARE(first->miniWindowsByWindow.value(windowName)->lastMousePosition, QPoint(11, 12));
+	QCOMPARE(first->miniWindowsByWindow.value(windowName)->mouseOverHotspot, QStringLiteral("old-over"));
+	QCOMPARE(readMouseState(first), QStringLiteral("11|12|13|14|15|old-over|old-down"));
+
+	runtimeWindow.lastMousePosition                        = QPoint(21, 22);
+	runtimeWindow.lastMouseUpdate                          = 23;
+	runtimeWindow.clientMousePosition                      = QPoint(24, 25);
+	runtimeWindow.mouseOverHotspot                         = QStringLiteral("new-over");
+	runtimeWindow.mouseDownHotspot                         = QStringLiteral("new-down");
+	const QSharedPointer<const LuaCallbackSnapshot> second = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(second);
+	QCOMPARE(second->miniWindowsByWindow.value(windowName)->lastMousePosition, QPoint(21, 22));
+	QCOMPARE(second->miniWindowsByWindow.value(windowName)->mouseOverHotspot, QStringLiteral("new-over"));
+	QCOMPARE(first->miniWindowsByWindow.value(windowName)->lastMousePosition, QPoint(11, 12));
+	QCOMPARE(first->miniWindowsByWindow.value(windowName)->mouseOverHotspot, QStringLiteral("old-over"));
+	QCOMPARE(readMouseState(second), QStringLiteral("21|22|23|24|25|new-over|new-down"));
+	QCOMPARE(readMouseState(first), QStringLiteral("11|12|13|14|15|old-over|old-down"));
+
+	QCOMPARE(runtime.windowShow(windowName, false), eOK);
+	const QSharedPointer<const LuaCallbackSnapshot> third = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(third);
+	QVERIFY(!third->windowInfoByWindow.value(windowName).show);
+	QVERIFY(first->windowInfoByWindow.value(windowName).show);
+	QVERIFY(first->miniWindowsByWindow.value(windowName) != third->miniWindowsByWindow.value(windowName));
+
+	const QString imageId   = QStringLiteral("snapshot-image");
+	const QString hotspotId = QStringLiteral("snapshot-hotspot");
+	QCOMPARE(runtime.windowCreateImage(windowName, imageId, 1, 2, 3, 4, 5, 6, 7, 8), eOK);
+	QCOMPARE(runtime.windowAddHotspot(windowName, hotspotId, 0, 0, 10, 10, QString(), QString(), QString(),
+	                                  QString(), QString(), QStringLiteral("snapshot tooltip"), 0, 0,
+	                                  QStringLiteral("plugin.id")),
+	         eOK);
+	const auto resourcesAdded = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(resourcesAdded);
+	QCOMPARE(readResourceState(resourcesAdded), QStringLiteral("snapshot-image|snapshot-hotspot"));
+	QCOMPARE(readResourceState(third), QStringLiteral("|"));
+
+	QCOMPARE(runtime.windowLoadImage(windowName, imageId, QString()), eOK);
+	QCOMPARE(runtime.windowDeleteHotspot(windowName, hotspotId), eOK);
+	const auto resourcesRemoved = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(resourcesRemoved);
+	QCOMPARE(readResourceState(resourcesRemoved), QStringLiteral("|"));
+	QCOMPARE(readResourceState(resourcesAdded), QStringLiteral("snapshot-image|snapshot-hotspot"));
+
+	QCOMPARE(runtime.windowCreateImage(windowName, imageId, 8, 7, 6, 5, 4, 3, 2, 1), eOK);
+	const auto beforeFailedReplacement = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(beforeFailedReplacement);
+	QCOMPARE(readResourceState(beforeFailedReplacement), QStringLiteral("snapshot-image|"));
+	QCOMPARE(runtime.windowLoadImageMemory(windowName, imageId, QByteArrayLiteral("not a PNG"), false),
+	         eUnableToLoadImage);
+	const auto afterFailedReplacement = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(afterFailedReplacement);
+	QCOMPARE(readResourceState(afterFailedReplacement), QStringLiteral("|"));
+	QCOMPARE(readResourceState(beforeFailedReplacement), QStringLiteral("snapshot-image|"));
+}
+
+void tst_LuaCallbackEngine::callbackDispatchSnapshotsRefreshMiniWindowPresentation()
+{
+	WorldRuntime runtime;
+	auto         engine = QSharedPointer<LuaCallbackEngine>::create();
+	engine->setWorldRuntime(&runtime);
+	setEngineScript(*engine, QStringLiteral(R"lua(
+function presentation_state(name)
+  return string.format("%s|%d|%d|%d|%d", tostring(WindowInfo(name, 6)),
+    WindowInfo(name, 10), WindowInfo(name, 11), WindowInfo(name, 12), WindowInfo(name, 13))
+end
+function hidden_window_menu(name)
+  return WindowMenu(name, 0, 0, "One")
+end
+)lua"));
+	LuaExecutorDirect executor;
+	const QString     firstName  = QStringLiteral("dock-a");
+	const QString     secondName = QStringLiteral("dock-b");
+	for (const QString &name : {firstName, secondName})
+	{
+		QCOMPARE(runtime.windowCreate(name, 0, 0, 80, 20, 5, 0, QColor(Qt::black), QString()), eOK);
+		QCOMPARE(runtime.windowShow(name, true), eOK);
+	}
+	QCOMPARE(runtime.windowCreateImage(firstName, QStringLiteral("resource"), 1, 2, 3, 4, 5, 6, 7, 8), eOK);
+
+	const auto dispatchPresentation =
+	    [&executor, &engine](const QString &functionName, const QString &windowName,
+	                         const QSharedPointer<const LuaCallbackSnapshot> &snapshot)
+	{
+		LuaBatchDispatchRequest request;
+		request.engines             = {engine};
+		request.kind                = LuaBatchDispatchKind::StringInOut;
+		request.functionName        = functionName;
+		request.stringArg           = windowName;
+		request.callbackSnapshotArg = snapshot;
+		return executor.dispatchBatch(request);
+	};
+
+	QVector<MiniWindow *> windows = WorldRuntimeTestAccess::sortedMiniWindows(runtime);
+	runtime.layoutMiniWindows(QSize(300, 100), QSize(300, 100), false, &windows);
+	const auto first = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(first);
+	const auto firstPresentation = first->miniWindowsByWindow.value(secondName);
+	QVERIFY(firstPresentation);
+	QVERIFY(!firstPresentation->temporarilyHide);
+	QVERIFY(!firstPresentation->apiRect().isEmpty());
+	const QRect firstPresentationRect = firstPresentation->apiRect();
+	QVERIFY(first->miniWindowsByWindow.value(firstName));
+	QVERIFY(!first->miniWindowsByWindow.value(firstName)->rect.isEmpty());
+	QVERIFY(!first->miniWindowsByWindow.value(firstName)->temporarilyHide);
+	QCOMPARE(dispatchPresentation(QStringLiteral("presentation_state"), secondName, first).stringResult,
+	         QStringLiteral("false|%1|%2|%3|%4")
+	             .arg(firstPresentation->apiRect().left())
+	             .arg(firstPresentation->apiRect().top())
+	             .arg(firstPresentation->apiRect().right())
+	             .arg(firstPresentation->apiRect().bottom()));
+
+	runtime.layoutMiniWindows(QSize(120, 100), QSize(120, 100), false, &windows);
+	const auto second = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(second);
+	const auto secondPresentation = second->miniWindowsByWindow.value(secondName);
+	QVERIFY(secondPresentation);
+	QVERIFY(secondPresentation->temporarilyHide);
+	QVERIFY(first->miniWindowsByWindow.value(firstName) != second->miniWindowsByWindow.value(firstName));
+	QVERIFY(!firstPresentation->temporarilyHide);
+	QCOMPARE(firstPresentation->apiRect(), firstPresentationRect);
+	QCOMPARE(dispatchPresentation(QStringLiteral("presentation_state"), secondName, second).stringResult,
+	         QStringLiteral("true|%1|%2|%3|%4")
+	             .arg(secondPresentation->apiRect().left())
+	             .arg(secondPresentation->apiRect().top())
+	             .arg(secondPresentation->apiRect().right())
+	             .arg(secondPresentation->apiRect().bottom()));
+
+	const LuaBatchDispatchResult menuResult =
+	    dispatchPresentation(QStringLiteral("hidden_window_menu"), secondName, second);
+	QVERIFY(!menuResult.suspended);
+	QCOMPARE(menuResult.stringResult, QString());
+}
+
+void tst_LuaCallbackEngine::deletedMiniWindowCannotBeResolvedByWindowMenu()
+{
+	WorldRuntime      runtime;
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function delete_then_open_menu(name)
+  local delete_status = WindowDelete(name)
+  return string.format("%.0f|%s", delete_status, WindowMenu(name, 0, 0, "One"))
+end
+)lua"),
+	                       &runtime);
+
+	const QString windowName = QStringLiteral("deleted-menu-window");
+	QCOMPARE(runtime.windowCreate(windowName, 0, 0, 80, 40, 0, 0, QColor(Qt::black), QString()), eOK);
+	QCOMPARE(runtime.windowShow(windowName, true), eOK);
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("delete_then_open_menu");
+	request.stringArg           = windowName;
+	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+
+	const bool    unexpectedlySuspended = result.suspended;
+	const QString callbackResult        = result.stringResult;
+	if (unexpectedlySuspended)
+	{
+		LuaBatchDispatchRequest cancelRequest;
+		cancelRequest.engines       = {engine};
+		cancelRequest.kind          = LuaBatchDispatchKind::CancelSuspendedModalString;
+		cancelRequest.modalResumeId = result.modalResumeId;
+		dispatchWorkerAndWait(executor, cancelRequest);
+	}
+	else
+	{
+		executeDeferredMutations(result);
+	}
+	teardownWorkerEngine(executor, engine);
+
+	QVERIFY2(!unexpectedlySuspended, "WindowMenu resurrected a miniwindow deleted in the same callback");
+	QCOMPARE(callbackResult, QStringLiteral("0|"));
+	QVERIFY(!runtime.windowList().contains(windowName));
+}
+
+void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectDatabaseExecState()
+{
+	WorldRuntime  runtime;
+	const QString databaseName = QStringLiteral("snapshot_db");
+	QCOMPARE(runtime.databaseOpen(databaseName, QStringLiteral(":memory:"),
+	                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MEMORY),
+	         SQLITE_OK);
+	QCOMPARE(runtime.databaseExec(
+	             databaseName,
+	             QStringLiteral("CREATE TABLE records (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)")),
+	         SQLITE_OK);
+
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+	const LuaCallbackDatabaseSnapshot initialDatabase = initial->databaseSnapshotsByName.value(databaseName);
+	QCOMPARE(initialDatabase.totalChanges, 0);
+	QCOMPARE(initialDatabase.changes, 0);
+	QVERIFY(!initialDatabase.validRow);
+	QCOMPARE(initialDatabase.columns, 0);
+	QCOMPARE(initialDatabase.lastError, SQLITE_OK);
+
+	QCOMPARE(
+	    runtime.databaseExec(databaseName, QStringLiteral("INSERT INTO records(value) VALUES ('direct')")),
+	    SQLITE_OK);
+	const auto inserted = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(inserted);
+	const LuaCallbackDatabaseSnapshot insertedDatabase =
+	    inserted->databaseSnapshotsByName.value(databaseName);
+	QCOMPARE(insertedDatabase.totalChanges, 1);
+	QCOMPARE(insertedDatabase.changes, 1);
+	QCOMPARE(insertedDatabase.lastInsertRowid, QStringLiteral("1"));
+	QVERIFY(!insertedDatabase.validRow);
+	QCOMPARE(insertedDatabase.columns, 0);
+	QCOMPARE(insertedDatabase.lastError, SQLITE_OK);
+	QCOMPARE(initial->databaseSnapshotsByName.value(databaseName).totalChanges, 0);
+	QCOMPARE(initial->databaseSnapshotsByName.value(databaseName).lastInsertRowid, QStringLiteral("0"));
+
+	const int failedStatus =
+	    runtime.databaseExec(databaseName, QStringLiteral("INSERT INTO missing_table VALUES (1)"));
+	QVERIFY(failedStatus != SQLITE_OK);
+	const auto failed = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(failed);
+	const LuaCallbackDatabaseSnapshot failedDatabase = failed->databaseSnapshotsByName.value(databaseName);
+	QCOMPARE(failedDatabase.lastError, failedStatus);
+	QVERIFY(!failedDatabase.errorText.isEmpty());
+	QCOMPARE(inserted->databaseSnapshotsByName.value(databaseName).lastError, SQLITE_OK);
+
+	const QString        pluginId = QStringLiteral("database.async.plugin");
+	auto                 engine   = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Database Async"));
+	plugin.lua = engine;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	LuaEngineObservedInitializationRequest initRequest;
+	initRequest.engine              = engine.data();
+	initRequest.workerLifetimeOwner = engine;
+	initRequest.runtime             = &runtime;
+	initRequest.scriptText          = QStringLiteral(R"lua(
+async_result = ""
+function deferred_database_exec(value)
+  local status, request_id = DatabaseExec("snapshot_db", "INSERT INTO records(value) VALUES ('deferred')")
+  return string.format("%.0f|%.0f", status, request_id or 0)
+end
+function OnPluginAsyncResult(request_id, api_name, status, payload)
+  async_result = string.format("%.0f|%s|%s|%s|%.0f", request_id, api_name, status, payload,
+    DatabaseTotalChanges("snapshot_db"))
+end
+function async_result_status(value)
+  return async_result
+end
+)lua");
+	initRequest.pluginId            = pluginId;
+	initRequest.pluginName          = QStringLiteral("Database Async");
+	runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({initRequest}, true);
+
+	LuaBatchDispatchRequest request;
+	request.engines                             = {engine};
+	request.kind                                = LuaBatchDispatchKind::StringInOut;
+	request.functionName                        = QStringLiteral("deferred_database_exec");
+	request.stringArg                           = QStringLiteral("ignored");
+	request.callbackSnapshotArg                 = captureVariableDispatchSnapshotForTest(runtime);
+	const LuaBatchDispatchResult deferredResult = runtime.dispatchLuaBatch(request);
+	const QStringList            acceptedParts  = deferredResult.stringResult.split(QLatin1Char('|'));
+	QCOMPARE(acceptedParts.size(), 2);
+	QCOMPARE(acceptedParts.at(0), QStringLiteral("0"));
+	QVERIFY(acceptedParts.at(1).toULongLong() > 0);
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_pluginCallbackDispatchWorkerInFlight &&
+	                             runtime.m_pluginCallbackDispatchQueue.isEmpty(),
+	                         5000);
+
+	request.functionName                     = QStringLiteral("async_result_status");
+	request.callbackSnapshotArg              = captureVariableDispatchSnapshotForTest(runtime);
+	const LuaBatchDispatchResult asyncResult = runtime.dispatchLuaBatch(request);
+	const QStringList            asyncParts  = asyncResult.stringResult.split(QLatin1Char('|'));
+	QCOMPARE(asyncParts.size(), 5);
+	QCOMPARE(asyncParts.at(0), acceptedParts.at(1));
+	QCOMPARE(asyncParts.at(1), QStringLiteral("DatabaseExec"));
+	QCOMPARE(asyncParts.at(2), QStringLiteral("ok"));
+	QCOMPARE(asyncParts.at(3), QString());
+	QCOMPARE(asyncParts.at(4), QStringLiteral("2"));
+
+	runtime.dispatchTeardownLuaEngines({engine}, true);
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QCOMPARE(runtime.databaseClose(databaseName), SQLITE_OK);
 }
 
 void tst_LuaCallbackEngine::nativeShimDiscoveryRespectsShadowPluginVisibility()
@@ -3630,23 +8070,22 @@ void tst_LuaCallbackEngine::nativeShimDiscoveryRespectsShadowPluginVisibility()
 	snapshot->soundBufferReusableByBuffer.insert(9, false);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = snapshot;
 	dispatchWorkerAndWait(executor, request);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("shim_info_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("shim_info_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult,
 	         QStringLiteral("false|false||false|%1|%1|LuaAudio|true|100|1|false").arg(eNoSuchPlugin));
-	QVERIFY(!runtime.pluginIdList().contains(shimId, Qt::CaseInsensitive));
-	QVERIFY(
-	    runtime.pluginIdList().contains(QMudNativePluginRegistry::luaAudioPluginId(), Qt::CaseInsensitive));
+	QVERIFY(!runtime.pluginIdList().contains(shimId));
+	QVERIFY(runtime.pluginIdList().contains(QMudNativePluginRegistry::luaAudioPluginId()));
 	QVERIFY(!runtime.isPluginInstalled(shimId));
 	QVERIFY(!runtime.pluginInfo(shimId, 1).isValid());
 	QCOMPARE(runtime.pluginSupports(shimId, QStringLiteral("say")), eNoSuchPlugin);
@@ -3665,7 +8104,7 @@ void tst_LuaCallbackEngine::nativeMushReaderEnableByNameUpdatesResolvedCallbackM
 	mushReaderPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("MushReader"));
 
 	WorldRuntime runtime;
-	runtime.pluginsMutable().push_back(mushReaderPlugin);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(mushReaderPlugin);
 
 	QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
 	QMudNativePluginRegistry::setTestSpeechSink(
@@ -3701,13 +8140,13 @@ void tst_LuaCallbackEngine::nativeMushReaderEnableByNameUpdatesResolvedCallbackM
 	request.functionName = QStringLiteral("OnPluginEnable");
 	auto snapshot        = captureMutableDispatchSnapshotForTest(runtime);
 	QVERIFY(snapshot);
-	request.miniWindowSnapshotArg = snapshot;
+	request.callbackSnapshotArg = snapshot;
 	dispatchWorkerAndWait(executor, request);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("mushreader_enable_by_name_result");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("mushreader_enable_by_name_result");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult,
@@ -3727,7 +8166,7 @@ void tst_LuaCallbackEngine::nativeMushReaderCallPluginUsesCallbackSpeechSnapshot
 	mushReaderPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("MushReader"));
 
 	WorldRuntime runtime;
-	runtime.pluginsMutable().push_back(mushReaderPlugin);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(mushReaderPlugin);
 	QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
 	QMudNativePluginRegistry::setTestSpeechSink(
 	    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
@@ -3765,13 +8204,13 @@ void tst_LuaCallbackEngine::nativeMushReaderCallPluginUsesCallbackSpeechSnapshot
 	request.functionName = QStringLiteral("OnPluginEnable");
 	auto snapshot        = captureMutableDispatchSnapshotForTest(runtime);
 	QVERIFY(snapshot);
-	request.miniWindowSnapshotArg = snapshot;
+	request.callbackSnapshotArg = snapshot;
 	dispatchWorkerAndWait(executor, request);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("mushreader_muted_call_result");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("mushreader_muted_call_result");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("%1|%1|%1|qmud:native/MushReader").arg(eOK));
@@ -3790,7 +8229,7 @@ void tst_LuaCallbackEngine::nativeMushReaderCallPluginDefersSpeechToRuntimeThrea
 	mushReaderPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("MushReader"));
 
 	WorldRuntime runtime;
-	runtime.pluginsMutable().push_back(mushReaderPlugin);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(mushReaderPlugin);
 	QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
 	QMudNativePluginRegistry::setTestSpeechSink(
 	    [&speechEvents](const QMudNativePluginRegistry::TestSpeechEvent &event)
@@ -3823,16 +8262,16 @@ void tst_LuaCallbackEngine::nativeMushReaderCallPluginDefersSpeechToRuntimeThrea
 	request.functionName = QStringLiteral("OnPluginEnable");
 	auto snapshot        = captureMutableDispatchSnapshotForTest(runtime);
 	QVERIFY(snapshot);
-	request.miniWindowSnapshotArg = snapshot;
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult dispatchResult;
 	dispatchWorkerAndWait(executor, request, dispatchResult);
 	QVERIFY(speechEvents.isEmpty());
 	QVERIFY(!dispatchResult.deferredRuntimeMutationBatches.isEmpty());
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("mushreader_deferred_call_result");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("mushreader_deferred_call_result");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("%1|%1").arg(eOK));
@@ -3867,7 +8306,7 @@ void tst_LuaCallbackEngine::nativeMushReaderDeferredCallPluginUsesRuntimeSpeechS
 		    runtime.setCommandProcessor(nullptr);
 		    processor.setRuntime(nullptr);
 	    });
-	runtime.pluginsMutable().push_back(mushReaderPlugin);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(mushReaderPlugin);
 
 	QVector<QMudNativePluginRegistry::TestSpeechEvent> speechEvents;
 	QMudNativePluginRegistry::setTestSpeechSink(
@@ -3901,16 +8340,16 @@ void tst_LuaCallbackEngine::nativeMushReaderDeferredCallPluginUsesRuntimeSpeechS
 	request.functionName = QStringLiteral("OnPluginEnable");
 	auto snapshot        = captureMutableDispatchSnapshotForTest(runtime);
 	QVERIFY(snapshot);
-	request.miniWindowSnapshotArg = snapshot;
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult dispatchResult;
 	dispatchWorkerAndWait(executor, request, dispatchResult);
 	QVERIFY(speechEvents.isEmpty());
 	QVERIFY(!dispatchResult.deferredRuntimeMutationBatches.isEmpty());
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("mushreader_runtime_state_result");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("mushreader_runtime_state_result");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("%1|%1").arg(eOK));
@@ -4006,23 +8445,23 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	)lua"),
 	                       &runtime);
 
-	auto snapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->soundStatusByBuffer.insert(1, -2);
 	snapshot->soundBufferReusableByBuffer.insert(1, true);
 	snapshot->soundStatusByBuffer.insert(2, -2);
 	snapshot->soundBufferReusableByBuffer.insert(2, true);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = snapshot;
 	dispatchWorkerAndWait(executor, request);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("lua_audio_shared_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("lua_audio_shared_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("2|25|100"));
@@ -4038,22 +8477,22 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	end
 	)lua"),
 	                       &runtime);
-	auto preStartSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto preStartSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	activeSoundBuffers.insert(1);
 	preStartSnapshot->soundStatusByBuffer.insert(1, 0);
 	preStartSnapshot->soundBufferReusableByBuffer.insert(1, false);
 	preStartSnapshot->soundStatusByBuffer.insert(2, -2);
 	preStartSnapshot->soundBufferReusableByBuffer.insert(2, true);
-	request.engines               = {preStartEngine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = preStartSnapshot;
+	request.engines             = {preStartEngine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = preStartSnapshot;
 	dispatchWorkerAndWait(executor, request);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("prestart_audio_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("prestart_audio_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("2"));
 	teardownWorkerEngine(executor, preStartEngine);
@@ -4071,22 +8510,22 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	end
 	)lua"),
 	                       &runtime);
-	auto callPluginPreStartSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto callPluginPreStartSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	activeSoundBuffers.insert(1);
 	callPluginPreStartSnapshot->soundStatusByBuffer.insert(1, 0);
 	callPluginPreStartSnapshot->soundBufferReusableByBuffer.insert(1, false);
 	callPluginPreStartSnapshot->soundStatusByBuffer.insert(2, -2);
 	callPluginPreStartSnapshot->soundBufferReusableByBuffer.insert(2, true);
-	request.engines               = {callPluginPreStartEngine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = callPluginPreStartSnapshot;
+	request.engines             = {callPluginPreStartEngine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = callPluginPreStartSnapshot;
 	dispatchWorkerAndWait(executor, request);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("callplugin_prestart_audio_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("callplugin_prestart_audio_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("0.0|2"));
 	teardownWorkerEngine(executor, callPluginPreStartEngine);
@@ -4104,19 +8543,19 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	end
 	)lua"),
 	                       &runtime);
-	auto callPluginStringBoolSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto callPluginStringBoolSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	callPluginStringBoolSnapshot->soundStatusByBuffer.insert(1, -2);
 	callPluginStringBoolSnapshot->soundBufferReusableByBuffer.insert(1, true);
-	request.engines               = {callPluginStringBoolEngine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = callPluginStringBoolSnapshot;
+	request.engines             = {callPluginStringBoolEngine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = callPluginStringBoolSnapshot;
 	dispatchWorkerAndWait(executor, request);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("callplugin_string_bool_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("callplugin_string_bool_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("0.0|1|true"));
 	teardownWorkerEngine(executor, callPluginStringBoolEngine);
@@ -4133,19 +8572,19 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	end
 	)lua"),
 	                       &runtime);
-	auto callPluginBadArgumentSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto callPluginBadArgumentSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	callPluginBadArgumentSnapshot->soundStatusByBuffer.insert(1, -2);
 	callPluginBadArgumentSnapshot->soundBufferReusableByBuffer.insert(1, true);
-	request.engines               = {callPluginBadArgumentEngine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = callPluginBadArgumentSnapshot;
+	request.engines             = {callPluginBadArgumentEngine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = callPluginBadArgumentSnapshot;
 	dispatchWorkerAndWait(executor, request);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("callplugin_bad_argument_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("callplugin_bad_argument_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("true|Cannot pass argument #3 (table type) to CallPlugin"));
 	teardownWorkerEngine(executor, callPluginBadArgumentEngine);
@@ -4192,7 +8631,7 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	activeSoundBuffers.insert(1);
 	activeSoundBuffers.insert(2);
 	activeSoundBuffers.insert(3);
-	auto callPluginBranchSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto callPluginBranchSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	callPluginBranchSnapshot->soundStatusByBuffer.insert(1, 1);
 	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(1, false);
 	callPluginBranchSnapshot->soundStatusByBuffer.insert(2, 1);
@@ -4201,18 +8640,18 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(3, false);
 	callPluginBranchSnapshot->soundStatusByBuffer.insert(4, -2);
 	callPluginBranchSnapshot->soundBufferReusableByBuffer.insert(4, true);
-	request.engines               = {callPluginBranchEngine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = callPluginBranchSnapshot;
+	request.engines             = {callPluginBranchEngine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = callPluginBranchSnapshot;
 	LuaBatchDispatchResult callPluginBranchResult;
 	dispatchWorkerAndWait(executor, request, callPluginBranchResult);
 	executeDeferredMutations(callPluginBranchResult);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("callplugin_branch_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("callplugin_branch_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("0.0|4|44|0.0|0.0|0.0|0.0|0.0|0.0|0.0|false"));
 	QTRY_VERIFY_WITH_TIMEOUT(
@@ -4241,13 +8680,13 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	end
 	)lua"),
 	                       &runtime);
-	auto pendingSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto pendingSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	pendingSnapshot->soundStatusByBuffer.insert(1, -2);
 	pendingSnapshot->soundBufferReusableByBuffer.insert(1, true);
-	request.engines               = {pendingEngine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = pendingSnapshot;
+	request.engines             = {pendingEngine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = pendingSnapshot;
 	dispatchWorkerAndWait(executor, request);
 	QCOMPARE(QMudNativePluginRegistry::luaAudioRuntimeOwnedBuffers(&runtime).size(), 1);
 
@@ -4286,22 +8725,22 @@ void tst_LuaCallbackEngine::nativeLuaAudioSharedRuntimeStateCoversDirectAndCallP
 	QMudNativePluginRegistry::luaAudioMarkRuntimeBuffer(&runtime, 2, fadeState);
 	activeSoundBuffers.insert(1);
 	activeSoundBuffers.insert(2);
-	auto timedSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto timedSnapshot = QSharedPointer<LuaCallbackSnapshot>::create();
 	timedSnapshot->soundStatusByBuffer.insert(1, 1);
 	timedSnapshot->soundBufferReusableByBuffer.insert(1, false);
 	timedSnapshot->soundStatusByBuffer.insert(2, 1);
 	timedSnapshot->soundBufferReusableByBuffer.insert(2, false);
-	request.engines               = {timedEngine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = timedSnapshot;
+	request.engines             = {timedEngine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = timedSnapshot;
 	dispatchWorkerAndWait(executor, request);
 
 	QTest::qWait(60);
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("timed_audio_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("timed_audio_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("1|2|100|40|false"));
 	QVERIFY(QMudNativePluginRegistry::luaAudioRuntimeBufferState(&runtime, 1, timedState));
@@ -4325,7 +8764,7 @@ void tst_LuaCallbackEngine::disabledNativeLuaAudioShadowBlocksCallbackCallPlugin
 	audioPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("LuaAudio"));
 
 	WorldRuntime runtime;
-	runtime.pluginsMutable().push_back(audioPlugin);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(audioPlugin);
 
 	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
 	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
@@ -4352,13 +8791,13 @@ void tst_LuaCallbackEngine::disabledNativeLuaAudioShadowBlocksCallbackCallPlugin
 	request.functionName = QStringLiteral("OnPluginEnable");
 	auto snapshot        = captureMutableDispatchSnapshotForTest(runtime);
 	QVERIFY(snapshot);
-	request.miniWindowSnapshotArg = snapshot;
+	request.callbackSnapshotArg = snapshot;
 	dispatchWorkerAndWait(executor, request);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("lua_audio_disabled_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("lua_audio_disabled_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("false|%1|true").arg(ePluginDisabled));
@@ -4380,7 +8819,7 @@ void tst_LuaCallbackEngine::blacklistedPluginsAreHiddenFromPluginApis()
 	plugin.attributes.insert(QStringLiteral("id"), blacklistedId);
 	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Automatic Backup"));
 	plugin.enabled = true;
-	runtime.pluginsMutable().push_back(plugin);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
 
 	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
 	function OnPluginEnable()
@@ -4405,7 +8844,7 @@ void tst_LuaCallbackEngine::blacklistedPluginsAreHiddenFromPluginApis()
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("true"));
-	QVERIFY(!runtime.pluginIdList().contains(blacklistedId, Qt::CaseInsensitive));
+	QVERIFY(!runtime.pluginIdList().contains(blacklistedId));
 	QCOMPARE(QMudNativePluginRegistry::pluginSupports(blacklistedId, QStringLiteral("say")), eNoSuchPlugin);
 	teardownWorkerEngine(executor, engine);
 }
@@ -4446,7 +8885,7 @@ end
 	request.triggerMatchedLineBufferIndex    = 1;
 	request.triggerMatchedLineAbsoluteNumber = promptEntry.lineNumber;
 	request.triggerOutputReplacesMatchedLine = false;
-	request.miniWindowSnapshotArg            = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	request.callbackSnapshotArg              = QSharedPointer<LuaCallbackSnapshot>::create();
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(result.hasFunctionValid);
@@ -4495,7 +8934,7 @@ end
 	request.styleRunsArg                     = styleRuns;
 	request.triggerMatchedLineBufferIndex    = 301;
 	request.triggerMatchedLineAbsoluteNumber = triggerLineNumber;
-	request.miniWindowSnapshotArg            = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg              = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	LuaBatchDispatchResult triggerResult     = executor.dispatchBatch(request);
 	QVERIFY(triggerResult.suspended);
 	QVERIFY(triggerResult.hasPendingModalStringRequest);
@@ -4511,7 +8950,7 @@ end
 	request.kind                        = LuaBatchDispatchKind::StringInOut;
 	request.functionName                = QStringLiteral("trigger_snapshot_status");
 	request.stringArg                   = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg       = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	const LuaBatchDispatchResult result = executor.dispatchBatch(request);
 	QCOMPARE(result.stringResult, QStringLiteral("301|inserted after first"));
 }
@@ -4555,7 +8994,7 @@ void tst_LuaCallbackEngine::triggerSnapshotPreservesMatchedMetadataAndRecentPres
 	matchedSnapshot.lineNumber                   = matched.lineNumber;
 	matchedSnapshot.ticks                        = matched.ticks;
 	matchedSnapshot.elapsed                      = matched.elapsed;
-	auto snapshot                                = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                                = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot              = true;
 	snapshot->lineBufferCount                    = 4;
 	snapshot->lineBufferSnapshot                 = lineSnapshot;
@@ -4593,14 +9032,14 @@ end
 	request.styleRunsArg                     = styleRuns;
 	request.triggerMatchedLineBufferIndex    = 2;
 	request.triggerMatchedLineAbsoluteNumber = 42;
-	request.miniWindowSnapshotArg            = snapshot;
+	request.callbackSnapshotArg              = snapshot;
 	LuaBatchDispatchResult triggerResult     = executor.dispatchBatch(request);
 	QVERIFY(!triggerResult.suspended);
 
 	request.kind                        = LuaBatchDispatchKind::StringInOut;
 	request.functionName                = QStringLiteral("trigger_metadata_status");
 	request.stringArg                   = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg       = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	request.callbackSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	const LuaBatchDispatchResult result = executor.dispatchBatch(request);
 	QCOMPARE(result.stringResult, QStringLiteral("true|true|1700000000|42|1.25|2.50|newest presentation"));
 }
@@ -4812,23 +9251,23 @@ void tst_LuaCallbackEngine::stringsAndWildcardsDispatchSuppliesSnapshotForCallba
 	)lua"),
 	                       &runtime);
 
-	auto snapshot                   = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                   = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasCommandUiSnapshot  = true;
 	snapshot->commandUiHasFrameData = true;
 	snapshot->commandUiValues[QStringLiteral("outputTextRectLeft")] = 19;
 	snapshot->windowNames                                           = {QStringLiteral("map")};
-	LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot windowInfo;
+	LuaCallbackSnapshot::WindowInfoSnapshot windowInfo;
 	windowInfo.width                                    = 120;
 	windowInfo.height                                   = 80;
 	snapshot->windowInfoByWindow[QStringLiteral("map")] = windowInfo;
 	snapshot->rebuildMiniWindowLookupCaches();
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("timer_cb");
-	request.stringListArg         = {QStringLiteral("wait_timer")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("timer_cb");
+	request.stringListArg       = {QStringLiteral("wait_timer")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(result.hasFunctionValid);
@@ -4932,17 +9371,17 @@ end
 	auto      lineSnapshot             = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration = lineBufferGeneration;
 	lineSnapshot->lineBufferCount      = lineBufferCount;
-	auto snapshot                      = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                      = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot    = true;
 	snapshot->lineBufferCount          = lineSnapshot->lineBufferCount;
 	snapshot->lineBufferSnapshot       = lineSnapshot;
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("page_cb");
-	request.stringListArg         = {QStringLiteral("page_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("page_cb");
+	request.stringListArg       = {QStringLiteral("page_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult firstPageRequest;
 	dispatchWorkerAndWait(executor, request, firstPageRequest);
 	QVERIFY(firstPageRequest.suspended);
@@ -4990,7 +9429,7 @@ end
 	auto cachedLineSnapshot                  = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	cachedLineSnapshot->lineBufferGeneration = lineBufferGeneration;
 	cachedLineSnapshot->lineBufferCount      = currentLineBufferCount;
-	auto cachedSnapshot                      = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto cachedSnapshot                      = QSharedPointer<LuaCallbackSnapshot>::create();
 	cachedSnapshot->hasLineBufferSnapshot    = true;
 	cachedSnapshot->lineBufferCount          = currentLineBufferCount;
 	cachedSnapshot->lineBufferSnapshot       = cachedLineSnapshot;
@@ -5000,8 +9439,8 @@ end
 	secondaryWorld.id      = QStringLiteral("secondary-id");
 	secondaryWorld.name    = QStringLiteral("Secondary");
 	cachedSnapshot->worldRuntimeSnapshot.push_back(secondaryWorld);
-	request.miniWindowSnapshotArg = cachedSnapshot;
-	request.functionName          = QStringLiteral("cached_page_cb");
+	request.callbackSnapshotArg = cachedSnapshot;
+	request.functionName        = QStringLiteral("cached_page_cb");
 	LuaBatchDispatchResult cachedPageResult;
 	dispatchWorkerAndWait(executor, request, cachedPageResult);
 	int cachedPageRequestCount = 0;
@@ -5098,7 +9537,7 @@ end
 	auto      lineSnapshot             = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration = lineBufferGeneration;
 	lineSnapshot->lineBufferCount      = lineBufferCount;
-	auto snapshot                      = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                      = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot    = true;
 	snapshot->lineBufferCount          = lineBufferCount;
 	snapshot->lineBufferSnapshot       = lineSnapshot;
@@ -5106,11 +9545,11 @@ end
 	snapshot->recentLinesSnapshot      = runtime.recentLines();
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("growth_cb");
-	request.stringListArg         = {QStringLiteral("growth_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("growth_cb");
+	request.stringListArg       = {QStringLiteral("growth_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult firstPageRequest;
 	dispatchWorkerAndWait(executor, request, firstPageRequest);
 	QVERIFY(firstPageRequest.suspended);
@@ -5190,7 +9629,7 @@ end
 	auto lineSnapshot                   = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration  = generation;
 	lineSnapshot->lineBufferCount       = count;
-	auto snapshot                       = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                       = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot     = true;
 	snapshot->lineBufferCount           = count;
 	snapshot->lineBufferSnapshot        = lineSnapshot;
@@ -5198,11 +9637,11 @@ end
 	snapshot->worldAttributesSnapshot.insert(QStringLiteral("max_output_lines"), QStringLiteral("400"));
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("mutation_page_cb");
-	request.stringListArg         = {QStringLiteral("mutation_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("mutation_page_cb");
+	request.stringListArg       = {QStringLiteral("mutation_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult completed;
 	dispatchWorkerAndWait(executor, request, completed);
 	int pageRequests = 0;
@@ -5266,7 +9705,7 @@ end
 	auto lineSnapshot                   = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration  = generation;
 	lineSnapshot->lineBufferCount       = count;
-	auto snapshot                       = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                       = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot     = true;
 	snapshot->lineBufferCount           = count;
 	snapshot->lineBufferSnapshot        = lineSnapshot;
@@ -5274,11 +9713,11 @@ end
 	snapshot->worldAttributesSnapshot.insert(QStringLiteral("max_output_lines"), QStringLiteral("200"));
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("dirty_tail_cb");
-	request.stringListArg         = {QStringLiteral("dirty_tail_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("dirty_tail_cb");
+	request.stringListArg       = {QStringLiteral("dirty_tail_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int pageRequests = 0;
@@ -5328,14 +9767,14 @@ void tst_LuaCallbackEngine::workerPresentationCountConsumersRefreshAfterMultilin
 	QVERIFY(view);
 	const QString boundsWindowId = QStringLiteral("scroll_bounds");
 	QCOMPARE(runtime.windowCreate(boundsWindowId, 0, 0, 100, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	const QString scaleAnchorWindowId = QStringLiteral("scroll_bounds_scale_anchor");
 	constexpr int kScaleAnchorLeft    = 2000;
 	constexpr int kScaleAnchorWidth   = 100;
 	QCOMPARE(runtime.windowCreate(scaleAnchorWindowId, kScaleAnchorLeft, 0, kScaleAnchorWidth, 60, 0,
 	                              kMiniWindowAbsoluteLocation, QColor(Qt::black),
-	                              QStringLiteral("Plugin.Id")),
+	                              QStringLiteral("plugin.id")),
 	         eOK);
 	QCOMPARE(runtime.windowShow(scaleAnchorWindowId, true), eOK);
 	const QString secondaryScaleAnchorWindowId = QStringLiteral("scroll_bounds_secondary_scale_anchor");
@@ -5343,14 +9782,16 @@ void tst_LuaCallbackEngine::workerPresentationCountConsumersRefreshAfterMultilin
 	constexpr int kSecondaryScaleAnchorWidth   = 100;
 	QCOMPARE(runtime.windowCreate(secondaryScaleAnchorWindowId, kSecondaryScaleAnchorLeft, 0,
 	                              kSecondaryScaleAnchorWidth, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	WorldRuntime secondaryRuntime;
 	secondaryRuntime.setWorldAttribute(QStringLiteral("id"), QStringLiteral("secondary-id"));
 	secondaryRuntime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Secondary"));
 
-	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto                      engine          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
 presentation_count_result = ""
 function presentation_count_cb(name, line, wildcards)
@@ -5556,13 +9997,21 @@ function nested_scroll_status(value)
 end
 )lua"),
 	                       &runtime);
+	WorldRuntime::Plugin selfPlugin;
+	selfPlugin.attributes.insert(QStringLiteral("id"), QStringLiteral("plugin.id"));
+	selfPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Plugin"));
+	selfPlugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	selfPlugin.enabled = true;
+	selfPlugin.lua     = engine;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(selfPlugin);
+	runtime.patchLuaCallbackStableSnapshot(WorldRuntime::LuaCallbackStableSnapshotDomain::Plugins);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("presentation_count_cb");
-	request.stringListArg         = {QStringLiteral("presentation_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("presentation_count_cb");
+	request.stringListArg       = {QStringLiteral("presentation_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int resumeRequests = 0;
@@ -5615,8 +10064,8 @@ end
 	QVERIFY(guessedPosition != bottom);
 
 	view->setInputText(QString(), false);
-	request.functionName          = QStringLiteral("scroll_visibility_cached_cb");
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("scroll_visibility_cached_cb");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(!result.suspended);
 	status.functionName = QStringLiteral("scroll_visibility_cached_status");
@@ -5631,11 +10080,11 @@ end
 	auto partialCommandUiSnapshot = runtime.luaCallbackSnapshotForBridgedCall();
 	QVERIFY(partialCommandUiSnapshot);
 	auto mutablePartialCommandUiSnapshot =
-	    QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(*partialCommandUiSnapshot);
+	    QSharedPointer<LuaCallbackSnapshot>::create(*partialCommandUiSnapshot);
 	mutablePartialCommandUiSnapshot->hasCommandUiSnapshot = false;
 	QVERIFY(mutablePartialCommandUiSnapshot->commandUiHasView);
-	request.functionName          = QStringLiteral("scroll_visibility_cached_cb");
-	request.miniWindowSnapshotArg = mutablePartialCommandUiSnapshot;
+	request.functionName        = QStringLiteral("scroll_visibility_cached_cb");
+	request.callbackSnapshotArg = mutablePartialCommandUiSnapshot;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(!result.suspended);
 	dispatchWorkerAndWait(executor, status, statusResult);
@@ -5646,8 +10095,8 @@ end
 	QCOMPARE(view->setOutputScroll(-2, true), eOK);
 	QCoreApplication::processEvents();
 
-	request.functionName          = QStringLiteral("scroll_then_command_cb");
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("scroll_then_command_cb");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(!result.suspended);
 	status.functionName = QStringLiteral("scroll_then_command_status");
@@ -5660,8 +10109,8 @@ end
 	QCOMPARE(view->setOutputScroll(-2, true), eOK);
 	QCoreApplication::processEvents();
 
-	request.functionName          = QStringLiteral("output_scroll_refresh_cb");
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("output_scroll_refresh_cb");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -5701,8 +10150,8 @@ end
 	QCoreApplication::processEvents();
 	QCOMPARE(view->outputScrollPosition(), refreshedPosition);
 
-	request.functionName          = QStringLiteral("output_scroll_cached_frame_cb");
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("output_scroll_cached_frame_cb");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -5737,8 +10186,8 @@ end
 	QCoreApplication::processEvents();
 	QCOMPARE(view->outputScrollPosition(), cachedFramePosition);
 
-	request.functionName          = QStringLiteral("output_scroll_visibility_cb");
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("output_scroll_visibility_cb");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -5782,8 +10231,8 @@ end
 	QCOMPARE(view->outputClientWidth(), shownWidth);
 	QCOMPARE(view->outputTextViewportRectangle().right(), shownRight - 1);
 
-	request.functionName          = QStringLiteral("nested_scroll_cb");
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("nested_scroll_cb");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -5804,8 +10253,8 @@ end
 	dispatchWorkerAndWait(executor, status, statusResult);
 	QCOMPARE(statusResult.stringResult, QStringLiteral("0|0|0"));
 
-	request.functionName          = QStringLiteral("nested_bookmark_cb");
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("nested_bookmark_cb");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -5831,8 +10280,8 @@ end
 	QVERIFY(nestedBookmarkPositionOk);
 	QVERIFY(nestedBookmarkPosition > 0);
 
-	request.functionName          = QStringLiteral("nested_refreshed_scroll_cb");
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("nested_refreshed_scroll_cb");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -5865,8 +10314,8 @@ end
 	QCoreApplication::processEvents();
 	QCOMPARE(view->outputScrollPosition(), targetPosition);
 
-	request.functionName          = QStringLiteral("nested_scroll_visibility_cb");
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("nested_scroll_visibility_cb");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -5933,8 +10382,8 @@ end
 
 	auto makeBoundsSnapshot = [&runtime, &secondaryRuntime, &boundsWindowId]
 	{
-		const auto baseline = runtime.luaCallbackSnapshotForBridgedCall(boundsWindowId);
-		auto       snapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(*baseline);
+		const auto                      baseline = runtime.luaCallbackSnapshotForBridgedCall(boundsWindowId);
+		auto                            snapshot = QSharedPointer<LuaCallbackSnapshot>::create(*baseline);
 		LuaCallbackWorldRuntimeSnapshot secondaryWorld;
 		secondaryWorld.runtime = &secondaryRuntime;
 		secondaryWorld.id      = QStringLiteral("secondary-id");
@@ -5949,8 +10398,8 @@ end
 	request.actionSourceOverride    = WorldRuntime::eHotspotCallback;
 	auto dispatchBoundsCallback     = [&](const QString &functionName, const int maximumResumeRequests)
 	{
-		request.functionName          = functionName;
-		request.miniWindowSnapshotArg = makeBoundsSnapshot();
+		request.functionName        = functionName;
+		request.callbackSnapshotArg = makeBoundsSnapshot();
 		dispatchWorkerAndWait(executor, request, result);
 		resumeRequests = 0;
 		while (result.suspended)
@@ -5984,7 +10433,7 @@ end
 	QCOMPARE(view->setOutputScroll(-2, true), eOK);
 	QCoreApplication::processEvents();
 	QCOMPARE(runtime.windowCreate(boundsWindowId, 0, 0, 100, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	dispatchBoundsCallback(QStringLiteral("local_scroll_create_bounds_cb"), 2);
 	QCOMPARE(resumeRequests, 1);
@@ -5994,7 +10443,7 @@ end
 	QCOMPARE(view->setOutputScroll(-2, true), eOK);
 	QCoreApplication::processEvents();
 	QCOMPARE(runtime.windowCreate(boundsWindowId, 0, 0, 100, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	dispatchBoundsCallback(QStringLiteral("local_scroll_resize_bounds_cb"), 2);
 	QCOMPARE(resumeRequests, 1);
@@ -6005,7 +10454,7 @@ end
 	QCoreApplication::processEvents();
 	QCOMPARE(runtime.windowShow(secondaryScaleAnchorWindowId, false), eOK);
 	QCOMPARE(runtime.windowCreate(boundsWindowId, 0, 0, 100, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	dispatchBoundsCallback(QStringLiteral("local_post_show_bounds_cb"), 3);
 	QCOMPARE(resumeRequests, 1);
@@ -6016,7 +10465,7 @@ end
 	QCoreApplication::processEvents();
 	QCOMPARE(runtime.windowShow(secondaryScaleAnchorWindowId, false), eOK);
 	QCOMPARE(runtime.windowCreate(boundsWindowId, 0, 0, 100, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	dispatchBoundsCallback(QStringLiteral("local_post_ui_bounds_cb"), 3);
 	QCOMPARE(resumeRequests, 1);
@@ -6026,7 +10475,7 @@ end
 	QCoreApplication::processEvents();
 	QCOMPARE(runtime.windowShow(secondaryScaleAnchorWindowId, false), eOK);
 	QCOMPARE(runtime.windowCreate(boundsWindowId, 0, 0, 100, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	dispatchBoundsCallback(QStringLiteral("nested_mutation_bounds_cb"), 3);
 	QCOMPARE(resumeRequests, 1);
@@ -6036,7 +10485,7 @@ end
 	QCoreApplication::processEvents();
 	QCOMPARE(runtime.windowShow(secondaryScaleAnchorWindowId, false), eOK);
 	QCOMPARE(runtime.windowCreate(boundsWindowId, 0, 0, 100, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	dispatchBoundsCallback(QStringLiteral("nested_scroll_bounds_cb"), 4);
 	QCOMPARE(resumeRequests, 1);
@@ -6047,7 +10496,7 @@ end
 	QCOMPARE(statusResult.stringResult, QStringLiteral("0|%1").arg(nestedBoundsLeft));
 
 	QCOMPARE(runtime.windowCreate(boundsWindowId, 0, 0, 100, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	dispatchBoundsCallback(QStringLiteral("local_post_command_height_bounds_cb"), 2);
 	QCOMPARE(resumeRequests, 1);
@@ -6058,7 +10507,7 @@ end
 	view->setInputText(QString(), false);
 	view->synchronizePendingInputViewportLayout();
 	QCOMPARE(runtime.windowCreate(boundsWindowId, 0, 0, 100, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	dispatchBoundsCallback(QStringLiteral("local_post_command_text_bounds_cb"), 2);
 	QCOMPARE(resumeRequests, 1);
@@ -6069,7 +10518,7 @@ end
 	view->setInputText(QString(), false);
 	view->synchronizePendingInputViewportLayout();
 	QCOMPARE(runtime.windowCreate(boundsWindowId, 0, 0, 100, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	dispatchBoundsCallback(QStringLiteral("cross_world_ui_bounds_cb"), 3);
 	QCOMPARE(resumeRequests, 2);
@@ -6081,7 +10530,7 @@ end
 	view->synchronizePendingInputViewportLayout();
 	secondaryRuntime.setView(view);
 	QCOMPARE(runtime.windowCreate(boundsWindowId, 0, 0, 100, 60, 0, kMiniWindowAbsoluteLocation,
-	                              QColor(Qt::black), QStringLiteral("Plugin.Id")),
+	                              QColor(Qt::black), QStringLiteral("plugin.id")),
 	         eOK);
 	dispatchBoundsCallback(QStringLiteral("cross_world_command_bounds_cb"), 3);
 	QCOMPARE(resumeRequests, 2);
@@ -6149,10 +10598,12 @@ void tst_LuaCallbackEngine::workerPresentationSnapshotsRefreshFrameDataCoherentl
 	QVERIFY(cursorOverWord);
 	runtime.setWordUnderMenu(QString(), false);
 
-	auto              caller      = QSharedPointer<LuaCallbackEngine>::create();
-	auto              target      = QSharedPointer<LuaCallbackEngine>::create();
-	auto              historyPeer = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto                      caller          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      target          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      historyPeer     = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
 function dirty_frame_from_call()
   ShowInfoBar(false)
@@ -6307,23 +10758,19 @@ end
 )lua"),
 	                       &runtime);
 
-	const QString targetKey               = QStringLiteral("target.id");
-	const QString peerKey                 = QStringLiteral("history.peer");
-	const auto    captureDispatchSnapshot = [&runtime, &target, &historyPeer, &targetKey, &peerKey]
+	const QString targetKey = QStringLiteral("target.id");
+	const QString peerKey   = QStringLiteral("history.peer");
+	const QString callerKey = QStringLiteral("plugin.id");
+	const auto    captureDispatchSnapshot =
+	    [&runtime, &caller, &target, &historyPeer, &callerKey, &targetKey, &peerKey]
 	{
 		const auto baseSnapshot = runtime.luaCallbackSnapshotForBridgedCall();
 		if (!baseSnapshot)
-			return QSharedPointer<LuaCallbackMiniWindowSnapshot>{};
-		auto snapshot               = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(*baseSnapshot);
-		snapshot->pluginIdsSnapshot = {targetKey, peerKey};
-		snapshot->pluginIdsByLookupKey.insert(targetKey, targetKey);
-		snapshot->pluginIdsByLookupKey.insert(peerKey, peerKey);
-		snapshot->pluginNamesById.insert(targetKey, QStringLiteral("Target Plugin"));
-		snapshot->pluginNamesById.insert(peerKey, QStringLiteral("History Peer"));
-		snapshot->pluginEnabledById.insert(targetKey, true);
-		snapshot->pluginEnabledById.insert(peerKey, true);
-		snapshot->pluginEnginesById.insert(targetKey, target);
-		snapshot->pluginEnginesById.insert(peerKey, historyPeer);
+			return QSharedPointer<LuaCallbackSnapshot>{};
+		auto snapshot = QSharedPointer<LuaCallbackSnapshot>::create(*baseSnapshot);
+		addPluginSnapshotEntry(*snapshot, callerKey, QStringLiteral("Caller Plugin"), caller);
+		addPluginSnapshotEntry(*snapshot, targetKey, QStringLiteral("Target Plugin"), target);
+		addPluginSnapshotEntry(*snapshot, peerKey, QStringLiteral("History Peer"), historyPeer);
 		snapshot->hasBroadcastPluginSnapshot     = true;
 		snapshot->broadcastPluginIdsSnapshot     = {targetKey};
 		snapshot->broadcastPluginEnginesSnapshot = {target};
@@ -6333,11 +10780,11 @@ end
 	QVERIFY(snapshot);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {caller};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("frame_refresh_cb");
-	request.stringListArg         = {QStringLiteral("frame_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("frame_refresh_cb");
+	request.stringListArg       = {QStringLiteral("frame_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int resumeRequests = 0;
@@ -6380,8 +10827,8 @@ end
 	}
 
 	runtime.setWordUnderMenu(QString(), false);
-	request.functionName          = QStringLiteral("selected_refresh_cb");
-	request.miniWindowSnapshotArg = captureDispatchSnapshot();
+	request.functionName        = QStringLiteral("selected_refresh_cb");
+	request.callbackSnapshotArg = captureDispatchSnapshot();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -6402,8 +10849,8 @@ end
 	dispatchWorkerAndWait(executor, status, statusResult);
 	QCOMPARE(statusResult.stringResult, QStringLiteral("hoverword"));
 
-	request.functionName          = QStringLiteral("history_refresh_cb");
-	request.miniWindowSnapshotArg = captureDispatchSnapshot();
+	request.functionName        = QStringLiteral("history_refresh_cb");
+	request.callbackSnapshotArg = captureDispatchSnapshot();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -6426,8 +10873,8 @@ end
 	QCOMPARE(statusResult.stringResult, QStringLiteral("0|nested command"));
 	QVERIFY(result.commandHistoryChanged);
 
-	request.functionName          = QStringLiteral("history_overlay_cb");
-	request.miniWindowSnapshotArg = captureDispatchSnapshot();
+	request.functionName        = QStringLiteral("history_overlay_cb");
+	request.callbackSnapshotArg = captureDispatchSnapshot();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -6450,8 +10897,8 @@ end
 	QCOMPARE(statusResult.stringResult, QStringLiteral("nested command|0|nested command"));
 	QCOMPARE(view->commandHistoryList(), QStringList{QStringLiteral("nested command")});
 
-	request.functionName          = QStringLiteral("nested_push_cb");
-	request.miniWindowSnapshotArg = captureDispatchSnapshot();
+	request.functionName        = QStringLiteral("nested_push_cb");
+	request.callbackSnapshotArg = captureDispatchSnapshot();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -6475,8 +10922,8 @@ end
 	const QStringList expectedHistory = {QStringLiteral("nested command"), QStringLiteral("second command")};
 	QCOMPARE(view->commandHistoryList(), expectedHistory);
 
-	request.functionName          = QStringLiteral("history_delete_cb");
-	request.miniWindowSnapshotArg = captureDispatchSnapshot();
+	request.functionName        = QStringLiteral("history_delete_cb");
+	request.callbackSnapshotArg = captureDispatchSnapshot();
 	dispatchWorkerAndWait(executor, request, result);
 	resumeRequests = 0;
 	while (result.suspended)
@@ -6510,8 +10957,8 @@ end
 	const auto runHistoryCallback =
 	    [&](const QString &functionName, const int maximumResumeRequests, int &callbackResumeRequests)
 	{
-		request.functionName          = functionName;
-		request.miniWindowSnapshotArg = captureDispatchSnapshot();
+		request.functionName        = functionName;
+		request.callbackSnapshotArg = captureDispatchSnapshot();
 		dispatchWorkerAndWait(executor, request, result);
 		callbackResumeRequests = 0;
 		while (result.suspended)
@@ -6655,11 +11102,11 @@ end
 	                       &runtime);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("extreme_line_cb");
-	request.stringListArg         = {QStringLiteral("extreme_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("extreme_line_cb");
+	request.stringListArg       = {QStringLiteral("extreme_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int pageRequests = 0;
@@ -6719,11 +11166,11 @@ end
 	                       &runtime);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("bookmark_cb");
-	request.stringListArg         = {QStringLiteral("bookmark_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("bookmark_cb");
+	request.stringListArg       = {QStringLiteral("bookmark_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int pageRequests = 0;
@@ -6756,7 +11203,7 @@ end
 	QVERIFY((lastEntry.flags & WorldRuntime::LineBookmark) == 0);
 
 	runtime.setSessionStateOutputBufferSealed(true);
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	dispatchWorkerAndWait(executor, request, result);
 	pageRequests = 0;
 	while (result.suspended)
@@ -6801,11 +11248,11 @@ end
 	                       &runtime);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("empty_delete_cb");
-	request.stringListArg         = {QStringLiteral("empty_delete_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("empty_delete_cb");
+	request.stringListArg       = {QStringLiteral("empty_delete_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(!result.suspended);
@@ -7045,11 +11492,11 @@ end
 		const qint64            deletedLineNumber = runtime.incomingLineLuaContextAbsoluteNumber();
 
 		LuaBatchDispatchRequest request;
-		request.engines               = {engine};
-		request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-		request.functionName          = functionName;
-		request.stringListArg         = {QStringLiteral("delete_trigger"), QStringLiteral("active trigger")};
-		request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+		request.engines             = {engine};
+		request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+		request.functionName        = functionName;
+		request.stringListArg       = {QStringLiteral("delete_trigger"), QStringLiteral("active trigger")};
+		request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 		LuaBatchDispatchResult result;
 		dispatchWorkerAndWait(executor, request, result);
 		int resumeCount = 0;
@@ -7099,7 +11546,7 @@ end
 	request.kind                               = LuaBatchDispatchKind::StringsAndWildcards;
 	request.functionName                       = QStringLiteral("delete_anchored_output_then_page");
 	request.stringListArg                      = {QStringLiteral("anchor_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg              = runtime.luaCallbackSnapshotForBridgedCall();
+	request.callbackSnapshotArg                = runtime.luaCallbackSnapshotForBridgedCall();
 	request.hasCallbackOutputAnchor            = true;
 	request.callbackOutputAnchorBufferIndex    = 1;
 	request.callbackOutputAnchorAbsoluteNumber = runtime.lines().constFirst().lineNumber;
@@ -7153,7 +11600,7 @@ end
 	auto lineSnapshot                            = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration           = generation;
 	lineSnapshot->lineBufferCount                = count;
-	auto snapshot                                = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                                = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot              = true;
 	snapshot->lineBufferCount                    = count;
 	snapshot->lineBufferSnapshot                 = lineSnapshot;
@@ -7162,13 +11609,13 @@ end
 	snapshot->callbackOutputAnchorAbsoluteNumber = 1;
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("empty_tell_anchor_cb");
-	request.stringListArg         = {QStringLiteral("empty_tell_trigger"), QStringLiteral("anchor")};
-	request.stringListArg2        = {QStringLiteral("anchor")};
-	request.styleRunsArg          = QSharedPointer<QVector<LuaStyleRun>>::create();
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("empty_tell_anchor_cb");
+	request.stringListArg       = {QStringLiteral("empty_tell_trigger"), QStringLiteral("anchor")};
+	request.stringListArg2      = {QStringLiteral("anchor")};
+	request.styleRunsArg        = QSharedPointer<QVector<LuaStyleRun>>::create();
+	request.callbackSnapshotArg = snapshot;
 	request.triggerOutputReplacesMatchedLine = true;
 	request.triggerMatchedLineBufferIndex    = 1;
 	request.triggerMatchedLineAbsoluteNumber = 1;
@@ -7215,7 +11662,7 @@ end
 	auto lineSnapshot                    = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration   = generation;
 	lineSnapshot->lineBufferCount        = count;
-	auto snapshot                        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                        = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot      = true;
 	snapshot->lineBufferCount            = count;
 	snapshot->lineBufferSnapshot         = lineSnapshot;
@@ -7223,11 +11670,11 @@ end
 	snapshot->runtimeCounterValues.insert(QStringLiteral("outputLineCount"), count);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("deferred_delete_cb");
-	request.stringListArg         = {QStringLiteral("delete_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("deferred_delete_cb");
+	request.stringListArg       = {QStringLiteral("delete_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int pageRequests = 0;
@@ -7303,11 +11750,11 @@ end
 	                       &runtime);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.stringListArg         = {QStringLiteral("delete_alias"), QStringLiteral("ignored")};
-	request.functionName          = QStringLiteral("delete_tail_then_output");
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.stringListArg       = {QStringLiteral("delete_alias"), QStringLiteral("ignored")};
+	request.functionName        = QStringLiteral("delete_tail_then_output");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(!result.suspended);
@@ -7316,8 +11763,8 @@ end
 	         QStringList({QStringLiteral("line 1"), QStringLiteral("line 2")}));
 	QCOMPARE(outputTexts, QStringList({QStringLiteral("after tail delete")}));
 
-	request.functionName          = QStringLiteral("delete_all_then_output");
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("delete_all_then_output");
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(!result.suspended);
 	executeDeferredMutations(result);
@@ -7329,7 +11776,7 @@ end
 	outputSpans.clear();
 	runtime.addLine(QStringLiteral("anchor"), WorldRuntime::LineOutput);
 	request.functionName                       = QStringLiteral("all_anchored_output_shapes");
-	request.miniWindowSnapshotArg              = runtime.luaCallbackSnapshotForBridgedCall();
+	request.callbackSnapshotArg                = runtime.luaCallbackSnapshotForBridgedCall();
 	request.hasCallbackOutputAnchor            = true;
 	request.callbackOutputAnchorBufferIndex    = 1;
 	request.callbackOutputAnchorAbsoluteNumber = runtime.lines().constLast().lineNumber;
@@ -7351,7 +11798,7 @@ end
 
 	runtime.deleteOutput();
 	runtime.addLine(QStringLiteral("vanishing anchor"), WorldRuntime::LineOutput);
-	request.miniWindowSnapshotArg              = runtime.luaCallbackSnapshotForBridgedCall();
+	request.callbackSnapshotArg                = runtime.luaCallbackSnapshotForBridgedCall();
 	request.callbackOutputAnchorBufferIndex    = 1;
 	request.callbackOutputAnchorAbsoluteNumber = runtime.lines().constLast().lineNumber;
 	dispatchWorkerAndWait(executor, request, result);
@@ -7384,7 +11831,7 @@ end
 	auto replacementStyleRuns = QSharedPointer<QVector<LuaStyleRun>>::create();
 	replacementStyleRuns->push_back({hiddenAnchor.text, 0xFFFFFF, 0, 0});
 	request.styleRunsArg                       = replacementStyleRuns;
-	request.miniWindowSnapshotArg              = runtime.luaCallbackSnapshotForBridgedCall();
+	request.callbackSnapshotArg                = runtime.luaCallbackSnapshotForBridgedCall();
 	request.hasCallbackOutputAnchor            = false;
 	request.callbackOutputAnchorBufferIndex    = 0;
 	request.callbackOutputAnchorAbsoluteNumber = 0;
@@ -7407,7 +11854,7 @@ end
 	request.stringListArg2 = {hiddenAnchor.text};
 	replacementStyleRuns->clear();
 	replacementStyleRuns->push_back({hiddenAnchor.text, 0xFFFFFF, 0, 0});
-	request.miniWindowSnapshotArg            = runtime.luaCallbackSnapshotForBridgedCall();
+	request.callbackSnapshotArg              = runtime.luaCallbackSnapshotForBridgedCall();
 	request.triggerMatchedLineAbsoluteNumber = hiddenAnchor.lineNumber;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(!result.suspended);
@@ -7450,7 +11897,7 @@ end
 	request.kind                               = LuaBatchDispatchKind::StringsAndWildcards;
 	request.functionName                       = QStringLiteral("ansi_note_semantics");
 	request.stringListArg                      = {QStringLiteral("ansi_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg              = runtime.luaCallbackSnapshotForBridgedCall();
+	request.callbackSnapshotArg                = runtime.luaCallbackSnapshotForBridgedCall();
 	request.hasCallbackOutputAnchor            = true;
 	request.callbackOutputAnchorBufferIndex    = 1;
 	request.callbackOutputAnchorAbsoluteNumber = runtime.lines().constFirst().lineNumber;
@@ -7538,7 +11985,7 @@ end
 	request.kind                               = LuaBatchDispatchKind::StringsAndWildcards;
 	request.functionName                       = QStringLiteral("tell_then_rule");
 	request.stringListArg                      = {QStringLiteral("rule_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg              = runtime.luaCallbackSnapshotForBridgedCall();
+	request.callbackSnapshotArg                = runtime.luaCallbackSnapshotForBridgedCall();
 	request.hasCallbackOutputAnchor            = true;
 	request.callbackOutputAnchorBufferIndex    = 1;
 	request.callbackOutputAnchorAbsoluteNumber = runtime.lines().constFirst().lineNumber;
@@ -7599,8 +12046,10 @@ void tst_LuaCallbackEngine::workerScreendrawReceivesCompletedPresentedLines()
 	WorldRuntime runtime;
 	runtime.addLine(QStringLiteral("anchor"), WorldRuntime::LineOutput);
 
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
-	auto              screenEngine = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor     = *runtimeExecutor;
+	auto                screenEngine = QSharedPointer<LuaCallbackEngine>::create();
 	initializeWorkerEngine(executor, screenEngine, QStringLiteral(R"lua(
 screen_calls = {}
 function OnPluginScreendraw(draw_type, log, text)
@@ -7619,7 +12068,7 @@ end
 	screenPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Screen plugin"));
 	screenPlugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
 	screenPlugin.lua = screenEngine;
-	runtime.pluginsMutable().push_back(screenPlugin);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(screenPlugin);
 
 	auto outputEngine = QSharedPointer<LuaCallbackEngine>::create();
 	initializeWorkerEngine(executor, outputEngine, QStringLiteral(R"lua(
@@ -7641,11 +12090,11 @@ end
 	auto dispatchOutput = [&](const QString &functionName, const bool anchored)
 	{
 		LuaBatchDispatchRequest request;
-		request.engines               = {outputEngine};
-		request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-		request.functionName          = functionName;
-		request.stringListArg         = {QStringLiteral("output_alias"), QStringLiteral("ignored")};
-		request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+		request.engines             = {outputEngine};
+		request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+		request.functionName        = functionName;
+		request.stringListArg       = {QStringLiteral("output_alias"), QStringLiteral("ignored")};
+		request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 		if (anchored)
 		{
 			request.hasCallbackOutputAnchor            = true;
@@ -7687,14 +12136,17 @@ end
 	waitForScreenStatus(QStringLiteral("1,0,open line one|1,0,two"));
 	QCOMPARE(screenStatus(QString()), QStringLiteral("1,0,open line one|1,0,two"));
 
-	runtime.pluginsMutable().clear();
+	WorldRuntimeTestAccess::plugins(runtime).clear();
 	teardownWorkerEngine(executor, outputEngine);
 	teardownWorkerEngine(executor, screenEngine);
 
 	WorldRuntime fallbackRuntime;
 	fallbackRuntime.addLine(QStringLiteral("hr open"), WorldRuntime::LineNote, false);
-	auto fallbackScreenEngine = QSharedPointer<LuaCallbackEngine>::create();
-	initializeWorkerEngine(executor, fallbackScreenEngine, QStringLiteral(R"lua(
+	const ILuaExecutor *const fallbackRuntimeExecutor = fallbackRuntime.luaExecutor();
+	QVERIFY(fallbackRuntimeExecutor);
+	const ILuaExecutor &fallbackExecutor     = *fallbackRuntimeExecutor;
+	auto                fallbackScreenEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(fallbackExecutor, fallbackScreenEngine, QStringLiteral(R"lua(
 fallback_screen_lines = {}
 function OnPluginScreendraw(draw_type, log, text)
   table.insert(fallback_screen_lines, string.format("%.0f,%.0f,%s", draw_type, log, text))
@@ -7709,10 +12161,10 @@ end
 	fallbackScreenPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Fallback screen plugin"));
 	fallbackScreenPlugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
 	fallbackScreenPlugin.lua = fallbackScreenEngine;
-	fallbackRuntime.pluginsMutable().push_back(fallbackScreenPlugin);
+	WorldRuntimeTestAccess::plugins(fallbackRuntime).push_back(fallbackScreenPlugin);
 
 	auto fallbackOutputEngine = QSharedPointer<LuaCallbackEngine>::create();
-	initializeWorkerEngine(executor, fallbackOutputEngine, QStringLiteral(R"lua(
+	initializeWorkerEngine(fallbackExecutor, fallbackOutputEngine, QStringLiteral(R"lua(
 function OnPluginSent(text)
   NoteHr()
   DeleteOutput()
@@ -7725,7 +12177,7 @@ end
 	fallbackOutputPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Fallback output plugin"));
 	fallbackOutputPlugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
 	fallbackOutputPlugin.lua = fallbackOutputEngine;
-	fallbackRuntime.pluginsMutable().push_back(fallbackOutputPlugin);
+	WorldRuntimeTestAccess::plugins(fallbackRuntime).push_back(fallbackOutputPlugin);
 	fallbackRuntime.firePluginSent(QStringLiteral("go"));
 
 	LuaBatchDispatchRequest fallbackStatus;
@@ -7739,14 +12191,14 @@ end
 	do
 	{
 		QTest::qWait(10);
-		dispatchWorkerAndWait(executor, fallbackStatus, fallbackStatusResult);
+		dispatchWorkerAndWait(fallbackExecutor, fallbackStatus, fallbackStatusResult);
 	} while (fallbackStatusResult.stringResult != QStringLiteral("1,0,hr open|1,0,fallback") &&
 	         fallbackTimer.elapsed() < 2000);
 	QCOMPARE(fallbackStatusResult.stringResult, QStringLiteral("1,0,hr open|1,0,fallback"));
 
-	fallbackRuntime.pluginsMutable().clear();
-	teardownWorkerEngine(executor, fallbackOutputEngine);
-	teardownWorkerEngine(executor, fallbackScreenEngine);
+	WorldRuntimeTestAccess::plugins(fallbackRuntime).clear();
+	teardownWorkerEngine(fallbackExecutor, fallbackOutputEngine);
+	teardownWorkerEngine(fallbackExecutor, fallbackScreenEngine);
 }
 
 void tst_LuaCallbackEngine::workerDrawOutputWindowOutputDoesNotQueueRecursiveCallback()
@@ -7872,10 +12324,10 @@ end
 	                         5000);
 	const QString kDrawPluginId      = QStringLiteral("fedcba9876543210fedcba98");
 	const QString kRecipientPluginId = QStringLiteral("0123456789abcdef01234567");
-	auto          drawPluginIt =
-	    std::ranges::find_if(runtime.pluginsMutable(), [&kDrawPluginId](const WorldRuntime::Plugin &plugin)
-	                         { return plugin.attributes.value(QStringLiteral("id")) == kDrawPluginId; });
-	QVERIFY(drawPluginIt != runtime.pluginsMutable().end());
+	auto          drawPluginIt       = std::ranges::find_if(
+        WorldRuntimeTestAccess::plugins(runtime), [&kDrawPluginId](const WorldRuntime::Plugin &plugin)
+        { return plugin.attributes.value(QStringLiteral("id")) == kDrawPluginId; });
+	QVERIFY(drawPluginIt != WorldRuntimeTestAccess::plugins(runtime).end());
 	const QSharedPointer<LuaCallbackEngine> drawPluginEngine = drawPluginIt->lua;
 	QVERIFY(drawPluginEngine);
 	QVERIFY(runtime.enablePlugin(kRecipientPluginId, false));
@@ -8081,7 +12533,7 @@ end
 	request.kind                               = LuaBatchDispatchKind::StringsAndWildcards;
 	request.functionName                       = QStringLiteral("wrap_open_line");
 	request.stringListArg                      = {QStringLiteral("wrap_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg              = runtime.luaCallbackSnapshotForBridgedCall();
+	request.callbackSnapshotArg                = runtime.luaCallbackSnapshotForBridgedCall();
 	request.hasCallbackOutputAnchor            = true;
 	request.callbackOutputAnchorBufferIndex    = 1;
 	request.callbackOutputAnchorAbsoluteNumber = runtime.lines().constFirst().lineNumber;
@@ -8108,8 +12560,10 @@ void tst_LuaCallbackEngine::workerAnchoredOutputCommitsBeforeScreendrawMutation(
 	WorldRuntime runtime;
 	runtime.addLine(QStringLiteral("anchor"), WorldRuntime::LineOutput);
 
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
-	auto              outputEngine = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor     = *runtimeExecutor;
+	auto                outputEngine = QSharedPointer<LuaCallbackEngine>::create();
 	initializeWorkerEngine(executor, outputEngine, QStringLiteral(R"lua(
 function anchored_note(name, line, wildcards)
   Note("inserted")
@@ -8129,14 +12583,14 @@ end
 	screenPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Screen plugin"));
 	screenPlugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
 	screenPlugin.lua = screenEngine;
-	runtime.pluginsMutable().push_back(screenPlugin);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(screenPlugin);
 
 	LuaBatchDispatchRequest request;
 	request.engines                            = {outputEngine};
 	request.kind                               = LuaBatchDispatchKind::StringsAndWildcards;
 	request.functionName                       = QStringLiteral("anchored_note");
 	request.stringListArg                      = {QStringLiteral("note_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg              = runtime.luaCallbackSnapshotForBridgedCall();
+	request.callbackSnapshotArg                = runtime.luaCallbackSnapshotForBridgedCall();
 	request.hasCallbackOutputAnchor            = true;
 	request.callbackOutputAnchorBufferIndex    = 1;
 	request.callbackOutputAnchorAbsoluteNumber = runtime.lines().constFirst().lineNumber;
@@ -8147,7 +12601,7 @@ end
 
 	QVERIFY(runtime.lines().isEmpty());
 
-	runtime.pluginsMutable().clear();
+	WorldRuntimeTestAccess::plugins(runtime).clear();
 	teardownWorkerEngine(executor, screenEngine);
 	teardownWorkerEngine(executor, outputEngine);
 }
@@ -8159,10 +12613,12 @@ void tst_LuaCallbackEngine::workerNestedDispatchRefreshesDirtyLinePresentation()
 	for (int lineNumber = 1; lineNumber <= 400; ++lineNumber)
 		runtime.addLine(QStringLiteral("line %1").arg(lineNumber), WorldRuntime::LineOutput);
 
-	auto              caller   = QSharedPointer<LuaCallbackEngine>::create();
-	auto              target   = QSharedPointer<LuaCallbackEngine>::create();
-	auto              follower = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto                      caller          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      target          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      follower        = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
 broadcast_line = ""
 function read_nested_line()
@@ -8216,7 +12672,7 @@ end
 	auto lineSnapshot                            = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration           = generation;
 	lineSnapshot->lineBufferCount                = count;
-	auto snapshot                                = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                                = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot              = true;
 	snapshot->lineBufferCount                    = count;
 	snapshot->lineBufferSnapshot                 = lineSnapshot;
@@ -8225,22 +12681,21 @@ end
 	snapshot->callbackOutputAnchorAbsoluteNumber = count;
 	snapshot->hasWorldAttributeSnapshot          = true;
 	snapshot->worldAttributesSnapshot.insert(QStringLiteral("max_output_lines"), QStringLiteral("400"));
-	const QString targetKey     = QStringLiteral("target.id");
-	snapshot->pluginIdsSnapshot = {targetKey};
-	snapshot->pluginIdsByLookupKey.insert(targetKey, targetKey);
-	snapshot->pluginNamesById.insert(targetKey, QStringLiteral("Target Plugin"));
-	snapshot->pluginEnabledById.insert(targetKey, true);
-	snapshot->pluginEnginesById.insert(targetKey, target);
+	addPluginSnapshotEntry(*snapshot, QStringLiteral("plugin.id"), QStringLiteral("Caller Plugin"), caller);
+	const QString targetKey = QStringLiteral("target.id");
+	addPluginSnapshotEntry(*snapshot, targetKey, QStringLiteral("Target Plugin"), target);
+	addPluginSnapshotEntry(*snapshot, QStringLiteral("follower.id"), QStringLiteral("Follower Plugin"),
+	                       follower);
 	snapshot->hasBroadcastPluginSnapshot     = true;
 	snapshot->broadcastPluginIdsSnapshot     = {targetKey, QStringLiteral("follower.id")};
 	snapshot->broadcastPluginEnginesSnapshot = {target, follower};
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {caller};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("nested_dispatch_cb");
-	request.stringListArg         = {QStringLiteral("nested_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("nested_dispatch_cb");
+	request.stringListArg       = {QStringLiteral("nested_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int pageRequests = 0;
@@ -8302,9 +12757,11 @@ void tst_LuaCallbackEngine::workerNestedPageWithoutRecentLinesClearsCallerSnapsh
 	                 [&runtime](const QString &text, const QVector<WorldRuntime::StyleSpan> &, const bool,
 	                            const bool) { runtime.addLine(text, WorldRuntime::LineNote); });
 
-	auto              caller = QSharedPointer<LuaCallbackEngine>::create();
-	auto              target = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto                      caller          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      target          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
 function refresh_without_recent()
   Note("target output before page")
@@ -8334,25 +12791,21 @@ end
 	auto lineSnapshot                  = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration = generation;
 	lineSnapshot->lineBufferCount      = count;
-	auto snapshot                      = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                      = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot    = true;
 	snapshot->lineBufferCount          = count;
 	snapshot->lineBufferSnapshot       = lineSnapshot;
 	snapshot->hasRecentLinesSnapshot   = true;
 	snapshot->recentLinesSnapshot      = runtime.recentLines();
 	const QString targetKey            = QStringLiteral("target.id");
-	snapshot->pluginIdsSnapshot        = {targetKey};
-	snapshot->pluginIdsByLookupKey.insert(targetKey, targetKey);
-	snapshot->pluginNamesById.insert(targetKey, QStringLiteral("Target Plugin"));
-	snapshot->pluginEnabledById.insert(targetKey, true);
-	snapshot->pluginEnginesById.insert(targetKey, target);
+	addPluginSnapshotEntry(*snapshot, targetKey, QStringLiteral("Target Plugin"), target);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {caller};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("nested_recent_cb");
-	request.stringListArg         = {QStringLiteral("nested_recent_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("nested_recent_cb");
+	request.stringListArg       = {QStringLiteral("nested_recent_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int pageRequests = 0;
@@ -8414,17 +12867,17 @@ end
 	auto lineSnapshot                  = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration = 0;
 	lineSnapshot->lineBufferCount      = 0;
-	auto snapshot                      = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                      = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot    = true;
 	snapshot->lineBufferCount          = 0;
 	snapshot->lineBufferSnapshot       = lineSnapshot;
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("empty_multiline_cb");
-	request.stringListArg         = {QStringLiteral("empty_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("empty_multiline_cb");
+	request.stringListArg       = {QStringLiteral("empty_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int pageRequests = 0;
@@ -8480,11 +12933,11 @@ end
 	                       &runtime);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("active_growth_cb");
-	request.stringListArg         = {QStringLiteral("active_growth_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("active_growth_cb");
+	request.stringListArg       = {QStringLiteral("active_growth_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = runtime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int resumeCount = 0;
@@ -8535,18 +12988,18 @@ end
 	auto lineSnapshot                    = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration   = 0;
 	lineSnapshot->lineBufferCount        = 0;
-	auto snapshot                        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                        = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot      = true;
 	snapshot->lineBufferCount            = 0;
 	snapshot->lineBufferSnapshot         = lineSnapshot;
 	snapshot->hasBroadcastPluginSnapshot = true;
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("unused_page_cb");
-	request.stringListArg         = {QStringLiteral("unused_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("unused_page_cb");
+	request.stringListArg       = {QStringLiteral("unused_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(!result.suspended);
@@ -8595,7 +13048,7 @@ end
 	auto lineSnapshot                            = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration           = generation;
 	lineSnapshot->lineBufferCount                = count;
-	auto snapshot                                = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                                = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot              = true;
 	snapshot->lineBufferCount                    = count;
 	snapshot->lineBufferSnapshot                 = lineSnapshot;
@@ -8604,11 +13057,11 @@ end
 	snapshot->callbackOutputAnchorAbsoluteNumber = count;
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("anchored_growth_cb");
-	request.stringListArg         = {QStringLiteral("growth_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("anchored_growth_cb");
+	request.stringListArg       = {QStringLiteral("growth_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int pageRequests = 0;
@@ -8651,27 +13104,35 @@ void tst_LuaCallbackEngine::workerCallPluginPropagatesTargetLinePageSuspension()
 	for (int lineNumber = 1; lineNumber <= 400; ++lineNumber)
 		runtime.addLine(QStringLiteral("line %1").arg(lineNumber), WorldRuntime::LineOutput);
 
-	auto              caller = QSharedPointer<LuaCallbackEngine>::create();
-	auto              target = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto                      caller          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      target          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
 function read_older_line()
-  return table.concat({ GetLineInfo(300, 1), GetLineInfo(316, 1), GetLinesInBufferCount() }, "|")
+  SetVariable("resumed-shared", "before-target-suspension")
+  local value = table.concat({ GetLineInfo(300, 1), GetLineInfo(316, 1), GetLinesInBufferCount() }, "|")
+  return value
 end
 )lua"),
-	                       &runtime);
+	                       &runtime, QStringLiteral("target.id"));
 	initializeWorkerEngine(executor, caller, QStringLiteral(R"lua(
 nested_page_result = ""
 function nested_page_cb(name, line, wildcards)
   local code, value = CallPlugin("Target.Id", "read_older_line")
-  nested_page_result = code == 0 and (value or "<nil>") or "error"
+  local after = GetPluginVariable("Target.Id", "resumed-shared")
+  nested_page_result = code == 0 and ((value or "<nil>") .. "|" .. (after or "<missing>")) or "error"
 end
 function read_self_older_line()
-  return GetLineInfo(20, 1)
+  SetVariable("self-resumed-shared", "before-self-suspension")
+  local value = GetLineInfo(20, 1)
+  return value
 end
 function self_nested_page_cb(name, line, wildcards)
   local code, value = CallPlugin("Plugin.Id", "read_self_older_line")
-  nested_page_result = code == 0 and (value or "<nil>") or "error"
+  nested_page_result = code == 0 and ((value or "<nil>") .. "|" ..
+    (GetVariable("self-resumed-shared") or "<missing>")) or "error"
 end
 function nested_page_status(value)
   return nested_page_result
@@ -8687,23 +13148,21 @@ end
 	auto      lineSnapshot             = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration = lineBufferGeneration;
 	lineSnapshot->lineBufferCount      = lineBufferCount;
-	auto snapshot                      = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                      = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot    = true;
 	snapshot->lineBufferCount          = lineBufferCount;
 	snapshot->lineBufferSnapshot       = lineSnapshot;
+	const QString callerKey            = QStringLiteral("plugin.id");
 	const QString targetKey            = QStringLiteral("target.id");
-	snapshot->pluginIdsSnapshot        = {targetKey};
-	snapshot->pluginIdsByLookupKey.insert(targetKey, targetKey);
-	snapshot->pluginNamesById.insert(targetKey, QStringLiteral("Target Plugin"));
-	snapshot->pluginEnabledById.insert(targetKey, true);
-	snapshot->pluginEnginesById.insert(targetKey, target);
+	addPluginSnapshotEntry(*snapshot, callerKey, QStringLiteral("Caller Plugin"), caller);
+	addPluginSnapshotEntry(*snapshot, targetKey, QStringLiteral("Target Plugin"), target);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {caller};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("nested_page_cb");
-	request.stringListArg         = {QStringLiteral("nested_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("nested_page_cb");
+	request.stringListArg       = {QStringLiteral("nested_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult suspended;
 	dispatchWorkerAndWait(executor, request, suspended);
 	int targetPageRequestCount = 0;
@@ -8731,7 +13190,7 @@ end
 	status.stringArg    = QStringLiteral("ignored");
 	LuaBatchDispatchResult statusResult;
 	dispatchWorkerAndWait(executor, status, statusResult);
-	QCOMPARE(statusResult.stringResult, QStringLiteral("line 300|line 316|402.0"));
+	QCOMPARE(statusResult.stringResult, QStringLiteral("line 300|line 316|402.0|before-target-suspension"));
 
 	request.functionName = QStringLiteral("self_nested_page_cb");
 	LuaBatchDispatchResult selfSuspended;
@@ -8751,7 +13210,7 @@ end
 	}
 	QCOMPARE(selfPageRequestCount, 1);
 	dispatchWorkerAndWait(executor, status, statusResult);
-	QCOMPARE(statusResult.stringResult, QStringLiteral("line 20"));
+	QCOMPARE(statusResult.stringResult, QStringLiteral("line 20|before-self-suspension"));
 
 	teardownWorkerEngine(executor, caller);
 	teardownWorkerEngine(executor, target);
@@ -8769,9 +13228,11 @@ void tst_LuaCallbackEngine::workerNestedCrossWorldPageKeepsCallerPresentation()
 	for (int lineNumber = 1; lineNumber <= 150; ++lineNumber)
 		secondaryRuntime.addLine(QStringLiteral("secondary %1").arg(lineNumber), WorldRuntime::LineOutput);
 
-	auto              caller = QSharedPointer<LuaCallbackEngine>::create();
-	auto              target = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto                      caller          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      target          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = primaryRuntime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
 function read_secondary_line()
   local secondary = GetWorld("Secondary")
@@ -8792,26 +13253,23 @@ end
 )lua"),
 	                       &primaryRuntime);
 
-	auto snapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(
-	    *primaryRuntime.luaCallbackSnapshotForBridgedCall());
+	auto snapshot =
+	    QSharedPointer<LuaCallbackSnapshot>::create(*primaryRuntime.luaCallbackSnapshotForBridgedCall());
 	LuaCallbackWorldRuntimeSnapshot secondaryWorld;
 	secondaryWorld.runtime = &secondaryRuntime;
 	secondaryWorld.id      = QStringLiteral("secondary-id");
 	secondaryWorld.name    = QStringLiteral("Secondary");
 	snapshot->worldRuntimeSnapshot.push_back(secondaryWorld);
+	addPluginSnapshotEntry(*snapshot, QStringLiteral("plugin.id"), QStringLiteral("Caller Plugin"), caller);
 	const QString targetKey = QStringLiteral("target.id");
-	snapshot->pluginIdsSnapshot.push_back(targetKey);
-	snapshot->pluginIdsByLookupKey.insert(targetKey, targetKey);
-	snapshot->pluginNamesById.insert(targetKey, QStringLiteral("Target Plugin"));
-	snapshot->pluginEnabledById.insert(targetKey, true);
-	snapshot->pluginEnginesById.insert(targetKey, target);
+	addPluginSnapshotEntry(*snapshot, targetKey, QStringLiteral("Target Plugin"), target);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {caller};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("nested_cross_world_cb");
-	request.stringListArg         = {QStringLiteral("nested_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("nested_cross_world_cb");
+	request.stringListArg       = {QStringLiteral("nested_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int pageRequests = 0;
@@ -8848,9 +13306,11 @@ void tst_LuaCallbackEngine::workerCallPluginCancellationReleasesTarget()
 	for (int lineNumber = 1; lineNumber <= 400; ++lineNumber)
 		runtime.addLine(QStringLiteral("line %1").arg(lineNumber), WorldRuntime::LineOutput);
 
-	auto              caller = QSharedPointer<LuaCallbackEngine>::create();
-	auto              target = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto                      caller          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      target          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
 cancel_target_completed = false
 function cancel_target()
@@ -8880,7 +13340,7 @@ end
 		auto lineSnapshot                         = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 		lineSnapshot->lineBufferGeneration        = lineBufferGeneration;
 		lineSnapshot->lineBufferCount             = lineBufferCount;
-		auto snapshot                             = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+		auto snapshot                             = QSharedPointer<LuaCallbackSnapshot>::create();
 		snapshot->hasLineBufferSnapshot           = true;
 		snapshot->lineBufferCount                 = lineBufferCount;
 		snapshot->lineBufferSnapshot              = lineSnapshot;
@@ -8893,11 +13353,11 @@ end
 		snapshot->pluginEnginesById.insert(targetKey, target);
 
 		LuaBatchDispatchRequest request;
-		request.engines               = {caller};
-		request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-		request.functionName          = QStringLiteral("cancel_caller");
-		request.stringListArg         = {QStringLiteral("cancel_alias"), QStringLiteral("ignored")};
-		request.miniWindowSnapshotArg = snapshot;
+		request.engines             = {caller};
+		request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+		request.functionName        = QStringLiteral("cancel_caller");
+		request.stringListArg       = {QStringLiteral("cancel_alias"), QStringLiteral("ignored")};
+		request.callbackSnapshotArg = snapshot;
 		LuaBatchDispatchResult suspended;
 		dispatchWorkerAndWait(executor, request, suspended);
 		QVERIFY(suspended.suspended);
@@ -8941,9 +13401,11 @@ void tst_LuaCallbackEngine::workerBroadcastCancellationReleasesTarget()
 	for (int lineNumber = 1; lineNumber <= 400; ++lineNumber)
 		runtime.addLine(QStringLiteral("line %1").arg(lineNumber), WorldRuntime::LineOutput);
 
-	auto              caller = QSharedPointer<LuaCallbackEngine>::create();
-	auto              target = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto                      caller          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      target          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
 broadcast_cancel_completed = false
 function OnPluginBroadcast(message, sender_id, sender_name, text)
@@ -8955,13 +13417,13 @@ function broadcast_cancel_status(value)
   return tostring(broadcast_cancel_completed)
 end
 )lua"),
-	                       &runtime, QStringLiteral("Target.Id"));
+	                       &runtime, QStringLiteral("target.id"));
 	initializeWorkerEngine(executor, caller, QStringLiteral(R"lua(
 function broadcast_cancel_caller(name, line, wildcards)
   BroadcastPlugin(7, "cancel")
 end
 )lua"),
-	                       &runtime, QStringLiteral("Caller.Id"));
+	                       &runtime, QStringLiteral("caller.id"));
 
 	quint64                             generation = 0;
 	QHash<int, WorldRuntime::LineEntry> ignoredEntries;
@@ -8971,23 +13433,25 @@ end
 	auto lineSnapshot                            = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration           = generation;
 	lineSnapshot->lineBufferCount                = count;
-	auto snapshot                                = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                                = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot              = true;
 	snapshot->lineBufferCount                    = count;
 	snapshot->lineBufferSnapshot                 = lineSnapshot;
 	snapshot->hasCallbackOutputAnchor            = true;
 	snapshot->callbackOutputAnchorBufferIndex    = count;
 	snapshot->callbackOutputAnchorAbsoluteNumber = runtime.lines().constLast().lineNumber;
-	snapshot->hasBroadcastPluginSnapshot         = true;
-	snapshot->broadcastPluginIdsSnapshot         = {QStringLiteral("target.id")};
-	snapshot->broadcastPluginEnginesSnapshot     = {target};
+	addPluginSnapshotEntry(*snapshot, QStringLiteral("caller.id"), QStringLiteral("Caller Plugin"), caller);
+	addPluginSnapshotEntry(*snapshot, QStringLiteral("target.id"), QStringLiteral("Target Plugin"), target);
+	snapshot->hasBroadcastPluginSnapshot     = true;
+	snapshot->broadcastPluginIdsSnapshot     = {QStringLiteral("target.id")};
+	snapshot->broadcastPluginEnginesSnapshot = {target};
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {caller};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("broadcast_cancel_caller");
-	request.stringListArg         = {QStringLiteral("cancel_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("broadcast_cancel_caller");
+	request.stringListArg       = {QStringLiteral("cancel_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult suspended;
 	dispatchWorkerAndWait(executor, request, suspended);
 	QVERIFY(suspended.suspended);
@@ -9025,8 +13489,10 @@ void tst_LuaCallbackEngine::workerResetCancelsSuspendedSelfCallPluginSafely()
 	for (int lineNumber = 1; lineNumber <= 400; ++lineNumber)
 		runtime.addLine(QStringLiteral("line %1").arg(lineNumber), WorldRuntime::LineOutput);
 
-	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto                      engine          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
 function read_self_during_reset()
   return GetLineInfo(20, 1)
@@ -9048,17 +13514,18 @@ end
 	auto lineSnapshot                  = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration = generation;
 	lineSnapshot->lineBufferCount      = count;
-	auto snapshot                      = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                      = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot    = true;
 	snapshot->lineBufferCount          = count;
 	snapshot->lineBufferSnapshot       = lineSnapshot;
+	addPluginSnapshotEntry(*snapshot, QStringLiteral("plugin.id"), QStringLiteral("Plugin"), engine);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("suspend_self_during_reset");
-	request.stringListArg         = {QStringLiteral("reset_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("suspend_self_during_reset");
+	request.stringListArg       = {QStringLiteral("reset_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult suspended;
 	dispatchWorkerAndWait(executor, request, suspended);
 	QVERIFY(suspended.suspended);
@@ -9089,9 +13556,11 @@ void tst_LuaCallbackEngine::workerResetCancelsSuspendedCallPluginTarget()
 	for (int lineNumber = 1; lineNumber <= 400; ++lineNumber)
 		runtime.addLine(QStringLiteral("line %1").arg(lineNumber), WorldRuntime::LineOutput);
 
-	auto              caller = QSharedPointer<LuaCallbackEngine>::create();
-	auto              target = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto                      caller          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      target          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
 reset_target_completed = false
 function reset_target()
@@ -9103,13 +13572,13 @@ function reset_target_status(value)
   return tostring(reset_target_completed)
 end
 )lua"),
-	                       &runtime, QStringLiteral("Target.Id"));
+	                       &runtime, QStringLiteral("target.id"));
 	initializeWorkerEngine(executor, caller, QStringLiteral(R"lua(
 function reset_caller(name, line, wildcards)
   CallPlugin("Target.Id", "reset_target")
 end
 )lua"),
-	                       &runtime, QStringLiteral("Caller.Id"));
+	                       &runtime, QStringLiteral("caller.id"));
 
 	quint64                             generation = 0;
 	QHash<int, WorldRuntime::LineEntry> ignoredEntries;
@@ -9119,7 +13588,7 @@ end
 	auto lineSnapshot                            = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration           = generation;
 	lineSnapshot->lineBufferCount                = count;
-	auto snapshot                                = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                                = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot              = true;
 	snapshot->lineBufferCount                    = count;
 	snapshot->lineBufferSnapshot                 = lineSnapshot;
@@ -9132,11 +13601,11 @@ end
 	snapshot->pluginEnginesById.insert(targetKey, target);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {caller};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("reset_caller");
-	request.stringListArg         = {QStringLiteral("reset_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("reset_caller");
+	request.stringListArg       = {QStringLiteral("reset_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult suspended;
 	dispatchWorkerAndWait(executor, request, suspended);
 	QVERIFY(suspended.suspended);
@@ -9168,15 +13637,16 @@ end
 	teardownWorkerEngine(executor, target);
 }
 
-void tst_LuaCallbackEngine::directDestructionCancelsSuspendedCallPluginTarget()
+void tst_LuaCallbackEngine::executorTeardownCancelsSuspendedCallPluginTarget()
 {
 	WorldRuntime runtime;
 	runtime.addLine(QStringLiteral("anchor"), WorldRuntime::LineOutput);
-	auto caller = QSharedPointer<LuaCallbackEngine>::create();
-	auto target = QSharedPointer<LuaCallbackEngine>::create();
-	caller->setWorldRuntime(&runtime);
-	target->setWorldRuntime(&runtime);
-	setEngineScript(*target, QStringLiteral(R"lua(
+	auto                      caller          = QSharedPointer<LuaCallbackEngine>::create();
+	auto                      target          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
+	initializeWorkerEngine(executor, target, QStringLiteral(R"lua(
 destruction_target_completed = false
 function destruction_target()
   Note("destruction target output")
@@ -9186,19 +13656,19 @@ end
 function destruction_target_status(value)
   return tostring(destruction_target_completed)
 end
-)lua"));
-	setEngineScript(*caller, QStringLiteral(R"lua(
+)lua"),
+	                       &runtime, QStringLiteral("target.id"));
+	initializeWorkerEngine(executor, caller, QStringLiteral(R"lua(
 function destruction_caller(name, line, wildcards)
   CallPlugin("Target.Id", "destruction_target")
 end
-)lua"));
-	caller->setPluginInfo(QStringLiteral("Caller.Id"), QStringLiteral("Caller"), QStringLiteral("/tmp"));
-	target->setPluginInfo(QStringLiteral("Target.Id"), QStringLiteral("Target"), QStringLiteral("/tmp"));
+)lua"),
+	                       &runtime, QStringLiteral("caller.id"));
 	WorldRuntime::Plugin targetPlugin;
-	targetPlugin.attributes.insert(QStringLiteral("id"), QStringLiteral("Target.Id"));
+	targetPlugin.attributes.insert(QStringLiteral("id"), QStringLiteral("target.id"));
 	targetPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Target"));
 	targetPlugin.lua = target;
-	runtime.pluginsMutable().push_back(targetPlugin);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(targetPlugin);
 
 	quint64                             generation = 0;
 	QHash<int, WorldRuntime::LineEntry> ignoredEntries;
@@ -9208,46 +13678,57 @@ end
 	auto lineSnapshot                            = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration           = generation;
 	lineSnapshot->lineBufferCount                = count;
-	auto snapshot                                = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                                = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot              = true;
 	snapshot->lineBufferCount                    = count;
 	snapshot->lineBufferSnapshot                 = lineSnapshot;
 	snapshot->hasCallbackOutputAnchor            = true;
 	snapshot->callbackOutputAnchorBufferIndex    = count;
 	snapshot->callbackOutputAnchorAbsoluteNumber = runtime.lines().constLast().lineNumber;
-	snapshot->pluginNamesById.insert(QStringLiteral("target.id"), QStringLiteral("Target"));
-	snapshot->pluginEnabledById.insert(QStringLiteral("target.id"), true);
-	snapshot->pluginEnginesById.insert(QStringLiteral("target.id"), target);
+	addPluginSnapshotEntry(*snapshot, QStringLiteral("target.id"), QStringLiteral("Target"), target);
 
-	LuaExecutorDirect       executor;
 	LuaBatchDispatchRequest request;
-	request.engines                  = {caller};
-	request.kind                     = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName             = QStringLiteral("destruction_caller");
-	request.stringListArg            = {QStringLiteral("alias"), QStringLiteral("ignored")};
-	request.stringListArg2           = {QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg    = snapshot;
-	LuaBatchDispatchResult suspended = executor.dispatchBatch(request);
+	request.engines             = {caller};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("destruction_caller");
+	request.stringListArg       = {QStringLiteral("alias"), QStringLiteral("ignored")};
+	request.stringListArg2      = {QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
+	LuaBatchDispatchResult suspended;
+	dispatchWorkerAndWait(executor, request, suspended);
 	QVERIFY(suspended.suspended);
 	executeDeferredMutations(suspended);
 	QCOMPARE(runtime.luaCallbackOutputCursorCount(), qsizetype{1});
 
+	LuaBatchDispatchRequest teardownRequest;
+	teardownRequest.kind    = LuaBatchDispatchKind::TeardownEnginesMany;
+	teardownRequest.engines = {caller};
+	LuaBatchDispatchResult teardownResult;
+	dispatchWorkerAndWait(executor, teardownRequest, teardownResult);
+	executeDeferredMutations(teardownResult);
+
 	request.engines.clear();
-	request.miniWindowSnapshotArg.clear();
+	request.callbackSnapshotArg.clear();
+	teardownRequest.engines.clear();
 	snapshot.clear();
 	suspended                                        = {};
+	teardownResult                                   = {};
 	const QWeakPointer<LuaCallbackEngine> callerWeak = caller;
 	caller.clear();
 	QVERIFY(callerWeak.isNull());
 	QCOMPARE(runtime.luaCallbackOutputCursorCount(), qsizetype{0});
 
 	LuaBatchDispatchRequest status;
-	status.engines                            = {target};
-	status.kind                               = LuaBatchDispatchKind::StringInOut;
-	status.functionName                       = QStringLiteral("destruction_target_status");
-	status.stringArg                          = QStringLiteral("ignored");
-	const LuaBatchDispatchResult statusResult = executor.dispatchBatch(status);
+	status.engines      = {target};
+	status.kind         = LuaBatchDispatchKind::StringInOut;
+	status.functionName = QStringLiteral("destruction_target_status");
+	status.stringArg    = QStringLiteral("ignored");
+	LuaBatchDispatchResult statusResult;
+	dispatchWorkerAndWait(executor, status, statusResult);
 	QCOMPARE(statusResult.stringResult, QStringLiteral("false"));
+
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	teardownWorkerEngine(executor, target);
 }
 
 void tst_LuaCallbackEngine::workerWorldProxyPagesTargetAndRestoresCallerPresentation()
@@ -9306,7 +13787,7 @@ end
 	auto lineSnapshot                    = QSharedPointer<LuaCallbackLineBufferSnapshot>::create();
 	lineSnapshot->lineBufferGeneration   = generation;
 	lineSnapshot->lineBufferCount        = count;
-	auto snapshot                        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                        = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasLineBufferSnapshot      = true;
 	snapshot->lineBufferCount            = count;
 	snapshot->lineBufferSnapshot         = lineSnapshot;
@@ -9322,11 +13803,11 @@ end
 	snapshot->worldRuntimeSnapshot.push_back(secondaryWorld);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("cross_world_page_cb");
-	request.stringListArg         = {QStringLiteral("world_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("cross_world_page_cb");
+	request.stringListArg       = {QStringLiteral("world_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int pageRequests = 0;
@@ -9446,8 +13927,8 @@ end
 )lua"),
 	                       &primaryRuntime);
 
-	auto snapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(
-	    *primaryRuntime.luaCallbackSnapshotForBridgedCall());
+	auto snapshot =
+	    QSharedPointer<LuaCallbackSnapshot>::create(*primaryRuntime.luaCallbackSnapshotForBridgedCall());
 	LuaCallbackWorldRuntimeSnapshot secondaryWorld;
 	secondaryWorld.runtime = secondaryRuntime.get();
 	secondaryWorld.id      = QStringLiteral("secondary-id");
@@ -9455,11 +13936,11 @@ end
 	snapshot->worldRuntimeSnapshot.push_back(secondaryWorld);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("vanished_page_cb");
-	request.stringListArg         = {QStringLiteral("world_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("vanished_page_cb");
+	request.stringListArg       = {QStringLiteral("world_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(result.suspended);
@@ -9557,7 +14038,7 @@ void tst_LuaCallbackEngine::freshNotepadSnapshotDoesNotReplayFlushedClose()
 	survivor.title     = QStringLiteral("DUPLICATE");
 	survivor.hasEditor = true;
 
-	LuaCallbackMiniWindowSnapshot freshSnapshot;
+	LuaCallbackSnapshot freshSnapshot;
 	freshSnapshot.hasNotepadPresentationSnapshot = true;
 	freshSnapshot.notepadSnapshot                = {survivor};
 
@@ -9606,8 +14087,10 @@ void tst_LuaCallbackEngine::workerNotepadCachesPreserveGlobalAndOwnerLists()
 	                              &secondaryRuntime));
 	QCoreApplication::processEvents();
 
-	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto                      engine          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = primaryRuntime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
 notepad_result = ""
 local function joined(all)
@@ -9809,6 +14292,14 @@ function notepad_cache_status(value)
 end
 )lua"),
 	                       &primaryRuntime);
+	WorldRuntime::Plugin selfPlugin;
+	selfPlugin.attributes.insert(QStringLiteral("id"), QStringLiteral("plugin.id"));
+	selfPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Plugin"));
+	selfPlugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	selfPlugin.enabled = true;
+	selfPlugin.lua     = engine;
+	WorldRuntimeTestAccess::plugins(primaryRuntime).push_back(selfPlugin);
+	primaryRuntime.patchLuaCallbackStableSnapshot(WorldRuntime::LuaCallbackStableSnapshotDomain::Plugins);
 
 	LuaBatchDispatchRequest status;
 	status.engines      = {engine};
@@ -9818,15 +14309,15 @@ end
 	LuaBatchDispatchResult  statusResult;
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.stringListArg         = {QStringLiteral("alias"), QStringLiteral("line")};
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
-	QVERIFY(request.miniWindowSnapshotArg);
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.stringListArg       = {QStringLiteral("alias"), QStringLiteral("line")};
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	QVERIFY(request.callbackSnapshotArg);
 	const auto primaryBSnapshot = std::ranges::find_if(
-	    request.miniWindowSnapshotArg->notepadSnapshot, [](const LuaCallbackNotepadSnapshot &notepad)
+	    request.callbackSnapshotArg->notepadSnapshot, [](const LuaCallbackNotepadSnapshot &notepad)
 	    { return notepad.title == QStringLiteral("Primary B"); });
-	QVERIFY(primaryBSnapshot != request.miniWindowSnapshotArg->notepadSnapshot.cend());
+	QVERIFY(primaryBSnapshot != request.callbackSnapshotArg->notepadSnapshot.cend());
 	QVERIFY(primaryBSnapshot->hasEditor);
 	QVERIFY(!primaryBSnapshot->hasText);
 	QVERIFY(primaryBSnapshot->text.isEmpty());
@@ -9864,8 +14355,8 @@ end
 
 	executeDeferredMutations(crossWorldResult);
 	QCoreApplication::processEvents();
-	request.functionName          = QStringLiteral("cross_world_pending_notepad_cache_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("cross_world_pending_notepad_cache_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult crossWorldPendingResult;
 	dispatchWorkerAndWait(executor, request, crossWorldPendingResult);
 	int pendingResumeRequests = 0;
@@ -9889,8 +14380,8 @@ end
 	executeDeferredMutations(crossWorldPendingResult);
 	QCoreApplication::processEvents();
 
-	request.functionName          = QStringLiteral("cross_world_notepad_geometry_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("cross_world_notepad_geometry_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult crossWorldGeometryResult;
 	dispatchWorkerAndWait(executor, request, crossWorldGeometryResult);
 	int crossWorldGeometryResumeCount = 0;
@@ -9921,8 +14412,8 @@ end
 	QCOMPARE(crossWorldGeometryParts.at(3).toInt(), realizedSecondaryGeometry.width());
 	QCOMPARE(crossWorldGeometryParts.at(4).toInt(), realizedSecondaryGeometry.height());
 
-	request.functionName          = QStringLiteral("owner_notepad_cache_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("owner_notepad_cache_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult ownerResult;
 	dispatchWorkerAndWait(executor, request, ownerResult);
 	QVERIFY(!ownerResult.suspended);
@@ -9935,7 +14426,7 @@ end
 	executeDeferredMutations(ownerResult);
 	QCoreApplication::processEvents();
 	request.functionName = QStringLiteral("duplicate_notepad_cache_cb");
-	request.miniWindowSnapshotArg.reset();
+	request.callbackSnapshotArg.reset();
 	LuaBatchDispatchResult duplicateResult;
 	dispatchWorkerAndWait(executor, request, duplicateResult);
 	int duplicateResumeCount = 0;
@@ -9962,8 +14453,8 @@ end
 	QVERIFY(remainingDuplicate->editor());
 	QCOMPARE(remainingDuplicate->editor()->toPlainText(), QStringLiteral("second"));
 
-	request.functionName          = QStringLiteral("ordered_notepad_mutations_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("ordered_notepad_mutations_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult orderedResult;
 	dispatchWorkerAndWait(executor, request, orderedResult);
 	int orderedResumeCount = 0;
@@ -10000,8 +14491,8 @@ end
 	QCOMPARE(orderedNotepad->editor()->palette().color(QPalette::Text), QColor(Qt::red));
 	QCOMPARE(orderedNotepad->editor()->palette().color(QPalette::Base), QColor(Qt::blue));
 
-	request.functionName          = QStringLiteral("nested_notepad_cache_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("nested_notepad_cache_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult nestedNotepadResult;
 	dispatchWorkerAndWait(executor, request, nestedNotepadResult);
 	QVERIFY(!nestedNotepadResult.suspended);
@@ -10041,13 +14532,12 @@ end
 	const auto completeNotepadSnapshot = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	QVERIFY(completeNotepadSnapshot);
 	QVERIFY(completeNotepadSnapshot->hasNotepadPresentationSnapshot);
-	auto partialNotepadSnapshot =
-	    QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(*completeNotepadSnapshot);
+	auto partialNotepadSnapshot = QSharedPointer<LuaCallbackSnapshot>::create(*completeNotepadSnapshot);
 	partialNotepadSnapshot->hasUiSnapshot                  = true;
 	partialNotepadSnapshot->hasNotepadPresentationSnapshot = false;
 	partialNotepadSnapshot->notepadSnapshot.clear();
-	request.functionName          = QStringLiteral("nested_partial_notepad_cb");
-	request.miniWindowSnapshotArg = partialNotepadSnapshot;
+	request.functionName        = QStringLiteral("nested_partial_notepad_cb");
+	request.callbackSnapshotArg = partialNotepadSnapshot;
 	LuaBatchDispatchResult partialNotepadResult;
 	dispatchWorkerAndWait(executor, request, partialNotepadResult);
 	int partialNotepadResumeCount = 0;
@@ -10069,8 +14559,8 @@ end
 	QCoreApplication::processEvents();
 	QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 
-	request.functionName          = QStringLiteral("partial_append_notepad_cb");
-	request.miniWindowSnapshotArg = partialNotepadSnapshot;
+	request.functionName        = QStringLiteral("partial_append_notepad_cb");
+	request.callbackSnapshotArg = partialNotepadSnapshot;
 	LuaBatchDispatchResult partialAppendResult;
 	dispatchWorkerAndWait(executor, request, partialAppendResult);
 	int partialAppendResumeCount = 0;
@@ -10111,9 +14601,11 @@ end
 	dispatchWorkerAndWait(executor, status, statusResult);
 	QCOMPARE(statusResult.stringResult, QStringLiteral("true"));
 
-	auto validEmptyNotepadSnapshot           = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
-	validEmptyNotepadSnapshot->hasUiSnapshot = true;
+	auto validEmptyNotepadSnapshot                            = QSharedPointer<LuaCallbackSnapshot>::create();
+	validEmptyNotepadSnapshot->hasUiSnapshot                  = true;
 	validEmptyNotepadSnapshot->hasNotepadPresentationSnapshot = true;
+	addPluginSnapshotEntry(*validEmptyNotepadSnapshot, QStringLiteral("plugin.id"), QStringLiteral("Plugin"),
+	                       engine);
 	LuaCallbackNotepadSnapshot onlyNotepad;
 	onlyNotepad.runtime   = &primaryRuntime;
 	onlyNotepad.worldId   = QStringLiteral("primary-id");
@@ -10121,10 +14613,10 @@ end
 	onlyNotepad.hasEditor = true;
 	validEmptyNotepadSnapshot->notepadSnapshot.push_back(onlyNotepad);
 	LuaBatchDispatchRequest emptyNotepadRequest;
-	emptyNotepadRequest.engines               = {engine};
-	emptyNotepadRequest.kind                  = LuaBatchDispatchKind::NumberAndUtf8StringsCount;
-	emptyNotepadRequest.functionName          = QStringLiteral("nested_empty_notepad_cb");
-	emptyNotepadRequest.miniWindowSnapshotArg = validEmptyNotepadSnapshot;
+	emptyNotepadRequest.engines             = {engine};
+	emptyNotepadRequest.kind                = LuaBatchDispatchKind::NumberAndUtf8StringsCount;
+	emptyNotepadRequest.functionName        = QStringLiteral("nested_empty_notepad_cb");
+	emptyNotepadRequest.callbackSnapshotArg = validEmptyNotepadSnapshot;
 	LuaBatchDispatchResult emptyNotepadResult;
 	dispatchWorkerAndWait(executor, emptyNotepadRequest, emptyNotepadResult);
 	QVERIFY(!emptyNotepadResult.suspended);
@@ -10140,7 +14632,7 @@ end
 
 	const QRect orderedGeometryBeforeOverflow = realizedOrderedGeometry;
 	request.functionName                      = QStringLiteral("overflowing_notepad_move_cb");
-	request.miniWindowSnapshotArg             = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.callbackSnapshotArg               = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult overflowMoveResult;
 	dispatchWorkerAndWait(executor, request, overflowMoveResult);
 	QVERIFY(!overflowMoveResult.suspended);
@@ -10154,8 +14646,8 @@ end
 	QVERIFY(
 	    frame.appendToNotepad(QStringLiteral("Vanishing"), QStringLiteral("body"), false, &primaryRuntime));
 	QCoreApplication::processEvents();
-	request.functionName          = QStringLiteral("disappearing_notepad_move_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("disappearing_notepad_move_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult disappearingMoveResult;
 	dispatchWorkerAndWait(executor, request, disappearingMoveResult);
 	QVERIFY(disappearingMoveResult.suspended);
@@ -10197,8 +14689,8 @@ end
 	QVERIFY(frame.appendToNotepad(QStringLiteral("Nested Vanishing"), QStringLiteral("nested body"), false,
 	                              &primaryRuntime));
 	QCoreApplication::processEvents();
-	request.functionName          = QStringLiteral("nested_vanishing_notepad_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("nested_vanishing_notepad_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult nestedVanishingResult;
 	dispatchWorkerAndWait(executor, request, nestedVanishingResult);
 	QVERIFY(nestedVanishingResult.suspended);
@@ -10240,8 +14732,8 @@ end
 	dispatchWorkerAndWait(executor, status, statusResult);
 	QCOMPARE(statusResult.stringResult, QStringLiteral("0.0||false"));
 
-	request.functionName          = QStringLiteral("spaced_notepad_titles_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("spaced_notepad_titles_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult spacedTitleResult;
 	dispatchWorkerAndWait(executor, request, spacedTitleResult);
 	QVERIFY(!spacedTitleResult.suspended);
@@ -10286,8 +14778,8 @@ end
 	QVERIFY(saveSourceNotepad->editor());
 	QVERIFY(saveSourceNotepad->editor()->document());
 	saveSourceNotepad->editor()->document()->setModified(true);
-	request.functionName          = QStringLiteral("save_notepad_copy_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("save_notepad_copy_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult saveCopyResult;
 	dispatchWorkerAndWait(executor, request, saveCopyResult);
 	int saveCopyResumeCount = 0;
@@ -10301,8 +14793,8 @@ end
 	QVERIFY(saveSourceNotepad->filePath().isEmpty());
 	QVERIFY(saveSourceNotepad->editor()->document()->isModified());
 
-	request.functionName          = QStringLiteral("save_notepad_replace_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("save_notepad_replace_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult saveReplaceResult;
 	dispatchWorkerAndWait(executor, request, saveReplaceResult);
 	int saveReplaceResumeCount = 0;
@@ -10320,8 +14812,8 @@ end
 
 	QVERIFY(frame.appendToNotepad(QStringLiteral("Rename Geometry"), QStringLiteral("geometry body"), false,
 	                              &primaryRuntime));
-	request.functionName          = QStringLiteral("move_then_rename_notepad_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("move_then_rename_notepad_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult renamedGeometryResult;
 	dispatchWorkerAndWait(executor, request, renamedGeometryResult);
 	int renamedGeometryResumeCount = 0;
@@ -10356,8 +14848,8 @@ end
 
 	QVERIFY(frame.appendToNotepad(QStringLiteral("Query Save"), QStringLiteral("unchanged"), false,
 	                              &primaryRuntime));
-	request.functionName          = QStringLiteral("query_save_notepad_cache_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("query_save_notepad_cache_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult querySaveResult;
 	dispatchWorkerAndWait(executor, request, querySaveResult);
 	int querySaveResumeCount = 0;
@@ -10381,8 +14873,8 @@ end
 	QVERIFY(recreatedQuerySave->editor());
 	QCOMPARE(recreatedQuerySave->editor()->toPlainText(), QStringLiteral("after"));
 
-	request.functionName          = QStringLiteral("invalid_notepad_mutations_cb");
-	request.miniWindowSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
+	request.functionName        = QStringLiteral("invalid_notepad_mutations_cb");
+	request.callbackSnapshotArg = primaryRuntime.luaCallbackSnapshotForBridgedCall();
 	LuaBatchDispatchResult invalidMutationResult;
 	dispatchWorkerAndWait(executor, request, invalidMutationResult);
 	QVERIFY(!invalidMutationResult.suspended);
@@ -10404,9 +14896,11 @@ end
 
 void tst_LuaCallbackEngine::workerUnavailableNotepadRefreshDoesNotExportStaleCaches()
 {
-	WorldRuntime      runtime;
-	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
-	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	WorldRuntime              runtime;
+	auto                      engine          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor = *runtimeExecutor;
 	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
 unavailable_notepad_result = ""
 function read_nested_notepad_list()
@@ -10426,17 +14920,18 @@ end
 )lua"),
 	                       &runtime);
 
-	auto snapshot                            = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                            = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasUiSnapshot                  = true;
 	snapshot->hasNotepadPresentationSnapshot = false;
 	snapshot->notepadListByKey.insert(QStringLiteral("1"), QStringList{QStringLiteral("stale notepad")});
+	addPluginSnapshotEntry(*snapshot, QStringLiteral("plugin.id"), QStringLiteral("Plugin"), engine);
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringsAndWildcards;
-	request.functionName          = QStringLiteral("unavailable_notepad_nested_cb");
-	request.stringListArg         = {QStringLiteral("notepad_alias"), QStringLiteral("ignored")};
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("unavailable_notepad_nested_cb");
+	request.stringListArg       = {QStringLiteral("notepad_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	int unavailableRefreshes = 0;
@@ -10463,6 +14958,86 @@ end
 	QCOMPARE(statusResult.stringResult, QStringLiteral("true|true|<nil>"));
 
 	teardownWorkerEngine(executor, engine);
+}
+
+void tst_LuaCallbackEngine::workerUnavailableNotepadRefreshSurvivesNestedMutationBoundary()
+{
+	WorldRuntime              runtime;
+	auto                      engine          = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor  &executor = *runtimeExecutor;
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), QStringLiteral("plugin.id"));
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Plugin Name"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+unavailable_after_mutation_result = ""
+function mutate_without_notepad_access()
+  SetVariable("notepad-boundary", "committed")
+  return "ok"
+end
+function unavailable_after_nested_mutation(name, line, wildcards)
+  local before = GetNotepadList(true)
+  local code = CallPlugin("Plugin.Id", "mutate_without_notepad_access")
+  local after = GetNotepadList(true)
+  unavailable_after_mutation_result = table.concat({
+    tostring(before == nil), tostring(code == 0), tostring(after == nil)
+  }, "|")
+end
+function unavailable_after_mutation_status(value)
+  return unavailable_after_mutation_result
+end
+)lua"),
+	                       &runtime);
+
+	auto snapshot                            = QSharedPointer<LuaCallbackSnapshot>::create();
+	snapshot->hasUiSnapshot                  = true;
+	snapshot->hasNotepadPresentationSnapshot = false;
+	snapshot->notepadListByKey.insert(QStringLiteral("1"), QStringList{QStringLiteral("stale notepad")});
+	addPluginSnapshotEntry(*snapshot, QStringLiteral("plugin.id"), QStringLiteral("Plugin"), engine);
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringsAndWildcards;
+	request.functionName        = QStringLiteral("unavailable_after_nested_mutation");
+	request.stringListArg       = {QStringLiteral("notepad_alias"), QStringLiteral("ignored")};
+	request.callbackSnapshotArg = snapshot;
+	LuaBatchDispatchResult result;
+	dispatchWorkerAndWait(executor, request, result);
+	int unavailableRefreshes = 0;
+	while (result.suspended)
+	{
+		++unavailableRefreshes;
+		QVERIFY(unavailableRefreshes <= 1);
+		QVERIFY(result.pendingModalStringRequest.internalImmediateResume);
+		LuaBatchDispatchRequest resume;
+		resume.engines       = {engine};
+		resume.kind          = LuaBatchDispatchKind::ResumeSuspendedModalString;
+		resume.modalResumeId = result.modalResumeId;
+		dispatchWorkerAndWait(executor, resume, result);
+	}
+	QCOMPARE(unavailableRefreshes, 1);
+
+	LuaBatchDispatchRequest status;
+	status.engines      = {engine};
+	status.kind         = LuaBatchDispatchKind::StringInOut;
+	status.functionName = QStringLiteral("unavailable_after_mutation_status");
+	status.stringArg    = QStringLiteral("ignored");
+	LuaBatchDispatchResult statusResult;
+	dispatchWorkerAndWait(executor, status, statusResult);
+	QCOMPARE(statusResult.stringResult, QStringLiteral("true|true|true"));
+
+	executeDeferredMutations(result);
+	QCOMPARE(runtime.pluginVariableValue(QStringLiteral("plugin.id"), QStringLiteral("notepad-boundary")),
+	         QStringLiteral("committed"));
+	teardownWorkerEngine(executor, engine);
+	if (WorldRuntime::Plugin *storedPlugin =
+	        WorldRuntimeTestAccess::plugin(runtime, QStringLiteral("plugin.id")))
+		storedPlugin->lua.clear();
 }
 
 void tst_LuaCallbackEngine::callbackRuleListsMaterializeOnlyOnDemandAndPreserveMutations() const
@@ -10520,7 +15095,7 @@ end
 	runtime.setAliases({makeRuntimeAlias(QStringLiteral("world_alias"))});
 	runtime.setTimers({makeRuntimeTimer(QStringLiteral("world_timer"))});
 
-	auto snapshot        = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot        = QSharedPointer<LuaCallbackSnapshot>::create();
 	auto makeSnapshotRow = []<typename Item>(const QString &name)
 	{
 		Item item;
@@ -10551,10 +15126,10 @@ end
 	auto dispatchSuspending = [&](const QString &functionName)
 	{
 		LuaBatchDispatchRequest request;
-		request.engines               = {engine};
-		request.kind                  = LuaBatchDispatchKind::NoArgs;
-		request.functionName          = functionName;
-		request.miniWindowSnapshotArg = snapshot;
+		request.engines             = {engine};
+		request.kind                = LuaBatchDispatchKind::NoArgs;
+		request.functionName        = functionName;
+		request.callbackSnapshotArg = snapshot;
 		LuaBatchDispatchResult result;
 		dispatchWorkerAndWait(executor, request, result);
 		return result;
@@ -10596,10 +15171,10 @@ end
 	resumeSuspended(selective);
 
 	LuaBatchDispatchRequest mutationRequest;
-	mutationRequest.engines               = {engine};
-	mutationRequest.kind                  = LuaBatchDispatchKind::NoArgs;
-	mutationRequest.functionName          = QStringLiteral("mutate_world_rules");
-	mutationRequest.miniWindowSnapshotArg = snapshot;
+	mutationRequest.engines             = {engine};
+	mutationRequest.kind                = LuaBatchDispatchKind::NoArgs;
+	mutationRequest.functionName        = QStringLiteral("mutate_world_rules");
+	mutationRequest.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult mutationResult;
 	dispatchWorkerAndWait(executor, mutationRequest, mutationResult);
 	QCOMPARE(runtime.triggers().constFirst().attributes.value(QStringLiteral("enabled")),
@@ -10647,17 +15222,17 @@ function snapshot_status(value)
 end
 )lua"));
 
-	auto snapshot                   = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
-	snapshot->hasCommandUiSnapshot  = true;
-	snapshot->commandUiHasFrameData = true;
-	snapshot->commandUiValues[QStringLiteral("selectedWord")]         = QStringLiteral("sextant");
+	auto snapshot                                             = QSharedPointer<LuaCallbackSnapshot>::create();
+	snapshot->hasCommandUiSnapshot                            = true;
+	snapshot->commandUiHasFrameData                           = true;
+	snapshot->commandUiValues[QStringLiteral("selectedWord")] = QStringLiteral("sextant");
 	snapshot->commandUiValues[QStringLiteral("selectedWordResolved")] = true;
 	snapshot->commandUiValues[QStringLiteral("outputTextRectLeft")]   = 19;
 	snapshot->commandUiValues[QStringLiteral("outputTextRectTop")]    = 14;
 	snapshot->commandUiValues[QStringLiteral("outputTextRectRight")]  = 318;
 	snapshot->commandUiValues[QStringLiteral("outputTextRectBottom")] = 252;
 	snapshot->windowNames.push_back(QStringLiteral("map"));
-	LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot windowInfo;
+	LuaCallbackSnapshot::WindowInfoSnapshot windowInfo;
 	windowInfo.width                                    = 120;
 	windowInfo.height                                   = 80;
 	windowInfo.lastMouseX                               = 33;
@@ -10668,10 +15243,10 @@ end
 
 	LuaExecutorDirect       executor;
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = snapshot;
 	static_cast<void>(executor.dispatchBatch(request));
 
 	request.kind                        = LuaBatchDispatchKind::StringInOut;
@@ -10704,7 +15279,7 @@ void tst_LuaCallbackEngine::callbackMiniWindowResourceIdentityIsExact()
 		)lua"),
 	                       &runtime);
 
-	auto snapshot         = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot         = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->windowNames = {QStringLiteral("Map"), QStringLiteral("map"), QStringLiteral("map|left")};
 	snapshot->fontIdsByWindow.insert(QStringLiteral("Map"),
 	                                 {QStringLiteral("Font"), QStringLiteral("Font ")});
@@ -10715,10 +15290,10 @@ void tst_LuaCallbackEngine::callbackMiniWindowResourceIdentityIsExact()
 	snapshot->rebuildMiniWindowLookupCaches();
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(result.hasFunctionValid);
@@ -10726,7 +15301,7 @@ void tst_LuaCallbackEngine::callbackMiniWindowResourceIdentityIsExact()
 	request.kind         = LuaBatchDispatchKind::StringInOut;
 	request.functionName = QStringLiteral("identity_status");
 	request.stringArg    = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg.reset();
+	request.callbackSnapshotArg.reset();
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("%1.0:%1.0:%1.0:-2.0:-2.0:-2.0").arg(eHotspotNotInstalled));
 
@@ -10756,12 +15331,12 @@ end
 )lua"),
 	                       &runtime);
 
-	auto snapshot         = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot         = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->windowNames = {QStringLiteral("Map"), QStringLiteral("map"), QStringLiteral("image-a"),
 	                         QStringLiteral("image-a|b")};
-	LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot upperInfo;
+	LuaCallbackSnapshot::WindowInfoSnapshot upperInfo;
 	upperInfo.width = 101;
-	LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot lowerInfo;
+	LuaCallbackSnapshot::WindowInfoSnapshot lowerInfo;
 	lowerInfo.width = 202;
 	snapshot->windowInfoByWindow.insert(QStringLiteral("Map"), upperInfo);
 	snapshot->windowInfoByWindow.insert(QStringLiteral("map"), lowerInfo);
@@ -10789,10 +15364,10 @@ end
 	snapshot->rebuildMiniWindowLookupCaches();
 
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::NoArgs;
-	request.functionName          = QStringLiteral("OnPluginEnable");
-	request.miniWindowSnapshotArg = snapshot;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("OnPluginEnable");
+	request.callbackSnapshotArg = snapshot;
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QVERIFY(result.hasFunctionValid);
@@ -10800,7 +15375,7 @@ end
 	request.kind         = LuaBatchDispatchKind::StringInOut;
 	request.functionName = QStringLiteral("structured_cache_status");
 	request.stringArg    = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg.reset();
+	request.callbackSnapshotArg.reset();
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("ok"));
 
@@ -10844,7 +15419,7 @@ end
 		const int     width    = runtime.windowInfo(windowId, 3).toInt();
 		const int     height   = runtime.windowInfo(windowId, 4).toInt();
 
-		auto          snapshot                = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+		auto          snapshot                = QSharedPointer<LuaCallbackSnapshot>::create();
 		snapshot->hasCommandUiSnapshot        = true;
 		snapshot->commandUiHasView            = true;
 		snapshot->commandUiHasFrameData       = true;
@@ -10859,7 +15434,7 @@ end
 		snapshot->commandUiValues.insert(QStringLiteral("outputClientHeight"), 480);
 
 		snapshot->windowNames.push_back(windowId);
-		LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot windowInfo;
+		LuaCallbackSnapshot::WindowInfoSnapshot windowInfo;
 		windowInfo.locationX                   = left;
 		windowInfo.locationY                   = top;
 		windowInfo.width                       = width;
@@ -10888,7 +15463,7 @@ end
 	request.numberArg1                = 0;
 	request.stringArg2                = QStringLiteral("resizer");
 	request.functionName              = QStringLiteral("OnResizeMove");
-	request.miniWindowSnapshotArg     = makeSnapshot(145, 165);
+	request.callbackSnapshotArg       = makeSnapshot(145, 165);
 	LuaBatchDispatchResult moveResult = executor.dispatchBatch(request);
 	QVERIFY(moveResult.boolResultValid);
 	QVERIFY(!moveResult.boolResult);
@@ -10897,7 +15472,7 @@ end
 	QCOMPARE(runtime.windowInfo(QStringLiteral("win"), 4).toInt(), 160);
 
 	request.functionName                 = QStringLiteral("OnResizeRelease");
-	request.miniWindowSnapshotArg        = makeSnapshot(145, 165);
+	request.callbackSnapshotArg          = makeSnapshot(145, 165);
 	LuaBatchDispatchResult releaseResult = executor.dispatchBatch(request);
 	QVERIFY(releaseResult.boolResultValid);
 	QVERIFY(!releaseResult.boolResult);
@@ -10905,7 +15480,7 @@ end
 	request.kind                        = LuaBatchDispatchKind::StringInOut;
 	request.functionName                = QStringLiteral("resize_status");
 	request.stringArg                   = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg       = {};
+	request.callbackSnapshotArg         = {};
 	const LuaBatchDispatchResult result = executor.dispatchBatch(request);
 	QCOMPARE(result.stringResult, QStringLiteral("move:145,165:125,135:145,165|release:240,160:145,165"));
 }
@@ -10994,7 +15569,7 @@ end
 	const MiniWindow *runtimeWindow = runtime.miniWindow(windowId);
 	QVERIFY(runtimeWindow);
 
-	auto snapshot                                   = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+	auto snapshot                                   = QSharedPointer<LuaCallbackSnapshot>::create();
 	snapshot->hasCommandUiSnapshot                  = false;
 	snapshot->commandUiHasView                      = true;
 	snapshot->commandUiHasFrameData                 = true;
@@ -11011,8 +15586,8 @@ end
 	snapshot->absoluteMiniWindowScaleYOver      = 0.5;
 	snapshot->windowNames.push_back(windowId);
 	snapshot->miniWindowsByWindow.insert(
-	    windowId, QSharedPointer<MiniWindow>::create(runtimeWindow->detachedImageCopy()));
-	LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot windowInfo;
+	    windowId, QSharedPointer<const MiniWindow>::create(runtimeWindow->detachedImageCopy()));
+	LuaCallbackSnapshot::WindowInfoSnapshot windowInfo;
 	windowInfo.locationX                   = runtimeWindow->location.x();
 	windowInfo.locationY                   = runtimeWindow->location.y();
 	windowInfo.width                       = runtimeWindow->width;
@@ -11031,7 +15606,7 @@ end
 	request.kind                    = LuaBatchDispatchKind::NumberAndStringStopOnTrue;
 	request.numberArg1              = 0;
 	request.stringArg2              = QStringLiteral("resizer");
-	request.miniWindowSnapshotArg   = snapshot;
+	request.callbackSnapshotArg     = snapshot;
 	request.hasActionSourceOverride = true;
 	request.actionSourceOverride    = WorldRuntime::eHotspotCallback;
 	request.functionName            = QStringLiteral("OnFullyBlockedPosition");
@@ -11055,21 +15630,21 @@ end
 	QVERIFY(exactGeometryNoOpResult.boolResult);
 	QVERIFY(exactGeometryNoOpResult.deferredRuntimeMutationBatches.isEmpty());
 
-	auto tinyScaleSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(*snapshot);
+	auto tinyScaleSnapshot                          = QSharedPointer<LuaCallbackSnapshot>::create(*snapshot);
 	tinyScaleSnapshot->absoluteMiniWindowScaleXOver = std::numeric_limits<double>::min();
 	tinyScaleSnapshot->absoluteMiniWindowScaleYOver = std::numeric_limits<double>::min();
 	request.functionName                            = QStringLiteral("OnTinyScalePosition");
-	request.miniWindowSnapshotArg                   = tinyScaleSnapshot;
+	request.callbackSnapshotArg                     = tinyScaleSnapshot;
 	LuaBatchDispatchResult tinyScalePositionResult;
 	dispatchWorkerAndWait(executor, request, tinyScalePositionResult);
 	QVERIFY(tinyScalePositionResult.boolResultValid);
 	QVERIFY(tinyScalePositionResult.boolResult);
 	QVERIFY(!tinyScalePositionResult.deferredRuntimeMutationBatches.isEmpty());
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("tiny_scale_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("tiny_scale_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	LuaBatchDispatchResult tinyScaleStatusResult;
 	dispatchWorkerAndWait(executor, request, tinyScaleStatusResult);
 	QCOMPARE(tinyScaleStatusResult.stringResult, QStringLiteral("%1,%2")
@@ -11080,7 +15655,7 @@ end
 	request.functionName            = QStringLiteral("OnResizeMove");
 	request.numberArg1              = 0;
 	request.stringArg2              = QStringLiteral("resizer");
-	request.miniWindowSnapshotArg   = snapshot;
+	request.callbackSnapshotArg     = snapshot;
 	request.hasActionSourceOverride = true;
 	request.actionSourceOverride    = WorldRuntime::eHotspotCallback;
 	LuaBatchDispatchResult moveResult;
@@ -11094,10 +15669,10 @@ end
 	QCOMPARE(runtime.windowInfo(windowId, 3).toInt(), 100);
 	QCOMPARE(runtime.windowInfo(windowId, 4).toInt(), 450);
 
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("resize_status");
-	request.stringArg             = QStringLiteral("ignored");
-	request.miniWindowSnapshotArg = {};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("resize_status");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = {};
 	LuaBatchDispatchResult result;
 	dispatchWorkerAndWait(executor, request, result);
 	QCOMPARE(result.stringResult, QStringLiteral("100x450@540,30"));
@@ -11106,7 +15681,7 @@ end
 	request.functionName            = QStringLiteral("OnAtomicRelocate");
 	request.numberArg1              = 0;
 	request.stringArg2              = QStringLiteral("resizer");
-	request.miniWindowSnapshotArg   = snapshot;
+	request.callbackSnapshotArg     = snapshot;
 	request.hasActionSourceOverride = true;
 	request.actionSourceOverride    = WorldRuntime::eHotspotCallback;
 	LuaBatchDispatchResult relocateResult;
@@ -11118,13 +15693,13 @@ end
 	QCOMPARE(runtime.windowInfo(windowId, 3).toInt(), 280);
 	QCOMPARE(runtime.windowInfo(windowId, 4).toInt(), 180);
 
-	auto unscopedHotspotSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(*snapshot);
+	auto unscopedHotspotSnapshot = QSharedPointer<LuaCallbackSnapshot>::create(*snapshot);
 	unscopedHotspotSnapshot->geometryConstrainedMiniWindowName.clear();
 	request.kind                    = LuaBatchDispatchKind::NumberAndStringStopOnTrue;
 	request.functionName            = QStringLiteral("OnOrdinaryCallback");
 	request.numberArg1              = 0;
 	request.stringArg2              = QStringLiteral("ordinary-hotspot");
-	request.miniWindowSnapshotArg   = unscopedHotspotSnapshot;
+	request.callbackSnapshotArg     = unscopedHotspotSnapshot;
 	request.hasActionSourceOverride = true;
 	request.actionSourceOverride    = WorldRuntime::eHotspotCallback;
 	LuaBatchDispatchResult ordinaryResult;
@@ -11135,13 +15710,13 @@ end
 	QCOMPARE(runtime.windowInfo(windowId, 4).toInt(), 200);
 
 	QCOMPARE(runtime.windowCreate(windowId, 0, 0, 100, 80, 0, kMiniWindowAbsoluteLocation, QColor(Qt::black),
-	                              QStringLiteral("Plugin.Id")),
+	                              QStringLiteral("plugin.id")),
 	         eOK);
 	runtimeWindow = runtime.miniWindow(windowId);
 	QVERIFY(runtimeWindow);
-	auto leftTopSnapshot = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create(*snapshot);
+	auto leftTopSnapshot = QSharedPointer<LuaCallbackSnapshot>::create(*snapshot);
 	leftTopSnapshot->miniWindowsByWindow[windowId] =
-	    QSharedPointer<MiniWindow>::create(runtimeWindow->detachedImageCopy());
+	    QSharedPointer<const MiniWindow>::create(runtimeWindow->detachedImageCopy());
 	auto &leftTopWindowInfo      = leftTopSnapshot->windowInfoByWindow[windowId];
 	leftTopWindowInfo.locationX  = runtimeWindow->location.x();
 	leftTopWindowInfo.locationY  = runtimeWindow->location.y();
@@ -11154,8 +15729,8 @@ end
 	leftTopWindowInfo.rectRight  = runtimeWindow->location.x() + runtimeWindow->width;
 	leftTopWindowInfo.rectBottom = runtimeWindow->location.y() + runtimeWindow->height;
 	leftTopSnapshot->rebuildMiniWindowLookupCaches();
-	request.functionName          = QStringLiteral("OnFullyBlockedLeftTopCreate");
-	request.miniWindowSnapshotArg = leftTopSnapshot;
+	request.functionName        = QStringLiteral("OnFullyBlockedLeftTopCreate");
+	request.callbackSnapshotArg = leftTopSnapshot;
 	LuaBatchDispatchResult blockedLeftTopCreateResult;
 	dispatchWorkerAndWait(executor, request, blockedLeftTopCreateResult);
 	QVERIFY(blockedLeftTopCreateResult.boolResultValid);

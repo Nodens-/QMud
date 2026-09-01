@@ -340,20 +340,20 @@ namespace
 				std::atomic_bool innerOnMain{false};
 
 				const bool       invokeOk = qmudLuaBridgeInvokeOnObjectThread(
-                    &workerTarget,
-                    [&]()
-                    {
-                        outerInvoked.store(true);
-                        outerOnWorker.store(QThread::currentThread() == &workerThread);
-                        const bool innerOk = qmudLuaBridgeInvokeOnObjectThread(
-                            &mainTarget,
-                            [&]()
-                            {
-                                innerInvoked.store(true);
-                                innerOnMain.store(QThread::currentThread() == mainThread);
-                            });
-                        nestedInvokeOk.store(innerOk);
-                    });
+				    &workerTarget,
+				    [&]()
+				    {
+					    outerInvoked.store(true);
+					    outerOnWorker.store(QThread::currentThread() == &workerThread);
+					    const bool innerOk = qmudLuaBridgeInvokeOnObjectThread(
+					        &mainTarget,
+					        [&]()
+					        {
+						        innerInvoked.store(true);
+						        innerOnMain.store(QThread::currentThread() == mainThread);
+					        });
+					    nestedInvokeOk.store(innerOk);
+				    });
 
 				QVERIFY(invokeOk);
 				QVERIFY(outerInvoked.load());
@@ -425,29 +425,29 @@ namespace
 				bool innerInvokeOk = false;
 				bool waitSucceeded = false;
 				outerInvokeOk      = qmudLuaBridgeInvokeOnObjectThread(
-                    &workerTarget,
-                    [&]()
-                    {
-                        innerInvokeOk = qmudLuaBridgeInvokeOnObjectThread(
-                            &mainTarget,
-                            [&]()
-                            {
-                                {
-                                    std::lock_guard lock(workMutex);
-                                    workQueue.emplace_back(
-                                        [&]()
-                                        {
-                                            std::lock_guard doneLock(doneMutex);
-                                            workDone = true;
-                                            doneCv.notify_all();
-                                        });
-                                }
-                                qmudLuaBridgeNotifyThreadWake(&workerThread);
-                                std::unique_lock waitLock(doneMutex);
-                                waitSucceeded = doneCv.wait_for(waitLock, std::chrono::milliseconds(1000),
-						                                             [&]() { return workDone; });
-                            });
-                    });
+				    &workerTarget,
+				    [&]()
+				    {
+					    innerInvokeOk = qmudLuaBridgeInvokeOnObjectThread(
+					        &mainTarget,
+					        [&]()
+					        {
+						        {
+							        std::lock_guard lock(workMutex);
+							        workQueue.emplace_back(
+							            [&]()
+							            {
+								            std::lock_guard doneLock(doneMutex);
+								            workDone = true;
+								            doneCv.notify_all();
+							            });
+						        }
+						        qmudLuaBridgeNotifyThreadWake(&workerThread);
+						        std::unique_lock waitLock(doneMutex);
+						        waitSucceeded = doneCv.wait_for(waitLock, std::chrono::milliseconds(1000),
+						                                        [&]() { return workDone; });
+					        });
+				    });
 
 				QVERIFY(outerInvokeOk);
 				QVERIFY(innerInvokeOk);
@@ -534,25 +534,25 @@ namespace
 				std::mutex      orderMutex;
 				std::deque<int> order;
 				const bool      invokeOk = qmudLuaBridgeInvokeOnObjectThread(
-                    &workerTarget,
-                    [&]()
-                    {
-                        const bool innerOk = qmudLuaBridgeInvokeOnObjectThread(
-                            &mainTarget,
-                            [&]()
-                            {
-                                executor.dispatchBatchAsync(asyncRequest, nullptr,
-						                                         [&](const LuaBatchDispatchResult &)
-						                                         {
-                                                                std::scoped_lock lock(orderMutex);
-                                                                order.push_back(1);
-                                                            });
-                                static_cast<void>(executor.dispatchBatch(syncRequest));
-                                std::scoped_lock lock(orderMutex);
-                                order.push_back(2);
-                            });
-                        QVERIFY(innerOk);
-                    });
+				    &workerTarget,
+				    [&]()
+				    {
+					    const bool innerOk = qmudLuaBridgeInvokeOnObjectThread(
+					        &mainTarget,
+					        [&]()
+					        {
+						        executor.dispatchBatchAsync(asyncRequest, nullptr,
+						                                    [&](const LuaBatchDispatchResult &)
+						                                    {
+							                                    std::scoped_lock lock(orderMutex);
+							                                    order.push_back(1);
+						                                    });
+						        static_cast<void>(executor.dispatchBatch(syncRequest));
+						        std::scoped_lock lock(orderMutex);
+						        order.push_back(2);
+					        });
+					    QVERIFY(innerOk);
+				    });
 				QVERIFY(invokeOk);
 
 				QTRY_VERIFY_WITH_TIMEOUT(
@@ -746,7 +746,7 @@ namespace
 				QTRY_COMPARE_WITH_TIMEOUT(completionCount.load(), requestCount, 3000);
 			}
 
-			void luaExecutorQueuedMiniWindowSnapshotOutlivesProducerScope()
+			void luaExecutorQueuedCallbackSnapshotOutlivesProducerScope()
 			{
 				QObject          completionTarget;
 
@@ -756,10 +756,10 @@ namespace
 				bool             observedLookup = false;
 
 				{
-					auto snapshot         = QSharedPointer<LuaCallbackMiniWindowSnapshot>::create();
+					auto snapshot         = QSharedPointer<LuaCallbackSnapshot>::create();
 					snapshot->windowNames = {QStringLiteral("Map"), QStringLiteral("map"),
 					                         QStringLiteral("Map "), QStringLiteral("map|left")};
-					LuaCallbackMiniWindowSnapshot::WindowInfoSnapshot info;
+					LuaCallbackSnapshot::WindowInfoSnapshot info;
 					info.width  = 123;
 					info.height = 45;
 					info.show   = true;
@@ -776,12 +776,12 @@ namespace
 					snapshot->rebuildMiniWindowLookupCaches();
 
 					LuaBatchDispatchRequest request;
-					request.kind                  = LuaBatchDispatchKind::HasFunction;
-					request.miniWindowSnapshotArg = snapshot;
+					request.kind                = LuaBatchDispatchKind::HasFunction;
+					request.callbackSnapshotArg = snapshot;
 					LuaExecutorWorker executor(recoveredMutationConsumerForTest());
 					executor.dispatchBatchAsync(
 					    request, &completionTarget,
-					    [snapshot = request.miniWindowSnapshotArg, &completed, &observedWindowName,
+					    [snapshot = request.callbackSnapshotArg, &completed, &observedWindowName,
 					     &observedWidth, &observedLookup](const LuaBatchDispatchResult &)
 					    {
 						    observedWindowName = snapshot->windowNames.value(0);
@@ -903,25 +903,25 @@ namespace
 
 				std::atomic_bool        firstInvokeOk{false};
 				std::thread             firstCaller(
-                    [&]()
-                    {
-                        firstInvokeOk.store(qmudLuaBridgeInvokeOnObjectThread(target.data(),
-					                                                                      [&]()
-					                                                                      {
-                                                                                  {
-                                                                                      std::lock_guard lock(
-                                                                                          gateMutex);
-                                                                                      firstEntered = true;
-                                                                                  }
-                                                                                  gateCv.notify_all();
-                                                                                  QThread::msleep(100);
-                                                                                  if (target)
-                                                                                  {
-                                                                                      delete target.data();
-                                                                                      target.clear();
-                                                                                  }
-                                                                              }));
-                    });
+				    [&]()
+				    {
+					    firstInvokeOk.store(qmudLuaBridgeInvokeOnObjectThread(target.data(),
+					                                                          [&]()
+					                                                          {
+						                                                          {
+							                                                          std::lock_guard lock(
+							                                                              gateMutex);
+							                                                          firstEntered = true;
+						                                                          }
+						                                                          gateCv.notify_all();
+						                                                          QThread::msleep(100);
+						                                                          if (target)
+						                                                          {
+							                                                          delete target.data();
+							                                                          target.clear();
+						                                                          }
+					                                                          }));
+				    });
 
 				{
 					std::unique_lock lock(gateMutex);
@@ -930,7 +930,7 @@ namespace
 
 				std::atomic_bool secondCallbackInvoked{false};
 				const bool       secondInvokeOk = qmudLuaBridgeInvokeOnObjectThread(
-                    target.data(), [&]() { secondCallbackInvoked.store(true); });
+				    target.data(), [&]() { secondCallbackInvoked.store(true); });
 
 				firstCaller.join();
 
@@ -1046,19 +1046,19 @@ namespace
 				std::atomic_bool        invokeBSuccess{false};
 
 				std::thread             callerA(
-                    [&]()
-                    {
-                        static_cast<void>(qmudLuaBridgeInvokeOnObjectThread(nullptr, [] {}));
-                        errorA1 = qmudLuaBridgeLastError();
-                        {
-                            std::lock_guard lock(gateMutex);
-                            aFailed = true;
-                        }
-                        gateCv.notify_all();
-                        std::unique_lock lock(gateMutex);
-                        gateCv.wait(lock, [&] { return bDone; });
-                        errorA2 = qmudLuaBridgeLastError();
-                    });
+				    [&]()
+				    {
+					    static_cast<void>(qmudLuaBridgeInvokeOnObjectThread(nullptr, [] {}));
+					    errorA1 = qmudLuaBridgeLastError();
+					    {
+						    std::lock_guard lock(gateMutex);
+						    aFailed = true;
+					    }
+					    gateCv.notify_all();
+					    std::unique_lock lock(gateMutex);
+					    gateCv.wait(lock, [&] { return bDone; });
+					    errorA2 = qmudLuaBridgeLastError();
+				    });
 
 				std::thread callerB(
 				    [&]()

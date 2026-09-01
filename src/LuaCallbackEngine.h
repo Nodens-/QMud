@@ -50,7 +50,7 @@ enum class LuaPreparedCallbackResultMode
 };
 #endif
 
-struct LuaCallbackMiniWindowSnapshot;
+struct LuaCallbackSnapshot;
 class WorldRuntime;
 
 /**
@@ -102,7 +102,7 @@ class LuaCallbackEngine
 		[[nodiscard]] class WorldRuntime *callbackDispatchRuntime() const;
 		/**
 		 * @brief Sets plugin identity metadata used by callback context.
-		 * @param id Plugin id.
+		 * @param id Canonical plugin id copied unchanged by this internal metadata sink.
 		 * @param name Plugin display name.
 		 * @param directory Plugin directory (legacy type-20 GetPluginInfo value).
 		 */
@@ -112,6 +112,11 @@ class LuaCallbackEngine
 		 * @return Plugin id.
 		 */
 		[[nodiscard]] QString pluginId() const;
+		/**
+		 * @brief Returns the immutable identity of this Lua engine instance.
+		 * @return Process-unique non-zero engine identity.
+		 */
+		[[nodiscard]] quint64 instanceId() const noexcept;
 		/**
 		 * @brief Returns plugin id metadata without binding Lua execution-thread affinity.
 		 * @return Plugin id metadata.
@@ -134,7 +139,7 @@ class LuaCallbackEngine
 		[[nodiscard]] QString pluginDirectory() const;
 		/**
 		 * @brief Pushes per-call caller plugin context for `GetPluginInfo(..., 23)`.
-		 * @param pluginId Calling plugin id for the current call scope.
+		 * @param pluginId Canonical calling plugin id copied unchanged by this internal stack.
 		 */
 		void                  pushCallingPluginId(const QString &pluginId);
 		/**
@@ -280,7 +285,7 @@ class LuaCallbackEngine
 		 * @param firstArg 1-based stack index for first routine argument in caller state.
 		 * @param miniWindowNamesSnapshot Optional miniwindow-name snapshot used to seed callback
 		 * existence cache for bridge-forbidden callback contexts when full snapshot is unavailable.
-		 * @param miniWindowSnapshot Optional full callback dispatch snapshot used to seed
+		 * @param callbackSnapshot Optional full callback dispatch snapshot used to seed
 		 * callback-scope API read caches.
 		 * @param suspended Optional output flag set when the routine yielded at a modal API.
 		 * @param modalResumeId Optional output id for the suspended modal callback.
@@ -298,9 +303,9 @@ class LuaCallbackEngine
 		 */
 		CallPluginLuaMarshallingResult callPluginLuaWithMarshalling(
 		    lua_State *callerState, const QString &routine, int firstArg,
-		    const QStringList                                         &miniWindowNamesSnapshot = {},
-		    const QSharedPointer<const LuaCallbackMiniWindowSnapshot> &miniWindowSnapshot      = {},
-		    bool *suspended = nullptr, quint64 *modalResumeId = nullptr,
+		    const QStringList                               &miniWindowNamesSnapshot = {},
+		    const QSharedPointer<const LuaCallbackSnapshot> &callbackSnapshot = {}, bool *suspended = nullptr,
+		    quint64                      *modalResumeId                   = nullptr,
 		    LuaPendingModalStringRequest *pendingModalStringRequest       = nullptr,
 		    bool                         *linePresentationRequiresRefresh = nullptr,
 		    bool *outputScrollPositionRequiresRefresh = nullptr, bool *outputScrollPositionChanged = nullptr,
@@ -475,7 +480,7 @@ class LuaCallbackEngine
 		 * @param wildcards Positional wildcard values.
 		 * @param namedWildcards Named wildcard values.
 		 * @param styleRuns Optional style-run list.
-		 * @param miniWindowSnapshot Optional runtime-thread miniwindow snapshot for callback cache seeding.
+		 * @param callbackSnapshot Optional unified runtime snapshot for callback cache seeding.
 		 * @param hasFunction Optional output flag indicating function existence.
 		 * @param actionSourceOverride Optional callback-local action source, or `-1` to use runtime state.
 		 * @param triggerOutputReplacesMatchedLine Whether trigger output should replace the matched line.
@@ -489,7 +494,7 @@ class LuaCallbackEngine
 		bool callFunctionWithStringsAndWildcards(
 		    const QString &functionName, const QStringList &args, const QStringList &wildcards,
 		    const QMap<QString, QString> &namedWildcards, const QVector<LuaStyleRun> *styleRuns,
-		    const LuaCallbackMiniWindowSnapshot *miniWindowSnapshot, bool *hasFunction = nullptr,
+		    const LuaCallbackSnapshot *callbackSnapshot, bool *hasFunction = nullptr,
 		    int actionSourceOverride = -1, bool triggerOutputReplacesMatchedLine = false,
 		    int triggerMatchedLineBufferIndex = 0, qint64 triggerMatchedLineAbsoluteNumber = 0,
 		    bool *suspended = nullptr, quint64 *modalResumeId = nullptr,
@@ -575,26 +580,24 @@ class LuaCallbackEngine
 		 */
 		void                               clearExecutionThreadAffinity() const;
 		/**
-		 * @brief Pushes per-dispatch miniwindow snapshot used by callback-scope read caches.
+		 * @brief Pushes the unified per-dispatch snapshot used by callback-scope read caches.
 		 * @param snapshot Snapshot captured on runtime thread for the active dispatch.
 		 */
-		void
-		pushDispatchMiniWindowSnapshot(const QSharedPointer<const LuaCallbackMiniWindowSnapshot> &snapshot);
+		void pushDispatchSnapshot(const QSharedPointer<const LuaCallbackSnapshot> &snapshot);
 		/**
-		 * @brief Pops per-dispatch miniwindow snapshot.
+		 * @brief Pops the unified per-dispatch snapshot.
 		 */
-		void                                               popDispatchMiniWindowSnapshot();
+		void popDispatchSnapshot();
 		/**
-		 * @brief Returns active per-dispatch miniwindow snapshot.
+		 * @brief Returns the active unified per-dispatch snapshot.
 		 * @return Snapshot pointer, or `nullptr` when unset.
 		 */
-		[[nodiscard]] const LuaCallbackMiniWindowSnapshot *currentDispatchMiniWindowSnapshot() const;
+		[[nodiscard]] const LuaCallbackSnapshot                *currentDispatchSnapshot() const;
 		/**
-		 * @brief Returns shared ownership of the active per-dispatch miniwindow snapshot.
+		 * @brief Returns shared ownership of the active unified per-dispatch snapshot.
 		 * @return Snapshot shared pointer, or null when unset.
 		 */
-		[[nodiscard]] QSharedPointer<const LuaCallbackMiniWindowSnapshot>
-		     currentDispatchMiniWindowSnapshotShared() const;
+		[[nodiscard]] QSharedPointer<const LuaCallbackSnapshot> currentDispatchSnapshotShared() const;
 		/**
 		 * @brief Appends a deferred runtime mutation journal produced by callback scope teardown.
 		 * @param runtime Runtime that owns the mutations.
@@ -615,6 +618,14 @@ class LuaCallbackEngine
 		 */
 		[[nodiscard]] QVector<LuaDeferredRuntimeMutationBatch> takeDeferredRuntimeMutationBatches();
 		void appendDeferredRuntimeMutationBatches(QVector<LuaDeferredRuntimeMutationBatch> batches);
+		/**
+		 * @brief Takes the callback-local snapshot produced by the last mutation-bearing callback.
+		 *
+		 * Sequential nested recipients use this immutable overlay while worker-side mutations are still
+		 * journaled and therefore cannot yet be read back from the runtime-owned stable base.
+		 */
+		[[nodiscard]] QSharedPointer<const LuaCallbackSnapshot> takeCompletedCallbackMutationSnapshot();
+		void storeCompletedCallbackMutationSnapshot(QSharedPointer<const LuaCallbackSnapshot> snapshot);
 		/**
 		 * @brief Detaches external owners and resets all callback state for final teardown.
 		 * @return Deferred runtime cleanup produced while cancelling suspended callbacks.
@@ -676,25 +687,26 @@ class LuaCallbackEngine
 		 * @brief Ensures Lua state exists and is initialized.
 		 * @return `true` when Lua state is ready.
 		 */
-		bool                                                         ensureState();
+		bool                                               ensureState();
 		/**
 		 * @brief Registers world/runtime bindings into Lua globals.
 		 */
-		void                                                         registerWorldBindings();
+		void                                               registerWorldBindings();
 
-		QString                                                      m_script;
-		bool                                                         m_scriptLoaded{false};
-		bool                                                         m_worldBindingsReady{false};
-		bool                                                         m_allowPackage{true};
-		class WorldRuntime                                          *m_worldRuntime{nullptr};
-		QString                                                      m_pluginId;
-		QString                                                      m_pluginName;
-		QString                                                      m_pluginDirectory;
-		QVector<QString>                                             m_callingPluginIdStack;
-		QVector<QSharedPointer<const LuaCallbackMiniWindowSnapshot>> m_dispatchMiniWindowSnapshotStack;
-		int                                                          m_scriptExecutionDepth{0};
-		mutable QThread                                             *m_executionThread{nullptr};
-		mutable bool                                                 m_reportedRuntimeThreadMismatch{false};
+		QString                                            m_script;
+		bool                                               m_scriptLoaded{false};
+		bool                                               m_worldBindingsReady{false};
+		bool                                               m_allowPackage{true};
+		class WorldRuntime                                *m_worldRuntime{nullptr};
+		const quint64                                      m_instanceId;
+		QString                                            m_pluginId;
+		QString                                            m_pluginName;
+		QString                                            m_pluginDirectory;
+		QVector<QString>                                   m_callingPluginIdStack;
+		QVector<QSharedPointer<const LuaCallbackSnapshot>> m_dispatchSnapshotStack;
+		int                                                m_scriptExecutionDepth{0};
+		mutable QThread                                   *m_executionThread{nullptr};
+		mutable bool                                       m_reportedRuntimeThreadMismatch{false};
 
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 		/**
@@ -741,11 +753,12 @@ class LuaCallbackEngine
 		QHash<quint64, std::shared_ptr<LuaSuspendedCallback>> m_suspendedCallbacks;
 		quint64                                               m_nextSuspendedCallbackId{1};
 #endif
-		QSet<QString>                            m_luaFunctionsSet;
-		QSet<QString>                            m_observedPluginCallbacks;
-		QHash<QString, bool>                     m_observedPluginCallbackPresence;
-		CallbackCatalogObserver                  m_callbackCatalogObserver;
-		QVector<LuaDeferredRuntimeMutationBatch> m_deferredRuntimeMutationBatches;
+		QSet<QString>                             m_luaFunctionsSet;
+		QSet<QString>                             m_observedPluginCallbacks;
+		QHash<QString, bool>                      m_observedPluginCallbackPresence;
+		CallbackCatalogObserver                   m_callbackCatalogObserver;
+		QVector<LuaDeferredRuntimeMutationBatch>  m_deferredRuntimeMutationBatches;
+		QSharedPointer<const LuaCallbackSnapshot> m_completedCallbackMutationSnapshot;
 		struct CachedLinePage
 		{
 				QPointer<WorldRuntime>                   runtime;

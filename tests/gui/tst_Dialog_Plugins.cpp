@@ -8,6 +8,7 @@
 
 #include "AppController.h"
 #include "WorldRuntime.h"
+#include "WorldRuntimeTestAccess.h"
 #include "dialogs/PluginsDialog.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
@@ -276,8 +277,9 @@ namespace
 			void tablePopulationAndSelectionState()
 			{
 				WorldRuntime runtime;
-				runtime.pluginsMutable().push_back(makePlugin(QStringLiteral("a"), QStringLiteral("Alpha")));
-				runtime.pluginsMutable().push_back(
+				WorldRuntimeTestAccess::plugins(runtime).push_back(
+				    makePlugin(QStringLiteral("a"), QStringLiteral("Alpha")));
+				WorldRuntimeTestAccess::plugins(runtime).push_back(
 				    makePlugin(QStringLiteral("b"), QStringLiteral("Beta"), false));
 
 				PluginsDialog dialog(&runtime, nullptr);
@@ -317,7 +319,7 @@ namespace
 				clearPluginsDialogSettings();
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 				WorldRuntime  runtime;
 				PluginsDialog dialog(&runtime, nullptr);
 				dialog.show();
@@ -503,7 +505,7 @@ namespace
 				clearPluginsDialogSettings();
 				const auto   clearSettings = qScopeGuard([] { clearPluginsDialogSettings(); });
 				WorldRuntime runtime;
-				runtime.pluginsMutable().push_back(
+				WorldRuntimeTestAccess::plugins(runtime).push_back(
 				    makePlugin(QStringLiteral("sort-test"), QStringLiteral("Sort Test")));
 				PluginsDialog dialog(&runtime, nullptr);
 				dialog.show();
@@ -595,7 +597,7 @@ namespace
 				const auto  clearSettings           = qScopeGuard([] { clearPluginsDialogSettings(); });
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 				QTableWidget legacyTable;
 				legacyTable.setColumnCount(6);
 				QVector<int> expectedWidths;
@@ -660,7 +662,7 @@ namespace
 				const auto  clearSettings           = qScopeGuard([] { clearPluginsDialogSettings(); });
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 				WorldRuntime runtime;
 				{
 					PluginsDialog dialog(&runtime, nullptr);
@@ -700,7 +702,7 @@ namespace
 				const auto  clearSettings           = qScopeGuard([] { clearPluginsDialogSettings(); });
 				const QFont originalApplicationFont = QApplication::font();
 				const auto  restoreApplicationFont  = qScopeGuard(
-                    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
 				WorldRuntime  runtime;
 				PluginsDialog dialog(&runtime, nullptr);
 				dialog.show();
@@ -747,9 +749,9 @@ namespace
 			void blacklistedPluginsAreHiddenFromTable()
 			{
 				WorldRuntime runtime;
-				runtime.pluginsMutable().push_back(makePlugin(QStringLiteral("bb6a05ed7534b5db1ed40511"),
-				                                              QStringLiteral("Automatic Backup")));
-				runtime.pluginsMutable().push_back(
+				WorldRuntimeTestAccess::plugins(runtime).push_back(makePlugin(
+				    QStringLiteral("bb6a05ed7534b5db1ed40511"), QStringLiteral("Automatic Backup")));
+				WorldRuntimeTestAccess::plugins(runtime).push_back(
 				    makePlugin(QStringLiteral("visible"), QStringLiteral("Visible")));
 
 				PluginsDialog dialog(&runtime, nullptr);
@@ -766,7 +768,7 @@ namespace
 			void tabLeavesPluginTableForActionButtons()
 			{
 				WorldRuntime runtime;
-				runtime.pluginsMutable().push_back(
+				WorldRuntimeTestAccess::plugins(runtime).push_back(
 				    makePlugin(QStringLiteral("plug"), QStringLiteral("Plugin")));
 
 				PluginsDialog dialog(&runtime, nullptr);
@@ -830,6 +832,51 @@ namespace
 				QCOMPARE(runtime.plugins().front().attributes.value(QStringLiteral("name")),
 				         QStringLiteral("PluginReloaded"));
 				QCOMPARE(runtime.plugins().front().version, 2.0);
+			}
+
+			void addAndRemoveRecordOnlyPersistentPluginMembershipChanges()
+			{
+				WorldRuntime  runtime;
+				const QString pluginId          = QStringLiteral("666666666666666666666666");
+				const QString artifactDirectory = QDir::currentPath();
+				const QString pluginsDirectory  = QDir(artifactDirectory).filePath(QStringLiteral("plugins"));
+				QVERIFY(QDir().mkpath(pluginsDirectory));
+				runtime.setStartupDirectory(artifactDirectory);
+				runtime.setPluginsDirectory(pluginsDirectory);
+				QString       error;
+				const QString pluginPath =
+				    QDir(pluginsDirectory).filePath(QStringLiteral("persistent-membership.xml"));
+				QVERIFY2(writePluginFixture(pluginPath, pluginId, QStringLiteral("Persistent"), 1.0, error),
+				         qPrintable(error));
+
+				PluginsDialog dialog(&runtime, nullptr);
+				QVERIFY(QMetaObject::invokeMethod(&dialog, "installPluginFile", Qt::DirectConnection,
+				                                  Q_ARG(QString, pluginPath)));
+				QVERIFY(runtime.isPluginInstalled(pluginId));
+				QVERIFY(runtime.worldFileModified());
+
+				runtime.setWorldFileModified(false);
+				auto *table = dialog.findChild<QTableWidget *>();
+				QVERIFY(table);
+				QCOMPARE(table->rowCount(), 1);
+				table->selectRow(0);
+				QVERIFY(QMetaObject::invokeMethod(&dialog, "onRemovePlugin", Qt::DirectConnection));
+				QVERIFY(!runtime.isPluginInstalled(pluginId));
+				QVERIFY(runtime.worldFileModified());
+
+				WorldRuntime::Plugin globalPlugin =
+				    makePlugin(QStringLiteral("777777777777777777777777"), QStringLiteral("Global"));
+				globalPlugin.global = true;
+				WorldRuntimeTestAccess::plugins(runtime).push_back(globalPlugin);
+				runtime.setWorldFileModified(false);
+				PluginsDialog globalDialog(&runtime, nullptr);
+				auto         *globalTable = globalDialog.findChild<QTableWidget *>();
+				QVERIFY(globalTable);
+				QCOMPARE(globalTable->rowCount(), 1);
+				globalTable->selectRow(0);
+				QVERIFY(QMetaObject::invokeMethod(&globalDialog, "onRemovePlugin", Qt::DirectConnection));
+				QVERIFY(runtime.plugins().isEmpty());
+				QVERIFY(!runtime.worldFileModified());
 			}
 			// NOLINTEND(readability-convert-member-functions-to-static)
 

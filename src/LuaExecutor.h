@@ -37,6 +37,8 @@
 #include <QVariant>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
+#include <array>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -49,6 +51,25 @@ struct MiniWindow;
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 struct lua_State;
 #endif
+
+/**
+ * @brief Immutable identity of one plugin-owned asynchronous API request.
+ *
+ * The plugin id locates the recipient while `engineInstanceId` proves that the recipient is still the exact Lua
+ * engine that initiated the work. Keeping these values in one object prevents an id-only completion path from
+ * delivering a pre-reload result to a same-id replacement.
+ */
+struct LuaPluginAsyncResultRequest
+{
+		QString            pluginId;
+		quint64            engineInstanceId{0};
+		quint64            requestId{0};
+
+		[[nodiscard]] bool isValid() const noexcept
+		{
+			return !pluginId.isEmpty() && engineInstanceId != 0 && requestId != 0;
+		}
+};
 
 /**
  * @brief Attribute/children payload used by callback-scope runtime snapshots.
@@ -335,43 +356,108 @@ struct LuaCallbackDatabaseSnapshot
 };
 
 /**
+ * @brief Aggregate result shape shared by initial, resumed, and fallback dispatch handling.
+ */
+enum class LuaBatchAggregateShape
+{
+	None,
+	BooleanAndFunction,
+	StopOnFalse,
+	FunctionHandled,
+	StopOnTrue,
+	FunctionCount,
+	FunctionAny,
+	BytesInOut,
+	StringInOut,
+	LastResult
+};
+
+/**
+ * @brief How a suspended dispatch is completed after its current recipient resumes.
+ *
+ * This is dispatch semantics, not WorldRuntime policy. `ResultOnly` returns the resumed operation as-is,
+ * `AggregateSingleRecipient` merges it into the pre-yield result and finishes, and
+ * `AggregateRemainingRecipients` additionally continues through the request's later recipients.
+ */
+enum class LuaBatchResumeContinuationShape
+{
+	ResultOnly,
+	AggregateSingleRecipient,
+	AggregateRemainingRecipients
+};
+
+/**
+ * @brief Extra neutral-result contract not derivable from recipient aggregation.
+ */
+enum class LuaBatchFallbackShape
+{
+	AggregateNeutral,
+	HasFunctionFalse,
+	BoolFalse,
+	BoolAndFunctionFalse
+};
+
+/**
+ * @brief Whether a queued callback dispatch requires a Lua function name.
+ */
+enum class LuaBatchFunctionNamePolicy
+{
+	Required,
+	NotRequired
+};
+
+/**
+ * @brief Authoritative registry for all batch-kind dispatch policies.
+ *
+ * Adding a dispatch kind must classify aggregation, continuation, fallback, and function-name handling here.
+ * The enum and every policy query are generated from this registry so no dispatch site can acquire a second
+ * hand-maintained kind list.
+ */
+#define QMUD_LUA_BATCH_DISPATCH_KIND_REGISTRY(X)                                                             \
+	X(NoArgs, BooleanAndFunction, AggregateRemainingRecipients, AggregateNeutral, Required)                  \
+	X(HasFunction, None, ResultOnly, HasFunctionFalse, Required)                                             \
+	X(String, LastResult, AggregateRemainingRecipients, AggregateNeutral, Required)                          \
+	X(StringStopOnFalse, StopOnFalse, AggregateRemainingRecipients, AggregateNeutral, Required)              \
+	X(StringHandled, FunctionHandled, AggregateRemainingRecipients, AggregateNeutral, Required)              \
+	X(Bytes, LastResult, AggregateRemainingRecipients, AggregateNeutral, Required)                           \
+	X(BytesInOut, BytesInOut, AggregateRemainingRecipients, AggregateNeutral, Required)                      \
+	X(StringInOut, StringInOut, AggregateRemainingRecipients, AggregateNeutral, Required)                    \
+	X(NumberAndStringStopOnTrue, StopOnTrue, AggregateRemainingRecipients, AggregateNeutral, Required)       \
+	X(NumberAndStringStopOnFalse, StopOnFalse, AggregateRemainingRecipients, AggregateNeutral, Required)     \
+	X(NumberAndString, LastResult, AggregateRemainingRecipients, AggregateNeutral, Required)                 \
+	X(TwoNumbersAndStringStopOnFalse, StopOnFalse, AggregateRemainingRecipients, AggregateNeutral, Required) \
+	X(TwoNumbersAndString, LastResult, AggregateRemainingRecipients, AggregateNeutral, Required)             \
+	X(NumberAndBytesStopOnTrue, StopOnTrue, AggregateRemainingRecipients, AggregateNeutral, Required)        \
+	X(NumberAndBytes, LastResult, AggregateRemainingRecipients, AggregateNeutral, Required)                  \
+	X(NumberAndUtf8StringsCount, FunctionCount, AggregateRemainingRecipients, AggregateNeutral, Required)    \
+	X(StringsAndWildcards, FunctionAny, AggregateRemainingRecipients, AggregateNeutral, Required)            \
+	X(ExecuteScript, LastResult, AggregateSingleRecipient, BoolFalse, NotRequired)                           \
+	X(ResetAndLoadScript, None, ResultOnly, BoolFalse, Required)                                             \
+	X(InitializeEnginesWithObservedCallbacksMany, None, ResultOnly, AggregateNeutral, Required)              \
+	X(UpdateObservedCallbacksMany, None, ResultOnly, AggregateNeutral, Required)                             \
+	X(CallPluginLuaMarshalling, None, ResultOnly, BoolFalse, Required)                                       \
+	X(TeardownEnginesMany, None, ResultOnly, AggregateNeutral, Required)                                     \
+	X(ApplyPackageRestrictionsMany, None, ResultOnly, AggregateNeutral, Required)                            \
+	X(ProcedureWithString, LastResult, AggregateSingleRecipient, BoolAndFunctionFalse, Required)             \
+	X(MxpError, LastResult, AggregateSingleRecipient, BoolFalse, Required)                                   \
+	X(MxpStartUp, None, AggregateRemainingRecipients, AggregateNeutral, Required)                            \
+	X(MxpShutDown, None, AggregateRemainingRecipients, AggregateNeutral, Required)                           \
+	X(MxpStartTag, LastResult, AggregateSingleRecipient, BoolFalse, Required)                                \
+	X(MxpEndTag, None, AggregateRemainingRecipients, AggregateNeutral, Required)                             \
+	X(MxpSetVariable, None, AggregateRemainingRecipients, AggregateNeutral, Required)                        \
+	X(CancelSuspendedModalString, None, ResultOnly, AggregateNeutral, NotRequired)                           \
+	X(ResumeSuspendedModalString, None, ResultOnly, AggregateNeutral, NotRequired)
+
+/**
  * @brief Batch callback command kinds routed through the Lua executor.
  */
 enum class LuaBatchDispatchKind
 {
-	NoArgs,
-	HasFunction,
-	String,
-	StringStopOnFalse,
-	StringHandled,
-	Bytes,
-	BytesInOut,
-	StringInOut,
-	NumberAndStringStopOnTrue,
-	NumberAndStringStopOnFalse,
-	NumberAndString,
-	TwoNumbersAndStringStopOnFalse,
-	TwoNumbersAndString,
-	NumberAndBytesStopOnTrue,
-	NumberAndBytes,
-	NumberAndUtf8StringsCount,
-	StringsAndWildcards,
-	ExecuteScript,
-	ResetAndLoadScript,
-	InitializeEnginesWithObservedCallbacksMany,
-	UpdateObservedCallbacksMany,
-	CallPluginLuaMarshalling,
-	TeardownEnginesMany,
-	ApplyPackageRestrictionsMany,
-	ProcedureWithString,
-	MxpError,
-	MxpStartUp,
-	MxpShutDown,
-	MxpStartTag,
-	MxpEndTag,
-	MxpSetVariable,
-	CancelSuspendedModalString,
-	ResumeSuspendedModalString
+#define QMUD_DECLARE_LUA_BATCH_DISPATCH_KIND(name, aggregateShape, continuationShape, fallbackShape,         \
+                                             functionNamePolicy)                                             \
+	name,
+	QMUD_LUA_BATCH_DISPATCH_KIND_REGISTRY(QMUD_DECLARE_LUA_BATCH_DISPATCH_KIND)
+#undef QMUD_DECLARE_LUA_BATCH_DISPATCH_KIND
 };
 
 /**
@@ -464,10 +550,40 @@ struct LuaCallbackMiniWindowTextWidthKey
 };
 
 /**
- * @brief Runtime-thread miniwindow snapshot used to satisfy callback-lane read validation without
- *        forbidden reentrant runtime bridges.
+ * @brief Immutable callback request view assembled from one runtime-owned stable base.
+ *
+ * WorldRuntime owns and patches a private base on its object thread. Every dispatch receives a
+ * top-level copy; Qt containers stay shallow until either copy is written, so later base patches
+ * detach and cannot alter an in-flight worker view. Stable fields are patched at their mutation
+ * source. Dispatch-local fields are cleared from the cached base and populated after each clone.
+ * Callback-local read-your-writes live in LuaCallbackEngine overlays rather than this shared
+ * snapshot.
+ *
+ * Extension contract for a new callback-visible field:
+ * 1. Classify it as stable, dispatch-local/asynchronously sampled, or callback-local.
+ * 2. For stable state, assign the field to an existing LuaCallbackStableSnapshotDomain, or add a new
+ *    entry to its single registry. Mark that entry plugin-indexed when plugin load/unload changes the
+ *    field; a Plugins patch then expands mechanically, with no second dependent-domain list. Put cold
+ *    construction and patch refresh in the same WorldRuntime population helper and handle the domain in
+ *    populateLuaCallbackStableSnapshotDomains(), the sole domain-to-population registry used by both
+ *    cold construction and patching; masks are derived mechanically from the enum. Call
+ *    patchLuaCallbackStableSnapshot() from every authoritative mutation source. Plugin-scoped rule
+ *    collections use the scoped overload of that same patch function, never a parallel registry.
+ * 3. If Lua can mutate it, also journal the mutation and provide a LuaCallbackEngine overlay when
+ *    the writing callback must read its own uncommitted value (which is 99% of the time). A field
+ *    indexed by plugin id must also be handled by markCallbackPluginTopologyUnavailable() and
+ *    reconcileCallbackPluginTopology(), the two ends of the single callback-local lifecycle overlay;
+ *    do not add an API-specific unload/reload fanout. Plugin ids are canonicalized only by XML validation and
+ *    plugin-facing Lua API argument decoders that actually accept a plugin id. Runtime service methods, metadata,
+ *    journals, snapshots, overlays, and cache keys must copy the canonical id unchanged; they must not normalize
+ *    or independently validate its spelling.
+ * 4. For dispatch-local/sampled state, populate it only after cloning and clear it from the cached
+ *    base in clearLuaCallbackDispatchVolatileSnapshot(); do not add an incidental stable-base patch.
+ * 5. Cover cold construction, cache-hit visibility, immutability of an issued snapshot, and later
+ *    recipient/nested-callback visibility with tests. A new field is incomplete until these paths
+ *    agree.
  */
-struct LuaCallbackMiniWindowSnapshot
+struct LuaCallbackSnapshot
 {
 		struct WindowInfoSnapshot
 		{
@@ -496,41 +612,45 @@ struct LuaCallbackMiniWindowSnapshot
 				QString   creatingPlugin;
 		};
 
-		QStringList                                   windowNames;
-		QHash<QString, QStringList>                   fontIdsByWindow;
-		QHash<QString, QStringList>                   imageIdsByWindow;
-		QHash<QString, QStringList>                   hotspotIdsByWindow;
-		QHash<LuaCallbackMiniWindowResourceKey, bool> imageHasAlphaByKey;
-		QHash<QString, WindowInfoSnapshot>            windowInfoByWindow;
-		QHash<QString, QSharedPointer<MiniWindow>>    miniWindowsByWindow;
-		bool                                          miniWindowLookupCacheValid{false};
-		QSet<QString>                                 miniWindowIds;
-		QSet<LuaCallbackMiniWindowResourceKey>        miniWindowFontKeys;
-		QSet<LuaCallbackMiniWindowResourceKey>        miniWindowImageKeys;
-		QSet<LuaCallbackMiniWindowResourceKey>        miniWindowHotspotKeys;
-		void                                         *framePointer{nullptr};
-		bool                                          hasFramePointer{false};
-		bool                                          hasCommandUiSnapshot{false};
-		bool                                          hasCommandHistorySnapshot{false};
-		QStringList                                   commandHistorySnapshot;
-		bool                                          commandUiHasView{false};
-		bool                                          commandUiHasFrameData{false};
-		int                                           commandUiOutputClientHeight{0};
-		int                                           commandUiOutputClientWidth{0};
-		int                                           commandUiViewHeight{0};
-		int                                           commandUiViewWidth{0};
-		QString                                       activeMiniWindowExecutionName;
-		QString                                       geometryConstrainedMiniWindowName;
-		int                                           geometryConstraintDisplayClientHeight{0};
-		int                                           geometryConstraintDisplayClientWidth{0};
-		double                                        absoluteMiniWindowScaleXOver{1.0};
-		double                                        absoluteMiniWindowScaleYOver{1.0};
-		double                                        absoluteMiniWindowScaleXUnder{1.0};
-		double                                        absoluteMiniWindowScaleYUnder{1.0};
-		bool                                          hasRuntimeCountersSnapshot{false};
-		int                                           runtimeOutputFontHeight{0};
-		int                                           runtimeOutputFontWidth{0};
-		void                                          rebuildMiniWindowLookupCaches()
+		// Stable miniwindow structures and resource indexes. The two full-window composites also contain
+		// presentation fields; those fields are overwritten from authoritative UI/runtime state on every
+		// dispatch clone before the snapshot is published to a worker.
+		QStringList                                      windowNames;
+		QHash<QString, QStringList>                      fontIdsByWindow;
+		QHash<QString, QStringList>                      imageIdsByWindow;
+		QHash<QString, QStringList>                      hotspotIdsByWindow;
+		QHash<LuaCallbackMiniWindowResourceKey, bool>    imageHasAlphaByKey;
+		QHash<QString, WindowInfoSnapshot>               windowInfoByWindow;
+		QHash<QString, QSharedPointer<const MiniWindow>> miniWindowsByWindow;
+		bool                                             miniWindowLookupCacheValid{false};
+		QSet<QString>                                    miniWindowIds;
+		QSet<LuaCallbackMiniWindowResourceKey>           miniWindowFontKeys;
+		QSet<LuaCallbackMiniWindowResourceKey>           miniWindowImageKeys;
+		QSet<LuaCallbackMiniWindowResourceKey>           miniWindowHotspotKeys;
+		// Other dispatch-local presentation and runtime counters.
+		void                                            *framePointer{nullptr};
+		bool                                             hasFramePointer{false};
+		bool                                             hasCommandUiSnapshot{false};
+		bool                                             hasCommandHistorySnapshot{false};
+		QStringList                                      commandHistorySnapshot;
+		bool                                             commandUiHasView{false};
+		bool                                             commandUiHasFrameData{false};
+		int                                              commandUiOutputClientHeight{0};
+		int                                              commandUiOutputClientWidth{0};
+		int                                              commandUiViewHeight{0};
+		int                                              commandUiViewWidth{0};
+		QString                                          activeMiniWindowExecutionName;
+		QString                                          geometryConstrainedMiniWindowName;
+		int                                              geometryConstraintDisplayClientHeight{0};
+		int                                              geometryConstraintDisplayClientWidth{0};
+		double                                           absoluteMiniWindowScaleXOver{1.0};
+		double                                           absoluteMiniWindowScaleYOver{1.0};
+		double                                           absoluteMiniWindowScaleXUnder{1.0};
+		double                                           absoluteMiniWindowScaleYUnder{1.0};
+		bool                                             hasRuntimeCountersSnapshot{false};
+		int                                              runtimeOutputFontHeight{0};
+		int                                              runtimeOutputFontWidth{0};
+		void                                             rebuildMiniWindowLookupCaches()
 		{
 			auto addWindowKey = [this](const QString &windowName)
 			{
@@ -571,6 +691,7 @@ struct LuaCallbackMiniWindowSnapshot
 			addItemKeys(hotspotIdsByWindow, miniWindowHotspotKeys);
 			miniWindowLookupCacheValid = true;
 		}
+		// Stable, mutation-patched runtime API domains.
 		bool                                                  hasWorldVariablesSnapshot{false};
 		QMap<QString, QString>                                worldVariablesSnapshot;
 		QHash<QString, QMap<QString, QString>>                pluginVariablesSnapshotById;
@@ -587,11 +708,13 @@ struct LuaCallbackMiniWindowSnapshot
 		bool                                                  hasArraySnapshot{false};
 		QStringList                                           arrayNamesSnapshot;
 		QHash<QString, QMap<QString, QString>>                arraysByName;
+		// Dispatch-sampled external/asynchronous domains.
 		bool                                                  hasChatSnapshot{false};
 		QList<long>                                           chatConnectionIdsSnapshot;
 		QHash<long, QHash<int, QVariant>>                     chatInfoValuesById;
 		QHash<long, QHash<QString, QVariant>>                 chatOptionValuesById;
 		QHash<QString, long>                                  chatIdsByLookupKey;
+		// Dispatch-local parser/render state.
 		bool                                                  hasWindowOutputTextRenderSnapshot{false};
 		QMudAnsiStreamState                                   windowOutputTextAnsiStreamState;
 		LuaCallbackAnsiRenderStateSnapshot                    windowOutputTextAnsiRenderState;
@@ -601,6 +724,7 @@ struct LuaCallbackMiniWindowSnapshot
 		bool                                                  windowOutputTextMxpLinkOpen{false};
 		int                                                   windowOutputTextMxpPreDepth{0};
 		QVector<LuaCallbackMxpCustomElementSnapshot>          windowOutputTextCustomElements;
+		// Stable, mutation-patched colours, wildcards, and mapper state.
 		QHash<int, long>                                      boldAnsiColoursByIndex;
 		QHash<int, long>                                      normalAnsiColoursByIndex;
 		QHash<int, long>                                      customTextColoursByIndex;
@@ -618,6 +742,7 @@ struct LuaCallbackMiniWindowSnapshot
 		QMap<long, long>                                      mapColourSnapshot;
 		bool                                                  hasMappingEntriesSnapshot{false};
 		QStringList                                           mappingEntriesSnapshot;
+		// Dispatch-sampled cross-runtime and backend state.
 		bool                                                  hasUdpPortSnapshot{false};
 		QList<int>                                            udpPortsSnapshot;
 		QHash<int, QString>                                   udpListenerPluginIdsByPort;
@@ -626,6 +751,7 @@ struct LuaCallbackMiniWindowSnapshot
 		QHash<int, int>                                       usedUdpPortReferenceCountsSnapshot;
 		QHash<int, int>                                       soundStatusByBuffer;
 		QHash<int, bool>                                      soundBufferReusableByBuffer;
+		// Request-local callback line context and overlays.
 		bool                                                  hasLineBufferSnapshot{false};
 		int                                                   lineBufferCount{0};
 		QSharedPointer<const LuaCallbackLineBufferSnapshot>   lineBufferSnapshot;
@@ -648,6 +774,7 @@ struct LuaCallbackMiniWindowSnapshot
 		bool                                              miniWindowGeometryConstraintRequiresRefresh{false};
 		bool                                              hasRecentLinesSnapshot{false};
 		QStringList                                       recentLinesSnapshot;
+		// Stable, mutation-patched database and collection state.
 		bool                                              hasDatabaseListSnapshot{false};
 		bool                                              databaseListSnapshotDirty{false};
 		QStringList                                       databaseNamesSnapshot;
@@ -679,11 +806,16 @@ struct LuaCallbackMiniWindowSnapshot
 		QList<LuaCallbackAttributeContentSnapshot>        keypadEntriesSnapshot;
 		bool                                              hasAcceleratorSnapshot{false};
 		QVector<LuaCallbackAcceleratorSnapshot>           acceleratorSnapshot;
+		// Dispatch-local UI/counter values followed by stable plugin metadata.
 		QVariantHash                                      commandUiValues;
 		QVariantHash                                      runtimeCounterValues;
 		QHash<QString, QString>                           pluginNamesById;
 		QHash<QString, QString>                           pluginDirectoriesById;
 		QHash<QString, bool>                              pluginEnabledById;
+		/** Installation gate consumed with enabled/engine state through qmudPluginDirectCallStatus(). */
+		QHash<QString, bool>                              pluginInstallPendingById;
+		/** Automatic-global membership; enabled state remains per-world for both values. */
+		QHash<QString, bool>                              pluginGlobalById;
 		QHash<QString, bool>                              nativePluginSpeechEnabledById;
 		QHash<QString, QSharedPointer<LuaCallbackEngine>> pluginEnginesById;
 		QHash<QString, QSet<QString>>                     pluginLuaFunctionsById;
@@ -694,6 +826,7 @@ struct LuaCallbackMiniWindowSnapshot
 		QHash<QString, QString>                           pluginIdsByLookupKey;
 		QHash<QString, QHash<int, QVariant>>              pluginInfoValuesById;
 		QHash<QString, bool>                              pluginCallbackPresenceByName;
+		// Dispatch-local entity, main-window, clipboard, and notepad presentation.
 		bool                                              hasEntitySnapshot{false};
 		QHash<QString, QString>                           entityValuesByName;
 		bool                                              hasUiSnapshot{false};
@@ -746,7 +879,7 @@ struct LuaBatchDispatchRequest
 		QByteArray                                                            bytesArg3;
 		QMap<QString, QString>                                                mapArg;
 		QSharedPointer<const QVector<LuaStyleRun>>                            styleRunsArg;
-		QSharedPointer<const LuaCallbackMiniWindowSnapshot>                   miniWindowSnapshotArg;
+		QSharedPointer<const LuaCallbackSnapshot>                             callbackSnapshotArg;
 		long                                                                  numberArg1{0};
 		long                                                                  numberArg2{0};
 		int                                                                   intArg1{0};
@@ -885,6 +1018,7 @@ struct LuaBatchDispatchResult
 		bool                                               suspended{false};
 		bool                                               recipientMutationBoundary{false};
 		int                                                nextEngineIndex{-1};
+		QSharedPointer<const LuaCallbackSnapshot>          callbackSnapshotAfterMutations;
 		bool                                               linePresentationRequiresRefresh{false};
 		bool                                               outputScrollPositionRequiresRefresh{false};
 		bool                                               outputScrollPositionChanged{false};
@@ -911,21 +1045,43 @@ enum class LuaBatchRecipientStopCondition
 };
 
 /**
- * @brief Aggregate result shape shared by initial, resumed, and fallback dispatch handling.
+ * @brief Complete behavior classification for one batch dispatch kind.
+ *
+ * The policy array is generated in enum order from the same registry that declares LuaBatchDispatchKind. This
+ * retains one authoritative classification without generating switches containing repeated return branches.
  */
-enum class LuaBatchAggregateShape
+struct LuaBatchDispatchPolicy
 {
-	None,
-	BooleanAndFunction,
-	StopOnFalse,
-	FunctionHandled,
-	StopOnTrue,
-	FunctionCount,
-	FunctionAny,
-	BytesInOut,
-	StringInOut,
-	LastResult
+		LuaBatchAggregateShape          aggregateShape;
+		LuaBatchResumeContinuationShape continuationShape;
+		LuaBatchFallbackShape           fallbackShape;
+		LuaBatchFunctionNamePolicy      functionNamePolicy;
 };
+
+inline constexpr auto kLuaBatchDispatchPolicies = std::to_array<LuaBatchDispatchPolicy>({
+#define QMUD_DECLARE_LUA_BATCH_DISPATCH_POLICY(name, aggregateShape, continuationShape, fallbackShape,       \
+                                               functionNamePolicy)                                           \
+	LuaBatchDispatchPolicy{                                                                                  \
+	    LuaBatchAggregateShape::aggregateShape, LuaBatchResumeContinuationShape::continuationShape,          \
+	    LuaBatchFallbackShape::fallbackShape, LuaBatchFunctionNamePolicy::functionNamePolicy},
+    QMUD_LUA_BATCH_DISPATCH_KIND_REGISTRY(QMUD_DECLARE_LUA_BATCH_DISPATCH_POLICY)
+#undef QMUD_DECLARE_LUA_BATCH_DISPATCH_POLICY
+});
+
+inline constexpr LuaBatchDispatchPolicy kInvalidLuaBatchDispatchPolicy{
+    LuaBatchAggregateShape::None,
+    LuaBatchResumeContinuationShape::ResultOnly,
+    LuaBatchFallbackShape::AggregateNeutral,
+    LuaBatchFunctionNamePolicy::Required,
+};
+
+[[nodiscard]] constexpr const LuaBatchDispatchPolicy &
+luaBatchDispatchPolicy(const LuaBatchDispatchKind kind) noexcept
+{
+	const auto index = static_cast<std::size_t>(kind);
+	return index < kLuaBatchDispatchPolicies.size() ? kLuaBatchDispatchPolicies[index]
+	                                                : kInvalidLuaBatchDispatchPolicy;
+}
 
 /**
  * @brief Returns the aggregate shape for a batch dispatch kind.
@@ -934,41 +1090,35 @@ enum class LuaBatchAggregateShape
  */
 [[nodiscard]] constexpr LuaBatchAggregateShape luaBatchDispatchAggregateShape(const LuaBatchDispatchKind kind)
 {
-	switch (kind)
-	{
-	case LuaBatchDispatchKind::NoArgs:
-		return LuaBatchAggregateShape::BooleanAndFunction;
-	case LuaBatchDispatchKind::StringStopOnFalse:
-	case LuaBatchDispatchKind::NumberAndStringStopOnFalse:
-	case LuaBatchDispatchKind::TwoNumbersAndStringStopOnFalse:
-		return LuaBatchAggregateShape::StopOnFalse;
-	case LuaBatchDispatchKind::StringHandled:
-		return LuaBatchAggregateShape::FunctionHandled;
-	case LuaBatchDispatchKind::NumberAndStringStopOnTrue:
-	case LuaBatchDispatchKind::NumberAndBytesStopOnTrue:
-		return LuaBatchAggregateShape::StopOnTrue;
-	case LuaBatchDispatchKind::NumberAndUtf8StringsCount:
-		return LuaBatchAggregateShape::FunctionCount;
-	case LuaBatchDispatchKind::StringsAndWildcards:
-		return LuaBatchAggregateShape::FunctionAny;
-	case LuaBatchDispatchKind::BytesInOut:
-		return LuaBatchAggregateShape::BytesInOut;
-	case LuaBatchDispatchKind::StringInOut:
-		return LuaBatchAggregateShape::StringInOut;
-	case LuaBatchDispatchKind::String:
-	case LuaBatchDispatchKind::Bytes:
-	case LuaBatchDispatchKind::NumberAndString:
-	case LuaBatchDispatchKind::TwoNumbersAndString:
-	case LuaBatchDispatchKind::NumberAndBytes:
-	case LuaBatchDispatchKind::ExecuteScript:
-	case LuaBatchDispatchKind::ProcedureWithString:
-	case LuaBatchDispatchKind::MxpError:
-	case LuaBatchDispatchKind::MxpStartTag:
-		return LuaBatchAggregateShape::LastResult;
-	default:
-		return LuaBatchAggregateShape::None;
-	}
+	return luaBatchDispatchPolicy(kind).aggregateShape;
 }
+
+/**
+ * @brief Returns the authoritative post-resume continuation shape for a dispatch kind.
+ */
+[[nodiscard]] constexpr LuaBatchResumeContinuationShape
+luaBatchDispatchResumeContinuationShape(const LuaBatchDispatchKind kind)
+{
+	return luaBatchDispatchPolicy(kind).continuationShape;
+}
+
+/**
+ * @brief Returns the authoritative neutral-result contract for a dispatch kind.
+ */
+[[nodiscard]] constexpr LuaBatchFallbackShape luaBatchDispatchFallbackShape(const LuaBatchDispatchKind kind)
+{
+	return luaBatchDispatchPolicy(kind).fallbackShape;
+}
+
+/**
+ * @brief Returns whether a dispatch kind requires a non-empty Lua function name.
+ */
+[[nodiscard]] constexpr bool luaBatchDispatchRequiresFunctionName(const LuaBatchDispatchKind kind)
+{
+	return luaBatchDispatchPolicy(kind).functionNamePolicy == LuaBatchFunctionNamePolicy::Required;
+}
+
+#undef QMUD_LUA_BATCH_DISPATCH_KIND_REGISTRY
 
 /**
  * @brief Builds the neutral result returned when a batch dispatch cannot run or continue.
@@ -1014,27 +1164,23 @@ makeLuaBatchDispatchFallback(const LuaBatchDispatchRequest &request)
 		break;
 	}
 
-	switch (request.kind)
+	switch (luaBatchDispatchFallbackShape(request.kind))
 	{
-	case LuaBatchDispatchKind::HasFunction:
+	case LuaBatchFallbackShape::HasFunctionFalse:
 		result.hasFunction      = false;
 		result.hasFunctionValid = true;
 		break;
-	case LuaBatchDispatchKind::ResetAndLoadScript:
-	case LuaBatchDispatchKind::ExecuteScript:
-	case LuaBatchDispatchKind::MxpError:
-	case LuaBatchDispatchKind::MxpStartTag:
-	case LuaBatchDispatchKind::CallPluginLuaMarshalling:
+	case LuaBatchFallbackShape::BoolFalse:
 		result.boolResult      = false;
 		result.boolResultValid = true;
 		break;
-	case LuaBatchDispatchKind::ProcedureWithString:
+	case LuaBatchFallbackShape::BoolAndFunctionFalse:
 		result.boolResult       = false;
 		result.boolResultValid  = true;
 		result.hasFunction      = false;
 		result.hasFunctionValid = true;
 		break;
-	default:
+	case LuaBatchFallbackShape::AggregateNeutral:
 		break;
 	}
 	return result;
@@ -1109,6 +1255,39 @@ inline void mergeLuaBatchPresentationRefreshFlags(LuaBatchDispatchResult       &
 		aggregate.notepadPresentationSnapshot    = result.hasNotepadPresentationSnapshot
 		                                               ? result.notepadPresentationSnapshot
 		                                               : QVector<LuaCallbackNotepadSnapshot>{};
+	}
+}
+
+/**
+ * @brief Carries a cumulative in/out aggregate into the request for the next recipient.
+ * @param kind Original batch dispatch kind.
+ * @param request Next-recipient request to update.
+ * @param aggregate Cumulative result produced by the preceding recipients.
+ *
+ * In/out continuation is an aggregation policy, not a runtime dispatch-kind policy. Keeping this switch beside the
+ * authoritative aggregate implementation prevents continuation sites from maintaining their own kind lists.
+ */
+inline void carryLuaBatchAggregateIntoNextRecipientRequest(const LuaBatchDispatchKind    kind,
+                                                           LuaBatchDispatchRequest      &request,
+                                                           const LuaBatchDispatchResult &aggregate)
+{
+	switch (luaBatchDispatchAggregateShape(kind))
+	{
+	case LuaBatchAggregateShape::BytesInOut:
+		request.bytesArg = aggregate.bytesResult;
+		break;
+	case LuaBatchAggregateShape::StringInOut:
+		request.stringArg = aggregate.stringResult;
+		break;
+	case LuaBatchAggregateShape::BooleanAndFunction:
+	case LuaBatchAggregateShape::StopOnFalse:
+	case LuaBatchAggregateShape::FunctionHandled:
+	case LuaBatchAggregateShape::StopOnTrue:
+	case LuaBatchAggregateShape::FunctionCount:
+	case LuaBatchAggregateShape::FunctionAny:
+	case LuaBatchAggregateShape::LastResult:
+	case LuaBatchAggregateShape::None:
+		break;
 	}
 }
 
@@ -1240,6 +1419,20 @@ inline void preserveLuaBatchPartialResultOnFallback(const LuaBatchDispatchKind  
 	       result.outputScrollPositionChanged || result.commandUiPresentationRequiresRefresh ||
 	       result.globalPresentationRequiresRefresh || result.commandHistoryChanged ||
 	       result.notepadPresentationChanged;
+}
+
+/**
+ * @brief Returns whether a callback result published committed or deferred runtime mutations.
+ * @param result Dispatch result to inspect before its deferred mutation batches are consumed.
+ * @return `true` when the runtime must advance the request snapshot before another recipient runs.
+ *
+ * Owner-thread callbacks normally apply mutations synchronously and publish the resulting immutable snapshot.
+ * Worker callbacks additionally carry deferred mutation batches. Both are representations of the same mutation
+ * boundary; continuation code must use this predicate rather than testing either representation independently.
+ */
+[[nodiscard]] inline bool luaBatchPublishedMutationBoundary(const LuaBatchDispatchResult &result)
+{
+	return result.callbackSnapshotAfterMutations || !result.deferredRuntimeMutationBatches.isEmpty();
 }
 
 namespace QMudLuaDeferredRuntimeMutation
