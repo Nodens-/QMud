@@ -48,6 +48,12 @@ class WorldCommandProcessor : public QObject
 		 */
 		void               setRuntime(WorldRuntime *runtime);
 		/**
+		 * @brief Applies one table-bound numeric world option to the command processor cache.
+		 * @param binding Exact cache binding declared by the numeric option table.
+		 * @param value Stored numeric option value.
+		 */
+		void               applyNumericWorldOption(WorldNumericOptionBinding binding, long long value);
+		/**
 		 * @brief Selects whether this processor owns session-wide timer evaluation.
 		 * @param owner `true` for the runtime's primary command processor.
 		 */

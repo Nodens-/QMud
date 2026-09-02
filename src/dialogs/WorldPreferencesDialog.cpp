@@ -24,6 +24,7 @@
 #include "helpers/DialogSizingUtils.h"
 #include "helpers/EncodingUtils.h"
 #include "helpers/NoteColourUtils.h"
+#include "helpers/TimerSchedulingUtils.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QApplication>
@@ -1957,6 +1958,9 @@ void WorldPreferencesDialog::accept()
 			m_runtime->setWorldAttribute(QStringLiteral("save_deleted_command"),
 			                             m_saveDeletedCommand->isChecked() ? QStringLiteral("1")
 			                                                               : QStringLiteral("0"));
+		if (m_partialSaveCharacterThreshold)
+			m_runtime->setWorldAttribute(QStringLiteral("partial_save_character_threshold"),
+			                             QString::number(m_partialSaveCharacterThreshold->value()));
 		if (m_ctrlZToEnd)
 			m_runtime->setWorldAttribute(QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
 			                             m_ctrlZToEnd->isChecked() ? QStringLiteral("1")
@@ -6043,6 +6047,9 @@ void WorldPreferencesDialog::buildUi()
 	m_doubleClickSends->setVisible(false);
 	m_saveDeletedCommand = new QCheckBox(commandsPage);
 	m_saveDeletedCommand->setVisible(false);
+	m_partialSaveCharacterThreshold = new QSpinBox(commandsPage);
+	m_partialSaveCharacterThreshold->setRange(0, 200);
+	m_partialSaveCharacterThreshold->setVisible(false);
 	m_arrowsChangeHistory = new QCheckBox(commandsPage);
 	m_arrowsChangeHistory->setVisible(false);
 	m_arrowRecallsPartial = new QCheckBox(commandsPage);
@@ -6313,10 +6320,22 @@ void WorldPreferencesDialog::buildUi()
 		    doubleClickLayout->addWidget(doubleClickPaste);
 		    doubleClickLayout->addWidget(doubleClickSend);
 
-		    auto *deletingBox    = new QGroupBox(QStringLiteral("Deleting"), &dialog);
-		    auto *deletingLayout = new QVBoxLayout(deletingBox);
-		    auto *escapeDeletes  = new QCheckBox(QStringLiteral("&Escape Deletes Typing"), deletingBox);
-		    auto *saveDeleted    = new QCheckBox(QStringLiteral("Save Deleted Command"), deletingBox);
+		    auto *deletingBox       = new QGroupBox(QStringLiteral("Deleting"), &dialog);
+		    auto *deletingLayout    = new QVBoxLayout(deletingBox);
+		    auto *escapeDeletes     = new QCheckBox(QStringLiteral("&Escape Deletes Typing"), deletingBox);
+		    auto *saveDeleted       = new QCheckBox(QStringLiteral("Save Deleted Command"), deletingBox);
+		    auto *partialSaveRow    = new QWidget(deletingBox);
+		    auto *partialSaveLayout = new QHBoxLayout(partialSaveRow);
+		    partialSaveLayout->setContentsMargins(24, 0, 0, 0);
+		    auto *partialSaveLabel =
+		        new QLabel(QStringLiteral("Partial Save Character Threshold"), partialSaveRow);
+		    auto *partialSaveThreshold = new QSpinBox(partialSaveRow);
+		    partialSaveThreshold->setRange(0, 200);
+		    configureSpinBoxWidthForRange(partialSaveThreshold);
+		    partialSaveLabel->setBuddy(partialSaveThreshold);
+		    partialSaveLayout->addWidget(partialSaveLabel);
+		    partialSaveLayout->addWidget(partialSaveThreshold);
+		    partialSaveLayout->addStretch();
 		    auto *confirmReplace =
 		        new QCheckBox(QStringLiteral("Confirm Before &Replacing Typing"), deletingBox);
 		    auto *ctrlBackspace =
@@ -6325,12 +6344,17 @@ void WorldPreferencesDialog::buildUi()
 			    escapeDeletes->setChecked(m_escapeDeletesInput->isChecked());
 		    if (m_saveDeletedCommand)
 			    saveDeleted->setChecked(m_saveDeletedCommand->isChecked());
+		    if (m_partialSaveCharacterThreshold)
+			    partialSaveThreshold->setValue(m_partialSaveCharacterThreshold->value());
+		    partialSaveRow->setEnabled(saveDeleted->isChecked());
+		    connect(saveDeleted, &QCheckBox::toggled, partialSaveRow, &QWidget::setEnabled);
 		    if (m_confirmBeforeReplacingTyping)
 			    confirmReplace->setChecked(m_confirmBeforeReplacingTyping->isChecked());
 		    if (m_ctrlBackspaceDeletesLastWord)
 			    ctrlBackspace->setChecked(m_ctrlBackspaceDeletesLastWord->isChecked());
 		    deletingLayout->addWidget(escapeDeletes);
 		    deletingLayout->addWidget(saveDeleted);
+		    deletingLayout->addWidget(partialSaveRow);
 		    deletingLayout->addWidget(confirmReplace);
 		    deletingLayout->addWidget(ctrlBackspace);
 
@@ -6388,6 +6412,8 @@ void WorldPreferencesDialog::buildUi()
 			    m_escapeDeletesInput->setChecked(escapeDeletes->isChecked());
 		    if (m_saveDeletedCommand)
 			    m_saveDeletedCommand->setChecked(saveDeleted->isChecked());
+		    if (m_partialSaveCharacterThreshold)
+			    m_partialSaveCharacterThreshold->setValue(partialSaveThreshold->value());
 		    if (m_confirmBeforeReplacingTyping)
 			    m_confirmBeforeReplacingTyping->setChecked(confirmReplace->isChecked());
 		    if (m_ctrlBackspaceDeletesLastWord)
@@ -8042,10 +8068,17 @@ void WorldPreferencesDialog::buildUi()
 			timer.attributes.insert(QStringLiteral("send_to"), QString::number(defaultTimerSendTo));
 		}
 
-		WorldTimerDialog dlg(m_runtime, timer, timers, index, this);
+		const WorldRuntime::Timer timerBeforeEdit = timer;
+		WorldTimerDialog          dlg(m_runtime, timer, timers, index, this);
 		if (dlg.exec() != QDialog::Accepted)
 			return false;
 		timer = dlg.timer();
+		if (!isNew)
+		{
+			const QMudTimerScheduling::TimerResetMutation scheduleReset{QDateTime::currentDateTime()};
+			static_cast<void>(QMudTimerScheduling::resetTimerDeadlineIfDefinitionChanged(
+			    timerBeforeEdit, timer, scheduleReset));
+		}
 
 		if (isNew)
 		{
@@ -9888,6 +9921,14 @@ void WorldPreferencesDialog::populateCommands()
 	if (m_saveDeletedCommand)
 		m_saveDeletedCommand->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("save_deleted_command"))));
+	if (m_partialSaveCharacterThreshold)
+	{
+		bool ok    = false;
+		int  value = attrs.value(QStringLiteral("partial_save_character_threshold")).toInt(&ok);
+		if (!ok)
+			value = 10;
+		m_partialSaveCharacterThreshold->setValue(value);
+	}
 	if (m_ctrlZToEnd)
 		m_ctrlZToEnd->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("ctrl_z_goes_to_end_of_buffer"))));

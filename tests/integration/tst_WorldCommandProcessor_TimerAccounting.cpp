@@ -108,6 +108,27 @@ namespace
 				QVERIFY(QMudTimerScheduling::evaluateTimerDue(timer, now, true).due);
 			}
 
+			void timerDeadlineChangesOnlyWithTimingFields()
+			{
+				const WorldRuntime::Timer original = makeTimer(QStringLiteral("deadline"));
+
+				WorldRuntime::Timer       eligibilityOnly = original;
+				eligibilityOnly.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
+				eligibilityOnly.attributes.insert(QStringLiteral("active_closed"), QStringLiteral("0"));
+				QVERIFY(!QMudTimerScheduling::timerDeadlineDefinitionChanged(original, eligibilityOnly));
+
+				WorldRuntime::Timer irrelevantAtTimeOffset = original;
+				irrelevantAtTimeOffset.attributes.insert(QStringLiteral("at_time"), QStringLiteral("1"));
+				WorldRuntime::Timer changedAtTimeOffset = irrelevantAtTimeOffset;
+				changedAtTimeOffset.attributes.insert(QStringLiteral("offset_second"), QStringLiteral("5"));
+				QVERIFY(!QMudTimerScheduling::timerDeadlineDefinitionChanged(irrelevantAtTimeOffset,
+				                                                             changedAtTimeOffset));
+
+				WorldRuntime::Timer durationChanged = original;
+				durationChanged.attributes.insert(QStringLiteral("second"), QStringLiteral("2"));
+				QVERIFY(QMudTimerScheduling::timerDeadlineDefinitionChanged(original, durationChanged));
+			}
+
 			void unnamedTimerCanBeDue()
 			{
 				WorldRuntime::Timer timer = makeTimer(QString());

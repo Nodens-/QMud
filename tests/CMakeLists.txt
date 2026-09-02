@@ -326,6 +326,8 @@ qmud_add_qtest(tst_WorldOptions
         SOURCES
         unit/tst_WorldOptions.cpp
         "${CMAKE_SOURCE_DIR}/src/WorldOptions.cpp"
+        LIBRARIES
+        Qt6::Gui
         LABELS
         unit)
 

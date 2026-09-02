@@ -333,7 +333,6 @@ static WorldRuntime    *findWorldRuntimeById(const LuaCallbackEngine *engine, co
 static WorldRuntime    *findWorldRuntimeByName(const LuaCallbackEngine *engine, const QString &name);
 static void             pushStringList(lua_State *L, const QStringList &list);
 static bool             isEnabledValue(const QString &value);
-static bool             parseBooleanKeywordValue(const QString &text, bool &out);
 static QString          attrFlag(bool value);
 template <typename Func>
 static auto runOnRuntimeThread(WorldRuntime *runtime, Func &&func, std::invoke_result_t<Func> fallbackValue)
@@ -17296,6 +17295,12 @@ static QString resolveWorldAttributeValueMaybeMultilineForApi(const LuaCallbackE
 	return !multiValue.isEmpty() ? multiValue : worldValue;
 }
 
+static void pushPublicNumericOptionValue(lua_State *L, const WorldNumericOption &option, const QString &value)
+{
+	const auto publicValue = QMudWorldOptions::publicNumericOptionValue(option, value);
+	lua_pushnumber(L, static_cast<lua_Number>(publicValue.value_or(0)));
+}
+
 static bool resolveVariableSnapshotForApi(const LuaCallbackEngine *engine, WorldRuntime *runtime,
                                           const QString &pluginId, QMap<QString, QString> &values,
                                           bool &pluginAvailable)
@@ -20276,40 +20281,9 @@ static int luaGetCurrentValue(lua_State *L)
 			lua_pushnil(L);
 			return 1;
 		}
-		const QString canonical       = QString::fromLatin1(numeric->name);
-		const QString value           = resolveWorldAttributeValueForApi(engine, runtime, canonical);
-		const QString trimmed         = value.trimmed().toLower();
-		const bool    isBooleanOption = numeric->minValue == 0 && numeric->maxValue == 0;
-		if (numeric->flags & OPT_RGB_COLOUR)
-		{
-			const long rgb = colourNameFallback(value);
-			lua_pushnumber(L, static_cast<lua_Number>(rgb >= 0 ? rgb : 0));
-			return 1;
-		}
-		if (bool boolValue = false; parseBooleanKeywordValue(trimmed, boolValue))
-		{
-			lua_pushnumber(L, boolValue ? 1 : 0);
-			return 1;
-		}
-		bool         ok     = false;
-		const double number = trimmed.toDouble(&ok);
-		if (ok && !trimmed.isEmpty())
-		{
-			if (numeric->flags & OPT_CUSTOM_COLOUR)
-			{
-				long adjusted = static_cast<long>(number) + 1;
-				if (adjusted == 65536)
-					adjusted = 0;
-				lua_pushnumber(L, static_cast<lua_Number>(adjusted));
-				return 1;
-			}
-			if (isBooleanOption)
-				lua_pushnumber(L, number != 0.0 ? 1 : 0);
-			else
-				lua_pushnumber(L, static_cast<lua_Number>(static_cast<long>(number)));
-			return 1;
-		}
-		lua_pushnumber(L, 0);
+		const QString canonical = QString::fromLatin1(numeric->name);
+		pushPublicNumericOptionValue(L, *numeric,
+		                             resolveWorldAttributeValueForApi(engine, runtime, canonical));
 		return 1;
 	}
 
@@ -21031,16 +21005,8 @@ static int luaGetLoadedValue(lua_State *L)
 			return 1;
 		}
 		const QString canonical = QString::fromLatin1(numeric->name);
-		const QString value     = resolveWorldAttributeValueForApi(engine, runtime, canonical);
-		const QString trimmed   = value.trimmed();
-		if (bool boolValue = false; parseBooleanKeywordValue(trimmed, boolValue))
-		{
-			lua_pushnumber(L, boolValue ? 1 : 0);
-			return 1;
-		}
-		bool            ok     = false;
-		const long long number = trimmed.toLongLong(&ok);
-		lua_pushnumber(L, ok ? static_cast<lua_Number>(number) : 0);
+		pushPublicNumericOptionValue(L, *numeric,
+		                             resolveWorldAttributeValueForApi(engine, runtime, canonical));
 		return 1;
 	}
 
@@ -29764,14 +29730,8 @@ static void reportLuaError(const LuaCallbackEngine &engine, const QString &messa
 	{
 		const auto emitOnRuntime = [message](WorldRuntime &targetRuntime) -> bool
 		{
-			const QString logFlag   = targetRuntime.worldAttributeValue(QStringLiteral("log_script_errors"));
-			bool          logErrors = isEnabledValue(logFlag);
-			if (!logErrors)
-			{
-				if (bool parsedKeyword = false; parseBooleanKeywordValue(logFlag, parsedKeyword))
-					logErrors = parsedKeyword;
-			}
-			if (logErrors)
+			const QString logFlag = targetRuntime.worldAttributeValue(QStringLiteral("log_script_errors"));
+			if (const bool logErrors = isEnabledValue(logFlag); logErrors)
 			{
 				QString       logDir     = targetRuntime.defaultLogDirectory();
 				const QString startupDir = targetRuntime.startupDirectory();
@@ -29798,11 +29758,6 @@ static void reportLuaError(const LuaCallbackEngine &engine, const QString &messa
 			const QString flag =
 			    targetRuntime.worldAttributeValue(QStringLiteral("script_errors_to_output_window"));
 			bool toOutput = isEnabledValue(flag);
-			if (!toOutput)
-			{
-				if (bool parsedKeyword = false; parseBooleanKeywordValue(flag, parsedKeyword))
-					toOutput = parsedKeyword;
-			}
 			if (toOutput && !targetRuntime.suppressScriptErrorOutputToWorld())
 			{
 				targetRuntime.outputText(message, true, true);
@@ -34321,27 +34276,7 @@ static int pushOptionalStringList(lua_State *L, const QStringList &list)
 
 static bool isEnabledValue(const QString &value)
 {
-	return value == QStringLiteral("1") || value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-	       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-}
-
-static bool parseBooleanKeywordValue(const QString &text, bool &out)
-{
-	if (text.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-	    text.compare(QStringLiteral("yes"), Qt::CaseInsensitive) == 0 ||
-	    text.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0)
-	{
-		out = true;
-		return true;
-	}
-	if (text.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
-	    text.compare(QStringLiteral("no"), Qt::CaseInsensitive) == 0 ||
-	    text.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0)
-	{
-		out = false;
-		return true;
-	}
-	return false;
+	return qmudIsEnabledFlag(value);
 }
 
 static QString attrFlag(const bool value)
@@ -34433,7 +34368,7 @@ static bool parseBoolArg(lua_State *L, bool &out)
 		return true;
 	}
 	const QString text = luaOptionValue(L, kValueIndex);
-	if (parseBooleanKeywordValue(text, out))
+	if (qmudParseBooleanKeyword(text, out))
 		return true;
 	bool         ok     = false;
 	const double number = text.toDouble(&ok);
@@ -41056,6 +40991,19 @@ static int luaSetTimerOption(lua_State *L)
 
 	const auto applyTimerMutation = [&](const std::function<int(WorldRuntime::Timer &)> &mutate) -> int
 	{
+		const auto applyMutation = [mutate, scheduleReset](WorldRuntime::Timer &timer) -> int
+		{
+			const WorldRuntime::Timer before = timer;
+			const int                 result = mutate(timer);
+			if (result != eOK)
+				return result;
+
+			applyTimerDefaults(timer);
+			static_cast<void>(
+			    QMudTimerScheduling::resetTimerDeadlineIfDefinitionChanged(before, timer, scheduleReset));
+			return eOK;
+		};
+
 		if (activeCallbackContextConst(engine))
 		{
 			QList<WorldRuntime::Timer> timers;
@@ -41065,7 +41013,7 @@ static int luaSetTimerOption(lua_State *L)
 			const int index = findTimerIndex(timers, name);
 			if (index < 0)
 				return eTimerNotFound;
-			const int result = mutate(timers[index]);
+			const int result = applyMutation(timers[index]);
 			if (result != eOK)
 				return result;
 			cacheCallbackTimerList(engine, pluginId, true, timers, false,
@@ -41073,7 +41021,7 @@ static int luaSetTimerOption(lua_State *L)
 			cacheCallbackTimerSnapshot(engine, pluginId, name, true, timers.at(index), false);
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
-			    [pluginId, name, mutate](WorldRuntime &targetRuntime)
+			    [pluginId, name, applyMutation](WorldRuntime &targetRuntime)
 			    {
 				    WorldRuntime::Plugin *plugin = nullptr;
 				    int                   errorCode{eOK};
@@ -41083,7 +41031,7 @@ static int luaSetTimerOption(lua_State *L)
 				    const int                   runtimeIndex  = findTimerIndex(runtimeTimers, name);
 				    if (runtimeIndex < 0)
 					    return;
-				    if (mutate(runtimeTimers[runtimeIndex]) != eOK)
+				    if (applyMutation(runtimeTimers[runtimeIndex]) != eOK)
 					    return;
 				    commitTimerListMutation(&targetRuntime, plugin, false);
 			    });
@@ -41100,7 +41048,7 @@ static int luaSetTimerOption(lua_State *L)
 			    const int                   index  = findTimerIndex(timers, name);
 			    if (index < 0)
 				    return eTimerNotFound;
-			    const int result = mutate(timers[index]);
+			    const int result = applyMutation(timers[index]);
 			    if (result != eOK)
 				    return result;
 			    commitTimerListMutation(runtime, plugin, false);
@@ -41126,7 +41074,6 @@ static int luaSetTimerOption(lua_State *L)
 		    [optName, textValue](WorldRuntime::Timer &timer) -> int
 		    {
 			    timer.attributes.insert(optName, textValue);
-			    applyTimerDefaults(timer);
 			    return eOK;
 		    });
 		lua_pushnumber(L, result);
@@ -41140,7 +41087,6 @@ static int luaSetTimerOption(lua_State *L)
 		    [textValue](WorldRuntime::Timer &timer) -> int
 		    {
 			    timer.children.insert(QStringLiteral("send"), textValue);
-			    applyTimerDefaults(timer);
 			    return eOK;
 		    });
 		lua_pushnumber(L, result);
@@ -41159,12 +41105,9 @@ static int luaSetTimerOption(lua_State *L)
 			return 1;
 		}
 		const int result = applyTimerMutation(
-		    [optName, boolValue, scheduleReset](WorldRuntime::Timer &timer) -> int
+		    [optName, boolValue](WorldRuntime::Timer &timer) -> int
 		    {
 			    timer.attributes.insert(optName, attrFlag(boolValue));
-			    if (optName == QStringLiteral("at_time"))
-				    resetTimerFields(timer, scheduleReset);
-			    applyTimerDefaults(timer);
 			    return eOK;
 		    });
 		lua_pushnumber(L, result);
@@ -41185,29 +41128,25 @@ static int luaSetTimerOption(lua_State *L)
 	}
 
 	const int result = applyTimerMutation(
-	    [optName, number, scheduleReset](WorldRuntime::Timer &timer) -> int
+	    [optName, number](WorldRuntime::Timer &timer) -> int
 	    {
-		    bool resetSchedule = false;
 		    if (optName == QStringLiteral("hour") || optName == QStringLiteral("offset_hour"))
 		    {
 			    if (number < 0 || number > 23)
 				    return eOptionOutOfRange;
 			    timer.attributes.insert(optName, QString::number(static_cast<int>(number)));
-			    resetSchedule = true;
 		    }
 		    else if (optName == QStringLiteral("minute") || optName == QStringLiteral("offset_minute"))
 		    {
 			    if (number < 0 || number > 59)
 				    return eOptionOutOfRange;
 			    timer.attributes.insert(optName, QString::number(static_cast<int>(number)));
-			    resetSchedule = true;
 		    }
 		    else if (optName == QStringLiteral("second") || optName == QStringLiteral("offset_second"))
 		    {
 			    if (number < 0 || number > 59.9999)
 				    return eOptionOutOfRange;
 			    timer.attributes.insert(optName, QString::number(number, 'f', 4));
-			    resetSchedule = true;
 		    }
 		    else if (optName == QStringLiteral("send_to"))
 		    {
@@ -41224,10 +41163,6 @@ static int luaSetTimerOption(lua_State *L)
 		    {
 			    return eUnknownOption;
 		    }
-
-		    if (resetSchedule)
-			    resetTimerFields(timer, scheduleReset);
-		    applyTimerDefaults(timer);
 		    return eOK;
 	    });
 	lua_pushnumber(L, result);
@@ -45629,40 +45564,8 @@ static int luaGetOption(lua_State *L)
 		lua_pushnumber(L, -1);
 		return 1;
 	}
-	const QString canonical       = QString::fromLatin1(option->name);
-	const QString value           = resolveWorldAttributeValueForApi(engine, runtime, canonical);
-	const QString trimmed         = value.trimmed();
-	const bool    isBooleanOption = option->minValue == 0 && option->maxValue == 0;
-	if (option->flags & OPT_RGB_COLOUR)
-	{
-		const long rgb = colourNameFallback(value);
-		lua_pushnumber(L, static_cast<lua_Number>(rgb >= 0 ? rgb : 0));
-		return 1;
-	}
-	if (bool boolValue = false; parseBooleanKeywordValue(trimmed, boolValue))
-	{
-		lua_pushnumber(L, boolValue ? 1 : 0);
-		return 1;
-	}
-	bool         ok     = false;
-	const double number = trimmed.toDouble(&ok);
-	if (ok && !trimmed.isEmpty())
-	{
-		if (option->flags & OPT_CUSTOM_COLOUR)
-		{
-			long adjusted = static_cast<long>(number) + 1;
-			if (adjusted == 65536)
-				adjusted = 0;
-			lua_pushnumber(L, static_cast<lua_Number>(adjusted));
-			return 1;
-		}
-		if (isBooleanOption)
-			lua_pushnumber(L, number != 0.0 ? 1 : 0);
-		else
-			lua_pushnumber(L, static_cast<lua_Number>(static_cast<long>(number)));
-	}
-	else
-		lua_pushnumber(L, 0);
+	const QString canonical = QString::fromLatin1(option->name);
+	pushPublicNumericOptionValue(L, *option, resolveWorldAttributeValueForApi(engine, runtime, canonical));
 	return 1;
 }
 
@@ -45700,43 +45603,31 @@ static int luaSetOption(lua_State *L)
 		numeric = 0.0;
 	else
 		numeric = luaL_checknumber(L, 2);
-	const int minimum = static_cast<int>(option->minValue);
-	int       maximum = static_cast<int>(option->maxValue);
-	if (minimum == 0 && maximum == 0)
-		maximum = 1;
-	if (numeric < minimum || numeric > maximum)
+	if (!QMudWorldOptions::numericOptionValueInRange(*option, numeric))
 	{
 		lua_pushnumber(L, eOptionOutOfRange);
 		return 1;
 	}
 
-	long storedValue = static_cast<long>(numeric);
-	// Legacy behavior: custom-color options store value-1 internally.
-	if (option->flags & OPT_CUSTOM_COLOUR)
-		storedValue -= 1;
-
-	const QString canonical = QString::fromLatin1(option->name);
+	const auto    publicValue = static_cast<long long>(numeric);
+	const QString storedValue = QMudWorldOptions::storedNumericOptionText(*option, publicValue);
+	const QString canonical   = QString::fromLatin1(option->name);
 	if (activeCallbackContextConst(engine))
 	{
 		enqueueRuntimeThreadDeferredMutationNoResult(
-		    engine, runtime, [canonical, storedValue](WorldRuntime &targetRuntime)
-		    { targetRuntime.setWorldAttribute(canonical, QString::number(storedValue)); });
-		updateCallbackWorldAttributeSnapshot(engine, canonical, QString::number(storedValue), false);
+		    engine, runtime, [option, publicValue](WorldRuntime &targetRuntime)
+		    { static_cast<void>(targetRuntime.setOptionItem(*option, publicValue)); });
+		updateCallbackWorldAttributeSnapshot(engine, canonical, storedValue, false);
 		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical, false);
 		lua_pushnumber(L, eOK);
 		return 1;
 	}
 	const int result = runOnRuntimeThreadDeferredMutation(
-	    engine, runtime,
-	    [canonical, storedValue](WorldRuntime &targetRuntime) -> int
-	    {
-		    targetRuntime.setWorldAttribute(canonical, QString::number(storedValue));
-		    return eOK;
-	    },
-	    eWorldClosed);
+	    engine, runtime, [option, publicValue](WorldRuntime &targetRuntime) -> int
+	    { return targetRuntime.setOptionItem(*option, publicValue); }, eWorldClosed);
 	if (result == eOK)
 	{
-		updateCallbackWorldAttributeSnapshot(engine, canonical, QString::number(storedValue), false);
+		updateCallbackWorldAttributeSnapshot(engine, canonical, storedValue, false);
 		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical, false);
 	}
 	lua_pushnumber(L, result);

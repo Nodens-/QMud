@@ -6,9 +6,12 @@
  * Role: QTest coverage for WorldOptions behavior.
  */
 
+#include "ColorPacking.h"
 #include "WorldOptions.h"
 
 #include <QtTest/QTest>
+
+#include <cmath>
 
 namespace
 {
@@ -102,6 +105,77 @@ namespace
 				QCOMPARE(opt->minValue, 0LL);
 				QCOMPARE(opt->maxValue, 0LL);
 				QCOMPARE(opt->flags, 0);
+			}
+
+			void partialSaveCharacterThresholdHasRequestedRangeAndDefault()
+			{
+				const WorldNumericOption *opt = QMudWorldOptions::findWorldNumericOption(
+				    QStringLiteral("partial_save_character_threshold"));
+				QVERIFY(opt != nullptr);
+				QCOMPARE(opt->defaultValue, 10LL);
+				QCOMPARE(opt->minValue, 0LL);
+				QCOMPARE(opt->maxValue, 200LL);
+				QCOMPARE(opt->flags, 0);
+				QCOMPARE(opt->binding, WorldNumericOptionBinding::PartialSaveCharacterThreshold);
+
+				const WorldNumericOption *saveDeleted =
+				    QMudWorldOptions::findWorldNumericOption(QStringLiteral("save_deleted_command"));
+				QVERIFY(saveDeleted != nullptr);
+				QCOMPARE(saveDeleted->binding, WorldNumericOptionBinding::SaveDeletedCommand);
+			}
+
+			void rgbOptionStorageNormalizesColorRefToInternalRgbText()
+			{
+				const WorldNumericOption *option =
+				    QMudWorldOptions::findWorldNumericOption(QStringLiteral("hyperlink_colour"));
+				QVERIFY(option != nullptr);
+				QVERIFY(option->flags & OPT_RGB_COLOUR);
+
+				constexpr auto colourRef = static_cast<long long>(qmudRgb(0x12, 0x34, 0x56));
+				QCOMPARE(QMudWorldOptions::storedNumericOptionText(*option, colourRef),
+				         QStringLiteral("#123456"));
+			}
+
+			void publicNumericValueConvertsInternalRepresentations()
+			{
+				const WorldNumericOption *rgb =
+				    QMudWorldOptions::findWorldNumericOption(QStringLiteral("hyperlink_colour"));
+				const WorldNumericOption *custom =
+				    QMudWorldOptions::findWorldNumericOption(QStringLiteral("echo_colour"));
+				const WorldNumericOption *boolean =
+				    QMudWorldOptions::findWorldNumericOption(QStringLiteral("underline_hyperlinks"));
+				QVERIFY(rgb);
+				QVERIFY(custom);
+				QVERIFY(boolean);
+
+				QCOMPARE(QMudWorldOptions::publicNumericOptionValue(*rgb, QStringLiteral("#123456")),
+				         std::optional<long long>(0x563412));
+				QCOMPARE(QMudWorldOptions::publicNumericOptionValue(*rgb, QStringLiteral("5649426")),
+				         std::optional<long long>(0x563412));
+				QCOMPARE(QMudWorldOptions::publicNumericOptionValue(*custom, QStringLiteral("10")),
+				         std::optional<long long>(10));
+				QCOMPARE(QMudWorldOptions::storedNumericOptionText(*custom, 10), QStringLiteral("10"));
+				QCOMPARE(QMudWorldOptions::publicNumericOptionValue(*boolean, QStringLiteral("true")),
+				         std::optional<long long>(1));
+				QCOMPARE(QMudWorldOptions::publicNumericOptionValue(*boolean, QStringLiteral("YES")),
+				         std::optional<long long>(1));
+				QCOMPARE(QMudWorldOptions::publicNumericOptionValue(*boolean, QStringLiteral("no")),
+				         std::optional<long long>(0));
+				QVERIFY(!QMudWorldOptions::publicNumericOptionValue(*rgb, QStringLiteral("invalid")));
+			}
+
+			void luaNumericRangeRejectsRoundedValueAboveIntegerMaximum()
+			{
+				const WorldNumericOption *option =
+				    QMudWorldOptions::findWorldNumericOption(QStringLiteral("chat_max_bytes_per_message"));
+				QVERIFY(option != nullptr);
+
+				const auto roundedMaximum = static_cast<double>(option->maxValue);
+				if (static_cast<long double>(roundedMaximum) > static_cast<long double>(option->maxValue))
+					QVERIFY(!QMudWorldOptions::numericOptionValueInRange(*option, roundedMaximum));
+
+				const double representableBelowMaximum = std::nextafter(roundedMaximum, 0.0);
+				QVERIFY(QMudWorldOptions::numericOptionValueInRange(*option, representableBelowMaximum));
 			}
 
 			void findUnknownReturnsNull()

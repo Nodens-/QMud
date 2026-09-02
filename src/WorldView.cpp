@@ -87,6 +87,7 @@
 namespace
 {
 	constexpr const char *kWorldOutputAccessibleProperty = "qmud_world_output_widget";
+	WorldView            *g_activeHotspotTooltipOwner{nullptr};
 
 	bool                  isPhysicalOutputNavigationKey(const QKeyEvent *event)
 	{
@@ -637,6 +638,7 @@ namespace
 		                                   QStringLiteral("line_information"),
 		                                   QStringLiteral("escape_deletes_input"),
 		                                   QStringLiteral("save_deleted_command"),
+		                                   QStringLiteral("partial_save_character_threshold"),
 		                                   QStringLiteral("confirm_on_paste"),
 		                                   QStringLiteral("ctrl_backspace_deletes_last_word"),
 		                                   QStringLiteral("arrows_change_history"),
@@ -778,6 +780,7 @@ namespace
 		                                   QStringLiteral("fade_output_opacity_percent"),
 		                                   QStringLiteral("fade_output_seconds"),
 		                                   QStringLiteral("pixel_offset"),
+		                                   QStringLiteral("partial_save_character_threshold"),
 		                                   QStringLiteral("tab_completion_lines"),
 		                                   QStringLiteral("auto_resize_minimum_lines"),
 		                                   QStringLiteral("auto_resize_maximum_lines"),
@@ -831,6 +834,8 @@ namespace
 		}
 		if (key == QStringLiteral("fade_output_seconds"))
 			return ok && parsed > 0 ? parsed : 1;
+		if (key == QStringLiteral("partial_save_character_threshold"))
+			return ok ? qBound(0, parsed, 200) : 10;
 		if (key == QStringLiteral("tab_completion_lines"))
 			return ok && parsed >= 1 ? parsed : 200;
 		if (key == QStringLiteral("auto_resize_minimum_lines"))
@@ -2071,6 +2076,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 WorldView::~WorldView()
 {
 	stopMiniWindowMouseCapture();
+	hideActiveHotspotTooltip();
 	m_destroying = true;
 }
 
@@ -13060,10 +13066,7 @@ void WorldView::cancelMouseOver(MiniWindow *window, const QString &hotspotId)
 		callHotspotCallback(window, hotspotId, it->cancelMouseOver, withMiniWindowModifierFlags(0));
 	window->mouseOverHotspot.clear();
 	if (m_tooltipHotspot == hotspotId)
-	{
-		QToolTip::hideText();
-		m_tooltipHotspot.clear();
-	}
+		hideActiveHotspotTooltip();
 	clearPendingHotspotTooltip();
 	clearHotspotCursor();
 }
@@ -13335,10 +13338,7 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 		if (captured)
 			setMiniWindowCallbackMousePosition(*captured, callbackLocal, true, dragCaptureActive);
 		if (!m_tooltipHotspot.isEmpty())
-		{
-			QToolTip::hideText();
-			m_tooltipHotspot.clear();
-		}
+			hideActiveHotspotTooltip();
 		clearPendingHotspotTooltip();
 		if (captured && !captured->mouseDownHotspot.isEmpty())
 		{
@@ -13470,10 +13470,7 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 	if (hotspotId.isEmpty())
 	{
 		if (!m_tooltipHotspot.isEmpty())
-		{
-			QToolTip::hideText();
-			m_tooltipHotspot.clear();
-		}
+			hideActiveHotspotTooltip();
 		clearPendingHotspotTooltip();
 		return false;
 	}
@@ -13783,161 +13780,10 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 
 	const QMap<QString, QString> &attrs          = m_runtime->worldAttributes();
 	const QMap<QString, QString> &multilineAttrs = m_runtime->worldMultilineAttributes();
-	const QString                 outputFontName = attrs.value(QStringLiteral("output_font_name"));
-	const QString                 inputFontName  = attrs.value(QStringLiteral("input_font_name"));
-	const int                     outputHeight   = attrs.value(QStringLiteral("output_font_height")).toInt();
-	const int                     inputHeight    = attrs.value(QStringLiteral("input_font_height")).toInt();
-	const int                     outputWeight   = attrs.value(QStringLiteral("output_font_weight")).toInt();
-	const int                     inputWeight    = attrs.value(QStringLiteral("input_font_weight")).toInt();
-	const int                     inputItalic    = attrs.value(QStringLiteral("input_font_italic")).toInt();
-	const int                     outputCharset  = attrs.value(QStringLiteral("output_font_charset")).toInt();
-	const int                     inputCharset   = attrs.value(QStringLiteral("input_font_charset")).toInt();
-	const QString useDefaultOutputFontValue      = attrs.value(QStringLiteral("use_default_output_font"));
-	const bool    useDefaultOutputFont =
-	    (useDefaultOutputFontValue.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-	     useDefaultOutputFontValue == QStringLiteral("1") ||
-	     useDefaultOutputFontValue.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
-	const QString useDefaultInputFontValue = attrs.value(QStringLiteral("use_default_input_font"));
-	const bool    useDefaultInputFont =
-	    (useDefaultInputFontValue.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-	     useDefaultInputFontValue == QStringLiteral("1") ||
-	     useDefaultInputFontValue.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
-	const AppController *app = AppController::instance();
+	applyOutputFontRuntimeSettings();
+	applyInputFontRuntimeSettings();
 
-	auto                 effectiveDefaultOutputFont = [&]
-	{
-		QString outputDefaultFamily;
-		int     outputDefaultHeight  = 9;
-		int     outputDefaultCharset = 1;
-		if (app)
-		{
-			outputDefaultFamily =
-			    app->getGlobalOption(QStringLiteral("DefaultOutputFont")).toString().trimmed();
-			outputDefaultHeight  = app->getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
-			outputDefaultCharset = app->getGlobalOption(QStringLiteral("DefaultOutputFontCharset")).toInt();
-		}
-
-		QFont         font            = qmudPreferredMonospaceFont(outputDefaultFamily, outputDefaultHeight);
-		const QString preferredFamily = outputDefaultFamily.isEmpty() ? font.family() : outputDefaultFamily;
-		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, outputDefaultCharset);
-		    !charsetFamily.isEmpty())
-		{
-			qmudApplyMonospaceFallback(font, charsetFamily);
-		}
-		font.setWeight(mapFontWeight(400));
-		font.setItalic(false);
-		return font;
-	};
-
-	auto effectiveDefaultInputFont = [&]
-	{
-		QString inputDefaultFamily;
-		int     inputDefaultHeight  = 9;
-		int     inputDefaultWeight  = 400;
-		int     inputDefaultItalic  = 0;
-		int     inputDefaultCharset = 1;
-		if (app)
-		{
-			inputDefaultFamily =
-			    app->getGlobalOption(QStringLiteral("DefaultInputFont")).toString().trimmed();
-			inputDefaultHeight  = app->getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
-			inputDefaultWeight  = app->getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
-			inputDefaultItalic  = app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
-			inputDefaultCharset = app->getGlobalOption(QStringLiteral("DefaultInputFontCharset")).toInt();
-		}
-
-		QFont         font            = qmudPreferredMonospaceFont(inputDefaultFamily, inputDefaultHeight);
-		const QString preferredFamily = inputDefaultFamily.isEmpty() ? font.family() : inputDefaultFamily;
-		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, inputDefaultCharset);
-		    !charsetFamily.isEmpty())
-		{
-			qmudApplyMonospaceFallback(font, charsetFamily);
-		}
-		if (inputDefaultWeight > 0)
-			font.setWeight(mapFontWeight(inputDefaultWeight));
-		font.setItalic(inputDefaultItalic != 0);
-		return font;
-	};
-
-	if (m_output && useDefaultOutputFont)
-	{
-		const QFont outputFont = effectiveDefaultOutputFont();
-		m_output->setFont(outputFont);
-		if (m_liveOutput)
-			m_liveOutput->setFont(outputFont);
-	}
-	else if (m_output && (!outputFontName.isEmpty() || outputHeight > 0 || outputWeight > 0))
-	{
-		QFont font = m_output->font();
-		if (!outputFontName.isEmpty())
-			qmudApplyMonospaceFallback(font, outputFontName);
-		const QString preferredFamily = outputFontName.isEmpty() ? font.family() : outputFontName;
-		const QString charsetFamily   = qmudFamilyForCharset(preferredFamily, outputCharset);
-		if (!charsetFamily.isEmpty())
-			qmudApplyMonospaceFallback(font, charsetFamily);
-		if (outputHeight > 0)
-			font.setPointSize(outputHeight);
-		if (outputWeight > 0)
-			font.setWeight(mapFontWeight(outputWeight));
-		m_output->setFont(font);
-		if (m_liveOutput)
-			m_liveOutput->setFont(font);
-	}
-
-	if (m_input && useDefaultInputFont)
-	{
-		m_input->setFont(effectiveDefaultInputFont());
-	}
-	else if (m_input && (!inputFontName.isEmpty() || inputHeight > 0 || inputWeight > 0 || inputItalic != 0))
-	{
-		QFont font = m_input->font();
-		if (!inputFontName.isEmpty())
-			qmudApplyMonospaceFallback(font, inputFontName);
-		const QString preferredFamily = inputFontName.isEmpty() ? font.family() : inputFontName;
-		const QString charsetFamily   = qmudFamilyForCharset(preferredFamily, inputCharset);
-		if (!charsetFamily.isEmpty())
-			qmudApplyMonospaceFallback(font, charsetFamily);
-		if (inputHeight > 0)
-			font.setPointSize(inputHeight);
-		if (inputWeight > 0)
-			font.setWeight(mapFontWeight(inputWeight));
-		font.setItalic(inputItalic != 0);
-		m_input->setFont(font);
-	}
-
-	syncOutputScrollSingleStep();
-
-	if (m_runtime)
-	{
-		if (m_output)
-		{
-			const QFontMetrics metrics(m_output->font());
-			m_runtime->setOutputFontMetrics(metrics.height(), metrics.horizontalAdvance(QLatin1Char('M')));
-		}
-		if (m_input)
-		{
-			const QFontMetrics metrics(m_input->font());
-			m_runtime->setInputFontMetrics(metrics.height(), metrics.horizontalAdvance(QLatin1Char('M')));
-		}
-	}
-
-	if (m_input)
-	{
-		QPalette       palette      = m_input->palette();
-		const QColor   inputBack    = parseColor(attrs.value(QStringLiteral("input_background_colour")));
-		const QColor   inputText    = parseColor(attrs.value(QStringLiteral("input_text_colour")));
-		constexpr QRgb fallbackBack = qRgb(0, 0, 0);
-		constexpr QRgb fallbackText = qRgb(192, 192, 192);
-		const QColor   resolvedBack = inputBack.isValid() ? inputBack : QColor::fromRgb(fallbackBack);
-		QColor         resolvedText = inputText.isValid() ? inputText : QColor::fromRgb(fallbackText);
-		if (resolvedText == resolvedBack)
-			resolvedText = QColor::fromRgb(fallbackText);
-		palette.setColor(QPalette::Base, resolvedBack);
-		palette.setColor(QPalette::Text, resolvedText);
-		palette.setColor(QPalette::Window, palette.color(QPalette::Base));
-		m_input->setAutoFillBackground(true);
-		m_input->setPalette(palette);
-	}
+	applyInputPaletteRuntimeSettings();
 
 	if (m_output)
 	{
@@ -13979,52 +13825,7 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	refreshTimestampRenderSettings();
 	syncOutputTextVisibilityForNativeCanvas();
 
-	const int     wrapColumn     = attrs.value(QStringLiteral("wrap_column")).toInt();
-	const QString wrapEnabled    = attrs.value(QStringLiteral("wrap"));
-	const bool    wrapOutput     = (wrapEnabled.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-	                                wrapEnabled == QStringLiteral("1") ||
-	                                wrapEnabled.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0);
-	const bool    nawsNegotiated = m_runtime && m_runtime->isNawsNegotiated();
-	if (m_output)
-	{
-		m_wrapColumn = wrapColumn;
-		if (!wrapOutput)
-		{
-			m_output->setLineWrapMode(WrapTextBrowser::NoWrap);
-			if (m_liveOutput)
-				m_liveOutput->setLineWrapMode(WrapTextBrowser::NoWrap);
-			m_output->setViewportMarginsPublic(0, 0, 0, 0);
-			if (m_liveOutput)
-				m_liveOutput->setViewportMarginsPublic(0, 0, 0, 0);
-		}
-		else
-		{
-			if (!nawsNegotiated)
-			{
-				// Runtime applies all non-NAWS wrapping (world wrap and auto-wrap-to-window).
-				// Keep the Qt view in NoWrap mode so existing output does not reflow on resize.
-				m_output->setLineWrapMode(WrapTextBrowser::NoWrap);
-				if (m_liveOutput)
-				{
-					m_liveOutput->setLineWrapMode(WrapTextBrowser::NoWrap);
-				}
-				m_output->setViewportMarginsPublic(0, 0, 0, 0);
-				if (m_liveOutput)
-					m_liveOutput->setViewportMarginsPublic(0, 0, 0, 0);
-			}
-			else
-			{
-				m_output->setLineWrapMode(WrapTextBrowser::WidgetWidth);
-				if (m_liveOutput)
-				{
-					m_liveOutput->setLineWrapMode(WrapTextBrowser::WidgetWidth);
-				}
-				m_output->setViewportMarginsPublic(0, 0, 0, 0);
-				if (m_liveOutput)
-					m_liveOutput->setViewportMarginsPublic(0, 0, 0, 0);
-			}
-		}
-	}
+	applyOutputWrapRuntimeSettings();
 
 	const QString wrapInput = attrs.value(QStringLiteral("wrap_input"));
 	const auto    isEnabled = [](const QString &value)
@@ -14084,10 +13885,16 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	const QString lineInformation = attrs.value(QStringLiteral("line_information"));
 	m_lineInformation             = isEnabled(lineInformation);
 
-	const QString escapeDeletes          = attrs.value(QStringLiteral("escape_deletes_input"));
-	m_escapeDeletesInput                 = isEnabled(escapeDeletes);
-	const QString saveDeleted            = attrs.value(QStringLiteral("save_deleted_command"));
-	m_saveDeletedCommand                 = isEnabled(saveDeleted);
+	const QString escapeDeletes = attrs.value(QStringLiteral("escape_deletes_input"));
+	m_escapeDeletesInput        = isEnabled(escapeDeletes);
+	const QString saveDeleted   = attrs.value(QStringLiteral("save_deleted_command"));
+	m_saveDeletedCommand        = isEnabled(saveDeleted);
+	bool partialSaveThresholdOk = false;
+	int  partialSaveThreshold =
+	    attrs.value(QStringLiteral("partial_save_character_threshold")).toInt(&partialSaveThresholdOk);
+	if (!partialSaveThresholdOk)
+		partialSaveThreshold = 10;
+	m_partialSaveCharacterThreshold      = qBound(0, partialSaveThreshold, 200);
 	const QString confirmPaste           = attrs.value(QStringLiteral("confirm_on_paste"));
 	m_confirmOnPaste                     = isEnabled(confirmPaste);
 	const QString ctrlBackspace          = attrs.value(QStringLiteral("ctrl_backspace_deletes_last_word"));
@@ -14167,11 +13974,7 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	                                          previousHyperlinkColour != m_hyperlinkColour;
 	if (m_noEchoOff)
 		m_noEcho = false;
-	m_historyLimit = attrs.value(QStringLiteral("history_lines")).toInt();
-	if (m_historyLimit < 0)
-		m_historyLimit = 0;
-	if (m_historyLimit > 0 && m_history.size() > m_historyLimit)
-		m_history.remove(0, m_history.size() - m_historyLimit);
+	applyHistoryLimit(attrs.value(QStringLiteral("history_lines")).toInt());
 	// Runtime output renders from native line state only.
 	if (hyperlinkPresentationChanged)
 		requestNativeOutputRepaint();
@@ -14224,6 +14027,184 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 	applyDefaultInputHeight(false);
 }
 
+void WorldView::applyOutputFontRuntimeSettings() const
+{
+	if (!m_runtime || !m_output)
+		return;
+
+	const QMap<QString, QString> &attrs    = m_runtime->worldAttributes();
+	const QString                 fontName = attrs.value(QStringLiteral("output_font_name"));
+	const int                     height   = attrs.value(QStringLiteral("output_font_height")).toInt();
+	const int                     weight   = attrs.value(QStringLiteral("output_font_weight")).toInt();
+	const int                     charset  = attrs.value(QStringLiteral("output_font_charset")).toInt();
+	const bool useDefault = isEnabledFlagValue(attrs.value(QStringLiteral("use_default_output_font")));
+
+	QFont      font = m_output->font();
+	if (useDefault)
+	{
+		QString defaultFamily;
+		int     defaultHeight  = 9;
+		int     defaultCharset = 1;
+		if (const AppController *app = AppController::instance())
+		{
+			defaultFamily  = app->getGlobalOption(QStringLiteral("DefaultOutputFont")).toString().trimmed();
+			defaultHeight  = app->getGlobalOption(QStringLiteral("DefaultOutputFontHeight")).toInt();
+			defaultCharset = app->getGlobalOption(QStringLiteral("DefaultOutputFontCharset")).toInt();
+		}
+		font                          = qmudPreferredMonospaceFont(defaultFamily, defaultHeight);
+		const QString preferredFamily = defaultFamily.isEmpty() ? font.family() : defaultFamily;
+		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, defaultCharset);
+		    !charsetFamily.isEmpty())
+		{
+			qmudApplyMonospaceFallback(font, charsetFamily);
+		}
+		font.setWeight(mapFontWeight(400));
+		font.setItalic(false);
+	}
+	else if (!fontName.isEmpty() || height > 0 || weight > 0)
+	{
+		if (!fontName.isEmpty())
+			qmudApplyMonospaceFallback(font, fontName);
+		const QString preferredFamily = fontName.isEmpty() ? font.family() : fontName;
+		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, charset);
+		    !charsetFamily.isEmpty())
+		{
+			qmudApplyMonospaceFallback(font, charsetFamily);
+		}
+		if (height > 0)
+			font.setPointSize(height);
+		if (weight > 0)
+			font.setWeight(mapFontWeight(weight));
+	}
+
+	m_output->setFont(font);
+	if (m_liveOutput)
+		m_liveOutput->setFont(font);
+	syncOutputScrollSingleStep();
+	const QFontMetrics metrics(font);
+	m_runtime->setOutputFontMetrics(metrics.height(), metrics.horizontalAdvance(QLatin1Char('M')));
+}
+
+void WorldView::applyHistoryLimit(const int limit)
+{
+	m_historyLimit = qMax(0, limit);
+	if (m_historyLimit <= 0 || m_history.size() <= m_historyLimit)
+		return;
+
+	m_history.remove(0, m_history.size() - m_historyLimit);
+	resetHistoryTraversal();
+	if (m_commandHistoryFind)
+	{
+		m_commandHistoryFind->currentLine = 0;
+		m_commandHistoryFind->again       = false;
+	}
+}
+
+void WorldView::applyInputFontRuntimeSettings() const
+{
+	if (!m_runtime || !m_input)
+		return;
+
+	const QMap<QString, QString> &attrs    = m_runtime->worldAttributes();
+	const QString                 fontName = attrs.value(QStringLiteral("input_font_name"));
+	const int                     height   = attrs.value(QStringLiteral("input_font_height")).toInt();
+	const int                     weight   = attrs.value(QStringLiteral("input_font_weight")).toInt();
+	const int                     italic   = attrs.value(QStringLiteral("input_font_italic")).toInt();
+	const int                     charset  = attrs.value(QStringLiteral("input_font_charset")).toInt();
+	const bool useDefault = isEnabledFlagValue(attrs.value(QStringLiteral("use_default_input_font")));
+
+	QFont      font = m_input->font();
+	if (useDefault)
+	{
+		QString defaultFamily;
+		int     defaultHeight  = 9;
+		int     defaultWeight  = 400;
+		int     defaultItalic  = 0;
+		int     defaultCharset = 1;
+		if (const AppController *app = AppController::instance())
+		{
+			defaultFamily  = app->getGlobalOption(QStringLiteral("DefaultInputFont")).toString().trimmed();
+			defaultHeight  = app->getGlobalOption(QStringLiteral("DefaultInputFontHeight")).toInt();
+			defaultWeight  = app->getGlobalOption(QStringLiteral("DefaultInputFontWeight")).toInt();
+			defaultItalic  = app->getGlobalOption(QStringLiteral("DefaultInputFontItalic")).toInt();
+			defaultCharset = app->getGlobalOption(QStringLiteral("DefaultInputFontCharset")).toInt();
+		}
+		font                          = qmudPreferredMonospaceFont(defaultFamily, defaultHeight);
+		const QString preferredFamily = defaultFamily.isEmpty() ? font.family() : defaultFamily;
+		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, defaultCharset);
+		    !charsetFamily.isEmpty())
+		{
+			qmudApplyMonospaceFallback(font, charsetFamily);
+		}
+		if (defaultWeight > 0)
+			font.setWeight(mapFontWeight(defaultWeight));
+		font.setItalic(defaultItalic != 0);
+	}
+	else if (!fontName.isEmpty() || height > 0 || weight > 0 || italic != 0)
+	{
+		if (!fontName.isEmpty())
+			qmudApplyMonospaceFallback(font, fontName);
+		const QString preferredFamily = fontName.isEmpty() ? font.family() : fontName;
+		if (const QString charsetFamily = qmudFamilyForCharset(preferredFamily, charset);
+		    !charsetFamily.isEmpty())
+		{
+			qmudApplyMonospaceFallback(font, charsetFamily);
+		}
+		if (height > 0)
+			font.setPointSize(height);
+		if (weight > 0)
+			font.setWeight(mapFontWeight(weight));
+		font.setItalic(italic != 0);
+	}
+
+	m_input->setFont(font);
+	const QFontMetrics metrics(font);
+	m_runtime->setInputFontMetrics(metrics.height(), metrics.horizontalAdvance(QLatin1Char('M')));
+	updateInputWrap();
+	updateInputHeight();
+}
+
+void WorldView::applyOutputWrapRuntimeSettings()
+{
+	if (!m_runtime || !m_output)
+		return;
+
+	const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
+	m_wrapColumn                        = attrs.value(QStringLiteral("wrap_column")).toInt();
+	const bool wrapOutput               = isEnabledFlagValue(attrs.value(QStringLiteral("wrap")));
+	const auto wrapMode =
+	    wrapOutput && m_runtime->isNawsNegotiated() ? WrapTextBrowser::WidgetWidth : WrapTextBrowser::NoWrap;
+	m_output->setLineWrapMode(wrapMode);
+	m_output->setViewportMarginsPublic(0, 0, 0, 0);
+	if (m_liveOutput)
+	{
+		m_liveOutput->setLineWrapMode(wrapMode);
+		m_liveOutput->setViewportMarginsPublic(0, 0, 0, 0);
+	}
+}
+
+void WorldView::applyInputPaletteRuntimeSettings() const
+{
+	if (!m_runtime || !m_input)
+		return;
+
+	const QMap<QString, QString> &attrs   = m_runtime->worldAttributes();
+	QPalette                      palette = m_input->palette();
+	const QColor   inputBack    = parseColor(attrs.value(QStringLiteral("input_background_colour")));
+	const QColor   inputText    = parseColor(attrs.value(QStringLiteral("input_text_colour")));
+	constexpr QRgb fallbackBack = qRgb(0, 0, 0);
+	constexpr QRgb fallbackText = qRgb(192, 192, 192);
+	const QColor   resolvedBack = inputBack.isValid() ? inputBack : QColor::fromRgb(fallbackBack);
+	QColor         resolvedText = inputText.isValid() ? inputText : QColor::fromRgb(fallbackText);
+	if (resolvedText == resolvedBack)
+		resolvedText = QColor::fromRgb(fallbackText);
+	palette.setColor(QPalette::Base, resolvedBack);
+	palette.setColor(QPalette::Text, resolvedText);
+	palette.setColor(QPalette::Window, resolvedBack);
+	m_input->setAutoFillBackground(true);
+	m_input->setPalette(palette);
+}
+
 void WorldView::stopIncrementalHyperlinkRestyle()
 {
 	// Native output rendering no longer uses incremental hyperlink restyling.
@@ -14236,7 +14217,7 @@ int WorldView::tooltipStartDelayMs() const
 	const QString value  = m_runtime->worldAttributes().value(QStringLiteral("tool_tip_start_time"));
 	bool          ok     = false;
 	int           parsed = value.toInt(&ok);
-	if (!ok || parsed < 0)
+	if (!ok || parsed <= 0)
 		parsed = 400;
 	return parsed;
 }
@@ -14251,6 +14232,30 @@ int WorldView::tooltipVisibleDurationMs() const
 	if (!ok || parsed <= 0)
 		parsed = 5000;
 	return parsed;
+}
+
+void WorldView::applyTooltipStartTimeRuntimeSetting()
+{
+	if (!m_tooltipTimer || !m_tooltipTimer->isActive() || m_pendingTooltipText.isEmpty())
+		return;
+
+	m_tooltipTimer->stop();
+	const int delay = tooltipStartDelayMs();
+	if (delay <= 0)
+		showScheduledHotspotTooltip();
+	else
+		m_tooltipTimer->start(delay);
+}
+
+void WorldView::applyTooltipVisibleTimeRuntimeSetting()
+{
+	if (g_activeHotspotTooltipOwner != this || m_tooltipHotspot.isEmpty() || m_activeTooltipText.isEmpty() ||
+	    !QToolTip::isVisible() || QToolTip::text() != m_activeTooltipText)
+		return;
+
+	QToolTip::hideText();
+	QToolTip::showText(m_activeTooltipGlobalPos, m_activeTooltipText, this, QRect(),
+	                   tooltipVisibleDurationMs());
 }
 
 void WorldView::scheduleHotspotTooltip(const QString &hotspotId, const QString &tooltipText,
@@ -14284,9 +14289,19 @@ void WorldView::showScheduledHotspotTooltip()
 
 	const int duration = tooltipVisibleDurationMs();
 	QToolTip::showText(m_pendingTooltipGlobalPos, m_pendingTooltipText, this, QRect(), duration);
-	m_tooltipHotspot = m_pendingTooltipHotspot;
+	if (g_activeHotspotTooltipOwner && g_activeHotspotTooltipOwner != this)
+	{
+		g_activeHotspotTooltipOwner->m_tooltipHotspot.clear();
+		g_activeHotspotTooltipOwner->m_activeTooltipText.clear();
+		g_activeHotspotTooltipOwner->m_activeTooltipGlobalPos = {};
+	}
+	g_activeHotspotTooltipOwner = this;
+	m_tooltipHotspot            = m_pendingTooltipHotspot;
+	m_activeTooltipText         = m_pendingTooltipText;
+	m_activeTooltipGlobalPos    = m_pendingTooltipGlobalPos;
 	m_pendingTooltipHotspot.clear();
 	m_pendingTooltipText.clear();
+	m_pendingTooltipGlobalPos = {};
 }
 
 void WorldView::clearPendingHotspotTooltip()
@@ -14295,6 +14310,19 @@ void WorldView::clearPendingHotspotTooltip()
 		m_tooltipTimer->stop();
 	m_pendingTooltipHotspot.clear();
 	m_pendingTooltipText.clear();
+	m_pendingTooltipGlobalPos = {};
+}
+
+void WorldView::hideActiveHotspotTooltip()
+{
+	if (g_activeHotspotTooltipOwner == this)
+	{
+		QToolTip::hideText();
+		g_activeHotspotTooltipOwner = nullptr;
+	}
+	m_tooltipHotspot.clear();
+	m_activeTooltipText.clear();
+	m_activeTooltipGlobalPos = {};
 }
 
 double WorldView::lineOpacityForTimestamp(const QDateTime &when) const
@@ -14380,10 +14408,7 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 	{
 		clearPendingHotspotTooltip();
 		if (m_tooltipHotspot == kLineInfoTooltipId)
-		{
-			QToolTip::hideText();
-			m_tooltipHotspot.clear();
-		}
+			hideActiveHotspotTooltip();
 	};
 
 	if (!m_lineInformation || !m_runtime || !event)
@@ -14767,10 +14792,7 @@ bool WorldView::eventFilter(QObject *watched, QEvent *event)
 			if (m_commandInteractionEnabled && m_runtime)
 				m_runtime->setWordUnderMenu(QString(), false);
 			if (m_tooltipHotspot == kLineInfoTooltipId)
-			{
-				QToolTip::hideText();
-				m_tooltipHotspot.clear();
-			}
+				hideActiveHotspotTooltip();
 			break;
 		case QEvent::ContextMenu:
 		{
@@ -15362,6 +15384,11 @@ QString WorldView::inputText() const
 
 bool WorldView::confirmReplaceTyping(const QString &replacement)
 {
+	return confirmReplaceTyping(replacement, CommandReplacementContext::General);
+}
+
+bool WorldView::confirmReplaceTyping(const QString &replacement, const CommandReplacementContext context)
+{
 	if (!m_inputChanged || !m_input)
 		return true;
 
@@ -15392,7 +15419,9 @@ bool WorldView::confirmReplaceTyping(const QString &replacement)
 		}
 	}
 
-	if (m_saveDeletedCommand)
+	const bool meetsPartialSaveThreshold = context != CommandReplacementContext::PartialHistoryRecall ||
+	                                       current.size() >= m_partialSaveCharacterThreshold;
+	if (m_saveDeletedCommand && meetsPartialSaveThreshold)
 		addToHistory(current);
 
 	return true;
@@ -15985,7 +16014,7 @@ void WorldView::recallPartialHistory(int direction)
 	int        index        = preferNewest ? findMatch(-1) : findMatch(1);
 	if (index < 0)
 	{
-		if (confirmReplaceTyping(QString()))
+		if (confirmReplaceTyping(QString(), CommandReplacementContext::PartialHistoryRecall))
 			setInputText(QString());
 		m_partialCommand.clear();
 		m_partialIndex = -1;
@@ -15993,7 +16022,7 @@ void WorldView::recallPartialHistory(int direction)
 	}
 
 	const QString candidate = m_history.at(index);
-	if (!confirmReplaceTyping(candidate))
+	if (!confirmReplaceTyping(candidate, CommandReplacementContext::PartialHistoryRecall))
 		return;
 
 	const qsizetype candidateIndex = m_history.indexOf(candidate);
@@ -16072,11 +16101,16 @@ void WorldView::recallHistory(int direction)
 
 void WorldView::resetHistoryRecall()
 {
+	resetHistoryTraversal();
+	m_inputChanged = false;
+	resetTabCompletionCycle();
+}
+
+void WorldView::resetHistoryTraversal()
+{
 	m_historyIndex = -1;
 	m_partialIndex = -1;
 	m_partialCommand.clear();
-	m_inputChanged = false;
-	resetTabCompletionCycle();
 }
 
 void WorldView::resetTabCompletionCycle()

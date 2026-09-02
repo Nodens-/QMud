@@ -54,6 +54,15 @@ namespace QMudTimerScheduling
 	[[nodiscard]] bool resetTimerFields(WorldRuntime::Timer &timer, const QDateTime &now);
 
 	/**
+	 * @brief Checks whether an edit changed fields that determine the timer deadline.
+	 * @param before Timer definition before the edit.
+	 * @param after Timer definition after the edit.
+	 * @return `true` when the timer mode, duration, or offset changed and its deadline must be recalculated.
+	 */
+	[[nodiscard]] bool timerDeadlineDefinitionChanged(const WorldRuntime::Timer &before,
+	                                                  const WorldRuntime::Timer &after);
+
+	/**
 	 * @brief Value journal for one schedule reset evaluated in more than one state copy.
 	 *
 	 * Callback APIs apply the same value to their request-local overlay and deferred authoritative mutation. This
@@ -68,6 +77,17 @@ namespace QMudTimerScheduling
 				return resetTimerFields(timer, timestamp);
 			}
 	};
+
+	/**
+	 * @brief Invalidates and rebuilds timer runtime state when its deadline definition changed.
+	 * @param before Timer definition before the edit.
+	 * @param after Timer definition after the edit and target for refreshed runtime state.
+	 * @param mutation Reset operation carrying the authoritative scheduling timestamp.
+	 * @return `true` when the deadline definition changed.
+	 */
+	[[nodiscard]] bool resetTimerDeadlineIfDefinitionChanged(const WorldRuntime::Timer &before,
+	                                                         WorldRuntime::Timer       &after,
+	                                                         const TimerResetMutation  &mutation);
 
 	/**
 	 * @brief Evaluates whether timer should fire at the provided timestamp.

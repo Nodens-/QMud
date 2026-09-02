@@ -48,6 +48,11 @@ class WorldRuntimeTestAccess final
 		{
 			return runtime.sortedMiniWindowsMutable();
 		}
+		static void processRawDataPayload(WorldRuntime &runtime, const QByteArray &data,
+		                                  const bool simulatedInput = false)
+		{
+			runtime.processRawDataPayload(data, simulatedInput);
+		}
 		static void layoutMiniWindows(WorldRuntime &runtime, const QSize &clientSize, const QSize &ownerSize,
 		                              const bool                   underneath,
 		                              const QVector<MiniWindow *> *orderedWindows = nullptr)

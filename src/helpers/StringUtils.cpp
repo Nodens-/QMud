@@ -227,9 +227,10 @@ QString qmudStripAnsiEscapeCodes(const QString &input)
 
 bool qmudIsEnabledFlag(const QString &value)
 {
-	return value == QStringLiteral("1") || value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-	       value.compare(QStringLiteral("yes"), Qt::CaseInsensitive) == 0 ||
-	       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+	if (value == QStringLiteral("1"))
+		return true;
+	bool result = false;
+	return qmudParseBooleanKeyword(value, result) && result;
 }
 
 QString qmudBoolToYn(const bool value)

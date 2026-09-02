@@ -1018,6 +1018,11 @@ class WorldView : public QWidget
 		friend class WorldRuntime;
 		friend class ::tst_WorldView_Basic;
 		friend class ::tst_WorldRuntime_PluginLifecycle;
+		enum class CommandReplacementContext
+		{
+			General,
+			PartialHistoryRecall,
+		};
 		struct NativeOutputRenderLine;
 		using NativeOutputRenderLines = IndexedRingBuffer<NativeOutputRenderLine>;
 		enum class AccessibleOutputReviewTargetKind
@@ -1069,6 +1074,13 @@ class WorldView : public QWidget
 		     textRectangleChangeDirtyRegion(const WorldRuntime::TextRectangleSettings &previousSettings,
 		                                    const WorldRuntime::TextRectangleSettings &currentSettings) const;
 		/**
+		 * @brief Confirms replacing current typing for a specific replacement context.
+		 * @param replacement Replacement text candidate.
+		 * @param context Source of the replacement operation.
+		 * @return `true` when replacement is approved.
+		 */
+		bool confirmReplaceTyping(const QString &replacement, CommandReplacementContext context);
+		/**
 		 * @brief Invalidates pixels affected by a TextRectangle settings change.
 		 * @param previousSettings Settings that were active before the change.
 		 * @param currentSettings Newly active settings.
@@ -1108,6 +1120,39 @@ class WorldView : public QWidget
 		 */
 		void applyRuntimeSettingsWithPolicy(bool allowRebuild);
 		void applyRuntimeSettingsImpl(bool rebuildOutput);
+		/**
+		 * @brief Applies the command-history limit and invalidates positions when entries are trimmed.
+		 * @param limit Maximum retained history entries, or zero to disable additions without trimming.
+		 */
+		void applyHistoryLimit(int limit);
+		/**
+		 * @brief Clears indices tied to the current command-history contents without changing typed-input state.
+		 */
+		void resetHistoryTraversal();
+		/**
+		 * @brief Applies only the output font settings from the bound runtime.
+		 */
+		void applyOutputFontRuntimeSettings() const;
+		/**
+		 * @brief Applies only the input font settings from the bound runtime.
+		 */
+		void applyInputFontRuntimeSettings() const;
+		/**
+		 * @brief Applies only output wrapping presentation from the bound runtime.
+		 */
+		void applyOutputWrapRuntimeSettings();
+		/**
+		 * @brief Applies only the input palette settings from the bound runtime.
+		 */
+		void applyInputPaletteRuntimeSettings() const;
+		/**
+		 * @brief Reapplies the configured tooltip start delay to a pending tooltip.
+		 */
+		void applyTooltipStartTimeRuntimeSetting();
+		/**
+		 * @brief Reapplies the configured visible duration to the active tooltip.
+		 */
+		void applyTooltipVisibleTimeRuntimeSetting();
 		/**
 		 * @brief Clears cached runtime-settings snapshot state.
 		 */
@@ -2408,6 +2453,10 @@ class WorldView : public QWidget
 		 */
 		void              clearPendingHotspotTooltip();
 		/**
+		 * @brief Hides and releases this view's active process-global hotspot tooltip.
+		 */
+		void              hideActiveHotspotTooltip();
+		/**
 		 * @brief Updates line-information tooltip from mouse position.
 		 * @param watched Widget receiving mouse events.
 		 * @param event Mouse event payload.
@@ -2688,6 +2737,7 @@ class WorldView : public QWidget
 		bool                                           m_displayMyInput{false};
 		bool                                           m_escapeDeletesInput{false};
 		bool                                           m_saveDeletedCommand{false};
+		int                                            m_partialSaveCharacterThreshold{10};
 		bool                                           m_confirmOnPaste{false};
 		bool                                           m_ctrlBackspaceDeletesLastWord{false};
 		bool                                           m_arrowsChangeHistory{false};
@@ -2798,6 +2848,8 @@ class WorldView : public QWidget
 		QString                                 m_pendingTooltipHotspot;
 		QString                                 m_pendingTooltipText;
 		QPoint                                  m_pendingTooltipGlobalPos;
+		QString                                 m_activeTooltipText;
+		QPoint                                  m_activeTooltipGlobalPos;
 		QPoint                                  m_capturedMiniWindowPressLocal;
 		QPoint                                  m_pendingCapturedMiniWindowDragMoveLocal;
 		QTimer                                 *m_tooltipTimer{nullptr};

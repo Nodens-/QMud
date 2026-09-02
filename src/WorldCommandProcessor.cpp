@@ -1062,6 +1062,43 @@ void WorldCommandProcessor::setRuntime(WorldRuntime *runtime)
 		processQueuedCommands(true);
 }
 
+void WorldCommandProcessor::applyNumericWorldOption(const WorldNumericOptionBinding binding,
+                                                    const long long                 value)
+{
+	const bool enabled = value != 0;
+	switch (binding)
+	{
+	case WorldNumericOptionBinding::CommandDoNotTranslateIac:
+		m_doNotTranslateIac = enabled;
+		break;
+	case WorldNumericOptionBinding::CommandEnableSpamPrevention:
+		m_enableSpamPrevention = enabled;
+		break;
+	case WorldNumericOptionBinding::CommandRegexpMatchEmpty:
+		m_regexpMatchEmpty = enabled;
+		break;
+	case WorldNumericOptionBinding::CommandSpamLineCount:
+		m_spamLineCount = static_cast<int>(value);
+		break;
+	case WorldNumericOptionBinding::CommandSpeedWalkDelay:
+		m_speedWalkDelay = static_cast<int>(value);
+		if (m_speedWalkDelay <= 0 && !m_queuedCommands.isEmpty())
+			processQueuedCommands(true);
+		break;
+	case WorldNumericOptionBinding::CommandTranslateBackslashSequences:
+		m_translateBackslashSequences = enabled;
+		break;
+	case WorldNumericOptionBinding::CommandTranslateGerman:
+		m_translateGerman = enabled;
+		break;
+	case WorldNumericOptionBinding::CommandUtf8:
+		m_utf8 = enabled;
+		break;
+	default:
+		break;
+	}
+}
+
 void WorldCommandProcessor::setRuntimeAutomationOwner(const bool owner)
 {
 	m_runtimeAutomationOwner = owner;

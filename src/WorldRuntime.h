@@ -205,6 +205,13 @@ class WorldRuntime : public QObject
 		 */
 		void                    setWorldAttribute(const QString &key, const QString &value);
 		/**
+		 * @brief Validates, stores, and applies one numeric world option.
+		 * @param option Canonical option-table entry.
+		 * @param value Public scripting value before any storage conversion.
+		 * @return Scripting error code.
+		 */
+		int                     setOptionItem(const WorldNumericOption &option, long long value);
+		/**
 		 * @brief Sets multiline world attribute value by key.
 		 * @param key Attribute name.
 		 * @param value Attribute value.
@@ -5095,6 +5102,19 @@ class WorldRuntime : public QObject
 
 	private:
 		/**
+		 * @brief Applies one option-table binding without reloading unrelated settings.
+		 * @param binding Exact runtime cache binding.
+		 * @param value Stored numeric option value.
+		 */
+		void applyNumericWorldOption(WorldNumericOptionBinding binding, long long value);
+		/**
+		 * @brief Stores one world attribute with selectable generic runtime propagation.
+		 * @param key Attribute name.
+		 * @param value Attribute value.
+		 * @param applyGenericEffects Apply normal attribute-driven cache refreshes when `true`.
+		 */
+		void setWorldAttributeImpl(const QString &key, const QString &value, bool applyGenericEffects);
+		/**
 		 * @brief Internal unpublished collection access for the two production mutation dispatchers and the test seam.
 		 *
 		 * These references are intentionally private: ordinary callers cannot mutate authoritative collections while
@@ -5304,21 +5324,26 @@ class WorldRuntime : public QObject
 		 */
 		void callPluginCallbacksTransformString(const QString &functionName, QString &payload);
 		/**
+		 * @brief Synchronizes the Telnet NAWS enabled state from current world settings.
+		 * @return `true` when text-rectangle compatibility is active and therefore disables NAWS.
+		 */
+		[[nodiscard]] bool synchronizeTelnetNawsEnabledState();
+		/**
 		 * @brief Pushes current terminal size via NAWS.
 		 */
-		void updateTelnetWindowSizeForNaws();
+		void               updateTelnetWindowSizeForNaws();
 		/**
 		 * @brief Resets ANSI rendering state machine.
 		 */
-		void resetAnsiRenderState();
+		void               resetAnsiRenderState();
 		/**
 		 * @brief Resets MXP rendering state machine.
 		 */
-		void resetMxpRenderState();
+		void               resetMxpRenderState();
 		/**
 		 * @brief Clears non-visual ANSI action context (links/send/prompt metadata).
 		 */
-		void clearAnsiActionContext();
+		void               clearAnsiActionContext();
 		/**
 		 * @brief Runs callbacks with numeric and string arguments.
 		 * @param functionName Callback function name.

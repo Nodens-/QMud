@@ -6784,17 +6784,13 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 						return ok ? value : 0;
 					};
 
-					auto currentOptionValue = [&](const QString            &key,
-					                              const WorldNumericOption *option) -> long long
+					auto currentOptionValue = [&](const WorldNumericOption *option) -> long long
 					{
-						const QString   raw   = getWorldAttribute(key);
-						bool            ok    = false;
-						const long long value = parseOptionValue(raw, &ok);
-						if (ok)
-							return value;
-						if (option)
-							return option->defaultValue;
-						return 0;
+						if (!option)
+							return -1;
+						const auto value = QMudWorldOptions::publicNumericOptionValue(
+						    *option, getWorldAttribute(QString::fromLatin1(option->name)));
+						return value.value_or(option->defaultValue);
 					};
 
 					auto getWorldPassword = [&]
@@ -6975,7 +6971,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 							for (int i = 0; list[i].name; i++)
 							{
 								const QString   key   = QString::fromLatin1(list[i].name);
-								const long long value = currentOptionValue(key, &list[i]);
+								const long long value = currentOptionValue(&list[i]);
 								options += QStringLiteral("%1=%2 ").arg(key).arg(QString::number(value));
 							}
 						}
@@ -6987,7 +6983,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 								if (key.isEmpty())
 									continue;
 								const WorldNumericOption *opt = QMudWorldOptions::findWorldNumericOption(key);
-								const long long           value = opt ? currentOptionValue(key, opt) : 0;
+								const long long           value = currentOptionValue(opt);
 								options += QStringLiteral("%1=%2 ").arg(key).arg(QString::number(value));
 							}
 						}
@@ -7051,11 +7047,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 								         QStringLiteral("Option named '%1' cannot be changed.").arg(key));
 								continue;
 							}
-							long long const minValue = opt->minValue;
-							long long       maxValue = opt->maxValue;
-							if (minValue == 0 && maxValue == 0)
-								maxValue = 1;
-							if (value < minValue || value > maxValue)
+							const int result = setOptionItem(*opt, value);
+							if (result == eOptionOutOfRange)
 							{
 								mxpError(DBG_ERROR, errMXP_OptionOutOfRange,
 								         QStringLiteral(
@@ -7063,10 +7056,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 								             .arg(key, valueText));
 								continue;
 							}
-							m_worldAttributes.insert(key, QString::number(value));
-							if (worldAttributeAffectsResolvedOutputColours(key))
-								invalidateResolvedOutputColourCache();
-							patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::WorldAttributes);
+							if (result != eOK)
+								continue;
 							mxpError(
 							    DBG_INFO, infoMXP_OptionChanged,
 							    QStringLiteral("Option named '%1' changed to '%2'.").arg(key, valueText));
@@ -18414,7 +18405,7 @@ void WorldRuntime::syncChatAcceptCallsWithPreferences()
 		setWorldAttribute(QStringLiteral("accept_chat_connections"), QStringLiteral("1"));
 	}
 
-	chatAcceptCalls(static_cast<short>(desiredPort));
+	chatAcceptCalls(0);
 }
 
 void WorldRuntime::setCommandProcessor(WorldCommandProcessor *processor)
@@ -19124,14 +19115,10 @@ void WorldRuntime::refreshNawsWindowSize()
 
 void WorldRuntime::updateTelnetWindowSizeForNaws()
 {
-	const bool textRectangleCompatActive = m_textRectangle.left != 0 || m_textRectangle.top != 0 ||
-	                                       m_textRectangle.right != 0 || m_textRectangle.bottom != 0;
-	const bool nawsEnabled =
-	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("naws"))) && !textRectangleCompatActive;
-	m_telnet.setNawsEnabled(nawsEnabled);
-	const bool wrapEnabled     = isEnabledFlag(m_worldAttributes.value(QStringLiteral("wrap")));
-	const int  worldWrapColumn = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
-	const int  minimumColumns  = wrapEnabled ? worldWrapColumn : 0;
+	const bool textRectangleCompatActive = synchronizeTelnetNawsEnabledState();
+	const bool wrapEnabled               = isEnabledFlag(m_worldAttributes.value(QStringLiteral("wrap")));
+	const int  worldWrapColumn           = m_worldAttributes.value(QStringLiteral("wrap_column")).toInt();
+	const int  minimumColumns            = wrapEnabled ? worldWrapColumn : 0;
 
 	int        columns = 0;
 	int        rows    = 0;
@@ -19174,6 +19161,16 @@ void WorldRuntime::updateTelnetWindowSizeForNaws()
 		if (!outbound.isEmpty())
 			sendToWorld(outbound);
 	}
+}
+
+bool WorldRuntime::synchronizeTelnetNawsEnabledState()
+{
+	const bool textRectangleCompatActive = m_textRectangle.left != 0 || m_textRectangle.top != 0 ||
+	                                       m_textRectangle.right != 0 || m_textRectangle.bottom != 0;
+	const bool nawsEnabled =
+	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("naws"))) && !textRectangleCompatActive;
+	m_telnet.setNawsEnabled(nawsEnabled);
+	return textRectangleCompatActive;
 }
 
 void WorldRuntime::notifyDrawOutputWindow(int firstLine, int offset, std::function<void()> completion)
@@ -19835,6 +19832,286 @@ QString WorldRuntime::worldAttributeValue(const QString &key) const
 	return m_worldAttributes.value(key);
 }
 
+void WorldRuntime::applyNumericWorldOption(const WorldNumericOptionBinding binding, const long long value)
+{
+	using enum WorldNumericOptionBinding;
+	const bool enabled = value != 0;
+	if (binding == ChatListener)
+	{
+		syncChatAcceptCallsWithPreferences();
+		return;
+	}
+	if (m_commandProcessor)
+	{
+		switch (binding)
+		{
+		case CommandDoNotTranslateIac:
+		case CommandEnableSpamPrevention:
+		case CommandRegexpMatchEmpty:
+		case CommandSpamLineCount:
+		case CommandSpeedWalkDelay:
+		case CommandTranslateBackslashSequences:
+		case CommandTranslateGerman:
+		case CommandUtf8:
+			m_commandProcessor->applyNumericWorldOption(binding, value);
+			return;
+		default:
+			break;
+		}
+	}
+	if (binding == OutputWrap)
+		static_cast<void>(synchronizeTelnetNawsEnabledState());
+	for (WorldView *view : presentationViews())
+	{
+		switch (binding)
+		{
+		case AlternativeInverse:
+			view->m_alternativeInverse = enabled;
+			break;
+		case AltArrowRecallsPartial:
+			view->m_altArrowRecallsPartial = enabled;
+			break;
+		case AlwaysRecordCommandHistory:
+			view->m_alwaysRecordCommandHistory = enabled;
+			break;
+		case ArrowsChangeHistory:
+			view->m_arrowsChangeHistory = enabled;
+			break;
+		case ArrowKeysWrap:
+			view->m_arrowKeysWrap = enabled;
+			break;
+		case ArrowRecallsPartial:
+			view->m_arrowRecallsPartial = enabled;
+			break;
+		case AutoPause:
+			view->m_autoPause = enabled;
+			if (!enabled)
+				view->setScrollbackSplitActive(false);
+			break;
+		case AutoRepeat:
+			view->m_autoRepeat = enabled;
+			break;
+		case AutoResizeCommandWindow:
+			view->m_autoResizeCommandWindow = enabled;
+			view->updateInputHeight();
+			break;
+		case AutoResizeMaximumLines:
+			view->m_autoResizeMaximumLines = static_cast<int>(value);
+			view->updateInputHeight();
+			break;
+		case AutoResizeMinimumLines:
+			view->m_autoResizeMinimumLines = static_cast<int>(value);
+			view->updateInputHeight();
+			break;
+		case ConfirmBeforeReplacingTyping:
+			view->m_confirmBeforeReplacingTyping = enabled;
+			break;
+		case ConfirmOnPaste:
+			view->m_confirmOnPaste = enabled;
+			break;
+		case CtrlBackspaceDeletesLastWord:
+			view->m_ctrlBackspaceDeletesLastWord = enabled;
+			break;
+		case CtrlNGoesToNextCommand:
+			view->m_ctrlNGoesToNextCommand = enabled;
+			break;
+		case CtrlPGoesToPreviousCommand:
+			view->m_ctrlPGoesToPreviousCommand = enabled;
+			break;
+		case CtrlZGoesToEndOfBuffer:
+			view->m_ctrlZGoesToEndOfBuffer = enabled;
+			break;
+		case DisplayMyInput:
+			view->m_displayMyInput = enabled;
+			break;
+		case DoubleClickInserts:
+			view->m_doubleClickInserts = enabled;
+			break;
+		case DoubleClickSends:
+			view->m_doubleClickSends = enabled;
+			break;
+		case EscapeDeletesInput:
+			view->m_escapeDeletesInput = enabled;
+			break;
+		case FadeOutputAfterSeconds:
+			view->m_fadeOutputBufferAfterSeconds = static_cast<int>(value);
+			if (view->m_fadeTimer)
+			{
+				if (value > 0)
+				{
+					if (!view->m_fadeTimer->isActive())
+						view->m_fadeTimer->start(1000);
+				}
+				else
+					view->m_fadeTimer->stop();
+			}
+			break;
+		case FadeOutputOpacityPercent:
+			view->m_fadeOutputOpacityPercent = static_cast<int>(value);
+			break;
+		case FadeOutputSeconds:
+			view->m_fadeOutputSeconds = static_cast<int>(value);
+			break;
+		case HistoryLines:
+			view->applyHistoryLimit(static_cast<int>(value));
+			break;
+		case HyperlinkAddsToCommandHistory:
+			view->m_hyperlinkAddsToCommandHistory = enabled;
+			break;
+		case HyperlinkColour:
+			view->m_hyperlinkColour =
+			    WorldView::parseColor(m_worldAttributes.value(QStringLiteral("hyperlink_colour")));
+			break;
+		case KeepCommandsOnSameLine:
+			view->m_keepCommandsOnSameLine = enabled;
+			break;
+		case KeepPauseAtBottom:
+			view->m_keepPauseAtBottom = enabled;
+			break;
+		case LineInformation:
+			view->m_lineInformation = enabled;
+			break;
+		case LineSpacing:
+			view->m_lineSpacing = static_cast<int>(value);
+			break;
+		case LowerCaseTabCompletion:
+			view->m_lowerCaseTabCompletion = enabled;
+			break;
+		case NoEchoOff:
+			view->m_noEchoOff = enabled;
+			if (enabled)
+				view->m_noEcho = false;
+			break;
+		case PartialSaveCharacterThreshold:
+			view->m_partialSaveCharacterThreshold = static_cast<int>(value);
+			break;
+		case PixelOffset:
+			view->m_inputPixelOffset = static_cast<int>(value);
+			break;
+		case SaveDeletedCommand:
+			view->m_saveDeletedCommand = enabled;
+			break;
+		case ShowBold:
+			view->m_showBold = enabled;
+			break;
+		case ShowItalic:
+			view->m_showItalic = enabled;
+			break;
+		case ShowUnderline:
+			view->m_showUnderline = enabled;
+			break;
+		case TabCompletionExcludesSymbolPrefix:
+			view->setTabCompletionExcludesSymbolPrefix(enabled);
+			break;
+		case TabCompletionExcludesSymbolSuffix:
+			view->setTabCompletionExcludesSymbolSuffix(enabled);
+			break;
+		case TabCompletionLines:
+			view->m_tabCompletionLines = static_cast<int>(value);
+			break;
+		case TabCompletionSpace:
+			view->m_tabCompletionSpace = enabled;
+			break;
+		case UnderlineHyperlinks:
+			view->m_underlineHyperlinks = enabled;
+			break;
+		case UseCustomLinkColour:
+			view->m_useCustomLinkColour = enabled;
+			break;
+		case WrapColumn:
+			view->m_wrapColumn = static_cast<int>(value);
+			view->applyOutputWrapRuntimeSettings();
+			view->updateWrapMargin();
+			break;
+		case WrapInput:
+			view->m_wrapInput = enabled;
+			break;
+		case InputBackgroundColour:
+		case InputTextColour:
+		case InputFont:
+		case OutputFont:
+		case OutputWrap:
+		case TimestampColours:
+			// These bindings are applied below with their related presentation state.
+			break;
+		default:
+			continue;
+		}
+
+		if (binding == InputBackgroundColour || binding == InputTextColour)
+			view->applyInputPaletteRuntimeSettings();
+		else if (binding == InputFont)
+			view->applyInputFontRuntimeSettings();
+		else if (binding == OutputFont)
+		{
+			view->applyOutputFontRuntimeSettings();
+			view->restoreOutputFromPersistedLines(m_lines);
+		}
+		else if (binding == OutputWrap)
+		{
+			view->applyOutputWrapRuntimeSettings();
+			view->updateWrapMargin();
+		}
+		else if (binding == TimestampColours)
+		{
+			view->refreshTimestampRenderSettings();
+			view->restoreOutputFromPersistedLines(m_lines);
+		}
+
+		if (binding == AlternativeInverse)
+			view->restoreOutputFromPersistedLines(m_lines);
+		else if (binding == UnderlineHyperlinks || binding == UseCustomLinkColour)
+			view->requestNativeOutputRepaint();
+	}
+	if (binding == OutputWrap)
+		updateTelnetWindowSizeForNaws();
+}
+
+int WorldRuntime::setOptionItem(const WorldNumericOption &option, const long long value)
+{
+	if (!QMudWorldOptions::numericOptionValueInRange(option, value))
+		return eOptionOutOfRange;
+
+	const long long storedValue = value;
+	const QString   storedText  = QMudWorldOptions::storedNumericOptionText(option, value);
+	setWorldAttributeImpl(QString::fromLatin1(option.name), storedText, false);
+	if (option.binding != WorldNumericOptionBinding::None)
+		applyNumericWorldOption(option.binding, storedValue);
+
+	if (option.flags & OPT_USE_MXP)
+	{
+		m_telnet.setUseMxp(static_cast<int>(storedValue));
+		if (storedValue == eNoMXP)
+			mxpShutDown();
+		else if (storedValue == eUseMXP)
+			mxpStartUp();
+	}
+	if (option.flags & OPT_FIX_WRAP_COLUMN)
+		updateTelnetWindowSizeForNaws();
+	for (WorldView *view : presentationViews())
+	{
+		bool rebuiltOutput = option.binding == WorldNumericOptionBinding::OutputFont ||
+		                     option.binding == WorldNumericOptionBinding::TimestampColours;
+		if (option.flags & OPT_FIX_INPUT_WRAP)
+			view->updateInputWrap();
+		if (option.flags & OPT_FIX_TOOLTIP_START)
+			view->applyTooltipStartTimeRuntimeSetting();
+		if (option.flags & OPT_FIX_TOOLTIP_VISIBLE)
+			view->applyTooltipVisibleTimeRuntimeSetting();
+		if (option.flags & OPT_UPDATE_INPUT_FONT)
+			view->applyInputFontRuntimeSettings();
+		if (option.flags & OPT_UPDATE_OUTPUT_FONT)
+		{
+			view->applyOutputFontRuntimeSettings();
+			view->restoreOutputFromPersistedLines(m_lines);
+			rebuiltOutput = true;
+		}
+		if (option.flags & OPT_UPDATE_VIEWS && !rebuiltOutput)
+			view->requestNativeOutputRepaint();
+	}
+	return eOK;
+}
+
 void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 {
 	if (QThread::currentThread() != thread())
@@ -19842,7 +20119,12 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 		qmudInvokeMethodChecked(this, [this, key, value] { setWorldAttribute(key, value); });
 		return;
 	}
+	setWorldAttributeImpl(key, value, true);
+}
 
+void WorldRuntime::setWorldAttributeImpl(const QString &key, const QString &value,
+                                         const bool applyGenericEffects)
+{
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setWorldAttribute");
 	QString normalizedValue = value;
 	if (isLikelyPathAttributeName(key))
@@ -19860,7 +20142,7 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 		return;
 	}
 	m_worldAttributes.insert(key, normalizedValue);
-	if (m_view)
+	if (applyGenericEffects && m_view)
 	{
 		if (key == QStringLiteral("tab_completion_excludes_symbol_prefix"))
 			m_view->setTabCompletionExcludesSymbolPrefix(isEnabledFlag(normalizedValue));
@@ -19878,11 +20160,14 @@ void WorldRuntime::setWorldAttribute(const QString &key, const QString &value)
 	}
 	if (key == QStringLiteral("naws"))
 	{
-		updateTelnetWindowSizeForNaws();
-		if (m_view)
-			m_view->applyRuntimeSettingsWithoutOutputRebuild();
+		if (applyGenericEffects)
+		{
+			updateTelnetWindowSizeForNaws();
+			if (m_view)
+				m_view->applyRuntimeSettingsWithoutOutputRebuild();
+		}
 	}
-	if (!m_loadingDocument && worldAttributeAffectsCommandProcessor(key))
+	if (applyGenericEffects && !m_loadingDocument && worldAttributeAffectsCommandProcessor(key))
 		refreshCommandProcessorOptions();
 	if (!m_loadingDocument)
 		m_worldFileModified = true;
@@ -22980,16 +23265,24 @@ int WorldRuntime::chatMaxBytes() const
 
 long WorldRuntime::chatForegroundColour() const
 {
-	bool            ok    = false;
-	const qlonglong value = m_worldAttributes.value(QStringLiteral("chat_foreground_colour")).toLongLong(&ok);
-	return ok ? static_cast<long>(value) : colorToLong(QColor(255, 0, 0));
+	const WorldNumericOption *option =
+	    QMudWorldOptions::findWorldNumericOption(QStringLiteral("chat_foreground_colour"));
+	const auto value = option
+	                       ? QMudWorldOptions::publicNumericOptionValue(
+	                             *option, m_worldAttributes.value(QStringLiteral("chat_foreground_colour")))
+	                       : std::nullopt;
+	return static_cast<long>(value.value_or(colorToLong(QColor(255, 0, 0))));
 }
 
 long WorldRuntime::chatBackgroundColour() const
 {
-	bool            ok    = false;
-	const qlonglong value = m_worldAttributes.value(QStringLiteral("chat_background_colour")).toLongLong(&ok);
-	return ok ? static_cast<long>(value) : colorToLong(QColor(0, 0, 0));
+	const WorldNumericOption *option =
+	    QMudWorldOptions::findWorldNumericOption(QStringLiteral("chat_background_colour"));
+	const auto value = option
+	                       ? QMudWorldOptions::publicNumericOptionValue(
+	                             *option, m_worldAttributes.value(QStringLiteral("chat_background_colour")))
+	                       : std::nullopt;
+	return static_cast<long>(value.value_or(colorToLong(QColor(0, 0, 0))));
 }
 
 bool WorldRuntime::isChatAlreadyConnected(const QString &address, int port,

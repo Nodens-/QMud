@@ -636,6 +636,7 @@ class WorldPreferencesDialog : public QDialog
 		QCheckBox                    *m_doubleClickInserts{nullptr};
 		QCheckBox                    *m_doubleClickSends{nullptr};
 		QCheckBox                    *m_saveDeletedCommand{nullptr};
+		QSpinBox                     *m_partialSaveCharacterThreshold{nullptr};
 		QCheckBox                    *m_ctrlZToEnd{nullptr};
 		QCheckBox                    *m_ctrlPToPrev{nullptr};
 		QCheckBox                    *m_ctrlNToNext{nullptr};

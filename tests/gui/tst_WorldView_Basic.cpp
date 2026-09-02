@@ -758,7 +758,8 @@ end
 		return {-1, -1};
 	}
 
-	QPoint findLineInformationPoint(const QTextBrowser &browser)
+	QPoint findLineInformationPoint(const QTextBrowser          &browser,
+	                                const std::function<bool()> &hasPendingLineInformation)
 	{
 		if (!browser.viewport())
 			return {-1, -1};
@@ -790,14 +791,11 @@ end
 		    qMin(area.bottom(), area.top() + qMax(24, QFontMetrics(browser.font()).height() * 6));
 		const int probeRight = qMin(area.right(), area.left() + 320);
 
-		auto      probePoint = [&browser](const QPoint &point)
+		auto      probePoint = [&browser, &hasPendingLineInformation](const QPoint &point)
 		{
-			QToolTip::hideText();
-			QCoreApplication::processEvents();
 			QTest::mouseMove(browser.viewport(), point);
 			QCoreApplication::processEvents();
-			QCoreApplication::processEvents();
-			return QToolTip::text().contains(QStringLiteral("Line "));
+			return hasPendingLineInformation();
 		};
 
 		const int lineHeight = qMax(1, QFontMetrics(browser.font()).height());
@@ -12161,6 +12159,7 @@ class tst_WorldView_Basic : public QObject
 			setTestWorldAttribute(QStringLiteral("arrow_recalls_partial"), QStringLiteral("1"));
 			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("3"));
 			setTestWorldAttribute(QStringLiteral("save_deleted_command"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("partial_save_character_threshold"), QStringLiteral("0"));
 			setTestWorldAttribute(QStringLiteral("confirm_before_replacing_typing"), QStringLiteral("0"));
 
 			WorldView view;
@@ -12188,6 +12187,64 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.inputText(), QStringLiteral("hit old"));
 			QTest::keyClick(input, Qt::Key_Down);
 			QCOMPARE(view.inputText(), QStringLiteral("hit newest"));
+
+			resetTestState();
+		}
+
+		void partialHistoryRecallSaveThreshold_data()
+		{
+			QTest::addColumn<bool>("partialRecall");
+			QTest::addColumn<int>("threshold");
+			QTest::addColumn<QString>("typedCommand");
+			QTest::addColumn<QString>("historyCommand");
+			QTest::addColumn<bool>("expectSaved");
+
+			QTest::newRow("partial-below-threshold")
+			    << true << 10 << QStringLiteral("sco") << QStringLiteral("score") << false;
+			QTest::newRow("partial-at-threshold")
+			    << true << 10 << QStringLiteral("abcdefghij") << QStringLiteral("abcdefghijk") << true;
+			QTest::newRow("partial-zero-threshold")
+			    << true << 0 << QStringLiteral("sco") << QStringLiteral("score") << true;
+			QTest::newRow("full-recall-ignores-threshold")
+			    << false << 10 << QStringLiteral("sco") << QStringLiteral("score") << true;
+		}
+
+		void partialHistoryRecallSaveThreshold()
+		{
+			QFETCH(bool, partialRecall);
+			QFETCH(int, threshold);
+			QFETCH(QString, typedCommand);
+			QFETCH(QString, historyCommand);
+			QFETCH(bool, expectSaved);
+			resetTestState();
+			setTestWorldAttribute(QStringLiteral("arrows_change_history"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("arrow_recalls_partial"),
+			                      partialRecall ? QStringLiteral("1") : QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("history_lines"), QStringLiteral("50"));
+			setTestWorldAttribute(QStringLiteral("save_deleted_command"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("partial_save_character_threshold"),
+			                      QString::number(threshold));
+			setTestWorldAttribute(QStringLiteral("confirm_before_replacing_typing"), QStringLiteral("0"));
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.applyRuntimeSettings();
+			view.addToHistoryForced(historyCommand);
+
+			QPlainTextEdit *input = view.inputEditor();
+			QVERIFY(input);
+			input->setFocus();
+			view.setInputText(typedCommand, true);
+			QCoreApplication::processEvents();
+
+			QTest::keyClick(input, Qt::Key_Up);
+			QCOMPARE(view.inputText(), historyCommand);
+			QStringList expectedHistory{historyCommand};
+			if (expectSaved)
+				expectedHistory.push_back(typedCommand);
+			QCOMPARE(view.commandHistoryList(), expectedHistory);
 
 			resetTestState();
 		}
@@ -12378,7 +12435,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 			QToolTip::hideText();
 			setTestWorldAttribute(QStringLiteral("line_information"), QStringLiteral("1"));
-			setTestWorldAttribute(QStringLiteral("tool_tip_start_time"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("tool_tip_start_time"), QStringLiteral("120000"));
 			setTestWorldAttribute(QStringLiteral("tool_tip_visible_time"), QStringLiteral("5000"));
 
 			runtimeForTest()->addLine(QStringLiteral("tooltip-source-line"), WorldRuntime::LineOutput, true,
@@ -12393,13 +12450,15 @@ class tst_WorldView_Basic : public QObject
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
 			QVERIFY(browser);
-			const QPoint point = findLineInformationPoint(*browser);
+			const QPoint point = findLineInformationPoint(
+			    *browser, [&view] { return view.m_pendingTooltipText.contains(QStringLiteral("Line 1, ")); });
 			QVERIFY2(point.x() >= 0 && point.y() >= 0,
 			         "Expected line-information tooltip probe point in rendered output.");
-			QTest::mouseMove(browser->viewport(), point);
-
-			QTRY_VERIFY(QToolTip::text().contains(QStringLiteral("Line 1, ")));
-			QTRY_VERIFY(QToolTip::text().contains(QStringLiteral("(unknown time)")));
+			QVERIFY(view.m_pendingTooltipText.contains(QStringLiteral("(unknown time)")));
+			view.showScheduledHotspotTooltip();
+			QVERIFY(view.m_activeTooltipText.contains(QStringLiteral("Line 1, ")));
+			QVERIFY(view.m_activeTooltipText.contains(QStringLiteral("(unknown time)")));
+			QCOMPARE(QToolTip::text(), view.m_activeTooltipText);
 			QToolTip::hideText();
 
 			resetTestState();
@@ -12410,7 +12469,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 			QToolTip::hideText();
 			setTestWorldAttribute(QStringLiteral("line_information"), QStringLiteral("1"));
-			setTestWorldAttribute(QStringLiteral("tool_tip_start_time"), QStringLiteral("0"));
+			setTestWorldAttribute(QStringLiteral("tool_tip_start_time"), QStringLiteral("120000"));
 			setTestWorldAttribute(QStringLiteral("tool_tip_visible_time"), QStringLiteral("5000"));
 
 			runtimeForTest()->addLine(QStringLiteral("tip"), WorldRuntime::LineOutput);
@@ -12424,12 +12483,14 @@ class tst_WorldView_Basic : public QObject
 
 			QTextBrowser *browser = findVisibleOutputBrowser(view);
 			QVERIFY(browser);
-			const QPoint textPoint = findLineInformationPoint(*browser);
+			const QPoint textPoint = findLineInformationPoint(
+			    *browser, [&view] { return view.m_pendingTooltipText.contains(QStringLiteral("Line 1, ")); });
 			QVERIFY2(textPoint.x() >= 0 && textPoint.y() >= 0,
 			         "Expected line-information tooltip probe point in rendered output.");
 
-			QTest::mouseMove(browser->viewport(), textPoint);
-			QTRY_VERIFY(QToolTip::text().contains(QStringLiteral("Line 1, ")));
+			view.showScheduledHotspotTooltip();
+			QVERIFY(view.m_activeTooltipText.contains(QStringLiteral("Line 1, ")));
+			QCOMPARE(QToolTip::text(), view.m_activeTooltipText);
 
 			const QRect  viewportRect = browser->viewport()->rect();
 			const int    blankX = qBound(viewportRect.left(), viewportRect.right() - 2, viewportRect.right());
@@ -12437,9 +12498,69 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(blankPoint.x() > textPoint.x());
 
 			QTest::mouseMove(browser->viewport(), blankPoint);
-			QTRY_VERIFY(QToolTip::text().isEmpty());
+			QCoreApplication::processEvents();
+			QVERIFY(view.m_pendingTooltipText.isEmpty());
+			QVERIFY(view.m_activeTooltipText.isEmpty());
+			QToolTip::hideText();
 
 			resetTestState();
+		}
+
+		void zeroTooltipStartTimeUsesDefaultDelay()
+		{
+			WorldRuntime runtime;
+			runtime.applyDefaultWorldOptions();
+			runtime.setWorldAttribute(QStringLiteral("tool_tip_start_time"), QStringLiteral("0"));
+			WorldView view;
+			view.setRuntime(&runtime);
+
+			QCOMPARE(view.tooltipStartDelayMs(), 400);
+		}
+
+		void tooltipDurationUpdateOnlyReappliesOwningView()
+		{
+			QToolTip::hideText();
+			WorldRuntime firstRuntime;
+			WorldRuntime secondRuntime;
+			firstRuntime.applyDefaultWorldOptions();
+			secondRuntime.applyDefaultWorldOptions();
+
+			WorldView firstView;
+			WorldView secondView;
+			firstView.setRuntime(&firstRuntime);
+			secondView.setRuntime(&secondRuntime);
+			firstView.scheduleHotspotTooltip(QStringLiteral("first"), QStringLiteral("first tooltip"),
+			                                 QPoint(20, 20));
+			firstView.showScheduledHotspotTooltip();
+			secondView.scheduleHotspotTooltip(QStringLiteral("second"), QStringLiteral("second tooltip"),
+			                                  QPoint(40, 40));
+			secondView.showScheduledHotspotTooltip();
+			QCOMPARE(QToolTip::text(), QStringLiteral("second tooltip"));
+
+			firstView.applyTooltipVisibleTimeRuntimeSetting();
+			QCOMPARE(QToolTip::text(), QStringLiteral("second tooltip"));
+			QCOMPARE(secondView.m_activeTooltipGlobalPos, QPoint(40, 40));
+			QToolTip::hideText();
+		}
+
+		void mxpRecommendOptionUsesRuntimeOptionApplication()
+		{
+			WorldRuntime runtime;
+			runtime.applyDefaultWorldOptions();
+			runtime.setWorldAttribute(QStringLiteral("mud_can_change_options"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("mud_can_remove_underline"), QStringLiteral("1"));
+			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QString::number(eUseMXP));
+
+			WorldView view;
+			view.setRuntime(&runtime);
+			QVERIFY(view.m_underlineHyperlinks);
+
+			WorldRuntimeTestAccess::processRawDataPayload(
+			    runtime, QByteArrayLiteral("\x1B[1z<RECOMMEND_OPTION underline_hyperlinks=0>"));
+
+			QCOMPARE(runtime.worldAttributes().value(QStringLiteral("underline_hyperlinks")),
+			         QStringLiteral("0"));
+			QVERIFY(!view.m_underlineHyperlinks);
 		}
 
 		void runtimePartialOutputUsesNativeOverlayWithoutDocumentWrites()

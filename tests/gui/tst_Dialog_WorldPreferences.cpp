@@ -1033,6 +1033,83 @@ namespace
 				QVERIFY(!restoredExcludeSymbolSuffix->isChecked());
 			}
 
+			void partialSaveCharacterThresholdFollowsParentAndPersists()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("partial_save_character_threshold")),
+				         QStringLiteral("10"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageCommands);
+				dialog.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+				QCoreApplication::processEvents();
+
+				QPushButton *keyboardPreferences = nullptr;
+				for (QPushButton *button : dialog.findChildren<QPushButton *>())
+				{
+					if (button && button->text() == QStringLiteral("Keyboard preferences..."))
+					{
+						keyboardPreferences = button;
+						break;
+					}
+				}
+				QVERIFY(keyboardPreferences);
+
+				bool inspectedKeyboardDialog = false;
+				QVERIFY(QMetaObject::invokeMethod(
+				    &dialog,
+				    [&inspectedKeyboardDialog]
+				    {
+					    auto *keyboardDialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+					    QVERIFY(keyboardDialog);
+					    const auto closeDialog = qScopeGuard(
+					        [keyboardDialog]
+					        {
+						        if (keyboardDialog->isVisible())
+							        keyboardDialog->reject();
+					        });
+
+					    QCheckBox *saveDeleted =
+					        findCheckBoxByText(*keyboardDialog, QStringLiteral("Save Deleted Command"));
+					    QVERIFY(saveDeleted);
+					    QLabel *thresholdLabel = nullptr;
+					    for (QLabel *label : keyboardDialog->findChildren<QLabel *>())
+					    {
+						    if (label && label->text() == QStringLiteral("Partial Save Character Threshold"))
+						    {
+							    thresholdLabel = label;
+							    break;
+						    }
+					    }
+					    QVERIFY(thresholdLabel);
+					    auto *threshold = qobject_cast<QSpinBox *>(thresholdLabel->buddy());
+					    QVERIFY(threshold);
+					    QCOMPARE(threshold->minimum(), 0);
+					    QCOMPARE(threshold->maximum(), 200);
+					    QCOMPARE(threshold->value(), 10);
+					    QVERIFY(!threshold->isEnabled());
+					    QVERIFY(thresholdLabel->mapTo(keyboardDialog, QPoint()).x() >
+					            saveDeleted->mapTo(keyboardDialog, QPoint()).x());
+
+					    saveDeleted->setChecked(true);
+					    QVERIFY(threshold->isEnabled());
+					    threshold->setValue(37);
+					    inspectedKeyboardDialog = true;
+					    keyboardDialog->accept();
+				    },
+				    Qt::QueuedConnection));
+
+				QTest::mouseClick(keyboardPreferences, Qt::LeftButton);
+				QVERIFY(inspectedKeyboardDialog);
+				dialog.accept();
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("save_deleted_command")),
+				         QStringLiteral("1"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("partial_save_character_threshold")),
+				         QStringLiteral("37"));
+			}
+
 			void legacyEncodingControlFollowsUtf8Option()
 			{
 				WorldRuntime runtime;
