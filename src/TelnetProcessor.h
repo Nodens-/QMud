@@ -771,7 +771,6 @@ class TelnetProcessor
 		QList<MxpEvent>                 m_mxpEvents;
 		QList<MxpModeChange>            m_mxpModeChanges;
 		QList<TelnetPluginEvent>        m_telnetPluginEvents;
-		bool                            m_mxpEventsOverflowed{false};
 		int                             m_mxpEventSequence{0};
 		Callbacks                       m_callbacks;
 
