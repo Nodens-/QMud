@@ -10938,7 +10938,7 @@ namespace
 		entry.flags      = flags;
 		entry.hardReturn = hardReturn;
 		entry.spans      = std::move(spans);
-		entry.time       = QDateTime::currentDateTime();
+		entry.time       = QDateTime::currentDateTimeUtc();
 		entry.lineNumber =
 		    hasPrevious && previousEntry.lineNumber > 0
 		        ? (target.replaceAnchor ? previousEntry.lineNumber : previousEntry.lineNumber + 1)
@@ -20907,7 +20907,8 @@ static int luaGetLineInfo(lua_State *L)
 
 		pushLuaUtf8String(L, "timestr");
 		const QString timeString =
-		    entry.time.isValid() ? QLocale::system().toString(entry.time, QLocale::ShortFormat) : QString();
+		    entry.time.isValid() ? QLocale::system().toString(entry.time.toLocalTime(), QLocale::ShortFormat)
+		                         : QString();
 		const QByteArray timeBytes = timeString.toLocal8Bit();
 		lua_pushlstring(L, timeBytes.constData(), timeBytes.size());
 		lua_rawset(L, -3);

@@ -2615,6 +2615,45 @@ bool AppController::closeOpenWorldLogsBeforeRestart(QString *errorMessage) const
 	return true;
 }
 
+QVector<int>
+AppController::selectSessionStateSaveCandidateIndexes(const QVector<SessionStateSaveCandidate> &candidates)
+{
+	QVector<int>        selectedCandidateIndexes;
+	QHash<QString, int> selectedCandidateByPath;
+	selectedCandidateIndexes.reserve(candidates.size());
+	selectedCandidateByPath.reserve(candidates.size());
+	for (int index = 0; index < candidates.size(); ++index)
+	{
+		const SessionStateSaveCandidate &candidate = candidates.at(index);
+		if (candidate.filePath.isEmpty())
+		{
+			selectedCandidateIndexes.push_back(index);
+			continue;
+		}
+
+		auto selectedIt = selectedCandidateByPath.find(candidate.filePath);
+		if (selectedIt == selectedCandidateByPath.end())
+		{
+			selectedCandidateByPath.insert(candidate.filePath, index);
+			continue;
+		}
+
+		const SessionStateSaveCandidate &selected = candidates.at(selectedIt.value());
+		const bool                       replaceSelection =
+		    candidate.connected ? (!selected.connected || candidate.openSequence < selected.openSequence)
+		                        : (!selected.connected && candidate.openSequence > selected.openSequence);
+		if (replaceSelection)
+			selectedIt.value() = index;
+	}
+	for (auto selectedIt = selectedCandidateByPath.cbegin(); selectedIt != selectedCandidateByPath.cend();
+	     ++selectedIt)
+	{
+		selectedCandidateIndexes.push_back(selectedIt.value());
+	}
+	std::ranges::sort(selectedCandidateIndexes);
+	return selectedCandidateIndexes;
+}
+
 bool AppController::saveOpenWorldSessionStatesBeforeRestart(QString *errorMessage) const
 {
 	if (errorMessage)
@@ -2625,6 +2664,14 @@ bool AppController::saveOpenWorldSessionStatesBeforeRestart(QString *errorMessag
 		return true;
 
 	const QVector<WorldWindowDescriptor> entries = host->worldRuntimeDescriptors();
+	struct SessionStateSaveResult
+	{
+			QString worldName;
+			QString error;
+			bool    ok{true};
+	};
+	QVector<SessionStateSaveCandidate> candidates;
+	candidates.reserve(entries.size());
 	for (const WorldWindowDescriptor &entry : entries)
 	{
 		WorldRuntime *runtime = entry.runtime;
@@ -2632,35 +2679,55 @@ bool AppController::saveOpenWorldSessionStatesBeforeRestart(QString *errorMessag
 		if (!runtime || !view)
 			continue;
 
-		bool       saveOk    = true;
-		QString    saveError = {};
-		bool       done      = false;
-		QEventLoop waitLoop;
-		saveWorldSessionStateAsync(
-		    runtime, view,
-		    [&saveOk, &saveError, &done, &waitLoop](const bool ok, const QString &error)
-		    {
-			    saveOk    = ok;
-			    saveError = error;
-			    done      = true;
-			    waitLoop.quit();
-		    });
-		if (!done)
-			waitLoop.exec();
-		if (!saveOk)
-		{
-			if (errorMessage)
-			{
-				const QString worldName = worldDisplayNameForRestartSave(entry);
-				*errorMessage =
-				    QStringLiteral("Unable to persist session state for world \"%1\": %2")
-				        .arg(worldName, saveError.isEmpty() ? QStringLiteral("Unknown error.") : saveError);
-			}
-			return false;
-		}
+		candidates.push_back({runtime, view, worldSessionStateFilePath(runtime),
+		                      worldDisplayNameForRestartSave(entry), runtime->openSequence(),
+		                      runtime->isConnected()});
 	}
 
-	return true;
+	const QVector<int> selectedCandidateIndexes = selectSessionStateSaveCandidateIndexes(candidates);
+
+	QVector<SessionStateSaveResult> results;
+	results.reserve(selectedCandidateIndexes.size());
+	int        pending{0};
+	bool       schedulingComplete{false};
+	QEventLoop waitLoop;
+	for (const int candidateIndex : std::as_const(selectedCandidateIndexes))
+	{
+		const SessionStateSaveCandidate &candidate   = candidates.at(candidateIndex);
+		const qsizetype                  resultIndex = results.size();
+		results.push_back({candidate.worldName, {}, true});
+		++pending;
+		saveWorldSessionStateAsync(candidate.runtime, candidate.view,
+		                           [&results, &pending, &schedulingComplete, &waitLoop,
+		                            resultIndex](const bool ok, const QString &error)
+		                           {
+			                           SessionStateSaveResult &result = results[resultIndex];
+			                           result.ok                      = ok;
+			                           result.error                   = error;
+			                           --pending;
+			                           if (schedulingComplete && pending == 0)
+				                           waitLoop.quit();
+		                           });
+	}
+	schedulingComplete = true;
+	if (pending > 0)
+		waitLoop.exec();
+
+	return std::ranges::all_of(
+	    std::as_const(results),
+	    [errorMessage](const SessionStateSaveResult &result)
+	    {
+		    if (result.ok)
+			    return true;
+		    if (errorMessage)
+		    {
+			    *errorMessage =
+			        QStringLiteral("Unable to persist session state for world \"%1\": %2")
+			            .arg(result.worldName,
+			                 result.error.isEmpty() ? QStringLiteral("Unknown error.") : result.error);
+		    }
+		    return false;
+	    });
 }
 
 bool AppController::saveOpenWorldPluginStatesBeforeRestart(QString *errorMessage) const
@@ -2785,6 +2852,7 @@ void AppController::saveWorldSessionStateAsync(WorldRuntime *runtime, const Worl
 	{
 		WorldRuntime::SessionStateOutputSnapshot outputSnapshot = runtime->sessionStateOutputSnapshot();
 		state.outputLines                                       = std::move(outputSnapshot.lines);
+		state.excludedOutputLineIndex                           = outputSnapshot.excludedLineIndex;
 		state.excludedOutputLineNumber                          = outputSnapshot.excludedLineNumber;
 	}
 	if (persistCommandHistory)
@@ -9810,7 +9878,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			    info += QStringLiteral("Line %1, %2\n")
 			                .arg(lineIndex + 1)
 			                .arg(QLocale::system().toString(
-			                    line.time, QStringLiteral("dddd, MMMM dd, yyyy, h:mm:ss AP")));
+			                    line.time.toLocalTime(), QStringLiteral("dddd, MMMM dd, yyyy, h:mm:ss AP")));
 			    info += QStringLiteral(" Flags = Output: %1, Note: %2, User input: %3\n")
 			                .arg(yesNo(line.flags & WorldRuntime::LineOutput))
 			                .arg(yesNo(line.flags & WorldRuntime::LineNote))

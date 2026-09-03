@@ -685,6 +685,25 @@ class AppController : public QObject
 		 */
 		[[nodiscard]] bool closeOpenWorldLogsBeforeRestart(QString *errorMessage = nullptr) const;
 		/**
+		 * @brief Candidate world runtime and presentation for session-state persistence.
+		 */
+		struct SessionStateSaveCandidate
+		{
+				WorldRuntime *runtime{nullptr};
+				WorldView    *view{nullptr};
+				QString       filePath;
+				QString       worldName;
+				quint64       openSequence{0};
+				bool          connected{false};
+		};
+		/**
+		 * @brief Selects at most one session-state save candidate for each non-empty file path.
+		 * @param candidates Candidate runtimes and their resolved session-state paths.
+		 * @return Candidate indexes to save.
+		 */
+		[[nodiscard]] static QVector<int>
+		selectSessionStateSaveCandidateIndexes(const QVector<SessionStateSaveCandidate> &candidates);
+		/**
 		 * @brief Saves per-world output/history session-state files before shutdown/restart.
 		 * @param errorMessage Optional output error text when persistence fails.
 		 * @return `true` when all eligible worlds were persisted successfully.

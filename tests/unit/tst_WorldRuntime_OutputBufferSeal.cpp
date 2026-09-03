@@ -216,6 +216,7 @@ namespace
 				const WorldRuntime::SessionStateOutputSnapshot persisted =
 				    runtime.sessionStateOutputSnapshot();
 				QCOMPARE(persisted.lines.size(), 3);
+				QCOMPARE(persisted.excludedLineIndex, 1);
 				QCOMPARE(persisted.excludedLineNumber, hiddenLineNumber);
 
 				runtime.endIncomingLineLuaContext();

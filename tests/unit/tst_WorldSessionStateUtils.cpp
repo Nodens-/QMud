@@ -47,7 +47,7 @@ namespace
 		line.flags      = WorldRuntime::LineOutput | WorldRuntime::LineBookmark;
 		line.hardReturn = false;
 		line.spans      = {span};
-		line.time       = QDateTime::fromMSecsSinceEpoch(1710000000000);
+		line.time       = QDateTime::fromMSecsSinceEpoch(1710000000000, QTimeZone::UTC);
 		line.lineNumber = 42;
 		line.ticks      = 12.5;
 		line.elapsed    = 12.5;
@@ -132,6 +132,8 @@ namespace
 				QCOMPARE(line.flags, writeData.outputLines.at(0).flags);
 				QCOMPARE(line.hardReturn, writeData.outputLines.at(0).hardReturn);
 				QCOMPARE(line.time.toMSecsSinceEpoch(), writeData.outputLines.at(0).time.toMSecsSinceEpoch());
+				QCOMPARE(line.time.offsetFromUtc(), 0);
+				QCOMPARE(line.time.timeSpec(), Qt::UTC);
 				QCOMPARE(line.lineNumber, writeData.outputLines.at(0).lineNumber);
 				QCOMPARE(line.spans.size(), 1);
 				QCOMPARE(line.spans.at(0).length, writeData.outputLines.at(0).spans.at(0).length);
@@ -211,8 +213,16 @@ namespace
 				         customOnly.mxpSessionState.previousMode);
 			}
 
+			void excludedHiddenOutputLineIsNotSerialized_data()
+			{
+				QTest::addColumn<int>("excludedLineIndex");
+				QTest::newRow("retained-index") << 1;
+				QTest::newRow("line-number-fallback") << -1;
+			}
+
 			void excludedHiddenOutputLineIsNotSerialized()
 			{
+				QFETCH(int, excludedLineIndex);
 				QTemporaryDir tempDir;
 				QVERIFY(tempDir.isValid());
 				const QString statePath = tempDir.filePath(QStringLiteral("excluded_hidden.qws"));
@@ -228,6 +238,7 @@ namespace
 						line.flags |= WorldRuntime::LineHidden;
 					writeData.outputLines.push_back(std::move(line));
 				}
+				writeData.excludedOutputLineIndex  = excludedLineIndex;
 				writeData.excludedOutputLineNumber = 2;
 
 				QString error;

@@ -166,6 +166,11 @@ class WorldRuntime : public QObject
 		 * @brief Destroys runtime and releases world-scoped resources.
 		 */
 		~WorldRuntime() override;
+		/**
+		 * @brief Returns the process-local order in which this world runtime was opened.
+		 * @return Monotonically increasing runtime-open sequence.
+		 */
+		[[nodiscard]] quint64                       openSequence() const noexcept;
 
 		/**
 		 * @brief Initializes runtime state from loaded world document.
@@ -624,6 +629,7 @@ class WorldRuntime : public QObject
 		struct SessionStateOutputSnapshot
 		{
 				IndexedRingBuffer<LineEntry> lines;
+				int                          excludedLineIndex{-1};
 				qint64                       excludedLineNumber{0};
 		};
 		/**
@@ -1641,7 +1647,7 @@ class WorldRuntime : public QObject
 		 * @param time Timestamp associated with the line.
 		 */
 		void                                addLine(const QString &text, int flags, bool hardReturn = true,
-		                                            const QDateTime &time = QDateTime::currentDateTime());
+		                                            const QDateTime &time = QDateTime::currentDateTimeUtc());
 		/**
 		 * @brief Appends styled line entry to output buffer.
 		 * @param text Line text.
@@ -1651,7 +1657,7 @@ class WorldRuntime : public QObject
 		 * @param time Timestamp associated with the line.
 		 */
 		void addLine(const QString &text, int flags, const QVector<StyleSpan> &spans, bool hardReturn = true,
-		             const QDateTime &time = QDateTime::currentDateTime());
+		             const QDateTime &time = QDateTime::currentDateTimeUtc());
 		/**
 		 * @brief Commits pending unterminated incoming output as the current tail line.
 		 *
@@ -6439,6 +6445,7 @@ class WorldRuntime : public QObject
 
 		QMap<QString, QString>                                     m_worldAttributes;
 		QMap<QString, QString>                                     m_worldMultilineAttributes;
+		const quint64                                              m_openSequence;
 		std::atomic<qint64>                                        m_scriptTimeNanos{0};
 		unsigned short                                             m_noteStyle{0};
 		QMap<long, long>                                           m_colourTranslationMap;

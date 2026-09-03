@@ -1849,7 +1849,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 			        return;
 		        rebuildOutputFromLines(m_runtime->lines());
 	        });
-	m_timeFadeCancelled = QDateTime::currentDateTime();
+	m_timeFadeCancelled = QDateTime::currentDateTimeUtc();
 	auto *outputLayout  = new QHBoxLayout(m_outputContainer);
 	outputLayout->setContentsMargins(0, 0, 0, 0);
 	outputLayout->setSpacing(0);
@@ -2681,7 +2681,7 @@ void WorldView::setFrozen(bool frozen)
 		return;
 	m_frozen = frozen;
 	if (m_frozen)
-		m_timeFadeCancelled = QDateTime::currentDateTime();
+		m_timeFadeCancelled = QDateTime::currentDateTimeUtc();
 	if (m_runtime)
 		m_runtime->setOutputFrozen(m_frozen);
 	emit freezeStateChanged(m_frozen);
@@ -2715,7 +2715,7 @@ bool WorldView::isFrozen() const
 
 void WorldView::noteUserScrollAction()
 {
-	m_timeFadeCancelled = QDateTime::currentDateTime();
+	m_timeFadeCancelled = QDateTime::currentDateTimeUtc();
 	if (!m_autoPause || !m_outputScrollBar)
 		return;
 	syncOutputScrollbackReviewState();
@@ -4942,7 +4942,8 @@ void WorldView::applyNativePartialRenderLineOverlay() const
 	    !m_nativeCachedRuntimeLastHardReturn && !m_nativeRenderLineCache.isEmpty();
 	if (nativePartialRenderLineOverlayCurrent(partialSpans, appendToLastBaseLine))
 	{
-		const double partialOpacity = qBound(0.0, lineOpacityForTimestamp(QDateTime::currentDateTime()), 1.0);
+		const double partialOpacity =
+		    qBound(0.0, lineOpacityForTimestamp(QDateTime::currentDateTimeUtc()), 1.0);
 		if (!m_nativeRenderLineCache.isEmpty())
 			m_nativeRenderLineCache.last().opacity = partialOpacity;
 		return;
@@ -4950,10 +4951,10 @@ void WorldView::applyNativePartialRenderLineOverlay() const
 
 	removeNativePartialRenderLineOverlay();
 
-	const int    oldLineCount      = sizeToInt(m_nativeRenderLineCache.size());
-	const double partialOpacity    = qBound(0.0, lineOpacityForTimestamp(QDateTime::currentDateTime()), 1.0);
-	m_nativePartialRenderLineText  = m_nativePartialOutputText;
-	m_nativePartialRenderLineSpans = partialSpans;
+	const int    oldLineCount   = sizeToInt(m_nativeRenderLineCache.size());
+	const double partialOpacity = qBound(0.0, lineOpacityForTimestamp(QDateTime::currentDateTimeUtc()), 1.0);
+	m_nativePartialRenderLineText           = m_nativePartialOutputText;
+	m_nativePartialRenderLineSpans          = partialSpans;
 	m_nativePartialRenderLineAppended       = !appendToLastBaseLine;
 	m_nativePartialRenderBaseLastHardReturn = m_nativeCachedRuntimeLastHardReturn;
 
@@ -10763,7 +10764,7 @@ void WorldView::commitPendingInlineInputBreak()
 	if (!m_runtime)
 	{
 		appendStandaloneOutputEntry(QString(), {}, true, WorldRuntime::LineOutput,
-		                            QDateTime::currentDateTime());
+		                            QDateTime::currentDateTimeUtc());
 		m_nativeRenderLineCacheFromRuntime = false;
 		m_nativeRenderLineCacheValid       = false;
 		if (!m_frozen)
@@ -11945,7 +11946,7 @@ void WorldView::appendStandaloneOutputEntry(const QString                       
 	entry.flags      = flags;
 	entry.spans      = spans;
 	entry.hardReturn = hardReturn;
-	entry.time       = time;
+	entry.time       = time.toUTC();
 	if (m_nativeStandaloneNextLineNumber <= 0)
 		m_nativeStandaloneNextLineNumber = 1;
 	entry.lineNumber = m_nativeStandaloneNextLineNumber++;
@@ -12025,7 +12026,7 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 	displayEntry.text  = text;
 	displayEntry.flags = recordedFlags;
 	displayEntry.spans = displaySpans;
-	displayEntry.time  = QDateTime::currentDateTime();
+	displayEntry.time  = QDateTime::currentDateTimeUtc();
 	QDateTime previousLineTime;
 
 	if (recordLine && m_runtime)
@@ -12471,7 +12472,7 @@ void WorldView::buildDisplayLine(const WorldRuntime::LineEntry &entry, const QDa
 	if (!timestampSettings->enabled)
 		return;
 
-	const QDateTime lineTime   = entry.time.isValid() ? entry.time : QDateTime::currentDateTime();
+	const QDateTime lineTime   = entry.time.isValid() ? entry.time : QDateTime::currentDateTimeUtc();
 	const QDateTime worldStart = m_runtime->worldStartTime();
 	const double    elapsed    = (worldStart.isValid() && lineTime.isValid())
 	                                 ? (static_cast<double>(worldStart.msecsTo(lineTime)) / 1000.0)
@@ -14332,7 +14333,7 @@ double WorldView::lineOpacityForTimestamp(const QDateTime &when) const
 	if (!when.isValid())
 		return 1.0;
 
-	const QDateTime now              = QDateTime::currentDateTime();
+	const QDateTime now              = QDateTime::currentDateTimeUtc();
 	qint64          timeSinceArrived = when.secsTo(now);
 	if (timeSinceArrived < 0)
 		timeSinceArrived = 0;
@@ -14369,7 +14370,7 @@ bool WorldView::fadeRebuildNeededNow() const
 	if (lines.isEmpty())
 		return false;
 
-	const QDateTime now        = QDateTime::currentDateTime();
+	const QDateTime now        = QDateTime::currentDateTimeUtc();
 	const qint64    lowerBound = m_fadeOutputBufferAfterSeconds;
 	const auto      upperBound = static_cast<qint64>(m_fadeOutputBufferAfterSeconds) + m_fadeOutputSeconds;
 
@@ -14498,10 +14499,11 @@ void WorldView::updateLineInformationTooltip(const QWidget *watched, const QMous
 		return;
 	}
 
-	const QString when = resolvedLine->time.isValid()
-	                         ? resolvedLine->time.toString(QStringLiteral("dddd, MMMM dd, HH:mm:ss"))
-	                         : QStringLiteral("(unknown time)");
-	QString       suffix;
+	const QString when =
+	    resolvedLine->time.isValid()
+	        ? resolvedLine->time.toLocalTime().toString(QStringLiteral("dddd, MMMM dd, HH:mm:ss"))
+	        : QStringLiteral("(unknown time)");
+	QString suffix;
 	if (renderLine.flags & WorldRuntime::LineNote)
 		suffix = QStringLiteral(", (note)");
 	else if (renderLine.flags & WorldRuntime::LineInput)

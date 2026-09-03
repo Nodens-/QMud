@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
+#include <QTimeZone>
 #include <QtEndian>
 #include <array>
 #include <limits>
@@ -20,26 +21,27 @@
 
 namespace
 {
-	constexpr quint32 kSessionStateMagic             = 0x514D5353u; // "QMSS"
-	constexpr quint32 kSessionStateSchemaVersion     = 1u;
-	constexpr quint32 kContainerFlagCompressed       = 0x01u;
-	constexpr quint32 kPayloadFlagOutputBuffer       = 0x01u;
-	constexpr quint32 kPayloadFlagCommandHistory     = 0x02u;
-	constexpr quint32 kPayloadFlagCustomMxpElements  = 0x04u;
-	constexpr quint32 kPayloadFlagMxpSessionState    = 0x08u;
-	constexpr quint16 kStyleFlagBold                 = 0x0001u;
-	constexpr quint16 kStyleFlagUnderline            = 0x0002u;
-	constexpr quint16 kStyleFlagItalic               = 0x0004u;
-	constexpr quint16 kStyleFlagBlink                = 0x0008u;
-	constexpr quint16 kStyleFlagStrike               = 0x0010u;
-	constexpr quint16 kStyleFlagInverse              = 0x0020u;
-	constexpr quint16 kStyleFlagChanged              = 0x0040u;
-	constexpr quint16 kStyleFlagStartTag             = 0x0080u;
-	constexpr qint64  kInvalidTimeMarker             = std::numeric_limits<qint64>::min();
-	constexpr quint32 kMaxPersistedOutputLineCount   = 500000u;
-	constexpr quint32 kMaxPersistedSpanCountPerLine  = 100000u;
-	constexpr quint32 kMaxPersistedHistoryEntryCount = 50000u;
-	constexpr quint32 kMaxPersistedCustomMxpElements = 2048u;
+	constexpr quint32 kSessionStateMagic               = 0x514D5353u; // "QMSS"
+	constexpr quint32 kLegacySessionStateSchemaVersion = 1u;
+	constexpr quint32 kSessionStateSchemaVersion       = 2u;
+	constexpr quint32 kContainerFlagCompressed         = 0x01u;
+	constexpr quint32 kPayloadFlagOutputBuffer         = 0x01u;
+	constexpr quint32 kPayloadFlagCommandHistory       = 0x02u;
+	constexpr quint32 kPayloadFlagCustomMxpElements    = 0x04u;
+	constexpr quint32 kPayloadFlagMxpSessionState      = 0x08u;
+	constexpr quint16 kStyleFlagBold                   = 0x0001u;
+	constexpr quint16 kStyleFlagUnderline              = 0x0002u;
+	constexpr quint16 kStyleFlagItalic                 = 0x0004u;
+	constexpr quint16 kStyleFlagBlink                  = 0x0008u;
+	constexpr quint16 kStyleFlagStrike                 = 0x0010u;
+	constexpr quint16 kStyleFlagInverse                = 0x0020u;
+	constexpr quint16 kStyleFlagChanged                = 0x0040u;
+	constexpr quint16 kStyleFlagStartTag               = 0x0080u;
+	constexpr qint64  kInvalidTimeMarker               = std::numeric_limits<qint64>::min();
+	constexpr quint32 kMaxPersistedOutputLineCount     = 500000u;
+	constexpr quint32 kMaxPersistedSpanCountPerLine    = 100000u;
+	constexpr quint32 kMaxPersistedHistoryEntryCount   = 50000u;
+	constexpr quint32 kMaxPersistedCustomMxpElements   = 2048u;
 
 	quint32           crc32ForBytes(const QByteArray &bytes)
 	{
@@ -238,7 +240,8 @@ namespace
 		}
 		line->flags      = flags;
 		line->hardReturn = hardReturn;
-		line->time = (timeMs == kInvalidTimeMarker) ? QDateTime() : QDateTime::fromMSecsSinceEpoch(timeMs);
+		line->time = (timeMs == kInvalidTimeMarker) ? QDateTime()
+		                                            : QDateTime::fromMSecsSinceEpoch(timeMs, QTimeZone::UTC);
 		line->spans.clear();
 		line->spans.reserve(static_cast<int>(spanCount));
 		for (quint32 i = 0; i < spanCount; ++i)
@@ -331,32 +334,38 @@ namespace QMudWorldSessionState
 			payloadStream << payloadFlags;
 			if (state.hasOutputBuffer)
 			{
-				bool excludeLine = false;
+				int excludedLineIndex = -1;
 				if (state.excludedOutputLineNumber > 0)
 				{
-					for (const WorldRuntime::LineEntry &line : state.outputLines)
+					auto matchesExcludedLine = [&state](const int index)
 					{
-						if (line.lineNumber == state.excludedOutputLineNumber &&
-						    (line.flags & WorldRuntime::LineHidden) != 0)
+						if (index < 0 || index >= state.outputLines.size())
+							return false;
+						const WorldRuntime::LineEntry &line = state.outputLines.at(index);
+						return line.lineNumber == state.excludedOutputLineNumber &&
+						       (line.flags & WorldRuntime::LineHidden) != 0;
+					};
+					if (matchesExcludedLine(state.excludedOutputLineIndex))
+						excludedLineIndex = state.excludedOutputLineIndex;
+					else
+					{
+						for (int index = static_cast<int>(state.outputLines.size()) - 1; index >= 0; --index)
 						{
-							excludeLine = true;
-							break;
+							if (matchesExcludedLine(index))
+							{
+								excludedLineIndex = index;
+								break;
+							}
 						}
 					}
 				}
-				payloadStream << static_cast<quint32>(state.outputLines.size() - (excludeLine ? 1 : 0));
-				bool exclusionWritten = false;
-				for (const WorldRuntime::LineEntry &line : state.outputLines)
-				{
-					if (excludeLine && !exclusionWritten &&
-					    line.lineNumber == state.excludedOutputLineNumber &&
-					    (line.flags & WorldRuntime::LineHidden) != 0)
-					{
-						exclusionWritten = true;
-						continue;
-					}
-					writeLineEntry(payloadStream, line);
-				}
+				payloadStream << static_cast<quint32>(state.outputLines.size() -
+				                                      (excludedLineIndex >= 0 ? 1 : 0));
+				for (int index = 0; index < excludedLineIndex; ++index)
+					writeLineEntry(payloadStream, state.outputLines.at(index));
+				const int firstFollowingLineIndex = qMax(0, excludedLineIndex + 1);
+				for (int index = firstFollowingLineIndex; index < state.outputLines.size(); ++index)
+					writeLineEntry(payloadStream, state.outputLines.at(index));
 			}
 			if (state.hasCommandHistory)
 			{
@@ -468,7 +477,6 @@ namespace QMudWorldSessionState
 		inputStream >> containerFlags;
 		inputStream >> payloadSize;
 		inputStream >> checksum;
-		inputStream >> storedPayload;
 		if (inputStream.status() != QDataStream::Ok)
 		{
 			if (errorMessage)
@@ -481,13 +489,20 @@ namespace QMudWorldSessionState
 				*errorMessage = QStringLiteral("Session-state file has invalid magic.");
 			return false;
 		}
-		if (schemaVersion != kSessionStateSchemaVersion)
+		if (schemaVersion != kLegacySessionStateSchemaVersion && schemaVersion != kSessionStateSchemaVersion)
 		{
 			if (errorMessage)
 			{
 				*errorMessage =
 				    QStringLiteral("Unsupported session-state schema version: %1").arg(schemaVersion);
 			}
+			return false;
+		}
+		inputStream >> storedPayload;
+		if (inputStream.status() != QDataStream::Ok)
+		{
+			if (errorMessage)
+				*errorMessage = QStringLiteral("Failed to read session-state container.");
 			return false;
 		}
 

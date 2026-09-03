@@ -54,6 +54,7 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
 #include <QTextDocument>
+#include <QTimeZone>
 #include <QTimer>
 #include <QToolTip>
 #include <QUrl>
@@ -12459,6 +12460,53 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(view.m_activeTooltipText.contains(QStringLiteral("Line 1, ")));
 			QVERIFY(view.m_activeTooltipText.contains(QStringLiteral("(unknown time)")));
 			QCOMPARE(QToolTip::text(), view.m_activeTooltipText);
+			QToolTip::hideText();
+
+			resetTestState();
+		}
+
+		void lineInformationTooltipDisplaysTimestampInSystemLocalTime()
+		{
+			resetTestState();
+			QToolTip::hideText();
+			setTestWorldAttribute(QStringLiteral("line_information"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("tool_tip_start_time"), QStringLiteral("120000"));
+			setTestWorldAttribute(QStringLiteral("tool_tip_visible_time"), QStringLiteral("5000"));
+
+			constexpr qint64 epochMs   = 1772600767000;
+			const QDateTime  localTime = QDateTime::fromMSecsSinceEpoch(epochMs).toLocalTime();
+			const int        sourceOffsetSeconds =
+			    localTime.offsetFromUtc() == 14 * 60 * 60 ? -12 * 60 * 60 : 14 * 60 * 60;
+			const QDateTime sourceTime = QDateTime::fromMSecsSinceEpoch(
+			    epochMs, QTimeZone::fromSecondsAheadOfUtc(sourceOffsetSeconds));
+			QVERIFY(sourceTime.offsetFromUtc() != localTime.offsetFromUtc());
+
+			WorldRuntime::LineEntry line;
+			line.text       = QStringLiteral("tooltip-timestamp-line");
+			line.flags      = WorldRuntime::LineOutput;
+			line.hardReturn = true;
+			line.time       = sourceTime;
+			line.lineNumber = 1;
+			runtimeForTest()->replaceOutputLines({line});
+
+			WorldView view;
+			view.resize(760, 460);
+			view.show();
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.applyRuntimeSettings();
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			const QPoint point = findLineInformationPoint(
+			    *browser, [&view] { return view.m_pendingTooltipText.contains(QStringLiteral("Line 1, ")); });
+			QVERIFY2(point.x() >= 0 && point.y() >= 0,
+			         "Expected line-information tooltip probe point in rendered output.");
+			const QString expected = localTime.toString(QStringLiteral("dddd, MMMM dd, HH:mm:ss"));
+			const QString source   = sourceTime.toString(QStringLiteral("dddd, MMMM dd, HH:mm:ss"));
+			QVERIFY(expected != source);
+			QVERIFY(view.m_pendingTooltipText.contains(expected));
+			QVERIFY(!view.m_pendingTooltipText.contains(source));
 			QToolTip::hideText();
 
 			resetTestState();

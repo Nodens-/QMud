@@ -74,6 +74,19 @@ class tst_WorldObserverLifecycle final : public QObject
 		Q_OBJECT
 
 	private slots:
+		static void sessionStateSaveSelectionDeduplicatesFilePaths()
+		{
+			const QVector<AppController::SessionStateSaveCandidate> candidates = {
+			    {nullptr, nullptr, QStringLiteral("/state/shared.qws"), QStringLiteral("First"),  1, false},
+			    {nullptr, nullptr, QStringLiteral("/state/shared.qws"), QStringLiteral("Second"), 2, true },
+			    {nullptr, nullptr, QStringLiteral("/state/unique.qws"), QStringLiteral("Third"),  3, false},
+			};
+
+			const QVector<int> selected = AppController::selectSessionStateSaveCandidateIndexes(candidates);
+			QCOMPARE(selected.size(), 2);
+			QVERIFY(candidates.at(selected.at(0)).filePath != candidates.at(selected.at(1)).filePath);
+		}
+
 		static void newObserverPreservesWindowedPresentation()
 		{
 			AppController app;

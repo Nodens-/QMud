@@ -15,7 +15,7 @@
 namespace
 {
 	QString contextLiteral(const QString &value, const bool htmlFixupEnabled,
-	                        const TimeFormatUtils::HtmlFixupFn fixupHtml)
+	                       const TimeFormatUtils::HtmlFixupFn fixupHtml)
 	{
 		if (!htmlFixupEnabled || !fixupHtml)
 			return value;
@@ -23,7 +23,7 @@ namespace
 	}
 
 	QString toQtDateTimeFormat(const QString &format, const TimeFormatUtils::WorldTimeFormatContext &context,
-	                       const bool fixHtml, const TimeFormatUtils::HtmlFixupFn fixupHtml)
+	                           const bool fixHtml, const TimeFormatUtils::HtmlFixupFn fixupHtml)
 	{
 		QString result;
 		result.reserve(format.size() + 16);
@@ -203,5 +203,5 @@ QString TimeFormatUtils::formatWorldTime(const QDateTime &time, const QString &f
                                          HtmlFixupFn fixupHtml)
 {
 	const auto qtFormat = toQtDateTimeFormat(format, context, fixHtml, fixupHtml);
-	return QLocale::system().toString(time, qtFormat);
+	return QLocale::system().toString(time.toLocalTime(), qtFormat);
 }

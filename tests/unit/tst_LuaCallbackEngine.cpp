@@ -53,6 +53,7 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimeZone>
 #include <QUdpSocket>
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
@@ -9289,10 +9290,15 @@ void tst_LuaCallbackEngine::triggerSnapshotPreservesMatchedMetadataAndRecentPres
 	first.text       = QStringLiteral("first");
 	first.lineNumber = 41;
 	WorldRuntime::LineEntry matched;
-	matched.text       = QStringLiteral("matched from buffer");
-	matched.flags      = WorldRuntime::LineNote | WorldRuntime::LineBookmark;
-	matched.hardReturn = false;
-	matched.time       = QDateTime::fromSecsSinceEpoch(1700000000);
+	matched.text                  = QStringLiteral("matched from buffer");
+	matched.flags                 = WorldRuntime::LineNote | WorldRuntime::LineBookmark;
+	matched.hardReturn            = false;
+	constexpr qint64 epochSeconds = 1700000000;
+	const QDateTime  localTime    = QDateTime::fromSecsSinceEpoch(epochSeconds).toLocalTime();
+	const int sourceOffsetSeconds = localTime.offsetFromUtc() == 14 * 60 * 60 ? -12 * 60 * 60 : 14 * 60 * 60;
+	matched.time =
+	    QDateTime::fromSecsSinceEpoch(epochSeconds, QTimeZone::fromSecondsAheadOfUtc(sourceOffsetSeconds));
+	QVERIFY(matched.time.offsetFromUtc() != localTime.offsetFromUtc());
 	matched.lineNumber = 42;
 	matched.ticks      = 1.25;
 	matched.elapsed    = 2.5;
@@ -9338,9 +9344,10 @@ void tst_LuaCallbackEngine::triggerSnapshotPreservesMatchedMetadataAndRecentPres
 	setEngineScript(*engine, QStringLiteral(R"lua(
 trigger_metadata_result = ""
 function trigger_metadata_cb(name, line, wildcards)
-  trigger_metadata_result = string.format("%s|%s|%.0f|%.0f|%.2f|%.2f|%s",
+  local info = GetLineInfo(3, 0)
+  trigger_metadata_result = string.format("%s|%s|%.0f|%.0f|%.2f|%.2f|%s|%s",
     tostring(GetLineInfo(3, 4)), tostring(GetLineInfo(3, 7)), GetLineInfo(3, 9),
-    GetLineInfo(3, 10), GetLineInfo(3, 12), GetLineInfo(3, 13), GetRecentLines(1))
+    GetLineInfo(3, 10), GetLineInfo(3, 12), GetLineInfo(3, 13), info.timestr, GetRecentLines(1))
 end
 function trigger_metadata_status(value)
   return trigger_metadata_result
@@ -9368,7 +9375,10 @@ end
 	request.stringArg                   = QStringLiteral("ignored");
 	request.callbackSnapshotArg         = captureRuntimeCounterDispatchSnapshotForTest(runtime);
 	const LuaBatchDispatchResult result = executor.dispatchBatch(request);
-	QCOMPARE(result.stringResult, QStringLiteral("true|true|1700000000|42|1.25|2.50|newest presentation"));
+	const QString expectedTimeString    = QLocale::system().toString(localTime, QLocale::ShortFormat);
+	QCOMPARE(
+	    result.stringResult,
+	    QStringLiteral("true|true|1700000000|42|1.25|2.50|%1|newest presentation").arg(expectedTimeString));
 }
 
 void tst_LuaCallbackEngine::runtimeTriggerDispatchRepairsStalePresentationIndex()

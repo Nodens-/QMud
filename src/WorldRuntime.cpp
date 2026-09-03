@@ -127,6 +127,15 @@ Q_DECLARE_OPAQUE_POINTER(sqlite3 *)
 
 namespace
 {
+	quint64 nextWorldRuntimeOpenSequence()
+	{
+		static std::atomic<quint64> sequenceCounter{0};
+		quint64                     sequence = sequenceCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (sequence == 0)
+			sequence = sequenceCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+		return sequence;
+	}
+
 	quint64 nextRuleRuntimeId()
 	{
 		static std::atomic<quint64> idCounter{0};
@@ -4446,7 +4455,7 @@ namespace
 	}
 } // namespace
 
-WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
+WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent), m_openSequence(nextWorldRuntimeOpenSequence())
 {
 	m_luaExecutor  = makeLuaExecutor([](QVector<LuaDeferredRuntimeMutationBatch> batches)
 	                                 { QMudLuaDeferredRuntimeMutation::apply(std::move(batches)); });
@@ -4461,7 +4470,7 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent)
 	m_socket         = new WorldSocket(this);
 	m_statusTime     = QDateTime::currentDateTime();
 	m_lastFlushTime  = QDateTime::currentDateTime();
-	m_worldStartTime = QDateTime::currentDateTime();
+	m_worldStartTime = QDateTime::currentDateTimeUtc();
 	m_lineTimer.start();
 	m_nextLineNumber = 1;
 	m_soundBuffers.resize(kMaxSoundBuffers);
@@ -4789,6 +4798,11 @@ WorldRuntime::~WorldRuntime()
 		}
 	}
 	m_udpListeners.clear();
+}
+
+quint64 WorldRuntime::openSequence() const noexcept
+{
+	return m_openSequence;
 }
 
 void WorldRuntime::addScriptTime(qint64 nanos)
@@ -25131,7 +25145,7 @@ void WorldRuntime::addLine(const QString &text, int flags, bool hardReturn, cons
 	entry.flags      = flags;
 	entry.hardReturn = hardReturn;
 	entry.spans.clear();
-	entry.time       = time;
+	entry.time       = time.toUTC();
 	entry.lineNumber = m_nextLineNumber++;
 	if (m_lineTimer.isValid())
 	{
@@ -25140,8 +25154,8 @@ void WorldRuntime::addLine(const QString &text, int flags, bool hardReturn, cons
 	}
 	else
 	{
-		const double fallback = (m_worldStartTime.isValid() && time.isValid())
-		                            ? static_cast<double>(m_worldStartTime.msecsTo(time)) / 1000.0
+		const double fallback = (m_worldStartTime.isValid() && entry.time.isValid())
+		                            ? static_cast<double>(m_worldStartTime.msecsTo(entry.time)) / 1000.0
 		                            : 0.0;
 		entry.ticks           = fallback;
 		entry.elapsed         = fallback;
@@ -25164,7 +25178,7 @@ void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSp
 	entry.flags      = flags;
 	entry.hardReturn = hardReturn;
 	entry.spans      = spans;
-	entry.time       = time;
+	entry.time       = time.toUTC();
 	entry.lineNumber = m_nextLineNumber++;
 	if (m_lineTimer.isValid())
 	{
@@ -25173,8 +25187,8 @@ void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSp
 	}
 	else
 	{
-		const double fallback = (m_worldStartTime.isValid() && time.isValid())
-		                            ? static_cast<double>(m_worldStartTime.msecsTo(time)) / 1000.0
+		const double fallback = (m_worldStartTime.isValid() && entry.time.isValid())
+		                            ? static_cast<double>(m_worldStartTime.msecsTo(entry.time)) / 1000.0
 		                            : 0.0;
 		entry.ticks           = fallback;
 		entry.elapsed         = fallback;
@@ -25270,11 +25284,12 @@ WorldRuntime::SessionStateOutputSnapshot WorldRuntime::sessionStateOutputSnapsho
 	if (excludedLineNumber <= 0)
 		return snapshot;
 
+	snapshot.excludedLineNumber = excludedLineNumber;
 	if (hiddenIndex >= 0 && hiddenIndex < snapshot.lines.size() &&
 	    snapshot.lines.at(hiddenIndex).lineNumber == excludedLineNumber &&
 	    (snapshot.lines.at(hiddenIndex).flags & LineHidden) != 0)
 	{
-		snapshot.excludedLineNumber = excludedLineNumber;
+		snapshot.excludedLineIndex = hiddenIndex;
 	}
 	return snapshot;
 }
@@ -25387,7 +25402,7 @@ void WorldRuntime::beginIncomingLineLuaContext(const QString &text, int flags,
 	m_luaPendingContextLineEntry.flags      = flags;
 	m_luaPendingContextLineEntry.hardReturn = hardReturn;
 	m_luaPendingContextLineEntry.spans      = spans;
-	m_luaPendingContextLineEntry.time       = QDateTime::currentDateTime();
+	m_luaPendingContextLineEntry.time       = QDateTime::currentDateTimeUtc();
 	m_luaPendingContextLineEntry.lineNumber = m_nextLineNumber;
 	m_luaContextLineNumber                  = m_nextLineNumber;
 	if (m_lineTimer.isValid())
@@ -26190,7 +26205,7 @@ bool WorldRuntime::writeLuaCallbackOutputSegmentsAtLineAnchor(
 		entry.flags      = flags & ~LineHidden;
 		entry.spans      = segment.spans;
 		entry.hardReturn = segment.hardReturn;
-		entry.time       = QDateTime::currentDateTime();
+		entry.time       = QDateTime::currentDateTimeUtc();
 		entry.lineNumber = m_nextLineNumber++;
 		if (m_lineTimer.isValid())
 		{
@@ -26378,7 +26393,7 @@ void WorldRuntime::removeDeferredHiddenIncomingLine()
 	int hiddenIndex = deferredHiddenIncomingLineIndex();
 	if (hiddenIndex < 0)
 	{
-		for (int index = 0; index < m_lines.size(); ++index)
+		for (int index = safeQSizeToInt(m_lines.size()) - 1; index >= 0; --index)
 		{
 			if (m_lines.at(index).lineNumber == m_deferredHiddenLuaContextLineNumber)
 			{
