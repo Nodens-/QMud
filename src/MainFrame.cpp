@@ -1787,7 +1787,7 @@ void MainWindow::onToggleInfoBar(const bool checked)
 
 void MainWindow::showStatusMessage(const QString &message, const int timeoutMs)
 {
-	if (m_hyperlinkStatusLocked)
+	if (m_statusMessageOverrideToken != 0 || m_hyperlinkStatusLocked)
 		return;
 	if (m_statusMessage)
 		m_statusMessage->setText(message);
@@ -1801,8 +1801,40 @@ void MainWindow::showStatusMessage(const QString &message, const int timeoutMs)
 	}
 }
 
+quint64 MainWindow::acquireStatusMessageOverride(const QString &message)
+{
+	++m_nextStatusMessageOverrideToken;
+	if (m_nextStatusMessageOverrideToken == 0)
+		++m_nextStatusMessageOverrideToken;
+	m_statusMessageOverrideToken = m_nextStatusMessageOverrideToken;
+	m_hyperlinkStatusLocked      = false;
+	m_statusTipOwnsMessage       = false;
+	if (m_statusMessageTimer)
+		m_statusMessageTimer->stop();
+	if (m_statusMessage)
+		m_statusMessage->setText(message);
+	return m_statusMessageOverrideToken;
+}
+
+void MainWindow::updateStatusMessageOverride(const quint64 token, const QString &message) const
+{
+	if (token == 0 || token != m_statusMessageOverrideToken)
+		return;
+	if (m_statusMessage && m_statusMessage->text() != message)
+		m_statusMessage->setText(message);
+}
+
+void MainWindow::releaseStatusMessageOverride(const quint64 token)
+{
+	if (token == 0 || token != m_statusMessageOverrideToken)
+		return;
+	m_statusMessageOverrideToken = 0;
+}
+
 void MainWindow::setHyperlinkStatusLock(const QString &href)
 {
+	if (m_statusMessageOverrideToken != 0)
+		return;
 	const QString trimmed = href.trimmed();
 	if (trimmed.isEmpty())
 		return;
@@ -2234,11 +2266,14 @@ void MainWindow::setStatusMessage(const QString &msg) const
 {
 	if (m_hyperlinkStatusLocked)
 		return;
-	if (m_statusMessage && m_statusMessage->text() != msg)
-		m_statusMessage->setText(msg);
-	m_statusTipOwnsMessage = false;
-	if (m_statusMessageTimer)
-		m_statusMessageTimer->stop();
+	if (m_statusMessageOverrideToken == 0)
+	{
+		if (m_statusMessage && m_statusMessage->text() != msg)
+			m_statusMessage->setText(msg);
+		m_statusTipOwnsMessage = false;
+		if (m_statusMessageTimer)
+			m_statusMessageTimer->stop();
+	}
 	if (const auto *world = activeWorldChildWindow())
 		if (WorldRuntime *runtime = world->runtime())
 			runtime->setStatusMessage(msg);
@@ -2289,16 +2324,7 @@ void MainWindow::updateEditActions()
 
 void MainWindow::setStatusMessageNow(const QString &msg)
 {
-	if (m_hyperlinkStatusLocked)
-		return;
-	if (m_statusMessage && m_statusMessage->text() != msg)
-		m_statusMessage->setText(msg);
-	m_statusTipOwnsMessage = false;
-	if (m_statusMessageTimer)
-		m_statusMessageTimer->stop();
-	if (const auto *world = activeWorldChildWindow())
-		if (WorldRuntime *runtime = world->runtime())
-			runtime->setStatusMessage(msg);
+	setStatusMessage(msg);
 }
 
 void MainWindow::setShowDebugStatus(const bool enabled)
@@ -3434,7 +3460,7 @@ bool MainWindow::event(QEvent *event)
 {
 	if (event && event->type() == QEvent::StatusTip)
 	{
-		if (m_hyperlinkStatusLocked)
+		if (m_statusMessageOverrideToken != 0 || m_hyperlinkStatusLocked)
 			return true;
 
 		const auto   *statusEvent = dynamic_cast<QStatusTipEvent *>(event);

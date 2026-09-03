@@ -1038,6 +1038,10 @@ class AppController : public QObject
 		 * @param runtime Runtime to auto-connect.
 		 */
 		void               maybeAutoConnectWorld(WorldRuntime *runtime) const;
+		/**
+		 * @brief Displays the current tracked scrollback-restore count.
+		 */
+		void               showRestoreScrollbackStatus() const;
 		void               beginRestoreScrollbackStatus() const;
 		void               preseedRestoreScrollbackStatus(int count) const;
 		void               endRestoreScrollbackStatus() const;
@@ -1117,6 +1121,7 @@ class AppController : public QObject
 		mutable int                      m_restoreScrollbackPreseedBudget{0};
 		mutable QPointer<WorldRuntime>   m_restoreScrollbackStatusRuntime;
 		mutable QString                  m_restoreScrollbackStatusPrevious;
+		quint64                          m_reloadRecoveryStatusOverrideToken{0};
 		mutable bool                     m_hasFontMetricApplySignature{false};
 		mutable FontMetricApplySignature m_lastFontMetricApplySignature;
 		bool                             m_batchOpeningWorldList{false};

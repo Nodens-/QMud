@@ -166,9 +166,26 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		void                            showStatusMessage(const QString &message, int timeoutMs) override;
 		/**
+		 * @brief Acquires exclusive ownership of the displayed status message.
+		 * @param message Status text to display while the override is active.
+		 * @return Token required to update or release the override.
+		 */
+		[[nodiscard]] quint64           acquireStatusMessageOverride(const QString &message);
+		/**
+		 * @brief Updates an active status-message override.
+		 * @param token Token returned by acquireStatusMessageOverride().
+		 * @param message Replacement status text.
+		 */
+		void updateStatusMessageOverride(quint64 token, const QString &message) const;
+		/**
+		 * @brief Releases an active status-message override.
+		 * @param token Token returned by acquireStatusMessageOverride().
+		 */
+		void releaseStatusMessageOverride(quint64 token);
+		/**
 		 * @brief Shows status message with no timeout.
 		 */
-		void                            showStatusMessage(const QString &message)
+		void showStatusMessage(const QString &message)
 		{
 			showStatusMessage(message, 0);
 		}
@@ -649,6 +666,8 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		QTimer                             *m_statusMessageTimer{nullptr};
 		mutable bool                        m_statusTipOwnsMessage{false};
 		bool                                m_hyperlinkStatusLocked{false};
+		quint64                             m_statusMessageOverrideToken{0};
+		quint64                             m_nextStatusMessageOverrideToken{0};
 		QTimer                             *m_activityTimer{nullptr};
 		QTimer                             *m_tickTimer{nullptr};
 		QElapsedTimer                       m_timerFallbackClock;

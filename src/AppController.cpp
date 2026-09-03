@@ -2887,6 +2887,18 @@ void AppController::saveWorldSessionStateAsync(WorldRuntime *runtime, const Worl
 	    });
 }
 
+void AppController::showRestoreScrollbackStatus() const
+{
+	if (!m_mainWindow)
+		return;
+	const QString message =
+	    QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(m_restoreScrollbackInFlight);
+	if (m_reloadRecoveryStatusOverrideToken != 0)
+		m_mainWindow->updateStatusMessageOverride(m_reloadRecoveryStatusOverrideToken, message);
+	else
+		m_mainWindow->setStatusMessageNow(message);
+}
+
 void AppController::beginRestoreScrollbackStatus() const
 {
 	if (!m_mainWindow)
@@ -2901,8 +2913,7 @@ void AppController::beginRestoreScrollbackStatus() const
 		    m_restoreScrollbackStatusRuntime ? m_restoreScrollbackStatusRuntime->statusMessage() : QString{};
 	}
 	++m_restoreScrollbackInFlight;
-	m_mainWindow->setStatusMessageNow(
-	    QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(m_restoreScrollbackInFlight));
+	showRestoreScrollbackStatus();
 }
 
 void AppController::preseedRestoreScrollbackStatus(const int count) const
@@ -2922,8 +2933,7 @@ void AppController::preseedRestoreScrollbackStatus(const int count) const
 
 	m_restoreScrollbackInFlight += count;
 	m_restoreScrollbackPreseedBudget += count;
-	m_mainWindow->setStatusMessageNow(
-	    QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(m_restoreScrollbackInFlight));
+	showRestoreScrollbackStatus();
 }
 
 void AppController::endRestoreScrollbackStatus() const
@@ -2935,18 +2945,23 @@ void AppController::endRestoreScrollbackStatus() const
 		return;
 	if (m_restoreScrollbackInFlight > 0)
 	{
-		m_mainWindow->setStatusMessageNow(
-		    QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(m_restoreScrollbackInFlight));
+		showRestoreScrollbackStatus();
 		return;
 	}
 
-	WorldRuntime *activeRuntime = nullptr;
-	if (const WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
-		activeRuntime = world->runtime();
-	if (activeRuntime == m_restoreScrollbackStatusRuntime && !m_restoreScrollbackStatusPrevious.isEmpty())
-		m_mainWindow->setStatusMessageNow(m_restoreScrollbackStatusPrevious);
+	if (m_reloadRecoveryStatusOverrideToken != 0)
+		m_mainWindow->updateStatusMessageOverride(m_reloadRecoveryStatusOverrideToken,
+		                                          QStringLiteral("Reload recovery: finalizing worlds..."));
 	else
-		m_mainWindow->setStatusNormal();
+	{
+		WorldRuntime *activeRuntime = nullptr;
+		if (const WorldChildWindow *world = m_mainWindow->activeWorldChildWindow())
+			activeRuntime = world->runtime();
+		if (activeRuntime == m_restoreScrollbackStatusRuntime && !m_restoreScrollbackStatusPrevious.isEmpty())
+			m_mainWindow->setStatusMessageNow(m_restoreScrollbackStatusPrevious);
+		else
+			m_mainWindow->setStatusNormal();
+	}
 
 	m_restoreScrollbackStatusRuntime = nullptr;
 	m_restoreScrollbackStatusPrevious.clear();
@@ -4272,6 +4287,11 @@ bool AppController::recoverReloadStartupState()
 		qWarning() << kReloadLogTag
 		           << "Unable to consume reload state file before recovery:" << cleanupWarning;
 	}
+	if (m_mainWindow)
+	{
+		m_reloadRecoveryStatusOverrideToken =
+		    m_mainWindow->acquireStatusMessageOverride(QStringLiteral("Reload recovery: opening worlds..."));
+	}
 
 	QList<ReloadWorldState> worlds = snapshot.worlds;
 	std::ranges::sort(worlds,
@@ -4384,6 +4404,8 @@ bool AppController::recoverReloadStartupState()
 		        << "reconnect_queued_total=" << m_reloadRecoveryReconnectQueued;
 		if (m_mainWindow)
 		{
+			m_mainWindow->releaseStatusMessageOverride(m_reloadRecoveryStatusOverrideToken);
+			m_reloadRecoveryStatusOverrideToken = 0;
 			m_mainWindow->showStatusMessage(
 			    QStringLiteral("Reload recovery: %1 reattached, %2 reconnect queued.")
 			        .arg(asyncContext->reattachedCount)
