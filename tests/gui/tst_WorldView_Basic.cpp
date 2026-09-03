@@ -11255,6 +11255,46 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void outputFindPreservesLeadingAndTrailingWhitespace()
+		{
+			resetTestState();
+
+			WorldView view;
+			setTestRuntimeObserver(view, runtimeForTest());
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("backstreet street and pottery pot "),
+			                                            true);
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(QStringLiteral(" street"));
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			QVERIFY(view.doOutputFind(false));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral(" street"));
+
+			scheduleDialogInteraction(
+			    [](const QDialog *dialog)
+			    { return dialog->windowTitle() == QStringLiteral("Find in output buffer..."); },
+			    [](const QDialog *dialog)
+			    {
+				    if (auto *combo = dialog->findChild<QComboBox *>())
+					    combo->setCurrentText(QStringLiteral("pot "));
+				    if (QPushButton *findButton = findButtonByText(*dialog, QStringLiteral("Find")))
+					    QMetaObject::invokeMethod(findButton, "click", Qt::QueuedConnection);
+			    });
+
+			QVERIFY(view.doOutputFind(false));
+			QCOMPARE(view.outputSelectionText(), QStringLiteral("pot "));
+
+			resetTestState();
+		}
+
 		void outputFindSelectsExistingTextWhenDialogOpens()
 		{
 			resetTestState();
