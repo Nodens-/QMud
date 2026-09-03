@@ -1,0 +1,198 @@
+/*
+ * QMud Project
+ * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
+ *
+ * File: Development.txt
+ * Role: Development design contract invariants for QMud's Lua engine, snapshots, paths, and colors.
+ */
+
+QMud Development Design Contract Invariants
+===========================
+
+These are architectural rules, not descriptions of incidental implementation details. New code must preserve them
+and potential contributors need to fully understand them.
+
+
+1. Lua engine
+-------------
+
+- A LuaCallbackEngine owns one Lua state. The world script and each Lua plugin use their own engine/state. Lua states
+  are never shared between engines.
+- A Lua state is used only on its bound execution thread. The first state operation binds the engine's affinity and
+  every later operation must agree with it. Never access lua_State directly from the runtime or GUI thread merely
+  because the pointer is available.
+- One engine must never execute concurrently on multiple lanes or threads. Dispatch through the Lua executor so VM
+  access remains serialized and ordered. This is important to avoid out of order bugs. There are some public Lua APIs
+  that could be done out of order but that is an extension for a later time.
+- WorldRuntime state belongs to the runtime's QObject thread. GUI state belongs to the GUI thread. A Lua callback must
+  not read or mutate either directly from a worker thread.
+- The callback lane preserves callback order. Do not bypass it with timers, polling, detached work, or an independent
+  callback queue.
+- Input-critical callbacks may require a completion result. Non-critical callbacks should remain asynchronous where
+  their API contract permits it. Do not turn all callback dispatch into a blanket completion barrier.
+- An active callback must not introduce a synchronous cross-thread callback-worker-to-runtime or worker-to-GUI bridge.
+  That creates the runtime-waits-for-worker/worker-waits-for-runtime deadlock cycle. Reads use the dispatch snapshot
+  and/or callback-local caches. Writes use the deferred mutation journal. Modal GUI operations yield and resume.
+- A same-thread direct execution path and the threaded executor path must have identical observable Lua behavior. The
+  direct path is an execution optimization, not a separate semantic model.
+- Runtime mutations produced by a callback are recorded in call order and applied on the owning runtime thread. They
+  are applied in batches so snapshot, miniwindow, and output-presentation updates coalesce without changing ordering.
+- A Lua mutation normally updates two things: the ordered runtime mutation journal and the callback-local overlay.
+  The overlay provides immediate read-your-writes behavior while the runtime still contains the pre-callback value.
+- A mutation journal is delivered exactly once. Normal completion and shutdown recovery compete for the same delivery
+  ownership so an asynchronous completion cannot lose mutations or apply them twice.
+- A nested CallPlugin() or broadcast adopts the caller's callback-local view and mutation journals. It must not rebind
+  the Lua engine to another WorldRuntime or read stale state from the outer callback's entry snapshot.
+- The runtime permanently associated with callback dispatch remains stable. Cross-world operations use a scoped
+  runtime override and a snapshot for the target runtime. They do not permanently rebind the engine.
+- When one recipient mutates state and later recipients remain, the mutation boundary is published, committed on the
+  runtime thread, and the request snapshot is recaptured before the next recipient. Non-mutating recipients stay on
+  the worker lane without needless recapture.
+- Modal APIs suspend the Lua coroutine, retain the original dispatch position and accumulated result, run the GUI
+  operation on the GUI thread, then resume the same callback. Never emulate this with a nested event loop or timer.
+- Callback result aggregation, stop conditions, continuation behavior, fallbacks, and function-name requirements are
+  defined by the single Lua batch-dispatch registry. Do not reproduce that policy in API-specific switches or tests.
+- Plugin IDs are canonicalized to lower case only while validating XML or decoding a plugin-facing API argument. Once
+  accepted, internal metadata, snapshots, journals, overlays, and cache keys copy the canonical ID unchanged.
+- MUSHclient-compatible Lua APIs retain their established argument order, return types, status codes, callback order,
+  and read-your-writes behavior. Internal Qt implementation details must not leak into the Lua contract.
+- APIs that change presentation state report the appropriate refresh flags with their callback result. Presentation is
+  refreshed by the owning runtime/GUI path after mutations are committed, not directly from the worker.
+- Engine teardown cancels suspended callbacks, closes the Lua state on the correct execution lane, recovers undelivered
+  mutation journals, and detaches potential observer windows. Teardown must not leave queued work holding a raw engine
+  or runtime pointer.
+
+
+2. Snapshot model
+-----------------
+
+- WorldRuntime is the authority for committed world state. A snapshot is a coherent read view for Lua dispatch.
+- The runtime-owned stable snapshot base is mutable. It is built once when cold, then patched when authoritative state
+  changes. Do not rebuild it indiscriminately after every mutation as it is expensive.
+- A snapshot already issued to a dispatch is immutable. Dispatch capture makes a top-level copy of the stable base.
+  Qt's implicitly shared containers detach when the runtime later patches its own base, leaving the issued view intact.
+- Snapshot-visible state has exactly three classifications:
+  1. Stable state is owned by WorldRuntime and mutation-patched in the cached base.
+  2. Dispatch-local or asynchronously sampled state is cleared from the cached base and populated after each clone.
+  3. Callback-local state is represented by the callback execution context and read-your-writes overlays.
+- Every stable field belongs to LuaCallbackStableSnapshotDomain. The domain registry is the single authority for the
+  complete domain set and for whether plugin topology changes expand into that domain.
+- Cold construction and targeted patching both call populateLuaCallbackStableSnapshotDomains(). A stable field must
+  never have one conversion path for initial construction and another for updates.
+- Every authoritative mutation source must patch its affected domain. Use the typed plugin/item scope for one plugin or
+  one rule when available. Do not create parallel enums, composite string keys, pending lists, or propagation tables.
+- Mutation batches coalesce domain masks and typed scopes. A full-domain patch supersedes narrower pending patches for
+  that scope. Closing the outermost batch applies the accumulated patches once.
+- Plugin topology changes mechanically expand the Plugins domain to all registry entries marked plugin-indexed. Do not
+  maintain a second handwritten list of plugin-dependent snapshot fields.
+- Dispatch-local fields include such things as callback/output anchors, requested line-buffer depth, active action
+  source, UI presentation, current runtime counters, chat/UDP/sound samples, and render/parser state. They are cleared
+  before each clone is populated so values cannot leak between callbacks.
+- Line-buffer data follows the requested LuaCallbackLineSnapshotPolicy. Reuse generation-keyed immutable line snapshots
+  and bounded pages. Do not copy the entire output buffer for APIs that need only a count, last line, or recent lines.
+- The callback execution context owns the active callback snapshot base. Local overlays are applied on top of that base
+  for queries and for snapshots passed into nested callbacks.
+- Read-your-writes is required for practically every Lua-visible mutation. If a new mutable field is exposed to Lua,
+  add both its deferred runtime mutation and its callback-local overlay unless the API contract explicitly says otherwise.
+- Flushing or publishing a mutation boundary may replace the callback context's owned base with a newly captured,
+  committed view. It must not mutate the dispatch-stack snapshot that was originally issued.
+- A later recipient or nested callback must see all mutations that precede it in callback order. It must not see later
+  runtime mutations that occurred after its own immutable snapshot was issued.
+- GetLoadedValue uses the same current world-option snapshot and callback-local updates as the other option readers.
+  There is no secondary immutable "loaded values" snapshot. Changes that establish the new persistent world value must
+  be visible without restarting the client.
+- Cache invalidation is a last resort for a genuinely invalid whole base. Ordinary mutations patch only their domain.
+  Blanket rebuilding or applying every setting risks drift, extra heavy overhead, and unrelated behavior changes.
+- Snapshot fallback reads must obey the no-synchronous-bridge rule. If data is required during a worker callback, it
+  must be captured, cached, overlaid, yielded for, or returned using the API's defined fallback.
+- Adding a callback-visible field is incomplete until tests cover cold construction, cache-hit visibility, immutability
+  of an issued snapshot, callback-local read-your-writes, and later-recipient or nested-callback visibility as applicable.
+
+
+3. Paths model
+--------------
+
+- The root for a world's file operations is that world's captured startupDirectory: the resolved QMud home directory.
+  Do not derive it from the process current directory during use and do not silently fall back to the current QMUD_HOME
+  environment value from a Lua worker.
+- Portable stored and Lua-visible paths use forward slashes on every platform. Backslashes are accepted at compatibility
+  boundaries and normalized immediately.
+- Persisted paths are portable and QMud-home-relative. They must not embed the developer's installation directory or a
+  machine-specific installation path.
+- The recognized portable roots are worlds, lua, logs, plugins, sounds, state, backup, and docs. Legacy drive-letter,
+  UNC, mixed-separator, and MUSHclient absolute paths are mapped to the corresponding path beneath the current QMud home.
+- Parent traversal is rejected. An existing target is canonicalized and checked for containment. A new target's nearest
+  existing parent is canonicalized and checked. Symlinks must not escape the QMud home.
+- Resolve a portable path to an absolute native filesystem path only at the I/O boundary. Store or expose the portable
+  form again after the operation. Do not let resolved absolute paths migrate into world/plugin metadata.
+- QMudPluginPathUtils is the authority for separator normalization, legacy-path mapping, home containment, and
+  home-relative conversion. Do not add API-specific drive stripping or ad-hoc prefix matching.
+- Dedicated runtime metadata such as world file, plugin directory, state directory, browse directory, translator, and
+  preferences database paths is stored without an absolute home prefix. Directory values retain a trailing slash.
+- Canonicalizable world attributes are converted to dot-relative portable paths on load and in the immutable save
+  snapshot (for example, ./worlds/foo/script.lua). Runtime setters normalize separators immediately. Generic
+  Lua-visible metadata removes the redundant dot prefix and normally returns worlds/foo/script.lua. The QMud home
+  directory itself is represented as "./".
+- GetInfo(56) is the deliberate exception to relative Lua-visible paths: it returns the absolute resolved QMud home with
+  a trailing slash. Other path-valued GetInfo and utils.info results follow their compatibility-specific relative form.
+- Plugin source and directory metadata is portable and home-relative. GetPluginInfo(..., 20) returns the directory with
+  a trailing slash. Plugin identity is not a path and must never be normalized by path helpers.
+- Lua io.open, io.lines, io.input, io.output, os.remove, os.rename, loadfile, dofile, and sqlite3.open are wrapped through
+  the same resolver. MUSHclient-style file APIs, miniwindow image APIs, utilities, logging, fonts, chat transfers, and
+  database paths must follow the same root and containment rules.
+- The sqlite :memory: name is not a filesystem path and passes through unchanged. Likewise, URL-valued world attributes
+  remain URLs and are not converted into local relative paths.
+- APIs returning a selected or created path convert it back to the portable form before exposing or storing it. A GUI
+  file dialog is not permission to retain an external absolute path.
+- Includes and plugin files are resolved relative to their defined world/plugin search context, but the final disk path
+  must still be inside the same QMud home.
+- Do not change the process working directory to make legacy relative paths work. Correctness must not depend on which
+  world opened first, which thread performs the call, or the application's launch directory. Only QMud home.
+- Path tests must include POSIX and Windows separators, legacy absolute inputs, native absolute paths inside QMud home,
+  traversal and symlink escapes, missing targets, trailing-directory separators, and Lua execution across thread affinity.
+- Native plugin compatibility shims are the explicit exception to home-relative filesystem plugin paths. Their source
+  is the virtual token qmud:native/<CanonicalName> and their directory is "qmud:native/". QMudNativePluginRegistry alone
+  canonicalizes and supplies these values. Save/load, snapshots, and GetPluginInfo preserve them as virtual metadata.
+  Never resolve them against QMud home, check them for filesystem existence, rewrite them as "./" paths, or pass them
+  through QMudPluginPathUtils. Legacy XML/DLL content with a protected shim ID is shadowed and never executed.
+
+4. Colours model
+----------------
+
+- "COLORREF" and "RGB" are not interchangeable packed integers:
+  - MUSHclient/Windows MFC COLORREF is 0x00BBGGRR: red is the low byte, then green, then blue.
+  - RGB is #RRGGBB.
+  - Qt QRgb/QColor::rgb() is Qt's 0xAARRGGBB representation and must never be passed as COLORREF.
+- QMudColorRef, qmudRgb(), qmudRed(), qmudGreen(), and qmudBlue() define the COLORREF encoding. Use these helpers
+  rather than reproducing channel shifts. An unavoidable compatibility wrapper must delegate to the same representation.
+- COLORREF is used at MUSHclient compatibility boundaries where callers or persisted legacy values expect a numeric
+  color: Lua color APIs, Lua miniwindow drawing APIs, public numeric color options, legacy imported numeric values,
+  and compatibility DTO/snapshot fields consumed by those APIs.
+- Global/default preferences whose established storage schema is a legacy numeric color also use COLORREF. Convert to
+  or from QColor at the settings/UI boundary. Do not make the internal widget or rendering path use the packed value.
+- A boundary is semantic, not determined by the source file. A WorldRuntime method implementing a MUSHclient API may
+  accept or return COLORREF even though the method lives inside the runtime implementation.
+- Convert COLORREF at the boundary into QColor or explicit red/green/blue channels. Internal color state is RGB:
+  rendering, ANSI/MXP style processing, color tables, widgets, QPalette, QPainter, and miniwindow backing images use
+  QColor/Qt RGB(A), not an unlabelled COLORREF long.
+- Internal line-style snapshots retain Qt RGBA values plus explicit validity flags because they reproduce QColor state.
+  Lua-facing color snapshots retain COLORREF values because their consumers implement the legacy numeric API.
+- RGB-valued world options accept the public COLORREF number or a color name/#RRGGBB string. Runtime/persisted option
+  text is canonical #RRGGBB. GetOption converts it back to the public COLORREF number through the option metadata.
+- World color XML is written as a name when an exact known name exists, otherwise as #RRGGBB. XML parsing produces an
+  internal QColor/RGB value; it must not preserve an accidental byte-swapped integer.
+- Color names are parsed as RGB and converted explicitly when a MUSHclient numeric result is required. Functions whose
+  legacy names contain "RGB" return COLORREF because that is the established MUSHclient API contract.
+- Miniwindow numeric color parameters and pixel results are COLORREF. Convert them once when entering QPainter/QImage
+  code and once when returning a pixel. Never apply a blanket red/blue swap to an already-internal QColor or QRgb.
+- COLORREF has no alpha channel. Preserve alpha separately in QColor/QImage and explicit snapshot metadata. The value
+  -1 is a transparent/no-color sentinel only for APIs that define it. It is not a general COLORREF alpha encoding.
+- Note colors have legacy special cases: public custom-color indexes, the same-color sentinel, and historical literal
+  COLORREF values. Resolve those through NoteColourUtils and the active custom-color table rather than guessing from
+  integer size in unrelated code.
+- ANSI, xterm, custom, note, mapper, system, and miniwindow colors must all cross the same explicit conversion boundary
+  before reaching a legacy numeric Lua result. Do not let one table use Qt packed RGB while another uses COLORREF.
+- Prefer QColor in new internal structures. If a packed field is unavoidable, its type/name/documentation must state
+  whether it is QMudColorRef, QRgb/RGBA, or canonical RGB text. A plain integer named only color is not sufficient.
+- Color tests must use asymmetric channel values (for example red != blue) and verify both conversion directions.
+  Black, white, and grays cannot detect a COLORREF/QRgb byte-order error.
