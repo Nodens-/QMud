@@ -254,11 +254,21 @@ class WorldRuntime : public QObject
 				int                    matched{0};
 				int                    invocationCount{0};
 				int                    matchAttempts{0};
+				qint64                 executionTimeNs{0};
 				QString                lastMatchTarget;
 				QDateTime              lastMatched;
 				quint64                runtimeId{0};
 				int                    executingScriptDepth{0};
 				bool                   executingScript{false};
+
+				/**
+				 * @brief Returns cumulative regular-expression execution time in seconds.
+				 * @return Accumulated match execution time.
+				 */
+				[[nodiscard]] double   executionTimeSeconds() const noexcept
+				{
+					return static_cast<double>(executionTimeNs) / 1'000'000'000.0;
+				}
 		};
 		/**
 		 * @brief Live alias state including runtime counters and last-match metadata.
@@ -678,6 +688,16 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] const QList<Trigger>  &triggers() const;
 		/**
+		 * @brief Ensures one trigger has a unique runtime identity.
+		 * @param trigger Trigger owned by this runtime.
+		 * @return Stable nonzero runtime identity.
+		 */
+		quint64                              ensureRuleRuntimeId(Trigger &trigger);
+		/**
+		 * @brief Ensures every world trigger has a unique runtime identity.
+		 */
+		void                                 ensureWorldTriggerRuntimeIds();
+		/**
 		 * @brief Returns current trigger rule generation for processor caches.
 		 * @return Monotonic generation incremented when trigger definitions change.
 		 */
@@ -711,6 +731,16 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] const QList<Alias>    &aliases() const;
 		/**
+		 * @brief Ensures one alias has a unique runtime identity.
+		 * @param alias Alias owned by this runtime.
+		 * @return Stable nonzero runtime identity.
+		 */
+		quint64                              ensureRuleRuntimeId(Alias &alias);
+		/**
+		 * @brief Ensures every world alias has a unique runtime identity.
+		 */
+		void                                 ensureWorldAliasRuntimeIds();
+		/**
 		 * @brief Replaces alias list.
 		 * @param aliases New alias list.
 		 */
@@ -734,6 +764,16 @@ class WorldRuntime : public QObject
 		 * @return Immutable timer list.
 		 */
 		[[nodiscard]] const QList<Timer>    &timers() const;
+		/**
+		 * @brief Ensures one timer has a unique runtime identity.
+		 * @param timer Timer owned by this runtime.
+		 * @return Stable nonzero runtime identity.
+		 */
+		quint64                              ensureRuleRuntimeId(Timer &timer);
+		/**
+		 * @brief Ensures every world timer has a unique runtime identity.
+		 */
+		void                                 ensureWorldTimerRuntimeIds();
 		/**
 		 * @brief Replaces timer list.
 		 * @param timers New timer list.

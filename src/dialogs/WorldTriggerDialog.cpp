@@ -82,13 +82,11 @@ namespace
 	constexpr int kMaxRecentLines = 200;
 } // namespace
 
-WorldTriggerDialog::WorldTriggerDialog(WorldRuntime *runtime, WorldRuntime::Trigger trigger,
-                                       QList<WorldRuntime::Trigger> triggers, const int currentIndex,
+WorldTriggerDialog::WorldTriggerDialog(WorldRuntime *runtime, WorldRuntime::Trigger trigger, const bool isNew,
                                        QWidget *parent)
-    : QDialog(parent), m_runtime(runtime), m_trigger(std::move(trigger)), m_existing(std::move(triggers)),
-      m_currentIndex(currentIndex)
+    : QDialog(parent), m_runtime(runtime), m_trigger(std::move(trigger))
 {
-	setWindowTitle(currentIndex < 0 ? QStringLiteral("Add trigger") : QStringLiteral("Edit trigger"));
+	setWindowTitle(isNew ? QStringLiteral("Add trigger") : QStringLiteral("Edit trigger"));
 	resize(520, 360);
 	setMinimumSize(920, 690);
 	buildUi();
@@ -632,19 +630,13 @@ void WorldTriggerDialog::loadTrigger() const
 	if (!otherBack.isEmpty())
 		m_otherBackColour->setProperty("colourValue", otherBack);
 
-	const QString matches   = attrs.value(QStringLiteral("times_matched"));
-	const QString calls     = attrs.value(QStringLiteral("invocation_count"));
-	const QString timeTaken = attrs.value(QStringLiteral("execution_time"));
-	if (!matches.isEmpty())
-		m_matchesLabel->setText(QStringLiteral("%1 match%2.")
-		                            .arg(matches)
-		                            .arg(matches == QStringLiteral("1") ? QString() : QStringLiteral("es")));
-	if (!calls.isEmpty())
-		m_callsLabel->setText(QStringLiteral("%1 call%2.")
-		                          .arg(calls)
-		                          .arg(calls == QStringLiteral("1") ? QString() : QStringLiteral("s")));
-	if (!timeTaken.isEmpty())
-		m_timeTakenLabel->setText(QStringLiteral("%1 sec.").arg(timeTaken));
+	const int matches = m_trigger.matched;
+	const int calls   = m_trigger.invocationCount;
+	m_matchesLabel->setText(
+	    QStringLiteral("%1 match%2.").arg(matches).arg(matches == 1 ? QString() : QStringLiteral("es")));
+	m_callsLabel->setText(
+	    QStringLiteral("%1 call%2.").arg(calls).arg(calls == 1 ? QString() : QStringLiteral("s")));
+	m_timeTakenLabel->setText(QStringLiteral("%1 sec.").arg(m_trigger.executionTimeSeconds(), 0, 'f', 6));
 
 	m_includedLabel->setVisible(isIncluded());
 	onSendToChanged(m_sendTo->currentIndex());
@@ -728,11 +720,12 @@ bool WorldTriggerDialog::validateTrigger()
 
 	if (!label.isEmpty())
 	{
-		for (int i = 0; i < m_existing.size(); ++i)
+		const QList<WorldRuntime::Trigger> &triggers = m_runtime->triggers();
+		for (const WorldRuntime::Trigger &trigger : triggers)
 		{
-			if (i == m_currentIndex)
+			if (m_trigger.runtimeId != 0 && trigger.runtimeId == m_trigger.runtimeId)
 				continue;
-			if (const QString other = m_existing.at(i).attributes.value(QStringLiteral("name"));
+			if (const QString other = trigger.attributes.value(QStringLiteral("name"));
 			    !other.isEmpty() && other.compare(label, Qt::CaseInsensitive) == 0)
 			{
 				QMessageBox::warning(

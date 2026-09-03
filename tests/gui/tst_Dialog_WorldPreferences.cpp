@@ -6,6 +6,7 @@
  * Role: QTest coverage for Dialog WorldPreferences behavior.
  */
 
+#include "AppController.h"
 #include "WorldPreferencesRoutingUtils.h"
 #include "WorldRuntime.h"
 #include "dialogs/WorldPreferencesDialog.h"
@@ -17,6 +18,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QDialogButtonBox>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
@@ -27,6 +29,7 @@
 #include <QLayout>
 #include <QLineEdit>
 #include <QMargins>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QScopeGuard>
 #include <QSpinBox>
@@ -107,6 +110,7 @@ namespace
 	{
 			QTableWidget *table{nullptr};
 			QTreeWidget  *tree{nullptr};
+			QPushButton  *editButton{nullptr};
 			QPushButton  *removeButton{nullptr};
 	};
 
@@ -187,11 +191,12 @@ namespace
 			return result;
 		for (QPushButton *button : page->findChildren<QPushButton *>())
 		{
-			if (button && button->text() == QStringLiteral("&Remove"))
-			{
+			if (!button)
+				continue;
+			if (button->text() == QStringLiteral("&Edit..."))
+				result.editButton = button;
+			else if (button->text() == QStringLiteral("&Remove"))
 				result.removeButton = button;
-				break;
-			}
 		}
 		return result;
 	}
@@ -211,6 +216,24 @@ namespace
 				return group;
 		}
 		return nullptr;
+	}
+
+	/**
+	 * @brief Finds a rule-table row carrying one runtime identity.
+	 * @param table Rule table to inspect.
+	 * @param runtimeId Runtime identity to locate.
+	 * @return Matching row, or `-1` when absent.
+	 */
+	int findRuleRowByRuntimeId(const QTableWidget &table, const quint64 runtimeId)
+	{
+		for (int row = 0; row < table.rowCount(); ++row)
+		{
+			bool ok = false;
+			if (const quint64 candidate = table.item(row, 0)->data(Qt::UserRole).toULongLong(&ok);
+			    ok && candidate == runtimeId)
+				return row;
+		}
+		return -1;
 	}
 
 	/**
@@ -1274,6 +1297,685 @@ namespace
 					QVERIFY(!findRuleGroup(*widgets.tree, QStringLiteral("sole")));
 					QVERIFY(!widgets.tree->currentItem());
 					QVERIFY(widgets.table->selectedItems().isEmpty());
+				}
+			}
+
+			void ruleEditsFollowRuntimeIdentityAfterEarlierRuleRemoval()
+			{
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					WorldRuntime runtime;
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+					{
+						auto makeTrigger = [](const QString &name, const QString &match, const QString &group)
+						{
+							WorldRuntime::Trigger trigger;
+							trigger.attributes.insert(QStringLiteral("name"), name);
+							trigger.attributes.insert(QStringLiteral("match"), match);
+							trigger.attributes.insert(QStringLiteral("group"), group);
+							trigger.children.insert(QStringLiteral("send"), QStringLiteral("noop"));
+							return trigger;
+						};
+						QList<WorldRuntime::Trigger> triggers = {
+						    makeTrigger(QStringLiteral("remove_trigger"), QStringLiteral("Alpha"),
+						                QStringLiteral("remove-group")),
+						    makeTrigger(QStringLiteral("target_trigger"), QStringLiteral("Mike"),
+						                QStringLiteral("target-group")),
+						    makeTrigger(QStringLiteral("other_trigger"), QStringLiteral("Zulu"),
+						                QStringLiteral("other-group"))};
+						triggers[1].matched         = 9;
+						triggers[1].invocationCount = 4;
+						triggers[1].matchAttempts   = 12;
+						triggers[1].executionTimeNs = 17'000'000;
+						runtime.setTriggers(triggers);
+						break;
+					}
+					case RuleKind::Alias:
+					{
+						auto makeAlias = [](const QString &name, const QString &match, const QString &group)
+						{
+							WorldRuntime::Alias alias;
+							alias.attributes.insert(QStringLiteral("name"), name);
+							alias.attributes.insert(QStringLiteral("match"), match);
+							alias.attributes.insert(QStringLiteral("group"), group);
+							alias.children.insert(QStringLiteral("send"), QStringLiteral("noop"));
+							return alias;
+						};
+						QList<WorldRuntime::Alias> aliases = {
+						    makeAlias(QStringLiteral("remove_alias"), QStringLiteral("Alpha"),
+						              QStringLiteral("remove-group")),
+						    makeAlias(QStringLiteral("target_alias"), QStringLiteral("Mike"),
+						              QStringLiteral("target-group")),
+						    makeAlias(QStringLiteral("other_alias"), QStringLiteral("Zulu"),
+						              QStringLiteral("other-group"))};
+						aliases[1].matched         = 9;
+						aliases[1].invocationCount = 4;
+						aliases[1].matchAttempts   = 12;
+						runtime.setAliases(aliases);
+						break;
+					}
+					case RuleKind::Timer:
+					{
+						auto makeTimer = [](const QString &name, const int hour, const QString &group)
+						{
+							WorldRuntime::Timer timer;
+							timer.attributes.insert(QStringLiteral("name"), name);
+							timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("1"));
+							timer.attributes.insert(QStringLiteral("hour"), QString::number(hour));
+							timer.attributes.insert(QStringLiteral("group"), group);
+							timer.children.insert(QStringLiteral("send"), QStringLiteral("noop"));
+							return timer;
+						};
+						QList<WorldRuntime::Timer> timers = {
+						    makeTimer(QStringLiteral("remove_timer"), 6, QStringLiteral("remove-group")),
+						    makeTimer(QStringLiteral("target_timer"), 12, QStringLiteral("target-group")),
+						    makeTimer(QStringLiteral("other_timer"), 18, QStringLiteral("other-group"))};
+						timers[1].firedCount      = 9;
+						timers[1].invocationCount = 4;
+						timers[1].lastFired       = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+						timers[1].nextFireTime    = QDateTime::fromSecsSinceEpoch(1'700'000'300);
+						runtime.setTimers(timers);
+						break;
+					}
+					}
+
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(rulePage(kind));
+					const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+					QVERIFY(widgets.table);
+					QVERIFY(widgets.editButton);
+					quint64 targetRuntimeId{0};
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+						targetRuntimeId = runtime.triggers().at(1).runtimeId;
+						break;
+					case RuleKind::Alias:
+						targetRuntimeId = runtime.aliases().at(1).runtimeId;
+						break;
+					case RuleKind::Timer:
+						targetRuntimeId = runtime.timers().at(1).runtimeId;
+						break;
+					}
+					QVERIFY(targetRuntimeId != 0);
+					const int targetRow = findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
+					QVERIFY(targetRow >= 0);
+					widgets.table->setCurrentCell(targetRow, 0);
+					QStringList observedEditorLabelTexts;
+					QString     editorCallbackFailure;
+					bool        editorCallbackInvoked = false;
+
+					QVERIFY(QMetaObject::invokeMethod(
+					    &dialog,
+					    [&runtime, &observedEditorLabelTexts, &editorCallbackFailure, &editorCallbackInvoked,
+					     kind]
+					    {
+						    editorCallbackInvoked = true;
+						    QWidget *activeModal  = QApplication::activeModalWidget();
+						    auto    *editor       = qobject_cast<QDialog *>(activeModal);
+						    if (!editor)
+						    {
+							    editorCallbackFailure = QStringLiteral("Rule editor was not active.");
+							    if (activeModal)
+								    activeModal->close();
+							    return;
+						    }
+
+						    for (const QLabel *label : editor->findChildren<QLabel *>())
+						    {
+							    if (label)
+								    observedEditorLabelTexts.push_back(label->text());
+						    }
+
+						    switch (kind)
+						    {
+						    case RuleKind::Trigger:
+						    {
+							    QList<WorldRuntime::Trigger> triggers = runtime.triggers();
+							    triggers.removeFirst();
+							    runtime.setTriggers(triggers);
+							    break;
+						    }
+						    case RuleKind::Alias:
+						    {
+							    QList<WorldRuntime::Alias> aliases = runtime.aliases();
+							    aliases.removeFirst();
+							    runtime.setAliases(aliases);
+							    break;
+						    }
+						    case RuleKind::Timer:
+						    {
+							    QList<WorldRuntime::Timer> timers = runtime.timers();
+							    timers.removeFirst();
+							    runtime.setTimers(timers);
+							    break;
+						    }
+						    }
+						    QLineEdit *groupEdit = nullptr;
+						    for (QLineEdit *lineEdit : editor->findChildren<QLineEdit *>())
+						    {
+							    if (lineEdit && lineEdit->text() == QStringLiteral("target-group"))
+							    {
+								    groupEdit = lineEdit;
+								    break;
+							    }
+						    }
+						    if (!groupEdit)
+						    {
+							    editorCallbackFailure =
+							        QStringLiteral("Rule editor group field was not found.");
+							    editor->reject();
+							    return;
+						    }
+						    groupEdit->setText(QStringLiteral("edited-group"));
+
+						    auto *buttons = editor->findChild<QDialogButtonBox *>();
+						    if (!buttons || !buttons->button(QDialogButtonBox::Ok))
+						    {
+							    editorCallbackFailure =
+							        QStringLiteral("Rule editor OK button was not found.");
+							    editor->reject();
+							    return;
+						    }
+						    buttons->button(QDialogButtonBox::Ok)->click();
+					    },
+					    Qt::QueuedConnection));
+					widgets.editButton->click();
+					QVERIFY2(editorCallbackInvoked, "Rule editor callback did not run.");
+					QVERIFY2(editorCallbackFailure.isEmpty(), qPrintable(editorCallbackFailure));
+
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("9 matches.")));
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("4 calls.")));
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("0.017000 sec.")));
+						break;
+					case RuleKind::Alias:
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("9 matches.")));
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("4 calls.")));
+						break;
+					case RuleKind::Timer:
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("Fired 9 times.")));
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("4 calls.")));
+						break;
+					}
+
+					QVERIFY(targetRuntimeId != 0);
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+					{
+						const QList<WorldRuntime::Trigger> &triggers = runtime.triggers();
+						QCOMPARE(triggers.size(), 2);
+						QCOMPARE(triggers.at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(triggers.at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						QCOMPARE(triggers.at(0).matched, 9);
+						QCOMPARE(triggers.at(0).invocationCount, 4);
+						QCOMPARE(triggers.at(0).matchAttempts, 12);
+						QCOMPARE(triggers.at(0).executionTimeNs, qint64{17'000'000});
+						QCOMPARE(triggers.at(1).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("other-group"));
+						break;
+					}
+					case RuleKind::Alias:
+					{
+						const QList<WorldRuntime::Alias> &aliases = runtime.aliases();
+						QCOMPARE(aliases.size(), 2);
+						QCOMPARE(aliases.at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(aliases.at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						QCOMPARE(aliases.at(0).matched, 9);
+						QCOMPARE(aliases.at(0).invocationCount, 4);
+						QCOMPARE(aliases.at(0).matchAttempts, 12);
+						QCOMPARE(aliases.at(1).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("other-group"));
+						break;
+					}
+					case RuleKind::Timer:
+					{
+						const QList<WorldRuntime::Timer> &timers = runtime.timers();
+						QCOMPARE(timers.size(), 2);
+						QCOMPARE(timers.at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(timers.at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						QCOMPARE(timers.at(0).firedCount, 9);
+						QCOMPARE(timers.at(0).invocationCount, 4);
+						QCOMPARE(timers.at(0).lastFired, QDateTime::fromSecsSinceEpoch(1'700'000'000));
+						QCOMPARE(timers.at(0).nextFireTime, QDateTime::fromSecsSinceEpoch(1'700'000'300));
+						QCOMPARE(timers.at(1).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("other-group"));
+						break;
+					}
+					}
+				}
+			}
+
+			void staleRuleViewEditResolvesRuntimeIdentityBeforeOpeningEditor()
+			{
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					WorldRuntime runtime;
+					populateRuleSelectionFixtures(runtime, kind, false, false);
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+					{
+						QList<WorldRuntime::Trigger> triggers = runtime.triggers();
+						triggers[1].attributes.insert(QStringLiteral("name"), QStringLiteral("target_rule"));
+						triggers[1].attributes.insert(QStringLiteral("group"),
+						                              QStringLiteral("target-group"));
+						runtime.setTriggers(triggers);
+						break;
+					}
+					case RuleKind::Alias:
+					{
+						QList<WorldRuntime::Alias> aliases = runtime.aliases();
+						aliases[1].attributes.insert(QStringLiteral("name"), QStringLiteral("target_rule"));
+						aliases[1].attributes.insert(QStringLiteral("group"), QStringLiteral("target-group"));
+						aliases[1].children.insert(QStringLiteral("send"), QStringLiteral("noop"));
+						runtime.setAliases(aliases);
+						break;
+					}
+					case RuleKind::Timer:
+					{
+						QList<WorldRuntime::Timer> timers = runtime.timers();
+						timers[1].attributes.insert(QStringLiteral("name"), QStringLiteral("target_rule"));
+						timers[1].attributes.insert(QStringLiteral("group"), QStringLiteral("target-group"));
+						timers[1].children.insert(QStringLiteral("send"), QStringLiteral("noop"));
+						runtime.setTimers(timers);
+						break;
+					}
+					}
+
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(rulePage(kind));
+					const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+					QVERIFY(widgets.table);
+					QVERIFY(widgets.editButton);
+
+					quint64 targetRuntimeId{0};
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+						targetRuntimeId = runtime.triggers().at(1).runtimeId;
+						break;
+					case RuleKind::Alias:
+						targetRuntimeId = runtime.aliases().at(1).runtimeId;
+						break;
+					case RuleKind::Timer:
+						targetRuntimeId = runtime.timers().at(1).runtimeId;
+						break;
+					}
+					QVERIFY(targetRuntimeId != 0);
+					const int targetRow = findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
+					QVERIFY(targetRow >= 0);
+					widgets.table->setCurrentCell(targetRow, 0);
+
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+					{
+						QList<WorldRuntime::Trigger> triggers = runtime.triggers();
+						triggers.removeFirst();
+						runtime.setTriggers(triggers);
+						break;
+					}
+					case RuleKind::Alias:
+					{
+						QList<WorldRuntime::Alias> aliases = runtime.aliases();
+						aliases.removeFirst();
+						runtime.setAliases(aliases);
+						break;
+					}
+					case RuleKind::Timer:
+					{
+						QList<WorldRuntime::Timer> timers = runtime.timers();
+						timers.removeFirst();
+						runtime.setTimers(timers);
+						break;
+					}
+					}
+
+					QString editorCallbackFailure;
+					bool    editorCallbackInvoked = false;
+					QVERIFY(QMetaObject::invokeMethod(
+					    &dialog,
+					    [&editorCallbackFailure, &editorCallbackInvoked]
+					    {
+						    editorCallbackInvoked = true;
+						    QWidget *activeModal  = QApplication::activeModalWidget();
+						    auto    *editor       = qobject_cast<QDialog *>(activeModal);
+						    if (!editor)
+						    {
+							    editorCallbackFailure = QStringLiteral("Rule editor was not active.");
+							    if (activeModal)
+								    activeModal->close();
+							    return;
+						    }
+						    QLineEdit *groupEdit = nullptr;
+						    for (QLineEdit *lineEdit : editor->findChildren<QLineEdit *>())
+						    {
+							    if (lineEdit && lineEdit->text() == QStringLiteral("target-group"))
+							    {
+								    groupEdit = lineEdit;
+								    break;
+							    }
+						    }
+						    if (!groupEdit)
+						    {
+							    editorCallbackFailure =
+							        QStringLiteral("Rule editor group field was not found.");
+							    editor->reject();
+							    return;
+						    }
+						    groupEdit->setText(QStringLiteral("edited-group"));
+						    auto *buttons = editor->findChild<QDialogButtonBox *>();
+						    if (!buttons || !buttons->button(QDialogButtonBox::Ok))
+						    {
+							    editorCallbackFailure =
+							        QStringLiteral("Rule editor OK button was not found.");
+							    editor->reject();
+							    return;
+						    }
+						    buttons->button(QDialogButtonBox::Ok)->click();
+					    },
+					    Qt::QueuedConnection));
+					widgets.editButton->click();
+					QVERIFY2(editorCallbackInvoked, "Rule editor callback did not run.");
+					QVERIFY2(editorCallbackFailure.isEmpty(), qPrintable(editorCallbackFailure));
+
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+						QCOMPARE(runtime.triggers().at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(runtime.triggers().at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						break;
+					case RuleKind::Alias:
+						QCOMPARE(runtime.aliases().at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(runtime.aliases().at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						break;
+					case RuleKind::Timer:
+						QCOMPARE(runtime.timers().at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(runtime.timers().at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						break;
+					}
+				}
+			}
+
+			void ruleRemovalReResolvesIdentityAfterConfirmation()
+			{
+				AppController app;
+				QCOMPARE(app.getGlobalOption(QStringLiteral("TriggerRemoveCheck")).toInt(), 1);
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					for (const bool treeMode : {false, true})
+					{
+						for (const bool removeSelectedDuringConfirmation : {false, true})
+						{
+							WorldRuntime runtime;
+							populateRuleSelectionFixtures(runtime, kind, treeMode, false);
+							WorldPreferencesDialog dialog(&runtime, nullptr);
+							dialog.setInitialPage(rulePage(kind));
+							const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+							QVERIFY(widgets.table);
+							QVERIFY(widgets.tree);
+							QVERIFY(widgets.removeButton);
+
+							quint64 targetRuntimeId{0};
+							quint64 expectedSelectionRuntimeId{0};
+							switch (kind)
+							{
+							case RuleKind::Trigger:
+								targetRuntimeId = runtime.triggers().at(1).runtimeId;
+								expectedSelectionRuntimeId =
+								    runtime.triggers().at(removeSelectedDuringConfirmation ? 0 : 2).runtimeId;
+								break;
+							case RuleKind::Alias:
+								targetRuntimeId = runtime.aliases().at(1).runtimeId;
+								expectedSelectionRuntimeId =
+								    runtime.aliases().at(removeSelectedDuringConfirmation ? 0 : 2).runtimeId;
+								break;
+							case RuleKind::Timer:
+								targetRuntimeId = runtime.timers().at(1).runtimeId;
+								expectedSelectionRuntimeId =
+								    runtime.timers().at(removeSelectedDuringConfirmation ? 0 : 2).runtimeId;
+								break;
+							}
+							const int targetRow = findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
+							QVERIFY(targetRow >= 0);
+							widgets.table->setCurrentCell(targetRow, 0);
+							if (treeMode)
+							{
+								QVERIFY(widgets.tree->currentItem());
+								QCOMPARE(widgets.tree->currentItem()->data(0, Qt::UserRole).toULongLong(),
+								         targetRuntimeId);
+							}
+
+							QString confirmationCallbackFailure;
+							bool    confirmationCallbackInvoked = false;
+							QVERIFY(QMetaObject::invokeMethod(
+							    &dialog,
+							    [&runtime, &confirmationCallbackFailure, &confirmationCallbackInvoked, kind,
+							     removeSelectedDuringConfirmation]
+							    {
+								    confirmationCallbackInvoked = true;
+								    switch (kind)
+								    {
+								    case RuleKind::Trigger:
+								    {
+									    QList<WorldRuntime::Trigger> triggers = runtime.triggers();
+									    triggers.removeAt(removeSelectedDuringConfirmation ? 1 : 0);
+									    runtime.setTriggers(triggers);
+									    break;
+								    }
+								    case RuleKind::Alias:
+								    {
+									    QList<WorldRuntime::Alias> aliases = runtime.aliases();
+									    aliases.removeAt(removeSelectedDuringConfirmation ? 1 : 0);
+									    runtime.setAliases(aliases);
+									    break;
+								    }
+								    case RuleKind::Timer:
+								    {
+									    QList<WorldRuntime::Timer> timers = runtime.timers();
+									    timers.removeAt(removeSelectedDuringConfirmation ? 1 : 0);
+									    runtime.setTimers(timers);
+									    break;
+								    }
+								    }
+								    QWidget *activeModal = QApplication::activeModalWidget();
+								    auto    *message     = qobject_cast<QMessageBox *>(activeModal);
+								    if (!message)
+								    {
+									    confirmationCallbackFailure =
+									        QStringLiteral("Removal confirmation was not active.");
+									    if (activeModal)
+										    activeModal->close();
+									    return;
+								    }
+								    QAbstractButton *yesButton = message->button(QMessageBox::Yes);
+								    if (!yesButton)
+								    {
+									    confirmationCallbackFailure =
+									        QStringLiteral("Removal confirmation Yes button was not found.");
+									    message->reject();
+									    return;
+								    }
+								    yesButton->click();
+							    },
+							    Qt::QueuedConnection));
+							widgets.removeButton->click();
+							QVERIFY2(confirmationCallbackInvoked,
+							         "Removal confirmation callback did not run.");
+							QVERIFY2(confirmationCallbackFailure.isEmpty(),
+							         qPrintable(confirmationCallbackFailure));
+
+							switch (kind)
+							{
+							case RuleKind::Trigger:
+								QCOMPARE(runtime.triggers().size(), removeSelectedDuringConfirmation ? 2 : 1);
+								break;
+							case RuleKind::Alias:
+								QCOMPARE(runtime.aliases().size(), removeSelectedDuringConfirmation ? 2 : 1);
+								break;
+							case RuleKind::Timer:
+								QCOMPARE(runtime.timers().size(), removeSelectedDuringConfirmation ? 2 : 1);
+								break;
+							}
+							const int remainingRow =
+							    findRuleRowByRuntimeId(*widgets.table, expectedSelectionRuntimeId);
+							QVERIFY(remainingRow >= 0);
+							QCOMPARE(widgets.table->currentRow(), remainingRow);
+							if (treeMode)
+							{
+								QVERIFY(widgets.tree->currentItem());
+								QCOMPARE(widgets.tree->currentItem()->data(0, Qt::UserRole).toULongLong(),
+								         expectedSelectionRuntimeId);
+								QVERIFY(widgets.tree->currentItem()->parent());
+								QCOMPARE(widgets.tree->currentItem()->parent()->text(0),
+								         QStringLiteral("primary"));
+							}
+						}
+					}
+				}
+			}
+
+			void staleRuleViewRemovalDoesNotDeleteAnotherRule()
+			{
+				AppController app;
+				QCOMPARE(app.getGlobalOption(QStringLiteral("TriggerRemoveCheck")).toInt(), 1);
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					for (const bool treeMode : {false, true})
+					{
+						WorldRuntime runtime;
+						populateRuleSelectionFixtures(runtime, kind, treeMode, false);
+						WorldPreferencesDialog dialog(&runtime, nullptr);
+						dialog.setInitialPage(rulePage(kind));
+						const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+						QVERIFY(widgets.table);
+						QVERIFY(widgets.tree);
+						QVERIFY(widgets.removeButton);
+
+						quint64 targetRuntimeId{0};
+						quint64 expectedSelectionRuntimeId{0};
+						quint64 otherRuntimeId{0};
+						switch (kind)
+						{
+						case RuleKind::Trigger:
+							targetRuntimeId            = runtime.triggers().at(1).runtimeId;
+							expectedSelectionRuntimeId = runtime.triggers().at(0).runtimeId;
+							otherRuntimeId             = runtime.triggers().at(2).runtimeId;
+							break;
+						case RuleKind::Alias:
+							targetRuntimeId            = runtime.aliases().at(1).runtimeId;
+							expectedSelectionRuntimeId = runtime.aliases().at(0).runtimeId;
+							otherRuntimeId             = runtime.aliases().at(2).runtimeId;
+							break;
+						case RuleKind::Timer:
+							targetRuntimeId            = runtime.timers().at(1).runtimeId;
+							expectedSelectionRuntimeId = runtime.timers().at(0).runtimeId;
+							otherRuntimeId             = runtime.timers().at(2).runtimeId;
+							break;
+						}
+						const int targetRow = findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
+						QVERIFY(targetRow >= 0);
+						widgets.table->setCurrentCell(targetRow, 0);
+						if (treeMode)
+						{
+							QVERIFY(widgets.tree->currentItem());
+							QCOMPARE(widgets.tree->currentItem()->data(0, Qt::UserRole).toULongLong(),
+							         targetRuntimeId);
+						}
+
+						switch (kind)
+						{
+						case RuleKind::Trigger:
+						{
+							QList<WorldRuntime::Trigger> triggers = runtime.triggers();
+							triggers.removeAt(1);
+							runtime.setTriggers(triggers);
+							break;
+						}
+						case RuleKind::Alias:
+						{
+							QList<WorldRuntime::Alias> aliases = runtime.aliases();
+							aliases.removeAt(1);
+							runtime.setAliases(aliases);
+							break;
+						}
+						case RuleKind::Timer:
+						{
+							QList<WorldRuntime::Timer> timers = runtime.timers();
+							timers.removeAt(1);
+							runtime.setTimers(timers);
+							break;
+						}
+						}
+
+						bool removeClickReturned    = false;
+						bool unexpectedConfirmation = false;
+						QVERIFY(QMetaObject::invokeMethod(
+						    &dialog,
+						    [&removeClickReturned, &unexpectedConfirmation]
+						    {
+							    if (removeClickReturned)
+								    return;
+							    if (QWidget *activeModal = QApplication::activeModalWidget())
+							    {
+								    unexpectedConfirmation = true;
+								    activeModal->close();
+							    }
+						    },
+						    Qt::QueuedConnection));
+						widgets.removeButton->click();
+						removeClickReturned = true;
+						QCoreApplication::sendPostedEvents(&dialog, QEvent::MetaCall);
+						QVERIFY(!unexpectedConfirmation);
+
+						switch (kind)
+						{
+						case RuleKind::Trigger:
+							QCOMPARE(runtime.triggers().size(), 2);
+							QCOMPARE(runtime.triggers().at(0).runtimeId, expectedSelectionRuntimeId);
+							QCOMPARE(runtime.triggers().at(1).runtimeId, otherRuntimeId);
+							break;
+						case RuleKind::Alias:
+							QCOMPARE(runtime.aliases().size(), 2);
+							QCOMPARE(runtime.aliases().at(0).runtimeId, expectedSelectionRuntimeId);
+							QCOMPARE(runtime.aliases().at(1).runtimeId, otherRuntimeId);
+							break;
+						case RuleKind::Timer:
+							QCOMPARE(runtime.timers().size(), 2);
+							QCOMPARE(runtime.timers().at(0).runtimeId, expectedSelectionRuntimeId);
+							QCOMPARE(runtime.timers().at(1).runtimeId, otherRuntimeId);
+							break;
+						}
+						const int selectedRow =
+						    findRuleRowByRuntimeId(*widgets.table, expectedSelectionRuntimeId);
+						QVERIFY(selectedRow >= 0);
+						QCOMPARE(widgets.table->currentRow(), selectedRow);
+						if (treeMode)
+						{
+							QVERIFY(widgets.tree->currentItem());
+							QCOMPARE(widgets.tree->currentItem()->data(0, Qt::UserRole).toULongLong(),
+							         expectedSelectionRuntimeId);
+							QVERIFY(widgets.tree->currentItem()->parent());
+							QCOMPARE(widgets.tree->currentItem()->parent()->text(0),
+							         QStringLiteral("primary"));
+						}
+					}
 				}
 			}
 

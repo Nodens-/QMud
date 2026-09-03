@@ -100,6 +100,7 @@ struct LuaCallbackTriggerSnapshot
 		int                    matched{0};
 		int                    invocationCount{0};
 		int                    matchAttempts{0};
+		qint64                 executionTimeNs{0};
 		QString                lastMatchTarget;
 		QDateTime              lastMatched;
 		quint64                runtimeId{0};

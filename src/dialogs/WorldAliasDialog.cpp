@@ -74,12 +74,11 @@ namespace
 	}
 } // namespace
 
-WorldAliasDialog::WorldAliasDialog(WorldRuntime *runtime, WorldRuntime::Alias alias,
-                                   QList<WorldRuntime::Alias> aliases, int currentIndex, QWidget *parent)
-    : QDialog(parent), m_runtime(runtime), m_alias(std::move(alias)), m_existing(std::move(aliases)),
-      m_currentIndex(currentIndex)
+WorldAliasDialog::WorldAliasDialog(WorldRuntime *runtime, WorldRuntime::Alias alias, const bool isNew,
+                                   QWidget *parent)
+    : QDialog(parent), m_runtime(runtime), m_alias(std::move(alias))
 {
-	setWindowTitle(currentIndex < 0 ? QStringLiteral("Add alias") : QStringLiteral("Edit alias"));
+	setWindowTitle(isNew ? QStringLiteral("Add alias") : QStringLiteral("Edit alias"));
 	resize(520, 360);
 	setMinimumSize(920, 690);
 	buildUi();
@@ -397,16 +396,12 @@ void WorldAliasDialog::loadAlias() const
 	    sendToIndex >= 0)
 		m_sendTo->setCurrentIndex(sendToIndex);
 
-	const QString matches = attrs.value(QStringLiteral("times_matched"));
-	const QString calls   = attrs.value(QStringLiteral("invocation_count"));
-	if (!matches.isEmpty())
-		m_matchesLabel->setText(QStringLiteral("%1 match%2.")
-		                            .arg(matches)
-		                            .arg(matches == QStringLiteral("1") ? QString() : QStringLiteral("es")));
-	if (!calls.isEmpty())
-		m_callsLabel->setText(QStringLiteral("%1 call%2.")
-		                          .arg(calls)
-		                          .arg(calls == QStringLiteral("1") ? QString() : QStringLiteral("s")));
+	const int matches = m_alias.matched;
+	const int calls   = m_alias.invocationCount;
+	m_matchesLabel->setText(
+	    QStringLiteral("%1 match%2.").arg(matches).arg(matches == 1 ? QString() : QStringLiteral("es")));
+	m_callsLabel->setText(
+	    QStringLiteral("%1 call%2.").arg(calls).arg(calls == 1 ? QString() : QStringLiteral("s")));
 
 	m_includedLabel->setVisible(isIncluded());
 	onSendToChanged(m_sendTo->currentIndex());
@@ -488,11 +483,12 @@ bool WorldAliasDialog::validateAlias()
 
 	if (!label.isEmpty())
 	{
-		for (int i = 0; i < m_existing.size(); ++i)
+		const QList<WorldRuntime::Alias> &aliases = m_runtime->aliases();
+		for (const WorldRuntime::Alias &alias : aliases)
 		{
-			if (i == m_currentIndex)
+			if (m_alias.runtimeId != 0 && alias.runtimeId == m_alias.runtimeId)
 				continue;
-			if (const QString other = m_existing.at(i).attributes.value(QStringLiteral("name"));
+			if (const QString other = alias.attributes.value(QStringLiteral("name"));
 			    !other.isEmpty() && other.compare(label, Qt::CaseInsensitive) == 0)
 			{
 				QMessageBox::warning(

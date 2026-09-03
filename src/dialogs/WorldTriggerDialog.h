@@ -32,13 +32,11 @@ class WorldTriggerDialog : public QDialog
 		 * @brief Creates trigger editor initialized from existing trigger data.
 		 * @param runtime Runtime context.
 		 * @param trigger Trigger value to edit.
-		 * @param triggers Existing trigger list for validation.
-		 * @param currentIndex Index of trigger being edited, or `-1` for new trigger.
+		 * @param isNew Whether a new trigger is being created.
 		 * @param parent Optional Qt parent widget.
 		 */
-			WorldTriggerDialog(WorldRuntime *runtime, WorldRuntime::Trigger trigger,
-			                   QList<WorldRuntime::Trigger> triggers, int currentIndex,
-			                   QWidget *parent = nullptr);
+		WorldTriggerDialog(WorldRuntime *runtime, WorldRuntime::Trigger trigger, bool isNew,
+		                   QWidget *parent = nullptr);
 
 		/**
 		 * @brief Returns edited trigger value.
@@ -138,8 +136,6 @@ class WorldTriggerDialog : public QDialog
 
 		WorldRuntime *m_runtime{nullptr};
 		WorldRuntime::Trigger            m_trigger;
-		QList<WorldRuntime::Trigger>     m_existing;
-		int                              m_currentIndex{-1};
 
 		QLineEdit                       *m_match{nullptr};
 		QLineEdit                       *m_label{nullptr};

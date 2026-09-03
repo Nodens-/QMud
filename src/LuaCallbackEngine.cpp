@@ -1841,6 +1841,7 @@ namespace
 		trigger.matched              = snapshot.matched;
 		trigger.invocationCount      = snapshot.invocationCount;
 		trigger.matchAttempts        = snapshot.matchAttempts;
+		trigger.executionTimeNs      = snapshot.executionTimeNs;
 		trigger.lastMatchTarget      = snapshot.lastMatchTarget;
 		trigger.lastMatched          = snapshot.lastMatched;
 		trigger.runtimeId            = snapshot.runtimeId;
@@ -40045,6 +40046,9 @@ static int luaGetTriggerInfo(lua_State *L)
 	case 36:
 		value = isEnabledValue(trigger.attributes.value(QStringLiteral("one_shot")));
 		break;
+	case 37:
+		value = trigger.executionTimeSeconds();
+		break;
 	default:
 		break;
 	}
@@ -41552,6 +41556,9 @@ static int luaGetPluginTriggerInfo(lua_State *L)
 		break;
 	case 36:
 		value = isEnabledValue(trigger.attributes.value(QStringLiteral("one_shot")));
+		break;
+	case 37:
+		value = trigger.executionTimeSeconds();
 		break;
 	default:
 		break;

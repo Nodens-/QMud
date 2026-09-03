@@ -8,6 +8,7 @@
 
 #include "AliasMatchUtils.h"
 
+#include <QElapsedTimer>
 #include <limits>
 
 namespace
@@ -30,10 +31,16 @@ namespace
 namespace QMudAliasMatch
 {
 	MatchResult matchWithCaptures(const QRegularExpression &regex, const QString &subject,
-	                              const bool allowEmptyMatch, const int startOffset)
+	                              const bool allowEmptyMatch, const int startOffset, qint64 *executionTimeNs)
 	{
-		MatchResult                   out;
+		QElapsedTimer executionTimer;
+		if (executionTimeNs)
+			executionTimer.start();
 		const QRegularExpressionMatch match = regex.match(subject, startOffset);
+		if (executionTimeNs)
+			*executionTimeNs += executionTimer.nsecsElapsed();
+
+		MatchResult out;
 		if (!match.hasMatch())
 			return out;
 

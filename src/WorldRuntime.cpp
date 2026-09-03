@@ -127,6 +127,55 @@ Q_DECLARE_OPAQUE_POINTER(sqlite3 *)
 
 namespace
 {
+	quint64 nextRuleRuntimeId()
+	{
+		static std::atomic<quint64> idCounter{0};
+		quint64                     id = idCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (id == 0)
+			id = idCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+		return id;
+	}
+
+	template <typename Rule>
+	bool ensureWorldRuleRuntimeIds(QList<Rule> &worldRules, const QList<WorldRuntime::Plugin> &plugins,
+	                               QList<Rule> WorldRuntime::Plugin::*pluginRules)
+	{
+		QSet<quint64> reservedRuntimeIds;
+		QSet<quint64> claimedRuntimeIds;
+		for (const WorldRuntime::Plugin &plugin : plugins)
+		{
+			for (const Rule &rule : plugin.*pluginRules)
+			{
+				if (rule.runtimeId != 0)
+				{
+					reservedRuntimeIds.insert(rule.runtimeId);
+					claimedRuntimeIds.insert(rule.runtimeId);
+				}
+			}
+		}
+		for (const Rule &rule : worldRules)
+		{
+			if (rule.runtimeId != 0)
+				reservedRuntimeIds.insert(rule.runtimeId);
+		}
+
+		bool changed = false;
+		for (Rule &rule : worldRules)
+		{
+			if (rule.runtimeId == 0 || claimedRuntimeIds.contains(rule.runtimeId))
+			{
+				do
+				{
+					rule.runtimeId = nextRuleRuntimeId();
+				} while (reservedRuntimeIds.contains(rule.runtimeId));
+				reservedRuntimeIds.insert(rule.runtimeId);
+				changed = true;
+			}
+			claimedRuntimeIds.insert(rule.runtimeId);
+		}
+		return changed;
+	}
+
 	[[nodiscard]] bool outputLineNumbersAdjacent(const WorldRuntime::LineEntry &first,
 	                                             const WorldRuntime::LineEntry &second)
 	{
@@ -9910,6 +9959,7 @@ namespace QMudLuaCallbackRuleSnapshot
 			row.matched              = trigger.matched;
 			row.invocationCount      = trigger.invocationCount;
 			row.matchAttempts        = trigger.matchAttempts;
+			row.executionTimeNs      = trigger.executionTimeNs;
 			row.lastMatchTarget      = trigger.lastMatchTarget;
 			row.lastMatched          = trigger.lastMatched;
 			row.runtimeId            = trigger.runtimeId;
@@ -20295,6 +20345,43 @@ const QList<WorldRuntime::Trigger> &WorldRuntime::triggers() const
 	return m_triggers;
 }
 
+quint64 WorldRuntime::ensureRuleRuntimeId(Trigger &trigger)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureRuleRuntimeId(Trigger)");
+	auto idUsedElsewhere = [this, &trigger](const quint64 runtimeId)
+	{
+		for (const Trigger &candidate : m_triggers)
+		{
+			if (&candidate != &trigger && candidate.runtimeId == runtimeId)
+				return true;
+		}
+		for (const Plugin &plugin : m_plugins)
+		{
+			for (const Trigger &candidate : plugin.triggers)
+			{
+				if (&candidate != &trigger && candidate.runtimeId == runtimeId)
+					return true;
+			}
+		}
+		return false;
+	};
+	if (trigger.runtimeId == 0 || idUsedElsewhere(trigger.runtimeId))
+	{
+		do
+		{
+			trigger.runtimeId = nextRuleRuntimeId();
+		} while (idUsedElsewhere(trigger.runtimeId));
+	}
+	return trigger.runtimeId;
+}
+
+void WorldRuntime::ensureWorldTriggerRuntimeIds()
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureWorldTriggerRuntimeIds");
+	if (ensureWorldRuleRuntimeIds(m_triggers, m_plugins, &Plugin::triggers))
+		markTriggerRuntimeStateChanged();
+}
+
 quint64 WorldRuntime::triggerRuleGeneration() const
 {
 	return m_triggerRuleGeneration;
@@ -20363,6 +20450,43 @@ const QList<WorldRuntime::Alias> &WorldRuntime::aliases() const
 	return m_aliases;
 }
 
+quint64 WorldRuntime::ensureRuleRuntimeId(Alias &alias)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureRuleRuntimeId(Alias)");
+	auto idUsedElsewhere = [this, &alias](const quint64 runtimeId)
+	{
+		for (const Alias &candidate : m_aliases)
+		{
+			if (&candidate != &alias && candidate.runtimeId == runtimeId)
+				return true;
+		}
+		for (const Plugin &plugin : m_plugins)
+		{
+			for (const Alias &candidate : plugin.aliases)
+			{
+				if (&candidate != &alias && candidate.runtimeId == runtimeId)
+					return true;
+			}
+		}
+		return false;
+	};
+	if (alias.runtimeId == 0 || idUsedElsewhere(alias.runtimeId))
+	{
+		do
+		{
+			alias.runtimeId = nextRuleRuntimeId();
+		} while (idUsedElsewhere(alias.runtimeId));
+	}
+	return alias.runtimeId;
+}
+
+void WorldRuntime::ensureWorldAliasRuntimeIds()
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureWorldAliasRuntimeIds");
+	if (ensureWorldRuleRuntimeIds(m_aliases, m_plugins, &Plugin::aliases))
+		markAliasRuntimeStateChanged();
+}
+
 QList<WorldRuntime::Alias> &WorldRuntime::aliasesMutable()
 {
 	return m_aliases;
@@ -20409,6 +20533,43 @@ void WorldRuntime::markPluginAliasesChanged(const QString &pluginId)
 const QList<WorldRuntime::Timer> &WorldRuntime::timers() const
 {
 	return m_timers;
+}
+
+quint64 WorldRuntime::ensureRuleRuntimeId(Timer &timer)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureRuleRuntimeId(Timer)");
+	auto idUsedElsewhere = [this, &timer](const quint64 runtimeId)
+	{
+		for (const Timer &candidate : m_timers)
+		{
+			if (&candidate != &timer && candidate.runtimeId == runtimeId)
+				return true;
+		}
+		for (const Plugin &plugin : m_plugins)
+		{
+			for (const Timer &candidate : plugin.timers)
+			{
+				if (&candidate != &timer && candidate.runtimeId == runtimeId)
+					return true;
+			}
+		}
+		return false;
+	};
+	if (timer.runtimeId == 0 || idUsedElsewhere(timer.runtimeId))
+	{
+		do
+		{
+			timer.runtimeId = nextRuleRuntimeId();
+		} while (idUsedElsewhere(timer.runtimeId));
+	}
+	return timer.runtimeId;
+}
+
+void WorldRuntime::ensureWorldTimerRuntimeIds()
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureWorldTimerRuntimeIds");
+	if (ensureWorldRuleRuntimeIds(m_timers, m_plugins, &Plugin::timers))
+		markTimerRuntimeStateChanged();
 }
 
 QList<WorldRuntime::Timer> &WorldRuntime::timersMutable()

@@ -45,7 +45,6 @@
 #include <QScopeGuard>
 #include <QUrl>
 #include <algorithm>
-#include <atomic>
 #include <limits>
 #include <memory>
 #ifdef HILITE
@@ -545,15 +544,6 @@ namespace
 		return !plugin.attributes.value(QStringLiteral("id")).isEmpty();
 	}
 
-	quint64 nextRuleRuntimeId()
-	{
-		static std::atomic<quint64> idCounter{0};
-		quint64                     id = idCounter.fetch_add(1, std::memory_order_relaxed) + 1;
-		if (id == 0)
-			id = idCounter.fetch_add(1, std::memory_order_relaxed) + 1;
-		return id;
-	}
-
 	QString pluginIdOf(const WorldRuntime::Plugin *plugin)
 	{
 		if (!plugin)
@@ -567,96 +557,6 @@ namespace
 		if (!runtime || pluginId.isEmpty())
 			return nullptr;
 		return WorldCommandProcessorMutationAccess::plugin(*runtime, pluginId);
-	}
-
-	bool aliasRuntimeIdUsedElsewhere(WorldRuntime *runtime, const quint64 runtimeId,
-	                                 const WorldRuntime::Alias *current)
-	{
-		if (!runtime || runtimeId == 0)
-			return false;
-		for (WorldRuntime::Alias &alias : WorldCommandProcessorMutationAccess::aliases(*runtime))
-		{
-			if (&alias != current && alias.runtimeId == runtimeId)
-				return true;
-		}
-		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
-		{
-			for (WorldRuntime::Alias &alias : plugin.aliases)
-			{
-				if (&alias != current && alias.runtimeId == runtimeId)
-					return true;
-			}
-		}
-		return false;
-	}
-
-	bool triggerRuntimeIdUsedElsewhere(WorldRuntime *runtime, const quint64 runtimeId,
-	                                   const WorldRuntime::Trigger *current)
-	{
-		if (!runtime || runtimeId == 0)
-			return false;
-		for (WorldRuntime::Trigger &trigger : WorldCommandProcessorMutationAccess::triggers(*runtime))
-		{
-			if (&trigger != current && trigger.runtimeId == runtimeId)
-				return true;
-		}
-		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
-		{
-			for (WorldRuntime::Trigger &trigger : plugin.triggers)
-			{
-				if (&trigger != current && trigger.runtimeId == runtimeId)
-					return true;
-			}
-		}
-		return false;
-	}
-
-	bool timerRuntimeIdUsedElsewhere(WorldRuntime *runtime, const quint64 runtimeId,
-	                                 const WorldRuntime::Timer *current)
-	{
-		if (!runtime || runtimeId == 0)
-			return false;
-		for (WorldRuntime::Timer &timer : WorldCommandProcessorMutationAccess::timers(*runtime))
-		{
-			if (&timer != current && timer.runtimeId == runtimeId)
-				return true;
-		}
-		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
-		{
-			for (WorldRuntime::Timer &timer : plugin.timers)
-			{
-				if (&timer != current && timer.runtimeId == runtimeId)
-					return true;
-			}
-		}
-		return false;
-	}
-
-	quint64 ensureAliasRuntimeId(WorldRuntime *runtime, WorldRuntime::Alias *alias)
-	{
-		if (!alias)
-			return 0;
-		if (alias->runtimeId == 0 || aliasRuntimeIdUsedElsewhere(runtime, alias->runtimeId, alias))
-			alias->runtimeId = nextRuleRuntimeId();
-		return alias->runtimeId;
-	}
-
-	quint64 ensureTriggerRuntimeId(WorldRuntime *runtime, WorldRuntime::Trigger *trigger)
-	{
-		if (!trigger)
-			return 0;
-		if (trigger->runtimeId == 0 || triggerRuntimeIdUsedElsewhere(runtime, trigger->runtimeId, trigger))
-			trigger->runtimeId = nextRuleRuntimeId();
-		return trigger->runtimeId;
-	}
-
-	quint64 ensureTimerRuntimeId(WorldRuntime *runtime, WorldRuntime::Timer *timer)
-	{
-		if (!timer)
-			return 0;
-		if (timer->runtimeId == 0 || timerRuntimeIdUsedElsewhere(runtime, timer->runtimeId, timer))
-			timer->runtimeId = nextRuleRuntimeId();
-		return timer->runtimeId;
 	}
 
 	WorldRuntime::Alias *resolveAliasByRuntimeId(WorldRuntime *runtime, const quint64 runtimeId)
@@ -809,7 +709,7 @@ namespace
 			{
 				if (!alias || !runtime)
 					return;
-				m_ruleRuntimeId = ensureAliasRuntimeId(runtime, alias);
+				m_ruleRuntimeId = runtime->ensureRuleRuntimeId(*alias);
 				alias->executingScriptDepth++;
 				alias->executingScript = true;
 				m_active               = true;
@@ -852,7 +752,7 @@ namespace
 			{
 				if (!trigger || !runtime)
 					return;
-				m_ruleRuntimeId = ensureTriggerRuntimeId(runtime, trigger);
+				m_ruleRuntimeId = runtime->ensureRuleRuntimeId(*trigger);
 				trigger->executingScriptDepth++;
 				trigger->executingScript = true;
 				m_active                 = true;
@@ -895,7 +795,7 @@ namespace
 			{
 				if (!timer || !runtime)
 					return;
-				m_ruleRuntimeId = ensureTimerRuntimeId(runtime, timer);
+				m_ruleRuntimeId = runtime->ensureRuleRuntimeId(*timer);
 				timer->executingScriptDepth++;
 				timer->executingScript = true;
 				m_active               = true;
@@ -3092,7 +2992,7 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 		// sendTo -> sendMsg/doSendMsg enforce connected-state checks for world sends.
 		Q_UNUSED(sendText);
 
-		const quint64       aliasRuntimeId = ensureAliasRuntimeId(m_runtime, &alias);
+		const quint64       aliasRuntimeId = m_runtime->ensureRuleRuntimeId(alias);
 		AliasExecutionScope executionScope(m_runtime, &alias, pluginIdOf(plugin), false);
 		sendTo(sendToValue, sendText, omitFromOutput, omitFromLogValue, variableName, scriptLabel, plugin);
 
@@ -3124,7 +3024,7 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &subject, const bool ignoreCase,
                                        QStringList &wildcards, QMap<QString, QString> &namedWildcards,
                                        int *startCol, int *endCol, const int startOffset,
-                                       const bool multiLine) const
+                                       const bool multiLine, qint64 *executionTimeNs) const
 {
 	QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
 	if (ignoreCase)
@@ -3169,7 +3069,7 @@ bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &su
 	}
 
 	const QMudAliasMatch::MatchResult result =
-	    QMudAliasMatch::matchWithCaptures(regex, subject, m_regexpMatchEmpty, startOffset);
+	    QMudAliasMatch::matchWithCaptures(regex, subject, m_regexpMatchEmpty, startOffset, executionTimeNs);
 	if (!result.matched)
 		return false;
 
@@ -3331,7 +3231,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			int                    startCol = 0;
 			int                    endCol   = 0;
 			if (!regexMatch(pattern, target, decoded.ignoreCase, wildcards, namedWildcards, &startCol,
-			                &endCol, 0, decoded.multiLine))
+			                &endCol, 0, decoded.multiLine, &trigger.executionTimeNs))
 			{
 				continue;
 			}
@@ -3404,7 +3304,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			trigger.matched++;
 			trigger.lastMatched = QDateTime::currentDateTime();
 			m_runtime->incrementTriggersMatched();
-			const quint64 triggerRuntimeId = ensureTriggerRuntimeId(m_runtime, &trigger);
+			const quint64 triggerRuntimeId = m_runtime->ensureRuleRuntimeId(trigger);
 			const bool    triggerSoundEnabled =
 			    QMudTriggerSound::shouldPlayTriggerSound(plugin != nullptr, worldTriggerSoundsEnabled);
 			if (!decoded.sound.isEmpty() &&
@@ -3571,7 +3471,8 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				{
 					int offset = endCol;
 					while (regexMatch(pattern, target, decoded.ignoreCase, wildcards, namedWildcards,
-					                  &startCol, &endCol, offset, decoded.multiLine))
+					                  &startCol, &endCol, offset, decoded.multiLine,
+					                  &trigger.executionTimeNs))
 					{
 						if (endCol <= offset)
 							break;
@@ -3685,7 +3586,7 @@ void WorldCommandProcessor::checkTimers()
 				scheduleStateChanged |= evaluation.runtimeStateChanged;
 				if (!evaluation.due)
 					continue;
-				const quint64 timerRuntimeId = ensureTimerRuntimeId(m_runtime, &timer);
+				const quint64 timerRuntimeId = m_runtime->ensureRuleRuntimeId(timer);
 				if (timerRuntimeId == 0)
 					continue;
 				firedRuntimeIds.push_back(timerRuntimeId);

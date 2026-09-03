@@ -9,6 +9,7 @@
 #ifndef QMUD_ALIASMATCHUTILS_H
 #define QMUD_ALIASMATCHUTILS_H
 
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QMap>
 #include <QRegularExpression>
 #include <QString>
@@ -34,10 +35,12 @@ namespace QMudAliasMatch
 	 * @param subject Input command text.
 	 * @param allowEmptyMatch Accept zero-length match when `true`.
 	 * @param startOffset Start offset for regex matching.
+	 * @param executionTimeNs Optional cumulative regex-execution time in nanoseconds.
 	 * @return Match result with capture data and span columns.
 	 */
 	MatchResult matchWithCaptures(const QRegularExpression &regex, const QString &subject,
-	                              bool allowEmptyMatch, int startOffset = 0);
+	                              bool allowEmptyMatch, int startOffset = 0,
+	                              qint64 *executionTimeNs = nullptr);
 
 	/**
 	 * @brief Checks whether alias/trigger nested execution depth exceeds configured limit.

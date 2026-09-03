@@ -6017,7 +6017,8 @@ function snapshot_trigger()
   SetVariable("trigger_runtime_report", table.concat({
     tostring(GetTriggerInfo("runtime_trigger", 33)),
     string.format("%.0f", GetTriggerInfo("runtime_trigger", 21)),
-    string.format("%.0f", GetTriggerInfo("runtime_trigger", 31))
+    string.format("%.0f", GetTriggerInfo("runtime_trigger", 31)),
+    string.format("%.9f", GetTriggerInfo("runtime_trigger", 37))
   }, "|"))
 end
 function snapshot_alias()
@@ -6108,13 +6109,32 @@ end
 	    });
 	QCOMPARE(processor.executeCommand(QStringLiteral("runtime-alias")), eOK);
 	processor.onIncomingLineReceived(QStringLiteral("runtime-trigger"));
-	QCOMPARE(processor.executeCommand(QStringLiteral("plugin-alias")), eOK);
-	processor.onIncomingLineReceived(QStringLiteral("plugin-trigger"));
-	processor.checkTimers();
-
 	QString value;
 	QVERIFY(runtime.findVariable(QStringLiteral("trigger_runtime_report"), value));
-	QCOMPARE(value, QStringLiteral("true|1|1"));
+	const QStringList triggerReport = value.split(QLatin1Char('|'));
+	QCOMPARE(triggerReport.size(), 4);
+	QCOMPARE(triggerReport.at(0), QStringLiteral("true"));
+	QCOMPARE(triggerReport.at(1), QStringLiteral("1"));
+	QCOMPARE(triggerReport.at(2), QStringLiteral("1"));
+	QCOMPARE(triggerReport.at(3),
+	         QString::number(runtime.triggers().constFirst().executionTimeSeconds(), 'f', 9));
+	QCOMPARE(processor.executeCommand(QStringLiteral("plugin-alias")), eOK);
+	processor.onIncomingLineReceived(QStringLiteral("plugin-trigger"));
+	QVERIFY(runtime.dispatchLuaExecuteScript(runtime.luaCallbacks(),
+	                                         QStringLiteral(R"lua(
+SetVariable("plugin_trigger_execution_report",
+            string.format("%.9f", GetPluginTriggerInfo("%1", "plugin_trigger", 37)))
+return true
+)lua")
+	                                             .arg(pluginId),
+	                                         QStringLiteral("plugin trigger execution-time report"), nullptr,
+	                                         true, false, 0, 0));
+	QVERIFY(runtime.findVariable(QStringLiteral("plugin_trigger_execution_report"), value));
+	const WorldRuntime::Plugin *runtimePlugin = runtime.pluginForId(pluginId);
+	QVERIFY(runtimePlugin);
+	QCOMPARE(value, QString::number(runtimePlugin->triggers.constFirst().executionTimeSeconds(), 'f', 9));
+	processor.checkTimers();
+
 	QVERIFY(runtime.findVariable(QStringLiteral("alias_runtime_report"), value));
 	QCOMPARE(value, QStringLiteral("true|1|1"));
 	QVERIFY(runtime.findVariable(QStringLiteral("timer_runtime_report"), value));
@@ -6867,6 +6887,7 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectMutableRuntimeDomain
 	WorldRuntime::Trigger &mutableTrigger = WorldRuntimeTestAccess::triggers(runtime).first();
 	mutableTrigger.matched                = 7;
 	mutableTrigger.matchAttempts          = 11;
+	mutableTrigger.executionTimeNs        = 17'000'000;
 	WorldRuntime::Alias &mutableAlias     = WorldRuntimeTestAccess::aliases(runtime).first();
 	mutableAlias.matched                  = 5;
 	mutableAlias.matchAttempts            = 13;
@@ -6889,6 +6910,7 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectMutableRuntimeDomain
 	    rulesChanged->timerListsByPluginId.value(QString()).constFirst();
 	QCOMPARE(triggerSnapshot.matched, 7);
 	QCOMPARE(triggerSnapshot.matchAttempts, 11);
+	QCOMPARE(triggerSnapshot.executionTimeNs, qint64{17'000'000});
 	QCOMPARE(aliasSnapshot.matched, 5);
 	QCOMPARE(aliasSnapshot.matchAttempts, 13);
 	QCOMPARE(timerSnapshot.firedCount, 3);

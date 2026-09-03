@@ -328,12 +328,13 @@ class WorldCommandProcessor : public QObject
 		 * @param endCol Optional output end column.
 		 * @param startOffset Start offset in subject.
 		 * @param multiLine Enable multiline mode when `true`.
+		 * @param executionTimeNs Optional cumulative regex-execution time in nanoseconds.
 		 * @return `true` when pattern matches.
 		 */
 		bool           regexMatch(const QString &pattern, const QString &subject, bool ignoreCase,
 		                          QStringList &wildcards, QMap<QString, QString> &namedWildcards,
 		                          int *startCol = nullptr, int *endCol = nullptr, int startOffset = 0,
-		                          bool multiLine = false) const;
+		                          bool multiLine = false, qint64 *executionTimeNs = nullptr) const;
 		struct TriggerScript
 		{
 				quint64                runtimeId{0};
