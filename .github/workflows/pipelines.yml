@@ -10,6 +10,11 @@ on:
     - cron: "0 4 * * *"
   workflow_dispatch:
     inputs:
+      run_main_pipeline:
+        description: "Run the complete push-to-main pipeline"
+        required: false
+        type: boolean
+        default: false
       force_coverage:
         description: "Force coverage run"
         required: false
@@ -113,9 +118,18 @@ jobs:
             } else if (context.eventName === "schedule") {
               addValidation("full-tests", 90);
             } else if (context.eventName === "workflow_dispatch") {
-              if (context.payload.inputs?.run_full_tests === "true") addValidation("full-tests", 90);
-              if (context.payload.inputs?.force_coverage === "true") addValidation("coverage", 120);
-              if (context.payload.inputs?.run_builds === "true") addBuilds();
+              if (context.payload.inputs?.run_main_pipeline === "true") {
+                if (context.ref !== "refs/heads/main") {
+                  throw new Error("The complete push-to-main pipeline must be dispatched from main.");
+                }
+                addValidation("quick-tests", 90);
+                addValidation("coverage", 120);
+                addBuilds();
+              } else {
+                if (context.payload.inputs?.run_full_tests === "true") addValidation("full-tests", 90);
+                if (context.payload.inputs?.force_coverage === "true") addValidation("coverage", 120);
+                if (context.payload.inputs?.run_builds === "true") addBuilds();
+              }
             }
 
             const hasBuilds = entries.some((entry) => entry.kind === "build");
@@ -680,7 +694,11 @@ jobs:
     needs:
       - pipeline-plan
       - pipeline
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.pipeline-plan.outputs.has_builds == 'true'
+    if: >-
+      needs.pipeline-plan.outputs.has_builds == 'true' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.run_main_pipeline == true))
     runs-on: [self-hosted, primary]
     permissions:
       contents: write
