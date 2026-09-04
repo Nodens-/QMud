@@ -265,6 +265,7 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS=--coverage
           CCACHE_DISABLE=1 cmake --build /home/user/build --parallel
           ctest --test-dir /home/user/build --output-on-failure --label-exclude slow
+          mkdir -p /home/user/build/coverage-html
           gcovr --root /home/user/project --object-directory /home/user/build \
             --filter /home/user/project/src/ --print-summary \
             --xml-pretty --xml /home/user/build/coverage.xml \
