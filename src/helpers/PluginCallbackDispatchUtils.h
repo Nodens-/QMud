@@ -9,6 +9,23 @@
 #ifndef QMUD_PLUGINCALLBACKDISPATCHUTILS_H
 #define QMUD_PLUGINCALLBACKDISPATCHUTILS_H
 
+#include "scripting/ScriptingErrors.h"
+
+/**
+ * @brief Returns the authoritative status for invoking a Lua routine in an installed plugin.
+ *
+ * `installPending` is deliberately treated as disabled: a plugin cannot receive any callback until its
+ * installation callback has completed. Keep all runtime and unified-snapshot call paths on this helper so a new
+ * eligibility condition cannot drift between observed dispatch and direct `CallPlugin` dispatch.
+ */
+[[nodiscard]] constexpr int qmudPluginDirectCallStatus(const bool enabled, const bool installPending,
+                                                       const bool hasLua) noexcept
+{
+	if (!enabled || installPending)
+		return ePluginDisabled;
+	return hasLua ? eOK : eNoSuchRoutine;
+}
+
 /**
  * @brief Returns whether a contended hotspot callback should be queued instead of synchronously waited on.
  * @param queueWhenCallbackLaneBusy Caller opt-in for the narrow non-blocking hotspot path.

@@ -28,83 +28,133 @@ namespace
 		timer.attributes.insert(QStringLiteral("one_shot"), QStringLiteral("0"));
 		return timer;
 	}
+
+	/**
+	 * @brief QTest fixture covering WorldCommandProcessor TimerAccounting scenarios.
+	 */
+	class tst_WorldCommandProcessor_TimerAccounting : public QObject
+	{
+			Q_OBJECT
+
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void dueTimerAdvancesAndIncrementsFiredCount()
+			{
+				WorldRuntime::Timer timer = makeTimer(QStringLiteral("heartbeat"));
+				const QDateTime     now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
+				timer.nextFireTime = now.addMSecs(-10);
+
+				const auto evaluation = QMudTimerScheduling::evaluateTimerDue(timer, now, true);
+				QVERIFY(evaluation.due);
+				QVERIFY(!evaluation.runtimeStateChanged);
+				QVERIFY(!QMudTimerScheduling::applyTimerFiredState(timer, now));
+
+				QCOMPARE(timer.firedCount, 1);
+				QCOMPARE(timer.lastFired, now);
+				QVERIFY(timer.nextFireTime > now);
+			}
+
+			void oneShotTimerRequestsDeletionAfterFire()
+			{
+				WorldRuntime::Timer timer = makeTimer(QStringLiteral("once"));
+				timer.attributes.insert(QStringLiteral("one_shot"), QStringLiteral("1"));
+				const QDateTime now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
+				timer.nextFireTime = now;
+
+				QVERIFY(QMudTimerScheduling::evaluateTimerDue(timer, now, true).due);
+				QVERIFY(QMudTimerScheduling::applyTimerFiredState(timer, now));
+
+				QCOMPARE(timer.attributes.value(QStringLiteral("enabled")), QStringLiteral("1"));
+			}
+
+			void resetTimerFieldsUsesInjectedClockForAtTime()
+			{
+				WorldRuntime::Timer timer = makeTimer(QStringLiteral("daily"));
+				timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("1"));
+				timer.attributes.insert(QStringLiteral("hour"), QStringLiteral("10"));
+				timer.attributes.insert(QStringLiteral("minute"), QStringLiteral("0"));
+				timer.attributes.insert(QStringLiteral("second"), QStringLiteral("0"));
+
+				const QDateTime now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
+				QVERIFY(QMudTimerScheduling::resetTimerFields(timer, now));
+
+				QCOMPARE(timer.lastFired, now);
+				QCOMPARE(timer.nextFireTime, QDateTime(QDate(2026, 3, 16), QTime(10, 0, 0), QTimeZone::UTC));
+				QCOMPARE(timer.nextFireTime.timeZone().id(), QByteArrayLiteral("UTC"));
+			}
+
+			void timerResetMutationReplaysExactState()
+			{
+				WorldRuntime::Timer callbackTimer = makeTimer(QStringLiteral("callback"));
+				WorldRuntime::Timer runtimeTimer  = makeTimer(QStringLiteral("runtime"));
+				const QMudTimerScheduling::TimerResetMutation mutation{
+				    QDateTime(QDate(2026, 3, 15), QTime(12, 0, 0, 347), QTimeZone::UTC)};
+
+				QVERIFY(mutation.apply(callbackTimer));
+				QVERIFY(mutation.apply(runtimeTimer));
+				QCOMPARE(callbackTimer.lastFired, runtimeTimer.lastFired);
+				QCOMPARE(callbackTimer.nextFireTime, runtimeTimer.nextFireTime);
+				QCOMPARE(callbackTimer.lastFired.time().msec(), 347);
+			}
+
+			void disconnectedTimerNeedsActiveClosedToBeDue()
+			{
+				WorldRuntime::Timer timer = makeTimer(QStringLiteral("closed"));
+				const QDateTime     now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
+				timer.nextFireTime = now.addSecs(-1);
+				timer.attributes.insert(QStringLiteral("active_closed"), QStringLiteral("0"));
+
+				QVERIFY(!QMudTimerScheduling::evaluateTimerDue(timer, now, false).due);
+				QVERIFY(QMudTimerScheduling::evaluateTimerDue(timer, now, true).due);
+			}
+
+			void timerDeadlineChangesOnlyWithTimingFields()
+			{
+				const WorldRuntime::Timer original = makeTimer(QStringLiteral("deadline"));
+
+				WorldRuntime::Timer       eligibilityOnly = original;
+				eligibilityOnly.attributes.insert(QStringLiteral("enabled"), QStringLiteral("0"));
+				eligibilityOnly.attributes.insert(QStringLiteral("active_closed"), QStringLiteral("0"));
+				QVERIFY(!QMudTimerScheduling::timerDeadlineDefinitionChanged(original, eligibilityOnly));
+
+				WorldRuntime::Timer irrelevantAtTimeOffset = original;
+				irrelevantAtTimeOffset.attributes.insert(QStringLiteral("at_time"), QStringLiteral("1"));
+				WorldRuntime::Timer changedAtTimeOffset = irrelevantAtTimeOffset;
+				changedAtTimeOffset.attributes.insert(QStringLiteral("offset_second"), QStringLiteral("5"));
+				QVERIFY(!QMudTimerScheduling::timerDeadlineDefinitionChanged(irrelevantAtTimeOffset,
+				                                                             changedAtTimeOffset));
+
+				WorldRuntime::Timer durationChanged = original;
+				durationChanged.attributes.insert(QStringLiteral("second"), QStringLiteral("2"));
+				QVERIFY(QMudTimerScheduling::timerDeadlineDefinitionChanged(original, durationChanged));
+			}
+
+			void unnamedTimerCanBeDue()
+			{
+				WorldRuntime::Timer timer = makeTimer(QString());
+				const QDateTime     now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
+				timer.nextFireTime = now.addSecs(-1);
+
+				QVERIFY(QMudTimerScheduling::evaluateTimerDue(timer, now, true).due);
+			}
+
+			void dueEvaluationReportsScheduleInitializationEvenWhenNotDue()
+			{
+				WorldRuntime::Timer timer = makeTimer(QStringLiteral("initializing"));
+				const QDateTime     now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
+
+				const auto          evaluation = QMudTimerScheduling::evaluateTimerDue(timer, now, true);
+
+				QVERIFY(!evaluation.due);
+				QVERIFY(evaluation.runtimeStateChanged);
+				QCOMPARE(timer.lastFired, now);
+				QVERIFY(timer.nextFireTime > now);
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
 } // namespace
 
-/**
- * @brief QTest fixture covering WorldCommandProcessor TimerAccounting scenarios.
- */
-class tst_WorldCommandProcessor_TimerAccounting : public QObject
-{
-		Q_OBJECT
-
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void dueTimerAdvancesAndIncrementsFiredCount()
-		{
-			WorldRuntime::Timer timer = makeTimer(QStringLiteral("heartbeat"));
-			const QDateTime     now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
-			timer.nextFireTime = now.addMSecs(-10);
-
-			QVERIFY(QMudTimerScheduling::isTimerDue(timer, now, true));
-			QMudTimerScheduling::applyTimerFiredState(timer, now);
-
-			QCOMPARE(timer.firedCount, 1);
-			QCOMPARE(timer.lastFired, now);
-			QVERIFY(timer.nextFireTime > now);
-		}
-
-		void oneShotTimerIsDisabledAfterFire()
-		{
-			WorldRuntime::Timer timer = makeTimer(QStringLiteral("once"));
-			timer.attributes.insert(QStringLiteral("one_shot"), QStringLiteral("1"));
-			const QDateTime now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
-			timer.nextFireTime = now;
-
-			QVERIFY(QMudTimerScheduling::isTimerDue(timer, now, true));
-			QMudTimerScheduling::applyTimerFiredState(timer, now);
-
-			QCOMPARE(timer.attributes.value(QStringLiteral("enabled")), QStringLiteral("0"));
-		}
-
-		void resetTimerFieldsUsesInjectedClockForAtTime()
-		{
-			WorldRuntime::Timer timer = makeTimer(QStringLiteral("daily"));
-			timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("1"));
-			timer.attributes.insert(QStringLiteral("hour"), QStringLiteral("10"));
-			timer.attributes.insert(QStringLiteral("minute"), QStringLiteral("0"));
-			timer.attributes.insert(QStringLiteral("second"), QStringLiteral("0"));
-
-			const QDateTime now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
-			QMudTimerScheduling::resetTimerFields(timer, now);
-
-			QCOMPARE(timer.lastFired, now);
-			QCOMPARE(timer.nextFireTime, QDateTime(QDate(2026, 3, 16), QTime(10, 0, 0), QTimeZone::UTC));
-		}
-
-		void disconnectedTimerNeedsActiveClosedToBeDue()
-		{
-			WorldRuntime::Timer timer = makeTimer(QStringLiteral("closed"));
-			const QDateTime     now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
-			timer.nextFireTime = now.addSecs(-1);
-			timer.attributes.insert(QStringLiteral("active_closed"), QStringLiteral("0"));
-
-			QVERIFY(!QMudTimerScheduling::isTimerDue(timer, now, false));
-			QVERIFY(QMudTimerScheduling::isTimerDue(timer, now, true));
-		}
-
-		void unnamedTimerCanBeDue()
-		{
-			WorldRuntime::Timer timer = makeTimer(QString());
-			const QDateTime     now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
-			timer.nextFireTime = now.addSecs(-1);
-
-			QVERIFY(QMudTimerScheduling::isTimerDue(timer, now, true));
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
-
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_TimerAccounting)
-
 
 #if __has_include("tst_WorldCommandProcessor_TimerAccounting.moc")
 #include "tst_WorldCommandProcessor_TimerAccounting.moc"

@@ -11,199 +11,203 @@
 
 #include <QtTest/QTest>
 
-/**
- * @brief QTest fixture for generation-based observed callback tracking helper functions.
- */
-class tst_PluginCallbackCatalogUtils : public QObject
+namespace
 {
-		Q_OBJECT
+	/**
+	 * @brief QTest fixture for generation-based observed callback tracking helper functions.
+	 */
+	class tst_PluginCallbackCatalogUtils : public QObject
+	{
+			Q_OBJECT
 
-	private slots:
-		/**
-		 * @brief Verifies alternating callback queries stay retained inside retention window.
-		 */
-		static void alternatingQueriesRemainTrackedWithinRetentionWindow()
-		{
-			QSet<QString>           observedCallbacks;
-			QHash<QString, quint64> queryGenerations;
-			quint64                 generation = 1;
-
-			noteObservedPluginCallbackQuery(queryGenerations, QStringLiteral("OnA"), generation);
-			QVERIFY(ensureObservedPluginCallback(observedCallbacks, QStringLiteral("OnA")));
-			noteObservedPluginCallbackQuery(queryGenerations, QStringLiteral("OnB"), generation);
-			QVERIFY(ensureObservedPluginCallback(observedCallbacks, QStringLiteral("OnB")));
-
-			for (int i = 0; i < 128; ++i)
+		private slots:
+			/**
+			 * @brief Verifies alternating callback queries stay retained inside retention window.
+			 */
+			static void alternatingQueriesRemainTrackedWithinRetentionWindow()
 			{
-				const QString queried = (i % 2 == 0) ? QStringLiteral("OnA") : QStringLiteral("OnB");
-				noteObservedPluginCallbackQuery(queryGenerations, queried, generation);
-				pruneStaleObservedPluginCallbacks(observedCallbacks, queryGenerations, generation,
-				                                  observedPluginCallbackRetentionGenerations());
-				QVERIFY2(observedCallbacks.contains(QStringLiteral("OnA")), "OnA was pruned too early");
-				QVERIFY2(observedCallbacks.contains(QStringLiteral("OnB")), "OnB was pruned too early");
-				advanceObservedPluginCallbackGeneration(generation);
-			}
-		}
+				QSet<QString>           observedCallbacks;
+				QHash<QString, quint64> queryGenerations;
+				quint64                 generation = 1;
 
-		/**
-		 * @brief Verifies stale callback names are pruned after retention generations elapse.
-		 */
-		static void callbackPrunedAfterRetentionWindowExpires()
-		{
-			QSet<QString>           observedCallbacks;
-			QHash<QString, quint64> queryGenerations;
-			quint64                 generation = 1;
+				noteObservedPluginCallbackQuery(queryGenerations, QStringLiteral("OnA"), generation);
+				QVERIFY(ensureObservedPluginCallback(observedCallbacks, QStringLiteral("OnA")));
+				noteObservedPluginCallbackQuery(queryGenerations, QStringLiteral("OnB"), generation);
+				QVERIFY(ensureObservedPluginCallback(observedCallbacks, QStringLiteral("OnB")));
 
-			noteObservedPluginCallbackQuery(queryGenerations, QStringLiteral("OnIdle"), generation);
-			QVERIFY(ensureObservedPluginCallback(observedCallbacks, QStringLiteral("OnIdle")));
-			QVERIFY(observedCallbacks.contains(QStringLiteral("OnIdle")));
-
-			for (quint64 i = 0; i <= observedPluginCallbackRetentionGenerations(); ++i)
-			{
-				pruneStaleObservedPluginCallbacks(observedCallbacks, queryGenerations, generation,
-				                                  observedPluginCallbackRetentionGenerations());
-				advanceObservedPluginCallbackGeneration(generation);
+				for (int i = 0; i < 128; ++i)
+				{
+					const QString queried = (i % 2 == 0) ? QStringLiteral("OnA") : QStringLiteral("OnB");
+					noteObservedPluginCallbackQuery(queryGenerations, queried, generation);
+					pruneStaleObservedPluginCallbacks(observedCallbacks, queryGenerations, generation,
+					                                  observedPluginCallbackRetentionGenerations());
+					QVERIFY2(observedCallbacks.contains(QStringLiteral("OnA")), "OnA was pruned too early");
+					QVERIFY2(observedCallbacks.contains(QStringLiteral("OnB")), "OnB was pruned too early");
+					advanceObservedPluginCallbackGeneration(generation);
+				}
 			}
 
-			pruneStaleObservedPluginCallbacks(observedCallbacks, queryGenerations, generation,
-			                                  observedPluginCallbackRetentionGenerations());
-			QVERIFY(!observedCallbacks.contains(QStringLiteral("OnIdle")));
-			QVERIFY(!queryGenerations.contains(QStringLiteral("OnIdle")));
-		}
+			/**
+			 * @brief Verifies stale callback names are pruned after retention generations elapse.
+			 */
+			static void callbackPrunedAfterRetentionWindowExpires()
+			{
+				QSet<QString>           observedCallbacks;
+				QHash<QString, quint64> queryGenerations;
+				quint64                 generation = 1;
 
-		/**
-		 * @brief Verifies tracking reset clears all tracked names/query generations and resets counter.
-		 */
-		static void resetClearsTrackingState()
-		{
-			QSet<QString>           observedCallbacks;
-			QHash<QString, quint64> queryGenerations;
-			quint64                 generation = 42;
+				noteObservedPluginCallbackQuery(queryGenerations, QStringLiteral("OnIdle"), generation);
+				QVERIFY(ensureObservedPluginCallback(observedCallbacks, QStringLiteral("OnIdle")));
+				QVERIFY(observedCallbacks.contains(QStringLiteral("OnIdle")));
 
-			noteObservedPluginCallbackQuery(queryGenerations, QStringLiteral("OnTest"), generation);
-			QVERIFY(ensureObservedPluginCallback(observedCallbacks, QStringLiteral("OnTest")));
+				for (quint64 i = 0; i <= observedPluginCallbackRetentionGenerations(); ++i)
+				{
+					pruneStaleObservedPluginCallbacks(observedCallbacks, queryGenerations, generation,
+					                                  observedPluginCallbackRetentionGenerations());
+					advanceObservedPluginCallbackGeneration(generation);
+				}
 
-			resetObservedPluginCallbackTracking(observedCallbacks, queryGenerations, generation);
-			QVERIFY(observedCallbacks.isEmpty());
-			QVERIFY(queryGenerations.isEmpty());
-			QCOMPARE(generation, static_cast<quint64>(1));
-		}
+				pruneStaleObservedPluginCallbacks(observedCallbacks, queryGenerations, generation,
+				                                  observedPluginCallbackRetentionGenerations());
+				QVERIFY(!observedCallbacks.contains(QStringLiteral("OnIdle")));
+				QVERIFY(!queryGenerations.contains(QStringLiteral("OnIdle")));
+			}
 
-		/**
-		 * @brief Verifies recipient filtering preserves order and removes out-of-range entries.
-		 */
-		static void filtersRecipientIndicesByPluginCount()
-		{
-			const QVector<int> cached{2, -1, 0, 9, 1, 3};
-			const QVector<int> filtered = qmudFilterValidPluginRecipientIndices(cached, 3);
-			QCOMPARE(filtered, QVector<int>({2, 0, 1}));
-		}
+			/**
+			 * @brief Verifies tracking reset clears all tracked names/query generations and resets counter.
+			 */
+			static void resetClearsTrackingState()
+			{
+				QSet<QString>           observedCallbacks;
+				QHash<QString, quint64> queryGenerations;
+				quint64                 generation = 42;
 
-		/**
-		 * @brief Verifies recipient filtering keeps stable order and duplicate recipients.
-		 */
-		static void filtersRecipientIndicesPreservesStableOrderAndDuplicates()
-		{
-			const QVector<int> cached{1, 1, 0, 2, 1, -3, 2};
-			const QVector<int> filtered = qmudFilterValidPluginRecipientIndices(cached, 3);
-			QCOMPARE(filtered, QVector<int>({1, 1, 0, 2, 1, 2}));
-		}
+				noteObservedPluginCallbackQuery(queryGenerations, QStringLiteral("OnTest"), generation);
+				QVERIFY(ensureObservedPluginCallback(observedCallbacks, QStringLiteral("OnTest")));
 
-		/**
-		 * @brief Verifies recipient filtering returns empty list for non-positive plugin count.
-		 */
-		static void filtersRecipientIndicesHandlesNonPositivePluginCount()
-		{
-			const QVector<int> cached{0, 1, 2};
-			QVERIFY(qmudFilterValidPluginRecipientIndices(cached, 0).isEmpty());
-			QVERIFY(qmudFilterValidPluginRecipientIndices(cached, -1).isEmpty());
-		}
+				resetObservedPluginCallbackTracking(observedCallbacks, queryGenerations, generation);
+				QVERIFY(observedCallbacks.isEmpty());
+				QVERIFY(queryGenerations.isEmpty());
+				QCOMPARE(generation, static_cast<quint64>(1));
+			}
 
-		/**
-		 * @brief Verifies single-recipient self-broadcast skip logic.
-		 */
-		static void selfOnlyBroadcastCanBeSkipped()
-		{
-			const QVector<int> recipients{1};
-			const bool skip = qmudShouldSkipSelfOnlyPluginBroadcast(recipients, 3, QStringLiteral("plugin-b"),
-			                                                        [](const int index)
-			                                                        {
-				                                                        switch (index)
-				                                                        {
-				                                                        case 0:
-					                                                        return QStringLiteral("plugin-a");
-				                                                        case 1:
-					                                                        return QStringLiteral("plugin-B");
-				                                                        default:
-					                                                        return QStringLiteral("plugin-c");
-				                                                        }
-			                                                        });
-			QVERIFY(skip);
-		}
+			/**
+			 * @brief Verifies recipient filtering preserves order and removes out-of-range entries.
+			 */
+			static void filtersRecipientIndicesByPluginCount()
+			{
+				const QVector<int> cached{2, -1, 0, 9, 1, 3};
+				const QVector<int> filtered = qmudFilterValidPluginRecipientIndices(cached, 3);
+				QCOMPARE(filtered, QVector<int>({2, 0, 1}));
+			}
 
-		/**
-		 * @brief Verifies skip logic stays disabled for empty caller or multiple recipients.
-		 */
-		static void selfOnlySkipRequiresSingleCallerRecipient()
-		{
-			const QVector<int> single{0};
-			QVERIFY(!qmudShouldSkipSelfOnlyPluginBroadcast(single, 1, QString(), [](const int)
-			                                               { return QStringLiteral("plugin-a"); }));
+			/**
+			 * @brief Verifies recipient filtering keeps stable order and duplicate recipients.
+			 */
+			static void filtersRecipientIndicesPreservesStableOrderAndDuplicates()
+			{
+				const QVector<int> cached{1, 1, 0, 2, 1, -3, 2};
+				const QVector<int> filtered = qmudFilterValidPluginRecipientIndices(cached, 3);
+				QCOMPARE(filtered, QVector<int>({1, 1, 0, 2, 1, 2}));
+			}
 
-			const QVector<int> multiple{0, 1};
-			QVERIFY(!qmudShouldSkipSelfOnlyPluginBroadcast(
-			    multiple, 2, QStringLiteral("plugin-a"), [](const int index)
-			    { return index == 0 ? QStringLiteral("plugin-a") : QStringLiteral("plugin-b"); }));
-		}
+			/**
+			 * @brief Verifies recipient filtering returns empty list for non-positive plugin count.
+			 */
+			static void filtersRecipientIndicesHandlesNonPositivePluginCount()
+			{
+				const QVector<int> cached{0, 1, 2};
+				QVERIFY(qmudFilterValidPluginRecipientIndices(cached, 0).isEmpty());
+				QVERIFY(qmudFilterValidPluginRecipientIndices(cached, -1).isEmpty());
+			}
 
-		/**
-		 * @brief Verifies skip logic does not trigger when callback accessor is missing.
-		 */
-		static void selfOnlySkipRequiresValidAccessor()
-		{
-			const QVector<int> recipients{0};
-			QVERIFY(!qmudShouldSkipSelfOnlyPluginBroadcast(recipients, 1, QStringLiteral("plugin-a"),
-			                                               std::function<QString(int)>()));
-		}
+			/**
+			 * @brief Verifies single-recipient self-broadcast skip logic.
+			 */
+			static void selfOnlyBroadcastCanBeSkipped()
+			{
+				const QVector<int> recipients{1};
+				const bool         skip =
+				    qmudShouldSkipSelfOnlyPluginBroadcast(recipients, 3, QStringLiteral("plugin-b"),
+				                                          [](const int index)
+				                                          {
+					                                          switch (index)
+					                                          {
+					                                          case 0:
+						                                          return QStringLiteral("plugin-a");
+					                                          case 1:
+						                                          return QStringLiteral("plugin-b");
+					                                          default:
+						                                          return QStringLiteral("plugin-c");
+					                                          }
+				                                          });
+				QVERIFY(skip);
+			}
 
-		/**
-		 * @brief Provides callback-lane contention combinations for hotspot queue policy coverage.
-		 */
-		static void contendedHotspotCallbackQueuePolicy_data()
-		{
-			QTest::addColumn<bool>("queueWhenBusy");
-			QTest::addColumn<bool>("dispatchActive");
-			QTest::addColumn<bool>("workerInFlight");
-			QTest::addColumn<bool>("hasQueuedDispatches");
-			QTest::addColumn<bool>("drainQueued");
-			QTest::addColumn<bool>("expected");
+			/**
+			 * @brief Verifies skip logic stays disabled for empty caller or multiple recipients.
+			 */
+			static void selfOnlySkipRequiresSingleCallerRecipient()
+			{
+				const QVector<int> single{0};
+				QVERIFY(!qmudShouldSkipSelfOnlyPluginBroadcast(single, 1, QString(), [](const int)
+				                                               { return QStringLiteral("plugin-a"); }));
 
-			QTest::newRow("not opted in idle") << false << false << false << false << false << false;
-			QTest::newRow("not opted in active") << false << true << true << true << true << false;
-			QTest::newRow("opted in idle") << true << false << false << false << false << false;
-			QTest::newRow("active") << true << true << false << false << false << true;
-			QTest::newRow("worker in flight") << true << false << true << false << false << true;
-			QTest::newRow("queued dispatch") << true << false << false << true << false << true;
-			QTest::newRow("drain queued") << true << false << false << false << true << true;
-		}
+				const QVector<int> multiple{0, 1};
+				QVERIFY(!qmudShouldSkipSelfOnlyPluginBroadcast(
+				    multiple, 2, QStringLiteral("plugin-a"), [](const int index)
+				    { return index == 0 ? QStringLiteral("plugin-a") : QStringLiteral("plugin-b"); }));
+			}
 
-		/**
-		 * @brief Verifies only opted-in hotspot callbacks queue when the callback lane is contended.
-		 */
-		static void contendedHotspotCallbackQueuePolicy()
-		{
-			QFETCH(bool, queueWhenBusy);
-			QFETCH(bool, dispatchActive);
-			QFETCH(bool, workerInFlight);
-			QFETCH(bool, hasQueuedDispatches);
-			QFETCH(bool, drainQueued);
-			QFETCH(bool, expected);
+			/**
+			 * @brief Verifies skip logic does not trigger when callback accessor is missing.
+			 */
+			static void selfOnlySkipRequiresValidAccessor()
+			{
+				const QVector<int> recipients{0};
+				QVERIFY(!qmudShouldSkipSelfOnlyPluginBroadcast(recipients, 1, QStringLiteral("plugin-a"),
+				                                               std::function<QString(int)>()));
+			}
 
-			QCOMPARE(qmudShouldQueueContendedHotspotCallback(queueWhenBusy, dispatchActive, workerInFlight,
-			                                                 hasQueuedDispatches, drainQueued),
-			         expected);
-		}
-};
+			/**
+			 * @brief Provides callback-lane contention combinations for hotspot queue policy coverage.
+			 */
+			static void contendedHotspotCallbackQueuePolicy_data()
+			{
+				QTest::addColumn<bool>("queueWhenBusy");
+				QTest::addColumn<bool>("dispatchActive");
+				QTest::addColumn<bool>("workerInFlight");
+				QTest::addColumn<bool>("hasQueuedDispatches");
+				QTest::addColumn<bool>("drainQueued");
+				QTest::addColumn<bool>("expected");
+
+				QTest::newRow("not opted in idle") << false << false << false << false << false << false;
+				QTest::newRow("not opted in active") << false << true << true << true << true << false;
+				QTest::newRow("opted in idle") << true << false << false << false << false << false;
+				QTest::newRow("active") << true << true << false << false << false << true;
+				QTest::newRow("worker in flight") << true << false << true << false << false << true;
+				QTest::newRow("queued dispatch") << true << false << false << true << false << true;
+				QTest::newRow("drain queued") << true << false << false << false << true << true;
+			}
+
+			/**
+			 * @brief Verifies only opted-in hotspot callbacks queue when the callback lane is contended.
+			 */
+			static void contendedHotspotCallbackQueuePolicy()
+			{
+				QFETCH(bool, queueWhenBusy);
+				QFETCH(bool, dispatchActive);
+				QFETCH(bool, workerInFlight);
+				QFETCH(bool, hasQueuedDispatches);
+				QFETCH(bool, drainQueued);
+				QFETCH(bool, expected);
+
+				QCOMPARE(qmudShouldQueueContendedHotspotCallback(
+				             queueWhenBusy, dispatchActive, workerInFlight, hasQueuedDispatches, drainQueued),
+				         expected);
+			}
+	};
+} // namespace
 
 QTEST_APPLESS_MAIN(tst_PluginCallbackCatalogUtils)
 

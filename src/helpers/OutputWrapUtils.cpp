@@ -205,8 +205,53 @@ int QMudOutputWrapUtils::trailingLineColumnWidthForWrap(const QString &text)
 	return column;
 }
 
+bool QMudOutputWrapUtils::styleSpansCoverTextExactly(const QString                          &text,
+                                                     const QVector<WorldRuntime::StyleSpan> &spans)
+{
+	qsizetype remaining = text.size();
+	for (const WorldRuntime::StyleSpan &span : spans)
+	{
+		if (span.length <= 0 || static_cast<qsizetype>(span.length) > remaining)
+			return false;
+		remaining -= span.length;
+	}
+	return remaining == 0;
+}
+
+QVector<WorldRuntime::StyleSpan>
+QMudOutputWrapUtils::normalizeStyleSpansForText(const QString                          &text,
+                                                const QVector<WorldRuntime::StyleSpan> &spans,
+                                                const WorldRuntime::StyleSpan          &fallback)
+{
+	QVector<WorldRuntime::StyleSpan> normalized;
+	int                              remaining = safeQSizeToInt(text.size());
+	if (remaining <= 0)
+		return normalized;
+
+	normalized.reserve(spans.size() + 1);
+	for (const WorldRuntime::StyleSpan &span : spans)
+	{
+		if (span.length <= 0)
+			continue;
+		WorldRuntime::StyleSpan clipped = span;
+		clipped.length                  = qMin(span.length, remaining);
+		normalized.push_back(std::move(clipped));
+		remaining -= normalized.constLast().length;
+		if (remaining == 0)
+			break;
+	}
+	if (remaining > 0)
+	{
+		WorldRuntime::StyleSpan suffix = fallback;
+		suffix.length                  = remaining;
+		normalized.push_back(std::move(suffix));
+	}
+	return normalized;
+}
+
 void QMudOutputWrapUtils::wrapPlainLineForColumn(QString &text, const int wrapColumn, const bool indentParas,
-                                                 const int firstLinePrefixColumns)
+                                                 const int  firstLinePrefixColumns,
+                                                 const bool firstLinePrefixEndsWithSpace)
 {
 	if (wrapColumn <= 0 || text.isEmpty())
 	{
@@ -221,6 +266,7 @@ void QMudOutputWrapUtils::wrapPlainLineForColumn(QString &text, const int wrapCo
 	int  lineStart          = 0;
 	int  lastSpace          = -1;
 	bool lineHasVisibleChar = column > 0;
+	bool canBreakBeforeText = firstLinePrefixColumns > 0 && firstLinePrefixEndsWithSpace;
 
 	auto recomputeLineState = [&]
 	{
@@ -273,6 +319,7 @@ void QMudOutputWrapUtils::wrapPlainLineForColumn(QString &text, const int wrapCo
 			lineStart          = safeQSizeToInt(wrappedText.size());
 			lastSpace          = -1;
 			lineHasVisibleChar = false;
+			canBreakBeforeText = false;
 			continue;
 		}
 
@@ -297,8 +344,11 @@ void QMudOutputWrapUtils::wrapPlainLineForColumn(QString &text, const int wrapCo
 				if (onlyWhitespace)
 					insertPos = safeQSizeToInt(wrappedText.size());
 			}
+			else if (canBreakBeforeText && lineStart == 0)
+				insertPos = 0;
 
 			wrappedText.insert(insertPos, QLatin1Char('\n'));
+			canBreakBeforeText = false;
 			recomputeLineState();
 		}
 
@@ -315,7 +365,8 @@ void QMudOutputWrapUtils::wrapPlainLineForColumn(QString &text, const int wrapCo
 
 void QMudOutputWrapUtils::wrapStyledLineForColumn(QString &text, QVector<WorldRuntime::StyleSpan> &spans,
                                                   const int wrapColumn, const bool indentParas,
-                                                  const int firstLinePrefixColumns)
+                                                  const int  firstLinePrefixColumns,
+                                                  const bool firstLinePrefixEndsWithSpace)
 {
 	if (wrapColumn <= 0 || text.isEmpty())
 		return;
@@ -348,6 +399,7 @@ void QMudOutputWrapUtils::wrapStyledLineForColumn(QString &text, QVector<WorldRu
 	int  lineStart          = 0;
 	int  lastSpace          = -1;
 	bool lineHasVisibleChar = column > 0;
+	bool canBreakBeforeText = firstLinePrefixColumns > 0 && firstLinePrefixEndsWithSpace;
 
 	auto recomputeLineState = [&]
 	{
@@ -404,6 +456,7 @@ void QMudOutputWrapUtils::wrapStyledLineForColumn(QString &text, QVector<WorldRu
 			lineStart          = safeQSizeToInt(wrappedText.size());
 			lastSpace          = -1;
 			lineHasVisibleChar = false;
+			canBreakBeforeText = false;
 			continue;
 		}
 
@@ -428,12 +481,15 @@ void QMudOutputWrapUtils::wrapStyledLineForColumn(QString &text, QVector<WorldRu
 				if (onlyWhitespace)
 					insertPos = safeQSizeToInt(wrappedText.size());
 			}
+			else if (canBreakBeforeText && lineStart == 0)
+				insertPos = 0;
 
 			const WorldRuntime::StyleSpan newlineStyle = insertPos > 0 && insertPos - 1 < wrappedStyles.size()
 			                                                 ? wrappedStyles.at(insertPos - 1)
 			                                                 : style;
 			wrappedText.insert(insertPos, QLatin1Char('\n'));
 			wrappedStyles.insert(insertPos, newlineStyle);
+			canBreakBeforeText = false;
 			recomputeLineState();
 		}
 

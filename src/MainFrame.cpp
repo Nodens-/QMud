@@ -27,6 +27,7 @@
 #include <QDebug>
 #include <QFontMetrics>
 #include <QGuiApplication>
+#include <QHash>
 #include <QIcon>
 #include <QImageReader>
 #include <QLabel>
@@ -37,6 +38,7 @@
 #include <QMetaObject>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QScopedValueRollback>
 #include <QSignalBlocker>
 #include <QStatusBar>
 #include <QStyle>
@@ -805,7 +807,7 @@ void MainWindow::buildMenus()
 	addActionToMenu(m_windowMenu, QStringLiteral("NewWindow"), QStringLiteral("&New Window"));
 	addActionToMenu(m_windowMenu, QStringLiteral("CascadeWindows"), QStringLiteral("&Cascade"));
 	addActionToMenu(m_windowMenu, QStringLiteral("TileWindows"), QStringLiteral("&Tile Horizontally"));
-	addActionToMenu(m_windowMenu, QStringLiteral("TileWindowsVert"), QStringLiteral("Tile Vertically"));
+	addActionToMenu(m_windowMenu, QStringLiteral("TileWindowsVertically"), QStringLiteral("Tile Vertically"));
 	addActionToMenu(m_windowMenu, QStringLiteral("ArrangeIcons"), QStringLiteral("&Arrange Icons"));
 	addActionToMenu(m_windowMenu, QStringLiteral("WindowMinimize"), QStringLiteral("&Minimize\tShift+Ctrl+M"),
 	                QKeySequence(QStringLiteral("Shift+Ctrl+M")));
@@ -875,8 +877,10 @@ void MainWindow::buildMdiArea()
 	m_centralLayout->addWidget(&m_mdiTabs);
 	m_centralLayout->addWidget(m_mdiArea);
 	setCentralWidget(m_centralContainer);
+	m_mdiArea->setOption(QMdiArea::DontMaximizeSubWindowOnActivation, m_windowTabsStyle != 0);
 
 	connect(m_mdiArea, &QMdiArea::subWindowActivated, this, &MainWindow::onMdiSubWindowActivated);
+	connect(&m_mdiTabs, &MdiTabs::windowActivationRequested, this, &MainWindow::activateMdiSubWindow);
 }
 
 void MainWindow::buildStatusBar()
@@ -1387,14 +1391,22 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 	if (!m_mdiArea || !subWindow)
 		return;
 
+	QScopedValueRollback transitionGuard(m_mdiPresentationTransitionActive, true);
+	const bool           tabbedPresentationActive = isTabbedWindowPresentationActive();
+	const bool           mdiUpdatesEnabled        = m_mdiArea->updatesEnabled();
+	if (tabbedPresentationActive)
+		m_mdiArea->setUpdatesEnabled(false);
+
 	const QPointer<QMdiSubWindow> previousActive =
 	    !activate ? QMudMainFrameMdiUtils::resolveBackgroundAddRestoreTarget(
 	                    m_mdiArea->activeSubWindow(), m_lastActiveSubWindow,
 	                    m_mdiArea->subWindowList(QMdiArea::CreationOrder), subWindow)
 	              : nullptr;
 
-	auto *world      = qobject_cast<WorldChildWindow *>(subWindow);
-	auto *textWindow = qobject_cast<TextChildWindow *>(subWindow);
+	auto      *world      = qobject_cast<WorldChildWindow *>(subWindow);
+	auto      *textWindow = qobject_cast<TextChildWindow *>(subWindow);
+	const bool maximizeOnAdd =
+	    tabbedPresentationActive || textWindow || (world && world->isPrimaryRuntimeBinding());
 	m_mdiArea->addSubWindow(subWindow);
 	subWindow->installEventFilter(this);
 	connect(subWindow, &QObject::destroyed, this,
@@ -1410,9 +1422,9 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 		        if (!fallback)
 			        return;
 		        if (m_mdiArea->activeSubWindow() != fallback)
-			        m_mdiArea->setActiveSubWindow(fallback);
+			        activateMdiSubWindow(fallback.data());
 	        });
-	if (world || textWindow)
+	if (maximizeOnAdd)
 		subWindow->showMaximized();
 	else
 		subWindow->show();
@@ -1428,8 +1440,8 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 	}
 	if (activate)
 	{
-		m_mdiArea->setActiveSubWindow(subWindow);
-		if (world || textWindow)
+		activateMdiSubWindow(subWindow);
+		if (maximizeOnAdd)
 			subWindow->showMaximized();
 		else
 			subWindow->show();
@@ -1443,9 +1455,19 @@ void MainWindow::addMdiSubWindow(QMdiSubWindow *subWindow, const bool activate)
 	}
 	else if (previousActive)
 	{
-		m_mdiArea->setActiveSubWindow(previousActive);
+		activateMdiSubWindow(previousActive.data());
 	}
+	if (tabbedPresentationActive)
+		maximizeMdiSubWindows(m_mdiArea->activeSubWindow());
 	m_mdiTabs.updateTabs();
+	if (!tabbedPresentationActive && maximizeOnAdd)
+		queueMdiPresentationReconciliation();
+	if (tabbedPresentationActive)
+	{
+		m_mdiArea->setUpdatesEnabled(mdiUpdatesEnabled);
+		if (mdiUpdatesEnabled)
+			m_mdiArea->viewport()->update();
+	}
 }
 
 void MainWindow::onApplicationStateChanged(const Qt::ApplicationState state)
@@ -1461,7 +1483,15 @@ void MainWindow::onApplicationStateChanged(const Qt::ApplicationState state)
 
 WorldChildWindow *MainWindow::activeWorldChildWindow() const
 {
-	return qobject_cast<WorldChildWindow *>(currentOrLastActiveSubWindow());
+	auto *world = qobject_cast<WorldChildWindow *>(currentOrLastActiveSubWindow());
+	return world && world->isPrimaryRuntimeBinding() ? world : nullptr;
+}
+
+WorldChildWindow *MainWindow::activeWorldPresentationWindow() const
+{
+	if (!m_mdiArea)
+		return nullptr;
+	return qobject_cast<WorldChildWindow *>(m_mdiArea->activeSubWindow());
 }
 
 TextChildWindow *MainWindow::activeTextChildWindow() const
@@ -1488,7 +1518,7 @@ WorldChildWindow *MainWindow::findWorldChildWindow(WorldRuntime *runtime) const
 		auto *world = qobject_cast<WorldChildWindow *>(sub);
 		if (!world)
 			continue;
-		if (world->runtime() == runtime)
+		if (world->runtime() == runtime && world->isPrimaryRuntimeBinding())
 			return world;
 	}
 
@@ -1501,7 +1531,7 @@ bool MainWindow::activateWorldRuntime(WorldRuntime *runtime)
 	if (!world || !m_mdiArea)
 		return false;
 
-	m_mdiArea->setActiveSubWindow(world);
+	activateMdiSubWindow(world);
 	if (world->isMinimized())
 		world->showNormal();
 	world->show();
@@ -1665,7 +1695,7 @@ bool MainWindow::activateActivityWindow() const
 	ActivityChildWindow *activity = activityChildWindow();
 	if (!activity)
 		return false;
-	m_mdiArea->setActiveSubWindow(activity);
+	activateMdiSubWindow(activity);
 	activity->show();
 	activity->raise();
 	return true;
@@ -1757,7 +1787,7 @@ void MainWindow::onToggleInfoBar(const bool checked)
 
 void MainWindow::showStatusMessage(const QString &message, const int timeoutMs)
 {
-	if (m_hyperlinkStatusLocked)
+	if (m_statusMessageOverrideToken != 0 || m_hyperlinkStatusLocked)
 		return;
 	if (m_statusMessage)
 		m_statusMessage->setText(message);
@@ -1771,8 +1801,40 @@ void MainWindow::showStatusMessage(const QString &message, const int timeoutMs)
 	}
 }
 
+quint64 MainWindow::acquireStatusMessageOverride(const QString &message)
+{
+	++m_nextStatusMessageOverrideToken;
+	if (m_nextStatusMessageOverrideToken == 0)
+		++m_nextStatusMessageOverrideToken;
+	m_statusMessageOverrideToken = m_nextStatusMessageOverrideToken;
+	m_hyperlinkStatusLocked      = false;
+	m_statusTipOwnsMessage       = false;
+	if (m_statusMessageTimer)
+		m_statusMessageTimer->stop();
+	if (m_statusMessage)
+		m_statusMessage->setText(message);
+	return m_statusMessageOverrideToken;
+}
+
+void MainWindow::updateStatusMessageOverride(const quint64 token, const QString &message) const
+{
+	if (token == 0 || token != m_statusMessageOverrideToken)
+		return;
+	if (m_statusMessage && m_statusMessage->text() != message)
+		m_statusMessage->setText(message);
+}
+
+void MainWindow::releaseStatusMessageOverride(const quint64 token)
+{
+	if (token == 0 || token != m_statusMessageOverrideToken)
+		return;
+	m_statusMessageOverrideToken = 0;
+}
+
 void MainWindow::setHyperlinkStatusLock(const QString &href)
 {
+	if (m_statusMessageOverrideToken != 0)
+		return;
 	const QString trimmed = href.trimmed();
 	if (trimmed.isEmpty())
 		return;
@@ -1923,53 +1985,43 @@ void MainWindow::onActionTriggered()
 
 	const QString cmd = a->objectName();
 	qDebug() << "Action triggered:" << cmd;
+	const auto applyWindowedMdiLayout = [this](const auto &layout)
+	{
+		if (!m_mdiArea)
+			return;
+		QScopedValueRollback transitionGuard(m_mdiPresentationTransitionActive, true);
+		const bool           updatesEnabled = m_mdiArea->updatesEnabled();
+		m_mdiArea->setUpdatesEnabled(false);
+		setTabbedWindowPresentationActive(false);
+		layout();
+		m_mdiArea->setUpdatesEnabled(updatesEnabled);
+		if (updatesEnabled)
+			m_mdiArea->viewport()->update();
+	};
 
 	if (cmd == QStringLiteral("CascadeWindows"))
 	{
-		if (m_mdiArea)
-			m_mdiArea->cascadeSubWindows();
+		applyWindowedMdiLayout([this] { m_mdiArea->cascadeSubWindows(); });
 		return;
 	}
 	if (cmd == QStringLiteral("TileWindows"))
 	{
-		if (m_mdiArea)
-		{
-			const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
-			if (const int count = sizeToInt(windows.size()); count > 0)
-			{
-				const QRect area   = m_mdiArea->viewport()->rect();
-				const int   height = area.height() / count;
-				int         y      = area.top();
-				for (QMdiSubWindow *sub : windows)
-				{
-					if (!sub)
-						continue;
-					sub->setGeometry(area.left(), y, area.width(), height);
-					y += height;
-				}
-			}
-		}
+		applyWindowedMdiLayout(
+		    [this]
+		    {
+			    QMudMainFrameMdiUtils::tileSubWindows(m_mdiArea,
+			                                          QMudMainFrameMdiUtils::TileDirection::Horizontal);
+		    });
 		return;
 	}
-	if (cmd == QStringLiteral("TileWindowsVert"))
+	if (cmd == QStringLiteral("TileWindowsVertically"))
 	{
-		if (m_mdiArea)
-		{
-			const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
-			if (const int count = sizeToInt(windows.size()); count > 0)
-			{
-				const QRect area  = m_mdiArea->viewport()->rect();
-				const int   width = area.width() / count;
-				int         x     = area.left();
-				for (QMdiSubWindow *sub : windows)
-				{
-					if (!sub)
-						continue;
-					sub->setGeometry(x, area.top(), width, area.height());
-					x += width;
-				}
-			}
-		}
+		applyWindowedMdiLayout(
+		    [this]
+		    {
+			    QMudMainFrameMdiUtils::tileSubWindows(m_mdiArea,
+			                                          QMudMainFrameMdiUtils::TileDirection::Vertical);
+		    });
 		return;
 	}
 	if (cmd == QStringLiteral("ArrangeIcons"))
@@ -2056,7 +2108,7 @@ void MainWindow::updateWindowMenu()
 	QAction *newWindow        = actionForCommand(QStringLiteral("NewWindow"));
 	QAction *cascade          = actionForCommand(QStringLiteral("CascadeWindows"));
 	QAction *tile             = actionForCommand(QStringLiteral("TileWindows"));
-	QAction *tileVert         = actionForCommand(QStringLiteral("TileWindowsVert"));
+	QAction *tileVert         = actionForCommand(QStringLiteral("TileWindowsVertically"));
 	QAction *arrangeIcons     = actionForCommand(QStringLiteral("ArrangeIcons"));
 	QAction *minimize         = actionForCommand(QStringLiteral("WindowMinimize"));
 	QAction *closeAllNotepads = actionForCommand(QStringLiteral("CloseAllNotepads"));
@@ -2139,7 +2191,7 @@ void MainWindow::updateWindowMenu()
 		        {
 			        if (!m_mdiArea || !ptr)
 				        return;
-			        m_mdiArea->setActiveSubWindow(ptr);
+			        activateMdiSubWindow(ptr.data());
 			        ptr->show();
 			        ptr->setFocus();
 		        });
@@ -2161,29 +2213,20 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 	}
 
 	WorldRuntime *activeRuntime = nullptr;
-	if (m_mdiArea)
-	{
-		for (QMdiSubWindow *sub : m_mdiArea->subWindowList(QMdiArea::CreationOrder))
-		{
-			auto *world = qobject_cast<WorldChildWindow *>(sub);
-			if (!world)
-				continue;
-			WorldRuntime *runtime = world->runtime();
-			if (!runtime)
-				continue;
-			const bool active = sub == window;
-			runtime->requestActiveState(active);
-			if (active)
-				activeRuntime = runtime;
-		}
-	}
+	if (auto *world = qobject_cast<WorldChildWindow *>(window); world && world->isPrimaryRuntimeBinding())
+		activeRuntime = world->runtime();
+	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
+		if (entry.runtime)
+			entry.runtime->requestActiveState(entry.runtime == activeRuntime);
 	refreshTitleBar();
 	if (activeRuntime)
 	{
 		if (AppController *app = AppController::instance())
 			app->processScriptFileChange(activeRuntime);
 	}
-	setActiveShortcutAcceleratorRuntime(activeRuntime);
+	const auto *activeWorld = qobject_cast<WorldChildWindow *>(window);
+	setActiveShortcutAcceleratorRuntime(activeWorld && activeWorld->isPrimaryRuntimeBinding() ? activeRuntime
+	                                                                                          : nullptr);
 	updateStatusBar();
 	updateEditActions();
 	refreshActionState();
@@ -2223,11 +2266,14 @@ void MainWindow::setStatusMessage(const QString &msg) const
 {
 	if (m_hyperlinkStatusLocked)
 		return;
-	if (m_statusMessage && m_statusMessage->text() != msg)
-		m_statusMessage->setText(msg);
-	m_statusTipOwnsMessage = false;
-	if (m_statusMessageTimer)
-		m_statusMessageTimer->stop();
+	if (m_statusMessageOverrideToken == 0)
+	{
+		if (m_statusMessage && m_statusMessage->text() != msg)
+			m_statusMessage->setText(msg);
+		m_statusTipOwnsMessage = false;
+		if (m_statusMessageTimer)
+			m_statusMessageTimer->stop();
+	}
 	if (const auto *world = activeWorldChildWindow())
 		if (WorldRuntime *runtime = world->runtime())
 			runtime->setStatusMessage(msg);
@@ -2278,16 +2324,7 @@ void MainWindow::updateEditActions()
 
 void MainWindow::setStatusMessageNow(const QString &msg)
 {
-	if (m_hyperlinkStatusLocked)
-		return;
-	if (m_statusMessage && m_statusMessage->text() != msg)
-		m_statusMessage->setText(msg);
-	m_statusTipOwnsMessage = false;
-	if (m_statusMessageTimer)
-		m_statusMessageTimer->stop();
-	if (const auto *world = activeWorldChildWindow())
-		if (WorldRuntime *runtime = world->runtime())
-			runtime->setStatusMessage(msg);
+	setStatusMessage(msg);
 }
 
 void MainWindow::setShowDebugStatus(const bool enabled)
@@ -2369,7 +2406,7 @@ void MainWindow::processPluginTicks()
 		m_timerFallbackClock.start();
 	m_lastTickProcessNs = m_timerFallbackClock.nsecsElapsed();
 
-	for (const WorldWindowDescriptor &entry : worldWindowDescriptors())
+	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
 	{
 		WorldRuntime *runtime = entry.runtime;
 		if (!runtime)
@@ -2389,7 +2426,7 @@ void MainWindow::processTimers()
 		return;
 
 	const bool reconnectEnabled = app->getGlobalOption(QStringLiteral("ReconnectOnLinkFailure")).toInt() != 0;
-	for (const WorldWindowDescriptor &entry : worldWindowDescriptors())
+	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
 	{
 		WorldRuntime *runtime = entry.runtime;
 		if (!runtime)
@@ -2807,11 +2844,15 @@ void MainWindow::activateWorldSlot(const int slot)
 	if (slot > entries.size())
 		return;
 
-	WorldChildWindow *world = entries.at(slot - 1).window;
+	activateWorldWindow(entries.at(slot - 1).window);
+}
+
+void MainWindow::activateWorldWindow(WorldChildWindow *world)
+{
 	if (!world)
 		return;
 	if (m_mdiArea)
-		m_mdiArea->setActiveSubWindow(world);
+		activateMdiSubWindow(world);
 	world->show();
 	world->raise();
 }
@@ -2842,6 +2883,28 @@ QVector<WorldWindowDescriptor> MainWindow::worldWindowDescriptors() const
 	}
 
 	return entries;
+}
+
+QVector<WorldWindowDescriptor> MainWindow::worldRuntimeDescriptors() const
+{
+	const QVector<WorldWindowDescriptor> windows = worldWindowDescriptors();
+	QVector<WorldWindowDescriptor>       runtimes;
+	QHash<WorldRuntime *, qsizetype>     runtimeIndexes;
+	runtimes.reserve(windows.size());
+
+	for (const WorldWindowDescriptor &window : windows)
+	{
+		if (!window.runtime || !window.window || !window.window->isPrimaryRuntimeBinding())
+			continue;
+		if (runtimeIndexes.contains(window.runtime))
+			continue;
+		WorldWindowDescriptor runtime = window;
+		runtime.sequence              = static_cast<int>(runtimes.size()) + 1;
+		runtimeIndexes.insert(window.runtime, runtimes.size());
+		runtimes.push_back(runtime);
+	}
+
+	return runtimes;
 }
 
 QList<TextChildWindow *> MainWindow::notepadWindows() const
@@ -2957,7 +3020,7 @@ bool                 MainWindow::switchToNotepad()
 		return true;
 	}
 
-	m_mdiArea->setActiveSubWindow(target);
+	activateMdiSubWindow(target);
 	target->show();
 	target->raise();
 	return true;
@@ -2994,7 +3057,7 @@ bool MainWindow::activateNotepad(const QString &title, WorldRuntime *relatedRunt
 		else if (!QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(text, 0, QString(), false))
 			continue;
 
-		m_mdiArea->setActiveSubWindow(text);
+		activateMdiSubWindow(text);
 		text->show();
 		text->raise();
 		return true;
@@ -3054,7 +3117,7 @@ static WorldRuntime *resolveRuntimeForNotepad(const MainWindow *frame, const Tex
 	                                   ? notepadTitle.mid(QStringLiteral("Notepad: ").size()).trimmed()
 	                                   : QString();
 
-	for (const WorldWindowDescriptor &descriptor : frame->worldWindowDescriptors())
+	for (const WorldWindowDescriptor &descriptor : frame->worldRuntimeDescriptors())
 	{
 		WorldRuntime *runtime = descriptor.runtime;
 		if (!runtime)
@@ -3169,17 +3232,21 @@ void MainWindow::setActivityToolbarVisible(const bool visible) const
 
 void MainWindow::setWindowTabsStyle(const int style)
 {
-	m_windowTabsStyle = style;
+	const bool tabsWereEnabled = m_windowTabsStyle != 0;
+	const bool tabsEnabled     = style != 0;
+	m_windowTabsStyle          = style;
 	if (!m_centralLayout || !m_mdiArea)
 		return;
 
-	if (style == 0)
+	if (!tabsEnabled)
 	{
-		m_mdiTabs.hide();
+		if (isTabbedWindowPresentationActive())
+			setTabbedWindowPresentationActive(false);
+		else
+			m_mdiTabs.updateTabs();
 		return;
 	}
 
-	m_mdiTabs.show();
 	m_centralLayout->removeWidget(&m_mdiTabs);
 	m_centralLayout->removeWidget(m_mdiArea);
 	if (style == 2)
@@ -3192,6 +3259,119 @@ void MainWindow::setWindowTabsStyle(const int style)
 		m_centralLayout->addWidget(&m_mdiTabs);
 		m_centralLayout->addWidget(m_mdiArea);
 	}
+	if (!tabsWereEnabled)
+		setTabbedWindowPresentationActive(true);
+	else
+		m_mdiTabs.updateTabs();
+}
+
+bool MainWindow::isTabbedWindowPresentationActive() const
+{
+	return m_mdiArea && m_mdiArea->testOption(QMdiArea::DontMaximizeSubWindowOnActivation);
+}
+
+void MainWindow::setTabbedWindowPresentationActive(const bool active)
+{
+	if (!m_mdiArea)
+		return;
+
+	QScopedValueRollback transitionGuard(m_mdiPresentationTransitionActive, true);
+	const bool           updatesEnabled = m_mdiArea->updatesEnabled();
+	m_mdiArea->setUpdatesEnabled(false);
+	if (active)
+	{
+		m_mdiArea->setOption(QMdiArea::DontMaximizeSubWindowOnActivation, true);
+		const QPointer<QMdiSubWindow> activeWindow = m_mdiArea->activeSubWindow();
+		const QList<QMdiSubWindow *>  windows      = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+		maximizeMdiSubWindows(activeWindow.data());
+		if (activeWindow && windows.contains(activeWindow.data()))
+			m_mdiArea->setActiveSubWindow(activeWindow.data());
+	}
+	else
+	{
+		m_mdiArea->setOption(QMdiArea::DontMaximizeSubWindowOnActivation, true);
+		QMudMainFrameMdiUtils::restoreMaximizedSubWindows(m_mdiArea,
+		                                                  m_mdiArea->subWindowList(QMdiArea::CreationOrder));
+		m_mdiArea->setOption(QMdiArea::DontMaximizeSubWindowOnActivation, false);
+	}
+	m_mdiArea->setUpdatesEnabled(updatesEnabled);
+	m_mdiTabs.updateTabs();
+	if (updatesEnabled)
+		m_mdiArea->viewport()->update();
+}
+
+void MainWindow::activateMdiSubWindow(QMdiSubWindow *subWindow) const
+{
+	if (!m_mdiArea || !subWindow || !m_mdiArea->subWindowList().contains(subWindow))
+		return;
+	if (!isTabbedWindowPresentationActive() || m_mdiPresentationTransitionActive)
+	{
+		m_mdiArea->setActiveSubWindow(subWindow);
+		return;
+	}
+
+	QScopedValueRollback transitionGuard(m_mdiPresentationTransitionActive, true);
+	const bool           updatesEnabled = m_mdiArea->updatesEnabled();
+	m_mdiArea->setUpdatesEnabled(false);
+	m_mdiArea->setActiveSubWindow(subWindow);
+	maximizeMdiSubWindows(subWindow);
+	m_mdiArea->setUpdatesEnabled(updatesEnabled);
+	if (updatesEnabled)
+		m_mdiArea->viewport()->update();
+}
+
+void MainWindow::maximizeMdiSubWindows(QMdiSubWindow *preferredActiveWindow) const
+{
+	if (!m_mdiArea)
+		return;
+	if (preferredActiveWindow &&
+	    (!preferredActiveWindow->isMaximized() || preferredActiveWindow->isMinimized()))
+		preferredActiveWindow->showMaximized();
+	for (QMdiSubWindow *subWindow : m_mdiArea->subWindowList(QMdiArea::CreationOrder))
+		if (subWindow && subWindow != preferredActiveWindow &&
+		    (!subWindow->isMaximized() || subWindow->isMinimized()))
+			subWindow->showMaximized();
+}
+
+void MainWindow::queueMdiPresentationReconciliation()
+{
+	if (m_mdiPresentationReconciliationQueued)
+		return;
+
+	m_mdiPresentationReconciliationQueued = true;
+	QMetaObject::invokeMethod(
+	    this,
+	    [this]
+	    {
+		    m_mdiPresentationReconciliationQueued = false;
+		    if (!m_mdiArea || m_mdiPresentationTransitionActive)
+			    return;
+
+		    const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
+		    if (windows.isEmpty())
+			    return;
+
+		    bool anyEffectivelyMaximized   = false;
+		    bool everyEffectivelyMaximized = true;
+		    for (const QMdiSubWindow *subWindow : windows)
+		    {
+			    const bool effectivelyMaximized =
+			        subWindow && subWindow->isMaximized() && !subWindow->isMinimized();
+			    anyEffectivelyMaximized |= effectivelyMaximized;
+			    everyEffectivelyMaximized &= effectivelyMaximized;
+		    }
+
+		    if (isTabbedWindowPresentationActive())
+		    {
+			    if (!everyEffectivelyMaximized)
+				    setTabbedWindowPresentationActive(false);
+		    }
+		    else if (m_windowTabsStyle != 0 && anyEffectivelyMaximized)
+		    {
+			    setTabbedWindowPresentationActive(true);
+		    }
+	    },
+	    Qt::QueuedConnection);
 }
 
 void MainWindow::setActivityToolbarStyle(const int style)
@@ -3280,7 +3460,7 @@ bool MainWindow::event(QEvent *event)
 {
 	if (event && event->type() == QEvent::StatusTip)
 	{
-		if (m_hyperlinkStatusLocked)
+		if (m_statusMessageOverrideToken != 0 || m_hyperlinkStatusLocked)
 			return true;
 
 		const auto   *statusEvent = dynamic_cast<QStatusTipEvent *>(event);
@@ -3379,6 +3559,13 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 			const QList<QMdiSubWindow *> windows = m_mdiArea->subWindowList(QMdiArea::CreationOrder);
 			m_tabActivationHistory.onCloseEvent(closingSubWindow, m_mdiArea->activeSubWindow(), windows);
 		}
+	}
+
+	if (event->type() == QEvent::WindowStateChange && !m_mdiPresentationTransitionActive)
+	{
+		if (auto *subWindow = qobject_cast<QMdiSubWindow *>(watched);
+		    subWindow && m_mdiArea && m_mdiArea->subWindowList().contains(subWindow))
+			queueMdiPresentationReconciliation();
 	}
 
 	if (event->type() != QEvent::KeyPress && event->type() != QEvent::ShortcutOverride)

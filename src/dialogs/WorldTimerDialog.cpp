@@ -58,12 +58,11 @@ namespace
 	}
 } // namespace
 
-WorldTimerDialog::WorldTimerDialog(WorldRuntime *runtime, WorldRuntime::Timer timer,
-                                   QList<WorldRuntime::Timer> timers, int currentIndex, QWidget *parent)
-    : QDialog(parent), m_runtime(runtime), m_timer(std::move(timer)), m_existing(std::move(timers)),
-      m_currentIndex(currentIndex)
+WorldTimerDialog::WorldTimerDialog(WorldRuntime *runtime, WorldRuntime::Timer timer, const bool isNew,
+                                   QWidget *parent)
+    : QDialog(parent), m_runtime(runtime), m_timer(std::move(timer))
 {
-	setWindowTitle(currentIndex < 0 ? QStringLiteral("Add timer") : QStringLiteral("Edit timer"));
+	setWindowTitle(isNew ? QStringLiteral("Add timer") : QStringLiteral("Edit timer"));
 	setMinimumSize(920, 690);
 	buildUi();
 	loadTimer();
@@ -345,16 +344,12 @@ void WorldTimerDialog::loadTimer() const
 	if (const int sendToIndex = m_sendTo->findData(sendTo); sendToIndex >= 0)
 		m_sendTo->setCurrentIndex(sendToIndex);
 
-	const QString matches = attrs.value(QStringLiteral("times_fired"));
-	const QString calls   = attrs.value(QStringLiteral("invocation_count"));
-	if (!matches.isEmpty())
-		m_matchesLabel->setText(QStringLiteral("Fired %1 time%2.")
-		                            .arg(matches)
-		                            .arg(matches == QStringLiteral("1") ? QString() : QStringLiteral("s")));
-	if (!calls.isEmpty())
-		m_callsLabel->setText(QStringLiteral("%1 call%2.")
-		                          .arg(calls)
-		                          .arg(calls == QStringLiteral("1") ? QString() : QStringLiteral("s")));
+	const int matches = m_timer.firedCount;
+	const int calls   = m_timer.invocationCount;
+	m_matchesLabel->setText(
+	    QStringLiteral("Fired %1 time%2.").arg(matches).arg(matches == 1 ? QString() : QStringLiteral("s")));
+	m_callsLabel->setText(
+	    QStringLiteral("%1 call%2.").arg(calls).arg(calls == 1 ? QString() : QStringLiteral("s")));
 
 	m_includedLabel->setVisible(isIncluded());
 	onSendToChanged(m_sendTo->currentIndex());
@@ -397,11 +392,12 @@ bool WorldTimerDialog::validateTimer()
 
 	if (!label.isEmpty())
 	{
-		for (int i = 0; i < m_existing.size(); ++i)
+		const QList<WorldRuntime::Timer> &timers = m_runtime->timers();
+		for (const WorldRuntime::Timer &timer : timers)
 		{
-			if (i == m_currentIndex)
+			if (m_timer.runtimeId != 0 && timer.runtimeId == m_timer.runtimeId)
 				continue;
-			if (const QString other = m_existing.at(i).attributes.value(QStringLiteral("name"));
+			if (const QString other = timer.attributes.value(QStringLiteral("name"));
 			    !other.isEmpty() && other.compare(label, Qt::CaseInsensitive) == 0)
 			{
 				QMessageBox::warning(

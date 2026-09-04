@@ -8,6 +8,7 @@
 
 #include "AliasMatchUtils.h"
 
+#include <QElapsedTimer>
 #include <limits>
 
 namespace
@@ -19,15 +20,27 @@ namespace
 		constexpr qsizetype kMaxInt = std::numeric_limits<int>::max();
 		return size > kMaxInt ? std::numeric_limits<int>::max() : static_cast<int>(size);
 	}
+
+	QString capturedOrEmpty(const QRegularExpressionMatch &match, const int index)
+	{
+		const QString captured = match.captured(index);
+		return captured.isNull() ? QStringLiteral("") : captured;
+	}
 } // namespace
 
 namespace QMudAliasMatch
 {
 	MatchResult matchWithCaptures(const QRegularExpression &regex, const QString &subject,
-	                              const bool allowEmptyMatch, const int startOffset)
+	                              const bool allowEmptyMatch, const int startOffset, qint64 *executionTimeNs)
 	{
-		MatchResult                   out;
+		QElapsedTimer executionTimer;
+		if (executionTimeNs)
+			executionTimer.start();
 		const QRegularExpressionMatch match = regex.match(subject, startOffset);
+		if (executionTimeNs)
+			*executionTimeNs += executionTimer.nsecsElapsed();
+
+		MatchResult out;
 		if (!match.hasMatch())
 			return out;
 
@@ -38,10 +51,10 @@ namespace QMudAliasMatch
 		out.startCol = safeQSizeToInt(match.capturedStart(0));
 		out.endCol   = safeQSizeToInt(match.capturedEnd(0));
 
-		const int lastIndex = match.lastCapturedIndex();
-		out.wildcards.reserve(lastIndex + 1);
-		for (int i = 0; i <= lastIndex; ++i)
-			out.wildcards.append(match.captured(i));
+		const int captureCount = regex.captureCount();
+		out.wildcards.reserve(captureCount + 1);
+		for (int i = 0; i <= captureCount; ++i)
+			out.wildcards.append(capturedOrEmpty(match, i));
 
 		const QStringList names = regex.namedCaptureGroups();
 		for (int i = 1, size = safeQSizeToInt(names.size()); i < size; ++i)
@@ -49,8 +62,10 @@ namespace QMudAliasMatch
 			const QString &name = names.at(i);
 			if (name.isEmpty())
 				continue;
-			if (i <= lastIndex)
-				out.namedWildcards.insert(name, match.captured(i));
+
+			const QString captured = capturedOrEmpty(match, i);
+			if (!out.namedWildcards.contains(name) || !captured.isEmpty())
+				out.namedWildcards.insert(name, captured);
 		}
 
 		return out;

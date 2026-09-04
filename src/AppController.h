@@ -35,6 +35,7 @@
 
 class MainWindow;
 class ActivityDocument;
+class WorldChildWindow;
 class WorldRuntime;
 class WorldView;
 class QMdiSubWindow;
@@ -43,6 +44,7 @@ class QDialog;
 class QNetworkAccessManager;
 class QTimer;
 class QWidget;
+class tst_WorldObserverLifecycle;
 struct ReloadWorldState;
 struct lua_State;
 
@@ -55,6 +57,7 @@ struct lua_State;
 class AppController : public QObject
 {
 		Q_OBJECT
+		friend class tst_WorldObserverLifecycle;
 
 	public:
 		/**
@@ -682,6 +685,25 @@ class AppController : public QObject
 		 */
 		[[nodiscard]] bool closeOpenWorldLogsBeforeRestart(QString *errorMessage = nullptr) const;
 		/**
+		 * @brief Candidate world runtime and presentation for session-state persistence.
+		 */
+		struct SessionStateSaveCandidate
+		{
+				WorldRuntime *runtime{nullptr};
+				WorldView    *view{nullptr};
+				QString       filePath;
+				QString       worldName;
+				quint64       openSequence{0};
+				bool          connected{false};
+		};
+		/**
+		 * @brief Selects at most one session-state save candidate for each non-empty file path.
+		 * @param candidates Candidate runtimes and their resolved session-state paths.
+		 * @return Candidate indexes to save.
+		 */
+		[[nodiscard]] static QVector<int>
+		selectSessionStateSaveCandidateIndexes(const QVector<SessionStateSaveCandidate> &candidates);
+		/**
 		 * @brief Saves per-world output/history session-state files before shutdown/restart.
 		 * @param errorMessage Optional output error text when persistence fails.
 		 * @return `true` when all eligible worlds were persisted successfully.
@@ -698,50 +720,50 @@ class AppController : public QObject
 		 * @param runtime Runtime receiving global plugin state.
 		 * @param completion Completion callback invoked after load sequence finishes.
 		 */
-		void        loadGlobalPlugins(WorldRuntime *runtime, const std::function<void()> &completion) const;
+		void loadGlobalPlugins(WorldRuntime *runtime, const std::function<void()> &completion) const;
 		/**
 		 * @brief Startup UX helpers.
 		 */
-		void        showTipDialog() const;
+		void showTipDialog() const;
 		/**
 		 * @brief Displays startup tip if enabled.
 		 */
-		void        showTipAtStartup() const;
+		void showTipAtStartup() const;
 		/**
 		 * @brief Shows getting-started page when appropriate.
 		 */
-		void        showGettingStartedIfNeeded() const;
+		void showGettingStartedIfNeeded() const;
 		/**
 		 * @brief Shows upgrade welcome dialog when required.
 		 */
-		void        showUpgradeWelcomeIfNeeded() const;
+		void showUpgradeWelcomeIfNeeded() const;
 		/**
 		 * @brief Shows deferred upgrade dialog after scrollback restore counter reaches zero.
 		 */
-		void        maybeShowDeferredUpgradeWelcomeAfterStartupRestores() const;
+		void maybeShowDeferredUpgradeWelcomeAfterStartupRestores() const;
 		/**
 		 * @brief Performs data backup when upgrading older installs.
 		 * @param previousVersion Previously stored application version.
 		 * @param firstTime `true` when this is first launch after install/migration.
 		 */
-		void        backupDataOnUpgradeIfNeeded(int previousVersion, bool firstTime) const;
+		void backupDataOnUpgradeIfNeeded(int previousVersion, bool firstTime) const;
 		/**
 		 * @brief Finalizes startup once all prerequisites are complete.
 		 */
-		void        finalizeStartupIfReady();
+		void finalizeStartupIfReady();
 		/**
 		 * @brief Parses reload startup arguments from process command line.
 		 */
-		void        detectReloadStartupArguments();
+		void detectReloadStartupArguments();
 		/**
 		 * @brief Deletes stale reload state file when startup is not reload-mode.
 		 */
-		void        cleanupReloadStateOnNormalStartup() const;
+		void cleanupReloadStateOnNormalStartup() const;
 		/**
 		 * @brief Executes startup recovery for reload-mode launches.
 		 * @return `true` when recovery path completed.
 		 */
-		bool        recoverReloadStartupState();
+		bool recoverReloadStartupState();
 		/**
 		 * @brief Opens one runtime/window pair from serialized reload world state.
 		 * @param worldState Serialized world state.
@@ -750,34 +772,43 @@ class AppController : public QObject
 		 * @param view Optional output world view pointer.
 		 * @return `true` when world opening succeeds.
 		 */
-		bool        openWorldForReloadRecovery(const ReloadWorldState &worldState, bool activateWindow,
-		                                       WorldRuntime **runtime, WorldView **view = nullptr);
+		bool openWorldForReloadRecovery(const ReloadWorldState &worldState, bool activateWindow,
+		                                WorldRuntime **runtime, WorldView **view = nullptr);
+		/**
+		 * @brief Creates another presentation for an existing runtime.
+		 * @param runtime Runtime shared by the new presentation.
+		 * @param source Existing presentation used for title and window state.
+		 * @param activateWindow Activate the new presentation when `true`.
+		 * @return Created observer window, or `nullptr` on invalid input.
+		 */
+		WorldChildWindow *createWorldObserverWindow(WorldRuntime *runtime, const WorldChildWindow *source,
+		                                            bool activateWindow) const;
 		/**
 		 * @brief Reconnects recovered runtime for `park_reconnect` fallback.
 		 * @param runtime Runtime to reconnect.
 		 * @param worldState Serialized host/port policy data.
 		 * @param closeSocketFirst Close inherited socket before reconnect when `true`.
 		 */
-		static void reconnectRecoveredWorld(WorldRuntime *runtime, const ReloadWorldState &worldState,
-		                                    bool closeSocketFirst);
+		static void       reconnectRecoveredWorld(WorldRuntime *runtime, const ReloadWorldState &worldState,
+		                                          bool closeSocketFirst);
 		/**
 		 * @brief Creates and shows splash screen.
 		 */
-		void        showSplashScreen();
+		void              showSplashScreen();
 		/**
 		 * @brief Hides splash screen.
 		 */
-		void        hideSplashScreen();
+		void              hideSplashScreen();
 		/**
 		 * @brief Synchronizes AppImage payload skeleton files.
 		 * @param startupDir Startup directory path.
 		 */
-		static void syncAppImageSkeleton(const QString &startupDir);
+		static void       syncAppImageSkeleton(const QString &startupDir);
 		/**
 		 * @brief Synchronizes macOS bundle payload files.
 		 * @param startupDir Startup directory path.
 		 */
-		static void syncMacBundlePayload(const QString &startupDir);
+		static void       syncMacBundlePayload(const QString &startupDir);
 
 		/**
 		 * @brief Low-level preferences DB helpers.
@@ -1007,6 +1038,10 @@ class AppController : public QObject
 		 * @param runtime Runtime to auto-connect.
 		 */
 		void               maybeAutoConnectWorld(WorldRuntime *runtime) const;
+		/**
+		 * @brief Displays the current tracked scrollback-restore count.
+		 */
+		void               showRestoreScrollbackStatus() const;
 		void               beginRestoreScrollbackStatus() const;
 		void               preseedRestoreScrollbackStatus(int count) const;
 		void               endRestoreScrollbackStatus() const;
@@ -1086,6 +1121,7 @@ class AppController : public QObject
 		mutable int                      m_restoreScrollbackPreseedBudget{0};
 		mutable QPointer<WorldRuntime>   m_restoreScrollbackStatusRuntime;
 		mutable QString                  m_restoreScrollbackStatusPrevious;
+		quint64                          m_reloadRecoveryStatusOverrideToken{0};
 		mutable bool                     m_hasFontMetricApplySignature{false};
 		mutable FontMetricApplySignature m_lastFontMetricApplySignature;
 		bool                             m_batchOpeningWorldList{false};

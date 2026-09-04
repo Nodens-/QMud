@@ -39,13 +39,17 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <list>
 
 namespace
 {
 	using PatternRows = std::array<quint8, 8>;
 
-	bool hasPngSignature(const QByteArray &data)
+	constexpr int    kMemoryImageDecodeCacheMaxEntries = 64;
+	constexpr qint64 kMemoryImageDecodeCacheMaxBytes   = 64LL * 1024LL * 1024LL;
+
+	bool             hasPngSignature(const QByteArray &data)
 	{
 		static constexpr unsigned char kPngSignature[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
 		return data.size() >= static_cast<int>(sizeof(kPngSignature)) &&
@@ -1049,10 +1053,10 @@ namespace
 	{
 		QTextBoundaryFinder finder(QTextBoundaryFinder::Grapheme, text);
 		finder.toStart();
-		int start = 0;
+		qsizetype start = 0;
 		while (true)
 		{
-			const int end = finder.toNextBoundary();
+			const qsizetype end = finder.toNextBoundary();
 			if (end < 0)
 				break;
 			if (end > start)
@@ -1089,6 +1093,139 @@ namespace MiniWindowUtils::Internal
 
 namespace MiniWindowUtils
 {
+	QPoint constrainCapturedAbsolutePosition(const QPoint &requestedLocation, const QSize &windowSize,
+	                                         const QSize &clientSize)
+	{
+		QPoint constrained = requestedLocation;
+		if (clientSize.width() > 0)
+		{
+			const int width = qBound(0, windowSize.width(), clientSize.width());
+			constrained.setX(qBound(0, constrained.x(), clientSize.width() - width));
+		}
+		if (clientSize.height() > 0)
+		{
+			const int height = qBound(0, windowSize.height(), clientSize.height());
+			constrained.setY(qBound(0, constrained.y(), clientSize.height() - height));
+		}
+		return constrained;
+	}
+
+	QSize constrainCapturedAbsoluteResize(const QPoint &location, const QSize &currentSize,
+	                                      const QSize &requestedSize, const QSize &clientSize)
+	{
+		QSize constrained(qMax(0, requestedSize.width()), qMax(0, requestedSize.height()));
+		if (clientSize.width() > 0)
+		{
+			const int availableWidth =
+			    qMax(0, clientSize.width() - qBound(0, location.x(), clientSize.width()));
+			const int currentWidth = qMax(0, currentSize.width());
+			if (currentWidth <= availableWidth)
+				constrained.setWidth(qMin(constrained.width(), availableWidth));
+			else if (constrained.width() >= currentWidth)
+				constrained.setWidth(currentWidth);
+		}
+		if (clientSize.height() > 0)
+		{
+			const int availableHeight =
+			    qMax(0, clientSize.height() - qBound(0, location.y(), clientSize.height()));
+			const int currentHeight = qMax(0, currentSize.height());
+			if (currentHeight <= availableHeight)
+				constrained.setHeight(qMin(constrained.height(), availableHeight));
+			else if (constrained.height() >= currentHeight)
+				constrained.setHeight(currentHeight);
+		}
+		return constrained;
+	}
+
+	QRect constrainCapturedAbsoluteGeometry(const QPoint &currentLocation, const QSize &currentSize,
+	                                        const QPoint &requestedLocation, const QSize &requestedSize,
+	                                        const QSize &clientSize)
+	{
+		struct ConstrainedAxis
+		{
+				int start{0};
+				int extent{0};
+		};
+		const auto constrainAxis = [](const int currentStart, const int currentExtentValue,
+		                              const int requestedStart, const int requestedExtentValue,
+		                              const int clientExtent)
+		{
+			const int currentExtent   = qMax(0, currentExtentValue);
+			const int requestedExtent = qMax(0, requestedExtentValue);
+			if (clientExtent <= 0)
+				return ConstrainedAxis{requestedStart, requestedExtent};
+
+			if (requestedExtent == currentExtent)
+			{
+				if (requestedStart == currentStart)
+					return ConstrainedAxis{currentStart, currentExtent};
+				const int boundedExtent = qBound(0, requestedExtent, clientExtent);
+				return ConstrainedAxis{qBound(0, requestedStart, clientExtent - boundedExtent),
+				                       requestedExtent};
+			}
+			if (requestedExtent == 0)
+				return ConstrainedAxis{qBound(0, requestedStart, clientExtent), 0};
+
+			const qint64 currentEnd    = static_cast<qint64>(currentStart) + currentExtent;
+			const qint64 requestedEnd  = static_cast<qint64>(requestedStart) + requestedExtent;
+			const auto   constrainEdge = [clientExtent](const qint64 currentEdge, const qint64 requestedEdge)
+			{
+				if (requestedEdge == currentEdge || (currentEdge < 0 && requestedEdge < currentEdge) ||
+				    (currentEdge > clientExtent && requestedEdge > currentEdge))
+					return currentEdge;
+				return qBound(qint64{0}, requestedEdge, static_cast<qint64>(clientExtent));
+			};
+			const qint64 constrainedStart = constrainEdge(currentStart, requestedStart);
+			const qint64 constrainedEnd   = constrainEdge(currentEnd, requestedEnd);
+			if (constrainedEnd > constrainedStart)
+			{
+				return ConstrainedAxis{static_cast<int>(constrainedStart),
+				                       static_cast<int>(constrainedEnd - constrainedStart)};
+			}
+
+			const int extent        = qMin(requestedExtent, currentExtent);
+			const int boundedExtent = qBound(0, extent, clientExtent);
+			return ConstrainedAxis{qBound(0, requestedStart, clientExtent - boundedExtent), extent};
+		};
+
+		const ConstrainedAxis horizontal =
+		    constrainAxis(currentLocation.x(), currentSize.width(), requestedLocation.x(),
+		                  requestedSize.width(), clientSize.width());
+		const ConstrainedAxis vertical =
+		    constrainAxis(currentLocation.y(), currentSize.height(), requestedLocation.y(),
+		                  requestedSize.height(), clientSize.height());
+		return {horizontal.start, vertical.start, horizontal.extent, vertical.extent};
+	}
+
+	QPoint constrainCapturedDragPosition(const QPoint &requestedPosition, const QSize &clientSize)
+	{
+		QPoint constrained = requestedPosition;
+		if (clientSize.width() > 0)
+			constrained.setX(qBound(0, constrained.x(), clientSize.width() - 1));
+		if (clientSize.height() > 0)
+			constrained.setY(qBound(0, constrained.y(), clientSize.height() - 1));
+		return constrained;
+	}
+
+	QPoint capturedDragPositionToCanonical(const QPoint &displayPosition, const double scaleX,
+	                                       const double scaleY)
+	{
+		const auto canonicalCoordinate = [](const int displayCoordinate, const double scale)
+		{
+			if (!std::isfinite(scale) || scale <= 0.0 || qFuzzyCompare(scale, 1.0))
+				return displayCoordinate;
+			const double canonical = static_cast<double>(displayCoordinate) / scale;
+			if (canonical >= static_cast<double>(std::numeric_limits<int>::max()))
+				return std::numeric_limits<int>::max();
+			if (canonical <= static_cast<double>(std::numeric_limits<int>::min()))
+				return std::numeric_limits<int>::min();
+			return qRound(canonical);
+		};
+
+		return {canonicalCoordinate(displayPosition.x(), scaleX),
+		        canonicalCoordinate(displayPosition.y(), scaleY)};
+	}
+
 	QColor colorFromRef(const long value)
 	{
 		const int r = static_cast<int>(value & 0xFF);
@@ -1792,77 +1929,80 @@ namespace MiniWindowUtils
 		return eOK;
 	}
 
-	QStringList splitLegacyPointList(QString points)
+	namespace
 	{
-		points = points.trimmed();
-		QStringList parts;
-		if (points.isEmpty())
-			return parts;
-
-		while (!points.isEmpty())
+		QStringList splitLegacyPointList(QString points)
 		{
-			const qsizetype delimiter = points.indexOf(QLatin1Char(','));
-			if (delimiter < 0)
-				break;
-			QString part = points.left(delimiter);
-			points       = points.mid(delimiter + 1);
-			parts.push_back(part.trimmed());
 			points = points.trimmed();
-		}
-		if (!points.isEmpty())
-			parts.push_back(points);
-		return parts;
-	}
+			QStringList parts;
+			if (points.isEmpty())
+				return parts;
 
-	bool parseLegacySignedIntegerPoint(const QString &text, qreal &value)
-	{
-		if (text.isEmpty())
-			return false;
-
-		qsizetype pos = 0;
-		if (text.at(0) == QLatin1Char('+') || text.at(0) == QLatin1Char('-'))
-		{
-			++pos;
-			if (pos == text.size())
-				return false;
-		}
-		for (; pos < text.size(); ++pos)
-		{
-			const QChar ch = text.at(pos);
-			if (ch < QLatin1Char('0') || ch > QLatin1Char('9'))
-				return false;
-		}
-
-		bool            ok     = false;
-		const qlonglong parsed = text.toLongLong(&ok);
-		if (!ok || parsed < std::numeric_limits<int>::min() || parsed > std::numeric_limits<int>::max())
-			return false;
-		value = static_cast<qreal>(parsed);
-		return true;
-	}
-
-	int parseLegacyPointPairs(const QString &points, const int minimumParts, const int moduloBase,
-	                          const int moduloRemainder, QVector<QPointF> &out)
-	{
-		const QStringList parts = splitLegacyPointList(points);
-		if (parts.size() < minimumParts || (parts.size() % moduloBase) != moduloRemainder)
-			return eInvalidNumberOfPoints;
-
-		out.clear();
-		out.reserve(parts.size() / 2);
-		for (int i = 0; i < parts.size(); i += 2)
-		{
-			qreal x = 0;
-			qreal y = 0;
-			if (!parseLegacySignedIntegerPoint(parts.at(i), x) ||
-			    !parseLegacySignedIntegerPoint(parts.at(i + 1), y))
+			while (!points.isEmpty())
 			{
-				return eInvalidPoint;
+				const qsizetype delimiter = points.indexOf(QLatin1Char(','));
+				if (delimiter < 0)
+					break;
+				QString part = points.left(delimiter);
+				points       = points.mid(delimiter + 1);
+				parts.push_back(part.trimmed());
+				points = points.trimmed();
 			}
-			out.push_back(QPointF(x, y));
+			if (!points.isEmpty())
+				parts.push_back(points);
+			return parts;
 		}
-		return eOK;
-	}
+
+		bool parseLegacySignedIntegerPoint(const QString &text, qreal &value)
+		{
+			if (text.isEmpty())
+				return false;
+
+			qsizetype pos = 0;
+			if (text.at(0) == QLatin1Char('+') || text.at(0) == QLatin1Char('-'))
+			{
+				++pos;
+				if (pos == text.size())
+					return false;
+			}
+			for (; pos < text.size(); ++pos)
+			{
+				const QChar ch = text.at(pos);
+				if (ch < QLatin1Char('0') || ch > QLatin1Char('9'))
+					return false;
+			}
+
+			bool            ok     = false;
+			const qlonglong parsed = text.toLongLong(&ok);
+			if (!ok || parsed < std::numeric_limits<int>::min() || parsed > std::numeric_limits<int>::max())
+				return false;
+			value = static_cast<qreal>(parsed);
+			return true;
+		}
+
+		int parseLegacyPointPairs(const QString &points, const int minimumParts, const int moduloBase,
+		                          const int moduloRemainder, QVector<QPointF> &out)
+		{
+			const QStringList parts = splitLegacyPointList(points);
+			if (parts.size() < minimumParts || (parts.size() % moduloBase) != moduloRemainder)
+				return eInvalidNumberOfPoints;
+
+			out.clear();
+			out.reserve(parts.size() / 2);
+			for (qsizetype i = 0; i < parts.size(); i += 2)
+			{
+				qreal x = 0;
+				qreal y = 0;
+				if (!parseLegacySignedIntegerPoint(parts.at(i), x) ||
+				    !parseLegacySignedIntegerPoint(parts.at(i + 1), y))
+				{
+					return eInvalidPoint;
+				}
+				out.push_back(QPointF(x, y));
+			}
+			return eOK;
+		}
+	} // namespace
 
 	int bezier(MiniWindow &window, const QString &points, const long penColour, const long penStyle,
 	           const int penWidth)
@@ -2041,8 +2181,9 @@ namespace MiniWindowUtils
 			sourceHasAlpha = decoded.hasAlphaChannel();
 			monochrome     = false;
 			QMutexLocker locker(&memoryImageDecodeCacheMutex());
-			qmudInsertMemoryImageDecodeCache(memoryImageDecodeCache(), memoryImageDecodeCacheBytes(), data,
-			                                 decoded, sourceHasAlpha, monochrome, 64, 64 * 1024 * 1024);
+			qmudInsertMemoryImageDecodeCache(
+			    memoryImageDecodeCache(), memoryImageDecodeCacheBytes(), data, decoded, sourceHasAlpha,
+			    monochrome, kMemoryImageDecodeCacheMaxEntries, kMemoryImageDecodeCacheMaxBytes);
 		}
 		Q_UNUSED(monochrome);
 		QImage image = decoded.convertToFormat(QImage::Format_ARGB32);
@@ -2187,7 +2328,7 @@ namespace MiniWindowUtils
 				const int    blendedG = (a.green() * mask + b.green() * (255 - mask)) / 255;
 				const int    blendedB = (a.blue() * mask + b.blue() * (255 - mask)) / 255;
 				const int    outR =
-                    (opacity < 1.0) ? QMudBlend::simpleOpacity(b.red(), blendedR, opacity) : blendedR;
+				    (opacity < 1.0) ? QMudBlend::simpleOpacity(b.red(), blendedR, opacity) : blendedR;
 				const int outG =
 				    (opacity < 1.0) ? QMudBlend::simpleOpacity(b.green(), blendedG, opacity) : blendedG;
 				const int outB =
@@ -2440,10 +2581,10 @@ namespace MiniWindowUtils
 				const long blendPixel = static_cast<long>(qRed(blendLine[x])) |
 				                        (static_cast<long>(qGreen(blendLine[x])) << 8) |
 				                        (static_cast<long>(qBlue(blendLine[x])) << 16);
-				const long basePixel = static_cast<long>(qRed(baseLine[x])) |
-				                       (static_cast<long>(qGreen(baseLine[x])) << 8) |
-				                       (static_cast<long>(qBlue(baseLine[x])) << 16);
-				long result{0};
+				const long basePixel  = static_cast<long>(qRed(baseLine[x])) |
+				                        (static_cast<long>(qGreen(baseLine[x])) << 8) |
+				                        (static_cast<long>(qBlue(baseLine[x])) << 16);
+				long       result{0};
 				if (!blendPixelInternal(blendPixel, basePixel, static_cast<short>(mode), opacity, result,
 				                        randomUnit))
 					return eUnknownOption;

@@ -11,12 +11,38 @@
 #define QMUD_WORLDOPTIONS_H
 
 #include <QString>
+#include <optional>
 // Canonical world/runtime option constants
 constexpr int DEFAULT_CHAT_PORT        = 4050;
 constexpr int MAX_CUSTOM               = 16;
 constexpr int MAX_LINE_WIDTH           = 500;
 constexpr int DEFAULT_TRIGGER_SEQUENCE = 100;
 constexpr int DEFAULT_ALIAS_SEQUENCE   = 100;
+
+namespace QMudPluginSequence
+{
+	/** Default plugin dispatch sequence when no sequence is declared. */
+	inline constexpr int                    kDefault = 5000;
+	/** Lowest plugin dispatch sequence accepted by the legacy format. */
+	inline constexpr int                    kMinimum = -10000;
+	/** Highest plugin dispatch sequence accepted by the legacy format. */
+	inline constexpr int                    kMaximum = 10000;
+
+	/**
+	 * @brief Parses and validates a plugin dispatch sequence.
+	 * @param text Serialized sequence value.
+	 * @return Parsed sequence, or no value when malformed or outside the supported range.
+	 */
+	[[nodiscard]] inline std::optional<int> parse(const QString &text)
+	{
+		bool      ok       = false;
+		const int sequence = text.trimmed().toInt(&ok);
+		if (!ok || sequence < kMinimum || sequence > kMaximum)
+			return std::nullopt;
+		return sequence;
+	}
+} // namespace QMudPluginSequence
+
 #ifdef DEFAULT_CHARSET
 #undef DEFAULT_CHARSET
 #endif
@@ -125,15 +151,89 @@ inline constexpr int OPT_FIX_TOOLTIP_VISIBLE = 0x2000000; // Added for tooltip d
 inline constexpr int OPT_FIX_TOOLTIP_START   = 0x4000000; // Added for tooltip delay changing.
 
 /**
+ * @brief Exact runtime cache updated when a numeric world option changes.
+ *
+ * The option table is the authoritative mapping. `SetOptionItem` uses this binding so changing one option
+ * cannot accidentally re-apply unrelated world attributes.
+ */
+enum class WorldNumericOptionBinding
+{
+	None,
+	AlternativeInverse,
+	AltArrowRecallsPartial,
+	AlwaysRecordCommandHistory,
+	ArrowsChangeHistory,
+	ArrowKeysWrap,
+	ArrowRecallsPartial,
+	AutoPause,
+	AutoRepeat,
+	AutoResizeCommandWindow,
+	AutoResizeMaximumLines,
+	AutoResizeMinimumLines,
+	ChatListener,
+	ConfirmBeforeReplacingTyping,
+	ConfirmOnPaste,
+	CtrlBackspaceDeletesLastWord,
+	CtrlNGoesToNextCommand,
+	CtrlPGoesToPreviousCommand,
+	CtrlZGoesToEndOfBuffer,
+	DisplayMyInput,
+	DoubleClickInserts,
+	DoubleClickSends,
+	EscapeDeletesInput,
+	FadeOutputAfterSeconds,
+	FadeOutputOpacityPercent,
+	FadeOutputSeconds,
+	HistoryLines,
+	HyperlinkAddsToCommandHistory,
+	HyperlinkColour,
+	InputBackgroundColour,
+	InputFont,
+	InputTextColour,
+	KeepCommandsOnSameLine,
+	KeepPauseAtBottom,
+	LineInformation,
+	LineSpacing,
+	LowerCaseTabCompletion,
+	NoEchoOff,
+	OutputFont,
+	OutputWrap,
+	PartialSaveCharacterThreshold,
+	PixelOffset,
+	SaveDeletedCommand,
+	ShowBold,
+	ShowItalic,
+	ShowUnderline,
+	TabCompletionExcludesSymbolPrefix,
+	TabCompletionExcludesSymbolSuffix,
+	TabCompletionLines,
+	TabCompletionSpace,
+	TimestampColours,
+	UnderlineHyperlinks,
+	UseCustomLinkColour,
+	WrapColumn,
+	WrapInput,
+	CommandDoNotTranslateIac,
+	CommandEnableSpamPrevention,
+	CommandRegexpMatchEmpty,
+	CommandSpamLineCount,
+	CommandSpeedWalkDelay,
+	CommandTranslateBackslashSequences,
+	CommandTranslateGerman,
+	CommandUtf8,
+};
+
+/**
  * @brief Numeric world-option metadata entry used by option lookup tables.
  */
 struct WorldNumericOption
 {
-		const char *name;
-		long long   defaultValue;
-		long long   minValue;
-		long long   maxValue;
-		int         flags;
+		const char               *name{};
+		long long                 defaultValue{};
+		long long                 minValue{};
+		long long                 maxValue{};
+		int                       flags{};
+		WorldNumericOptionBinding binding{WorldNumericOptionBinding::None};
 };
 
 /**
@@ -155,6 +255,35 @@ namespace QMudWorldOptions
 	 * @return Matching option metadata pointer, or `nullptr`.
 	 */
 	const WorldNumericOption *findWorldNumericOption(const QString &name);
+	/**
+	 * @brief Checks a public scripting value against an option table entry.
+	 * @param option Numeric option metadata.
+	 * @param value Public scripting value.
+	 * @return `true` when the value is accepted.
+	 */
+	[[nodiscard]] bool        numericOptionValueInRange(const WorldNumericOption &option, long long value);
+	/**
+	 * @brief Checks an unconverted Lua numeric value against an option table entry.
+	 * @param option Numeric option metadata.
+	 * @param value Lua numeric value.
+	 * @return `true` when finite and within the accepted range.
+	 */
+	[[nodiscard]] bool        numericOptionValueInRange(const WorldNumericOption &option, double value);
+	/**
+	 * @brief Converts an internal world-attribute value to its public numeric option value.
+	 * @param option Numeric option metadata.
+	 * @param text Internal world-attribute representation.
+	 * @return Public value, or no value when the text cannot represent this option.
+	 */
+	[[nodiscard]] std::optional<long long> publicNumericOptionValue(const WorldNumericOption &option,
+	                                                                const QString            &text);
+	/**
+	 * @brief Converts a public scripting value to its canonical persisted runtime text.
+	 * @param option Numeric option metadata.
+	 * @param value Public scripting value.
+	 * @return Internal world-attribute representation.
+	 */
+	[[nodiscard]] QString storedNumericOptionText(const WorldNumericOption &option, long long value);
 } // namespace QMudWorldOptions
 
 #endif // QMUD_WORLDOPTIONS_H

@@ -6,399 +6,2082 @@
  * Role: QTest coverage for Dialog WorldPreferences behavior.
  */
 
+#include "AppController.h"
 #include "WorldPreferencesRoutingUtils.h"
 #include "WorldRuntime.h"
 #include "dialogs/WorldPreferencesDialog.h"
+#include "helpers/DialogSizingUtils.h"
 #include "helpers/EncodingUtils.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QDialogButtonBox>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 #include <QFile>
+#include <QFont>
+#include <QFontMetrics>
+#include <QLabel>
+#include <QLayout>
+#include <QLineEdit>
+#include <QMargins>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QScopeGuard>
+#include <QSpinBox>
+#include <QStackedWidget>
+#include <QStyleOptionSpinBox>
+#include <QTableWidget>
+#include <QToolButton>
+#include <QTreeWidget>
+#include <QTreeWidgetItemIterator>
 #include <QtTest/QTest>
 
-/**
- * @brief QTest fixture covering Dialog WorldPreferences scenarios.
- */
-class tst_Dialog_WorldPreferences : public QObject
+namespace
 {
-		Q_OBJECT
-
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void worldPreferencesButtonConnectionsAreAfterConstruction()
-		{
-			const QString sourcePath =
-			    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
-			        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
-			QFile sourceFile(sourcePath);
-			QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
-			         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
-			const QString sourceText = QString::fromUtf8(sourceFile.readAll());
-
-			auto          firstMatchLine = [&sourceText](const QString &pattern) -> int
+	/**
+	 * @brief Counts top-level resize events emitted during one application-font update.
+	 */
+	class ResizeEventCounter final : public QObject
+	{
+		public:
+			/**
+			 * @brief Clears the accumulated resize-event count.
+			 */
+			void reset()
 			{
-				const QRegularExpression      regex(pattern);
-				const QRegularExpressionMatch match = regex.match(sourceText);
-				if (!match.hasMatch())
-					return -1;
-				return static_cast<int>(sourceText.left(match.capturedStart()).count(QLatin1Char('\n'))) + 1;
-			};
-
-			const QStringList mustBeConstructedBeforeConnect = {QStringLiteral("m_browseLogFile"),
-			                                                    QStringLiteral("m_standardPreamble"),
-			                                                    QStringLiteral("m_editPreamble"),
-			                                                    QStringLiteral("m_editPostamble"),
-			                                                    QStringLiteral("m_substitutionHelp"),
-			                                                    QStringLiteral("m_connectText"),
-			                                                    QStringLiteral("m_keypadControl"),
-			                                                    QStringLiteral("m_infoCalculateMemory"),
-			                                                    QStringLiteral("m_chatSaveBrowse"),
-			                                                    QStringLiteral("m_resetMxpTagsButton"),
-			                                                    QStringLiteral("m_loadNotesButton"),
-			                                                    QStringLiteral("m_saveNotesButton"),
-			                                                    QStringLiteral("m_editNotesButton"),
-			                                                    QStringLiteral("m_findNotesButton"),
-			                                                    QStringLiteral("m_findNextNotesButton"),
-			                                                    QStringLiteral("m_editTriggersFilter"),
-			                                                    QStringLiteral("m_filterTriggers"),
-			                                                    QStringLiteral("m_editAliasesFilter"),
-			                                                    QStringLiteral("m_filterAliases"),
-			                                                    QStringLiteral("m_editTimersFilter"),
-			                                                    QStringLiteral("m_filterTimers"),
-			                                                    QStringLiteral("m_ansiDefaults"),
-			                                                    QStringLiteral("m_ansiSwap"),
-			                                                    QStringLiteral("m_ansiInvert"),
-			                                                    QStringLiteral("m_ansiLighter"),
-			                                                    QStringLiteral("m_ansiDarker"),
-			                                                    QStringLiteral("m_ansiMoreColour"),
-			                                                    QStringLiteral("m_ansiLessColour"),
-			                                                    QStringLiteral("m_ansiRandom"),
-			                                                    QStringLiteral("m_ansiLoad"),
-			                                                    QStringLiteral("m_ansiSave"),
-			                                                    QStringLiteral("m_copyAnsiToCustom")};
-
-			for (const QString &widgetName : mustBeConstructedBeforeConnect)
-			{
-				const QString escaped = QRegularExpression::escape(widgetName);
-				const int createLine  = firstMatchLine(QStringLiteral("\\b%1\\s*=\\s*new\\b").arg(escaped));
-				const int connectLine =
-				    firstMatchLine(QStringLiteral("\\bconnect\\s*\\(\\s*%1\\s*,").arg(escaped));
-
-				QVERIFY2(createLine > 0,
-				         qPrintable(QStringLiteral("No construction found for %1").arg(widgetName)));
-				QVERIFY2(connectLine > 0,
-				         qPrintable(QStringLiteral("No connect found for %1").arg(widgetName)));
-				QVERIFY2(connectLine > createLine,
-				         qPrintable(QStringLiteral("%1 connect line %2 is before construction line %3")
-				                        .arg(widgetName)
-				                        .arg(connectLine)
-				                        .arg(createLine)));
+				m_count = 0;
 			}
-		}
 
-		void commandRecognitionAndPageMapping_data()
-		{
-			QTest::addColumn<QString>("cmdName");
-			QTest::addColumn<bool>("mudAddressAlias");
-			QTest::addColumn<bool>("mxpAlias");
-			QTest::addColumn<bool>("autoSayAlias");
-			QTest::addColumn<bool>("pasteAlias");
-			QTest::addColumn<int>("lastPage");
-			QTest::addColumn<bool>("expectedRecognized");
-			QTest::addColumn<int>("expectedPage");
-
-			QTest::newRow("preferences-valid-last-page")
-			    << QStringLiteral("Preferences") << false << false << false << false
-			    << static_cast<int>(WorldPreferencesDialog::PageTimers) << true
-			    << static_cast<int>(WorldPreferencesDialog::PageTimers);
-			QTest::newRow("preferences-negative-last-page")
-			    << QStringLiteral("Preferences") << false << false << false << false << -1 << true
-			    << static_cast<int>(WorldPreferencesDialog::PageGeneral);
-			QTest::newRow("preferences-overflow-last-page")
-			    << QStringLiteral("Preferences") << false << false << false << false << 999 << true
-			    << static_cast<int>(WorldPreferencesDialog::PageGeneral);
-			QTest::newRow("configure-logging-direct")
-			    << QStringLiteral("ConfigureLogging") << false << false << false << false << 0 << true
-			    << static_cast<int>(WorldPreferencesDialog::PageLogging);
-			QTest::newRow("configure-chat-direct")
-			    << QStringLiteral("ConfigureChat") << false << false << false << false << 0 << true
-			    << static_cast<int>(WorldPreferencesDialog::PageChat);
-			QTest::newRow("configure-mud-address-alias")
-			    << QStringLiteral("AliasForMudAddress") << true << false << false << false << 0 << true
-			    << static_cast<int>(WorldPreferencesDialog::PageGeneral);
-			QTest::newRow("configure-mxp-alias")
-			    << QStringLiteral("AliasForMxp") << false << true << false << false << 0 << true
-			    << static_cast<int>(WorldPreferencesDialog::PageMxp);
-			QTest::newRow("configure-autosay-alias")
-			    << QStringLiteral("AliasForAutoSay") << false << false << true << false << 0 << true
-			    << static_cast<int>(WorldPreferencesDialog::PageAutoSay);
-			QTest::newRow("configure-paste-alias")
-			    << QStringLiteral("AliasForPaste") << false << false << false << true << 0 << true
-			    << static_cast<int>(WorldPreferencesDialog::PagePaste);
-			QTest::newRow("unrelated-command")
-			    << QStringLiteral("NotAWorldPreferenceCommand") << false << false << false << false << 0
-			    << false << static_cast<int>(WorldPreferencesDialog::PageGeneral);
-		}
-
-		void commandRecognitionAndPageMapping()
-		{
-			QFETCH(QString, cmdName);
-			QFETCH(bool, mudAddressAlias);
-			QFETCH(bool, mxpAlias);
-			QFETCH(bool, autoSayAlias);
-			QFETCH(bool, pasteAlias);
-			QFETCH(int, lastPage);
-			QFETCH(bool, expectedRecognized);
-			QFETCH(int, expectedPage);
-
-			const auto matcher = [mudAddressAlias, mxpAlias, autoSayAlias,
-			                      pasteAlias](const QString &commandName) -> bool
+			/**
+			 * @brief Returns the accumulated resize-event count.
+			 * @return Number of observed resize events.
+			 */
+			[[nodiscard]] int count() const
 			{
-				if (commandName == QStringLiteral("ConfigureMudAddress"))
-					return mudAddressAlias;
-				if (commandName == QStringLiteral("ConfigureMxp"))
-					return mxpAlias;
-				if (commandName == QStringLiteral("ConfigureAutoSay"))
-					return autoSayAlias;
-				if (commandName == QStringLiteral("ConfigurePaste"))
-					return pasteAlias;
-				return false;
-			};
-
-			QCOMPARE(QMudWorldPreferencesRouting::isPreferencesCommand(cmdName, matcher), expectedRecognized);
-			QCOMPARE(static_cast<int>(
-			             QMudWorldPreferencesRouting::initialPageForCommand(cmdName, lastPage, matcher)),
-			         expectedPage);
-		}
-
-		void spinBoxesUseRangeBasedWidthPolicy()
-		{
-			const QString sourcePath =
-			    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
-			        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
-			QFile sourceFile(sourcePath);
-			QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
-			         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
-			const QString sourceText = QString::fromUtf8(sourceFile.readAll());
-
-			auto          firstMatchLine = [&sourceText](const QString &pattern) -> int
-			{
-				const QRegularExpression      regex(pattern);
-				const QRegularExpressionMatch match = regex.match(sourceText);
-				if (!match.hasMatch())
-					return -1;
-				return static_cast<int>(sourceText.left(match.capturedStart()).count(QLatin1Char('\n'))) + 1;
-			};
-
-			QVERIFY2(firstMatchLine(QStringLiteral(
-			             "\\bconfigureSpinBoxWidthForRange\\s*\\(\\s*QSpinBox\\s*\\*\\s*\\w+\\s*\\)")) > 0,
-			         "Expected range-based spin-box width helper was not found.");
-			QVERIFY2(firstMatchLine(QStringLiteral("\\bQStyleOptionSpinBox\\b")) > 0,
-			         "Expected style-aware spin-box width calculation was not found.");
-
-			const QStringList spinNames = {QStringLiteral("m_maxLines"),
-			                               QStringLiteral("m_wrapColumn"),
-			                               QStringLiteral("m_speedWalkDelay"),
-			                               QStringLiteral("m_autoResizeMinimumLines"),
-			                               QStringLiteral("m_autoResizeMaximumLines"),
-			                               QStringLiteral("m_spamLineCount"),
-			                               QStringLiteral("m_historyLines")};
-
-			for (const QString &spinName : spinNames)
-			{
-				const QString escaped = QRegularExpression::escape(spinName);
-				const int     createLine =
-				    firstMatchLine(QStringLiteral("\\b%1\\s*=\\s*new\\s+QSpinBox\\s*\\(").arg(escaped));
-				const int setRangeLine =
-				    firstMatchLine(QStringLiteral("\\b%1\\s*->\\s*setRange\\s*\\(").arg(escaped));
-				const int configureLine = firstMatchLine(
-				    QStringLiteral("\\bconfigureSpinBoxWidthForRange\\s*\\(\\s*%1\\s*\\)\\s*;").arg(escaped));
-
-				QVERIFY2(createLine > 0,
-				         qPrintable(QStringLiteral("No QSpinBox construction found for %1").arg(spinName)));
-				QVERIFY2(setRangeLine > 0,
-				         qPrintable(QStringLiteral("No setRange(...) call found for %1").arg(spinName)));
-				QVERIFY2(configureLine > 0,
-				         qPrintable(QStringLiteral("No configureSpinBoxWidthForRange(...) call found for %1")
-				                        .arg(spinName)));
-				QVERIFY2(setRangeLine > createLine,
-				         qPrintable(
-				             QStringLiteral("Expected setRange(...) after %1 construction.").arg(spinName)));
-				QVERIFY2(configureLine > setRangeLine,
-				         qPrintable(
-				             QStringLiteral("Expected configureSpinBoxWidthForRange(%1) after setRange(...).")
-				                 .arg(spinName)));
-
-				const QRegularExpression fixedWidthPattern(
-				    QStringLiteral("\\b%1\\s*->\\s*set(?:Maximum|Minimum|Fixed)Width\\s*\\(").arg(escaped));
-				QVERIFY2(!fixedWidthPattern.match(sourceText).hasMatch(),
-				         qPrintable(QStringLiteral("Unexpected fixed-width policy for %1").arg(spinName)));
+				return m_count;
 			}
-		}
 
-		void listedEditorsAndTablesAllowTabFocusTraversal()
-		{
-			const QString sourcePath =
-			    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
-			        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
-			QFile sourceFile(sourcePath);
-			QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
-			         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
-			const QString sourceText = QString::fromUtf8(sourceFile.readAll());
-
-			auto          firstMatchLine = [&sourceText](const QString &pattern) -> int
+			/**
+			 * @brief Counts resize events without consuming them.
+			 * @param watched Object receiving the event.
+			 * @param event Event delivered to the watched object.
+			 * @return Base event-filter result.
+			 */
+			bool eventFilter(QObject *watched, QEvent *event) override
 			{
-				const QRegularExpression      regex(pattern);
-				const QRegularExpressionMatch match = regex.match(sourceText);
-				if (!match.hasMatch())
-					return -1;
-				return static_cast<int>(sourceText.left(match.capturedStart()).count(QLatin1Char('\n'))) + 1;
+				if (event && event->type() == QEvent::Resize)
+					++m_count;
+				return QObject::eventFilter(watched, event);
+			}
+
+		private:
+			int m_count{0};
+	};
+
+	/**
+	 * @brief Finds a checkbox by its exact visible label.
+	 * @param root Root object to search.
+	 * @param text Checkbox label to match.
+	 * @return Matching checkbox, or `nullptr` when absent.
+	 */
+	QCheckBox *findCheckBoxByText(const QObject &root, const QString &text)
+	{
+		for (QCheckBox *checkbox : root.findChildren<QCheckBox *>())
+		{
+			if (checkbox && checkbox->text() == text)
+				return checkbox;
+		}
+		return nullptr;
+	}
+
+	enum class RuleKind
+	{
+		Trigger,
+		Alias,
+		Timer
+	};
+
+	struct RuleViewWidgets
+	{
+			QTableWidget *table{nullptr};
+			QTreeWidget  *tree{nullptr};
+			QPushButton  *editButton{nullptr};
+			QPushButton  *removeButton{nullptr};
+	};
+
+	/**
+	 * @brief Returns the preferences page containing one rule kind.
+	 * @param kind Rule kind to resolve.
+	 * @return Corresponding preferences page.
+	 */
+	WorldPreferencesDialog::Page rulePage(const RuleKind kind)
+	{
+		switch (kind)
+		{
+		case RuleKind::Trigger:
+			return WorldPreferencesDialog::PageTriggers;
+		case RuleKind::Alias:
+			return WorldPreferencesDialog::PageAliases;
+		case RuleKind::Timer:
+			return WorldPreferencesDialog::PageTimers;
+		}
+		return WorldPreferencesDialog::PageTriggers;
+	}
+
+	/**
+	 * @brief Returns the first-column heading identifying one rule table.
+	 * @param kind Rule kind to resolve.
+	 * @return Exact first-column heading.
+	 */
+	QString ruleTableHeading(const RuleKind kind)
+	{
+		switch (kind)
+		{
+		case RuleKind::Trigger:
+			return QStringLiteral("Trigger");
+		case RuleKind::Alias:
+			return QStringLiteral("Alias");
+		case RuleKind::Timer:
+			return QStringLiteral("Type");
+		}
+		return {};
+	}
+
+	/**
+	 * @brief Returns the column carrying the sortable display value for one rule kind.
+	 * @param kind Rule kind to resolve.
+	 * @return Display-value column.
+	 */
+	int ruleDisplayColumn(const RuleKind kind)
+	{
+		return kind == RuleKind::Timer ? 1 : 0;
+	}
+
+	/**
+	 * @brief Locates the table, grouped tree, and remove button for one rule page.
+	 * @param dialog Preferences dialog to inspect.
+	 * @param kind Rule kind to locate.
+	 * @return Located widgets; unavailable entries remain null.
+	 */
+	RuleViewWidgets findRuleViewWidgets(const WorldPreferencesDialog &dialog, const RuleKind kind)
+	{
+		RuleViewWidgets result;
+		for (QTableWidget *table : dialog.findChildren<QTableWidget *>())
+		{
+			if (!table || !table->horizontalHeaderItem(0) ||
+			    table->horizontalHeaderItem(0)->text() != ruleTableHeading(kind))
+				continue;
+			result.table = table;
+			break;
+		}
+		if (!result.table)
+			return result;
+
+		auto *stack = qobject_cast<QStackedWidget *>(result.table->parentWidget());
+		if (!stack)
+			return result;
+		result.tree   = stack->findChild<QTreeWidget *>(QString(), Qt::FindDirectChildrenOnly);
+		QWidget *page = stack->parentWidget();
+		if (!page)
+			return result;
+		for (QPushButton *button : page->findChildren<QPushButton *>())
+		{
+			if (!button)
+				continue;
+			if (button->text() == QStringLiteral("&Edit..."))
+				result.editButton = button;
+			else if (button->text() == QStringLiteral("&Remove"))
+				result.removeButton = button;
+		}
+		return result;
+	}
+
+	/**
+	 * @brief Finds a grouped rule-tree parent by its exact group name.
+	 * @param tree Tree to search.
+	 * @param groupName Group name to match.
+	 * @return Matching group item, or `nullptr` when absent.
+	 */
+	QTreeWidgetItem *findRuleGroup(const QTreeWidget &tree, const QString &groupName)
+	{
+		for (int index = 0; index < tree.topLevelItemCount(); ++index)
+		{
+			QTreeWidgetItem *group = tree.topLevelItem(index);
+			if (group && group->text(0) == groupName)
+				return group;
+		}
+		return nullptr;
+	}
+
+	/**
+	 * @brief Finds a rule-table row carrying one runtime identity.
+	 * @param table Rule table to inspect.
+	 * @param runtimeId Runtime identity to locate.
+	 * @return Matching row, or `-1` when absent.
+	 */
+	int findRuleRowByRuntimeId(const QTableWidget &table, const quint64 runtimeId)
+	{
+		for (int row = 0; row < table.rowCount(); ++row)
+		{
+			bool ok = false;
+			if (const quint64 candidate = table.item(row, 0)->data(Qt::UserRole).toULongLong(&ok);
+			    ok && candidate == runtimeId)
+				return row;
+		}
+		return -1;
+	}
+
+	/**
+	 * @brief Populates one runtime with deliberately storage-unsorted rule fixtures.
+	 * @param runtime Runtime receiving the fixtures.
+	 * @param kind Rule kind to populate.
+	 * @param treeMode Enable grouped tree presentation when `true`.
+	 * @param includeSoleGroup Add a second group containing one rule when `true`.
+	 */
+	void populateRuleSelectionFixtures(WorldRuntime &runtime, const RuleKind kind, const bool treeMode,
+	                                   const bool includeSoleGroup)
+	{
+		const QString treeValue = treeMode ? QStringLiteral("1") : QStringLiteral("0");
+		switch (kind)
+		{
+		case RuleKind::Trigger:
+		{
+			auto makeTrigger = [](const QString &match, const QString &group)
+			{
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("match"), match);
+				trigger.attributes.insert(QStringLiteral("group"), group);
+				return trigger;
 			};
-
-			const QStringList textEditNames = {QStringLiteral("m_connectText"),
-			                                   QStringLiteral("m_logFilePreamble"),
-			                                   QStringLiteral("m_logFilePostamble"),
-			                                   QStringLiteral("m_notes"),
-			                                   QStringLiteral("m_pastePreamble"),
-			                                   QStringLiteral("m_pastePostamble"),
-			                                   QStringLiteral("m_sendToWorldFilePreamble"),
-			                                   QStringLiteral("m_sendToWorldFilePostamble")};
-			for (const QString &editName : textEditNames)
-			{
-				const QString escaped = QRegularExpression::escape(editName);
-				const int createLine  = firstMatchLine(QStringLiteral("\\b%1\\s*=\\s*new\\b").arg(escaped));
-				const int tabLine     = firstMatchLine(
-				    QStringLiteral("\\b%1\\s*->\\s*setTabChangesFocus\\s*\\(\\s*true\\s*\\)").arg(escaped));
-
-				QVERIFY2(createLine > 0,
-				         qPrintable(QStringLiteral("No construction found for %1").arg(editName)));
-				QVERIFY2(
-				    tabLine > createLine,
-				    qPrintable(
-				        QStringLiteral("No setTabChangesFocus(true) after %1 construction.").arg(editName)));
-			}
-			QVERIFY2(sourceText.contains(QStringLiteral("words->setTabChangesFocus(true);")),
-			         "Expected Tab Completion word list editor to pass Tab to focus traversal.");
-
-			const QStringList tableNames = {QStringLiteral("m_macrosTable"),
-			                                QStringLiteral("m_variablesTable")};
-			for (const QString &tableName : tableNames)
-			{
-				const QString escaped    = QRegularExpression::escape(tableName);
-				const int     createLine = firstMatchLine(QStringLiteral("\\b%1\\s*=").arg(escaped));
-				const int     tabLine    = firstMatchLine(
-				    QStringLiteral("\\b%1\\s*->\\s*setTabKeyNavigation\\s*\\(\\s*false\\s*\\)").arg(escaped));
-
-				QVERIFY2(createLine > 0,
-				         qPrintable(QStringLiteral("No construction found for %1").arg(tableName)));
-				QVERIFY2(tabLine > createLine,
-				         qPrintable(QStringLiteral("No setTabKeyNavigation(false) after %1 construction.")
-				                        .arg(tableName)));
-			}
+			QList<WorldRuntime::Trigger> triggers = {
+			    makeTrigger(QStringLiteral("Mike"), QStringLiteral("primary")),
+			    makeTrigger(QStringLiteral("Zulu"), QStringLiteral("primary")),
+			    makeTrigger(QStringLiteral("Alpha"), QStringLiteral("primary"))};
+			if (includeSoleGroup)
+				triggers.push_back(makeTrigger(QStringLiteral("Only"), QStringLiteral("sole")));
+			runtime.setTriggers(triggers);
+			runtime.setWorldAttribute(QStringLiteral("treeview_triggers"), treeValue);
+			break;
 		}
-
-		void legacyEncodingControlFollowsUtf8Option()
+		case RuleKind::Alias:
 		{
-			WorldRuntime runtime;
-			runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Legacy Encoding Test"));
-			runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("localhost"));
-			runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
-			runtime.setWorldAttribute(QStringLiteral("utf_8"), QStringLiteral("0"));
-			runtime.setWorldAttribute(QStringLiteral("legacy_encoding"), QStringLiteral("GB18030"));
-			runtime.setWorldAttribute(QStringLiteral("proxy_type"), QStringLiteral("0"));
-			runtime.setWorldAttribute(QStringLiteral("connect_method"), QStringLiteral("0"));
-			runtime.setWorldAttribute(QStringLiteral("enable_command_stack"), QStringLiteral("0"));
-			runtime.setWorldAttribute(QStringLiteral("command_stack_character"), QStringLiteral(";"));
-			runtime.setWorldAttribute(QStringLiteral("enable_speed_walk"), QStringLiteral("0"));
-			runtime.setWorldAttribute(QStringLiteral("speed_walk_prefix"), QStringLiteral("#"));
-			runtime.setWorldAttribute(QStringLiteral("enable_auto_say"), QStringLiteral("0"));
-			runtime.setWorldAttribute(QStringLiteral("auto_say_string"), QStringLiteral("say "));
-			runtime.setWorldAttribute(QStringLiteral("log_output"), QStringLiteral("1"));
-			runtime.setWorldAttribute(QStringLiteral("log_raw"), QStringLiteral("0"));
-
-			WorldPreferencesDialog dialog(&runtime, nullptr);
-			auto *combo = dialog.findChild<QComboBox *>(QStringLiteral("legacyEncodingCombo"));
-			QVERIFY(combo);
-
-			QCheckBox *utf8 = nullptr;
-			for (QCheckBox *box : dialog.findChildren<QCheckBox *>())
+			auto makeAlias = [](const QString &match, const QString &group)
 			{
-				if (box->text() == QStringLiteral("UTF-8 (Unicode)"))
+				WorldRuntime::Alias alias;
+				alias.attributes.insert(QStringLiteral("match"), match);
+				alias.attributes.insert(QStringLiteral("group"), group);
+				return alias;
+			};
+			QList<WorldRuntime::Alias> aliases = {
+			    makeAlias(QStringLiteral("Mike"), QStringLiteral("primary")),
+			    makeAlias(QStringLiteral("Zulu"), QStringLiteral("primary")),
+			    makeAlias(QStringLiteral("Alpha"), QStringLiteral("primary"))};
+			if (includeSoleGroup)
+				aliases.push_back(makeAlias(QStringLiteral("Only"), QStringLiteral("sole")));
+			runtime.setAliases(aliases);
+			runtime.setWorldAttribute(QStringLiteral("treeview_aliases"), treeValue);
+			break;
+		}
+		case RuleKind::Timer:
+		{
+			auto makeTimer = [](const int hour, const QString &group)
+			{
+				WorldRuntime::Timer timer;
+				timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("1"));
+				timer.attributes.insert(QStringLiteral("hour"), QString::number(hour));
+				timer.attributes.insert(QStringLiteral("group"), group);
+				return timer;
+			};
+			QList<WorldRuntime::Timer> timers = {makeTimer(12, QStringLiteral("primary")),
+			                                     makeTimer(18, QStringLiteral("primary")),
+			                                     makeTimer(6, QStringLiteral("primary"))};
+			if (includeSoleGroup)
+				timers.push_back(makeTimer(23, QStringLiteral("sole")));
+			runtime.setTimers(timers);
+			runtime.setWorldAttribute(QStringLiteral("treeview_timers"), treeValue);
+			break;
+		}
+		}
+	}
+
+	/**
+	 * @brief QTest fixture covering Dialog WorldPreferences scenarios.
+	 */
+	class tst_Dialog_WorldPreferences : public QObject
+	{
+			Q_OBJECT
+
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			/**
+			 * @brief Verifies screen constraints account for frames and non-primary screen origins.
+			 */
+			void dialogSizingGeometryHandlesFramesAndNegativeOrigins()
+			{
+				const QRect        available(-1920, -200, 1600, 900);
+				constexpr QMargins frameMargins(8, 30, 12, 10);
+				QCOMPARE(
+				    DialogSizingUtils::mergedFrameMarginsForObservedOverhead(frameMargins, QSize(20, 40)),
+				    frameMargins);
+				QCOMPARE(
+				    DialogSizingUtils::mergedFrameMarginsForObservedOverhead(frameMargins, QSize(24, 45)),
+				    QMargins(8, 30, 16, 15));
+				QCOMPARE(DialogSizingUtils::mergedFrameMarginsForObservedOverhead(QMargins(-2, -3, 4, 5),
+				                                                                  QSize(7, 9)),
+				         QMargins(0, 0, 7, 9));
+				QCOMPARE(DialogSizingUtils::maximumClientSizeForAvailableSize(available.size(), frameMargins),
+				         QSize(1580, 860));
+				QCOMPARE(DialogSizingUtils::maximumCentralHeightForLayout(860, 700, 520), 680);
+				QCOMPARE(DialogSizingUtils::maximumCentralHeightForLayout(120, 700, 520), 1);
+
+				const QRect frame(100, 100, 1200, 700);
+				QCOMPARE(DialogSizingUtils::boundedFrameTopLeft(available, frame), QPoint(-1520, 0));
+				const QRect oversizedFrame(100, 100, 1800, 1000);
+				QCOMPARE(DialogSizingUtils::boundedFrameTopLeft(available, oversizedFrame),
+				         available.topLeft());
+
+				constexpr QSize initialContent(700, 520);
+				constexpr QSize enlargedContent(820, 610);
+				QCOMPARE(DialogSizingUtils::desiredClientSizeForContentChange(
+				             QSize(900, 650), QSize(), QSize(), QSize(), initialContent),
+				         QSize(900, 650));
+				QCOMPARE(
+				    DialogSizingUtils::desiredClientSizeForContentChange(
+				        QSize(900, 650), QSize(900, 650), QSize(900, 650), initialContent, enlargedContent),
+				    QSize(1020, 740));
+				QCOMPARE(DialogSizingUtils::desiredClientSizeForContentChange(
+				             QSize(1020, 740), QSize(1020, 740), QSize(1020, 740), enlargedContent,
+				             initialContent),
+				         QSize(900, 650));
+
+				constexpr QSize screenClampedContent(1400, 1000);
+				constexpr QSize desiredBeforeClamp(1000, 700);
+				const QSize     desiredWhileClamped = DialogSizingUtils::desiredClientSizeForContentChange(
+				    desiredBeforeClamp, desiredBeforeClamp, desiredBeforeClamp, initialContent,
+				    screenClampedContent);
+				QCOMPARE(desiredWhileClamped, QSize(1700, 1180));
+				QCOMPARE(DialogSizingUtils::desiredClientSizeForContentChange(
+				             QSize(1100, 800), QSize(1100, 800), desiredWhileClamped, screenClampedContent,
+				             initialContent),
+				         desiredBeforeClamp);
+				QCOMPARE(
+				    DialogSizingUtils::desiredClientSizeForContentChange(
+				        QSize(950, 680), QSize(900, 650), QSize(900, 650), initialContent, enlargedContent),
+				    QSize(1070, 770));
+				QCOMPARE(DialogSizingUtils::desiredClientSizeForContentChange(
+				             QSize(1100, 850), QSize(1100, 800), desiredWhileClamped, screenClampedContent,
+				             screenClampedContent),
+				         QSize(1700, 1000));
+				QCOMPARE(DialogSizingUtils::desiredClientSizeForContentChange(
+				             QSize(1150, 800), QSize(1100, 800), desiredWhileClamped, screenClampedContent,
+				             screenClampedContent),
+				         QSize(1400, 1180));
+			}
+
+			/**
+			 * @brief Verifies initial sizing preserves the platform's parent-relative placement.
+			 */
+			void initialSizingDoesNotForceNativePosition()
+			{
+				QWidget                parent;
+				WorldRuntime           runtime;
+				WorldPreferencesDialog dialog(&runtime, nullptr, &parent);
+
+				QVERIFY(!dialog.testAttribute(Qt::WA_Moved));
+
+				parent.resize(700, 650);
+				parent.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&parent));
+				QVERIFY(parent.screen());
+				const QRect availableGeometry = parent.screen()->availableGeometry();
+				parent.move(parent.pos() + availableGeometry.center() - parent.frameGeometry().center());
+				QCoreApplication::processEvents();
+				dialog.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+				QVERIFY(dialog.windowHandle());
+				QTRY_VERIFY(dialog.screen()->availableGeometry().contains(dialog.frameGeometry()));
+				QTRY_VERIFY(qAbs(dialog.frameGeometry().center().x() - parent.frameGeometry().center().x()) <=
+				            4);
+				QTRY_VERIFY(qAbs(dialog.frameGeometry().center().y() - parent.frameGeometry().center().y()) <=
+				            4);
+			}
+
+			void worldPreferencesButtonConnectionsAreAfterConstruction()
+			{
+				const QString sourcePath =
+				    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
+				        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
+				QFile sourceFile(sourcePath);
+				QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
+				         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
+				const QString sourceText = QString::fromUtf8(sourceFile.readAll());
+
+				auto          firstMatchLine = [&sourceText](const QString &pattern) -> int
 				{
-					utf8 = box;
-					break;
+					const QRegularExpression      regex(pattern);
+					const QRegularExpressionMatch match = regex.match(sourceText);
+					if (!match.hasMatch())
+						return -1;
+					return static_cast<int>(sourceText.left(match.capturedStart()).count(QLatin1Char('\n'))) +
+					       1;
+				};
+
+				const QStringList mustBeConstructedBeforeConnect = {QStringLiteral("m_browseLogFile"),
+				                                                    QStringLiteral("m_standardPreamble"),
+				                                                    QStringLiteral("m_editPreamble"),
+				                                                    QStringLiteral("m_editPostamble"),
+				                                                    QStringLiteral("m_substitutionHelp"),
+				                                                    QStringLiteral("m_connectText"),
+				                                                    QStringLiteral("m_keypadControl"),
+				                                                    QStringLiteral("m_infoCalculateMemory"),
+				                                                    QStringLiteral("m_chatSaveBrowse"),
+				                                                    QStringLiteral("m_resetMxpTagsButton"),
+				                                                    QStringLiteral("m_loadNotesButton"),
+				                                                    QStringLiteral("m_saveNotesButton"),
+				                                                    QStringLiteral("m_editNotesButton"),
+				                                                    QStringLiteral("m_findNotesButton"),
+				                                                    QStringLiteral("m_findNextNotesButton"),
+				                                                    QStringLiteral("m_editTriggersFilter"),
+				                                                    QStringLiteral("m_filterTriggers"),
+				                                                    QStringLiteral("m_editAliasesFilter"),
+				                                                    QStringLiteral("m_filterAliases"),
+				                                                    QStringLiteral("m_editTimersFilter"),
+				                                                    QStringLiteral("m_filterTimers"),
+				                                                    QStringLiteral("m_ansiDefaults"),
+				                                                    QStringLiteral("m_ansiSwap"),
+				                                                    QStringLiteral("m_ansiInvert"),
+				                                                    QStringLiteral("m_ansiLighter"),
+				                                                    QStringLiteral("m_ansiDarker"),
+				                                                    QStringLiteral("m_ansiMoreColour"),
+				                                                    QStringLiteral("m_ansiLessColour"),
+				                                                    QStringLiteral("m_ansiRandom"),
+				                                                    QStringLiteral("m_ansiLoad"),
+				                                                    QStringLiteral("m_ansiSave"),
+				                                                    QStringLiteral("m_copyAnsiToCustom")};
+
+				for (const QString &widgetName : mustBeConstructedBeforeConnect)
+				{
+					const QString escaped = QRegularExpression::escape(widgetName);
+					const int     createLine =
+					    firstMatchLine(QStringLiteral("\\b%1\\s*=\\s*new\\b").arg(escaped));
+					const int connectLine =
+					    firstMatchLine(QStringLiteral("\\bconnect\\s*\\(\\s*%1\\s*,").arg(escaped));
+
+					QVERIFY2(createLine > 0,
+					         qPrintable(QStringLiteral("No construction found for %1").arg(widgetName)));
+					QVERIFY2(connectLine > 0,
+					         qPrintable(QStringLiteral("No connect found for %1").arg(widgetName)));
+					QVERIFY2(connectLine > createLine,
+					         qPrintable(QStringLiteral("%1 connect line %2 is before construction line %3")
+					                        .arg(widgetName)
+					                        .arg(connectLine)
+					                        .arg(createLine)));
 				}
 			}
-			if (utf8 == nullptr)
-				QFAIL("UTF-8 checkbox not found");
-			QCheckBox        &utf8CheckBox = *utf8;
 
-			const QStringList encodings = qmudAvailableWorldTextEncodings();
-			QCOMPARE(combo->count(), encodings.size());
-			for (const QString &encodingName : encodings)
+			void commandRecognitionAndPageMapping_data()
 			{
-				const int index = combo->findData(encodingName);
-				QVERIFY2(index >= 0,
-				         qPrintable(QStringLiteral("Missing legacy encoding item for %1").arg(encodingName)));
-				QCOMPARE(combo->itemText(index), qmudWorldTextEncodingDisplayName(encodingName));
-				QVERIFY(combo->itemText(index).contains(QLatin1Char('(')));
-				QVERIFY(combo->itemText(index).endsWith(QLatin1Char(')')));
+				QTest::addColumn<QString>("cmdName");
+				QTest::addColumn<bool>("mudAddressAlias");
+				QTest::addColumn<bool>("mxpAlias");
+				QTest::addColumn<bool>("autoSayAlias");
+				QTest::addColumn<bool>("pasteAlias");
+				QTest::addColumn<int>("lastPage");
+				QTest::addColumn<bool>("expectedRecognized");
+				QTest::addColumn<int>("expectedPage");
+
+				QTest::newRow("preferences-valid-last-page")
+				    << QStringLiteral("Preferences") << false << false << false << false
+				    << static_cast<int>(WorldPreferencesDialog::PageTimers) << true
+				    << static_cast<int>(WorldPreferencesDialog::PageTimers);
+				QTest::newRow("preferences-negative-last-page")
+				    << QStringLiteral("Preferences") << false << false << false << false << -1 << true
+				    << static_cast<int>(WorldPreferencesDialog::PageGeneral);
+				QTest::newRow("preferences-overflow-last-page")
+				    << QStringLiteral("Preferences") << false << false << false << false << 999 << true
+				    << static_cast<int>(WorldPreferencesDialog::PageGeneral);
+				QTest::newRow("configure-logging-direct")
+				    << QStringLiteral("ConfigureLogging") << false << false << false << false << 0 << true
+				    << static_cast<int>(WorldPreferencesDialog::PageLogging);
+				QTest::newRow("configure-chat-direct")
+				    << QStringLiteral("ConfigureChat") << false << false << false << false << 0 << true
+				    << static_cast<int>(WorldPreferencesDialog::PageChat);
+				QTest::newRow("configure-mud-address-alias")
+				    << QStringLiteral("AliasForMudAddress") << true << false << false << false << 0 << true
+				    << static_cast<int>(WorldPreferencesDialog::PageGeneral);
+				QTest::newRow("configure-mxp-alias")
+				    << QStringLiteral("AliasForMxp") << false << true << false << false << 0 << true
+				    << static_cast<int>(WorldPreferencesDialog::PageMxp);
+				QTest::newRow("configure-autosay-alias")
+				    << QStringLiteral("AliasForAutoSay") << false << false << true << false << 0 << true
+				    << static_cast<int>(WorldPreferencesDialog::PageAutoSay);
+				QTest::newRow("configure-paste-alias")
+				    << QStringLiteral("AliasForPaste") << false << false << false << true << 0 << true
+				    << static_cast<int>(WorldPreferencesDialog::PagePaste);
+				QTest::newRow("unrelated-command")
+				    << QStringLiteral("NotAWorldPreferenceCommand") << false << false << false << false << 0
+				    << false << static_cast<int>(WorldPreferencesDialog::PageGeneral);
 			}
 
-			QCOMPARE(combo->currentData().toString(), QStringLiteral("GB18030"));
-			QVERIFY(combo->isEnabled());
+			void commandRecognitionAndPageMapping()
+			{
+				QFETCH(QString, cmdName);
+				QFETCH(bool, mudAddressAlias);
+				QFETCH(bool, mxpAlias);
+				QFETCH(bool, autoSayAlias);
+				QFETCH(bool, pasteAlias);
+				QFETCH(int, lastPage);
+				QFETCH(bool, expectedRecognized);
+				QFETCH(int, expectedPage);
 
-			utf8CheckBox.setChecked(true);
-			QVERIFY(!combo->isEnabled());
-			utf8CheckBox.setChecked(false);
-			QVERIFY(combo->isEnabled());
+				const auto matcher = [mudAddressAlias, mxpAlias, autoSayAlias,
+				                      pasteAlias](const QString &commandName) -> bool
+				{
+					if (commandName == QStringLiteral("ConfigureMudAddress"))
+						return mudAddressAlias;
+					if (commandName == QStringLiteral("ConfigureMxp"))
+						return mxpAlias;
+					if (commandName == QStringLiteral("ConfigureAutoSay"))
+						return autoSayAlias;
+					if (commandName == QStringLiteral("ConfigurePaste"))
+						return pasteAlias;
+					return false;
+				};
 
-			const QString targetEncoding = qmudNormalizeWorldTextEncodingName(QStringLiteral("windows-1252"));
-			const int     targetIndex    = combo->findData(targetEncoding);
-			QVERIFY(targetIndex >= 0);
-			combo->setCurrentIndex(targetIndex);
+				QCOMPARE(QMudWorldPreferencesRouting::isPreferencesCommand(cmdName, matcher),
+				         expectedRecognized);
+				QCOMPARE(static_cast<int>(
+				             QMudWorldPreferencesRouting::initialPageForCommand(cmdName, lastPage, matcher)),
+				         expectedPage);
+			}
 
-			dialog.accept();
+			void spinBoxesUseRangeBasedWidthPolicy()
+			{
+				const QString sourcePath =
+				    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
+				        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
+				QFile sourceFile(sourcePath);
+				QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
+				         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
+				const QString sourceText = QString::fromUtf8(sourceFile.readAll());
 
-			QCOMPARE(runtime.worldAttributes().value(QStringLiteral("legacy_encoding")), targetEncoding);
-		}
+				auto          firstMatchLine = [&sourceText](const QString &pattern) -> int
+				{
+					const QRegularExpression      regex(pattern);
+					const QRegularExpressionMatch match = regex.match(sourceText);
+					if (!match.hasMatch())
+						return -1;
+					return static_cast<int>(sourceText.left(match.capturedStart()).count(QLatin1Char('\n'))) +
+					       1;
+				};
 
-		void scriptingNoteColourApplyUpdatesRuntimeState()
-		{
-			const QString sourcePath =
-			    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
-			        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
-			QFile sourceFile(sourcePath);
-			QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
-			         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
-			const QString sourceText = QString::fromUtf8(sourceFile.readAll());
+				QVERIFY2(firstMatchLine(QStringLiteral(
+				             "\\bconfigureSpinBoxWidthForRange\\s*\\(\\s*QSpinBox\\s*\\*\\s*\\w+\\s*\\)")) >
+				             0,
+				         "Expected range-based spin-box width helper was not found.");
+				QVERIFY2(firstMatchLine(QStringLiteral("\\bQStyleOptionSpinBox\\b")) > 0,
+				         "Expected style-aware spin-box width calculation was not found.");
 
-			QVERIFY2(sourceText.contains(QStringLiteral("QMudNoteColour::worldAttributeFromPublicIndex")),
-			         "Expected scripting Note colour persistence to use shared note-colour encoding.");
-			QVERIFY2(sourceText.contains(QStringLiteral("m_runtime->setNoteTextColour(notePublicIndex)")),
-			         "Expected scripting Note colour apply path to update runtime Note() colour state.");
-		}
+				const QStringList spinNames = {QStringLiteral("m_maxLines"),
+				                               QStringLiteral("m_wrapColumn"),
+				                               QStringLiteral("m_pixelOffset"),
+				                               QStringLiteral("m_lineSpacing"),
+				                               QStringLiteral("m_outputFontHeight"),
+				                               QStringLiteral("m_fadeOutputBufferAfterSeconds"),
+				                               QStringLiteral("m_fadeOutputOpacityPercent"),
+				                               QStringLiteral("m_fadeOutputSeconds"),
+				                               QStringLiteral("m_speedWalkDelay"),
+				                               QStringLiteral("m_autoResizeMinimumLines"),
+				                               QStringLiteral("m_autoResizeMaximumLines"),
+				                               QStringLiteral("m_spamLineCount"),
+				                               QStringLiteral("m_historyLines")};
 
-		void scriptingNoteColourComboItemsUseCustomColours()
-		{
-			const QString sourcePath =
-			    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
-			        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
-			QFile sourceFile(sourcePath);
-			QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
-			         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
-			const QString sourceText = QString::fromUtf8(sourceFile.readAll());
+				for (const QString &spinName : spinNames)
+				{
+					const QString escaped = QRegularExpression::escape(spinName);
+					const int     createLine =
+					    firstMatchLine(QStringLiteral("\\b%1\\s*=\\s*new\\s+QSpinBox\\s*\\(").arg(escaped));
+					const int setRangeLine =
+					    firstMatchLine(QStringLiteral("\\b%1\\s*->\\s*setRange\\s*\\(").arg(escaped));
+					const int configureLine = firstMatchLine(
+					    QStringLiteral("\\bconfigureSpinBoxWidthForRange\\s*\\(\\s*%1\\s*\\)\\s*;")
+					        .arg(escaped));
 
-			QVERIFY2(sourceText.contains(QStringLiteral("updateScriptNoteColourItems")),
-			         "Expected scripting Note colour combo item role updater.");
-			QVERIFY2(sourceText.contains(QStringLiteral("Qt::ForegroundRole")),
-			         "Expected scripting Note colour combo entries to carry foreground colours.");
-			QVERIFY2(sourceText.contains(QStringLiteral("Qt::BackgroundRole")),
-			         "Expected scripting Note colour combo entries to carry background colours.");
-		}
-};
+					QVERIFY2(
+					    createLine > 0,
+					    qPrintable(QStringLiteral("No QSpinBox construction found for %1").arg(spinName)));
+					QVERIFY2(setRangeLine > 0,
+					         qPrintable(QStringLiteral("No setRange(...) call found for %1").arg(spinName)));
+					QVERIFY2(
+					    configureLine > 0,
+					    qPrintable(QStringLiteral("No configureSpinBoxWidthForRange(...) call found for %1")
+					                   .arg(spinName)));
+					QVERIFY2(
+					    setRangeLine > createLine,
+					    qPrintable(
+					        QStringLiteral("Expected setRange(...) after %1 construction.").arg(spinName)));
+					QVERIFY2(configureLine > setRangeLine,
+					         qPrintable(QStringLiteral(
+					                        "Expected configureSpinBoxWidthForRange(%1) after setRange(...).")
+					                        .arg(spinName)));
+
+					const QRegularExpression fixedWidthPattern(
+					    QStringLiteral("\\b%1\\s*->\\s*set(?:Maximum|Minimum|Fixed)Width\\s*\\(")
+					        .arg(escaped));
+					QVERIFY2(
+					    !fixedWidthPattern.match(sourceText).hasMatch(),
+					    qPrintable(QStringLiteral("Unexpected fixed-width policy for %1").arg(spinName)));
+				}
+			}
+
+			void dialogMinimumTracksFontChanges()
+			{
+				const QFont originalApplicationFont = QApplication::font();
+				const auto  restoreApplicationFont  = qScopeGuard(
+				    [originalApplicationFont] { QApplication::setFont(originalApplicationFont); });
+				WorldRuntime           runtime;
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageOutput);
+				dialog.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+				QCoreApplication::processEvents();
+				QVERIFY(dialog.screen());
+
+				auto *combo = dialog.findChild<QComboBox *>(QStringLiteral("legacyEncodingCombo"));
+				QVERIFY(combo);
+				auto *scriptTextColourCombo =
+				    dialog.findChild<QComboBox *>(QStringLiteral("scriptTextColourCombo"));
+				QVERIFY(scriptTextColourCombo);
+				QVERIFY(scriptTextColourCombo->maximumWidth() > scriptTextColourCombo->minimumWidth());
+				auto *customSwapButton =
+				    dialog.findChild<QPushButton *>(QStringLiteral("customColourSwapButton"));
+				auto *customTextSwatch = dialog.findChild<QPushButton *>(QStringLiteral("customTextSwatch0"));
+				auto *customBackSwatch = dialog.findChild<QPushButton *>(QStringLiteral("customBackSwatch0"));
+				auto *autoSayFooter    = dialog.findChild<QWidget *>(QStringLiteral("autoSayFooter"));
+				auto *ansiNormalHeader = dialog.findChild<QLabel *>(QStringLiteral("ansiNormalHeaderLabel"));
+				auto *ansiNormalMarker = dialog.findChild<QPushButton *>(QStringLiteral("ansiNormalSwatch0"));
+				auto *gradientHeader =
+				    dialog.findChild<QWidget *>(QStringLiteral("worldPreferencesGradientHeader"));
+				auto *infoPage = dialog.findChild<QWidget *>(QStringLiteral("worldPreferencesInfoPage"));
+				QVERIFY(customSwapButton);
+				QVERIFY(customTextSwatch);
+				QVERIFY(customBackSwatch);
+				QVERIFY(autoSayFooter);
+				QVERIFY(ansiNormalHeader);
+				QVERIFY(ansiNormalMarker);
+				QVERIFY(gradientHeader);
+				QVERIFY(infoPage);
+				auto *autoSayCheckbox = autoSayFooter->findChild<QCheckBox *>();
+				QVERIFY(autoSayCheckbox);
+				const QStringList compactButtonNames = {
+				    QStringLiteral("substitutionHelpButton"),   QStringLiteral("editLogPreambleButton"),
+				    QStringLiteral("editLogPostambleButton"),   QStringLiteral("editTriggersFilterButton"),
+				    QStringLiteral("editAliasesFilterButton"),  QStringLiteral("editTimersFilterButton"),
+				    QStringLiteral("editVariablesFilterButton")};
+				QList<QToolButton *> compactTextButtons;
+				compactTextButtons.reserve(compactButtonNames.size());
+				for (const QString &buttonName : compactButtonNames)
+				{
+					auto *button = dialog.findChild<QToolButton *>(buttonName);
+					QVERIFY2(button, qPrintable(QStringLiteral("Missing %1").arg(buttonName)));
+					QCOMPARE(button->toolButtonStyle(), Qt::ToolButtonTextOnly);
+					QVERIFY(!button->accessibleName().isEmpty());
+					QVERIFY(!button->toolTip().isEmpty());
+					compactTextButtons.push_back(button);
+				}
+				const QStringList responsiveEditNames = {
+				    QStringLiteral("customColourName0"), QStringLiteral("scriptPrefixEdit"),
+				    QStringLiteral("autoSayOverridePrefixEdit"), QStringLiteral("autoSayStringEdit")};
+				QList<QLineEdit *> responsiveEdits;
+				responsiveEdits.reserve(responsiveEditNames.size());
+				for (const QString &editName : responsiveEditNames)
+				{
+					auto *edit = dialog.findChild<QLineEdit *>(editName);
+					QVERIFY2(edit, qPrintable(QStringLiteral("Missing %1").arg(editName)));
+					QVERIFY(edit->maximumWidth() > edit->minimumWidth());
+					responsiveEdits.push_back(edit);
+				}
+				const QStringList  compactEditNames = {QStringLiteral("speedWalkPrefixEdit"),
+				                                       QStringLiteral("commandStackCharacterEdit")};
+				QList<QLineEdit *> compactEdits;
+				compactEdits.reserve(compactEditNames.size());
+				for (const QString &editName : compactEditNames)
+				{
+					auto *edit = dialog.findChild<QLineEdit *>(editName);
+					QVERIFY2(edit, qPrintable(QStringLiteral("Missing %1").arg(editName)));
+					compactEdits.push_back(edit);
+				}
+
+				constexpr QSize baselineMinimum(700, 520);
+				QVERIFY(dialog.minimumWidth() >= baselineMinimum.width() ||
+				        dialog.frameGeometry().width() >= dialog.screen()->availableGeometry().width());
+				QVERIFY(dialog.minimumHeight() >= baselineMinimum.height() ||
+				        dialog.frameGeometry().height() >= dialog.screen()->availableGeometry().height());
+				const QSize  initialDialogMinimum        = dialog.minimumSize();
+				const int    initialComboHeight          = combo->minimumSizeHint().height();
+				const int    initialComboWidth           = combo->minimumSizeHint().width();
+				const QSize  initialScriptTextColourHint = scriptTextColourCombo->minimumSizeHint();
+				const QSize  initialCustomSwapHint       = customSwapButton->sizeHint();
+				const QSize  initialAutoSayHint          = autoSayCheckbox->sizeHint();
+				const QSize  initialAnsiHeaderSize       = ansiNormalHeader->size();
+				const QSize  initialAnsiMarkerSize       = ansiNormalMarker->size();
+				const QSize  initialGradientHeaderHint   = gradientHeader->minimumSizeHint();
+				const int    initialInfoFontHeight       = infoPage->fontMetrics().height();
+				QList<QSize> initialCompactButtonHints;
+				initialCompactButtonHints.reserve(compactTextButtons.size());
+				for (const QToolButton *button : compactTextButtons)
+					initialCompactButtonHints.push_back(button->sizeHint());
+				QList<QSize> initialResponsiveEditHints;
+				initialResponsiveEditHints.reserve(responsiveEdits.size());
+				for (const QLineEdit *edit : responsiveEdits)
+					initialResponsiveEditHints.push_back(edit->sizeHint());
+				const QFont &initialFont       = originalApplicationFont;
+				const QSize  frameSize         = dialog.frameGeometry().size() - dialog.geometry().size();
+				const QSize  maximumClientSize = dialog.screen()->availableGeometry().size() - frameSize;
+				const QSize  preferredDialogSize(qMin(maximumClientSize.width(), dialog.width() + 80),
+				                                 qMin(maximumClientSize.height(), dialog.height() + 60));
+				dialog.resize(preferredDialogSize);
+				QTRY_COMPARE(dialog.size(), preferredDialogSize);
+				const QRect availableGeometry = dialog.screen()->availableGeometry();
+				dialog.move(availableGeometry.right() - 10, availableGeometry.bottom() - 10);
+				ResizeEventCounter resizeEvents;
+				dialog.installEventFilter(&resizeEvents);
+				QCoreApplication::processEvents();
+				resizeEvents.reset();
+
+				QFont enlargedFont = initialFont;
+				if (enlargedFont.pointSizeF() > 0.0)
+					enlargedFont.setPointSizeF(enlargedFont.pointSizeF() * 2.0);
+				else
+					enlargedFont.setPixelSize(qMax(1, enlargedFont.pixelSize() * 2));
+				QApplication::setFont(enlargedFont);
+
+				QTRY_VERIFY(combo->minimumSizeHint().height() > initialComboHeight);
+				QTRY_VERIFY(combo->minimumSizeHint().width() > initialComboWidth);
+				QTRY_VERIFY(scriptTextColourCombo->minimumSizeHint().width() >
+				            initialScriptTextColourHint.width());
+				QTRY_VERIFY(scriptTextColourCombo->minimumSizeHint().height() >
+				            initialScriptTextColourHint.height());
+				QVERIFY(scriptTextColourCombo->maximumWidth() >=
+				        scriptTextColourCombo->minimumSizeHint().width());
+				QTRY_VERIFY(customSwapButton->sizeHint().width() > initialCustomSwapHint.width());
+				QTRY_VERIFY(autoSayCheckbox->sizeHint().width() > initialAutoSayHint.width());
+				QVERIFY(customSwapButton->parentWidget()->maximumWidth() >=
+				        customSwapButton->parentWidget()->minimumSizeHint().width());
+				QVERIFY(autoSayFooter->maximumWidth() >= autoSayFooter->minimumSizeHint().width());
+				QTRY_VERIFY(ansiNormalHeader->width() > initialAnsiHeaderSize.width() ||
+				            ansiNormalHeader->height() > initialAnsiHeaderSize.height());
+				QTRY_VERIFY(ansiNormalMarker->width() > initialAnsiMarkerSize.width() ||
+				            ansiNormalMarker->height() > initialAnsiMarkerSize.height());
+				QVERIFY(ansiNormalHeader->width() >=
+				        ansiNormalHeader->fontMetrics().horizontalAdvance(ansiNormalHeader->text()));
+				QVERIFY(ansiNormalMarker->width() >=
+				        ansiNormalMarker->fontMetrics().horizontalAdvance(ansiNormalMarker->text()));
+				QVERIFY(ansiNormalMarker->height() >= ansiNormalMarker->fontMetrics().height());
+				QTRY_VERIFY(gradientHeader->minimumSizeHint().width() > initialGradientHeaderHint.width() ||
+				            gradientHeader->minimumSizeHint().height() > initialGradientHeaderHint.height());
+				QFont gradientTextFont = gradientHeader->font();
+				gradientTextFont.setBold(true);
+				const QFontMetrics gradientTextMetrics(gradientTextFont);
+				QVERIFY(gradientHeader->minimumSizeHint().width() >=
+				        gradientTextMetrics.horizontalAdvance(dialog.windowTitle()) + 16);
+				QVERIFY(gradientHeader->minimumSizeHint().height() >= gradientTextMetrics.height() + 10);
+				QTRY_VERIFY(infoPage->fontMetrics().height() > initialInfoFontHeight);
+				if (enlargedFont.pointSizeF() > 0.0)
+					QTRY_COMPARE(infoPage->font().pointSizeF(), qMax(8.0, enlargedFont.pointSizeF() - 2.0));
+				else
+					QTRY_COMPARE(infoPage->font().pixelSize(), qMax(1, enlargedFont.pixelSize() - 2));
+				for (qsizetype index = 0; index < compactTextButtons.size(); ++index)
+				{
+					const QToolButton *const button = compactTextButtons.at(index);
+					QVERIFY(button->sizeHint().width() > initialCompactButtonHints.at(index).width() ||
+					        button->sizeHint().height() > initialCompactButtonHints.at(index).height());
+					QVERIFY(button->maximumWidth() >= button->sizeHint().width());
+				}
+				for (qsizetype index = 0; index < responsiveEdits.size(); ++index)
+				{
+					const QLineEdit *const edit = responsiveEdits.at(index);
+					QVERIFY(edit->sizeHint().width() > initialResponsiveEditHints.at(index).width());
+					QVERIFY(edit->maximumWidth() > edit->minimumWidth());
+				}
+				for (const QLineEdit *edit : compactEdits)
+					QVERIFY(edit->width() >= edit->fontMetrics().horizontalAdvance(QLatin1Char('M')) + 12);
+				for (QSpinBox *spin : dialog.findChildren<QSpinBox *>())
+				{
+					if (!spin->property("qmud_range_sized").toBool())
+						continue;
+					const auto editFieldWidth = [spin]
+					{
+						QStyleOptionSpinBox option;
+						option.initFrom(spin);
+						option.rect        = QRect(QPoint(), QSize(spin->width(), spin->sizeHint().height()));
+						option.subControls = QStyle::SC_All;
+						return spin->style()
+						    ->subControlRect(QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxEditField, spin)
+						    .width();
+					};
+					const auto displayText = [spin](const int value)
+					{ return spin->prefix() + spin->locale().toString(value) + spin->suffix(); };
+					const int requiredTextWidth =
+					    qMax(spin->fontMetrics().horizontalAdvance(displayText(spin->minimum())),
+					         spin->fontMetrics().horizontalAdvance(displayText(spin->maximum())));
+					QTRY_VERIFY2(
+					    editFieldWidth() >= requiredTextWidth,
+					    qPrintable(QStringLiteral("range=[%1,%2], prefix='%3', suffix='%4', widgetWidth=%5, "
+					                              "hintWidth=%6, editFieldWidth=%7, requiredTextWidth=%8")
+					                   .arg(spin->minimum())
+					                   .arg(spin->maximum())
+					                   .arg(spin->prefix(), spin->suffix())
+					                   .arg(spin->width())
+					                   .arg(spin->sizeHint().width())
+					                   .arg(editFieldWidth())
+					                   .arg(requiredTextWidth)));
+				}
+				QTRY_VERIFY(dialog.minimumWidth() > initialDialogMinimum.width() ||
+				            dialog.minimumHeight() > initialDialogMinimum.height() ||
+				            dialog.frameGeometry().width() >= dialog.screen()->availableGeometry().width() ||
+				            dialog.frameGeometry().height() >= dialog.screen()->availableGeometry().height());
+				QVERIFY(dialog.width() >= dialog.minimumWidth());
+				QVERIFY(dialog.height() >= dialog.minimumHeight());
+				QTRY_VERIFY(dialog.screen()->availableGeometry().contains(dialog.frameGeometry()));
+				QCoreApplication::processEvents();
+				QVERIFY(resizeEvents.count() <= 1);
+
+				auto *pages   = dialog.findChild<QStackedWidget *>();
+				auto *tree    = dialog.findChild<QTreeWidget *>();
+				auto *buttons = dialog.findChild<QDialogButtonBox *>();
+				QVERIFY(pages);
+				QVERIFY(tree);
+				QVERIFY(buttons);
+				QVERIFY(dialog.rect().contains(pages->geometry()));
+				QVERIFY(dialog.rect().contains(tree->geometry()));
+				QVERIFY(dialog.rect().contains(buttons->geometry()));
+				int itemCount = 0;
+				for (QTreeWidgetItemIterator iterator(tree); *iterator; ++iterator)
+					++itemCount;
+				QVERIFY(itemCount > 0);
+				const int completeTreeHeight = tree->sizeHintForRow(0) * itemCount;
+				QTRY_VERIFY(tree->minimumHeight() >= qMin(completeTreeHeight, tree->height()));
+				const QSize enlargedDialogSize    = dialog.size();
+				const QSize enlargedDialogMinimum = dialog.minimumSize();
+				for (int index = 0; index < pages->count(); ++index)
+				{
+					pages->setCurrentIndex(index);
+					QCoreApplication::processEvents();
+					QCOMPARE(dialog.size(), enlargedDialogSize);
+					QCOMPARE(dialog.minimumSize(), enlargedDialogMinimum);
+					if (index == WorldPreferencesDialog::PageCustomColours)
+					{
+						const int swapCentreTwice = customSwapButton->geometry().center().x() * 2;
+						const int swatchCentres   = customTextSwatch->geometry().center().x() +
+						                            customBackSwatch->geometry().center().x();
+						QVERIFY(qAbs(swapCentreTwice - swatchCentres) <= 2);
+					}
+					QWidget *const page = pages->widget(index);
+					QVERIFY(page);
+					if (!page->layout())
+						continue;
+					for (const QWidget *child : page->findChildren<QWidget *>(Qt::FindDirectChildrenOnly))
+					{
+						if (child->isVisible() && !child->isWindow())
+							QVERIFY(page->rect().contains(child->geometry()));
+					}
+					const QSize pageHint         = page->layout()->sizeHint();
+					const int   pageOuterHint    = pageHint.width() + (pages->frameWidth() * 2);
+					const int   maximumPageWidth = dialog.width() - pages->mapTo(&dialog, QPoint()).x() -
+					                               dialog.layout()->contentsMargins().right();
+					QVERIFY(pages->minimumWidth() >= qMin(pageOuterHint, maximumPageWidth));
+					QVERIFY(pages->width() <= maximumPageWidth);
+					const int pageOuterHeight = pageHint.height() + (pages->frameWidth() * 2);
+					QVERIFY(pages->minimumHeight() >= qMin(pageOuterHeight, pages->height()));
+					if (page->layout()->hasHeightForWidth())
+					{
+						const int availablePageWidth = qMax(1, pages->width() - (pages->frameWidth() * 2));
+						const int requiredHeight     = page->layout()->heightForWidth(availablePageWidth);
+						QVERIFY(requiredHeight < 0 ||
+						        pages->minimumHeight() >=
+						            qMin(requiredHeight + (pages->frameWidth() * 2), pages->height()));
+					}
+				}
+
+				resizeEvents.reset();
+				QApplication::setFont(initialFont);
+				QTRY_VERIFY(dialog.minimumWidth() < enlargedDialogMinimum.width() ||
+				            dialog.minimumHeight() < enlargedDialogMinimum.height() ||
+				            dialog.frameGeometry().width() >= dialog.screen()->availableGeometry().width() ||
+				            dialog.frameGeometry().height() >= dialog.screen()->availableGeometry().height());
+				QVERIFY(dialog.minimumWidth() >= initialDialogMinimum.width());
+				QVERIFY(dialog.minimumHeight() >= initialDialogMinimum.height());
+				QTRY_COMPARE(dialog.size(), preferredDialogSize);
+				QCoreApplication::processEvents();
+				QVERIFY(resizeEvents.count() <= 1);
+			}
+
+			void listedEditorsAndTablesAllowTabFocusTraversal()
+			{
+				const QString sourcePath =
+				    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
+				        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
+				QFile sourceFile(sourcePath);
+				QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
+				         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
+				const QString sourceText = QString::fromUtf8(sourceFile.readAll());
+
+				auto          firstMatchLine = [&sourceText](const QString &pattern) -> int
+				{
+					const QRegularExpression      regex(pattern);
+					const QRegularExpressionMatch match = regex.match(sourceText);
+					if (!match.hasMatch())
+						return -1;
+					return static_cast<int>(sourceText.left(match.capturedStart()).count(QLatin1Char('\n'))) +
+					       1;
+				};
+
+				const QStringList textEditNames = {QStringLiteral("m_connectText"),
+				                                   QStringLiteral("m_logFilePreamble"),
+				                                   QStringLiteral("m_logFilePostamble"),
+				                                   QStringLiteral("m_notes"),
+				                                   QStringLiteral("m_pastePreamble"),
+				                                   QStringLiteral("m_pastePostamble"),
+				                                   QStringLiteral("m_sendToWorldFilePreamble"),
+				                                   QStringLiteral("m_sendToWorldFilePostamble")};
+				for (const QString &editName : textEditNames)
+				{
+					const QString escaped = QRegularExpression::escape(editName);
+					const int     createLine =
+					    firstMatchLine(QStringLiteral("\\b%1\\s*=\\s*new\\b").arg(escaped));
+					const int tabLine = firstMatchLine(
+					    QStringLiteral("\\b%1\\s*->\\s*setTabChangesFocus\\s*\\(\\s*true\\s*\\)")
+					        .arg(escaped));
+
+					QVERIFY2(createLine > 0,
+					         qPrintable(QStringLiteral("No construction found for %1").arg(editName)));
+					QVERIFY2(tabLine > createLine,
+					         qPrintable(QStringLiteral("No setTabChangesFocus(true) after %1 construction.")
+					                        .arg(editName)));
+				}
+				QVERIFY2(sourceText.contains(QStringLiteral("words->setTabChangesFocus(true);")),
+				         "Expected Tab Completion word list editor to pass Tab to focus traversal.");
+
+				const QStringList tableNames = {QStringLiteral("m_macrosTable"),
+				                                QStringLiteral("m_variablesTable")};
+				for (const QString &tableName : tableNames)
+				{
+					const QString escaped    = QRegularExpression::escape(tableName);
+					const int     createLine = firstMatchLine(QStringLiteral("\\b%1\\s*=").arg(escaped));
+					const int     tabLine    = firstMatchLine(
+					    QStringLiteral("\\b%1\\s*->\\s*setTabKeyNavigation\\s*\\(\\s*false\\s*\\)")
+					        .arg(escaped));
+
+					QVERIFY2(createLine > 0,
+					         qPrintable(QStringLiteral("No construction found for %1").arg(tableName)));
+					QVERIFY2(tabLine > createLine,
+					         qPrintable(QStringLiteral("No setTabKeyNavigation(false) after %1 construction.")
+					                        .arg(tableName)));
+				}
+			}
+
+			void tabCompletionSymbolOptionsDefaultPersistAndFollowFocusOrder()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_prefix")),
+				    QStringLiteral("y"));
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_suffix")),
+				    QStringLiteral("y"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageCommands);
+				dialog.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+				QCoreApplication::processEvents();
+
+				QCheckBox *lowerCase =
+				    findCheckBoxByText(dialog, QStringLiteral("Tab Completion In Lower Case"));
+				QCheckBox *excludeSymbolPrefix =
+				    findCheckBoxByText(dialog, QStringLiteral("Tab Completion Excludes Symbol Prefix"));
+				QCheckBox *excludeSymbolSuffix =
+				    findCheckBoxByText(dialog, QStringLiteral("Tab Completion Excludes Symbol Suffix"));
+				QCheckBox *translateGerman =
+				    findCheckBoxByText(dialog, QStringLiteral("Translate German characters"));
+				QVERIFY(lowerCase);
+				QVERIFY(excludeSymbolPrefix);
+				QVERIFY(excludeSymbolSuffix);
+				QVERIFY(translateGerman);
+				QVERIFY(excludeSymbolPrefix->isChecked());
+				QVERIFY(excludeSymbolSuffix->isChecked());
+
+				const int lowerCaseTop = lowerCase->mapTo(&dialog, QPoint()).y();
+				const int excludeTop   = excludeSymbolPrefix->mapTo(&dialog, QPoint()).y();
+				const int suffixTop    = excludeSymbolSuffix->mapTo(&dialog, QPoint()).y();
+				const int germanTop    = translateGerman->mapTo(&dialog, QPoint()).y();
+				QVERIFY(excludeTop > lowerCaseTop);
+				QVERIFY(suffixTop > excludeTop);
+				QVERIFY(suffixTop < germanTop);
+
+				lowerCase->setFocus(Qt::OtherFocusReason);
+				QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(lowerCase));
+				QTest::keyClick(lowerCase, Qt::Key_Tab);
+				QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(excludeSymbolPrefix));
+				QTest::keyClick(excludeSymbolPrefix, Qt::Key_Tab);
+				QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(excludeSymbolSuffix));
+				QTest::keyClick(excludeSymbolSuffix, Qt::Key_Tab);
+				QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(translateGerman));
+
+				excludeSymbolPrefix->setChecked(false);
+				excludeSymbolSuffix->setChecked(false);
+				dialog.accept();
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_prefix")),
+				    QStringLiteral("0"));
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("tab_completion_excludes_symbol_suffix")),
+				    QStringLiteral("0"));
+
+				WorldPreferencesDialog restoredDialog(&runtime, nullptr);
+				QCheckBox             *restoredExcludeSymbolPrefix = findCheckBoxByText(
+				    restoredDialog, QStringLiteral("Tab Completion Excludes Symbol Prefix"));
+				QCheckBox *restoredExcludeSymbolSuffix = findCheckBoxByText(
+				    restoredDialog, QStringLiteral("Tab Completion Excludes Symbol Suffix"));
+				QVERIFY(restoredExcludeSymbolPrefix);
+				QVERIFY(restoredExcludeSymbolSuffix);
+				QVERIFY(!restoredExcludeSymbolPrefix->isChecked());
+				QVERIFY(!restoredExcludeSymbolSuffix->isChecked());
+			}
+
+			void customColoursLoadPersistAndCreateMissingCanonicalEntries()
+			{
+				WorldRuntime::Colour existing;
+				existing.group = QStringLiteral("custom");
+				existing.attributes.insert(QStringLiteral("seq"), QStringLiteral("01"));
+				existing.attributes.insert(QStringLiteral("seq_index"), QStringLiteral("0"));
+				existing.attributes.insert(QStringLiteral("name"), QStringLiteral("Existing"));
+				existing.attributes.insert(QStringLiteral("text"), QStringLiteral("#123456"));
+				existing.attributes.insert(QStringLiteral("back"), QStringLiteral("#654321"));
+
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setColours({existing});
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				auto *name       = dialog.findChild<QLineEdit *>(QStringLiteral("customColourName0"));
+				auto *textSwatch = dialog.findChild<QPushButton *>(QStringLiteral("customTextSwatch0"));
+				auto *backSwatch = dialog.findChild<QPushButton *>(QStringLiteral("customBackSwatch0"));
+				QVERIFY(name);
+				QVERIFY(textSwatch);
+				QVERIFY(backSwatch);
+				QCOMPARE(name->text(), QStringLiteral("Existing"));
+				QCOMPARE(QColor(textSwatch->property("swatchColor").toString()),
+				         QColor(QStringLiteral("#123456")));
+				QCOMPARE(QColor(backSwatch->property("swatchColor").toString()),
+				         QColor(QStringLiteral("#654321")));
+
+				name->setText(QStringLiteral("Changed"));
+				textSwatch->setProperty("swatchColor", QStringLiteral("#13579b"));
+				backSwatch->setProperty("swatchColor", QStringLiteral("#2468ac"));
+				dialog.accept();
+
+				const WorldRuntime::Colour *changed     = nullptr;
+				int                         customCount = 0;
+				for (const WorldRuntime::Colour &colour : runtime.colours())
+				{
+					if (colour.group != QStringLiteral("custom"))
+						continue;
+					++customCount;
+					if (colour.attributes.value(QStringLiteral("seq")) == QStringLiteral("1"))
+						changed = &colour;
+				}
+				QCOMPARE(customCount, MAX_CUSTOM);
+				QVERIFY(changed);
+				QCOMPARE(changed->attributes.value(QStringLiteral("seq")), QStringLiteral("1"));
+				QCOMPARE(changed->attributes.value(QStringLiteral("name")), QStringLiteral("Changed"));
+				QCOMPARE(QColor(changed->attributes.value(QStringLiteral("text"))),
+				         QColor(QStringLiteral("#13579b")));
+				QCOMPARE(QColor(changed->attributes.value(QStringLiteral("back"))),
+				         QColor(QStringLiteral("#2468ac")));
+
+				WorldPreferencesDialog restoredDialog(&runtime, nullptr);
+				auto                  *restoredName =
+				    restoredDialog.findChild<QLineEdit *>(QStringLiteral("customColourName0"));
+				auto *restoredText =
+				    restoredDialog.findChild<QPushButton *>(QStringLiteral("customTextSwatch0"));
+				auto *restoredBack =
+				    restoredDialog.findChild<QPushButton *>(QStringLiteral("customBackSwatch0"));
+				QVERIFY(restoredName);
+				QVERIFY(restoredText);
+				QVERIFY(restoredBack);
+				QCOMPARE(restoredName->text(), QStringLiteral("Changed"));
+				QCOMPARE(QColor(restoredText->property("swatchColor").toString()),
+				         QColor(QStringLiteral("#13579b")));
+				QCOMPARE(QColor(restoredBack->property("swatchColor").toString()),
+				         QColor(QStringLiteral("#2468ac")));
+			}
+
+			void partialSaveCharacterThresholdFollowsParentAndPersists()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("partial_save_character_threshold")),
+				         QStringLiteral("10"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageCommands);
+				dialog.show();
+				QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+				QCoreApplication::processEvents();
+
+				QPushButton *keyboardPreferences = nullptr;
+				for (QPushButton *button : dialog.findChildren<QPushButton *>())
+				{
+					if (button && button->text() == QStringLiteral("Keyboard preferences..."))
+					{
+						keyboardPreferences = button;
+						break;
+					}
+				}
+				QVERIFY(keyboardPreferences);
+
+				bool inspectedKeyboardDialog = false;
+				QVERIFY(QMetaObject::invokeMethod(
+				    &dialog,
+				    [&inspectedKeyboardDialog]
+				    {
+					    auto *keyboardDialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+					    QVERIFY(keyboardDialog);
+					    const auto closeDialog = qScopeGuard(
+					        [keyboardDialog]
+					        {
+						        if (keyboardDialog->isVisible())
+							        keyboardDialog->reject();
+					        });
+
+					    QCheckBox *saveDeleted =
+					        findCheckBoxByText(*keyboardDialog, QStringLiteral("Save Deleted Command"));
+					    QVERIFY(saveDeleted);
+					    QLabel *thresholdLabel = nullptr;
+					    for (QLabel *label : keyboardDialog->findChildren<QLabel *>())
+					    {
+						    if (label && label->text() == QStringLiteral("Partial Save Character Threshold"))
+						    {
+							    thresholdLabel = label;
+							    break;
+						    }
+					    }
+					    QVERIFY(thresholdLabel);
+					    auto *threshold = qobject_cast<QSpinBox *>(thresholdLabel->buddy());
+					    QVERIFY(threshold);
+					    QCOMPARE(threshold->minimum(), 0);
+					    QCOMPARE(threshold->maximum(), 200);
+					    QCOMPARE(threshold->value(), 10);
+					    QVERIFY(!threshold->isEnabled());
+					    QVERIFY(thresholdLabel->mapTo(keyboardDialog, QPoint()).x() >
+					            saveDeleted->mapTo(keyboardDialog, QPoint()).x());
+
+					    saveDeleted->setChecked(true);
+					    QVERIFY(threshold->isEnabled());
+					    threshold->setValue(37);
+					    inspectedKeyboardDialog = true;
+					    keyboardDialog->accept();
+				    },
+				    Qt::QueuedConnection));
+
+				QTest::mouseClick(keyboardPreferences, Qt::LeftButton);
+				QVERIFY(inspectedKeyboardDialog);
+				dialog.accept();
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("save_deleted_command")),
+				         QStringLiteral("1"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("partial_save_character_threshold")),
+				         QStringLiteral("37"));
+			}
+
+			void legacyEncodingControlFollowsUtf8Option()
+			{
+				WorldRuntime runtime;
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Legacy Encoding Test"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("localhost"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+				runtime.setWorldAttribute(QStringLiteral("utf_8"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("legacy_encoding"), QStringLiteral("GB18030"));
+				runtime.setWorldAttribute(QStringLiteral("proxy_type"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("connect_method"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("enable_command_stack"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("command_stack_character"), QStringLiteral(";"));
+				runtime.setWorldAttribute(QStringLiteral("enable_speed_walk"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("speed_walk_prefix"), QStringLiteral("#"));
+				runtime.setWorldAttribute(QStringLiteral("enable_auto_say"), QStringLiteral("0"));
+				runtime.setWorldAttribute(QStringLiteral("auto_say_string"), QStringLiteral("say "));
+				runtime.setWorldAttribute(QStringLiteral("log_output"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("log_raw"), QStringLiteral("0"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				auto *combo = dialog.findChild<QComboBox *>(QStringLiteral("legacyEncodingCombo"));
+				QVERIFY(combo);
+
+				QCheckBox *utf8 = nullptr;
+				for (QCheckBox *box : dialog.findChildren<QCheckBox *>())
+				{
+					if (box->text() == QStringLiteral("UTF-8 (Unicode)"))
+					{
+						utf8 = box;
+						break;
+					}
+				}
+				if (utf8 == nullptr)
+					QFAIL("UTF-8 checkbox not found");
+				QCheckBox        &utf8CheckBox = *utf8;
+
+				const QStringList encodings = qmudAvailableWorldTextEncodings();
+				QCOMPARE(combo->count(), encodings.size());
+				for (const QString &encodingName : encodings)
+				{
+					const int index = combo->findData(encodingName);
+					QVERIFY2(
+					    index >= 0,
+					    qPrintable(QStringLiteral("Missing legacy encoding item for %1").arg(encodingName)));
+					QCOMPARE(combo->itemText(index), qmudWorldTextEncodingDisplayName(encodingName));
+					QVERIFY(combo->itemText(index).contains(QLatin1Char('(')));
+					QVERIFY(combo->itemText(index).endsWith(QLatin1Char(')')));
+				}
+
+				QCOMPARE(combo->currentData().toString(), QStringLiteral("GB18030"));
+				QVERIFY(combo->isEnabled());
+
+				utf8CheckBox.setChecked(true);
+				QVERIFY(!combo->isEnabled());
+				utf8CheckBox.setChecked(false);
+				QVERIFY(combo->isEnabled());
+
+				const QString targetEncoding =
+				    qmudNormalizeWorldTextEncodingName(QStringLiteral("windows-1252"));
+				const int targetIndex = combo->findData(targetEncoding);
+				QVERIFY(targetIndex >= 0);
+				combo->setCurrentIndex(targetIndex);
+
+				dialog.accept();
+
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("legacy_encoding")), targetEncoding);
+			}
+
+			void ruleRemovalUsesAdjacentItemInDisplayedSortOrder()
+			{
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					WorldRuntime runtime;
+					populateRuleSelectionFixtures(runtime, kind, false, false);
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(rulePage(kind));
+					const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+					QVERIFY(widgets.table);
+					QVERIFY(widgets.tree);
+					QVERIFY(widgets.removeButton);
+					QCOMPARE(widgets.table->rowCount(), 3);
+
+					const int     displayColumn    = ruleDisplayColumn(kind);
+					const QString expectedPrevious = widgets.table->item(0, displayColumn)->text();
+					widgets.table->setCurrentCell(1, 0);
+					QVERIFY(widgets.removeButton->isEnabled());
+					widgets.removeButton->click();
+
+					QCOMPARE(widgets.table->rowCount(), 2);
+					QCOMPARE(widgets.table->currentRow(), 0);
+					QCOMPARE(widgets.table->item(widgets.table->currentRow(), displayColumn)->text(),
+					         expectedPrevious);
+
+					const QString expectedNext = widgets.table->item(1, displayColumn)->text();
+					widgets.removeButton->click();
+					QCOMPARE(widgets.table->rowCount(), 1);
+					QCOMPARE(widgets.table->currentRow(), 0);
+					QCOMPARE(widgets.table->item(widgets.table->currentRow(), displayColumn)->text(),
+					         expectedNext);
+
+					QVERIFY(widgets.removeButton->isEnabled());
+					widgets.removeButton->click();
+					QCOMPARE(widgets.table->rowCount(), 0);
+					QCOMPARE(widgets.table->currentRow(), -1);
+					QVERIFY(widgets.table->selectedItems().isEmpty());
+				}
+			}
+
+			void groupedRuleRemovalUsesSortedSiblingAndNotAnotherGroup()
+			{
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					WorldRuntime runtime;
+					populateRuleSelectionFixtures(runtime, kind, true, true);
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(rulePage(kind));
+					const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+					QVERIFY(widgets.table);
+					QVERIFY(widgets.tree);
+					QVERIFY(widgets.removeButton);
+
+					QTreeWidgetItem *primaryGroup = findRuleGroup(*widgets.tree, QStringLiteral("primary"));
+					QVERIFY(primaryGroup);
+					QCOMPARE(primaryGroup->childCount(), 3);
+					primaryGroup->setExpanded(true);
+					const QString expectedPrevious = primaryGroup->child(0)->text(0);
+					widgets.tree->setCurrentItem(primaryGroup->child(1));
+					QVERIFY(widgets.removeButton->isEnabled());
+					widgets.removeButton->click();
+
+					primaryGroup = findRuleGroup(*widgets.tree, QStringLiteral("primary"));
+					QVERIFY(primaryGroup);
+					QCOMPARE(primaryGroup->childCount(), 2);
+					QVERIFY(widgets.tree->currentItem());
+					QCOMPARE(widgets.tree->currentItem()->parent(), primaryGroup);
+					QCOMPARE(widgets.tree->currentItem()->text(0), expectedPrevious);
+					const QString expectedNext = primaryGroup->child(1)->text(0);
+					widgets.removeButton->click();
+
+					primaryGroup = findRuleGroup(*widgets.tree, QStringLiteral("primary"));
+					QVERIFY(primaryGroup);
+					QCOMPARE(primaryGroup->childCount(), 1);
+					QVERIFY(widgets.tree->currentItem());
+					QCOMPARE(widgets.tree->currentItem()->parent(), primaryGroup);
+					QCOMPARE(widgets.tree->currentItem()->text(0), expectedNext);
+					widgets.removeButton->click();
+
+					QVERIFY(!findRuleGroup(*widgets.tree, QStringLiteral("primary")));
+					QVERIFY(!widgets.tree->currentItem());
+					QVERIFY(widgets.table->selectedItems().isEmpty());
+
+					QTreeWidgetItem *soleGroup = findRuleGroup(*widgets.tree, QStringLiteral("sole"));
+					QVERIFY(soleGroup);
+					QCOMPARE(soleGroup->childCount(), 1);
+					soleGroup->setExpanded(true);
+					widgets.tree->setCurrentItem(soleGroup->child(0));
+					QVERIFY(widgets.removeButton->isEnabled());
+					widgets.removeButton->click();
+
+					QVERIFY(!findRuleGroup(*widgets.tree, QStringLiteral("sole")));
+					QVERIFY(!widgets.tree->currentItem());
+					QVERIFY(widgets.table->selectedItems().isEmpty());
+				}
+			}
+
+			void ruleEditsFollowRuntimeIdentityAfterEarlierRuleRemoval()
+			{
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					WorldRuntime runtime;
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+					{
+						auto makeTrigger = [](const QString &name, const QString &match, const QString &group)
+						{
+							WorldRuntime::Trigger trigger;
+							trigger.attributes.insert(QStringLiteral("name"), name);
+							trigger.attributes.insert(QStringLiteral("match"), match);
+							trigger.attributes.insert(QStringLiteral("group"), group);
+							trigger.children.insert(QStringLiteral("send"), QStringLiteral("noop"));
+							return trigger;
+						};
+						QList<WorldRuntime::Trigger> triggers = {
+						    makeTrigger(QStringLiteral("remove_trigger"), QStringLiteral("Alpha"),
+						                QStringLiteral("remove-group")),
+						    makeTrigger(QStringLiteral("target_trigger"), QStringLiteral("Mike"),
+						                QStringLiteral("target-group")),
+						    makeTrigger(QStringLiteral("other_trigger"), QStringLiteral("Zulu"),
+						                QStringLiteral("other-group"))};
+						triggers[1].matched         = 9;
+						triggers[1].invocationCount = 4;
+						triggers[1].matchAttempts   = 12;
+						triggers[1].executionTimeNs = 17'000'000;
+						runtime.setTriggers(triggers);
+						break;
+					}
+					case RuleKind::Alias:
+					{
+						auto makeAlias = [](const QString &name, const QString &match, const QString &group)
+						{
+							WorldRuntime::Alias alias;
+							alias.attributes.insert(QStringLiteral("name"), name);
+							alias.attributes.insert(QStringLiteral("match"), match);
+							alias.attributes.insert(QStringLiteral("group"), group);
+							alias.children.insert(QStringLiteral("send"), QStringLiteral("noop"));
+							return alias;
+						};
+						QList<WorldRuntime::Alias> aliases = {
+						    makeAlias(QStringLiteral("remove_alias"), QStringLiteral("Alpha"),
+						              QStringLiteral("remove-group")),
+						    makeAlias(QStringLiteral("target_alias"), QStringLiteral("Mike"),
+						              QStringLiteral("target-group")),
+						    makeAlias(QStringLiteral("other_alias"), QStringLiteral("Zulu"),
+						              QStringLiteral("other-group"))};
+						aliases[1].matched         = 9;
+						aliases[1].invocationCount = 4;
+						aliases[1].matchAttempts   = 12;
+						runtime.setAliases(aliases);
+						break;
+					}
+					case RuleKind::Timer:
+					{
+						auto makeTimer = [](const QString &name, const int hour, const QString &group)
+						{
+							WorldRuntime::Timer timer;
+							timer.attributes.insert(QStringLiteral("name"), name);
+							timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("1"));
+							timer.attributes.insert(QStringLiteral("hour"), QString::number(hour));
+							timer.attributes.insert(QStringLiteral("group"), group);
+							timer.children.insert(QStringLiteral("send"), QStringLiteral("noop"));
+							return timer;
+						};
+						QList<WorldRuntime::Timer> timers = {
+						    makeTimer(QStringLiteral("remove_timer"), 6, QStringLiteral("remove-group")),
+						    makeTimer(QStringLiteral("target_timer"), 12, QStringLiteral("target-group")),
+						    makeTimer(QStringLiteral("other_timer"), 18, QStringLiteral("other-group"))};
+						timers[1].firedCount      = 9;
+						timers[1].invocationCount = 4;
+						timers[1].lastFired       = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+						timers[1].nextFireTime    = QDateTime::fromSecsSinceEpoch(1'700'000'300);
+						runtime.setTimers(timers);
+						break;
+					}
+					}
+
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(rulePage(kind));
+					const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+					QVERIFY(widgets.table);
+					QVERIFY(widgets.editButton);
+					quint64 targetRuntimeId{0};
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+						targetRuntimeId = runtime.triggers().at(1).runtimeId;
+						break;
+					case RuleKind::Alias:
+						targetRuntimeId = runtime.aliases().at(1).runtimeId;
+						break;
+					case RuleKind::Timer:
+						targetRuntimeId = runtime.timers().at(1).runtimeId;
+						break;
+					}
+					QVERIFY(targetRuntimeId != 0);
+					const int targetRow = findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
+					QVERIFY(targetRow >= 0);
+					widgets.table->setCurrentCell(targetRow, 0);
+					QStringList observedEditorLabelTexts;
+					QString     editorCallbackFailure;
+					bool        editorCallbackInvoked = false;
+
+					QVERIFY(QMetaObject::invokeMethod(
+					    &dialog,
+					    [&runtime, &observedEditorLabelTexts, &editorCallbackFailure, &editorCallbackInvoked,
+					     kind]
+					    {
+						    editorCallbackInvoked = true;
+						    QWidget *activeModal  = QApplication::activeModalWidget();
+						    auto    *editor       = qobject_cast<QDialog *>(activeModal);
+						    if (!editor)
+						    {
+							    editorCallbackFailure = QStringLiteral("Rule editor was not active.");
+							    if (activeModal)
+								    activeModal->close();
+							    return;
+						    }
+
+						    for (const QLabel *label : editor->findChildren<QLabel *>())
+						    {
+							    if (label)
+								    observedEditorLabelTexts.push_back(label->text());
+						    }
+
+						    switch (kind)
+						    {
+						    case RuleKind::Trigger:
+						    {
+							    QList<WorldRuntime::Trigger> triggers = runtime.triggers();
+							    triggers.removeFirst();
+							    runtime.setTriggers(triggers);
+							    break;
+						    }
+						    case RuleKind::Alias:
+						    {
+							    QList<WorldRuntime::Alias> aliases = runtime.aliases();
+							    aliases.removeFirst();
+							    runtime.setAliases(aliases);
+							    break;
+						    }
+						    case RuleKind::Timer:
+						    {
+							    QList<WorldRuntime::Timer> timers = runtime.timers();
+							    timers.removeFirst();
+							    runtime.setTimers(timers);
+							    break;
+						    }
+						    }
+						    QLineEdit *groupEdit = nullptr;
+						    for (QLineEdit *lineEdit : editor->findChildren<QLineEdit *>())
+						    {
+							    if (lineEdit && lineEdit->text() == QStringLiteral("target-group"))
+							    {
+								    groupEdit = lineEdit;
+								    break;
+							    }
+						    }
+						    if (!groupEdit)
+						    {
+							    editorCallbackFailure =
+							        QStringLiteral("Rule editor group field was not found.");
+							    editor->reject();
+							    return;
+						    }
+						    groupEdit->setText(QStringLiteral("edited-group"));
+
+						    auto *buttons = editor->findChild<QDialogButtonBox *>();
+						    if (!buttons || !buttons->button(QDialogButtonBox::Ok))
+						    {
+							    editorCallbackFailure =
+							        QStringLiteral("Rule editor OK button was not found.");
+							    editor->reject();
+							    return;
+						    }
+						    buttons->button(QDialogButtonBox::Ok)->click();
+					    },
+					    Qt::QueuedConnection));
+					widgets.editButton->click();
+					QVERIFY2(editorCallbackInvoked, "Rule editor callback did not run.");
+					QVERIFY2(editorCallbackFailure.isEmpty(), qPrintable(editorCallbackFailure));
+
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("9 matches.")));
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("4 calls.")));
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("0.017000 sec.")));
+						break;
+					case RuleKind::Alias:
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("9 matches.")));
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("4 calls.")));
+						break;
+					case RuleKind::Timer:
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("Fired 9 times.")));
+						QVERIFY(observedEditorLabelTexts.contains(QStringLiteral("4 calls.")));
+						break;
+					}
+
+					QVERIFY(targetRuntimeId != 0);
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+					{
+						const QList<WorldRuntime::Trigger> &triggers = runtime.triggers();
+						QCOMPARE(triggers.size(), 2);
+						QCOMPARE(triggers.at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(triggers.at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						QCOMPARE(triggers.at(0).matched, 9);
+						QCOMPARE(triggers.at(0).invocationCount, 4);
+						QCOMPARE(triggers.at(0).matchAttempts, 12);
+						QCOMPARE(triggers.at(0).executionTimeNs, qint64{17'000'000});
+						QCOMPARE(triggers.at(1).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("other-group"));
+						break;
+					}
+					case RuleKind::Alias:
+					{
+						const QList<WorldRuntime::Alias> &aliases = runtime.aliases();
+						QCOMPARE(aliases.size(), 2);
+						QCOMPARE(aliases.at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(aliases.at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						QCOMPARE(aliases.at(0).matched, 9);
+						QCOMPARE(aliases.at(0).invocationCount, 4);
+						QCOMPARE(aliases.at(0).matchAttempts, 12);
+						QCOMPARE(aliases.at(1).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("other-group"));
+						break;
+					}
+					case RuleKind::Timer:
+					{
+						const QList<WorldRuntime::Timer> &timers = runtime.timers();
+						QCOMPARE(timers.size(), 2);
+						QCOMPARE(timers.at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(timers.at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						QCOMPARE(timers.at(0).firedCount, 9);
+						QCOMPARE(timers.at(0).invocationCount, 4);
+						QCOMPARE(timers.at(0).lastFired, QDateTime::fromSecsSinceEpoch(1'700'000'000));
+						QCOMPARE(timers.at(0).nextFireTime, QDateTime::fromSecsSinceEpoch(1'700'000'300));
+						QCOMPARE(timers.at(1).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("other-group"));
+						break;
+					}
+					}
+				}
+			}
+
+			void staleRuleViewEditResolvesRuntimeIdentityBeforeOpeningEditor()
+			{
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					WorldRuntime runtime;
+					populateRuleSelectionFixtures(runtime, kind, false, false);
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+					{
+						QList<WorldRuntime::Trigger> triggers = runtime.triggers();
+						triggers[1].attributes.insert(QStringLiteral("name"), QStringLiteral("target_rule"));
+						triggers[1].attributes.insert(QStringLiteral("group"),
+						                              QStringLiteral("target-group"));
+						runtime.setTriggers(triggers);
+						break;
+					}
+					case RuleKind::Alias:
+					{
+						QList<WorldRuntime::Alias> aliases = runtime.aliases();
+						aliases[1].attributes.insert(QStringLiteral("name"), QStringLiteral("target_rule"));
+						aliases[1].attributes.insert(QStringLiteral("group"), QStringLiteral("target-group"));
+						aliases[1].children.insert(QStringLiteral("send"), QStringLiteral("noop"));
+						runtime.setAliases(aliases);
+						break;
+					}
+					case RuleKind::Timer:
+					{
+						QList<WorldRuntime::Timer> timers = runtime.timers();
+						timers[1].attributes.insert(QStringLiteral("name"), QStringLiteral("target_rule"));
+						timers[1].attributes.insert(QStringLiteral("group"), QStringLiteral("target-group"));
+						timers[1].children.insert(QStringLiteral("send"), QStringLiteral("noop"));
+						runtime.setTimers(timers);
+						break;
+					}
+					}
+
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					dialog.setInitialPage(rulePage(kind));
+					const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+					QVERIFY(widgets.table);
+					QVERIFY(widgets.editButton);
+
+					quint64 targetRuntimeId{0};
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+						targetRuntimeId = runtime.triggers().at(1).runtimeId;
+						break;
+					case RuleKind::Alias:
+						targetRuntimeId = runtime.aliases().at(1).runtimeId;
+						break;
+					case RuleKind::Timer:
+						targetRuntimeId = runtime.timers().at(1).runtimeId;
+						break;
+					}
+					QVERIFY(targetRuntimeId != 0);
+					const int targetRow = findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
+					QVERIFY(targetRow >= 0);
+					widgets.table->setCurrentCell(targetRow, 0);
+
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+					{
+						QList<WorldRuntime::Trigger> triggers = runtime.triggers();
+						triggers.removeFirst();
+						runtime.setTriggers(triggers);
+						break;
+					}
+					case RuleKind::Alias:
+					{
+						QList<WorldRuntime::Alias> aliases = runtime.aliases();
+						aliases.removeFirst();
+						runtime.setAliases(aliases);
+						break;
+					}
+					case RuleKind::Timer:
+					{
+						QList<WorldRuntime::Timer> timers = runtime.timers();
+						timers.removeFirst();
+						runtime.setTimers(timers);
+						break;
+					}
+					}
+
+					QString editorCallbackFailure;
+					bool    editorCallbackInvoked = false;
+					QVERIFY(QMetaObject::invokeMethod(
+					    &dialog,
+					    [&editorCallbackFailure, &editorCallbackInvoked]
+					    {
+						    editorCallbackInvoked = true;
+						    QWidget *activeModal  = QApplication::activeModalWidget();
+						    auto    *editor       = qobject_cast<QDialog *>(activeModal);
+						    if (!editor)
+						    {
+							    editorCallbackFailure = QStringLiteral("Rule editor was not active.");
+							    if (activeModal)
+								    activeModal->close();
+							    return;
+						    }
+						    QLineEdit *groupEdit = nullptr;
+						    for (QLineEdit *lineEdit : editor->findChildren<QLineEdit *>())
+						    {
+							    if (lineEdit && lineEdit->text() == QStringLiteral("target-group"))
+							    {
+								    groupEdit = lineEdit;
+								    break;
+							    }
+						    }
+						    if (!groupEdit)
+						    {
+							    editorCallbackFailure =
+							        QStringLiteral("Rule editor group field was not found.");
+							    editor->reject();
+							    return;
+						    }
+						    groupEdit->setText(QStringLiteral("edited-group"));
+						    auto *buttons = editor->findChild<QDialogButtonBox *>();
+						    if (!buttons || !buttons->button(QDialogButtonBox::Ok))
+						    {
+							    editorCallbackFailure =
+							        QStringLiteral("Rule editor OK button was not found.");
+							    editor->reject();
+							    return;
+						    }
+						    buttons->button(QDialogButtonBox::Ok)->click();
+					    },
+					    Qt::QueuedConnection));
+					widgets.editButton->click();
+					QVERIFY2(editorCallbackInvoked, "Rule editor callback did not run.");
+					QVERIFY2(editorCallbackFailure.isEmpty(), qPrintable(editorCallbackFailure));
+
+					switch (kind)
+					{
+					case RuleKind::Trigger:
+						QCOMPARE(runtime.triggers().at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(runtime.triggers().at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						break;
+					case RuleKind::Alias:
+						QCOMPARE(runtime.aliases().at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(runtime.aliases().at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						break;
+					case RuleKind::Timer:
+						QCOMPARE(runtime.timers().at(0).runtimeId, targetRuntimeId);
+						QCOMPARE(runtime.timers().at(0).attributes.value(QStringLiteral("group")),
+						         QStringLiteral("edited-group"));
+						break;
+					}
+				}
+			}
+
+			void ruleRemovalReResolvesIdentityAfterConfirmation()
+			{
+				AppController app;
+				QCOMPARE(app.getGlobalOption(QStringLiteral("TriggerRemoveCheck")).toInt(), 1);
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					for (const bool treeMode : {false, true})
+					{
+						for (const bool removeSelectedDuringConfirmation : {false, true})
+						{
+							WorldRuntime runtime;
+							populateRuleSelectionFixtures(runtime, kind, treeMode, false);
+							WorldPreferencesDialog dialog(&runtime, nullptr);
+							dialog.setInitialPage(rulePage(kind));
+							const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+							QVERIFY(widgets.table);
+							QVERIFY(widgets.tree);
+							QVERIFY(widgets.removeButton);
+
+							quint64 targetRuntimeId{0};
+							quint64 expectedSelectionRuntimeId{0};
+							switch (kind)
+							{
+							case RuleKind::Trigger:
+								targetRuntimeId = runtime.triggers().at(1).runtimeId;
+								expectedSelectionRuntimeId =
+								    runtime.triggers().at(removeSelectedDuringConfirmation ? 0 : 2).runtimeId;
+								break;
+							case RuleKind::Alias:
+								targetRuntimeId = runtime.aliases().at(1).runtimeId;
+								expectedSelectionRuntimeId =
+								    runtime.aliases().at(removeSelectedDuringConfirmation ? 0 : 2).runtimeId;
+								break;
+							case RuleKind::Timer:
+								targetRuntimeId = runtime.timers().at(1).runtimeId;
+								expectedSelectionRuntimeId =
+								    runtime.timers().at(removeSelectedDuringConfirmation ? 0 : 2).runtimeId;
+								break;
+							}
+							const int targetRow = findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
+							QVERIFY(targetRow >= 0);
+							widgets.table->setCurrentCell(targetRow, 0);
+							if (treeMode)
+							{
+								QVERIFY(widgets.tree->currentItem());
+								QCOMPARE(widgets.tree->currentItem()->data(0, Qt::UserRole).toULongLong(),
+								         targetRuntimeId);
+							}
+
+							QString confirmationCallbackFailure;
+							bool    confirmationCallbackInvoked = false;
+							QVERIFY(QMetaObject::invokeMethod(
+							    &dialog,
+							    [&runtime, &confirmationCallbackFailure, &confirmationCallbackInvoked, kind,
+							     removeSelectedDuringConfirmation]
+							    {
+								    confirmationCallbackInvoked = true;
+								    switch (kind)
+								    {
+								    case RuleKind::Trigger:
+								    {
+									    QList<WorldRuntime::Trigger> triggers = runtime.triggers();
+									    triggers.removeAt(removeSelectedDuringConfirmation ? 1 : 0);
+									    runtime.setTriggers(triggers);
+									    break;
+								    }
+								    case RuleKind::Alias:
+								    {
+									    QList<WorldRuntime::Alias> aliases = runtime.aliases();
+									    aliases.removeAt(removeSelectedDuringConfirmation ? 1 : 0);
+									    runtime.setAliases(aliases);
+									    break;
+								    }
+								    case RuleKind::Timer:
+								    {
+									    QList<WorldRuntime::Timer> timers = runtime.timers();
+									    timers.removeAt(removeSelectedDuringConfirmation ? 1 : 0);
+									    runtime.setTimers(timers);
+									    break;
+								    }
+								    }
+								    QWidget *activeModal = QApplication::activeModalWidget();
+								    auto    *message     = qobject_cast<QMessageBox *>(activeModal);
+								    if (!message)
+								    {
+									    confirmationCallbackFailure =
+									        QStringLiteral("Removal confirmation was not active.");
+									    if (activeModal)
+										    activeModal->close();
+									    return;
+								    }
+								    QAbstractButton *yesButton = message->button(QMessageBox::Yes);
+								    if (!yesButton)
+								    {
+									    confirmationCallbackFailure =
+									        QStringLiteral("Removal confirmation Yes button was not found.");
+									    message->reject();
+									    return;
+								    }
+								    yesButton->click();
+							    },
+							    Qt::QueuedConnection));
+							widgets.removeButton->click();
+							QVERIFY2(confirmationCallbackInvoked,
+							         "Removal confirmation callback did not run.");
+							QVERIFY2(confirmationCallbackFailure.isEmpty(),
+							         qPrintable(confirmationCallbackFailure));
+
+							switch (kind)
+							{
+							case RuleKind::Trigger:
+								QCOMPARE(runtime.triggers().size(), removeSelectedDuringConfirmation ? 2 : 1);
+								break;
+							case RuleKind::Alias:
+								QCOMPARE(runtime.aliases().size(), removeSelectedDuringConfirmation ? 2 : 1);
+								break;
+							case RuleKind::Timer:
+								QCOMPARE(runtime.timers().size(), removeSelectedDuringConfirmation ? 2 : 1);
+								break;
+							}
+							const int remainingRow =
+							    findRuleRowByRuntimeId(*widgets.table, expectedSelectionRuntimeId);
+							QVERIFY(remainingRow >= 0);
+							QCOMPARE(widgets.table->currentRow(), remainingRow);
+							if (treeMode)
+							{
+								QVERIFY(widgets.tree->currentItem());
+								QCOMPARE(widgets.tree->currentItem()->data(0, Qt::UserRole).toULongLong(),
+								         expectedSelectionRuntimeId);
+								QVERIFY(widgets.tree->currentItem()->parent());
+								QCOMPARE(widgets.tree->currentItem()->parent()->text(0),
+								         QStringLiteral("primary"));
+							}
+						}
+					}
+				}
+			}
+
+			void staleRuleViewRemovalDoesNotDeleteAnotherRule()
+			{
+				AppController app;
+				QCOMPARE(app.getGlobalOption(QStringLiteral("TriggerRemoveCheck")).toInt(), 1);
+				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
+				for (const RuleKind kind : ruleKinds)
+				{
+					for (const bool treeMode : {false, true})
+					{
+						WorldRuntime runtime;
+						populateRuleSelectionFixtures(runtime, kind, treeMode, false);
+						WorldPreferencesDialog dialog(&runtime, nullptr);
+						dialog.setInitialPage(rulePage(kind));
+						const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+						QVERIFY(widgets.table);
+						QVERIFY(widgets.tree);
+						QVERIFY(widgets.removeButton);
+
+						quint64 targetRuntimeId{0};
+						quint64 expectedSelectionRuntimeId{0};
+						quint64 otherRuntimeId{0};
+						switch (kind)
+						{
+						case RuleKind::Trigger:
+							targetRuntimeId            = runtime.triggers().at(1).runtimeId;
+							expectedSelectionRuntimeId = runtime.triggers().at(0).runtimeId;
+							otherRuntimeId             = runtime.triggers().at(2).runtimeId;
+							break;
+						case RuleKind::Alias:
+							targetRuntimeId            = runtime.aliases().at(1).runtimeId;
+							expectedSelectionRuntimeId = runtime.aliases().at(0).runtimeId;
+							otherRuntimeId             = runtime.aliases().at(2).runtimeId;
+							break;
+						case RuleKind::Timer:
+							targetRuntimeId            = runtime.timers().at(1).runtimeId;
+							expectedSelectionRuntimeId = runtime.timers().at(0).runtimeId;
+							otherRuntimeId             = runtime.timers().at(2).runtimeId;
+							break;
+						}
+						const int targetRow = findRuleRowByRuntimeId(*widgets.table, targetRuntimeId);
+						QVERIFY(targetRow >= 0);
+						widgets.table->setCurrentCell(targetRow, 0);
+						if (treeMode)
+						{
+							QVERIFY(widgets.tree->currentItem());
+							QCOMPARE(widgets.tree->currentItem()->data(0, Qt::UserRole).toULongLong(),
+							         targetRuntimeId);
+						}
+
+						switch (kind)
+						{
+						case RuleKind::Trigger:
+						{
+							QList<WorldRuntime::Trigger> triggers = runtime.triggers();
+							triggers.removeAt(1);
+							runtime.setTriggers(triggers);
+							break;
+						}
+						case RuleKind::Alias:
+						{
+							QList<WorldRuntime::Alias> aliases = runtime.aliases();
+							aliases.removeAt(1);
+							runtime.setAliases(aliases);
+							break;
+						}
+						case RuleKind::Timer:
+						{
+							QList<WorldRuntime::Timer> timers = runtime.timers();
+							timers.removeAt(1);
+							runtime.setTimers(timers);
+							break;
+						}
+						}
+
+						bool removeClickReturned    = false;
+						bool unexpectedConfirmation = false;
+						QVERIFY(QMetaObject::invokeMethod(
+						    &dialog,
+						    [&removeClickReturned, &unexpectedConfirmation]
+						    {
+							    if (removeClickReturned)
+								    return;
+							    if (QWidget *activeModal = QApplication::activeModalWidget())
+							    {
+								    unexpectedConfirmation = true;
+								    activeModal->close();
+							    }
+						    },
+						    Qt::QueuedConnection));
+						widgets.removeButton->click();
+						removeClickReturned = true;
+						QCoreApplication::sendPostedEvents(&dialog, QEvent::MetaCall);
+						QVERIFY(!unexpectedConfirmation);
+
+						switch (kind)
+						{
+						case RuleKind::Trigger:
+							QCOMPARE(runtime.triggers().size(), 2);
+							QCOMPARE(runtime.triggers().at(0).runtimeId, expectedSelectionRuntimeId);
+							QCOMPARE(runtime.triggers().at(1).runtimeId, otherRuntimeId);
+							break;
+						case RuleKind::Alias:
+							QCOMPARE(runtime.aliases().size(), 2);
+							QCOMPARE(runtime.aliases().at(0).runtimeId, expectedSelectionRuntimeId);
+							QCOMPARE(runtime.aliases().at(1).runtimeId, otherRuntimeId);
+							break;
+						case RuleKind::Timer:
+							QCOMPARE(runtime.timers().size(), 2);
+							QCOMPARE(runtime.timers().at(0).runtimeId, expectedSelectionRuntimeId);
+							QCOMPARE(runtime.timers().at(1).runtimeId, otherRuntimeId);
+							break;
+						}
+						const int selectedRow =
+						    findRuleRowByRuntimeId(*widgets.table, expectedSelectionRuntimeId);
+						QVERIFY(selectedRow >= 0);
+						QCOMPARE(widgets.table->currentRow(), selectedRow);
+						if (treeMode)
+						{
+							QVERIFY(widgets.tree->currentItem());
+							QCOMPARE(widgets.tree->currentItem()->data(0, Qt::UserRole).toULongLong(),
+							         expectedSelectionRuntimeId);
+							QVERIFY(widgets.tree->currentItem()->parent());
+							QCOMPARE(widgets.tree->currentItem()->parent()->text(0),
+							         QStringLiteral("primary"));
+						}
+					}
+				}
+			}
+
+			void scriptingNoteColourApplyUpdatesRuntimeState()
+			{
+				const QString sourcePath =
+				    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
+				        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
+				QFile sourceFile(sourcePath);
+				QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
+				         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
+				const QString sourceText = QString::fromUtf8(sourceFile.readAll());
+
+				QVERIFY2(sourceText.contains(QStringLiteral("QMudNoteColour::worldAttributeFromPublicIndex")),
+				         "Expected scripting Note colour persistence to use shared note-colour encoding.");
+				QVERIFY2(sourceText.contains(QStringLiteral("m_runtime->setNoteTextColour(notePublicIndex)")),
+				         "Expected scripting Note colour apply path to update runtime Note() colour state.");
+			}
+
+			void scriptingNoteColourComboItemsUseCustomColours()
+			{
+				const QString sourcePath =
+				    QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR))
+				        .filePath(QStringLiteral("src/dialogs/WorldPreferencesDialog.cpp"));
+				QFile sourceFile(sourcePath);
+				QVERIFY2(sourceFile.open(QIODevice::ReadOnly | QIODevice::Text),
+				         qPrintable(QStringLiteral("Failed to open %1").arg(sourcePath)));
+				const QString sourceText = QString::fromUtf8(sourceFile.readAll());
+
+				QVERIFY2(sourceText.contains(QStringLiteral("updateScriptNoteColourItems")),
+				         "Expected scripting Note colour combo item role updater.");
+				QVERIFY2(sourceText.contains(QStringLiteral("Qt::ForegroundRole")),
+				         "Expected scripting Note colour combo entries to carry foreground colours.");
+				QVERIFY2(sourceText.contains(QStringLiteral("Qt::BackgroundRole")),
+				         "Expected scripting Note colour combo entries to carry background colours.");
+			}
+	};
+} // namespace
 // NOLINTEND(readability-convert-member-functions-to-static)
 
 QTEST_MAIN(tst_Dialog_WorldPreferences)

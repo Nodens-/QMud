@@ -10,6 +10,8 @@
 
 #include "NativePluginRegistry.h"
 #include "Version.h"
+#include "WorldOptions.h"
+#include "helpers/ColorUtils.h"
 
 #include <QDir>
 #include <QFile>
@@ -37,6 +39,28 @@ static bool makeVirtualNativePlugin(const QString &rawName, WorldDocument::Plugi
 static bool isVirtualNativePluginInclude(const QString &rawName)
 {
 	return !QMudNativePluginRegistry::normalizeNativeSource(rawName).isEmpty();
+}
+
+static bool applyPluginIncludeOverrides(const WorldDocument::Include &include, WorldDocument::Plugin &plugin,
+                                        QString &error)
+{
+	const QString includeEnabled = include.attributes.value(QStringLiteral("enabled")).trimmed();
+	if (!includeEnabled.isEmpty())
+		plugin.attributes.insert(QStringLiteral("enabled"), includeEnabled);
+
+	const QString sequenceText = include.attributes.value(QStringLiteral("sequence")).trimmed();
+	if (sequenceText.isEmpty())
+		return true;
+
+	const std::optional<int> sequence = QMudPluginSequence::parse(sequenceText);
+	if (!sequence)
+	{
+		error = QStringLiteral("Plugin include \"%1\" has invalid sequence override \"%2\".")
+		            .arg(include.attributes.value(QStringLiteral("name")), sequenceText);
+		return false;
+	}
+	plugin.dispatchSequenceOverride = *sequence;
+	return true;
 }
 
 static bool isPortableRootSegment(const QString &segment)
@@ -628,7 +652,25 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 			}
 			else if (name == QLatin1String("colours"))
 			{
-				sawContent = true;
+				sawContent        = true;
+				auto appendColour = [this, &reader](const QString &group, const int maxSequence)
+				{
+					Colour colour;
+					colour.group                     = group;
+					const QXmlStreamAttributes attrs = reader.attributes();
+					for (const QXmlStreamAttribute &attr : attrs)
+						colour.attributes.insert(attr.name().toString(), attr.value().toString());
+					bool      ok  = false;
+					const int seq = colour.attributes.value(QStringLiteral("seq")).trimmed().toInt(&ok);
+					if (!ok || seq < 1 || seq > maxSequence)
+					{
+						m_warnings.push_back(
+						    withLine(reader, QStringLiteral("Colour sequence (\"seq\") must be specified")));
+						return;
+					}
+					colour.attributes.insert(QStringLiteral("seq"), QString::number(seq));
+					m_colours.push_back(colour);
+				};
 				// Collect color elements by group.
 				while (!reader.atEnd())
 				{
@@ -636,7 +678,7 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 					if (reader.isStartElement())
 					{
 						const QString colourGroup = reader.name().toString();
-						if (colourGroup == QLatin1String("ansi") || colourGroup == QLatin1String("custom"))
+						if (colourGroup == QLatin1String("ansi"))
 						{
 							while (!reader.atEnd())
 							{
@@ -645,72 +687,42 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 								{
 									const QString subGroup = reader.name().toString();
 									if (subGroup == QLatin1String("normal") ||
-									    subGroup == QLatin1String("bold") ||
-									    subGroup == QLatin1String("custom"))
+									    subGroup == QLatin1String("bold"))
 									{
 										while (!reader.atEnd())
 										{
 											reader.readNext();
 											if (reader.isStartElement() &&
 											    reader.name() == QLatin1String("colour"))
-											{
-												Colour colour;
-												colour.group = colourGroup + QStringLiteral("/") + subGroup;
-												const QXmlStreamAttributes attrs = reader.attributes();
-												for (const QXmlStreamAttribute &attr : attrs)
-												{
-													colour.attributes.insert(attr.name().toString(),
-													                         attr.value().toString());
-												}
-												const QString seqText =
-												    colour.attributes.value(QStringLiteral("seq")).trimmed();
-												bool      ok  = false;
-												const int seq = seqText.toInt(&ok);
-												const int maxSeq =
-												    colourGroup == QLatin1String("custom") ? 16 : 8;
-												if (!ok || seq < 1 || seq > maxSeq)
-												{
-													m_warnings.push_back(withLine(
-													    reader,
-													    QStringLiteral(
-													        "Colour sequence (\"seq\") must be specified")));
-													continue;
-												}
-												m_colours.push_back(colour);
-											}
+												appendColour(colourGroup + QStringLiteral("/") + subGroup, 8);
+											else if (reader.isStartElement())
+												reader.skipCurrentElement();
 											else if (reader.isEndElement() && reader.name() == subGroup)
 												break;
 										}
 									}
-									else if (subGroup == QLatin1String("colour"))
-									{
-										Colour colour;
-										colour.group                     = colourGroup;
-										const QXmlStreamAttributes attrs = reader.attributes();
-										for (const QXmlStreamAttribute &attr : attrs)
-										{
-											colour.attributes.insert(attr.name().toString(),
-											                         attr.value().toString());
-										}
-										const QString seqText =
-										    colour.attributes.value(QStringLiteral("seq")).trimmed();
-										bool      ok     = false;
-										const int seq    = seqText.toInt(&ok);
-										const int maxSeq = colourGroup == QLatin1String("custom") ? 16 : 8;
-										if (!ok || seq < 1 || seq > maxSeq)
-										{
-											m_warnings.push_back(withLine(
-											    reader, QStringLiteral(
-											                "Colour sequence (\"seq\") must be specified")));
-											continue;
-										}
-										m_colours.push_back(colour);
-									}
+									else
+										reader.skipCurrentElement();
 								}
 								else if (reader.isEndElement() && reader.name() == colourGroup)
 									break;
 							}
 						}
+						else if (colourGroup == QMudColourGroup::kCustom)
+						{
+							while (!reader.atEnd())
+							{
+								reader.readNext();
+								if (reader.isStartElement() && reader.name() == QLatin1String("colour"))
+									appendColour(QMudColourGroup::kCustom.toString(), MAX_CUSTOM);
+								else if (reader.isStartElement())
+									reader.skipCurrentElement();
+								else if (reader.isEndElement() && reader.name() == QMudColourGroup::kCustom)
+									break;
+							}
+						}
+						else
+							reader.skipCurrentElement();
 					}
 					else if (reader.isEndElement() && reader.name() == QLatin1String("colours"))
 						break;
@@ -1005,6 +1017,8 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 				return false;
 			}
 		}
+		// Plugin-definition XML is the authoritative spelling boundary. Everything downstream
+		// copies this value unchanged; plugin-facing Lua argument decoding is the only other boundary.
 		pluginId = pluginId.toLower();
 		plugin.attributes.insert(QStringLiteral("id"), pluginId);
 
@@ -1019,6 +1033,14 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 		if (language.isEmpty() && !plugin.script.trimmed().isEmpty())
 		{
 			m_errorString = QStringLiteral("Plugin script supplied without a scripting language");
+			return false;
+		}
+
+		const QString sequenceText = plugin.attributes.value(QStringLiteral("sequence")).trimmed();
+		if (!sequenceText.isEmpty() && !QMudPluginSequence::parse(sequenceText))
+		{
+			m_errorString =
+			    QStringLiteral("Plugin \"%1\" has invalid sequence \"%2\".").arg(name, sequenceText);
 			return false;
 		}
 
@@ -1118,7 +1140,7 @@ bool WorldDocument::expandIncludes(const QString &worldFilePath, const QString &
 	{
 		for (const Plugin &plugin : m_plugins)
 		{
-			const QString pluginId   = plugin.attributes.value(QStringLiteral("id")).trimmed().toLower();
+			const QString pluginId   = plugin.attributes.value(QStringLiteral("id"));
 			const QString pluginName = plugin.attributes.value(QStringLiteral("name")).trimmed();
 			if (!pluginId.isEmpty())
 				m_loadedPluginIds.insert(pluginId, pluginName);
@@ -1174,11 +1196,9 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 					m_errorString = QStringLiteral("Unknown native plugin include \"%1\"").arg(rawName);
 					return false;
 				}
-				const QString includeEnabled = include.attributes.value(QStringLiteral("enabled")).trimmed();
-				if (!includeEnabled.isEmpty())
-					nativePlugin.attributes.insert(QStringLiteral("enabled"), includeEnabled);
-				const QString newPluginId =
-				    nativePlugin.attributes.value(QStringLiteral("id")).trimmed().toLower();
+				if (!applyPluginIncludeOverrides(include, nativePlugin, m_errorString))
+					return false;
+				const QString newPluginId   = nativePlugin.attributes.value(QStringLiteral("id"));
 				const QString newPluginName = nativePlugin.attributes.value(QStringLiteral("name")).trimmed();
 				if (!newPluginId.isEmpty() && m_loadedPluginIds.contains(newPluginId))
 				{
@@ -1238,13 +1258,12 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 		QString newPluginName;
 		if (isPlugin && !child.m_plugins.isEmpty())
 		{
-			Plugin       &childPlugin    = child.m_plugins.front();
-			const QString includeEnabled = include.attributes.value(QStringLiteral("enabled")).trimmed();
-			if (!includeEnabled.isEmpty())
-				childPlugin.attributes.insert(QStringLiteral("enabled"), includeEnabled);
+			Plugin &childPlugin = child.m_plugins.front();
+			if (!applyPluginIncludeOverrides(include, childPlugin, m_errorString))
+				return false;
 			childPlugin.attributes.insert(QStringLiteral("source"), resolved);
 			childPlugin.attributes.insert(QStringLiteral("directory"), QFileInfo(resolved).absolutePath());
-			newPluginId   = childPlugin.attributes.value(QStringLiteral("id")).trimmed().toLower();
+			newPluginId   = childPlugin.attributes.value(QStringLiteral("id"));
 			newPluginName = childPlugin.attributes.value(QStringLiteral("name")).trimmed();
 			if (!newPluginId.isEmpty() && m_loadedPluginIds.contains(newPluginId))
 			{

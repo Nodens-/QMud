@@ -53,14 +53,7 @@ fi
 if [ -z "${OSXCROSS_SDK:-}" ]; then
   OSXCROSS_SDK=$(find "${OSXCROSS_TARGET_DIR}/SDK" -maxdepth 1 -type d -name 'MacOSX*.sdk' | sort | tail -n 1)
 fi
-if [ "$BUILD_ARCH" = "aarch64" ]; then
-  OSXCROSS_HOST=$(find -L /opt/osxcross/bin -maxdepth 1 \( -type f -o -type l \) -name 'aarch64-apple-darwin*-clang' | sort | head -n 1 | awk -F/ '{print $NF}' | sed 's/-clang$//')
-  if [ -z "$OSXCROSS_HOST" ]; then
-    OSXCROSS_HOST=$(find -L /opt/osxcross/bin -maxdepth 1 \( -type f -o -type l \) -name 'arm64-apple-darwin*-clang' | sort | head -n 1 | awk -F/ '{print $NF}' | sed 's/-clang$//')
-  fi
-else
-  OSXCROSS_HOST=$(find -L /opt/osxcross/bin -maxdepth 1 \( -type f -o -type l \) -name 'x86_64-apple-darwin*-clang' | sort | head -n 1 | awk -F/ '{print $NF}' | sed 's/-clang$//')
-fi
+OSXCROSS_HOST=$(find -L /opt/osxcross/bin -maxdepth 1 \( -type f -o -type l \) -name 'x86_64-apple-darwin*-clang' | sort | head -n 1 | awk -F/ '{print $NF}' | sed 's/-clang$//')
 if [ -z "$OSXCROSS_HOST" ]; then
   echo "Error: could not resolve OSXCROSS_HOST for BUILD_ARCH=${BUILD_ARCH}" >&2
   exit 1
@@ -97,17 +90,16 @@ else
   CMAKE_OSX_ARCH=x86_64
 fi
 
-CMAKE_EXE=cmake
-if [ -x /opt/Qt/Tools/CMake/bin/cmake ]; then
-  CMAKE_EXE=/opt/Qt/Tools/CMake/bin/cmake
+CMAKE_EXE="/opt/osxcross/bin/${OSXCROSS_HOST}-cmake"
+if [ ! -x "$CMAKE_EXE" ]; then
+  echo "Error: osxcross CMake dispatcher is missing at $CMAKE_EXE." >&2
+  exit 1
 fi
 
 "$CMAKE_EXE" -S "$PROJECT_DIR" -G Ninja -B "$BUILD_DIR" \
   -DCMAKE_TOOLCHAIN_FILE="$QT_TOOLCHAIN" \
   -DQT_CHAINLOAD_TOOLCHAIN_FILE=/opt/osxcross/target/toolchain.cmake \
   -DCMAKE_SYSTEM_NAME=Darwin \
-  -DCMAKE_C_COMPILER="/opt/osxcross/bin/${OSXCROSS_HOST}-clang" \
-  -DCMAKE_CXX_COMPILER="/opt/osxcross/bin/${OSXCROSS_HOST}-clang++" \
   -DCMAKE_OSX_ARCHITECTURES="$CMAKE_OSX_ARCH" \
   -DCMAKE_OSX_DEPLOYMENT_TARGET="$QMUD_MAC_DOCKER_OSX_DEPLOYMENT_TARGET" \
   -DOSXCROSS_HOST="$OSXCROSS_HOST" \

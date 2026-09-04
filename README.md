@@ -9,26 +9,22 @@
 [![License](https://img.shields.io/github/license/Nodens-/QMud)](https://github.com/Nodens-/QMud/blob/main/LICENSE.md)
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20this%20project-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/nodens)
 
-QMud is a Qt 6 port and continuation of the
-original [MUSHclient](https://www.mushclient.com/mushclient/mushclient.htm) (by Nick Gammon),
-designed and written by Panagiotis Kalogiratos (Nodens) of [CthulhuMUD](https://www.cthulhumud.com).
-It is a client program for connecting to MUD (Multi-User Dungeon) games.
-It is compatible with existing MUSHclient files and plugins, but it will migrate them to
-its own format in order to maintain separation. As more features are implemented,
-things were bound to diverge, especially in data persistence, so, as a conscious
-choice, QMud diverges from the get-go.
-The active implementation in this repository is C++20 + Qt 6.11.
+QMud is a Qt 6 port and continuation of the original [MUSHclient](https://www.mushclient.com/mushclient/mushclient.htm)
+(by Nick Gammon), designed and written by Panagiotis Kalogiratos (Nodens) of [CthulhuMUD](https://www.cthulhumud.com).
+It is a client program for connecting to MUD (Multi-User Dungeon) games. It is compatible with existing MUSHclient files
+and plugins, but it will migrate them to its own format in order to maintain separation. As more features are
+implemented, things were bound to diverge, especially in data persistence, so, as a conscious choice, QMud diverges from
+the get-go. The active implementation in this repository is C++20 + Qt 6.11.
 
 The official site and documentation of QMud is here: [qmud.dev](https://qmud.dev)
 
 ## Project status
 
-QMud is fully functional and early porting issues have been ironed out.
-There are several improvements and new features implemented already and many more on TODO.
-It is now also the FIRST and ONLY, at the time of this writing, MUD client with a multithreaded Lua engine.
-v11.00 essentially marks the first production release. QMud started with a v10 versioning offset in order to guarrantee
-higher than MUSHclient versioning for compatibility/importing reasons.
-Please use the issue tracker, with the appropriate template to report issues, request features, etc.
+QMud is fully functional and early porting issues have been ironed out. There are several improvements and new features
+implemented already and many more on TODO. It is now also the FIRST and ONLY, at the time of this writing, MUD client
+with a multithreaded Lua engine. v11.00 essentially marks the first production release. QMud started with a v10
+versioning offset in order to guarrantee higher than MUSHclient versioning for compatibility/importing reasons. Please
+use the issue tracker, with the appropriate template to report issues, request features, etc.
 
 ## Features
 
@@ -61,11 +57,15 @@ Do **NOT** use the issue tracker for general support requests.
   help before that).
 - You can test plugins of various MUDs and see if they're working right or not. Open detailed issues if something's not
   working and make sure to include a link to the source for the plugin in question.
-- You can also contribute with funding as funds are needed for code signing certificate, Apple registration etc.
-  in order to bring QMud to the Apple Store/avoid issues with Windows SmartScreen/WDAC.
+- You can also contribute with funding as funds are needed for code signing certificate, Apple registration etc. in
+  order to bring QMud to the Apple Store/avoid issues with Windows SmartScreen/WDAC.
 
 NOTICE: While contributions/PRs are very welcome, if you open a PR, you are expected to UNDERSTAND the code you're
 touching AND be able to make requested changes after review. "Vibe coding" is NOT welcome.
+
+Development.txt under skeleton/docs describes the design contract invariants that everyone considering to contribute
+code to the project must be aware of and fully understand. If you have questions about any of them, contact me on
+Discord.
 
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20this%20project-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/nodens)
 
@@ -89,8 +89,8 @@ QMud can migrate an existing MUSHclient data tree.
 
 ### Old manual Migration method. (Still working but obsolete)
 
-Migration is copy-based, so source files are preserved and moved under a `migrated` marker
-path after successful import to avoid reprocessing.
+Migration is copy-based, so source files are preserved and moved under a `migrated` marker path after successful import
+to avoid reprocessing.
 
 What is migrated:
 
@@ -98,8 +98,8 @@ What is migrated:
 - World files under the worlds tree (`.MCL` and related world XML data)
 - Preference/state data required for normal startup
 
-Path handling during migration normalizes legacy Windows-style paths (for
-example `C:\...`) so migrated worlds resolve correctly on the active platform.
+Path handling during migration normalizes legacy Windows-style paths (for example `C:\...`) so migrated worlds resolve
+correctly on the active platform.
 
 1. Install/Run QMud (depending on platform) to create fresh QMud home directory.
 2. Copy your MUSHclient's lua contents into QMud/lua directory without overwriting anything. (*IF* you have placed any
@@ -139,9 +139,8 @@ System config lines support both:
 - `QMUD_HOME=/path/to/dir`
 - `export QMUD_HOME=/path/to/dir`
 
-Quoted values are accepted, and leading `~` is expanded.
-The same config fallback files can also define any `QMUD_*` environment flag, and those values are used when the real
-process environment does not override them.
+Quoted values are accepted, and leading `~` is expanded. The same config fallback files can also define any `QMUD_*`
+environment flag, and those values are used when the real process environment does not override them.
 
 If nothing is configured, defaults are:
 
@@ -332,8 +331,7 @@ These are intentional design choices in QMud:
 
 ## License
 
-QMud is licensed under the GNU General Public License v3.0.
-See [LICENSE](./LICENSE.md).
+QMud is licensed under the GNU General Public License v3.0. See [LICENSE](./LICENSE.md).
 
 Third-party license texts are in `skeleton/docs/licenses`.
 

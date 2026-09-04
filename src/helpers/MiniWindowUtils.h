@@ -14,7 +14,9 @@
 #include <QByteArray>
 #include <QColor>
 #include <QPen>
+#include <QPoint>
 #include <QRect>
+#include <QSize>
 #include <QVariant>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QString>
@@ -32,6 +34,56 @@ namespace MiniWindowUtils
 	[[nodiscard]] QRect  rectFromCoords(const MiniWindow &window, long left, long top, long right,
 	                                    long bottom);
 	[[nodiscard]] QPen   makePen(long colour, long style, int width);
+	/**
+	 * @brief Clamps a captured absolute-miniwindow move while preserving its size.
+	 * @param requestedLocation Requested top-left client coordinate.
+	 * @param windowSize Current logical miniwindow size.
+	 * @param clientSize World-output client size.
+	 * @return Top-left coordinate that keeps the complete miniwindow inside the client.
+	 */
+	[[nodiscard]] QPoint constrainCapturedAbsolutePosition(const QPoint &requestedLocation,
+	                                                       const QSize &windowSize, const QSize &clientSize);
+	/**
+	 * @brief Constrains a captured absolute-miniwindow resize independently on both axes.
+	 * @param location Current top-left client coordinate.
+	 * @param currentSize Current logical miniwindow size.
+	 * @param requestedSize Requested logical miniwindow size.
+	 * @param clientSize World-output client size.
+	 * @return Size that reaches an available edge but rejects further outward growth.
+	 */
+	[[nodiscard]] QSize  constrainCapturedAbsoluteResize(const QPoint &location, const QSize &currentSize,
+	                                                     const QSize &requestedSize, const QSize &clientSize);
+	/**
+	 * @brief Constrains an atomic captured absolute-miniwindow move and resize on all four edges.
+	 * @param currentLocation Current top-left client coordinate.
+	 * @param currentSize Current logical miniwindow size.
+	 * @param requestedLocation Requested top-left client coordinate.
+	 * @param requestedSize Requested logical miniwindow size.
+	 * @param clientSize World-output client size.
+	 * @return Geometry that preserves pure-move size and rejects outward edge growth independently.
+	 */
+	[[nodiscard]] QRect  constrainCapturedAbsoluteGeometry(const QPoint &currentLocation,
+	                                                       const QSize  &currentSize,
+	                                                       const QPoint &requestedLocation,
+	                                                       const QSize  &requestedSize,
+	                                                       const QSize  &clientSize);
+	/**
+	 * @brief Clamps a captured drag coordinate to world-output geometry edges.
+	 * @param requestedPosition Requested callback coordinate.
+	 * @param clientSize World-output client size.
+	 * @return Coordinate limited independently to the client area's valid pixel coordinates.
+	 */
+	[[nodiscard]] QPoint constrainCapturedDragPosition(const QPoint &requestedPosition,
+	                                                   const QSize  &clientSize);
+	/**
+	 * @brief Converts a display-space drag coordinate into the active layer's canonical coordinate space.
+	 * @param displayPosition Display-space output-client coordinate.
+	 * @param scaleX Active horizontal absolute-miniwindow scale.
+	 * @param scaleY Active vertical absolute-miniwindow scale.
+	 * @return Coordinate expressed in canonical miniwindow client units.
+	 */
+	[[nodiscard]] QPoint capturedDragPositionToCanonical(const QPoint &displayPosition, double scaleX,
+	                                                     double scaleY);
 	[[nodiscard]] int    validatePenStyle(long penStyle, int penWidth);
 	[[nodiscard]] int    validateBrushStyle(long brushStyle);
 	[[nodiscard]] int    bytesPerLine(int width, int bitsPerPixel);

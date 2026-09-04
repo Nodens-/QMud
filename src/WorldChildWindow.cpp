@@ -108,14 +108,22 @@ WorldChildWindow::WorldChildWindow(const QString &title, QWidget *parent) : QMdi
 	initializeWorldUi(title);
 }
 
+WorldChildWindow::~WorldChildWindow()
+{
+	bindRuntime(nullptr, RuntimeBindingRole::Observer);
+}
+
 void WorldChildWindow::initializeWorldUi(const QString &title)
 {
 	setAttribute(Qt::WA_DeleteOnClose, true);
 	setWindowTitle(title);
-	m_view             = new WorldView(this);
-	m_commandProcessor = new WorldCommandProcessor(this);
-	m_commandProcessor->setView(m_view);
-	connect(m_view, &WorldView::sendText, m_commandProcessor, &WorldCommandProcessor::onCommandEntered);
+	m_view = new WorldView(this);
+	connect(m_view, &WorldView::hyperlinkActivated, this,
+	        [this](const QString &)
+	        {
+		        if (MainWindowHost *main = resolveMainWindowHost(window()))
+			        main->clearHyperlinkStatusLock();
+	        });
 	connect(m_view, &WorldView::outputSelectionChanged, this,
 	        [this]
 	        {
@@ -143,6 +151,33 @@ void WorldChildWindow::initializeWorldUi(const QString &title)
 	m_autosaveTimer->stop();
 }
 
+void WorldChildWindow::createCommandProcessor()
+{
+	if (m_commandProcessor || !m_view)
+		return;
+
+	m_commandProcessor = new WorldCommandProcessor(this);
+	m_commandProcessor->setView(m_view);
+	connect(m_view, &WorldView::sendText, m_commandProcessor, &WorldCommandProcessor::onCommandEntered);
+	connect(m_view, &WorldView::hyperlinkActivated, m_commandProcessor,
+	        &WorldCommandProcessor::onHyperlinkActivated);
+}
+
+void WorldChildWindow::destroyCommandProcessor()
+{
+	if (!m_commandProcessor)
+		return;
+
+	if (m_runtime)
+	{
+		QObject::disconnect(m_runtime, nullptr, m_commandProcessor, nullptr);
+		m_runtime->clearCommandProcessor(m_commandProcessor);
+	}
+	m_commandProcessor->setRuntime(nullptr);
+	delete m_commandProcessor;
+	m_commandProcessor = nullptr;
+}
+
 void WorldChildWindow::setRuntime(WorldRuntime *runtime)
 {
 	bindRuntime(runtime, RuntimeBindingRole::Primary);
@@ -155,11 +190,34 @@ void WorldChildWindow::setRuntimeObserver(WorldRuntime *runtime)
 
 void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBindingRole role)
 {
-	const bool primary      = role == RuntimeBindingRole::Primary;
+	if (m_runtime)
+	{
+		QObject::disconnect(m_runtime, nullptr, this, nullptr);
+		if (m_view)
+		{
+			QObject::disconnect(m_runtime, nullptr, m_view, nullptr);
+			QObject::disconnect(m_view, nullptr, m_runtime, nullptr);
+			m_view->setRuntime(nullptr);
+		}
+		if (m_commandProcessor)
+		{
+			QObject::disconnect(m_runtime, nullptr, m_commandProcessor, nullptr);
+			m_runtime->clearCommandProcessor(m_commandProcessor);
+			m_commandProcessor->setRuntime(nullptr);
+		}
+	}
+
+	const bool primary = worldRuntime && role == RuntimeBindingRole::Primary;
+	if (primary)
+		createCommandProcessor();
+	else
+		destroyCommandProcessor();
 	m_runtime               = worldRuntime;
 	m_primaryRuntimeBinding = primary;
 	m_autosaveInFlight      = false;
 	refreshAutosaveTimer();
+	if (m_view)
+		m_view->setPassiveBufferView(!primary);
 	if (!worldRuntime || !m_view)
 		return;
 
@@ -177,15 +235,22 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 	connect(worldRuntime, &WorldRuntime::worldAttributeChanged, this,
 	        &WorldChildWindow::onWorldAttributeChanged, Qt::UniqueConnection);
 	if (m_commandProcessor)
+	{
+		Q_ASSERT(primary);
+		m_commandProcessor->setRuntimeAutomationOwner(true);
 		m_commandProcessor->setRuntime(worldRuntime);
+	}
 	if (primary)
 		worldRuntime->setCommandProcessor(m_commandProcessor);
 	if (m_commandProcessor)
 	{
-		connect(worldRuntime, &WorldRuntime::incomingStyledLineReceived, m_commandProcessor,
-		        &WorldCommandProcessor::onIncomingStyledLineReceived);
-		connect(worldRuntime, &WorldRuntime::incomingStyledLinePartialReceived, m_commandProcessor,
-		        &WorldCommandProcessor::onIncomingStyledLinePartialReceived);
+		if (primary)
+		{
+			connect(worldRuntime, &WorldRuntime::incomingStyledLineReceived, m_commandProcessor,
+			        &WorldCommandProcessor::onIncomingStyledLineReceived);
+			connect(worldRuntime, &WorldRuntime::incomingStyledLinePartialReceived, m_commandProcessor,
+			        &WorldCommandProcessor::onIncomingStyledLinePartialReceived);
+		}
 		connect(worldRuntime, &WorldRuntime::incomingStyledLineReceived, this,
 		        [this](const QString &, const QVector<WorldRuntime::StyleSpan> &)
 		        {
@@ -215,39 +280,21 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 	}
 	if (m_view)
 	{
-		connect(worldRuntime, &WorldRuntime::outputRequested, m_view,
-		        [this](const QString &text, const bool newLine, const bool note)
-		        {
-			        if (!m_view)
-				        return;
-			        if (note)
-				        m_view->appendNoteText(text, newLine);
-			        else
-				        m_view->appendOutputText(text, newLine);
-		        });
-		connect(worldRuntime, &WorldRuntime::outputStyledRequested, m_view,
-		        [this](const QString &text, const QVector<WorldRuntime::StyleSpan> &spans, const bool newLine,
-		               const bool note)
-		        {
-			        if (!m_view)
-				        return;
-			        if (note)
-				        m_view->appendNoteTextStyled(text, spans, newLine);
-			        else
-				        m_view->appendOutputTextStyled(text, spans, newLine);
-		        });
 		connect(worldRuntime, &WorldRuntime::miniWindowsChanged, m_view,
 		        [this]
 		        {
 			        if (m_view)
 				        m_view->onMiniWindowsChanged();
 		        });
-		connect(m_view, &WorldView::outputSelectionChanged, worldRuntime,
-		        [worldRuntime]
-		        {
-			        if (worldRuntime)
-				        worldRuntime->notifyOutputSelectionChanged();
-		        });
+		if (primary)
+		{
+			connect(m_view, &WorldView::outputSelectionChanged, worldRuntime,
+			        [worldRuntime]
+			        {
+				        if (worldRuntime)
+					        worldRuntime->notifyOutputSelectionChanged();
+			        });
+		}
 		connect(m_view, &WorldView::hyperlinkHighlighted, this,
 		        [this](const QString &href)
 		        {
@@ -286,211 +333,226 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 			        if (MainWindowHost *main = resolveMainWindowHost(window()))
 				        main->refreshTitleBar();
 		        });
-		connect(
-		    worldRuntime, &WorldRuntime::connected, this,
-		    [this, worldRuntime]
-		    {
-			    if (!m_view || !worldRuntime)
-				    return;
-			    bool          shouldFocusInput    = false;
-			    const bool    suppressConnectNote = worldRuntime->reloadReattachConnectActionsSuppressed();
-			    const QString flag =
-			        worldRuntime->worldAttributes().value(QStringLiteral("show_connect_disconnect"));
-			    if (const bool show = flag.isEmpty() || isEnabledFlagValue(flag);
-			        show && !suppressConnectNote)
+		if (primary)
+		{
+			connect(
+			    worldRuntime, &WorldRuntime::connected, this,
+			    [this, worldRuntime]
 			    {
-				    const QString when =
-				        QDateTime::currentDateTime().toString(QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"));
-				    if (m_commandProcessor)
-					    m_commandProcessor->note(QStringLiteral("--- Connected on %1 ---").arg(when), true);
-				    else if (m_view)
-					    m_view->appendNoteText(QStringLiteral("--- Connected on %1 ---").arg(when), true);
-			    }
-			    if (MainWindowHost *main = resolveMainWindowHost(window()))
-			    {
-				    main->setConnectedState(true);
-				    main->refreshTitleBar();
-				    main->updateActivityToolbarButtons();
-				    shouldFocusInput = main->activeWorldChildWindow() == this;
-			    }
-			    if (m_commandProcessor)
-				    m_commandProcessor->handleWorldConnected();
-			    if (m_view && shouldFocusInput)
-				    m_view->focusInput();
-		    });
-		connect(
-		    worldRuntime, &WorldRuntime::socketError, this,
-		    [this, worldRuntime](const QString &message)
-		    {
-			    if (!m_view || !worldRuntime)
-				    return;
-			    // Connection-failure messaging is only valid while establishing a session.
-			    // Once connected (or intentionally disconnecting), let the disconnected path
-			    // handle user-facing messaging with current UI wording/flags.
-			    if (const int phase = worldRuntime->connectPhase();
-			        phase == WorldRuntime::eConnectConnectedToMud ||
-			        phase == WorldRuntime::eConnectDisconnecting)
-				    return;
-			    const QMap<QString, QString> &attrs = worldRuntime->worldAttributes();
-			    const bool                    notify =
-			        attrs.value(QStringLiteral("notify_if_cannot_connect"), QStringLiteral("1")).toInt() != 0;
-			    if (!notify)
-				    return;
-			    const bool toOutput =
-			        attrs.value(QStringLiteral("error_notification_to_output"), QStringLiteral("1"))
-			            .toInt() != 0;
-			    const QString runtimeWorldName = attrs.value(QStringLiteral("name"), QStringLiteral("world"));
-			    const QString host             = attrs.value(QStringLiteral("site"));
-			    const QString port             = attrs.value(QStringLiteral("port"));
-			    QString       details          = message;
-			    if (!host.isEmpty())
-				    details = QStringLiteral("%1 (%2:%3)").arg(message, host, port);
-			    const QString text =
-			        QStringLiteral("Unable to connect to \"%1\": %2").arg(runtimeWorldName, details);
-			    if (toOutput)
-			    {
-				    if (m_commandProcessor)
+				    if (!m_view || !worldRuntime)
+					    return;
+				    bool       shouldFocusInput    = false;
+				    const bool suppressConnectNote = worldRuntime->reloadReattachConnectActionsSuppressed();
+				    const QString flag =
+				        worldRuntime->worldAttributes().value(QStringLiteral("show_connect_disconnect"));
+				    if (const bool show = flag.isEmpty() || isEnabledFlagValue(flag);
+				        show && !suppressConnectNote)
 				    {
-					    m_commandProcessor->note(text, true);
-					    m_commandProcessor->note(QString(), true);
-					    m_commandProcessor->note(
-					        QStringLiteral("For assistance with connection problems see:"), true);
-				    }
-				    else
-				    {
-					    m_view->appendNoteText(text, true);
-					    m_view->appendNoteText(QString(), true);
-					    m_view->appendNoteText(QStringLiteral("For assistance with connection problems see:"),
-					                           true);
-				    }
-				    const QString           forumLink = QString::fromLatin1(FORUM_URL);
-				    WorldRuntime::StyleSpan linkSpan;
-				    const QString linkText = QStringLiteral("How to resolve network connection problems");
-				    const auto    boundedLinkSize =
-				        qMin(linkText.size(), static_cast<qsizetype>(std::numeric_limits<int>::max()));
-				    linkSpan.length     = static_cast<int>(boundedLinkSize);
-				    linkSpan.actionType = WorldRuntime::ActionHyperlink;
-				    linkSpan.action     = forumLink;
-				    m_view->appendOutputTextStyled(linkText, {linkSpan}, true);
-				    if (m_commandProcessor)
-					    m_commandProcessor->note(QString(), true);
-				    else
-					    m_view->appendNoteText(QString(), true);
-			    }
-			    else
-				    QMessageBox::warning(this, QStringLiteral("QMud"), text);
-		    });
-		connect(
-		    worldRuntime, &WorldRuntime::disconnected, this,
-		    [this, worldRuntime]
-		    {
-			    if (!m_view || !worldRuntime)
-				    return;
-			    if (MainWindowHost *main = resolveMainWindowHost(window()))
-				    main->updateActivityToolbarButtons();
-			    const QString flag =
-			        worldRuntime->worldAttributes().value(QStringLiteral("show_connect_disconnect"));
-			    if (const bool show = flag.isEmpty() || isEnabledFlagValue(flag); show)
-			    {
-				    const QString when =
-				        QDateTime::currentDateTime().toString(QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"));
-				    if (m_commandProcessor)
-					    m_commandProcessor->note(QStringLiteral("--- Disconnected on %1 ---").arg(when),
-					                             true);
-				    else if (m_view)
-					    m_view->appendNoteText(QStringLiteral("--- Disconnected on %1 ---").arg(when), true);
-				    if (worldRuntime->connectTime().isValid())
-				    {
-					    const qint64 seconds =
-					        worldRuntime->connectTime().secsTo(QDateTime::currentDateTime());
-					    const qint64  days    = seconds / 86400;
-					    const qint64  hours   = seconds % 86400 / 3600;
-					    const qint64  minutes = seconds % 3600 / 60;
-					    const qint64  secs    = seconds % 60;
-					    const QString duration =
-					        QStringLiteral(
-					            "--- Connected for %1 day%2, %3 hour%4, %5 minute%6, %7 second%8. ---")
-					            .arg(days)
-					            .arg(days == 1 ? QString() : QStringLiteral("s"))
-					            .arg(hours)
-					            .arg(hours == 1 ? QString() : QStringLiteral("s"))
-					            .arg(minutes)
-					            .arg(minutes == 1 ? QString() : QStringLiteral("s"))
-					            .arg(secs)
-					            .arg(secs == 1 ? QString() : QStringLiteral("s"));
+					    const QString when = QDateTime::currentDateTime().toString(
+					        QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"));
 					    if (m_commandProcessor)
-						    m_commandProcessor->note(duration, true);
+						    m_commandProcessor->note(QStringLiteral("--- Connected on %1 ---").arg(when),
+						                             true);
 					    else if (m_view)
-						    m_view->appendNoteText(duration, true);
+						    m_view->appendNoteText(QStringLiteral("--- Connected on %1 ---").arg(when), true);
 				    }
-			    }
-			    if (m_commandProcessor)
+				    if (MainWindowHost *main = resolveMainWindowHost(window()))
+				    {
+					    main->setConnectedState(true);
+					    main->refreshTitleBar();
+					    main->updateActivityToolbarButtons();
+					    shouldFocusInput = main->activeWorldChildWindow() == this;
+				    }
+				    if (m_commandProcessor)
+					    m_commandProcessor->handleWorldConnected();
+				    if (m_view && shouldFocusInput)
+					    m_view->focusInput();
+			    });
+			connect(worldRuntime, &WorldRuntime::socketError, this,
+			        [this, worldRuntime](const QString &message)
+			        {
+				        if (!m_view || !worldRuntime)
+					        return;
+				        // Connection-failure messaging is only valid while establishing a session.
+				        // Once connected (or intentionally disconnecting), let the disconnected path
+				        // handle user-facing messaging with current UI wording/flags.
+				        if (const int phase = worldRuntime->connectPhase();
+				            phase == WorldRuntime::eConnectConnectedToMud ||
+				            phase == WorldRuntime::eConnectDisconnecting)
+					        return;
+				        const QMap<QString, QString> &attrs = worldRuntime->worldAttributes();
+				        const bool                    notify =
+				            attrs.value(QStringLiteral("notify_if_cannot_connect"), QStringLiteral("1"))
+				                .toInt() != 0;
+				        if (!notify)
+					        return;
+				        const bool toOutput =
+				            attrs.value(QStringLiteral("error_notification_to_output"), QStringLiteral("1"))
+				                .toInt() != 0;
+				        const QString runtimeWorldName =
+				            attrs.value(QStringLiteral("name"), QStringLiteral("world"));
+				        const QString host    = attrs.value(QStringLiteral("site"));
+				        const QString port    = attrs.value(QStringLiteral("port"));
+				        QString       details = message;
+				        if (!host.isEmpty())
+					        details = QStringLiteral("%1 (%2:%3)").arg(message, host, port);
+				        const QString text =
+				            QStringLiteral("Unable to connect to \"%1\": %2").arg(runtimeWorldName, details);
+				        if (toOutput)
+				        {
+					        if (m_commandProcessor)
+					        {
+						        m_commandProcessor->note(text, true);
+						        m_commandProcessor->note(QString(), true);
+						        m_commandProcessor->note(
+						            QStringLiteral("For assistance with connection problems see:"), true);
+					        }
+					        else
+					        {
+						        m_view->appendNoteText(text, true);
+						        m_view->appendNoteText(QString(), true);
+						        m_view->appendNoteText(
+						            QStringLiteral("For assistance with connection problems see:"), true);
+					        }
+					        const QString           forumLink = QString::fromLatin1(FORUM_URL);
+					        WorldRuntime::StyleSpan linkSpan;
+					        const QString           linkText =
+					            QStringLiteral("How to resolve network connection problems");
+					        const auto boundedLinkSize = qMin(
+					            linkText.size(), static_cast<qsizetype>(std::numeric_limits<int>::max()));
+					        linkSpan.length     = static_cast<int>(boundedLinkSize);
+					        linkSpan.actionType = WorldRuntime::ActionHyperlink;
+					        linkSpan.action     = forumLink;
+					        m_view->appendOutputTextStyled(linkText, {linkSpan}, true);
+					        if (m_commandProcessor)
+						        m_commandProcessor->note(QString(), true);
+					        else
+						        m_view->appendNoteText(QString(), true);
+				        }
+				        else
+					        QMessageBox::warning(this, QStringLiteral("QMud"), text);
+			        });
+			connect(
+			    worldRuntime, &WorldRuntime::disconnected, this,
+			    [this, worldRuntime]
 			    {
-				    const int     received       = worldRuntime->totalLinesReceived();
-				    const int     sent           = worldRuntime->totalLinesSent();
-				    const QString receivedPlural = received == 1 ? QString() : QStringLiteral("s");
-				    const QString sentPlural     = sent == 1 ? QString() : QStringLiteral("s");
-				    const QString info           = QStringLiteral("--- Received %1 line%2, sent %3 line%4.")
-				                                       .arg(received)
-				                                       .arg(receivedPlural)
-				                                       .arg(sent)
-				                                       .arg(sentPlural);
-				    m_commandProcessor->note(info, true);
-
-				    const int maxLines =
-				        worldRuntime->worldAttributes().value(QStringLiteral("max_output_lines")).toInt();
-				    if (maxLines > 0)
+				    if (!m_view || !worldRuntime)
+					    return;
+				    if (MainWindowHost *main = resolveMainWindowHost(window()))
+					    main->updateActivityToolbarButtons();
+				    const QString flag =
+				        worldRuntime->worldAttributes().value(QStringLiteral("show_connect_disconnect"));
+				    if (const bool show = flag.isEmpty() || isEnabledFlagValue(flag); show)
 				    {
-					    const auto   count = worldRuntime->lines().size();
-					    const double percent =
-					        static_cast<double>(count) / static_cast<double>(maxLines) * 100.0;
-					    const QString countPlural = count == 1 ? QString() : QStringLiteral("s");
-					    const QString bufferInfo =
-					        QStringLiteral("--- Output buffer has %1/%2 line%3 in it (%4% full).")
-					            .arg(count)
-					            .arg(maxLines)
-					            .arg(countPlural)
-					            .arg(QString::number(percent, 'f', 1));
-					    m_commandProcessor->note(bufferInfo, true);
+					    const QString when = QDateTime::currentDateTime().toString(
+					        QStringLiteral("dddd, MMMM dd, yyyy, h:mm AP"));
+					    if (m_commandProcessor)
+						    m_commandProcessor->note(QStringLiteral("--- Disconnected on %1 ---").arg(when),
+						                             true);
+					    else if (m_view)
+						    m_view->appendNoteText(QStringLiteral("--- Disconnected on %1 ---").arg(when),
+						                           true);
+					    if (worldRuntime->connectTime().isValid())
+					    {
+						    const qint64 seconds =
+						        worldRuntime->connectTime().secsTo(QDateTime::currentDateTime());
+						    const qint64  days    = seconds / 86400;
+						    const qint64  hours   = seconds % 86400 / 3600;
+						    const qint64  minutes = seconds % 3600 / 60;
+						    const qint64  secs    = seconds % 60;
+						    const QString duration =
+						        QStringLiteral(
+						            "--- Connected for %1 day%2, %3 hour%4, %5 minute%6, %7 second%8. ---")
+						            .arg(days)
+						            .arg(days == 1 ? QString() : QStringLiteral("s"))
+						            .arg(hours)
+						            .arg(hours == 1 ? QString() : QStringLiteral("s"))
+						            .arg(minutes)
+						            .arg(minutes == 1 ? QString() : QStringLiteral("s"))
+						            .arg(secs)
+						            .arg(secs == 1 ? QString() : QStringLiteral("s"));
+						    if (m_commandProcessor)
+							    m_commandProcessor->note(duration, true);
+						    else if (m_view)
+							    m_view->appendNoteText(duration, true);
+					    }
 				    }
+				    if (m_commandProcessor)
+				    {
+					    const int     received       = worldRuntime->totalLinesReceived();
+					    const int     sent           = worldRuntime->totalLinesSent();
+					    const QString receivedPlural = received == 1 ? QString() : QStringLiteral("s");
+					    const QString sentPlural     = sent == 1 ? QString() : QStringLiteral("s");
+					    const QString info = QStringLiteral("--- Received %1 line%2, sent %3 line%4.")
+					                             .arg(received)
+					                             .arg(receivedPlural)
+					                             .arg(sent)
+					                             .arg(sentPlural);
+					    m_commandProcessor->note(info, true);
 
-				    const int     triggers    = worldRuntime->triggersMatchedThisSession();
-				    const int     aliases     = worldRuntime->aliasesMatchedThisSession();
-				    const int     timers      = worldRuntime->timersFiredThisSession();
-				    const QString trigPlural  = triggers == 1 ? QString() : QStringLiteral("s");
-				    const QString aliasPlural = aliases == 1 ? QString() : QStringLiteral("es");
-				    const QString timerPlural = timers == 1 ? QString() : QStringLiteral("s");
-				    const QString matchInfo =
-				        QStringLiteral("--- Matched %1 trigger%2, %3 alias%4, and %5 timer%6 fired.")
-				            .arg(triggers)
-				            .arg(trigPlural)
-				            .arg(aliases)
-				            .arg(aliasPlural)
-				            .arg(timers)
-				            .arg(timerPlural);
-				    m_commandProcessor->note(matchInfo, true);
-			    }
-			    const QMap<QString, QString> &attrs = worldRuntime->worldAttributes();
-			    const bool                    notifyDisconnect =
-			        attrs.value(QStringLiteral("notify_on_disconnect"), QStringLiteral("1")).toInt() != 0;
-			    const bool toOutput =
-			        attrs.value(QStringLiteral("error_notification_to_output"), QStringLiteral("1"))
-			            .toInt() != 0;
-			    if (const bool expectedDisconnect = worldRuntime->disconnectOk();
-			        notifyDisconnect && !expectedDisconnect)
-			    {
-				    if (!toOutput)
-				    {
-					    QMessageBox::information(this, QStringLiteral("QMud"),
-					                             QStringLiteral("The server has closed the connection."));
+					    const int maxLines =
+					        worldRuntime->worldAttributes().value(QStringLiteral("max_output_lines")).toInt();
+					    if (maxLines > 0)
+					    {
+						    const auto   count = worldRuntime->lines().size();
+						    const double percent =
+						        static_cast<double>(count) / static_cast<double>(maxLines) * 100.0;
+						    const QString countPlural = count == 1 ? QString() : QStringLiteral("s");
+						    const QString bufferInfo =
+						        QStringLiteral("--- Output buffer has %1/%2 line%3 in it (%4% full).")
+						            .arg(count)
+						            .arg(maxLines)
+						            .arg(countPlural)
+						            .arg(QString::number(percent, 'f', 1));
+						    m_commandProcessor->note(bufferInfo, true);
+					    }
+
+					    const int     triggers    = worldRuntime->triggersMatchedThisSession();
+					    const int     aliases     = worldRuntime->aliasesMatchedThisSession();
+					    const int     timers      = worldRuntime->timersFiredThisSession();
+					    const QString trigPlural  = triggers == 1 ? QString() : QStringLiteral("s");
+					    const QString aliasPlural = aliases == 1 ? QString() : QStringLiteral("es");
+					    const QString timerPlural = timers == 1 ? QString() : QStringLiteral("s");
+					    const QString matchInfo =
+					        QStringLiteral("--- Matched %1 trigger%2, %3 alias%4, and %5 timer%6 fired.")
+					            .arg(triggers)
+					            .arg(trigPlural)
+					            .arg(aliases)
+					            .arg(aliasPlural)
+					            .arg(timers)
+					            .arg(timerPlural);
+					    m_commandProcessor->note(matchInfo, true);
 				    }
-				    else if (m_commandProcessor)
+				    const QMap<QString, QString> &attrs = worldRuntime->worldAttributes();
+				    const bool                    notifyDisconnect =
+				        attrs.value(QStringLiteral("notify_on_disconnect"), QStringLiteral("1")).toInt() != 0;
+				    const bool toOutput =
+				        attrs.value(QStringLiteral("error_notification_to_output"), QStringLiteral("1"))
+				            .toInt() != 0;
+				    if (const bool expectedDisconnect = worldRuntime->disconnectOk();
+				        notifyDisconnect && !expectedDisconnect)
 				    {
-					    const QString disconnectedWorldName =
-					        attrs.value(QStringLiteral("name"), QStringLiteral("world"));
-					    const QString msg = QStringLiteral("The \"%1\" server has closed the connection")
-					                            .arg(disconnectedWorldName);
-					    m_commandProcessor->note(msg, true);
+					    if (!toOutput)
+					    {
+						    QMessageBox::information(this, QStringLiteral("QMud"),
+						                             QStringLiteral("The server has closed the connection."));
+					    }
+					    else if (m_commandProcessor)
+					    {
+						    const QString disconnectedWorldName =
+						        attrs.value(QStringLiteral("name"), QStringLiteral("world"));
+						    const QString msg = QStringLiteral("The \"%1\" server has closed the connection")
+						                            .arg(disconnectedWorldName);
+						    m_commandProcessor->note(msg, true);
+					    }
+					    else if (MainWindowHost *main = resolveMainWindowHost(window()))
+					    {
+						    const QString disconnectedWorldName =
+						        attrs.value(QStringLiteral("name"), QStringLiteral("world"));
+						    const QString msg = QStringLiteral("The \"%1\" server has closed the connection")
+						                            .arg(disconnectedWorldName);
+						    main->showStatusMessage(msg, 5000);
+					    }
 				    }
 				    else if (MainWindowHost *main = resolveMainWindowHost(window()))
 				    {
@@ -500,54 +562,42 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 					                            .arg(disconnectedWorldName);
 					    main->showStatusMessage(msg, 5000);
 				    }
-			    }
-			    else if (MainWindowHost *main = resolveMainWindowHost(window()))
-			    {
-				    const QString disconnectedWorldName =
-				        attrs.value(QStringLiteral("name"), QStringLiteral("world"));
-				    const QString msg = QStringLiteral("The \"%1\" server has closed the connection")
-				                            .arg(disconnectedWorldName);
-				    main->showStatusMessage(msg, 5000);
-			    }
-			    if (MainWindowHost *main = resolveMainWindowHost(window()))
-			    {
-				    main->setConnectedState(false);
-				    main->refreshTitleBar();
-			    }
-			    if (m_commandProcessor)
-				    m_commandProcessor->handleWorldDisconnected();
-		    });
-		connect(worldRuntime, &WorldRuntime::mxpDebugMessage, this,
-		        [this](const QString &title, const QString &message)
-		        {
-			        if (!m_mxpDebug)
+				    if (MainWindowHost *main = resolveMainWindowHost(window()))
+				    {
+					    main->setConnectedState(false);
+					    main->refreshTitleBar();
+				    }
+				    if (m_commandProcessor)
+					    m_commandProcessor->handleWorldDisconnected();
+			    });
+			connect(worldRuntime, &WorldRuntime::mxpDebugMessage, this,
+			        [this](const QString &title, const QString &message)
 			        {
-				        MainWindowHost *main = resolveMainWindowHost(window());
-				        if (!main)
-					        return;
-				        auto             debugWindow = std::make_unique<TextChildWindow>(title, QString());
-				        TextChildWindow *debugPtr    = debugWindow.get();
-				        debugPtr->setQuerySaveOnClose(false);
-				        debugPtr->editor()->setReadOnly(true);
-				        connect(debugPtr, &QObject::destroyed, this, [this] { m_mxpDebug = nullptr; });
-				        main->addMdiSubWindow(debugPtr, false);
-				        m_mxpDebug                                                   = debugPtr;
-				        [[maybe_unused]] TextChildWindow *const transferredOwnership = debugWindow.release();
-				        Q_ASSERT(transferredOwnership == debugPtr);
-			        }
-			        m_mxpDebug->setWindowTitle(title);
-			        m_mxpDebug->appendText(message);
-		        });
-		connect(m_view, &WorldView::hyperlinkActivated, m_commandProcessor,
-		        &WorldCommandProcessor::onHyperlinkActivated);
-		connect(worldRuntime, &WorldRuntime::miniWindowOutputActionActivated, m_commandProcessor,
-		        &WorldCommandProcessor::onMiniWindowOutputActionActivated);
-		connect(m_view, &WorldView::hyperlinkActivated, this,
-		        [this](const QString &)
-		        {
-			        if (MainWindowHost *main = resolveMainWindowHost(window()))
-				        main->clearHyperlinkStatusLock();
-		        });
+				        if (!m_mxpDebug)
+				        {
+					        MainWindowHost *main = resolveMainWindowHost(window());
+					        if (!main)
+						        return;
+					        auto debugWindow          = std::make_unique<TextChildWindow>(title, QString());
+					        TextChildWindow *debugPtr = debugWindow.get();
+					        debugPtr->setQuerySaveOnClose(false);
+					        debugPtr->editor()->setReadOnly(true);
+					        connect(debugPtr, &QObject::destroyed, this, [this] { m_mxpDebug = nullptr; });
+					        main->addMdiSubWindow(debugPtr, false);
+					        m_mxpDebug = debugPtr;
+					        [[maybe_unused]] TextChildWindow *const transferredOwnership =
+					            debugWindow.release();
+					        Q_ASSERT(transferredOwnership == debugPtr);
+				        }
+				        m_mxpDebug->setWindowTitle(title);
+				        m_mxpDebug->appendText(message);
+			        });
+		}
+		if (primary)
+		{
+			connect(worldRuntime, &WorldRuntime::miniWindowOutputActionActivated, m_commandProcessor,
+			        &WorldCommandProcessor::onMiniWindowOutputActionActivated);
+		}
 	}
 	tryInstallPendingPlugins();
 	if (primary)
@@ -626,9 +676,24 @@ WorldRuntime *WorldChildWindow::runtime() const
 	return m_runtime;
 }
 
+bool WorldChildWindow::isPrimaryRuntimeBinding() const
+{
+	return m_primaryRuntimeBinding;
+}
+
 WorldView *WorldChildWindow::view() const
 {
 	return m_view;
+}
+
+int WorldChildWindow::getInfoWindowShowCommand() const
+{
+	return m_infoWindowShowCommand;
+}
+
+void WorldChildWindow::setInfoWindowShowCommand(const int command)
+{
+	m_infoWindowShowCommand = command;
 }
 
 void WorldChildWindow::handleAutosaveTick()
@@ -672,6 +737,17 @@ void WorldChildWindow::closeEvent(QCloseEvent *event)
 {
 	AppController *app     = AppController::instance();
 	WorldRuntime  *runtime = m_runtime;
+
+	// Observer windows are disposable views. They never own, close, or replace the session.
+	if (!m_primaryRuntimeBinding)
+	{
+		QMdiSubWindow::closeEvent(event);
+		if (!event->isAccepted())
+			return;
+		bindRuntime(nullptr, RuntimeBindingRole::Observer);
+		return;
+	}
+
 	if (app && runtime && runtime->isConnected() &&
 	    app->getGlobalOption(QStringLiteral("ConfirmBeforeClosingWorld")).toInt() != 0)
 	{
@@ -752,7 +828,29 @@ void WorldChildWindow::closeEvent(QCloseEvent *event)
 		controller->saveWorldWindowPlacement(placementName, this);
 	}
 
+	QVector<QPointer<WorldChildWindow>> observers;
+	if (runtime)
+	{
+		if (const MainWindowHost *host = resolveMainWindowHost(window()))
+		{
+			for (const WorldWindowDescriptor &entry : host->worldWindowDescriptors())
+			{
+				if (entry.runtime == runtime && entry.window && entry.window != this &&
+				    !entry.window->isPrimaryRuntimeBinding())
+				{
+					observers.push_back(entry.window);
+				}
+			}
+		}
+	}
+
 	QMdiSubWindow::closeEvent(event);
+	if (!event->isAccepted())
+		return;
+
+	for (const QPointer<WorldChildWindow> &observer : std::as_const(observers))
+		if (observer)
+			observer->close();
 }
 
 bool WorldChildWindow::event(QEvent *event)
@@ -761,9 +859,19 @@ bool WorldChildWindow::event(QEvent *event)
 	{
 		if (event->type() == QEvent::WindowStateChange)
 		{
+			if (isMinimized())
+				m_infoWindowShowCommand = kWindowMinimize;
+			else if (isMaximized())
+				m_infoWindowShowCommand = kWindowShowMaximized;
+			else if (const auto *stateChange = dynamic_cast<QWindowStateChangeEvent *>(event);
+			         stateChange && (stateChange->oldState() & (Qt::WindowMinimized | Qt::WindowMaximized)))
+				m_infoWindowShowCommand = kWindowRestore;
+			else
+				m_infoWindowShowCommand = kWindowShowNormal;
 			if (m_view)
 				m_view->refreshMiniWindows(true);
-			runtime->notifyWorldOutputResized();
+			if (m_primaryRuntimeBinding)
+				runtime->notifyWorldOutputResized();
 		}
 	}
 	return QMdiSubWindow::event(event);
@@ -774,7 +882,7 @@ void WorldChildWindow::showEvent(QShowEvent *event)
 	QMdiSubWindow::showEvent(event);
 	if (m_view)
 		m_view->refreshMiniWindows(true);
-	if (WorldRuntime *runtime = m_runtime)
+	if (WorldRuntime *runtime = m_runtime; runtime && m_primaryRuntimeBinding)
 		runtime->notifyWorldOutputResized();
 	tryInstallPendingPlugins();
 }
@@ -784,7 +892,7 @@ void WorldChildWindow::resizeEvent(QResizeEvent *event)
 	QMdiSubWindow::resizeEvent(event);
 	if (m_view)
 		m_view->refreshMiniWindows(true);
-	if (WorldRuntime *runtime = m_runtime)
+	if (WorldRuntime *runtime = m_runtime; runtime && m_primaryRuntimeBinding)
 		runtime->notifyWorldOutputResized();
 	tryInstallPendingPlugins();
 }
@@ -792,7 +900,7 @@ void WorldChildWindow::resizeEvent(QResizeEvent *event)
 void WorldChildWindow::tryInstallPendingPlugins() const
 {
 	WorldRuntime *worldRuntime = m_runtime;
-	if (!worldRuntime || !m_view)
+	if (!m_primaryRuntimeBinding || !worldRuntime || !m_view)
 		return;
 	if (!isVisible() || !m_view->isVisible())
 		return;
@@ -955,7 +1063,7 @@ void TextChildWindow::setFilePath(const QString &path)
 		setWindowTitle(QFileInfo(path).fileName());
 }
 
-bool TextChildWindow::saveToFile(const QString &path, QString *error)
+bool TextChildWindow::saveToFile(const QString &path, QString *error, const bool adoptPath)
 {
 	if (!m_editor)
 	{
@@ -989,9 +1097,12 @@ bool TextChildWindow::saveToFile(const QString &path, QString *error)
 			*error = QStringLiteral("Unable to save the requested file.");
 		return false;
 	}
-	setFilePath(path);
-	if (m_editor->document())
-		m_editor->document()->setModified(false);
+	if (adoptPath)
+	{
+		setFilePath(path);
+		if (m_editor->document())
+			m_editor->document()->setModified(false);
+	}
 	return true;
 }
 

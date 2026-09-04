@@ -15,6 +15,8 @@
 #include "ShortcutPreferenceUtils.h"
 #include "WorldChildWindow.h"
 #include "WorldRuntime.h"
+#include "WorldView.h"
+#include "helpers/DialogSizingUtils.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -37,6 +39,8 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -61,6 +65,7 @@
 #include <QTableWidgetItem>
 #include <QTextEdit>
 #include <QThreadPool>
+#include <QWindow>
 
 #include <limits>
 
@@ -71,6 +76,40 @@
 #include <fcntl.h>
 #include <unistd.h>
 #endif
+
+namespace
+{
+	constexpr QSize kGlobalPreferencesBaselineMinimum(748, 600);
+
+	/**
+	 * @brief Combo box whose minimum size follows live font metrics.
+	 *
+	 * Qt invalidates QComboBox::sizeHint() when its font changes, but its cached
+	 * minimumSizeHint() can retain dimensions calculated for the previous font.
+	 */
+	class FontResponsiveComboBox final : public QComboBox
+	{
+		public:
+			using QComboBox::QComboBox;
+
+			[[nodiscard]] QSize minimumSizeHint() const override
+			{
+				return QComboBox::sizeHint();
+			}
+	};
+
+	/**
+	 * @brief Configures a path label to wrap without controlling dialog width.
+	 * @param label Label that displays a user-controlled path.
+	 */
+	void configureWrappingPathLabel(QLabel *label)
+	{
+		if (!label)
+			return;
+		label->setWordWrap(true);
+		label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+	}
+} // namespace
 
 GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(parent)
 {
@@ -177,6 +216,7 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 	m_tabs->addTab(buildPluginsPage(), QStringLiteral("Plugins"));
 	m_tabs->addTab(buildLuaPage(), QStringLiteral("Lua"));
 	m_tabs->addTab(buildUpdatesPage(), QStringLiteral("Updates"));
+	QWidget::setTabOrder(m_tabsStyle, m_splitViewDividerWidth);
 	rebuildExternalTabRows();
 	root->addWidget(m_tabs);
 
@@ -201,7 +241,7 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 	connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 	root->addWidget(buttons);
 
-	setFixedSize(748, 600);
+	resize(kGlobalPreferencesBaselineMinimum);
 
 	loadPreferences();
 
@@ -228,6 +268,220 @@ GlobalPreferencesDialog::GlobalPreferencesDialog(QWidget *parent) : QDialog(pare
 			        settings.endGroup();
 		        });
 	}
+	refreshDialogSizing();
+}
+
+GlobalPreferencesDialog::~GlobalPreferencesDialog()
+{
+	if (m_shortcutsTable)
+		QObject::disconnect(m_shortcutsTable, nullptr, this, nullptr);
+}
+
+bool GlobalPreferencesDialog::event(QEvent *event)
+{
+	if (!event)
+		return QDialog::event(event);
+
+	const bool  firstShow              = event->type() == QEvent::Show && !m_initialDialogSizingFinalized;
+	const bool  applicationFontChanged = event->type() == QEvent::ApplicationFontChange;
+	const QSize sizeBeforeShow         = firstShow ? size() : QSize();
+	if (applicationFontChanged && m_initialDialogSizingFinalized && !m_dialogSizingRefreshPending)
+		m_dialogSizeBeforeRefresh = size();
+	const bool handled = QDialog::event(event);
+	if (firstShow)
+	{
+		m_dialogSizeBeforeRefresh = sizeBeforeShow;
+		if (QWindow *const nativeWindow = windowHandle())
+		{
+			nativeWindow->installEventFilter(this);
+			if (nativeWindow->isExposed())
+				finalizeInitialDialogSizing();
+		}
+	}
+	if (applicationFontChanged && m_initialDialogSizingFinalized)
+		scheduleDialogSizingRefresh();
+	return handled;
+}
+
+bool GlobalPreferencesDialog::eventFilter(QObject *watched, QEvent *event)
+{
+	QWindow *const nativeWindow = windowHandle();
+	if (event && nativeWindow && watched == nativeWindow && event->type() == QEvent::Expose &&
+	    nativeWindow->isExposed())
+		finalizeInitialDialogSizing();
+	return QDialog::eventFilter(watched, event);
+}
+
+void GlobalPreferencesDialog::refreshDialogSizing()
+{
+	QLayout *const dialogLayout = layout();
+	if (!dialogLayout)
+		return;
+	const QLayout::SizeConstraint originalSizeConstraint = dialogLayout->sizeConstraint();
+	dialogLayout->setSizeConstraint(QLayout::SetNoConstraint);
+
+	if (m_tabs && m_tabRowOne && m_tabRowTwo)
+	{
+		m_tabRowOne->ensurePolished();
+		m_tabRowTwo->ensurePolished();
+		m_tabRowOne->setMinimumSize(0, 0);
+		m_tabRowTwo->setMinimumSize(0, 0);
+		const int currentPage = m_tabs->currentIndex();
+		QSize     rowOneMinimum;
+		QSize     rowTwoMinimum;
+		for (int index = 0; index < m_tabs->count(); ++index)
+		{
+			syncExternalTabSelection(index);
+			rowOneMinimum = rowOneMinimum.expandedTo(m_tabRowOne->sizeHint());
+			rowTwoMinimum = rowTwoMinimum.expandedTo(m_tabRowTwo->sizeHint());
+		}
+		syncExternalTabSelection(currentPage);
+		m_tabRowOne->setMinimumSize(rowOneMinimum);
+		m_tabRowTwo->setMinimumSize(rowTwoMinimum);
+	}
+	QSize pageMinimum;
+	auto  measurePages = [this](const int availableWidth)
+	{
+		QSize minimum;
+		if (!m_tabs)
+			return minimum;
+		for (int index = 0; index < m_tabs->count(); ++index)
+		{
+			QWidget *const page = m_tabs->widget(index);
+			if (!page || !page->layout())
+				continue;
+			page->ensurePolished();
+			page->layout()->invalidate();
+			page->layout()->activate();
+			QSize pageSize = page->layout()->sizeHint();
+			if (availableWidth > 0 && page->layout()->hasHeightForWidth())
+			{
+				const int heightForWidth = page->layout()->heightForWidth(availableWidth);
+				if (heightForWidth >= 0)
+					pageSize.setHeight(qMax(pageSize.height(), heightForWidth));
+			}
+			minimum = minimum.expandedTo(pageSize);
+		}
+		return minimum;
+	};
+	if (m_tabs)
+	{
+		m_tabs->setMinimumSize(0, 0);
+		pageMinimum          = measurePages(-1);
+		const int frameWidth = m_tabs->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, m_tabs);
+		pageMinimum          = pageMinimum.grownBy(QMargins(frameWidth, frameWidth, frameWidth, frameWidth));
+		m_tabs->setMinimumSize(pageMinimum);
+	}
+
+	dialogLayout->invalidate();
+	dialogLayout->activate();
+
+	const QSize maximumSize      = DialogSizingUtils::maximumClientSize(this);
+	QSize       unboundedMinimum = dialogLayout->minimumSize()
+	                                   .expandedTo(dialogLayout->sizeHint())
+	                                   .expandedTo(kGlobalPreferencesBaselineMinimum);
+	if (m_tabs)
+	{
+		const QSize sizeBeforeChange =
+		    m_dialogSizeBeforeRefresh.isValid() ? m_dialogSizeBeforeRefresh : size();
+		const int preliminaryWidth =
+		    qMin(maximumSize.width(), qMax(sizeBeforeChange.width(), unboundedMinimum.width()));
+		const QMargins dialogMargins = dialogLayout->contentsMargins();
+		const int frameWidth = m_tabs->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, nullptr, m_tabs);
+		const int availablePageOuterWidth =
+		    qMax(1, preliminaryWidth - dialogMargins.left() - dialogMargins.right());
+		const int availablePageWidth = qMax(1, availablePageOuterWidth - (frameWidth * 2));
+		QSize     widthAwareMinimum  = measurePages(availablePageWidth);
+		widthAwareMinimum =
+		    widthAwareMinimum.grownBy(QMargins(frameWidth, frameWidth, frameWidth, frameWidth));
+		pageMinimum = pageMinimum.expandedTo(widthAwareMinimum);
+		pageMinimum.setWidth(qMin(pageMinimum.width(), availablePageOuterWidth));
+		m_tabs->setMinimumSize(pageMinimum);
+		dialogLayout->invalidate();
+		dialogLayout->activate();
+		unboundedMinimum = dialogLayout->minimumSize()
+		                       .expandedTo(dialogLayout->sizeHint())
+		                       .expandedTo(kGlobalPreferencesBaselineMinimum);
+	}
+	const QSize sizeBeforeChange = m_dialogSizeBeforeRefresh.isValid() ? m_dialogSizeBeforeRefresh : size();
+	const int   targetWidth =
+	    qMin(maximumSize.width(), qMax(sizeBeforeChange.width(), unboundedMinimum.width()));
+	if (dialogLayout->hasHeightForWidth())
+	{
+		const int heightForWidth = dialogLayout->heightForWidth(targetWidth);
+		if (heightForWidth >= 0)
+			unboundedMinimum.setHeight(qMax(unboundedMinimum.height(), heightForWidth));
+	}
+	if (m_tabs)
+	{
+		const int maximumTabHeight = DialogSizingUtils::maximumCentralHeightForLayout(
+		    maximumSize.height(), dialogLayout->minimumSize().height(), m_tabs->minimumHeight());
+		if (m_tabs->minimumHeight() > maximumTabHeight)
+		{
+			m_tabs->setMinimumHeight(maximumTabHeight);
+			dialogLayout->invalidate();
+			dialogLayout->activate();
+		}
+	}
+	applyDialogContentSize(unboundedMinimum);
+	dialogLayout->setSizeConstraint(originalSizeConstraint);
+}
+
+void GlobalPreferencesDialog::applyDialogContentSize(const QSize contentMinimum)
+{
+	const QSize maximumSize = DialogSizingUtils::maximumClientSize(this);
+	if (m_tabs && layout())
+	{
+		const QMargins dialogMargins = layout()->contentsMargins();
+		const int      maximumTabWidth =
+		    qMax(1, maximumSize.width() - dialogMargins.left() - dialogMargins.right());
+		if (m_tabs->minimumWidth() > maximumTabWidth)
+			m_tabs->setMinimumWidth(maximumTabWidth);
+	}
+	const QSize requiredMinimum  = contentMinimum.boundedTo(maximumSize);
+	const QSize sizeBeforeChange = m_dialogSizeBeforeRefresh.isValid() ? m_dialogSizeBeforeRefresh : size();
+	const QSize desiredSize      = DialogSizingUtils::desiredClientSizeForContentChange(
+	    sizeBeforeChange, m_lastAppliedDialogSize, m_desiredDialogSize, m_lastDialogContentMinimum,
+	    contentMinimum);
+	const QSize targetSize     = desiredSize.boundedTo(maximumSize);
+	m_lastDialogContentMinimum = contentMinimum;
+	m_desiredDialogSize        = desiredSize;
+	m_dialogSizeBeforeRefresh  = {};
+	const QSize relaxedMinimum = minimumSize().boundedTo(requiredMinimum);
+	if (minimumSize() != relaxedMinimum)
+		setMinimumSize(relaxedMinimum);
+	if (isVisible())
+		DialogSizingUtils::applyAvailableGeometry(this, targetSize);
+	else
+		resize(targetSize);
+	m_lastAppliedDialogSize = size();
+	if (minimumSize() != requiredMinimum)
+		setMinimumSize(requiredMinimum);
+}
+
+void GlobalPreferencesDialog::scheduleDialogSizingRefresh()
+{
+	if (m_dialogSizingRefreshPending)
+		return;
+	m_dialogSizingRefreshPending = true;
+	QMetaObject::invokeMethod(
+	    this,
+	    [this]
+	    {
+		    m_dialogSizingRefreshPending = false;
+		    refreshDialogSizing();
+	    },
+	    Qt::QueuedConnection);
+}
+
+void GlobalPreferencesDialog::finalizeInitialDialogSizing()
+{
+	if (m_initialDialogSizingFinalized)
+		return;
+	m_initialDialogSizingFinalized = true;
+	if (QWindow *const nativeWindow = windowHandle())
+		nativeWindow->removeEventFilter(this);
+	scheduleDialogSizingRefresh();
 }
 
 namespace
@@ -245,6 +499,40 @@ namespace
 			}
 
 		protected:
+			/**
+			 * @brief Opens the current row's shortcut override editor when Enter is pressed.
+			 * @param event Key event delivered to the table.
+			 */
+			void keyPressEvent(QKeyEvent *event) override
+			{
+				if (event->key() != Qt::Key_Return && event->key() != Qt::Key_Enter)
+				{
+					QTableWidget::keyPressEvent(event);
+					return;
+				}
+
+				Qt::KeyboardModifiers modifiers = event->modifiers();
+				modifiers.setFlag(Qt::KeypadModifier, false);
+				if (modifiers != Qt::NoModifier)
+				{
+					QTableWidget::keyPressEvent(event);
+					return;
+				}
+
+				const int row = currentRow() >= 0 ? currentRow() : 0;
+				if (QTableWidgetItem *overrideItem = item(row, 3);
+				    overrideItem && overrideItem->flags().testFlag(Qt::ItemIsEditable))
+				{
+					setCurrentItem(overrideItem);
+					scrollToItem(overrideItem);
+					editItem(overrideItem);
+					event->accept();
+					return;
+				}
+
+				QTableWidget::keyPressEvent(event);
+			}
+
 			void focusInEvent(QFocusEvent *event) override
 			{
 				QTableWidget::focusInEvent(event);
@@ -310,8 +598,8 @@ namespace
 				int x = textRect.left();
 				for (qsizetype i = 0; i < nativeTexts.size(); ++i)
 				{
-					const QString nativeText   = nativeTexts.at(i);
-					const QString portableText = portableTexts.at(i);
+					const QString &nativeText   = nativeTexts.at(i);
+					const QString &portableText = portableTexts.at(i);
 					painter->setPen(disabled.contains(portableText) ? disabledColor : normalColor);
 					painter->drawText(QPoint(x, baseline), nativeText);
 					x += metrics.horizontalAdvance(nativeText);
@@ -577,12 +865,21 @@ namespace
 	{
 		if (!row)
 			return;
-		row->setProperty("activeRow", active);
+		const QVariant previousState  = row->property("activeRow");
+		const bool     stateUnchanged = previousState.isValid() && previousState.toBool() == active;
+		if (!stateUnchanged)
+			row->setProperty("activeRow", active);
+		if (stateUnchanged && !active)
+		{
+			row->update();
+			return;
+		}
 		if (QStyle *style = row->style(); style)
 		{
 			style->unpolish(row);
 			style->polish(row);
 		}
+		row->updateGeometry();
 		row->update();
 	}
 } // namespace
@@ -622,7 +919,7 @@ QWidget *GlobalPreferencesDialog::buildWorldsPage()
 	layout->addWidget(m_worldList);
 
 	m_worldSelected = new QLabel(QStringLiteral("Selected world"));
-	m_worldSelected->setWordWrap(true);
+	configureWrappingPathLabel(m_worldSelected);
 	layout->addWidget(m_worldSelected);
 
 	auto *buttons     = new QHBoxLayout;
@@ -645,6 +942,7 @@ QWidget *GlobalPreferencesDialog::buildWorldsPage()
 	layout->addLayout(bottomButtons);
 
 	m_worldDefaultDir = new QLabel(QStringLiteral("Default directory"));
+	configureWrappingPathLabel(m_worldDefaultDir);
 	layout->addWidget(m_worldDefaultDir);
 
 	QObject::connect(m_worldList, &QListWidget::currentTextChanged, page,
@@ -864,15 +1162,31 @@ QWidget *GlobalPreferencesDialog::buildGeneralPage()
 	leftBottom->addWidget(wordGroup);
 	leftBottom->addWidget(spellGroup);
 
-	auto *rightBottom = new QVBoxLayout;
-	rightBottom->addWidget(new QLabel(QStringLiteral("Window Tabs:")));
-	m_tabsStyle = new QComboBox;
+	auto *rightBottom              = new QVBoxLayout;
+	auto *windowPresentationLayout = new QGridLayout;
+	auto *windowTabsLabel          = new QLabel(QStringLiteral("Window Tabs:"));
+	windowPresentationLayout->addWidget(windowTabsLabel, 0, 0);
+	m_tabsStyle = new FontResponsiveComboBox;
 	m_tabsStyle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	m_tabsStyle->addItem(QStringLiteral("None"), 0);
 	m_tabsStyle->addItem(QStringLiteral("Top"), 1);
 	m_tabsStyle->addItem(QStringLiteral("Bottom"), 2);
 	registerCombo(QStringLiteral("WindowTabsStyle"), m_tabsStyle);
-	rightBottom->addWidget(m_tabsStyle);
+	windowTabsLabel->setBuddy(m_tabsStyle);
+	windowPresentationLayout->addWidget(m_tabsStyle, 1, 0);
+
+	auto *splitViewDividerLabel = new QLabel(QStringLiteral("Split-view divider:"));
+	windowPresentationLayout->addWidget(splitViewDividerLabel, 0, 1);
+	m_splitViewDividerWidth = new QSpinBox;
+	m_splitViewDividerWidth->setRange(WorldView::kMinimumSplitViewDividerWidth,
+	                                  WorldView::kMaximumSplitViewDividerWidth);
+	m_splitViewDividerWidth->setSuffix(QStringLiteral(" px"));
+	m_splitViewDividerWidth->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	registerSpin(QStringLiteral("SplitViewDividerWidth"), m_splitViewDividerWidth);
+	splitViewDividerLabel->setBuddy(m_splitViewDividerWidth);
+	windowPresentationLayout->addWidget(m_splitViewDividerWidth, 1, 1);
+	windowPresentationLayout->setColumnStretch(2, 1);
+	rightBottom->addLayout(windowPresentationLayout);
 	rightBottom->addSpacing(6);
 	auto *localeRow = new QHBoxLayout;
 	localeRow->addWidget(new QLabel(QStringLiteral("Locale:")));
@@ -1122,7 +1436,8 @@ QWidget *GlobalPreferencesDialog::buildLoggingPage()
 	auto *compressLogsButton = new QPushButton(QStringLiteral("Compress all uncompressed logs"));
 	compressLogsButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	m_logDefaultDirLabel = new QLabel(QStringLiteral("Default Directory"));
-	auto *dirRow         = new QHBoxLayout;
+	configureWrappingPathLabel(m_logDefaultDirLabel);
+	auto *dirRow = new QHBoxLayout;
 	dirRow->addWidget(defaultDirButton);
 	dirRow->addWidget(compressLogsButton);
 	dirRow->addStretch();
@@ -1341,7 +1656,7 @@ QWidget *GlobalPreferencesDialog::buildActivityPage()
 
 	auto *styleRow = new QHBoxLayout;
 	styleRow->addWidget(new QLabel(QStringLiteral("Activity button bar style:")));
-	m_activityBarStyle = new QComboBox;
+	m_activityBarStyle = new FontResponsiveComboBox;
 	m_activityBarStyle->addItem(QStringLiteral("Default"), 0);
 	m_activityBarStyle->addItem(QStringLiteral("Style 1"), 1);
 	m_activityBarStyle->addItem(QStringLiteral("Style 2"), 2);
@@ -1592,7 +1907,7 @@ QWidget *GlobalPreferencesDialog::buildTrayPage()
 
 	auto *topRow = new QHBoxLayout;
 	topRow->addWidget(new QLabel(QStringLiteral("Show QMud in:")));
-	m_iconPlacement = new QComboBox;
+	m_iconPlacement = new FontResponsiveComboBox;
 	m_iconPlacement->addItem(QStringLiteral("Taskbar"), 0);
 	m_iconPlacement->addItem(QStringLiteral("Tray"), 1);
 	m_iconPlacement->addItem(QStringLiteral("Both"), 2);
@@ -1643,6 +1958,7 @@ QWidget *GlobalPreferencesDialog::buildTrayPage()
 	layout->addLayout(customRow);
 
 	m_customIconLabel = new QLabel(QStringLiteral("File name"));
+	configureWrappingPathLabel(m_customIconLabel);
 	layout->addWidget(m_customIconLabel);
 	layout->addStretch();
 
@@ -1685,7 +2001,7 @@ QWidget *GlobalPreferencesDialog::buildPluginsPage()
 	layout->addWidget(m_pluginsList);
 
 	m_pluginsSelected = new QLabel(QStringLiteral("Selected plugin"));
-	m_pluginsSelected->setWordWrap(true);
+	configureWrappingPathLabel(m_pluginsSelected);
 	layout->addWidget(m_pluginsSelected);
 
 	auto *buttons      = new QHBoxLayout;
@@ -1706,6 +2022,7 @@ QWidget *GlobalPreferencesDialog::buildPluginsPage()
 	layout->addLayout(bottom);
 
 	m_pluginsDefaultDir = new QLabel(QStringLiteral("Default plugins directory"));
+	configureWrappingPathLabel(m_pluginsDefaultDir);
 	layout->addWidget(m_pluginsDefaultDir);
 
 	QObject::connect(m_pluginsList, &QListWidget::currentTextChanged, page,

@@ -42,7 +42,7 @@ QVector<int> qmudCollectBroadcastRecipientIndices(const PluginContainer &plugins
 		if (hasCaller)
 		{
 			const QString pluginId = idAt(pluginIndex);
-			if (pluginId.compare(callingPluginId, Qt::CaseInsensitive) == 0)
+			if (pluginId == callingPluginId)
 				continue;
 		}
 		recipients.push_back(pluginIndex);

@@ -15,6 +15,7 @@
 #include <QMap>
 #include <QObject>
 #include <QString>
+#include <optional>
 
 /**
  * @brief Parsed world-file document model and XML load/save entry point.
@@ -205,6 +206,8 @@ class WorldDocument : public QObject
 				QMap<QString, QString> attributes;
 				QString                description;
 				QString                script;
+				/** Effective dispatch-sequence override supplied by the containing world. */
+				std::optional<int>     dispatchSequenceOverride;
 				QList<Trigger>         triggers;
 				QList<Alias>           aliases;
 				QList<Timer>           timers;
@@ -348,44 +351,44 @@ class WorldDocument : public QObject
 		 * @param isIncludeContext Whether currently processing include context.
 		 * @return `true` when pass succeeds.
 		 */
-		bool           expandIncludesPass(const QString &worldFilePath, const QString &pluginsDir,
-		                                  const QString &programDir, const QString &stateDir, bool wantPlugins,
-		                                  const QString &currentPluginDir, bool isIncludeContext);
+		bool          expandIncludesPass(const QString &worldFilePath, const QString &pluginsDir,
+		                                 const QString &programDir, const QString &stateDir, bool wantPlugins,
+		                                 const QString &currentPluginDir, bool isIncludeContext);
 		/**
 		 * @brief Merges variable list from another document.
 		 * @param other Source document.
 		 * @param overwrite Overwrite existing variables when `true`.
 		 */
-		void           mergeVariablesFrom(const WorldDocument &other, bool overwrite);
+		void          mergeVariablesFrom(const WorldDocument &other, bool overwrite);
 		/**
 		 * @brief Merges another document into this one.
 		 * @param other Source document.
 		 * @param fromInclude Merge as include context when `true`.
 		 * @return `true` when merge succeeds.
 		 */
-		bool           mergeFrom(const WorldDocument &other, bool fromInclude);
+		bool          mergeFrom(const WorldDocument &other, bool fromInclude);
 		/**
 		 * @brief Finalizes plugin payloads after load/merge.
 		 */
-		void           finalizePluginContents();
+		void          finalizePluginContents();
 		/**
 		 * @brief Merges plugin-scoped variables.
 		 * @param plugin Target plugin record.
 		 * @param vars Variables to merge.
 		 * @param overwrite Overwrite existing variables when `true`.
 		 */
-		static void    mergePluginVariablesFrom(Plugin &plugin, const QList<Variable> &vars, bool overwrite);
+		static void   mergePluginVariablesFrom(Plugin &plugin, const QList<Variable> &vars, bool overwrite);
 
-		QString        m_errorString;
-		bool           m_loadedFromInclude{false};
-		bool           m_pluginFile{false};
-		bool           m_pluginContentFinalized{false};
-		unsigned long  m_loadMask{kDefaultLoadMask};
-		unsigned int   m_includeMergeFlags{0};
-		QStringList    m_warnings;
-		int            m_worldFileVersion{0};
-			QString        m_qmudVersion;
-		QDateTime      m_dateSaved;
+		QString       m_errorString;
+		bool          m_loadedFromInclude{false};
+		bool          m_pluginFile{false};
+		bool          m_pluginContentFinalized{false};
+		unsigned long m_loadMask{kDefaultLoadMask};
+		unsigned int  m_includeMergeFlags{0};
+		QStringList   m_warnings;
+		int           m_worldFileVersion{0};
+		QString       m_qmudVersion;
+		QDateTime     m_dateSaved;
 		QMap<QString, QString> m_worldAttributes;
 		QMap<QString, QString> m_worldMultilineAttributes;
 		QList<Trigger>         m_triggers;

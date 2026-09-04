@@ -31,6 +31,8 @@ struct QMudStyledTextState
 		bool    inverse{false};
 		QString fore;
 		QString back;
+		int     foregroundAnsiIndex{-1};
+		bool    foregroundAnsiBright{false};
 		int     actionType{0};
 		QString action;
 		QString hint;
@@ -58,8 +60,11 @@ struct QMudAnsiStreamState
 			Normal,
 			Escape,
 			Csi,
+			DiscardCsi,
 			Osc,
-			OscEsc
+			OscEsc,
+			DiscardOsc,
+			DiscardOscEsc
 		};
 
 		Mode       mode{Mode::Normal};

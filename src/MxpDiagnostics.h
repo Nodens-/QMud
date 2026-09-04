@@ -73,10 +73,9 @@ enum
 	wrnMXP_TagClosedAtReset,
 	wrnMXP_UnusedArgument,
 	wrnMXP_NotStartingPueblo,
-	wrnMXP_TagStackLimitExceeded  = 5017,
-	wrnMXP_TextBufferLimitExceeded = 5018,
+	wrnMXP_TagStackLimitExceeded         = 5017,
+	wrnMXP_TextBufferLimitExceeded       = 5018,
 	wrnMXP_CustomDefinitionLimitExceeded = 5019,
-	wrnMXP_EventQueueLimitExceeded       = 5020,
 	wrnMXP_AttlistLimitExceeded          = 5021,
 
 	infoMXP_VersionSent               = 10000,

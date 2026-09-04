@@ -13,10 +13,43 @@
 #include <QScopeGuard>
 #include <QString>
 #include <functional>
+#include <memory>
 
 class QObject;
 class QThread;
 struct lua_State;
+
+/**
+ * @brief Lifetime-safe endpoint for posting work to a captured Lua bridge thread.
+ */
+class LuaBridgeAsyncTarget final
+{
+	public:
+		/**
+		 * @brief Creates an invalid endpoint.
+		 */
+		LuaBridgeAsyncTarget() = default;
+
+		/**
+		 * @brief Reports whether the captured bridge context is still available.
+		 * @return `true` when work can be posted through this endpoint.
+		 */
+		[[nodiscard]] bool isValid() const
+		{
+			return static_cast<bool>(m_context);
+		}
+
+	private:
+		explicit LuaBridgeAsyncTarget(std::shared_ptr<void> context) : m_context(std::move(context))
+		{
+		}
+
+		std::shared_ptr<void>       m_context;
+
+		friend LuaBridgeAsyncTarget qmudLuaBridgeCaptureAsyncTarget(QThread *thread);
+		friend bool qmudLuaBridgePost(const LuaBridgeAsyncTarget &target, std::function<void()> fn,
+		                              std::function<void()> canceled, quintptr asynchronousPumpKey);
+};
 
 /**
  * @brief Last status classification for Lua bridge invocation on the current thread.
@@ -115,7 +148,29 @@ void qmudCompleteLuaWorkerCallbackDispatch(bool &workerInFlight, ConsumeResult &
  * @param target Target QObject.
  * @return `true` when target thread bridge endpoint is ready to accept bridge calls.
  */
-bool    qmudLuaBridgeEnsureObjectThreadReady(const QObject *target);
+bool                               qmudLuaBridgeEnsureObjectThreadReady(const QObject *target);
+/**
+ * @brief Captures the stable Lua bridge endpoint for a thread.
+ * @param thread Thread whose endpoint will receive later asynchronous work.
+ * @return Opaque endpoint handle, or an invalid handle for a null thread.
+ */
+[[nodiscard]] LuaBridgeAsyncTarget qmudLuaBridgeCaptureAsyncTarget(QThread *thread);
+/**
+ * @brief Posts work through a captured thread bridge endpoint.
+ * @param target Previously captured endpoint.
+ * @param fn Work to execute on the endpoint thread.
+ * @param canceled Called exactly once instead when the endpoint cannot execute the work.
+ * @param asynchronousPumpKey Optional stable target identity used for targeted cooperative pumping.
+ * @return `true` when the request was queued; otherwise `false` after calling `canceled`.
+ */
+bool    qmudLuaBridgePost(const LuaBridgeAsyncTarget &target, std::function<void()> fn,
+                          std::function<void()> canceled, quintptr asynchronousPumpKey = 0);
+/**
+ * @brief Pumps one asynchronous bridge post associated with a specific logical target.
+ * @param asynchronousPumpKey Stable target identity supplied when the post was queued.
+ * @return `true` when one matching request was executed.
+ */
+bool    qmudLuaBridgePumpCurrentThreadAsyncOnce(quintptr asynchronousPumpKey);
 /**
  * @brief Pumps one pending bridge request on the current thread, if any.
  * @return `true` when one request was executed; otherwise `false`.

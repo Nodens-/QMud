@@ -133,6 +133,11 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		[[nodiscard]] WorldChildWindow *activeWorldChildWindow() const override;
 		/**
+		 * @brief Returns the currently focused world presentation, including a passive observer.
+		 * @return Focused world MDI child, or `nullptr` when another presentation is active.
+		 */
+		[[nodiscard]] WorldChildWindow *activeWorldPresentationWindow() const;
+		/**
 		 * @brief Returns active text child window.
 		 * @return Active text child window, or `nullptr`.
 		 */
@@ -161,9 +166,26 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		void                            showStatusMessage(const QString &message, int timeoutMs) override;
 		/**
+		 * @brief Acquires exclusive ownership of the displayed status message.
+		 * @param message Status text to display while the override is active.
+		 * @return Token required to update or release the override.
+		 */
+		[[nodiscard]] quint64           acquireStatusMessageOverride(const QString &message);
+		/**
+		 * @brief Updates an active status-message override.
+		 * @param token Token returned by acquireStatusMessageOverride().
+		 * @param message Replacement status text.
+		 */
+		void updateStatusMessageOverride(quint64 token, const QString &message) const;
+		/**
+		 * @brief Releases an active status-message override.
+		 * @param token Token returned by acquireStatusMessageOverride().
+		 */
+		void releaseStatusMessageOverride(quint64 token);
+		/**
 		 * @brief Shows status message with no timeout.
 		 */
-		void                            showStatusMessage(const QString &message)
+		void showStatusMessage(const QString &message)
 		{
 			showStatusMessage(message, 0);
 		}
@@ -256,6 +278,11 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @param style Window-tab style flags.
 		 */
 		void               setWindowTabsStyle(int style);
+		/**
+		 * @brief Reports whether the MDI area is currently enforcing maximized tab presentation.
+		 * @return `true` when the tabbed presentation is active.
+		 */
+		[[nodiscard]] bool isTabbedWindowPresentationActive() const;
 		/**
 		 * @brief Sets style for activity toolbar.
 		 * @param style Activity-toolbar style value.
@@ -478,6 +505,11 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		void                                         activateWorldSlot(int slot) override;
 		/**
+		 * @brief Activates a specific world presentation.
+		 * @param window World presentation to activate.
+		 */
+		void                                         activateWorldWindow(WorldChildWindow *window) override;
+		/**
 		 * @brief Returns last remembered normal geometry.
 		 * @return Last non-maximized geometry rectangle.
 		 */
@@ -487,6 +519,11 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @return Descriptor list for open world windows.
 		 */
 		[[nodiscard]] QVector<WorldWindowDescriptor> worldWindowDescriptors() const override;
+		/**
+		 * @brief Returns one primary presentation descriptor per runtime.
+		 * @return Ordered unique runtime descriptors.
+		 */
+		[[nodiscard]] QVector<WorldWindowDescriptor> worldRuntimeDescriptors() const override;
 		/**
 		 * @brief Returns open notepad child windows in MDI creation order.
 		 * @return Ordered notepad child window pointers.
@@ -629,6 +666,8 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		QTimer                             *m_statusMessageTimer{nullptr};
 		mutable bool                        m_statusTipOwnsMessage{false};
 		bool                                m_hyperlinkStatusLocked{false};
+		quint64                             m_statusMessageOverrideToken{0};
+		quint64                             m_nextStatusMessageOverrideToken{0};
 		QTimer                             *m_activityTimer{nullptr};
 		QTimer                             *m_tickTimer{nullptr};
 		QElapsedTimer                       m_timerFallbackClock;
@@ -639,6 +678,8 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		int                                 m_activityRefreshType{0};
 		int                                 m_activityRefreshInterval{15};
 		bool                                m_disableKeyboardMenuActivation{false};
+		mutable bool                        m_mdiPresentationTransitionActive{false};
+		bool                                m_mdiPresentationReconciliationQueued{false};
 		bool                                m_deferredUiRefreshQueued{false};
 		bool                                m_deferredUiRefreshStatus{false};
 		bool                                m_deferredUiRefreshTabs{false};
@@ -754,6 +795,25 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 * @return Active or fallback MDI subwindow, or `nullptr`.
 		 */
 		[[nodiscard]] QMdiSubWindow *currentOrLastActiveSubWindow() const;
+		/**
+		 * @brief Atomically enters maximized tab presentation or restores all maximized MDI children.
+		 * @param active Whether every MDI child must be maximized and presented as a tab.
+		 */
+		void                         setTabbedWindowPresentationActive(bool active);
+		/**
+		 * @brief Activates an MDI child while withholding intermediate maximized-state repaints.
+		 * @param subWindow Child window to activate.
+		 */
+		void                         activateMdiSubWindow(QMdiSubWindow *subWindow) const;
+		/**
+		 * @brief Establishes the maximized-state invariant for every MDI child.
+		 * @param preferredActiveWindow Active child to maximize before inactive children.
+		 */
+		void                         maximizeMdiSubWindows(QMdiSubWindow *preferredActiveWindow) const;
+		/**
+		 * @brief Reconciles presentation after Qt finishes the current MDI child state-change transaction.
+		 */
+		void                         queueMdiPresentationReconciliation();
 		/**
 		 * @brief Builds menu bar and command actions.
 		 */

@@ -84,7 +84,6 @@ static constexpr unsigned char TTYPE_SEND               = 1;
 static constexpr unsigned char START_TLS_FOLLOWS        = 1;
 static constexpr int           MCCP_INFLATE_CHUNK_SIZE  = 8192;
 static constexpr int           kMaxMxpPendingBytes      = 8192;
-static constexpr int           kMaxMxpEventsPending     = 4096;
 static constexpr int           kMaxMxpCustomDefinitions = 1024;
 static constexpr int           kMaxMxpAttlistBytes      = 16384;
 
@@ -162,7 +161,7 @@ namespace
 	{
 		static const QHash<QByteArray, QByteArray> kMap = []
 		{
-			static const LegacyEntityPair kPairs[] = {
+			static constexpr LegacyEntityPair kPairs[] = {
 			    {"lt",     "<"     },
                 {"micro",  "&#181;"},
                 {"Icirc",  "&#206;"},
@@ -527,12 +526,11 @@ void TelnetProcessor::resetConnectionState()
 	m_mxpEvents.clear();
 	m_mxpModeChanges.clear();
 	m_telnetPluginEvents.clear();
-	m_mxpEventsOverflowed = false;
-	m_mxpEventSequence    = 0;
-	m_mxpEnabled          = false;
-	m_puebloActive        = false;
-	m_mxpDefaultMode      = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
-	m_mxpMode             = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
+	m_mxpEventSequence = 0;
+	m_mxpEnabled       = false;
+	m_puebloActive     = false;
+	m_mxpDefaultMode   = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
+	m_mxpMode          = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 	m_customElements.clear();
 	m_customEntities.clear();
 	m_nawsWanted          = false;
@@ -872,7 +870,6 @@ QList<TelnetProcessor::MxpEvent> TelnetProcessor::takeMxpEvents()
 {
 	QList<MxpEvent> events = m_mxpEvents;
 	m_mxpEvents.clear();
-	m_mxpEventsOverflowed = false;
 	return events;
 }
 
@@ -1072,8 +1069,7 @@ void TelnetProcessor::setMxpSessionState(const MxpSessionState &state)
 		m_mxpString.clear();
 		m_mxpModeChanges.clear();
 		m_mxpEvents.clear();
-		m_mxpEventsOverflowed = false;
-		m_mxpEventSequence    = 0;
+		m_mxpEventSequence = 0;
 		return;
 	}
 
@@ -1108,8 +1104,7 @@ void TelnetProcessor::setMxpSessionState(const MxpSessionState &state)
 	m_mxpString.clear();
 	m_mxpModeChanges.clear();
 	m_mxpEvents.clear();
-	m_mxpEventsOverflowed = false;
-	m_mxpEventSequence    = 0;
+	m_mxpEventSequence = 0;
 }
 
 bool TelnetProcessor::isMxpSecure() const
@@ -2509,26 +2504,6 @@ void TelnetProcessor::mxpCollectedElement()
 		return;
 	}
 
-	auto appendMxpEvent = [this](const MxpEvent &event)
-	{
-		if (m_mxpEvents.size() >= kMaxMxpEventsPending)
-		{
-			if (!m_mxpEventsOverflowed)
-			{
-				m_mxpEventsOverflowed = true;
-				emitMxpDiagnosticLazy(DBG_WARNING, wrnMXP_EventQueueLimitExceeded,
-				                      []
-				                      {
-					                      return QStringLiteral("MXP event queue exceeded %1 entries; "
-					                                            "dropping further MXP events until drained.")
-					                          .arg(kMaxMxpEventsPending);
-				                      });
-			}
-			return;
-		}
-		m_mxpEvents.append(event);
-	};
-
 	// test first character, that will tell us
 	switch (c)
 	{
@@ -2542,7 +2517,7 @@ void TelnetProcessor::mxpCollectedElement()
 			ev.offset   = m_outputSize;
 			ev.sequence = m_mxpEventSequence++;
 			ev.secure   = mxpSecure();
-			appendMxpEvent(ev);
+			m_mxpEvents.append(ev);
 		}
 		break;
 	case '/': // end of tag
@@ -2559,7 +2534,7 @@ void TelnetProcessor::mxpCollectedElement()
 			ev.offset     = m_outputSize;
 			ev.sequence   = m_mxpEventSequence++;
 			ev.secure     = mxpSecure();
-			appendMxpEvent(ev);
+			m_mxpEvents.append(ev);
 		}
 		break;
 	default: // start of tag
@@ -2576,7 +2551,7 @@ void TelnetProcessor::mxpCollectedElement()
 			ev.offset     = m_outputSize;
 			ev.sequence   = m_mxpEventSequence++;
 			ev.secure     = mxpSecure();
-			appendMxpEvent(ev);
+			m_mxpEvents.append(ev);
 		}
 		break;
 	} // end of switch

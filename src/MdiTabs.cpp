@@ -149,7 +149,8 @@ void MdiTabs::updateTabs()
 	else if (count() > 0)
 		setCurrentIndex(0);
 
-	const bool showTabs = count() >= m_minVisibleViews;
+	const bool showTabs =
+	    m_mdiArea->testOption(QMdiArea::DontMaximizeSubWindowOnActivation) && count() >= m_minVisibleViews;
 	if (!showTabs && isVisible())
 		setVisible(false);
 	else if (showTabs && !isVisible())
@@ -182,7 +183,18 @@ void MdiTabs::onCurrentChanged(int index)
 		return;
 
 	if (QMdiSubWindow *sub = m_orderedWindows[index])
-		m_mdiArea->setActiveSubWindow(sub);
+		emit windowActivationRequested(sub);
+}
+
+void MdiTabs::activateTabWindow(const int index, QMdiSubWindow *const subWindow)
+{
+	if (!subWindow)
+		return;
+
+	const bool currentChanged = currentIndex() != index;
+	setCurrentIndex(index);
+	if (!currentChanged)
+		emit windowActivationRequested(subWindow);
 }
 
 void MdiTabs::onTabMoved(int from, int to)
@@ -228,20 +240,17 @@ void MdiTabs::contextMenuEvent(QContextMenuEvent *event)
 		return;
 	if (chosen == actRestore)
 	{
-		setCurrentIndex(index);
-		m_mdiArea->setActiveSubWindow(sub);
+		activateTabWindow(index, sub);
 		sub->showNormal();
 	}
 	else if (chosen == actMin)
 	{
-		setCurrentIndex(index);
-		m_mdiArea->setActiveSubWindow(sub);
+		activateTabWindow(index, sub);
 		sub->showMinimized();
 	}
 	else if (chosen == actMax)
 	{
-		setCurrentIndex(index);
-		m_mdiArea->setActiveSubWindow(sub);
+		activateTabWindow(index, sub);
 		sub->showMaximized();
 	}
 	else if (chosen == actClose)
@@ -264,7 +273,7 @@ void MdiTabs::mouseDoubleClickEvent(QMouseEvent *event)
 		return;
 
 	if (QMdiSubWindow *sub = m_orderedWindows[index])
-		sub->showMaximized();
+		activateTabWindow(index, sub);
 }
 
 void MdiTabs::mouseReleaseEvent(QMouseEvent *event)

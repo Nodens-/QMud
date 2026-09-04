@@ -9,6 +9,8 @@
 #ifndef QMUD_NATIVEPLUGINREGISTRY_H
 #define QMUD_NATIVEPLUGINREGISTRY_H
 
+#include "WorldOptions.h"
+
 #include <QDateTime>
 #include <QList>
 #include <QString>
@@ -40,7 +42,7 @@ namespace QMudNativePluginRegistry
 			QString   directory;
 			double    version{0.0};
 			double    requiredVersion{0.0};
-			int       sequence{5000};
+			int       sequence{QMudPluginSequence::kDefault};
 			QDateTime dateWritten;
 			QDateTime dateModified;
 	};

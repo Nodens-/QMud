@@ -45,11 +45,48 @@ class GlobalPreferencesDialog : public QDialog
 		 */
 		explicit GlobalPreferencesDialog(QWidget *parent = nullptr);
 		/**
+		 * @brief Disconnects table callbacks before child-editor teardown can commit data.
+		 */
+		~GlobalPreferencesDialog() override;
+		/**
 		 * @brief Validates and applies global settings changes.
 		 */
 		void accept() override;
 
+	protected:
+		/**
+		 * @brief Schedules sizing after first display or an application-font change.
+		 * @param event Event being delivered to the dialog.
+		 * @return Result returned by the base dialog event handler.
+		 */
+		bool event(QEvent *event) override;
+		/**
+		 * @brief Finalizes first-display sizing when the native window becomes exposed.
+		 * @param watched Object receiving the event.
+		 * @param event Event delivered to the watched object.
+		 * @return Base event-filter result.
+		 */
+		bool eventFilter(QObject *watched, QEvent *event) override;
+
 	private:
+		/**
+		 * @brief Recalculates the font- and style-aware minimum dialog size.
+		 */
+		void                               refreshDialogSizing();
+		/**
+		 * @brief Applies one content-driven resize while preserving user-added space.
+		 * @param contentMinimum Global content requirement across all pages.
+		 */
+		void                               applyDialogContentSize(QSize contentMinimum);
+		/**
+		 * @brief Queues one sizing refresh after pending native and font metrics settle.
+		 */
+		void                               scheduleDialogSizingRefresh();
+		/**
+		 * @brief Queues the one-time native-frame-aware sizing pass after first exposure.
+		 */
+		void                               finalizeInitialDialogSizing();
+
 		QTabWidget                        *m_tabs{nullptr};
 		QTabBar                           *m_tabRowOne{nullptr};
 		QTabBar                           *m_tabRowTwo{nullptr};
@@ -125,6 +162,7 @@ class GlobalPreferencesDialog : public QDialog
 		QCheckBox                         *m_parenDoubleEscape{nullptr};
 
 		QComboBox                         *m_tabsStyle{nullptr};
+		QSpinBox                          *m_splitViewDividerWidth{nullptr};
 		QLineEdit                         *m_localeEdit{nullptr};
 
 		QComboBox                         *m_iconPlacement{nullptr};
@@ -142,6 +180,12 @@ class GlobalPreferencesDialog : public QDialog
 		QCheckBox                         *m_enableReloadFeatureCheck{nullptr};
 		QSpinBox                          *m_reloadMccpTimeoutSpin{nullptr};
 		bool                               m_updateMechanismAvailable{true};
+		bool                               m_dialogSizingRefreshPending{false};
+		bool                               m_initialDialogSizingFinalized{false};
+		QSize                              m_dialogSizeBeforeRefresh;
+		QSize                              m_lastDialogContentMinimum;
+		QSize                              m_desiredDialogSize;
+		QSize                              m_lastAppliedDialogSize;
 
 		/**
 		 * @brief Builds world lists/settings page.

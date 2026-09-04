@@ -172,10 +172,24 @@ class MainWindowHost
 		 */
 		virtual void activateWorldSlot(int slot) = 0;
 		/**
+		 * @brief Activates a specific world presentation.
+		 * @param window World presentation to activate.
+		 */
+		virtual void activateWorldWindow(WorldChildWindow *window) = 0;
+		/**
 		 * @brief Returns descriptors for open world windows in display order.
 		 * @return Ordered world window descriptors.
 		 */
 		[[nodiscard]] virtual QVector<WorldWindowDescriptor> worldWindowDescriptors() const = 0;
+		/**
+		 * @brief Returns one canonical descriptor per open world runtime.
+		 *
+		 * The primary presentation is selected as the representative window. Runtime-global
+		 * work must use this list rather than iterating every presentation.
+		 *
+		 * @return Ordered unique world runtime descriptors.
+		 */
+		[[nodiscard]] virtual QVector<WorldWindowDescriptor> worldRuntimeDescriptors() const = 0;
 };
 
 #endif // QMUD_MAINWINDOWHOST_H

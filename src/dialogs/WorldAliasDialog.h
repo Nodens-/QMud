@@ -32,12 +32,11 @@ class WorldAliasDialog : public QDialog
 		 * @brief Creates alias editor initialized from existing alias data.
 		 * @param runtime Runtime context.
 		 * @param alias Alias value to edit.
-		 * @param aliases Existing alias list for validation.
-		 * @param currentIndex Index of alias being edited, or `-1` for new alias.
+		 * @param isNew Whether a new alias is being created.
 		 * @param parent Optional Qt parent widget.
 		 */
-		WorldAliasDialog(WorldRuntime *runtime, WorldRuntime::Alias alias, QList<WorldRuntime::Alias> aliases,
-		                 int currentIndex, QWidget *parent = nullptr);
+		WorldAliasDialog(WorldRuntime *runtime, WorldRuntime::Alias alias, bool isNew,
+		                 QWidget *parent = nullptr);
 
 		/**
 		 * @brief Returns edited alias value.
@@ -45,11 +44,10 @@ class WorldAliasDialog : public QDialog
 		 */
 		[[nodiscard]] WorldRuntime::Alias alias() const;
 
-	protected:
 		/**
 		 * @brief Validates fields and commits edited alias.
 		 */
-		void accept() override;
+		void                              accept() override;
 
 	private slots:
 		/**
@@ -82,63 +80,61 @@ class WorldAliasDialog : public QDialog
 		/**
 		 * @brief Builds dialog controls.
 		 */
-		void                       buildUi();
+		void                buildUi();
 		/**
 		 * @brief Loads alias values into controls.
 		 */
-		void                       loadAlias() const;
+		void                loadAlias() const;
 		/**
 		 * @brief Performs semantic alias validation.
 		 * @return `true` when alias settings are valid.
 		 */
-		bool                       validateAlias();
+		bool                validateAlias();
 		/**
 		 * @brief Reports whether alias comes from included source.
 		 * @return `true` when alias is from an included file.
 		 */
-		[[nodiscard]] bool         isIncluded() const;
+		[[nodiscard]] bool  isIncluded() const;
 		/**
 		 * @brief Returns selected send-target enum value.
 		 * @return Selected send-target enum value.
 		 */
-		[[nodiscard]] int          sendToValue() const;
+		[[nodiscard]] int   sendToValue() const;
 
-		WorldRuntime              *m_runtime{nullptr};
-		WorldRuntime::Alias        m_alias;
-		QList<WorldRuntime::Alias> m_existing;
-		int                        m_currentIndex{-1};
+		WorldRuntime       *m_runtime{nullptr};
+		WorldRuntime::Alias m_alias;
 
-		QLineEdit                 *m_match{nullptr};
-		QLineEdit                 *m_label{nullptr};
-		QLineEdit                 *m_script{nullptr};
-		QLineEdit                 *m_group{nullptr};
-		QLineEdit                 *m_variable{nullptr};
-		QSpinBox                  *m_sequence{nullptr};
-		QComboBox                 *m_sendTo{nullptr};
-		QPlainTextEdit            *m_send{nullptr};
+		QLineEdit          *m_match{nullptr};
+		QLineEdit          *m_label{nullptr};
+		QLineEdit          *m_script{nullptr};
+		QLineEdit          *m_group{nullptr};
+		QLineEdit          *m_variable{nullptr};
+		QSpinBox           *m_sequence{nullptr};
+		QComboBox          *m_sendTo{nullptr};
+		QPlainTextEdit     *m_send{nullptr};
 
-		QCheckBox                 *m_enabled{nullptr};
-		QCheckBox                 *m_omitFromLog{nullptr};
-		QCheckBox                 *m_ignoreCase{nullptr};
-		QCheckBox                 *m_regexp{nullptr};
-		QCheckBox                 *m_expandVariables{nullptr};
-		QCheckBox                 *m_omitFromOutput{nullptr};
-		QCheckBox                 *m_temporary{nullptr};
-		QCheckBox                 *m_keepEvaluating{nullptr};
-		QCheckBox                 *m_echoAlias{nullptr};
-		QCheckBox                 *m_omitFromCommandHistory{nullptr};
-		QCheckBox                 *m_menu{nullptr};
-		QCheckBox                 *m_oneShot{nullptr};
+		QCheckBox          *m_enabled{nullptr};
+		QCheckBox          *m_omitFromLog{nullptr};
+		QCheckBox          *m_ignoreCase{nullptr};
+		QCheckBox          *m_regexp{nullptr};
+		QCheckBox          *m_expandVariables{nullptr};
+		QCheckBox          *m_omitFromOutput{nullptr};
+		QCheckBox          *m_temporary{nullptr};
+		QCheckBox          *m_keepEvaluating{nullptr};
+		QCheckBox          *m_echoAlias{nullptr};
+		QCheckBox          *m_omitFromCommandHistory{nullptr};
+		QCheckBox          *m_menu{nullptr};
+		QCheckBox          *m_oneShot{nullptr};
 
-		QLabel                    *m_includedLabel{nullptr};
-		QLabel                    *m_matchesLabel{nullptr};
-		QLabel                    *m_callsLabel{nullptr};
+		QLabel             *m_includedLabel{nullptr};
+		QLabel             *m_matchesLabel{nullptr};
+		QLabel             *m_callsLabel{nullptr};
 
-		QPushButton               *m_editMatchButton{nullptr};
-		QPushButton               *m_editSendButton{nullptr};
-		QPushButton               *m_convertRegexpButton{nullptr};
-		QPushButton               *m_reverseSpeedwalkButton{nullptr};
-		QDialogButtonBox          *m_buttons{nullptr};
+		QPushButton        *m_editMatchButton{nullptr};
+		QPushButton        *m_editSendButton{nullptr};
+		QPushButton        *m_convertRegexpButton{nullptr};
+		QPushButton        *m_reverseSpeedwalkButton{nullptr};
+		QDialogButtonBox   *m_buttons{nullptr};
 };
 
 #endif // QMUD_WORLDALIASDIALOG_H

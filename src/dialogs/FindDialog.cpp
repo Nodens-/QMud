@@ -175,7 +175,7 @@ int FindDialog::execModal()
 
 	while (dlg.exec() == Accepted)
 	{
-		const QString text = findCombo.currentText().trimmed();
+		const QString text = findCombo.currentText();
 		if (text.isEmpty())
 		{
 			QMessageBox::information(&dlg, QStringLiteral("Find"),

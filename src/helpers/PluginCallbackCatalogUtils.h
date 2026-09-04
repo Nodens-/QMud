@@ -149,7 +149,7 @@ inline bool qmudShouldSkipSelfOnlyPluginBroadcast(const QVector<int> &recipientI
 	if (onlyIndex < 0 || onlyIndex >= pluginCount)
 		return false;
 	const QString onlyPluginId = pluginIdAt(onlyIndex);
-	return onlyPluginId.compare(callingPluginId, Qt::CaseInsensitive) == 0;
+	return onlyPluginId == callingPluginId;
 }
 
 #endif // QMUD_PLUGINCALLBACKCATALOGUTILS_H

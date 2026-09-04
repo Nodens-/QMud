@@ -28,11 +28,35 @@ enum class ReloadSocketPolicy
 };
 
 /**
+ * @brief Outcome of an MCCP shutdown request made during reload preparation.
+ */
+enum class ReloadMccpDisableStatus
+{
+	Inactive,  ///< No reload MCCP shutdown request is armed.
+	Pending,   ///< MCCP remains active while reload preparation waits.
+	Succeeded, ///< MCCP ended without a fatal compression error.
+	Failed     ///< A fatal compression error occurred after the shutdown request.
+};
+
+/**
+ * @brief Reload-planning interpretation of an MCCP shutdown status.
+ */
+struct ReloadMccpDisableDecision
+{
+		bool        waitComplete{false};      ///< Whether reload preparation should stop waiting.
+		bool        snapshotSucceeded{false}; ///< Value persisted as MCCP shutdown success.
+		const char *statusLabel{"inactive"};  ///< Stable diagnostic label for the status.
+		QString     failureNote;              ///< Optional recovery note persisted for the world.
+};
+
+/**
  * @brief Serialized handoff state for one world entry during reload.
  */
 struct ReloadWorldState
 {
 		int                sequence{0};
+		int                presentationCount{1};
+		int                activePresentationOrdinal{0};
 		QString            worldId;
 		QString            displayName;
 		QString            worldFilePath;
@@ -276,6 +300,12 @@ class ReloadPostReattachOps
 [[nodiscard]] bool shouldAttemptReloadMccpDisable(bool connected, int socketDescriptor, bool tlsEnabled,
                                                   bool mccpWasActive);
 /**
+ * @brief Interprets an MCCP shutdown status for reload waiting and snapshot persistence.
+ * @param status Current MCCP shutdown status.
+ * @return Planning decision containing wait completion, persisted success, and optional failure note.
+ */
+[[nodiscard]] ReloadMccpDisableDecision    resolveReloadMccpDisableStatus(ReloadMccpDisableStatus status);
+/**
  * @brief Computes per-world reload socket policy.
  * @param input Per-world connection and MCCP state.
  * @return Decision containing connected-at-reload state, inheritance hint, and selected policy.
@@ -301,8 +331,8 @@ class ReloadPostReattachOps
  * @param closeSocketFirst Close inherited parked socket before reconnect.
  * @return Empty string on success; warning text when reconnect cannot be started.
  */
-[[nodiscard]] QString                      reconnectRecoveredRuntime(ReloadReconnectOps     &runtime,
-                                                                     const ReloadWorldState &worldState, bool closeSocketFirst);
+[[nodiscard]] QString reconnectRecoveredRuntime(ReloadReconnectOps     &runtime,
+                                                const ReloadWorldState &worldState, bool closeSocketFirst);
 /**
  * @brief Applies post-reattach startup actions for one recovered world.
  *

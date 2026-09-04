@@ -33,6 +33,8 @@ class WorldView;
 class WorldCommandProcessor : public QObject
 {
 		Q_OBJECT
+		friend class tst_LuaCallbackEngine;
+
 	public:
 		/**
 		 * @brief Creates a command processor for one world/session.
@@ -45,6 +47,17 @@ class WorldCommandProcessor : public QObject
 		 * @param runtime Runtime instance.
 		 */
 		void               setRuntime(WorldRuntime *runtime);
+		/**
+		 * @brief Applies one table-bound numeric world option to the command processor cache.
+		 * @param binding Exact cache binding declared by the numeric option table.
+		 * @param value Stored numeric option value.
+		 */
+		void               applyNumericWorldOption(WorldNumericOptionBinding binding, long long value);
+		/**
+		 * @brief Selects whether this processor owns session-wide timer evaluation.
+		 * @param owner `true` for the runtime's primary command processor.
+		 */
+		void               setRuntimeAutomationOwner(bool owner);
 		/**
 		 * @brief Binds the owning world view for UI interactions.
 		 * @param view World view instance.
@@ -315,12 +328,13 @@ class WorldCommandProcessor : public QObject
 		 * @param endCol Optional output end column.
 		 * @param startOffset Start offset in subject.
 		 * @param multiLine Enable multiline mode when `true`.
+		 * @param executionTimeNs Optional cumulative regex-execution time in nanoseconds.
 		 * @return `true` when pattern matches.
 		 */
 		bool           regexMatch(const QString &pattern, const QString &subject, bool ignoreCase,
 		                          QStringList &wildcards, QMap<QString, QString> &namedWildcards,
 		                          int *startCol = nullptr, int *endCol = nullptr, int startOffset = 0,
-		                          bool multiLine = false) const;
+		                          bool multiLine = false, qint64 *executionTimeNs = nullptr) const;
 		struct TriggerScript
 		{
 				quint64                runtimeId{0};
@@ -339,6 +353,11 @@ class WorldCommandProcessor : public QObject
 				QString description;
 				bool    replaceMatchedLineOutput{false};
 		};
+		struct RuleRef
+		{
+				quint64 runtimeId{0};
+				QString pluginId;
+		};
 		struct TriggerEvaluationResult
 		{
 				bool                             omitFromOutput{false};
@@ -347,7 +366,7 @@ class WorldCommandProcessor : public QObject
 				QString                          extraOutput;
 				QVector<DeferredScript>          deferredScripts;
 				QVector<TriggerScript>           triggerScripts;
-				QVector<quint64>                 oneShotTriggers;
+				QVector<RuleRef>                 oneShotTriggers;
 		};
 		/**
 		 * @brief Evaluates all trigger sets for an incoming line.
@@ -611,6 +630,7 @@ class WorldCommandProcessor : public QObject
 		bool                                         m_processingEnteredCommand{false};
 		bool                                         m_omitFromHistoryForEnteredCommand{false};
 		bool                                         m_enteredCommandSendFailed{false};
+		bool                                         m_runtimeAutomationOwner{true};
 		int                                          m_executionDepth{0};
 		mutable QHash<QString, QRegularExpression>   m_regexCache;
 		QHash<QString, QString>                      m_wildcardRegexCache;

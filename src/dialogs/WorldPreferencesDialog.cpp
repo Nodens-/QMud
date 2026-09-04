@@ -21,8 +21,11 @@
 #include "dialogs/WorldAliasDialog.h"
 #include "dialogs/WorldTimerDialog.h"
 #include "dialogs/WorldTriggerDialog.h"
+#include "helpers/ColorUtils.h"
+#include "helpers/DialogSizingUtils.h"
 #include "helpers/EncodingUtils.h"
 #include "helpers/NoteColourUtils.h"
+#include "helpers/TimerSchedulingUtils.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QApplication>
@@ -50,6 +53,7 @@
 #include <QLinearGradient>
 #include <QLocale>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPainter>
 #include <QPalette>
 #include <QProcess>
@@ -59,7 +63,6 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
-#include <QScreen>
 #include <QSet>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -67,6 +70,10 @@
 #include <QSpacerItem>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStyleOptionButton>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QStyleOptionFrame>
+// ReSharper disable once CppUnusedIncludeDirective
 #include <QStyleOptionGroupBox>
 // ReSharper disable  once CppUnusedIncludeDirective
 #include <QStyleOptionSpinBox>
@@ -75,10 +82,11 @@
 #include <QTextCursor>
 #include <QTextEdit>
 #include <QTextStream>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QUrl>
+#include <QWindow>
 #include <algorithm>
-#include <cmath>
 #include <functional>
 #include <limits>
 #include <unistd.h>
@@ -166,6 +174,9 @@ static void configureSpinBoxWidthForRange(QSpinBox *spin)
 {
 	if (!spin)
 		return;
+	spin->setProperty("qmud_range_sized", true);
+	spin->setMinimumWidth(0);
+	spin->setMaximumWidth(QWIDGETSIZE_MAX);
 
 	const auto makeDisplayText = [spin](const int value)
 	{ return spin->prefix() + spin->locale().toString(value) + spin->suffix(); };
@@ -176,74 +187,154 @@ static void configureSpinBoxWidthForRange(QSpinBox *spin)
 
 	QStyleOptionSpinBox option;
 	option.initFrom(spin);
-	option.subControls = QStyle::SC_All;
+	const QSize unconstrainedHint = spin->sizeHint();
+	option.rect                   = QRect(QPoint(), unconstrainedHint);
+	option.subControls            = QStyle::SC_All;
 	const QRect editField =
 	    spin->style()->subControlRect(QStyle::CC_SpinBox, &option, QStyle::SC_SpinBoxEditField, spin);
-	const int chromeWidth = qMax(0, spin->sizeHint().width() - editField.width());
+	const int chromeWidth = qMax(0, unconstrainedHint.width() - editField.width());
 	const int targetWidth = qMax(spin->minimumSizeHint().width(), chromeWidth + textWidth + 12);
 
 	spin->setMinimumWidth(targetWidth);
 	spin->setMaximumWidth(targetWidth);
 }
 
-class GradientHeader : public QWidget
+/**
+ * @brief Keeps an intentionally compact line edit wide enough for its font and style.
+ * @param edit Line edit whose width should be recalculated after application-font changes.
+ * @param baselineWidth Minimum width retained for the original dialog layout.
+ * @param characterCount Number of widest representative characters that must fit.
+ */
+static void configureCompactLineEditWidth(QLineEdit *edit, const int baselineWidth, const int characterCount)
 {
-	public:
-		explicit GradientHeader(QWidget *parent = nullptr) : QWidget(parent)
-		{
-			setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-			setMinimumHeight(28);
-		}
+	if (!edit)
+		return;
+	const int safeCharacterCount = qMax(1, characterCount);
+	edit->setProperty("qmud_compact_line_baseline_width", baselineWidth);
+	edit->setProperty("qmud_compact_line_character_count", safeCharacterCount);
 
-		void setText(const QString &text)
-		{
-			if (m_text == text)
-				return;
-			m_text = text;
-			update();
-		}
+	QStyleOptionFrame option;
+	option.initFrom(edit);
+	option.lineWidth           = edit->style()->pixelMetric(QStyle::PM_DefaultFrameWidth, &option, edit);
+	const QMargins textMargins = edit->textMargins();
+	const QString  sample(safeCharacterCount, QLatin1Char('M'));
+	const QSize    contents(edit->fontMetrics().horizontalAdvance(sample) + textMargins.left() +
+	                            textMargins.right(),
+	                        edit->fontMetrics().height() + textMargins.top() + textMargins.bottom());
+	const QSize    styledSize = edit->style()->sizeFromContents(QStyle::CT_LineEdit, &option, contents, edit);
+	edit->setFixedWidth(qMax(baselineWidth, styledSize.width()));
+}
 
-		void setGradientEnabled(const bool enabled)
-		{
-			if (m_gradientEnabled == enabled)
-				return;
-			m_gradientEnabled = enabled;
-			update();
-		}
+namespace
+{
+	/**
+	 * @brief Combo box whose minimum size follows live font metrics.
+	 *
+	 * Qt invalidates QComboBox::sizeHint() when its font changes, but its cached
+	 * minimumSizeHint() can retain dimensions calculated for the previous font.
+	 */
+	class FontResponsiveComboBox final : public QComboBox
+	{
+		public:
+			using QComboBox::QComboBox;
 
-	protected:
-		void paintEvent(QPaintEvent *event) override
-		{
-			Q_UNUSED(event);
-			QPainter         painter(this);
-			const QRect      rect = this->rect();
-			constexpr QColor left(140, 0, 0);
-			constexpr QColor right(255, 255, 0);
-			if (m_gradientEnabled)
+			[[nodiscard]] QSize minimumSizeHint() const override
 			{
-				QLinearGradient gradient(rect.left(), rect.top(), rect.right(), rect.top());
-				gradient.setColorAt(0.0, left);
-				gradient.setColorAt(1.0, right);
-				painter.fillRect(rect, gradient);
+				return QComboBox::sizeHint();
 			}
-			else
+	};
+
+	/**
+	 * @brief Configures a compact textual tool button with stable rendering and accessible identification.
+	 * @param button Button to configure.
+	 * @param objectName Stable object name used by tests and assistive inspection.
+	 * @param text Visible compact label.
+	 * @param description Human-readable action description.
+	 */
+	void configureCompactTextButton(QToolButton *button, const QString &objectName, const QString &text,
+	                                const QString &description)
+	{
+		if (!button)
+			return;
+		button->setObjectName(objectName);
+		button->setText(text);
+		button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+		button->setAccessibleName(description);
+		button->setToolTip(description);
+	}
+
+	class GradientHeader : public QWidget
+	{
+		public:
+			explicit GradientHeader(QWidget *parent = nullptr) : QWidget(parent)
 			{
-				painter.fillRect(rect, left);
+				setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+				setMinimumHeight(28);
 			}
 
-			painter.setPen(Qt::white);
-			QFont font = painter.font();
-			font.setBold(true);
-			painter.setFont(font);
-			const int x = rect.left() + 8;
-			const int y = rect.center().y() + (painter.fontMetrics().ascent() / 2);
-			painter.drawText(x, y, m_text);
-		}
+			void setText(const QString &text)
+			{
+				if (m_text == text)
+					return;
+				m_text = text;
+				updateGeometry();
+				update();
+			}
 
-	private:
-		QString m_text;
-		bool    m_gradientEnabled{false};
-};
+			void setGradientEnabled(const bool enabled)
+			{
+				if (m_gradientEnabled == enabled)
+					return;
+				m_gradientEnabled = enabled;
+				update();
+			}
+
+		protected:
+			void paintEvent(QPaintEvent *event) override
+			{
+				Q_UNUSED(event);
+				QPainter         painter(this);
+				const QRect      rect = this->rect();
+				constexpr QColor left(140, 0, 0);
+				constexpr QColor right(255, 255, 0);
+				if (m_gradientEnabled)
+				{
+					QLinearGradient gradient(rect.left(), rect.top(), rect.right(), rect.top());
+					gradient.setColorAt(0.0, left);
+					gradient.setColorAt(1.0, right);
+					painter.fillRect(rect, gradient);
+				}
+				else
+				{
+					painter.fillRect(rect, left);
+				}
+
+				painter.setPen(Qt::white);
+				QFont font = painter.font();
+				font.setBold(true);
+				painter.setFont(font);
+				painter.drawText(rect.adjusted(8, 0, -8, 0), Qt::AlignLeft | Qt::AlignVCenter, m_text);
+			}
+
+		public:
+			[[nodiscard]] QSize sizeHint() const override
+			{
+				QFont textFont = font();
+				textFont.setBold(true);
+				const QFontMetrics metrics(textFont);
+				return {metrics.horizontalAdvance(m_text) + 16, qMax(28, metrics.height() + 10)};
+			}
+
+			[[nodiscard]] QSize minimumSizeHint() const override
+			{
+				return sizeHint();
+			}
+
+		private:
+			QString m_text;
+			bool    m_gradientEnabled{false};
+	};
+} // namespace
 
 static QString formatColourValue(const QColor &colour)
 {
@@ -299,6 +390,19 @@ static int saturatingToInt(const qsizetype value)
 	if (value < std::numeric_limits<int>::min())
 		return std::numeric_limits<int>::min();
 	return static_cast<int>(value);
+}
+
+template <typename Rule> static int ruleIndexForRuntimeId(const QList<Rule> &rules, const quint64 runtimeId)
+{
+	if (runtimeId == 0)
+		return -1;
+	const int ruleCount = saturatingToInt(rules.size());
+	for (int index = 0; index < ruleCount; ++index)
+	{
+		if (rules.at(index).runtimeId == runtimeId)
+			return index;
+	}
+	return -1;
 }
 
 static long toColourRef(const QColor &colour)
@@ -515,22 +619,122 @@ static void selectRowByIndex(QTableWidget *table, const int index)
 		selectRow(table, row);
 }
 
-static int currentTreeIndex(const QTreeWidget *tree)
+static quint64 ruleRuntimeIdForRow(const QTableWidget *table, const int row)
 {
-	if (!tree)
+	if (!table || row < 0 || row >= table->rowCount())
+		return 0;
+	const QTableWidgetItem *item = table->item(row, 0);
+	if (!item)
+		return 0;
+	bool          ok        = false;
+	const quint64 runtimeId = item->data(Qt::UserRole).toULongLong(&ok);
+	return ok ? runtimeId : 0;
+}
+
+static int findRuleRowForRuntimeId(const QTableWidget *table, const quint64 runtimeId)
+{
+	if (!table || runtimeId == 0)
 		return -1;
-	const QTreeWidgetItem *item = tree->currentItem();
-	if (!item || item->childCount() > 0)
-		return -1;
-	bool ok = false;
-	if (const int value = item->data(0, Qt::UserRole).toInt(&ok); ok)
-		return value;
+	for (int row = 0; row < table->rowCount(); ++row)
+	{
+		if (ruleRuntimeIdForRow(table, row) == runtimeId)
+			return row;
+	}
 	return -1;
 }
 
-static QTreeWidgetItem *findTreeItemByIndex(const QTreeWidget *tree, const int index)
+static void selectRuleRowByRuntimeId(QTableWidget *table, const quint64 runtimeId)
 {
-	if (!tree || index < 0)
+	if (const int row = findRuleRowForRuntimeId(table, runtimeId); row >= 0)
+		selectRow(table, row);
+}
+
+static void selectRuleRowByRuntimeId(QTableWidget *table, const QList<quint64> &runtimeIds)
+{
+	for (const quint64 runtimeId : runtimeIds)
+	{
+		if (const int row = findRuleRowForRuntimeId(table, runtimeId); row >= 0)
+		{
+			selectRow(table, row);
+			return;
+		}
+	}
+}
+
+/**
+ * @brief Captures displayed candidates for selection after a rule is removed.
+ * @param table Sorted rule table carrying runtime identities in `Qt::UserRole`.
+ * @param tree Grouped rule tree carrying runtime identities in `Qt::UserRole`.
+ * @param treeMode Whether the grouped tree is the active presentation.
+ * @param removedRuntimeId Runtime identity of the rule being removed.
+ * @return Runtime identities in selection priority order. Previous displayed rules are preferred,
+ * followed by subsequent rules; tree candidates remain within the selected group.
+ */
+static QList<quint64> displayedRuleRuntimeIdsAfterRemoval(const QTableWidget *table, const QTreeWidget *tree,
+                                                          const bool treeMode, const quint64 removedRuntimeId)
+{
+	QList<quint64> candidates;
+	if (treeMode)
+	{
+		QTreeWidgetItem *current               = tree ? tree->currentItem() : nullptr;
+		QTreeWidgetItem *group                 = current ? current->parent() : nullptr;
+		bool             currentRuntimeIdValid = false;
+		const quint64    currentRuntimeId =
+		    current ? current->data(0, Qt::UserRole).toULongLong(&currentRuntimeIdValid) : 0;
+		if (!group || !currentRuntimeIdValid || currentRuntimeId != removedRuntimeId)
+			return {};
+		const int childIndex = group->indexOfChild(current);
+		for (int index = childIndex - 1; index >= 0; --index)
+		{
+			bool          valid     = false;
+			const quint64 runtimeId = group->child(index)->data(0, Qt::UserRole).toULongLong(&valid);
+			if (valid && runtimeId != 0)
+				candidates.push_back(runtimeId);
+		}
+		for (int index = childIndex + 1; index < group->childCount(); ++index)
+		{
+			bool          valid     = false;
+			const quint64 runtimeId = group->child(index)->data(0, Qt::UserRole).toULongLong(&valid);
+			if (valid && runtimeId != 0)
+				candidates.push_back(runtimeId);
+		}
+	}
+	else
+	{
+		const int row = selectedRow(table);
+		if (row < 0 || ruleRuntimeIdForRow(table, row) != removedRuntimeId)
+			return {};
+		for (int index = row - 1; index >= 0; --index)
+		{
+			if (const quint64 runtimeId = ruleRuntimeIdForRow(table, index); runtimeId != 0)
+				candidates.push_back(runtimeId);
+		}
+		for (int index = row + 1; table && index < table->rowCount(); ++index)
+		{
+			if (const quint64 runtimeId = ruleRuntimeIdForRow(table, index); runtimeId != 0)
+				candidates.push_back(runtimeId);
+		}
+	}
+
+	return candidates;
+}
+
+static quint64 currentTreeRuleRuntimeId(const QTreeWidget *tree)
+{
+	if (!tree)
+		return 0;
+	const QTreeWidgetItem *item = tree->currentItem();
+	if (!item || item->childCount() > 0)
+		return 0;
+	bool ok = false;
+	if (const quint64 value = item->data(0, Qt::UserRole).toULongLong(&ok); ok)
+		return value;
+	return 0;
+}
+
+static QTreeWidgetItem *findTreeItemByRuntimeId(const QTreeWidget *tree, const quint64 runtimeId)
+{
+	if (!tree || runtimeId == 0)
 		return nullptr;
 	for (int i = 0; i < tree->topLevelItemCount(); ++i)
 	{
@@ -543,7 +747,8 @@ static QTreeWidgetItem *findTreeItemByIndex(const QTreeWidget *tree, const int i
 			if (!child)
 				continue;
 			bool ok = false;
-			if (const int childIndex = child->data(0, Qt::UserRole).toInt(&ok); ok && childIndex == index)
+			if (const quint64 childRuntimeId = child->data(0, Qt::UserRole).toULongLong(&ok);
+			    ok && childRuntimeId == runtimeId)
 				return child;
 		}
 	}
@@ -590,12 +795,12 @@ static void rebuildGroupedTree(const QTableWidget *table, QTreeWidget *tree,
 	if (!table || !tree)
 		return;
 
-	const int selectedIndex = [&]
+	const quint64 selectedRuntimeId = [&]
 	{
 		const int tableRow = selectedRow(table);
-		if (const int fromTable = rowToIndex(table, tableRow); fromTable >= 0)
+		if (const quint64 fromTable = ruleRuntimeIdForRow(table, tableRow); fromTable != 0)
 			return fromTable;
-		return currentTreeIndex(tree);
+		return currentTreeRuleRuntimeId(tree);
 	}();
 
 	tree->clear();
@@ -629,7 +834,7 @@ static void rebuildGroupedTree(const QTableWidget *table, QTreeWidget *tree,
 			continue;
 		auto *child = new QTreeWidgetItem(parent);
 		child->setText(0, descriptionForRow(row));
-		child->setData(0, Qt::UserRole, rowToIndex(table, row));
+		child->setData(0, Qt::UserRole, ruleRuntimeIdForRow(table, row));
 	}
 
 	bool restoredExpandedGroup = false;
@@ -650,7 +855,7 @@ static void rebuildGroupedTree(const QTableWidget *table, QTreeWidget *tree,
 				groupItem->setExpanded(false);
 		}
 	}
-	tree->setCurrentItem(findTreeItemByIndex(tree, selectedIndex));
+	tree->setCurrentItem(findTreeItemByRuntimeId(tree, selectedRuntimeId));
 }
 
 static QString serializeStringMap(const QMap<QString, QString> &values)
@@ -812,88 +1017,91 @@ static void doFindAdvanced(WorldPreferencesDialog *dialog, QTableWidget *table,
 }
 
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
-class LuaFilterRunner
+namespace
 {
-	public:
-		explicit LuaFilterRunner(const QString &script, QWidget *owner) : m_owner(owner)
-		{
-			if (script.trimmed().isEmpty())
-				return;
-			m_state.reset(QMudLuaSupport::makeLuaState());
-			if (!m_state)
+	class LuaFilterRunner
+	{
+		public:
+			explicit LuaFilterRunner(const QString &script, QWidget *owner) : m_owner(owner)
 			{
-				showError(QStringLiteral("Unable to create Lua state for filter."));
-				return;
+				if (script.trimmed().isEmpty())
+					return;
+				m_state.reset(QMudLuaSupport::makeLuaState());
+				if (!m_state)
+				{
+					showError(QStringLiteral("Unable to create Lua state for filter."));
+					return;
+				}
+				luaL_openlibs(m_state.get());
+				QMudLuaSupport::applyLua51Compat(m_state.get());
+				qmudLogLua51CompatState(m_state.get(), "WorldPreferencesDialog filter state");
+				if (luaL_loadstring(m_state.get(), script.toUtf8().constData()) != 0 ||
+				    QMudLuaSupport::callLuaProtected(m_state.get(), 0, 0, 0) != 0)
+				{
+					const char *error = lua_tostring(m_state.get(), -1);
+					showError(QStringLiteral("Filter error: %1")
+					              .arg(error ? QString::fromUtf8(error) : QStringLiteral("unknown error")));
+					lua_settop(m_state.get(), 0);
+					return;
+				}
+				lua_getglobal(m_state.get(), "filter");
+				if (!lua_isfunction(m_state.get(), -1))
+				{
+					showError(QStringLiteral("Filter script must define a global function named 'filter'."));
+					lua_settop(m_state.get(), 0);
+					return;
+				}
+				lua_pop(m_state.get(), 1);
+				m_valid = true;
 			}
-			luaL_openlibs(m_state.get());
-			QMudLuaSupport::applyLua51Compat(m_state.get());
-			qmudLogLua51CompatState(m_state.get(), "WorldPreferencesDialog filter state");
-			if (luaL_loadstring(m_state.get(), script.toUtf8().constData()) != 0 ||
-			    QMudLuaSupport::callLuaProtected(m_state.get(), 0, 0, 0) != 0)
+
+			~LuaFilterRunner() = default;
+
+			[[nodiscard]] bool isValid() const
 			{
-				const char *error = lua_tostring(m_state.get(), -1);
-				showError(QStringLiteral("Filter error: %1")
-				              .arg(error ? QString::fromUtf8(error) : QStringLiteral("unknown error")));
-				lua_settop(m_state.get(), 0);
-				return;
+				return m_valid;
 			}
-			lua_getglobal(m_state.get(), "filter");
-			if (!lua_isfunction(m_state.get(), -1))
+
+			bool matches(const QString &name, const std::function<void(lua_State *)> &pushInfo)
 			{
-				showError(QStringLiteral("Filter script must define a global function named 'filter'."));
-				lua_settop(m_state.get(), 0);
-				return;
+				if (!m_valid || !m_state)
+					return true;
+				lua_getglobal(m_state.get(), "filter");
+				if (!lua_isfunction(m_state.get(), -1))
+					return true;
+				lua_pushstring(m_state.get(), name.toUtf8().constData());
+				pushInfo(m_state.get());
+				if (QMudLuaSupport::callLuaProtected(m_state.get(), 2, 1, 0) != 0)
+				{
+					const char *error = lua_tostring(m_state.get(), -1);
+					showError(QStringLiteral("Filter error: %1")
+					              .arg(error ? QString::fromUtf8(error) : QStringLiteral("unknown error")));
+					lua_settop(m_state.get(), 0);
+					m_valid = false;
+					return true;
+				}
+				bool result = true;
+				if (lua_isboolean(m_state.get(), -1))
+					result = lua_toboolean(m_state.get(), -1) != 0;
+				lua_pop(m_state.get(), 1);
+				return result;
 			}
-			lua_pop(m_state.get(), 1);
-			m_valid = true;
-		}
 
-		~LuaFilterRunner() = default;
-
-		[[nodiscard]] bool isValid() const
-		{
-			return m_valid;
-		}
-
-		bool matches(const QString &name, const std::function<void(lua_State *)> &pushInfo)
-		{
-			if (!m_valid || !m_state)
-				return true;
-			lua_getglobal(m_state.get(), "filter");
-			if (!lua_isfunction(m_state.get(), -1))
-				return true;
-			lua_pushstring(m_state.get(), name.toUtf8().constData());
-			pushInfo(m_state.get());
-			if (QMudLuaSupport::callLuaProtected(m_state.get(), 2, 1, 0) != 0)
+		private:
+			void showError(const QString &message)
 			{
-				const char *error = lua_tostring(m_state.get(), -1);
-				showError(QStringLiteral("Filter error: %1")
-				              .arg(error ? QString::fromUtf8(error) : QStringLiteral("unknown error")));
-				lua_settop(m_state.get(), 0);
-				m_valid = false;
-				return true;
+				if (m_errorShown)
+					return;
+				m_errorShown = true;
+				QMessageBox::warning(m_owner, QStringLiteral("Filter"), message);
 			}
-			bool result = true;
-			if (lua_isboolean(m_state.get(), -1))
-				result = lua_toboolean(m_state.get(), -1) != 0;
-			lua_pop(m_state.get(), 1);
-			return result;
-		}
 
-	private:
-		void showError(const QString &message)
-		{
-			if (m_errorShown)
-				return;
-			m_errorShown = true;
-			QMessageBox::warning(m_owner, QStringLiteral("Filter"), message);
-		}
-
-		LuaStateOwner m_state;
-		QWidget      *m_owner{nullptr};
-		bool          m_valid{false};
-		bool          m_errorShown{false};
-};
+			LuaStateOwner m_state;
+			QWidget      *m_owner{nullptr};
+			bool          m_valid{false};
+			bool          m_errorShown{false};
+	};
+} // namespace
 #endif
 
 static bool gridLinesEnabled()
@@ -967,15 +1175,6 @@ WorldPreferencesDialog::WorldPreferencesDialog(WorldRuntime *runtime, WorldView 
 	resize(700, 520);
 	buildUi();
 	setSizeGripEnabled(true);
-	if (QScreen *screen = QGuiApplication::primaryScreen())
-	{
-		const QRect avail = screen->availableGeometry();
-		setMaximumSize(avail.size());
-		QSize start = size();
-		start.setWidth(qMin(start.width(), avail.width()));
-		start.setHeight(qMin(start.height(), avail.height()));
-		resize(start);
-	}
 
 	if (AppController *app = AppController::instance())
 	{
@@ -1000,6 +1199,286 @@ WorldPreferencesDialog::WorldPreferencesDialog(WorldRuntime *runtime, WorldView 
 			        persistedSettings.endGroup();
 		        });
 	}
+	refreshDialogSizing();
+}
+
+bool WorldPreferencesDialog::event(QEvent *event)
+{
+	if (!event)
+		return QDialog::event(event);
+
+	const bool  firstShow              = event->type() == QEvent::Show && !m_initialDialogSizingFinalized;
+	const bool  applicationFontChanged = event->type() == QEvent::ApplicationFontChange;
+	const QSize sizeBeforeShow         = firstShow ? size() : QSize();
+	if (applicationFontChanged && m_initialDialogSizingFinalized && !m_dialogSizingRefreshPending)
+		m_dialogSizeBeforeRefresh = size();
+	const bool handled = QDialog::event(event);
+	if (firstShow)
+	{
+		m_dialogSizeBeforeRefresh = sizeBeforeShow;
+		if (QWindow *const nativeWindow = windowHandle())
+		{
+			nativeWindow->installEventFilter(this);
+			if (nativeWindow->isExposed())
+				finalizeInitialDialogSizing();
+		}
+	}
+	if (applicationFontChanged && m_initialDialogSizingFinalized)
+		scheduleDialogSizingRefresh();
+	return handled;
+}
+
+void WorldPreferencesDialog::refreshDialogSizing()
+{
+	QLayout *const dialogLayout = layout();
+	if (!dialogLayout)
+		return;
+	const QLayout::SizeConstraint originalSizeConstraint = dialogLayout->sizeConstraint();
+	dialogLayout->setSizeConstraint(QLayout::SetNoConstraint);
+
+	refreshCustomColourColumnWidths();
+	refreshAnsiColourGeometry();
+	refreshInfoPageFont();
+	for (QSpinBox *spin : findChildren<QSpinBox *>())
+	{
+		if (spin->property("qmud_range_sized").toBool())
+			configureSpinBoxWidthForRange(spin);
+	}
+	for (QLineEdit *edit : findChildren<QLineEdit *>())
+	{
+		const QVariant baselineWidth = edit->property("qmud_compact_line_baseline_width");
+		if (!baselineWidth.isValid())
+			continue;
+		configureCompactLineEditWidth(edit, baselineWidth.toInt(),
+		                              edit->property("qmud_compact_line_character_count").toInt());
+	}
+	auto measurePages = [this](const int availableWidth)
+	{
+		QSize minimum;
+		if (!m_pages)
+			return minimum;
+		for (int index = 0; index < m_pages->count(); ++index)
+		{
+			QWidget *const page = m_pages->widget(index);
+			if (!page || !page->layout())
+				continue;
+			page->ensurePolished();
+			page->layout()->invalidate();
+			page->layout()->activate();
+			QSize pageSize = page->layout()->sizeHint();
+			if (availableWidth > 0 && page->layout()->hasHeightForWidth())
+			{
+				const int heightForWidth = page->layout()->heightForWidth(availableWidth);
+				if (heightForWidth >= 0)
+					pageSize.setHeight(qMax(pageSize.height(), heightForWidth));
+			}
+			minimum = minimum.expandedTo(pageSize);
+		}
+		return minimum;
+	};
+	QSize pageMinimum;
+	if (m_pages)
+	{
+		m_pages->setMinimumSize(0, 0);
+		pageMinimum          = measurePages(-1);
+		const int frameWidth = m_pages->frameWidth();
+		pageMinimum          = pageMinimum.grownBy(QMargins(frameWidth, frameWidth, frameWidth, frameWidth));
+		m_pages->setMinimumSize(pageMinimum);
+	}
+	if (m_pageTree)
+	{
+		m_pageTree->ensurePolished();
+		const auto countTreeItems = [](const QTreeWidgetItem *item, auto &&countRef) -> int
+		{
+			int total = 1;
+			for (int index = 0; index < item->childCount(); ++index)
+				total += countRef(item->child(index), countRef);
+			return total;
+		};
+		int itemCount = 0;
+		for (int index = 0; index < m_pageTree->topLevelItemCount(); ++index)
+			itemCount += countTreeItems(m_pageTree->topLevelItem(index), countTreeItems);
+		int rowHeight = m_pageTree->sizeHintForRow(0);
+		if (rowHeight <= 0)
+			rowHeight = m_pageTree->fontMetrics().height() + 6;
+		const int frameWidth = m_pageTree->frameWidth();
+		m_pageTree->setMinimumHeight((rowHeight * itemCount) + (frameWidth * 2) + 12);
+		m_pageTree->resizeColumnToContents(0);
+		m_pageTree->setMinimumWidth(qMax(220, m_pageTree->columnWidth(0) + (frameWidth * 2) + 12));
+	}
+
+	dialogLayout->invalidate();
+	dialogLayout->activate();
+
+	constexpr QSize baselineMinimum(700, 520);
+	QSize           unboundedMinimum =
+	    dialogLayout->minimumSize().expandedTo(dialogLayout->sizeHint()).expandedTo(baselineMinimum);
+	const QSize maximumSize = DialogSizingUtils::maximumClientSize(this);
+	if (m_pages)
+	{
+		const QSize referenceSize = m_dialogSizeBeforeRefresh.isValid() ? m_dialogSizeBeforeRefresh : size();
+		const int   preliminaryWidth =
+		    qMin(maximumSize.width(), qMax(referenceSize.width(), unboundedMinimum.width()));
+		const int pageLeft   = m_pages->mapTo(this, QPoint()).x();
+		const int frameWidth = m_pages->frameWidth();
+		const int availablePageOuterWidth =
+		    qMax(1, preliminaryWidth - pageLeft - dialogLayout->contentsMargins().right());
+		const int availablePageWidth = qMax(1, availablePageOuterWidth - (frameWidth * 2));
+		QSize     widthAwareMinimum  = measurePages(availablePageWidth);
+		widthAwareMinimum =
+		    widthAwareMinimum.grownBy(QMargins(frameWidth, frameWidth, frameWidth, frameWidth));
+		pageMinimum = pageMinimum.expandedTo(widthAwareMinimum);
+		pageMinimum.setWidth(qMin(pageMinimum.width(), availablePageOuterWidth));
+		m_pages->setMinimumSize(pageMinimum);
+		dialogLayout->invalidate();
+		dialogLayout->activate();
+		unboundedMinimum =
+		    dialogLayout->minimumSize().expandedTo(dialogLayout->sizeHint()).expandedTo(baselineMinimum);
+	}
+	const int centralMinimumHeight =
+	    qMax(m_pages ? m_pages->minimumHeight() : 0, m_pageTree ? m_pageTree->minimumHeight() : 0);
+	const int maximumCentralHeight = DialogSizingUtils::maximumCentralHeightForLayout(
+	    maximumSize.height(), dialogLayout->minimumSize().height(), centralMinimumHeight);
+	if (m_pages && m_pages->minimumHeight() > maximumCentralHeight)
+		m_pages->setMinimumHeight(maximumCentralHeight);
+	if (m_pageTree && m_pageTree->minimumHeight() > maximumCentralHeight)
+		m_pageTree->setMinimumHeight(maximumCentralHeight);
+	dialogLayout->invalidate();
+	dialogLayout->activate();
+	applyDialogContentSize(unboundedMinimum);
+	dialogLayout->setSizeConstraint(originalSizeConstraint);
+}
+
+void WorldPreferencesDialog::refreshCustomColourColumnWidths() const
+{
+	if (!m_customColoursGrid || !m_customTextLabel || !m_customBackLabel)
+		return;
+	int columnWidth = qMax(m_customTextLabel->sizeHint().width(), m_customBackLabel->sizeHint().width());
+	for (const QPushButton *button : m_customTextSwatches)
+	{
+		if (button)
+			columnWidth = qMax(columnWidth, button->sizeHint().width());
+	}
+	for (const QPushButton *button : m_customBackSwatches)
+	{
+		if (button)
+			columnWidth = qMax(columnWidth, button->sizeHint().width());
+	}
+	m_customColoursGrid->setColumnMinimumWidth(1, columnWidth);
+	m_customColoursGrid->setColumnMinimumWidth(2, columnWidth);
+}
+
+void WorldPreferencesDialog::refreshAnsiColourGeometry() const
+{
+	if (!m_ansiColoursGrid || !m_ansiNormalLabel || !m_ansiBoldLabel)
+		return;
+
+	const QFontMetrics metrics(m_ansiNormalLabel->font());
+	const int          headerTextWidth = qMax(metrics.horizontalAdvance(m_ansiNormalLabel->text()),
+	                                          metrics.horizontalAdvance(m_ansiBoldLabel->text())) +
+	                                     6;
+	int                swatchWidth     = qMax(28, headerTextWidth);
+	int                swatchHeight    = qMax(20, metrics.height());
+	if (QPushButton *const representative = m_ansiNormalSwatches.value(0))
+	{
+		QStyleOptionButton option;
+		option.initFrom(representative);
+		const QSize markerContents(metrics.horizontalAdvance(QLatin1Char('M')), metrics.height());
+		const QSize markerSize = representative->style()->sizeFromContents(QStyle::CT_PushButton, &option,
+		                                                                   markerContents, representative);
+		swatchWidth            = qMax(swatchWidth, markerSize.width());
+		swatchHeight           = qMax(swatchHeight, markerSize.height());
+	}
+
+	const QSize swatchSize(swatchWidth, swatchHeight);
+	m_ansiNormalLabel->setFixedWidth(swatchWidth);
+	m_ansiBoldLabel->setFixedWidth(swatchWidth);
+	for (QPushButton *const swatch : m_ansiNormalSwatches)
+	{
+		if (swatch)
+			swatch->setFixedSize(swatchSize);
+	}
+	for (QPushButton *const swatch : m_ansiBoldSwatches)
+	{
+		if (swatch)
+			swatch->setFixedSize(swatchSize);
+	}
+	m_ansiColoursGrid->setColumnMinimumWidth(0, metrics.horizontalAdvance(QStringLiteral("Magenta")) + 12);
+	m_ansiColoursGrid->setColumnMinimumWidth(1, swatchWidth);
+	m_ansiColoursGrid->setColumnMinimumWidth(2, swatchWidth);
+}
+
+void WorldPreferencesDialog::refreshInfoPageFont() const
+{
+	if (!m_infoPage)
+		return;
+
+	QFont infoFont = font();
+	if (infoFont.pointSizeF() > 0.0)
+		infoFont.setPointSizeF(qMax(8.0, infoFont.pointSizeF() - 2.0));
+	else if (infoFont.pixelSize() > 0)
+		infoFont.setPixelSize(qMax(1, infoFont.pixelSize() - 2));
+	if (m_infoPage->font() != infoFont)
+		m_infoPage->setFont(infoFont);
+}
+
+void WorldPreferencesDialog::applyDialogContentSize(const QSize contentMinimum)
+{
+	if (!contentMinimum.isValid())
+		return;
+	const QSize maximumSize = DialogSizingUtils::maximumClientSize(this);
+	if (m_pages && layout())
+	{
+		const int pageLeft = m_pages->mapTo(this, QPoint()).x();
+		const int maximumPageWidth =
+		    qMax(1, maximumSize.width() - pageLeft - layout()->contentsMargins().right());
+		if (m_pages->minimumWidth() > maximumPageWidth)
+			m_pages->setMinimumWidth(maximumPageWidth);
+	}
+	const QSize requiredMinimum  = contentMinimum.boundedTo(maximumSize);
+	const QSize sizeBeforeChange = m_dialogSizeBeforeRefresh.isValid() ? m_dialogSizeBeforeRefresh : size();
+	const QSize desiredSize      = DialogSizingUtils::desiredClientSizeForContentChange(
+	    sizeBeforeChange, m_lastAppliedDialogSize, m_desiredDialogSize, m_lastDialogContentMinimum,
+	    contentMinimum);
+	const QSize targetSize     = desiredSize.boundedTo(maximumSize);
+	m_lastDialogContentMinimum = contentMinimum;
+	m_desiredDialogSize        = desiredSize;
+	m_dialogSizeBeforeRefresh  = {};
+	const QSize relaxedMinimum = minimumSize().boundedTo(requiredMinimum);
+	if (minimumSize() != relaxedMinimum)
+		setMinimumSize(relaxedMinimum);
+	if (isVisible())
+		DialogSizingUtils::applyAvailableGeometry(this, targetSize);
+	else
+		resize(targetSize);
+	m_lastAppliedDialogSize = size();
+	if (minimumSize() != requiredMinimum)
+		setMinimumSize(requiredMinimum);
+}
+
+void WorldPreferencesDialog::scheduleDialogSizingRefresh()
+{
+	if (m_dialogSizingRefreshPending)
+		return;
+	m_dialogSizingRefreshPending = true;
+	QMetaObject::invokeMethod(
+	    this,
+	    [this]
+	    {
+		    m_dialogSizingRefreshPending = false;
+		    refreshDialogSizing();
+	    },
+	    Qt::QueuedConnection);
+}
+
+void WorldPreferencesDialog::finalizeInitialDialogSizing()
+{
+	if (m_initialDialogSizingFinalized)
+		return;
+	m_initialDialogSizingFinalized = true;
+	if (QWindow *const nativeWindow = windowHandle())
+		nativeWindow->removeEventFilter(this);
+	scheduleDialogSizingRefresh();
 }
 
 void WorldPreferencesDialog::setInitialPage(const Page page)
@@ -1544,6 +2023,9 @@ void WorldPreferencesDialog::accept()
 			m_runtime->setWorldAttribute(QStringLiteral("save_deleted_command"),
 			                             m_saveDeletedCommand->isChecked() ? QStringLiteral("1")
 			                                                               : QStringLiteral("0"));
+		if (m_partialSaveCharacterThreshold)
+			m_runtime->setWorldAttribute(QStringLiteral("partial_save_character_threshold"),
+			                             QString::number(m_partialSaveCharacterThreshold->value()));
 		if (m_ctrlZToEnd)
 			m_runtime->setWorldAttribute(QStringLiteral("ctrl_z_goes_to_end_of_buffer"),
 			                             m_ctrlZToEnd->isChecked() ? QStringLiteral("1")
@@ -1610,6 +2092,18 @@ void WorldPreferencesDialog::accept()
 			m_runtime->setWorldAttribute(QStringLiteral("auto_repeat"), m_autoRepeat->isChecked()
 			                                                                ? QStringLiteral("1")
 			                                                                : QStringLiteral("0"));
+		if (m_lowerCaseTabCompletion)
+			m_runtime->setWorldAttribute(QStringLiteral("lower_case_tab_completion"),
+			                             m_lowerCaseTabCompletion->isChecked() ? QStringLiteral("1")
+			                                                                   : QStringLiteral("0"));
+		if (m_tabCompletionExcludesSymbolPrefix)
+			m_runtime->setWorldAttribute(
+			    QStringLiteral("tab_completion_excludes_symbol_prefix"),
+			    m_tabCompletionExcludesSymbolPrefix->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+		if (m_tabCompletionExcludesSymbolSuffix)
+			m_runtime->setWorldAttribute(
+			    QStringLiteral("tab_completion_excludes_symbol_suffix"),
+			    m_tabCompletionExcludesSymbolSuffix->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
 		if (m_translateGerman)
 			m_runtime->setWorldAttribute(QStringLiteral("translate_german"), m_translateGerman->isChecked()
 			                                                                     ? QStringLiteral("1")
@@ -1618,10 +2112,6 @@ void WorldPreferencesDialog::accept()
 			m_runtime->setWorldAttribute(QStringLiteral("spell_check_on_send"),
 			                             m_spellCheckOnSend->isChecked() ? QStringLiteral("1")
 			                                                             : QStringLiteral("0"));
-		if (m_lowerCaseTabCompletion)
-			m_runtime->setWorldAttribute(QStringLiteral("lower_case_tab_completion"),
-			                             m_lowerCaseTabCompletion->isChecked() ? QStringLiteral("1")
-			                                                                   : QStringLiteral("0"));
 		if (m_translateBackslash)
 			m_runtime->setWorldAttribute(QStringLiteral("translate_backslash_sequences"),
 			                             m_translateBackslash->isChecked() ? QStringLiteral("1")
@@ -2146,7 +2636,11 @@ void WorldPreferencesDialog::accept()
 
 bool WorldPreferencesDialog::eventFilter(QObject *obj, QEvent *event)
 {
-	if (event->type() == QEvent::MouseButtonPress)
+	QWindow *const nativeWindow = windowHandle();
+	if (event && nativeWindow && obj == nativeWindow && event->type() == QEvent::Expose &&
+	    nativeWindow->isExposed())
+		finalizeInitialDialogSizing();
+	if (event && event->type() == QEvent::MouseButtonPress)
 	{
 		if (obj == m_chatTextColour)
 		{
@@ -2415,22 +2909,22 @@ void WorldPreferencesDialog::updateRuleViewModes()
 
 		if (treeMode)
 		{
-			if (const int index = rowToIndex(table, selectedRow(table)); index >= 0)
+			if (const quint64 runtimeId = ruleRuntimeIdForRow(table, selectedRow(table)); runtimeId != 0)
 			{
 				QSignalBlocker block(tree);
 				m_syncingRuleSelection = true;
-				tree->setCurrentItem(findTreeItemByIndex(tree, index));
+				tree->setCurrentItem(findTreeItemByRuntimeId(tree, runtimeId));
 				m_syncingRuleSelection = false;
 			}
 		}
 		else
 		{
-			const int index = currentTreeIndex(tree);
-			if (index >= 0)
+			const quint64 runtimeId = currentTreeRuleRuntimeId(tree);
+			if (runtimeId != 0)
 			{
 				QSignalBlocker block(table);
 				m_syncingRuleSelection = true;
-				selectRowByIndex(table, index);
+				selectRuleRowByRuntimeId(table, runtimeId);
 				m_syncingRuleSelection = false;
 			}
 		}
@@ -2613,7 +3107,7 @@ void WorldPreferencesDialog::doNotesFind(const bool again)
 		dialog.setWindowTitle(QStringLiteral("Find notes"));
 		auto *dialogLayout = new QVBoxLayout(&dialog);
 		auto *form         = new QFormLayout();
-		auto *combo        = new QComboBox(&dialog);
+		auto *combo        = new FontResponsiveComboBox(&dialog);
 		combo->setEditable(true);
 		combo->addItems(m_notesFindHistory);
 		if (!findText.isEmpty())
@@ -2713,26 +3207,46 @@ void WorldPreferencesDialog::applyListEdits()
 	{
 		for (int i = 0; i < m_customColourNames.size(); ++i)
 		{
-			const QString seq  = QString::number(i + 1);
-			const QString name = m_customColourNames[i] ? m_customColourNames[i]->text() : QString();
-			const QString text = formatColourValue(swatchButtonColour(m_customTextSwatches.value(i)));
-			const QString back = formatColourValue(swatchButtonColour(m_customBackSwatches.value(i)));
+			const QString seq      = QString::number(i + 1);
+			const QString seqIndex = QString::number(i);
+			const QString name     = m_customColourNames[i] ? m_customColourNames[i]->text() : QString();
+			const QString text     = formatColourValue(swatchButtonColour(m_customTextSwatches.value(i)));
+			const QString back     = formatColourValue(swatchButtonColour(m_customBackSwatches.value(i)));
+			bool          found    = false;
 			for (auto &colour : colours)
 			{
-				if (!colour.group.startsWith(QStringLiteral("custom/")))
+				if (colour.group != QMudColourGroup::kCustom)
 					continue;
-				if (colour.attributes.value(QStringLiteral("seq")) != seq)
+				bool      sequenceOk = false;
+				const int sequence   = colour.attributes.value(QStringLiteral("seq")).toInt(&sequenceOk);
+				if (!sequenceOk || sequence != i + 1)
 					continue;
-				if (colour.attributes.value(QStringLiteral("text")) != text ||
+				found = true;
+				if (colour.attributes.value(QStringLiteral("seq")) != seq ||
+				    colour.attributes.value(QStringLiteral("text")) != text ||
 				    colour.attributes.value(QStringLiteral("back")) != back ||
-				    colour.attributes.value(QStringLiteral("name")) != name)
+				    colour.attributes.value(QStringLiteral("name")) != name ||
+				    colour.attributes.value(QStringLiteral("seq_index")) != seqIndex)
 				{
+					colour.attributes.insert(QStringLiteral("seq"), seq);
+					colour.attributes.insert(QStringLiteral("seq_index"), seqIndex);
 					colour.attributes.insert(QStringLiteral("text"), text);
 					colour.attributes.insert(QStringLiteral("back"), back);
 					colour.attributes.insert(QStringLiteral("name"), name);
 					coloursChanged = true;
 				}
-				break;
+			}
+			if (!found)
+			{
+				WorldRuntime::Colour colour;
+				colour.group = QMudColourGroup::kCustom.toString();
+				colour.attributes.insert(QStringLiteral("seq"), seq);
+				colour.attributes.insert(QStringLiteral("seq_index"), seqIndex);
+				colour.attributes.insert(QStringLiteral("text"), text);
+				colour.attributes.insert(QStringLiteral("back"), back);
+				colour.attributes.insert(QStringLiteral("name"), name);
+				colours.push_back(colour);
+				coloursChanged = true;
 			}
 		}
 	}
@@ -2977,7 +3491,7 @@ void WorldPreferencesDialog::findMacro(const QString &text, const bool continueF
 		dialog.setWindowTitle(QStringLiteral("Find macro"));
 		auto *dialogLayout = new QVBoxLayout(&dialog);
 		auto *form         = new QFormLayout();
-		auto *combo        = new QComboBox(&dialog);
+		auto *combo        = new FontResponsiveComboBox(&dialog);
 		combo->setEditable(true);
 		combo->addItems(m_macroFindHistory);
 		if (!findText.isEmpty())
@@ -3569,8 +4083,8 @@ bool WorldPreferencesDialog::loadVariablesFromFile(const QString &fileName)
 void WorldPreferencesDialog::buildUi()
 {
 	auto *layout = new QVBoxLayout(this);
-	layout->setSizeConstraint(QLayout::SetNoConstraint);
 	auto *header = new GradientHeader(this);
+	header->setObjectName(QStringLiteral("worldPreferencesGradientHeader"));
 	header->setText(windowTitle());
 	if (AppController *app = AppController::instance())
 		header->setGradientEnabled(app->getGlobalOption(QStringLiteral("ColourGradientConfig")).toInt() != 0);
@@ -3720,7 +4234,7 @@ void WorldPreferencesDialog::buildUi()
 	m_port->setRange(1, 65535);
 	m_clearCachedButton = new QPushButton(QStringLiteral("Clear Cached IP"), mudGroup);
 	m_tlsEncryption     = new QCheckBox(QStringLiteral("TLS Encryption"), mudGroup);
-	m_tlsMethod         = new QComboBox(mudGroup);
+	m_tlsMethod         = new FontResponsiveComboBox(mudGroup);
 	m_tlsDisableCertificateValidation =
 	    new QCheckBox(QStringLiteral("Disable certificate validation"), mudGroup);
 	m_tlsMethod->addItem(QStringLiteral("Direct"), eTlsDirect);
@@ -3737,7 +4251,7 @@ void WorldPreferencesDialog::buildUi()
 
 	auto *proxyGroup  = new QGroupBox(QStringLiteral("Proxy"), generalPage);
 	auto *proxyLayout = new QFormLayout(proxyGroup);
-	m_proxyType       = new QComboBox(proxyGroup);
+	m_proxyType       = new FontResponsiveComboBox(proxyGroup);
 	m_proxyType->addItem(QStringLiteral("None"), eProxyServerNone);
 	m_proxyType->addItem(QStringLiteral("SOCKS4"), eProxyServerSocks4);
 	m_proxyType->addItem(QStringLiteral("SOCKS5"), eProxyServerSocks5);
@@ -3795,40 +4309,42 @@ void WorldPreferencesDialog::buildUi()
 	customLeftRow->setContentsMargins(0, 0, 0, 0);
 	constexpr int nameToSwatchGap = 16;
 	customLeftRow->setSpacing(nameToSwatchGap);
-	auto *customGrid = new QGridLayout();
+	auto *customGrid    = new QGridLayout();
+	m_customColoursGrid = customGrid;
 	customGrid->setHorizontalSpacing(8);
 	customGrid->setVerticalSpacing(4);
 	customGrid->setContentsMargins(0, 0, 0, 0);
 	customGrid->setSizeConstraint(QLayout::SetFixedSize);
 	constexpr QSize customSwatchSize(28, 20);
 	auto           *customNameLabel = new QLabel(QStringLiteral("Custom Colour Name"), customColoursPage);
-	auto           *customTextLabel = new QLabel(QStringLiteral("Text"), customColoursPage);
-	auto           *customBackLabel = new QLabel(QStringLiteral("Background"), customColoursPage);
+	m_customTextLabel               = new QLabel(QStringLiteral("Text"), customColoursPage);
+	m_customBackLabel               = new QLabel(QStringLiteral("Background"), customColoursPage);
+	auto *const customTextLabel     = m_customTextLabel;
+	auto *const customBackLabel     = m_customBackLabel;
 	customTextLabel->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
 	customBackLabel->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
 	customGrid->addWidget(customNameLabel, 0, 0, Qt::AlignLeft);
 	customGrid->addWidget(customTextLabel, 0, 1, Qt::AlignHCenter);
 	customGrid->addWidget(customBackLabel, 0, 2, Qt::AlignHCenter);
-	const int textLabelWidth = qMax(customTextLabel->sizeHint().width(), customSwatchSize.width());
-	const int backLabelWidth = qMax(customBackLabel->sizeHint().width(), customSwatchSize.width());
-	customGrid->setColumnMinimumWidth(1, textLabelWidth);
-	customGrid->setColumnMinimumWidth(2, backLabelWidth);
 	customGrid->setColumnStretch(0, 0);
-	customGrid->setColumnStretch(1, 0);
-	customGrid->setColumnStretch(2, 0);
+	customGrid->setColumnStretch(1, 1);
+	customGrid->setColumnStretch(2, 1);
 	m_customColourNames.resize(MAX_CUSTOM);
 	m_customTextSwatches.resize(MAX_CUSTOM);
 	m_customBackSwatches.resize(MAX_CUSTOM);
 	for (int i = 0; i < MAX_CUSTOM; ++i)
 	{
 		auto *nameEdit = new QLineEdit(customColoursPage);
+		nameEdit->setObjectName(QStringLiteral("customColourName%1").arg(i));
 		nameEdit->setText(QStringLiteral("Custom%1").arg(i + 1));
-		nameEdit->setFixedWidth(160);
+		nameEdit->setMinimumWidth(160);
 		auto *textSwatch = new QPushButton(customColoursPage);
+		textSwatch->setObjectName(QStringLiteral("customTextSwatch%1").arg(i));
 		textSwatch->setFixedSize(customSwatchSize);
 		textSwatch->setFlat(true);
 		textSwatch->setFocusPolicy(Qt::NoFocus);
 		auto *backSwatch = new QPushButton(customColoursPage);
+		backSwatch->setObjectName(QStringLiteral("customBackSwatch%1").arg(i));
 		backSwatch->setFixedSize(customSwatchSize);
 		backSwatch->setFlat(true);
 		backSwatch->setFocusPolicy(Qt::NoFocus);
@@ -3839,21 +4355,9 @@ void WorldPreferencesDialog::buildUi()
 		m_customTextSwatches[i] = textSwatch;
 		m_customBackSwatches[i] = backSwatch;
 	}
-	m_customSwap              = new QPushButton(QStringLiteral("<- Swap ->"), customColoursPage);
-	const int swatchSpanWidth = textLabelWidth + backLabelWidth + customGrid->horizontalSpacing();
-	const int swapMinWidth    = m_customSwap->sizeHint().width() + 8;
-	m_customSwap->setMinimumWidth(swapMinWidth);
-	const int    swapRowWidth = qMax(swatchSpanWidth, swapMinWidth);
-	const double swatchMid =
-	    (0.75 * textLabelWidth) + (0.5 * customGrid->horizontalSpacing()) + (0.25 * backLabelWidth);
-	const int swapOffset = qMax(0, static_cast<int>(std::lround(swatchMid - (swapMinWidth / 2.0))));
-	auto     *swapRow    = new QWidget(customColoursPage);
-	swapRow->setFixedWidth(swapRowWidth);
-	auto *swapLayout = new QHBoxLayout(swapRow);
-	swapLayout->setContentsMargins(swapOffset, 0, 0, 0);
-	swapLayout->addWidget(m_customSwap, 0, Qt::AlignLeft);
-	swapLayout->addStretch();
-	customGrid->addWidget(swapRow, MAX_CUSTOM + 1, 1, 1, 2, Qt::AlignLeft);
+	m_customSwap = new QPushButton(QStringLiteral("<- Swap ->"), customColoursPage);
+	m_customSwap->setObjectName(QStringLiteral("customColourSwapButton"));
+	customGrid->addWidget(m_customSwap, MAX_CUSTOM + 1, 1, 1, 2, Qt::AlignHCenter);
 	auto *customGridWidget = new QWidget(customColoursPage);
 	customGridWidget->setLayout(customGrid);
 	customGridWidget->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
@@ -3875,7 +4379,7 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!button)
 			return;
-		button->setFixedHeight(28);
+		button->setMinimumHeight(28);
 		button->setMinimumWidth(150);
 		button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	};
@@ -3982,11 +4486,17 @@ void WorldPreferencesDialog::buildUi()
 	// Logging
 	auto *loggingLayout = new QGridLayout(loggingPage);
 	m_logFilePreamble   = new QTextEdit(loggingPage);
-	m_substitutionHelp  = new QPushButton(QStringLiteral("?"), loggingPage);
-	m_editPreamble      = new QPushButton(QStringLiteral("..."), loggingPage);
-	m_logFilePostamble  = new QTextEdit(loggingPage);
-	m_editPostamble     = new QPushButton(QStringLiteral("..."), loggingPage);
-	m_standardPreamble  = new QPushButton(QStringLiteral("Standard HTML preamble/postamble"), loggingPage);
+	m_substitutionHelp  = new QToolButton(loggingPage);
+	configureCompactTextButton(m_substitutionHelp, QStringLiteral("substitutionHelpButton"),
+	                           QStringLiteral("?"), QStringLiteral("Show substitution help"));
+	m_editPreamble = new QToolButton(loggingPage);
+	configureCompactTextButton(m_editPreamble, QStringLiteral("editLogPreambleButton"), QStringLiteral("..."),
+	                           QStringLiteral("Edit log file preamble"));
+	m_logFilePostamble = new QTextEdit(loggingPage);
+	m_editPostamble    = new QToolButton(loggingPage);
+	configureCompactTextButton(m_editPostamble, QStringLiteral("editLogPostambleButton"),
+	                           QStringLiteral("..."), QStringLiteral("Edit log file postamble"));
+	m_standardPreamble = new QPushButton(QStringLiteral("Standard HTML preamble/postamble"), loggingPage);
 	m_logFilePreamble->setTabChangesFocus(true);
 	m_logFilePostamble->setTabChangesFocus(true);
 	m_logOutput           = new QCheckBox(QStringLiteral("Log Output"), loggingPage);
@@ -4000,10 +4510,6 @@ void WorldPreferencesDialog::buildUi()
 	m_logRotateGzip       = new QCheckBox(QStringLiteral("Gzip logs on close"), loggingPage);
 	m_autoLogFileName     = new QLineEdit(loggingPage);
 	m_browseLogFile       = new QPushButton(QStringLiteral("&Browse..."), loggingPage);
-	m_editPreamble->setFixedWidth(24);
-	m_editPostamble->setFixedWidth(24);
-	m_substitutionHelp->setFixedWidth(24);
-
 	loggingLayout->addWidget(new QLabel(QStringLiteral("File Preamble"), loggingPage), 0, 0);
 	loggingLayout->addWidget(m_logFilePreamble, 0, 1);
 	auto *preambleButtons = new QVBoxLayout();
@@ -4135,12 +4641,12 @@ void WorldPreferencesDialog::buildUi()
 		        m_logFilePreamble->setPlainText(preamble);
 		        m_logFilePostamble->setPlainText(postamble);
 	        });
-	connect(m_editPreamble, &QPushButton::clicked, this, [this]
+	connect(m_editPreamble, &QToolButton::clicked, this, [this]
 	        { editPlainTextWithDialog(this, m_logFilePreamble, QStringLiteral("Edit log file preamble")); });
 	connect(
-	    m_editPostamble, &QPushButton::clicked, this, [this]
+	    m_editPostamble, &QToolButton::clicked, this, [this]
 	    { editPlainTextWithDialog(this, m_logFilePostamble, QStringLiteral("Edit log file postamble")); });
-	connect(m_substitutionHelp, &QPushButton::clicked, this,
+	connect(m_substitutionHelp, &QToolButton::clicked, this,
 	        [this]
 	        {
 		        QDialog dialog(this);
@@ -4169,21 +4675,20 @@ void WorldPreferencesDialog::buildUi()
 	auto *ansiColoursLayout = new QVBoxLayout(ansiColoursPage);
 	auto *ansiTop           = new QHBoxLayout();
 	auto *ansiSwatchGrid    = new QGridLayout();
+	m_ansiColoursGrid       = ansiSwatchGrid;
 	ansiSwatchGrid->setHorizontalSpacing(4);
 	ansiSwatchGrid->setVerticalSpacing(0);
 	ansiSwatchGrid->setContentsMargins(0, 0, 0, 0);
-	const int headerTextWidth =
-	    QFontMetrics(ansiColoursPage->font()).horizontalAdvance(QStringLiteral("Normal")) + 6;
-	const int   swatchWidth = qMax(28, headerTextWidth);
-	const QSize swatchSize(swatchWidth, 20);
-	auto       *normalHeader = new QLabel(QStringLiteral("Normal"), ansiColoursPage);
+	auto *normalHeader = new QLabel(QStringLiteral("Normal"), ansiColoursPage);
+	normalHeader->setObjectName(QStringLiteral("ansiNormalHeaderLabel"));
 	normalHeader->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
 	normalHeader->setContentsMargins(0, 0, 0, 0);
-	normalHeader->setFixedWidth(swatchSize.width());
 	auto *boldHeader = new QLabel(QStringLiteral("Bold"), ansiColoursPage);
+	boldHeader->setObjectName(QStringLiteral("ansiBoldHeaderLabel"));
 	boldHeader->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
 	boldHeader->setContentsMargins(0, 0, 0, 0);
-	boldHeader->setFixedWidth(swatchSize.width());
+	m_ansiNormalLabel = normalHeader;
+	m_ansiBoldLabel   = boldHeader;
 	ansiSwatchGrid->addWidget(normalHeader, 0, 1, Qt::AlignBottom | Qt::AlignHCenter);
 	ansiSwatchGrid->addWidget(boldHeader, 0, 2, Qt::AlignBottom | Qt::AlignHCenter);
 	static const QStringList colourNames = {
@@ -4197,7 +4702,7 @@ void WorldPreferencesDialog::buildUi()
 		nameLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 		ansiSwatchGrid->addWidget(nameLabel, i + 1, 0);
 		auto *normalSwatch = new QPushButton(ansiColoursPage);
-		normalSwatch->setFixedSize(swatchSize);
+		normalSwatch->setObjectName(QStringLiteral("ansiNormalSwatch%1").arg(i));
 		normalSwatch->setFlat(true);
 		normalSwatch->setFocusPolicy(Qt::NoFocus);
 		if (i == 0)
@@ -4207,17 +4712,13 @@ void WorldPreferencesDialog::buildUi()
 		ansiSwatchGrid->addWidget(normalSwatch, i + 1, 1, Qt::AlignHCenter);
 		m_ansiNormalSwatches[i] = normalSwatch;
 		auto *boldSwatch        = new QPushButton(ansiColoursPage);
-		boldSwatch->setFixedSize(swatchSize);
+		boldSwatch->setObjectName(QStringLiteral("ansiBoldSwatch%1").arg(i));
 		boldSwatch->setFlat(true);
 		boldSwatch->setFocusPolicy(Qt::NoFocus);
 		ansiSwatchGrid->addWidget(boldSwatch, i + 1, 2, Qt::AlignHCenter);
 		m_ansiBoldSwatches[i] = boldSwatch;
 	}
-	const int nameWidth =
-	    QFontMetrics(ansiColoursPage->font()).horizontalAdvance(QStringLiteral("Magenta")) + 12;
-	ansiSwatchGrid->setColumnMinimumWidth(0, nameWidth);
-	ansiSwatchGrid->setColumnMinimumWidth(1, swatchSize.width());
-	ansiSwatchGrid->setColumnMinimumWidth(2, swatchSize.width());
+	refreshAnsiColourGeometry();
 	ansiSwatchGrid->setColumnStretch(1, 0);
 	ansiSwatchGrid->setColumnStretch(2, 0);
 	auto *legendB = new QLabel(QStringLiteral("B = Normal Background"), ansiColoursPage);
@@ -4527,7 +5028,7 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!button)
 			return;
-		button->setFixedHeight(28);
+		button->setMinimumHeight(28);
 		button->setMinimumWidth(150);
 		button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	};
@@ -5071,36 +5572,6 @@ void WorldPreferencesDialog::buildUi()
 			        m_runtime->setVariables(combined);
 			        populateVariables();
 		        });
-	if (m_editVariablesFilter)
-		connect(m_editVariablesFilter, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        QDialog dialog(this);
-			        dialog.setWindowTitle(QStringLiteral("Edit variable filter"));
-			        auto *dialogLayout = new QVBoxLayout(&dialog);
-			        auto *edit         = new QTextEdit(&dialog);
-			        edit->setPlainText(m_variableFilterText);
-			        dialogLayout->addWidget(edit);
-			        auto *buttons =
-			            new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-			        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-			        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-			        dialogLayout->addWidget(buttons);
-			        if (dialog.exec() != QDialog::Accepted)
-				        return;
-			        m_variableFilterText = edit->toPlainText();
-			        if (m_filterVariables)
-				        m_filterVariables->setChecked(true);
-			        populateVariables();
-			        updateVariableControls();
-		        });
-	if (m_filterVariables)
-		connect(m_filterVariables, &QCheckBox::toggled, this,
-		        [this]
-		        {
-			        populateVariables();
-			        updateVariableControls();
-		        });
 	// Output
 	auto *outputLayout = new QGridLayout(outputPage);
 	auto *outputLeft   = new QVBoxLayout();
@@ -5124,10 +5595,10 @@ void WorldPreferencesDialog::buildUi()
 	auto *spacingLayout = new QGridLayout(spacingGroup);
 	m_pixelOffset       = new QSpinBox(spacingGroup);
 	m_pixelOffset->setRange(0, 20);
-	m_pixelOffset->setMaximumWidth(70);
+	configureSpinBoxWidthForRange(m_pixelOffset);
 	m_lineSpacing = new QSpinBox(spacingGroup);
 	m_lineSpacing->setRange(0, 100);
-	m_lineSpacing->setMaximumWidth(70);
+	configureSpinBoxWidthForRange(m_lineSpacing);
 	spacingLayout->addWidget(new QLabel(QStringLiteral("Text offset from edge"), spacingGroup), 0, 0);
 	spacingLayout->addWidget(m_pixelOffset, 0, 1);
 	spacingLayout->addWidget(new QLabel(QStringLiteral("Line spacing (pixels)"), spacingGroup), 1, 0);
@@ -5148,7 +5619,7 @@ void WorldPreferencesDialog::buildUi()
 	m_outputFontHeight->setButtonSymbols(QAbstractSpinBox::NoButtons);
 	m_outputFontHeight->setFrame(false);
 	m_outputFontHeight->setSuffix(QStringLiteral(" pt."));
-	m_outputFontHeight->setMaximumWidth(70);
+	configureSpinBoxWidthForRange(m_outputFontHeight);
 	m_useDefaultOutputFont = new QCheckBox(QStringLiteral("Override with default"), outputFontBox);
 	m_showBold             = new QCheckBox(QStringLiteral("Bold"), outputFontBox);
 	m_showItalic           = new QCheckBox(QStringLiteral("Italic"), outputFontBox);
@@ -5335,7 +5806,7 @@ void WorldPreferencesDialog::buildUi()
 	    new QCheckBox(QStringLiteral("Carriage-return clears line"), outputOptionsWidget);
 	m_utf8                    = new QCheckBox(QStringLiteral("UTF-8 (Unicode)"), outputOptionsWidget);
 	auto *legacyEncodingLabel = new QLabel(QStringLiteral("Legacy encoding:"), outputOptionsWidget);
-	m_legacyEncoding          = new QComboBox(outputOptionsWidget);
+	m_legacyEncoding          = new FontResponsiveComboBox(outputOptionsWidget);
 	m_legacyEncoding->setObjectName(QStringLiteral("legacyEncodingCombo"));
 	m_legacyEncoding->setAccessibleName(legacyEncodingLabel->text());
 	m_legacyEncoding->setMinimumContentsLength(20);
@@ -5408,13 +5879,13 @@ void WorldPreferencesDialog::buildUi()
 	auto *fadeLayout               = new QGridLayout(fadeGroup);
 	m_fadeOutputBufferAfterSeconds = new QSpinBox(fadeGroup);
 	m_fadeOutputBufferAfterSeconds->setRange(0, 3600);
-	m_fadeOutputBufferAfterSeconds->setMaximumWidth(80);
+	configureSpinBoxWidthForRange(m_fadeOutputBufferAfterSeconds);
 	m_fadeOutputOpacityPercent = new QSpinBox(fadeGroup);
 	m_fadeOutputOpacityPercent->setRange(0, 100);
-	m_fadeOutputOpacityPercent->setMaximumWidth(80);
+	configureSpinBoxWidthForRange(m_fadeOutputOpacityPercent);
 	m_fadeOutputSeconds = new QSpinBox(fadeGroup);
 	m_fadeOutputSeconds->setRange(1, 60);
-	m_fadeOutputSeconds->setMaximumWidth(80);
+	configureSpinBoxWidthForRange(m_fadeOutputSeconds);
 	fadeLayout->addWidget(new QLabel(QStringLiteral("Start after (seconds)"), fadeGroup), 0, 0);
 	fadeLayout->addWidget(m_fadeOutputBufferAfterSeconds, 0, 1);
 	fadeLayout->addWidget(new QLabel(QStringLiteral("Target opacity (%)"), fadeGroup), 1, 0);
@@ -5445,7 +5916,7 @@ void WorldPreferencesDialog::buildUi()
 	auto           *outputWindowBox    = new QGroupBox(QStringLiteral("Output Window"), commandsPage);
 	auto           *outputWindowLayout = new QGridLayout(outputWindowBox);
 	m_displayMyInput                   = new QCheckBox(QStringLiteral("Echo My &Input In:"), outputWindowBox);
-	m_echoColour                       = new QComboBox(outputWindowBox);
+	m_echoColour                       = new FontResponsiveComboBox(outputWindowBox);
 	m_echoColour->addItem(QStringLiteral("(no change)"));
 	for (int i = 0; i < MAX_CUSTOM; ++i)
 	{
@@ -5476,8 +5947,9 @@ void WorldPreferencesDialog::buildUi()
 	auto *speedWalkLayout = new QGridLayout(speedWalkBox);
 	m_enableSpeedWalk     = new QCheckBox(QStringLiteral("Enable &Speed Walking, prefix is:"), speedWalkBox);
 	m_speedWalkPrefix     = new QLineEdit(speedWalkBox);
+	m_speedWalkPrefix->setObjectName(QStringLiteral("speedWalkPrefixEdit"));
 	m_speedWalkPrefix->setMaxLength(1);
-	m_speedWalkPrefix->setMaximumWidth(40);
+	configureCompactLineEditWidth(m_speedWalkPrefix, 40, 1);
 	m_speedWalkFiller = new QLineEdit(speedWalkBox);
 	m_speedWalkDelay  = new QSpinBox(speedWalkBox);
 	m_speedWalkDelay->setRange(0, 30000);
@@ -5500,8 +5972,9 @@ void WorldPreferencesDialog::buildUi()
 	auto *commandStackLayout = new QGridLayout(commandStackBox);
 	m_enableCommandStack     = new QCheckBox(QStringLiteral("&Command Stacking Using:"), commandStackBox);
 	m_commandStackCharacter  = new QLineEdit(commandStackBox);
+	m_commandStackCharacter->setObjectName(QStringLiteral("commandStackCharacterEdit"));
 	m_commandStackCharacter->setMaxLength(1);
-	m_commandStackCharacter->setMaximumWidth(40);
+	configureCompactLineEditWidth(m_commandStackCharacter, 40, 1);
 	commandStackLayout->addWidget(m_enableCommandStack, 0, 0);
 	commandStackLayout->addWidget(m_commandStackCharacter, 0, 1);
 	commandStackLayout->setColumnStretch(0, 1);
@@ -5589,6 +6062,10 @@ void WorldPreferencesDialog::buildUi()
 
 	m_autoRepeat             = new QCheckBox(QStringLiteral("Auto-repeat Command"), commandsPage);
 	m_lowerCaseTabCompletion = new QCheckBox(QStringLiteral("Tab Completion In Lower Case"), commandsPage);
+	m_tabCompletionExcludesSymbolPrefix =
+	    new QCheckBox(QStringLiteral("Tab Completion Excludes Symbol Prefix"), commandsPage);
+	m_tabCompletionExcludesSymbolSuffix =
+	    new QCheckBox(QStringLiteral("Tab Completion Excludes Symbol Suffix"), commandsPage);
 	m_translateGerman        = new QCheckBox(QStringLiteral("Translate German characters"), commandsPage);
 	m_spellCheckOnSend       = new QCheckBox(QStringLiteral("Spell Check On Send"), commandsPage);
 	m_translateBackslash     = new QCheckBox(QStringLiteral("&Translate Backslash Sequences"), commandsPage);
@@ -5596,6 +6073,8 @@ void WorldPreferencesDialog::buildUi()
 	m_noEchoOff              = new QCheckBox(QStringLiteral("Ignore 'Echo Off' messages"), commandsPage);
 	commandsRight->addWidget(m_autoRepeat);
 	commandsRight->addWidget(m_lowerCaseTabCompletion);
+	commandsRight->addWidget(m_tabCompletionExcludesSymbolPrefix);
+	commandsRight->addWidget(m_tabCompletionExcludesSymbolSuffix);
 	commandsRight->addWidget(m_translateGerman);
 	commandsRight->addWidget(m_spellCheckOnSend);
 	commandsRight->addWidget(m_translateBackslash);
@@ -5653,6 +6132,9 @@ void WorldPreferencesDialog::buildUi()
 	m_doubleClickSends->setVisible(false);
 	m_saveDeletedCommand = new QCheckBox(commandsPage);
 	m_saveDeletedCommand->setVisible(false);
+	m_partialSaveCharacterThreshold = new QSpinBox(commandsPage);
+	m_partialSaveCharacterThreshold->setRange(0, 200);
+	m_partialSaveCharacterThreshold->setVisible(false);
 	m_arrowsChangeHistory = new QCheckBox(commandsPage);
 	m_arrowsChangeHistory->setVisible(false);
 	m_arrowRecallsPartial = new QCheckBox(commandsPage);
@@ -5923,10 +6405,22 @@ void WorldPreferencesDialog::buildUi()
 		    doubleClickLayout->addWidget(doubleClickPaste);
 		    doubleClickLayout->addWidget(doubleClickSend);
 
-		    auto *deletingBox    = new QGroupBox(QStringLiteral("Deleting"), &dialog);
-		    auto *deletingLayout = new QVBoxLayout(deletingBox);
-		    auto *escapeDeletes  = new QCheckBox(QStringLiteral("&Escape Deletes Typing"), deletingBox);
-		    auto *saveDeleted    = new QCheckBox(QStringLiteral("Save Deleted Command"), deletingBox);
+		    auto *deletingBox       = new QGroupBox(QStringLiteral("Deleting"), &dialog);
+		    auto *deletingLayout    = new QVBoxLayout(deletingBox);
+		    auto *escapeDeletes     = new QCheckBox(QStringLiteral("&Escape Deletes Typing"), deletingBox);
+		    auto *saveDeleted       = new QCheckBox(QStringLiteral("Save Deleted Command"), deletingBox);
+		    auto *partialSaveRow    = new QWidget(deletingBox);
+		    auto *partialSaveLayout = new QHBoxLayout(partialSaveRow);
+		    partialSaveLayout->setContentsMargins(24, 0, 0, 0);
+		    auto *partialSaveLabel =
+		        new QLabel(QStringLiteral("Partial Save Character Threshold"), partialSaveRow);
+		    auto *partialSaveThreshold = new QSpinBox(partialSaveRow);
+		    partialSaveThreshold->setRange(0, 200);
+		    configureSpinBoxWidthForRange(partialSaveThreshold);
+		    partialSaveLabel->setBuddy(partialSaveThreshold);
+		    partialSaveLayout->addWidget(partialSaveLabel);
+		    partialSaveLayout->addWidget(partialSaveThreshold);
+		    partialSaveLayout->addStretch();
 		    auto *confirmReplace =
 		        new QCheckBox(QStringLiteral("Confirm Before &Replacing Typing"), deletingBox);
 		    auto *ctrlBackspace =
@@ -5935,12 +6429,17 @@ void WorldPreferencesDialog::buildUi()
 			    escapeDeletes->setChecked(m_escapeDeletesInput->isChecked());
 		    if (m_saveDeletedCommand)
 			    saveDeleted->setChecked(m_saveDeletedCommand->isChecked());
+		    if (m_partialSaveCharacterThreshold)
+			    partialSaveThreshold->setValue(m_partialSaveCharacterThreshold->value());
+		    partialSaveRow->setEnabled(saveDeleted->isChecked());
+		    connect(saveDeleted, &QCheckBox::toggled, partialSaveRow, &QWidget::setEnabled);
 		    if (m_confirmBeforeReplacingTyping)
 			    confirmReplace->setChecked(m_confirmBeforeReplacingTyping->isChecked());
 		    if (m_ctrlBackspaceDeletesLastWord)
 			    ctrlBackspace->setChecked(m_ctrlBackspaceDeletesLastWord->isChecked());
 		    deletingLayout->addWidget(escapeDeletes);
 		    deletingLayout->addWidget(saveDeleted);
+		    deletingLayout->addWidget(partialSaveRow);
 		    deletingLayout->addWidget(confirmReplace);
 		    deletingLayout->addWidget(ctrlBackspace);
 
@@ -5998,6 +6497,8 @@ void WorldPreferencesDialog::buildUi()
 			    m_escapeDeletesInput->setChecked(escapeDeletes->isChecked());
 		    if (m_saveDeletedCommand)
 			    m_saveDeletedCommand->setChecked(saveDeleted->isChecked());
+		    if (m_partialSaveCharacterThreshold)
+			    m_partialSaveCharacterThreshold->setValue(partialSaveThreshold->value());
 		    if (m_confirmBeforeReplacingTyping)
 			    m_confirmBeforeReplacingTyping->setChecked(confirmReplace->isChecked());
 		    if (m_ctrlBackspaceDeletesLastWord)
@@ -6064,7 +6565,7 @@ void WorldPreferencesDialog::buildUi()
 	m_enableScripts           = new QCheckBox(QStringLiteral("Enable scripting"), scriptingPage);
 	m_warnIfScriptingInactive = new QCheckBox(QStringLiteral("Warn if inactive"), scriptingPage);
 	m_scriptIsActive          = new QLabel(QStringLiteral("(inactive)"), scriptingPage);
-	m_scriptLanguage          = new QComboBox(scriptingPage);
+	m_scriptLanguage          = new FontResponsiveComboBox(scriptingPage);
 	m_scriptLanguage->addItem(QStringLiteral("Lua"), QStringLiteral("Lua"));
 	m_scriptLanguage->setVisible(false);
 	m_scriptFile       = new QLineEdit(scriptingPage);
@@ -6076,10 +6577,11 @@ void WorldPreferencesDialog::buildUi()
 	m_chooseScriptEditor   = new QPushButton(QStringLiteral("Choose &Editor..."), scriptingPage);
 	m_scriptEditor         = new QLineEdit(scriptingPage);
 	m_editorWindowName     = new QLineEdit(scriptingPage);
-	m_scriptReloadOption   = new QComboBox(scriptingPage);
+	m_scriptReloadOption   = new FontResponsiveComboBox(scriptingPage);
 	m_scriptErrorsToOutput = new QCheckBox(QStringLiteral("Note errors"), scriptingPage);
 	m_logScriptErrors      = new QCheckBox(QStringLiteral("Log script errors"), scriptingPage);
-	m_scriptTextColour     = new QComboBox(scriptingPage);
+	m_scriptTextColour     = new FontResponsiveComboBox(scriptingPage);
+	m_scriptTextColour->setObjectName(QStringLiteral("scriptTextColourCombo"));
 	m_scriptReloadOption->addItem(QStringLiteral("Confirm"), eReloadConfirm);
 	m_scriptReloadOption->addItem(QStringLiteral("Reload always"), eReloadAlways);
 	m_scriptReloadOption->addItem(QStringLiteral("Reload never"), eReloadNever);
@@ -6096,7 +6598,8 @@ void WorldPreferencesDialog::buildUi()
 	m_scriptExecutionTime = new QLabel(QStringLiteral("-"), scriptingPage);
 
 	auto *scriptPrefixLabel = new QLabel(QStringLiteral("Script"), scriptingPage);
-	m_scriptPrefix->setFixedWidth(200);
+	m_scriptPrefix->setObjectName(QStringLiteral("scriptPrefixEdit"));
+	m_scriptPrefix->setMinimumWidth(200);
 	auto *scriptingTopLayout = new QGridLayout();
 	scriptingTopLayout->addWidget(scriptPrefixLabel, 0, 0, Qt::AlignLeft);
 	scriptingTopLayout->addWidget(m_scriptPrefix, 0, 1, 1, 2, Qt::AlignLeft);
@@ -6136,7 +6639,8 @@ void WorldPreferencesDialog::buildUi()
 		m_scriptTextColour->addItem(name);
 	}
 	updateScriptNoteColourItems();
-	m_scriptTextColour->setFixedWidth(120);
+	m_scriptTextColour->setMinimumContentsLength(12);
+	m_scriptTextColour->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
 	connect(m_scriptTextColour, qOverload<int>(&QComboBox::currentIndexChanged), this,
 	        [this](const int) { updateScriptNoteSwatches(); });
 	noteLayout->addWidget(m_scriptErrorsToOutput);
@@ -6577,8 +7081,9 @@ void WorldPreferencesDialog::buildUi()
 	m_enableTriggerSounds = new QCheckBox(QStringLiteral("Enable Trigger S&ounds"), triggersPage);
 	m_useDefaultTriggers  = new QCheckBox(QStringLiteral("O&verride with default triggers"), triggersPage);
 	m_filterTriggers      = new QCheckBox(QStringLiteral("F&ilter by:"), triggersPage);
-	m_editTriggersFilter  = new QPushButton(QStringLiteral("..."), triggersPage);
-	m_editTriggersFilter->setFixedWidth(24);
+	m_editTriggersFilter  = new QToolButton(triggersPage);
+	configureCompactTextButton(m_editTriggersFilter, QStringLiteral("editTriggersFilterButton"),
+	                           QStringLiteral("..."), QStringLiteral("Edit trigger filter"));
 	triggerOptions->setContentsMargins(0, 0, 0, 0);
 	triggerOptions->setHorizontalSpacing(12);
 	triggerOptions->setVerticalSpacing(4);
@@ -6639,8 +7144,9 @@ void WorldPreferencesDialog::buildUi()
 	m_enableAliases     = new QCheckBox(QStringLiteral("Ena&ble Aliases"), aliasesPage);
 	m_useDefaultAliases = new QCheckBox(QStringLiteral("O&verride with default aliases"), aliasesPage);
 	m_filterAliases     = new QCheckBox(QStringLiteral("F&ilter by:"), aliasesPage);
-	m_editAliasesFilter = new QPushButton(QStringLiteral("..."), aliasesPage);
-	m_editAliasesFilter->setFixedWidth(24);
+	m_editAliasesFilter = new QToolButton(aliasesPage);
+	configureCompactTextButton(m_editAliasesFilter, QStringLiteral("editAliasesFilterButton"),
+	                           QStringLiteral("..."), QStringLiteral("Edit alias filter"));
 	aliasOptions->setContentsMargins(0, 0, 0, 0);
 	aliasOptions->setHorizontalSpacing(12);
 	aliasOptions->setVerticalSpacing(4);
@@ -6711,8 +7217,9 @@ void WorldPreferencesDialog::buildUi()
 	m_enableTimers     = new QCheckBox(QStringLiteral("Enable &Timers"), timersPage);
 	m_useDefaultTimers = new QCheckBox(QStringLiteral("O&verride with default timers"), timersPage);
 	m_filterTimers     = new QCheckBox(QStringLiteral("F&ilter by:"), timersPage);
-	m_editTimersFilter = new QPushButton(QStringLiteral("..."), timersPage);
-	m_editTimersFilter->setFixedWidth(24);
+	m_editTimersFilter = new QToolButton(timersPage);
+	configureCompactTextButton(m_editTimersFilter, QStringLiteral("editTimersFilterButton"),
+	                           QStringLiteral("..."), QStringLiteral("Edit timer filter"));
 	m_editTimerButton     = new QPushButton(QStringLiteral("&Edit..."), timersPage);
 	m_deleteTimerButton   = new QPushButton(QStringLiteral("&Remove"), timersPage);
 	m_findTimerButton     = new QPushButton(QStringLiteral("&Find..."), timersPage);
@@ -6739,7 +7246,7 @@ void WorldPreferencesDialog::buildUi()
 	timerButtons->setVerticalSpacing(4);
 	timerButtons->setColumnStretch(6, 1);
 	timersLayout->addLayout(timerButtons);
-	connect(m_editTriggersFilter, &QPushButton::clicked, this,
+	connect(m_editTriggersFilter, &QToolButton::clicked, this,
 	        [this]
 	        {
 		        if (!editFilterDialog(this, m_triggerFilterText, QStringLiteral("Edit trigger filter")))
@@ -6755,7 +7262,7 @@ void WorldPreferencesDialog::buildUi()
 		        populateTriggers();
 		        updateTriggerControls();
 	        });
-	connect(m_editAliasesFilter, &QPushButton::clicked, this,
+	connect(m_editAliasesFilter, &QToolButton::clicked, this,
 	        [this]
 	        {
 		        if (!editFilterDialog(this, m_aliasFilterText, QStringLiteral("Edit alias filter")))
@@ -6771,7 +7278,7 @@ void WorldPreferencesDialog::buildUi()
 		        populateAliases();
 		        updateAliasControls();
 	        });
-	connect(m_editTimersFilter, &QPushButton::clicked, this,
+	connect(m_editTimersFilter, &QToolButton::clicked, this,
 	        [this]
 	        {
 		        if (!editFilterDialog(this, m_timerFilterText, QStringLiteral("Edit timer filter")))
@@ -6795,8 +7302,9 @@ void WorldPreferencesDialog::buildUi()
 	auto *variableOptions = new QHBoxLayout();
 	m_variablesCount      = new QLabel(QStringLiteral("0 items."), variablesPage);
 	m_filterVariables     = new QCheckBox(QStringLiteral("F&ilter by:"), variablesPage);
-	m_editVariablesFilter = new QPushButton(QStringLiteral("..."), variablesPage);
-	m_editVariablesFilter->setFixedWidth(24);
+	m_editVariablesFilter = new QToolButton(variablesPage);
+	configureCompactTextButton(m_editVariablesFilter, QStringLiteral("editVariablesFilterButton"),
+	                           QStringLiteral("..."), QStringLiteral("Edit variable filter"));
 	variableOptions->addWidget(m_variablesCount);
 	variableOptions->addStretch();
 	varsLayout->addLayout(variableOptions);
@@ -6933,10 +7441,9 @@ void WorldPreferencesDialog::buildUi()
 	pasteLayout->addStretch();
 
 	// Info
-	QFont infoFont = infoPage->font();
-	if (infoFont.pointSize() > 0)
-		infoFont.setPointSize(qMax(8, infoFont.pointSize() - 2));
-	infoPage->setFont(infoFont);
+	m_infoPage = infoPage;
+	m_infoPage->setObjectName(QStringLiteral("worldPreferencesInfoPage"));
+	refreshInfoPageFont();
 	auto *infoLayout           = new QVBoxLayout(infoPage);
 	m_infoWorldFile            = new QLabel(infoPage);
 	m_infoWorldFileVersion     = new QLabel(infoPage);
@@ -7188,18 +7695,20 @@ void WorldPreferencesDialog::buildUi()
 	autoSayGrid->addWidget(autoSayExclusions, 0, 0, 1, 2);
 	auto *autoSayOverrideLabel = new QLabel(QStringLiteral("Override"), autoSayGroup);
 	m_autoSayOverridePrefix    = new QLineEdit(autoSayGroup);
-	m_autoSayOverridePrefix->setFixedWidth(60);
+	m_autoSayOverridePrefix->setObjectName(QStringLiteral("autoSayOverridePrefixEdit"));
+	m_autoSayOverridePrefix->setMinimumWidth(60);
 	autoSayGrid->addWidget(autoSayOverrideLabel, 1, 0, Qt::AlignLeft);
 	autoSayGrid->addWidget(m_autoSayOverridePrefix, 1, 1, Qt::AlignLeft);
 	auto *autoSayLabel = new QLabel(QStringLiteral("Auto Say"), autoSayGroup);
 	m_autoSayString    = new QLineEdit(autoSayGroup);
-	m_autoSayString->setFixedWidth(200);
+	m_autoSayString->setObjectName(QStringLiteral("autoSayStringEdit"));
+	m_autoSayString->setMinimumWidth(200);
 	autoSayGrid->addWidget(autoSayLabel, 2, 0, Qt::AlignLeft);
 	autoSayGrid->addWidget(m_autoSayString, 2, 1, Qt::AlignLeft);
-	autoSayLayout->addWidget(autoSayGroup, 0, Qt::AlignHCenter);
 	m_reEvaluateAutoSay = new QCheckBox(
 	    QStringLiteral("Send auto-say response to command interpreter (for aliases etc)"), autoSayPage);
-	auto *autoSayFooter       = new QWidget(autoSayPage);
+	auto *autoSayFooter = new QWidget(autoSayPage);
+	autoSayFooter->setObjectName(QStringLiteral("autoSayFooter"));
 	auto *autoSayFooterLayout = new QHBoxLayout(autoSayFooter);
 	autoSayFooterLayout->setContentsMargins(0, 0, 0, 0);
 	autoSayFooterLayout->addWidget(m_reEvaluateAutoSay);
@@ -7213,11 +7722,12 @@ void WorldPreferencesDialog::buildUi()
 	const QRect autoSayContents = autoSayGroup->style()->subControlRect(
 	    QStyle::CC_GroupBox, &autoSayOption, QStyle::SC_GroupBoxContents, autoSayGroup);
 	autoSayFooterLayout->setContentsMargins(autoSayContents.left(), 0, 0, 0);
-	const int autoSayMinimumWidth = m_reEvaluateAutoSay->sizeHint().width() + autoSayContents.left();
-	const int autoSayLayoutWidth  = qMax(autoSayGroup->sizeHint().width(), autoSayMinimumWidth);
-	autoSayGroup->setMinimumWidth(autoSayLayoutWidth);
-	autoSayFooter->setFixedWidth(autoSayLayoutWidth);
-	autoSayLayout->addWidget(autoSayFooter, 0, Qt::AlignHCenter);
+	auto *autoSayContent       = new QWidget(autoSayPage);
+	auto *autoSayContentLayout = new QVBoxLayout(autoSayContent);
+	autoSayContentLayout->setContentsMargins(0, 0, 0, 0);
+	autoSayContentLayout->addWidget(autoSayGroup);
+	autoSayContentLayout->addWidget(autoSayFooter);
+	autoSayLayout->addWidget(autoSayContent, 0, Qt::AlignHCenter);
 	autoSayLayout->addStretch();
 
 	// Printing
@@ -7272,7 +7782,7 @@ void WorldPreferencesDialog::buildUi()
 	m_playerName           = new QLineEdit(connectGroup);
 	m_password             = new QLineEdit(connectGroup);
 	m_password->setEchoMode(QLineEdit::Password);
-	m_connectMethod = new QComboBox(connectGroup);
+	m_connectMethod = new FontResponsiveComboBox(connectGroup);
 	m_connectMethod->addItem(QStringLiteral("No auto-connect"), eNoAutoConnect);
 	m_connectMethod->addItem(QStringLiteral("MUSH"), eConnectMUSH);
 	m_connectMethod->addItem(QStringLiteral("Diku"), eConnectDiku);
@@ -7329,13 +7839,13 @@ void WorldPreferencesDialog::buildUi()
 	auto *mxpGroup  = new QGroupBox(QStringLiteral("MUD Extension"), mxpPage);
 	auto *mxpForm   = new QGridLayout(mxpGroup);
 	m_mxpActive     = new QLabel(QStringLiteral("MXP inactive"), mxpPage);
-	m_useMxp        = new QComboBox(mxpPage);
+	m_useMxp        = new FontResponsiveComboBox(mxpPage);
 	m_useMxp->addItem(QStringLiteral("On command"), QStringLiteral("0"));
 	m_useMxp->addItem(QStringLiteral("On request"), QStringLiteral("1"));
 	m_useMxp->addItem(QStringLiteral("Always on"), QStringLiteral("2"));
 	m_useMxp->addItem(QStringLiteral("Never"), QStringLiteral("3"));
 	m_detectPueblo  = new QCheckBox(QStringLiteral("Detect Pueblo initiation string"), mxpPage);
-	m_mxpDebugLevel = new QComboBox(mxpPage);
+	m_mxpDebugLevel = new FontResponsiveComboBox(mxpPage);
 	m_mxpDebugLevel->addItem(QStringLiteral("None"), QStringLiteral("0"));
 	m_mxpDebugLevel->addItem(QStringLiteral("Errors"), QStringLiteral("1"));
 	m_mxpDebugLevel->addItem(QStringLiteral("Warnings"), QStringLiteral("2"));
@@ -7487,7 +7997,26 @@ void WorldPreferencesDialog::buildUi()
 	chatLayout->addWidget(filesBox);
 	chatLayout->addStretch();
 
-	auto editAliasItem = [this](const int row, const bool isNew) -> bool
+	auto refreshTriggerView = [this](const auto &selection)
+	{
+		populateTriggers();
+		selectRuleRowByRuntimeId(m_triggersTable, selection);
+		updateTriggerControls();
+	};
+	auto refreshAliasView = [this](const auto &selection)
+	{
+		populateAliases();
+		selectRuleRowByRuntimeId(m_aliasesTable, selection);
+		updateAliasControls();
+	};
+	auto refreshTimerView = [this](const auto &selection)
+	{
+		populateTimers();
+		selectRuleRowByRuntimeId(m_timersTable, selection);
+		updateTimerControls();
+	};
+
+	auto editAliasItem = [this, refreshAliasView](const int row, const bool isNew) -> bool
 	{
 		if (!m_runtime)
 			return false;
@@ -7495,12 +8024,17 @@ void WorldPreferencesDialog::buildUi()
 			return false;
 		QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
 		WorldRuntime::Alias        alias;
-		int                        index = row;
+		int                        index = -1;
+		quint64       selectedRuntimeId  = ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
+		const quint64 runtimeId          = isNew ? 0 : ruleRuntimeIdForRow(m_aliasesTable, row);
 		if (!isNew)
 		{
-			index = rowToIndex(m_aliasesTable, row);
+			index = ruleIndexForRuntimeId(aliases, runtimeId);
 			if (index < 0 || index >= aliases.size())
+			{
+				refreshAliasView(selectedRuntimeId);
 				return false;
+			}
 			alias = aliases.at(index);
 		}
 		else
@@ -7532,28 +8066,36 @@ void WorldPreferencesDialog::buildUi()
 			alias.attributes.insert(QStringLiteral("sequence"), QString::number(defaultAliasSequence));
 		}
 
-		WorldAliasDialog dlg(m_runtime, alias, aliases, index, this);
+		WorldAliasDialog dlg(m_runtime, alias, isNew, this);
 		if (dlg.exec() != QDialog::Accepted)
 			return false;
-		alias = dlg.alias();
+		const WorldRuntime::Alias editedAlias = dlg.alias();
+		aliases                               = m_runtime->aliases();
 
 		if (isNew)
 		{
-			aliases.push_back(alias);
+			aliases.push_back(editedAlias);
 			index = saturatingToInt(aliases.size()) - 1;
 		}
 		else
 		{
-			aliases[index] = alias;
+			index = ruleIndexForRuntimeId(aliases, runtimeId);
+			if (index < 0)
+			{
+				refreshAliasView(selectedRuntimeId);
+				return false;
+			}
+			aliases[index].attributes = editedAlias.attributes;
+			aliases[index].children   = editedAlias.children;
 		}
 		m_runtime->setAliases(aliases);
-		populateAliases();
-		selectRowByIndex(m_aliasesTable, index);
-		updateAliasControls();
+		m_runtime->ensureWorldAliasRuntimeIds();
+		selectedRuntimeId = m_runtime->aliases().at(index).runtimeId;
+		refreshAliasView(selectedRuntimeId);
 		return true;
 	};
 
-	auto editTriggerItem = [this](const int row, const bool isNew) -> bool
+	auto editTriggerItem = [this, refreshTriggerView](const int row, const bool isNew) -> bool
 	{
 		if (!m_runtime)
 			return false;
@@ -7561,12 +8103,17 @@ void WorldPreferencesDialog::buildUi()
 			return false;
 		QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
 		WorldRuntime::Trigger        trigger;
-		int                          index = row;
+		int                          index = -1;
+		quint64       selectedRuntimeId = ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
+		const quint64 runtimeId         = isNew ? 0 : ruleRuntimeIdForRow(m_triggersTable, row);
 		if (!isNew)
 		{
-			index = rowToIndex(m_triggersTable, row);
+			index = ruleIndexForRuntimeId(triggers, runtimeId);
 			if (index < 0 || index >= triggers.size())
+			{
+				refreshTriggerView(selectedRuntimeId);
 				return false;
+			}
 			trigger = triggers.at(index);
 		}
 		else
@@ -7599,28 +8146,36 @@ void WorldPreferencesDialog::buildUi()
 			trigger.attributes.insert(QStringLiteral("sequence"), QString::number(defaultTriggerSequence));
 		}
 
-		WorldTriggerDialog dlg(m_runtime, trigger, triggers, index, this);
+		WorldTriggerDialog dlg(m_runtime, trigger, isNew, this);
 		if (dlg.exec() != QDialog::Accepted)
 			return false;
-		trigger = dlg.trigger();
+		const WorldRuntime::Trigger editedTrigger = dlg.trigger();
+		triggers                                  = m_runtime->triggers();
 
 		if (isNew)
 		{
-			triggers.push_back(trigger);
+			triggers.push_back(editedTrigger);
 			index = saturatingToInt(triggers.size()) - 1;
 		}
 		else
 		{
-			triggers[index] = trigger;
+			index = ruleIndexForRuntimeId(triggers, runtimeId);
+			if (index < 0)
+			{
+				refreshTriggerView(selectedRuntimeId);
+				return false;
+			}
+			triggers[index].attributes = editedTrigger.attributes;
+			triggers[index].children   = editedTrigger.children;
 		}
 		m_runtime->setTriggers(triggers);
-		populateTriggers();
-		selectRowByIndex(m_triggersTable, index);
-		updateTriggerControls();
+		m_runtime->ensureWorldTriggerRuntimeIds();
+		selectedRuntimeId = m_runtime->triggers().at(index).runtimeId;
+		refreshTriggerView(selectedRuntimeId);
 		return true;
 	};
 
-	auto editTimerItem = [this](const int row, const bool isNew) -> bool
+	auto editTimerItem = [this, refreshTimerView](const int row, const bool isNew) -> bool
 	{
 		if (!m_runtime)
 			return false;
@@ -7628,12 +8183,17 @@ void WorldPreferencesDialog::buildUi()
 			return false;
 		QList<WorldRuntime::Timer> timers = m_runtime->timers();
 		WorldRuntime::Timer        timer;
-		int                        index = row;
+		int                        index = -1;
+		quint64       selectedRuntimeId  = ruleRuntimeIdForRow(m_timersTable, selectedRow(m_timersTable));
+		const quint64 runtimeId          = isNew ? 0 : ruleRuntimeIdForRow(m_timersTable, row);
 		if (!isNew)
 		{
-			index = rowToIndex(m_timersTable, row);
+			index = ruleIndexForRuntimeId(timers, runtimeId);
 			if (index < 0 || index >= timers.size())
+			{
+				refreshTimerView(selectedRuntimeId);
 				return false;
+			}
 			timer = timers.at(index);
 		}
 		else
@@ -7643,24 +8203,37 @@ void WorldPreferencesDialog::buildUi()
 			timer.attributes.insert(QStringLiteral("send_to"), QString::number(defaultTimerSendTo));
 		}
 
-		WorldTimerDialog dlg(m_runtime, timer, timers, index, this);
+		WorldTimerDialog dlg(m_runtime, timer, isNew, this);
 		if (dlg.exec() != QDialog::Accepted)
 			return false;
-		timer = dlg.timer();
+		const WorldRuntime::Timer editedTimer = dlg.timer();
+		timers                                = m_runtime->timers();
 
 		if (isNew)
 		{
-			timers.push_back(timer);
+			timers.push_back(editedTimer);
 			index = saturatingToInt(timers.size()) - 1;
 		}
 		else
 		{
-			timers[index] = timer;
+			index = ruleIndexForRuntimeId(timers, runtimeId);
+			if (index < 0)
+			{
+				refreshTimerView(selectedRuntimeId);
+				return false;
+			}
+			const WorldRuntime::Timer timerBeforeEdit = timers.at(index);
+			WorldRuntime::Timer      &liveTimer       = timers[index];
+			liveTimer.attributes                      = editedTimer.attributes;
+			liveTimer.children                        = editedTimer.children;
+			const QMudTimerScheduling::TimerResetMutation scheduleReset{QDateTime::currentDateTime()};
+			static_cast<void>(QMudTimerScheduling::resetTimerDeadlineIfDefinitionChanged(
+			    timerBeforeEdit, liveTimer, scheduleReset));
 		}
 		m_runtime->setTimers(timers);
-		populateTimers();
-		selectRowByIndex(m_timersTable, index);
-		updateTimerControls();
+		m_runtime->ensureWorldTimerRuntimeIds();
+		selectedRuntimeId = m_runtime->timers().at(index).runtimeId;
+		refreshTimerView(selectedRuntimeId);
 		return true;
 	};
 
@@ -7677,9 +8250,13 @@ void WorldPreferencesDialog::buildUi()
 		QList<WorldRuntime::Trigger>       selected;
 		for (int row : rows)
 		{
-			const int index = rowToIndex(m_triggersTable, row);
-			if (index >= 0 && index < triggers.size())
-				selected.push_back(triggers.at(index));
+			const int index = ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
+			if (index < 0)
+			{
+				populateTriggers();
+				return;
+			}
+			selected.push_back(triggers.at(index));
 		}
 		if (selected.isEmpty())
 			return;
@@ -7735,8 +8312,13 @@ void WorldPreferencesDialog::buildUi()
 		QList<WorldRuntime::Alias>       selected;
 		for (int row : rows)
 		{
-			if (const int index = rowToIndex(m_aliasesTable, row); index >= 0 && index < aliases.size())
-				selected.push_back(aliases.at(index));
+			const int index = ruleIndexForRuntimeId(aliases, ruleRuntimeIdForRow(m_aliasesTable, row));
+			if (index < 0)
+			{
+				populateAliases();
+				return;
+			}
+			selected.push_back(aliases.at(index));
 		}
 		if (selected.isEmpty())
 			return;
@@ -7792,8 +8374,13 @@ void WorldPreferencesDialog::buildUi()
 		QList<WorldRuntime::Timer>       selected;
 		for (int row : rows)
 		{
-			if (const int index = rowToIndex(m_timersTable, row); index >= 0 && index < timers.size())
-				selected.push_back(timers.at(index));
+			const int index = ruleIndexForRuntimeId(timers, ruleRuntimeIdForRow(m_timersTable, row));
+			if (index < 0)
+			{
+				populateTimers();
+				return;
+			}
+			selected.push_back(timers.at(index));
 		}
 		if (selected.isEmpty())
 			return;
@@ -8103,65 +8690,80 @@ void WorldPreferencesDialog::buildUi()
 		        editAliasItem(row, false);
 	        });
 	connect(m_deleteAliasButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, refreshAliasView]
 	        {
 		        if (!m_runtime)
 			        return;
 		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
 			        return;
-		        const int row   = selectedRow(m_aliasesTable);
-		        const int index = rowToIndex(m_aliasesTable, row);
+		        const quint64 selectedRuntimeId =
+		            ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
+		        const bool treeMode =
+		            m_aliasesViewStack && m_aliasesViewStack->currentWidget() == m_aliasesTree;
+		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
+		            m_aliasesTable, m_aliasesTree, treeMode, selectedRuntimeId);
+		        QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
+		        int                        index   = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
 		        if (index < 0)
+		        {
+			        refreshAliasView(selectionCandidates);
 			        return;
+		        }
 		        if (!confirmRemoval(this, QStringLiteral("alias")))
 			        return;
-		        QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		        if (index >= aliases.size())
+		        aliases = m_runtime->aliases();
+		        index   = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
+		        if (index < 0)
+		        {
+			        refreshAliasView(selectionCandidates);
 			        return;
+		        }
 		        aliases.removeAt(index);
 		        m_runtime->setAliases(aliases);
-		        populateAliases();
-		        const int lastIndex = saturatingToInt(aliases.size()) - 1;
-		        selectRowByIndex(m_aliasesTable, std::min(index, lastIndex));
-		        updateAliasControls();
+		        refreshAliasView(selectionCandidates);
 	        });
 	connect(m_moveAliasUpButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, refreshAliasView]
 	        {
 		        if (!m_runtime)
 			        return;
 		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
 			        return;
-		        const int row   = selectedRow(m_aliasesTable);
-		        const int index = rowToIndex(m_aliasesTable, row);
-		        if (index <= 0)
-			        return;
+		        const quint64 selectedRuntimeId =
+		            ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
 		        QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		        if (index >= aliases.size())
+		        const int                  index   = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
+		        if (index <= 0)
+		        {
+			        if (index < 0)
+				        refreshAliasView(selectedRuntimeId);
 			        return;
+		        }
 		        aliases.swapItemsAt(index, index - 1);
 		        m_runtime->setAliases(aliases);
-		        populateAliases();
-		        selectRowByIndex(m_aliasesTable, index - 1);
-		        updateAliasControls();
+		        refreshAliasView(selectedRuntimeId);
 	        });
 	connect(m_moveAliasDownButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, refreshAliasView]
 	        {
 		        if (!m_runtime)
 			        return;
-		        const int                  row     = selectedRow(m_aliasesTable);
+		        const quint64 selectedRuntimeId =
+		            ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
 		        QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
 		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
 			        return;
-		        const int index = rowToIndex(m_aliasesTable, row);
-		        if (index < 0 || index + 1 >= aliases.size())
+		        const int index = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
+		        if (index < 0)
+		        {
+			        refreshAliasView(selectedRuntimeId);
+			        return;
+		        }
+		        if (index + 1 >= aliases.size())
 			        return;
 		        aliases.swapItemsAt(index, index + 1);
 		        m_runtime->setAliases(aliases);
-		        populateAliases();
-		        selectRowByIndex(m_aliasesTable, index + 1);
-		        updateAliasControls();
+		        refreshAliasView(selectedRuntimeId);
 	        });
 	connect(m_copyAliasButton, &QPushButton::clicked, this,
 	        [copyAliasesToClipboard] { copyAliasesToClipboard(); });
@@ -8175,7 +8777,8 @@ void WorldPreferencesDialog::buildUi()
 		        const QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
 		        auto                             rowText = [this, &aliases](const int row) -> QString
 		        {
-			        const int index = rowToIndex(m_aliasesTable, row);
+			        const int index =
+			            ruleIndexForRuntimeId(aliases, ruleRuntimeIdForRow(m_aliasesTable, row));
 			        if (index < 0 || index >= aliases.size())
 				        return {};
 			        const WorldRuntime::Alias &al     = aliases.at(index);
@@ -8199,7 +8802,8 @@ void WorldPreferencesDialog::buildUi()
 		        const QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
 		        auto                             rowText = [this, &aliases](const int row) -> QString
 		        {
-			        const int index = rowToIndex(m_aliasesTable, row);
+			        const int index =
+			            ruleIndexForRuntimeId(aliases, ruleRuntimeIdForRow(m_aliasesTable, row));
 			        if (index < 0 || index >= aliases.size())
 				        return {};
 			        const WorldRuntime::Alias &al     = aliases.at(index);
@@ -8225,65 +8829,80 @@ void WorldPreferencesDialog::buildUi()
 		        editTriggerItem(row, false);
 	        });
 	connect(m_deleteTriggerButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, refreshTriggerView]
 	        {
 		        if (!m_runtime)
 			        return;
 		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
 			        return;
-		        const int row   = selectedRow(m_triggersTable);
-		        const int index = rowToIndex(m_triggersTable, row);
+		        const quint64 selectedRuntimeId =
+		            ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
+		        const bool treeMode =
+		            m_triggersViewStack && m_triggersViewStack->currentWidget() == m_triggersTree;
+		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
+		            m_triggersTable, m_triggersTree, treeMode, selectedRuntimeId);
+		        QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
+		        int                          index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
 		        if (index < 0)
+		        {
+			        refreshTriggerView(selectionCandidates);
 			        return;
+		        }
 		        if (!confirmRemoval(this, QStringLiteral("trigger")))
 			        return;
-		        QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        if (index >= triggers.size())
+		        triggers = m_runtime->triggers();
+		        index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
+		        if (index < 0)
+		        {
+			        refreshTriggerView(selectionCandidates);
 			        return;
+		        }
 		        triggers.removeAt(index);
 		        m_runtime->setTriggers(triggers);
-		        populateTriggers();
-		        const int lastIndex = saturatingToInt(triggers.size()) - 1;
-		        selectRowByIndex(m_triggersTable, std::min(index, lastIndex));
-		        updateTriggerControls();
+		        refreshTriggerView(selectionCandidates);
 	        });
 	connect(m_moveTriggerUpButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, refreshTriggerView]
 	        {
 		        if (!m_runtime)
 			        return;
 		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
 			        return;
-		        const int row   = selectedRow(m_triggersTable);
-		        const int index = rowToIndex(m_triggersTable, row);
-		        if (index <= 0)
-			        return;
+		        const quint64 selectedRuntimeId =
+		            ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
 		        QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        if (index >= triggers.size())
+		        const int                    index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
+		        if (index <= 0)
+		        {
+			        if (index < 0)
+				        refreshTriggerView(selectedRuntimeId);
 			        return;
+		        }
 		        triggers.swapItemsAt(index, index - 1);
 		        m_runtime->setTriggers(triggers);
-		        populateTriggers();
-		        selectRowByIndex(m_triggersTable, index - 1);
-		        updateTriggerControls();
+		        refreshTriggerView(selectedRuntimeId);
 	        });
 	connect(m_moveTriggerDownButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, refreshTriggerView]
 	        {
 		        if (!m_runtime)
 			        return;
 		        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
 			        return;
-		        const int                    row      = selectedRow(m_triggersTable);
+		        const quint64 selectedRuntimeId =
+		            ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
 		        QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        const int                    index    = rowToIndex(m_triggersTable, row);
-		        if (index < 0 || index + 1 >= triggers.size())
+		        const int                    index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
+		        if (index < 0)
+		        {
+			        refreshTriggerView(selectedRuntimeId);
+			        return;
+		        }
+		        if (index + 1 >= triggers.size())
 			        return;
 		        triggers.swapItemsAt(index, index + 1);
 		        m_runtime->setTriggers(triggers);
-		        populateTriggers();
-		        selectRowByIndex(m_triggersTable, index + 1);
-		        updateTriggerControls();
+		        refreshTriggerView(selectedRuntimeId);
 	        });
 	connect(m_copyTriggerButton, &QPushButton::clicked, this,
 	        [copyTriggersToClipboard] { copyTriggersToClipboard(); });
@@ -8297,7 +8916,8 @@ void WorldPreferencesDialog::buildUi()
 		        const QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
 		        auto                               rowText  = [this, &triggers](const int row) -> QString
 		        {
-			        const int index = rowToIndex(m_triggersTable, row);
+			        const int index =
+			            ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
 			        if (index < 0 || index >= triggers.size())
 				        return {};
 			        const WorldRuntime::Trigger &tr     = triggers.at(index);
@@ -8321,7 +8941,8 @@ void WorldPreferencesDialog::buildUi()
 		        const QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
 		        auto                               rowText  = [this, &triggers](const int row) -> QString
 		        {
-			        const int index = rowToIndex(m_triggersTable, row);
+			        const int index =
+			            ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
 			        if (index < 0 || index >= triggers.size())
 				        return {};
 			        const WorldRuntime::Trigger &tr     = triggers.at(index);
@@ -8346,27 +8967,36 @@ void WorldPreferencesDialog::buildUi()
 		        editTimerItem(row, false);
 	        });
 	connect(m_deleteTimerButton, &QPushButton::clicked, this,
-	        [this]
+	        [this, refreshTimerView]
 	        {
 		        if (!m_runtime)
 			        return;
 		        if (m_useDefaultTimers && m_useDefaultTimers->isChecked() && hasDefaultTimersFile())
 			        return;
-		        const int row   = selectedRow(m_timersTable);
-		        const int index = rowToIndex(m_timersTable, row);
+		        const quint64 selectedRuntimeId =
+		            ruleRuntimeIdForRow(m_timersTable, selectedRow(m_timersTable));
+		        const bool treeMode = m_timersViewStack && m_timersViewStack->currentWidget() == m_timersTree;
+		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
+		            m_timersTable, m_timersTree, treeMode, selectedRuntimeId);
+		        QList<WorldRuntime::Timer> timers = m_runtime->timers();
+		        int                        index  = ruleIndexForRuntimeId(timers, selectedRuntimeId);
 		        if (index < 0)
+		        {
+			        refreshTimerView(selectionCandidates);
 			        return;
+		        }
 		        if (!confirmRemoval(this, QStringLiteral("timer")))
 			        return;
-		        QList<WorldRuntime::Timer> timers = m_runtime->timers();
-		        if (index >= timers.size())
+		        timers = m_runtime->timers();
+		        index  = ruleIndexForRuntimeId(timers, selectedRuntimeId);
+		        if (index < 0)
+		        {
+			        refreshTimerView(selectionCandidates);
 			        return;
+		        }
 		        timers.removeAt(index);
 		        m_runtime->setTimers(timers);
-		        populateTimers();
-		        const int lastIndex = saturatingToInt(timers.size()) - 1;
-		        selectRowByIndex(m_timersTable, std::min(index, lastIndex));
-		        updateTimerControls();
+		        refreshTimerView(selectionCandidates);
 	        });
 	connect(m_copyTimerButton, &QPushButton::clicked, this,
 	        [copyTimersToClipboard] { copyTimersToClipboard(); });
@@ -8380,7 +9010,7 @@ void WorldPreferencesDialog::buildUi()
 		        const QList<WorldRuntime::Timer> timers  = m_runtime->timers();
 		        auto                             rowText = [this, &timers](const int row) -> QString
 		        {
-			        const int index = rowToIndex(m_timersTable, row);
+			        const int index = ruleIndexForRuntimeId(timers, ruleRuntimeIdForRow(m_timersTable, row));
 			        if (index < 0 || index >= timers.size())
 				        return {};
 			        const WorldRuntime::Timer &tm     = timers.at(index);
@@ -8403,7 +9033,7 @@ void WorldPreferencesDialog::buildUi()
 		        const QList<WorldRuntime::Timer> timers  = m_runtime->timers();
 		        auto                             rowText = [this, &timers](const int row) -> QString
 		        {
-			        const int index = rowToIndex(m_timersTable, row);
+			        const int index = ruleIndexForRuntimeId(timers, ruleRuntimeIdForRow(m_timersTable, row));
 			        if (index < 0 || index >= timers.size())
 				        return {};
 			        const WorldRuntime::Timer &tm     = timers.at(index);
@@ -8437,21 +9067,21 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!table || !tree || m_syncingRuleSelection)
 			return;
-		const int      index = rowToIndex(table, selectedRow(table));
+		const quint64  runtimeId = ruleRuntimeIdForRow(table, selectedRow(table));
 		QSignalBlocker block(tree);
 		m_syncingRuleSelection = true;
-		tree->setCurrentItem(findTreeItemByIndex(tree, index));
+		tree->setCurrentItem(findTreeItemByRuntimeId(tree, runtimeId));
 		m_syncingRuleSelection = false;
 	};
 	auto syncTableFromTree = [this](const QTreeWidget *tree, QTableWidget *table)
 	{
 		if (!table || !tree || m_syncingRuleSelection)
 			return;
-		const int      index = currentTreeIndex(tree);
+		const quint64  runtimeId = currentTreeRuleRuntimeId(tree);
 		QSignalBlocker block(table);
 		m_syncingRuleSelection = true;
-		if (index >= 0)
-			selectRowByIndex(table, index);
+		if (runtimeId != 0)
+			selectRuleRowByRuntimeId(table, runtimeId);
 		else
 			table->clearSelection();
 		m_syncingRuleSelection = false;
@@ -8460,11 +9090,11 @@ void WorldPreferencesDialog::buildUi()
 	{
 		if (!item || !table || item->childCount() > 0)
 			return -1;
-		bool      ok    = false;
-		const int index = item->data(0, Qt::UserRole).toInt(&ok);
+		bool          ok        = false;
+		const quint64 runtimeId = item->data(0, Qt::UserRole).toULongLong(&ok);
 		if (!ok)
 			return -1;
-		return findRowForIndex(table, index);
+		return findRuleRowForRuntimeId(table, runtimeId);
 	};
 	auto connectSingleGroupExpansion =
 	    [this](QTreeWidget *tree, const std::function<void(const QString &)> &save)
@@ -8916,7 +9546,7 @@ void WorldPreferencesDialog::buildUi()
 			        updateVariableControls();
 		        });
 	if (m_editVariablesFilter)
-		connect(m_editVariablesFilter, &QPushButton::clicked, this,
+		connect(m_editVariablesFilter, &QToolButton::clicked, this,
 		        [this]
 		        {
 			        QDialog dialog(this);
@@ -8954,29 +9584,6 @@ void WorldPreferencesDialog::buildUi()
 	connect(buttons, &QDialogButtonBox::accepted, this, &WorldPreferencesDialog::accept);
 	connect(buttons, &QDialogButtonBox::rejected, this, &WorldPreferencesDialog::reject);
 	layout->addWidget(buttons);
-
-	auto countTreeItems = [](const QTreeWidgetItem *item, auto &&countRef) -> int
-	{
-		int total = 1;
-		for (int i = 0; i < item->childCount(); ++i)
-			total += countRef(item->child(i), countRef);
-		return total;
-	};
-	int treeItems = 0;
-	for (int i = 0; i < m_pageTree->topLevelItemCount(); ++i)
-		treeItems += countTreeItems(m_pageTree->topLevelItem(i), countTreeItems);
-	int rowHeight = m_pageTree->sizeHintForRow(0);
-	if (rowHeight <= 0)
-		rowHeight = m_pageTree->fontMetrics().height() + 6;
-	const int      treeHeight = rowHeight * treeItems + (m_pageTree->frameWidth() * 2) + 12;
-	const QMargins margins    = layout->contentsMargins();
-	const int      minHeight  = treeHeight + buttons->sizeHint().height() + margins.top() + margins.bottom() +
-	                            (layout->spacing() * 2);
-	const int      minHeightWithPadding = minHeight + ((minHeight * 2) / 10);
-	setMinimumHeight(qMax(minHeightWithPadding, minimumHeight()));
-	int baseWidth = qMax(minimumWidth(), sizeHint().width());
-	baseWidth += (baseWidth * 1) / 20;
-	setMinimumWidth(qMax(baseWidth, minimumWidth()));
 
 	populateGeneral();
 	populateSound();
@@ -9098,7 +9705,7 @@ void WorldPreferencesDialog::populateCustomColours()
 	const QList<WorldRuntime::Colour> &colours = m_runtime->colours();
 	for (const WorldRuntime::Colour &colour : colours)
 	{
-		if (!colour.group.startsWith(QStringLiteral("custom/")))
+		if (colour.group != QMudColourGroup::kCustom)
 			continue;
 		bool      ok  = false;
 		const int seq = colour.attributes.value(QStringLiteral("seq")).toInt(&ok);
@@ -9325,7 +9932,7 @@ void WorldPreferencesDialog::populateMacros()
 		nameItem->setData(Qt::UserRole, macro.index);
 		nameItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
 		m_macrosTable->setItem(row, 0, nameItem);
-		auto *typeCombo = new QComboBox(m_macrosTable);
+		auto *typeCombo = new FontResponsiveComboBox(m_macrosTable);
 		typeCombo->addItem(QStringLiteral("Replace"), QStringLiteral("replace"));
 		typeCombo->addItem(QStringLiteral("Send now"), QStringLiteral("send_now"));
 		typeCombo->addItem(QStringLiteral("Insert"), QStringLiteral("insert"));
@@ -9504,6 +10111,14 @@ void WorldPreferencesDialog::populateCommands()
 	if (m_saveDeletedCommand)
 		m_saveDeletedCommand->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("save_deleted_command"))));
+	if (m_partialSaveCharacterThreshold)
+	{
+		bool ok    = false;
+		int  value = attrs.value(QStringLiteral("partial_save_character_threshold")).toInt(&ok);
+		if (!ok)
+			value = 10;
+		m_partialSaveCharacterThreshold->setValue(value);
+	}
 	if (m_ctrlZToEnd)
 		m_ctrlZToEnd->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("ctrl_z_goes_to_end_of_buffer"))));
@@ -9563,13 +10178,19 @@ void WorldPreferencesDialog::populateCommands()
 	}
 	if (m_autoRepeat)
 		m_autoRepeat->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("auto_repeat"))));
+	if (m_lowerCaseTabCompletion)
+		m_lowerCaseTabCompletion->setChecked(
+		    qmudIsEnabledFlag(attrs.value(QStringLiteral("lower_case_tab_completion"))));
+	if (m_tabCompletionExcludesSymbolPrefix)
+		m_tabCompletionExcludesSymbolPrefix->setChecked(qmudIsEnabledFlag(
+		    attrs.value(QStringLiteral("tab_completion_excludes_symbol_prefix"), QStringLiteral("1"))));
+	if (m_tabCompletionExcludesSymbolSuffix)
+		m_tabCompletionExcludesSymbolSuffix->setChecked(qmudIsEnabledFlag(
+		    attrs.value(QStringLiteral("tab_completion_excludes_symbol_suffix"), QStringLiteral("1"))));
 	if (m_translateGerman)
 		m_translateGerman->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("translate_german"))));
 	if (m_spellCheckOnSend)
 		m_spellCheckOnSend->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("spell_check_on_send"))));
-	if (m_lowerCaseTabCompletion)
-		m_lowerCaseTabCompletion->setChecked(
-		    qmudIsEnabledFlag(attrs.value(QStringLiteral("lower_case_tab_completion"))));
 	if (m_translateBackslash)
 		m_translateBackslash->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("translate_backslash_sequences"))));
@@ -10172,6 +10793,7 @@ void WorldPreferencesDialog::populateTriggers()
 {
 	if (!m_runtime || !m_triggersTable)
 		return;
+	m_runtime->ensureWorldTriggerRuntimeIds();
 	m_triggersTable->setShowGrid(gridLinesEnabled());
 	const QList<WorldRuntime::Trigger> &triggers = m_runtime->triggers();
 	QSet<QString>                       pluginOwnedSignatures;
@@ -10289,6 +10911,7 @@ void WorldPreferencesDialog::populateTriggers()
 
 					pushNumber("invocation_count", tr.invocationCount);
 					pushNumber("times_matched", tr.matched);
+					pushNumber("execution_time", tr.executionTimeSeconds());
 					if (tr.lastMatched.isValid())
 						pushString("when_matched", tr.lastMatched.toString(Qt::ISODate));
 					pushBool("included", tr.included);
@@ -10357,7 +10980,7 @@ void WorldPreferencesDialog::populateTriggers()
 		const QString label       = tr.attributes.value(QStringLiteral("name"));
 		const QString group       = tr.attributes.value(QStringLiteral("group"));
 		auto         *triggerItem = new QTableWidgetItem(trigger);
-		triggerItem->setData(Qt::UserRole, i);
+		triggerItem->setData(Qt::UserRole, tr.runtimeId);
 		m_triggersTable->setItem(row, 0, triggerItem);
 		m_triggersTable->setItem(row, 1, new QTableWidgetItem(sequence));
 		m_triggersTable->setItem(row, 2, new QTableWidgetItem(contents));
@@ -10418,6 +11041,7 @@ void WorldPreferencesDialog::populateAliases()
 {
 	if (!m_runtime || !m_aliasesTable)
 		return;
+	m_runtime->ensureWorldAliasRuntimeIds();
 	m_aliasesTable->setShowGrid(gridLinesEnabled());
 	const QList<WorldRuntime::Alias> &aliases = m_runtime->aliases();
 	QSet<QString>                     pluginOwnedSignatures;
@@ -10580,7 +11204,7 @@ void WorldPreferencesDialog::populateAliases()
 		const int                  row      = m_aliasesTable->rowCount();
 		m_aliasesTable->insertRow(row);
 		auto *aliasItem = new QTableWidgetItem(alias);
-		aliasItem->setData(Qt::UserRole, i);
+		aliasItem->setData(Qt::UserRole, al.runtimeId);
 		m_aliasesTable->setItem(row, 0, aliasItem);
 		m_aliasesTable->setItem(row, 1, new QTableWidgetItem(sequence));
 		m_aliasesTable->setItem(row, 2, new QTableWidgetItem(contents));
@@ -10638,6 +11262,7 @@ void WorldPreferencesDialog::populateTimers()
 {
 	if (!m_runtime || !m_timersTable)
 		return;
+	m_runtime->ensureWorldTimerRuntimeIds();
 	m_timersTable->setShowGrid(gridLinesEnabled());
 	const QList<WorldRuntime::Timer> &timers = m_runtime->timers();
 	QSet<QString>                     pluginOwnedSignatures;
@@ -10818,7 +11443,7 @@ void WorldPreferencesDialog::populateTimers()
 		const int row = m_timersTable->rowCount();
 		m_timersTable->insertRow(row);
 		auto *typeItem = new QTableWidgetItem(type);
-		typeItem->setData(Qt::UserRole, i);
+		typeItem->setData(Qt::UserRole, tm.runtimeId);
 		m_timersTable->setItem(row, 0, typeItem);
 		m_timersTable->setItem(row, 1, new QTableWidgetItem(when));
 		m_timersTable->setItem(row, 2, new QTableWidgetItem(contents));

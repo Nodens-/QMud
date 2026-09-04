@@ -39,6 +39,9 @@
         <colour seq="1" name="black" rgb="#000000"/>
       </normal>
     </ansi>
+    <custom>
+      <colour seq="03" name="Asymmetric" text="#123456" back="#654321"/>
+    </custom>
   </colours>
   <keypad>
     <key name="1">
@@ -48,7 +51,7 @@
   <printing>
     <ansi>
       <normal>
-        <style seq="1" textcolour="white" backcolour="black"/>
+        <style seq="1" bold="y"/>
       </normal>
     </ansi>
   </printing>
