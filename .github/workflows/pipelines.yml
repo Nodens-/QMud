@@ -10,23 +10,33 @@ on:
     - cron: "0 4 * * *"
   workflow_dispatch:
     inputs:
-      run_main_pipeline:
-        description: "Run the complete push-to-main pipeline"
-        required: false
-        type: boolean
-        default: false
-      force_coverage:
-        description: "Force coverage run"
-        required: false
-        type: boolean
-        default: false
       run_full_tests:
         description: "Run full test suite"
         required: false
         type: boolean
         default: false
-      run_builds:
-        description: "Run package build matrix"
+      run_coverage:
+        description: "Run coverage"
+        required: false
+        type: boolean
+        default: false
+      publish_tagged_release:
+        description: "Publish tagged-release"
+        required: false
+        type: boolean
+        default: false
+      publish_ci_main:
+        description: "Publish ci-main"
+        required: false
+        type: boolean
+        default: false
+      run_main_pipeline:
+        description: "Run push-to-main (MutEx)"
+        required: false
+        type: boolean
+        default: false
+      run_tagged_release:
+        description: "Run tagged-release (MutEx)"
         required: false
         type: boolean
         default: false
@@ -41,8 +51,15 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
-      needs_test_image: ${{ steps.plan.outputs.needs_test_image }}
-      has_builds: ${{ steps.plan.outputs.has_builds }}
+      needs_linux_image: ${{ steps.plan.outputs.needs_linux_image }}
+      artifact_run_id: ${{ steps.plan.outputs.artifact_run_id }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      publish_tagged_release: ${{ steps.plan.outputs.publish_tagged_release }}
+      publish_ci_release: ${{ steps.plan.outputs.publish_ci_release }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
     steps:
       - name: Determine tasks
         id: plan
@@ -56,10 +73,10 @@ jobs:
             const addValidation = (task, timeout) => entries.push({
               task, kind: "validation", runner: hosted, timeout,
             });
-            const addBuilds = (buildType = "Release") => {
+            const addBuilds = (buildType = "Release", taskPrefix = "build") => {
               for (const packageName of ["appimage", "macos", "windows"]) {
                 entries.push({
-                  task: "build-" + packageName,
+                  task: taskPrefix + "-" + packageName,
                   kind: "build",
                   package: packageName,
                   build_type: buildType,
@@ -67,6 +84,90 @@ jobs:
                   timeout: 180,
                 });
               }
+            };
+            const resolveHeadReleaseTag = async () => {
+              const response = await github.rest.repos.getContent({
+                owner, repo, path: "src/Version.h", ref: context.sha,
+              });
+              if (Array.isArray(response.data) || response.data.type !== "file" || !response.data.content) {
+                throw new Error("Could not read src/Version.h at the selected HEAD.");
+              }
+              const contents = Buffer.from(response.data.content, "base64").toString("utf8");
+              const versionMatch = contents.match(/kVersionString\[\]\s*=\s*"([^"]+)"/);
+              if (!versionMatch) {
+                throw new Error("Could not resolve kVersionString from src/Version.h.");
+              }
+
+              const tagName = `v${versionMatch[1]}`;
+              const tagRef = await github.rest.git.getRef({owner, repo, ref: `tags/${tagName}`});
+              let target = tagRef.data.object;
+              while (target.type === "tag") {
+                const tag = await github.rest.git.getTag({owner, repo, tag_sha: target.sha});
+                target = tag.data.object;
+              }
+              if (target.type !== "commit" || target.sha !== context.sha) {
+                throw new Error(`${tagName} does not point to the selected HEAD ${context.sha}.`);
+              }
+              return tagName;
+            };
+            const findArtifactRun = async (publication, releaseTag = "") => {
+              const ciJobs = ["build-appimage", "build-macos", "build-windows"];
+              const taggedJobs = ["tagged-build-appimage", "tagged-build-macos", "tagged-build-windows"];
+              const requiredArtifacts = new Set(["qmud-appimage", "qmud-macos", "qmud-windows"]);
+
+              for (let page = 1; ; page += 1) {
+                const response = await github.rest.actions.listWorkflowRuns({
+                  owner,
+                  repo,
+                  workflow_id: "pipelines.yml",
+                  status: "completed",
+                  per_page: 100,
+                  page,
+                });
+                const runs = Array.isArray(response.data.workflow_runs) ? response.data.workflow_runs : [];
+                for (const run of runs) {
+                  if (run.event === "pull_request" || run.id === context.runId || run.head_sha !== context.sha) {
+                    continue;
+                  }
+
+                  const automaticTaggedRun = publication === "tagged" &&
+                    run.event === "push" && run.head_branch === releaseTag;
+                  const manualTaggedRun = publication === "tagged" &&
+                    run.event === "workflow_dispatch" && run.head_branch === "main";
+                  const ciRun = publication === "ci" && run.head_branch === "main" &&
+                    (run.event === "push" || run.event === "workflow_dispatch");
+                  if (!automaticTaggedRun && !manualTaggedRun && !ciRun) continue;
+
+                  const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                    owner, repo, run_id: run.id, per_page: 100,
+                  });
+                  const successfulJobs = new Set(
+                    jobs.filter((job) => job.conclusion === "success").map((job) => job.name),
+                  );
+                  const hasCiJobs = ciJobs.every((name) => successfulJobs.has(name));
+                  const hasTaggedJobs = taggedJobs.every((name) => successfulJobs.has(name));
+                  if ((ciRun && !hasCiJobs) ||
+                      (manualTaggedRun && !hasTaggedJobs) ||
+                      (automaticTaggedRun && !hasTaggedJobs && !hasCiJobs)) {
+                    continue;
+                  }
+
+                  const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+                    owner, repo, run_id: run.id, per_page: 100,
+                  });
+                  const availableArtifacts = new Set(
+                    artifacts.filter((artifact) => !artifact.expired).map((artifact) => artifact.name),
+                  );
+                  if ([...requiredArtifacts].every((name) => availableArtifacts.has(name))) {
+                    return String(run.id);
+                  }
+                }
+                if (runs.length < 100) break;
+              }
+
+              throw new Error(
+                `No completed ${publication} build at HEAD ${context.sha} has all successful Release package builds and artifacts.`,
+              );
             };
             const coveragePath = (name) => name.startsWith("src/") || name.startsWith("tests/");
             const pipelinePath = (name) => (
@@ -80,6 +181,10 @@ jobs:
 
             let runPipeline = false;
             let runCoverage = false;
+            let artifactRunId = String(context.runId);
+            let releaseTag = "";
+            let publishTaggedRelease = false;
+            let publishCiRelease = false;
             if (context.eventName === "pull_request") {
               const pullNumber = context.payload.pull_request.number;
               for (let page = 1; ; page += 1) {
@@ -112,49 +217,90 @@ jobs:
                 addValidation("quick-tests", 90);
                 if (runCoverage) addValidation("coverage", 120);
                 addBuilds();
+                publishCiRelease = true;
               }
             } else if (context.eventName === "push" && context.ref.startsWith("refs/tags/v")) {
-              addBuilds();
+              addBuilds("Release", "tagged-build");
+              releaseTag = context.ref.replace("refs/tags/", "");
+              publishTaggedRelease = true;
             } else if (context.eventName === "schedule") {
               addValidation("full-tests", 90);
             } else if (context.eventName === "workflow_dispatch") {
-              if (context.payload.inputs?.run_main_pipeline === "true") {
+              const runMainPipeline = context.payload.inputs?.run_main_pipeline === "true";
+              const runTaggedRelease = context.payload.inputs?.run_tagged_release === "true";
+              if (runMainPipeline && runTaggedRelease) {
+                throw new Error("Select only one mutually exclusive complete pipeline.");
+              }
+
+              if (runMainPipeline) {
                 if (context.ref !== "refs/heads/main") {
                   throw new Error("The complete push-to-main pipeline must be dispatched from main.");
                 }
                 addValidation("quick-tests", 90);
                 addValidation("coverage", 120);
                 addBuilds();
+                publishCiRelease = true;
+              } else if (runTaggedRelease) {
+                if (context.ref !== "refs/heads/main") {
+                  throw new Error("The complete tagged-release pipeline must be dispatched from main.");
+                }
+                releaseTag = await resolveHeadReleaseTag();
+                addBuilds("Release", "tagged-build");
+                publishTaggedRelease = true;
               } else {
                 if (context.payload.inputs?.run_full_tests === "true") addValidation("full-tests", 90);
-                if (context.payload.inputs?.force_coverage === "true") addValidation("coverage", 120);
-                if (context.payload.inputs?.run_builds === "true") addBuilds();
+                if (context.payload.inputs?.run_coverage === "true") addValidation("coverage", 120);
+
+                const publishTagged = context.payload.inputs?.publish_tagged_release === "true";
+                const publishCi = context.payload.inputs?.publish_ci_main === "true";
+                if (publishTagged && publishCi) {
+                  throw new Error("Select only one publication target.");
+                }
+                if (publishTagged) {
+                  if (context.ref !== "refs/heads/main") {
+                    throw new Error("Tagged-release publication must be dispatched from main.");
+                  }
+                  releaseTag = await resolveHeadReleaseTag();
+                  artifactRunId = await findArtifactRun("tagged", releaseTag);
+                  publishTaggedRelease = true;
+                } else if (publishCi) {
+                  if (context.ref !== "refs/heads/main") {
+                    throw new Error("ci-main publication must be dispatched from main.");
+                  }
+                  artifactRunId = await findArtifactRun("ci");
+                  publishCiRelease = true;
+                }
               }
             }
 
-            const hasBuilds = entries.some((entry) => entry.kind === "build");
-            const needsTestImage = entries.some((entry) => entry.kind === "validation");
+            const needsLinuxImage = entries.some((entry) => entry.kind === "validation");
             if (entries.length === 0) {
               entries.push({task: "nothing-to-run", kind: "noop", runner: hosted, timeout: 5});
             }
             core.info("Pipeline matrix: " + JSON.stringify(entries));
             core.setOutput("matrix", JSON.stringify({include: entries}));
-            core.setOutput("needs_test_image", needsTestImage ? "true" : "false");
-            core.setOutput("has_builds", hasBuilds ? "true" : "false");
+            core.setOutput("needs_linux_image", needsLinuxImage ? "true" : "false");
+            core.setOutput("artifact_run_id", artifactRunId);
+            core.setOutput("release_tag", releaseTag);
+            core.setOutput("publish_tagged_release", publishTaggedRelease ? "true" : "false");
+            core.setOutput("publish_ci_release", publishCiRelease ? "true" : "false");
 
-  prepare-test-image:
-    name: Prepare cached Linux image
+  prepare-linux-image:
+    name: Prepare Linux image
     needs: pipeline-plan
-    if: needs.pipeline-plan.outputs.needs_test_image == 'true'
+    if: needs.pipeline-plan.outputs.needs_linux_image == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
     outputs:
-      cache_key: ${{ steps.cache-key.outputs.value }}
+      image: ${{ steps.image-reference.outputs.image }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
-      - name: Resolve image cache key
-        id: cache-key
+      - name: Resolve Linux image reference
+        id: image-reference
         run: |
           set -euo pipefail
           IMAGE_SERIAL="$(tr -d '[:space:]' < tools/docker/appimage-qt611/IMAGE_REVISION)"
@@ -162,53 +308,79 @@ jobs:
             echo "Invalid AppImage image revision: $IMAGE_SERIAL" >&2
             exit 1
           fi
-          DEFINITION_HASH="$(sha256sum tools/docker/appimage-qt611/Dockerfile | awk '{print $1}')"
-          echo "serial=$IMAGE_SERIAL" >> "$GITHUB_OUTPUT"
-          echo "value=qmud-appimage-test-$RUNNER_OS-$RUNNER_ARCH-$IMAGE_SERIAL-$DEFINITION_HASH" >> "$GITHUB_OUTPUT"
-      - name: Restore AppImage test image
-        id: image-cache
-        uses: actions/cache@v5
-        with:
-          path: /tmp/qmud-appimage-builder.tar
-          key: ${{ steps.cache-key.outputs.value }}
-      - name: Build AppImage test image
-        if: steps.image-cache.outputs.cache-hit != 'true'
+          IMAGE_OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "image=ghcr.io/$IMAGE_OWNER/qmud-appimage-builder:$IMAGE_SERIAL" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
         env:
-          IMAGE_SERIAL: ${{ steps.cache-key.outputs.serial }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Ensure Linux image exists
+        id: ensure-image
+        env:
+          GHCR_IMAGE: ${{ steps.image-reference.outputs.image }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
+          set -euo pipefail
+          if docker manifest inspect "$GHCR_IMAGE" >/dev/null; then
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] && [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
+            echo "The required repository-owned Linux image is missing, and fork pull requests cannot publish it: $GHCR_IMAGE" >&2
+            exit 1
+          fi
+          LOCAL_IMAGE="qmud-appimage-builder:${GHCR_IMAGE##*:}"
           docker build --pull --no-cache \
-            --label "org.opencontainers.image.version=$IMAGE_SERIAL" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.version=${GHCR_IMAGE##*:}" \
             --file tools/docker/appimage-qt611/Dockerfile \
-            --tag qmud-appimage-builder:qt6.11 \
+            --tag "$LOCAL_IMAGE" \
             tools/docker/appimage-qt611
-          docker save --output /tmp/qmud-appimage-builder.tar qmud-appimage-builder:qt6.11
+          if docker manifest inspect "$GHCR_IMAGE" >/dev/null; then
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          docker tag "$LOCAL_IMAGE" "$GHCR_IMAGE"
+          docker push "$GHCR_IMAGE"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+      - name: Keep the newest two Linux images
+        if: steps.ensure-image.outputs.pushed == 'true'
+        uses: actions/delete-package-versions@v5
+        with:
+          owner: ${{ github.repository_owner }}
+          package-name: qmud-appimage-builder
+          package-type: container
+          min-versions-to-keep: 2
+          token: ${{ github.token }}
 
   pipeline:
     name: ${{ matrix.task }}
-    needs: [pipeline-plan, prepare-test-image]
-    if: always() && needs.pipeline-plan.result == 'success' && (needs.prepare-test-image.result == 'success' || needs.prepare-test-image.result == 'skipped')
+    needs: [pipeline-plan, prepare-linux-image]
+    if: always() && needs.pipeline-plan.result == 'success' && (needs.prepare-linux-image.result == 'success' || needs.prepare-linux-image.result == 'skipped')
     strategy:
       fail-fast: true
       matrix: ${{ fromJSON(needs.pipeline-plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
+    permissions:
+      contents: read
+      packages: read
     env:
       QT_QPA_PLATFORM: offscreen
+      QMUD_LINUX_IMAGE: ${{ needs.prepare-linux-image.outputs.image }}
     steps:
       - name: Check out repository
         if: matrix.kind != 'noop'
         uses: actions/checkout@v6
 
-      - name: Restore cached Linux image
+      - name: Log in to GHCR
         if: matrix.kind == 'validation'
-        uses: actions/cache/restore@v5
-        with:
-          path: /tmp/qmud-appimage-builder.tar
-          key: ${{ needs.prepare-test-image.outputs.cache_key }}
-          fail-on-cache-miss: true
-      - name: Load Linux image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Pull Linux image
         if: matrix.kind == 'validation'
-        run: docker load --input /tmp/qmud-appimage-builder.tar
+        run: docker pull "$QMUD_LINUX_IMAGE"
 
       - name: Run test suite
         if: matrix.task == 'quick-tests' || matrix.task == 'full-tests'
@@ -221,7 +393,7 @@ jobs:
             -e CCACHE_DISABLE=1 -e HOME=/tmp -e QT_QPA_PLATFORM=offscreen \
             -v "$GITHUB_WORKSPACE:/home/user/project:ro" \
             -v "$GITHUB_WORKSPACE/ci-build:/home/user/build:rw" \
-            qmud-appimage-builder:qt6.11 bash -s -- "$TEST_SUITE" <<'CONTAINER'
+            "$QMUD_LINUX_IMAGE" bash -s -- "$TEST_SUITE" <<'CONTAINER'
           set -euo pipefail
           TEST_SUITE=$1
           cmake -S /home/user/project -B /home/user/build -G Ninja \
@@ -265,7 +437,7 @@ jobs:
             -e CCACHE_DISABLE=1 -e HOME=/tmp -e QT_QPA_PLATFORM=offscreen \
             -v "$GITHUB_WORKSPACE:/home/user/project:ro" \
             -v "$GITHUB_WORKSPACE/ci-build:/home/user/build:rw" \
-            qmud-appimage-builder:qt6.11 bash -s <<'CONTAINER'
+            "$QMUD_LINUX_IMAGE" bash -s <<'CONTAINER'
           set -euo pipefail
           cmake -S /home/user/project -B /home/user/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
@@ -307,6 +479,8 @@ jobs:
         run: rm -rf cmake-build-release cmake-build-coverage release-assets
       - name: Resolve package version
         if: matrix.kind == 'build'
+        env:
+          TAGGED_RELEASE_BUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.run_tagged_release }}
         run: |
           set -euo pipefail
           BASE_VERSION="$(sed -n 's/.*kVersionString\[\] = "\([^"]*\)".*/\1/p' src/Version.h | head -n 1)"
@@ -314,7 +488,7 @@ jobs:
             echo "Failed to resolve kVersionString from src/Version.h" >&2
             exit 1
           fi
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/v* || "$TAGGED_RELEASE_BUILD" == "true" ]]; then
             PACKAGE_VERSION="$BASE_VERSION"
           else
             PACKAGE_VERSION="ci-${GITHUB_SHA::7}"
@@ -487,13 +661,19 @@ jobs:
           rm -rf cmake-build-release cmake-build-coverage release-assets
 
   publish-release:
-    name: Publish GitHub release assets
+    name: Publish tagged-release
     needs:
       - pipeline-plan
       - pipeline
-    if: startsWith(github.ref, 'refs/tags/v') && needs.pipeline-plan.outputs.has_builds == 'true'
+    if: >-
+      always() && !cancelled() &&
+      needs.pipeline-plan.result == 'success' &&
+      needs.pipeline.result == 'success' &&
+      needs.pipeline-plan.outputs.release_tag != '' &&
+      needs.pipeline-plan.outputs.publish_tagged_release == 'true'
     runs-on: [self-hosted, primary]
     permissions:
+      actions: read
       contents: write
 
     steps:
@@ -505,6 +685,9 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.pipeline-plan.outputs.artifact_run_id }}
           pattern: qmud-*
           path: release-assets
 
@@ -512,8 +695,9 @@ jobs:
         id: release_changelog
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.pipeline-plan.outputs.release_tag }}
         run: |
-          CURRENT_TAG="${GITHUB_REF_NAME}"
+          CURRENT_TAG="$RELEASE_TAG"
           PREVIOUS_TAG="$(git tag --sort=-v:refname --list 'v*' | awk -v cur="${CURRENT_TAG}" '$0 != cur {print; exit}')"
           RANGE="${CURRENT_TAG}^!"
           if [ -n "${PREVIOUS_TAG}" ]; then
@@ -617,6 +801,7 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          tag_name: ${{ needs.pipeline-plan.outputs.release_tag }}
           generate_release_notes: false
           body_path: ${{ steps.release_changelog.outputs.body_path }}
           files: |
@@ -631,6 +816,7 @@ jobs:
         env:
           DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
           RELEASE_NOTES_PATH: ${{ steps.release_changelog.outputs.body_path }}
+          RELEASE_TAG: ${{ needs.pipeline-plan.outputs.release_tag }}
         run: |
           if [ -z "${DISCORD_RELEASE_WEBHOOK_URL}" ]; then
             echo "DISCORD_RELEASE_WEBHOOK_URL is not set." >&2
@@ -644,7 +830,7 @@ jobs:
           webhook = os.environ["DISCORD_RELEASE_WEBHOOK_URL"].strip()
           notes_path = os.environ["RELEASE_NOTES_PATH"].strip()
           repo = os.environ["GITHUB_REPOSITORY"]
-          tag = os.environ["GITHUB_REF_NAME"]
+          tag = os.environ["RELEASE_TAG"]
           release_url = f"https://github.com/{repo}/releases/tag/{tag}"
 
           def post_message(content: str) -> None:
@@ -690,17 +876,19 @@ jobs:
         run: |
           rm -rf cmake-build-release cmake-build-coverage release-assets release-notes.md ci-release-notes.md
   publish-ci-release:
-    name: Publish rolling CI prerelease
+    name: Publish rolling ci-main
     needs:
       - pipeline-plan
       - pipeline
     if: >-
-      needs.pipeline-plan.outputs.has_builds == 'true' &&
+      always() && !cancelled() &&
+      needs.pipeline-plan.result == 'success' &&
+      needs.pipeline.result == 'success' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' ||
-       (github.event_name == 'workflow_dispatch' && inputs.run_main_pipeline == true))
+      needs.pipeline-plan.outputs.publish_ci_release == 'true'
     runs-on: [self-hosted, primary]
     permissions:
+      actions: read
       contents: write
 
     steps:
@@ -724,6 +912,9 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.pipeline-plan.outputs.artifact_run_id }}
           pattern: qmud-*
           path: release-assets
 
