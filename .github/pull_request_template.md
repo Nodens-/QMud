@@ -1,6 +1,14 @@
-## Summary
+## Changelog
 
-Describe the change and why it is needed.
+List each change as a bullet point under the appropriate subsection. Maintenance entries are included in ci-main changelogs only and are excluded from tagged-release changelogs.
+
+### Bug Fixes
+
+### Features
+
+### Performance Optimizations
+
+### Maintenance
 
 ## Scope
 
@@ -27,4 +35,3 @@ List what you verified (build targets, manual tests, etc.).
 - [ ] I verified behavior manually or with tests.
 - [ ] I updated docs when relevant.
 - [ ] I did not introduce unrelated changes.
-
