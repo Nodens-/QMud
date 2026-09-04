@@ -129,7 +129,7 @@ jobs:
             core.setOutput("has_builds", hasBuilds ? "true" : "false");
 
   prepare-test-image:
-    name: Prepare cached Linux test image
+    name: Prepare cached Linux image
     needs: pipeline-plan
     if: needs.pipeline-plan.outputs.needs_test_image == 'true'
     runs-on: ubuntu-latest
@@ -185,14 +185,14 @@ jobs:
         if: matrix.kind != 'noop'
         uses: actions/checkout@v6
 
-      - name: Restore cached Linux test image
+      - name: Restore cached Linux image
         if: matrix.kind == 'validation'
         uses: actions/cache/restore@v5
         with:
           path: /tmp/qmud-appimage-builder.tar
           key: ${{ needs.prepare-test-image.outputs.cache_key }}
           fail-on-cache-miss: true
-      - name: Load Linux test image
+      - name: Load Linux image
         if: matrix.kind == 'validation'
         run: docker load --input /tmp/qmud-appimage-builder.tar
 
@@ -215,7 +215,6 @@ jobs:
             -DCMAKE_PREFIX_PATH=/opt/Qt/latest/gcc_64 \
             -DQt6_DIR=/opt/Qt/latest/gcc_64/lib/cmake/Qt6 \
             -DQMUD_ENABLE_TESTING=ON -DQMUD_ENABLE_GUI_TESTS=ON \
-            -DQMUD_LIMIT_PARALLEL_LINKS=OFF \
             -DQMUD_ENABLE_APPIMAGE=OFF \
             -DQMUD_ENABLE_APPIMAGE_DOCKER=OFF \
             -DQMUD_ENABLE_MAC_DOCKER=OFF -DQMUD_ENABLE_WINDOCKER=OFF
@@ -259,7 +258,6 @@ jobs:
             -DCMAKE_PREFIX_PATH=/opt/Qt/latest/gcc_64 \
             -DQt6_DIR=/opt/Qt/latest/gcc_64/lib/cmake/Qt6 \
             -DQMUD_ENABLE_TESTING=ON -DQMUD_ENABLE_GUI_TESTS=ON \
-            -DQMUD_LIMIT_PARALLEL_LINKS=OFF \
             -DQMUD_ENABLE_APPIMAGE=OFF \
             -DQMUD_ENABLE_APPIMAGE_DOCKER=OFF \
             -DQMUD_ENABLE_MAC_DOCKER=OFF -DQMUD_ENABLE_WINDOCKER=OFF \
