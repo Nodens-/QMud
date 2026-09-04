@@ -9,6 +9,8 @@
 #ifndef QMUD_WORLDCHILDWINDOW_H
 #define QMUD_WORLDCHILDWINDOW_H
 
+#include "Flags.h"
+
 #include <QMdiSubWindow>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -69,6 +71,16 @@ class WorldChildWindow : public QMdiSubWindow
 		 * @return Hosted world view pointer, or `nullptr`.
 		 */
 		[[nodiscard]] class WorldView *view() const;
+		/**
+		 * @brief Returns the ShowWindow-compatible command for GetInfo(238).
+		 * @return Last applicable ShowWindow command value.
+		 */
+		[[nodiscard]] int              getInfoWindowShowCommand() const;
+		/**
+		 * @brief Records the ShowWindow-compatible command for GetInfo(238).
+		 * @param command ShowWindow command value.
+		 */
+		void                           setInfoWindowShowCommand(int command);
 
 	protected:
 		/**
@@ -142,6 +154,7 @@ class WorldChildWindow : public QMdiSubWindow
 		QTimer                      *m_autosaveTimer{nullptr};
 		bool                         m_primaryRuntimeBinding{false};
 		bool                         m_autosaveInFlight{false};
+		int                          m_infoWindowShowCommand{kWindowShowNormal};
 };
 
 /**

@@ -686,6 +686,16 @@ WorldView *WorldChildWindow::view() const
 	return m_view;
 }
 
+int WorldChildWindow::getInfoWindowShowCommand() const
+{
+	return m_infoWindowShowCommand;
+}
+
+void WorldChildWindow::setInfoWindowShowCommand(const int command)
+{
+	m_infoWindowShowCommand = command;
+}
+
 void WorldChildWindow::handleAutosaveTick()
 {
 	refreshAutosaveTimer();
@@ -849,6 +859,15 @@ bool WorldChildWindow::event(QEvent *event)
 	{
 		if (event->type() == QEvent::WindowStateChange)
 		{
+			if (isMinimized())
+				m_infoWindowShowCommand = kWindowMinimize;
+			else if (isMaximized())
+				m_infoWindowShowCommand = kWindowShowMaximized;
+			else if (const auto *stateChange = dynamic_cast<QWindowStateChangeEvent *>(event);
+			         stateChange && (stateChange->oldState() & (Qt::WindowMinimized | Qt::WindowMaximized)))
+				m_infoWindowShowCommand = kWindowRestore;
+			else
+				m_infoWindowShowCommand = kWindowShowNormal;
 			if (m_view)
 				m_view->refreshMiniWindows(true);
 			if (m_primaryRuntimeBinding)

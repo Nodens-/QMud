@@ -46,7 +46,10 @@ namespace
 {
 	using PatternRows = std::array<quint8, 8>;
 
-	bool hasPngSignature(const QByteArray &data)
+	constexpr int    kMemoryImageDecodeCacheMaxEntries = 64;
+	constexpr qint64 kMemoryImageDecodeCacheMaxBytes   = 64LL * 1024LL * 1024LL;
+
+	bool             hasPngSignature(const QByteArray &data)
 	{
 		static constexpr unsigned char kPngSignature[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
 		return data.size() >= static_cast<int>(sizeof(kPngSignature)) &&
@@ -2178,8 +2181,9 @@ namespace MiniWindowUtils
 			sourceHasAlpha = decoded.hasAlphaChannel();
 			monochrome     = false;
 			QMutexLocker locker(&memoryImageDecodeCacheMutex());
-			qmudInsertMemoryImageDecodeCache(memoryImageDecodeCache(), memoryImageDecodeCacheBytes(), data,
-			                                 decoded, sourceHasAlpha, monochrome, 64, 64 * 1024 * 1024);
+			qmudInsertMemoryImageDecodeCache(
+			    memoryImageDecodeCache(), memoryImageDecodeCacheBytes(), data, decoded, sourceHasAlpha,
+			    monochrome, kMemoryImageDecodeCacheMaxEntries, kMemoryImageDecodeCacheMaxBytes);
 		}
 		Q_UNUSED(monochrome);
 		QImage image = decoded.convertToFormat(QImage::Format_ARGB32);

@@ -17,6 +17,7 @@
 #include "DoubleMetaphone.h"
 #include "EncodingUtils.h"
 #include "ErrorDescriptions.h"
+#include "Flags.h"
 #include "GuiSystemUtils.h"
 #include "HyperlinkActionUtils.h"
 #include "LogCompressionUtils.h"
@@ -346,19 +347,17 @@ static int                 publicNoteColourIndexFromWorldAttribute(const QString
 static QStringList         macroDescriptionList();
 static QStringList         keypadNameList();
 
-constexpr int              kChatLoopDiscardSeconds           = 5;
-constexpr int              ADJUST_COLOUR_INVERT              = 1;
-constexpr int              ADJUST_COLOUR_LIGHTER             = 2;
-constexpr int              ADJUST_COLOUR_DARKER              = 3;
-constexpr int              ADJUST_COLOUR_LESS_COLOUR         = 4;
-constexpr int              ADJUST_COLOUR_MORE_COLOUR         = 5;
-constexpr int              kPacketDebugChars                 = 16;
-constexpr int              kMaxMxpTextBufferBytes            = 256 * 1024;
-constexpr int              kMaxMxpStackDepth                 = 512;
-constexpr int              kMemoryImageDecodeCacheMaxEntries = 48;
-constexpr qint64           kMemoryImageDecodeCacheMaxBytes   = 64LL * 1024LL * 1024LL;
-constexpr int              kAnsiBlack                        = 0;
-constexpr int              kAnsiWhite                        = 7;
+constexpr int              kChatLoopDiscardSeconds   = 5;
+constexpr int              ADJUST_COLOUR_INVERT      = 1;
+constexpr int              ADJUST_COLOUR_LIGHTER     = 2;
+constexpr int              ADJUST_COLOUR_DARKER      = 3;
+constexpr int              ADJUST_COLOUR_LESS_COLOUR = 4;
+constexpr int              ADJUST_COLOUR_MORE_COLOUR = 5;
+constexpr int              kPacketDebugChars         = 16;
+constexpr int              kMaxMxpTextBufferBytes    = 256 * 1024;
+constexpr int              kMaxMxpStackDepth         = 512;
+constexpr int              kAnsiBlack                = 0;
+constexpr int              kAnsiWhite                = 7;
 
 namespace
 {
@@ -1297,37 +1296,50 @@ static MiniWindowUtils::RandomUnit seededMiniWindowRandomUnit(const quint32 seed
 	return [generator]() { return generator->generateDouble(); };
 }
 
-constexpr int kChatNameChange         = 1;
-constexpr int kChatRequestConnections = 2;
-constexpr int kChatConnectionList     = 3;
-constexpr int kChatTextEverybody      = 4;
-constexpr int kChatTextPersonal       = 5;
-constexpr int kChatTextGroup          = 6;
-constexpr int kChatMessage            = 7;
-constexpr int kChatDoNotDisturb       = 8;
-constexpr int kChatSendAction         = 9;
-constexpr int kChatSendAlias          = 10;
-constexpr int kChatSendMacro          = 11;
-constexpr int kChatSendVariable       = 12;
-constexpr int kChatSendEvent          = 13;
-constexpr int kChatSendGag            = 14;
-constexpr int kChatSendHighlight      = 15;
-constexpr int kChatSendList           = 16;
-constexpr int kChatSendArray          = 17;
-constexpr int kChatSendBaritem        = 18;
-constexpr int kChatVersion            = 19;
-constexpr int kChatFileStart          = 20;
-constexpr int kChatFileDeny           = 21;
-constexpr int kChatFileBlockRequest   = 22;
-constexpr int kChatFileBlock          = 23;
-constexpr int kChatFileEnd            = 24;
-constexpr int kChatFileCancel         = 25;
-constexpr int kChatPingRequest        = 26;
-constexpr int kChatPingResponse       = 27;
-constexpr int kChatPeekConnections    = 28;
-
 namespace
 {
+	enum ChatMessageCode : int
+	{
+		kChatNameChange                     = 1,
+		kChatRequestConnections             = 2,
+		kChatConnectionList                 = 3,
+		kChatTextEverybody                  = 4,
+		kChatTextPersonal                   = 5,
+		kChatTextGroup                      = 6,
+		kChatMessage                        = 7,
+		kChatDoNotDisturb [[maybe_unused]]  = 8,
+		kChatSendAction [[maybe_unused]]    = 9,
+		kChatSendAlias [[maybe_unused]]     = 10,
+		kChatSendMacro [[maybe_unused]]     = 11,
+		kChatSendVariable [[maybe_unused]]  = 12,
+		kChatSendEvent [[maybe_unused]]     = 13,
+		kChatSendGag [[maybe_unused]]       = 14,
+		kChatSendHighlight [[maybe_unused]] = 15,
+		kChatSendList [[maybe_unused]]      = 16,
+		kChatSendArray [[maybe_unused]]     = 17,
+		kChatSendBaritem [[maybe_unused]]   = 18,
+		kChatVersion                        = 19,
+		kChatFileStart                      = 20,
+		kChatFileDeny                       = 21,
+		kChatFileBlockRequest               = 22,
+		kChatFileBlock                      = 23,
+		kChatFileEnd                        = 24,
+		kChatFileCancel                     = 25,
+		kChatPingRequest                    = 26,
+		kChatPingResponse                   = 27,
+		kChatPeekConnections                = 28,
+		kChatPeekList                       = 29,
+		kChatSnoop                          = 30,
+		kChatSnoopData                      = 31,
+		kChatIcon                           = 100,
+		kChatStatus                         = 101,
+		kChatEmailAddress                   = 102,
+		kChatRequestPgpKey                  = 103,
+		kChatPgpKey                         = 104,
+		kChatSendCommand                    = 105,
+		kChatStamp                          = 106,
+	};
+
 	struct MxpSupportTag
 	{
 			const char *name;
@@ -1393,18 +1405,6 @@ static int mxpBuiltinTagCount()
 		count++;
 	return count;
 }
-
-constexpr int     kChatPeekList  = 29;
-constexpr int     kChatSnoop     = 30;
-constexpr int     kChatSnoopData = 31;
-
-constexpr int     kChatIcon          = 100;
-constexpr int     kChatStatus        = 101;
-constexpr int     kChatEmailAddress  = 102;
-constexpr int     kChatRequestPgpKey = 103;
-constexpr int     kChatPgpKey        = 104;
-constexpr int     kChatSendCommand   = 105;
-constexpr int     kChatStamp         = 106;
 
 constexpr char    kChatEndOfCommand = static_cast<char>(0xFF);
 
@@ -18622,9 +18622,11 @@ WorldRuntime::CommandUiSnapshot WorldRuntime::commandUiSnapshot(const bool inclu
 				if (!childWindow->isVisible())
 					snapshot.worldWindowShowCommand = 0;
 				else if (childWindow->isMinimized())
-					snapshot.worldWindowShowCommand = 6;
+					snapshot.worldWindowShowCommand = kWindowMinimize;
 				else if (childWindow->isMaximized())
-					snapshot.worldWindowShowCommand = 3;
+					snapshot.worldWindowShowCommand = kWindowShowMaximized;
+				else
+					snapshot.worldWindowShowCommand = childWindow->getInfoWindowShowCommand();
 				snapshot.worldChildWindowHeight = childWindow->height();
 				snapshot.worldChildWindowWidth  = childWindow->width();
 			}

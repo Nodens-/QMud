@@ -155,14 +155,9 @@ constexpr int kStyleInverse = INVERSE;
 #else
 constexpr int kStyleInverse = 0x0008;
 #endif
-// Keep legacy ShowWindow-compatible values returned by GetInfo(238).
-constexpr int  kWindowShowNormal    = 1;
-constexpr int  kWindowShowMaximized = 3;
-constexpr int  kWindowMinimize      = 6;
-constexpr int  kWindowRestore       = 9;
-constexpr int  kAnsiBold            = 1;
-constexpr int  kAnsiTextRed         = 31;
-constexpr int  kAnsiTextCyan        = 36;
+constexpr int  kAnsiBold     = 1;
+constexpr int  kAnsiTextRed  = 31;
+constexpr int  kAnsiTextCyan = 36;
 
 static QString qmudHomeForLuaFileApi(const LuaCallbackEngine *engine);
 static bool    resolveLuaFileApiPath(const LuaCallbackEngine *engine, const QString &rawPath,
@@ -26484,33 +26479,38 @@ static int luaSetWorldWindowStatus(lua_State *L)
 	if (!runtime)
 		return 0;
 	const int requestedStatus = static_cast<int>(luaL_checkinteger(L, 1));
-	enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime,
-	                                             [requestedStatus](WorldRuntime &targetRuntime)
-	                                             {
-		                                             MainWindowHost *host =
-		                                                 resolveMainWindowHostForRuntime(&targetRuntime);
-		                                             if (!host)
-			                                             return;
-		                                             WorldChildWindow *child =
-		                                                 host->findWorldChildWindow(&targetRuntime);
-		                                             if (!child)
-			                                             return;
-		                                             switch (requestedStatus)
-		                                             {
-		                                             case 1:
-			                                             child->showMaximized();
-			                                             break;
-		                                             case 2:
-			                                             child->showMinimized();
-			                                             break;
-		                                             case 4:
-		                                             case 3:
-			                                             child->showNormal();
-			                                             break;
-		                                             default:
-			                                             break;
-		                                             }
-	                                             });
+	enqueueRuntimeThreadDeferredMutationNoResult(
+	    engine, runtime,
+	    [requestedStatus](WorldRuntime &targetRuntime)
+	    {
+		    MainWindowHost *host = resolveMainWindowHostForRuntime(&targetRuntime);
+		    if (!host)
+			    return;
+		    WorldChildWindow *child = host->findWorldChildWindow(&targetRuntime);
+		    if (!child)
+			    return;
+		    switch (requestedStatus)
+		    {
+		    case 1:
+			    child->showMaximized();
+			    child->setInfoWindowShowCommand(kWindowShowMaximized);
+			    break;
+		    case 2:
+			    child->showMinimized();
+			    child->setInfoWindowShowCommand(kWindowMinimize);
+			    break;
+		    case 3:
+			    child->showNormal();
+			    child->setInfoWindowShowCommand(kWindowRestore);
+			    break;
+		    case 4:
+			    child->showNormal();
+			    child->setInfoWindowShowCommand(kWindowShowNormal);
+			    break;
+		    default:
+			    break;
+		    }
+	    });
 	if (requestedStatus >= 1 && requestedStatus <= 4)
 		invalidateGlobalCachedCommandUiSnapshot(engine);
 	return 0;

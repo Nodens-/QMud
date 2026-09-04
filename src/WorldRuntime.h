@@ -11,9 +11,9 @@
 #define QMUD_WORLDRUNTIME_H
 
 #include "AnsiSgrParseUtils.h"
+#include "Flags.h"
 #include "IndexedRingBuffer.h"
 #include "LuaExecutor.h"
-#include "MemoryImageDecodeCacheUtils.h"
 #include "MiniWindow.h"
 #include "ReloadUtils.h"
 #include "SqliteCompat.h"
@@ -4546,7 +4546,7 @@ class WorldRuntime : public QObject
 				bool        selectedWordResolved{false};
 				bool        fullScreenMode{false};
 				int         worldWindowCount{0};
-				int         worldWindowShowCommand{1};
+				int         worldWindowShowCommand{kWindowShowNormal};
 				int         mainClientHeight{0};
 				int         mainClientWidth{0};
 				int         mainToolbarHeight{0};
@@ -6633,8 +6633,6 @@ class WorldRuntime : public QObject
 		int                                             m_outputViewLastAppendedIndexExclusive{-1};
 		QVector<OutputBufferEdit>                       m_outputViewStructuralEditsPending;
 		QVector<QPointer<WorldView>>                    m_outputViewMutationBatchViews;
-		QVector<QMudMemoryImageDecodeCacheEntry>        m_memoryImageDecodeCache;
-		qint64                                          m_memoryImageDecodeCacheBytes{0};
 		int                                             m_absoluteReferenceRightOver{0};
 		int                                             m_absoluteReferenceBottomOver{0};
 		int                                             m_absoluteReferenceRightUnder{0};

@@ -133,6 +133,7 @@ ARG LUASOCKET_VERSION=3.1.0
 ARG LPEG_VERSION=1.1.0
 ARG LUASEC_VERSION=1.3.2
 ARG OPENSSL_VERSION=3.3.2
+ARG MACOS_DEPLOYMENT_TARGET=13.0.0
 
 RUN cat > /usr/local/bin/build-qmud-macos-lua-deps.sh <<'EOF' && chmod +x /usr/local/bin/build-qmud-macos-lua-deps.sh
 #!/usr/bin/env bash
@@ -143,35 +144,77 @@ LUASOCKET_VERSION="${LUASOCKET_VERSION:?LUASOCKET_VERSION not set}"
 LPEG_VERSION="${LPEG_VERSION:?LPEG_VERSION not set}"
 LUASEC_VERSION="${LUASEC_VERSION:?LUASEC_VERSION not set}"
 OPENSSL_VERSION="${OPENSSL_VERSION:?OPENSSL_VERSION not set}"
+MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:?MACOS_DEPLOYMENT_TARGET not set}"
 
-LUA_CC=""
-for CANDIDATE_DIR in "${OSXCROSS_BIN_DIR:-/opt/osxcross/target/bin}" /opt/osxcross/bin /usr/local/osxcross/bin; do
-  if [[ -d "${CANDIDATE_DIR}" ]]; then
-    LUA_CC="$(find "${CANDIDATE_DIR}" -maxdepth 1 -type f -name 'x86_64-apple-darwin*-clang' | sort | head -n 1 || true)"
-    [[ -n "${LUA_CC}" ]] && break
-  fi
-done
-if [[ -z "${LUA_CC}" ]] && command -v o64-clang >/dev/null 2>&1; then
-  LUA_CC="$(command -v o64-clang)"
+find_osxcross_host() {
+  local pattern="$1"
+  find -L /opt/osxcross/bin /opt/osxcross/target/bin -maxdepth 1 \( -type f -o -type l \) \
+    -name "${pattern}-apple-darwin*-clang" 2>/dev/null | sort | head -n 1 | awk -F/ '{print $NF}' | sed 's/-clang$//'
+}
+
+resolve_tool() {
+  local tool_name="$1"
+  local candidate
+  for candidate in \
+    "/opt/osxcross/bin/${tool_name}" \
+    "/opt/osxcross/target/bin/${tool_name}" \
+    "/opt/osxcross/bin/${X86_HOST}-${tool_name}" \
+    "/opt/osxcross/target/bin/${X86_HOST}-${tool_name}"; do
+    if [[ -x "${candidate}" ]]; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_host_tool() {
+  local host="$1"
+  local tool_name="$2"
+  local candidate
+  for candidate in \
+    "/opt/osxcross/bin/${host}-${tool_name}" \
+    "/opt/osxcross/target/bin/${host}-${tool_name}" \
+    "/opt/osxcross/bin/${tool_name}" \
+    "/opt/osxcross/target/bin/${tool_name}"; do
+    if [[ -x "${candidate}" ]]; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+X86_HOST="$(find_osxcross_host x86_64)"
+ARM_HOST="$(find_osxcross_host aarch64)"
+if [[ -z "${ARM_HOST}" ]]; then
+  ARM_HOST="$(find_osxcross_host arm64)"
 fi
-if [[ -z "${LUA_CC}" ]]; then
-  echo "Error: could not locate macOS cross-clang compiler in expected osxcross bin directories" >&2
-  ls -la "${OSXCROSS_BIN_DIR:-/opt/osxcross/target/bin}" >&2 || true
-  ls -la /opt/osxcross/bin >&2 || true
-  ls -la /usr/local/osxcross/bin >&2 || true
+if [[ -z "${X86_HOST}" || -z "${ARM_HOST}" ]]; then
+  echo "Error: universal macOS dependencies require both x86_64 and arm64 osxcross clang toolchains." >&2
   exit 1
 fi
+
+X86_CC="/opt/osxcross/bin/${X86_HOST}-clang"
+ARM_CC="/opt/osxcross/bin/${ARM_HOST}-clang"
+X86_AR="$(resolve_host_tool "${X86_HOST}" ar)"
+X86_RANLIB="$(resolve_host_tool "${X86_HOST}" ranlib)"
+ARM_AR="$(resolve_host_tool "${ARM_HOST}" ar)"
+ARM_RANLIB="$(resolve_host_tool "${ARM_HOST}" ranlib)"
+LIPO="$(resolve_tool lipo || resolve_tool llvm-lipo)"
+UNIVERSAL_CFLAGS=(-O2 -fPIC "-mmacosx-version-min=${MACOS_DEPLOYMENT_TARGET}" -arch x86_64 -arch arm64)
 
 mkdir -p /tmp/qmud-src
 mkdir -p /opt/qmud/macos-deps/lua/include /opt/qmud/macos-deps/lua/lib
 mkdir -p /opt/qmud/macos-deps/lua-modules/socket /opt/qmud/macos-deps/lua-modules/mime /opt/qmud/macos-deps/lua-modules/json /opt/qmud/macos-deps/lua-modules/ssl
+mkdir -p /opt/qmud/macos-deps/openssl/include /opt/qmud/macos-deps/openssl/lib /tmp/qmud-src/openssl-slices
 
 curl -fsSL "https://www.lua.org/ftp/lua-${LUA_VERSION}.tar.gz" -o /tmp/qmud-src/lua.tar.gz
 tar -xf /tmp/qmud-src/lua.tar.gz -C /tmp/qmud-src
 LUA_SRC_DIR="$(find /tmp/qmud-src -maxdepth 1 -type d -name "lua-${LUA_VERSION}*" | head -n 1 || true)"
 [[ -n "${LUA_SRC_DIR}" ]]
 cd "${LUA_SRC_DIR}/src"
-"${LUA_CC}" -O2 -fPIC -mmacosx-version-min=12.0 -DLUA_USE_MACOSX -I. -dynamiclib \
+"${X86_CC}" "${UNIVERSAL_CFLAGS[@]}" -DLUA_USE_MACOSX -I. -dynamiclib \
   lapi.c lauxlib.c lbaselib.c lcode.c lcorolib.c lctype.c ldblib.c ldebug.c ldo.c ldump.c lfunc.c lgc.c \
   linit.c liolib.c llex.c lmathlib.c lmem.c loadlib.c lobject.c lopcodes.c loslib.c lparser.c lstate.c \
   lstring.c lstrlib.c ltable.c ltablib.c ltm.c lundump.c lutf8lib.c lvm.c lzio.c \
@@ -187,10 +230,10 @@ LUASOCKET_SRC="$(find /tmp/qmud-src -maxdepth 1 -type d -name "luasocket*${LUASO
 LUASOCKET_SRC_C_DIR="${LUASOCKET_SRC}/src"
 [[ -d "${LUASOCKET_SRC_C_DIR}" ]]
 cd "${LUASOCKET_SRC_C_DIR}"
-"${LUA_CC}" -O2 -fPIC -mmacosx-version-min=12.0 -I/opt/qmud/macos-deps/lua/include -bundle -undefined dynamic_lookup \
+"${X86_CC}" "${UNIVERSAL_CFLAGS[@]}" -I/opt/qmud/macos-deps/lua/include -bundle -undefined dynamic_lookup \
   auxiliar.c buffer.c compat.c except.c inet.c io.c luasocket.c options.c select.c tcp.c timeout.c udp.c usocket.c \
   -o /opt/qmud/macos-deps/lua-modules/socket/core.so
-"${LUA_CC}" -O2 -fPIC -mmacosx-version-min=12.0 -I/opt/qmud/macos-deps/lua/include -bundle -undefined dynamic_lookup \
+"${X86_CC}" "${UNIVERSAL_CFLAGS[@]}" -I/opt/qmud/macos-deps/lua/include -bundle -undefined dynamic_lookup \
   mime.c compat.c -o /opt/qmud/macos-deps/lua-modules/mime/core.so
 
 copy_lua_file() {
@@ -236,16 +279,36 @@ curl -fsSL "https://www.openssl.org/source/old/3.3/openssl-${OPENSSL_VERSION}.ta
 tar -xf /tmp/qmud-src/openssl.tar.gz -C /tmp/qmud-src
 OPENSSL_SRC="$(find /tmp/qmud-src -maxdepth 1 -type d -name "openssl-${OPENSSL_VERSION}*" | head -n 1 || true)"
 [[ -n "${OPENSSL_SRC}" ]]
-cd "${OPENSSL_SRC}"
-OPENSSL_TARGET="darwin64-x86_64-cc"
-if [[ "${LUA_CC}" == *"aarch64-apple-darwin"* ]] || [[ "${LUA_CC}" == *"arm64-apple-darwin"* ]]; then
-  OPENSSL_TARGET="darwin64-arm64-cc"
-fi
-CC="${LUA_CC}" ./Configure "${OPENSSL_TARGET}" no-shared no-tests no-apps no-module no-legacy \
-  --prefix=/opt/qmud/macos-deps/openssl \
-  --openssldir=/opt/qmud/macos-deps/openssl
-make -j"$(nproc)"
-make install_sw
+
+build_openssl_slice() {
+  local arch_name="$1"
+  local cc="$2"
+  local ar="$3"
+  local ranlib="$4"
+  local openssl_target="$5"
+  local prefix="/tmp/qmud-src/openssl-slices/${arch_name}"
+  local build_dir="/tmp/qmud-src/openssl-${arch_name}"
+
+  cp -R "${OPENSSL_SRC}" "${build_dir}"
+  cd "${build_dir}"
+  CC="${cc}" AR="${ar}" RANLIB="${ranlib}" ./Configure "${openssl_target}" no-shared no-tests no-apps no-module no-legacy \
+    --prefix="${prefix}" \
+    --openssldir="${prefix}"
+  make -j"$(nproc)" AR="${ar}" RANLIB="${ranlib}"
+  make install_sw AR="${ar}" RANLIB="${ranlib}"
+}
+
+build_openssl_slice x86_64 "${X86_CC}" "${X86_AR}" "${X86_RANLIB}" darwin64-x86_64-cc
+build_openssl_slice arm64 "${ARM_CC}" "${ARM_AR}" "${ARM_RANLIB}" darwin64-arm64-cc
+cp -R /tmp/qmud-src/openssl-slices/x86_64/include/. /opt/qmud/macos-deps/openssl/include/
+"${LIPO}" -create \
+  /tmp/qmud-src/openssl-slices/x86_64/lib/libssl.a \
+  /tmp/qmud-src/openssl-slices/arm64/lib/libssl.a \
+  -output /opt/qmud/macos-deps/openssl/lib/libssl.a
+"${LIPO}" -create \
+  /tmp/qmud-src/openssl-slices/x86_64/lib/libcrypto.a \
+  /tmp/qmud-src/openssl-slices/arm64/lib/libcrypto.a \
+  -output /opt/qmud/macos-deps/openssl/lib/libcrypto.a
 
 curl -fsSL "https://github.com/brunoos/luasec/archive/refs/tags/v${LUASEC_VERSION}.tar.gz" -o /tmp/qmud-src/luasec.tar.gz || \
 curl -fsSL "https://github.com/brunoos/luasec/archive/refs/tags/${LUASEC_VERSION}.tar.gz" -o /tmp/qmud-src/luasec.tar.gz
@@ -280,7 +343,7 @@ if [[ -z "${LUASEC_SOCKET_SOURCES}" ]]; then
   echo "Error: could not resolve bundled LuaSocket sources in ${LUASEC_SRC_C_DIR}/luasocket" >&2
   exit 1
 fi
-"${LUA_CC}" -O2 -fPIC -mmacosx-version-min=12.0 \
+"${X86_CC}" "${UNIVERSAL_CFLAGS[@]}" \
   -I/opt/qmud/macos-deps/lua/include \
   -I/opt/qmud/macos-deps/openssl/include \
   -I"${LUASEC_SRC_C_DIR}" \
@@ -318,7 +381,7 @@ else
 fi
 [[ -f "${LPEG_C_DIR}/lpcap.c" ]]
 cd "${LPEG_C_DIR}"
-"${LUA_CC}" -O2 -fPIC -mmacosx-version-min=12.0 -I/opt/qmud/macos-deps/lua/include -bundle -undefined dynamic_lookup \
+"${X86_CC}" "${UNIVERSAL_CFLAGS[@]}" -I/opt/qmud/macos-deps/lua/include -bundle -undefined dynamic_lookup \
   lpcap.c lpcode.c lptree.c lpvm.c -o /opt/qmud/macos-deps/lua-modules/lpeg.so
 if [[ -f "${LPEG_SRC}/re.lua" ]]; then
   cp "${LPEG_SRC}/re.lua" /opt/qmud/macos-deps/lua-modules/re.lua
@@ -340,12 +403,13 @@ test -f /opt/qmud/macos-deps/openssl/lib/libcrypto.a
 rm -rf /tmp/qmud-src
 EOF
 
-RUN LUA_VERSION="${LUA_VERSION}" LUASOCKET_VERSION="${LUASOCKET_VERSION}" LPEG_VERSION="${LPEG_VERSION}" LUASEC_VERSION="${LUASEC_VERSION}" OPENSSL_VERSION="${OPENSSL_VERSION}" \
+RUN LUA_VERSION="${LUA_VERSION}" LUASOCKET_VERSION="${LUASOCKET_VERSION}" LPEG_VERSION="${LPEG_VERSION}" LUASEC_VERSION="${LUASEC_VERSION}" OPENSSL_VERSION="${OPENSSL_VERSION}" MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}" \
     /usr/local/bin/build-qmud-macos-lua-deps.sh
 
 ENV QMUD_MACOS_QT_PREFIX=/opt/Qt/latest/macos
 ENV QMUD_MACOS_QT_HOST_PREFIX=/usr/lib64/qt6
 ENV QMUD_MACOS_LUA_PREFIX=/opt/qmud/macos-deps/lua
 ENV QMUD_MACOS_LUA_MODULES=/opt/qmud/macos-deps/lua-modules
+ENV QMUD_MACOS_OPENSSL_PREFIX=/opt/qmud/macos-deps/openssl
 
 WORKDIR /work

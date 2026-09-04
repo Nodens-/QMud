@@ -9,6 +9,12 @@
 #ifndef QMUD_FLAGS_H
 #define QMUD_FLAGS_H
 
+// Win32 ShowWindow-compatible values exposed by GetInfo(238).
+inline constexpr int kWindowShowNormal    = 1;
+inline constexpr int kWindowShowMaximized = 3;
+inline constexpr int kWindowMinimize      = 6;
+inline constexpr int kWindowRestore       = 9;
+
 // Flags for AddTrigger
 enum
 {
