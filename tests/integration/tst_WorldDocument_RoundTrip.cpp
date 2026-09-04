@@ -162,6 +162,15 @@ namespace
 				                                            QStringLiteral("1"));
 				QVERIFY(colour);
 				QCOMPARE(QColor(colour->attributes.value(QStringLiteral("rgb"))), QColor(Qt::black));
+				const auto *customColour =
+				    groupedEntryBySequence(loaded.colours(), QStringLiteral("custom"), QStringLiteral("3"));
+				QVERIFY(customColour);
+				QCOMPARE(customColour->attributes.value(QStringLiteral("name")),
+				         QStringLiteral("Asymmetric"));
+				QCOMPARE(QColor(customColour->attributes.value(QStringLiteral("text"))),
+				         QColor(QStringLiteral("#123456")));
+				QCOMPARE(QColor(customColour->attributes.value(QStringLiteral("back"))),
+				         QColor(QStringLiteral("#654321")));
 				const auto *printing = groupedEntryBySequence(
 				    loaded.printingStyles(), QStringLiteral("ansi/normal"), QStringLiteral("1"));
 				QVERIFY(printing);

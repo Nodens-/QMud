@@ -1056,6 +1056,74 @@ namespace
 				QVERIFY(!restoredExcludeSymbolSuffix->isChecked());
 			}
 
+			void customColoursLoadPersistAndCreateMissingCanonicalEntries()
+			{
+				WorldRuntime::Colour existing;
+				existing.group = QStringLiteral("custom");
+				existing.attributes.insert(QStringLiteral("seq"), QStringLiteral("01"));
+				existing.attributes.insert(QStringLiteral("seq_index"), QStringLiteral("0"));
+				existing.attributes.insert(QStringLiteral("name"), QStringLiteral("Existing"));
+				existing.attributes.insert(QStringLiteral("text"), QStringLiteral("#123456"));
+				existing.attributes.insert(QStringLiteral("back"), QStringLiteral("#654321"));
+
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setColours({existing});
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				auto *name       = dialog.findChild<QLineEdit *>(QStringLiteral("customColourName0"));
+				auto *textSwatch = dialog.findChild<QPushButton *>(QStringLiteral("customTextSwatch0"));
+				auto *backSwatch = dialog.findChild<QPushButton *>(QStringLiteral("customBackSwatch0"));
+				QVERIFY(name);
+				QVERIFY(textSwatch);
+				QVERIFY(backSwatch);
+				QCOMPARE(name->text(), QStringLiteral("Existing"));
+				QCOMPARE(QColor(textSwatch->property("swatchColor").toString()),
+				         QColor(QStringLiteral("#123456")));
+				QCOMPARE(QColor(backSwatch->property("swatchColor").toString()),
+				         QColor(QStringLiteral("#654321")));
+
+				name->setText(QStringLiteral("Changed"));
+				textSwatch->setProperty("swatchColor", QStringLiteral("#13579b"));
+				backSwatch->setProperty("swatchColor", QStringLiteral("#2468ac"));
+				dialog.accept();
+
+				const WorldRuntime::Colour *changed     = nullptr;
+				int                         customCount = 0;
+				for (const WorldRuntime::Colour &colour : runtime.colours())
+				{
+					if (colour.group != QStringLiteral("custom"))
+						continue;
+					++customCount;
+					if (colour.attributes.value(QStringLiteral("seq")) == QStringLiteral("1"))
+						changed = &colour;
+				}
+				QCOMPARE(customCount, MAX_CUSTOM);
+				QVERIFY(changed);
+				QCOMPARE(changed->attributes.value(QStringLiteral("seq")), QStringLiteral("1"));
+				QCOMPARE(changed->attributes.value(QStringLiteral("name")), QStringLiteral("Changed"));
+				QCOMPARE(QColor(changed->attributes.value(QStringLiteral("text"))),
+				         QColor(QStringLiteral("#13579b")));
+				QCOMPARE(QColor(changed->attributes.value(QStringLiteral("back"))),
+				         QColor(QStringLiteral("#2468ac")));
+
+				WorldPreferencesDialog restoredDialog(&runtime, nullptr);
+				auto                  *restoredName =
+				    restoredDialog.findChild<QLineEdit *>(QStringLiteral("customColourName0"));
+				auto *restoredText =
+				    restoredDialog.findChild<QPushButton *>(QStringLiteral("customTextSwatch0"));
+				auto *restoredBack =
+				    restoredDialog.findChild<QPushButton *>(QStringLiteral("customBackSwatch0"));
+				QVERIFY(restoredName);
+				QVERIFY(restoredText);
+				QVERIFY(restoredBack);
+				QCOMPARE(restoredName->text(), QStringLiteral("Changed"));
+				QCOMPARE(QColor(restoredText->property("swatchColor").toString()),
+				         QColor(QStringLiteral("#13579b")));
+				QCOMPARE(QColor(restoredBack->property("swatchColor").toString()),
+				         QColor(QStringLiteral("#2468ac")));
+			}
+
 			void partialSaveCharacterThresholdFollowsParentAndPersists()
 			{
 				WorldRuntime runtime;

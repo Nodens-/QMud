@@ -11,6 +11,7 @@
 #include "NativePluginRegistry.h"
 #include "Version.h"
 #include "WorldOptions.h"
+#include "helpers/ColorUtils.h"
 
 #include <QDir>
 #include <QFile>
@@ -651,7 +652,25 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 			}
 			else if (name == QLatin1String("colours"))
 			{
-				sawContent = true;
+				sawContent        = true;
+				auto appendColour = [this, &reader](const QString &group, const int maxSequence)
+				{
+					Colour colour;
+					colour.group                     = group;
+					const QXmlStreamAttributes attrs = reader.attributes();
+					for (const QXmlStreamAttribute &attr : attrs)
+						colour.attributes.insert(attr.name().toString(), attr.value().toString());
+					bool      ok  = false;
+					const int seq = colour.attributes.value(QStringLiteral("seq")).trimmed().toInt(&ok);
+					if (!ok || seq < 1 || seq > maxSequence)
+					{
+						m_warnings.push_back(
+						    withLine(reader, QStringLiteral("Colour sequence (\"seq\") must be specified")));
+						return;
+					}
+					colour.attributes.insert(QStringLiteral("seq"), QString::number(seq));
+					m_colours.push_back(colour);
+				};
 				// Collect color elements by group.
 				while (!reader.atEnd())
 				{
@@ -659,7 +678,7 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 					if (reader.isStartElement())
 					{
 						const QString colourGroup = reader.name().toString();
-						if (colourGroup == QLatin1String("ansi") || colourGroup == QLatin1String("custom"))
+						if (colourGroup == QLatin1String("ansi"))
 						{
 							while (!reader.atEnd())
 							{
@@ -668,72 +687,42 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 								{
 									const QString subGroup = reader.name().toString();
 									if (subGroup == QLatin1String("normal") ||
-									    subGroup == QLatin1String("bold") ||
-									    subGroup == QLatin1String("custom"))
+									    subGroup == QLatin1String("bold"))
 									{
 										while (!reader.atEnd())
 										{
 											reader.readNext();
 											if (reader.isStartElement() &&
 											    reader.name() == QLatin1String("colour"))
-											{
-												Colour colour;
-												colour.group = colourGroup + QStringLiteral("/") + subGroup;
-												const QXmlStreamAttributes attrs = reader.attributes();
-												for (const QXmlStreamAttribute &attr : attrs)
-												{
-													colour.attributes.insert(attr.name().toString(),
-													                         attr.value().toString());
-												}
-												const QString seqText =
-												    colour.attributes.value(QStringLiteral("seq")).trimmed();
-												bool      ok  = false;
-												const int seq = seqText.toInt(&ok);
-												const int maxSeq =
-												    colourGroup == QLatin1String("custom") ? 16 : 8;
-												if (!ok || seq < 1 || seq > maxSeq)
-												{
-													m_warnings.push_back(withLine(
-													    reader,
-													    QStringLiteral(
-													        "Colour sequence (\"seq\") must be specified")));
-													continue;
-												}
-												m_colours.push_back(colour);
-											}
+												appendColour(colourGroup + QStringLiteral("/") + subGroup, 8);
+											else if (reader.isStartElement())
+												reader.skipCurrentElement();
 											else if (reader.isEndElement() && reader.name() == subGroup)
 												break;
 										}
 									}
-									else if (subGroup == QLatin1String("colour"))
-									{
-										Colour colour;
-										colour.group                     = colourGroup;
-										const QXmlStreamAttributes attrs = reader.attributes();
-										for (const QXmlStreamAttribute &attr : attrs)
-										{
-											colour.attributes.insert(attr.name().toString(),
-											                         attr.value().toString());
-										}
-										const QString seqText =
-										    colour.attributes.value(QStringLiteral("seq")).trimmed();
-										bool      ok     = false;
-										const int seq    = seqText.toInt(&ok);
-										const int maxSeq = colourGroup == QLatin1String("custom") ? 16 : 8;
-										if (!ok || seq < 1 || seq > maxSeq)
-										{
-											m_warnings.push_back(withLine(
-											    reader, QStringLiteral(
-											                "Colour sequence (\"seq\") must be specified")));
-											continue;
-										}
-										m_colours.push_back(colour);
-									}
+									else
+										reader.skipCurrentElement();
 								}
 								else if (reader.isEndElement() && reader.name() == colourGroup)
 									break;
 							}
 						}
+						else if (colourGroup == QMudColourGroup::kCustom)
+						{
+							while (!reader.atEnd())
+							{
+								reader.readNext();
+								if (reader.isStartElement() && reader.name() == QLatin1String("colour"))
+									appendColour(QMudColourGroup::kCustom.toString(), MAX_CUSTOM);
+								else if (reader.isStartElement())
+									reader.skipCurrentElement();
+								else if (reader.isEndElement() && reader.name() == QMudColourGroup::kCustom)
+									break;
+							}
+						}
+						else
+							reader.skipCurrentElement();
 					}
 					else if (reader.isEndElement() && reader.name() == QLatin1String("colours"))
 						break;

@@ -9,7 +9,17 @@
 #ifndef QMUD_COLORUTILS_H
 #define QMUD_COLORUTILS_H
 
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QLatin1StringView>
 #include <QString>
+
+namespace QMudColourGroup
+{
+	/**
+	 * @brief Canonical internal and XML group name for MUSHclient custom colours.
+	 */
+	inline constexpr QLatin1StringView kCustom{"custom"};
+} // namespace QMudColourGroup
 
 /**
  * @brief Converts RGB color value to closest/known name string.

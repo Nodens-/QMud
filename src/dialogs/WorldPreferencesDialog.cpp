@@ -21,6 +21,7 @@
 #include "dialogs/WorldAliasDialog.h"
 #include "dialogs/WorldTimerDialog.h"
 #include "dialogs/WorldTriggerDialog.h"
+#include "helpers/ColorUtils.h"
 #include "helpers/DialogSizingUtils.h"
 #include "helpers/EncodingUtils.h"
 #include "helpers/NoteColourUtils.h"
@@ -3206,26 +3207,46 @@ void WorldPreferencesDialog::applyListEdits()
 	{
 		for (int i = 0; i < m_customColourNames.size(); ++i)
 		{
-			const QString seq  = QString::number(i + 1);
-			const QString name = m_customColourNames[i] ? m_customColourNames[i]->text() : QString();
-			const QString text = formatColourValue(swatchButtonColour(m_customTextSwatches.value(i)));
-			const QString back = formatColourValue(swatchButtonColour(m_customBackSwatches.value(i)));
+			const QString seq      = QString::number(i + 1);
+			const QString seqIndex = QString::number(i);
+			const QString name     = m_customColourNames[i] ? m_customColourNames[i]->text() : QString();
+			const QString text     = formatColourValue(swatchButtonColour(m_customTextSwatches.value(i)));
+			const QString back     = formatColourValue(swatchButtonColour(m_customBackSwatches.value(i)));
+			bool          found    = false;
 			for (auto &colour : colours)
 			{
-				if (!colour.group.startsWith(QStringLiteral("custom/")))
+				if (colour.group != QMudColourGroup::kCustom)
 					continue;
-				if (colour.attributes.value(QStringLiteral("seq")) != seq)
+				bool      sequenceOk = false;
+				const int sequence   = colour.attributes.value(QStringLiteral("seq")).toInt(&sequenceOk);
+				if (!sequenceOk || sequence != i + 1)
 					continue;
-				if (colour.attributes.value(QStringLiteral("text")) != text ||
+				found = true;
+				if (colour.attributes.value(QStringLiteral("seq")) != seq ||
+				    colour.attributes.value(QStringLiteral("text")) != text ||
 				    colour.attributes.value(QStringLiteral("back")) != back ||
-				    colour.attributes.value(QStringLiteral("name")) != name)
+				    colour.attributes.value(QStringLiteral("name")) != name ||
+				    colour.attributes.value(QStringLiteral("seq_index")) != seqIndex)
 				{
+					colour.attributes.insert(QStringLiteral("seq"), seq);
+					colour.attributes.insert(QStringLiteral("seq_index"), seqIndex);
 					colour.attributes.insert(QStringLiteral("text"), text);
 					colour.attributes.insert(QStringLiteral("back"), back);
 					colour.attributes.insert(QStringLiteral("name"), name);
 					coloursChanged = true;
 				}
-				break;
+			}
+			if (!found)
+			{
+				WorldRuntime::Colour colour;
+				colour.group = QMudColourGroup::kCustom.toString();
+				colour.attributes.insert(QStringLiteral("seq"), seq);
+				colour.attributes.insert(QStringLiteral("seq_index"), seqIndex);
+				colour.attributes.insert(QStringLiteral("text"), text);
+				colour.attributes.insert(QStringLiteral("back"), back);
+				colour.attributes.insert(QStringLiteral("name"), name);
+				colours.push_back(colour);
+				coloursChanged = true;
 			}
 		}
 	}
@@ -9684,7 +9705,7 @@ void WorldPreferencesDialog::populateCustomColours()
 	const QList<WorldRuntime::Colour> &colours = m_runtime->colours();
 	for (const WorldRuntime::Colour &colour : colours)
 	{
-		if (!colour.group.startsWith(QStringLiteral("custom/")))
+		if (colour.group != QMudColourGroup::kCustom)
 			continue;
 		bool      ok  = false;
 		const int seq = colour.attributes.value(QStringLiteral("seq")).toInt(&ok);

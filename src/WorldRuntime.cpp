@@ -9305,8 +9305,7 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 			if (rgb.isValid())
 				boldAnsi[index] = rgb;
 		}
-		else if ((group == QStringLiteral("custom/custom") || group == QStringLiteral("custom")) &&
-		         index < customText.size())
+		else if (colour.group == QMudColourGroup::kCustom && index < customText.size())
 		{
 			const QColor text = parseColourValue(colour.attributes.value(QStringLiteral("text")));
 			const QColor back = parseColourValue(colour.attributes.value(QStringLiteral("back")));
@@ -10471,8 +10470,7 @@ void WorldRuntime::populateLuaCallbackColourSnapshots(LuaCallbackSnapshot &snaps
 	QVector<uchar>   customNameResolved(MAX_CUSTOM, 0);
 	for (const auto &colour : m_colours)
 	{
-		const QString groupKey = colour.group.trimmed().toLower();
-		if (groupKey != QStringLiteral("custom/custom") && groupKey != QStringLiteral("custom"))
+		if (colour.group != QMudColourGroup::kCustom)
 			continue;
 		const int index = colourSeqFromAttributes(colour.attributes) - 1;
 		if (index < 0 || index >= MAX_CUSTOM || customNameResolved.at(index) != 0)
@@ -13250,15 +13248,14 @@ int WorldRuntime::setCustomColourText(int index, const QColor &color)
 	if (index < 1 || index > MAX_CUSTOM || !color.isValid())
 		return eBadParameter;
 
-	const auto    group    = QStringLiteral("custom/custom");
+	const QString group    = QMudColourGroup::kCustom.toString();
 	const QString seq      = QString::number(index);
 	const QString seqIndex = QString::number(index - 1);
 	const QString value    = QString::number(colorToLong(color));
 
 	for (auto &colour : m_colours)
 	{
-		const QString groupKey = colour.group.trimmed().toLower();
-		if (groupKey != QStringLiteral("custom/custom") && groupKey != QStringLiteral("custom"))
+		if (colour.group != QMudColourGroup::kCustom)
 			continue;
 		const int itemSeq = colourSeqFromAttributes(colour.attributes);
 		if (itemSeq != index)
@@ -13305,15 +13302,14 @@ int WorldRuntime::setCustomColourBackground(int index, const QColor &color)
 	if (index < 1 || index > MAX_CUSTOM || !color.isValid())
 		return eBadParameter;
 
-	const auto    group    = QStringLiteral("custom/custom");
+	const QString group    = QMudColourGroup::kCustom.toString();
 	const QString seq      = QString::number(index);
 	const QString seqIndex = QString::number(index - 1);
 	const QString value    = QString::number(colorToLong(color));
 
 	for (auto &colour : m_colours)
 	{
-		const QString groupKey = colour.group.trimmed().toLower();
-		if (groupKey != QStringLiteral("custom/custom") && groupKey != QStringLiteral("custom"))
+		if (colour.group != QMudColourGroup::kCustom)
 			continue;
 		const int itemSeq = colourSeqFromAttributes(colour.attributes);
 		if (itemSeq != index)
@@ -13365,14 +13361,13 @@ int WorldRuntime::setCustomColourName(int index, const QString &name)
 	if (trimmed.size() > 30)
 		return eInvalidObjectLabel;
 
-	const auto    group    = QStringLiteral("custom/custom");
+	const QString group    = QMudColourGroup::kCustom.toString();
 	const QString seq      = QString::number(index);
 	const QString seqIndex = QString::number(index - 1);
 
 	for (auto &colour : m_colours)
 	{
-		const QString groupKey = colour.group.trimmed().toLower();
-		if (groupKey != QStringLiteral("custom/custom") && groupKey != QStringLiteral("custom"))
+		if (colour.group != QMudColourGroup::kCustom)
 			continue;
 		const int itemSeq = colourSeqFromAttributes(colour.attributes);
 		if (itemSeq != index)
@@ -13409,8 +13404,7 @@ QString WorldRuntime::customColourName(int index) const
 
 	for (const auto &colour : m_colours)
 	{
-		const QString groupKey = colour.group.trimmed().toLower();
-		if (groupKey != QStringLiteral("custom/custom") && groupKey != QStringLiteral("custom"))
+		if (colour.group != QMudColourGroup::kCustom)
 			continue;
 		if (colourSeqFromAttributes(colour.attributes) != index)
 			continue;
@@ -14109,8 +14103,7 @@ static void buildResolvedColourTables(const QList<WorldRuntime::Colour> &colours
 			if (rgb.isValid())
 				tables.boldAnsi[index] = rgb;
 		}
-		else if ((group == QStringLiteral("custom/custom") || group == QStringLiteral("custom")) &&
-		         index < tables.customText.size())
+		else if (colour.group == QMudColourGroup::kCustom && index < tables.customText.size())
 		{
 			const QColor text = parseColourValue(colour.attributes.value(QStringLiteral("text")));
 			const QColor back = parseColourValue(colour.attributes.value(QStringLiteral("back")));

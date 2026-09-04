@@ -102,7 +102,6 @@ extern "C"
 #include <QInputDialog>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QJsonArray>
-#include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeySequenceEdit>
 #include <QLabel>
@@ -784,7 +783,7 @@ namespace
 			const QString modernExtension = QStringLiteral(".") + QString::fromLatin1(entry.modernExtension);
 			const QString legacyExtension = QStringLiteral(".") + QString::fromLatin1(entry.legacyExtension);
 
-			const bool ok = writeRegistryStringValue(modernExtension, QString(), programId) &&
+			const bool    ok = writeRegistryStringValue(modernExtension, QString(), programId) &&
 			                writeRegistryStringValue(legacyExtension, QString(), programId) &&
 			                writeRegistryStringValue(programId, QString(), description) &&
 			                writeRegistryStringValue(programId + QStringLiteral("\\DefaultIcon"), QString(),
@@ -2640,8 +2639,8 @@ AppController::selectSessionStateSaveCandidateIndexes(const QVector<SessionState
 
 		const SessionStateSaveCandidate &selected = candidates.at(selectedIt.value());
 		const bool                       replaceSelection =
-		    candidate.connected ? (!selected.connected || candidate.openSequence < selected.openSequence)
-		                        : (!selected.connected && candidate.openSequence > selected.openSequence);
+            candidate.connected ? (!selected.connected || candidate.openSequence < selected.openSequence)
+		                                              : (!selected.connected && candidate.openSequence > selected.openSequence);
 		if (replaceSelection)
 			selectedIt.value() = index;
 	}
@@ -3002,7 +3001,7 @@ void AppController::restoreWorldSessionStateAsync(WorldRuntime *runtime, WorldVi
 	const auto loadPlan        = (forceReadSessionState && stateFileExists)
 	                                 ? QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply
 	                                 : QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
-	                                       persistOutputBuffer, persistCommandHistory, stateFileExists);
+                                    persistOutputBuffer, persistCommandHistory, stateFileExists);
 	const bool trackScrollbackRestoreStatus =
 	    QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(persistOutputBuffer, loadPlan);
 	const QPointer<AppController> controllerGuard(const_cast<AppController *>(this));
@@ -4321,8 +4320,8 @@ bool AppController::recoverReloadStartupState()
 		WorldRuntime *runtime               = nullptr;
 		WorldView    *view                  = nullptr;
 		const bool    activatePrimaryWindow = snapshot.activeWorldSequence > 0 &&
-		                                      worldState.sequence == snapshot.activeWorldSequence &&
-		                                      worldState.activePresentationOrdinal == 1;
+		                                   worldState.sequence == snapshot.activeWorldSequence &&
+		                                   worldState.activePresentationOrdinal == 1;
 		if (!openWorldForReloadRecovery(worldState, activatePrimaryWindow, &runtime, &view) || !runtime ||
 		    !view)
 		{
@@ -4605,7 +4604,7 @@ bool AppController::recoverReloadStartupState()
 		const auto loadPlan        = stateFileExists
 		                                 ? QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply
 		                                 : QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(
-		                                       persistOutputBuffer, persistCommandHistory, false);
+                                        persistOutputBuffer, persistCommandHistory, false);
 		return QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(persistOutputBuffer, loadPlan);
 	};
 
@@ -4904,12 +4903,12 @@ bool AppController::openWorldDocument(const QString &path)
 		const auto &attrs            = runtime->worldAttributes();
 		const auto  useDefaultInput  = attrs.value(QStringLiteral("use_default_input_font"));
 		const auto  useDefaultOutput = attrs.value(QStringLiteral("use_default_output_font"));
-		const auto  useInput  = useDefaultInput.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		                        useDefaultInput == QStringLiteral("1") ||
-		                        useDefaultInput.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
-		const auto  useOutput = useDefaultOutput.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		                        useDefaultOutput == QStringLiteral("1") ||
-		                        useDefaultOutput.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+		const auto  useInput = useDefaultInput.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		                      useDefaultInput == QStringLiteral("1") ||
+		                      useDefaultInput.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+		const auto useOutput = useDefaultOutput.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		                       useDefaultOutput == QStringLiteral("1") ||
+		                       useDefaultOutput.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 		if (useInput)
 		{
 			const auto inputFont   = getGlobalOption(QStringLiteral("DefaultInputFont")).toString();
@@ -6062,7 +6061,7 @@ void AppController::handleUpdateQmudNow()
 		    const QVariant statusVar  = replyGuard->attribute(QNetworkRequest::HttpStatusCodeAttribute);
 		    const int      httpStatus = statusVar.isValid() ? statusVar.toInt() : 0;
 		    const QString  networkError =
-		        replyGuard->error() == QNetworkReply::NoError ? QString() : replyGuard->errorString();
+                replyGuard->error() == QNetworkReply::NoError ? QString() : replyGuard->errorString();
 		    replyGuard->deleteLater();
 
 		    if (*timedOut)
@@ -7081,9 +7080,9 @@ static int luaUtilsInfoQt(lua_State *L)
 		const QString worldsDir = ensureTrailingSeparator(app->makeAbsolutePath(
 		    app->getGlobalOption(QStringLiteral("DefaultWorldFileDirectory")).toString()));
 		const QString stateDir  = ensureTrailingSeparator(
-		    app->makeAbsolutePath(app->getGlobalOption(QStringLiteral("StateFilesDirectory")).toString()));
+            app->makeAbsolutePath(app->getGlobalOption(QStringLiteral("StateFilesDirectory")).toString()));
 		const QString logDir     = ensureTrailingSeparator(app->makeAbsolutePath(
-		    app->getGlobalOption(QStringLiteral("DefaultLogFileDirectory")).toString()));
+            app->getGlobalOption(QStringLiteral("DefaultLogFileDirectory")).toString()));
 		const QString pluginsDir = ensureTrailingSeparator(
 		    app->makeAbsolutePath(app->getGlobalOption(QStringLiteral("PluginsDirectory")).toString()));
 
@@ -8490,8 +8489,8 @@ int AppController::dbWriteInt(const QString &section, const QString &entry, cons
 
 	const QString escapedEntry = escapeSql(entry);
 	const QString sqlUpdate    = QStringLiteral("UPDATE %1 SET value = '%2' WHERE name = '%3'")
-	                                 .arg(section, QString::number(value), escapedEntry);
-	int           rc           = dbExecute(sqlUpdate, false);
+	                              .arg(section, QString::number(value), escapedEntry);
+	int rc = dbExecute(sqlUpdate, false);
 	if (rc != SQLITE_OK)
 		return rc;
 
@@ -8499,7 +8498,7 @@ int AppController::dbWriteInt(const QString &section, const QString &entry, cons
 	{
 		const QString sqlInsert = QStringLiteral("INSERT INTO %1 (name, value) VALUES ('%2', '%3')")
 		                              .arg(section, escapedEntry, QString::number(value));
-		rc                      = dbExecute(sqlInsert, false);
+		rc = dbExecute(sqlInsert, false);
 	}
 
 	return rc;
@@ -8526,8 +8525,8 @@ int AppController::dbWriteString(const QString &section, const QString &entry, c
 	const QString escapedEntry = escapeSql(entry);
 	const QString escapedValue = escapeSql(normalizedValue);
 	const QString sqlUpdate    = QStringLiteral("UPDATE %1 SET value = '%2' WHERE name = '%3'")
-	                                 .arg(section, escapedValue, escapedEntry);
-	int           rc           = dbExecute(sqlUpdate, false);
+	                              .arg(section, escapedValue, escapedEntry);
+	int rc = dbExecute(sqlUpdate, false);
 	if (rc != SQLITE_OK)
 		return rc;
 
@@ -8535,7 +8534,7 @@ int AppController::dbWriteString(const QString &section, const QString &entry, c
 	{
 		const QString sqlInsert = QStringLiteral("INSERT INTO %1 (name, value) VALUES ('%2', '%3')")
 		                              .arg(section, escapedEntry, escapedValue);
-		rc                      = dbExecute(sqlInsert, false);
+		rc = dbExecute(sqlInsert, false);
 	}
 
 	return rc;
@@ -8661,8 +8660,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		const QString message = QStringLiteral("Clipboard converted for use with the Forum, %1 change%2 made")
 		                            .arg(changes)
 		                            .arg(changes == 1 ? QString() : QStringLiteral("s"));
-		const auto    response = QMessageBox::question(m_mainWindow, QStringLiteral("QMud"), message,
-		                                               QMessageBox::Ok | QMessageBox::Cancel);
+		const auto response = QMessageBox::question(m_mainWindow, QStringLiteral("QMud"), message,
+		                                            QMessageBox::Ok | QMessageBox::Cancel);
 		if (response != QMessageBox::Ok)
 			return input;
 		return out;
@@ -8864,8 +8863,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		        {
 			        const QString start = makeAbsolutePath(fontEdit->text().trimmed());
 			        const QString path  = QFileDialog::getOpenFileName(
-			            m_mainWindow, QStringLiteral("Select FIGlet Font"), start,
-			            QStringLiteral("FIGlet Font (*.flf);;All Files (*)"));
+                        m_mainWindow, QStringLiteral("Select FIGlet Font"), start,
+                        QStringLiteral("FIGlet Font (*.flf);;All Files (*)"));
 			        if (path.isEmpty())
 				        return;
 			        fontEdit->setText(path);
@@ -8933,8 +8932,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		{
 			const int lineCount = qMax(1, editor->document()->blockCount());
 			bool      ok        = false;
-			int       line = QInputDialog::getInt(m_mainWindow, QStringLiteral("Go To"),
-			                                      QStringLiteral("Line number:"), 1, 1, lineCount, 1, &ok);
+			int       line      = QInputDialog::getInt(m_mainWindow, QStringLiteral("Go To"),
+			                                           QStringLiteral("Line number:"), 1, 1, lineCount, 1, &ok);
 			if (!ok)
 				return;
 			QTextCursor cursor(editor->document());
@@ -9714,7 +9713,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		}
 		for (const auto &colours = runtime->colours(); const auto &[group, attributes] : colours)
 		{
-			if (!group.startsWith(QStringLiteral("custom/")) && group.toLower() != QStringLiteral("custom"))
+			if (group != QMudColourGroup::kCustom)
 				continue;
 			bool      ok  = false;
 			const int seq = attributes.value(QStringLiteral("seq")).toInt(&ok);
@@ -9807,7 +9806,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		                            .arg(spanBack.blue(), 2, 16, QLatin1Char('0'))
 		                            .toUpper();
 
-		QString       letter;
+		QString letter;
 		if (zeroBasedCol >= 0 && zeroBasedCol < line.text.size())
 			letter = line.text.mid(zeroBasedCol, 1);
 
@@ -10951,7 +10950,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		for (const QList<WorldRuntime::Colour> &colours = runtime->colours();
 		     const auto &[group, attributes] : colours)
 		{
-			if (!group.startsWith(QStringLiteral("custom/")) && group.toLower() != QStringLiteral("custom"))
+			if (group != QMudColourGroup::kCustom)
 				continue;
 			bool      ok  = false;
 			const int seq = attributes.value(QStringLiteral("seq")).toInt(&ok);
@@ -12619,7 +12618,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			return;
 		const QMap<QString, QString> &attrs     = runtime->worldAttributes();
 		const QString                 worldName = attrs.value(QStringLiteral("name"));
-		const QString prompt = QStringLiteral("Quit from %1?")
+		const QString                 prompt    = QStringLiteral("Quit from %1?")
 		                           .arg(worldName.isEmpty() ? QStringLiteral("this world") : worldName);
 		if (QMessageBox::question(m_mainWindow, QStringLiteral("Quit"), prompt,
 		                          QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
@@ -12663,8 +12662,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		    runtime->worldAttributes().value(QStringLiteral("name"), QStringLiteral("world"));
 		const QString dialogTitle = QStringLiteral("File to paste into %1").arg(worldName);
 		const QString fileName    = QFileDialog::getOpenFileName(
-		    m_mainWindow, dialogTitle, initialDir,
-		    QStringLiteral("MUD files (*.mud;*.mush);;Text files (*.txt);;All files (*.*)"));
+            m_mainWindow, dialogTitle, initialDir,
+            QStringLiteral("MUD files (*.mud;*.mush);;Text files (*.txt);;All files (*.*)"));
 		if (fileName.isEmpty())
 			return;
 
@@ -13231,7 +13230,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			const int          lineHeight = metrics.lineSpacing();
 			const QRect        pageRect   = printer.pageRect(QPrinter::DevicePixel).toRect();
 			const int          linesPerPage =
-			    linesPerPagePref > 0 ? linesPerPagePref : qMax(1, pageRect.height() / qMax(1, lineHeight));
+                linesPerPagePref > 0 ? linesPerPagePref : qMax(1, pageRect.height() / qMax(1, lineHeight));
 			const int contentLines = qMax(1, linesPerPage - 4);
 			int       pageNumber   = 1;
 			int       lineOnPage   = 0;
@@ -13266,7 +13265,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			const int          lineHeight = baseMetrics.lineSpacing();
 			const QRect        pageRect   = printer.pageRect(QPrinter::DevicePixel).toRect();
 			const int          linesPerPage =
-			    linesPerPagePref > 0 ? linesPerPagePref : qMax(1, pageRect.height() / qMax(1, lineHeight));
+                linesPerPagePref > 0 ? linesPerPagePref : qMax(1, pageRect.height() / qMax(1, lineHeight));
 			const int contentLines = qMax(1, linesPerPage - 4);
 			int       pageNumber   = 1;
 			int       lineOnPage   = 0;
@@ -14138,11 +14137,11 @@ void AppController::handleImportFromMushclient()
 	progressDialog.setWindowFlag(Qt::WindowCloseButtonHint, false);
 	auto *layout = new QVBoxLayout(&progressDialog);
 	auto *label  = new QLabel(
-	    QStringLiteral("Please wait while MUSHclient data are being imported.\n"
-	                   "Do NOT close QMud until this process is finished.\n"
-	                   "If you do close it, you have to start with a fresh QMud installation and rerun "
-	                   "the \"Import from MUSHclient\" procedure."),
-	    &progressDialog);
+        QStringLiteral("Please wait while MUSHclient data are being imported.\n"
+	                     "Do NOT close QMud until this process is finished.\n"
+	                     "If you do close it, you have to start with a fresh QMud installation and rerun "
+	                     "the \"Import from MUSHclient\" procedure."),
+        &progressDialog);
 	label->setWordWrap(true);
 	layout->addWidget(label);
 	progressDialog.show();

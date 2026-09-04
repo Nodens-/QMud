@@ -24,6 +24,7 @@
 #include "WorldRuleEnableUtils.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
+#include "helpers/ColorUtils.h"
 #include "helpers/EncodingUtils.h"
 #include "helpers/OutputWrapUtils.h"
 #include "scripting/ScriptingErrors.h"
@@ -46,7 +47,6 @@
 #include <QUrl>
 #include <algorithm>
 #include <limits>
-#include <memory>
 #ifdef HILITE
 constexpr int kStyleHilite = HILITE;
 #else
@@ -329,8 +329,7 @@ namespace
 				    rgb.isValid())
 					palette.bold[index] = rgb;
 			}
-			else if ((group == QStringLiteral("custom/custom") || group == QStringLiteral("custom")) &&
-			         index < palette.customText.size())
+			else if (groupValue == QMudColourGroup::kCustom && index < palette.customText.size())
 			{
 				const QColor text = parseColorValue(attributes.value(QStringLiteral("text")));
 				const QColor back = parseColorValue(attributes.value(QStringLiteral("back")));
@@ -950,12 +949,12 @@ void WorldCommandProcessor::setRuntime(WorldRuntime *runtime)
 	const QString noTranslateIac        = attrs.value(QStringLiteral("do_not_translate_iac_to_iac_iac"));
 	m_doNotTranslateIac                 = isEnabledValue(noTranslateIac);
 	const QString matchEmpty            = attrs.value(QStringLiteral("regexp_match_empty"));
-	m_regexpMatchEmpty   = !(matchEmpty == QStringLiteral("0") ||
-	                         matchEmpty.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
-	                         matchEmpty.compare(QStringLiteral("no"), Qt::CaseInsensitive) == 0 ||
-	                         matchEmpty.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
-	const QString utf8   = attrs.value(QStringLiteral("utf_8"));
-	m_utf8               = isEnabledValue(utf8);
+	m_regexpMatchEmpty                  = !(matchEmpty == QStringLiteral("0") ||
+                           matchEmpty.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+                           matchEmpty.compare(QStringLiteral("no"), Qt::CaseInsensitive) == 0 ||
+                           matchEmpty.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+	const QString utf8                  = attrs.value(QStringLiteral("utf_8"));
+	m_utf8                              = isEnabledValue(utf8);
 	m_legacyEncodingName = qmudNormalizeWorldTextEncodingName(attrs.value(QStringLiteral("legacy_encoding")));
 
 	if (m_speedWalkDelay <= 0 && !m_queuedCommands.isEmpty())
@@ -1750,8 +1749,8 @@ void WorldCommandProcessor::note(const QString &text, const bool newLine) const
 	{
 		const QString value    = m_runtime->worldAttributes().value(QStringLiteral("log_notes"));
 		const bool    logNotes = value == QStringLiteral("1") ||
-		                         value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		                         value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+		                      value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		                      value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 		m_runtime->firePluginScreendraw(1, logNotes ? 1 : 0, text);
 	}
 	if (m_view)
@@ -1925,7 +1924,7 @@ void WorldCommandProcessor::handleWorldConnected()
 	const int     connectDelay = qBound(0, attrs.value(QStringLiteral("connect_delay")).toInt(), 10000);
 
 	const bool    needsPassword = password.isEmpty() && ((connectMethod != 0 && !player.isEmpty()) ||
-	                                                     connectText.contains(QStringLiteral("%password%")));
+                                                      connectText.contains(QStringLiteral("%password%")));
 	if (needsPassword)
 	{
 		bool          ok     = false;
@@ -2805,11 +2804,11 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 	const QString scopePluginId       = pluginIdOf(plugin);
 	bool          runtimeStateChanged = false;
 	const auto    publishRuntimeState = qScopeGuard(
-	    [runtime = QPointer<WorldRuntime>(m_runtime), &runtimeStateChanged, scopePluginId]
-	    {
-		    if (runtime && runtimeStateChanged)
-			    runtime->markAliasRuntimeStateChanged(scopePluginId);
-	    });
+        [runtime = QPointer<WorldRuntime>(m_runtime), &runtimeStateChanged, scopePluginId]
+        {
+            if (runtime && runtimeStateChanged)
+                runtime->markAliasRuntimeStateChanged(scopePluginId);
+        });
 	const auto                  cacheKey   = reinterpret_cast<quintptr>(&aliases);
 	const quint64               signature  = aliasOrderSignature(aliases);
 	const AliasOrderCacheEntry *cacheEntry = nullptr;
@@ -3187,11 +3186,11 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 		const QString scopePluginId       = pluginIdOf(plugin);
 		bool          runtimeStateChanged = false;
 		const auto    publishRuntimeState = qScopeGuard(
-		    [runtime = QPointer<WorldRuntime>(m_runtime), &runtimeStateChanged, scopePluginId]
-		    {
-			    if (runtime && runtimeStateChanged)
-				    runtime->markTriggerRuntimeStateChanged(scopePluginId);
-		    });
+            [runtime = QPointer<WorldRuntime>(m_runtime), &runtimeStateChanged, scopePluginId]
+            {
+                if (runtime && runtimeStateChanged)
+                    runtime->markTriggerRuntimeStateChanged(scopePluginId);
+            });
 		const TriggerEvaluationCacheEntry &cacheEntry = decodedTriggerEvaluationCache(triggers);
 		for (const DecodedTrigger &decoded : cacheEntry.triggers)
 		{
@@ -3213,10 +3212,10 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				continue;
 
 			const bool preserveTrailingWhitespace = decoded.isRegexp;
-			QString    target = decoded.multiLine
-			                        ? buildTarget(decoded.linesToMatch, preserveTrailingWhitespace)
-			                        : (preserveTrailingWhitespace ? matchInputLine : trimmedTriggerLine);
-			trigger.lastMatchTarget = target;
+			QString    target                     = decoded.multiLine
+			                                            ? buildTarget(decoded.linesToMatch, preserveTrailingWhitespace)
+			                                            : (preserveTrailingWhitespace ? matchInputLine : trimmedTriggerLine);
+			trigger.lastMatchTarget               = target;
 
 			if (decoded.expandVariables && matchText.contains(QLatin1Char('@')))
 			{
@@ -3349,9 +3348,9 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			}
 
 			QString sendText = decoded.sendText;
-			sendText = fixSendText(fixupEscapeSequences(sendText), decoded.sendToValue, wildcards,
-			                       namedWildcards, language, decoded.lowerWildcards, decoded.expandVariables,
-			                       true, false, false, false, decoded.scriptLabel, plugin, nullptr);
+			sendText         = fixSendText(fixupEscapeSequences(sendText), decoded.sendToValue, wildcards,
+			                               namedWildcards, language, decoded.lowerWildcards, decoded.expandVariables,
+			                               true, false, false, false, decoded.scriptLabel, plugin, nullptr);
 
 			if (!decoded.multiLine)
 			{
@@ -3878,7 +3877,7 @@ void WorldCommandProcessor::dispatchScriptSend(
 	else
 	{
 		const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
-		const bool scriptingEnabled = isEnabledValue(attrs.value(QStringLiteral("enable_scripts"))) &&
+		const bool scriptingEnabled         = isEnabledValue(attrs.value(QStringLiteral("enable_scripts"))) &&
 		                              attrs.value(QStringLiteral("script_language"))
 		                                      .compare(QStringLiteral("Lua"), Qt::CaseInsensitive) == 0;
 		if (!scriptingEnabled)

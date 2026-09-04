@@ -9,6 +9,7 @@
 #include "dialogs/WorldTriggerDialog.h"
 #include "StringUtils.h"
 #include "WorldOptions.h"
+#include "helpers/ColorUtils.h"
 #include "helpers/WorldEditUtils.h"
 
 #include <QCheckBox>
@@ -439,7 +440,7 @@ void WorldTriggerDialog::buildUi()
 	{
 		for (const auto &[group, attributes] : m_runtime->colours())
 		{
-			if (!group.startsWith(QStringLiteral("custom/")))
+			if (group != QMudColourGroup::kCustom)
 				continue;
 			bool      ok  = false;
 			const int seq = attributes.value(QStringLiteral("seq")).toInt(&ok);
