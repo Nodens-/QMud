@@ -378,16 +378,18 @@ jobs:
           MAC_DOCKER=OFF
           WIN_DOCKER=OFF
           case "$PACKAGE_KIND" in
-            appimage) APPIMAGE_DOCKER=ON ;;
-            macos) MAC_DOCKER=ON ;;
-            windows) WIN_DOCKER=ON ;;
+            appimage) APPIMAGE_DOCKER=ON; CONTAINER_NAME=AppImageDocker ;;
+            macos) MAC_DOCKER=ON; CONTAINER_NAME=MacDockerU ;;
+            windows) WIN_DOCKER=ON; CONTAINER_NAME=WinDocker ;;
           esac
+          echo "QMUD_CI_CONTAINER_NAME=$CONTAINER_NAME" >> "$GITHUB_ENV"
           cmake -S . -B cmake-build-release -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$QT_ROOT" -DQt6_DIR="$QT6_CMAKE_DIR" \
             -DQMUD_ENABLE_TESTING=OFF -DQMUD_CI_BUILD=ON \
             -DQMUD_APPIMAGE_VERSION="$QMUD_PACKAGE_VERSION" \
             -DQMUD_DOCKER_EXECUTABLE="$QMUD_DOCKER_EXECUTABLE" \
+            -DQMUD_DOCKER_CONTAINER_NAME="$CONTAINER_NAME" \
             -DQMUD_ENABLE_APPIMAGE=OFF \
             -DQMUD_ENABLE_APPIMAGE_DOCKER="$APPIMAGE_DOCKER" \
             -DQMUD_ENABLE_MAC_DOCKER="$MAC_DOCKER" \
@@ -397,6 +399,15 @@ jobs:
         env:
           PACKAGE_KIND: ${{ matrix.package }}
         run: |
+          set -euo pipefail
+          cleanup_package_container() {
+            "$QMUD_DOCKER_EXECUTABLE" rm --force "$QMUD_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
+          }
+          trap cleanup_package_container EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          cleanup_package_container
           case "$PACKAGE_KIND" in
             appimage) PACKAGE_TARGET=AppImageDocker ;;
             macos) PACKAGE_TARGET=MacDockerU ;;
@@ -449,7 +460,11 @@ jobs:
             cmake-build-release/windows-docker-out/QMud-*.exe
       - name: Cleanup self-hosted workspace
         if: always() && matrix.kind == 'build'
-        run: rm -rf cmake-build-release cmake-build-coverage release-assets
+        run: |
+          if [ -n "${QMUD_CI_CONTAINER_NAME:-}" ]; then
+            "$QMUD_DOCKER_EXECUTABLE" rm --force "$QMUD_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
+          fi
+          rm -rf cmake-build-release cmake-build-coverage release-assets
 
   publish-release:
     name: Publish GitHub release assets

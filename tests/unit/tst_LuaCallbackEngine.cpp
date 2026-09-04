@@ -4196,8 +4196,7 @@ void tst_LuaCallbackEngine::worldCollectionMutationsUpdateDerivedCallbackState()
 	auto engine =
 	    QSharedPointer<LuaCallbackEngine>(runtime.luaCallbacks(), [](LuaCallbackEngine * /*unused*/) {});
 	QVERIFY(engine);
-	engine->setPluginInfo(QString(), QString(), QString());
-	engine->setScriptText(QStringLiteral(R"lua(
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
 function mutate_world_derived_state(value)
   local values = {
     string.format("%.0f", GetInfo(218)), tostring(GetInfo(118)), tostring(GetInfo(111))
@@ -4225,23 +4224,21 @@ function mutate_world_derived_state(value)
   return table.concat(values, "|")
 end
 )lua"));
-	QVERIFY(engine->loadScript());
+	QVERIFY(runtime.dispatchLuaResetAndLoadScript(engine));
 
 	const auto issued = captureVariableDispatchSnapshotForTest(runtime);
 	QVERIFY(issued);
 	QVERIFY(!issued->runtimeCounterValues.value(QStringLiteral("worldFileModified")).toBool());
 	QVERIFY(!issued->runtimeCounterValues.value(QStringLiteral("variablesChanged")).toBool());
 
-	LuaExecutorDirect       executor;
 	LuaBatchDispatchRequest request;
-	request.engines               = {engine};
-	request.kind                  = LuaBatchDispatchKind::StringInOut;
-	request.functionName          = QStringLiteral("mutate_world_derived_state");
-	request.stringArg             = QStringLiteral("ignored");
-	request.callbackSnapshotArg   = issued;
-	LuaBatchDispatchResult result = executor.dispatchBatch(request);
+	request.engines                     = {engine};
+	request.kind                        = LuaBatchDispatchKind::StringInOut;
+	request.functionName                = QStringLiteral("mutate_world_derived_state");
+	request.stringArg                   = QStringLiteral("ignored");
+	request.callbackSnapshotArg         = issued;
+	const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
 	QCOMPARE(result.stringResult, QStringLiteral("0|false|false|1|true|1|1|1|true|0|0|0|0|true|true"));
-	executeDeferredMutations(result);
 
 	QCOMPARE(runtime.variableCount(), 0);
 	QVERIFY(runtime.variablesChanged());

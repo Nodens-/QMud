@@ -33,6 +33,7 @@ RUN dnf -y upgrade && \
       openssl \
       openssl-devel \
       patchelf \
+      pipewire-libs \
       pkgconf-pkg-config \
       pulseaudio-libs \
       python3 \

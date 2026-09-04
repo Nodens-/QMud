@@ -189,20 +189,6 @@ namespace
 		                          0) == eOK;
 	}
 
-	/**
-	 * @brief Loads script text into a callback engine.
-	 * @param engine Engine to initialize.
-	 * @param script Lua script text.
-	 * @return `true` when the script loaded.
-	 */
-	bool loadCallbackEngineScript(LuaCallbackEngine &engine, const QString &script)
-	{
-		engine.setPluginInfo(QStringLiteral("plugin.id"), QStringLiteral("Plugin Name"),
-		                     QStringLiteral("/tmp/plugin"));
-		engine.setScriptText(script);
-		return engine.loadScript();
-	}
-
 	QSharedPointer<LuaCallbackEngine> addDirectCallbackPlugin(WorldRuntime &runtime, const QString &id,
 	                                                          const QString &name, const QString &script)
 	{
@@ -2092,9 +2078,14 @@ end
 			WorldRuntime runtime;
 			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
 			QVERIFY(createWindowOutputTextTarget(runtime));
-			auto engine = QSharedPointer<LuaCallbackEngine>::create();
-			engine->setWorldRuntime(&runtime);
-			QVERIFY(loadCallbackEngineScript(*engine, QStringLiteral(R"lua(
+			auto                                   engine = QSharedPointer<LuaCallbackEngine>::create();
+			LuaEngineObservedInitializationRequest initialization;
+			initialization.engine              = engine.data();
+			initialization.workerLifetimeOwner = engine;
+			initialization.runtime             = &runtime;
+			initialization.pluginId            = QStringLiteral("plugin.id");
+			initialization.pluginName          = QStringLiteral("Plugin Name");
+			initialization.scriptText          = QStringLiteral(R"lua(
 activation_status = ""
 function OnPluginEnable()
   SetEntity("cmd", "look")
@@ -2111,20 +2102,21 @@ end
 function activation_result(value)
   return activation_status
 end
-)lua")));
+)lua");
+			runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
+			QVERIFY(runtime.dispatchLuaResetAndLoadScript(engine));
 
 			const LuaBatchDispatchResult callbackResult =
 			    runtime.dispatchLuaStringsAndWildcards(engine, QStringLiteral("OnPluginEnable"), {});
 			QVERIFY(callbackResult.hasFunctionValid);
 			QVERIFY(callbackResult.hasFunction);
 
-			LuaExecutorDirect       executor;
 			LuaBatchDispatchRequest request;
 			request.engines                     = {engine};
 			request.kind                        = LuaBatchDispatchKind::StringInOut;
 			request.functionName                = QStringLiteral("activation_result");
 			request.stringArg                   = QStringLiteral("ignored");
-			const LuaBatchDispatchResult result = executor.dispatchBatch(request);
+			const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
 			QCOMPARE(result.stringResult, QStringLiteral("true|1|0"));
 		}
 
