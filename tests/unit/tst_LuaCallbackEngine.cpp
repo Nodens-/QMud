@@ -200,6 +200,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void callbackDispatchSnapshotsIsolateMiniWindowMouseState();
 		void callbackDispatchSnapshotsRefreshMiniWindowPresentation();
 		void deletedMiniWindowCannotBeResolvedByWindowMenu();
+		void databaseExecMatchesSqliteMultiStatementSemantics();
 		void callbackDispatchSnapshotsReflectDatabaseExecState();
 		void nativeShimDiscoveryRespectsShadowPluginVisibility();
 		void nativeMushReaderEnableByNameUpdatesResolvedCallbackMetadata();
@@ -8245,6 +8246,57 @@ end
 	QVERIFY2(!unexpectedlySuspended, "WindowMenu resurrected a miniwindow deleted in the same callback");
 	QCOMPARE(callbackResult, QStringLiteral("0|"));
 	QVERIFY(!runtime.windowList().contains(windowName));
+}
+
+void tst_LuaCallbackEngine::databaseExecMatchesSqliteMultiStatementSemantics()
+{
+	WorldRuntime  runtime;
+	const QString databaseName = QStringLiteral("multi_statement_db");
+	QCOMPARE(runtime.databaseOpen(databaseName, QStringLiteral(":memory:"),
+	                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MEMORY),
+	         SQLITE_OK);
+
+	QCOMPARE(runtime.databaseExec(databaseName, QStringLiteral(R"sql(
+-- A comment semicolon does not end a statement: ;
+CREATE TABLE records (value TEXT UNIQUE);
+INSERT INTO records(value) VALUES ('first;value');
+CREATE TABLE audit (value TEXT);
+CREATE TRIGGER records_after_insert AFTER INSERT ON records
+BEGIN
+  INSERT INTO audit(value) VALUES ('first trigger statement; value');
+  INSERT INTO audit(value) VALUES (NEW.value);
+END;
+CREATE TABLE "quoted;table" ([bracket;column] TEXT, `grave;column` TEXT);
+INSERT INTO "quoted;table" ([bracket;column], `grave;column`)
+  VALUES ('escaped'';value', 'grave;value');
+SELECT [bracket;column], `grave;column` FROM "quoted;table";
+/* Nor does a block-comment semicolon: ; */
+INSERT INTO records(value) VALUES ('second')
+)sql")),
+	         SQLITE_OK);
+	QCOMPARE(runtime.databaseTotalChanges(databaseName), 5);
+
+	const int failedStatus = runtime.databaseExec(databaseName, QStringLiteral(R"sql(
+INSERT INTO records(value) VALUES ('third');
+INSERT INTO records(value) VALUES ('first;value');
+INSERT INTO records(value) VALUES ('must not execute');
+)sql"));
+	QCOMPARE(failedStatus, SQLITE_CONSTRAINT);
+	QCOMPARE(runtime.databaseTotalChanges(databaseName), 8);
+	QVERIFY(!runtime.databaseError(databaseName).isEmpty());
+
+	const int rowDrainStatus = runtime.databaseExec(databaseName, QStringLiteral(R"sql(
+CREATE TABLE drain_values (value INTEGER);
+INSERT INTO drain_values(value) VALUES (1), (-9223372036854775808);
+SELECT abs(value) FROM drain_values ORDER BY rowid;
+INSERT INTO records(value) VALUES ('must not execute after row error');
+)sql"));
+	QCOMPARE(rowDrainStatus, SQLITE_ERROR);
+	QCOMPARE(runtime.databaseTotalChanges(databaseName), 10);
+
+	QCOMPARE(runtime.databaseExec(databaseName, QStringLiteral("; -- no statement;\n /* still none; */ ;")),
+	         SQLITE_OK);
+	QCOMPARE(runtime.databaseClose(databaseName), SQLITE_OK);
 }
 
 void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectDatabaseExecState()
