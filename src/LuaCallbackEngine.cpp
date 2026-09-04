@@ -12728,14 +12728,6 @@ static bool qmudMmStartupDiagIsWatchedPluginId(const QString &pluginId)
 	       pluginId == QStringLiteral("f67c4339ed0591a5b010d05b");
 }
 
-static QString qmudMmStartupDiagEngineLabels(const QVector<QSharedPointer<LuaCallbackEngine>> &engines)
-{
-	QStringList labels;
-	labels.reserve(engines.size());
-	for (const auto &engine : engines)
-		labels.push_back(qmudMmStartupDiagEngineLabel(engine.data()));
-	return labels.join(QLatin1Char(','));
-}
 #endif
 
 template <typename Func>

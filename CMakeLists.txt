@@ -79,7 +79,10 @@ if (POLICY CMP0069)
     cmake_policy(SET CMP0069 NEW)
 endif ()
 option(QMUD_PROBE_IPO "Probe toolchain for IPO/LTO support at configure time" ON)
-if (CMAKE_GENERATOR MATCHES "Ninja")
+option(QMUD_LIMIT_PARALLEL_LINKS "Limit Ninja to two concurrent linker processes outside Debug builds" ON)
+if (CMAKE_GENERATOR MATCHES "Ninja"
+        AND QMUD_LIMIT_PARALLEL_LINKS
+        AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_property(GLOBAL PROPERTY JOB_POOLS link_pool=2)
     set(CMAKE_JOB_POOL_LINK link_pool)
 endif ()
@@ -1159,6 +1162,9 @@ else ()
     target_compile_options(qmud_app_core PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(QMud PRIVATE -Wall -Wextra -Wpedantic)
 endif ()
+if (MINGW)
+    target_compile_options(qmud_app_core PRIVATE "$<$<CONFIG:Debug>:-Wa,-mbig-obj>")
+endif ()
 
 qmud_apply_release_optimizations(qmud_app_core)
 qmud_apply_release_optimizations(QMud)
@@ -1328,6 +1334,12 @@ endif ()
 if (UNIX AND NOT APPLE)
     set(QMUD_DOCKER_EXECUTABLE "docker" CACHE FILEPATH
             "Path to docker-compatible executable (docker/podman)")
+    set(QMUD_DOCKER_CONTAINER_NAME "" CACHE STRING
+            "Optional explicit container name for Docker package targets")
+    set(QMUD_DOCKER_CONTAINER_NAME_ARGS)
+    if (NOT QMUD_DOCKER_CONTAINER_NAME STREQUAL "")
+        set(QMUD_DOCKER_CONTAINER_NAME_ARGS --name "${QMUD_DOCKER_CONTAINER_NAME}")
+    endif ()
 
     if (DEFINED QMUD_ENABLE_MACAPP_DOCKER_NEW AND NOT DEFINED QMUD_ENABLE_MAC_DOCKER)
         set(QMUD_ENABLE_MAC_DOCKER "${QMUD_ENABLE_MACAPP_DOCKER_NEW}" CACHE BOOL
@@ -1474,6 +1486,7 @@ if (UNIX AND NOT APPLE)
                     COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_MAC_DOCKER_BUILD_DIR}"
                     COMMAND /bin/chmod 0777 "${QMUD_MAC_DOCKER_BUILD_DIR}"
                     COMMAND ${QMUD_DOCKER_EXECUTABLE_FOUND_NEW} run --rm
+                    ${QMUD_DOCKER_CONTAINER_NAME_ARGS}
                     ${QMUD_MAC_DOCKER_SECURITY_OPT}
                     ${QMUD_MAC_DOCKER_USERNS_ARGS}
                     ${QMUD_MAC_DOCKER_USER_ARGS}
@@ -1505,6 +1518,7 @@ if (UNIX AND NOT APPLE)
                     COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_MAC_DOCKER_BUILD_DIR}"
                     COMMAND /bin/chmod 0777 "${QMUD_MAC_DOCKER_BUILD_DIR}"
                     COMMAND ${QMUD_DOCKER_EXECUTABLE_FOUND_NEW} run --rm
+                    ${QMUD_DOCKER_CONTAINER_NAME_ARGS}
                     ${QMUD_MAC_DOCKER_SECURITY_OPT}
                     ${QMUD_MAC_DOCKER_USERNS_ARGS}
                     ${QMUD_MAC_DOCKER_USER_ARGS}
@@ -1638,6 +1652,7 @@ if (UNIX AND NOT APPLE)
                     COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_WINDOCKER_BUILD_DIR}"
                     COMMAND /bin/chmod 0777 "${QMUD_WINDOCKER_BUILD_DIR}"
                     COMMAND ${QMUD_DOCKER_EXECUTABLE_FOUND_WINDOCKER} run --rm
+                    ${QMUD_DOCKER_CONTAINER_NAME_ARGS}
                     ${QMUD_WINDOCKER_SECURITY_OPT}
                     ${QMUD_WINDOCKER_USERNS_ARGS}
                     ${QMUD_WINDOCKER_USER_ARGS}
@@ -2207,6 +2222,7 @@ if (UNIX AND NOT APPLE)
                     COMMAND ${CMAKE_COMMAND} -E make_directory "${QMUD_APPIMAGE_DOCKER_BUILD_DIR}"
                     COMMAND /bin/chmod 0777 "${QMUD_APPIMAGE_DOCKER_BUILD_DIR}"
                     COMMAND ${QMUD_DOCKER_EXECUTABLE_FOUND_APPIMAGEDOCKER} run --rm
+                    ${QMUD_DOCKER_CONTAINER_NAME_ARGS}
                     ${QMUD_APPIMAGE_DOCKER_SECURITY_OPT}
                     ${QMUD_APPIMAGE_DOCKER_USERNS_ARGS}
                     ${QMUD_APPIMAGE_DOCKER_USER_ARGS}

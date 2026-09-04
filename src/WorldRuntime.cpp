@@ -78,7 +78,6 @@
 #include <QHostInfo>
 #include <QImageReader>
 #include <QLayout>
-#include <QLibrary>
 #include <QLocale>
 #include <QMessageBox>
 #include <QMetaType>
@@ -99,7 +98,6 @@
 #include <QTimeZone>
 #include <QTimer>
 #include <QUdpSocket>
-#include <QtSql/QSqlDriver>
 #include <QtSql/QSqlError>
 #include <QtSql/QSqlRecord>
 #if QMUD_ENABLE_SOUND
@@ -123,8 +121,6 @@
 #include <type_traits>
 #include <utility>
 #include <zlib.h>
-
-Q_DECLARE_OPAQUE_POINTER(sqlite3 *)
 
 namespace
 {
@@ -21005,6 +21001,12 @@ namespace
 	{
 		if (!err.isValid())
 			return SQLITE_OK;
+
+		bool      nativeCodeValid = false;
+		const int nativeCode      = err.nativeErrorCode().toInt(&nativeCodeValid);
+		if (nativeCodeValid && nativeCode > 0)
+			return nativeCode & 0xff;
+
 		const QString text = err.text().toLower();
 		if (text.contains(QStringLiteral("locked")) || text.contains(QStringLiteral("busy")))
 			return SQLITE_BUSY;
@@ -21069,61 +21071,187 @@ namespace
 		}
 	}
 
-	using SqliteExecCallback = int (*)(void *, int, char **, char **);
-	using SqliteExecFn       = int (*)(sqlite3 *, const char *, SqliteExecCallback, void *, char **);
-	using SqliteFreeFn       = void (*)(void *);
-	using SqliteErrmsgFn     = const char *(*)(sqlite3 *);
-
-	struct NativeSqliteApi
+	enum class SqliteCompleteState : quint8
 	{
-			QLibrary       library;
-			SqliteExecFn   exec{nullptr};
-			SqliteFreeFn   free{nullptr};
-			SqliteErrmsgFn errmsg{nullptr};
-			QString        errorMessage;
-
-			NativeSqliteApi() : library(QStringLiteral("sqlite3"))
-			{
-				if (!library.load())
-				{
-					library.setFileName(QStringLiteral("libsqlite3.so.0"));
-					library.load();
-				}
-
-				if (!library.isLoaded())
-				{
-					errorMessage = library.errorString();
-					return;
-				}
-
-				exec   = reinterpret_cast<SqliteExecFn>(library.resolve("sqlite3_exec"));
-				free   = reinterpret_cast<SqliteFreeFn>(library.resolve("sqlite3_free"));
-				errmsg = reinterpret_cast<SqliteErrmsgFn>(library.resolve("sqlite3_errmsg"));
-				if (!exec || !free || !errmsg)
-					errorMessage = QStringLiteral("Required SQLite entry points are unavailable.");
-			}
-
-			[[nodiscard]] bool isAvailable() const
-			{
-				return exec && free && errmsg;
-			}
+		Invalid,
+		Start,
+		Normal,
+		Explain,
+		Create,
+		Trigger,
+		Semicolon,
+		End
 	};
 
-	const NativeSqliteApi &nativeSqliteApi()
+	enum class SqliteCompleteToken : quint8
 	{
-		static const NativeSqliteApi api;
-		return api;
+		Semicolon,
+		Whitespace,
+		Other,
+		Explain,
+		Create,
+		Temporary,
+		Trigger,
+		End
+	};
+
+	// Keep statement-boundary recognition identical to SQLite's sqlite3_complete() state machine. This permits
+	// QSqlQuery to reproduce sqlite3_exec() sequencing without mixing a Qt-owned connection with another SQLite.
+	constexpr std::array<std::array<SqliteCompleteState, 8>, 8> kSqliteCompleteTransitions{
+	    {{SqliteCompleteState::Start, SqliteCompleteState::Invalid, SqliteCompleteState::Normal,
+	      SqliteCompleteState::Explain, SqliteCompleteState::Create, SqliteCompleteState::Normal,
+	      SqliteCompleteState::Normal, SqliteCompleteState::Normal},
+	     {SqliteCompleteState::Start, SqliteCompleteState::Start, SqliteCompleteState::Normal,
+	      SqliteCompleteState::Explain, SqliteCompleteState::Create, SqliteCompleteState::Normal,
+	      SqliteCompleteState::Normal, SqliteCompleteState::Normal},
+	     {SqliteCompleteState::Start, SqliteCompleteState::Normal, SqliteCompleteState::Normal,
+	      SqliteCompleteState::Normal, SqliteCompleteState::Normal, SqliteCompleteState::Normal,
+	      SqliteCompleteState::Normal, SqliteCompleteState::Normal},
+	     {SqliteCompleteState::Start, SqliteCompleteState::Explain, SqliteCompleteState::Explain,
+	      SqliteCompleteState::Normal, SqliteCompleteState::Create, SqliteCompleteState::Normal,
+	      SqliteCompleteState::Normal, SqliteCompleteState::Normal},
+	     {SqliteCompleteState::Start, SqliteCompleteState::Create, SqliteCompleteState::Normal,
+	      SqliteCompleteState::Normal, SqliteCompleteState::Normal, SqliteCompleteState::Create,
+	      SqliteCompleteState::Trigger, SqliteCompleteState::Normal},
+	     {SqliteCompleteState::Semicolon, SqliteCompleteState::Trigger, SqliteCompleteState::Trigger,
+	      SqliteCompleteState::Trigger, SqliteCompleteState::Trigger, SqliteCompleteState::Trigger,
+	      SqliteCompleteState::Trigger, SqliteCompleteState::Trigger},
+	     {SqliteCompleteState::Semicolon, SqliteCompleteState::Semicolon, SqliteCompleteState::Trigger,
+	      SqliteCompleteState::Trigger, SqliteCompleteState::Trigger, SqliteCompleteState::Trigger,
+	      SqliteCompleteState::Trigger, SqliteCompleteState::End},
+	     {SqliteCompleteState::Start, SqliteCompleteState::End, SqliteCompleteState::Trigger,
+	      SqliteCompleteState::Trigger, SqliteCompleteState::Trigger, SqliteCompleteState::Trigger,
+	      SqliteCompleteState::Trigger, SqliteCompleteState::Trigger}}
+    };
+
+	bool isSqliteIdentifierCodeUnit(const QChar codeUnit)
+	{
+		const ushort value = codeUnit.unicode();
+		return value >= 0x80 || (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+		       (value >= '0' && value <= '9') || value == '_' || value == '$';
 	}
 
-	sqlite3 *nativeSqliteHandle(const QSqlDatabase &db)
+	bool sqliteKeywordEquals(const QString &sql, const qsizetype offset, const qsizetype length,
+	                         const char *keyword)
 	{
-		QSqlDriver *driver = db.driver();
-		if (!driver)
-			return nullptr;
-		const QVariant handle = driver->handle();
-		if (!handle.isValid() || qstrcmp(handle.typeName(), "sqlite3*") != 0)
-			return nullptr;
-		return *static_cast<sqlite3 *const *>(handle.constData());
+		for (qsizetype i = 0; i < length; ++i)
+		{
+			ushort value = sql.at(offset + i).unicode();
+			if (value >= 'A' && value <= 'Z')
+				value = static_cast<ushort>(value - 'A' + 'a');
+			if (value != static_cast<unsigned char>(keyword[i]))
+				return false;
+		}
+		return keyword[length] == '\0';
+	}
+
+	SqliteCompleteToken sqliteKeywordToken(const QString &sql, const qsizetype offset, const qsizetype length)
+	{
+		if (length == 3 && sqliteKeywordEquals(sql, offset, length, "end"))
+			return SqliteCompleteToken::End;
+		if (length == 4 && sqliteKeywordEquals(sql, offset, length, "temp"))
+			return SqliteCompleteToken::Temporary;
+		if (length == 6 && sqliteKeywordEquals(sql, offset, length, "create"))
+			return SqliteCompleteToken::Create;
+		if (length == 7 && sqliteKeywordEquals(sql, offset, length, "explain"))
+			return SqliteCompleteToken::Explain;
+		if (length == 7 && sqliteKeywordEquals(sql, offset, length, "trigger"))
+			return SqliteCompleteToken::Trigger;
+		if (length == 9 && sqliteKeywordEquals(sql, offset, length, "temporary"))
+			return SqliteCompleteToken::Temporary;
+		return SqliteCompleteToken::Other;
+	}
+
+	template <typename Visitor> bool visitSqliteExecStatements(const QString &sqlText, Visitor &&visitor)
+	{
+		const qsizetype     nul               = sqlText.indexOf(QChar::Null);
+		const qsizetype     sqlSize           = nul < 0 ? sqlText.size() : nul;
+		SqliteCompleteState state             = SqliteCompleteState::Invalid;
+		qsizetype           statementStart    = 0;
+		bool                statementHasToken = false;
+
+		for (qsizetype offset = 0; offset < sqlSize; ++offset)
+		{
+			SqliteCompleteToken token = SqliteCompleteToken::Other;
+			switch (sqlText.at(offset).unicode())
+			{
+			case ';':
+				token = SqliteCompleteToken::Semicolon;
+				break;
+			case ' ':
+			case '\r':
+			case '\t':
+			case '\n':
+			case '\f':
+				token = SqliteCompleteToken::Whitespace;
+				break;
+			case '/':
+				if (offset + 1 < sqlSize && sqlText.at(offset + 1) == QLatin1Char('*'))
+				{
+					offset += 2;
+					while (offset < sqlSize &&
+					       (sqlText.at(offset) != QLatin1Char('*') || offset + 1 >= sqlSize ||
+					        sqlText.at(offset + 1) != QLatin1Char('/')))
+						++offset;
+					if (offset < sqlSize)
+						++offset;
+					else
+						offset = sqlSize - 1;
+					token = SqliteCompleteToken::Whitespace;
+				}
+				break;
+			case '-':
+				if (offset + 1 < sqlSize && sqlText.at(offset + 1) == QLatin1Char('-'))
+				{
+					while (offset + 1 < sqlSize && sqlText.at(offset + 1) != QLatin1Char('\n'))
+						++offset;
+					token = SqliteCompleteToken::Whitespace;
+				}
+				break;
+			case '[':
+				while (offset + 1 < sqlSize && sqlText.at(offset + 1) != QLatin1Char(']'))
+					++offset;
+				if (offset + 1 < sqlSize)
+					++offset;
+				break;
+			case '`':
+			case '"':
+			case '\'':
+			{
+				const QChar quote = sqlText.at(offset);
+				while (offset + 1 < sqlSize && sqlText.at(offset + 1) != quote)
+					++offset;
+				if (offset + 1 < sqlSize)
+					++offset;
+				break;
+			}
+			default:
+				if (isSqliteIdentifierCodeUnit(sqlText.at(offset)))
+				{
+					const qsizetype identifierStart = offset;
+					while (offset + 1 < sqlSize && isSqliteIdentifierCodeUnit(sqlText.at(offset + 1)))
+						++offset;
+					token = sqliteKeywordToken(sqlText, identifierStart, offset - identifierStart + 1);
+				}
+				break;
+			}
+
+			state = kSqliteCompleteTransitions.at(static_cast<std::size_t>(state))
+			            .at(static_cast<std::size_t>(token));
+			if (token != SqliteCompleteToken::Whitespace && token != SqliteCompleteToken::Semicolon)
+				statementHasToken = true;
+
+			if (token == SqliteCompleteToken::Semicolon && state == SqliteCompleteState::Start)
+			{
+				if (statementHasToken &&
+				    !visitor(sqlText.sliced(statementStart, offset - statementStart + 1)))
+					return false;
+				statementStart    = offset + 1;
+				statementHasToken = false;
+			}
+		}
+
+		return !statementHasToken || visitor(sqlText.sliced(statementStart, sqlSize - statementStart));
 	}
 } // namespace
 
@@ -21591,42 +21719,33 @@ int WorldRuntime::databaseExec(const QString &name, const QString &sql)
 	const auto patchSnapshot =
 	    qScopeGuard([this] { patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Databases); });
 
-	const NativeSqliteApi &api    = nativeSqliteApi();
-	sqlite3               *handle = nativeSqliteHandle(it->db);
-	if (!api.isAvailable() || !handle)
-	{
-		QSqlQuery query(it->db);
-		if (query.exec(sql))
-		{
-			it->lastError = SQLITE_OK;
-			it->lastErrorMessage.clear();
-			return SQLITE_OK;
-		}
-		it->lastError        = mapSqlErrorToSqlite(query.lastError());
-		it->lastErrorMessage = api.errorMessage.isEmpty() ? query.lastError().text() : api.errorMessage;
+	const bool completed = visitSqliteExecStatements(sql,
+	                                                 [&it](const QString &statement)
+	                                                 {
+		                                                 QSqlQuery query(it->db);
+		                                                 if (query.exec(statement))
+		                                                 {
+			                                                 if (query.isSelect())
+			                                                 {
+				                                                 while (query.next())
+				                                                 {
+				                                                 }
+			                                                 }
+			                                                 if (!query.lastError().isValid())
+				                                                 return true;
+		                                                 }
+
+		                                                 it->lastError =
+		                                                     mapSqlErrorToSqlite(query.lastError());
+		                                                 it->lastErrorMessage = query.lastError().text();
+		                                                 return false;
+	                                                 });
+	if (!completed)
 		return it->lastError;
-	}
 
-	char            *errorMessage = nullptr;
-	const QByteArray sqlBytes     = sql.toUtf8();
-	const int        result       = api.exec(handle, sqlBytes.constData(), nullptr, nullptr, &errorMessage);
-	it->lastError                 = result;
-	if (result == SQLITE_OK)
-	{
-		it->lastErrorMessage.clear();
-		return SQLITE_OK;
-	}
-
-	if (errorMessage)
-	{
-		it->lastErrorMessage = QString::fromUtf8(errorMessage);
-		api.free(errorMessage);
-	}
-	else
-	{
-		it->lastErrorMessage = QString::fromUtf8(api.errmsg(handle));
-	}
-	return result;
+	it->lastError = SQLITE_OK;
+	it->lastErrorMessage.clear();
+	return SQLITE_OK;
 }
 
 QStringList WorldRuntime::databaseColumnNames(const QString &name) const

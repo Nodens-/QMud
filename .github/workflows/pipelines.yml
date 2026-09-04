@@ -51,12 +51,13 @@ jobs:
             const addValidation = (task, timeout) => entries.push({
               task, kind: "validation", runner: hosted, timeout,
             });
-            const addBuilds = () => {
+            const addBuilds = (buildType = "Release") => {
               for (const packageName of ["appimage", "macos", "windows"]) {
                 entries.push({
                   task: "build-" + packageName,
                   kind: "build",
                   package: packageName,
+                  build_type: buildType,
                   runner: selfHosted,
                   timeout: 180,
                 });
@@ -87,7 +88,7 @@ jobs:
               }
               if (runPipeline) {
                 addValidation("quick-tests", 90);
-                addBuilds();
+                addBuilds("Debug");
               }
             } else if (context.eventName === "push" && context.ref === "refs/heads/main") {
               const before = context.payload.before;
@@ -128,7 +129,7 @@ jobs:
             core.setOutput("has_builds", hasBuilds ? "true" : "false");
 
   prepare-test-image:
-    name: Prepare cached Linux test image
+    name: Prepare cached Linux image
     needs: pipeline-plan
     if: needs.pipeline-plan.outputs.needs_test_image == 'true'
     runs-on: ubuntu-latest
@@ -184,14 +185,14 @@ jobs:
         if: matrix.kind != 'noop'
         uses: actions/checkout@v6
 
-      - name: Restore cached Linux test image
+      - name: Restore cached Linux image
         if: matrix.kind == 'validation'
         uses: actions/cache/restore@v5
         with:
           path: /tmp/qmud-appimage-builder.tar
           key: ${{ needs.prepare-test-image.outputs.cache_key }}
           fail-on-cache-miss: true
-      - name: Load Linux test image
+      - name: Load Linux image
         if: matrix.kind == 'validation'
         run: docker load --input /tmp/qmud-appimage-builder.tar
 
@@ -210,14 +211,14 @@ jobs:
           set -euo pipefail
           TEST_SUITE=$1
           cmake -S /home/user/project -B /home/user/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_PREFIX_PATH=/opt/Qt/latest/gcc_64 \
             -DQt6_DIR=/opt/Qt/latest/gcc_64/lib/cmake/Qt6 \
             -DQMUD_ENABLE_TESTING=ON -DQMUD_ENABLE_GUI_TESTS=ON \
             -DQMUD_ENABLE_APPIMAGE=OFF \
             -DQMUD_ENABLE_APPIMAGE_DOCKER=OFF \
             -DQMUD_ENABLE_MAC_DOCKER=OFF -DQMUD_ENABLE_WINDOCKER=OFF
-          CCACHE_DISABLE=1 cmake --build /home/user/build --parallel 6
+          CCACHE_DISABLE=1 cmake --build /home/user/build --parallel
           if [ "$TEST_SUITE" = quick-tests ]; then
             ctest --test-dir /home/user/build --output-on-failure --label-exclude slow
           else
@@ -262,7 +263,7 @@ jobs:
             -DQMUD_ENABLE_MAC_DOCKER=OFF -DQMUD_ENABLE_WINDOCKER=OFF \
             -DCMAKE_C_FLAGS=--coverage -DCMAKE_CXX_FLAGS=--coverage \
             -DCMAKE_EXE_LINKER_FLAGS=--coverage
-          CCACHE_DISABLE=1 cmake --build /home/user/build --parallel 6
+          CCACHE_DISABLE=1 cmake --build /home/user/build --parallel
           ctest --test-dir /home/user/build --output-on-failure --label-exclude slow
           gcovr --root /home/user/project --object-directory /home/user/build \
             --filter /home/user/project/src/ --print-summary \
@@ -372,22 +373,28 @@ jobs:
         if: matrix.kind == 'build'
         env:
           PACKAGE_KIND: ${{ matrix.package }}
+          BUILD_TYPE: ${{ matrix.build_type }}
         run: |
           set -euo pipefail
           APPIMAGE_DOCKER=OFF
           MAC_DOCKER=OFF
           WIN_DOCKER=OFF
           case "$PACKAGE_KIND" in
-            appimage) APPIMAGE_DOCKER=ON ;;
-            macos) MAC_DOCKER=ON ;;
-            windows) WIN_DOCKER=ON ;;
+            appimage) APPIMAGE_DOCKER=ON; CONTAINER_NAME=AppImageDocker ;;
+            macos) MAC_DOCKER=ON; CONTAINER_NAME=MacDockerU ;;
+            windows) WIN_DOCKER=ON; CONTAINER_NAME=WinDocker ;;
           esac
+          echo "QMUD_CI_CONTAINER_NAME=$CONTAINER_NAME" >> "$GITHUB_ENV"
           cmake -S . -B cmake-build-release -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
             -DCMAKE_PREFIX_PATH="$QT_ROOT" -DQt6_DIR="$QT6_CMAKE_DIR" \
             -DQMUD_ENABLE_TESTING=OFF -DQMUD_CI_BUILD=ON \
             -DQMUD_APPIMAGE_VERSION="$QMUD_PACKAGE_VERSION" \
             -DQMUD_DOCKER_EXECUTABLE="$QMUD_DOCKER_EXECUTABLE" \
+            -DQMUD_DOCKER_CONTAINER_NAME="$CONTAINER_NAME" \
+            -DQMUD_APPIMAGE_DOCKER_BUILD_TYPE="$BUILD_TYPE" \
+            -DQMUD_MAC_DOCKER_BUILD_TYPE="$BUILD_TYPE" \
+            -DQMUD_WINDOCKER_BUILD_TYPE="$BUILD_TYPE" \
             -DQMUD_ENABLE_APPIMAGE=OFF \
             -DQMUD_ENABLE_APPIMAGE_DOCKER="$APPIMAGE_DOCKER" \
             -DQMUD_ENABLE_MAC_DOCKER="$MAC_DOCKER" \
@@ -397,6 +404,15 @@ jobs:
         env:
           PACKAGE_KIND: ${{ matrix.package }}
         run: |
+          set -euo pipefail
+          cleanup_package_container() {
+            "$QMUD_DOCKER_EXECUTABLE" rm --force "$QMUD_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
+          }
+          trap cleanup_package_container EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          cleanup_package_container
           case "$PACKAGE_KIND" in
             appimage) PACKAGE_TARGET=AppImageDocker ;;
             macos) PACKAGE_TARGET=MacDockerU ;;
@@ -449,7 +465,11 @@ jobs:
             cmake-build-release/windows-docker-out/QMud-*.exe
       - name: Cleanup self-hosted workspace
         if: always() && matrix.kind == 'build'
-        run: rm -rf cmake-build-release cmake-build-coverage release-assets
+        run: |
+          if [ -n "${QMUD_CI_CONTAINER_NAME:-}" ]; then
+            "$QMUD_DOCKER_EXECUTABLE" rm --force "$QMUD_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
+          fi
+          rm -rf cmake-build-release cmake-build-coverage release-assets
 
   publish-release:
     name: Publish GitHub release assets

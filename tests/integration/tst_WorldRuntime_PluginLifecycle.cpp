@@ -189,20 +189,6 @@ namespace
 		                          0) == eOK;
 	}
 
-	/**
-	 * @brief Loads script text into a callback engine.
-	 * @param engine Engine to initialize.
-	 * @param script Lua script text.
-	 * @return `true` when the script loaded.
-	 */
-	bool loadCallbackEngineScript(LuaCallbackEngine &engine, const QString &script)
-	{
-		engine.setPluginInfo(QStringLiteral("plugin.id"), QStringLiteral("Plugin Name"),
-		                     QStringLiteral("/tmp/plugin"));
-		engine.setScriptText(script);
-		return engine.loadScript();
-	}
-
 	QSharedPointer<LuaCallbackEngine> addDirectCallbackPlugin(WorldRuntime &runtime, const QString &id,
 	                                                          const QString &name, const QString &script)
 	{
@@ -1066,6 +1052,69 @@ end
 class tst_WorldRuntime_PluginLifecycle : public QObject
 {
 		Q_OBJECT
+
+	private:
+		/**
+		 * @brief Replaces a runtime's worker executor with a direct executor without violating engine affinity.
+		 * @param runtime Runtime whose executor and world engine are migrated.
+		 */
+		static void switchRuntimeToDirectLuaExecutor(WorldRuntime &runtime)
+		{
+			const QSharedPointer<LuaCallbackEngine> worldEngine(runtime.luaCallbacks(),
+			                                                    [](LuaCallbackEngine * /*unused*/) {});
+			runtime.dispatchTeardownLuaEngines({worldEngine}, true);
+			runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+			runtime.setLuaScriptText(QString());
+		}
+
+		/**
+		 * @brief Initializes a plugin engine through the runtime's configured Lua executor.
+		 * @param runtime Runtime that owns the callback lane.
+		 * @param engine Engine to initialize.
+		 * @param id Plugin identifier supplied to Lua.
+		 * @param name Plugin display name supplied to Lua.
+		 * @param script Plugin script text.
+		 */
+		static void initializeRuntimeCallbackPlugin(WorldRuntime                            &runtime,
+		                                            const QSharedPointer<LuaCallbackEngine> &engine,
+		                                            const QString &id, const QString &name,
+		                                            const QString &script)
+		{
+			LuaEngineObservedInitializationRequest initialization;
+			initialization.engine              = engine.data();
+			initialization.workerLifetimeOwner = engine;
+			initialization.runtime             = &runtime;
+			initialization.pluginId            = id;
+			initialization.pluginName          = name;
+			initialization.scriptText          = script;
+			runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
+		}
+
+		/**
+		 * @brief Adds and initializes a plugin on the runtime's configured Lua executor.
+		 * @param runtime Runtime that owns the plugin and callback lane.
+		 * @param id Plugin identifier.
+		 * @param name Plugin display name.
+		 * @param script Plugin script text.
+		 * @return Initialized plugin engine.
+		 */
+		static QSharedPointer<LuaCallbackEngine> addRuntimeCallbackPlugin(WorldRuntime  &runtime,
+		                                                                  const QString &id,
+		                                                                  const QString &name,
+		                                                                  const QString &script)
+		{
+			auto                 engine = QSharedPointer<LuaCallbackEngine>::create();
+			WorldRuntime::Plugin plugin;
+			plugin.attributes.insert(QStringLiteral("id"), id);
+			plugin.attributes.insert(QStringLiteral("name"), name);
+			plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("Lua"));
+			plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+			plugin.enabled = true;
+			plugin.lua     = engine;
+			WorldRuntimeTestAccess::plugins(runtime).push_back(std::move(plugin));
+			initializeRuntimeCallbackPlugin(runtime, engine, id, name, script);
+			return engine;
+		}
 
 	private slots:
 		static void pluginIdsAreCanonicalizedAtXmlAndApiBoundaries()
@@ -2092,9 +2141,14 @@ end
 			WorldRuntime runtime;
 			runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
 			QVERIFY(createWindowOutputTextTarget(runtime));
-			auto engine = QSharedPointer<LuaCallbackEngine>::create();
-			engine->setWorldRuntime(&runtime);
-			QVERIFY(loadCallbackEngineScript(*engine, QStringLiteral(R"lua(
+			auto                                   engine = QSharedPointer<LuaCallbackEngine>::create();
+			LuaEngineObservedInitializationRequest initialization;
+			initialization.engine              = engine.data();
+			initialization.workerLifetimeOwner = engine;
+			initialization.runtime             = &runtime;
+			initialization.pluginId            = QStringLiteral("plugin.id");
+			initialization.pluginName          = QStringLiteral("Plugin Name");
+			initialization.scriptText          = QStringLiteral(R"lua(
 activation_status = ""
 function OnPluginEnable()
   SetEntity("cmd", "look")
@@ -2111,20 +2165,21 @@ end
 function activation_result(value)
   return activation_status
 end
-)lua")));
+)lua");
+			runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
+			QVERIFY(runtime.dispatchLuaResetAndLoadScript(engine));
 
 			const LuaBatchDispatchResult callbackResult =
 			    runtime.dispatchLuaStringsAndWildcards(engine, QStringLiteral("OnPluginEnable"), {});
 			QVERIFY(callbackResult.hasFunctionValid);
 			QVERIFY(callbackResult.hasFunction);
 
-			LuaExecutorDirect       executor;
 			LuaBatchDispatchRequest request;
 			request.engines                     = {engine};
 			request.kind                        = LuaBatchDispatchKind::StringInOut;
 			request.functionName                = QStringLiteral("activation_result");
 			request.stringArg                   = QStringLiteral("ignored");
-			const LuaBatchDispatchResult result = executor.dispatchBatch(request);
+			const LuaBatchDispatchResult result = runtime.queuePluginCallbackDispatch(request, true);
 			QCOMPARE(result.stringResult, QStringLiteral("true|1|0"));
 		}
 
@@ -2761,7 +2816,7 @@ end
 		static void currentSuspendedRecipientTeardownCancelsCoroutineAndFinishesFallback()
 		{
 			WorldRuntime runtime;
-			runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+			switchRuntimeToDirectLuaExecutor(runtime);
 			for (int lineNumber = 1; lineNumber <= 200; ++lineNumber)
 				runtime.addLine(QStringLiteral("cancellation baseline %1").arg(lineNumber),
 				                WorldRuntime::LineOutput);
@@ -2831,12 +2886,15 @@ end
 			QVERIFY(!staleResume.suspended);
 			QVERIFY(!staleResume.boolResultValid);
 			QVERIFY(!staleResume.hasFunctionValid);
+
+			runtime.dispatchTeardownLuaEngines({engine}, true);
+			WorldRuntimeTestAccess::plugins(runtime).clear();
 		}
 
 		static void directSuspendedContinuationPublishesEveryMutationBoundary()
 		{
 			WorldRuntime runtime;
-			runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+			switchRuntimeToDirectLuaExecutor(runtime);
 
 			const QString firstId  = QStringLiteral("111111111111111111111111");
 			const QString secondId = QStringLiteral("222222222222222222222222");
@@ -2941,7 +2999,7 @@ end
 		static void terminalModalResumeDoesNotRecaptureUnusedRequestSnapshot()
 		{
 			WorldRuntime runtime;
-			runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+			switchRuntimeToDirectLuaExecutor(runtime);
 
 			const QString pluginId = QStringLiteral("515151515151515151515151");
 			const QString callback = QStringLiteral("qcb_terminal_resume_capture");
@@ -3006,7 +3064,7 @@ end
 		static void stoppingContinuationDoesNotRecaptureOrDispatchLaterRecipient()
 		{
 			WorldRuntime runtime;
-			runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+			switchRuntimeToDirectLuaExecutor(runtime);
 
 			const QString stoppingId = QStringLiteral("616161616161616161616161");
 			const QString laterId    = QStringLiteral("717171717171717171717171");
@@ -3068,7 +3126,7 @@ end
 		static void directRecipientMutationBoundaryCapturesExactlyOnce()
 		{
 			WorldRuntime runtime;
-			runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+			switchRuntimeToDirectLuaExecutor(runtime);
 
 			const QString firstId  = QStringLiteral("101010101010101010101010");
 			const QString secondId = QStringLiteral("202020202020202020202020");
@@ -3112,7 +3170,7 @@ end
 		static void directRecipientMutationBoundaryCarriesBytesInOutValue()
 		{
 			WorldRuntime runtime;
-			runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+			switchRuntimeToDirectLuaExecutor(runtime);
 
 			const QString firstId  = QStringLiteral("121212121212121212121212");
 			const QString secondId = QStringLiteral("232323232323232323232323");
@@ -3148,7 +3206,7 @@ end
 		static void directRepeatedYieldRetainsCommonContinuationState()
 		{
 			WorldRuntime runtime;
-			runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+			switchRuntimeToDirectLuaExecutor(runtime);
 			for (int lineNumber = 1; lineNumber <= 500; ++lineNumber)
 				runtime.addLine(QStringLiteral("yield line %1").arg(lineNumber), WorldRuntime::LineOutput);
 
@@ -5390,8 +5448,8 @@ end
 		{
 			WorldRuntime  runtime;
 			const QString pluginId = QStringLiteral("f50112233445566778899aab");
-			addDirectCallbackPlugin(runtime, pluginId, QStringLiteral("Pending direct target"),
-			                        QStringLiteral(R"lua(
+			addRuntimeCallbackPlugin(runtime, pluginId, QStringLiteral("Pending direct target"),
+			                         QStringLiteral(R"lua(
 function ping(value)
   SetVariable("ping_value", value)
 end
@@ -5413,25 +5471,25 @@ end
 		{
 			WorldRuntime  runtime;
 			const QString pluginId  = QStringLiteral("f60112233445566778899aab");
-			const auto    oldEngine = addDirectCallbackPlugin(
+			const auto    oldEngine = addRuntimeCallbackPlugin(
 			    runtime, pluginId, QStringLiteral("Async owner"),
 			    QStringLiteral("function OnPluginAsyncResult() SetVariable('async_payload', 'old') end"));
 			QVERIFY(oldEngine);
+			const quint64 oldInstanceId = oldEngine->instanceId();
 
-			auto replacement = QSharedPointer<LuaCallbackEngine>::create();
-			replacement->setWorldRuntime(&runtime);
-			replacement->setPluginInfo(pluginId, QStringLiteral("Async replacement"), QString());
-			replacement->setScriptText(QStringLiteral(R"lua(
+			auto          replacement = QSharedPointer<LuaCallbackEngine>::create();
+			initializeRuntimeCallbackPlugin(runtime, replacement, pluginId,
+			                                QStringLiteral("Async replacement"), QStringLiteral(R"lua(
 function OnPluginAsyncResult(request_id, api_name, status, payload)
   SetVariable("async_payload", payload)
 end
 )lua"));
-			QVERIFY(replacement->loadScript());
 			WorldRuntime::Plugin *plugin = WorldRuntimeTestAccess::plugin(runtime, pluginId);
 			QVERIFY(plugin);
 			plugin->lua = replacement;
+			runtime.dispatchTeardownLuaEngines({oldEngine}, true);
 
-			runtime.dispatchPluginAsyncResult({pluginId, oldEngine->instanceId(), 1},
+			runtime.dispatchPluginAsyncResult({pluginId, oldInstanceId, 1},
 			                                  QStringLiteral("replacement-test"), true, eOK,
 			                                  QStringLiteral("stale"));
 			QCOMPARE(pluginVariable(runtime, pluginId, QStringLiteral("async_payload")), QString());
