@@ -273,6 +273,11 @@ class tst_LuaCallbackEngine final : public QObject
 		void deferredRuntimeMutationSkipsDestroyedRuntime();
 		// NOLINTEND(readability-convert-member-functions-to-static)
 	private:
+		/**
+		 * @brief Replaces a runtime's worker executor with a direct executor without violating engine affinity.
+		 * @param runtime Runtime whose executor and world engine are migrated.
+		 */
+		static void switchRuntimeToDirectLuaExecutor(WorldRuntime &runtime);
 		[[nodiscard]] static QSharedPointer<const LuaCallbackSnapshot>
 		captureVariableDispatchSnapshotForTest(const WorldRuntime &runtime);
 		[[nodiscard]] static QSharedPointer<const LuaCallbackSnapshot>
@@ -526,6 +531,15 @@ namespace
 		return true;
 	}
 } // namespace
+
+void tst_LuaCallbackEngine::switchRuntimeToDirectLuaExecutor(WorldRuntime &runtime)
+{
+	const QSharedPointer<LuaCallbackEngine> worldEngine(runtime.luaCallbacks(),
+	                                                    [](LuaCallbackEngine * /*unused*/) {});
+	runtime.dispatchTeardownLuaEngines({worldEngine}, true);
+	runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+	runtime.setLuaScriptText(QString());
+}
 
 QSharedPointer<const LuaCallbackSnapshot>
 tst_LuaCallbackEngine::captureVariableDispatchSnapshotForTest(const WorldRuntime &runtime)
@@ -4628,7 +4642,7 @@ end
 	pluginFile.close();
 
 	WorldRuntime runtime;
-	runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+	switchRuntimeToDirectLuaExecutor(runtime);
 	runtime.setStartupDirectory(temporaryDirectory.path());
 	runtime.setPluginsDirectory(temporaryDirectory.path());
 	auto                 caller = QSharedPointer<LuaCallbackEngine>::create();
@@ -4701,7 +4715,7 @@ end
 void tst_LuaCallbackEngine::callbackBroadcastFlushesBeforeSnapshotCapture()
 {
 	WorldRuntime runtime;
-	runtime.m_luaExecutor         = std::make_unique<LuaExecutorDirect>();
+	switchRuntimeToDirectLuaExecutor(runtime);
 	const QString        callerId = QStringLiteral("611111111111111111111111");
 	const QString        targetId = QStringLiteral("622222222222222222222222");
 	auto                 caller   = QSharedPointer<LuaCallbackEngine>::create();
@@ -6273,13 +6287,13 @@ void tst_LuaCallbackEngine::luaTimerMutationApisReplayExactRuntimeState()
 	};
 
 	WorldRuntime runtime;
+	switchRuntimeToDirectLuaExecutor(runtime);
 	runtime.setTimers({makeTimer(QStringLiteral("one")), makeTimer(QStringLiteral("two"))});
 	runtime.setWorldFileModified(false);
 	auto engine =
 	    QSharedPointer<LuaCallbackEngine>(runtime.luaCallbacks(), [](LuaCallbackEngine * /*unused*/) {});
 	QVERIFY(engine);
-	engine->setPluginInfo(QString(), QString(), QString());
-	engine->setScriptText(QStringLiteral(R"lua(
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
 function reset_one(value)
 	  return string.format("%.0f|%.0f|%.0f|%s", ResetTimer("one"),
 	                       GetTimerInfo("one", 11), GetTimerInfo("one", 12), tostring(GetInfo(111)))
@@ -6310,10 +6324,9 @@ function change_disabled_interval(value)
                        SetTimerOption("one", "second", 6.25))
 end
 )lua"));
-	QVERIFY(engine->loadScript());
+	QVERIFY(runtime.dispatchLuaResetAndLoadScript(engine));
 
-	LuaExecutorDirect executor;
-	auto              runMutation = [&](const QString &functionName)
+	auto runMutation = [&](const QString &functionName)
 	{
 		LuaBatchDispatchRequest request;
 		request.engines               = {engine};
@@ -6321,7 +6334,7 @@ end
 		request.functionName          = functionName;
 		request.stringArg             = QStringLiteral("ignored");
 		request.callbackSnapshotArg   = captureVariableDispatchSnapshotForTest(runtime);
-		LuaBatchDispatchResult result = executor.dispatchBatch(request);
+		LuaBatchDispatchResult result = runtime.luaExecutor()->dispatchBatch(request);
 		executeDeferredMutations(result);
 		return result.stringResult.split(QLatin1Char('|'));
 	};
@@ -6403,26 +6416,25 @@ end
 void tst_LuaCallbackEngine::deferredTimerCreationReplaysExactScheduleTimestamp()
 {
 	WorldRuntime runtime;
-	auto         engine =
+	switchRuntimeToDirectLuaExecutor(runtime);
+	auto engine =
 	    QSharedPointer<LuaCallbackEngine>(runtime.luaCallbacks(), [](LuaCallbackEngine * /*unused*/) {});
 	QVERIFY(engine);
-	engine->setPluginInfo(QString(), QString(), QString());
-	engine->setScriptText(QStringLiteral(R"lua(
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
 function create_scheduled_timers(value)
   return string.format("%.0f", AddTimer("exact_timer", 0, 0, 5, "", 1, "")) .. "|" ..
          string.format("%.0f", DoAfter(6.25, "temporary"))
 end
 )lua"));
-	QVERIFY(engine->loadScript());
+	QVERIFY(runtime.dispatchLuaResetAndLoadScript(engine));
 
 	LuaBatchDispatchRequest request;
-	request.engines             = {engine};
-	request.kind                = LuaBatchDispatchKind::StringInOut;
-	request.functionName        = QStringLiteral("create_scheduled_timers");
-	request.stringArg           = QStringLiteral("ignored");
-	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
-	LuaExecutorDirect      executor;
-	LuaBatchDispatchResult result = executor.dispatchBatch(request);
+	request.engines               = {engine};
+	request.kind                  = LuaBatchDispatchKind::StringInOut;
+	request.functionName          = QStringLiteral("create_scheduled_timers");
+	request.stringArg             = QStringLiteral("ignored");
+	request.callbackSnapshotArg   = captureVariableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result = runtime.luaExecutor()->dispatchBatch(request);
 	QCOMPARE(result.stringResult, QStringLiteral("0|0"));
 	executeDeferredMutations(result);
 
@@ -6645,15 +6657,15 @@ void tst_LuaCallbackEngine::worldOneShotRuleApisDirtyOnCreationAndDeletion()
 	QFETCH(QString, createCall);
 	QFETCH(QString, deleteCall);
 
-	WorldRuntime  runtime;
+	WorldRuntime runtime;
+	switchRuntimeToDirectLuaExecutor(runtime);
 	QTemporaryDir temporaryDirectory;
 	QVERIFY(temporaryDirectory.isValid());
 	runtime.setStartupDirectory(temporaryDirectory.path());
 	auto engine =
 	    QSharedPointer<LuaCallbackEngine>(runtime.luaCallbacks(), [](LuaCallbackEngine * /*unused*/) {});
 	QVERIFY(engine);
-	engine->setPluginInfo(QString(), QString(), QString());
-	engine->setScriptText(QStringLiteral(R"lua(
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
 function create_world_oneshot(value)
   return string.format("%.0f", %1)
 end
@@ -6661,8 +6673,8 @@ function delete_world_oneshot(value)
   return string.format("%.0f", %2)
 end
 )lua")
-	                          .arg(createCall, deleteCall));
-	QVERIFY(engine->loadScript());
+	                             .arg(createCall, deleteCall));
+	QVERIFY(runtime.dispatchLuaResetAndLoadScript(engine));
 	const auto ruleCount = [kind](const WorldRuntime &targetRuntime)
 	{
 		switch (kind)
@@ -6701,14 +6713,13 @@ end
 		return loaded;
 	};
 
-	LuaExecutorDirect       executor;
 	LuaBatchDispatchRequest request;
 	request.engines               = {engine};
 	request.kind                  = LuaBatchDispatchKind::StringInOut;
 	request.functionName          = QStringLiteral("create_world_oneshot");
 	request.stringArg             = QStringLiteral("ignored");
 	request.callbackSnapshotArg   = captureVariableDispatchSnapshotForTest(runtime);
-	LuaBatchDispatchResult result = executor.dispatchBatch(request);
+	LuaBatchDispatchResult result = runtime.luaExecutor()->dispatchBatch(request);
 	QCOMPARE(result.stringResult, QStringLiteral("0"));
 	executeDeferredMutations(result);
 	QCOMPARE(ruleCount(runtime), 1);
@@ -6732,7 +6743,7 @@ end
 	runtime.setWorldFileModified(false);
 	request.functionName        = QStringLiteral("delete_world_oneshot");
 	request.callbackSnapshotArg = captureVariableDispatchSnapshotForTest(runtime);
-	result                      = executor.dispatchBatch(request);
+	result                      = runtime.luaExecutor()->dispatchBatch(request);
 	QCOMPARE(result.stringResult, QStringLiteral("0"));
 	executeDeferredMutations(result);
 	QCOMPARE(ruleCount(runtime), 0);
@@ -7620,7 +7631,8 @@ void tst_LuaCallbackEngine::scopedStablePatchesDoNotRefreshUnrelatedState()
 
 void tst_LuaCallbackEngine::pluginSnapshotPopulationDoesNotConsumePendingCatalogs()
 {
-	WorldRuntime         runtime;
+	WorldRuntime runtime;
+	switchRuntimeToDirectLuaExecutor(runtime);
 	const QString        pluginId     = QStringLiteral("snapshot.catalog.pending");
 	auto                 pluginEngine = QSharedPointer<LuaCallbackEngine>::create();
 	WorldRuntime::Plugin plugin;
@@ -7657,22 +7669,20 @@ void tst_LuaCallbackEngine::pluginSnapshotPopulationDoesNotConsumePendingCatalog
 	auto worldEngine =
 	    QSharedPointer<LuaCallbackEngine>(runtime.luaCallbacks(), [](LuaCallbackEngine * /*unused*/) {});
 	QVERIFY(worldEngine);
-	worldEngine->setPluginInfo(QString(), QString(), QString());
-	worldEngine->setScriptText(QStringLiteral(R"lua(
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
 function catalog_support_status(value)
   return string.format("%.0f", PluginSupports("%1", "late_routine"))
 end
 )lua")
-	                               .arg(pluginId));
-	QVERIFY(worldEngine->loadScript());
+	                             .arg(pluginId));
+	QVERIFY(runtime.dispatchLuaResetAndLoadScript(worldEngine));
 	LuaBatchDispatchRequest request;
 	request.engines             = {worldEngine};
 	request.kind                = LuaBatchDispatchKind::StringInOut;
 	request.functionName        = QStringLiteral("catalog_support_status");
 	request.stringArg           = QStringLiteral("ignored");
 	request.callbackSnapshotArg = published;
-	LuaExecutorDirect executor;
-	QCOMPARE(executor.dispatchBatch(request).stringResult, QStringLiteral("0"));
+	QCOMPARE(runtime.luaExecutor()->dispatchBatch(request).stringResult, QStringLiteral("0"));
 }
 
 void tst_LuaCallbackEngine::installPendingTransitionsPatchExecutablePluginSnapshot()
