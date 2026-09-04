@@ -2753,7 +2753,13 @@ end
 		static void currentSuspendedRecipientTeardownCancelsCoroutineAndFinishesFallback()
 		{
 			WorldRuntime runtime;
+			{
+				const QSharedPointer<LuaCallbackEngine> worldEngine(runtime.luaCallbacks(),
+				                                                    [](LuaCallbackEngine * /*unused*/) {});
+				runtime.dispatchTeardownLuaEngines({worldEngine}, true);
+			}
 			runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
+			runtime.setLuaScriptText(QString());
 			for (int lineNumber = 1; lineNumber <= 200; ++lineNumber)
 				runtime.addLine(QStringLiteral("cancellation baseline %1").arg(lineNumber),
 				                WorldRuntime::LineOutput);
@@ -2823,6 +2829,9 @@ end
 			QVERIFY(!staleResume.suspended);
 			QVERIFY(!staleResume.boolResultValid);
 			QVERIFY(!staleResume.hasFunctionValid);
+
+			runtime.dispatchTeardownLuaEngines({engine}, true);
+			WorldRuntimeTestAccess::plugins(runtime).clear();
 		}
 
 		static void directSuspendedContinuationPublishesEveryMutationBoundary()

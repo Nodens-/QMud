@@ -4494,7 +4494,7 @@ end
 	         QStringLiteral("0|true|true|%1|%1|<nil>|0|0|0|<nil>|<nil>|0").arg(eNoSuchPlugin));
 	QVERIFY(runtime.isPluginInstalled(targetId));
 	QVERIFY(runtime.isPluginInstalled(callerId));
-	QVERIFY(caller->hasFunction(QStringLiteral("unload_and_probe")));
+	QCOMPARE(runtime.pluginSupports(callerId, QStringLiteral("unload_and_probe")), eOK);
 
 	request.functionName                = QStringLiteral("unload_and_probe");
 	request.callbackSnapshotArg         = captureVariableDispatchSnapshotForTest(runtime);
