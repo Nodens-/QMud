@@ -51,7 +51,7 @@ RUN dnf -y upgrade && \
     dnf clean all
 
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    python3 -m pip install --no-cache-dir --upgrade aqtinstall
+    python3 -m pip install --no-cache-dir --upgrade aqtinstall gcovr
 
 RUN mkdir -p /etc/aqt && \
     printf '%s\n' \
