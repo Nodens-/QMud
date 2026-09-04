@@ -20,6 +20,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_builds:
+        description: "Run package build matrix"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -64,8 +69,7 @@ jobs:
               name.startsWith("skeleton/") ||
               name.startsWith("tools/") ||
               name === "CMakeLists.txt" ||
-              name.endsWith("/CMakeLists.txt") ||
-              name === ".github/workflows/pipelines.yml"
+              name.endsWith("/CMakeLists.txt")
             );
 
             let runPipeline = false;
@@ -110,6 +114,7 @@ jobs:
             } else if (context.eventName === "workflow_dispatch") {
               if (context.payload.inputs?.run_full_tests === "true") addValidation("full-tests", 90);
               if (context.payload.inputs?.force_coverage === "true") addValidation("coverage", 120);
+              if (context.payload.inputs?.run_builds === "true") addBuilds();
             }
 
             const hasBuilds = entries.some((entry) => entry.kind === "build");
@@ -197,7 +202,7 @@ jobs:
         run: |
           mkdir -p ci-build
           chmod 0777 ci-build
-          docker run --rm --user "$(id -u):$(id -g)" \
+          docker run --rm --interactive --user "$(id -u):$(id -g)" \
             -e CCACHE_DISABLE=1 -e HOME=/tmp -e QT_QPA_PLATFORM=offscreen \
             -v "$GITHUB_WORKSPACE:/home/user/project:ro" \
             -v "$GITHUB_WORKSPACE/ci-build:/home/user/build:rw" \
@@ -240,7 +245,7 @@ jobs:
         run: |
           mkdir -p ci-build
           chmod 0777 ci-build
-          docker run --rm --user "$(id -u):$(id -g)" \
+          docker run --rm --interactive --user "$(id -u):$(id -g)" \
             -e CCACHE_DISABLE=1 -e HOME=/tmp -e QT_QPA_PLATFORM=offscreen \
             -v "$GITHUB_WORKSPACE:/home/user/project:ro" \
             -v "$GITHUB_WORKSPACE/ci-build:/home/user/build:rw" \
