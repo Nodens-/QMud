@@ -214,6 +214,7 @@ jobs:
             -DCMAKE_PREFIX_PATH=/opt/Qt/latest/gcc_64 \
             -DQt6_DIR=/opt/Qt/latest/gcc_64/lib/cmake/Qt6 \
             -DQMUD_ENABLE_TESTING=ON -DQMUD_ENABLE_GUI_TESTS=ON \
+            -DQMUD_ENABLE_APPIMAGE=OFF \
             -DQMUD_ENABLE_APPIMAGE_DOCKER=OFF \
             -DQMUD_ENABLE_MAC_DOCKER=OFF -DQMUD_ENABLE_WINDOCKER=OFF
           CCACHE_DISABLE=1 cmake --build /home/user/build --parallel 6
@@ -256,6 +257,7 @@ jobs:
             -DCMAKE_PREFIX_PATH=/opt/Qt/latest/gcc_64 \
             -DQt6_DIR=/opt/Qt/latest/gcc_64/lib/cmake/Qt6 \
             -DQMUD_ENABLE_TESTING=ON -DQMUD_ENABLE_GUI_TESTS=ON \
+            -DQMUD_ENABLE_APPIMAGE=OFF \
             -DQMUD_ENABLE_APPIMAGE_DOCKER=OFF \
             -DQMUD_ENABLE_MAC_DOCKER=OFF -DQMUD_ENABLE_WINDOCKER=OFF \
             -DCMAKE_C_FLAGS=--coverage -DCMAKE_CXX_FLAGS=--coverage \
