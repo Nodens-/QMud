@@ -881,7 +881,8 @@ jobs:
               parsed = parse_changelog(str(pull.get("body") or ""), number)
               user = pull.get("user")
               login = str(user.get("login") or "").strip() if isinstance(user, dict) else ""
-              attribution = f" by @{login} (#{number})" if login else f" (#{number})"
+              pr_link = f"[#{number}](https://github.com/Nodens-/QMud/pull/{number})"
+              attribution = f" by @{login} ({pr_link})" if login else f" ({pr_link})"
               for section_name in section_names:
                   for entry in parsed[section_name]:
                       entries[section_name].append(f"* {entry}{attribution}")
@@ -1233,7 +1234,8 @@ jobs:
               parsed = parse_changelog(str(pull.get("body") or ""), number)
               user = pull.get("user")
               login = str(user.get("login") or "").strip() if isinstance(user, dict) else ""
-              attribution = f" by @{login} (#{number})" if login else f" (#{number})"
+              pr_link = f"[#{number}](https://github.com/Nodens-/QMud/pull/{number})"
+              attribution = f" by @{login} ({pr_link})" if login else f" ({pr_link})"
               for section_name in section_names:
                   for entry in parsed[section_name]:
                       entries[section_name].append(f"* {entry}{attribution}")

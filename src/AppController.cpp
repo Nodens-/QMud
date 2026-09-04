@@ -5830,10 +5830,9 @@ void AppController::showUpdateAvailableDialog(const QString &currentVersion, con
 	layout->addWidget(title);
 	layout->addWidget(new QLabel(QStringLiteral("Changelog:"), dialog));
 
-	auto *changelogView = new QPlainTextEdit(dialog);
-	changelogView->setReadOnly(true);
-	changelogView->setPlainText(changelog);
-	changelogView->setFont(qmudPreferredMonospaceFont());
+	auto *changelogView = new QTextBrowser(dialog);
+	changelogView->setOpenExternalLinks(true);
+	changelogView->setMarkdown(changelog);
 	layout->addWidget(changelogView, 1);
 
 	auto *fullChangelogLink = new QLabel(dialog);

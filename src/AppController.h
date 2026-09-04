@@ -44,6 +44,7 @@ class QDialog;
 class QNetworkAccessManager;
 class QTimer;
 class QWidget;
+class AppControllerTestAccess;
 class tst_WorldObserverLifecycle;
 struct ReloadWorldState;
 struct lua_State;
@@ -57,6 +58,7 @@ struct lua_State;
 class AppController : public QObject
 {
 		Q_OBJECT
+		friend class AppControllerTestAccess;
 		friend class tst_WorldObserverLifecycle;
 
 	public:

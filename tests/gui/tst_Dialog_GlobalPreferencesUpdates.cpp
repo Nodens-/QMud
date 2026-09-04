@@ -15,6 +15,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDialog>
 #include <QDialogButtonBox>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
@@ -36,11 +37,38 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTextBlock>
+#include <QTextBrowser>
 #include <QTextEdit>
 #include <QWidget>
 #include <QtTest/QTest>
 
 #include <memory>
+
+/**
+ * @brief Provides narrowly scoped access to update-dialog internals for GUI tests.
+ */
+class AppControllerTestAccess final
+{
+	public:
+		/**
+		 * @brief Shows the production update dialog using the supplied test owner.
+		 * @param controller Application controller under test.
+		 * @param owner Visible owner for the modeless dialog.
+		 * @param currentVersion Running version string.
+		 * @param version Available version string.
+		 * @param changelog Markdown release changelog.
+		 * @return Created update dialog.
+		 */
+		static QDialog *showUpdateAvailableDialog(AppController &controller, QWidget &owner,
+		                                          const QString &currentVersion, const QString &version,
+		                                          const QString &changelog)
+		{
+			controller.m_updateUiParent = &owner;
+			controller.showUpdateAvailableDialog(currentVersion, version, changelog);
+			return controller.m_updateAvailableDialog.data();
+		}
+};
 
 namespace
 {
@@ -880,6 +908,42 @@ namespace
 				QVERIFY(hoursSpin->isEnabled());
 				QVERIFY(checkEveryLabel->isEnabled());
 				QVERIFY(checkNowButton->isEnabled());
+			}
+
+			/**
+			 * @brief Verifies Markdown changelog links render as clickable pull-request anchors.
+			 */
+			void updateChangelogMarkdownRendersPullRequestLink() const
+			{
+				const QString pullRequestUrl = QStringLiteral("https://github.com/Nodens-/QMud/pull/131");
+				const QString changelog =
+				    QStringLiteral("## What's changed\n\n### Bug Fixes\n\n* Fix release notes rendering by "
+				                   "@Nodens- ([#131](%1))\n")
+				        .arg(pullRequestUrl);
+
+				QWidget updateUiOwner;
+				updateUiOwner.show();
+				QDialog *dialog = AppControllerTestAccess::showUpdateAvailableDialog(
+				    *m_app, updateUiOwner, QStringLiteral("13.00"), QStringLiteral("13.01"), changelog);
+				QVERIFY(dialog);
+				auto changelogView = dialog->findChild<QTextBrowser *>();
+				QVERIFY(changelogView);
+
+				QStringList renderedLinks;
+				for (QTextBlock block = changelogView->document()->begin(); block.isValid();
+				     block            = block.next())
+				{
+					for (auto fragmentIt = block.begin(); !fragmentIt.atEnd(); ++fragmentIt)
+					{
+						const QTextFragment fragment = fragmentIt.fragment();
+						if (fragment.isValid() && fragment.charFormat().isAnchor())
+							renderedLinks.append(fragment.charFormat().anchorHref());
+					}
+				}
+
+				QVERIFY(changelogView->openExternalLinks());
+				QCOMPARE(renderedLinks, QStringList{pullRequestUrl});
+				dialog->close();
 			}
 
 			/**
