@@ -53,6 +53,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       needs_linux_image: ${{ steps.plan.outputs.needs_linux_image }}
       artifact_run_id: ${{ steps.plan.outputs.artifact_run_id }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
       publish_tagged_release: ${{ steps.plan.outputs.publish_tagged_release }}
       publish_ci_release: ${{ steps.plan.outputs.publish_ci_release }}
@@ -85,35 +86,76 @@ jobs:
                 });
               }
             };
-            const resolveHeadReleaseTag = async () => {
-              const response = await github.rest.repos.getContent({
-                owner, repo, path: "src/Version.h", ref: context.sha,
-              });
-              if (Array.isArray(response.data) || response.data.type !== "file" || !response.data.content) {
-                throw new Error("Could not read src/Version.h at the selected HEAD.");
-              }
-              const contents = Buffer.from(response.data.content, "base64").toString("utf8");
-              const versionMatch = contents.match(/kVersionString\[\]\s*=\s*"([^"]+)"/);
-              if (!versionMatch) {
-                throw new Error("Could not resolve kVersionString from src/Version.h.");
-              }
-
-              const tagName = `v${versionMatch[1]}`;
+            const resolveTagCommit = async (tagName) => {
               const tagRef = await github.rest.git.getRef({owner, repo, ref: `tags/${tagName}`});
               let target = tagRef.data.object;
               while (target.type === "tag") {
                 const tag = await github.rest.git.getTag({owner, repo, tag_sha: target.sha});
                 target = tag.data.object;
               }
-              if (target.type !== "commit" || target.sha !== context.sha) {
-                throw new Error(`${tagName} does not point to the selected HEAD ${context.sha}.`);
+              if (target.type !== "commit") {
+                throw new Error(`${tagName} does not resolve to a commit.`);
               }
-              return tagName;
+              return target.sha;
             };
-            const findArtifactRun = async (publication, releaseTag = "") => {
+            const resolveLatestVersionTag = async () => {
+              const tags = await github.paginate(github.rest.repos.listTags, {
+                owner, repo, per_page: 100,
+              });
+              const versionTags = tags
+                .map((tag) => tag.name)
+                .filter((name) => /^v\d+(?:\.\d+)*$/.test(name));
+              if (versionTags.length === 0) {
+                throw new Error("No version tags were found.");
+              }
+              const versionParts = (name) => name.slice(1).split(".").map(Number);
+              versionTags.sort((left, right) => {
+                const leftParts = versionParts(left);
+                const rightParts = versionParts(right);
+                const count = Math.max(leftParts.length, rightParts.length);
+                for (let index = 0; index < count; ++index) {
+                  const difference = (rightParts[index] ?? 0) - (leftParts[index] ?? 0);
+                  if (difference !== 0) return difference;
+                }
+                return right.localeCompare(left);
+              });
+              const name = versionTags[0];
+              return {name, sha: await resolveTagCommit(name)};
+            };
+            const resolveMainHead = async () => {
+              const mainRef = await github.rest.git.getRef({owner, repo, ref: "heads/main"});
+              if (mainRef.data.object.type !== "commit") {
+                throw new Error("refs/heads/main does not resolve to a commit.");
+              }
+              return mainRef.data.object.sha;
+            };
+            const releaseExists = async (tagName) => {
+              try {
+                await github.rest.repos.getReleaseByTag({owner, repo, tag: tagName});
+                return true;
+              } catch (error) {
+                if (error.status === 404) return false;
+                throw error;
+              }
+            };
+            const releaseTargetsCommit = async (tagName, sourceSha) => {
+              if (!await releaseExists(tagName)) return false;
+              try {
+                return await resolveTagCommit(tagName) === sourceSha;
+              } catch (error) {
+                if (error.status === 404) return false;
+                throw error;
+              }
+            };
+            const artifactNames = (sourceSha) => new Set([
+              `qmud-appimage-${sourceSha}`,
+              `qmud-macos-${sourceSha}`,
+              `qmud-windows-${sourceSha}`,
+            ]);
+            const findArtifactRun = async (publication, sourceSha, releaseTag = "") => {
               const ciJobs = ["build-appimage", "build-macos", "build-windows"];
               const taggedJobs = ["tagged-build-appimage", "tagged-build-macos", "tagged-build-windows"];
-              const requiredArtifacts = new Set(["qmud-appimage", "qmud-macos", "qmud-windows"]);
+              const requiredArtifacts = artifactNames(sourceSha);
 
               for (let page = 1; ; page += 1) {
                 const response = await github.rest.actions.listWorkflowRuns({
@@ -126,16 +168,15 @@ jobs:
                 });
                 const runs = Array.isArray(response.data.workflow_runs) ? response.data.workflow_runs : [];
                 for (const run of runs) {
-                  if (run.event === "pull_request" || run.id === context.runId || run.head_sha !== context.sha) {
+                  if (run.event === "pull_request" || run.id === context.runId) {
                     continue;
                   }
 
                   const automaticTaggedRun = publication === "tagged" &&
                     run.event === "push" && run.head_branch === releaseTag;
-                  const manualTaggedRun = publication === "tagged" &&
-                    run.event === "workflow_dispatch" && run.head_branch === "main";
-                  const ciRun = publication === "ci" && run.head_branch === "main" &&
-                    (run.event === "push" || run.event === "workflow_dispatch");
+                  const manualTaggedRun = publication === "tagged" && run.event === "workflow_dispatch";
+                  const ciRun = publication === "ci" &&
+                    ((run.event === "push" && run.head_branch === "main") || run.event === "workflow_dispatch");
                   if (!automaticTaggedRun && !manualTaggedRun && !ciRun) continue;
 
                   const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
@@ -165,9 +206,7 @@ jobs:
                 if (runs.length < 100) break;
               }
 
-              throw new Error(
-                `No completed ${publication} build at HEAD ${context.sha} has all successful Release package builds and artifacts.`,
-              );
+              return "";
             };
             const coveragePath = (name) => name.startsWith("src/") || name.startsWith("tests/");
             const pipelinePath = (name) => (
@@ -182,6 +221,7 @@ jobs:
             let runPipeline = false;
             let runCoverage = false;
             let artifactRunId = String(context.runId);
+            let sourceSha = context.sha;
             let releaseTag = "";
             let publishTaggedRelease = false;
             let publishCiRelease = false;
@@ -220,8 +260,9 @@ jobs:
                 publishCiRelease = true;
               }
             } else if (context.eventName === "push" && context.ref.startsWith("refs/tags/v")) {
-              addBuilds("Release", "tagged-build");
               releaseTag = context.ref.replace("refs/tags/", "");
+              sourceSha = await resolveTagCommit(releaseTag);
+              addBuilds("Release", "tagged-build");
               publishTaggedRelease = true;
             } else if (context.eventName === "schedule") {
               addValidation("full-tests", 90);
@@ -233,18 +274,15 @@ jobs:
               }
 
               if (runMainPipeline) {
-                if (context.ref !== "refs/heads/main") {
-                  throw new Error("The complete push-to-main pipeline must be dispatched from main.");
-                }
+                sourceSha = await resolveMainHead();
                 addValidation("quick-tests", 90);
                 addValidation("coverage", 120);
                 addBuilds();
                 publishCiRelease = true;
               } else if (runTaggedRelease) {
-                if (context.ref !== "refs/heads/main") {
-                  throw new Error("The complete tagged-release pipeline must be dispatched from main.");
-                }
-                releaseTag = await resolveHeadReleaseTag();
+                const latestTag = await resolveLatestVersionTag();
+                releaseTag = latestTag.name;
+                sourceSha = latestTag.sha;
                 addBuilds("Release", "tagged-build");
                 publishTaggedRelease = true;
               } else {
@@ -257,17 +295,28 @@ jobs:
                   throw new Error("Select only one publication target.");
                 }
                 if (publishTagged) {
-                  if (context.ref !== "refs/heads/main") {
-                    throw new Error("Tagged-release publication must be dispatched from main.");
+                  const latestTag = await resolveLatestVersionTag();
+                  releaseTag = latestTag.name;
+                  sourceSha = latestTag.sha;
+                  if (await releaseExists(releaseTag)) {
+                    throw new Error(`${releaseTag} has already been released.`);
                   }
-                  releaseTag = await resolveHeadReleaseTag();
-                  artifactRunId = await findArtifactRun("tagged", releaseTag);
+                  artifactRunId = await findArtifactRun("tagged", sourceSha, releaseTag);
+                  if (!artifactRunId) {
+                    artifactRunId = String(context.runId);
+                    addBuilds("Release", "tagged-build");
+                  }
                   publishTaggedRelease = true;
                 } else if (publishCi) {
-                  if (context.ref !== "refs/heads/main") {
-                    throw new Error("ci-main publication must be dispatched from main.");
+                  sourceSha = await resolveMainHead();
+                  if (await releaseTargetsCommit("ci-main", sourceSha)) {
+                    throw new Error(`The current main commit ${sourceSha} has already been published as ci-main.`);
                   }
-                  artifactRunId = await findArtifactRun("ci");
+                  artifactRunId = await findArtifactRun("ci", sourceSha);
+                  if (!artifactRunId) {
+                    artifactRunId = String(context.runId);
+                    addBuilds();
+                  }
                   publishCiRelease = true;
                 }
               }
@@ -281,6 +330,7 @@ jobs:
             core.setOutput("matrix", JSON.stringify({include: entries}));
             core.setOutput("needs_linux_image", needsLinuxImage ? "true" : "false");
             core.setOutput("artifact_run_id", artifactRunId);
+            core.setOutput("source_sha", sourceSha);
             core.setOutput("release_tag", releaseTag);
             core.setOutput("publish_tagged_release", publishTaggedRelease ? "true" : "false");
             core.setOutput("publish_ci_release", publishCiRelease ? "true" : "false");
@@ -299,6 +349,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.pipeline-plan.outputs.source_sha }}
       - name: Resolve Linux image reference
         id: image-reference
         run: |
@@ -368,10 +420,13 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       QMUD_LINUX_IMAGE: ${{ needs.prepare-linux-image.outputs.image }}
+      QMUD_SOURCE_SHA: ${{ needs.pipeline-plan.outputs.source_sha }}
     steps:
       - name: Check out repository
         if: matrix.kind != 'noop'
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.pipeline-plan.outputs.source_sha }}
 
       - name: Log in to GHCR
         if: matrix.kind == 'validation'
@@ -480,7 +535,7 @@ jobs:
       - name: Resolve package version
         if: matrix.kind == 'build'
         env:
-          TAGGED_RELEASE_BUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.run_tagged_release }}
+          TAGGED_RELEASE_BUILD: ${{ startsWith(matrix.task, 'tagged-build-') }}
         run: |
           set -euo pipefail
           BASE_VERSION="$(sed -n 's/.*kVersionString\[\] = "\([^"]*\)".*/\1/p' src/Version.h | head -n 1)"
@@ -491,7 +546,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* || "$TAGGED_RELEASE_BUILD" == "true" ]]; then
             PACKAGE_VERSION="$BASE_VERSION"
           else
-            PACKAGE_VERSION="ci-${GITHUB_SHA::7}"
+            PACKAGE_VERSION="ci-${QMUD_SOURCE_SHA::7}"
           fi
           echo "QMUD_PACKAGE_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
       - name: Verify self-hosted dependencies
@@ -629,7 +684,7 @@ jobs:
         if: matrix.package == 'appimage'
         uses: actions/upload-artifact@v7
         with:
-          name: qmud-appimage
+          name: qmud-appimage-${{ needs.pipeline-plan.outputs.source_sha }}
           if-no-files-found: error
           path: |
             cmake-build-release/appimage-docker-out/*.AppImage
@@ -638,7 +693,7 @@ jobs:
         if: matrix.package == 'macos'
         uses: actions/upload-artifact@v7
         with:
-          name: qmud-macos
+          name: qmud-macos-${{ needs.pipeline-plan.outputs.source_sha }}
           if-no-files-found: error
           path: |
             cmake-build-release/mac-docker-out/QMud-*.app.zip
@@ -647,7 +702,7 @@ jobs:
         if: matrix.package == 'windows'
         uses: actions/upload-artifact@v7
         with:
-          name: qmud-windows
+          name: qmud-windows-${{ needs.pipeline-plan.outputs.source_sha }}
           if-no-files-found: error
           path: |
             cmake-build-release/windows-docker-out/QMud-*.zip
@@ -681,15 +736,19 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ needs.pipeline-plan.outputs.source_sha }}
 
+      - name: Clean publication workspace
+        run: rm -rf release-assets release-notes.md ci-release-notes.md
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ needs.pipeline-plan.outputs.artifact_run_id }}
-          pattern: qmud-*
+          pattern: qmud-*-${{ needs.pipeline-plan.outputs.source_sha }}
           path: release-assets
+          merge-multiple: true
 
       - name: Build release changelog body
         id: release_changelog
@@ -805,12 +864,12 @@ jobs:
           generate_release_notes: false
           body_path: ${{ steps.release_changelog.outputs.body_path }}
           files: |
-            release-assets/qmud-appimage/*.AppImage
-            release-assets/qmud-appimage/*.AppImage.zsync
-            release-assets/qmud-macos/*.app.zip
-            release-assets/qmud-macos/*.dmg
-            release-assets/qmud-windows/*.zip
-            release-assets/qmud-windows/*.exe
+            release-assets/*.AppImage
+            release-assets/*.AppImage.zsync
+            release-assets/*-macos.app.zip
+            release-assets/*-macos.dmg
+            release-assets/*-windows.zip
+            release-assets/*-win-setup.exe
 
       - name: Announce tagged release on Discord
         env:
@@ -884,7 +943,6 @@ jobs:
       always() && !cancelled() &&
       needs.pipeline-plan.result == 'success' &&
       needs.pipeline.result == 'success' &&
-      github.ref == 'refs/heads/main' &&
       needs.pipeline-plan.outputs.publish_ci_release == 'true'
     runs-on: [self-hosted, primary]
     permissions:
@@ -896,6 +954,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ needs.pipeline-plan.outputs.source_sha }}
 
       - name: Resolve base version from Version.h
         id: version
@@ -909,32 +968,28 @@ jobs:
           fi
           echo "base=$BASE_VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Clean publication workspace
+        run: rm -rf release-assets release-notes.md ci-release-notes.md
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ needs.pipeline-plan.outputs.artifact_run_id }}
-          pattern: qmud-*
+          pattern: qmud-*-${{ needs.pipeline-plan.outputs.source_sha }}
           path: release-assets
-
-      - name: Move rolling CI tag to current commit
-        run: |
-          CI_TAG="ci-${GITHUB_REF_NAME}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "${CI_TAG}" "${GITHUB_SHA}"
-          git push origin "refs/tags/${CI_TAG}" --force
+          merge-multiple: true
 
       - name: Build CI changelog body
         id: changelog
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.pipeline-plan.outputs.source_sha }}
         run: |
           PREVIOUS_TAG="$(git tag --sort=-v:refname --list 'v*' | head -n 1)"
-          RANGE="${GITHUB_SHA}^!"
+          RANGE="${SOURCE_SHA}^!"
           if [ -n "${PREVIOUS_TAG}" ]; then
-            RANGE="${PREVIOUS_TAG}..${GITHUB_SHA}"
+            RANGE="${PREVIOUS_TAG}..${SOURCE_SHA}"
           fi
           export RANGE
           python3 - <<'PY'
@@ -1037,7 +1092,7 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const tag = `ci-${context.ref.replace('refs/heads/', '')}`;
+            const tag = "ci-main";
             let release;
             try {
               release = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
@@ -1056,10 +1111,20 @@ jobs:
               release_id: release.data.id,
             });
 
+      - name: Move rolling CI tag to current commit
+        env:
+          SOURCE_SHA: ${{ needs.pipeline-plan.outputs.source_sha }}
+        run: |
+          CI_TAG="ci-main"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "${CI_TAG}" "${SOURCE_SHA}"
+          git push origin "refs/tags/${CI_TAG}" --force
+
       - name: Publish CI prerelease assets
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          tag_name: ci-${{ github.ref_name }}
+          tag_name: ci-main
           name: QMud v${{ steps.version.outputs.base }}-ci
           prerelease: true
           make_latest: false
@@ -1067,12 +1132,12 @@ jobs:
           body_path: ${{ steps.changelog.outputs.body_path }}
           overwrite_files: true
           files: |
-            release-assets/qmud-appimage/*.AppImage
-            release-assets/qmud-appimage/*.AppImage.zsync
-            release-assets/qmud-macos/*.app.zip
-            release-assets/qmud-macos/*.dmg
-            release-assets/qmud-windows/*.zip
-            release-assets/qmud-windows/*.exe
+            release-assets/*.AppImage
+            release-assets/*.AppImage.zsync
+            release-assets/*-macos.app.zip
+            release-assets/*-macos.dmg
+            release-assets/*-windows.zip
+            release-assets/*-win-setup.exe
 
       - name: Cleanup workspace build directories
         if: always()
