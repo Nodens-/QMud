@@ -8304,6 +8304,7 @@ end
 function OnPluginAsyncResult(request_id, api_name, status, payload)
   async_result = string.format("%.0f|%s|%s|%s|%.0f", request_id, api_name, status, payload,
     DatabaseTotalChanges("snapshot_db"))
+  SetVariable("async_complete", "yes")
 end
 function async_result_status(value)
   return async_result
@@ -8319,18 +8320,17 @@ end
 	request.functionName                        = QStringLiteral("deferred_database_exec");
 	request.stringArg                           = QStringLiteral("ignored");
 	request.callbackSnapshotArg                 = captureVariableDispatchSnapshotForTest(runtime);
-	const LuaBatchDispatchResult deferredResult = runtime.dispatchLuaBatch(request);
+	const LuaBatchDispatchResult deferredResult = runtime.queuePluginCallbackDispatch(request, true);
 	const QStringList            acceptedParts  = deferredResult.stringResult.split(QLatin1Char('|'));
 	QCOMPARE(acceptedParts.size(), 2);
 	QCOMPARE(acceptedParts.at(0), QStringLiteral("0"));
 	QVERIFY(acceptedParts.at(1).toULongLong() > 0);
-	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_pluginCallbackDispatchWorkerInFlight &&
-	                             runtime.m_pluginCallbackDispatchQueue.isEmpty(),
-	                         5000);
+	QTRY_COMPARE_WITH_TIMEOUT(runtime.pluginVariableValue(pluginId, QStringLiteral("async_complete")),
+	                          QStringLiteral("yes"), 5000);
 
 	request.functionName                     = QStringLiteral("async_result_status");
 	request.callbackSnapshotArg              = captureVariableDispatchSnapshotForTest(runtime);
-	const LuaBatchDispatchResult asyncResult = runtime.dispatchLuaBatch(request);
+	const LuaBatchDispatchResult asyncResult = runtime.queuePluginCallbackDispatch(request, true);
 	const QStringList            asyncParts  = asyncResult.stringResult.split(QLatin1Char('|'));
 	QCOMPARE(asyncParts.size(), 5);
 	QCOMPARE(asyncParts.at(0), acceptedParts.at(1));
