@@ -2,10 +2,10 @@ name: Pipelines
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [ opened, synchronize, reopened ]
   push:
-    branches: [main]
-    tags: ["v*"]
+    branches: [ main ]
+    tags: [ "v*" ]
   schedule:
     - cron: "0 4 * * *"
   workflow_dispatch:
@@ -395,10 +395,11 @@ jobs:
           else
             echo "needs_push=true" >> "$GITHUB_OUTPUT"
           fi
-      - name: Log in to GHCR
-        id: ghcr-login
+      - name: Push Linux image
+        id: push-image
         if: steps.build-image.outputs.needs_push == 'true'
         env:
+          GHCR_IMAGE: ${{ steps.image-reference.outputs.image }}
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
         run: |
           set -euo pipefail
@@ -406,21 +407,12 @@ jobs:
             echo "GHCR_PAT is unavailable." >&2
             exit 1
           fi
-          printf '%s' "$GHCR_PAT" | docker login ghcr.io --username "$GITHUB_REPOSITORY_OWNER" --password-stdin
-      - name: Push Linux image
-        id: push-image
-        if: steps.build-image.outputs.needs_push == 'true'
-        env:
-          GHCR_IMAGE: ${{ steps.image-reference.outputs.image }}
-        run: |
-          set -euo pipefail
           LOCAL_IMAGE="qmud-appimage-builder:${GHCR_IMAGE##*:}"
-          docker tag "$LOCAL_IMAGE" "$GHCR_IMAGE"
-          docker push "$GHCR_IMAGE"
+          skopeo copy \
+            --dest-creds "$GITHUB_REPOSITORY_OWNER:$GHCR_PAT" \
+            "docker-daemon:$LOCAL_IMAGE" \
+            "docker://$GHCR_IMAGE"
           echo "pushed=true" >> "$GITHUB_OUTPUT"
-      - name: Log out of GHCR
-        if: always() && steps.ghcr-login.outcome == 'success'
-        run: docker logout ghcr.io
       - name: Keep the newest two Linux images
         if: steps.push-image.outputs.pushed == 'true'
         uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
@@ -433,7 +425,7 @@ jobs:
 
   pipeline:
     name: ${{ matrix.task }}
-    needs: [pipeline-plan, prepare-linux-image]
+    needs: [ pipeline-plan, prepare-linux-image ]
     if: always() && needs.pipeline-plan.result == 'success' && (needs.prepare-linux-image.result == 'success' || needs.prepare-linux-image.result == 'skipped')
     strategy:
       fail-fast: true
@@ -746,7 +738,7 @@ jobs:
       needs.pipeline.result == 'success' &&
       needs.pipeline-plan.outputs.release_tag != '' &&
       needs.pipeline-plan.outputs.publish_tagged_release == 'true'
-    runs-on: [self-hosted, primary]
+    runs-on: [ self-hosted, primary ]
     permissions:
       actions: read
       contents: write
@@ -1080,7 +1072,7 @@ jobs:
       needs.pipeline-plan.result == 'success' &&
       needs.pipeline.result == 'success' &&
       needs.pipeline-plan.outputs.publish_ci_release == 'true'
-    runs-on: [self-hosted, primary]
+    runs-on: [ self-hosted, primary ]
     permissions:
       actions: read
       contents: write
