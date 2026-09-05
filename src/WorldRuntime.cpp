@@ -883,7 +883,7 @@ namespace
 	{
 		if (!engine)
 			return QStringLiteral("<null>");
-		const QString id   = engine->pluginIdMetadata();
+		QString       id   = engine->pluginIdMetadata();
 		const QString name = engine->pluginNameMetadata().trimmed();
 		if (name.isEmpty())
 			return id;
@@ -1263,17 +1263,14 @@ void QMudLuaDeferredRuntimeMutation::apply(LuaBatchDispatchResult &result)
 	batches.swap(result.deferredRuntimeMutationBatches);
 	if (result.deferredRuntimeMutationDelivery)
 	{
-		QVector<LuaDeferredRuntimeMutationBatch> currentBatches = std::move(batches);
-		const bool consumed = result.deferredRuntimeMutationDelivery->consumeForDelivery(
+		static_cast<void>(result.deferredRuntimeMutationDelivery->consumeForDelivery(
 		    [currentBatches =
-		         std::move(currentBatches)](QVector<LuaDeferredRuntimeMutationBatch> earlierBatches) mutable
+		         std::move(batches)](QVector<LuaDeferredRuntimeMutationBatch> earlierBatches) mutable
 		    {
 			    earlierBatches += std::move(currentBatches);
 			    apply(std::move(earlierBatches));
-		    });
+		    }));
 		result.deferredRuntimeMutationDelivery.clear();
-		if (!consumed)
-			currentBatches.clear();
 		return;
 	}
 	apply(std::move(batches));
@@ -15948,7 +15945,7 @@ void WorldRuntime::finishPluginCallbackDispatchCommand(PluginCallbackDispatchCom
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::finishPluginCallbackDispatchCommand");
 	endPluginCallbackDispatchCommandGuard(command);
-	if (command.retainResult)
+	if (command.options.testFlag(PluginCallbackDispatchOption::RetainResult))
 		m_pluginCallbackDispatchResults.insert(command.id, std::move(result));
 	else
 	{
@@ -16470,9 +16467,10 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 	    m_pluginCallbackDispatchQueue.isEmpty() && !m_pluginCallbackDispatchDrainQueued)
 	{
 		PluginCallbackDispatchCommand directCommand;
-		directCommand.id              = m_nextPluginCallbackDispatchId++;
-		directCommand.request         = callbackRequest;
-		directCommand.retainResult    = true;
+		directCommand.id      = m_nextPluginCallbackDispatchId++;
+		directCommand.request = callbackRequest;
+		directCommand.options.setFlag(PluginCallbackDispatchOption::RetainResult);
+		directCommand.options.setFlag(PluginCallbackDispatchOption::DispatchSynchronously);
 		const quint64 directCommandId = directCommand.id;
 		beginPluginCallbackDispatchCommandGuard(directCommand);
 #ifndef NDEBUG
@@ -16581,9 +16579,10 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 	}
 
 	PluginCallbackDispatchCommand command;
-	command.id           = m_nextPluginCallbackDispatchId++;
-	command.request      = callbackRequest;
-	command.retainResult = canRetainQueuedResult;
+	command.id      = m_nextPluginCallbackDispatchId++;
+	command.request = callbackRequest;
+	command.options.setFlag(PluginCallbackDispatchOption::RetainResult, canRetainQueuedResult);
+	command.options.setFlag(PluginCallbackDispatchOption::DispatchSynchronously, canRetainQueuedResult);
 #ifndef NDEBUG
 	command.enqueuedAtNs        = dispatchStartNs;
 	command.queueDepthAtEnqueue = safeQSizeToInt(m_pluginCallbackDispatchQueue.size()) + 1;
@@ -16617,7 +16616,9 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 		           .arg(command.id)
 		           .arg(callbackRequest.functionName, qmudMmStartupDiagEngineLabels(callbackRequest.engines),
 		                pluginCallbackDispatchKindLabel(callbackRequest.kind),
-		                command.retainResult ? QStringLiteral("1") : QStringLiteral("0"),
+		                command.options.testFlag(PluginCallbackDispatchOption::RetainResult)
+		                    ? QStringLiteral("1")
+		                    : QStringLiteral("0"),
 		                completionBarrier ? QStringLiteral("1") : QStringLiteral("0"),
 		                inputCritical ? QStringLiteral("1") : QStringLiteral("0"),
 		                callbackRequest.lowPriority ? QStringLiteral("1") : QStringLiteral("0"))
@@ -16628,7 +16629,7 @@ LuaBatchDispatchResult WorldRuntime::queuePluginCallbackDispatch(const LuaBatchD
 	}
 #endif
 
-	if (command.retainResult)
+	if (command.options.testFlag(PluginCallbackDispatchOption::RetainResult))
 	{
 #ifndef NDEBUG
 		bool          timeoutLogged = false;
@@ -16764,12 +16765,12 @@ void WorldRuntime::queuePluginCallbackDispatchAsync(
 		return;
 	}
 
-	static_cast<void>(tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(request, std::move(completion)));
+	static_cast<void>(tryQueuePluginCallbackDispatchOnRuntimeThread(request, std::move(completion)));
 }
 
-bool WorldRuntime::tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(
+bool WorldRuntime::tryQueuePluginCallbackDispatchOnRuntimeThread(
     const LuaBatchDispatchRequest &request, std::function<void(const LuaBatchDispatchResult &)> completion,
-    const bool resumeSuspendedCommandAtFront)
+    const bool dispatchSynchronously, const bool resumeSuspendedCommandAtFront)
 {
 	LuaBatchDispatchRequest callbackRequest = request;
 	callbackRequest.lane                    = LuaBatchDispatchLane::Callback;
@@ -16778,7 +16779,7 @@ bool WorldRuntime::tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(
 	const qint64 dispatchStartNs = pluginCallbackDispatchNowNs();
 #endif
 
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::tryQueuePluginCallbackDispatchAsyncOnRuntimeThread");
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::tryQueuePluginCallbackDispatchOnRuntimeThread");
 	if (m_pluginCallbackDispatchShuttingDown)
 	{
 		if (completion)
@@ -16817,10 +16818,10 @@ bool WorldRuntime::tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(
 	callbackRequest.inputCritical = inputCritical;
 	callbackRequest.lowPriority   = !inputCritical && !isDrawOutputWindowDispatchRequest(callbackRequest);
 	PluginCallbackDispatchCommand command;
-	command.id           = m_nextPluginCallbackDispatchId++;
-	command.request      = callbackRequest;
-	command.retainResult = false;
-	command.completion   = std::move(completion);
+	command.id      = m_nextPluginCallbackDispatchId++;
+	command.request = callbackRequest;
+	command.options.setFlag(PluginCallbackDispatchOption::DispatchSynchronously, dispatchSynchronously);
+	command.completion = std::move(completion);
 #ifndef NDEBUG
 	command.enqueuedAtNs        = dispatchStartNs;
 	command.queueDepthAtEnqueue = safeQSizeToInt(m_pluginCallbackDispatchQueue.size()) + 1;
@@ -16854,13 +16855,13 @@ bool WorldRuntime::tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(
 	if (mmStartupDiag)
 	{
 		qInfo().noquote()
-		    << QStringLiteral(
-		           "[QMud][MMStartupDiag] dispatch-enqueue-async id=%1 callback=%2 targets=%3 kind=%4 "
-		           "inputCritical=%5 lowPriority=%6 queueDepthAtEnqueue=%7 "
-		           "workerInFlight=%8 active=%9 drainQueued=%10")
+		    << QStringLiteral("[QMud][MMStartupDiag] dispatch-enqueue id=%1 callback=%2 targets=%3 kind=%4 "
+		                      "synchronous=%5 inputCritical=%6 lowPriority=%7 queueDepthAtEnqueue=%8 "
+		                      "workerInFlight=%9 active=%10 drainQueued=%11")
 		           .arg(m_nextPluginCallbackDispatchId - 1)
 		           .arg(callbackRequest.functionName, qmudMmStartupDiagEngineLabels(callbackRequest.engines),
 		                pluginCallbackDispatchKindLabel(callbackRequest.kind),
+		                dispatchSynchronously ? QStringLiteral("1") : QStringLiteral("0"),
 		                inputCritical ? QStringLiteral("1") : QStringLiteral("0"),
 		                callbackRequest.lowPriority ? QStringLiteral("1") : QStringLiteral("0"))
 		           .arg(safeQSizeToInt(m_pluginCallbackDispatchQueue.size()))
@@ -17046,9 +17047,8 @@ bool WorldRuntime::buildActiveStateNoArgCallbackCommand(
 	request.callbackSnapshotArg = captureLuaCallbackSnapshotForDispatchWithActionSource(
 	    request.engines, request.lineSnapshotPolicy, request.actionSourceOverride);
 
-	command.id           = m_nextPluginCallbackDispatchId++;
-	command.request      = std::move(request);
-	command.retainResult = false;
+	command.id      = m_nextPluginCallbackDispatchId++;
+	command.request = std::move(request);
 #ifndef NDEBUG
 	command.enqueuedAtNs        = pluginCallbackDispatchNowNs();
 	command.queueDepthAtEnqueue = safeQSizeToInt(m_pluginCallbackDispatchQueue.size()) + 1;
@@ -17196,12 +17196,19 @@ void WorldRuntime::processNextPluginCallbackDispatchCommand()
 void WorldRuntime::processPluginCallbackDispatchCommand(PluginCallbackDispatchCommand &&command)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::processPluginCallbackDispatchCommand");
+	Q_ASSERT(!command.options.testFlag(PluginCallbackDispatchOption::RetainResult) ||
+	         command.options.testFlag(PluginCallbackDispatchOption::DispatchSynchronously));
 	revalidateObservedCallbackRecipients(command.request);
 #ifndef NDEBUG
 	const bool mmStartupDiag = qmudMmStartupDiagShouldLogRequest(command.request);
 #endif
 	if (command.request.engines.isEmpty())
 	{
+		if (command.request.kind == LuaBatchDispatchKind::ResumeSuspendedModalString)
+		{
+			finishSuspendedPluginCallbackDispatchWithFallback(command.request.runtimeModalResumeId, true);
+			return;
+		}
 		const LuaBatchDispatchResult fallback = pluginCallbackDispatchFallback(command.request);
 #ifndef NDEBUG
 		if (mmStartupDiag)
@@ -17230,7 +17237,9 @@ void WorldRuntime::processPluginCallbackDispatchCommand(PluginCallbackDispatchCo
 		           .arg(command.id)
 		           .arg(command.request.functionName, qmudMmStartupDiagEngineLabels(command.request.engines),
 		                pluginCallbackDispatchKindLabel(command.request.kind),
-		                command.retainResult ? QStringLiteral("1") : QStringLiteral("0"),
+		                command.options.testFlag(PluginCallbackDispatchOption::RetainResult)
+		                    ? QStringLiteral("1")
+		                    : QStringLiteral("0"),
 		                command.completion ? QStringLiteral("1") : QStringLiteral("0"))
 		           .arg(m_pluginCallbackDispatchQueue.size())
 		           .arg(m_pluginCallbackDispatchWorkerInFlight ? QStringLiteral("1") : QStringLiteral("0"),
@@ -17239,7 +17248,7 @@ void WorldRuntime::processPluginCallbackDispatchCommand(PluginCallbackDispatchCo
 	const qint64 queueWaitMs                = pluginCallbackDispatchElapsedMs(command.enqueuedAtNs);
 	const bool   dispatchDiagnosticsEnabled = m_traceEnabled;
 #endif
-	if (command.retainResult)
+	if (command.options.testFlag(PluginCallbackDispatchOption::DispatchSynchronously))
 	{
 #ifndef NDEBUG
 		const quint64 diagCommandId           = command.id;
@@ -17797,18 +17806,26 @@ void WorldRuntime::queueLuaModalCallbackResume(const QString &pluginId, const qu
 		return;
 	}
 	LuaBatchDispatchRequest request;
-	request.kind                     = LuaBatchDispatchKind::ResumeSuspendedModalString;
-	request.engines                  = {validatedEngine};
-	request.modalResumeId            = validatedSuspendedIt->engineModalResumeId;
-	request.runtimeModalResumeId     = resumeId;
-	request.stringArg                = result;
-	request.inputCritical            = true;
-	request.miniWindowExecutionName  = validatedSuspendedIt->command.request.miniWindowExecutionName;
-	request.screendrawExecutionGuard = validatedSuspendedIt->command.request.screendrawExecutionGuard;
+	request.kind                         = LuaBatchDispatchKind::ResumeSuspendedModalString;
+	request.engines                      = {validatedEngine};
+	request.functionName                 = validatedSuspendedIt->command.request.functionName;
+	request.modalResumeId                = validatedSuspendedIt->engineModalResumeId;
+	request.runtimeModalResumeId         = resumeId;
+	request.stringArg                    = result;
+	request.revalidateObservedRecipients = validatedSuspendedIt->command.request.revalidateObservedRecipients;
+	request.inputCritical                = true;
+	request.miniWindowExecutionName      = validatedSuspendedIt->command.request.miniWindowExecutionName;
+	request.screendrawExecutionGuard     = validatedSuspendedIt->command.request.screendrawExecutionGuard;
 	request.drawOutputWindowExecutionGuard =
 	    validatedSuspendedIt->command.request.drawOutputWindowExecutionGuard;
-	const bool resumeSuspendedCommandAtFront = validatedSuspendedIt->internalImmediateResume;
-	if (!tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(request, {}, resumeSuspendedCommandAtFront))
+	const bool retainedOriginal =
+	    validatedSuspendedIt->command.options.testFlag(PluginCallbackDispatchOption::RetainResult);
+	const bool dispatchSynchronously =
+	    validatedSuspendedIt->command.options.testFlag(PluginCallbackDispatchOption::DispatchSynchronously);
+	const bool resumeSuspendedCommandAtFront =
+	    validatedSuspendedIt->internalImmediateResume || retainedOriginal;
+	if (!tryQueuePluginCallbackDispatchOnRuntimeThread(request, {}, dispatchSynchronously,
+	                                                   resumeSuspendedCommandAtFront))
 		finishSuspendedPluginCallbackDispatchWithFallback(resumeId, true);
 }
 

@@ -2,10 +2,10 @@ name: Pipelines
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [ opened, synchronize, reopened ]
   push:
-    branches: [main]
-    tags: ["v*"]
+    branches: [ main ]
+    tags: [ "v*" ]
   schedule:
     - cron: "0 4 * * *"
   workflow_dispatch:
@@ -64,7 +64,7 @@ jobs:
     steps:
       - name: Determine tasks
         id: plan
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -343,12 +343,11 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
-      packages: write
     outputs:
       image: ${{ steps.image-reference.outputs.image }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.pipeline-plan.outputs.source_sha }}
       - name: Resolve Linux image reference
@@ -360,27 +359,30 @@ jobs:
             echo "Invalid AppImage image revision: $IMAGE_SERIAL" >&2
             exit 1
           fi
-          IMAGE_OWNER="${GITHUB_REPOSITORY_OWNER,,}"
-          echo "image=ghcr.io/$IMAGE_OWNER/qmud-appimage-builder:$IMAGE_SERIAL" >> "$GITHUB_OUTPUT"
-      - name: Log in to GHCR
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-      - name: Ensure Linux image exists
-        id: ensure-image
+          echo "image=ghcr.io/abnormal-frequency/qmud-appimage-builder:$IMAGE_SERIAL" >> "$GITHUB_OUTPUT"
+      - name: Check Linux image
+        id: image-status
         env:
           GHCR_IMAGE: ${{ steps.image-reference.outputs.image }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
           if docker manifest inspect "$GHCR_IMAGE" >/dev/null; then
-            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$GITHUB_EVENT_NAME" = pull_request ] && [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
             echo "The required repository-owned Linux image is missing, and fork pull requests cannot publish it: $GHCR_IMAGE" >&2
             exit 1
           fi
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+      - name: Build Linux image
+        id: build-image
+        if: steps.image-status.outputs.exists == 'false'
+        env:
+          GHCR_IMAGE: ${{ steps.image-reference.outputs.image }}
+        run: |
+          set -euo pipefail
           LOCAL_IMAGE="qmud-appimage-builder:${GHCR_IMAGE##*:}"
           docker build --pull --no-cache \
             --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
@@ -389,25 +391,41 @@ jobs:
             --tag "$LOCAL_IMAGE" \
             tools/docker/appimage-qt611
           if docker manifest inspect "$GHCR_IMAGE" >/dev/null; then
-            echo "pushed=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "needs_push=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_push=true" >> "$GITHUB_OUTPUT"
           fi
-          docker tag "$LOCAL_IMAGE" "$GHCR_IMAGE"
-          docker push "$GHCR_IMAGE"
+      - name: Push Linux image
+        id: push-image
+        if: steps.build-image.outputs.needs_push == 'true'
+        env:
+          GHCR_IMAGE: ${{ steps.image-reference.outputs.image }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GHCR_PAT" ]; then
+            echo "GHCR_PAT is unavailable." >&2
+            exit 1
+          fi
+          LOCAL_IMAGE="qmud-appimage-builder:${GHCR_IMAGE##*:}"
+          skopeo copy \
+            --dest-creds "$GITHUB_REPOSITORY_OWNER:$GHCR_PAT" \
+            "docker-daemon:$LOCAL_IMAGE" \
+            "docker://$GHCR_IMAGE"
           echo "pushed=true" >> "$GITHUB_OUTPUT"
       - name: Keep the newest two Linux images
-        if: steps.ensure-image.outputs.pushed == 'true'
-        uses: actions/delete-package-versions@v5
+        if: steps.push-image.outputs.pushed == 'true'
+        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
         with:
-          owner: ${{ github.repository_owner }}
+          owner: Abnormal-Frequency
           package-name: qmud-appimage-builder
           package-type: container
           min-versions-to-keep: 2
-          token: ${{ github.token }}
+          token: ${{ secrets.GHCR_PAT }}
 
   pipeline:
     name: ${{ matrix.task }}
-    needs: [pipeline-plan, prepare-linux-image]
+    needs: [ pipeline-plan, prepare-linux-image ]
     if: always() && needs.pipeline-plan.result == 'success' && (needs.prepare-linux-image.result == 'success' || needs.prepare-linux-image.result == 'skipped')
     strategy:
       fail-fast: true
@@ -416,7 +434,6 @@ jobs:
     timeout-minutes: ${{ matrix.timeout }}
     permissions:
       contents: read
-      packages: read
     env:
       QT_QPA_PLATFORM: offscreen
       QMUD_LINUX_IMAGE: ${{ needs.prepare-linux-image.outputs.image }}
@@ -424,15 +441,10 @@ jobs:
     steps:
       - name: Check out repository
         if: matrix.kind != 'noop'
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.pipeline-plan.outputs.source_sha }}
 
-      - name: Log in to GHCR
-        if: matrix.kind == 'validation'
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Pull Linux image
         if: matrix.kind == 'validation'
         run: docker pull "$QMUD_LINUX_IMAGE"
@@ -468,7 +480,7 @@ jobs:
           CONTAINER
       - name: Upload CTest logs
         if: always() && (matrix.task == 'quick-tests' || matrix.task == 'full-tests')
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.task }}-ctest-logs
           if-no-files-found: ignore
@@ -477,7 +489,7 @@ jobs:
             ci-build/Testing/**/*.xml
       - name: Upload failing test executables
         if: failure() && (matrix.task == 'quick-tests' || matrix.task == 'full-tests')
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.task }}-qtest-binaries
           if-no-files-found: ignore
@@ -514,7 +526,7 @@ jobs:
           CONTAINER
       - name: Upload coverage artifacts
         if: matrix.task == 'coverage'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: qmud-coverage
           if-no-files-found: error
@@ -523,7 +535,7 @@ jobs:
             ci-build/coverage-html/**
       - name: Upload coverage to Codecov
         if: matrix.task == 'coverage'
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ci-build/coverage.xml
@@ -682,7 +694,7 @@ jobs:
           esac
       - name: Upload AppImage artifact
         if: matrix.package == 'appimage'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: qmud-appimage-${{ needs.pipeline-plan.outputs.source_sha }}
           if-no-files-found: error
@@ -691,7 +703,7 @@ jobs:
             cmake-build-release/appimage-docker-out/*.AppImage.zsync
       - name: Upload macOS artifact
         if: matrix.package == 'macos'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: qmud-macos-${{ needs.pipeline-plan.outputs.source_sha }}
           if-no-files-found: error
@@ -700,7 +712,7 @@ jobs:
             cmake-build-release/mac-docker-out/QMud-*.dmg
       - name: Upload Windows artifact
         if: matrix.package == 'windows'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: qmud-windows-${{ needs.pipeline-plan.outputs.source_sha }}
           if-no-files-found: error
@@ -726,14 +738,15 @@ jobs:
       needs.pipeline.result == 'success' &&
       needs.pipeline-plan.outputs.release_tag != '' &&
       needs.pipeline-plan.outputs.publish_tagged_release == 'true'
-    runs-on: [self-hosted, primary]
+    runs-on: [ self-hosted, primary ]
     permissions:
       actions: read
       contents: write
+      pull-requests: read
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.pipeline-plan.outputs.source_sha }}
@@ -741,7 +754,7 @@ jobs:
       - name: Clean publication workspace
         run: rm -rf release-assets release-notes.md ci-release-notes.md
       - name: Download build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
@@ -757,119 +770,234 @@ jobs:
           RELEASE_TAG: ${{ needs.pipeline-plan.outputs.release_tag }}
         run: |
           CURRENT_TAG="$RELEASE_TAG"
-          PREVIOUS_TAG="$(git tag --sort=-v:refname --list 'v*' | awk -v cur="${CURRENT_TAG}" '$0 != cur {print; exit}')"
-          RANGE="${CURRENT_TAG}^!"
+          PREVIOUS_TAG="$(git tag --sort=-v:refname --list 'v[0-9]*' | grep -E '^v[0-9]+(\.[0-9]+)*$' | awk -v cur="${CURRENT_TAG}" '$0 != cur {print; exit}')"
+          SINCE=""
           if [ -n "${PREVIOUS_TAG}" ]; then
-            RANGE="${PREVIOUS_TAG}..${CURRENT_TAG}"
+            SINCE="$(git for-each-ref --format='%(creatordate:iso-strict)' "refs/tags/${PREVIOUS_TAG}")"
           fi
-          export RANGE
+          UNTIL="$(git for-each-ref --format='%(creatordate:iso-strict)' "refs/tags/${CURRENT_TAG}")"
+          export SINCE UNTIL
           python3 - <<'PY'
           import json
           import os
           import re
-          import subprocess
-          import urllib.error
+          import urllib.parse
           import urllib.request
+          from datetime import datetime
 
-          range_spec = os.environ.get("RANGE", "").strip()
           repo = os.environ["GITHUB_REPOSITORY"]
           api_base = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
           token = os.environ.get("GITHUB_TOKEN", "").strip()
           output_path = "release-notes.md"
-
-          def split_sentences(text: str) -> list[str]:
-              collapsed = " ".join(text.split())
-              if not collapsed:
-                  return []
-              return [part.strip() for part in re.split(r"(?<=\.)\s+", collapsed) if part.strip()]
-
-          commit_pr_cache: dict[str, list[dict]] = {}
-
-          def fetch_commit_prs(sha: str) -> list[dict]:
-              if sha in commit_pr_cache:
-                  return commit_pr_cache[sha]
-              url = f"{api_base}/repos/{repo}/commits/{sha}/pulls"
-              headers = {
-                  "Accept": "application/vnd.github+json, application/vnd.github.groot-preview+json",
-                  "User-Agent": "qmud-release-notes",
-              }
-              if token:
-                  headers["Authorization"] = f"Bearer {token}"
-              req = urllib.request.Request(url, headers=headers)
-              try:
-                  with urllib.request.urlopen(req, timeout=10) as resp:
-                      payload = json.loads(resp.read().decode("utf-8"))
-              except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
-                  payload = []
-              prs = payload if isinstance(payload, list) else []
-              commit_pr_cache[sha] = prs
-              return prs
-
-          raw = subprocess.check_output(
-              ["git", "rev-list", "--first-parent", "--reverse", range_spec],
-              text=True,
-              encoding="utf-8",
-              errors="replace",
+          section_names = (
+              "Bug Fixes",
+              "Features",
+              "Performance Optimizations",
+              "Maintenance",
           )
-          commits = [line.strip() for line in raw.splitlines() if line.strip()]
+
+          def parse_time(value: str) -> datetime:
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+          def fetch_merged_pulls() -> list[dict]:
+              pulls: list[dict] = []
+              page = 1
+              while True:
+                  query = urllib.parse.urlencode({
+                      "state": "closed",
+                      "base": "main",
+                      "per_page": 100,
+                      "page": page,
+                  })
+                  url = f"{api_base}/repos/{repo}/pulls?{query}"
+                  headers = {
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "qmud-release-notes",
+                  }
+                  if token:
+                      headers["Authorization"] = f"Bearer {token}"
+                  request = urllib.request.Request(url, headers=headers)
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      payload = json.loads(response.read().decode("utf-8"))
+                  if not isinstance(payload, list):
+                      raise RuntimeError("GitHub returned an invalid pull-request list.")
+                  pulls.extend(pr for pr in payload if isinstance(pr, dict) and pr.get("merged_at"))
+                  if len(payload) < 100:
+                      return pulls
+                  page += 1
+
+          def parse_changelog(body: str, number: int) -> dict[str, list[str]]:
+              changelog_headings = list(re.finditer(r"(?m)^##[ \t]+Changelog[ \t]*$", body))
+              if len(changelog_headings) != 1:
+                  raise RuntimeError(f"PR #{number} must contain exactly one '## Changelog' section.")
+              start = changelog_headings[0].end()
+              next_heading = re.search(r"(?m)^##[ \t]+", body[start:])
+              end = start + next_heading.start() if next_heading else len(body)
+              block = body[start:end]
+
+              subsection_matches = list(re.finditer(r"(?m)^###[ \t]+(.+?)[ \t]*$", block))
+              found_names = [match.group(1) for match in subsection_matches]
+              if found_names != list(section_names):
+                  raise RuntimeError(
+                      f"PR #{number} must contain the Changelog subsections in template order: "
+                      + ", ".join(section_names)
+                      + "."
+                  )
+
+              parsed = {name: [] for name in section_names}
+              for index, match in enumerate(subsection_matches):
+                  section_end = subsection_matches[index + 1].start() if index + 1 < len(subsection_matches) else len(block)
+                  section_body = block[match.end():section_end]
+                  current_entry: list[str] | None = None
+                  for line in section_body.splitlines():
+                      bullet = re.fullmatch(r"[ \t]*[-*][ \t]+(.*)", line)
+                      if bullet:
+                          if current_entry is not None:
+                              entry = "\n".join(current_entry).rstrip()
+                              if not entry:
+                                  raise RuntimeError(f"PR #{number} contains an empty Changelog bullet.")
+                              parsed[match.group(1)].append(entry)
+                          current_entry = [bullet.group(1)]
+                      elif current_entry is not None:
+                          current_entry.append(line)
+                      elif line.strip():
+                          raise RuntimeError(
+                              f"PR #{number} contains content before the first bullet under "
+                              f"'### {match.group(1)}': {line.strip()}"
+                          )
+                  if current_entry is not None:
+                      entry = "\n".join(current_entry).rstrip()
+                      if not entry:
+                          raise RuntimeError(f"PR #{number} contains an empty Changelog bullet.")
+                      parsed[match.group(1)].append(entry)
+              if not any(parsed.values()):
+                  raise RuntimeError(f"PR #{number} has no Changelog entries.")
+              return parsed
+
+          since_text = os.environ.get("SINCE", "").strip()
+          since = parse_time(since_text) if since_text else None
+          until = parse_time(os.environ["UNTIL"])
+          pulls = []
+          for pull in fetch_merged_pulls():
+              merged_at = parse_time(str(pull["merged_at"]))
+              if since is not None and merged_at <= since:
+                  continue
+              if merged_at > until:
+                  continue
+              pulls.append(pull)
+          pulls.sort(key=lambda pull: (parse_time(str(pull["merged_at"])), int(pull["number"])))
+
+          entries = {name: [] for name in section_names}
+          for pull in pulls:
+              number = int(pull["number"])
+              parsed = parse_changelog(str(pull.get("body") or ""), number)
+              user = pull.get("user")
+              login = str(user.get("login") or "").strip() if isinstance(user, dict) else ""
+              pr_link = f"[#{number}](https://github.com/Nodens-/QMud/pull/{number})"
+              attribution = f" by @{login} ({pr_link})" if login else f" ({pr_link})"
+              for section_name in section_names:
+                  for entry in parsed[section_name]:
+                      entries[section_name].append(f"* {entry}{attribution}")
 
           lines = ["## What's changed", ""]
-          seen_prs: set[str] = set()
-          if commits:
-              for sha in commits:
-                  prs = fetch_commit_prs(sha)
-                  if not prs:
-                      continue
-                  for pr_payload in prs:
-                      if not isinstance(pr_payload, dict):
-                          continue
-                      number = pr_payload.get("number")
-                      if number is None:
-                          continue
-                      pr_number = str(number).strip()
-                      if not pr_number or pr_number in seen_prs:
-                          continue
-                      seen_prs.add(pr_number)
+          for section_name in section_names[:3]:
+              lines.extend((f"### {section_name}", ""))
+              lines.extend(entries[section_name])
+              lines.append("")
 
-                      source_text = str(pr_payload.get("title", "")).strip()
-                      if not source_text:
-                          source_text = "Untitled PR."
-                      sentences = split_sentences(source_text)
-                      if not sentences:
-                          sentences = [source_text]
-
-                      login = ""
-                      user = pr_payload.get("user")
-                      if isinstance(user, dict):
-                          login = str(user.get("login", "")).strip()
-
-                      for sentence in sentences:
-                          if login:
-                              lines.append(f"* {sentence} by @{login} (#{pr_number})")
-                          else:
-                              lines.append(f"* {sentence} (#{pr_number})")
-
-          if len(lines) == 2:
-              lines.append("* No merged pull requests found in selected range.")
-
-          with open(output_path, "w", encoding="utf-8") as fh:
-              fh.write("\n".join(lines).rstrip() + "\n")
+          with open(output_path, "w", encoding="utf-8") as handle:
+              handle.write("\n".join(lines).rstrip() + "\n")
           PY
           echo "body_path=release-notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Publish release assets
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RELEASE_NOTES_PATH: ${{ steps.release_changelog.outputs.body_path }}
+          RELEASE_TAG: ${{ needs.pipeline-plan.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.pipeline-plan.outputs.source_sha }}
         with:
-          tag_name: ${{ needs.pipeline-plan.outputs.release_tag }}
-          generate_release_notes: false
-          body_path: ${{ steps.release_changelog.outputs.body_path }}
-          files: |
-            release-assets/*.AppImage
-            release-assets/*.AppImage.zsync
-            release-assets/*-macos.app.zip
-            release-assets/*-macos.dmg
-            release-assets/*-windows.zip
-            release-assets/*-win-setup.exe
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const {owner, repo} = context.repo;
+            const tag = process.env.RELEASE_TAG;
+            const assetDirectory = "release-assets";
+            const availableNames = fs.readdirSync(assetDirectory).filter((name) =>
+              fs.statSync(path.join(assetDirectory, name)).isFile(),
+            );
+            const requiredAssets = [
+              ["AppImage", (name) => name.endsWith(".AppImage"), "application/octet-stream"],
+              ["AppImage zsync", (name) => name.endsWith(".AppImage.zsync"), "application/octet-stream"],
+              ["macOS app zip", (name) => name.endsWith("-macos.app.zip"), "application/zip"],
+              ["macOS DMG", (name) => name.endsWith("-macos.dmg"), "application/x-apple-diskimage"],
+              ["Windows zip", (name) => name.endsWith("-windows.zip"), "application/zip"],
+              ["Windows installer", (name) => name.endsWith("-win-setup.exe"), "application/vnd.microsoft.portable-executable"],
+            ];
+            const assets = requiredAssets.map(([label, matches, contentType]) => {
+              const names = availableNames.filter(matches);
+              if (names.length !== 1) {
+                throw new Error(`Expected exactly one ${label} asset, found ${names.length}: ${names.join(", ")}`);
+              }
+              return {name: names[0], contentType};
+            });
+            const body = fs.readFileSync(process.env.RELEASE_NOTES_PATH, "utf8");
+
+            let release;
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({owner, repo, tag});
+              release = await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: existing.data.id,
+                tag_name: tag,
+                name: tag,
+                body,
+                draft: false,
+                prerelease: false,
+                make_latest: "true",
+              });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              release = await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: tag,
+                target_commitish: process.env.SOURCE_SHA,
+                name: tag,
+                body,
+                draft: false,
+                prerelease: false,
+                make_latest: "true",
+              });
+            }
+
+            const existingAssets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner,
+              repo,
+              release_id: release.data.id,
+              per_page: 100,
+            });
+            const replacementNames = new Set(assets.map((asset) => asset.name));
+            for (const asset of existingAssets) {
+              if (replacementNames.has(asset.name)) {
+                await github.rest.repos.deleteReleaseAsset({owner, repo, asset_id: asset.id});
+              }
+            }
+            for (const asset of assets) {
+              const data = fs.readFileSync(path.join(assetDirectory, asset.name));
+              await github.rest.repos.uploadReleaseAsset({
+                owner,
+                repo,
+                release_id: release.data.id,
+                name: asset.name,
+                headers: {
+                  "content-type": asset.contentType,
+                  "content-length": data.length,
+                },
+                data,
+              });
+            }
 
       - name: Announce tagged release on Discord
         env:
@@ -944,14 +1072,15 @@ jobs:
       needs.pipeline-plan.result == 'success' &&
       needs.pipeline.result == 'success' &&
       needs.pipeline-plan.outputs.publish_ci_release == 'true'
-    runs-on: [self-hosted, primary]
+    runs-on: [ self-hosted, primary ]
     permissions:
       actions: read
       contents: write
+      pull-requests: read
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ needs.pipeline-plan.outputs.source_sha }}
@@ -971,7 +1100,7 @@ jobs:
       - name: Clean publication workspace
         run: rm -rf release-assets release-notes.md ci-release-notes.md
       - name: Download build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
@@ -986,108 +1115,156 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.pipeline-plan.outputs.source_sha }}
         run: |
-          PREVIOUS_TAG="$(git tag --sort=-v:refname --list 'v*' | head -n 1)"
-          RANGE="${SOURCE_SHA}^!"
+          PREVIOUS_TAG="$(git tag --sort=-v:refname --list 'v[0-9]*' | grep -E '^v[0-9]+(\.[0-9]+)*$' | head -n 1)"
+          SINCE=""
           if [ -n "${PREVIOUS_TAG}" ]; then
-            RANGE="${PREVIOUS_TAG}..${SOURCE_SHA}"
+            SINCE="$(git for-each-ref --format='%(creatordate:iso-strict)' "refs/tags/${PREVIOUS_TAG}")"
           fi
-          export RANGE
+          UNTIL="$(git show -s --format=%cI "${SOURCE_SHA}")"
+          export SINCE SOURCE_SHA UNTIL
           python3 - <<'PY'
           import json
           import os
           import re
-          import subprocess
-          import urllib.error
+          import urllib.parse
           import urllib.request
+          from datetime import datetime
 
-          range_spec = os.environ.get("RANGE", "").strip()
           repo = os.environ["GITHUB_REPOSITORY"]
           api_base = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
           token = os.environ.get("GITHUB_TOKEN", "").strip()
           output_path = "ci-release-notes.md"
-
-          def split_sentences(text: str) -> list[str]:
-              collapsed = " ".join(text.split())
-              if not collapsed:
-                  return []
-              return [part.strip() for part in re.split(r"(?<=\.)\s+", collapsed) if part.strip()]
-
-          commit_pr_cache: dict[str, list[dict]] = {}
-
-          def fetch_commit_prs(sha: str) -> list[dict]:
-              if sha in commit_pr_cache:
-                  return commit_pr_cache[sha]
-              url = f"{api_base}/repos/{repo}/commits/{sha}/pulls"
-              headers = {
-                  "Accept": "application/vnd.github+json, application/vnd.github.groot-preview+json",
-                  "User-Agent": "qmud-release-notes",
-              }
-              if token:
-                  headers["Authorization"] = f"Bearer {token}"
-              req = urllib.request.Request(url, headers=headers)
-              try:
-                  with urllib.request.urlopen(req, timeout=10) as resp:
-                      payload = json.loads(resp.read().decode("utf-8"))
-              except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
-                  payload = []
-              prs = payload if isinstance(payload, list) else []
-              commit_pr_cache[sha] = prs
-              return prs
-
-          raw = subprocess.check_output(
-              ["git", "rev-list", "--first-parent", "--reverse", range_spec],
-              text=True,
-              encoding="utf-8",
-              errors="replace",
+          section_names = (
+              "Bug Fixes",
+              "Features",
+              "Performance Optimizations",
+              "Maintenance",
           )
-          commits = [line.strip() for line in raw.splitlines() if line.strip()]
+
+          def parse_time(value: str) -> datetime:
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+          def fetch_merged_pulls() -> list[dict]:
+              pulls: list[dict] = []
+              page = 1
+              while True:
+                  query = urllib.parse.urlencode({
+                      "state": "closed",
+                      "base": "main",
+                      "per_page": 100,
+                      "page": page,
+                  })
+                  url = f"{api_base}/repos/{repo}/pulls?{query}"
+                  headers = {
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "qmud-release-notes",
+                  }
+                  if token:
+                      headers["Authorization"] = f"Bearer {token}"
+                  request = urllib.request.Request(url, headers=headers)
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      payload = json.loads(response.read().decode("utf-8"))
+                  if not isinstance(payload, list):
+                      raise RuntimeError("GitHub returned an invalid pull-request list.")
+                  pulls.extend(pr for pr in payload if isinstance(pr, dict) and pr.get("merged_at"))
+                  if len(payload) < 100:
+                      return pulls
+                  page += 1
+
+          def parse_changelog(body: str, number: int) -> dict[str, list[str]]:
+              changelog_headings = list(re.finditer(r"(?m)^##[ \t]+Changelog[ \t]*$", body))
+              if len(changelog_headings) != 1:
+                  raise RuntimeError(f"PR #{number} must contain exactly one '## Changelog' section.")
+              start = changelog_headings[0].end()
+              next_heading = re.search(r"(?m)^##[ \t]+", body[start:])
+              end = start + next_heading.start() if next_heading else len(body)
+              block = body[start:end]
+
+              subsection_matches = list(re.finditer(r"(?m)^###[ \t]+(.+?)[ \t]*$", block))
+              found_names = [match.group(1) for match in subsection_matches]
+              if found_names != list(section_names):
+                  raise RuntimeError(
+                      f"PR #{number} must contain the Changelog subsections in template order: "
+                      + ", ".join(section_names)
+                      + "."
+                  )
+
+              parsed = {name: [] for name in section_names}
+              for index, match in enumerate(subsection_matches):
+                  section_end = subsection_matches[index + 1].start() if index + 1 < len(subsection_matches) else len(block)
+                  section_body = block[match.end():section_end]
+                  current_entry: list[str] | None = None
+                  for line in section_body.splitlines():
+                      bullet = re.fullmatch(r"[ \t]*[-*][ \t]+(.*)", line)
+                      if bullet:
+                          if current_entry is not None:
+                              entry = "\n".join(current_entry).rstrip()
+                              if not entry:
+                                  raise RuntimeError(f"PR #{number} contains an empty Changelog bullet.")
+                              parsed[match.group(1)].append(entry)
+                          current_entry = [bullet.group(1)]
+                      elif current_entry is not None:
+                          current_entry.append(line)
+                      elif line.strip():
+                          raise RuntimeError(
+                              f"PR #{number} contains content before the first bullet under "
+                              f"'### {match.group(1)}': {line.strip()}"
+                          )
+                  if current_entry is not None:
+                      entry = "\n".join(current_entry).rstrip()
+                      if not entry:
+                          raise RuntimeError(f"PR #{number} contains an empty Changelog bullet.")
+                      parsed[match.group(1)].append(entry)
+              if not any(parsed.values()):
+                  raise RuntimeError(f"PR #{number} has no Changelog entries.")
+              return parsed
+
+          since_text = os.environ.get("SINCE", "").strip()
+          since = parse_time(since_text) if since_text else None
+          until = parse_time(os.environ["UNTIL"])
+          merged_pulls = fetch_merged_pulls()
+          source_merge_times = [
+              parse_time(str(pull["merged_at"]))
+              for pull in merged_pulls
+              if str(pull.get("merge_commit_sha") or "") == os.environ["SOURCE_SHA"]
+          ]
+          if source_merge_times:
+              until = max(until, *source_merge_times)
+          pulls = []
+          for pull in merged_pulls:
+              merged_at = parse_time(str(pull["merged_at"]))
+              if since is not None and merged_at <= since:
+                  continue
+              if merged_at > until:
+                  continue
+              pulls.append(pull)
+          pulls.sort(key=lambda pull: (parse_time(str(pull["merged_at"])), int(pull["number"])))
+
+          entries = {name: [] for name in section_names}
+          for pull in pulls:
+              number = int(pull["number"])
+              parsed = parse_changelog(str(pull.get("body") or ""), number)
+              user = pull.get("user")
+              login = str(user.get("login") or "").strip() if isinstance(user, dict) else ""
+              pr_link = f"[#{number}](https://github.com/Nodens-/QMud/pull/{number})"
+              attribution = f" by @{login} ({pr_link})" if login else f" ({pr_link})"
+              for section_name in section_names:
+                  for entry in parsed[section_name]:
+                      entries[section_name].append(f"* {entry}{attribution}")
 
           lines = ["## What's changed", ""]
-          seen_prs: set[str] = set()
-          if commits:
-              for sha in commits:
-                  prs = fetch_commit_prs(sha)
-                  if not prs:
-                      continue
-                  for pr_payload in prs:
-                      if not isinstance(pr_payload, dict):
-                          continue
-                      number = pr_payload.get("number")
-                      if number is None:
-                          continue
-                      pr_number = str(number).strip()
-                      if not pr_number or pr_number in seen_prs:
-                          continue
-                      seen_prs.add(pr_number)
+          for section_name in section_names:
+              lines.extend((f"### {section_name}", ""))
+              lines.extend(entries[section_name])
+              lines.append("")
 
-                      source_text = str(pr_payload.get("title", "")).strip()
-                      if not source_text:
-                          source_text = "Untitled PR."
-                      sentences = split_sentences(source_text)
-                      if not sentences:
-                          sentences = [source_text]
-
-                      login = ""
-                      user = pr_payload.get("user")
-                      if isinstance(user, dict):
-                          login = str(user.get("login", "")).strip()
-
-                      for sentence in sentences:
-                          if login:
-                              lines.append(f"* {sentence} by @{login} (#{pr_number})")
-                          else:
-                              lines.append(f"* {sentence} (#{pr_number})")
-
-          if len(lines) == 2:
-              lines.append("* No merged pull requests found in selected range.")
-
-          with open(output_path, "w", encoding="utf-8") as fh:
-              fh.write("\n".join(lines).rstrip() + "\n")
+          with open(output_path, "w", encoding="utf-8") as handle:
+              handle.write("\n".join(lines).rstrip() + "\n")
           PY
           echo "body_path=ci-release-notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Delete old CI release
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const owner = context.repo.owner;
@@ -1122,22 +1299,63 @@ jobs:
           git push origin "refs/tags/${CI_TAG}" --force
 
       - name: Publish CI prerelease assets
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RELEASE_NAME: QMud v${{ steps.version.outputs.base }}-ci
+          RELEASE_NOTES_PATH: ${{ steps.changelog.outputs.body_path }}
+          SOURCE_SHA: ${{ needs.pipeline-plan.outputs.source_sha }}
         with:
-          tag_name: ci-main
-          name: QMud v${{ steps.version.outputs.base }}-ci
-          prerelease: true
-          make_latest: false
-          generate_release_notes: false
-          body_path: ${{ steps.changelog.outputs.body_path }}
-          overwrite_files: true
-          files: |
-            release-assets/*.AppImage
-            release-assets/*.AppImage.zsync
-            release-assets/*-macos.app.zip
-            release-assets/*-macos.dmg
-            release-assets/*-windows.zip
-            release-assets/*-win-setup.exe
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const {owner, repo} = context.repo;
+            const tag = "ci-main";
+            const assetDirectory = "release-assets";
+            const availableNames = fs.readdirSync(assetDirectory).filter((name) =>
+              fs.statSync(path.join(assetDirectory, name)).isFile(),
+            );
+            const requiredAssets = [
+              ["AppImage", (name) => name.endsWith(".AppImage"), "application/octet-stream"],
+              ["AppImage zsync", (name) => name.endsWith(".AppImage.zsync"), "application/octet-stream"],
+              ["macOS app zip", (name) => name.endsWith("-macos.app.zip"), "application/zip"],
+              ["macOS DMG", (name) => name.endsWith("-macos.dmg"), "application/x-apple-diskimage"],
+              ["Windows zip", (name) => name.endsWith("-windows.zip"), "application/zip"],
+              ["Windows installer", (name) => name.endsWith("-win-setup.exe"), "application/vnd.microsoft.portable-executable"],
+            ];
+            const assets = requiredAssets.map(([label, matches, contentType]) => {
+              const names = availableNames.filter(matches);
+              if (names.length !== 1) {
+                throw new Error(`Expected exactly one ${label} asset, found ${names.length}: ${names.join(", ")}`);
+              }
+              return {name: names[0], contentType};
+            });
+            const body = fs.readFileSync(process.env.RELEASE_NOTES_PATH, "utf8");
+
+            const release = await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              target_commitish: process.env.SOURCE_SHA,
+              name: process.env.RELEASE_NAME,
+              body,
+              draft: false,
+              prerelease: true,
+              make_latest: "false",
+            });
+            for (const asset of assets) {
+              const data = fs.readFileSync(path.join(assetDirectory, asset.name));
+              await github.rest.repos.uploadReleaseAsset({
+                owner,
+                repo,
+                release_id: release.data.id,
+                name: asset.name,
+                headers: {
+                  "content-type": asset.contentType,
+                  "content-length": data.length,
+                },
+                data,
+              });
+            }
 
       - name: Cleanup workspace build directories
         if: always()

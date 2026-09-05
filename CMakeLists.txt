@@ -14,8 +14,6 @@ endif ()
 option(QMUD_ENABLE_LUA_SCRIPTING "Enable Lua scripting callbacks" ON)
 option(QMUD_ENABLE_TESTING "Enable QMud QtTest/CTest targets" ON)
 option(QMUD_ENABLE_GUI_TESTS "Enable GUI-focused QtTest suites" ON)
-option(QMUD_ENABLE_EXPERIMENTAL_THREADED_LUA_EXECUTOR
-        "Enable experimental worker-thread Lua executor backend (on by default)" ON)
 option(QMUD_CI_BUILD "Mark runtime display version as CI build (-ci suffix)" OFF)
 option(QMUD_RELEASE_NATIVE_OPTIMIZATIONS "Tune Release builds for the local CPU (-march=native or /arch:AVX2)" OFF)
 set(QMUD_SYSTEM_LUA_MODULES_PREFIX "" CACHE PATH
@@ -257,6 +255,7 @@ set(QMUD_SOURCES
         helpers/FontUtils.cpp
         BraceMatch.cpp
         LuaExecutor.cpp
+        LuaExecutorWorker.cpp
         helpers/LuaCompletionDeliveryUtils.cpp
         LuaCallbackEngine.cpp
         LuaApiExport.cpp
@@ -381,9 +380,6 @@ set(QMUD_HEADERS
 )
 
 set(QMUD_SOURCE_FILES_ABS)
-if (QMUD_ENABLE_EXPERIMENTAL_THREADED_LUA_EXECUTOR)
-    list(APPEND QMUD_SOURCES LuaExecutorWorker.cpp)
-endif ()
 foreach (QMUD_SOURCE_FILE IN LISTS QMUD_SOURCES)
     list(APPEND QMUD_SOURCE_FILES_ABS "${QMUD_SRC_DIR}/${QMUD_SOURCE_FILE}")
 endforeach ()
@@ -461,8 +457,7 @@ if (WIN32)
     target_link_libraries(qmud_app_core PUBLIC ole32 oleaut32)
 endif ()
 target_compile_definitions(qmud_app_core PUBLIC QMUD_ENABLE_SOUND=${QMUD_ENABLE_SOUND_VALUE}
-        QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE}
-        QMUD_ENABLE_EXPERIMENTAL_THREADED_LUA_EXECUTOR=$<IF:$<BOOL:${QMUD_ENABLE_EXPERIMENTAL_THREADED_LUA_EXECUTOR}>,1,0>)
+        QMUD_ENABLE_TEXT_TO_SPEECH=${QMUD_ENABLE_TEXT_TO_SPEECH_VALUE})
 
 if (QMUD_ENABLE_LUA_SCRIPTING)
     set(QMUD_LUA_LIBRARY_FILES "")

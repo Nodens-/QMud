@@ -2891,6 +2891,82 @@ end
 			WorldRuntimeTestAccess::plugins(runtime).clear();
 		}
 
+		static void queuedModalResumeRevalidatesRemovedRecipient()
+		{
+			WorldRuntime  runtime;
+			const QString pluginId = QStringLiteral("818181818181818181818181");
+			const QString callback = QStringLiteral("qcb_resume_recipient_revalidation");
+			const auto    engine   = addRuntimeCallbackPlugin(
+			    runtime, pluginId, QStringLiteral("Resume revalidation"), QStringLiteral(R"lua(
+function qcb_resume_recipient_revalidation()
+  utils.inputbox("prompt", "title", "")
+  SetVariable("resumed_after_removal", "yes")
+  return false
+end
+)lua"));
+
+			runtime.m_observedPluginCallbacks.insert(callback);
+			runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {callback}, {callback});
+			QVERIFY(runtime.hasAnyPluginCallback(callback));
+
+			LuaBatchDispatchRequest originalRequest;
+			originalRequest.kind                         = LuaBatchDispatchKind::NoArgs;
+			originalRequest.engines                      = {engine};
+			originalRequest.functionName                 = callback;
+			originalRequest.defaultResult                = true;
+			originalRequest.revalidateObservedRecipients = true;
+			originalRequest.callbackSnapshotArg =
+			    runtime.captureLuaCallbackSnapshotForRequest(originalRequest);
+			LuaBatchDispatchResult initialResult = runtime.m_luaExecutor->dispatchBatch(originalRequest);
+			QVERIFY(initialResult.suspended);
+			QVERIFY(initialResult.modalResumeId != 0);
+
+			constexpr quint64                             runtimeResumeId = 921;
+			constexpr quint64                             commandId       = 922;
+			const quint64                                 engineResumeId  = initialResult.modalResumeId;
+			WorldRuntime::SuspendedPluginCallbackDispatch suspended;
+			suspended.command.id = commandId;
+			suspended.command.options.setFlag(WorldRuntime::PluginCallbackDispatchOption::RetainResult);
+			suspended.command.options.setFlag(
+			    WorldRuntime::PluginCallbackDispatchOption::DispatchSynchronously);
+			suspended.command.request     = originalRequest;
+			suspended.partialResult       = std::move(initialResult);
+			suspended.pluginId            = pluginId;
+			suspended.engineModalResumeId = engineResumeId;
+			suspended.nextEngineIndex     = 1;
+			runtime.m_suspendedPluginCallbackDispatches.insert(runtimeResumeId, std::move(suspended));
+
+			runtime.queueLuaModalCallbackResume(pluginId, runtimeResumeId, QStringLiteral("accepted"));
+			QCOMPARE(runtime.m_pluginCallbackDispatchQueue.size(), 1);
+			const auto &queuedResume = runtime.m_pluginCallbackDispatchQueue.constFirst().callback.request;
+			QCOMPARE(queuedResume.functionName, callback);
+			QVERIFY(queuedResume.revalidateObservedRecipients);
+
+			WorldRuntimeTestAccess::plugins(runtime).clear();
+			runtime.drainPluginCallbackDispatchQueue();
+
+			QVERIFY(!runtime.m_suspendedPluginCallbackDispatches.contains(runtimeResumeId));
+			auto completed = runtime.m_pluginCallbackDispatchResults.find(commandId);
+			QVERIFY(completed != runtime.m_pluginCallbackDispatchResults.end());
+			QVERIFY(completed->boolResultValid);
+			QVERIFY(completed->boolResult);
+			QVERIFY(completed->hasFunctionValid);
+			QVERIFY(!completed->hasFunction);
+			QVERIFY(worldVariable(runtime, QStringLiteral("resumed_after_removal")).isEmpty());
+			runtime.m_pluginCallbackDispatchResults.erase(completed);
+
+			LuaBatchDispatchRequest staleResumeRequest;
+			staleResumeRequest.kind                  = LuaBatchDispatchKind::ResumeSuspendedModalString;
+			staleResumeRequest.engines               = {engine};
+			staleResumeRequest.modalResumeId         = engineResumeId;
+			const LuaBatchDispatchResult staleResume = runtime.dispatchLuaBatch(staleResumeRequest);
+			QVERIFY(!staleResume.suspended);
+			QVERIFY(!staleResume.boolResultValid);
+			QVERIFY(!staleResume.hasFunctionValid);
+
+			runtime.dispatchTeardownLuaEngines({engine}, true);
+		}
+
 		static void directSuspendedContinuationPublishesEveryMutationBoundary()
 		{
 			WorldRuntime runtime;
@@ -2960,13 +3036,15 @@ end
 			constexpr quint64                             runtimeResumeId = 901;
 			constexpr quint64                             commandId       = 902;
 			WorldRuntime::SuspendedPluginCallbackDispatch suspended;
-			suspended.command.id           = commandId;
-			suspended.command.retainResult = true;
-			suspended.command.request      = originalRequest;
-			suspended.partialResult        = initialResult;
-			suspended.pluginId             = firstId;
-			suspended.engineModalResumeId  = initialResult.modalResumeId;
-			suspended.nextEngineIndex      = 1;
+			suspended.command.id = commandId;
+			suspended.command.options.setFlag(WorldRuntime::PluginCallbackDispatchOption::RetainResult);
+			suspended.command.options.setFlag(
+			    WorldRuntime::PluginCallbackDispatchOption::DispatchSynchronously);
+			suspended.command.request     = originalRequest;
+			suspended.partialResult       = initialResult;
+			suspended.pluginId            = firstId;
+			suspended.engineModalResumeId = initialResult.modalResumeId;
+			suspended.nextEngineIndex     = 1;
 			runtime.m_suspendedPluginCallbackDispatches.insert(runtimeResumeId, std::move(suspended));
 
 			LuaBatchDispatchRequest resumeRequest;
@@ -3027,13 +3105,15 @@ end
 			constexpr quint64                             runtimeResumeId = 911;
 			constexpr quint64                             commandId       = 912;
 			WorldRuntime::SuspendedPluginCallbackDispatch suspended;
-			suspended.command.id           = commandId;
-			suspended.command.retainResult = true;
-			suspended.command.request      = originalRequest;
-			suspended.partialResult        = initialResult;
-			suspended.pluginId             = pluginId;
-			suspended.engineModalResumeId  = initialResult.modalResumeId;
-			suspended.nextEngineIndex      = 1;
+			suspended.command.id = commandId;
+			suspended.command.options.setFlag(WorldRuntime::PluginCallbackDispatchOption::RetainResult);
+			suspended.command.options.setFlag(
+			    WorldRuntime::PluginCallbackDispatchOption::DispatchSynchronously);
+			suspended.command.request     = originalRequest;
+			suspended.partialResult       = initialResult;
+			suspended.pluginId            = pluginId;
+			suspended.engineModalResumeId = initialResult.modalResumeId;
+			suspended.nextEngineIndex     = 1;
 			runtime.m_suspendedPluginCallbackDispatches.insert(runtimeResumeId, std::move(suspended));
 
 			LuaBatchDispatchRequest resumeRequest;
@@ -3095,11 +3175,13 @@ end
 
 			constexpr quint64                             commandId = 913;
 			WorldRuntime::SuspendedPluginCallbackDispatch suspended;
-			suspended.command.id           = commandId;
-			suspended.command.retainResult = true;
-			suspended.command.request      = originalRequest;
-			suspended.partialResult        = makeLuaBatchDispatchFallback(originalRequest);
-			suspended.nextEngineIndex      = 0;
+			suspended.command.id = commandId;
+			suspended.command.options.setFlag(WorldRuntime::PluginCallbackDispatchOption::RetainResult);
+			suspended.command.options.setFlag(
+			    WorldRuntime::PluginCallbackDispatchOption::DispatchSynchronously);
+			suspended.command.request = originalRequest;
+			suspended.partialResult   = makeLuaBatchDispatchFallback(originalRequest);
+			suspended.nextEngineIndex = 0;
 
 			LuaBatchDispatchResult resumedRecipient;
 			resumedRecipient.boolResult       = false;
@@ -3289,8 +3371,10 @@ end
 				const quint64                                 commandId = nextCommandId++;
 				const quint64                                 resumeId  = nextResumeId++;
 				WorldRuntime::SuspendedPluginCallbackDispatch suspended;
-				suspended.command.id           = commandId;
-				suspended.command.retainResult = true;
+				suspended.command.id = commandId;
+				suspended.command.options.setFlag(WorldRuntime::PluginCallbackDispatchOption::RetainResult);
+				suspended.command.options.setFlag(
+				    WorldRuntime::PluginCallbackDispatchOption::DispatchSynchronously);
 				suspended.command.request.kind = kind;
 				suspended.partialResult        = std::move(partial);
 				runtime.m_suspendedPluginCallbackDispatches.insert(resumeId, std::move(suspended));
