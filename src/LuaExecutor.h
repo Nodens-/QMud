@@ -1501,7 +1501,7 @@ class ILuaExecutor
 };
 
 /**
- * @brief Same-thread/direct execution backend that preserves current behavior.
+ * @brief Same-thread execution primitive used exclusively on a Lua worker lane.
  */
 class LuaExecutorDirect final : public ILuaExecutor
 {
@@ -1509,9 +1509,7 @@ class LuaExecutorDirect final : public ILuaExecutor
 
 /**
  * @brief Creates the runtime Lua executor backend.
- *
- * Default builds return the worker-thread backend. Builds configured with
- * `QMUD_ENABLE_EXPERIMENTAL_THREADED_LUA_EXECUTOR=OFF` return the direct backend.
+ * @return Worker-thread Lua executor used by every runtime.
  */
 std::unique_ptr<ILuaExecutor> makeLuaExecutor(LuaDeferredRuntimeMutationConsumer shutdownMutationConsumer);
 

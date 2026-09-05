@@ -33,8 +33,8 @@ and potential contributors need to fully understand them.
 - An active callback must not introduce a synchronous cross-thread callback-worker-to-runtime or worker-to-GUI bridge.
   That creates the runtime-waits-for-worker/worker-waits-for-runtime deadlock cycle. Reads use the dispatch snapshot
   and/or callback-local caches. Writes use the deferred mutation journal. Modal GUI operations yield and resume.
-- A same-thread direct execution path and the threaded executor path must have identical observable Lua behavior. The
-  direct path is an execution optimization, not a separate semantic model.
+- The worker-thread executor is the only runtime and test dispatch path. LuaExecutorDirect is the worker lane's
+  same-thread execution primitive; never install it as a runtime backend or instantiate it directly in tests.
 - Runtime mutations produced by a callback are recorded in call order and applied on the owning runtime thread. They
   are applied in batches so snapshot, miniwindow, and output-presentation updates coalesce without changing ordering.
 - A Lua mutation normally updates two things: the ordered runtime mutation journal and the callback-local overlay.
@@ -61,6 +61,10 @@ and potential contributors need to fully understand them.
 - Engine teardown cancels suspended callbacks, closes the Lua state on the correct execution lane, recovers undelivered
   mutation journals, and detaches potential observer windows. Teardown must not leave queued work holding a raw engine
   or runtime pointer.
+- Result retention and synchronous dispatch are separate callback-command options, but RetainResult requires
+  DispatchSynchronously. A retained modal continuation inherits synchronous dispatch and resumes at the original
+  callback-lane position without entering asynchronous completion sequencing, while non-retained modal continuations
+  remain asynchronous.
 
 
 2. Snapshot model

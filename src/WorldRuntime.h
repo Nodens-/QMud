@@ -25,6 +25,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFlags>
 #include <QHash>
 #include <QImage>
 #include <QList>
@@ -5537,13 +5538,23 @@ class WorldRuntime : public QObject
 		[[nodiscard]] static bool shouldDispatchPluginAsyncResult(const Plugin  &plugin,
 		                                                          const QString &apiName);
 		/**
+		 * @brief Callback-command behavior flags; result retention requires synchronous executor dispatch.
+		 */
+		enum class PluginCallbackDispatchOption : quint8
+		{
+			None                  = 0,
+			RetainResult          = 1 << 0,
+			DispatchSynchronously = 1 << 1
+		};
+		Q_DECLARE_FLAGS(PluginCallbackDispatchOptions, PluginCallbackDispatchOption)
+		struct PluginCallbackDispatchCommand;
+		struct SuspendedPluginCallbackDispatch;
+		/**
 		 * @brief Enqueues one plugin callback command and optionally waits for completion.
 		 * @param request Structured callback command payload.
 		 * @param completionBarrier Wait for command completion when `true`.
 		 * @return Callback command result payload.
 		 */
-		struct PluginCallbackDispatchCommand;
-		struct SuspendedPluginCallbackDispatch;
 		LuaBatchDispatchResult queuePluginCallbackDispatch(const LuaBatchDispatchRequest &request,
 		                                                   bool                           completionBarrier);
 		/**
@@ -5975,13 +5986,14 @@ class WorldRuntime : public QObject
 		 * @brief Enqueues one plugin callback command from the runtime thread.
 		 * @param request Structured callback command payload.
 		 * @param completion Optional callback receiving dispatch result after worker completion.
+		 * @param dispatchSynchronously Use synchronous executor dispatch when `true`.
 		 * @param resumeSuspendedCommandAtFront Preserve an internally suspended command's existing lane position.
 		 * @return `true` when the command was accepted for dispatch.
 		 */
-		[[nodiscard]] bool tryQueuePluginCallbackDispatchAsyncOnRuntimeThread(
+		[[nodiscard]] bool tryQueuePluginCallbackDispatchOnRuntimeThread(
 		    const LuaBatchDispatchRequest                      &request,
-		    std::function<void(const LuaBatchDispatchResult &)> completion                    = {},
-		    bool                                                resumeSuspendedCommandAtFront = false);
+		    std::function<void(const LuaBatchDispatchResult &)> completion = {},
+		    bool dispatchSynchronously = false, bool resumeSuspendedCommandAtFront = false);
 		/**
 		 * @brief Applies the current runtime action source to a callback request when no explicit source exists.
 		 * @param request Callback request to update.
@@ -6545,7 +6557,7 @@ class WorldRuntime : public QObject
 		{
 				quint64                                                      id{0};
 				LuaBatchDispatchRequest                                      request;
-				bool                                                         retainResult{false};
+				PluginCallbackDispatchOptions                                options;
 				std::function<void(const LuaBatchDispatchResult &)>          completion;
 				QVector<std::function<void(const LuaBatchDispatchResult &)>> coalescedCompletions;
 				qint64                                                       enqueuedAtNs{0};

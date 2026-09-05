@@ -43,6 +43,9 @@
 #include <QJsonObject>
 #include <QMetaObject>
 #include <QPlainTextEdit>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QScopeGuard>
 #include <QSemaphore>
 #include <QSet>
@@ -242,6 +245,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void workerAnsiNoteTerminatesAndPreservesUtf8();
 		void workerNoteHrTerminatesOpenOutputLine();
 		void workerScreendrawReceivesCompletedPresentedLines();
+		void workerQueuedRetainedScreendrawAppendDoesNotDeadlock();
 		void workerDrawOutputWindowOutputDoesNotQueueRecursiveCallback();
 		void workerAnchoredOutputWrapsFromOpenLineColumn();
 		void workerAnchoredOutputCommitsBeforeScreendrawMutation();
@@ -12595,6 +12599,120 @@ end
 	WorldRuntimeTestAccess::plugins(fallbackRuntime).clear();
 	teardownWorkerEngine(fallbackExecutor, fallbackOutputEngine);
 	teardownWorkerEngine(fallbackExecutor, fallbackScreenEngine);
+}
+
+void tst_LuaCallbackEngine::workerQueuedRetainedScreendrawAppendDoesNotDeadlock()
+{
+	constexpr auto childEnvironmentVariable = "QMUD_SCREENDRAW_APPEND_DEADLOCK_CHILD";
+	if (!qEnvironmentVariableIsSet(childEnvironmentVariable))
+	{
+		QProcess process;
+		process.setProgram(QCoreApplication::applicationFilePath());
+		process.setArguments({QStringLiteral("workerQueuedRetainedScreendrawAppendDoesNotDeadlock")});
+		QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+		environment.insert(QString::fromLatin1(childEnvironmentVariable), QStringLiteral("1"));
+		process.setProcessEnvironment(environment);
+		process.start();
+		QVERIFY2(process.waitForStarted(3000), qPrintable(process.errorString()));
+		if (!process.waitForFinished(5000))
+		{
+			process.kill();
+			static_cast<void>(process.waitForFinished(500));
+			QFAIL("Queued retained OnPluginScreendraw deadlocked while appending to an existing notepad");
+		}
+		const QByteArray output = process.readAllStandardError() + process.readAllStandardOutput();
+		QCOMPARE(process.exitStatus(), QProcess::NormalExit);
+		QVERIFY2(process.exitCode() == 0, output.constData());
+		return;
+	}
+
+	QTemporaryDir qmudHome;
+	QVERIFY(qmudHome.isValid());
+	MainWindow frame;
+	frame.resize(900, 700);
+	frame.show();
+
+	WorldRuntime runtime(&frame);
+	runtime.setStartupDirectory(qmudHome.path());
+	runtime.setWorldAttribute(QStringLiteral("id"), QStringLiteral("screendraw-world"));
+	runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Screendraw World"));
+	auto *worldWindow = new WorldChildWindow(QStringLiteral("Screendraw World"));
+	worldWindow->setRuntime(&runtime);
+	frame.addMdiSubWindow(worldWindow, true);
+	worldWindow->show();
+	runtime.requestActiveState(true);
+	QCoreApplication::processEvents();
+	QVERIFY(runtime.isActive());
+	QVERIFY(frame.appendToNotepad(QStringLiteral("output"), QStringLiteral("before\n"), false, &runtime));
+	QCoreApplication::processEvents();
+	QVERIFY(runtime.isActive());
+
+	const ILuaExecutor *const runtimeExecutor = runtime.luaExecutor();
+	QVERIFY(runtimeExecutor);
+	const ILuaExecutor &executor     = *runtimeExecutor;
+	auto                screenEngine = QSharedPointer<LuaCallbackEngine>::create();
+	initializeWorkerEngine(executor, screenEngine, QStringLiteral(R"lua(
+msgbuffer = {}
+function qmud_report_outer()
+  return true
+end
+function OnPluginScreendraw(t,l,line)
+  if GetVariable("output") == "0" then return end
+  if GetInfo(113) == false then
+    table.insert(msgbuffer,line)
+  else
+    AppendToNotepad("output",line.."\r\n")
+    AppendToNotepad("output",line.." again\r\n")
+  end
+end
+)lua"),
+	                       &runtime, QStringLiteral("screendraw.plugin"));
+	WorldRuntime::Plugin screenPlugin;
+	screenPlugin.attributes.insert(QStringLiteral("id"), QStringLiteral("screendraw.plugin"));
+	screenPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Screen draw plugin"));
+	screenPlugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	screenPlugin.variables.insert(QStringLiteral("output"), QStringLiteral("1"));
+	screenPlugin.lua = screenEngine;
+	WorldRuntimeTestAccess::plugins(runtime).push_back(screenPlugin);
+
+	LuaBatchDispatchRequest outerRequest;
+	outerRequest.kind          = LuaBatchDispatchKind::NoArgs;
+	outerRequest.engines       = {screenEngine};
+	outerRequest.functionName  = QStringLiteral("qmud_report_outer");
+	outerRequest.defaultResult = true;
+	std::atomic_bool completed{false};
+	runtime.queuePluginCallbackDispatchAsync(outerRequest,
+	                                         [&runtime, &completed](const LuaBatchDispatchResult &)
+	                                         {
+		                                         runtime.queuePluginCallbackDispatchDrain();
+		                                         QVERIFY(runtime.m_pluginCallbackDispatchDrainQueued);
+		                                         runtime.firePluginScreendraw(0, 0,
+		                                                                      QStringLiteral("score line"));
+		                                         completed.store(true, std::memory_order_release);
+	                                         });
+	QTRY_VERIFY_WITH_TIMEOUT(completed.load(std::memory_order_acquire), 3000);
+
+	TextChildWindow *outputNotepad = nullptr;
+	for (TextChildWindow *notepad : frame.notepadWindows())
+	{
+		if (notepad && notepad->windowTitle().compare(QStringLiteral("output"), Qt::CaseInsensitive) == 0)
+		{
+			outputNotepad = notepad;
+			break;
+		}
+	}
+	QVERIFY(outputNotepad);
+	outputNotepad->setQuerySaveOnClose(false);
+	QVERIFY(outputNotepad->editor());
+	QCOMPARE(outputNotepad->editor()->toPlainText(),
+	         QStringLiteral("before\nscore line\nscore line again\n"));
+	QVERIFY(outputNotepad->close());
+	QCoreApplication::processEvents();
+	QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	teardownWorkerEngine(executor, screenEngine);
+	worldWindow->setRuntime(nullptr);
 }
 
 void tst_LuaCallbackEngine::workerDrawOutputWindowOutputDoesNotQueueRecursiveCallback()

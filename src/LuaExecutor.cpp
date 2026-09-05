@@ -53,7 +53,7 @@ namespace
 	{
 		if (!engine)
 			return QStringLiteral("<null>");
-		const QString id   = engine->pluginId();
+		QString       id   = engine->pluginId();
 		const QString name = engine->pluginName().trimmed();
 		if (name.isEmpty())
 			return id;
@@ -1307,10 +1307,5 @@ void ILuaExecutor::dispatchBatchAsync(
 
 std::unique_ptr<ILuaExecutor> makeLuaExecutor(LuaDeferredRuntimeMutationConsumer shutdownMutationConsumer)
 {
-#if QMUD_ENABLE_EXPERIMENTAL_THREADED_LUA_EXECUTOR
 	return std::make_unique<LuaExecutorWorker>(std::move(shutdownMutationConsumer));
-#else
-	Q_UNUSED(shutdownMutationConsumer);
-	return std::make_unique<LuaExecutorDirect>();
-#endif
 }
