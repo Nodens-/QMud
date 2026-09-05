@@ -828,6 +828,7 @@ jobs:
                   page += 1
 
           def parse_changelog(body: str, number: int) -> dict[str, list[str]]:
+              body = body.replace("\r\n", "\n").replace("\r", "\n")
               changelog_headings = list(re.finditer(r"(?m)^##[ \t]+Changelog[ \t]*$", body))
               if len(changelog_headings) != 1:
                   raise RuntimeError(f"PR #{number} must contain exactly one '## Changelog' section.")
@@ -1173,6 +1174,7 @@ jobs:
                   page += 1
 
           def parse_changelog(body: str, number: int) -> dict[str, list[str]]:
+              body = body.replace("\r\n", "\n").replace("\r", "\n")
               changelog_headings = list(re.finditer(r"(?m)^##[ \t]+Changelog[ \t]*$", body))
               if len(changelog_headings) != 1:
                   raise RuntimeError(f"PR #{number} must contain exactly one '## Changelog' section.")
