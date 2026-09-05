@@ -343,7 +343,6 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
-      packages: write
     outputs:
       image: ${{ steps.image-reference.outputs.image }}
     steps:
@@ -361,25 +360,29 @@ jobs:
             exit 1
           fi
           echo "image=ghcr.io/abnormal-frequency/qmud-appimage-builder:$IMAGE_SERIAL" >> "$GITHUB_OUTPUT"
-      - name: Log in to GHCR
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-      - name: Ensure Linux image exists
-        id: ensure-image
+      - name: Check Linux image
+        id: image-status
         env:
           GHCR_IMAGE: ${{ steps.image-reference.outputs.image }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
           if docker manifest inspect "$GHCR_IMAGE" >/dev/null; then
-            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$GITHUB_EVENT_NAME" = pull_request ] && [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
             echo "The required repository-owned Linux image is missing, and fork pull requests cannot publish it: $GHCR_IMAGE" >&2
             exit 1
           fi
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+      - name: Build Linux image
+        id: build-image
+        if: steps.image-status.outputs.exists == 'false'
+        env:
+          GHCR_IMAGE: ${{ steps.image-reference.outputs.image }}
+        run: |
+          set -euo pipefail
           LOCAL_IMAGE="qmud-appimage-builder:${GHCR_IMAGE##*:}"
           docker build --pull --no-cache \
             --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
@@ -388,21 +391,45 @@ jobs:
             --tag "$LOCAL_IMAGE" \
             tools/docker/appimage-qt611
           if docker manifest inspect "$GHCR_IMAGE" >/dev/null; then
-            echo "pushed=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "needs_push=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_push=true" >> "$GITHUB_OUTPUT"
           fi
+      - name: Log in to GHCR
+        id: ghcr-login
+        if: steps.build-image.outputs.needs_push == 'true'
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GHCR_PAT" ]; then
+            echo "GHCR_PAT is unavailable." >&2
+            exit 1
+          fi
+          printf '%s' "$GHCR_PAT" | docker login ghcr.io --username "$GITHUB_REPOSITORY_OWNER" --password-stdin
+      - name: Push Linux image
+        id: push-image
+        if: steps.build-image.outputs.needs_push == 'true'
+        env:
+          GHCR_IMAGE: ${{ steps.image-reference.outputs.image }}
+        run: |
+          set -euo pipefail
+          LOCAL_IMAGE="qmud-appimage-builder:${GHCR_IMAGE##*:}"
           docker tag "$LOCAL_IMAGE" "$GHCR_IMAGE"
           docker push "$GHCR_IMAGE"
           echo "pushed=true" >> "$GITHUB_OUTPUT"
+      - name: Log out of GHCR
+        if: always() && steps.ghcr-login.outcome == 'success'
+        run: docker logout ghcr.io
       - name: Keep the newest two Linux images
-        if: steps.ensure-image.outputs.pushed == 'true'
+        if: steps.push-image.outputs.pushed == 'true'
         uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
         with:
           owner: Abnormal-Frequency
           package-name: qmud-appimage-builder
           package-type: container
           min-versions-to-keep: 2
-          token: ${{ github.token }}
+          token: ${{ secrets.GHCR_PAT }}
 
   pipeline:
     name: ${{ matrix.task }}
@@ -415,7 +442,6 @@ jobs:
     timeout-minutes: ${{ matrix.timeout }}
     permissions:
       contents: read
-      packages: read
     env:
       QT_QPA_PLATFORM: offscreen
       QMUD_LINUX_IMAGE: ${{ needs.prepare-linux-image.outputs.image }}
@@ -427,11 +453,6 @@ jobs:
         with:
           ref: ${{ needs.pipeline-plan.outputs.source_sha }}
 
-      - name: Log in to GHCR
-        if: matrix.kind == 'validation'
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Pull Linux image
         if: matrix.kind == 'validation'
         run: docker pull "$QMUD_LINUX_IMAGE"
