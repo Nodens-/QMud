@@ -53,6 +53,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       needs_linux_image: ${{ steps.plan.outputs.needs_linux_image }}
       artifact_run_id: ${{ steps.plan.outputs.artifact_run_id }}
+      artifact_source_sha: ${{ steps.plan.outputs.artifact_source_sha }}
       source_sha: ${{ steps.plan.outputs.source_sha }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
       publish_tagged_release: ${{ steps.plan.outputs.publish_tagged_release }}
@@ -152,10 +153,31 @@ jobs:
               `qmud-macos-${sourceSha}`,
               `qmud-windows-${sourceSha}`,
             ]);
+            const canReuseArtifactSource = async (artifactSourceSha, sourceSha) => {
+              if (artifactSourceSha === sourceSha) return true;
+
+              let comparison;
+              try {
+                comparison = await github.rest.repos.compareCommitsWithBasehead({
+                  owner,
+                  repo,
+                  basehead: `${artifactSourceSha}...${sourceSha}`,
+                });
+              } catch (error) {
+                if (error.status === 404 || error.status === 409) return false;
+                throw error;
+              }
+              if (comparison.data.status !== "ahead" || !Array.isArray(comparison.data.files)) {
+                return false;
+              }
+              if (comparison.data.files.length >= 300) {
+                return false;
+              }
+              return !comparison.data.files.some((file) => pipelinePath(file.filename || ""));
+            };
             const findArtifactRun = async (publication, sourceSha, releaseTag = "") => {
               const ciJobs = ["build-appimage", "build-macos", "build-windows"];
               const taggedJobs = ["tagged-build-appimage", "tagged-build-macos", "tagged-build-windows"];
-              const requiredArtifacts = artifactNames(sourceSha);
 
               for (let page = 1; ; page += 1) {
                 const response = await github.rest.actions.listWorkflowRuns({
@@ -199,14 +221,30 @@ jobs:
                   const availableArtifacts = new Set(
                     artifacts.filter((artifact) => !artifact.expired).map((artifact) => artifact.name),
                   );
-                  if ([...requiredArtifacts].every((name) => availableArtifacts.has(name))) {
-                    return String(run.id);
+                  const artifactSourceShas = [...availableArtifacts]
+                    .map((name) => /^qmud-appimage-([0-9a-f]{40})$/.exec(name)?.[1])
+                    .filter((sha) => sha !== undefined);
+                  artifactSourceShas.sort((left, right) => {
+                    if (left === sourceSha) return -1;
+                    if (right === sourceSha) return 1;
+                    return 0;
+                  });
+                  for (const artifactSourceSha of artifactSourceShas) {
+                    const requiredArtifacts = artifactNames(artifactSourceSha);
+                    if (![...requiredArtifacts].every((name) => availableArtifacts.has(name))) continue;
+                    if (publication === "tagged" && artifactSourceSha !== sourceSha) continue;
+                    if (publication === "ci" &&
+                        !await canReuseArtifactSource(artifactSourceSha, sourceSha)) {
+                      continue;
+                    }
+                    core.info(`Reusing build artifacts for ${artifactSourceSha} from run ${run.id}.`);
+                    return {runId: String(run.id), sourceSha: artifactSourceSha};
                   }
                 }
                 if (runs.length < 100) break;
               }
 
-              return "";
+              return null;
             };
             const coveragePath = (name) => name.startsWith("src/") || name.startsWith("tests/");
             const pipelinePath = (name) => (
@@ -221,6 +259,7 @@ jobs:
             let runPipeline = false;
             let runCoverage = false;
             let artifactRunId = String(context.runId);
+            let artifactSourceSha = "";
             let sourceSha = context.sha;
             let releaseTag = "";
             let publishTaggedRelease = false;
@@ -301,8 +340,11 @@ jobs:
                   if (await releaseExists(releaseTag)) {
                     throw new Error(`${releaseTag} has already been released.`);
                   }
-                  artifactRunId = await findArtifactRun("tagged", sourceSha, releaseTag);
-                  if (!artifactRunId) {
+                  const artifactRun = await findArtifactRun("tagged", sourceSha, releaseTag);
+                  if (artifactRun) {
+                    artifactRunId = artifactRun.runId;
+                    artifactSourceSha = artifactRun.sourceSha;
+                  } else {
                     artifactRunId = String(context.runId);
                     addBuilds("Release", "tagged-build");
                   }
@@ -312,8 +354,11 @@ jobs:
                   if (await releaseTargetsCommit("ci-main", sourceSha)) {
                     throw new Error(`The current main commit ${sourceSha} has already been published as ci-main.`);
                   }
-                  artifactRunId = await findArtifactRun("ci", sourceSha);
-                  if (!artifactRunId) {
+                  const artifactRun = await findArtifactRun("ci", sourceSha);
+                  if (artifactRun) {
+                    artifactRunId = artifactRun.runId;
+                    artifactSourceSha = artifactRun.sourceSha;
+                  } else {
                     artifactRunId = String(context.runId);
                     addBuilds();
                   }
@@ -322,6 +367,7 @@ jobs:
               }
             }
 
+            if (!artifactSourceSha) artifactSourceSha = sourceSha;
             const needsLinuxImage = entries.some((entry) => entry.kind === "validation");
             if (entries.length === 0) {
               entries.push({task: "nothing-to-run", kind: "noop", runner: hosted, timeout: 5});
@@ -330,6 +376,7 @@ jobs:
             core.setOutput("matrix", JSON.stringify({include: entries}));
             core.setOutput("needs_linux_image", needsLinuxImage ? "true" : "false");
             core.setOutput("artifact_run_id", artifactRunId);
+            core.setOutput("artifact_source_sha", artifactSourceSha);
             core.setOutput("source_sha", sourceSha);
             core.setOutput("release_tag", releaseTag);
             core.setOutput("publish_tagged_release", publishTaggedRelease ? "true" : "false");
@@ -760,7 +807,7 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ needs.pipeline-plan.outputs.artifact_run_id }}
-          pattern: qmud-*-${{ needs.pipeline-plan.outputs.source_sha }}
+          pattern: qmud-*-${{ needs.pipeline-plan.outputs.artifact_source_sha }}
           path: release-assets
           merge-multiple: true
 
@@ -930,7 +977,6 @@ jobs:
             );
             const requiredAssets = [
               ["AppImage", (name) => name.endsWith(".AppImage"), "application/octet-stream"],
-              ["AppImage zsync", (name) => name.endsWith(".AppImage.zsync"), "application/octet-stream"],
               ["macOS app zip", (name) => name.endsWith("-macos.app.zip"), "application/zip"],
               ["macOS DMG", (name) => name.endsWith("-macos.dmg"), "application/x-apple-diskimage"],
               ["Windows zip", (name) => name.endsWith("-windows.zip"), "application/zip"],
@@ -1107,7 +1153,7 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ needs.pipeline-plan.outputs.artifact_run_id }}
-          pattern: qmud-*-${{ needs.pipeline-plan.outputs.source_sha }}
+          pattern: qmud-*-${{ needs.pipeline-plan.outputs.artifact_source_sha }}
           path: release-assets
           merge-multiple: true
 
@@ -1319,7 +1365,6 @@ jobs:
             );
             const requiredAssets = [
               ["AppImage", (name) => name.endsWith(".AppImage"), "application/octet-stream"],
-              ["AppImage zsync", (name) => name.endsWith(".AppImage.zsync"), "application/octet-stream"],
               ["macOS app zip", (name) => name.endsWith("-macos.app.zip"), "application/zip"],
               ["macOS DMG", (name) => name.endsWith("-macos.dmg"), "application/x-apple-diskimage"],
               ["Windows zip", (name) => name.endsWith("-windows.zip"), "application/zip"],
