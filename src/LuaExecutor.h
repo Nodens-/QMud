@@ -1474,8 +1474,8 @@ struct LuaEngineObservedInitializationRequest
 /**
  * @brief Execution seam for invoking Lua callback engine operations.
  *
- * Runtime configuration selects either the worker-thread or same-thread direct
- * backend while preserving identical call semantics through this interface.
+ * Every runtime uses the worker-thread executor. Its worker lane invokes the
+ * same-thread direct primitive through this interface.
  */
 class ILuaExecutor
 {
