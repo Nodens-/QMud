@@ -514,7 +514,8 @@ jobs:
             -DQMUD_ENABLE_APPIMAGE=OFF \
             -DQMUD_ENABLE_APPIMAGE_DOCKER=OFF \
             -DQMUD_ENABLE_MAC_DOCKER=OFF -DQMUD_ENABLE_WINDOCKER=OFF \
-            -DCMAKE_C_FLAGS=--coverage -DCMAKE_CXX_FLAGS=--coverage \
+            -DCMAKE_C_FLAGS="--coverage -fprofile-update=atomic" \
+            -DCMAKE_CXX_FLAGS="--coverage -fprofile-update=atomic" \
             -DCMAKE_EXE_LINKER_FLAGS=--coverage
           CCACHE_DISABLE=1 cmake --build /home/user/build --parallel
           ctest --test-dir /home/user/build --output-on-failure --label-exclude slow
