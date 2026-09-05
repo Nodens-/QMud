@@ -360,8 +360,7 @@ jobs:
             echo "Invalid AppImage image revision: $IMAGE_SERIAL" >&2
             exit 1
           fi
-          IMAGE_OWNER="${GITHUB_REPOSITORY_OWNER,,}"
-          echo "image=ghcr.io/$IMAGE_OWNER/qmud-appimage-builder:$IMAGE_SERIAL" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/abnormal-frequency/qmud-appimage-builder:$IMAGE_SERIAL" >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ github.token }}
@@ -399,7 +398,7 @@ jobs:
         if: steps.ensure-image.outputs.pushed == 'true'
         uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
         with:
-          owner: ${{ github.repository_owner }}
+          owner: Abnormal-Frequency
           package-name: qmud-appimage-builder
           package-type: container
           min-versions-to-keep: 2
