@@ -157,26 +157,27 @@ namespace QMudTimerScheduling
 		        .runtimeStateChanged = runtimeStateChanged};
 	}
 
-	bool applyTimerFiredState(WorldRuntime::Timer &timer, const QDateTime &now)
+	void applyTimerFiredState(WorldRuntime::Timer &timer, const QDateTime &now)
 	{
 		timer.firedCount++;
 		timer.lastFired = now;
 
-		const TimerScheduleDefinition schedule = timerScheduleDefinition(timer);
-		if (schedule.atTime)
-		{
-			if (timer.nextFireTime.isValid())
-				timer.nextFireTime = timer.nextFireTime.addDays(1);
-		}
-		else
-		{
-			timer.nextFireTime = timer.nextFireTime.addMSecs(
-			    intervalMsFromParts(schedule.hour, schedule.minute, schedule.second));
-		}
-
 		if (!timer.nextFireTime.isValid() || timer.nextFireTime <= now)
-			static_cast<void>(resetTimerFields(timer, now));
+		{
+			const TimerScheduleDefinition schedule = timerScheduleDefinition(timer);
+			if (schedule.atTime)
+			{
+				if (timer.nextFireTime.isValid())
+					timer.nextFireTime = timer.nextFireTime.addDays(1);
+			}
+			else
+			{
+				timer.nextFireTime = timer.nextFireTime.addMSecs(
+				    intervalMsFromParts(schedule.hour, schedule.minute, schedule.second));
+			}
 
-		return isEnabledValue(timer.attributes.value(QStringLiteral("one_shot")));
+			if (!timer.nextFireTime.isValid() || timer.nextFireTime <= now)
+				static_cast<void>(resetTimerFields(timer, now));
+		}
 	}
 } // namespace QMudTimerScheduling

@@ -99,9 +99,11 @@ struct LuaCallbackTriggerSnapshot
 		bool                   included{false};
 		int                    matched{0};
 		int                    invocationCount{0};
+		int                    matchCount{0};
 		int                    matchAttempts{0};
 		qint64                 executionTimeNs{0};
 		QString                lastMatchTarget;
+		QStringList            lastMatchWildcards;
 		QDateTime              lastMatched;
 		quint64                runtimeId{0};
 		int                    executingScriptDepth{0};
@@ -118,8 +120,11 @@ struct LuaCallbackAliasSnapshot
 		bool                   included{false};
 		int                    matched{0};
 		int                    invocationCount{0};
+		int                    matchCount{0};
 		int                    matchAttempts{0};
+		qint64                 executionTimeNs{0};
 		QString                lastMatchTarget;
+		QStringList            lastMatchWildcards;
 		QDateTime              lastMatched;
 		quint64                runtimeId{0};
 		int                    executingScriptDepth{0};

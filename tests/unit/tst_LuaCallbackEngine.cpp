@@ -6,6 +6,7 @@
  * Role: Unit coverage for Lua callback-engine dispatch, catalog, and callback-context semantics.
  */
 
+#include "AppController.h"
 #include "ColorPacking.h"
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
@@ -58,6 +59,7 @@
 #include <QThread>
 #include <QTimeZone>
 #include <QUdpSocket>
+#include <QUrl>
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
@@ -129,6 +131,12 @@ class tst_LuaCallbackEngine final : public QObject
 		void utilsMultiListBoxAcceptsMushclientArgumentOrder();
 		void deferredRuntimeMutationBatchesPreserveOrderAndOwnership();
 		void workerExecutorDispatchesRealEngines();
+		void workerBundledBcExercisesArithmeticSurface();
+		void workerGetInfoCoversSupportedSelectors();
+		void workerArraySerializationCoversEscapesAndFailures();
+		void workerRuleApisCoverOptionsInfoAndGroups();
+		void workerXmlApisCoverAllExportKindsAndImport();
+		void workerLineAndStyleInfoCoverMetadataSurface();
 		void setOptionUpdatesOnlyTabCompletionSymbolBehaviors();
 		void setOptionAppliesPartialRecallSaveSettingsImmediately();
 		void setOptionItemAppliesChatListenerSettings();
@@ -176,6 +184,13 @@ class tst_LuaCallbackEngine final : public QObject
 		void callbackPendingPluginStaysExcludedAfterEnabledOverlay();
 		void laterRecipientObservesCustomColourMutations();
 		void productionRuleRuntimeMutationsPatchSnapshots();
+		void aliasMatchStateIsPublishedBeforeNestedScreenDraw();
+		void triggerMatchStateIsPublishedAtNestedCallbackBoundaries();
+		void repeatedTriggerMergesNestedRuntimeAccounting();
+		void ruleEvaluationPlansSurviveNestedStructuralMutation();
+		void disabledPluginSuppressesPendingAliasAndTriggerScripts();
+		void timerEvaluationPlanSurvivesTraceStructuralMutation();
+		void aliasMissesPublishRuntimeSnapshotOncePerScope();
 		void timerScheduleRuntimeMutationsPatchWithoutDirtyingWorld();
 		void luaTimerMutationApisReplayExactRuntimeState();
 		void deferredTimerCreationReplaysExactScheduleTimestamp();
@@ -185,6 +200,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void pluginOneShotRuleApisRemainPluginScoped_data();
 		void pluginOneShotRuleApisRemainPluginScoped();
 		void callbackDispatchSnapshotsReflectMutableRuntimeDomains();
+		void aliasRuntimeItemPatchUsesStableIdentity();
 		void callbackDispatchSnapshotsReflectUdpState();
 		void callbackDispatchSnapshotsReflectChatState();
 		void callbackDispatchSnapshotsAreIndependent();
@@ -479,15 +495,38 @@ namespace
 	                                      const QSharedPointer<LuaCallbackEngine> &engine,
 	                                      const QString                           &script)
 	{
+		static std::atomic<quint64> nextFunctionId{1};
+		const quint64               functionId = nextFunctionId.fetch_add(1, std::memory_order_relaxed);
+		const QString functionName = QStringLiteral("__qmud_test_verify_worker_script_%1").arg(functionId);
 		LuaBatchDispatchRequest request;
 		request.engines    = {engine};
 		request.kind       = LuaBatchDispatchKind::ExecuteScript;
-		request.stringArg  = script;
-		request.stringArg2 = QStringLiteral("worker test assertion");
+		request.stringArg  = QStringLiteral("function %1(_)\nlocal function verify()\n%2\nend\nverify()\n"
+		                                    "return 'ok'\nend")
+		                         .arg(functionName, script);
+		request.stringArg2 = QStringLiteral("worker test assertion wrapper");
 		LuaBatchDispatchResult result;
 		if (!dispatchWorkerAndWait(executor, request, result))
 			return false;
-		return result.boolResultValid && result.boolResult;
+		if (!result.boolResultValid || !result.boolResult)
+			return false;
+
+		request.kind         = LuaBatchDispatchKind::StringInOut;
+		request.functionName = functionName;
+		request.stringArg    = QStringLiteral("ignored");
+		result               = {};
+		if (!dispatchWorkerAndWait(executor, request, result))
+			return false;
+		const bool verified = !result.suspended && result.stringResult == QStringLiteral("ok");
+
+		request.kind         = LuaBatchDispatchKind::ExecuteScript;
+		request.functionName = {};
+		request.stringArg    = QStringLiteral("%1 = nil").arg(functionName);
+		request.stringArg2   = QStringLiteral("worker test assertion cleanup");
+		result               = {};
+		if (!dispatchWorkerAndWait(executor, request, result))
+			return false;
+		return verified && result.boolResultValid && result.boolResult;
 	}
 
 	void executeDeferredMutations(LuaBatchDispatchResult &result)
@@ -2822,6 +2861,1066 @@ end
 	QVERIFY(result.countResultValid);
 	QCOMPARE(result.countResult, 1);
 	QVERIFY(verifyWorkerScript(executor, engine, QStringLiteral("assert(count_seen == '3:abc')")));
+	QVERIFY(teardownWorkerEngine(executor, engine));
+}
+
+void tst_LuaCallbackEngine::workerBundledBcExercisesArithmeticSurface()
+{
+#ifdef QMUD_BUNDLED_BC
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, engine, QString()))
+		QFAIL("Worker engine initialization failed");
+
+	QVERIFY(verifyWorkerScript(executor, engine, QStringLiteral(R"lua(
+assert(type(bc.version) == "string" and #bc.version > 0)
+local original_digits = bc.digits()
+assert(bc.digits(6) == original_digits)
+assert(bc.digits() == 6)
+
+local a = bc.number("12345678901234567890")
+local b = bc.number("98765432109876543210")
+assert(bc.compare(bc.add(a, b), "111111111011111111100") == 0)
+assert(bc.compare(bc.sub(b, a), "86419753208641975320") == 0)
+assert(bc.compare(bc.mul("12.5", "8"), "100") == 0)
+assert(bc.compare(bc.div("7", "2"), "3.5") == 0)
+assert(bc.compare(bc.mod("17", "5"), "2") == 0)
+local quotient, remainder = bc.divmod("17", "5")
+assert(bc.compare(quotient, "3") == 0 and bc.compare(remainder, "2") == 0)
+assert(bc.compare(bc.pow("2", "20"), "1048576") == 0)
+assert(bc.compare(bc.powmod("7", "128", "13"), "3") == 0)
+assert(bc.compare(bc.sqrt("81"), "9") == 0)
+assert(bc.compare(bc.trunc("12.34567", 3), "12.345") == 0)
+assert(bc.compare(bc.neg("42"), "-42") == 0)
+assert(bc.isneg("-0.01") and not bc.isneg("0.01"))
+assert(bc.iszero("0.000") and not bc.iszero("0.001"))
+assert(bc.compare(bc.number("1.25e3"), "1250") == 0)
+assert(bc.tonumber(bc.number("12.5")) == 12.5)
+assert(bc.tostring(bc.number("12.5")) == "12.5")
+
+local x = bc.number("9")
+assert(x + 1 == bc.number("10"))
+assert(x - 1 == bc.number("8"))
+assert(x * 2 == bc.number("18"))
+assert(x / 2 == bc.number("4.5"))
+assert(x % 4 == bc.number("1"))
+assert(x ^ 2 == bc.number("81"))
+assert(-x == bc.number("-9"))
+assert(bc.number("8") < x and x == bc.number("9"))
+assert(tostring(x) == "9")
+
+assert(select("#", bc.div("1", "0")) == 0)
+assert(select("#", bc.mod("1", "0")) == 0)
+assert(select("#", bc.divmod("1", "0")) == 0)
+assert(select("#", bc.powmod("2", "3", "0")) == 0)
+assert(select("#", bc.sqrt("-1")) == 0)
+assert(bc.digits(original_digits) == 6)
+collectgarbage("collect")
+return true
+)lua")));
+	QVERIFY(teardownWorkerEngine(executor, engine));
+#else
+	QSKIP("The build uses the system bc Lua module.");
+#endif
+}
+
+void tst_LuaCallbackEngine::workerGetInfoCoversSupportedSelectors()
+{
+	WorldRuntime runtime;
+	runtime.applyDefaultWorldOptions();
+	runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("mud.example"));
+	runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Coverage World"));
+	runtime.setWorldAttribute(QStringLiteral("player"), QStringLiteral("Coverage Player"));
+
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+local string_selectors = {
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+  21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+  41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60,
+  61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
+  81, 82, 83, 84, 85, 86, 87, 88, 89,
+}
+local boolean_selectors = {
+  101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113,
+  114, 115, 118, 119, 120, 121, 122, 123, 124, 125, 285,
+}
+local number_selectors = {
+  201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216,
+  217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232,
+  233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248,
+  249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264,
+  265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280,
+  281, 282, 283, 284, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296,
+  297, 298, 299, 300, 310,
+}
+
+function validate_getinfo_selectors(value)
+  if GetInfo(1) ~= "mud.example" or GetInfo(2) ~= "Coverage World" or
+      GetInfo(3) ~= "Coverage Player" then
+    return "world attributes"
+  end
+  if GetInfo(52) ~= "coverage expression" or GetInfo(86) ~= "coverage selection" then
+    return "snapshot strings"
+  end
+  if GetInfo(101) ~= true or GetInfo(285) ~= true then
+    return "snapshot booleans"
+  end
+  if GetInfo(201) ~= 321 or GetInfo(216) ~= 654 or
+      GetInfo(272) ~= 17 or GetInfo(281) ~= 640 then
+    return "snapshot numbers"
+  end
+  if GetInfo(301) ~= 1700000000 or GetInfo(302) ~= 1700000001 or
+      GetInfo(303) ~= 1700000002 or GetInfo(305) ~= 1700000003 or
+      GetInfo(306) ~= 1700000004 then
+    return "snapshot dates"
+  end
+  local current_time = GetInfo(304)
+  if type(current_time) ~= "number" or math.abs(current_time - os.time()) > 2 then
+    return "current date"
+  end
+  for _, selector in ipairs(string_selectors) do
+    local actual_type = type(GetInfo(selector))
+    if actual_type ~= "string" then
+      return "string selector " .. selector .. ": " .. actual_type
+    end
+  end
+  for _, selector in ipairs(boolean_selectors) do
+    local actual_type = type(GetInfo(selector))
+    if actual_type ~= "boolean" then
+      return "boolean selector " .. selector .. ": " .. actual_type
+    end
+  end
+  for _, selector in ipairs(number_selectors) do
+    local actual_type = type(GetInfo(selector))
+    if actual_type ~= "number" then
+      return "number selector " .. selector .. ": " .. actual_type
+    end
+  end
+  if GetInfo(-1) ~= nil or GetInfo(307) ~= nil then
+    return "unknown selectors"
+  end
+  return "ok"
+end
+)lua"),
+	                            &runtime))
+		QFAIL("Worker engine initialization failed");
+
+	auto snapshot                                        = captureMutableDispatchSnapshotForTest(runtime);
+	snapshot->hasCommandUiSnapshot                       = true;
+	snapshot->commandUiHasView                           = true;
+	snapshot->commandUiHasFrameData                      = true;
+	snapshot->commandUiValues[QStringLiteral("hasView")] = true;
+	snapshot->commandUiValues[QStringLiteral("hasFrameData")]         = true;
+	snapshot->commandUiValues[QStringLiteral("selectedWord")]         = QStringLiteral("coverage selection");
+	snapshot->commandUiValues[QStringLiteral("selectedWordResolved")] = true;
+	snapshot->commandUiValues[QStringLiteral("textRectangleLeft")]    = 17;
+	snapshot->commandUiValues[QStringLiteral("outputClientWidth")]    = 640;
+	snapshot->runtimeCounterValues[QStringLiteral("lastImmediateExpression")] =
+	    QStringLiteral("coverage expression");
+	snapshot->runtimeCounterValues[QStringLiteral("noCommandEcho")]      = true;
+	snapshot->runtimeCounterValues[QStringLiteral("totalLinesReceived")] = 321;
+	snapshot->runtimeCounterValues[QStringLiteral("bytesIn")]            = qint64{654};
+	snapshot->runtimeCounterValues[QStringLiteral("connectTime")] =
+	    QDateTime::fromSecsSinceEpoch(1700000000, QTimeZone::UTC);
+	snapshot->runtimeCounterValues[QStringLiteral("lastFlushTime")] =
+	    QDateTime::fromSecsSinceEpoch(1700000001, QTimeZone::UTC);
+	snapshot->runtimeCounterValues[QStringLiteral("scriptFileModTime")] =
+	    QDateTime::fromSecsSinceEpoch(1700000002, QTimeZone::UTC);
+	snapshot->runtimeCounterValues[QStringLiteral("clientStartTime")] =
+	    QDateTime::fromSecsSinceEpoch(1700000003, QTimeZone::UTC);
+	snapshot->runtimeCounterValues[QStringLiteral("worldStartTime")] =
+	    QDateTime::fromSecsSinceEpoch(1700000004, QTimeZone::UTC);
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("validate_getinfo_selectors");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = snapshot;
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	QCOMPARE(result.stringResult, QStringLiteral("ok"));
+	QVERIFY(!result.suspended);
+	QVERIFY(teardownWorkerEngine(executor, engine));
+}
+
+void tst_LuaCallbackEngine::workerArraySerializationCoversEscapesAndFailures()
+{
+	WorldRuntime      runtime;
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function exercise_array_serialization(value)
+  assert(ArrayCreate("coverage") == 0)
+  assert(ArrayCreate("empty") == 0)
+  assert(ArraySet("coverage", "a|key", "v\\alue") == 0)
+  assert(ArraySet("coverage", "b", "two|parts") == 0)
+
+  local exported = ArrayExport("coverage", "|")
+  local exported_keys = ArrayExportKeys("coverage", "|")
+  assert(ArrayExport("empty", "|") == "")
+  assert(ArrayExportKeys("empty", "|") == "")
+  assert(ArrayExport("missing", "|") == 30056)
+  assert(ArrayExportKeys("missing", "|") == 30056)
+  assert(ArrayExport("coverage", "\\") == 30059)
+  assert(ArrayExportKeys("coverage", "too long") == 30059)
+
+  assert(ArrayImport("coverage", { ["a|key"] = "replaced", c = "three" }) == 30058)
+  assert(ArrayGet("coverage", "a|key") == "replaced")
+  assert(ArrayImport("coverage", "d|four|e\\|key|five\\\\value", "|") == 0)
+  assert(ArrayGet("coverage", "d") == "four")
+  assert(ArrayGet("coverage", "e|key") == "five\\value")
+  assert(ArrayImport("coverage", "odd|count|tail", "|") == 30057)
+  assert(ArrayImport("coverage", "a,b", "\\") == 30059)
+  assert(ArrayImport("missing", { key = "value" }) == 30056)
+  assert(ArrayImport("missing", "key,value", ",") == 30056)
+  local valid_table, table_error = pcall(ArrayImport, "coverage", { [true] = "value" })
+  assert(not valid_table and tostring(table_error):find("string keys", 1, true))
+
+  return exported .. "\n" .. exported_keys
+end
+)lua"),
+	                            &runtime, QString()))
+		QFAIL("Worker engine initialization failed");
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("exercise_array_serialization");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	QCOMPARE(result.stringResult, QStringLiteral("a\\|key|v\\\\alue|b|two\\|parts\na\\|key|b"));
+	executeDeferredMutations(result);
+
+	QString value;
+	QVERIFY(runtime.arrayGet(QStringLiteral("coverage"), QStringLiteral("a|key"), value));
+	QCOMPARE(value, QStringLiteral("replaced"));
+	QVERIFY(runtime.arrayGet(QStringLiteral("coverage"), QStringLiteral("b"), value));
+	QCOMPARE(value, QStringLiteral("two|parts"));
+	QVERIFY(runtime.arrayGet(QStringLiteral("coverage"), QStringLiteral("c"), value));
+	QCOMPARE(value, QStringLiteral("three"));
+	QVERIFY(runtime.arrayGet(QStringLiteral("coverage"), QStringLiteral("d"), value));
+	QCOMPARE(value, QStringLiteral("four"));
+	QVERIFY(runtime.arrayGet(QStringLiteral("coverage"), QStringLiteral("e|key"), value));
+	QCOMPARE(value, QStringLiteral("five\\value"));
+	QStringList actualKeys = runtime.arrayListKeys(QStringLiteral("coverage"));
+	actualKeys.sort();
+	QCOMPARE(actualKeys, QStringList({QStringLiteral("a|key"), QStringLiteral("b"), QStringLiteral("c"),
+	                                  QStringLiteral("d"), QStringLiteral("e|key")}));
+	QVERIFY(runtime.arrayExists(QStringLiteral("empty")));
+	QVERIFY(runtime.arrayListKeys(QStringLiteral("empty")).isEmpty());
+	QVERIFY(!runtime.arrayExists(QStringLiteral("missing")));
+	QVERIFY(teardownWorkerEngine(executor, engine));
+}
+
+void tst_LuaCallbackEngine::workerRuleApisCoverOptionsInfoAndGroups()
+{
+	WorldRuntime         runtime;
+
+	const QString        pluginId = QStringLiteral("coverage.plugin");
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Coverage Plugin"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled = true;
+	WorldRuntime::Trigger pluginTrigger;
+	pluginTrigger.attributes.insert(QStringLiteral("name"), QStringLiteral("plugin_trigger"));
+	pluginTrigger.attributes.insert(QStringLiteral("match"), QStringLiteral("plugin trigger"));
+	pluginTrigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	pluginTrigger.attributes.insert(QStringLiteral("sound"), QStringLiteral("plugin trigger.wav"));
+	pluginTrigger.attributes.insert(QStringLiteral("script"), QStringLiteral("plugin_trigger_callback"));
+	pluginTrigger.attributes.insert(QStringLiteral("omit_from_log"), QStringLiteral("1"));
+	pluginTrigger.attributes.insert(QStringLiteral("keep_evaluating"), QStringLiteral("1"));
+	pluginTrigger.attributes.insert(QStringLiteral("ignore_case"), QStringLiteral("1"));
+	pluginTrigger.attributes.insert(QStringLiteral("sound_if_inactive"), QStringLiteral("1"));
+	pluginTrigger.attributes.insert(QStringLiteral("clipboard_arg"), QStringLiteral("6"));
+	pluginTrigger.attributes.insert(QStringLiteral("send_to"), QStringLiteral("9"));
+	pluginTrigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("321"));
+	pluginTrigger.attributes.insert(QStringLiteral("temporary"), QStringLiteral("1"));
+	pluginTrigger.attributes.insert(QStringLiteral("lowercase_wildcard"), QStringLiteral("1"));
+	pluginTrigger.attributes.insert(QStringLiteral("group"), QStringLiteral("plugin trigger group"));
+	pluginTrigger.attributes.insert(QStringLiteral("variable"), QStringLiteral("plugin trigger variable"));
+	pluginTrigger.attributes.insert(QStringLiteral("user"), QStringLiteral("654"));
+	pluginTrigger.attributes.insert(QStringLiteral("one_shot"), QStringLiteral("1"));
+	pluginTrigger.children.insert(QStringLiteral("send"), QStringLiteral("plugin trigger send"));
+	pluginTrigger.attributes.insert(QStringLiteral("other_text_colour"), QStringLiteral("1193046"));
+	pluginTrigger.attributes.insert(QStringLiteral("other_back_colour"), QStringLiteral("6636321"));
+	pluginTrigger.invocationCount    = 7;
+	pluginTrigger.matched            = 5;
+	pluginTrigger.matchCount         = 4;
+	pluginTrigger.matchAttempts      = 11;
+	pluginTrigger.executionTimeNs    = 17'000'000;
+	pluginTrigger.lastMatchWildcards = {
+	    QStringLiteral("plugin trigger whole"), QStringLiteral("plugin trigger one"),
+	    QStringLiteral("plugin trigger two"),   QStringLiteral("plugin trigger three"),
+	    QStringLiteral("plugin trigger four"),  QStringLiteral("plugin trigger five"),
+	    QStringLiteral("plugin trigger six"),   QStringLiteral("plugin trigger seven"),
+	    QStringLiteral("plugin trigger eight"), QStringLiteral("plugin trigger nine")};
+	pluginTrigger.lastMatched     = QDateTime::fromSecsSinceEpoch(1700000101, QTimeZone::UTC);
+	pluginTrigger.lastMatchTarget = QStringLiteral("plugin trigger target");
+	pluginTrigger.included        = true;
+	plugin.triggers.push_back(pluginTrigger);
+	WorldRuntime::Alias pluginAlias;
+	pluginAlias.attributes.insert(QStringLiteral("name"), QStringLiteral("plugin_alias"));
+	pluginAlias.attributes.insert(QStringLiteral("match"), QStringLiteral("plugin alias"));
+	pluginAlias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	pluginAlias.attributes.insert(QStringLiteral("script"), QStringLiteral("plugin_alias_callback"));
+	pluginAlias.attributes.insert(QStringLiteral("omit_from_output"), QStringLiteral("1"));
+	pluginAlias.attributes.insert(QStringLiteral("ignore_case"), QStringLiteral("1"));
+	pluginAlias.attributes.insert(QStringLiteral("menu"), QStringLiteral("1"));
+	pluginAlias.attributes.insert(QStringLiteral("temporary"), QStringLiteral("1"));
+	pluginAlias.attributes.insert(QStringLiteral("group"), QStringLiteral("plugin alias group"));
+	pluginAlias.attributes.insert(QStringLiteral("variable"), QStringLiteral("plugin alias variable"));
+	pluginAlias.attributes.insert(QStringLiteral("send_to"), QStringLiteral("10"));
+	pluginAlias.attributes.insert(QStringLiteral("sequence"), QStringLiteral("432"));
+	pluginAlias.attributes.insert(QStringLiteral("echo_alias"), QStringLiteral("1"));
+	pluginAlias.attributes.insert(QStringLiteral("user"), QStringLiteral("765"));
+	pluginAlias.attributes.insert(QStringLiteral("one_shot"), QStringLiteral("1"));
+	pluginAlias.children.insert(QStringLiteral("send"), QStringLiteral("plugin alias send"));
+	pluginAlias.invocationCount    = 8;
+	pluginAlias.matched            = 6;
+	pluginAlias.matchCount         = 3;
+	pluginAlias.matchAttempts      = 12;
+	pluginAlias.executionTimeNs    = 19'000'000;
+	pluginAlias.lastMatchWildcards = {
+	    QStringLiteral("plugin alias whole"), QStringLiteral("plugin alias one"),
+	    QStringLiteral("plugin alias two"),   QStringLiteral("plugin alias three"),
+	    QStringLiteral("plugin alias four"),  QStringLiteral("plugin alias five"),
+	    QStringLiteral("plugin alias six"),   QStringLiteral("plugin alias seven"),
+	    QStringLiteral("plugin alias eight"), QStringLiteral("plugin alias nine")};
+	pluginAlias.lastMatched     = QDateTime::fromSecsSinceEpoch(1700000202, QTimeZone::UTC);
+	pluginAlias.lastMatchTarget = QStringLiteral("plugin alias target");
+	pluginAlias.included        = true;
+	plugin.aliases.push_back(pluginAlias);
+	WorldRuntime::Timer pluginTimer;
+	pluginTimer.attributes.insert(QStringLiteral("name"), QStringLiteral("plugin_timer"));
+	pluginTimer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	pluginTimer.attributes.insert(QStringLiteral("hour"), QStringLiteral("12"));
+	pluginTimer.attributes.insert(QStringLiteral("minute"), QStringLiteral("23"));
+	pluginTimer.attributes.insert(QStringLiteral("second"), QStringLiteral("30"));
+	pluginTimer.attributes.insert(QStringLiteral("script"), QStringLiteral("plugin_timer_callback"));
+	pluginTimer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("1"));
+	pluginTimer.attributes.insert(QStringLiteral("temporary"), QStringLiteral("1"));
+	pluginTimer.attributes.insert(QStringLiteral("send_to"), QStringLiteral("2"));
+	pluginTimer.attributes.insert(QStringLiteral("active_closed"), QStringLiteral("1"));
+	pluginTimer.attributes.insert(QStringLiteral("group"), QStringLiteral("plugin timer group"));
+	pluginTimer.attributes.insert(QStringLiteral("user"), QStringLiteral("876"));
+	pluginTimer.attributes.insert(QStringLiteral("omit_from_output"), QStringLiteral("1"));
+	pluginTimer.children.insert(QStringLiteral("send"), QStringLiteral("plugin timer send"));
+	pluginTimer.invocationCount = 9;
+	pluginTimer.firedCount      = 10;
+	pluginTimer.included        = true;
+	pluginTimer.lastFired       = QDateTime::fromSecsSinceEpoch(1700000303, QTimeZone::UTC);
+	pluginTimer.nextFireTime    = QDateTime::fromSecsSinceEpoch(4102444800, QTimeZone::UTC);
+	plugin.timers.push_back(pluginTimer);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+local function require_ok(status, operation)
+  assert(status == 0, operation .. ": " .. tostring(status))
+end
+
+function coverage_trigger_callback() end
+function coverage_alias_callback() end
+function coverage_timer_callback() end
+
+local function require_info_types(label, getter, expected_type, selectors)
+  for _, selector in ipairs(selectors) do
+    local actual_type = type(getter(selector))
+    assert(actual_type == expected_type,
+      label .. " selector " .. selector .. ": expected " .. expected_type .. ", got " .. actual_type)
+  end
+end
+
+local function require_info_wildcards(getter, prefix)
+  local names = { "one", "two", "three", "four", "five", "six", "seven", "eight", "nine" }
+  for index, name in ipairs(names) do
+    assert(getter(100 + index) == prefix .. " " .. name)
+  end
+  assert(getter(110) == prefix .. " whole")
+end
+
+local function require_info_values(label, getter, expected)
+  for selector, expected_value in pairs(expected) do
+    local actual = getter(selector)
+    assert(actual == expected_value,
+      label .. " selector " .. selector .. ": expected " .. tostring(expected_value) ..
+      ", got " .. tostring(actual))
+  end
+end
+
+local function exercise_trigger_info(label, getter, last_matched_type)
+  require_info_types(label, getter, "string", { 1, 2, 3, 4, 26, 27, 32, 101, 102, 103, 104,
+    105, 106, 107, 108, 109, 110 })
+  require_info_types(label, getter, "boolean",
+    { 5, 6, 7, 8, 9, 10, 11, 12, 13, 23, 24, 25, 33, 34, 36 })
+  require_info_types(label, getter, "number",
+    { 14, 15, 16, 17, 18, 19, 20, 21, 28, 29, 30, 31, 35, 37, 38 })
+  require_info_types(label, getter, last_matched_type, { 22 })
+  assert(getter(0) == nil and getter(39) == nil and getter(100) == nil and getter(111) == nil)
+end
+
+local function exercise_alias_info(label, getter, last_matched_type)
+  require_info_types(label, getter, "string", { 1, 2, 3, 16, 17, 25, 101, 102, 103, 104, 105,
+    106, 107, 108, 109, 110 })
+  require_info_types(label, getter, "boolean", { 4, 5, 6, 7, 8, 9, 12, 14, 15, 19, 21, 22, 26, 27, 29 })
+  require_info_types(label, getter, "number", { 10, 11, 18, 20, 23, 24, 28, 30, 31 })
+  require_info_types(label, getter, last_matched_type, { 13 })
+  assert(getter(0) == nil and getter(32) == nil and getter(100) == nil and getter(111) == nil)
+end
+
+local function exercise_timer_info(label, getter, last_fired_type, next_fire_type)
+  require_info_types(label, getter, "string", { 4, 5, 19, 22 })
+  require_info_types(label, getter, "boolean", { 6, 7, 8, 14, 15, 16, 17, 18, 23, 24, 25, 26 })
+  require_info_types(label, getter, "number", { 1, 2, 3, 9, 10, 20, 21 })
+  require_info_types(label, getter, last_fired_type, { 11 })
+  require_info_types(label, getter, next_fire_type, { 12, 13 })
+  assert(getter(0) == nil and getter(27) == nil)
+end
+
+function exercise_rule_apis(value)
+  require_ok(AddTrigger("coverage_trigger", "^before$", "initial trigger", 0, 0, 0, "", ""),
+             "AddTrigger")
+  require_ok(AddAlias("coverage_alias", "^before$", "initial alias", 0, ""), "AddAlias")
+  require_ok(AddTimer("coverage_timer", 0, 0, 30, "initial timer", 0, ""), "AddTimer")
+  assert(GetTriggerInfo("coverage_trigger", 34) == false)
+  assert(GetAliasInfo("coverage_alias", 27) == false)
+  assert(GetTimerInfo("coverage_timer", 26) == false)
+
+  local trigger_text = {
+    group = "coverage_group", match = "^after$", script = "coverage_trigger_callback",
+    sound = "coverage.wav",
+    variable = "trigger_variable", send = "trigger text",
+  }
+  for option, option_value in pairs(trigger_text) do
+    require_ok(SetTriggerOption("coverage_trigger", option, option_value), "trigger " .. option)
+  end
+  for _, option in ipairs({
+    "enabled", "expand_variables", "keep_evaluating", "omit_from_log", "omit_from_output",
+    "repeat", "sound_if_inactive", "lowercase_wildcard", "temporary", "one_shot",
+  }) do
+    require_ok(SetTriggerOption("coverage_trigger", option, 1), "trigger " .. option)
+  end
+  require_ok(SetTriggerOption("coverage_trigger", "multi_line", 1), "trigger multi_line")
+  require_ok(SetTriggerOption("coverage_trigger", "match_style", 0x071F), "trigger match_style")
+  require_ok(SetTriggerOption("coverage_trigger", "new_style", 7), "trigger new_style")
+  local trigger_numbers = {
+    clipboard_arg = 3, colour_change_type = 1, custom_colour = 2, lines_to_match = 4,
+    other_text_colour = 0x123456, other_back_colour = 0x654321, send_to = 2,
+    sequence = 250, user = 42,
+  }
+  for option, option_value in pairs(trigger_numbers) do
+    require_ok(SetTriggerOption("coverage_trigger", option, option_value), "trigger " .. option)
+  end
+  assert(SetTriggerOption("coverage_trigger", "regexp", 1) == 30032)
+  assert(SetTriggerOption("coverage_trigger", "ignore_case", 1) == 30032)
+  assert(SetTriggerOption("coverage_trigger", "sequence", -1) == 30026)
+  assert(SetTriggerOption("coverage_trigger", "unknown", 1) == 30025)
+  assert(SetTriggerOption("missing", "enabled", 1) == 30005)
+
+  local alias_text = {
+    group = "coverage_group", match = "^after$", script = "coverage_alias_callback",
+    variable = "alias_variable", send = "alias text",
+  }
+  for option, option_value in pairs(alias_text) do
+    require_ok(SetAliasOption("coverage_alias", option, option_value), "alias " .. option)
+  end
+  for _, option in ipairs({
+    "enabled", "expand_variables", "omit_from_log", "omit_from_command_history",
+    "omit_from_output", "menu", "keep_evaluating", "echo_alias", "temporary", "one_shot",
+  }) do
+    require_ok(SetAliasOption("coverage_alias", option, 1), "alias " .. option)
+  end
+  for option, option_value in pairs({ send_to = 2, sequence = 250, user = 43 }) do
+    require_ok(SetAliasOption("coverage_alias", option, option_value), "alias " .. option)
+  end
+  assert(SetAliasOption("coverage_alias", "regexp", 1) == 30032)
+  assert(SetAliasOption("coverage_alias", "ignore_case", 1) == 30032)
+  assert(SetAliasOption("coverage_alias", "send_to", 1000) == 30026)
+  assert(SetAliasOption("coverage_alias", "unknown", 1) == 30025)
+  assert(SetAliasOption("missing", "enabled", 1) == 30010)
+
+  for option, option_value in pairs({
+    group = "coverage_group", script = "coverage_timer_callback",
+    variable = "timer_variable", send = "timer text",
+  }) do
+    require_ok(SetTimerOption("coverage_timer", option, option_value), "timer " .. option)
+  end
+  for _, option in ipairs({
+    "enabled", "at_time", "one_shot", "omit_from_output", "omit_from_log", "active_closed",
+    "temporary",
+  }) do
+    require_ok(SetTimerOption("coverage_timer", option, 1), "timer " .. option)
+  end
+  local timer_numbers = {
+    hour = 12, minute = 34, second = 56.75, offset_hour = 1, offset_minute = 2,
+    offset_second = 3.5, send_to = 2, user = 44,
+  }
+  for option, option_value in pairs(timer_numbers) do
+    require_ok(SetTimerOption("coverage_timer", option, option_value), "timer " .. option)
+  end
+  assert(SetTimerOption("coverage_timer", "hour", 24) == 30026)
+  assert(SetTimerOption("coverage_timer", "unknown", 1) == 30025)
+  assert(SetTimerOption("missing", "enabled", 1) == 30017)
+
+  exercise_trigger_info("trigger", function(selector)
+    return GetTriggerInfo("coverage_trigger", selector)
+  end, "nil")
+  exercise_alias_info("alias", function(selector)
+    return GetAliasInfo("coverage_alias", selector)
+  end, "nil")
+  exercise_timer_info("timer", function(selector)
+    return GetTimerInfo("coverage_timer", selector)
+  end, "number", "number")
+  assert(GetTriggerInfo("coverage_trigger", 34) == true)
+  assert(GetAliasInfo("coverage_alias", 27) == true)
+  assert(GetTimerInfo("coverage_timer", 26) == true)
+  local plugin_trigger_info = function(selector)
+    return GetPluginTriggerInfo("coverage.plugin", "plugin_trigger", selector)
+  end
+  require_info_values("plugin trigger", plugin_trigger_info, {
+    [1] = "plugin trigger", [2] = "plugin trigger send", [3] = "plugin trigger.wav",
+    [4] = "plugin_trigger_callback", [5] = true, [6] = false, [7] = true, [8] = true,
+    [9] = false, [10] = true, [11] = false, [12] = true, [13] = false, [14] = 6,
+    [15] = 9, [16] = 321, [17] = 0, [18] = 0, [19] = -1, [20] = 7, [21] = 5,
+    [22] = 1700000101, [23] = true, [24] = true, [25] = true,
+    [26] = "plugin trigger group", [27] = "plugin trigger variable", [28] = 654,
+    [29] = 1193046, [30] = 6636321, [31] = 4, [32] = "plugin trigger target",
+    [33] = false, [34] = false, [35] = 0, [36] = true, [38] = 11,
+  })
+  assert(math.abs(plugin_trigger_info(37) - 0.017) < 0.000000001)
+  require_info_wildcards(plugin_trigger_info, "plugin trigger")
+
+  local plugin_alias_info = function(selector)
+    return GetPluginAliasInfo("coverage.plugin", "plugin_alias", selector)
+  end
+  require_info_values("plugin alias", plugin_alias_info, {
+    [1] = "plugin alias", [2] = "plugin alias send", [3] = "plugin_alias_callback",
+    [4] = false, [5] = true, [6] = true, [7] = false, [8] = true, [9] = false,
+    [10] = 8, [11] = 6, [12] = true, [13] = 1700000202, [14] = true, [15] = true,
+    [16] = "plugin alias group", [17] = "plugin alias variable", [18] = 10,
+    [19] = false, [20] = 432, [21] = true, [22] = false, [23] = 765, [24] = 3,
+    [25] = "plugin alias target", [26] = false, [27] = false, [28] = 0,
+    [29] = true, [31] = 12,
+  })
+  assert(math.abs(plugin_alias_info(30) - 0.019) < 0.000000001)
+  require_info_wildcards(plugin_alias_info, "plugin alias")
+
+  local plugin_timer_info = function(selector)
+    return GetPluginTimerInfo("coverage.plugin", "plugin_timer", selector)
+  end
+  require_info_values("plugin timer", plugin_timer_info, {
+    [1] = 12, [2] = 23, [3] = 30, [4] = "plugin timer send",
+    [5] = "plugin_timer_callback", [6] = true, [7] = false, [8] = true, [9] = 9,
+    [10] = 10, [11] = 1700000303, [12] = 4102444800, [14] = true, [15] = false,
+    [16] = true, [17] = true, [18] = true, [19] = "plugin timer group", [20] = 2,
+    [21] = 876, [22] = "plugin_timer", [23] = true, [24] = false, [25] = false,
+    [26] = false,
+  })
+  local remaining = GetPluginTimerInfo("coverage.plugin", "plugin_timer", 13)
+  assert(math.abs(remaining - (4102444800 - os.time())) <= 2)
+  assert(plugin_trigger_info(0) == nil and plugin_trigger_info(39) == nil)
+  assert(plugin_alias_info(0) == nil and plugin_alias_info(32) == nil)
+  assert(plugin_timer_info(0) == nil and plugin_timer_info(27) == nil)
+
+  assert(GetTriggerOption("coverage_trigger", "group") == "coverage_group")
+  assert(GetAliasOption("coverage_alias", "group") == "coverage_group")
+  assert(GetTimerOption("coverage_timer", "group") == "coverage_group")
+  return "ok"
+end
+
+function cleanup_rule_apis(value)
+  assert(GetTriggerInfo("coverage_trigger", 31) == 0)
+  assert(GetTriggerInfo("coverage_trigger", 38) == 0)
+  require_info_wildcards(function(selector)
+    return GetTriggerInfo("coverage_trigger", selector)
+  end, "world trigger")
+  assert(GetAliasInfo("coverage_alias", 24) == 0)
+  assert(GetAliasInfo("coverage_alias", 30) == 0)
+  assert(GetAliasInfo("coverage_alias", 31) == 0)
+  require_info_wildcards(function(selector)
+    return GetAliasInfo("coverage_alias", selector)
+  end, "world alias")
+  assert(EnableTriggerGroup("coverage_group", false) == 1)
+  assert(EnableAliasGroup("coverage_group", false) == 1)
+  assert(EnableTimerGroup("coverage_group", false) == 1)
+  assert(EnableGroup("coverage_group", true) == 3)
+  assert(DeleteGroup("coverage_group") == 3)
+  assert(GetTriggerInfo("coverage_trigger", 1) == nil)
+  assert(GetAliasInfo("coverage_alias", 1) == nil)
+  assert(GetTimerInfo("coverage_timer", 1) == nil)
+  return "ok"
+end
+)lua"),
+	                            &runtime, QString()))
+		QFAIL("Worker engine initialization failed");
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("exercise_rule_apis");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	QCOMPARE(result.stringResult, QStringLiteral("ok"));
+	executeDeferredMutations(result);
+	QCOMPARE(runtime.triggers().size(), 1);
+	QCOMPARE(runtime.aliases().size(), 1);
+	QCOMPARE(runtime.timers().size(), 1);
+	const QStringList worldTriggerWildcards{
+	    QStringLiteral("world trigger whole"), QStringLiteral("world trigger one"),
+	    QStringLiteral("world trigger two"),   QStringLiteral("world trigger three"),
+	    QStringLiteral("world trigger four"),  QStringLiteral("world trigger five"),
+	    QStringLiteral("world trigger six"),   QStringLiteral("world trigger seven"),
+	    QStringLiteral("world trigger eight"), QStringLiteral("world trigger nine")};
+	const QStringList worldAliasWildcards{
+	    QStringLiteral("world alias whole"), QStringLiteral("world alias one"),
+	    QStringLiteral("world alias two"),   QStringLiteral("world alias three"),
+	    QStringLiteral("world alias four"),  QStringLiteral("world alias five"),
+	    QStringLiteral("world alias six"),   QStringLiteral("world alias seven"),
+	    QStringLiteral("world alias eight"), QStringLiteral("world alias nine")};
+	WorldRuntimeTestAccess::triggers(runtime).first().lastMatchWildcards = worldTriggerWildcards;
+	WorldRuntimeTestAccess::aliases(runtime).first().lastMatchWildcards  = worldAliasWildcards;
+	runtime.markTriggerRuntimeStateChanged();
+	runtime.markAliasRuntimeStateChanged();
+
+	const WorldRuntime::Trigger &trigger = runtime.triggers().constFirst();
+	QCOMPARE(trigger.attributes.value(QStringLiteral("group")), QStringLiteral("coverage_group"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("match")), QStringLiteral("^after$"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("script")), QStringLiteral("coverage_trigger_callback"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("sound")), QStringLiteral("coverage.wav"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("variable")), QStringLiteral("trigger_variable"));
+	const QStringList triggerEnabledAttributes{
+	    QStringLiteral("enabled"),           QStringLiteral("expand_variables"),
+	    QStringLiteral("keep_evaluating"),   QStringLiteral("omit_from_log"),
+	    QStringLiteral("omit_from_output"),  QStringLiteral("repeat"),
+	    QStringLiteral("sound_if_inactive"), QStringLiteral("lowercase_wildcard"),
+	    QStringLiteral("temporary"),         QStringLiteral("one_shot"),
+	};
+	for (const QString &attribute : triggerEnabledAttributes)
+		QCOMPARE(trigger.attributes.value(attribute), QStringLiteral("1"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("multi_line")), QStringLiteral("1"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("text_colour")), QStringLiteral("1"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("back_colour")), QStringLiteral("7"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("make_bold")), QStringLiteral("1"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("make_italic")), QStringLiteral("1"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("make_underline")), QStringLiteral("1"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("clipboard_arg")), QStringLiteral("3"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("colour_change_type")), QStringLiteral("1"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("custom_colour")), QStringLiteral("2"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("lines_to_match")), QStringLiteral("4"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("other_text_colour")), QStringLiteral("1193046"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("other_back_colour")), QStringLiteral("6636321"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("send_to")), QStringLiteral("2"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("sequence")), QStringLiteral("250"));
+	QCOMPARE(trigger.attributes.value(QStringLiteral("user")), QStringLiteral("42"));
+	QCOMPARE(trigger.children.value(QStringLiteral("send")), QStringLiteral("trigger text"));
+
+	const WorldRuntime::Alias &alias = runtime.aliases().constFirst();
+	QCOMPARE(alias.attributes.value(QStringLiteral("group")), QStringLiteral("coverage_group"));
+	QCOMPARE(alias.attributes.value(QStringLiteral("match")), QStringLiteral("^after$"));
+	QCOMPARE(alias.attributes.value(QStringLiteral("script")), QStringLiteral("coverage_alias_callback"));
+	QCOMPARE(alias.attributes.value(QStringLiteral("variable")), QStringLiteral("alias_variable"));
+	const QStringList aliasEnabledAttributes{
+	    QStringLiteral("enabled"),          QStringLiteral("expand_variables"),
+	    QStringLiteral("omit_from_log"),    QStringLiteral("omit_from_command_history"),
+	    QStringLiteral("omit_from_output"), QStringLiteral("menu"),
+	    QStringLiteral("keep_evaluating"),  QStringLiteral("echo_alias"),
+	    QStringLiteral("temporary"),        QStringLiteral("one_shot"),
+	};
+	for (const QString &attribute : aliasEnabledAttributes)
+		QCOMPARE(alias.attributes.value(attribute), QStringLiteral("1"));
+	QCOMPARE(alias.attributes.value(QStringLiteral("send_to")), QStringLiteral("2"));
+	QCOMPARE(alias.attributes.value(QStringLiteral("sequence")), QStringLiteral("250"));
+	QCOMPARE(alias.attributes.value(QStringLiteral("user")), QStringLiteral("43"));
+	QCOMPARE(alias.children.value(QStringLiteral("send")), QStringLiteral("alias text"));
+
+	const WorldRuntime::Timer &timer = runtime.timers().constFirst();
+	QCOMPARE(timer.attributes.value(QStringLiteral("group")), QStringLiteral("coverage_group"));
+	QCOMPARE(timer.attributes.value(QStringLiteral("script")), QStringLiteral("coverage_timer_callback"));
+	QCOMPARE(timer.attributes.value(QStringLiteral("variable")), QStringLiteral("timer_variable"));
+	const QStringList timerEnabledAttributes{
+	    QStringLiteral("enabled"),          QStringLiteral("at_time"),       QStringLiteral("one_shot"),
+	    QStringLiteral("omit_from_output"), QStringLiteral("omit_from_log"), QStringLiteral("active_closed"),
+	    QStringLiteral("temporary"),
+	};
+	for (const QString &attribute : timerEnabledAttributes)
+		QCOMPARE(timer.attributes.value(attribute), QStringLiteral("1"));
+	QCOMPARE(timer.attributes.value(QStringLiteral("hour")), QStringLiteral("12"));
+	QCOMPARE(timer.attributes.value(QStringLiteral("minute")), QStringLiteral("34"));
+	QCOMPARE(timer.attributes.value(QStringLiteral("second")), QStringLiteral("56.7500"));
+	QCOMPARE(timer.attributes.value(QStringLiteral("offset_hour")), QStringLiteral("1"));
+	QCOMPARE(timer.attributes.value(QStringLiteral("offset_minute")), QStringLiteral("2"));
+	QCOMPARE(timer.attributes.value(QStringLiteral("offset_second")), QStringLiteral("3.5000"));
+	QCOMPARE(timer.attributes.value(QStringLiteral("send_to")), QStringLiteral("2"));
+	QCOMPARE(timer.attributes.value(QStringLiteral("user")), QStringLiteral("44"));
+	QCOMPARE(timer.children.value(QStringLiteral("send")), QStringLiteral("timer text"));
+	QVERIFY(timer.nextFireTime.isValid());
+
+	LuaBatchDispatchRequest cleanupRequest;
+	cleanupRequest.engines             = {engine};
+	cleanupRequest.kind                = LuaBatchDispatchKind::StringInOut;
+	cleanupRequest.functionName        = QStringLiteral("cleanup_rule_apis");
+	cleanupRequest.stringArg           = QStringLiteral("ignored");
+	cleanupRequest.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult cleanupResult;
+	QVERIFY(dispatchWorkerAndWait(executor, cleanupRequest, cleanupResult));
+	QCOMPARE(cleanupResult.stringResult, QStringLiteral("ok"));
+	executeDeferredMutations(cleanupResult);
+	QVERIFY(runtime.triggers().isEmpty());
+	QVERIFY(runtime.aliases().isEmpty());
+	QVERIFY(runtime.timers().isEmpty());
+	const WorldRuntime::Plugin *const storedPlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId);
+	QVERIFY(storedPlugin);
+	QCOMPARE(storedPlugin->triggers.size(), 1);
+	const WorldRuntime::Trigger &storedTrigger = storedPlugin->triggers.front();
+	QCOMPARE(storedTrigger.attributes, pluginTrigger.attributes);
+	QCOMPARE(storedTrigger.children, pluginTrigger.children);
+	QCOMPARE(storedTrigger.invocationCount, pluginTrigger.invocationCount);
+	QCOMPARE(storedTrigger.matchCount, pluginTrigger.matchCount);
+	QCOMPARE(storedTrigger.matchAttempts, pluginTrigger.matchAttempts);
+	QCOMPARE(storedTrigger.executionTimeNs, pluginTrigger.executionTimeNs);
+	QCOMPARE(storedTrigger.lastMatchWildcards, pluginTrigger.lastMatchWildcards);
+	QCOMPARE(storedTrigger.lastMatched, pluginTrigger.lastMatched);
+	QCOMPARE(storedPlugin->aliases.size(), 1);
+	const WorldRuntime::Alias &storedAlias = storedPlugin->aliases.front();
+	QCOMPARE(storedAlias.attributes, pluginAlias.attributes);
+	QCOMPARE(storedAlias.children, pluginAlias.children);
+	QCOMPARE(storedAlias.invocationCount, pluginAlias.invocationCount);
+	QCOMPARE(storedAlias.matchCount, pluginAlias.matchCount);
+	QCOMPARE(storedAlias.matchAttempts, pluginAlias.matchAttempts);
+	QCOMPARE(storedAlias.executionTimeNs, pluginAlias.executionTimeNs);
+	QCOMPARE(storedAlias.lastMatchWildcards, pluginAlias.lastMatchWildcards);
+	QCOMPARE(storedAlias.lastMatched, pluginAlias.lastMatched);
+	QCOMPARE(storedPlugin->timers.size(), 1);
+	const WorldRuntime::Timer &storedTimer = storedPlugin->timers.front();
+	QCOMPARE(storedTimer.attributes, pluginTimer.attributes);
+	QCOMPARE(storedTimer.children, pluginTimer.children);
+	QCOMPARE(storedTimer.invocationCount, pluginTimer.invocationCount);
+	QCOMPARE(storedTimer.lastFired, pluginTimer.lastFired);
+	QCOMPARE(storedTimer.nextFireTime, pluginTimer.nextFireTime);
+	QVERIFY(teardownWorkerEngine(executor, engine));
+}
+
+void tst_LuaCallbackEngine::workerXmlApisCoverAllExportKindsAndImport()
+{
+	QVERIFY(!AppController::instance());
+	AppController app;
+	MainWindow    frame;
+	app.setMainWindow(&frame);
+
+	auto *runtime = new WorldRuntime(&frame);
+	runtime->setStartupDirectory(QDir::currentPath());
+	auto *child = new WorldChildWindow(QStringLiteral("XML API Coverage"));
+	child->setRuntime(runtime);
+	frame.addMdiSubWindow(child, true);
+	QCoreApplication::processEvents();
+	const auto            detachRuntime = qScopeGuard([child] { child->setRuntime(nullptr); });
+
+	WorldRuntime::Trigger trigger;
+	trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("xml_trigger"));
+	trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("<&\">"));
+	trigger.children.insert(QStringLiteral("send"), QStringLiteral("trigger<&>\ttext"));
+	runtime->setTriggers({trigger});
+	WorldRuntime::Alias alias;
+	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("xml_alias"));
+	alias.attributes.insert(QStringLiteral("match"), QStringLiteral("alias<&\">"));
+	alias.children.insert(QStringLiteral("send"), QStringLiteral("alias<&>\ttext"));
+	runtime->setAliases({alias});
+	WorldRuntime::Timer timer;
+	timer.attributes.insert(QStringLiteral("name"), QStringLiteral("xml_timer"));
+	timer.attributes.insert(QStringLiteral("second"), QStringLiteral("30"));
+	timer.children.insert(QStringLiteral("send"), QStringLiteral("timer<&>\ttext"));
+	runtime->setTimers({timer});
+	WorldRuntime::Macro macro;
+	macro.attributes.insert(QStringLiteral("name"), QStringLiteral("up"));
+	macro.attributes.insert(QStringLiteral("type"), QStringLiteral("invalid_type"));
+	macro.children.insert(QStringLiteral("send"), QStringLiteral("macro<&>\ttext"));
+	runtime->setMacros({macro});
+	WorldRuntime::Variable variable;
+	variable.attributes.insert(QStringLiteral("name"), QStringLiteral("xml_variable"));
+	variable.content = QStringLiteral("variable<&>\ttext");
+	runtime->setVariables({variable});
+	WorldRuntime::Keypad keypad;
+	keypad.attributes.insert(QStringLiteral("name"), QStringLiteral("Ctrl+1<&\">"));
+	keypad.content = QStringLiteral("keypad<&>\ttext");
+	runtime->setKeypadEntries({keypad});
+
+	auto                 engine   = QSharedPointer<LuaCallbackEngine>::create();
+	const QString        pluginId = QStringLiteral("xml.coverage.plugin");
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("XML Coverage Plugin"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled = true;
+	plugin.lua     = engine;
+	WorldRuntimeTestAccess::plugins(*runtime).push_back(plugin);
+	const QString                          script = QStringLiteral(R"lua(
+local function contains(text, expected)
+  return text:find(expected, 1, true) ~= nil
+end
+
+function exercise_xml_exports(value)
+  local trigger = ExportXML(0, "  XML_TRIGGER  ")
+  local alias = ExportXML(1, "xml_alias")
+  local timer = ExportXML(2, "xml_timer")
+  local macro = ExportXML(3, "up")
+  local variable = ExportXML(4, "xml_variable")
+  local keypad = ExportXML(5, "ctrl+1<&\">")
+  assert(contains(trigger, "<triggers>") and contains(trigger, "match=\"&lt;&amp;&quot;&gt;\""))
+  assert(contains(trigger, "trigger&lt;&amp;&gt;&#9;text"))
+  assert(contains(alias, "<aliases>") and contains(alias, "alias&lt;&amp;&gt;&#9;text"))
+  assert(contains(timer, "<timers>") and contains(timer, "timer&lt;&amp;&gt;&#9;text"))
+  assert(contains(macro, "<macros>") and contains(macro, "type=\"unknown\""))
+  assert(contains(macro, "macro&lt;&amp;&gt;&#9;text"))
+  assert(contains(variable, "<variables>") and contains(variable, "variable&lt;&amp;&gt;&#9;text"))
+  assert(contains(keypad, "<keypad>") and contains(keypad, "name=\"Ctrl+1&lt;&amp;&quot;&gt;\""))
+  assert(contains(keypad, "keypad&lt;&amp;&gt;&#9;text"))
+  assert(ExportXML(0, "missing") == "")
+  assert(ExportXML(99, "xml_trigger") == "")
+  assert(ExportXML(0, "   ") == "")
+  return "ok"
+end
+
+function exercise_xml_import(xml)
+  local status, request_id = ImportXML(xml)
+  return string.format("%.0f|%.0f", status, request_id or 0)
+end
+
+function OnPluginAsyncResult(request_id, api_name, status, payload)
+  if api_name ~= "ImportXML" then return end
+  SetVariable("xml_async_result",
+    string.format("%.0f|%s|%s|%s", request_id, api_name, status, payload))
+end
+)lua");
+	LuaEngineObservedInitializationRequest initialization;
+	initialization.engine              = engine.data();
+	initialization.workerLifetimeOwner = engine;
+	initialization.runtime             = runtime;
+	initialization.pluginId            = pluginId;
+	initialization.pluginName          = QStringLiteral("XML Coverage Plugin");
+	initialization.scriptText          = script;
+	runtime->dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("exercise_xml_exports");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(*runtime);
+	LuaBatchDispatchResult result =
+	    WorldRuntimeTestAccess::queuePluginCallbackDispatch(*runtime, request, true);
+	QCOMPARE(result.stringResult, QStringLiteral("ok"));
+
+	request.functionName        = QStringLiteral("exercise_xml_import");
+	request.stringArg           = QStringLiteral(R"xml(<muclient>
+  <variables>
+    <variable name="imported_by_lua">imported value</variable>
+  </variables>
+</muclient>)xml");
+	request.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(*runtime);
+	result = WorldRuntimeTestAccess::queuePluginCallbackDispatch(*runtime, request, true);
+	const QStringList acceptedParts = result.stringResult.split(QLatin1Char('|'));
+	QCOMPARE(acceptedParts.size(), 2);
+	QCOMPARE(acceptedParts.at(0), QStringLiteral("0"));
+	QVERIFY(acceptedParts.at(1).toULongLong() > 0);
+	QTRY_VERIFY_WITH_TIMEOUT(
+	    !runtime->pluginVariableValue(pluginId, QStringLiteral("xml_async_result")).isEmpty(), 5000);
+	const QStringList asyncParts =
+	    runtime->pluginVariableValue(pluginId, QStringLiteral("xml_async_result")).split(QLatin1Char('|'));
+	QCOMPARE(asyncParts.size(), 4);
+	QCOMPARE(asyncParts.at(0), acceptedParts.at(1));
+	QCOMPARE(asyncParts.at(1), QStringLiteral("ImportXML"));
+	QCOMPARE(asyncParts.at(2), QStringLiteral("ok"));
+	QMap<QString, QString> payloadFields;
+	for (const QString &field : asyncParts.at(3).split(QLatin1Char(';')))
+	{
+		const qsizetype separator = field.indexOf(QLatin1Char('='));
+		QVERIFY2(separator > 0,
+		         qPrintable(QStringLiteral("Malformed ImportXML payload field: %1").arg(field)));
+		const QString key = field.first(separator);
+		QVERIFY2(!payloadFields.contains(key),
+		         qPrintable(QStringLiteral("Duplicate ImportXML payload field: %1").arg(key)));
+		payloadFields.insert(key, QUrl::fromPercentEncoding(field.sliced(separator + 1).toUtf8()));
+	}
+	const QStringList expectedPayloadKeys{
+	    QStringLiteral("triggers"), QStringLiteral("aliases"),   QStringLiteral("timers"),
+	    QStringLiteral("macros"),   QStringLiteral("variables"), QStringLiteral("colours"),
+	    QStringLiteral("keypad"),   QStringLiteral("printing"),  QStringLiteral("duplicates"),
+	    QStringLiteral("error"),
+	};
+	QCOMPARE(payloadFields.size(), expectedPayloadKeys.size());
+	for (const QString &key : expectedPayloadKeys)
+		QVERIFY2(payloadFields.contains(key),
+		         qPrintable(QStringLiteral("Missing ImportXML payload field: %1").arg(key)));
+	QCOMPARE(payloadFields.value(QStringLiteral("triggers")), QStringLiteral("0"));
+	QCOMPARE(payloadFields.value(QStringLiteral("aliases")), QStringLiteral("0"));
+	QCOMPARE(payloadFields.value(QStringLiteral("timers")), QStringLiteral("0"));
+	QCOMPARE(payloadFields.value(QStringLiteral("macros")), QStringLiteral("0"));
+	QCOMPARE(payloadFields.value(QStringLiteral("variables")), QStringLiteral("1"));
+	QCOMPARE(payloadFields.value(QStringLiteral("colours")), QStringLiteral("0"));
+	QCOMPARE(payloadFields.value(QStringLiteral("keypad")), QStringLiteral("0"));
+	QCOMPARE(payloadFields.value(QStringLiteral("printing")), QStringLiteral("0"));
+	QCOMPARE(payloadFields.value(QStringLiteral("duplicates")), QStringLiteral("0"));
+	QCOMPARE(payloadFields.value(QStringLiteral("error")), QString());
+	QString importedValue;
+	QTRY_VERIFY_WITH_TIMEOUT(runtime->findVariable(QStringLiteral("imported_by_lua"), importedValue), 3000);
+	QCOMPARE(importedValue, QStringLiteral("imported value"));
+	runtime->dispatchTeardownLuaEngines({engine}, true);
+	if (WorldRuntime::Plugin *storedPlugin = WorldRuntimeTestAccess::plugin(*runtime, pluginId))
+		storedPlugin->lua.clear();
+}
+
+void tst_LuaCallbackEngine::workerLineAndStyleInfoCoverMetadataSurface()
+{
+	WorldRuntime            runtime;
+	WorldRuntime::LineEntry line;
+	line.text       = QStringLiteral("plain send link prompt");
+	line.flags      = WorldRuntime::LineOutput | WorldRuntime::LineLog | WorldRuntime::LineBookmark;
+	line.hardReturn = true;
+	line.time       = QDateTime::fromSecsSinceEpoch(1700000000, QTimeZone::UTC);
+	line.lineNumber = 42;
+	line.ticks      = 1.25;
+	line.elapsed    = 2.5;
+
+	WorldRuntime::StyleSpan plain;
+	plain.length  = 6;
+	plain.fore    = QColor(QStringLiteral("#112233"));
+	plain.back    = QColor(QStringLiteral("#445566"));
+	plain.bold    = true;
+	plain.changed = true;
+	WorldRuntime::StyleSpan send;
+	send.length     = 5;
+	send.fore       = QColor(QStringLiteral("#223344"));
+	send.back       = QColor(QStringLiteral("#556677"));
+	send.underline  = true;
+	send.actionType = WorldRuntime::ActionSend;
+	send.action     = QStringLiteral("look");
+	send.hint       = QStringLiteral("send hint");
+	send.variable   = QStringLiteral("send_variable");
+	WorldRuntime::StyleSpan link;
+	link.length     = 5;
+	link.fore       = QColor(QStringLiteral("#334455"));
+	link.back       = QColor(QStringLiteral("#667788"));
+	link.blink      = true;
+	link.inverse    = true;
+	link.startTag   = true;
+	link.actionType = WorldRuntime::ActionHyperlink;
+	link.action     = QStringLiteral("https://example.invalid/");
+	link.hint       = QStringLiteral("link hint");
+	link.variable   = QStringLiteral("link_variable");
+	WorldRuntime::StyleSpan prompt;
+	prompt.length     = 6;
+	prompt.fore       = QColor(QStringLiteral("#445566"));
+	prompt.back       = QColor(QStringLiteral("#778899"));
+	prompt.actionType = WorldRuntime::ActionPrompt;
+	prompt.action     = QStringLiteral("say hello");
+	line.spans        = {plain, send, link, prompt};
+
+	WorldRuntime::LineEntry noteLine;
+	noteLine.text       = QStringLiteral("note");
+	noteLine.flags      = WorldRuntime::LineNote;
+	noteLine.hardReturn = true;
+	noteLine.lineNumber = 43;
+
+	WorldRuntime::LineEntry inputLine;
+	inputLine.text       = QStringLiteral("input");
+	inputLine.flags      = WorldRuntime::LineInput;
+	inputLine.hardReturn = true;
+	inputLine.lineNumber = 44;
+
+	WorldRuntime::LineEntry horizontalRuleLine;
+	horizontalRuleLine.flags      = WorldRuntime::LineHorizontalRule;
+	horizontalRuleLine.hardReturn = true;
+	horizontalRuleLine.lineNumber = 45;
+
+	runtime.replaceOutputLines({line, noteLine, inputLine, horizontalRuleLine});
+
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function exercise_line_and_style_info(value)
+  local line = GetLineInfo(1, 0)
+  assert(line.text == "plain send link prompt" and line.length == 22)
+  assert(line.newline and not line.note and not line.user and line.log and line.bookmark and not line.hr)
+  assert(line.time == 1700000000 and line.line == 42 and line.styles == 4)
+  assert(line.ticks == 1.25 and line.elapsed == 2.5 and type(line.timestr) == "string")
+  assert(GetLineInfo(1, 1) == line.text and GetLineInfo(1, 2) == line.length)
+  for selector = 3, 8 do assert(type(GetLineInfo(1, selector)) == "boolean") end
+  for selector = 9, 13 do assert(type(GetLineInfo(1, selector)) == "number") end
+
+  local note_line = GetLineInfo(2, 0)
+  assert(note_line.text == "note" and note_line.note and not note_line.user and not note_line.hr)
+  local input_line = GetLineInfo(3, 0)
+  assert(input_line.text == "input" and not input_line.note and input_line.user and not input_line.hr)
+  local horizontal_rule_line = GetLineInfo(4, 0)
+  assert(horizontal_rule_line.text == "" and not horizontal_rule_line.note)
+  assert(not horizontal_rule_line.user and horizontal_rule_line.hr)
+
+  assert(GetLineInfo(1, 14) == nil and GetLineInfo(5, 1) == nil)
+  assert(select("#", GetLineInfo(5, 0)) == 0)
+  assert(GetLineInfo(2147483648, 1) == nil)
+  assert(select("#", GetLineInfo(2147483648, 0)) == 0)
+
+  local styles = GetStyleInfo(1, 0, 0)
+  assert(#styles == 4 and styles[1].text == "plain " and styles[4].text == "prompt")
+  assert(styles[1].actiontype == 0 and styles[2].actiontype == 1)
+  assert(styles[3].actiontype == 2 and styles[4].actiontype == 3)
+  assert(styles[1].bold and styles[1].changed)
+  assert(styles[2].ul and styles[2].action == "look" and styles[2].hint == "send hint")
+  assert(styles[2].variable == "send_variable")
+  assert(styles[3].blink and styles[3].inverse and styles[3].starttag)
+  assert(styles[3].action == "https://example.invalid/")
+  assert(styles[3].hint == "link hint" and styles[3].variable == "link_variable")
+  assert(styles[4].action == "say hello")
+  assert(styles[1].textcolour == 0x332211 and styles[1].backcolour == 0x665544)
+  assert(styles[2].textcolour == 0x443322 and styles[2].backcolour == 0x776655)
+  assert(styles[3].textcolour == 0x554433 and styles[3].backcolour == 0x887766)
+  assert(styles[4].textcolour == 0x665544 and styles[4].backcolour == 0x998877)
+  assert(GetStyleInfo(1, 1, 14) == 0x332211 and GetStyleInfo(1, 1, 15) == 0x665544)
+  assert(GetStyleInfo(1, 2, 14) == 0x443322 and GetStyleInfo(1, 2, 15) == 0x776655)
+  assert(GetStyleInfo(1, 3, 14) == 0x554433 and GetStyleInfo(1, 3, 15) == 0x887766)
+  assert(GetStyleInfo(1, 4, 14) == 0x665544 and GetStyleInfo(1, 4, 15) == 0x998877)
+
+  for selector = 1, 15 do
+    local all_values = GetStyleInfo(1, 0, selector)
+    assert(type(all_values) == "table" and #all_values == 4)
+    assert(GetStyleInfo(1, 1, selector) == all_values[1])
+  end
+  assert(GetStyleInfo(1, 1, 16) == nil)
+  assert(GetStyleInfo(1, 5, 1) == nil)
+  assert(select("#", GetStyleInfo(1, 5, 0)) == 0)
+  assert(GetStyleInfo(5, 1, 1) == nil)
+  assert(select("#", GetStyleInfo(5, 0, 0)) == 0)
+  assert(GetStyleInfo(2147483648, 1, 1) == nil)
+  assert(select("#", GetStyleInfo(2147483648, 0, 0)) == 0)
+  return "ok"
+end
+)lua"),
+	                            &runtime, QString()))
+		QFAIL("Worker engine initialization failed");
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("exercise_line_and_style_info");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	QVERIFY(result.suspended);
+	int resumeCount = 0;
+	QVERIFY(completeWorkerSuspensions(executor, engine, runtime, result, resumeCount));
+	QCOMPARE(resumeCount, 1);
+	QCOMPARE(result.stringResult, QStringLiteral("ok"));
+	QVERIFY(!result.suspended);
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 
@@ -6189,14 +7288,21 @@ function snapshot_trigger()
     tostring(GetTriggerInfo("runtime_trigger", 33)),
     string.format("%.0f", GetTriggerInfo("runtime_trigger", 21)),
     string.format("%.0f", GetTriggerInfo("runtime_trigger", 31)),
-    string.format("%.9f", GetTriggerInfo("runtime_trigger", 37))
+	string.format("%.0f", GetTriggerInfo("runtime_trigger", 38)),
+	string.format("%.9f", GetTriggerInfo("runtime_trigger", 37)),
+	GetTriggerInfo("runtime_trigger", 101),
+	GetTriggerInfo("runtime_trigger", 110)
   }, "|"))
 end
 function snapshot_alias()
   SetVariable("alias_runtime_report", table.concat({
     tostring(GetAliasInfo("runtime_alias", 26)),
     string.format("%.0f", GetAliasInfo("runtime_alias", 11)),
-    string.format("%.0f", GetAliasInfo("runtime_alias", 24))
+    string.format("%.0f", GetAliasInfo("runtime_alias", 24)),
+	string.format("%.0f", GetAliasInfo("runtime_alias", 31)),
+	string.format("%.9f", GetAliasInfo("runtime_alias", 30)),
+	GetAliasInfo("runtime_alias", 101),
+	GetAliasInfo("runtime_alias", 110)
   }, "|"))
 end
 function snapshot_timer()
@@ -6210,7 +7316,8 @@ end
 	WorldRuntime::Trigger trigger;
 	trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("runtime_trigger"));
 	trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
-	trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("runtime-trigger"));
+	trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("^(runtime)-(trigger)$"));
+	trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
 	trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
 	trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
 	trigger.attributes.insert(QStringLiteral("script"), QStringLiteral("snapshot_trigger"));
@@ -6219,7 +7326,8 @@ end
 	WorldRuntime::Alias alias;
 	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("runtime_alias"));
 	alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
-	alias.attributes.insert(QStringLiteral("match"), QStringLiteral("runtime-alias"));
+	alias.attributes.insert(QStringLiteral("match"), QStringLiteral("^(runtime)-(alias)$"));
+	alias.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
 	alias.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
 	alias.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
 	alias.attributes.insert(QStringLiteral("script"), QStringLiteral("snapshot_alias"));
@@ -6247,12 +7355,12 @@ end
 	plugin.sequence                     = 100;
 	WorldRuntime::Trigger pluginTrigger = trigger;
 	pluginTrigger.attributes.insert(QStringLiteral("name"), QStringLiteral("plugin_trigger"));
-	pluginTrigger.attributes.insert(QStringLiteral("match"), QStringLiteral("plugin-trigger"));
+	pluginTrigger.attributes.insert(QStringLiteral("match"), QStringLiteral("^(plugin)-(trigger)$"));
 	pluginTrigger.attributes.remove(QStringLiteral("script"));
 	plugin.triggers.push_back(pluginTrigger);
 	WorldRuntime::Alias pluginAlias = alias;
 	pluginAlias.attributes.insert(QStringLiteral("name"), QStringLiteral("plugin_alias"));
-	pluginAlias.attributes.insert(QStringLiteral("match"), QStringLiteral("plugin-alias"));
+	pluginAlias.attributes.insert(QStringLiteral("match"), QStringLiteral("^(plugin)-(alias)$"));
 	pluginAlias.attributes.remove(QStringLiteral("script"));
 	plugin.aliases.push_back(pluginAlias);
 	WorldRuntime::Timer pluginTimer = timer;
@@ -6279,16 +7387,30 @@ end
 		    processor.setRuntime(nullptr);
 	    });
 	QCOMPARE(processor.executeCommand(QStringLiteral("runtime-alias")), eOK);
-	processor.onIncomingLineReceived(QStringLiteral("runtime-trigger"));
 	QString value;
+	QVERIFY(runtime.findVariable(QStringLiteral("alias_runtime_report"), value));
+	const QStringList aliasReport = value.split(QLatin1Char('|'));
+	QCOMPARE(aliasReport.size(), 7);
+	QCOMPARE(aliasReport.at(0), QStringLiteral("true"));
+	QCOMPARE(aliasReport.at(1), QStringLiteral("1"));
+	QCOMPARE(aliasReport.at(2), QStringLiteral("3"));
+	QCOMPARE(aliasReport.at(3), QStringLiteral("1"));
+	QCOMPARE(aliasReport.at(4),
+	         QString::number(runtime.aliases().constFirst().executionTimeSeconds(), 'f', 9));
+	QCOMPARE(aliasReport.at(5), QStringLiteral("runtime"));
+	QCOMPARE(aliasReport.at(6), QStringLiteral("runtime-alias"));
+	processor.onIncomingLineReceived(QStringLiteral("runtime-trigger"));
 	QVERIFY(runtime.findVariable(QStringLiteral("trigger_runtime_report"), value));
 	const QStringList triggerReport = value.split(QLatin1Char('|'));
-	QCOMPARE(triggerReport.size(), 4);
+	QCOMPARE(triggerReport.size(), 7);
 	QCOMPARE(triggerReport.at(0), QStringLiteral("true"));
 	QCOMPARE(triggerReport.at(1), QStringLiteral("1"));
-	QCOMPARE(triggerReport.at(2), QStringLiteral("1"));
-	QCOMPARE(triggerReport.at(3),
+	QCOMPARE(triggerReport.at(2), QStringLiteral("3"));
+	QCOMPARE(triggerReport.at(3), QStringLiteral("1"));
+	QCOMPARE(triggerReport.at(4),
 	         QString::number(runtime.triggers().constFirst().executionTimeSeconds(), 'f', 9));
+	QCOMPARE(triggerReport.at(5), QStringLiteral("runtime"));
+	QCOMPARE(triggerReport.at(6), QStringLiteral("runtime-trigger"));
 	QCOMPARE(processor.executeCommand(QStringLiteral("plugin-alias")), eOK);
 	processor.onIncomingLineReceived(QStringLiteral("plugin-trigger"));
 	QVERIFY(runtime.dispatchLuaExecuteScript(runtime.luaCallbacks(),
@@ -6306,8 +7428,6 @@ return true
 	QCOMPARE(value, QString::number(runtimePlugin->triggers.constFirst().executionTimeSeconds(), 'f', 9));
 	processor.checkTimers();
 
-	QVERIFY(runtime.findVariable(QStringLiteral("alias_runtime_report"), value));
-	QCOMPARE(value, QStringLiteral("true|1|1"));
 	QVERIFY(runtime.findVariable(QStringLiteral("timer_runtime_report"), value));
 	QCOMPARE(value, QStringLiteral("true|1"));
 
@@ -6317,11 +7437,14 @@ return true
 	const auto &aliasAfter   = after->aliasListsByPluginId.value(QString()).constFirst();
 	const auto &timerAfter   = after->timerListsByPluginId.value(QString()).constFirst();
 	QCOMPARE(triggerAfter.matched, 1);
+	QCOMPARE(triggerAfter.matchCount, 3);
 	QCOMPARE(triggerAfter.matchAttempts, 2);
 	QCOMPARE(triggerAfter.invocationCount, 1);
 	QVERIFY(!triggerAfter.executingScript);
 	QCOMPARE(aliasAfter.matched, 1);
+	QCOMPARE(aliasAfter.matchCount, 3);
 	QCOMPARE(aliasAfter.matchAttempts, 2);
+	QVERIFY(aliasAfter.executionTimeNs > 0);
 	QCOMPARE(aliasAfter.invocationCount, 1);
 	QVERIFY(!aliasAfter.executingScript);
 	QCOMPARE(timerAfter.firedCount, 1);
@@ -6358,6 +7481,676 @@ return true
 	QCOMPARE(beforeRemoval->triggerListsByPluginId.value(QString()).size(), 1);
 	QCOMPARE(beforeRemoval->aliasListsByPluginId.value(QString()).size(), 1);
 	QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, quint64{1});
+}
+
+void tst_LuaCallbackEngine::aliasMatchStateIsPublishedBeforeNestedScreenDraw()
+{
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
+	runtime.addLine(QStringLiteral("existing output"), WorldRuntime::LineOutput);
+
+	const QString             pluginId = QStringLiteral("alias.state.plugin");
+	const auto                engine   = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const executor = runtime.luaExecutor();
+	QVERIFY(executor);
+	if (!initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+screen_draw_state = "unset"
+function OnPluginScreendraw(draw_type, log, text)
+  screen_draw_state = table.concat({
+    string.format("%.0f", GetAliasInfo("nested_alias", 11)),
+    string.format("%.0f", GetAliasInfo("nested_alias", 24)),
+    string.format("%.0f", GetAliasInfo("nested_alias", 31)),
+    GetAliasInfo("nested_alias", 101),
+    GetAliasInfo("nested_alias", 110),
+    GetAliasWildcard("nested_alias", "0"),
+    GetAliasWildcard("nested_alias", "1")
+  }, "|")
+end
+function alias_state(_)
+  return screen_draw_state .. "#" .. table.concat({
+    string.format("%.0f", GetAliasInfo("nested_alias", 11)),
+    string.format("%.0f", GetAliasInfo("nested_alias", 24)),
+    string.format("%.0f", GetAliasInfo("nested_alias", 31)),
+    GetAliasInfo("nested_alias", 25),
+    GetAliasInfo("nested_alias", 101),
+    GetAliasInfo("nested_alias", 110),
+    GetAliasWildcard("nested_alias", "0"),
+    GetAliasWildcard("nested_alias", "1")
+  }, "|")
+end
+)lua"),
+	                            &runtime, pluginId))
+		QFAIL("Worker engine initialization failed");
+
+	WorldRuntime::Alias alias;
+	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("nested_alias"));
+	alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+	alias.attributes.insert(QStringLiteral("match"), QStringLiteral("^(nested)-(alias)$"));
+	alias.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+	alias.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Alias State Plugin"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	plugin.enabled  = true;
+	plugin.sequence = 100;
+	plugin.lua      = engine;
+	plugin.aliases.push_back(alias);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+	QCOMPARE(initial->aliasListsByPluginId.value(pluginId).constFirst().matchAttempts, 0);
+
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	runtime.setCommandProcessor(&processor);
+	const auto detachProcessor = qScopeGuard(
+	    [&runtime, &processor]
+	    {
+		    runtime.setCommandProcessor(nullptr);
+		    processor.setRuntime(nullptr);
+	    });
+
+	auto readAliasState = [&]() -> QString
+	{
+		LuaBatchDispatchRequest request;
+		request.engines             = {engine};
+		request.kind                = LuaBatchDispatchKind::StringInOut;
+		request.functionName        = QStringLiteral("alias_state");
+		request.stringArg           = QStringLiteral("ignored");
+		request.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(runtime);
+		LuaBatchDispatchResult result;
+		if (!dispatchWorkerAndWait(*executor, request, result) || result.suspended)
+			return {};
+		return result.stringResult;
+	};
+
+	QCOMPARE(processor.executeCommand(QStringLiteral("nested-alias")), eOK);
+	QCOMPARE(readAliasState(), QStringLiteral("1|3|1|nested|nested-alias|nested-alias|nested#"
+	                                          "1|3|1|nested-alias|nested|nested-alias|nested-alias|nested"));
+
+	QCOMPARE(processor.executeCommand(QStringLiteral("unmatched")), eOK);
+	QCOMPARE(readAliasState(), QStringLiteral("1|3|1|nested|nested-alias|nested-alias|nested#"
+	                                          "1|3|2|nested-alias|||nested-alias|nested"));
+
+	runtime.dispatchTeardownLuaEngines({engine}, true);
+	if (WorldRuntime::Plugin *storedPlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId))
+		storedPlugin->lua.clear();
+}
+
+void tst_LuaCallbackEngine::triggerMatchStateIsPublishedAtNestedCallbackBoundaries()
+{
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+	runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+	runtime.setTraceEnabled(true);
+
+	const QString             pluginId = QStringLiteral("trigger.state.plugin");
+	const auto                engine   = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const executor = runtime.luaExecutor();
+	QVERIFY(executor);
+	if (!initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+trace_state = "unset"
+trigger_send_state = "unset"
+function OnPluginTrace(message)
+  trace_state = table.concat({
+    tostring(GetTriggerInfo("script_trigger", 33)),
+    string.format("%.0f", GetTriggerInfo("script_trigger", 21)),
+    string.format("%.0f", GetTriggerInfo("script_trigger", 31)),
+    string.format("%.0f", GetTriggerInfo("script_trigger", 38)),
+    GetTriggerInfo("script_trigger", 32),
+    GetTriggerInfo("script_trigger", 101),
+    GetTriggerInfo("script_trigger", 110),
+    GetTriggerWildcard("script_trigger", "0"),
+    GetTriggerWildcard("script_trigger", "1")
+  }, "|")
+  return true
+end
+function read_trigger_send_state(_)
+  return trace_state .. "#" .. trigger_send_state
+end
+)lua"),
+	                            &runtime, pluginId))
+		QFAIL("Worker engine initialization failed");
+
+	WorldRuntime::Trigger trigger;
+	trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("script_trigger"));
+	trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+	trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("^(nested)-(trigger)$"));
+	trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+	trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+	trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	trigger.children.insert(QStringLiteral("send"), QStringLiteral(R"lua(
+trigger_send_state = table.concat({
+  tostring(GetTriggerInfo("script_trigger", 33)),
+  string.format("%.0f", GetTriggerInfo("script_trigger", 21)),
+  string.format("%.0f", GetTriggerInfo("script_trigger", 31)),
+  string.format("%.0f", GetTriggerInfo("script_trigger", 38)),
+  GetTriggerInfo("script_trigger", 32),
+  GetTriggerInfo("script_trigger", 101),
+  GetTriggerInfo("script_trigger", 110),
+  GetTriggerWildcard("script_trigger", "0"),
+  GetTriggerWildcard("script_trigger", "1")
+}, "|")
+)lua"));
+
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Trigger State Plugin"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	plugin.enabled  = true;
+	plugin.sequence = 100;
+	plugin.lua      = engine;
+	plugin.triggers.push_back(trigger);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+
+	QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	runtime.setCommandProcessor(&processor);
+	const auto detachProcessor = qScopeGuard(
+	    [&runtime, &processor]
+	    {
+		    runtime.setCommandProcessor(nullptr);
+		    processor.setRuntime(nullptr);
+	    });
+	processor.onIncomingLineReceived(QStringLiteral("nested-trigger"));
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("read_trigger_send_state");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(*executor, request, result));
+	QCOMPARE(result.stringResult,
+	         QStringLiteral("false|1|3|1|nested-trigger|nested|nested-trigger|nested-trigger|nested#"
+	                        "true|1|3|1|nested-trigger|nested|nested-trigger|nested-trigger|nested"));
+
+	runtime.dispatchTeardownLuaEngines({engine}, true);
+	if (WorldRuntime::Plugin *storedPlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId))
+		storedPlugin->lua.clear();
+}
+
+void tst_LuaCallbackEngine::repeatedTriggerMergesNestedRuntimeAccounting()
+{
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+	runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
+repeat_nested = false
+function repeated_named(name, line, wildcards)
+  SetVariable("repeat_callback_report", table.concat({
+    wildcards[0], wildcards.word,
+    GetTriggerInfo("nested_repeat", 101), GetTriggerInfo("nested_repeat", 110),
+    GetTriggerWildcard("nested_repeat", "0"), GetTriggerWildcard("nested_repeat", "word")
+  }, "|"))
+end
+)lua"));
+
+	WorldRuntime::Trigger trigger;
+	trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("nested_repeat"));
+	trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+	trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("(?<word>[a-z]+)"));
+	trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+	trigger.attributes.insert(QStringLiteral("repeat"), QStringLiteral("y"));
+	trigger.attributes.insert(QStringLiteral("make_bold"), QStringLiteral("y"));
+	trigger.attributes.insert(QStringLiteral("script"), QStringLiteral("repeated_named"));
+	trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+	trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	trigger.children.insert(QStringLiteral("send"), QStringLiteral(R"lua(
+if not repeat_nested then
+  repeat_nested = true
+  Simulate("three four" .. string.char(13, 10))
+  assert(SetVariable("repeat_nested_flushed", "1") == error_code.eOK)
+end
+)lua"));
+	runtime.setTriggers({trigger});
+
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	runtime.setCommandProcessor(&processor);
+	const QMetaObject::Connection incomingLineConnection =
+	    QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &processor,
+	                     &WorldCommandProcessor::onIncomingStyledLineReceived);
+	QVERIFY(incomingLineConnection);
+	constexpr qint64              kExecutionTimeMarker = 1'000'000'000;
+	int                           scriptSendCount      = 0;
+	const QMetaObject::Connection accountingConnection = QObject::connect(
+	    &processor, &WorldCommandProcessor::sendToScriptRequested, &runtime,
+	    [&runtime, &scriptSendCount]
+	    {
+		    ++scriptSendCount;
+		    WorldRuntimeTestAccess::triggers(runtime).first().executionTimeNs += kExecutionTimeMarker;
+	    },
+	    Qt::DirectConnection);
+	QVERIFY(accountingConnection);
+	const auto detachProcessor = qScopeGuard(
+	    [&runtime, &processor]
+	    {
+		    runtime.setCommandProcessor(nullptr);
+		    processor.setRuntime(nullptr);
+	    });
+
+	processor.onIncomingLineReceived(QStringLiteral("one two"));
+
+	const WorldRuntime::Trigger &stored = runtime.triggers().constFirst();
+	QCOMPARE(stored.matched, 2);
+	QCOMPARE(stored.matchCount, 2);
+	QCOMPARE(stored.matchAttempts, 6);
+	QCOMPARE(scriptSendCount, 2);
+	QVERIFY(stored.executionTimeNs >= 2 * kExecutionTimeMarker);
+	QCOMPARE(stored.lastMatchTarget, QStringLiteral("three four"));
+	QCOMPARE(stored.lastMatchWildcards, (QStringList{QStringLiteral("three"), QStringLiteral("three")}));
+	QString callbackReport;
+	QVERIFY(runtime.findVariable(QStringLiteral("repeat_callback_report"), callbackReport));
+	QCOMPARE(callbackReport, QStringLiteral("two|two|three|three|two|two"));
+}
+
+void tst_LuaCallbackEngine::ruleEvaluationPlansSurviveNestedStructuralMutation()
+{
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+	runtime.setTraceEnabled(true);
+	runtime.addLine(QStringLiteral("existing output"), WorldRuntime::LineOutput);
+
+	const QString             pluginId = QStringLiteral("rule.plan.plugin");
+	const auto                engine   = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const executor = runtime.luaExecutor();
+	QVERIFY(executor);
+	if (!initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+alias_mutated = false
+trigger_mutated = false
+function OnPluginScreendraw(draw_type, log, text)
+  if alias_mutated then return end
+  alias_mutated = true
+  assert(DeleteAlias("first_alias") == error_code.eOK)
+  assert(SetAliasOption("second_alias", "send", "mutated second alias") == error_code.eOK)
+  assert(AddAlias("inserted_alias", "^go$", "inserted alias", 0, "") == error_code.eOK)
+  assert(SetAliasOption("inserted_alias", "send_to", 9) == error_code.eOK)
+  assert(SetAliasOption("inserted_alias", "variable", "inserted_alias_result") == error_code.eOK)
+end
+function OnPluginTrace(message)
+  if trigger_mutated or not string.find(message, "first_trigger", 1, true) then return true end
+  trigger_mutated = true
+  assert(DeleteTrigger("first_trigger") == error_code.eOK)
+  assert(SetTriggerOption("second_trigger", "send", "mutated second trigger") == error_code.eOK)
+  assert(AddTrigger("inserted_trigger", "^line$", "inserted trigger", 0, 0, 0, "", "") == error_code.eOK)
+  assert(SetTriggerOption("inserted_trigger", "send_to", 9) == error_code.eOK)
+  assert(SetTriggerOption("inserted_trigger", "variable", "inserted_trigger_result") == error_code.eOK)
+  return true
+end
+)lua"),
+	                            &runtime, pluginId))
+		QFAIL("Worker engine initialization failed");
+
+	auto makeAlias = [](const QString &name, const int sequence, const QString &send, const QString &variable)
+	{
+		WorldRuntime::Alias alias;
+		alias.attributes.insert(QStringLiteral("name"), name);
+		alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		alias.attributes.insert(QStringLiteral("match"), QStringLiteral("^go$"));
+		alias.attributes.insert(QStringLiteral("regexp"), QStringLiteral("1"));
+		alias.attributes.insert(QStringLiteral("keep_evaluating"), QStringLiteral("1"));
+		alias.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToVariable));
+		alias.attributes.insert(QStringLiteral("variable"), variable);
+		alias.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		alias.children.insert(QStringLiteral("send"), send);
+		return alias;
+	};
+	auto makeTrigger =
+	    [](const QString &name, const int sequence, const QString &send, const QString &variable)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("name"), name);
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("^line$"));
+		trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("1"));
+		trigger.attributes.insert(QStringLiteral("keep_evaluating"), QStringLiteral("1"));
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToVariable));
+		trigger.attributes.insert(QStringLiteral("variable"), variable);
+		trigger.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		trigger.children.insert(QStringLiteral("send"), send);
+		return trigger;
+	};
+
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Rule Plan Plugin"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	plugin.enabled  = true;
+	plugin.sequence = 100;
+	plugin.lua      = engine;
+	plugin.aliases  = {makeAlias(QStringLiteral("first_alias"), 100, QStringLiteral("first alias"),
+	                             QStringLiteral("first_alias_result")),
+	                   makeAlias(QStringLiteral("second_alias"), 200, QStringLiteral("second alias"),
+	                             QStringLiteral("second_alias_result"))};
+	plugin.triggers = {makeTrigger(QStringLiteral("first_trigger"), 100, QStringLiteral("first trigger"),
+	                               QStringLiteral("first_trigger_result")),
+	                   makeTrigger(QStringLiteral("second_trigger"), 200, QStringLiteral("second trigger"),
+	                               QStringLiteral("second_trigger_result"))};
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	runtime.setCommandProcessor(&processor);
+	const auto detachProcessor = qScopeGuard(
+	    [&runtime, &processor]
+	    {
+		    runtime.setCommandProcessor(nullptr);
+		    processor.setRuntime(nullptr);
+	    });
+
+	QCOMPARE(processor.executeCommand(QStringLiteral("go")), eOK);
+	QString value;
+	QVERIFY(runtime.findVariable(QStringLiteral("first_alias_result"), value));
+	QCOMPARE(value, QStringLiteral("first alias"));
+	QVERIFY(runtime.findVariable(QStringLiteral("second_alias_result"), value));
+	QCOMPARE(value, QStringLiteral("second alias"));
+	QVERIFY(!runtime.findVariable(QStringLiteral("inserted_alias_result"), value));
+
+	processor.onIncomingLineReceived(QStringLiteral("line"));
+	QVERIFY(runtime.findVariable(QStringLiteral("first_trigger_result"), value));
+	QCOMPARE(value, QStringLiteral("first trigger"));
+	QVERIFY(runtime.findVariable(QStringLiteral("second_trigger_result"), value));
+	QCOMPARE(value, QStringLiteral("second trigger"));
+	QVERIFY(!runtime.findVariable(QStringLiteral("inserted_trigger_result"), value));
+
+	const WorldRuntime::Plugin *storedPlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId);
+	QVERIFY(storedPlugin);
+	QCOMPARE(storedPlugin->aliases.size(), 2);
+	QCOMPARE(storedPlugin->aliases.constFirst().attributes.value(QStringLiteral("name")),
+	         QStringLiteral("second_alias"));
+	QCOMPARE(storedPlugin->aliases.constFirst().children.value(QStringLiteral("send")),
+	         QStringLiteral("mutated second alias"));
+	QCOMPARE(storedPlugin->triggers.size(), 2);
+	QCOMPARE(storedPlugin->triggers.constFirst().attributes.value(QStringLiteral("name")),
+	         QStringLiteral("second_trigger"));
+	QCOMPARE(storedPlugin->triggers.constFirst().children.value(QStringLiteral("send")),
+	         QStringLiteral("mutated second trigger"));
+
+	runtime.dispatchTeardownLuaEngines({engine}, true);
+	if (WorldRuntime::Plugin *mutablePlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId))
+		mutablePlugin->lua.clear();
+}
+
+void tst_LuaCallbackEngine::disabledPluginSuppressesPendingAliasAndTriggerScripts()
+{
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+	runtime.setTraceEnabled(true);
+	runtime.addLine(QStringLiteral("existing output"), WorldRuntime::LineOutput);
+
+	const QString             pluginId = QStringLiteral("disabled.pending.rules.plugin");
+	const auto                engine   = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const executor = runtime.luaExecutor();
+	QVERIFY(executor);
+	if (!initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+alias_plugin_disabled = false
+trigger_plugin_disabled = false
+function OnPluginScreendraw(draw_type, log, text)
+  if alias_plugin_disabled then return end
+  alias_plugin_disabled = true
+  assert(EnablePlugin(GetPluginID(), false) == error_code.eOK)
+end
+function OnPluginTrace(message)
+  if trigger_plugin_disabled or
+      not string.find(message, "disabling_trigger", 1, true) then return true end
+  trigger_plugin_disabled = true
+  assert(EnablePlugin(GetPluginID(), false) == error_code.eOK)
+  return true
+end
+function pending_alias_script(name, line, wildcards)
+  SetVariable("pending_alias_script_ran", "1")
+end
+function pending_trigger_script(name, line, wildcards)
+  SetVariable("pending_trigger_script_ran", "1")
+end
+)lua"),
+	                            &runtime, pluginId))
+		QFAIL("Worker engine initialization failed");
+
+	auto makeAlias = [](const QString &name, const int sequence)
+	{
+		WorldRuntime::Alias alias;
+		alias.attributes.insert(QStringLiteral("name"), name);
+		alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		alias.attributes.insert(QStringLiteral("match"), QStringLiteral("^disable-alias-plugin$"));
+		alias.attributes.insert(QStringLiteral("regexp"), QStringLiteral("1"));
+		alias.attributes.insert(QStringLiteral("keep_evaluating"), QStringLiteral("1"));
+		alias.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		return alias;
+	};
+	auto makeTrigger = [](const QString &name, const int sequence)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("name"), name);
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("^disable-trigger-plugin$"));
+		trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("1"));
+		trigger.attributes.insert(QStringLiteral("keep_evaluating"), QStringLiteral("1"));
+		trigger.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+		return trigger;
+	};
+
+	WorldRuntime::Alias disablingAlias = makeAlias(QStringLiteral("disabling_alias"), 100);
+	disablingAlias.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToVariable));
+	disablingAlias.attributes.insert(QStringLiteral("variable"), QStringLiteral("disabling_alias_action"));
+	disablingAlias.children.insert(QStringLiteral("send"), QStringLiteral("disabling alias ran"));
+	WorldRuntime::Alias pendingAlias = makeAlias(QStringLiteral("pending_alias"), 200);
+	pendingAlias.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToVariable));
+	pendingAlias.attributes.insert(QStringLiteral("variable"), QStringLiteral("pending_alias_action"));
+	pendingAlias.attributes.insert(QStringLiteral("script"), QStringLiteral("pending_alias_script"));
+	pendingAlias.children.insert(QStringLiteral("send"), QStringLiteral("alias action ran"));
+
+	WorldRuntime::Trigger disablingTrigger = makeTrigger(QStringLiteral("disabling_trigger"), 100);
+	disablingTrigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToVariable));
+	disablingTrigger.attributes.insert(QStringLiteral("variable"),
+	                                   QStringLiteral("disabling_trigger_action"));
+	disablingTrigger.children.insert(QStringLiteral("send"), QStringLiteral("disabling trigger ran"));
+	WorldRuntime::Trigger pendingTrigger = makeTrigger(QStringLiteral("pending_trigger"), 200);
+	pendingTrigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToVariable));
+	pendingTrigger.attributes.insert(QStringLiteral("variable"), QStringLiteral("pending_trigger_action"));
+	pendingTrigger.attributes.insert(QStringLiteral("script"), QStringLiteral("pending_trigger_script"));
+	pendingTrigger.children.insert(QStringLiteral("send"), QStringLiteral("trigger action ran"));
+
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Disabled Pending Rules Plugin"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	plugin.enabled  = true;
+	plugin.sequence = 100;
+	plugin.lua      = engine;
+	plugin.aliases  = {disablingAlias, pendingAlias};
+	plugin.triggers = {disablingTrigger, pendingTrigger};
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	runtime.setCommandProcessor(&processor);
+	const auto detachProcessor = qScopeGuard(
+	    [&runtime, &processor]
+	    {
+		    runtime.setCommandProcessor(nullptr);
+		    processor.setRuntime(nullptr);
+	    });
+
+	QCOMPARE(processor.executeCommand(QStringLiteral("disable-alias-plugin")), eOK);
+	QString value;
+	QVERIFY(runtime.findVariable(QStringLiteral("pending_alias_action"), value));
+	QCOMPARE(value, QStringLiteral("alias action ran"));
+	QVERIFY(runtime.pluginVariableValue(pluginId, QStringLiteral("pending_alias_script_ran")).isEmpty());
+	const WorldRuntime::Plugin *storedPlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId);
+	QVERIFY(storedPlugin);
+	QVERIFY(!storedPlugin->enabled);
+	QCOMPARE(storedPlugin->aliases.at(1).invocationCount, 0);
+
+	QVERIFY(runtime.enablePlugin(pluginId, true));
+	processor.onIncomingLineReceived(QStringLiteral("disable-trigger-plugin"));
+	QVERIFY(runtime.findVariable(QStringLiteral("pending_trigger_action"), value));
+	QCOMPARE(value, QStringLiteral("trigger action ran"));
+	QVERIFY(runtime.pluginVariableValue(pluginId, QStringLiteral("pending_trigger_script_ran")).isEmpty());
+	storedPlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId);
+	QVERIFY(storedPlugin);
+	QVERIFY(!storedPlugin->enabled);
+	QCOMPARE(storedPlugin->triggers.at(1).invocationCount, 0);
+
+	runtime.dispatchTeardownLuaEngines({engine}, true);
+	if (WorldRuntime::Plugin *mutablePlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId))
+		mutablePlugin->lua.clear();
+}
+
+void tst_LuaCallbackEngine::timerEvaluationPlanSurvivesTraceStructuralMutation()
+{
+	WorldRuntime runtime;
+	runtime.setTraceEnabled(true);
+
+	const QString             pluginId = QStringLiteral("timer.plan.plugin");
+	const auto                engine   = QSharedPointer<LuaCallbackEngine>::create();
+	const ILuaExecutor *const executor = runtime.luaExecutor();
+	QVERIFY(executor);
+	if (!initializeWorkerEngine(*executor, engine, QStringLiteral(R"lua(
+timer_mutated = false
+function OnPluginTrace(message)
+  if timer_mutated or not string.find(message, "first_timer", 1, true) then return true end
+  timer_mutated = true
+  assert(DeleteTimer("first_timer") == error_code.eOK)
+  assert(SetTimerOption("second_timer", "send", "mutated second timer") == error_code.eOK)
+  assert(SetTimerOption("second_timer", "minute", 10) == error_code.eOK)
+  assert(SetTimerOption("second_timer", "enabled", 0) == error_code.eOK)
+  assert(SetTimerOption("second_timer", "one_shot", 1) == error_code.eOK)
+  assert(AddTimer("inserted_timer", 0, 0, 1, "inserted timer",
+                  timer_flag.Enabled + timer_flag.ActiveWhenClosed, "") == error_code.eOK)
+  assert(SetTimerOption("inserted_timer", "send_to", 9) == error_code.eOK)
+  assert(SetTimerOption("inserted_timer", "variable", "inserted_timer_result") == error_code.eOK)
+  return true
+end
+)lua"),
+	                            &runtime, pluginId))
+		QFAIL("Worker engine initialization failed");
+
+	auto makeTimer = [](const QString &name, const QString &send, const QString &variable)
+	{
+		WorldRuntime::Timer timer;
+		timer.attributes.insert(QStringLiteral("name"), name);
+		timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+		timer.attributes.insert(QStringLiteral("active_closed"), QStringLiteral("1"));
+		timer.attributes.insert(QStringLiteral("at_time"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("hour"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("minute"), QStringLiteral("5"));
+		timer.attributes.insert(QStringLiteral("second"), QStringLiteral("0"));
+		timer.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToVariable));
+		timer.attributes.insert(QStringLiteral("variable"), variable);
+		timer.children.insert(QStringLiteral("send"), send);
+		timer.nextFireTime = QDateTime::currentDateTime().addSecs(-1);
+		return timer;
+	};
+
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Timer Plan Plugin"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+	plugin.enabled  = true;
+	plugin.sequence = 100;
+	plugin.lua      = engine;
+	plugin.timers   = {
+	    makeTimer(QStringLiteral("first_timer"), QStringLiteral("first timer"),
+	              QStringLiteral("first_timer_result")),
+	    makeTimer(QStringLiteral("second_timer"), QStringLiteral("second timer"),
+	              QStringLiteral("second_timer_result")),
+	};
+	WorldRuntimeTestAccess::plugins(runtime).push_back(plugin);
+	QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	runtime.setCommandProcessor(&processor);
+	const auto detachProcessor = qScopeGuard(
+	    [&runtime, &processor]
+	    {
+		    runtime.setCommandProcessor(nullptr);
+		    processor.setRuntime(nullptr);
+	    });
+
+	const QDateTime checkStartedAt = QDateTime::currentDateTime();
+	processor.checkTimers();
+	const QDateTime checkFinishedAt = QDateTime::currentDateTime();
+
+	QString         value;
+	QVERIFY(!runtime.findVariable(QStringLiteral("first_timer_result"), value));
+	QVERIFY(!runtime.findVariable(QStringLiteral("inserted_timer_result"), value));
+	QVERIFY(runtime.findVariable(QStringLiteral("second_timer_result"), value));
+	QCOMPARE(value, QStringLiteral("second timer"));
+	const WorldRuntime::Plugin *storedPlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId);
+	QVERIFY(storedPlugin);
+	QCOMPARE(storedPlugin->timers.size(), 2);
+	QCOMPARE(storedPlugin->timers.at(0).attributes.value(QStringLiteral("name")),
+	         QStringLiteral("second_timer"));
+	QCOMPARE(storedPlugin->timers.at(0).children.value(QStringLiteral("send")),
+	         QStringLiteral("mutated second timer"));
+	QCOMPARE(storedPlugin->timers.at(0).attributes.value(QStringLiteral("minute")), QStringLiteral("10"));
+	QCOMPARE(storedPlugin->timers.at(0).attributes.value(QStringLiteral("enabled")), QStringLiteral("0"));
+	QCOMPARE(storedPlugin->timers.at(0).attributes.value(QStringLiteral("one_shot")), QStringLiteral("1"));
+	QVERIFY(storedPlugin->timers.at(0).nextFireTime >= checkStartedAt.addSecs(10 * 60));
+	QVERIFY(storedPlugin->timers.at(0).nextFireTime <= checkFinishedAt.addSecs(10 * 60));
+	QCOMPARE(storedPlugin->timers.at(1).attributes.value(QStringLiteral("name")),
+	         QStringLiteral("inserted_timer"));
+
+	runtime.dispatchTeardownLuaEngines({engine}, true);
+	if (WorldRuntime::Plugin *mutablePlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId))
+		mutablePlugin->lua.clear();
+}
+
+void tst_LuaCallbackEngine::aliasMissesPublishRuntimeSnapshotOncePerScope()
+{
+	auto makeAlias = [](const QString &name, const QString &match)
+	{
+		WorldRuntime::Alias alias;
+		alias.attributes.insert(QStringLiteral("name"), name);
+		alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		alias.attributes.insert(QStringLiteral("match"), match);
+		alias.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+		alias.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		alias.lastMatchWildcards = {QStringLiteral("previous")};
+		return alias;
+	};
+
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
+	runtime.setAliases({makeAlias(QStringLiteral("first"), QStringLiteral("^first$")),
+	                    makeAlias(QStringLiteral("second"), QStringLiteral("^second$"))});
+	runtime.ensureAllAliasRuntimeIds();
+	QVERIFY(captureVariableDispatchSnapshotForTest(runtime));
+
+	constexpr auto aliasesIndex = static_cast<size_t>(WorldRuntime::LuaCallbackStableSnapshotDomain::Aliases);
+	const quint64  aliasesBefore = runtime.m_luaCallbackStableSnapshotDomainPopulationCounts.at(aliasesIndex);
+
+	WorldCommandProcessor processor;
+	processor.setRuntime(&runtime);
+	QCOMPARE(processor.executeCommand(QStringLiteral("unmatched")), eOK);
+
+	QCOMPARE(runtime.m_luaCallbackStableSnapshotDomainPopulationCounts.at(aliasesIndex), aliasesBefore + 1);
+	QCOMPARE(runtime.aliases().at(0).matchAttempts, 1);
+	QCOMPARE(runtime.aliases().at(1).matchAttempts, 1);
+	QVERIFY(runtime.aliases().at(0).lastMatchWildcards.isEmpty());
+	QVERIFY(runtime.aliases().at(1).lastMatchWildcards.isEmpty());
 }
 
 void tst_LuaCallbackEngine::timerScheduleRuntimeMutationsPatchWithoutDirtyingWorld()
@@ -7051,11 +8844,16 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectMutableRuntimeDomain
 
 	WorldRuntime::Trigger &mutableTrigger = WorldRuntimeTestAccess::triggers(runtime).first();
 	mutableTrigger.matched                = 7;
+	mutableTrigger.matchCount             = 6;
 	mutableTrigger.matchAttempts          = 11;
 	mutableTrigger.executionTimeNs        = 17'000'000;
+	mutableTrigger.lastMatchWildcards     = {QStringLiteral("trigger-whole"), QStringLiteral("trigger-one")};
 	WorldRuntime::Alias &mutableAlias     = WorldRuntimeTestAccess::aliases(runtime).first();
 	mutableAlias.matched                  = 5;
+	mutableAlias.matchCount               = 4;
 	mutableAlias.matchAttempts            = 13;
+	mutableAlias.executionTimeNs          = 19'000'000;
+	mutableAlias.lastMatchWildcards       = {QStringLiteral("alias-whole"), QStringLiteral("alias-one")};
 	WorldRuntime::Timer &mutableTimer     = WorldRuntimeTestAccess::timers(runtime).first();
 	mutableTimer.firedCount               = 3;
 	mutableTimer.invocationCount          = 2;
@@ -7074,10 +8872,17 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectMutableRuntimeDomain
 	const LuaCallbackTimerSnapshot &timerSnapshot =
 	    rulesChanged->timerListsByPluginId.value(QString()).constFirst();
 	QCOMPARE(triggerSnapshot.matched, 7);
+	QCOMPARE(triggerSnapshot.matchCount, 6);
 	QCOMPARE(triggerSnapshot.matchAttempts, 11);
 	QCOMPARE(triggerSnapshot.executionTimeNs, qint64{17'000'000});
+	QCOMPARE(triggerSnapshot.lastMatchWildcards,
+	         QStringList({QStringLiteral("trigger-whole"), QStringLiteral("trigger-one")}));
 	QCOMPARE(aliasSnapshot.matched, 5);
+	QCOMPARE(aliasSnapshot.matchCount, 4);
 	QCOMPARE(aliasSnapshot.matchAttempts, 13);
+	QCOMPARE(aliasSnapshot.executionTimeNs, qint64{19'000'000});
+	QCOMPARE(aliasSnapshot.lastMatchWildcards,
+	         QStringList({QStringLiteral("alias-whole"), QStringLiteral("alias-one")}));
 	QCOMPARE(timerSnapshot.firedCount, 3);
 	QCOMPARE(timerSnapshot.invocationCount, 2);
 	QCOMPARE(rulesChanged->triggerWildcardsSnapshot.value(QStringLiteral("tracked_trigger")).constFirst(),
@@ -7153,6 +8958,53 @@ void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectMutableRuntimeDomain
 	QVERIFY(soundChanged->soundBufferReusableByBuffer.value(1));
 	QCOMPARE(acceleratorChanged->soundStatusByBuffer.value(1), -2);
 	QCOMPARE(initial->soundStatusByBuffer.value(1), -2);
+}
+
+void tst_LuaCallbackEngine::aliasRuntimeItemPatchUsesStableIdentity()
+{
+	auto makeAlias = [](const QString &name)
+	{
+		WorldRuntime::Alias alias;
+		alias.attributes.insert(QStringLiteral("name"), name);
+		return alias;
+	};
+
+	WorldRuntime runtime;
+	runtime.setAliases({makeAlias(QStringLiteral("first_alias")), makeAlias(QStringLiteral("second_alias"))});
+	runtime.ensureAllAliasRuntimeIds();
+	const auto initial = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(initial);
+
+	QList<WorldRuntime::Alias> &aliases  = WorldRuntimeTestAccess::aliases(runtime);
+	const quint64               firstId  = aliases.at(0).runtimeId;
+	const quint64               secondId = aliases.at(1).runtimeId;
+	QVERIFY(firstId != 0);
+	QVERIFY(secondId != 0);
+	QVERIFY(firstId != secondId);
+
+	aliases[1].matched = 7;
+	runtime.markAliasRuntimeStateChanged(QString(), secondId, 1);
+	const auto secondChanged = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(secondChanged);
+	QCOMPARE(secondChanged->aliasListsByPluginId.value(QString()).at(0).matched, 0);
+	QCOMPARE(secondChanged->aliasListsByPluginId.value(QString()).at(1).matched, 7);
+	QCOMPARE(initial->aliasListsByPluginId.value(QString()).at(1).matched, 0);
+
+	aliases[0].matched = 9;
+	runtime.markAliasRuntimeStateChanged(QString(), firstId, 1);
+	const auto staleHintChanged = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(staleHintChanged);
+	QCOMPARE(staleHintChanged->aliasListsByPluginId.value(QString()).at(0).matched, 9);
+	QCOMPARE(staleHintChanged->aliasListsByPluginId.value(QString()).at(1).matched, 7);
+	QCOMPARE(secondChanged->aliasListsByPluginId.value(QString()).at(0).matched, 0);
+
+	aliases[0].matched = 11;
+	aliases[1].matched = 12;
+	runtime.markAliasRuntimeStateChanged(QString(), std::numeric_limits<quint64>::max(), -1);
+	const auto unresolvedIdentityChanged = captureVariableDispatchSnapshotForTest(runtime);
+	QVERIFY(unresolvedIdentityChanged);
+	QCOMPARE(unresolvedIdentityChanged->aliasListsByPluginId.value(QString()).at(0).matched, 11);
+	QCOMPARE(unresolvedIdentityChanged->aliasListsByPluginId.value(QString()).at(1).matched, 12);
 }
 
 void tst_LuaCallbackEngine::callbackDispatchSnapshotsReflectUdpState()

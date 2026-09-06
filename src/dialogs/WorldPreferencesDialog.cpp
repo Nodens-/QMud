@@ -10911,6 +10911,7 @@ void WorldPreferencesDialog::populateTriggers()
 
 					pushNumber("invocation_count", tr.invocationCount);
 					pushNumber("times_matched", tr.matched);
+					pushNumber("match_count", tr.matchCount);
 					pushNumber("execution_time", tr.executionTimeSeconds());
 					if (tr.lastMatched.isValid())
 						pushString("when_matched", tr.lastMatched.toString(Qt::ISODate));
@@ -11133,7 +11134,8 @@ void WorldPreferencesDialog::populateAliases()
 
 					pushNumber("invocation_count", al.invocationCount);
 					pushNumber("times_matched", al.matched);
-					pushNumber("match_count", al.matched);
+					pushNumber("match_count", al.matchCount);
+					pushNumber("execution_time", al.executionTimeSeconds());
 					if (al.lastMatched.isValid())
 						pushString("when_matched", al.lastMatched.toString(Qt::ISODate));
 					pushBool("temporary", qmudIsEnabledFlag(attrs.value(QStringLiteral("temporary"))));

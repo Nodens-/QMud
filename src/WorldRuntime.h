@@ -259,9 +259,11 @@ class WorldRuntime : public QObject
 				bool                   included{false};
 				int                    matched{0};
 				int                    invocationCount{0};
+				int                    matchCount{0};
 				int                    matchAttempts{0};
 				qint64                 executionTimeNs{0};
 				QString                lastMatchTarget;
+				QStringList            lastMatchWildcards;
 				QDateTime              lastMatched;
 				quint64                runtimeId{0};
 				int                    executingScriptDepth{0};
@@ -286,12 +288,24 @@ class WorldRuntime : public QObject
 				bool                   included{false};
 				int                    matched{0};
 				int                    invocationCount{0};
+				int                    matchCount{0};
 				int                    matchAttempts{0};
+				qint64                 executionTimeNs{0};
 				QString                lastMatchTarget;
+				QStringList            lastMatchWildcards;
 				QDateTime              lastMatched;
 				quint64                runtimeId{0};
 				int                    executingScriptDepth{0};
 				bool                   executingScript{false};
+
+				/**
+				 * @brief Returns cumulative regular-expression execution time in seconds.
+				 * @return Accumulated match execution time.
+				 */
+				[[nodiscard]] double   executionTimeSeconds() const noexcept
+				{
+					return static_cast<double>(executionTimeNs) / 1'000'000'000.0;
+				}
 		};
 		/**
 		 * @brief Live timer state including scheduling and invocation metadata.
@@ -693,79 +707,90 @@ class WorldRuntime : public QObject
 		 * @brief Returns trigger list.
 		 * @return Immutable trigger list.
 		 */
-		[[nodiscard]] const QList<Trigger>  &triggers() const;
+		[[nodiscard]] const QList<Trigger> &triggers() const;
 		/**
 		 * @brief Ensures one trigger has a unique runtime identity.
 		 * @param trigger Trigger owned by this runtime.
 		 * @return Stable nonzero runtime identity.
 		 */
-		quint64                              ensureRuleRuntimeId(Trigger &trigger);
+		quint64                             ensureRuleRuntimeId(Trigger &trigger);
 		/**
 		 * @brief Ensures every world trigger has a unique runtime identity.
 		 */
-		void                                 ensureWorldTriggerRuntimeIds();
+		void                                ensureWorldTriggerRuntimeIds();
 		/**
 		 * @brief Returns current trigger rule generation for processor caches.
 		 * @return Monotonic generation incremented when trigger definitions change.
 		 */
-		[[nodiscard]] quint64                triggerRuleGeneration() const;
+		[[nodiscard]] quint64               triggerRuleGeneration() const;
 		/**
 		 * @brief Replaces trigger list.
 		 * @param triggers New trigger list.
 		 */
-		void                                 setTriggers(const QList<Trigger> &triggers);
+		void                                setTriggers(const QList<Trigger> &triggers);
 		/**
 		 * @brief Marks trigger collection as modified.
 		 */
-		void                                 markTriggersChanged();
+		void                                markTriggersChanged();
 		/**
 		 * @brief Publishes trigger execution/statistics state without treating it as a definition edit.
 		 * @param pluginId Owning plugin id, or empty for world triggers.
 		 */
-		void                                 markTriggerRuntimeStateChanged(const QString &pluginId = {});
+		void                                markTriggerRuntimeStateChanged(const QString &pluginId = {});
 		/**
 		 * @brief Marks trigger evaluation rules as changed without changing save state.
 		 */
-		void                                 markTriggerRulesChanged();
+		void                                markTriggerRulesChanged();
 		/**
 		 * @brief Commits a plugin trigger mutation to rule generations and the stable callback snapshot.
 		 * @param pluginId Owning plugin id.
 		 */
-		void                                 markPluginTriggersChanged(const QString &pluginId);
+		void                                markPluginTriggersChanged(const QString &pluginId);
 		/**
 		 * @brief Returns alias list.
 		 * @return Immutable alias list.
 		 */
-		[[nodiscard]] const QList<Alias>    &aliases() const;
+		[[nodiscard]] const QList<Alias>   &aliases() const;
 		/**
 		 * @brief Ensures one alias has a unique runtime identity.
 		 * @param alias Alias owned by this runtime.
 		 * @return Stable nonzero runtime identity.
 		 */
-		quint64                              ensureRuleRuntimeId(Alias &alias);
+		quint64                             ensureRuleRuntimeId(Alias &alias);
 		/**
 		 * @brief Ensures every world alias has a unique runtime identity.
 		 */
-		void                                 ensureWorldAliasRuntimeIds();
+		void                                ensureWorldAliasRuntimeIds();
+		/**
+		 * @brief Ensures every world and plugin alias has a unique runtime identity.
+		 */
+		void                                ensureAllAliasRuntimeIds();
 		/**
 		 * @brief Replaces alias list.
 		 * @param aliases New alias list.
 		 */
-		void                                 setAliases(const QList<Alias> &aliases);
+		void                                setAliases(const QList<Alias> &aliases);
 		/**
 		 * @brief Marks alias collection as modified.
 		 */
-		void                                 markAliasesChanged();
+		void                                markAliasesChanged();
 		/**
 		 * @brief Publishes alias execution/statistics state without treating it as a definition edit.
 		 * @param pluginId Owning plugin id, or empty for world aliases.
 		 */
-		void                                 markAliasRuntimeStateChanged(const QString &pluginId = {});
+		void                                markAliasRuntimeStateChanged(const QString &pluginId = {});
+		/**
+		 * @brief Commits one alias runtime-state mutation to the stable callback snapshot.
+		 * @param pluginId Owning plugin id, or empty for world aliases.
+		 * @param runtimeId Stable identity of the changed alias.
+		 * @param indexHint Current list index, validated against runtimeId before use.
+		 */
+		void markAliasRuntimeStateChanged(const QString &pluginId, quint64 runtimeId, int indexHint);
 		/**
 		 * @brief Commits a plugin alias mutation to the stable callback snapshot.
 		 * @param pluginId Owning plugin id.
 		 */
-		void                                 markPluginAliasesChanged(const QString &pluginId);
+		void markPluginAliasesChanged(const QString &pluginId);
 		/**
 		 * @brief Returns timer list.
 		 * @return Immutable timer list.
@@ -5648,20 +5673,24 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Optional narrowing for one stable-domain patch.
 		 *
-		 * An empty `pluginId` identifies world scope. `itemName` further narrows item-addressable domains.
-		 * Typed fields keep batching and population free of composite-key parsing conventions.
+		 * An empty `pluginId` identifies world scope. `itemName` further narrows name-addressable domains.
+		 * `runtimeId` identifies one rule independently of mutable names, while `indexHint` is accepted only after
+		 * that identity is verified. Typed fields keep batching and population free of composite-key parsing
+		 * conventions.
 		 */
 		struct LuaCallbackStableSnapshotPatchScope
 		{
 				QString       pluginId;
 				QString       itemName;
+				quint64       runtimeId{0};
+				int           indexHint{-1};
 
 				bool          operator==(const LuaCallbackStableSnapshotPatchScope &) const = default;
 
 				friend size_t qHash(const LuaCallbackStableSnapshotPatchScope &scope,
 				                    const size_t                               seed = 0) noexcept
 				{
-					return qHashMulti(seed, scope.pluginId, scope.itemName);
+					return qHashMulti(seed, scope.pluginId, scope.itemName, scope.runtimeId, scope.indexHint);
 				}
 		};
 		[[nodiscard]] static constexpr quint32
@@ -5717,6 +5746,8 @@ class WorldRuntime : public QObject
 		 */
 		void patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain domain, const QString &pluginId,
 		                                    const QString &itemName) const;
+		void patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain            domain,
+		                                    const LuaCallbackStableSnapshotPatchScope &scope) const;
 		/**
 		 * @brief Refreshes one full or scoped stable snapshot domain from authoritative runtime state.
 		 */
@@ -5745,8 +5776,9 @@ class WorldRuntime : public QObject
 		static void clearLuaCallbackDispatchVolatileSnapshot(LuaCallbackSnapshot &snapshot);
 		void populateLuaCallbackTriggerSnapshots(LuaCallbackSnapshot          &snapshot,
 		                                         const std::optional<QString> &pluginId = std::nullopt) const;
-		void populateLuaCallbackAliasSnapshots(LuaCallbackSnapshot          &snapshot,
-		                                       const std::optional<QString> &pluginId = std::nullopt) const;
+		void populateLuaCallbackAliasSnapshots(
+		    LuaCallbackSnapshot                                      &snapshot,
+		    const std::optional<LuaCallbackStableSnapshotPatchScope> &scope = std::nullopt) const;
 		void populateLuaCallbackTimerSnapshots(LuaCallbackSnapshot          &snapshot,
 		                                       const std::optional<QString> &pluginId = std::nullopt) const;
 		void populateLuaCallbackWorldVariableSnapshots(LuaCallbackSnapshot &snapshot) const;
@@ -6873,6 +6905,7 @@ namespace QMudLuaCallbackRuleSnapshot
 {
 	[[nodiscard]] QList<LuaCallbackTriggerSnapshot>
 	                                              fromTriggers(const QList<WorldRuntime::Trigger> &triggers);
+	[[nodiscard]] LuaCallbackAliasSnapshot        fromAlias(const WorldRuntime::Alias &alias);
 	[[nodiscard]] QList<LuaCallbackAliasSnapshot> fromAliases(const QList<WorldRuntime::Alias> &aliases);
 	[[nodiscard]] QList<LuaCallbackTimerSnapshot> fromTimers(const QList<WorldRuntime::Timer> &timers);
 } // namespace QMudLuaCallbackRuleSnapshot

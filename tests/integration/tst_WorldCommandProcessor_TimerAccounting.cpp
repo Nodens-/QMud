@@ -47,24 +47,11 @@ namespace
 				const auto evaluation = QMudTimerScheduling::evaluateTimerDue(timer, now, true);
 				QVERIFY(evaluation.due);
 				QVERIFY(!evaluation.runtimeStateChanged);
-				QVERIFY(!QMudTimerScheduling::applyTimerFiredState(timer, now));
+				QMudTimerScheduling::applyTimerFiredState(timer, now);
 
 				QCOMPARE(timer.firedCount, 1);
 				QCOMPARE(timer.lastFired, now);
 				QVERIFY(timer.nextFireTime > now);
-			}
-
-			void oneShotTimerRequestsDeletionAfterFire()
-			{
-				WorldRuntime::Timer timer = makeTimer(QStringLiteral("once"));
-				timer.attributes.insert(QStringLiteral("one_shot"), QStringLiteral("1"));
-				const QDateTime now(QDate(2026, 3, 15), QTime(12, 0, 0), QTimeZone::UTC);
-				timer.nextFireTime = now;
-
-				QVERIFY(QMudTimerScheduling::evaluateTimerDue(timer, now, true).due);
-				QVERIFY(QMudTimerScheduling::applyTimerFiredState(timer, now));
-
-				QCOMPARE(timer.attributes.value(QStringLiteral("enabled")), QStringLiteral("1"));
 			}
 
 			void resetTimerFieldsUsesInjectedClockForAtTime()

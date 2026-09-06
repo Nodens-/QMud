@@ -9964,9 +9964,11 @@ namespace QMudLuaCallbackRuleSnapshot
 			row.included             = trigger.included;
 			row.matched              = trigger.matched;
 			row.invocationCount      = trigger.invocationCount;
+			row.matchCount           = trigger.matchCount;
 			row.matchAttempts        = trigger.matchAttempts;
 			row.executionTimeNs      = trigger.executionTimeNs;
 			row.lastMatchTarget      = trigger.lastMatchTarget;
+			row.lastMatchWildcards   = trigger.lastMatchWildcards;
 			row.lastMatched          = trigger.lastMatched;
 			row.runtimeId            = trigger.runtimeId;
 			row.executingScriptDepth = trigger.executingScriptDepth;
@@ -9976,26 +9978,32 @@ namespace QMudLuaCallbackRuleSnapshot
 		return rows;
 	}
 
+	LuaCallbackAliasSnapshot fromAlias(const WorldRuntime::Alias &alias)
+	{
+		LuaCallbackAliasSnapshot row;
+		row.attributes           = alias.attributes;
+		row.children             = alias.children;
+		row.included             = alias.included;
+		row.matched              = alias.matched;
+		row.invocationCount      = alias.invocationCount;
+		row.matchCount           = alias.matchCount;
+		row.matchAttempts        = alias.matchAttempts;
+		row.executionTimeNs      = alias.executionTimeNs;
+		row.lastMatchTarget      = alias.lastMatchTarget;
+		row.lastMatchWildcards   = alias.lastMatchWildcards;
+		row.lastMatched          = alias.lastMatched;
+		row.runtimeId            = alias.runtimeId;
+		row.executingScriptDepth = alias.executingScriptDepth;
+		row.executingScript      = alias.executingScript;
+		return row;
+	}
+
 	QList<LuaCallbackAliasSnapshot> fromAliases(const QList<WorldRuntime::Alias> &aliases)
 	{
 		QList<LuaCallbackAliasSnapshot> rows;
 		rows.reserve(aliases.size());
 		for (const WorldRuntime::Alias &alias : aliases)
-		{
-			LuaCallbackAliasSnapshot row;
-			row.attributes           = alias.attributes;
-			row.children             = alias.children;
-			row.included             = alias.included;
-			row.matched              = alias.matched;
-			row.invocationCount      = alias.invocationCount;
-			row.matchAttempts        = alias.matchAttempts;
-			row.lastMatchTarget      = alias.lastMatchTarget;
-			row.lastMatched          = alias.lastMatched;
-			row.runtimeId            = alias.runtimeId;
-			row.executingScriptDepth = alias.executingScriptDepth;
-			row.executingScript      = alias.executingScript;
-			rows.push_back(std::move(row));
-		}
+			rows.push_back(fromAlias(alias));
 		return rows;
 	}
 
@@ -10097,6 +10105,13 @@ void WorldRuntime::patchLuaCallbackStableSnapshot(const LuaCallbackStableSnapsho
 
 void WorldRuntime::patchLuaCallbackStableSnapshot(const LuaCallbackStableSnapshotDomain domain,
                                                   const QString &pluginId, const QString &itemName) const
+
+{
+	patchLuaCallbackStableSnapshot(domain, LuaCallbackStableSnapshotPatchScope{pluginId, itemName});
+}
+
+void WorldRuntime::patchLuaCallbackStableSnapshot(const LuaCallbackStableSnapshotDomain      domain,
+                                                  const LuaCallbackStableSnapshotPatchScope &scope) const
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::patchLuaCallbackStableSnapshot");
 	if (!m_luaCallbackDispatchSnapshotBaseCache ||
@@ -10104,17 +10119,16 @@ void WorldRuntime::patchLuaCallbackStableSnapshot(const LuaCallbackStableSnapsho
 	{
 		return;
 	}
-	const LuaCallbackStableSnapshotPatchScope scope{pluginId, itemName};
 	if (m_luaCallbackSnapshotMutationBatchDepth > 0)
 	{
 		QSet<LuaCallbackStableSnapshotPatchScope> &pendingScopes =
 		    m_pendingLuaCallbackScopedSnapshotPatchIdsByDomain[domain];
 		const LuaCallbackStableSnapshotPatchScope fullPluginScope{scope.pluginId, QString()};
-		if (scope.itemName.isEmpty())
+		if (scope.itemName.isEmpty() && scope.runtimeId == 0)
 		{
 			pendingScopes.removeIf([&scope](const LuaCallbackStableSnapshotPatchScope &pending)
 			                       { return pending.pluginId == scope.pluginId; });
-			pendingScopes.insert(scope);
+			pendingScopes.insert(fullPluginScope);
 		}
 		else if (!pendingScopes.contains(fullPluginScope))
 		{
@@ -10190,8 +10204,7 @@ void WorldRuntime::populateLuaCallbackStableSnapshotDomains(
 			                                                    : std::nullopt);
 			break;
 		case LuaCallbackStableSnapshotDomain::Aliases:
-			populateLuaCallbackAliasSnapshots(snapshot,
-			                                  scope ? std::optional<QString>{scope->pluginId} : std::nullopt);
+			populateLuaCallbackAliasSnapshots(snapshot, scope);
 			break;
 		case LuaCallbackStableSnapshotDomain::Timers:
 			populateLuaCallbackTimerSnapshots(snapshot,
@@ -10792,10 +10805,10 @@ void WorldRuntime::populateLuaCallbackTriggerSnapshots(LuaCallbackSnapshot      
 		snapshot.pluginInfoValuesById[scopeId].insert(9, plugin->triggers.size());
 }
 
-void WorldRuntime::populateLuaCallbackAliasSnapshots(LuaCallbackSnapshot          &snapshot,
-                                                     const std::optional<QString> &pluginId) const
+void WorldRuntime::populateLuaCallbackAliasSnapshots(
+    LuaCallbackSnapshot &snapshot, const std::optional<LuaCallbackStableSnapshotPatchScope> &scope) const
 {
-	if (!pluginId)
+	if (!scope)
 	{
 		snapshot.aliasListsByPluginId.clear();
 		snapshot.missingAliasListPluginIds.clear();
@@ -10816,7 +10829,7 @@ void WorldRuntime::populateLuaCallbackAliasSnapshots(LuaCallbackSnapshot        
 		return;
 	}
 
-	const QString &scopeId = *pluginId;
+	const QString &scopeId = scope->pluginId;
 	const Plugin  *plugin  = scopeId.isEmpty() ? nullptr : findPluginByCanonicalId(m_plugins, scopeId);
 	if (!scopeId.isEmpty() && !plugin)
 	{
@@ -10824,8 +10837,53 @@ void WorldRuntime::populateLuaCallbackAliasSnapshots(LuaCallbackSnapshot        
 		snapshot.missingAliasListPluginIds.insert(scopeId);
 		return;
 	}
-	snapshot.aliasListsByPluginId.insert(
-	    scopeId, QMudLuaCallbackRuleSnapshot::fromAliases(plugin ? plugin->aliases : m_aliases));
+
+	const QList<Alias> &aliases = plugin ? plugin->aliases : m_aliases;
+	if (scope->runtimeId != 0)
+	{
+		auto snapshotList = snapshot.aliasListsByPluginId.find(scopeId);
+		int  aliasIndex   = scope->indexHint;
+		if (aliasIndex < 0 || aliasIndex >= aliases.size() ||
+		    aliases.at(aliasIndex).runtimeId != scope->runtimeId)
+		{
+			aliasIndex = -1;
+			for (int index = 0; index < aliases.size(); ++index)
+			{
+				if (aliases.at(index).runtimeId == scope->runtimeId)
+				{
+					aliasIndex = index;
+					break;
+				}
+			}
+		}
+
+		if (snapshotList != snapshot.aliasListsByPluginId.end() && snapshotList->size() == aliases.size() &&
+		    aliasIndex >= 0)
+		{
+			int snapshotIndex = aliasIndex;
+			if (snapshotList->at(snapshotIndex).runtimeId != scope->runtimeId)
+			{
+				snapshotIndex = -1;
+				for (int index = 0; index < snapshotList->size(); ++index)
+				{
+					if (snapshotList->at(index).runtimeId == scope->runtimeId)
+					{
+						snapshotIndex = index;
+						break;
+					}
+				}
+			}
+			if (snapshotIndex >= 0)
+			{
+				(*snapshotList)[snapshotIndex] =
+				    QMudLuaCallbackRuleSnapshot::fromAlias(aliases.at(aliasIndex));
+				snapshot.missingAliasListPluginIds.remove(scopeId);
+				return;
+			}
+		}
+	}
+
+	snapshot.aliasListsByPluginId.insert(scopeId, QMudLuaCallbackRuleSnapshot::fromAliases(aliases));
 	snapshot.missingAliasListPluginIds.remove(scopeId);
 	if (plugin)
 		snapshot.pluginInfoValuesById[scopeId].insert(10, plugin->aliases.size());
@@ -19826,6 +19884,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	}
 	sortPluginsBySequence();
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
+	ensureAllAliasRuntimeIds();
 	invalidatePluginCallbackPresenceCache();
 	invalidateLuaCallbackDispatchSnapshot();
 	markTriggerRulesChanged();
@@ -20509,6 +20568,57 @@ void WorldRuntime::ensureWorldAliasRuntimeIds()
 		markAliasRuntimeStateChanged();
 }
 
+void WorldRuntime::ensureAllAliasRuntimeIds()
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureAllAliasRuntimeIds");
+	QSet<quint64> reservedRuntimeIds;
+	for (const Alias &alias : m_aliases)
+	{
+		if (alias.runtimeId != 0)
+			reservedRuntimeIds.insert(alias.runtimeId);
+	}
+	for (const Plugin &plugin : m_plugins)
+	{
+		for (const Alias &alias : plugin.aliases)
+		{
+			if (alias.runtimeId != 0)
+				reservedRuntimeIds.insert(alias.runtimeId);
+		}
+	}
+
+	QSet<quint64> claimedRuntimeIds;
+	auto          ensureList = [&](QList<Alias> &aliases)
+	{
+		bool changed = false;
+		for (Alias &alias : aliases)
+		{
+			if (alias.runtimeId == 0 || claimedRuntimeIds.contains(alias.runtimeId))
+			{
+				do
+				{
+					alias.runtimeId = nextRuleRuntimeId();
+				} while (reservedRuntimeIds.contains(alias.runtimeId));
+				reservedRuntimeIds.insert(alias.runtimeId);
+				changed = true;
+			}
+			claimedRuntimeIds.insert(alias.runtimeId);
+		}
+		return changed;
+	};
+
+	if (ensureList(m_aliases))
+		markAliasRuntimeStateChanged();
+	for (Plugin &plugin : m_plugins)
+	{
+		if (ensureList(plugin.aliases))
+		{
+			const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
+			if (!pluginId.isEmpty())
+				markAliasRuntimeStateChanged(pluginId);
+		}
+	}
+}
+
 QList<WorldRuntime::Alias> &WorldRuntime::aliasesMutable()
 {
 	return m_aliases;
@@ -20523,6 +20633,7 @@ void WorldRuntime::setAliases(const QList<Alias> &aliases)
 		applyAliasDefaults(ra);
 		m_aliases.push_back(ra);
 	}
+	ensureAllAliasRuntimeIds();
 	m_aliasCount        = safeQSizeToInt(m_aliases.size());
 	m_worldFileModified = true;
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Aliases);
@@ -20530,6 +20641,7 @@ void WorldRuntime::setAliases(const QList<Alias> &aliases)
 
 void WorldRuntime::markAliasesChanged()
 {
+	ensureAllAliasRuntimeIds();
 	m_aliasCount        = safeQSizeToInt(m_aliases.size());
 	m_worldFileModified = true;
 	markAliasRuntimeStateChanged();
@@ -20546,9 +20658,25 @@ void WorldRuntime::markAliasRuntimeStateChanged(const QString &pluginId)
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Aliases, pluginId);
 }
 
+void WorldRuntime::markAliasRuntimeStateChanged(const QString &pluginId, const quint64 runtimeId,
+                                                const int indexHint)
+{
+	if (QThread::currentThread() != thread())
+	{
+		qmudInvokeMethodChecked(this, [this, pluginId, runtimeId, indexHint]
+		                        { markAliasRuntimeStateChanged(pluginId, runtimeId, indexHint); });
+		return;
+	}
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::markAliasRuntimeStateChanged");
+	patchLuaCallbackStableSnapshot(
+	    LuaCallbackStableSnapshotDomain::Aliases,
+	    LuaCallbackStableSnapshotPatchScope{pluginId, QString(), runtimeId, indexHint});
+}
+
 void WorldRuntime::markPluginAliasesChanged(const QString &pluginId)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::markPluginAliasesChanged");
+	ensureAllAliasRuntimeIds();
 	markAliasRuntimeStateChanged(pluginId);
 }
 
@@ -22284,6 +22412,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 	m_plugins.push_back(rp);
 	sortPluginsBySequence();
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
+	ensureAllAliasRuntimeIds();
 	noteTimerStructureMutation();
 	invalidatePluginCallbackPresenceCache();
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);

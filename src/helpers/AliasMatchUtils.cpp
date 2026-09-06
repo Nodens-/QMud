@@ -31,8 +31,15 @@ namespace
 namespace QMudAliasMatch
 {
 	MatchResult matchWithCaptures(const QRegularExpression &regex, const QString &subject,
-	                              const bool allowEmptyMatch, const int startOffset, qint64 *executionTimeNs)
+	                              const bool allowEmptyMatch, const int startOffset, qint64 *executionTimeNs,
+	                              int *matchAttempts)
 	{
+		MatchResult out;
+		if (!regex.isValid())
+			return out;
+
+		if (matchAttempts)
+			++*matchAttempts;
 		QElapsedTimer executionTimer;
 		if (executionTimeNs)
 			executionTimer.start();
@@ -40,18 +47,26 @@ namespace QMudAliasMatch
 		if (executionTimeNs)
 			*executionTimeNs += executionTimer.nsecsElapsed();
 
-		MatchResult out;
 		if (!match.hasMatch())
 			return out;
 
 		if (!allowEmptyMatch && match.capturedLength(0) == 0)
 			return out;
 
-		out.matched  = true;
-		out.startCol = safeQSizeToInt(match.capturedStart(0));
-		out.endCol   = safeQSizeToInt(match.capturedEnd(0));
+		out.matched    = true;
+		out.startCol   = safeQSizeToInt(match.capturedStart(0));
+		out.endCol     = safeQSizeToInt(match.capturedEnd(0));
+		out.matchCount = 1;
 
 		const int captureCount = regex.captureCount();
+		for (int i = captureCount; i > 0; --i)
+		{
+			if (match.capturedStart(i) >= 0)
+			{
+				out.matchCount = i + 1;
+				break;
+			}
+		}
 		out.wildcards.reserve(captureCount + 1);
 		for (int i = 0; i <= captureCount; ++i)
 			out.wildcards.append(capturedOrEmpty(match, i));
