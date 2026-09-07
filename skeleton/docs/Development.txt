@@ -65,6 +65,12 @@ and potential contributors need to fully understand them.
   DispatchSynchronously. A retained modal continuation inherits synchronous dispatch and resumes at the original
   callback-lane position without entering asynchronous completion sequencing, while non-retained modal continuations
   remain asynchronous.
+- Production code commits pending incoming partial lines only through WorldView::commitPendingIncomingPartialOutput().
+  That boundary clears the partial presentation overlay before requesting the corresponding OnPluginScreendraw
+  dispatch. The established ScreenDraw non-recursion guard suppresses the request when it occurs inside an active
+  ScreenDraw callback. The storage-only WorldRuntime operation stays private. Only the WorldView boundary implementation
+  calls it in production, and tests that intentionally do not exercise presentation access it through
+  WorldRuntimeTestAccess.
 
 
 2. Snapshot model

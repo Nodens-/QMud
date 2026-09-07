@@ -68,10 +68,13 @@ namespace
 	const QString           kEligibilityMutatorPluginId   = QStringLiteral("ccddee001122334455667788");
 	const QString           kEligibilityVictimPluginId    = QStringLiteral("ddee00112233445566778899");
 	const QString           kEligibilityRecorderPluginId  = QStringLiteral("ee00112233445566778899aa");
+	const QString           kMushReaderOmitPluginId       = QStringLiteral("ff00112233445566778899aa");
+	const QString           kScreenDrawRecorderPluginId   = QStringLiteral("0f112233445566778899aabb");
 	const QString           kTelnetTriggerLine            = QStringLiteral("qxv-lattice-17");
 	const QString           kTelnetAfterLine              = QStringLiteral("qxv-after-64");
 
 	constexpr unsigned char IAC   = 0xFF;
+	constexpr unsigned char GA    = 0xF9;
 	constexpr unsigned char SB    = 0xFA;
 	constexpr unsigned char SE    = 0xF0;
 	constexpr unsigned char GMCP  = 201;
@@ -215,6 +218,85 @@ end
 
 function OnPluginDisconnect()
   SetVariable("disconnect_marker", "disconnected")
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml"));
+	}
+
+	/**
+	 * @brief Writes a plugin whose Lua trigger callback omits a completed prompt.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writeMushReaderOmitTriggerPlugin(const QString &pluginsDir)
+	{
+		const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("mushreader_omit_trigger.xml"));
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="MushReaderOmitTrigger"
+    author="QMud Test"
+    id=")xml") + kMushReaderOmitPluginId + QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function qcb_omit_prompt()
+  local count = tonumber(GetVariable("omit_callback_count")) or 0
+  SetVariable("omit_callback_count", tostring(count + 1))
+end
+]]></script>
+  </plugin>
+  <triggers>
+    <trigger
+      name="omit_prompt"
+      enabled="y"
+      match="^&lt;plugin-omitted&gt; $"
+      omit_from_output="y"
+      regexp="y"
+      send_to="12"
+      sequence="100">
+      <send>qcb_omit_prompt()</send>
+    </trigger>
+  </triggers>
+</muclient>
+)xml"));
+	}
+
+	/**
+	 * @brief Writes a plugin that records completed screen-draw callbacks in plugin variables.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writeScreenDrawRecorderPlugin(const QString &pluginsDir)
+	{
+		const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("screen_draw_recorder.xml"));
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="ScreenDrawRecorder"
+    author="QMud Test"
+    id=")xml") + kScreenDrawRecorderPluginId +
+		                                     QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function OnPluginScreendraw(draw_type, log, line)
+  local count = tonumber(GetVariable("screen_draw_count")) or 0
+  local next_count = count + 1
+  local suffix = tostring(next_count)
+  SetVariable("screen_draw_count", suffix)
+  SetVariable("screen_draw_type", string.format("%.0f", draw_type))
+  SetVariable("screen_draw_log", string.format("%.0f", log))
+  SetVariable("screen_draw_text", line)
+  SetVariable("screen_draw_type_" .. suffix, string.format("%.0f", draw_type))
+  SetVariable("screen_draw_log_" .. suffix, string.format("%.0f", log))
+  SetVariable("screen_draw_text_" .. suffix, line)
 end
 ]]></script>
   </plugin>
@@ -1780,7 +1862,7 @@ end
 			                 });
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[1zprefix <send href=\"help &text;\">start-"));
-			QVERIFY(runtime.commitPendingIncomingPartialLine());
+			QVERIFY(WorldRuntimeTestAccess::commitPendingIncomingPartialLineStorage(runtime));
 			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
 
 			QCOMPARE(line, QStringLiteral("newbie"));
@@ -2049,6 +2131,241 @@ end
 
 			QCOMPARE(partialLines.size(), completedOutputPublicationCount);
 			QTRY_COMPARE(outputLastLine(), QStringLiteral("N"));
+		}
+
+		static void mushReaderWorldTriggerSpeaksOnlyCompletedPresentedLines()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("convert_ga_to_newline"), QStringLiteral("y"));
+
+			const QString         omittedPrompt = QStringLiteral("<omitted> ");
+			WorldRuntime::Trigger trigger;
+			trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+			trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("^<omitted> $"));
+			trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+			trigger.attributes.insert(QStringLiteral("omit_from_output"), QStringLiteral("y"));
+			trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(trigger);
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&events](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { events.push_back(event); });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+			runtime.receiveRawData(omittedPrompt.toUtf8());
+			QTRY_VERIFY_WITH_TIMEOUT(!harness.view.outputLines().isEmpty(), 5000);
+			QCOMPARE(harness.view.outputLines().constLast(), omittedPrompt);
+			QVERIFY(events.isEmpty());
+
+			runtime.receiveRawData(bytes({IAC, GA}));
+			QTRY_COMPARE_WITH_TIMEOUT(runtime.triggers().constFirst().matched, 1, 5000);
+			QVERIFY(runtime.lines().isEmpty());
+			QVERIFY(!harness.view.outputLines().contains(omittedPrompt));
+			QVERIFY(events.isEmpty());
+
+			const QString visiblePrompt = QStringLiteral("<visible> ");
+			runtime.receiveRawData(visiblePrompt.toUtf8());
+			QTRY_VERIFY_WITH_TIMEOUT(!harness.view.outputLines().isEmpty(), 5000);
+			QCOMPARE(harness.view.outputLines().constLast(), visiblePrompt);
+			QVERIFY(events.isEmpty());
+
+			runtime.receiveRawData(bytes({IAC, GA}));
+			QTRY_COMPARE_WITH_TIMEOUT(events.size(), 1, 5000);
+			QCOMPARE(events.constFirst().text, visiblePrompt);
+			QVERIFY(!events.constFirst().interrupt);
+			QCOMPARE(runtime.lines().size(), 1);
+			QCOMPARE(runtime.lines().constFirst().text, visiblePrompt);
+		}
+
+		static void mushReaderPluginTriggerSpeaksOnlyCompletedPresentedLines()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeMushReaderOmitTriggerPlugin(pluginsDir));
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("convert_ga_to_newline"), QStringLiteral("y"));
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("mushreader_omit_trigger.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(
+			    !runtime.plugins().isEmpty() && !runtime.plugins().constFirst().installPending, 5000);
+
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&events](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { events.push_back(event); });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+			const QString omittedPrompt = QStringLiteral("<plugin-omitted> ");
+			runtime.receiveRawData(omittedPrompt.toUtf8());
+			QTRY_VERIFY_WITH_TIMEOUT(!harness.view.outputLines().isEmpty(), 5000);
+			QCOMPARE(harness.view.outputLines().constLast(), omittedPrompt);
+			QVERIFY(events.isEmpty());
+
+			runtime.receiveRawData(bytes({IAC, GA}));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kMushReaderOmitPluginId, QStringLiteral("omit_callback_count")),
+			    QStringLiteral("1"), 5000);
+			QVERIFY(runtime.lines().isEmpty());
+			QVERIFY(!harness.view.outputLines().contains(omittedPrompt));
+			QVERIFY(events.isEmpty());
+
+			const QString visiblePrompt = QStringLiteral("<plugin-visible> ");
+			runtime.receiveRawData(visiblePrompt.toUtf8());
+			QTRY_VERIFY_WITH_TIMEOUT(!harness.view.outputLines().isEmpty(), 5000);
+			QCOMPARE(harness.view.outputLines().constLast(), visiblePrompt);
+			QVERIFY(events.isEmpty());
+
+			runtime.receiveRawData(bytes({IAC, GA}));
+			QTRY_COMPARE_WITH_TIMEOUT(events.size(), 1, 5000);
+			QCOMPARE(events.constFirst().text, visiblePrompt);
+			QCOMPARE(pluginVariable(runtime, kMushReaderOmitPluginId, QStringLiteral("omit_callback_count")),
+			         QStringLiteral("1"));
+		}
+
+		static void mushReaderCommitsPartialLinesBeforeFollowingPresentationOutput()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeScreenDrawRecorderPlugin(pluginsDir));
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("y"));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("screen_draw_recorder.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(
+			    !runtime.plugins().isEmpty() && !runtime.plugins().constFirst().installPending, 5000);
+
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			QVector<bool>                                      partialOverlayAtSpeech;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&events, &partialOverlayAtSpeech,
+			     &view = harness.view](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    {
+				    events.push_back(event);
+				    partialOverlayAtSpeech.push_back(view.m_nativeHasPartialOutput ||
+				                                     view.m_hasPartialOutput ||
+				                                     !view.m_nativePartialOutputText.isEmpty() ||
+				                                     !view.m_nativePartialOutputSpans.isEmpty());
+			    });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+			const QString partialLine = QStringLiteral("alpha beta gamma");
+			runtime.receiveRawData(partialLine.toUtf8());
+			QTRY_VERIFY_WITH_TIMEOUT(!harness.view.outputLines().isEmpty(), 5000);
+			QCOMPARE(harness.view.outputLines().constLast(), partialLine);
+			QVERIFY(events.isEmpty());
+			QVERIFY(pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_count"))
+			            .isEmpty());
+
+			runtime.setWorldAttribute(QStringLiteral("wrap"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("10"));
+			runtime.setWorldAttribute(QStringLiteral("indent_paras"), QStringLiteral("n"));
+
+			const QString noteText = QStringLiteral("note");
+			harness.processor.note(noteText, true);
+			QCOMPARE(events.size(), 2);
+			QCOMPARE(events.at(0).text, partialLine);
+			QVERIFY(!events.at(0).interrupt);
+			QCOMPARE(events.at(1).text, noteText);
+			QVERIFY(!events.at(1).interrupt);
+			QCOMPARE(partialOverlayAtSpeech, QVector<bool>({false, false}));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_count")),
+			    QStringLiteral("2"), 5000);
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_type_1")),
+			    QStringLiteral("0"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_log_1")),
+			    QStringLiteral("0"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_text_1")),
+			    partialLine);
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_type_2")),
+			    QStringLiteral("1"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_log_2")),
+			    QStringLiteral("0"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_text_2")),
+			    noteText);
+			QCOMPARE(runtime.lines().size(), 2);
+			QVERIFY(runtime.lines().constFirst().text != partialLine);
+			QVERIFY(runtime.lines().constFirst().text.contains(QLatin1Char('\n')));
+			QVERIFY(runtime.lines().constFirst().hardReturn);
+			QCOMPARE(runtime.lines().constLast().text, noteText);
+
+			runtime.setWorldAttribute(QStringLiteral("wrap"), QStringLiteral("n"));
+			const QString secondPartialLine = QStringLiteral("second prompt> ");
+			runtime.receiveRawData(secondPartialLine.toUtf8());
+			QTRY_COMPARE_WITH_TIMEOUT(harness.view.outputLines().constLast(), secondPartialLine, 5000);
+			QCOMPARE(events.size(), 2);
+
+			runtime.setCurrentActionSource(WorldRuntime::eUserTyping);
+			harness.view.echoInputText(QStringLiteral("look\r\n"));
+			QCOMPARE(events.size(), 3);
+			QCOMPARE(events.constLast().text, secondPartialLine);
+			QVERIFY(!events.constLast().interrupt);
+			QCOMPARE(partialOverlayAtSpeech, QVector<bool>({false, false, false}));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_count")),
+			    QStringLiteral("3"), 5000);
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_type_3")),
+			    QStringLiteral("0"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_log_3")),
+			    QStringLiteral("0"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_text_3")),
+			    secondPartialLine);
+
+			harness.view.echoInputText(QStringLiteral("again\r\n"));
+			QCOMPARE(events.size(), 3);
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_count")),
+			    QStringLiteral("3"));
 		}
 
 		static void legacyEncodingMxpSetEntityCallbackPayloadUsesInternalUtf8()

@@ -77,6 +77,17 @@ class WorldRuntimeTestAccess final
 		{
 			runtime.processRawDataPayload(data, simulatedInput);
 		}
+		/**
+		 * @brief Commits pending partial input to runtime storage without exercising presentation behavior.
+		 * @param runtime Runtime whose pending partial state is committed.
+		 * @param committedText Optional receiver for the unwrapped committed text.
+		 * @return `true` when pending partial input was committed.
+		 */
+		static bool commitPendingIncomingPartialLineStorage(WorldRuntime &runtime,
+		                                                    QString      *committedText = nullptr)
+		{
+			return runtime.commitPendingIncomingPartialLineStorage(committedText);
+		}
 		static void layoutMiniWindows(WorldRuntime &runtime, const QSize &clientSize, const QSize &ownerSize,
 		                              const bool                   underneath,
 		                              const QVector<MiniWindow *> *orderedWindows = nullptr)

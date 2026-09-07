@@ -12208,7 +12208,8 @@ bool WorldView::commitPendingIncomingPartialOutput()
 {
 	if (!m_runtime)
 		return false;
-	if (!m_runtime->commitPendingIncomingPartialLine())
+	QString completedLine;
+	if (!m_runtime->commitPendingIncomingPartialLineStorage(&completedLine))
 		return false;
 
 	m_nativeHasPartialOutput = false;
@@ -12222,6 +12223,7 @@ bool WorldView::commitPendingIncomingPartialOutput()
 	m_accessibleOutputLastAnnouncedPartialText.clear();
 	syncOutputTextVisibilityForNativeCanvas();
 	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
+	m_runtime->firePluginScreendraw(0, 0, completedLine);
 	return true;
 }
 

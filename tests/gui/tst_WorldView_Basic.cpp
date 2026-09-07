@@ -3375,7 +3375,7 @@ class tst_WorldView_Basic : public QObject
 			g_accessibleTextUpdateRecords.clear();
 			g_accessibleAnnouncementRecords.clear();
 
-			QVERIFY(runtimeForTest()->commitPendingIncomingPartialLine());
+			QVERIFY(view.commitPendingIncomingPartialOutput());
 			QCoreApplication::processEvents();
 
 			QCOMPARE(g_accessibleTextInsertRecords.size(), 0);

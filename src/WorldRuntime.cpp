@@ -19175,7 +19175,6 @@ bool WorldRuntime::isQtAccessibilitySpeechEnabled() const
 void WorldRuntime::firePluginPartialLine(const QString &text)
 {
 	callPluginCallbacks(QStringLiteral("OnPluginPartialLine"), text, true);
-	QMudNativePluginRegistry::handleMushReaderPartialLine(this, text);
 }
 
 void WorldRuntime::notifyMiniWindowMouseMoved(int x, int y, const QString &windowName)
@@ -25460,12 +25459,15 @@ void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSp
 		notifyOutputViewLineAppended(removedHeadCount);
 }
 
-bool WorldRuntime::commitPendingIncomingPartialLine()
+bool WorldRuntime::commitPendingIncomingPartialLineStorage(QString *committedText)
 {
 	if (QThread::currentThread() != thread())
-		return qmudInvokeMethodOr(this, false, [this] { return commitPendingIncomingPartialLine(); });
+	{
+		return qmudInvokeMethodOr(this, false, [this, committedText]
+		                          { return commitPendingIncomingPartialLineStorage(committedText); });
+	}
 
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::commitPendingIncomingPartialLine");
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::commitPendingIncomingPartialLineStorage");
 	if (m_sessionStateOutputBufferSealed)
 		return false;
 	if (m_partialLineText.isEmpty() && m_partialLineSpans.isEmpty())
@@ -25473,6 +25475,8 @@ bool WorldRuntime::commitPendingIncomingPartialLine()
 
 	QString            text  = m_partialLineText;
 	QVector<StyleSpan> spans = m_partialLineSpans;
+	if (committedText)
+		*committedText = text;
 	m_partialLineText.clear();
 	m_partialLineSpans.clear();
 	m_pendingCarriageReturnOverwrite = false;
@@ -25495,7 +25499,6 @@ bool WorldRuntime::commitPendingIncomingPartialLine()
 		addLine(text, LineOutput, true);
 	else
 		addLine(text, LineOutput, spans, true);
-	QMudNativePluginRegistry::clearMushReaderPartialLine(this);
 	return true;
 }
 
@@ -25750,9 +25753,8 @@ bool WorldRuntime::removeBufferedIncomingLineLuaContext()
 	if (!luaContextLinePresentInBuffer())
 		return false;
 
-	const int removedIndex = m_luaContextLineBufferIndex - 1;
-	const int removedCount = removeOutputLineRange(removedIndex, 1);
-	QMudNativePluginRegistry::clearMushReaderPartialLine(this);
+	const int removedIndex      = m_luaContextLineBufferIndex - 1;
+	const int removedCount      = removeOutputLineRange(removedIndex, 1);
 	const int firstChangedIndex = qMax(0, qMin(removedIndex, safeQSizeToInt(m_lines.size()) - 1));
 	notifyOutputViewRangeChanged(firstChangedIndex, removedIndex, {removedIndex, removedCount, 0},
 	                             removedIndex == 0 ? removedCount : 0);
@@ -25771,7 +25773,6 @@ bool WorldRuntime::hideBufferedIncomingLineLuaContextForReplacement()
 	entry.flags |= LineHidden;
 	m_luaContextLineState = LuaContextLineState::AwaitingReplacement;
 	invalidateLuaCallbackLineBufferSnapshot();
-	QMudNativePluginRegistry::clearMushReaderPartialLine(this);
 	notifyOutputViewRangeChanged(m_luaContextLineBufferIndex - 1, m_luaContextLineBufferIndex);
 	return true;
 }
@@ -26615,7 +26616,6 @@ void WorldRuntime::endIncomingLineLuaContext()
 			m_deferredHiddenLuaContextLineBufferIndex = m_luaContextLineBufferIndex;
 			m_deferredHiddenLuaContextLineNumber      = m_luaContextLineNumber;
 			resetIncomingLineLuaContext();
-			QMudNativePluginRegistry::clearMushReaderPartialLine(this);
 			invalidateLuaCallbackLineBufferSnapshot();
 			return;
 		}
@@ -26624,8 +26624,7 @@ void WorldRuntime::endIncomingLineLuaContext()
 		    m_lines.at(hiddenIndex).lineNumber == m_luaContextLineNumber &&
 		    (m_lines.at(hiddenIndex).flags & LineHidden) != 0)
 		{
-			const int removedCount = removeOutputLineRange(hiddenIndex, 1);
-			QMudNativePluginRegistry::clearMushReaderPartialLine(this);
+			const int removedCount      = removeOutputLineRange(hiddenIndex, 1);
 			const int firstChangedIndex = qMax(0, qMin(hiddenIndex, safeQSizeToInt(m_lines.size()) - 1));
 			notifyOutputViewRangeChanged(firstChangedIndex, hiddenIndex, {hiddenIndex, removedCount, 0},
 			                             hiddenIndex == 0 ? removedCount : 0);
@@ -26664,8 +26663,7 @@ void WorldRuntime::removeDeferredHiddenIncomingLine()
 	}
 	if (hiddenIndex >= 0 && (m_lines.at(hiddenIndex).flags & LineHidden) != 0)
 	{
-		const int removedCount = removeOutputLineRange(hiddenIndex, 1);
-		QMudNativePluginRegistry::clearMushReaderPartialLine(this);
+		const int removedCount      = removeOutputLineRange(hiddenIndex, 1);
 		const int firstChangedIndex = qMax(0, qMin(hiddenIndex, safeQSizeToInt(m_lines.size()) - 1));
 		notifyOutputViewRangeChanged(firstChangedIndex, hiddenIndex, {hiddenIndex, removedCount, 0},
 		                             hiddenIndex == 0 ? removedCount : 0);

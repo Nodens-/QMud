@@ -1768,6 +1768,8 @@ void WorldCommandProcessor::onMiniWindowOutputActionActivated(const int actionTy
 
 void WorldCommandProcessor::note(const QString &text, const bool newLine) const
 {
+	if (m_view)
+		static_cast<void>(m_view->commitPendingIncomingPartialOutput());
 	if (m_runtime)
 	{
 		const QString value    = m_runtime->worldAttributes().value(QStringLiteral("log_notes"));
