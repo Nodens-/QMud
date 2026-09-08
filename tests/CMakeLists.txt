@@ -661,6 +661,16 @@ qmud_add_qtest(tst_WorldCommandProcessor_Alias
         TIMEOUT
         20)
 
+qmud_add_qtest(tst_WorldCommandProcessor_CommandStacking
+        SOURCES
+        integration/tst_WorldCommandProcessor_CommandStacking.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        integration
+        TIMEOUT
+        20)
+
 qmud_add_qtest(tst_WorldCommandProcessor_Regex
         SOURCES
         integration/tst_WorldCommandProcessor_Regex.cpp

@@ -1269,6 +1269,28 @@ namespace
 				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("legacy_encoding")), targetEncoding);
 			}
 
+			void commandStackSeparatorAcceptsTwoCharacters()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				auto *separator = dialog.findChild<QLineEdit *>(QStringLiteral("commandStackCharacterEdit"));
+				QVERIFY(separator);
+				QCOMPARE(separator->maxLength(), 2);
+
+				QCheckBox *enabled = findCheckBoxByText(dialog, QStringLiteral("&Command Stacking Using:"));
+				QVERIFY(enabled);
+				enabled->setChecked(true);
+				separator->setText(QStringLiteral("::"));
+				dialog.accept();
+
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("enable_command_stack")),
+				         QStringLiteral("1"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("command_stack_character")),
+				         QStringLiteral("::"));
+			}
+
 			void ruleRemovalUsesAdjacentItemInDisplayedSortOrder()
 			{
 				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};

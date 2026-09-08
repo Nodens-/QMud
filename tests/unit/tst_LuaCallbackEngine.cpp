@@ -139,6 +139,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void workerLineAndStyleInfoCoverMetadataSurface();
 		void setOptionUpdatesOnlyTabCompletionSymbolBehaviors();
 		void setOptionAppliesPartialRecallSaveSettingsImmediately();
+		void setAlphaOptionSupportsTwoCharacterCommandStackSeparator();
 		void setOptionItemAppliesChatListenerSettings();
 		void setOptionItemRefreshesMiniWindowAdjustedNawsWidth();
 		void setOptionItemHistoryTrimResetsRecallTraversal();
@@ -4044,6 +4045,60 @@ end
 	QTest::keyClick(input, Qt::Key_Up);
 	QCOMPARE(view.inputText(), QStringLiteral("score"));
 	QCOMPARE(view.commandHistoryList(), QStringList({QStringLiteral("score"), QStringLiteral("sco")}));
+	QVERIFY(teardownWorkerEngine(executor, engine));
+}
+
+void tst_LuaCallbackEngine::setAlphaOptionSupportsTwoCharacterCommandStackSeparator()
+{
+	WorldRuntime runtime;
+	runtime.applyDefaultWorldOptions();
+	runtime.setWorldAttribute(QStringLiteral("enable_command_stack"), QStringLiteral("1"));
+
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function set_two_character_separator()
+  assert(SetAlphaOption("command_stack_character", "::") == 0)
+  assert(GetAlphaOption("command_stack_character") == "::")
+end
+function reject_overlong_separator()
+  assert(SetAlphaOption("command_stack_character", ":::") == 30026)
+  assert(GetAlphaOption("command_stack_character") == "::")
+end
+function reject_non_ascii_separator()
+  assert(SetAlphaOption("command_stack_character", "é") == 30026)
+  assert(GetOption("enable_command_stack") == 0)
+end
+)lua"),
+	                            &runtime))
+		QFAIL("Worker engine initialization failed");
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::NoArgs;
+	request.functionName        = QStringLiteral("set_two_character_separator");
+	request.callbackSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	executeDeferredMutations(result);
+	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("command_stack_character")),
+	         QStringLiteral("::"));
+
+	request.functionName        = QStringLiteral("reject_overlong_separator");
+	request.callbackSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	executeDeferredMutations(result);
+	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("command_stack_character")),
+	         QStringLiteral("::"));
+	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("enable_command_stack")), QStringLiteral("1"));
+
+	request.functionName        = QStringLiteral("reject_non_ascii_separator");
+	request.callbackSnapshotArg = captureRuntimeCounterDispatchSnapshotForTest(runtime);
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	executeDeferredMutations(result);
+	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("command_stack_character")),
+	         QStringLiteral("::"));
+	QCOMPARE(runtime.worldAttributes().value(QStringLiteral("enable_command_stack")), QStringLiteral("0"));
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 

@@ -13,6 +13,31 @@
 #include <QString>
 #include <QStringList>
 
+namespace QMudCommandStack
+{
+	/** Maximum number of characters supported by a command-stack separator. */
+	inline constexpr qsizetype kMaximumSeparatorLength = 2;
+
+	/**
+	 * @brief Validates a command-stack separator.
+	 * @param separator Candidate separator.
+	 * @return `true` when the separator contains one or two printable, non-space characters.
+	 */
+	[[nodiscard]] bool         isValidSeparator(const QString &separator);
+
+	/**
+	 * @brief Expands one command line according to command-stacking rules.
+	 *
+	 * A separator at the start disables stacking for the line and is removed. Elsewhere, one separator splits
+	 * commands and two consecutive separators produce one literal separator.
+	 *
+	 * @param command Command line to expand.
+	 * @param separator Valid command-stack separator.
+	 * @return Expanded commands, or the unchanged command when the separator is invalid.
+	 */
+	[[nodiscard]] QStringList  expand(const QString &command, const QString &separator);
+} // namespace QMudCommandStack
+
 namespace QMudCommandPattern
 {
 	/**

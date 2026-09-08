@@ -45524,30 +45524,18 @@ static int luaSetAlphaOption(lua_State *L)
 		value.remove(QLatin1Char('\r'));
 	}
 
-	// Legacy behavior: command stack character must be one printable non-space char.
+	// QMud extends the legacy command stack character to a separator of up to two characters while retaining the
+	// SetAlphaOption printable-ASCII restriction.
 	if (constexpr int kOptCommandStack = 0x000008; option->flags & kOptCommandStack)
 	{
-		if (value.size() > 1)
+		if (value.size() > QMudCommandStack::kMaximumSeparatorLength)
 		{
 			lua_pushnumber(L, eOptionOutOfRange);
 			return 1;
 		}
-		if (value.isEmpty())
-		{
-			enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime,
-			                                             [](WorldRuntime &targetRuntime)
-			                                             {
-				                                             targetRuntime.setWorldAttribute(
-				                                                 QStringLiteral("enable_command_stack"),
-				                                                 QStringLiteral("0"));
-			                                             });
-			updateCallbackWorldAttributeSnapshot(engine, QStringLiteral("enable_command_stack"),
-			                                     QStringLiteral("0"), false);
-			lua_pushnumber(L, eOptionOutOfRange);
-			return 1;
-		}
-		const QChar ch = value.at(0);
-		if (const ushort code = ch.unicode(); code > 0x7F || code < 0x20 || code == 0x7F || ch.isSpace())
+		const bool containsNonAscii = std::ranges::any_of(
+		    value, [](const QChar ch) { return ch.unicode() < 0x20 || ch.unicode() > 0x7E; });
+		if (!QMudCommandStack::isValidSeparator(value) || containsNonAscii)
 		{
 			enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime,
 			                                             [](WorldRuntime &targetRuntime)

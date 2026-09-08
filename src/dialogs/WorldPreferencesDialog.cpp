@@ -26,6 +26,7 @@
 #include "helpers/EncodingUtils.h"
 #include "helpers/NoteColourUtils.h"
 #include "helpers/TimerSchedulingUtils.h"
+#include "helpers/WorldCommandProcessorUtils.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QApplication>
@@ -1648,16 +1649,11 @@ void WorldPreferencesDialog::accept()
 			if (m_enableCommandStack->isChecked())
 			{
 				const QString value = m_commandStackCharacter->text();
-				if (value.isEmpty())
+				if (!QMudCommandStack::isValidSeparator(value))
 				{
 					QMessageBox::warning(this, QStringLiteral("Commands"),
-					                     QStringLiteral("You must supply a command stack character."));
-					return;
-				}
-				if (value.at(0).isSpace() || !value.at(0).isPrint())
-				{
-					QMessageBox::warning(this, QStringLiteral("Commands"),
-					                     QStringLiteral("The command stack character is invalid."));
+					                     QStringLiteral("The command stack separator must contain one or two "
+					                                    "printable, non-space characters."));
 					return;
 				}
 			}
@@ -5973,8 +5969,9 @@ void WorldPreferencesDialog::buildUi()
 	m_enableCommandStack     = new QCheckBox(QStringLiteral("&Command Stacking Using:"), commandStackBox);
 	m_commandStackCharacter  = new QLineEdit(commandStackBox);
 	m_commandStackCharacter->setObjectName(QStringLiteral("commandStackCharacterEdit"));
-	m_commandStackCharacter->setMaxLength(1);
-	configureCompactLineEditWidth(m_commandStackCharacter, 40, 1);
+	m_commandStackCharacter->setMaxLength(static_cast<int>(QMudCommandStack::kMaximumSeparatorLength));
+	configureCompactLineEditWidth(m_commandStackCharacter, 40,
+	                              static_cast<int>(QMudCommandStack::kMaximumSeparatorLength));
 	commandStackLayout->addWidget(m_enableCommandStack, 0, 0);
 	commandStackLayout->addWidget(m_commandStackCharacter, 0, 1);
 	commandStackLayout->setColumnStretch(0, 1);

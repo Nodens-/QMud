@@ -242,9 +242,11 @@ class WorldCommandProcessor : public QObject
 		/**
 		 * @brief Parses and executes one command line.
 		 * @param input Command input text.
+		 * @param allowCommandStacking Apply command stacking when `true`; stacked children pass `false` so escaped
+		 * separators remain literal during their normal command processing.
 		 * @return `true` when command was processed successfully.
 		 */
-		bool           evaluateCommand(const QString &input);
+		bool           evaluateCommand(const QString &input, bool allowCommandStacking = true);
 		/**
 		 * @brief Internal speedwalk evaluator used by public wrapper.
 		 * @param speedWalkString Speedwalk expression.

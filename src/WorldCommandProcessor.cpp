@@ -2060,7 +2060,7 @@ void WorldCommandProcessor::handleWorldDisconnected()
 		note(QStringLiteral("Unable to create disconnect backup: %1").arg(backupError), true);
 }
 
-bool WorldCommandProcessor::evaluateCommand(const QString &input)
+bool WorldCommandProcessor::evaluateCommand(const QString &input, const bool allowCommandStacking)
 {
 	if (!m_runtime)
 		return false;
@@ -2170,31 +2170,18 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 	// ---------------------- COMMAND STACKING ------------------------------
 	const QString commandStackEnabled = attrs.value(QStringLiteral("enable_command_stack"));
 	const bool    enableCommandStack  = isEnabledValue(commandStackEnabled);
-	if (const QString commandStackCharacter = attrs.value(QStringLiteral("command_stack_character"));
-	    enableCommandStack && !commandStackCharacter.isEmpty())
+	if (const QString commandStackSeparator = attrs.value(QStringLiteral("command_stack_character"));
+	    allowCommandStacking && enableCommandStack &&
+	    QMudCommandStack::isValidSeparator(commandStackSeparator))
 	{
-		if (const auto stackChar = commandStackCharacter.at(0); !line.isEmpty() && line.at(0) == stackChar)
+		const QStringList commands = QMudCommandStack::expand(line, commandStackSeparator);
+		if (commands.size() > 1)
 		{
-			// Leading stack char disables command stacking for this line.
-			line.remove(0, 1);
+			for (const QString &command : commands)
+				evaluateCommand(command, false);
+			return false;
 		}
-		else
-		{
-			QString escaped;
-			escaped += stackChar;
-			escaped += stackChar;
-			constexpr QChar placeholder = QChar(0x01);
-			line.replace(escaped, QString(placeholder));
-			line.replace(stackChar, QLatin1Char('\n'));
-			line.replace(QString(placeholder), QString(stackChar));
-
-			if (const QStringList stacked = line.split(QLatin1Char('\n')); stacked.size() > 1)
-			{
-				for (const QString &part : stacked)
-					evaluateCommand(part);
-				return false;
-			}
-		}
+		line = commands.constFirst();
 	}
 
 	// ------------------------- PLUGIN COMMAND CALLBACK -------------------
