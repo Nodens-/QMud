@@ -465,6 +465,9 @@ const InternalFunctionMetadata kInternalFunctionMetadataTable[] = {
     {"WindowMergeImageAlpha",     "( WindowName , ImageId , MaskId , Left , Top , Right , Bottom , Mode , "
                               "Opacity , SrcLeft , SrcTop , SrcRight , SrcBottom )"        },
     {"WindowMoveHotspot",         "( WindowName , HotspotId , Left , Top , Right , Bottom )"                            },
+    {"WindowOutputActivate",      "( WindowName , HotspotId )"                                                          },
+    {"WindowOutputText",          "( WindowName , FontId , Text , Left , Top , Right , Bottom , Colour , MouseUp , "
+                         "HotspotPrefix , Unicode )"                                            },
     {"WindowPolygon",             "( WindowName , Points , PenColour , PenStyle , PenWidth , BrushColour , BrushStyle , "
                       "Close , Winding )"                                                          },
     {"WindowPosition",            "( WindowName , Left , Top , Position , Flags )"                                      },

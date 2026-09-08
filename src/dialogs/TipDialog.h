@@ -64,30 +64,32 @@ class TipDialog : public QDialog
 
 	private:
 		/**
-		 * @brief Loads tip file and initializes stream.
+		 * @brief Loads tip file and initializes its first eligible tip.
+		 * @return `true` when an eligible tip was loaded.
 		 */
-		void           loadTipFile();
+		bool           loadTipFile();
 		/**
 		 * @brief Reads next tip string from stream.
 		 * @param next Output tip text.
+		 * @return `true` when an eligible tip was found before completing one wrap.
 		 */
-		void           getNextTipString(QString &next);
+		bool           getNextTipString(QString &next);
 		/**
 		 * @brief Resolves path to bundled tip file.
 		 * @return Tip file path.
 		 */
 		static QString tipFilePath();
 
-			QFile          m_file;
-			QTextStream    m_stream;
-			bool           m_startup{true};
-			QString        m_tipText;
-			QLabel        *m_tipLabel{nullptr};
-			QCheckBox     *m_startupCheck{nullptr};
+		QFile          m_file;
+		QTextStream    m_stream;
+		bool           m_startup{true};
+		QString        m_tipText;
+		QLabel        *m_tipLabel{nullptr};
+		QCheckBox     *m_startupCheck{nullptr};
 
-			GetIntFn       m_getInt;
-			GetStringFn    m_getString;
-			WriteIntFn     m_writeInt;
+		GetIntFn       m_getInt;
+		GetStringFn    m_getString;
+		WriteIntFn     m_writeInt;
 		WriteStringFn  m_writeString;
 };
 

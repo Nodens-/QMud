@@ -1,5 +1,5 @@
 # QMud Lua API inventory export
-# Exported (UTC): 2026-03-10T18:58:53Z
+# Exported (UTC): 2026-09-08T08:23:10Z
 
 ANSI
 Accelerator
@@ -321,6 +321,7 @@ SendSpecial
 SendToNotepad
 SetAliasOption
 SetAlphaOption
+SetAsyncResultFilter
 SetBackgroundColour
 SetBackgroundImage
 SetBoldColour
@@ -421,6 +422,8 @@ WindowLoadImageMemory
 WindowMenu
 WindowMergeImageAlpha
 WindowMoveHotspot
+WindowOutputActivate
+WindowOutputText
 WindowPolygon
 WindowPosition
 WindowRectOp

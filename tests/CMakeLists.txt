@@ -149,6 +149,38 @@ qmud_add_qtest(tst_Environment
         LABELS
         unit)
 
+qmud_add_qtest(tst_GuiSystemUtils
+        GUI
+        SOURCES
+        unit/tst_GuiSystemUtils.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        unit
+        TIMEOUT
+        10)
+
+qmud_add_qtest(tst_NameGeneration
+        SOURCES
+        unit/tst_NameGeneration.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        unit
+        TIMEOUT
+        10)
+
+qmud_add_qtest(tst_WorldEditUtils
+        GUI
+        SOURCES
+        unit/tst_WorldEditUtils.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        unit
+        TIMEOUT
+        10)
+
 qmud_add_qtest(tst_TimeFormatUtils
         SOURCES
         unit/tst_TimeFormatUtils.cpp
@@ -184,6 +216,17 @@ qmud_add_qtest(tst_NativePluginRegistry
         unit)
 
 if (QMUD_ENABLE_LUA_SCRIPTING)
+    qmud_add_qtest(tst_LuaApiExport
+            GUI
+            SOURCES
+            unit/tst_LuaApiExport.cpp
+            LIBRARIES
+            qmud_app_core
+            LABELS
+            unit
+            TIMEOUT
+            20)
+
     qmud_add_qtest(tst_LuaExecution
             SOURCES
             unit/tst_LuaExecution.cpp
@@ -720,6 +763,17 @@ qmud_add_qtest(tst_WorldCommandProcessor_TimerAccounting
         20)
 
 if (QMUD_ENABLE_GUI_TESTS)
+	qmud_add_qtest(tst_DialogUtils
+			GUI
+			SOURCES
+			gui/tst_DialogUtils.cpp
+            LIBRARIES
+            qmud_app_core
+            LABELS
+            gui
+            TIMEOUT
+            10)
+
     qmud_add_qtest(tst_MainFrame_Actions
             GUI
             SOURCES

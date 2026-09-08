@@ -17,6 +17,7 @@
 #include <QLocale>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include <limits>
 #include <memory>
 
 static const auto kTipFilePosKey   = QStringLiteral("Tip_FilePos");
@@ -41,12 +42,12 @@ TipDialog::TipDialog(GetIntFn getInt, GetStringFn getString, WriteIntFn writeInt
 	layout->addWidget(titleWidget);
 
 	auto tipLabel = std::make_unique<QLabel>(this);
-	m_tipLabel = tipLabel.release();
+	m_tipLabel    = tipLabel.release();
 	m_tipLabel->setWordWrap(true);
 	layout->addWidget(m_tipLabel, 1);
 
 	auto startupCheck = std::make_unique<QCheckBox>(QStringLiteral("Show tips at startup"), this);
-	m_startupCheck = startupCheck.release();
+	m_startupCheck    = startupCheck.release();
 	layout->addWidget(m_startupCheck);
 
 	auto buttonRow = std::make_unique<QHBoxLayout>();
@@ -66,17 +67,17 @@ TipDialog::TipDialog(GetIntFn getInt, GetStringFn getString, WriteIntFn writeInt
 	m_startup = m_getInt(QStringLiteral("control"), kTipStartupKey, 0) == 0;
 	m_startupCheck->setChecked(m_startup);
 
-	loadTipFile();
+	const bool hasTip = loadTipFile();
 
-	// If Tips file does not exist then disable NextTip
-	if (!m_file.isOpen())
+	if (!hasTip)
 		nextTip->setEnabled(false);
 
 	m_tipLabel->setText(m_tipText);
 
 	const auto nextTipConnection = connect(nextTip.get(), &QPushButton::clicked, this, &TipDialog::onNextTip);
 	Q_UNUSED(nextTipConnection);
-	const auto acceptConnection = connect(buttons.get(), &QDialogButtonBox::accepted, this, &TipDialog::onAccepted);
+	const auto acceptConnection =
+	    connect(buttons.get(), &QDialogButtonBox::accepted, this, &TipDialog::onAccepted);
 	Q_UNUSED(acceptConnection);
 	auto *const nextTipButton = nextTip.release();
 	Q_UNUSED(nextTipButton);
@@ -94,14 +95,22 @@ TipDialog::~TipDialog()
 	// But make sure the tips file existed in the first place....
 	if (m_file.isOpen())
 	{
-		m_writeInt(QStringLiteral("control"), kTipFilePosKey, static_cast<int>(m_file.pos()));
+		if (const qint64 position = m_stream.pos(); position >= 0)
+		{
+			constexpr qint64 maximum = std::numeric_limits<int>::max();
+			m_writeInt(QStringLiteral("control"), kTipFilePosKey, static_cast<int>(qMin(position, maximum)));
+		}
 		m_file.close();
 	}
 }
 
 void TipDialog::onNextTip()
 {
-	getNextTipString(m_tipText);
+	QString next;
+	if (getNextTipString(next))
+		m_tipText = next;
+	else
+		m_tipText = QStringLiteral("No tips available.");
 	if (m_tipLabel)
 		m_tipLabel->setText(m_tipText);
 }
@@ -116,7 +125,7 @@ void TipDialog::onAccepted()
 	accept();
 }
 
-void TipDialog::loadTipFile()
+bool TipDialog::loadTipFile()
 {
 	const QString path = tipFilePath();
 	m_file.setFileName(path);
@@ -125,7 +134,7 @@ void TipDialog::loadTipFile()
 	if (!m_file.open(QIODevice::ReadOnly | QIODevice::Text))
 	{
 		m_tipText = QStringLiteral("Tips file not found.");
-		return;
+		return false;
 	}
 
 	m_stream.setDevice(&m_file);
@@ -139,48 +148,47 @@ void TipDialog::loadTipFile()
 	const QString   storedTime  = m_getString(QStringLiteral("control"), kTipTimeStampKey, QString());
 	if (currentTime != storedTime)
 	{
-		m_file.seek(0);
+		m_stream.seek(0);
 		m_writeString(QStringLiteral("control"), kTipTimeStampKey, currentTime);
 	}
 	else
 	{
 		const int pos = m_getInt(QStringLiteral("control"), kTipFilePosKey, 0);
-		m_file.seek(pos);
+		if (pos < 0 || !m_stream.seek(pos))
+			m_stream.seek(0);
 	}
 
-	getNextTipString(m_tipText);
+	if (!getNextTipString(m_tipText))
+	{
+		m_tipText = QStringLiteral("No tips available.");
+		return false;
+	}
+	return true;
 }
 
-void TipDialog::getNextTipString(QString &next)
+bool TipDialog::getNextTipString(QString &next)
 {
-	// This routine identifies the next string that needs to be
-	// read from the tips file
-	bool stop = false;
-	while (!stop)
+	bool canWrap = m_stream.pos() > 0;
+	for (;;)
 	{
-		if (m_stream.atEnd())
-		{
-			// We have either reached EOF or encountered some problem
-			// In both cases reset the pointer to the beginning of the file
-			// Keep behavior aligned with legacy tip file handling.
-			m_file.seek(0);
-			m_stream.seek(0);
-		}
-		else
+		while (!m_stream.atEnd())
 		{
 			if (const QString line = m_stream.readLine(); !line.isEmpty())
 			{
 				if (const QChar c = line.at(0);
 				    c != QChar(' ') && c != QChar('\t') && c != QChar('\n') && c != QChar(';'))
 				{
-					// There should be no space at the beginning of the tip
-					// Keep behavior aligned with legacy tip file handling.
-					// Comment lines are ignored and they start with a semicolon
-					stop = true;
 					next = line;
+					return true;
 				}
 			}
 		}
+
+		if (!canWrap)
+			return false;
+		canWrap = false;
+		if (!m_stream.seek(0))
+			return false;
 	}
 }
 

@@ -1,5 +1,5 @@
 # QMud Lua API inventory export
-# Exported (UTC): 2026-03-10T18:58:53Z
+# Exported (UTC): 2026-09-08T08:23:10Z
 
 ANSI	( Code )
 Accelerator	( Key , Send )
@@ -336,6 +336,7 @@ SendSpecial	( Message , Echo , Queue , Log , History )
 SendToNotepad	( Title , Contents )
 SetAliasOption	( AliasName , OptionName , Value )
 SetAlphaOption	( OptionName , Value )
+SetAsyncResultFilter	( Filters )
 SetBackgroundColour	( Colour )
 SetBackgroundImage	( FileName , Mode )
 SetBoldColour	( )
@@ -438,6 +439,8 @@ WindowLoadImageMemory	( )
 WindowMenu	( WindowName , Left , Top , Items )
 WindowMergeImageAlpha	( WindowName , ImageId , MaskId , Left , Top , Right , Bottom , Mode , Opacity , SrcLeft , SrcTop , SrcRight , SrcBottom )
 WindowMoveHotspot	( WindowName , HotspotId , Left , Top , Right , Bottom )
+WindowOutputActivate	( WindowName , HotspotId )
+WindowOutputText	( WindowName , FontId , Text , Left , Top , Right , Bottom , Colour , MouseUp , HotspotPrefix , Unicode )
 WindowPolygon	( WindowName , Points , PenColour , PenStyle , PenWidth , BrushColour , BrushStyle , Close , Winding )
 WindowPosition	( WindowName , Left , Top , Position , Flags )
 WindowRectOp	( WindowName , Action , Left , Top , Right , Bottom , Colour1 , Colour2 )
