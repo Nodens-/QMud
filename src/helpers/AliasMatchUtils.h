@@ -25,6 +25,7 @@ namespace QMudAliasMatch
 			bool                   matched{false};
 			int                    startCol{0};
 			int                    endCol{0};
+			int                    matchCount{0};
 			QStringList            wildcards;
 			QMap<QString, QString> namedWildcards;
 	};
@@ -36,11 +37,12 @@ namespace QMudAliasMatch
 	 * @param allowEmptyMatch Accept zero-length match when `true`.
 	 * @param startOffset Start offset for regex matching.
 	 * @param executionTimeNs Optional cumulative regex-execution time in nanoseconds.
+	 * @param matchAttempts Optional count incremented immediately before a valid regex is executed.
 	 * @return Match result with capture data and span columns.
 	 */
 	MatchResult matchWithCaptures(const QRegularExpression &regex, const QString &subject,
 	                              bool allowEmptyMatch, int startOffset = 0,
-	                              qint64 *executionTimeNs = nullptr);
+	                              qint64 *executionTimeNs = nullptr, int *matchAttempts = nullptr);
 
 	/**
 	 * @brief Checks whether alias/trigger nested execution depth exceeds configured limit.

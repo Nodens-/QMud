@@ -558,42 +558,50 @@ namespace
 		return WorldCommandProcessorMutationAccess::plugin(*runtime, pluginId);
 	}
 
-	WorldRuntime::Alias *resolveAliasByRuntimeId(WorldRuntime *runtime, const quint64 runtimeId)
+	WorldRuntime::Alias *resolveAliasByRuntimeId(WorldRuntime *runtime, const quint64 runtimeId,
+	                                             const QString &pluginId, const int indexHint)
 	{
 		if (!runtime || runtimeId == 0)
 			return nullptr;
-		for (WorldRuntime::Alias &alias : WorldCommandProcessorMutationAccess::aliases(*runtime))
+		QList<WorldRuntime::Alias> *aliases = &WorldCommandProcessorMutationAccess::aliases(*runtime);
+		if (!pluginId.isEmpty())
+		{
+			WorldRuntime::Plugin *plugin = resolveCapturedPlugin(runtime, pluginId);
+			if (!plugin)
+				return nullptr;
+			aliases = &plugin->aliases;
+		}
+		if (indexHint >= 0 && indexHint < aliases->size() && aliases->at(indexHint).runtimeId == runtimeId)
+			return &(*aliases)[indexHint];
+		for (WorldRuntime::Alias &alias : *aliases)
 		{
 			if (alias.runtimeId == runtimeId)
 				return &alias;
 		}
-		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
-		{
-			for (WorldRuntime::Alias &alias : plugin.aliases)
-			{
-				if (alias.runtimeId == runtimeId)
-					return &alias;
-			}
-		}
 		return nullptr;
 	}
 
-	WorldRuntime::Trigger *resolveTriggerByRuntimeId(WorldRuntime *runtime, const quint64 runtimeId)
+	WorldRuntime::Trigger *resolveTriggerByRuntimeId(WorldRuntime *runtime, const quint64 runtimeId,
+	                                                 const QString &pluginId = {}, const int indexHint = -1)
 	{
 		if (!runtime || runtimeId == 0)
 			return nullptr;
-		for (WorldRuntime::Trigger &trigger : WorldCommandProcessorMutationAccess::triggers(*runtime))
+		QList<WorldRuntime::Trigger> *triggers = &WorldCommandProcessorMutationAccess::triggers(*runtime);
+		if (!pluginId.isEmpty())
+		{
+			WorldRuntime::Plugin *plugin = resolveCapturedPlugin(runtime, pluginId);
+			if (!plugin)
+				return nullptr;
+			triggers = &plugin->triggers;
+		}
+		if (indexHint >= 0 && indexHint < triggers->size() && triggers->at(indexHint).runtimeId == runtimeId)
+		{
+			return &(*triggers)[indexHint];
+		}
+		for (WorldRuntime::Trigger &trigger : *triggers)
 		{
 			if (trigger.runtimeId == runtimeId)
 				return &trigger;
-		}
-		for (WorldRuntime::Plugin &plugin : WorldCommandProcessorMutationAccess::plugins(*runtime))
-		{
-			for (WorldRuntime::Trigger &trigger : plugin.triggers)
-			{
-				if (trigger.runtimeId == runtimeId)
-					return &trigger;
-			}
 		}
 		return nullptr;
 	}
@@ -702,17 +710,21 @@ namespace
 	class AliasExecutionScope final
 	{
 		public:
-			AliasExecutionScope(WorldRuntime *runtime, WorldRuntime::Alias *alias, QString pluginId,
-			                    const bool countInvocation)
-			    : m_runtime(runtime), m_pluginId(std::move(pluginId)), m_countInvocation(countInvocation)
+			AliasExecutionScope(WorldRuntime *runtime, const quint64 runtimeId, QString pluginId,
+			                    const bool countInvocation, const int indexHint = -1)
+			    : m_runtime(runtime), m_pluginId(std::move(pluginId)), m_ruleRuntimeId(runtimeId),
+			      m_indexHint(indexHint), m_countInvocation(countInvocation)
 			{
-				if (!alias || !runtime)
+				if (!runtime)
 					return;
-				m_ruleRuntimeId = runtime->ensureRuleRuntimeId(*alias);
+				WorldRuntime::Alias *alias =
+				    resolveAliasByRuntimeId(runtime, m_ruleRuntimeId, m_pluginId, m_indexHint);
+				if (!alias)
+					return;
 				alias->executingScriptDepth++;
 				alias->executingScript = true;
 				m_active               = true;
-				runtime->markAliasRuntimeStateChanged(m_pluginId);
+				runtime->markAliasRuntimeStateChanged(m_pluginId, m_ruleRuntimeId, m_indexHint);
 			}
 
 			~AliasExecutionScope()
@@ -720,14 +732,14 @@ namespace
 				if (!m_active || !m_runtime)
 					return;
 				if (WorldRuntime::Alias *resolved =
-				        resolveAliasByRuntimeId(m_runtime.data(), m_ruleRuntimeId))
+				        resolveAliasByRuntimeId(m_runtime.data(), m_ruleRuntimeId, m_pluginId, m_indexHint))
 				{
 					if (resolved->executingScriptDepth > 0)
 						resolved->executingScriptDepth--;
 					resolved->executingScript = resolved->executingScriptDepth > 0;
 					if (m_countInvocation)
 						resolved->invocationCount++;
-					m_runtime->markAliasRuntimeStateChanged(m_pluginId);
+					m_runtime->markAliasRuntimeStateChanged(m_pluginId, m_ruleRuntimeId, m_indexHint);
 				}
 			}
 
@@ -738,6 +750,7 @@ namespace
 			QPointer<WorldRuntime> m_runtime;
 			QString                m_pluginId;
 			quint64                m_ruleRuntimeId{0};
+			int                    m_indexHint{-1};
 			bool                   m_countInvocation{false};
 			bool                   m_active{false};
 	};
@@ -745,13 +758,17 @@ namespace
 	class TriggerExecutionScope final
 	{
 		public:
-			TriggerExecutionScope(WorldRuntime *runtime, WorldRuntime::Trigger *trigger, QString pluginId,
-			                      const bool countInvocation)
-			    : m_runtime(runtime), m_pluginId(std::move(pluginId)), m_countInvocation(countInvocation)
+			TriggerExecutionScope(WorldRuntime *runtime, const quint64 runtimeId, QString pluginId,
+			                      const bool countInvocation, const int indexHint = -1)
+			    : m_runtime(runtime), m_pluginId(std::move(pluginId)), m_ruleRuntimeId(runtimeId),
+			      m_indexHint(indexHint), m_countInvocation(countInvocation)
 			{
-				if (!trigger || !runtime)
+				if (!runtime)
 					return;
-				m_ruleRuntimeId = runtime->ensureRuleRuntimeId(*trigger);
+				WorldRuntime::Trigger *trigger =
+				    resolveTriggerByRuntimeId(runtime, m_ruleRuntimeId, m_pluginId, m_indexHint);
+				if (!trigger)
+					return;
 				trigger->executingScriptDepth++;
 				trigger->executingScript = true;
 				m_active                 = true;
@@ -763,7 +780,7 @@ namespace
 				if (!m_active || !m_runtime)
 					return;
 				if (WorldRuntime::Trigger *resolved =
-				        resolveTriggerByRuntimeId(m_runtime.data(), m_ruleRuntimeId))
+				        resolveTriggerByRuntimeId(m_runtime.data(), m_ruleRuntimeId, m_pluginId, m_indexHint))
 				{
 					if (resolved->executingScriptDepth > 0)
 						resolved->executingScriptDepth--;
@@ -781,6 +798,7 @@ namespace
 			QPointer<WorldRuntime> m_runtime;
 			QString                m_pluginId;
 			quint64                m_ruleRuntimeId{0};
+			int                    m_indexHint{-1};
 			bool                   m_countInvocation{false};
 			bool                   m_active{false};
 	};
@@ -788,13 +806,16 @@ namespace
 	class TimerExecutionScope final
 	{
 		public:
-			TimerExecutionScope(WorldRuntime *runtime, WorldRuntime::Timer *timer, QString pluginId,
+			TimerExecutionScope(WorldRuntime *runtime, const quint64 runtimeId, QString pluginId,
 			                    const bool countInvocation)
-			    : m_runtime(runtime), m_pluginId(std::move(pluginId)), m_countInvocation(countInvocation)
+			    : m_runtime(runtime), m_pluginId(std::move(pluginId)), m_ruleRuntimeId(runtimeId),
+			      m_countInvocation(countInvocation)
 			{
-				if (!timer || !runtime)
+				if (!runtime)
 					return;
-				m_ruleRuntimeId = runtime->ensureRuleRuntimeId(*timer);
+				WorldRuntime::Timer *timer = resolveTimerByRuntimeId(runtime, m_ruleRuntimeId);
+				if (!timer)
+					return;
 				timer->executingScriptDepth++;
 				timer->executingScript = true;
 				m_active               = true;
@@ -949,12 +970,12 @@ void WorldCommandProcessor::setRuntime(WorldRuntime *runtime)
 	const QString noTranslateIac        = attrs.value(QStringLiteral("do_not_translate_iac_to_iac_iac"));
 	m_doNotTranslateIac                 = isEnabledValue(noTranslateIac);
 	const QString matchEmpty            = attrs.value(QStringLiteral("regexp_match_empty"));
-	m_regexpMatchEmpty                  = !(matchEmpty == QStringLiteral("0") ||
-                           matchEmpty.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
-                           matchEmpty.compare(QStringLiteral("no"), Qt::CaseInsensitive) == 0 ||
-                           matchEmpty.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
-	const QString utf8                  = attrs.value(QStringLiteral("utf_8"));
-	m_utf8                              = isEnabledValue(utf8);
+	m_regexpMatchEmpty   = !(matchEmpty == QStringLiteral("0") ||
+	                         matchEmpty.compare(QStringLiteral("n"), Qt::CaseInsensitive) == 0 ||
+	                         matchEmpty.compare(QStringLiteral("no"), Qt::CaseInsensitive) == 0 ||
+	                         matchEmpty.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0);
+	const QString utf8   = attrs.value(QStringLiteral("utf_8"));
+	m_utf8               = isEnabledValue(utf8);
 	m_legacyEncodingName = qmudNormalizeWorldTextEncodingName(attrs.value(QStringLiteral("legacy_encoding")));
 
 	if (m_speedWalkDelay <= 0 && !m_queuedCommands.isEmpty())
@@ -1247,7 +1268,7 @@ int WorldCommandProcessor::executeCommandWithTriggerPriority(const QString &text
 void WorldCommandProcessor::sendToFromAccelerator(int sendTo, const QString &text, const QString &description,
                                                   const WorldRuntime::Plugin *plugin)
 {
-	this->sendTo(sendTo, text, true, true, QString(), description, plugin);
+	this->sendTo(sendTo, text, true, true, QString(), description, pluginIdOf(plugin));
 }
 
 void WorldCommandProcessor::emitTrace(const QString &message) const
@@ -1503,10 +1524,12 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 	{
 		if (scriptName.isEmpty())
 			continue;
-		WorldRuntime::Trigger *trigger = resolveTriggerByRuntimeId(m_runtime, runtimeId);
+		WorldRuntime::Trigger *trigger = resolveTriggerByRuntimeId(m_runtime, runtimeId, pluginId);
 		if (!trigger)
 			continue;
-		WorldRuntime::Plugin             *plugin = resolveCapturedPlugin(m_runtime, pluginId);
+		WorldRuntime::Plugin *plugin = resolveCapturedPlugin(m_runtime, pluginId);
+		if (!pluginId.isEmpty() && (!plugin || !plugin->enabled || plugin->installPending))
+			continue;
 		QSharedPointer<LuaCallbackEngine> luaRef = plugin ? plugin->lua : QSharedPointer<LuaCallbackEngine>{};
 		LuaCallbackEngine *lua = luaRef ? luaRef.data() : (m_runtime ? m_runtime->luaCallbacks() : nullptr);
 		if (!plugin)
@@ -1526,7 +1549,7 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 			continue;
 		const QSharedPointer<LuaCallbackEngine> dispatchLua =
 		    luaRef ? luaRef : QSharedPointer<LuaCallbackEngine>(lua, [](LuaCallbackEngine * /*unused*/) {});
-		TriggerExecutionScope executionScope(m_runtime, trigger, pluginIdOf(plugin), true);
+		TriggerExecutionScope executionScope(m_runtime, runtimeId, pluginId, true);
 		m_runtime->setCurrentActionSource(WorldRuntime::eTriggerFired);
 		const auto result = m_runtime->dispatchLuaStringsAndWildcards(
 		    dispatchLua, scriptName, {label, scriptLine}, wildcards, namedWildcards, styleRunsShared.data(),
@@ -1745,12 +1768,14 @@ void WorldCommandProcessor::onMiniWindowOutputActionActivated(const int actionTy
 
 void WorldCommandProcessor::note(const QString &text, const bool newLine) const
 {
+	if (m_view)
+		static_cast<void>(m_view->commitPendingIncomingPartialOutput());
 	if (m_runtime)
 	{
 		const QString value    = m_runtime->worldAttributes().value(QStringLiteral("log_notes"));
 		const bool    logNotes = value == QStringLiteral("1") ||
-		                      value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		                      value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+		                         value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+		                         value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 		m_runtime->firePluginScreendraw(1, logNotes ? 1 : 0, text);
 	}
 	if (m_view)
@@ -1924,7 +1949,7 @@ void WorldCommandProcessor::handleWorldConnected()
 	const int     connectDelay = qBound(0, attrs.value(QStringLiteral("connect_delay")).toInt(), 10000);
 
 	const bool    needsPassword = password.isEmpty() && ((connectMethod != 0 && !player.isEmpty()) ||
-                                                      connectText.contains(QStringLiteral("%password%")));
+	                                                     connectText.contains(QStringLiteral("%password%")));
 	if (needsPassword)
 	{
 		bool          ok     = false;
@@ -2035,7 +2060,7 @@ void WorldCommandProcessor::handleWorldDisconnected()
 		note(QStringLiteral("Unable to create disconnect backup: %1").arg(backupError), true);
 }
 
-bool WorldCommandProcessor::evaluateCommand(const QString &input)
+bool WorldCommandProcessor::evaluateCommand(const QString &input, const bool allowCommandStacking)
 {
 	if (!m_runtime)
 		return false;
@@ -2138,38 +2163,25 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 	    !m_processingAutoSay && scriptingEnabled && !scriptPrefix.isEmpty() && line.startsWith(scriptPrefix))
 	{
 		const QString code = line.mid(scriptPrefix.size());
-		sendTo(eSendToScript, code, false, false, QString(), QStringLiteral("script prefix"), nullptr);
+		sendTo(eSendToScript, code, false, false, QString(), QStringLiteral("script prefix"), QString());
 		return false;
 	}
 
 	// ---------------------- COMMAND STACKING ------------------------------
 	const QString commandStackEnabled = attrs.value(QStringLiteral("enable_command_stack"));
 	const bool    enableCommandStack  = isEnabledValue(commandStackEnabled);
-	if (const QString commandStackCharacter = attrs.value(QStringLiteral("command_stack_character"));
-	    enableCommandStack && !commandStackCharacter.isEmpty())
+	if (const QString commandStackSeparator = attrs.value(QStringLiteral("command_stack_character"));
+	    allowCommandStacking && enableCommandStack &&
+	    QMudCommandStack::isValidSeparator(commandStackSeparator))
 	{
-		if (const auto stackChar = commandStackCharacter.at(0); !line.isEmpty() && line.at(0) == stackChar)
+		const QStringList commands = QMudCommandStack::expand(line, commandStackSeparator);
+		if (commands.size() > 1)
 		{
-			// Leading stack char disables command stacking for this line.
-			line.remove(0, 1);
+			for (const QString &command : commands)
+				evaluateCommand(command, false);
+			return false;
 		}
-		else
-		{
-			QString escaped;
-			escaped += stackChar;
-			escaped += stackChar;
-			constexpr QChar placeholder = QChar(0x01);
-			line.replace(escaped, QString(placeholder));
-			line.replace(stackChar, QLatin1Char('\n'));
-			line.replace(QString(placeholder), QString(stackChar));
-
-			if (const QStringList stacked = line.split(QLatin1Char('\n')); stacked.size() > 1)
-			{
-				for (const QString &part : stacked)
-					evaluateCommand(part);
-				return false;
-			}
-		}
+		line = commands.constFirst();
 	}
 
 	// ------------------------- PLUGIN COMMAND CALLBACK -------------------
@@ -2212,15 +2224,23 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 	QVector<AliasRef>            matchedAliases;
 	QVector<AliasRef>            oneShotAliases;
 	bool                         stopAliasEvaluation = false;
-	QList<WorldRuntime::Plugin> &pluginList    = WorldCommandProcessorMutationAccess::plugins(*m_runtime);
-	const QVector<int>          &pluginIndices = sortedPluginIndices();
-	for (int pluginIndex : pluginIndices)
+	QList<WorldRuntime::Plugin> &pluginList = WorldCommandProcessorMutationAccess::plugins(*m_runtime);
+	QVector<QPair<QString, int>> pluginPlan;
+	for (const int pluginIndex : sortedPluginIndices())
 	{
 		if (pluginIndex < 0 || pluginIndex >= pluginList.size())
 			continue;
-		WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
-		if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
-		    plugin->sequence >= 0)
+		const WorldRuntime::Plugin &plugin = pluginList.at(pluginIndex);
+		if (!pluginHasValidId(plugin))
+			continue;
+		pluginPlan.push_back({pluginIdOf(&plugin), plugin.sequence});
+	}
+	for (const auto &[pluginId, sequence] : std::as_const(pluginPlan))
+	{
+		if (sequence >= 0)
+			continue;
+		WorldRuntime::Plugin *plugin = resolveCapturedPlugin(m_runtime, pluginId);
+		if (!plugin || !plugin->enabled || plugin->installPending)
 			continue;
 		if (processOneAliasSequence(line, true, bOmitFromLog, bEchoAlias, bOmitFromHistory, matchedAliases,
 		                            oneShotAliases, plugin))
@@ -2237,15 +2257,14 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 		stopAliasEvaluation = true;
 	}
 
-	for (int pluginIndex : pluginIndices)
+	for (const auto &[pluginId, sequence] : std::as_const(pluginPlan))
 	{
 		if (stopAliasEvaluation)
 			break;
-		if (pluginIndex < 0 || pluginIndex >= pluginList.size())
+		if (sequence < 0)
 			continue;
-		WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
-		if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
-		    plugin->sequence < 0)
+		WorldRuntime::Plugin *plugin = resolveCapturedPlugin(m_runtime, pluginId);
+		if (!plugin || !plugin->enabled || plugin->installPending)
 			continue;
 		if (processOneAliasSequence(line, true, bOmitFromLog, bEchoAlias, bOmitFromHistory, matchedAliases,
 		                            oneShotAliases, plugin))
@@ -2287,15 +2306,17 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 	}
 
 	QHash<QString, bool> worldAliasFunctionPresenceCache;
-	for (const auto &[runtimeId, pluginId, label, scriptName, scriptLine, wildcards, namedWildcards] :
-	     matchedAliases)
+	for (const auto &[runtimeId, pluginId, label, scriptName, scriptLine, wildcards, namedWildcards,
+	                  indexHint] : matchedAliases)
 	{
 		if (scriptName.isEmpty())
 			continue;
-		WorldRuntime::Alias *alias = resolveAliasByRuntimeId(m_runtime, runtimeId);
+		WorldRuntime::Alias *alias = resolveAliasByRuntimeId(m_runtime, runtimeId, pluginId, indexHint);
 		if (!alias)
 			continue;
-		WorldRuntime::Plugin             *plugin = resolveCapturedPlugin(m_runtime, pluginId);
+		WorldRuntime::Plugin *plugin = resolveCapturedPlugin(m_runtime, pluginId);
+		if (!pluginId.isEmpty() && (!plugin || !plugin->enabled || plugin->installPending))
+			continue;
 		QSharedPointer<LuaCallbackEngine> luaRef = plugin ? plugin->lua : QSharedPointer<LuaCallbackEngine>{};
 		LuaCallbackEngine *lua = luaRef ? luaRef.data() : (m_runtime ? m_runtime->luaCallbacks() : nullptr);
 		if (!plugin)
@@ -2311,7 +2332,7 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input)
 			continue;
 		if (lua)
 		{
-			AliasExecutionScope executionScope(m_runtime, alias, pluginIdOf(plugin), true);
+			AliasExecutionScope executionScope(m_runtime, runtimeId, pluginId, true, indexHint);
 			if (m_runtime)
 			{
 				const QSharedPointer<LuaCallbackEngine> dispatchLua =
@@ -2386,11 +2407,13 @@ QString WorldCommandProcessor::fixWildcard(const QString &wildcard, const bool m
 	return QMudCommandText::fixWildcard(wildcard, makeLowerCase, sendTo, language);
 } // end of FixWildcard
 
-bool WorldCommandProcessor::findVariable(const QString &name, QString &value,
-                                         const WorldRuntime::Plugin *plugin) const
+bool WorldCommandProcessor::findVariable(const QString &name, QString &value, const QString &pluginId) const
 {
-	if (plugin)
+	if (!pluginId.isEmpty())
 	{
+		const WorldRuntime::Plugin *plugin = resolveCapturedPlugin(m_runtime, pluginId);
+		if (!plugin)
+			return false;
 		for (auto it = plugin->variables.constBegin(); it != plugin->variables.constEnd(); ++it)
 		{
 			if (it.key().compare(name, Qt::CaseInsensitive) == 0)
@@ -2401,10 +2424,7 @@ bool WorldCommandProcessor::findVariable(const QString &name, QString &value,
 		}
 		return false;
 	}
-
-	if (!m_runtime)
-		return false;
-	return m_runtime->findVariable(name, value);
+	return m_runtime && m_runtime->findVariable(name, value);
 }
 
 QString WorldCommandProcessor::fixSendText(const QString &source, int sendTo, const QStringList &wildcards,
@@ -2412,7 +2432,7 @@ QString WorldCommandProcessor::fixSendText(const QString &source, int sendTo, co
                                            const QString &language, bool makeWildcardsLower,
                                            bool expandVariables, bool expandWildcards, bool fixRegexps,
                                            bool isRegexp, bool throwExceptions, const QString &name,
-                                           const WorldRuntime::Plugin *plugin, bool *ok) const
+                                           const QString &pluginId, bool *ok) const
 {
 	QString      strOutput; // result of expansion
 
@@ -2493,7 +2513,7 @@ QString WorldCommandProcessor::fixSendText(const QString &source, int sendTo, co
 			{
 				strVariableName = strVariableName.toLower();
 				QString strVariableContents;
-				if (findVariable(strVariableName, strVariableContents, plugin))
+				if (findVariable(strVariableName, strVariableContents, pluginId))
 				{
 					// fix up so regexps don't get confused with [ etc. inside variable
 					if (bEscape)
@@ -2801,14 +2821,43 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 
 	QList<WorldRuntime::Alias> &aliases =
 	    plugin ? plugin->aliases : WorldCommandProcessorMutationAccess::aliases(*m_runtime);
-	const QString scopePluginId       = pluginIdOf(plugin);
-	bool          runtimeStateChanged = false;
-	const auto    publishRuntimeState = qScopeGuard(
-        [runtime = QPointer<WorldRuntime>(m_runtime), &runtimeStateChanged, scopePluginId]
-        {
-            if (runtime && runtimeStateChanged)
-                runtime->markAliasRuntimeStateChanged(scopePluginId);
-        });
+	const QString scopePluginId            = pluginIdOf(plugin);
+	bool          runtimeStateChanged      = false;
+	quint64       changedAliasRuntimeId    = 0;
+	int           changedAliasIndexHint    = -1;
+	auto          recordRuntimeStateChange = [&](WorldRuntime::Alias &alias, const int index)
+	{
+		const quint64 runtimeId =
+		    alias.runtimeId != 0 ? alias.runtimeId : m_runtime->ensureRuleRuntimeId(alias);
+		if (!runtimeStateChanged)
+		{
+			changedAliasRuntimeId = runtimeId;
+			changedAliasIndexHint = index;
+		}
+		else if (changedAliasRuntimeId != runtimeId)
+		{
+			changedAliasRuntimeId = 0;
+			changedAliasIndexHint = -1;
+		}
+		runtimeStateChanged = true;
+	};
+	auto publishChangedRuntimeState = [runtime = QPointer<WorldRuntime>(m_runtime), &runtimeStateChanged,
+	                                   &changedAliasRuntimeId, &changedAliasIndexHint, scopePluginId]
+	{
+		if (runtime && runtimeStateChanged)
+		{
+			if (changedAliasRuntimeId != 0)
+				runtime->markAliasRuntimeStateChanged(scopePluginId, changedAliasRuntimeId,
+				                                      changedAliasIndexHint);
+			else
+				runtime->markAliasRuntimeStateChanged(scopePluginId);
+			runtimeStateChanged   = false;
+			changedAliasRuntimeId = 0;
+			changedAliasIndexHint = -1;
+		}
+	};
+	const auto publishRuntimeState =
+	    qScopeGuard([&publishChangedRuntimeState] { publishChangedRuntimeState(); });
 	const auto                  cacheKey   = reinterpret_cast<quintptr>(&aliases);
 	const quint64               signature  = aliasOrderSignature(aliases);
 	const AliasOrderCacheEntry *cacheEntry = nullptr;
@@ -2853,43 +2902,120 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 		return false;
 	}
 
-	bool matchedAny = false;
-	for (int index : cacheEntry->indices)
+	const QVector<int>           orderedIndices = cacheEntry->indices;
+	QVector<int>                 indexHints;
+	QVector<WorldRuntime::Alias> evaluationPlan;
+	indexHints.reserve(orderedIndices.size());
+	evaluationPlan.reserve(orderedIndices.size());
+	for (const int index : orderedIndices)
 	{
+		if (index < 0 || index >= aliases.size())
+			continue;
 		WorldRuntime::Alias &alias = aliases[index];
+		if (alias.runtimeId == 0)
+			m_runtime->ensureRuleRuntimeId(alias);
+		indexHints.push_back(index);
+		evaluationPlan.push_back(alias);
+	}
+
+	bool matchedAny = false;
+	for (int planIndex = 0; planIndex < evaluationPlan.size(); ++planIndex)
+	{
+		const WorldRuntime::Alias &definition     = evaluationPlan.at(planIndex);
+		const int                  index          = indexHints.at(planIndex);
+		const quint64              aliasRuntimeId = definition.runtimeId;
+		WorldRuntime::Alias *alias = resolveAliasByRuntimeId(m_runtime, aliasRuntimeId, scopePluginId, index);
 		// ignore non-enabled aliases
-		if (const QString enabled = alias.attributes.value(QStringLiteral("enabled")); !attrTrue(enabled))
+		if (const QString enabled = definition.attributes.value(QStringLiteral("enabled"));
+		    !attrTrue(enabled))
 		{
 			continue;
 		}
 
 		if (m_runtime)
 			m_runtime->incrementAliasesEvaluated();
-		alias.matchAttempts++;
-		alias.lastMatchTarget = currentLine;
-		runtimeStateChanged   = true;
+		if (alias && !alias->lastMatchWildcards.isEmpty())
+		{
+			alias->lastMatchWildcards.clear();
+			recordRuntimeStateChange(*alias, index);
+		}
 
-		const QString matchText = alias.attributes.value(QStringLiteral("match"));
+		const QString matchText = definition.attributes.value(QStringLiteral("match"));
 		if (matchText.isEmpty())
 			continue;
 
-		const bool             isRegexp   = attrTrue(alias.attributes.value(QStringLiteral("regexp")));
-		const bool             ignoreCase = attrTrue(alias.attributes.value(QStringLiteral("ignore_case")));
+		const bool    isRegexp   = attrTrue(definition.attributes.value(QStringLiteral("regexp")));
+		const bool    ignoreCase = attrTrue(definition.attributes.value(QStringLiteral("ignore_case")));
 
-		const QString          pattern = isRegexp ? matchText : wildcardToRegexCached(matchText);
-		QStringList            wildcards;
+		const QString pattern = isRegexp ? matchText : wildcardToRegexCached(matchText);
+		QStringList   wildcards;
 		QMap<QString, QString> namedWildcards;
-		int                    startCol = 0;
-		int                    endCol   = 0;
-		if (!regexMatch(pattern, currentLine, ignoreCase, wildcards, namedWildcards, &startCol, &endCol))
+		int                    startCol        = 0;
+		int                    endCol          = 0;
+		qint64                 executionTimeNs = alias ? alias->executionTimeNs : definition.executionTimeNs;
+		int                    matchCount      = alias ? alias->matchCount : definition.matchCount;
+		int                    matchAttempts   = alias ? alias->matchAttempts : definition.matchAttempts;
+		const int              previousMatchAttempts = matchAttempts;
+		if (!regexMatch(pattern, currentLine, ignoreCase, wildcards, namedWildcards, &startCol, &endCol, 0,
+		                false, &executionTimeNs, &matchCount, &matchAttempts))
+		{
+			if (alias && matchAttempts != previousMatchAttempts)
+			{
+				alias->executionTimeNs = executionTimeNs;
+				alias->matchCount      = matchCount;
+				alias->matchAttempts   = matchAttempts;
+				recordRuntimeStateChange(*alias, index);
+			}
 			continue;
+		}
+
+		const QString  language       = m_runtime->worldAttributes().value(QStringLiteral("script_language"));
+		constexpr bool lowerWildcards = false;
+		const int      sendToValue    = definition.attributes.value(QStringLiteral("send_to")).toInt();
+		QStringList    fixedWildcards = wildcards;
+		for (QString &fixed : fixedWildcards)
+			fixed = fixWildcard(fixed, lowerWildcards, sendToValue, language);
+		QMap<QString, QString> fixedNamed = namedWildcards;
+		for (auto it = fixedNamed.begin(); it != fixedNamed.end(); ++it)
+			it.value() = fixWildcard(it.value(), lowerWildcards, sendToValue, language);
+		const QString label       = definition.attributes.value(QStringLiteral("name"));
+		const QString scriptLabel = label.isEmpty() ? matchText : label;
+		const bool    omitCommandHistory =
+		    attrTrue(definition.attributes.value(QStringLiteral("omit_from_command_history")));
+		const bool echoMatchedAlias = attrTrue(definition.attributes.value(QStringLiteral("echo_alias")));
+		const bool expandVariables =
+		    attrTrue(definition.attributes.value(QStringLiteral("expand_variables")));
+		const bool omitFromOutput = attrTrue(definition.attributes.value(QStringLiteral("omit_from_output")));
+		const bool omitFromLogValue = attrTrue(definition.attributes.value(QStringLiteral("omit_from_log")));
+		const QString variableName  = definition.attributes.value(QStringLiteral("variable"));
+		const QString scriptName    = definition.attributes.value(QStringLiteral("script"));
+		const bool    oneShot       = attrTrue(definition.attributes.value(QStringLiteral("one_shot")));
+		const bool keepEvaluating = attrTrue(definition.attributes.value(QStringLiteral("keep_evaluating")));
+		const QString sendSource  = definition.children.value(QStringLiteral("send"));
 
 		matchedAny = true;
-		alias.matched++;
-		alias.lastMatched = QDateTime::currentDateTime();
+		if (alias)
+		{
+			alias->executionTimeNs = executionTimeNs;
+			alias->matchCount      = matchCount;
+			alias->matchAttempts   = matchAttempts;
+			alias->matched++;
+			alias->lastMatchTarget    = currentLine;
+			alias->lastMatchWildcards = fixedWildcards;
+			alias->lastMatched        = QDateTime::currentDateTime();
+			recordRuntimeStateChange(*alias, index);
+		}
+		if (m_runtime)
+		{
+			if (!scopePluginId.isEmpty())
+				m_runtime->setPluginAliasWildcards(scopePluginId, scriptLabel, fixedWildcards, fixedNamed);
+			else
+				m_runtime->setAliasWildcards(scriptLabel, fixedWildcards, fixedNamed);
+		}
+		publishChangedRuntimeState();
 
 		// if alias wants it, omit entire typed line from command history
-		if (attrTrue(alias.attributes.value(QStringLiteral("omit_from_command_history"))))
+		if (omitCommandHistory)
 		{
 			omitFromHistory = true;
 		}
@@ -2909,7 +3035,7 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 		// echo the alias they typed, unless command echo off, or previously displayed
 		// (if wanted - v3.38)
 
-		if (echoAlias && attrTrue(alias.attributes.value(QStringLiteral("echo_alias"))))
+		if (echoAlias && echoMatchedAlias)
 		{
 			if (m_view)
 				m_view->echoInputText(currentLine);
@@ -2917,7 +3043,7 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 			// Log the typed alias command when input logging is enabled (LogCommand behavior).
 			if (m_runtime &&
 			    isEnabledValue(m_runtime->worldAttributes().value(QStringLiteral("log_input"))) &&
-			    !attrTrue(alias.attributes.value(QStringLiteral("omit_from_log"))))
+			    !omitFromLogValue)
 			{
 				logLine(currentLine, QStringLiteral("log_line_preamble_input"),
 				        QStringLiteral("log_line_postamble_input"));
@@ -2930,58 +3056,18 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 				m_runtime->incrementAliasesMatched();
 		}
 
-		omitFromLog = attrTrue(alias.attributes.value(QStringLiteral("omit_from_log")));
+		omitFromLog = omitFromLogValue;
 
 		// get unlabelled alias's internal name
-		const QString label       = alias.attributes.value(QStringLiteral("name"));
-		const QString scriptLabel = label.isEmpty() ? matchText : label;
 		if (label.isEmpty())
 			emitTrace(QStringLiteral("Matched alias \"%1\"").arg(matchText));
 		else
 			emitTrace(QStringLiteral("Matched alias %1").arg(label));
 
-		const QString  language       = m_runtime->worldAttributes().value(QStringLiteral("script_language"));
-		constexpr bool lowerWildcards = false;
-		const int      sendToValue    = alias.attributes.value(QStringLiteral("send_to")).toInt();
-		const bool     expandVariables = attrTrue(alias.attributes.value(QStringLiteral("expand_variables")));
-		const bool     omitFromOutput  = attrTrue(alias.attributes.value(QStringLiteral("omit_from_output")));
-		const bool     omitFromLogValue = attrTrue(alias.attributes.value(QStringLiteral("omit_from_log")));
-		const QString  variableName     = alias.attributes.value(QStringLiteral("variable"));
-		const QString  scriptName       = alias.attributes.value(QStringLiteral("script"));
-		const bool     oneShot          = attrTrue(alias.attributes.value(QStringLiteral("one_shot")));
-		const bool     keepEvaluating   = attrTrue(alias.attributes.value(QStringLiteral("keep_evaluating")));
-		QStringList    fixedWildcards   = wildcards;
-		for (QString &fixed : fixedWildcards)
-			fixed = fixWildcard(fixed, lowerWildcards, sendToValue, language);
-		QMap<QString, QString> fixedNamed = namedWildcards;
-		for (auto it = fixedNamed.begin(); it != fixedNamed.end(); ++it)
-			it.value() = fixWildcard(it.value(), lowerWildcards, sendToValue, language);
-
-		if (m_runtime && !scriptLabel.isEmpty())
-		{
-			if (plugin)
-				m_runtime->setPluginAliasWildcards(plugin->attributes.value(QStringLiteral("id")),
-				                                   scriptLabel, fixedWildcards, fixedNamed);
-			else
-				m_runtime->setAliasWildcards(scriptLabel, fixedWildcards, fixedNamed);
-		}
-
-		// if we have to do parameter substitution on the alias, do it now
-
-		QString sendText = alias.children.value(QStringLiteral("send"));
-
-		// copy contents to strSendText area, replacing %1, %2 etc. with appropriate contents
-
 		bool    ok = false;
-		sendText   = fixSendText(fixupEscapeSequences(sendText), sendToValue, wildcards, namedWildcards,
-		                         m_runtime->worldAttributes().value(QStringLiteral("script_language")),
-		                         false, // lower-case wildcards
-		                         expandVariables,
-		                         true,  // expand wildcards
-		                         false, // convert regexps
-		                         false, // is it regexp or normal?
-		                         true,  // throw exceptions
-		                         scriptLabel, plugin, &ok);
+		QString sendText =
+		    fixSendText(fixupEscapeSequences(sendSource), sendToValue, wildcards, namedWildcards, language,
+		                false, expandVariables, true, false, false, true, scriptLabel, scopePluginId, &ok);
 		if (!ok)
 		{
 			recordTime();
@@ -2991,18 +3077,19 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 		// sendTo -> sendMsg/doSendMsg enforce connected-state checks for world sends.
 		Q_UNUSED(sendText);
 
-		const quint64       aliasRuntimeId = m_runtime->ensureRuleRuntimeId(alias);
-		AliasExecutionScope executionScope(m_runtime, &alias, pluginIdOf(plugin), false);
-		sendTo(sendToValue, sendText, omitFromOutput, omitFromLogValue, variableName, scriptLabel, plugin);
+		AliasExecutionScope executionScope(m_runtime, aliasRuntimeId, scopePluginId, false, index);
+		sendTo(sendToValue, sendText, omitFromOutput, omitFromLogValue, variableName, scriptLabel,
+		       scopePluginId);
 
 		AliasRef ref;
 		ref.runtimeId      = aliasRuntimeId;
-		ref.pluginId       = pluginIdOf(plugin);
+		ref.pluginId       = scopePluginId;
 		ref.label          = scriptLabel;
 		ref.scriptName     = scriptName;
 		ref.line           = currentLine;
 		ref.wildcards      = wildcards;
 		ref.namedWildcards = namedWildcards;
+		ref.indexHint      = index;
 		matchedAliases.push_back(ref);
 
 		if (oneShot)
@@ -3023,7 +3110,8 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &subject, const bool ignoreCase,
                                        QStringList &wildcards, QMap<QString, QString> &namedWildcards,
                                        int *startCol, int *endCol, const int startOffset,
-                                       const bool multiLine, qint64 *executionTimeNs) const
+                                       const bool multiLine, qint64 *executionTimeNs, int *matchCount,
+                                       int *matchAttempts) const
 {
 	QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
 	if (ignoreCase)
@@ -3067,8 +3155,8 @@ bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &su
 		return false;
 	}
 
-	const QMudAliasMatch::MatchResult result =
-	    QMudAliasMatch::matchWithCaptures(regex, subject, m_regexpMatchEmpty, startOffset, executionTimeNs);
+	const QMudAliasMatch::MatchResult result = QMudAliasMatch::matchWithCaptures(
+	    regex, subject, m_regexpMatchEmpty, startOffset, executionTimeNs, matchAttempts);
 	if (!result.matched)
 		return false;
 
@@ -3079,6 +3167,8 @@ bool WorldCommandProcessor::regexMatch(const QString &pattern, const QString &su
 
 	wildcards      = result.wildcards;
 	namedWildcards = result.namedWildcards;
+	if (matchCount)
+		*matchCount = result.matchCount;
 
 	return true;
 }
@@ -3185,43 +3275,63 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 	{
 		const QString scopePluginId       = pluginIdOf(plugin);
 		bool          runtimeStateChanged = false;
-		const auto    publishRuntimeState = qScopeGuard(
-            [runtime = QPointer<WorldRuntime>(m_runtime), &runtimeStateChanged, scopePluginId]
-            {
-                if (runtime && runtimeStateChanged)
-                    runtime->markTriggerRuntimeStateChanged(scopePluginId);
-            });
+		auto          publishChangedRuntimeState =
+		    [runtime = QPointer<WorldRuntime>(m_runtime), &runtimeStateChanged, scopePluginId]
+		{
+			if (runtime && runtimeStateChanged)
+			{
+				runtime->markTriggerRuntimeStateChanged(scopePluginId);
+				runtimeStateChanged = false;
+			}
+		};
+		const auto publishRuntimeState =
+		    qScopeGuard([&publishChangedRuntimeState] { publishChangedRuntimeState(); });
+		for (WorldRuntime::Trigger &trigger : triggers)
+		{
+			if (trigger.runtimeId == 0)
+				m_runtime->ensureRuleRuntimeId(trigger);
+		}
 		const TriggerEvaluationCacheEntry &cacheEntry = decodedTriggerEvaluationCache(triggers);
+		QVector<DecodedTrigger>            evaluationPlan;
+		QVector<WorldRuntime::Trigger>     initialRuntimeState;
+		evaluationPlan.reserve(cacheEntry.triggers.size());
+		initialRuntimeState.reserve(cacheEntry.triggers.size());
 		for (const DecodedTrigger &decoded : cacheEntry.triggers)
 		{
+			if (decoded.index < 0 || decoded.index >= triggers.size())
+				continue;
+			evaluationPlan.push_back(decoded);
+			initialRuntimeState.push_back(triggers.at(decoded.index));
+		}
+		for (int planIndex = 0; planIndex < evaluationPlan.size(); ++planIndex)
+		{
+			const DecodedTrigger        &decoded      = evaluationPlan.at(planIndex);
+			const WorldRuntime::Trigger &initialState = initialRuntimeState.at(planIndex);
 			if (m_runtime->stopTriggerEvaluation() != WorldRuntime::KeepEvaluating)
 				break;
 
-			if (decoded.index < 0 || decoded.index >= safeQSizeToInt(triggers.size()))
-				continue;
-			WorldRuntime::Trigger &trigger = triggers[decoded.index];
+			const quint64          triggerRuntimeId = initialState.runtimeId;
+			WorldRuntime::Trigger *trigger =
+			    resolveTriggerByRuntimeId(m_runtime, triggerRuntimeId, scopePluginId, decoded.index);
 			if (!decoded.enabled)
 				continue;
 
 			m_runtime->incrementTriggersEvaluated();
-			trigger.matchAttempts++;
-			runtimeStateChanged = true;
 
 			QString matchText = decoded.matchText;
 			if (matchText.isEmpty())
 				continue;
 
 			const bool preserveTrailingWhitespace = decoded.isRegexp;
-			QString    target                     = decoded.multiLine
-			                                            ? buildTarget(decoded.linesToMatch, preserveTrailingWhitespace)
-			                                            : (preserveTrailingWhitespace ? matchInputLine : trimmedTriggerLine);
-			trigger.lastMatchTarget               = target;
+			QString    target = decoded.multiLine
+			                        ? buildTarget(decoded.linesToMatch, preserveTrailingWhitespace)
+			                        : (preserveTrailingWhitespace ? matchInputLine : trimmedTriggerLine);
 
 			if (decoded.expandVariables && matchText.contains(QLatin1Char('@')))
 			{
 				matchText = fixSendText(matchText, decoded.sendToValue, QStringList(),
 				                        QMap<QString, QString>(), language, false, true, false, true,
-				                        decoded.isRegexp, false, QString(), plugin, nullptr);
+				                        decoded.isRegexp, false, QString(), scopePluginId, nullptr);
 			}
 
 			const QString          pattern = decoded.isRegexp ? matchText : wildcardToRegexCached(matchText);
@@ -3229,10 +3339,48 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			QMap<QString, QString> namedWildcards;
 			int                    startCol = 0;
 			int                    endCol   = 0;
+			qint64    executionTimeNs = trigger ? trigger->executionTimeNs : initialState.executionTimeNs;
+			int       matchCount      = trigger ? trigger->matchCount : initialState.matchCount;
+			int       matchAttempts   = trigger ? trigger->matchAttempts : initialState.matchAttempts;
+			const int previousMatchAttempts = matchAttempts;
 			if (!regexMatch(pattern, target, decoded.ignoreCase, wildcards, namedWildcards, &startCol,
-			                &endCol, 0, decoded.multiLine, &trigger.executionTimeNs))
+			                &endCol, 0, decoded.multiLine, &executionTimeNs, &matchCount, &matchAttempts))
 			{
+				if (trigger && matchAttempts != previousMatchAttempts)
+				{
+					trigger->executionTimeNs = executionTimeNs;
+					trigger->matchCount      = matchCount;
+					trigger->matchAttempts   = matchAttempts;
+					runtimeStateChanged      = true;
+				}
 				continue;
+			}
+			if (trigger)
+			{
+				trigger->executionTimeNs = executionTimeNs;
+				trigger->matchCount      = matchCount;
+				trigger->matchAttempts   = matchAttempts;
+				trigger->lastMatchTarget = target;
+				runtimeStateChanged      = true;
+			}
+			QStringList fixedWildcards = wildcards;
+			for (QString &fixed : fixedWildcards)
+				fixed = fixWildcard(fixed, decoded.lowerWildcards, decoded.sendToValue, language);
+			auto publishCurrentRegexCaptures = [&]
+			{
+				if (decoded.scriptLabel.isEmpty())
+					return;
+				if (!scopePluginId.isEmpty())
+					m_runtime->setPluginTriggerWildcards(scopePluginId, decoded.scriptLabel, wildcards,
+					                                     namedWildcards);
+				else
+					m_runtime->setTriggerWildcards(decoded.scriptLabel, wildcards, namedWildcards);
+			};
+			publishCurrentRegexCaptures();
+			if (trigger)
+			{
+				trigger->lastMatchWildcards = fixedWildcards;
+				runtimeStateChanged         = true;
 			}
 
 			if (!decoded.multiLine)
@@ -3300,17 +3448,19 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				}
 			}
 
-			trigger.matched++;
-			trigger.lastMatched = QDateTime::currentDateTime();
+			if (trigger)
+			{
+				trigger->matched++;
+				trigger->lastMatched = QDateTime::currentDateTime();
+			}
 			m_runtime->incrementTriggersMatched();
-			const quint64 triggerRuntimeId = m_runtime->ensureRuleRuntimeId(trigger);
-			const bool    triggerSoundEnabled =
-			    QMudTriggerSound::shouldPlayTriggerSound(plugin != nullptr, worldTriggerSoundsEnabled);
+			const bool triggerSoundEnabled =
+			    QMudTriggerSound::shouldPlayTriggerSound(!scopePluginId.isEmpty(), worldTriggerSoundsEnabled);
 			if (!decoded.sound.isEmpty() &&
 			    decoded.sound.compare(QStringLiteral("(No sound)"), Qt::CaseInsensitive) != 0 &&
 			    triggerSoundEnabled)
 			{
-				if (!isEnabledValue(trigger.attributes.value(QStringLiteral("sound_if_inactive"))) ||
+				if (!isEnabledValue(initialState.attributes.value(QStringLiteral("sound_if_inactive"))) ||
 				    !m_runtime->isActive())
 					m_runtime->playSound(0, decoded.sound, false, 0.0, 0.0);
 			}
@@ -3320,26 +3470,12 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 				result.oneShotTriggers.push_back({triggerRuntimeId, scopePluginId});
 			}
 
+			if (m_runtime->traceEnabled())
+				publishChangedRuntimeState();
 			if (decoded.label.isEmpty())
 				emitTrace(QStringLiteral("Matched trigger \"%1\"").arg(decoded.matchText));
 			else
 				emitTrace(QStringLiteral("Matched trigger %1").arg(decoded.label));
-
-			QStringList fixedWildcards = wildcards;
-			for (QString &fixed : fixedWildcards)
-				fixed = fixWildcard(fixed, decoded.lowerWildcards, decoded.sendToValue, language);
-			QMap<QString, QString> fixedNamed = namedWildcards;
-			for (auto it = fixedNamed.begin(); it != fixedNamed.end(); ++it)
-				it.value() = fixWildcard(it.value(), decoded.lowerWildcards, decoded.sendToValue, language);
-
-			if (m_runtime && !decoded.scriptLabel.isEmpty())
-			{
-				if (plugin)
-					m_runtime->setPluginTriggerWildcards(plugin->attributes.value(QStringLiteral("id")),
-					                                     decoded.scriptLabel, fixedWildcards, fixedNamed);
-				else
-					m_runtime->setTriggerWildcards(decoded.scriptLabel, fixedWildcards, fixedNamed);
-			}
 
 			if (decoded.clipboardArg > 0 && decoded.clipboardArg < fixedWildcards.size())
 			{
@@ -3348,9 +3484,9 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			}
 
 			QString sendText = decoded.sendText;
-			sendText         = fixSendText(fixupEscapeSequences(sendText), decoded.sendToValue, wildcards,
-			                               namedWildcards, language, decoded.lowerWildcards, decoded.expandVariables,
-			                               true, false, false, false, decoded.scriptLabel, plugin, nullptr);
+			sendText = fixSendText(fixupEscapeSequences(sendText), decoded.sendToValue, wildcards,
+			                       namedWildcards, language, decoded.lowerWildcards, decoded.expandVariables,
+			                       true, false, false, false, decoded.scriptLabel, scopePluginId, nullptr);
 
 			if (!decoded.multiLine)
 			{
@@ -3363,7 +3499,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			if (decoded.sendToValue == eSendToScriptAfterOmit)
 			{
 				DeferredScript deferred;
-				deferred.pluginId                 = pluginIdOf(plugin);
+				deferred.pluginId                 = scopePluginId;
 				deferred.scriptText               = sendText;
 				deferred.description              = QStringLiteral("Trigger: %1").arg(decoded.scriptLabel);
 				deferred.replaceMatchedLineOutput = decoded.omitFromOutput;
@@ -3380,7 +3516,9 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			}
 			else
 			{
-				TriggerExecutionScope executionScope(m_runtime, &trigger, pluginIdOf(plugin), false);
+				publishChangedRuntimeState();
+				TriggerExecutionScope executionScope(m_runtime, triggerRuntimeId, scopePluginId, false,
+				                                     decoded.index);
 				unsigned short        previousActionSource = WorldRuntime::eUnknownActionSource;
 				if (m_runtime)
 				{
@@ -3396,31 +3534,18 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 					    buildStyleRuns(matchInputLine, sourceSpans, defaultFore, defaultBack);
 					sendTo(decoded.sendToValue, sendText, decoded.omitFromOutput, decoded.omitFromLog,
 					       decoded.variableName, QStringLiteral("Trigger: %1").arg(decoded.scriptLabel),
-					       plugin, &triggerStyleRuns, true, false, m_runtime->luaContextLinesInBufferCount(),
+					       scopePluginId, &triggerStyleRuns, true, false,
+					       m_runtime->luaContextLinesInBufferCount(),
 					       m_runtime->incomingLineLuaContextAbsoluteNumber());
 				}
 				else
 				{
 					sendTo(decoded.sendToValue, sendText, decoded.omitFromOutput, decoded.omitFromLog,
 					       decoded.variableName, QStringLiteral("Trigger: %1").arg(decoded.scriptLabel),
-					       plugin);
+					       scopePluginId);
 				}
 				if (m_runtime)
 					m_runtime->setCurrentActionSource(previousActionSource);
-			}
-
-			if (!decoded.scriptName.isEmpty())
-			{
-				TriggerScript script;
-				script.runtimeId                = triggerRuntimeId;
-				script.pluginId                 = pluginIdOf(plugin);
-				script.label                    = decoded.scriptLabel;
-				script.scriptName               = decoded.scriptName;
-				script.line                     = matchInputLine;
-				script.wildcards                = wildcards;
-				script.namedWildcards           = namedWildcards;
-				script.replaceMatchedLineOutput = decoded.omitFromOutput;
-				result.triggerScripts.push_back(script);
 			}
 
 			if (!decoded.multiLine && (decoded.colourChange >= 0 || decoded.makeBold || decoded.makeItalic ||
@@ -3468,17 +3593,55 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 				if (decoded.repeatMatches)
 				{
-					int offset = endCol;
-					while (regexMatch(pattern, target, decoded.ignoreCase, wildcards, namedWildcards,
-					                  &startCol, &endCol, offset, decoded.multiLine,
-					                  &trigger.executionTimeNs))
+					const qint64 executionTimeBeforeRepeats = executionTimeNs;
+					const int    attemptsBeforeRepeats      = matchAttempts;
+					bool         repeatedMatchSucceeded     = false;
+					int          offset                     = endCol;
+					while (true)
 					{
+						if (!regexMatch(pattern, target, decoded.ignoreCase, wildcards, namedWildcards,
+						                &startCol, &endCol, offset, decoded.multiLine, &executionTimeNs,
+						                &matchCount, &matchAttempts))
+							break;
+						repeatedMatchSucceeded = true;
 						if (endCol <= offset)
 							break;
 						applyColour(startCol, endCol);
 						offset = endCol;
 					}
+					const qint64 repeatExecutionTimeNs = executionTimeNs - executionTimeBeforeRepeats;
+					const int    repeatMatchAttempts   = matchAttempts - attemptsBeforeRepeats;
+					if (repeatExecutionTimeNs != 0 || repeatMatchAttempts != 0 || repeatedMatchSucceeded)
+					{
+						if (WorldRuntime::Trigger *resolved = resolveTriggerByRuntimeId(
+						        m_runtime, triggerRuntimeId, scopePluginId, decoded.index))
+						{
+							resolved->executionTimeNs += repeatExecutionTimeNs;
+							resolved->matchAttempts += repeatMatchAttempts;
+							if (repeatedMatchSucceeded)
+							{
+								resolved->matchCount = matchCount;
+							}
+							runtimeStateChanged = true;
+						}
+					}
+					if (repeatedMatchSucceeded)
+						publishCurrentRegexCaptures();
 				}
+			}
+
+			if (!decoded.scriptName.isEmpty())
+			{
+				TriggerScript script;
+				script.runtimeId                = triggerRuntimeId;
+				script.pluginId                 = scopePluginId;
+				script.label                    = decoded.scriptLabel;
+				script.scriptName               = decoded.scriptName;
+				script.line                     = matchInputLine;
+				script.wildcards                = wildcards;
+				script.namedWildcards           = namedWildcards;
+				script.replaceMatchedLineOutput = decoded.omitFromOutput;
+				result.triggerScripts.push_back(script);
 			}
 
 			if (!decoded.keepEvaluating)
@@ -3486,15 +3649,23 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 		}
 	};
 
-	QList<WorldRuntime::Plugin> &pluginList    = WorldCommandProcessorMutationAccess::plugins(*m_runtime);
-	const QVector<int>          &pluginIndices = sortedPluginIndices();
-	for (int pluginIndex : pluginIndices)
+	QList<WorldRuntime::Plugin> &pluginList = WorldCommandProcessorMutationAccess::plugins(*m_runtime);
+	QVector<QPair<QString, int>> pluginPlan;
+	for (const int pluginIndex : sortedPluginIndices())
 	{
 		if (pluginIndex < 0 || pluginIndex >= pluginList.size())
 			continue;
-		WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
-		if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
-		    plugin->sequence >= 0)
+		const WorldRuntime::Plugin &plugin = pluginList.at(pluginIndex);
+		if (!pluginHasValidId(plugin))
+			continue;
+		pluginPlan.push_back({pluginIdOf(&plugin), plugin.sequence});
+	}
+	for (const auto &[pluginId, sequence] : std::as_const(pluginPlan))
+	{
+		if (sequence >= 0)
+			continue;
+		WorldRuntime::Plugin *plugin = resolveCapturedPlugin(m_runtime, pluginId);
+		if (!plugin || !plugin->enabled || plugin->installPending)
 			continue;
 		m_runtime->setStopTriggerEvaluation(WorldRuntime::KeepEvaluating);
 		processSequence(plugin->triggers, plugin);
@@ -3513,13 +3684,12 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 
 	if (m_runtime->stopTriggerEvaluation() != WorldRuntime::StopAllSequences)
 	{
-		for (int pluginIndex : pluginIndices)
+		for (const auto &[pluginId, sequence] : std::as_const(pluginPlan))
 		{
-			if (pluginIndex < 0 || pluginIndex >= pluginList.size())
+			if (sequence < 0)
 				continue;
-			WorldRuntime::Plugin *plugin = &pluginList[pluginIndex];
-			if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending ||
-			    plugin->sequence < 0)
+			WorldRuntime::Plugin *plugin = resolveCapturedPlugin(m_runtime, pluginId);
+			if (!plugin || !plugin->enabled || plugin->installPending)
 				continue;
 			m_runtime->setStopTriggerEvaluation(WorldRuntime::KeepEvaluating);
 			processSequence(plugin->triggers, plugin);
@@ -3550,156 +3720,146 @@ void WorldCommandProcessor::checkTimers()
 	const QDateTime now       = QDateTime::currentDateTime();
 	const bool      connected = m_runtime->connectPhase() == WorldRuntime::eConnectConnectedToMud;
 
-	auto            processTimers = [&](const QString &contextPluginId) -> bool
+	auto            processTimers = [&](const QString &contextPluginId)
 	{
-		constexpr int kMaxRescansPerTick = 2;
-		int           rescanCount        = 0;
-		const bool    pluginScoped       = !contextPluginId.isEmpty();
-
-		while (true)
+		struct TimerEvaluationPlanEntry
 		{
-			QList<WorldRuntime::Timer> *timers = nullptr;
-			const WorldRuntime::Plugin *plugin = nullptr;
-			if (!pluginScoped)
-			{
-				timers = &WorldCommandProcessorMutationAccess::timers(*m_runtime);
-			}
-			else
-			{
-				WorldRuntime::Plugin *activePlugin =
-				    m_runtime ? WorldCommandProcessorMutationAccess::plugin(*m_runtime, contextPluginId)
-				              : nullptr;
-				if (!activePlugin || !pluginHasValidId(*activePlugin) || !activePlugin->enabled ||
-				    activePlugin->installPending)
-					return false;
-				plugin = activePlugin;
-				timers = &activePlugin->timers;
-			}
+				quint64             runtimeId{0};
+				WorldRuntime::Timer definition;
+		};
 
-			QVector<quint64> firedRuntimeIds;
-			bool             scheduleStateChanged = false;
-			for (int i = 0, size = safeQSizeToInt(timers->size()); i < size; ++i)
-			{
-				WorldRuntime::Timer &timer = (*timers)[i];
-				const auto evaluation      = QMudTimerScheduling::evaluateTimerDue(timer, now, connected);
-				scheduleStateChanged |= evaluation.runtimeStateChanged;
-				if (!evaluation.due)
-					continue;
-				const quint64 timerRuntimeId = m_runtime->ensureRuleRuntimeId(timer);
-				if (timerRuntimeId == 0)
-					continue;
-				firedRuntimeIds.push_back(timerRuntimeId);
-			}
-			if (scheduleStateChanged)
-				m_runtime->markTimerRuntimeStateChanged(contextPluginId);
+		const bool                  pluginScoped = !contextPluginId.isEmpty();
 
-			bool rescanNeeded = false;
-			for (const quint64 timerRuntimeId : std::as_const(firedRuntimeIds))
-			{
-				WorldRuntime::Timer *timer = resolveTimerByRuntimeId(m_runtime, timerRuntimeId);
-				if (!timer)
-				{
-					if (pluginScoped)
-						return false;
-					rescanNeeded = true;
-					break;
-				}
-
-				if (!isEnabledValue(timer->attributes.value(QStringLiteral("enabled"))))
-					continue;
-
-				const bool deleteAfterFire = QMudTimerScheduling::applyTimerFiredState(*timer, now);
-				m_runtime->markTimerRuntimeStateChanged(contextPluginId);
-				// One-shot timers remain available while their action/script runs, then delete themselves.
-				// World deletion is a persisted definition mutation; plugin deletion stays plugin-owned.
-				const auto deleteOneShotTimer = qScopeGuard(
-				    [runtime = QPointer<WorldRuntime>(m_runtime), timerRuntimeId, contextPluginId,
-				     deleteAfterFire]
-				    {
-					    if (!deleteAfterFire || !runtime ||
-					        !removeTimerByRuntimeId(runtime.data(), timerRuntimeId))
-					    {
-						    return;
-					    }
-					    runtime->noteTimerStructureMutation();
-					    if (contextPluginId.isEmpty())
-						    runtime->markTimersChanged();
-					    else
-						    runtime->markPluginTimersChanged(contextPluginId);
-				    });
-				m_runtime->incrementTimersFired();
-
-				const int  sendToValue = timer->attributes.value(QStringLiteral("send_to")).toInt();
-				const bool omitFromOutput =
-				    isEnabledValue(timer->attributes.value(QStringLiteral("omit_from_output")));
-				const bool omitFromLog =
-				    isEnabledValue(timer->attributes.value(QStringLiteral("omit_from_log")));
-				const QString variableName = timer->attributes.value(QStringLiteral("variable"));
-				const QString label        = timer->attributes.value(QStringLiteral("name")).trimmed();
-				const QString sendText     = timer->children.value(QStringLiteral("send"));
-				const QString scriptName   = timer->attributes.value(QStringLiteral("script"));
-				if (label.isEmpty())
-					emitTrace(QStringLiteral("Fired unlabelled timer "));
-				else
-					emitTrace(QStringLiteral("Fired timer %1").arg(label));
-
-				const quint64 serialBeforeSend = m_runtime->timerStructureMutationSerial();
-				{
-					TimerExecutionScope executionScope(m_runtime, timer, contextPluginId, false);
-					m_runtime->setCurrentActionSource(WorldRuntime::eTimerFired);
-					sendTo(sendToValue, sendText, omitFromOutput, omitFromLog, variableName,
-					       QStringLiteral("Timer: %1").arg(label), plugin);
-					m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
-				}
-				const quint64 serialAfterSend = m_runtime->timerStructureMutationSerial();
-				if (serialAfterSend != serialBeforeSend)
-				{
-					if (pluginScoped)
-						return false;
-					rescanNeeded = true;
-					break;
-				}
-
-				if (scriptName.isEmpty())
-					continue;
-
-				const QSharedPointer<LuaCallbackEngine> luaRef =
-				    plugin ? plugin->lua : QSharedPointer<LuaCallbackEngine>{};
-				LuaCallbackEngine *lua = luaRef ? luaRef.data() : m_runtime->luaCallbacks();
-				if (!plugin && !canExecuteWorldScript(QStringLiteral("Timer"), scriptName, lua))
-					continue;
-				if (!lua)
-					continue;
-				if (!m_runtime)
-					continue;
-
-				const QSharedPointer<LuaCallbackEngine> dispatchLua =
-				    luaRef ? luaRef
-				           : QSharedPointer<LuaCallbackEngine>(lua, [](LuaCallbackEngine * /*unused*/) {});
-				const bool worldScript = plugin == nullptr;
-				{
-					TimerExecutionScope executionScope(m_runtime, timer, contextPluginId, true);
-					m_runtime->setCurrentActionSource(WorldRuntime::eTimerFired);
-					const LuaBatchDispatchResult result = m_runtime->dispatchLuaStringsAndWildcards(
-					    dispatchLua, scriptName, {label}, {}, {}, nullptr);
-					if (worldScript && result.hasFunctionValid && !result.hasFunction)
-						warnMissingWorldScriptFunction(QStringLiteral("Timer"), scriptName);
-					m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
-				}
-			}
-
-			if (!rescanNeeded || rescanCount >= kMaxRescansPerTick)
-				break;
-			++rescanCount;
+		QList<WorldRuntime::Timer> *timers = nullptr;
+		if (!pluginScoped)
+		{
+			timers = &WorldCommandProcessorMutationAccess::timers(*m_runtime);
 		}
-		return false;
+		else
+		{
+			WorldRuntime::Plugin *activePlugin =
+			    m_runtime ? WorldCommandProcessorMutationAccess::plugin(*m_runtime, contextPluginId)
+			              : nullptr;
+			if (!activePlugin || !pluginHasValidId(*activePlugin) || !activePlugin->enabled ||
+			    activePlugin->installPending)
+				return;
+			timers = &activePlugin->timers;
+		}
+
+		QVector<TimerEvaluationPlanEntry> evaluationPlan;
+		bool                              scheduleStateChanged = false;
+		for (int i = 0, size = safeQSizeToInt(timers->size()); i < size; ++i)
+		{
+			WorldRuntime::Timer &timer      = (*timers)[i];
+			const auto           evaluation = QMudTimerScheduling::evaluateTimerDue(timer, now, connected);
+			scheduleStateChanged |= evaluation.runtimeStateChanged;
+			if (!evaluation.due)
+				continue;
+			const quint64 timerRuntimeId = m_runtime->ensureRuleRuntimeId(timer);
+			if (timerRuntimeId == 0)
+				continue;
+			evaluationPlan.push_back({timerRuntimeId, timer});
+		}
+		if (scheduleStateChanged)
+			m_runtime->markTimerRuntimeStateChanged(contextPluginId);
+
+		for (const TimerEvaluationPlanEntry &planned : std::as_const(evaluationPlan))
+		{
+			WorldRuntime::Timer *timer = resolveTimerByRuntimeId(m_runtime, planned.runtimeId);
+			if (!timer)
+				continue;
+
+			QMudTimerScheduling::applyTimerFiredState(*timer, now);
+			const bool deleteAfterFire =
+			    isEnabledValue(planned.definition.attributes.value(QStringLiteral("one_shot")));
+			m_runtime->markTimerRuntimeStateChanged(contextPluginId);
+			// One-shot timers remain available while their action/script runs, then delete themselves.
+			// World deletion is a persisted definition mutation; plugin deletion stays plugin-owned.
+			const auto deleteOneShotTimer = qScopeGuard(
+			    [runtime = QPointer<WorldRuntime>(m_runtime), timerRuntimeId = planned.runtimeId,
+			     contextPluginId, deleteAfterFire]
+			    {
+				    if (!deleteAfterFire || !runtime ||
+				        !removeTimerByRuntimeId(runtime.data(), timerRuntimeId))
+				    {
+					    return;
+				    }
+				    runtime->noteTimerStructureMutation();
+				    if (contextPluginId.isEmpty())
+					    runtime->markTimersChanged();
+				    else
+					    runtime->markPluginTimersChanged(contextPluginId);
+			    });
+			m_runtime->incrementTimersFired();
+
+			const WorldRuntime::Timer &definition = planned.definition;
+			const int  sendToValue = definition.attributes.value(QStringLiteral("send_to")).toInt();
+			const bool omitFromOutput =
+			    isEnabledValue(definition.attributes.value(QStringLiteral("omit_from_output")));
+			const bool omitFromLog =
+			    isEnabledValue(definition.attributes.value(QStringLiteral("omit_from_log")));
+			const QString variableName = definition.attributes.value(QStringLiteral("variable"));
+			const QString label        = definition.attributes.value(QStringLiteral("name")).trimmed();
+			const QString sendText     = definition.children.value(QStringLiteral("send"));
+			const QString scriptName   = definition.attributes.value(QStringLiteral("script"));
+			if (label.isEmpty())
+				emitTrace(QStringLiteral("Fired unlabelled timer "));
+			else
+				emitTrace(QStringLiteral("Fired timer %1").arg(label));
+			if (!resolveTimerByRuntimeId(m_runtime, planned.runtimeId))
+			{
+				continue;
+			}
+
+			{
+				TimerExecutionScope executionScope(m_runtime, planned.runtimeId, contextPluginId, false);
+				m_runtime->setCurrentActionSource(WorldRuntime::eTimerFired);
+				sendTo(sendToValue, sendText, omitFromOutput, omitFromLog, variableName,
+				       QStringLiteral("Timer: %1").arg(label), contextPluginId);
+				m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
+			}
+			if (!resolveTimerByRuntimeId(m_runtime, planned.runtimeId))
+			{
+				continue;
+			}
+
+			if (scriptName.isEmpty())
+				continue;
+
+			QSharedPointer<LuaCallbackEngine> luaRef;
+			if (pluginScoped)
+			{
+				WorldRuntime::Plugin *activePlugin = resolveCapturedPlugin(m_runtime, contextPluginId);
+				if (!activePlugin || !activePlugin->enabled || activePlugin->installPending)
+					continue;
+				luaRef = activePlugin->lua;
+			}
+			LuaCallbackEngine *lua = luaRef ? luaRef.data() : m_runtime->luaCallbacks();
+			if (!pluginScoped && !canExecuteWorldScript(QStringLiteral("Timer"), scriptName, lua))
+				continue;
+			if (!lua)
+				continue;
+			if (!m_runtime)
+				continue;
+
+			const QSharedPointer<LuaCallbackEngine> dispatchLua =
+			    luaRef ? luaRef
+			           : QSharedPointer<LuaCallbackEngine>(lua, [](LuaCallbackEngine * /*unused*/) {});
+			const bool worldScript = !pluginScoped;
+			{
+				TimerExecutionScope executionScope(m_runtime, planned.runtimeId, contextPluginId, true);
+				m_runtime->setCurrentActionSource(WorldRuntime::eTimerFired);
+				const LuaBatchDispatchResult result = m_runtime->dispatchLuaStringsAndWildcards(
+				    dispatchLua, scriptName, {label}, {}, {}, nullptr);
+				if (worldScript && result.hasFunctionValid && !result.hasFunction)
+					warnMissingWorldScriptFunction(QStringLiteral("Timer"), scriptName);
+				m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
+			}
+		}
 	};
 
 	if (worldTimersEnabled)
-	{
-		if (processTimers(QString()))
-			return;
-	}
+		processTimers(QString());
 
 	QStringList pluginIds;
 	for (const auto &plugin : m_runtime->plugins())
@@ -3714,14 +3874,13 @@ void WorldCommandProcessor::checkTimers()
 		WorldRuntime::Plugin *plugin = WorldCommandProcessorMutationAccess::plugin(*m_runtime, pluginId);
 		if (!plugin || !pluginHasValidId(*plugin) || !plugin->enabled || plugin->installPending)
 			continue;
-		if (processTimers(pluginId))
-			return;
+		processTimers(pluginId);
 	}
 }
 
 void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const bool omitFromOutput,
                                    const bool omitFromLog, const QString &variableName,
-                                   const QString &description, const WorldRuntime::Plugin *plugin,
+                                   const QString &description, const QString &pluginId,
                                    const QVector<LuaStyleRun> *styleRuns, const bool hasTriggerContext,
                                    const bool   replaceMatchedLineOutput,
                                    const int    triggerMatchedLineBufferIndex,
@@ -3846,7 +4005,7 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 		break;
 	case eSendToScript:
 	case eSendToScriptAfterOmit:
-		emit sendToScriptRequested(pluginIdOf(plugin), text, description, styleRuns, hasTriggerContext,
+		emit sendToScriptRequested(pluginId, text, description, styleRuns, hasTriggerContext,
 		                           replaceMatchedLineOutput, triggerMatchedLineBufferIndex,
 		                           triggerMatchedLineAbsoluteNumber);
 		break;
@@ -3877,7 +4036,7 @@ void WorldCommandProcessor::dispatchScriptSend(
 	else
 	{
 		const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
-		const bool scriptingEnabled         = isEnabledValue(attrs.value(QStringLiteral("enable_scripts"))) &&
+		const bool scriptingEnabled = isEnabledValue(attrs.value(QStringLiteral("enable_scripts"))) &&
 		                              attrs.value(QStringLiteral("script_language"))
 		                                      .compare(QStringLiteral("Lua"), Qt::CaseInsensitive) == 0;
 		if (!scriptingEnabled)

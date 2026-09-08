@@ -10,6 +10,8 @@
 
 #include "WorldOptions.h"
 
+#include <QStringView>
+#include <algorithm>
 #include <limits>
 
 namespace
@@ -45,6 +47,60 @@ namespace
 		return end == line.size() ? line : line.left(end);
 	}
 } // namespace
+
+namespace QMudCommandStack
+{
+	bool isValidSeparator(const QString &separator)
+	{
+		if (separator.isEmpty() || separator.size() > kMaximumSeparatorLength)
+			return false;
+
+		return std::ranges::all_of(separator, [](const QChar ch) { return ch.isPrint() && !ch.isSpace(); });
+	}
+
+	QStringList expand(const QString &command, const QString &separator)
+	{
+		if (!isValidSeparator(separator))
+			return {command};
+
+		if (command.startsWith(separator))
+			return {command.sliced(separator.size())};
+
+		const QString doubledSeparator = separator + separator;
+		QStringList   commands;
+		QString       current;
+		current.reserve(command.size());
+		for (qsizetype offset = 0; offset < command.size();)
+		{
+			const QStringView remaining(command.constData() + offset, command.size() - offset);
+			if (remaining.startsWith(doubledSeparator))
+			{
+				current += separator;
+				offset += doubledSeparator.size();
+				continue;
+			}
+			if (remaining.startsWith(separator))
+			{
+				commands.push_back(std::move(current));
+				current.clear();
+				offset += separator.size();
+				continue;
+			}
+			if (command.at(offset) == QLatin1Char('\n'))
+			{
+				commands.push_back(std::move(current));
+				current.clear();
+				++offset;
+				continue;
+			}
+
+			current += command.at(offset);
+			++offset;
+		}
+		commands.push_back(std::move(current));
+		return commands;
+	}
+} // namespace QMudCommandStack
 
 namespace QMudCommandPattern
 {

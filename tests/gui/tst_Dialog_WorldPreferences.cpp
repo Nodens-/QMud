@@ -1269,6 +1269,28 @@ namespace
 				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("legacy_encoding")), targetEncoding);
 			}
 
+			void commandStackSeparatorAcceptsTwoCharacters()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				auto *separator = dialog.findChild<QLineEdit *>(QStringLiteral("commandStackCharacterEdit"));
+				QVERIFY(separator);
+				QCOMPARE(separator->maxLength(), 2);
+
+				QCheckBox *enabled = findCheckBoxByText(dialog, QStringLiteral("&Command Stacking Using:"));
+				QVERIFY(enabled);
+				enabled->setChecked(true);
+				separator->setText(QStringLiteral("::"));
+				dialog.accept();
+
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("enable_command_stack")),
+				         QStringLiteral("1"));
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("command_stack_character")),
+				         QStringLiteral("::"));
+			}
+
 			void ruleRemovalUsesAdjacentItemInDisplayedSortOrder()
 			{
 				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
@@ -1394,10 +1416,12 @@ namespace
 						                QStringLiteral("target-group")),
 						    makeTrigger(QStringLiteral("other_trigger"), QStringLiteral("Zulu"),
 						                QStringLiteral("other-group"))};
-						triggers[1].matched         = 9;
-						triggers[1].invocationCount = 4;
-						triggers[1].matchAttempts   = 12;
-						triggers[1].executionTimeNs = 17'000'000;
+						triggers[1].matched            = 9;
+						triggers[1].invocationCount    = 4;
+						triggers[1].matchCount         = 3;
+						triggers[1].matchAttempts      = 12;
+						triggers[1].executionTimeNs    = 17'000'000;
+						triggers[1].lastMatchWildcards = {QStringLiteral("whole"), QStringLiteral("capture")};
 						runtime.setTriggers(triggers);
 						break;
 					}
@@ -1419,9 +1443,12 @@ namespace
 						              QStringLiteral("target-group")),
 						    makeAlias(QStringLiteral("other_alias"), QStringLiteral("Zulu"),
 						              QStringLiteral("other-group"))};
-						aliases[1].matched         = 9;
-						aliases[1].invocationCount = 4;
-						aliases[1].matchAttempts   = 12;
+						aliases[1].matched            = 9;
+						aliases[1].invocationCount    = 4;
+						aliases[1].matchCount         = 3;
+						aliases[1].matchAttempts      = 12;
+						aliases[1].executionTimeNs    = 19'000'000;
+						aliases[1].lastMatchWildcards = {QStringLiteral("whole"), QStringLiteral("capture")};
 						runtime.setAliases(aliases);
 						break;
 					}
@@ -1584,8 +1611,11 @@ namespace
 						         QStringLiteral("edited-group"));
 						QCOMPARE(triggers.at(0).matched, 9);
 						QCOMPARE(triggers.at(0).invocationCount, 4);
+						QCOMPARE(triggers.at(0).matchCount, 3);
 						QCOMPARE(triggers.at(0).matchAttempts, 12);
 						QCOMPARE(triggers.at(0).executionTimeNs, qint64{17'000'000});
+						QCOMPARE(triggers.at(0).lastMatchWildcards,
+						         QStringList({QStringLiteral("whole"), QStringLiteral("capture")}));
 						QCOMPARE(triggers.at(1).attributes.value(QStringLiteral("group")),
 						         QStringLiteral("other-group"));
 						break;
@@ -1599,7 +1629,11 @@ namespace
 						         QStringLiteral("edited-group"));
 						QCOMPARE(aliases.at(0).matched, 9);
 						QCOMPARE(aliases.at(0).invocationCount, 4);
+						QCOMPARE(aliases.at(0).matchCount, 3);
 						QCOMPARE(aliases.at(0).matchAttempts, 12);
+						QCOMPARE(aliases.at(0).executionTimeNs, qint64{19'000'000});
+						QCOMPARE(aliases.at(0).lastMatchWildcards,
+						         QStringList({QStringLiteral("whole"), QStringLiteral("capture")}));
 						QCOMPARE(aliases.at(1).attributes.value(QStringLiteral("group")),
 						         QStringLiteral("other-group"));
 						break;

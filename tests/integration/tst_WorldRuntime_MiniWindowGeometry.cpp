@@ -864,12 +864,26 @@ end
 
 			static void callbackMiniWindowFontCachesKeepDelimiterDistinctKeys()
 			{
-				WorldRuntime runtime;
-				auto         engine = QSharedPointer<LuaCallbackEngine>::create();
-				engine->setWorldRuntime(&runtime);
-				engine->setPluginInfo(QStringLiteral("plugin.id"), QStringLiteral("Plugin Name"),
-				                      QStringLiteral("/tmp/plugin"));
-				engine->setScriptText(QStringLiteral(R"lua(
+				WorldRuntime         runtime;
+				const QString        pluginId = QStringLiteral("plugin.id");
+				auto                 engine   = QSharedPointer<LuaCallbackEngine>::create();
+				WorldRuntime::Plugin plugin;
+				plugin.attributes.insert(QStringLiteral("id"), pluginId);
+				plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Plugin Name"));
+				plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("Lua"));
+				plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+				plugin.enabled = true;
+				plugin.lua     = engine;
+				WorldRuntimeTestAccess::plugins(runtime).push_back(std::move(plugin));
+
+				LuaEngineObservedInitializationRequest initialization;
+				initialization.engine              = engine.data();
+				initialization.workerLifetimeOwner = engine;
+				initialization.runtime             = &runtime;
+				initialization.pluginId            = pluginId;
+				initialization.pluginName          = QStringLiteral("Plugin Name");
+				initialization.pluginDirectory     = QStringLiteral("/tmp/plugin");
+				initialization.scriptText          = QStringLiteral(R"lua(
 function OnPluginEnable()
   assert(WindowFont("font-a", "b|c", "DejaVu Sans Mono", 12, false, false) == 0)
   assert(WindowFont("font-a|b", "c", "DejaVu Sans Mono", 12, false, true) == 0)
@@ -888,21 +902,23 @@ end
 function structured_font_cache_status(value)
   return structured_font_cache_result or ""
 end
-)lua"));
-				QVERIFY(engine->loadScript());
+)lua");
+				WorldRuntimeTestAccess::dispatchInitializeLuaEnginesWithObservedCallbacks(
+				    runtime, {initialization}, true);
+				QVERIFY(WorldRuntimeTestAccess::dispatchLuaResetAndLoadScript(runtime, engine));
 
 				auto snapshot         = QSharedPointer<LuaCallbackSnapshot>::create();
 				snapshot->windowNames = {QStringLiteral("font-a"), QStringLiteral("font-a|b"),
 				                         QStringLiteral("text-a"), QStringLiteral("text-a|b")};
 				snapshot->rebuildMiniWindowLookupCaches();
 
-				LuaExecutorDirect       executor;
 				LuaBatchDispatchRequest request;
-				request.engines               = {engine};
-				request.kind                  = LuaBatchDispatchKind::NoArgs;
-				request.functionName          = QStringLiteral("OnPluginEnable");
-				request.callbackSnapshotArg   = snapshot;
-				LuaBatchDispatchResult result = executor.dispatchBatch(request);
+				request.engines             = {engine};
+				request.kind                = LuaBatchDispatchKind::NoArgs;
+				request.functionName        = QStringLiteral("OnPluginEnable");
+				request.callbackSnapshotArg = snapshot;
+				LuaBatchDispatchResult result =
+				    WorldRuntimeTestAccess::queuePluginCallbackDispatch(runtime, request, true);
 				QVERIFY(result.hasFunctionValid);
 				QVERIFY(result.hasFunction);
 
@@ -910,8 +926,11 @@ end
 				request.functionName = QStringLiteral("structured_font_cache_status");
 				request.stringArg    = QStringLiteral("ignored");
 				request.callbackSnapshotArg.reset();
-				result = executor.dispatchBatch(request);
+				result = WorldRuntimeTestAccess::queuePluginCallbackDispatch(runtime, request, true);
 				QCOMPARE(result.stringResult, QStringLiteral("ok"));
+
+				WorldRuntimeTestAccess::dispatchTeardownLuaEngines(runtime, {engine}, true);
+				WorldRuntimeTestAccess::plugins(runtime).clear();
 			}
 
 			static void queuedHotspotCallbackSeesMiniWindowExecutionGuard()

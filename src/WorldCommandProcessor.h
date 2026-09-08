@@ -242,9 +242,11 @@ class WorldCommandProcessor : public QObject
 		/**
 		 * @brief Parses and executes one command line.
 		 * @param input Command input text.
+		 * @param allowCommandStacking Apply command stacking when `true`; stacked children pass `false` so escaped
+		 * separators remain literal during their normal command processing.
 		 * @return `true` when command was processed successfully.
 		 */
-		bool           evaluateCommand(const QString &input);
+		bool           evaluateCommand(const QString &input, bool allowCommandStacking = true);
 		/**
 		 * @brief Internal speedwalk evaluator used by public wrapper.
 		 * @param speedWalkString Speedwalk expression.
@@ -308,7 +310,7 @@ class WorldCommandProcessor : public QObject
 		 * @param isRegexp Source is regex pattern when `true`.
 		 * @param throwExceptions Throw on errors when `true`.
 		 * @param name Context label/name.
-		 * @param plugin Optional plugin scope.
+		 * @param pluginId Plugin scope ID, or empty for world variables.
 		 * @param ok Optional output success flag.
 		 * @return Formatted send text.
 		 */
@@ -316,7 +318,7 @@ class WorldCommandProcessor : public QObject
 		                           const QMap<QString, QString> &namedWildcards, const QString &language,
 		                           bool makeWildcardsLower, bool expandVariables, bool expandWildcards,
 		                           bool fixRegexps, bool isRegexp, bool throwExceptions, const QString &name,
-		                           const WorldRuntime::Plugin *plugin, bool *ok) const;
+		                           const QString &pluginId, bool *ok) const;
 		/**
 		 * @brief Matches subject text using configured regex options.
 		 * @param pattern Regex pattern text.
@@ -329,12 +331,15 @@ class WorldCommandProcessor : public QObject
 		 * @param startOffset Start offset in subject.
 		 * @param multiLine Enable multiline mode when `true`.
 		 * @param executionTimeNs Optional cumulative regex-execution time in nanoseconds.
+		 * @param matchCount Optional successful-match capture count.
+		 * @param matchAttempts Optional valid-regex execution counter.
 		 * @return `true` when pattern matches.
 		 */
-		bool           regexMatch(const QString &pattern, const QString &subject, bool ignoreCase,
-		                          QStringList &wildcards, QMap<QString, QString> &namedWildcards,
-		                          int *startCol = nullptr, int *endCol = nullptr, int startOffset = 0,
-		                          bool multiLine = false, qint64 *executionTimeNs = nullptr) const;
+		bool regexMatch(const QString &pattern, const QString &subject, bool ignoreCase,
+		                QStringList &wildcards, QMap<QString, QString> &namedWildcards,
+		                int *startCol = nullptr, int *endCol = nullptr, int startOffset = 0,
+		                bool multiLine = false, qint64 *executionTimeNs = nullptr, int *matchCount = nullptr,
+		                int *matchAttempts = nullptr) const;
 		struct TriggerScript
 		{
 				quint64                runtimeId{0};
@@ -380,10 +385,10 @@ class WorldCommandProcessor : public QObject
 		 * @brief Resolves variable value from world or plugin scope.
 		 * @param name Variable name.
 		 * @param value Output variable value.
-		 * @param plugin Optional plugin scope.
+		 * @param pluginId Plugin scope ID, or empty for world variables.
 		 * @return `true` when variable is found.
 		 */
-		bool findVariable(const QString &name, QString &value, const WorldRuntime::Plugin *plugin) const;
+		bool findVariable(const QString &name, QString &value, const QString &pluginId) const;
 		struct AliasRef
 		{
 				quint64                runtimeId{0};
@@ -393,6 +398,7 @@ class WorldCommandProcessor : public QObject
 				QString                line;
 				QStringList            wildcards;
 				QMap<QString, QString> namedWildcards;
+				int                    indexHint{-1};
 		};
 		struct DecodedTrigger
 		{
@@ -506,7 +512,7 @@ class WorldCommandProcessor : public QObject
 		 * @param omitFromLog Omit from log when `true`.
 		 * @param variableName Variable name for variable targets.
 		 * @param description Description text for UI/logging.
-		 * @param plugin Optional originating plugin.
+		 * @param pluginId Originating plugin ID, or empty for world scope.
 		 * @param styleRuns Optional matched trigger style runs for script targets.
 		 * @param hasTriggerContext Execute script target with trigger line context when `true`.
 		 * @param replaceMatchedLineOutput First script output replaces matched line when `true`.
@@ -514,10 +520,10 @@ class WorldCommandProcessor : public QObject
 		 * @param triggerMatchedLineAbsoluteNumber Stable matched line number captured at dispatch.
 		 */
 		void sendTo(int sendTo, const QString &text, bool omitFromOutput, bool omitFromLog,
-		            const QString &variableName, const QString &description,
-		            const WorldRuntime::Plugin *plugin, const QVector<LuaStyleRun> *styleRuns = nullptr,
-		            bool hasTriggerContext = false, bool replaceMatchedLineOutput = false,
-		            int triggerMatchedLineBufferIndex = 0, qint64 triggerMatchedLineAbsoluteNumber = 0);
+		            const QString &variableName, const QString &description, const QString &pluginId,
+		            const QVector<LuaStyleRun> *styleRuns = nullptr, bool hasTriggerContext = false,
+		            bool replaceMatchedLineOutput = false, int triggerMatchedLineBufferIndex = 0,
+		            qint64 triggerMatchedLineAbsoluteNumber = 0);
 		/**
 		 * @brief Executes one send-to-script request on the active runtime/script context.
 		 * @param pluginId Origin plugin ID, or empty for world script context.

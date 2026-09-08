@@ -18,6 +18,7 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
 #include <QFile>
+#include <QMessageBox>
 #include <QRegularExpression>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
@@ -28,11 +29,65 @@ namespace
 	const QString kAliasCapturePluginId = QStringLiteral("66778899aabbccddeeff0011");
 
 	/**
+	 * @brief Captures and dismisses modal processor warnings so integration tests cannot block.
+	 */
+	class MessageBoxObserver final : public QObject
+	{
+		public:
+			/**
+			 * @brief Installs the observer on the test application.
+			 */
+			MessageBoxObserver()
+			{
+				qApp->installEventFilter(this);
+			}
+
+			/**
+			 * @brief Removes the observer from the test application.
+			 */
+			~MessageBoxObserver() override
+			{
+				qApp->removeEventFilter(this);
+			}
+
+			/**
+			 * @brief Returns the number of captured warning dialogs.
+			 * @return Number of message boxes shown while the observer was installed.
+			 */
+			[[nodiscard]] int messageCount() const
+			{
+				return m_messageCount;
+			}
+
+			/**
+			 * @brief Counts shown message boxes and queues their rejection.
+			 * @param watched Object receiving the event.
+			 * @param event Event delivered to the watched object.
+			 * @return Base event-filter result.
+			 */
+			bool eventFilter(QObject *watched, QEvent *event) override
+			{
+				if (event && event->type() == QEvent::Show)
+				{
+					if (auto *messageBox = qobject_cast<QMessageBox *>(watched))
+					{
+						++m_messageCount;
+						QMetaObject::invokeMethod(messageBox, &QDialog::reject, Qt::QueuedConnection);
+					}
+				}
+				return QObject::eventFilter(watched, event);
+			}
+
+		private:
+			int m_messageCount{0};
+	};
+
+	/**
 	 * @brief Writes a Lua plugin fixture containing the mapper signpost alias.
 	 * @param path Destination plugin file path.
 	 * @return `true` when the complete fixture was written.
 	 */
-	bool          writeAliasCapturePlugin(const QString &path)
+	bool writeAliasCapturePlugin(const QString &path)
 	{
 		QFile file(path);
 		if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
@@ -136,6 +191,7 @@ end
 				const QMudAliasMatch::MatchResult result =
 				    QMudAliasMatch::matchWithCaptures(regex, QStringLiteral("buy sword from merchant"), true);
 				QVERIFY(result.matched);
+				QCOMPARE(result.matchCount, 3);
 				QCOMPARE(result.wildcards.size(), 3);
 				QCOMPARE(result.wildcards.at(1), QStringLiteral("sword"));
 				QCOMPARE(result.wildcards.at(2), QStringLiteral("merchant"));
@@ -149,6 +205,7 @@ end
 				const QMudAliasMatch::MatchResult result =
 				    QMudAliasMatch::matchWithCaptures(regex, QStringLiteral("give coin to guard"), true);
 				QVERIFY(result.matched);
+				QCOMPARE(result.matchCount, 3);
 				QCOMPARE(result.namedWildcards.value(QStringLiteral("what")), QStringLiteral("coin"));
 				QCOMPARE(result.namedWildcards.value(QStringLiteral("who")), QStringLiteral("guard"));
 			}
@@ -162,6 +219,7 @@ end
 				const QMudAliasMatch::MatchResult result =
 				    QMudAliasMatch::matchWithCaptures(regex, QStringLiteral("mapper signpost"), true);
 				QVERIFY(result.matched);
+				QCOMPARE(result.matchCount, 3);
 				QCOMPARE(result.wildcards.size(), regex.captureCount() + 1);
 				QCOMPARE(result.wildcards.at(2), QStringLiteral(""));
 				QVERIFY(!result.wildcards.at(2).isNull());
@@ -180,6 +238,7 @@ end
 				const QMudAliasMatch::MatchResult firstResult =
 				    QMudAliasMatch::matchWithCaptures(regex, QStringLiteral("first"), true);
 				QVERIFY(firstResult.matched);
+				QCOMPARE(firstResult.matchCount, 2);
 				QCOMPARE(firstResult.wildcards.size(), regex.captureCount() + 1);
 				QCOMPARE(firstResult.wildcards.at(2), QStringLiteral(""));
 				QCOMPARE(firstResult.namedWildcards.value(QStringLiteral("value")), QStringLiteral("first"));
@@ -187,10 +246,45 @@ end
 				const QMudAliasMatch::MatchResult secondResult =
 				    QMudAliasMatch::matchWithCaptures(regex, QStringLiteral("second"), true);
 				QVERIFY(secondResult.matched);
+				QCOMPARE(secondResult.matchCount, 3);
 				QCOMPARE(secondResult.wildcards.size(), regex.captureCount() + 1);
 				QCOMPARE(secondResult.wildcards.at(1), QStringLiteral(""));
 				QCOMPARE(secondResult.namedWildcards.value(QStringLiteral("value")),
 				         QStringLiteral("second"));
+			}
+
+			static void matchAccountingCountsOnlyValidRegexExecutions()
+			{
+				WorldRuntime runtime;
+				runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
+
+				WorldRuntime::Alias alias;
+				alias.attributes.insert(QStringLiteral("name"), QStringLiteral("accounted_alias"));
+				alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+				alias.attributes.insert(QStringLiteral("match"), QStringLiteral("("));
+				alias.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+				alias.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+				runtime.setAliases({alias});
+
+				WorldCommandProcessor processor;
+				processor.setRuntime(&runtime);
+				MessageBoxObserver observer;
+
+				QCOMPARE(processor.executeCommand(QStringLiteral("subject")), eOK);
+				QCOMPARE(observer.messageCount(), 1);
+				QCOMPARE(runtime.aliases().constFirst().matchAttempts, 0);
+				QCOMPARE(runtime.aliases().constFirst().executionTimeNs, qint64{0});
+
+				WorldRuntime::Alias &storedAlias = WorldRuntimeTestAccess::aliases(runtime).first();
+				storedAlias.attributes.insert(QStringLiteral("match"), QStringLiteral("^match$"));
+				runtime.markAliasesChanged();
+
+				QCOMPARE(processor.executeCommand(QStringLiteral("miss")), eOK);
+				QCOMPARE(runtime.aliases().constFirst().matchAttempts, 1);
+				QCOMPARE(processor.executeCommand(QStringLiteral("match")), eOK);
+				QCOMPARE(runtime.aliases().constFirst().matchAttempts, 2);
+				QCOMPARE(runtime.aliases().constFirst().matchCount, 1);
+				QCOMPARE(runtime.aliases().constFirst().matched, 1);
 			}
 
 			static void regexpAliasDispatchesUnmatchedNamedCaptureAsEmptyLuaString()

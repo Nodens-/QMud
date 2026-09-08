@@ -950,6 +950,8 @@ jobs:
 
           lines = ["## What's changed", ""]
           for section_name in section_names[:3]:
+              if not entries[section_name]:
+                  continue
               lines.extend((f"### {section_name}", ""))
               lines.extend(entries[section_name])
               lines.append("")
@@ -1303,6 +1305,8 @@ jobs:
 
           lines = ["## What's changed", ""]
           for section_name in section_names:
+              if not entries[section_name]:
+                  continue
               lines.extend((f"### {section_name}", ""))
               lines.extend(entries[section_name])
               lines.append("")

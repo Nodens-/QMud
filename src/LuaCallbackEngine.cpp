@@ -1835,9 +1835,11 @@ namespace
 		trigger.included             = snapshot.included;
 		trigger.matched              = snapshot.matched;
 		trigger.invocationCount      = snapshot.invocationCount;
+		trigger.matchCount           = snapshot.matchCount;
 		trigger.matchAttempts        = snapshot.matchAttempts;
 		trigger.executionTimeNs      = snapshot.executionTimeNs;
 		trigger.lastMatchTarget      = snapshot.lastMatchTarget;
+		trigger.lastMatchWildcards   = snapshot.lastMatchWildcards;
 		trigger.lastMatched          = snapshot.lastMatched;
 		trigger.runtimeId            = snapshot.runtimeId;
 		trigger.executingScriptDepth = snapshot.executingScriptDepth;
@@ -1863,8 +1865,11 @@ namespace
 		alias.included             = snapshot.included;
 		alias.matched              = snapshot.matched;
 		alias.invocationCount      = snapshot.invocationCount;
+		alias.matchCount           = snapshot.matchCount;
 		alias.matchAttempts        = snapshot.matchAttempts;
+		alias.executionTimeNs      = snapshot.executionTimeNs;
 		alias.lastMatchTarget      = snapshot.lastMatchTarget;
+		alias.lastMatchWildcards   = snapshot.lastMatchWildcards;
 		alias.lastMatched          = snapshot.lastMatched;
 		alias.runtimeId            = snapshot.runtimeId;
 		alias.executingScriptDepth = snapshot.executingScriptDepth;
@@ -39906,22 +39911,18 @@ static int luaIsTimer(lua_State *L)
 	return 1;
 }
 
-static int luaGetTriggerInfo(lua_State *L)
+static QString resolveRuleInfoWildcard(const QStringList &wildcards, const int infoType)
 {
-	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
-	if (!runtime)
+	const int wildcardIndex = infoType == 110 ? 0 : infoType - 100;
+	return wildcards.value(wildcardIndex);
+}
+
+static int pushTriggerInfo(lua_State *L, LuaCallbackEngine *engine, WorldRuntime *runtime,
+                           const QString &pluginId, const WorldRuntime::Trigger &trigger, const int infoType)
+{
+	if ((infoType >= 101 && infoType <= 109) || infoType == 110)
 	{
-		lua_pushnil(L);
-		return 1;
-	}
-	const QString         name     = QString::fromUtf8(luaL_checkstring(L, 1));
-	const int             infoType = static_cast<int>(luaL_checkinteger(L, 2));
-	const QString         pluginId = engine ? engine->pluginId() : QString();
-	WorldRuntime::Trigger trigger;
-	if (!fetchTriggerSnapshotForContext(engine, runtime, pluginId, name, trigger))
-	{
-		lua_pushnil(L);
+		pushLuaUtf8String(L, resolveRuleInfoWildcard(trigger.lastMatchWildcards, infoType));
 		return 1;
 	}
 	QVariant value;
@@ -40019,7 +40020,7 @@ static int luaGetTriggerInfo(lua_State *L)
 		value = trigger.attributes.value(QStringLiteral("other_back_colour")).toLongLong();
 		break;
 	case 31:
-		value = trigger.matchAttempts;
+		value = trigger.matchCount;
 		break;
 	case 32:
 		value = trigger.lastMatchTarget;
@@ -40042,6 +40043,9 @@ static int luaGetTriggerInfo(lua_State *L)
 	case 37:
 		value = trigger.executionTimeSeconds();
 		break;
+	case 38:
+		value = trigger.matchAttempts;
+		break;
 	default:
 		break;
 	}
@@ -40049,7 +40053,7 @@ static int luaGetTriggerInfo(lua_State *L)
 	return 1;
 }
 
-static int luaGetAliasInfo(lua_State *L)
+static int luaGetTriggerInfo(lua_State *L)
 {
 	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
 	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
@@ -40058,13 +40062,24 @@ static int luaGetAliasInfo(lua_State *L)
 		lua_pushnil(L);
 		return 1;
 	}
-	const QString       name     = QString::fromUtf8(luaL_checkstring(L, 1));
-	const int           infoType = static_cast<int>(luaL_checkinteger(L, 2));
-	const QString       pluginId = engine ? engine->pluginId() : QString();
-	WorldRuntime::Alias alias;
-	if (!fetchAliasSnapshotForContext(engine, runtime, pluginId, name, alias))
+	const QString         name     = QString::fromUtf8(luaL_checkstring(L, 1));
+	const int             infoType = static_cast<int>(luaL_checkinteger(L, 2));
+	const QString         pluginId = engine ? engine->pluginId() : QString();
+	WorldRuntime::Trigger trigger;
+	if (!fetchTriggerSnapshotForContext(engine, runtime, pluginId, name, trigger))
 	{
 		lua_pushnil(L);
+		return 1;
+	}
+	return pushTriggerInfo(L, engine, runtime, pluginId, trigger, infoType);
+}
+
+static int pushAliasInfo(lua_State *L, LuaCallbackEngine *engine, WorldRuntime *runtime,
+                         const QString &pluginId, const WorldRuntime::Alias &alias, const int infoType)
+{
+	if ((infoType >= 101 && infoType <= 109) || infoType == 110)
+	{
+		pushLuaUtf8String(L, resolveRuleInfoWildcard(alias.lastMatchWildcards, infoType));
 		return 1;
 	}
 	const QMap<QString, QString> &attributes      = alias.attributes;
@@ -40072,6 +40087,7 @@ static int luaGetAliasInfo(lua_State *L)
 	const bool                    included        = alias.included;
 	const int                     matched         = alias.matched;
 	const int                     invocationCount = alias.invocationCount;
+	const int                     matchCount      = alias.matchCount;
 	const int                     matchAttempts   = alias.matchAttempts;
 	const QString                &lastMatchTarget = alias.lastMatchTarget;
 	const QDateTime              &lastMatched     = alias.lastMatched;
@@ -40150,7 +40166,7 @@ static int luaGetAliasInfo(lua_State *L)
 		value = attributes.value(QStringLiteral("user")).toLongLong();
 		break;
 	case 24:
-		value = matchAttempts;
+		value = matchCount;
 		break;
 	case 25:
 		value = lastMatchTarget;
@@ -40169,6 +40185,12 @@ static int luaGetAliasInfo(lua_State *L)
 	case 29:
 		value = isEnabledValue(attributes.value(QStringLiteral("one_shot")));
 		break;
+	case 30:
+		value = alias.executionTimeSeconds();
+		break;
+	case 31:
+		value = matchAttempts;
+		break;
 	default:
 		break;
 	}
@@ -40176,7 +40198,7 @@ static int luaGetAliasInfo(lua_State *L)
 	return 1;
 }
 
-static int luaGetTimerInfo(lua_State *L)
+static int luaGetAliasInfo(lua_State *L)
 {
 	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
 	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
@@ -40188,12 +40210,18 @@ static int luaGetTimerInfo(lua_State *L)
 	const QString       name     = QString::fromUtf8(luaL_checkstring(L, 1));
 	const int           infoType = static_cast<int>(luaL_checkinteger(L, 2));
 	const QString       pluginId = engine ? engine->pluginId() : QString();
-	WorldRuntime::Timer timer;
-	if (!fetchTimerSnapshotForContext(engine, runtime, pluginId, name, timer))
+	WorldRuntime::Alias alias;
+	if (!fetchAliasSnapshotForContext(engine, runtime, pluginId, name, alias))
 	{
 		lua_pushnil(L);
 		return 1;
 	}
+	return pushAliasInfo(L, engine, runtime, pluginId, alias, infoType);
+}
+
+static int pushTimerInfo(lua_State *L, LuaCallbackEngine *engine, WorldRuntime *runtime,
+                         const QString &pluginId, const WorldRuntime::Timer &timer, const int infoType)
+{
 	const QMap<QString, QString> &attributes      = timer.attributes;
 	const QMap<QString, QString> &children        = timer.children;
 	const QDateTime              &lastFired       = timer.lastFired;
@@ -40297,6 +40325,27 @@ static int luaGetTimerInfo(lua_State *L)
 	}
 	pushVariant(L, value);
 	return 1;
+}
+
+static int luaGetTimerInfo(lua_State *L)
+{
+	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
+	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
+	if (!runtime)
+	{
+		lua_pushnil(L);
+		return 1;
+	}
+	const QString       name     = QString::fromUtf8(luaL_checkstring(L, 1));
+	const int           infoType = static_cast<int>(luaL_checkinteger(L, 2));
+	const QString       pluginId = engine ? engine->pluginId() : QString();
+	WorldRuntime::Timer timer;
+	if (!fetchTimerSnapshotForContext(engine, runtime, pluginId, name, timer))
+	{
+		lua_pushnil(L);
+		return 1;
+	}
+	return pushTimerInfo(L, engine, runtime, pluginId, timer, infoType);
 }
 
 static int luaGetTriggerOption(lua_State *L)
@@ -41443,121 +41492,7 @@ static int luaGetPluginTriggerInfo(lua_State *L)
 		lua_pushnil(L);
 		return 1;
 	}
-	QVariant value;
-	switch (infoType)
-	{
-	case 1:
-		value = trigger.attributes.value(QStringLiteral("match"));
-		break;
-	case 2:
-		value = trigger.children.value(QStringLiteral("send"));
-		break;
-	case 3:
-		value = trigger.attributes.value(QStringLiteral("sound"));
-		break;
-	case 4:
-		value = trigger.attributes.value(QStringLiteral("script"));
-		break;
-	case 5:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("omit_from_log")));
-		break;
-	case 6:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("omit_from_output")));
-		break;
-	case 7:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("keep_evaluating")));
-		break;
-	case 8:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("enabled")));
-		break;
-	case 9:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("regexp")));
-		break;
-	case 10:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("ignore_case")));
-		break;
-	case 11:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("repeat")));
-		break;
-	case 12:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("sound_if_inactive")));
-		break;
-	case 13:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("expand_variables")));
-		break;
-	case 14:
-		value = trigger.attributes.value(QStringLiteral("clipboard_arg")).toInt();
-		break;
-	case 15:
-		value = trigger.attributes.value(QStringLiteral("send_to")).toInt();
-		break;
-	case 16:
-		value = trigger.attributes.value(QStringLiteral("sequence")).toInt();
-		break;
-	case 17:
-		value = buildTriggerMatchFlags(trigger);
-		break;
-	case 18:
-		value = buildTriggerStyleFlags(trigger);
-		break;
-	case 19:
-		value = triggerColourFromCustom(trigger.attributes.value(QStringLiteral("custom_colour")).toInt());
-		break;
-	case 20:
-		value = trigger.invocationCount;
-		break;
-	case 21:
-		value = trigger.matched;
-		break;
-	case 22:
-		if (trigger.lastMatched.isValid())
-			value = trigger.lastMatched.toSecsSinceEpoch();
-		break;
-	case 23:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("temporary")));
-		break;
-	case 24:
-		value = trigger.included;
-		break;
-	case 25:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("lowercase_wildcard")));
-		break;
-	case 26:
-		value = trigger.attributes.value(QStringLiteral("group"));
-		break;
-	case 27:
-		value = trigger.attributes.value(QStringLiteral("variable"));
-		break;
-	case 28:
-		value = trigger.attributes.value(QStringLiteral("user")).toLongLong();
-		break;
-	case 31:
-		value = trigger.matchAttempts;
-		break;
-	case 32:
-		value = trigger.lastMatchTarget;
-		break;
-	case 33:
-		value = trigger.executingScript;
-		break;
-	case 34:
-		value = luaPluginSupportsScript(engine, runtime, pluginId,
-		                                trigger.attributes.value(QStringLiteral("script")));
-		break;
-	case 35:
-		value = 0;
-		break;
-	case 36:
-		value = isEnabledValue(trigger.attributes.value(QStringLiteral("one_shot")));
-		break;
-	case 37:
-		value = trigger.executionTimeSeconds();
-		break;
-	default:
-		break;
-	}
-	pushVariant(L, value);
-	return 1;
+	return pushTriggerInfo(L, engine, runtime, pluginId, trigger, infoType);
 }
 
 static int luaGetPluginAliasInfo(lua_State *L)
@@ -41578,112 +41513,7 @@ static int luaGetPluginAliasInfo(lua_State *L)
 		lua_pushnil(L);
 		return 1;
 	}
-	const QMap<QString, QString> &attributes      = alias.attributes;
-	const QMap<QString, QString> &children        = alias.children;
-	const bool                    included        = alias.included;
-	const int                     matched         = alias.matched;
-	const int                     invocationCount = alias.invocationCount;
-	const int                     matchAttempts   = alias.matchAttempts;
-	const QString                &lastMatchTarget = alias.lastMatchTarget;
-	const QDateTime              &lastMatched     = alias.lastMatched;
-	const bool                    executingScript = alias.executingScript;
-	QVariant                      value;
-	switch (infoType)
-	{
-	case 1:
-		value = attributes.value(QStringLiteral("match"));
-		break;
-	case 2:
-		value = children.value(QStringLiteral("send"));
-		break;
-	case 3:
-		value = attributes.value(QStringLiteral("script"));
-		break;
-	case 4:
-		value = isEnabledValue(attributes.value(QStringLiteral("omit_from_log")));
-		break;
-	case 5:
-		value = isEnabledValue(attributes.value(QStringLiteral("omit_from_output")));
-		break;
-	case 6:
-		value = isEnabledValue(attributes.value(QStringLiteral("enabled")));
-		break;
-	case 7:
-		value = isEnabledValue(attributes.value(QStringLiteral("regexp")));
-		break;
-	case 8:
-		value = isEnabledValue(attributes.value(QStringLiteral("ignore_case")));
-		break;
-	case 9:
-		value = isEnabledValue(attributes.value(QStringLiteral("expand_variables")));
-		break;
-	case 10:
-		value = invocationCount;
-		break;
-	case 11:
-		value = matched;
-		break;
-	case 12:
-		value = isEnabledValue(attributes.value(QStringLiteral("menu")));
-		break;
-	case 13:
-		if (lastMatched.isValid())
-			value = lastMatched.toSecsSinceEpoch();
-		break;
-	case 14:
-		value = isEnabledValue(attributes.value(QStringLiteral("temporary")));
-		break;
-	case 15:
-		value = included;
-		break;
-	case 16:
-		value = attributes.value(QStringLiteral("group"));
-		break;
-	case 17:
-		value = attributes.value(QStringLiteral("variable"));
-		break;
-	case 18:
-		value = attributes.value(QStringLiteral("send_to")).toInt();
-		break;
-	case 19:
-		value = isEnabledValue(attributes.value(QStringLiteral("keep_evaluating")));
-		break;
-	case 20:
-		value = attributes.value(QStringLiteral("sequence")).toInt();
-		break;
-	case 21:
-		value = isEnabledValue(attributes.value(QStringLiteral("echo_alias")));
-		break;
-	case 22:
-		value = isEnabledValue(attributes.value(QStringLiteral("omit_from_command_history")));
-		break;
-	case 23:
-		value = attributes.value(QStringLiteral("user")).toLongLong();
-		break;
-	case 24:
-		value = matchAttempts;
-		break;
-	case 25:
-		value = lastMatchTarget;
-		break;
-	case 26:
-		value = executingScript;
-		break;
-	case 27:
-		value =
-		    luaPluginSupportsScript(engine, runtime, pluginId, attributes.value(QStringLiteral("script")));
-		break;
-	case 28:
-		value = 0;
-		break;
-	case 29:
-		value = isEnabledValue(attributes.value(QStringLiteral("one_shot")));
-		break;
-	default:
-		break;
-	}
-	pushVariant(L, value);
-	return 1;
+	return pushAliasInfo(L, engine, runtime, pluginId, alias, infoType);
 }
 
 static int luaGetPluginTimerInfo(lua_State *L)
@@ -41704,108 +41534,7 @@ static int luaGetPluginTimerInfo(lua_State *L)
 		lua_pushnil(L);
 		return 1;
 	}
-	const QMap<QString, QString> &attributes      = timer.attributes;
-	const QMap<QString, QString> &children        = timer.children;
-	const QDateTime              &lastFired       = timer.lastFired;
-	const QDateTime              &nextFireTime    = timer.nextFireTime;
-	const int                     firedCount      = timer.firedCount;
-	const int                     invocationCount = timer.invocationCount;
-	const bool                    included        = timer.included;
-	const bool                    executingScript = timer.executingScript;
-	QVariant                      value;
-	const bool                    atTime = isEnabledValue(attributes.value(QStringLiteral("at_time")));
-	switch (infoType)
-	{
-	case 1:
-		value = attributes.value(QStringLiteral("hour")).toInt();
-		break;
-	case 2:
-		value = attributes.value(QStringLiteral("minute")).toInt();
-		break;
-	case 3:
-		value = attributes.value(QStringLiteral("second")).toDouble();
-		break;
-	case 4:
-		value = children.value(QStringLiteral("send"));
-		break;
-	case 5:
-		value = attributes.value(QStringLiteral("script"));
-		break;
-	case 6:
-		value = isEnabledValue(attributes.value(QStringLiteral("enabled")));
-		break;
-	case 7:
-		value = isEnabledValue(attributes.value(QStringLiteral("one_shot")));
-		break;
-	case 8:
-		value = atTime;
-		break;
-	case 9:
-		value = invocationCount;
-		break;
-	case 10:
-		value = firedCount;
-		break;
-	case 11:
-		if (lastFired.isValid())
-			value = lastFired.toSecsSinceEpoch();
-		break;
-	case 12:
-		if (nextFireTime.isValid())
-			value = nextFireTime.toSecsSinceEpoch();
-		break;
-	case 13:
-		if (nextFireTime.isValid())
-		{
-			const qint64 secs = QDateTime::currentDateTime().secsTo(nextFireTime);
-			value             = static_cast<double>(secs < 0 ? 0 : secs);
-		}
-		break;
-	case 14:
-		value = isEnabledValue(attributes.value(QStringLiteral("temporary")));
-		break;
-	case 15:
-		value = attributes.value(QStringLiteral("send_to")).toInt() == eSendToSpeedwalk;
-		break;
-	case 16:
-		value = attributes.value(QStringLiteral("send_to")).toInt() == eSendToOutput;
-		break;
-	case 17:
-		value = isEnabledValue(attributes.value(QStringLiteral("active_closed")));
-		break;
-	case 18:
-		value = included;
-		break;
-	case 19:
-		value = attributes.value(QStringLiteral("group"));
-		break;
-	case 20:
-		value = attributes.value(QStringLiteral("send_to")).toInt();
-		break;
-	case 21:
-		value = attributes.value(QStringLiteral("user")).toLongLong();
-		break;
-	case 22:
-		value = attributes.value(QStringLiteral("name"));
-		break;
-	case 23:
-		value = isEnabledValue(attributes.value(QStringLiteral("omit_from_output")));
-		break;
-	case 24:
-		value = isEnabledValue(attributes.value(QStringLiteral("omit_from_log")));
-		break;
-	case 25:
-		value = executingScript;
-		break;
-	case 26:
-		value =
-		    luaPluginSupportsScript(engine, runtime, pluginId, attributes.value(QStringLiteral("script")));
-		break;
-	default:
-		break;
-	}
-	pushVariant(L, value);
-	return 1;
+	return pushTimerInfo(L, engine, runtime, pluginId, timer, infoType);
 }
 
 static int luaGetPluginTriggerOption(lua_State *L)
@@ -45795,30 +45524,18 @@ static int luaSetAlphaOption(lua_State *L)
 		value.remove(QLatin1Char('\r'));
 	}
 
-	// Legacy behavior: command stack character must be one printable non-space char.
+	// QMud extends the legacy command stack character to a separator of up to two characters while retaining the
+	// SetAlphaOption printable-ASCII restriction.
 	if (constexpr int kOptCommandStack = 0x000008; option->flags & kOptCommandStack)
 	{
-		if (value.size() > 1)
+		if (value.size() > QMudCommandStack::kMaximumSeparatorLength)
 		{
 			lua_pushnumber(L, eOptionOutOfRange);
 			return 1;
 		}
-		if (value.isEmpty())
-		{
-			enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime,
-			                                             [](WorldRuntime &targetRuntime)
-			                                             {
-				                                             targetRuntime.setWorldAttribute(
-				                                                 QStringLiteral("enable_command_stack"),
-				                                                 QStringLiteral("0"));
-			                                             });
-			updateCallbackWorldAttributeSnapshot(engine, QStringLiteral("enable_command_stack"),
-			                                     QStringLiteral("0"), false);
-			lua_pushnumber(L, eOptionOutOfRange);
-			return 1;
-		}
-		const QChar ch = value.at(0);
-		if (const ushort code = ch.unicode(); code > 0x7F || code < 0x20 || code == 0x7F || ch.isSpace())
+		const bool containsNonAscii = std::ranges::any_of(
+		    value, [](const QChar ch) { return ch.unicode() < 0x20 || ch.unicode() > 0x7E; });
+		if (!QMudCommandStack::isValidSeparator(value) || containsNonAscii)
 		{
 			enqueueRuntimeThreadDeferredMutationNoResult(engine, runtime,
 			                                             [](WorldRuntime &targetRuntime)

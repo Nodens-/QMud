@@ -65,6 +65,12 @@ and potential contributors need to fully understand them.
   DispatchSynchronously. A retained modal continuation inherits synchronous dispatch and resumes at the original
   callback-lane position without entering asynchronous completion sequencing, while non-retained modal continuations
   remain asynchronous.
+- Production code commits pending incoming partial lines only through WorldView::commitPendingIncomingPartialOutput().
+  That boundary clears the partial presentation overlay before requesting the corresponding OnPluginScreendraw
+  dispatch. The established ScreenDraw non-recursion guard suppresses the request when it occurs inside an active
+  ScreenDraw callback. The storage-only WorldRuntime operation stays private. Only the WorldView boundary implementation
+  calls it in production, and tests that intentionally do not exercise presentation access it through
+  WorldRuntimeTestAccess.
 
 
 2. Snapshot model
@@ -85,6 +91,10 @@ and potential contributors need to fully understand them.
   never have one conversion path for initial construction and another for updates.
 - Every authoritative mutation source must patch its affected domain. Use the typed plugin/item scope for one plugin or
   one rule when available. Do not create parallel enums, composite string keys, pending lists, or propagation tables.
+- Rule-item patches use the rule's stable runtime identity. A list index may only be a validated lookup hint. If the
+  identity cannot be resolved in both authoritative state and the cached snapshot, repopulate the full plugin scope.
+- Rule evaluation captures definition data and order before any callback-capable boundary. After that boundary, stable
+  identity may update surviving runtime bookkeeping only; callback mutations apply to later evaluations.
 - Mutation batches coalesce domain masks and typed scopes. A full-domain patch supersedes narrower pending patches for
   that scope. Closing the outermost batch applies the accumulated patches once.
 - Plugin topology changes mechanically expand the Plugins domain to all registry entries marked plugin-indexed. Do not

@@ -283,6 +283,45 @@ namespace
 				QCOMPARE(capturedRuns.constFirst().sourceSpans.constFirst().length, 3);
 			}
 
+			static void repeatedTriggerSeparatesInitialInfoFromFinalRegexCaptures()
+			{
+				WorldRuntime runtime;
+				runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+				runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("repeated_capture"));
+				trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+				trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("(?<word>[A-Z]+)"));
+				trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+				trigger.attributes.insert(QStringLiteral("repeat"), QStringLiteral("y"));
+				trigger.attributes.insert(QStringLiteral("lowercase_wildcard"), QStringLiteral("y"));
+				trigger.attributes.insert(QStringLiteral("make_bold"), QStringLiteral("y"));
+				trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+				runtime.setTriggers({trigger});
+
+				WorldCommandProcessor processor;
+				processor.setRuntime(&runtime);
+				processor.onIncomingLineReceived(QStringLiteral("ONE TWO"));
+
+				const WorldRuntime::Trigger &stored = runtime.triggers().constFirst();
+				QCOMPARE(stored.matched, 1);
+				QCOMPARE(stored.matchCount, 2);
+				QCOMPARE(stored.matchAttempts, 3);
+				QCOMPARE(stored.lastMatchTarget, QStringLiteral("ONE TWO"));
+				QCOMPARE(stored.lastMatchWildcards,
+				         (QStringList{QStringLiteral("one"), QStringLiteral("one")}));
+
+				QString wildcard;
+				QVERIFY(runtime.triggerWildcard(QStringLiteral("repeated_capture"), QStringLiteral("0"),
+				                                wildcard));
+				QCOMPARE(wildcard, QStringLiteral("TWO"));
+				QVERIFY(runtime.triggerWildcard(QStringLiteral("repeated_capture"), QStringLiteral("word"),
+				                                wildcard));
+				QCOMPARE(wildcard, QStringLiteral("TWO"));
+			}
+
 			static void triggerSendsInsertAtPriorityQueueBoundary()
 			{
 				QTcpServer server;

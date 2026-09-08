@@ -24,6 +24,7 @@
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QHostAddress>
@@ -67,10 +68,13 @@ namespace
 	const QString           kEligibilityMutatorPluginId   = QStringLiteral("ccddee001122334455667788");
 	const QString           kEligibilityVictimPluginId    = QStringLiteral("ddee00112233445566778899");
 	const QString           kEligibilityRecorderPluginId  = QStringLiteral("ee00112233445566778899aa");
+	const QString           kMushReaderOmitPluginId       = QStringLiteral("ff00112233445566778899aa");
+	const QString           kScreenDrawRecorderPluginId   = QStringLiteral("0f112233445566778899aabb");
 	const QString           kTelnetTriggerLine            = QStringLiteral("qxv-lattice-17");
 	const QString           kTelnetAfterLine              = QStringLiteral("qxv-after-64");
 
 	constexpr unsigned char IAC   = 0xFF;
+	constexpr unsigned char GA    = 0xF9;
 	constexpr unsigned char SB    = 0xFA;
 	constexpr unsigned char SE    = 0xF0;
 	constexpr unsigned char GMCP  = 201;
@@ -189,24 +193,6 @@ namespace
 		                          0) == eOK;
 	}
 
-	QSharedPointer<LuaCallbackEngine> addDirectCallbackPlugin(WorldRuntime &runtime, const QString &id,
-	                                                          const QString &name, const QString &script)
-	{
-		auto engine = QSharedPointer<LuaCallbackEngine>::create();
-		engine->setWorldRuntime(&runtime);
-		engine->setPluginInfo(id, name, QString());
-		engine->setScriptText(script);
-		WorldRuntime::Plugin plugin;
-		plugin.attributes.insert(QStringLiteral("id"), id);
-		plugin.attributes.insert(QStringLiteral("name"), name);
-		plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("Lua"));
-		plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
-		plugin.enabled = true;
-		plugin.lua     = engine;
-		WorldRuntimeTestAccess::plugins(runtime).push_back(std::move(plugin));
-		return engine;
-	}
-
 	/**
 	 * @brief Writes a plugin fixture with connect/disconnect lifecycle markers.
 	 * @param pluginsDir Plugin fixture directory.
@@ -232,6 +218,85 @@ end
 
 function OnPluginDisconnect()
   SetVariable("disconnect_marker", "disconnected")
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml"));
+	}
+
+	/**
+	 * @brief Writes a plugin whose Lua trigger callback omits a completed prompt.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writeMushReaderOmitTriggerPlugin(const QString &pluginsDir)
+	{
+		const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("mushreader_omit_trigger.xml"));
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="MushReaderOmitTrigger"
+    author="QMud Test"
+    id=")xml") + kMushReaderOmitPluginId + QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function qcb_omit_prompt()
+  local count = tonumber(GetVariable("omit_callback_count")) or 0
+  SetVariable("omit_callback_count", tostring(count + 1))
+end
+]]></script>
+  </plugin>
+  <triggers>
+    <trigger
+      name="omit_prompt"
+      enabled="y"
+      match="^&lt;plugin-omitted&gt; $"
+      omit_from_output="y"
+      regexp="y"
+      send_to="12"
+      sequence="100">
+      <send>qcb_omit_prompt()</send>
+    </trigger>
+  </triggers>
+</muclient>
+)xml"));
+	}
+
+	/**
+	 * @brief Writes a plugin that records completed screen-draw callbacks in plugin variables.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writeScreenDrawRecorderPlugin(const QString &pluginsDir)
+	{
+		const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("screen_draw_recorder.xml"));
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="ScreenDrawRecorder"
+    author="QMud Test"
+    id=")xml") + kScreenDrawRecorderPluginId +
+		                                     QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function OnPluginScreendraw(draw_type, log, line)
+  local count = tonumber(GetVariable("screen_draw_count")) or 0
+  local next_count = count + 1
+  local suffix = tostring(next_count)
+  SetVariable("screen_draw_count", suffix)
+  SetVariable("screen_draw_type", string.format("%.0f", draw_type))
+  SetVariable("screen_draw_log", string.format("%.0f", log))
+  SetVariable("screen_draw_text", line)
+  SetVariable("screen_draw_type_" .. suffix, string.format("%.0f", draw_type))
+  SetVariable("screen_draw_log_" .. suffix, string.format("%.0f", log))
+  SetVariable("screen_draw_text_" .. suffix, line)
 end
 ]]></script>
   </plugin>
@@ -1044,6 +1109,35 @@ end
 		}
 		return {};
 	}
+
+	/**
+	 * @brief Observes queued runtime calls until a callback accepts one.
+	 */
+	class MetaCallObserver final : public QObject
+	{
+		public:
+			explicit MetaCallObserver(std::function<bool()> callback) : m_callback(std::move(callback))
+			{
+			}
+
+			bool eventFilter(QObject *watched, QEvent *event) override
+			{
+				if (m_observed || !event || event->type() != QEvent::MetaCall)
+					return QObject::eventFilter(watched, event);
+				if (m_callback)
+					m_observed = m_callback();
+				return QObject::eventFilter(watched, event);
+			}
+
+			[[nodiscard]] bool observed() const
+			{
+				return m_observed;
+			}
+
+		private:
+			std::function<bool()> m_callback;
+			bool                  m_observed{false};
+	};
 } // namespace
 
 /**
@@ -1054,19 +1148,6 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 		Q_OBJECT
 
 	private:
-		/**
-		 * @brief Replaces a runtime's worker executor with a direct executor without violating engine affinity.
-		 * @param runtime Runtime whose executor and world engine are migrated.
-		 */
-		static void switchRuntimeToDirectLuaExecutor(WorldRuntime &runtime)
-		{
-			const QSharedPointer<LuaCallbackEngine> worldEngine(runtime.luaCallbacks(),
-			                                                    [](LuaCallbackEngine * /*unused*/) {});
-			runtime.dispatchTeardownLuaEngines({worldEngine}, true);
-			runtime.m_luaExecutor = std::make_unique<LuaExecutorDirect>();
-			runtime.setLuaScriptText(QString());
-		}
-
 		/**
 		 * @brief Initializes a plugin engine through the runtime's configured Lua executor.
 		 * @param runtime Runtime that owns the callback lane.
@@ -1781,7 +1862,7 @@ end
 			                 });
 
 			runtime.receiveRawData(QByteArrayLiteral("\x1B[1zprefix <send href=\"help &text;\">start-"));
-			QVERIFY(runtime.commitPendingIncomingPartialLine());
+			QVERIFY(WorldRuntimeTestAccess::commitPendingIncomingPartialLineStorage(runtime));
 			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
 
 			QCOMPARE(line, QStringLiteral("newbie"));
@@ -2050,6 +2131,241 @@ end
 
 			QCOMPARE(partialLines.size(), completedOutputPublicationCount);
 			QTRY_COMPARE(outputLastLine(), QStringLiteral("N"));
+		}
+
+		static void mushReaderWorldTriggerSpeaksOnlyCompletedPresentedLines()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("convert_ga_to_newline"), QStringLiteral("y"));
+
+			const QString         omittedPrompt = QStringLiteral("<omitted> ");
+			WorldRuntime::Trigger trigger;
+			trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+			trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("^<omitted> $"));
+			trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+			trigger.attributes.insert(QStringLiteral("omit_from_output"), QStringLiteral("y"));
+			trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(trigger);
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&events](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { events.push_back(event); });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+			runtime.receiveRawData(omittedPrompt.toUtf8());
+			QTRY_VERIFY_WITH_TIMEOUT(!harness.view.outputLines().isEmpty(), 5000);
+			QCOMPARE(harness.view.outputLines().constLast(), omittedPrompt);
+			QVERIFY(events.isEmpty());
+
+			runtime.receiveRawData(bytes({IAC, GA}));
+			QTRY_COMPARE_WITH_TIMEOUT(runtime.triggers().constFirst().matched, 1, 5000);
+			QVERIFY(runtime.lines().isEmpty());
+			QVERIFY(!harness.view.outputLines().contains(omittedPrompt));
+			QVERIFY(events.isEmpty());
+
+			const QString visiblePrompt = QStringLiteral("<visible> ");
+			runtime.receiveRawData(visiblePrompt.toUtf8());
+			QTRY_VERIFY_WITH_TIMEOUT(!harness.view.outputLines().isEmpty(), 5000);
+			QCOMPARE(harness.view.outputLines().constLast(), visiblePrompt);
+			QVERIFY(events.isEmpty());
+
+			runtime.receiveRawData(bytes({IAC, GA}));
+			QTRY_COMPARE_WITH_TIMEOUT(events.size(), 1, 5000);
+			QCOMPARE(events.constFirst().text, visiblePrompt);
+			QVERIFY(!events.constFirst().interrupt);
+			QCOMPARE(runtime.lines().size(), 1);
+			QCOMPARE(runtime.lines().constFirst().text, visiblePrompt);
+		}
+
+		static void mushReaderPluginTriggerSpeaksOnlyCompletedPresentedLines()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeMushReaderOmitTriggerPlugin(pluginsDir));
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("convert_ga_to_newline"), QStringLiteral("y"));
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("mushreader_omit_trigger.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(
+			    !runtime.plugins().isEmpty() && !runtime.plugins().constFirst().installPending, 5000);
+
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&events](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    { events.push_back(event); });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+			const QString omittedPrompt = QStringLiteral("<plugin-omitted> ");
+			runtime.receiveRawData(omittedPrompt.toUtf8());
+			QTRY_VERIFY_WITH_TIMEOUT(!harness.view.outputLines().isEmpty(), 5000);
+			QCOMPARE(harness.view.outputLines().constLast(), omittedPrompt);
+			QVERIFY(events.isEmpty());
+
+			runtime.receiveRawData(bytes({IAC, GA}));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kMushReaderOmitPluginId, QStringLiteral("omit_callback_count")),
+			    QStringLiteral("1"), 5000);
+			QVERIFY(runtime.lines().isEmpty());
+			QVERIFY(!harness.view.outputLines().contains(omittedPrompt));
+			QVERIFY(events.isEmpty());
+
+			const QString visiblePrompt = QStringLiteral("<plugin-visible> ");
+			runtime.receiveRawData(visiblePrompt.toUtf8());
+			QTRY_VERIFY_WITH_TIMEOUT(!harness.view.outputLines().isEmpty(), 5000);
+			QCOMPARE(harness.view.outputLines().constLast(), visiblePrompt);
+			QVERIFY(events.isEmpty());
+
+			runtime.receiveRawData(bytes({IAC, GA}));
+			QTRY_COMPARE_WITH_TIMEOUT(events.size(), 1, 5000);
+			QCOMPARE(events.constFirst().text, visiblePrompt);
+			QCOMPARE(pluginVariable(runtime, kMushReaderOmitPluginId, QStringLiteral("omit_callback_count")),
+			         QStringLiteral("1"));
+		}
+
+		static void mushReaderCommitsPartialLinesBeforeFollowingPresentationOutput()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeScreenDrawRecorderPlugin(pluginsDir));
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("y"));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("screen_draw_recorder.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(
+			    !runtime.plugins().isEmpty() && !runtime.plugins().constFirst().installPending, 5000);
+
+			QVector<QMudNativePluginRegistry::TestSpeechEvent> events;
+			QVector<bool>                                      partialOverlayAtSpeech;
+			QMudNativePluginRegistry::setTestSpeechSink(
+			    [&events, &partialOverlayAtSpeech,
+			     &view = harness.view](const QMudNativePluginRegistry::TestSpeechEvent &event)
+			    {
+				    events.push_back(event);
+				    partialOverlayAtSpeech.push_back(view.m_nativeHasPartialOutput ||
+				                                     view.m_hasPartialOutput ||
+				                                     !view.m_nativePartialOutputText.isEmpty() ||
+				                                     !view.m_nativePartialOutputSpans.isEmpty());
+			    });
+			const auto restoreSpeechSink =
+			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
+			QMudNativePluginRegistry::setMushReaderPluginEnabled(&runtime, true);
+
+			const QString partialLine = QStringLiteral("alpha beta gamma");
+			runtime.receiveRawData(partialLine.toUtf8());
+			QTRY_VERIFY_WITH_TIMEOUT(!harness.view.outputLines().isEmpty(), 5000);
+			QCOMPARE(harness.view.outputLines().constLast(), partialLine);
+			QVERIFY(events.isEmpty());
+			QVERIFY(pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_count"))
+			            .isEmpty());
+
+			runtime.setWorldAttribute(QStringLiteral("wrap"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("auto_wrap_window_width"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("10"));
+			runtime.setWorldAttribute(QStringLiteral("indent_paras"), QStringLiteral("n"));
+
+			const QString noteText = QStringLiteral("note");
+			harness.processor.note(noteText, true);
+			QCOMPARE(events.size(), 2);
+			QCOMPARE(events.at(0).text, partialLine);
+			QVERIFY(!events.at(0).interrupt);
+			QCOMPARE(events.at(1).text, noteText);
+			QVERIFY(!events.at(1).interrupt);
+			QCOMPARE(partialOverlayAtSpeech, QVector<bool>({false, false}));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_count")),
+			    QStringLiteral("2"), 5000);
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_type_1")),
+			    QStringLiteral("0"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_log_1")),
+			    QStringLiteral("0"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_text_1")),
+			    partialLine);
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_type_2")),
+			    QStringLiteral("1"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_log_2")),
+			    QStringLiteral("0"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_text_2")),
+			    noteText);
+			QCOMPARE(runtime.lines().size(), 2);
+			QVERIFY(runtime.lines().constFirst().text != partialLine);
+			QVERIFY(runtime.lines().constFirst().text.contains(QLatin1Char('\n')));
+			QVERIFY(runtime.lines().constFirst().hardReturn);
+			QCOMPARE(runtime.lines().constLast().text, noteText);
+
+			runtime.setWorldAttribute(QStringLiteral("wrap"), QStringLiteral("n"));
+			const QString secondPartialLine = QStringLiteral("second prompt> ");
+			runtime.receiveRawData(secondPartialLine.toUtf8());
+			QTRY_COMPARE_WITH_TIMEOUT(harness.view.outputLines().constLast(), secondPartialLine, 5000);
+			QCOMPARE(events.size(), 2);
+
+			runtime.setCurrentActionSource(WorldRuntime::eUserTyping);
+			harness.view.echoInputText(QStringLiteral("look\r\n"));
+			QCOMPARE(events.size(), 3);
+			QCOMPARE(events.constLast().text, secondPartialLine);
+			QVERIFY(!events.constLast().interrupt);
+			QCOMPARE(partialOverlayAtSpeech, QVector<bool>({false, false, false}));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_count")),
+			    QStringLiteral("3"), 5000);
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_type_3")),
+			    QStringLiteral("0"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_log_3")),
+			    QStringLiteral("0"));
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_text_3")),
+			    secondPartialLine);
+
+			harness.view.echoInputText(QStringLiteral("again\r\n"));
+			QCOMPARE(events.size(), 3);
+			QCOMPARE(
+			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_count")),
+			    QStringLiteral("3"));
 		}
 
 		static void legacyEncodingMxpSetEntityCallbackPayloadUsesInternalUtf8()
@@ -2816,16 +3132,13 @@ end
 		static void currentSuspendedRecipientTeardownCancelsCoroutineAndFinishesFallback()
 		{
 			WorldRuntime runtime;
-			switchRuntimeToDirectLuaExecutor(runtime);
 			for (int lineNumber = 1; lineNumber <= 200; ++lineNumber)
 				runtime.addLine(QStringLiteral("cancellation baseline %1").arg(lineNumber),
 				                WorldRuntime::LineOutput);
 
 			const QString                           pluginId = QStringLiteral("cancel-suspended-plugin");
-			const QSharedPointer<LuaCallbackEngine> engine   = QSharedPointer<LuaCallbackEngine>::create();
-			engine->setWorldRuntime(&runtime);
-			engine->setPluginInfo(pluginId, QStringLiteral("Cancellation plugin"), QString());
-			engine->setScriptText(QStringLiteral(R"lua(
+			const QSharedPointer<LuaCallbackEngine> engine   = addRuntimeCallbackPlugin(
+			    runtime, pluginId, QStringLiteral("Cancellation plugin"), QStringLiteral(R"lua(
 function qcb_cancel_suspended_recipient()
   Note("cancellation output")
   utils.inputbox("prompt", "title", "")
@@ -2833,20 +3146,37 @@ function qcb_cancel_suspended_recipient()
   return false
 end
 )lua"));
-			WorldRuntime::Plugin plugin;
-			plugin.attributes.insert(QStringLiteral("id"), pluginId);
-			plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Cancellation plugin"));
-			plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("Lua"));
-			plugin.lua = engine;
-			WorldRuntimeTestAccess::plugins(runtime).push_back(std::move(plugin));
 
 			LuaBatchDispatchRequest callbackRequest;
-			callbackRequest.kind                    = LuaBatchDispatchKind::NoArgs;
-			callbackRequest.engines                 = {engine};
-			callbackRequest.functionName            = QStringLiteral("qcb_cancel_suspended_recipient");
-			callbackRequest.defaultResult           = true;
-			bool                   completionCalled = false;
+			callbackRequest.kind          = LuaBatchDispatchKind::NoArgs;
+			callbackRequest.engines       = {engine};
+			callbackRequest.functionName  = QStringLiteral("qcb_cancel_suspended_recipient");
+			callbackRequest.defaultResult = true;
+			callbackRequest.callbackSnapshotArg =
+			    runtime.captureLuaCallbackSnapshotForRequest(callbackRequest);
+			bool                   completionCalled   = false;
+			bool                   suspensionObserved = false;
+			quint64                runtimeResumeId    = 0;
+			quint64                engineResumeId     = 0;
+			qsizetype              outputCursorCount  = 0;
 			LuaBatchDispatchResult completionResult;
+			MetaCallObserver       modalDeliveryObserver(
+			    [&]() -> bool
+			    {
+				    if (runtime.m_suspendedPluginCallbackDispatches.size() != 1)
+					    return false;
+				    const auto suspendedIt = runtime.m_suspendedPluginCallbackDispatches.constBegin();
+				    runtimeResumeId        = suspendedIt.key();
+				    engineResumeId         = suspendedIt->engineModalResumeId;
+				    outputCursorCount      = runtime.luaCallbackOutputCursorCount();
+				    suspensionObserved     = true;
+				    runtime.cancelSuspendedPluginCallbackDispatchesForEngines({engine});
+				    return true;
+			    });
+			runtime.installEventFilter(&modalDeliveryObserver);
+			const auto removeModalDeliveryObserver = qScopeGuard(
+			    [&runtime, &modalDeliveryObserver] { runtime.removeEventFilter(&modalDeliveryObserver); });
+
 			runtime.queuePluginCallbackDispatchAsync(
 			    callbackRequest,
 			    [&completionCalled, &completionResult](const LuaBatchDispatchResult &result)
@@ -2854,18 +3184,12 @@ end
 				    completionCalled = true;
 				    completionResult = result;
 			    });
-			runtime.drainPluginCallbackDispatchQueue();
 
-			QCOMPARE(runtime.m_suspendedPluginCallbackDispatches.size(), 1);
-			const auto    suspendedIt     = runtime.m_suspendedPluginCallbackDispatches.constBegin();
-			const quint64 runtimeResumeId = suspendedIt.key();
-			const quint64 engineResumeId  = suspendedIt->engineModalResumeId;
+			QTRY_VERIFY_WITH_TIMEOUT(modalDeliveryObserver.observed(), 5000);
+			QVERIFY(suspensionObserved);
 			QVERIFY(runtimeResumeId != 0);
 			QVERIFY(engineResumeId != 0);
-			QVERIFY(runtime.luaCallbackOutputCursorCount() > 0);
-			QVERIFY(!completionCalled);
-
-			runtime.cancelSuspendedPluginCallbackDispatchesForEngines({engine});
+			QVERIFY(outputCursorCount > 0);
 
 			QVERIFY(!runtime.m_suspendedPluginCallbackDispatches.contains(runtimeResumeId));
 			QCOMPARE(runtime.luaCallbackOutputCursorCount(), qsizetype{0});
@@ -2967,55 +3291,39 @@ end
 			runtime.dispatchTeardownLuaEngines({engine}, true);
 		}
 
-		static void directSuspendedContinuationPublishesEveryMutationBoundary()
+		static void workerSuspendedContinuationPublishesEveryMutationBoundary()
 		{
-			WorldRuntime runtime;
-			switchRuntimeToDirectLuaExecutor(runtime);
+			WorldRuntime  runtime;
 
 			const QString firstId  = QStringLiteral("111111111111111111111111");
 			const QString secondId = QStringLiteral("222222222222222222222222");
 			const QString thirdId  = QStringLiteral("333333333333333333333333");
-			const QString callback = QStringLiteral("qcb_direct_suspended_boundary");
+			const QString callback = QStringLiteral("qcb_worker_suspended_boundary");
 
-			const auto addPlugin = [&runtime](const QString &id, const QString &name, const QString &script)
-			{
-				auto engine = QSharedPointer<LuaCallbackEngine>::create();
-				engine->setWorldRuntime(&runtime);
-				engine->setPluginInfo(id, name, QString());
-				engine->setScriptText(script);
-				WorldRuntime::Plugin plugin;
-				plugin.attributes.insert(QStringLiteral("id"), id);
-				plugin.attributes.insert(QStringLiteral("name"), name);
-				plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("Lua"));
-				plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
-				plugin.lua = engine;
-				WorldRuntimeTestAccess::plugins(runtime).push_back(std::move(plugin));
-				return engine;
-			};
-
-			const auto first  = addPlugin(firstId, QStringLiteral("First"), QStringLiteral(R"lua(
-function qcb_direct_suspended_boundary(value)
+			const auto    first =
+			    addRuntimeCallbackPlugin(runtime, firstId, QStringLiteral("First"), QStringLiteral(R"lua(
+function qcb_worker_suspended_boundary(value)
   utils.inputbox("prompt", "title", "")
   SetVariable("shared", "after-resume")
   return "first-result"
 end
 )lua"));
-			const auto second = addPlugin(secondId, QStringLiteral("Second"),
-			                              QStringLiteral(R"lua(
-function qcb_direct_suspended_boundary(value)
+			const auto second = addRuntimeCallbackPlugin(runtime, secondId, QStringLiteral("Second"),
+			                                             QStringLiteral(R"lua(
+function qcb_worker_suspended_boundary(value)
   local observed = GetPluginVariable("%1", "shared") or "<missing>"
   SetVariable("shared", observed .. ":second")
   return value .. ":" .. observed
 end
 )lua")
-			                                  .arg(firstId));
-			const auto third  = addPlugin(thirdId, QStringLiteral("Third"),
-			                              QStringLiteral(R"lua(
-function qcb_direct_suspended_boundary(value)
+			                                                 .arg(firstId));
+			const auto third  = addRuntimeCallbackPlugin(runtime, thirdId, QStringLiteral("Third"),
+			                                             QStringLiteral(R"lua(
+function qcb_worker_suspended_boundary(value)
   return value .. ":" .. (GetPluginVariable("%1", "shared") or "<missing>")
 end
 )lua")
-			                                  .arg(secondId));
+			                                                 .arg(secondId));
 
 			LuaBatchDispatchRequest originalRequest;
 			originalRequest.kind         = LuaBatchDispatchKind::StringInOut;
@@ -3031,7 +3339,9 @@ end
 			LuaBatchDispatchResult initialResult = runtime.m_luaExecutor->dispatchBatch(firstRequest);
 			QVERIFY(initialResult.suspended);
 			QVERIFY(initialResult.modalResumeId != 0);
-			QVERIFY(initialResult.deferredRuntimeMutationBatches.isEmpty());
+			QMudLuaDeferredRuntimeMutation::apply(initialResult);
+			originalRequest.callbackSnapshotArg =
+			    runtime.captureLuaCallbackSnapshotForRequest(originalRequest);
 
 			constexpr quint64                             runtimeResumeId = 901;
 			constexpr quint64                             commandId       = 902;
@@ -3054,8 +3364,7 @@ end
 			resumeRequest.runtimeModalResumeId  = runtimeResumeId;
 			LuaBatchDispatchResult resumeResult = runtime.m_luaExecutor->dispatchBatch(resumeRequest);
 			QVERIFY(!resumeResult.suspended);
-			QVERIFY(resumeResult.deferredRuntimeMutationBatches.isEmpty());
-			QVERIFY(resumeResult.callbackSnapshotAfterMutations);
+			QVERIFY(luaBatchPublishedMutationBoundary(resumeResult));
 
 			WorldRuntime::PluginCallbackDispatchCommand resumeCommand;
 			resumeCommand.request = resumeRequest;
@@ -3076,13 +3385,12 @@ end
 
 		static void terminalModalResumeDoesNotRecaptureUnusedRequestSnapshot()
 		{
-			WorldRuntime runtime;
-			switchRuntimeToDirectLuaExecutor(runtime);
+			WorldRuntime  runtime;
 
 			const QString pluginId = QStringLiteral("515151515151515151515151");
 			const QString callback = QStringLiteral("qcb_terminal_resume_capture");
-			const auto engine = addDirectCallbackPlugin(runtime, pluginId, QStringLiteral("Terminal resume"),
-			                                            QStringLiteral(R"lua(
+			const auto engine = addRuntimeCallbackPlugin(runtime, pluginId, QStringLiteral("Terminal resume"),
+			                                             QStringLiteral(R"lua(
 function qcb_terminal_resume_capture(value)
   utils.inputbox("prompt", "title", "")
   SetVariable("after_resume", "committed")
@@ -3143,21 +3451,20 @@ end
 
 		static void stoppingContinuationDoesNotRecaptureOrDispatchLaterRecipient()
 		{
-			WorldRuntime runtime;
-			switchRuntimeToDirectLuaExecutor(runtime);
+			WorldRuntime  runtime;
 
 			const QString stoppingId = QStringLiteral("616161616161616161616161");
 			const QString laterId    = QStringLiteral("717171717171717171717171");
 			const QString callback   = QStringLiteral("qcb_stop_without_recapture");
-			const auto    stopping   = addDirectCallbackPlugin(
+			const auto    stopping   = addRuntimeCallbackPlugin(
 			    runtime, stoppingId, QStringLiteral("Stopping recipient"), QStringLiteral(R"lua(
 function qcb_stop_without_recapture(flags, value)
   SetVariable("stopped", "yes")
   return true
 end
 )lua"));
-			const auto later = addDirectCallbackPlugin(runtime, laterId, QStringLiteral("Later recipient"),
-			                                           QStringLiteral(R"lua(
+			const auto later = addRuntimeCallbackPlugin(runtime, laterId, QStringLiteral("Later recipient"),
+			                                            QStringLiteral(R"lua(
 function qcb_stop_without_recapture(flags, value)
   SetVariable("called", "yes")
   return false
@@ -3193,9 +3500,9 @@ end
 			runtime.continueSuspendedPluginCallbackDispatch(std::move(suspended),
 			                                                std::move(resumedRecipient));
 
-			// The stopping callback publishes its cumulative mutation snapshot once. A second increment
-			// would be the unused request recapture that used to occur before the stop result was checked.
-			QCOMPARE(runtime.m_luaCallbackDispatchSnapshotCaptureCount, capturesBefore + 1);
+			// The stopping callback publishes its mutation journal, but no later recipient consumes the
+			// request, so the runtime must not recapture an unused snapshot.
+			QCOMPARE(runtime.m_luaCallbackDispatchSnapshotCaptureCount, capturesBefore);
 			QCOMPARE(pluginVariable(runtime, stoppingId, QStringLiteral("stopped")), QStringLiteral("yes"));
 			QVERIFY(pluginVariable(runtime, laterId, QStringLiteral("called")).isEmpty());
 			auto completed = runtime.m_pluginCallbackDispatchResults.find(commandId);
@@ -3205,28 +3512,27 @@ end
 			runtime.m_pluginCallbackDispatchResults.erase(completed);
 		}
 
-		static void directRecipientMutationBoundaryCapturesExactlyOnce()
+		static void workerRecipientMutationBoundaryCapturesExactlyOnce()
 		{
-			WorldRuntime runtime;
-			switchRuntimeToDirectLuaExecutor(runtime);
+			WorldRuntime  runtime;
 
 			const QString firstId  = QStringLiteral("101010101010101010101010");
 			const QString secondId = QStringLiteral("202020202020202020202020");
-			const QString callback = QStringLiteral("qcb_direct_single_boundary_capture");
+			const QString callback = QStringLiteral("qcb_worker_single_boundary_capture");
 			const auto    first =
-			    addDirectCallbackPlugin(runtime, firstId, QStringLiteral("First"), QStringLiteral(R"lua(
-function qcb_direct_single_boundary_capture(value)
+			    addRuntimeCallbackPlugin(runtime, firstId, QStringLiteral("First"), QStringLiteral(R"lua(
+function qcb_worker_single_boundary_capture(value)
   SetVariable("shared", "published-once")
   return "first-result"
 end
 )lua"));
-			const auto second = addDirectCallbackPlugin(runtime, secondId, QStringLiteral("Second"),
-			                                            QStringLiteral(R"lua(
-function qcb_direct_single_boundary_capture(value)
+			const auto second = addRuntimeCallbackPlugin(runtime, secondId, QStringLiteral("Second"),
+			                                             QStringLiteral(R"lua(
+function qcb_worker_single_boundary_capture(value)
   return value .. ":" .. (GetPluginVariable("%1", "shared") or "<missing>")
 end
 )lua")
-			                                                .arg(firstId));
+			                                                 .arg(firstId));
 
 			LuaBatchDispatchRequest request;
 			request.kind         = LuaBatchDispatchKind::StringInOut;
@@ -3242,35 +3548,33 @@ end
 			QCOMPARE(result.stringResult, QStringLiteral("first-result:published-once"));
 			QCOMPARE(pluginVariable(runtime, firstId, QStringLiteral("shared")),
 			         QStringLiteral("published-once"));
-			// Initial request capture, the mutating callback's cumulative publication, and one
-			// continuation capture. The old direct-path duplication produced a fourth capture here.
-			QCOMPARE(runtime.m_luaCallbackDispatchSnapshotCaptureCount, capturesBefore + 3);
+			// Initial request capture plus one continuation capture after the first recipient's mutation.
+			QCOMPARE(runtime.m_luaCallbackDispatchSnapshotCaptureCount, capturesBefore + 2);
 			QCOMPARE(runtime.m_luaCallbackDispatchSnapshotBaseBuildCount, buildsBefore + 1);
 			QVERIFY(runtime.m_luaCallbackDispatchSnapshotBasePatchCount > patchesBefore);
 		}
 
-		static void directRecipientMutationBoundaryCarriesBytesInOutValue()
+		static void workerRecipientMutationBoundaryCarriesBytesInOutValue()
 		{
-			WorldRuntime runtime;
-			switchRuntimeToDirectLuaExecutor(runtime);
+			WorldRuntime  runtime;
 
 			const QString firstId  = QStringLiteral("121212121212121212121212");
 			const QString secondId = QStringLiteral("232323232323232323232323");
-			const QString callback = QStringLiteral("qcb_direct_bytes_boundary");
-			const auto    first =
-			    addDirectCallbackPlugin(runtime, firstId, QStringLiteral("First bytes"), QStringLiteral(R"lua(
-function qcb_direct_bytes_boundary(value)
+			const QString callback = QStringLiteral("qcb_worker_bytes_boundary");
+			const auto    first    = addRuntimeCallbackPlugin(runtime, firstId, QStringLiteral("First bytes"),
+			                                                  QStringLiteral(R"lua(
+function qcb_worker_bytes_boundary(value)
   SetVariable("shared", "bytes-published")
   return value .. ":first"
 end
 )lua"));
-			const auto second = addDirectCallbackPlugin(runtime, secondId, QStringLiteral("Second bytes"),
-			                                            QStringLiteral(R"lua(
-function qcb_direct_bytes_boundary(value)
+			const auto    second = addRuntimeCallbackPlugin(runtime, secondId, QStringLiteral("Second bytes"),
+			                                                QStringLiteral(R"lua(
+function qcb_worker_bytes_boundary(value)
   return value .. ":" .. (GetPluginVariable("%1", "shared") or "<missing>")
 end
 )lua")
-			                                                .arg(firstId));
+			                                                    .arg(firstId));
 
 			LuaBatchDispatchRequest request;
 			request.kind         = LuaBatchDispatchKind::BytesInOut;
@@ -3285,19 +3589,18 @@ end
 			         QStringLiteral("bytes-published"));
 		}
 
-		static void directRepeatedYieldRetainsCommonContinuationState()
+		static void workerRepeatedYieldRetainsCommonContinuationState()
 		{
 			WorldRuntime runtime;
-			switchRuntimeToDirectLuaExecutor(runtime);
 			for (int lineNumber = 1; lineNumber <= 500; ++lineNumber)
 				runtime.addLine(QStringLiteral("yield line %1").arg(lineNumber), WorldRuntime::LineOutput);
 
 			const QString firstId  = QStringLiteral("303030303030303030303030");
 			const QString secondId = QStringLiteral("404040404040404040404040");
-			const QString callback = QStringLiteral("qcb_direct_repeated_yield");
-			const auto    first = addDirectCallbackPlugin(runtime, firstId, QStringLiteral("Yielding first"),
-			                                              QStringLiteral(R"lua(
-function qcb_direct_repeated_yield(value)
+			const QString callback = QStringLiteral("qcb_worker_repeated_yield");
+			const auto    first = addRuntimeCallbackPlugin(runtime, firstId, QStringLiteral("Yielding first"),
+			                                               QStringLiteral(R"lua(
+function qcb_worker_repeated_yield(value)
   SetVariable("phase", "before-first-yield")
   local first = GetLineInfo(1, 1) or "<missing-first>"
   SetVariable("phase", "between-yields")
@@ -3306,13 +3609,13 @@ function qcb_direct_repeated_yield(value)
   return first .. "|" .. second
 end
 )lua"));
-			const auto second   = addDirectCallbackPlugin(runtime, secondId, QStringLiteral("Yield observer"),
-			                                              QStringLiteral(R"lua(
-function qcb_direct_repeated_yield(value)
+			const auto second = addRuntimeCallbackPlugin(runtime, secondId, QStringLiteral("Yield observer"),
+			                                             QStringLiteral(R"lua(
+function qcb_worker_repeated_yield(value)
   return value .. "|" .. (GetPluginVariable("%1", "phase") or "<missing-phase>")
 end
 )lua")
-			                                                  .arg(firstId));
+			                                                 .arg(firstId));
 
 			LuaBatchDispatchRequest request;
 			request.kind         = LuaBatchDispatchKind::StringInOut;

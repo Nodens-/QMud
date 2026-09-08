@@ -100,12 +100,11 @@ namespace QMudTimerScheduling
 	                                                  bool connected);
 
 	/**
-	 * @brief Applies post-fire scheduling/accounting updates to timer state.
+	 * @brief Applies post-fire accounting and advances a deadline that has not already been rescheduled.
 	 * @param timer Mutable timer record.
 	 * @param now Current timestamp.
-	 * @return `true` when the caller must delete the one-shot timer after its action finishes.
 	 */
-	bool                             applyTimerFiredState(WorldRuntime::Timer &timer, const QDateTime &now);
+	void                             applyTimerFiredState(WorldRuntime::Timer &timer, const QDateTime &now);
 } // namespace QMudTimerScheduling
 
 #endif // QMUD_TIMERSCHEDULINGUTILS_H

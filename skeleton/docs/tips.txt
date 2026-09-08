@@ -15,7 +15,7 @@ You can customize the text and background color of the command (input) window by
 You can customize the font used in the command (input) window by using: Game > World Configuration > Commands.
 You can echo what you type into the MUD in a different color, to make your input stand out. Also, any aliases are expanded so you know exactly what is sent to the MUD.
 You can use "speed walking" to quickly move from one location to another. You choose what "prefix" enables speed walking. For example: /w 2N3E  will take you North twice and then East three times.
-You can use "command stacking" to type multiple commands on one line. You can choose which character is used to stack commands together. For example: take sword; kill dragon
+You can use "command stacking" to type multiple commands on one line. You can choose a one- or two-character separator, such as ";" or "::". Type the separator twice to include it literally, or put it at the start of the line to disable stacking for that line.
 You can use the "notes" tab in the World Configuration screen to keep free-format notes about things of interest in the current world.
 You can use the numeric keypad to quickly move around. The actual commands sent by the keypad are customizable by you.
 If you use the numeric keypad, or commands on the "Actions" menu, then any command you have typed into the command area is preserved. This way you can use the numeric keypad to walk around, whilst typing in a lengthy command at the same time.
