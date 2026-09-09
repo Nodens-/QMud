@@ -162,6 +162,9 @@ and potential contributors need to fully understand them.
   must still be inside the same QMud home.
 - Do not change the process working directory to make legacy relative paths work. Correctness must not depend on which
   world opened first, which thread performs the call, or the application's launch directory. Only QMud home.
+- Every operating-system file-association entry point converges on one dispatch path and remains inert until startup
+  captures QMud home. Dispatch preserves the exact native filename, accepts only existing regular files whose canonical
+  targets are inside that captured home in order to enforce the sandboxing model.
 - Path tests must include POSIX and Windows separators, legacy absolute inputs, native absolute paths inside QMud home,
   traversal and symlink escapes, missing targets, trailing-directory separators, and Lua execution across thread affinity.
 - Native plugin compatibility shims are the explicit exception to home-relative filesystem plugin paths. Their source

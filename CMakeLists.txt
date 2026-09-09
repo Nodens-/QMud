@@ -194,6 +194,122 @@ endif ()
 qt_standard_project_setup()
 set(QMUD_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+# FileExtensions.h is the single source of truth for runtime file handling and macOS bundle metadata.
+set(QMUD_FILE_ASSOCIATIONS_HEADER "${QMUD_SRC_DIR}/FileExtensions.h")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${QMUD_FILE_ASSOCIATIONS_HEADER}")
+file(READ "${QMUD_FILE_ASSOCIATIONS_HEADER}" QMUD_FILE_ASSOCIATIONS_CONTENT)
+
+set(QMUD_FILE_ASSOCIATIONS_DECLARATION_PATTERN
+        "static[ \t\r\n]+const[ \t\r\n]+QList<Entry>[ \t\r\n]+kEntries[ \t\r\n]*=")
+string(REGEX MATCHALL "${QMUD_FILE_ASSOCIATIONS_DECLARATION_PATTERN}"
+        QMUD_FILE_ASSOCIATIONS_DECLARATIONS "${QMUD_FILE_ASSOCIATIONS_CONTENT}")
+list(LENGTH QMUD_FILE_ASSOCIATIONS_DECLARATIONS QMUD_FILE_ASSOCIATIONS_DECLARATION_COUNT)
+if (NOT QMUD_FILE_ASSOCIATIONS_DECLARATION_COUNT EQUAL 1)
+    message(FATAL_ERROR "FileExtensions.h must contain exactly one kEntries association table")
+endif ()
+set(QMUD_FILE_ASSOCIATIONS_TABLE_PATTERN
+        "${QMUD_FILE_ASSOCIATIONS_DECLARATION_PATTERN}[ \t\r\n]*\\{([^;]*)\\};")
+if (NOT QMUD_FILE_ASSOCIATIONS_CONTENT MATCHES "${QMUD_FILE_ASSOCIATIONS_TABLE_PATTERN}")
+    message(FATAL_ERROR "Unable to parse the FileExtensions.h kEntries initializer")
+endif ()
+set(QMUD_FILE_ASSOCIATIONS_TABLE_CONTENT "${CMAKE_MATCH_1}")
+
+set(QMUD_FILE_ASSOCIATION_ROW_PATTERN
+        "\\{[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*\\}")
+string(REGEX MATCHALL "\\{[ \t\r\n]*\"" QMUD_FILE_ASSOCIATION_ROW_STARTS
+        "${QMUD_FILE_ASSOCIATIONS_TABLE_CONTENT}")
+string(REGEX MATCHALL "${QMUD_FILE_ASSOCIATION_ROW_PATTERN}" QMUD_FILE_ASSOCIATION_ROWS
+        "${QMUD_FILE_ASSOCIATIONS_TABLE_CONTENT}")
+list(LENGTH QMUD_FILE_ASSOCIATION_ROW_STARTS QMUD_FILE_ASSOCIATION_ROW_START_COUNT)
+list(LENGTH QMUD_FILE_ASSOCIATION_ROWS QMUD_FILE_ASSOCIATION_ROW_COUNT)
+if (QMUD_FILE_ASSOCIATION_ROW_COUNT EQUAL 0 OR
+        NOT QMUD_FILE_ASSOCIATION_ROW_COUNT EQUAL QMUD_FILE_ASSOCIATION_ROW_START_COUNT)
+    message(FATAL_ERROR
+            "Every FileExtensions.h entry must be a six-string aggregate initializer; found "
+            "${QMUD_FILE_ASSOCIATION_ROW_COUNT} valid rows from ${QMUD_FILE_ASSOCIATION_ROW_START_COUNT} entries")
+endif ()
+
+function(qmud_xml_escape output_name input_value)
+    set(escaped "${input_value}")
+    string(REPLACE "&" "&amp;" escaped "${escaped}")
+    string(REPLACE "<" "&lt;" escaped "${escaped}")
+    string(REPLACE ">" "&gt;" escaped "${escaped}")
+    string(REPLACE "\"" "&quot;" escaped "${escaped}")
+    string(REPLACE "'" "&apos;" escaped "${escaped}")
+    set(${output_name} "${escaped}" PARENT_SCOPE)
+endfunction()
+
+set(QMUD_MAC_DOCUMENT_TYPES_XML "\t<key>CFBundleDocumentTypes</key>\n\t<array>\n")
+set(QMUD_MAC_EXPORTED_TYPES_XML "\t<key>UTExportedTypeDeclarations</key>\n\t<array>\n")
+set(QMUD_FILE_ASSOCIATION_WORLD_COUNT 0)
+
+foreach (association_row IN LISTS QMUD_FILE_ASSOCIATION_ROWS)
+    if (NOT association_row MATCHES "^${QMUD_FILE_ASSOCIATION_ROW_PATTERN}$")
+        message(FATAL_ERROR "Unable to parse a FileExtensions.h entry")
+    endif ()
+    set(program_id_suffix "${CMAKE_MATCH_1}")
+    set(description "${CMAKE_MATCH_2}")
+    set(mime_type "${CMAKE_MATCH_3}")
+    set(modern_extension "${CMAKE_MATCH_4}")
+    set(legacy_extension "${CMAKE_MATCH_5}")
+    set(uniform_type_identifier "${CMAKE_MATCH_6}")
+
+    if (program_id_suffix STREQUAL "World")
+        math(EXPR QMUD_FILE_ASSOCIATION_WORLD_COUNT "${QMUD_FILE_ASSOCIATION_WORLD_COUNT} + 1")
+    endif ()
+
+    qmud_xml_escape(description_xml "${description}")
+    qmud_xml_escape(mime_type_xml "${mime_type}")
+    qmud_xml_escape(modern_extension_xml "${modern_extension}")
+    qmud_xml_escape(legacy_extension_xml "${legacy_extension}")
+    qmud_xml_escape(uniform_type_identifier_xml "${uniform_type_identifier}")
+
+    string(APPEND QMUD_MAC_DOCUMENT_TYPES_XML
+            "\t\t<dict>\n"
+            "\t\t\t<key>CFBundleTypeName</key>\n"
+            "\t\t\t<string>${description_xml}</string>\n"
+            "\t\t\t<key>CFBundleTypeRole</key>\n"
+            "\t\t\t<string>Editor</string>\n"
+            "\t\t\t<key>LSHandlerRank</key>\n"
+            "\t\t\t<string>Owner</string>\n"
+            "\t\t\t<key>LSItemContentTypes</key>\n"
+            "\t\t\t<array>\n"
+            "\t\t\t\t<string>${uniform_type_identifier_xml}</string>\n"
+            "\t\t\t</array>\n"
+            "\t\t</dict>\n")
+    string(APPEND QMUD_MAC_EXPORTED_TYPES_XML
+            "\t\t<dict>\n"
+            "\t\t\t<key>UTTypeConformsTo</key>\n"
+            "\t\t\t<array>\n"
+            "\t\t\t\t<string>public.xml</string>\n"
+            "\t\t\t</array>\n"
+            "\t\t\t<key>UTTypeDescription</key>\n"
+            "\t\t\t<string>${description_xml}</string>\n"
+            "\t\t\t<key>UTTypeIdentifier</key>\n"
+            "\t\t\t<string>${uniform_type_identifier_xml}</string>\n"
+            "\t\t\t<key>UTTypeTagSpecification</key>\n"
+            "\t\t\t<dict>\n"
+            "\t\t\t\t<key>public.filename-extension</key>\n"
+            "\t\t\t\t<array>\n"
+            "\t\t\t\t\t<string>${modern_extension_xml}</string>\n"
+            "\t\t\t\t\t<string>${legacy_extension_xml}</string>\n"
+            "\t\t\t\t</array>\n"
+            "\t\t\t\t<key>public.mime-type</key>\n"
+            "\t\t\t\t<string>${mime_type_xml}</string>\n"
+            "\t\t\t</dict>\n"
+            "\t\t</dict>\n")
+endforeach ()
+
+if (NOT QMUD_FILE_ASSOCIATION_WORLD_COUNT EQUAL 1)
+    message(FATAL_ERROR "FileExtensions.h must contain exactly one World association")
+endif ()
+
+string(APPEND QMUD_MAC_DOCUMENT_TYPES_XML "\t</array>")
+string(APPEND QMUD_MAC_EXPORTED_TYPES_XML "\t</array>")
+set(QMUD_MAC_INFO_PLIST_TEMPLATE "${CMAKE_CURRENT_BINARY_DIR}/QMudInfo.plist.in")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/resources/qmud/macos/QMudInfo.plist.in"
+        "${QMUD_MAC_INFO_PLIST_TEMPLATE}" @ONLY)
+
 # Core Qt entry-point sources (start minimal, expand as modules are ported)
 set(QMUD_SOURCES
         Main.cpp
@@ -209,6 +325,7 @@ set(QMUD_SOURCES
         helpers/WorldSessionRestoreFlowUtils.cpp
         helpers/WorldSessionStateUtils.cpp
         helpers/ReloadUtils.cpp
+        helpers/SingleInstanceIpc.cpp
         helpers/MushclientImportUtils.cpp
         Environment.cpp
         Accelerators.cpp
@@ -305,6 +422,7 @@ set(QMUD_HEADERS
         Environment.h
         helpers/LogCompressionUtils.h
         helpers/ReloadUtils.h
+        helpers/SingleInstanceIpc.h
         helpers/MushclientImportUtils.h
         helpers/WorldSessionRestoreFlowUtils.h
         helpers/WorldSessionStateUtils.h
@@ -1227,6 +1345,7 @@ if (APPLE)
                 MACOSX_BUNDLE_GUI_IDENTIFIER "com.abnormalfrequency.qmud"
                 MACOSX_BUNDLE_BUNDLE_VERSION "${QMUD_MACAPP_BUNDLE_VERSION}"
                 MACOSX_BUNDLE_SHORT_VERSION_STRING "${QMUD_MACAPP_BUNDLE_VERSION}"
+                MACOSX_BUNDLE_INFO_PLIST "${QMUD_MAC_INFO_PLIST_TEMPLATE}"
                 MACOSX_RPATH TRUE
                 BUILD_WITH_INSTALL_RPATH TRUE
                 INSTALL_RPATH "@executable_path/../Frameworks;@loader_path/../Frameworks"

@@ -41,10 +41,12 @@ class WorldView;
 class QMdiSubWindow;
 class NameGenerator;
 class QDialog;
+class QEvent;
 class QNetworkAccessManager;
 class QTimer;
 class QWidget;
 class AppControllerTestAccess;
+class tst_AppControllerFileOpen;
 class tst_WorldObserverLifecycle;
 struct ReloadWorldState;
 struct lua_State;
@@ -59,6 +61,7 @@ class AppController : public QObject
 {
 		Q_OBJECT
 		friend class AppControllerTestAccess;
+		friend class tst_AppControllerFileOpen;
 		friend class tst_WorldObserverLifecycle;
 
 	public:
@@ -142,6 +145,19 @@ class AppController : public QObject
 		 * @return Empty when updates are available, otherwise unavailable reason.
 		 */
 		[[nodiscard]] static QString updateMechanismUnavailableReason();
+		/**
+		 * @brief Queues or dispatches one operating-system file-association request.
+		 * @param path Exact native file path supplied by the operating system.
+		 * @return `true` when the request was queued or opened successfully.
+		 */
+		bool                         handleFileAssociationRequest(const QString &path);
+		/**
+		 * @brief Captures application-level file-open requests until startup is ready to open documents.
+		 * @param watched Object receiving the event.
+		 * @param event Event being delivered.
+		 * @return `true` when a local file-open request was consumed, including a rejected unsafe request.
+		 */
+		bool                         eventFilter(QObject *watched, QEvent *event) override;
 		/**
 		 * @brief Registers OS-level file associations.
 		 * @param errorMessage Optional output error message.
@@ -754,18 +770,44 @@ class AppController : public QObject
 		 */
 		void finalizeStartupIfReady();
 		/**
+		 * @brief Opens queued application file requests in arrival order and enables immediate dispatch.
+		 */
+		void enableFileAssociationDispatch();
+		/**
+		 * @brief Validates and opens one OS file request inside the captured QMud home directory.
+		 * @param path Native file path supplied by the operating system.
+		 * @return `true` when the path passed containment checks and the document opened.
+		 */
+		bool dispatchFileAssociationRequest(const QString &path);
+		/**
+		 * @brief Resolves an exact native file-association path and enforces the captured QMud-home boundary.
+		 * @param qmudHome Captured QMud home directory.
+		 * @param path Exact native path supplied by the operating system.
+		 * @param resolvedPath Receives the canonical file path on success.
+		 * @param error Receives a diagnostic on failure.
+		 * @return `true` for an existing regular file whose canonical target is inside QMud home.
+		 */
+		[[nodiscard]] static bool resolveFileAssociationFile(const QString &qmudHome, const QString &path,
+		                                                     QString *resolvedPath, QString *error = nullptr);
+		/**
+		 * @brief Opens one already-resolved document path without applying legacy path transformations.
+		 * @param resolvedPath Exact resolved document path.
+		 * @return `true` when the document opens successfully.
+		 */
+		bool                      openResolvedDocumentFile(const QString &resolvedPath);
+		/**
 		 * @brief Parses reload startup arguments from process command line.
 		 */
-		void detectReloadStartupArguments();
+		void                      detectReloadStartupArguments();
 		/**
 		 * @brief Deletes stale reload state file when startup is not reload-mode.
 		 */
-		void cleanupReloadStateOnNormalStartup() const;
+		void                      cleanupReloadStateOnNormalStartup() const;
 		/**
 		 * @brief Executes startup recovery for reload-mode launches.
 		 * @return `true` when recovery path completed.
 		 */
-		bool recoverReloadStartupState();
+		bool                      recoverReloadStartupState();
 		/**
 		 * @brief Opens one runtime/window pair from serialized reload world state.
 		 * @param worldState Serialized world state.
@@ -774,8 +816,8 @@ class AppController : public QObject
 		 * @param view Optional output world view pointer.
 		 * @return `true` when world opening succeeds.
 		 */
-		bool openWorldForReloadRecovery(const ReloadWorldState &worldState, bool activateWindow,
-		                                WorldRuntime **runtime, WorldView **view = nullptr);
+		bool              openWorldForReloadRecovery(const ReloadWorldState &worldState, bool activateWindow,
+		                                             WorldRuntime **runtime, WorldView **view = nullptr);
 		/**
 		 * @brief Creates another presentation for an existing runtime.
 		 * @param runtime Runtime shared by the new presentation.
@@ -1097,7 +1139,9 @@ class AppController : public QObject
 		bool                             m_initializeFinished{false};
 		bool                             m_initializeSucceeded{false};
 		bool                             m_startupFinalized{false};
+		bool                             m_fileAssociationDispatchReady{false};
 		bool                             m_startupFirstTime{false};
+		QStringList                      m_pendingFileAssociationRequests;
 		bool                             m_startupNeedsUpgradeWelcome{false};
 		mutable bool                     m_deferUpgradeWelcomeUntilStartupRestores{false};
 		mutable bool                     m_startupRestoreDispatchComplete{false};

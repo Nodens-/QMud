@@ -89,6 +89,8 @@ extern "C"
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QFileOpenEvent>
 #include <QFont>
 #include <QFormLayout>
 #include <QGridLayout>
@@ -162,6 +164,7 @@ extern "C"
 // ReSharper disable once CppUnusedIncludeDirective
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 #include <zlib.h>
 
@@ -193,14 +196,11 @@ namespace
 		       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 	}
 
-	struct FileAssociationEntry
+	bool containsNativeParentTraversal(const QString &path)
 	{
-			const char *programIdSuffix;
-			const char *description;
-			const char *mimeType;
-			const char *modernExtension;
-			const char *legacyExtension;
-	};
+		const QStringList segments = QDir::fromNativeSeparators(path).split(QLatin1Char('/'));
+		return segments.contains(QStringLiteral(".."));
+	}
 
 	class ImportProgressDialog final : public QDialog
 	{
@@ -585,20 +585,6 @@ namespace
 		return true;
 	}
 
-	const QList<FileAssociationEntry> &fileAssociationEntries()
-	{
-		static const QList<FileAssociationEntry> kEntries = {
-		    {"World",     "QMud World File",    "application/x-qmud-world",     "qdl", "mcl"},
-		    {"Triggers",  "QMud Trigger File",  "application/x-qmud-triggers",  "qdt", "mct"},
-		    {"Aliases",   "QMud Alias File",    "application/x-qmud-aliases",   "qda", "mca"},
-		    {"Timers",    "QMud Timer File",    "application/x-qmud-timers",    "qdi", "mci"},
-		    {"Colours",   "QMud Colour File",   "application/x-qmud-colours",   "qdc", "mcc"},
-		    {"Macros",    "QMud Macro File",    "application/x-qmud-macros",    "qdm", "mcm"},
-		    {"Variables", "QMud Variable File", "application/x-qmud-variables", "qdv", "mcv"},
-		};
-		return kEntries;
-	}
-
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 	QString makeReloadArgument(const QString &name, const QString &value)
 	{
@@ -738,10 +724,10 @@ namespace
 #ifdef Q_OS_LINUX
 	QStringList registeredMimeTypes()
 	{
-		QStringList                        mimeTypes;
-		const QList<FileAssociationEntry> &entries = fileAssociationEntries();
+		QStringList                             mimeTypes;
+		const QList<QMudFileExtensions::Entry> &entries = QMudFileExtensions::entries();
 		mimeTypes.reserve(entries.size());
-		for (const FileAssociationEntry &entry : entries)
+		for (const QMudFileExtensions::Entry &entry : entries)
 			mimeTypes.push_back(QString::fromLatin1(entry.mimeType));
 		return mimeTypes;
 	}
@@ -772,10 +758,10 @@ namespace
 		const QString executablePath = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
 		const QString openCommand = QStringLiteral("\"%1\" \"%2\"").arg(executablePath, QStringLiteral("%1"));
 		const QString defaultIcon = QStringLiteral("\"%1\",0").arg(executablePath);
-		const QString baseProgramId                = QStringLiteral("QMud");
-		const QList<FileAssociationEntry> &entries = fileAssociationEntries();
+		const QString baseProgramId                     = QStringLiteral("QMud");
+		const QList<QMudFileExtensions::Entry> &entries = QMudFileExtensions::entries();
 
-		for (const FileAssociationEntry &entry : entries)
+		for (const QMudFileExtensions::Entry &entry : entries)
 		{
 			const QString programId =
 			    QStringLiteral("%1.%2").arg(baseProgramId, QString::fromLatin1(entry.programIdSuffix));
@@ -804,58 +790,52 @@ namespace
 #endif
 
 #ifdef Q_OS_MACOS
-	CFStringRef cfStringFromQString(const QString &value)
-	{
-		return CFStringCreateWithCharacters(kCFAllocatorDefault,
-		                                    reinterpret_cast<const UniChar *>(value.utf16()),
-		                                    static_cast<CFIndex>(value.size()));
-	}
-
 	bool registerMacFileAssociations(QString *errorMessage)
 	{
-		const QString bundleId    = QStringLiteral("com.abnormalfrequency.qmud");
-		CFStringRef   bundleIdRef = cfStringFromQString(bundleId);
-		if (!bundleIdRef)
+		CFBundleRef bundle = CFBundleGetMainBundle();
+		if (!bundle)
 		{
 			if (errorMessage)
-				*errorMessage = QStringLiteral("Unable to construct macOS bundle identifier.");
+				*errorMessage = QStringLiteral("Unable to access the macOS application bundle.");
 			return false;
 		}
 
-		bool                               ok = true;
-		QString                            firstError;
-		const QList<FileAssociationEntry> &entries = fileAssociationEntries();
-		for (const FileAssociationEntry &entry : entries)
+		CFStringRef bundleId = CFBundleGetIdentifier(bundle);
+		if (!bundleId || CFStringGetLength(bundleId) == 0)
 		{
-			const QStringList extensions = {QString::fromLatin1(entry.modernExtension),
-			                                QString::fromLatin1(entry.legacyExtension)};
+			if (errorMessage)
+				*errorMessage = QStringLiteral("The macOS application bundle has no identifier.");
+			return false;
+		}
 
-			for (const QString &extension : extensions)
+		bool    ok = true;
+		QString firstError;
+		for (const QMudFileExtensions::Entry &entry : QMudFileExtensions::entries())
+		{
+			CFStringRef contentType = CFStringCreateWithCString(
+			    kCFAllocatorDefault, entry.uniformTypeIdentifier, kCFStringEncodingUTF8);
+			if (!contentType)
 			{
-				CFStringRef extensionRef = cfStringFromQString(extension);
-				if (!extensionRef)
-					continue;
+				ok = false;
+				if (firstError.isEmpty())
+					firstError = QStringLiteral("Unable to create macOS content type '%1'.")
+					                 .arg(QString::fromLatin1(entry.uniformTypeIdentifier));
+				continue;
+			}
 
-				CFStringRef utiRef = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension,
-				                                                           extensionRef, nullptr);
-				CFRelease(extensionRef);
-				if (!utiRef)
-					continue;
-
-				const OSStatus status =
-				    LSSetDefaultRoleHandlerForContentType(utiRef, kLSRolesAll, bundleIdRef);
-				CFRelease(utiRef);
-				if (status != noErr)
-				{
-					ok = false;
-					if (firstError.isEmpty())
-						firstError = QStringLiteral("LaunchServices status %1 while setting default handler.")
-						                 .arg(status);
-				}
+			const OSStatus status = LSSetDefaultRoleHandlerForContentType(contentType, kLSRolesAll, bundleId);
+			CFRelease(contentType);
+			if (status != noErr)
+			{
+				ok = false;
+				if (firstError.isEmpty())
+					firstError =
+					    QStringLiteral("LaunchServices status %1 while setting default handler for '%2'.")
+					        .arg(status)
+					        .arg(QString::fromLatin1(entry.uniformTypeIdentifier));
 			}
 		}
 
-		CFRelease(bundleIdRef);
 		if (!ok && errorMessage)
 			*errorMessage = firstError;
 		return ok;
@@ -962,7 +942,7 @@ namespace
 		QTextStream mimeXmlStream(&mimeXmlText);
 		mimeXmlStream << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 		mimeXmlStream << "<mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n";
-		for (const FileAssociationEntry &entry : fileAssociationEntries())
+		for (const QMudFileExtensions::Entry &entry : QMudFileExtensions::entries())
 		{
 			mimeXmlStream << "  <mime-type type=\"" << entry.mimeType << "\">\n";
 			mimeXmlStream << "    <comment>" << entry.description << "</comment>\n";
@@ -2341,10 +2321,14 @@ AppController::AppController(QObject *parent) : QObject(parent)
 {
 	s_instance = this;
 	m_nameGenerator.reset(new NameGenerator(this));
+	if (QCoreApplication *application = QCoreApplication::instance())
+		application->installEventFilter(this);
 }
 
 AppController::~AppController()
 {
+	if (QCoreApplication *application = QCoreApplication::instance())
+		application->removeEventFilter(this);
 #ifdef QMUD_ENABLE_LUA_I18N
 	if (m_translatorLua)
 	{
@@ -2366,6 +2350,39 @@ AppController::~AppController()
 AppController *AppController::instance()
 {
 	return s_instance;
+}
+
+bool AppController::eventFilter(QObject *watched, QEvent *event)
+{
+	if (watched != QCoreApplication::instance() || !event || event->type() != QEvent::FileOpen)
+		return QObject::eventFilter(watched, event);
+
+	const auto *fileOpenEvent = dynamic_cast<QFileOpenEvent *>(event);
+	if (!fileOpenEvent)
+		return QObject::eventFilter(watched, event);
+	const QUrl url = fileOpenEvent->url();
+	QString    path;
+	if (url.isLocalFile())
+		path = url.toLocalFile();
+	else if (url.isEmpty())
+		path = fileOpenEvent->file();
+
+	if (path.isEmpty())
+		return QObject::eventFilter(watched, event);
+
+	const bool accepted = handleFileAssociationRequest(path);
+	event->setAccepted(accepted);
+	return true;
+}
+
+bool AppController::handleFileAssociationRequest(const QString &path)
+{
+	if (path.isEmpty())
+		return false;
+	if (m_fileAssociationDispatchReady)
+		return dispatchFileAssociationRequest(path);
+	m_pendingFileAssociationRequests.push_back(path);
+	return true;
 }
 
 QString AppController::resolveHelpDatabasePath()
@@ -3166,7 +3183,11 @@ bool AppController::openDocumentFile(const QString &path)
 	auto resolvedPath = normalized;
 	if (const QFileInfo info(normalized); !info.isAbsolute())
 		resolvedPath = makeAbsolutePath(normalized);
+	return openResolvedDocumentFile(resolvedPath);
+}
 
+bool AppController::openResolvedDocumentFile(const QString &resolvedPath)
+{
 	const auto suffix = QFileInfo(resolvedPath).suffix().toLower();
 	const auto opened = QMudFileExtensions::isWorldSuffix(suffix) ? openWorldDocument(resolvedPath)
 	                                                              : openTextDocument(resolvedPath);
@@ -4675,15 +4696,33 @@ void AppController::setupStartupBehavior()
 		}
 	}
 
-	const bool        skipStartupWorldListAutoOpen = startedWithReloadArgs;
+	const bool  skipStartupWorldListAutoOpen = startedWithReloadArgs;
 
 	// simple command line parsing for auto-open behavior
-	const QStringList args    = filterReloadStartupArguments(QCoreApplication::arguments());
-	const auto        cmdLine = args.mid(1).join(QStringLiteral(" "));
+	QStringList args = filterReloadStartupArguments(QCoreApplication::arguments());
+	for (qsizetype index = args.size() - 1; index >= 1; --index)
+	{
+		const QString &argument = args.at(index);
+		if (argument.compare(QStringLiteral("--multi-instance"), Qt::CaseInsensitive) == 0 ||
+		    argument.compare(QStringLiteral("--allow-multi-instance"), Qt::CaseInsensitive) == 0)
+		{
+			args.removeAt(index);
+		}
+	}
 
-	bool              bAutoOpen = true;
+	bool bAutoOpen = true;
 	if (skipStartupWorldListAutoOpen)
 		bAutoOpen = false;
+	for (qsizetype index = args.size() - 1; index >= 1; --index)
+	{
+		if (args.at(index).compare(QStringLiteral("--noauto"), Qt::CaseInsensitive) != 0)
+			continue;
+		bAutoOpen = false;
+		args.removeAt(index);
+	}
+
+	const QString associationPath = QMudFileExtensions::fileAssociationPathArgument(args);
+	const QString cmdLine         = args.mid(1).join(QStringLiteral(" "));
 
 	if (cmdLine.isEmpty())
 	{
@@ -4691,16 +4730,11 @@ void AppController::setupStartupBehavior()
 	}
 	else
 	{
-		auto strTemp = cmdLine.toLower();
-		strTemp      = strTemp.trimmed();
+		const QString strTemp = cmdLine.toLower().trimmed();
 
-		// look for --noauto command-line option
-		if (strTemp == QStringLiteral("--noauto"))
-			bAutoOpen = false;
-		else if (strTemp.contains(QStringLiteral(".mcl")) || strTemp.contains(QStringLiteral(".qdl")))
-		// open an existing document
+		if (!associationPath.isEmpty())
 		{
-			openDocumentFile(cmdLine);
+			handleFileAssociationRequest(associationPath);
 		}
 		else if (strTemp.startsWith(QLatin1Char('/')) || strTemp.startsWith(QLatin1Char('-')))
 		{
@@ -7943,6 +7977,76 @@ void AppController::finalizeStartupIfReady()
 
 	m_startupFirstTime           = false;
 	m_startupNeedsUpgradeWelcome = false;
+	enableFileAssociationDispatch();
+}
+
+void AppController::enableFileAssociationDispatch()
+{
+	while (!m_pendingFileAssociationRequests.isEmpty())
+	{
+		const QStringList pendingRequests = std::exchange(m_pendingFileAssociationRequests, {});
+		for (const QString &path : pendingRequests)
+			dispatchFileAssociationRequest(path);
+	}
+	m_fileAssociationDispatchReady = true;
+}
+
+bool AppController::dispatchFileAssociationRequest(const QString &path)
+{
+	QString resolvedPath;
+	if (!resolveFileAssociationFile(m_workingDir, path, &resolvedPath))
+		return false;
+	return openResolvedDocumentFile(resolvedPath);
+}
+
+bool AppController::resolveFileAssociationFile(const QString &qmudHome, const QString &path,
+                                               QString *resolvedPath, QString *error)
+{
+	if (qmudHome.isEmpty())
+	{
+		if (error)
+			*error = QStringLiteral("QMud home directory is not available");
+		return false;
+	}
+
+	const QFileInfo homeInfo(qmudHome);
+	const QString   canonicalHome = homeInfo.canonicalFilePath();
+	if (canonicalHome.isEmpty() || !homeInfo.isDir())
+	{
+		if (error)
+			*error = QStringLiteral("QMud home directory does not resolve to an existing directory");
+		return false;
+	}
+
+	if (path.isEmpty() || containsNativeParentTraversal(path))
+	{
+		if (error)
+			*error = QStringLiteral("File path is empty or contains parent traversal");
+		return false;
+	}
+
+	const QFileInfo suppliedInfo(path);
+	const QString   absolutePath = suppliedInfo.isAbsolute() ? path : QDir(canonicalHome).filePath(path);
+	const QFileInfo targetInfo(absolutePath);
+	if (!targetInfo.exists() || !targetInfo.isFile())
+	{
+		if (error)
+			*error = QStringLiteral("File path does not identify an existing regular file");
+		return false;
+	}
+
+	const QString canonicalTarget = targetInfo.canonicalFilePath();
+	if (canonicalTarget.isEmpty() ||
+	    !QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(canonicalTarget, canonicalHome))
+	{
+		if (error)
+			*error = QStringLiteral("File path resolves outside QMud home directory");
+		return false;
+	}
+
+	if (resolvedPath)
+		*resolvedPath = canonicalTarget;
+	return true;
 }
 
 void AppController::showSplashScreen()

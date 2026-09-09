@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
  * File: PluginPathUtils.h
- * Role: Path normalization and containment helpers for legacy plugin file APIs.
+ * Role: Path normalization for plugin file APIs and shared QMud-home containment policy.
  */
 
 #ifndef QMUD_PLUGINPATHUTILS_H
@@ -12,7 +12,7 @@
 #include <QString>
 
 /**
- * @brief Helpers for mapping legacy MUSHclient-style plugin paths into the resolved QMud home directory.
+ * @brief Helpers for normalizing paths and enforcing the resolved QMud home directory boundary.
  */
 namespace QMudPluginPathUtils
 {
@@ -54,6 +54,13 @@ namespace QMudPluginPathUtils
 	 * @return True when path equals root or is below it.
 	 */
 	[[nodiscard]] bool    pathIsWithinOrEqualTo(const QString &path, const QString &root);
+	/**
+	 * @brief Tests whether one canonical native path equals or resides below another canonical native path.
+	 * @param path Canonical native path to test.
+	 * @param root Canonical native root directory.
+	 * @return True when path equals root or is below it according to platform path case rules.
+	 */
+	[[nodiscard]] bool    canonicalPathIsWithinOrEqualTo(const QString &path, const QString &root);
 } // namespace QMudPluginPathUtils
 
 #endif // QMUD_PLUGINPATHUTILS_H

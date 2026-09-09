@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Panagiotis Kalogiratos (Nodens)
  *
  * File: PluginPathUtils.cpp
- * Role: Path normalization and containment helpers for legacy plugin file APIs.
+ * Role: Path normalization for plugin file APIs and shared QMud-home containment policy.
  */
 
 #include "PluginPathUtils.h"
@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QUrl>
+#include <algorithm>
 #include <array>
 #include <utility>
 
@@ -20,24 +21,17 @@ namespace
 	{
 		static constexpr std::array<const char *, 8> kPortableRoots = {"worlds", "lua",   "logs",   "plugins",
 		                                                               "sounds", "state", "backup", "docs"};
-		for (const char *root : kPortableRoots)
-		{
-			if (segment.compare(QLatin1String(root), Qt::CaseInsensitive) == 0)
-				return true;
-		}
-		return false;
+		return std::ranges::any_of(
+		    kPortableRoots, [&segment](const char *root)
+		    { return segment.compare(QLatin1String(root), Qt::CaseInsensitive) == 0; });
 	}
 
 	bool containsParentTraversal(QString path)
 	{
 		path                       = QMudPluginPathUtils::normalizeSeparators(std::move(path));
 		const QStringList segments = path.split(QLatin1Char('/'), Qt::SkipEmptyParts);
-		for (const QString &segment : segments)
-		{
-			if (segment == QLatin1String(".."))
-				return true;
-		}
-		return false;
+		return std::ranges::any_of(segments,
+		                           [](const QString &segment) { return segment == QLatin1String(".."); });
 	}
 
 	bool isAbsolutePathLike(const QString &path)
@@ -149,32 +143,34 @@ QString QMudPluginPathUtils::legacyPathRelativeToQmudHome(QString path)
 
 bool QMudPluginPathUtils::pathIsWithinOrEqualTo(const QString &path, const QString &root)
 {
-	QString directPath = normalizeSeparators(path);
-	QString directRoot = normalizeSeparators(root);
-	if (directRoot.endsWith(QLatin1Char('/')))
-		directRoot.chop(1);
-	if (directRoot.isEmpty())
+	const QString normalizedRootText = normalizeSeparators(root);
+	if (normalizedRootText.isEmpty())
 		return false;
-#ifdef Q_OS_WIN
-	if (directPath.compare(directRoot, Qt::CaseInsensitive) == 0 ||
-	    directPath.startsWith(directRoot + QLatin1Char('/'), Qt::CaseInsensitive))
-		return true;
-#else
-	if (directPath == directRoot || directPath.startsWith(directRoot + QLatin1Char('/')))
-		return true;
-#endif
-
 	const QString normalizedPath = QDir::cleanPath(normalizeSeparators(path));
-	QString       normalizedRoot = QDir::cleanPath(normalizeSeparators(root));
-	if (normalizedRoot.endsWith(QLatin1Char('/')))
-		normalizedRoot.chop(1);
-	if (normalizedRoot.isEmpty())
+	const QString normalizedRoot = QDir::cleanPath(normalizedRootText);
+	return canonicalPathIsWithinOrEqualTo(normalizedPath, normalizedRoot);
+}
+
+bool QMudPluginPathUtils::canonicalPathIsWithinOrEqualTo(const QString &path, const QString &root)
+{
+	if (path.isEmpty() || root.isEmpty())
 		return false;
+
+	const QString nativePath = QDir::fromNativeSeparators(path);
+	QString       nativeRoot = QDir::fromNativeSeparators(root);
+	while (nativeRoot.size() > 1 && nativeRoot.endsWith(QLatin1Char('/')) &&
+	       !(nativeRoot.size() == 3 && nativeRoot.at(1) == QLatin1Char(':')))
+	{
+		nativeRoot.chop(1);
+	}
+	QString childPrefix = nativeRoot;
+	if (!childPrefix.endsWith(QLatin1Char('/')))
+		childPrefix.append(QLatin1Char('/'));
 #ifdef Q_OS_WIN
-	return normalizedPath.compare(normalizedRoot, Qt::CaseInsensitive) == 0 ||
-	       normalizedPath.startsWith(normalizedRoot + QLatin1Char('/'), Qt::CaseInsensitive);
+	return nativePath.compare(nativeRoot, Qt::CaseInsensitive) == 0 ||
+	       nativePath.startsWith(childPrefix, Qt::CaseInsensitive);
 #else
-	return normalizedPath == normalizedRoot || normalizedPath.startsWith(normalizedRoot + QLatin1Char('/'));
+	return nativePath == nativeRoot || nativePath.startsWith(childPrefix);
 #endif
 }
 
