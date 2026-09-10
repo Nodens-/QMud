@@ -4411,17 +4411,25 @@ bool AppController::recoverReloadStartupState()
 				m_mainWindow->activateWorldSlot(1);
 		}
 
-		qInfo() << kReloadLogTag << "Recovery summary:"
-		        << "opened=" << asyncContext->openedCount << "reattached=" << asyncContext->reattachedCount
-		        << "reconnect_queued=" << asyncContext->reconnectCount
-		        << "open_failures=" << asyncContext->openFailures
-		        << "adopt_failures=" << asyncContext->adoptFailures;
+		if (asyncContext->verboseReloadLogs)
+		{
+			qInfo() << kReloadLogTag << "Recovery summary:"
+			        << "opened=" << asyncContext->openedCount
+			        << "reattached=" << asyncContext->reattachedCount
+			        << "reconnect_queued=" << asyncContext->reconnectCount
+			        << "open_failures=" << asyncContext->openFailures
+			        << "adopt_failures=" << asyncContext->adoptFailures;
+		}
 		m_reloadRecoveryReattached += asyncContext->reattachedCount;
 		m_reloadRecoveryReconnectQueued += asyncContext->reconnectCount;
-		qInfo() << kReloadLogTag << "Counters:"
-		        << "attempts=" << m_reloadAttempts << "exec_failures=" << m_reloadExecFailures
-		        << "recoveries=" << m_reloadRecoveryRuns << "reattached_total=" << m_reloadRecoveryReattached
-		        << "reconnect_queued_total=" << m_reloadRecoveryReconnectQueued;
+		if (asyncContext->verboseReloadLogs)
+		{
+			qInfo() << kReloadLogTag << "Counters:"
+			        << "attempts=" << m_reloadAttempts << "exec_failures=" << m_reloadExecFailures
+			        << "recoveries=" << m_reloadRecoveryRuns
+			        << "reattached_total=" << m_reloadRecoveryReattached
+			        << "reconnect_queued_total=" << m_reloadRecoveryReconnectQueued;
+		}
 		if (m_mainWindow)
 		{
 			m_mainWindow->releaseStatusMessageOverride(m_reloadRecoveryStatusOverrideToken);
@@ -14505,9 +14513,12 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 		return;
 	}
 
-	qInfo() << kReloadLogTag << "Preparing reload handoff. attempt=" << m_reloadAttempts
-	        << "exec_failures=" << m_reloadExecFailures << "recoveries=" << m_reloadRecoveryRuns
-	        << "mccp_disable_timeout_ms=" << mccpDisableTimeoutMs;
+	if (verboseReloadLogs)
+	{
+		qInfo() << kReloadLogTag << "Preparing reload handoff. attempt=" << m_reloadAttempts
+		        << "exec_failures=" << m_reloadExecFailures << "recoveries=" << m_reloadRecoveryRuns
+		        << "mccp_disable_timeout_ms=" << mccpDisableTimeoutMs;
+	}
 
 	QVector<int> inheritableDescriptors;
 	bool         snapshotWritten    = false;
@@ -14815,10 +14826,13 @@ void AppController::handleReloadQmud(const bool persistRuntimePreferences)
 	}
 	for (qsizetype idx = droppedWorldIndices.size(); idx > 0; --idx)
 		snapshot.worlds.removeAt(droppedWorldIndices.at(idx - 1));
-	qInfo() << kReloadLogTag << "Plan summary:"
-	        << "worlds=" << snapshot.worlds.size() << "connected=" << connectedWorlds
-	        << "reattach=" << reattachWorlds << "reconnect=" << reconnectWorlds
-	        << "fallbacks=" << mccpFallbacks;
+	if (verboseReloadLogs)
+	{
+		qInfo() << kReloadLogTag << "Plan summary:"
+		        << "worlds=" << snapshot.worlds.size() << "connected=" << connectedWorlds
+		        << "reattach=" << reattachWorlds << "reconnect=" << reconnectWorlds
+		        << "fallbacks=" << mccpFallbacks;
+	}
 	if (mccpFallbacks > 0)
 	{
 		if (verboseReloadLogs)
