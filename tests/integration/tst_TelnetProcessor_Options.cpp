@@ -10,6 +10,47 @@
 
 #include <QtTest/QTest>
 
+#include <array>
+
+/**
+ * @brief Provides deterministic access to TelnetProcessor's monotonic renegotiation limiter.
+ */
+class TelnetProcessorTestAccess
+{
+	public:
+		enum class Disposition
+		{
+			Proceed,
+			SettleAndSuppress,
+			Suppress
+		};
+
+		/**
+		 * @brief Records one negotiation attempt at a supplied monotonic timestamp.
+		 * @param processor Processor whose limiter is exercised.
+		 * @param serverOption Selects WILL/WONT direction when `true`, DO/DONT otherwise.
+		 * @param option Telnet option code.
+		 * @param nowMilliseconds Monotonic timestamp to record.
+		 * @return Public test representation of the limiter decision.
+		 */
+		static Disposition record(TelnetProcessor &processor, const bool serverOption,
+		                          const unsigned char option, const qint64 nowMilliseconds)
+		{
+			const auto direction = serverOption ? TelnetProcessor::NegotiationDirection::ServerOption
+			                                    : TelnetProcessor::NegotiationDirection::ClientOption;
+			switch (processor.recordNegotiationAttempt(direction, option, nowMilliseconds))
+			{
+			case TelnetProcessor::NegotiationDisposition::Proceed:
+				return Disposition::Proceed;
+			case TelnetProcessor::NegotiationDisposition::SettleAndSuppress:
+				return Disposition::SettleAndSuppress;
+			case TelnetProcessor::NegotiationDisposition::Suppress:
+				return Disposition::Suppress;
+			}
+			Q_UNREACHABLE_RETURN(Disposition::Proceed);
+		}
+};
+
 namespace
 {
 	constexpr unsigned char IAC                  = 0xFF;
@@ -50,9 +91,8 @@ namespace
 	{
 			Q_OBJECT
 
-			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
-			void queueInitialNegotiationIsIdempotent()
+			static void queueInitialNegotiationIsIdempotent()
 			{
 				TelnetProcessor processor;
 				processor.queueInitialNegotiation(true, true);
@@ -62,7 +102,7 @@ namespace
 				QVERIFY(processor.takeOutboundData().isEmpty());
 			}
 
-			void repeatedSgaNegotiationRemainsEnabledByDefault()
+			static void repeatedSgaNegotiationRemainsEnabledByDefault()
 			{
 				TelnetProcessor processor;
 
@@ -73,7 +113,7 @@ namespace
 				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
 			}
 
-			void repeatedSgaNegotiationCanBeSuppressedWhenConfigured()
+			static void repeatedSgaNegotiationCanBeSuppressedWhenConfigured()
 			{
 				TelnetProcessor processor;
 				processor.setNegotiateOptionsOnce(true);
@@ -91,21 +131,140 @@ namespace
 				QVERIFY(processor.takeOutboundData().isEmpty());
 			}
 
-			void queueEnableCompression2NegotiationSendsDoCompress2()
+			static void automaticProtectionOverridesManualNegotiateOnceMode()
+			{
+				TelnetProcessor processor;
+				processor.setNegotiateOptionsOnce(true);
+				processor.setAutomaticRenegotiationLoopProtection(true);
+
+				processor.processBytes(bytes({IAC, WILL, SGA}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
+				processor.processBytes(bytes({IAC, WILL, SGA}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
+
+				processor.setAutomaticRenegotiationLoopProtection(false);
+				processor.processBytes(bytes({IAC, WILL, SGA}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
+				processor.processBytes(bytes({IAC, WILL, SGA}));
+				QVERIFY(processor.takeOutboundData().isEmpty());
+			}
+
+			static void automaticProtectionSettlesThenSuppressesNegotiationReplies()
+			{
+				TelnetProcessor            processor;
+				QList<bool>                noEchoStates;
+				TelnetProcessor::Callbacks callbacks;
+				callbacks.onNoEchoChanged = [&noEchoStates](const bool enabled)
+				{ noEchoStates.append(enabled); };
+				processor.setCallbacks(callbacks);
+				processor.setAutomaticRenegotiationLoopProtection(true);
+
+				for (int attempt = 0; attempt < 9; ++attempt)
+				{
+					const unsigned char command = attempt % 2 == 0 ? WILL : WONT;
+					processor.processBytes(bytes({IAC, command, TELOPT_ECHO}));
+					QCOMPARE(processor.takeOutboundData(),
+					         bytes({IAC, command == WILL ? DO : DONT, TELOPT_ECHO}));
+				}
+
+				processor.processBytes(bytes({IAC, WONT, TELOPT_ECHO}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_ECHO}));
+				QVERIFY(noEchoStates.constLast());
+
+				processor.processBytes(bytes({IAC, DO, SGA}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, SGA}));
+				processor.processBytes(bytes({IAC, WONT, TELOPT_ECHO}));
+				QVERIFY(processor.takeOutboundData().isEmpty());
+				QCOMPARE(processor.processBytes(QByteArrayLiteral("ordinary text")),
+				         QByteArrayLiteral("ordinary text"));
+
+				processor.resetConnectionState();
+				processor.processBytes(bytes({IAC, DO, SGA}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, SGA}));
+			}
+
+			static void automaticProtectionUsesRollingWindowAndFiniteCooldown()
+			{
+				using Disposition = TelnetProcessorTestAccess::Disposition;
+
+				TelnetProcessor processor;
+				processor.setAutomaticRenegotiationLoopProtection(true);
+				for (int attempt = 0; attempt < 9; ++attempt)
+				{
+					QCOMPARE(TelnetProcessorTestAccess::record(processor, true, TELOPT_ECHO, 0),
+					         Disposition::Proceed);
+				}
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, true, TELOPT_ECHO, 60'001),
+				         Disposition::Proceed);
+
+				processor.setAutomaticRenegotiationLoopProtection(false);
+				processor.setAutomaticRenegotiationLoopProtection(true);
+				for (int attempt = 0; attempt < 9; ++attempt)
+				{
+					QCOMPARE(TelnetProcessorTestAccess::record(processor, true, TELOPT_ECHO, attempt),
+					         Disposition::Proceed);
+				}
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, true, TELOPT_ECHO, 9),
+				         Disposition::SettleAndSuppress);
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, true, TELOPT_ECHO, 10'008),
+				         Disposition::Suppress);
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, true, TELOPT_ECHO, 10'009),
+				         Disposition::Proceed);
+			}
+
+			static void automaticProtectionTracksEachOptionAndDirectionSeparately()
+			{
+				using Disposition = TelnetProcessorTestAccess::Disposition;
+
+				TelnetProcessor processor;
+				processor.setAutomaticRenegotiationLoopProtection(true);
+				for (int attempt = 0; attempt < 9; ++attempt)
+				{
+					QCOMPARE(TelnetProcessorTestAccess::record(processor, true, TELOPT_ECHO, attempt),
+					         Disposition::Proceed);
+					QCOMPARE(TelnetProcessorTestAccess::record(processor, false, TELOPT_ECHO, attempt),
+					         Disposition::Proceed);
+					QCOMPARE(TelnetProcessorTestAccess::record(processor, true, SGA, attempt),
+					         Disposition::Proceed);
+				}
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, false, TELOPT_ECHO, 9),
+				         Disposition::SettleAndSuppress);
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, true, TELOPT_ECHO, 10),
+				         Disposition::SettleAndSuppress);
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, true, SGA, 11),
+				         Disposition::SettleAndSuppress);
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, true, TELOPT_CHARSET, 12),
+				         Disposition::Proceed);
+
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, false, TELOPT_ECHO, 10'008),
+				         Disposition::Suppress);
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, false, TELOPT_ECHO, 10'009),
+				         Disposition::Proceed);
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, true, TELOPT_ECHO, 10'009),
+				         Disposition::Suppress);
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, true, TELOPT_ECHO, 10'010),
+				         Disposition::Proceed);
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, true, SGA, 10'010),
+				         Disposition::Suppress);
+				QCOMPARE(TelnetProcessorTestAccess::record(processor, true, SGA, 10'011),
+				         Disposition::Proceed);
+			}
+
+			static void queueEnableCompression2NegotiationSendsDoCompress2()
 			{
 				TelnetProcessor processor;
 				processor.queueEnableCompression2Negotiation();
 				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_COMPRESS2}));
 			}
 
-			void queueDisableCompressionNegotiationDefaultsToCompress2()
+			static void queueDisableCompressionNegotiationDefaultsToCompress2()
 			{
 				TelnetProcessor processor;
 				processor.queueDisableCompressionNegotiation();
 				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_COMPRESS2}));
 			}
 
-			void echoNegotiationCallbacksAndReplies()
+			static void echoNegotiationCallbacksAndReplies()
 			{
 				TelnetProcessor            processor;
 				QList<bool>                noEchoStates;
@@ -123,7 +282,7 @@ namespace
 				QCOMPARE(noEchoStates, QList<bool>({true, false}));
 			}
 
-			void noEchoOffRejectsEchoNegotiation()
+			static void noEchoOffRejectsEchoNegotiation()
 			{
 				TelnetProcessor            processor;
 				bool                       callbackFired = false;
@@ -138,7 +297,7 @@ namespace
 				QVERIFY(!callbackFired);
 			}
 
-			void noEchoStaysEnabledAcrossIncomingData()
+			static void noEchoStaysEnabledAcrossIncomingData()
 			{
 				TelnetProcessor            processor;
 				QList<bool>                noEchoStates;
@@ -160,7 +319,7 @@ namespace
 				QCOMPARE(noEchoStates, QList<bool>({true, false}));
 			}
 
-			void resetConnectionStateClearsNoEchoOnce()
+			static void resetConnectionStateClearsNoEchoOnce()
 			{
 				TelnetProcessor            processor;
 				QList<bool>                noEchoStates;
@@ -180,7 +339,7 @@ namespace
 				QCOMPARE(noEchoStates, QList<bool>({true, false}));
 			}
 
-			void doNawsSendsWillAndWindowSizeWhenEnabled()
+			static void doNawsSendsWillAndWindowSizeWhenEnabled()
 			{
 				TelnetProcessor processor;
 				processor.setNawsEnabled(true);
@@ -193,7 +352,7 @@ namespace
 				QVERIFY(processor.isNawsNegotiated());
 			}
 
-			void doNawsEscapesIacBytesInWindowSizePayload()
+			static void doNawsEscapesIacBytesInWindowSizePayload()
 			{
 				TelnetProcessor processor;
 				processor.setNawsEnabled(true);
@@ -204,7 +363,7 @@ namespace
 				                                              0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, IAC, SE}));
 			}
 
-			void doNawsSendsWontWhenDisabled()
+			static void doNawsSendsWontWhenDisabled()
 			{
 				TelnetProcessor processor;
 				processor.setNawsEnabled(false);
@@ -215,7 +374,7 @@ namespace
 				QVERIFY(!processor.isNawsNegotiated());
 			}
 
-			void doNawsSendsUpdatedWindowSizeAfterNegotiation()
+			static void doNawsSendsUpdatedWindowSizeAfterNegotiation()
 			{
 				TelnetProcessor processor;
 				processor.setNawsEnabled(true);
@@ -233,7 +392,7 @@ namespace
 				QVERIFY(processor.takeOutboundData().isEmpty());
 			}
 
-			void nawsNegotiationStateClearsOnDontWontAndReset()
+			static void nawsNegotiationStateClearsOnDontWontAndReset()
 			{
 				TelnetProcessor processor;
 				processor.setNawsEnabled(true);
@@ -267,7 +426,7 @@ namespace
 				QVERIFY(!processor.isNawsNegotiated());
 			}
 
-			void disablingNawsAfterNegotiationSendsWontAndClearsNegotiatedState()
+			static void disablingNawsAfterNegotiationSendsWontAndClearsNegotiatedState()
 			{
 				TelnetProcessor processor;
 				processor.setNawsEnabled(true);
@@ -286,7 +445,7 @@ namespace
 				QVERIFY(processor.takeOutboundData().isEmpty());
 			}
 
-			void terminalTypeRequestReturnsConfiguredName()
+			static void terminalTypeRequestReturnsConfiguredName()
 			{
 				TelnetProcessor processor;
 				processor.setTerminalIdentification(QStringLiteral("QMudTerm"));
@@ -299,7 +458,7 @@ namespace
 				                                              'M', 'u', 'd', 'T', 'e', 'r', 'm', IAC, SE}));
 			}
 
-			void charsetRequestAcceptedAndRejected()
+			static void charsetRequestAcceptedAndRejected()
 			{
 				TelnetProcessor processor;
 				processor.setUseUtf8(true);
@@ -334,7 +493,7 @@ namespace
 				         bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REJECTED, IAC, SE}));
 			}
 
-			void startTlsNegotiationQueuesDoAndRequestsUpgradeOnWill()
+			static void startTlsNegotiationQueuesDoAndRequestsUpgradeOnWill()
 			{
 				TelnetProcessor processor;
 				processor.setStartTlsEnabled(true);
@@ -348,7 +507,7 @@ namespace
 				QVERIFY(!processor.takeStartTlsUpgradeRequest());
 			}
 
-			void startTlsFollowsSubnegotiationRequestsUpgrade()
+			static void startTlsFollowsSubnegotiationRequestsUpgrade()
 			{
 				TelnetProcessor processor;
 				processor.setStartTlsEnabled(true);
@@ -361,7 +520,7 @@ namespace
 				QVERIFY(!processor.takeStartTlsUpgradeRequest());
 			}
 
-			void startTlsRejectionIsReported()
+			static void startTlsRejectionIsReported()
 			{
 				TelnetProcessor processor;
 				processor.setStartTlsEnabled(true);
@@ -374,7 +533,7 @@ namespace
 				QVERIFY(!processor.takeStartTlsUpgradeRequest());
 			}
 
-			void gaCanConvertToNewline()
+			static void gaCanConvertToNewline()
 			{
 				TelnetProcessor            processor;
 				int                        gaCount = 0;
@@ -388,7 +547,40 @@ namespace
 				QCOMPARE(output, QByteArray("\n"));
 				QCOMPARE(gaCount, 1);
 			}
-			// NOLINTEND(readability-convert-member-functions-to-static)
+
+		public:
+			/** @brief Keeps every Qt test entry point source-visible to static analysis. */
+			tst_TelnetProcessor_Options()
+			{
+				constexpr std::array testFunctions = {
+				    &queueInitialNegotiationIsIdempotent,
+				    &repeatedSgaNegotiationRemainsEnabledByDefault,
+				    &repeatedSgaNegotiationCanBeSuppressedWhenConfigured,
+				    &automaticProtectionOverridesManualNegotiateOnceMode,
+				    &automaticProtectionSettlesThenSuppressesNegotiationReplies,
+				    &automaticProtectionUsesRollingWindowAndFiniteCooldown,
+				    &automaticProtectionTracksEachOptionAndDirectionSeparately,
+				    &queueEnableCompression2NegotiationSendsDoCompress2,
+				    &queueDisableCompressionNegotiationDefaultsToCompress2,
+				    &echoNegotiationCallbacksAndReplies,
+				    &noEchoOffRejectsEchoNegotiation,
+				    &noEchoStaysEnabledAcrossIncomingData,
+				    &resetConnectionStateClearsNoEchoOnce,
+				    &doNawsSendsWillAndWindowSizeWhenEnabled,
+				    &doNawsEscapesIacBytesInWindowSizePayload,
+				    &doNawsSendsWontWhenDisabled,
+				    &doNawsSendsUpdatedWindowSizeAfterNegotiation,
+				    &nawsNegotiationStateClearsOnDontWontAndReset,
+				    &disablingNawsAfterNegotiationSendsWontAndClearsNegotiatedState,
+				    &terminalTypeRequestReturnsConfiguredName,
+				    &charsetRequestAcceptedAndRejected,
+				    &startTlsNegotiationQueuesDoAndRequestsUpgradeOnWill,
+				    &startTlsFollowsSubnegotiationRequestsUpgrade,
+				    &startTlsRejectionIsReported,
+				    &gaCanConvertToNewline,
+				};
+				static_assert(testFunctions.size() == 25);
+			}
 	};
 
 } // namespace

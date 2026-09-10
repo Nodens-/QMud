@@ -16,6 +16,7 @@
 #include "WorldOptions.h"
 
 #include <QByteArray>
+#include <QElapsedTimer>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QList>
 #include <QMap>
@@ -141,6 +142,11 @@ class TelnetProcessor
 		 * negotiated option are ignored.
 		 */
 		void       setNegotiateOptionsOnce(bool enabled);
+		/**
+		 * @brief Enables or disables automatic protection from telnet option renegotiation loops.
+		 * @param enabled Enable rate-based renegotiation suppression when `true`.
+		 */
+		void       setAutomaticRenegotiationLoopProtection(bool enabled);
 		/**
 		 * @brief Updates terminal size values used for NAWS replies.
 		 * @param columns Terminal width in columns.
@@ -477,6 +483,8 @@ class TelnetProcessor
 		void                          setMxpSessionState(const MxpSessionState &state);
 
 	private:
+		friend class TelnetProcessorTestAccess;
+
 		enum Phase
 		{
 			NONE,
@@ -492,6 +500,17 @@ class TelnetProcessor
 			HAVE_SUBNEGOTIATION_IAC,
 			HAVE_COMPRESS,
 			HAVE_COMPRESS_WILL
+		};
+		enum class NegotiationDirection
+		{
+			ServerOption,
+			ClientOption
+		};
+		enum class NegotiationDisposition
+		{
+			Proceed,
+			SettleAndSuppress,
+			Suppress
 		};
 
 		/**
@@ -566,101 +585,132 @@ class TelnetProcessor
 		 * @brief Applies MXP mode side effects required before diagnostic callbacks.
 		 * @param level MXP diagnostic level.
 		 */
-		void               restoreMxpModeForDiagnosticLevel(int level);
+		void                   restoreMxpModeForDiagnosticLevel(int level);
 		/**
 		 * @brief Parses one MXP definition command.
 		 * @param definition Definition payload bytes.
 		 */
-		void               mxpDefinition(QByteArray definition);
+		void                   mxpDefinition(QByteArray definition);
 		/**
 		 * @brief Parses one MXP element declaration.
 		 * @param name Element name.
 		 * @param tagRemainder Remaining declaration bytes.
 		 */
-		void               mxpElement(const QByteArray &name, const QByteArray &tagRemainder);
+		void                   mxpElement(const QByteArray &name, const QByteArray &tagRemainder);
 		/**
 		 * @brief Parses one MXP ATTLIST declaration.
 		 * @param name Element name.
 		 * @param tagRemainder Remaining declaration bytes.
 		 */
-		void               mxpAttlist(const QByteArray &name, const QByteArray &tagRemainder);
+		void                   mxpAttlist(const QByteArray &name, const QByteArray &tagRemainder);
 		/**
 		 * @brief Parses one MXP entity declaration.
 		 * @param name Entity name.
 		 * @param tagRemainder Remaining declaration bytes.
 		 */
-		void               mxpEntity(const QByteArray &name, const QByteArray &tagRemainder);
+		void                   mxpEntity(const QByteArray &name, const QByteArray &tagRemainder);
 		/**
 		 * @brief Enters MXP mode and dispatches start callback.
 		 * @param pueblo Activate pueblo mode when `true`.
 		 * @param manual Mark as manual activation when `true`.
 		 */
-		void               mxpOn(bool pueblo, bool manual);
+		void                   mxpOn(bool pueblo, bool manual);
 		/**
 		 * @brief Exits MXP mode and dispatches stop callback.
 		 * @param completely Stop completely when `true`.
 		 */
-		void               mxpOff(bool completely);
+		void                   mxpOff(bool completely);
 		/**
 		 * @brief Applies MXP mode transition and notifies callback.
 		 * @param newMode Target MXP mode.
 		 */
-		void               mxpModeChange(int newMode);
+		void                   mxpModeChange(int newMode);
 		/**
 		 * @brief Restores MXP mode after temporary changes.
 		 */
-		void               mxpRestoreMode();
+		void                   mxpRestoreMode();
 		/**
 		 * @brief Reports whether current MXP mode is open.
 		 * @return `true` when current mode is open.
 		 */
-		[[nodiscard]] bool mxpOpen() const;
+		[[nodiscard]] bool     mxpOpen() const;
 		/**
 		 * @brief Reports whether current MXP mode is secure.
 		 * @return `true` when current mode is secure.
 		 */
-		[[nodiscard]] bool mxpSecure() const;
+		[[nodiscard]] bool     mxpSecure() const;
 		/**
 		 * @brief Queues IAC DO option negotiation command.
 		 * @param option Telnet option code.
 		 */
-		void               sendIacDo(unsigned char option);
+		void                   sendIacDo(unsigned char option);
 		/**
 		 * @brief Queues IAC DONT option negotiation command.
 		 * @param option Telnet option code.
 		 */
-		void               sendIacDont(unsigned char option);
+		void                   sendIacDont(unsigned char option);
 		/**
 		 * @brief Queues IAC WILL option negotiation command.
 		 * @param option Telnet option code.
 		 */
-		void               sendIacWill(unsigned char option);
+		void                   sendIacWill(unsigned char option);
 		/**
 		 * @brief Queues IAC WONT option negotiation command.
 		 * @param option Telnet option code.
 		 */
-		void               sendIacWont(unsigned char option);
+		void                   sendIacWont(unsigned char option);
 		/**
 		 * @brief Sends START-TLS FOLLOWS subnegotiation.
 		 */
-		void               sendStartTlsFollows();
+		void                   sendStartTlsFollows();
 		/**
 		 * @brief Sends CHARSET ACCEPTED subnegotiation.
 		 * @param charset Accepted charset name.
 		 */
-		void               sendCharsetAccepted(const QByteArray &charset);
+		void                   sendCharsetAccepted(const QByteArray &charset);
 		/**
 		 * @brief Sends CHARSET REJECTED subnegotiation.
 		 */
-		void               sendCharsetRejected();
+		void                   sendCharsetRejected();
 		/**
 		 * @brief Sends terminal type response subnegotiation.
 		 */
-		void               sendTerminalType();
+		void                   sendTerminalType();
 		/**
 		 * @brief Sends current NAWS window size.
 		 */
-		void               sendWindowSize();
+		void                   sendWindowSize();
+		/**
+		 * @brief Applies the configured response and state changes for IAC WILL.
+		 * @param option Telnet option code.
+		 */
+		void                   handleWill(unsigned char option);
+		/**
+		 * @brief Applies the response and state changes for IAC WONT.
+		 * @param option Telnet option code.
+		 */
+		void                   handleWont(unsigned char option);
+		/**
+		 * @brief Applies the configured response and state changes for IAC DO.
+		 * @param option Telnet option code.
+		 */
+		void                   handleDo(unsigned char option);
+		/**
+		 * @brief Applies the response and state changes for IAC DONT.
+		 * @param option Telnet option code.
+		 */
+		void                   handleDont(unsigned char option);
+		/**
+		 * @brief Records one option negotiation and determines whether replies should continue.
+		 * @param direction Negotiated side of the connection.
+		 * @param option Telnet option code.
+		 * @param nowMilliseconds Monotonic session timestamp.
+		 * @return Action to take for this negotiation event.
+		 */
+		NegotiationDisposition recordNegotiationAttempt(NegotiationDirection direction, unsigned char option,
+		                                                qint64 nowMilliseconds);
+		/** @brief Clears rolling negotiation histories and active suppression intervals. */
+		void                   resetRenegotiationLoopProtection();
 		/**
 		 * @brief Records a plugin-visible telnet event at the current output position.
 		 * @param type Plugin event type.
@@ -797,6 +847,11 @@ class TelnetProcessor
 		bool                            m_negotiateOptionsOnce{false};
 		std::array<bool, 256>           m_seenWillWontOption{};
 		std::array<bool, 256>           m_seenDoDontOption{};
+		bool                            m_automaticRenegotiationLoopProtection{false};
+		std::array<QList<qint64>, 512>  m_negotiationAttemptTimes;
+		std::array<qint64, 512>         m_negotiationSuppressionUntil{};
+		qint64                          m_lastNegotiationAttemptTime{-1};
+		QElapsedTimer                   m_negotiationClock;
 
 		struct ZStreamWrapper;
 		ZStreamWrapper *m_zlib{nullptr};

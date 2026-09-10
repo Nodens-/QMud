@@ -11,6 +11,8 @@
 #include <QMap>
 #include <QtTest/QTest>
 
+#include <array>
+
 namespace
 {
 	/**
@@ -20,9 +22,8 @@ namespace
 	{
 			Q_OBJECT
 
-			// NOLINTBEGIN(readability-convert-member-functions-to-static)
 		private slots:
-			void generateWorldUniqueIdFormat()
+			static void generateWorldUniqueIdFormat()
 			{
 				const QString            first  = QMudWorldOptionDefaults::generateWorldUniqueId();
 				const QString            second = QMudWorldOptionDefaults::generateWorldUniqueId();
@@ -33,7 +34,7 @@ namespace
 				QVERIFY(first != second);
 			}
 
-			void applyDefaultsPopulatesExpectedValues()
+			static void applyDefaultsPopulatesExpectedValues()
 			{
 				QMap<QString, QString> attrs;
 				QMap<QString, QString> multilineAttrs;
@@ -58,6 +59,9 @@ namespace
 				         QStringLiteral("y"));
 				QCOMPARE(attrs.value(QStringLiteral("tab_completion_excludes_symbol_suffix")),
 				         QStringLiteral("y"));
+				QCOMPARE(attrs.value(QStringLiteral(
+				             "automatically_protect_against_telnet_option_renegotiation_loops")),
+				         QStringLiteral("y"));
 				QCOMPARE(attrs.value(QStringLiteral("only_negotiate_telnet_options_once")),
 				         QStringLiteral("n"));
 				QCOMPARE(attrs.value(QStringLiteral("tls_disable_certificate_validation")),
@@ -67,7 +71,7 @@ namespace
 				QVERIFY(multilineAttrs.contains(QStringLiteral("notes")));
 			}
 
-			void applyDefaultsPreservesExistingValues()
+			static void applyDefaultsPreservesExistingValues()
 			{
 				QMap<QString, QString> attrs;
 				QMap<QString, QString> multilineAttrs;
@@ -81,7 +85,7 @@ namespace
 				QCOMPARE(multilineAttrs.value(QStringLiteral("notes")), QStringLiteral("keep me"));
 			}
 
-			void alphaOptionLookupAndTableSanity()
+			static void alphaOptionLookupAndTableSanity()
 			{
 				const WorldAlphaOption *opt =
 				    QMudWorldOptionDefaults::findWorldAlphaOption(QStringLiteral("  NAME "));
@@ -94,7 +98,19 @@ namespace
 				QVERIFY(count > 0);
 				QVERIFY(table[count].name == nullptr);
 			}
-			// NOLINTEND(readability-convert-member-functions-to-static)
+
+		public:
+			/** @brief Keeps every Qt test entry point source-visible to static analysis. */
+			tst_WorldOptionDefaults()
+			{
+				constexpr std::array testFunctions = {
+				    &generateWorldUniqueIdFormat,
+				    &applyDefaultsPopulatesExpectedValues,
+				    &applyDefaultsPreservesExistingValues,
+				    &alphaOptionLookupAndTableSanity,
+				};
+				static_assert(testFunctions.size() == 4);
+			}
 	};
 } // namespace
 

@@ -24,6 +24,7 @@
     {"confirm_before_replacing_typing", false}, {"confirm_on_paste", true}, {"confirm_on_send", true},
     {"connect_method", eNoAutoConnect, eNoAutoConnect, eConnectTypeMax - 1}, {"connect_delay", 0, 0, 10000},
     {"copy_selection_to_clipboard", false}, {"convert_ga_to_newline", true},
+    {"automatically_protect_against_telnet_option_renegotiation_loops", true},
     {"only_negotiate_telnet_options_once", false}, {"ctrl_n_goes_to_next_command", false},
     {"ctrl_p_goes_to_previous_command", false}, {"ctrl_z_goes_to_end_of_buffer", false},
     {"ctrl_backspace_deletes_last_word", false},

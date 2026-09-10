@@ -76,16 +76,19 @@ static constexpr unsigned char TELOPT_MXP           = 91;
 static constexpr unsigned char SGA                  = 3; // suppress go-ahead
 static constexpr unsigned char WILL_END_OF_RECORD   = 25;
 
-static constexpr unsigned char CHARSET_REQUEST          = 1;
-static constexpr unsigned char CHARSET_ACCEPTED         = 2;
-static constexpr unsigned char CHARSET_REJECTED         = 3;
-static constexpr unsigned char TTYPE_IS                 = 0;
-static constexpr unsigned char TTYPE_SEND               = 1;
-static constexpr unsigned char START_TLS_FOLLOWS        = 1;
-static constexpr int           MCCP_INFLATE_CHUNK_SIZE  = 8192;
-static constexpr int           kMaxMxpPendingBytes      = 8192;
-static constexpr int           kMaxMxpCustomDefinitions = 1024;
-static constexpr int           kMaxMxpAttlistBytes      = 16384;
+static constexpr unsigned char CHARSET_REQUEST                       = 1;
+static constexpr unsigned char CHARSET_ACCEPTED                      = 2;
+static constexpr unsigned char CHARSET_REJECTED                      = 3;
+static constexpr unsigned char TTYPE_IS                              = 0;
+static constexpr unsigned char TTYPE_SEND                            = 1;
+static constexpr unsigned char START_TLS_FOLLOWS                     = 1;
+static constexpr int           MCCP_INFLATE_CHUNK_SIZE               = 8192;
+static constexpr int           kMaxMxpPendingBytes                   = 8192;
+static constexpr int           kMaxMxpCustomDefinitions              = 1024;
+static constexpr int           kMaxMxpAttlistBytes                   = 16384;
+static constexpr qsizetype     kRenegotiationAttemptLimit            = 10;
+static constexpr qint64        kRenegotiationWindowMilliseconds      = 60'000;
+static constexpr qint64        kRenegotiationSuppressionMilliseconds = 10'000;
 
 namespace
 {
@@ -345,6 +348,8 @@ TelnetProcessor::TelnetProcessor()
 {
 	m_zlib               = new ZStreamWrapper;
 	m_legacyEncodingName = qmudDefaultLegacyWorldEncodingName();
+	resetRenegotiationLoopProtection();
+	m_negotiationClock.start();
 }
 
 void TelnetProcessor::setCallbacks(const Callbacks &callbacks)
@@ -418,6 +423,17 @@ void TelnetProcessor::setNegotiateOptionsOnce(const bool enabled)
 		return;
 
 	m_negotiateOptionsOnce = enabled;
+	m_seenWillWontOption.fill(false);
+	m_seenDoDontOption.fill(false);
+}
+
+void TelnetProcessor::setAutomaticRenegotiationLoopProtection(const bool enabled)
+{
+	if (m_automaticRenegotiationLoopProtection == enabled)
+		return;
+
+	m_automaticRenegotiationLoopProtection = enabled;
+	resetRenegotiationLoopProtection();
 	m_seenWillWontOption.fill(false);
 	m_seenDoDontOption.fill(false);
 }
@@ -553,6 +569,8 @@ void TelnetProcessor::resetConnectionState()
 	m_requestedEor                = false;
 	m_seenWillWontOption.fill(false);
 	m_seenDoDontOption.fill(false);
+	resetRenegotiationLoopProtection();
+	m_negotiationClock.restart();
 	m_noEcho = false;
 	if (hadNoEcho && m_callbacks.onNoEchoChanged)
 		m_callbacks.onNoEchoChanged(false);
@@ -571,6 +589,288 @@ void TelnetProcessor::queueInitialNegotiation(const bool requestSga, const bool 
 	{
 		sendIacDo(WILL_END_OF_RECORD);
 		m_requestedEor = true;
+	}
+}
+
+void TelnetProcessor::resetRenegotiationLoopProtection()
+{
+	for (QList<qint64> &attempts : m_negotiationAttemptTimes)
+		attempts.clear();
+	m_negotiationSuppressionUntil.fill(-1);
+	m_lastNegotiationAttemptTime = -1;
+}
+
+TelnetProcessor::NegotiationDisposition
+TelnetProcessor::recordNegotiationAttempt(const NegotiationDirection direction, const unsigned char option,
+                                          const qint64 nowMilliseconds)
+{
+	if (!m_automaticRenegotiationLoopProtection)
+		return NegotiationDisposition::Proceed;
+
+	if (m_lastNegotiationAttemptTime >= 0 && nowMilliseconds < m_lastNegotiationAttemptTime)
+		resetRenegotiationLoopProtection();
+	m_lastNegotiationAttemptTime = nowMilliseconds;
+
+	const qsizetype directionOffset  = direction == NegotiationDirection::ServerOption ? 0 : 256;
+	const auto      bucketIndex      = static_cast<size_t>(directionOffset + static_cast<qsizetype>(option));
+	QList<qint64>  &attempts         = m_negotiationAttemptTimes.at(bucketIndex);
+	qint64         &suppressionUntil = m_negotiationSuppressionUntil.at(bucketIndex);
+	if (suppressionUntil >= 0)
+	{
+		if (nowMilliseconds < suppressionUntil)
+			return NegotiationDisposition::Suppress;
+		attempts.clear();
+		suppressionUntil = -1;
+	}
+
+	while (!attempts.isEmpty() && nowMilliseconds - attempts.constFirst() > kRenegotiationWindowMilliseconds)
+	{
+		attempts.removeFirst();
+	}
+	attempts.append(nowMilliseconds);
+	if (attempts.size() < kRenegotiationAttemptLimit)
+		return NegotiationDisposition::Proceed;
+
+	attempts.clear();
+	suppressionUntil = nowMilliseconds + kRenegotiationSuppressionMilliseconds;
+	return NegotiationDisposition::SettleAndSuppress;
+}
+
+void TelnetProcessor::handleWill(const unsigned char option)
+{
+	switch (option)
+	{
+	case TELOPT_COMPRESS2:
+	case TELOPT_COMPRESS:
+		if (!m_disableCompression)
+		{
+			if (!(option == TELOPT_COMPRESS && m_supportsMccp2))
+			{
+				sendIacDo(option);
+				if (option == TELOPT_COMPRESS2)
+					m_supportsMccp2 = true;
+			}
+			else
+			{
+				sendIacDont(option);
+			}
+		}
+		else
+		{
+			sendIacDont(option);
+		}
+		break;
+
+	case SGA:
+	case TELOPT_MUD_SPECIFIC:
+		sendIacDo(option);
+		break;
+
+	case TELOPT_ECHO:
+		if (!m_noEchoOff)
+		{
+			m_noEcho = true;
+			if (m_callbacks.onNoEchoChanged)
+				m_callbacks.onNoEchoChanged(true);
+			sendIacDo(option);
+		}
+		else
+		{
+			sendIacDont(option);
+		}
+		break;
+
+	case TELOPT_START_TLS:
+		if (m_startTlsEnabled && !m_startTlsActive)
+		{
+			if (!m_startTlsDoSent)
+				sendIacDo(option);
+			m_startTlsDoSent = true;
+			if (!m_startTlsFollowsSent && !m_startTlsUpgradeInProgress)
+			{
+				sendStartTlsFollows();
+				m_startTlsFollowsSent       = true;
+				m_startTlsUpgradeRequested  = true;
+				m_startTlsUpgradeInProgress = true;
+			}
+		}
+		else
+		{
+			sendIacDont(option);
+		}
+		break;
+
+	case TELOPT_MXP:
+		if (m_useMxp == eNoMXP)
+		{
+			sendIacDont(option);
+		}
+		else
+		{
+			sendIacDo(option);
+			if (m_useMxp == eQueryMXP)
+				mxpOn(false, false);
+		}
+		break;
+
+	case WILL_END_OF_RECORD:
+		if (m_convertGAtoNewline)
+			sendIacDo(option);
+		else
+			sendIacDont(option);
+		break;
+
+	case TELOPT_CHARSET:
+		sendIacDo(option);
+		break;
+
+	default:
+		if (m_callbacks.onTelnetRequest && m_callbacks.onTelnetRequest(option, QStringLiteral("WILL")))
+		{
+			sendIacDo(option);
+			if (m_callbacks.onTelnetRequest)
+				m_callbacks.onTelnetRequest(option, QStringLiteral("SENT_DO"));
+		}
+		else
+		{
+			sendIacDont(option);
+		}
+		break;
+	}
+}
+
+void TelnetProcessor::handleWont(const unsigned char option)
+{
+	if (option == TELOPT_COMPRESS || option == TELOPT_COMPRESS2)
+	{
+		m_compress = false;
+		m_mccpType = 0;
+		m_compressInput.clear();
+		m_compressInputOffset = 0;
+		m_pendingCompressed.clear();
+		m_postCompressionRemainder.clear();
+	}
+	if (option == TELOPT_ECHO && !m_noEchoOff)
+	{
+		m_noEcho = false;
+		if (m_callbacks.onNoEchoChanged)
+			m_callbacks.onNoEchoChanged(false);
+	}
+	if (option == TELOPT_NAWS)
+		m_nawsWanted = false;
+	if (option == TELOPT_START_TLS)
+	{
+		if (m_startTlsEnabled && !m_startTlsActive)
+			m_startTlsNegotiationRejected = true;
+		m_startTlsDoSent            = false;
+		m_startTlsFollowsSent       = false;
+		m_startTlsUpgradeRequested  = false;
+		m_startTlsUpgradeInProgress = false;
+		m_startTlsActive            = false;
+	}
+	sendIacDont(option);
+}
+
+void TelnetProcessor::handleDo(const unsigned char option)
+{
+	switch (option)
+	{
+	case SGA:
+	case TELOPT_MUD_SPECIFIC:
+	case TELOPT_ECHO:
+	case TELOPT_CHARSET:
+		sendIacWill(option);
+		break;
+
+	case TELOPT_START_TLS:
+		if (m_startTlsEnabled && !m_startTlsActive)
+			sendIacWill(option);
+		else
+			sendIacWont(option);
+		break;
+
+	case TELOPT_TERMINAL_TYPE:
+		m_ttypeSequence = 0;
+		sendIacWill(option);
+		break;
+
+	case TELOPT_NAWS:
+		if (m_naws)
+		{
+			sendIacWill(option);
+			m_nawsWanted = true;
+			sendWindowSize();
+		}
+		else
+		{
+			sendIacWont(option);
+		}
+		break;
+
+	case TELOPT_MXP:
+		if (m_useMxp == eNoMXP)
+		{
+			sendIacWont(option);
+		}
+		else
+		{
+			sendIacWill(option);
+			if (m_useMxp == eQueryMXP)
+				mxpOn(false, false);
+		}
+		break;
+
+	default:
+		if (m_callbacks.onTelnetRequest && m_callbacks.onTelnetRequest(option, QStringLiteral("DO")))
+		{
+			sendIacWill(option);
+			if (m_callbacks.onTelnetRequest)
+				m_callbacks.onTelnetRequest(option, QStringLiteral("SENT_WILL"));
+		}
+		else
+		{
+			sendIacWont(option);
+		}
+		break;
+	}
+}
+
+void TelnetProcessor::handleDont(const unsigned char option)
+{
+	sendIacWont(option);
+	switch (option)
+	{
+	case TELOPT_COMPRESS2:
+	case TELOPT_COMPRESS:
+		m_compress = false;
+		m_mccpType = 0;
+		m_compressInput.clear();
+		m_compressInputOffset = 0;
+		m_pendingCompressed.clear();
+		m_postCompressionRemainder.clear();
+		break;
+
+	case TELOPT_MXP:
+		mxpOff(true);
+		break;
+
+	case TELOPT_TERMINAL_TYPE:
+		m_ttypeSequence = 0;
+		break;
+	case TELOPT_NAWS:
+		m_nawsWanted = false;
+		break;
+	case TELOPT_START_TLS:
+		if (m_startTlsEnabled && !m_startTlsActive)
+			m_startTlsNegotiationRejected = true;
+		m_startTlsDoSent            = false;
+		m_startTlsFollowsSent       = false;
+		m_startTlsUpgradeRequested  = false;
+		m_startTlsUpgradeInProgress = false;
+		m_startTlsActive            = false;
+		break;
+	default:
+		break;
 	}
 }
 
@@ -1723,295 +2023,47 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 			break;
 
 		case HAVE_WILL:
-			// WILL - we have IAC WILL x   - reply DO or DONT (generally based on client option settings)
-			// for unknown types we query plugins: function OnPluginTelnetRequest (num, type)
-			//    e.g. num = 200, type = WILL
-			// They reply true or false to handle or not handle that telnet type
-			//
-			// telnet negotiation : in response to WILL, we say DONT
-			// (except for compression, MXP, TERMINAL_TYPE and SGA), we *will* handle that)
-			if (m_negotiateOptionsOnce && m_seenWillWontOption[c])
-			{
-				m_phase = NONE;
-				break;
-			}
-			switch (c)
-			{
-			case TELOPT_COMPRESS2:
-			case TELOPT_COMPRESS:
-				// initialize compression library if not already decompressing
-				if (!m_disableCompression)
-				{
-					if (!(c == TELOPT_COMPRESS && m_supportsMccp2)) // don't agree to MCCP1 and MCCP2
-					{
-						sendIacDo(c);
-						if (c == TELOPT_COMPRESS2)
-							m_supportsMccp2 = true;
-					}
-					else
-					{
-						sendIacDont(c);
-					}
-				}
-				else
-				{
-					sendIacDont(c);
-				}
-				break; // end of TELOPT_COMPRESS
-
-			// here for SGA (Suppress GoAhead) and TELOPT_MUD_SPECIFIC
-			case SGA:
-			case TELOPT_MUD_SPECIFIC:
-				sendIacDo(c);
-				break;
-
-			case TELOPT_ECHO:
-				if (!m_noEchoOff)
-				{
-					m_noEcho = true;
-					if (m_callbacks.onNoEchoChanged)
-						m_callbacks.onNoEchoChanged(true);
-					sendIacDo(c);
-				}
-				else
-				{
-					sendIacDont(c);
-				}
-				break; // end of TELOPT_ECHO
-
-			case TELOPT_START_TLS:
-				if (m_startTlsEnabled && !m_startTlsActive)
-				{
-					if (!m_startTlsDoSent)
-						sendIacDo(c);
-					m_startTlsDoSent = true;
-					if (!m_startTlsFollowsSent && !m_startTlsUpgradeInProgress)
-					{
-						sendStartTlsFollows();
-						m_startTlsFollowsSent       = true;
-						m_startTlsUpgradeRequested  = true;
-						m_startTlsUpgradeInProgress = true;
-					}
-				}
-				else
-				{
-					sendIacDont(c);
-				}
-				break;
-
-			case TELOPT_MXP:
-				if (m_useMxp == eNoMXP)
-				{
-					sendIacDont(c);
-				} // end of no MXP wanted
-				else
-				{
-					sendIacDo(c);
-					if (m_useMxp == eQueryMXP)
-						mxpOn(false, false);
-				} // end of MXP wanted
-				break; // end of MXP
-
-			// here for EOR (End of record)
-			case WILL_END_OF_RECORD:
-				if (m_convertGAtoNewline)
-					sendIacDo(c);
-				else
-					sendIacDont(c);
-				break; // end of WILL_END_OF_RECORD
-
-			// character set negotiations
-			case TELOPT_CHARSET:
-				sendIacDo(c);
-				break;
-
-			default:
-				if (m_callbacks.onTelnetRequest && m_callbacks.onTelnetRequest(c, QStringLiteral("WILL")))
-				{
-					sendIacDo(c);
-					if (m_callbacks.onTelnetRequest)
-						m_callbacks.onTelnetRequest(c, QStringLiteral("SENT_DO"));
-				}
-				else
-				{
-					sendIacDont(c);
-				}
-				break; // end of others
-			} // end of switch
-			m_seenWillWontOption[c] = true;
-			m_phase                 = NONE;
-			break;
-
 		case HAVE_WONT:
-			// Received: IAC WONT x
-			//
-			// telnet negotiation : in response to WONT, we say DONT
-			if (m_negotiateOptionsOnce && m_seenWillWontOption[c])
+		{
+			const NegotiationDisposition disposition =
+			    recordNegotiationAttempt(NegotiationDirection::ServerOption, c, m_negotiationClock.elapsed());
+			if (disposition == NegotiationDisposition::Suppress ||
+			    (!m_automaticRenegotiationLoopProtection && m_negotiateOptionsOnce &&
+			     m_seenWillWontOption[c]))
 			{
 				m_phase = NONE;
 				break;
 			}
-			if (c == TELOPT_COMPRESS || c == TELOPT_COMPRESS2)
-			{
-				m_compress = false;
-				m_mccpType = 0;
-				m_compressInput.clear();
-				m_compressInputOffset = 0;
-				m_pendingCompressed.clear();
-				m_postCompressionRemainder.clear();
-			}
-			if (c == TELOPT_ECHO && !m_noEchoOff)
-			{
-				m_noEcho = false;
-				if (m_callbacks.onNoEchoChanged)
-					m_callbacks.onNoEchoChanged(false);
-			}
-			if (c == TELOPT_NAWS)
-				m_nawsWanted = false;
-			if (c == TELOPT_START_TLS)
-			{
-				if (m_startTlsEnabled && !m_startTlsActive)
-					m_startTlsNegotiationRejected = true;
-				m_startTlsDoSent            = false;
-				m_startTlsFollowsSent       = false;
-				m_startTlsUpgradeRequested  = false;
-				m_startTlsUpgradeInProgress = false;
-				m_startTlsActive            = false;
-			}
-			sendIacDont(c);
+
+			if (m_phase == HAVE_WILL || disposition == NegotiationDisposition::SettleAndSuppress)
+				handleWill(c);
+			else
+				handleWont(c);
 			m_seenWillWontOption[c] = true;
 			m_phase                 = NONE;
 			break;
+		}
 
 		case HAVE_DO:
-			// Received: IAC DO x
-			//
-			// for unknown types we query plugins: function OnPluginTelnetRequest (num, type)
-			//    e.g. num = 200, type = DO
-			// They reply true or false to handle or not handle that telnet type
-			//
-			// telnet negotiation : in response to DO, we say WILL for:
-			//  <102> (Aardwolf), SGA, echo, NAWS, CHARSET, MXP and Terminal type
-			// for others we query plugins to see if they want to handle it or not
-			if (m_negotiateOptionsOnce && m_seenDoDontOption[c])
-			{
-				m_phase = NONE;
-				break;
-			}
-			switch (c)
-			{
-			case SGA:
-			case TELOPT_MUD_SPECIFIC:
-			case TELOPT_ECHO:
-			case TELOPT_CHARSET:
-				sendIacWill(c);
-				break; // end of things we will do
-
-			case TELOPT_START_TLS:
-				if (m_startTlsEnabled && !m_startTlsActive)
-					sendIacWill(c);
-				else
-					sendIacWont(c);
-				break;
-
-			// for MTTS start back at sequence 0
-			case TELOPT_TERMINAL_TYPE:
-				m_ttypeSequence = 0;
-				sendIacWill(c);
-				break;
-
-			case TELOPT_NAWS:
-				// option off - must be server initiated
-				if (m_naws)
-				{
-					sendIacWill(c);
-					m_nawsWanted = true;
-					sendWindowSize();
-				}
-				else
-				{
-					sendIacWont(c);
-				}
-				break;
-
-			case TELOPT_MXP:
-				if (m_useMxp == eNoMXP)
-				{
-					sendIacWont(c);
-				}
-				else
-				{
-					sendIacWill(c);
-					if (m_useMxp == eQueryMXP)
-						mxpOn(false, false);
-				} // end of MXP wanted
-				break; // end of MXP
-
-			default:
-				if (m_callbacks.onTelnetRequest && m_callbacks.onTelnetRequest(c, QStringLiteral("DO")))
-				{
-					sendIacWill(c);
-					if (m_callbacks.onTelnetRequest)
-						m_callbacks.onTelnetRequest(c, QStringLiteral("SENT_WILL"));
-				}
-				else
-				{
-					sendIacWont(c);
-				}
-				break; // end of others
-			} // end of switch
-			m_seenDoDontOption[c] = true;
-			m_phase               = NONE;
-			break;
-
 		case HAVE_DONT:
-			// Received: IAC DONT x
-			//
-			// telnet negotiation : in response to DONT, we say WONT
-			if (m_negotiateOptionsOnce && m_seenDoDontOption[c])
+		{
+			const NegotiationDisposition disposition =
+			    recordNegotiationAttempt(NegotiationDirection::ClientOption, c, m_negotiationClock.elapsed());
+			if (disposition == NegotiationDisposition::Suppress ||
+			    (!m_automaticRenegotiationLoopProtection && m_negotiateOptionsOnce && m_seenDoDontOption[c]))
 			{
 				m_phase = NONE;
 				break;
 			}
-			sendIacWont(c);
-			switch (c)
-			{
-			case TELOPT_COMPRESS2:
-			case TELOPT_COMPRESS:
-				m_compress = false;
-				m_mccpType = 0;
-				m_compressInput.clear();
-				m_compressInputOffset = 0;
-				m_pendingCompressed.clear();
-				m_postCompressionRemainder.clear();
-				break;
 
-			case TELOPT_MXP:
-				mxpOff(true);
-				break; // end of MXP
-
-				// for MTTS start back at sequence 0
-			case TELOPT_TERMINAL_TYPE:
-				m_ttypeSequence = 0;
-				break;
-			case TELOPT_NAWS:
-				m_nawsWanted = false;
-				break;
-			case TELOPT_START_TLS:
-				if (m_startTlsEnabled && !m_startTlsActive)
-					m_startTlsNegotiationRejected = true;
-				m_startTlsDoSent            = false;
-				m_startTlsFollowsSent       = false;
-				m_startTlsUpgradeRequested  = false;
-				m_startTlsUpgradeInProgress = false;
-				m_startTlsActive            = false;
-				break;
-			default:
-				break;
-			} // end of switch
+			if (m_phase == HAVE_DO || disposition == NegotiationDisposition::SettleAndSuppress)
+				handleDo(c);
+			else
+				handleDont(c);
 			m_seenDoDontOption[c] = true;
 			m_phase               = NONE;
 			break;
+		}
 
 		case HAVE_SB:
 			// begin subnegotiation; first byte is the option type

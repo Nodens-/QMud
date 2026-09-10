@@ -4952,6 +4952,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 	const bool    disableCompression     = isEnabledFlag(disableCompressionFlag);
 	const bool    negotiateOptionsOnce =
 	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("only_negotiate_telnet_options_once")));
+	const bool    automaticRenegotiationLoopProtection = isEnabledFlag(m_worldAttributes.value(
+	    QStringLiteral("automatically_protect_against_telnet_option_renegotiation_loops")));
 	const int     useMxp     = m_worldAttributes.value(QStringLiteral("use_mxp")).toInt();
 	const QString terminalId = m_worldAttributes.value(QStringLiteral("terminal_identification"));
 
@@ -4962,6 +4964,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 	m_telnet.setNoEchoOff(noEchoOff);
 	m_telnet.setDisableCompression(disableCompression);
 	m_telnet.setNegotiateOptionsOnce(negotiateOptionsOnce);
+	m_telnet.setAutomaticRenegotiationLoopProtection(automaticRenegotiationLoopProtection);
 	if (useMxp >= 0)
 		m_telnet.setUseMxp(useMxp);
 	updateTelnetWindowSizeForNaws();

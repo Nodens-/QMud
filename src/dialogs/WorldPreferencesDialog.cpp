@@ -2427,6 +2427,14 @@ void WorldPreferencesDialog::accept()
 		if (m_connectDelay)
 			m_runtime->setWorldAttribute(QStringLiteral("connect_delay"),
 			                             QString::number(m_connectDelay->value()));
+		if (m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops)
+		{
+			m_runtime->setWorldAttribute(
+			    QStringLiteral("automatically_protect_against_telnet_option_renegotiation_loops"),
+			    m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->isChecked()
+			        ? QStringLiteral("1")
+			        : QStringLiteral("0"));
+		}
 		if (m_onlyNegotiateTelnetOptionsOnce)
 			m_runtime->setWorldAttribute(QStringLiteral("only_negotiate_telnet_options_once"),
 			                             m_onlyNegotiateTelnetOptionsOnce->isChecked() ? QStringLiteral("1")
@@ -7835,9 +7843,17 @@ void WorldPreferencesDialog::buildUi()
 	connectNote->setWordWrap(true);
 	connectTextLayout->addWidget(connectNote);
 	connectingLayout->addWidget(connectTextGroup);
+	m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops = new QCheckBox(
+	    QStringLiteral("Automatically protect against Telnet option renegotiation loops"), connectingPage);
+	connectingLayout->addWidget(m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops);
 	m_onlyNegotiateTelnetOptionsOnce =
 	    new QCheckBox(QStringLiteral("Only negotiate telnet options once"), connectingPage);
-	connectingLayout->addWidget(m_onlyNegotiateTelnetOptionsOnce);
+	auto *onlyNegotiateLayout = new QHBoxLayout;
+	onlyNegotiateLayout->setContentsMargins(20, 0, 0, 0);
+	onlyNegotiateLayout->addWidget(m_onlyNegotiateTelnetOptionsOnce);
+	connectingLayout->addLayout(onlyNegotiateLayout);
+	connect(m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops, &QCheckBox::toggled,
+	        m_onlyNegotiateTelnetOptionsOnce, &QWidget::setDisabled);
 	connectingLayout->addStretch();
 
 	// MXP
@@ -11668,10 +11684,18 @@ void WorldPreferencesDialog::populateConnecting() const
 	}
 	if (m_connectDelay)
 		m_connectDelay->setValue(attrs.value(QStringLiteral("connect_delay")).toInt());
+	if (m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops)
+	{
+		m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->setChecked(qmudIsEnabledFlag(
+		    attrs.value(QStringLiteral("automatically_protect_against_telnet_option_renegotiation_loops"))));
+	}
 	if (m_onlyNegotiateTelnetOptionsOnce)
 	{
 		m_onlyNegotiateTelnetOptionsOnce->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("only_negotiate_telnet_options_once"))));
+		m_onlyNegotiateTelnetOptionsOnce->setEnabled(
+		    !m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops ||
+		    !m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->isChecked());
 	}
 	if (m_connectLineCount && m_connectText)
 	{
