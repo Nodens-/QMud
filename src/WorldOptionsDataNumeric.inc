@@ -52,6 +52,7 @@
     {"double_click_inserts", false, 0, 0, 0, DoubleClickInserts},
     {"double_click_sends", false, 0, 0, 0, DoubleClickSends},
     {"echo_colour", 0, 0, MAX_CUSTOM, OPT_CUSTOM_COLOUR | OPT_UPDATE_VIEWS},
+    {"echo_force_terminates_partial_prompts", false, 0, 0, 0, EchoForceTerminatesPartialPrompts},
     {"echo_hyperlink_in_output_window", true, 0, 0, 0}, {"edit_script_with_notepad", true, 0, 0, 0},
     {"enable_aliases", true, 0, 0, 0}, {"enable_auto_say", false, 0, 0, 0}, {"enable_beeps", true, 0, 0, 0},
     {"enable_command_stack", false, 0, 0, 0}, {"enable_scripts", true, 0, 0, 0},

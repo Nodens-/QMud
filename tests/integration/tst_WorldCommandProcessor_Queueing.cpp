@@ -10,151 +10,171 @@
 
 #include <QtTest/QTest>
 
-/**
- * @brief QTest fixture covering WorldCommandProcessor Queueing scenarios.
- */
-class tst_WorldCommandProcessor_Queueing : public QObject
+namespace
 {
-		Q_OBJECT
+	/**
+	 * @brief QTest fixture covering WorldCommandProcessor Queueing scenarios.
+	 */
+	class tst_WorldCommandProcessor_Queueing : public QObject
+	{
+			Q_OBJECT
 
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void queueDecision_data()
-		{
-			QTest::addColumn<int>("speedWalkDelayMs");
-			QTest::addColumn<bool>("queueRequested");
-			QTest::addColumn<bool>("queueNotEmpty");
-			QTest::addColumn<bool>("expected");
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void queueDecision_data()
+			{
+				QTest::addColumn<int>("speedWalkDelayMs");
+				QTest::addColumn<bool>("queueRequested");
+				QTest::addColumn<bool>("queueNotEmpty");
+				QTest::addColumn<bool>("expected");
 
-			QTest::newRow("no-delay") << 0 << true << true << false;
-			QTest::newRow("queue-requested") << 10 << true << false << true;
-			QTest::newRow("already-has-queued") << 10 << false << true << true;
-			QTest::newRow("nothing-to-queue") << 10 << false << false << false;
-		}
+				QTest::newRow("no-delay") << 0 << true << true << false;
+				QTest::newRow("queue-requested") << 10 << true << false << true;
+				QTest::newRow("already-has-queued") << 10 << false << true << true;
+				QTest::newRow("nothing-to-queue") << 10 << false << false << false;
+			}
 
-		void queueDecision()
-		{
-			QFETCH(int, speedWalkDelayMs);
-			QFETCH(bool, queueRequested);
-			QFETCH(bool, queueNotEmpty);
-			QFETCH(bool, expected);
+			void queueDecision()
+			{
+				QFETCH(int, speedWalkDelayMs);
+				QFETCH(bool, queueRequested);
+				QFETCH(bool, queueNotEmpty);
+				QFETCH(bool, expected);
 
-			QCOMPARE(QMudCommandQueue::shouldQueueCommand(speedWalkDelayMs, queueRequested, queueNotEmpty),
-			         expected);
-		}
+				QCOMPARE(
+				    QMudCommandQueue::shouldQueueCommand(speedWalkDelayMs, queueRequested, queueNotEmpty),
+				    expected);
+			}
 
-		void queueEntryEncoding_data()
-		{
-			QTest::addColumn<bool>("queueRequested");
-			QTest::addColumn<bool>("echo");
-			QTest::addColumn<bool>("logIt");
-			QTest::addColumn<QString>("expected");
+			void queueEntryEncoding_data()
+			{
+				QTest::addColumn<bool>("queueRequested");
+				QTest::addColumn<bool>("echo");
+				QTest::addColumn<bool>("logIt");
+				QTest::addColumn<quint16>("actionSource");
+				QTest::addColumn<QString>("expectedFlag");
 
-			QTest::newRow("queued-echo-log") << true << true << true << QStringLiteral("Ecmd");
-			QTest::newRow("queued-echo-no-log") << true << true << false << QStringLiteral("ecmd");
-			QTest::newRow("queued-no-echo") << true << false << true << QStringLiteral("ecmd");
-			QTest::newRow("immediate-echo-log") << false << true << true << QStringLiteral("Icmd");
-			QTest::newRow("immediate-echo-no-log") << false << true << false << QStringLiteral("icmd");
-			QTest::newRow("immediate-no-echo") << false << false << true << QStringLiteral("icmd");
-		}
+				QTest::newRow("queued-echo-log")
+				    << true << true << true << static_cast<quint16>(1) << QStringLiteral("E");
+				QTest::newRow("queued-echo-no-log")
+				    << true << true << false << static_cast<quint16>(2) << QStringLiteral("e");
+				QTest::newRow("queued-no-echo")
+				    << true << false << true << static_cast<quint16>(3) << QStringLiteral("e");
+				QTest::newRow("immediate-echo-log")
+				    << false << true << true << static_cast<quint16>(4) << QStringLiteral("I");
+				QTest::newRow("immediate-echo-no-log")
+				    << false << true << false << static_cast<quint16>(5) << QStringLiteral("i");
+				QTest::newRow("immediate-no-echo")
+				    << false << false << true << static_cast<quint16>(6) << QStringLiteral("i");
+			}
 
-		void queueEntryEncoding()
-		{
-			QFETCH(bool, queueRequested);
-			QFETCH(bool, echo);
-			QFETCH(bool, logIt);
-			QFETCH(QString, expected);
+			void queueEntryEncoding()
+			{
+				QFETCH(bool, queueRequested);
+				QFETCH(bool, echo);
+				QFETCH(bool, logIt);
+				QFETCH(quint16, actionSource);
+				QFETCH(QString, expectedFlag);
 
-			QCOMPARE(QMudCommandQueue::encodeQueueEntry(QStringLiteral("cmd"), queueRequested, echo, logIt),
-			         expected);
-		}
+				const QString encoded = QMudCommandQueue::encodeQueueEntry(
+				    QStringLiteral("cmd"), queueRequested, echo, logIt, actionSource);
+				QCOMPARE(encoded.left(1), expectedFlag);
+				const QMudCommandQueue::QueueEntry decoded = QMudCommandQueue::decodeQueueEntry(encoded);
+				QCOMPARE(decoded.actionSource, actionSource);
+				QCOMPARE(decoded.payload, QStringLiteral("cmd"));
+			}
 
-		void queueEntryDecoding_data()
-		{
-			QTest::addColumn<QString>("entry");
-			QTest::addColumn<bool>("withEcho");
-			QTest::addColumn<bool>("logIt");
-			QTest::addColumn<bool>("queuedType");
-			QTest::addColumn<QString>("payload");
+			void queueEntryDecoding_data()
+			{
+				QTest::addColumn<QString>("entry");
+				QTest::addColumn<bool>("withEcho");
+				QTest::addColumn<bool>("logIt");
+				QTest::addColumn<bool>("queuedType");
+				QTest::addColumn<quint16>("actionSource");
+				QTest::addColumn<QString>("payload");
 
-			QTest::newRow("queued-echo-log")
-			    << QStringLiteral("Ego") << true << true << true << QStringLiteral("go");
-			QTest::newRow("queued-no-log")
-			    << QStringLiteral("ego") << true << false << true << QStringLiteral("go");
-			QTest::newRow("immediate-echo-log")
-			    << QStringLiteral("Igo") << true << true << false << QStringLiteral("go");
-			QTest::newRow("immediate-no-log")
-			    << QStringLiteral("igo") << true << false << false << QStringLiteral("go");
-			QTest::newRow("unknown-flag-falls-back")
-			    << QStringLiteral("Xgo") << false << true << false << QStringLiteral("go");
-			QTest::newRow("empty-entry") << QString() << false << false << false << QString();
-		}
+				QTest::newRow("queued-echo-log") << QStringLiteral("Ego") << true << true << true
+				                                 << static_cast<quint16>(0) << QStringLiteral("go");
+				QTest::newRow("queued-no-log") << QStringLiteral("ego") << true << false << true
+				                               << static_cast<quint16>(0) << QStringLiteral("go");
+				QTest::newRow("immediate-echo-log") << QStringLiteral("Igo") << true << true << false
+				                                    << static_cast<quint16>(0) << QStringLiteral("go");
+				QTest::newRow("immediate-no-log") << QStringLiteral("igo") << true << false << false
+				                                  << static_cast<quint16>(0) << QStringLiteral("go");
+				QTest::newRow("unknown-flag-falls-back") << QStringLiteral("Xgo") << false << true << false
+				                                         << static_cast<quint16>(0) << QStringLiteral("go");
+				QTest::newRow("empty-entry")
+				    << QString() << false << false << false << static_cast<quint16>(0) << QString();
+			}
 
-		void queueEntryDecoding()
-		{
-			QFETCH(QString, entry);
-			QFETCH(bool, withEcho);
-			QFETCH(bool, logIt);
-			QFETCH(bool, queuedType);
-			QFETCH(QString, payload);
+			void queueEntryDecoding()
+			{
+				QFETCH(QString, entry);
+				QFETCH(bool, withEcho);
+				QFETCH(bool, logIt);
+				QFETCH(bool, queuedType);
+				QFETCH(quint16, actionSource);
+				QFETCH(QString, payload);
 
-			const QMudCommandQueue::QueueEntry decoded = QMudCommandQueue::decodeQueueEntry(entry);
-			QCOMPARE(decoded.withEcho, withEcho);
-			QCOMPARE(decoded.logIt, logIt);
-			QCOMPARE(decoded.queuedType, queuedType);
-			QCOMPARE(decoded.payload, payload);
-		}
+				const QMudCommandQueue::QueueEntry decoded = QMudCommandQueue::decodeQueueEntry(entry);
+				QCOMPARE(decoded.withEcho, withEcho);
+				QCOMPARE(decoded.logIt, logIt);
+				QCOMPARE(decoded.queuedType, queuedType);
+				QCOMPARE(decoded.actionSource, actionSource);
+				QCOMPARE(decoded.payload, payload);
+			}
 
-		void takeDispatchBatchStopsAtQueuedType()
-		{
-			QStringList       queue = {QStringLiteral("Ifirst"), QStringLiteral("Esecond"),
-			                           QStringLiteral("ithird")};
-			const QStringList batch = QMudCommandQueue::takeDispatchBatch(queue, false);
-			QCOMPARE(batch, (QStringList{QStringLiteral("Ifirst"), QStringLiteral("Esecond")}));
-			QCOMPARE(queue, (QStringList{QStringLiteral("ithird")}));
-		}
+			void takeDispatchBatchStopsAtQueuedType()
+			{
+				QStringList       queue = {QStringLiteral("Ifirst"), QStringLiteral("Esecond"),
+				                           QStringLiteral("ithird")};
+				const QStringList batch = QMudCommandQueue::takeDispatchBatch(queue, false);
+				QCOMPARE(batch, (QStringList{QStringLiteral("Ifirst"), QStringLiteral("Esecond")}));
+				QCOMPARE(queue, (QStringList{QStringLiteral("ithird")}));
+			}
 
-		void takeDispatchBatchFlushAllConsumesEverything()
-		{
-			QStringList       queue = {QString(), QStringLiteral("ifirst"), QStringLiteral("esecond"),
-			                           QStringLiteral("Ithird")};
-			const QStringList batch = QMudCommandQueue::takeDispatchBatch(queue, true);
-			QCOMPARE(batch, (QStringList{QStringLiteral("ifirst"), QStringLiteral("esecond"),
-			                             QStringLiteral("Ithird")}));
-			QVERIFY(queue.isEmpty());
-		}
+			void takeDispatchBatchFlushAllConsumesEverything()
+			{
+				QStringList       queue = {QString(), QStringLiteral("ifirst"), QStringLiteral("esecond"),
+				                           QStringLiteral("Ithird")};
+				const QStringList batch = QMudCommandQueue::takeDispatchBatch(queue, true);
+				QCOMPARE(batch, (QStringList{QStringLiteral("ifirst"), QStringLiteral("esecond"),
+				                             QStringLiteral("Ithird")}));
+				QVERIFY(queue.isEmpty());
+			}
 
-		void discardClearsQueuedCommands()
-		{
-			QStringList queue = {QStringLiteral("Eone"), QStringLiteral("Itwo")};
-			QCOMPARE(QMudCommandQueue::discardAll(queue), 2);
-			QVERIFY(queue.isEmpty());
-		}
+			void discardClearsQueuedCommands()
+			{
+				QStringList queue = {QStringLiteral("Eone"), QStringLiteral("Itwo")};
+				QCOMPARE(QMudCommandQueue::discardAll(queue), 2);
+				QVERIFY(queue.isEmpty());
+			}
 
-		void actionCommandTextNormalizesNewlines_data()
-		{
-			QTest::addColumn<QString>("input");
-			QTest::addColumn<QString>("expected");
+			void actionCommandTextNormalizesNewlines_data()
+			{
+				QTest::addColumn<QString>("input");
+				QTest::addColumn<QString>("expected");
 
-			QTest::newRow("lf") << QStringLiteral("north\nsouth") << QStringLiteral("north\r\nsouth");
-			QTest::newRow("crlf") << QStringLiteral("north\r\nsouth") << QStringLiteral("north\r\nsouth");
-			QTest::newRow("cr") << QStringLiteral("north\rsouth") << QStringLiteral("north\r\nsouth");
-			QTest::newRow("mixed") << QStringLiteral("north\nsouth\reast\r\nwest")
-			                       << QStringLiteral("north\r\nsouth\r\neast\r\nwest");
-			QTest::newRow("trailing-lf") << QStringLiteral("north\n") << QStringLiteral("north\r\n");
-			QTest::newRow("trailing-crlf") << QStringLiteral("north\r\n") << QStringLiteral("north\r\n");
-			QTest::newRow("empty") << QString() << QString();
-		}
+				QTest::newRow("lf") << QStringLiteral("north\nsouth") << QStringLiteral("north\r\nsouth");
+				QTest::newRow("crlf") << QStringLiteral("north\r\nsouth") << QStringLiteral("north\r\nsouth");
+				QTest::newRow("cr") << QStringLiteral("north\rsouth") << QStringLiteral("north\r\nsouth");
+				QTest::newRow("mixed") << QStringLiteral("north\nsouth\reast\r\nwest")
+				                       << QStringLiteral("north\r\nsouth\r\neast\r\nwest");
+				QTest::newRow("trailing-lf") << QStringLiteral("north\n") << QStringLiteral("north\r\n");
+				QTest::newRow("trailing-crlf") << QStringLiteral("north\r\n") << QStringLiteral("north\r\n");
+				QTest::newRow("empty") << QString() << QString();
+			}
 
-		void actionCommandTextNormalizesNewlines()
-		{
-			QFETCH(QString, input);
-			QFETCH(QString, expected);
+			void actionCommandTextNormalizesNewlines()
+			{
+				QFETCH(QString, input);
+				QFETCH(QString, expected);
 
-			QCOMPARE(QMudCommandText::normalizeActionCommandTextNewlines(input), expected);
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
+				QCOMPARE(QMudCommandText::normalizeActionCommandTextNewlines(input), expected);
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+} // namespace
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_Queueing)
 

@@ -783,6 +783,18 @@ qmud_add_qtest(tst_WorldCommandProcessor_TimerAccounting
         20)
 
 if (QMUD_ENABLE_GUI_TESTS)
+    qmud_add_qtest(tst_AppControllerTextCommands
+            GUI
+            SOURCES
+            gui/tst_AppControllerTextCommands.cpp
+            LIBRARIES
+            qmud_app_core
+            LABELS
+            gui
+            integration
+            TIMEOUT
+            20)
+
     qmud_add_qtest(tst_AppControllerFileOpen
             GUI
             SOURCES

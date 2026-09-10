@@ -116,6 +116,8 @@ namespace
 				runtime.applyFromDocument(source);
 				runtime.setWorldAttribute(QStringLiteral("partial_save_character_threshold"),
 				                          QStringLiteral("37"));
+				runtime.setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
+				                          QStringLiteral("y"));
 				QString saveError;
 				QVERIFY2(runtime.saveWorldFile(roundTripPath, &saveError), qPrintable(saveError));
 
@@ -132,6 +134,9 @@ namespace
 				QCOMPARE(loaded.worldAttributes().value(QStringLiteral("port")), QStringLiteral("4001"));
 				QCOMPARE(loaded.worldAttributes().value(QStringLiteral("partial_save_character_threshold")),
 				         QStringLiteral("37"));
+				QCOMPARE(
+				    loaded.worldAttributes().value(QStringLiteral("echo_force_terminates_partial_prompts")),
+				    QStringLiteral("y"));
 				QCOMPARE(loaded.worldMultilineAttributes(), source.worldMultilineAttributes());
 
 				const auto *trigger = entryByAttribute(loaded.triggers(), QStringLiteral("name"),

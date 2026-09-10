@@ -662,6 +662,7 @@ namespace
 		                                   QStringLiteral("auto_resize_maximum_lines"),
 		                                   QStringLiteral("keep_commands_on_same_line"),
 		                                   QStringLiteral("no_echo_off"),
+		                                   QStringLiteral("echo_force_terminates_partial_prompts"),
 		                                   QStringLiteral("always_record_command_history"),
 		                                   QStringLiteral("hyperlink_adds_to_command_history"),
 		                                   QStringLiteral("use_custom_link_colour"),
@@ -745,6 +746,7 @@ namespace
 		                                   QStringLiteral("auto_resize_command_window"),
 		                                   QStringLiteral("keep_commands_on_same_line"),
 		                                   QStringLiteral("no_echo_off"),
+		                                   QStringLiteral("echo_force_terminates_partial_prompts"),
 		                                   QStringLiteral("always_record_command_history"),
 		                                   QStringLiteral("hyperlink_adds_to_command_history"),
 		                                   QStringLiteral("use_custom_link_colour"),
@@ -10782,22 +10784,17 @@ void WorldView::echoInputText(const QString &text)
 {
 	if (!m_displayMyInput || !m_output)
 		return;
-	if (m_runtime)
-		static_cast<void>(commitPendingIncomingPartialOutput());
 	QString trimmed = text;
 	if (trimmed.endsWith(QStringLiteral("\r\n")))
 		trimmed.chop(2);
+	if (m_echoForceTerminatesPartialPrompts && m_runtime &&
+	    WorldRuntime::isInteractiveActionSource(m_runtime->currentActionSource()))
+		static_cast<void>(commitPendingIncomingPartialOutput());
+
 	bool keepOnSameLine = m_keepCommandsOnSameLine;
-	if (m_runtime)
-	{
-		const unsigned short source = m_runtime->currentActionSource();
-		const bool           interactiveSource =
-		    source == WorldRuntime::eUserTyping || source == WorldRuntime::eUserMacro ||
-		    source == WorldRuntime::eUserKeypad || source == WorldRuntime::eUserAccelerator ||
-		    source == WorldRuntime::eUserMenuAction;
-		if (!interactiveSource)
-			keepOnSameLine = false;
-	}
+	if (keepOnSameLine && m_runtime &&
+	    !WorldRuntime::isInteractiveActionSource(m_runtime->currentActionSource()))
+		keepOnSameLine = false;
 	const bool                       appendToCurrentLine = keepOnSameLine && !m_breakBeforeNextServerOutput;
 	QVector<WorldRuntime::StyleSpan> echoSpans;
 	bool                             reopenedPresentedHardReturn = false;
@@ -11961,8 +11958,6 @@ void WorldView::appendOutputTextInternal(const QString &text, bool newLine, bool
 	if (m_runtime && !m_commandInteractionEnabled)
 		return;
 
-	if (recordLine && m_runtime && (flags & WorldRuntime::LineOutput) == 0)
-		static_cast<void>(commitPendingIncomingPartialOutput());
 	if (recordLine && m_runtime && (flags & WorldRuntime::LineHorizontalRule) != 0)
 		m_runtime->finalizeOpenOutputLineHardReturn();
 
@@ -13952,16 +13947,19 @@ void WorldView::applyRuntimeSettingsImpl(const bool rebuildOutput)
 		minLines = 1;
 	if (!maxOk || maxLines <= 0)
 		maxLines = 20;
-	m_autoResizeMinimumLines        = minLines;
-	m_autoResizeMaximumLines        = maxLines;
-	const QString keepCommands      = attrs.value(QStringLiteral("keep_commands_on_same_line"));
-	m_keepCommandsOnSameLine        = isEnabled(keepCommands);
-	const QString noEchoOff         = attrs.value(QStringLiteral("no_echo_off"));
-	m_noEchoOff                     = isEnabled(noEchoOff);
-	const QString alwaysRecord      = attrs.value(QStringLiteral("always_record_command_history"));
-	m_alwaysRecordCommandHistory    = isEnabled(alwaysRecord);
-	const QString hyperlinkHistory  = attrs.value(QStringLiteral("hyperlink_adds_to_command_history"));
-	m_hyperlinkAddsToCommandHistory = isEnabled(hyperlinkHistory);
+	m_autoResizeMinimumLines   = minLines;
+	m_autoResizeMaximumLines   = maxLines;
+	const QString keepCommands = attrs.value(QStringLiteral("keep_commands_on_same_line"));
+	m_keepCommandsOnSameLine   = isEnabled(keepCommands);
+	const QString noEchoOff    = attrs.value(QStringLiteral("no_echo_off"));
+	m_noEchoOff                = isEnabled(noEchoOff);
+	const QString forceTerminatePrompts =
+	    attrs.value(QStringLiteral("echo_force_terminates_partial_prompts"));
+	m_echoForceTerminatesPartialPrompts = isEnabled(forceTerminatePrompts);
+	const QString alwaysRecord          = attrs.value(QStringLiteral("always_record_command_history"));
+	m_alwaysRecordCommandHistory        = isEnabled(alwaysRecord);
+	const QString hyperlinkHistory      = attrs.value(QStringLiteral("hyperlink_adds_to_command_history"));
+	m_hyperlinkAddsToCommandHistory     = isEnabled(hyperlinkHistory);
 	const bool    previousUseCustomLinkColour = m_useCustomLinkColour;
 	const bool    previousUnderlineHyperlinks = m_underlineHyperlinks;
 	const QColor  previousHyperlinkColour     = m_hyperlinkColour;
@@ -16451,11 +16449,9 @@ void InputTextEdit::keyPressEvent(QKeyEvent *event)
 				       value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
 				       value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
 			};
-			const bool spellOnSend      = isEnabled(attrs.value(QStringLiteral("spell_check_on_send")));
-			const bool scriptingEnabled = isEnabled(attrs.value(QStringLiteral("enable_scripts"))) &&
-			                              attrs.value(QStringLiteral("script_language"))
-			                                      .compare(QStringLiteral("Lua"), Qt::CaseInsensitive) == 0;
-			const QString scriptPrefix  = attrs.value(QStringLiteral("script_prefix"));
+			const bool    spellOnSend      = isEnabled(attrs.value(QStringLiteral("spell_check_on_send")));
+			const bool    scriptingEnabled = m_view->m_runtime->luaScriptingAvailable();
+			const QString scriptPrefix     = attrs.value(QStringLiteral("script_prefix"));
 			const bool    scriptCommand =
 			    scriptingEnabled && !scriptPrefix.isEmpty() && text.startsWith(scriptPrefix);
 			if (spellOnSend && !scriptCommand)

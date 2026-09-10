@@ -900,12 +900,8 @@ bool WorldCommandProcessor::canExecuteWorldScript(const QString &functionType, c
 		return false;
 
 	const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
-	const bool warn = isEnabledValue(attrs.value(QStringLiteral("warn_if_scripting_inactive")));
-	const bool scriptingEnabled =
-	    isEnabledValue(attrs.value(QStringLiteral("enable_scripts"))) &&
-	    attrs.value(QStringLiteral("script_language")).compare(QStringLiteral("Lua"), Qt::CaseInsensitive) ==
-	        0 &&
-	    lua != nullptr;
+	const bool warn             = isEnabledValue(attrs.value(QStringLiteral("warn_if_scripting_inactive")));
+	const bool scriptingEnabled = m_runtime->luaScriptingAvailable() && lua;
 	if (!scriptingEnabled)
 	{
 		if (warn)
@@ -1697,6 +1693,19 @@ void WorldCommandProcessor::onHyperlinkActivated(const QString &href)
 	const QString sendText = firstMxpSendAction(normalizedHref);
 	if (sendText.isEmpty())
 		return;
+
+	const QPointer<WorldRuntime> runtimeGuard(m_runtime);
+	const unsigned short         previousActionSource =
+	    runtimeGuard ? runtimeGuard->currentActionSource()
+	                 : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
+	if (runtimeGuard)
+		runtimeGuard->setCurrentActionSource(WorldRuntime::eUserTyping);
+	[[maybe_unused]] const auto restoreActionSource = qScopeGuard(
+	    [runtimeGuard, previousActionSource]
+	    {
+		    if (runtimeGuard)
+			    runtimeGuard->setCurrentActionSource(previousActionSource);
+	    });
 	if (dispatchPolicy == MxpHyperlinkDispatchPolicy::CommandProcessing)
 	{
 		PluginHyperlinkCall pluginCall;
@@ -1768,8 +1777,6 @@ void WorldCommandProcessor::onMiniWindowOutputActionActivated(const int actionTy
 
 void WorldCommandProcessor::note(const QString &text, const bool newLine) const
 {
-	if (m_view)
-		static_cast<void>(m_view->commitPendingIncomingPartialOutput());
 	if (m_runtime)
 	{
 		const QString value    = m_runtime->worldAttributes().value(QStringLiteral("log_notes"));
@@ -2155,10 +2162,7 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input, const bool all
 	}
 
 	// -------------------------- SCRIPT PREFIX ---------------------------
-	const bool scriptingEnabled =
-	    isEnabled(attrs.value(QStringLiteral("enable_scripts"))) &&
-	    attrs.value(QStringLiteral("script_language")).compare(QStringLiteral("Lua"), Qt::CaseInsensitive) ==
-	        0;
+	const bool scriptingEnabled = m_runtime->luaScriptingAvailable();
 	if (const QString scriptPrefix = attrs.value(QStringLiteral("script_prefix"));
 	    !m_processingAutoSay && scriptingEnabled && !scriptPrefix.isEmpty() && line.startsWith(scriptPrefix))
 	{
@@ -4036,10 +4040,7 @@ void WorldCommandProcessor::dispatchScriptSend(
 	else
 	{
 		const QMap<QString, QString> &attrs = m_runtime->worldAttributes();
-		const bool scriptingEnabled = isEnabledValue(attrs.value(QStringLiteral("enable_scripts"))) &&
-		                              attrs.value(QStringLiteral("script_language"))
-		                                      .compare(QStringLiteral("Lua"), Qt::CaseInsensitive) == 0;
-		if (!scriptingEnabled)
+		if (!m_runtime->luaScriptingAvailable())
 		{
 			if (isEnabledValue(attrs.value(QStringLiteral("warn_if_scripting_inactive"))))
 			{
@@ -4051,19 +4052,7 @@ void WorldCommandProcessor::dispatchScriptSend(
 			}
 			return;
 		}
-		lua = m_runtime->luaCallbacks();
-		if (!lua)
-		{
-			if (isEnabledValue(attrs.value(QStringLiteral("warn_if_scripting_inactive"))))
-			{
-				const QString name = description.isEmpty() ? QStringLiteral("(unnamed)") : description;
-				m_runtime->outputText(
-				    QStringLiteral("Script function \"%1\" cannot execute - scripting disabled/parse error.")
-				        .arg(name),
-				    true, true);
-			}
-			return;
-		}
+		lua    = m_runtime->luaCallbacks();
 		luaRef = QSharedPointer<LuaCallbackEngine>(lua, [](LuaCallbackEngine * /*unused*/) {});
 	}
 
@@ -4146,7 +4135,11 @@ void WorldCommandProcessor::sendMsg(const QString &text, const bool echo, const 
 
 		if (QMudCommandQueue::shouldQueueCommand(m_speedWalkDelay, queueIt, !m_queuedCommands.isEmpty()))
 		{
-			const QString encoded = QMudCommandQueue::encodeQueueEntry(strLine, queueIt, bEcho, logIt);
+			const unsigned short actionSource =
+			    m_runtime ? m_runtime->currentActionSource()
+			              : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
+			const QString encoded =
+			    QMudCommandQueue::encodeQueueEntry(strLine, queueIt, bEcho, logIt, actionSource);
 			if (const bool triggerPriority = !queueIt && m_triggerCommandPriorityDepth > 0; triggerPriority)
 			{
 				const int insertAt =
@@ -4374,11 +4367,7 @@ bool WorldCommandProcessor::ensureConnectedForSend() const
 	if (phase == WorldRuntime::eConnectDisconnecting)
 		return false;
 
-	const unsigned short source = m_runtime->currentActionSource();
-	const bool           interactiveSource =
-	    source == WorldRuntime::eUserTyping || source == WorldRuntime::eUserMacro ||
-	    source == WorldRuntime::eUserKeypad || source == WorldRuntime::eUserAccelerator ||
-	    source == WorldRuntime::eUserMenuAction;
+	const bool interactiveSource = WorldRuntime::isInteractiveActionSource(m_runtime->currentActionSource());
 
 	const QMap<QString, QString> &attrs     = m_runtime->worldAttributes();
 	const QString                 host      = attrs.value(QStringLiteral("site")).trimmed();
@@ -4454,6 +4443,18 @@ void WorldCommandProcessor::processQueuedCommands(bool flushAll)
 	for (const QString &queued : batch)
 	{
 		const QMudCommandQueue::QueueEntry decoded = QMudCommandQueue::decodeQueueEntry(queued);
+		const QPointer<WorldRuntime>       runtimeGuard(m_runtime);
+		const unsigned short               previousActionSource =
+		    runtimeGuard ? runtimeGuard->currentActionSource()
+		                 : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
+		if (runtimeGuard)
+			runtimeGuard->setCurrentActionSource(decoded.actionSource);
+		[[maybe_unused]] const auto restoreActionSource = qScopeGuard(
+		    [runtimeGuard, previousActionSource]
+		    {
+			    if (runtimeGuard)
+				    runtimeGuard->setCurrentActionSource(previousActionSource);
+		    });
 		doSendMsg(decoded.payload, decoded.withEcho, decoded.logIt);
 		sentAny = true;
 	}
@@ -4513,7 +4514,7 @@ void WorldCommandProcessor::updateQueuedCommandsStatusLine()
 			break;
 		}
 
-		const QString direction = item.mid(1).trimmed();
+		const QString direction = QMudCommandQueue::decodeQueueEntry(item).payload.trimmed();
 		if (direction.isEmpty())
 			continue;
 

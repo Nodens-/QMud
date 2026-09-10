@@ -49,6 +49,8 @@ namespace
 				QCOMPARE(attrs.value(QStringLiteral("legacy_encoding")), QStringLiteral("windows-1252"));
 				QCOMPARE(attrs.value(QStringLiteral("persist_output_buffer")), QStringLiteral("y"));
 				QCOMPARE(attrs.value(QStringLiteral("persist_command_history")), QStringLiteral("y"));
+				QCOMPARE(attrs.value(QStringLiteral("echo_force_terminates_partial_prompts")),
+				         QStringLiteral("n"));
 				QCOMPARE(attrs.value(QStringLiteral("partial_save_character_threshold")),
 				         QStringLiteral("10"));
 				QCOMPARE(attrs.value(QStringLiteral("regexp_match_empty")), QStringLiteral("y"));

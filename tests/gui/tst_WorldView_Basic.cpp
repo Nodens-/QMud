@@ -12697,70 +12697,88 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void runtimePartialOutputCommitsBeforeLocalOutputBoundary()
+		void runtimePartialOutputEchoCommitFollowsPolicy_data()
 		{
+			QTest::addColumn<int>("actionSource");
+			QTest::addColumn<bool>("optionEnabled");
+			QTest::addColumn<bool>("echoCommitsPartial");
+
+			QTest::newRow("user-default-off")
+			    << static_cast<int>(WorldRuntime::eUserTyping) << false << false;
+			QTest::newRow("user-typing-enabled")
+			    << static_cast<int>(WorldRuntime::eUserTyping) << true << true;
+			QTest::newRow("user-macro-enabled") << static_cast<int>(WorldRuntime::eUserMacro) << true << true;
+			QTest::newRow("user-keypad-enabled")
+			    << static_cast<int>(WorldRuntime::eUserKeypad) << true << true;
+			QTest::newRow("user-accelerator-enabled")
+			    << static_cast<int>(WorldRuntime::eUserAccelerator) << true << true;
+			QTest::newRow("user-menu-enabled")
+			    << static_cast<int>(WorldRuntime::eUserMenuAction) << true << true;
+			QTest::newRow("trigger-enabled")
+			    << static_cast<int>(WorldRuntime::eTriggerFired) << true << false;
+			QTest::newRow("timer-enabled") << static_cast<int>(WorldRuntime::eTimerFired) << true << false;
+			QTest::newRow("server-input-enabled")
+			    << static_cast<int>(WorldRuntime::eInputFromServer) << true << false;
+			QTest::newRow("world-action-enabled")
+			    << static_cast<int>(WorldRuntime::eWorldAction) << true << false;
+			QTest::newRow("script-enabled") << static_cast<int>(WorldRuntime::eLuaSandbox) << true << false;
+			QTest::newRow("hotspot-enabled")
+			    << static_cast<int>(WorldRuntime::eHotspotCallback) << true << false;
+			QTest::newRow("dont-change-enabled")
+			    << static_cast<int>(WorldRuntime::eDontChangeAction) << true << false;
+			QTest::newRow("unknown-enabled")
+			    << static_cast<int>(WorldRuntime::eUnknownActionSource) << true << false;
+		}
+
+		void runtimePartialOutputEchoCommitFollowsPolicy()
+		{
+			QFETCH(int, actionSource);
+			QFETCH(bool, optionEnabled);
+			QFETCH(bool, echoCommitsPartial);
+
 			resetTestState();
 			setTestWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("1"));
+			setTestWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
+			                      optionEnabled ? QStringLiteral("1") : QStringLiteral("0"));
 
 			WorldRuntime *const runtime = runtimeForTest();
 			WorldView           view;
-			view.resize(760, 460);
-			view.show();
 			setTestRuntime(view, runtime);
 			QObject::connect(runtime, &WorldRuntime::incomingStyledLinePartialReceived, &view,
 			                 &WorldView::updatePartialOutputText);
 			view.applyRuntimeSettings();
-			QCoreApplication::processEvents();
 
-			QTextBrowser *browser = findVisibleOutputBrowser(view);
-			QVERIFY(browser);
-			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
-
-			runtimeOutputForTest(view).appendOutputText(QStringLiteral("room"), true);
 			const QString prompt = QStringLiteral("<2060hp 1694sp> ");
 			runtime->receiveRawData(prompt.toUtf8());
-			QCoreApplication::processEvents();
+			QTRY_COMPARE(view.outputLines().constLast(), prompt);
 
-			QCOMPARE(runtime->lines().size(), 1);
-			QCOMPARE(view.outputLines().constLast(), prompt);
-
-			runtimeOutputForTest(view).appendNoteText(QStringLiteral("[gmcp: update]"), true);
-			QCoreApplication::processEvents();
-
-			QStringList lines = view.outputLines();
-			QCOMPARE(runtime->lines().size(), 3);
-			QVERIFY(lines.size() >= 3);
-			QCOMPARE(lines.at(lines.size() - 2), prompt);
-			QCOMPARE(lines.constLast(), QStringLiteral("[gmcp: update]"));
-			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
-
-			const QString secondPrompt = QStringLiteral("<2060hp 1694sp> ");
-			runtime->receiveRawData(secondPrompt.toUtf8());
-			runtime->setCurrentActionSource(WorldRuntime::eUserTyping);
+			runtime->setCurrentActionSource(static_cast<unsigned short>(actionSource));
 			view.echoInputText(QStringLiteral("look\r\n"));
-			QCoreApplication::processEvents();
 
-			lines = view.outputLines();
-			QCOMPARE(runtime->lines().size(), 5);
-			QVERIFY(lines.size() >= 5);
-			QCOMPARE(lines.at(lines.size() - 2), secondPrompt);
-			QCOMPARE(lines.constLast(), QStringLiteral("look"));
-			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
+			QCOMPARE(view.commitPendingIncomingPartialOutput(), !echoCommitsPartial);
+			resetTestState();
+		}
 
-			setTestWorldAttribute(QStringLiteral("keep_commands_on_same_line"), QStringLiteral("1"));
+		void runtimePartialOutputDoesNotCommitBeforeNote()
+		{
+			resetTestState();
+			setTestWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
+			                      QStringLiteral("1"));
+			WorldRuntime *const   runtime = runtimeForTest();
+			WorldView             view;
+			WorldCommandProcessor processor;
+			setTestRuntime(view, runtime);
+			processor.setRuntime(runtime);
+			processor.setView(&view);
+			QObject::connect(runtime, &WorldRuntime::incomingStyledLinePartialReceived, &view,
+			                 &WorldView::updatePartialOutputText);
 			view.applyRuntimeSettings();
-			const QString thirdPrompt = QStringLiteral("<2060hp 1694sp> ");
-			runtime->receiveRawData(thirdPrompt.toUtf8());
-			runtime->setCurrentActionSource(WorldRuntime::eUserTyping);
-			view.echoInputText(QStringLiteral("north\r\n"));
-			QCoreApplication::processEvents();
 
-			lines = view.outputLines();
-			QCOMPARE(runtime->lines().size(), 7);
-			QVERIFY(lines.size() >= 6);
-			QCOMPARE(lines.constLast(), thirdPrompt + QStringLiteral("north"));
-			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
+			runtime->receiveRawData(QByteArrayLiteral("partial prompt> "));
+			QTRY_COMPARE(view.outputLines().constLast(), QStringLiteral("partial prompt> "));
+			processor.note(QStringLiteral("note"), true);
 
+			QVERIFY(view.commitPendingIncomingPartialOutput());
 			resetTestState();
 		}
 

@@ -2777,6 +2777,7 @@ class WorldView : public QWidget
 		bool                                           m_autoRepeat{false};
 		bool                                           m_keepCommandsOnSameLine{false};
 		bool                                           m_noEchoOff{false};
+		bool                                           m_echoForceTerminatesPartialPrompts{false};
 		bool                                           m_noEcho{false};
 		bool                                           m_alwaysRecordCommandHistory{false};
 		bool                                           m_hyperlinkAddsToCommandHistory{false};

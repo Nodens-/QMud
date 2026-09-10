@@ -10,6 +10,7 @@
 
 #include "AppController.h"
 #include "NameGeneration.h"
+#include "StringUtils.h"
 #include "WorldRuntime.h"
 #include "WorldView.h"
 
@@ -22,7 +23,9 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPointer>
 #include <QPushButton>
+#include <QScopeGuard>
 
 #include <exception>
 #include <memory>
@@ -118,8 +121,17 @@ void GeneratedNameDialog::onSendToWorld() const
 	if (name.isEmpty())
 		return;
 	const bool echo =
-	    m_runtime->worldAttributes().value(QStringLiteral("display_my_input")) == QStringLiteral("1");
-	static_cast<void>(m_runtime->sendCommand(name, echo, false, false, true, false));
+	    qmudIsEnabledFlag(m_runtime->worldAttributes().value(QStringLiteral("display_my_input")));
+	const QPointer<WorldRuntime> runtimeGuard(m_runtime);
+	const unsigned short         previousActionSource = runtimeGuard->currentActionSource();
+	runtimeGuard->setCurrentActionSource(WorldRuntime::eUserTyping);
+	[[maybe_unused]] const auto restoreActionSource = qScopeGuard(
+	    [runtimeGuard, previousActionSource]
+	    {
+		    if (runtimeGuard)
+			    runtimeGuard->setCurrentActionSource(previousActionSource);
+	    });
+	static_cast<void>(runtimeGuard->sendCommand(name, echo, false, false, true, false));
 }
 
 void GeneratedNameDialog::onBrowseName()

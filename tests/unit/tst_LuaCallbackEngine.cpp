@@ -98,6 +98,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void directCallbackShapesRoundTrip();
 		void wildcardAndStyleCallbackReceivesContextTables();
 		void mxpCallbacksMarshalArguments();
+		void worldMxpErrorCallbackRequiresScripting();
 		void modalYieldResumePreservesNumberAndStringCallback();
 		void modalYieldResumePreservesStringInOutCallback();
 		void modalYieldResumePreservesNoArgsCallback();
@@ -801,6 +802,28 @@ assert(mxp_seen.end_tag == "send:Look")
 assert(mxp_seen.variable == "room:Dock")
 )lua"),
 	                             QStringLiteral("verify mxp callbacks")));
+}
+
+void tst_LuaCallbackEngine::worldMxpErrorCallbackRequiresScripting()
+{
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("n"));
+	runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+	runtime.setWorldAttribute(QStringLiteral("on_mxp_error"), QStringLiteral("record_mxp_error"));
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
+function record_mxp_error(level, number, line, message)
+  SetVariable("mxp_error_callback", message)
+  return true
+end
+)lua"));
+
+	runtime.mxpError(DBG_NONE, 42, QStringLiteral("disabled"));
+	QVERIFY(runtime.variableSnapshot().value(QStringLiteral("mxp_error_callback")).isEmpty());
+
+	runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+	runtime.mxpError(DBG_NONE, 42, QStringLiteral("enabled"));
+	QCOMPARE(runtime.variableSnapshot().value(QStringLiteral("mxp_error_callback")),
+	         QStringLiteral("enabled"));
 }
 
 void tst_LuaCallbackEngine::modalYieldResumePreservesNumberAndStringCallback()
@@ -2965,7 +2988,7 @@ function validate_getinfo_selectors(value)
   if GetInfo(52) ~= "coverage expression" or GetInfo(86) ~= "coverage selection" then
     return "snapshot strings"
   end
-  if GetInfo(101) ~= true or GetInfo(285) ~= true then
+  if GetInfo(101) ~= true or GetInfo(119) ~= true or GetInfo(285) ~= true then
     return "snapshot booleans"
   end
   if GetInfo(201) ~= 321 or GetInfo(216) ~= 654 or
@@ -3003,6 +3026,10 @@ function validate_getinfo_selectors(value)
     return "unknown selectors"
   end
   return "ok"
+end
+
+function getinfo_119_status(value)
+  return tostring(GetInfo(119))
 end
 )lua"),
 	                            &runtime))
@@ -3044,6 +3071,12 @@ end
 	QVERIFY(dispatchWorkerAndWait(executor, request, result));
 	QCOMPARE(result.stringResult, QStringLiteral("ok"));
 	QVERIFY(!result.suspended);
+
+	snapshot->worldAttributesSnapshot.insert(QStringLiteral("enable_scripts"), QStringLiteral("n"));
+	request.functionName = QStringLiteral("getinfo_119_status");
+	result               = {};
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	QCOMPARE(result.stringResult, QStringLiteral("false"));
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 

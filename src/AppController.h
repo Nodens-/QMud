@@ -205,9 +205,11 @@ class AppController : public QObject
 		/**
 		 * @brief Opens a plain text document in notepad/text view.
 		 * @param path Text document path.
+		 * @param relatedRuntime Optional world runtime associated with the text document.
 		 * @return `true` on successful open.
 		 */
-		[[nodiscard]] bool              openTextDocument(const QString &path) const;
+		[[nodiscard]] bool              openTextDocument(const QString &path,
+		                                                 WorldRuntime  *relatedRuntime = nullptr) const;
 		/**
 		 * @brief Opens multiple worlds from persisted list.
 		 * @param items World file list.

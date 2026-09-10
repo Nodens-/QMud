@@ -674,6 +674,7 @@ class WorldPreferencesDialog : public QDialog
 		bool                          m_inputFontItalic{false};
 		int                           m_inputFontCharset{0};
 		QCheckBox                    *m_noEchoOff{nullptr};
+		QCheckBox                    *m_echoForceTerminatesPartialPrompts{nullptr};
 		QCheckBox                    *m_enableSpamPrevention{nullptr};
 		QSpinBox                     *m_spamLineCount{nullptr};
 		QLineEdit                    *m_spamMessage{nullptr};

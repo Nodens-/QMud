@@ -4436,10 +4436,15 @@ namespace
 
 	bool isLuaScriptingEnabled(const QMap<QString, QString> &attrs)
 	{
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
 		if (!isEnabledFlag(attrs.value(QStringLiteral("enable_scripts"))))
 			return false;
 		const QString language = attrs.value(QStringLiteral("script_language"));
 		return language.compare(QStringLiteral("Lua"), Qt::CaseInsensitive) == 0;
+#else
+		Q_UNUSED(attrs);
+		return false;
+#endif
 	}
 
 	QSharedPointer<LuaCallbackEngine> makeNonOwningLuaEngineRef(LuaCallbackEngine *engine)
@@ -4574,7 +4579,7 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent), m_openSequence(ne
 	};
 	callbacks.onMxpDiagnosticNeeded = [this](int level)
 	{
-		if (isLuaScriptingEnabled(m_worldAttributes) && m_luaCallbacks &&
+		if (luaScriptingAvailable() &&
 		    !m_worldAttributes.value(QStringLiteral("on_mxp_error")).trimmed().isEmpty())
 		{
 			return true;
@@ -5365,7 +5370,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 	}
 	if (!events.isEmpty() || !modeChanges.isEmpty())
 		mxpStartUp();
-	const bool luaEnabled = isLuaScriptingEnabled(m_worldAttributes);
+	const bool luaEnabled = luaScriptingAvailable();
 
 	const bool ignoreMxpColourChanges =
 	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("ignore_mxp_colour_changes")));
@@ -9696,6 +9701,11 @@ WorldRuntime::StopTriggerEvaluation WorldRuntime::stopTriggerEvaluation() const
 LuaCallbackEngine *WorldRuntime::luaCallbacks() const
 {
 	return m_luaCallbacks;
+}
+
+bool WorldRuntime::luaScriptingAvailable() const
+{
+	return m_luaCallbacks && isLuaScriptingEnabled(m_worldAttributes);
 }
 
 const ILuaExecutor *WorldRuntime::luaExecutor() const
@@ -15015,7 +15025,7 @@ void WorldRuntime::fireWorldLoseFocusHandlers()
 void WorldRuntime::mxpError(int level, long messageNumber, const QString &message)
 {
 	if (const QString callbackName = m_worldAttributes.value(QStringLiteral("on_mxp_error")).trimmed();
-	    !callbackName.isEmpty() && m_luaCallbacks)
+	    !callbackName.isEmpty() && luaScriptingAvailable())
 	{
 		const QSharedPointer<LuaCallbackEngine> worldLua(m_luaCallbacks,
 		                                                 [](LuaCallbackEngine * /*unused*/) {});
@@ -15081,7 +15091,7 @@ void WorldRuntime::mxpStartUp()
 		return;
 	m_mxpActive = true;
 
-	if (isLuaScriptingEnabled(m_worldAttributes) && m_luaCallbacks)
+	if (luaScriptingAvailable())
 	{
 		const QString callbackName = m_worldAttributes.value(QStringLiteral("on_mxp_start")).trimmed();
 		if (!callbackName.isEmpty())
@@ -15110,7 +15120,7 @@ void WorldRuntime::mxpShutDown()
 	resetMxpRenderState();
 	clearAnsiActionContext();
 
-	if (isLuaScriptingEnabled(m_worldAttributes) && m_luaCallbacks)
+	if (luaScriptingAvailable())
 	{
 		const QString callbackName = m_worldAttributes.value(QStringLiteral("on_mxp_stop")).trimmed();
 		if (!callbackName.isEmpty())
@@ -17029,7 +17039,7 @@ void WorldRuntime::dispatchSingleEngineNoArgCallback(const QSharedPointer<LuaCal
 void WorldRuntime::dispatchWorldNoArgCallbackByAttribute(const QString &attributeName,
                                                          const bool     completionBarrier)
 {
-	if (attributeName.isEmpty() || !isLuaScriptingEnabled(m_worldAttributes) || !m_luaCallbacks)
+	if (attributeName.isEmpty() || !luaScriptingAvailable())
 		return;
 	const QString callbackName = m_worldAttributes.value(attributeName).trimmed();
 	if (callbackName.isEmpty())
@@ -17136,10 +17146,9 @@ void WorldRuntime::processActiveStateTransitionCommand(const ActiveStateTransiti
 	    });
 
 	PluginCallbackDispatchCommand worldCommand;
-	const bool                    hasWorldCommand =
-	    isLuaScriptingEnabled(m_worldAttributes) && m_luaCallbacks &&
-	    buildActiveStateNoArgCallbackCommand({makeNonOwningLuaEngineRef(m_luaCallbacks)}, worldCallbackName,
-	                                         false, worldCommand);
+	const bool hasWorldCommand = luaScriptingAvailable() && buildActiveStateNoArgCallbackCommand(
+	                                                            {makeNonOwningLuaEngineRef(m_luaCallbacks)},
+	                                                            worldCallbackName, false, worldCommand);
 	PluginCallbackDispatchCommand pluginCommand;
 	const bool                    hasPluginCommand = buildActiveStateNoArgCallbackCommand(
 	    collectPluginCallbackRecipients(pluginCallbackName), pluginCallbackName, true, pluginCommand);
@@ -20060,6 +20069,9 @@ void WorldRuntime::applyNumericWorldOption(const WorldNumericOptionBinding bindi
 		case DoubleClickSends:
 			view->m_doubleClickSends = enabled;
 			break;
+		case EchoForceTerminatesPartialPrompts:
+			view->m_echoForceTerminatesPartialPrompts = enabled;
+			break;
 		case EscapeDeletesInput:
 			view->m_escapeDeletesInput = enabled;
 			break;
@@ -20256,7 +20268,8 @@ void WorldRuntime::setWorldAttributeImpl(const QString &key, const QString &valu
                                          const bool applyGenericEffects)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setWorldAttribute");
-	QString normalizedValue = value;
+	const bool luaScriptingWasAvailable = luaScriptingAvailable();
+	QString    normalizedValue          = value;
 	if (isLikelyPathAttributeName(key))
 		normalizedValue = normalizePathForRuntime(normalizedValue);
 	if (key == QStringLiteral("auto_log_file_name"))
@@ -20272,6 +20285,9 @@ void WorldRuntime::setWorldAttributeImpl(const QString &key, const QString &valu
 		return;
 	}
 	m_worldAttributes.insert(key, normalizedValue);
+	const bool luaScriptingIsAvailable = luaScriptingAvailable();
+	if (luaScriptingIsAvailable != luaScriptingWasAvailable)
+		emit luaScriptingAvailabilityChanged(luaScriptingIsAvailable);
 	if (applyGenericEffects && m_view)
 	{
 		if (key == QStringLiteral("tab_completion_excludes_symbol_prefix"))

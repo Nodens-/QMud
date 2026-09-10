@@ -11393,7 +11393,11 @@ namespace
 
 		const auto *context         = activeCallbackContextConst(engine);
 		const bool  triggerPriority = !queue && context && context->directTriggerScriptActionPriority;
-		bool        changed         = false;
+		const CallbackActionSourceOverride actionSourceOverride = callbackActionSourceOverride(context);
+		const unsigned short               actionSource =
+		    actionSourceOverride.active ? actionSourceOverride.source
+		                                : static_cast<unsigned short>(WorldRuntime::eUnknownActionSource);
+		bool changed = false;
 		for (const QString &line : lines)
 		{
 			if (!QMudCommandQueue::shouldQueueCommand(speedWalkDelay, queue,
@@ -11402,7 +11406,7 @@ namespace
 				immediateLines.append(line);
 				continue;
 			}
-			const QString encoded = QMudCommandQueue::encodeQueueEntry(line, queue, echo, log);
+			const QString encoded = QMudCommandQueue::encodeQueueEntry(line, queue, echo, log, actionSource);
 			if (triggerPriority)
 			{
 				const int queueSize = sizeToInt(snapshot.queuedCommands.size());
@@ -28728,16 +28732,9 @@ static int luaGetInfo(lua_State *L)
 		return 1;
 	}
 	case 119:
-	{
-		WorldRuntime::RuntimeCountersSnapshot snapshot;
-		if (!resolveRuntimeCountersSnapshotForApi(engine, runtime, snapshot))
-		{
-			lua_pushboolean(L, false);
-			return 1;
-		}
-		lua_pushboolean(L, snapshot.hasLuaCallbacks);
+		lua_pushboolean(L, isEnabledValue(resolveWorldAttributeValueForApi(
+		                       engine, runtime, QStringLiteral("enable_scripts"))));
 		return 1;
-	}
 	case 120:
 	{
 		if (const auto *context = activeCallbackContextConst(engine);
@@ -35116,11 +35113,7 @@ static int luaGetQueue(lua_State *L)
 	lua_newtable(L);
 	for (int i = 0; i < commands.size(); ++i)
 	{
-		QString entry = commands.at(i);
-		if (entry.size() > 1)
-			entry = entry.mid(1);
-		else if (!entry.isEmpty())
-			entry.clear();
+		const QString    entry = QMudCommandQueue::decodeQueueEntry(commands.at(i)).payload;
 		const QByteArray bytes = entry.toUtf8();
 		lua_pushlstring(L, bytes.constData(), bytes.size());
 		lua_rawseti(L, -2, i + 1);

@@ -234,6 +234,18 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		m_view->setRuntimeObserver(worldRuntime);
 	connect(worldRuntime, &WorldRuntime::worldAttributeChanged, this,
 	        &WorldChildWindow::onWorldAttributeChanged, Qt::UniqueConnection);
+	if (primary)
+	{
+		connect(worldRuntime, &WorldRuntime::luaScriptingAvailabilityChanged, this,
+		        [this](bool)
+		        {
+			        if (MainWindowHost *main = resolveMainWindowHost(window()))
+			        {
+				        main->updateEditActions();
+				        main->refreshActionState();
+			        }
+		        });
+	}
 	if (m_commandProcessor)
 	{
 		Q_ASSERT(primary);

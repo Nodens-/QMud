@@ -2140,6 +2140,10 @@ void WorldPreferencesDialog::accept()
 			m_runtime->setWorldAttribute(QStringLiteral("no_echo_off"), m_noEchoOff->isChecked()
 			                                                                ? QStringLiteral("1")
 			                                                                : QStringLiteral("0"));
+		if (m_echoForceTerminatesPartialPrompts)
+			m_runtime->setWorldAttribute(
+			    QStringLiteral("echo_force_terminates_partial_prompts"),
+			    m_echoForceTerminatesPartialPrompts->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
 		if (m_enableSpamPrevention)
 			m_runtime->setWorldAttribute(QStringLiteral("enable_spam_prevention"),
 			                             m_enableSpamPrevention->isChecked() ? QStringLiteral("1")
@@ -6068,6 +6072,10 @@ void WorldPreferencesDialog::buildUi()
 	m_translateBackslash     = new QCheckBox(QStringLiteral("&Translate Backslash Sequences"), commandsPage);
 	m_keepCommandsOnSameLine = new QCheckBox(QStringLiteral("Keep Commands On Prompt Line"), commandsPage);
 	m_noEchoOff              = new QCheckBox(QStringLiteral("Ignore 'Echo Off' messages"), commandsPage);
+	m_echoForceTerminatesPartialPrompts =
+	    new QCheckBox(QStringLiteral("Echo Force-Terminates Partial Prompts"), commandsPage);
+	m_echoForceTerminatesPartialPrompts->setToolTip(
+	    QStringLiteral("Enable if the MUD's prompt does not appear properly."));
 	commandsRight->addWidget(m_autoRepeat);
 	commandsRight->addWidget(m_lowerCaseTabCompletion);
 	commandsRight->addWidget(m_tabCompletionExcludesSymbolPrefix);
@@ -6077,6 +6085,7 @@ void WorldPreferencesDialog::buildUi()
 	commandsRight->addWidget(m_translateBackslash);
 	commandsRight->addWidget(m_keepCommandsOnSameLine);
 	commandsRight->addWidget(m_noEchoOff);
+	commandsRight->addWidget(m_echoForceTerminatesPartialPrompts);
 	commandsRight->addSpacing(12);
 
 	auto *tabCompletionButton = new QPushButton(QStringLiteral("Tab Completion..."), commandsPage);
@@ -6825,7 +6834,7 @@ void WorldPreferencesDialog::buildUi()
 				        }
 				        if (app)
 				        {
-					        (void)app->openTextDocument(resolvedFileName);
+					        (void)app->openTextDocument(resolvedFileName, m_runtime);
 					        tryRaiseConfiguredEditorWindow();
 					        return;
 				        }
@@ -10213,6 +10222,9 @@ void WorldPreferencesDialog::populateCommands()
 		    formatFontStyleText(m_inputFontHeight->value(), m_inputFontWeight, m_inputFontItalic));
 	if (m_noEchoOff)
 		m_noEchoOff->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("no_echo_off"))));
+	if (m_echoForceTerminatesPartialPrompts)
+		m_echoForceTerminatesPartialPrompts->setChecked(
+		    qmudIsEnabledFlag(attrs.value(QStringLiteral("echo_force_terminates_partial_prompts"))));
 	if (m_enableSpamPrevention)
 		m_enableSpamPrevention->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_spam_prevention"))));
@@ -10315,11 +10327,8 @@ void WorldPreferencesDialog::populateScripting() const
 		m_logScriptErrors->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("log_script_errors"))));
 	if (m_scriptIsActive)
 	{
-		const bool    enabled  = qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_scripts")));
-		const QString language = attrs.value(QStringLiteral("script_language"), QStringLiteral("Lua"));
-		const bool    lua      = language.compare(QStringLiteral("lua"), Qt::CaseInsensitive) == 0;
-		m_scriptIsActive->setText(enabled && lua ? QStringLiteral("(active)")
-		                                         : QStringLiteral("(not active)"));
+		m_scriptIsActive->setText(m_runtime->luaScriptingAvailable() ? QStringLiteral("(active)")
+		                                                             : QStringLiteral("(not active)"));
 	}
 	if (m_scriptExecutionTime)
 		m_scriptExecutionTime->setText(

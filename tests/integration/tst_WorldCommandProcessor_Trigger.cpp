@@ -11,6 +11,7 @@
 #include "WorldCommandProcessorUtils.h"
 #include "WorldOptions.h"
 #include "WorldRuntimeTestAccess.h"
+#include "WorldView.h"
 #include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
@@ -380,6 +381,73 @@ namespace
 				                 QStringLiteral("qcmd-priority-c83"), QStringLiteral("qcmd-priority-e05"),
 				                 QStringLiteral("qcmd-tail-9f31"), QStringLiteral("qcmd-normal-d64")}));
 				QCOMPARE(queuedTypes(processor), (QList<bool>{false, false, false, false, true, false}));
+			}
+
+			static void fragmentedWorldTriggerEchoFollowsFinalizedLine()
+			{
+				QTcpServer server;
+				if (!server.listen(QHostAddress::LocalHost, 0))
+					QSKIP("Local TCP listen is unavailable in this environment.");
+
+				WorldRuntime runtime;
+				runtime.setWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
+				                          QStringLiteral("1"));
+
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+				trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("^fragmented line$"));
+				trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("1"));
+				trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToWorld));
+				trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+				trigger.children.insert(QStringLiteral("send"), QStringLiteral("trigger command"));
+				WorldRuntimeTestAccess::triggers(runtime).push_back(trigger);
+				runtime.markTriggersChanged();
+
+				WorldView             view;
+				WorldCommandProcessor processor;
+				view.setRuntime(&runtime);
+				view.applyRuntimeSettings();
+				processor.setView(&view);
+				processor.setRuntime(&runtime);
+				runtime.setCommandProcessor(&processor);
+				QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &processor,
+				                 &WorldCommandProcessor::onIncomingStyledLineReceived);
+				QObject::connect(&runtime, &WorldRuntime::incomingStyledLinePartialReceived, &processor,
+				                 &WorldCommandProcessor::onIncomingStyledLinePartialReceived);
+
+				QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+				QVERIFY(connectedSpy.isValid());
+				QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+				QVERIFY(serverAcceptedSpy.isValid());
+				QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+				QVERIFY(connectedSpy.wait(5000));
+				QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0,
+				                         5000);
+				QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+				QVERIFY(!acceptedSocket.isNull());
+
+				runtime.receiveRawData(QByteArrayLiteral("fragmented "));
+				QTRY_COMPARE(view.outputLines().constLast(), QStringLiteral("fragmented "));
+				runtime.receiveRawData(QByteArrayLiteral("line\n"));
+
+				QTRY_COMPARE(runtime.triggers().constFirst().matched, 1);
+				QCOMPARE(runtime.lines().size(), qsizetype{2});
+				QCOMPARE(runtime.lines().at(0).text, QStringLiteral("fragmented line"));
+				QCOMPARE(runtime.lines().at(1).text, QStringLiteral("trigger command"));
+				QCOMPARE(view.outputLines(),
+				         QStringList({QStringLiteral("fragmented line"), QStringLiteral("trigger command")}));
+
+				QByteArray received;
+				auto       receivedTriggerCommand = [&acceptedSocket, &received]
+				{
+					if (acceptedSocket->bytesAvailable() == 0)
+						acceptedSocket->waitForReadyRead(10);
+					received += acceptedSocket->readAll();
+					return received.contains("trigger command\r\n");
+				};
+				QTRY_VERIFY_WITH_TIMEOUT(receivedTriggerCommand(), 5000);
 			}
 
 			static void userMacroCommandSuppressesAutoSayDuringEvaluation()

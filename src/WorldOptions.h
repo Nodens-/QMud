@@ -180,6 +180,7 @@ enum class WorldNumericOptionBinding
 	DisplayMyInput,
 	DoubleClickInserts,
 	DoubleClickSends,
+	EchoForceTerminatesPartialPrompts,
 	EscapeDeletesInput,
 	FadeOutputAfterSeconds,
 	FadeOutputOpacityPercent,

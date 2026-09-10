@@ -1056,6 +1056,35 @@ namespace
 				QVERIFY(!restoredExcludeSymbolSuffix->isChecked());
 			}
 
+			void echoForceTerminatesPartialPromptsDefaultsOffAndPersists()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("echo_force_terminates_partial_prompts")),
+				    QStringLiteral("n"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				QCheckBox *const       option =
+				    findCheckBoxByText(dialog, QStringLiteral("Echo Force-Terminates Partial Prompts"));
+				QVERIFY(option);
+				QVERIFY(!option->isChecked());
+				QCOMPARE(option->toolTip(),
+				         QStringLiteral("Enable if the MUD's prompt does not appear properly."));
+
+				option->setChecked(true);
+				dialog.accept();
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("echo_force_terminates_partial_prompts")),
+				    QStringLiteral("1"));
+
+				WorldPreferencesDialog restoredDialog(&runtime, nullptr);
+				QCheckBox *const       restoredOption = findCheckBoxByText(
+				    restoredDialog, QStringLiteral("Echo Force-Terminates Partial Prompts"));
+				QVERIFY(restoredOption);
+				QVERIFY(restoredOption->isChecked());
+			}
+
 			void customColoursLoadPersistAndCreateMissingCanonicalEntries()
 			{
 				WorldRuntime::Colour existing;
