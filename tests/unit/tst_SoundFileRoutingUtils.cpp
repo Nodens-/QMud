@@ -96,88 +96,89 @@ namespace
 			return {};
 		return file.fileName();
 	}
+	/**
+	 * @brief QTest fixture for sound file playback backend routing.
+	 */
+	class tst_SoundFileRoutingUtils : public QObject
+	{
+			Q_OBJECT
+
+		private slots:
+			/**
+			 * @brief Verifies ordinary PCM WAV files are routed to QSoundEffect.
+			 */
+			static void pcmWaveUsesSoundEffect()
+			{
+				QTemporaryDir dir;
+				QVERIFY(dir.isValid());
+
+				const QString path = writeSoundFile(dir, QStringLiteral("plain.wav"), waveBytes(0x0001));
+				QVERIFY(!path.isEmpty());
+
+				QCOMPARE(soundFilePlaybackBackendForFile(path), SoundFilePlaybackBackend::QSoundEffect);
+			}
+
+			/**
+			 * @brief Verifies extensible PCM WAV files are routed to QSoundEffect.
+			 */
+			static void extensiblePcmWaveUsesSoundEffect()
+			{
+				QTemporaryDir dir;
+				QVERIFY(dir.isValid());
+
+				const QString path =
+				    writeSoundFile(dir, QStringLiteral("extensible.wave"), waveBytes(0xFFFE, true));
+				QVERIFY(!path.isEmpty());
+
+				QCOMPARE(soundFilePlaybackBackendForFile(path), SoundFilePlaybackBackend::QSoundEffect);
+			}
+
+			/**
+			 * @brief Verifies compressed WAV containers are routed to QMediaPlayer.
+			 */
+			static void compressedWaveUsesMediaPlayer()
+			{
+				QTemporaryDir dir;
+				QVERIFY(dir.isValid());
+
+				const QString path = writeSoundFile(dir, QStringLiteral("compressed.wav"), waveBytes(0x0055));
+				QVERIFY(!path.isEmpty());
+
+				QCOMPARE(soundFilePlaybackBackendForFile(path), SoundFilePlaybackBackend::QMediaPlayer);
+			}
+
+			/**
+			 * @brief Verifies malformed WAV files are routed away from QSoundEffect.
+			 */
+			static void malformedWaveUsesMediaPlayer()
+			{
+				QTemporaryDir dir;
+				QVERIFY(dir.isValid());
+
+				const QString path =
+				    writeSoundFile(dir, QStringLiteral("broken.wav"), QByteArrayLiteral("not wave"));
+				QVERIFY(!path.isEmpty());
+
+				QCOMPARE(soundFilePlaybackBackendForFile(path), SoundFilePlaybackBackend::QMediaPlayer);
+			}
+
+			/**
+			 * @brief Verifies non-WAV file names use QMediaPlayer.
+			 */
+			static void nonWaveUsesMediaPlayer()
+			{
+				QTemporaryDir dir;
+				QVERIFY(dir.isValid());
+
+				const QString path =
+				    writeSoundFile(dir, QStringLiteral("music.ogg"), QByteArrayLiteral("OggS"));
+				QVERIFY(!path.isEmpty());
+
+				QCOMPARE(soundFilePlaybackBackendForFile(path), SoundFilePlaybackBackend::QMediaPlayer);
+			}
+	};
+
 } // namespace
-
-/**
- * @brief QTest fixture for sound file playback backend routing.
- */
-class tst_SoundFileRoutingUtils : public QObject
-{
-		Q_OBJECT
-
-	private slots:
-		/**
-		 * @brief Verifies ordinary PCM WAV files are routed to QSoundEffect.
-		 */
-		static void pcmWaveUsesSoundEffect()
-		{
-			QTemporaryDir dir;
-			QVERIFY(dir.isValid());
-
-			const QString path = writeSoundFile(dir, QStringLiteral("plain.wav"), waveBytes(0x0001));
-			QVERIFY(!path.isEmpty());
-
-			QCOMPARE(soundFilePlaybackBackendForFile(path), SoundFilePlaybackBackend::QSoundEffect);
-		}
-
-		/**
-		 * @brief Verifies extensible PCM WAV files are routed to QSoundEffect.
-		 */
-		static void extensiblePcmWaveUsesSoundEffect()
-		{
-			QTemporaryDir dir;
-			QVERIFY(dir.isValid());
-
-			const QString path =
-			    writeSoundFile(dir, QStringLiteral("extensible.wave"), waveBytes(0xFFFE, true));
-			QVERIFY(!path.isEmpty());
-
-			QCOMPARE(soundFilePlaybackBackendForFile(path), SoundFilePlaybackBackend::QSoundEffect);
-		}
-
-		/**
-		 * @brief Verifies compressed WAV containers are routed to QMediaPlayer.
-		 */
-		static void compressedWaveUsesMediaPlayer()
-		{
-			QTemporaryDir dir;
-			QVERIFY(dir.isValid());
-
-			const QString path = writeSoundFile(dir, QStringLiteral("compressed.wav"), waveBytes(0x0055));
-			QVERIFY(!path.isEmpty());
-
-			QCOMPARE(soundFilePlaybackBackendForFile(path), SoundFilePlaybackBackend::QMediaPlayer);
-		}
-
-		/**
-		 * @brief Verifies malformed WAV files are routed away from QSoundEffect.
-		 */
-		static void malformedWaveUsesMediaPlayer()
-		{
-			QTemporaryDir dir;
-			QVERIFY(dir.isValid());
-
-			const QString path =
-			    writeSoundFile(dir, QStringLiteral("broken.wav"), QByteArrayLiteral("not wave"));
-			QVERIFY(!path.isEmpty());
-
-			QCOMPARE(soundFilePlaybackBackendForFile(path), SoundFilePlaybackBackend::QMediaPlayer);
-		}
-
-		/**
-		 * @brief Verifies non-WAV file names use QMediaPlayer.
-		 */
-		static void nonWaveUsesMediaPlayer()
-		{
-			QTemporaryDir dir;
-			QVERIFY(dir.isValid());
-
-			const QString path = writeSoundFile(dir, QStringLiteral("music.ogg"), QByteArrayLiteral("OggS"));
-			QVERIFY(!path.isEmpty());
-
-			QCOMPARE(soundFilePlaybackBackendForFile(path), SoundFilePlaybackBackend::QMediaPlayer);
-		}
-};
 
 QTEST_APPLESS_MAIN(tst_SoundFileRoutingUtils)
 

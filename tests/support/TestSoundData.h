@@ -56,7 +56,7 @@ namespace QMudTestSoundData
 		const quint32     dataSize = kByteRate * static_cast<quint32>(qMax(1, durationMilliseconds)) / 1000U;
 
 		QByteArray        bytes;
-		bytes.reserve(static_cast<qsizetype>(44U + dataSize));
+		bytes.reserve(qsizetype{44} + static_cast<qsizetype>(dataSize));
 		bytes.append("RIFF", 4);
 		appendLittleEndian32(bytes, 36U + dataSize);
 		bytes.append("WAVE", 4);

@@ -10,71 +10,77 @@
 
 #include <QtTest/QTest>
 
-/**
- * @brief QTest fixture covering WorldCommandProcessor Regex scenarios.
- */
-class tst_WorldCommandProcessor_Regex : public QObject
+namespace
 {
-		Q_OBJECT
 
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void wildcardConvertsToNonGreedyCapture()
-		{
-			const QString pattern =
-			    QMudCommandPattern::convertToRegularExpression(QStringLiteral("look * at *"), true, true);
-			const QRegularExpression regex(pattern);
-			QVERIFY(regex.isValid());
+	/**
+	 * @brief QTest fixture covering WorldCommandProcessor Regex scenarios.
+	 */
+	class tst_WorldCommandProcessor_Regex : public QObject
+	{
+			Q_OBJECT
 
-			const QRegularExpressionMatch match = regex.match(QStringLiteral("look red dragon at horizon"));
-			QVERIFY(match.hasMatch());
-			QCOMPARE(match.captured(1), QStringLiteral("red dragon"));
-			QCOMPARE(match.captured(2), QStringLiteral("horizon"));
-		}
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void wildcardConvertsToNonGreedyCapture()
+			{
+				const QString pattern =
+				    QMudCommandPattern::convertToRegularExpression(QStringLiteral("look * at *"), true, true);
+				const QRegularExpression regex(pattern);
+				QVERIFY(regex.isValid());
 
-		void wholeLineAnchoringCanBeDisabled()
-		{
-			const QString anchored =
-			    QMudCommandPattern::convertToRegularExpression(QStringLiteral("abc"), true, true);
-			const QString partial =
-			    QMudCommandPattern::convertToRegularExpression(QStringLiteral("abc"), false, true);
+				const QRegularExpressionMatch match =
+				    regex.match(QStringLiteral("look red dragon at horizon"));
+				QVERIFY(match.hasMatch());
+				QCOMPARE(match.captured(1), QStringLiteral("red dragon"));
+				QCOMPARE(match.captured(2), QStringLiteral("horizon"));
+			}
 
-			QVERIFY(QRegularExpression(anchored).match(QStringLiteral("xabcx")).hasMatch() == false);
-			QVERIFY(QRegularExpression(partial).match(QStringLiteral("xabcx")).hasMatch());
-		}
+			void wholeLineAnchoringCanBeDisabled()
+			{
+				const QString anchored =
+				    QMudCommandPattern::convertToRegularExpression(QStringLiteral("abc"), true, true);
+				const QString partial =
+				    QMudCommandPattern::convertToRegularExpression(QStringLiteral("abc"), false, true);
 
-		void regexMetaCharactersAreEscaped()
-		{
-			const QString pattern =
-			    QMudCommandPattern::convertToRegularExpression(QStringLiteral("a+b(c).?"), true, true);
-			const QRegularExpression regex(pattern);
-			QVERIFY(regex.isValid());
-			QVERIFY(regex.match(QStringLiteral("a+b(c).?")).hasMatch());
-			QVERIFY(!regex.match(QStringLiteral("aaabcc")).hasMatch());
-		}
+				QVERIFY(QRegularExpression(anchored).match(QStringLiteral("xabcx")).hasMatch() == false);
+				QVERIFY(QRegularExpression(partial).match(QStringLiteral("xabcx")).hasMatch());
+			}
 
-		void controlCharactersAreHexEscaped()
-		{
-			const QString source  = QStringLiteral("left") + QChar(0x01) + QStringLiteral("right");
-			const QString pattern = QMudCommandPattern::convertToRegularExpression(source, true, true);
-			QVERIFY(pattern.contains(QStringLiteral("\\x01")));
+			void regexMetaCharactersAreEscaped()
+			{
+				const QString pattern =
+				    QMudCommandPattern::convertToRegularExpression(QStringLiteral("a+b(c).?"), true, true);
+				const QRegularExpression regex(pattern);
+				QVERIFY(regex.isValid());
+				QVERIFY(regex.match(QStringLiteral("a+b(c).?")).hasMatch());
+				QVERIFY(!regex.match(QStringLiteral("aaabcc")).hasMatch());
+			}
 
-			const QRegularExpression regex(pattern);
-			QVERIFY(regex.isValid());
-			QVERIFY(regex.match(source).hasMatch());
-		}
+			void controlCharactersAreHexEscaped()
+			{
+				const QString source  = QStringLiteral("left") + QChar(0x01) + QStringLiteral("right");
+				const QString pattern = QMudCommandPattern::convertToRegularExpression(source, true, true);
+				QVERIFY(pattern.contains(QStringLiteral("\\x01")));
 
-		void asteriskCanRemainLiteralWhenDisabled()
-		{
-			const QString pattern =
-			    QMudCommandPattern::convertToRegularExpression(QStringLiteral("value *"), true, false);
-			const QRegularExpression regex(pattern);
-			QVERIFY(regex.isValid());
-			QVERIFY(regex.match(QStringLiteral("value *")).hasMatch());
-			QVERIFY(!regex.match(QStringLiteral("value anything")).hasMatch());
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
+				const QRegularExpression regex(pattern);
+				QVERIFY(regex.isValid());
+				QVERIFY(regex.match(source).hasMatch());
+			}
+
+			void asteriskCanRemainLiteralWhenDisabled()
+			{
+				const QString pattern =
+				    QMudCommandPattern::convertToRegularExpression(QStringLiteral("value *"), true, false);
+				const QRegularExpression regex(pattern);
+				QVERIFY(regex.isValid());
+				QVERIFY(regex.match(QStringLiteral("value *")).hasMatch());
+				QVERIFY(!regex.match(QStringLiteral("value anything")).hasMatch());
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+
+} // namespace
 
 QTEST_APPLESS_MAIN(tst_WorldCommandProcessor_Regex)
 

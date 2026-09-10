@@ -12,73 +12,76 @@
 #include <QTextCursor>
 #include <QtTest/QTest>
 
-/**
- * @brief QTest fixture covering BraceMatch scenarios.
- */
-class tst_BraceMatch : public QObject
+namespace
 {
-		Q_OBJECT
 
-	// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void findsForwardMatchWithSelection()
-		{
-			constexpr int nestedPairs = 0x0001;
+	/**
+	 * @brief QTest fixture covering BraceMatch scenarios.
+	 */
+	class tst_BraceMatch : public QObject
+	{
+			Q_OBJECT
 
-			QPlainTextEdit edit;
-			edit.setPlainText(QStringLiteral("a(b[c]d)e"));
-			QTextCursor cursor = edit.textCursor();
-			cursor.setPosition(1);
-			edit.setTextCursor(cursor);
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void findsForwardMatchWithSelection()
+			{
+				constexpr int  nestedPairs = 0x0001;
 
-			QVERIFY(QMudBraceMatch::findMatchingBrace(&edit, true, nestedPairs));
-			QCOMPARE(edit.textCursor().selectedText(), QStringLiteral("(b[c]d)"));
-		}
+				QPlainTextEdit edit;
+				edit.setPlainText(QStringLiteral("a(b[c]d)e"));
+				QTextCursor cursor = edit.textCursor();
+				cursor.setPosition(1);
+				edit.setTextCursor(cursor);
 
-		void findsBackwardMatchWithoutSelection()
-		{
-			constexpr int nestedPairs = 0x0001;
+				QVERIFY(QMudBraceMatch::findMatchingBrace(&edit, true, nestedPairs));
+				QCOMPARE(edit.textCursor().selectedText(), QStringLiteral("(b[c]d)"));
+			}
 
-			QPlainTextEdit edit;
-			edit.setPlainText(QStringLiteral("a(b[c]d)e"));
-			QTextCursor cursor = edit.textCursor();
-			cursor.setPosition(7);
-			edit.setTextCursor(cursor);
+			void findsBackwardMatchWithoutSelection()
+			{
+				constexpr int  nestedPairs = 0x0001;
 
-			QVERIFY(QMudBraceMatch::findMatchingBrace(&edit, false, nestedPairs));
-			QCOMPARE(edit.textCursor().position(), 1);
-		}
+				QPlainTextEdit edit;
+				edit.setPlainText(QStringLiteral("a(b[c]d)e"));
+				QTextCursor cursor = edit.textCursor();
+				cursor.setPosition(7);
+				edit.setTextCursor(cursor);
 
-		void escapedDelimiterIsIgnored()
-		{
-			constexpr int nestedPairs     = 0x0001;
-			constexpr int backslashEscape = 0x0020;
+				QVERIFY(QMudBraceMatch::findMatchingBrace(&edit, false, nestedPairs));
+				QCOMPARE(edit.textCursor().position(), 1);
+			}
 
-			QPlainTextEdit edit;
-			edit.setPlainText(QStringLiteral("\\(x)"));
-			QTextCursor cursor = edit.textCursor();
-			cursor.setPosition(1);
-			edit.setTextCursor(cursor);
+			void escapedDelimiterIsIgnored()
+			{
+				constexpr int  nestedPairs     = 0x0001;
+				constexpr int  backslashEscape = 0x0020;
 
-			QVERIFY(!QMudBraceMatch::findMatchingBrace(&edit, false, nestedPairs | backslashEscape));
-		}
+				QPlainTextEdit edit;
+				edit.setPlainText(QStringLiteral("\\(x)"));
+				QTextCursor cursor = edit.textCursor();
+				cursor.setPosition(1);
+				edit.setTextCursor(cursor);
 
-		void noMatchReturnsFalse()
-		{
-			QPlainTextEdit edit;
-			edit.setPlainText(QStringLiteral("(abc"));
-			QTextCursor cursor = edit.textCursor();
-			cursor.setPosition(0);
-			edit.setTextCursor(cursor);
+				QVERIFY(!QMudBraceMatch::findMatchingBrace(&edit, false, nestedPairs | backslashEscape));
+			}
 
-			QVERIFY(!QMudBraceMatch::findMatchingBrace(&edit, true, 0));
-		}
-	// NOLINTEND(readability-convert-member-functions-to-static)
-};
+			void noMatchReturnsFalse()
+			{
+				QPlainTextEdit edit;
+				edit.setPlainText(QStringLiteral("(abc"));
+				QTextCursor cursor = edit.textCursor();
+				cursor.setPosition(0);
+				edit.setTextCursor(cursor);
+
+				QVERIFY(!QMudBraceMatch::findMatchingBrace(&edit, true, 0));
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+
+} // namespace
 
 QTEST_MAIN(tst_BraceMatch)
-
-
 
 #if __has_include("tst_BraceMatch.moc")
 #include "tst_BraceMatch.moc"

@@ -107,302 +107,305 @@ namespace
 		}
 		return 0;
 	}
-} // namespace
 
-/**
- * @brief QTest fixture covering bridge dispatcher timeout behavior.
- */
-class tst_LuaBridgeDispatcherIntegration : public QObject
-{
-		Q_OBJECT
+	/**
+	 * @brief QTest fixture covering bridge dispatcher timeout behavior.
+	 */
+	class tst_LuaBridgeDispatcherIntegration : public QObject
+	{
+			Q_OBJECT
 
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void init()
-		{
-			qmudSetLuaBridgeInvokeTimeoutMs(30000);
-		}
-
-		void cleanup()
-		{
-			qmudSetLuaBridgeInvokeTimeoutMs(30000);
-		}
-
-		void sameThreadInvokeRunsInlineAndSucceeds()
-		{
-			QObject          target;
-			std::atomic_bool invoked{false};
-			QVERIFY(qmudLuaBridgeInvokeOnObjectThread(&target, [&]() { invoked.store(true); }));
-			QVERIFY(invoked.load());
-			QCOMPARE(qmudLuaBridgeLastStatus(), LuaBridgeInvokeStatus::Success);
-		}
-
-		void reentrantBridgeCycleCompletes()
-		{
-			QThread workerThread;
-			workerThread.setObjectName(QStringLiteral("tst_LuaBridgeReentrantWorker"));
-			QObject  workerTarget;
-			QObject  mainTarget;
-			QThread *mainThread = QThread::currentThread();
-			workerTarget.moveToThread(&workerThread);
-			workerThread.start();
-			const auto stopWorker = qScopeGuard(
-			    [&]()
-			    {
-				    if (workerTarget.thread() == &workerThread)
-				    {
-					    static_cast<void>(
-					        qmudLuaBridgeInvokeOnObjectThread(&workerTarget, [&workerTarget, mainThread]
-					                                          { workerTarget.moveToThread(mainThread); }));
-				    }
-				    workerThread.quit();
-				    static_cast<void>(workerThread.wait());
-			    });
-
-			QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&workerTarget));
-			QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&mainTarget));
-
-			std::atomic_bool workerCallbackInvoked{false};
-			std::atomic_bool mainCallbackInvoked{false};
-			const bool       outerOk = qmudLuaBridgeInvokeOnObjectThread(
-			    &workerTarget,
-			    [&]()
-			    {
-				    const bool innerOk = qmudLuaBridgeInvokeOnObjectThread(
-				        &mainTarget, [&]() { mainCallbackInvoked.store(true); });
-				    if (innerOk)
-					    workerCallbackInvoked.store(true);
-			    });
-
-			QVERIFY(outerOk);
-			QVERIFY(workerCallbackInvoked.load());
-			QVERIFY(mainCallbackInvoked.load());
-			QCOMPARE(qmudLuaBridgeLastStatus(), LuaBridgeInvokeStatus::Success);
-		}
-
-		void queuedInvokeTimeoutCancelsRequest()
-		{
-			qmudSetLuaBridgeInvokeTimeoutMs(kBridgeTestInvokeTimeoutMs);
-			QThread workerThread;
-			workerThread.setObjectName(QStringLiteral("tst_LuaBridgeTimeoutWorker"));
-			QObject  target;
-			QObject  blocker;
-			QThread *mainThread = QThread::currentThread();
-			target.moveToThread(&workerThread);
-			blocker.moveToThread(&workerThread);
-			workerThread.start();
-			const auto stopWorker = qScopeGuard(
-			    [&]()
-			    {
-				    QElapsedTimer deadline;
-				    deadline.start();
-				    while (target.thread() == &workerThread && deadline.elapsed() < 5000)
-				    {
-					    if (qmudLuaBridgeInvokeOnObjectThread(&target, [&target, mainThread]
-					                                          { target.moveToThread(mainThread); }))
-					    {
-						    break;
-					    }
-					    QThread::msleep(25);
-				    }
-				    workerThread.quit();
-				    static_cast<void>(workerThread.wait());
-			    });
-
-			QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&target));
-
-			std::atomic_bool blockerEntered{false};
-			QVERIFY(QMetaObject::invokeMethod(
-			    &blocker,
-			    [&]()
-			    {
-				    blockerEntered.store(true);
-				    QThread::sleep(1);
-			    },
-			    Qt::QueuedConnection));
-			QTRY_VERIFY_WITH_TIMEOUT(blockerEntered.load(), 2000);
-
-			std::atomic_bool callbackInvoked{false};
-			QVERIFY(!qmudLuaBridgeInvokeOnObjectThread(&target, [&]() { callbackInvoked.store(true); }));
-			QCOMPARE(qmudLuaBridgeLastStatus(), LuaBridgeInvokeStatus::RequestCanceledBeforeDispatch);
-			QVERIFY(
-			    qmudLuaBridgeLastError().contains(QStringLiteral("timed out and canceled queued request")));
-			QVERIFY(!callbackInvoked.load());
-		}
-
-		void inFlightRequestTimeoutWaitsForCompletion()
-		{
-			qmudSetLuaBridgeInvokeTimeoutMs(kBridgeTestInvokeTimeoutMs);
-			QTemporaryDir tempDir;
-			QVERIFY(tempDir.isValid());
-			const QString logPath = tempDir.filePath(QStringLiteral("bridge_fatal.log"));
-
-			QProcess      process;
-			process.setProgram(QCoreApplication::applicationFilePath());
-			process.setArguments({QStringLiteral("--bridge-inflight-timeout-child")});
-			QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-			env.insert(QStringLiteral("QMUD_BRIDGE_FATAL_LOG"), logPath);
-			process.setProcessEnvironment(env);
-			process.start();
-			QVERIFY(process.waitForStarted());
-			QVERIFY(process.waitForFinished(10000));
-
-			QFile      logFile(logPath);
-			QByteArray fatalLog;
-			if (logFile.open(QIODevice::ReadOnly | QIODevice::Text))
-				fatalLog = logFile.readAll();
-
-			const QByteArray output =
-			    process.readAllStandardError() + process.readAllStandardOutput() + fatalLog;
-			QCOMPARE(process.exitStatus(), QProcess::NormalExit);
-			QCOMPARE(process.exitCode(), 0);
-			QVERIFY(!output.contains(
-			    QStringLiteral("Invoke timed out after %1 ms while request was already executing")
-			        .arg(kBridgeTestInvokeTimeoutMs)
-			        .toUtf8()));
-		}
-
-		void queuedInvokeThroughputStaysWithinBudget()
-		{
-			QThread workerThread;
-			workerThread.setObjectName(QStringLiteral("tst_LuaBridgeThroughputWorker"));
-			QObject  target;
-			QThread *mainThread = QThread::currentThread();
-			target.moveToThread(&workerThread);
-			workerThread.start();
-			const auto stopWorker = qScopeGuard(
-			    [&]()
-			    {
-				    if (target.thread() == &workerThread)
-				    {
-					    static_cast<void>(qmudLuaBridgeInvokeOnObjectThread(
-					        &target, [&target, mainThread] { target.moveToThread(mainThread); }));
-				    }
-				    workerThread.quit();
-				    static_cast<void>(workerThread.wait());
-			    });
-
-			QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&target));
-
-			constexpr int invokeCount = 1000;
-			int           executed    = 0;
-			QElapsedTimer timer;
-			timer.start();
-			for (int i = 0; i < invokeCount; ++i)
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void init()
 			{
-				QVERIFY(qmudLuaBridgeInvokeOnObjectThread(&target, [&]() { ++executed; }));
+				qmudSetLuaBridgeInvokeTimeoutMs(30000);
 			}
-			const qint64 elapsedMs = timer.elapsed();
-			QCOMPARE(executed, invokeCount);
-			QVERIFY2(elapsedMs < 5000,
-			         qPrintable(
-			             QStringLiteral("Bridge queued invoke throughput regression: %1 ms").arg(elapsedMs)));
-		}
 
-		void nestedInvokeThroughputStaysWithinBudget()
-		{
-			QThread workerThread;
-			workerThread.setObjectName(QStringLiteral("tst_LuaBridgeNestedThroughputWorker"));
-			QObject  workerTarget;
-			QObject  mainTarget;
-			QThread *mainThread = QThread::currentThread();
-			workerTarget.moveToThread(&workerThread);
-			workerThread.start();
-			const auto stopWorker = qScopeGuard(
-			    [&]()
-			    {
-				    if (workerTarget.thread() == &workerThread)
-				    {
-					    static_cast<void>(
-					        qmudLuaBridgeInvokeOnObjectThread(&workerTarget, [&workerTarget, mainThread]
-					                                          { workerTarget.moveToThread(mainThread); }));
-				    }
-				    workerThread.quit();
-				    static_cast<void>(workerThread.wait());
-			    });
-
-			QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&workerTarget));
-			QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&mainTarget));
-
-			constexpr int outerCalls     = 400;
-			int           outerRan       = 0;
-			int           nestedRan      = 0;
-			bool          nestedInvokeOk = true;
-			QElapsedTimer timer;
-			timer.start();
-			for (int i = 0; i < outerCalls; ++i)
+			void cleanup()
 			{
-				const bool ok = qmudLuaBridgeInvokeOnObjectThread(
+				qmudSetLuaBridgeInvokeTimeoutMs(30000);
+			}
+
+			void sameThreadInvokeRunsInlineAndSucceeds()
+			{
+				QObject          target;
+				std::atomic_bool invoked{false};
+				QVERIFY(qmudLuaBridgeInvokeOnObjectThread(&target, [&]() { invoked.store(true); }));
+				QVERIFY(invoked.load());
+				QCOMPARE(qmudLuaBridgeLastStatus(), LuaBridgeInvokeStatus::Success);
+			}
+
+			void reentrantBridgeCycleCompletes()
+			{
+				QThread workerThread;
+				workerThread.setObjectName(QStringLiteral("tst_LuaBridgeReentrantWorker"));
+				QObject  workerTarget;
+				QObject  mainTarget;
+				QThread *mainThread = QThread::currentThread();
+				workerTarget.moveToThread(&workerThread);
+				workerThread.start();
+				const auto stopWorker = qScopeGuard(
+				    [&]()
+				    {
+					    if (workerTarget.thread() == &workerThread)
+					    {
+						    static_cast<void>(qmudLuaBridgeInvokeOnObjectThread(
+						        &workerTarget,
+						        [&workerTarget, mainThread] { workerTarget.moveToThread(mainThread); }));
+					    }
+					    workerThread.quit();
+					    static_cast<void>(workerThread.wait());
+				    });
+
+				QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&workerTarget));
+				QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&mainTarget));
+
+				std::atomic_bool workerCallbackInvoked{false};
+				std::atomic_bool mainCallbackInvoked{false};
+				const bool       outerOk = qmudLuaBridgeInvokeOnObjectThread(
 				    &workerTarget,
 				    [&]()
 				    {
-					    ++outerRan;
-					    if (!qmudLuaBridgeInvokeOnObjectThread(&mainTarget, [&]() { ++nestedRan; }))
-						    nestedInvokeOk = false;
+					    const bool innerOk = qmudLuaBridgeInvokeOnObjectThread(
+					        &mainTarget, [&]() { mainCallbackInvoked.store(true); });
+					    if (innerOk)
+						    workerCallbackInvoked.store(true);
 				    });
-				QVERIFY(ok);
+
+				QVERIFY(outerOk);
+				QVERIFY(workerCallbackInvoked.load());
+				QVERIFY(mainCallbackInvoked.load());
+				QCOMPARE(qmudLuaBridgeLastStatus(), LuaBridgeInvokeStatus::Success);
 			}
-			const qint64 elapsedMs = timer.elapsed();
-			QCOMPARE(outerRan, outerCalls);
-			QCOMPARE(nestedRan, outerCalls);
-			QVERIFY(nestedInvokeOk);
-			QVERIFY2(elapsedMs < 7000,
-			         qPrintable(
-			             QStringLiteral("Bridge nested invoke throughput regression: %1 ms").arg(elapsedMs)));
-		}
 
-		void pluginBootstrapStyleBridgeWorkloadStaysWithinBudget()
-		{
-			QThread workerThread;
-			workerThread.setObjectName(QStringLiteral("tst_LuaBridgeBootstrapWorker"));
-			QThread *mainThread = QThread::currentThread();
-			workerThread.start();
-			const auto stopWorker = qScopeGuard(
-			    [&]()
-			    {
-				    workerThread.quit();
-				    static_cast<void>(workerThread.wait());
-			    });
-
-			constexpr int      objectCount = 250;
-			QVector<QObject *> targets;
-			targets.reserve(objectCount);
-			for (int i = 0; i < objectCount; ++i)
+			void queuedInvokeTimeoutCancelsRequest()
 			{
-				auto *target = new QObject();
-				target->moveToThread(&workerThread);
-				targets.push_back(target);
-			}
-			const auto destroyTargets = qScopeGuard([&]() { qDeleteAll(targets); });
-			const auto restoreTargets = qScopeGuard(
-			    [&]()
-			    {
-				    for (QObject *target : targets)
+				qmudSetLuaBridgeInvokeTimeoutMs(kBridgeTestInvokeTimeoutMs);
+				QThread workerThread;
+				workerThread.setObjectName(QStringLiteral("tst_LuaBridgeTimeoutWorker"));
+				QObject  target;
+				QObject  blocker;
+				QThread *mainThread = QThread::currentThread();
+				target.moveToThread(&workerThread);
+				blocker.moveToThread(&workerThread);
+				workerThread.start();
+				const auto stopWorker = qScopeGuard(
+				    [&]()
 				    {
-					    if (!target || target->thread() != &workerThread)
-						    continue;
-					    static_cast<void>(qmudLuaBridgeInvokeOnObjectThread(
-					        target, [target, mainThread] { target->moveToThread(mainThread); }));
-				    }
-			    });
+					    QElapsedTimer deadline;
+					    deadline.start();
+					    while (target.thread() == &workerThread && deadline.elapsed() < 5000)
+					    {
+						    if (qmudLuaBridgeInvokeOnObjectThread(&target, [&target, mainThread]
+						                                          { target.moveToThread(mainThread); }))
+						    {
+							    break;
+						    }
+						    QThread::msleep(25);
+					    }
+					    workerThread.quit();
+					    static_cast<void>(workerThread.wait());
+				    });
 
-			QElapsedTimer timer;
-			timer.start();
-			int executed = 0;
-			for (QObject *target : targets)
-			{
-				QVERIFY(target != nullptr);
-				QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(target));
-				QVERIFY(qmudLuaBridgeInvokeOnObjectThread(target, [&]() { ++executed; }));
+				QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&target));
+
+				std::atomic_bool blockerEntered{false};
+				QVERIFY(QMetaObject::invokeMethod(
+				    &blocker,
+				    [&]()
+				    {
+					    blockerEntered.store(true);
+					    QThread::sleep(1);
+				    },
+				    Qt::QueuedConnection));
+				QTRY_VERIFY_WITH_TIMEOUT(blockerEntered.load(), 2000);
+
+				std::atomic_bool callbackInvoked{false};
+				QVERIFY(!qmudLuaBridgeInvokeOnObjectThread(&target, [&]() { callbackInvoked.store(true); }));
+				QCOMPARE(qmudLuaBridgeLastStatus(), LuaBridgeInvokeStatus::RequestCanceledBeforeDispatch);
+				QVERIFY(qmudLuaBridgeLastError().contains(
+				    QStringLiteral("timed out and canceled queued request")));
+				QVERIFY(!callbackInvoked.load());
 			}
-			const qint64 elapsedMs = timer.elapsed();
-			QCOMPARE(executed, objectCount);
-			QVERIFY2(
-			    elapsedMs < 6000,
-			    qPrintable(QStringLiteral("Bridge bootstrap workload regression: %1 ms").arg(elapsedMs)));
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
+
+			void inFlightRequestTimeoutWaitsForCompletion()
+			{
+				qmudSetLuaBridgeInvokeTimeoutMs(kBridgeTestInvokeTimeoutMs);
+				QTemporaryDir tempDir;
+				QVERIFY(tempDir.isValid());
+				const QString logPath = tempDir.filePath(QStringLiteral("bridge_fatal.log"));
+
+				QProcess      process;
+				process.setProgram(QCoreApplication::applicationFilePath());
+				process.setArguments({QStringLiteral("--bridge-inflight-timeout-child")});
+				QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+				env.insert(QStringLiteral("QMUD_BRIDGE_FATAL_LOG"), logPath);
+				process.setProcessEnvironment(env);
+				process.start();
+				QVERIFY(process.waitForStarted());
+				QVERIFY(process.waitForFinished(10000));
+
+				QFile      logFile(logPath);
+				QByteArray fatalLog;
+				if (logFile.open(QIODevice::ReadOnly | QIODevice::Text))
+					fatalLog = logFile.readAll();
+
+				const QByteArray output =
+				    process.readAllStandardError() + process.readAllStandardOutput() + fatalLog;
+				QCOMPARE(process.exitStatus(), QProcess::NormalExit);
+				QCOMPARE(process.exitCode(), 0);
+				QVERIFY(!output.contains(
+				    QStringLiteral("Invoke timed out after %1 ms while request was already executing")
+				        .arg(kBridgeTestInvokeTimeoutMs)
+				        .toUtf8()));
+			}
+
+			void queuedInvokeThroughputStaysWithinBudget()
+			{
+				QThread workerThread;
+				workerThread.setObjectName(QStringLiteral("tst_LuaBridgeThroughputWorker"));
+				QObject  target;
+				QThread *mainThread = QThread::currentThread();
+				target.moveToThread(&workerThread);
+				workerThread.start();
+				const auto stopWorker = qScopeGuard(
+				    [&]()
+				    {
+					    if (target.thread() == &workerThread)
+					    {
+						    static_cast<void>(qmudLuaBridgeInvokeOnObjectThread(
+						        &target, [&target, mainThread] { target.moveToThread(mainThread); }));
+					    }
+					    workerThread.quit();
+					    static_cast<void>(workerThread.wait());
+				    });
+
+				QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&target));
+
+				constexpr int invokeCount = 1000;
+				int           executed    = 0;
+				QElapsedTimer timer;
+				timer.start();
+				for (int i = 0; i < invokeCount; ++i)
+				{
+					QVERIFY(qmudLuaBridgeInvokeOnObjectThread(&target, [&]() { ++executed; }));
+				}
+				const qint64 elapsedMs = timer.elapsed();
+				QCOMPARE(executed, invokeCount);
+				QVERIFY2(
+				    elapsedMs < 5000,
+				    qPrintable(
+				        QStringLiteral("Bridge queued invoke throughput regression: %1 ms").arg(elapsedMs)));
+			}
+
+			void nestedInvokeThroughputStaysWithinBudget()
+			{
+				QThread workerThread;
+				workerThread.setObjectName(QStringLiteral("tst_LuaBridgeNestedThroughputWorker"));
+				QObject  workerTarget;
+				QObject  mainTarget;
+				QThread *mainThread = QThread::currentThread();
+				workerTarget.moveToThread(&workerThread);
+				workerThread.start();
+				const auto stopWorker = qScopeGuard(
+				    [&]()
+				    {
+					    if (workerTarget.thread() == &workerThread)
+					    {
+						    static_cast<void>(qmudLuaBridgeInvokeOnObjectThread(
+						        &workerTarget,
+						        [&workerTarget, mainThread] { workerTarget.moveToThread(mainThread); }));
+					    }
+					    workerThread.quit();
+					    static_cast<void>(workerThread.wait());
+				    });
+
+				QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&workerTarget));
+				QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(&mainTarget));
+
+				constexpr int outerCalls     = 400;
+				int           outerRan       = 0;
+				int           nestedRan      = 0;
+				bool          nestedInvokeOk = true;
+				QElapsedTimer timer;
+				timer.start();
+				for (int i = 0; i < outerCalls; ++i)
+				{
+					const bool ok = qmudLuaBridgeInvokeOnObjectThread(
+					    &workerTarget,
+					    [&]()
+					    {
+						    ++outerRan;
+						    if (!qmudLuaBridgeInvokeOnObjectThread(&mainTarget, [&]() { ++nestedRan; }))
+							    nestedInvokeOk = false;
+					    });
+					QVERIFY(ok);
+				}
+				const qint64 elapsedMs = timer.elapsed();
+				QCOMPARE(outerRan, outerCalls);
+				QCOMPARE(nestedRan, outerCalls);
+				QVERIFY(nestedInvokeOk);
+				QVERIFY2(
+				    elapsedMs < 7000,
+				    qPrintable(
+				        QStringLiteral("Bridge nested invoke throughput regression: %1 ms").arg(elapsedMs)));
+			}
+
+			void pluginBootstrapStyleBridgeWorkloadStaysWithinBudget()
+			{
+				QThread workerThread;
+				workerThread.setObjectName(QStringLiteral("tst_LuaBridgeBootstrapWorker"));
+				QThread *mainThread = QThread::currentThread();
+				workerThread.start();
+				const auto stopWorker = qScopeGuard(
+				    [&]()
+				    {
+					    workerThread.quit();
+					    static_cast<void>(workerThread.wait());
+				    });
+
+				constexpr int      objectCount = 250;
+				QVector<QObject *> targets;
+				targets.reserve(objectCount);
+				for (int i = 0; i < objectCount; ++i)
+				{
+					auto *target = new QObject();
+					target->moveToThread(&workerThread);
+					targets.push_back(target);
+				}
+				const auto destroyTargets = qScopeGuard([&]() { qDeleteAll(targets); });
+				const auto restoreTargets = qScopeGuard(
+				    [&]()
+				    {
+					    for (QObject *target : targets)
+					    {
+						    if (!target || target->thread() != &workerThread)
+							    continue;
+						    static_cast<void>(qmudLuaBridgeInvokeOnObjectThread(
+						        target, [target, mainThread] { target->moveToThread(mainThread); }));
+					    }
+				    });
+
+				QElapsedTimer timer;
+				timer.start();
+				int executed = 0;
+				for (QObject *target : targets)
+				{
+					QVERIFY(target != nullptr);
+					QVERIFY(qmudLuaBridgeEnsureObjectThreadReady(target));
+					QVERIFY(qmudLuaBridgeInvokeOnObjectThread(target, [&]() { ++executed; }));
+				}
+				const qint64 elapsedMs = timer.elapsed();
+				QCOMPARE(executed, objectCount);
+				QVERIFY2(
+				    elapsedMs < 6000,
+				    qPrintable(QStringLiteral("Bridge bootstrap workload regression: %1 ms").arg(elapsedMs)));
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+
+} // namespace
 
 int main(int argc, char **argv)
 {

@@ -11,183 +11,194 @@
 #include <QElapsedTimer>
 #include <QtTest/QTest>
 
-/**
- * @brief QTest fixture covering post-restore sequencing behavior.
- */
-class tst_WorldSessionRestoreFlowUtils : public QObject
+namespace
 {
-		Q_OBJECT
 
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void loadPlanDefaultsOnWithoutStateFileSkipsRead()
-		{
-			const auto plan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(true, true, false);
-			QCOMPARE(plan, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::SkipApplyAndSucceed);
-		}
+	/**
+	 * @brief QTest fixture covering post-restore sequencing behavior.
+	 */
+	class tst_WorldSessionRestoreFlowUtils : public QObject
+	{
+			Q_OBJECT
 
-		void loadPlanDefaultsOnWithStateFileReads()
-		{
-			const auto plan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(true, true, true);
-			QCOMPARE(plan, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply);
-		}
-
-		void loadPlanBothDisabledRemovesFile()
-		{
-			const auto plan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(false, false, true);
-			QCOMPARE(plan, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::RemoveFileAndSucceed);
-		}
-
-		void scrollbackStatusTrackingRequiresOutputBufferPersistence()
-		{
-			const bool track = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
-			    true, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply);
-			QVERIFY(track);
-		}
-
-		void scrollbackStatusTrackingSkipsHistoryOnlyReadPlan()
-		{
-			const bool track = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
-			    false, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply);
-			QVERIFY(!track);
-		}
-
-		void scrollbackStatusTrackingIncludesSkipApplyPlanWhenOutputBufferIsEnabled()
-		{
-			const bool skipPlan = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
-			    true, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::SkipApplyAndSucceed);
-			QVERIFY(skipPlan);
-		}
-
-		void scrollbackStatusTrackingSkipsRemovePlan()
-		{
-			const bool removePlan = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
-			    false, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::RemoveFileAndSucceed);
-			QVERIFY(!removePlan);
-		}
-
-		void deferredUpgradeWelcomeRequiresDeferFlag()
-		{
-			const bool show = QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(false, true, 0);
-			QVERIFY(!show);
-		}
-
-		void deferredUpgradeWelcomeRequiresDispatchComplete()
-		{
-			const bool show = QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(true, false, 0);
-			QVERIFY(!show);
-		}
-
-		void deferredUpgradeWelcomeRequiresNoInFlightRestores()
-		{
-			const bool show = QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(true, true, 2);
-			QVERIFY(!show);
-		}
-
-		void deferredUpgradeWelcomeAllowsWhenReady()
-		{
-			const bool show = QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(true, true, 0);
-			QVERIFY(show);
-		}
-
-		void restoreStatusMessageAlwaysShowsRemainingCount()
-		{
-			const QString one     = QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(1);
-			const QString many    = QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(3);
-			const QString clamped = QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(-4);
-			QCOMPARE(one, QStringLiteral("Restoring scrollback buffers (1 remaining)"));
-			QCOMPARE(many, QStringLiteral("Restoring scrollback buffers (3 remaining)"));
-			QCOMPARE(clamped, QStringLiteral("Restoring scrollback buffers (0 remaining)"));
-		}
-
-		void runsStartupThenAutoConnectOnSuccess()
-		{
-			QStringList sequence;
-			QMudWorldSessionRestoreFlow::runPostRestoreFlow(
-			    true, QStringLiteral("ignored"),
-			    {
-			        [&sequence] { sequence.push_back(QStringLiteral("startup")); },
-			        [&sequence] { sequence.push_back(QStringLiteral("autoconnect")); },
-			        [&sequence](const QString &error)
-			        { sequence.push_back(QStringLiteral("error:%1").arg(error)); },
-			    });
-
-			const QStringList expected{
-			    QStringLiteral("startup"),
-			    QStringLiteral("autoconnect"),
-			};
-			QCOMPARE(sequence, expected);
-		}
-
-		void reportsErrorAndStillRunsStartupAndAutoConnect()
-		{
-			QStringList sequence;
-			QMudWorldSessionRestoreFlow::runPostRestoreFlow(
-			    false, QStringLiteral("restore failed"),
-			    {
-			        [&sequence] { sequence.push_back(QStringLiteral("startup")); },
-			        [&sequence] { sequence.push_back(QStringLiteral("autoconnect")); },
-			        [&sequence](const QString &error)
-			        { sequence.push_back(QStringLiteral("error:%1").arg(error)); },
-			    });
-
-			const QStringList expected{
-			    QStringLiteral("error:restore failed"),
-			    QStringLiteral("startup"),
-			    QStringLiteral("autoconnect"),
-			};
-			QCOMPARE(sequence, expected);
-		}
-
-		void doesNotReportErrorWhenEmpty()
-		{
-			QStringList sequence;
-			QMudWorldSessionRestoreFlow::runPostRestoreFlow(
-			    false, QString(),
-			    {
-			        [&sequence] { sequence.push_back(QStringLiteral("startup")); },
-			        [&sequence] { sequence.push_back(QStringLiteral("autoconnect")); },
-			        [&sequence](const QString &error)
-			        { sequence.push_back(QStringLiteral("error:%1").arg(error)); },
-			    });
-
-			const QStringList expected{
-			    QStringLiteral("startup"),
-			    QStringLiteral("autoconnect"),
-			};
-			QCOMPARE(sequence, expected);
-		}
-
-		void postRestoreFlowThroughputStaysWithinBudget()
-		{
-			constexpr int iterations = 5000;
-			int           startupCount{0};
-			int           autoConnectCount{0};
-			int           errorCount{0};
-
-			QElapsedTimer timer;
-			timer.start();
-			for (int i = 0; i < iterations; ++i)
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void loadPlanDefaultsOnWithoutStateFileSkipsRead()
 			{
-				const bool ok = (i % 2) == 0;
-				QMudWorldSessionRestoreFlow::runPostRestoreFlow(
-				    ok, ok ? QString() : QStringLiteral("restore failed"),
-				    {
-				        [&startupCount] { ++startupCount; },
-				        [&autoConnectCount] { ++autoConnectCount; },
-				        [&errorCount](const QString &) { ++errorCount; },
-				    });
+				const auto plan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(true, true, false);
+				QCOMPARE(plan, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::SkipApplyAndSucceed);
 			}
-			const qint64 elapsedMs = timer.elapsed();
-			QCOMPARE(startupCount, iterations);
-			QCOMPARE(autoConnectCount, iterations);
-			QCOMPARE(errorCount, iterations / 2);
-			QVERIFY2(
-			    elapsedMs < 3000,
-			    qPrintable(QStringLiteral("Post-restore flow throughput regression: %1 ms").arg(elapsedMs)));
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
+
+			void loadPlanDefaultsOnWithStateFileReads()
+			{
+				const auto plan = QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(true, true, true);
+				QCOMPARE(plan, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply);
+			}
+
+			void loadPlanBothDisabledRemovesFile()
+			{
+				const auto plan =
+				    QMudWorldSessionRestoreFlow::computeSessionStateLoadPlan(false, false, true);
+				QCOMPARE(plan, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::RemoveFileAndSucceed);
+			}
+
+			void scrollbackStatusTrackingRequiresOutputBufferPersistence()
+			{
+				const bool track = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
+				    true, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply);
+				QVERIFY(track);
+			}
+
+			void scrollbackStatusTrackingSkipsHistoryOnlyReadPlan()
+			{
+				const bool track = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
+				    false, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::ReadFileAndApply);
+				QVERIFY(!track);
+			}
+
+			void scrollbackStatusTrackingIncludesSkipApplyPlanWhenOutputBufferIsEnabled()
+			{
+				const bool skipPlan = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
+				    true, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::SkipApplyAndSucceed);
+				QVERIFY(skipPlan);
+			}
+
+			void scrollbackStatusTrackingSkipsRemovePlan()
+			{
+				const bool removePlan = QMudWorldSessionRestoreFlow::shouldTrackScrollbackRestoreStatus(
+				    false, QMudWorldSessionRestoreFlow::SessionStateLoadPlan::RemoveFileAndSucceed);
+				QVERIFY(!removePlan);
+			}
+
+			void deferredUpgradeWelcomeRequiresDeferFlag()
+			{
+				const bool show =
+				    QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(false, true, 0);
+				QVERIFY(!show);
+			}
+
+			void deferredUpgradeWelcomeRequiresDispatchComplete()
+			{
+				const bool show =
+				    QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(true, false, 0);
+				QVERIFY(!show);
+			}
+
+			void deferredUpgradeWelcomeRequiresNoInFlightRestores()
+			{
+				const bool show =
+				    QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(true, true, 2);
+				QVERIFY(!show);
+			}
+
+			void deferredUpgradeWelcomeAllowsWhenReady()
+			{
+				const bool show =
+				    QMudWorldSessionRestoreFlow::shouldShowDeferredUpgradeWelcome(true, true, 0);
+				QVERIFY(show);
+			}
+
+			void restoreStatusMessageAlwaysShowsRemainingCount()
+			{
+				const QString one     = QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(1);
+				const QString many    = QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(3);
+				const QString clamped = QMudWorldSessionRestoreFlow::restoreScrollbackStatusMessage(-4);
+				QCOMPARE(one, QStringLiteral("Restoring scrollback buffers (1 remaining)"));
+				QCOMPARE(many, QStringLiteral("Restoring scrollback buffers (3 remaining)"));
+				QCOMPARE(clamped, QStringLiteral("Restoring scrollback buffers (0 remaining)"));
+			}
+
+			void runsStartupThenAutoConnectOnSuccess()
+			{
+				QStringList sequence;
+				QMudWorldSessionRestoreFlow::runPostRestoreFlow(
+				    true, QStringLiteral("ignored"),
+				    {
+				        [&sequence] { sequence.push_back(QStringLiteral("startup")); },
+				        [&sequence] { sequence.push_back(QStringLiteral("autoconnect")); },
+				        [&sequence](const QString &error)
+				        { sequence.push_back(QStringLiteral("error:%1").arg(error)); },
+				    });
+
+				const QStringList expected{
+				    QStringLiteral("startup"),
+				    QStringLiteral("autoconnect"),
+				};
+				QCOMPARE(sequence, expected);
+			}
+
+			void reportsErrorAndStillRunsStartupAndAutoConnect()
+			{
+				QStringList sequence;
+				QMudWorldSessionRestoreFlow::runPostRestoreFlow(
+				    false, QStringLiteral("restore failed"),
+				    {
+				        [&sequence] { sequence.push_back(QStringLiteral("startup")); },
+				        [&sequence] { sequence.push_back(QStringLiteral("autoconnect")); },
+				        [&sequence](const QString &error)
+				        { sequence.push_back(QStringLiteral("error:%1").arg(error)); },
+				    });
+
+				const QStringList expected{
+				    QStringLiteral("error:restore failed"),
+				    QStringLiteral("startup"),
+				    QStringLiteral("autoconnect"),
+				};
+				QCOMPARE(sequence, expected);
+			}
+
+			void doesNotReportErrorWhenEmpty()
+			{
+				QStringList sequence;
+				QMudWorldSessionRestoreFlow::runPostRestoreFlow(
+				    false, QString(),
+				    {
+				        [&sequence] { sequence.push_back(QStringLiteral("startup")); },
+				        [&sequence] { sequence.push_back(QStringLiteral("autoconnect")); },
+				        [&sequence](const QString &error)
+				        { sequence.push_back(QStringLiteral("error:%1").arg(error)); },
+				    });
+
+				const QStringList expected{
+				    QStringLiteral("startup"),
+				    QStringLiteral("autoconnect"),
+				};
+				QCOMPARE(sequence, expected);
+			}
+
+			void postRestoreFlowThroughputStaysWithinBudget()
+			{
+				constexpr int iterations = 5000;
+				int           startupCount{0};
+				int           autoConnectCount{0};
+				int           errorCount{0};
+
+				QElapsedTimer timer;
+				timer.start();
+				for (int i = 0; i < iterations; ++i)
+				{
+					const bool ok = (i % 2) == 0;
+					QMudWorldSessionRestoreFlow::runPostRestoreFlow(
+					    ok, ok ? QString() : QStringLiteral("restore failed"),
+					    {
+					        [&startupCount] { ++startupCount; },
+					        [&autoConnectCount] { ++autoConnectCount; },
+					        [&errorCount](const QString &) { ++errorCount; },
+					    });
+				}
+				const qint64 elapsedMs = timer.elapsed();
+				QCOMPARE(startupCount, iterations);
+				QCOMPARE(autoConnectCount, iterations);
+				QCOMPARE(errorCount, iterations / 2);
+				QVERIFY2(
+				    elapsedMs < 3000,
+				    qPrintable(
+				        QStringLiteral("Post-restore flow throughput regression: %1 ms").arg(elapsedMs)));
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+
+} // namespace
 
 QTEST_APPLESS_MAIN(tst_WorldSessionRestoreFlowUtils)
 

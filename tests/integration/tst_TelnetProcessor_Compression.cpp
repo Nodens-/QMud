@@ -62,261 +62,262 @@ namespace
 		payload.resize(payload.size() - static_cast<int>(stream.avail_out));
 		return payload;
 	}
-} // namespace
 
-/**
- * @brief QTest fixture covering TelnetProcessor Compression scenarios.
- */
-class tst_TelnetProcessor_Compression : public QObject
-{
-		Q_OBJECT
+	/**
+	 * @brief QTest fixture covering TelnetProcessor Compression scenarios.
+	 */
+	class tst_TelnetProcessor_Compression : public QObject
+	{
+			Q_OBJECT
 
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void disableCompressionRejectsWillCompress2()
-		{
-			TelnetProcessor processor;
-			processor.setDisableCompression(true);
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void disableCompressionRejectsWillCompress2()
+			{
+				TelnetProcessor processor;
+				processor.setDisableCompression(true);
 
-			processor.processBytes(bytes({IAC, WILL, TELOPT_COMPRESS2}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, 0xFE, TELOPT_COMPRESS2}));
-		}
+				processor.processBytes(bytes({IAC, WILL, TELOPT_COMPRESS2}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, 0xFE, TELOPT_COMPRESS2}));
+			}
 
-		void mccp2ActivationAndInflate()
-		{
-			TelnetProcessor  processor;
-			const QByteArray compressed = makeQtZlibPayload(QByteArrayLiteral("hello"));
-			QVERIFY(!compressed.isEmpty());
+			void mccp2ActivationAndInflate()
+			{
+				TelnetProcessor  processor;
+				const QByteArray compressed = makeQtZlibPayload(QByteArrayLiteral("hello"));
+				QVERIFY(!compressed.isEmpty());
 
-			const QByteArray packet = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE}) + compressed;
-			const QByteArray output = processor.processBytes(packet);
+				const QByteArray packet = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE}) + compressed;
+				const QByteArray output = processor.processBytes(packet);
 
-			QCOMPARE(output, QByteArrayLiteral("hello"));
-			QVERIFY(!processor.isCompressing());
-			QCOMPARE(processor.mccpType(), 0);
-			QVERIFY(processor.totalCompressedBytes() > 0);
-			QVERIFY(processor.totalUncompressedBytes() >= 5);
-		}
+				QCOMPARE(output, QByteArrayLiteral("hello"));
+				QVERIFY(!processor.isCompressing());
+				QCOMPARE(processor.mccpType(), 0);
+				QVERIFY(processor.totalCompressedBytes() > 0);
+				QVERIFY(processor.totalUncompressedBytes() >= 5);
+			}
 
-		void packetTransformRunsAfterMccpInflateBeforeTelnetParsing()
-		{
-			TelnetProcessor  processor;
+			void packetTransformRunsAfterMccpInflateBeforeTelnetParsing()
+			{
+				TelnetProcessor  processor;
 
-			QByteArray       plain      = bytes({IAC, SB, GMCP, 'r', 'o', 'o', 'm', IAC, SE});
-			const QByteArray compressed = makeQtZlibPayload(plain);
-			QVERIFY(!compressed.isEmpty());
+				QByteArray       plain      = bytes({IAC, SB, GMCP, 'r', 'o', 'o', 'm', IAC, SE});
+				const QByteArray compressed = makeQtZlibPayload(plain);
+				QVERIFY(!compressed.isEmpty());
 
-			const QByteArray  gmcpMarker = bytes({IAC, SB, GMCP});
-			QList<QByteArray> seenPackets;
-			const QByteArray  prefix     = QByteArrayLiteral("pre");
-			const QByteArray  activation = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
-			QByteArray        packet     = prefix + activation + compressed;
-			const QByteArray  output     = processor.processBytes(
-			    packet,
-			    [&](QByteArray &payload)
-			    {
-				    seenPackets.append(payload);
-				    if (payload == prefix)
+				const QByteArray  gmcpMarker = bytes({IAC, SB, GMCP});
+				QList<QByteArray> seenPackets;
+				const QByteArray  prefix     = QByteArrayLiteral("pre");
+				const QByteArray  activation = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
+				QByteArray        packet     = prefix + activation + compressed;
+				const QByteArray  output     = processor.processBytes(
+				    packet,
+				    [&](QByteArray &payload)
 				    {
-					    payload = QByteArrayLiteral("prefix\n");
-					    return;
-				    }
-				    const qsizetype gmcpAt = payload.indexOf(gmcpMarker);
-				    if (gmcpAt >= 0)
-					    payload.insert(gmcpAt, QByteArrayLiteral("qxv-insert-5d2\r\n"));
-			    });
+					    seenPackets.append(payload);
+					    if (payload == prefix)
+					    {
+						    payload = QByteArrayLiteral("prefix\n");
+						    return;
+					    }
+					    const qsizetype gmcpAt = payload.indexOf(gmcpMarker);
+					    if (gmcpAt >= 0)
+						    payload.insert(gmcpAt, QByteArrayLiteral("qxv-insert-5d2\r\n"));
+				    });
 
-			QCOMPARE(seenPackets.size(), 2);
-			QCOMPARE(seenPackets.at(0), prefix);
-			QCOMPARE(seenPackets.at(1), plain);
-			QVERIFY(!seenPackets.contains(activation));
-			QVERIFY(!seenPackets.contains(compressed));
-			QCOMPARE(output, QByteArrayLiteral("prefix\nqxv-insert-5d2\r\n"));
+				QCOMPARE(seenPackets.size(), 2);
+				QCOMPARE(seenPackets.at(0), prefix);
+				QCOMPARE(seenPackets.at(1), plain);
+				QVERIFY(!seenPackets.contains(activation));
+				QVERIFY(!seenPackets.contains(compressed));
+				QCOMPARE(output, QByteArrayLiteral("prefix\nqxv-insert-5d2\r\n"));
 
-			const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
-			QCOMPARE(events.size(), 1);
-			QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
-			QCOMPARE(events.constFirst().offset, QByteArrayLiteral("prefix\nqxv-insert-5d2\r\n").size());
-		}
+				const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+				QCOMPARE(events.size(), 1);
+				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+				QCOMPARE(events.constFirst().offset, QByteArrayLiteral("prefix\nqxv-insert-5d2\r\n").size());
+			}
 
-		void packetTransformDoesNotMisclassifyEscapedIacInsideSubnegotiationAsMccp()
-		{
-			TelnetProcessor processor;
+			void packetTransformDoesNotMisclassifyEscapedIacInsideSubnegotiationAsMccp()
+			{
+				TelnetProcessor processor;
 
-			QByteArray      payload = QByteArrayLiteral("before");
-			payload += bytes({IAC, SB, GMCP, 'a', IAC, IAC, SB, TELOPT_COMPRESS2, 'b', IAC, SE});
-			payload += QByteArrayLiteral("after");
+				QByteArray      payload = QByteArrayLiteral("before");
+				payload += bytes({IAC, SB, GMCP, 'a', IAC, IAC, SB, TELOPT_COMPRESS2, 'b', IAC, SE});
+				payload += QByteArrayLiteral("after");
 
-			QList<QByteArray> seenPackets;
-			const QByteArray  output = processor.processBytes(payload, [&](const QByteArray &packetPayload)
-			                                                  { seenPackets.append(packetPayload); });
+				QList<QByteArray> seenPackets;
+				const QByteArray output = processor.processBytes(payload, [&](const QByteArray &packetPayload)
+				                                                 { seenPackets.append(packetPayload); });
 
-			QCOMPARE(seenPackets.size(), 1);
-			QCOMPARE(seenPackets.constFirst(), payload);
-			QCOMPARE(output, QByteArrayLiteral("beforeafter"));
-			QVERIFY(!processor.isCompressing());
+				QCOMPARE(seenPackets.size(), 1);
+				QCOMPARE(seenPackets.constFirst(), payload);
+				QCOMPARE(output, QByteArrayLiteral("beforeafter"));
+				QVERIFY(!processor.isCompressing());
 
-			const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
-			QCOMPARE(events.size(), 1);
-			QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
-			QCOMPARE(events.constFirst().option, static_cast<int>(GMCP));
-			QCOMPARE(events.constFirst().data, bytes({'a', IAC, SB, TELOPT_COMPRESS2, 'b'}));
-		}
+				const QList<TelnetProcessor::TelnetPluginEvent> events = processor.takeTelnetPluginEvents();
+				QCOMPARE(events.size(), 1);
+				QCOMPARE(events.constFirst().type, TelnetProcessor::TelnetPluginEvent::Subnegotiation);
+				QCOMPARE(events.constFirst().option, static_cast<int>(GMCP));
+				QCOMPARE(events.constFirst().data, bytes({'a', IAC, SB, TELOPT_COMPRESS2, 'b'}));
+			}
 
-		void packetTransformDoesNotSeeSplitMccpActivation()
-		{
-			TelnetProcessor  processor;
+			void packetTransformDoesNotSeeSplitMccpActivation()
+			{
+				TelnetProcessor  processor;
 
-			const QByteArray plain      = QByteArrayLiteral("after-mccp\n");
-			const QByteArray compressed = makeQtZlibPayload(plain);
-			QVERIFY(!compressed.isEmpty());
+				const QByteArray plain      = QByteArrayLiteral("after-mccp\n");
+				const QByteArray compressed = makeQtZlibPayload(plain);
+				QVERIFY(!compressed.isEmpty());
 
-			const QByteArray  activation = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
-			QList<QByteArray> seenPackets;
-			const QByteArray  firstOutput =
-			    processor.processBytes(QByteArrayLiteral("before\n") + activation.left(2),
-			                           [&](const QByteArray &payload) { seenPackets.append(payload); });
-			QCOMPARE(firstOutput, QByteArrayLiteral("before\n"));
+				const QByteArray  activation = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
+				QList<QByteArray> seenPackets;
+				const QByteArray  firstOutput =
+				    processor.processBytes(QByteArrayLiteral("before\n") + activation.left(2),
+				                           [&](const QByteArray &payload) { seenPackets.append(payload); });
+				QCOMPARE(firstOutput, QByteArrayLiteral("before\n"));
 
-			const QByteArray secondOutput =
-			    processor.processBytes(activation.mid(2) + compressed,
-			                           [&](const QByteArray &payload) { seenPackets.append(payload); });
-			QCOMPARE(secondOutput, plain);
+				const QByteArray secondOutput =
+				    processor.processBytes(activation.mid(2) + compressed,
+				                           [&](const QByteArray &payload) { seenPackets.append(payload); });
+				QCOMPARE(secondOutput, plain);
 
-			QCOMPARE(seenPackets.size(), 2);
-			QCOMPARE(seenPackets.at(0), QByteArrayLiteral("before\n"));
-			QCOMPARE(seenPackets.at(1), plain);
-			QVERIFY(!seenPackets.contains(activation));
-			QVERIFY(!seenPackets.contains(compressed));
-		}
+				QCOMPARE(seenPackets.size(), 2);
+				QCOMPARE(seenPackets.at(0), QByteArrayLiteral("before\n"));
+				QCOMPARE(seenPackets.at(1), plain);
+				QVERIFY(!seenPackets.contains(activation));
+				QVERIFY(!seenPackets.contains(compressed));
+			}
 
-		void packetTransformDoesNotSeeMccpRestartAfterStreamEnd()
-		{
-			TelnetProcessor  processor;
+			void packetTransformDoesNotSeeMccpRestartAfterStreamEnd()
+			{
+				TelnetProcessor  processor;
 
-			const QByteArray firstPlain   = QByteArrayLiteral("old-stream\n");
-			const QByteArray secondPlain  = QByteArrayLiteral("new-stream\n");
-			const QByteArray firstStream  = makeQtZlibPayload(firstPlain);
-			const QByteArray secondStream = makeQtZlibPayload(secondPlain);
-			QVERIFY(!firstStream.isEmpty());
-			QVERIFY(!secondStream.isEmpty());
+				const QByteArray firstPlain   = QByteArrayLiteral("old-stream\n");
+				const QByteArray secondPlain  = QByteArrayLiteral("new-stream\n");
+				const QByteArray firstStream  = makeQtZlibPayload(firstPlain);
+				const QByteArray secondStream = makeQtZlibPayload(secondPlain);
+				QVERIFY(!firstStream.isEmpty());
+				QVERIFY(!secondStream.isEmpty());
 
-			const QByteArray  activation     = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
-			const QByteArray  plainRemainder = QByteArrayLiteral("after-copyover\n");
-			QList<QByteArray> seenPackets;
-			QByteArray        packet = activation + firstStream + plainRemainder + activation + secondStream;
-			const QByteArray  output =
-			    processor.processBytes(packet,
-			                           [&](QByteArray &payload)
-			                           {
-				                           seenPackets.append(payload);
-				                           if (payload == plainRemainder)
-					                           payload = QByteArrayLiteral("between-streams\n");
-			                           });
+				const QByteArray  activation     = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
+				const QByteArray  plainRemainder = QByteArrayLiteral("after-copyover\n");
+				QList<QByteArray> seenPackets;
+				QByteArray packet = activation + firstStream + plainRemainder + activation + secondStream;
+				const QByteArray output =
+				    processor.processBytes(packet,
+				                           [&](QByteArray &payload)
+				                           {
+					                           seenPackets.append(payload);
+					                           if (payload == plainRemainder)
+						                           payload = QByteArrayLiteral("between-streams\n");
+				                           });
 
-			QCOMPARE(seenPackets.size(), 3);
-			QCOMPARE(seenPackets.at(0), firstPlain);
-			QCOMPARE(seenPackets.at(1), plainRemainder);
-			QCOMPARE(seenPackets.at(2), secondPlain);
-			QVERIFY(!seenPackets.contains(activation));
-			QVERIFY(!seenPackets.contains(firstStream));
-			QVERIFY(!seenPackets.contains(secondStream));
-			QCOMPARE(output, QByteArrayLiteral("old-stream\nbetween-streams\nnew-stream\n"));
-		}
+				QCOMPARE(seenPackets.size(), 3);
+				QCOMPARE(seenPackets.at(0), firstPlain);
+				QCOMPARE(seenPackets.at(1), plainRemainder);
+				QCOMPARE(seenPackets.at(2), secondPlain);
+				QVERIFY(!seenPackets.contains(activation));
+				QVERIFY(!seenPackets.contains(firstStream));
+				QVERIFY(!seenPackets.contains(secondStream));
+				QCOMPARE(output, QByteArrayLiteral("old-stream\nbetween-streams\nnew-stream\n"));
+			}
 
-		void malformedCompressedDataEmitsFatalError()
-		{
-			TelnetProcessor   processor;
-			TelnetCallbackSpy spy;
-			processor.setCallbacks(spy.callbacks());
+			void malformedCompressedDataEmitsFatalError()
+			{
+				TelnetProcessor   processor;
+				TelnetCallbackSpy spy;
+				processor.setCallbacks(spy.callbacks());
 
-			processor.processBytes(bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE}));
-			QVERIFY(processor.isCompressing());
+				processor.processBytes(bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE}));
+				QVERIFY(processor.isCompressing());
 
-			processor.processBytes(QByteArrayLiteral("not-a-zlib-stream"));
-			QVERIFY(!spy.fatalProtocolErrors.isEmpty());
-			QVERIFY(!processor.isCompressing());
-			QCOMPARE(processor.mccpType(), 0);
-		}
+				processor.processBytes(QByteArrayLiteral("not-a-zlib-stream"));
+				QVERIFY(!spy.fatalProtocolErrors.isEmpty());
+				QVERIFY(!processor.isCompressing());
+				QCOMPARE(processor.mccpType(), 0);
+			}
 
-		void postTeardownBytesInSameReadAreProcessed()
-		{
-			TelnetProcessor  processor;
-			const QByteArray compressed = makeQtZlibPayload(QByteArrayLiteral("4. This is line four\n"));
-			QVERIFY(!compressed.isEmpty());
+			void postTeardownBytesInSameReadAreProcessed()
+			{
+				TelnetProcessor  processor;
+				const QByteArray compressed = makeQtZlibPayload(QByteArrayLiteral("4. This is line four\n"));
+				QVERIFY(!compressed.isEmpty());
 
-			QByteArray packet = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
-			packet.append(compressed);
-			packet.append(QByteArrayLiteral("5. This is line five\n"));
+				QByteArray packet = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
+				packet.append(compressed);
+				packet.append(QByteArrayLiteral("5. This is line five\n"));
 
-			const QByteArray output = processor.processBytes(packet);
-			QCOMPARE(output, QByteArrayLiteral("4. This is line four\n5. This is line five\n"));
-			QVERIFY(!processor.isCompressing());
-			QCOMPARE(processor.mccpType(), 0);
-		}
+				const QByteArray output = processor.processBytes(packet);
+				QCOMPARE(output, QByteArrayLiteral("4. This is line four\n5. This is line five\n"));
+				QVERIFY(!processor.isCompressing());
+				QCOMPARE(processor.mccpType(), 0);
+			}
 
-		void wontCompress2ClearsCompressionStateImmediately()
-		{
-			TelnetProcessor processor;
+			void wontCompress2ClearsCompressionStateImmediately()
+			{
+				TelnetProcessor processor;
 
-			processor.processBytes(bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE}));
-			QVERIFY(processor.isCompressing());
-			QCOMPARE(processor.mccpType(), 2);
+				processor.processBytes(bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE}));
+				QVERIFY(processor.isCompressing());
+				QCOMPARE(processor.mccpType(), 2);
 
-			const QByteArray wontSequence   = bytes({IAC, WONT, TELOPT_COMPRESS2});
-			const QByteArray compressedWont = makeZlibSyncFlushPayload(wontSequence);
-			QVERIFY(!compressedWont.isEmpty());
+				const QByteArray wontSequence   = bytes({IAC, WONT, TELOPT_COMPRESS2});
+				const QByteArray compressedWont = makeZlibSyncFlushPayload(wontSequence);
+				QVERIFY(!compressedWont.isEmpty());
 
-			const QByteArray output = processor.processBytes(compressedWont);
-			QCOMPARE(output, QByteArray());
-			QVERIFY(!processor.isCompressing());
-			QCOMPARE(processor.mccpType(), 0);
-		}
+				const QByteArray output = processor.processBytes(compressedWont);
+				QCOMPARE(output, QByteArray());
+				QVERIFY(!processor.isCompressing());
+				QCOMPARE(processor.mccpType(), 0);
+			}
 
-		void mccpRestartAfterStreamEndPreservesCompressedOrdering()
-		{
-			TelnetProcessor   processor;
-			TelnetCallbackSpy spy;
-			processor.setCallbacks(spy.callbacks());
+			void mccpRestartAfterStreamEndPreservesCompressedOrdering()
+			{
+				TelnetProcessor   processor;
+				TelnetCallbackSpy spy;
+				processor.setCallbacks(spy.callbacks());
 
-			const QByteArray firstStream = makeQtZlibPayload(QByteArrayLiteral("old-stream\n"));
-			QVERIFY(!firstStream.isEmpty());
+				const QByteArray firstStream = makeQtZlibPayload(QByteArrayLiteral("old-stream\n"));
+				QVERIFY(!firstStream.isEmpty());
 
-			QByteArray firstPacket = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
-			firstPacket.append(firstStream);
-			firstPacket.append(QByteArrayLiteral("copyover-tail\n"));
+				QByteArray firstPacket = bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE});
+				firstPacket.append(firstStream);
+				firstPacket.append(QByteArrayLiteral("copyover-tail\n"));
 
-			const QByteArray firstOutput = processor.processBytes(firstPacket);
-			QCOMPARE(firstOutput, QByteArrayLiteral("old-stream\ncopyover-tail\n"));
-			QVERIFY(!processor.isCompressing());
-			QCOMPARE(processor.mccpType(), 0);
+				const QByteArray firstOutput = processor.processBytes(firstPacket);
+				QCOMPARE(firstOutput, QByteArrayLiteral("old-stream\ncopyover-tail\n"));
+				QVERIFY(!processor.isCompressing());
+				QCOMPARE(processor.mccpType(), 0);
 
-			const QByteArray restartStream = makeQtZlibPayload(QByteArrayLiteral("new-stream\n"));
-			QVERIFY(restartStream.size() > 6);
-			constexpr int    splitAt      = 4;
-			const QByteArray restartPartA = restartStream.left(splitAt);
-			const QByteArray restartPartB = restartStream.mid(splitAt);
-			QVERIFY(!restartPartA.isEmpty());
-			QVERIFY(!restartPartB.isEmpty());
+				const QByteArray restartStream = makeQtZlibPayload(QByteArrayLiteral("new-stream\n"));
+				QVERIFY(restartStream.size() > 6);
+				constexpr int    splitAt      = 4;
+				const QByteArray restartPartA = restartStream.left(splitAt);
+				const QByteArray restartPartB = restartStream.mid(splitAt);
+				QVERIFY(!restartPartA.isEmpty());
+				QVERIFY(!restartPartB.isEmpty());
 
-			QByteArray restartNegotiationPacket = QByteArrayLiteral("after-copyover\n");
-			restartNegotiationPacket.append(bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE}));
-			restartNegotiationPacket.append(restartPartA);
+				QByteArray restartNegotiationPacket = QByteArrayLiteral("after-copyover\n");
+				restartNegotiationPacket.append(bytes({IAC, SB, TELOPT_COMPRESS2, IAC, SE}));
+				restartNegotiationPacket.append(restartPartA);
 
-			const QByteArray restartOutputA = processor.processBytes(restartNegotiationPacket);
-			QVERIFY(restartOutputA.startsWith(QByteArrayLiteral("after-copyover\n")));
-			QVERIFY(processor.isCompressing());
-			QCOMPARE(processor.mccpType(), 2);
-			QVERIFY(spy.fatalProtocolErrors.isEmpty());
+				const QByteArray restartOutputA = processor.processBytes(restartNegotiationPacket);
+				QVERIFY(restartOutputA.startsWith(QByteArrayLiteral("after-copyover\n")));
+				QVERIFY(processor.isCompressing());
+				QCOMPARE(processor.mccpType(), 2);
+				QVERIFY(spy.fatalProtocolErrors.isEmpty());
 
-			const QByteArray restartOutputB = processor.processBytes(restartPartB);
-			QCOMPARE(restartOutputA + restartOutputB, QByteArrayLiteral("after-copyover\nnew-stream\n"));
-			QVERIFY(!processor.isCompressing());
-			QCOMPARE(processor.mccpType(), 0);
-			QVERIFY(spy.fatalProtocolErrors.isEmpty());
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
+				const QByteArray restartOutputB = processor.processBytes(restartPartB);
+				QCOMPARE(restartOutputA + restartOutputB, QByteArrayLiteral("after-copyover\nnew-stream\n"));
+				QVERIFY(!processor.isCompressing());
+				QCOMPARE(processor.mccpType(), 0);
+				QVERIFY(spy.fatalProtocolErrors.isEmpty());
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+
+} // namespace
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Compression)
 

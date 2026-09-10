@@ -12,57 +12,62 @@
 #include <QFontDatabase>
 #include <QtTest/QTest>
 
-/**
- * @brief QTest fixture covering FontUtils scenarios.
- */
-class tst_FontUtils : public QObject
+namespace
 {
-		Q_OBJECT
 
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void applyMonospaceFallback()
-		{
-			QFont font(QStringLiteral("RandomFamily"));
-			qmudApplyMonospaceFallback(font);
-			QVERIFY(font.fixedPitch());
-			QCOMPARE(font.styleHint(), QFont::Monospace);
-		}
+	/**
+	 * @brief QTest fixture covering FontUtils scenarios.
+	 */
+	class tst_FontUtils : public QObject
+	{
+			Q_OBJECT
 
-		void preferredMonospaceFontHonorsSize()
-		{
-			const QFont font = qmudPreferredMonospaceFont(QStringLiteral("DejaVu Sans Mono"), 13);
-			QVERIFY(font.fixedPitch());
-			QCOMPARE(font.pointSize(), 13);
-		}
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void applyMonospaceFallback()
+			{
+				QFont font(QStringLiteral("RandomFamily"));
+				qmudApplyMonospaceFallback(font);
+				QVERIFY(font.fixedPitch());
+				QCOMPARE(font.styleHint(), QFont::Monospace);
+			}
 
-		void fontDialogUsesQtDialogOnMacOS()
-		{
+			void preferredMonospaceFontHonorsSize()
+			{
+				const QFont font = qmudPreferredMonospaceFont(QStringLiteral("DejaVu Sans Mono"), 13);
+				QVERIFY(font.fixedPitch());
+				QCOMPARE(font.pointSize(), 13);
+			}
+
+			void fontDialogUsesQtDialogOnMacOS()
+			{
 #ifdef Q_OS_MACOS
-			QVERIFY(qmudFontDialogUsesQtDialog());
+				QVERIFY(qmudFontDialogUsesQtDialog());
 #else
-			QVERIFY(!qmudFontDialogUsesQtDialog());
+				QVERIFY(!qmudFontDialogUsesQtDialog());
 #endif
-		}
+			}
 
-		void mapCharsetKnownAndUnknown()
-		{
-			QFontDatabase::WritingSystem ws = QFontDatabase::Any;
-			QVERIFY(qmudMapWindowsCharsetToWritingSystem(128, &ws));
-			QCOMPARE(ws, QFontDatabase::Japanese);
+			void mapCharsetKnownAndUnknown()
+			{
+				QFontDatabase::WritingSystem ws = QFontDatabase::Any;
+				QVERIFY(qmudMapWindowsCharsetToWritingSystem(128, &ws));
+				QCOMPARE(ws, QFontDatabase::Japanese);
 
-			ws = QFontDatabase::Korean;
-			QVERIFY(!qmudMapWindowsCharsetToWritingSystem(999, &ws));
-			QCOMPARE(ws, QFontDatabase::Korean);
-		}
+				ws = QFontDatabase::Korean;
+				QVERIFY(!qmudMapWindowsCharsetToWritingSystem(999, &ws));
+				QCOMPARE(ws, QFontDatabase::Korean);
+			}
 
-		void familyForUnknownCharsetReturnsPreferred()
-		{
-			QCOMPARE(qmudFamilyForCharset(QStringLiteral("MyPreferredFamily"), 999),
-			         QStringLiteral("MyPreferredFamily"));
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
+			void familyForUnknownCharsetReturnsPreferred()
+			{
+				QCOMPARE(qmudFamilyForCharset(QStringLiteral("MyPreferredFamily"), 999),
+				         QStringLiteral("MyPreferredFamily"));
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+
+} // namespace
 
 QTEST_GUILESS_MAIN(tst_FontUtils)
 

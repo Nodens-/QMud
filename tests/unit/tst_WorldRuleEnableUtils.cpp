@@ -10,62 +10,67 @@
 
 #include <QtTest/QTest>
 
-/**
- * @brief QTest fixture covering world and plugin rule gating semantics.
- */
-class tst_WorldRuleEnableUtils : public QObject
+namespace
 {
-		Q_OBJECT
 
-	private slots:
-		/**
-		 * @brief Verifies world enable keys map to expected world attribute names.
-		 */
-		static void worldRuleEnableKeyMatchesExpectedAttribute()
-		{
-			QCOMPARE(worldRuleEnableKey(WorldRuleKind::Alias), QStringLiteral("enable_aliases"));
-			QCOMPARE(worldRuleEnableKey(WorldRuleKind::Trigger), QStringLiteral("enable_triggers"));
-			QCOMPARE(worldRuleEnableKey(WorldRuleKind::Timer), QStringLiteral("enable_timers"));
-		}
+	/**
+	 * @brief QTest fixture covering world and plugin rule gating semantics.
+	 */
+	class tst_WorldRuleEnableUtils : public QObject
+	{
+			Q_OBJECT
 
-		/**
-		 * @brief Verifies world rule collections follow corresponding world enable flags.
-		 */
-		static void worldRuleCollectionFollowsWorldEnableFlags()
-		{
-			QMap<QString, QString> attrs;
-			attrs.insert(QStringLiteral("enable_aliases"), QStringLiteral("0"));
-			attrs.insert(QStringLiteral("enable_triggers"), QStringLiteral("n"));
-			attrs.insert(QStringLiteral("enable_timers"), QStringLiteral("false"));
+		private slots:
+			/**
+			 * @brief Verifies world enable keys map to expected world attribute names.
+			 */
+			static void worldRuleEnableKeyMatchesExpectedAttribute()
+			{
+				QCOMPARE(worldRuleEnableKey(WorldRuleKind::Alias), QStringLiteral("enable_aliases"));
+				QCOMPARE(worldRuleEnableKey(WorldRuleKind::Trigger), QStringLiteral("enable_triggers"));
+				QCOMPARE(worldRuleEnableKey(WorldRuleKind::Timer), QStringLiteral("enable_timers"));
+			}
 
-			QVERIFY(!shouldEvaluateRuleCollection(attrs, WorldRuleKind::Alias, false));
-			QVERIFY(!shouldEvaluateRuleCollection(attrs, WorldRuleKind::Trigger, false));
-			QVERIFY(!shouldEvaluateRuleCollection(attrs, WorldRuleKind::Timer, false));
+			/**
+			 * @brief Verifies world rule collections follow corresponding world enable flags.
+			 */
+			static void worldRuleCollectionFollowsWorldEnableFlags()
+			{
+				QMap<QString, QString> attrs;
+				attrs.insert(QStringLiteral("enable_aliases"), QStringLiteral("0"));
+				attrs.insert(QStringLiteral("enable_triggers"), QStringLiteral("n"));
+				attrs.insert(QStringLiteral("enable_timers"), QStringLiteral("false"));
 
-			attrs.insert(QStringLiteral("enable_aliases"), QStringLiteral("1"));
-			attrs.insert(QStringLiteral("enable_triggers"), QStringLiteral("Y"));
-			attrs.insert(QStringLiteral("enable_timers"), QStringLiteral("TRUE"));
+				QVERIFY(!shouldEvaluateRuleCollection(attrs, WorldRuleKind::Alias, false));
+				QVERIFY(!shouldEvaluateRuleCollection(attrs, WorldRuleKind::Trigger, false));
+				QVERIFY(!shouldEvaluateRuleCollection(attrs, WorldRuleKind::Timer, false));
 
-			QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Alias, false));
-			QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Trigger, false));
-			QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Timer, false));
-		}
+				attrs.insert(QStringLiteral("enable_aliases"), QStringLiteral("1"));
+				attrs.insert(QStringLiteral("enable_triggers"), QStringLiteral("Y"));
+				attrs.insert(QStringLiteral("enable_timers"), QStringLiteral("TRUE"));
 
-		/**
-		 * @brief Verifies plugin rule collections ignore world enable flags.
-		 */
-		static void pluginRuleCollectionAlwaysEnabledRegardlessOfWorldFlags()
-		{
-			QMap<QString, QString> attrs;
-			attrs.insert(QStringLiteral("enable_aliases"), QStringLiteral("0"));
-			attrs.insert(QStringLiteral("enable_triggers"), QStringLiteral("0"));
-			attrs.insert(QStringLiteral("enable_timers"), QStringLiteral("0"));
+				QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Alias, false));
+				QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Trigger, false));
+				QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Timer, false));
+			}
 
-			QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Alias, true));
-			QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Trigger, true));
-			QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Timer, true));
-		}
-};
+			/**
+			 * @brief Verifies plugin rule collections ignore world enable flags.
+			 */
+			static void pluginRuleCollectionAlwaysEnabledRegardlessOfWorldFlags()
+			{
+				QMap<QString, QString> attrs;
+				attrs.insert(QStringLiteral("enable_aliases"), QStringLiteral("0"));
+				attrs.insert(QStringLiteral("enable_triggers"), QStringLiteral("0"));
+				attrs.insert(QStringLiteral("enable_timers"), QStringLiteral("0"));
+
+				QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Alias, true));
+				QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Trigger, true));
+				QVERIFY(shouldEvaluateRuleCollection(attrs, WorldRuleKind::Timer, true));
+			}
+	};
+
+} // namespace
 
 QTEST_APPLESS_MAIN(tst_WorldRuleEnableUtils)
 

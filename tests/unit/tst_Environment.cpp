@@ -38,7 +38,7 @@ namespace
 	class ScopedEnvVar
 	{
 		public:
-				ScopedEnvVar(QByteArray name, const QByteArray &value) : m_name(std::move(name))
+			ScopedEnvVar(QByteArray name, const QByteArray &value) : m_name(std::move(name))
 			{
 				m_hadOriginal = qEnvironmentVariableIsSet(m_name.constData());
 				if (m_hadOriginal)
@@ -59,49 +59,48 @@ namespace
 			QByteArray m_originalValue;
 			bool       m_hadOriginal{false};
 	};
+	/**
+	 * @brief QTest fixture for Environment fallback and multi-instance safety behavior.
+	 */
+	class tst_Environment : public QObject
+	{
+			Q_OBJECT
+
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void emptyQmudHomeUsesConfigFallbackWhenEnabled()
+			{
+				QTemporaryDir tempDir;
+				QVERIFY(tempDir.isValid());
+				const QString                    configPath = tempDir.filePath(QStringLiteral("config"));
+				const ScopedConfigSearchOverride configOverride(
+				    configPath, QStringLiteral("QMUD_HOME=/tmp/qmud-fallback-home\n"));
+
+				ScopedEnvVar emptyHome(QByteArrayLiteral("QMUD_HOME"), QByteArray());
+				qmudSetEnvironmentConfigFallbackEnabled(true);
+				QCOMPARE(qmudEnvironmentVariable(QStringLiteral("QMUD_HOME")),
+				         QStringLiteral("/tmp/qmud-fallback-home"));
+			}
+
+			void fallbackDisabledIgnoresConfigEvenWhenQmudHomeEnvIsEmpty()
+			{
+				QTemporaryDir tempDir;
+				QVERIFY(tempDir.isValid());
+				const QString                    configPath = tempDir.filePath(QStringLiteral("config"));
+				const ScopedConfigSearchOverride configOverride(
+				    configPath, QStringLiteral("QMUD_HOME=/tmp/qmud-fallback-home\n"));
+
+				ScopedEnvVar emptyHome(QByteArrayLiteral("QMUD_HOME"), QByteArray());
+				qmudSetEnvironmentConfigFallbackEnabled(false);
+				QVERIFY(qmudEnvironmentVariable(QStringLiteral("QMUD_HOME")).isEmpty());
+				qmudSetEnvironmentConfigFallbackEnabled(true);
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+
 } // namespace
 
-/**
- * @brief QTest fixture for Environment fallback and multi-instance safety behavior.
- */
-class tst_Environment : public QObject
-{
-		Q_OBJECT
-
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void emptyQmudHomeUsesConfigFallbackWhenEnabled()
-		{
-			QTemporaryDir tempDir;
-			QVERIFY(tempDir.isValid());
-			const QString                    configPath = tempDir.filePath(QStringLiteral("config"));
-			const ScopedConfigSearchOverride configOverride(
-			    configPath, QStringLiteral("QMUD_HOME=/tmp/qmud-fallback-home\n"));
-
-			ScopedEnvVar emptyHome(QByteArrayLiteral("QMUD_HOME"), QByteArray());
-			qmudSetEnvironmentConfigFallbackEnabled(true);
-			QCOMPARE(qmudEnvironmentVariable(QStringLiteral("QMUD_HOME")),
-			         QStringLiteral("/tmp/qmud-fallback-home"));
-		}
-
-		void fallbackDisabledIgnoresConfigEvenWhenQmudHomeEnvIsEmpty()
-		{
-			QTemporaryDir tempDir;
-			QVERIFY(tempDir.isValid());
-			const QString                    configPath = tempDir.filePath(QStringLiteral("config"));
-			const ScopedConfigSearchOverride configOverride(
-			    configPath, QStringLiteral("QMUD_HOME=/tmp/qmud-fallback-home\n"));
-
-			ScopedEnvVar emptyHome(QByteArrayLiteral("QMUD_HOME"), QByteArray());
-			qmudSetEnvironmentConfigFallbackEnabled(false);
-			QVERIFY(qmudEnvironmentVariable(QStringLiteral("QMUD_HOME")).isEmpty());
-			qmudSetEnvironmentConfigFallbackEnabled(true);
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
-
 QTEST_APPLESS_MAIN(tst_Environment)
-
 
 #if __has_include("tst_Environment.moc")
 #include "tst_Environment.moc"

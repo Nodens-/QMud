@@ -43,352 +43,355 @@ namespace
 			out.append(static_cast<char>(c));
 		return out;
 	}
+	/**
+	 * @brief QTest fixture covering TelnetProcessor Options scenarios.
+	 */
+	class tst_TelnetProcessor_Options : public QObject
+	{
+			Q_OBJECT
+
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void queueInitialNegotiationIsIdempotent()
+			{
+				TelnetProcessor processor;
+				processor.queueInitialNegotiation(true, true);
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA, IAC, DO, WILL_END_OF_RECORD}));
+
+				processor.queueInitialNegotiation(true, true);
+				QVERIFY(processor.takeOutboundData().isEmpty());
+			}
+
+			void repeatedSgaNegotiationRemainsEnabledByDefault()
+			{
+				TelnetProcessor processor;
+
+				processor.processBytes(bytes({IAC, WILL, SGA}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
+
+				processor.processBytes(bytes({IAC, WILL, SGA}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
+			}
+
+			void repeatedSgaNegotiationCanBeSuppressedWhenConfigured()
+			{
+				TelnetProcessor processor;
+				processor.setNegotiateOptionsOnce(true);
+
+				processor.processBytes(bytes({IAC, WILL, SGA}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
+
+				processor.processBytes(bytes({IAC, WILL, SGA}));
+				QVERIFY(processor.takeOutboundData().isEmpty());
+
+				processor.processBytes(bytes({IAC, DO, SGA}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, SGA}));
+
+				processor.processBytes(bytes({IAC, DO, SGA}));
+				QVERIFY(processor.takeOutboundData().isEmpty());
+			}
+
+			void queueEnableCompression2NegotiationSendsDoCompress2()
+			{
+				TelnetProcessor processor;
+				processor.queueEnableCompression2Negotiation();
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_COMPRESS2}));
+			}
+
+			void queueDisableCompressionNegotiationDefaultsToCompress2()
+			{
+				TelnetProcessor processor;
+				processor.queueDisableCompressionNegotiation();
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_COMPRESS2}));
+			}
+
+			void echoNegotiationCallbacksAndReplies()
+			{
+				TelnetProcessor            processor;
+				QList<bool>                noEchoStates;
+				TelnetProcessor::Callbacks callbacks;
+				callbacks.onNoEchoChanged = [&noEchoStates](const bool enabled)
+				{ noEchoStates.append(enabled); };
+				processor.setCallbacks(callbacks);
+
+				processor.processBytes(bytes({IAC, WILL, TELOPT_ECHO}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_ECHO}));
+				QCOMPARE(noEchoStates, QList<bool>{true});
+
+				processor.processBytes(bytes({IAC, WONT, TELOPT_ECHO}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_ECHO}));
+				QCOMPARE(noEchoStates, QList<bool>({true, false}));
+			}
+
+			void noEchoOffRejectsEchoNegotiation()
+			{
+				TelnetProcessor            processor;
+				bool                       callbackFired = false;
+
+				TelnetProcessor::Callbacks callbacks;
+				callbacks.onNoEchoChanged = [&callbackFired](bool) { callbackFired = true; };
+				processor.setCallbacks(callbacks);
+				processor.setNoEchoOff(true);
+
+				processor.processBytes(bytes({IAC, WILL, TELOPT_ECHO}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_ECHO}));
+				QVERIFY(!callbackFired);
+			}
+
+			void noEchoStaysEnabledAcrossIncomingData()
+			{
+				TelnetProcessor            processor;
+				QList<bool>                noEchoStates;
+				TelnetProcessor::Callbacks callbacks;
+				callbacks.onNoEchoChanged = [&noEchoStates](const bool enabled)
+				{ noEchoStates.append(enabled); };
+				processor.setCallbacks(callbacks);
+
+				processor.processBytes(bytes({IAC, WILL, TELOPT_ECHO}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_ECHO}));
+				QCOMPARE(noEchoStates, QList<bool>{true});
+
+				QCOMPARE(processor.processBytes(QByteArray("secret input")), QByteArray("secret input"));
+				QVERIFY(processor.takeOutboundData().isEmpty());
+				QCOMPARE(noEchoStates, QList<bool>{true});
+
+				processor.processBytes(bytes({IAC, WONT, TELOPT_ECHO}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_ECHO}));
+				QCOMPARE(noEchoStates, QList<bool>({true, false}));
+			}
+
+			void resetConnectionStateClearsNoEchoOnce()
+			{
+				TelnetProcessor            processor;
+				QList<bool>                noEchoStates;
+				TelnetProcessor::Callbacks callbacks;
+				callbacks.onNoEchoChanged = [&noEchoStates](const bool enabled)
+				{ noEchoStates.append(enabled); };
+				processor.setCallbacks(callbacks);
+
+				processor.processBytes(bytes({IAC, WILL, TELOPT_ECHO}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_ECHO}));
+				QCOMPARE(noEchoStates, QList<bool>{true});
+
+				processor.resetConnectionState();
+				QCOMPARE(noEchoStates, QList<bool>({true, false}));
+
+				processor.resetConnectionState();
+				QCOMPARE(noEchoStates, QList<bool>({true, false}));
+			}
+
+			void doNawsSendsWillAndWindowSizeWhenEnabled()
+			{
+				TelnetProcessor processor;
+				processor.setNawsEnabled(true);
+				processor.setWindowSize(80, 24);
+				QVERIFY(!processor.isNawsNegotiated());
+
+				processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS,
+				                                              0x00, 0x50, 0x00, 0x18, IAC, SE}));
+				QVERIFY(processor.isNawsNegotiated());
+			}
+
+			void doNawsEscapesIacBytesInWindowSizePayload()
+			{
+				TelnetProcessor processor;
+				processor.setNawsEnabled(true);
+				processor.setWindowSize(255, 255);
+
+				processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS,
+				                                              0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, IAC, SE}));
+			}
+
+			void doNawsSendsWontWhenDisabled()
+			{
+				TelnetProcessor processor;
+				processor.setNawsEnabled(false);
+				QVERIFY(!processor.isNawsNegotiated());
+
+				processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_NAWS}));
+				QVERIFY(!processor.isNawsNegotiated());
+			}
+
+			void doNawsSendsUpdatedWindowSizeAfterNegotiation()
+			{
+				TelnetProcessor processor;
+				processor.setNawsEnabled(true);
+				processor.setWindowSize(80, 24);
+
+				processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS,
+				                                              0x00, 0x50, 0x00, 0x18, IAC, SE}));
+
+				processor.setWindowSize(132, 40);
+				QCOMPARE(processor.takeOutboundData(),
+				         bytes({IAC, SB, TELOPT_NAWS, 0x00, 0x84, 0x00, 0x28, IAC, SE}));
+
+				processor.setWindowSize(132, 40);
+				QVERIFY(processor.takeOutboundData().isEmpty());
+			}
+
+			void nawsNegotiationStateClearsOnDontWontAndReset()
+			{
+				TelnetProcessor processor;
+				processor.setNawsEnabled(true);
+				processor.setWindowSize(80, 24);
+				QVERIFY(!processor.isNawsNegotiated());
+
+				processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS,
+				                                              0x00, 0x50, 0x00, 0x18, IAC, SE}));
+				QVERIFY(processor.isNawsNegotiated());
+
+				processor.processBytes(bytes({IAC, DONT, TELOPT_NAWS}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_NAWS}));
+				QVERIFY(!processor.isNawsNegotiated());
+
+				processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS,
+				                                              0x00, 0x50, 0x00, 0x18, IAC, SE}));
+				QVERIFY(processor.isNawsNegotiated());
+
+				processor.processBytes(bytes({IAC, WONT, TELOPT_NAWS}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_NAWS}));
+				QVERIFY(!processor.isNawsNegotiated());
+
+				processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS,
+				                                              0x00, 0x50, 0x00, 0x18, IAC, SE}));
+				QVERIFY(processor.isNawsNegotiated());
+
+				processor.resetConnectionState();
+				QVERIFY(!processor.isNawsNegotiated());
+			}
+
+			void disablingNawsAfterNegotiationSendsWontAndClearsNegotiatedState()
+			{
+				TelnetProcessor processor;
+				processor.setNawsEnabled(true);
+				processor.setWindowSize(120, 40);
+
+				processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS,
+				                                              0x00, 0x78, 0x00, 0x28, IAC, SE}));
+				QVERIFY(processor.isNawsNegotiated());
+
+				processor.setNawsEnabled(false);
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_NAWS}));
+				QVERIFY(!processor.isNawsNegotiated());
+
+				processor.setWindowSize(132, 45);
+				QVERIFY(processor.takeOutboundData().isEmpty());
+			}
+
+			void terminalTypeRequestReturnsConfiguredName()
+			{
+				TelnetProcessor processor;
+				processor.setTerminalIdentification(QStringLiteral("QMudTerm"));
+
+				processor.processBytes(bytes({IAC, DO, TELOPT_TERMINAL_TYPE}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_TERMINAL_TYPE}));
+
+				processor.processBytes(bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_SEND, IAC, SE}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_IS, 'Q',
+				                                              'M', 'u', 'd', 'T', 'e', 'r', 'm', IAC, SE}));
+			}
+
+			void charsetRequestAcceptedAndRejected()
+			{
+				TelnetProcessor processor;
+				processor.setUseUtf8(true);
+
+				processor.processBytes(bytes({IAC,
+				                              SB,
+				                              TELOPT_CHARSET,
+				                              CHARSET_REQUEST,
+				                              ',',
+				                              'U',
+				                              'T',
+				                              'F',
+				                              '-',
+				                              '8',
+				                              ',',
+				                              'U',
+				                              'S',
+				                              '-',
+				                              'A',
+				                              'S',
+				                              'C',
+				                              'I',
+				                              'I',
+				                              IAC,
+				                              SE}));
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, SB, TELOPT_CHARSET, CHARSET_ACCEPTED, 'U',
+				                                              'T', 'F', '-', '8', IAC, SE}));
+
+				processor.processBytes(bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REQUEST, ',', 'U', 'S', '-',
+				                              'A', 'S', 'C', 'I', 'I', IAC, SE}));
+				QCOMPARE(processor.takeOutboundData(),
+				         bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REJECTED, IAC, SE}));
+			}
+
+			void startTlsNegotiationQueuesDoAndRequestsUpgradeOnWill()
+			{
+				TelnetProcessor processor;
+				processor.setStartTlsEnabled(true);
+				processor.queueStartTlsNegotiation();
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_START_TLS}));
+
+				processor.processBytes(bytes({IAC, WILL, TELOPT_START_TLS}));
+				QCOMPARE(processor.takeOutboundData(),
+				         bytes({IAC, SB, TELOPT_START_TLS, START_TLS_FOLLOWS, IAC, SE}));
+				QVERIFY(processor.takeStartTlsUpgradeRequest());
+				QVERIFY(!processor.takeStartTlsUpgradeRequest());
+			}
+
+			void startTlsFollowsSubnegotiationRequestsUpgrade()
+			{
+				TelnetProcessor processor;
+				processor.setStartTlsEnabled(true);
+				processor.processBytes(bytes({IAC, SB, TELOPT_START_TLS, START_TLS_FOLLOWS, IAC, SE}));
+				QVERIFY(processor.takeStartTlsUpgradeRequest());
+				QVERIFY(!processor.takeStartTlsUpgradeRequest());
+
+				processor.setStartTlsActive(true);
+				processor.processBytes(bytes({IAC, SB, TELOPT_START_TLS, START_TLS_FOLLOWS, IAC, SE}));
+				QVERIFY(!processor.takeStartTlsUpgradeRequest());
+			}
+
+			void startTlsRejectionIsReported()
+			{
+				TelnetProcessor processor;
+				processor.setStartTlsEnabled(true);
+				processor.queueStartTlsNegotiation();
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_START_TLS}));
+
+				processor.processBytes(bytes({IAC, WONT, TELOPT_START_TLS}));
+				QVERIFY(processor.takeStartTlsNegotiationRejected());
+				QVERIFY(!processor.takeStartTlsNegotiationRejected());
+				QVERIFY(!processor.takeStartTlsUpgradeRequest());
+			}
+
+			void gaCanConvertToNewline()
+			{
+				TelnetProcessor            processor;
+				int                        gaCount = 0;
+
+				TelnetProcessor::Callbacks callbacks;
+				callbacks.onIacGa = [&gaCount]() { ++gaCount; };
+				processor.setCallbacks(callbacks);
+				processor.setConvertGAtoNewline(true);
+
+				const QByteArray output = processor.processBytes(bytes({IAC, GA}));
+				QCOMPARE(output, QByteArray("\n"));
+				QCOMPARE(gaCount, 1);
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+
 } // namespace
-
-/**
- * @brief QTest fixture covering TelnetProcessor Options scenarios.
- */
-class tst_TelnetProcessor_Options : public QObject
-{
-		Q_OBJECT
-
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void queueInitialNegotiationIsIdempotent()
-		{
-			TelnetProcessor processor;
-			processor.queueInitialNegotiation(true, true);
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA, IAC, DO, WILL_END_OF_RECORD}));
-
-			processor.queueInitialNegotiation(true, true);
-			QVERIFY(processor.takeOutboundData().isEmpty());
-		}
-
-		void repeatedSgaNegotiationRemainsEnabledByDefault()
-		{
-			TelnetProcessor processor;
-
-			processor.processBytes(bytes({IAC, WILL, SGA}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
-
-			processor.processBytes(bytes({IAC, WILL, SGA}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
-		}
-
-		void repeatedSgaNegotiationCanBeSuppressedWhenConfigured()
-		{
-			TelnetProcessor processor;
-			processor.setNegotiateOptionsOnce(true);
-
-			processor.processBytes(bytes({IAC, WILL, SGA}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, SGA}));
-
-			processor.processBytes(bytes({IAC, WILL, SGA}));
-			QVERIFY(processor.takeOutboundData().isEmpty());
-
-			processor.processBytes(bytes({IAC, DO, SGA}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, SGA}));
-
-			processor.processBytes(bytes({IAC, DO, SGA}));
-			QVERIFY(processor.takeOutboundData().isEmpty());
-		}
-
-		void queueEnableCompression2NegotiationSendsDoCompress2()
-		{
-			TelnetProcessor processor;
-			processor.queueEnableCompression2Negotiation();
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_COMPRESS2}));
-		}
-
-		void queueDisableCompressionNegotiationDefaultsToCompress2()
-		{
-			TelnetProcessor processor;
-			processor.queueDisableCompressionNegotiation();
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_COMPRESS2}));
-		}
-
-		void echoNegotiationCallbacksAndReplies()
-		{
-			TelnetProcessor            processor;
-			QList<bool>                noEchoStates;
-			TelnetProcessor::Callbacks callbacks;
-			callbacks.onNoEchoChanged = [&noEchoStates](const bool enabled) { noEchoStates.append(enabled); };
-			processor.setCallbacks(callbacks);
-
-			processor.processBytes(bytes({IAC, WILL, TELOPT_ECHO}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_ECHO}));
-			QCOMPARE(noEchoStates, QList<bool>{true});
-
-			processor.processBytes(bytes({IAC, WONT, TELOPT_ECHO}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_ECHO}));
-			QCOMPARE(noEchoStates, QList<bool>({true, false}));
-		}
-
-		void noEchoOffRejectsEchoNegotiation()
-		{
-			TelnetProcessor            processor;
-			bool                       callbackFired = false;
-
-			TelnetProcessor::Callbacks callbacks;
-			callbacks.onNoEchoChanged = [&callbackFired](bool) { callbackFired = true; };
-			processor.setCallbacks(callbacks);
-			processor.setNoEchoOff(true);
-
-			processor.processBytes(bytes({IAC, WILL, TELOPT_ECHO}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_ECHO}));
-			QVERIFY(!callbackFired);
-		}
-
-		void noEchoStaysEnabledAcrossIncomingData()
-		{
-			TelnetProcessor            processor;
-			QList<bool>                noEchoStates;
-			TelnetProcessor::Callbacks callbacks;
-			callbacks.onNoEchoChanged = [&noEchoStates](const bool enabled) { noEchoStates.append(enabled); };
-			processor.setCallbacks(callbacks);
-
-			processor.processBytes(bytes({IAC, WILL, TELOPT_ECHO}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_ECHO}));
-			QCOMPARE(noEchoStates, QList<bool>{true});
-
-			QCOMPARE(processor.processBytes(QByteArray("secret input")), QByteArray("secret input"));
-			QVERIFY(processor.takeOutboundData().isEmpty());
-			QCOMPARE(noEchoStates, QList<bool>{true});
-
-			processor.processBytes(bytes({IAC, WONT, TELOPT_ECHO}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_ECHO}));
-			QCOMPARE(noEchoStates, QList<bool>({true, false}));
-		}
-
-		void resetConnectionStateClearsNoEchoOnce()
-		{
-			TelnetProcessor            processor;
-			QList<bool>                noEchoStates;
-			TelnetProcessor::Callbacks callbacks;
-			callbacks.onNoEchoChanged = [&noEchoStates](const bool enabled) { noEchoStates.append(enabled); };
-			processor.setCallbacks(callbacks);
-
-			processor.processBytes(bytes({IAC, WILL, TELOPT_ECHO}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_ECHO}));
-			QCOMPARE(noEchoStates, QList<bool>{true});
-
-			processor.resetConnectionState();
-			QCOMPARE(noEchoStates, QList<bool>({true, false}));
-
-			processor.resetConnectionState();
-			QCOMPARE(noEchoStates, QList<bool>({true, false}));
-		}
-
-		void doNawsSendsWillAndWindowSizeWhenEnabled()
-		{
-			TelnetProcessor processor;
-			processor.setNawsEnabled(true);
-			processor.setWindowSize(80, 24);
-			QVERIFY(!processor.isNawsNegotiated());
-
-			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE}));
-			QVERIFY(processor.isNawsNegotiated());
-		}
-
-		void doNawsEscapesIacBytesInWindowSizePayload()
-		{
-			TelnetProcessor processor;
-			processor.setNawsEnabled(true);
-			processor.setWindowSize(255, 255);
-
-			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00,
-			                                              0xFF, 0xFF, 0x00, 0xFF, 0xFF, IAC, SE}));
-		}
-
-		void doNawsSendsWontWhenDisabled()
-		{
-			TelnetProcessor processor;
-			processor.setNawsEnabled(false);
-			QVERIFY(!processor.isNawsNegotiated());
-
-			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_NAWS}));
-			QVERIFY(!processor.isNawsNegotiated());
-		}
-
-		void doNawsSendsUpdatedWindowSizeAfterNegotiation()
-		{
-			TelnetProcessor processor;
-			processor.setNawsEnabled(true);
-			processor.setWindowSize(80, 24);
-
-			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE}));
-
-			processor.setWindowSize(132, 40);
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, SB, TELOPT_NAWS, 0x00, 0x84, 0x00, 0x28, IAC, SE}));
-
-			processor.setWindowSize(132, 40);
-			QVERIFY(processor.takeOutboundData().isEmpty());
-		}
-
-		void nawsNegotiationStateClearsOnDontWontAndReset()
-		{
-			TelnetProcessor processor;
-			processor.setNawsEnabled(true);
-			processor.setWindowSize(80, 24);
-			QVERIFY(!processor.isNawsNegotiated());
-
-			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE}));
-			QVERIFY(processor.isNawsNegotiated());
-
-			processor.processBytes(bytes({IAC, DONT, TELOPT_NAWS}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_NAWS}));
-			QVERIFY(!processor.isNawsNegotiated());
-
-			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE}));
-			QVERIFY(processor.isNawsNegotiated());
-
-			processor.processBytes(bytes({IAC, WONT, TELOPT_NAWS}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_NAWS}));
-			QVERIFY(!processor.isNawsNegotiated());
-
-			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE}));
-			QVERIFY(processor.isNawsNegotiated());
-
-			processor.resetConnectionState();
-			QVERIFY(!processor.isNawsNegotiated());
-		}
-
-		void disablingNawsAfterNegotiationSendsWontAndClearsNegotiatedState()
-		{
-			TelnetProcessor processor;
-			processor.setNawsEnabled(true);
-			processor.setWindowSize(120, 40);
-
-			processor.processBytes(bytes({IAC, DO, TELOPT_NAWS}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, WILL, TELOPT_NAWS, IAC, SB, TELOPT_NAWS, 0x00, 0x78, 0x00, 0x28, IAC, SE}));
-			QVERIFY(processor.isNawsNegotiated());
-
-			processor.setNawsEnabled(false);
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WONT, TELOPT_NAWS}));
-			QVERIFY(!processor.isNawsNegotiated());
-
-			processor.setWindowSize(132, 45);
-			QVERIFY(processor.takeOutboundData().isEmpty());
-		}
-
-		void terminalTypeRequestReturnsConfiguredName()
-		{
-			TelnetProcessor processor;
-			processor.setTerminalIdentification(QStringLiteral("QMudTerm"));
-
-			processor.processBytes(bytes({IAC, DO, TELOPT_TERMINAL_TYPE}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, TELOPT_TERMINAL_TYPE}));
-
-			processor.processBytes(bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_SEND, IAC, SE}));
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, SB, TELOPT_TERMINAL_TYPE, TTYPE_IS, 'Q', 'M',
-			                                              'u', 'd', 'T', 'e', 'r', 'm', IAC, SE}));
-		}
-
-		void charsetRequestAcceptedAndRejected()
-		{
-			TelnetProcessor processor;
-			processor.setUseUtf8(true);
-
-			processor.processBytes(bytes({IAC,
-			                              SB,
-			                              TELOPT_CHARSET,
-			                              CHARSET_REQUEST,
-			                              ',',
-			                              'U',
-			                              'T',
-			                              'F',
-			                              '-',
-			                              '8',
-			                              ',',
-			                              'U',
-			                              'S',
-			                              '-',
-			                              'A',
-			                              'S',
-			                              'C',
-			                              'I',
-			                              'I',
-			                              IAC,
-			                              SE}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, SB, TELOPT_CHARSET, CHARSET_ACCEPTED, 'U', 'T', 'F', '-', '8', IAC, SE}));
-
-			processor.processBytes(bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REQUEST, ',', 'U', 'S', '-', 'A',
-			                              'S', 'C', 'I', 'I', IAC, SE}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, SB, TELOPT_CHARSET, CHARSET_REJECTED, IAC, SE}));
-		}
-
-		void startTlsNegotiationQueuesDoAndRequestsUpgradeOnWill()
-		{
-			TelnetProcessor processor;
-			processor.setStartTlsEnabled(true);
-			processor.queueStartTlsNegotiation();
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_START_TLS}));
-
-			processor.processBytes(bytes({IAC, WILL, TELOPT_START_TLS}));
-			QCOMPARE(processor.takeOutboundData(),
-			         bytes({IAC, SB, TELOPT_START_TLS, START_TLS_FOLLOWS, IAC, SE}));
-			QVERIFY(processor.takeStartTlsUpgradeRequest());
-			QVERIFY(!processor.takeStartTlsUpgradeRequest());
-		}
-
-		void startTlsFollowsSubnegotiationRequestsUpgrade()
-		{
-			TelnetProcessor processor;
-			processor.setStartTlsEnabled(true);
-			processor.processBytes(bytes({IAC, SB, TELOPT_START_TLS, START_TLS_FOLLOWS, IAC, SE}));
-			QVERIFY(processor.takeStartTlsUpgradeRequest());
-			QVERIFY(!processor.takeStartTlsUpgradeRequest());
-
-			processor.setStartTlsActive(true);
-			processor.processBytes(bytes({IAC, SB, TELOPT_START_TLS, START_TLS_FOLLOWS, IAC, SE}));
-			QVERIFY(!processor.takeStartTlsUpgradeRequest());
-		}
-
-		void startTlsRejectionIsReported()
-		{
-			TelnetProcessor processor;
-			processor.setStartTlsEnabled(true);
-			processor.queueStartTlsNegotiation();
-			QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_START_TLS}));
-
-			processor.processBytes(bytes({IAC, WONT, TELOPT_START_TLS}));
-			QVERIFY(processor.takeStartTlsNegotiationRejected());
-			QVERIFY(!processor.takeStartTlsNegotiationRejected());
-			QVERIFY(!processor.takeStartTlsUpgradeRequest());
-		}
-
-		void gaCanConvertToNewline()
-		{
-			TelnetProcessor            processor;
-			int                        gaCount = 0;
-
-			TelnetProcessor::Callbacks callbacks;
-			callbacks.onIacGa = [&gaCount]() { ++gaCount; };
-			processor.setCallbacks(callbacks);
-			processor.setConvertGAtoNewline(true);
-
-			const QByteArray output = processor.processBytes(bytes({IAC, GA}));
-			QCOMPARE(output, QByteArray("\n"));
-			QCOMPARE(gaCount, 1);
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Options)
 
