@@ -13,6 +13,7 @@
 #include "AccessibleTextUtils.h"
 #include "WorldRuntime.h"
 
+#include <QElapsedTimer>
 #include <QFont>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QKeySequence>
@@ -2049,6 +2050,19 @@ class WorldView : public QWidget
 				quint64                      renderRevision{0};
 		};
 		/**
+		 * @brief Existing word selection captured across Qt's double-click mouse sequence.
+		 */
+		struct NativeOutputWordSelectionCandidate
+		{
+				bool                         valid{false};
+				WrapTextBrowser             *sourceView{nullptr};
+				NativeOutputPositionIdentity lineIdentity;
+				int                          line{-1};
+				int                          startColumn{0};
+				int                          endColumn{0};
+				quint64                      renderRevision{0};
+		};
+		/**
 		 * @brief Result of resolving stored native output selection against current render lines.
 		 */
 		enum class NativeOutputSelectionResolveResult
@@ -2063,6 +2077,29 @@ class WorldView : public QWidget
 		 * @return Word at @p position, or an empty string when no word is present.
 		 */
 		[[nodiscard]] QString wordAtNativeOutputPosition(const NativeOutputPosition &position) const;
+		/**
+		 * @brief Resolves the non-delimiter word range containing a native output position.
+		 * @param position Native output position to inspect.
+		 * @param start Receives the inclusive word start.
+		 * @param end Receives the exclusive word end.
+		 * @return `true` when @p position lies on a word.
+		 */
+		[[nodiscard]] bool    nativeOutputWordRange(const NativeOutputPosition &position,
+		                                            NativeOutputPosition       &start,
+		                                            NativeOutputPosition       &end) const;
+		/**
+		 * @brief Schedules a completed link click after Qt's platform double-click interval.
+		 * @param href Link action captured on release.
+		 */
+		void                  scheduleHyperlinkActivation(const QString &href);
+		/**
+		 * @brief Immediately dispatches the pending link activation, if any.
+		 */
+		void                  dispatchPendingHyperlinkActivation();
+		/**
+		 * @brief Cancels the pending link activation, if any.
+		 */
+		void                  cancelPendingHyperlinkActivation();
 		/**
 		 * @brief Hit-tests a point in an output viewport against native output lines.
 		 * @param view Source output view.
@@ -2856,7 +2893,13 @@ class WorldView : public QWidget
 		QTimer                                 *m_tooltipTimer{nullptr};
 		bool                                    m_anchorHoverActive{false};
 		QString                                 m_hoveredHyperlinkHref;
+		QTimer                                 *m_hyperlinkActivationTimer{nullptr};
+		QString                                 m_pendingHyperlinkActivationHref;
 		NativeOutputSelectionState              m_nativeOutputSelection;
+		NativeOutputWordSelectionCandidate      m_nativeOutputWordSelectionCandidate;
+		QElapsedTimer                           m_nativeOutputTripleClickTimer;
+		WrapTextBrowser                        *m_nativeOutputTripleClickView{nullptr};
+		QPoint                                  m_nativeOutputTripleClickGlobalPosition;
 		mutable int                             m_nativeSelectionPendingHeadTrimLines{0};
 		bool                                    m_mouseCaptured{false};
 		bool                                    m_capturedMiniWindowDragActive{false};

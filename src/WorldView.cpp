@@ -69,6 +69,7 @@
 #include <QStringList>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QStyle>
+#include <QStyleHints>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
@@ -1840,6 +1841,11 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 	m_tooltipTimer    = new QTimer(this);
 	m_tooltipTimer->setSingleShot(true);
 	connect(m_tooltipTimer, &QTimer::timeout, this, &WorldView::showScheduledHotspotTooltip);
+	m_hyperlinkActivationTimer = new QTimer(this);
+	m_hyperlinkActivationTimer->setSingleShot(true);
+	m_hyperlinkActivationTimer->setTimerType(Qt::PreciseTimer);
+	connect(m_hyperlinkActivationTimer, &QTimer::timeout, this,
+	        &WorldView::dispatchPendingHyperlinkActivation);
 	m_fadeTimer = new QTimer(this);
 	m_fadeTimer->setSingleShot(false);
 	connect(m_fadeTimer, &QTimer::timeout, this,
@@ -2077,6 +2083,7 @@ WorldView::WorldView(QWidget *parent) : QWidget(parent)
 
 WorldView::~WorldView()
 {
+	cancelPendingHyperlinkActivation();
 	stopMiniWindowMouseCapture();
 	hideActiveHotspotTooltip();
 	m_destroying = true;
@@ -2099,6 +2106,7 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 		m_drawOutputWindowCallbackActive = m_runtime->drawOutputWindowCallbackActive();
 		return;
 	}
+	cancelPendingHyperlinkActivation();
 
 	QObject::disconnect(m_runtimeOutputConnection);
 	QObject::disconnect(m_runtimeStyledOutputConnection);
@@ -2206,6 +2214,7 @@ void WorldView::setRuntimeObserver(WorldRuntime *runtime)
 		m_runtime->registerPresentationView(this);
 		return;
 	}
+	cancelPendingHyperlinkActivation();
 
 	QObject::disconnect(m_runtimeOutputConnection);
 	QObject::disconnect(m_runtimeStyledOutputConnection);
@@ -2265,6 +2274,7 @@ void WorldView::setCommandInteractionEnabled(const bool enabled)
 	m_commandInteractionEnabled = enabled;
 	if (!enabled)
 	{
+		cancelPendingHyperlinkActivation();
 		stopMiniWindowMouseCapture();
 		m_capturedWindowName.clear();
 		m_hoverWindowName.clear();
@@ -8987,7 +8997,11 @@ void WorldView::clearNativeOutputSelection(const bool notify)
 	                             m_nativeOutputSelection.sourceView != nullptr;
 	const QRect oldPaneRect    = nativeOutputSelectionRepaintRect(m_nativeOutputSelection);
 	m_nativeOutputSelection    = {};
-	m_nativeSelectionPendingHeadTrimLines = 0;
+	m_nativeOutputWordSelectionCandidate = {};
+	m_nativeOutputTripleClickTimer.invalidate();
+	m_nativeOutputTripleClickView           = nullptr;
+	m_nativeOutputTripleClickGlobalPosition = {};
+	m_nativeSelectionPendingHeadTrimLines   = 0;
 	if (oldPaneRect.isValid())
 		requestNativeOutputRepaint(oldPaneRect);
 	if (hadNativeState)
@@ -9413,6 +9427,35 @@ QString WorldView::nativeOutputSelectionHtml() const
 	return html;
 }
 
+void WorldView::scheduleHyperlinkActivation(const QString &href)
+{
+	if (!m_hyperlinkActivationTimer || href.isEmpty())
+		return;
+
+	m_pendingHyperlinkActivationHref = href;
+	const int doubleClickInterval =
+	    QGuiApplication::styleHints() ? QGuiApplication::styleHints()->mouseDoubleClickInterval() : 0;
+	m_hyperlinkActivationTimer->start(qMax(0, doubleClickInterval));
+}
+
+void WorldView::dispatchPendingHyperlinkActivation()
+{
+	if (m_hyperlinkActivationTimer)
+		m_hyperlinkActivationTimer->stop();
+	const QString href = m_pendingHyperlinkActivationHref;
+	m_pendingHyperlinkActivationHref.clear();
+	if (href.isEmpty() || !m_commandInteractionEnabled || m_destroying)
+		return;
+	emit hyperlinkActivated(href);
+}
+
+void WorldView::cancelPendingHyperlinkActivation()
+{
+	if (m_hyperlinkActivationTimer)
+		m_hyperlinkActivationTimer->stop();
+	m_pendingHyperlinkActivationHref.clear();
+}
+
 bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget *watched)
 {
 	if (!nativeOutputInteractionActive() || !event)
@@ -9443,6 +9486,31 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 		const auto *mouseEvent = dynamic_cast<const QMouseEvent *>(event);
 		if (!mouseEvent || mouseEvent->button() != Qt::LeftButton)
 			return false;
+		const bool createdDoubleClick = mouseEvent->flags().testFlag(Qt::MouseEventCreatedDoubleClick);
+		if (createdDoubleClick)
+		{
+			cancelPendingHyperlinkActivation();
+		}
+		else if (!m_pendingHyperlinkActivationHref.isEmpty())
+		{
+			const QPointer<WorldView> guard(this);
+			dispatchPendingHyperlinkActivation();
+			if (!guard)
+				return true;
+		}
+		const QStyleHints *styleHints = QGuiApplication::styleHints();
+		const QPoint       tripleClickDelta =
+		    mouseEvent->globalPosition().toPoint() - m_nativeOutputTripleClickGlobalPosition;
+		const qint64 tripleClickDistance =
+		    qAbs(static_cast<qint64>(tripleClickDelta.x())) + qAbs(static_cast<qint64>(tripleClickDelta.y()));
+		const bool tripleClick =
+		    m_nativeOutputTripleClickTimer.isValid() && m_nativeOutputTripleClickView == sourceView &&
+		    styleHints &&
+		    m_nativeOutputTripleClickTimer.elapsed() <= qMax(0, styleHints->mouseDoubleClickInterval()) &&
+		    tripleClickDistance <= qMax(0, styleHints->mouseDoubleClickDistance());
+		m_nativeOutputTripleClickTimer.invalidate();
+		m_nativeOutputTripleClickView           = nullptr;
+		m_nativeOutputTripleClickGlobalPosition = {};
 
 		NativeOutputPosition position;
 		bool                 textHit = false;
@@ -9450,6 +9518,45 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 		                         true, false, &textHit))
 			return false;
 		cacheWordUnderMouse(position, textHit);
+
+		if (tripleClick)
+		{
+			m_nativeOutputWordSelectionCandidate = {};
+			const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+			if (position.line < 0 || position.line >= lines.size())
+				return false;
+			setNativeOutputSelection(sourceView, {position.line, 0},
+			                         {position.line, sizeToInt(lines.at(position.line).text.size())}, false);
+			return true;
+		}
+
+		if (!createdDoubleClick)
+		{
+			m_nativeOutputWordSelectionCandidate = {};
+
+			NativeOutputPosition           wordStart;
+			NativeOutputPosition           wordEnd;
+			NativeOutputSelectionState     resolvedSelection;
+			const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+			if (nativeOutputWordRange(position, wordStart, wordEnd) &&
+			    resolveNativeOutputSelectionStateForLines(lines, resolvedSelection) ==
+			        NativeOutputSelectionResolveResult::MappedSelection &&
+			    resolvedSelection.sourceView == sourceView &&
+			    resolvedSelection.start.line == wordStart.line &&
+			    resolvedSelection.start.column == wordStart.column &&
+			    resolvedSelection.end.line == wordEnd.line && resolvedSelection.end.column == wordEnd.column)
+			{
+				m_nativeOutputWordSelectionCandidate = {
+				    true,
+				    sourceView,
+				    nativeOutputSelectionIdentityForPosition(lines, wordStart),
+				    wordStart.line,
+				    wordStart.column,
+				    wordEnd.column,
+				    m_nativeRenderLineCacheRevision,
+				};
+			}
+		}
 
 		setNativeOutputSelection(sourceView, position, position, true);
 		return true;
@@ -9463,7 +9570,8 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 			return false;
 		if ((mouseEvent->buttons() & Qt::LeftButton) == Qt::NoButton)
 		{
-			m_nativeOutputSelection.dragging = false;
+			m_nativeOutputWordSelectionCandidate = {};
+			m_nativeOutputSelection.dragging     = false;
 			return false;
 		}
 
@@ -9480,6 +9588,7 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 		}
 		cacheWordUnderMouse(position, textHit);
 
+		m_nativeOutputWordSelectionCandidate = {};
 		setNativeOutputSelection(selectionSource, m_nativeOutputSelection.anchor, position, true);
 		return true;
 	}
@@ -9509,7 +9618,7 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 		                      m_nativeOutputSelection.anchor.column == position.column;
 		setNativeOutputSelection(selectionSource, m_nativeOutputSelection.anchor, position, false);
 		if (m_commandInteractionEnabled && wasClick && !href.isEmpty())
-			emit hyperlinkActivated(href);
+			scheduleHyperlinkActivation(href);
 		return true;
 	}
 	case QEvent::MouseButtonDblClick:
@@ -9517,6 +9626,15 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 		const auto *mouseEvent = dynamic_cast<const QMouseEvent *>(event);
 		if (!mouseEvent || mouseEvent->button() != Qt::LeftButton)
 			return false;
+		cancelPendingHyperlinkActivation();
+		m_nativeOutputSelection.dragging = false;
+		m_nativeOutputTripleClickTimer.invalidate();
+		m_nativeOutputTripleClickView           = nullptr;
+		m_nativeOutputTripleClickGlobalPosition = {};
+
+		const NativeOutputWordSelectionCandidate wordSelectionCandidate =
+		    m_nativeOutputWordSelectionCandidate;
+		m_nativeOutputWordSelectionCandidate = {};
 
 		NativeOutputPosition hit;
 		bool                 textHit = false;
@@ -9528,6 +9646,9 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 		const NativeOutputRenderLines &lines = nativeOutputRenderLines();
 		if (hit.line < 0 || hit.line >= lines.size())
 			return false;
+		m_nativeOutputTripleClickView           = sourceView;
+		m_nativeOutputTripleClickGlobalPosition = mouseEvent->globalPosition().toPoint();
+		m_nativeOutputTripleClickTimer.start();
 		const QString text = lines.at(hit.line).text;
 		if (text.isEmpty())
 		{
@@ -9535,29 +9656,43 @@ bool WorldView::handleNativeOutputMouseEvent(const QEvent *event, const QWidget 
 			return true;
 		}
 
-		auto isDelim = [this](const QChar ch)
+		NativeOutputPosition wordStart;
+		NativeOutputPosition wordEnd;
+		if (!nativeOutputWordRange(hit, wordStart, wordEnd))
 		{
-			if (ch.isSpace())
-				return true;
-			const QString &delims =
-			    m_wordDelimitersDblClick.isEmpty() ? m_wordDelimiters : m_wordDelimitersDblClick;
-			return delims.contains(ch);
-		};
-
-		int probe = qBound(0, hit.column, sizeToInt(text.size()) - 1);
-		if (isDelim(text.at(probe)))
-		{
+			const int probe = qBound(0, hit.column, sizeToInt(text.size()) - 1);
 			setNativeOutputSelection(sourceView, {hit.line, probe}, {hit.line, probe + 1}, false);
 			return true;
 		}
 
-		int start = probe;
-		while (start > 0 && !isDelim(text.at(start - 1)))
-			--start;
-		int end = probe;
-		while (end < text.size() && !isDelim(text.at(end)))
-			++end;
-		setNativeOutputSelection(sourceView, {hit.line, start}, {hit.line, end}, false);
+		const NativeOutputPositionIdentity currentLineIdentity =
+		    nativeOutputSelectionIdentityForPosition(lines, wordStart);
+		const bool candidateHasIdentity   = wordSelectionCandidate.lineIdentity.lineKey != 0 ||
+		                                    wordSelectionCandidate.lineIdentity.firstRuntimeLineNumber > 0 ||
+		                                    wordSelectionCandidate.lineIdentity.lastRuntimeLineNumber > 0;
+		const bool currentLineHasIdentity = currentLineIdentity.lineKey != 0 ||
+		                                    currentLineIdentity.firstRuntimeLineNumber > 0 ||
+		                                    currentLineIdentity.lastRuntimeLineNumber > 0;
+		const bool sameLine =
+		    candidateHasIdentity && currentLineHasIdentity
+		        ? wordSelectionCandidate.lineIdentity.lineKey == currentLineIdentity.lineKey &&
+		              wordSelectionCandidate.lineIdentity.firstRuntimeLineNumber ==
+		                  currentLineIdentity.firstRuntimeLineNumber &&
+		              wordSelectionCandidate.lineIdentity.lastRuntimeLineNumber ==
+		                  currentLineIdentity.lastRuntimeLineNumber
+		        : wordSelectionCandidate.renderRevision == m_nativeRenderLineCacheRevision &&
+		              wordSelectionCandidate.line == wordStart.line;
+		const bool selectLine = wordSelectionCandidate.valid &&
+		                        wordSelectionCandidate.sourceView == sourceView && sameLine &&
+		                        wordSelectionCandidate.startColumn == wordStart.column &&
+		                        wordSelectionCandidate.endColumn == wordEnd.column;
+		if (selectLine)
+		{
+			setNativeOutputSelection(sourceView, {hit.line, 0}, {hit.line, sizeToInt(text.size())}, false);
+			return true;
+		}
+
+		setNativeOutputSelection(sourceView, wordStart, wordEnd, false);
 		return true;
 	}
 	default:
@@ -11465,6 +11600,40 @@ QString WorldView::wordAtNativeOutputPosition(const NativeOutputPosition &positi
 		++end;
 
 	return text.mid(start, end - start);
+}
+
+bool WorldView::nativeOutputWordRange(const NativeOutputPosition &position, NativeOutputPosition &start,
+                                      NativeOutputPosition &end) const
+{
+	start = {};
+	end   = {};
+
+	const NativeOutputRenderLines &lines = nativeOutputRenderLines();
+	if (position.line < 0 || position.line >= lines.size())
+		return false;
+	const QString &text = lines.at(position.line).text;
+	if (text.isEmpty())
+		return false;
+
+	const QString &delimiters =
+	    m_wordDelimitersDblClick.isEmpty() ? m_wordDelimiters : m_wordDelimitersDblClick;
+	auto isDelimiter = [&delimiters](const QChar character)
+	{ return character.isSpace() || delimiters.contains(character); };
+
+	const int probe = qBound(0, position.column, sizeToInt(text.size()) - 1);
+	if (isDelimiter(text.at(probe)))
+		return false;
+
+	int startColumn = probe;
+	while (startColumn > 0 && !isDelimiter(text.at(startColumn - 1)))
+		--startColumn;
+	int endColumn = probe;
+	while (endColumn < text.size() && !isDelimiter(text.at(endColumn)))
+		++endColumn;
+
+	start = {position.line, startColumn};
+	end   = {position.line, endColumn};
+	return true;
 }
 
 void WorldView::setWordDelimiters(const QString &delimiters, const QString &doubleClickDelimiters)

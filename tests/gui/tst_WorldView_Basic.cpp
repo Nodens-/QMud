@@ -51,6 +51,7 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QSplitter>
 #include <QSplitterHandle>
+#include <QStyleHints>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QTemporaryDir>
 #include <QTextDocument>
@@ -60,6 +61,8 @@
 #include <QUrl>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QWheelEvent>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QWindow>
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
@@ -668,97 +671,6 @@ end
 			int m_count{0};
 	};
 
-	QPoint findHyperlinkPoint(WorldView &view, QTextBrowser &browser, const QString &href)
-	{
-		if (!browser.viewport() || href.isEmpty())
-			return {-1, -1};
-
-		auto waitForNativeOutputReady = [&view, &browser]()
-		{
-			auto         *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
-			QElapsedTimer timer;
-			timer.start();
-			while (timer.elapsed() < 500)
-			{
-				const bool ready = nativeCanvas && nativeCanvas->isVisible() && view.isVisible() &&
-				                   browser.viewport() && browser.viewport()->isVisible() &&
-				                   browser.viewport()->width() > 1 && browser.viewport()->height() > 1;
-				if (ready)
-					return true;
-				QCoreApplication::processEvents();
-				QTest::qWait(1);
-			}
-			return nativeCanvas && nativeCanvas->isVisible() && view.isVisible() && browser.viewport() &&
-			       browser.viewport()->isVisible() && browser.viewport()->width() > 1 &&
-			       browser.viewport()->height() > 1;
-		};
-		if (!waitForNativeOutputReady())
-			return {-1, -1};
-
-		auto matchesHref = [&href](const QString &candidate)
-		{ return candidate == href || QUrl::fromPercentEncoding(candidate.toUtf8()) == href; };
-
-		QSignalSpy hoverSpy(&view, &WorldView::hyperlinkHighlighted);
-		const auto probeHover = [&browser, &hoverSpy, &matchesHref](const QPoint &point)
-		{
-			const qsizetype before = hoverSpy.size();
-			QTest::mouseMove(browser.viewport(), point);
-			QCoreApplication::processEvents();
-			for (qsizetype i = before; i < hoverSpy.size(); ++i)
-			{
-				if (matchesHref(hoverSpy.at(i).at(0).toString()))
-					return true;
-			}
-			return false;
-		};
-
-		QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
-		const auto probeClick = [&browser, &activatedSpy, &matchesHref](const QPoint &point)
-		{
-			const qsizetype before = activatedSpy.size();
-			QTest::mouseClick(browser.viewport(), Qt::LeftButton, Qt::NoModifier, point);
-			QCoreApplication::processEvents();
-			for (qsizetype i = before; i < activatedSpy.size(); ++i)
-			{
-				if (matchesHref(activatedSpy.at(i).at(0).toString()))
-					return true;
-			}
-			return false;
-		};
-
-		const QRect area = browser.viewport()->rect();
-		const int   fastBottom =
-		    qMin(area.bottom(), area.top() + qMax(24, QFontMetrics(browser.font()).height() * 4));
-		const int fastRight = qMin(area.right(), area.left() + 320);
-		for (int y = area.top(); y <= fastBottom; y += 2)
-		{
-			for (int x = area.left(); x <= fastRight; x += 2)
-			{
-				if (probeHover({x, y}))
-					return {x, y};
-			}
-		}
-
-		for (int y = area.top(); y <= fastBottom; y += 6)
-		{
-			for (int x = area.left(); x <= fastRight; x += 6)
-			{
-				if (probeClick({x, y}))
-					return {x, y};
-			}
-		}
-
-		for (int y = area.top(); y <= area.bottom(); y += 12)
-		{
-			for (int x = area.left(); x <= area.right(); x += 12)
-			{
-				if (probeClick({x, y}))
-					return {x, y};
-			}
-		}
-		return {-1, -1};
-	}
-
 	QPoint findLineInformationPoint(const QTextBrowser          &browser,
 	                                const std::function<bool()> &hasPendingLineInformation)
 	{
@@ -1290,6 +1202,73 @@ class tst_WorldView_Basic : public QObject
 		Q_OBJECT
 
 	private:
+		static QPoint findHyperlinkPoint(WorldView &view, QTextBrowser &browser, const QString &href)
+		{
+			if (!browser.viewport() || href.isEmpty())
+				return {-1, -1};
+
+			auto         *nativeCanvas = view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QElapsedTimer timer;
+			timer.start();
+			while (timer.elapsed() < 500)
+			{
+				const bool ready = nativeCanvas && nativeCanvas->isVisible() && view.isVisible() &&
+				                   browser.viewport()->isVisible() && browser.viewport()->width() > 1 &&
+				                   browser.viewport()->height() > 1;
+				if (ready)
+					break;
+				QCoreApplication::processEvents();
+				QTest::qWait(1);
+			}
+			if (!nativeCanvas || !nativeCanvas->isVisible() || !view.isVisible() ||
+			    !browser.viewport()->isVisible() || browser.viewport()->width() <= 1 ||
+			    browser.viewport()->height() <= 1)
+			{
+				return {-1, -1};
+			}
+
+			auto matchesHref = [&href](const QString &candidate)
+			{ return candidate == href || QUrl::fromPercentEncoding(candidate.toUtf8()) == href; };
+			auto probePoint = [&view, &browser, &matchesHref](const QPoint &point)
+			{
+				QTest::mouseMove(browser.viewport(), point);
+				QCoreApplication::processEvents();
+				return matchesHref(view.currentHoveredHyperlink());
+			};
+
+			const QRect area = browser.viewport()->rect();
+			const int   fastBottom =
+			    qMin(area.bottom(), area.top() + qMax(24, QFontMetrics(browser.font()).height() * 4));
+			const int fastRight = qMin(area.right(), area.left() + 320);
+			for (int y = area.top(); y <= fastBottom; y += 2)
+			{
+				for (int x = area.left(); x <= fastRight; x += 2)
+				{
+					if (probePoint({x, y}))
+						return {x, y};
+				}
+			}
+
+			for (int y = area.top(); y <= fastBottom; y += 6)
+			{
+				for (int x = area.left(); x <= fastRight; x += 6)
+				{
+					if (probePoint({x, y}))
+						return {x, y};
+				}
+			}
+
+			for (int y = area.top(); y <= area.bottom(); y += 12)
+			{
+				for (int x = area.left(); x <= area.right(); x += 12)
+				{
+					if (probePoint({x, y}))
+						return {x, y};
+				}
+			}
+			return {-1, -1};
+		}
+
 		static void makeNativeLayoutCacheExact(const WorldView                          &view,
 		                                       const WorldView::NativeOutputRenderLines &lines,
 		                                       const int wrapWidthPixels, const int localWrapWidthPixels,
@@ -13840,6 +13819,396 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.outputSelectionText(), selectionBeforeLostMove);
 
 			QTest::mouseRelease(viewport, Qt::LeftButton, Qt::NoModifier, dragFar);
+			resetTestState();
+		}
+
+		void repeatedDoubleClickPromotesWordSelectionToLogicalLineInEveryOutputPane()
+		{
+			struct WordHit
+			{
+					QPoint  point{-1, -1};
+					QString word;
+					QString line;
+			};
+
+			auto findWordHit = [](const WorldView &view, const QTextBrowser *browser)
+			{
+				WordHit result;
+				if (!browser || !browser->viewport())
+					return result;
+
+				const QRect viewportRect = browser->viewport()->rect();
+				for (int y = viewportRect.top() + 1; y <= viewportRect.bottom(); y += 2)
+				{
+					for (int x = viewportRect.left() + 1; x <= viewportRect.right(); x += 2)
+					{
+						WorldView::NativeOutputPosition position;
+						bool                            textHit = false;
+						if (!view.nativeOutputHitTest(reinterpret_cast<const WrapTextBrowser *>(browser),
+						                              {x, y}, position, nullptr, nullptr, true, true,
+						                              &textHit) ||
+						    !textHit)
+						{
+							continue;
+						}
+
+						WorldView::NativeOutputPosition wordStart;
+						WorldView::NativeOutputPosition wordEnd;
+						if (!view.nativeOutputWordRange(position, wordStart, wordEnd))
+							continue;
+
+						const WorldView::NativeOutputRenderLines &lines = view.nativeOutputRenderLines();
+						if (position.line < 0 || position.line >= lines.size())
+							continue;
+						const QString line = lines.at(position.line).text;
+						const QString word = line.mid(wordStart.column, wordEnd.column - wordStart.column);
+						if (word.isEmpty() || word == line)
+							continue;
+
+						result.point = {x, y};
+						result.word  = word;
+						result.line  = line;
+						return result;
+					}
+				}
+				return result;
+			};
+
+			auto verifyPromotion = [](const WorldView &view, QTextBrowser *browser, const WordHit &hit,
+			                          const bool useQpaSequence)
+			{
+				QVERIFY(browser);
+				QVERIFY(browser->viewport());
+				QVERIFY(hit.point.x() >= 0 && hit.point.y() >= 0);
+				QVERIFY(!hit.word.isEmpty());
+				QVERIFY(hit.line.contains(hit.word));
+				QVERIFY(hit.word != hit.line);
+
+				auto sendQpaDoubleClick = [browser, &hit]
+				{
+					QWindow *window = browser->window()->windowHandle();
+					QVERIFY(window);
+					const QPoint windowPoint =
+					    window->mapFromGlobal(browser->viewport()->mapToGlobal(hit.point));
+					QTest::mouseMove(window, windowPoint, QTest::mouseDoubleClickInterval + 1);
+					QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, windowPoint, 10);
+				};
+				auto sendSingleClick = [browser, &hit, useQpaSequence]
+				{
+					if (useQpaSequence)
+					{
+						QWindow *window = browser->window()->windowHandle();
+						QVERIFY(window);
+						const QPoint windowPoint =
+						    window->mapFromGlobal(browser->viewport()->mapToGlobal(hit.point));
+						QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, windowPoint, 10);
+					}
+					else
+					{
+						QTest::mouseClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, hit.point);
+						QCoreApplication::processEvents();
+					}
+				};
+
+				if (useQpaSequence)
+				{
+					sendQpaDoubleClick();
+				}
+				else
+				{
+					QTest::mouseDClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, hit.point);
+					QTest::mouseRelease(browser->viewport(), Qt::LeftButton, Qt::NoModifier, hit.point);
+					QCoreApplication::processEvents();
+				}
+				QCOMPARE(view.outputSelectionText(), hit.word);
+				sendSingleClick();
+				QCOMPARE(view.outputSelectionText(), hit.line);
+
+				QTest::qWait(QTest::mouseDoubleClickInterval + 1);
+				if (useQpaSequence)
+				{
+					sendQpaDoubleClick();
+				}
+				else
+				{
+					QTest::mouseDClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, hit.point);
+					QTest::mouseRelease(browser->viewport(), Qt::LeftButton, Qt::NoModifier, hit.point);
+					QCoreApplication::processEvents();
+				}
+				QCOMPARE(view.outputSelectionText(), hit.word);
+				QTest::qWait(QTest::mouseDoubleClickInterval + 1);
+
+				if (useQpaSequence)
+				{
+					sendQpaDoubleClick();
+				}
+				else
+				{
+					QTest::mouseClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, hit.point);
+					QCoreApplication::processEvents();
+					QVERIFY(!view.hasOutputSelection());
+
+					QTest::mouseDClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, hit.point);
+					QTest::mouseRelease(browser->viewport(), Qt::LeftButton, Qt::NoModifier, hit.point);
+					QCoreApplication::processEvents();
+				}
+				QCOMPARE(view.outputSelectionText(), hit.line);
+			};
+
+			resetTestState();
+			{
+				WorldView view;
+				setTestRuntimeObserver(view, runtimeForTest());
+				view.resize(760, 460);
+				view.show();
+				QCoreApplication::processEvents();
+
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("mainprefix selectedword mainsuffix"), true);
+				QCoreApplication::processEvents();
+
+				QTextBrowser *browser = findVisibleOutputBrowser(view);
+				QVERIFY(browser);
+				const WordHit hit = findWordHit(view, browser);
+				verifyPromotion(view, browser, hit, true);
+			}
+
+			resetTestState();
+			{
+				WorldView view;
+				setTestRuntimeObserver(view, runtimeForTest());
+				view.resize(760, 460);
+				view.show();
+				QCoreApplication::processEvents();
+
+				for (int i = 0; i < 280; ++i)
+				{
+					runtimeOutputForTest(view).appendOutputText(
+					    QStringLiteral("splitprefix%1 splitword%1 splitsuffix%1").arg(i), true);
+				}
+				QCoreApplication::processEvents();
+
+				QCOMPARE(view.setOutputScroll(0, true), 0);
+				QCoreApplication::processEvents();
+				QTRY_VERIFY(view.isScrollbackSplitActive());
+
+				const auto [splitTop, splitBottom] = findSplitOutputBrowsers(view);
+				QVERIFY(splitTop);
+				QVERIFY(splitBottom);
+
+				const WordHit topHit = findWordHit(view, splitTop);
+				verifyPromotion(view, splitTop, topHit, false);
+
+				const WordHit bottomHit = findWordHit(view, splitBottom);
+				verifyPromotion(view, splitBottom, bottomHit, false);
+			}
+			resetTestState();
+		}
+
+		void doubleClickOnHyperlinkSelectsWithoutActivatingAndSingleClickStillActivates()
+		{
+			resetTestState();
+
+			WorldView view;
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			const QString           linkedText = QStringLiteral("linkedword");
+			const QString           suffix     = QStringLiteral(" trailing text");
+			const QString           line       = linkedText + suffix;
+			WorldRuntime::StyleSpan linkSpan;
+			linkSpan.length     = boundedSizeToInt(linkedText.size());
+			linkSpan.actionType = WorldRuntime::ActionSend;
+			linkSpan.action     = QStringLiteral("examine linkedword");
+			WorldRuntime::StyleSpan suffixSpan;
+			suffixSpan.length = boundedSizeToInt(suffix.size());
+			runtimeOutputForTest(view).appendOutputTextStyled(line, {linkSpan, suffixSpan}, true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QVERIFY(browser->viewport());
+
+			QPoint      anchorPoint{-1, -1};
+			const QRect viewportRect = browser->viewport()->rect();
+			for (int y = viewportRect.top() + 1; y <= viewportRect.bottom() && anchorPoint.x() < 0; y += 2)
+			{
+				for (int x = viewportRect.left() + 1; x <= viewportRect.right(); x += 2)
+				{
+					WorldView::NativeOutputPosition position;
+					QString                         href;
+					if (view.nativeOutputHitTest(reinterpret_cast<const WrapTextBrowser *>(browser), {x, y},
+					                             position, &href, nullptr, true, true) &&
+					    QUrl::fromPercentEncoding(href.toUtf8()) == linkSpan.action)
+					{
+						anchorPoint = {x, y};
+						break;
+					}
+				}
+			}
+			QVERIFY(anchorPoint.x() >= 0 && anchorPoint.y() >= 0);
+
+			QWindow *window = browser->window()->windowHandle();
+			QVERIFY(window);
+			const QPoint windowPoint = window->mapFromGlobal(browser->viewport()->mapToGlobal(anchorPoint));
+			auto         sendDoubleClick = [window, windowPoint]
+			{
+				QTest::mouseMove(window, windowPoint, QTest::mouseDoubleClickInterval + 1);
+				QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, windowPoint, 10);
+			};
+
+			QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
+			sendDoubleClick();
+			QCOMPARE(view.outputSelectionText(), linkedText);
+			QCOMPARE(activatedSpy.count(), 0);
+
+			QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, windowPoint, 10);
+			QCOMPARE(view.outputSelectionText(), line);
+			QCOMPARE(activatedSpy.count(), 0);
+
+			QStyleHints *styleHints = QGuiApplication::styleHints();
+			QVERIFY(styleHints);
+			const int doubleClickInterval = qMax(0, styleHints->mouseDoubleClickInterval());
+			QTest::qWait(doubleClickInterval + 20);
+			QCOMPARE(activatedSpy.count(), 0);
+
+			QTest::mouseMove(window, windowPoint, QTest::mouseDoubleClickInterval + 1);
+			QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, windowPoint, 10);
+			QCOMPARE(activatedSpy.count(), 0);
+			QTRY_COMPARE_WITH_TIMEOUT(activatedSpy.count(), 1, doubleClickInterval + 1000);
+			QCOMPARE(QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8()),
+			         linkSpan.action);
+
+			resetTestState();
+		}
+
+		void doubleClickAcrossAdjacentHyperlinksDoesNotActivateEitherLink()
+		{
+			resetTestState();
+
+			WorldView view;
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			const QString           linkedText = QStringLiteral("ab");
+			const QString           suffix     = QStringLiteral(" trailing text");
+			WorldRuntime::StyleSpan firstLinkSpan;
+			firstLinkSpan.length     = 1;
+			firstLinkSpan.actionType = WorldRuntime::ActionSend;
+			firstLinkSpan.action     = QStringLiteral("first adjacent action");
+			WorldRuntime::StyleSpan secondLinkSpan;
+			secondLinkSpan.length     = 1;
+			secondLinkSpan.actionType = WorldRuntime::ActionSend;
+			secondLinkSpan.action     = QStringLiteral("second adjacent action");
+			WorldRuntime::StyleSpan suffixSpan;
+			suffixSpan.length = boundedSizeToInt(suffix.size());
+			runtimeOutputForTest(view).appendOutputTextStyled(
+			    linkedText + suffix, {firstLinkSpan, secondLinkSpan, suffixSpan}, true);
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QVERIFY(browser->viewport());
+			QStyleHints *styleHints = QGuiApplication::styleHints();
+			QVERIFY(styleHints);
+			const int maximumDoubleClickDistance = styleHints->mouseDoubleClickDistance();
+			QVERIFY(maximumDoubleClickDistance > 0);
+
+			QPoint      firstPoint{-1, -1};
+			QPoint      secondPoint{-1, -1};
+			int         closestDistance = std::numeric_limits<int>::max();
+			const QRect viewportRect    = browser->viewport()->rect();
+			const int   probeRight      = qMin(viewportRect.right(), viewportRect.left() + 200);
+			for (int y = viewportRect.top(); y <= viewportRect.bottom(); ++y)
+			{
+				QPoint rightmostFirstPoint{-1, -1};
+				for (int x = viewportRect.left(); x <= probeRight; ++x)
+				{
+					WorldView::NativeOutputPosition position;
+					QString                         href;
+					if (!view.nativeOutputHitTest(reinterpret_cast<const WrapTextBrowser *>(browser), {x, y},
+					                              position, &href, nullptr, true, false))
+					{
+						continue;
+					}
+					const QString action = QUrl::fromPercentEncoding(href.toUtf8());
+					if (action == firstLinkSpan.action)
+					{
+						rightmostFirstPoint = {x, y};
+						continue;
+					}
+					if (action != secondLinkSpan.action || rightmostFirstPoint.x() < 0)
+						continue;
+
+					const int distance = x - rightmostFirstPoint.x();
+					if (distance < closestDistance)
+					{
+						closestDistance = distance;
+						firstPoint      = rightmostFirstPoint;
+						secondPoint     = {x, y};
+					}
+					break;
+				}
+			}
+			QVERIFY(firstPoint.x() >= 0 && firstPoint.y() >= 0);
+			QVERIFY(secondPoint.x() >= 0 && secondPoint.y() >= 0);
+			QVERIFY(closestDistance <= maximumDoubleClickDistance);
+
+			QWindow *window = browser->window()->windowHandle();
+			QVERIFY(window);
+			const QPoint firstWindowPoint =
+			    window->mapFromGlobal(browser->viewport()->mapToGlobal(firstPoint));
+			const QPoint secondWindowPoint =
+			    window->mapFromGlobal(browser->viewport()->mapToGlobal(secondPoint));
+
+			QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
+			QTest::mouseMove(window, firstWindowPoint, QTest::mouseDoubleClickInterval + 1);
+			QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, firstWindowPoint, 10);
+			QCOMPARE(activatedSpy.count(), 0);
+			QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, secondWindowPoint, 10);
+			QCOMPARE(view.outputSelectionText(), linkedText);
+			QCOMPARE(activatedSpy.count(), 0);
+
+			const int doubleClickInterval = qMax(0, styleHints->mouseDoubleClickInterval());
+			QTest::qWait(doubleClickInterval + 20);
+			QCOMPARE(activatedSpy.count(), 0);
+
+			resetTestState();
+		}
+
+		void failedDoubleClickHitStopsDraggingAndCancelsPendingHyperlinkActivation()
+		{
+			resetTestState();
+
+			WorldView view;
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QTextBrowser *browser = findVisibleOutputBrowser(view);
+			QVERIFY(browser);
+			QVERIFY(browser->viewport());
+			QVERIFY(view.nativeOutputRenderLines().isEmpty());
+
+			view.m_nativeOutputSelection.dragging   = true;
+			view.m_nativeOutputSelection.sourceView = reinterpret_cast<WrapTextBrowser *>(browser);
+			view.scheduleHyperlinkActivation(QStringLiteral("pending action"));
+			QVERIFY(view.m_hyperlinkActivationTimer->isActive());
+
+			const QPoint localPoint  = browser->viewport()->rect().center();
+			const QPoint globalPoint = browser->viewport()->mapToGlobal(localPoint);
+			QMouseEvent  doubleClick(QEvent::MouseButtonDblClick, QPointF(localPoint), QPointF(globalPoint),
+			                         Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+			QVERIFY(!view.handleNativeOutputMouseEvent(&doubleClick, browser->viewport()));
+			QVERIFY(!view.m_nativeOutputSelection.dragging);
+			QVERIFY(view.m_pendingHyperlinkActivationHref.isEmpty());
+			QVERIFY(!view.m_hyperlinkActivationTimer->isActive());
+
 			resetTestState();
 		}
 
