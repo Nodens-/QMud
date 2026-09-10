@@ -2628,10 +2628,11 @@ void MainWindow::requestDeferredUiRefresh(const bool refreshStatus, const bool r
 
 void MainWindow::refreshActionState()
 {
-	const auto         *world   = activeWorldChildWindow();
-	const WorldRuntime *runtime = world ? world->runtime() : nullptr;
-	auto               *view    = world ? world->view() : nullptr;
-	auto               *text    = activeTextChildWindow();
+	const auto         *world         = activeWorldChildWindow();
+	const WorldRuntime *runtime       = world ? world->runtime() : nullptr;
+	auto               *view          = world ? world->view() : nullptr;
+	auto               *text          = activeTextChildWindow();
+	const WorldRuntime *actionRuntime = runtime ? runtime : resolveRuntimeForTextWindow(text);
 
 	const bool          hasWorld = runtime != nullptr;
 	const bool          hasText  = text != nullptr;
@@ -2643,6 +2644,13 @@ void MainWindow::refreshActionState()
 		freezeAction->setCheckable(true);
 		freezeAction->setChecked(isFrozen);
 		freezeAction->setEnabled(view != nullptr);
+	}
+	if (m_actions.contains(QStringLiteral("DebugPackets")))
+	{
+		QAction *debugPacketsAction = m_actions.value(QStringLiteral("DebugPackets"));
+		debugPacketsAction->setCheckable(true);
+		debugPacketsAction->setChecked(actionRuntime && actionRuntime->debugIncomingPackets());
+		debugPacketsAction->setEnabled(actionRuntime != nullptr);
 	}
 
 	// keep toolbar/menu states in sync with runtime

@@ -218,6 +218,74 @@ namespace
 				QVERIFY(!sendToWorld->isEnabled());
 			}
 			/**
+			 * @brief Verifies packet debugging can be toggled from its owned text window and recreated after close.
+			 */
+			static void packetDebugActionUsesOwnedTextWindow()
+			{
+				AppController controller;
+				MainWindow    frame;
+				WorldRuntime  runtime;
+				runtime.setWorldAttribute(QStringLiteral("id"), QStringLiteral("packet-debug-world-id"));
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Packet debug world"));
+
+				auto *world = new WorldChildWindow(QStringLiteral("Packet debug world"));
+				world->setRuntime(&runtime);
+				const QPointer worldGuard(world);
+				const auto     unbindRuntime = qScopeGuard(
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
+				controller.setMainWindow(&frame);
+				frame.addMdiSubWindow(world, true);
+				frame.resize(900, 600);
+				frame.show();
+				QCoreApplication::processEvents();
+
+				QAction *const debugPackets = frame.actionForCommand(QStringLiteral("DebugPackets"));
+				QVERIFY(debugPackets);
+				QVERIFY(debugPackets->isEnabled());
+				QVERIFY(!debugPackets->isChecked());
+
+				controller.onCommandTriggered(QStringLiteral("DebugPackets"));
+				QVERIFY(runtime.debugIncomingPackets());
+				QVERIFY(debugPackets->isChecked());
+				runtime.receiveRawData(QByteArrayLiteral("packet-one\r\n"));
+
+				const QString title = QStringLiteral("Packet debug - Packet debug world");
+				QVERIFY(frame.activateNotepad(title, &runtime));
+				QCoreApplication::processEvents();
+				TextChildWindow *const firstDebugWindow = frame.activeTextChildWindow();
+				QVERIFY(firstDebugWindow);
+				QCOMPARE(frame.resolveRuntimeForTextWindow(firstDebugWindow), &runtime);
+				QVERIFY(debugPackets->isEnabled());
+				QVERIFY(debugPackets->isChecked());
+
+				controller.onCommandTriggered(QStringLiteral("DebugPackets"));
+				QVERIFY(!runtime.debugIncomingPackets());
+				QVERIFY(!debugPackets->isChecked());
+
+				QPointer<TextChildWindow> closedDebugWindow(firstDebugWindow);
+				firstDebugWindow->setQuerySaveOnClose(false);
+				firstDebugWindow->close();
+				QTRY_VERIFY(closedDebugWindow.isNull());
+				QTRY_COMPARE(frame.activeWorldChildWindow(), world);
+				QVERIFY(debugPackets->isEnabled());
+				QVERIFY(!debugPackets->isChecked());
+				controller.onCommandTriggered(QStringLiteral("DebugPackets"));
+				QVERIFY(runtime.debugIncomingPackets());
+				runtime.receiveRawData(QByteArrayLiteral("packet-two\r\n"));
+				QVERIFY(frame.activateNotepad(title, &runtime));
+				QCoreApplication::processEvents();
+				TextChildWindow *const secondDebugWindow = frame.activeTextChildWindow();
+				QVERIFY(secondDebugWindow);
+				QCOMPARE(frame.resolveRuntimeForTextWindow(secondDebugWindow), &runtime);
+				controller.onCommandTriggered(QStringLiteral("DebugPackets"));
+				QVERIFY(!runtime.debugIncomingPackets());
+				secondDebugWindow->setQuerySaveOnClose(false);
+			}
+			/**
 			 * @brief Verifies clicked command hyperlinks are treated as typed user commands.
 			 */
 			static void clickedCommandLinkTerminatesPartialPrompt()
@@ -367,11 +435,12 @@ namespace
 				constexpr std::array testFunctions = {
 				    &ownedNotepadSendToWorldTerminatesPartialPrompt,
 				    &textWindowActionsRequireRecordedLiveOwner,
+				    &packetDebugActionUsesOwnedTextWindow,
 				    &clickedCommandLinkTerminatesPartialPrompt,
 				    &queuedCommandRetainsInteractiveSource,
 				    &generatedNameSendTerminatesPartialPrompt,
 				};
-				static_assert(testFunctions.size() == 5);
+				static_assert(testFunctions.size() == 6);
 			}
 	};
 

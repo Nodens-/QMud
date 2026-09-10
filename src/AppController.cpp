@@ -5428,7 +5428,7 @@ bool AppController::openTextDocument(const QString &path, WorldRuntime *relatedR
 
 	const auto title = QFileInfo(path).fileName();
 	auto      *child = new TextChildWindow(title, text);
-	m_mainWindow->associateTextWindowWithRuntime(child, relatedRuntime);
+	MainWindow::associateTextWindowWithRuntime(child, relatedRuntime);
 	child->setFilePath(path);
 	if (const QPlainTextEdit *editor = child->editor())
 		if (editor->document())
@@ -9529,7 +9529,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		runtime->setWorldAttribute(QStringLiteral("recall_line_preamble"), preamble);
 
 		auto *child = new TextChildWindow(QStringLiteral("Recall: %1").arg(findText), result);
-		m_mainWindow->associateTextWindowWithRuntime(child, runtime);
+		MainWindow::associateTextWindowWithRuntime(child, runtime);
 		m_mainWindow->addMdiSubWindow(child);
 	}
 	else if (isCommand(QStringLiteral("GoToUrl")) || cmdName == QStringLiteral("SendMailTo"))
@@ -11365,7 +11365,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			}
 		}
 		auto *text = new TextChildWindow(title, QString());
-		m_mainWindow->associateTextWindowWithRuntime(text, runtime);
+		MainWindow::associateTextWindowWithRuntime(text, runtime);
 		m_mainWindow->addMdiSubWindow(text);
 	}
 	else if (cmdName == QStringLiteral("FlipToNotepad"))
@@ -12561,10 +12561,11 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		auto *world = m_mainWindow->activeWorldChildWindow();
-		if (!world)
-			return;
-		auto *runtime = world->runtime();
+		WorldRuntime *runtime = nullptr;
+		if (const auto *world = m_mainWindow->activeWorldChildWindow())
+			runtime = world->runtime();
+		else if (const auto *text = m_mainWindow->activeTextChildWindow())
+			runtime = m_mainWindow->resolveRuntimeForTextWindow(text);
 		if (!runtime)
 			return;
 		const auto enabled = !runtime->debugIncomingPackets();
