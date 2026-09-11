@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <muclient>
+  <script>pre_plugin_script = true</script>
   <plugin
     name="FixturePlugin"
     author="Tester"

@@ -387,7 +387,7 @@ void WorldDocument::clearState()
 	m_plugins.clear();
 	m_loadedPluginIds.clear();
 	m_includes.clear();
-	m_scripts.clear();
+	m_pluginScriptFragments.clear();
 	m_currentIncludeStack.clear();
 	m_includeFileList.clear();
 	m_warnings.clear();
@@ -906,7 +906,8 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 			else if (name == QLatin1String("script"))
 			{
 				sawContent = true;
-				// Script tags apply to the current plugin.
+				// Script tags are plugin content. Retain a standalone fragment while resolving a plugin
+				// include or until plugin metadata later in the same file has been parsed.
 				const QString content = reader.readElementText(QXmlStreamReader::IncludeChildElements);
 				if (!content.isEmpty())
 				{
@@ -917,12 +918,8 @@ bool WorldDocument::loadFromFileWithPolicy(const QString &fileName, PluginPolicy
 							plugin.script += "\n";
 						plugin.script += content;
 					}
-					else
-					{
-						Script script;
-						script.content = content;
-						m_scripts.push_back(script);
-					}
+					else if (m_loadedFromInclude || m_pluginFile)
+						m_pluginScriptFragments.push_back(content);
 				}
 			}
 		}
@@ -1146,10 +1143,11 @@ bool WorldDocument::expandIncludes(const QString &worldFilePath, const QString &
 				m_loadedPluginIds.insert(pluginId, pluginName);
 		}
 	}
+	const QString rootPluginDir = m_pluginFile ? QFileInfo(worldFilePath).absolutePath() : QString();
 
-	if (!expandIncludesPass(worldFilePath, pluginsDir, programDir, stateDir, false, QString(), false))
+	if (!expandIncludesPass(worldFilePath, pluginsDir, programDir, stateDir, false, rootPluginDir, false))
 		return false;
-	if (!expandIncludesPass(worldFilePath, pluginsDir, programDir, stateDir, true, QString(), false))
+	if (!expandIncludesPass(worldFilePath, pluginsDir, programDir, stateDir, true, rootPluginDir, false))
 		return false;
 	finalizePluginContents();
 	return true;
@@ -1166,6 +1164,7 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 		if (!(m_loadMask & XML_PLUGINS))
 			return true;
 	}
+	QStringList includedPluginScripts;
 
 	for (const Include &include : m_includes)
 	{
@@ -1253,6 +1252,12 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 			return false;
 		}
 		child.finalizePluginContents();
+		if (!isPlugin)
+		{
+			if (!currentPluginDir.isEmpty())
+				includedPluginScripts.append(child.m_pluginScriptFragments);
+			child.m_pluginScriptFragments.clear();
+		}
 
 		QString newPluginId;
 		QString newPluginName;
@@ -1320,6 +1325,11 @@ bool WorldDocument::expandIncludesPass(const QString &worldFilePath, const QStri
 			m_loadedPluginIds.insert(newPluginId, newPluginName);
 		if (!isPlugin && currentPluginDir.isEmpty() && !m_currentIncludeStack.isEmpty())
 			m_currentIncludeStack.removeLast();
+	}
+	if (!wantPlugins && !includedPluginScripts.isEmpty())
+	{
+		includedPluginScripts.append(m_pluginScriptFragments);
+		m_pluginScriptFragments = std::move(includedPluginScripts);
 	}
 
 	return true;
@@ -1662,7 +1672,6 @@ bool WorldDocument::mergeFrom(const WorldDocument &other, bool fromInclude)
 	// Keep only includes declared in the loaded root document.
 	// Nested includes (including plugin-local includes) are expanded into runtime
 	// content but must not be flattened back into the parent include list.
-	m_scripts.append(other.m_scripts);
 	if (!other.m_comments.isEmpty())
 	{
 		if (!m_comments.isEmpty())
@@ -1743,6 +1752,24 @@ void WorldDocument::finalizePluginContents()
 		return;
 
 	Plugin &plugin = m_plugins.front();
+	if (!m_pluginScriptFragments.isEmpty())
+	{
+		QString combinedScript;
+		for (const QString &script : std::as_const(m_pluginScriptFragments))
+		{
+			if (!combinedScript.isEmpty() && !combinedScript.endsWith(QLatin1Char('\n')))
+				combinedScript += QLatin1Char('\n');
+			combinedScript += script;
+		}
+		if (!plugin.script.isEmpty())
+		{
+			if (!combinedScript.isEmpty() && !combinedScript.endsWith(QLatin1Char('\n')))
+				combinedScript += QLatin1Char('\n');
+			combinedScript += plugin.script;
+		}
+		plugin.script = std::move(combinedScript);
+		m_pluginScriptFragments.clear();
+	}
 	if (!m_triggers.isEmpty())
 		plugin.triggers = m_triggers;
 	if (!m_aliases.isEmpty())
@@ -1842,11 +1869,6 @@ const QList<WorldDocument::Plugin> &WorldDocument::plugins() const
 const QList<WorldDocument::Include> &WorldDocument::includes() const
 {
 	return m_includes;
-}
-
-const QList<WorldDocument::Script> &WorldDocument::scripts() const
-{
-	return m_scripts;
 }
 
 const QStringList &WorldDocument::includeFileList() const

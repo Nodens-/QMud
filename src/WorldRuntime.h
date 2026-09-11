@@ -444,13 +444,6 @@ class WorldRuntime : public QObject
 		{
 				QMap<QString, QString> attributes;
 		};
-		/**
-		 * @brief Script content block loaded from world/plugin configuration.
-		 */
-		struct Script
-		{
-				QString content;
-		};
 		enum LineFlag
 		{
 			// Mirrors legacy CLine flag bits where applicable, with an extra output marker bit.
@@ -1659,18 +1652,13 @@ class WorldRuntime : public QObject
 		bool pluginAliasWildcard(const QString &pluginId, const QString &aliasName,
 		                         const QString &wildcardName, QString &value) const;
 		/**
-		 * @brief Include/script/comment and output line-buffer APIs.
+		 * @brief Include/comment and output line-buffer APIs.
 		 */
 		/**
 		 * @brief Returns include blocks list.
 		 * @return Immutable include block list.
 		 */
 		[[nodiscard]] const QList<Include> &includes() const;
-		/**
-		 * @brief Returns script blocks list.
-		 * @return Immutable script block list.
-		 */
-		[[nodiscard]] const QList<Script>  &scripts() const;
 		/**
 		 * @brief Returns world comment text.
 		 * @return World comment text.
@@ -2784,12 +2772,6 @@ class WorldRuntime : public QObject
 		 * @return Include block count.
 		 */
 		[[nodiscard]] int  includeCount() const;
-		/**
-		 * @brief Returns script block count.
-		 * @return Script block count.
-		 */
-		[[nodiscard]] int  scriptCount() const;
-
 		/**
 		 * @brief Network I/O, command dispatch, and session counters.
 		 */
@@ -6455,7 +6437,6 @@ class WorldRuntime : public QObject
 				QMap<QString, QString>    worldAttributes;
 				QMap<QString, QString>    worldMultilineAttributes;
 				QList<Include>            includes;
-				QList<Script>             scripts;
 				QList<Trigger>            triggers;
 				QList<Alias>              aliases;
 				QList<Timer>              timers;
@@ -6549,7 +6530,6 @@ class WorldRuntime : public QObject
 		int                                                        m_printingStyleCount{0};
 		int                                                        m_pluginCount{0};
 		int                                                        m_includeCount{0};
-		int                                                        m_scriptCount{0};
 		quint64                                                    m_triggerRuleGeneration{0};
 		QMudAnsiStreamState                                        m_ansiStreamState;
 		AnsiRenderState                                            m_ansiRenderState;
@@ -6677,7 +6657,6 @@ class WorldRuntime : public QObject
 		bool                                            m_hasPendingMiniWindowMouseMoved{false};
 		bool                                            m_pendingMiniWindowMouseMovedQueued{false};
 		QList<Include>                                  m_includes;
-		QList<Script>                                   m_scripts;
 		QString                                         m_comments;
 		IndexedRingBuffer<LineEntry>                    m_lines;
 		bool                                            m_sessionStateOutputBufferSealed{false};

@@ -382,12 +382,19 @@ end
 </qmud>)")));
 				QVERIFY(writeTextFile(pluginPath, QStringLiteral(R"(<?xml version="1.0" encoding="UTF-8"?>
 <muclient>
-  <plugin name="PluginA" id="bbbbbbbbbbbbbbbbbbbbbbbb" language="lua"/>
   <include name="constants.xml"/>
+  <script><![CDATA[
+assert(plugin_include_value == "included")
+plugin_main_loaded = true
+]]></script>
+  <plugin name="PluginA" id="bbbbbbbbbbbbbbbbbbbbbbbb" language="lua"/>
 </muclient>)")));
 				QVERIFY(
 				    writeTextFile(pluginIncludePath, QStringLiteral(R"(<?xml version="1.0" encoding="UTF-8"?>
 <qmud>
+  <script><![CDATA[
+plugin_include_value = "included"
+]]></script>
   <variables>
     <variable name="from_constants">ok</variable>
   </variables>
@@ -401,8 +408,30 @@ end
 				QCOMPARE(doc.includes().front().attributes.value(QStringLiteral("name")),
 				         QStringLiteral("plugin.xml"));
 				QCOMPARE(doc.plugins().size(), 1);
-				QCOMPARE(pluginVariableByName(doc.plugins().front(), QStringLiteral("from_constants")),
+				const WorldDocument::Plugin &plugin = doc.plugins().front();
+				QCOMPARE(pluginVariableByName(plugin, QStringLiteral("from_constants")),
 				         QStringLiteral("ok"));
+				const qsizetype includedScriptIndex =
+				    plugin.script.indexOf(QStringLiteral("plugin_include_value = \"included\""));
+				const qsizetype mainScriptIndex =
+				    plugin.script.indexOf(QStringLiteral("assert(plugin_include_value == \"included\")"));
+				QVERIFY(includedScriptIndex >= 0);
+				QVERIFY(mainScriptIndex > includedScriptIndex);
+
+				WorldDocument directlyLoadedPlugin;
+				QVERIFY2(directlyLoadedPlugin.loadFromPluginFile(pluginPath),
+				         qPrintable(directlyLoadedPlugin.errorString()));
+				QVERIFY2(
+				    directlyLoadedPlugin.expandIncludes(pluginPath, pluginsPath, tempDir.path(), QString()),
+				    qPrintable(directlyLoadedPlugin.errorString()));
+				QCOMPARE(directlyLoadedPlugin.plugins().size(), 1);
+				const QString   directPluginScript = directlyLoadedPlugin.plugins().front().script;
+				const qsizetype directIncludedScriptIndex =
+				    directPluginScript.indexOf(QStringLiteral("plugin_include_value = \"included\""));
+				const qsizetype directMainScriptIndex = directPluginScript.indexOf(
+				    QStringLiteral("assert(plugin_include_value == \"included\")"));
+				QVERIFY(directIncludedScriptIndex >= 0);
+				QVERIFY(directMainScriptIndex > directIncludedScriptIndex);
 			}
 
 			void includeWithoutNameReturnsError()

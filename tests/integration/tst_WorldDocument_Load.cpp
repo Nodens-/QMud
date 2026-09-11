@@ -59,8 +59,6 @@ namespace
 				QCOMPARE(doc.timers().size(), 1);
 				QCOMPARE(doc.variables().size(), 1);
 				QCOMPARE(doc.includes().size(), 1);
-				QCOMPARE(doc.scripts().size(), 1);
-				QCOMPARE(doc.scripts().front().content, QStringLiteral("print(\"root script\")"));
 				QVERIFY(doc.errorString().isEmpty());
 				QVERIFY(doc.warnings().isEmpty());
 			}
@@ -79,7 +77,11 @@ namespace
 				QCOMPARE(plugin.attributes.value(QStringLiteral("name")), QStringLiteral("FixturePlugin"));
 				QCOMPARE(plugin.attributes.value(QStringLiteral("id")),
 				         QStringLiteral("0123456789abcdef01234567"));
-				QCOMPARE(plugin.script.trimmed(), QStringLiteral("return \"ok\""));
+				const qsizetype preMetadataScriptIndex =
+				    plugin.script.indexOf(QStringLiteral("pre_plugin_script = true"));
+				const qsizetype nestedScriptIndex = plugin.script.indexOf(QStringLiteral("return \"ok\""));
+				QVERIFY(preMetadataScriptIndex >= 0);
+				QVERIFY(nestedScriptIndex > preMetadataScriptIndex);
 				QCOMPARE(plugin.triggers.size(), 1);
 				QCOMPARE(plugin.triggers.front().attributes.value(QStringLiteral("name")),
 				         QStringLiteral("plugin_trigger"));
@@ -95,6 +97,7 @@ namespace
 				QVERIFY(allowDoc.loadFromFile(
 				    fixturePath(QStringLiteral("tests/data/worlds/world_with_plugin.xml"))));
 				QCOMPARE(allowDoc.plugins().size(), 1);
+				QCOMPARE(allowDoc.plugins().front().script.trimmed(), QStringLiteral("return \"embedded\""));
 
 				WorldDocument noPluginsDoc;
 				noPluginsDoc.setLoadMask(WorldDocument::kDefaultLoadMask | WorldDocument::XML_NO_PLUGINS);

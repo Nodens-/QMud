@@ -8418,7 +8418,6 @@ WorldRuntime::SaveSnapshot WorldRuntime::buildSaveSnapshot(const QString &fileNa
 	snapshot.worldAttributes          = m_worldAttributes;
 	snapshot.worldMultilineAttributes = m_worldMultilineAttributes;
 	snapshot.includes                 = m_includes;
-	snapshot.scripts                  = m_scripts;
 	snapshot.triggers                 = m_triggers;
 	snapshot.aliases                  = m_aliases;
 	snapshot.timers                   = m_timers;
@@ -8462,13 +8461,6 @@ bool WorldRuntime::saveStateMatchesSnapshot(const SaveSnapshot &snapshot) const
 	};
 	if (!includesEqual(m_includes, snapshot.includes))
 		return false;
-	if (m_scripts.size() != snapshot.scripts.size())
-		return false;
-	for (int i = 0; i < m_scripts.size(); ++i)
-	{
-		if (m_scripts.at(i).content != snapshot.scripts.at(i).content)
-			return false;
-	}
 
 	auto triggersEqual = [&](const QList<Trigger> &current, const QList<Trigger> &saved) -> bool
 	{
@@ -8824,7 +8816,6 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 	const auto &m_worldAttributes          = normalizedSnapshot.worldAttributes;
 	const auto &m_worldMultilineAttributes = normalizedSnapshot.worldMultilineAttributes;
 	const auto &m_includes                 = normalizedSnapshot.includes;
-	const auto &m_scripts                  = normalizedSnapshot.scripts;
 	const auto &m_triggers                 = normalizedSnapshot.triggers;
 	const auto &m_aliases                  = normalizedSnapshot.aliases;
 	const auto &m_timers                   = normalizedSnapshot.timers;
@@ -9475,9 +9466,6 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 		out << (requestedPluginEnabledState(plugin.attributes) ? "enabled=\"y\" " : "enabled=\"n\" ");
 		out << "/>" << nl;
 	}
-
-	for (const auto &script : m_scripts)
-		saveXmlMulti(out, nl, "script", script.content);
 
 	out << "</qmud>" << nl;
 
@@ -19617,7 +19605,6 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	m_printingStyleCount = safeQSizeToInt(doc.printingStyles().size());
 	m_pluginCount        = safeQSizeToInt(doc.plugins().size());
 	m_includeCount       = safeQSizeToInt(doc.includes().size());
-	m_scriptCount        = safeQSizeToInt(doc.scripts().size());
 	m_connectPhase       = eConnectNotConnected;
 	m_connectViaProxy    = false;
 	m_proxyAddressString.clear();
@@ -19936,14 +19923,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 		}
 		m_includes.push_back(ri);
 	}
-	m_includeCount = safeQSizeToInt(m_includes.size());
-	m_scripts.clear();
-	for (const auto &s : doc.scripts())
-	{
-		Script rs;
-		rs.content = s.content;
-		m_scripts.push_back(rs);
-	}
+	m_includeCount           = safeQSizeToInt(m_includes.size());
 	const QString scriptFile = m_worldAttributes.value(QStringLiteral("script_filename"));
 	if (m_scriptWatcher)
 	{
@@ -20436,11 +20416,6 @@ int WorldRuntime::pluginCount() const
 int WorldRuntime::includeCount() const
 {
 	return m_includeCount;
-}
-
-int WorldRuntime::scriptCount() const
-{
-	return m_scriptCount;
 }
 
 const QList<WorldRuntime::Trigger> &WorldRuntime::triggers() const
@@ -25405,11 +25380,6 @@ void WorldRuntime::sortPluginsBySequence()
 const QList<WorldRuntime::Include> &WorldRuntime::includes() const
 {
 	return m_includes;
-}
-
-const QList<WorldRuntime::Script> &WorldRuntime::scripts() const
-{
-	return m_scripts;
 }
 
 QString WorldRuntime::comments() const
