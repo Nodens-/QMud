@@ -37899,6 +37899,7 @@ static int addTriggerInternal(const LuaCallbackEngine *engine, const QString &ra
 			                                     QString::number(customFromTriggerColour(colour)));
 			    runtimeTrigger.attributes.insert(QStringLiteral("variable"), name);
 			    applyTriggerDefaults(runtimeTrigger);
+			    targetRuntime.ensureRuleRuntimeId(runtimeTrigger);
 
 			    runtimeTriggers.insert(runtimeInsertIndex, runtimeTrigger);
 			    commitTriggerListMutation(&targetRuntime, plugin);
@@ -37952,6 +37953,7 @@ static int addTriggerInternal(const LuaCallbackEngine *engine, const QString &ra
 		                              QString::number(customFromTriggerColour(colour)));
 		    trigger.attributes.insert(QStringLiteral("variable"), name);
 		    applyTriggerDefaults(trigger);
+		    runtime->ensureRuleRuntimeId(trigger);
 
 		    runtimeTriggers.insert(runtimeInsertIndex, trigger);
 		    commitTriggerListMutation(runtime, plugin);

@@ -437,6 +437,7 @@ class WorldCommandProcessor : public QObject
 				bool    makeUnderline{false};
 				bool    repeatMatches{false};
 				bool    keepEvaluating{false};
+				bool    soundIfInactive{false};
 				int     linesToMatch{0};
 				int     sendToValue{0};
 				int     textColour{-1};
@@ -445,10 +446,19 @@ class WorldCommandProcessor : public QObject
 				int     changeType{0};
 				int     clipboardArg{0};
 		};
+		struct TriggerEvaluationPlanEntry
+		{
+				DecodedTrigger decoded;
+				quint64        runtimeId{0};
+				qint64         executionTimeNs{0};
+				int            matchCount{0};
+				int            matchAttempts{0};
+		};
 		struct TriggerEvaluationCacheEntry
 		{
 				quint64                 generation{0};
 				int                     count{0};
+				int                     enabledCount{0};
 				QVector<DecodedTrigger> triggers;
 		};
 		struct AliasOrderCacheEntry

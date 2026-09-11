@@ -1135,9 +1135,12 @@ WorldCommandProcessor::decodedTriggerEvaluationCache(const QList<WorldRuntime::T
 		decoded.changeType    = attrs.value(QStringLiteral("colour_change_type")).toInt();
 		decoded.repeatMatches = decoded.isRegexp && isEnabledValue(attrs.value(QStringLiteral("repeat")));
 		decoded.keepEvaluating  = isEnabledValue(attrs.value(QStringLiteral("keep_evaluating")));
+		decoded.soundIfInactive = isEnabledValue(attrs.value(QStringLiteral("sound_if_inactive")));
 		decoded.otherTextColour = attrs.value(QStringLiteral("other_text_colour"));
 		decoded.otherBackColour = attrs.value(QStringLiteral("other_back_colour"));
 		decoded.clipboardArg    = attrs.value(QStringLiteral("clipboard_arg")).toInt();
+		if (decoded.enabled)
+			++rebuilt.enabledCount;
 		rebuilt.triggers.push_back(decoded);
 	}
 
@@ -3290,35 +3293,40 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 		};
 		const auto publishRuntimeState =
 		    qScopeGuard([&publishChangedRuntimeState] { publishChangedRuntimeState(); });
-		for (WorldRuntime::Trigger &trigger : triggers)
-		{
-			if (trigger.runtimeId == 0)
-				m_runtime->ensureRuleRuntimeId(trigger);
-		}
-		const TriggerEvaluationCacheEntry &cacheEntry = decodedTriggerEvaluationCache(triggers);
-		QVector<DecodedTrigger>            evaluationPlan;
-		QVector<WorldRuntime::Trigger>     initialRuntimeState;
-		evaluationPlan.reserve(cacheEntry.triggers.size());
-		initialRuntimeState.reserve(cacheEntry.triggers.size());
+		const TriggerEvaluationCacheEntry  &cacheEntry           = decodedTriggerEvaluationCache(triggers);
+		const quint64                       evaluationGeneration = m_runtime->triggerRuleGeneration();
+		QVector<TriggerEvaluationPlanEntry> evaluationPlan;
+		evaluationPlan.reserve(cacheEntry.enabledCount);
 		for (const DecodedTrigger &decoded : cacheEntry.triggers)
 		{
+			if (!decoded.enabled)
+				continue;
 			if (decoded.index < 0 || decoded.index >= triggers.size())
 				continue;
-			evaluationPlan.push_back(decoded);
-			initialRuntimeState.push_back(triggers.at(decoded.index));
+			if (triggers.at(decoded.index).runtimeId == 0)
+				m_runtime->ensureAllTriggerRuntimeIds();
+			const WorldRuntime::Trigger &trigger = triggers.at(decoded.index);
+			evaluationPlan.push_back({decoded, trigger.runtimeId, trigger.executionTimeNs, trigger.matchCount,
+			                          trigger.matchAttempts});
 		}
-		for (int planIndex = 0; planIndex < evaluationPlan.size(); ++planIndex)
+		for (const TriggerEvaluationPlanEntry &planned : std::as_const(evaluationPlan))
 		{
-			const DecodedTrigger        &decoded      = evaluationPlan.at(planIndex);
-			const WorldRuntime::Trigger &initialState = initialRuntimeState.at(planIndex);
+			const DecodedTrigger &decoded = planned.decoded;
 			if (m_runtime->stopTriggerEvaluation() != WorldRuntime::KeepEvaluating)
 				break;
 
-			const quint64          triggerRuntimeId = initialState.runtimeId;
-			WorldRuntime::Trigger *trigger =
-			    resolveTriggerByRuntimeId(m_runtime, triggerRuntimeId, scopePluginId, decoded.index);
-			if (!decoded.enabled)
-				continue;
+			const quint64          triggerRuntimeId = planned.runtimeId;
+			WorldRuntime::Trigger *trigger          = nullptr;
+			if (m_runtime->triggerRuleGeneration() == evaluationGeneration && decoded.index >= 0 &&
+			    decoded.index < triggers.size() && triggers.at(decoded.index).runtimeId == triggerRuntimeId)
+			{
+				trigger = &triggers[decoded.index];
+			}
+			else
+			{
+				trigger =
+				    resolveTriggerByRuntimeId(m_runtime, triggerRuntimeId, scopePluginId, decoded.index);
+			}
 
 			m_runtime->incrementTriggersEvaluated();
 
@@ -3343,9 +3351,9 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			QMap<QString, QString> namedWildcards;
 			int                    startCol = 0;
 			int                    endCol   = 0;
-			qint64    executionTimeNs = trigger ? trigger->executionTimeNs : initialState.executionTimeNs;
-			int       matchCount      = trigger ? trigger->matchCount : initialState.matchCount;
-			int       matchAttempts   = trigger ? trigger->matchAttempts : initialState.matchAttempts;
+			qint64    executionTimeNs       = trigger ? trigger->executionTimeNs : planned.executionTimeNs;
+			int       matchCount            = trigger ? trigger->matchCount : planned.matchCount;
+			int       matchAttempts         = trigger ? trigger->matchAttempts : planned.matchAttempts;
 			const int previousMatchAttempts = matchAttempts;
 			if (!regexMatch(pattern, target, decoded.ignoreCase, wildcards, namedWildcards, &startCol,
 			                &endCol, 0, decoded.multiLine, &executionTimeNs, &matchCount, &matchAttempts))
@@ -3464,8 +3472,7 @@ WorldCommandProcessor::processTriggersForLine(const QString                     
 			    decoded.sound.compare(QStringLiteral("(No sound)"), Qt::CaseInsensitive) != 0 &&
 			    triggerSoundEnabled)
 			{
-				if (!isEnabledValue(initialState.attributes.value(QStringLiteral("sound_if_inactive"))) ||
-				    !m_runtime->isActive())
+				if (!decoded.soundIfInactive || !m_runtime->isActive())
 					m_runtime->playSound(0, decoded.sound, false, 0.0, 0.0);
 			}
 

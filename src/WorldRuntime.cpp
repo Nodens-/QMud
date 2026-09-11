@@ -182,6 +182,65 @@ namespace
 		return changed;
 	}
 
+	struct RuleRuntimeIdChanges
+	{
+			bool        worldChanged{false};
+			QStringList changedPluginIds;
+	};
+
+	template <typename Rule>
+	RuleRuntimeIdChanges ensureAllRuleRuntimeIds(QList<Rule>                 &worldRules,
+	                                             QList<WorldRuntime::Plugin> &plugins,
+	                                             QList<Rule> WorldRuntime::Plugin::*pluginRules)
+	{
+		QSet<quint64> reservedRuntimeIds;
+		for (const Rule &rule : worldRules)
+		{
+			if (rule.runtimeId != 0)
+				reservedRuntimeIds.insert(rule.runtimeId);
+		}
+		for (const WorldRuntime::Plugin &plugin : std::as_const(plugins))
+		{
+			for (const Rule &rule : plugin.*pluginRules)
+			{
+				if (rule.runtimeId != 0)
+					reservedRuntimeIds.insert(rule.runtimeId);
+			}
+		}
+
+		QSet<quint64> claimedRuntimeIds;
+		auto          ensureList = [&](QList<Rule> &rules)
+		{
+			bool changed = false;
+			for (Rule &rule : rules)
+			{
+				if (rule.runtimeId == 0 || claimedRuntimeIds.contains(rule.runtimeId))
+				{
+					do
+					{
+						rule.runtimeId = nextRuleRuntimeId();
+					} while (reservedRuntimeIds.contains(rule.runtimeId));
+					reservedRuntimeIds.insert(rule.runtimeId);
+					changed = true;
+				}
+				claimedRuntimeIds.insert(rule.runtimeId);
+			}
+			return changed;
+		};
+
+		RuleRuntimeIdChanges changes;
+		changes.worldChanged = ensureList(worldRules);
+		for (WorldRuntime::Plugin &plugin : plugins)
+		{
+			if (!ensureList(plugin.*pluginRules))
+				continue;
+			const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
+			if (!pluginId.isEmpty())
+				changes.changedPluginIds.push_back(pluginId);
+		}
+		return changes;
+	}
+
 	[[nodiscard]] bool outputLineNumbersAdjacent(const WorldRuntime::LineEntry &first,
 	                                             const WorldRuntime::LineEntry &second)
 	{
@@ -19889,7 +19948,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	ensureAllAliasRuntimeIds();
 	invalidatePluginCallbackPresenceCache();
 	invalidateLuaCallbackDispatchSnapshot();
-	markTriggerRulesChanged();
+	notePluginStructureMutation();
 	for (auto &plugin : m_plugins)
 	{
 		queuePluginInstall(plugin);
@@ -20460,6 +20519,16 @@ void WorldRuntime::ensureWorldTriggerRuntimeIds()
 		markTriggerRuntimeStateChanged();
 }
 
+void WorldRuntime::ensureAllTriggerRuntimeIds()
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureAllTriggerRuntimeIds");
+	const RuleRuntimeIdChanges changes = ensureAllRuleRuntimeIds(m_triggers, m_plugins, &Plugin::triggers);
+	if (changes.worldChanged)
+		markTriggerRuntimeStateChanged();
+	for (const QString &pluginId : changes.changedPluginIds)
+		markTriggerRuntimeStateChanged(pluginId);
+}
+
 quint64 WorldRuntime::triggerRuleGeneration() const
 {
 	return m_triggerRuleGeneration;
@@ -20479,6 +20548,7 @@ void WorldRuntime::setTriggers(const QList<Trigger> &triggers)
 		applyTriggerDefaults(rt);
 		m_triggers.push_back(rt);
 	}
+	static_cast<void>(ensureWorldRuleRuntimeIds(m_triggers, m_plugins, &Plugin::triggers));
 	m_triggerCount      = safeQSizeToInt(m_triggers.size());
 	m_worldFileModified = true;
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Triggers);
@@ -20568,52 +20638,11 @@ void WorldRuntime::ensureWorldAliasRuntimeIds()
 void WorldRuntime::ensureAllAliasRuntimeIds()
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureAllAliasRuntimeIds");
-	QSet<quint64> reservedRuntimeIds;
-	for (const Alias &alias : m_aliases)
-	{
-		if (alias.runtimeId != 0)
-			reservedRuntimeIds.insert(alias.runtimeId);
-	}
-	for (const Plugin &plugin : m_plugins)
-	{
-		for (const Alias &alias : plugin.aliases)
-		{
-			if (alias.runtimeId != 0)
-				reservedRuntimeIds.insert(alias.runtimeId);
-		}
-	}
-
-	QSet<quint64> claimedRuntimeIds;
-	auto          ensureList = [&](QList<Alias> &aliases)
-	{
-		bool changed = false;
-		for (Alias &alias : aliases)
-		{
-			if (alias.runtimeId == 0 || claimedRuntimeIds.contains(alias.runtimeId))
-			{
-				do
-				{
-					alias.runtimeId = nextRuleRuntimeId();
-				} while (reservedRuntimeIds.contains(alias.runtimeId));
-				reservedRuntimeIds.insert(alias.runtimeId);
-				changed = true;
-			}
-			claimedRuntimeIds.insert(alias.runtimeId);
-		}
-		return changed;
-	};
-
-	if (ensureList(m_aliases))
+	const RuleRuntimeIdChanges changes = ensureAllRuleRuntimeIds(m_aliases, m_plugins, &Plugin::aliases);
+	if (changes.worldChanged)
 		markAliasRuntimeStateChanged();
-	for (Plugin &plugin : m_plugins)
-	{
-		if (ensureList(plugin.aliases))
-		{
-			const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
-			if (!pluginId.isEmpty())
-				markAliasRuntimeStateChanged(pluginId);
-		}
-	}
+	for (const QString &pluginId : changes.changedPluginIds)
+		markAliasRuntimeStateChanged(pluginId);
 }
 
 QList<WorldRuntime::Alias> &WorldRuntime::aliasesMutable()
@@ -20771,6 +20800,13 @@ quint64 WorldRuntime::timerStructureMutationSerial() const
 void WorldRuntime::noteTimerStructureMutation()
 {
 	++m_timerStructureMutationSerial;
+}
+
+void WorldRuntime::notePluginStructureMutation()
+{
+	static_cast<void>(ensureAllRuleRuntimeIds(m_triggers, m_plugins, &Plugin::triggers));
+	noteTimerStructureMutation();
+	markTriggerRulesChanged();
 }
 
 const QList<WorldRuntime::Macro> &WorldRuntime::macros() const
@@ -22120,6 +22156,7 @@ bool WorldRuntime::reorderPlugin(const QString &pluginId, const int delta)
 		m_plugins.swapItemsAt(index, other);
 	}
 	m_worldFileModified = true;
+	notePluginStructureMutation();
 	invalidatePluginCallbackPresenceCache();
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 	return true;
@@ -22251,7 +22288,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 		}
 		sortPluginsBySequence();
 		m_pluginCount = safeQSizeToInt(m_plugins.size());
-		noteTimerStructureMutation();
+		notePluginStructureMutation();
 		invalidatePluginCallbackPresenceCache();
 		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 		QMudNativePluginRegistry::ensureMushReaderRuntimeSetup(this);
@@ -22410,7 +22447,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 	sortPluginsBySequence();
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
 	ensureAllAliasRuntimeIds();
-	noteTimerStructureMutation();
+	notePluginStructureMutation();
 	invalidatePluginCallbackPresenceCache();
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 
@@ -22513,7 +22550,7 @@ bool WorldRuntime::unloadPlugin(const QString &pluginId, QString *error)
 	}
 	m_plugins.removeAt(finalRemovalIndex);
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
-	noteTimerStructureMutation();
+	notePluginStructureMutation();
 	invalidatePluginCallbackPresenceCache();
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginListChanged"), false);
@@ -22654,7 +22691,7 @@ int WorldRuntime::reloadPlugin(const QString &pluginId, QString *error)
 		m_plugins.push_back(std::move(replacement));
 		sortPluginsBySequence();
 		m_pluginCount = safeQSizeToInt(m_plugins.size());
-		noteTimerStructureMutation();
+		notePluginStructureMutation();
 		invalidatePluginCallbackPresenceCache();
 		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 		if (resolvedPluginId == QMudNativePluginRegistry::mushReaderPluginId())

@@ -723,6 +723,10 @@ class WorldRuntime : public QObject
 		 */
 		void                                ensureWorldTriggerRuntimeIds();
 		/**
+		 * @brief Ensures every world and plugin trigger has a unique runtime identity.
+		 */
+		void                                ensureAllTriggerRuntimeIds();
+		/**
 		 * @brief Returns current trigger rule generation for processor caches.
 		 * @return Monotonic generation incremented when trigger definitions change.
 		 */
@@ -5815,6 +5819,10 @@ class WorldRuntime : public QObject
 		 * @brief Applies a plugin enabled-state transition and optionally marks its per-world state modified.
 		 */
 		bool setPluginEnabledState(const QString &pluginId, bool enable, bool markWorldModified);
+		/**
+		 * @brief Normalizes rule identities and advances collection revisions after plugin replacement or reordering.
+		 */
+		void notePluginStructureMutation();
 		/**
 		 * @brief Marks a per-world plugin enabled-state change, including for automatically loaded global plugins.
 		 */

@@ -323,6 +323,75 @@ namespace
 				QCOMPARE(wildcard, QStringLiteral("TWO"));
 			}
 
+			static void pluginReorderDuringTriggerEvaluationUsesStableFallback()
+			{
+				const QString firstPluginId  = QStringLiteral("111111111111111111111111");
+				const QString secondPluginId = QStringLiteral("222222222222222222222222");
+				auto makeTrigger = [](const QString &name, const QString &sendText, const int sequence)
+				{
+					WorldRuntime::Trigger trigger = makeScriptTrigger();
+					trigger.attributes.insert(QStringLiteral("name"), name);
+					trigger.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+					trigger.attributes.insert(QStringLiteral("keep_evaluating"), QStringLiteral("y"));
+					trigger.children.insert(QStringLiteral("send"), sendText);
+					return trigger;
+				};
+
+				WorldRuntime::Plugin firstPlugin;
+				firstPlugin.attributes.insert(QStringLiteral("id"), firstPluginId);
+				firstPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("First"));
+				firstPlugin.enabled  = true;
+				firstPlugin.sequence = 100;
+				firstPlugin.triggers = {
+				    makeTrigger(QStringLiteral("first"), QStringLiteral("first-send"), 100),
+				    makeTrigger(QStringLiteral("second"), QStringLiteral("second-send"), 200)};
+				firstPlugin.triggers[0].runtimeId = 42;
+				firstPlugin.triggers[1].runtimeId = 42;
+
+				WorldRuntime::Plugin secondPlugin;
+				secondPlugin.attributes.insert(QStringLiteral("id"), secondPluginId);
+				secondPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Second"));
+				secondPlugin.enabled  = true;
+				secondPlugin.sequence = 200;
+
+				WorldRuntime runtime;
+				WorldRuntimeTestAccess::plugins(runtime) = {firstPlugin, secondPlugin};
+				runtime.ensureAllTriggerRuntimeIds();
+				runtime.markTriggerRulesChanged();
+				const QList<WorldRuntime::Trigger> &runtimeTriggers =
+				    WorldRuntimeTestAccess::plugins(runtime).front().triggers;
+				QVERIFY(runtimeTriggers.at(0).runtimeId != 0);
+				QVERIFY(runtimeTriggers.at(1).runtimeId != 0);
+				QVERIFY(runtimeTriggers.at(0).runtimeId != runtimeTriggers.at(1).runtimeId);
+
+				WorldCommandProcessor processor;
+				processor.setRuntime(&runtime);
+
+				QStringList sends;
+				bool        reordered        = false;
+				bool        reorderSucceeded = false;
+				QObject::connect(&processor, &WorldCommandProcessor::sendToScriptRequested, &processor,
+				                 [&](const QString &pluginId, const QString &scriptText, const QString &,
+				                     const QVector<LuaStyleRun> *, bool, bool, int, qint64)
+				                 {
+					                 if (pluginId != firstPluginId)
+						                 return;
+					                 sends.push_back(scriptText);
+					                 if (!reordered)
+					                 {
+						                 reordered        = true;
+						                 reorderSucceeded = runtime.reorderPlugin(firstPluginId, 1);
+					                 }
+				                 });
+
+				const quint64 generationBefore = runtime.triggerRuleGeneration();
+				processor.onIncomingLineReceived(QStringLiteral("line"));
+
+				QVERIFY(reorderSucceeded);
+				QVERIFY(runtime.triggerRuleGeneration() > generationBefore);
+				QCOMPARE(sends, (QStringList{QStringLiteral("first-send"), QStringLiteral("second-send")}));
+			}
+
 			static void triggerSendsInsertAtPriorityQueueBoundary()
 			{
 				QTcpServer server;
