@@ -14,10 +14,13 @@
 #include "WorldView.h"
 
 #include <QAbstractScrollArea>
+#include <QFile>
 #include <QPointer>
 #include <QScopeGuard>
 #include <QScrollBar>
 #include <QSplitter>
+// ReSharper disable once CppUnusedIncludeDirective
+#include <QTemporaryDir>
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
@@ -74,6 +77,63 @@ class tst_WorldObserverLifecycle final : public QObject
 		Q_OBJECT
 
 	private slots:
+		static void startupPostRestoreWaitsForPluginInstallCommit()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			const QString pluginId   = QStringLiteral("aabbccddeeff001122334455");
+			const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("startup_commit.xml"));
+			QFile         pluginFile(pluginPath);
+			QVERIFY(pluginFile.open(QIODevice::WriteOnly | QIODevice::Text));
+			const QByteArray pluginXml = QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin name="StartupCommit" id="%1" language="lua" enabled="y" save_state="n">
+    <script><![CDATA[
+function OnPluginInstall()
+  SetVariable("install_completed", "yes")
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml")
+			                                 .arg(pluginId)
+			                                 .toUtf8();
+			QCOMPARE(pluginFile.write(pluginXml), static_cast<qint64>(pluginXml.size()));
+			pluginFile.close();
+
+			AppController app;
+			MainWindow    frame;
+			app.setMainWindow(&frame);
+			frame.resize(900, 700);
+			frame.show();
+
+			auto *runtime = new WorldRuntime(&frame);
+			runtime->setStartupDirectory(tempDir.path());
+			runtime->setPluginsDirectory(pluginsDir);
+			runtime->setPluginInstallDeferred(true);
+			auto *world = new WorldChildWindow(QStringLiteral("Startup commit"));
+			world->setRuntime(runtime);
+			frame.addMdiSubWindow(world, false);
+			QCoreApplication::processEvents();
+
+			QString error;
+			QVERIFY2(runtime->loadPluginFile(pluginPath, &error), qPrintable(error));
+			QVERIFY(runtime->pluginForId(pluginId));
+			QVERIFY(runtime->pluginForId(pluginId)->installPending);
+
+			bool startupComplete = false;
+			app.runWorldStartupPostRestore(runtime, [&startupComplete] { startupComplete = true; });
+			QVERIFY(!startupComplete);
+			QTRY_VERIFY_WITH_TIMEOUT(startupComplete, 5000);
+			QCOMPARE(runtime->pluginVariableValue(pluginId, QStringLiteral("install_completed")),
+			         QStringLiteral("yes"));
+			QVERIFY(!runtime->pluginForId(pluginId)->installPending);
+
+			world->setRuntime(nullptr);
+		}
+
 		static void sessionStateSaveSelectionDeduplicatesFilePaths()
 		{
 			const QVector<AppController::SessionStateSaveCandidate> candidates = {

@@ -1074,32 +1074,30 @@ class AppController : public QObject
 		/**
 		 * @brief Emits startup banner and runs async plugin startup pipeline after session-state restore.
 		 * @param runtime World runtime.
-		 * @param completion Completion callback invoked after startup pipeline finishes.
-		 * @param waitForPluginInstallCommit Wait for pending plugin installs to commit before completion.
+		 * @param completion Completion callback invoked after pending plugin installs commit.
 		 */
-		void               runWorldStartupPostRestore(WorldRuntime *runtime, std::function<void()> completion,
-		                                              bool waitForPluginInstallCommit = true) const;
+		void        runWorldStartupPostRestore(WorldRuntime *runtime, std::function<void()> completion) const;
 		/**
 		 * @brief Auto-connects runtime when settings request it.
 		 * @param runtime Runtime to auto-connect.
 		 */
-		void               maybeAutoConnectWorld(WorldRuntime *runtime) const;
+		void        maybeAutoConnectWorld(WorldRuntime *runtime) const;
 		/**
 		 * @brief Displays the current tracked scrollback-restore count.
 		 */
-		void               showRestoreScrollbackStatus() const;
-		void               beginRestoreScrollbackStatus() const;
-		void               preseedRestoreScrollbackStatus(int count) const;
-		void               endRestoreScrollbackStatus() const;
-		MainWindow        *m_mainWindow{nullptr};
-		QDateTime          m_whenClientStarted;
-		QString            m_version;
-		QString            m_workingDir;
-		QString            m_fileBrowsingDir;
-		QString            m_preferencesDatabaseName;
-		QString            m_locale;
-		QString            m_translatorFile;
-		QMap<QString, int> m_globalIntPrefs;
+		void        showRestoreScrollbackStatus() const;
+		void        beginRestoreScrollbackStatus() const;
+		void        preseedRestoreScrollbackStatus(int count) const;
+		void        endRestoreScrollbackStatus() const;
+		MainWindow *m_mainWindow{nullptr};
+		QDateTime   m_whenClientStarted;
+		QString     m_version;
+		QString     m_workingDir;
+		QString     m_fileBrowsingDir;
+		QString     m_preferencesDatabaseName;
+		QString     m_locale;
+		QString     m_translatorFile;
+		QMap<QString, int>               m_globalIntPrefs;
 		QMap<QString, QString>           m_globalStringPrefs;
 		QString                          m_luaScript;
 		QString                          m_pluginsDirectory;

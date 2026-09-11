@@ -3114,8 +3114,7 @@ bool AppController::restoreWorldSessionStateSync(WorldRuntime *runtime, WorldVie
 	return loadOk;
 }
 
-void AppController::runWorldStartupPostRestore(WorldRuntime *runtime, std::function<void()> completion,
-                                               const bool waitForPluginInstallCommit) const
+void AppController::runWorldStartupPostRestore(WorldRuntime *runtime, std::function<void()> completion) const
 {
 	if (!runtime)
 	{
@@ -3125,23 +3124,20 @@ void AppController::runWorldStartupPostRestore(WorldRuntime *runtime, std::funct
 	}
 
 	emitStartupBanner(runtime);
-	loadGlobalPlugins(runtime,
-	                  [runtimeGuard = QPointer<WorldRuntime>(runtime), completion = std::move(completion),
-	                   waitForPluginInstallCommit]() mutable
-	                  {
-		                  if (!runtimeGuard)
-		                  {
-			                  if (completion)
-				                  completion();
-			                  return;
-		                  }
-		                  runtimeGuard->setPluginInstallDeferred(false);
-		                  const auto completionMode =
-		                      waitForPluginInstallCommit
-		                          ? WorldRuntime::PluginInstallCompletionMode::Committed
-		                          : WorldRuntime::PluginInstallCompletionMode::Staged;
-		                  runtimeGuard->installPendingPluginsAsync(std::move(completion), completionMode);
-	                  });
+	loadGlobalPlugins(
+	    runtime,
+	    [runtimeGuard = QPointer<WorldRuntime>(runtime), completion = std::move(completion)]() mutable
+	    {
+		    if (!runtimeGuard)
+		    {
+			    if (completion)
+				    completion();
+			    return;
+		    }
+		    runtimeGuard->setPluginInstallDeferred(false);
+		    runtimeGuard->installPendingPluginsAsync(std::move(completion),
+		                                             WorldRuntime::PluginInstallCompletionMode::Committed);
+	    });
 }
 
 void AppController::detectReloadStartupArguments()
@@ -4601,8 +4597,7 @@ bool AppController::recoverReloadStartupState()
 			    },
 			    Qt::QueuedConnection);
 		};
-		const bool waitForPluginInstallCommit = runtime == asyncContext->requestedActiveRuntime;
-		runWorldStartupPostRestore(runtime, continueRecovery, waitForPluginInstallCommit);
+		runWorldStartupPostRestore(runtime, continueRecovery);
 	};
 
 	if (asyncContext->requestedActiveRuntime && !openedWorlds.isEmpty())
