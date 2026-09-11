@@ -2140,6 +2140,10 @@ void WorldPreferencesDialog::accept()
 			m_runtime->setWorldAttribute(QStringLiteral("no_echo_off"), m_noEchoOff->isChecked()
 			                                                                ? QStringLiteral("1")
 			                                                                : QStringLiteral("0"));
+		if (m_echoForceTerminatesPartialPrompts)
+			m_runtime->setWorldAttribute(
+			    QStringLiteral("echo_force_terminates_partial_prompts"),
+			    m_echoForceTerminatesPartialPrompts->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
 		if (m_enableSpamPrevention)
 			m_runtime->setWorldAttribute(QStringLiteral("enable_spam_prevention"),
 			                             m_enableSpamPrevention->isChecked() ? QStringLiteral("1")
@@ -2423,6 +2427,14 @@ void WorldPreferencesDialog::accept()
 		if (m_connectDelay)
 			m_runtime->setWorldAttribute(QStringLiteral("connect_delay"),
 			                             QString::number(m_connectDelay->value()));
+		if (m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops)
+		{
+			m_runtime->setWorldAttribute(
+			    QStringLiteral("automatically_protect_against_telnet_option_renegotiation_loops"),
+			    m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->isChecked()
+			        ? QStringLiteral("1")
+			        : QStringLiteral("0"));
+		}
 		if (m_onlyNegotiateTelnetOptionsOnce)
 			m_runtime->setWorldAttribute(QStringLiteral("only_negotiate_telnet_options_once"),
 			                             m_onlyNegotiateTelnetOptionsOnce->isChecked() ? QStringLiteral("1")
@@ -6068,6 +6080,10 @@ void WorldPreferencesDialog::buildUi()
 	m_translateBackslash     = new QCheckBox(QStringLiteral("&Translate Backslash Sequences"), commandsPage);
 	m_keepCommandsOnSameLine = new QCheckBox(QStringLiteral("Keep Commands On Prompt Line"), commandsPage);
 	m_noEchoOff              = new QCheckBox(QStringLiteral("Ignore 'Echo Off' messages"), commandsPage);
+	m_echoForceTerminatesPartialPrompts =
+	    new QCheckBox(QStringLiteral("Echo Force-Terminates Partial Prompts"), commandsPage);
+	m_echoForceTerminatesPartialPrompts->setToolTip(
+	    QStringLiteral("Enable if the MUD's prompt does not appear properly."));
 	commandsRight->addWidget(m_autoRepeat);
 	commandsRight->addWidget(m_lowerCaseTabCompletion);
 	commandsRight->addWidget(m_tabCompletionExcludesSymbolPrefix);
@@ -6077,6 +6093,7 @@ void WorldPreferencesDialog::buildUi()
 	commandsRight->addWidget(m_translateBackslash);
 	commandsRight->addWidget(m_keepCommandsOnSameLine);
 	commandsRight->addWidget(m_noEchoOff);
+	commandsRight->addWidget(m_echoForceTerminatesPartialPrompts);
 	commandsRight->addSpacing(12);
 
 	auto *tabCompletionButton = new QPushButton(QStringLiteral("Tab Completion..."), commandsPage);
@@ -6825,7 +6842,7 @@ void WorldPreferencesDialog::buildUi()
 				        }
 				        if (app)
 				        {
-					        (void)app->openTextDocument(resolvedFileName);
+					        (void)app->openTextDocument(resolvedFileName, m_runtime);
 					        tryRaiseConfiguredEditorWindow();
 					        return;
 				        }
@@ -7826,9 +7843,17 @@ void WorldPreferencesDialog::buildUi()
 	connectNote->setWordWrap(true);
 	connectTextLayout->addWidget(connectNote);
 	connectingLayout->addWidget(connectTextGroup);
+	m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops = new QCheckBox(
+	    QStringLiteral("Automatically protect against Telnet option renegotiation loops"), connectingPage);
+	connectingLayout->addWidget(m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops);
 	m_onlyNegotiateTelnetOptionsOnce =
 	    new QCheckBox(QStringLiteral("Only negotiate telnet options once"), connectingPage);
-	connectingLayout->addWidget(m_onlyNegotiateTelnetOptionsOnce);
+	auto *onlyNegotiateLayout = new QHBoxLayout;
+	onlyNegotiateLayout->setContentsMargins(20, 0, 0, 0);
+	onlyNegotiateLayout->addWidget(m_onlyNegotiateTelnetOptionsOnce);
+	connectingLayout->addLayout(onlyNegotiateLayout);
+	connect(m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops, &QCheckBox::toggled,
+	        m_onlyNegotiateTelnetOptionsOnce, &QWidget::setDisabled);
 	connectingLayout->addStretch();
 
 	// MXP
@@ -10213,6 +10238,9 @@ void WorldPreferencesDialog::populateCommands()
 		    formatFontStyleText(m_inputFontHeight->value(), m_inputFontWeight, m_inputFontItalic));
 	if (m_noEchoOff)
 		m_noEchoOff->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("no_echo_off"))));
+	if (m_echoForceTerminatesPartialPrompts)
+		m_echoForceTerminatesPartialPrompts->setChecked(
+		    qmudIsEnabledFlag(attrs.value(QStringLiteral("echo_force_terminates_partial_prompts"))));
 	if (m_enableSpamPrevention)
 		m_enableSpamPrevention->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_spam_prevention"))));
@@ -10315,11 +10343,8 @@ void WorldPreferencesDialog::populateScripting() const
 		m_logScriptErrors->setChecked(qmudIsEnabledFlag(attrs.value(QStringLiteral("log_script_errors"))));
 	if (m_scriptIsActive)
 	{
-		const bool    enabled  = qmudIsEnabledFlag(attrs.value(QStringLiteral("enable_scripts")));
-		const QString language = attrs.value(QStringLiteral("script_language"), QStringLiteral("Lua"));
-		const bool    lua      = language.compare(QStringLiteral("lua"), Qt::CaseInsensitive) == 0;
-		m_scriptIsActive->setText(enabled && lua ? QStringLiteral("(active)")
-		                                         : QStringLiteral("(not active)"));
+		m_scriptIsActive->setText(m_runtime->luaScriptingAvailable() ? QStringLiteral("(active)")
+		                                                             : QStringLiteral("(not active)"));
 	}
 	if (m_scriptExecutionTime)
 		m_scriptExecutionTime->setText(
@@ -11659,10 +11684,18 @@ void WorldPreferencesDialog::populateConnecting() const
 	}
 	if (m_connectDelay)
 		m_connectDelay->setValue(attrs.value(QStringLiteral("connect_delay")).toInt());
+	if (m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops)
+	{
+		m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->setChecked(qmudIsEnabledFlag(
+		    attrs.value(QStringLiteral("automatically_protect_against_telnet_option_renegotiation_loops"))));
+	}
 	if (m_onlyNegotiateTelnetOptionsOnce)
 	{
 		m_onlyNegotiateTelnetOptionsOnce->setChecked(
 		    qmudIsEnabledFlag(attrs.value(QStringLiteral("only_negotiate_telnet_options_once"))));
+		m_onlyNegotiateTelnetOptionsOnce->setEnabled(
+		    !m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops ||
+		    !m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops->isChecked());
 	}
 	if (m_connectLineCount && m_connectText)
 	{

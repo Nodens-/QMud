@@ -36,71 +36,71 @@ namespace
 		    },
 		    [&harness](const QString &line) { harness.outputLines.push_back(line); }};
 	}
+	/**
+	 * @brief QTest fixture covering shared trace dispatch behavior.
+	 */
+	class tst_TraceDispatchUtils : public QObject
+	{
+			Q_OBJECT
+
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void traceDisabledDoesNotDispatch()
+			{
+				TraceHarness harness;
+				harness.traceEnabled = false;
+
+				QMudTraceDispatch::emitTrace(QStringLiteral("hello"), makeCallbacks(harness));
+
+				QCOMPARE(harness.pluginCalls, 0);
+				QVERIFY(harness.pluginMessages.isEmpty());
+				QVERIFY(harness.outputLines.isEmpty());
+				QVERIFY(!harness.traceEnabled);
+			}
+
+			void pluginHandledTraceSuppressesFallbackOutput()
+			{
+				TraceHarness harness;
+				harness.pluginHandles = true;
+
+				QMudTraceDispatch::emitTrace(QStringLiteral("matched trigger"), makeCallbacks(harness));
+
+				QCOMPARE(harness.pluginCalls, 1);
+				QCOMPARE(harness.pluginMessages, QStringList{QStringLiteral("matched trigger")});
+				QVERIFY(!harness.traceEnabledDuringPluginCall);
+				QVERIFY(harness.outputLines.isEmpty());
+				QVERIFY(harness.traceEnabled);
+			}
+
+			void unhandledTraceFallsBackToOutput()
+			{
+				TraceHarness harness;
+				harness.pluginHandles = false;
+
+				QMudTraceDispatch::emitTrace(QStringLiteral("matched alias"), makeCallbacks(harness));
+
+				QCOMPARE(harness.pluginCalls, 1);
+				QCOMPARE(harness.pluginMessages, QStringList{QStringLiteral("matched alias")});
+				QVERIFY(!harness.traceEnabledDuringPluginCall);
+				QCOMPARE(harness.outputLines, QStringList{QStringLiteral("TRACE: matched alias")});
+				QVERIFY(harness.traceEnabled);
+			}
+
+			void emptyTraceMessageIsIgnored()
+			{
+				TraceHarness harness;
+
+				QMudTraceDispatch::emitTrace(QString(), makeCallbacks(harness));
+
+				QCOMPARE(harness.pluginCalls, 0);
+				QVERIFY(harness.pluginMessages.isEmpty());
+				QVERIFY(harness.outputLines.isEmpty());
+				QVERIFY(harness.traceEnabled);
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+
 } // namespace
-
-/**
- * @brief QTest fixture covering shared trace dispatch behavior.
- */
-class tst_TraceDispatchUtils : public QObject
-{
-		Q_OBJECT
-
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void traceDisabledDoesNotDispatch()
-		{
-			TraceHarness harness;
-			harness.traceEnabled = false;
-
-			QMudTraceDispatch::emitTrace(QStringLiteral("hello"), makeCallbacks(harness));
-
-			QCOMPARE(harness.pluginCalls, 0);
-			QVERIFY(harness.pluginMessages.isEmpty());
-			QVERIFY(harness.outputLines.isEmpty());
-			QVERIFY(!harness.traceEnabled);
-		}
-
-		void pluginHandledTraceSuppressesFallbackOutput()
-		{
-			TraceHarness harness;
-			harness.pluginHandles = true;
-
-			QMudTraceDispatch::emitTrace(QStringLiteral("matched trigger"), makeCallbacks(harness));
-
-			QCOMPARE(harness.pluginCalls, 1);
-			QCOMPARE(harness.pluginMessages, QStringList{QStringLiteral("matched trigger")});
-			QVERIFY(!harness.traceEnabledDuringPluginCall);
-			QVERIFY(harness.outputLines.isEmpty());
-			QVERIFY(harness.traceEnabled);
-		}
-
-		void unhandledTraceFallsBackToOutput()
-		{
-			TraceHarness harness;
-			harness.pluginHandles = false;
-
-			QMudTraceDispatch::emitTrace(QStringLiteral("matched alias"), makeCallbacks(harness));
-
-			QCOMPARE(harness.pluginCalls, 1);
-			QCOMPARE(harness.pluginMessages, QStringList{QStringLiteral("matched alias")});
-			QVERIFY(!harness.traceEnabledDuringPluginCall);
-			QCOMPARE(harness.outputLines, QStringList{QStringLiteral("TRACE: matched alias")});
-			QVERIFY(harness.traceEnabled);
-		}
-
-		void emptyTraceMessageIsIgnored()
-		{
-			TraceHarness harness;
-
-			QMudTraceDispatch::emitTrace(QString(), makeCallbacks(harness));
-
-			QCOMPARE(harness.pluginCalls, 0);
-			QVERIFY(harness.pluginMessages.isEmpty());
-			QVERIFY(harness.outputLines.isEmpty());
-			QVERIFY(harness.traceEnabled);
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
 
 QTEST_APPLESS_MAIN(tst_TraceDispatchUtils)
 

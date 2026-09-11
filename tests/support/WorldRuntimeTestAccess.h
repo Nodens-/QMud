@@ -78,6 +78,15 @@ class WorldRuntimeTestAccess final
 			runtime.processRawDataPayload(data, simulatedInput);
 		}
 		/**
+		 * @brief Sets connection phase for deterministic command-dispatch tests without a network socket.
+		 * @param runtime Runtime whose phase is changed.
+		 * @param phase WorldRuntime connection phase.
+		 */
+		static void setConnectPhase(WorldRuntime &runtime, const WorldRuntime::ConnectPhase phase)
+		{
+			runtime.m_connectPhase = phase;
+		}
+		/**
 		 * @brief Commits pending partial input to runtime storage without exercising presentation behavior.
 		 * @param runtime Runtime whose pending partial state is committed.
 		 * @param committedText Optional receiver for the unwrapped committed text.

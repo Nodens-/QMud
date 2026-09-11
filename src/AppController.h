@@ -22,6 +22,7 @@
 #include <QPointer>
 #include <QRandomGenerator>
 #include <QScopedPointer>
+#include <QSet>
 #include <QSplashScreen>
 #include <QString>
 #include <QStringList>
@@ -29,6 +30,7 @@
 #include <QVariant>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QVector>
+#include <QWaitCondition>
 #include <QtSql/QSqlDatabase>
 #include <atomic>
 #include <functional>
@@ -41,10 +43,13 @@ class WorldView;
 class QMdiSubWindow;
 class NameGenerator;
 class QDialog;
+class QEvent;
 class QNetworkAccessManager;
+class QThread;
 class QTimer;
 class QWidget;
 class AppControllerTestAccess;
+class tst_AppControllerFileOpen;
 class tst_WorldObserverLifecycle;
 struct ReloadWorldState;
 struct lua_State;
@@ -59,6 +64,7 @@ class AppController : public QObject
 {
 		Q_OBJECT
 		friend class AppControllerTestAccess;
+		friend class tst_AppControllerFileOpen;
 		friend class tst_WorldObserverLifecycle;
 
 	public:
@@ -143,6 +149,19 @@ class AppController : public QObject
 		 */
 		[[nodiscard]] static QString updateMechanismUnavailableReason();
 		/**
+		 * @brief Queues or dispatches one operating-system file-association request.
+		 * @param path Exact native file path supplied by the operating system.
+		 * @return `true` when the request was queued or opened successfully.
+		 */
+		bool                         handleFileAssociationRequest(const QString &path);
+		/**
+		 * @brief Captures application-level file-open requests until startup is ready to open documents.
+		 * @param watched Object receiving the event.
+		 * @param event Event being delivered.
+		 * @return `true` when a local file-open request was consumed, including a rejected unsafe request.
+		 */
+		bool                         eventFilter(QObject *watched, QEvent *event) override;
+		/**
 		 * @brief Registers OS-level file associations.
 		 * @param errorMessage Optional output error message.
 		 * @return `true` on successful registration.
@@ -189,9 +208,11 @@ class AppController : public QObject
 		/**
 		 * @brief Opens a plain text document in notepad/text view.
 		 * @param path Text document path.
+		 * @param relatedRuntime Optional world runtime associated with the text document.
 		 * @return `true` on successful open.
 		 */
-		[[nodiscard]] bool              openTextDocument(const QString &path) const;
+		[[nodiscard]] bool              openTextDocument(const QString &path,
+		                                                 WorldRuntime  *relatedRuntime = nullptr) const;
 		/**
 		 * @brief Opens multiple worlds from persisted list.
 		 * @param items World file list.
@@ -399,28 +420,48 @@ class AppController : public QObject
 		 */
 		bool               ensureSpellCheckerLoaded();
 		/**
-		 * @brief Adds or updates a spell-check dictionary entry through the owned Lua state.
+		 * @brief Adds or updates a spell-check dictionary entry for a world.
+		 * @param worldOwner World owning the spell-check operation.
 		 * @param original Original word bytes.
 		 * @param action Dictionary action bytes.
 		 * @param replacement Replacement word bytes.
 		 * @return Scripting API status code.
 		 */
-		int                addSpellCheckWord(const QByteArray &original, const QByteArray &action,
-		                                     const QByteArray &replacement);
+		int                addSpellCheckWord(const WorldRuntime *worldOwner, const QByteArray &original,
+		                                     const QByteArray &action, const QByteArray &replacement);
 		/**
-		 * @brief Runs the spell-check string helper through the owned Lua state.
+		 * @brief Runs the spell-check string helper for a world.
+		 * @param worldOwner World owning the spell-check operation.
 		 * @param text Text to check.
 		 * @param errorContext User-facing error context.
 		 * @return Invalid variant on unavailable/error, otherwise number, string, or string-list result.
 		 */
-		QVariant           spellCheckString(const QString &text, const QString &errorContext);
+		QVariant           spellCheckString(const WorldRuntime *worldOwner, const QString &text,
+		                                    const QString &errorContext);
 		/**
 		 * @brief Runs the command-line spell-check replacement decision helper.
+		 * @param worldOwner World owning the spell-check operation, or `nullptr` for application text.
 		 * @param selectedText Text selected for replacement.
 		 * @param all Whether the whole input was selected.
+		 * @param errorContext User-facing error context.
 		 * @return Spell-check command decision result.
 		 */
-		SpellCommandResult spellCheckCommandText(const QString &selectedText, bool all);
+		SpellCommandResult spellCheckCommandText(const WorldRuntime *worldOwner, const QString &selectedText,
+		                                         bool all, const QString &errorContext);
+		/**
+		 * @brief Runs the interactive spell-check dialog helper.
+		 * @param worldOwner World owning the spell-check operation.
+		 * @param text Text to check.
+		 * @param errorContext User-facing error context.
+		 * @return Spell-check dialog result.
+		 */
+		SpellCommandResult spellCheckDialogText(const WorldRuntime *worldOwner, const QString &text,
+		                                        const QString &errorContext);
+		/**
+		 * @brief Releases every spell-check execution state belonging to a closing world.
+		 * @param worldOwner World whose spell-check states must be released.
+		 */
+		void               releaseSpellCheckerForWorld(const WorldRuntime *worldOwner);
 		/**
 		 * @brief Closes and resets spell-check Lua subsystem.
 		 */
@@ -446,6 +487,61 @@ class AppController : public QObject
 		void onCommandTriggered(const QString &cmdName);
 
 	private:
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+		enum class InteractiveSpellCheckMode
+		{
+			Command,
+			Dialog
+		};
+
+		struct SpellCheckerStateLease
+		{
+				lua_State          *state{nullptr};
+				const WorldRuntime *worldOwner{nullptr};
+				QThread            *ownerThread{nullptr};
+				quint64             generation{0};
+		};
+
+		/**
+		 * @brief Runs the common interactive spell-check implementation with API-specific call semantics.
+		 * @param worldOwner World owning the spell-check operation, or `nullptr` for application text.
+		 * @param text Text to check.
+		 * @param all Whether the command API selected the whole input.
+		 * @param errorContext User-facing error context.
+		 * @param mode Calling API semantics.
+		 * @return Interactive spell-check result.
+		 */
+		SpellCommandResult     spellCheckInteractiveText(const WorldRuntime *worldOwner, const QString &text,
+		                                                 bool all, const QString &errorContext,
+		                                                 InteractiveSpellCheckMode mode);
+		/**
+		 * @brief Acquires an independently usable spell-check Lua state for a world and calling thread.
+		 * @param worldOwner World owning the state, or `nullptr` for a transient application operation.
+		 * @return State lease, or an empty lease when spell checking is unavailable.
+		 */
+		SpellCheckerStateLease acquireSpellCheckerState(const WorldRuntime *worldOwner);
+		/**
+		 * @brief Returns or discards a spell-check Lua state lease.
+		 * @param lease Lease to release.
+		 * @param reusable Whether the state remains valid for reuse.
+		 */
+		void                   releaseSpellCheckerState(const SpellCheckerStateLease &lease, bool reusable);
+		/**
+		 * @brief Creates and initializes one spell-check Lua state for the calling thread.
+		 * @return Initialized state, or `nullptr` on failure.
+		 */
+		lua_State             *createSpellCheckerState() const;
+		/**
+		 * @brief Closes idle spell-check states owned by a terminating thread.
+		 * @param ownerThread Thread whose states must be closed.
+		 */
+		void                   discardSpellCheckerStatesForThread(QThread *ownerThread);
+		/**
+		 * @brief Closes obsolete idle states on their owning thread.
+		 * @param ownerThread Thread whose obsolete states must be closed.
+		 */
+		void                   discardStaleSpellCheckerStatesForThread(const QThread *ownerThread);
+#endif
 		static AppController             *s_instance;
 		/**
 		 * @brief Database and preference loading helpers.
@@ -754,18 +850,44 @@ class AppController : public QObject
 		 */
 		void finalizeStartupIfReady();
 		/**
+		 * @brief Opens queued application file requests in arrival order and enables immediate dispatch.
+		 */
+		void enableFileAssociationDispatch();
+		/**
+		 * @brief Validates and opens one OS file request inside the captured QMud home directory.
+		 * @param path Native file path supplied by the operating system.
+		 * @return `true` when the path passed containment checks and the document opened.
+		 */
+		bool dispatchFileAssociationRequest(const QString &path);
+		/**
+		 * @brief Resolves an exact native file-association path and enforces the captured QMud-home boundary.
+		 * @param qmudHome Captured QMud home directory.
+		 * @param path Exact native path supplied by the operating system.
+		 * @param resolvedPath Receives the canonical file path on success.
+		 * @param error Receives a diagnostic on failure.
+		 * @return `true` for an existing regular file whose canonical target is inside QMud home.
+		 */
+		[[nodiscard]] static bool resolveFileAssociationFile(const QString &qmudHome, const QString &path,
+		                                                     QString *resolvedPath, QString *error = nullptr);
+		/**
+		 * @brief Opens one already-resolved document path without applying legacy path transformations.
+		 * @param resolvedPath Exact resolved document path.
+		 * @return `true` when the document opens successfully.
+		 */
+		bool                      openResolvedDocumentFile(const QString &resolvedPath);
+		/**
 		 * @brief Parses reload startup arguments from process command line.
 		 */
-		void detectReloadStartupArguments();
+		void                      detectReloadStartupArguments();
 		/**
 		 * @brief Deletes stale reload state file when startup is not reload-mode.
 		 */
-		void cleanupReloadStateOnNormalStartup() const;
+		void                      cleanupReloadStateOnNormalStartup() const;
 		/**
 		 * @brief Executes startup recovery for reload-mode launches.
 		 * @return `true` when recovery path completed.
 		 */
-		bool recoverReloadStartupState();
+		bool                      recoverReloadStartupState();
 		/**
 		 * @brief Opens one runtime/window pair from serialized reload world state.
 		 * @param worldState Serialized world state.
@@ -774,8 +896,8 @@ class AppController : public QObject
 		 * @param view Optional output world view pointer.
 		 * @return `true` when world opening succeeds.
 		 */
-		bool openWorldForReloadRecovery(const ReloadWorldState &worldState, bool activateWindow,
-		                                WorldRuntime **runtime, WorldView **view = nullptr);
+		bool              openWorldForReloadRecovery(const ReloadWorldState &worldState, bool activateWindow,
+		                                             WorldRuntime **runtime, WorldView **view = nullptr);
 		/**
 		 * @brief Creates another presentation for an existing runtime.
 		 * @param runtime Runtime shared by the new presentation.
@@ -1030,32 +1152,30 @@ class AppController : public QObject
 		/**
 		 * @brief Emits startup banner and runs async plugin startup pipeline after session-state restore.
 		 * @param runtime World runtime.
-		 * @param completion Completion callback invoked after startup pipeline finishes.
-		 * @param waitForPluginInstallCommit Wait for pending plugin installs to commit before completion.
+		 * @param completion Completion callback invoked after pending plugin installs commit.
 		 */
-		void               runWorldStartupPostRestore(WorldRuntime *runtime, std::function<void()> completion,
-		                                              bool waitForPluginInstallCommit = true) const;
+		void        runWorldStartupPostRestore(WorldRuntime *runtime, std::function<void()> completion) const;
 		/**
 		 * @brief Auto-connects runtime when settings request it.
 		 * @param runtime Runtime to auto-connect.
 		 */
-		void               maybeAutoConnectWorld(WorldRuntime *runtime) const;
+		void        maybeAutoConnectWorld(WorldRuntime *runtime) const;
 		/**
 		 * @brief Displays the current tracked scrollback-restore count.
 		 */
-		void               showRestoreScrollbackStatus() const;
-		void               beginRestoreScrollbackStatus() const;
-		void               preseedRestoreScrollbackStatus(int count) const;
-		void               endRestoreScrollbackStatus() const;
-		MainWindow        *m_mainWindow{nullptr};
-		QDateTime          m_whenClientStarted;
-		QString            m_version;
-		QString            m_workingDir;
-		QString            m_fileBrowsingDir;
-		QString            m_preferencesDatabaseName;
-		QString            m_locale;
-		QString            m_translatorFile;
-		QMap<QString, int> m_globalIntPrefs;
+		void        showRestoreScrollbackStatus() const;
+		void        beginRestoreScrollbackStatus() const;
+		void        preseedRestoreScrollbackStatus(int count) const;
+		void        endRestoreScrollbackStatus() const;
+		MainWindow *m_mainWindow{nullptr};
+		QDateTime   m_whenClientStarted;
+		QString     m_version;
+		QString     m_workingDir;
+		QString     m_fileBrowsingDir;
+		QString     m_preferencesDatabaseName;
+		QString     m_locale;
+		QString     m_translatorFile;
+		QMap<QString, int>               m_globalIntPrefs;
 		QMap<QString, QString>           m_globalStringPrefs;
 		QString                          m_luaScript;
 		QString                          m_pluginsDirectory;
@@ -1097,15 +1217,33 @@ class AppController : public QObject
 		bool                             m_initializeFinished{false};
 		bool                             m_initializeSucceeded{false};
 		bool                             m_startupFinalized{false};
+		bool                             m_fileAssociationDispatchReady{false};
 		bool                             m_startupFirstTime{false};
+		QStringList                      m_pendingFileAssociationRequests;
 		bool                             m_startupNeedsUpgradeWelcome{false};
 		mutable bool                     m_deferUpgradeWelcomeUntilStartupRestores{false};
 		mutable bool                     m_startupRestoreDispatchComplete{false};
 		QTranslator                     *m_qtTranslator{nullptr};
 		lua_State                       *m_translatorLua{nullptr};
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
-		lua_State *m_spellCheckerLua{nullptr};
-		bool       m_spellCheckOk{false};
+		struct IdleSpellCheckerState
+		{
+				lua_State          *state{nullptr};
+				const WorldRuntime *worldOwner{nullptr};
+				QThread            *ownerThread{nullptr};
+				quint64             generation{0};
+		};
+
+		QVector<IdleSpellCheckerState>      m_idleSpellCheckerStates;
+		QSet<QThread *>                     m_spellCheckerOwnerThreads;
+		QHash<QThread *, QPointer<QObject>> m_spellCheckerThreadCleanupContexts;
+		QSet<const WorldRuntime *>          m_spellCheckerWorldOwners;
+		QMutex                              m_spellCheckerPoolMutex;
+		QWaitCondition                      m_spellCheckerStorageReady;
+		QThread                            *m_spellCheckerStorageInitializationThread{nullptr};
+		quint64                             m_spellCheckerGeneration{1};
+		bool                                m_spellCheckerStorageInitialized{false};
+		bool                                m_spellCheckerStorageInitializationInProgress{false};
 #endif
 		mutable QRecursiveMutex          m_luaStateMutex;
 		mutable QRecursiveMutex          m_globalPrefsMutex;

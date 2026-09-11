@@ -122,6 +122,15 @@ qmud_add_qtest(tst_PluginPathUtils
         LABELS
         unit)
 
+qmud_add_qtest(tst_FileAssociations
+        SOURCES
+        unit/tst_FileAssociations.cpp
+        LABELS
+        unit)
+target_compile_definitions(tst_FileAssociations
+        PRIVATE
+        QMUD_TEST_GENERATED_INFO_PLIST="${QMUD_MAC_INFO_PLIST_TEMPLATE}")
+
 qmud_add_qtest(tst_HyperlinkActionUtils
         SOURCES
         unit/tst_HyperlinkActionUtils.cpp
@@ -148,6 +157,38 @@ qmud_add_qtest(tst_Environment
         "${CMAKE_SOURCE_DIR}/src/Environment.cpp"
         LABELS
         unit)
+
+qmud_add_qtest(tst_GuiSystemUtils
+        GUI
+        SOURCES
+        unit/tst_GuiSystemUtils.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        unit
+        TIMEOUT
+        10)
+
+qmud_add_qtest(tst_NameGeneration
+        SOURCES
+        unit/tst_NameGeneration.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        unit
+        TIMEOUT
+        10)
+
+qmud_add_qtest(tst_WorldEditUtils
+        GUI
+        SOURCES
+        unit/tst_WorldEditUtils.cpp
+        LIBRARIES
+        qmud_app_core
+        LABELS
+        unit
+        TIMEOUT
+        10)
 
 qmud_add_qtest(tst_TimeFormatUtils
         SOURCES
@@ -184,6 +225,17 @@ qmud_add_qtest(tst_NativePluginRegistry
         unit)
 
 if (QMUD_ENABLE_LUA_SCRIPTING)
+    qmud_add_qtest(tst_LuaApiExport
+            GUI
+            SOURCES
+            unit/tst_LuaApiExport.cpp
+            LIBRARIES
+            qmud_app_core
+            LABELS
+            unit
+            TIMEOUT
+            20)
+
     qmud_add_qtest(tst_LuaExecution
             SOURCES
             unit/tst_LuaExecution.cpp
@@ -518,6 +570,17 @@ qmud_add_qtest(tst_ReloadIntegration
         TIMEOUT
         20)
 
+qmud_add_qtest(tst_SingleInstanceIpc
+        SOURCES
+        integration/tst_SingleInstanceIpc.cpp
+        "${CMAKE_SOURCE_DIR}/src/helpers/SingleInstanceIpc.cpp"
+        LIBRARIES
+        Qt6::Network
+        LABELS
+        integration
+        TIMEOUT
+        10)
+
 qmud_add_qtest(tst_MushclientImportUtils
         SOURCES
         integration/tst_MushclientImportUtils.cpp
@@ -720,6 +783,40 @@ qmud_add_qtest(tst_WorldCommandProcessor_TimerAccounting
         20)
 
 if (QMUD_ENABLE_GUI_TESTS)
+    qmud_add_qtest(tst_AppControllerTextCommands
+            GUI
+            SOURCES
+            gui/tst_AppControllerTextCommands.cpp
+            LIBRARIES
+            qmud_app_core
+            LABELS
+            gui
+            integration
+            TIMEOUT
+            20)
+
+    qmud_add_qtest(tst_AppControllerFileOpen
+            GUI
+            SOURCES
+            gui/tst_AppControllerFileOpen.cpp
+            LIBRARIES
+            qmud_app_core
+            LABELS
+            gui
+            TIMEOUT
+            10)
+
+	qmud_add_qtest(tst_DialogUtils
+			GUI
+			SOURCES
+			gui/tst_DialogUtils.cpp
+            LIBRARIES
+            qmud_app_core
+            LABELS
+            gui
+            TIMEOUT
+            10)
+
     qmud_add_qtest(tst_MainFrame_Actions
             GUI
             SOURCES

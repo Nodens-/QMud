@@ -1056,6 +1056,81 @@ namespace
 				QVERIFY(!restoredExcludeSymbolSuffix->isChecked());
 			}
 
+			void echoForceTerminatesPartialPromptsDefaultsOffAndPersists()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("echo_force_terminates_partial_prompts")),
+				    QStringLiteral("n"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				QCheckBox *const       option =
+				    findCheckBoxByText(dialog, QStringLiteral("Echo Force-Terminates Partial Prompts"));
+				QVERIFY(option);
+				QVERIFY(!option->isChecked());
+				QCOMPARE(option->toolTip(),
+				         QStringLiteral("Enable if the MUD's prompt does not appear properly."));
+
+				option->setChecked(true);
+				dialog.accept();
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("echo_force_terminates_partial_prompts")),
+				    QStringLiteral("1"));
+
+				WorldPreferencesDialog restoredDialog(&runtime, nullptr);
+				QCheckBox *const       restoredOption = findCheckBoxByText(
+				    restoredDialog, QStringLiteral("Echo Force-Terminates Partial Prompts"));
+				QVERIFY(restoredOption);
+				QVERIFY(restoredOption->isChecked());
+			}
+
+			void automaticTelnetProtectionOwnsManualOptionAndPreservesItsValue()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral(
+				             "automatically_protect_against_telnet_option_renegotiation_loops")),
+				         QStringLiteral("y"));
+				runtime.setWorldAttribute(QStringLiteral("only_negotiate_telnet_options_once"),
+				                          QStringLiteral("1"));
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				QCheckBox *const       automatic = findCheckBoxByText(
+				    dialog,
+				    QStringLiteral("Automatically protect against Telnet option renegotiation loops"));
+				QCheckBox *const manual =
+				    findCheckBoxByText(dialog, QStringLiteral("Only negotiate telnet options once"));
+				QVERIFY(automatic);
+				QVERIFY(manual);
+				QVERIFY(automatic->isChecked());
+				QVERIFY(manual->isChecked());
+				QVERIFY(!manual->isEnabled());
+
+				automatic->setChecked(false);
+				QVERIFY(manual->isEnabled());
+				QVERIFY(manual->isChecked());
+				dialog.accept();
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral(
+				             "automatically_protect_against_telnet_option_renegotiation_loops")),
+				         QStringLiteral("0"));
+				QCOMPARE(
+				    runtime.worldAttributes().value(QStringLiteral("only_negotiate_telnet_options_once")),
+				    QStringLiteral("1"));
+
+				WorldPreferencesDialog restoredDialog(&runtime, nullptr);
+				QCheckBox *const       restoredAutomatic = findCheckBoxByText(
+				    restoredDialog,
+				    QStringLiteral("Automatically protect against Telnet option renegotiation loops"));
+				QCheckBox *const restoredManual =
+				    findCheckBoxByText(restoredDialog, QStringLiteral("Only negotiate telnet options once"));
+				QVERIFY(restoredAutomatic);
+				QVERIFY(restoredManual);
+				QVERIFY(!restoredAutomatic->isChecked());
+				QVERIFY(restoredManual->isEnabled());
+				QVERIFY(restoredManual->isChecked());
+			}
+
 			void customColoursLoadPersistAndCreateMissingCanonicalEntries()
 			{
 				WorldRuntime::Colour existing;

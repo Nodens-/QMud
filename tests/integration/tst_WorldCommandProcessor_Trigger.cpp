@@ -11,6 +11,7 @@
 #include "WorldCommandProcessorUtils.h"
 #include "WorldOptions.h"
 #include "WorldRuntimeTestAccess.h"
+#include "WorldView.h"
 #include "scripting/ScriptingErrors.h"
 
 // ReSharper disable once CppUnusedIncludeDirective
@@ -322,6 +323,75 @@ namespace
 				QCOMPARE(wildcard, QStringLiteral("TWO"));
 			}
 
+			static void pluginReorderDuringTriggerEvaluationUsesStableFallback()
+			{
+				const QString firstPluginId  = QStringLiteral("111111111111111111111111");
+				const QString secondPluginId = QStringLiteral("222222222222222222222222");
+				auto makeTrigger = [](const QString &name, const QString &sendText, const int sequence)
+				{
+					WorldRuntime::Trigger trigger = makeScriptTrigger();
+					trigger.attributes.insert(QStringLiteral("name"), name);
+					trigger.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+					trigger.attributes.insert(QStringLiteral("keep_evaluating"), QStringLiteral("y"));
+					trigger.children.insert(QStringLiteral("send"), sendText);
+					return trigger;
+				};
+
+				WorldRuntime::Plugin firstPlugin;
+				firstPlugin.attributes.insert(QStringLiteral("id"), firstPluginId);
+				firstPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("First"));
+				firstPlugin.enabled  = true;
+				firstPlugin.sequence = 100;
+				firstPlugin.triggers = {
+				    makeTrigger(QStringLiteral("first"), QStringLiteral("first-send"), 100),
+				    makeTrigger(QStringLiteral("second"), QStringLiteral("second-send"), 200)};
+				firstPlugin.triggers[0].runtimeId = 42;
+				firstPlugin.triggers[1].runtimeId = 42;
+
+				WorldRuntime::Plugin secondPlugin;
+				secondPlugin.attributes.insert(QStringLiteral("id"), secondPluginId);
+				secondPlugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Second"));
+				secondPlugin.enabled  = true;
+				secondPlugin.sequence = 200;
+
+				WorldRuntime runtime;
+				WorldRuntimeTestAccess::plugins(runtime) = {firstPlugin, secondPlugin};
+				runtime.ensureAllTriggerRuntimeIds();
+				runtime.markTriggerRulesChanged();
+				const QList<WorldRuntime::Trigger> &runtimeTriggers =
+				    WorldRuntimeTestAccess::plugins(runtime).front().triggers;
+				QVERIFY(runtimeTriggers.at(0).runtimeId != 0);
+				QVERIFY(runtimeTriggers.at(1).runtimeId != 0);
+				QVERIFY(runtimeTriggers.at(0).runtimeId != runtimeTriggers.at(1).runtimeId);
+
+				WorldCommandProcessor processor;
+				processor.setRuntime(&runtime);
+
+				QStringList sends;
+				bool        reordered        = false;
+				bool        reorderSucceeded = false;
+				QObject::connect(&processor, &WorldCommandProcessor::sendToScriptRequested, &processor,
+				                 [&](const QString &pluginId, const QString &scriptText, const QString &,
+				                     const QVector<LuaStyleRun> *, bool, bool, int, qint64)
+				                 {
+					                 if (pluginId != firstPluginId)
+						                 return;
+					                 sends.push_back(scriptText);
+					                 if (!reordered)
+					                 {
+						                 reordered        = true;
+						                 reorderSucceeded = runtime.reorderPlugin(firstPluginId, 1);
+					                 }
+				                 });
+
+				const quint64 generationBefore = runtime.triggerRuleGeneration();
+				processor.onIncomingLineReceived(QStringLiteral("line"));
+
+				QVERIFY(reorderSucceeded);
+				QVERIFY(runtime.triggerRuleGeneration() > generationBefore);
+				QCOMPARE(sends, (QStringList{QStringLiteral("first-send"), QStringLiteral("second-send")}));
+			}
+
 			static void triggerSendsInsertAtPriorityQueueBoundary()
 			{
 				QTcpServer server;
@@ -380,6 +450,73 @@ namespace
 				                 QStringLiteral("qcmd-priority-c83"), QStringLiteral("qcmd-priority-e05"),
 				                 QStringLiteral("qcmd-tail-9f31"), QStringLiteral("qcmd-normal-d64")}));
 				QCOMPARE(queuedTypes(processor), (QList<bool>{false, false, false, false, true, false}));
+			}
+
+			static void fragmentedWorldTriggerEchoFollowsFinalizedLine()
+			{
+				QTcpServer server;
+				if (!server.listen(QHostAddress::LocalHost, 0))
+					QSKIP("Local TCP listen is unavailable in this environment.");
+
+				WorldRuntime runtime;
+				runtime.setWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("1"));
+				runtime.setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
+				                          QStringLiteral("1"));
+
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+				trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("^fragmented line$"));
+				trigger.attributes.insert(QStringLiteral("regexp"), QStringLiteral("1"));
+				trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToWorld));
+				trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+				trigger.children.insert(QStringLiteral("send"), QStringLiteral("trigger command"));
+				WorldRuntimeTestAccess::triggers(runtime).push_back(trigger);
+				runtime.markTriggersChanged();
+
+				WorldView             view;
+				WorldCommandProcessor processor;
+				view.setRuntime(&runtime);
+				view.applyRuntimeSettings();
+				processor.setView(&view);
+				processor.setRuntime(&runtime);
+				runtime.setCommandProcessor(&processor);
+				QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &processor,
+				                 &WorldCommandProcessor::onIncomingStyledLineReceived);
+				QObject::connect(&runtime, &WorldRuntime::incomingStyledLinePartialReceived, &processor,
+				                 &WorldCommandProcessor::onIncomingStyledLinePartialReceived);
+
+				QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+				QVERIFY(connectedSpy.isValid());
+				QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+				QVERIFY(serverAcceptedSpy.isValid());
+				QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+				QVERIFY(connectedSpy.wait(5000));
+				QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0,
+				                         5000);
+				QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+				QVERIFY(!acceptedSocket.isNull());
+
+				runtime.receiveRawData(QByteArrayLiteral("fragmented "));
+				QTRY_COMPARE(view.outputLines().constLast(), QStringLiteral("fragmented "));
+				runtime.receiveRawData(QByteArrayLiteral("line\n"));
+
+				QTRY_COMPARE(runtime.triggers().constFirst().matched, 1);
+				QCOMPARE(runtime.lines().size(), qsizetype{2});
+				QCOMPARE(runtime.lines().at(0).text, QStringLiteral("fragmented line"));
+				QCOMPARE(runtime.lines().at(1).text, QStringLiteral("trigger command"));
+				QCOMPARE(view.outputLines(),
+				         QStringList({QStringLiteral("fragmented line"), QStringLiteral("trigger command")}));
+
+				QByteArray received;
+				auto       receivedTriggerCommand = [&acceptedSocket, &received]
+				{
+					if (acceptedSocket->bytesAvailable() == 0)
+						acceptedSocket->waitForReadyRead(10);
+					received += acceptedSocket->readAll();
+					return received.contains("trigger command\r\n");
+				};
+				QTRY_VERIFY_WITH_TIMEOUT(receivedTriggerCommand(), 5000);
 			}
 
 			static void userMacroCommandSuppressesAutoSayDuringEvaluation()

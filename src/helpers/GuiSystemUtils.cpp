@@ -8,6 +8,8 @@
 
 #include "GuiSystemUtils.h"
 
+#include "ColorPacking.h"
+
 #include <QApplication>
 #include <QColor>
 #include <QFont>
@@ -19,15 +21,6 @@
 #include <QtMath>
 
 #include <limits>
-
-namespace
-{
-	long colorToLong(const QColor &color)
-	{
-		return static_cast<long>(color.red()) | static_cast<long>(color.green()) << 8 |
-		       static_cast<long>(color.blue()) << 16;
-	}
-} // namespace
 
 QString qmudGuiSystemValueKey(const QString &category, const int index)
 {
@@ -96,7 +89,7 @@ long qmudGuiSystemColor(const int index)
 	default:
 		return 0;
 	}
-	return colorToLong(color);
+	return static_cast<long>(qmudRgb(color.red(), color.green(), color.blue()));
 }
 
 QVariantMap qmudCollectGuiSystemValues()

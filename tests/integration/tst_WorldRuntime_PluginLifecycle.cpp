@@ -2248,7 +2248,7 @@ end
 			         QStringLiteral("1"));
 		}
 
-		static void mushReaderCommitsPartialLinesBeforeFollowingPresentationOutput()
+		static void mushReaderEnabledUserEchoCommitsPartialLineBeforeEcho()
 		{
 			QTemporaryDir tempDir;
 			QVERIFY(tempDir.isValid());
@@ -2263,6 +2263,8 @@ end
 			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
 			runtime.setWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
+			                          QStringLiteral("y"));
 			RuntimeCommandHarness harness(runtime);
 			QVERIFY(harness.showAndWait());
 
@@ -2301,17 +2303,15 @@ end
 			runtime.setWorldAttribute(QStringLiteral("wrap_column"), QStringLiteral("10"));
 			runtime.setWorldAttribute(QStringLiteral("indent_paras"), QStringLiteral("n"));
 
-			const QString noteText = QStringLiteral("note");
-			harness.processor.note(noteText, true);
-			QCOMPARE(events.size(), 2);
-			QCOMPARE(events.at(0).text, partialLine);
-			QVERIFY(!events.at(0).interrupt);
-			QCOMPARE(events.at(1).text, noteText);
-			QVERIFY(!events.at(1).interrupt);
-			QCOMPARE(partialOverlayAtSpeech, QVector<bool>({false, false}));
+			runtime.setCurrentActionSource(WorldRuntime::eUserTyping);
+			harness.view.echoInputText(QStringLiteral("look\r\n"));
+			QCOMPARE(events.size(), 1);
+			QCOMPARE(events.constLast().text, partialLine);
+			QVERIFY(!events.constLast().interrupt);
+			QCOMPARE(partialOverlayAtSpeech, QVector<bool>({false}));
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_count")),
-			    QStringLiteral("2"), 5000);
+			    QStringLiteral("1"), 5000);
 			QCOMPARE(
 			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_type_1")),
 			    QStringLiteral("0"));
@@ -2321,51 +2321,12 @@ end
 			QCOMPARE(
 			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_text_1")),
 			    partialLine);
-			QCOMPARE(
-			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_type_2")),
-			    QStringLiteral("1"));
-			QCOMPARE(
-			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_log_2")),
-			    QStringLiteral("0"));
-			QCOMPARE(
-			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_text_2")),
-			    noteText);
-			QCOMPARE(runtime.lines().size(), 2);
-			QVERIFY(runtime.lines().constFirst().text != partialLine);
-			QVERIFY(runtime.lines().constFirst().text.contains(QLatin1Char('\n')));
-			QVERIFY(runtime.lines().constFirst().hardReturn);
-			QCOMPARE(runtime.lines().constLast().text, noteText);
-
-			runtime.setWorldAttribute(QStringLiteral("wrap"), QStringLiteral("n"));
-			const QString secondPartialLine = QStringLiteral("second prompt> ");
-			runtime.receiveRawData(secondPartialLine.toUtf8());
-			QTRY_COMPARE_WITH_TIMEOUT(harness.view.outputLines().constLast(), secondPartialLine, 5000);
-			QCOMPARE(events.size(), 2);
-
-			runtime.setCurrentActionSource(WorldRuntime::eUserTyping);
-			harness.view.echoInputText(QStringLiteral("look\r\n"));
-			QCOMPARE(events.size(), 3);
-			QCOMPARE(events.constLast().text, secondPartialLine);
-			QVERIFY(!events.constLast().interrupt);
-			QCOMPARE(partialOverlayAtSpeech, QVector<bool>({false, false, false}));
-			QTRY_COMPARE_WITH_TIMEOUT(
-			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_count")),
-			    QStringLiteral("3"), 5000);
-			QCOMPARE(
-			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_type_3")),
-			    QStringLiteral("0"));
-			QCOMPARE(
-			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_log_3")),
-			    QStringLiteral("0"));
-			QCOMPARE(
-			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_text_3")),
-			    secondPartialLine);
 
 			harness.view.echoInputText(QStringLiteral("again\r\n"));
-			QCOMPARE(events.size(), 3);
+			QCOMPARE(events.size(), 1);
 			QCOMPARE(
 			    pluginVariable(runtime, kScreenDrawRecorderPluginId, QStringLiteral("screen_draw_count")),
-			    QStringLiteral("3"));
+			    QStringLiteral("1"));
 		}
 
 		static void legacyEncodingMxpSetEntityCallbackPayloadUsesInternalUtf8()

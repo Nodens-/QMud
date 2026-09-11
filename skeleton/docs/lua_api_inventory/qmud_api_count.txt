@@ -1,9 +1,9 @@
 # QMud Lua API inventory export
-# Exported (UTC): 2026-03-10T18:58:53Z
+# Exported (UTC): 2026-09-08T08:23:10Z
 
 bc,29
 bitlib,12
-function_signature_table,454
+function_signature_table,457
 lpeg,23
 lpeg_meta,9
 progress_lib,1
@@ -15,6 +15,6 @@ utils_binding_table,48
 utils_compresslib,11
 utils_union,48
 utils_xmllib,37
-world_binding_table,437
-worldlib,437
+world_binding_table,440
+worldlib,440
 worldlib_meta,0

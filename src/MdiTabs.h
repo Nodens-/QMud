@@ -88,6 +88,11 @@ class MdiTabs : public QTabBar
 		 * @param subWindow Child represented by the tab.
 		 */
 		void                             activateTabWindow(int index, QMdiSubWindow *subWindow);
+		/**
+		 * @brief Closes a tab window and immediately removes an accepted close from the MDI area.
+		 * @param subWindow Child represented by the tab.
+		 */
+		void                             closeTabWindow(QMdiSubWindow *subWindow);
 
 	protected:
 		/**

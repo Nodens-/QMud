@@ -144,15 +144,17 @@ namespace QMudTimerScheduling
 	TimerDueEvaluation evaluateTimerDue(WorldRuntime::Timer &timer, const QDateTime &now,
 	                                    const bool connected)
 	{
-		const TimerScheduleDefinition schedule = timerScheduleDefinition(timer);
-		if (!schedule.enabled)
+		if (!isEnabledValue(timer.attributes.value(QStringLiteral("enabled"))))
 			return {};
 		if (!isEnabledValue(timer.attributes.value(QStringLiteral("active_closed"))) && !connected)
 			return {};
 
 		bool runtimeStateChanged = false;
 		if (!timer.nextFireTime.isValid())
-			runtimeStateChanged = ::resetTimerFields(timer, now, schedule);
+		{
+			const TimerScheduleDefinition schedule = timerScheduleDefinition(timer);
+			runtimeStateChanged                    = ::resetTimerFields(timer, now, schedule);
+		}
 		return {.due                 = timer.nextFireTime.isValid() && timer.nextFireTime <= now,
 		        .runtimeStateChanged = runtimeStateChanged};
 	}

@@ -159,6 +159,18 @@ namespace QMudLuaSupport
 	 */
 	bool       optBoolean(lua_State *L, int argIndex, bool defaultValue);
 	/**
+	 * @brief Computes the edit distance for two Lua string arguments.
+	 * @param L Lua state pointer.
+	 * @return Number of Lua results pushed.
+	 */
+	int        luaUtilsEditDistance(lua_State *L);
+	/**
+	 * @brief Computes Double Metaphone keys for a Lua string argument.
+	 * @param L Lua state pointer.
+	 * @return Number of Lua results pushed.
+	 */
+	int        luaUtilsMetaphone(lua_State *L);
+	/**
 	 * @brief Raises a standardized Lua runtime error.
 	 * @param L Lua state pointer.
 	 * @param strEvent Event/category text.

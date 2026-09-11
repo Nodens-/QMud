@@ -143,49 +143,61 @@ class MainWindow : public QMainWindow, public MainWindowHost
 		 */
 		[[nodiscard]] TextChildWindow  *activeTextChildWindow() const;
 		/**
+		 * @brief Records the world runtime associated with a text child window.
+		 * @param textChild Text window whose ownership is updated.
+		 * @param runtime Owning world runtime, or `nullptr` to clear ownership.
+		 */
+		static void associateTextWindowWithRuntime(TextChildWindow *textChild, WorldRuntime *runtime);
+		/**
+		 * @brief Resolves the world runtime associated with a text child window.
+		 * @param textChild Text window whose recorded world ownership is inspected.
+		 * @return Associated live world runtime, or `nullptr`.
+		 */
+		[[nodiscard]] WorldRuntime *resolveRuntimeForTextWindow(const TextChildWindow *textChild) const;
+		/**
 		 * @brief Finds world child for runtime.
 		 * @param runtime Runtime to resolve.
 		 * @return Matching world child window, or `nullptr`.
 		 */
-		WorldChildWindow               *findWorldChildWindow(WorldRuntime *runtime) const override;
+		WorldChildWindow           *findWorldChildWindow(WorldRuntime *runtime) const override;
 		/**
 		 * @brief Activates window for runtime.
 		 * @param runtime Runtime whose window should be activated.
 		 * @return `true` when activation succeeds.
 		 */
-		bool                            activateWorldRuntime(WorldRuntime *runtime) override;
+		bool                        activateWorldRuntime(WorldRuntime *runtime) override;
 		/**
 		 * @brief Shows/hides tray icon.
 		 * @param visible Show tray icon when `true`.
 		 */
-		void                            setTrayIconVisible(bool visible);
+		void                        setTrayIconVisible(bool visible);
 		/**
 		 * @brief Shows status message with optional timeout.
 		 * @param message Status text.
 		 * @param timeoutMs Timeout in milliseconds; `0` means no timeout.
 		 */
-		void                            showStatusMessage(const QString &message, int timeoutMs) override;
+		void                        showStatusMessage(const QString &message, int timeoutMs) override;
 		/**
 		 * @brief Acquires exclusive ownership of the displayed status message.
 		 * @param message Status text to display while the override is active.
 		 * @return Token required to update or release the override.
 		 */
-		[[nodiscard]] quint64           acquireStatusMessageOverride(const QString &message);
+		[[nodiscard]] quint64       acquireStatusMessageOverride(const QString &message);
 		/**
 		 * @brief Updates an active status-message override.
 		 * @param token Token returned by acquireStatusMessageOverride().
 		 * @param message Replacement status text.
 		 */
-		void updateStatusMessageOverride(quint64 token, const QString &message) const;
+		void                        updateStatusMessageOverride(quint64 token, const QString &message) const;
 		/**
 		 * @brief Releases an active status-message override.
 		 * @param token Token returned by acquireStatusMessageOverride().
 		 */
-		void releaseStatusMessageOverride(quint64 token);
+		void                        releaseStatusMessageOverride(quint64 token);
 		/**
 		 * @brief Shows status message with no timeout.
 		 */
-		void showStatusMessage(const QString &message)
+		void                        showStatusMessage(const QString &message)
 		{
 			showStatusMessage(message, 0);
 		}

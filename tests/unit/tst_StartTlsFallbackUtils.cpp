@@ -10,55 +10,61 @@
 
 #include <QtTest/QTest>
 
-/**
- * @brief QTest fixture covering START-TLS timeout fallback guard behavior.
- */
-class tst_StartTlsFallbackUtils : public QObject
+namespace
 {
-		Q_OBJECT
 
-		// NOLINTBEGIN(readability-convert-member-functions-to-static)
-	private slots:
-		void fallbackAppliesOnlyWhenAllConditionsMatch()
-		{
-			constexpr StartTlsFallbackContext context = {12, 12, true, true, false, true, eTlsStartTls};
-			QVERIFY(shouldFallbackToPlainOnStartTlsTimeout(context));
-		}
+	/**
+	 * @brief QTest fixture covering START-TLS timeout fallback guard behavior.
+	 */
+	class tst_StartTlsFallbackUtils : public QObject
+	{
+			Q_OBJECT
 
-		void fallbackDoesNotApplyWhenGenerationIsStale()
-		{
-			constexpr StartTlsFallbackContext context = {11, 12, true, true, false, true, eTlsStartTls};
-			QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(context));
-		}
+			// NOLINTBEGIN(readability-convert-member-functions-to-static)
+		private slots:
+			void fallbackAppliesOnlyWhenAllConditionsMatch()
+			{
+				constexpr StartTlsFallbackContext context = {12, 12, true, true, false, true, eTlsStartTls};
+				QVERIFY(shouldFallbackToPlainOnStartTlsTimeout(context));
+			}
 
-		void fallbackDoesNotApplyWhenSocketIsUnavailableOrDisconnected()
-		{
-			constexpr StartTlsFallbackContext missingSocket = {12,    12,   false,       false,
-			                                                   false, true, eTlsStartTls};
-			QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(missingSocket));
+			void fallbackDoesNotApplyWhenGenerationIsStale()
+			{
+				constexpr StartTlsFallbackContext context = {11, 12, true, true, false, true, eTlsStartTls};
+				QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(context));
+			}
 
-			constexpr StartTlsFallbackContext disconnectedSocket = {12,    12,   true,        false,
-			                                                        false, true, eTlsStartTls};
-			QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(disconnectedSocket));
-		}
+			void fallbackDoesNotApplyWhenSocketIsUnavailableOrDisconnected()
+			{
+				constexpr StartTlsFallbackContext missingSocket = {12,    12,   false,       false,
+				                                                   false, true, eTlsStartTls};
+				QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(missingSocket));
 
-		void fallbackDoesNotApplyWhenSessionAlreadyReady()
-		{
-			constexpr StartTlsFallbackContext context = {12, 12, true, true, true, true, eTlsStartTls};
-			QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(context));
-		}
+				constexpr StartTlsFallbackContext disconnectedSocket = {12,    12,   true,        false,
+				                                                        false, true, eTlsStartTls};
+				QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(disconnectedSocket));
+			}
 
-		void fallbackDoesNotApplyWhenTlsStartTlsIsNotActiveMode()
-		{
-			constexpr StartTlsFallbackContext tlsDisabled = {12, 12, true, true, false, false, eTlsStartTls};
-			QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(tlsDisabled));
+			void fallbackDoesNotApplyWhenSessionAlreadyReady()
+			{
+				constexpr StartTlsFallbackContext context = {12, 12, true, true, true, true, eTlsStartTls};
+				QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(context));
+			}
 
-			constexpr StartTlsFallbackContext nonStartTlsMethod = {12,    12,   true,      true,
-			                                                       false, true, eTlsDirect};
-			QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(nonStartTlsMethod));
-		}
-		// NOLINTEND(readability-convert-member-functions-to-static)
-};
+			void fallbackDoesNotApplyWhenTlsStartTlsIsNotActiveMode()
+			{
+				constexpr StartTlsFallbackContext tlsDisabled = {12,    12,    true,        true,
+				                                                 false, false, eTlsStartTls};
+				QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(tlsDisabled));
+
+				constexpr StartTlsFallbackContext nonStartTlsMethod = {12,    12,   true,      true,
+				                                                       false, true, eTlsDirect};
+				QVERIFY(!shouldFallbackToPlainOnStartTlsTimeout(nonStartTlsMethod));
+			}
+			// NOLINTEND(readability-convert-member-functions-to-static)
+	};
+
+} // namespace
 
 QTEST_APPLESS_MAIN(tst_StartTlsFallbackUtils)
 

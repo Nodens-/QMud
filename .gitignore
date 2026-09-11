@@ -31,6 +31,7 @@ inspect
 #  Performance data file for profiling.
 #
 perf.data
+perf.data.old
 
 #
 # Help database (generated)

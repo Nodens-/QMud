@@ -674,6 +674,7 @@ class WorldPreferencesDialog : public QDialog
 		bool                          m_inputFontItalic{false};
 		int                           m_inputFontCharset{0};
 		QCheckBox                    *m_noEchoOff{nullptr};
+		QCheckBox                    *m_echoForceTerminatesPartialPrompts{nullptr};
 		QCheckBox                    *m_enableSpamPrevention{nullptr};
 		QSpinBox                     *m_spamLineCount{nullptr};
 		QLineEdit                    *m_spamMessage{nullptr};
@@ -830,6 +831,7 @@ class WorldPreferencesDialog : public QDialog
 		QTextEdit                    *m_connectText{nullptr};
 		QComboBox                    *m_connectMethod{nullptr};
 		QSpinBox                     *m_connectDelay{nullptr};
+		QCheckBox                    *m_automaticallyProtectAgainstTelnetOptionRenegotiationLoops{nullptr};
 		QCheckBox                    *m_onlyNegotiateTelnetOptionsOnce{nullptr};
 		QLabel                       *m_connectLineCount{nullptr};
 

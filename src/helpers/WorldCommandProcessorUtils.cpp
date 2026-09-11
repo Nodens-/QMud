@@ -16,7 +16,9 @@
 
 namespace
 {
-	bool isAsciiHexDigit(const QChar ch)
+	constexpr QChar kQueueActionSourceMarker{0xFDD0};
+
+	bool            isAsciiHexDigit(const QChar ch)
 	{
 		const ushort u = ch.unicode();
 		return (u >= '0' && u <= '9') || (u >= 'a' && u <= 'f') || (u >= 'A' && u <= 'F');
@@ -173,7 +175,7 @@ namespace QMudCommandQueue
 	}
 
 	QString encodeQueueEntry(const QString &payload, const bool queueRequested, const bool echo,
-	                         const bool logIt)
+	                         const bool logIt, const unsigned short actionSource)
 	{
 		QString flag;
 		if (queueRequested)
@@ -183,7 +185,14 @@ namespace QMudCommandQueue
 
 		if (!logIt)
 			flag = flag.toLower();
-		return flag + payload;
+
+		QString encoded;
+		encoded.reserve(payload.size() + 3);
+		encoded += flag;
+		encoded += kQueueActionSourceMarker;
+		encoded += QChar(actionSource);
+		encoded += payload;
+		return encoded;
 	}
 
 	QueueEntry decodeQueueEntry(const QString &entry)
@@ -198,7 +207,15 @@ namespace QMudCommandQueue
 		out.withEcho   = (upper == QLatin1Char('E') || upper == QLatin1Char('I'));
 		out.logIt      = kind.isUpper();
 		out.queuedType = (upper == QLatin1Char('E'));
-		out.payload    = entry.mid(1);
+		if (entry.size() >= 3 && entry.at(1) == kQueueActionSourceMarker)
+		{
+			out.actionSource = entry.at(2).unicode();
+			out.payload      = entry.mid(3);
+		}
+		else
+		{
+			out.payload = entry.mid(1);
+		}
 		return out;
 	}
 

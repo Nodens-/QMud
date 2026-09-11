@@ -24,6 +24,7 @@
     {"confirm_before_replacing_typing", false}, {"confirm_on_paste", true}, {"confirm_on_send", true},
     {"connect_method", eNoAutoConnect, eNoAutoConnect, eConnectTypeMax - 1}, {"connect_delay", 0, 0, 10000},
     {"copy_selection_to_clipboard", false}, {"convert_ga_to_newline", true},
+    {"automatically_protect_against_telnet_option_renegotiation_loops", true},
     {"only_negotiate_telnet_options_once", false}, {"ctrl_n_goes_to_next_command", false},
     {"ctrl_p_goes_to_previous_command", false}, {"ctrl_z_goes_to_end_of_buffer", false},
     {"ctrl_backspace_deletes_last_word", false},
@@ -41,11 +42,11 @@
     {"do_not_translate_iac_to_iac_iac", false}, {"disable_compression", false}, {"display_my_input", true},
     {"double_click_inserts", false}, {"double_click_sends", false},
     {"echo_colour", 0, 0, MAX_CUSTOM, OPT_CUSTOM_COLOUR | OPT_UPDATE_VIEWS},
-    {"echo_hyperlink_in_output_window", true}, {"edit_script_with_notepad", true}, {"enable_aliases", true},
-    {"enable_auto_say", false}, {"enable_beeps", true}, {"enable_command_stack", false},
-    {"enable_scripts", true}, {"enable_spam_prevention", false}, {"enable_speed_walk", false},
-    {"enable_timers", true}, {"enable_triggers", true}, {"enable_trigger_sounds", true},
-    {"escape_deletes_input", false},
+    {"echo_force_terminates_partial_prompts", false}, {"echo_hyperlink_in_output_window", true},
+    {"edit_script_with_notepad", true}, {"enable_aliases", true}, {"enable_auto_say", false},
+    {"enable_beeps", true}, {"enable_command_stack", false}, {"enable_scripts", true},
+    {"enable_spam_prevention", false}, {"enable_speed_walk", false}, {"enable_timers", true},
+    {"enable_triggers", true}, {"enable_trigger_sounds", true}, {"escape_deletes_input", false},
     {"fade_output_buffer_after_seconds", 0, 0, 3600, OPT_UPDATE_VIEWS}, // seconds to wait before fading
     {"fade_output_opacity_percent", 20, 0, 100, OPT_UPDATE_VIEWS},      // percent to fade to
     {"fade_output_seconds", 8, 1, 60, OPT_UPDATE_VIEWS},                // how many seconds to take to fade

@@ -14,6 +14,7 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QUuid>
 #include <QtTest/QTest>
@@ -23,6 +24,23 @@ namespace
 	QString fixturePath(const QString &relativePath)
 	{
 		return QDir(QStringLiteral(QMUD_TEST_SOURCE_DIR)).filePath(relativePath);
+	}
+
+	bool writeTextFile(const QString &filePath, const QString &content)
+	{
+		QFile file(filePath);
+		if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+			return false;
+		const QByteArray bytes = content.toUtf8();
+		return file.write(bytes) == bytes.size();
+	}
+
+	QString readTextFile(const QString &filePath)
+	{
+		QFile file(filePath);
+		if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+			return {};
+		return QString::fromUtf8(file.readAll());
 	}
 
 	template <typename Entry> void compareNamedEntries(const QList<Entry> &left, const QList<Entry> &right)
@@ -116,8 +134,15 @@ namespace
 				runtime.applyFromDocument(source);
 				runtime.setWorldAttribute(QStringLiteral("partial_save_character_threshold"),
 				                          QStringLiteral("37"));
+				runtime.setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
+				                          QStringLiteral("y"));
 				QString saveError;
 				QVERIFY2(runtime.saveWorldFile(roundTripPath, &saveError), qPrintable(saveError));
+				QFile serializedWorld(roundTripPath);
+				QVERIFY(serializedWorld.open(QIODevice::ReadOnly | QIODevice::Text));
+				const QString serializedWorldText = QString::fromUtf8(serializedWorld.readAll());
+				QVERIFY(!serializedWorldText.contains(QStringLiteral("sections script")));
+				QVERIFY(!serializedWorldText.contains(QStringLiteral("<script>")));
 
 				WorldDocument loaded;
 				QVERIFY2(loaded.loadFromFile(roundTripPath), qPrintable(loaded.errorString()));
@@ -132,6 +157,9 @@ namespace
 				QCOMPARE(loaded.worldAttributes().value(QStringLiteral("port")), QStringLiteral("4001"));
 				QCOMPARE(loaded.worldAttributes().value(QStringLiteral("partial_save_character_threshold")),
 				         QStringLiteral("37"));
+				QCOMPARE(
+				    loaded.worldAttributes().value(QStringLiteral("echo_force_terminates_partial_prompts")),
+				    QStringLiteral("y"));
 				QCOMPARE(loaded.worldMultilineAttributes(), source.worldMultilineAttributes());
 
 				const auto *trigger = entryByAttribute(loaded.triggers(), QStringLiteral("name"),
@@ -179,9 +207,6 @@ namespace
 				QCOMPARE(
 				    QDir::cleanPath(loaded.includes().constFirst().attributes.value(QStringLiteral("name"))),
 				    QStringLiteral("include_child.xml"));
-				QVERIFY(!loaded.scripts().isEmpty());
-				QCOMPARE(loaded.scripts().constFirst().content, QStringLiteral("print(\"sections script\")"));
-
 				WorldRuntime restoredRuntime;
 				restoredRuntime.setStartupDirectory(QCoreApplication::applicationDirPath());
 				restoredRuntime.setPluginInstallDeferred(true);
@@ -210,9 +235,107 @@ namespace
 				QCOMPARE(stabilized.includes().size(), loaded.includes().size());
 				for (qsizetype i = 0; i < stabilized.includes().size(); ++i)
 					QCOMPARE(stabilized.includes()[i].attributes, loaded.includes()[i].attributes);
-				QCOMPARE(stabilized.scripts().size(), loaded.scripts().size());
-				for (qsizetype i = 0; i < stabilized.scripts().size(); ++i)
-					QCOMPARE(stabilized.scripts()[i].content, loaded.scripts()[i].content);
+			}
+
+			static void includedScriptsAreNotSerializedIntoWorlds()
+			{
+				QMudTest::ScopedTempDir tempDir;
+				QVERIFY(tempDir.isValid());
+
+				const QString worldPath = QDir(tempDir.path()).filePath(QStringLiteral("world.xml"));
+				const QString worldConstantsPath =
+				    QDir(tempDir.path()).filePath(QStringLiteral("world_constants.lua"));
+				const QString pluginPath = QDir(tempDir.path()).filePath(QStringLiteral("plugin.xml"));
+				const QString pluginConstantsPath =
+				    QDir(tempDir.path()).filePath(QStringLiteral("plugin_constants.lua"));
+				QVERIFY(writeTextFile(worldPath, QStringLiteral(R"(<?xml version="1.0" encoding="UTF-8"?>
+<qmud>
+  <world id="aaaaaaaaaaaaaaaaaaaaaaaa" name="Main" omit_date_from_save_files="y"/>
+  <include name="world_constants.lua"/>
+  <include name="plugin.xml" plugin="y"/>
+  <script>previously_leaked_script = true</script>
+</qmud>)")));
+				QVERIFY(
+				    writeTextFile(worldConstantsPath, QStringLiteral(R"(<?xml version="1.0" encoding="UTF-8"?>
+<script><![CDATA[
+direct_world_include_marker = true
+]]></script>)")));
+				QVERIFY(writeTextFile(pluginPath, QStringLiteral(R"(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin name="PluginA" id="bbbbbbbbbbbbbbbbbbbbbbbb" language="lua"/>
+  <include name="plugin_constants.lua"/>
+  <script><![CDATA[
+assert(plugin_include_value == "included")
+plugin_main_loaded = true
+]]></script>
+</muclient>)")));
+				QVERIFY(writeTextFile(pluginConstantsPath,
+				                      QStringLiteral(R"(<?xml version="1.0" encoding="UTF-8"?>
+<script><![CDATA[
+plugin_include_value = "included"
+]]></script>)")));
+
+				WorldDocument document;
+				QVERIFY2(document.loadFromFile(worldPath), qPrintable(document.errorString()));
+				QVERIFY2(document.expandIncludes(worldPath, tempDir.path(), tempDir.path(), QString()),
+				         qPrintable(document.errorString()));
+				QCOMPARE(document.plugins().size(), 1);
+				const QString   pluginScript = document.plugins().front().script;
+				const qsizetype includedScriptIndex =
+				    pluginScript.indexOf(QStringLiteral("plugin_include_value = \"included\""));
+				const qsizetype mainScriptIndex =
+				    pluginScript.indexOf(QStringLiteral("assert(plugin_include_value == \"included\")"));
+				QVERIFY(includedScriptIndex >= 0);
+				QVERIFY(mainScriptIndex > includedScriptIndex);
+
+				WorldRuntime runtime;
+				runtime.setStartupDirectory(tempDir.path());
+				runtime.setWorldFilePath(worldPath);
+				runtime.setPluginsDirectory(tempDir.path());
+				runtime.setPluginInstallDeferred(true);
+				runtime.applyFromDocument(document);
+				const QString firstSavePath = QDir(tempDir.path()).filePath(QStringLiteral("first-save.xml"));
+				QString       saveError;
+				QVERIFY2(runtime.saveWorldFile(firstSavePath, &saveError), qPrintable(saveError));
+				const QString firstSaveText = readTextFile(firstSavePath);
+				QVERIFY(!firstSaveText.isEmpty());
+				QVERIFY(firstSaveText.contains(QStringLiteral("world_constants.lua")));
+				QVERIFY(firstSaveText.contains(QStringLiteral("plugin.xml")));
+				QVERIFY(!firstSaveText.contains(QStringLiteral("direct_world_include_marker")));
+				QVERIFY(!firstSaveText.contains(QStringLiteral("plugin_include_value")));
+				QVERIFY(!firstSaveText.contains(QStringLiteral("previously_leaked_script")));
+				QVERIFY(!firstSaveText.contains(QStringLiteral("<script")));
+
+				WorldDocument reloaded;
+				QVERIFY2(reloaded.loadFromFile(firstSavePath), qPrintable(reloaded.errorString()));
+				QVERIFY2(reloaded.expandIncludes(firstSavePath, tempDir.path(), tempDir.path(), QString()),
+				         qPrintable(reloaded.errorString()));
+				QCOMPARE(reloaded.plugins().size(), 1);
+				const QString   reloadedPluginScript = reloaded.plugins().front().script;
+				const qsizetype reloadedIncludedScriptIndex =
+				    reloadedPluginScript.indexOf(QStringLiteral("plugin_include_value = \"included\""));
+				const qsizetype reloadedMainScriptIndex = reloadedPluginScript.indexOf(
+				    QStringLiteral("assert(plugin_include_value == \"included\")"));
+				QVERIFY(reloadedIncludedScriptIndex >= 0);
+				QVERIFY(reloadedMainScriptIndex > reloadedIncludedScriptIndex);
+
+				WorldRuntime reloadedRuntime;
+				reloadedRuntime.setStartupDirectory(tempDir.path());
+				reloadedRuntime.setWorldFilePath(firstSavePath);
+				reloadedRuntime.setPluginsDirectory(tempDir.path());
+				reloadedRuntime.setPluginInstallDeferred(true);
+				reloadedRuntime.applyFromDocument(reloaded);
+				const QString secondSavePath =
+				    QDir(tempDir.path()).filePath(QStringLiteral("second-save.xml"));
+				QVERIFY2(reloadedRuntime.saveWorldFile(secondSavePath, &saveError), qPrintable(saveError));
+				const QString secondSaveText = readTextFile(secondSavePath);
+				QVERIFY(!secondSaveText.isEmpty());
+				QVERIFY(secondSaveText.contains(QStringLiteral("world_constants.lua")));
+				QVERIFY(secondSaveText.contains(QStringLiteral("plugin.xml")));
+				QVERIFY(!secondSaveText.contains(QStringLiteral("direct_world_include_marker")));
+				QVERIFY(!secondSaveText.contains(QStringLiteral("plugin_include_value")));
+				QVERIFY(!secondSaveText.contains(QStringLiteral("previously_leaked_script")));
+				QVERIFY(!secondSaveText.contains(QStringLiteral("<script")));
 			}
 	};
 } // namespace

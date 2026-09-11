@@ -9,6 +9,8 @@
 #include "helpers/WorldEditUtils.h"
 #include "AppController.h"
 #include "FontUtils.h"
+#include "SpeedwalkParser.h"
+#include "WorldCommandProcessorUtils.h"
 #include "WorldOptions.h"
 
 #include <QComboBox>
@@ -24,9 +26,9 @@
 
 namespace
 {
-	bool isAsciiSpace(const char ch)
+	bool isAsciiSpace(const QChar ch)
 	{
-		switch (ch)
+		switch (ch.unicode())
 		{
 		case ' ':
 		case '\t':
@@ -40,39 +42,30 @@ namespace
 		}
 	}
 
-	bool isAsciiDigit(const char ch)
+	bool isAsciiDigit(const QChar ch)
 	{
-		return ch >= '0' && ch <= '9';
+		return ch >= QLatin1Char('0') && ch <= QLatin1Char('9');
 	}
 
-	bool isAsciiAlpha(const char ch)
+	QChar asciiToUpper(const QChar ch)
 	{
-		return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
-	}
-
-	bool isAsciiAlnum(const char ch)
-	{
-		return isAsciiAlpha(ch) || isAsciiDigit(ch);
-	}
-
-	char asciiToUpper(const char ch)
-	{
-		if (ch >= 'a' && ch <= 'z')
-			return static_cast<char>(ch - ('a' - 'A'));
+		if (ch >= QLatin1Char('a') && ch <= QLatin1Char('z'))
+			return QChar(ch.unicode() - ('a' - 'A'));
 		return ch;
 	}
 
-	char asciiToLower(const char ch)
+	QChar asciiToLower(const QChar ch)
 	{
-		if (ch >= 'A' && ch <= 'Z')
-			return static_cast<char>(ch + ('a' - 'A'));
+		if (ch >= QLatin1Char('A') && ch <= QLatin1Char('Z'))
+			return QChar(ch.unicode() + ('a' - 'A'));
 		return ch;
 	}
 
-	bool isActionCode(const char ch)
+	bool isActionCode(const QChar ch)
 	{
-		const char upper = asciiToUpper(ch);
-		return upper == 'C' || upper == 'O' || upper == 'L' || upper == 'K';
+		const QChar upper = asciiToUpper(ch);
+		return upper == QLatin1Char('C') || upper == QLatin1Char('O') || upper == QLatin1Char('L') ||
+		       upper == QLatin1Char('K');
 	}
 
 	bool fixedFontEnabled()
@@ -104,11 +97,6 @@ namespace
 		if (size > 0)
 			font.setPointSize(size);
 		return font;
-	}
-
-	QString makeSpeedwalkErrorString(const QString &message)
-	{
-		return QStringLiteral("*") + message;
 	}
 
 	struct SendToItem
@@ -179,225 +167,34 @@ QString WorldEditUtils::sendToLabel(const int sendTo)
 QString WorldEditUtils::convertToRegularExpression(const QString &matchString, const bool wholeLine,
                                                    const bool makeAsterisksWildcards)
 {
-	QString          strRegexp;
-	int              iSize      = 0;
-	const QByteArray inputBytes = matchString.toLocal8Bit();
-	const char      *p          = inputBytes.constData();
-
-	// count places where the size will get larger
-	for (; *p; ++p)
-	{
-		const auto uch = static_cast<unsigned char>(*p);
-		if (uch < ' ')
-			iSize += 3; // non-printable 01 to 1F become \xhh
-		else if (*p == '*' && makeAsterisksWildcards)
-			iSize += 4; // * becomes .*?  (non-greedy wildcard)
-		else if (!(isAsciiAlnum(*p) || *p == ' ' || uch >= 0x80))
-			iSize++; // others are escaped, eg. ( becomes \(
-	}
-
-	// work out new buffer size
-	strRegexp.reserve(matchString.length() + iSize + // escaped sequences
-	                  2 +                            // ^ at start, and $ at end
-	                  10);                           // 1 for null, plus 9 just in case
-
-	// now copy across non-regexp, turning it into a regexp
-	if (wholeLine)
-		strRegexp += QLatin1Char('^'); // start of buffer marker
-
-	for (p = inputBytes.constData(); *p; p++)
-	{
-		if (*p == '\n') // newlines become \n
-		{
-			strRegexp += QLatin1Char('\\');
-			strRegexp += QLatin1Char('n');
-		}
-		else if (const auto uch = static_cast<unsigned char>(*p); uch < ' ')
-		{
-			strRegexp += QLatin1Char('\\');
-			strRegexp += QLatin1Char('x');
-			const auto     ch    = static_cast<unsigned char>(*p);
-			constexpr char hex[] = "0123456789abcdef";
-			strRegexp += QLatin1Char(hex[(ch >> 4) & 0x0F]);
-			strRegexp += QLatin1Char(hex[ch & 0x0F]);
-		}
-		else if (isAsciiAlnum(*p) || *p == ' ' || static_cast<unsigned char>(*p) >= 0x80)
-			strRegexp += QLatin1Char(*p);             // copy alphanumeric, spaces, across
-		else if (*p == '*' && makeAsterisksWildcards) // wildcard
-		{
-			strRegexp += QLatin1Char('(');
-			strRegexp += QLatin1Char('.');
-			strRegexp += QLatin1Char('*');
-			strRegexp += QLatin1Char('?');
-			strRegexp += QLatin1Char(')');
-		}
-		else
-		{ // non-alphanumeric are escaped out
-			strRegexp += QLatin1Char('\\');
-			strRegexp += QLatin1Char(*p);
-		}
-	} // end of scanning input buffer
-
-	if (wholeLine)
-		strRegexp += QLatin1Char('$'); // end of buffer marker
-
-	return strRegexp;
+	return QMudCommandPattern::convertToRegularExpression(matchString, wholeLine, makeAsterisksWildcards);
 }
 
 QString WorldEditUtils::evaluateSpeedwalk(const QString &speedWalkString, const QString &filler)
 {
-	QString          strResult;
-	QString          str;
-	int              count      = 0;
-	const auto      *app        = AppController::instance();
-	const QByteArray inputBytes = speedWalkString.toLocal8Bit();
-	const char      *p          = inputBytes.constData();
-
-	while (*p) // until string runs out
-	{
-		// bypass spaces
-		while (isAsciiSpace(*p))
-			p++;
-
-		// bypass comments
-		if (*p == '{')
-		{
-			while (*p && *p != '}')
-				p++;
-
-			if (*p != '}')
-				return makeSpeedwalkErrorString(
-				    QStringLiteral("Comment code of '{' not terminated by a '}'"));
-			p++;      // skip } symbol
-			continue; // back to start of loop
-		} // end of comment
-
-		// get counter, if any
-		count = 0;
-		while (isAsciiDigit(*p))
-		{
-			count = count * 10 + (*p++ - '0');
-			if (count > 99)
-				return makeSpeedwalkErrorString(QStringLiteral("Speed walk counter exceeds 99"));
-		} // end of having digit(s)
-
-		// no counter, assume do once
-		if (count == 0)
-			count = 1;
-
-		// bypass spaces after counter
-		while (isAsciiSpace(*p))
-			p++;
-
-		if (count > 1 && *p == 0)
-			return makeSpeedwalkErrorString(QStringLiteral("Speed walk counter not followed by an action"));
-
-		if (count > 1 && *p == '{')
-			return makeSpeedwalkErrorString(
-			    QStringLiteral("Speed walk counter may not be followed by a comment"));
-
-		// might have had trailing space
-		if (*p == 0)
-			break;
-
-		if (isActionCode(*p))
-		{
-			if (count > 1)
-				return makeSpeedwalkErrorString(QStringLiteral("Action code of C, O, L or K must not follow "
-				                                               "a speed walk count (1-99)"));
-
-			switch (asciiToUpper(*p++))
-			{
-			case 'C':
-				strResult += QStringLiteral("close ");
-				break;
-			case 'O':
-				strResult += QStringLiteral("open ");
-				break;
-			case 'L':
-				strResult += QStringLiteral("lock ");
-				break;
-			case 'K':
-				strResult += QStringLiteral("unlock ");
-				break;
-			default:
-				break;
-			} // end of switch
-
-			// bypass spaces after open/close/lock/unlock
-			while (isAsciiSpace(*p))
-				p++;
-
-			if (*p == 0 || asciiToUpper(*p) == 'F' || *p == '{')
-				return makeSpeedwalkErrorString(QStringLiteral("Action code of C, O, L or K must be followed "
-				                                               "by a direction"));
-
-		} // end of C, O, L, K
-
-		// work out which direction we are going
-		switch (asciiToUpper(*p))
-		{
-		case 'N':
-		case 'S':
-		case 'E':
-		case 'W':
-		case 'U':
-		case 'D':
-		{
-			// we know it will be in the list - look up the direction to send
-			str = app ? app->mapDirectionToSend(QString(QChar(asciiToLower(*p)))) : QString();
-		}
-		break;
-
-		case 'F':
-			str = filler;
-			break;
-		case '(': // special string (eg. (ne/sw) )
-		{
-			str.clear();
-			++p;
-			while (*p && *p != ')')
-				str += *p++; // add to string
-
-			if (*p != ')')
-				return makeSpeedwalkErrorString(QStringLiteral("Action code of '(' not terminated by a ')'"));
-			if (const qsizetype iSlash = str.indexOf(QStringLiteral("/")); iSlash != -1)
-				str = str.left(iSlash);
-		}
-		break; // end of (blahblah/blah blah)
-		default:
-			return QStringLiteral("*Invalid direction '%1' in speed walk, must be "
-			                      "N, S, E, W, U, D, F, or (something)")
-			    .arg(QChar(*p));
-		} // end of switch on character
-
-		p++; // bypass whatever that character was (or the trailing bracket)
-
-		// output required number of times
-		for (int j = 0; j < count; j++)
-			strResult += str + QStringLiteral("\r\n");
-
-	} // end of processing each character
-
-	return strResult;
+	const auto *app      = AppController::instance();
+	const auto  resolver = [app](const QString &direction) -> QString
+	{ return app ? app->mapDirectionToSend(direction) : QString(); };
+	return QMudSpeedwalk::evaluateSpeedwalk(speedWalkString, filler, resolver);
 }
 
 QString WorldEditUtils::reverseSpeedwalk(const QString &speedWalkString)
 {
-	QString          strResult;
-	QString          str;
-	QString          strAction;
-	int              count      = 0;
-	const auto      *app        = AppController::instance();
-	const QByteArray inputBytes = speedWalkString.toLocal8Bit();
-	const char      *p          = inputBytes.constData();
+	QString         strResult;
+	QString         str;
+	QString         strAction;
+	int             count = 0;
+	const auto     *app   = AppController::instance();
+	qsizetype       offset{0};
+	const qsizetype size = speedWalkString.size();
 
-	while (*p) // until string runs out
+	while (offset < size)
 	{
 		// preserve spaces
-		while (isAsciiSpace(*p))
+		while (offset < size && isAsciiSpace(speedWalkString.at(offset)))
 		{
-			switch (*p)
+			const QChar ch = speedWalkString.at(offset);
+			switch (ch.unicode())
 			{
 			case '\r':
 				break; // discard carriage returns
@@ -405,39 +202,42 @@ QString WorldEditUtils::reverseSpeedwalk(const QString &speedWalkString)
 				strResult = QStringLiteral("\r\n") + strResult; // newline
 				break;
 			default:
-				strResult = QChar(*p) + strResult;
+				strResult = ch + strResult;
 				break;
 			} // end of switch
 
-			p++;
+			++offset;
 		} // end of preserving spaces
 
+		if (offset >= size)
+			break;
+
 		// preserve comments
-		if (*p == '{')
+		if (speedWalkString.at(offset) == QLatin1Char('{'))
 		{
 			str.clear();
-			while (*p && *p != '}')
-				str += *p++; // add to string
+			while (offset < size && speedWalkString.at(offset) != QLatin1Char('}'))
+				str += speedWalkString.at(offset++);
 
-			if (*p != '}')
-				return makeSpeedwalkErrorString(
+			if (offset >= size)
+				return QMudSpeedwalk::makeSpeedWalkErrorString(
 				    QStringLiteral("Comment code of '{' not terminated by a '}'"));
 
-			p++; // skip } symbol
-
+			++offset;
 			str += QLatin1Char('}');
-
 			strResult = str + strResult;
-			continue; // back to start of loop
+			continue;
 		} // end of comment
 
 		// get counter, if any
 		count = 0;
-		while (isAsciiDigit(*p))
+		while (offset < size && isAsciiDigit(speedWalkString.at(offset)))
 		{
-			count = count * 10 + (*p++ - '0');
+			count = count * 10 + speedWalkString.at(offset).unicode() - '0';
+			++offset;
 			if (count > 99)
-				return makeSpeedwalkErrorString(QStringLiteral("Speed walk counter exceeds 99"));
+				return QMudSpeedwalk::makeSpeedWalkErrorString(
+				    QStringLiteral("Speed walk counter exceeds 99"));
 		} // end of having digit(s)
 
 		// no counter, assume do once
@@ -445,42 +245,44 @@ QString WorldEditUtils::reverseSpeedwalk(const QString &speedWalkString)
 			count = 1;
 
 		// bypass spaces after counter
-		while (isAsciiSpace(*p))
-			p++;
+		while (offset < size && isAsciiSpace(speedWalkString.at(offset)))
+			++offset;
 
-		if (count > 1 && *p == 0)
-			return makeSpeedwalkErrorString(QStringLiteral("Speed walk counter not followed by an action"));
+		if (count > 1 && offset >= size)
+			return QMudSpeedwalk::makeSpeedWalkErrorString(
+			    QStringLiteral("Speed walk counter not followed by an action"));
 
-		if (count > 1 && *p == '{')
-			return makeSpeedwalkErrorString(
+		if (count > 1 && speedWalkString.at(offset) == QLatin1Char('{'))
+			return QMudSpeedwalk::makeSpeedWalkErrorString(
 			    QStringLiteral("Speed walk counter may not be followed by a comment"));
 
 		// might have had trailing space
-		if (*p == 0)
+		if (offset >= size)
 			break;
 
-		if (isActionCode(*p))
+		if (isActionCode(speedWalkString.at(offset)))
 		{
 			if (count > 1)
-				return makeSpeedwalkErrorString(QStringLiteral("Action code of C, O, L or K must not follow "
-				                                               "a speed walk count (1-99)"));
+				return QMudSpeedwalk::makeSpeedWalkErrorString(
+				    QStringLiteral("Action code of C, O, L or K must not follow a speed walk count (1-99)"));
 
-			strAction = QChar(*p++); // remember action
+			strAction = speedWalkString.at(offset++);
 
 			// bypass spaces after open/close/lock/unlock
-			while (isAsciiSpace(*p))
-				p++;
+			while (offset < size && isAsciiSpace(speedWalkString.at(offset)))
+				++offset;
 
-			if (*p == 0 || asciiToUpper(*p) == 'F' || *p == '{')
-				return makeSpeedwalkErrorString(QStringLiteral("Action code of C, O, L or K must be followed "
-				                                               "by a direction"));
+			if (offset >= size || asciiToUpper(speedWalkString.at(offset)) == QLatin1Char('F') ||
+			    speedWalkString.at(offset) == QLatin1Char('{'))
+				return QMudSpeedwalk::makeSpeedWalkErrorString(
+				    QStringLiteral("Action code of C, O, L or K must be followed by a direction"));
 
 		} // end of C, O, L, K
 		else
 			strAction.clear(); // no action
 
 		// work out which direction we are going
-		switch (asciiToUpper(*p))
+		switch (asciiToUpper(speedWalkString.at(offset)).unicode())
 		{
 		case 'N':
 		case 'S':
@@ -490,19 +292,21 @@ QString WorldEditUtils::reverseSpeedwalk(const QString &speedWalkString)
 		case 'D':
 		case 'F':
 		{
-			str = app ? app->mapDirectionReverse(QString(QChar(asciiToLower(*p)))) : QString();
+			str =
+			    app ? app->mapDirectionReverse(QString(asciiToLower(speedWalkString.at(offset)))) : QString();
 		}
 		break;
 
 		case '(': // special string (eg. (ne/sw) )
 		{
 			str.clear();
-			++p;
-			while (*p && *p != ')')
-				str += QChar(asciiToLower(*p++)); // add to string
+			++offset;
+			while (offset < size && speedWalkString.at(offset) != QLatin1Char(')'))
+				str += asciiToLower(speedWalkString.at(offset++));
 
-			if (*p != ')')
-				return makeSpeedwalkErrorString(QStringLiteral("Action code of '(' not terminated by a ')'"));
+			if (offset >= size)
+				return QMudSpeedwalk::makeSpeedWalkErrorString(
+				    QStringLiteral("Action code of '(' not terminated by a ')'"));
 			// if no slash try to convert whole thing (e.g. ne becomes sw)
 			if (const qsizetype iSlash = str.indexOf(QStringLiteral("/")); iSlash == -1)
 			{
@@ -522,18 +326,17 @@ QString WorldEditUtils::reverseSpeedwalk(const QString &speedWalkString)
 		default:
 			return QStringLiteral("*Invalid direction '%1' in speed walk, must be "
 			                      "N, S, E, W, U, D, F, or (something)")
-			    .arg(QChar(*p));
+			    .arg(speedWalkString.at(offset));
 		} // end of switch on character
 
-		p++; // bypass whatever that character was (or the trailing bracket)
+		++offset; // bypass direction or trailing bracket
 
 		// output it
 		if (count > 1)
 			strResult = QStringLiteral("%1%2%3").arg(count).arg(strAction).arg(str) + strResult;
 		else
 			strResult = strAction + str + strResult;
-
-	} // end of processing each character
+	}
 
 	return strResult;
 }

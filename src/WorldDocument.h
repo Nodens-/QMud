@@ -231,47 +231,35 @@ class WorldDocument : public QObject
 		 */
 		[[nodiscard]] const QList<Include> &includes() const;
 		/**
-		 * @brief Parsed script block from world XML.
-		 */
-		struct Script
-		{
-				QString content;
-		};
-		/**
-		 * @brief Returns script sections from document.
-		 * @return Immutable script-section list.
-		 */
-		[[nodiscard]] const QList<Script> &scripts() const;
-		/**
 		 * @brief Returns resolved include file list.
 		 * @return Include file path list.
 		 */
-		[[nodiscard]] const QStringList   &includeFileList() const;
+		[[nodiscard]] const QStringList    &includeFileList() const;
 		/**
 		 * @brief Sets XML section mask used by subsequent loads.
 		 * @param mask XML section load mask.
 		 */
-		void                               setLoadMask(unsigned long mask);
+		void                                setLoadMask(unsigned long mask);
 		/**
 		 * @brief Returns active XML load mask.
 		 * @return Active XML load mask.
 		 */
-		[[nodiscard]] unsigned long        loadMask() const;
+		[[nodiscard]] unsigned long         loadMask() const;
 		/**
 		 * @brief Sets include merge behavior flags.
 		 * @param flags Include merge flags.
 		 */
-		void                               setIncludeMergeFlags(unsigned int flags);
+		void                                setIncludeMergeFlags(unsigned int flags);
 		/**
 		 * @brief Returns include merge behavior flags.
 		 * @return Include merge flags.
 		 */
-		[[nodiscard]] unsigned int         includeMergeFlags() const;
+		[[nodiscard]] unsigned int          includeMergeFlags() const;
 		/**
 		 * @brief Returns non-fatal load/merge warnings.
 		 * @return Warning message list.
 		 */
-		[[nodiscard]] const QStringList   &warnings() const;
+		[[nodiscard]] const QStringList    &warnings() const;
 
 		enum LoadMask : unsigned long
 		{
@@ -403,7 +391,7 @@ class WorldDocument : public QObject
 		QList<Plugin>          m_plugins;
 		QMap<QString, QString> m_loadedPluginIds;
 		QList<Include>         m_includes;
-		QList<Script>          m_scripts;
+		QStringList            m_pluginScriptFragments;
 		QStringList            m_currentIncludeStack;
 		QStringList            m_includeFileList;
 };

@@ -9,9 +9,11 @@
 
 #include "AppController.h"
 #include "Environment.h"
+#include "FileExtensions.h"
 #include "LuaApiExport.h"
 #include "MainFrame.h"
 #include "ReloadUtils.h"
+#include "SingleInstanceIpc.h"
 #include "WorldView.h"
 #include <QApplication>
 #include <QCoreApplication>
@@ -21,6 +23,7 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <cstring>
+#include <optional>
 #ifdef Q_OS_WIN
 #include <wchar.h>
 #include <windows.h>
@@ -28,6 +31,18 @@
 
 namespace
 {
+	void activateMainWindow(MainWindow *mainWindow)
+	{
+		if (!mainWindow)
+			return;
+		if (mainWindow->isMinimized())
+			mainWindow->showNormal();
+		if (!mainWindow->isVisible())
+			mainWindow->show();
+		mainWindow->raise();
+		mainWindow->activateWindow();
+	}
+
 #ifdef Q_OS_WIN
 #ifdef LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
 	constexpr DWORD kLoadLibrarySearchDefaultDirs = LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
@@ -204,47 +219,50 @@ int main(int argc, char *argv[])
 	QLocalServer instanceServer;
 	if (!allowMultipleInstances)
 	{
-		const QString instanceServerName = singleInstanceServerName();
+		const QString                                 instanceServerName = singleInstanceServerName();
+		std::optional<QMudSingleInstanceIpc::Request> requestToForward;
 		if (!reloadLaunchArguments)
 		{
-			QLocalSocket existingInstanceProbe;
-			existingInstanceProbe.connectToServer(instanceServerName, QIODevice::WriteOnly);
-			if (existingInstanceProbe.waitForConnected(150))
-			{
-				existingInstanceProbe.write("raise");
-				existingInstanceProbe.flush();
-				existingInstanceProbe.waitForBytesWritten(100);
-				return 0;
-			}
+			requestToForward.emplace();
+			requestToForward->fileAssociationPath = QMudFileExtensions::fileAssociationPathArgument(args);
+			if (!requestToForward->fileAssociationPath.isEmpty())
+				requestToForward->action = QMudSingleInstanceIpc::Action::OpenFileAssociation;
 		}
-		QLocalServer::removeServer(instanceServerName);
-		if (!instanceServer.listen(instanceServerName))
+
+		QString                                          errorMessage;
+		const QMudSingleInstanceIpc::ServerStartupResult startupResult =
+		    QMudSingleInstanceIpc::startServerOrForward(instanceServer, instanceServerName, requestToForward,
+		                                                150, 3000, 5000, &errorMessage);
+		if (startupResult == QMudSingleInstanceIpc::ServerStartupResult::Forwarded)
 			return 0;
+		if (startupResult == QMudSingleInstanceIpc::ServerStartupResult::Failed)
+		{
+			qCritical() << "Unable to establish single-instance ownership:" << errorMessage;
+			return 1;
+		}
 	}
 
-	MainWindow *mainWindow = nullptr;
+	AppController controller;
+	MainWindow   *mainWindow = nullptr;
 	QObject::connect(&instanceServer, &QLocalServer::newConnection, &app,
-	                 [&instanceServer, &mainWindow]()
+	                 [&instanceServer, &controller, &mainWindow]()
 	                 {
 		                 while (QLocalSocket *client = instanceServer.nextPendingConnection())
 		                 {
-			                 client->readAll();
-			                 client->disconnectFromServer();
-			                 client->deleteLater();
+			                 QMudSingleInstanceIpc::receiveRequest(
+			                     client,
+			                     [&controller, &mainWindow](const QMudSingleInstanceIpc::Request &request)
+			                     {
+				                     if (request.action == QMudSingleInstanceIpc::Action::OpenFileAssociation)
+				                     {
+					                     controller.handleFileAssociationRequest(request.fileAssociationPath);
+				                     }
+				                     activateMainWindow(mainWindow);
+			                     });
 		                 }
-
-		                 if (!mainWindow)
-			                 return;
-		                 if (mainWindow->isMinimized())
-			                 mainWindow->showNormal();
-		                 if (!mainWindow->isVisible())
-			                 mainWindow->show();
-		                 mainWindow->raise();
-		                 mainWindow->activateWindow();
 	                 });
 
-	AppController controller;
-	MainWindow    w;
+	MainWindow w;
 	mainWindow = &w;
 	w.setWindowIcon(QIcon(QStringLiteral(":/qmud/res/QMud.png")));
 	controller.setMainWindow(&w);

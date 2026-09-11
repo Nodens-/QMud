@@ -58,10 +58,11 @@ namespace QMudCommandQueue
 	 */
 	struct QueueEntry
 	{
-			bool    withEcho{false};
-			bool    logIt{false};
-			bool    queuedType{false};
-			QString payload;
+			bool           withEcho{false};
+			bool           logIt{false};
+			bool           queuedType{false};
+			unsigned short actionSource{0};
+			QString        payload;
 	};
 
 	/**
@@ -79,9 +80,11 @@ namespace QMudCommandQueue
 	 * @param queueRequested Explicit queue/send-to-queue flag.
 	 * @param echo Echo command locally when dispatched.
 	 * @param logIt Log command when dispatched.
+	 * @param actionSource Action source in effect when the command was queued.
 	 * @return Encoded queue entry string.
 	 */
-	QString     encodeQueueEntry(const QString &payload, bool queueRequested, bool echo, bool logIt);
+	QString     encodeQueueEntry(const QString &payload, bool queueRequested, bool echo, bool logIt,
+	                             unsigned short actionSource);
 
 	/**
 	 * @brief Decodes one queue storage entry into structured fields.

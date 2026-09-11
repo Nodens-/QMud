@@ -98,6 +98,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void directCallbackShapesRoundTrip();
 		void wildcardAndStyleCallbackReceivesContextTables();
 		void mxpCallbacksMarshalArguments();
+		void worldMxpErrorCallbackRequiresScripting();
 		void modalYieldResumePreservesNumberAndStringCallback();
 		void modalYieldResumePreservesStringInOutCallback();
 		void modalYieldResumePreservesNoArgsCallback();
@@ -135,6 +136,10 @@ class tst_LuaCallbackEngine final : public QObject
 		void workerGetInfoCoversSupportedSelectors();
 		void workerArraySerializationCoversEscapesAndFailures();
 		void workerRuleApisCoverOptionsInfoAndGroups();
+		void workerEnableGroupCachesOnlyMatchedCollections();
+		void workerEnableGroupMutationSnapshotIncludesOnlyMatchedCollections();
+		void directGroupApisCommitOnlyMatchedCollections();
+		void deferredRuleDeletionsCommitOnlyRuntimeRemovals();
 		void workerXmlApisCoverAllExportKindsAndImport();
 		void workerLineAndStyleInfoCoverMetadataSurface();
 		void setOptionUpdatesOnlyTabCompletionSymbolBehaviors();
@@ -801,6 +806,28 @@ assert(mxp_seen.end_tag == "send:Look")
 assert(mxp_seen.variable == "room:Dock")
 )lua"),
 	                             QStringLiteral("verify mxp callbacks")));
+}
+
+void tst_LuaCallbackEngine::worldMxpErrorCallbackRequiresScripting()
+{
+	WorldRuntime runtime;
+	runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("n"));
+	runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+	runtime.setWorldAttribute(QStringLiteral("on_mxp_error"), QStringLiteral("record_mxp_error"));
+	runtime.setLuaScriptText(QStringLiteral(R"lua(
+function record_mxp_error(level, number, line, message)
+  SetVariable("mxp_error_callback", message)
+  return true
+end
+)lua"));
+
+	runtime.mxpError(DBG_NONE, 42, QStringLiteral("disabled"));
+	QVERIFY(runtime.variableSnapshot().value(QStringLiteral("mxp_error_callback")).isEmpty());
+
+	runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+	runtime.mxpError(DBG_NONE, 42, QStringLiteral("enabled"));
+	QCOMPARE(runtime.variableSnapshot().value(QStringLiteral("mxp_error_callback")),
+	         QStringLiteral("enabled"));
 }
 
 void tst_LuaCallbackEngine::modalYieldResumePreservesNumberAndStringCallback()
@@ -2965,7 +2992,7 @@ function validate_getinfo_selectors(value)
   if GetInfo(52) ~= "coverage expression" or GetInfo(86) ~= "coverage selection" then
     return "snapshot strings"
   end
-  if GetInfo(101) ~= true or GetInfo(285) ~= true then
+  if GetInfo(101) ~= true or GetInfo(119) ~= true or GetInfo(285) ~= true then
     return "snapshot booleans"
   end
   if GetInfo(201) ~= 321 or GetInfo(216) ~= 654 or
@@ -3003,6 +3030,10 @@ function validate_getinfo_selectors(value)
     return "unknown selectors"
   end
   return "ok"
+end
+
+function getinfo_119_status(value)
+  return tostring(GetInfo(119))
 end
 )lua"),
 	                            &runtime))
@@ -3044,6 +3075,12 @@ end
 	QVERIFY(dispatchWorkerAndWait(executor, request, result));
 	QCOMPARE(result.stringResult, QStringLiteral("ok"));
 	QVERIFY(!result.suspended);
+
+	snapshot->worldAttributesSnapshot.insert(QStringLiteral("enable_scripts"), QStringLiteral("n"));
+	request.functionName = QStringLiteral("getinfo_119_status");
+	result               = {};
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	QCOMPARE(result.stringResult, QStringLiteral("false"));
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 
@@ -3607,6 +3644,430 @@ end
 	QCOMPARE(storedTimer.invocationCount, pluginTimer.invocationCount);
 	QCOMPARE(storedTimer.lastFired, pluginTimer.lastFired);
 	QCOMPARE(storedTimer.nextFireTime, pluginTimer.nextFireTime);
+	QVERIFY(teardownWorkerEngine(executor, engine));
+}
+
+void tst_LuaCallbackEngine::workerEnableGroupCachesOnlyMatchedCollections()
+{
+	WorldRuntime          runtime;
+
+	WorldRuntime::Trigger trigger;
+	trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("trigger_only"));
+	trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("trigger only"));
+	trigger.attributes.insert(QStringLiteral("group"), QStringLiteral("trigger_group"));
+	trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	runtime.setTriggers({trigger});
+
+	WorldRuntime::Alias alias;
+	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("alias_only"));
+	alias.attributes.insert(QStringLiteral("match"), QStringLiteral("alias only"));
+	alias.attributes.insert(QStringLiteral("group"), QStringLiteral("alias_group"));
+	alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	runtime.setAliases({alias});
+
+	WorldRuntime::Timer timer;
+	timer.attributes.insert(QStringLiteral("name"), QStringLiteral("timer_only"));
+	timer.attributes.insert(QStringLiteral("group"), QStringLiteral("timer_group"));
+	timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	runtime.setTimers({timer});
+	runtime.setWorldFileModified(false);
+
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function enable_single_collection_groups(_)
+  assert(EnableGroup("trigger_group", false) == 1)
+  assert(GetTriggerOption("trigger_only", "enabled") == 0)
+  assert(GetAliasOption("alias_only", "enabled") == 1)
+  assert(GetTimerOption("timer_only", "enabled") == 1)
+
+  assert(EnableGroup("alias_group", false) == 1)
+  assert(GetTriggerOption("trigger_only", "enabled") == 0)
+  assert(GetAliasOption("alias_only", "enabled") == 0)
+  assert(GetTimerOption("timer_only", "enabled") == 1)
+
+  assert(EnableGroup("timer_group", false) == 1)
+  assert(GetTriggerOption("trigger_only", "enabled") == 0)
+  assert(GetAliasOption("alias_only", "enabled") == 0)
+  assert(GetTimerOption("timer_only", "enabled") == 0)
+  return "ok"
+end
+)lua"),
+	                            &runtime, QString()))
+	{
+		QFAIL("Worker engine initialization failed");
+	}
+
+	const quint64           triggerGenerationBefore = runtime.triggerRuleGeneration();
+	const quint64           aliasGenerationBefore   = runtime.aliasRuleGeneration();
+	const quint64           timerSerialBefore       = runtime.timerStructureMutationSerial();
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("enable_single_collection_groups");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	QCOMPARE(result.stringResult, QStringLiteral("ok"));
+	QCOMPARE(runtime.triggers().constFirst().attributes.value(QStringLiteral("enabled")),
+	         QStringLiteral("1"));
+	QCOMPARE(runtime.aliases().constFirst().attributes.value(QStringLiteral("enabled")), QStringLiteral("1"));
+	QCOMPARE(runtime.timers().constFirst().attributes.value(QStringLiteral("enabled")), QStringLiteral("1"));
+	QVERIFY(!runtime.worldFileModified());
+
+	executeDeferredMutations(result);
+	QCOMPARE(runtime.triggers().constFirst().attributes.value(QStringLiteral("enabled")),
+	         QStringLiteral("0"));
+	QCOMPARE(runtime.aliases().constFirst().attributes.value(QStringLiteral("enabled")), QStringLiteral("0"));
+	QCOMPARE(runtime.timers().constFirst().attributes.value(QStringLiteral("enabled")), QStringLiteral("0"));
+	QCOMPARE(runtime.triggerRuleGeneration(), triggerGenerationBefore + 1);
+	QCOMPARE(runtime.aliasRuleGeneration(), aliasGenerationBefore + 1);
+	QCOMPARE(runtime.timerStructureMutationSerial(), timerSerialBefore);
+	QVERIFY(runtime.worldFileModified());
+	QVERIFY(teardownWorkerEngine(executor, engine));
+}
+
+void tst_LuaCallbackEngine::workerEnableGroupMutationSnapshotIncludesOnlyMatchedCollections()
+{
+	WorldRuntime          runtime;
+
+	WorldRuntime::Trigger trigger;
+	trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("trigger_only"));
+	trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("trigger only"));
+	trigger.attributes.insert(QStringLiteral("group"), QStringLiteral("trigger_group"));
+	trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	runtime.setTriggers({trigger});
+
+	WorldRuntime::Alias alias;
+	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("alias_only"));
+	alias.attributes.insert(QStringLiteral("match"), QStringLiteral("alias only"));
+	alias.attributes.insert(QStringLiteral("group"), QStringLiteral("alias_group"));
+	alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	runtime.setAliases({alias});
+
+	WorldRuntime::Timer timer;
+	timer.attributes.insert(QStringLiteral("name"), QStringLiteral("timer_only"));
+	timer.attributes.insert(QStringLiteral("group"), QStringLiteral("timer_group"));
+	timer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	runtime.setTimers({timer});
+	runtime.setWorldFileModified(false);
+
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function enable_one_group(group)
+  local count = EnableGroup(group, false)
+  return string.format("%.0f|%.0f|%.0f|%.0f", count,
+    GetTriggerOption("trigger_only", "enabled"),
+    GetAliasOption("alias_only", "enabled"),
+    GetTimerOption("timer_only", "enabled"))
+end
+)lua"),
+	                            &runtime, QString()))
+	{
+		QFAIL("Worker engine initialization failed");
+	}
+
+	enum class RuleCollection
+	{
+		Trigger,
+		Alias,
+		Timer,
+	};
+	struct EnableGroupCase
+	{
+			QString        groupName;
+			RuleCollection collection;
+			QString        callbackResult;
+	};
+	const std::array cases{
+	    EnableGroupCase{QStringLiteral("trigger_group"), RuleCollection::Trigger, QStringLiteral("1|0|1|1")},
+	    EnableGroupCase{QStringLiteral("alias_group"),   RuleCollection::Alias,   QStringLiteral("1|1|0|1")},
+	    EnableGroupCase{QStringLiteral("timer_group"),   RuleCollection::Timer,   QStringLiteral("1|1|1|0")},
+	};
+
+	for (const EnableGroupCase &testCase : cases)
+	{
+		runtime.setTriggers({trigger});
+		runtime.setAliases({alias});
+		runtime.setTimers({timer});
+		runtime.setWorldFileModified(false);
+		const quint64 triggerGenerationBefore = runtime.triggerRuleGeneration();
+		const quint64 aliasGenerationBefore   = runtime.aliasRuleGeneration();
+		const quint64 timerSerialBefore       = runtime.timerStructureMutationSerial();
+
+		auto          snapshot = captureMutableDispatchSnapshotForTest(runtime);
+		snapshot->triggerListsByPluginId.detach();
+		snapshot->aliasListsByPluginId.detach();
+		snapshot->timerListsByPluginId.detach();
+		QVERIFY(snapshot->triggerListsByPluginId.isDetached());
+		QVERIFY(snapshot->aliasListsByPluginId.isDetached());
+		QVERIFY(snapshot->timerListsByPluginId.isDetached());
+
+		LuaBatchDispatchRequest request;
+		request.engines             = {engine};
+		request.kind                = LuaBatchDispatchKind::StringInOut;
+		request.functionName        = QStringLiteral("enable_one_group");
+		request.stringArg           = testCase.groupName;
+		request.callbackSnapshotArg = snapshot;
+		LuaBatchDispatchResult result;
+		QVERIFY(dispatchWorkerAndWait(executor, request, result));
+		QCOMPARE(result.stringResult, testCase.callbackResult);
+		QVERIFY(result.callbackSnapshotAfterMutations);
+
+		const bool triggerMutated = testCase.collection == RuleCollection::Trigger;
+		const bool aliasMutated   = testCase.collection == RuleCollection::Alias;
+		const bool timerMutated   = testCase.collection == RuleCollection::Timer;
+		QCOMPARE(snapshot->triggerListsByPluginId.isDetached(), triggerMutated);
+		QCOMPARE(snapshot->aliasListsByPluginId.isDetached(), aliasMutated);
+		QCOMPARE(snapshot->timerListsByPluginId.isDetached(), timerMutated);
+
+		QCOMPARE(runtime.triggers().constFirst().attributes.value(QStringLiteral("enabled")),
+		         QStringLiteral("1"));
+		QCOMPARE(runtime.aliases().constFirst().attributes.value(QStringLiteral("enabled")),
+		         QStringLiteral("1"));
+		QCOMPARE(runtime.timers().constFirst().attributes.value(QStringLiteral("enabled")),
+		         QStringLiteral("1"));
+		QVERIFY(!runtime.worldFileModified());
+
+		executeDeferredMutations(result);
+		QCOMPARE(runtime.triggers().constFirst().attributes.value(QStringLiteral("enabled")),
+		         triggerMutated ? QStringLiteral("0") : QStringLiteral("1"));
+		QCOMPARE(runtime.aliases().constFirst().attributes.value(QStringLiteral("enabled")),
+		         aliasMutated ? QStringLiteral("0") : QStringLiteral("1"));
+		QCOMPARE(runtime.timers().constFirst().attributes.value(QStringLiteral("enabled")),
+		         timerMutated ? QStringLiteral("0") : QStringLiteral("1"));
+		QCOMPARE(runtime.triggerRuleGeneration(), triggerGenerationBefore + (triggerMutated ? 1 : 0));
+		QCOMPARE(runtime.aliasRuleGeneration(), aliasGenerationBefore + (aliasMutated ? 1 : 0));
+		QCOMPARE(runtime.timerStructureMutationSerial(), timerSerialBefore);
+		QVERIFY(runtime.worldFileModified());
+	}
+	QVERIFY(teardownWorkerEngine(executor, engine));
+}
+
+void tst_LuaCallbackEngine::directGroupApisCommitOnlyMatchedCollections()
+{
+	WorldRuntime          runtime;
+
+	WorldRuntime::Trigger sharedTrigger;
+	sharedTrigger.attributes.insert(QStringLiteral("name"), QStringLiteral("shared_trigger"));
+	sharedTrigger.attributes.insert(QStringLiteral("match"), QStringLiteral("shared trigger"));
+	sharedTrigger.attributes.insert(QStringLiteral("group"), QStringLiteral("shared_group"));
+	sharedTrigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	WorldRuntime::Trigger triggerOnly;
+	triggerOnly.attributes.insert(QStringLiteral("name"), QStringLiteral("trigger_only"));
+	triggerOnly.attributes.insert(QStringLiteral("match"), QStringLiteral("trigger only"));
+	triggerOnly.attributes.insert(QStringLiteral("group"), QStringLiteral("trigger_group"));
+	triggerOnly.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	runtime.setTriggers({sharedTrigger, triggerOnly});
+
+	WorldRuntime::Alias sharedAlias;
+	sharedAlias.attributes.insert(QStringLiteral("name"), QStringLiteral("shared_alias"));
+	sharedAlias.attributes.insert(QStringLiteral("match"), QStringLiteral("shared alias"));
+	sharedAlias.attributes.insert(QStringLiteral("group"), QStringLiteral("shared_group"));
+	sharedAlias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	runtime.setAliases({sharedAlias});
+
+	WorldRuntime::Timer sharedTimer;
+	sharedTimer.attributes.insert(QStringLiteral("name"), QStringLiteral("shared_timer"));
+	sharedTimer.attributes.insert(QStringLiteral("group"), QStringLiteral("shared_group"));
+	sharedTimer.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	runtime.setTimers({sharedTimer});
+
+	LuaCallbackEngine engine;
+	engine.setWorldRuntime(&runtime);
+	engine.setScriptText(QString());
+	QVERIFY(engine.loadScript());
+	auto callCountApi = [&engine](const char *functionName, const std::optional<QString> &group,
+	                              const std::optional<bool> enabled) -> std::optional<int>
+	{
+		lua_State *state = engine.luaState();
+		lua_getglobal(state, functionName);
+		int argumentCount = 0;
+		if (group)
+		{
+			const QByteArray groupUtf8 = group->toUtf8();
+			lua_pushlstring(state, groupUtf8.constData(), static_cast<size_t>(groupUtf8.size()));
+			++argumentCount;
+		}
+		if (enabled)
+		{
+			lua_pushboolean(state, *enabled ? 1 : 0);
+			++argumentCount;
+		}
+		if (lua_pcall(state, argumentCount, 1, 0) != LUA_OK)
+		{
+			lua_pop(state, 1);
+			return std::nullopt;
+		}
+		const int result = static_cast<int>(lua_tointeger(state, -1));
+		lua_pop(state, 1);
+		return result;
+	};
+
+	const quint64 generationBeforeShared = runtime.aliasRuleGeneration();
+	const auto    sharedResult           = callCountApi("EnableGroup", QStringLiteral("shared_group"), false);
+	QVERIFY(sharedResult.has_value());
+	QCOMPARE(*sharedResult, 3);
+	QCOMPARE(runtime.triggers().at(0).attributes.value(QStringLiteral("enabled")), QStringLiteral("0"));
+	QCOMPARE(runtime.aliases().constFirst().attributes.value(QStringLiteral("enabled")), QStringLiteral("0"));
+	QCOMPARE(runtime.timers().constFirst().attributes.value(QStringLiteral("enabled")), QStringLiteral("0"));
+	QCOMPARE(runtime.aliasRuleGeneration(), generationBeforeShared + 1);
+
+	const quint64 generationBeforeTriggerOnly = runtime.aliasRuleGeneration();
+	const auto    triggerOnlyResult = callCountApi("EnableGroup", QStringLiteral("trigger_group"), false);
+	QVERIFY(triggerOnlyResult.has_value());
+	QCOMPARE(*triggerOnlyResult, 1);
+	QCOMPARE(runtime.triggers().at(1).attributes.value(QStringLiteral("enabled")), QStringLiteral("0"));
+	QCOMPARE(runtime.aliasRuleGeneration(), generationBeforeTriggerOnly);
+
+	const QStringList missingEnableApis{QStringLiteral("EnableTriggerGroup"),
+	                                    QStringLiteral("EnableAliasGroup"),
+	                                    QStringLiteral("EnableTimerGroup")};
+	for (const QString &api : missingEnableApis)
+	{
+		runtime.setWorldFileModified(false);
+		const quint64    generationBeforeMissing  = runtime.aliasRuleGeneration();
+		const quint64    timerSerialBeforeMissing = runtime.timerStructureMutationSerial();
+		const QByteArray apiName                  = api.toLatin1();
+		const auto       result = callCountApi(apiName.constData(), QStringLiteral("missing_group"), true);
+		QVERIFY(result.has_value());
+		QCOMPARE(*result, 0);
+		QVERIFY(!runtime.worldFileModified());
+		QCOMPARE(runtime.aliasRuleGeneration(), generationBeforeMissing);
+		QCOMPARE(runtime.timerStructureMutationSerial(), timerSerialBeforeMissing);
+	}
+
+	const QStringList missingDeleteApis{QStringLiteral("DeleteTriggerGroup"),
+	                                    QStringLiteral("DeleteAliasGroup"),
+	                                    QStringLiteral("DeleteTimerGroup"), QStringLiteral("DeleteGroup")};
+	for (const QString &api : missingDeleteApis)
+	{
+		runtime.setWorldFileModified(false);
+		const quint64    generationBeforeMissing  = runtime.aliasRuleGeneration();
+		const quint64    timerSerialBeforeMissing = runtime.timerStructureMutationSerial();
+		const QByteArray apiName                  = api.toLatin1();
+		const auto result = callCountApi(apiName.constData(), QStringLiteral("missing_group"), std::nullopt);
+		QVERIFY(result.has_value());
+		QCOMPARE(*result, 0);
+		QVERIFY(!runtime.worldFileModified());
+		QCOMPARE(runtime.aliasRuleGeneration(), generationBeforeMissing);
+		QCOMPARE(runtime.timerStructureMutationSerial(), timerSerialBeforeMissing);
+	}
+
+	const quint64 generationBeforeDelete  = runtime.aliasRuleGeneration();
+	const quint64 timerSerialBeforeDelete = runtime.timerStructureMutationSerial();
+	const auto    deleteResult = callCountApi("DeleteGroup", QStringLiteral("shared_group"), std::nullopt);
+	QVERIFY(deleteResult.has_value());
+	QCOMPARE(*deleteResult, 3);
+	QCOMPARE(runtime.triggers().size(), 1);
+	QVERIFY(runtime.aliases().isEmpty());
+	QVERIFY(runtime.timers().isEmpty());
+	QCOMPARE(runtime.aliasRuleGeneration(), generationBeforeDelete + 1);
+	QCOMPARE(runtime.timerStructureMutationSerial(), timerSerialBeforeDelete + 1);
+
+	const QStringList temporaryDeleteApis{QStringLiteral("DeleteTemporaryTriggers"),
+	                                      QStringLiteral("DeleteTemporaryAliases"),
+	                                      QStringLiteral("DeleteTemporaryTimers")};
+	for (const QString &api : temporaryDeleteApis)
+	{
+		runtime.setWorldFileModified(false);
+		const quint64    generationBeforeMissing  = runtime.aliasRuleGeneration();
+		const quint64    timerSerialBeforeMissing = runtime.timerStructureMutationSerial();
+		const QByteArray apiName                  = api.toLatin1();
+		const auto       result = callCountApi(apiName.constData(), std::nullopt, std::nullopt);
+		QVERIFY(result.has_value());
+		QCOMPARE(*result, 0);
+		QVERIFY(!runtime.worldFileModified());
+		QCOMPARE(runtime.aliasRuleGeneration(), generationBeforeMissing);
+		QCOMPARE(runtime.timerStructureMutationSerial(), timerSerialBeforeMissing);
+	}
+}
+
+void tst_LuaCallbackEngine::deferredRuleDeletionsCommitOnlyRuntimeRemovals()
+{
+	WorldRuntime runtime;
+
+	auto         makeTrigger = [](const QString &name, const QString &group, const bool temporary = false)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("name"), name);
+		trigger.attributes.insert(QStringLiteral("match"), name);
+		trigger.attributes.insert(QStringLiteral("group"), group);
+		if (temporary)
+			trigger.attributes.insert(QStringLiteral("temporary"), QStringLiteral("1"));
+		return trigger;
+	};
+	auto makeAlias = [](const QString &name, const QString &group, const bool temporary = false)
+	{
+		WorldRuntime::Alias alias;
+		alias.attributes.insert(QStringLiteral("name"), name);
+		alias.attributes.insert(QStringLiteral("match"), name);
+		alias.attributes.insert(QStringLiteral("group"), group);
+		if (temporary)
+			alias.attributes.insert(QStringLiteral("temporary"), QStringLiteral("1"));
+		return alias;
+	};
+	auto makeTimer = [](const QString &name, const QString &group, const bool temporary = false)
+	{
+		WorldRuntime::Timer timer;
+		timer.attributes.insert(QStringLiteral("name"), name);
+		timer.attributes.insert(QStringLiteral("group"), group);
+		if (temporary)
+			timer.attributes.insert(QStringLiteral("temporary"), QStringLiteral("1"));
+		return timer;
+	};
+	runtime.setTriggers({makeTrigger(QStringLiteral("temporary_trigger"), QString(), true),
+	                     makeTrigger(QStringLiteral("group_trigger"), QStringLiteral("trigger_group")),
+	                     makeTrigger(QStringLiteral("shared_trigger"), QStringLiteral("shared_group"))});
+	runtime.setAliases({makeAlias(QStringLiteral("temporary_alias"), QString(), true),
+	                    makeAlias(QStringLiteral("group_alias"), QStringLiteral("alias_group")),
+	                    makeAlias(QStringLiteral("shared_alias"), QStringLiteral("shared_group"))});
+	runtime.setTimers({makeTimer(QStringLiteral("temporary_timer"), QString(), true),
+	                   makeTimer(QStringLiteral("group_timer"), QStringLiteral("timer_group")),
+	                   makeTimer(QStringLiteral("shared_timer"), QStringLiteral("shared_group"))});
+
+	LuaExecutorWorker executor(recoveredMutationConsumerForTest());
+	auto              engine = QSharedPointer<LuaCallbackEngine>::create();
+	if (!initializeWorkerEngine(executor, engine, QStringLiteral(R"lua(
+function delete_deferred_rules(_)
+  assert(DeleteTemporaryTriggers() == 1)
+  assert(DeleteTemporaryAliases() == 1)
+  assert(DeleteTemporaryTimers() == 1)
+  assert(DeleteTriggerGroup("trigger_group") == 1)
+  assert(DeleteAliasGroup("alias_group") == 1)
+  assert(DeleteTimerGroup("timer_group") == 1)
+  assert(DeleteGroup("shared_group") == 3)
+  return "ok"
+end
+)lua"),
+	                            &runtime, QString()))
+	{
+		QFAIL("Worker engine initialization failed");
+	}
+
+	LuaBatchDispatchRequest request;
+	request.engines             = {engine};
+	request.kind                = LuaBatchDispatchKind::StringInOut;
+	request.functionName        = QStringLiteral("delete_deferred_rules");
+	request.stringArg           = QStringLiteral("ignored");
+	request.callbackSnapshotArg = captureMutableDispatchSnapshotForTest(runtime);
+	LuaBatchDispatchResult result;
+	QVERIFY(dispatchWorkerAndWait(executor, request, result));
+	QCOMPARE(result.stringResult, QStringLiteral("ok"));
+
+	runtime.setTriggers({});
+	runtime.setAliases({});
+	runtime.setTimers({});
+	runtime.setWorldFileModified(false);
+	const quint64 aliasGenerationBeforeDelivery = runtime.aliasRuleGeneration();
+	const quint64 timerSerialBeforeDelivery     = runtime.timerStructureMutationSerial();
+	executeDeferredMutations(result);
+	QVERIFY(!runtime.worldFileModified());
+	QCOMPARE(runtime.aliasRuleGeneration(), aliasGenerationBeforeDelivery);
+	QCOMPARE(runtime.timerStructureMutationSerial(), timerSerialBeforeDelivery);
 	QVERIFY(teardownWorkerEngine(executor, engine));
 }
 
@@ -7908,6 +8369,7 @@ end
 		    processor.setRuntime(nullptr);
 	    });
 
+	const quint64 aliasGenerationBefore = runtime.aliasRuleGeneration();
 	QCOMPARE(processor.executeCommand(QStringLiteral("go")), eOK);
 	QString value;
 	QVERIFY(runtime.findVariable(QStringLiteral("first_alias_result"), value));
@@ -7930,6 +8392,10 @@ end
 	         QStringLiteral("second_alias"));
 	QCOMPARE(storedPlugin->aliases.constFirst().children.value(QStringLiteral("send")),
 	         QStringLiteral("mutated second alias"));
+	QVERIFY(runtime.aliasRuleGeneration() > aliasGenerationBefore);
+	QVERIFY(storedPlugin->aliases.at(0).runtimeId != 0);
+	QVERIFY(storedPlugin->aliases.at(1).runtimeId != 0);
+	QVERIFY(storedPlugin->aliases.at(0).runtimeId != storedPlugin->aliases.at(1).runtimeId);
 	QCOMPARE(storedPlugin->triggers.size(), 2);
 	QCOMPARE(storedPlugin->triggers.constFirst().attributes.value(QStringLiteral("name")),
 	         QStringLiteral("second_trigger"));
@@ -8144,7 +8610,8 @@ end
 		    processor.setRuntime(nullptr);
 	    });
 
-	const QDateTime checkStartedAt = QDateTime::currentDateTime();
+	const quint64   timerStructureSerialBefore = runtime.timerStructureMutationSerial();
+	const QDateTime checkStartedAt             = QDateTime::currentDateTime();
 	processor.checkTimers();
 	const QDateTime checkFinishedAt = QDateTime::currentDateTime();
 
@@ -8167,6 +8634,10 @@ end
 	QVERIFY(storedPlugin->timers.at(0).nextFireTime <= checkFinishedAt.addSecs(10 * 60));
 	QCOMPARE(storedPlugin->timers.at(1).attributes.value(QStringLiteral("name")),
 	         QStringLiteral("inserted_timer"));
+	QVERIFY(runtime.timerStructureMutationSerial() > timerStructureSerialBefore);
+	QVERIFY(storedPlugin->timers.at(0).runtimeId != 0);
+	QVERIFY(storedPlugin->timers.at(1).runtimeId != 0);
+	QVERIFY(storedPlugin->timers.at(0).runtimeId != storedPlugin->timers.at(1).runtimeId);
 
 	runtime.dispatchTeardownLuaEngines({engine}, true);
 	if (WorldRuntime::Plugin *mutablePlugin = WorldRuntimeTestAccess::plugin(runtime, pluginId))

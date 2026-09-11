@@ -8,7 +8,9 @@
 
 #include "LuaSupport.h"
 
+#include "DoubleMetaphone.h"
 #include "Environment.h"
+#include "StringUtils.h"
 #include "scripting/ScriptingErrors.h"
 
 #include <QByteArray>
@@ -88,6 +90,33 @@ bool QMudLuaSupport::pushLuaFunctionByName(lua_State *state, const QString &func
 	}
 
 	return true;
+}
+
+int QMudLuaSupport::luaUtilsEditDistance(lua_State *L)
+{
+	const QString source = QString::fromUtf8(luaL_checkstring(L, 1));
+	const QString target = QString::fromUtf8(luaL_checkstring(L, 2));
+	lua_pushinteger(L, qmudEditDistance(source, target));
+	return 1;
+}
+
+int QMudLuaSupport::luaUtilsMetaphone(lua_State *L)
+{
+	const QString input             = QString::fromUtf8(luaL_checkstring(L, 1));
+	const int     length            = static_cast<int>(luaL_optnumber(L, 2, 4));
+	const auto [primary, secondary] = qmudDoubleMetaphone(input, length);
+	const QByteArray primaryBytes   = primary.toUtf8();
+	lua_pushlstring(L, primaryBytes.constData(), primaryBytes.size());
+	if (secondary.isEmpty())
+	{
+		lua_pushnil(L);
+	}
+	else
+	{
+		const QByteArray secondaryBytes = secondary.toUtf8();
+		lua_pushlstring(L, secondaryBytes.constData(), secondaryBytes.size());
+	}
+	return 2;
 }
 
 lua_State *QMudLuaSupport::makeLuaState()

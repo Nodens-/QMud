@@ -182,6 +182,65 @@ namespace
 		return changed;
 	}
 
+	struct RuleRuntimeIdChanges
+	{
+			bool        worldChanged{false};
+			QStringList changedPluginIds;
+	};
+
+	template <typename Rule>
+	RuleRuntimeIdChanges ensureAllRuleRuntimeIds(QList<Rule>                 &worldRules,
+	                                             QList<WorldRuntime::Plugin> &plugins,
+	                                             QList<Rule> WorldRuntime::Plugin::*pluginRules)
+	{
+		QSet<quint64> reservedRuntimeIds;
+		for (const Rule &rule : worldRules)
+		{
+			if (rule.runtimeId != 0)
+				reservedRuntimeIds.insert(rule.runtimeId);
+		}
+		for (const WorldRuntime::Plugin &plugin : std::as_const(plugins))
+		{
+			for (const Rule &rule : plugin.*pluginRules)
+			{
+				if (rule.runtimeId != 0)
+					reservedRuntimeIds.insert(rule.runtimeId);
+			}
+		}
+
+		QSet<quint64> claimedRuntimeIds;
+		auto          ensureList = [&](QList<Rule> &rules)
+		{
+			bool changed = false;
+			for (Rule &rule : rules)
+			{
+				if (rule.runtimeId == 0 || claimedRuntimeIds.contains(rule.runtimeId))
+				{
+					do
+					{
+						rule.runtimeId = nextRuleRuntimeId();
+					} while (reservedRuntimeIds.contains(rule.runtimeId));
+					reservedRuntimeIds.insert(rule.runtimeId);
+					changed = true;
+				}
+				claimedRuntimeIds.insert(rule.runtimeId);
+			}
+			return changed;
+		};
+
+		RuleRuntimeIdChanges changes;
+		changes.worldChanged = ensureList(worldRules);
+		for (WorldRuntime::Plugin &plugin : plugins)
+		{
+			if (!ensureList(plugin.*pluginRules))
+				continue;
+			const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
+			if (!pluginId.isEmpty())
+				changes.changedPluginIds.push_back(pluginId);
+		}
+		return changes;
+	}
+
 	[[nodiscard]] bool outputLineNumbersAdjacent(const WorldRuntime::LineEntry &first,
 	                                             const WorldRuntime::LineEntry &second)
 	{
@@ -4436,10 +4495,15 @@ namespace
 
 	bool isLuaScriptingEnabled(const QMap<QString, QString> &attrs)
 	{
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
 		if (!isEnabledFlag(attrs.value(QStringLiteral("enable_scripts"))))
 			return false;
 		const QString language = attrs.value(QStringLiteral("script_language"));
 		return language.compare(QStringLiteral("Lua"), Qt::CaseInsensitive) == 0;
+#else
+		Q_UNUSED(attrs);
+		return false;
+#endif
 	}
 
 	QSharedPointer<LuaCallbackEngine> makeNonOwningLuaEngineRef(LuaCallbackEngine *engine)
@@ -4574,7 +4638,7 @@ WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent), m_openSequence(ne
 	};
 	callbacks.onMxpDiagnosticNeeded = [this](int level)
 	{
-		if (isLuaScriptingEnabled(m_worldAttributes) && m_luaCallbacks &&
+		if (luaScriptingAvailable() &&
 		    !m_worldAttributes.value(QStringLiteral("on_mxp_error")).trimmed().isEmpty())
 		{
 			return true;
@@ -4759,6 +4823,10 @@ WorldRuntime::~WorldRuntime()
 	// reverse member-declaration order would let recovered mutations re-enter partially destroyed
 	// snapshot caches and other authoritative runtime state.
 	m_luaExecutor.reset();
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+	if (AppController *controller = AppController::instance())
+		controller->releaseSpellCheckerForWorld(this);
+#endif
 	if (m_luaCallbacks)
 	{
 		delete m_luaCallbacks;
@@ -4947,6 +5015,8 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 	const bool    disableCompression     = isEnabledFlag(disableCompressionFlag);
 	const bool    negotiateOptionsOnce =
 	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("only_negotiate_telnet_options_once")));
+	const bool    automaticRenegotiationLoopProtection = isEnabledFlag(m_worldAttributes.value(
+	    QStringLiteral("automatically_protect_against_telnet_option_renegotiation_loops")));
 	const int     useMxp     = m_worldAttributes.value(QStringLiteral("use_mxp")).toInt();
 	const QString terminalId = m_worldAttributes.value(QStringLiteral("terminal_identification"));
 
@@ -4957,6 +5027,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 	m_telnet.setNoEchoOff(noEchoOff);
 	m_telnet.setDisableCompression(disableCompression);
 	m_telnet.setNegotiateOptionsOnce(negotiateOptionsOnce);
+	m_telnet.setAutomaticRenegotiationLoopProtection(automaticRenegotiationLoopProtection);
 	if (useMxp >= 0)
 		m_telnet.setUseMxp(useMxp);
 	updateTelnetWindowSizeForNaws();
@@ -5365,7 +5436,7 @@ void WorldRuntime::processRawDataPayload(const QByteArray &data, const bool simu
 	}
 	if (!events.isEmpty() || !modeChanges.isEmpty())
 		mxpStartUp();
-	const bool luaEnabled = isLuaScriptingEnabled(m_worldAttributes);
+	const bool luaEnabled = luaScriptingAvailable();
 
 	const bool ignoreMxpColourChanges =
 	    isEnabledFlag(m_worldAttributes.value(QStringLiteral("ignore_mxp_colour_changes")));
@@ -8406,7 +8477,6 @@ WorldRuntime::SaveSnapshot WorldRuntime::buildSaveSnapshot(const QString &fileNa
 	snapshot.worldAttributes          = m_worldAttributes;
 	snapshot.worldMultilineAttributes = m_worldMultilineAttributes;
 	snapshot.includes                 = m_includes;
-	snapshot.scripts                  = m_scripts;
 	snapshot.triggers                 = m_triggers;
 	snapshot.aliases                  = m_aliases;
 	snapshot.timers                   = m_timers;
@@ -8450,13 +8520,6 @@ bool WorldRuntime::saveStateMatchesSnapshot(const SaveSnapshot &snapshot) const
 	};
 	if (!includesEqual(m_includes, snapshot.includes))
 		return false;
-	if (m_scripts.size() != snapshot.scripts.size())
-		return false;
-	for (int i = 0; i < m_scripts.size(); ++i)
-	{
-		if (m_scripts.at(i).content != snapshot.scripts.at(i).content)
-			return false;
-	}
 
 	auto triggersEqual = [&](const QList<Trigger> &current, const QList<Trigger> &saved) -> bool
 	{
@@ -8812,7 +8875,6 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 	const auto &m_worldAttributes          = normalizedSnapshot.worldAttributes;
 	const auto &m_worldMultilineAttributes = normalizedSnapshot.worldMultilineAttributes;
 	const auto &m_includes                 = normalizedSnapshot.includes;
-	const auto &m_scripts                  = normalizedSnapshot.scripts;
 	const auto &m_triggers                 = normalizedSnapshot.triggers;
 	const auto &m_aliases                  = normalizedSnapshot.aliases;
 	const auto &m_timers                   = normalizedSnapshot.timers;
@@ -9464,9 +9526,6 @@ bool WorldRuntime::writeSaveSnapshot(const SaveSnapshot &snapshot, QString *erro
 		out << "/>" << nl;
 	}
 
-	for (const auto &script : m_scripts)
-		saveXmlMulti(out, nl, "script", script.content);
-
 	out << "</qmud>" << nl;
 
 	if (!file.commit())
@@ -9696,6 +9755,11 @@ WorldRuntime::StopTriggerEvaluation WorldRuntime::stopTriggerEvaluation() const
 LuaCallbackEngine *WorldRuntime::luaCallbacks() const
 {
 	return m_luaCallbacks;
+}
+
+bool WorldRuntime::luaScriptingAvailable() const
+{
+	return m_luaCallbacks && isLuaScriptingEnabled(m_worldAttributes);
 }
 
 const ILuaExecutor *WorldRuntime::luaExecutor() const
@@ -15015,7 +15079,7 @@ void WorldRuntime::fireWorldLoseFocusHandlers()
 void WorldRuntime::mxpError(int level, long messageNumber, const QString &message)
 {
 	if (const QString callbackName = m_worldAttributes.value(QStringLiteral("on_mxp_error")).trimmed();
-	    !callbackName.isEmpty() && m_luaCallbacks)
+	    !callbackName.isEmpty() && luaScriptingAvailable())
 	{
 		const QSharedPointer<LuaCallbackEngine> worldLua(m_luaCallbacks,
 		                                                 [](LuaCallbackEngine * /*unused*/) {});
@@ -15081,7 +15145,7 @@ void WorldRuntime::mxpStartUp()
 		return;
 	m_mxpActive = true;
 
-	if (isLuaScriptingEnabled(m_worldAttributes) && m_luaCallbacks)
+	if (luaScriptingAvailable())
 	{
 		const QString callbackName = m_worldAttributes.value(QStringLiteral("on_mxp_start")).trimmed();
 		if (!callbackName.isEmpty())
@@ -15110,7 +15174,7 @@ void WorldRuntime::mxpShutDown()
 	resetMxpRenderState();
 	clearAnsiActionContext();
 
-	if (isLuaScriptingEnabled(m_worldAttributes) && m_luaCallbacks)
+	if (luaScriptingAvailable())
 	{
 		const QString callbackName = m_worldAttributes.value(QStringLiteral("on_mxp_stop")).trimmed();
 		if (!callbackName.isEmpty())
@@ -17029,7 +17093,7 @@ void WorldRuntime::dispatchSingleEngineNoArgCallback(const QSharedPointer<LuaCal
 void WorldRuntime::dispatchWorldNoArgCallbackByAttribute(const QString &attributeName,
                                                          const bool     completionBarrier)
 {
-	if (attributeName.isEmpty() || !isLuaScriptingEnabled(m_worldAttributes) || !m_luaCallbacks)
+	if (attributeName.isEmpty() || !luaScriptingAvailable())
 		return;
 	const QString callbackName = m_worldAttributes.value(attributeName).trimmed();
 	if (callbackName.isEmpty())
@@ -17136,10 +17200,9 @@ void WorldRuntime::processActiveStateTransitionCommand(const ActiveStateTransiti
 	    });
 
 	PluginCallbackDispatchCommand worldCommand;
-	const bool                    hasWorldCommand =
-	    isLuaScriptingEnabled(m_worldAttributes) && m_luaCallbacks &&
-	    buildActiveStateNoArgCallbackCommand({makeNonOwningLuaEngineRef(m_luaCallbacks)}, worldCallbackName,
-	                                         false, worldCommand);
+	const bool hasWorldCommand = luaScriptingAvailable() && buildActiveStateNoArgCallbackCommand(
+	                                                            {makeNonOwningLuaEngineRef(m_luaCallbacks)},
+	                                                            worldCallbackName, false, worldCommand);
 	PluginCallbackDispatchCommand pluginCommand;
 	const bool                    hasPluginCommand = buildActiveStateNoArgCallbackCommand(
 	    collectPluginCallbackRecipients(pluginCallbackName), pluginCallbackName, true, pluginCommand);
@@ -19601,7 +19664,6 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	m_printingStyleCount = safeQSizeToInt(doc.printingStyles().size());
 	m_pluginCount        = safeQSizeToInt(doc.plugins().size());
 	m_includeCount       = safeQSizeToInt(doc.includes().size());
-	m_scriptCount        = safeQSizeToInt(doc.scripts().size());
 	m_connectPhase       = eConnectNotConnected;
 	m_connectViaProxy    = false;
 	m_proxyAddressString.clear();
@@ -19883,10 +19945,9 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 	}
 	sortPluginsBySequence();
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
-	ensureAllAliasRuntimeIds();
 	invalidatePluginCallbackPresenceCache();
 	invalidateLuaCallbackDispatchSnapshot();
-	markTriggerRulesChanged();
+	notePluginStructureMutation();
 	for (auto &plugin : m_plugins)
 	{
 		queuePluginInstall(plugin);
@@ -19920,14 +19981,7 @@ void WorldRuntime::applyFromDocument(const WorldDocument &doc)
 		}
 		m_includes.push_back(ri);
 	}
-	m_includeCount = safeQSizeToInt(m_includes.size());
-	m_scripts.clear();
-	for (const auto &s : doc.scripts())
-	{
-		Script rs;
-		rs.content = s.content;
-		m_scripts.push_back(rs);
-	}
+	m_includeCount           = safeQSizeToInt(m_includes.size());
 	const QString scriptFile = m_worldAttributes.value(QStringLiteral("script_filename"));
 	if (m_scriptWatcher)
 	{
@@ -20059,6 +20113,9 @@ void WorldRuntime::applyNumericWorldOption(const WorldNumericOptionBinding bindi
 			break;
 		case DoubleClickSends:
 			view->m_doubleClickSends = enabled;
+			break;
+		case EchoForceTerminatesPartialPrompts:
+			view->m_echoForceTerminatesPartialPrompts = enabled;
 			break;
 		case EscapeDeletesInput:
 			view->m_escapeDeletesInput = enabled;
@@ -20256,7 +20313,8 @@ void WorldRuntime::setWorldAttributeImpl(const QString &key, const QString &valu
                                          const bool applyGenericEffects)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setWorldAttribute");
-	QString normalizedValue = value;
+	const bool luaScriptingWasAvailable = luaScriptingAvailable();
+	QString    normalizedValue          = value;
 	if (isLikelyPathAttributeName(key))
 		normalizedValue = normalizePathForRuntime(normalizedValue);
 	if (key == QStringLiteral("auto_log_file_name"))
@@ -20272,6 +20330,9 @@ void WorldRuntime::setWorldAttributeImpl(const QString &key, const QString &valu
 		return;
 	}
 	m_worldAttributes.insert(key, normalizedValue);
+	const bool luaScriptingIsAvailable = luaScriptingAvailable();
+	if (luaScriptingIsAvailable != luaScriptingWasAvailable)
+		emit luaScriptingAvailabilityChanged(luaScriptingIsAvailable);
 	if (applyGenericEffects && m_view)
 	{
 		if (key == QStringLiteral("tab_completion_excludes_symbol_prefix"))
@@ -20415,11 +20476,6 @@ int WorldRuntime::includeCount() const
 	return m_includeCount;
 }
 
-int WorldRuntime::scriptCount() const
-{
-	return m_scriptCount;
-}
-
 const QList<WorldRuntime::Trigger> &WorldRuntime::triggers() const
 {
 	return m_triggers;
@@ -20462,6 +20518,16 @@ void WorldRuntime::ensureWorldTriggerRuntimeIds()
 		markTriggerRuntimeStateChanged();
 }
 
+void WorldRuntime::ensureAllTriggerRuntimeIds()
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureAllTriggerRuntimeIds");
+	const RuleRuntimeIdChanges changes = ensureAllRuleRuntimeIds(m_triggers, m_plugins, &Plugin::triggers);
+	if (changes.worldChanged)
+		markTriggerRuntimeStateChanged();
+	for (const QString &pluginId : changes.changedPluginIds)
+		markTriggerRuntimeStateChanged(pluginId);
+}
+
 quint64 WorldRuntime::triggerRuleGeneration() const
 {
 	return m_triggerRuleGeneration;
@@ -20481,6 +20547,7 @@ void WorldRuntime::setTriggers(const QList<Trigger> &triggers)
 		applyTriggerDefaults(rt);
 		m_triggers.push_back(rt);
 	}
+	static_cast<void>(ensureWorldRuleRuntimeIds(m_triggers, m_plugins, &Plugin::triggers));
 	m_triggerCount      = safeQSizeToInt(m_triggers.size());
 	m_worldFileModified = true;
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Triggers);
@@ -20570,52 +20637,16 @@ void WorldRuntime::ensureWorldAliasRuntimeIds()
 void WorldRuntime::ensureAllAliasRuntimeIds()
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureAllAliasRuntimeIds");
-	QSet<quint64> reservedRuntimeIds;
-	for (const Alias &alias : m_aliases)
-	{
-		if (alias.runtimeId != 0)
-			reservedRuntimeIds.insert(alias.runtimeId);
-	}
-	for (const Plugin &plugin : m_plugins)
-	{
-		for (const Alias &alias : plugin.aliases)
-		{
-			if (alias.runtimeId != 0)
-				reservedRuntimeIds.insert(alias.runtimeId);
-		}
-	}
-
-	QSet<quint64> claimedRuntimeIds;
-	auto          ensureList = [&](QList<Alias> &aliases)
-	{
-		bool changed = false;
-		for (Alias &alias : aliases)
-		{
-			if (alias.runtimeId == 0 || claimedRuntimeIds.contains(alias.runtimeId))
-			{
-				do
-				{
-					alias.runtimeId = nextRuleRuntimeId();
-				} while (reservedRuntimeIds.contains(alias.runtimeId));
-				reservedRuntimeIds.insert(alias.runtimeId);
-				changed = true;
-			}
-			claimedRuntimeIds.insert(alias.runtimeId);
-		}
-		return changed;
-	};
-
-	if (ensureList(m_aliases))
+	const RuleRuntimeIdChanges changes = ensureAllRuleRuntimeIds(m_aliases, m_plugins, &Plugin::aliases);
+	if (changes.worldChanged)
 		markAliasRuntimeStateChanged();
-	for (Plugin &plugin : m_plugins)
-	{
-		if (ensureList(plugin.aliases))
-		{
-			const QString pluginId = plugin.attributes.value(QStringLiteral("id"));
-			if (!pluginId.isEmpty())
-				markAliasRuntimeStateChanged(pluginId);
-		}
-	}
+	for (const QString &pluginId : changes.changedPluginIds)
+		markAliasRuntimeStateChanged(pluginId);
+}
+
+quint64 WorldRuntime::aliasRuleGeneration() const
+{
+	return m_aliasRuleGeneration;
 }
 
 QList<WorldRuntime::Alias> &WorldRuntime::aliasesMutable()
@@ -20632,18 +20663,19 @@ void WorldRuntime::setAliases(const QList<Alias> &aliases)
 		applyAliasDefaults(ra);
 		m_aliases.push_back(ra);
 	}
-	ensureAllAliasRuntimeIds();
+	static_cast<void>(ensureWorldRuleRuntimeIds(m_aliases, m_plugins, &Plugin::aliases));
 	m_aliasCount        = safeQSizeToInt(m_aliases.size());
 	m_worldFileModified = true;
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Aliases);
+	markAliasRulesChanged();
 }
 
 void WorldRuntime::markAliasesChanged()
 {
-	ensureAllAliasRuntimeIds();
 	m_aliasCount        = safeQSizeToInt(m_aliases.size());
 	m_worldFileModified = true;
 	markAliasRuntimeStateChanged();
+	markAliasRulesChanged();
 }
 
 void WorldRuntime::markAliasRuntimeStateChanged(const QString &pluginId)
@@ -20672,11 +20704,23 @@ void WorldRuntime::markAliasRuntimeStateChanged(const QString &pluginId, const q
 	    LuaCallbackStableSnapshotPatchScope{pluginId, QString(), runtimeId, indexHint});
 }
 
+void WorldRuntime::markAliasRulesChanged()
+{
+	if (QThread::currentThread() != thread())
+	{
+		qmudInvokeMethodChecked(this, [this] { markAliasRulesChanged(); });
+		return;
+	}
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::markAliasRulesChanged");
+	++m_aliasRuleGeneration;
+}
+
 void WorldRuntime::markPluginAliasesChanged(const QString &pluginId)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::markPluginAliasesChanged");
-	ensureAllAliasRuntimeIds();
 	markAliasRuntimeStateChanged(pluginId);
+	markAliasRulesChanged();
 }
 
 const QList<WorldRuntime::Timer> &WorldRuntime::timers() const
@@ -20721,6 +20765,16 @@ void WorldRuntime::ensureWorldTimerRuntimeIds()
 		markTimerRuntimeStateChanged();
 }
 
+void WorldRuntime::ensureAllTimerRuntimeIds()
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::ensureAllTimerRuntimeIds");
+	const RuleRuntimeIdChanges changes = ensureAllRuleRuntimeIds(m_timers, m_plugins, &Plugin::timers);
+	if (changes.worldChanged)
+		markTimerRuntimeStateChanged();
+	for (const QString &pluginId : changes.changedPluginIds)
+		markTimerRuntimeStateChanged(pluginId);
+}
+
 QList<WorldRuntime::Timer> &WorldRuntime::timersMutable()
 {
 	return m_timers;
@@ -20735,6 +20789,7 @@ void WorldRuntime::setTimers(const QList<Timer> &timers)
 		applyTimerDefaults(rt);
 		m_timers.push_back(rt);
 	}
+	static_cast<void>(ensureWorldRuleRuntimeIds(m_timers, m_plugins, &Plugin::timers));
 	m_timerCount = safeQSizeToInt(m_timers.size());
 	noteTimerStructureMutation();
 	m_worldFileModified = true;
@@ -20773,6 +20828,16 @@ quint64 WorldRuntime::timerStructureMutationSerial() const
 void WorldRuntime::noteTimerStructureMutation()
 {
 	++m_timerStructureMutationSerial;
+}
+
+void WorldRuntime::notePluginStructureMutation()
+{
+	static_cast<void>(ensureAllRuleRuntimeIds(m_triggers, m_plugins, &Plugin::triggers));
+	static_cast<void>(ensureAllRuleRuntimeIds(m_aliases, m_plugins, &Plugin::aliases));
+	static_cast<void>(ensureAllRuleRuntimeIds(m_timers, m_plugins, &Plugin::timers));
+	noteTimerStructureMutation();
+	markAliasRulesChanged();
+	markTriggerRulesChanged();
 }
 
 const QList<WorldRuntime::Macro> &WorldRuntime::macros() const
@@ -22122,6 +22187,7 @@ bool WorldRuntime::reorderPlugin(const QString &pluginId, const int delta)
 		m_plugins.swapItemsAt(index, other);
 	}
 	m_worldFileModified = true;
+	notePluginStructureMutation();
 	invalidatePluginCallbackPresenceCache();
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 	return true;
@@ -22253,7 +22319,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 		}
 		sortPluginsBySequence();
 		m_pluginCount = safeQSizeToInt(m_plugins.size());
-		noteTimerStructureMutation();
+		notePluginStructureMutation();
 		invalidatePluginCallbackPresenceCache();
 		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 		QMudNativePluginRegistry::ensureMushReaderRuntimeSetup(this);
@@ -22411,8 +22477,7 @@ bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool 
 	m_plugins.push_back(rp);
 	sortPluginsBySequence();
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
-	ensureAllAliasRuntimeIds();
-	noteTimerStructureMutation();
+	notePluginStructureMutation();
 	invalidatePluginCallbackPresenceCache();
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 
@@ -22515,7 +22580,7 @@ bool WorldRuntime::unloadPlugin(const QString &pluginId, QString *error)
 	}
 	m_plugins.removeAt(finalRemovalIndex);
 	m_pluginCount = safeQSizeToInt(m_plugins.size());
-	noteTimerStructureMutation();
+	notePluginStructureMutation();
 	invalidatePluginCallbackPresenceCache();
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 	callPluginCallbacksNoArgs(QStringLiteral("OnPluginListChanged"), false);
@@ -22656,7 +22721,7 @@ int WorldRuntime::reloadPlugin(const QString &pluginId, QString *error)
 		m_plugins.push_back(std::move(replacement));
 		sortPluginsBySequence();
 		m_pluginCount = safeQSizeToInt(m_plugins.size());
-		noteTimerStructureMutation();
+		notePluginStructureMutation();
 		invalidatePluginCallbackPresenceCache();
 		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 		if (resolvedPluginId == QMudNativePluginRegistry::mushReaderPluginId())
@@ -25382,11 +25447,6 @@ void WorldRuntime::sortPluginsBySequence()
 const QList<WorldRuntime::Include> &WorldRuntime::includes() const
 {
 	return m_includes;
-}
-
-const QList<WorldRuntime::Script> &WorldRuntime::scripts() const
-{
-	return m_scripts;
 }
 
 QString WorldRuntime::comments() const

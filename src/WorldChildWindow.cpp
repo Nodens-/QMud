@@ -234,6 +234,18 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		m_view->setRuntimeObserver(worldRuntime);
 	connect(worldRuntime, &WorldRuntime::worldAttributeChanged, this,
 	        &WorldChildWindow::onWorldAttributeChanged, Qt::UniqueConnection);
+	if (primary)
+	{
+		connect(worldRuntime, &WorldRuntime::luaScriptingAvailabilityChanged, this,
+		        [this](bool)
+		        {
+			        if (MainWindowHost *main = resolveMainWindowHost(window()))
+			        {
+				        main->updateEditActions();
+				        main->refreshActionState();
+			        }
+		        });
+	}
 	if (m_commandProcessor)
 	{
 		Q_ASSERT(primary);
@@ -1125,10 +1137,10 @@ void TextChildWindow::setQuerySaveOnClose(const bool querySave)
 
 bool TextChildWindow::maybeSaveBeforeClose(const bool querySave)
 {
-	if (QTextDocument *document = m_editor ? m_editor->document() : nullptr;
-	    !document || !document->isModified())
+	QTextDocument *document = m_editor ? m_editor->document() : nullptr;
+	if (!document || !document->isModified())
 		return true;
-	if (m_editor->toPlainText().isEmpty())
+	if (document->isEmpty())
 		return true;
 
 	if (!querySave)

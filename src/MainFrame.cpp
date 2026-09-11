@@ -2281,15 +2281,16 @@ void MainWindow::setStatusMessage(const QString &msg) const
 
 void MainWindow::updateEditActions()
 {
-	const auto *world = activeWorldChildWindow();
-	const auto *view  = world ? world->view() : nullptr;
-	const auto *text  = activeTextChildWindow();
+	const auto         *world       = activeWorldChildWindow();
+	const auto         *view        = world ? world->view() : nullptr;
+	const auto         *text        = activeTextChildWindow();
+	WorldRuntime *const textRuntime = resolveRuntimeForTextWindow(text);
 
-	const bool  canCopy         = view && (view->hasOutputSelection() || view->hasInputSelection());
-	const bool  canCopyHtml     = view && view->hasOutputSelection();
-	const bool  canFindAgain    = view && view->hasOutputFindHistory();
-	const bool  canClearHistory = view && view->hasCommandHistory();
-	const bool  textContext     = text != nullptr;
+	const bool          canCopy         = view && (view->hasOutputSelection() || view->hasInputSelection());
+	const bool          canCopyHtml     = view && view->hasOutputSelection();
+	const bool          canFindAgain    = view && view->hasOutputFindHistory();
+	const bool          canClearHistory = view && view->hasCommandHistory();
+	const bool          textContext     = text != nullptr;
 
 	if (QAction *a = actionForCommand(QStringLiteral("Copy")))
 		a->setEnabled(canCopy);
@@ -2308,10 +2309,8 @@ void MainWindow::updateEditActions()
 		a->setVisible(textContext);
 		a->setEnabled(textContext);
 	}
-	const QStringList textOnly = {QStringLiteral("TextGoTo"),           QStringLiteral("InsertDateTime"),
-	                              QStringLiteral("WordCount"),          QStringLiteral("SendToCommandWindow"),
-	                              QStringLiteral("SendToScript"),       QStringLiteral("SendToWorld"),
-	                              QStringLiteral("RefreshRecalledData")};
+	const QStringList textOnly = {QStringLiteral("TextGoTo"), QStringLiteral("InsertDateTime"),
+	                              QStringLiteral("WordCount"), QStringLiteral("RefreshRecalledData")};
 	for (const QString &id : textOnly)
 	{
 		if (QAction *a = actionForCommand(id))
@@ -2320,6 +2319,18 @@ void MainWindow::updateEditActions()
 			a->setEnabled(textContext);
 		}
 	}
+	const auto updateOwnedTextAction = [this, textContext](const QString &id, const bool enabled)
+	{
+		if (QAction *action = actionForCommand(id))
+		{
+			action->setVisible(textContext);
+			action->setEnabled(enabled);
+		}
+	};
+	updateOwnedTextAction(QStringLiteral("SendToCommandWindow"), textRuntime && textRuntime->view());
+	updateOwnedTextAction(QStringLiteral("SendToScript"),
+	                      textRuntime && textRuntime->luaScriptingAvailable());
+	updateOwnedTextAction(QStringLiteral("SendToWorld"), textRuntime != nullptr);
 }
 
 void MainWindow::setStatusMessageNow(const QString &msg)
@@ -2617,10 +2628,11 @@ void MainWindow::requestDeferredUiRefresh(const bool refreshStatus, const bool r
 
 void MainWindow::refreshActionState()
 {
-	const auto         *world   = activeWorldChildWindow();
-	const WorldRuntime *runtime = world ? world->runtime() : nullptr;
-	auto               *view    = world ? world->view() : nullptr;
-	auto               *text    = activeTextChildWindow();
+	const auto         *world         = activeWorldChildWindow();
+	const WorldRuntime *runtime       = world ? world->runtime() : nullptr;
+	auto               *view          = world ? world->view() : nullptr;
+	auto               *text          = activeTextChildWindow();
+	const WorldRuntime *actionRuntime = runtime ? runtime : resolveRuntimeForTextWindow(text);
 
 	const bool          hasWorld = runtime != nullptr;
 	const bool          hasText  = text != nullptr;
@@ -2632,6 +2644,13 @@ void MainWindow::refreshActionState()
 		freezeAction->setCheckable(true);
 		freezeAction->setChecked(isFrozen);
 		freezeAction->setEnabled(view != nullptr);
+	}
+	if (m_actions.contains(QStringLiteral("DebugPackets")))
+	{
+		QAction *debugPacketsAction = m_actions.value(QStringLiteral("DebugPackets"));
+		debugPacketsAction->setCheckable(true);
+		debugPacketsAction->setChecked(actionRuntime && actionRuntime->debugIncomingPackets());
+		debugPacketsAction->setEnabled(actionRuntime != nullptr);
 	}
 
 	// keep toolbar/menu states in sync with runtime
@@ -2680,16 +2699,7 @@ void MainWindow::refreshActionState()
 		m_actions.value(QStringLiteral("ResetAllTimers"))->setEnabled(hasWorld);
 	if (m_actions.contains(QStringLiteral("Immediate")))
 	{
-		const QString enableScripts =
-		    runtime ? runtime->worldAttributes().value(QStringLiteral("enable_scripts")) : QString();
-		const QString language =
-		    runtime ? runtime->worldAttributes().value(QStringLiteral("script_language")) : QString();
-		const bool enableImmediate =
-		    hasWorld &&
-		    (enableScripts == QStringLiteral("1") ||
-		     enableScripts.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		     enableScripts.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0) &&
-		    language.compare(QStringLiteral("Lua"), Qt::CaseInsensitive) == 0;
+		const bool enableImmediate = hasWorld && runtime->luaScriptingAvailable();
 		m_actions.value(QStringLiteral("Immediate"))->setEnabled(enableImmediate);
 	}
 	if (m_actions.contains(QStringLiteral("EditScriptFile")))
@@ -2701,16 +2711,8 @@ void MainWindow::refreshActionState()
 	}
 	if (m_actions.contains(QStringLiteral("ReloadScriptFile")))
 	{
-		QAction      *reloadAction = m_actions.value(QStringLiteral("ReloadScriptFile"));
-		const QString enableScripts =
-		    runtime ? runtime->worldAttributes().value(QStringLiteral("enable_scripts")) : QString();
-		const QString language =
-		    runtime ? runtime->worldAttributes().value(QStringLiteral("script_language")) : QString();
-		const bool enableReload = hasWorld &&
-		                          (enableScripts == QStringLiteral("1") ||
-		                           enableScripts.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
-		                           enableScripts.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0) &&
-		                          language.compare(QStringLiteral("Lua"), Qt::CaseInsensitive) == 0;
+		QAction   *reloadAction = m_actions.value(QStringLiteral("ReloadScriptFile"));
+		const bool enableReload = hasWorld && runtime->luaScriptingAvailable();
 		reloadAction->setEnabled(enableReload);
 	}
 	if (m_actions.contains(QStringLiteral("Trace")))
@@ -2975,8 +2977,6 @@ void MainWindow::infoBarSetBackground(const QColor &color) const
 static WorldRuntime *resolveRelatedRuntime(const MainWindow *frame, WorldRuntime *explicitRuntime);
 static qulonglong    runtimeOwnerToken(WorldRuntime *runtime);
 static QString       defaultNotepadTitleForWorld(const WorldRuntime *runtime, const WorldChildWindow *world);
-static void          assignNotepadOwner(TextChildWindow *notepad, WorldRuntime *runtime);
-static WorldRuntime *resolveRuntimeForNotepad(const MainWindow *frame, const TextChildWindow *notepad);
 
 bool                 MainWindow::switchToNotepad()
 {
@@ -2985,7 +2985,7 @@ bool                 MainWindow::switchToNotepad()
 
 	if (const auto *activeText = activeTextChildWindow())
 	{
-		if (WorldRuntime *runtime = resolveRuntimeForNotepad(this, activeText))
+		if (WorldRuntime *runtime = resolveRuntimeForTextWindow(activeText))
 			return activateWorldRuntime(runtime);
 		return false;
 	}
@@ -3015,7 +3015,7 @@ bool                 MainWindow::switchToNotepad()
 	if (!target)
 	{
 		auto *created = new TextChildWindow(defaultTitle, QString());
-		assignNotepadOwner(created, owner);
+		associateTextWindowWithRuntime(created, owner);
 		addMdiSubWindow(created, true);
 		return true;
 	}
@@ -3095,41 +3095,32 @@ static QString defaultNotepadTitleForWorld(const WorldRuntime *runtime, const Wo
 	return QStringLiteral("Notepad: %1").arg(worldName);
 }
 
-static void assignNotepadOwner(TextChildWindow *notepad, WorldRuntime *runtime)
+void MainWindow::associateTextWindowWithRuntime(TextChildWindow *textChild, WorldRuntime *runtime)
 {
-	if (!notepad || !runtime)
+	if (!textChild)
 		return;
-	notepad->setProperty("worldRuntimeToken", QVariant::fromValue(runtimeOwnerToken(runtime)));
-	if (const QString worldId = runtime->worldAttributes().value(QStringLiteral("id")).trimmed();
-	    !worldId.isEmpty())
-		notepad->setProperty("worldId", worldId);
+
+	textChild->setProperty("worldRuntimeToken",
+	                       runtime ? QVariant::fromValue(runtimeOwnerToken(runtime)) : QVariant());
+	const QString worldId =
+	    runtime ? runtime->worldAttributes().value(QStringLiteral("id")).trimmed() : QString();
+	textChild->setProperty("worldId", worldId.isEmpty() ? QVariant() : QVariant(worldId));
 }
 
-static WorldRuntime *resolveRuntimeForNotepad(const MainWindow *frame, const TextChildWindow *notepad)
+WorldRuntime *MainWindow::resolveRuntimeForTextWindow(const TextChildWindow *textChild) const
 {
-	if (!frame || !notepad)
+	if (!textChild)
 		return nullptr;
 
-	const qulonglong relatedToken   = notepad->property("worldRuntimeToken").toULongLong();
-	const QString    relatedWorldId = notepad->property("worldId").toString().trimmed();
-	const QString    notepadTitle   = notepad->windowTitle();
-	const QString    relatedName = notepadTitle.startsWith(QStringLiteral("Notepad: "), Qt::CaseInsensitive)
-	                                   ? notepadTitle.mid(QStringLiteral("Notepad: ").size()).trimmed()
-	                                   : QString();
-
-	for (const WorldWindowDescriptor &descriptor : frame->worldRuntimeDescriptors())
+	const QVector<WorldWindowDescriptor> descriptors = worldRuntimeDescriptors();
+	for (const WorldWindowDescriptor &descriptor : descriptors)
 	{
 		WorldRuntime *runtime = descriptor.runtime;
 		if (!runtime)
 			continue;
-		if (relatedToken != 0 && runtimeOwnerToken(runtime) == relatedToken)
-			return runtime;
-		const QMap<QString, QString> &attrs = runtime->worldAttributes();
-		if (!relatedWorldId.isEmpty() &&
-		    attrs.value(QStringLiteral("id")).trimmed().compare(relatedWorldId, Qt::CaseInsensitive) == 0)
-			return runtime;
-		if (!relatedName.isEmpty() &&
-		    attrs.value(QStringLiteral("name")).trimmed().compare(relatedName, Qt::CaseInsensitive) == 0)
+		const QString runtimeWorldId = runtime->worldAttributes().value(QStringLiteral("id")).trimmed();
+		if (QMudMainFrameMdiUtils::windowMatchesRuntimeIdentity(textChild, runtimeOwnerToken(runtime),
+		                                                        runtimeWorldId, false))
 			return runtime;
 	}
 
@@ -3173,12 +3164,12 @@ bool MainWindow::appendToNotepad(const QString &title, const QString &text, cons
 	if (!target)
 	{
 		target = new TextChildWindow(title, text);
-		assignNotepadOwner(target, owner);
+		associateTextWindowWithRuntime(target, owner);
 		addMdiSubWindow(target);
 		return true;
 	}
 
-	assignNotepadOwner(target, owner);
+	associateTextWindowWithRuntime(target, owner);
 	if (replace)
 		target->setText(text);
 	else
@@ -3192,7 +3183,7 @@ bool MainWindow::sendToNotepad(const QString &title, const QString &text, WorldR
 		return false;
 	WorldRuntime *owner  = resolveRelatedRuntime(this, relatedRuntime);
 	auto         *target = new TextChildWindow(title, text);
-	assignNotepadOwner(target, owner);
+	associateTextWindowWithRuntime(target, owner);
 	addMdiSubWindow(target);
 	return true;
 }
