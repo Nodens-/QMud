@@ -750,30 +750,6 @@ end
 		QCoreApplication::processEvents();
 	}
 
-	QPoint findNonHyperlinkPoint(WorldView &view, QTextBrowser &browser)
-	{
-		if (!browser.viewport())
-			return {-1, -1};
-
-		const auto probePoint = [&view, &browser](const QPoint &point)
-		{
-			QTest::mouseMove(browser.viewport(), point);
-			QCoreApplication::processEvents();
-			return !view.hyperlinkHoverActive();
-		};
-
-		const QRect area = browser.viewport()->rect();
-		for (int y = area.top(); y <= area.bottom(); y += 4)
-		{
-			for (int x = area.left(); x <= area.right(); x += 4)
-			{
-				if (probePoint({x, y}))
-					return {x, y};
-			}
-		}
-		return {-1, -1};
-	}
-
 	/**
 	 * Creates a visible production miniwindow fixture at rect.
 	 *
@@ -1231,39 +1207,68 @@ class tst_WorldView_Basic : public QObject
 			{ return candidate == href || QUrl::fromPercentEncoding(candidate.toUtf8()) == href; };
 			auto probePoint = [&view, &browser, &matchesHref](const QPoint &point)
 			{
-				QTest::mouseMove(browser.viewport(), point);
-				QCoreApplication::processEvents();
-				return matchesHref(view.currentHoveredHyperlink());
+				WrapTextBrowser                *matchedView = nullptr;
+				WorldView::NativeOutputPosition position;
+				QString                         candidate;
+				const QPoint                    globalPoint = browser.viewport()->mapToGlobal(point);
+				return view.nativeOutputHitTestGlobal(globalPoint, matchedView, position, &candidate, nullptr,
+				                                      true, true) &&
+				       matchesHref(candidate);
 			};
 
 			const QRect area = browser.viewport()->rect();
 			const int   fastBottom =
 			    qMin(area.bottom(), area.top() + qMax(24, QFontMetrics(browser.font()).height() * 4));
 			const int fastRight = qMin(area.right(), area.left() + 320);
-			for (int y = area.top(); y <= fastBottom; y += 2)
+			for (int y = area.top() + 1; y <= fastBottom; y += 2)
 			{
-				for (int x = area.left(); x <= fastRight; x += 2)
+				for (int x = area.left() + 1; x <= fastRight; x += 2)
 				{
 					if (probePoint({x, y}))
 						return {x, y};
 				}
 			}
 
-			for (int y = area.top(); y <= fastBottom; y += 6)
+			for (int y = area.top() + 1; y <= fastBottom; y += 6)
 			{
-				for (int x = area.left(); x <= fastRight; x += 6)
+				for (int x = area.left() + 1; x <= fastRight; x += 6)
 				{
 					if (probePoint({x, y}))
 						return {x, y};
 				}
 			}
 
-			for (int y = area.top(); y <= area.bottom(); y += 12)
+			for (int y = area.top() + 1; y <= area.bottom(); y += 12)
 			{
-				for (int x = area.left(); x <= area.right(); x += 12)
+				for (int x = area.left() + 1; x <= area.right(); x += 12)
 				{
 					if (probePoint({x, y}))
 						return {x, y};
+				}
+			}
+			return {-1, -1};
+		}
+
+		static QPoint findNonHyperlinkPoint(const WorldView &view, const QTextBrowser &browser)
+		{
+			if (!browser.viewport())
+				return {-1, -1};
+
+			const QRect area = browser.viewport()->rect();
+			for (int y = area.top() + 1; y <= area.bottom(); y += 4)
+			{
+				for (int x = area.left() + 1; x <= area.right(); x += 4)
+				{
+					WrapTextBrowser                *matchedView = nullptr;
+					WorldView::NativeOutputPosition position;
+					QString                         candidate;
+					const QPoint globalPoint = browser.viewport()->mapToGlobal(QPoint(x, y));
+					if (view.nativeOutputHitTestGlobal(globalPoint, matchedView, position, &candidate,
+					                                   nullptr, true, false) &&
+					    candidate.isEmpty())
+					{
+						return {x, y};
+					}
 				}
 			}
 			return {-1, -1};
@@ -12860,30 +12865,33 @@ class tst_WorldView_Basic : public QObject
 			const QPoint  anchorPoint = findHyperlinkPoint(view, *browser, href);
 			QVERIFY2(anchorPoint.x() >= 0 && anchorPoint.y() >= 0,
 			         "Expected hyperlink anchor in rendered output.");
+			auto sendMouseMove = [&view, browser](const QPoint &point)
+			{
+				const QPoint globalPoint = browser->viewport()->mapToGlobal(point);
+				QMouseEvent moveEvent(QEvent::MouseMove, QPointF(point), QPointF(point), QPointF(globalPoint),
+				                      Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+				static_cast<void>(view.eventFilter(browser->viewport(), &moveEvent));
+				QCoreApplication::processEvents();
+			};
 			const QPoint resetPoint = findNonHyperlinkPoint(view, *browser);
 			if (resetPoint.x() >= 0 && resetPoint.y() >= 0)
-			{
-				QTest::mouseMove(browser->viewport(), resetPoint);
-				QCoreApplication::processEvents();
-			}
+				sendMouseMove(resetPoint);
 
 			QSignalSpy hoverSpy(&view, &WorldView::hyperlinkHighlighted);
-			QTest::mouseMove(browser->viewport(), anchorPoint);
+			sendMouseMove(anchorPoint);
 			QTRY_VERIFY(view.hyperlinkHoverActive());
 			QTRY_VERIFY(!hoverSpy.isEmpty());
 			QTRY_COMPARE(hoverSpy.back().at(0).toString(), href);
 
 			// Additional movement over the same anchor must not clear hover state.
-			QTest::mouseMove(browser->viewport(), anchorPoint + QPoint(1, 0));
-			QCoreApplication::processEvents();
+			sendMouseMove(anchorPoint + QPoint(1, 0));
 			QVERIFY(view.hyperlinkHoverActive());
 
 			// Moving to a non-anchor point must clear hover deterministically.
 			const QPoint nonAnchorPoint = findNonHyperlinkPoint(view, *browser);
 			QVERIFY2(nonAnchorPoint.x() >= 0 && nonAnchorPoint.y() >= 0,
 			         "Expected non-anchor point in output viewport.");
-			QTest::mouseMove(browser->viewport(), nonAnchorPoint);
-			QCoreApplication::processEvents();
+			sendMouseMove(nonAnchorPoint);
 			QTRY_VERIFY(!view.hyperlinkHoverActive());
 			QTRY_VERIFY(!hoverSpy.isEmpty());
 			QTRY_COMPARE(hoverSpy.back().at(0).toString(), QString());
