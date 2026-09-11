@@ -2337,10 +2337,21 @@ AppController::~AppController()
 	}
 #endif
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
-	if (m_spellCheckerLua)
+	closeSpellChecker();
+	QVector<IdleSpellCheckerState> remainingSpellCheckerStates;
 	{
-		lua_close(m_spellCheckerLua);
-		m_spellCheckerLua = nullptr;
+		QMutexLocker locker(&m_spellCheckerPoolMutex);
+		remainingSpellCheckerStates = std::move(m_idleSpellCheckerStates);
+		m_spellCheckerOwnerThreads.clear();
+		m_spellCheckerThreadCleanupContexts.clear();
+		m_spellCheckerWorldOwners.clear();
+	}
+	for (const IdleSpellCheckerState &entry : std::as_const(remainingSpellCheckerStates))
+	{
+		Q_ASSERT(!entry.ownerThread || entry.ownerThread == QThread::currentThread() ||
+		         !entry.ownerThread->isRunning());
+		if (entry.state)
+			lua_close(entry.state);
 	}
 #endif
 	if (s_instance == this)
@@ -6784,164 +6795,6 @@ static QString findSpellCheckerPath(const QString &baseDir)
 	return {};
 }
 
-namespace
-{
-	constexpr auto kSpellProgressMetaName = "qmud.spell_progress_dialog";
-
-	struct SpellProgressDialog
-	{
-			QPointer<QProgressDialog> dialog;
-			int                       step{1};
-	};
-
-	SpellProgressDialog *spellProgressCheck(lua_State *L)
-	{
-		auto **ud = static_cast<SpellProgressDialog **>(luaL_checkudata(L, 1, kSpellProgressMetaName));
-		if (!ud || !*ud)
-		{
-			luaL_argerror(L, 1, "progress dialog userdata expected");
-			return nullptr;
-		}
-		return *ud;
-	}
-
-	int luaSpellProgressGc(lua_State *L)
-	{
-		auto **ud = static_cast<SpellProgressDialog **>(luaL_checkudata(L, 1, kSpellProgressMetaName));
-		if (!ud || !*ud)
-			return 0;
-
-		SpellProgressDialog *p = *ud;
-		if (p->dialog)
-		{
-			p->dialog->close();
-			delete p->dialog;
-			p->dialog = nullptr;
-		}
-		delete p;
-		*ud = nullptr;
-		return 0;
-	}
-
-	int luaSpellProgressNew(lua_State *L)
-	{
-		const char          *status     = luaL_optstring(L, 1, "");
-		const AppController *controller = AppController::instance();
-		QWidget             *parent = controller ? static_cast<QWidget *>(controller->mainWindow()) : nullptr;
-
-		auto                *p = new SpellProgressDialog;
-		p->dialog = new QProgressDialog(QString::fromUtf8(status), QStringLiteral("Cancel"), 0, 100, parent);
-		p->dialog->setWindowTitle(QStringLiteral("QMud"));
-		p->dialog->setAutoClose(false);
-		p->dialog->setAutoReset(false);
-		p->dialog->setMinimumDuration(0);
-		p->dialog->setWindowModality(Qt::WindowModal);
-		p->dialog->show();
-		QCoreApplication::processEvents();
-
-		auto **ud = static_cast<SpellProgressDialog **>(lua_newuserdata(L, sizeof(SpellProgressDialog *)));
-		*ud       = p;
-		luaL_getmetatable(L, kSpellProgressMetaName);
-		lua_setmetatable(L, -2);
-		return 1;
-	}
-
-	int luaSpellProgressSetStatus(lua_State *L)
-	{
-		const SpellProgressDialog *p      = spellProgressCheck(L);
-		const char                *status = luaL_checkstring(L, 2);
-		if (p->dialog)
-		{
-			p->dialog->setLabelText(QString::fromUtf8(status));
-			QCoreApplication::processEvents();
-		}
-		return 0;
-	}
-
-	int luaSpellProgressSetRange(lua_State *L)
-	{
-		const SpellProgressDialog *p     = spellProgressCheck(L);
-		const int                  start = static_cast<int>(luaL_checkinteger(L, 2));
-		const int                  end   = static_cast<int>(luaL_checkinteger(L, 3));
-		if (p->dialog)
-		{
-			p->dialog->setRange(start, end);
-			QCoreApplication::processEvents();
-		}
-		return 0;
-	}
-
-	int luaSpellProgressSetPosition(lua_State *L)
-	{
-		const SpellProgressDialog *p   = spellProgressCheck(L);
-		const int                  pos = static_cast<int>(luaL_checkinteger(L, 2));
-		if (p->dialog)
-		{
-			p->dialog->setValue(pos);
-			QCoreApplication::processEvents();
-		}
-		return 0;
-	}
-
-	int luaSpellProgressSetStep(lua_State *L)
-	{
-		SpellProgressDialog *p = spellProgressCheck(L);
-		p->step                = static_cast<int>(luaL_checkinteger(L, 2));
-		if (p->step <= 0)
-			p->step = 1;
-		return 0;
-	}
-
-	int luaSpellProgressStep(lua_State *L)
-	{
-		if (const SpellProgressDialog *p = spellProgressCheck(L); p->dialog)
-		{
-			p->dialog->setValue(p->dialog->value() + p->step);
-			QCoreApplication::processEvents();
-		}
-		return 0;
-	}
-
-	int luaSpellProgressCheckCancel(lua_State *L)
-	{
-		const SpellProgressDialog *p = spellProgressCheck(L);
-		lua_pushboolean(L, p->dialog && p->dialog->wasCanceled() ? 1 : 0);
-		return 1;
-	}
-
-	void registerSpellProgressLibrary(lua_State *L)
-	{
-		if (!L)
-			return;
-
-		luaL_newmetatable(L, kSpellProgressMetaName);
-		lua_pushvalue(L, -1);
-		lua_setfield(L, -2, "__index");
-		lua_pushcfunction(L, luaSpellProgressGc);
-		lua_setfield(L, -2, "__gc");
-		lua_pushcfunction(L, luaSpellProgressGc);
-		lua_setfield(L, -2, "close");
-		lua_pushcfunction(L, luaSpellProgressSetStatus);
-		lua_setfield(L, -2, "status");
-		lua_pushcfunction(L, luaSpellProgressSetRange);
-		lua_setfield(L, -2, "range");
-		lua_pushcfunction(L, luaSpellProgressSetPosition);
-		lua_setfield(L, -2, "position");
-		lua_pushcfunction(L, luaSpellProgressSetStep);
-		lua_setfield(L, -2, "setstep");
-		lua_pushcfunction(L, luaSpellProgressStep);
-		lua_setfield(L, -2, "step");
-		lua_pushcfunction(L, luaSpellProgressCheckCancel);
-		lua_setfield(L, -2, "checkcancel");
-		lua_pop(L, 1);
-
-		lua_newtable(L);
-		lua_pushcfunction(L, luaSpellProgressNew);
-		lua_setfield(L, -2, "new");
-		lua_setglobal(L, "progress");
-	}
-} // namespace
-
 static int luaSpellCheckDialog(lua_State *L)
 {
 	const char *word = luaL_checkstring(L, 1);
@@ -7138,27 +6991,17 @@ static int luaUtilsInfoQt(lua_State *L)
 	return 1;
 }
 
-bool AppController::ensureSpellCheckerLoaded()
+lua_State *AppController::createSpellCheckerState() const
 {
-	QMutexLocker locker(&m_luaStateMutex);
-	if (const int enableSpellCheck = getGlobalOption(QStringLiteral("EnableSpellCheck")).toInt();
-	    !enableSpellCheck)
-	{
-		return false;
-	}
-	if (m_spellCheckerLua)
-		return m_spellCheckOk;
-
 	LuaStateOwner state(QMudLuaSupport::makeLuaState());
 	if (!state)
-		return false;
+		return nullptr;
 
 	luaL_openlibs(state.get());
 	QMudLuaSupport::applyLua51Compat(state.get());
 	qmudLogLua51CompatState(state.get(), "AppController spellchecker");
 	QMudLuaSupport::callLuaCFunction(state.get(), luaopen_lsqlite3);
 	installSpellPathCompat(state.get());
-	registerSpellProgressLibrary(state.get());
 	lua_getglobal(state.get(), "utils");
 	if (!lua_istable(state.get(), -1))
 	{
@@ -7169,58 +7012,258 @@ bool AppController::ensureSpellCheckerLoaded()
 	}
 	if (lua_istable(state.get(), -1))
 	{
+		lua_pushcfunction(state.get(), QMudLuaSupport::luaUtilsEditDistance);
+		lua_setfield(state.get(), -2, "edit_distance");
 		lua_pushcfunction(state.get(), luaUtilsInfoQt);
 		lua_setfield(state.get(), -2, "info");
+		lua_pushcfunction(state.get(), QMudLuaSupport::luaUtilsMetaphone);
+		lua_setfield(state.get(), -2, "metaphone");
 		lua_pushcfunction(state.get(), luaSpellCheckDialog);
 		lua_setfield(state.get(), -2, "spellcheckdialog");
 	}
 	lua_pop(state.get(), 1);
 
-	const bool enablePackage = getGlobalOption(QStringLiteral("AllowLoadingDlls")).toInt() != 0;
-	QMudLuaSupport::applyLuaSecurityRestrictions(state.get(), enablePackage);
+	QMudLuaSupport::applyLuaSecurityRestrictions(state.get(), false);
 
 	QString spellPath = findSpellCheckerPath(m_workingDir);
 	if (spellPath.isEmpty())
 		spellPath = findSpellCheckerPath(QCoreApplication::applicationDirPath());
 
 	if (spellPath.isEmpty())
-		return false;
+		return nullptr;
 
 	if (const QByteArray pathBytes = spellPath.toUtf8();
 	    luaL_loadfile(state.get(), pathBytes.constData()) ||
 	    QMudLuaSupport::callLuaProtected(state.get(), 0, 0, 0))
 	{
 		QMudLuaSupport::luaError(state.get(), "Spellcheck initialization");
-		return false;
+		return nullptr;
 	}
 
 	lua_getglobal(state.get(), "spellcheck");
 	if (!lua_isfunction(state.get(), -1))
 	{
 		lua_pop(state.get(), 1);
-		return false;
+		return nullptr;
 	}
 	lua_pop(state.get(), 1);
-
-	m_spellCheckerLua = state.release();
-	m_spellCheckOk    = true;
-	return true;
+	return state.release();
 }
 
-int AppController::addSpellCheckWord(const QByteArray &original, const QByteArray &action,
-                                     const QByteArray &replacement)
+AppController::SpellCheckerStateLease AppController::acquireSpellCheckerState(const WorldRuntime *worldOwner)
 {
-	QMutexLocker locker(&m_luaStateMutex);
-	if (!ensureSpellCheckerLoaded())
-		return eSpellCheckNotActive;
-	lua_State *spell = m_spellCheckerLua;
+	for (;;)
+	{
+		if (const int enableSpellCheck = getGlobalOption(QStringLiteral("EnableSpellCheck")).toInt();
+		    !enableSpellCheck)
+		{
+			return {};
+		}
+
+		QThread             *ownerThread = QThread::currentThread();
+		QVector<lua_State *> staleStates;
+		lua_State           *pooledState        = nullptr;
+		quint64              generation         = 0;
+		bool                 initializesStorage = false;
+		{
+			QMutexLocker locker(&m_spellCheckerPoolMutex);
+			if (!m_spellCheckerStorageInitialized && m_spellCheckerStorageInitializationInProgress)
+			{
+				if (m_spellCheckerStorageInitializationThread == ownerThread)
+					return {};
+				m_spellCheckerStorageReady.wait(&m_spellCheckerPoolMutex);
+				continue;
+			}
+
+			for (auto it = m_idleSpellCheckerStates.begin(); it != m_idleSpellCheckerStates.end();)
+			{
+				if (it->ownerThread == ownerThread && it->generation != m_spellCheckerGeneration)
+				{
+					if (it->state)
+						staleStates.push_back(it->state);
+					it = m_idleSpellCheckerStates.erase(it);
+				}
+				else
+				{
+					++it;
+				}
+			}
+
+			if (worldOwner)
+			{
+				for (qsizetype i = m_idleSpellCheckerStates.size(); i > 0; --i)
+				{
+					const qsizetype index = i - 1;
+					const auto     &entry = m_idleSpellCheckerStates.at(index);
+					if (entry.worldOwner != worldOwner || entry.ownerThread != ownerThread ||
+					    entry.generation != m_spellCheckerGeneration)
+					{
+						continue;
+					}
+					pooledState = m_idleSpellCheckerStates.takeAt(index).state;
+					break;
+				}
+			}
+
+			generation = m_spellCheckerGeneration;
+			if (!pooledState && !m_spellCheckerStorageInitialized)
+			{
+				m_spellCheckerStorageInitializationInProgress = true;
+				m_spellCheckerStorageInitializationThread     = ownerThread;
+				initializesStorage                            = true;
+			}
+		}
+
+		for (lua_State *state : std::as_const(staleStates))
+			lua_close(state);
+		if (pooledState)
+			return {pooledState, worldOwner, ownerThread, generation};
+
+		LuaStateOwner state(createSpellCheckerState());
+		QThread      *applicationThread =
+		    QCoreApplication::instance() ? QCoreApplication::instance()->thread() : nullptr;
+		std::unique_ptr<QObject> cleanupContext;
+		if (state && worldOwner && ownerThread != applicationThread)
+			cleanupContext = std::make_unique<QObject>();
+
+		bool accepted            = false;
+		bool registerOwnerThread = false;
+		{
+			QMutexLocker locker(&m_spellCheckerPoolMutex);
+			if (initializesStorage)
+			{
+				if (state)
+					m_spellCheckerStorageInitialized = true;
+				m_spellCheckerStorageInitializationInProgress = false;
+				m_spellCheckerStorageInitializationThread     = nullptr;
+				m_spellCheckerStorageReady.wakeAll();
+			}
+			accepted = state && generation == m_spellCheckerGeneration;
+			if (accepted && worldOwner)
+			{
+				m_spellCheckerWorldOwners.insert(worldOwner);
+				if (!m_spellCheckerOwnerThreads.contains(ownerThread))
+				{
+					m_spellCheckerOwnerThreads.insert(ownerThread);
+					if (cleanupContext)
+						m_spellCheckerThreadCleanupContexts.insert(ownerThread, cleanupContext.get());
+					registerOwnerThread = true;
+				}
+			}
+		}
+
+		if (!accepted)
+		{
+			if (state)
+				continue;
+			return {};
+		}
+
+		if (registerOwnerThread && cleanupContext)
+		{
+			QObject *context = cleanupContext.release();
+			connect(
+			    ownerThread, &QThread::finished, this, [this, ownerThread]
+			    { discardSpellCheckerStatesForThread(ownerThread); }, Qt::DirectConnection);
+			connect(ownerThread, &QThread::finished, context, &QObject::deleteLater);
+		}
+		return {state.release(), worldOwner, ownerThread, generation};
+	}
+}
+
+void AppController::releaseSpellCheckerState(const SpellCheckerStateLease &lease, const bool reusable)
+{
+	if (!lease.state)
+		return;
+	Q_ASSERT(!lease.ownerThread || lease.ownerThread == QThread::currentThread());
+	bool pooled = false;
+	{
+		QMutexLocker locker(&m_spellCheckerPoolMutex);
+		if (reusable && lease.worldOwner && m_spellCheckerWorldOwners.contains(lease.worldOwner) &&
+		    lease.ownerThread == QThread::currentThread() && lease.generation == m_spellCheckerGeneration)
+		{
+			m_idleSpellCheckerStates.push_back(
+			    {lease.state, lease.worldOwner, lease.ownerThread, lease.generation});
+			pooled = true;
+		}
+	}
+	if (!pooled)
+		lua_close(lease.state);
+}
+
+void AppController::discardSpellCheckerStatesForThread(QThread *ownerThread)
+{
+	QVector<lua_State *> states;
+	{
+		QMutexLocker locker(&m_spellCheckerPoolMutex);
+		for (auto it = m_idleSpellCheckerStates.begin(); it != m_idleSpellCheckerStates.end();)
+		{
+			if (it->ownerThread == ownerThread)
+			{
+				if (it->state)
+					states.push_back(it->state);
+				it = m_idleSpellCheckerStates.erase(it);
+			}
+			else
+			{
+				++it;
+			}
+		}
+		m_spellCheckerOwnerThreads.remove(ownerThread);
+		m_spellCheckerThreadCleanupContexts.remove(ownerThread);
+	}
+	for (lua_State *state : std::as_const(states))
+		lua_close(state);
+}
+
+void AppController::discardStaleSpellCheckerStatesForThread(const QThread *ownerThread)
+{
+	QVector<lua_State *> states;
+	{
+		QMutexLocker locker(&m_spellCheckerPoolMutex);
+		for (auto it = m_idleSpellCheckerStates.begin(); it != m_idleSpellCheckerStates.end();)
+		{
+			if (it->ownerThread == ownerThread && it->generation != m_spellCheckerGeneration)
+			{
+				if (it->state)
+					states.push_back(it->state);
+				it = m_idleSpellCheckerStates.erase(it);
+			}
+			else
+			{
+				++it;
+			}
+		}
+	}
+	for (lua_State *state : std::as_const(states))
+		lua_close(state);
+}
+
+bool AppController::ensureSpellCheckerLoaded()
+{
+	const SpellCheckerStateLease lease  = acquireSpellCheckerState(nullptr);
+	const bool                   loaded = lease.state != nullptr;
+	releaseSpellCheckerState(lease, true);
+	return loaded;
+}
+
+int AppController::addSpellCheckWord(const WorldRuntime *worldOwner, const QByteArray &original,
+                                     const QByteArray &action, const QByteArray &replacement)
+{
+	const SpellCheckerStateLease lease = acquireSpellCheckerState(worldOwner);
+	lua_State                   *spell = lease.state;
 	if (!spell)
 		return eSpellCheckNotActive;
+	bool       reusable = true;
+	const auto releaseState =
+	    qScopeGuard([this, lease, &reusable] { releaseSpellCheckerState(lease, reusable); });
+	Q_UNUSED(releaseState);
 
 	lua_settop(spell, 0);
 	lua_getglobal(spell, "spellcheck_add_word");
 	if (!lua_isfunction(spell, -1))
 	{
+		reusable = false;
 		lua_settop(spell, 0);
 		return eSpellCheckNotActive;
 	}
@@ -7231,7 +7274,7 @@ int AppController::addSpellCheckWord(const QByteArray &original, const QByteArra
 	{
 		Q_UNUSED(error);
 		QMudLuaSupport::luaError(spell, "Run-time error", "spellcheck_add_word", "world.AddSpellCheckWord");
-		closeSpellChecker();
+		reusable = false;
 		return eSpellCheckNotActive;
 	}
 
@@ -7245,19 +7288,23 @@ int AppController::addSpellCheckWord(const QByteArray &original, const QByteArra
 	return eOK;
 }
 
-QVariant AppController::spellCheckString(const QString &text, const QString &errorContext)
+QVariant AppController::spellCheckString(const WorldRuntime *worldOwner, const QString &text,
+                                         const QString &errorContext)
 {
-	QMutexLocker locker(&m_luaStateMutex);
-	if (!ensureSpellCheckerLoaded())
-		return {};
-	lua_State *spell = m_spellCheckerLua;
+	const SpellCheckerStateLease lease = acquireSpellCheckerState(worldOwner);
+	lua_State                   *spell = lease.state;
 	if (!spell)
 		return {};
+	bool       reusable = true;
+	const auto releaseState =
+	    qScopeGuard([this, lease, &reusable] { releaseSpellCheckerState(lease, reusable); });
+	Q_UNUSED(releaseState);
 
 	lua_settop(spell, 0);
 	lua_getglobal(spell, "spellcheck_string");
 	if (!lua_isfunction(spell, -1))
 	{
+		reusable = false;
 		lua_settop(spell, 0);
 		return {};
 	}
@@ -7268,7 +7315,7 @@ QVariant AppController::spellCheckString(const QString &text, const QString &err
 		Q_UNUSED(error);
 		QMudLuaSupport::luaError(spell, "Run-time error", "spellcheck_string",
 		                         errorContext.toLocal8Bit().constData());
-		lua_settop(spell, 0);
+		reusable = false;
 		return {};
 	}
 
@@ -7309,34 +7356,60 @@ QVariant AppController::spellCheckString(const QString &text, const QString &err
 	return errors;
 }
 
-AppController::SpellCommandResult AppController::spellCheckCommandText(const QString &selectedText,
-                                                                       const bool     all)
+AppController::SpellCommandResult AppController::spellCheckCommandText(const WorldRuntime *worldOwner,
+                                                                       const QString      &selectedText,
+                                                                       const bool          all,
+                                                                       const QString      &errorContext)
 {
-	QMutexLocker       locker(&m_luaStateMutex);
-	SpellCommandResult result;
-	if (!ensureSpellCheckerLoaded())
-		return result;
-	lua_State *spell = m_spellCheckerLua;
+	return spellCheckInteractiveText(worldOwner, selectedText, all, errorContext,
+	                                 InteractiveSpellCheckMode::Command);
+}
+
+AppController::SpellCommandResult AppController::spellCheckDialogText(const WorldRuntime *worldOwner,
+                                                                      const QString      &text,
+                                                                      const QString      &errorContext)
+{
+	return spellCheckInteractiveText(worldOwner, text, false, errorContext,
+	                                 InteractiveSpellCheckMode::Dialog);
+}
+
+AppController::SpellCommandResult
+AppController::spellCheckInteractiveText(const WorldRuntime *worldOwner, const QString &text, const bool all,
+                                         const QString &errorContext, const InteractiveSpellCheckMode mode)
+{
+	SpellCommandResult           result;
+	const SpellCheckerStateLease lease = acquireSpellCheckerState(worldOwner);
+	lua_State                   *spell = lease.state;
 	if (!spell)
 		return result;
+	bool       reusable = true;
+	const auto releaseState =
+	    qScopeGuard([this, lease, &reusable] { releaseSpellCheckerState(lease, reusable); });
+	Q_UNUSED(releaseState);
 
 	lua_settop(spell, 0);
 	lua_getglobal(spell, "spellcheck");
 	if (!lua_isfunction(spell, -1))
 	{
+		reusable = false;
 		lua_settop(spell, 0);
 		return result;
 	}
 
-	const QByteArray textBytes = selectedText.toUtf8();
+	const QByteArray textBytes = text.toUtf8();
 	lua_pushlstring(spell, textBytes.constData(), textBytes.size());
-	lua_pushboolean(spell, all);
-	if (const int error = QMudLuaSupport::callLuaWithTraceback(spell, 2, 1); error)
+	int argumentCount = 1;
+	if (mode == InteractiveSpellCheckMode::Command)
+	{
+		lua_pushboolean(spell, all);
+		argumentCount = 2;
+	}
+	if (const int error = QMudLuaSupport::callLuaWithTraceback(spell, argumentCount, 1); error)
 	{
 		Q_UNUSED(error);
-		QMudLuaSupport::luaError(spell, "Run-time error", "spellcheck", "Command-line spell-check");
-		closeSpellChecker();
-		lua_settop(spell, 0);
+		QMudLuaSupport::luaError(spell, "Run-time error", "spellcheck",
+		                         errorContext.toLocal8Bit().constData());
+		reusable = false;
 		return result;
 	}
 
@@ -7355,13 +7428,82 @@ AppController::SpellCommandResult AppController::spellCheckCommandText(const QSt
 
 void AppController::closeSpellChecker()
 {
-	QMutexLocker locker(&m_luaStateMutex);
-	if (m_spellCheckerLua)
+	QVector<lua_State *>                         states;
+	QVector<QPair<QThread *, QPointer<QObject>>> cleanupContexts;
 	{
-		lua_close(m_spellCheckerLua);
-		m_spellCheckerLua = nullptr;
+		QMutexLocker locker(&m_spellCheckerPoolMutex);
+		if (++m_spellCheckerGeneration == 0)
+			++m_spellCheckerGeneration;
+		for (auto it = m_idleSpellCheckerStates.begin(); it != m_idleSpellCheckerStates.end();)
+		{
+			if (it->ownerThread == QThread::currentThread())
+			{
+				if (it->state)
+					states.push_back(it->state);
+				it = m_idleSpellCheckerStates.erase(it);
+			}
+			else
+			{
+				++it;
+			}
+		}
+		cleanupContexts.reserve(m_spellCheckerThreadCleanupContexts.size());
+		for (auto it = m_spellCheckerThreadCleanupContexts.cbegin();
+		     it != m_spellCheckerThreadCleanupContexts.cend(); ++it)
+		{
+			if (it.key() != QThread::currentThread() && it.value())
+				cleanupContexts.push_back({it.key(), it.value()});
+		}
 	}
-	m_spellCheckOk = false;
+	for (lua_State *state : std::as_const(states))
+		lua_close(state);
+	const QPointer<AppController> controller(this);
+	for (const auto &[ownerThread, context] : std::as_const(cleanupContexts))
+	{
+		if (!context)
+			continue;
+		QMetaObject::invokeMethod(
+		    context.data(),
+		    [controller, ownerThread]
+		    {
+			    if (controller)
+				    controller->discardStaleSpellCheckerStatesForThread(ownerThread);
+		    },
+		    Qt::QueuedConnection);
+	}
+}
+
+void AppController::releaseSpellCheckerForWorld(const WorldRuntime *worldOwner)
+{
+	if (!worldOwner)
+		return;
+	QVector<lua_State *> states;
+	{
+		QMutexLocker locker(&m_spellCheckerPoolMutex);
+		if (!m_spellCheckerWorldOwners.remove(worldOwner))
+			return;
+		for (auto it = m_idleSpellCheckerStates.begin(); it != m_idleSpellCheckerStates.end();)
+		{
+			if (it->worldOwner == worldOwner)
+			{
+				Q_ASSERT(!it->ownerThread || it->ownerThread == QThread::currentThread());
+				if (it->state)
+					states.push_back(it->state);
+				it = m_idleSpellCheckerStates.erase(it);
+			}
+			else
+			{
+				++it;
+			}
+		}
+		if (m_spellCheckerWorldOwners.isEmpty())
+		{
+			if (++m_spellCheckerGeneration == 0)
+				++m_spellCheckerGeneration;
+		}
+	}
+	for (lua_State *state : std::as_const(states))
+		lua_close(state);
 }
 #endif
 
@@ -7782,8 +7924,6 @@ void AppController::applyPackagePreferences() const
 	{
 		if (m_translatorLua)
 			QMudLuaSupport::applyLuaSecurityRestrictions(m_translatorLua, enablePackage);
-		if (m_spellCheckerLua)
-			QMudLuaSupport::applyLuaSecurityRestrictions(m_spellCheckerLua, enablePackage);
 	}
 #endif
 
@@ -12459,7 +12599,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!m_mainWindow)
 			return;
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
-		QPlainTextEdit *edit = nullptr;
+		QPlainTextEdit     *edit       = nullptr;
+		const WorldRuntime *worldOwner = nullptr;
 		if (auto *focus = QApplication::focusWidget(); auto *plain = qobject_cast<QPlainTextEdit *>(focus))
 			edit = plain;
 		if (!edit)
@@ -12467,7 +12608,10 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			if (auto *world = m_mainWindow->activeWorldChildWindow())
 			{
 				if (auto *view = world->view())
-					edit = view->inputEditor();
+				{
+					edit       = view->inputEditor();
+					worldOwner = world->runtime();
+				}
 			}
 		}
 		if (!edit)
@@ -12477,6 +12621,14 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		}
 		if (!edit)
 			return;
+		if (!worldOwner)
+		{
+			if (const auto *world = m_mainWindow->activeWorldChildWindow();
+			    world && world->view() && world->view()->inputEditor() == edit)
+			{
+				worldOwner = world->runtime();
+			}
+		}
 
 		auto       cursor    = edit->textCursor();
 		const auto origStart = cursor.selectionStart();
@@ -12491,7 +12643,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		}
 		selected.replace(QChar(0x2029), QLatin1Char('\n'));
 
-		const SpellCommandResult decision = spellCheckCommandText(selected, all);
+		const SpellCommandResult decision =
+		    spellCheckCommandText(worldOwner, selected, all, QStringLiteral("Command-line spell-check"));
 		if (decision.status == 1)
 		{
 			if (all)

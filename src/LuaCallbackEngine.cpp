@@ -12,7 +12,6 @@
 
 #include "AcceleratorUtils.h"
 #include "AppController.h"
-#include "DoubleMetaphone.h"
 #include "ErrorDescriptions.h"
 #include "Flags.h"
 #include "FontUtils.h"
@@ -2698,6 +2697,23 @@ namespace
 			    cached.inputSelectionEndColumn   = 0;
 		    });
 		invalidateCallbackMiniWindowGeometryConstraintSnapshot(engine);
+	}
+
+	void setCallbackCommandSelectionSnapshot(const LuaCallbackEngine *engine, const int selectionStart,
+	                                         const int selectionEnd)
+	{
+		updateCachedCommandUiSnapshot(engine,
+		                              [selectionStart, selectionEnd](WorldRuntime::CommandUiSnapshot &cached)
+		                              {
+			                              const int inputLength =
+			                                  cached.commandInputText.size() > std::numeric_limits<int>::max()
+			                                      ? std::numeric_limits<int>::max()
+			                                      : static_cast<int>(cached.commandInputText.size());
+			                              const int start = std::clamp(selectionStart, 0, inputLength);
+			                              const int end   = std::clamp(selectionEnd, start, inputLength);
+			                              cached.inputSelectionStartColumn = start + 1;
+			                              cached.inputSelectionEndColumn   = end > start ? end : 0;
+		                              });
 	}
 
 	bool tryResolveCallbackCommandHistoryFromCache(const LuaCallbackEngine *engine, QStringList &history)
@@ -14002,12 +14018,14 @@ static int luaAddMapperComment(lua_State *L)
 
 static int luaAddSpellCheckWord(lua_State *L)
 {
-	size_t      originalLen    = 0;
-	size_t      actionLen      = 0;
-	size_t      replacementLen = 0;
-	const char *original       = luaL_checklstring(L, 1, &originalLen);
-	const char *action         = luaL_checklstring(L, 2, &actionLen);
-	const char *replacement    = luaL_optlstring(L, 3, "", &replacementLen);
+	auto         *engine         = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
+	WorldRuntime *worldOwner     = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
+	size_t        originalLen    = 0;
+	size_t        actionLen      = 0;
+	size_t        replacementLen = 0;
+	const char   *original       = luaL_checklstring(L, 1, &originalLen);
+	const char   *action         = luaL_checklstring(L, 2, &actionLen);
+	const char   *replacement    = luaL_optlstring(L, 3, "", &replacementLen);
 	if (originalLen == 0 || originalLen > 63 || replacementLen > 63)
 	{
 		lua_pushnumber(L, eBadParameter);
@@ -14033,14 +14051,15 @@ static int luaAddSpellCheckWord(lua_State *L)
 	}
 
 	AppController *controller = AppController::instance();
-	if (!controller)
+	if (!controller || !worldOwner)
 	{
 		lua_pushnumber(L, eSpellCheckNotActive);
 		return 1;
 	}
-	const int result = controller->addSpellCheckWord(
-	    QByteArray(original, static_cast<int>(originalLen)), QByteArray(action, static_cast<int>(actionLen)),
-	    QByteArray(replacement, static_cast<int>(replacementLen)));
+	const int result =
+	    controller->addSpellCheckWord(worldOwner, QByteArray(original, static_cast<int>(originalLen)),
+	                                  QByteArray(action, static_cast<int>(actionLen)),
+	                                  QByteArray(replacement, static_cast<int>(replacementLen)));
 	lua_pushnumber(L, result);
 	return 1;
 }
@@ -26660,14 +26679,17 @@ static int luaSetSpeedWalkDelay(lua_State *L)
 
 static int luaSpellCheck(lua_State *L)
 {
+	auto          *engine     = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
+	WorldRuntime  *worldOwner = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
 	const QString  text       = QString::fromUtf8(luaL_checkstring(L, 1));
 	AppController *controller = AppController::instance();
-	if (!controller)
+	if (!controller || !worldOwner)
 	{
 		lua_pushnil(L);
 		return 1;
 	}
-	const QVariant result = controller->spellCheckString(text, QStringLiteral("world.SpellCheck"));
+	const QVariant result =
+	    controller->spellCheckString(worldOwner, text, QStringLiteral("world.SpellCheck"));
 	if (!result.isValid())
 	{
 		lua_pushnil(L);
@@ -26690,6 +26712,89 @@ static int luaSpellCheck(lua_State *L)
 		return 1;
 	}
 	lua_pushnil(L);
+	return 1;
+}
+
+static bool applySpellCheckCommandReplacement(const WorldRuntime &runtime, const QString &expectedInput,
+                                              const int replacementStart, const int replacementEnd,
+                                              const QString &replacement, const int restoreSelectionStart,
+                                              const int restoreSelectionEnd)
+{
+	WorldView *view = runtime.view();
+	if (!view)
+		return false;
+	QPlainTextEdit *input = view->inputEditor();
+	if (!input || input->toPlainText() != expectedInput)
+		return false;
+
+	const int   inputLength             = expectedInput.size() > std::numeric_limits<int>::max()
+	                                          ? std::numeric_limits<int>::max()
+	                                          : static_cast<int>(expectedInput.size());
+	const int   boundedReplacementStart = std::clamp(replacementStart, 0, inputLength);
+	const int   boundedReplacementEnd   = std::clamp(replacementEnd, boundedReplacementStart, inputLength);
+	QTextCursor replaceCursor           = input->textCursor();
+	replaceCursor.setPosition(boundedReplacementStart);
+	replaceCursor.setPosition(boundedReplacementEnd, QTextCursor::KeepAnchor);
+	replaceCursor.insertText(replacement);
+
+	const qsizetype updatedLengthRaw = input->toPlainText().size();
+	const int       updatedLength    = updatedLengthRaw > std::numeric_limits<int>::max()
+	                                       ? std::numeric_limits<int>::max()
+	                                       : static_cast<int>(updatedLengthRaw);
+	const int       restoreStart     = std::clamp(restoreSelectionStart, 0, updatedLength);
+	const int       restoreEnd       = std::clamp(restoreSelectionEnd, restoreStart, updatedLength);
+	QTextCursor     restore          = input->textCursor();
+	restore.setPosition(restoreStart);
+	restore.setPosition(restoreEnd, QTextCursor::KeepAnchor);
+	input->setTextCursor(restore);
+	return true;
+}
+
+static int luaSpellCheckCommandContinuation(lua_State *L, int status, lua_KContext context)
+{
+	Q_UNUSED(status);
+	Q_UNUSED(context);
+	auto             *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
+	WorldRuntime     *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
+	const QJsonObject result  = luaModalJsonResultArgument(L);
+	const int         decisionStatus = result.value(QStringLiteral("status")).toInt(-1);
+	if (!runtime || decisionStatus <= 0)
+	{
+		lua_pushnumber(L, runtime ? decisionStatus : -1);
+		return 1;
+	}
+
+	const QString expectedInput         = result.value(QStringLiteral("expectedInput")).toString();
+	const int     replacementStart      = result.value(QStringLiteral("replacementStart")).toInt();
+	const int     replacementEnd        = result.value(QStringLiteral("replacementEnd")).toInt();
+	const int     restoreSelectionStart = result.value(QStringLiteral("restoreSelectionStart")).toInt();
+	const int     restoreSelectionEnd   = result.value(QStringLiteral("restoreSelectionEnd")).toInt();
+	const QString replacement           = result.value(QStringLiteral("replacement")).toString();
+	const LuaPluginAsyncResultRequest requestId = nextPluginAsyncResultRequest(engine);
+	const bool                        accepted  = enqueueRuntimeThreadDeferredMutationNoResult(
+	    engine, runtime,
+	    [expectedInput, replacementStart, replacementEnd, replacement, restoreSelectionStart,
+	     restoreSelectionEnd, requestId](WorldRuntime &targetRuntime)
+	    {
+		    const bool applied = applySpellCheckCommandReplacement(
+		        targetRuntime, expectedInput, replacementStart, replacementEnd, replacement,
+		        restoreSelectionStart, restoreSelectionEnd);
+		    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("SpellCheckCommand"), applied,
+		                          applied ? 0 : -1, applied ? QStringLiteral("1") : QString());
+	    });
+	if (!accepted)
+	{
+		lua_pushnumber(L, -1);
+		return 1;
+	}
+	replaceCallbackCommandSelectionSnapshot(engine, replacementStart, replacementEnd, replacement);
+	setCallbackCommandSelectionSnapshot(engine, restoreSelectionStart, restoreSelectionEnd);
+	lua_pushnumber(L, 1);
+	if (requestId.isValid())
+	{
+		lua_pushnumber(L, static_cast<lua_Number>(requestId.requestId));
+		return 2;
+	}
 	return 1;
 }
 
@@ -26746,7 +26851,8 @@ static int luaSpellCheckCommand(lua_State *L)
 			selected = input->toPlainText();
 		}
 
-		const AppController::SpellCommandResult decision = controller->spellCheckCommandText(selected, all);
+		const AppController::SpellCommandResult decision = controller->spellCheckCommandText(
+		    &targetRuntime, selected, all, QStringLiteral("world.SpellCheckCommand"));
 		if (decision.status < 0)
 			return -1;
 
@@ -26765,53 +26871,16 @@ static int luaSpellCheckCommand(lua_State *L)
 		input->setTextCursor(restore);
 		return resultValue;
 	};
-	const auto runSpellCheckDecision = [](const QString &selectedText, const bool all,
-	                                      QString &replacementOut) -> int
+	const auto runSpellCheckDecision = [runtime](const QString &selectedText, const bool all,
+	                                             QString &replacementOut) -> int
 	{
 		AppController *controller = AppController::instance();
 		if (!controller)
 			return -1;
-		const AppController::SpellCommandResult result = controller->spellCheckCommandText(selectedText, all);
-		replacementOut                                 = result.replacement;
+		const AppController::SpellCommandResult result = controller->spellCheckCommandText(
+		    runtime, selectedText, all, QStringLiteral("world.SpellCheckCommand"));
+		replacementOut = result.replacement;
 		return result.status;
-	};
-	const auto applySpellCheckReplacement =
-	    [](const WorldRuntime &targetRuntime, const QString &expectedInput, const int selectionStart,
-	       const int selectionEnd, const bool all, const QString &replacement) -> bool
-	{
-		WorldView *view = targetRuntime.view();
-		if (!view)
-			return false;
-		QPlainTextEdit *input = view->inputEditor();
-		if (!input)
-			return false;
-		if (input->toPlainText() != expectedInput)
-			return false;
-
-		if (all)
-			input->selectAll();
-		else
-		{
-			QTextCursor selection = input->textCursor();
-			selection.setPosition(selectionStart);
-			selection.setPosition(selectionEnd, QTextCursor::KeepAnchor);
-			input->setTextCursor(selection);
-		}
-
-		QTextCursor replaceCursor = input->textCursor();
-		replaceCursor.insertText(replacement);
-
-		const qsizetype updatedLengthRaw = input->toPlainText().size();
-		const int       updatedLength    = updatedLengthRaw > std::numeric_limits<int>::max()
-		                                       ? std::numeric_limits<int>::max()
-		                                       : static_cast<int>(updatedLengthRaw);
-		const int       restoreStart     = std::clamp(selectionStart, 0, updatedLength);
-		const int       restoreEnd       = std::clamp(selectionEnd, restoreStart, updatedLength);
-		QTextCursor     restore          = input->textCursor();
-		restore.setPosition(restoreStart);
-		restore.setPosition(restoreEnd, QTextCursor::KeepAnchor);
-		input->setTextCursor(restore);
-		return true;
 	};
 	if (activeCallbackContextConst(engine))
 	{
@@ -26822,51 +26891,82 @@ static int luaSpellCheckCommand(lua_State *L)
 			return 1;
 		}
 
-		const QString expectedInput  = snapshot.commandInputText;
-		const int     inputLength    = expectedInput.size() > std::numeric_limits<int>::max()
-		                                   ? std::numeric_limits<int>::max()
-		                                   : static_cast<int>(expectedInput.size());
-		int           selectionStart = std::clamp(snapshot.inputSelectionStartColumn - 1, 0, inputLength);
-		int selectionEnd = snapshot.inputSelectionEndColumn <= selectionStart
-		                       ? selectionStart
-		                       : std::clamp(snapshot.inputSelectionEndColumn, selectionStart, inputLength);
+		const QString expectedInput     = snapshot.commandInputText;
+		const int     inputLength       = expectedInput.size() > std::numeric_limits<int>::max()
+		                                      ? std::numeric_limits<int>::max()
+		                                      : static_cast<int>(expectedInput.size());
+		const int restoreSelectionStart = std::clamp(snapshot.inputSelectionStartColumn - 1, 0, inputLength);
+		const int restoreSelectionEnd =
+		    snapshot.inputSelectionEndColumn <= restoreSelectionStart
+		        ? restoreSelectionStart
+		        : std::clamp(snapshot.inputSelectionEndColumn, restoreSelectionStart, inputLength);
+		int replacementStart = restoreSelectionStart;
+		int replacementEnd   = restoreSelectionEnd;
 		if (endCol > startCol && startCol >= 0 && endCol >= 0)
 		{
-			selectionStart = std::clamp(startCol, 0, inputLength);
-			selectionEnd   = std::clamp(endCol, selectionStart, inputLength);
+			replacementStart = std::clamp(startCol, 0, inputLength);
+			replacementEnd   = std::clamp(endCol, replacementStart, inputLength);
 		}
 
-		QString selected = expectedInput.mid(selectionStart, selectionEnd - selectionStart);
+		QString selected = expectedInput.mid(replacementStart, replacementEnd - replacementStart);
 		bool    all      = false;
 		if (selected.isEmpty())
 		{
-			all            = true;
-			selectionStart = 0;
-			selectionEnd   = inputLength;
-			selected       = expectedInput;
+			all              = true;
+			replacementStart = 0;
+			replacementEnd   = inputLength;
+			selected         = expectedInput;
+		}
+
+		if (callbackScopeSyncBridgeForbidden())
+		{
+			if (!canYieldModalResult(L))
+			{
+				lua_pushnumber(L, -1);
+				return 1;
+			}
+			const QPointer<AppController> controller = AppController::instance();
+			const QPointer<WorldRuntime>  runtimeGuard(runtime);
+			LuaPendingModalStringRequest  request;
+			request.guiCallable = [controller, runtimeGuard, selected, all, expectedInput, replacementStart,
+			                       replacementEnd, restoreSelectionStart, restoreSelectionEnd]() -> QString
+			{
+				if (!controller || !runtimeGuard)
+					return luaModalJsonResult({
+					    {QStringLiteral("status"), -1}
+                    });
+				const AppController::SpellCommandResult decision = controller->spellCheckCommandText(
+				    runtimeGuard.data(), selected, all, QStringLiteral("world.SpellCheckCommand"));
+				return luaModalJsonResult({
+				    {QStringLiteral("status"),                decision.status      },
+				    {QStringLiteral("replacement"),           decision.replacement },
+				    {QStringLiteral("expectedInput"),         expectedInput        },
+				    {QStringLiteral("replacementStart"),      replacementStart     },
+				    {QStringLiteral("replacementEnd"),        replacementEnd       },
+				    {QStringLiteral("restoreSelectionStart"), restoreSelectionStart},
+				    {QStringLiteral("restoreSelectionEnd"),   restoreSelectionEnd  },
+				});
+			};
+			setLuaModalResumeCallback(request, runtime, pluginIdFromLua(L));
+			return yieldModalStringResult(L, engine, std::move(request), luaSpellCheckCommandContinuation);
 		}
 
 		QString   replacement;
 		const int decisionResult = runSpellCheckDecision(selected, all, replacement);
-		if (decisionResult < 0)
+		if (decisionResult <= 0)
 		{
-			lua_pushnumber(L, -1);
+			lua_pushnumber(L, decisionResult);
 			return 1;
 		}
-		if (decisionResult == 0)
-		{
-			lua_pushnumber(L, 0);
-			return 1;
-		}
-
 		const LuaPluginAsyncResultRequest requestId = nextPluginAsyncResultRequest(engine);
 		const bool                        accepted  = enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
-		    [expectedInput, selectionStart, selectionEnd, all, replacement, requestId,
-		     applySpellCheckReplacement](WorldRuntime &targetRuntime)
+		    [expectedInput, replacementStart, replacementEnd, replacement, restoreSelectionStart,
+		     restoreSelectionEnd, requestId](WorldRuntime &targetRuntime)
 		    {
-			    const bool applied = applySpellCheckReplacement(targetRuntime, expectedInput, selectionStart,
-			                                                    selectionEnd, all, replacement);
+			    const bool applied = applySpellCheckCommandReplacement(
+			        targetRuntime, expectedInput, replacementStart, replacementEnd, replacement,
+			        restoreSelectionStart, restoreSelectionEnd);
 			    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("SpellCheckCommand"), applied,
 			                          applied ? 0 : -1, applied ? QStringLiteral("1") : QString());
 		    });
@@ -26875,7 +26975,8 @@ static int luaSpellCheckCommand(lua_State *L)
 			lua_pushnumber(L, -1);
 			return 1;
 		}
-		replaceCallbackCommandSelectionSnapshot(engine, selectionStart, selectionEnd, replacement);
+		replaceCallbackCommandSelectionSnapshot(engine, replacementStart, replacementEnd, replacement);
+		setCallbackCommandSelectionSnapshot(engine, restoreSelectionStart, restoreSelectionEnd);
 		lua_pushnumber(L, 1);
 		if (requestId.isValid())
 		{
@@ -26893,21 +26994,47 @@ static int luaSpellCheckCommand(lua_State *L)
 
 static int luaSpellCheckDlg(lua_State *L)
 {
-	const QString  text       = QString::fromUtf8(luaL_checkstring(L, 1));
-	AppController *controller = AppController::instance();
+	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
+	WorldRuntime *runtime = engine ? engine->worldRuntimeForBridgedCall() : nullptr;
+	const QString text    = QString::fromUtf8(luaL_checkstring(L, 1));
+	const QPointer<AppController> controller = AppController::instance();
 	if (!controller)
 	{
 		lua_pushnil(L);
 		return 1;
 	}
-	const QVariant result = controller->spellCheckString(text, QStringLiteral("world.SpellCheckDlg"));
-	if (result.typeId() == QMetaType::QString)
+	const QPointer<WorldRuntime> runtimeGuard(runtime);
+	const auto runSpellCheck = [controller, runtimeGuard, text]() -> AppController::SpellCommandResult
 	{
-		const QByteArray bytes = result.toString().toUtf8();
-		lua_pushlstring(L, bytes.constData(), bytes.size());
+		if (!controller || !runtimeGuard)
+			return {};
+		return controller->spellCheckDialogText(runtimeGuard.data(), text,
+		                                        QStringLiteral("world.SpellCheckDlg"));
+	};
+	if (runtime && activeCallbackContextConst(engine) && callbackScopeSyncBridgeForbidden())
+	{
+		if (!canYieldModalResult(L))
+		{
+			lua_pushnil(L);
+			return 1;
+		}
+		LuaPendingModalStringRequest request;
+		request.guiCallable = [runSpellCheck]() -> QString
+		{
+			const AppController::SpellCommandResult result = runSpellCheck();
+			return luaModalAcceptedStringResult(result.status == 1, result.replacement);
+		};
+		setLuaModalResumeCallback(request, runtime, pluginIdFromLua(L));
+		return yieldModalStringResult(L, engine, std::move(request), luaModalAcceptedStringContinuation);
+	}
+	const AppController::SpellCommandResult result = runOnMainWindowThreadModalDialogSync(
+	    [&runSpellCheck](MainWindow *) -> AppController::SpellCommandResult { return runSpellCheck(); }, {});
+	if (result.status != 1)
+	{
+		lua_pushnil(L);
 		return 1;
 	}
-	lua_pushnil(L);
+	pushLuaUtf8String(L, result.replacement);
 	return 1;
 }
 
@@ -30337,19 +30464,6 @@ static int luaUtilsMenuFontSize(lua_State *L)
 	return 1;
 }
 
-static int luaUtilsMetaphone(lua_State *L)
-{
-	const QString input             = QString::fromUtf8(luaL_checkstring(L, 1));
-	const int     length            = static_cast<int>(luaL_optnumber(L, 2, 4));
-	const auto [primary, secondary] = qmudDoubleMetaphone(input, length);
-	pushLuaUtf8String(L, primary);
-	if (secondary.isEmpty())
-		lua_pushnil(L);
-	else
-		pushLuaUtf8String(L, secondary);
-	return 2;
-}
-
 static int luaUtilsGlyphAvailable(lua_State *L)
 {
 	const QString  family    = QString::fromUtf8(luaL_checkstring(L, 1));
@@ -32225,15 +32339,6 @@ static int luaUtilsDirectoryPicker(lua_State *L)
 	return 1;
 }
 
-static int luaUtilsEditDistance(lua_State *L)
-{
-	const QString source   = QString::fromUtf8(luaL_checkstring(L, 1));
-	const QString target   = QString::fromUtf8(luaL_checkstring(L, 2));
-	const int     distance = qmudEditDistance(source, target);
-	lua_pushinteger(L, distance);
-	return 1;
-}
-
 static int luaUtilsFilterPicker(lua_State *L)
 {
 	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
@@ -32398,54 +32503,54 @@ static void registerUtilsBindings(lua_State *L, LuaCallbackEngine *engine)
 	};
 
 	static const LuaBindingEntry kUtilsBindings[] = {
-	    {"activatenotepad",     luaUtilsActivateNotepad    },
-	    {"appendtonotepad",     luaUtilsAppendToNotepad    },
-	    {"base64decode",        luaUtilsBase64Decode       },
-	    {"base64encode",        luaUtilsBase64Encode       },
-	    {"callbackslist",       luaUtilsCallbacksList      },
-	    {"choose",              luaUtilsChoose             },
-	    {"colourcube",          luaUtilsColourCube         },
-	    {"compress",            luaUtilsCompress           },
-	    {"decompress",          luaUtilsDecompress         },
-	    {"directorypicker",     luaUtilsDirectoryPicker    },
-	    {"edit_distance",       luaUtilsEditDistance       },
-	    {"editbox",             luaUtilsEditBox            },
-	    {"filepicker",          luaUtilsFilePicker         },
-	    {"filterpicker",        luaUtilsFilterPicker       },
-	    {"fontpicker",          luaUtilsFontPicker         },
-	    {"fromhex",             luaUtilsFromHex            },
-	    {"functionargs",        luaUtilsFunctionArgs       },
-	    {"functionlist",        luaUtilsFunctionList       },
-	    {"getfontfamilies",     luaUtilsGetFontFamilies    },
-	    {"glyph_available",     luaUtilsGlyphAvailable     },
-	    {"hash",                luaUtilsHash               },
-	    {"info",                luaUtilsInfo               },
-	    {"infotypes",           luaUtilsInfoTypes          },
-	    {"inputbox",            luaUtilsInputBox           },
-	    {"listbox",             luaUtilsListBox            },
-	    {"md5",	             luaUtilsMd5                },
-	    {"menufontsize",        luaUtilsMenuFontSize       },
-	    {"metaphone",           luaUtilsMetaphone          },
-	    {"msgbox",              luaUtilsMsgBox             },
-	    {"multilistbox",        luaUtilsMultiListBox       },
-	    {"readdir",             luaUtilsReadDir            },
-	    {"reload_global_prefs", luaUtilsReloadGlobalPrefs  },
-	    {"sendtofront",         luaUtilsSendToFront        },
-	    {"setbackgroundcolour", luaUtilsSetBackgroundColour},
-	    {"sha256",              luaUtilsSha256             },
-	    {"shellexecute",        luaUtilsShellExecute       },
-	    {"showdebugstatus",     luaUtilsShowDebugStatus    },
-	    {"spellcheckdialog",    luaUtilsSpellCheckDialog   },
-	    {"split",               luaUtilsSplit              },
-	    {"timer",               luaUtilsTimer              },
-	    {"tohex",               luaUtilsToHex              },
-	    {"umsgbox",             luaUtilsUMsgBox            },
-	    {"utf8convert",         luaUtilsUtf8Convert        },
-	    {"utf8decode",          luaUtilsUtf8Decode         },
-	    {"utf8encode",          luaUtilsUtf8Encode         },
-	    {"utf8sub",             luaUtilsUtf8Sub            },
-	    {"utf8valid",           luaUtilsUtf8Valid          },
-	    {"xmlread",             luaUtilsXmlRead            },
+	    {"activatenotepad",     luaUtilsActivateNotepad             },
+	    {"appendtonotepad",     luaUtilsAppendToNotepad             },
+	    {"base64decode",        luaUtilsBase64Decode                },
+	    {"base64encode",        luaUtilsBase64Encode                },
+	    {"callbackslist",       luaUtilsCallbacksList               },
+	    {"choose",              luaUtilsChoose                      },
+	    {"colourcube",          luaUtilsColourCube                  },
+	    {"compress",            luaUtilsCompress                    },
+	    {"decompress",          luaUtilsDecompress                  },
+	    {"directorypicker",     luaUtilsDirectoryPicker             },
+	    {"edit_distance",       QMudLuaSupport::luaUtilsEditDistance},
+	    {"editbox",             luaUtilsEditBox                     },
+	    {"filepicker",          luaUtilsFilePicker                  },
+	    {"filterpicker",        luaUtilsFilterPicker                },
+	    {"fontpicker",          luaUtilsFontPicker                  },
+	    {"fromhex",             luaUtilsFromHex                     },
+	    {"functionargs",        luaUtilsFunctionArgs                },
+	    {"functionlist",        luaUtilsFunctionList                },
+	    {"getfontfamilies",     luaUtilsGetFontFamilies             },
+	    {"glyph_available",     luaUtilsGlyphAvailable              },
+	    {"hash",                luaUtilsHash                        },
+	    {"info",                luaUtilsInfo                        },
+	    {"infotypes",           luaUtilsInfoTypes                   },
+	    {"inputbox",            luaUtilsInputBox                    },
+	    {"listbox",             luaUtilsListBox                     },
+	    {"md5",	             luaUtilsMd5                         },
+	    {"menufontsize",        luaUtilsMenuFontSize                },
+	    {"metaphone",           QMudLuaSupport::luaUtilsMetaphone   },
+	    {"msgbox",              luaUtilsMsgBox                      },
+	    {"multilistbox",        luaUtilsMultiListBox                },
+	    {"readdir",             luaUtilsReadDir                     },
+	    {"reload_global_prefs", luaUtilsReloadGlobalPrefs           },
+	    {"sendtofront",         luaUtilsSendToFront                 },
+	    {"setbackgroundcolour", luaUtilsSetBackgroundColour         },
+	    {"sha256",              luaUtilsSha256                      },
+	    {"shellexecute",        luaUtilsShellExecute                },
+	    {"showdebugstatus",     luaUtilsShowDebugStatus             },
+	    {"spellcheckdialog",    luaUtilsSpellCheckDialog            },
+	    {"split",               luaUtilsSplit                       },
+	    {"timer",               luaUtilsTimer                       },
+	    {"tohex",               luaUtilsToHex                       },
+	    {"umsgbox",             luaUtilsUMsgBox                     },
+	    {"utf8convert",         luaUtilsUtf8Convert                 },
+	    {"utf8decode",          luaUtilsUtf8Decode                  },
+	    {"utf8encode",          luaUtilsUtf8Encode                  },
+	    {"utf8sub",             luaUtilsUtf8Sub                     },
+	    {"utf8valid",           luaUtilsUtf8Valid                   },
+	    {"xmlread",             luaUtilsXmlRead                     },
 	};
 	for (const auto &[name, function] : kUtilsBindings)
 		setFn(name, function);

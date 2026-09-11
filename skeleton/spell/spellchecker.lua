@@ -6,9 +6,8 @@
   Updated: 13th April 2007 to added IGNORE_MIXED_CASE, IGNORE_IMBEDDED_NUMBERS
   Updated: 15th February 2009 to convert to using SQLite database instead of Lua table
   Updated: 21st February 2009 to fix problem where words with 2 metaphones were only stored once.
+  Updated: 11th September 2026 by Panagiotis Kalogiratos, to make dictionary initialization headless for QMud.
 --]]
-
-local SHOW_PROGRESS_BAR = true -- show progress bar? true or false
 
 local METAPHONE_LENGTH = 4   -- how many characters of metaphone to get back
 local EDIT_DISTANCE = 4      -- how close a word must be to appear in the list of suggestions
@@ -286,15 +285,7 @@ function spellcheck_add_word (word, action, replacement)
 end -- spellcheck_string
 
 -- read one of the dictionaries
-local function read_dict (dlg, name)
- if SHOW_PROGRESS_BAR then
-   dlg:step ()
-   dlg:status (directory .. name)
-   if dlg:checkcancel () then
-     error "Dictionary loading cancelled"
-   end -- if cancelled
- end -- if SHOW_PROGRESS_BAR
-
+local function read_dict (name)
   for line in io.lines (directory .. name) do
     insert_word (line, 0)
   end 
@@ -357,33 +348,17 @@ local function init ()
   -- if empty, populate it  
   if count == 0 then
     
-    local dlg
-  
-    if SHOW_PROGRESS_BAR then
-      dlg = progress.new ("Loading dictionaries into SQLite database ...")
-    
-      dlg:range (0, #files)
-      dlg:setstep (1)
-    end -- if SHOW_PROGRESS_BAR
-     
     assert (db:execute "BEGIN TRANSACTION");
-    
+
     for k, v in ipairs (files) do
-      ok, result = pcall (function () 
-                            read_dict (dlg, v) 
+      ok, result = pcall (function ()
+                            read_dict (v)
                           end)
-      if not ok then 
-        if SHOW_PROGRESS_BAR then
-          dlg:close ()
-        end -- if SHOW_PROGRESS_BAR
+      if not ok then
         error (result)
       end -- not ok
     end -- reading each file
-    
-    if SHOW_PROGRESS_BAR then
-      dlg:close ()
-    end -- if SHOW_PROGRESS_BAR
-    
+
     assert (db:execute "COMMIT");
     
   end -- if nothing in database

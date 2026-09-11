@@ -4764,6 +4764,10 @@ WorldRuntime::~WorldRuntime()
 	// reverse member-declaration order would let recovered mutations re-enter partially destroyed
 	// snapshot caches and other authoritative runtime state.
 	m_luaExecutor.reset();
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+	if (AppController *controller = AppController::instance())
+		controller->releaseSpellCheckerForWorld(this);
+#endif
 	if (m_luaCallbacks)
 	{
 		delete m_luaCallbacks;
