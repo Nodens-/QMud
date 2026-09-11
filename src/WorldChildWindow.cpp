@@ -1137,10 +1137,10 @@ void TextChildWindow::setQuerySaveOnClose(const bool querySave)
 
 bool TextChildWindow::maybeSaveBeforeClose(const bool querySave)
 {
-	if (QTextDocument *document = m_editor ? m_editor->document() : nullptr;
-	    !document || !document->isModified())
+	QTextDocument *document = m_editor ? m_editor->document() : nullptr;
+	if (!document || !document->isModified())
 		return true;
-	if (m_editor->toPlainText().isEmpty())
+	if (document->isEmpty())
 		return true;
 
 	if (!querySave)

@@ -17,11 +17,11 @@
 
 namespace
 {
-	QMdiSubWindow *addWindow(QMdiArea &mdiArea, const QString &title)
+	QMdiSubWindow *addWindow(QMdiArea &mdiArea, const QString &title, const bool deleteOnClose = true)
 	{
 		auto *container = new QWidget(&mdiArea);
 		auto *sub       = mdiArea.addSubWindow(container);
-		sub->setAttribute(Qt::WA_DeleteOnClose, true);
+		sub->setAttribute(Qt::WA_DeleteOnClose, deleteOnClose);
 		sub->setWindowTitle(title);
 		sub->show();
 		return sub;
@@ -119,7 +119,7 @@ namespace
 				                                      QStringLiteral("One"), QStringLiteral("Four")}));
 			}
 
-			void middleClickClosesClickedTab()
+			void middleClickImmediatelyClosesClickedInactiveTab()
 			{
 				QWidget     host;
 				QVBoxLayout layout(&host);
@@ -133,16 +133,41 @@ namespace
 
 				createTabsForActivePresentation(tabs, mdiArea, kMdiTabsTop);
 				addWindow(mdiArea, QStringLiteral("One"));
-				addWindow(mdiArea, QStringLiteral("Two"));
+				QMdiSubWindow *second = addWindow(mdiArea, QStringLiteral("Two"));
+				mdiArea.setActiveSubWindow(second);
 				tabs.updateTabs();
 				QCOMPARE(tabs.count(), 2);
 
 				QTest::mouseClick(&tabs, Qt::MiddleButton, Qt::NoModifier, tabs.tabRect(0).center());
-				QCoreApplication::processEvents();
-				tabs.updateTabs();
 
 				QCOMPARE(tabs.count(), 1);
 				QCOMPARE(tabTexts(tabs), QStringList({QStringLiteral("Two")}));
+				QCOMPARE(mdiArea.subWindowList(), QList<QMdiSubWindow *>({second}));
+			}
+
+			void middleClickPreservesMdiOwnershipForHideOnCloseWindow()
+			{
+				QWidget     host;
+				QVBoxLayout layout(&host);
+				QMdiArea    mdiArea;
+				MdiTabs     tabs;
+
+				layout.addWidget(&tabs);
+				layout.addWidget(&mdiArea);
+				host.resize(640, 480);
+				host.show();
+
+				createTabsForActivePresentation(tabs, mdiArea, kMdiTabsTop);
+				QMdiSubWindow *persistent = addWindow(mdiArea, QStringLiteral("Persistent"), false);
+				QMdiSubWindow *active     = addWindow(mdiArea, QStringLiteral("Active"));
+				mdiArea.setActiveSubWindow(active);
+				tabs.updateTabs();
+
+				QTest::mouseClick(&tabs, Qt::MiddleButton, Qt::NoModifier, tabs.tabRect(0).center());
+				QCoreApplication::processEvents();
+
+				QVERIFY(persistent->isHidden());
+				QVERIFY(mdiArea.subWindowList().contains(persistent));
 			}
 
 			void mixedTabsKeepOrderAndActiveIndexAcrossWorldTitleUpdates()

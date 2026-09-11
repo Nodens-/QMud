@@ -197,6 +197,21 @@ void MdiTabs::activateTabWindow(const int index, QMdiSubWindow *const subWindow)
 		emit windowActivationRequested(subWindow);
 }
 
+void MdiTabs::closeTabWindow(QMdiSubWindow *const subWindow)
+{
+	if (!m_mdiArea || !subWindow)
+		return;
+
+	const bool              deletesOnClose = subWindow->testAttribute(Qt::WA_DeleteOnClose);
+	QPointer<QMdiSubWindow> closingWindow(subWindow);
+	if (!subWindow->close())
+		return;
+
+	if (deletesOnClose && closingWindow && m_mdiArea->subWindowList().contains(closingWindow))
+		m_mdiArea->removeSubWindow(closingWindow.data());
+	updateTabs();
+}
+
 void MdiTabs::onTabMoved(int from, int to)
 {
 	if (from < 0 || to < 0 || from >= m_orderedWindows.size() || to >= m_orderedWindows.size())
@@ -218,7 +233,7 @@ void MdiTabs::contextMenuEvent(QContextMenuEvent *event)
 	if (index >= m_orderedWindows.size())
 		return;
 
-	QMdiSubWindow *sub = m_orderedWindows[index];
+	QPointer<QMdiSubWindow> sub = m_orderedWindows[index];
 	if (!sub)
 		return;
 
@@ -236,27 +251,31 @@ void MdiTabs::contextMenuEvent(QContextMenuEvent *event)
 	actRestore->setEnabled(sub->windowState() & Qt::WindowMaximized);
 
 	QAction *chosen = menu.exec(event->globalPos());
-	if (!chosen)
+	if (!chosen || !sub)
 		return;
+	const qsizetype storedIndex = m_orderedWindows.indexOf(sub);
+	if (storedIndex < 0 || storedIndex >= count())
+		return;
+	const int currentIndex = static_cast<int>(storedIndex);
 	if (chosen == actRestore)
 	{
-		activateTabWindow(index, sub);
+		activateTabWindow(currentIndex, sub.data());
 		sub->showNormal();
 	}
 	else if (chosen == actMin)
 	{
-		activateTabWindow(index, sub);
+		activateTabWindow(currentIndex, sub.data());
 		sub->showMinimized();
 	}
 	else if (chosen == actMax)
 	{
-		activateTabWindow(index, sub);
+		activateTabWindow(currentIndex, sub.data());
 		sub->showMaximized();
 	}
 	else if (chosen == actClose)
 	{
 		// Close exactly the tab that was right-clicked, even if active tab changed.
-		sub->close();
+		closeTabWindow(sub.data());
 	}
 }
 
@@ -285,7 +304,7 @@ void MdiTabs::mouseReleaseEvent(QMouseEvent *event)
 		{
 			if (QMdiSubWindow *sub = m_orderedWindows[index])
 			{
-				sub->close();
+				closeTabWindow(sub);
 				event->accept();
 				return;
 			}
