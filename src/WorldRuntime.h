@@ -774,6 +774,11 @@ class WorldRuntime : public QObject
 		 */
 		void                                ensureAllAliasRuntimeIds();
 		/**
+		 * @brief Returns current alias rule generation for processor caches.
+		 * @return Monotonic generation incremented when alias definitions change.
+		 */
+		[[nodiscard]] quint64               aliasRuleGeneration() const;
+		/**
 		 * @brief Replaces alias list.
 		 * @param aliases New alias list.
 		 */
@@ -787,6 +792,10 @@ class WorldRuntime : public QObject
 		 * @param pluginId Owning plugin id, or empty for world aliases.
 		 */
 		void                                markAliasRuntimeStateChanged(const QString &pluginId = {});
+		/**
+		 * @brief Marks alias evaluation rules as changed without changing save state.
+		 */
+		void                                markAliasRulesChanged();
 		/**
 		 * @brief Commits one alias runtime-state mutation to the stable callback snapshot.
 		 * @param pluginId Owning plugin id, or empty for world aliases.
@@ -814,6 +823,10 @@ class WorldRuntime : public QObject
 		 * @brief Ensures every world timer has a unique runtime identity.
 		 */
 		void                                 ensureWorldTimerRuntimeIds();
+		/**
+		 * @brief Ensures every world and plugin timer has a unique runtime identity.
+		 */
+		void                                 ensureAllTimerRuntimeIds();
 		/**
 		 * @brief Replaces timer list.
 		 * @param timers New timer list.
@@ -6530,6 +6543,7 @@ class WorldRuntime : public QObject
 		int                                                        m_triggerCount{0};
 		int                                                        m_aliasCount{0};
 		int                                                        m_timerCount{0};
+		quint64                                                    m_aliasRuleGeneration{0};
 		quint64                                                    m_timerStructureMutationSerial{0};
 		int                                                        m_macroCount{0};
 		int                                                        m_variableCount{0};

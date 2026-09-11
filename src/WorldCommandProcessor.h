@@ -461,11 +461,42 @@ class WorldCommandProcessor : public QObject
 				int                     enabledCount{0};
 				QVector<DecodedTrigger> triggers;
 		};
-		struct AliasOrderCacheEntry
+		struct DecodedAlias
 		{
-				int          count{0};
-				quint64      signature{0};
-				QVector<int> indices;
+				int     index{0};
+				int     sequence{0};
+				QString matchText;
+				QString sendText;
+				QString label;
+				QString scriptLabel;
+				QString variableName;
+				QString scriptName;
+				bool    enabled{false};
+				bool    isRegexp{false};
+				bool    ignoreCase{false};
+				bool    omitCommandHistory{false};
+				bool    echoMatchedAlias{false};
+				bool    expandVariables{false};
+				bool    omitFromOutput{false};
+				bool    omitFromLog{false};
+				bool    oneShot{false};
+				bool    keepEvaluating{false};
+				int     sendToValue{0};
+		};
+		struct AliasEvaluationPlanEntry
+		{
+				DecodedAlias decoded;
+				quint64      runtimeId{0};
+				qint64       executionTimeNs{0};
+				int          matchCount{0};
+				int          matchAttempts{0};
+		};
+		struct AliasEvaluationCacheEntry
+		{
+				quint64               generation{0};
+				int                   count{0};
+				int                   enabledCount{0};
+				QVector<DecodedAlias> aliases;
 		};
 		struct PluginOrderCacheEntry
 		{
@@ -483,8 +514,15 @@ class WorldCommandProcessor : public QObject
 		 * @param triggers Trigger list.
 		 * @return Cached decoded trigger data.
 		 */
-		const TriggerEvaluationCacheEntry      &
-        decodedTriggerEvaluationCache(const QList<WorldRuntime::Trigger> &triggers);
+		const TriggerEvaluationCacheEntry &
+		decodedTriggerEvaluationCache(const QList<WorldRuntime::Trigger> &triggers);
+		/**
+		 * @brief Returns decoded alias evaluation data for an alias list.
+		 * @param aliases Alias list.
+		 * @return Cached decoded alias data.
+		 */
+		const AliasEvaluationCacheEntry      &
+        decodedAliasEvaluationCache(const QList<WorldRuntime::Alias> &aliases);
 		/**
 		 * @brief Clears cached decoded trigger evaluation data.
 		 */
@@ -653,7 +691,8 @@ class WorldCommandProcessor : public QObject
 		mutable QSet<QString>                        m_invalidRegexWarnings;
 		QHash<quintptr, TriggerEvaluationCacheEntry> m_triggerEvaluationCache;
 		quint64                                      m_triggerEvaluationCacheGeneration{0};
-		QHash<quintptr, AliasOrderCacheEntry>        m_aliasOrderCache;
+		QHash<quintptr, AliasEvaluationCacheEntry>   m_aliasEvaluationCache;
+		quint64                                      m_aliasEvaluationCacheGeneration{0};
 		PluginOrderCacheEntry                        m_pluginOrderCache;
 		mutable bool                                 m_paletteCacheValid{false};
 		mutable quint64                              m_paletteCacheSignature{0};

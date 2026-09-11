@@ -19225,6 +19225,7 @@ static int addTempTimer(const LuaCallbackEngine *engine, double seconds, const Q
 			    runtimeTimer.attributes.insert(QStringLiteral("active_closed"), attrFlag(true));
 			    applyTimerDefaults(runtimeTimer);
 			    resetTimerFields(runtimeTimer, scheduleReset);
+			    targetRuntime.ensureRuleRuntimeId(runtimeTimer);
 
 			    runtimeTimers.push_back(runtimeTimer);
 			    commitTimerListMutation(&targetRuntime, plugin, true);
@@ -19259,6 +19260,7 @@ static int addTempTimer(const LuaCallbackEngine *engine, double seconds, const Q
 		    timer.attributes.insert(QStringLiteral("active_closed"), attrFlag(true));
 		    applyTimerDefaults(timer);
 		    resetTimerFields(timer);
+		    runtime->ensureRuleRuntimeId(timer);
 
 		    timers.push_back(timer);
 		    commitTimerListMutation(runtime, plugin, true);
@@ -19440,15 +19442,24 @@ static int luaEnableGroup(lua_State *L)
 		const int changedCount   = triggerChanged + aliasChanged + timerChanged;
 		if (changedCount > 0)
 		{
-			cacheCallbackTriggerList(engine, pluginId, true, triggers, false,
-			                         CallbackCollectionCacheWriteKind::PersistentMutation);
-			cacheCallbackAliasList(engine, pluginId, true, aliases, false,
-			                       CallbackCollectionCacheWriteKind::PersistentMutation);
-			cacheCallbackTimerList(engine, pluginId, true, timers, false,
-			                       CallbackCollectionCacheWriteKind::PersistentMutation);
-			invalidateCallbackTriggerSnapshotCacheForPlugin(engine, pluginId);
-			invalidateCallbackAliasSnapshotCacheForPlugin(engine, pluginId);
-			invalidateCallbackTimerSnapshotCacheForPlugin(engine, pluginId);
+			if (triggerChanged > 0)
+			{
+				cacheCallbackTriggerList(engine, pluginId, true, triggers, false,
+				                         CallbackCollectionCacheWriteKind::PersistentMutation);
+				invalidateCallbackTriggerSnapshotCacheForPlugin(engine, pluginId);
+			}
+			if (aliasChanged > 0)
+			{
+				cacheCallbackAliasList(engine, pluginId, true, aliases, false,
+				                       CallbackCollectionCacheWriteKind::PersistentMutation);
+				invalidateCallbackAliasSnapshotCacheForPlugin(engine, pluginId);
+			}
+			if (timerChanged > 0)
+			{
+				cacheCallbackTimerList(engine, pluginId, true, timers, false,
+				                       CallbackCollectionCacheWriteKind::PersistentMutation);
+				invalidateCallbackTimerSnapshotCacheForPlugin(engine, pluginId);
+			}
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
 			    [pluginId, groupName, enabled](WorldRuntime &targetRuntime)
@@ -19512,11 +19523,17 @@ static int luaEnableGroup(lua_State *L)
 		    QList<WorldRuntime::Alias>   &aliases  = mutableAliasList(runtime, plugin);
 		    QList<WorldRuntime::Timer>   &timers   = mutableTimerList(runtime, plugin);
 
-		    const int changedCount = setEnabled(triggers) + setEnabled(aliases) + setEnabled(timers);
+		    const int                     triggerChanged = setEnabled(triggers);
+		    const int                     aliasChanged   = setEnabled(aliases);
+		    const int                     timerChanged   = setEnabled(timers);
+		    const int                     changedCount   = triggerChanged + aliasChanged + timerChanged;
 
-		    commitTriggerListMutation(runtime, plugin);
-		    commitAliasListMutation(runtime, plugin);
-		    commitTimerListMutation(runtime, plugin);
+		    if (triggerChanged > 0)
+			    commitTriggerListMutation(runtime, plugin);
+		    if (aliasChanged > 0)
+			    commitAliasListMutation(runtime, plugin);
+		    if (timerChanged > 0)
+			    commitTimerListMutation(runtime, plugin, false);
 		    return changedCount;
 	    },
 	    0);
@@ -38086,6 +38103,7 @@ static int addAliasInternal(const LuaCallbackEngine *engine, const QString &rawN
 			    runtimeAlias.attributes.insert(QStringLiteral("keep_evaluating"),
 			                                   attrFlag(flags & eKeepEvaluating));
 			    applyAliasDefaults(runtimeAlias);
+			    targetRuntime.ensureRuleRuntimeId(runtimeAlias);
 
 			    runtimeAliases.insert(runtimeInsertIndex, runtimeAlias);
 			    commitAliasListMutation(&targetRuntime, plugin);
@@ -38138,6 +38156,7 @@ static int addAliasInternal(const LuaCallbackEngine *engine, const QString &rawN
 		    alias.attributes.insert(QStringLiteral("one_shot"), attrFlag(flags & eAliasOneShot));
 		    alias.attributes.insert(QStringLiteral("keep_evaluating"), attrFlag(flags & eKeepEvaluating));
 		    applyAliasDefaults(alias);
+		    runtime->ensureRuleRuntimeId(alias);
 
 		    runtimeAliases.insert(runtimeInsertIndex, alias);
 		    commitAliasListMutation(runtime, plugin);
@@ -38265,6 +38284,7 @@ static int addTimerInternal(const LuaCallbackEngine *engine, const QString &rawN
 				    runtimeTimer.attributes.insert(QStringLiteral("script"), scriptName);
 			    applyTimerDefaults(runtimeTimer);
 			    resetTimerFields(runtimeTimer, scheduleReset);
+			    targetRuntime.ensureRuleRuntimeId(runtimeTimer);
 
 			    runtimeTimers.insert(runtimeInsertIndex, runtimeTimer);
 			    commitTimerListMutation(&targetRuntime, plugin, true);
@@ -38316,6 +38336,7 @@ static int addTimerInternal(const LuaCallbackEngine *engine, const QString &rawN
 			    timer.attributes.insert(QStringLiteral("script"), scriptName);
 		    applyTimerDefaults(timer);
 		    resetTimerFields(timer);
+		    runtime->ensureRuleRuntimeId(timer);
 
 		    runtimeTimers.insert(runtimeInsertIndex, timer);
 		    commitTimerListMutation(runtime, plugin, true);
@@ -38647,13 +38668,18 @@ static int luaDeleteTemporaryTriggers(lua_State *L)
 					    return;
 				    QList<WorldRuntime::Trigger> &runtimeTriggers =
 				        mutableTriggerList(&targetRuntime, plugin);
+				    int runtimeCount = 0;
 				    for (int i = sizeToInt(runtimeTriggers.size()) - 1; i >= 0; --i)
 				    {
 					    if (isEnabledValue(
 					            runtimeTriggers.at(i).attributes.value(QStringLiteral("temporary"))))
+					    {
 						    runtimeTriggers.removeAt(i);
+						    ++runtimeCount;
+					    }
 				    }
-				    commitTriggerListMutation(&targetRuntime, plugin);
+				    if (runtimeCount > 0)
+					    commitTriggerListMutation(&targetRuntime, plugin);
 			    });
 		}
 		lua_pushnumber(L, count);
@@ -38676,7 +38702,8 @@ static int luaDeleteTemporaryTriggers(lua_State *L)
 				    count++;
 			    }
 		    }
-		    commitTriggerListMutation(runtime, plugin);
+		    if (count > 0)
+			    commitTriggerListMutation(runtime, plugin);
 		    return count;
 	    },
 	    0);
@@ -38726,13 +38753,18 @@ static int luaDeleteTemporaryAliases(lua_State *L)
 				    if (!resolvePluginContextById(&targetRuntime, pluginId, plugin, errorCode))
 					    return;
 				    QList<WorldRuntime::Alias> &runtimeAliases = mutableAliasList(&targetRuntime, plugin);
+				    int                         runtimeCount   = 0;
 				    for (int i = sizeToInt(runtimeAliases.size()) - 1; i >= 0; --i)
 				    {
 					    if (isEnabledValue(
 					            runtimeAliases.at(i).attributes.value(QStringLiteral("temporary"))))
+					    {
 						    runtimeAliases.removeAt(i);
+						    ++runtimeCount;
+					    }
 				    }
-				    commitAliasListMutation(&targetRuntime, plugin);
+				    if (runtimeCount > 0)
+					    commitAliasListMutation(&targetRuntime, plugin);
 			    });
 		}
 		lua_pushnumber(L, count);
@@ -38755,7 +38787,8 @@ static int luaDeleteTemporaryAliases(lua_State *L)
 				    count++;
 			    }
 		    }
-		    commitAliasListMutation(runtime, plugin);
+		    if (count > 0)
+			    commitAliasListMutation(runtime, plugin);
 		    return count;
 	    },
 	    0);
@@ -38814,7 +38847,8 @@ static int luaDeleteTemporaryTimers(lua_State *L)
 						    ++runtimeCount;
 					    }
 				    }
-				    commitTimerListMutation(&targetRuntime, plugin, runtimeCount > 0);
+				    if (runtimeCount > 0)
+					    commitTimerListMutation(&targetRuntime, plugin, true);
 			    });
 		}
 		lua_pushnumber(L, count);
@@ -38837,7 +38871,8 @@ static int luaDeleteTemporaryTimers(lua_State *L)
 				    count++;
 			    }
 		    }
-		    commitTimerListMutation(runtime, plugin, count > 0);
+		    if (count > 0)
+			    commitTimerListMutation(runtime, plugin, true);
 		    return count;
 	    },
 	    0);
@@ -38894,13 +38929,18 @@ static int luaDeleteTriggerGroup(lua_State *L)
 					    return;
 				    QList<WorldRuntime::Trigger> &runtimeTriggers =
 				        mutableTriggerList(&targetRuntime, plugin);
+				    int runtimeRemoved = 0;
 				    for (int i = sizeToInt(runtimeTriggers.size()) - 1; i >= 0; --i)
 				    {
 					    if (groupMatches(runtimeTriggers.at(i).attributes.value(QStringLiteral("group")),
 					                     groupName))
+					    {
 						    runtimeTriggers.removeAt(i);
+						    ++runtimeRemoved;
+					    }
 				    }
-				    commitTriggerListMutation(&targetRuntime, plugin);
+				    if (runtimeRemoved > 0)
+					    commitTriggerListMutation(&targetRuntime, plugin);
 			    });
 		}
 		lua_pushnumber(L, count);
@@ -38923,7 +38963,8 @@ static int luaDeleteTriggerGroup(lua_State *L)
 				    count++;
 			    }
 		    }
-		    commitTriggerListMutation(runtime, plugin);
+		    if (count > 0)
+			    commitTriggerListMutation(runtime, plugin);
 		    return count;
 	    },
 	    0);
@@ -38979,13 +39020,18 @@ static int luaDeleteAliasGroup(lua_State *L)
 				    if (!resolvePluginContextById(&targetRuntime, pluginId, plugin, errorCode))
 					    return;
 				    QList<WorldRuntime::Alias> &runtimeAliases = mutableAliasList(&targetRuntime, plugin);
+				    int                         runtimeRemoved = 0;
 				    for (int i = sizeToInt(runtimeAliases.size()) - 1; i >= 0; --i)
 				    {
 					    if (groupMatches(runtimeAliases.at(i).attributes.value(QStringLiteral("group")),
 					                     groupName))
+					    {
 						    runtimeAliases.removeAt(i);
+						    ++runtimeRemoved;
+					    }
 				    }
-				    commitAliasListMutation(&targetRuntime, plugin);
+				    if (runtimeRemoved > 0)
+					    commitAliasListMutation(&targetRuntime, plugin);
 			    });
 		}
 		lua_pushnumber(L, count);
@@ -39008,7 +39054,8 @@ static int luaDeleteAliasGroup(lua_State *L)
 				    count++;
 			    }
 		    }
-		    commitAliasListMutation(runtime, plugin);
+		    if (count > 0)
+			    commitAliasListMutation(runtime, plugin);
 		    return count;
 	    },
 	    0);
@@ -39074,7 +39121,8 @@ static int luaDeleteTimerGroup(lua_State *L)
 						    ++runtimeRemoved;
 					    }
 				    }
-				    commitTimerListMutation(&targetRuntime, plugin, runtimeRemoved > 0);
+				    if (runtimeRemoved > 0)
+					    commitTimerListMutation(&targetRuntime, plugin, true);
 			    });
 		}
 		lua_pushnumber(L, count);
@@ -39097,7 +39145,8 @@ static int luaDeleteTimerGroup(lua_State *L)
 				    count++;
 			    }
 		    }
-		    commitTimerListMutation(runtime, plugin, count > 0);
+		    if (count > 0)
+			    commitTimerListMutation(runtime, plugin, true);
 		    return count;
 	    },
 	    0);
@@ -39154,15 +39203,24 @@ static int luaDeleteGroup(lua_State *L)
 		const int totalRemoved   = triggerRemoved + aliasRemoved + timerRemoved;
 		if (totalRemoved > 0)
 		{
-			cacheCallbackTriggerList(engine, pluginId, true, triggers, false,
-			                         CallbackCollectionCacheWriteKind::PersistentMutation);
-			cacheCallbackAliasList(engine, pluginId, true, aliases, false,
-			                       CallbackCollectionCacheWriteKind::PersistentMutation);
-			cacheCallbackTimerList(engine, pluginId, true, timers, false,
-			                       CallbackCollectionCacheWriteKind::PersistentMutation);
-			invalidateCallbackTriggerSnapshotCacheForPlugin(engine, pluginId);
-			invalidateCallbackAliasSnapshotCacheForPlugin(engine, pluginId);
-			invalidateCallbackTimerSnapshotCacheForPlugin(engine, pluginId);
+			if (triggerRemoved > 0)
+			{
+				cacheCallbackTriggerList(engine, pluginId, true, triggers, false,
+				                         CallbackCollectionCacheWriteKind::PersistentMutation);
+				invalidateCallbackTriggerSnapshotCacheForPlugin(engine, pluginId);
+			}
+			if (aliasRemoved > 0)
+			{
+				cacheCallbackAliasList(engine, pluginId, true, aliases, false,
+				                       CallbackCollectionCacheWriteKind::PersistentMutation);
+				invalidateCallbackAliasSnapshotCacheForPlugin(engine, pluginId);
+			}
+			if (timerRemoved > 0)
+			{
+				cacheCallbackTimerList(engine, pluginId, true, timers, false,
+				                       CallbackCollectionCacheWriteKind::PersistentMutation);
+				invalidateCallbackTimerSnapshotCacheForPlugin(engine, pluginId);
+			}
 			enqueueRuntimeThreadDeferredMutationNoResult(
 			    engine, runtime,
 			    [pluginId, groupName](WorldRuntime &targetRuntime)
@@ -39195,7 +39253,8 @@ static int luaDeleteGroup(lua_State *L)
 					    commitTriggerListMutation(&targetRuntime, plugin);
 				    if (rtAliasRemoved > 0)
 					    commitAliasListMutation(&targetRuntime, plugin);
-				    commitTimerListMutation(&targetRuntime, plugin, rtTimerRemoved > 0);
+				    if (rtTimerRemoved > 0)
+					    commitTimerListMutation(&targetRuntime, plugin, true);
 			    });
 		}
 		lua_pushnumber(L, totalRemoved);
@@ -39216,9 +39275,12 @@ static int luaDeleteGroup(lua_State *L)
 		    const int                     aliasRemoved   = removeGroup(aliases);
 		    const int                     timerRemoved   = removeGroup(timers);
 
-		    commitTriggerListMutation(runtime, plugin);
-		    commitAliasListMutation(runtime, plugin);
-		    commitTimerListMutation(runtime, plugin, timerRemoved > 0);
+		    if (triggerRemoved > 0)
+			    commitTriggerListMutation(runtime, plugin);
+		    if (aliasRemoved > 0)
+			    commitAliasListMutation(runtime, plugin);
+		    if (timerRemoved > 0)
+			    commitTimerListMutation(runtime, plugin, true);
 		    return triggerRemoved + aliasRemoved + timerRemoved;
 	    },
 	    0);
@@ -39516,7 +39578,8 @@ static int luaEnableTriggerGroup(lua_State *L)
 				    changed++;
 			    }
 		    }
-		    commitTriggerListMutation(runtime, plugin);
+		    if (changed > 0)
+			    commitTriggerListMutation(runtime, plugin);
 		    return changed;
 	    },
 	    0);
@@ -39606,7 +39669,8 @@ static int luaEnableAliasGroup(lua_State *L)
 				    changed++;
 			    }
 		    }
-		    commitAliasListMutation(runtime, plugin);
+		    if (changed > 0)
+			    commitAliasListMutation(runtime, plugin);
 		    return changed;
 	    },
 	    0);
@@ -39696,7 +39760,8 @@ static int luaEnableTimerGroup(lua_State *L)
 				    changed++;
 			    }
 		    }
-		    commitTimerListMutation(runtime, plugin);
+		    if (changed > 0)
+			    commitTimerListMutation(runtime, plugin, false);
 		    return changed;
 	    },
 	    0);
