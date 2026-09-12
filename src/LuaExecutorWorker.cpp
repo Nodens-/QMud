@@ -452,7 +452,10 @@ LuaExecutorWorker::LuaExecutorWorker(LuaDeferredRuntimeMutationConsumer shutdown
 		qFatal("LuaExecutorWorker requires a shutdown mutation consumer");
 	m_controlLane.name  = "control";
 	m_callbackLane.name = "callback";
-	initializeWorkerLane(m_controlLane, QStringLiteral("QMudLuaExecutorControlWorker"));
+	// The control lane is reserved for a future dispatch design and intentionally remains dormant.
+	// Lua-state work must stay serialized on the callback lane until laneStateForRequest() can define
+	// a control workload that cannot access the same Lua state or reorder callback execution.
+	// initializeWorkerLane(m_controlLane, QStringLiteral("QMudLuaExecutorControlWorker"));
 	initializeWorkerLane(m_callbackLane, QStringLiteral("QMudLuaExecutorCallbackWorker"));
 }
 
