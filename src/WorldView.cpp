@@ -12099,7 +12099,7 @@ void WorldView::copySelectionAsHtml() const
 
 	auto data = std::make_unique<QMimeData>();
 	data->setHtml(html);
-	data->setText(text);
+	data->setText(html);
 	QGuiApplication::clipboard()->setMimeData(data.release());
 }
 

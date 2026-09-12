@@ -7019,7 +7019,8 @@ class tst_WorldView_Basic : public QObject
 			const QMimeData *mime = QGuiApplication::clipboard()->mimeData();
 			QVERIFY(mime);
 			QVERIFY(mime->hasHtml());
-			QVERIFY(mime->text().contains(liveSelection));
+			QCOMPARE(mime->text(), mime->html());
+			QVERIFY(mime->text().contains(QStringLiteral("<!-- Produced by QMud")));
 			QVERIFY(mime->html().contains(liveSelection));
 
 			const QString topSelectionAgain = selectWordInView(splitTop, topProbePoints);
@@ -12966,7 +12967,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void rightClickOnLinkPrefersSelectionMenuWhenOutputSelectionExists() const
+		void rightClickOnLinkPrefersSelectionMenuAndCopiesHtml() const
 		{
 			resetTestState();
 
@@ -12982,6 +12983,8 @@ class tst_WorldView_Basic : public QObject
 			span.action     = QStringLiteral("examine assistant|consider assistant|attack assistant");
 			span.hint       = QStringLiteral("Right mouse click to act|Examine assistant|Consider assistant|"
 			                                 "Attack assistant");
+			span.fore       = QColor(QStringLiteral("#123456"));
+			span.back       = QColor(QStringLiteral("#654321"));
 			runtimeOutputForTest(view).appendOutputTextStyled(QStringLiteral("assistant"), {span}, true);
 			QCoreApplication::processEvents();
 
@@ -12993,8 +12996,11 @@ class tst_WorldView_Basic : public QObject
 
 			struct MenuCaptureFilter final : QObject
 			{
-					explicit MenuCaptureFilter(QStringList *capturedActions, bool *captured)
-					    : m_capturedActions(capturedActions), m_captured(captured)
+					explicit MenuCaptureFilter(QStringList *capturedActions, bool *captured,
+					                           const QString &actionToTrigger = {},
+					                           bool          *actionTriggered = nullptr)
+					    : m_capturedActions(capturedActions), m_captured(captured),
+					      m_actionToTrigger(actionToTrigger), m_actionTriggered(actionTriggered)
 					{
 					}
 
@@ -13008,26 +13014,50 @@ class tst_WorldView_Basic : public QObject
 
 						const QList<QAction *> actions = menu->actions();
 						m_capturedActions->reserve(actions.size());
+						QAction *requestedAction = nullptr;
 						for (QAction *action : actions)
 						{
 							if (action)
+							{
 								m_capturedActions->push_back(action->text());
+								if (action->text() == m_actionToTrigger)
+									requestedAction = action;
+							}
 						}
 						*m_captured = true;
-						QMetaObject::invokeMethod(menu, &QMenu::close, Qt::QueuedConnection);
+						QPointer<QAction> actionGuard(requestedAction);
+						QPointer<QMenu>   menuGuard(menu);
+						QMetaObject::invokeMethod(
+						    menu,
+						    [actionGuard, menuGuard, actionTriggered = m_actionTriggered]
+						    {
+							    if (actionGuard)
+							    {
+								    actionGuard->trigger();
+								    if (actionTriggered)
+									    *actionTriggered = true;
+							    }
+							    if (menuGuard)
+								    menuGuard->close();
+						    },
+						    Qt::QueuedConnection);
 						return QObject::eventFilter(watched, event);
 					}
 
 				private:
 					QStringList *m_capturedActions{nullptr};
 					bool        *m_captured{nullptr};
+					QString      m_actionToTrigger;
+					bool        *m_actionTriggered{nullptr};
 			};
 
-			auto captureWorldMenuActions = [&view](const QPoint &globalPos) -> QStringList
+			auto captureWorldMenuActions = [&view](const QPoint  &globalPos,
+			                                       const QString &actionToTrigger = {},
+			                                       bool          *actionTriggered = nullptr) -> QStringList
 			{
 				QStringList       capturedActions;
 				bool              captured = false;
-				MenuCaptureFilter filter(&capturedActions, &captured);
+				MenuCaptureFilter filter(&capturedActions, &captured, actionToTrigger, actionTriggered);
 				qApp->installEventFilter(&filter);
 				const bool shown = view.showWorldContextMenuAtGlobalPos(globalPos);
 				qApp->removeEventFilter(&filter);
@@ -13043,9 +13073,20 @@ class tst_WorldView_Basic : public QObject
 
 			view.selectOutputRange(0, 0, 3);
 			QTRY_VERIFY(view.hasOutputSelection());
-			const QStringList selectionMenuActions = captureWorldMenuActions(globalAnchorPos);
+			bool              copyAsHtmlTriggered  = false;
+			const QStringList selectionMenuActions = captureWorldMenuActions(
+			    globalAnchorPos, QStringLiteral("Copy as HTML"), &copyAsHtmlTriggered);
 			QCOMPARE(selectionMenuActions,
 			         (QStringList{QStringLiteral("Copy"), QStringLiteral("Copy as HTML")}));
+			QVERIFY(copyAsHtmlTriggered);
+
+			const QMimeData *mime = QGuiApplication::clipboard()->mimeData();
+			QVERIFY(mime);
+			QVERIFY(mime->hasHtml());
+			QCOMPARE(mime->text(), mime->html());
+			QVERIFY(mime->html().contains(QStringLiteral("ass")));
+			QVERIFY(mime->html().contains(QStringLiteral("color:#123456")));
+			QVERIFY(mime->html().contains(QStringLiteral("background-color:#654321")));
 
 			resetTestState();
 		}
