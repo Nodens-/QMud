@@ -11,6 +11,7 @@
 #define QMUD_BLENDING_H
 
 #include <QtGlobal>
+#include <array>
 #include <cmath>
 
 namespace QMudBlend
@@ -24,6 +25,88 @@ namespace QMudBlend
 	}
 
 	using Channel = quint8;
+
+	/**
+	 * @brief Floating-point HSL components used by MUSHclient-compatible blend modes.
+	 */
+	struct HslComponents
+	{
+			double hueDegrees{0.0};
+			double saturation{0.0};
+			double luminance{0.0};
+	};
+
+	/**
+	 * @brief Converts byte RGB channels to the HSL representation used by MUSHclient.
+	 */
+	inline HslComponents rgbToHsl(const long redChannel, const long greenChannel,
+	                              const long blueChannel) noexcept
+	{
+		const double red        = static_cast<double>(redChannel) / 255.0;
+		const double green      = static_cast<double>(greenChannel) / 255.0;
+		const double blue       = static_cast<double>(blueChannel) / 255.0;
+		const double minimum    = qMin(red, qMin(green, blue));
+		const double maximum    = qMax(red, qMax(green, blue));
+		const double difference = maximum - minimum;
+
+		if (difference == 0.0)
+			return {0.0, 0.0, minimum};
+
+		HslComponents result;
+		result.luminance  = (maximum + minimum) / 2.0;
+		result.saturation = result.luminance < 0.5 ? difference / (maximum + minimum)
+		                                           : difference / (2.0 - maximum - minimum);
+
+		if (red == maximum)
+			result.hueDegrees = 60.0 * (green - blue) / difference;
+		else if (green == maximum)
+			result.hueDegrees = 60.0 * (blue - red) / difference + 120.0;
+		else
+			result.hueDegrees = 60.0 * (red - green) / difference + 240.0;
+
+		if (result.hueDegrees < 0.0)
+			result.hueDegrees += 360.0;
+		else if (result.hueDegrees > 360.0)
+			result.hueDegrees -= 360.0;
+		result.saturation = qBound(0.0, result.saturation, 1.0);
+		return result;
+	}
+
+	/**
+	 * @brief Converts MUSHclient HSL components to rounded byte RGB channels.
+	 */
+	inline std::array<Channel, 3> hslToRgb(const HslComponents &hsl) noexcept
+	{
+		const auto roundedChannel = [](const double value)
+		{ return static_cast<Channel>(clampToByteRange(static_cast<int>(std::lround(value * 255.0)))); };
+		if (hsl.saturation <= 0.0)
+		{
+			const Channel grey = roundedChannel(hsl.luminance);
+			return {grey, grey, grey};
+		}
+
+		const double q                = hsl.luminance < 0.5
+		                                    ? hsl.luminance * (1.0 + hsl.saturation)
+		                                    : hsl.luminance + hsl.saturation - hsl.luminance * hsl.saturation;
+		const double p                = 2.0 * hsl.luminance - q;
+		const double hue              = hsl.hueDegrees / 360.0;
+		const auto   channelComponent = [p, q](double component)
+		{
+			if (component < 0.0)
+				component += 1.0;
+			if (component > 1.0)
+				component -= 1.0;
+			if (component < 1.0 / 6.0)
+				return p + (q - p) * 6.0 * component;
+			if (component < 0.5)
+				return q;
+			if (component < 2.0 / 3.0)
+				return p + (q - p) * 6.0 * (2.0 / 3.0 - component);
+			return p;
+		};
+		return {roundedChannel(channelComponent(hue + 1.0 / 3.0)), roundedChannel(channelComponent(hue)),
+		        roundedChannel(channelComponent(hue - 1.0 / 3.0))};
+	}
 
 	/**
 	 * @brief Returns square of long value.

@@ -645,25 +645,23 @@ namespace
 		{
 			for (long row = 0; row < height; ++row)
 			{
-				unsigned char *line     = buffer + bpl * row;
-				const int      lastByte = static_cast<int>(width * 3);
+				unsigned char *line = buffer + bpl * row;
 				for (long rgb = 0; rgb < 3; ++rgb)
 				{
 					long windowBytes[5];
-					for (long col = 0; col < 4; ++col)
-						windowBytes[col + 1] =
-						    line[qBound(0, static_cast<int>(rgb + (col * 3) - 6), lastByte - 1)];
-					for (long col = 0; col < lastByte - 4; col += 3)
+					for (long offset = -2; offset <= 1; ++offset)
+						windowBytes[offset + 3] = line[qBound(0L, offset, width - 1) * 3 + rgb];
+					for (long col = 0; col < width; ++col)
 					{
 						windowBytes[0] = windowBytes[1];
 						windowBytes[1] = windowBytes[2];
 						windowBytes[2] = windowBytes[3];
 						windowBytes[3] = windowBytes[4];
-						windowBytes[4] = line[qBound(0, static_cast<int>(col + rgb + 6), lastByte - 1)];
-						long total     = 0;
+						windowBytes[4] = line[qBound(0L, col + 2, width - 1) * 3 + rgb];
+						double total   = 0.0;
 						for (int i = 0; i < 5; ++i)
-							total += roundedToLong(static_cast<double>(windowBytes[i]) * matrix[i]);
-						line[col + rgb] = clampByte(roundedToLong(static_cast<double>(total) / divisor));
+							total += static_cast<double>(windowBytes[i]) * matrix[i];
+						line[col * 3 + rgb] = clampByte(roundedToLong(total / divisor));
 					}
 				}
 			}
@@ -683,18 +681,18 @@ namespace
 				}
 				for (long row = 0; row < height; ++row)
 				{
-					const long     from = qBound(0L, row + 3, height - 1);
+					const long     from = qBound(0L, row + 2, height - 1);
 					unsigned char *line = buffer + col + (from * bpl);
 					windowBytes[0]      = windowBytes[1];
 					windowBytes[1]      = windowBytes[2];
 					windowBytes[2]      = windowBytes[3];
 					windowBytes[3]      = windowBytes[4];
 					windowBytes[4]      = *line;
-					long total          = 0;
+					double total        = 0.0;
 					for (int i = 0; i < 5; ++i)
-						total += roundedToLong(static_cast<double>(windowBytes[i]) * matrix[i]);
+						total += static_cast<double>(windowBytes[i]) * matrix[i];
 					line  = buffer + col + (row * bpl);
-					*line = clampByte(roundedToLong(static_cast<double>(total) / divisor));
+					*line = clampByte(roundedToLong(total / divisor));
 				}
 			}
 		}
@@ -948,59 +946,47 @@ namespace
 			break;
 		case 60:
 		{
-			const QColor cA(lowByteToInt(rA), lowByteToInt(gA), lowByteToInt(bA));
-			const QColor cB(lowByteToInt(rB), lowByteToInt(gB), lowByteToInt(bB));
-			const int    hue      = (cA.hslHue() < 0) ? 0 : cA.hslHue();
-			const QColor outColor = QColor::fromHsl(hue, cB.hslSaturation(), cB.lightness());
-			r                     = QMudBlend::simpleOpacity(longToDouble(rB), outColor.red(), opacity);
-			g                     = QMudBlend::simpleOpacity(longToDouble(gB), outColor.green(), opacity);
-			b                     = QMudBlend::simpleOpacity(longToDouble(bB), outColor.blue(), opacity);
+			const QMudBlend::HslComponents blendHsl = QMudBlend::rgbToHsl(rA, gA, bA);
+			QMudBlend::HslComponents       baseHsl  = QMudBlend::rgbToHsl(rB, gB, bB);
+			baseHsl.hueDegrees                      = blendHsl.hueDegrees;
+			const auto outColor                     = QMudBlend::hslToRgb(baseHsl);
+			applyRgb(outColor[0], outColor[1], outColor[2]);
 			break;
 		}
 		case 61:
 		{
-			const QColor cA(lowByteToInt(rA), lowByteToInt(gA), lowByteToInt(bA));
-			const QColor cB(lowByteToInt(rB), lowByteToInt(gB), lowByteToInt(bB));
-			const int    sat      = cA.hslSaturation();
-			const QColor outColor = QColor::fromHsl(cB.hslHue() < 0 ? 0 : cB.hslHue(), sat, cB.lightness());
-			r                     = QMudBlend::simpleOpacity(longToDouble(rB), outColor.red(), opacity);
-			g                     = QMudBlend::simpleOpacity(longToDouble(gB), outColor.green(), opacity);
-			b                     = QMudBlend::simpleOpacity(longToDouble(bB), outColor.blue(), opacity);
+			const QMudBlend::HslComponents blendHsl = QMudBlend::rgbToHsl(rA, gA, bA);
+			QMudBlend::HslComponents       baseHsl  = QMudBlend::rgbToHsl(rB, gB, bB);
+			baseHsl.saturation                      = blendHsl.saturation;
+			const auto outColor                     = QMudBlend::hslToRgb(baseHsl);
+			applyRgb(outColor[0], outColor[1], outColor[2]);
 			break;
 		}
 		case 62:
 		{
-			const QColor cA(lowByteToInt(rA), lowByteToInt(gA), lowByteToInt(bA));
-			const QColor cB(lowByteToInt(rB), lowByteToInt(gB), lowByteToInt(bB));
-			const int    hue      = (cA.hslHue() < 0) ? 0 : cA.hslHue();
-			const int    sat      = cA.hslSaturation();
-			const QColor outColor = QColor::fromHsl(hue, sat, cB.lightness());
-			r                     = QMudBlend::simpleOpacity(longToDouble(rB), outColor.red(), opacity);
-			g                     = QMudBlend::simpleOpacity(longToDouble(gB), outColor.green(), opacity);
-			b                     = QMudBlend::simpleOpacity(longToDouble(bB), outColor.blue(), opacity);
+			const QMudBlend::HslComponents blendHsl = QMudBlend::rgbToHsl(rA, gA, bA);
+			QMudBlend::HslComponents       baseHsl  = QMudBlend::rgbToHsl(rB, gB, bB);
+			baseHsl.hueDegrees                      = blendHsl.hueDegrees;
+			baseHsl.saturation                      = blendHsl.saturation;
+			const auto outColor                     = QMudBlend::hslToRgb(baseHsl);
+			applyRgb(outColor[0], outColor[1], outColor[2]);
 			break;
 		}
 		case 63:
 		{
-			const QColor cA(lowByteToInt(rA), lowByteToInt(gA), lowByteToInt(bA));
-			const QColor cB(lowByteToInt(rB), lowByteToInt(gB), lowByteToInt(bB));
-			const QColor outColor =
-			    QColor::fromHsl(cB.hslHue() < 0 ? 0 : cB.hslHue(), cB.hslSaturation(), cA.lightness());
-			r = QMudBlend::simpleOpacity(longToDouble(rB), outColor.red(), opacity);
-			g = QMudBlend::simpleOpacity(longToDouble(gB), outColor.green(), opacity);
-			b = QMudBlend::simpleOpacity(longToDouble(bB), outColor.blue(), opacity);
+			const QMudBlend::HslComponents blendHsl = QMudBlend::rgbToHsl(rA, gA, bA);
+			QMudBlend::HslComponents       baseHsl  = QMudBlend::rgbToHsl(rB, gB, bB);
+			baseHsl.luminance                       = blendHsl.luminance;
+			const auto outColor                     = QMudBlend::hslToRgb(baseHsl);
+			applyRgb(outColor[0], outColor[1], outColor[2]);
 			break;
 		}
 		case 64:
 		{
-			const QColor cA(lowByteToInt(rA), lowByteToInt(gA), lowByteToInt(bA));
-			const qreal  hue       = cA.hslHueF();
-			const qreal  sat       = cA.hslSaturationF();
-			const qreal  lum       = cA.lightnessF();
-			const double hueScaled = (hue < 0.0) ? 0.0 : hue * 255.0;
-			r                      = QMudBlend::simpleOpacity(longToDouble(rB), hueScaled, opacity);
-			g                      = QMudBlend::simpleOpacity(longToDouble(gB), sat * 255.0, opacity);
-			b                      = QMudBlend::simpleOpacity(longToDouble(bB), lum * 255.0, opacity);
+			const QMudBlend::HslComponents blendHsl = QMudBlend::rgbToHsl(rA, gA, bA);
+			r = QMudBlend::simpleOpacity(longToDouble(rB), blendHsl.hueDegrees / 360.0 * 255.0, opacity);
+			g = QMudBlend::simpleOpacity(longToDouble(gB), blendHsl.saturation * 255.0, opacity);
+			b = QMudBlend::simpleOpacity(longToDouble(bB), blendHsl.luminance * 255.0, opacity);
 			break;
 		}
 		default:
