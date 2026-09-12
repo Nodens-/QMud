@@ -11,7 +11,6 @@
 #include "AppController.h"
 #include "MiniWindowUtils.h"
 #include "NativePluginRegistry.h"
-#include "OutputWrapUtils.h"
 #include "TelnetProcessor.h"
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
@@ -72,6 +71,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <utility>
 
 namespace
 {
@@ -10577,7 +10577,9 @@ class tst_WorldView_Basic : public QObject
 
 			QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
 			QTest::mouseClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, firstRemainingPoint);
-			QTRY_COMPARE(activatedSpy.count(), 1);
+			QVERIFY(view.m_hyperlinkActivationTimer->isActive());
+			view.dispatchPendingHyperlinkActivation();
+			QCOMPARE(activatedSpy.count(), 1);
 			QCOMPARE(QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8()),
 			         firstRemainingHref);
 
@@ -12926,7 +12928,9 @@ class tst_WorldView_Basic : public QObject
 
 			QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
 			QTest::mouseClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, anchorPoint);
-			QTRY_COMPARE(activatedSpy.count(), 1);
+			QVERIFY(view.m_hyperlinkActivationTimer->isActive());
+			view.dispatchPendingHyperlinkActivation();
+			QCOMPARE(activatedSpy.count(), 1);
 			const QString emittedHref =
 			    QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8());
 			QCOMPARE(emittedHref, span.action);
@@ -12960,7 +12964,9 @@ class tst_WorldView_Basic : public QObject
 
 			QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
 			QTest::mouseClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, anchorPoint);
-			QTRY_COMPARE(activatedSpy.count(), 1);
+			QVERIFY(view.m_hyperlinkActivationTimer->isActive());
+			view.dispatchPendingHyperlinkActivation();
+			QCOMPARE(activatedSpy.count(), 1);
 			const QString emittedHref =
 			    QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8());
 			QCOMPARE(emittedHref, span.action);
@@ -12997,10 +13003,9 @@ class tst_WorldView_Basic : public QObject
 			struct MenuCaptureFilter final : QObject
 			{
 					explicit MenuCaptureFilter(QStringList *capturedActions, bool *captured,
-					                           const QString &actionToTrigger = {},
-					                           bool          *actionTriggered = nullptr)
+					                           QString actionToTrigger = {}, bool *actionTriggered = nullptr)
 					    : m_capturedActions(capturedActions), m_captured(captured),
-					      m_actionToTrigger(actionToTrigger), m_actionTriggered(actionTriggered)
+					      m_actionToTrigger(std::move(actionToTrigger)), m_actionTriggered(actionTriggered)
 					{
 					}
 
@@ -13923,8 +13928,8 @@ class tst_WorldView_Basic : public QObject
 				return result;
 			};
 
-			auto verifyPromotion = [](const WorldView &view, QTextBrowser *browser, const WordHit &hit,
-			                          const bool useQpaSequence)
+			auto verifyPromotion =
+			    [](WorldView &view, QTextBrowser *browser, const WordHit &hit, const bool useQpaSequence)
 			{
 				QVERIFY(browser);
 				QVERIFY(browser->viewport());
@@ -13958,6 +13963,16 @@ class tst_WorldView_Basic : public QObject
 						QCoreApplication::processEvents();
 					}
 				};
+				auto expireTripleClickTracking = [&view, verifyElapsedExpiry = useQpaSequence]() mutable
+				{
+					if (verifyElapsedExpiry)
+					{
+						QTest::qWait(QTest::mouseDoubleClickInterval + 1);
+						verifyElapsedExpiry = false;
+						return;
+					}
+					view.m_nativeOutputTripleClickTimer.invalidate();
+				};
 
 				if (useQpaSequence)
 				{
@@ -13973,7 +13988,7 @@ class tst_WorldView_Basic : public QObject
 				sendSingleClick();
 				QCOMPARE(view.outputSelectionText(), hit.line);
 
-				QTest::qWait(QTest::mouseDoubleClickInterval + 1);
+				expireTripleClickTracking();
 				if (useQpaSequence)
 				{
 					sendQpaDoubleClick();
@@ -13985,7 +14000,7 @@ class tst_WorldView_Basic : public QObject
 					QCoreApplication::processEvents();
 				}
 				QCOMPARE(view.outputSelectionText(), hit.word);
-				QTest::qWait(QTest::mouseDoubleClickInterval + 1);
+				expireTripleClickTracking();
 
 				if (useQpaSequence)
 				{
@@ -14222,8 +14237,8 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(view.outputSelectionText(), linkedText);
 			QCOMPARE(activatedSpy.count(), 0);
 
-			const int doubleClickInterval = qMax(0, styleHints->mouseDoubleClickInterval());
-			QTest::qWait(doubleClickInterval + 20);
+			QVERIFY(!view.m_hyperlinkActivationTimer->isActive());
+			QVERIFY(view.m_pendingHyperlinkActivationHref.isEmpty());
 			QCOMPARE(activatedSpy.count(), 0);
 
 			resetTestState();
@@ -14888,7 +14903,9 @@ class tst_WorldView_Basic : public QObject
 
 			QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
 			QTest::mouseClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, anchorPoint);
-			QTRY_COMPARE(activatedSpy.count(), 1);
+			QVERIFY(view.m_hyperlinkActivationTimer->isActive());
+			view.dispatchPendingHyperlinkActivation();
+			QCOMPARE(activatedSpy.count(), 1);
 			QCOMPARE(QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8()), span.action);
 			resetTestState();
 		}
@@ -14945,7 +14962,9 @@ class tst_WorldView_Basic : public QObject
 
 			QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
 			QTest::mouseClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, anchorPoint);
-			QTRY_COMPARE(activatedSpy.count(), 1);
+			QVERIFY(view.m_hyperlinkActivationTimer->isActive());
+			view.dispatchPendingHyperlinkActivation();
+			QCOMPARE(activatedSpy.count(), 1);
 			QCOMPARE(QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8()),
 			         linkSpan.action);
 			resetTestState();
@@ -15008,7 +15027,9 @@ class tst_WorldView_Basic : public QObject
 
 			QSignalSpy activatedSpy(&view, &WorldView::hyperlinkActivated);
 			QTest::mouseClick(browser->viewport(), Qt::LeftButton, Qt::NoModifier, newestPointAfter);
-			QTRY_COMPARE(activatedSpy.count(), 1);
+			QVERIFY(view.m_hyperlinkActivationTimer->isActive());
+			view.dispatchPendingHyperlinkActivation();
+			QCOMPARE(activatedSpy.count(), 1);
 			QCOMPARE(QUrl::fromPercentEncoding(activatedSpy.at(0).at(0).toString().toUtf8()), newestHref);
 
 			resetTestState();
