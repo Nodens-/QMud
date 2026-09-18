@@ -16,6 +16,7 @@
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QCoreApplication>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -112,6 +113,7 @@ namespace
 			QTreeWidget  *tree{nullptr};
 			QPushButton  *editButton{nullptr};
 			QPushButton  *removeButton{nullptr};
+			QPushButton  *pasteButton{nullptr};
 	};
 
 	/**
@@ -197,6 +199,8 @@ namespace
 				result.editButton = button;
 			else if (button->text() == QStringLiteral("&Remove"))
 				result.removeButton = button;
+			else if (button->text() == QStringLiteral("&Paste"))
+				result.pasteButton = button;
 		}
 		return result;
 	}
@@ -1465,6 +1469,168 @@ namespace
 				}
 			}
 
+			void ruleDeletionIsStagedUntilMainDialogAcceptance()
+			{
+				AppController app;
+				QCOMPARE(app.getGlobalOption(QStringLiteral("TriggerRemoveCheck")).toInt(), 1);
+				for (const RuleKind kind : {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer})
+				{
+					auto exerciseDeletion = [kind](const bool acceptDialog)
+					{
+						WorldRuntime runtime;
+						runtime.applyDefaultWorldOptions();
+						runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Test World"));
+						runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+						runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+						populateRuleSelectionFixtures(runtime, kind, false, false);
+						WorldPreferencesDialog dialog(&runtime, nullptr);
+						dialog.setInitialPage(rulePage(kind));
+						const RuleViewWidgets widgets = findRuleViewWidgets(dialog, kind);
+						QVERIFY(widgets.table);
+						QVERIFY(widgets.removeButton);
+						widgets.table->setCurrentCell(0, 0);
+
+						bool confirmationHandled = false;
+						QVERIFY(QMetaObject::invokeMethod(
+						    &dialog,
+						    [&confirmationHandled]
+						    {
+							    auto *message =
+							        qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+							    if (!message)
+								    return;
+							    confirmationHandled = true;
+							    message->button(QMessageBox::Yes)->click();
+						    },
+						    Qt::QueuedConnection));
+						widgets.removeButton->click();
+						QVERIFY(confirmationHandled);
+						QCOMPARE(widgets.table->rowCount(), 2);
+
+						auto runtimeSize = [&runtime, kind]() -> qsizetype
+						{
+							switch (kind)
+							{
+							case RuleKind::Trigger:
+								return runtime.triggers().size();
+							case RuleKind::Alias:
+								return runtime.aliases().size();
+							case RuleKind::Timer:
+								return runtime.timers().size();
+							}
+							return 0;
+						};
+						QCOMPARE(runtimeSize(), 3);
+						if (acceptDialog)
+							dialog.accept();
+						else
+							dialog.reject();
+						QCOMPARE(runtimeSize(), acceptDialog ? 2 : 3);
+					};
+					exerciseDeletion(false);
+					exerciseDeletion(true);
+				}
+			}
+
+			void pastedNamedDuplicateIsStagedAndBlocksAcceptance()
+			{
+				WorldRuntime runtime;
+				runtime.applyDefaultWorldOptions();
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Test World"));
+				runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+				runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("name"), QStringLiteral("Existing"));
+				trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("original"));
+				runtime.setTriggers({trigger});
+
+				WorldPreferencesDialog dialog(&runtime, nullptr);
+				dialog.setInitialPage(WorldPreferencesDialog::PageTriggers);
+				const RuleViewWidgets widgets = findRuleViewWidgets(dialog, RuleKind::Trigger);
+				QVERIFY(widgets.table);
+				QVERIFY(widgets.pasteButton);
+				QClipboard *clipboard = QGuiApplication::clipboard();
+				QVERIFY(clipboard);
+				clipboard->setText(
+				    QStringLiteral("<qmud><triggers><trigger name=\"existing\" match=\"pasted\">"
+				                   "<send>pasted</send></trigger>"
+				                   "<trigger name=\"EXISTING\" match=\"second pasted\">"
+				                   "<send>second pasted</send></trigger></triggers></qmud>"));
+
+				widgets.pasteButton->click();
+				QCOMPARE(widgets.table->rowCount(), 3);
+				QCOMPARE(runtime.triggers().size(), 1);
+
+				QString duplicateMessage;
+				QVERIFY(QMetaObject::invokeMethod(
+				    &dialog,
+				    [&duplicateMessage]
+				    {
+					    auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+					    if (!message)
+						    return;
+					    duplicateMessage = message->text();
+					    message->button(QMessageBox::Ok)->click();
+				    },
+				    Qt::QueuedConnection));
+				dialog.accept();
+				QVERIFY(
+				    duplicateMessage.contains(QStringLiteral("Named rules and variables should be unique:")));
+				QVERIFY(duplicateMessage.contains(QStringLiteral("Triggers\n  3 named Existing")));
+				QCOMPARE(runtime.triggers().size(), 1);
+				QCOMPARE(dialog.result(), 0);
+			}
+
+			void inlineVariableEditIsStagedUntilMainDialogAcceptance()
+			{
+				auto configureRuntime = [](WorldRuntime &runtime)
+				{
+					runtime.applyDefaultWorldOptions();
+					runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Test World"));
+					runtime.setWorldAttribute(QStringLiteral("site"), QStringLiteral("example.invalid"));
+					runtime.setWorldAttribute(QStringLiteral("port"), QStringLiteral("4000"));
+					WorldRuntime::Variable variable;
+					variable.attributes.insert(QStringLiteral("name"), QStringLiteral("health"));
+					variable.content = QStringLiteral("10");
+					runtime.setVariables({variable});
+				};
+				auto findVariablesTable = [](const WorldPreferencesDialog &dialog) -> QTableWidget *
+				{
+					for (QTableWidget *table : dialog.findChildren<QTableWidget *>())
+					{
+						if (table && table->horizontalHeaderItem(0) && table->horizontalHeaderItem(1) &&
+						    table->horizontalHeaderItem(0)->text() == QStringLiteral("Name") &&
+						    table->horizontalHeaderItem(1)->text() == QStringLiteral("Value"))
+							return table;
+					}
+					return nullptr;
+				};
+
+				{
+					WorldRuntime runtime;
+					configureRuntime(runtime);
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					QTableWidget          *table = findVariablesTable(dialog);
+					QVERIFY(table);
+					table->item(0, 1)->setText(QStringLiteral("20"));
+					QCOMPARE(runtime.variables().front().content, QStringLiteral("10"));
+					dialog.reject();
+					QCOMPARE(runtime.variables().front().content, QStringLiteral("10"));
+				}
+
+				{
+					WorldRuntime runtime;
+					configureRuntime(runtime);
+					WorldPreferencesDialog dialog(&runtime, nullptr);
+					QTableWidget          *table = findVariablesTable(dialog);
+					QVERIFY(table);
+					table->item(0, 1)->setText(QStringLiteral("20"));
+					QCOMPARE(runtime.variables().front().content, QStringLiteral("10"));
+					dialog.accept();
+					QCOMPARE(runtime.variables().front().content, QStringLiteral("20"));
+				}
+			}
+
 			void ruleEditsFollowRuntimeIdentityAfterEarlierRuleRemoval()
 			{
 				const QList<RuleKind> ruleKinds = {RuleKind::Trigger, RuleKind::Alias, RuleKind::Timer};
@@ -2000,13 +2166,13 @@ namespace
 							switch (kind)
 							{
 							case RuleKind::Trigger:
-								QCOMPARE(runtime.triggers().size(), removeSelectedDuringConfirmation ? 2 : 1);
+								QCOMPARE(runtime.triggers().size(), 2);
 								break;
 							case RuleKind::Alias:
-								QCOMPARE(runtime.aliases().size(), removeSelectedDuringConfirmation ? 2 : 1);
+								QCOMPARE(runtime.aliases().size(), 2);
 								break;
 							case RuleKind::Timer:
-								QCOMPARE(runtime.timers().size(), removeSelectedDuringConfirmation ? 2 : 1);
+								QCOMPARE(runtime.timers().size(), 2);
 								break;
 							}
 							const int remainingRow =

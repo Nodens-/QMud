@@ -21,20 +21,18 @@ namespace QMudImportMerge
 	 * @param src Source list to merge from.
 	 * @param kind User-visible item kind label for error text.
 	 * @param allowOverwrite Replace existing entries on duplicate name when `true`.
-	 * @param allowPasteDuplicate Keep both entries on duplicate name when `true`.
 	 * @param duplicates Optional duplicate counter output.
 	 * @param errorMessage Optional error output when merge stops on duplicate.
 	 * @return `true` when merge succeeds.
 	 */
 	template <typename Item>
 	bool mergeNamedList(QList<Item> &dest, const QList<Item> &src, const QString &kind,
-	                    const bool allowOverwrite, const bool allowPasteDuplicate, int *duplicates,
-	                    QString *errorMessage)
+	                    const bool allowOverwrite, int *duplicates, QString *errorMessage)
 	{
 		QMap<QString, int> indexByName;
 		for (int i = 0; i < dest.size(); ++i)
 		{
-			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toLower();
+			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
 			if (!name.isEmpty())
 				indexByName.insert(name, i);
 		}
@@ -42,7 +40,7 @@ namespace QMudImportMerge
 		for (const auto &item : src)
 		{
 			const QString rawName = item.attributes.value(QStringLiteral("name")).trimmed();
-			const QString key     = rawName.toLower();
+			const QString key     = rawName.toCaseFolded();
 			if (key.isEmpty() || !indexByName.contains(key))
 			{
 				dest.push_back(item);
@@ -59,14 +57,6 @@ namespace QMudImportMerge
 				continue;
 			}
 
-			if (allowPasteDuplicate)
-			{
-				dest.push_back(item);
-				if (duplicates)
-					++(*duplicates);
-				continue;
-			}
-
 			if (errorMessage)
 				*errorMessage = QStringLiteral("Duplicate %1 label \"%2\"").arg(kind, rawName);
 			return false;
@@ -75,22 +65,21 @@ namespace QMudImportMerge
 	}
 
 	/**
-	 * @brief Merges variable list using overwrite/paste-duplicate policies.
+	 * @brief Merges a variable list using overwrite and duplicate-counting policies.
 	 * @tparam VariableItem Variable item type exposing `attributes` map with `name` and `content`.
 	 * @param dest Destination list to update.
 	 * @param src Source list to merge from.
 	 * @param allowOverwrite Replace existing entries on duplicate name when `true`.
-	 * @param allowPasteDuplicate Keep both entries on duplicate name when `true`.
 	 * @param duplicates Optional duplicate/change counter output.
 	 */
 	template <typename VariableItem>
 	void mergeVariables(QList<VariableItem> &dest, const QList<VariableItem> &src, const bool allowOverwrite,
-	                    const bool allowPasteDuplicate, int *duplicates)
+	                    int *duplicates)
 	{
 		QMap<QString, int> indexByName;
 		for (int i = 0; i < dest.size(); ++i)
 		{
-			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toLower();
+			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
 			if (!name.isEmpty())
 				indexByName.insert(name, i);
 		}
@@ -98,7 +87,7 @@ namespace QMudImportMerge
 		for (const auto &item : src)
 		{
 			const QString rawName = item.attributes.value(QStringLiteral("name")).trimmed();
-			const QString key     = rawName.toLower();
+			const QString key     = rawName.toCaseFolded();
 			if (key.isEmpty() || !indexByName.contains(key))
 			{
 				dest.push_back(item);
@@ -111,14 +100,6 @@ namespace QMudImportMerge
 			if (allowOverwrite)
 			{
 				dest[existingIndex] = item;
-				if (duplicates)
-					++(*duplicates);
-				continue;
-			}
-
-			if (allowPasteDuplicate)
-			{
-				dest.push_back(item);
 				if (duplicates)
 					++(*duplicates);
 				continue;

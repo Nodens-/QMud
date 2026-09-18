@@ -38,6 +38,7 @@
 class MainWindow;
 class ActivityDocument;
 class WorldChildWindow;
+class WorldDocument;
 class WorldRuntime;
 class WorldView;
 class QMdiSubWindow;
@@ -542,35 +543,45 @@ class AppController : public QObject
 		 */
 		void                   discardStaleSpellCheckerStatesForThread(const QThread *ownerThread);
 #endif
-		static AppController             *s_instance;
+		/**
+		 * @brief Applies an already parsed XML import to the active world.
+		 * @param world Active world child window.
+		 * @param runtime Active world runtime.
+		 * @param document Parsed XML document.
+		 * @param mask Import mask.
+		 * @return Import result payload.
+		 */
+		ImportResult          applyImportedDocument(WorldChildWindow *world, WorldRuntime *runtime,
+		                                            const WorldDocument &document, unsigned long mask);
+		static AppController *s_instance;
 		/**
 		 * @brief Database and preference loading helpers.
 		 * @return `true` when database opens successfully.
 		 */
-		bool                              openPreferencesDatabase();
+		bool                  openPreferencesDatabase();
 		/**
 		 * @brief Creates/updates preferences schema and seed rows.
 		 * @return Number of schema/population changes applied.
 		 */
-		[[nodiscard]] int                 populateDatabase() const;
+		[[nodiscard]] int     populateDatabase() const;
 		/**
 		 * @brief Loads global settings from preferences database.
 		 */
-		void                              loadGlobalsFromDatabase();
+		void                  loadGlobalsFromDatabase();
 		/**
 		 * @brief Returns count of pending DB changes.
 		 * @return Number of pending DB changes.
 		 */
-		[[nodiscard]] int                 dbChanges() const;
+		[[nodiscard]] int     dbChanges() const;
 		/**
 		 * @brief Initializes translation/localization subsystem.
 		 * @return `true` when i18n setup succeeds.
 		 */
-		bool                              setupI18N();
+		bool                  setupI18N();
 		/**
 		 * @brief Loads compass/map direction aliases.
 		 */
-		void                              loadMapDirections();
+		void                  loadMapDirections();
 		/**
 		 * @brief Finds configured map direction entry.
 		 * @param direction Direction token.

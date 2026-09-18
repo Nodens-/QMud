@@ -15,6 +15,7 @@
 #include <QHash>
 #include <QMap>
 #include <QVector>
+#include <memory>
 
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -77,6 +78,10 @@ class WorldPreferencesDialog : public QDialog
 		 * @param parent Optional Qt parent widget.
 		 */
 		explicit WorldPreferencesDialog(WorldRuntime *runtime, WorldView *view, QWidget *parent = nullptr);
+		/**
+		 * @brief Destroys the preferences dialog and its staged list state.
+		 */
+		~WorldPreferencesDialog() override;
 
 		/**
 		 * @brief Selects initially visible preferences page.
@@ -107,367 +112,401 @@ class WorldPreferencesDialog : public QDialog
 		/**
 		 * @brief Recalculates the font- and style-aware minimum dialog size.
 		 */
-		void                          refreshDialogSizing();
+		void                refreshDialogSizing();
 		/**
 		 * @brief Applies one content-driven resize while preserving user-added space.
 		 * @param contentMinimum Global content requirement across all pages.
 		 */
-		void                          applyDialogContentSize(QSize contentMinimum);
+		void                applyDialogContentSize(QSize contentMinimum);
 		/**
 		 * @brief Queues one sizing refresh after pending native and font metrics settle.
 		 */
-		void                          scheduleDialogSizingRefresh();
+		void                scheduleDialogSizingRefresh();
 		/**
 		 * @brief Queues the one-time native-frame-aware sizing pass after first exposure.
 		 */
-		void                          finalizeInitialDialogSizing();
+		void                finalizeInitialDialogSizing();
 		/**
 		 * @brief Keeps the Custom Colours swatch columns equally sized for exact swap-button alignment.
 		 */
-		void                          refreshCustomColourColumnWidths() const;
+		void                refreshCustomColourColumnWidths() const;
 		/**
 		 * @brief Recalculates ANSI colour headers and marker swatches from current font and style metrics.
 		 */
-		void                          refreshAnsiColourGeometry() const;
+		void                refreshAnsiColourGeometry() const;
 		/**
 		 * @brief Reapplies the Info page's compact font relative to the current dialog font.
 		 */
-		void                          refreshInfoPageFont() const;
+		void                refreshInfoPageFont() const;
 		/**
 		 * @brief UI construction and import/export helpers.
 		 */
-		void                          buildUi();
+		void                buildUi();
 		/**
 		 * @brief Applies pending inline list/table edits.
 		 */
-		void                          applyListEdits();
+		void                applyListEdits();
 		/**
 		 * @brief Opens color editor for table cell.
 		 * @param table Target table containing the editable color cell.
 		 * @param row Row index of the color cell.
 		 * @param column Column index of the color cell.
 		 */
-		void                          editColourCell(QTableWidget *table, int row, int column);
+		void                editColourCell(QTableWidget *table, int row, int column);
 		/**
 		 * @brief Opens macro editor for the selected row.
 		 * @param row Macro row index to edit.
 		 */
-		void                          editMacroAtRow(int row);
+		void                editMacroAtRow(int row);
 		/**
 		 * @brief Finds macro rows matching text criteria.
 		 * @param text Search text or regex pattern.
 		 * @param continueFromCurrent Continue from current selection when `true`.
 		 */
-		void                          findMacro(const QString &text, bool continueFromCurrent);
+		void                findMacro(const QString &text, bool continueFromCurrent);
 		/**
 		 * @brief Saves macro list to XML/file.
 		 * @param fileName Target file path.
 		 * @return `true` on successful write.
 		 */
-		[[nodiscard]] bool            saveMacrosToFile(const QString &fileName) const;
+		[[nodiscard]] bool  saveMacrosToFile(const QString &fileName) const;
 		/**
 		 * @brief Loads macro list from XML/file.
 		 * @param fileName Source file path.
 		 * @return `true` on successful load and parse.
 		 */
-		bool                          loadMacrosFromFile(const QString &fileName);
+		bool                loadMacrosFromFile(const QString &fileName);
 		/**
 		 * @brief Saves trigger list to XML/file.
 		 * @param fileName Target file path.
 		 * @return `true` on successful write.
 		 */
-		[[nodiscard]] bool            saveTriggersToFile(const QString &fileName) const;
+		[[nodiscard]] bool  saveTriggersToFile(const QString &fileName);
 		/**
 		 * @brief Loads triggers from XML/file.
 		 * @param fileName Source file path.
 		 * @param replace Replace existing triggers when `true`.
 		 * @return `true` on successful load and merge/replace.
 		 */
-		bool                          loadTriggersFromFile(const QString &fileName, bool replace);
+		bool                loadTriggersFromFile(const QString &fileName, bool replace);
 		/**
 		 * @brief Saves alias list to XML/file.
 		 * @param fileName Target file path.
 		 * @return `true` on successful write.
 		 */
-		[[nodiscard]] bool            saveAliasesToFile(const QString &fileName) const;
+		[[nodiscard]] bool  saveAliasesToFile(const QString &fileName);
 		/**
 		 * @brief Loads aliases from XML/file.
 		 * @param fileName Source file path.
 		 * @param replace Replace existing aliases when `true`.
 		 * @return `true` on successful load and merge/replace.
 		 */
-		bool                          loadAliasesFromFile(const QString &fileName, bool replace);
+		bool                loadAliasesFromFile(const QString &fileName, bool replace);
 		/**
 		 * @brief Saves timer list to XML/file.
 		 * @param fileName Target file path.
 		 * @return `true` on successful write.
 		 */
-		[[nodiscard]] bool            saveTimersToFile(const QString &fileName) const;
+		[[nodiscard]] bool  saveTimersToFile(const QString &fileName);
 		/**
 		 * @brief Loads timers from XML/file.
 		 * @param fileName Source file path.
 		 * @param replace Replace existing timers when `true`.
 		 * @return `true` on successful load and merge/replace.
 		 */
-		bool                          loadTimersFromFile(const QString &fileName, bool replace);
+		bool                loadTimersFromFile(const QString &fileName, bool replace);
 		/**
 		 * @brief Saves variables to XML/file.
 		 * @param fileName Target file path.
 		 * @return `true` on successful write.
 		 */
-		[[nodiscard]] bool            saveVariablesToFile(const QString &fileName) const;
+		[[nodiscard]] bool  saveVariablesToFile(const QString &fileName);
 		/**
 		 * @brief Loads variables from XML/file.
 		 * @param fileName Source file path.
 		 * @return `true` on successful load.
 		 */
-		bool                          loadVariablesFromFile(const QString &fileName);
+		bool                loadVariablesFromFile(const QString &fileName);
 		/**
 		 * @brief Page population helpers.
 		 */
-		void                          populateGeneral();
+		void                populateGeneral();
 		/**
 		 * @brief Populates sound page controls.
 		 */
-		void                          populateSound() const;
+		void                populateSound() const;
 		/**
 		 * @brief Populates custom color page controls.
 		 */
-		void                          populateCustomColours();
+		void                populateCustomColours();
 		/**
 		 * @brief Populates logging page controls.
 		 */
-		void                          populateLogging() const;
+		void                populateLogging() const;
 		/**
 		 * @brief Populates ANSI color page controls.
 		 */
-		void                          populateAnsiColours();
+		void                populateAnsiColours();
 		/**
 		 * @brief Populates macro list page controls.
 		 */
-		void                          populateMacros();
+		void                populateMacros();
 		/**
 		 * @brief Populates output page controls.
 		 */
-		void                          populateOutput();
+		void                populateOutput();
 		/**
 		 * @brief Populates command page controls.
 		 */
-		void                          populateCommands();
+		void                populateCommands();
 		/**
 		 * @brief Populates scripting page controls.
 		 */
-		void                          populateScripting() const;
+		void                populateScripting() const;
 		/**
 		 * @brief Populates send-to-world page controls.
 		 */
-		void                          populateSendToWorld() const;
+		void                populateSendToWorld() const;
 		/**
 		 * @brief Populates notes page controls.
 		 */
-		void                          populateNotes() const;
+		void                populateNotes() const;
 		/**
 		 * @brief Populates keypad page controls.
 		 */
-		void                          populateKeypad();
+		void                populateKeypad();
 		/**
 		 * @brief Populates paste page controls.
 		 */
-		void                          populatePaste() const;
+		void                populatePaste() const;
 		/**
 		 * @brief Populates info/statistics page controls.
 		 */
-		void                          populateInfo();
+		void                populateInfo();
 		/**
 		 * @brief Populates trigger list page controls.
 		 */
-		void                          populateTriggers();
+		void                populateTriggers();
 		/**
 		 * @brief Populates alias list page controls.
 		 */
-		void                          populateAliases();
+		void                populateAliases();
 		/**
 		 * @brief Populates timer list page controls.
 		 */
-		void                          populateTimers();
+		void                populateTimers();
 		/**
 		 * @brief Populates variable list page controls.
 		 */
-		void                          populateVariables();
+		void                populateVariables();
 		/**
 		 * @brief Populates auto-say page controls.
 		 */
-		void                          populateAutoSay() const;
+		void                populateAutoSay() const;
 		/**
 		 * @brief Populates printing page controls.
 		 */
-		void                          populatePrinting();
+		void                populatePrinting();
 		/**
 		 * @brief Populates connecting page controls.
 		 */
-		void                          populateConnecting() const;
+		void                populateConnecting() const;
 		/**
 		 * @brief Populates MXP page controls.
 		 */
-		void                          populateMxp() const;
+		void                populateMxp() const;
 		/**
 		 * @brief Populates chat page controls.
 		 */
-		void                          populateChat() const;
+		void                populateChat() const;
 		/**
 		 * @brief Derived-state and control-update helpers.
 		 */
-		void                          updateScriptNoteSwatches() const;
+		void                updateScriptNoteSwatches() const;
 		/**
 		 * @brief Updates scripting note color combo item roles from custom colors.
 		 */
-		void                          updateScriptNoteColourItems() const;
+		void                updateScriptNoteColourItems() const;
 		/**
 		 * @brief Recalculates memory usage estimates for scripts/rules.
 		 * @param allowProgress Show progress UI for expensive runs when `true`.
 		 */
-		void                          calculateMemoryUsage(bool allowProgress);
+		void                calculateMemoryUsage(bool allowProgress);
 		/**
 		 * @brief Updates enable state of clear-cached-data button.
 		 */
-		void                          updateClearCachedButton() const;
+		void                updateClearCachedButton() const;
 		/**
 		 * @brief Updates TLS mode UI enable state.
 		 */
-		void                          updateTlsEncryptionState() const;
+		void                updateTlsEncryptionState() const;
 		/**
 		 * @brief Finds text within notes editor.
 		 * @param again Continue search from current position when `true`.
 		 */
-		void                          doNotesFind(bool again);
+		void                doNotesFind(bool again);
 		/**
 		 * @brief Applies swatch color style to line-edit field.
 		 * @param edit Target line edit showing a color value.
 		 * @param colour Color to apply.
 		 */
-		void                          setLineEditSwatch(QLineEdit *edit, const QColor &colour) const;
+		void                setLineEditSwatch(QLineEdit *edit, const QColor &colour) const;
 		/**
 		 * @brief Opens color picker for line-edit swatch field.
 		 * @param edit Target line edit whose color value will be updated.
 		 * @param title Dialog title text.
 		 */
-		void                          openLineEditColourPicker(QLineEdit *edit, const QString &title);
+		void                openLineEditColourPicker(QLineEdit *edit, const QString &title);
 		/**
 		 * @brief Updates auto-copy-html option dependencies.
 		 */
-		void                          updateAutoCopyHtmlState() const;
+		void                updateAutoCopyHtmlState() const;
 		/**
 		 * @brief Updates legacy text encoding option dependencies.
 		 */
-		void                          updateLegacyEncodingState() const;
+		void                updateLegacyEncodingState() const;
 		/**
 		 * @brief Updates output font controls.
 		 */
-		void                          updateOutputFontControls() const;
+		void                updateOutputFontControls() const;
 		/**
 		 * @brief Updates default-colours option dependencies.
 		 */
-		void                          updateDefaultColoursState();
+		void                updateDefaultColoursState();
 		/**
 		 * @brief Updates input font controls.
 		 */
-		void                          updateInputFontControls() const;
+		void                updateInputFontControls() const;
 		/**
 		 * @brief Updates command auto-resize controls.
 		 */
-		void                          updateCommandAutoResizeControls() const;
+		void                updateCommandAutoResizeControls() const;
 		/**
 		 * @brief Updates macro page button states.
 		 */
-		void                          updateMacroControls() const;
+		void                updateMacroControls() const;
 		/**
 		 * @brief Updates alias page button states.
 		 */
-		void                          updateAliasControls() const;
+		void                updateAliasControls() const;
 		/**
 		 * @brief Updates trigger page button states.
 		 */
-		void                          updateTriggerControls() const;
+		void                updateTriggerControls() const;
 		/**
 		 * @brief Updates timer page button states.
 		 */
-		void                          updateTimerControls() const;
+		void                updateTimerControls() const;
 		/**
 		 * @brief Updates variable page button states.
 		 */
-		void                          updateVariableControls() const;
+		void                updateVariableControls() const;
 		/**
 		 * @brief Switches between table/tree rule views.
 		 */
-		void                          updateRuleViewModes();
+		void                updateRuleViewModes();
 		/**
 		 * @brief Updates spell-check UI enable state.
 		 */
-		void                          updateSpellCheckState() const;
+		void                updateSpellCheckState() const;
 		/**
 		 * @brief Default-resource availability and font helpers.
 		 * @return `true` when the default output font global option is available.
 		 */
-		static bool                   hasDefaultOutputFont();
+		static bool         hasDefaultOutputFont();
 		/**
 		 * @brief Returns true when default colors file exists.
 		 * @return `true` when default colors resource file is present.
 		 */
-		static bool                   hasDefaultColoursFile();
+		static bool         hasDefaultColoursFile();
 		/**
 		 * @brief Returns true when default input font exists.
 		 * @return `true` when default input font global option is available.
 		 */
-		static bool                   hasDefaultInputFont();
+		static bool         hasDefaultInputFont();
 		/**
 		 * @brief Returns true when default macros file exists.
 		 * @return `true` when default macros resource file is present.
 		 */
-		static bool                   hasDefaultMacrosFile();
+		static bool         hasDefaultMacrosFile();
 		/**
 		 * @brief Returns true when default triggers file exists.
 		 * @return `true` when default triggers resource file is present.
 		 */
-		static bool                   hasDefaultTriggersFile();
+		static bool         hasDefaultTriggersFile();
 		/**
 		 * @brief Returns true when default timers file exists.
 		 * @return `true` when default timers resource file is present.
 		 */
-		static bool                   hasDefaultTimersFile();
+		static bool         hasDefaultTimersFile();
 		/**
 		 * @brief Returns true when default aliases file exists.
 		 * @return `true` when default aliases resource file is present.
 		 */
-		static bool                   hasDefaultAliasesFile();
+		static bool         hasDefaultAliasesFile();
 		/**
 		 * @brief Builds output font from dialog controls.
 		 * @return Font built from current output-font widgets.
 		 */
-		[[nodiscard]] QFont           outputFontFromDialog() const;
+		[[nodiscard]] QFont outputFontFromDialog() const;
 		/**
 		 * @brief Returns current output font from world view.
 		 * @return Effective output font currently used by the view.
 		 */
-		[[nodiscard]] QFont           outputFontFromView() const;
+		[[nodiscard]] QFont outputFontFromView() const;
 		/**
 		 * @brief Computes average character width for a font.
 		 * @param font Font to measure.
 		 * @return Average character width in pixels.
 		 */
-		static int                    averageCharWidth(const QFont &font);
+		static int          averageCharWidth(const QFont &font);
 		/**
 		 * @brief Keypad view-mode data marshaling helpers.
 		 * @param ctrlView Use Ctrl-modifier keypad view when `true`, base view otherwise.
 		 */
-		void                          storeKeypadFields(bool ctrlView);
+		void                storeKeypadFields(bool ctrlView);
 		/**
 		 * @brief Loads keypad controls from selected view-mode buffer.
 		 * @param ctrlView Use Ctrl-modifier keypad view when `true`, base view otherwise.
 		 */
-		void                          loadKeypadFields(bool ctrlView);
+		void                loadKeypadFields(bool ctrlView);
+		enum class WorkingListValidationScope
+		{
+			All,
+			Triggers,
+			Aliases,
+			Timers,
+			Variables
+		};
+		/**
+		 * @brief Validates that the selected resolved lists have unique nonempty names where required.
+		 * @param scope Collections included in this validation pass.
+		 * @return `true` when the selected collections can be committed or exported.
+		 */
+		bool validateWorkingListNames(WorkingListValidationScope scope);
+		/**
+		 * @brief Commits staged rule and variable list operations to the runtime.
+		 */
+		void commitWorkingListChanges() const;
+		/**
+		 * @brief Variable definition resolved against current runtime state.
+		 */
+		struct ResolvedVariable
+		{
+				QMap<QString, QString> attributes;
+				QString                content;
+		};
+		/**
+		 * @brief Resolves staged variable operations against the current runtime list.
+		 * @return Variable list that would be committed by the main dialog.
+		 */
+		[[nodiscard]] QList<ResolvedVariable> effectiveWorkingVariables() const;
+
+		struct WorkingLists;
 
 		WorldRuntime                 *m_runtime{nullptr};
 		WorldView                    *m_view{nullptr};
+		std::unique_ptr<WorkingLists> m_workingLists;
 		QTreeWidget                  *m_pageTree{nullptr};
 		QStackedWidget               *m_pages{nullptr};
 		QHash<int, QTreeWidgetItem *> m_pageItems;

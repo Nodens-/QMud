@@ -37,6 +37,7 @@
 #include <QtMath>
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -45,6 +46,12 @@
 namespace
 {
 	using PatternRows = std::array<quint8, 8>;
+
+	quint64 nextMiniWindowHotspotInstanceId()
+	{
+		static std::atomic<quint64> nextId{1};
+		return nextId.fetch_add(1, std::memory_order_relaxed);
+	}
 
 	constexpr int    kMemoryImageDecodeCacheMaxEntries = 64;
 	constexpr qint64 kMemoryImageDecodeCacheMaxBytes   = 64LL * 1024LL * 1024LL;
@@ -2825,6 +2832,7 @@ namespace MiniWindowUtils
 			window.mouseDownHotspot.clear();
 
 		MiniWindowHotspot hotspot;
+		hotspot.instanceId      = nextMiniWindowHotspotInstanceId();
 		hotspot.rect            = rectFromCoords(window, left, top, right, bottom);
 		hotspot.mouseOver       = mouseOver;
 		hotspot.cancelMouseOver = cancelMouseOver;
@@ -2909,8 +2917,11 @@ namespace MiniWindowUtils
 		return eOK;
 	}
 
-	void clearGeneratedOutputHotspots(MiniWindow &window, const QString &hotspotPrefix)
+	void clearGeneratedOutputHotspots(MiniWindow &window, const QString &hotspotPrefix,
+	                                  QStringList *removedHotspotIdsOut)
 	{
+		if (removedHotspotIdsOut)
+			removedHotspotIdsOut->clear();
 		const QString normalizedPrefix =
 		    hotspotPrefix.trimmed().isEmpty() ? QStringLiteral("output_link") : hotspotPrefix.trimmed();
 		const QString    scopedPrefix = normalizedPrefix + QLatin1Char('_');
@@ -2928,7 +2939,11 @@ namespace MiniWindowUtils
 			scopedGeneratedIds.push_back(generatedHotspotId);
 		}
 		for (const QString &generatedHotspotId : std::as_const(scopedGeneratedIds))
+		{
 			window.outputGeneratedHotspots.remove(generatedHotspotId);
+			if (removedHotspotIdsOut)
+				removedHotspotIdsOut->push_back(generatedHotspotId);
+		}
 		if (window.hotspots.isEmpty())
 		{
 			window.callbackPlugin.clear();
@@ -2938,7 +2953,8 @@ namespace MiniWindowUtils
 
 	int addGeneratedOutputHotspot(MiniWindow &window, const QString &hotspotPrefix, const int left,
 	                              const int top, const int right, const int bottom, const QString &mouseUp,
-	                              const QString &pluginId, const int actionType, const QString &action)
+	                              const QString &pluginId, const int actionType, const QString &action,
+	                              QString *hotspotIdOut)
 	{
 		const QString normalizedPrefix =
 		    hotspotPrefix.trimmed().isEmpty() ? QStringLiteral("output_link") : hotspotPrefix.trimmed();
@@ -2954,6 +2970,8 @@ namespace MiniWindowUtils
 			it->outputAction     = action;
 			window.outputGeneratedHotspots.insert(hotspotId);
 		}
+		if (hotspotIdOut)
+			*hotspotIdOut = hotspotId;
 		return eOK;
 	}
 

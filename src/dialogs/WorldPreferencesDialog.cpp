@@ -79,7 +79,6 @@
 // ReSharper disable  once CppUnusedIncludeDirective
 #include <QStyleOptionSpinBox>
 #include <QTableWidget>
-#include <QTemporaryFile>
 #include <QTextCursor>
 #include <QTextEdit>
 #include <QTextStream>
@@ -162,6 +161,34 @@ static bool bringOwnedWindowToFrontByTitle(const QString &title)
 	}
 	return false;
 }
+
+struct WorldPreferencesDialog::WorkingLists
+{
+		struct Variable
+		{
+				WorldRuntime::Variable value;
+				QString                runtimeName;
+				bool                   presentInRuntime{false};
+				bool                   nameEdited{false};
+				bool                   valueEdited{false};
+		};
+
+		QList<WorldRuntime::Trigger> triggers;
+		QList<WorldRuntime::Alias>   aliases;
+		QList<WorldRuntime::Timer>   timers;
+		QList<Variable>              variables;
+		QSet<quint64>                initialTriggerIds;
+		QSet<quint64>                initialAliasIds;
+		QSet<quint64>                initialTimerIds;
+		QSet<quint64>                deletedTriggerIds;
+		QSet<quint64>                deletedAliasIds;
+		QSet<quint64>                deletedTimerIds;
+		QSet<QString>                deletedVariableNames;
+		bool                         triggersStaged{false};
+		bool                         aliasesStaged{false};
+		bool                         timersStaged{false};
+		bool                         variablesStaged{false};
+};
 
 static QString canonicalSavePath(const QString &fileName, const QString &extensionLower)
 {
@@ -404,6 +431,37 @@ template <typename Rule> static int ruleIndexForRuntimeId(const QList<Rule> &rul
 			return index;
 	}
 	return -1;
+}
+
+template <typename Rule>
+static QList<Rule> mergeWorkingRules(const QList<Rule> &working, const QList<Rule> &current,
+                                     const QSet<quint64> &initialIds, const QSet<quint64> &deletedIds)
+{
+	QList<Rule>               merged;
+	QSet<quint64>             emittedIds;
+	QHash<quint64, qsizetype> currentIndexById;
+	merged.reserve(working.size() + current.size());
+	for (qsizetype index = 0; index < current.size(); ++index)
+		currentIndexById.insert(current.at(index).runtimeId, index);
+	for (const Rule &item : working)
+	{
+		if (deletedIds.contains(item.runtimeId))
+			continue;
+		if (const auto currentIndex = currentIndexById.constFind(item.runtimeId);
+		    currentIndex != currentIndexById.cend())
+			merged.push_back(current.at(currentIndex.value()));
+		else if (!initialIds.contains(item.runtimeId))
+			merged.push_back(item);
+		else
+			continue;
+		emittedIds.insert(item.runtimeId);
+	}
+	for (const Rule &item : current)
+	{
+		if (!deletedIds.contains(item.runtimeId) && !emittedIds.contains(item.runtimeId))
+			merged.push_back(item);
+	}
+	return merged;
 }
 
 static long toColourRef(const QColor &colour)
@@ -1170,10 +1228,30 @@ static QString fixHtmlMultilineString(const QString &value)
 }
 
 WorldPreferencesDialog::WorldPreferencesDialog(WorldRuntime *runtime, WorldView *view, QWidget *parent)
-    : QDialog(parent), m_runtime(runtime), m_view(view)
+    : QDialog(parent), m_runtime(runtime), m_view(view), m_workingLists(std::make_unique<WorkingLists>())
 {
 	setWindowTitle(QStringLiteral("World Configuration"));
 	resize(700, 520);
+	if (m_runtime)
+	{
+		m_runtime->ensureWorldTriggerRuntimeIds();
+		m_runtime->ensureWorldAliasRuntimeIds();
+		m_runtime->ensureWorldTimerRuntimeIds();
+		m_workingLists->triggers = m_runtime->triggers();
+		m_workingLists->aliases  = m_runtime->aliases();
+		m_workingLists->timers   = m_runtime->timers();
+		for (const WorldRuntime::Trigger &trigger : std::as_const(m_workingLists->triggers))
+			m_workingLists->initialTriggerIds.insert(trigger.runtimeId);
+		for (const WorldRuntime::Alias &alias : std::as_const(m_workingLists->aliases))
+			m_workingLists->initialAliasIds.insert(alias.runtimeId);
+		for (const WorldRuntime::Timer &timer : std::as_const(m_workingLists->timers))
+			m_workingLists->initialTimerIds.insert(timer.runtimeId);
+		for (const WorldRuntime::Variable &variable : m_runtime->variables())
+		{
+			m_workingLists->variables.push_back(
+			    {variable, variable.attributes.value(QStringLiteral("name")), true, false, false});
+		}
+	}
 	buildUi();
 	setSizeGripEnabled(true);
 
@@ -1202,6 +1280,8 @@ WorldPreferencesDialog::WorldPreferencesDialog(WorldRuntime *runtime, WorldView 
 	}
 	refreshDialogSizing();
 }
+
+WorldPreferencesDialog::~WorldPreferencesDialog() = default;
 
 bool WorldPreferencesDialog::event(QEvent *event)
 {
@@ -1503,6 +1583,194 @@ void WorldPreferencesDialog::setInitialPage(const Page page)
 		m_runtime->setLastPreferencesPage(index);
 }
 
+bool WorldPreferencesDialog::validateWorkingListNames(const WorkingListValidationScope scope)
+{
+	if (!m_workingLists)
+		return true;
+
+	const bool includeTriggers =
+	    scope == WorkingListValidationScope::All || scope == WorkingListValidationScope::Triggers;
+	const bool includeAliases =
+	    scope == WorkingListValidationScope::All || scope == WorkingListValidationScope::Aliases;
+	const bool includeTimers =
+	    scope == WorkingListValidationScope::All || scope == WorkingListValidationScope::Timers;
+	const bool includeVariables =
+	    scope == WorkingListValidationScope::All || scope == WorkingListValidationScope::Variables;
+
+	QList<WorldRuntime::Trigger> triggers;
+	QList<WorldRuntime::Alias>   aliases;
+	QList<WorldRuntime::Timer>   timers;
+	QList<ResolvedVariable>      variables;
+	if (includeTriggers)
+	{
+		triggers = m_runtime ? mergeWorkingRules(m_workingLists->triggers, m_runtime->triggers(),
+		                                         m_workingLists->initialTriggerIds,
+		                                         m_workingLists->deletedTriggerIds)
+		                     : m_workingLists->triggers;
+	}
+	if (includeAliases)
+	{
+		aliases = m_runtime
+		              ? mergeWorkingRules(m_workingLists->aliases, m_runtime->aliases(),
+		                                  m_workingLists->initialAliasIds, m_workingLists->deletedAliasIds)
+		              : m_workingLists->aliases;
+	}
+	if (includeTimers)
+	{
+		timers = m_runtime
+		             ? mergeWorkingRules(m_workingLists->timers, m_runtime->timers(),
+		                                 m_workingLists->initialTimerIds, m_workingLists->deletedTimerIds)
+		             : m_workingLists->timers;
+	}
+	if (includeVariables)
+		variables = effectiveWorkingVariables();
+
+	for (const ResolvedVariable &variable : variables)
+	{
+		if (!variable.attributes.value(QStringLiteral("name")).trimmed().isEmpty())
+			continue;
+		QMessageBox::information(this, QStringLiteral("Variables"),
+		                         QStringLiteral("Variable names cannot be blank."), QMessageBox::Ok);
+		setInitialPage(PageVariables);
+		return false;
+	}
+
+	auto duplicateLines = [](const auto &items, auto itemValue) -> QStringList
+	{
+		struct NameCount
+		{
+				QString displayName;
+				int     count{0};
+		};
+		QMap<QString, NameCount> counts;
+		for (const auto &item : items)
+		{
+			const QString name = itemValue(item).attributes.value(QStringLiteral("name")).trimmed();
+			if (name.isEmpty())
+				continue;
+			NameCount &entry = counts[name.toCaseFolded()];
+			if (entry.displayName.isEmpty())
+				entry.displayName = name;
+			++entry.count;
+		}
+		QStringList lines;
+		for (const NameCount &entry : std::as_const(counts))
+		{
+			if (entry.count > 1)
+				lines.push_back(QStringLiteral("  %1 named %2").arg(entry.count).arg(entry.displayName));
+		}
+		return lines;
+	};
+
+	QStringList sections;
+	auto        appendSection = [&sections](const QString &heading, const QStringList &lines)
+	{
+		if (!lines.isEmpty())
+			sections.push_back(heading + QLatin1Char('\n') + lines.join(QLatin1Char('\n')));
+	};
+	if (includeTriggers)
+		appendSection(QStringLiteral("Triggers"),
+		              duplicateLines(triggers, [](const auto &item) -> const auto & { return item; }));
+	if (includeAliases)
+		appendSection(QStringLiteral("Aliases"),
+		              duplicateLines(aliases, [](const auto &item) -> const auto & { return item; }));
+	if (includeTimers)
+		appendSection(QStringLiteral("Timers"),
+		              duplicateLines(timers, [](const auto &item) -> const auto & { return item; }));
+	if (includeVariables)
+		appendSection(QStringLiteral("Variables"),
+		              duplicateLines(variables, [](const auto &item) -> const auto & { return item; }));
+	if (sections.isEmpty())
+		return true;
+
+	QMessageBox::information(this, QStringLiteral("Duplicate names"),
+	                         QStringLiteral("Named rules and variables should be unique:\n\n") +
+	                             sections.join(QStringLiteral("\n\n")),
+	                         QMessageBox::Ok);
+	return false;
+}
+
+QList<WorldPreferencesDialog::ResolvedVariable> WorldPreferencesDialog::effectiveWorkingVariables() const
+{
+	if (!m_workingLists)
+		return {};
+	if (!m_runtime)
+	{
+		QList<ResolvedVariable> variables;
+		variables.reserve(m_workingLists->variables.size());
+		for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
+			variables.push_back({working.value.attributes, working.value.content});
+		return variables;
+	}
+
+	const QList<WorldRuntime::Variable> current = m_runtime->variables();
+	QList<ResolvedVariable>             resolved;
+	QSet<QString>                       emittedRuntimeNames;
+	QHash<QString, qsizetype>           currentIndexByName;
+	resolved.reserve(m_workingLists->variables.size() + current.size());
+	for (qsizetype index = 0; index < current.size(); ++index)
+	{
+		const QString key =
+		    current.at(index).attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
+		currentIndexByName.insert(key, index);
+	}
+	for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
+	{
+		ResolvedVariable value{working.value.attributes, working.value.content};
+		if (working.presentInRuntime)
+		{
+			const QString runtimeKey   = working.runtimeName.trimmed().toCaseFolded();
+			const auto    currentIndex = currentIndexByName.constFind(runtimeKey);
+			if (currentIndex == currentIndexByName.cend())
+				continue;
+			const WorldRuntime::Variable &currentValue = current.at(currentIndex.value());
+			value                                      = {currentValue.attributes, currentValue.content};
+			if (working.nameEdited)
+				value.attributes.insert(QStringLiteral("name"),
+				                        working.value.attributes.value(QStringLiteral("name")));
+			if (working.valueEdited)
+				value.content = working.value.content;
+			emittedRuntimeNames.insert(runtimeKey);
+		}
+		resolved.push_back(std::move(value));
+	}
+	for (const WorldRuntime::Variable &candidate : current)
+	{
+		const QString key = candidate.attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
+		if (!m_workingLists->deletedVariableNames.contains(key) && !emittedRuntimeNames.contains(key))
+			resolved.push_back({candidate.attributes, candidate.content});
+	}
+	return resolved;
+}
+
+void WorldPreferencesDialog::commitWorkingListChanges() const
+{
+	if (!m_runtime || !m_workingLists)
+		return;
+
+	if (m_workingLists->triggersStaged)
+		m_runtime->setTriggers(mergeWorkingRules(m_workingLists->triggers, m_runtime->triggers(),
+		                                         m_workingLists->initialTriggerIds,
+		                                         m_workingLists->deletedTriggerIds));
+	if (m_workingLists->aliasesStaged)
+		m_runtime->setAliases(mergeWorkingRules(m_workingLists->aliases, m_runtime->aliases(),
+		                                        m_workingLists->initialAliasIds,
+		                                        m_workingLists->deletedAliasIds));
+	if (m_workingLists->timersStaged)
+		m_runtime->setTimers(mergeWorkingRules(m_workingLists->timers, m_runtime->timers(),
+		                                       m_workingLists->initialTimerIds,
+		                                       m_workingLists->deletedTimerIds));
+	if (m_workingLists->variablesStaged)
+	{
+		const QList<ResolvedVariable> resolved = effectiveWorkingVariables();
+		QList<WorldRuntime::Variable> variables;
+		variables.reserve(resolved.size());
+		for (const ResolvedVariable &variable : resolved)
+			variables.push_back({variable.attributes, variable.content});
+		m_runtime->setVariables(variables);
+	}
+}
+
 void WorldPreferencesDialog::accept()
 {
 	QMap<QString, QString> worldAttributesBeforeApply;
@@ -1565,7 +1833,7 @@ void WorldPreferencesDialog::accept()
 		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() &&
 		    m_useDefaultTriggers->isChecked() != m_initialUseDefaultTriggers && hasDefaultTriggersFile())
 		{
-			if (const qsizetype count = m_runtime->triggers().size(); count > 0)
+			if (const qsizetype count = m_workingLists->triggers.size(); count > 0)
 			{
 				const QMessageBox::StandardButton result = QMessageBox::question(
 				    this, QStringLiteral("World Configuration"),
@@ -1582,7 +1850,7 @@ void WorldPreferencesDialog::accept()
 		if (m_useDefaultAliases && m_useDefaultAliases->isChecked() &&
 		    m_useDefaultAliases->isChecked() != m_initialUseDefaultAliases && hasDefaultAliasesFile())
 		{
-			if (const qsizetype count = m_runtime->aliases().size(); count > 0)
+			if (const qsizetype count = m_workingLists->aliases.size(); count > 0)
 			{
 				const QMessageBox::StandardButton result = QMessageBox::question(
 				    this, QStringLiteral("World Configuration"),
@@ -1599,7 +1867,7 @@ void WorldPreferencesDialog::accept()
 		if (m_useDefaultTimers && m_useDefaultTimers->isChecked() &&
 		    m_useDefaultTimers->isChecked() != m_initialUseDefaultTimers && hasDefaultTimersFile())
 		{
-			if (const qsizetype count = m_runtime->timers().size(); count > 0)
+			if (const qsizetype count = m_workingLists->timers.size(); count > 0)
 			{
 				const QMessageBox::StandardButton result = QMessageBox::question(
 				    this, QStringLiteral("World Configuration"),
@@ -1714,6 +1982,9 @@ void WorldPreferencesDialog::accept()
 					return;
 			}
 		}
+		if (!validateWorkingListNames(WorkingListValidationScope::All))
+			return;
+		commitWorkingListChanges();
 
 		worldAttributesBeforeApply          = m_runtime->worldAttributes();
 		worldMultilineBeforeApply           = m_runtime->worldMultilineAttributes();
@@ -3735,16 +4006,18 @@ bool WorldPreferencesDialog::loadMacrosFromFile(const QString &fileName)
 	return true;
 }
 
-bool WorldPreferencesDialog::saveTriggersToFile(const QString &fileName) const
+bool WorldPreferencesDialog::saveTriggersToFile(const QString &fileName)
 {
 	if (!m_runtime)
+		return false;
+	if (!validateWorkingListNames(WorkingListValidationScope::Triggers))
 		return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdt"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save triggers"),
+		QMessageBox::warning(this, QStringLiteral("Save triggers"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3771,7 +4044,10 @@ bool WorldPreferencesDialog::saveTriggersToFile(const QString &fileName) const
 	out << "   date_saved=\"" << now.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) << "\" " << nl;
 	out << "  >" << nl;
 
-	for (const auto &tr : m_runtime->triggers())
+	const QList<WorldRuntime::Trigger> triggers =
+	    mergeWorkingRules(m_workingLists->triggers, m_runtime->triggers(), m_workingLists->initialTriggerIds,
+	                      m_workingLists->deletedTriggerIds);
+	for (const auto &tr : triggers)
 	{
 		out << nl << "  <trigger ";
 		for (auto it = tr.attributes.begin(); it != tr.attributes.end(); ++it)
@@ -3790,7 +4066,7 @@ bool WorldPreferencesDialog::saveTriggersToFile(const QString &fileName) const
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save triggers"),
+		QMessageBox::warning(this, QStringLiteral("Save triggers"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3814,29 +4090,38 @@ bool WorldPreferencesDialog::loadTriggersFromFile(const QString &fileName, const
 
 	QList<WorldRuntime::Trigger> combined;
 	if (!replace)
-		combined = m_runtime->triggers();
+		combined = m_workingLists->triggers;
+	else
+	{
+		for (const WorldRuntime::Trigger &trigger : std::as_const(m_workingLists->triggers))
+			m_workingLists->deletedTriggerIds.insert(trigger.runtimeId);
+	}
 	for (const auto &t : doc.triggers())
 	{
 		WorldRuntime::Trigger rt;
 		rt.attributes = t.attributes;
 		rt.children   = t.children;
 		rt.included   = t.included;
+		rt.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
 		combined.push_back(rt);
 	}
-	m_runtime->setTriggers(combined);
+	m_workingLists->triggers       = std::move(combined);
+	m_workingLists->triggersStaged = true;
 	return true;
 }
 
-bool WorldPreferencesDialog::saveAliasesToFile(const QString &fileName) const
+bool WorldPreferencesDialog::saveAliasesToFile(const QString &fileName)
 {
 	if (!m_runtime)
+		return false;
+	if (!validateWorkingListNames(WorkingListValidationScope::Aliases))
 		return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qda"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save aliases"),
+		QMessageBox::warning(this, QStringLiteral("Save aliases"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3863,7 +4148,10 @@ bool WorldPreferencesDialog::saveAliasesToFile(const QString &fileName) const
 	out << "   date_saved=\"" << now.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) << "\" " << nl;
 	out << "  >" << nl;
 
-	for (const auto &al : m_runtime->aliases())
+	const QList<WorldRuntime::Alias> aliases =
+	    mergeWorkingRules(m_workingLists->aliases, m_runtime->aliases(), m_workingLists->initialAliasIds,
+	                      m_workingLists->deletedAliasIds);
+	for (const auto &al : aliases)
 	{
 		out << nl << "  <alias ";
 		for (auto it = al.attributes.begin(); it != al.attributes.end(); ++it)
@@ -3882,7 +4170,7 @@ bool WorldPreferencesDialog::saveAliasesToFile(const QString &fileName) const
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save aliases"),
+		QMessageBox::warning(this, QStringLiteral("Save aliases"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3906,29 +4194,38 @@ bool WorldPreferencesDialog::loadAliasesFromFile(const QString &fileName, const 
 
 	QList<WorldRuntime::Alias> combined;
 	if (!replace)
-		combined = m_runtime->aliases();
+		combined = m_workingLists->aliases;
+	else
+	{
+		for (const WorldRuntime::Alias &alias : std::as_const(m_workingLists->aliases))
+			m_workingLists->deletedAliasIds.insert(alias.runtimeId);
+	}
 	for (const auto &a : doc.aliases())
 	{
 		WorldRuntime::Alias ra;
 		ra.attributes = a.attributes;
 		ra.children   = a.children;
 		ra.included   = a.included;
+		ra.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
 		combined.push_back(ra);
 	}
-	m_runtime->setAliases(combined);
+	m_workingLists->aliases       = std::move(combined);
+	m_workingLists->aliasesStaged = true;
 	return true;
 }
 
-bool WorldPreferencesDialog::saveTimersToFile(const QString &fileName) const
+bool WorldPreferencesDialog::saveTimersToFile(const QString &fileName)
 {
 	if (!m_runtime)
+		return false;
+	if (!validateWorkingListNames(WorkingListValidationScope::Timers))
 		return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdi"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save timers"),
+		QMessageBox::warning(this, QStringLiteral("Save timers"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3955,7 +4252,10 @@ bool WorldPreferencesDialog::saveTimersToFile(const QString &fileName) const
 	out << "   date_saved=\"" << now.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) << "\" " << nl;
 	out << "  >" << nl;
 
-	for (const auto &tm : m_runtime->timers())
+	const QList<WorldRuntime::Timer> timers =
+	    mergeWorkingRules(m_workingLists->timers, m_runtime->timers(), m_workingLists->initialTimerIds,
+	                      m_workingLists->deletedTimerIds);
+	for (const auto &tm : timers)
 	{
 		out << nl << "  <timer ";
 		for (auto it = tm.attributes.begin(); it != tm.attributes.end(); ++it)
@@ -3974,7 +4274,7 @@ bool WorldPreferencesDialog::saveTimersToFile(const QString &fileName) const
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save timers"),
+		QMessageBox::warning(this, QStringLiteral("Save timers"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -3998,29 +4298,38 @@ bool WorldPreferencesDialog::loadTimersFromFile(const QString &fileName, const b
 
 	QList<WorldRuntime::Timer> combined;
 	if (!replace)
-		combined = m_runtime->timers();
+		combined = m_workingLists->timers;
+	else
+	{
+		for (const WorldRuntime::Timer &timer : std::as_const(m_workingLists->timers))
+			m_workingLists->deletedTimerIds.insert(timer.runtimeId);
+	}
 	for (const auto &t : doc.timers())
 	{
 		WorldRuntime::Timer rt;
 		rt.attributes = t.attributes;
 		rt.children   = t.children;
 		rt.included   = t.included;
+		rt.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
 		combined.push_back(rt);
 	}
-	m_runtime->setTimers(combined);
+	m_workingLists->timers       = std::move(combined);
+	m_workingLists->timersStaged = true;
 	return true;
 }
 
-bool WorldPreferencesDialog::saveVariablesToFile(const QString &fileName) const
+bool WorldPreferencesDialog::saveVariablesToFile(const QString &fileName)
 {
 	if (!m_runtime)
+		return false;
+	if (!validateWorkingListNames(WorkingListValidationScope::Variables))
 		return false;
 
 	const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdv"));
 	QSaveFile     file(outputPath);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save variables"),
+		QMessageBox::warning(this, QStringLiteral("Save variables"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -4042,7 +4351,7 @@ bool WorldPreferencesDialog::saveVariablesToFile(const QString &fileName) const
 	out << nl << "<!-- variables -->" << nl;
 	out << "<variables>" << nl;
 
-	for (const auto &var : m_runtime->variables())
+	for (const ResolvedVariable &var : effectiveWorkingVariables())
 	{
 		const QString name = var.attributes.value(QStringLiteral("name"));
 		out << "  <variable name=\"" << fixHtmlString(name) << "\">" << fixHtmlMultilineString(var.content)
@@ -4054,7 +4363,7 @@ bool WorldPreferencesDialog::saveVariablesToFile(const QString &fileName) const
 
 	if (!file.commit())
 	{
-		QMessageBox::warning(const_cast<WorldPreferencesDialog *>(this), QStringLiteral("Save variables"),
+		QMessageBox::warning(this, QStringLiteral("Save variables"),
 		                     QStringLiteral("Unable to create the requested file."));
 		return false;
 	}
@@ -4076,15 +4385,21 @@ bool WorldPreferencesDialog::loadVariablesFromFile(const QString &fileName)
 		return false;
 	}
 
-	QList<WorldRuntime::Variable> vars;
+	QList<WorkingLists::Variable> vars;
+	for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
+	{
+		if (working.presentInRuntime)
+			m_workingLists->deletedVariableNames.insert(working.runtimeName.trimmed().toCaseFolded());
+	}
 	for (const auto &v : doc.variables())
 	{
 		WorldRuntime::Variable rv;
 		rv.attributes = v.attributes;
 		rv.content    = v.content;
-		vars.push_back(rv);
+		vars.push_back({rv, {}, false, false, false});
 	}
-	m_runtime->setVariables(vars);
+	m_workingLists->variables       = std::move(vars);
+	m_workingLists->variablesStaged = true;
 	return true;
 }
 
@@ -5339,247 +5654,6 @@ void WorldPreferencesDialog::buildUi()
 		        }
 	        });
 
-	auto editVariableDialog = [this](QString &name, QString &value, const bool allowRename) -> bool
-	{
-		QDialog dialog(this);
-		dialog.setWindowTitle(QStringLiteral("Variable"));
-		auto *dialogLayout = new QVBoxLayout(&dialog);
-		auto *form         = new QFormLayout();
-		auto *nameEdit     = new QLineEdit(&dialog);
-		nameEdit->setText(name);
-		nameEdit->setReadOnly(!allowRename);
-		auto *valueEdit = new QTextEdit(&dialog);
-		valueEdit->setPlainText(value);
-		form->addRow(QStringLiteral("Name"), nameEdit);
-		form->addRow(QStringLiteral("Contents"), valueEdit);
-		dialogLayout->addLayout(form);
-		auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-		connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-		connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-		dialogLayout->addWidget(buttons);
-		if (dialog.exec() != QDialog::Accepted)
-			return false;
-		name  = nameEdit->text().trimmed();
-		value = valueEdit->toPlainText();
-		return !name.isEmpty();
-	};
-	if (m_addVariableButton)
-		connect(m_addVariableButton, &QPushButton::clicked, this,
-		        [this, editVariableDialog]
-		        {
-			        if (!m_runtime)
-				        return;
-			        QString name;
-			        QString value;
-			        if (!editVariableDialog(name, value, true))
-				        return;
-			        const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
-			        for (const auto &var : vars)
-			        {
-				        if (var.attributes.value(QStringLiteral("name")) == name)
-				        {
-					        QMessageBox::warning(this, QStringLiteral("Variables"),
-					                             QStringLiteral("That variable name is already in use."));
-					        return;
-				        }
-			        }
-			        WorldRuntime::Variable newVar;
-			        newVar.attributes.insert(QStringLiteral("name"), name);
-			        newVar.content                        = value;
-			        QList<WorldRuntime::Variable> updated = vars;
-			        updated.push_back(newVar);
-			        m_runtime->setVariables(updated);
-			        populateVariables();
-		        });
-	if (m_editVariableButton)
-		connect(m_editVariableButton, &QPushButton::clicked, this,
-		        [this, editVariableDialog]
-		        {
-			        if (!m_runtime || !m_variablesTable)
-				        return;
-			        const int row   = m_variablesTable->currentRow();
-			        const int index = rowToIndex(m_variablesTable, row);
-			        if (index < 0)
-				        return;
-			        QList<WorldRuntime::Variable> vars = m_runtime->variables();
-			        if (index >= vars.size())
-				        return;
-			        QString name  = vars.at(index).attributes.value(QStringLiteral("name"));
-			        QString value = vars.at(index).content;
-			        if (!editVariableDialog(name, value, true))
-				        return;
-			        vars[index].attributes.insert(QStringLiteral("name"), name);
-			        vars[index].content = value;
-			        m_runtime->setVariables(vars);
-			        populateVariables();
-			        selectRowByIndex(m_variablesTable, index);
-			        updateVariableControls();
-		        });
-	if (m_deleteVariableButton)
-		connect(m_deleteVariableButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!m_runtime || !m_variablesTable)
-				        return;
-			        const int row   = m_variablesTable->currentRow();
-			        const int index = rowToIndex(m_variablesTable, row);
-			        if (index < 0)
-				        return;
-			        if (!confirmRemoval(this, QStringLiteral("variable")))
-				        return;
-			        QList<WorldRuntime::Variable> vars = m_runtime->variables();
-			        if (index >= vars.size())
-				        return;
-			        vars.removeAt(index);
-			        m_runtime->setVariables(vars);
-			        populateVariables();
-			        const int lastIndex = saturatingToInt(vars.size()) - 1;
-			        selectRowByIndex(m_variablesTable, std::min(index, lastIndex));
-			        updateVariableControls();
-		        });
-	if (m_variablesTable)
-		connect(m_variablesTable, &QTableWidget::cellDoubleClicked, this,
-		        [this]
-		        {
-			        if (m_editVariableButton)
-				        m_editVariableButton->click();
-		        });
-	if (m_findVariableButton)
-		connect(m_findVariableButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!m_runtime)
-				        return;
-			        const QList<WorldRuntime::Variable> vars    = m_runtime->variables();
-			        auto                                rowText = [this, &vars](const int row) -> QString
-			        {
-				        const int index = rowToIndex(m_variablesTable, row);
-				        if (index < 0 || index >= vars.size())
-					        return {};
-				        const WorldRuntime::Variable &var  = vars.at(index);
-				        const QString                 name = var.attributes.value(QStringLiteral("name"));
-				        return var.content + QLatin1Char('\t') + name;
-			        };
-			        doFindAdvanced(this, m_variablesTable, rowText, m_variableFindText, m_variableFindRow,
-			                       m_variableFindHistory, m_variableFindMatchCase, m_variableFindRegex,
-			                       m_variableFindForwards, QStringLiteral("Find variable"), false);
-			        updateVariableControls();
-		        });
-	if (m_findNextVariableButton)
-		connect(m_findNextVariableButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!m_runtime)
-				        return;
-			        const QList<WorldRuntime::Variable> vars    = m_runtime->variables();
-			        auto                                rowText = [this, &vars](const int row) -> QString
-			        {
-				        const int index = rowToIndex(m_variablesTable, row);
-				        if (index < 0 || index >= vars.size())
-					        return {};
-				        const WorldRuntime::Variable &var  = vars.at(index);
-				        const QString                 name = var.attributes.value(QStringLiteral("name"));
-				        return var.content + QLatin1Char('\t') + name;
-			        };
-			        doFindAdvanced(this, m_variablesTable, rowText, m_variableFindText, m_variableFindRow,
-			                       m_variableFindHistory, m_variableFindMatchCase, m_variableFindRegex,
-			                       m_variableFindForwards, QStringLiteral("Find variable"), true);
-			        updateVariableControls();
-		        });
-	if (m_loadVariablesButton)
-		connect(m_loadVariablesButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getOpenFileName(this, QStringLiteral("Variable file name"), startDir,
-			                                         QStringLiteral("QMud variables (*.qdv *.mcv)"));
-			        if (fileName.isEmpty())
-				        return;
-			        if (m_runtime)
-				        m_runtime->setFileBrowsingDirectory(QFileInfo(fileName).absolutePath());
-			        if (!loadVariablesFromFile(fileName))
-				        return;
-			        populateVariables();
-		        });
-	if (m_saveVariablesButton)
-		connect(m_saveVariablesButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        const QString startDir = m_runtime ? m_runtime->fileBrowsingDirectory() : QString();
-			        const QString fileName =
-			            QFileDialog::getSaveFileName(this, QStringLiteral("Variable file name"), startDir,
-			                                         QStringLiteral("QMud variables (*.qdv *.mcv)"));
-			        if (fileName.isEmpty())
-				        return;
-			        const QString outputPath = canonicalSavePath(fileName, QStringLiteral("qdv"));
-			        if (m_runtime)
-				        m_runtime->setFileBrowsingDirectory(QFileInfo(outputPath).absolutePath());
-			        if (!saveVariablesToFile(outputPath))
-				        return;
-		        });
-	if (m_copyVariableButton)
-		connect(m_copyVariableButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!m_runtime || !m_variablesTable)
-				        return;
-			        const int row   = m_variablesTable->currentRow();
-			        const int index = rowToIndex(m_variablesTable, row);
-			        if (index < 0)
-				        return;
-			        const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
-			        if (index >= vars.size())
-				        return;
-			        const WorldRuntime::Variable &var = vars.at(index);
-			        QString                       xml;
-			        QTextStream                   out(&xml);
-			        out << "<variables>\n";
-			        out << "  <variable name=\""
-			            << fixHtmlString(var.attributes.value(QStringLiteral("name"))) << "\">"
-			            << fixHtmlMultilineString(var.content) << "</variable>\n";
-			        out << "</variables>\n";
-			        if (QClipboard *clipboard = QGuiApplication::clipboard())
-				        clipboard->setText(xml);
-		        });
-	if (m_pasteVariableButton)
-		connect(m_pasteVariableButton, &QPushButton::clicked, this,
-		        [this]
-		        {
-			        if (!m_runtime)
-				        return;
-			        const QString text = []() -> QString
-			        {
-				        if (QClipboard *clipboard = QGuiApplication::clipboard())
-					        return clipboard->text();
-				        return {};
-			        }();
-			        if (text.trimmed().isEmpty())
-				        return;
-			        QTemporaryFile temp;
-			        if (!temp.open())
-				        return;
-			        temp.write(text.toUtf8());
-			        temp.flush();
-			        WorldDocument doc;
-			        doc.setLoadMask(WorldDocument::XML_VARIABLES | WorldDocument::XML_NO_PLUGINS |
-			                        WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-			        if (!doc.loadFromFile(temp.fileName()))
-			        {
-				        QMessageBox::warning(this, QStringLiteral("Paste variables"), doc.errorString());
-				        return;
-			        }
-			        QList<WorldRuntime::Variable> combined = m_runtime->variables();
-			        for (const auto &v : doc.variables())
-			        {
-				        WorldRuntime::Variable rv;
-				        rv.attributes = v.attributes;
-				        rv.content    = v.content;
-				        combined.push_back(rv);
-			        }
-			        m_runtime->setVariables(combined);
-			        populateVariables();
-		        });
 	// Output
 	auto *outputLayout = new QGridLayout(outputPage);
 	auto *outputLeft   = new QVBoxLayout();
@@ -8037,6 +8111,19 @@ void WorldPreferencesDialog::buildUi()
 		selectRuleRowByRuntimeId(m_timersTable, selection);
 		updateTimerControls();
 	};
+	auto pruneMissingRuntimeRules = [](auto &working, const QSet<quint64> &initialIds, const auto &current)
+	{
+		QSet<quint64> currentIds;
+		currentIds.reserve(current.size());
+		for (const auto &item : current)
+			currentIds.insert(item.runtimeId);
+		for (int index = working.size() - 1; index >= 0; --index)
+		{
+			const quint64 runtimeId = working.at(index).runtimeId;
+			if (initialIds.contains(runtimeId) && !currentIds.contains(runtimeId))
+				working.removeAt(index);
+		}
+	};
 
 	auto editAliasItem = [this, refreshAliasView](const int row, const bool isNew) -> bool
 	{
@@ -8044,20 +8131,20 @@ void WorldPreferencesDialog::buildUi()
 			return false;
 		if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
 			return false;
-		QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		WorldRuntime::Alias        alias;
-		int                        index = -1;
-		quint64       selectedRuntimeId  = ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
-		const quint64 runtimeId          = isNew ? 0 : ruleRuntimeIdForRow(m_aliasesTable, row);
+		QList<WorldRuntime::Alias> &workingAliases = m_workingLists->aliases;
+		WorldRuntime::Alias         alias;
+		int                         index = -1;
+		quint64       selectedRuntimeId   = ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
+		const quint64 runtimeId           = isNew ? 0 : ruleRuntimeIdForRow(m_aliasesTable, row);
 		if (!isNew)
 		{
-			index = ruleIndexForRuntimeId(aliases, runtimeId);
-			if (index < 0 || index >= aliases.size())
+			index = ruleIndexForRuntimeId(workingAliases, runtimeId);
+			if (index < 0 || index >= workingAliases.size())
 			{
 				refreshAliasView(selectedRuntimeId);
 				return false;
 			}
-			alias = aliases.at(index);
+			alias = workingAliases.at(index);
 		}
 		else
 		{
@@ -8091,28 +8178,27 @@ void WorldPreferencesDialog::buildUi()
 		WorldAliasDialog dlg(m_runtime, alias, isNew, this);
 		if (dlg.exec() != QDialog::Accepted)
 			return false;
-		const WorldRuntime::Alias editedAlias = dlg.alias();
-		aliases                               = m_runtime->aliases();
-
-		if (isNew)
-		{
-			aliases.push_back(editedAlias);
-			index = saturatingToInt(aliases.size()) - 1;
-		}
+		const WorldRuntime::Alias  editedAlias    = dlg.alias();
+		QList<WorldRuntime::Alias> runtimeAliases = m_runtime->aliases();
+		int                 runtimeIndex   = isNew ? -1 : ruleIndexForRuntimeId(runtimeAliases, runtimeId);
+		WorldRuntime::Alias committedAlias = runtimeIndex >= 0 ? runtimeAliases.at(runtimeIndex) : alias;
+		committedAlias.attributes          = editedAlias.attributes;
+		committedAlias.children            = editedAlias.children;
+		if (runtimeIndex >= 0)
+			runtimeAliases[runtimeIndex] = committedAlias;
 		else
 		{
-			index = ruleIndexForRuntimeId(aliases, runtimeId);
-			if (index < 0)
-			{
-				refreshAliasView(selectedRuntimeId);
-				return false;
-			}
-			aliases[index].attributes = editedAlias.attributes;
-			aliases[index].children   = editedAlias.children;
+			runtimeAliases.push_back(committedAlias);
+			runtimeIndex = saturatingToInt(runtimeAliases.size()) - 1;
 		}
-		m_runtime->setAliases(aliases);
+		m_runtime->setAliases(runtimeAliases);
 		m_runtime->ensureWorldAliasRuntimeIds();
-		selectedRuntimeId = m_runtime->aliases().at(index).runtimeId;
+		committedAlias = m_runtime->aliases().at(runtimeIndex);
+		if (isNew)
+			workingAliases.push_back(committedAlias);
+		else
+			workingAliases[index] = committedAlias;
+		selectedRuntimeId = committedAlias.runtimeId;
 		refreshAliasView(selectedRuntimeId);
 		return true;
 	};
@@ -8123,20 +8209,20 @@ void WorldPreferencesDialog::buildUi()
 			return false;
 		if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
 			return false;
-		QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		WorldRuntime::Trigger        trigger;
-		int                          index = -1;
+		QList<WorldRuntime::Trigger> &workingTriggers = m_workingLists->triggers;
+		WorldRuntime::Trigger         trigger;
+		int                           index = -1;
 		quint64       selectedRuntimeId = ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
 		const quint64 runtimeId         = isNew ? 0 : ruleRuntimeIdForRow(m_triggersTable, row);
 		if (!isNew)
 		{
-			index = ruleIndexForRuntimeId(triggers, runtimeId);
-			if (index < 0 || index >= triggers.size())
+			index = ruleIndexForRuntimeId(workingTriggers, runtimeId);
+			if (index < 0 || index >= workingTriggers.size())
 			{
 				refreshTriggerView(selectedRuntimeId);
 				return false;
 			}
-			trigger = triggers.at(index);
+			trigger = workingTriggers.at(index);
 		}
 		else
 		{
@@ -8171,28 +8257,28 @@ void WorldPreferencesDialog::buildUi()
 		WorldTriggerDialog dlg(m_runtime, trigger, isNew, this);
 		if (dlg.exec() != QDialog::Accepted)
 			return false;
-		const WorldRuntime::Trigger editedTrigger = dlg.trigger();
-		triggers                                  = m_runtime->triggers();
-
-		if (isNew)
-		{
-			triggers.push_back(editedTrigger);
-			index = saturatingToInt(triggers.size()) - 1;
-		}
+		const WorldRuntime::Trigger  editedTrigger   = dlg.trigger();
+		QList<WorldRuntime::Trigger> runtimeTriggers = m_runtime->triggers();
+		int                   runtimeIndex = isNew ? -1 : ruleIndexForRuntimeId(runtimeTriggers, runtimeId);
+		WorldRuntime::Trigger committedTrigger =
+		    runtimeIndex >= 0 ? runtimeTriggers.at(runtimeIndex) : trigger;
+		committedTrigger.attributes = editedTrigger.attributes;
+		committedTrigger.children   = editedTrigger.children;
+		if (runtimeIndex >= 0)
+			runtimeTriggers[runtimeIndex] = committedTrigger;
 		else
 		{
-			index = ruleIndexForRuntimeId(triggers, runtimeId);
-			if (index < 0)
-			{
-				refreshTriggerView(selectedRuntimeId);
-				return false;
-			}
-			triggers[index].attributes = editedTrigger.attributes;
-			triggers[index].children   = editedTrigger.children;
+			runtimeTriggers.push_back(committedTrigger);
+			runtimeIndex = saturatingToInt(runtimeTriggers.size()) - 1;
 		}
-		m_runtime->setTriggers(triggers);
+		m_runtime->setTriggers(runtimeTriggers);
 		m_runtime->ensureWorldTriggerRuntimeIds();
-		selectedRuntimeId = m_runtime->triggers().at(index).runtimeId;
+		committedTrigger = m_runtime->triggers().at(runtimeIndex);
+		if (isNew)
+			workingTriggers.push_back(committedTrigger);
+		else
+			workingTriggers[index] = committedTrigger;
+		selectedRuntimeId = committedTrigger.runtimeId;
 		refreshTriggerView(selectedRuntimeId);
 		return true;
 	};
@@ -8203,20 +8289,20 @@ void WorldPreferencesDialog::buildUi()
 			return false;
 		if (m_useDefaultTimers && m_useDefaultTimers->isChecked() && hasDefaultTimersFile())
 			return false;
-		QList<WorldRuntime::Timer> timers = m_runtime->timers();
-		WorldRuntime::Timer        timer;
-		int                        index = -1;
-		quint64       selectedRuntimeId  = ruleRuntimeIdForRow(m_timersTable, selectedRow(m_timersTable));
-		const quint64 runtimeId          = isNew ? 0 : ruleRuntimeIdForRow(m_timersTable, row);
+		QList<WorldRuntime::Timer> &workingTimers = m_workingLists->timers;
+		WorldRuntime::Timer         timer;
+		int                         index = -1;
+		quint64       selectedRuntimeId   = ruleRuntimeIdForRow(m_timersTable, selectedRow(m_timersTable));
+		const quint64 runtimeId           = isNew ? 0 : ruleRuntimeIdForRow(m_timersTable, row);
 		if (!isNew)
 		{
-			index = ruleIndexForRuntimeId(timers, runtimeId);
-			if (index < 0 || index >= timers.size())
+			index = ruleIndexForRuntimeId(workingTimers, runtimeId);
+			if (index < 0 || index >= workingTimers.size())
 			{
 				refreshTimerView(selectedRuntimeId);
 				return false;
 			}
-			timer = timers.at(index);
+			timer = workingTimers.at(index);
 		}
 		else
 		{
@@ -8228,33 +8314,36 @@ void WorldPreferencesDialog::buildUi()
 		WorldTimerDialog dlg(m_runtime, timer, isNew, this);
 		if (dlg.exec() != QDialog::Accepted)
 			return false;
-		const WorldRuntime::Timer editedTimer = dlg.timer();
-		timers                                = m_runtime->timers();
-
-		if (isNew)
+		const WorldRuntime::Timer  editedTimer   = dlg.timer();
+		QList<WorldRuntime::Timer> runtimeTimers = m_runtime->timers();
+		int                 runtimeIndex   = isNew ? -1 : ruleIndexForRuntimeId(runtimeTimers, runtimeId);
+		WorldRuntime::Timer committedTimer = runtimeIndex >= 0 ? runtimeTimers.at(runtimeIndex) : timer;
+		if (runtimeIndex >= 0)
 		{
-			timers.push_back(editedTimer);
-			index = saturatingToInt(timers.size()) - 1;
+			const WorldRuntime::Timer timerBeforeEdit = committedTimer;
+			committedTimer.attributes                 = editedTimer.attributes;
+			committedTimer.children                   = editedTimer.children;
+			const QMudTimerScheduling::TimerResetMutation scheduleReset{QDateTime::currentDateTime()};
+			static_cast<void>(QMudTimerScheduling::resetTimerDeadlineIfDefinitionChanged(
+			    timerBeforeEdit, committedTimer, scheduleReset));
 		}
 		else
 		{
-			index = ruleIndexForRuntimeId(timers, runtimeId);
-			if (index < 0)
-			{
-				refreshTimerView(selectedRuntimeId);
-				return false;
-			}
-			const WorldRuntime::Timer timerBeforeEdit = timers.at(index);
-			WorldRuntime::Timer      &liveTimer       = timers[index];
-			liveTimer.attributes                      = editedTimer.attributes;
-			liveTimer.children                        = editedTimer.children;
-			const QMudTimerScheduling::TimerResetMutation scheduleReset{QDateTime::currentDateTime()};
-			static_cast<void>(QMudTimerScheduling::resetTimerDeadlineIfDefinitionChanged(
-			    timerBeforeEdit, liveTimer, scheduleReset));
+			committedTimer.attributes = editedTimer.attributes;
+			committedTimer.children   = editedTimer.children;
+			runtimeTimers.push_back(committedTimer);
+			runtimeIndex = saturatingToInt(runtimeTimers.size()) - 1;
 		}
-		m_runtime->setTimers(timers);
+		if (runtimeIndex >= 0 && runtimeIndex < runtimeTimers.size())
+			runtimeTimers[runtimeIndex] = committedTimer;
+		m_runtime->setTimers(runtimeTimers);
 		m_runtime->ensureWorldTimerRuntimeIds();
-		selectedRuntimeId = m_runtime->timers().at(index).runtimeId;
+		committedTimer = m_runtime->timers().at(runtimeIndex);
+		if (isNew)
+			workingTimers.push_back(committedTimer);
+		else
+			workingTimers[index] = committedTimer;
+		selectedRuntimeId = committedTimer.runtimeId;
 		refreshTimerView(selectedRuntimeId);
 		return true;
 	};
@@ -8268,8 +8357,8 @@ void WorldPreferencesDialog::buildUi()
 		const QList<int> rows = selectedRows(m_triggersTable);
 		if (rows.isEmpty())
 			return;
-		const QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		QList<WorldRuntime::Trigger>       selected;
+		const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
+		QList<WorldRuntime::Trigger>        selected;
 		for (int row : rows)
 		{
 			const int index = ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
@@ -8330,8 +8419,8 @@ void WorldPreferencesDialog::buildUi()
 		const QList<int> rows = selectedRows(m_aliasesTable);
 		if (rows.isEmpty())
 			return;
-		const QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		QList<WorldRuntime::Alias>       selected;
+		const QList<WorldRuntime::Alias> &aliases = m_workingLists->aliases;
+		QList<WorldRuntime::Alias>        selected;
 		for (int row : rows)
 		{
 			const int index = ruleIndexForRuntimeId(aliases, ruleRuntimeIdForRow(m_aliasesTable, row));
@@ -8392,8 +8481,8 @@ void WorldPreferencesDialog::buildUi()
 		const QList<int> rows = selectedRows(m_timersTable);
 		if (rows.isEmpty())
 			return;
-		const QList<WorldRuntime::Timer> timers = m_runtime->timers();
-		QList<WorldRuntime::Timer>       selected;
+		const QList<WorldRuntime::Timer> &timers = m_workingLists->timers;
+		QList<WorldRuntime::Timer>        selected;
 		for (int row : rows)
 		{
 			const int index = ruleIndexForRuntimeId(timers, ruleRuntimeIdForRow(m_timersTable, row));
@@ -8457,29 +8546,24 @@ void WorldPreferencesDialog::buildUi()
 		const QString text = clipboard->text();
 		if (text.trimmed().isEmpty())
 			return;
-		QTemporaryFile temp;
-		if (!temp.open())
-			return;
-		temp.write(text.toUtf8());
-		temp.flush();
 		WorldDocument doc;
 		doc.setLoadMask(WorldDocument::XML_TRIGGERS | WorldDocument::XML_NO_PLUGINS |
 		                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-		if (!doc.loadFromFile(temp.fileName()))
+		if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 		{
 			QMessageBox::warning(this, QStringLiteral("Paste triggers"), doc.errorString());
 			return;
 		}
-		QList<WorldRuntime::Trigger> combined = m_runtime->triggers();
 		for (const auto &t : doc.triggers())
 		{
 			WorldRuntime::Trigger rt;
 			rt.attributes = t.attributes;
 			rt.children   = t.children;
 			rt.included   = t.included;
-			combined.push_back(rt);
+			rt.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
+			m_workingLists->triggers.push_back(rt);
 		}
-		m_runtime->setTriggers(combined);
+		m_workingLists->triggersStaged = true;
 		populateTriggers();
 		updateTriggerControls();
 	};
@@ -8496,29 +8580,24 @@ void WorldPreferencesDialog::buildUi()
 		const QString text = clipboard->text();
 		if (text.trimmed().isEmpty())
 			return;
-		QTemporaryFile temp;
-		if (!temp.open())
-			return;
-		temp.write(text.toUtf8());
-		temp.flush();
 		WorldDocument doc;
 		doc.setLoadMask(WorldDocument::XML_ALIASES | WorldDocument::XML_NO_PLUGINS |
 		                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-		if (!doc.loadFromFile(temp.fileName()))
+		if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 		{
 			QMessageBox::warning(this, QStringLiteral("Paste aliases"), doc.errorString());
 			return;
 		}
-		QList<WorldRuntime::Alias> combined = m_runtime->aliases();
 		for (const auto &a : doc.aliases())
 		{
 			WorldRuntime::Alias ra;
 			ra.attributes = a.attributes;
 			ra.children   = a.children;
 			ra.included   = a.included;
-			combined.push_back(ra);
+			ra.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
+			m_workingLists->aliases.push_back(ra);
 		}
-		m_runtime->setAliases(combined);
+		m_workingLists->aliasesStaged = true;
 		populateAliases();
 		updateAliasControls();
 	};
@@ -8535,29 +8614,24 @@ void WorldPreferencesDialog::buildUi()
 		const QString text = clipboard->text();
 		if (text.trimmed().isEmpty())
 			return;
-		QTemporaryFile temp;
-		if (!temp.open())
-			return;
-		temp.write(text.toUtf8());
-		temp.flush();
 		WorldDocument doc;
 		doc.setLoadMask(WorldDocument::XML_TIMERS | WorldDocument::XML_NO_PLUGINS |
 		                WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-		if (!doc.loadFromFile(temp.fileName()))
+		if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 		{
 			QMessageBox::warning(this, QStringLiteral("Paste timers"), doc.errorString());
 			return;
 		}
-		QList<WorldRuntime::Timer> combined = m_runtime->timers();
 		for (const auto &t : doc.timers())
 		{
 			WorldRuntime::Timer rt;
 			rt.attributes = t.attributes;
 			rt.children   = t.children;
 			rt.included   = t.included;
-			combined.push_back(rt);
+			rt.runtimeId  = WorldRuntime::allocateRuleRuntimeId();
+			m_workingLists->timers.push_back(rt);
 		}
-		m_runtime->setTimers(combined);
+		m_workingLists->timersStaged = true;
 		populateTimers();
 		updateTimerControls();
 	};
@@ -8571,7 +8645,7 @@ void WorldPreferencesDialog::buildUi()
 			        if (m_useDefaultTriggers && m_useDefaultTriggers->isChecked() && hasDefaultTriggersFile())
 				        return;
 			        bool replace = true;
-			        if (!m_runtime->triggers().isEmpty())
+			        if (!m_workingLists->triggers.isEmpty())
 			        {
 				        const QString message =
 				            QStringLiteral("Replace existing triggers?\n"
@@ -8618,7 +8692,7 @@ void WorldPreferencesDialog::buildUi()
 			        if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
 				        return;
 			        bool replace = true;
-			        if (!m_runtime->aliases().isEmpty())
+			        if (!m_workingLists->aliases.isEmpty())
 			        {
 				        const QString message =
 				            QStringLiteral("Replace existing aliases?\n"
@@ -8665,7 +8739,7 @@ void WorldPreferencesDialog::buildUi()
 			        if (m_useDefaultTimers && m_useDefaultTimers->isChecked() && hasDefaultTimersFile())
 				        return;
 			        bool replace = true;
-			        if (!m_runtime->timers().isEmpty())
+			        if (!m_workingLists->timers.isEmpty())
 			        {
 				        const QString message =
 				            QStringLiteral("Replace existing timers?\n"
@@ -8712,7 +8786,7 @@ void WorldPreferencesDialog::buildUi()
 		        editAliasItem(row, false);
 	        });
 	connect(m_deleteAliasButton, &QPushButton::clicked, this,
-	        [this, refreshAliasView]
+	        [this, refreshAliasView, pruneMissingRuntimeRules]
 	        {
 		        if (!m_runtime)
 			        return;
@@ -8724,8 +8798,9 @@ void WorldPreferencesDialog::buildUi()
 		            m_aliasesViewStack && m_aliasesViewStack->currentWidget() == m_aliasesTree;
 		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
 		            m_aliasesTable, m_aliasesTree, treeMode, selectedRuntimeId);
-		        QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		        int                        index   = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
+		        pruneMissingRuntimeRules(m_workingLists->aliases, m_workingLists->initialAliasIds,
+		                                 m_runtime->aliases());
+		        int index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshAliasView(selectionCandidates);
@@ -8733,15 +8808,17 @@ void WorldPreferencesDialog::buildUi()
 		        }
 		        if (!confirmRemoval(this, QStringLiteral("alias")))
 			        return;
-		        aliases = m_runtime->aliases();
-		        index   = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
+		        pruneMissingRuntimeRules(m_workingLists->aliases, m_workingLists->initialAliasIds,
+		                                 m_runtime->aliases());
+		        index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshAliasView(selectionCandidates);
 			        return;
 		        }
-		        aliases.removeAt(index);
-		        m_runtime->setAliases(aliases);
+		        m_workingLists->deletedAliasIds.insert(selectedRuntimeId);
+		        m_workingLists->aliases.removeAt(index);
+		        m_workingLists->aliasesStaged = true;
 		        refreshAliasView(selectionCandidates);
 	        });
 	connect(m_moveAliasUpButton, &QPushButton::clicked, this,
@@ -8753,16 +8830,15 @@ void WorldPreferencesDialog::buildUi()
 			        return;
 		        const quint64 selectedRuntimeId =
 		            ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
-		        QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		        const int                  index   = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
+		        const int index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
 		        if (index <= 0)
 		        {
 			        if (index < 0)
 				        refreshAliasView(selectedRuntimeId);
 			        return;
 		        }
-		        aliases.swapItemsAt(index, index - 1);
-		        m_runtime->setAliases(aliases);
+		        m_workingLists->aliases.swapItemsAt(index, index - 1);
+		        m_workingLists->aliasesStaged = true;
 		        refreshAliasView(selectedRuntimeId);
 	        });
 	connect(m_moveAliasDownButton, &QPushButton::clicked, this,
@@ -8772,19 +8848,18 @@ void WorldPreferencesDialog::buildUi()
 			        return;
 		        const quint64 selectedRuntimeId =
 		            ruleRuntimeIdForRow(m_aliasesTable, selectedRow(m_aliasesTable));
-		        QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
 		        if (m_useDefaultAliases && m_useDefaultAliases->isChecked() && hasDefaultAliasesFile())
 			        return;
-		        const int index = ruleIndexForRuntimeId(aliases, selectedRuntimeId);
+		        const int index = ruleIndexForRuntimeId(m_workingLists->aliases, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshAliasView(selectedRuntimeId);
 			        return;
 		        }
-		        if (index + 1 >= aliases.size())
+		        if (index + 1 >= m_workingLists->aliases.size())
 			        return;
-		        aliases.swapItemsAt(index, index + 1);
-		        m_runtime->setAliases(aliases);
+		        m_workingLists->aliases.swapItemsAt(index, index + 1);
+		        m_workingLists->aliasesStaged = true;
 		        refreshAliasView(selectedRuntimeId);
 	        });
 	connect(m_copyAliasButton, &QPushButton::clicked, this,
@@ -8796,8 +8871,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		        auto                             rowText = [this, &aliases](const int row) -> QString
+		        const QList<WorldRuntime::Alias> &aliases = m_workingLists->aliases;
+		        auto                              rowText = [this, &aliases](const int row) -> QString
 		        {
 			        const int index =
 			            ruleIndexForRuntimeId(aliases, ruleRuntimeIdForRow(m_aliasesTable, row));
@@ -8821,8 +8896,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Alias> aliases = m_runtime->aliases();
-		        auto                             rowText = [this, &aliases](const int row) -> QString
+		        const QList<WorldRuntime::Alias> &aliases = m_workingLists->aliases;
+		        auto                              rowText = [this, &aliases](const int row) -> QString
 		        {
 			        const int index =
 			            ruleIndexForRuntimeId(aliases, ruleRuntimeIdForRow(m_aliasesTable, row));
@@ -8851,7 +8926,7 @@ void WorldPreferencesDialog::buildUi()
 		        editTriggerItem(row, false);
 	        });
 	connect(m_deleteTriggerButton, &QPushButton::clicked, this,
-	        [this, refreshTriggerView]
+	        [this, refreshTriggerView, pruneMissingRuntimeRules]
 	        {
 		        if (!m_runtime)
 			        return;
@@ -8863,8 +8938,9 @@ void WorldPreferencesDialog::buildUi()
 		            m_triggersViewStack && m_triggersViewStack->currentWidget() == m_triggersTree;
 		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
 		            m_triggersTable, m_triggersTree, treeMode, selectedRuntimeId);
-		        QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        int                          index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
+		        pruneMissingRuntimeRules(m_workingLists->triggers, m_workingLists->initialTriggerIds,
+		                                 m_runtime->triggers());
+		        int index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshTriggerView(selectionCandidates);
@@ -8872,15 +8948,17 @@ void WorldPreferencesDialog::buildUi()
 		        }
 		        if (!confirmRemoval(this, QStringLiteral("trigger")))
 			        return;
-		        triggers = m_runtime->triggers();
-		        index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
+		        pruneMissingRuntimeRules(m_workingLists->triggers, m_workingLists->initialTriggerIds,
+		                                 m_runtime->triggers());
+		        index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshTriggerView(selectionCandidates);
 			        return;
 		        }
-		        triggers.removeAt(index);
-		        m_runtime->setTriggers(triggers);
+		        m_workingLists->deletedTriggerIds.insert(selectedRuntimeId);
+		        m_workingLists->triggers.removeAt(index);
+		        m_workingLists->triggersStaged = true;
 		        refreshTriggerView(selectionCandidates);
 	        });
 	connect(m_moveTriggerUpButton, &QPushButton::clicked, this,
@@ -8892,16 +8970,15 @@ void WorldPreferencesDialog::buildUi()
 			        return;
 		        const quint64 selectedRuntimeId =
 		            ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
-		        QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        const int                    index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
+		        const int index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
 		        if (index <= 0)
 		        {
 			        if (index < 0)
 				        refreshTriggerView(selectedRuntimeId);
 			        return;
 		        }
-		        triggers.swapItemsAt(index, index - 1);
-		        m_runtime->setTriggers(triggers);
+		        m_workingLists->triggers.swapItemsAt(index, index - 1);
+		        m_workingLists->triggersStaged = true;
 		        refreshTriggerView(selectedRuntimeId);
 	        });
 	connect(m_moveTriggerDownButton, &QPushButton::clicked, this,
@@ -8913,17 +8990,16 @@ void WorldPreferencesDialog::buildUi()
 			        return;
 		        const quint64 selectedRuntimeId =
 		            ruleRuntimeIdForRow(m_triggersTable, selectedRow(m_triggersTable));
-		        QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        const int                    index    = ruleIndexForRuntimeId(triggers, selectedRuntimeId);
+		        const int index = ruleIndexForRuntimeId(m_workingLists->triggers, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshTriggerView(selectedRuntimeId);
 			        return;
 		        }
-		        if (index + 1 >= triggers.size())
+		        if (index + 1 >= m_workingLists->triggers.size())
 			        return;
-		        triggers.swapItemsAt(index, index + 1);
-		        m_runtime->setTriggers(triggers);
+		        m_workingLists->triggers.swapItemsAt(index, index + 1);
+		        m_workingLists->triggersStaged = true;
 		        refreshTriggerView(selectedRuntimeId);
 	        });
 	connect(m_copyTriggerButton, &QPushButton::clicked, this,
@@ -8935,8 +9011,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        auto                               rowText  = [this, &triggers](const int row) -> QString
+		        const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
+		        auto                                rowText  = [this, &triggers](const int row) -> QString
 		        {
 			        const int index =
 			            ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
@@ -8960,8 +9036,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Trigger> triggers = m_runtime->triggers();
-		        auto                               rowText  = [this, &triggers](const int row) -> QString
+		        const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
+		        auto                                rowText  = [this, &triggers](const int row) -> QString
 		        {
 			        const int index =
 			            ruleIndexForRuntimeId(triggers, ruleRuntimeIdForRow(m_triggersTable, row));
@@ -8989,7 +9065,7 @@ void WorldPreferencesDialog::buildUi()
 		        editTimerItem(row, false);
 	        });
 	connect(m_deleteTimerButton, &QPushButton::clicked, this,
-	        [this, refreshTimerView]
+	        [this, refreshTimerView, pruneMissingRuntimeRules]
 	        {
 		        if (!m_runtime)
 			        return;
@@ -9000,8 +9076,9 @@ void WorldPreferencesDialog::buildUi()
 		        const bool treeMode = m_timersViewStack && m_timersViewStack->currentWidget() == m_timersTree;
 		        const QList<quint64> selectionCandidates = displayedRuleRuntimeIdsAfterRemoval(
 		            m_timersTable, m_timersTree, treeMode, selectedRuntimeId);
-		        QList<WorldRuntime::Timer> timers = m_runtime->timers();
-		        int                        index  = ruleIndexForRuntimeId(timers, selectedRuntimeId);
+		        pruneMissingRuntimeRules(m_workingLists->timers, m_workingLists->initialTimerIds,
+		                                 m_runtime->timers());
+		        int index = ruleIndexForRuntimeId(m_workingLists->timers, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshTimerView(selectionCandidates);
@@ -9009,15 +9086,17 @@ void WorldPreferencesDialog::buildUi()
 		        }
 		        if (!confirmRemoval(this, QStringLiteral("timer")))
 			        return;
-		        timers = m_runtime->timers();
-		        index  = ruleIndexForRuntimeId(timers, selectedRuntimeId);
+		        pruneMissingRuntimeRules(m_workingLists->timers, m_workingLists->initialTimerIds,
+		                                 m_runtime->timers());
+		        index = ruleIndexForRuntimeId(m_workingLists->timers, selectedRuntimeId);
 		        if (index < 0)
 		        {
 			        refreshTimerView(selectionCandidates);
 			        return;
 		        }
-		        timers.removeAt(index);
-		        m_runtime->setTimers(timers);
+		        m_workingLists->deletedTimerIds.insert(selectedRuntimeId);
+		        m_workingLists->timers.removeAt(index);
+		        m_workingLists->timersStaged = true;
 		        refreshTimerView(selectionCandidates);
 	        });
 	connect(m_copyTimerButton, &QPushButton::clicked, this,
@@ -9029,8 +9108,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Timer> timers  = m_runtime->timers();
-		        auto                             rowText = [this, &timers](const int row) -> QString
+		        const QList<WorldRuntime::Timer> &timers  = m_workingLists->timers;
+		        auto                              rowText = [this, &timers](const int row) -> QString
 		        {
 			        const int index = ruleIndexForRuntimeId(timers, ruleRuntimeIdForRow(m_timersTable, row));
 			        if (index < 0 || index >= timers.size())
@@ -9052,8 +9131,8 @@ void WorldPreferencesDialog::buildUi()
 	        {
 		        if (!m_runtime)
 			        return;
-		        const QList<WorldRuntime::Timer> timers  = m_runtime->timers();
-		        auto                             rowText = [this, &timers](const int row) -> QString
+		        const QList<WorldRuntime::Timer> &timers  = m_workingLists->timers;
+		        auto                              rowText = [this, &timers](const int row) -> QString
 		        {
 			        const int index = ruleIndexForRuntimeId(timers, ruleRuntimeIdForRow(m_timersTable, row));
 			        if (index < 0 || index >= timers.size())
@@ -9283,7 +9362,7 @@ void WorldPreferencesDialog::buildUi()
 		connect(m_variablesTable, &QTableWidget::itemSelectionChanged, this,
 		        [this] { updateVariableControls(); });
 	auto editVariableDialogNow = [this](QString &name, QString &value, const bool allowRename,
-	                                    const QSet<QString> &disallowedNames) -> bool
+	                                    const std::function<QSet<QString>()> &currentDisallowedNames) -> bool
 	{
 		QDialog dialog(this);
 		dialog.setWindowTitle(QStringLiteral("Variable"));
@@ -9314,7 +9393,7 @@ void WorldPreferencesDialog::buildUi()
 				                     QStringLiteral("Variable name cannot be blank."));
 				continue;
 			}
-			if (disallowedNames.contains(candidateName))
+			if (currentDisallowedNames().contains(candidateName.toCaseFolded()))
 			{
 				QMessageBox::warning(&dialog, QStringLiteral("Variables"),
 				                     QStringLiteral("That variable name is already in use."));
@@ -9327,28 +9406,37 @@ void WorldPreferencesDialog::buildUi()
 		}
 	};
 	if (m_addVariableButton)
-		connect(m_addVariableButton, &QPushButton::clicked, this,
-		        [this, editVariableDialogNow]
-		        {
-			        if (!m_runtime)
-				        return;
-			        QSet<QString>                        namesInUse;
-			        const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
-			        for (const auto &var : vars)
-				        namesInUse.insert(var.attributes.value(QStringLiteral("name")));
-			        QString name;
-			        QString value;
-			        if (!editVariableDialogNow(name, value, true, namesInUse))
-				        return;
-			        WorldRuntime::Variable newVar;
-			        newVar.attributes.insert(QStringLiteral("name"), name);
-			        newVar.content                        = value;
-			        QList<WorldRuntime::Variable> updated = vars;
-			        updated.push_back(newVar);
-			        m_runtime->setVariables(updated);
-			        populateVariables();
-			        updateVariableControls();
-		        });
+		connect(
+		    m_addVariableButton, &QPushButton::clicked, this,
+		    [this, editVariableDialogNow]
+		    {
+			    if (!m_runtime)
+				    return;
+			    QString name;
+			    QString value;
+			    auto    currentNamesInUse = [this]
+			    {
+				    QSet<QString> names;
+				    for (const WorldRuntime::Variable &var : m_runtime->variables())
+					    names.insert(var.attributes.value(QStringLiteral("name")).trimmed().toCaseFolded());
+				    for (const WorkingLists::Variable &working : std::as_const(m_workingLists->variables))
+					    names.insert(
+					        working.value.attributes.value(QStringLiteral("name")).trimmed().toCaseFolded());
+				    return names;
+			    };
+			    if (!editVariableDialogNow(name, value, true, currentNamesInUse))
+				    return;
+			    WorldRuntime::Variable newVar;
+			    newVar.attributes.insert(QStringLiteral("name"), name);
+			    newVar.content                        = value;
+			    QList<WorldRuntime::Variable> updated = m_runtime->variables();
+			    updated.push_back(newVar);
+			    m_runtime->setVariables(updated);
+			    m_workingLists->variables.push_back({newVar, name, true, false, false});
+			    populateVariables();
+			    selectRowByIndex(m_variablesTable, saturatingToInt(m_workingLists->variables.size()) - 1);
+			    updateVariableControls();
+		    });
 	if (m_editVariableButton)
 		connect(m_editVariableButton, &QPushButton::clicked, this,
 		        [this, editVariableDialogNow]
@@ -9359,24 +9447,63 @@ void WorldPreferencesDialog::buildUi()
 			        const int index = rowToIndex(m_variablesTable, row);
 			        if (index < 0)
 				        return;
-			        QList<WorldRuntime::Variable> vars = m_runtime->variables();
-			        if (index >= vars.size())
+			        if (index >= m_workingLists->variables.size())
 				        return;
-			        const QString oldName = vars.at(index).attributes.value(QStringLiteral("name"));
-			        QString       name    = oldName;
-			        QString       value   = vars.at(index).content;
-			        QSet<QString> namesInUse;
-			        for (int i = 0; i < vars.size(); ++i)
+			        WorkingLists::Variable &working = m_workingLists->variables[index];
+			        const QString           oldName = working.value.attributes.value(QStringLiteral("name"));
+			        QString                 name    = oldName;
+			        QString                 value   = working.value.content;
+			        auto                    currentNamesInUse = [this, index]
 			        {
-				        if (i == index)
-					        continue;
-				        namesInUse.insert(vars.at(i).attributes.value(QStringLiteral("name")));
-			        }
-			        if (!editVariableDialogNow(name, value, true, namesInUse))
+				        QSet<QString>                 names;
+				        const WorkingLists::Variable &selected = m_workingLists->variables.at(index);
+				        for (int i = 0; i < m_workingLists->variables.size(); ++i)
+				        {
+					        if (i == index)
+						        continue;
+					        names.insert(m_workingLists->variables.at(i)
+					                         .value.attributes.value(QStringLiteral("name"))
+					                         .trimmed()
+					                         .toCaseFolded());
+				        }
+				        for (const WorldRuntime::Variable &runtimeVariable : m_runtime->variables())
+				        {
+					        const QString runtimeName =
+					            runtimeVariable.attributes.value(QStringLiteral("name")).trimmed();
+					        if (selected.presentInRuntime &&
+					            runtimeName.compare(selected.runtimeName, Qt::CaseInsensitive) == 0)
+						        continue;
+					        names.insert(runtimeName.toCaseFolded());
+				        }
+				        return names;
+			        };
+			        if (!editVariableDialogNow(name, value, true, currentNamesInUse))
 				        return;
-			        vars[index].attributes.insert(QStringLiteral("name"), name);
-			        vars[index].content = value;
-			        m_runtime->setVariables(vars);
+
+			        WorldRuntime::Variable committed = working.value;
+			        committed.attributes.insert(QStringLiteral("name"), name);
+			        committed.content                              = value;
+			        QList<WorldRuntime::Variable> runtimeVariables = m_runtime->variables();
+			        int                           runtimeIndex     = -1;
+			        if (working.presentInRuntime)
+			        {
+				        for (int i = 0; i < runtimeVariables.size(); ++i)
+				        {
+					        if (runtimeVariables.at(i)
+					                .attributes.value(QStringLiteral("name"))
+					                .compare(working.runtimeName, Qt::CaseInsensitive) == 0)
+					        {
+						        runtimeIndex = i;
+						        break;
+					        }
+				        }
+			        }
+			        if (runtimeIndex >= 0)
+				        runtimeVariables[runtimeIndex] = committed;
+			        else
+				        runtimeVariables.push_back(committed);
+			        m_runtime->setVariables(runtimeVariables);
+			        working = {committed, name, true, false, false};
 			        populateVariables();
 			        selectRowByIndex(m_variablesTable, index);
 			        updateVariableControls();
@@ -9393,15 +9520,42 @@ void WorldPreferencesDialog::buildUi()
 				        return;
 			        if (!confirmRemoval(this, QStringLiteral("variable")))
 				        return;
-			        QList<WorldRuntime::Variable> vars = m_runtime->variables();
-			        if (index >= vars.size())
+			        if (index >= m_workingLists->variables.size())
 				        return;
-			        vars.removeAt(index);
-			        m_runtime->setVariables(vars);
+			        const WorkingLists::Variable &working = m_workingLists->variables.at(index);
+			        if (working.presentInRuntime)
+				        m_workingLists->deletedVariableNames.insert(
+				            working.runtimeName.trimmed().toCaseFolded());
+			        m_workingLists->variables.removeAt(index);
+			        m_workingLists->variablesStaged = true;
 			        populateVariables();
-			        const int lastIndex = saturatingToInt(vars.size()) - 1;
+			        const int lastIndex = saturatingToInt(m_workingLists->variables.size()) - 1;
 			        selectRowByIndex(m_variablesTable, std::min(index, lastIndex));
 			        updateVariableControls();
+		        });
+	if (m_variablesTable)
+		connect(m_variablesTable, &QTableWidget::itemChanged, this,
+		        [this](const QTableWidgetItem *item)
+		        {
+			        if (!item)
+				        return;
+			        const int index = rowToIndex(m_variablesTable, item->row());
+			        if (index < 0 || index >= m_workingLists->variables.size())
+				        return;
+			        WorkingLists::Variable &working = m_workingLists->variables[index];
+			        if (item->column() == 0)
+			        {
+				        working.value.attributes.insert(QStringLiteral("name"), item->text().trimmed());
+				        working.nameEdited = true;
+			        }
+			        else if (item->column() == 1)
+			        {
+				        working.value.content = item->text();
+				        working.valueEdited   = true;
+			        }
+			        else
+				        return;
+			        m_workingLists->variablesStaged = true;
 		        });
 	if (m_variablesTable)
 		connect(m_variablesTable, &QTableWidget::cellDoubleClicked, this,
@@ -9416,13 +9570,12 @@ void WorldPreferencesDialog::buildUi()
 		        {
 			        if (!m_runtime)
 				        return;
-			        const QList<WorldRuntime::Variable> vars    = m_runtime->variables();
-			        auto                                rowText = [this, &vars](const int row) -> QString
+			        auto rowText = [this](const int row) -> QString
 			        {
 				        const int index = rowToIndex(m_variablesTable, row);
-				        if (index < 0 || index >= vars.size())
+				        if (index < 0 || index >= m_workingLists->variables.size())
 					        return {};
-				        const WorldRuntime::Variable &var  = vars.at(index);
+				        const WorldRuntime::Variable &var  = m_workingLists->variables.at(index).value;
 				        const QString                 name = var.attributes.value(QStringLiteral("name"));
 				        return var.content + QLatin1Char('\t') + name;
 			        };
@@ -9437,13 +9590,12 @@ void WorldPreferencesDialog::buildUi()
 		        {
 			        if (!m_runtime)
 				        return;
-			        const QList<WorldRuntime::Variable> vars    = m_runtime->variables();
-			        auto                                rowText = [this, &vars](const int row) -> QString
+			        auto rowText = [this](const int row) -> QString
 			        {
 				        const int index = rowToIndex(m_variablesTable, row);
-				        if (index < 0 || index >= vars.size())
+				        if (index < 0 || index >= m_workingLists->variables.size())
 					        return {};
-				        const WorldRuntime::Variable &var  = vars.at(index);
+				        const WorldRuntime::Variable &var  = m_workingLists->variables.at(index).value;
 				        const QString                 name = var.attributes.value(QStringLiteral("name"));
 				        return var.content + QLatin1Char('\t') + name;
 			        };
@@ -9496,10 +9648,9 @@ void WorldPreferencesDialog::buildUi()
 			        const int index = rowToIndex(m_variablesTable, row);
 			        if (index < 0)
 				        return;
-			        const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
-			        if (index >= vars.size())
+			        if (index >= m_workingLists->variables.size())
 				        return;
-			        const WorldRuntime::Variable &var = vars.at(index);
+			        const WorldRuntime::Variable &var = m_workingLists->variables.at(index).value;
 			        QString                       xml;
 			        QTextStream                   out(&xml);
 			        out << "<variables>\n";
@@ -9513,7 +9664,7 @@ void WorldPreferencesDialog::buildUi()
 		        });
 	if (m_pasteVariableButton)
 		connect(m_pasteVariableButton, &QPushButton::clicked, this,
-		        [this, editVariableDialogNow]
+		        [this]
 		        {
 			        if (!m_runtime)
 				        return;
@@ -9525,44 +9676,24 @@ void WorldPreferencesDialog::buildUi()
 			        }();
 			        if (text.trimmed().isEmpty())
 				        return;
-			        QTemporaryFile temp;
-			        if (!temp.open())
-				        return;
-			        temp.write(text.toUtf8());
-			        temp.flush();
 			        WorldDocument doc;
 			        doc.setLoadMask(WorldDocument::XML_VARIABLES | WorldDocument::XML_NO_PLUGINS |
 			                        WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
-			        if (!doc.loadFromFile(temp.fileName()))
+			        if (!doc.loadFromXml(text, WorldDocument::NamedDuplicatePolicy::Preserve))
 			        {
 				        QMessageBox::warning(this, QStringLiteral("Paste variables"), doc.errorString());
 				        return;
 			        }
-			        QList<WorldRuntime::Variable> combined = m_runtime->variables();
-			        QSet<QString>                 namesInUse;
-			        for (const auto &var : combined)
-				        namesInUse.insert(var.attributes.value(QStringLiteral("name")));
-			        bool changed = false;
 			        for (const auto &v : doc.variables())
 			        {
-				        QString name  = v.attributes.value(QStringLiteral("name"));
-				        QString value = v.content;
-				        if (namesInUse.contains(name))
-				        {
-					        if (!editVariableDialogNow(name, value, true, namesInUse))
-						        continue;
-				        }
 				        WorldRuntime::Variable rv;
 				        rv.attributes = v.attributes;
-				        rv.attributes.insert(QStringLiteral("name"), name);
-				        rv.content = value;
-				        combined.push_back(rv);
-				        namesInUse.insert(name);
-				        changed = true;
+				        rv.content    = v.content;
+				        m_workingLists->variables.push_back({rv, {}, false, false, false});
 			        }
-			        if (changed)
+			        if (!doc.variables().isEmpty())
 			        {
-				        m_runtime->setVariables(combined);
+				        m_workingLists->variablesStaged = true;
 				        populateVariables();
 			        }
 			        updateVariableControls();
@@ -10815,9 +10946,8 @@ void WorldPreferencesDialog::populateTriggers()
 {
 	if (!m_runtime || !m_triggersTable)
 		return;
-	m_runtime->ensureWorldTriggerRuntimeIds();
 	m_triggersTable->setShowGrid(gridLinesEnabled());
-	const QList<WorldRuntime::Trigger> &triggers = m_runtime->triggers();
+	const QList<WorldRuntime::Trigger> &triggers = m_workingLists->triggers;
 	QSet<QString>                       pluginOwnedSignatures;
 	for (const auto &plugin : m_runtime->plugins())
 	{
@@ -11064,9 +11194,8 @@ void WorldPreferencesDialog::populateAliases()
 {
 	if (!m_runtime || !m_aliasesTable)
 		return;
-	m_runtime->ensureWorldAliasRuntimeIds();
 	m_aliasesTable->setShowGrid(gridLinesEnabled());
-	const QList<WorldRuntime::Alias> &aliases = m_runtime->aliases();
+	const QList<WorldRuntime::Alias> &aliases = m_workingLists->aliases;
 	QSet<QString>                     pluginOwnedSignatures;
 	for (const auto &plugin : m_runtime->plugins())
 	{
@@ -11286,9 +11415,8 @@ void WorldPreferencesDialog::populateTimers()
 {
 	if (!m_runtime || !m_timersTable)
 		return;
-	m_runtime->ensureWorldTimerRuntimeIds();
 	m_timersTable->setShowGrid(gridLinesEnabled());
-	const QList<WorldRuntime::Timer> &timers = m_runtime->timers();
+	const QList<WorldRuntime::Timer> &timers = m_workingLists->timers;
 	QSet<QString>                     pluginOwnedSignatures;
 	for (const auto &plugin : m_runtime->plugins())
 	{
@@ -11516,8 +11644,7 @@ void WorldPreferencesDialog::populateVariables()
 	if (!m_runtime || !m_variablesTable)
 		return;
 	m_variablesTable->setShowGrid(gridLinesEnabled());
-	const QList<WorldRuntime::Variable> &vars = m_runtime->variables();
-	QSet<QString>                        pluginOwnedVariables;
+	QSet<QString> pluginOwnedVariables;
 	for (const auto &plugin : m_runtime->plugins())
 	{
 		for (auto it = plugin.variables.constBegin(); it != plugin.variables.constEnd(); ++it)
@@ -11535,9 +11662,10 @@ void WorldPreferencesDialog::populateVariables()
 	LuaFilterRunner filter(filterEnabled ? m_variableFilterText : QString(), this);
 	const bool      useLuaFilter = filterEnabled && filter.isValid();
 #endif
-	for (int i = 0; i < vars.size(); ++i)
+	const QSignalBlocker tableBlocker(m_variablesTable);
+	for (int i = 0; i < m_workingLists->variables.size(); ++i)
 	{
-		const WorldRuntime::Variable &var     = vars.at(i);
+		const WorldRuntime::Variable &var     = m_workingLists->variables.at(i).value;
 		const QString                 varName = var.attributes.value(QStringLiteral("name"));
 		const QString variableKey = normalizeObjectName(varName) + QLatin1Char('\x1d') + var.content;
 		if (pluginOwnedVariables.contains(variableKey))

@@ -125,6 +125,67 @@ namespace
 				QVERIFY(containsMessage(warningDoc.warnings(),
 				                        QStringLiteral("<macros> tag cannot be used inside a plugin")));
 			}
+
+			void duplicateNamedItemsUseLastDefinitionInFirstPosition()
+			{
+				const QString xml = QStringLiteral(R"xml(
+<qmud>
+  <triggers>
+    <trigger name="First" match="old"><send>old trigger</send></trigger>
+    <trigger match="anonymous one"><send>anonymous one</send></trigger>
+    <trigger name="first" match="new"><send>new trigger</send></trigger>
+    <trigger match="anonymous two"><send>anonymous two</send></trigger>
+  </triggers>
+  <aliases>
+    <alias name="Alias" match="old"><send>old alias</send></alias>
+    <alias name="ALIAS" match="new"><send>new alias</send></alias>
+  </aliases>
+  <timers>
+    <timer name="Timer" second="1"><send>old timer</send></timer>
+    <timer name="timer" second="2"><send>new timer</send></timer>
+  </timers>
+  <variables>
+    <variable name="Value">old value</variable>
+    <variable name="value">new value</variable>
+  </variables>
+</qmud>
+)xml");
+
+				WorldDocument doc;
+				QVERIFY(doc.loadFromXml(xml));
+
+				QCOMPARE(doc.triggers().size(), 3);
+				QCOMPARE(doc.triggers().at(0).attributes.value(QStringLiteral("match")),
+				         QStringLiteral("new"));
+				QCOMPARE(doc.triggers().at(0).children.value(QStringLiteral("send")),
+				         QStringLiteral("new trigger"));
+				QVERIFY(doc.triggers().at(1).attributes.value(QStringLiteral("name")).isEmpty());
+				QCOMPARE(doc.triggers().at(1).attributes.value(QStringLiteral("match")),
+				         QStringLiteral("anonymous one"));
+				QVERIFY(doc.triggers().at(2).attributes.value(QStringLiteral("name")).isEmpty());
+				QCOMPARE(doc.triggers().at(2).attributes.value(QStringLiteral("match")),
+				         QStringLiteral("anonymous two"));
+
+				QCOMPARE(doc.aliases().size(), 1);
+				QCOMPARE(doc.aliases().front().children.value(QStringLiteral("send")),
+				         QStringLiteral("new alias"));
+				QCOMPARE(doc.timers().size(), 1);
+				QCOMPARE(doc.timers().front().attributes.value(QStringLiteral("second")),
+				         QStringLiteral("2"));
+				QCOMPARE(doc.variables().size(), 1);
+				QCOMPARE(doc.variables().front().content, QStringLiteral("new value"));
+
+				WorldDocument preservedDoc;
+				QVERIFY(preservedDoc.loadFromXml(xml, WorldDocument::NamedDuplicatePolicy::Preserve));
+				QCOMPARE(preservedDoc.triggers().size(), 4);
+				QCOMPARE(preservedDoc.aliases().size(), 2);
+				QCOMPARE(preservedDoc.timers().size(), 2);
+				QCOMPARE(preservedDoc.variables().size(), 2);
+				QCOMPARE(preservedDoc.triggers().at(0).attributes.value(QStringLiteral("match")),
+				         QStringLiteral("old"));
+				QCOMPARE(preservedDoc.triggers().at(2).attributes.value(QStringLiteral("match")),
+				         QStringLiteral("new"));
+			}
 			// NOLINTEND(readability-convert-member-functions-to-static)
 	};
 

@@ -546,14 +546,19 @@ class WorldView : public QWidget
 		 */
 		void                      recheckMiniWindowHover();
 		/**
+		 * @brief Rechecks hover only when one newly added hotspot is under the stationary pointer.
+		 * @param addedHotspots Exact hotspot instances added by the completed mutation batch.
+		 */
+		void recheckMiniWindowHoverForAddedHotspots(const MiniWindowHotspotInstanceMap &addedHotspots);
+		/**
 		 * @brief Returns true when scrollback split view is active.
 		 * @return `true` when split view is active.
 		 */
-		[[nodiscard]] bool        isScrollbackSplitActive() const;
+		[[nodiscard]] bool isScrollbackSplitActive() const;
 		/**
 		 * @brief Collapses split output view back to live-only output.
 		 */
-		void                      collapseScrollbackSplitToLiveOutput();
+		void               collapseScrollbackSplitToLiveOutput();
 
 	signals:
 		/**
@@ -1934,11 +1939,10 @@ class WorldView : public QWidget
 		 */
 		[[nodiscard]] bool runtimeOutputTailAdvanced() const;
 		/**
-		 * @brief Resets partial-line presentation before applying a runtime buffer mutation.
+		 * @brief Detaches the partial-line overlay before applying a runtime buffer mutation.
 		 * @param tailAdvanced Whether the runtime acquired a new presented tail line.
-		 * @param clearLastPartialAnnouncement Whether to discard partial-line accessibility history.
 		 */
-		void prepareRuntimeOutputMutationPresentation(bool tailAdvanced, bool clearLastPartialAnnouncement);
+		void               prepareRuntimeOutputMutationPresentation(bool tailAdvanced);
 		/**
 		 * @brief Returns whether queued output work must complete before draw callbacks run.
 		 * @return `true` while presentation, tail-scroll, or batched partial-clear work is pending.
@@ -2344,6 +2348,27 @@ class WorldView : public QWidget
 		 */
 		bool        handleMiniWindowMouseMove(const QMouseEvent *event, const QWidget *source);
 		/**
+		 * @brief Handles a miniwindow mouse-move event or a stationary hover-state refresh.
+		 * @param event Mouse event payload.
+		 * @param source Source widget.
+		 * @param invokeRepeatedMouseOverCallback Invoke a repeat-enabled mouse-over callback for an unchanged
+		 * hotspot when `true`.
+		 * @return `true` when event is consumed.
+		 */
+		bool        handleMiniWindowMouseMove(const QMouseEvent *event, const QWidget *source,
+		                                      bool invokeRepeatedMouseOverCallback);
+		/**
+		 * @brief Handles mouse movement while requiring the resolved hotspot to be one exact added instance.
+		 * @param event Mouse event payload.
+		 * @param source Source widget.
+		 * @param invokeRepeatedMouseOverCallback Invoke repeat-enabled mouse-over callbacks when `true`.
+		 * @param requiredAddedHotspots Exact newly added instances eligible for this synthetic move.
+		 * @return `true` when event is consumed.
+		 */
+		bool        handleMiniWindowMouseMove(const QMouseEvent *event, const QWidget *source,
+		                                      bool                                invokeRepeatedMouseOverCallback,
+		                                      const MiniWindowHotspotInstanceMap *requiredAddedHotspots);
+		/**
 		 * @brief Updates script-visible miniwindow mouse coordinates for a callback.
 		 * @param window Miniwindow receiving the callback.
 		 * @param displayLocal Output-stack-local display coordinate.
@@ -2432,8 +2457,9 @@ class WorldView : public QWidget
 		 * @param flags Callback mouse/keyboard flags.
 		 * @param queueWhenCallbackLaneBusy Queue instead of synchronously waiting when the callback lane is busy.
 		 */
-		void callHotspotCallback(MiniWindow *window, const QString &hotspotId, const QString &callbackName,
-		                         int flags, bool queueWhenCallbackLaneBusy = false) const;
+		void callHotspotCallback(const MiniWindow *window, const QString &hotspotId,
+		                         const QString &callbackName, int flags,
+		                         bool queueWhenCallbackLaneBusy = false) const;
 		/**
 		 * @brief Clears currently applied hotspot cursor override.
 		 */
@@ -2447,8 +2473,9 @@ class WorldView : public QWidget
 		 * @brief Cancels mouse-over state for hotspot/window.
 		 * @param window Miniwindow to clear hover state from.
 		 * @param hotspotId Hovered hotspot identifier.
+		 * @return `true` when a Lua cancellation callback was dispatched.
 		 */
-		void cancelMouseOver(MiniWindow *window, const QString &hotspotId);
+		bool cancelMouseOver(MiniWindow *window, QString hotspotId);
 		/**
 		 * @brief Computes MFC-compatible mouse flags for hotspot callbacks.
 		 * @param event Mouse event payload.
@@ -2481,18 +2508,31 @@ class WorldView : public QWidget
 		 */
 		void              scheduleHotspotTooltip(const QString &hotspotId, const QString &tooltipText,
 		                                         const QPoint &globalPos);
+		void scheduleMiniWindowHotspotTooltip(const MiniWindow &window, const QString &hotspotId,
+		                                      const MiniWindowHotspot &hotspot, const QString &tooltipText,
+		                                      const QPoint &globalPos);
+		/** Schedules a tooltip with optional miniwindow hotspot ownership. */
+		void scheduleHotspotTooltipOwned(const QString &hotspotId, const QString &tooltipText,
+		                                 const QPoint &globalPos, const QString &windowName,
+		                                 quint64 instanceId);
+		/** Clears view interaction state owned by an invalidated hotspot instance. */
+		void invalidateMiniWindowHotspotInteraction(const QString &windowName, const QString &hotspotId,
+		                                            quint64 instanceId);
+		/** Updates pending or visible tooltip text for an unchanged hotspot instance. */
+		void refreshMiniWindowHotspotTooltip(const QString &windowName, const QString &hotspotId,
+		                                     quint64 instanceId, const QString &tooltipText);
 		/**
 		 * @brief Shows previously scheduled hotspot tooltip.
 		 */
-		void              showScheduledHotspotTooltip();
+		void showScheduledHotspotTooltip();
 		/**
 		 * @brief Clears any pending hotspot tooltip request.
 		 */
-		void              clearPendingHotspotTooltip();
+		void clearPendingHotspotTooltip();
 		/**
 		 * @brief Hides and releases this view's active process-global hotspot tooltip.
 		 */
-		void              hideActiveHotspotTooltip();
+		void hideActiveHotspotTooltip();
 		/**
 		 * @brief Updates line-information tooltip from mouse position.
 		 * @param watched Widget receiving mouse events.
@@ -2504,12 +2544,12 @@ class WorldView : public QWidget
 		 * @param allowCacheBuild `true` to materialize the needed layout range on demand, `false` to
 		 *        query only when cache is ready.
 		 */
-		void              updateLineInformationTooltip(const QWidget *watched, const QMouseEvent *event,
-		                                               const WrapTextBrowser      *precomputedView = nullptr,
-		                                               const QPoint               *precomputedPosInView = nullptr,
-		                                               const NativeOutputPosition *precomputedHit = nullptr,
-		                                               const bool                 *precomputedTextHit = nullptr,
-		                                               bool                        allowCacheBuild = true);
+		void updateLineInformationTooltip(const QWidget *watched, const QMouseEvent *event,
+		                                  const WrapTextBrowser      *precomputedView      = nullptr,
+		                                  const QPoint               *precomputedPosInView = nullptr,
+		                                  const NativeOutputPosition *precomputedHit       = nullptr,
+		                                  const bool                 *precomputedTextHit   = nullptr,
+		                                  bool                        allowCacheBuild      = true);
 		/**
 		 * @brief Computes line fade opacity for timestamp.
 		 * @param when Line timestamp.
@@ -2884,9 +2924,13 @@ class WorldView : public QWidget
 		QString                                 m_geometryConstrainedMiniWindowName;
 		QString                                 m_tooltipHotspot;
 		QString                                 m_pendingTooltipHotspot;
+		QString                                 m_pendingTooltipWindowName;
+		quint64                                 m_pendingTooltipHotspotInstanceId{0};
 		QString                                 m_pendingTooltipText;
 		QPoint                                  m_pendingTooltipGlobalPos;
 		QString                                 m_activeTooltipText;
+		QString                                 m_activeTooltipWindowName;
+		quint64                                 m_activeTooltipHotspotInstanceId{0};
 		QPoint                                  m_activeTooltipGlobalPos;
 		QPoint                                  m_capturedMiniWindowPressLocal;
 		QPoint                                  m_pendingCapturedMiniWindowDragMoveLocal;
@@ -2915,6 +2959,7 @@ class WorldView : public QWidget
 		int                                     m_lastSelectionEndColumn{0};
 		QPoint                                  m_lastMousePos;
 		bool                                    m_hasLastMousePos{false};
+		bool                                    m_windowAddHotspotReentryBlockedForMouseDispatch{false};
 		bool                                    m_hasAppliedOutputCursor{false};
 		QCursor                                 m_appliedOutputCursor;
 		bool                                    m_drawNotifyQueued{false};

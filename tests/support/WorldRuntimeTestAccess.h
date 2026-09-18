@@ -44,6 +44,15 @@ class WorldRuntimeTestAccess final
 		{
 			return runtime.miniWindowMutable(name);
 		}
+		/**
+		 * @brief Returns the runtime-owned Lua executor storage for executor-seam tests.
+		 * @param runtime Runtime whose executor is inspected or decorated.
+		 * @return Mutable executor ownership slot.
+		 */
+		static std::unique_ptr<ILuaExecutor> &luaExecutorStorage(WorldRuntime &runtime)
+		{
+			return runtime.m_luaExecutor;
+		}
 		static QVector<MiniWindow *> sortedMiniWindows(WorldRuntime &runtime)
 		{
 			return runtime.sortedMiniWindowsMutable();
@@ -78,6 +87,31 @@ class WorldRuntimeTestAccess final
 			runtime.processRawDataPayload(data, simulatedInput);
 		}
 		/**
+		 * @brief Opens an inbound transmission boundary for deterministic staging tests.
+		 * @param runtime Runtime whose boundary is opened.
+		 */
+		static void beginInboundTransmissionDeferralScope(WorldRuntime &runtime)
+		{
+			runtime.beginInboundTransmissionDeferralScope();
+		}
+		/**
+		 * @brief Closes an inbound transmission boundary and flushes staged bytes.
+		 * @param runtime Runtime whose boundary is closed.
+		 */
+		static void endInboundTransmissionDeferralScope(WorldRuntime &runtime)
+		{
+			runtime.endInboundTransmissionDeferralScope();
+		}
+		/**
+		 * @brief Returns the active inbound transmission-boundary nesting depth.
+		 * @param runtime Runtime whose boundary state is inspected.
+		 * @return Current nesting depth.
+		 */
+		[[nodiscard]] static int inboundTransmissionDeferralDepth(const WorldRuntime &runtime)
+		{
+			return runtime.m_inboundTransmissionDeferralDepth;
+		}
+		/**
 		 * @brief Sets connection phase for deterministic command-dispatch tests without a network socket.
 		 * @param runtime Runtime whose phase is changed.
 		 * @param phase WorldRuntime connection phase.
@@ -102,5 +136,58 @@ class WorldRuntimeTestAccess final
 		                              const QVector<MiniWindow *> *orderedWindows = nullptr)
 		{
 			runtime.layoutMiniWindows(clientSize, ownerSize, underneath, orderedWindows);
+		}
+		/**
+		 * @brief Dispatches a world-Lua hotspot callback through the production callback lane.
+		 * @param runtime Runtime that owns the world Lua engine.
+		 * @param functionName Lua callback function name.
+		 * @param hotspotId Hotspot identifier passed to Lua.
+		 * @param miniWindowName Miniwindow execution context passed to Lua.
+		 */
+		static void dispatchWorldHotspotCallback(WorldRuntime &runtime, const QString &functionName,
+		                                         const QString &hotspotId      = {},
+		                                         const QString &miniWindowName = {})
+		{
+			static_cast<void>(
+			    runtime.callWorldHotspotFunction(functionName, 0, hotspotId, miniWindowName, false));
+		}
+		/**
+		 * @brief Commits callback-local miniwindow shadows through the production reconciliation path.
+		 * @param runtime Runtime receiving the shadows.
+		 * @param windows Final callback-local window states.
+		 * @param removedWindowNames Window ids removed by the callback.
+		 * @param replacedWindowNames Window ids recreated by the callback.
+		 * @param addedHotspots Exact hotspot instances added by the callback.
+		 */
+		static void commitLuaCallbackMiniWindowStates(WorldRuntime                &runtime,
+		                                              QHash<QString, MiniWindow>   windows,
+		                                              const QSet<QString>         &removedWindowNames,
+		                                              const QSet<QString>         &replacedWindowNames,
+		                                              MiniWindowHotspotInstanceMap addedHotspots = {})
+		{
+			QHash<QString, QSharedPointer<const MiniWindow>> baseWindowsByName;
+			QSet<QString>                                    presentationChangedWindowNames;
+			for (auto window = windows.constBegin(); window != windows.constEnd(); ++window)
+			{
+				if (const auto current = runtime.m_miniWindows.constFind(window.key());
+				    current != runtime.m_miniWindows.constEnd())
+				{
+					baseWindowsByName.insert(window.key(),
+					                         QSharedPointer<const MiniWindow>::create(current.value()));
+				}
+				presentationChangedWindowNames.insert(window.key());
+			}
+			for (const QString &windowName : removedWindowNames)
+			{
+				if (const auto current = runtime.m_miniWindows.constFind(windowName);
+				    current != runtime.m_miniWindows.constEnd())
+				{
+					baseWindowsByName.insert(windowName,
+					                         QSharedPointer<const MiniWindow>::create(current.value()));
+				}
+			}
+			runtime.commitLuaCallbackMiniWindowStates(std::move(windows), removedWindowNames,
+			                                          replacedWindowNames, std::move(addedHotspots), {},
+			                                          baseWindowsByName, presentationChangedWindowNames);
 		}
 };

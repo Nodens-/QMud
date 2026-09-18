@@ -140,7 +140,6 @@ extern "C"
 #include <QSysInfo>
 #include <QTableWidget>
 #include <QTemporaryDir>
-#include <QTemporaryFile>
 #include <QTextBrowser>
 #include <QTextDocument>
 #include <QTextEdit>
@@ -9272,8 +9271,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			if (!lua)
 				return;
 			runtime->setLastImmediateExpression(payload);
-			const bool executed =
-			    runtime->dispatchLuaExecuteScript(lua, payload, QStringLiteral("Immediate"));
+			const bool executed = runtime->dispatchLuaExecuteScript(lua, payload, QStringLiteral("Immediate"),
+			                                                        LuaCallbackEvent::None);
 			if (!executed)
 				QMessageBox::warning(m_mainWindow, QStringLiteral("Send To Script"),
 				                     QStringLiteral("Script execution failed."));
@@ -10554,8 +10553,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				        return;
 			        if (m_mainWindow)
 				        m_mainWindow->setStatusMessageNow(QStringLiteral("Executing immediate script"));
-			        const bool executed =
-			            runtime->dispatchLuaExecuteScript(lua, code, QStringLiteral("Immediate"));
+			        const bool executed = runtime->dispatchLuaExecuteScript(
+			            lua, code, QStringLiteral("Immediate"), LuaCallbackEvent::None);
 			        if (!executed)
 				        QMessageBox::warning(m_mainWindow, QStringLiteral("QMud"),
 				                             QStringLiteral("Immediate execution failed."));
@@ -15085,13 +15084,26 @@ AppController::ImportResult AppController::importXmlFromFile(const QString &path
 		result.errorMessage = doc.errorString();
 		return result;
 	}
+	return applyImportedDocument(world, runtime, doc, mask);
+}
 
-	const bool allowOverwrite      = mask & WorldDocument::XML_OVERWRITE;
-	const bool allowPasteDuplicate = mask & WorldDocument::XML_PASTE_DUPLICATE;
-	auto       mergeNamedList      = [&](auto &dest, const auto &src, const QString &kind) -> bool
+AppController::ImportResult AppController::applyImportedDocument(WorldChildWindow    *world,
+                                                                 WorldRuntime        *runtime,
+                                                                 const WorldDocument &doc,
+                                                                 const unsigned long  mask)
+{
+	ImportResult result;
+	if (!world || !runtime)
 	{
-		return QMudImportMerge::mergeNamedList(dest, src, kind, allowOverwrite, allowPasteDuplicate,
-		                                       &result.duplicates, &result.errorMessage);
+		result.errorMessage = QStringLiteral("No active world runtime available.");
+		return result;
+	}
+
+	const bool allowOverwrite = mask & WorldDocument::XML_OVERWRITE;
+	auto       mergeNamedList = [&](auto &dest, const auto &src, const QString &kind) -> bool
+	{
+		return QMudImportMerge::mergeNamedList(dest, src, kind, allowOverwrite, &result.duplicates,
+		                                       &result.errorMessage);
 	};
 
 	if (mask & WorldDocument::XML_GENERAL)
@@ -15178,8 +15190,7 @@ AppController::ImportResult AppController::importXmlFromFile(const QString &path
 		{
 			incoming.push_back({attributes, content});
 		}
-		QMudImportMerge::mergeVariables(merged, incoming, allowOverwrite, allowPasteDuplicate,
-		                                &result.duplicates);
+		QMudImportMerge::mergeVariables(merged, incoming, allowOverwrite, &result.duplicates);
 		runtime->setVariables(merged);
 	}
 
@@ -15232,17 +15243,32 @@ AppController::ImportResult AppController::importXmlFromText(const QString &xml,
 		result.errorMessage = QStringLiteral("Not in XML format");
 		return result;
 	}
-
-	QTemporaryFile tmp;
-	if (!tmp.open())
+	if (!m_mainWindow)
 	{
-		result.errorMessage = QStringLiteral("Unable to open temporary file for import.");
+		result.errorMessage = QStringLiteral("No active window.");
 		return result;
 	}
-	tmp.write(xml.toUtf8());
-	tmp.flush();
+	WorldChildWindow *world = m_mainWindow->activeWorldChildWindow();
+	if (!world)
+	{
+		result.errorMessage = QStringLiteral("No active world to import into.");
+		return result;
+	}
+	WorldRuntime *runtime = world->runtime();
+	if (!runtime)
+	{
+		result.errorMessage = QStringLiteral("No active world runtime available.");
+		return result;
+	}
 
-	return importXmlFromFile(tmp.fileName(), mask);
+	WorldDocument doc;
+	doc.setLoadMask(mask | WorldDocument::XML_NO_PLUGINS | WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
+	if (!doc.loadFromXml(xml))
+	{
+		result.errorMessage = doc.errorString();
+		return result;
+	}
+	return applyImportedDocument(world, runtime, doc, mask);
 }
 
 bool AppController::isSpellCheckerAvailable()

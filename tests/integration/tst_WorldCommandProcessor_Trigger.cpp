@@ -166,7 +166,7 @@ namespace
 				bool                 sawScriptSend = false;
 				QVector<LuaStyleRun> capturedRuns;
 				QObject::connect(&processor, &WorldCommandProcessor::sendToScriptRequested, &processor,
-				                 [&](const QString &, const QString &, const QString &,
+				                 [&](const QString &, const QString &, const QString &, LuaCallbackEvent,
 				                     const QVector<LuaStyleRun> *styleRuns, bool, bool, int, qint64)
 				                 {
 					                 sawScriptSend = true;
@@ -256,7 +256,7 @@ namespace
 				processor.setRuntime(&runtime);
 				QVector<LuaStyleRun> capturedRuns;
 				QObject::connect(&processor, &WorldCommandProcessor::sendToScriptRequested, &processor,
-				                 [&](const QString &, const QString &, const QString &,
+				                 [&](const QString &, const QString &, const QString &, LuaCallbackEvent,
 				                     const QVector<LuaStyleRun> *styleRuns, bool, bool, int, qint64)
 				                 {
 					                 if (styleRuns)
@@ -372,7 +372,7 @@ namespace
 				bool        reorderSucceeded = false;
 				QObject::connect(&processor, &WorldCommandProcessor::sendToScriptRequested, &processor,
 				                 [&](const QString &pluginId, const QString &scriptText, const QString &,
-				                     const QVector<LuaStyleRun> *, bool, bool, int, qint64)
+				                     LuaCallbackEvent, const QVector<LuaStyleRun> *, bool, bool, int, qint64)
 				                 {
 					                 if (pluginId != firstPluginId)
 						                 return;

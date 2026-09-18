@@ -27,6 +27,12 @@ class WorldDocument : public QObject
 {
 		Q_OBJECT
 	public:
+		enum class NamedDuplicatePolicy
+		{
+			KeepLast,
+			Preserve
+		};
+
 		/**
 		 * @brief Creates an empty world document model.
 		 * @param parent Optional Qt parent object.
@@ -38,13 +44,21 @@ class WorldDocument : public QObject
 		 * @param fileName World XML file path.
 		 * @return `true` on successful load/parse.
 		 */
-		bool                    loadFromFile(const QString &fileName);
+		bool loadFromFile(const QString &fileName);
+		/**
+		 * @brief Loads world XML directly from text.
+		 * @param xmlText World XML content.
+		 * @param duplicatePolicy Handling for repeated nonempty rule and variable names.
+		 * @return `true` on successful load/parse.
+		 */
+		bool loadFromXml(const QString       &xmlText,
+		                 NamedDuplicatePolicy duplicatePolicy = NamedDuplicatePolicy::KeepLast);
 		/**
 		 * @brief Loads a plugin XML file into this document.
 		 * @param fileName Plugin XML file path.
 		 * @return `true` on successful load/parse.
 		 */
-		bool                    loadFromPluginFile(const QString &fileName);
+		bool loadFromPluginFile(const QString &fileName);
 		/**
 		 * @brief Expands include directives and merges referenced documents.
 		 * @param worldFilePath Current world file path.
@@ -53,29 +67,29 @@ class WorldDocument : public QObject
 		 * @param stateDir State-files directory path.
 		 * @return `true` when include expansion succeeds.
 		 */
-		bool                    expandIncludes(const QString &worldFilePath, const QString &pluginsDir,
-		                                       const QString &programDir, const QString &stateDir);
+		bool expandIncludes(const QString &worldFilePath, const QString &pluginsDir,
+		                    const QString &programDir, const QString &stateDir);
 		/**
 		 * @brief Returns last load/parse error text.
 		 * @return Error string.
 		 */
-		[[nodiscard]] QString   errorString() const;
+		[[nodiscard]] QString                       errorString() const;
 
 		/**
 		 * @brief Returns parsed world-file version.
 		 * @return Parsed world-file version.
 		 */
-		[[nodiscard]] int       worldFileVersion() const;
+		[[nodiscard]] int                           worldFileVersion() const;
 		/**
 		 * @brief Returns parsed QMud version string.
 		 * @return Parsed QMud version string.
 		 */
-		[[nodiscard]] QString   qmudVersion() const;
+		[[nodiscard]] QString                       qmudVersion() const;
 		/**
 		 * @brief Returns world save timestamp from XML.
 		 * @return Parsed save timestamp.
 		 */
-		[[nodiscard]] QDateTime dateSaved() const;
+		[[nodiscard]] QDateTime                     dateSaved() const;
 		/**
 		 * @brief Returns single-line world attribute map.
 		 * @return Immutable world attribute map.
@@ -276,7 +290,6 @@ class WorldDocument : public QObject
 			XML_PLUGINS               = 0x0400,
 			XML_NO_PLUGINS            = 0x0800,
 			XML_OVERWRITE             = 0x1000,
-			XML_PASTE_DUPLICATE       = 0x2000,
 			XML_IMPORT_MAIN_FILE_ONLY = 0x4000
 		};
 		static constexpr unsigned long kDefaultLoadMask =
@@ -305,6 +318,16 @@ class WorldDocument : public QObject
 		 * @return `true` on successful load.
 		 */
 		bool        loadFromFileWithPolicy(const QString &fileName, PluginPolicy policy, bool includeContext);
+		/**
+		 * @brief Loads XML text using plugin-policy constraints.
+		 * @param xmlText Source XML content.
+		 * @param policy Plugin-content policy.
+		 * @param includeContext Whether load happens in include context.
+		 * @param duplicatePolicy Handling for repeated nonempty rule and variable names.
+		 * @return `true` on successful load.
+		 */
+		bool        loadFromXmlWithPolicy(const QString &xmlText, PluginPolicy policy, bool includeContext,
+		                                  NamedDuplicatePolicy duplicatePolicy);
 		/**
 		 * @brief Clears all stored parse/load state.
 		 */

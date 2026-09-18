@@ -986,7 +986,8 @@ end
 				bool asynchronousDispatchCompleted = false;
 				runtime.dispatchLuaExecuteScriptAsync(
 				    engine, QStringLiteral("SetVariable('queued_guard_predecessor', 'done')"),
-				    QStringLiteral("queued miniwindow guard predecessor"), nullptr, false, false, 0, 0,
+				    QStringLiteral("queued miniwindow guard predecessor"), LuaCallbackEvent::None, nullptr,
+				    false, false, 0, 0,
 				    [&asynchronousDispatchCompleted](const bool ok) { asynchronousDispatchCompleted = ok; });
 
 				QTest::mouseRelease(outputStack, Qt::RightButton, Qt::NoModifier, clickPosition);

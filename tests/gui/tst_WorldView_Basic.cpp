@@ -805,6 +805,7 @@ end
 
 for _, name in ipairs({
 	"on_hotspot_down", "on_hotspot_up", "on_right_hotspot_down", "on_right_hotspot_up",
+	"on_hotspot_over",
 	"ordinary_capture_down", "ordinary_capture_up", "ordinary_capture_cancel",
 	"drag_release_down", "drag_release_up", "drag_release_cancel", "drag_release_move",
 	"drag_release_callback"
@@ -1658,9 +1659,15 @@ class tst_WorldView_Basic : public QObject
 				const QString insertedText =
 				    QStringLiteral("hidden scattered lua mutation %1 ").arg(mutation) +
 				    QStringLiteral("wide callback output ").repeated(24);
+				const auto anchor = std::ranges::find(runtime->lines(), anchorLineNumbers.at(mutation),
+				                                      &WorldRuntime::LineEntry::lineNumber);
+				QVERIFY(anchor != runtime->lines().cend());
+				const int anchorBufferIndex =
+				    boundedSizeToInt(std::distance(runtime->lines().cbegin(), anchor)) + 1;
 				runtime->beginOutputViewMutationBatch();
 				const bool inserted = runtime->writeLuaCallbackOutputAtLineAnchor(
-				    anchorLineNumbers.at(mutation), 1, false, insertedText, WorldRuntime::LineNote, {}, true);
+				    anchorLineNumbers.at(mutation), anchorBufferIndex, 1, false, insertedText,
+				    WorldRuntime::LineNote, {}, true);
 				runtime->endOutputViewMutationBatch();
 				QVERIFY(inserted);
 
@@ -7808,6 +7815,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(lines.contains(QStringLiteral("[gmcp: no-npcs / city street]")));
 			QCOMPARE(lines.constLast(), QStringLiteral("<2060hp 1694sp> "));
 
+			view.clearPartialOutput();
 			runtimeOutputForTest(view).appendOutputText(QStringLiteral("<2060hp 1694sp> look"), true);
 			QCoreApplication::processEvents();
 			nativeCanvas->update();
@@ -9690,7 +9698,7 @@ class tst_WorldView_Basic : public QObject
 
 			runtime->beginOutputViewMutationBatch();
 			const bool insertionApplied = runtime->writeLuaCallbackOutputAtLineAnchor(
-			    firstLineNumber, 1, false, QStringLiteral("anchored-inserted"), WorldRuntime::LineNote, {},
+			    firstLineNumber, 1, 1, false, QStringLiteral("anchored-inserted"), WorldRuntime::LineNote, {},
 			    true);
 			runtime->endOutputViewMutationBatch();
 			QVERIFY(insertionApplied);
@@ -9749,7 +9757,7 @@ class tst_WorldView_Basic : public QObject
 			const qint64 firstLineNumber = runtime->lines().constFirst().lineNumber;
 			runtime->beginOutputViewMutationBatch();
 			const bool inserted = runtime->writeLuaCallbackOutputAtLineAnchor(
-			    firstLineNumber, 1, false,
+			    firstLineNumber, 1, 1, false,
 			    QStringLiteral("multi-segment-insert-1\nmulti-segment-insert-2\nmulti-segment-insert-3"),
 			    WorldRuntime::LineNote, {}, true);
 			runtime->endOutputViewMutationBatch();
@@ -9768,6 +9776,109 @@ class tst_WorldView_Basic : public QObject
 
 			view.ensureNativeLayoutCaches(finalLines, 400, 400, 0, layoutFont);
 			QCOMPARE(view.nativeLayoutForLine(2), retainedSuffixLayout);
+			resetTestState();
+		}
+
+		void nativeOutputRendererCappedCallbackTailInsertionUsesExactAppendRange()
+		{
+			resetTestState();
+			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("4"));
+
+			WorldRuntime *const runtime = runtimeForTest();
+			WorldView           view;
+			setTestRuntimeObserver(view, runtime);
+			view.applyRuntimeSettings();
+			for (int index = 0; index < 4; ++index)
+			{
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("callback-tail-%1").arg(index),
+				                                            true);
+			}
+
+			const WorldView::NativeOutputRenderLines &initialLines = view.nativeOutputRenderLines();
+			QCOMPARE(sizeToInt(initialLines.size()), 4);
+			const QFont layoutFont;
+			view.ensureNativeLayoutCaches(initialLines, 400, 400, 0, layoutFont);
+			makeNativeLayoutCacheExact(view, initialLines, 400, 400, 0, layoutFont);
+			const QTextLayout *const retainedAnchorLayout = view.nativeLayoutForLine(3);
+			QVERIFY(retainedAnchorLayout);
+
+			const qint64 anchorLineNumber = runtime->lines().constLast().lineNumber;
+			const bool   inserted         = runtime->writeLuaCallbackOutputAtLineAnchor(
+			    anchorLineNumber, 4, 1, false,
+			    QStringLiteral("callback-tail-insert-1\ncallback-tail-insert-2\ncallback-tail-insert-3"),
+			    WorldRuntime::LineNote, {}, true);
+			QVERIFY(inserted);
+			QCOMPARE(view.m_nativeRuntimeRangeRestitchStartIndex, -1);
+			QCOMPARE(view.m_nativeRuntimeRangeRestitchEndIndexExclusive, -1);
+			QVERIFY(view.m_nativeRuntimeAppendPending);
+			QCOMPARE(view.m_nativeRuntimeFirstAppendedIndex, 1);
+			QCOMPARE(view.m_nativeRuntimeLastAppendedIndexExclusive, 4);
+
+			const WorldView::NativeOutputRenderLines &finalLines = view.nativeOutputRenderLines();
+			QCOMPARE(sizeToInt(finalLines.size()), 4);
+			QCOMPARE(finalLines.at(0).text, QStringLiteral("callback-tail-3"));
+			QCOMPARE(finalLines.at(1).text, QStringLiteral("callback-tail-insert-1"));
+			QCOMPARE(finalLines.at(2).text, QStringLiteral("callback-tail-insert-2"));
+			QCOMPARE(finalLines.at(3).text, QStringLiteral("callback-tail-insert-3"));
+			QCOMPARE(view.m_nativeRenderCacheDelta.kind,
+			         WorldView::NativeRenderCacheDeltaKind::HeadTrimTailAppend);
+			QCOMPARE(view.m_nativeRenderCacheDelta.headTrimCount, 3);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
+
+			view.ensureNativeLayoutCaches(finalLines, 400, 400, 0, layoutFont);
+			QCOMPARE(view.nativeLayoutForLine(0), retainedAnchorLayout);
+			resetTestState();
+		}
+
+		void nativeOutputRendererCallbackHorizontalRuleTracksChangedAndAppendedTailRanges()
+		{
+			resetTestState();
+
+			WorldRuntime *const runtime = runtimeForTest();
+			WorldView           view;
+			setTestRuntimeObserver(view, runtime);
+			view.applyRuntimeSettings();
+			for (int index = 0; index < 4; ++index)
+			{
+				runtimeOutputForTest(view).appendOutputText(
+				    QStringLiteral("callback-rule-primer-%1").arg(index), true);
+			}
+			runtime->addLine(QStringLiteral("callback-rule-open-line"), WorldRuntime::LineOutput, false);
+
+			const WorldView::NativeOutputRenderLines &initialLines = view.nativeOutputRenderLines();
+			QCOMPARE(sizeToInt(initialLines.size()), 5);
+			QVERIFY(!runtime->lines().constLast().hardReturn);
+			const QFont layoutFont;
+			view.ensureNativeLayoutCaches(initialLines, 400, 400, 0, layoutFont);
+			makeNativeLayoutCacheExact(view, initialLines, 400, 400, 0, layoutFont);
+			const QTextLayout *const retainedPrefixLayout = view.nativeLayoutForLine(2);
+			QVERIFY(retainedPrefixLayout);
+
+			const qint64 anchorLineNumber = runtime->lines().constLast().lineNumber;
+			runtime->beginOutputViewMutationBatch();
+			const bool inserted = runtime->writeLuaCallbackOutputAtLineAnchor(
+			    anchorLineNumber, 5, 1, false, QString(), WorldRuntime::LineHorizontalRule, {}, true);
+			runtime->endOutputViewMutationBatch();
+			QVERIFY(inserted);
+			QCOMPARE(view.m_nativeRuntimeRangeRestitchStartIndex, 4);
+			QCOMPARE(view.m_nativeRuntimeRangeRestitchEndIndexExclusive, 5);
+			QVERIFY(view.m_nativeRuntimeAppendPending);
+			QCOMPARE(view.m_nativeRuntimeFirstAppendedIndex, 5);
+			QCOMPARE(view.m_nativeRuntimeLastAppendedIndexExclusive, 6);
+
+			const WorldView::NativeOutputRenderLines &finalLines = view.nativeOutputRenderLines();
+			QCOMPARE(sizeToInt(finalLines.size()), 6);
+			QVERIFY(runtime->lines().at(4).hardReturn);
+			QVERIFY((finalLines.at(5).flags & WorldRuntime::LineHorizontalRule) != 0);
+			QCOMPARE(view.m_nativeRenderCacheDelta.kind,
+			         WorldView::NativeRenderCacheDeltaKind::RuntimeRangeRestitch);
+			QCOMPARE(view.m_nativeRenderCacheDelta.replaceFirstLine, 4);
+			QCOMPARE(view.m_nativeRenderCacheDelta.removedLineCount, 1);
+			QCOMPARE(view.m_nativeRenderCacheDelta.insertedLineCount, 2);
+			QCOMPARE(view.m_nativeLayoutCachedRenderRevision, view.m_nativeRenderLineCacheRevision);
+
+			view.ensureNativeLayoutCaches(finalLines, 400, 400, 0, layoutFont);
+			QCOMPARE(view.nativeLayoutForLine(2), retainedPrefixLayout);
 			resetTestState();
 		}
 
@@ -9804,8 +9915,8 @@ class tst_WorldView_Basic : public QObject
 			const qint64 anchorLineNumber = runtime->incomingLineLuaContextAbsoluteNumber();
 			const bool   hidden           = runtime->hideBufferedIncomingLineLuaContextForReplacement();
 			const bool   replaced         = runtime->writeLuaCallbackOutputAtLineAnchor(
-			    anchorLineNumber, 0, true, QStringLiteral("trigger replacement"), WorldRuntime::LineNote, {},
-			    true);
+			    anchorLineNumber, runtime->incomingLineLuaContextBufferIndex(), 0, true,
+			    QStringLiteral("trigger replacement"), WorldRuntime::LineNote, {}, true);
 			runtime->endIncomingLineLuaContext();
 			runtime->endOutputViewMutationBatch();
 
@@ -9884,9 +9995,9 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(runtime->reserveIncomingLineLuaContextInBuffer());
 			const qint64 hiddenLineNumber = runtime->incomingLineLuaContextAbsoluteNumber();
 			QVERIFY(runtime->hideBufferedIncomingLineLuaContextForReplacement());
-			QVERIFY(runtime->writeLuaCallbackOutputAtLineAnchor(hiddenLineNumber, 1, false,
-			                                                    QStringLiteral("tail after hidden anchor"),
-			                                                    WorldRuntime::LineNote, {}, true, 1));
+			QVERIFY(runtime->writeLuaCallbackOutputAtLineAnchor(
+			    hiddenLineNumber, runtime->incomingLineLuaContextBufferIndex(), 1, false,
+			    QStringLiteral("tail after hidden anchor"), WorldRuntime::LineNote, {}, true, 1));
 			const WorldView::NativeOutputRenderLines &initialLines = view.nativeOutputRenderLines();
 			QCOMPARE(sizeToInt(initialLines.size()), kPrimerLineCount + 1);
 
@@ -9901,7 +10012,7 @@ class tst_WorldView_Basic : public QObject
 			runtime->beginOutputViewMutationBatch();
 			const bool removed  = runtime->removeHiddenLuaContextLineByAbsoluteNumber(hiddenLineNumber);
 			const bool inserted = runtime->writeLuaCallbackOutputAtLineAnchor(
-			    precedingLineNumber, 1, false, QStringLiteral("same-boundary replacement"),
+			    precedingLineNumber, kReplacementIndex, 1, false, QStringLiteral("same-boundary replacement"),
 			    WorldRuntime::LineNote, {}, true, 2);
 			runtime->endOutputViewMutationBatch();
 
@@ -9954,8 +10065,8 @@ class tst_WorldView_Basic : public QObject
 
 			runtime->beginOutputViewMutationBatch();
 			const bool inserted = runtime->writeLuaCallbackOutputAtLineAnchor(
-			    insertionAnchor, 1, false, QStringLiteral("middle callback output"), WorldRuntime::LineNote,
-			    {}, true);
+			    insertionAnchor, 21, 1, false, QStringLiteral("middle callback output"),
+			    WorldRuntime::LineNote, {}, true);
 			runtimeOutputForTest(view).appendOutputText(QStringLiteral("independent tail output"), true);
 			runtime->endOutputViewMutationBatch();
 
@@ -10193,6 +10304,7 @@ class tst_WorldView_Basic : public QObject
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral(")---> "), false);
 				runtimeOutputForTest(view).appendNoteText(QStringLiteral("E"), true);
 				view.updatePartialOutputText(QStringLiteral("<guard-prompt-%1> ").arg(cycle));
+				view.clearPartialOutput();
 				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("<guard-prompt-%1> look").arg(cycle), true);
 				QCoreApplication::processEvents();
@@ -10250,6 +10362,7 @@ class tst_WorldView_Basic : public QObject
 				QCoreApplication::processEvents();
 				QCOMPARE(view.outputLines().constLast(), QStringLiteral("<partial-prompt-%1> ").arg(cycle));
 
+				view.clearPartialOutput();
 				runtimeOutputForTest(view).appendOutputText(
 				    QStringLiteral("<partial-prompt-%1> look").arg(cycle), true);
 				QCoreApplication::processEvents();
@@ -10266,7 +10379,7 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
-		void nativeOutputForcedPaintUsesPendingPromptPluginRestitchPresentation()
+		void nativeOutputForcedPaintUsesPromptPluginRestitchPresentation()
 		{
 			resetTestState();
 			setTestWorldAttribute(QStringLiteral("max_output_lines"), QStringLiteral("14"));
@@ -10310,7 +10423,7 @@ class tst_WorldView_Basic : public QObject
 			lines.insert(lines.begin() + promptIndex, compassLine);
 			runtime->replaceOutputLines(lines);
 
-			QVERIFY(view.m_pendingSemanticOutputRepaint != WorldView::SemanticOutputRepaint::None);
+			QCOMPARE(view.m_pendingSemanticOutputRepaint, WorldView::SemanticOutputRepaint::None);
 			QVERIFY(!nativeCanvas->grab().isNull());
 			QVERIFY(nativeCanvas->property("qmud_native_plain_tail_lines")
 			            .toStringList()
@@ -12672,13 +12785,22 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(view.outputLines().isEmpty());
 			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
-			view.updatePartialOutputText(QStringLiteral("temp"));
+			WorldRuntime::StyleSpan partialSpan;
+			partialSpan.length = 4;
+			partialSpan.fore   = QColor(QStringLiteral("#123456"));
+			partialSpan.back   = QColor(QStringLiteral("#654321"));
+			partialSpan.bold   = true;
+			view.updatePartialOutputText(QStringLiteral("temp"), {partialSpan});
 			runtimeOutputForTest(view).appendOutputText(QStringLiteral("final"), true);
 			QCoreApplication::processEvents();
 			lines = view.outputLines();
-			QVERIFY(!lines.isEmpty());
-			QCOMPARE(lines.last(), QStringLiteral("final"));
-			QVERIFY(!lines.contains(QStringLiteral("temp")));
+			QCOMPARE(lines, (QStringList{QStringLiteral("final"), QStringLiteral("temp")}));
+			QCOMPARE(view.m_nativeRenderLineCache.constLast().spans.size(), 1);
+			QCOMPARE(view.m_nativeRenderLineCache.constLast().spans.constFirst(), partialSpan);
+
+			view.clearPartialOutput();
+			QCoreApplication::processEvents();
+			QCOMPARE(view.outputLines(), (QStringList{QStringLiteral("final")}));
 			QVERIFY(browser->findChildren<QTextDocument *>().isEmpty());
 
 			resetTestState();
@@ -13190,9 +13312,14 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(overlayImage.pixelColor(overlayRect.center()), currentWorldMiniWindow);
 			QCOMPARE(view.m_pendingSemanticOutputRepaint, WorldView::SemanticOutputRepaint::Tail);
 
+			view.m_drawCallbackCompletionsPending = 1;
+			view.releaseSemanticOutputRepaint();
+			QVERIFY(view.m_drawOutputWindowCallbackActive);
+			QCOMPARE(view.m_drawCallbackCompletionsPending, 1);
+			QCOMPARE(view.m_pendingSemanticOutputRepaint, WorldView::SemanticOutputRepaint::None);
+			view.m_drawCallbackCompletionsPending = 0;
 			view.setDrawOutputWindowCallbackActive(false);
 			QVERIFY(!view.m_drawOutputWindowCallbackActive);
-			QCOMPARE(view.m_pendingSemanticOutputRepaint, WorldView::SemanticOutputRepaint::None);
 			resetTestState();
 		}
 
@@ -13236,6 +13363,639 @@ class tst_WorldView_Basic : public QObject
 			QCOMPARE(trace.at(0).hotspotId, QStringLiteral("hotspot_main"));
 			QCOMPARE(trace.at(1).functionName, QStringLiteral("on_hotspot_up"));
 			QCOMPARE(trace.at(1).hotspotId, QStringLiteral("hotspot_main"));
+			resetTestState();
+		}
+
+		void nativeOutputRendererStationaryHoverRefreshDoesNotRepeatMouseOverCallback()
+		{
+			resetTestState();
+
+			WorldView view;
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			WorldRuntime *const runtime = runtimeForTest();
+			installMiniWindowCallbackTrace(*runtime);
+
+			constexpr QRect windowRect(40, 40, 80, 40);
+			MiniWindow     &window =
+			    appendTestMiniWindow(QStringLiteral("stationary-hover"), windowRect, 0, QColor(0, 160, 0));
+			QCOMPARE(runtime->windowAddHotspot(window.name, QStringLiteral("repeat-hover"), 0, 0,
+			                                   windowRect.width(), windowRect.height(),
+			                                   QStringLiteral("on_hotspot_over"), {}, {}, {}, {}, {}, 0, 0x01,
+			                                   {}),
+			         eOK);
+			view.onMiniWindowsChanged();
+			QCoreApplication::processEvents();
+
+			QTest::mouseMove(outputStack, windowRect.center());
+			QCOMPARE(miniWindowCallbackTrace(*runtime).size(), 1);
+			view.recheckMiniWindowHover();
+			QCOMPARE(miniWindowCallbackTrace(*runtime).size(), 1);
+			resetTestState();
+		}
+
+		void miniWindowMouseLeaveClearsTooltipOwnedByHoveredHotspot()
+		{
+			resetTestState();
+
+			WorldView view;
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			WorldRuntime *const runtime    = runtimeForTest();
+			const QString       windowName = QStringLiteral("tooltip-leave");
+			const QString       hotspotId  = QStringLiteral("hovered");
+			MiniWindow         &window =
+			    appendTestMiniWindow(windowName, QRect(40, 40, 80, 40), 0, QColor(0, 160, 0));
+			QCOMPARE(runtime->windowAddHotspot(windowName, hotspotId, 0, 0, 80, 40, {}, {}, {}, {}, {},
+			                                   QStringLiteral("tooltip"), 0, 0, {}),
+			         eOK);
+			const auto hotspot = window.hotspots.constFind(hotspotId);
+			QVERIFY(hotspot != window.hotspots.constEnd());
+			window.mouseOverHotspot = hotspotId;
+			view.m_hoverWindowName  = windowName;
+			view.scheduleMiniWindowHotspotTooltip(window, hotspotId, *hotspot, QStringLiteral("tooltip"),
+			                                      QPoint(80, 80));
+			view.showScheduledHotspotTooltip();
+			QCOMPARE(view.m_activeTooltipWindowName, windowName);
+			QCOMPARE(view.m_tooltipHotspot, hotspotId);
+
+			QVERIFY(view.handleMiniWindowMouseLeave());
+			QVERIFY(view.m_activeTooltipWindowName.isEmpty());
+			QVERIFY(view.m_tooltipHotspot.isEmpty());
+			QCOMPARE(view.m_activeTooltipHotspotInstanceId, quint64{0});
+			resetTestState();
+		}
+
+		void miniWindowMouseMoveRehitsAfterCancellationDeletesTargetWindow()
+		{
+			resetTestState();
+
+			WorldView     view;
+			WorldRuntime *runtime = runtimeForTest();
+			setTestRuntime(view, runtime);
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime->setLuaScriptText(QStringLiteral(R"lua(
+function delete_move_target(flags, hotspot_id)
+	SetVariable("delete_move_target_result", tostring(WindowDelete("move-target")))
+end
+
+function mark_deleted_move_target(flags, hotspot_id)
+	SetVariable("deleted_move_target_callback", hotspot_id)
+end
+)lua"));
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			MiniWindow &source = appendTestMiniWindow(QStringLiteral("move-source"), QRect(40, 40, 80, 40), 0,
+			                                          QColor(0, 160, 0));
+			MiniWindow &target = appendTestMiniWindow(QStringLiteral("move-target"), QRect(160, 40, 80, 40),
+			                                          0, QColor(160, 0, 0));
+			QCOMPARE(runtime->windowAddHotspot(source.name, QStringLiteral("source"), 0, 0, 80, 40, {},
+			                                   QStringLiteral("delete_move_target"), {}, {}, {}, {}, 0, 0,
+			                                   {}),
+			         eOK);
+			QCOMPARE(runtime->windowAddHotspot(target.name, QStringLiteral("target"), 0, 0, 80, 40,
+			                                   QStringLiteral("mark_deleted_move_target"), {}, {}, {}, {}, {},
+			                                   0, 0, {}),
+			         eOK);
+			source.mouseOverHotspot = QStringLiteral("source");
+			view.m_hoverWindowName  = source.name;
+
+			const QPoint targetPoint = target.rect.center();
+			QMouseEvent  moveEvent(QEvent::MouseMove, QPointF(targetPoint), QPointF(targetPoint),
+			                       QPointF(outputStack->mapToGlobal(targetPoint)), Qt::NoButton, Qt::NoButton,
+			                       Qt::NoModifier);
+			QVERIFY(view.handleMiniWindowMouseMove(&moveEvent, outputStack));
+			QVERIFY(!WorldRuntimeTestAccess::miniWindow(*runtime, QStringLiteral("move-target")));
+			QString callbackValue;
+			QVERIFY(!runtime->findVariable(QStringLiteral("deleted_move_target_callback"), callbackValue));
+			QVERIFY(view.m_hoverWindowName.isEmpty());
+			resetTestState();
+		}
+
+		void miniWindowMouseMoveRehitsAfterCancellationDeletesTargetHotspot()
+		{
+			resetTestState();
+
+			WorldView     view;
+			WorldRuntime *runtime = runtimeForTest();
+			setTestRuntime(view, runtime);
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime->setLuaScriptText(QStringLiteral(R"lua(
+function delete_later_hotspot(flags, hotspot_id)
+	SetVariable("delete_later_hotspot_result",
+		tostring(WindowDeleteHotspot("hotspot-mutation", "later")))
+end
+
+function mark_deleted_hotspot(flags, hotspot_id)
+	SetVariable("deleted_hotspot_callback", hotspot_id)
+end
+)lua"));
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			constexpr QRect windowRect(40, 120, 100, 40);
+			MiniWindow     &window =
+			    appendTestMiniWindow(QStringLiteral("hotspot-mutation"), windowRect, 0, QColor(0, 160, 0));
+			QCOMPARE(runtime->windowAddHotspot(window.name, QStringLiteral("earlier"), 0, 0, 50, 40, {},
+			                                   QStringLiteral("delete_later_hotspot"), {}, {}, {}, {}, 0, 0,
+			                                   {}),
+			         eOK);
+			QCOMPARE(runtime->windowAddHotspot(window.name, QStringLiteral("later"), 50, 0, 100, 40,
+			                                   QStringLiteral("mark_deleted_hotspot"), {}, {}, {}, {}, {}, 0,
+			                                   0, {}),
+			         eOK);
+			window.mouseOverHotspot = QStringLiteral("earlier");
+			view.m_hoverWindowName  = window.name;
+
+			const QPoint targetPoint = windowRect.topLeft() + QPoint(75, 20);
+			QMouseEvent  moveEvent(QEvent::MouseMove, QPointF(targetPoint), QPointF(targetPoint),
+			                       QPointF(outputStack->mapToGlobal(targetPoint)), Qt::NoButton, Qt::NoButton,
+			                       Qt::NoModifier);
+			QVERIFY(view.handleMiniWindowMouseMove(&moveEvent, outputStack));
+			QVERIFY(!runtime->windowHotspotInfo(window.name, QStringLiteral("later"), 1).isValid());
+			QString callbackValue;
+			QVERIFY(!runtime->findVariable(QStringLiteral("deleted_hotspot_callback"), callbackValue));
+			QVERIFY(window.mouseOverHotspot.isEmpty());
+			resetTestState();
+		}
+
+		void miniWindowMousePressRehitsAfterCancellationDeletesTargetWindow()
+		{
+			resetTestState();
+
+			WorldView     view;
+			WorldRuntime *runtime = runtimeForTest();
+			setTestRuntime(view, runtime);
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime->setLuaScriptText(QStringLiteral(R"lua(
+function delete_press_target(flags, hotspot_id)
+	WindowDelete("press-target")
+end
+
+function mark_deleted_press_target(flags, hotspot_id)
+	SetVariable("deleted_press_target_callback", hotspot_id)
+end
+)lua"));
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			MiniWindow &source = appendTestMiniWindow(QStringLiteral("press-source"), QRect(40, 200, 80, 40),
+			                                          0, QColor(0, 160, 0));
+			MiniWindow &target = appendTestMiniWindow(QStringLiteral("press-target"), QRect(160, 200, 80, 40),
+			                                          0, QColor(160, 0, 0));
+			QCOMPARE(runtime->windowAddHotspot(source.name, QStringLiteral("source"), 0, 0, 80, 40, {},
+			                                   QStringLiteral("delete_press_target"), {}, {}, {}, {}, 0, 0,
+			                                   {}),
+			         eOK);
+			QCOMPARE(runtime->windowAddHotspot(target.name, QStringLiteral("target"), 0, 0, 80, 40, {}, {},
+			                                   QStringLiteral("mark_deleted_press_target"), {}, {}, {}, 0, 0,
+			                                   {}),
+			         eOK);
+			source.mouseOverHotspot = QStringLiteral("source");
+			view.m_hoverWindowName  = source.name;
+
+			const QPoint targetPoint = target.rect.center();
+			QMouseEvent  pressEvent(QEvent::MouseButtonPress, QPointF(targetPoint), QPointF(targetPoint),
+			                        QPointF(outputStack->mapToGlobal(targetPoint)), Qt::LeftButton,
+			                        Qt::LeftButton, Qt::NoModifier);
+			QVERIFY(!view.handleMiniWindowMousePress(&pressEvent, false, outputStack));
+			QVERIFY(!WorldRuntimeTestAccess::miniWindow(*runtime, QStringLiteral("press-target")));
+			QVERIFY(!view.isMiniWindowCaptureActive());
+			QString callbackValue;
+			QVERIFY(!runtime->findVariable(QStringLiteral("deleted_press_target_callback"), callbackValue));
+			resetTestState();
+		}
+
+		void miniWindowMouseReleaseRehitsAfterCancellationDeletesWindowUnderPointer()
+		{
+			resetTestState();
+
+			WorldView     view;
+			WorldRuntime *runtime = runtimeForTest();
+			setTestRuntime(view, runtime);
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime->setLuaScriptText(QStringLiteral(R"lua(
+function delete_release_target(flags, hotspot_id)
+	SetVariable("delete_release_target_result", tostring(WindowDelete("release-target")))
+end
+)lua"));
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			const QString pressedWindowName = QStringLiteral("release-source");
+			const QString targetWindowName  = QStringLiteral("release-target");
+			const QRect   pressedWindowRect(40, 40, 80, 40);
+			const QRect   targetWindowRect(160, 40, 80, 40);
+			static_cast<void>(
+			    appendTestMiniWindow(pressedWindowName, pressedWindowRect, 0, QColor(0, 160, 0)));
+			static_cast<void>(appendTestMiniWindow(targetWindowName, targetWindowRect, 0, QColor(160, 0, 0)));
+			QCOMPARE(runtime->windowAddHotspot(pressedWindowName, QStringLiteral("pressed"), 0, 0, 80, 40, {},
+			                                   {}, {}, QStringLiteral("delete_release_target"), {}, {}, 0, 0,
+			                                   {}),
+			         eOK);
+			QCOMPARE(runtime->windowAddHotspot(targetWindowName, QStringLiteral("target"), 0, 0, 80, 40, {},
+			                                   {}, {}, {}, {}, {}, 0, 0, {}),
+			         eOK);
+			QCoreApplication::processEvents();
+
+			MiniWindow *const pressedWindow = WorldRuntimeTestAccess::miniWindow(*runtime, pressedWindowName);
+			QVERIFY(pressedWindow);
+			const QPoint pressPoint = pressedWindow->rect.center();
+			QVERIFY(outputStack->rect().contains(pressPoint));
+			QString hitHotspotId;
+			QString hitWindowName;
+			QVERIFY(view.hitTestMiniWindow(pressPoint, hitHotspotId, hitWindowName, true));
+			QCOMPARE(hitWindowName, pressedWindowName);
+			QCOMPARE(hitHotspotId, QStringLiteral("pressed"));
+			QMouseEvent pressEvent(QEvent::MouseButtonPress, QPointF(pressPoint), QPointF(pressPoint),
+			                       QPointF(outputStack->mapToGlobal(pressPoint)), Qt::LeftButton,
+			                       Qt::LeftButton, Qt::NoModifier);
+			QVERIFY(view.handleMiniWindowMousePress(&pressEvent, false, outputStack));
+			QVERIFY(view.isMiniWindowCaptureActive());
+			MiniWindow *const targetWindow = WorldRuntimeTestAccess::miniWindow(*runtime, targetWindowName);
+			QVERIFY(targetWindow);
+			sendMiniWindowMouseRelease(outputStack, outputStack, targetWindow->rect.center());
+			QVERIFY(!view.isMiniWindowCaptureActive());
+			QVERIFY(!WorldRuntimeTestAccess::miniWindow(*runtime, QStringLiteral("release-target")));
+			QVERIFY(view.m_hoverWindowName.isEmpty());
+			resetTestState();
+		}
+
+		void luaCallbackHotspotAdditionRechecksAfterLayout()
+		{
+			resetTestState();
+
+			WorldView     view;
+			WorldRuntime *runtime = runtimeForTest();
+			setTestRuntime(view, runtime);
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime->setLuaScriptText(QStringLiteral(R"lua(
+function build_hover_window(flags, hotspot_id)
+	WindowCreate("callback-hover", 40, 40, 80, 40, 0, 2, 0)
+	WindowShow("callback-hover", true)
+	WindowAddHotspot("callback-hover", "added-under-pointer", 0, 0, 80, 40,
+		"on_callback_added_hover", "", "", "", "", "callback tooltip", 0, 0)
+end
+
+function on_callback_added_hover(flags, hotspot_id)
+	SetVariable("callback_added_hover", hotspot_id)
+	local count = tonumber(GetVariable("callback_added_hover_count") or "0") or 0
+	SetVariable("callback_added_hover_count", tostring(count + 1))
+	local missing_result = WindowAddHotspot("missing-callback-window", "missing", 0, 0, 1, 1,
+		"", "", "", "", "", "", 0, 0)
+	SetVariable("callback_added_hover_missing_result", string.format("%.0f", missing_result))
+	local result = WindowAddHotspot("callback-hover", "added-under-pointer", 0, 0, 80, 40,
+		"on_callback_added_hover", "", "", "", "", "callback tooltip", 0, 0)
+	SetVariable("callback_added_hover_add_result", string.format("%.0f", result))
+end
+)lua"));
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			constexpr QRect windowRect(40, 40, 80, 40);
+			const QPoint    pointerPosition = windowRect.center();
+			QMouseEvent pointerEvent(QEvent::MouseMove, QPointF(pointerPosition), QPointF(pointerPosition),
+			                         QPointF(outputStack->mapToGlobal(pointerPosition)), Qt::NoButton,
+			                         Qt::NoButton, Qt::NoModifier);
+			QVERIFY(!view.handleMiniWindowMouseMove(&pointerEvent, outputStack));
+			QVERIFY(view.hasLastMousePosition());
+
+			WorldRuntimeTestAccess::dispatchWorldHotspotCallback(*runtime,
+			                                                     QStringLiteral("build_hover_window"));
+			QString callbackHotspotId;
+			QVERIFY(!runtime->findVariable(QStringLiteral("callback_added_hover"), callbackHotspotId));
+			QCoreApplication::processEvents();
+
+			QVERIFY(runtime->findVariable(QStringLiteral("callback_added_hover"), callbackHotspotId));
+			QCOMPARE(callbackHotspotId, QStringLiteral("added-under-pointer"));
+			QString hoverCount;
+			QVERIFY(runtime->findVariable(QStringLiteral("callback_added_hover_count"), hoverCount));
+			QCOMPARE(hoverCount, QStringLiteral("1"));
+			QString addResult;
+			QVERIFY(runtime->findVariable(QStringLiteral("callback_added_hover_add_result"), addResult));
+			QCOMPARE(addResult, QString::number(eItemInUse));
+			QString missingResult;
+			QVERIFY(
+			    runtime->findVariable(QStringLiteral("callback_added_hover_missing_result"), missingResult));
+			QCOMPARE(missingResult, QString::number(eNoSuchWindow));
+			QCOMPARE(view.m_pendingTooltipGlobalPos, outputStack->mapToGlobal(pointerPosition));
+			resetTestState();
+		}
+
+		void luaCallbackWindowOutputTextHotspotRechecksAfterLayout()
+		{
+			resetTestState();
+
+			WorldView     view;
+			WorldRuntime *runtime = runtimeForTest();
+			setTestRuntime(view, runtime);
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			constexpr QRect windowRect(180, 40, 200, 60);
+			QCOMPARE(runtime->windowCreate(QStringLiteral("callback-output"), windowRect.left(),
+			                               windowRect.top(), windowRect.width(), windowRect.height(), 0,
+			                               kMiniWindowAbsoluteLocation, QColor(Qt::black), {}),
+			         eOK);
+			QCOMPARE(runtime->windowShow(QStringLiteral("callback-output"), true), eOK);
+			QCOMPARE(runtime->windowFont(QStringLiteral("callback-output"), QStringLiteral("font"),
+			                             QStringLiteral("DejaVu Sans Mono"), 10.0, false, false, false, false,
+			                             0, 0),
+			         eOK);
+			runtime->setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
+			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime->setLuaScriptText(QStringLiteral(R"lua(
+function render_callback_output(flags, hotspot_id)
+	local marker = string.char(3)
+	local terminator = string.char(4)
+	WindowOutputText("callback-output", "font",
+		marker .. "send href=\"look\"" .. terminator .. "Link" .. marker .. "/send" .. terminator,
+		0, 0, 199, 59, 0xFFFFFF, "on_callback_output_click", "generated")
+end
+
+function on_callback_output_click(flags, hotspot_id)
+end
+)lua"));
+
+			const QPoint pointerPosition = windowRect.topLeft() + QPoint(2, 2);
+			QMouseEvent  pointerEvent(QEvent::MouseMove, QPointF(pointerPosition), QPointF(pointerPosition),
+			                          QPointF(outputStack->mapToGlobal(pointerPosition)), Qt::NoButton,
+			                          Qt::NoButton, Qt::NoModifier);
+			static_cast<void>(view.handleMiniWindowMouseMove(&pointerEvent, outputStack));
+			QVERIFY(view.hasLastMousePosition());
+			WorldRuntimeTestAccess::dispatchWorldHotspotCallback(*runtime,
+			                                                     QStringLiteral("render_callback_output"));
+
+			MiniWindow *window =
+			    WorldRuntimeTestAccess::miniWindow(*runtime, QStringLiteral("callback-output"));
+			QVERIFY(window);
+			QCOMPARE(window->hotspots.size(), 1);
+			const auto generatedHotspot = window->hotspots.constBegin();
+			QVERIFY(generatedHotspot->rect.contains(pointerPosition - windowRect.topLeft()));
+			const QString &generatedHotspotId = generatedHotspot.key();
+			QVERIFY(window->mouseOverHotspot.isEmpty());
+			QCoreApplication::processEvents();
+			QCOMPARE(window->mouseOverHotspot, generatedHotspotId);
+			resetTestState();
+		}
+
+		void luaCallbackUnrelatedHotspotAdditionDoesNotRecheckHover()
+		{
+			resetTestState();
+
+			WorldView     view;
+			WorldRuntime *runtime = runtimeForTest();
+			setTestRuntime(view, runtime);
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime->setLuaScriptText(QStringLiteral(R"lua(
+function on_existing_hover(flags, hotspot_id)
+	local count = tonumber(GetVariable("existing_hover_count") or "0") or 0
+	SetVariable("existing_hover_count", tostring(count + 1))
+end
+
+function add_unrelated_hotspot(flags, hotspot_id)
+	WindowAddHotspot("callback-unrelated", "unrelated", 0, 0, 10, 10,
+		"", "", "", "", "", "", 0, 0)
+end
+)lua"));
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			constexpr QRect windowRect(40, 120, 100, 60);
+			MiniWindow     &window =
+			    appendTestMiniWindow(QStringLiteral("callback-unrelated"), windowRect, 0, QColor(0, 160, 0));
+			QCOMPARE(runtime->windowAddHotspot(window.name, QStringLiteral("existing"), 30, 20, 80, 50,
+			                                   QStringLiteral("on_existing_hover"), {}, {}, {}, {}, {}, 0, 0,
+			                                   {}),
+			         eOK);
+			const QPoint pointerPosition = windowRect.topLeft() + QPoint(50, 30);
+			QTest::mouseMove(outputStack, pointerPosition);
+			QString hoverCount;
+			QVERIFY(runtime->findVariable(QStringLiteral("existing_hover_count"), hoverCount));
+			QCOMPARE(hoverCount, QStringLiteral("1"));
+			const int mouseUpdateBeforeAddition = window.lastMouseUpdate;
+
+			WorldRuntimeTestAccess::dispatchWorldHotspotCallback(*runtime,
+			                                                     QStringLiteral("add_unrelated_hotspot"));
+			QCoreApplication::processEvents();
+			QCOMPARE(window.lastMouseUpdate, mouseUpdateBeforeAddition);
+			QVERIFY(runtime->findVariable(QStringLiteral("existing_hover_count"), hoverCount));
+			QCOMPARE(hoverCount, QStringLiteral("1"));
+			resetTestState();
+		}
+
+		void miniWindowHoverCheckWaitsForCurrentViewBindingLayout()
+		{
+			resetTestState();
+
+			WorldView     view;
+			WorldRuntime *runtime = runtimeForTest();
+			setTestRuntime(view, runtime);
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+			installMiniWindowCallbackTrace(*runtime);
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			constexpr QPoint pointerPosition(80, 260);
+			QMouseEvent pointerEvent(QEvent::MouseMove, QPointF(pointerPosition), QPointF(pointerPosition),
+			                         QPointF(outputStack->mapToGlobal(pointerPosition)), Qt::NoButton,
+			                         Qt::NoButton, Qt::NoModifier);
+			QVERIFY(!view.handleMiniWindowMouseMove(&pointerEvent, outputStack));
+
+			constexpr QRect oldWindowRect(300, 260, 40, 30);
+			MiniWindow     &oldWindow = appendTestMiniWindow(QStringLiteral("old-binding-candidate"),
+			                                                 oldWindowRect, 0, QColor(Qt::black));
+			QCOMPARE(runtime->windowAddHotspot(oldWindow.name, QStringLiteral("old"), 0, 0,
+			                                   oldWindowRect.width(), oldWindowRect.height(),
+			                                   QStringLiteral("on_hotspot_over"), {}, {}, {}, {}, {}, 0, 0,
+			                                   {}),
+			         eOK);
+			runtime->setView(nullptr);
+			runtime->setView(&view);
+
+			constexpr QRect newWindowRect(380, 260, 40, 30);
+			MiniWindow     &newWindow = appendTestMiniWindow(QStringLiteral("current-binding-candidate"),
+			                                                 newWindowRect, 0, QColor(Qt::black));
+			QCOMPARE(runtime->windowAddHotspot(newWindow.name, QStringLiteral("current"), 0, 0,
+			                                   newWindowRect.width(), newWindowRect.height(),
+			                                   QStringLiteral("on_hotspot_over"), {}, {}, {}, {}, {}, 0, 0,
+			                                   {}),
+			         eOK);
+			QMetaObject::invokeMethod(
+			    runtime,
+			    [runtime]
+			    {
+				    static_cast<void>(runtime->windowPosition(QStringLiteral("current-binding-candidate"), 60,
+				                                              245, 0, kMiniWindowAbsoluteLocation));
+			    },
+			    Qt::QueuedConnection);
+
+			QCoreApplication::processEvents();
+			QCoreApplication::processEvents();
+			const auto trace = miniWindowCallbackTrace(*runtime);
+			QCOMPARE(trace.size(), 1);
+			QCOMPARE(trace.constFirst().hotspotId, QStringLiteral("current"));
+			resetTestState();
+		}
+
+		void nativeOutputRendererMovingExistingHotspotDoesNotSynthesizeMouseMove()
+		{
+			resetTestState();
+
+			WorldView     view;
+			WorldRuntime *runtime = runtimeForTest();
+			setTestRuntime(view, runtime);
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+			installMiniWindowCallbackTrace(*runtime);
+
+			QSplitter *outputSplitter = findOutputSplitter(view);
+			QVERIFY(outputSplitter);
+			QWidget *outputStack = outputSplitter->parentWidget();
+			QVERIFY(outputStack);
+			constexpr QRect windowRect(40, 40, 100, 60);
+			MiniWindow     &window =
+			    appendTestMiniWindow(QStringLiteral("moved-hotspot"), windowRect, 0, QColor(0, 160, 0));
+			QCOMPARE(runtime->windowAddHotspot(window.name, QStringLiteral("existing"), 0, 0, 10, 10,
+			                                   QStringLiteral("on_hotspot_over"), {}, {}, {}, {}, {}, 0, 0,
+			                                   {}),
+			         eOK);
+			view.onMiniWindowsChanged();
+			QCoreApplication::processEvents();
+			const QPoint stationaryPoint = windowRect.topLeft() + QPoint(50, 30);
+			QTest::mouseMove(outputStack, stationaryPoint);
+			QVERIFY(miniWindowCallbackTrace(*runtime).isEmpty());
+
+			QCOMPARE(runtime->windowMoveHotspot(window.name, QStringLiteral("existing"), 40, 20, 70, 50),
+			         eOK);
+			QCoreApplication::processEvents();
+			QVERIFY(miniWindowCallbackTrace(*runtime).isEmpty());
+			QVERIFY(window.mouseOverHotspot.isEmpty());
+			resetTestState();
+		}
+
+		void miniWindowHotspotMutationClearsOwnedTooltipState()
+		{
+			resetTestState();
+
+			WorldView     view;
+			WorldRuntime *runtime = runtimeForTest();
+			setTestRuntime(view, runtime);
+			const QString windowName = QStringLiteral("tooltip-owner");
+			const QString hotspotId  = QStringLiteral("tooltip-hotspot");
+			QCOMPARE(runtime->windowCreate(windowName, 0, 0, 40, 30, 0, kMiniWindowAbsoluteLocation,
+			                               QColor(Qt::black), {}),
+			         eOK);
+			QCOMPARE(runtime->windowAddHotspot(windowName, hotspotId, 0, 0, 40, 30, {}, {}, {}, {}, {},
+			                                   QStringLiteral("old tooltip"), 0, 0, {}),
+			         eOK);
+			MiniWindow *window = WorldRuntimeTestAccess::miniWindow(*runtime, windowName);
+			QVERIFY(window);
+			const auto hotspotIt = window->hotspots.constFind(hotspotId);
+			QVERIFY(hotspotIt != window->hotspots.constEnd());
+
+			view.scheduleMiniWindowHotspotTooltip(*window, hotspotId, *hotspotIt,
+			                                      QStringLiteral("old tooltip"), QPoint(20, 20));
+			QCOMPARE(view.m_pendingTooltipWindowName, windowName);
+			QCOMPARE(view.m_pendingTooltipHotspotInstanceId, hotspotIt->instanceId);
+			QCOMPARE(runtime->windowHotspotTooltip(windowName, hotspotId, {}), eOK);
+			QVERIFY(view.m_pendingTooltipText.isEmpty());
+			QVERIFY(view.m_pendingTooltipWindowName.isEmpty());
+			QCOMPARE(view.m_pendingTooltipHotspotInstanceId, quint64{0});
+
+			QCOMPARE(runtime->windowHotspotTooltip(windowName, hotspotId, QStringLiteral("visible tooltip")),
+			         eOK);
+			window = WorldRuntimeTestAccess::miniWindow(*runtime, windowName);
+			QVERIFY(window);
+			const auto visibleHotspot = window->hotspots.constFind(hotspotId);
+			QVERIFY(visibleHotspot != window->hotspots.constEnd());
+			view.scheduleMiniWindowHotspotTooltip(*window, hotspotId, *visibleHotspot,
+			                                      QStringLiteral("visible tooltip"), QPoint(20, 20));
+			view.showScheduledHotspotTooltip();
+			QCOMPARE(view.m_activeTooltipWindowName, windowName);
+			QCOMPARE(view.m_activeTooltipHotspotInstanceId, visibleHotspot->instanceId);
+			QCOMPARE(runtime->windowDeleteHotspot(windowName, hotspotId), eOK);
+			QVERIFY(view.m_activeTooltipText.isEmpty());
+			QVERIFY(view.m_activeTooltipWindowName.isEmpty());
+			QCOMPARE(view.m_activeTooltipHotspotInstanceId, quint64{0});
+
+			QCOMPARE(runtime->windowAddHotspot(windowName, hotspotId, 0, 0, 40, 30, {}, {}, {}, {}, {},
+			                                   QStringLiteral("callback tooltip"), 0, 0, {}),
+			         eOK);
+			window = WorldRuntimeTestAccess::miniWindow(*runtime, windowName);
+			QVERIFY(window);
+			window->mouseOverHotspot   = hotspotId;
+			const auto callbackHotspot = window->hotspots.constFind(hotspotId);
+			QVERIFY(callbackHotspot != window->hotspots.constEnd());
+			view.scheduleMiniWindowHotspotTooltip(*window, hotspotId, *callbackHotspot,
+			                                      QStringLiteral("callback tooltip"), QPoint(20, 20));
+			MiniWindow callbackShadow = window->detachedImageCopy();
+			QCOMPARE(MiniWindowUtils::deleteHotspot(callbackShadow, hotspotId), eOK);
+			QHash<QString, MiniWindow> committedWindows;
+			committedWindows.insert(windowName, std::move(callbackShadow));
+			WorldRuntimeTestAccess::commitLuaCallbackMiniWindowStates(*runtime, std::move(committedWindows),
+			                                                          {}, {});
+			QVERIFY(view.m_pendingTooltipText.isEmpty());
+			QVERIFY(view.m_pendingTooltipWindowName.isEmpty());
+			QCOMPARE(view.m_pendingTooltipHotspotInstanceId, quint64{0});
 			resetTestState();
 		}
 

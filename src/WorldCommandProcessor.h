@@ -10,7 +10,6 @@
 #ifndef QMUD_WORLDCOMMANDPROCESSOR_H
 #define QMUD_WORLDCOMMANDPROCESSOR_H
 
-#include "LuaCallbackEngine.h"
 #include "WorldRuntime.h"
 #include <QColor>
 #include <QElapsedTimer>
@@ -123,6 +122,7 @@ class WorldCommandProcessor : public QObject
 		 * @param pluginId Origin plugin ID, or empty for world script context.
 		 * @param text Script text/code to execute.
 		 * @param description Script description for diagnostics.
+		 * @param callbackEvent Runtime event that caused this script invocation.
 		 * @param styleRuns Optional style runs to expose as `TriggerStyleRuns`.
 		 * @param hasTriggerContext Execute with trigger line context when `true`.
 		 * @param replaceMatchedLineOutput First output replaces matched line when `true`.
@@ -130,8 +130,9 @@ class WorldCommandProcessor : public QObject
 		 * @param triggerMatchedLineAbsoluteNumber Stable matched line number captured at dispatch.
 		 */
 		void sendToScriptRequested(const QString &pluginId, const QString &text, const QString &description,
-		                           const QVector<LuaStyleRun> *styleRuns, bool hasTriggerContext,
-		                           bool replaceMatchedLineOutput, int triggerMatchedLineBufferIndex,
+		                           LuaCallbackEvent callbackEvent, const QVector<LuaStyleRun> *styleRuns,
+		                           bool hasTriggerContext, bool replaceMatchedLineOutput,
+		                           int    triggerMatchedLineBufferIndex,
 		                           qint64 triggerMatchedLineAbsoluteNumber);
 
 	public slots:
@@ -210,13 +211,6 @@ class WorldCommandProcessor : public QObject
 		 * @param history Add command to history when `true`.
 		 */
 		void sendImmediateText(const QString &text, bool echo, bool log, bool history);
-		/**
-		 * @brief Sends one deferred inbound command line through the immediate send path.
-		 * @param text Command line text.
-		 * @param echo Echo command when `true`.
-		 * @param log Log command when `true`.
-		 */
-		void sendDeferredInboundText(const QString &text, bool echo, bool log);
 		/**
 		 * @brief Writes input line to log according to settings.
 		 * @param text Input text.
@@ -566,17 +560,20 @@ class WorldCommandProcessor : public QObject
 		 * @param replaceMatchedLineOutput First script output replaces matched line when `true`.
 		 * @param triggerMatchedLineBufferIndex One-based matched line index captured at dispatch.
 		 * @param triggerMatchedLineAbsoluteNumber Stable matched line number captured at dispatch.
+		 * @param callbackEvent Runtime event that caused this script invocation.
 		 */
 		void sendTo(int sendTo, const QString &text, bool omitFromOutput, bool omitFromLog,
 		            const QString &variableName, const QString &description, const QString &pluginId,
 		            const QVector<LuaStyleRun> *styleRuns = nullptr, bool hasTriggerContext = false,
 		            bool replaceMatchedLineOutput = false, int triggerMatchedLineBufferIndex = 0,
-		            qint64 triggerMatchedLineAbsoluteNumber = 0);
+		            qint64           triggerMatchedLineAbsoluteNumber = 0,
+		            LuaCallbackEvent callbackEvent                    = LuaCallbackEvent::None);
 		/**
 		 * @brief Executes one send-to-script request on the active runtime/script context.
 		 * @param pluginId Origin plugin ID, or empty for world script context.
 		 * @param text Script text/code to execute.
 		 * @param description Script description for diagnostics.
+		 * @param callbackEvent Runtime event that caused this script invocation.
 		 * @param styleRuns Optional style runs to expose as `TriggerStyleRuns`.
 		 * @param hasTriggerContext Execute with trigger line context when `true`.
 		 * @param replaceMatchedLineOutput First output replaces matched line when `true`.
@@ -584,8 +581,9 @@ class WorldCommandProcessor : public QObject
 		 * @param triggerMatchedLineAbsoluteNumber Stable matched line number captured at dispatch.
 		 */
 		void dispatchScriptSend(const QString &pluginId, const QString &text, const QString &description,
-		                        const QVector<LuaStyleRun> *styleRuns, bool hasTriggerContext,
-		                        bool replaceMatchedLineOutput, int triggerMatchedLineBufferIndex,
+		                        LuaCallbackEvent callbackEvent, const QVector<LuaStyleRun> *styleRuns,
+		                        bool hasTriggerContext, bool replaceMatchedLineOutput,
+		                        int    triggerMatchedLineBufferIndex,
 		                        qint64 triggerMatchedLineAbsoluteNumber) const;
 		/**
 		 * @brief Emits one trace line through plugin trace callbacks/world output.
@@ -614,13 +612,20 @@ class WorldCommandProcessor : public QObject
 		 * @param logIt Log send when `true`.
 		 */
 		void sendMsg(const QString &text, bool echo, bool queueIt, bool logIt);
+		enum class OutboundTransport
+		{
+			Immediate,
+			DeferAtInboundBoundary,
+			DeferAtInboundBoundaryWithTriggerPriority
+		};
 		/**
-		 * @brief Executes immediate send path.
+		 * @brief Processes a send and either transmits or stages its encoded payload.
 		 * @param text Text to send.
 		 * @param echo Echo text when `true`.
 		 * @param logIt Log send when `true`.
+		 * @param transport Transport timing and priority.
 		 */
-		void doSendMsg(const QString &text, bool echo, bool logIt);
+		void doSendMsg(const QString &text, bool echo, bool logIt, OutboundTransport transport);
 		/**
 		 * @brief Writes line to session log with optional wrappers.
 		 * @param text Line text.

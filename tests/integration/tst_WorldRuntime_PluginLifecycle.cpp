@@ -51,27 +51,30 @@ extern "C"
 
 namespace
 {
-	const QString           kDeferredConnectPluginId      = QStringLiteral("abcdeffedcbaabcdeffedcba");
-	const QString           kTeardownStatePluginId        = QStringLiteral("fedcbaabcdeffedcbaabcdef");
-	const QString           kHiddenMessagePluginId        = QStringLiteral("112233445566778899aabbcc");
-	const QString           kNestedCallPluginId           = QStringLiteral("2233445566778899aabbccdd");
-	const QString           kTelnetOrderingPluginId       = QStringLiteral("00112233445566778899aabb");
-	const QString           kTimerCommandPluginId         = QStringLiteral("33445566778899aabbccddee");
-	const QString           kFocusCallbackPluginId        = QStringLiteral("445566778899aabbccddeeff");
-	const QString           kMxpEntityCallbackPluginId    = QStringLiteral("5566778899aabbccddeeff00");
-	const QString           kSnapshotMutatorPluginId      = QStringLiteral("66778899aabbccddeeff0011");
-	const QString           kSnapshotObserverPluginId     = QStringLiteral("778899aabbccddeeff001122");
-	const QString           kDispatchPolicyFirstPluginId  = QStringLiteral("8899aabbccddeeff00112233");
-	const QString           kDispatchPolicySecondPluginId = QStringLiteral("99aabbccddeeff0011223344");
-	const QString           kDispatchPolicyThirdPluginId  = QStringLiteral("aabbccddeeff001122334455");
-	const QString           kInstallDrawPluginId          = QStringLiteral("bbccddeeff00112233445566");
-	const QString           kEligibilityMutatorPluginId   = QStringLiteral("ccddee001122334455667788");
-	const QString           kEligibilityVictimPluginId    = QStringLiteral("ddee00112233445566778899");
-	const QString           kEligibilityRecorderPluginId  = QStringLiteral("ee00112233445566778899aa");
-	const QString           kMushReaderOmitPluginId       = QStringLiteral("ff00112233445566778899aa");
-	const QString           kScreenDrawRecorderPluginId   = QStringLiteral("0f112233445566778899aabb");
-	const QString           kTelnetTriggerLine            = QStringLiteral("qxv-lattice-17");
-	const QString           kTelnetAfterLine              = QStringLiteral("qxv-after-64");
+	const QString           kDeferredConnectPluginId         = QStringLiteral("abcdeffedcbaabcdeffedcba");
+	const QString           kTeardownStatePluginId           = QStringLiteral("fedcbaabcdeffedcbaabcdef");
+	const QString           kHiddenMessagePluginId           = QStringLiteral("112233445566778899aabbcc");
+	const QString           kNestedCallPluginId              = QStringLiteral("2233445566778899aabbccdd");
+	const QString           kTelnetOrderingPluginId          = QStringLiteral("00112233445566778899aabb");
+	const QString           kTimerCommandPluginId            = QStringLiteral("33445566778899aabbccddee");
+	const QString           kFocusCallbackPluginId           = QStringLiteral("445566778899aabbccddeeff");
+	const QString           kMxpEntityCallbackPluginId       = QStringLiteral("5566778899aabbccddeeff00");
+	const QString           kSnapshotMutatorPluginId         = QStringLiteral("66778899aabbccddeeff0011");
+	const QString           kSnapshotObserverPluginId        = QStringLiteral("778899aabbccddeeff001122");
+	const QString           kDispatchPolicyFirstPluginId     = QStringLiteral("8899aabbccddeeff00112233");
+	const QString           kDispatchPolicySecondPluginId    = QStringLiteral("99aabbccddeeff0011223344");
+	const QString           kDispatchPolicyThirdPluginId     = QStringLiteral("aabbccddeeff001122334455");
+	const QString           kInstallDrawPluginId             = QStringLiteral("bbccddeeff00112233445566");
+	const QString           kEligibilityMutatorPluginId      = QStringLiteral("ccddee001122334455667788");
+	const QString           kEligibilityVictimPluginId       = QStringLiteral("ddee00112233445566778899");
+	const QString           kEligibilityRecorderPluginId     = QStringLiteral("ee00112233445566778899aa");
+	const QString           kMushReaderOmitPluginId          = QStringLiteral("ff00112233445566778899aa");
+	const QString           kScreenDrawRecorderPluginId      = QStringLiteral("0f112233445566778899aabb");
+	const QString           kPacketDebugActionSourcePluginId = QStringLiteral("10112233445566778899aabb");
+	const QString           kPacketDebugDisconnectPluginId   = QStringLiteral("20112233445566778899aabb");
+	const QString           kPacketDebugSendPluginId         = QStringLiteral("30112233445566778899aabb");
+	const QString           kTelnetTriggerLine               = QStringLiteral("qxv-lattice-17");
+	const QString           kTelnetAfterLine                 = QStringLiteral("qxv-after-64");
 
 	constexpr unsigned char IAC   = 0xFF;
 	constexpr unsigned char GA    = 0xF9;
@@ -328,6 +331,7 @@ end
 
 function OnPluginTelnetSubnegotiation(msg_type, data)
   qcb_append_order("telnet")
+  Note("telnet-note-b73")
   Send("qcmd-telnet-b73")
 end
 )lua");
@@ -355,6 +359,108 @@ end
 )xml") + QStringLiteral("    <script><![CDATA[") +
 		                                     script + QStringLiteral("]]></script>\n") +
 		                                     QStringLiteral(R"xml(  </plugin>
+</muclient>
+)xml"));
+	}
+
+	/**
+	 * @brief Writes a plugin that records the action source of a selected outgoing packet-debug row.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writePacketDebugActionSourcePlugin(const QString &pluginsDir)
+	{
+		const QString pluginPath =
+		    QDir(pluginsDir).filePath(QStringLiteral("packet_debug_action_source.xml"));
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="PacketDebugActionSource"
+    author="QMud Test"
+    id=")xml") + kPacketDebugActionSourcePluginId +
+		                                     QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function OnPluginPacketDebug(packet)
+  if string.find(packet, "qsrc91", 1, true) then
+    SetVariable("outbound_action_source", string.format("%.0f", GetInfo(239)))
+  end
+  return true
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml"));
+	}
+
+	/**
+	 * @brief Writes a plugin that disconnects during the first outgoing packet-debug callback.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writePacketDebugDisconnectPlugin(const QString &pluginsDir)
+	{
+		const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("packet_debug_disconnect.xml"));
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="PacketDebugDisconnect"
+    author="QMud Test"
+    id=")xml") + kPacketDebugDisconnectPluginId +
+		                                     QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+local disconnected = false
+
+function OnPluginPacketDebug(packet)
+  if not disconnected and string.find(packet, "Sent ", 1, true) then
+    disconnected = true
+    SetVariable("disconnect_status", string.format("%.0f", Disconnect()))
+  end
+  return true
+end
+]]></script>
+  </plugin>
+</muclient>
+)xml"));
+	}
+
+	/**
+	 * @brief Writes a plugin that sends once while the first deferred packet is being debugged.
+	 * @param pluginsDir Plugin fixture directory.
+	 * @return `true` when the plugin fixture was written.
+	 */
+	bool writePacketDebugSendPlugin(const QString &pluginsDir)
+	{
+		const QString pluginPath = QDir(pluginsDir).filePath(QStringLiteral("packet_debug_send.xml"));
+		return writeTextFile(pluginPath, QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="PacketDebugSend"
+    author="QMud Test"
+    id=")xml") + kPacketDebugSendPluginId + QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+local sent = false
+
+function OnPluginPacketDebug(packet)
+  if not sent and string.find(packet, "qcmd-lua-a91", 1, true) then
+    sent = true
+    SetVariable("send_status", string.format("%.0f", Send("qcmd-packet-debug-causal")))
+  end
+  return true
+end
+]]></script>
+  </plugin>
 </muclient>
 )xml"));
 	}
@@ -645,6 +751,12 @@ function qcb_append_plugin_focus(marker)
     sources = sources .. ","
   end
   SetVariable("plugin_focus_action_sources", sources .. string.format("%.0f", GetInfo(239)))
+
+  local wrap_columns = GetVariable("plugin_focus_wrap_columns") or ""
+  if wrap_columns ~= "" then
+    wrap_columns = wrap_columns .. ","
+  end
+  SetVariable("plugin_focus_wrap_columns", wrap_columns .. string.format("%.0f", GetOption("wrap_column")))
 end
 
 function OnPluginGetFocus()
@@ -730,11 +842,73 @@ end
 	}
 
 	/**
-	 * @brief Creates a direct script trigger that inserts note lines above the matched prompt.
+	 * @brief Creates a direct script trigger that sends and disconnects in a selected order.
+	 * @param match Trigger match text.
+	 * @param command Command passed to Send.
+	 * @param sendFirst Whether Send precedes Disconnect.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makeLuaSendDisconnectTrigger(const QString &match, const QString &command,
+	                                                   const bool sendFirst)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"), match);
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		const QString sendStatement       = QStringLiteral("send_status = Send(\"%1\")\n").arg(command);
+		const QString disconnectStatement = QStringLiteral("disconnect_status = Disconnect()\n");
+		trigger.children.insert(
+		    QStringLiteral("send"),
+		    QStringLiteral("local send_status\nlocal disconnect_status\n") +
+		        (sendFirst ? sendStatement + disconnectStatement : disconnectStatement + sendStatement) +
+		        QStringLiteral("SetVariable(\"send_status\", string.format(\"%.0f\", send_status))\n"
+		                       "SetVariable(\"disconnect_status\", "
+		                       "string.format(\"%.0f\", disconnect_status))"));
+		return trigger;
+	}
+
+	/**
+	 * @brief Creates a direct world-send trigger with echoed command output.
+	 * @param match Trigger match text.
+	 * @param command Command sent by the trigger.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makeWorldSendTrigger(const QString &match, const QString &command)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"), match);
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToWorld));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		trigger.children.insert(QStringLiteral("send"), command);
+		return trigger;
+	}
+
+	/**
+	 * @brief Creates a direct script trigger that emits plain and coloured notes.
+	 * @param match Trigger match text.
+	 * @return Trigger fixture.
+	 */
+	WorldRuntime::Trigger makeLuaNoteOrderingTrigger(const QString &match)
+	{
+		WorldRuntime::Trigger trigger;
+		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+		trigger.attributes.insert(QStringLiteral("match"), match);
+		trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+		trigger.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+		trigger.children.insert(QStringLiteral("send"), QStringLiteral("Note(\"note-after-match\")\n"
+		                                                               "ColourNote(\"red\", \"black\", "
+		                                                               "\"colour-note-after-match\")"));
+		return trigger;
+	}
+
+	/**
+	 * @brief Creates a direct script trigger that appends note lines after the matched prompt.
 	 * @param prompt Prompt text to match.
 	 * @return Trigger fixture.
 	 */
-	WorldRuntime::Trigger makePromptNoteInjectionTrigger(const QString &prompt)
+	WorldRuntime::Trigger makePromptNoteTrigger(const QString &prompt)
 	{
 		WorldRuntime::Trigger trigger;
 		trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
@@ -1042,10 +1216,12 @@ end
 
 function qcb_world_get_focus()
   qcb_append_world_focus("world_get")
+  SetOption("wrap_column", 81)
 end
 
 function qcb_world_lose_focus()
   qcb_append_world_focus("world_lose")
+  SetOption("wrap_column", 82)
 end
 )lua"));
 	}
@@ -1944,7 +2120,7 @@ end
 			QTRY_COMPARE_WITH_TIMEOUT(runtime.lines().size(), qsizetype{1}, 1000);
 			const qint64 actionStartLineNumber = runtime.lines().at(0).lineNumber;
 
-			QVERIFY(runtime.writeLuaCallbackOutputAtLineAnchor(actionStartLineNumber, 0, false,
+			QVERIFY(runtime.writeLuaCallbackOutputAtLineAnchor(actionStartLineNumber, 1, 0, false,
 			                                                   QStringLiteral("callback"),
 			                                                   WorldRuntime::LineNote, {}, true));
 			runtime.receiveRawData(QByteArrayLiteral("newbie</send>\n"));
@@ -2446,8 +2622,8 @@ end
 			runtime.dispatchInitializeLuaEnginesWithObservedCallbacks({initialization}, true);
 			QVERIFY(runtime.dispatchLuaResetAndLoadScript(engine));
 
-			const LuaBatchDispatchResult callbackResult =
-			    runtime.dispatchLuaStringsAndWildcards(engine, QStringLiteral("OnPluginEnable"), {});
+			const LuaBatchDispatchResult callbackResult = runtime.dispatchLuaStringsAndWildcards(
+			    engine, QStringLiteral("OnPluginEnable"), LuaCallbackEvent::Enable, {});
 			QVERIFY(callbackResult.hasFunctionValid);
 			QVERIFY(callbackResult.hasFunction);
 
@@ -2676,6 +2852,9 @@ end
 			QCOMPARE(pluginVariable(runtime, kFocusCallbackPluginId,
 			                        QStringLiteral("plugin_focus_action_sources")),
 			         QString::number(WorldRuntime::eWorldAction));
+			QCOMPARE(
+			    pluginVariable(runtime, kFocusCallbackPluginId, QStringLiteral("plugin_focus_wrap_columns")),
+			    QStringLiteral("81"));
 
 			runtime.requestActiveState(true);
 			QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
@@ -2700,6 +2879,9 @@ end
 			QCOMPARE(pluginVariable(runtime, kFocusCallbackPluginId,
 			                        QStringLiteral("plugin_focus_action_sources")),
 			         QStringLiteral("%1,%1").arg(WorldRuntime::eWorldAction));
+			QCOMPARE(
+			    pluginVariable(runtime, kFocusCallbackPluginId, QStringLiteral("plugin_focus_wrap_columns")),
+			    QStringLiteral("81,82"));
 		}
 
 		static void focusCallbacksPreserveRapidOppositeTransitions()
@@ -2759,8 +2941,8 @@ function qcb_record_post_async_source(label)
   SetVariable(label .. "_source", string.format("%.0f", GetInfo(239)))
 end
 )lua"),
-			                                      QStringLiteral("async action source isolation"), nullptr,
-			                                      false, false, 0, 0,
+			                                      QStringLiteral("async action source isolation"),
+			                                      LuaCallbackEvent::None, nullptr, false, false, 0, 0,
 			                                      [&executeCompleted, &executeOk](const bool ok)
 			                                      {
 				                                      executeOk        = ok;
@@ -2775,7 +2957,7 @@ end
 
 			bool callbackCompleted = false;
 			runtime.dispatchLuaStringsAndWildcardsAsync(
-			    engine, QStringLiteral("qcb_record_post_async_source"),
+			    engine, QStringLiteral("qcb_record_post_async_source"), LuaCallbackEvent::None,
 			    {QStringLiteral("post_async_callback")}, {}, {}, nullptr, -1, false, 0, 0,
 			    [&callbackCompleted](const LuaBatchDispatchResult & /*unused*/)
 			    { callbackCompleted = true; });
@@ -2805,8 +2987,8 @@ function qcb_read_older_output(name, line, wildcards)
   SetVariable("paged_older_output", GetLineInfo(20, 1) or "<nil>")
 end
 )lua"),
-			                                      QStringLiteral("paged callback line lookup"), nullptr,
-			                                      false, false, 0, 0,
+			                                      QStringLiteral("paged callback line lookup"),
+			                                      LuaCallbackEvent::None, nullptr, false, false, 0, 0,
 			                                      [&executeCompleted, &executeOk](const bool ok)
 			                                      {
 				                                      executeOk        = ok;
@@ -2819,7 +3001,7 @@ end
 			bool                   callbackCompleted = false;
 			LuaBatchDispatchResult callbackResult;
 			runtime.dispatchLuaStringsAndWildcardsAsync(
-			    engine, QStringLiteral("qcb_read_older_output"),
+			    engine, QStringLiteral("qcb_read_older_output"), LuaCallbackEvent::None,
 			    {QStringLiteral("older_output"), QStringLiteral("ignored")}, {}, {}, nullptr, -1, false, 0, 0,
 			    [&callbackCompleted, &callbackResult](const LuaBatchDispatchResult &result)
 			    {
@@ -3072,9 +3254,11 @@ end
 
 			constexpr quint64 kResumeId = 41;
 			WorldRuntime::SuspendedPluginCallbackDispatch suspended;
-			suspended.command.request.engines = {currentRecipient, removedRecipient, laterRecipient};
-			suspended.nextEngineIndex         = 1;
-			suspended.engineModalResumeId     = 73;
+			suspended.command.request.engines       = {currentRecipient, removedRecipient, laterRecipient};
+			suspended.command.recipientDispatchView = {currentRecipient, removedRecipient, laterRecipient};
+			suspended.command.recipientDispatchViewRevision = 17;
+			suspended.nextEngineIndex                       = 1;
+			suspended.engineModalResumeId                   = 73;
 			runtime.m_suspendedPluginCallbackDispatches.insert(kResumeId, std::move(suspended));
 
 			runtime.cancelSuspendedPluginCallbackDispatchesForEngines({removedRecipient});
@@ -3086,6 +3270,11 @@ end
 			QVERIFY(stored.command.request.engines.at(0) == currentRecipient);
 			QVERIFY(stored.command.request.engines.at(1).isNull());
 			QVERIFY(stored.command.request.engines.at(2) == laterRecipient);
+			QCOMPARE(stored.command.recipientDispatchView.size(), 3);
+			QVERIFY(stored.command.recipientDispatchView.at(0) == currentRecipient);
+			QVERIFY(stored.command.recipientDispatchView.at(1).isNull());
+			QVERIFY(stored.command.recipientDispatchView.at(2) == laterRecipient);
+			QCOMPARE(stored.command.recipientDispatchViewRevision, quint64{0});
 
 			runtime.m_suspendedPluginCallbackDispatches.clear();
 		}
@@ -3331,6 +3520,7 @@ end
 			resumeCommand.request = resumeRequest;
 			runtime.handleCompletedPluginCallbackDispatchCommand(std::move(resumeCommand),
 			                                                     std::move(resumeResult));
+			runtime.drainPluginCallbackDispatchQueue(commandId);
 
 			QVERIFY(!runtime.m_suspendedPluginCallbackDispatches.contains(runtimeResumeId));
 			auto completed = runtime.m_pluginCallbackDispatchResults.find(commandId);
@@ -3460,6 +3650,7 @@ end
 			const quint64 capturesBefore = runtime.m_luaCallbackDispatchSnapshotCaptureCount;
 			runtime.continueSuspendedPluginCallbackDispatch(std::move(suspended),
 			                                                std::move(resumedRecipient));
+			runtime.drainPluginCallbackDispatchQueue(commandId);
 
 			// The stopping callback publishes its mutation journal, but no later recipient consumes the
 			// request, so the runtime must not recapture an unused snapshot.
@@ -3880,7 +4071,7 @@ end
 			    QStringLiteral("qcmd-timer-multi-a23,qcmd-timer-multi-b58"), 5000);
 		}
 
-		static void promptPartialCommitPresentsTriggerInjectedLinesWithoutBlankRows()
+		static void promptPartialCommitPresentsTriggerNotesAfterPromptWithoutBlankRows()
 		{
 			WorldRuntime runtime;
 			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
@@ -3889,7 +4080,7 @@ end
 			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
 
 			const QString prompt = QStringLiteral("[SAFE]<2083hp 2220sp 1990st> ");
-			WorldRuntimeTestAccess::triggers(runtime).push_back(makePromptNoteInjectionTrigger(prompt));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(makePromptNoteTrigger(prompt));
 			runtime.markTriggersChanged();
 
 			RuntimeCommandHarness harness(runtime);
@@ -3909,12 +4100,654 @@ end
 				if (lines.size() < 4)
 					return false;
 				const QStringList tailLines = lines.sliced(lines.size() - 4);
-				return tailLines == QStringList{QStringLiteral("(Mount: 2614st)"),
-				                                QStringLiteral("[695, 770]"), QStringLiteral("0 0 +196"),
-				                                prompt} &&
+				return tailLines == QStringList{QStringLiteral("(Mount: 2614st)"), prompt,
+				                                QStringLiteral("[695, 770]"), QStringLiteral("0 0 +196")} &&
 				       std::ranges::none_of(tailLines, [](const QString &line) { return line.isEmpty(); });
 			};
 			QTRY_VERIFY_WITH_TIMEOUT(tailLinesMatch(), 5000);
+		}
+
+		static void inboundPayloadBoundaryDefersOnlyEncodedTransmission()
+		{
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("y"));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			const qint64 bytesOutBefore  = runtime.bytesOut();
+			const int    linesSentBefore = runtime.totalLinesSent();
+			bool         boundaryOpen    = true;
+			WorldRuntimeTestAccess::beginInboundTransmissionDeferralScope(runtime);
+			[[maybe_unused]] const auto closeBoundary = qScopeGuard(
+			    [&runtime, &boundaryOpen]
+			    {
+				    if (boundaryOpen)
+					    WorldRuntimeTestAccess::endInboundTransmissionDeferralScope(runtime);
+			    });
+
+			const QString command = QStringLiteral("boundary-command");
+			QCOMPARE(runtime.sendCommand(command, true, false, true, false, false), eOK);
+			QCOMPARE(harness.view.outputLines().constLast(), command);
+			QCOMPARE(runtime.lastCommandSent(), command);
+			QCOMPARE(runtime.totalLinesSent(), linesSentBefore + 1);
+			QCOMPARE(runtime.bytesOut(), bytesOutBefore);
+
+			boundaryOpen = false;
+			WorldRuntimeTestAccess::endInboundTransmissionDeferralScope(runtime);
+			QVERIFY(runtime.bytesOut() > bytesOutBefore);
+
+			QByteArray received;
+			auto       commandReceived = [&]
+			{
+				received += acceptedSocket->readAll();
+				return received.contains(command.toUtf8() + QByteArrayLiteral("\r\n"));
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(commandReceived(), 5000);
+		}
+
+		static void inboundDisconnectPreservesLuaCommandOrder_data()
+		{
+			QTest::addColumn<bool>("sendFirst");
+			QTest::newRow("send-before-disconnect") << true;
+			QTest::newRow("disconnect-before-send") << false;
+		}
+
+		static void inboundDisconnectPreservesLuaCommandOrder()
+		{
+			QFETCH(bool, sendFirst);
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			const QString match   = QStringLiteral("send-disconnect-trigger");
+			const QString command = QStringLiteral("send-before-socket-close");
+			WorldRuntime  runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("y"));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(
+			    makeLuaSendDisconnectTrigger(match, command, sendFirst));
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy disconnectedSpy(&runtime, &WorldRuntime::disconnected);
+			QVERIFY(disconnectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+			const qint64 startupBytes = runtime.bytesOut();
+			QTRY_COMPARE_WITH_TIMEOUT(acceptedSocket->bytesAvailable(), startupBytes, 5000);
+			QCOMPARE(acceptedSocket->readAll().size(), startupBytes);
+
+			const qint64  bytesOutBefore    = runtime.bytesOut();
+			const int     packetsOutBefore  = runtime.outputPacketCount();
+			const int     linesSentBefore   = runtime.totalLinesSent();
+			const QString lastCommandBefore = runtime.lastCommandSent();
+			runtime.receiveRawData(match.toUtf8() + QByteArrayLiteral("\r\n"));
+
+			QCOMPARE(worldVariable(runtime, QStringLiteral("disconnect_status")), QString::number(eOK));
+			QCOMPARE(worldVariable(runtime, QStringLiteral("send_status")),
+			         QString::number(sendFirst ? eOK : eWorldClosed));
+			QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 1, 5000);
+			QCOMPARE(runtime.connectPhase(), WorldRuntime::eConnectNotConnected);
+
+			QByteArray received;
+			auto       readPeerData = [&]
+			{
+				received += acceptedSocket->readAll();
+				return !sendFirst || received.contains(command.toUtf8() + QByteArrayLiteral("\r\n"));
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(readPeerData(), 5000);
+			if (sendFirst)
+			{
+				const QByteArray encodedCommand = command.toUtf8() + QByteArrayLiteral("\r\n");
+				QCOMPARE(received, encodedCommand);
+				QCOMPARE(runtime.bytesOut(), bytesOutBefore + encodedCommand.size());
+				QCOMPARE(runtime.outputPacketCount(), packetsOutBefore + 1);
+				QCOMPARE(runtime.totalLinesSent(), linesSentBefore + 1);
+				QCOMPARE(runtime.lastCommandSent(), command);
+				QVERIFY(harness.view.outputLines().contains(command));
+			}
+			else
+			{
+				QCOMPARE(received, QByteArray{});
+				QCOMPARE(runtime.bytesOut(), bytesOutBefore);
+				QCOMPARE(runtime.outputPacketCount(), packetsOutBefore);
+				QCOMPARE(runtime.totalLinesSent(), linesSentBefore);
+				QCOMPARE(runtime.lastCommandSent(), lastCommandBefore);
+				QVERIFY(!harness.view.outputLines().contains(command));
+			}
+		}
+
+		static void packetDebugDisconnectWaitsForRemainingInboundTransmissions()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writePacketDebugDisconnectPlugin(pluginsDir));
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(makeLuaSendPriorityTrigger());
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("packet_debug_disconnect.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy disconnectedSpy(&runtime, &WorldRuntime::disconnected);
+			QVERIFY(disconnectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+			const qint64 startupBytes = runtime.bytesOut();
+			QTRY_COMPARE_WITH_TIMEOUT(acceptedSocket->bytesAvailable(), startupBytes, 5000);
+			QCOMPARE(acceptedSocket->readAll().size(), startupBytes);
+
+			const qint64 bytesOutBefore   = runtime.bytesOut();
+			const int    packetsOutBefore = runtime.outputPacketCount();
+			runtime.setDebugIncomingPackets(true);
+			runtime.receiveRawData(QByteArrayLiteral("qxv-priority-line-38\r\n"));
+
+			QCOMPARE(
+			    pluginVariable(runtime, kPacketDebugDisconnectPluginId, QStringLiteral("disconnect_status")),
+			    QString::number(eOK));
+			QTRY_COMPARE_WITH_TIMEOUT(disconnectedSpy.count(), 1, 5000);
+			QByteArray       received;
+			const QByteArray expected            = QByteArrayLiteral("qcmd-lua-a91\r\nqcmd-lua-b26\r\n");
+			auto             allCommandsReceived = [&]
+			{
+				received += acceptedSocket->readAll();
+				return received.size() >= expected.size();
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(allCommandsReceived(), 5000);
+			QCOMPARE(received, expected);
+			QCOMPARE(runtime.bytesOut(), bytesOutBefore + expected.size());
+			QCOMPARE(runtime.outputPacketCount(), packetsOutBefore + 2);
+			QCOMPARE(runtime.connectPhase(), WorldRuntime::eConnectNotConnected);
+		}
+
+		static void packetDebugSendRemainsBehindAlreadyDeferredTransmissions()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writePacketDebugSendPlugin(pluginsDir));
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(makeLuaSendPriorityTrigger());
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("packet_debug_send.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+			const qint64 startupBytes = runtime.bytesOut();
+			QTRY_COMPARE_WITH_TIMEOUT(acceptedSocket->bytesAvailable(), startupBytes, 5000);
+			QCOMPARE(acceptedSocket->readAll().size(), startupBytes);
+
+			const qint64 bytesOutBefore   = runtime.bytesOut();
+			const int    packetsOutBefore = runtime.outputPacketCount();
+			runtime.setDebugIncomingPackets(true);
+			runtime.receiveRawData(QByteArrayLiteral("qxv-priority-line-38\r\n"));
+
+			QCOMPARE(pluginVariable(runtime, kPacketDebugSendPluginId, QStringLiteral("send_status")),
+			         QString::number(eOK));
+			QByteArray       received;
+			const QByteArray expected =
+			    QByteArrayLiteral("qcmd-lua-a91\r\nqcmd-lua-b26\r\nqcmd-packet-debug-causal\r\n");
+			auto allCommandsReceived = [&]
+			{
+				received += acceptedSocket->readAll();
+				return received.size() >= expected.size();
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(allCommandsReceived(), 5000);
+			QCOMPARE(received, expected);
+			QCOMPARE(runtime.bytesOut(), bytesOutBefore + expected.size());
+			QCOMPARE(runtime.outputPacketCount(), packetsOutBefore + 3);
+		}
+
+		static void partialLinePublicationsRemainInsideInboundTransmissionBoundary()
+		{
+			{
+				WorldRuntime runtime;
+				int          observedDepth = -1;
+				QObject::connect(
+				    &runtime, &WorldRuntime::incomingStyledLinePartialReceived, &runtime,
+				    [&runtime, &observedDepth](const QString &, const QVector<WorldRuntime::StyleSpan> &)
+				    { observedDepth = WorldRuntimeTestAccess::inboundTransmissionDeferralDepth(runtime); });
+
+				runtime.receiveRawData(QByteArrayLiteral("ansi-partial-line"));
+
+				QCOMPARE(observedDepth, 1);
+				QCOMPARE(WorldRuntimeTestAccess::inboundTransmissionDeferralDepth(runtime), 0);
+			}
+
+			{
+				WorldRuntime runtime;
+				runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("0"));
+				runtime.receiveRawData(bytes({IAC, SB, 91, IAC, SE}));
+				int observedDepth = -1;
+				QObject::connect(
+				    &runtime, &WorldRuntime::incomingStyledLinePartialReceived, &runtime,
+				    [&runtime, &observedDepth](const QString &, const QVector<WorldRuntime::StyleSpan> &)
+				    { observedDepth = WorldRuntimeTestAccess::inboundTransmissionDeferralDepth(runtime); });
+
+				runtime.receiveRawData(QByteArrayLiteral("\x1B[3zmxp-partial-line"));
+
+				QCOMPARE(observedDepth, 1);
+				QCOMPARE(WorldRuntimeTestAccess::inboundTransmissionDeferralDepth(runtime), 0);
+			}
+		}
+
+		static void deferredTransmissionPreservesOriginatingActionSourceForPacketDebug()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writePacketDebugActionSourcePlugin(pluginsDir));
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(tempDir.path());
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(
+			    makeWorldSendTrigger(QStringLiteral("packet-debug-origin"), QStringLiteral("qsrc91")));
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("packet_debug_action_source.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			runtime.setDebugIncomingPackets(true);
+			runtime.receiveRawData(QByteArrayLiteral("packet-debug-origin\r\n"));
+			QCOMPARE(pluginVariable(runtime, kPacketDebugActionSourcePluginId,
+			                        QStringLiteral("outbound_action_source")),
+			         QString::number(WorldRuntime::eTriggerFired));
+		}
+
+		static void triggerCommandEchoKeepsItsInputPositionWhileTransmissionIsDeferred_data()
+		{
+			QTest::addColumn<bool>("pluginTrigger");
+			QTest::newRow("world-trigger") << false;
+			QTest::newRow("plugin-trigger") << true;
+		}
+
+		static void triggerCommandEchoKeepsItsInputPositionWhileTransmissionIsDeferred()
+		{
+			QFETCH(bool, pluginTrigger);
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("log_input"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("echo_colour"), QStringLiteral("1"));
+			const QColor echoFore(QStringLiteral("#123456"));
+			const QColor echoBack(QStringLiteral("#654321"));
+			QCOMPARE(runtime.setCustomColourText(1, echoFore), eOK);
+			QCOMPARE(runtime.setCustomColourBackground(1, echoBack), eOK);
+			WorldRuntime::Trigger trigger = makeWorldSendTrigger(QStringLiteral("trigger-origin-line"),
+			                                                     QStringLiteral("trigger-command"));
+			if (pluginTrigger)
+			{
+				WorldRuntime::Plugin plugin;
+				plugin.attributes.insert(QStringLiteral("id"), QStringLiteral("1234567890abcdef12345678"));
+				plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Echo anchor test"));
+				plugin.enabled  = true;
+				plugin.sequence = 100;
+				plugin.triggers.push_back(std::move(trigger));
+				WorldRuntimeTestAccess::plugins(runtime).push_back(std::move(plugin));
+			}
+			else
+				WorldRuntimeTestAccess::triggers(runtime).push_back(std::move(trigger));
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			QString publishedPartialLine;
+			QObject::connect(&runtime, &WorldRuntime::incomingStyledLinePartialReceived, &runtime,
+			                 [&publishedPartialLine](const QString &line,
+			                                         const QVector<WorldRuntime::StyleSpan> & /*spans*/)
+			                 { publishedPartialLine = line; });
+			runtime.receiveRawData(QByteArrayLiteral("trigger-origin-line\r\nfollowing-prompt"));
+
+			const QStringList lines = harness.view.outputLines();
+			QVERIFY2(lines.size() >= 3, qPrintable(lines.join(QStringLiteral(" | "))));
+			QCOMPARE(lines.sliced(lines.size() - 3),
+			         (QStringList{QStringLiteral("trigger-origin-line"), QStringLiteral("trigger-command"),
+			                      QStringLiteral("following-prompt")}));
+
+			const auto commandLine =
+			    std::ranges::find_if(runtime.lines(), [](const WorldRuntime::LineEntry &line)
+			                         { return line.text == QStringLiteral("trigger-command"); });
+			QVERIFY(commandLine != runtime.lines().cend());
+			QVERIFY((commandLine->flags & WorldRuntime::LineInput) != 0);
+			QVERIFY((commandLine->flags & WorldRuntime::LineLog) != 0);
+			QCOMPARE(commandLine->spans.size(), 1);
+			QCOMPARE(commandLine->spans.constFirst().fore, echoFore);
+			QCOMPARE(commandLine->spans.constFirst().back, echoBack);
+			QCOMPARE(publishedPartialLine, QStringLiteral("following-prompt"));
+		}
+
+		static void directTriggerNotesFollowTheirMatchedLineWithinOnePayload()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(
+			    makeLuaNoteOrderingTrigger(QStringLiteral("note-trigger-origin")));
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			runtime.receiveRawData(QByteArrayLiteral("note-trigger-origin\r\nfollowing-prompt\r\n"));
+
+			const QStringList lines = harness.view.outputLines();
+			QVERIFY(lines.size() >= 4);
+			QCOMPARE(
+			    lines.sliced(lines.size() - 4),
+			    (QStringList{QStringLiteral("note-trigger-origin"), QStringLiteral("note-after-match"),
+			                 QStringLiteral("colour-note-after-match"), QStringLiteral("following-prompt")}));
+		}
+
+		static void ansiReplacementRetainsPriorTriggerOutputOrderAfterOmit()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+
+			auto makeTrigger = [](const QString &script, const int sequence, const bool keepEvaluating,
+			                      const bool omitFromOutput)
+			{
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+				trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("ansi-ordered-origin"));
+				trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScriptAfterOmit));
+				trigger.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+				if (keepEvaluating)
+					trigger.attributes.insert(QStringLiteral("keep_evaluating"), QStringLiteral("y"));
+				if (omitFromOutput)
+					trigger.attributes.insert(QStringLiteral("omit_from_output"), QStringLiteral("y"));
+				trigger.children.insert(QStringLiteral("send"), script);
+				return trigger;
+			};
+
+			WorldRuntimeTestAccess::triggers(runtime).push_back(
+			    makeTrigger(QStringLiteral("Note(\"prior-trigger-output\")"), 100, true, false));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(makeTrigger(QStringLiteral(R"lua(
+AnsiNote(ANSI(31), "ansi-replacement-output")
+local count = GetLinesInBufferCount()
+SetVariable("ansi_callback_lines", string.format("%.0f|%s|%s", count,
+  tostring(GetLineInfo(count - 1, 1)), tostring(GetLineInfo(count, 1))))
+Note("post-ansi-output")
+)lua"),
+			                                                                200, false, true));
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+			runtime.receiveRawData(QByteArrayLiteral("ansi-ordered-origin\r\nfollowing-partial"));
+
+			const QStringList expected{
+			    QStringLiteral("prior-trigger-output"), QStringLiteral("ansi-replacement-output"),
+			    QStringLiteral("post-ansi-output"), QStringLiteral("following-partial")};
+			const QStringList lines = harness.view.outputLines();
+			QVERIFY2(lines.size() >= expected.size(), qPrintable(lines.join(QStringLiteral(" | "))));
+			QCOMPARE(lines.sliced(lines.size() - expected.size()), expected);
+			QVERIFY(!lines.contains(QStringLiteral("ansi-ordered-origin")));
+			QCOMPARE(worldVariable(runtime, QStringLiteral("ansi_callback_lines")),
+			         QStringLiteral("3|prior-trigger-output|ansi-replacement-output"));
+		}
+
+		static void keepEvaluatingTriggerOutputRetainsActionOrderWhenMatchedLineIsOmitted_data()
+		{
+			QTest::addColumn<bool>("sendFirst");
+			QTest::addColumn<bool>("scriptAfterOmit");
+			QTest::newRow("direct-send-before-note") << true << false;
+			QTest::newRow("direct-note-before-send") << false << false;
+			QTest::newRow("after-omit-send-before-note") << true << true;
+			QTest::newRow("after-omit-note-before-send") << false << true;
+		}
+
+		static void keepEvaluatingTriggerOutputRetainsActionOrderWhenMatchedLineIsOmitted()
+		{
+			QFETCH(bool, sendFirst);
+			QFETCH(bool, scriptAfterOmit);
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("y"));
+
+			auto makeOrderedTrigger = [](const QString &script, const int sequence, const int sendTo,
+			                             const bool keepEvaluating, const bool omitFromOutput)
+			{
+				WorldRuntime::Trigger trigger;
+				trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+				trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("ordered-origin"));
+				trigger.attributes.insert(QStringLiteral("send_to"), QString::number(sendTo));
+				trigger.attributes.insert(QStringLiteral("sequence"), QString::number(sequence));
+				if (keepEvaluating)
+					trigger.attributes.insert(QStringLiteral("keep_evaluating"), QStringLiteral("y"));
+				if (omitFromOutput)
+					trigger.attributes.insert(QStringLiteral("omit_from_output"), QStringLiteral("y"));
+				trigger.children.insert(QStringLiteral("send"), script);
+				return trigger;
+			};
+
+			const QString sendScript = QStringLiteral("Send(\"ordered-command-one\")\n"
+			                                          "Send(\"ordered-command-two\")");
+			const QString noteScript = QStringLiteral("ColourNote(\"red\", \"black\", \"ordered-note\")");
+			const int     sendTo     = scriptAfterOmit ? eSendToScriptAfterOmit : eSendToScript;
+			WorldRuntimeTestAccess::triggers(runtime).push_back(
+			    makeOrderedTrigger(sendFirst ? sendScript : noteScript, 100, sendTo, true, scriptAfterOmit));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(
+			    makeOrderedTrigger(sendFirst ? noteScript : sendScript, 200, sendTo, false, true));
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+			auto *const nativeCanvas =
+			    harness.view.findChild<QWidget *>(QStringLiteral("worldOutputNativeCanvas"));
+			QVERIFY(nativeCanvas);
+			QCoreApplication::processEvents();
+			const int  fullRebuildsBefore = nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt();
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			runtime.receiveRawData(QByteArrayLiteral("ordered-origin\r\nfollowing-partial"));
+
+			const QStringList expected =
+			    sendFirst
+			        ? QStringList{QStringLiteral("ordered-command-one"),
+			                      QStringLiteral("ordered-command-two"), QStringLiteral("ordered-note"),
+			                      QStringLiteral("following-partial")}
+			        : QStringList{QStringLiteral("ordered-note"), QStringLiteral("ordered-command-one"),
+			                      QStringLiteral("ordered-command-two"), QStringLiteral("following-partial")};
+			QStringList runtimeLines;
+			for (const WorldRuntime::LineEntry &entry : runtime.lines())
+			{
+				if ((entry.flags & WorldRuntime::LineHidden) == 0)
+					runtimeLines.push_back(entry.text);
+			}
+			QCOMPARE(runtimeLines, expected.sliced(0, expected.size() - 1));
+			const QStringList lines = harness.view.outputLines();
+			QVERIFY2(lines.size() >= expected.size(), qPrintable(lines.join(QStringLiteral(" | "))));
+			QCOMPARE(lines.sliced(lines.size() - expected.size()), expected);
+			QVERIFY(!lines.contains(QStringLiteral("ordered-origin")));
+			QCOMPARE(nativeCanvas->property("qmud_native_cache_full_rebuilds").toInt(), fullRebuildsBefore);
+
+			QByteArray received;
+			auto       commandReceived = [&]
+			{
+				received += acceptedSocket->readAll();
+				return received.contains("ordered-command-one\r\n") &&
+				       received.contains("ordered-command-two\r\n");
+			};
+			QTRY_VERIFY_WITH_TIMEOUT(commandReceived(), 5000);
+			QVERIFY(received.indexOf("ordered-command-one\r\n") <
+			        received.indexOf("ordered-command-two\r\n"));
+		}
+
+		static void oneTriggerRetainsSendAndNoteActionOrderAfterOmit()
+		{
+			WorldRuntime runtime;
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
+			runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
+			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
+			runtime.setWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("y"));
+			WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+
+			WorldRuntime::Trigger trigger;
+			trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+			trigger.attributes.insert(QStringLiteral("match"), QStringLiteral("single-ordered-origin"));
+			trigger.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScriptAfterOmit));
+			trigger.attributes.insert(QStringLiteral("omit_from_output"), QStringLiteral("y"));
+			trigger.children.insert(QStringLiteral("send"), QStringLiteral(R"lua(
+Send("single-command-one")
+ColourNote("red", "black", "single-note-one")
+Send("single-command-two")
+ColourNote("red", "black", "single-note-two")
+)lua"));
+			WorldRuntimeTestAccess::triggers(runtime).push_back(std::move(trigger));
+			runtime.markTriggersChanged();
+
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+			runtime.receiveRawData(QByteArrayLiteral("single-ordered-origin\r\nfollowing-partial"));
+
+			const QStringList expected{
+			    QStringLiteral("single-command-one"), QStringLiteral("single-note-one"),
+			    QStringLiteral("single-command-two"), QStringLiteral("single-note-two"),
+			    QStringLiteral("following-partial")};
+			const QStringList lines = harness.view.outputLines();
+			QVERIFY2(lines.size() >= expected.size(), qPrintable(lines.join(QStringLiteral(" | "))));
+			QCOMPARE(lines.sliced(lines.size() - expected.size()), expected);
+			QVERIFY(!lines.contains(QStringLiteral("single-ordered-origin")));
 		}
 
 		static void directLuaTriggerSendCommandsEnterPriorityQueueBand()
@@ -4197,6 +5030,55 @@ end
 
 			verifyTelnetCallbackAndSocketSendOrder(runtime, acceptedSocket.data(),
 			                                       QStringLiteral("trigger,telnet"));
+		}
+
+		static void telnetOnlyCallbackOutputPreservesVisiblePartialLine()
+		{
+			QTemporaryDir tempDir;
+			QVERIFY(tempDir.isValid());
+
+			const QString pluginsDir = QDir(tempDir.path()).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDir));
+			QVERIFY(writeTelnetOrderingPlugin(pluginsDir));
+
+			QTcpServer server;
+			if (!server.listen(QHostAddress::LocalHost, 0))
+				QSKIP("Local TCP listen is unavailable in this environment.");
+
+			WorldRuntime runtime;
+			configureTelnetOrderingRuntime(runtime, tempDir.path());
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("telnet_ordering.xml"), &loadError),
+			         qPrintable(loadError));
+			QTRY_VERIFY_WITH_TIMEOUT(!runtime.plugins().constFirst().installPending, 5000);
+
+			QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+			QVERIFY(connectedSpy.isValid());
+			QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+			QVERIFY(serverAcceptedSpy.isValid());
+			QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+			QVERIFY(connectedSpy.wait(5000));
+			QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+			QScopedPointer<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+			QVERIFY(!acceptedSocket.isNull());
+
+			runtime.receiveRawData(QByteArrayLiteral("visible-partial"));
+			QCOMPARE(harness.view.outputLines().constLast(), QStringLiteral("visible-partial"));
+
+			runtime.receiveRawData(bytes({IAC, SB, GMCP, 'q', '7', 'x', IAC, SE}));
+			const QStringList afterCallback = harness.view.outputLines();
+			QVERIFY(afterCallback.size() >= 2);
+			QCOMPARE(afterCallback.sliced(afterCallback.size() - 2),
+			         (QStringList{QStringLiteral("telnet-note-b73"), QStringLiteral("visible-partial")}));
+
+			runtime.receiveRawData(QByteArrayLiteral("\r\n"));
+			const QStringList afterCompletion = harness.view.outputLines();
+			QVERIFY(afterCompletion.size() >= 2);
+			QCOMPARE(afterCompletion.sliced(afterCompletion.size() - 2),
+			         (QStringList{QStringLiteral("telnet-note-b73"), QStringLiteral("visible-partial")}));
 		}
 
 		static void telnetSubnegotiationCallbacksUsePacketTransformedStreamOrder()
@@ -6233,8 +7115,6 @@ function OnPluginDrawOutputWindow(first_line, offset)
   SetVariable("draw_calls", tostring(calls + 1))
   SetVariable("draw_first_line", tostring(first_line))
   SetVariable("draw_offset", tostring(offset))
-  local started = os.clock()
-  while os.clock() - started < 0.25 do end
 end
 ]]></script>
   </plugin>
@@ -6267,12 +7147,7 @@ end
 			QString loadError;
 			QVERIFY2(runtime.loadPluginFile(QStringLiteral("install_draw.xml"), &loadError),
 			         qPrintable(loadError));
-			QTRY_VERIFY_WITH_TIMEOUT(runtime.drawOutputWindowCallbackActive(), 5000);
-			QVERIFY(view.m_drawOutputWindowCallbackActive);
 			QVERIFY(!observer.m_drawOutputWindowCallbackActive);
-			QVERIFY(view.m_pendingSemanticOutputRepaint != WorldView::SemanticOutputRepaint::None);
-			QCOMPARE(observer.m_pendingSemanticOutputRepaint, WorldView::SemanticOutputRepaint::None);
-			QVERIFY(view.m_drawCallbackCompletionsPending > 0);
 			QCOMPARE(observer.m_drawCallbackCompletionsPending, 0);
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    pluginVariable(runtime, kInstallDrawPluginId, QStringLiteral("draw_offset")),

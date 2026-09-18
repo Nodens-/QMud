@@ -2657,9 +2657,36 @@ void WorldView::recheckMiniWindowHover()
 	if (!m_hasLastMousePos || !m_capturedWindowName.isEmpty())
 		return;
 
+	QMouseEvent event(
+	    QEvent::MouseMove, QPointF(m_lastMousePos), QPointF(m_lastMousePos),
+	    QPointF(m_outputStack ? m_outputStack->mapToGlobal(m_lastMousePos) : mapToGlobal(m_lastMousePos)),
+	    Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+	handleMiniWindowMouseMove(&event, m_outputStack ? m_outputStack : this, false);
+}
+
+void WorldView::recheckMiniWindowHoverForAddedHotspots(const MiniWindowHotspotInstanceMap &addedHotspots)
+{
+	if (!m_runtime || !m_outputStack || !m_hasLastMousePos || !m_capturedWindowName.isEmpty())
+		return;
+
+	bool pointerInsideAffectedWindow = false;
+	for (auto windowIt = addedHotspots.cbegin(); windowIt != addedHotspots.cend(); ++windowIt)
+	{
+		const MiniWindow *window = m_runtime->miniWindow(windowIt.key());
+		if (!window || windowIt->isEmpty() || !window->show || window->temporarilyHide ||
+		    (window->flags & (kMiniWindowDrawUnderneath | kMiniWindowIgnoreMouse)) ||
+		    window->rect.width() <= 0 || window->rect.height() <= 0 || !window->rect.contains(m_lastMousePos))
+			continue;
+		pointerInsideAffectedWindow = true;
+		break;
+	}
+	if (!pointerInsideAffectedWindow)
+		return;
+
 	QMouseEvent event(QEvent::MouseMove, QPointF(m_lastMousePos), QPointF(m_lastMousePos),
-	                  QPointF(mapToGlobal(m_lastMousePos)), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
-	handleMiniWindowMouseMove(&event, m_outputStack ? m_outputStack : this);
+	                  QPointF(m_outputStack->mapToGlobal(m_lastMousePos)), Qt::NoButton, Qt::NoButton,
+	                  Qt::NoModifier);
+	handleMiniWindowMouseMove(&event, m_outputStack, false, &addedHotspots);
 }
 
 bool WorldView::isScrollbackSplitActive() const
@@ -10475,22 +10502,11 @@ bool WorldView::runtimeOutputTailAdvanced() const
 	return m_runtime->lines().constLast().lineNumber > m_nativeCachedRuntimeLastLineNumber;
 }
 
-void WorldView::prepareRuntimeOutputMutationPresentation(const bool tailAdvanced,
-                                                         const bool clearLastPartialAnnouncement)
+void WorldView::prepareRuntimeOutputMutationPresentation(const bool tailAdvanced)
 {
-	if (tailAdvanced)
-		removeNativePartialRenderLineOverlay();
-	m_hasPartialOutput       = false;
-	m_partialOutputStart     = 0;
-	m_partialOutputLength    = 0;
-	m_nativeHasPartialOutput = false;
-	m_nativePartialOutputText.clear();
-	m_nativePartialOutputSpans.clear();
+	removeNativePartialRenderLineOverlay();
 	m_nativeRenderLineCacheFromRuntime  = true;
 	m_accessibleOutputPendingTailAppend = tailAdvanced;
-	if (clearLastPartialAnnouncement)
-		m_accessibleOutputLastAnnouncedPartialText.clear();
-	m_runtimeBatchPartialClearPending = false;
 	syncOutputTextVisibilityForNativeCanvas();
 	if (tailAdvanced && !m_frozen)
 		requestOutputScrollToEnd();
@@ -10522,12 +10538,8 @@ void WorldView::releaseSemanticOutputRepaint()
 {
 	if (m_pendingSemanticOutputRepaint == SemanticOutputRepaint::None)
 		return;
-	if (hasPendingOutputPresentationWork() ||
-	    (m_runtime && (m_drawNotifyQueued || m_drawViewportNotificationPending ||
-	                   m_drawOutputWindowCallbackActive || m_drawCallbackCompletionsPending > 0)))
-	{
+	if (hasPendingOutputPresentationWork())
 		return;
-	}
 
 	const SemanticOutputRepaint repaint = m_pendingSemanticOutputRepaint;
 	m_pendingSemanticOutputRepaint      = SemanticOutputRepaint::None;
@@ -10933,24 +10945,8 @@ void WorldView::echoInputText(const QString &text)
 	const bool                       appendToCurrentLine = keepOnSameLine && !m_breakBeforeNextServerOutput;
 	QVector<WorldRuntime::StyleSpan> echoSpans;
 	bool                             reopenedPresentedHardReturn = false;
-	if (m_runtime && !trimmed.isEmpty())
-	{
-		bool      ok         = false;
-		const int echoColour = m_runtime->worldAttributes().value(QStringLiteral("echo_colour")).toInt(&ok);
-		if (ok && echoColour > 0 && echoColour <= MAX_CUSTOM)
-		{
-			auto fromColorRef = [](long value)
-			{
-				return QColor(static_cast<int>(value & 0xFF), static_cast<int>((value >> 8) & 0xFF),
-				              static_cast<int>((value >> 16) & 0xFF));
-			};
-			WorldRuntime::StyleSpan span;
-			span.length = sizeToInt(trimmed.size());
-			span.fore   = fromColorRef(m_runtime->customColourText(echoColour));
-			span.back   = fromColorRef(m_runtime->customColourBackground(echoColour));
-			echoSpans.push_back(span);
-		}
-	}
+	if (m_runtime)
+		echoSpans = m_runtime->inputEchoStyleSpans(trimmed);
 	if (m_runtime)
 		reopenedPresentedHardReturn =
 		    m_runtime->prepareInputEchoForDisplay(trimmed, echoSpans, appendToCurrentLine);
@@ -12393,7 +12389,7 @@ bool WorldView::commitPendingIncomingPartialOutput()
 
 void WorldView::notifyRuntimeOutputLineChanged()
 {
-	prepareRuntimeOutputMutationPresentation(runtimeOutputTailAdvanced(), false);
+	prepareRuntimeOutputMutationPresentation(runtimeOutputTailAdvanced());
 	notifyAccessibleOutputPresented(nativeOutputRenderLines());
 	requestSemanticOutputRepaint(SemanticOutputRepaint::Full);
 }
@@ -12401,7 +12397,7 @@ void WorldView::notifyRuntimeOutputLineChanged()
 void WorldView::notifyRuntimeOutputLineChanged(const int runtimeLineIndex)
 {
 	const bool tailAdvanced = runtimeOutputTailAdvanced();
-	prepareRuntimeOutputMutationPresentation(tailAdvanced, false);
+	prepareRuntimeOutputMutationPresentation(tailAdvanced);
 	markNativeRuntimeLineRestitchPending(runtimeLineIndex);
 	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
 }
@@ -12410,7 +12406,7 @@ void WorldView::notifyRuntimeOutputLineAppended(
     const int firstAppendedIndex, const int lastAppendedIndexExclusive,
     const std::span<const WorldRuntime::OutputBufferEdit> structuralEdits, const int removedHeadCount)
 {
-	prepareRuntimeOutputMutationPresentation(true, false);
+	prepareRuntimeOutputMutationPresentation(true);
 	transformPendingNativeRuntimeRestitches(structuralEdits);
 	const bool exactAppendRange = firstAppendedIndex >= 0 && lastAppendedIndexExclusive > firstAppendedIndex;
 	if (!m_nativeRuntimeAppendPending)
@@ -12437,7 +12433,7 @@ void WorldView::notifyRuntimeOutputRangeChanged(
     const std::span<const WorldRuntime::OutputBufferEdit> structuralEdits, const int removedHeadCount)
 {
 	const bool tailAdvanced = runtimeOutputTailAdvanced();
-	prepareRuntimeOutputMutationPresentation(tailAdvanced, true);
+	prepareRuntimeOutputMutationPresentation(tailAdvanced);
 	markNativeRuntimeRangeRestitchPending(runtimeLineIndex, runtimeLineEndExclusive, structuralEdits,
 	                                      removedHeadCount);
 	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
@@ -13198,44 +13194,59 @@ MiniWindow *WorldView::hitTestMiniWindow(const QPoint &localPos, QString &hotspo
 	return nullptr;
 }
 
-void WorldView::callHotspotCallback(MiniWindow *window, const QString &hotspotId, const QString &callbackName,
-                                    int flags, const bool queueWhenCallbackLaneBusy) const
+void WorldView::callHotspotCallback(const MiniWindow *window, const QString &hotspotId,
+                                    const QString &callbackName, int flags,
+                                    const bool queueWhenCallbackLaneBusy) const
 {
 	if (!window || callbackName.isEmpty() || hotspotId.isEmpty())
 		return;
 	if (!m_runtime)
 		return;
+	// These values must remain owned across the synchronous Lua callback, which may replace the window state.
+	QString windowName     = window->name;
+	QString callbackPlugin = window->callbackPlugin;
 	m_runtime->setWordUnderMenu(QString(), true);
 	bool ok = false;
-	if (window->callbackPlugin.isEmpty())
-		ok = m_runtime->callWorldHotspotFunction(callbackName, flags, hotspotId, window->name,
-		                                         queueWhenCallbackLaneBusy);
+	if (callbackPlugin.isEmpty())
+		ok = m_runtime->callWorldHotspotFunction(callbackName, flags, hotspotId, windowName,
+		                                         queueWhenCallbackLaneBusy,
+		                                         m_windowAddHotspotReentryBlockedForMouseDispatch);
 	else
-		ok = m_runtime->callPluginHotspotFunction(window->callbackPlugin, callbackName, flags, hotspotId,
-		                                          window->name, queueWhenCallbackLaneBusy);
+		ok = m_runtime->callPluginHotspotFunction(callbackPlugin, callbackName, flags, hotspotId, windowName,
+		                                          queueWhenCallbackLaneBusy,
+		                                          m_windowAddHotspotReentryBlockedForMouseDispatch);
 	if (miniWindowMouseDebugEnabled())
 	{
-		miniWindowMouseDebug(
-		    QStringLiteral("callback window=%1 hotspot=%2 plugin=%3 fn=%4 flags=0x%5 ok=%6")
-		        .arg(window->name, hotspotId,
-		             window->callbackPlugin.isEmpty() ? QStringLiteral("<world>") : window->callbackPlugin,
-		             callbackName, QString::number(flags, 16),
-		             ok ? QStringLiteral("1") : QStringLiteral("0")));
+		miniWindowMouseDebug(QStringLiteral("callback window=%1 hotspot=%2 plugin=%3 fn=%4 flags=0x%5 ok=%6")
+		                         .arg(windowName, hotspotId,
+		                              callbackPlugin.isEmpty() ? QStringLiteral("<world>") : callbackPlugin,
+		                              callbackName, QString::number(flags, 16),
+		                              ok ? QStringLiteral("1") : QStringLiteral("0")));
 	}
 }
 
-void WorldView::cancelMouseOver(MiniWindow *window, const QString &hotspotId)
+bool WorldView::cancelMouseOver(MiniWindow *window, QString hotspotId)
 {
 	if (!window || hotspotId.isEmpty())
-		return;
-	const auto it = window->hotspots.find(hotspotId);
-	if (it != window->hotspots.end() && !it->cancelMouseOver.isEmpty())
-		callHotspotCallback(window, hotspotId, it->cancelMouseOver, withMiniWindowModifierFlags(0));
-	window->mouseOverHotspot.clear();
-	if (m_tooltipHotspot == hotspotId)
-		hideActiveHotspotTooltip();
+		return false;
+	// The hotspot ID is owned by this call because callers commonly pass window->mouseOverHotspot itself.
+	// Retain the window identity before clearing or dispatching Lua mutations as well.
+	const QString stableHotspotId  = std::move(hotspotId);
+	QString       stableWindowName = window->name;
+	const auto    it               = window->hotspots.find(stableHotspotId);
+	const quint64 instanceId       = it != window->hotspots.end() ? it->instanceId : 0;
+	const QString cancelCallback   = it != window->hotspots.end() ? it->cancelMouseOver : QString();
+	if (!cancelCallback.isEmpty())
+		callHotspotCallback(window, stableHotspotId, cancelCallback, withMiniWindowModifierFlags(0));
+	if (MiniWindow *currentWindow = m_runtime ? m_runtime->miniWindowMutable(stableWindowName) : nullptr;
+	    currentWindow && currentWindow->mouseOverHotspot == stableHotspotId)
+	{
+		currentWindow->mouseOverHotspot.clear();
+	}
+	invalidateMiniWindowHotspotInteraction(stableWindowName, stableHotspotId, instanceId);
 	clearPendingHotspotTooltip();
 	clearHotspotCursor();
+	return !cancelCallback.isEmpty();
 }
 
 void WorldView::clearHotspotCursor()
@@ -13458,14 +13469,32 @@ bool WorldView::handleMiniWindowMouseLeave(const QPoint &reportedPosition)
 }
 
 bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidget *source)
+
+{
+	return handleMiniWindowMouseMove(event, source, true);
+}
+
+bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidget *source,
+                                          const bool invokeRepeatedMouseOverCallback)
+
+{
+	return handleMiniWindowMouseMove(event, source, invokeRepeatedMouseOverCallback, nullptr);
+}
+
+bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidget *source,
+                                          const bool                          invokeRepeatedMouseOverCallback,
+                                          const MiniWindowHotspotInstanceMap *requiredAddedHotspots)
 {
 	if (!m_commandInteractionEnabled || !m_runtime || !m_outputStack)
 		return false;
+	QScopedValueRollback mouseDispatchGuard(m_windowAddHotspotReentryBlockedForMouseDispatch,
+	                                        m_windowAddHotspotReentryBlockedForMouseDispatch ||
+	                                            requiredAddedHotspots != nullptr);
 
-	const QPoint globalPos  = event->globalPosition().toPoint();
-	const QPoint local      = mapEventToOutputStack(event->position(), source);
-	QPoint       hitLocal   = local;
-	const QRect  outputRect = m_outputStack->rect();
+	const QPoint         globalPos  = event->globalPosition().toPoint();
+	const QPoint         local      = mapEventToOutputStack(event->position(), source);
+	QPoint               hitLocal   = local;
+	const QRect          outputRect = m_outputStack->rect();
 	if (!outputRect.contains(hitLocal))
 	{
 		if (m_capturedWindowName.isEmpty())
@@ -13483,7 +13512,23 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 
 	QString     hotspotId;
 	QString     windowName;
-	MiniWindow *window = hitTestMiniWindow(hitLocal, hotspotId, windowName);
+	MiniWindow *window                      = hitTestMiniWindow(hitLocal, hotspotId, windowName);
+	const auto  requiredAddedHotspotMatches = [&]
+	{
+		if (!window || hotspotId.isEmpty())
+			return false;
+		const auto candidateWindow = requiredAddedHotspots->constFind(windowName);
+		if (candidateWindow == requiredAddedHotspots->constEnd())
+			return false;
+		const auto candidateHotspot = candidateWindow->constFind(hotspotId);
+		if (candidateHotspot == candidateWindow->constEnd())
+			return false;
+		const auto currentHotspot = window->hotspots.constFind(hotspotId);
+		return currentHotspot != window->hotspots.constEnd() &&
+		       currentHotspot->instanceId == candidateHotspot.value();
+	};
+	if (requiredAddedHotspots && !requiredAddedHotspotMatches())
+		return false;
 	if (miniWindowMouseDebugEnabled())
 	{
 		miniWindowMouseDebug(
@@ -13497,7 +13542,8 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 		        .arg(m_capturedWindowName.isEmpty() ? QStringLiteral("<none>") : m_capturedWindowName));
 	}
 	if (m_runtime)
-		m_runtime->notifyMiniWindowMouseMoved(hitLocal.x(), hitLocal.y(), windowName);
+		m_runtime->notifyMiniWindowMouseMoved(hitLocal.x(), hitLocal.y(), windowName,
+		                                      m_windowAddHotspotReentryBlockedForMouseDispatch);
 
 	if (!m_capturedWindowName.isEmpty())
 	{
@@ -13520,6 +13566,7 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 	const QString previousHoverWindow = m_hoverWindowName;
 	if (windowName != previousHoverWindow)
 	{
+		bool cancellationCallbackDispatched = false;
 		if (!previousHoverWindow.isEmpty())
 		{
 			if (MiniWindow *oldWindow = m_runtime->miniWindowMutable(previousHoverWindow); oldWindow)
@@ -13528,7 +13575,18 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 				    miniWindowDisplayToContent(oldWindow, hitLocal - oldWindow->rect.topLeft());
 				oldWindow->lastMouseUpdate++;
 				if (!oldWindow->mouseOverHotspot.isEmpty())
-					cancelMouseOver(oldWindow, oldWindow->mouseOverHotspot);
+					cancellationCallbackDispatched = cancelMouseOver(oldWindow, oldWindow->mouseOverHotspot);
+			}
+		}
+		if (cancellationCallbackDispatched)
+		{
+			hotspotId.clear();
+			windowName.clear();
+			window = hitTestMiniWindow(hitLocal, hotspotId, windowName);
+			if (requiredAddedHotspots && !requiredAddedHotspotMatches())
+			{
+				m_hoverWindowName.clear();
+				return true;
 			}
 		}
 		m_hoverWindowName = windowName;
@@ -13553,37 +13611,71 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 		return !m_capturedWindowName.isEmpty();
 	}
 
-	const auto hotspotIt = window->hotspots.find(hotspotId);
-
 	if (currentHotspot != hotspotId)
 	{
+		bool cancellationCallbackDispatched = false;
 		if (!currentHotspot.isEmpty())
-			cancelMouseOver(window, currentHotspot);
-		window->mouseOverHotspot = hotspotId;
-		updateHotspotCursor(window, hotspotId);
-		if (hotspotIt != window->hotspots.end())
+			cancellationCallbackDispatched = cancelMouseOver(window, currentHotspot);
+		if (cancellationCallbackDispatched)
 		{
-			const QString mouseOverCallback = hotspotIt->mouseOver;
-			if (!mouseOverCallback.isEmpty())
-				callHotspotCallback(window, hotspotId, mouseOverCallback, withMiniWindowModifierFlags(0));
-			const auto refreshedHotspot = window->hotspots.find(hotspotId);
-			if (refreshedHotspot != window->hotspots.end() && !refreshedHotspot->tooltip.isEmpty())
+			hotspotId.clear();
+			windowName.clear();
+			window = hitTestMiniWindow(hitLocal, hotspotId, windowName);
+			if (requiredAddedHotspots && !requiredAddedHotspotMatches())
 			{
-				scheduleHotspotTooltip(hotspotId, formatHotspotTooltip(refreshedHotspot->tooltip), globalPos);
+				m_hoverWindowName.clear();
+				return true;
+			}
+			m_hoverWindowName = windowName;
+			if (!window || hotspotId.isEmpty())
+				return true;
+			window->lastMousePosition = miniWindowDisplayToContent(window, hitLocal - window->rect.topLeft());
+			window->lastMouseUpdate++;
+			if (!window->mouseOverHotspot.isEmpty() && window->mouseOverHotspot != hotspotId)
+				return true;
+		}
+		const auto hotspotIt = window->hotspots.find(hotspotId);
+		if (hotspotIt == window->hotspots.end())
+			return true;
+		const quint64 hotspotInstanceId = hotspotIt->instanceId;
+		window->mouseOverHotspot        = hotspotId;
+		updateHotspotCursor(window, hotspotId);
+		const QString mouseOverCallback = hotspotIt->mouseOver;
+		if (!mouseOverCallback.isEmpty())
+			callHotspotCallback(window, hotspotId, mouseOverCallback, withMiniWindowModifierFlags(0));
+		window = m_runtime->miniWindowMutable(windowName);
+		if (window)
+		{
+			const auto refreshedHotspot = window->hotspots.find(hotspotId);
+			if (refreshedHotspot != window->hotspots.end() &&
+			    refreshedHotspot->instanceId == hotspotInstanceId && !refreshedHotspot->tooltip.isEmpty())
+			{
+				scheduleMiniWindowHotspotTooltip(*window, hotspotId, *refreshedHotspot,
+				                                 formatHotspotTooltip(refreshedHotspot->tooltip), globalPos);
 			}
 		}
 	}
-	else if (hotspotIt != window->hotspots.end())
+	else
 	{
+		const auto hotspotIt = window->hotspots.find(hotspotId);
+		if (hotspotIt == window->hotspots.end())
+			return true;
+		const quint64 hotspotInstanceId = hotspotIt->instanceId;
 		const int     hotspotFlags      = hotspotIt->flags;
 		const QString mouseOverCallback = hotspotIt->mouseOver;
-		if ((hotspotFlags & 0x01) && !mouseOverCallback.isEmpty())
+		if (invokeRepeatedMouseOverCallback && (hotspotFlags & 0x01) && !mouseOverCallback.isEmpty())
 			callHotspotCallback(window, hotspotId, mouseOverCallback,
 			                    withMiniWindowModifierFlags(kMiniMouseNotFirst));
-		const auto refreshedHotspot = window->hotspots.find(hotspotId);
-		if (refreshedHotspot != window->hotspots.end() && !refreshedHotspot->tooltip.isEmpty())
+		window = m_runtime->miniWindowMutable(windowName);
+		if (window)
 		{
-			scheduleHotspotTooltip(hotspotId, formatHotspotTooltip(refreshedHotspot->tooltip), globalPos);
+			const auto refreshedHotspot = window->hotspots.find(hotspotId);
+			if (refreshedHotspot != window->hotspots.end() &&
+			    refreshedHotspot->instanceId == hotspotInstanceId && !refreshedHotspot->tooltip.isEmpty())
+			{
+				scheduleMiniWindowHotspotTooltip(*window, hotspotId, *refreshedHotspot,
+				                                 formatHotspotTooltip(refreshedHotspot->tooltip), globalPos);
+			}
 		}
 	}
 
@@ -13617,22 +13709,34 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 	}
 	if (!m_hoverWindowName.isEmpty())
 	{
-		MiniWindow *hoverWindow = m_runtime->miniWindowMutable(m_hoverWindowName);
+		MiniWindow *hoverWindow                    = m_runtime->miniWindowMutable(m_hoverWindowName);
+		bool        cancellationCallbackDispatched = false;
 		if (hoverWindow && !hoverWindow->mouseOverHotspot.isEmpty())
-			cancelMouseOver(hoverWindow, hoverWindow->mouseOverHotspot);
+			cancellationCallbackDispatched = cancelMouseOver(hoverWindow, hoverWindow->mouseOverHotspot);
 		m_hoverWindowName.clear();
+		if (cancellationCallbackDispatched)
+		{
+			hotspotId.clear();
+			windowName.clear();
+			window = hitTestMiniWindow(local, hotspotId, windowName, true);
+		}
 	}
 	if (!window)
 		return false;
 
-	m_hoverWindowName         = windowName;
-	const auto initialHotspot = window->hotspots.constFind(hotspotId);
-	const bool dragHandler =
-	    initialHotspot != window->hotspots.constEnd() &&
-	    (!initialHotspot->moveCallback.isEmpty() || !initialHotspot->releaseCallback.isEmpty());
-	setMiniWindowCallbackMousePosition(*window, local, true, dragHandler);
+	m_hoverWindowName = windowName;
 	if (!window->mouseOverHotspot.isEmpty())
-		cancelMouseOver(window, window->mouseOverHotspot);
+	{
+		if (cancelMouseOver(window, window->mouseOverHotspot))
+		{
+			hotspotId.clear();
+			windowName.clear();
+			window            = hitTestMiniWindow(local, hotspotId, windowName, true);
+			m_hoverWindowName = windowName;
+			if (!window)
+				return false;
+		}
+	}
 
 	if (hotspotId.isEmpty())
 	{
@@ -13641,6 +13745,13 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 		clearPendingHotspotTooltip();
 		return false;
 	}
+	const auto initialHotspot = window->hotspots.constFind(hotspotId);
+	if (initialHotspot == window->hotspots.constEnd())
+		return false;
+	const quint64 hotspotInstanceId = initialHotspot->instanceId;
+	const bool    dragHandler =
+	    !initialHotspot->moveCallback.isEmpty() || !initialHotspot->releaseCallback.isEmpty();
+	setMiniWindowCallbackMousePosition(*window, local, true, dragHandler);
 
 	int base = 0;
 	switch (event->button())
@@ -13676,10 +13787,16 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 		const QString mouseDownCallback = it->mouseDown;
 		if (!mouseDownCallback.isEmpty())
 			callHotspotCallback(window, hotspotId, mouseDownCallback, flags);
-		const auto refreshedHotspot = window->hotspots.find(hotspotId);
-		if (refreshedHotspot != window->hotspots.end() && !refreshedHotspot->tooltip.isEmpty())
+		window = m_runtime->miniWindowMutable(windowName);
+		if (window)
 		{
-			scheduleHotspotTooltip(hotspotId, refreshedHotspot->tooltip, globalPos);
+			const auto refreshedHotspot = window->hotspots.find(hotspotId);
+			if (refreshedHotspot != window->hotspots.end() &&
+			    refreshedHotspot->instanceId == hotspotInstanceId && !refreshedHotspot->tooltip.isEmpty())
+			{
+				scheduleMiniWindowHotspotTooltip(*window, hotspotId, *refreshedHotspot,
+				                                 formatHotspotTooltip(refreshedHotspot->tooltip), globalPos);
+			}
 		}
 	}
 
@@ -13722,21 +13839,32 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 		flushPendingCapturedMiniWindowDragMove(local);
 		pressedWindow =
 		    !m_capturedWindowName.isEmpty() ? m_runtime->miniWindowMutable(m_capturedWindowName) : nullptr;
+		hotspotId.clear();
+		windowName.clear();
+		windowUnderCursor = m_outputStack->rect().contains(rawLocal)
+		                        ? hitTestMiniWindow(rawLocal, hotspotId, windowName, true)
+		                        : nullptr;
 	}
 	QString previousDownHotspot;
+	quint64 previousDownHotspotInstanceId = 0;
+	QString pressedWindowName;
 	if (pressedWindow)
 	{
 		setMiniWindowCallbackMousePosition(*pressedWindow, local, true, dragCaptureActive);
-		previousDownHotspot = pressedWindow->mouseDownHotspot;
+		pressedWindowName         = pressedWindow->name;
+		previousDownHotspot       = pressedWindow->mouseDownHotspot;
+		const auto pressedHotspot = pressedWindow->hotspots.constFind(previousDownHotspot);
+		if (pressedHotspot != pressedWindow->hotspots.constEnd())
+			previousDownHotspotInstanceId = pressedHotspot->instanceId;
 		pressedWindow->mouseDownHotspot.clear();
 	}
 
 	stopMiniWindowMouseCapture();
 
-	if (pressedWindow && !previousDownHotspot.isEmpty())
+	if (pressedWindow && !previousDownHotspot.isEmpty() && previousDownHotspotInstanceId != 0)
 	{
-		const int flags = withMiniWindowModifierFlags(pressedWindow->flagsOnMouseDown);
-		auto      it    = pressedWindow->hotspots.find(previousDownHotspot);
+		const int  flags = withMiniWindowModifierFlags(pressedWindow->flagsOnMouseDown);
+		const auto it    = pressedWindow->hotspots.find(previousDownHotspot);
 		if (it != pressedWindow->hotspots.end())
 		{
 			const QString releaseCallback = it->releaseCallback;
@@ -13746,22 +13874,40 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 				                                      pressedWindow->name);
 				callHotspotCallback(pressedWindow, previousDownHotspot, releaseCallback, flags);
 			}
-			it = pressedWindow->hotspots.find(previousDownHotspot);
-			if (it != pressedWindow->hotspots.end())
+			pressedWindow = m_runtime->miniWindowMutable(pressedWindowName);
+			hotspotId.clear();
+			windowName.clear();
+			windowUnderCursor = m_outputStack->rect().contains(rawLocal)
+			                        ? hitTestMiniWindow(rawLocal, hotspotId, windowName, true)
+			                        : nullptr;
+			if (pressedWindow)
 			{
-				if (windowUnderCursor == pressedWindow && hotspotId == previousDownHotspot)
+				const auto refreshedHotspot = pressedWindow->hotspots.find(previousDownHotspot);
+				if (refreshedHotspot != pressedWindow->hotspots.end() &&
+				    refreshedHotspot->instanceId == previousDownHotspotInstanceId)
 				{
-					const QString mouseUpCallback = it->mouseUp;
-					if (!mouseUpCallback.isEmpty())
-						callHotspotCallback(pressedWindow, previousDownHotspot, mouseUpCallback, flags,
-						                    (flags & kMiniMouseRight) != 0);
-				}
-				else
-				{
-					const QString cancelMouseDownCallback = it->cancelMouseDown;
-					if (!cancelMouseDownCallback.isEmpty())
-						callHotspotCallback(pressedWindow, previousDownHotspot, cancelMouseDownCallback,
-						                    flags);
+					bool releasedOnPressedHotspot = false;
+					if (windowUnderCursor && windowName == pressedWindowName &&
+					    hotspotId == previousDownHotspot)
+					{
+						const auto hitHotspot    = windowUnderCursor->hotspots.constFind(hotspotId);
+						releasedOnPressedHotspot = hitHotspot != windowUnderCursor->hotspots.constEnd() &&
+						                           hitHotspot->instanceId == previousDownHotspotInstanceId;
+					}
+					if (releasedOnPressedHotspot)
+					{
+						const QString mouseUpCallback = refreshedHotspot->mouseUp;
+						if (!mouseUpCallback.isEmpty())
+							callHotspotCallback(pressedWindow, previousDownHotspot, mouseUpCallback, flags,
+							                    (flags & kMiniMouseRight) != 0);
+					}
+					else
+					{
+						const QString cancelMouseDownCallback = refreshedHotspot->cancelMouseDown;
+						if (!cancelMouseDownCallback.isEmpty())
+							callHotspotCallback(pressedWindow, previousDownHotspot, cancelMouseDownCallback,
+							                    flags);
+					}
 				}
 			}
 		}
@@ -13772,20 +13918,11 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 	m_hasPendingCapturedMiniWindowDragMove = false;
 
 	if (dragCaptureActive)
-	{
 		refreshMiniWindows();
-		if (m_outputStack->rect().contains(rawLocal))
-			handleMiniWindowMouseMove(event, source);
-		else
-			handleMiniWindowMouseLeave(rawLocal);
-	}
-	else if (windowUnderCursor)
-	{
-		windowUnderCursor->lastMousePosition =
-		    miniWindowDisplayToContent(windowUnderCursor, local - windowUnderCursor->rect.topLeft());
-		windowUnderCursor->lastMouseUpdate++;
+	if (m_outputStack->rect().contains(rawLocal))
 		handleMiniWindowMouseMove(event, source);
-	}
+	else
+		handleMiniWindowMouseLeave(rawLocal);
 
 	return true;
 }
@@ -13814,7 +13951,8 @@ bool WorldView::handleMiniWindowWheel(const QWheelEvent *event, const QWidget *s
 	if (delta < 0)
 		flags |= kMiniMouseScrollBack;
 	flags |= (qAbs(delta) << 16);
-	callHotspotCallback(window, hotspotId, it->scrollwheelCallback, withMiniWindowModifierFlags(flags));
+	const QString scrollwheelCallback = it->scrollwheelCallback;
+	callHotspotCallback(window, hotspotId, scrollwheelCallback, withMiniWindowModifierFlags(flags));
 	return true;
 }
 
@@ -14431,15 +14569,31 @@ void WorldView::applyTooltipVisibleTimeRuntimeSetting()
 void WorldView::scheduleHotspotTooltip(const QString &hotspotId, const QString &tooltipText,
                                        const QPoint &globalPos)
 {
+	scheduleHotspotTooltipOwned(hotspotId, tooltipText, globalPos, {}, 0);
+}
+
+void WorldView::scheduleMiniWindowHotspotTooltip(const MiniWindow &window, const QString &hotspotId,
+                                                 const MiniWindowHotspot &hotspot, const QString &tooltipText,
+                                                 const QPoint &globalPos)
+{
+	scheduleHotspotTooltipOwned(hotspotId, tooltipText, globalPos, window.name, hotspot.instanceId);
+}
+
+void WorldView::scheduleHotspotTooltipOwned(const QString &hotspotId, const QString &tooltipText,
+                                            const QPoint &globalPos, const QString &windowName,
+                                            const quint64 instanceId)
+{
 	if (tooltipText.isEmpty())
 		return;
 
 	if (m_tooltipTimer)
 		m_tooltipTimer->stop();
 
-	m_pendingTooltipHotspot   = hotspotId;
-	m_pendingTooltipText      = tooltipText;
-	m_pendingTooltipGlobalPos = globalPos;
+	m_pendingTooltipHotspot           = hotspotId;
+	m_pendingTooltipWindowName        = windowName;
+	m_pendingTooltipHotspotInstanceId = instanceId;
+	m_pendingTooltipText              = tooltipText;
+	m_pendingTooltipGlobalPos         = globalPos;
 
 	const int delay = tooltipStartDelayMs();
 	if (delay <= 0)
@@ -14462,14 +14616,20 @@ void WorldView::showScheduledHotspotTooltip()
 	if (g_activeHotspotTooltipOwner && g_activeHotspotTooltipOwner != this)
 	{
 		g_activeHotspotTooltipOwner->m_tooltipHotspot.clear();
+		g_activeHotspotTooltipOwner->m_activeTooltipWindowName.clear();
+		g_activeHotspotTooltipOwner->m_activeTooltipHotspotInstanceId = 0;
 		g_activeHotspotTooltipOwner->m_activeTooltipText.clear();
 		g_activeHotspotTooltipOwner->m_activeTooltipGlobalPos = {};
 	}
-	g_activeHotspotTooltipOwner = this;
-	m_tooltipHotspot            = m_pendingTooltipHotspot;
-	m_activeTooltipText         = m_pendingTooltipText;
-	m_activeTooltipGlobalPos    = m_pendingTooltipGlobalPos;
+	g_activeHotspotTooltipOwner      = this;
+	m_tooltipHotspot                 = m_pendingTooltipHotspot;
+	m_activeTooltipWindowName        = m_pendingTooltipWindowName;
+	m_activeTooltipHotspotInstanceId = m_pendingTooltipHotspotInstanceId;
+	m_activeTooltipText              = m_pendingTooltipText;
+	m_activeTooltipGlobalPos         = m_pendingTooltipGlobalPos;
 	m_pendingTooltipHotspot.clear();
+	m_pendingTooltipWindowName.clear();
+	m_pendingTooltipHotspotInstanceId = 0;
 	m_pendingTooltipText.clear();
 	m_pendingTooltipGlobalPos = {};
 }
@@ -14479,6 +14639,8 @@ void WorldView::clearPendingHotspotTooltip()
 	if (m_tooltipTimer)
 		m_tooltipTimer->stop();
 	m_pendingTooltipHotspot.clear();
+	m_pendingTooltipWindowName.clear();
+	m_pendingTooltipHotspotInstanceId = 0;
 	m_pendingTooltipText.clear();
 	m_pendingTooltipGlobalPos = {};
 }
@@ -14491,8 +14653,55 @@ void WorldView::hideActiveHotspotTooltip()
 		g_activeHotspotTooltipOwner = nullptr;
 	}
 	m_tooltipHotspot.clear();
+	m_activeTooltipWindowName.clear();
+	m_activeTooltipHotspotInstanceId = 0;
 	m_activeTooltipText.clear();
 	m_activeTooltipGlobalPos = {};
+}
+
+void WorldView::invalidateMiniWindowHotspotInteraction(const QString &windowName, const QString &hotspotId,
+                                                       const quint64 instanceId)
+{
+	if (instanceId == 0)
+		return;
+	if (m_pendingTooltipWindowName == windowName && m_pendingTooltipHotspot == hotspotId &&
+	    m_pendingTooltipHotspotInstanceId == instanceId)
+		clearPendingHotspotTooltip();
+	if (m_activeTooltipWindowName == windowName && m_tooltipHotspot == hotspotId &&
+	    m_activeTooltipHotspotInstanceId == instanceId)
+		hideActiveHotspotTooltip();
+	if (m_hoverWindowName == windowName)
+	{
+		const MiniWindow *window = m_runtime ? m_runtime->miniWindow(windowName) : nullptr;
+		if (!window || window->mouseOverHotspot.isEmpty() || window->mouseOverHotspot == hotspotId)
+			clearHotspotCursor();
+	}
+}
+
+void WorldView::refreshMiniWindowHotspotTooltip(const QString &windowName, const QString &hotspotId,
+                                                const quint64 instanceId, const QString &tooltipText)
+{
+	const QString formattedTooltip = formatHotspotTooltip(tooltipText);
+	if (m_pendingTooltipWindowName == windowName && m_pendingTooltipHotspot == hotspotId &&
+	    m_pendingTooltipHotspotInstanceId == instanceId)
+	{
+		if (formattedTooltip.isEmpty())
+			clearPendingHotspotTooltip();
+		else
+			m_pendingTooltipText = formattedTooltip;
+	}
+	if (m_activeTooltipWindowName != windowName || m_tooltipHotspot != hotspotId ||
+	    m_activeTooltipHotspotInstanceId != instanceId)
+		return;
+	if (formattedTooltip.isEmpty())
+	{
+		hideActiveHotspotTooltip();
+		return;
+	}
+	m_activeTooltipText = formattedTooltip;
+	if (g_activeHotspotTooltipOwner == this && QToolTip::isVisible())
+		QToolTip::showText(m_activeTooltipGlobalPos, m_activeTooltipText, this, QRect(),
+		                   tooltipVisibleDurationMs());
 }
 
 double WorldView::lineOpacityForTimestamp(const QDateTime &when) const

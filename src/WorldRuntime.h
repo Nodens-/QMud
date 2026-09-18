@@ -45,6 +45,7 @@
 #include <QtSql/QSqlQuery>
 #include <array>
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -74,6 +75,89 @@ namespace QMudNativePluginRegistry
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 struct lua_State;
 #endif
+
+/** @brief One accepted WindowResize operation in callback execution order. */
+struct LuaCallbackMiniWindowResizeMutation
+{
+		int  width{0};
+		int  height{0};
+		long colour{-1};
+};
+
+/**
+ * @brief Latest accepted WindowCreate transition for one callback-local miniwindow generation.
+ *
+ * WindowCreate reinitializes geometry and the backing surface while preserving fonts, images, z-order, and
+ * optionally hotspots. Keeping that transition separate prevents unrelated state from being mistaken for a
+ * whole-window replacement.
+ */
+struct LuaCallbackMiniWindowCreateMutation
+{
+		int                left{0};
+		int                top{0};
+		int                width{0};
+		int                height{0};
+		int                position{0};
+		int                flags{0};
+		QColor             background;
+		QString            pluginId;
+		QDateTime          installedAt;
+		std::optional<int> zOrder;
+		bool               clearHotspotsSinceBase{false};
+		bool               freshIdentityRequested{false};
+};
+
+/**
+ * @brief Applied semantic changes to one existing miniwindow for causal snapshot rebasing.
+ *
+ * Values are recorded only after the authoritative runtime accepts the callback mutation. Presentation surfaces
+ * and layout state are intentionally absent because they are not input-critical callback state.
+ */
+struct LuaCallbackMiniWindowCausalDelta
+{
+		quint64                                        expectedRuntimeId{0};
+		std::optional<int>                             width;
+		std::optional<int>                             height;
+		std::optional<int>                             position;
+		std::optional<int>                             flags;
+		std::optional<QColor>                          background;
+		std::optional<bool>                            show;
+		std::optional<QPoint>                          location;
+		std::optional<int>                             zOrder;
+		std::optional<QString>                         creatingPlugin;
+		std::optional<QDateTime>                       installedAt;
+		QVector<LuaCallbackMiniWindowResizeMutation>   resizes;
+		QHash<QString, std::optional<MiniWindowFont>>  fonts;
+		QHash<QString, std::optional<MiniWindowImage>> images;
+		QHash<QString, MiniWindowHotspotMutation>      hotspots;
+		QString                                        hotspotCallbackPlugin;
+		quint64                                        outputHotspotSerialBefore{0};
+		quint64                                        outputHotspotSerialAfter{0};
+		LuaCallbackMiniWindowSnapshotChanges           snapshotChanges;
+};
+
+/**
+ * @brief One accepted miniwindow operation replayed into causally later callback snapshots.
+ */
+struct LuaCallbackMiniWindowCausalMutation
+{
+		enum class Kind : quint8
+		{
+			Delta,
+			Create,
+			Remove,
+			Replace
+		};
+
+		Kind                                kind{Kind::Delta};
+		LuaCallbackMiniWindowCreateMutation create;
+		LuaCallbackMiniWindowCausalDelta    delta;
+		QSharedPointer<const MiniWindow>    replacement;
+};
+
+/** Applied miniwindow causal operations in runtime execution order. */
+using LuaCallbackMiniWindowCausalMutations = QVector<QPair<QString, LuaCallbackMiniWindowCausalMutation>>;
+
 /**
  * @brief Per-world runtime coordinator for connection, automation, and UI-facing state.
  *
@@ -99,6 +183,9 @@ class WorldRuntime : public QObject
 		friend class tst_LuaCallbackEngine;
 		friend class tst_WorldRuntime_SoundLifetime;
 		friend class tst_WorldRuntime_PluginLifecycle;
+		friend void QMudLuaDeferredRuntimeMutation::apply(QVector<LuaDeferredRuntimeMutationBatch> batches);
+		friend void
+		QMudLuaDeferredRuntimeMutation::applyLocallyOrQueue(QVector<LuaDeferredRuntimeMutationBatch> batches);
 
 	public:
 		static constexpr int kAcceleratorFirstCommand = 12000;
@@ -128,12 +215,19 @@ class WorldRuntime : public QObject
 		 */
 		struct WindowOutputTextRenderResult
 		{
-				int                                                         legacyValue{0};
-				bool                                                        succeeded{false};
+				int  legacyValue{0};
+				bool succeeded{false};
+				bool hotspotStateChanged{false};
+				bool hotspotMembershipChanged{false};
+				bool hotspotInteractionChanged{false};
 
-				[[nodiscard]] static constexpr WindowOutputTextRenderResult success(const int width) noexcept
+				[[nodiscard]] static constexpr WindowOutputTextRenderResult
+				success(const int width, const bool hotspotStateChanged = false,
+				        const bool hotspotMembershipChanged  = false,
+				        const bool hotspotInteractionChanged = false) noexcept
 				{
-					return {width, true};
+					return {width, true, hotspotStateChanged, hotspotMembershipChanged,
+					        hotspotInteractionChanged};
 				}
 				[[nodiscard]] static constexpr WindowOutputTextRenderResult failure(const int error) noexcept
 				{
@@ -216,49 +310,56 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] QString                       worldMultilineAttributeValue(const QString &key) const;
 		/**
+		 * @brief Normalizes a single-line world attribute exactly as runtime storage does.
+		 * @param key Attribute name.
+		 * @param value Candidate attribute value.
+		 * @return Value that setWorldAttribute stores.
+		 */
+		[[nodiscard]] static QString normalizeWorldAttributeValue(const QString &key, const QString &value);
+		/**
 		 * @brief Sets single-line world attribute value by key.
 		 * @param key Attribute name.
 		 * @param value Attribute value.
 		 */
-		void                    setWorldAttribute(const QString &key, const QString &value);
+		void                         setWorldAttribute(const QString &key, const QString &value);
 		/**
 		 * @brief Validates, stores, and applies one numeric world option.
 		 * @param option Canonical option-table entry.
 		 * @param value Public scripting value before any storage conversion.
 		 * @return Scripting error code.
 		 */
-		int                     setOptionItem(const WorldNumericOption &option, long long value);
+		int                          setOptionItem(const WorldNumericOption &option, long long value);
 		/**
 		 * @brief Sets multiline world attribute value by key.
 		 * @param key Attribute name.
 		 * @param value Attribute value.
 		 */
-		void                    setWorldMultilineAttribute(const QString &key, const QString &value);
+		void                         setWorldMultilineAttribute(const QString &key, const QString &value);
 		/**
 		 * @brief Returns parsed world file format version.
 		 * @return Parsed world file version number.
 		 */
-		[[nodiscard]] int       worldFileVersion() const;
+		[[nodiscard]] int            worldFileVersion() const;
 		/**
 		 * @brief Returns persisted QMud version string from file.
 		 * @return Persisted client version string from world file.
 		 */
-		[[nodiscard]] QString   qmudVersion() const;
+		[[nodiscard]] QString        qmudVersion() const;
 		/**
 		 * @brief Returns persisted save timestamp from world file.
 		 * @return World file save timestamp.
 		 */
-		[[nodiscard]] QDateTime dateSaved() const;
+		[[nodiscard]] QDateTime      dateSaved() const;
 		/**
 		 * @brief Adds script execution time sample in nanoseconds.
 		 * @param nanos Duration sample in nanoseconds.
 		 */
-		void                    addScriptTime(qint64 nanos);
+		void                         addScriptTime(qint64 nanos);
 		/**
 		 * @brief Returns cumulative script time in seconds.
 		 * @return Total script time in seconds.
 		 */
-		[[nodiscard]] double    scriptTimeSeconds() const;
+		[[nodiscard]] double         scriptTimeSeconds() const;
 
 		/**
 		 * @brief Live trigger state including runtime counters and last-match metadata.
@@ -397,6 +498,8 @@ class WorldRuntime : public QObject
 				int                                   sequence{QMudPluginSequence::kDefault};
 				/** Explicit world override for the effective sequence, absent when metadata supplies it. */
 				std::optional<int>                    dispatchSequenceOverride;
+				/** Last execution-eligibility transition used by in-flight callback recipient views. */
+				quint64                               callbackEligibilityRevision{0};
 				double                                version{0.0};
 				double                                requiredVersion{0.0};
 				QDateTime                             dateWritten;
@@ -712,6 +815,11 @@ class WorldRuntime : public QObject
 		 * @return Immutable trigger list.
 		 */
 		[[nodiscard]] const QList<Trigger> &triggers() const;
+		/**
+		 * @brief Allocates a process-wide stable identity for a rule created off the runtime thread.
+		 * @return Nonzero stable runtime identity.
+		 */
+		static quint64                      allocateRuleRuntimeId();
 		/**
 		 * @brief Ensures one trigger has a unique runtime identity.
 		 * @param trigger Trigger owned by this runtime.
@@ -1806,6 +1914,7 @@ class WorldRuntime : public QObject
 		/**
 		 * @brief Inserts or replaces callback output relative to a stable trigger output anchor.
 		 * @param anchorLineNumber Absolute line number of the trigger line captured at dispatch.
+		 * @param anchorBufferIndex One-based Lua buffer position captured with the anchor identity.
 		 * @param anchorRelativeOffset Zero-based output offset from the anchor line.
 		 * @param replaceAnchor Replace the hidden anchor entry instead of inserting after it.
 		 * @param text Output text.
@@ -1813,80 +1922,69 @@ class WorldRuntime : public QObject
 		 * @param spans Style spans.
 		 * @param hardReturn Hard-return state.
 		 * @param outputStreamId Callback output stream that owns the anchored insertion cursor.
+		 * @param anchorState Shared presentation state maintained with the insertion cursor.
+		 * @param resolvedAnchorBufferIndex Receives the anchor's current one-based position after the write.
 		 * @return `true` when runtime line state changed.
 		 */
-		bool writeLuaCallbackOutputAtLineAnchor(qint64 anchorLineNumber, int anchorRelativeOffset,
-		                                        bool replaceAnchor, const QString &text, int flags,
-		                                        const QVector<StyleSpan> &spans, bool hardReturn,
-		                                        quint64 outputStreamId = 0);
+		bool                 writeLuaCallbackOutputAtLineAnchor(
+		    qint64 anchorLineNumber, int anchorBufferIndex, int anchorRelativeOffset, bool replaceAnchor,
+		    const QString &text, int flags, const QVector<StyleSpan> &spans, bool hardReturn,
+		    quint64 outputStreamId = 0, const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState = {},
+		    int *resolvedAnchorBufferIndex = nullptr);
 		/**
 		 * @brief Parses ANSI callback output and writes it relative to a stable output anchor.
 		 * @return `true` when the anchored output was written.
 		 */
-		bool writeLuaCallbackAnsiOutputAtLineAnchor(qint64 anchorLineNumber, int anchorRelativeOffset,
-		                                            bool replaceAnchor, const QString &text, int flags,
-		                                            quint64 outputStreamId = 0);
+		bool writeLuaCallbackAnsiOutputAtLineAnchor(
+		    qint64 anchorLineNumber, int anchorBufferIndex, int anchorRelativeOffset, bool replaceAnchor,
+		    const QString &text, int flags, quint64 outputStreamId = 0,
+		    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState               = {},
+		    int                                                 *resolvedAnchorBufferIndex = nullptr);
+		/**
+		 * @brief Allocates a process-unique anchored-output insertion stream identifier.
+		 * @return Nonzero insertion stream identifier.
+		 */
+		[[nodiscard]] static quint64 allocateOutputInsertionStreamId();
 		/**
 		 * @brief Releases all anchored insertion cursors owned by a completed callback output stream.
 		 */
-		void releaseLuaCallbackOutputStream(quint64 outputStreamId);
+		void                         releaseLuaCallbackOutputStream(quint64 outputStreamId);
 		/**
 		 * @brief Returns currently retained callback output cursors for regression diagnostics.
 		 */
-		[[nodiscard]] qsizetype luaCallbackOutputCursorCount() const;
-		/**
-		 * @brief Returns the number of full-buffer anchor-position scans performed by callback output.
-		 *
-		 * This diagnostic counter is used to guard the anchored-output positioning complexity without
-		 * relying on wall-clock timing in regression tests.
-		 */
-		[[nodiscard]] quint64   luaCallbackOutputPositionFullScanCount() const;
-		/**
-		 * @brief Returns the number of line-entry copies made by callback matched-line resolution.
-		 *
-		 * The counter guards against copying every rejected candidate while resolving a stale
-		 * callback buffer index. A successful resolution copies only the selected entry.
-		 *
-		 * @return Cumulative matched-line resolution entry-copy count.
-		 */
-		[[nodiscard]] quint64   luaCallbackMatchedLineResolutionEntryCopyCount() const;
-		/**
-		 * @brief Returns the number of full-buffer scans used to repair stale callback matched-line indexes.
-		 * @return Cumulative matched-line resolution full-scan count.
-		 */
-		[[nodiscard]] quint64   luaCallbackMatchedLineResolutionFullScanCount() const;
+		[[nodiscard]] qsizetype      luaCallbackOutputCursorCount() const;
 		/**
 		 * @brief Begins a runtime-output view notification batch.
 		 */
-		void                    beginOutputViewMutationBatch();
+		void                         beginOutputViewMutationBatch();
 		/**
 		 * @brief Ends a runtime-output view notification batch and flushes pending view refresh.
 		 */
-		void                    endOutputViewMutationBatch();
+		void                         endOutputViewMutationBatch();
 		/**
 		 * @brief Ends current incoming-line Lua context.
 		 */
-		void                    endIncomingLineLuaContext();
+		void                         endIncomingLineLuaContext();
 		/**
 		 * @brief Marks current Lua-context line as buffered.
 		 */
-		void                    markIncomingLineLuaContextBuffered();
+		void                         markIncomingLineLuaContextBuffered();
 		/**
 		 * @brief Marks current Lua-context line as committed.
 		 */
-		void                    markIncomingLineLuaContextCommitted();
+		void                         markIncomingLineLuaContextCommitted();
 		/**
 		 * @brief Returns the current incoming line's one-based presentation index.
 		 * @return Incoming line index, or zero when no incoming line is active.
 		 */
-		[[nodiscard]] int       incomingLineLuaContextBufferIndex() const;
+		[[nodiscard]] int            incomingLineLuaContextBufferIndex() const;
 		/**
 		 * @brief Returns buffered Lua-context line entry by index.
 		 * @param lineNumber One-based buffer-presentation index.
 		 * @param entry Output line entry.
 		 * @return `true` when the line exists.
 		 */
-		bool                    luaContextLineEntry(int lineNumber, LineEntry &entry) const;
+		bool                         luaContextLineEntry(int lineNumber, LineEntry &entry) const;
 		/**
 		 * @brief Returns Lua-context/buffer line entry by absolute line number.
 		 * @param absoluteLineNumber Absolute line number from `LineEntry::lineNumber`.
@@ -2233,14 +2331,16 @@ class WorldRuntime : public QObject
 		 * @param pluginId Owning plugin id.
 		 * @param renderContext ANSI/MXP/custom-element render context.
 		 * @param metricsOut Optional render metrics output.
+		 * @param addedHotspotIdsOut Optional ids of link hotspots created by this render.
+		 * @param removedHotspotIdsOut Optional ids of generated hotspots removed by this render.
 		 * @return Rendered width in pixels or API error code.
 		 */
-		static WindowOutputTextRenderResult
-		renderWindowOutputText(MiniWindow &window, const QString &fontId, const QString &text, int left,
-		                       int top, int right, int bottom, long colour, const QString &mouseUp,
-		                       const QString &hotspotPrefix, const QString &pluginId,
-		                       WindowOutputTextRenderContext renderContext,
-		                       WindowOutputMetrics          *metricsOut = nullptr);
+		static WindowOutputTextRenderResult renderWindowOutputText(
+		    MiniWindow &window, const QString &fontId, const QString &text, int left, int top, int right,
+		    int bottom, long colour, const QString &mouseUp, const QString &hotspotPrefix,
+		    const QString &pluginId, WindowOutputTextRenderContext renderContext,
+		    WindowOutputMetrics *metricsOut = nullptr, QStringList *addedHotspotIdsOut = nullptr,
+		    QStringList *removedHotspotIdsOut = nullptr);
 		/**
 		 * @brief Measures text width for a miniwindow font.
 		 * @param name Miniwindow name.
@@ -3526,6 +3626,7 @@ class WorldRuntime : public QObject
 		 * @brief Dispatches a Lua callback with positional/wildcard arguments.
 		 * @param engine Target Lua engine reference.
 		 * @param functionName Callback function name.
+		 * @param callbackEvent Runtime event that caused this routine invocation.
 		 * @param args Positional callback arguments.
 		 * @param wildcards Wildcard argument list.
 		 * @param namedWildcards Named wildcard map.
@@ -3537,7 +3638,7 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] LuaBatchDispatchResult dispatchLuaStringsAndWildcards(
 		    const QSharedPointer<LuaCallbackEngine> &engine, const QString &functionName,
-		    const QStringList &args, const QStringList &wildcards = {},
+		    LuaCallbackEvent callbackEvent, const QStringList &args, const QStringList &wildcards = {},
 		    const QMap<QString, QString> &namedWildcards = {},
 		    const QVector<LuaStyleRun> *styleRuns = nullptr, bool triggerOutputReplacesMatchedLine = false,
 		    int triggerMatchedLineBufferIndex = 0, qint64 triggerMatchedLineAbsoluteNumber = 0) const;
@@ -3545,6 +3646,7 @@ class WorldRuntime : public QObject
 		 * @brief Queues a Lua callback with positional/wildcard arguments.
 		 * @param engine Target Lua engine reference.
 		 * @param functionName Callback function name.
+		 * @param callbackEvent Runtime event that caused this routine invocation.
 		 * @param args Positional callback arguments.
 		 * @param wildcards Wildcard argument list.
 		 * @param namedWildcards Named wildcard map.
@@ -3557,7 +3659,7 @@ class WorldRuntime : public QObject
 		 */
 		void dispatchLuaStringsAndWildcardsAsync(
 		    const QSharedPointer<LuaCallbackEngine> &engine, const QString &functionName,
-		    const QStringList &args, const QStringList &wildcards = {},
+		    LuaCallbackEvent callbackEvent, const QStringList &args, const QStringList &wildcards = {},
 		    const QMap<QString, QString> &namedWildcards = {},
 		    const QVector<LuaStyleRun> *styleRuns = nullptr, int actionSourceOverride = -1,
 		    bool triggerOutputReplacesMatchedLine = false, int triggerMatchedLineBufferIndex = 0,
@@ -3567,6 +3669,7 @@ class WorldRuntime : public QObject
 		 * @brief Dispatches a Lua callback with positional/wildcard arguments.
 		 * @param engine Target Lua engine.
 		 * @param functionName Callback function name.
+		 * @param callbackEvent Runtime event that caused this routine invocation.
 		 * @param args Positional callback arguments.
 		 * @param wildcards Wildcard argument list.
 		 * @param namedWildcards Named wildcard map.
@@ -3577,8 +3680,9 @@ class WorldRuntime : public QObject
 		 * @return Structured dispatch result.
 		 */
 		[[nodiscard]] LuaBatchDispatchResult dispatchLuaStringsAndWildcards(
-		    LuaCallbackEngine *engine, const QString &functionName, const QStringList &args,
-		    const QStringList &wildcards = {}, const QMap<QString, QString> &namedWildcards = {},
+		    LuaCallbackEngine *engine, const QString &functionName, LuaCallbackEvent callbackEvent,
+		    const QStringList &args, const QStringList &wildcards = {},
+		    const QMap<QString, QString> &namedWildcards = {},
 		    const QVector<LuaStyleRun> *styleRuns = nullptr, bool triggerOutputReplacesMatchedLine = false,
 		    int triggerMatchedLineBufferIndex = 0, qint64 triggerMatchedLineAbsoluteNumber = 0) const;
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
@@ -3618,6 +3722,7 @@ class WorldRuntime : public QObject
 		 * @param engine Target Lua engine reference.
 		 * @param code Lua script source.
 		 * @param description Human-readable script description.
+		 * @param callbackEvent Runtime event that caused this script invocation.
 		 * @param styleRuns Optional style-run payload.
 		 * @param hasTriggerContext Whether the script runs with trigger-line context.
 		 * @param triggerOutputReplacesMatchedLine Whether trigger output replaces the matched line.
@@ -3625,18 +3730,17 @@ class WorldRuntime : public QObject
 		 * @param triggerMatchedLineAbsoluteNumber Absolute line number of the trigger-matched line.
 		 * @return `true` when script execution succeeded.
 		 */
-		[[nodiscard]] bool dispatchLuaExecuteScript(const QSharedPointer<LuaCallbackEngine> &engine,
-		                                            const QString &code, const QString &description,
-		                                            const QVector<LuaStyleRun> *styleRuns         = nullptr,
-		                                            bool                        hasTriggerContext = false,
-		                                            bool   triggerOutputReplacesMatchedLine       = false,
-		                                            int    triggerMatchedLineBufferIndex          = 0,
-		                                            qint64 triggerMatchedLineAbsoluteNumber       = 0) const;
+		[[nodiscard]] bool dispatchLuaExecuteScript(
+		    const QSharedPointer<LuaCallbackEngine> &engine, const QString &code, const QString &description,
+		    LuaCallbackEvent callbackEvent, const QVector<LuaStyleRun> *styleRuns = nullptr,
+		    bool hasTriggerContext = false, bool triggerOutputReplacesMatchedLine = false,
+		    int triggerMatchedLineBufferIndex = 0, qint64 triggerMatchedLineAbsoluteNumber = 0) const;
 		/**
 		 * @brief Queues a Lua script block through the callback lane without blocking the runtime thread.
 		 * @param engine Target Lua engine reference.
 		 * @param code Lua script source.
 		 * @param description Human-readable script description.
+		 * @param callbackEvent Runtime event that caused this script invocation.
 		 * @param styleRuns Optional style-run payload.
 		 * @param hasTriggerContext Whether the script runs with trigger-line context.
 		 * @param triggerOutputReplacesMatchedLine Whether trigger output replaces the matched line.
@@ -3644,11 +3748,12 @@ class WorldRuntime : public QObject
 		 * @param triggerMatchedLineAbsoluteNumber Absolute line number of the trigger-matched line.
 		 * @param completion Optional completion receiving success status after runtime-side mutation flush.
 		 */
-		void               dispatchLuaExecuteScriptAsync(
+		void dispatchLuaExecuteScriptAsync(
 		    const QSharedPointer<LuaCallbackEngine> &engine, const QString &code, const QString &description,
-		    const QVector<LuaStyleRun> *styleRuns = nullptr, bool hasTriggerContext = false,
-		    bool triggerOutputReplacesMatchedLine = false, int triggerMatchedLineBufferIndex = 0,
-		    qint64 triggerMatchedLineAbsoluteNumber = 0, std::function<void(bool)> completion = {}) const;
+		    LuaCallbackEvent callbackEvent, const QVector<LuaStyleRun> *styleRuns = nullptr,
+		    bool hasTriggerContext = false, bool triggerOutputReplacesMatchedLine = false,
+		    int triggerMatchedLineBufferIndex = 0, qint64 triggerMatchedLineAbsoluteNumber = 0,
+		    std::function<void(bool)> completion = {}) const;
 		/**
 		 * @brief Returns whether any executable plugin currently exposes a callback function.
 		 * @param functionName Callback function name.
@@ -3660,6 +3765,7 @@ class WorldRuntime : public QObject
 		 * @param engine Target Lua engine.
 		 * @param code Lua script source.
 		 * @param description Human-readable script description.
+		 * @param callbackEvent Runtime event that caused this script invocation.
 		 * @param styleRuns Optional style-run payload.
 		 * @param hasTriggerContext Whether the script runs with trigger-line context.
 		 * @param triggerOutputReplacesMatchedLine Whether trigger output replaces the matched line.
@@ -3667,13 +3773,11 @@ class WorldRuntime : public QObject
 		 * @param triggerMatchedLineAbsoluteNumber Absolute line number of the trigger-matched line.
 		 * @return `true` when script execution succeeded.
 		 */
-		[[nodiscard]] bool dispatchLuaExecuteScript(LuaCallbackEngine *engine, const QString &code,
-		                                            const QString              &description,
-		                                            const QVector<LuaStyleRun> *styleRuns         = nullptr,
-		                                            bool                        hasTriggerContext = false,
-		                                            bool   triggerOutputReplacesMatchedLine       = false,
-		                                            int    triggerMatchedLineBufferIndex          = 0,
-		                                            qint64 triggerMatchedLineAbsoluteNumber       = 0) const;
+		[[nodiscard]] bool dispatchLuaExecuteScript(
+		    LuaCallbackEngine *engine, const QString &code, const QString &description,
+		    LuaCallbackEvent callbackEvent, const QVector<LuaStyleRun> *styleRuns = nullptr,
+		    bool hasTriggerContext = false, bool triggerOutputReplacesMatchedLine = false,
+		    int triggerMatchedLineBufferIndex = 0, qint64 triggerMatchedLineAbsoluteNumber = 0) const;
 		/**
 		 * @brief Resets and reloads the Lua state for a target engine.
 		 * @param engine Target Lua engine reference.
@@ -4483,15 +4587,12 @@ class WorldRuntime : public QObject
 		[[nodiscard]] int sendCommandWithTriggerPriority(const QString &text, bool echo, bool queue, bool log,
 		                                                 bool history) const;
 		/**
-		 * @brief Defers an immediate command send until current inbound world data finishes processing.
-		 * @param text Command line text.
-		 * @param echo Echo command when `true`.
-		 * @param log Log command when `true`.
-		 * @param triggerPriority Place command in the inbound trigger-priority band when `true`.
-		 * @return `true` when the command was deferred.
+		 * @brief Tries to stage encoded command bytes until current inbound world data finishes processing.
+		 * @param payload Encoded and telnet-escaped command bytes, consumed only when staged.
+		 * @param triggerPriority Place bytes in the inbound trigger-priority band when `true`.
+		 * @return `true` when the transmission was deferred.
 		 */
-		[[nodiscard]] bool deferInboundImmediateCommand(const QString &text, bool echo, bool log,
-		                                                bool triggerPriority) const;
+		[[nodiscard]] bool tryDeferInboundTransmission(QByteArray &payload, bool triggerPriority);
 		/**
 		 * @brief Command-processor bridge, accelerators, and plugin callbacks.
 		 */
@@ -4909,8 +5010,10 @@ class WorldRuntime : public QObject
 		 * @param x Mouse x coordinate.
 		 * @param y Mouse y coordinate.
 		 * @param windowName Miniwindow name.
+		 * @param windowAddHotspotReentryBlocked Preserve WindowAddHotspot's add-induced callback guard.
 		 */
-		void notifyMiniWindowMouseMoved(int x, int y, const QString &windowName);
+		void notifyMiniWindowMouseMoved(int x, int y, const QString &windowName,
+		                                bool windowAddHotspotReentryBlocked = false);
 		/**
 		 * @brief Dispatches output-resized notification.
 		 */
@@ -5233,34 +5336,59 @@ class WorldRuntime : public QObject
 		};
 		struct LuaCallbackOutputInsertionCursor
 		{
-				qint64 cursorLineNumber{0};
-				qint64 anchorPosition{-1};
-				qint64 cursorPosition{-1};
+				qint64                                        cursorLineNumber{0};
+				qint64                                        anchorPosition{-1};
+				qint64                                        cursorPosition{-1};
+				std::shared_ptr<LuaCallbackOutputAnchorState> trackedAnchorState;
 		};
+		struct LuaContextBufferPresentation;
 		struct LuaCallbackOutputPosition
 		{
 				int anchorIndex{-1};
 				int insertionIndex{-1};
 		};
 		bool outputAnsiTextInternal(const QString &text, bool note, bool finishLine, qint64 anchorLineNumber,
-		                            int anchorRelativeOffset, bool replaceAnchor, int flags,
-		                            quint64 outputStreamId = 0);
-		bool writeLuaCallbackOutputSegmentsAtLineAnchor(qint64 anchorLineNumber, int anchorRelativeOffset,
-		                                                bool                             replaceAnchor,
-		                                                const LuaCallbackOutputPosition &position,
-		                                                const QVector<LineEntry> &segments, int flags,
-		                                                quint64            outputStreamId,
-		                                                const QStringList &screenDrawLines);
-		[[nodiscard]] bool resolveLuaCallbackOutputPosition(qint64 anchorLineNumber, int anchorRelativeOffset,
-		                                                    bool replaceAnchor, quint64 outputStreamId,
-		                                                    LuaCallbackOutputPosition &position);
-		void               insertOutputLineRange(int insertionIndex, QVector<LineEntry> entries);
+		                            int anchorBufferIndex, int anchorRelativeOffset, bool replaceAnchor,
+		                            int flags, quint64 outputStreamId = 0,
+		                            const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState = {},
+		                            int *resolvedAnchorBufferIndex = nullptr);
+		[[nodiscard]] QVector<StyleSpan> inputEchoStyleSpans(const QString &text) const;
+		bool                             writeLuaCallbackOutputSegmentsAtLineAnchor(
+		    qint64 anchorLineNumber, int anchorRelativeOffset, bool replaceAnchor,
+		    const LuaCallbackOutputPosition &position, const QVector<LineEntry> &segments, int flags,
+		    quint64 outputStreamId, const QStringList &screenDrawLines,
+		    const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState, int *resolvedAnchorBufferIndex);
+		/**
+		 * @brief Resolves an anchored-output cursor's current one-based Lua buffer position.
+		 * @return Current anchor position, or zero when the anchor is no longer present.
+		 */
+		[[nodiscard]] int luaCallbackOutputAnchorBufferIndex(quint64 outputStreamId,
+		                                                     qint64  anchorLineNumber) const;
+		[[nodiscard]] bool
+		registerLuaCallbackOutputAnchor(quint64 outputStreamId, qint64 anchorLineNumber,
+		                                int anchorBufferIndex,
+		                                const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState);
+		void
+		invalidateLuaCallbackOutputAnchor(quint64 outputStreamId, qint64 anchorLineNumber,
+		                                  const std::shared_ptr<LuaCallbackOutputAnchorState> &anchorState);
+		void indexLuaCallbackOutputCursor(const LuaCallbackOutputCursorKey &key);
+		void unindexLuaCallbackOutputCursor(const LuaCallbackOutputCursorKey &key);
+		void refreshTrackedLuaCallbackOutputAnchor(const LuaCallbackOutputCursorKey       &key,
+		                                           const LuaCallbackOutputInsertionCursor &cursor,
+		                                           const LuaContextBufferPresentation     &presentation);
+		void refreshTrackedLuaCallbackOutputAnchorsForLine(qint64 anchorLineNumber);
+		void invalidateTrackedLuaCallbackOutputAnchors();
+		[[nodiscard]] bool    resolveLuaCallbackOutputPosition(qint64 anchorLineNumber, int anchorBufferIndex,
+		                                                       int anchorRelativeOffset, bool replaceAnchor,
+		                                                       quint64                    outputStreamId,
+		                                                       LuaCallbackOutputPosition &position);
+		void                  insertOutputLineRange(int insertionIndex, QVector<LineEntry> entries);
 		/**
 		 * @brief Appends one output entry while maintaining line-number topology metadata.
 		 * @param entry Entry to append.
 		 */
-		void               appendOutputLine(LineEntry entry);
-		[[nodiscard]] int  openOutputPrefixColumnsBeforeIndex(int insertionIndex) const;
+		void                  appendOutputLine(LineEntry entry);
+		[[nodiscard]] int     openOutputPrefixColumnsBeforeIndex(int insertionIndex) const;
 		[[nodiscard]] QString openOutputTextBeforeIndex(int insertionIndex) const;
 		/**
 		 * @brief Captures runtime counters using already-resolved Note colors.
@@ -5275,11 +5403,11 @@ class WorldRuntime : public QObject
 		// Internal plugin-callback, chat, save-snapshot, and log-rotation helpers.
 		/**
 		 * @brief Runs plugin callbacks until one returns false.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param payload Callback payload text.
 		 * @return `true` when all callbacks returned true.
 		 */
-		bool callPluginCallbacksStopOnFalse(const QString &functionName, const QString &payload);
+		bool callPluginCallbacksStopOnFalse(LuaCallbackEvent callbackEvent, const QString &payload);
 		/**
 		 * @brief Dispatches one no-argument Lua callback to a specific engine.
 		 * @param engine Target callback engine.
@@ -5290,6 +5418,16 @@ class WorldRuntime : public QObject
 		void dispatchSingleEngineNoArgCallback(const QSharedPointer<LuaCallbackEngine> &engine,
 		                                       const QString &functionName, bool completionBarrier,
 		                                       bool defaultResult = true);
+		/**
+		 * @brief Dispatches one authoritative no-argument plugin event to a specific engine.
+		 * @param engine Target callback engine.
+		 * @param callbackEvent Plugin callback event identity.
+		 * @param completionBarrier Wait for callback completion when `true`.
+		 * @param defaultResult Default callback result fallback.
+		 */
+		void dispatchSingleEngineNoArgPluginCallback(const QSharedPointer<LuaCallbackEngine> &engine,
+		                                             LuaCallbackEvent callbackEvent, bool completionBarrier,
+		                                             bool defaultResult = true);
 		/**
 		 * @brief Dispatches a world-attribute no-argument callback if configured.
 		 * @param attributeName World attribute containing callback function name.
@@ -5368,44 +5506,45 @@ class WorldRuntime : public QObject
 		void cancelStartTlsFallbackTimer();
 		/**
 		 * @brief Runs plugin callbacks with string payload.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param payload Callback payload text.
 		 * @param completionBarrier Wait for callback completion when `true`.
 		 */
-		void callPluginCallbacks(const QString &functionName, const QString &payload, bool completionBarrier);
+		void callPluginCallbacks(LuaCallbackEvent callbackEvent, const QString &payload,
+		                         bool completionBarrier);
 		/**
 		 * @brief Runs plugin callbacks without arguments.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param completionBarrier Wait for callback completion when `true`.
 		 */
-		void callPluginCallbacksNoArgs(const QString &functionName, bool completionBarrier);
+		void callPluginCallbacksNoArgs(LuaCallbackEvent callbackEvent, bool completionBarrier);
 		/**
 		 * @brief Runs callbacks until one returns true.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param arg1 Numeric callback argument.
 		 * @param arg2 String callback argument.
 		 * @return `true` when any callback returned true.
 		 */
-		bool callPluginCallbacksStopOnTrue(const QString &functionName, long arg1, const QString &arg2);
+		bool callPluginCallbacksStopOnTrue(LuaCallbackEvent callbackEvent, long arg1, const QString &arg2);
 		/**
 		 * @brief Runs callbacks until one returns true with string payload.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param payload Callback payload text.
 		 * @return `true` when any callback returned true.
 		 */
-		bool callPluginCallbacksStopOnTrueWithString(const QString &functionName, const QString &payload);
+		bool callPluginCallbacksStopOnTrueWithString(LuaCallbackEvent callbackEvent, const QString &payload);
 		/**
 		 * @brief Applies plugin byte-transform callbacks in sequence.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param payload Byte payload transformed in place.
 		 */
-		void callPluginCallbacksTransformBytes(const QString &functionName, QByteArray &payload);
+		void callPluginCallbacksTransformBytes(LuaCallbackEvent callbackEvent, QByteArray &payload);
 		/**
 		 * @brief Applies plugin string-transform callbacks in sequence.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param payload String payload transformed in place.
 		 */
-		void callPluginCallbacksTransformString(const QString &functionName, QString &payload);
+		void callPluginCallbacksTransformString(LuaCallbackEvent callbackEvent, QString &payload);
 		/**
 		 * @brief Synchronizes the Telnet NAWS enabled state from current world settings.
 		 * @return `true` when text-rectangle compatibility is active and therefore disables NAWS.
@@ -5429,67 +5568,69 @@ class WorldRuntime : public QObject
 		void               clearAnsiActionContext();
 		/**
 		 * @brief Runs callbacks with numeric and string arguments.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param arg1 Numeric callback argument.
 		 * @param arg2 String callback argument.
 		 * @param completionBarrier Wait for callback completion when `true`.
 		 */
-		void callPluginCallbacksWithNumberAndString(const QString &functionName, long arg1,
+		void callPluginCallbacksWithNumberAndString(LuaCallbackEvent callbackEvent, long arg1,
 		                                            const QString &arg2, bool completionBarrier);
 		/**
 		 * @brief Runs callbacks with byte payload.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param payload Byte payload.
 		 * @param completionBarrier Wait for callback completion when `true`.
 		 */
-		void callPluginCallbacksWithBytes(const QString &functionName, const QByteArray &payload,
+		void callPluginCallbacksWithBytes(LuaCallbackEvent callbackEvent, const QByteArray &payload,
 		                                  bool completionBarrier);
 		/**
 		 * @brief Runs byte callbacks until one returns true.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param arg1 Numeric callback argument.
 		 * @param payload Byte payload.
 		 * @return `true` when any callback returned true.
 		 */
-		bool callPluginCallbacksStopOnTrueBytes(const QString &functionName, long arg1,
+		bool callPluginCallbacksStopOnTrueBytes(LuaCallbackEvent callbackEvent, long arg1,
 		                                        const QByteArray &payload);
 		/**
 		 * @brief Runs callbacks with numeric and byte arguments.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param arg1 Numeric callback argument.
 		 * @param payload Byte payload.
 		 * @param completionBarrier Wait for callback completion when `true`.
 		 */
-		void callPluginCallbacksWithNumberAndBytes(const QString &functionName, long arg1,
+		void callPluginCallbacksWithNumberAndBytes(LuaCallbackEvent callbackEvent, long arg1,
 		                                           const QByteArray &payload, bool completionBarrier);
 		/**
 		 * @brief Runs callbacks with two numbers and string.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param arg1 First numeric callback argument.
 		 * @param arg2 Second numeric callback argument.
 		 * @param arg3 String callback argument.
 		 * @param completionBarrier Wait for callback completion when `true`.
+		 * @param windowAddHotspotReentryBlocked Preserve WindowAddHotspot's add-induced callback guard.
 		 */
-		void callPluginCallbacksWithTwoNumbersAndString(const QString &functionName, long arg1, long arg2,
-		                                                const QString &arg3, bool completionBarrier);
+		void callPluginCallbacksWithTwoNumbersAndString(LuaCallbackEvent callbackEvent, long arg1, long arg2,
+		                                                const QString &arg3, bool completionBarrier,
+		                                                bool windowAddHotspotReentryBlocked = false);
 		/**
 		 * @brief Runs callbacks until one returns false.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param arg1 Numeric callback argument.
 		 * @param arg2 String callback argument.
 		 * @return `true` when all callbacks returned true.
 		 */
-		bool callPluginCallbacksStopOnFalseWithNumberAndString(const QString &functionName, long arg1,
+		bool callPluginCallbacksStopOnFalseWithNumberAndString(LuaCallbackEvent callbackEvent, long arg1,
 		                                                       const QString &arg2);
 		/**
 		 * @brief Runs callbacks until one returns false.
-		 * @param functionName Callback function name.
+		 * @param callbackEvent Authoritative callback event identity.
 		 * @param arg1 First numeric callback argument.
 		 * @param arg2 Second numeric callback argument.
 		 * @param arg3 String callback argument.
 		 * @return `true` when all callbacks returned true.
 		 */
-		bool callPluginCallbacksStopOnFalseWithTwoNumbersAndString(const QString &functionName, long arg1,
+		bool callPluginCallbacksStopOnFalseWithTwoNumbersAndString(LuaCallbackEvent callbackEvent, long arg1,
 		                                                           long arg2, const QString &arg3);
 		/**
 		 * @brief Returns whether any executable plugin exposes a callback function.
@@ -5511,19 +5652,43 @@ class WorldRuntime : public QObject
 		                                                  const QSet<QString> &presentCallbacks,
 		                                                  const QSet<QString> &luaFunctions);
 		/**
+		 * @brief Schedules owner-thread publication of pending worker callback catalogs.
+		 *
+		 * Reports are coalesced, stable-state publication occurs only when catalog content changes, and the
+		 * recipient cache is dirtied only when callback presence changes.
+		 */
+		void schedulePendingObservedPluginCallbackPresencePublication();
+		/**
+		 * @brief Describes authoritative callback-catalog changes found while draining worker reports.
+		 */
+		struct PluginCallbackCatalogChanges
+		{
+				bool               callbackPresence{false};
+				bool               luaFunctions{false};
+
+				/**
+				 * @brief Returns whether either catalog changed.
+				 * @return `true` when stable plugin snapshot publication is required.
+				 */
+				[[nodiscard]] bool any() const noexcept
+				{
+					return callbackPresence || luaFunctions;
+				}
+		};
+		/**
 		 * @brief Drains pending callback-catalog snapshots while the Plugins domain is already being populated.
-		 * @return `true` when cache content changed.
+		 * @return Independently classified callback-presence and Lua-function changes.
 		 *
 		 * Ordinary consumers must use publishPendingObservedPluginCallbackPresenceSnapshots() so draining cannot
 		 * lose the stable-domain publication signal. This raw operation exists only to avoid recursively patching
 		 * the Plugins domain from inside its own preparation step.
 		 */
-		[[nodiscard]] bool drainPendingObservedPluginCallbackPresenceSnapshots();
+		[[nodiscard]] PluginCallbackCatalogChanges drainPendingObservedPluginCallbackPresenceSnapshots();
 		/**
 		 * @brief Drains worker callback catalogs and publishes the complete Plugins stable domain.
 		 * @return `true` when authoritative catalog content changed.
 		 */
-		[[nodiscard]] bool publishPendingObservedPluginCallbackPresenceSnapshots();
+		[[nodiscard]] bool                         publishPendingObservedPluginCallbackPresenceSnapshots();
 		/**
 		 * @brief Evaluates callback presence after the current Plugins preparation point without draining again.
 		 * @param functionName Callback name.
@@ -5546,25 +5711,31 @@ class WorldRuntime : public QObject
 		[[nodiscard]] bool isObservedPluginCallbackPropagationPending(const QString &functionName) const;
 		[[nodiscard]] bool hasAnyExecutableLuaPluginRecipient() const;
 		[[nodiscard]] QVector<int>
-		collectExecutablePluginRecipientIndicesWithWarmupFallback(const QString &functionName) const;
-		[[nodiscard]] QVector<QSharedPointer<LuaCallbackEngine>>
-		     collectExecutablePluginRecipientEnginesWithWarmupFallback(const QString &functionName) const;
+		     collectExecutablePluginRecipientIndicesWithWarmupFallback(const QString &functionName) const;
 		void scheduleObservedPluginCallbackPropagation();
 		void onObservedPluginCallbackPropagationCompleted(const QSet<QString> &propagatedCallbackNames);
 		/**
-		 * @brief Collects executable Lua recipients for a callback name.
+		 * @brief Collects the fixed Lua recipient roster for a callback name.
 		 * @param functionName Callback function name.
-		 * @return Ordered executable callback recipients.
+		 * @return Ordered callback-capable recipients, including currently disabled plugins.
 		 */
 		QVector<QSharedPointer<LuaCallbackEngine>>
-		                          collectPluginCallbackRecipients(const QString &functionName);
+		collectPluginCallbackRecipients(const QString &functionName);
+		struct PluginCallbackDispatchCommand;
 		/**
-		 * @brief Revalidates an unprocessed observed-callback suffix against current executable plugin state.
-		 * @param request Batch request to trim when stale recipients are detected.
-		 * @param firstRecipientIndex First unprocessed recipient; the completed prefix remains positionally stable.
+		 * @brief Captures the event-time executable view when a command owns a cached recipient roster.
+		 * @param command Newly created callback command.
 		 */
-		void                      revalidateObservedCallbackRecipients(LuaBatchDispatchRequest &request,
-		                                                               int                      firstRecipientIndex = 0);
+		void captureInitialPluginCallbackDispatchView(PluginCallbackDispatchCommand &command) const;
+		/**
+		 * @brief Builds the current executable view of a callback command's fixed recipient roster.
+		 * @param command Callback command whose cached view may be refreshed.
+		 * @param firstRecipientIndex First recipient position the executor may visit.
+		 * @return Dispatch request retaining the original positional indexes.
+		 */
+		[[nodiscard]] LuaBatchDispatchRequest
+		                          currentPluginCallbackDispatchRequest(PluginCallbackDispatchCommand &command,
+		                                                               int                            firstRecipientIndex = 0);
 		/**
 		 * @brief Checks whether plugin should receive async result callback for API name.
 		 * @param plugin Plugin state entry.
@@ -5583,16 +5754,18 @@ class WorldRuntime : public QObject
 			DispatchSynchronously = 1 << 1
 		};
 		Q_DECLARE_FLAGS(PluginCallbackDispatchOptions, PluginCallbackDispatchOption)
-		struct PluginCallbackDispatchCommand;
+		struct PluginCallbackLaneCommand;
 		struct SuspendedPluginCallbackDispatch;
 		/**
 		 * @brief Enqueues one plugin callback command and optionally waits for completion.
 		 * @param request Structured callback command payload.
-		 * @param completionBarrier Wait for command completion when `true`.
+		 * @param completionBarrier Preserve completion ordering when `true`.
+		 * @param immediateResultRequired The caller consumes the callback result before it can continue.
 		 * @return Callback command result payload.
 		 */
 		LuaBatchDispatchResult queuePluginCallbackDispatch(const LuaBatchDispatchRequest &request,
-		                                                   bool                           completionBarrier);
+		                                                   bool                           completionBarrier,
+		                                                   bool immediateResultRequired = true);
 		/**
 		 * @brief Captures callback-lane snapshot data used by bridge-forbidden Lua API reads.
 		 * @param recipients Target plugin engines for this dispatch.
@@ -5630,7 +5803,20 @@ class WorldRuntime : public QObject
 		 * @return Coherent request-scoped snapshot payload.
 		 */
 		[[nodiscard]] QSharedPointer<const LuaCallbackSnapshot>
-		            captureLuaCallbackSnapshotForRequest(const LuaBatchDispatchRequest &request) const;
+		     captureLuaCallbackSnapshotForRequest(const LuaBatchDispatchRequest &request) const;
+		/**
+		 * @brief Promotes a callback's output anchor into the positional cursor registry.
+		 * @param command Callback command that will outlive its capture point.
+		 * @return `true` when the command has no anchor or its anchor was promoted successfully.
+		 */
+		bool promotePluginCallbackOutputAnchor(PluginCallbackDispatchCommand &command);
+		/**
+		 * @brief Releases a command-owned promoted output anchor.
+		 * @param command Completed or abandoned callback command.
+		 */
+		void releasePluginCallbackOutputAnchor(PluginCallbackDispatchCommand &command);
+		void applyCausalPluginCallbackSnapshotDeltas(PluginCallbackDispatchCommand &command) const;
+		[[nodiscard]] QSharedPointer<LuaCallbackSnapshot> captureLuaCallbackStableSnapshotBase() const;
 		/**
 		 * @brief Applies request-local action source data to a mutable callback snapshot.
 		 * @param snapshot Snapshot to stamp.
@@ -5645,7 +5831,8 @@ class WorldRuntime : public QObject
 		 * Assign it to one of these domains (or add a new registry entry) and populate it through the same helper
 		 * used by cold base construction. The registry's second value declares whether plugin load/unload must
 		 * repopulate the domain; this mechanically expands a Plugins patch and replaces a second hand-maintained
-		 * fanout list.
+		 * fanout list. Its third value declares domains whose population also updates derived plugin-info values,
+		 * so causal revisions include that coupled Plugins state.
 		 * populateLuaCallbackStableSnapshotDomains() is the sole domain-to-population registry: cold builds
 		 * pass the complete mask derived from `Count`, while immediate and batched patches pass masks derived
 		 * from their enum values. Handle a new domain in that method's switch and patch it at every
@@ -5655,32 +5842,7 @@ class WorldRuntime : public QObject
 		 * journal/overlay path.
 		 * See LuaCallbackSnapshot's extension contract for the required visibility tests.
 		 */
-#define QMUD_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN_REGISTRY(X)                                                 \
-	X(WorldVariables, false)                                                                                 \
-	X(PluginVariables, true)                                                                                 \
-	X(Triggers, true)                                                                                        \
-	X(Aliases, true)                                                                                         \
-	X(Timers, true)                                                                                          \
-	X(WorldAttributes, false)                                                                                \
-	X(Arrays, false)                                                                                         \
-	X(Colours, false)                                                                                        \
-	X(Mapper, false)                                                                                         \
-	X(Databases, false)                                                                                      \
-	X(Macros, false)                                                                                         \
-	X(Keypad, false)                                                                                         \
-	X(Accelerators, false)                                                                                   \
-	X(Plugins, false)                                                                                        \
-	X(MiniWindows, false)                                                                                    \
-	X(TriggerWildcards, true)                                                                                \
-	X(AliasWildcards, true)
-		enum class LuaCallbackStableSnapshotDomain : quint8
-		{
-#define QMUD_DECLARE_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN(name, pluginIndexed) name,
-			QMUD_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN_REGISTRY(
-			    QMUD_DECLARE_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN)
-#undef QMUD_DECLARE_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN
-			    Count
-		};
+		using LuaCallbackStableSnapshotDomain = ::LuaCallbackStableSnapshotDomain;
 		/**
 		 * @brief Optional narrowing for one stable-domain patch.
 		 *
@@ -5691,12 +5853,18 @@ class WorldRuntime : public QObject
 		 */
 		struct LuaCallbackStableSnapshotPatchScope
 		{
-				QString       pluginId;
-				QString       itemName;
-				quint64       runtimeId{0};
-				int           indexHint{-1};
+				QString                              pluginId;
+				QString                              itemName;
+				quint64                              runtimeId{0};
+				int                                  indexHint{-1};
+				LuaCallbackMiniWindowSnapshotChanges miniWindowChanges{
+				    luaCallbackAllMiniWindowSnapshotChanges()};
 
-				bool          operator==(const LuaCallbackStableSnapshotPatchScope &) const = default;
+				bool operator==(const LuaCallbackStableSnapshotPatchScope &other) const
+				{
+					return pluginId == other.pluginId && itemName == other.itemName &&
+					       runtimeId == other.runtimeId && indexHint == other.indexHint;
+				}
 
 				friend size_t qHash(const LuaCallbackStableSnapshotPatchScope &scope,
 				                    const size_t                               seed = 0) noexcept
@@ -5707,22 +5875,15 @@ class WorldRuntime : public QObject
 		[[nodiscard]] static constexpr quint32
 		luaCallbackStableSnapshotDomainBit(const LuaCallbackStableSnapshotDomain domain)
 		{
-			return quint32{1} << static_cast<quint32>(domain);
+			return ::luaCallbackStableSnapshotDomainBit(domain);
 		}
 		[[nodiscard]] static constexpr quint32 luaCallbackAllStableSnapshotDomainsMask()
 		{
-			static_assert(static_cast<quint32>(LuaCallbackStableSnapshotDomain::Count) < 32U);
-			return luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::Count) - 1U;
+			return ::luaCallbackAllStableSnapshotDomainsMask();
 		}
 		[[nodiscard]] static constexpr quint32 luaCallbackPluginIndexedStableSnapshotDomainsMask()
 		{
-			return 0U
-#define QMUD_PLUGIN_INDEXED_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN(name, pluginIndexed)                         \
-	| (pluginIndexed ? luaCallbackStableSnapshotDomainBit(LuaCallbackStableSnapshotDomain::name) : 0U)
-			    QMUD_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN_REGISTRY(
-			        QMUD_PLUGIN_INDEXED_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN)
-#undef QMUD_PLUGIN_INDEXED_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN
-			        ;
+			return ::luaCallbackPluginIndexedStableSnapshotDomainsMask();
 		}
 		[[nodiscard]] static constexpr quint32
 		luaCallbackExpandedStableSnapshotDomainMask(const quint32 domainMask)
@@ -5732,7 +5893,6 @@ class WorldRuntime : public QObject
 			           ? domainMask | luaCallbackPluginIndexedStableSnapshotDomainsMask()
 			           : domainMask;
 		}
-#undef QMUD_LUA_CALLBACK_STABLE_SNAPSHOT_DOMAIN_REGISTRY
 		/**
 		 * @brief Invalidates the cached stable callback-dispatch snapshot.
 		 */
@@ -5805,7 +5965,9 @@ class WorldRuntime : public QObject
 		void populateLuaCallbackKeypadSnapshots(LuaCallbackSnapshot &snapshot) const;
 		void populateLuaCallbackAcceleratorSnapshots(LuaCallbackSnapshot &snapshot) const;
 		void populateLuaCallbackPluginSnapshots(LuaCallbackSnapshot &snapshot) const;
-		void populateLuaCallbackMiniWindowSnapshots(LuaCallbackSnapshot &snapshot) const;
+		void populateLuaCallbackMiniWindowSnapshots(
+		    LuaCallbackSnapshot                                      &snapshot,
+		    const std::optional<LuaCallbackStableSnapshotPatchScope> &scope = std::nullopt) const;
 		/**
 		 * @brief Rebuilds stable trigger wildcard state, optionally for one rule.
 		 */
@@ -5949,8 +6111,8 @@ class WorldRuntime : public QObject
         luaContextStoredLineEntryAtBufferIndex(int                                 bufferIndex,
 		                                            const LuaContextBufferPresentation &presentation) const;
 		/**
-		 * @brief Resolves a callback matched line without copying rejected scan candidates.
-		 * @param preferredBufferIndex One-based dispatch-time index to check first.
+		 * @brief Resolves a callback matched line from its maintained or captured position.
+		 * @param preferredBufferIndex One-based position captured with the stable line identity.
 		 * @param absoluteLineNumber Stable absolute line identity to resolve.
 		 * @param resolvedBufferIndex Output current one-based buffer-presentation index.
 		 * @param entry Output copy of the selected line.
@@ -5972,36 +6134,57 @@ class WorldRuntime : public QObject
 		 */
 		void              notifyOutputViewLineAppended(int removedHeadCount = 0);
 		/**
+		 * @brief Notifies or defers presentation of multiple newly appended runtime tail lines.
+		 * @param firstAppendedIndex Zero-based inclusive start of surviving appended lines.
+		 * @param lastAppendedIndexExclusive Zero-based exclusive end of surviving appended lines.
+		 * @param structuralEdit Physical-buffer edit before any reported head eviction.
+		 * @param removedHeadCount Exact number of physical output-buffer head entries evicted by the mutation.
+		 */
+		void notifyOutputViewLinesAppended(int firstAppendedIndex, int lastAppendedIndexExclusive,
+		                                   OutputBufferEdit structuralEdit, int removedHeadCount);
+		/**
+		 * @brief Notifies or defers a tail mutation containing both changed and appended ranges.
+		 * @param firstChangedIndex Zero-based inclusive start of surviving changed lines.
+		 * @param lastChangedIndexExclusive Zero-based exclusive end of surviving changed lines.
+		 * @param firstAppendedIndex Zero-based inclusive start of surviving appended lines.
+		 * @param lastAppendedIndexExclusive Zero-based exclusive end of surviving appended lines.
+		 * @param structuralEdit Physical-buffer edit before any reported head eviction.
+		 * @param removedHeadCount Exact number of physical output-buffer head entries evicted by the mutation.
+		 */
+		void notifyOutputViewTailRangeChangedAndLinesAppended(
+		    int firstChangedIndex, int lastChangedIndexExclusive, int firstAppendedIndex,
+		    int lastAppendedIndexExclusive, OutputBufferEdit structuralEdit, int removedHeadCount);
+		/**
 		 * @brief Notifies or defers a runtime output range restitch.
 		 * @param runtimeLineIndex Zero-based runtime line index where restitching starts.
 		 * @param runtimeLineEndExclusive First runtime index known to be unchanged, or `-1` when unknown.
 		 * @param structuralEdit Optional physical-buffer edit that produced the changed range.
 		 * @param removedHeadCount Exact number of physical output-buffer head entries evicted by the mutation.
 		 */
-		void              notifyOutputViewRangeChanged(int runtimeLineIndex, int runtimeLineEndExclusive,
-		                                               OutputBufferEdit structuralEdit   = {-1, 0, 0},
-		                                               int              removedHeadCount = 0);
+		void notifyOutputViewRangeChanged(int runtimeLineIndex, int runtimeLineEndExclusive,
+		                                  OutputBufferEdit structuralEdit   = {-1, 0, 0},
+		                                  int              removedHeadCount = 0);
 		/**
 		 * @brief Maps pending batched presentation coordinates through structural edits.
 		 * @param structuralEdits Ordered physical-buffer edits to apply.
 		 */
-		void              transformPendingOutputViewRanges(std::span<const OutputBufferEdit> structuralEdits);
+		void transformPendingOutputViewRanges(std::span<const OutputBufferEdit> structuralEdits);
 		/**
 		 * @brief Clears every pending runtime-output presentation notification.
 		 */
-		void              resetPendingOutputViewMutationNotifications();
+		void resetPendingOutputViewMutationNotifications();
 		/**
 		 * @brief Rebuilds every registered presentation from the runtime output buffer.
 		 */
-		void              rebuildOutputPresentationViews() const;
+		void rebuildOutputPresentationViews() const;
 		/**
 		 * @brief Clears presentation-local output state in every registered view.
 		 */
-		void              clearOutputPresentationViews() const;
+		void clearOutputPresentationViews() const;
 		/**
 		 * @brief Flushes pending batched runtime output view refresh.
 		 */
-		void              flushOutputViewMutationBatch();
+		void flushOutputViewMutationBatch();
 		/**
 		 * @brief Returns all currently live views presenting this runtime.
 		 * @return Registered presentation views in binding order.
@@ -6063,14 +6246,16 @@ class WorldRuntime : public QObject
 		 * @brief Builds one no-argument focus callback command after an active-state transition.
 		 * @param engines Target callback engines.
 		 * @param functionName Callback function name.
+		 * @param callbackEvent Actual callback event, or `LuaCallbackEvent::None` for a configured world routine.
 		 * @param revalidateObservedRecipients Revalidate observed plugin recipients when `true`.
 		 * @param command Output callback command.
 		 * @return `true` when a dispatchable command was built.
 		 */
 		[[nodiscard]] bool
-		buildActiveStateNoArgCallbackCommand(const QVector<QSharedPointer<LuaCallbackEngine>> &engines,
-		                                     const QString &functionName, bool revalidateObservedRecipients,
-		                                     PluginCallbackDispatchCommand &command);
+		     buildActiveStateNoArgCallbackCommand(const QVector<QSharedPointer<LuaCallbackEngine>> &engines,
+		                                          const QString &functionName, LuaCallbackEvent callbackEvent,
+		                                          bool                           revalidateObservedRecipients,
+		                                          PluginCallbackDispatchCommand &command);
 		/**
 		 * @brief Drains queued plugin callback commands.
 		 * @param completionCommandId Optional command-id barrier; `0` drains all currently queued commands.
@@ -6081,6 +6266,15 @@ class WorldRuntime : public QObject
 		 */
 		void queuePluginCallbackDispatchDrain();
 		/**
+		 * @brief Appends a callback generated by the currently replayed mutation journal.
+		 * @param command Causal callback-lane command to stage or queue.
+		 */
+		void enqueueCausalPluginCallbackCommand(PluginCallbackLaneCommand &&command);
+		/**
+		 * @brief Publishes the active journal's staged causal callbacks ahead of later lane work.
+		 */
+		void publishCurrentCausalPluginCallbackCommands();
+		/**
 		 * @brief Executes one queued callback-lane command.
 		 */
 		void processNextPluginCallbackDispatchCommand();
@@ -6090,11 +6284,23 @@ class WorldRuntime : public QObject
 		 */
 		void processPluginCallbackDispatchCommand(PluginCallbackDispatchCommand &&command);
 		/**
+		 * @brief Dispatches the next recipient of an asynchronous callback continuation.
+		 * @param continuation Original command, aggregate, and next-recipient position.
+		 */
+		void processPluginCallbackRecipientContinuation(SuspendedPluginCallbackDispatch &&continuation);
+		/**
+		 * @brief Applies one asynchronously completed continuation range and schedules any remainder.
+		 * @param continuation Original command and aggregate carried across recipients.
+		 * @param result Completed range result before deferred mutation application.
+		 */
+		void
+		handleCompletedPluginCallbackRecipientContinuation(SuspendedPluginCallbackDispatch &&continuation,
+		                                                   LuaBatchDispatchResult          &&result);
+		/**
 		 * @brief Executes one queued active-state transition command.
 		 * @param command Active-state transition command to execute.
 		 */
 		struct ActiveStateTransitionCommand;
-		struct PluginCallbackLaneCommand;
 		void processActiveStateTransitionCommand(const ActiveStateTransitionCommand &command);
 		/**
 		 * @brief Returns whether a queued lane item blocks input-critical insertion.
@@ -6104,15 +6310,22 @@ class WorldRuntime : public QObject
 		[[nodiscard]] static bool
 		     pluginCallbackLaneCommandBlocksInputCriticalInsertion(const PluginCallbackLaneCommand &command);
 		/**
-		 * @brief Starts request-scoped miniwindow script execution protection.
-		 * @param command Dispatch command that may carry miniwindow execution state.
+		 * @brief Starts request-scoped dispatch protections.
+		 * @param command Dispatch command that may carry protected execution state.
 		 */
 		void beginPluginCallbackDispatchCommandGuard(PluginCallbackDispatchCommand &command);
 		/**
-		 * @brief Ends request-scoped miniwindow script execution protection.
-		 * @param command Dispatch command that may carry miniwindow execution state.
+		 * @brief Ends request-scoped dispatch protections.
+		 * @param command Dispatch command that may carry protected execution state.
 		 */
 		void endPluginCallbackDispatchCommandGuard(PluginCallbackDispatchCommand &command);
+		/**
+		 * @brief Applies a completed command journal under callback-specific replay guards.
+		 * @param command Command whose callback produced the journal.
+		 * @param result Completed callback result whose mutations are consumed.
+		 */
+		void applyCompletedPluginCallbackCommandMutations(const PluginCallbackDispatchCommand &command,
+		                                                  LuaBatchDispatchResult              &result);
 		/**
 		 * @brief Completes a non-suspended plugin callback dispatch command.
 		 * @param command Completed dispatch command.
@@ -6135,6 +6348,16 @@ class WorldRuntime : public QObject
 		 */
 		void handleCompletedPluginCallbackDispatchCommand(PluginCallbackDispatchCommand &&command,
 		                                                  LuaBatchDispatchResult        &&result);
+		/**
+		 * @brief Applies one completed callback's mutation journal with its required callback-lane ordering.
+		 * @param result Completed callback result whose mutations are consumed.
+		 */
+		void applyCompletedPluginCallbackMutations(LuaBatchDispatchResult &result) const;
+		/**
+		 * @brief Returns whether either the ordinary or causal callback queue contains work.
+		 * @return `true` when a callback-lane command remains queued.
+		 */
+		[[nodiscard]] bool hasQueuedPluginCallbackDispatchCommands() const;
 		/**
 		 * @brief Stores a modal-yielded callback command until the modal result resumes it.
 		 * @param command Suspended original dispatch command.
@@ -6206,17 +6429,21 @@ class WorldRuntime : public QObject
 		 */
 		void processRawDataPayload(const QByteArray &data, bool simulatedInput);
 		/**
-		 * @brief Starts an inbound command deferral scope.
+		 * @brief Starts an inbound transmission deferral scope.
 		 */
-		void beginInboundCommandDeferralScope() const;
+		void beginInboundTransmissionDeferralScope();
 		/**
-		 * @brief Ends an inbound command deferral scope and flushes staged commands at the outer boundary.
+		 * @brief Ends an inbound transmission deferral scope and flushes staged bytes at the outer boundary.
 		 */
-		void endInboundCommandDeferralScope() const;
+		void endInboundTransmissionDeferralScope();
 		/**
-		 * @brief Flushes staged commands created while inbound world data was being processed.
+		 * @brief Flushes staged transmissions created while inbound world data was being processed.
 		 */
-		void flushDeferredInboundCommands() const;
+		void flushDeferredInboundTransmissions();
+		/**
+		 * @brief Performs a socket disconnect deferred until staged inbound transmissions were flushed.
+		 */
+		void performPendingInboundSocketDisconnect();
 		/**
 		 * @brief Queues plugin for deferred installation.
 		 * @param plugin Plugin instance.
@@ -6381,15 +6608,65 @@ class WorldRuntime : public QObject
 		 * @param miniWindowName Miniwindow whose callback is executing.
 		 * @param queueWhenCallbackLaneBusy Queue modal-menu hotspot callbacks instead of executing
 		 * synchronously when the callback lane is already busy.
+		 * @param windowAddHotspotReentryBlocked Preserve WindowAddHotspot's add-induced callback guard.
 		 * @return `true` when callback succeeds.
 		 */
 		bool callPluginHotspotFunction(const QString &pluginId, const QString &functionName, long flags,
 		                               const QString &hotspotId, const QString &miniWindowName,
-		                               bool queueWhenCallbackLaneBusy = false);
+		                               bool queueWhenCallbackLaneBusy      = false,
+		                               bool windowAddHotspotReentryBlocked = false);
 		/**
 		 * @brief Emits/coalesces miniwindow-change notification based on active batch depth.
+		 * @param windowName Changed or removed miniwindow name.
 		 */
-		void emitMiniWindowsChangedCoalesced();
+		void emitMiniWindowsChangedCoalesced(const QString &windowName);
+		void emitMiniWindowsChangedCoalesced(const QString                       &windowName,
+		                                     LuaCallbackMiniWindowSnapshotChanges changes);
+		/**
+		 * @brief Emits/coalesces one notification for several changed miniwindows.
+		 * @param windows Changed or removed miniwindows and their snapshot-change domains.
+		 */
+		void
+		emitMiniWindowsChangedCoalesced(const QHash<QString, LuaCallbackMiniWindowSnapshotChanges> &windows);
+		/**
+		 * @brief Applies one completed callback mutation batch on its owning runtime.
+		 * @param batch Ordered mutations and causal-ordering policy.
+		 * @param waitForRuntimeThread Wait for a foreign owner thread when `true`; otherwise queue there.
+		 */
+		static void applyLuaDeferredRuntimeMutationBatch(LuaDeferredRuntimeMutationBatch &&batch,
+		                                                 bool waitForRuntimeThread);
+		void recordCausalMapperSnapshotOperation(LuaCallbackMapperSnapshotOperation::Kind kind,
+		                                         const QString &entry = QString(), bool enabled = false);
+		void applyAcceptedCallbackMapperAppend(const QString &entry);
+		void applyAcceptedCallbackMapperRemoveLast();
+		void applyAcceptedCallbackMapperClear();
+		void commitLuaCallbackMiniWindowStates(
+		    QHash<QString, MiniWindow> windows, const QSet<QString> &removedWindowNames,
+		    const QSet<QString> &replacedWindowNames, MiniWindowHotspotInstanceMap addedHotspots,
+		    const QHash<QString, LuaCallbackMiniWindowSnapshotChanges> &changesByWindow,
+		    const QHash<QString, QSharedPointer<const MiniWindow>>     &baseWindowsByName,
+		    const QSet<QString>                                        &presentationChangedWindowNames,
+		    const MiniWindowHotspotMutationMap                         &hotspotMutations                = {},
+		    const QSet<QString>                                        &forceDeltaMergeWindowNames      = {},
+		    const QHash<QString, QSet<QString>>                        &mutatedFontIdsByWindow          = {},
+		    const QHash<QString, QSet<QString>>                        &mutatedImageIdsByWindow         = {},
+		    const QHash<QString, QVector<LuaCallbackMiniWindowResizeMutation>> &resizeMutationsByWindow = {},
+		    const QHash<QString, LuaCallbackMiniWindowCreateMutation>          &createMutationsByWindow = {},
+		    MiniWindowCommitOutcomeMap                                         *outcomes = nullptr);
+		void patchLuaCallbackMiniWindowSnapshot(const QString                       &windowName,
+		                                        LuaCallbackMiniWindowSnapshotChanges changes);
+		/** Queues exact added-hotspot identities for one post-layout hover check. */
+		void requestMiniWindowAddedHotspotHoverChecks(MiniWindowHotspotInstanceMap addedHotspots);
+		/** Queues one exact added-hotspot identity for a post-layout hover check. */
+		void requestMiniWindowAddedHotspotHoverCheck(const QString &windowName, const QString &hotspotId,
+		                                             quint64 instanceId);
+		/** Posts the coalesced added-hotspot hover check after pending layout work. */
+		void scheduleMiniWindowAddedHotspotHoverCheck();
+		/** Reconciles tooltip and cursor ownership after one hotspot mutation. */
+		void reconcileMiniWindowHotspotInteractionAfterMutation(const QString &windowName,
+		                                                        const QString &hotspotId,
+		                                                        quint64        previousInstanceId,
+		                                                        const QString &previousTooltip) const;
 		/**
 		 * @brief Calls world hotspot callback.
 		 * @param functionName Callback function name.
@@ -6398,10 +6675,12 @@ class WorldRuntime : public QObject
 		 * @param miniWindowName Miniwindow whose callback is executing.
 		 * @param queueWhenCallbackLaneBusy Queue modal-menu hotspot callbacks instead of executing
 		 * synchronously when the callback lane is already busy.
+		 * @param windowAddHotspotReentryBlocked Preserve WindowAddHotspot's add-induced callback guard.
 		 * @return `true` when callback succeeds.
 		 */
 		bool callWorldHotspotFunction(const QString &functionName, long flags, const QString &hotspotId,
-		                              const QString &miniWindowName, bool queueWhenCallbackLaneBusy = false);
+		                              const QString &miniWindowName, bool queueWhenCallbackLaneBusy = false,
+		                              bool windowAddHotspotReentryBlocked = false);
 		/**
 		 * @brief Saves one plugin state snapshot.
 		 * @param pluginId Stable identifier of the plugin to save.
@@ -6530,6 +6809,7 @@ class WorldRuntime : public QObject
 		WorldSocketService                                        *m_socket{nullptr};
 		WorldView                                                 *m_view{nullptr};
 		QMetaObject::Connection                                    m_viewDestroyedConnection;
+		quint64                                                    m_viewBindingGeneration{0};
 		QVector<QPointer<WorldView>>                               m_presentationViews;
 		long                                                       m_backgroundColour{0};
 		QImage                                                     m_backgroundImage;
@@ -6601,6 +6881,9 @@ class WorldRuntime : public QObject
 		QHash<QString, int>                                        m_pluginCallbackPresenceCounts;
 		QHash<QString, QVector<int>>                               m_pluginCallbackRecipientIndices;
 		QHash<QString, QVector<QSharedPointer<LuaCallbackEngine>>> m_pluginCallbackRecipientEngines;
+		QHash<QString, QVector<QSharedPointer<LuaCallbackEngine>>> m_pluginCallbackExecutableViews;
+		quint64                                                    m_pluginCallbackPresenceRevision{1};
+		quint64                                                    m_pluginCallbackEligibilityRevision{1};
 		QSet<QString>                                              m_observedPluginCallbacksPendingWarmup;
 		bool                          m_observedPluginCallbackPropagationInFlight{false};
 		bool                          m_observedPluginCallbackPropagationQueued{false};
@@ -6612,18 +6895,35 @@ class WorldRuntime : public QObject
 		int                           m_pluginCallbackPresencePluginCount{-1};
 		bool                          m_pluginCallbackPresenceDirty{true};
 		std::atomic_bool              m_pluginCallbackPresenceInvalidateQueued{false};
+		std::atomic_bool              m_pluginCallbackPresencePublicationQueued{false};
+		struct CausalPluginCallbackSnapshotRevision
+		{
+				QSharedPointer<const LuaCallbackSnapshot>             before;
+				QSharedPointer<const LuaCallbackSnapshot>             after;
+				std::shared_ptr<CausalPluginCallbackSnapshotRevision> next;
+				QVector<LuaCallbackMapperSnapshotOperation>           mapperOperations;
+				LuaCallbackMiniWindowCausalMutations                  miniWindowMutations;
+				LuaCallbackRuntimeCounterUpdates                      runtimeCounterUpdates;
+				quint32                                               stableDomainMask{0};
+		};
 		struct PluginCallbackDispatchCommand
 		{
 				quint64                                                      id{0};
 				LuaBatchDispatchRequest                                      request;
+				QVector<QSharedPointer<LuaCallbackEngine>>                   recipientDispatchView;
+				quint64                                                      recipientDispatchViewRevision{0};
 				PluginCallbackDispatchOptions                                options;
 				std::function<void(const LuaBatchDispatchResult &)>          completion;
 				QVector<std::function<void(const LuaBatchDispatchResult &)>> coalescedCompletions;
 				qint64                                                       enqueuedAtNs{0};
 				int                                                          queueDepthAtEnqueue{0};
 				bool miniWindowExecutionGuardActive{false};
-				bool screendrawExecutionGuardActive{false};
 				bool drawOutputWindowExecutionGuardActive{false};
+				std::shared_ptr<CausalPluginCallbackSnapshotRevision> causalSnapshotRevision;
+				bool                                                  recipientDispatchStarted{false};
+				quint64                                               recipientEligibilityRevisionAtStart{0};
+				quint64                                               promotedOutputAnchorStreamId{0};
+				std::shared_ptr<LuaCallbackOutputAnchorState>         promotedOutputAnchorState;
 		};
 		struct ActiveStateTransitionCommand
 		{
@@ -6631,18 +6931,6 @@ class WorldRuntime : public QObject
 				bool    active{false};
 				qint64  enqueuedAtNs{0};
 				int     queueDepthAtEnqueue{0};
-		};
-		struct PluginCallbackLaneCommand
-		{
-				enum class Kind
-				{
-					CallbackDispatch,
-					ActiveStateTransition
-				};
-
-				Kind                          kind{Kind::CallbackDispatch};
-				PluginCallbackDispatchCommand callback;
-				ActiveStateTransitionCommand  activeState;
 		};
 		struct SuspendedPluginCallbackDispatch
 		{
@@ -6652,162 +6940,189 @@ class WorldRuntime : public QObject
 				std::function<void(WorldRuntime &, const QString &)> beforeRuntimeResumeCallback;
 				quint64                                              engineModalResumeId{0};
 				int                                                  nextEngineIndex{0};
-				bool                                                 resumeQueued{false};
-				bool                                                 internalImmediateResume{false};
+				bool recaptureSnapshotBeforeNextRecipient{false};
+				bool resumeQueued{false};
+				bool internalImmediateResume{false};
+		};
+		struct PluginCallbackLaneCommand
+		{
+				enum class Kind
+				{
+					CallbackDispatch,
+					RecipientContinuation,
+					ActiveStateTransition
+				};
+
+				Kind                                            kind{Kind::CallbackDispatch};
+				PluginCallbackDispatchCommand                   callback;
+				QSharedPointer<SuspendedPluginCallbackDispatch> recipientContinuation;
+				ActiveStateTransitionCommand                    activeState;
 		};
 		struct RawIngressPayload
 		{
 				QByteArray data;
 				bool       simulatedInput{false};
 		};
-		QQueue<PluginCallbackLaneCommand>               m_pluginCallbackDispatchQueue;
-		QHash<quint64, LuaBatchDispatchResult>          m_pluginCallbackDispatchResults;
-		QHash<quint64, SuspendedPluginCallbackDispatch> m_suspendedPluginCallbackDispatches;
-		quint64                                         m_nextPluginCallbackDispatchId{1};
-		quint64                                         m_nextSuspendedPluginCallbackResumeId{1};
-		int                                             m_pendingActiveStateTransitionCount{0};
-		bool                                            m_lastPendingActiveState{false};
-		bool                                            m_pluginCallbackDispatchActive{false};
-		bool                                            m_pluginCallbackDispatchWorkerInFlight{false};
-		bool                                            m_pluginCallbackDispatchDrainQueued{false};
-		bool                                            m_pluginCallbackDispatchShuttingDown{false};
-		QQueue<RawIngressPayload>                       m_pendingRawIngressPayloads;
-		bool                                            m_rawIngressProcessing{false};
-		int                                             m_pendingMiniWindowMouseX{0};
-		int                                             m_pendingMiniWindowMouseY{0};
-		QString                                         m_pendingMiniWindowMouseWindowName;
-		bool                                            m_hasPendingMiniWindowMouseMoved{false};
-		bool                                            m_pendingMiniWindowMouseMovedQueued{false};
-		QList<Include>                                  m_includes;
-		QString                                         m_comments;
-		IndexedRingBuffer<LineEntry>                    m_lines;
-		bool                                            m_sessionStateOutputBufferSealed{false};
-		QMap<qint64, int>                               m_acceleratorKeyToCommand;
-		QMap<int, AcceleratorEntry>                     m_commandToAcceleratorEntry;
-		int                                             m_nextAcceleratorCommand{kAcceleratorFirstCommand};
-		QMap<QString, MiniWindow>                       m_miniWindows;
-		int                                             m_miniWindowMutationBatchDepth{0};
-		bool                                            m_miniWindowsChangedPending{false};
+		QQueue<PluginCallbackLaneCommand>                     m_pluginCallbackDispatchQueue;
+		std::deque<PluginCallbackLaneCommand>                 m_pluginCallbackCausalQueue;
+		QVector<QVector<PluginCallbackLaneCommand> *>         m_pluginCallbackCausalEnqueueScopes;
+		qsizetype                                             m_stagedPluginCallbackCausalCommandCount{0};
+		QHash<quint64, LuaBatchDispatchResult>                m_pluginCallbackDispatchResults;
+		QHash<quint64, SuspendedPluginCallbackDispatch>       m_suspendedPluginCallbackDispatches;
+		std::shared_ptr<CausalPluginCallbackSnapshotRevision> m_causalPluginCallbackSnapshotRevision{
+		    std::make_shared<CausalPluginCallbackSnapshotRevision>()};
+		QVector<std::shared_ptr<CausalPluginCallbackSnapshotRevision>>
+		                                      m_causalPluginCallbackSnapshotCaptureStack;
+		quint64                               m_nextPluginCallbackDispatchId{1};
+		quint64                               m_nextSuspendedPluginCallbackResumeId{1};
+		int                                   m_pendingActiveStateTransitionCount{0};
+		bool                                  m_lastPendingActiveState{false};
+		bool                                  m_pluginCallbackDispatchActive{false};
+		bool                                  m_pluginCallbackDispatchWorkerInFlight{false};
+		bool                                  m_pluginCallbackDispatchDrainQueued{false};
+		bool                                  m_pluginCallbackDispatchShuttingDown{false};
+		int                                   m_pluginCallbackMutationPlaybackDepth{0};
+		int                                   m_windowAddHotspotMutationPlaybackDepth{0};
+		int                                   m_windowAddHotspotCallDepth{0};
+		QQueue<RawIngressPayload>             m_pendingRawIngressPayloads;
+		bool                                  m_rawIngressProcessing{false};
+		int                                   m_pendingMiniWindowMouseX{0};
+		int                                   m_pendingMiniWindowMouseY{0};
+		QString                               m_pendingMiniWindowMouseWindowName;
+		bool                                  m_hasPendingMiniWindowMouseMoved{false};
+		bool                                  m_pendingMiniWindowMouseMovedQueued{false};
+		bool                                  m_pendingMiniWindowMouseMoveBlocksHotspotAdd{false};
+		QList<Include>                        m_includes;
+		QString                               m_comments;
+		IndexedRingBuffer<LineEntry>          m_lines;
+		bool                                  m_sessionStateOutputBufferSealed{false};
+		QMap<qint64, int>                     m_acceleratorKeyToCommand;
+		QMap<int, AcceleratorEntry>           m_commandToAcceleratorEntry;
+		int                                   m_nextAcceleratorCommand{kAcceleratorFirstCommand};
+		QMap<QString, MiniWindow>             m_miniWindows;
+		int                                   m_miniWindowMutationBatchDepth{0};
+		bool                                  m_miniWindowsChangedPending{false};
+		MiniWindowHotspotInstanceMap          m_pendingMiniWindowAddedHotspots;
+		bool                                  m_miniWindowAddedHotspotHoverCheckQueued{false};
 		// Preview rendering temporarily mutates an authoritative MiniWindow and then rolls it back. Suppress both
 		// stable-snapshot publication and the public change signal while that transaction is in progress.
-		bool                                            m_suppressMiniWindowsChangedPublication{false};
-		int                                             m_outputViewMutationBatchDepth{0};
-		int                                             m_outputViewMutationBatchInitialLineCount{0};
-		bool                                            m_outputViewLineChangedPending{false};
-		int                                             m_outputViewLineChangedIndex{-1};
-		bool                                            m_outputViewRangeChangedPending{false};
-		int                                             m_outputViewFirstChangedIndex{-1};
-		int                                             m_outputViewLastChangedIndexExclusive{-1};
-		bool                                            m_outputViewTailAppendPending{false};
-		int                                             m_outputViewFirstAppendedIndex{-1};
-		int                                             m_outputViewLastAppendedIndexExclusive{-1};
-		QVector<OutputBufferEdit>                       m_outputViewStructuralEditsPending;
-		QVector<QPointer<WorldView>>                    m_outputViewMutationBatchViews;
-		int                                             m_absoluteReferenceRightOver{0};
-		int                                             m_absoluteReferenceBottomOver{0};
-		int                                             m_absoluteReferenceRightUnder{0};
-		int                                             m_absoluteReferenceBottomUnder{0};
-		double                                          m_absoluteMiniWindowScaleXOver{1.0};
-		double                                          m_absoluteMiniWindowScaleYOver{1.0};
-		double                                          m_absoluteMiniWindowScaleXUnder{1.0};
-		double                                          m_absoluteMiniWindowScaleYUnder{1.0};
-		QSet<QString>                                   m_specialFontPaths;
-		QVector<QString>                                m_specialFontPathOrder;
-		QVector<int>                                    m_specialFontIds;
-		QFile                                           m_logFile;
-		QString                                         m_logFileName;
-		QString                                         m_logRotationBaseFileName;
-		bool                                            m_logRotateInProgress{false};
-		QString                                         m_defaultWorldDirectory;
-		QString                                         m_defaultLogDirectory;
-		QString                                         m_startupDirectory;
-		QString                                         m_worldFilePath;
-		QString                                         m_pluginsDirectory;
-		QString                                         m_stateFilesDirectory;
-		QString                                         m_fileBrowsingDirectory;
-		QString                                         m_preferencesDatabaseName;
-		QString                                         m_translatorFile;
-		QString                                         m_locale;
-		QString                                         m_fixedPitchFont;
-		QString                                         m_statusMessage;
-		QString                                         m_wordUnderMenu;
-		bool                                            m_wordUnderMenuResolved{false};
-		bool                                            m_debugIncomingPackets{false};
-		QString                                         m_lastImmediateExpression;
-		QString                                         m_lastCommandSent;
-		QString                                         m_lastTelnetSubnegotiation;
-		int                                             m_totalLinesSent{0};
-		QDateTime                                       m_lastUserInput;
-		int                                             m_linesReceived{0};
-		int                                             m_utf8ErrorCount{0};
-		int                                             m_lastLineWithIacGa{0};
-		unsigned short                                  m_currentActionSource{eUnknownActionSource};
-		int                                             m_newLines{0};
-		bool                                            m_doingSimulate{false};
-		bool                                            m_tabCompleteFunctions{false};
-		QSet<QString>                                   m_shiftTabCompleteItems;
-		bool                                            m_active{false};
-		int                                             m_triggersMatchedThisSession{0};
-		int                                             m_triggersEvaluatedCount{0};
-		int                                             m_aliasesMatchedThisSession{0};
-		int                                             m_aliasesEvaluatedCount{0};
-		int                                             m_timersFiredThisSession{0};
-		int                                             m_connectPhase{eConnectNotConnected};
-		bool                                            m_connectViaProxy{false};
-		bool                                            m_tlsEncryptionEnabled{false};
-		int                                             m_tlsMethod{0};
-		bool                                            m_tlsDisableCertificateValidation{false};
-		bool                                            m_socketReadyForWorld{false};
-		quint64                                         m_startTlsFallbackGeneration{0};
-		QString                                         m_proxyAddressString;
-		quint32                                         m_proxyAddressV4{0};
-		int                                             m_lastPreferencesPage{0};
-		QString                                         m_lastTriggerTreeExpandedGroup;
-		QString                                         m_lastAliasTreeExpandedGroup;
-		QString                                         m_lastTimerTreeExpandedGroup;
-		bool                                            m_hasCachedIp{false};
-		QDateTime                                       m_connectTime;
-		bool                                            m_disconnectOk{true};
-		bool                                            m_reconnectOnLinkFailure{false};
-		bool                                            m_incomingSocketDataPaused{false};
-		bool                                            m_reloadReattachSuppressConnectActions{false};
-		bool                                            m_reloadReattachMccpProbePending{false};
-		bool                                            m_reloadReattachMccpResumePending{false};
-		bool                                            m_reloadReattachLookProbeSent{false};
-		bool                                            m_reloadReattachUseDeferredMxpReplay{false};
-		qsizetype                                       m_reloadReattachMccpProbeDecisionOffset{0};
-		int                                             m_reloadMccpProbeTimeoutPass{0};
-		QByteArray                                      m_reloadReattachMccpProbeBuffer;
-		QList<TelnetProcessor::MxpEvent>                m_reloadReattachMxpProbeEvents;
-		QList<TelnetProcessor::MxpModeChange>           m_reloadReattachMxpProbeModeChanges;
-		quint64                                         m_reloadMccpProbeGeneration{0};
-		bool                                            m_reloadMccpDisableForReloadArmed{false};
-		bool                                            m_reloadMccpDisableForReloadFatal{false};
-		struct DeferredInboundCommand
+		bool                                  m_suppressMiniWindowsChangedPublication{false};
+		int                                   m_outputViewMutationBatchDepth{0};
+		int                                   m_outputViewMutationBatchInitialLineCount{0};
+		bool                                  m_outputViewLineChangedPending{false};
+		int                                   m_outputViewLineChangedIndex{-1};
+		bool                                  m_outputViewRangeChangedPending{false};
+		int                                   m_outputViewFirstChangedIndex{-1};
+		int                                   m_outputViewLastChangedIndexExclusive{-1};
+		bool                                  m_outputViewTailAppendPending{false};
+		int                                   m_outputViewFirstAppendedIndex{-1};
+		int                                   m_outputViewLastAppendedIndexExclusive{-1};
+		QVector<OutputBufferEdit>             m_outputViewStructuralEditsPending;
+		QVector<QPointer<WorldView>>          m_outputViewMutationBatchViews;
+		int                                   m_absoluteReferenceRightOver{0};
+		int                                   m_absoluteReferenceBottomOver{0};
+		int                                   m_absoluteReferenceRightUnder{0};
+		int                                   m_absoluteReferenceBottomUnder{0};
+		double                                m_absoluteMiniWindowScaleXOver{1.0};
+		double                                m_absoluteMiniWindowScaleYOver{1.0};
+		double                                m_absoluteMiniWindowScaleXUnder{1.0};
+		double                                m_absoluteMiniWindowScaleYUnder{1.0};
+		QSet<QString>                         m_specialFontPaths;
+		QVector<QString>                      m_specialFontPathOrder;
+		QVector<int>                          m_specialFontIds;
+		QFile                                 m_logFile;
+		QString                               m_logFileName;
+		QString                               m_logRotationBaseFileName;
+		bool                                  m_logRotateInProgress{false};
+		QString                               m_defaultWorldDirectory;
+		QString                               m_defaultLogDirectory;
+		QString                               m_startupDirectory;
+		QString                               m_worldFilePath;
+		QString                               m_pluginsDirectory;
+		QString                               m_stateFilesDirectory;
+		QString                               m_fileBrowsingDirectory;
+		QString                               m_preferencesDatabaseName;
+		QString                               m_translatorFile;
+		QString                               m_locale;
+		QString                               m_fixedPitchFont;
+		QString                               m_statusMessage;
+		QString                               m_wordUnderMenu;
+		bool                                  m_wordUnderMenuResolved{false};
+		bool                                  m_debugIncomingPackets{false};
+		QString                               m_lastImmediateExpression;
+		QString                               m_lastCommandSent;
+		QString                               m_lastTelnetSubnegotiation;
+		int                                   m_totalLinesSent{0};
+		QDateTime                             m_lastUserInput;
+		int                                   m_linesReceived{0};
+		int                                   m_utf8ErrorCount{0};
+		int                                   m_lastLineWithIacGa{0};
+		unsigned short                        m_currentActionSource{eUnknownActionSource};
+		int                                   m_newLines{0};
+		bool                                  m_doingSimulate{false};
+		bool                                  m_tabCompleteFunctions{false};
+		QSet<QString>                         m_shiftTabCompleteItems;
+		bool                                  m_active{false};
+		int                                   m_triggersMatchedThisSession{0};
+		int                                   m_triggersEvaluatedCount{0};
+		int                                   m_aliasesMatchedThisSession{0};
+		int                                   m_aliasesEvaluatedCount{0};
+		int                                   m_timersFiredThisSession{0};
+		int                                   m_connectPhase{eConnectNotConnected};
+		bool                                  m_connectViaProxy{false};
+		bool                                  m_tlsEncryptionEnabled{false};
+		int                                   m_tlsMethod{0};
+		bool                                  m_tlsDisableCertificateValidation{false};
+		bool                                  m_socketReadyForWorld{false};
+		quint64                               m_startTlsFallbackGeneration{0};
+		QString                               m_proxyAddressString;
+		quint32                               m_proxyAddressV4{0};
+		int                                   m_lastPreferencesPage{0};
+		QString                               m_lastTriggerTreeExpandedGroup;
+		QString                               m_lastAliasTreeExpandedGroup;
+		QString                               m_lastTimerTreeExpandedGroup;
+		bool                                  m_hasCachedIp{false};
+		QDateTime                             m_connectTime;
+		bool                                  m_disconnectOk{true};
+		bool                                  m_reconnectOnLinkFailure{false};
+		bool                                  m_incomingSocketDataPaused{false};
+		bool                                  m_reloadReattachSuppressConnectActions{false};
+		bool                                  m_reloadReattachMccpProbePending{false};
+		bool                                  m_reloadReattachMccpResumePending{false};
+		bool                                  m_reloadReattachLookProbeSent{false};
+		bool                                  m_reloadReattachUseDeferredMxpReplay{false};
+		qsizetype                             m_reloadReattachMccpProbeDecisionOffset{0};
+		int                                   m_reloadMccpProbeTimeoutPass{0};
+		QByteArray                            m_reloadReattachMccpProbeBuffer;
+		QList<TelnetProcessor::MxpEvent>      m_reloadReattachMxpProbeEvents;
+		QList<TelnetProcessor::MxpModeChange> m_reloadReattachMxpProbeModeChanges;
+		quint64                               m_reloadMccpProbeGeneration{0};
+		bool                                  m_reloadMccpDisableForReloadArmed{false};
+		bool                                  m_reloadMccpDisableForReloadFatal{false};
+		struct DeferredInboundTransmission
 		{
-				QString        text;
-				bool           echo{false};
-				bool           log{false};
+				QByteArray     payload;
 				unsigned short actionSource{eUnknownActionSource};
 		};
-		mutable QVector<DeferredInboundCommand> m_deferredInboundCommands;
-		mutable int                             m_deferredInboundTriggerPriorityCommands{0};
-		mutable int                             m_inboundCommandDeferralDepth{0};
-		mutable bool                            m_flushingDeferredInboundCommands{false};
-		QDateTime                               m_statusTime;
-		QDateTime                               m_lastFlushTime;
-		QDateTime                               m_clientStartTime;
-		QDateTime                               m_worldStartTime;
-		int                                     m_mxpErrors{0};
-		bool                                    m_mxpActive{false};
-		bool                                    m_outputFrozen{false};
-		TextRectangleSettings                   m_textRectangle;
-		QMap<int, UdpListener>                  m_udpListeners;
-		[[nodiscard]] static bool               soundBufferHasBackend(const SoundBuffer &entry);
-		[[nodiscard]] static bool               soundBufferIsPlaying(const SoundBuffer &entry);
-		[[nodiscard]] static bool               soundBufferIsReusable(const SoundBuffer &entry);
-		[[nodiscard]] static bool               soundBufferIsStealable(const SoundBuffer &entry);
-		static void                             clearSoundBuffer(SoundBuffer &entry);
+		QVector<DeferredInboundTransmission> m_deferredInboundTransmissions;
+		int                                  m_deferredInboundTriggerPriorityTransmissions{0};
+		int                                  m_inboundTransmissionDeferralDepth{0};
+		bool                                 m_flushingDeferredInboundTransmissions{false};
+		bool                                 m_inboundSocketDisconnectPending{false};
+		QDateTime                            m_statusTime;
+		QDateTime                            m_lastFlushTime;
+		QDateTime                            m_clientStartTime;
+		QDateTime                            m_worldStartTime;
+		int                                  m_mxpErrors{0};
+		bool                                 m_mxpActive{false};
+		bool                                 m_outputFrozen{false};
+		TextRectangleSettings                m_textRectangle;
+		QMap<int, UdpListener>               m_udpListeners;
+		[[nodiscard]] static bool            soundBufferHasBackend(const SoundBuffer &entry);
+		[[nodiscard]] static bool            soundBufferIsPlaying(const SoundBuffer &entry);
+		[[nodiscard]] static bool            soundBufferIsReusable(const SoundBuffer &entry);
+		[[nodiscard]] static bool            soundBufferIsStealable(const SoundBuffer &entry);
+		static void                          clearSoundBuffer(SoundBuffer &entry);
 #if QMUD_ENABLE_SOUND
 		[[nodiscard]] SoundBuffer *soundBufferForEffectSignal(const QSoundEffect *effect, int targetBuffer);
 		[[nodiscard]] SoundBuffer *soundBufferForPlayerSignal(const QMediaPlayer *player, int targetBuffer);
@@ -6835,8 +7150,9 @@ class WorldRuntime : public QObject
 		bool                           m_loadingDocument{false};
 		bool                           m_inPlaySoundPluginCallback{false};
 		bool                           m_inCancelSoundPluginCallback{false};
-		bool                           m_inScreendrawCallback{false};
-		bool                           m_inDrawOutputWindowCallback{false};
+		int                            m_drawOutputWindowCallbackInFlightDepth{0};
+		int                            m_screendrawMutationReplayDepth{0};
+		int                            m_drawOutputWindowMutationReplayDepth{0};
 		int                            m_suppressWorldOutputResizedCallbacks{0};
 		bool                           m_pluginInstallDeferred{false};
 		bool                           m_pluginInstallInProgress{false};
@@ -6885,11 +7201,12 @@ class WorldRuntime : public QObject
 		int                 m_deferredHiddenLuaContextLineBufferIndex{0};
 		qint64              m_deferredHiddenLuaContextLineNumber{0};
 		QHash<LuaCallbackOutputCursorKey, LuaCallbackOutputInsertionCursor>
-		                m_luaCallbackAfterAnchorInsertionCursors;
-		qint64          m_luaCallbackOutputIndexOrigin{0};
-		quint64         m_luaCallbackOutputPositionFullScanCount{0};
-		mutable quint64 m_luaCallbackMatchedLineResolutionEntryCopyCount{0};
-		mutable quint64 m_luaCallbackMatchedLineResolutionFullScanCount{0};
+		                                            m_luaCallbackAfterAnchorInsertionCursors;
+		QHash<qint64, QSet<quint64>>                m_luaCallbackOutputStreamsByAnchorLineNumber;
+		QHash<quint64, QSet<qint64>>                m_luaCallbackOutputAnchorLinesByStream;
+		qint64                                      m_luaCallbackOutputIndexOrigin{0};
+		const std::shared_ptr<std::atomic<quint64>> m_luaCallbackOutputHeadRemovalCount =
+		    std::make_shared<std::atomic<quint64>>(0);
 		mutable quint64 m_luaCallbackLineBufferSnapshotGeneration{0};
 		mutable quint64 m_luaCallbackLastLineBufferSnapshotCacheGeneration{0};
 		mutable QSharedPointer<const LuaCallbackLineBufferSnapshot> m_luaCallbackLastLineBufferSnapshotCache;

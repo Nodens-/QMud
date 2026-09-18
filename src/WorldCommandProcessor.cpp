@@ -13,6 +13,7 @@
 #include "AppController.h"
 #include "FileExtensions.h"
 #include "HyperlinkActionUtils.h"
+#include "LuaCallbackEngine.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
 #include "NativePluginRegistry.h"
@@ -1574,8 +1575,8 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 		QPointer<WorldRuntime> executionRuntime = m_runtime;
 		if (executionRuntime)
 			executionRuntime->setCurrentActionSource(WorldRuntime::eTriggerFired);
-		emit sendToScriptRequested(pluginId, scriptText, description, &styleRuns, true,
-		                           replaceMatchedLineOutput, triggerMatchedLineBufferIndex,
+		emit sendToScriptRequested(pluginId, scriptText, description, LuaCallbackEvent::TriggerScript,
+		                           &styleRuns, true, replaceMatchedLineOutput, triggerMatchedLineBufferIndex,
 		                           triggerMatchedLineAbsoluteNumber);
 		if (executionRuntime)
 			executionRuntime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
@@ -1615,8 +1616,9 @@ void WorldCommandProcessor::onIncomingStyledLineReceived(const QString          
 		TriggerExecutionScope executionScope(m_runtime, runtimeId, pluginId, true);
 		m_runtime->setCurrentActionSource(WorldRuntime::eTriggerFired);
 		const auto result = m_runtime->dispatchLuaStringsAndWildcards(
-		    dispatchLua, scriptName, {label, scriptLine}, wildcards, namedWildcards, styleRunsShared.data(),
-		    replaceMatchedLineOutput, triggerMatchedLineBufferIndex, triggerMatchedLineAbsoluteNumber);
+		    dispatchLua, scriptName, LuaCallbackEvent::TriggerRoutine, {label, scriptLine}, wildcards,
+		    namedWildcards, styleRunsShared.data(), replaceMatchedLineOutput, triggerMatchedLineBufferIndex,
+		    triggerMatchedLineAbsoluteNumber);
 		if (!plugin && result.hasFunctionValid)
 		{
 			worldTriggerFunctionPresenceCache.insert(scriptName, result.hasFunction);
@@ -1878,14 +1880,9 @@ void WorldCommandProcessor::sendRawTextWithTriggerPriority(const QString &text, 
 void WorldCommandProcessor::sendImmediateText(const QString &text, const bool echo, const bool log,
                                               const bool history)
 {
-	doSendMsg(text, echo, log);
+	doSendMsg(text, echo, log, OutboundTransport::Immediate);
 	if (history && m_view)
 		m_view->addToHistoryForced(text);
-}
-
-void WorldCommandProcessor::sendDeferredInboundText(const QString &text, const bool echo, const bool log)
-{
-	doSendMsg(text, echo, log);
 }
 
 void WorldCommandProcessor::logInputCommand(const QString &text) const
@@ -2410,7 +2407,8 @@ bool WorldCommandProcessor::evaluateCommand(const QString &input, const bool all
 				    luaRef ? luaRef
 				           : QSharedPointer<LuaCallbackEngine>(lua, [](LuaCallbackEngine * /*unused*/) {});
 				const auto result = m_runtime->dispatchLuaStringsAndWildcards(
-				    dispatchLua, scriptName, {label, scriptLine}, wildcards, namedWildcards);
+				    dispatchLua, scriptName, LuaCallbackEvent::AliasRoutine, {label, scriptLine}, wildcards,
+				    namedWildcards);
 				if (!plugin && result.hasFunctionValid)
 				{
 					worldAliasFunctionPresenceCache.insert(scriptName, result.hasFunction);
@@ -3099,7 +3097,7 @@ bool WorldCommandProcessor::processOneAliasSequence(const QString &currentLine, 
 
 		AliasExecutionScope executionScope(m_runtime, aliasRuntimeId, scopePluginId, false, index);
 		sendTo(sendToValue, sendText, omitFromOutput, omitFromLogValue, variableName, scriptLabel,
-		       scopePluginId);
+		       scopePluginId, nullptr, false, false, 0, 0, LuaCallbackEvent::AliasScript);
 
 		AliasRef ref;
 		ref.runtimeId      = aliasRuntimeId;
@@ -3897,7 +3895,8 @@ void WorldCommandProcessor::checkTimers()
 				                                   planned.index);
 				m_runtime->setCurrentActionSource(WorldRuntime::eTimerFired);
 				const LuaBatchDispatchResult result = m_runtime->dispatchLuaStringsAndWildcards(
-				    dispatchLua, planned.scriptName, {planned.label}, {}, {}, nullptr);
+				    dispatchLua, planned.scriptName, LuaCallbackEvent::None, {planned.label}, {}, {},
+				    nullptr);
 				if (worldScript && result.hasFunctionValid && !result.hasFunction)
 					warnMissingWorldScriptFunction(QStringLiteral("Timer"), planned.scriptName);
 				m_runtime->setCurrentActionSource(WorldRuntime::eUnknownActionSource);
@@ -3929,9 +3928,10 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
                                    const bool omitFromLog, const QString &variableName,
                                    const QString &description, const QString &pluginId,
                                    const QVector<LuaStyleRun> *styleRuns, const bool hasTriggerContext,
-                                   const bool   replaceMatchedLineOutput,
-                                   const int    triggerMatchedLineBufferIndex,
-                                   const qint64 triggerMatchedLineAbsoluteNumber)
+                                   const bool             replaceMatchedLineOutput,
+                                   const int              triggerMatchedLineBufferIndex,
+                                   const qint64           triggerMatchedLineAbsoluteNumber,
+                                   const LuaCallbackEvent callbackEvent)
 {
 	const bool canSendEmpty = sendTo == eSendToNotepad || sendTo == eAppendToNotepad ||
 	                          sendTo == eReplaceNotepad || sendTo == eSendToOutput ||
@@ -3983,7 +3983,7 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 	case eSendImmediate:
 		if (m_runtime)
 			m_runtime->setLastImmediateExpression(text);
-		doSendMsg(text, echoSend, logIt);
+		doSendMsg(text, echoSend, logIt, OutboundTransport::Immediate);
 		break;
 	case eSendToCommand:
 		if (m_view && m_view->inputText().isEmpty())
@@ -4052,9 +4052,10 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 		break;
 	case eSendToScript:
 	case eSendToScriptAfterOmit:
-		emit sendToScriptRequested(pluginId, text, description, styleRuns, hasTriggerContext,
-		                           replaceMatchedLineOutput, triggerMatchedLineBufferIndex,
-		                           triggerMatchedLineAbsoluteNumber);
+		emit sendToScriptRequested(pluginId, text, description,
+		                           hasTriggerContext ? LuaCallbackEvent::TriggerScript : callbackEvent,
+		                           styleRuns, hasTriggerContext, replaceMatchedLineOutput,
+		                           triggerMatchedLineBufferIndex, triggerMatchedLineAbsoluteNumber);
 		break;
 	default:
 		break;
@@ -4063,8 +4064,9 @@ void WorldCommandProcessor::sendTo(const int sendTo, const QString &text, const 
 
 void WorldCommandProcessor::dispatchScriptSend(
     const QString &pluginId, const QString &text, const QString &description,
-    const QVector<LuaStyleRun> *styleRuns, const bool hasTriggerContext, const bool replaceMatchedLineOutput,
-    const int triggerMatchedLineBufferIndex, const qint64 triggerMatchedLineAbsoluteNumber) const
+    const LuaCallbackEvent callbackEvent, const QVector<LuaStyleRun> *styleRuns, const bool hasTriggerContext,
+    const bool replaceMatchedLineOutput, const int triggerMatchedLineBufferIndex,
+    const qint64 triggerMatchedLineAbsoluteNumber) const
 {
 	if (!m_runtime)
 		return;
@@ -4108,14 +4110,14 @@ void WorldCommandProcessor::dispatchScriptSend(
 	if (hasTriggerContext)
 	{
 		static_cast<void>(executionRuntime->dispatchLuaExecuteScript(
-		    luaRef, text, description, styleRuns, hasTriggerContext, replaceMatchedLineOutput,
+		    luaRef, text, description, callbackEvent, styleRuns, hasTriggerContext, replaceMatchedLineOutput,
 		    triggerMatchedLineBufferIndex, triggerMatchedLineAbsoluteNumber));
 		return;
 	}
 
-	executionRuntime->dispatchLuaExecuteScriptAsync(luaRef, text, description, styleRuns, hasTriggerContext,
-	                                                replaceMatchedLineOutput, triggerMatchedLineBufferIndex,
-	                                                triggerMatchedLineAbsoluteNumber);
+	executionRuntime->dispatchLuaExecuteScriptAsync(
+	    luaRef, text, description, callbackEvent, styleRuns, hasTriggerContext, replaceMatchedLineOutput,
+	    triggerMatchedLineBufferIndex, triggerMatchedLineAbsoluteNumber);
 }
 
 void WorldCommandProcessor::sendMsg(const QString &text, const bool echo, const bool queueIt, bool logIt)
@@ -4198,10 +4200,11 @@ void WorldCommandProcessor::sendMsg(const QString &text, const bool echo, const 
 		} // end of having a speedwalk delay
 		else
 		{
-			const bool triggerPriority = !queueIt && m_triggerCommandPriorityDepth > 0;
-			if (m_runtime && m_runtime->deferInboundImmediateCommand(strLine, bEcho, logIt, triggerPriority))
-				continue;
-			doSendMsg(strLine, bEcho, logIt); // just send it
+			const bool              triggerPriority = !queueIt && m_triggerCommandPriorityDepth > 0;
+			const OutboundTransport transport =
+			    triggerPriority ? OutboundTransport::DeferAtInboundBoundaryWithTriggerPriority
+			                    : OutboundTransport::DeferAtInboundBoundary;
+			doSendMsg(strLine, bEcho, logIt, transport);
 		}
 	} // end of breaking it into lines
 
@@ -4211,7 +4214,8 @@ void WorldCommandProcessor::sendMsg(const QString &text, const bool echo, const 
 		m_runtime->setQueuedCommandCount(safeQSizeToInt(m_queuedCommands.size()));
 }
 
-void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, const bool logIt)
+void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, const bool logIt,
+                                      const OutboundTransport transport)
 {
 	if (!ensureConnectedForSend())
 	{
@@ -4263,9 +4267,9 @@ void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, cons
 	{
 		if (m_lastCommandCount > m_spamLineCount)
 		{
-			m_lastCommandCount = 0;                // so we don't recurse again
-			doSendMsg(m_spamMessage, echo, logIt); // recursive call
-			m_lastCommandSent  = str;              // remember it for next time
+			m_lastCommandCount = 0;                           // so we don't recurse again
+			doSendMsg(m_spamMessage, echo, logIt, transport); // recursive call
+			m_lastCommandSent  = str;                         // remember it for next time
 			m_lastCommandCount = 1;
 		} // end of time to do it
 
@@ -4386,7 +4390,11 @@ void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, cons
 		QByteArray payload = m_utf8 ? str.toUtf8() : qmudEncodeWorldText(str, m_legacyEncodingName, nullptr);
 		if (!m_doNotTranslateIac)
 			payload.replace(static_cast<char>(0xFF), QByteArray("\xFF\xFF", 2));
-		m_runtime->sendToWorld(payload);
+		const bool deferAtInboundBoundary = transport != OutboundTransport::Immediate;
+		const bool triggerPriority =
+		    transport == OutboundTransport::DeferAtInboundBoundaryWithTriggerPriority;
+		if (!deferAtInboundBoundary || !m_runtime->tryDeferInboundTransmission(payload, triggerPriority))
+			m_runtime->sendToWorld(payload);
 		if (m_processingEnteredCommand)
 			m_enteredCommandSendFailed = false;
 		m_runtime->incrementLinesSent();
@@ -4498,7 +4506,7 @@ void WorldCommandProcessor::processQueuedCommands(bool flushAll)
 			    if (runtimeGuard)
 				    runtimeGuard->setCurrentActionSource(previousActionSource);
 		    });
-		doSendMsg(decoded.payload, decoded.withEcho, decoded.logIt);
+		doSendMsg(decoded.payload, decoded.withEcho, decoded.logIt, OutboundTransport::Immediate);
 		sentAny = true;
 	}
 

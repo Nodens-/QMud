@@ -331,6 +331,33 @@ end
 				QCOMPARE(runtime.aliases().constFirst().matched, 2);
 			}
 
+			static void inlineAliasScriptUsesInputCriticalEvent()
+			{
+				WorldRuntime runtime;
+				runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
+
+				WorldRuntime::Alias alias;
+				alias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+				alias.attributes.insert(QStringLiteral("match"), QStringLiteral("critical-alias"));
+				alias.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
+				alias.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToScript));
+				alias.children.insert(QStringLiteral("send"), QStringLiteral("return true"));
+				runtime.setAliases({alias});
+
+				WorldCommandProcessor processor;
+				processor.setRuntime(&runtime);
+				LuaCallbackEvent capturedEvent = LuaCallbackEvent::None;
+				QObject::connect(&processor, &WorldCommandProcessor::sendToScriptRequested, &processor,
+				                 [&capturedEvent](const QString &, const QString &, const QString &,
+				                                  const LuaCallbackEvent callbackEvent,
+				                                  const QVector<LuaStyleRun> *, bool, bool, int, qint64)
+				                 { capturedEvent = callbackEvent; });
+
+				QCOMPARE(processor.executeCommand(QStringLiteral("critical-alias")), eOK);
+				QCOMPARE(capturedEvent, LuaCallbackEvent::AliasScript);
+				QVERIFY(luaCallbackEventIsInputCritical(capturedEvent));
+			}
+
 			static void pluginRegexpAliasDispatchesUnmatchedNamedCaptureAsEmptyLuaString()
 			{
 				QTemporaryDir tempDir;
