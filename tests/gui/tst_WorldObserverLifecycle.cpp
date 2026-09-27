@@ -11,6 +11,7 @@
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
 #include "WorldRuntime.h"
+#include "WorldRuntimeTestAccess.h"
 #include "WorldView.h"
 
 #include <QAbstractScrollArea>
@@ -366,7 +367,7 @@ end
 			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
 			runtime->setWorldAttribute(QStringLiteral("on_world_close"), QStringLiteral("qcb_close"));
-			runtime->setLuaScriptText(QStringLiteral(R"lua(
+			WorldRuntimeTestAccess::initializeLuaScriptText(*runtime, QStringLiteral(R"lua(
 function qcb_close()
   local count = tonumber(GetVariable("close_count") or "0") or 0
   SetVariable("close_count", tostring(count + 1))
@@ -401,6 +402,4 @@ end
 
 QTEST_MAIN(tst_WorldObserverLifecycle)
 
-#if __has_include("tst_WorldObserverLifecycle.moc")
 #include "tst_WorldObserverLifecycle.moc"
-#endif

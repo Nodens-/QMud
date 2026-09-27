@@ -132,6 +132,31 @@ namespace
 				runtime.setStartupDirectory(QCoreApplication::applicationDirPath());
 				runtime.setPluginInstallDeferred(true);
 				runtime.applyFromDocument(source);
+				for (const WorldRuntime::Alias &alias : runtime.aliases())
+				{
+					QVERIFY(alias.runtimeId != 0);
+					QVERIFY(alias.runtimeLocationHandle != 0);
+				}
+				for (const WorldRuntime::Timer &timer : runtime.timers())
+				{
+					QVERIFY(timer.runtimeId != 0);
+					QVERIFY(timer.runtimeLocationHandle != 0);
+				}
+				for (const WorldRuntime::Plugin &plugin : runtime.plugins())
+				{
+					QVERIFY(plugin.runtimeInstanceId != 0);
+					QVERIFY(plugin.runtimeLocationHandle != 0);
+					for (const WorldRuntime::Alias &alias : plugin.aliases)
+					{
+						QVERIFY(alias.runtimeId != 0);
+						QVERIFY(alias.runtimeLocationHandle != 0);
+					}
+					for (const WorldRuntime::Timer &timer : plugin.timers)
+					{
+						QVERIFY(timer.runtimeId != 0);
+						QVERIFY(timer.runtimeLocationHandle != 0);
+					}
+				}
 				runtime.setWorldAttribute(QStringLiteral("partial_save_character_threshold"),
 				                          QStringLiteral("37"));
 				runtime.setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
@@ -342,6 +367,4 @@ plugin_include_value = "included"
 
 QTEST_GUILESS_MAIN(tst_WorldDocument_RoundTrip)
 
-#if __has_include("tst_WorldDocument_RoundTrip.moc")
 #include "tst_WorldDocument_RoundTrip.moc"
-#endif

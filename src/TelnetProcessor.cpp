@@ -84,7 +84,6 @@ static constexpr unsigned char TTYPE_SEND                            = 1;
 static constexpr unsigned char START_TLS_FOLLOWS                     = 1;
 static constexpr int           MCCP_INFLATE_CHUNK_SIZE               = 8192;
 static constexpr int           kMaxMxpPendingBytes                   = 8192;
-static constexpr int           kMaxMxpCustomDefinitions              = 1024;
 static constexpr int           kMaxMxpAttlistBytes                   = 16384;
 static constexpr qsizetype     kRenegotiationAttemptLimit            = 10;
 static constexpr qint64        kRenegotiationWindowMilliseconds      = 60'000;
@@ -547,8 +546,8 @@ void TelnetProcessor::resetConnectionState()
 	m_puebloActive     = false;
 	m_mxpDefaultMode   = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 	m_mxpMode          = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
-	m_customElements.clear();
-	m_customEntities.clear();
+	clearCustomElements();
+	clearCustomEntities();
 	m_nawsWanted          = false;
 	m_compress            = false;
 	m_mccpType            = 0;
@@ -1189,9 +1188,51 @@ bool TelnetProcessor::getCustomEntityValue(const QByteArray &name, QByteArray &v
 	return true;
 }
 
-QMap<QByteArray, QByteArray> TelnetProcessor::customEntitySnapshot() const
+TelnetProcessor::CustomEntityMap TelnetProcessor::customEntitySnapshot() const
 {
 	return m_customEntities;
+}
+
+void TelnetProcessor::updateCustomEntity(const QByteArray &name, const QByteArray &value, const bool present)
+{
+	if (name.isEmpty())
+		return;
+	const auto existing = m_customEntities.constFind(name);
+	if (present)
+	{
+		if (existing != m_customEntities.constEnd() && existing.value() == value)
+			return;
+		m_customEntities.insert(name, value);
+	}
+	else
+	{
+		if (existing == m_customEntities.constEnd())
+			return;
+		m_customEntities.erase(existing);
+	}
+	if (m_callbacks.onCustomEntityChanged)
+		m_callbacks.onCustomEntityChanged(name, value, present);
+}
+
+void TelnetProcessor::clearCustomEntities()
+{
+	m_customEntities.clear();
+	if (m_callbacks.onCustomEntitiesCleared)
+		m_callbacks.onCustomEntitiesCleared();
+}
+
+void TelnetProcessor::clearCustomElements()
+{
+	if (m_customElements.isEmpty())
+		return;
+	m_customElements.clear();
+	notifyCustomElementsChanged();
+}
+
+void TelnetProcessor::notifyCustomElementsChanged(const QByteArray &name) const
+{
+	if (m_callbacks.onCustomElementsChanged)
+		m_callbacks.onCustomElementsChanged(name);
 }
 
 void TelnetProcessor::setCustomEntity(const QByteArray &name, const QByteArray &value)
@@ -1199,24 +1240,7 @@ void TelnetProcessor::setCustomEntity(const QByteArray &name, const QByteArray &
 	const QByteArray key = name.toLower();
 	if (key.isEmpty())
 		return;
-	if (value.isEmpty())
-		m_customEntities.remove(key);
-	else
-	{
-		if (!m_customEntities.contains(key) && m_customEntities.size() >= kMaxMxpCustomDefinitions)
-		{
-			emitMxpDiagnosticLazy(
-			    DBG_WARNING, wrnMXP_CustomDefinitionLimitExceeded,
-			    [key]
-			    {
-				    return QStringLiteral("MXP custom definition limit reached (%1). Ignoring entity &%2;.")
-				        .arg(kMaxMxpCustomDefinitions)
-				        .arg(QString::fromLocal8Bit(key));
-			    });
-			return;
-		}
-		m_customEntities.insert(key, value);
-	}
+	updateCustomEntity(key, value, !value.isEmpty());
 }
 
 QByteArray TelnetProcessor::decodeIncomingMxpTextToInternalBytes(const QByteArray &bytes) const
@@ -1284,21 +1308,22 @@ bool TelnetProcessor::resolveEntityValue(const QByteArray &name, QByteArray &val
 	return resolveCustomEntityValue(name, value);
 }
 
+bool TelnetProcessor::resolveBuiltinEntityValue(const QByteArray &name, QByteArray &value)
+{
+	QByteArray builtin;
+	if (!resolveBuiltinEntity(name, builtin))
+		return false;
+	value = decodeBuiltinMxpTextToInternalBytes(builtin);
+	return !value.isEmpty();
+}
+
 bool TelnetProcessor::getCustomElementInfo(const QByteArray &name, CustomElementInfo &info) const
 {
 	const QByteArray key = name.toLower();
 	const auto       it  = m_customElements.constFind(key);
 	if (it == m_customElements.cend())
 		return false;
-	const auto &[elementName, elementOpen, elementCommand, elementTag, elementFlag, elementDefinition,
-	             elementAttributes] = it.value();
-	info.name                       = elementName;
-	info.open                       = elementOpen;
-	info.command                    = elementCommand;
-	info.tag                        = elementTag;
-	info.flag                       = elementFlag;
-	info.definition                 = elementDefinition;
-	info.attributes                 = elementAttributes;
+	info = it.value();
 	return true;
 }
 
@@ -1307,33 +1332,24 @@ QList<TelnetProcessor::CustomElementInfo> TelnetProcessor::customElementInfos() 
 	QList<CustomElementInfo> infos;
 	infos.reserve(m_customElements.size());
 	for (auto it = m_customElements.cbegin(); it != m_customElements.cend(); ++it)
-	{
-		const auto &[elementName, elementOpen, elementCommand, elementTag, elementFlag, elementDefinition,
-		             elementAttributes] = it.value();
-		CustomElementInfo info;
-		info.name       = elementName;
-		info.open       = elementOpen;
-		info.command    = elementCommand;
-		info.tag        = elementTag;
-		info.flag       = elementFlag;
-		info.definition = elementDefinition;
-		info.attributes = elementAttributes;
-		infos.push_back(info);
-	}
+		infos.push_back(it.value());
 	return infos;
+}
+
+TelnetProcessor::CustomElementMap TelnetProcessor::customElementSnapshot() const
+{
+	return m_customElements;
 }
 
 void TelnetProcessor::setCustomElementInfos(const QList<CustomElementInfo> &elements)
 {
-	m_customElements.clear();
+	CustomElementMap replacements;
 	for (const CustomElementInfo &info : elements)
 	{
 		const QByteArray lowerName = info.name.toLower();
 		if (lowerName.isEmpty())
 			continue;
-		if (!m_customElements.contains(lowerName) && m_customElements.size() >= kMaxMxpCustomDefinitions)
-			break;
-		CustomElement element;
+		CustomElementInfo element;
 		element.name       = lowerName;
 		element.open       = info.open;
 		element.command    = info.command;
@@ -1341,8 +1357,12 @@ void TelnetProcessor::setCustomElementInfos(const QList<CustomElementInfo> &elem
 		element.flag       = info.flag;
 		element.definition = info.definition;
 		element.attributes = info.attributes;
-		m_customElements.insert(lowerName, element);
+		replacements.insert(lowerName, element);
 	}
+	if (m_customElements == replacements)
+		return;
+	m_customElements = std::move(replacements);
+	notifyCustomElementsChanged();
 }
 
 TelnetProcessor::MxpSessionState TelnetProcessor::mxpSessionState() const
@@ -2035,7 +2055,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				break;
 			}
 
-			if (m_phase == HAVE_WILL || disposition == NegotiationDisposition::SettleAndSuppress)
+			if (m_phase == HAVE_WILL)
 				handleWill(c);
 			else
 				handleWont(c);
@@ -2056,7 +2076,7 @@ QByteArray TelnetProcessor::processPlainBytes(const QByteArray &data)
 				break;
 			}
 
-			if (m_phase == HAVE_DO || disposition == NegotiationDisposition::SettleAndSuppress)
+			if (m_phase == HAVE_DO)
 				handleDo(c);
 			else
 				handleDont(c);
@@ -3071,7 +3091,7 @@ void TelnetProcessor::mxpEntity(const QByteArray &name, const QByteArray &tagRem
 	// blank contents deletes the entity
 	if (strEntityContents.isEmpty())
 	{
-		m_customEntities.remove(lowerName);
+		updateCustomEntity(lowerName, {}, false);
 		return;
 	}
 
@@ -3120,19 +3140,7 @@ void TelnetProcessor::mxpEntity(const QByteArray &name, const QByteArray &tagRem
 	flushRawRun();
 
 	// add entity to map
-	if (!m_customEntities.contains(lowerName) && m_customEntities.size() >= kMaxMxpCustomDefinitions)
-	{
-		emitMxpDiagnosticLazy(
-		    DBG_WARNING, wrnMXP_CustomDefinitionLimitExceeded,
-		    [lowerName]
-		    {
-			    return QStringLiteral("MXP custom definition limit reached (%1). Ignoring entity &%2;.")
-			        .arg(kMaxMxpCustomDefinitions)
-			        .arg(QString::fromLocal8Bit(lowerName));
-		    });
-		return;
-	}
-	m_customEntities.insert(lowerName, strFixedValue);
+	updateCustomEntity(lowerName, strFixedValue, true);
 
 	// check they didn't supply any other arguments
 	mutableTagRemainder = trimMxp(mutableTagRemainder);
@@ -3155,7 +3163,7 @@ void TelnetProcessor::mxpEntity(const QByteArray &name, const QByteArray &tagRem
 		}
 		else if (strKeyword == "delete" || strKeyword == "remove")
 		{
-			m_customEntities.remove(lowerName);
+			updateCustomEntity(lowerName, {}, false);
 		}
 		else
 		{
@@ -3296,15 +3304,18 @@ void TelnetProcessor::mxpElement(const QByteArray &name, const QByteArray &tagRe
 		return;
 	}
 
-	// if element already defined, delete old one
-	if (m_customElements.contains(lowerName))
-	{
-		m_customElements.remove(lowerName);
-	}
+	const auto existing = m_customElements.constFind(lowerName);
 	if (doDelete)
+	{
+		if (existing != m_customElements.constEnd())
+		{
+			m_customElements.erase(existing);
+			notifyCustomElementsChanged(lowerName);
+		}
 		return;
+	}
 
-	CustomElement element;
+	CustomElementInfo element;
 	element.name    = lowerName;
 	element.open    = getKeyword(args, QByteArrayLiteral("open"));
 	element.command = getKeyword(args, QByteArrayLiteral("empty"));
@@ -3333,19 +3344,10 @@ void TelnetProcessor::mxpElement(const QByteArray &name, const QByteArray &tagRe
 		element.flag.replace(' ', '_');
 	}
 
-	if (!m_customElements.contains(lowerName) && m_customElements.size() >= kMaxMxpCustomDefinitions)
-	{
-		emitMxpDiagnosticLazy(
-		    DBG_WARNING, wrnMXP_CustomDefinitionLimitExceeded,
-		    [lowerName]
-		    {
-			    return QStringLiteral("MXP custom definition limit reached (%1). Ignoring element <%2>.")
-			        .arg(kMaxMxpCustomDefinitions)
-			        .arg(QString::fromLocal8Bit(lowerName));
-		    });
+	if (existing != m_customElements.constEnd() && existing.value() == element)
 		return;
-	}
 	m_customElements.insert(lowerName, element);
+	notifyCustomElementsChanged(lowerName);
 }
 
 // here for <!ATTLIST blah>
@@ -3416,10 +3418,10 @@ void TelnetProcessor::mxpAttlist(const QByteArray &name, const QByteArray &tagRe
 		return;
 	} // end of no element matching
 
-	CustomElement   element = m_customElements.value(lowerName);
+	CustomElementInfo element = m_customElements.value(lowerName);
 
-	const qsizetype separatorBytes = element.attributes.isEmpty() ? 0 : 1;
-	const qsizetype appendBytes    = separatorBytes + tagRemainder.size();
+	const qsizetype   separatorBytes = element.attributes.isEmpty() ? 0 : 1;
+	const qsizetype   appendBytes    = separatorBytes + tagRemainder.size();
 	if (appendBytes > 0 && element.attributes.size() + appendBytes > kMaxMxpAttlistBytes)
 	{
 		emitMxpDiagnosticLazy(
@@ -3443,7 +3445,10 @@ void TelnetProcessor::mxpAttlist(const QByteArray &name, const QByteArray &tagRe
 	else
 		element.attributes = tagRemainder;
 
+	if (m_customElements.value(lowerName) == element)
+		return;
 	m_customElements.insert(lowerName, element);
+	notifyCustomElementsChanged(lowerName);
 }
 
 bool TelnetProcessor::mxpOpen() const
@@ -3535,8 +3540,8 @@ void TelnetProcessor::mxpOn(const bool pueblo, const bool manual)
 	{
 		m_mxpDefaultMode = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
 		m_mxpMode        = TelnetProcessor::mxpModeCode(TelnetProcessor::MxpMode::Open);
-		m_customElements.clear();
-		m_customEntities.clear();
+		clearCustomElements();
+		clearCustomEntities();
 	}
 
 	if (m_callbacks.onMxpStart)

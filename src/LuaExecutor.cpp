@@ -81,6 +81,9 @@ namespace
 
 LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest &request) const
 {
+	LuaCallbackEngine::pushDispatchCallbackOrigin(request.callbackEvent != LuaCallbackEvent::None ||
+	                                              request.inheritedCallbackOrigin);
+	const auto popCallbackOrigin = qScopeGuard([] { LuaCallbackEngine::popDispatchCallbackOrigin(); });
 	LuaBatchDispatchResult                    result;
 	QSharedPointer<const LuaCallbackSnapshot> callbackSnapshot = request.callbackSnapshotArg;
 	const int                                 firstEngineIndex =
@@ -958,12 +961,41 @@ LuaBatchDispatchResult ILuaExecutor::dispatchBatch(const LuaBatchDispatchRequest
 	case LuaBatchDispatchKind::ResetAndLoadScript:
 	{
 		result.boolResult = false;
-		static_cast<void>(withFirstEngine(
-		    [&](LuaCallbackEngine *engine)
-		    {
-			    engine->resetState();
-			    result.boolResult = engine->loadScript();
-		    }));
+		if (request.scriptReloadArg && request.scriptReloadArg->cancellationState &&
+		    request.scriptReloadArg->cancellationState->isCancelled())
+		{
+			result.boolResultValid = true;
+			return result;
+		}
+		for (int engineIndex = firstEngineIndex; engineIndex < request.engines.size(); ++engineIndex)
+		{
+			const auto &engine = request.engines.at(engineIndex);
+			if (!engine)
+				continue;
+			prepareEngine(engine.data());
+			engine->resetState();
+			if (request.scriptReloadArg)
+			{
+				engine->setScriptText(request.scriptReloadArg->scriptText);
+				engine->applyPackageRestrictions(request.scriptReloadArg->allowPackage);
+			}
+			if (request.scriptReloadArg && !request.scriptReloadArg->loadScript)
+			{
+				result.boolResult = true;
+			}
+			else if (callbackSnapshot)
+			{
+				engine->pushDispatchSnapshot(callbackSnapshot);
+				const auto popSnapshot = qScopeGuard([engine] { engine->popDispatchSnapshot(); });
+				result.boolResult      = engine->loadScript();
+			}
+			else
+			{
+				result.boolResult = engine->loadScript();
+			}
+			static_cast<void>(collectMutationBoundaryResult(engine.data()));
+			break;
+		}
 		result.boolResultValid = true;
 		return result;
 	}

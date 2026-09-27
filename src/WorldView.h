@@ -15,6 +15,7 @@
 
 #include <QElapsedTimer>
 #include <QFont>
+#include <QHash>
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QKeySequence>
 #include <QList>
@@ -1444,8 +1445,21 @@ class WorldView : public QWidget
 		 * @param view Output pane view.
 		 * @return Paint state for @p view, or `nullptr` when the view is not native output.
 		 */
-		[[nodiscard]] NativeOutputPanePaintState      *
+		[[nodiscard]] NativeOutputPanePaintState                    *
         nativeOutputPanePaintStateForView(const WrapTextBrowser *view) const;
+		/**
+		 * @brief Captures current pane geometry and visible-line anchors without changing durable paint state.
+		 * @param state Destination state.
+		 * @param paneRect Full pane rectangle in canvas coordinates.
+		 * @param scrollY Current vertical scroll position.
+		 * @param scrollMax Current vertical scrollbar maximum.
+		 * @param lines Native render lines for the pane.
+		 * @return `true` when a complete state was captured.
+		 */
+		[[nodiscard]] bool captureNativeOutputPanePaintState(NativeOutputPanePaintState &state,
+		                                                     const QRect &paneRect, int scrollY,
+		                                                     int                            scrollMax,
+		                                                     const NativeOutputRenderLines &lines) const;
 		/**
 		 * @brief Records visible native output line anchors from the current layout.
 		 * @param view Output pane view.
@@ -1469,6 +1483,21 @@ class WorldView : public QWidget
 		void updateNativeOutputPanePaintState(const WrapTextBrowser *view, const QRect &paneRect,
 		                                      const QRegion &paintedRegion, int scrollY, int scrollMax,
 		                                      const NativeOutputRenderLines &lines) const;
+		/**
+		 * @brief Queues a native canvas region and records whether it was requested independently of scroll-copy damage.
+		 * @param region Canvas region to repaint.
+		 * @param independentOfScrollBlit Whether the request must receive ordinary background painting.
+		 */
+		void queueNativeOutputRepaintRegion(const QRegion &region, bool independentOfScrollBlit) const;
+		/**
+		 * @brief Clears an unconfirmed native-output scroll-copy transaction.
+		 */
+		void clearNativeOutputScrollBlitState() const;
+		/**
+		 * @brief Confirms painted portions of a pending native-output scroll-copy transaction.
+		 * @param paintedRegion Canvas region painted by the current paint event.
+		 */
+		void completeNativeOutputScrollBlitPaint(const QRegion &paintedRegion) const;
 		[[nodiscard]] bool nativeServerSideWrapActive() const;
 		[[nodiscard]] int  nativeWrapWidthPixels(int viewportWidth, bool wrapEnabled) const;
 		[[nodiscard]] int  nativeLocalWrapWidthPixels(int viewportWidth, bool wrapEnabled) const;
@@ -2632,16 +2661,30 @@ class WorldView : public QWidget
 				QVector<WorldRuntime::StyleSpan> spans;
 				bool                             injectBreakBeforeRender{false};
 		};
+		struct MiniWindowPaintState
+		{
+				quint64 runtimeId{0};
+				quint64 surfaceRevision{0};
+				QRect   bounds;
+				QRgb    transparentKey{0};
+				int     position{0};
+				int     zOrder{0};
+				bool    absoluteLocation{false};
+				bool    underneath{false};
+				bool    transparent{false};
+
+				bool    operator==(const MiniWindowPaintState &) const = default;
+		};
 		struct MiniWindowPaintBoundsSnapshot
 		{
-				QRect  underlayBounds;
-				QRect  overlayBounds;
-				QSize  clientSize;
-				QSize  ownerSize;
-				qint64 backgroundImageKey{0};
-				qint64 foregroundImageKey{0};
-				int    backgroundImageMode{0};
-				int    foregroundImageMode{0};
+				QHash<QString, MiniWindowPaintState> windows;
+				QRegion                              underlayRegion;
+				QSize                                clientSize;
+				QSize                                ownerSize;
+				qint64                               backgroundImageKey{0};
+				qint64                               foregroundImageKey{0};
+				int                                  backgroundImageMode{0};
+				int                                  foregroundImageMode{0};
 		};
 		/**
 		 * @brief Captures miniwindow paint bounds for dirty-rect native repainting.
@@ -2678,10 +2721,12 @@ class WorldView : public QWidget
 		int                                      m_drawCallbackCompletionsPending{0};
 		mutable NativeOutputPanePaintState       m_nativePrimaryPaintState;
 		mutable NativeOutputPanePaintState       m_nativeLivePaintState;
+		mutable NativeOutputPanePaintState       m_nativeOutputScrollBlitTargetState;
 		mutable bool                             m_nativeOutputScrollBlitPending{false};
-		mutable QRect                            m_nativeOutputScrollBlitExposedRect;
+		mutable QRegion                          m_nativeOutputScrollBlitExposedRegion;
 		mutable QRegion                          m_nativeOutputScrollBlitBackgroundRegion;
 		mutable QRegion                          m_nativeOutputScrollBlitRepaintRegion;
+		mutable QRegion                          m_nativeOutputScrollBlitIndependentRepaintRegion;
 		quint64                                  m_miniWindowChangeSerial{0};
 		mutable bool                             m_miniWindowPaintBoundsValid{false};
 		mutable MiniWindowPaintBoundsSnapshot    m_miniWindowPaintBounds;

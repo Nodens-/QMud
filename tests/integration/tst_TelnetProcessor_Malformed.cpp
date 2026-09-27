@@ -135,44 +135,6 @@ namespace
 				QCOMPARE(processor.takeMxpEvents().size(), 2);
 			}
 
-			void customEntityDefinitionLimitIsEnforced()
-			{
-				TelnetProcessor   processor;
-				TelnetCallbackSpy spy;
-				processor.setCallbacks(spy.callbacks());
-
-				for (int i = 0; i < 1100; ++i)
-				{
-					const QByteArray key = QStringLiteral("entity_%1").arg(i).toUtf8();
-					processor.setCustomEntity(key, QByteArrayLiteral("x"));
-				}
-
-				QCOMPARE(processor.customEntityCount(), 1024);
-				bool sawLimitDiagnostic = false;
-				for (const TelnetCallbackSpy::MxpDiagnostic &diag : spy.mxpDiagnostics)
-				{
-					if (diag.messageNumber == wrnMXP_CustomDefinitionLimitExceeded)
-					{
-						sawLimitDiagnostic = true;
-						break;
-					}
-				}
-				QVERIFY(sawLimitDiagnostic);
-
-				QByteArray value;
-				QVERIFY(processor.getCustomEntityValue(QByteArrayLiteral("entity_0"), value));
-				QCOMPARE(value, QByteArrayLiteral("x"));
-
-				processor.setCustomEntity(QByteArrayLiteral("entity_0"), QByteArrayLiteral("updated"));
-				QVERIFY(processor.getCustomEntityValue(QByteArrayLiteral("entity_0"), value));
-				QCOMPARE(value, QByteArrayLiteral("updated"));
-
-				processor.setCustomEntity(QByteArrayLiteral("entity_1"), QByteArray());
-				QCOMPARE(processor.customEntityCount(), 1023);
-				processor.setCustomEntity(QByteArrayLiteral("entity_new"), QByteArrayLiteral("x"));
-				QCOMPARE(processor.customEntityCount(), 1024);
-			}
-
 			void attlistDefinitionGrowthIsCapped()
 			{
 				TelnetProcessor   processor;
@@ -232,6 +194,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Malformed)
 
-#if __has_include("tst_TelnetProcessor_Malformed.moc")
 #include "tst_TelnetProcessor_Malformed.moc"
-#endif

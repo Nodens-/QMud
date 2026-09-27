@@ -356,8 +356,7 @@ namespace
 
 				WorldRuntime runtime;
 				WorldRuntimeTestAccess::plugins(runtime) = {firstPlugin, secondPlugin};
-				runtime.ensureAllTriggerRuntimeIds();
-				runtime.markTriggerRulesChanged();
+				WorldRuntimeTestAccess::commitPluginStructure(runtime);
 				const QList<WorldRuntime::Trigger> &runtimeTriggers =
 				    WorldRuntimeTestAccess::plugins(runtime).front().triggers;
 				QVERIFY(runtimeTriggers.at(0).runtimeId != 0);
@@ -562,6 +561,4 @@ namespace
 
 QTEST_MAIN(tst_WorldCommandProcessor_Trigger)
 
-#if __has_include("tst_WorldCommandProcessor_Trigger.moc")
 #include "tst_WorldCommandProcessor_Trigger.moc"
-#endif

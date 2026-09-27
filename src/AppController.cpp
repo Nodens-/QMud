@@ -187,6 +187,53 @@ extern "C"
 
 namespace
 {
+	bool worldLuaReloadNotificationTargetIsActive(const WorldRuntime *runtime, const WorldChildWindow *world,
+	                                              const MainWindow *mainWindow)
+	{
+		return runtime && world && mainWindow && !runtime->runtimeDestructionStarted() &&
+		       world->runtime() == runtime && world->isPrimaryRuntimeBinding() &&
+		       !runtime->worldSessionCloseStarted();
+	}
+
+	void queueWorldLuaScriptReload(WorldRuntime *runtime, WorldChildWindow *world, MainWindow *mainWindow,
+	                               QString script, const bool allowPackage, const bool loadScript,
+	                               QString successMessage)
+	{
+		if (!runtime)
+			return;
+		const QPointer<WorldRuntime>     runtimeGuard(runtime);
+		const QPointer<WorldChildWindow> worldGuard(world);
+		const QPointer<MainWindow>       mainWindowGuard(mainWindow);
+		runtime->reloadLuaScript(
+		    std::move(script), allowPackage, loadScript,
+		    [runtimeGuard, worldGuard, mainWindowGuard,
+		     successMessage = std::move(successMessage)](const bool loaded) mutable
+		    {
+			    if (loaded && successMessage.isEmpty())
+				    return;
+			    if (!worldLuaReloadNotificationTargetIsActive(runtimeGuard, worldGuard, mainWindowGuard))
+				    return;
+			    static_cast<void>(QMetaObject::invokeMethod(
+			        worldGuard.data(),
+			        [runtimeGuard, worldGuard, mainWindowGuard, loaded,
+			         successMessage = std::move(successMessage)]
+			        {
+				        if (!worldLuaReloadNotificationTargetIsActive(runtimeGuard, worldGuard,
+				                                                      mainWindowGuard))
+					        return;
+				        if (!loaded)
+				        {
+					        QMessageBox::warning(mainWindowGuard, QStringLiteral("Reload Script File"),
+					                             QStringLiteral("Failed to reload the script."));
+					        return;
+				        }
+				        if (!successMessage.isEmpty())
+					        mainWindowGuard->showStatusMessage(successMessage, 3000);
+			        },
+			        Qt::QueuedConnection));
+		    });
+	}
+
 	bool envFlagEnabled(const char *name)
 	{
 		const QString value = qmudEnvironmentVariable(QString::fromLatin1(name)).trimmed();
@@ -9356,21 +9403,15 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			scriptText = runtime->worldMultilineAttributes().value(QStringLiteral("script"));
 		}
 
-		runtime->setLuaScriptText(scriptText);
 		runtime->setScriptFileChanged(false);
-		if (LuaCallbackEngine *lua = runtime->luaCallbacks())
+		if (runtime->luaCallbacks())
 		{
 			int allowPackage = 1;
 			if (AppController *app = instance())
 				allowPackage = app->getGlobalOption(QStringLiteral("AllowLoadingDlls")).toInt();
-			runtime->applyPackageRestrictions(allowPackage != 0);
-			const bool loaded = runtime->dispatchLuaResetAndLoadScript(lua);
-			if (!loaded)
-			{
-				QMessageBox::warning(m_mainWindow, QStringLiteral("Reload Script File"),
-				                     QStringLiteral("Failed to reload the script."));
-				return;
-			}
+			queueWorldLuaScriptReload(runtime, world, m_mainWindow, std::move(scriptText), allowPackage != 0,
+			                          true, QStringLiteral("Script file reloaded."));
+			return;
 		}
 		m_mainWindow->showStatusMessage(QStringLiteral("Script file reloaded."), 3000);
 	}
@@ -12770,10 +12811,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (payload.isEmpty())
 			return;
 
-		const bool wasSimulating = runtime->doingSimulate();
-		runtime->setDoingSimulate(true);
-		runtime->receiveRawData(payload);
-		runtime->setDoingSimulate(wasSimulating);
+		runtime->simulateInput(payload);
 	}
 	else if (cmdName == QStringLiteral("FullScreenMode"))
 	{
@@ -15106,18 +15144,20 @@ AppController::ImportResult AppController::applyImportedDocument(WorldChildWindo
 		                                       &result.errorMessage);
 	};
 
-	if (mask & WorldDocument::XML_GENERAL)
-	{
-		for (auto it = doc.worldAttributes().begin(); it != doc.worldAttributes().end(); ++it)
-			runtime->setWorldAttribute(it.key(), it.value());
-		for (auto it = doc.worldMultilineAttributes().begin(); it != doc.worldMultilineAttributes().end();
-		     ++it)
-			runtime->setWorldMultilineAttribute(it.key(), it.value());
-	}
+	QList<WorldRuntime::Trigger>       mergedTriggers;
+	QList<WorldRuntime::Alias>         mergedAliases;
+	QList<WorldRuntime::Timer>         mergedTimers;
+	QList<WorldRuntime::Macro>         mergedMacros;
+	QList<WorldRuntime::Variable>      mergedVariables;
+	QList<WorldRuntime::Colour>        mergedColours;
+	QList<WorldRuntime::Keypad>        mergedKeypad;
+	QList<WorldRuntime::PrintingStyle> mergedPrinting;
 
+	// Prepare every selected category before changing the runtime. Named-list duplicate rejection must leave
+	// General settings, rules, variables, and the active script engine untouched.
 	if (mask & WorldDocument::XML_TRIGGERS)
 	{
-		QList<WorldRuntime::Trigger> merged = runtime->triggers();
+		mergedTriggers = runtime->triggers();
 		QList<WorldRuntime::Trigger> incoming;
 		incoming.reserve(doc.triggers().size());
 		for (const auto &[attributes, children, included] : doc.triggers())
@@ -15128,14 +15168,13 @@ AppController::ImportResult AppController::applyImportedDocument(WorldChildWindo
 			trigger.included   = included;
 			incoming.push_back(trigger);
 		}
-		if (!mergeNamedList(merged, incoming, QStringLiteral("trigger")))
+		if (!mergeNamedList(mergedTriggers, incoming, QStringLiteral("trigger")))
 			return result;
-		runtime->setTriggers(merged);
 	}
 
 	if (mask & WorldDocument::XML_ALIASES)
 	{
-		QList<WorldRuntime::Alias> merged = runtime->aliases();
+		mergedAliases = runtime->aliases();
 		QList<WorldRuntime::Alias> incoming;
 		incoming.reserve(doc.aliases().size());
 		for (const auto &[attributes, children, included] : doc.aliases())
@@ -15146,14 +15185,13 @@ AppController::ImportResult AppController::applyImportedDocument(WorldChildWindo
 			alias.included   = included;
 			incoming.push_back(alias);
 		}
-		if (!mergeNamedList(merged, incoming, QStringLiteral("alias")))
+		if (!mergeNamedList(mergedAliases, incoming, QStringLiteral("alias")))
 			return result;
-		runtime->setAliases(merged);
 	}
 
 	if (mask & WorldDocument::XML_TIMERS)
 	{
-		QList<WorldRuntime::Timer> merged = runtime->timers();
+		mergedTimers = runtime->timers();
 		QList<WorldRuntime::Timer> incoming;
 		incoming.reserve(doc.timers().size());
 		for (const auto &[attributes, children, included] : doc.timers())
@@ -15164,58 +15202,92 @@ AppController::ImportResult AppController::applyImportedDocument(WorldChildWindo
 			timer.included   = included;
 			incoming.push_back(timer);
 		}
-		if (!mergeNamedList(merged, incoming, QStringLiteral("timer")))
+		if (!mergeNamedList(mergedTimers, incoming, QStringLiteral("timer")))
 			return result;
-		runtime->setTimers(merged);
 	}
 
 	if (mask & WorldDocument::XML_MACROS)
 	{
-		QList<WorldRuntime::Macro> merged = runtime->macros();
+		mergedMacros = runtime->macros();
 		QList<WorldRuntime::Macro> incoming;
 		incoming.reserve(doc.macros().size());
 		for (const auto &[attributes, children] : doc.macros())
 			incoming.push_back({attributes, children});
-		if (!mergeNamedList(merged, incoming, QStringLiteral("macro")))
+		if (!mergeNamedList(mergedMacros, incoming, QStringLiteral("macro")))
 			return result;
-		runtime->setMacros(merged);
 	}
 
 	if (mask & WorldDocument::XML_VARIABLES)
 	{
-		QList<WorldRuntime::Variable> merged = runtime->variables();
+		mergedVariables = runtime->variables();
 		QList<WorldRuntime::Variable> incoming;
 		incoming.reserve(doc.variables().size());
 		for (const auto &[attributes, content] : doc.variables())
 		{
 			incoming.push_back({attributes, content});
 		}
-		QMudImportMerge::mergeVariables(merged, incoming, allowOverwrite, &result.duplicates);
-		runtime->setVariables(merged);
+		QMudImportMerge::mergeVariables(mergedVariables, incoming, allowOverwrite, &result.duplicates);
 	}
 
 	if (mask & WorldDocument::XML_COLOURS)
 	{
-		QList<WorldRuntime::Colour> merged = runtime->colours();
+		mergedColours = runtime->colours();
 		for (const auto &[group, attributes] : doc.colours())
-			merged.push_back({group, attributes});
-		runtime->setColours(merged);
+			mergedColours.push_back({group, attributes});
 	}
 
 	if (mask & WorldDocument::XML_KEYPAD)
 	{
-		QList<WorldRuntime::Keypad> merged = runtime->keypadEntries();
+		mergedKeypad = runtime->keypadEntries();
 		for (const auto &[attributes, content] : doc.keypadEntries())
-			merged.push_back({attributes, content});
-		runtime->setKeypadEntries(merged);
+			mergedKeypad.push_back({attributes, content});
 	}
 
 	if (mask & WorldDocument::XML_PRINTING)
 	{
-		QList<WorldRuntime::PrintingStyle> merged = runtime->printingStyles();
+		mergedPrinting = runtime->printingStyles();
 		for (const auto &[group, attributes] : doc.printingStyles())
-			merged.push_back({group, attributes});
-		runtime->setPrintingStyles(merged);
+			mergedPrinting.push_back({group, attributes});
+	}
+
+	QString importedScriptText;
+	bool    reloadImportedScript = false;
+	if (mask & WorldDocument::XML_GENERAL)
+	{
+		const auto importedScript = doc.worldMultilineAttributes().constFind(QStringLiteral("script"));
+		reloadImportedScript =
+		    importedScript != doc.worldMultilineAttributes().cend() &&
+		    (!runtime->worldMultilineAttributes().contains(QStringLiteral("script")) ||
+		     runtime->worldMultilineAttributes().value(QStringLiteral("script")) != *importedScript);
+		if (reloadImportedScript)
+			importedScriptText = *importedScript;
+		for (auto it = doc.worldAttributes().begin(); it != doc.worldAttributes().end(); ++it)
+			runtime->setWorldAttribute(it.key(), it.value());
+		for (auto it = doc.worldMultilineAttributes().begin(); it != doc.worldMultilineAttributes().end();
+		     ++it)
+			runtime->setWorldMultilineAttribute(it.key(), it.value());
+	}
+	if (mask & WorldDocument::XML_TRIGGERS)
+		runtime->setTriggers(mergedTriggers);
+	if (mask & WorldDocument::XML_ALIASES)
+		runtime->setAliases(mergedAliases);
+	if (mask & WorldDocument::XML_TIMERS)
+		runtime->setTimers(mergedTimers);
+	if (mask & WorldDocument::XML_MACROS)
+		runtime->setMacros(mergedMacros);
+	if (mask & WorldDocument::XML_VARIABLES)
+		runtime->setVariables(mergedVariables);
+	if (mask & WorldDocument::XML_COLOURS)
+		runtime->setColours(mergedColours);
+	if (mask & WorldDocument::XML_KEYPAD)
+		runtime->setKeypadEntries(mergedKeypad);
+	if (mask & WorldDocument::XML_PRINTING)
+		runtime->setPrintingStyles(mergedPrinting);
+	if (reloadImportedScript && runtime->luaCallbacks())
+	{
+		const bool allowPackage = getGlobalOption(QStringLiteral("AllowLoadingDlls")).toInt() != 0;
+		queueWorldLuaScriptReload(runtime, world, m_mainWindow, std::move(importedScriptText), allowPackage,
+		                          false, {});
 	}
 
 	if (WorldView *view = world->view())

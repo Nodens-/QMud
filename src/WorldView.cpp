@@ -1068,20 +1068,12 @@ namespace
 		return window->rect.width() != window->width || window->rect.height() != window->height;
 	}
 
-	QRect expandedMiniWindowDirtyRect(const QRect &rect, const QRect &clipRect)
+	QRegion expandedMiniWindowDirtyRegion(const QRegion &region, const QRect &clipRect)
 	{
-		if (rect.isEmpty())
-			return {};
-		return rect.adjusted(-1, -1, 1, 1).intersected(clipRect);
-	}
-
-	QRect unitedMiniWindowBounds(const QRect &first, const QRect &second)
-	{
-		if (first.isEmpty())
-			return second;
-		if (second.isEmpty())
-			return first;
-		return first.united(second);
+		QRegion expanded;
+		for (const QRect &rect : region)
+			expanded += rect.adjusted(-1, -1, 1, 1).intersected(clipRect);
+		return expanded;
 	}
 
 	QPoint miniWindowDisplayToContent(const MiniWindow *window, const QPoint &displayPoint)
@@ -2140,28 +2132,22 @@ void WorldView::setRuntime(WorldRuntime *runtime)
 		m_lastQueuedOutputClientSizeValid  = false;
 		clearNativeOutputSelection(true);
 		m_nativeStandaloneOutputLines.clear();
-		m_nativeStandaloneNextLineNumber         = 1;
-		m_nativePrimaryPaintState                = {};
-		m_nativeLivePaintState                   = {};
-		m_nativeOutputScrollBlitPending          = false;
-		m_nativeOutputScrollBlitExposedRect      = {};
-		m_nativeOutputScrollBlitBackgroundRegion = {};
-		m_nativeOutputScrollBlitRepaintRegion    = {};
-		m_miniWindowChangeSerial                 = 0;
-		m_miniWindowPaintBoundsValid             = false;
-		m_pendingMiniWindowUnderlayDirtyRegion   = {};
-		m_pendingMiniWindowOverlayDirtyRegion    = {};
-		m_wrapMarginReservationCacheValid        = false;
-		m_wrapMarginReservationPixels            = 0;
+		m_nativeStandaloneNextLineNumber = 1;
+		m_nativePrimaryPaintState        = {};
+		m_nativeLivePaintState           = {};
+		clearNativeOutputScrollBlitState();
+		m_miniWindowChangeSerial               = 0;
+		m_miniWindowPaintBoundsValid           = false;
+		m_pendingMiniWindowUnderlayDirtyRegion = {};
+		m_pendingMiniWindowOverlayDirtyRegion  = {};
+		m_wrapMarginReservationCacheValid      = false;
+		m_wrapMarginReservationPixels          = 0;
 	}
 
-	m_miniWindowChangeSerial                                = 0;
-	m_nativePrimaryPaintState                               = {};
-	m_nativeLivePaintState                                  = {};
-	m_nativeOutputScrollBlitPending                         = false;
-	m_nativeOutputScrollBlitExposedRect                     = {};
-	m_nativeOutputScrollBlitBackgroundRegion                = {};
-	m_nativeOutputScrollBlitRepaintRegion                   = {};
+	m_miniWindowChangeSerial  = 0;
+	m_nativePrimaryPaintState = {};
+	m_nativeLivePaintState    = {};
+	clearNativeOutputScrollBlitState();
 	m_miniWindowPaintBoundsValid                            = false;
 	m_pendingMiniWindowUnderlayDirtyRegion                  = {};
 	m_pendingMiniWindowOverlayDirtyRegion                   = {};
@@ -2361,46 +2347,51 @@ WorldView::MiniWindowPaintBoundsSnapshot WorldView::miniWindowPaintBoundsSnapsho
 	snapshot.foregroundImageMode = m_runtime->foregroundImageMode();
 
 	const QRect clientRect(QPoint(0, 0), snapshot.clientSize);
-	const auto  windows     = m_runtime->sortedMiniWindowsMutable();
-	auto        layerBounds = [this, &snapshot, &clientRect, &windows](const bool underneath)
+	const auto  windows = m_runtime->sortedMiniWindowsMutable();
+	m_runtime->layoutMiniWindows(snapshot.clientSize, snapshot.ownerSize, true, &windows);
+	m_runtime->layoutMiniWindows(snapshot.clientSize, snapshot.ownerSize, false, &windows);
+	snapshot.windows.reserve(windows.size());
+	for (const MiniWindow *window : windows)
 	{
-		QRect bounds;
-		if (!m_runtime)
-			return bounds;
-		m_runtime->layoutMiniWindows(snapshot.clientSize, snapshot.ownerSize, underneath, &windows);
-		for (const MiniWindow *window : windows)
+		if (!window || !window->show || window->temporarilyHide || window->backingSurfaceIsNull())
+			continue;
+
+		QRect windowBounds;
+		if ((window->flags & kMiniWindowAbsoluteLocation) == 0 && window->position == 13)
 		{
-			if (!window || !window->show || window->temporarilyHide)
-				continue;
-			const bool drawUnder = (window->flags & kMiniWindowDrawUnderneath) != 0;
-			if (drawUnder != underneath || window->backingSurfaceIsNull())
-				continue;
-
-			QRect windowBounds;
-			if ((window->flags & kMiniWindowAbsoluteLocation) == 0 && window->position == 13)
-			{
-				windowBounds = clientRect;
-			}
-			else if (((window->flags & kMiniWindowAbsoluteLocation) == 0 && window->position >= 0 &&
-			          window->position <= 3) ||
-			         ((window->flags & kMiniWindowAbsoluteLocation) != 0 && hasScaledAbsoluteRect(window)))
-			{
-				windowBounds = window->rect;
-			}
-			else
-			{
-				windowBounds = QRect(window->rect.topLeft(), imageLogicalSize(window->backingSurface()));
-			}
-
-			windowBounds = windowBounds.intersected(clientRect);
-			if (!windowBounds.isEmpty())
-				bounds = bounds.isNull() ? windowBounds : bounds.united(windowBounds);
+			windowBounds = clientRect;
 		}
-		return bounds;
-	};
+		else if (((window->flags & kMiniWindowAbsoluteLocation) == 0 && window->position >= 0 &&
+		          window->position <= 3) ||
+		         ((window->flags & kMiniWindowAbsoluteLocation) != 0 && hasScaledAbsoluteRect(window)))
+		{
+			windowBounds = window->rect;
+		}
+		else
+		{
+			windowBounds = QRect(window->rect.topLeft(), imageLogicalSize(window->backingSurface()));
+		}
 
-	snapshot.underlayBounds = layerBounds(true);
-	snapshot.overlayBounds  = layerBounds(false);
+		windowBounds = windowBounds.intersected(clientRect);
+		if (windowBounds.isEmpty())
+			continue;
+
+		const bool           underneath  = (window->flags & kMiniWindowDrawUnderneath) != 0;
+		const bool           transparent = (window->flags & kMiniWindowTransparent) != 0;
+		MiniWindowPaintState state;
+		state.runtimeId        = window->runtimeId;
+		state.surfaceRevision  = window->backingSurfaceRevision();
+		state.bounds           = windowBounds;
+		state.transparentKey   = transparent ? window->background.rgb() : 0;
+		state.position         = window->position;
+		state.zOrder           = window->zOrder;
+		state.absoluteLocation = (window->flags & kMiniWindowAbsoluteLocation) != 0;
+		state.underneath       = underneath;
+		state.transparent      = transparent;
+		snapshot.windows.insert(window->name, state);
+		if (underneath)
+			snapshot.underlayRegion += windowBounds;
+	}
 	return snapshot;
 }
 
@@ -2435,34 +2426,50 @@ void WorldView::refreshMiniWindows(const bool forceFullRepaint) const
 			return;
 		}
 
-		const QRect underlayDirty = expandedMiniWindowDirtyRect(
-		    unitedMiniWindowBounds(m_miniWindowPaintBounds.underlayBounds, currentBounds.underlayBounds),
-		    canvasRect);
-		const QRect overlayDirty = expandedMiniWindowDirtyRect(
-		    unitedMiniWindowBounds(m_miniWindowPaintBounds.overlayBounds, currentBounds.overlayBounds),
-		    canvasRect);
+		QRegion    underlayDirty;
+		QRegion    overlayDirty;
+		const auto appendDamage = [&underlayDirty, &overlayDirty](const MiniWindowPaintState &state)
+		{
+			if (state.underneath)
+				underlayDirty += state.bounds;
+			else
+				overlayDirty += state.bounds;
+		};
+		for (auto previous = m_miniWindowPaintBounds.windows.cbegin();
+		     previous != m_miniWindowPaintBounds.windows.cend(); ++previous)
+		{
+			const auto current = currentBounds.windows.constFind(previous.key());
+			if (current != currentBounds.windows.cend() && current.value() == previous.value())
+				continue;
+			appendDamage(previous.value());
+			if (current != currentBounds.windows.cend())
+				appendDamage(current.value());
+		}
+		for (auto current = currentBounds.windows.cbegin(); current != currentBounds.windows.cend();
+		     ++current)
+		{
+			if (!m_miniWindowPaintBounds.windows.contains(current.key()))
+				appendDamage(current.value());
+		}
+		underlayDirty = expandedMiniWindowDirtyRegion(underlayDirty, canvasRect);
+		overlayDirty  = fullOverlayRepaint ? QRegion(canvasRect)
+		                                   : expandedMiniWindowDirtyRegion(overlayDirty, canvasRect);
 		if (!underlayDirty.isEmpty())
 		{
 			m_pendingMiniWindowUnderlayDirtyRegion =
-			    m_pendingMiniWindowUnderlayDirtyRegion.united(QRegion(underlayDirty));
-			requestNativeOutputRepaintRegion(m_pendingMiniWindowUnderlayDirtyRegion);
+			    m_pendingMiniWindowUnderlayDirtyRegion.united(underlayDirty);
 		}
-		if (m_miniOverlay)
+		if (!overlayDirty.isEmpty())
 		{
-			if (fullOverlayRepaint)
-			{
-				m_pendingMiniWindowOverlayDirtyRegion = QRegion(canvasRect);
-				m_miniOverlay->update();
-			}
-			else if (!overlayDirty.isEmpty())
-			{
-				m_pendingMiniWindowOverlayDirtyRegion =
-				    m_pendingMiniWindowOverlayDirtyRegion.united(QRegion(overlayDirty));
-				m_miniOverlay->update(m_pendingMiniWindowOverlayDirtyRegion);
-			}
+			m_pendingMiniWindowOverlayDirtyRegion =
+			    m_pendingMiniWindowOverlayDirtyRegion.united(overlayDirty);
 		}
 		m_miniWindowPaintBounds      = currentBounds;
 		m_miniWindowPaintBoundsValid = true;
+		if (!m_pendingMiniWindowUnderlayDirtyRegion.isEmpty())
+			requestNativeOutputRepaintRegion(m_pendingMiniWindowUnderlayDirtyRegion);
+		if (m_miniOverlay && !m_pendingMiniWindowOverlayDirtyRegion.isEmpty())
+			m_miniOverlay->update(m_pendingMiniWindowOverlayDirtyRegion);
 		return;
 	}
 	if (m_miniUnderlay)
@@ -3078,46 +3085,40 @@ void WorldView::requestNativeOutputRepaint(const QRect &rect) const
 		requestNativeOutputRepaintRegion(QRegion(rect));
 		return;
 	}
-	if (m_nativeOutputScrollBlitPending)
-	{
-		m_nativeOutputScrollBlitBackgroundRegion = {};
-		m_nativeOutputScrollBlitRepaintRegion    = {};
-	}
+	clearNativeOutputScrollBlitState();
 	if (!m_nativeOutputRepaintQueued)
 	{
 		m_nativeOutputRepaintQueued = true;
 		QMetaObject::invokeMethod(
 		    const_cast<WorldView *>(this), [this] { flushQueuedNativeOutputRepaint(); },
 		    Qt::QueuedConnection);
-		m_nativeOutputCanvas->update();
-		return;
 	}
-
 	m_nativeOutputRepaintAll    = true;
 	m_nativeOutputRepaintRegion = {};
-	m_nativeOutputCanvas->update();
 }
 
 void WorldView::requestNativeOutputRepaintRegion(const QRegion &region) const
 {
+	queueNativeOutputRepaintRegion(region, true);
+}
+
+void WorldView::queueNativeOutputRepaintRegion(const QRegion &region,
+                                               const bool     independentOfScrollBlit) const
+{
 	if (!m_nativeOutputCanvas || region.isEmpty())
 		return;
-	if (m_nativeOutputScrollBlitPending)
-	{
-		m_nativeOutputScrollBlitBackgroundRegion = {};
-		m_nativeOutputScrollBlitRepaintRegion    = {};
-	}
+	if (m_nativeOutputScrollBlitPending && independentOfScrollBlit)
+		m_nativeOutputScrollBlitIndependentRepaintRegion += region;
+	if (m_nativeOutputRepaintAll)
+		return;
+	m_nativeOutputRepaintRegion += region;
 	if (!m_nativeOutputRepaintQueued)
 	{
 		m_nativeOutputRepaintQueued = true;
 		QMetaObject::invokeMethod(
 		    const_cast<WorldView *>(this), [this] { flushQueuedNativeOutputRepaint(); },
 		    Qt::QueuedConnection);
-		m_nativeOutputCanvas->update(region);
-		return;
 	}
-	if (!m_nativeOutputRepaintAll)
-		m_nativeOutputRepaintRegion += region;
 }
 
 void WorldView::flushQueuedNativeOutputRepaint() const
@@ -3127,6 +3128,7 @@ void WorldView::flushQueuedNativeOutputRepaint() const
 	{
 		m_nativeOutputRepaintAll    = false;
 		m_nativeOutputRepaintRegion = {};
+		clearNativeOutputScrollBlitState();
 		return;
 	}
 
@@ -3274,15 +3276,17 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 	{
 		return false;
 	}
-	if (m_scrollbackSplitActive || m_nativeOutputRepaintQueued || m_nativeOutputScrollBlitPending)
+	if (m_scrollbackSplitActive || m_nativeOutputRepaintAll)
 		return false;
 	if (m_nativeRenderCacheDelta.revision != m_nativeRenderLineCacheRevision ||
 	    m_nativeRenderCacheDelta.newLineCount != sizeToInt(lines.size()))
 	{
 		return false;
 	}
-	if (m_nativeRenderLineCacheRevision == 0 ||
-	    m_nativePrimaryPaintState.renderRevision != m_nativeRenderLineCacheRevision - 1)
+	const NativeOutputPanePaintState &sourceState =
+	    m_nativeOutputScrollBlitPending ? m_nativeOutputScrollBlitTargetState : m_nativePrimaryPaintState;
+	if (m_nativeRenderLineCacheRevision == 0 || !sourceState.valid ||
+	    sourceState.renderRevision != m_nativeRenderCacheDelta.fromRevision)
 	{
 		return false;
 	}
@@ -3298,34 +3302,17 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 	}
 
 	const QRect paneRect = nativeOutputPaneRect(m_output);
-	if (paneRect.isEmpty() || !m_nativePrimaryPaintState.valid ||
-	    m_nativePrimaryPaintState.paneRect != paneRect)
+	if (paneRect.isEmpty() || sourceState.paneRect != paneRect)
 	{
 		return false;
 	}
 	const QScrollBar *const scrollBar = m_output->verticalScrollBar();
 	const int currentScrollY   = scrollBar ? qMax(0, scrollBar->value()) : qMax(0, outputScrollPosition());
 	const int currentScrollMax = scrollBar ? qMax(0, scrollBar->maximum()) : 0;
-	if (currentScrollY < currentScrollMax ||
-	    m_nativePrimaryPaintState.scrollY < m_nativePrimaryPaintState.scrollMax)
+	if (currentScrollY < currentScrollMax || sourceState.scrollY < sourceState.scrollMax)
 		return false;
 
-	QRect dirtyRect;
-	if (!nativeOutputDeltaRepaintRect(lines, dirtyRect))
-		return false;
-	dirtyRect = dirtyRect.intersected(paneRect);
-
-	const int scrollDelta = currentScrollY - m_nativePrimaryPaintState.scrollY;
-
-	if (scrollDelta == 0)
-	{
-		m_nativePrimaryPaintState.scrollY        = currentScrollY;
-		m_nativePrimaryPaintState.scrollMax      = currentScrollMax;
-		m_nativePrimaryPaintState.renderRevision = m_nativeRenderLineCacheRevision;
-		if (dirtyRect.isValid())
-			requestNativeOutputRepaint(dirtyRect);
-		return true;
-	}
+	const int scrollDelta = currentScrollY - sourceState.scrollY;
 	if (scrollDelta < 0 || scrollDelta >= paneRect.height())
 		return false;
 
@@ -3333,11 +3320,9 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 	{
 		return false;
 	}
-	if (m_nativePrimaryPaintState.visibleLineKeys.isEmpty() ||
-	    m_nativePrimaryPaintState.visibleLineKeys.size() !=
-	        m_nativePrimaryPaintState.visibleLineTops.size() ||
-	    m_nativePrimaryPaintState.visibleLineKeys.size() !=
-	        m_nativePrimaryPaintState.visibleLineBottoms.size())
+	if (sourceState.visibleLineKeys.isEmpty() ||
+	    sourceState.visibleLineKeys.size() != sourceState.visibleLineTops.size() ||
+	    sourceState.visibleLineKeys.size() != sourceState.visibleLineBottoms.size())
 	{
 		return false;
 	}
@@ -3382,75 +3367,97 @@ bool WorldView::requestNativeOutputScrollAwarePresentationRepaint(
 		}
 	}
 
-	QVector<quint64> currentLineKeys;
-	QVector<int>     currentLineTops;
-	QVector<int>     currentLineBottoms;
-	currentLineKeys.reserve(currentLastVisibleLine - currentFirstVisibleLine + 1);
-	currentLineTops.reserve(currentLastVisibleLine - currentFirstVisibleLine + 1);
-	currentLineBottoms.reserve(currentLastVisibleLine - currentFirstVisibleLine + 1);
-	qreal currentLineTop = nativeLayoutCumulativeHeightAt(currentFirstVisibleLine);
-	for (int i = currentFirstVisibleLine; i <= currentLastVisibleLine; ++i)
+	NativeOutputPanePaintState targetState;
+	if (!captureNativeOutputPanePaintState(targetState, paneRect, currentScrollY, currentScrollMax, lines))
+		return false;
+	QRect     dirtyRect;
+	const int firstDirtyLine =
+	    qMax(0, m_nativeRenderCacheDelta.oldLineCount - (m_nativeRenderCacheDelta.tailLineMutated ? 1 : 0));
+	if (firstDirtyLine < sizeToInt(lines.size()) && firstDirtyLine <= currentLastVisibleLine)
 	{
-		if (m_nativeLayoutSlots.at(i).rowsExact == 0)
+		const qreal dirtyTop = static_cast<qreal>(paneRect.top()) +
+		                       nativeLayoutCumulativeHeightAt(firstDirtyLine) -
+		                       static_cast<qreal>(currentScrollY);
+		const int   dirtyY =
+		    dirtyTop <= paneRect.top() ? paneRect.top() : static_cast<int>(std::floor(dirtyTop)) - 2;
+		dirtyRect = QRect(paneRect.left(), dirtyY, paneRect.width(), paneRect.bottom() - dirtyY + 1)
+		                .intersected(paneRect);
+	}
+	QHash<quint64, int> currentLineIndexesByKey;
+	currentLineIndexesByKey.reserve(targetState.visibleLineKeys.size());
+	for (int currentIndex = 0; currentIndex < targetState.visibleLineKeys.size(); ++currentIndex)
+	{
+		const int lineIndex = targetState.visibleLineIndexes.at(currentIndex);
+		if (lineIndex < 0 || lineIndex >= m_nativeLayoutSlots.size() ||
+		    m_nativeLayoutSlots.at(lineIndex).rowsExact == 0)
 			return false;
-		const qreal currentLineBottom = currentLineTop + m_nativeLayoutHeightIndex.heightAt(i);
-		currentLineKeys.push_back(m_nativeLayoutSlots.at(i).runtimeLineKey);
-		currentLineTops.push_back(static_cast<int>(std::round(currentLineTop - currentScrollY)));
-		currentLineBottoms.push_back(static_cast<int>(std::round(currentLineBottom - currentScrollY)));
-		currentLineTop = currentLineBottom;
+		const quint64 lineKey = targetState.visibleLineKeys.at(currentIndex);
+		if (lineKey == 0 || currentLineIndexesByKey.contains(lineKey))
+			return false;
+		currentLineIndexesByKey.insert(lineKey, currentIndex);
 	}
 
 	int mappedLineCount = 0;
-	for (int oldIndex = 0; oldIndex < m_nativePrimaryPaintState.visibleLineKeys.size(); ++oldIndex)
+	for (int oldIndex = 0; oldIndex < sourceState.visibleLineKeys.size(); ++oldIndex)
 	{
-		const int shiftedTop    = m_nativePrimaryPaintState.visibleLineTops.at(oldIndex) - scrollDelta;
-		const int shiftedBottom = m_nativePrimaryPaintState.visibleLineBottoms.at(oldIndex) - scrollDelta;
+		const int shiftedTop    = sourceState.visibleLineTops.at(oldIndex) - scrollDelta;
+		const int shiftedBottom = sourceState.visibleLineBottoms.at(oldIndex) - scrollDelta;
 		if (shiftedBottom <= 0 || shiftedTop >= paneRect.height())
 			continue;
 
-		const quint64 lineKey     = m_nativePrimaryPaintState.visibleLineKeys.at(oldIndex);
-		bool          matchedLine = false;
-		for (int currentIndex = 0; currentIndex < currentLineKeys.size(); ++currentIndex)
-		{
-			if (currentLineKeys.at(currentIndex) != lineKey)
-				continue;
-			if (std::abs(currentLineTops.at(currentIndex) - shiftedTop) > 1 ||
-			    std::abs(currentLineBottoms.at(currentIndex) - shiftedBottom) > 1)
-			{
-				return false;
-			}
-			matchedLine = true;
-			break;
-		}
-		if (!matchedLine)
+		const auto currentIndex = currentLineIndexesByKey.constFind(sourceState.visibleLineKeys.at(oldIndex));
+		if (currentIndex == currentLineIndexesByKey.cend())
 			return false;
+		if (std::abs(targetState.visibleLineTops.at(*currentIndex) - shiftedTop) > 1 ||
+		    std::abs(targetState.visibleLineBottoms.at(*currentIndex) - shiftedBottom) > 1)
+		{
+			return false;
+		}
 		++mappedLineCount;
 	}
 	if (mappedLineCount <= 0)
 		return false;
 
-	m_nativeOutputCanvas->scroll(0, -scrollDelta, paneRect);
-	const QRect exposedRect(paneRect.left(), paneRect.bottom() - scrollDelta + 1, paneRect.width(),
-	                        scrollDelta);
-	QRegion     backgroundRegion(exposedRect);
+	QRegion exposedRegion;
+	QRegion backgroundRegion;
+	QRegion repaintRegion;
+	if (m_nativeOutputScrollBlitPending)
+	{
+		exposedRegion =
+		    m_nativeOutputScrollBlitExposedRegion.translated(0, -scrollDelta).intersected(paneRect);
+		backgroundRegion =
+		    m_nativeOutputScrollBlitBackgroundRegion.translated(0, -scrollDelta).intersected(paneRect);
+		repaintRegion =
+		    m_nativeOutputScrollBlitRepaintRegion.translated(0, -scrollDelta).intersected(paneRect);
+	}
+	if (scrollDelta > 0)
+	{
+		m_nativeOutputCanvas->scroll(0, -scrollDelta, paneRect);
+		const QRect exposedRect(paneRect.left(), paneRect.bottom() - scrollDelta + 1, paneRect.width(),
+		                        scrollDelta);
+		exposedRegion += exposedRect;
+		backgroundRegion += exposedRect;
+	}
 	backgroundRegion += textRectangleCompatibilityRegionWithin(paneRect);
-	QRegion repaintRegion = backgroundRegion;
+	repaintRegion += backgroundRegion;
 	if (dirtyRect.isValid())
 		repaintRegion += dirtyRect;
-	if (m_miniWindowPaintBoundsValid && !m_miniWindowPaintBounds.underlayBounds.isEmpty())
-		repaintRegion += m_miniWindowPaintBounds.underlayBounds.intersected(paneRect);
+	if (m_miniWindowPaintBoundsValid)
+	{
+		const QRegion fixedUnderlays = m_miniWindowPaintBounds.underlayRegion.intersected(paneRect);
+		repaintRegion += fixedUnderlays;
+		repaintRegion += fixedUnderlays.translated(0, -scrollDelta).intersected(paneRect);
+	}
 	repaintRegion = repaintRegion.intersected(paneRect);
 	if (repaintRegion.isEmpty())
 		return false;
 
-	requestNativeOutputRepaintRegion(repaintRegion);
-	m_nativePrimaryPaintState.scrollY        = currentScrollY;
-	m_nativePrimaryPaintState.scrollMax      = currentScrollMax;
-	m_nativePrimaryPaintState.renderRevision = m_nativeRenderLineCacheRevision;
 	m_nativeOutputScrollBlitPending          = true;
-	m_nativeOutputScrollBlitExposedRect      = exposedRect.intersected(paneRect);
+	m_nativeOutputScrollBlitTargetState      = std::move(targetState);
+	m_nativeOutputScrollBlitExposedRegion    = exposedRegion.intersected(paneRect);
 	m_nativeOutputScrollBlitBackgroundRegion = backgroundRegion.intersected(paneRect);
 	m_nativeOutputScrollBlitRepaintRegion    = repaintRegion;
+	queueNativeOutputRepaintRegion(repaintRegion, false);
 	return true;
 }
 
@@ -3466,6 +3473,7 @@ void WorldView::requestNativeOutputPresentationRepaint(const bool repaintVisible
 	{
 		if (requestNativeOutputScrollAwarePresentationRepaint(lines))
 			return;
+		clearNativeOutputScrollBlitState();
 
 		const QRect repaintRect = nativeOutputVisiblePaneRepaintRect();
 		if (repaintRect.isValid())
@@ -4307,8 +4315,20 @@ void WorldView::refreshNativeOutputPanePaintStateFromLayout(const WrapTextBrowse
                                                             const NativeOutputRenderLines &lines) const
 {
 	NativeOutputPanePaintState *const state = nativeOutputPanePaintStateForView(view);
-	if (!state || paneRect.isEmpty())
+	if (!state)
 		return;
+	static_cast<void>(captureNativeOutputPanePaintState(*state, paneRect, scrollY, scrollMax, lines));
+}
+
+bool WorldView::captureNativeOutputPanePaintState(NativeOutputPanePaintState &state, const QRect &paneRect,
+                                                  const int scrollY, const int scrollMax,
+                                                  const NativeOutputRenderLines &lines) const
+{
+	if (paneRect.isEmpty())
+	{
+		state = {};
+		return false;
+	}
 
 	QVector<int>     visibleLineIndexes;
 	QVector<quint64> visibleLineKeys;
@@ -4347,17 +4367,18 @@ void WorldView::refreshNativeOutputPanePaintStateFromLayout(const WrapTextBrowse
 		}
 	}
 
-	state->paneRect                       = paneRect;
-	state->scrollY                        = scrollY;
-	state->scrollMax                      = scrollMax;
-	state->renderRevision                 = m_nativeRenderLineCacheRevision;
-	state->visibleLineIndexes             = std::move(visibleLineIndexes);
-	state->visibleLineKeys                = std::move(visibleLineKeys);
-	state->visibleFirstRuntimeLineNumbers = std::move(visibleFirstRuntimeLineNumbers);
-	state->visibleLastRuntimeLineNumbers  = std::move(visibleLastRuntimeLineNumbers);
-	state->visibleLineTops                = std::move(visibleLineTops);
-	state->visibleLineBottoms             = std::move(visibleLineBottoms);
-	state->valid                          = true;
+	state.paneRect                       = paneRect;
+	state.scrollY                        = scrollY;
+	state.scrollMax                      = scrollMax;
+	state.renderRevision                 = m_nativeRenderLineCacheRevision;
+	state.visibleLineIndexes             = std::move(visibleLineIndexes);
+	state.visibleLineKeys                = std::move(visibleLineKeys);
+	state.visibleFirstRuntimeLineNumbers = std::move(visibleFirstRuntimeLineNumbers);
+	state.visibleLastRuntimeLineNumbers  = std::move(visibleLastRuntimeLineNumbers);
+	state.visibleLineTops                = std::move(visibleLineTops);
+	state.visibleLineBottoms             = std::move(visibleLineBottoms);
+	state.valid                          = true;
+	return true;
 }
 
 void WorldView::updateNativeOutputPanePaintState(const WrapTextBrowser *view, const QRect &paneRect,
@@ -4369,15 +4390,45 @@ void WorldView::updateNativeOutputPanePaintState(const WrapTextBrowser *view, co
 	if (!state || paneRect.isEmpty())
 		return;
 
-	const bool fullPanePainted     = QRegion(paneRect).subtracted(paintedRegion).isEmpty();
-	const bool confirmsScrollBlit  = m_nativeOutputScrollBlitPending && view == m_output;
+	const bool fullPanePainted = QRegion(paneRect).subtracted(paintedRegion).isEmpty();
+	if (m_nativeOutputScrollBlitPending && view == m_output)
+		return;
 	const bool confirmsCurrentPane = state->valid && state->paneRect == paneRect &&
 	                                 state->scrollY == scrollY &&
 	                                 state->renderRevision == m_nativeRenderLineCacheRevision;
-	if (!fullPanePainted && !confirmsScrollBlit && !confirmsCurrentPane)
+	if (!fullPanePainted && !confirmsCurrentPane)
 		return;
 
 	refreshNativeOutputPanePaintStateFromLayout(view, paneRect, scrollY, scrollMax, lines);
+}
+
+void WorldView::clearNativeOutputScrollBlitState() const
+{
+	m_nativeOutputScrollBlitPending                  = false;
+	m_nativeOutputScrollBlitTargetState              = {};
+	m_nativeOutputScrollBlitExposedRegion            = {};
+	m_nativeOutputScrollBlitBackgroundRegion         = {};
+	m_nativeOutputScrollBlitRepaintRegion            = {};
+	m_nativeOutputScrollBlitIndependentRepaintRegion = {};
+}
+
+void WorldView::completeNativeOutputScrollBlitPaint(const QRegion &paintedRegion) const
+{
+	if (!m_nativeOutputScrollBlitPending || paintedRegion.isEmpty())
+		return;
+	m_nativeOutputScrollBlitExposedRegion -= paintedRegion;
+	m_nativeOutputScrollBlitBackgroundRegion -= paintedRegion;
+	m_nativeOutputScrollBlitRepaintRegion -= paintedRegion;
+	m_nativeOutputScrollBlitIndependentRepaintRegion -= paintedRegion;
+	if (!m_nativeOutputScrollBlitRepaintRegion.isEmpty())
+		return;
+
+	if (m_nativeOutputScrollBlitTargetState.valid &&
+	    m_nativeOutputScrollBlitTargetState.renderRevision == m_nativeRenderLineCacheRevision)
+	{
+		m_nativePrimaryPaintState = std::move(m_nativeOutputScrollBlitTargetState);
+	}
+	clearNativeOutputScrollBlitState();
 }
 
 void WorldView::primeNativeOutputCaches() const
@@ -9797,22 +9848,21 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 	if (clippedUpdateRegion.isEmpty())
 		return;
 
-	struct ScrollBlitPendingClearer
+	struct ScrollBlitPaintCompleter
 	{
 			const WorldView *view{nullptr};
+			QRegion          paintedRegion;
+			bool            *paintCompleted{nullptr};
 
-			~ScrollBlitPendingClearer()
+			~ScrollBlitPaintCompleter()
 			{
-				if (view)
-				{
-					view->m_nativeOutputScrollBlitPending          = false;
-					view->m_nativeOutputScrollBlitExposedRect      = {};
-					view->m_nativeOutputScrollBlitBackgroundRegion = {};
-					view->m_nativeOutputScrollBlitRepaintRegion    = {};
-				}
+				if (view && paintCompleted && *paintCompleted)
+					view->completeNativeOutputScrollBlitPaint(paintedRegion);
 			}
 	};
-	const ScrollBlitPendingClearer scrollBlitPendingClearer{this};
+	bool                           scrollBlitPaintCompleted = false;
+	const ScrollBlitPaintCompleter scrollBlitPaintCompleter{this, clippedUpdateRegion,
+	                                                        &scrollBlitPaintCompleted};
 
 	paintNativeOutputBackground(painter, clippedUpdateRegion);
 	paintMiniWindows(painter, true, clippedUpdateRegion);
@@ -9935,8 +9985,8 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 	const bool clearScrollBlitLineBackgrounds =
 	    m_nativeOutputScrollBlitPending && !m_bleedBackground &&
 	    (!m_runtime || m_runtime->backgroundImage().isNull()) && m_miniWindowPaintBoundsValid &&
-	    m_miniWindowPaintBounds.underlayBounds.isEmpty() && !m_nativeOutputScrollBlitExposedRect.isEmpty();
-	const QRect  scrollBlitExposedRect  = m_nativeOutputScrollBlitExposedRect;
+	    m_miniWindowPaintBounds.underlayRegion.isEmpty() && !m_nativeOutputScrollBlitExposedRegion.isEmpty();
+	const QRegion scrollBlitExposedRegion = m_nativeOutputScrollBlitExposedRegion;
 	const QColor nativeBackgroundColour = m_outputBackground.isValid() ? m_outputBackground : QColor(0, 0, 0);
 	syncNativeOutputScrollBarsFromLayout(lines, false);
 	if (diagnosticsEnabled)
@@ -10038,7 +10088,7 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 			}
 			if (clearScrollBlitLineBackgrounds)
 			{
-				if (!lineBackgroundRect.isEmpty() && !scrollBlitExposedRect.contains(lineBackgroundRect))
+				if (!lineBackgroundRect.isEmpty() && !scrollBlitExposedRegion.contains(lineBackgroundRect))
 				{
 					painter->fillRect(lineBackgroundRect, nativeBackgroundColour);
 				}
@@ -10166,6 +10216,7 @@ void WorldView::paintNativeOutputCanvas(QPainter *painter, const QRegion &update
 	}
 	if (diagnosticsEnabled)
 		m_nativeOutputCanvas->setProperty("qmud_native_visual_row_count", totalVisualRows);
+	scrollBlitPaintCompleted = true;
 }
 
 void WorldView::handleOutputWheel(const QWheelEvent *event)
@@ -12308,10 +12359,7 @@ void WorldView::clearPartialOutput()
 		requestDrawOutputWindowNotification();
 		return;
 	}
-	const NativeOutputRenderLines &lines = synchronizeNativeRuntimeOutputPresentation(false, !m_frozen);
-	Q_UNUSED(lines);
-	requestSemanticOutputRepaint(!m_frozen ? SemanticOutputRepaint::PresentationVisible
-	                                       : SemanticOutputRepaint::PresentationDelta);
+	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
 }
 
 void WorldView::beginRuntimeOutputMutationBatch(const bool suppressDrawNotifications)
@@ -12339,8 +12387,7 @@ void WorldView::endRuntimeOutputMutationBatch()
 	if (m_runtimeBatchPartialClearPending)
 	{
 		m_runtimeBatchPartialClearPending = false;
-		static_cast<void>(synchronizeNativeRuntimeOutputPresentation(false, !m_frozen));
-		finalizeNativeOutputPresentationUpdate(!m_frozen);
+		requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
 	}
 	if (!m_drawCallbackOutputPresentationSuppressed)
 		return;
@@ -12390,7 +12437,7 @@ bool WorldView::commitPendingIncomingPartialOutput()
 void WorldView::notifyRuntimeOutputLineChanged()
 {
 	prepareRuntimeOutputMutationPresentation(runtimeOutputTailAdvanced());
-	notifyAccessibleOutputPresented(nativeOutputRenderLines());
+	requestNativeRuntimeOutputPresentationSync(false, !m_frozen);
 	requestSemanticOutputRepaint(SemanticOutputRepaint::Full);
 }
 
@@ -12806,15 +12853,19 @@ void WorldView::paintNativeOutputBackground(QPainter *painter, const QRegion &up
 	const bool limitScrollBlitBackground = m_nativeOutputScrollBlitPending && !m_bleedBackground &&
 	                                       (!m_runtime || m_runtime->backgroundImage().isNull()) &&
 	                                       m_miniWindowPaintBoundsValid &&
-	                                       m_miniWindowPaintBounds.underlayBounds.isEmpty() &&
+	                                       m_miniWindowPaintBounds.underlayRegion.isEmpty() &&
 	                                       !m_nativeOutputScrollBlitBackgroundRegion.isEmpty() &&
 	                                       !m_nativeOutputScrollBlitRepaintRegion.isEmpty();
 	if (limitScrollBlitBackground)
 	{
+		const QRegion explicitlyIndependentUpdate =
+		    backgroundFillRegion.intersected(m_nativeOutputScrollBlitIndependentRepaintRegion);
 		const QRegion scrollBlitUpdate =
-		    backgroundFillRegion.intersected(m_nativeOutputScrollBlitRepaintRegion);
+		    backgroundFillRegion.intersected(m_nativeOutputScrollBlitRepaintRegion)
+		        .subtracted(explicitlyIndependentUpdate);
 		const QRegion independentUpdate =
-		    backgroundFillRegion.subtracted(m_nativeOutputScrollBlitRepaintRegion);
+		    backgroundFillRegion.subtracted(m_nativeOutputScrollBlitRepaintRegion)
+		        .united(explicitlyIndependentUpdate);
 		backgroundFillRegion =
 		    independentUpdate.united(scrollBlitUpdate.intersected(m_nativeOutputScrollBlitBackgroundRegion));
 		if (backgroundFillRegion.isEmpty())
@@ -12968,11 +13019,12 @@ void WorldView::paintMiniWindows(QPainter *painter, bool underneath, const QRegi
 	if (clippedUpdateRegion.isEmpty())
 		return;
 
-	if (underneath && m_miniWindowPaintBoundsValid)
+	if (underneath && m_nativeOutputCanvas && m_nativeOutputCanvas->isVisible() &&
+	    m_miniWindowPaintBoundsValid)
 	{
-		if (m_miniWindowPaintBounds.underlayBounds.isEmpty())
+		if (m_miniWindowPaintBounds.underlayRegion.isEmpty())
 			return;
-		clippedUpdateRegion = clippedUpdateRegion.intersected(m_miniWindowPaintBounds.underlayBounds);
+		clippedUpdateRegion = clippedUpdateRegion.intersected(m_miniWindowPaintBounds.underlayRegion);
 		if (clippedUpdateRegion.isEmpty())
 			return;
 	}
@@ -13205,6 +13257,7 @@ void WorldView::callHotspotCallback(const MiniWindow *window, const QString &hot
 	// These values must remain owned across the synchronous Lua callback, which may replace the window state.
 	QString windowName     = window->name;
 	QString callbackPlugin = window->callbackPlugin;
+	m_runtime->publishMiniWindowPresentation(windowName);
 	m_runtime->setWordUnderMenu(QString(), true);
 	bool ok = false;
 	if (callbackPlugin.isEmpty())
@@ -13242,6 +13295,7 @@ bool WorldView::cancelMouseOver(MiniWindow *window, QString hotspotId)
 	    currentWindow && currentWindow->mouseOverHotspot == stableHotspotId)
 	{
 		currentWindow->mouseOverHotspot.clear();
+		m_runtime->publishMiniWindowPresentation(stableWindowName);
 	}
 	invalidateMiniWindowHotspotInteraction(stableWindowName, stableHotspotId, instanceId);
 	clearPendingHotspotTooltip();
@@ -13268,6 +13322,8 @@ void WorldView::setMiniWindowCallbackMousePosition(MiniWindow &window, const QPo
 		    miniWindowDisplayToContentUnbounded(&window, displayLocal - window.rect.topLeft());
 		window.lastMouseUpdate++;
 	}
+	if (m_runtime)
+		m_runtime->publishMiniWindowPresentation(window.name);
 }
 
 void WorldView::scheduleCapturedMiniWindowDragMove(const QPoint &callbackLocal)
@@ -13510,10 +13566,22 @@ bool WorldView::handleMiniWindowMouseMove(const QMouseEvent *event, const QWidge
 	m_lastMousePos    = hitLocal;
 	m_hasLastMousePos = true;
 
-	QString     hotspotId;
-	QString     windowName;
-	MiniWindow *window                      = hitTestMiniWindow(hitLocal, hotspotId, windowName);
-	const auto  requiredAddedHotspotMatches = [&]
+	QString       hotspotId;
+	QString       windowName;
+	MiniWindow   *window                      = hitTestMiniWindow(hitLocal, hotspotId, windowName);
+	const QString initialHoverWindowName      = m_hoverWindowName;
+	const auto    publishPresentationOnReturn = qScopeGuard(
+	    [this, &windowName, initialHoverWindowName]
+	    {
+		    if (!m_runtime)
+			    return;
+		    QSet<QString> names{windowName, initialHoverWindowName, m_hoverWindowName, m_capturedWindowName};
+		    names.remove(QString());
+		    for (const QString &name : std::as_const(names))
+			    m_runtime->publishMiniWindowPresentation(name);
+	    });
+	Q_UNUSED(publishPresentationOnReturn);
+	const auto requiredAddedHotspotMatches = [&]
 	{
 		if (!window || hotspotId.isEmpty())
 			return false;
@@ -13694,9 +13762,21 @@ bool WorldView::handleMiniWindowMousePress(const QMouseEvent *event, bool double
 	if (!m_outputStack->rect().contains(local))
 		return false;
 
-	QString     hotspotId;
-	QString     windowName;
-	MiniWindow *window = hitTestMiniWindow(local, hotspotId, windowName, true);
+	QString       hotspotId;
+	QString       windowName;
+	MiniWindow   *window                      = hitTestMiniWindow(local, hotspotId, windowName, true);
+	const QString initialHoverWindowName      = m_hoverWindowName;
+	const auto    publishPresentationOnReturn = qScopeGuard(
+	    [this, &windowName, initialHoverWindowName]
+	    {
+		    if (!m_runtime)
+			    return;
+		    QSet<QString> names{windowName, initialHoverWindowName, m_hoverWindowName, m_capturedWindowName};
+		    names.remove(QString());
+		    for (const QString &name : std::as_const(names))
+			    m_runtime->publishMiniWindowPresentation(name);
+	    });
+	Q_UNUSED(publishPresentationOnReturn);
 	if (miniWindowMouseDebugEnabled())
 	{
 		miniWindowMouseDebug(QStringLiteral("press button=%1 dbl=%2 local=(%3,%4) window=%5 hotspot=%6")
@@ -13817,11 +13897,24 @@ bool WorldView::handleMiniWindowMouseRelease(const QMouseEvent *event, const QWi
 	                         : rawLocal;
 	m_lastMousePos     = rawLocal;
 	m_hasLastMousePos  = true;
-	QString     hotspotId;
-	QString     windowName;
-	MiniWindow *windowUnderCursor = m_outputStack->rect().contains(rawLocal)
-	                                    ? hitTestMiniWindow(rawLocal, hotspotId, windowName, true)
-	                                    : nullptr;
+	QString       hotspotId;
+	QString       windowName;
+	MiniWindow   *windowUnderCursor           = m_outputStack->rect().contains(rawLocal)
+	                                                ? hitTestMiniWindow(rawLocal, hotspotId, windowName, true)
+	                                                : nullptr;
+	const QString initialCapturedWindowName   = m_capturedWindowName;
+	const auto    publishPresentationOnReturn = qScopeGuard(
+	    [this, &windowName, initialCapturedWindowName]
+	    {
+		    if (!m_runtime)
+			    return;
+		    QSet<QString> names{windowName, initialCapturedWindowName, m_hoverWindowName,
+		                        m_capturedWindowName};
+		    names.remove(QString());
+		    for (const QString &name : std::as_const(names))
+			    m_runtime->publishMiniWindowPresentation(name);
+	    });
+	Q_UNUSED(publishPresentationOnReturn);
 	if (miniWindowMouseDebugEnabled())
 	{
 		miniWindowMouseDebug(

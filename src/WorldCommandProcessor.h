@@ -15,10 +15,13 @@
 #include <QElapsedTimer>
 #include <QHash>
 #include <QObject>
+#include <QQueue>
 #include <QRegularExpression>
 #include <QSet>
 #include <QString>
 #include <QTimer>
+
+#include <functional>
 
 class WorldRuntime;
 class WorldView;
@@ -32,6 +35,7 @@ class WorldView;
 class WorldCommandProcessor : public QObject
 {
 		Q_OBJECT
+		friend class WorldRuntime;
 		friend class tst_LuaCallbackEngine;
 
 	public:
@@ -46,6 +50,10 @@ class WorldCommandProcessor : public QObject
 		 * @param runtime Runtime instance.
 		 */
 		void               setRuntime(WorldRuntime *runtime);
+		/**
+		 * @brief Reloads command-processing options from the bound runtime.
+		 */
+		void               refreshRuntimeOptions();
 		/**
 		 * @brief Applies one table-bound numeric world option to the command processor cache.
 		 * @param binding Exact cache binding declared by the numeric option table.
@@ -158,7 +166,7 @@ class WorldCommandProcessor : public QObject
 		 * @param spans Style spans.
 		 */
 		void onIncomingStyledLinePartialReceived(const QString                          &line,
-		                                         const QVector<WorldRuntime::StyleSpan> &spans) const;
+		                                         const QVector<WorldRuntime::StyleSpan> &spans);
 		/**
 		 * @brief Dispatches activated hyperlink actions.
 		 * @param href Hyperlink target.
@@ -178,6 +186,10 @@ class WorldCommandProcessor : public QObject
 		 * @brief Stops connection-dependent processing after disconnect.
 		 */
 		void handleWorldDisconnected();
+		/**
+		 * @brief Completes disconnect housekeeping after lifecycle callbacks finish.
+		 */
+		void finishWorldDisconnected();
 		/**
 		 * @brief Emits note text to output path.
 		 * @param text Note text.
@@ -233,20 +245,170 @@ class WorldCommandProcessor : public QObject
 		bool pluginProcessingSent() const;
 
 	private:
+		struct CommandHistoryState
+		{
+				bool omitFromHistory{false};
+				bool sendFailed{false};
+		};
+		using CommandCompletion = std::function<void(bool)>;
+		struct LogicalOperationCompletion;
+		using LogicalOperationCompletionPtr  = QSharedPointer<LogicalOperationCompletion>;
+		using InputCriticalOperationScopePtr = LogicalOperationCompletionPtr;
+		struct CommandExecutionContext
+		{
+				unsigned short                      actionSource{WorldRuntime::eUnknownActionSource};
+				int                                 executionDepth{0};
+				bool                                suppressInputLog{false};
+				bool                                processingAutoSay{false};
+				int                                 triggerCommandPriorityDepth{0};
+				int                                 triggerPriorityActionExecutionDepth{0};
+				QSharedPointer<CommandHistoryState> historyState;
+				LogicalOperationCompletionPtr       operationCompletion;
+				InputCriticalOperationScopePtr      inputCriticalOperationScope;
+		};
+		using CallerContextRunner = std::function<void(const std::function<void()> &)>;
+		struct PendingPluginCommandEvaluation;
+		struct PendingPluginCommandEntered;
+		struct PendingPluginSendDecision;
+		struct PendingPluginSentNotification;
+		struct CommandEvaluationSequence;
+		struct AliasEvaluationSequence;
+		struct TimerEvaluationSequence;
+		struct PendingEnteredCommand
+		{
+				QString                             text;
+				unsigned short                      actionSource{WorldRuntime::eUnknownActionSource};
+				QSharedPointer<CommandHistoryState> historyState;
+				CommandCompletion                   completion;
+		};
+		struct PendingTriggerPriorityAction
+		{
+				enum class Kind
+				{
+					Execute,
+					Send
+				};
+
+				Kind                          kind{Kind::Execute};
+				QString                       text;
+				bool                          echo{false};
+				bool                          queueIt{false};
+				bool                          logIt{false};
+				CallerContextRunner           callerContext;
+				LogicalOperationCompletionPtr operationCompletion;
+		};
 		/**
 		 * @brief Parses and executes one command line.
 		 * @param input Command input text.
 		 * @param allowCommandStacking Apply command stacking when `true`; stacked children pass `false` so escaped
 		 * separators remain literal during their normal command processing.
+		 * @param completion Callback invoked when this command has fully completed, including suspended callbacks.
 		 * @return `true` when command was processed successfully.
 		 */
-		bool           evaluateCommand(const QString &input, bool allowCommandStacking = true);
+		bool evaluateCommand(const QString &input, bool allowCommandStacking = true,
+		                     CommandCompletion completion = {});
+		/**
+		 * @brief Starts one logical command and retains its nesting depth through suspension.
+		 * @param text Command text.
+		 * @param completion Callback invoked when the logical command completes.
+		 * @return Execution status/result code.
+		 */
+		int  executeCommandWithCompletion(const QString &text, CommandCompletion completion);
+		/**
+		 * @brief Creates a logical completion group joined to the currently active parent operation.
+		 * @param completion Callback invoked after this group and all of its retained work complete.
+		 * @param joinActiveOperation Join the current logical operation as this group's parent when `true`.
+		 * @return New logical completion group.
+		 */
+		[[nodiscard]] LogicalOperationCompletionPtr
+		createLogicalOperationCompletion(CommandCompletion completion, bool joinActiveOperation = true);
+		[[nodiscard]] CommandExecutionContext captureCommandExecutionContext() const;
+		[[nodiscard]] CallerContextRunner     captureCallerContextRunner() const;
+		/**
+		 * @brief Captures command and runtime causal state for work that will resume later.
+		 * @return Runner restoring the complete runtime caller context.
+		 */
+		[[nodiscard]] CallerContextRunner     captureRuntimeCallerContextRunner() const;
+		/**
+		 * @brief Captures caller state without joining later work to the current logical operation.
+		 * @return Runner restoring ambient command state for asynchronous independent work.
+		 */
+		[[nodiscard]] CallerContextRunner     captureAmbientCallerContextRunner() const;
+		void    runWithCommandExecutionContext(const CommandExecutionContext &context,
+		                                       const std::function<void()>   &work);
+		void    runWithInputCriticalOperationScope(const InputCriticalOperationScopePtr &scope,
+		                                           const std::function<void()>          &work);
+		/**
+		 * @brief Queues one trigger-priority action while retaining its originating logical operation.
+		 * @param action Action payload to queue.
+		 */
+		void    enqueuePendingTriggerPriorityAction(PendingTriggerPriorityAction action);
+		void    ensureTriggerPriorityOutboundGroup();
+		void    releaseTriggerPriorityOutboundGroup();
+		void    runWithTriggerPriorityOutboundGroup(const std::function<void()> &work) const;
+		/**
+		 * @brief Completes one suspended trigger-priority command and advances later direct actions.
+		 */
+		void    finishTriggerPriorityCommand(bool completed);
+		/**
+		 * @brief Cancels queued trigger-priority actions and releases their originating operations.
+		 */
+		void    cancelPendingTriggerPriorityActions();
+		/**
+		 * @brief Advances direct trigger actions queued behind a result-dependent command.
+		 */
+		void    drainPendingTriggerPriorityActions();
+		/**
+		 * @brief Continues command evaluation after OnPluginCommand has accepted the command.
+		 * @param line Normalized command text.
+		 * @param echoInput Whether ordinary command sends should be echoed.
+		 * @return `true` when command processing reached its successful terminal path.
+		 */
+		bool    continueEvaluateCommandAfterPluginCommand(const QString &line, bool echoInput);
+		/**
+		 * @brief Starts ordered evaluation of an expanded command stack.
+		 * @param commands Expanded commands in execution order.
+		 * @param completion Callback invoked after the final command completes.
+		 * @param autoSayEvaluation Continue through the auto-say fallback when `true`.
+		 */
+		void    evaluateCommandSequence(QStringList commands, CommandCompletion completion,
+		                                bool autoSayEvaluation = false);
+		/**
+		 * @brief Runs one rule action under a child logical-completion group.
+		 * @param action Action to start in the captured command context.
+		 * @param completion Completion invoked after all asynchronous descendants finish.
+		 */
+		void    runOrderedRuleAction(const std::function<void()> &action, CommandCompletion completion);
+		/**
+		 * @brief Continues entered-command processing after its plugin transform completes.
+		 * @param commandText Transformed command text.
+		 */
+		void    continueCommandEnteredAfterPluginTransform(QString commandText);
+		/**
+		 * @brief Starts one entered command with its captured caller context.
+		 * @param command Entered text and action source captured at submission.
+		 */
+		void    startEnteredCommand(PendingEnteredCommand command);
+		/**
+		 * @brief Finalizes entered-command history and action-source state.
+		 * @param historyText Transformed command text retained for history.
+		 * @param historyState History state accumulated while processing the entered command.
+		 * @param executionAccepted Whether command evaluation was accepted.
+		 * @param completed Whether the entered command and its asynchronous descendants completed.
+		 */
+		void    finishCommandEntered(const QString                             &historyText,
+		                             const QSharedPointer<CommandHistoryState> &historyState,
+		                             bool executionAccepted, bool completed);
+		/**
+		 * @brief Starts entered commands queued while an earlier command was suspended.
+		 */
+		void    cancelActiveEnteredCommand();
 		/**
 		 * @brief Internal speedwalk evaluator used by public wrapper.
 		 * @param speedWalkString Speedwalk expression.
 		 * @return Expanded command text.
 		 */
-		QString        doEvaluateSpeedwalk(const QString &speedWalkString) const;
+		QString doEvaluateSpeedwalk(const QString &speedWalkString) const;
 		/**
 		 * @brief Formats standardized speedwalk parser error text.
 		 * @param message Error detail.
@@ -337,6 +499,12 @@ class WorldCommandProcessor : public QObject
 		struct TriggerScript
 		{
 				quint64                runtimeId{0};
+				quint64                runtimeLocationHandle{0};
+				quint64                pluginEngineInstanceId{0};
+				quint64                pluginRuntimeInstanceId{0};
+				quint64                pluginRuntimeLocationHandle{0};
+				int                    pluginIndexHint{-1};
+				int                    indexHint{-1};
 				QString                pluginId;
 				QString                label;
 				QString                scriptName;
@@ -347,14 +515,27 @@ class WorldCommandProcessor : public QObject
 		};
 		struct DeferredScript
 		{
-				QString pluginId;
-				QString scriptText;
-				QString description;
-				bool    replaceMatchedLineOutput{false};
+				quint64                                    triggerRuntimeId{0};
+				quint64                                    triggerRuntimeLocationHandle{0};
+				int                                        triggerIndexHint{-1};
+				quint64                                    pluginEngineInstanceId{0};
+				quint64                                    pluginRuntimeInstanceId{0};
+				quint64                                    pluginRuntimeLocationHandle{0};
+				QString                                    pluginId;
+				QString                                    scriptText;
+				QString                                    description;
+				QSharedPointer<const QVector<LuaStyleRun>> styleRuns;
+				bool                                       trackTriggerExecution{false};
+				bool                                       replaceMatchedLineOutput{false};
 		};
 		struct RuleRef
 		{
 				quint64 runtimeId{0};
+				quint64 runtimeLocationHandle{0};
+				quint64 pluginRuntimeInstanceId{0};
+				quint64 pluginRuntimeLocationHandle{0};
+				int     pluginIndexHint{-1};
+				int     indexHint{-1};
 				QString pluginId;
 		};
 		struct TriggerEvaluationResult
@@ -367,6 +548,107 @@ class WorldCommandProcessor : public QObject
 				QVector<TriggerScript>           triggerScripts;
 				QVector<RuleRef>                 oneShotTriggers;
 		};
+		struct PendingIncomingStreamItem
+		{
+				using OrderedAction       = std::function<void()>;
+				using InputCriticalAction = std::function<void(CommandCompletion)>;
+
+				enum class Kind : quint8
+				{
+					CompleteLine,
+					PartialLine,
+					OrderedAction,
+					InputCriticalAction
+				};
+
+				Kind                                                          kind{Kind::CompleteLine};
+				QString                                                       line;
+				QVector<WorldRuntime::StyleSpan>                              spans;
+				OrderedAction                                                 action;
+				InputCriticalAction                                           inputCriticalAction;
+				CommandExecutionContext                                       inputCriticalActionContext;
+				CallerContextRunner                                           inputCriticalCallerContext;
+				std::shared_ptr<LuaDeferredRuntimeMutationPlayback>           nestingPlayback;
+				QSharedPointer<WorldRuntime::IncomingStreamPresentationBatch> presentationBatch;
+				InputCriticalOperationScopePtr                                inputCriticalOperationScope;
+				LuaCallbackIncomingLineObservation                            observation;
+				unsigned short actionSource{WorldRuntime::eUnknownActionSource};
+				bool           doingSimulate{false};
+		};
+		struct PendingIncomingLineOperation
+		{
+				QPointer<WorldCommandProcessor>                               processor;
+				QSharedPointer<PendingIncomingLineOperation>                  parent;
+				std::function<void()>                                         restoreParentLineContext;
+				std::shared_ptr<LuaDeferredRuntimeMutationPlayback>           nestingPlayback;
+				QSharedPointer<WorldRuntime::IncomingStreamPresentationBatch> presentationBatch;
+				InputCriticalOperationScopePtr                                inputCriticalOperationScope;
+				LuaCallbackIncomingLineObservation                            observation;
+				QString                                                       line;
+				QVector<WorldRuntime::StyleSpan>                              spans;
+				TriggerEvaluationResult                                       triggerResult;
+				QSharedPointer<const QVector<LuaStyleRun>>                    styleRuns;
+				QHash<QString, bool>                                          worldFunctionPresence;
+				int       triggerMatchedLineBufferIndex{0};
+				qint64    triggerMatchedLineAbsoluteNumber{0};
+				qsizetype deferredScriptIndex{0};
+				qsizetype triggerScriptIndex{0};
+				int       wrapColumn{0};
+				bool      runtimeWrap{false};
+				bool      indentParas{true};
+				bool      logOutput{false};
+		};
+		struct PendingIncomingStreamDrainFrame
+		{
+				const PendingIncomingLineOperation       *parent{nullptr};
+				const LuaDeferredRuntimeMutationPlayback *nestingPlayback{nullptr};
+				bool                                      nestedOnly{false};
+		};
+		struct PendingPluginLineDecision;
+		void
+		startIncomingLine(PendingIncomingStreamItem                                  request,
+		                  const QSharedPointer<PendingIncomingLineOperation>        &parent          = {},
+		                  const std::shared_ptr<LuaDeferredRuntimeMutationPlayback> &nestingPlayback = {});
+		void
+		continueIncomingLineAfterPluginDecision(const QSharedPointer<PendingIncomingLineOperation> &operation,
+		                                        bool                                                accepted);
+		void advanceIncomingLineScripts(const QSharedPointer<PendingIncomingLineOperation> &operation);
+		void finishIncomingLine(const QSharedPointer<PendingIncomingLineOperation> &operation);
+		void cancelIncomingLine(const QSharedPointer<PendingIncomingLineOperation> &operation);
+		/**
+		 * @brief Runs or queues a non-suspending protocol notification at its exact incoming-stream position.
+		 * @param action Notification publication to execute on the runtime thread.
+		 */
+		void enqueueOrRunIncomingStreamAction(PendingIncomingStreamItem::OrderedAction action);
+		void enqueueOrRunInputCriticalAction(PendingIncomingStreamItem::InputCriticalAction action);
+		[[nodiscard]] InputCriticalOperationScopePtr
+		                   createInputCriticalOperationScope(bool joinActiveOperation = false);
+		static void        finishInputCriticalOperation(const InputCriticalOperationScopePtr &scope,
+		                                                bool                                  completed = true);
+		void               completeInputCriticalOperation(const InputCriticalOperationScopePtr &scope);
+		void               cancelInputCriticalOperations();
+		[[nodiscard]] bool hasCurrentInputCriticalOperation() const;
+		void               adoptIncomingStreamBacklogPresentationBatch(PendingIncomingStreamItem &item);
+		void               finishIncomingStreamBacklogPresentationBatchIfIdle();
+		/**
+		 * @brief Processes one queued incoming stream item.
+		 * @param item Queued line, partial presentation, or protocol action.
+		 * @param parent Parent line operation for nested playback, if any.
+		 * @param nestingPlayback Playback grouping for nested input.
+		 * @return `true` when processing became asynchronous and draining must stop.
+		 */
+		bool               processPendingIncomingStreamItem(
+		    PendingIncomingStreamItem item, const QSharedPointer<PendingIncomingLineOperation> &parent,
+		    const std::shared_ptr<LuaDeferredRuntimeMutationPlayback> &nestingPlayback);
+		void drainPendingIncomingLines();
+		void
+		drainNestedIncomingLines(const QSharedPointer<PendingIncomingLineOperation>        &parent,
+		                         const std::shared_ptr<LuaDeferredRuntimeMutationPlayback> &nestingPlayback);
+		void drainPendingIncomingStreamItems(
+		    const QSharedPointer<PendingIncomingLineOperation>        &parent,
+		    const std::shared_ptr<LuaDeferredRuntimeMutationPlayback> &nestingPlayback, bool nestedOnly);
+		void presentIncomingPartialLine(const QString                          &line,
+		                                const QVector<WorldRuntime::StyleSpan> &spans) const;
 		/**
 		 * @brief Evaluates all trigger sets for an incoming line.
 		 * @param line Incoming line text.
@@ -386,6 +668,11 @@ class WorldCommandProcessor : public QObject
 		struct AliasRef
 		{
 				quint64                runtimeId{0};
+				quint64                runtimeLocationHandle{0};
+				quint64                pluginEngineInstanceId{0};
+				quint64                pluginRuntimeInstanceId{0};
+				quint64                pluginRuntimeLocationHandle{0};
+				int                    pluginIndexHint{-1};
 				QString                pluginId;
 				QString                label;
 				QString                scriptName;
@@ -444,6 +731,7 @@ class WorldCommandProcessor : public QObject
 		{
 				DecodedTrigger decoded;
 				quint64        runtimeId{0};
+				quint64        runtimeLocationHandle{0};
 				qint64         executionTimeNs{0};
 				int            matchCount{0};
 				int            matchAttempts{0};
@@ -481,6 +769,7 @@ class WorldCommandProcessor : public QObject
 		{
 				DecodedAlias decoded;
 				quint64      runtimeId{0};
+				quint64      runtimeLocationHandle{0};
 				qint64       executionTimeNs{0};
 				int          matchCount{0};
 				int          matchAttempts{0};
@@ -527,22 +816,6 @@ class WorldCommandProcessor : public QObject
 		 */
 		void ensurePaletteCache(const QMap<QString, QString> &attrs) const;
 		/**
-		 * @brief Evaluates one alias pass sequence.
-		 * @param currentLine Current command line.
-		 * @param countThem Count match stats when `true`.
-		 * @param omitFromLog Output omit-from-log flag.
-		 * @param echoAlias Output echo-alias flag.
-		 * @param omitFromHistory Output omit-from-history flag.
-		 * @param matchedAliases Output matched alias refs.
-		 * @param oneShotAliases Output one-shot alias refs.
-		 * @param plugin Optional plugin scope.
-		 * @return `true` when any alias matched.
-		 */
-		bool processOneAliasSequence(const QString &currentLine, bool countThem, bool &omitFromLog,
-		                             bool &echoAlias, bool &omitFromHistory,
-		                             QVector<AliasRef> &matchedAliases, QVector<AliasRef> &oneShotAliases,
-		                             WorldRuntime::Plugin *plugin);
-		/**
 		 * @brief Executes due timers.
 		 */
 		void checkTimers();
@@ -583,8 +856,7 @@ class WorldCommandProcessor : public QObject
 		void dispatchScriptSend(const QString &pluginId, const QString &text, const QString &description,
 		                        LuaCallbackEvent callbackEvent, const QVector<LuaStyleRun> *styleRuns,
 		                        bool hasTriggerContext, bool replaceMatchedLineOutput,
-		                        int    triggerMatchedLineBufferIndex,
-		                        qint64 triggerMatchedLineAbsoluteNumber) const;
+		                        int triggerMatchedLineBufferIndex, qint64 triggerMatchedLineAbsoluteNumber);
 		/**
 		 * @brief Emits one trace line through plugin trace callbacks/world output.
 		 * @param message Trace message without `TRACE:` prefix.
@@ -612,11 +884,34 @@ class WorldCommandProcessor : public QObject
 		 * @param logIt Log send when `true`.
 		 */
 		void sendMsg(const QString &text, bool echo, bool queueIt, bool logIt);
+		/**
+		 * @brief Rejects an outbound request before it can mutate queue or presentation state.
+		 * @return `true` when the request belongs to an earlier connection or disconnect has begun.
+		 */
+		[[nodiscard]] bool rejectInvalidOutboundRequest() const;
 		enum class OutboundTransport
 		{
 			Immediate,
-			DeferAtInboundBoundary,
-			DeferAtInboundBoundaryWithTriggerPriority
+			CausalDeferred,
+			CausalDeferredWithTriggerPriority
+		};
+		struct PendingOutboundSend
+		{
+				enum class Phase
+				{
+					Start,
+					ResumeAfterSpam,
+					PluginSentNotification
+				};
+
+				Phase                         phase{Phase::Start};
+				QString                       text;
+				bool                          echo{false};
+				bool                          logIt{false};
+				OutboundTransport             transport{OutboundTransport::Immediate};
+				CallerContextRunner           callerContext;
+				std::function<void(bool)>     mutationCompletion;
+				LogicalOperationCompletionPtr operationCompletion;
 		};
 		/**
 		 * @brief Processes a send and either transmits or stages its encoded payload.
@@ -624,8 +919,99 @@ class WorldCommandProcessor : public QObject
 		 * @param echo Echo text when `true`.
 		 * @param logIt Log send when `true`.
 		 * @param transport Transport timing and priority.
+		 * @param mutationCompletion Deferred mutation completion retained by this send.
+		 * @param operationCompletion Logical operation retained by this send.
 		 */
-		void doSendMsg(const QString &text, bool echo, bool logIt, OutboundTransport transport);
+		void doSendMsg(const QString &text, bool echo, bool logIt, OutboundTransport transport,
+		               std::function<void(bool)>     mutationCompletion  = {},
+		               LogicalOperationCompletionPtr operationCompletion = {});
+		/**
+		 * @brief Cancels one active OnPluginSend decision and resumes queued sends individually.
+		 * @param mutationCompletion Deferred mutation completion retained by the active send.
+		 * @param operationCompletion Logical operation retained by the active send.
+		 */
+		void cancelPluginSendDecision(const std::function<void(bool)>     &mutationCompletion,
+		                              const LogicalOperationCompletionPtr &operationCompletion);
+		/**
+		 * @brief Cancels every queued plugin send while the owning runtime is shutting down.
+		 */
+		void cancelPendingPluginSendsForShutdown();
+		/**
+		 * @brief Finishes a send after OnPluginSend accepts it.
+		 * @param text Newline-terminated outbound text.
+		 * @param echo Echo text when `true`.
+		 * @param logIt Log send when `true`.
+		 * @param transport Transport timing and priority.
+		 * @param mutationCompletion Deferred mutation completion retained by this send.
+		 * @param operationCompletion Logical operation retained by this send.
+		 */
+		void continueDoSendMsgAfterPluginSend(const QString &text, bool echo, bool logIt,
+		                                      OutboundTransport             transport,
+		                                      std::function<void(bool)>     mutationCompletion,
+		                                      LogicalOperationCompletionPtr operationCompletion);
+		/**
+		 * @brief Starts OnPluginSent after send preprocessing has completed.
+		 * @param text Newline-terminated outbound text.
+		 * @param echo Echo text when `true`.
+		 * @param logIt Log send when `true`.
+		 * @param transport Transport timing and priority.
+		 * @param mutationCompletion Deferred mutation completion retained by this send.
+		 * @param operationCompletion Logical operation retained by this send.
+		 */
+		void startPluginSentNotification(const QString &text, bool echo, bool logIt,
+		                                 OutboundTransport             transport,
+		                                 std::function<void(bool)>     mutationCompletion,
+		                                 LogicalOperationCompletionPtr operationCompletion);
+		/**
+		 * @brief Finishes an accepted send after OnPluginSent completes.
+		 * @param text Newline-terminated outbound text.
+		 * @param echo Echo text when `true`.
+		 * @param logIt Log send when `true`.
+		 * @param transport Transport timing and priority.
+		 * @param mutationCompletion Deferred mutation completion retained by this send.
+		 * @param operationCompletion Logical operation retained by this send.
+		 */
+		void completePluginSentNotification(const QString &text, bool echo, bool logIt,
+		                                    OutboundTransport             transport,
+		                                    std::function<void(bool)>     mutationCompletion,
+		                                    LogicalOperationCompletionPtr operationCompletion);
+		/**
+		 * @brief Applies a completed OnPluginSend decision and advances queued sends.
+		 * @param text Newline-terminated outbound text.
+		 * @param echo Echo text when `true`.
+		 * @param logIt Log send when `true`.
+		 * @param transport Transport timing and priority.
+		 * @param accepted Whether plugins accepted the send.
+		 * @param mutationCompletion Deferred mutation completion retained by this send.
+		 * @param operationCompletion Logical operation retained by this send.
+		 */
+		void completePluginSendDecision(const QString &text, bool echo, bool logIt,
+		                                OutboundTransport transport, bool accepted,
+		                                std::function<void(bool)>     mutationCompletion,
+		                                LogicalOperationCompletionPtr operationCompletion);
+		/**
+		 * @brief Completes a send that cannot cross its captured connection epoch.
+		 * @param mutationCompletion Deferred mutation continuation retained by this send.
+		 * @param operationCompletion Logical operation retained by this send.
+		 * @param drainPendingSends Continue draining queued sends when `true`.
+		 */
+		void finishRejectedOutboundSend(std::function<void(bool)>     &mutationCompletion,
+		                                LogicalOperationCompletionPtr &operationCompletion,
+		                                bool                           drainPendingSends);
+		/**
+		 * @brief Rejects the current send when its context is stale or disconnect has begun.
+		 * @param mutationCompletion Deferred mutation continuation retained by this send.
+		 * @param operationCompletion Logical operation retained by this send.
+		 * @param drainPendingSends Continue draining queued sends when `true`.
+		 * @return `true` when the send was rejected and completed.
+		 */
+		[[nodiscard]] bool rejectInvalidOutboundContext(std::function<void(bool)>     &mutationCompletion,
+		                                                LogicalOperationCompletionPtr &operationCompletion,
+		                                                bool                           drainPendingSends);
+		/**
+		 * @brief Sends queued outbound operations after the active OnPluginSend decision completes.
+		 */
+		void               drainPendingPluginSends();
 		/**
 		 * @brief Writes line to session log with optional wrappers.
 		 * @param text Line text.
@@ -664,11 +1050,20 @@ class WorldCommandProcessor : public QObject
 		QStringList                                  m_queuedCommands;
 		int                                          m_triggerPriorityQueuedCommands{0};
 		int                                          m_triggerCommandPriorityDepth{0};
+		int                                          m_pendingTriggerPriorityCommands{0};
+		int                                          m_triggerPriorityActionExecutionDepth{0};
+		bool                                         m_drainingPendingTriggerPriorityActions{false};
+		QQueue<PendingTriggerPriorityAction>         m_pendingTriggerPriorityActions;
+		QSharedPointer<CausalOutboundGroup>          m_triggerPriorityOutboundGroup;
 		bool                                         m_queueStatusOwnsMessage{false};
 		int                                          m_speedWalkDelay{0};
 		QString                                      m_speedWalkFiller;
 		bool                                         m_pluginProcessingSend{false};
 		bool                                         m_pluginProcessingSent{false};
+		bool                                         m_pluginSendDecisionPending{false};
+		bool                                         m_pluginSentNotificationPending{false};
+		bool                                         m_drainingPendingPluginSends{false};
+		QQueue<PendingOutboundSend>                  m_pendingPluginSends;
 		bool                                         m_noEcho{false};
 		bool                                         m_translateGerman{false};
 		bool                                         m_translateBackslashSequences{false};
@@ -684,11 +1079,27 @@ class WorldCommandProcessor : public QObject
 		QString                                      m_lastCommandSent;
 		int                                          m_lastCommandCount{0};
 		QTimer                                      *m_timerCheck{nullptr};
+		std::shared_ptr<TimerEvaluationSequence>     m_timerEvaluationSequence;
+		bool                                         m_timerEvaluationRerunPending{false};
+		quint64                                      m_ruleEvaluationGeneration{0};
+		QSet<quint64>                                m_reservedOneShotAliasRuntimeIds;
 		QElapsedTimer                                m_queueDispatchTimer;
 		bool                                         m_suppressInputLog{false};
 		bool                                         m_processingEnteredCommand{false};
-		bool                                         m_omitFromHistoryForEnteredCommand{false};
-		bool                                         m_enteredCommandSendFailed{false};
+		QSharedPointer<CommandHistoryState>          m_activeCommandHistoryState;
+		LogicalOperationCompletionPtr                m_activeOperationCompletion;
+		CommandCompletion                            m_activeEnteredCommandCompletion;
+		quint64                                      m_nextInputCriticalOperationId{1};
+		InputCriticalOperationScopePtr               m_activeInputCriticalOperationScope;
+		InputCriticalOperationScopePtr               m_currentInputCriticalOperationScope;
+		bool                                         m_processingInputCriticalOperation{false};
+		bool                                         m_processingIncomingLine{false};
+		bool                                         m_processingIncomingStreamAction{false};
+		QVector<PendingIncomingStreamDrainFrame>     m_pendingIncomingStreamDrainStack;
+		QSharedPointer<PendingIncomingLineOperation> m_activeIncomingLineOperation;
+		QQueue<PendingIncomingStreamItem>            m_pendingIncomingStreamItems;
+		QSharedPointer<WorldRuntime::IncomingStreamPresentationBatch>
+		                                             m_incomingStreamBacklogPresentationBatch;
 		bool                                         m_runtimeAutomationOwner{true};
 		int                                          m_executionDepth{0};
 		mutable QHash<QString, QRegularExpression>   m_regexCache;

@@ -583,11 +583,25 @@ class LuaCallbackEngine
 		 * @brief Pushes the unified per-dispatch snapshot used by callback-scope read caches.
 		 * @param snapshot Snapshot captured on runtime thread for the active dispatch.
 		 */
-		void pushDispatchSnapshot(const QSharedPointer<const LuaCallbackSnapshot> &snapshot);
+		void        pushDispatchSnapshot(const QSharedPointer<const LuaCallbackSnapshot> &snapshot);
 		/**
 		 * @brief Pops the unified per-dispatch snapshot.
 		 */
-		void popDispatchSnapshot();
+		void        popDispatchSnapshot();
+		/**
+		 * @brief Pushes whether the current dispatch originated from a runtime callback.
+		 * @param originatedFromCallback Callback-origin state for the dispatch.
+		 */
+		static void pushDispatchCallbackOrigin(bool originatedFromCallback);
+		/**
+		 * @brief Pops the current dispatch callback-origin state.
+		 */
+		static void popDispatchCallbackOrigin();
+		/**
+		 * @brief Returns whether the current dispatch originated from a runtime callback.
+		 * @return `true` for callback-originated dispatches and their nested continuations.
+		 */
+		[[nodiscard]] static bool                               currentDispatchOriginatedFromCallback();
 		/**
 		 * @brief Returns the active unified per-dispatch snapshot.
 		 * @return Snapshot pointer, or `nullptr` when unset.
@@ -604,11 +618,12 @@ class LuaCallbackEngine
 		 * @param mutations Ordered mutation callables to execute on the runtime thread.
 		 * @param requiresCausalOrdering Whether callbacks raised by the batch must precede queued lane work.
 		 * @param windowAddHotspotReentryBlocked Whether callbacks raised by the batch inherit hotspot-add blocking.
+		 * @param mutationDependencies Identity dependencies shared by the producing callback chain.
 		 */
-		void appendDeferredRuntimeMutationBatch(class WorldRuntime              *runtime,
-		                                        QVector<std::function<void()>> &&mutations,
-		                                        bool requiresCausalOrdering         = true,
-		                                        bool windowAddHotspotReentryBlocked = false);
+		void                                                    appendDeferredRuntimeMutationBatch(
+		    class WorldRuntime *runtime, QVector<std::function<void()>> &&mutations,
+		    bool requiresCausalOrdering = true, bool windowAddHotspotReentryBlocked = false,
+		    std::shared_ptr<LuaCallbackMutationDependencyState> mutationDependencies = {});
 		/**
 		 * @brief Moves a nested callback mutation journal into the active outer callback result.
 		 * @param batch Batch produced by a nested callback dispatch. Consumed on success.
@@ -776,7 +791,8 @@ class LuaCallbackEngine
 		CallbackCatalogObserver                   m_callbackCatalogObserver;
 		QVector<LuaDeferredRuntimeMutationBatch>  m_deferredRuntimeMutationBatches;
 		QSharedPointer<const LuaCallbackSnapshot> m_completedCallbackMutationSnapshot;
-		bool m_completedCallbackMutationSnapshotIsPresentationOnly{false};
+		bool         m_completedCallbackMutationSnapshotIsPresentationOnly{false};
+		mutable bool m_scriptLoadMutationSnapshotPending{false};
 		struct CachedLinePage
 		{
 				QPointer<WorldRuntime>                   runtime;

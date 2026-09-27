@@ -473,6 +473,7 @@ set(QMUD_HEADERS
         MxpDebugWindow.h
         BraceMatch.h
         LuaExecutor.h
+        LuaCallbackContinuation.h
         LuaExecutorWorker.h
         LuaCallbackEngine.h
         LuaApiExport.h

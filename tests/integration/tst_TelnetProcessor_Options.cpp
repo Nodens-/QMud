@@ -168,13 +168,17 @@ namespace
 				}
 
 				processor.processBytes(bytes({IAC, WONT, TELOPT_ECHO}));
-				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DO, TELOPT_ECHO}));
-				QVERIFY(noEchoStates.constLast());
+				QCOMPARE(processor.takeOutboundData(), bytes({IAC, DONT, TELOPT_ECHO}));
+				QVERIFY(!noEchoStates.constLast());
+				processor.processBytes(bytes({IAC, WILL, TELOPT_ECHO}));
+				QVERIFY(processor.takeOutboundData().isEmpty());
+				QVERIFY(!noEchoStates.constLast());
+				processor.processBytes(bytes({IAC, WONT, TELOPT_ECHO}));
+				QVERIFY(processor.takeOutboundData().isEmpty());
+				QVERIFY(!noEchoStates.constLast());
 
 				processor.processBytes(bytes({IAC, DO, SGA}));
 				QCOMPARE(processor.takeOutboundData(), bytes({IAC, WILL, SGA}));
-				processor.processBytes(bytes({IAC, WONT, TELOPT_ECHO}));
-				QVERIFY(processor.takeOutboundData().isEmpty());
 				QCOMPARE(processor.processBytes(QByteArrayLiteral("ordinary text")),
 				         QByteArrayLiteral("ordinary text"));
 

@@ -16,6 +16,7 @@
 #include "NameGeneration.h"
 #include "WorldChildWindow.h"
 #include "WorldCommandProcessor.h"
+#include "WorldDocument.h"
 #include "WorldOptions.h"
 #include "WorldRuntime.h"
 #include "WorldRuntimeTestAccess.h"
@@ -101,7 +102,7 @@ class AppControllerTestAccess final
 			if (!engine || !executor)
 				return false;
 
-			runtime.setLuaScriptText(QStringLiteral(R"lua(
+			WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 function qmud_test_worker_spellcheck(value)
   return type(SpellCheck(value))
 end
@@ -410,17 +411,11 @@ end
 				    runtime.luaCallbackSnapshotForBridgedCall();
 				QVERIFY(commandSnapshot);
 				QVERIFY(commandSnapshot->hasCommandUiSnapshot);
-				QVERIFY(commandSnapshot->commandUiHasView);
-				QVERIFY(commandSnapshot->commandUiHasFrameData);
-				QCOMPARE(
-				    commandSnapshot->commandUiValues.value(QStringLiteral("commandInputText")).toString(),
-				    QStringLiteral("mispelt"));
-				QCOMPARE(commandSnapshot->commandUiValues.value(QStringLiteral("inputSelectionStartColumn"))
-				             .toInt(),
-				         4);
-				QCOMPARE(
-				    commandSnapshot->commandUiValues.value(QStringLiteral("inputSelectionEndColumn")).toInt(),
-				    0);
+				QVERIFY(commandSnapshot->commandUiSnapshotState.hasView);
+				QVERIFY(commandSnapshot->commandUiSnapshotState.hasFrameData);
+				QCOMPARE(commandSnapshot->commandUiSnapshotState.commandInputText, QStringLiteral("mispelt"));
+				QCOMPARE(commandSnapshot->commandUiSnapshotState.inputSelectionStartColumn, 4);
+				QCOMPARE(commandSnapshot->commandUiSnapshotState.inputSelectionEndColumn, 0);
 				hasFunction  = false;
 				suspended    = false;
 				resumeId     = 0;
@@ -490,6 +485,148 @@ end
 				QCOMPARE(AppControllerTestAccess::spellCheckerWorldCount(controller), 0);
 			}
 #endif
+#ifdef QMUD_ENABLE_LUA_SCRIPTING
+			/**
+			 * @brief Verifies imported world script text replaces the live Lua state through the callback lane.
+			 */
+			static void generalXmlImportReloadsWorldScriptState()
+			{
+				AppController controller;
+				MainWindow    frame;
+				WorldRuntime  runtime;
+				controller.setMainWindow(&frame);
+				WorldRuntimeTestAccess::initializeLuaScriptText(
+				    runtime, QStringLiteral("import_old_global = 'stale'"));
+				QVERIFY(runtime.dispatchLuaResetAndLoadScript(runtime.luaCallbacks()));
+
+				auto *world = new WorldChildWindow(QStringLiteral("Imported script world"));
+				world->setRuntime(&runtime);
+				const QPointer worldGuard(world);
+				const auto     unbindRuntime = qScopeGuard(
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
+				Q_UNUSED(unbindRuntime);
+				frame.addMdiSubWindow(world, true);
+				frame.show();
+				QCoreApplication::processEvents();
+
+				const QString                     xml = QStringLiteral(R"xml(
+<qmud>
+  <world>
+    <script><![CDATA[
+SetVariable("imported-script-used-fresh-state", tostring(import_old_global == nil))
+]]></script>
+  </world>
+</qmud>
+)xml");
+				const AppController::ImportResult result =
+				    controller.importXmlFromText(xml, WorldDocument::XML_GENERAL);
+				QVERIFY2(result.ok, qPrintable(result.errorMessage));
+				const QSharedPointer<LuaCallbackEngine> worldEngine(runtime.luaCallbacks(),
+				                                                    [](LuaCallbackEngine * /*unused*/){});
+				bool                                    followupCompleted = false;
+				runtime.dispatchLuaExecuteScriptAsync(
+				    worldEngine, QStringLiteral("local imported_script_loaded = true"),
+				    QStringLiteral("load imported world script"), LuaCallbackEvent::ScreenDraw, nullptr,
+				    false, false, 0, 0, [&followupCompleted](const bool ok) { followupCompleted = ok; });
+				QTRY_VERIFY_WITH_TIMEOUT(followupCompleted, 5000);
+				QTRY_COMPARE_WITH_TIMEOUT(
+				    runtime.variableSnapshot().value(QStringLiteral("imported-script-used-fresh-state")),
+				    QStringLiteral("true"), 5000);
+			}
+
+			/**
+			 * @brief Verifies a rejected multi-category import cannot change General state or the Lua engine.
+			 */
+			static void rejectedXmlImportLeavesWorldScriptStateUntouched()
+			{
+				AppController controller;
+				MainWindow    frame;
+				WorldRuntime  runtime;
+				controller.setMainWindow(&frame);
+				runtime.setWorldAttribute(QStringLiteral("name"), QStringLiteral("Original world"));
+				const QString originalScript = QStringLiteral(R"lua(
+function record_atomic_import_generation()
+  SetVariable("atomic-import-generation", "original")
+end
+)lua");
+				runtime.setWorldMultilineAttribute(QStringLiteral("script"), originalScript);
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, originalScript);
+				QVERIFY(runtime.dispatchLuaResetAndLoadScript(runtime.luaCallbacks()));
+
+				WorldRuntime::Trigger existingTrigger;
+				existingTrigger.attributes.insert(QStringLiteral("name"), QStringLiteral("duplicate"));
+				runtime.setTriggers({existingTrigger});
+
+				auto *world = new WorldChildWindow(QStringLiteral("Atomic import world"));
+				world->setRuntime(&runtime);
+				const QPointer worldGuard(world);
+				const auto     unbindRuntime = qScopeGuard(
+				    [&worldGuard]
+				    {
+					    if (worldGuard)
+						    worldGuard->setRuntime(nullptr);
+				    });
+				Q_UNUSED(unbindRuntime);
+				frame.addMdiSubWindow(world, true);
+				frame.show();
+				QCoreApplication::processEvents();
+
+				const QString                     xml    = QStringLiteral(R"xml(
+<qmud>
+  <world name="Replacement world">
+    <script><![CDATA[
+SetVariable("rejected-import-loaded", "yes")
+function record_atomic_import_generation()
+  SetVariable("atomic-import-generation", "replacement")
+end
+]]></script>
+  </world>
+  <triggers>
+    <trigger name="duplicate" enabled="1">
+      <send>replacement</send>
+    </trigger>
+  </triggers>
+</qmud>
+)xml");
+				const AppController::ImportResult result = controller.importXmlFromText(
+				    xml, WorldDocument::XML_GENERAL | WorldDocument::XML_TRIGGERS);
+				QVERIFY(!result.ok);
+				QCOMPARE(runtime.worldAttributes().value(QStringLiteral("name")),
+				         QStringLiteral("Original world"));
+				QCOMPARE(runtime.worldMultilineAttributes().value(QStringLiteral("script")), originalScript);
+
+				const QSharedPointer<LuaCallbackEngine> worldEngine(runtime.luaCallbacks(),
+				                                                    [](LuaCallbackEngine * /*unused*/){});
+				bool                                    followupCompleted = false;
+				runtime.dispatchLuaExecuteScriptAsync(
+				    worldEngine, QStringLiteral("record_atomic_import_generation()"),
+				    QStringLiteral("verify rejected import script"), LuaCallbackEvent::ScreenDraw, nullptr,
+				    false, false, 0, 0, [&followupCompleted](const bool ok) { followupCompleted = ok; });
+				QTRY_VERIFY_WITH_TIMEOUT(followupCompleted, 5000);
+				QCOMPARE(runtime.variableSnapshot().value(QStringLiteral("atomic-import-generation")),
+				         QStringLiteral("original"));
+				QVERIFY(!runtime.variableSnapshot().contains(QStringLiteral("rejected-import-loaded")));
+			}
+#endif
+
+			/** @brief Verifies only an accepted primary-world close ends its script-reload session. */
+			static void acceptedWorldCloseEndsScriptReloadSession()
+			{
+				WorldRuntime runtime;
+				auto         world = std::make_unique<WorldChildWindow>(QStringLiteral("Closing world"));
+				world->setAttribute(Qt::WA_DeleteOnClose, false);
+				world->setRuntime(&runtime);
+				QVERIFY(!runtime.worldSessionCloseStarted());
+				QVERIFY(world->close());
+				QVERIFY(runtime.worldSessionCloseStarted());
+				world->setRuntime(nullptr);
+				QVERIFY(runtime.worldSessionCloseStarted());
+			}
+
 			/**
 			 * @brief Verifies notepad Send To World targets its exact owner and terminates its partial prompt.
 			 */
@@ -884,7 +1021,10 @@ end
 				constexpr std::array testFunctions = {
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 				    &spellCheckerStateProvidesRequiredUtilities,
+				    &generalXmlImportReloadsWorldScriptState,
+				    &rejectedXmlImportLeavesWorldScriptStateUntouched,
 #endif
+				    &acceptedWorldCloseEndsScriptReloadSession,
 				    &ownedNotepadSendToWorldTerminatesPartialPrompt,
 				    &textWindowActionsRequireRecordedLiveOwner,
 				    &packetDebugActionUsesOwnedTextWindow,
@@ -893,9 +1033,9 @@ end
 				    &generatedNameSendTerminatesPartialPrompt,
 				};
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
-				static_assert(testFunctions.size() == 7);
+				static_assert(testFunctions.size() == 10);
 #else
-				static_assert(testFunctions.size() == 6);
+				static_assert(testFunctions.size() == 7);
 #endif
 			}
 	};

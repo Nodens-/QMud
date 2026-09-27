@@ -99,7 +99,7 @@ namespace
 
 				runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.setLuaScriptText(QStringLiteral(R"lua(
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 local scaled_drag_start_x = 0
 
 function qmud_scaled_drag_down(flags, hotspot_id)
@@ -119,7 +119,7 @@ function qmud_scaled_drag_release(flags, hotspot_id)
 	SetVariable("scaled_drag_release_x", string.format("%d", WindowInfo("scaled-drag", 17)))
 end
 )lua")
-				                             .arg(destinationFlags));
+				                                                             .arg(destinationFlags));
 
 				const QString windowId = QStringLiteral("scaled-drag");
 				QCOMPARE(runtime.windowCreate(windowId, clientWidth, 40, 100, 80, 0,
@@ -234,7 +234,7 @@ end
 
 				runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.setLuaScriptText(QStringLiteral(R"lua(
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 function qmud_scale_reset_move(flags, hotspot_id)
 	WindowResize("scale-reset", 50, 80, 0)
 	WindowPosition("scale-reset", %1, 40, 0, %2)
@@ -247,8 +247,8 @@ function qmud_scale_reset_over(flags, hotspot_id)
 	SetVariable("scale_reset_hovered", hotspot_id)
 end
 )lua")
-				                             .arg(clientWidth)
-				                             .arg(destinationFlags));
+				                                                             .arg(clientWidth)
+				                                                             .arg(destinationFlags));
 
 				const QString windowId = QStringLiteral("scale-reset");
 				QCOMPARE(runtime.windowCreate(windowId, clientWidth, 40, 100, 80, 0,
@@ -361,7 +361,7 @@ end
 
 				runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.setLuaScriptText(QStringLiteral(R"lua(
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 local install_drag_down_count = 0
 
 function qmud_install_drag_down(flags, hotspot_id)
@@ -474,7 +474,7 @@ end
 
 				runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.setLuaScriptText(QStringLiteral(R"lua(
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 function qmud_guarded_drag_move(flags, hotspot_id)
 	local delete_result = WindowDelete("guarded-drag")
 	local create_result = WindowCreate("guarded-drag", 100000, 100000, 500, 500, 0, 2, 0)
@@ -554,7 +554,7 @@ end
 
 				runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.setLuaScriptText(QStringLiteral(R"lua(
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 local resize_start_x = 0
 
 function qmud_right_edge_resize_down(flags, hotspot_id)
@@ -658,7 +658,7 @@ end
 
 				runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.setLuaScriptText(QStringLiteral(R"lua(
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 function qmud_fully_blocked_create(flags, hotspot_id)
 	local result = WindowCreate("blocked-create", 100000, 100000, 500, 500, 0, 2, 0)
 	SetVariable("blocked_create_result", string.format("%d", result))
@@ -783,7 +783,7 @@ end
 
 				runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.setLuaScriptText(QStringLiteral(R"lua(
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 local distinct_window_id = "%1"
 
 function qmud_distinct_drag_move(flags, hotspot_id)
@@ -792,7 +792,7 @@ function qmud_distinct_drag_move(flags, hotspot_id)
 	SetVariable("distinct_identity_results", string.format("%d:%d", delete_result, create_result))
 end
 )lua")
-				                             .arg(distinctWindowId));
+				                                                             .arg(distinctWindowId));
 
 				constexpr QSize  capturedSize(100, 80);
 				constexpr QSize  distinctInitialSize(90, 70);
@@ -918,7 +918,7 @@ end
 				request.functionName        = QStringLiteral("OnPluginEnable");
 				request.callbackSnapshotArg = snapshot;
 				LuaBatchDispatchResult result =
-				    WorldRuntimeTestAccess::queuePluginCallbackDispatch(runtime, request, true);
+				    WorldRuntimeTestAccess::queuePluginCallbackDispatchResult(runtime, request);
 				QVERIFY(result.hasFunctionValid);
 				QVERIFY(result.hasFunction);
 
@@ -926,7 +926,7 @@ end
 				request.functionName = QStringLiteral("structured_font_cache_status");
 				request.stringArg    = QStringLiteral("ignored");
 				request.callbackSnapshotArg.reset();
-				result = WorldRuntimeTestAccess::queuePluginCallbackDispatch(runtime, request, true);
+				result = WorldRuntimeTestAccess::queuePluginCallbackDispatchResult(runtime, request);
 				QCOMPARE(result.stringResult, QStringLiteral("ok"));
 
 				WorldRuntimeTestAccess::dispatchTeardownLuaEngines(runtime, {engine}, true);
@@ -946,7 +946,7 @@ end
 
 				runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.setLuaScriptText(QStringLiteral(R"lua(
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 function qmud_queued_hotspot(flags, hotspot_id)
 	local delete_result = WindowDelete("queued-guard")
 	WindowCreate("queued-guard", 40, 40, 100, 80, 0, 2, 0)
@@ -1107,6 +1107,4 @@ end
 
 QTEST_MAIN(tst_WorldRuntime_MiniWindowGeometry)
 
-#if __has_include("tst_WorldRuntime_MiniWindowGeometry.moc")
 #include "tst_WorldRuntime_MiniWindowGeometry.moc"
-#endif

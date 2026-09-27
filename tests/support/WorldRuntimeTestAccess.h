@@ -20,6 +20,18 @@
 class WorldRuntimeTestAccess final
 {
 	public:
+		/**
+		 * @brief Installs initial world Lua source for a test before callback dispatch begins.
+		 * @param runtime Runtime whose world engine receives the source.
+		 * @param script Lua script text.
+		 */
+		static void initializeLuaScriptText(WorldRuntime &runtime, const QString &script)
+		{
+			const bool wasLoadingDocument = runtime.m_loadingDocument;
+			runtime.m_loadingDocument     = true;
+			runtime.initializeLuaScriptText(script);
+			runtime.m_loadingDocument = wasLoadingDocument;
+		}
 		static QList<WorldRuntime::Trigger> &triggers(WorldRuntime &runtime)
 		{
 			return runtime.triggersMutable();
@@ -40,6 +52,87 @@ class WorldRuntimeTestAccess final
 		{
 			return runtime.pluginForIdMutable(pluginId);
 		}
+		/**
+		 * @brief Publishes plugin topology after a test directly arranges the private plugin collection.
+		 * @param runtime Runtime whose test-only plugin setup is complete.
+		 */
+		static void commitPluginStructure(WorldRuntime &runtime)
+		{
+			runtime.notePluginStructureMutation();
+			runtime.patchLuaCallbackStableSnapshot(WorldRuntime::LuaCallbackStableSnapshotDomain::Plugins);
+		}
+		/**
+		 * @brief Replaces a directly arranged plugin as a new runtime instance.
+		 * @param runtime Runtime owning the plugin collection.
+		 * @param index Index of the plugin to replace.
+		 * @param replacement New plugin instance.
+		 */
+		static void replacePlugin(WorldRuntime &runtime, const int index, WorldRuntime::Plugin replacement)
+		{
+			runtime.invalidatePluginRuntimeLocations(runtime.m_plugins[index]);
+			runtime.m_plugins[index] = std::move(replacement);
+			commitPluginStructure(runtime);
+		}
+		/**
+		 * @brief Publishes a directly arranged plugin trigger structure.
+		 * @param runtime Runtime owning the plugin.
+		 * @param plugin Plugin whose trigger collection changed.
+		 * @param firstChangedIndex First index whose runtime location may have changed.
+		 */
+		static void commitPluginTriggerStructure(WorldRuntime &runtime, WorldRuntime::Plugin &plugin,
+		                                         const int firstChangedIndex)
+		{
+			runtime.synchronizeTriggerRuntimeLocations(&plugin, firstChangedIndex);
+			runtime.markPluginTriggersChanged(plugin.attributes.value(QStringLiteral("id")));
+		}
+		/**
+		 * @brief Publishes a directly arranged plugin alias structure.
+		 * @param runtime Runtime owning the plugin.
+		 * @param plugin Plugin whose alias collection changed.
+		 * @param firstChangedIndex First index whose runtime location may have changed.
+		 */
+		static void commitPluginAliasStructure(WorldRuntime &runtime, WorldRuntime::Plugin &plugin,
+		                                       const int firstChangedIndex)
+		{
+			runtime.synchronizeAliasRuntimeLocations(&plugin, firstChangedIndex);
+			runtime.noteAliasStructureMutation();
+			runtime.markPluginAliasesChanged(plugin.attributes.value(QStringLiteral("id")));
+		}
+		/**
+		 * @brief Publishes a directly arranged plugin timer structure.
+		 * @param runtime Runtime owning the plugin.
+		 * @param plugin Plugin whose timer collection changed.
+		 * @param firstChangedIndex First index whose runtime location may have changed.
+		 */
+		static void commitPluginTimerStructure(WorldRuntime &runtime, WorldRuntime::Plugin &plugin,
+		                                       const int firstChangedIndex)
+		{
+			runtime.synchronizeTimerRuntimeLocations(&plugin, firstChangedIndex);
+			runtime.noteTimerStructureMutation();
+			runtime.markPluginTimersChanged(plugin.attributes.value(QStringLiteral("id")));
+		}
+		/**
+		 * @brief Clears all directly arranged rules for one plugin and publishes the structural changes.
+		 * @param runtime Runtime owning the plugin.
+		 * @param plugin Plugin whose rule collections are cleared.
+		 */
+		static void clearPluginRules(WorldRuntime &runtime, WorldRuntime::Plugin &plugin)
+		{
+			for (const WorldRuntime::Trigger &trigger : std::as_const(plugin.triggers))
+				runtime.invalidateRuntimeLocation(trigger.runtimeLocationHandle);
+			for (const WorldRuntime::Alias &alias : std::as_const(plugin.aliases))
+				runtime.invalidateRuntimeLocation(alias.runtimeLocationHandle);
+			for (const WorldRuntime::Timer &timer : std::as_const(plugin.timers))
+				runtime.invalidateRuntimeLocation(timer.runtimeLocationHandle);
+			plugin.triggers.clear();
+			plugin.aliases.clear();
+			plugin.timers.clear();
+			runtime.beginLuaCallbackSnapshotMutationBatch();
+			runtime.markPluginTriggersChanged(plugin.attributes.value(QStringLiteral("id")));
+			runtime.markPluginAliasesChanged(plugin.attributes.value(QStringLiteral("id")));
+			runtime.markPluginTimersChanged(plugin.attributes.value(QStringLiteral("id")));
+			runtime.endLuaCallbackSnapshotMutationBatch();
+		}
 		static MiniWindow *miniWindow(WorldRuntime &runtime, const QString &name)
 		{
 			return runtime.miniWindowMutable(name);
@@ -57,6 +150,23 @@ class WorldRuntimeTestAccess final
 		{
 			return runtime.sortedMiniWindowsMutable();
 		}
+		/**
+		 * @brief Returns the script timestamp cached for callback snapshots.
+		 * @param runtime Runtime whose watcher-backed cache is inspected.
+		 * @return Cached script modification timestamp.
+		 */
+		static QDateTime cachedScriptFileModTime(const WorldRuntime &runtime)
+		{
+			return runtime.cachedScriptFileModTime();
+		}
+		/**
+		 * @brief Resets protocol state through the production TelnetProcessor boundary.
+		 * @param runtime Runtime whose protocol state is reset.
+		 */
+		static void resetTelnetConnectionState(WorldRuntime &runtime)
+		{
+			runtime.m_telnet.resetConnectionState();
+		}
 		static void dispatchInitializeLuaEnginesWithObservedCallbacks(
 		    const WorldRuntime &runtime, const QVector<LuaEngineObservedInitializationRequest> &requests,
 		    const bool completionBarrier)
@@ -70,10 +180,10 @@ class WorldRuntimeTestAccess final
 			return runtime.dispatchLuaResetAndLoadScript(engine);
 		}
 		[[nodiscard]] static LuaBatchDispatchResult
-		queuePluginCallbackDispatch(WorldRuntime &runtime, const LuaBatchDispatchRequest &request,
-		                            const bool completionBarrier)
+		queuePluginCallbackDispatchResult(WorldRuntime &runtime, const LuaBatchDispatchRequest &request)
 		{
-			return runtime.queuePluginCallbackDispatch(request, completionBarrier);
+			return runtime.queuePluginCallbackDispatch(
+			    request, WorldRuntime::PluginCallbackCompletionPolicy::ResultRequired);
 		}
 		static void dispatchTeardownLuaEngines(const WorldRuntime                               &runtime,
 		                                       const QVector<QSharedPointer<LuaCallbackEngine>> &engines,
@@ -85,31 +195,6 @@ class WorldRuntimeTestAccess final
 		                                  const bool simulatedInput = false)
 		{
 			runtime.processRawDataPayload(data, simulatedInput);
-		}
-		/**
-		 * @brief Opens an inbound transmission boundary for deterministic staging tests.
-		 * @param runtime Runtime whose boundary is opened.
-		 */
-		static void beginInboundTransmissionDeferralScope(WorldRuntime &runtime)
-		{
-			runtime.beginInboundTransmissionDeferralScope();
-		}
-		/**
-		 * @brief Closes an inbound transmission boundary and flushes staged bytes.
-		 * @param runtime Runtime whose boundary is closed.
-		 */
-		static void endInboundTransmissionDeferralScope(WorldRuntime &runtime)
-		{
-			runtime.endInboundTransmissionDeferralScope();
-		}
-		/**
-		 * @brief Returns the active inbound transmission-boundary nesting depth.
-		 * @param runtime Runtime whose boundary state is inspected.
-		 * @return Current nesting depth.
-		 */
-		[[nodiscard]] static int inboundTransmissionDeferralDepth(const WorldRuntime &runtime)
-		{
-			return runtime.m_inboundTransmissionDeferralDepth;
 		}
 		/**
 		 * @brief Sets connection phase for deterministic command-dispatch tests without a network socket.

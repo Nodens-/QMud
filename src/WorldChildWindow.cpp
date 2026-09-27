@@ -13,6 +13,7 @@
 #include "AppController.h"
 #include "DocConstants.h"
 #include "FileExtensions.h"
+#include "Flags.h"
 #include "MainWindowHost.h"
 #include "MainWindowHostResolver.h"
 #include "WorldCommandProcessor.h"
@@ -859,6 +860,8 @@ void WorldChildWindow::closeEvent(QCloseEvent *event)
 	QMdiSubWindow::closeEvent(event);
 	if (!event->isAccepted())
 		return;
+	if (runtime)
+		runtime->beginWorldSessionClose();
 
 	for (const QPointer<WorldChildWindow> &observer : std::as_const(observers))
 		if (observer)

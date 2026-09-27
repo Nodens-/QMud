@@ -475,7 +475,9 @@ namespace
 				image.image.fill(QColor(Qt::yellow));
 				window.images.insert(QStringLiteral("img"), image);
 
-				const MiniWindow copy = window.detachedImageCopy();
+				const MiniWindow copy                  = window.detachedImageCopy();
+				const quint64    copiedSurfaceRevision = copy.backingSurfaceRevision();
+				QCOMPARE(copiedSurfaceRevision, window.backingSurfaceRevision());
 
 				MiniWindowUtils::rectOp(window, 2, 0, 0, 0, 0, MiniWindowUtils::colorToRef(QColor(Qt::red)),
 				                        0);
@@ -486,6 +488,8 @@ namespace
 				QCOMPARE(copy.width, 16);
 				QCOMPARE(copy.height, 12);
 				QCOMPARE(copy.backingSurface().pixelColor(0, 0), QColor(Qt::green));
+				QCOMPARE(copy.backingSurfaceRevision(), copiedSurfaceRevision);
+				QVERIFY(window.backingSurfaceRevision() != copiedSurfaceRevision);
 				QVERIFY(copy.images.contains(QStringLiteral("img")));
 				QCOMPARE(copy.images.value(QStringLiteral("img")).image.pixelColor(0, 0), QColor(Qt::yellow));
 			}
@@ -1190,6 +1194,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_MiniWindowUtils)
 
-#if __has_include("tst_MiniWindowUtils.moc")
 #include "tst_MiniWindowUtils.moc"
-#endif

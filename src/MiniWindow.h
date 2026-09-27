@@ -132,6 +132,8 @@ struct MiniWindow
 		quint64                          runtimeId{0};
 		/** Authoritative runtime mutation revision used to detect stale callback shadows. */
 		quint64                          mutationRevision{0};
+		/** Backing-surface revision retained across detached callback snapshots. */
+		quint64                          surfaceRevision{0};
 		QString                          name;
 		int                              width{0};
 		int                              height{0};
@@ -248,6 +250,14 @@ struct MiniWindow
 		}
 
 		/**
+		 * @brief Returns the revision of the backing pixels.
+		 */
+		[[nodiscard]] quint64 backingSurfaceRevision() const
+		{
+			return surfaceRevision;
+		}
+
+		/**
 		 * @brief Replaces the high-DPI backing image and records its DPR.
 		 */
 		void setBackingSurface(QImage surface)
@@ -256,6 +266,7 @@ struct MiniWindow
 			surface.setDevicePixelRatio(normalizedRatio);
 			devicePixelRatio = normalizedRatio;
 			m_surface        = std::move(surface);
+			markBackingSurfaceChanged();
 		}
 
 		/**
@@ -301,6 +312,7 @@ struct MiniWindow
 			m_surface = QImage(backingStoreSize(width, height, devicePixelRatio), QImage::Format_ARGB32);
 			m_surface.setDevicePixelRatio(devicePixelRatio);
 			m_surface.fill(background.isValid() ? background : QColor(0, 0, 0));
+			markBackingSurfaceChanged();
 			transparentSurfaceCache     = QImage();
 			transparentSurfaceSourceKey = 0;
 			transparentSurfaceKeyRgb    = 0;
@@ -336,7 +348,14 @@ struct MiniWindow
 		 */
 		[[nodiscard]] QImage &mutableBackingSurface()
 		{
+			markBackingSurfaceChanged();
 			return m_surface;
+		}
+
+		void markBackingSurfaceChanged()
+		{
+			if (++surfaceRevision == 0)
+				++surfaceRevision;
 		}
 
 		QImage m_surface;

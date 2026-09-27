@@ -573,6 +573,9 @@ LuaBatchDispatchResult LuaExecutorWorker::dispatchBatch(const LuaBatchDispatchRe
 		return canceled;
 	};
 
+	if ((request.connectionCancellationState && request.connectionCancellationState->isCancelled()) ||
+	    (request.runtimeLifetimeState && request.runtimeLifetimeState->isCancelled()))
+		return fallback;
 	if (!lane.thread)
 		return fallback;
 	if (QThread::currentThread() == lane.thread.get())
@@ -856,7 +859,13 @@ LuaBatchDispatchResult LuaExecutorWorker::dispatchOnWorkerLane(WorkerLaneState  
 		}
 	}
 
-	LuaBatchDispatchResult result = m_direct.dispatchBatch(request);
+	LuaBatchDispatchResult result      = m_direct.dispatchBatch(request);
+	result.connectionCancellationState = request.connectionCancellationState;
+	for (LuaDeferredRuntimeMutationBatch &batch : result.deferredRuntimeMutationBatches)
+	{
+		batch.connectionCancellationState = request.connectionCancellationState;
+		batch.runtimeLifetimeState        = request.runtimeLifetimeState;
+	}
 	if (request.kind == LuaBatchDispatchKind::TeardownEnginesMany)
 	{
 		for (const QSharedPointer<LuaCallbackEngine> &engine : request.engines)
@@ -872,6 +881,9 @@ LuaBatchDispatchResult
 LuaExecutorWorker::dispatchOnWorkerLaneSafely(WorkerLaneState &lane, const LuaBatchDispatchRequest &request,
                                               LuaBatchDispatchResult fallback) const noexcept
 {
+	if ((request.connectionCancellationState && request.connectionCancellationState->isCancelled()) ||
+	    (request.runtimeLifetimeState && request.runtimeLifetimeState->isCancelled()))
+		return fallback;
 	static_cast<void>(runWorkerOperationSafely(QStringLiteral("executing a worker dispatch"),
 	                                           [&] { fallback = dispatchOnWorkerLane(lane, request); }));
 	return fallback;

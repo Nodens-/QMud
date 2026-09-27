@@ -793,7 +793,7 @@ end
 	{
 		runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 		runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-		runtime.setLuaScriptText(QStringLiteral(R"lua(
+		WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 local callback_count = 0
 
 local function record_callback(name, flags, hotspot_id)
@@ -865,7 +865,7 @@ end
 	{
 		runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 		runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-		runtime.setLuaScriptText(QStringLiteral(R"lua(
+		WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 local window_name = "%1"
 local fill_colour = %2
 local callback_trace = ""
@@ -899,8 +899,8 @@ function drag_test_release_after_resize(flags, hotspot_id)
 	record_callback("release")
 end
 )lua")
-		                             .arg(windowName)
-		                             .arg(MiniWindowUtils::colorToRef(fill)));
+		                                                             .arg(windowName)
+		                                                             .arg(MiniWindowUtils::colorToRef(fill)));
 	}
 
 	/**
@@ -916,7 +916,7 @@ end
 	{
 		runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 		runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-		runtime.setLuaScriptText(QStringLiteral(R"lua(
+		WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 local window_name = "%1"
 local press_offset_x = %2
 local press_offset_y = %3
@@ -928,10 +928,10 @@ function drag_test_move(flags, hotspot_id)
 	WindowPosition(window_name, mouse_x - press_offset_x, mouse_y - press_offset_y, 0, window_flags)
 end
 )lua")
-		                             .arg(windowName)
-		                             .arg(pressOffset.x())
-		                             .arg(pressOffset.y())
-		                             .arg(flags));
+		                                                             .arg(windowName)
+		                                                             .arg(pressOffset.x())
+		                                                             .arg(pressOffset.y())
+		                                                             .arg(flags));
 	}
 
 	/**
@@ -3308,6 +3308,7 @@ class tst_WorldView_Basic : public QObject
 
 			view.clearPartialOutput();
 			QTRY_COMPARE(textInterface->text(0, textInterface->characterCount()), QStringLiteral("room"));
+			QTRY_VERIFY(!view.m_nativeRuntimeOutputPresentationQueued);
 			g_accessibleTextInsertRecords.clear();
 			g_accessibleTextUpdateRecords.clear();
 			g_accessibleAnnouncementRecords.clear();
@@ -9299,9 +9300,9 @@ class tst_WorldView_Basic : public QObject
 
 			view.m_outputBackground                       = QColor(12, 34, 56);
 			view.m_miniWindowPaintBoundsValid             = true;
-			view.m_miniWindowPaintBounds.underlayBounds   = {};
+			view.m_miniWindowPaintBounds.underlayRegion   = {};
 			view.m_nativeOutputScrollBlitPending          = true;
-			view.m_nativeOutputScrollBlitExposedRect      = exposedRect;
+			view.m_nativeOutputScrollBlitExposedRegion    = QRegion(exposedRect);
 			view.m_nativeOutputScrollBlitBackgroundRegion = backgroundRegion;
 			view.m_nativeOutputScrollBlitRepaintRegion    = scrollRepaintRegion;
 
@@ -9327,13 +9328,67 @@ class tst_WorldView_Basic : public QObject
 
 			view.requestNativeOutputRepaintRegion(QRegion(scrollContentRect));
 			QVERIFY(view.m_nativeOutputScrollBlitPending);
-			QVERIFY(view.m_nativeOutputScrollBlitBackgroundRegion.isEmpty());
-			QVERIFY(view.m_nativeOutputScrollBlitRepaintRegion.isEmpty());
+			QCOMPARE(view.m_nativeOutputScrollBlitBackgroundRegion, backgroundRegion);
+			QCOMPARE(view.m_nativeOutputScrollBlitRepaintRegion, scrollRepaintRegion);
 			{
 				QPainter painter(&image);
 				view.paintNativeOutputBackground(&painter, QRegion(scrollContentRect));
 			}
 			QCOMPARE(image.pixelColor(scrollContentRect.center()), view.m_outputBackground);
+
+			resetTestState();
+		}
+
+		void nativeOutputScrollBlitAccumulatesConsecutiveAppendsBeforePaint()
+		{
+			resetTestState();
+
+			WorldView view;
+			view.resize(640, 320);
+			view.show();
+			setTestRuntimeObserver(view, runtimeForTest());
+			for (int index = 0; index < 80; ++index)
+			{
+				runtimeOutputForTest(view).appendOutputText(QStringLiteral("scroll-primer-%1").arg(index),
+				                                            true);
+			}
+			QCoreApplication::processEvents();
+
+			QVERIFY(view.m_nativePrimaryPaintState.valid);
+			const quint64 paintedRevision = view.m_nativePrimaryPaintState.renderRevision;
+			QCOMPARE(paintedRevision, view.m_nativeRenderLineCacheRevision);
+
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("scroll-pending-one"), true);
+			QCoreApplication::sendPostedEvents(&view, QEvent::MetaCall);
+			QVERIFY(view.m_nativeOutputScrollBlitPending);
+			QCOMPARE(view.m_nativePrimaryPaintState.renderRevision, paintedRevision);
+			const quint64 firstTargetRevision = view.m_nativeOutputScrollBlitTargetState.renderRevision;
+			QVERIFY(firstTargetRevision > paintedRevision);
+
+			runtimeOutputForTest(view).appendOutputText(QStringLiteral("scroll-pending-two"), true);
+			QCoreApplication::sendPostedEvents(&view, QEvent::MetaCall);
+			QVERIFY(view.m_nativeOutputScrollBlitPending);
+			QCOMPARE(view.m_nativePrimaryPaintState.renderRevision, paintedRevision);
+			QVERIFY(view.m_nativeOutputScrollBlitTargetState.renderRevision > firstTargetRevision);
+			QCOMPARE(view.m_nativeOutputScrollBlitTargetState.renderRevision,
+			         view.m_nativeRenderLineCacheRevision);
+			QVERIFY(!view.m_nativeOutputScrollBlitRepaintRegion.isEmpty());
+			const QRect paneRect = view.nativeOutputPaneRect(view.m_output);
+			QVERIFY2(
+			    view.m_nativeOutputScrollBlitRepaintRegion != QRegion(paneRect),
+			    qPrintable(QStringLiteral("pane=%1,%2 %3x%4 exposed=%5 background=%6 repaint=%7 underlay=%8")
+			                   .arg(paneRect.x())
+			                   .arg(paneRect.y())
+			                   .arg(paneRect.width())
+			                   .arg(paneRect.height())
+			                   .arg(view.m_nativeOutputScrollBlitExposedRegion.rectCount())
+			                   .arg(view.m_nativeOutputScrollBlitBackgroundRegion.rectCount())
+			                   .arg(view.m_nativeOutputScrollBlitRepaintRegion.rectCount())
+			                   .arg(view.m_miniWindowPaintBounds.underlayRegion.rectCount())));
+
+			QCoreApplication::processEvents();
+			QTRY_VERIFY(!view.m_nativeOutputScrollBlitPending);
+			QCOMPARE(view.m_nativePrimaryPaintState.renderRevision, view.m_nativeRenderLineCacheRevision);
 
 			resetTestState();
 		}
@@ -13260,6 +13315,35 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void nativeOutputRendererMiniWindowDamageStaysWithinChangedWindow()
+		{
+			resetTestState();
+
+			WorldView view;
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			const QRect changedRect(20, 20, 80, 50);
+			const QRect unchangedRect(280, 180, 100, 70);
+			appendTestMiniWindow(QStringLiteral("changed-window"), changedRect, 0, QColor(Qt::red));
+			appendTestMiniWindow(QStringLiteral("unchanged-window"), unchangedRect, 0, QColor(Qt::blue));
+			view.refreshMiniWindows(true);
+			view.m_pendingMiniWindowUnderlayDirtyRegion = {};
+			view.m_pendingMiniWindowOverlayDirtyRegion  = {};
+
+			QCOMPARE(runtimeForTest()->windowSetPixel(QStringLiteral("changed-window"), 1, 1,
+			                                          MiniWindowUtils::colorToRef(QColor(Qt::green))),
+			         eOK);
+			view.refreshMiniWindows();
+
+			const QRegion damage = view.m_pendingMiniWindowOverlayDirtyRegion;
+			QVERIFY(damage.intersects(changedRect));
+			QVERIFY(!damage.intersects(unchangedRect.adjusted(-1, -1, 1, 1)));
+			resetTestState();
+		}
+
 		void semanticRepaintDeferralNeverSuppressesRequiredWidgetPaints()
 		{
 			resetTestState();
@@ -13276,6 +13360,7 @@ class tst_WorldView_Basic : public QObject
 			QVERIFY(overlayLayer);
 			QVERIFY(!nativeCanvas->size().isEmpty());
 			QVERIFY(!overlayLayer->size().isEmpty());
+			QVERIFY(overlayLayer->isVisible());
 
 			constexpr QColor currentWorldBackground(17, 43, 71);
 			constexpr QColor previousWorldBackground(211, 37, 173);
@@ -13302,6 +13387,7 @@ class tst_WorldView_Basic : public QObject
 			}
 			const QPoint nativeSample(nativeCanvas->width() - 2, nativeCanvas->height() - 2);
 			QCOMPARE(nativeImage.pixelColor(nativeSample), currentWorldBackground);
+			QVERIFY(nativeImage.pixelColor(overlayRect.center()) != currentWorldMiniWindow);
 
 			QImage overlayImage(overlayLayer->size(), QImage::Format_ARGB32_Premultiplied);
 			overlayImage.fill(previousWorldMiniWindow);
@@ -13448,7 +13534,7 @@ class tst_WorldView_Basic : public QObject
 			QCoreApplication::processEvents();
 			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-			runtime->setLuaScriptText(QStringLiteral(R"lua(
+			WorldRuntimeTestAccess::initializeLuaScriptText(*runtime, QStringLiteral(R"lua(
 function delete_move_target(flags, hotspot_id)
 	SetVariable("delete_move_target_result", tostring(WindowDelete("move-target")))
 end
@@ -13501,7 +13587,7 @@ end
 			QCoreApplication::processEvents();
 			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-			runtime->setLuaScriptText(QStringLiteral(R"lua(
+			WorldRuntimeTestAccess::initializeLuaScriptText(*runtime, QStringLiteral(R"lua(
 function delete_later_hotspot(flags, hotspot_id)
 	SetVariable("delete_later_hotspot_result",
 		tostring(WindowDeleteHotspot("hotspot-mutation", "later")))
@@ -13554,7 +13640,7 @@ end
 			QCoreApplication::processEvents();
 			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-			runtime->setLuaScriptText(QStringLiteral(R"lua(
+			WorldRuntimeTestAccess::initializeLuaScriptText(*runtime, QStringLiteral(R"lua(
 function delete_press_target(flags, hotspot_id)
 	WindowDelete("press-target")
 end
@@ -13607,7 +13693,7 @@ end
 			QCoreApplication::processEvents();
 			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-			runtime->setLuaScriptText(QStringLiteral(R"lua(
+			WorldRuntimeTestAccess::initializeLuaScriptText(*runtime, QStringLiteral(R"lua(
 function delete_release_target(flags, hotspot_id)
 	SetVariable("delete_release_target_result", tostring(WindowDelete("release-target")))
 end
@@ -13668,7 +13754,7 @@ end
 			QCoreApplication::processEvents();
 			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-			runtime->setLuaScriptText(QStringLiteral(R"lua(
+			WorldRuntimeTestAccess::initializeLuaScriptText(*runtime, QStringLiteral(R"lua(
 function build_hover_window(flags, hotspot_id)
 	WindowCreate("callback-hover", 40, 40, 80, 40, 0, 2, 0)
 	WindowShow("callback-hover", true)
@@ -13751,7 +13837,7 @@ end
 			runtime->setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
 			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-			runtime->setLuaScriptText(QStringLiteral(R"lua(
+			WorldRuntimeTestAccess::initializeLuaScriptText(*runtime, QStringLiteral(R"lua(
 function render_callback_output(flags, hotspot_id)
 	local marker = string.char(3)
 	local terminator = string.char(4)
@@ -13798,7 +13884,7 @@ end
 			QCoreApplication::processEvents();
 			runtime->setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 			runtime->setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-			runtime->setLuaScriptText(QStringLiteral(R"lua(
+			WorldRuntimeTestAccess::initializeLuaScriptText(*runtime, QStringLiteral(R"lua(
 function on_existing_hover(flags, hotspot_id)
 	local count = tonumber(GetVariable("existing_hover_count") or "0") or 0
 	SetVariable("existing_hover_count", tostring(count + 1))

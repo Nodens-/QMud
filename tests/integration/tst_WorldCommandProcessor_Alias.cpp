@@ -293,7 +293,7 @@ end
 				runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("enable_scripts"), QStringLiteral("y"));
 				runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
-				runtime.setLuaScriptText(QStringLiteral(R"lua(
+				WorldRuntimeTestAccess::initializeLuaScriptText(runtime, QStringLiteral(R"lua(
 function capture_mapper_signpost(name, line, wildcards)
   local status = "missing"
   if wildcards.id ~= nil then
@@ -312,22 +312,25 @@ end
 				alias.attributes.insert(QStringLiteral("sequence"), QStringLiteral("100"));
 				alias.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToOutput));
 				alias.attributes.insert(QStringLiteral("script"), QStringLiteral("capture_mapper_signpost"));
-				WorldRuntimeTestAccess::aliases(runtime).push_back(alias);
-				runtime.markAliasesChanged();
+				runtime.setAliases({alias});
 
 				WorldCommandProcessor processor;
 				processor.setRuntime(&runtime);
 
 				QCOMPARE(processor.executeCommand(QStringLiteral("mapper signpost")), eOK);
 				QString value;
-				QVERIFY(runtime.findVariable(QStringLiteral("mapper_signpost_id"), value));
-				QCOMPARE(value, QStringLiteral("present:"));
-				QVERIFY(runtime.findVariable(QStringLiteral("mapper_signpost_line"), value));
-				QCOMPARE(value, QStringLiteral("mapper signpost"));
+				QTRY_VERIFY_WITH_TIMEOUT(runtime.findVariable(QStringLiteral("mapper_signpost_id"), value) &&
+				                             value == QStringLiteral("present:"),
+				                         5000);
+				QTRY_VERIFY_WITH_TIMEOUT(
+				    runtime.findVariable(QStringLiteral("mapper_signpost_line"), value) &&
+				        value == QStringLiteral("mapper signpost"),
+				    5000);
 
 				QCOMPARE(processor.executeCommand(QStringLiteral("mapper signpost ABC")), eOK);
-				QVERIFY(runtime.findVariable(QStringLiteral("mapper_signpost_id"), value));
-				QCOMPARE(value, QStringLiteral("present:ABC"));
+				QTRY_VERIFY_WITH_TIMEOUT(runtime.findVariable(QStringLiteral("mapper_signpost_id"), value) &&
+				                             value == QStringLiteral("present:ABC"),
+				                         5000);
 				QCOMPARE(runtime.aliases().constFirst().matched, 2);
 			}
 
@@ -355,7 +358,8 @@ end
 
 				QCOMPARE(processor.executeCommand(QStringLiteral("critical-alias")), eOK);
 				QCOMPARE(capturedEvent, LuaCallbackEvent::AliasScript);
-				QVERIFY(luaCallbackEventIsInputCritical(capturedEvent));
+				QCOMPARE(luaCallbackEventOrderingDomain(capturedEvent),
+				         LuaCallbackOrderingDomain::InputCritical);
 			}
 
 			static void pluginRegexpAliasDispatchesUnmatchedNamedCaptureAsEmptyLuaString()
@@ -384,18 +388,25 @@ end
 
 				QCOMPARE(harness.processor.executeCommand(QStringLiteral("mapper signpost")), eOK);
 				QString value;
-				QVERIFY(runtime.findPluginVariable(kAliasCapturePluginId,
-				                                   QStringLiteral("mapper_signpost_id"), value));
-				QCOMPARE(value, QStringLiteral("present:"));
-				QVERIFY(runtime.findPluginVariable(kAliasCapturePluginId,
-				                                   QStringLiteral("mapper_signpost_line"), value));
-				QCOMPARE(value, QStringLiteral("mapper signpost"));
+				QTRY_VERIFY_WITH_TIMEOUT(runtime.findPluginVariable(kAliasCapturePluginId,
+				                                                    QStringLiteral("mapper_signpost_id"),
+				                                                    value) &&
+				                             value == QStringLiteral("present:"),
+				                         5000);
+				QTRY_VERIFY_WITH_TIMEOUT(runtime.findPluginVariable(kAliasCapturePluginId,
+				                                                    QStringLiteral("mapper_signpost_line"),
+				                                                    value) &&
+				                             value == QStringLiteral("mapper signpost"),
+				                         5000);
 
 				QCOMPARE(harness.processor.executeCommand(QStringLiteral("mapper signpost ABC")), eOK);
-				QVERIFY(runtime.findPluginVariable(kAliasCapturePluginId,
-				                                   QStringLiteral("mapper_signpost_id"), value));
-				QCOMPARE(value, QStringLiteral("present:ABC"));
-				QCOMPARE(runtime.plugins().constFirst().aliases.constFirst().matched, 2);
+				QTRY_VERIFY_WITH_TIMEOUT(runtime.findPluginVariable(kAliasCapturePluginId,
+				                                                    QStringLiteral("mapper_signpost_id"),
+				                                                    value) &&
+				                             value == QStringLiteral("present:ABC"),
+				                         5000);
+				QTRY_COMPARE_WITH_TIMEOUT(runtime.plugins().constFirst().aliases.constFirst().matched, 2,
+				                          5000);
 			}
 
 			static void ignoreCaseOptionControlsAliasMatch()
@@ -434,6 +445,4 @@ end
 
 QTEST_MAIN(tst_WorldCommandProcessor_Alias)
 
-#if __has_include("tst_WorldCommandProcessor_Alias.moc")
 #include "tst_WorldCommandProcessor_Alias.moc"
-#endif
