@@ -1044,6 +1044,4 @@ end
 
 QTEST_MAIN(tst_AppControllerTextCommands)
 
-#if __has_include("tst_AppControllerTextCommands.moc")
 #include "tst_AppControllerTextCommands.moc"
-#endif

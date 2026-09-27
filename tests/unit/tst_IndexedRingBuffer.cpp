@@ -266,6 +266,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_IndexedRingBuffer)
 
-#if __has_include("tst_IndexedRingBuffer.moc")
 #include "tst_IndexedRingBuffer.moc"
-#endif

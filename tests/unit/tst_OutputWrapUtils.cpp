@@ -313,6 +313,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_OutputWrapUtils)
 
-#if __has_include("tst_OutputWrapUtils.moc")
 #include "tst_OutputWrapUtils.moc"
-#endif

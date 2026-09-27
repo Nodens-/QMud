@@ -78,6 +78,4 @@ namespace
 
 QTEST_MAIN(tst_WorldCommandProcessor_SendTargets)
 
-#if __has_include("tst_WorldCommandProcessor_SendTargets.moc")
 #include "tst_WorldCommandProcessor_SendTargets.moc"
-#endif

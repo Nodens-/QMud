@@ -283,6 +283,4 @@ namespace
 
 QTEST_MAIN(tst_UpdateCheckUtils)
 
-#if __has_include("tst_UpdateCheckUtils.moc")
 #include "tst_UpdateCheckUtils.moc"
-#endif

@@ -620,6 +620,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Mxp)
 
-#if __has_include("tst_TelnetProcessor_Mxp.moc")
 #include "tst_TelnetProcessor_Mxp.moc"
-#endif

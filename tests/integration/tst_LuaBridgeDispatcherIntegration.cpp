@@ -418,6 +418,4 @@ int main(int argc, char **argv)
 	return QTest::qExec(&test, argc, argv);
 }
 
-#if __has_include("tst_LuaBridgeDispatcherIntegration.moc")
 #include "tst_LuaBridgeDispatcherIntegration.moc"
-#endif

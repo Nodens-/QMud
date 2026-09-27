@@ -888,6 +888,4 @@ namespace
 
 QTEST_MAIN(tst_Dialog_Plugins)
 
-#if __has_include("tst_Dialog_Plugins.moc")
 #include "tst_Dialog_Plugins.moc"
-#endif

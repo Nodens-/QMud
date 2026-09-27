@@ -247,6 +247,4 @@ namespace
 
 QTEST_MAIN(tst_WorldRuntime_OutputBufferSeal)
 
-#if __has_include("tst_WorldRuntime_OutputBufferSeal.moc")
 #include "tst_WorldRuntime_OutputBufferSeal.moc"
-#endif

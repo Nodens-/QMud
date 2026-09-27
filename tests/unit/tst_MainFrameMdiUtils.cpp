@@ -306,6 +306,4 @@ namespace
 
 QTEST_MAIN(tst_MainFrameMdiUtils)
 
-#if __has_include("tst_MainFrameMdiUtils.moc")
 #include "tst_MainFrameMdiUtils.moc"
-#endif

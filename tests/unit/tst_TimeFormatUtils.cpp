@@ -128,7 +128,7 @@ namespace
 				constexpr qint64 epochMs   = 1772600767000;
 				const QDateTime  localTime = QDateTime::fromMSecsSinceEpoch(epochMs).toLocalTime();
 				const int        sourceOffsetSeconds =
-                    localTime.offsetFromUtc() == 14 * 60 * 60 ? -12 * 60 * 60 : 14 * 60 * 60;
+				    localTime.offsetFromUtc() == 14 * 60 * 60 ? -12 * 60 * 60 : 14 * 60 * 60;
 				const QDateTime sourceTime = QDateTime::fromMSecsSinceEpoch(
 				    epochMs, QTimeZone::fromSecondsAheadOfUtc(sourceOffsetSeconds));
 				QVERIFY(sourceTime.offsetFromUtc() != localTime.offsetFromUtc());
@@ -146,6 +146,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_TimeFormatUtils)
 
-#if __has_include("tst_TimeFormatUtils.moc")
 #include "tst_TimeFormatUtils.moc"
-#endif

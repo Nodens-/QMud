@@ -41,6 +41,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_ColorUtils)
 
-#if __has_include("tst_ColorUtils.moc")
 #include "tst_ColorUtils.moc"
-#endif

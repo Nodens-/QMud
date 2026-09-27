@@ -193,6 +193,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_WorldDocument_Load)
 
-#if __has_include("tst_WorldDocument_Load.moc")
 #include "tst_WorldDocument_Load.moc"
-#endif

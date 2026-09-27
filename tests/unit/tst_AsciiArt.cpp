@@ -84,6 +84,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_AsciiArt)
 
-#if __has_include("tst_AsciiArt.moc")
 #include "tst_AsciiArt.moc"
-#endif

@@ -831,6 +831,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_ReloadUnit)
 
-#if __has_include("tst_ReloadUnit.moc")
 #include "tst_ReloadUnit.moc"
-#endif

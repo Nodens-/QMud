@@ -71,6 +71,4 @@ namespace
 
 QTEST_GUILESS_MAIN(tst_FontUtils)
 
-#if __has_include("tst_FontUtils.moc")
 #include "tst_FontUtils.moc"
-#endif

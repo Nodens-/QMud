@@ -154,6 +154,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Subnegotiation)
 
-#if __has_include("tst_TelnetProcessor_Subnegotiation.moc")
 #include "tst_TelnetProcessor_Subnegotiation.moc"
-#endif

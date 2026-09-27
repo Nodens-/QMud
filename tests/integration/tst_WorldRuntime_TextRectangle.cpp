@@ -143,6 +143,4 @@ namespace
 
 QTEST_MAIN(tst_WorldRuntime_TextRectangle)
 
-#if __has_include("tst_WorldRuntime_TextRectangle.moc")
 #include "tst_WorldRuntime_TextRectangle.moc"
-#endif

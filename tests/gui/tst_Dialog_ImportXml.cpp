@@ -259,6 +259,4 @@ namespace
 
 QTEST_MAIN(tst_Dialog_ImportXml)
 
-#if __has_include("tst_Dialog_ImportXml.moc")
 #include "tst_Dialog_ImportXml.moc"
-#endif

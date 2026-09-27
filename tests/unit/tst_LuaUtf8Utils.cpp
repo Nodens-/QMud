@@ -56,6 +56,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_LuaUtf8Utils)
 
-#if __has_include("tst_LuaUtf8Utils.moc")
 #include "tst_LuaUtf8Utils.moc"
-#endif

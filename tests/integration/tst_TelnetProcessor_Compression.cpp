@@ -321,6 +321,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Compression)
 
-#if __has_include("tst_TelnetProcessor_Compression.moc")
 #include "tst_TelnetProcessor_Compression.moc"
-#endif

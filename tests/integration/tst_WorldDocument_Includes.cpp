@@ -458,6 +458,4 @@ plugin_include_value = "included"
 
 QTEST_APPLESS_MAIN(tst_WorldDocument_Includes)
 
-#if __has_include("tst_WorldDocument_Includes.moc")
 #include "tst_WorldDocument_Includes.moc"
-#endif

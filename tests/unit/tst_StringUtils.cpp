@@ -190,6 +190,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_StringUtils)
 
-#if __has_include("tst_StringUtils.moc")
 #include "tst_StringUtils.moc"
-#endif

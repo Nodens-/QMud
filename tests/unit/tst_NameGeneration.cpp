@@ -137,6 +137,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_NameGeneration)
 
-#if __has_include("tst_NameGeneration.moc")
 #include "tst_NameGeneration.moc"
-#endif

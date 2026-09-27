@@ -116,6 +116,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_WorldOptionDefaults)
 
-#if __has_include("tst_WorldOptionDefaults.moc")
 #include "tst_WorldOptionDefaults.moc"
-#endif

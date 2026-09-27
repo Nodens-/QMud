@@ -74,6 +74,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_WorldRuleEnableUtils)
 
-#if __has_include("tst_WorldRuleEnableUtils.moc")
 #include "tst_WorldRuleEnableUtils.moc"
-#endif

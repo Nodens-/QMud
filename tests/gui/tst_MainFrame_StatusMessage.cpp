@@ -98,6 +98,4 @@ namespace
 
 QTEST_MAIN(tst_MainFrame_StatusMessage)
 
-#if __has_include("tst_MainFrame_StatusMessage.moc")
 #include "tst_MainFrame_StatusMessage.moc"
-#endif

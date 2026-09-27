@@ -309,6 +309,4 @@ int main(int argc, char **argv)
 	return QTest::qExec(&tc, argc, argv);
 }
 
-#if __has_include("tst_TtsEngine.moc")
 #include "tst_TtsEngine.moc"
-#endif

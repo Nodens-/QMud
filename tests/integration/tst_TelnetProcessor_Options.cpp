@@ -591,6 +591,4 @@ namespace
 
 QTEST_APPLESS_MAIN(tst_TelnetProcessor_Options)
 
-#if __has_include("tst_TelnetProcessor_Options.moc")
 #include "tst_TelnetProcessor_Options.moc"
-#endif

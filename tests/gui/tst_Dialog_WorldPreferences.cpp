@@ -2361,6 +2361,4 @@ namespace
 
 QTEST_MAIN(tst_Dialog_WorldPreferences)
 
-#if __has_include("tst_Dialog_WorldPreferences.moc")
 #include "tst_Dialog_WorldPreferences.moc"
-#endif

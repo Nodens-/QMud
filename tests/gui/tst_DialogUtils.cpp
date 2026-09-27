@@ -441,6 +441,4 @@ namespace
 
 QTEST_MAIN(tst_DialogUtils)
 
-#if __has_include("tst_DialogUtils.moc")
 #include "tst_DialogUtils.moc"
-#endif
