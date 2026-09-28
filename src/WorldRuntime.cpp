@@ -20,6 +20,7 @@
 #include "Flags.h"
 #include "GuiSystemUtils.h"
 #include "HyperlinkActionUtils.h"
+#include "ImportMergeUtils.h"
 #include "LogCompressionUtils.h"
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
@@ -30087,6 +30088,206 @@ bool WorldRuntime::reorderPlugin(const QString &pluginId, const int delta)
 	invalidatePluginCallbackPresenceCache();
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Plugins);
 	return true;
+}
+
+std::optional<LuaCallbackPluginsSnapshotState::RuntimeIdentity>
+WorldRuntime::pluginRuntimeIdentity(const QString &pluginId, const quint64 engineInstanceId) const
+{
+	if (QThread::currentThread() != thread())
+	{
+		return qmudInvokeMethodOr(const_cast<WorldRuntime *>(this),
+		                          std::optional<LuaCallbackPluginsSnapshotState::RuntimeIdentity>{},
+		                          [this, pluginId, engineInstanceId]
+		                          { return pluginRuntimeIdentity(pluginId, engineInstanceId); });
+	}
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::pluginRuntimeIdentity");
+	const Plugin *plugin = findPluginByCanonicalId(m_plugins, pluginId);
+	if (!plugin || !plugin->lua || plugin->lua->instanceId() != engineInstanceId ||
+	    plugin->runtimeLocationHandle == 0 || plugin->runtimeInstanceId == 0)
+	{
+		return std::nullopt;
+	}
+	return LuaCallbackPluginsSnapshotState::RuntimeIdentity{plugin->runtimeLocationHandle,
+	                                                        plugin->runtimeInstanceId, engineInstanceId};
+}
+
+XmlImportResult
+WorldRuntime::importPluginXml(const QString &xml, const QString &pluginId,
+                              const LuaCallbackPluginsSnapshotState::RuntimeIdentity &expectedIdentity,
+                              const unsigned long                                     mask)
+{
+	if (QThread::currentThread() != thread())
+	{
+		return qmudInvokeMethodOr(this, XmlImportResult{}, [this, xml, pluginId, expectedIdentity, mask]
+		                          { return importPluginXml(xml, pluginId, expectedIdentity, mask); });
+	}
+
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::importPluginXml");
+	XmlImportResult result;
+	if (xml.isEmpty())
+	{
+		result.errorMessage = QStringLiteral("Not in XML format");
+		return result;
+	}
+
+	const auto resolveDestination = [this, &pluginId, &expectedIdentity]() -> Plugin *
+	{
+		Plugin *candidate = pluginForRuntimeLocation(expectedIdentity.runtimeLocationHandle,
+		                                             expectedIdentity.runtimeInstanceId);
+		return candidate && candidate->attributes.value(QStringLiteral("id")) == pluginId && candidate->lua &&
+		               candidate->lua->instanceId() == expectedIdentity.engineInstanceId
+		           ? candidate
+		           : nullptr;
+	};
+	Plugin *plugin = resolveDestination();
+	if (!plugin)
+	{
+		result.errorMessage = QStringLiteral("The destination plugin is no longer installed.");
+		return result;
+	}
+
+	WorldDocument doc;
+	doc.setLoadMask(mask | WorldDocument::XML_NO_PLUGINS | WorldDocument::XML_IMPORT_MAIN_FILE_ONLY);
+	if (!doc.loadFromXml(xml))
+	{
+		result.errorMessage = doc.errorString();
+		return result;
+	}
+	if (!doc.macros().isEmpty() || !doc.colours().isEmpty() || !doc.keypadEntries().isEmpty() ||
+	    !doc.printingStyles().isEmpty())
+	{
+		result.errorMessage =
+		    QStringLiteral("Plugin XML cannot import macros, colours, keypad, or printing settings.");
+		return result;
+	}
+
+	const bool             allowOverwrite  = (mask & WorldDocument::XML_OVERWRITE) != 0;
+	QList<Trigger>         mergedTriggers  = plugin->triggers;
+	QList<Alias>           mergedAliases   = plugin->aliases;
+	QList<Timer>           mergedTimers    = plugin->timers;
+	QMap<QString, QString> mergedVariables = plugin->variables;
+
+	if (mask & WorldDocument::XML_TRIGGERS)
+	{
+		QList<Trigger> incoming;
+		incoming.reserve(doc.triggers().size());
+		for (const auto &[attributes, children, included] : doc.triggers())
+		{
+			Trigger trigger;
+			trigger.attributes = attributes;
+			trigger.children   = children;
+			trigger.included   = included;
+			applyTriggerDefaults(trigger);
+			incoming.push_back(std::move(trigger));
+		}
+		if (!QMudImportMerge::mergeNamedList(mergedTriggers, incoming, QStringLiteral("trigger"),
+		                                     allowOverwrite, &result.duplicates, &result.errorMessage))
+		{
+			return result;
+		}
+	}
+	if (mask & WorldDocument::XML_ALIASES)
+	{
+		QList<Alias> incoming;
+		incoming.reserve(doc.aliases().size());
+		for (const auto &[attributes, children, included] : doc.aliases())
+		{
+			Alias alias;
+			alias.attributes = attributes;
+			alias.children   = children;
+			alias.included   = included;
+			applyAliasDefaults(alias);
+			incoming.push_back(std::move(alias));
+		}
+		if (!QMudImportMerge::mergeNamedList(mergedAliases, incoming, QStringLiteral("alias"), allowOverwrite,
+		                                     &result.duplicates, &result.errorMessage))
+		{
+			return result;
+		}
+	}
+	if (mask & WorldDocument::XML_TIMERS)
+	{
+		QList<Timer> incoming;
+		incoming.reserve(doc.timers().size());
+		for (const auto &[attributes, children, included] : doc.timers())
+		{
+			Timer timer;
+			timer.attributes = attributes;
+			timer.children   = children;
+			timer.included   = included;
+			applyTimerDefaults(timer);
+			resetTimerFields(timer);
+			incoming.push_back(std::move(timer));
+		}
+		if (!QMudImportMerge::mergeNamedList(mergedTimers, incoming, QStringLiteral("timer"), allowOverwrite,
+		                                     &result.duplicates, &result.errorMessage))
+		{
+			return result;
+		}
+	}
+	if (mask & WorldDocument::XML_VARIABLES)
+	{
+		QList<QPair<QString, QString>> incoming;
+		incoming.reserve(doc.variables().size());
+		for (const auto &[attributes, content] : doc.variables())
+			incoming.push_back({attributes.value(QStringLiteral("name")), content});
+		QMudImportMerge::mergePluginVariables(mergedVariables, incoming, allowOverwrite, &result.duplicates);
+	}
+
+	// XML parsing and all duplicate validation finish before any live plugin collection changes.
+	plugin = resolveDestination();
+	if (!plugin)
+	{
+		result.errorMessage = QStringLiteral("The destination plugin is no longer installed.");
+		return result;
+	}
+
+	const int oldTriggerCount = safeQSizeToInt(plugin->triggers.size());
+	const int oldAliasCount   = safeQSizeToInt(plugin->aliases.size());
+	const int oldTimerCount   = safeQSizeToInt(plugin->timers.size());
+	beginLuaCallbackSnapshotMutationBatch();
+	const auto finishSnapshotBatch = qScopeGuard([this] { endLuaCallbackSnapshotMutationBatch(); });
+	Q_UNUSED(finishSnapshotBatch);
+	if ((mask & WorldDocument::XML_TRIGGERS) && !doc.triggers().isEmpty())
+	{
+		plugin->triggers = std::move(mergedTriggers);
+		if (plugin->triggers.size() > oldTriggerCount)
+			synchronizeTriggerRuntimeLocations(plugin, oldTriggerCount);
+		markPluginTriggersChanged(pluginId);
+	}
+	if ((mask & WorldDocument::XML_ALIASES) && !doc.aliases().isEmpty())
+	{
+		plugin->aliases = std::move(mergedAliases);
+		if (plugin->aliases.size() > oldAliasCount)
+		{
+			synchronizeAliasRuntimeLocations(plugin, oldAliasCount);
+			noteAliasStructureMutation();
+		}
+		markPluginAliasesChanged(pluginId);
+	}
+	if ((mask & WorldDocument::XML_TIMERS) && !doc.timers().isEmpty())
+	{
+		plugin->timers = std::move(mergedTimers);
+		if (plugin->timers.size() > oldTimerCount)
+		{
+			synchronizeTimerRuntimeLocations(plugin, oldTimerCount);
+			noteTimerStructureMutation();
+		}
+		markPluginTimersChanged(pluginId);
+	}
+	if ((mask & WorldDocument::XML_VARIABLES) && !doc.variables().isEmpty())
+	{
+		plugin->variables = std::move(mergedVariables);
+		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::PluginVariables, pluginId);
+	}
+
+	result.ok        = true;
+	result.triggers  = static_cast<int>(doc.triggers().size());
+	result.aliases   = static_cast<int>(doc.aliases().size());
+	result.timers    = static_cast<int>(doc.timers().size());
+	result.variables = static_cast<int>(doc.variables().size());
+	return result;
 }
 
 bool WorldRuntime::loadPluginFile(const QString &fileName, QString *error, bool markGlobal)

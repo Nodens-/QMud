@@ -73,6 +73,7 @@ namespace
 	const QString           kPacketDebugActionSourcePluginId = QStringLiteral("10112233445566778899aabb");
 	const QString           kPacketDebugDisconnectPluginId   = QStringLiteral("20112233445566778899aabb");
 	const QString           kPacketDebugSendPluginId         = QStringLiteral("30112233445566778899aabb");
+	const QString           kDynamicImportPluginId           = QStringLiteral("40112233445566778899aabb");
 	const QString           kTelnetTriggerLine               = QStringLiteral("qxv-lattice-17");
 	const QString           kTelnetAfterLine                 = QStringLiteral("qxv-after-64");
 
@@ -1394,6 +1395,107 @@ class tst_WorldRuntime_PluginLifecycle : public QObject
 		}
 
 	private slots:
+		static void dofileImportRemainsPluginOwnedAfterTriggerExecutionAndWorldSave()
+		{
+			const QString artifactDirectory =
+			    QDir(QCoreApplication::applicationDirPath())
+			        .filePath(QStringLiteral("test-artifacts/tst_WorldRuntime_PluginLifecycle/"
+			                                 "dofile-plugin-import"));
+			const QString pluginsDirectory =
+			    QDir(artifactDirectory).filePath(QStringLiteral("worlds/plugins"));
+			QVERIFY(QDir().mkpath(pluginsDirectory));
+			QVERIFY(writeTextFile(QDir(artifactDirectory).filePath(QStringLiteral("dynamic_rules.lua")),
+			                      QStringLiteral(R"lua(return ImportXML([=[
+<muclient>
+  <triggers>
+    <trigger name="dynamic_import_trigger" enabled="y" match="^dynamic-import-hit$" regexp="y" send_to="12">
+      <send>dynamic_import_trigger_routine()</send>
+    </trigger>
+  </triggers>
+  <aliases>
+    <alias name="dynamic_import_alias" enabled="y" match="^dynamic-import-alias$">
+      <send>say imported</send>
+    </alias>
+  </aliases>
+  <timers>
+    <timer name="dynamic_import_timer" enabled="n" hour="0" minute="10" second="0">
+      <send>say timer</send>
+    </timer>
+  </timers>
+  <variables>
+    <variable name="dynamic_import_variable">plugin value</variable>
+  </variables>
+</muclient>
+]=]))lua")));
+			QVERIFY(writeTextFile(QDir(pluginsDirectory).filePath(QStringLiteral("dynamic_import.xml")),
+			                      QStringLiteral(R"xml(<?xml version="1.0" encoding="UTF-8"?>
+<muclient>
+  <plugin
+    name="DynamicImport"
+    author="QMud Test"
+    id=")xml") + kDynamicImportPluginId +
+			                          QStringLiteral(R"xml("
+    language="lua"
+    enabled="y"
+    save_state="n"
+    sequence="100">
+    <script><![CDATA[
+function dynamic_import_trigger_routine()
+  SetVariable("dynamic_import_fired", "yes")
+end
+local ok, imported = pcall(dofile, "dynamic_rules.lua")
+SetVariable("dynamic_import_status", ok and string.format("%.0f", imported) or tostring(imported))
+]]></script>
+  </plugin>
+</muclient>
+)xml")));
+
+			WorldRuntime runtime;
+			runtime.setStartupDirectory(artifactDirectory);
+			runtime.setPluginsDirectory(QStringLiteral("worlds/plugins"));
+			runtime.applyDefaultWorldOptions();
+			runtime.setWorldAttribute(QStringLiteral("enable_triggers"), QStringLiteral("y"));
+			RuntimeCommandHarness harness(runtime);
+			QVERIFY(harness.showAndWait());
+			QString loadError;
+			QVERIFY2(runtime.loadPluginFile(QStringLiteral("dynamic_import.xml"), &loadError),
+			         qPrintable(loadError));
+
+			QTRY_VERIFY_WITH_TIMEOUT(runtime.pluginForId(kDynamicImportPluginId) &&
+			                             !runtime.pluginForId(kDynamicImportPluginId)->installPending,
+			                         5000);
+			const WorldRuntime::Plugin *plugin = runtime.pluginForId(kDynamicImportPluginId);
+			QVERIFY(plugin);
+			QCOMPARE(pluginVariable(runtime, kDynamicImportPluginId, QStringLiteral("dynamic_import_status")),
+			         QStringLiteral("0"));
+			QCOMPARE(plugin->triggers.size(), 1);
+			QCOMPARE(plugin->aliases.size(), 1);
+			QCOMPARE(plugin->timers.size(), 1);
+			QCOMPARE(
+			    pluginVariable(runtime, kDynamicImportPluginId, QStringLiteral("dynamic_import_variable")),
+			    QStringLiteral("plugin value"));
+			QString worldValue;
+			QVERIFY(!runtime.findVariable(QStringLiteral("dynamic_import_variable"), worldValue));
+			QVERIFY(runtime.triggers().isEmpty());
+			QVERIFY(runtime.aliases().isEmpty());
+			QVERIFY(runtime.timers().isEmpty());
+
+			runtime.receiveRawData(QByteArrayLiteral("dynamic-import-hit\r\n"));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kDynamicImportPluginId, QStringLiteral("dynamic_import_fired")),
+			    QStringLiteral("yes"), 5000);
+
+			const QString savedPath = QDir(artifactDirectory).filePath(QStringLiteral("saved.qdl"));
+			QString       saveError;
+			QVERIFY2(runtime.saveWorldFile(savedPath, &saveError), qPrintable(saveError));
+			QString savedXml;
+			QVERIFY(readTextFile(savedPath, savedXml));
+			QVERIFY(!savedXml.contains(QStringLiteral("dynamic_import_trigger")));
+			QVERIFY(!savedXml.contains(QStringLiteral("dynamic_import_alias")));
+			QVERIFY(!savedXml.contains(QStringLiteral("dynamic_import_timer")));
+			QVERIFY(!savedXml.contains(QStringLiteral("dynamic_import_variable")));
+		}
+
 		static void pluginIdsAreCanonicalizedAtXmlAndApiBoundaries()
 		{
 			QTemporaryDir tempDir;

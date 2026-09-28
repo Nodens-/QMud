@@ -9,8 +9,10 @@
 #ifndef QMUD_IMPORTMERGEUTILS_H
 #define QMUD_IMPORTMERGEUTILS_H
 
+#include <QHash>
 #include <QMap>
 #include <QString>
+#include <utility>
 
 namespace QMudImportMerge
 {
@@ -29,7 +31,8 @@ namespace QMudImportMerge
 	bool mergeNamedList(QList<Item> &dest, const QList<Item> &src, const QString &kind,
 	                    const bool allowOverwrite, int *duplicates, QString *errorMessage)
 	{
-		QMap<QString, int> indexByName;
+		QHash<QString, int> indexByName;
+		indexByName.reserve(dest.size() + src.size());
 		for (int i = 0; i < dest.size(); ++i)
 		{
 			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
@@ -51,7 +54,17 @@ namespace QMudImportMerge
 
 			if (allowOverwrite)
 			{
-				dest[indexByName.value(key)] = item;
+				Item replacement = item;
+				if constexpr (requires(Item value) {
+					              value.runtimeId;
+					              value.runtimeLocationHandle;
+				              })
+				{
+					const Item &existing              = dest.at(indexByName.value(key));
+					replacement.runtimeId             = existing.runtimeId;
+					replacement.runtimeLocationHandle = existing.runtimeLocationHandle;
+				}
+				dest[indexByName.value(key)] = std::move(replacement);
 				if (duplicates)
 					++(*duplicates);
 				continue;
@@ -76,7 +89,8 @@ namespace QMudImportMerge
 	void mergeVariables(QList<VariableItem> &dest, const QList<VariableItem> &src, const bool allowOverwrite,
 	                    int *duplicates)
 	{
-		QMap<QString, int> indexByName;
+		QHash<QString, int> indexByName;
+		indexByName.reserve(dest.size() + src.size());
 		for (int i = 0; i < dest.size(); ++i)
 		{
 			const QString name = dest[i].attributes.value(QStringLiteral("name")).trimmed().toCaseFolded();
@@ -108,6 +122,47 @@ namespace QMudImportMerge
 			if (dest[existingIndex].content != item.content && duplicates)
 				++(*duplicates);
 			dest[existingIndex] = item;
+		}
+	}
+
+	/**
+	 * @brief Merges imported variables into a plugin variable map using case-insensitive names.
+	 * @param dest Destination plugin variables.
+	 * @param src Imported name/value pairs.
+	 * @param allowOverwrite Replace existing values when `true`.
+	 * @param duplicates Optional duplicate/change counter output.
+	 */
+	inline void mergePluginVariables(QMap<QString, QString> &dest, const QList<QPair<QString, QString>> &src,
+	                                 const bool allowOverwrite, int *duplicates)
+	{
+		QHash<QString, QString> storedNameByKey;
+		storedNameByKey.reserve(dest.size() + src.size());
+		for (auto it = dest.cbegin(); it != dest.cend(); ++it)
+			storedNameByKey.insert(it.key().trimmed().toCaseFolded(), it.key());
+
+		for (const auto &[rawName, value] : src)
+		{
+			const QString name = rawName.trimmed();
+			const QString key  = name.toCaseFolded();
+			if (name.isEmpty())
+				continue;
+			const auto existing = storedNameByKey.constFind(key);
+			if (existing == storedNameByKey.cend())
+			{
+				dest.insert(name, value);
+				storedNameByKey.insert(key, name);
+				continue;
+			}
+			if (allowOverwrite)
+			{
+				dest[*existing] = value;
+				if (duplicates)
+					++(*duplicates);
+			}
+			else if (dest.value(*existing) != value && duplicates)
+			{
+				++(*duplicates);
+			}
 		}
 	}
 } // namespace QMudImportMerge

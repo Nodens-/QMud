@@ -19,6 +19,7 @@
 #include "SqliteCompat.h"
 #include "TelnetProcessor.h"
 #include "WorldOptions.h"
+#include "XmlImportResult.h"
 
 #include <QByteArray>
 #include <QColor>
@@ -1430,6 +1431,26 @@ class WorldRuntime : public QObject
 		 * @return `true` on successful load/install.
 		 */
 		bool loadPluginFile(const QString &fileName, QString *error = nullptr, bool markGlobal = false);
+		/**
+		 * @brief Resolves the stable identity of a plugin owned by a specific Lua engine instance.
+		 * @param pluginId Plugin identifier.
+		 * @param engineInstanceId Lua engine instance identity.
+		 * @return Stable plugin identity, or no value when the engine is no longer current.
+		 */
+		[[nodiscard]] std::optional<LuaCallbackPluginsSnapshotState::RuntimeIdentity>
+		pluginRuntimeIdentity(const QString &pluginId, quint64 engineInstanceId) const;
+		/**
+		 * @brief Imports XML rules and variables into one stable plugin runtime instance.
+		 * @param xml XML payload text.
+		 * @param pluginId Destination plugin identifier.
+		 * @param expectedIdentity Stable destination identity captured by the caller.
+		 * @param mask Import mask.
+		 * @return Import result payload.
+		 */
+		XmlImportResult
+		     importPluginXml(const QString &xml, const QString &pluginId,
+		                     const LuaCallbackPluginsSnapshotState::RuntimeIdentity &expectedIdentity,
+		                     unsigned long                                           mask);
 		/**
 		 * @brief Unloads installed plugin.
 		 * @param pluginId Plugin id to unload.

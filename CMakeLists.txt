@@ -452,6 +452,7 @@ set(QMUD_HEADERS
         ActivityWindow.h
         dialogs/ImportXmlDialog.h
         WorldDocument.h
+        XmlImportResult.h
         NativePluginRegistry.h
         WorldRuntime.h
         helpers/WorldRuntimeAttributeUtils.h

@@ -10,6 +10,8 @@
 #ifndef QMUD_APPCONTROLLER_H
 #define QMUD_APPCONTROLLER_H
 
+#include "XmlImportResult.h"
+
 #include "ColorPacking.h"
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QByteArray>
@@ -365,20 +367,7 @@ class AppController : public QObject
 		/**
 		 * @brief Result summary returned by XML import operations.
 		 */
-		struct ImportResult
-		{
-				bool    ok{false};
-				QString errorMessage;
-				int     triggers{0};
-				int     aliases{0};
-				int     timers{0};
-				int     macros{0};
-				int     variables{0};
-				int     colours{0};
-				int     keypad{0};
-				int     printing{0};
-				int     duplicates{0};
-		};
+		using ImportResult = XmlImportResult;
 
 		/**
 		 * @brief Result payload for command-line spell-check replacement decisions.
@@ -409,6 +398,14 @@ class AppController : public QObject
 		 * @return Import result payload.
 		 */
 		ImportResult importXmlFromText(const QString &xml, unsigned long mask);
+		/**
+		 * @brief Imports XML text into a specific world runtime.
+		 * @param runtime Destination world runtime.
+		 * @param xml XML payload text.
+		 * @param mask Import mask.
+		 * @return Import result payload.
+		 */
+		ImportResult importXmlFromText(WorldRuntime *runtime, const QString &xml, unsigned long mask);
 		/**
 		 * @brief Returns true when spell-check subsystem is available.
 		 * @return `true` when spell checker is available.

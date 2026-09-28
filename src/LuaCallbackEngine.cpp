@@ -23774,11 +23774,10 @@ static int luaHyperlink(lua_State *L)
 
 static int luaImportXML(lua_State *L)
 {
-	auto          *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
-	WorldRuntime  *runtime = runtimeFromLuaUpvalue(L);
-	const QString  xml     = QString::fromUtf8(luaL_checkstring(L, 1));
-	AppController *app     = AppController::instance();
-	if (!app)
+	auto         *engine  = static_cast<LuaCallbackEngine *>(lua_touserdata(L, lua_upvalueindex(1)));
+	WorldRuntime *runtime = runtimeFromLuaUpvalue(L);
+	const QString xml     = QString::fromUtf8(luaL_checkstring(L, 1));
+	if (!engine || !runtime)
 	{
 		lua_pushnumber(L, -1);
 		return 1;
@@ -23789,7 +23788,7 @@ static int luaImportXML(lua_State *L)
 	    WorldDocument::XML_MACROS | WorldDocument::XML_VARIABLES | WorldDocument::XML_COLOURS |
 	    WorldDocument::XML_KEYPAD | WorldDocument::XML_PRINTING | WorldDocument::XML_OVERWRITE;
 
-	auto encodeImportPayload = [](const AppController::ImportResult &result) -> QString
+	auto encodeImportPayload = [](const XmlImportResult &result) -> QString
 	{
 		return encodeAsyncKeyValuePayload({
 		    {QStringLiteral("triggers"),   QString::number(result.triggers)  },
@@ -23807,32 +23806,30 @@ static int luaImportXML(lua_State *L)
 
 	if (engine && runtime && activeCallbackContextConst(engine) && callbackScopeSyncBridgeForbidden())
 	{
-		const QString                     callbackPluginId = engine->pluginId();
-		const LuaPluginAsyncResultRequest requestId        = nextPluginAsyncResultRequest(engine);
-		const bool                        accepted         = enqueueRuntimeThreadDeferredMutationNoResult(
+		const QString                     callbackPluginId       = engine->pluginId();
+		const auto                        callbackPluginIdentity = originatingPluginRuntimeIdentity(engine);
+		const LuaPluginAsyncResultRequest requestId              = nextPluginAsyncResultRequest(engine);
+		const bool                        accepted = enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
-		    [xml, callbackPluginId, requestId, encodeImportPayload](WorldRuntime &targetRuntime)
+		    [xml, callbackPluginId, callbackPluginIdentity, requestId,
+		     encodeImportPayload](WorldRuntime &targetRuntime)
 		    {
-			    const QPointer<WorldRuntime> runtimeGuard(&targetRuntime);
-			    const bool                   queued = enqueueOnMainThread(
-			        [runtimeGuard, xml, callbackPluginId, requestId, encodeImportPayload]
-			        {
-				        WorldRuntime *targetRuntimeOnMain = runtimeGuard.data();
-				        if (!targetRuntimeOnMain)
-					        return;
-				        AppController::ImportResult result;
-				        if (AppController *targetApp = AppController::instance())
-					        result = targetApp->importXmlFromText(xml, mask);
-				        else
-					        result.errorMessage = QStringLiteral("App controller is not available");
-				        emitPluginAsyncResult(*targetRuntimeOnMain, requestId, QStringLiteral("ImportXML"),
-				                              result.ok, result.ok ? eOK : -1, encodeImportPayload(result));
-			        });
-			    if (!queued)
+			    XmlImportResult result;
+			    if (!callbackPluginId.isEmpty())
 			    {
-				    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ImportXML"), false, -1,
-				                          QStringLiteral("error=Failed%20to%20queue%20ImportXML"));
+				    result =
+				        targetRuntime.importPluginXml(xml, callbackPluginId, callbackPluginIdentity, mask);
 			    }
+			    else if (AppController *targetApp = AppController::instance())
+			    {
+				    result = targetApp->importXmlFromText(&targetRuntime, xml, mask);
+			    }
+			    else
+			    {
+				    result.errorMessage = QStringLiteral("App controller is not available");
+			    }
+			    emitPluginAsyncResult(targetRuntime, requestId, QStringLiteral("ImportXML"), result.ok,
+			                          result.ok ? eOK : -1, encodeImportPayload(result));
 		    });
 		lua_pushnumber(L, accepted ? 0 : -1);
 		if (accepted && requestId.isValid())
@@ -23843,9 +23840,42 @@ static int luaImportXML(lua_State *L)
 		return 1;
 	}
 
-	const AppController::ImportResult result = runOnMainWindowThreadAllowNestedEvents(
-	    [app, xml](MainWindow *) -> AppController::ImportResult { return app->importXmlFromText(xml, mask); },
-	    AppController::ImportResult{});
+	const QString   pluginId         = engine->pluginId();
+	const quint64   engineInstanceId = engine->instanceId();
+	XmlImportResult result;
+	if (!pluginId.isEmpty())
+	{
+		result = runOnRuntimeThreadAllowNestedEvents(
+		    runtime,
+		    [runtime, xml, pluginId, engineInstanceId]() -> XmlImportResult
+		    {
+			    const auto identity = runtime->pluginRuntimeIdentity(pluginId, engineInstanceId);
+			    if (!identity)
+			    {
+				    XmlImportResult missing;
+				    missing.errorMessage = QStringLiteral("The destination plugin is no longer installed.");
+				    return missing;
+			    }
+			    return runtime->importPluginXml(xml, pluginId, *identity, mask);
+		    },
+		    XmlImportResult{});
+	}
+	else
+	{
+		result = runOnMainWindowThreadAllowNestedEvents(
+		    [runtimeGuard = QPointer<WorldRuntime>(runtime), xml](MainWindow *) -> XmlImportResult
+		    {
+			    WorldRuntime *targetRuntime = runtimeGuard.data();
+			    if (!targetRuntime)
+				    return {};
+			    if (AppController *targetApp = AppController::instance())
+				    return targetApp->importXmlFromText(targetRuntime, xml, mask);
+			    XmlImportResult missing;
+			    missing.errorMessage = QStringLiteral("App controller is not available");
+			    return missing;
+		    },
+		    XmlImportResult{});
+	}
 	if (!result.ok)
 	{
 		lua_pushnumber(L, -1);

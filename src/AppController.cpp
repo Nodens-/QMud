@@ -15310,11 +15310,6 @@ AppController::ImportResult AppController::applyImportedDocument(WorldChildWindo
 AppController::ImportResult AppController::importXmlFromText(const QString &xml, const unsigned long mask)
 {
 	ImportResult result;
-	if (xml.isEmpty())
-	{
-		result.errorMessage = QStringLiteral("Not in XML format");
-		return result;
-	}
 	if (!m_mainWindow)
 	{
 		result.errorMessage = QStringLiteral("No active window.");
@@ -15326,10 +15321,32 @@ AppController::ImportResult AppController::importXmlFromText(const QString &xml,
 		result.errorMessage = QStringLiteral("No active world to import into.");
 		return result;
 	}
-	WorldRuntime *runtime = world->runtime();
+	return importXmlFromText(world->runtime(), xml, mask);
+}
+
+AppController::ImportResult AppController::importXmlFromText(WorldRuntime *runtime, const QString &xml,
+                                                             const unsigned long mask)
+{
+	ImportResult result;
+	if (xml.isEmpty())
+	{
+		result.errorMessage = QStringLiteral("Not in XML format");
+		return result;
+	}
+	if (!m_mainWindow)
+	{
+		result.errorMessage = QStringLiteral("No active window.");
+		return result;
+	}
 	if (!runtime)
 	{
-		result.errorMessage = QStringLiteral("No active world runtime available.");
+		result.errorMessage = QStringLiteral("No world runtime available.");
+		return result;
+	}
+	WorldChildWindow *world = m_mainWindow->findWorldChildWindow(runtime);
+	if (!world)
+	{
+		result.errorMessage = QStringLiteral("The destination world is no longer open.");
 		return result;
 	}
 

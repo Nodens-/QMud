@@ -9,6 +9,7 @@
 #include "AppController.h"
 #include "MainFrame.h"
 #include "WorldChildWindow.h"
+#include "WorldDocument.h"
 #include "WorldRuntime.h"
 #include "dialogs/ImportXmlDialog.h"
 
@@ -247,6 +248,37 @@ namespace
 				QVERIFY(!messageObserver.message().isEmpty());
 				QVERIFY(harness.runtime->aliases().isEmpty());
 				QVERIFY(dialog.result() != static_cast<int>(QDialog::Accepted));
+			}
+
+			void explicitRuntimeImportDoesNotFollowActiveWorld()
+			{
+				AppController app;
+				MainWindow    frame;
+				app.setMainWindow(&frame);
+
+				auto *firstRuntime  = new WorldRuntime(&frame);
+				auto *secondRuntime = new WorldRuntime(&frame);
+				auto *firstChild    = new WorldChildWindow(QStringLiteral("First"));
+				auto *secondChild   = new WorldChildWindow(QStringLiteral("Second"));
+				firstChild->setRuntime(firstRuntime);
+				secondChild->setRuntime(secondRuntime);
+				frame.addMdiSubWindow(firstChild, true);
+				frame.addMdiSubWindow(secondChild, true);
+				QVERIFY(frame.activateWorldRuntime(secondRuntime));
+
+				const AppController::ImportResult result = app.importXmlFromText(
+				    firstRuntime,
+				    QStringLiteral(
+				        R"xml(<qmud><variables><variable name="targeted_import">first</variable></variables></qmud>)xml"),
+				    WorldDocument::XML_VARIABLES | WorldDocument::XML_OVERWRITE);
+				QVERIFY2(result.ok, qPrintable(result.errorMessage));
+				QString value;
+				QVERIFY(firstRuntime->findVariable(QStringLiteral("targeted_import"), value));
+				QCOMPARE(value, QStringLiteral("first"));
+				QVERIFY(!secondRuntime->findVariable(QStringLiteral("targeted_import"), value));
+
+				firstChild->setRuntime(nullptr);
+				secondChild->setRuntime(nullptr);
 			}
 			// NOLINTEND(readability-convert-member-functions-to-static)
 

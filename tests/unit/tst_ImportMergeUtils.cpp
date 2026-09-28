@@ -16,6 +16,8 @@ namespace
 	{
 			QMap<QString, QString> attributes;
 			QMap<QString, QString> children;
+			quint64                runtimeId{0};
+			quint64                runtimeLocationHandle{0};
 	};
 
 	struct VariableItem
@@ -78,6 +80,22 @@ namespace
 				QCOMPARE(dest.front().children.value(QStringLiteral("send")), QStringLiteral("incoming"));
 			}
 
+			void namedDuplicateOverwritePreservesRuntimeIdentity()
+			{
+				NamedItem existing             = makeNamed(QStringLiteral("dup"), QStringLiteral("main"));
+				existing.runtimeId             = 17;
+				existing.runtimeLocationHandle = 29;
+				QList<NamedItem> dest{existing};
+				QList<NamedItem> src{makeNamed(QStringLiteral("DUP"), QStringLiteral("incoming"))};
+				int              duplicates = 0;
+				QString          error;
+
+				QVERIFY(QMudImportMerge::mergeNamedList(dest, src, QStringLiteral("trigger"), true,
+				                                        &duplicates, &error));
+				QCOMPARE(dest.front().runtimeId, quint64{17});
+				QCOMPARE(dest.front().runtimeLocationHandle, quint64{29});
+			}
+
 			void variablesDefaultModeReplacesAndCountsDifference()
 			{
 				QList<VariableItem> dest{makeVariable(QStringLiteral("hp"), QStringLiteral("10"))};
@@ -100,6 +118,25 @@ namespace
 				QCOMPARE(duplicates, 1);
 				QCOMPARE(dest.size(), 1);
 				QCOMPARE(dest.front().content, QStringLiteral("25"));
+			}
+
+			void pluginVariablesMergeCaseInsensitivelyWithoutChangingStoredName()
+			{
+				QMap<QString, QString> dest{
+				    {QStringLiteral("Health"), QStringLiteral("10")}
+                };
+				const QList<QPair<QString, QString>> src{
+				    {QStringLiteral("health"), QStringLiteral("25")},
+				    {QStringLiteral("Mana"),   QStringLiteral("8") }
+                };
+				int duplicates = 0;
+
+				QMudImportMerge::mergePluginVariables(dest, src, true, &duplicates);
+				QCOMPARE(duplicates, 1);
+				QCOMPARE(dest.size(), 2);
+				QCOMPARE(dest.value(QStringLiteral("Health")), QStringLiteral("25"));
+				QVERIFY(!dest.contains(QStringLiteral("health")));
+				QCOMPARE(dest.value(QStringLiteral("Mana")), QStringLiteral("8"));
 			}
 
 			// NOLINTEND(readability-convert-member-functions-to-static)

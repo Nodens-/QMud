@@ -393,6 +393,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void deferredPluginRuleCreationsRejectReplacementEngine();
 		void deferredPluginOwnedMutationsRejectReplacementEngine();
 		void workerXmlApisCoverAllExportKindsAndImport();
+		void pluginXmlImportIsAtomicAndRejectsStaleOwner();
 		void workerLineAndStyleInfoCoverMetadataSurface();
 		void setOptionUpdatesOnlyTabCompletionSymbolBehaviors();
 		void setOptionAppliesPartialRecallSaveSettingsImmediately();
@@ -5240,11 +5241,57 @@ end
 	QCOMPARE(payloadFields.value(QStringLiteral("duplicates")), QStringLiteral("0"));
 	QCOMPARE(payloadFields.value(QStringLiteral("error")), QString());
 	QString importedValue;
-	QTRY_VERIFY_WITH_TIMEOUT(runtime->findVariable(QStringLiteral("imported_by_lua"), importedValue), 3000);
+	QTRY_VERIFY_WITH_TIMEOUT(
+	    runtime->findPluginVariable(pluginId, QStringLiteral("imported_by_lua"), importedValue), 3000);
 	QCOMPARE(importedValue, QStringLiteral("imported value"));
+	QVERIFY(!runtime->findVariable(QStringLiteral("imported_by_lua"), importedValue));
 	runtime->dispatchTeardownLuaEngines({engine}, true);
 	if (WorldRuntime::Plugin *storedPlugin = WorldRuntimeTestAccess::plugin(*runtime, pluginId))
 		storedPlugin->lua.clear();
+}
+
+void tst_LuaCallbackEngine::pluginXmlImportIsAtomicAndRejectsStaleOwner()
+{
+	WorldRuntime         runtime;
+	const QString        pluginId  = QStringLiteral("xml.stable.owner");
+	auto                 oldEngine = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.lua = oldEngine;
+	WorldRuntime::Alias existingAlias;
+	existingAlias.attributes.insert(QStringLiteral("name"), QStringLiteral("existing_alias"));
+	existingAlias.children.insert(QStringLiteral("send"), QStringLiteral("kept"));
+	plugin.aliases.push_back(existingAlias);
+	WorldRuntimeTestAccess::plugins(runtime).push_back(std::move(plugin));
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	const auto oldIdentity = runtime.pluginRuntimeIdentity(pluginId, oldEngine->instanceId());
+	QVERIFY(oldIdentity.has_value());
+
+	constexpr unsigned long mask     = WorldDocument::XML_TRIGGERS | WorldDocument::XML_ALIASES |
+	                                   WorldDocument::XML_TIMERS | WorldDocument::XML_VARIABLES;
+	const XmlImportResult   rejected = runtime.importPluginXml(QStringLiteral(R"xml(<muclient>
+  <triggers><trigger name="prepared_trigger" match="prepared"><send>prepared</send></trigger></triggers>
+  <aliases><alias name="existing_alias" match="duplicate"><send>rejected</send></alias></aliases>
+</muclient>)xml"),
+	                                                           pluginId, *oldIdentity, mask);
+	QVERIFY(!rejected.ok);
+	const WorldRuntime::Plugin *unchanged = runtime.pluginForId(pluginId);
+	QVERIFY(unchanged);
+	QVERIFY(unchanged->triggers.isEmpty());
+	QCOMPARE(unchanged->aliases.size(), 1);
+	QCOMPARE(unchanged->aliases.constFirst().children.value(QStringLiteral("send")), QStringLiteral("kept"));
+
+	auto                 replacementEngine = QSharedPointer<LuaCallbackEngine>::create();
+	WorldRuntime::Plugin replacement;
+	replacement.attributes.insert(QStringLiteral("id"), pluginId);
+	replacement.lua = replacementEngine;
+	WorldRuntimeTestAccess::replacePlugin(runtime, 0, std::move(replacement));
+	const XmlImportResult stale = runtime.importPluginXml(
+	    QStringLiteral(
+	        R"xml(<muclient><variables><variable name="stale">rejected</variable></variables></muclient>)xml"),
+	    pluginId, *oldIdentity, mask | WorldDocument::XML_OVERWRITE);
+	QVERIFY(!stale.ok);
+	QVERIFY(runtime.pluginVariableValue(pluginId, QStringLiteral("stale")).isEmpty());
 }
 
 void tst_LuaCallbackEngine::workerLineAndStyleInfoCoverMetadataSurface()
