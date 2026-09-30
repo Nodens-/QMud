@@ -10,6 +10,7 @@
 #ifndef QMUD_APPCONTROLLER_H
 #define QMUD_APPCONTROLLER_H
 
+#include "WorldViewGlobalSettings.h"
 #include "XmlImportResult.h"
 
 #include "ColorPacking.h"
@@ -246,29 +247,34 @@ class AppController : public QObject
 		 * @brief Returns default world-files directory path.
 		 * @return Default world directory path.
 		 */
-		[[nodiscard]] QString              defaultWorldDirectory() const;
+		[[nodiscard]] QString                        defaultWorldDirectory() const;
 		/**
 		 * @brief Returns ini/preferences file path.
 		 * @return INI/preferences database path.
 		 */
-		[[nodiscard]] QString              iniFilePath() const;
+		[[nodiscard]] QString                        iniFilePath() const;
 		/**
 		 * @brief Reads one global option value.
 		 * @param name Global option key.
 		 * @return Option value.
 		 */
-		[[nodiscard]] QVariant             getGlobalOption(const QString &name) const;
+		[[nodiscard]] QVariant                       getGlobalOption(const QString &name) const;
+		/**
+		 * @brief Returns the shared typed settings used by every world view.
+		 * @return Application-wide world-view settings.
+		 */
+		[[nodiscard]] const WorldViewGlobalSettings &worldViewGlobalSettings() const noexcept;
 		/**
 		 * @brief Returns list of known global option names.
 		 * @return Global option key list.
 		 */
-		static QStringList                 globalOptionList();
+		static QStringList                           globalOptionList();
 		/**
 		 * @brief Writes integer global option.
 		 * @param name Option key.
 		 * @param value Integer value.
 		 */
-		void                               setGlobalOptionInt(const QString &name, int value);
+		void                                         setGlobalOptionInt(const QString &name, int value);
 		/**
 		 * @brief Writes string global option.
 		 * @param name Option key.
@@ -484,7 +490,17 @@ class AppController : public QObject
 		 */
 		void onCommandTriggered(const QString &cmdName);
 
+	signals:
+		/**
+		 * @brief Emitted after the shared world-view settings change.
+		 */
+		void worldViewGlobalSettingsChanged();
+
 	private:
+		/**
+		 * @brief Refreshes the typed shared world-view settings from the global preference store.
+		 */
+		void refreshWorldViewGlobalSettings();
 #ifdef QMUD_ENABLE_LUA_SCRIPTING
 		enum class InteractiveSpellCheckMode
 		{
@@ -652,7 +668,7 @@ class AppController : public QObject
 		/**
 		 * @brief Applies word-delimiter preferences.
 		 */
-		void                              applyWordDelimiterPreferences() const;
+		void                              applyWordDelimiterPreferences();
 		/**
 		 * @brief Applies editor behavior preferences.
 		 */
@@ -672,7 +688,7 @@ class AppController : public QObject
 		/**
 		 * @brief Applies list view presentation settings.
 		 */
-		void                              applyListViewPreferences() const;
+		void                              applyListViewPreferences();
 		/**
 		 * @brief Applies input control settings.
 		 */
@@ -684,7 +700,7 @@ class AppController : public QObject
 		/**
 		 * @brief Applies typing behavior settings.
 		 */
-		void                              applyTypingPreferences() const;
+		void                              applyTypingPreferences();
 		/**
 		 * @brief Applies regex-engine preferences.
 		 */
@@ -727,7 +743,7 @@ class AppController : public QObject
 		/**
 		 * @brief Applies rendering pipeline preferences.
 		 */
-		void applyRenderingPreferences() const;
+		void applyRenderingPreferences();
 		/**
 		 * @brief Schedules or stops periodic update checks from preferences.
 		 */
@@ -1185,6 +1201,7 @@ class AppController : public QObject
 		QString     m_translatorFile;
 		QMap<QString, int>               m_globalIntPrefs;
 		QMap<QString, QString>           m_globalStringPrefs;
+		WorldViewGlobalSettings          m_worldViewGlobalSettings;
 		QString                          m_luaScript;
 		QString                          m_pluginsDirectory;
 		QString                          m_fixedPitchFont;

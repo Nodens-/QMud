@@ -2213,7 +2213,7 @@ void MainWindow::onMdiSubWindowActivated(QMdiSubWindow *window)
 	}
 
 	WorldRuntime *activeRuntime = nullptr;
-	if (auto *world = qobject_cast<WorldChildWindow *>(window); world && world->isPrimaryRuntimeBinding())
+	if (auto *world = qobject_cast<WorldChildWindow *>(window))
 		activeRuntime = world->runtime();
 	for (const WorldWindowDescriptor &entry : worldRuntimeDescriptors())
 		if (entry.runtime)
@@ -2281,15 +2281,17 @@ void MainWindow::setStatusMessage(const QString &msg) const
 
 void MainWindow::updateEditActions()
 {
-	const auto         *world       = activeWorldChildWindow();
-	const auto         *view        = world ? world->view() : nullptr;
-	const auto         *text        = activeTextChildWindow();
-	WorldRuntime *const textRuntime = resolveRuntimeForTextWindow(text);
+	const auto         *presentation = activeWorldPresentationWindow();
+	const auto         *view         = presentation ? presentation->view() : nullptr;
+	const auto         *world        = activeWorldChildWindow();
+	const auto         *commandView  = world ? world->view() : nullptr;
+	const auto         *text         = activeTextChildWindow();
+	WorldRuntime *const textRuntime  = resolveRuntimeForTextWindow(text);
 
 	const bool          canCopy         = view && (view->hasOutputSelection() || view->hasInputSelection());
 	const bool          canCopyHtml     = view && view->hasOutputSelection();
 	const bool          canFindAgain    = view && view->hasOutputFindHistory();
-	const bool          canClearHistory = view && view->hasCommandHistory();
+	const bool          canClearHistory = commandView && commandView->hasCommandHistory();
 	const bool          textContext     = text != nullptr;
 
 	if (QAction *a = actionForCommand(QStringLiteral("Copy")))
@@ -2629,8 +2631,9 @@ void MainWindow::requestDeferredUiRefresh(const bool refreshStatus, const bool r
 void MainWindow::refreshActionState()
 {
 	const auto         *world         = activeWorldChildWindow();
+	const auto         *presentation  = activeWorldPresentationWindow();
 	const WorldRuntime *runtime       = world ? world->runtime() : nullptr;
-	auto               *view          = world ? world->view() : nullptr;
+	auto               *view          = presentation ? presentation->view() : nullptr;
 	auto               *text          = activeTextChildWindow();
 	const WorldRuntime *actionRuntime = runtime ? runtime : resolveRuntimeForTextWindow(text);
 
@@ -2643,7 +2646,7 @@ void MainWindow::refreshActionState()
 		QAction *freezeAction = m_actions.value(QStringLiteral("FreezeOutput"));
 		freezeAction->setCheckable(true);
 		freezeAction->setChecked(isFrozen);
-		freezeAction->setEnabled(view != nullptr);
+		freezeAction->setEnabled(presentation && presentation->isPrimaryRuntimeBinding() && view);
 	}
 	if (m_actions.contains(QStringLiteral("DebugPackets")))
 	{
@@ -2657,6 +2660,8 @@ void MainWindow::refreshActionState()
 	updateConnectionActions(runtime);
 	if (m_actions.contains(QStringLiteral("Preferences")))
 		m_actions.value(QStringLiteral("Preferences"))->setEnabled(hasWorld);
+	if (m_actions.contains(QStringLiteral("RecallText")))
+		m_actions.value(QStringLiteral("RecallText"))->setEnabled(hasWorld);
 	if (m_actions.contains(QStringLiteral("OpenWorldsInStartupList")))
 	{
 		bool enableStartup = false;
@@ -2767,7 +2772,7 @@ void MainWindow::onStatusFreezeDoubleClick()
 {
 	// Qt split-scrollback behavior: if split view is active, collapse back to
 	// the normal output path and jump to current output.
-	if (const auto *world = activeWorldChildWindow())
+	if (const auto *world = activeWorldPresentationWindow())
 	{
 		if (WorldView *view = world->view())
 		{
@@ -2821,7 +2826,9 @@ void MainWindow::updateActivityToolbarButtons()
 		m_worldActions.push_back(action);
 	}
 
-	const WorldChildWindow *activeWorld = activeWorldChildWindow();
+	const WorldRuntime *activeRuntime = nullptr;
+	if (const WorldChildWindow *activePresentation = activeWorldPresentationWindow())
+		activeRuntime = activePresentation->runtime();
 	for (int i = 0; i < m_worldActions.size(); ++i)
 	{
 		QAction *action = m_worldActions.at(i);
@@ -2831,7 +2838,7 @@ void MainWindow::updateActivityToolbarButtons()
 		action->setVisible(hasWorld);
 		action->setEnabled(hasWorld);
 		action->setCheckable(hasWorld);
-		action->setChecked(hasWorld && entries.at(i).window == activeWorld);
+		action->setChecked(hasWorld && entries.at(i).runtime == activeRuntime);
 		if (!hasWorld)
 			action->setChecked(false);
 	}

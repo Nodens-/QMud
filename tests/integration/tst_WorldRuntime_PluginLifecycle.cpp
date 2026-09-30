@@ -2596,10 +2596,10 @@ end
 			     &view = harness.view](const QMudNativePluginRegistry::TestSpeechEvent &event)
 			    {
 				    events.push_back(event);
-				    partialOverlayAtSpeech.push_back(view.m_nativeHasPartialOutput ||
-				                                     view.m_hasPartialOutput ||
-				                                     !view.m_nativePartialOutputText.isEmpty() ||
-				                                     !view.m_nativePartialOutputSpans.isEmpty());
+				    partialOverlayAtSpeech.push_back(
+				        view.m_nativeRenderModel->m_nativeHasPartialOutput || view.m_hasPartialOutput ||
+				        !view.m_nativeRenderModel->m_nativePartialOutputText.isEmpty() ||
+				        !view.m_nativeRenderModel->m_nativePartialOutputSpans.isEmpty());
 			    });
 			const auto restoreSpeechSink =
 			    qScopeGuard([] { QMudNativePluginRegistry::setTestSpeechSink({}); });
@@ -2724,6 +2724,7 @@ end
 			    !runtime.plugins().isEmpty() && !runtime.plugins().constFirst().installPending, 5000);
 
 			QStringList publishedPartialLines;
+			QSignalSpy  presentedPartialSpy(&runtime, &WorldRuntime::partialOutputPresentationUpdated);
 			QObject::connect(&runtime, &WorldRuntime::incomingStyledLinePartialReceived, &runtime,
 			                 [&publishedPartialLines](const QString &line,
 			                                          const QVector<WorldRuntime::StyleSpan> & /*spans*/)
@@ -2731,6 +2732,7 @@ end
 			runtime.receiveRawData(
 			    QByteArrayLiteral("suspend-before-mxp\nprefix-\x1B[1z<!ENTITY continuation "
 			                      "'completed'>suffix"));
+			runtime.receiveRawData(QByteArrayLiteral(" completed\nfresh-partial"));
 
 			QTRY_COMPARE_WITH_TIMEOUT(pluginVariable(runtime, kMxpEntityCallbackPluginId,
 			                                         QStringLiteral("line_before_mxp_resumed")),
@@ -2738,8 +2740,18 @@ end
 			QTRY_COMPARE_WITH_TIMEOUT(
 			    pluginVariable(runtime, kMxpEntityCallbackPluginId, QStringLiteral("mxp_entity_payload")),
 			    QStringLiteral("continuation=completed"), 5000);
-			QTRY_COMPARE_WITH_TIMEOUT(publishedPartialLines.size(), 1, 5000);
-			QCOMPARE(publishedPartialLines.constFirst(), QStringLiteral("prefix-suffix"));
+			QTRY_COMPARE_WITH_TIMEOUT(publishedPartialLines.size(), 2, 5000);
+			QCOMPARE(publishedPartialLines,
+			         QStringList({QStringLiteral("prefix-suffix"), QStringLiteral("fresh-partial")}));
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    pluginVariable(runtime, kMxpEntityCallbackPluginId, QStringLiteral("partial_line_count")),
+			    QStringLiteral("1"), 5000);
+			QCOMPARE(
+			    pluginVariable(runtime, kMxpEntityCallbackPluginId, QStringLiteral("partial_line_payload")),
+			    QStringLiteral("fresh-partial"));
+			QCOMPARE(presentedPartialSpy.size(), 2);
+			QCOMPARE(presentedPartialSpy.at(0).constFirst().toString(), QStringLiteral("prefix-suffix"));
+			QCOMPARE(presentedPartialSpy.at(1).constFirst().toString(), QStringLiteral("fresh-partial"));
 		}
 
 		static void legacyEncodingExpandsMiniWindowMxpEntitiesAsInternalText()
@@ -7450,7 +7462,6 @@ end
 			primary.setRuntime(&runtime);
 			observer.setRuntimeObserver(&runtime);
 
-			QCOMPARE(runtime.presentationViews().size(), 2);
 			QCOMPARE(runtime.view(), primary.view());
 
 			runtime.outputText(QStringLiteral("single-runtime-write"), false, true);
@@ -7483,11 +7494,13 @@ end
 			QTRY_VERIFY_WITH_TIMEOUT(observer.view()->outputLines().isEmpty(), 2000);
 
 			primary.setRuntime(nullptr);
-			QCOMPARE(runtime.presentationViews().size(), 1);
 			QVERIFY(!runtime.view());
+			runtime.addLine(QStringLiteral("observer-only-update"), WorldRuntime::LineOutput, true);
+			QTRY_COMPARE_WITH_TIMEOUT(
+			    observer.view()->outputLines().count(QStringLiteral("observer-only-update")), 1, 2000);
+			QVERIFY(!primary.view()->outputLines().contains(QStringLiteral("observer-only-update")));
 
 			observer.setRuntimeObserver(nullptr);
-			QVERIFY(runtime.presentationViews().isEmpty());
 			QVERIFY(!runtime.view());
 		}
 
@@ -7536,7 +7549,7 @@ end
 			QVERIFY2(runtime.loadPluginFile(QStringLiteral("detached_install_draw.xml"), &loadError),
 			         qPrintable(loadError));
 			view.setRuntime(nullptr);
-			QVERIFY(runtime.presentationViews().isEmpty());
+			QVERIFY(!runtime.view());
 			QTRY_VERIFY_WITH_TIMEOUT(
 			    !runtime.plugins().isEmpty() && !runtime.plugins().constFirst().installPending, 5000);
 			QCOMPARE(pluginVariable(runtime, QStringLiteral("ccddeeff0011223344556677"),

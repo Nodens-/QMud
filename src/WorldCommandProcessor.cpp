@@ -3148,16 +3148,19 @@ void WorldCommandProcessor::cancelActiveEnteredCommand()
 
 void WorldCommandProcessor::onIncomingLineReceived(const QString &line)
 {
-	onIncomingStyledLineReceived(line, QVector<WorldRuntime::StyleSpan>());
+	onIncomingStyledLineReceived(line, QVector<WorldRuntime::StyleSpan>(),
+	                             m_runtime ? m_runtime->m_incomingPartialLineRevision : 0);
 }
 
 void WorldCommandProcessor::onIncomingStyledLineReceived(const QString                          &line,
-                                                         const QVector<WorldRuntime::StyleSpan> &spans)
+                                                         const QVector<WorldRuntime::StyleSpan> &spans,
+                                                         const quint64 partialLineRevision)
 {
 	PendingIncomingStreamItem request;
-	request.line              = line;
-	request.spans             = spans;
-	request.presentationBatch = m_runtime ? m_runtime->acquireIncomingStreamPresentationBatch() : nullptr;
+	request.line                = line;
+	request.spans               = spans;
+	request.partialLineRevision = partialLineRevision;
+	request.presentationBatch   = m_runtime ? m_runtime->acquireIncomingStreamPresentationBatch() : nullptr;
 	adoptIncomingStreamBacklogPresentationBatch(request);
 	request.observation =
 	    m_runtime ? m_runtime->captureIncomingLineLuaObservation() : LuaCallbackIncomingLineObservation{};
@@ -3289,13 +3292,14 @@ void WorldCommandProcessor::startIncomingLine(
 				runtime->restoreIncomingLineLuaContextState(state);
 		};
 	}
-	operation->line               = line;
-	operation->spans              = std::move(normalizedSpans);
-	operation->runtimeWrap        = runtimeWrap;
-	operation->wrapColumn         = wrapColumn;
-	operation->indentParas        = indentParas;
-	operation->logOutput          = logOutput;
-	m_activeIncomingLineOperation = operation;
+	operation->line                = line;
+	operation->spans               = std::move(normalizedSpans);
+	operation->partialLineRevision = request.partialLineRevision;
+	operation->runtimeWrap         = runtimeWrap;
+	operation->wrapColumn          = wrapColumn;
+	operation->indentParas         = indentParas;
+	operation->logOutput           = logOutput;
+	m_activeIncomingLineOperation  = operation;
 	if (!m_runtime)
 	{
 		continueIncomingLineAfterPluginDecision(operation, true);
@@ -3359,7 +3363,6 @@ void WorldCommandProcessor::continueIncomingLineAfterPluginDecision(
 
 	if (m_view)
 	{
-		m_view->clearPartialOutput();
 		if (!triggerResult.omitFromOutput)
 		{
 			QString                          displayLine  = line;
@@ -3374,10 +3377,23 @@ void WorldCommandProcessor::continueIncomingLineAfterPluginDecision(
 			const bool updatedRuntimeLine =
 			    m_runtime && m_runtime->updateBufferedIncomingLineLuaContext(
 			                     displayLine, WorldRuntime::LineOutput, displaySpans, true);
-			if (!updatedRuntimeLine && displaySpans.isEmpty())
-				m_view->appendOutputText(displayLine);
-			else if (!updatedRuntimeLine)
-				m_view->appendOutputTextStyled(displayLine, displaySpans);
+			if (updatedRuntimeLine)
+			{
+				m_runtime->completePartialOutputPresentation(
+				    operation->partialLineRevision, m_runtime->incomingLineLuaContextAbsoluteNumber());
+			}
+			else
+			{
+				if (m_runtime)
+					static_cast<void>(
+					    m_runtime->clearPartialOutputPresentation(operation->partialLineRevision));
+				else
+					m_view->clearPartialOutput();
+				if (displaySpans.isEmpty())
+					m_view->appendOutputText(displayLine);
+				else
+					m_view->appendOutputTextStyled(displayLine, displaySpans);
+			}
 			if (m_runtime)
 			{
 				m_runtime->markIncomingLineLuaContextBuffered();
@@ -3386,6 +3402,10 @@ void WorldCommandProcessor::continueIncomingLineAfterPluginDecision(
 		}
 		else
 		{
+			if (m_runtime)
+				static_cast<void>(m_runtime->clearPartialOutputPresentation(operation->partialLineRevision));
+			else
+				m_view->clearPartialOutput();
 			const bool hasReplacementOutput =
 			    std::ranges::any_of(triggerResult.deferredScripts, [](const DeferredScript &script)
 			                        { return script.replaceMatchedLineOutput; }) ||
@@ -3876,7 +3896,8 @@ bool WorldCommandProcessor::processPendingIncomingStreamItem(
 		case PendingIncomingStreamItem::Kind::PartialLine:
 			if (m_runtime)
 				m_runtime->activateIncomingStreamPresentationBatch(item.presentationBatch);
-			presentIncomingPartialLine(item.line, item.spans);
+			if (!m_runtime || item.partialLineRevision == m_runtime->m_incomingPartialLineRevision)
+				presentIncomingPartialLine(item.line, item.spans, item.partialLineRevision);
 			return;
 		case PendingIncomingStreamItem::Kind::OrderedAction:
 		{
@@ -4006,19 +4027,22 @@ void WorldCommandProcessor::drainPendingIncomingStreamItems(
 }
 
 void WorldCommandProcessor::onIncomingStyledLinePartialReceived(const QString                          &line,
-                                                                const QVector<WorldRuntime::StyleSpan> &spans)
+                                                                const QVector<WorldRuntime::StyleSpan> &spans,
+                                                                const quint64 partialLineRevision)
 {
 	PendingIncomingStreamItem request;
-	request.kind              = PendingIncomingStreamItem::Kind::PartialLine;
-	request.line              = line;
-	request.spans             = spans;
-	request.nestingPlayback   = m_runtime ? m_runtime->activeLuaDeferredRuntimeMutationPlayback() : nullptr;
-	request.presentationBatch = m_runtime ? m_runtime->acquireIncomingStreamPresentationBatch() : nullptr;
+	request.kind                = PendingIncomingStreamItem::Kind::PartialLine;
+	request.line                = line;
+	request.spans               = spans;
+	request.partialLineRevision = partialLineRevision;
+	request.nestingPlayback     = m_runtime ? m_runtime->activeLuaDeferredRuntimeMutationPlayback() : nullptr;
+	request.presentationBatch   = m_runtime ? m_runtime->acquireIncomingStreamPresentationBatch() : nullptr;
 	adoptIncomingStreamBacklogPresentationBatch(request);
 	if (m_processingInputCriticalOperation || m_processingIncomingLine || m_processingIncomingStreamAction)
 	{
 		if (!m_pendingIncomingStreamItems.isEmpty() &&
 		    m_pendingIncomingStreamItems.constLast().kind == PendingIncomingStreamItem::Kind::PartialLine &&
+		    m_pendingIncomingStreamItems.constLast().partialLineRevision == request.partialLineRevision &&
 		    m_pendingIncomingStreamItems.constLast().nestingPlayback == request.nestingPlayback &&
 		    m_pendingIncomingStreamItems.constLast().presentationBatch == request.presentationBatch)
 			m_pendingIncomingStreamItems.last() = std::move(request);
@@ -4028,12 +4052,14 @@ void WorldCommandProcessor::onIncomingStyledLinePartialReceived(const QString   
 	}
 	if (m_runtime)
 		m_runtime->activateIncomingStreamPresentationBatch(request.presentationBatch);
-	presentIncomingPartialLine(request.line, request.spans);
+	if (!m_runtime || request.partialLineRevision == m_runtime->m_incomingPartialLineRevision)
+		presentIncomingPartialLine(request.line, request.spans, request.partialLineRevision);
 	finishIncomingStreamBacklogPresentationBatchIfIdle();
 }
 
 void WorldCommandProcessor::presentIncomingPartialLine(const QString                          &line,
-                                                       const QVector<WorldRuntime::StyleSpan> &spans) const
+                                                       const QVector<WorldRuntime::StyleSpan> &spans,
+                                                       const quint64 partialLineRevision) const
 {
 	if (!m_view)
 		return;
@@ -4072,9 +4098,15 @@ void WorldCommandProcessor::presentIncomingPartialLine(const QString            
 		}
 	}
 
-	m_view->updatePartialOutputText(displayLine, displaySpans);
 	if (m_runtime)
-		m_runtime->firePluginPartialLine(line);
+	{
+		if (m_runtime->publishPartialOutputPresentation(displayLine, displaySpans, partialLineRevision))
+			m_runtime->firePluginPartialLine(line);
+	}
+	else
+	{
+		m_view->updatePartialOutputText(displayLine, displaySpans);
+	}
 }
 
 void WorldCommandProcessor::onHyperlinkActivated(const QString &href)

@@ -3181,6 +3181,7 @@ void AppController::runWorldStartupPostRestore(WorldRuntime *runtime, std::funct
 	}
 
 	emitStartupBanner(runtime);
+	runtime->applyInitialStartPausedState();
 	loadGlobalPlugins(
 	    runtime,
 	    [runtimeGuard = QPointer<WorldRuntime>(runtime), completion = std::move(completion)]() mutable
@@ -3471,6 +3472,11 @@ QVariant AppController::getGlobalOption(const QString &name) const
 	return {};
 }
 
+const WorldViewGlobalSettings &AppController::worldViewGlobalSettings() const noexcept
+{
+	return m_worldViewGlobalSettings;
+}
+
 QStringList AppController::globalOptionList()
 {
 	QStringList result;
@@ -3508,6 +3514,7 @@ void AppController::setGlobalOptionString(const QString &name, const QString &va
 		m_globalStringPrefs.insert(key, runtimeValue);
 	}
 	(void)dbWriteString(QStringLiteral("prefs"), key, storedValue);
+	refreshWorldViewGlobalSettings();
 }
 
 void AppController::setGlobalOptionInt(const QString &name, const int value)
@@ -3536,6 +3543,25 @@ void AppController::setGlobalOptionInt(const QString &name, const int value)
 		m_globalIntPrefs.insert(key, value);
 	}
 	(void)dbWriteInt(QStringLiteral("prefs"), key, value);
+	refreshWorldViewGlobalSettings();
+}
+
+void AppController::refreshWorldViewGlobalSettings()
+{
+	WorldViewGlobalSettings updated;
+	updated.wordDelimiters            = getGlobalOption(QStringLiteral("WordDelimiters")).toString();
+	updated.doubleClickWordDelimiters = getGlobalOption(QStringLiteral("WordDelimitersDblClick")).toString();
+	updated.smoothScrolling           = getGlobalOption(QStringLiteral("SmoothScrolling")).toInt() != 0;
+	updated.smootherScrolling         = getGlobalOption(QStringLiteral("SmootherScrolling")).toInt() != 0;
+	updated.allTypingToCommandWindow =
+	    getGlobalOption(QStringLiteral("AllTypingToCommandWindow")).toInt() != 0;
+	updated.bleedBackground = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
+	updated.splitViewDividerWidth =
+	    qBound(0, getGlobalOption(QStringLiteral("SplitViewDividerWidth")).toInt(), 200);
+	if (updated == m_worldViewGlobalSettings)
+		return;
+	m_worldViewGlobalSettings = std::move(updated);
+	emit worldViewGlobalSettingsChanged();
 }
 
 QString AppController::makeAbsolutePath(const QString &fileName) const
@@ -4303,8 +4329,6 @@ WorldChildWindow *AppController::createWorldObserverWindow(WorldRuntime         
 		title = runtime->worldAttributes().value(QStringLiteral("name"), QStringLiteral("World"));
 	auto *window = new WorldChildWindow(title);
 	window->setRuntimeObserver(runtime);
-	if (WorldView *view = window->view())
-		view->restoreOutputFromPersistedLines(runtime->lines());
 	m_mainWindow->addMdiSubWindow(window);
 	if (source && source->isMaximized())
 		window->showMaximized();
@@ -4837,25 +4861,6 @@ void AppController::setupStartupBehavior()
 
 bool AppController::openWorldDocument(const QString &path)
 {
-	const bool allTypingToCommandWindow =
-	    getGlobalOption(QStringLiteral("AllTypingToCommandWindow")).toInt() != 0;
-	const QString wordDelimiters = getGlobalOption(QStringLiteral("WordDelimiters")).toString();
-	const QString wordDelimitersDblClick =
-	    getGlobalOption(QStringLiteral("WordDelimitersDblClick")).toString();
-	const bool smoothScrolling   = getGlobalOption(QStringLiteral("SmoothScrolling")).toInt() != 0;
-	const bool smootherScrolling = getGlobalOption(QStringLiteral("SmootherScrolling")).toInt() != 0;
-	const bool bleedBackground   = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
-
-	auto       applyViewGlobalOptions = [&](WorldView *view)
-	{
-		if (!view)
-			return;
-		view->setAllTypingToCommandWindow(allTypingToCommandWindow);
-		view->setWordDelimiters(wordDelimiters, wordDelimitersDblClick);
-		view->setSmoothScrolling(smoothScrolling, smootherScrolling);
-		view->setBleedBackground(bleedBackground);
-	};
-
 	auto shouldActivateNewWorld = [this]() -> bool
 	{
 		if (m_nextNewWorldActivationOverride >= 0)
@@ -4990,7 +4995,6 @@ bool AppController::openWorldDocument(const QString &path)
 		auto *window = new WorldChildWindow(title);
 		window->setRuntime(runtime);
 		m_mainWindow->addMdiSubWindow(window, shouldActivateNewWorld());
-		applyViewGlobalOptions(window->view());
 		runtime->setPluginInstallDeferred(true);
 		runtime->applyFromDocument(doc);
 		runtime->setWorldFilePath(normalized);
@@ -5042,8 +5046,7 @@ bool AppController::openWorldDocument(const QString &path)
 		runtime->setWorldAttribute(QStringLiteral("error_notification_to_output"),
 		                           QString::number(errorToOutput));
 		applyConfiguredWorldDefaults(runtime);
-		if (auto *view = window->view())
-			view->applyRuntimeSettings();
+		runtime->applyRuntimeSettingsToPresentationViews();
 		m_mainWindow->refreshActionState();
 		const auto worldName = runtime->worldAttributes().value(QStringLiteral("name")).trimmed();
 		if (!worldName.isEmpty())
@@ -5105,7 +5108,6 @@ bool AppController::openWorldDocument(const QString &path)
 	auto *window = new WorldChildWindow(title);
 	window->setRuntime(runtime);
 	m_mainWindow->addMdiSubWindow(window, shouldActivateNewWorld());
-	applyViewGlobalOptions(window->view());
 	restoreWorldWindowPlacement(window->windowTitle(), window);
 	if (getGlobalOption(QStringLiteral("OpenWorldsMaximised")).toInt() != 0)
 		window->showMaximized();
@@ -7673,20 +7675,9 @@ void AppController::applyTimerPreferences() const
 		m_mainWindow->setTimerInterval(timerInterval);
 }
 
-void AppController::applyWordDelimiterPreferences() const
+void AppController::applyWordDelimiterPreferences()
 {
-	const QString wordDelims    = getGlobalOption(QStringLiteral("WordDelimiters")).toString();
-	const QString wordDelimsDbl = getGlobalOption(QStringLiteral("WordDelimitersDblClick")).toString();
-	if (!m_mainWindow)
-		return;
-	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
-	{
-		if (const WorldChildWindow *child = m_mainWindow->findWorldChildWindow(runtime); child)
-		{
-			if (WorldView *view = child->view(); view)
-				view->setWordDelimiters(wordDelims, wordDelimsDbl);
-		}
-	}
+	refreshWorldViewGlobalSettings();
 }
 
 void AppController::applyEditorPreferences() const
@@ -7748,22 +7739,12 @@ void AppController::applyNotepadPreferences() const
 	                                      colorFromRef(notepadBack));
 }
 
-void AppController::applyListViewPreferences() const
+void AppController::applyListViewPreferences()
 {
-	const bool smoothScroll   = getGlobalOption(QStringLiteral("SmoothScrolling")).toInt() != 0;
-	const bool smootherScroll = getGlobalOption(QStringLiteral("SmootherScrolling")).toInt() != 0;
-	const bool gridLines      = getGlobalOption(QStringLiteral("ShowGridLinesInListViews")).toInt() != 0;
-	if (!m_mainWindow)
-		return;
-	m_mainWindow->setListViewGridLinesVisible(gridLines);
-	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
-	{
-		if (const WorldChildWindow *child = m_mainWindow->findWorldChildWindow(runtime); child)
-		{
-			if (WorldView *view = child->view(); view)
-				view->setSmoothScrolling(smoothScroll, smootherScroll);
-		}
-	}
+	const bool gridLines = getGlobalOption(QStringLiteral("ShowGridLinesInListViews")).toInt() != 0;
+	if (m_mainWindow)
+		m_mainWindow->setListViewGridLinesVisible(gridLines);
+	refreshWorldViewGlobalSettings();
 }
 
 void AppController::applyInputPreferences() const
@@ -7789,19 +7770,9 @@ void AppController::applyNotificationPreferences() const
 	}
 }
 
-void AppController::applyTypingPreferences() const
+void AppController::applyTypingPreferences()
 {
-	const bool allTypingToCommand = getGlobalOption(QStringLiteral("AllTypingToCommandWindow")).toInt() != 0;
-	if (!m_mainWindow)
-		return;
-	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
-	{
-		if (const WorldChildWindow *child = m_mainWindow->findWorldChildWindow(runtime); child)
-		{
-			if (WorldView *view = child->view(); view)
-				view->setAllTypingToCommandWindow(allTypingToCommand);
-		}
-	}
+	refreshWorldViewGlobalSettings();
 }
 
 void AppController::applyRegexPreferences() const
@@ -7941,11 +7912,7 @@ void AppController::applyFontMetricPreferences() const
 		    isEnabledFlag(attrs.value(QStringLiteral("use_default_output_font")));
 		if (!useDefaultInputFont && !useDefaultOutputFont)
 			continue;
-		if (const WorldChildWindow *child = m_mainWindow->findWorldChildWindow(runtime); child)
-		{
-			if (WorldView *view = child->view(); view)
-				view->applyRuntimeSettings();
-		}
+		runtime->applyRuntimeSettingsToPresentationViews();
 	}
 }
 
@@ -7988,21 +7955,9 @@ void AppController::applyMiscPreferences() const
 	m_mainWindow->setFlatToolbars(flat);
 }
 
-void AppController::applyRenderingPreferences() const
+void AppController::applyRenderingPreferences()
 {
-	const bool bleed                 = getGlobalOption(QStringLiteral("BleedBackground")).toInt() != 0;
-	const int  splitViewDividerWidth = getGlobalOption(QStringLiteral("SplitViewDividerWidth")).toInt();
-	if (!m_mainWindow)
-		return;
-	for (const auto runtimes = activeWorldRuntimes(); WorldRuntime *runtime : runtimes)
-	{
-		if (const WorldChildWindow *child = m_mainWindow->findWorldChildWindow(runtime); child)
-		{
-			if (WorldView *view = child->view(); view)
-				view->setBleedBackground(bleed);
-		}
-		runtime->setPresentationSplitViewDividerWidth(splitViewDividerWidth);
-	}
+	refreshWorldViewGlobalSettings();
 }
 
 void AppController::saveWindowPlacement() const
@@ -9051,8 +9006,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!world)
 			return;
 		WorldRuntime *runtime = world->runtime();
-		WorldView    *view    = world->view();
-		if (!runtime || !view)
+		if (!runtime)
 			return;
 		if (const int wrapColumn = runtime->worldAttributes().value(QStringLiteral("wrap_column")).toInt();
 		    wrapColumn > 0)
@@ -9065,7 +9019,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			const int fallback = m_savedWrapColumns.value(runtime, 80);
 			runtime->setWorldAttribute(QStringLiteral("wrap_column"), QString::number(fallback));
 		}
-		view->applyRuntimeSettings();
+		runtime->applyRuntimeSettingsToPresentationViews();
 		m_mainWindow->updateStatusBar();
 		m_mainWindow->refreshActionState();
 	}
@@ -9476,7 +9430,8 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		if (WorldChildWindow *world = m_mainWindow->activeWorldChildWindow(); world)
+		if (WorldChildWindow *world = m_mainWindow->activeWorldPresentationWindow();
+		    world && world->isPrimaryRuntimeBinding())
 		{
 			if (WorldView *view = world->view(); view)
 			{
@@ -9502,7 +9457,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 			--maxLine;
 		if (maxLine <= 0)
 			return;
-		int current = runtime->lastGoToLine();
+		int current = view->lastGoToLine();
 		if (current < 1 || current > maxLine)
 			current = qMin(maxLine, 1);
 		bool      ok   = false;
@@ -9512,7 +9467,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!ok)
 			return;
 		view->selectOutputLine(line - 1);
-		runtime->setLastGoToLine(line);
+		view->setLastGoToLine(line);
 	}
 	else if (cmdName == QStringLiteral("ActivityList"))
 	{
@@ -9720,7 +9675,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!m_mainWindow)
 			return;
 		QString selection;
-		if (auto *world = m_mainWindow->activeWorldChildWindow())
+		if (auto *world = m_mainWindow->activeWorldPresentationWindow())
 		{
 			if (auto *view = world->view())
 			{
@@ -9928,7 +9883,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		auto *world = m_mainWindow->activeWorldChildWindow();
+		auto *world = m_mainWindow->activeWorldPresentationWindow();
 		if (!world)
 			return;
 		auto *runtime = world->runtime();
@@ -11111,7 +11066,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		auto *world = m_mainWindow->activeWorldChildWindow();
+		auto *world = m_mainWindow->activeWorldPresentationWindow();
 		if (!world)
 			return;
 		auto *view = world->view();
@@ -11130,7 +11085,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		auto *world = m_mainWindow->activeWorldChildWindow();
+		auto *world = m_mainWindow->activeWorldPresentationWindow();
 		if (!world)
 			return;
 		auto *view = world->view();
@@ -12396,7 +12351,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 				}
 			}
 		}
-		else if (auto *world = m_mainWindow->activeWorldChildWindow())
+		else if (auto *world = m_mainWindow->activeWorldPresentationWindow())
 		{
 			if (auto *view = world->view())
 			{
@@ -12455,11 +12410,10 @@ void AppController::onCommandTriggered(const QString &cmdName)
 		if (!world)
 			return;
 		auto *runtime = world->runtime();
-		auto *view    = world->view();
-		if (!runtime || !view)
+		if (!runtime)
 			return;
 		runtime->applyDefaultWorldOptions();
-		view->applyRuntimeSettings();
+		runtime->applyRuntimeSettingsToPresentationViews();
 		m_mainWindow->showStatusMessage(QStringLiteral("Defaults reloaded."), 2000);
 	}
 	else if (isCommand(QStringLiteral("WindowsSocketInfo")))
@@ -13433,7 +13387,7 @@ void AppController::onCommandTriggered(const QString &cmdName)
 	{
 		if (!m_mainWindow)
 			return;
-		WorldChildWindow *world      = m_mainWindow->activeWorldChildWindow();
+		WorldChildWindow *world      = m_mainWindow->activeWorldPresentationWindow();
 		TextChildWindow  *textWindow = m_mainWindow->activeTextChildWindow();
 		if (!world && !textWindow)
 			return;
@@ -13648,7 +13602,7 @@ void AppController::handleOutputFind(const bool again, const bool forceDirection
 {
 	if (!m_mainWindow)
 		return;
-	const WorldChildWindow *world = m_mainWindow->activeWorldChildWindow();
+	const WorldChildWindow *world = m_mainWindow->activeWorldPresentationWindow();
 	if (!world)
 		return;
 	if (WorldView *view = world->view(); !view)
@@ -13872,7 +13826,7 @@ void AppController::handleCopy() const
 {
 	if (!m_mainWindow)
 		return;
-	const WorldChildWindow *child = m_mainWindow->activeWorldChildWindow();
+	const WorldChildWindow *child = m_mainWindow->activeWorldPresentationWindow();
 	if (!child)
 		return;
 	if (WorldView *view = child->view(); view)
@@ -13883,7 +13837,7 @@ void AppController::handleCopyAsHtml() const
 {
 	if (!m_mainWindow)
 		return;
-	const WorldChildWindow *child = m_mainWindow->activeWorldChildWindow();
+	const WorldChildWindow *child = m_mainWindow->activeWorldPresentationWindow();
 	if (!child)
 		return;
 	if (WorldView *view = child->view(); view)
@@ -13974,6 +13928,7 @@ void AppController::handleQuickConnect()
 		runtime->setPluginInstallDeferred(true);
 		applyConfiguredWorldDefaults(runtime);
 		emitStartupBanner(runtime);
+		runtime->applyInitialStartPausedState();
 		createdRuntime = true;
 	}
 
@@ -15290,8 +15245,7 @@ AppController::ImportResult AppController::applyImportedDocument(WorldChildWindo
 		                          false, {});
 	}
 
-	if (WorldView *view = world->view())
-		view->applyRuntimeSettings();
+	runtime->applyRuntimeSettingsToPresentationViews();
 	m_mainWindow->updateStatusBar();
 	m_mainWindow->refreshActionState();
 

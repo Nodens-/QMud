@@ -158,15 +158,19 @@ class WorldCommandProcessor : public QObject
 		 * @brief Processes one styled incoming server line.
 		 * @param line Incoming line text.
 		 * @param spans Style spans.
+		 * @param partialLineRevision Stable identity of the partial line completed by this line.
 		 */
-		void onIncomingStyledLineReceived(const QString &line, const QVector<WorldRuntime::StyleSpan> &spans);
+		void onIncomingStyledLineReceived(const QString &line, const QVector<WorldRuntime::StyleSpan> &spans,
+		                                  quint64 partialLineRevision = 0);
 		/**
 		 * @brief Processes partial styled line updates.
 		 * @param line Partial line text.
 		 * @param spans Style spans.
+		 * @param partialLineRevision Stable identity of the partial line update.
 		 */
 		void onIncomingStyledLinePartialReceived(const QString                          &line,
-		                                         const QVector<WorldRuntime::StyleSpan> &spans);
+		                                         const QVector<WorldRuntime::StyleSpan> &spans,
+		                                         quint64 partialLineRevision = 0);
 		/**
 		 * @brief Dispatches activated hyperlink actions.
 		 * @param href Hyperlink target.
@@ -573,6 +577,7 @@ class WorldCommandProcessor : public QObject
 				InputCriticalOperationScopePtr                                inputCriticalOperationScope;
 				LuaCallbackIncomingLineObservation                            observation;
 				unsigned short actionSource{WorldRuntime::eUnknownActionSource};
+				quint64        partialLineRevision{0};
 				bool           doingSimulate{false};
 		};
 		struct PendingIncomingLineOperation
@@ -594,6 +599,7 @@ class WorldCommandProcessor : public QObject
 				qsizetype deferredScriptIndex{0};
 				qsizetype triggerScriptIndex{0};
 				int       wrapColumn{0};
+				quint64   partialLineRevision{0};
 				bool      runtimeWrap{false};
 				bool      indentParas{true};
 				bool      logOutput{false};
@@ -647,8 +653,8 @@ class WorldCommandProcessor : public QObject
 		void drainPendingIncomingStreamItems(
 		    const QSharedPointer<PendingIncomingLineOperation>        &parent,
 		    const std::shared_ptr<LuaDeferredRuntimeMutationPlayback> &nestingPlayback, bool nestedOnly);
-		void presentIncomingPartialLine(const QString                          &line,
-		                                const QVector<WorldRuntime::StyleSpan> &spans) const;
+		void presentIncomingPartialLine(const QString &line, const QVector<WorldRuntime::StyleSpan> &spans,
+		                                quint64 partialLineRevision) const;
 		/**
 		 * @brief Evaluates all trigger sets for an incoming line.
 		 * @param line Incoming line text.

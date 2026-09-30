@@ -2903,10 +2903,7 @@ void WorldPreferencesDialog::accept()
 		{
 			const bool needsFullRebuild =
 			    WorldView::runtimeSettingsNeedFullRebuild(changedViewAttributeKeys, changedViewMultilineKeys);
-			if (needsFullRebuild)
-				m_view->applyRuntimeSettings();
-			else
-				m_view->applyRuntimeSettingsWithoutOutputRebuild();
+			m_runtime->applyRuntimeSettingsToPresentationViews(needsFullRebuild);
 		}
 	}
 

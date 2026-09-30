@@ -47,6 +47,7 @@
 #include "WorldDocument.h"
 #include "WorldOptionDefaults.h"
 #include "WorldOptions.h"
+#include "WorldOutputRenderModel.h"
 #include "WorldRuntimeAttributeUtils.h"
 #include "WorldSocket.h"
 #include "WorldView.h"
@@ -7265,9 +7266,10 @@ namespace
 
 WorldRuntime::WorldRuntime(QObject *parent) : QObject(parent), m_openSequence(nextWorldRuntimeOpenSequence())
 {
-	m_luaExecutor  = makeLuaExecutor([](QVector<LuaDeferredRuntimeMutationBatch> batches)
-	                                 { QMudLuaDeferredRuntimeMutation::apply(std::move(batches)); });
-	m_luaCallbacks = new LuaCallbackEngine();
+	m_outputRenderModel = std::make_shared<WorldOutputRenderModel>();
+	m_luaExecutor       = makeLuaExecutor([](QVector<LuaDeferredRuntimeMutationBatch> batches)
+	                                      { QMudLuaDeferredRuntimeMutation::apply(std::move(batches)); });
+	m_luaCallbacks      = new LuaCallbackEngine();
 	{
 		LuaEngineObservedInitializationRequest request;
 		request.engine     = m_luaCallbacks;
@@ -7554,7 +7556,6 @@ WorldRuntime::~WorldRuntime()
 		m_viewDestroyedConnection = QMetaObject::Connection{};
 	}
 	m_view = nullptr;
-	m_presentationViews.clear();
 
 	QVector<QSharedPointer<LuaCallbackEngine>> enginesToTeardown;
 	enginesToTeardown.reserve((m_luaCallbacks ? 1 : 0) + m_plugins.size());
@@ -7672,6 +7673,7 @@ void WorldRuntime::resetAnsiRenderState()
 	m_partialLineSpans.clear();
 	m_pendingCarriageReturnOverwrite = false;
 	setIncomingPartialLineRevision(m_incomingPartialLineRevision + 1);
+	clearPartialOutputPresentation();
 	m_ansiRenderState = AnsiRenderState{};
 	m_streamUtf8Carry.clear();
 	m_streamUtf8DecoderEnabled = false;
@@ -9239,7 +9241,7 @@ void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const b
 		if (!m_active)
 			incrementNewLines();
 		incrementTotalLinesReceived();
-		emit incomingStyledLineReceived(lineText, lineSpans);
+		emit incomingStyledLineReceived(lineText, lineSpans, incomingPartialLineRevision);
 		emit incomingLineReceived(lineText);
 		lineText.clear();
 		lineSpans.clear();
@@ -9454,7 +9456,7 @@ void WorldRuntime::processRawDataPayloadInternal(const QByteArray &data, const b
 			const bool partialIdentityChanged = incomingPartialLineRevision != publishedLineRevision;
 			const bool hasPartialLine         = !lineText.isEmpty() || !lineSpans.isEmpty();
 			if (partialValueChanged || (partialIdentityChanged && hasPartialLine))
-				publishIncomingStyledLinePartial(lineText, lineSpans);
+				publishIncomingStyledLinePartial(lineText, lineSpans, incomingPartialLineRevision);
 		};
 
 		constexpr QMudOscActionIds oscActionIds{ActionNone, ActionSend, ActionPrompt, ActionHyperlink};
@@ -9591,7 +9593,7 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 		if (!m_active)
 			incrementNewLines();
 		incrementTotalLinesReceived();
-		emit incomingStyledLineReceived(lineText, lineSpans);
+		emit incomingStyledLineReceived(lineText, lineSpans, incomingPartialLineRevision);
 		emit incomingLineReceived(lineText);
 		lineText.clear();
 		lineSpans.clear();
@@ -10432,7 +10434,7 @@ WorldRuntime::processMxpPayloadContinuable(MxpPayloadProcessingState state)
 			notifiedLineSpans                 = lineSpans;
 			notifiedLineRevision              = incomingPartialLineRevision;
 			if (partialValueChanged || (partialIdentityChanged && hasPartialLine))
-				publishIncomingStyledLinePartial(lineText, lineSpans);
+				publishIncomingStyledLinePartial(lineText, lineSpans, incomingPartialLineRevision);
 		};
 		auto reloadMxpRenderState = [&]
 		{
@@ -14201,8 +14203,6 @@ int WorldRuntime::removeOutputLineRange(const int firstIndex, const int count)
 			++it;
 		}
 	}
-	if (m_lastGoTo > m_lines.size())
-		m_lastGoTo = qMax(1, safeQSizeToInt(m_lines.size()));
 	invalidateLuaCallbackLineBufferSnapshot();
 	return boundedCount;
 }
@@ -18531,11 +18531,7 @@ int WorldRuntime::setCustomColourText(int index, const QColor &color)
 		setWorldFileModified(true);
 		invalidateResolvedOutputColourCache();
 		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Colours);
-		if (m_view)
-		{
-			m_view->applyRuntimeSettings();
-			m_view->update();
-		}
+		applyRuntimeSettingsToPresentationViews();
 		return eOK;
 	}
 
@@ -18549,11 +18545,7 @@ int WorldRuntime::setCustomColourText(int index, const QColor &color)
 	setWorldFileModified(true);
 	invalidateResolvedOutputColourCache();
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Colours);
-	if (m_view)
-	{
-		m_view->applyRuntimeSettings();
-		m_view->update();
-	}
+	applyRuntimeSettingsToPresentationViews();
 	return eOK;
 }
 
@@ -18585,11 +18577,7 @@ int WorldRuntime::setCustomColourBackground(int index, const QColor &color)
 		setWorldFileModified(true);
 		invalidateResolvedOutputColourCache();
 		patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Colours);
-		if (m_view)
-		{
-			m_view->applyRuntimeSettings();
-			m_view->update();
-		}
+		applyRuntimeSettingsToPresentationViews();
 		return eOK;
 	}
 
@@ -18603,11 +18591,7 @@ int WorldRuntime::setCustomColourBackground(int index, const QColor &color)
 	setWorldFileModified(true);
 	invalidateResolvedOutputColourCache();
 	patchLuaCallbackStableSnapshot(LuaCallbackStableSnapshotDomain::Colours);
-	if (m_view)
-	{
-		m_view->applyRuntimeSettings();
-		m_view->update();
-	}
+	applyRuntimeSettingsToPresentationViews();
 	return eOK;
 }
 
@@ -18780,11 +18764,7 @@ int WorldRuntime::setBackgroundImage(const QString &fileName, int mode)
 		        ? QString()
 		        : QMudPluginPathUtils::qmudHomeRelativePath(m_startupDirectory, imageFileName, false);
 		setWorldFileModified(true);
-		if (m_view)
-		{
-			m_view->applyRuntimeSettings();
-			m_view->update();
-		}
+		applyRuntimeSettingsToPresentationViews();
 	}
 	return result;
 }
@@ -18808,11 +18788,7 @@ int WorldRuntime::setForegroundImage(const QString &fileName, int mode)
 		        ? QString()
 		        : QMudPluginPathUtils::qmudHomeRelativePath(m_startupDirectory, imageFileName, false);
 		setWorldFileModified(true);
-		if (m_view)
-		{
-			m_view->applyRuntimeSettings();
-			m_view->update();
-		}
+		applyRuntimeSettingsToPresentationViews();
 	}
 	return result;
 }
@@ -20410,14 +20386,16 @@ void WorldRuntime::setRemoveMapReverses(bool enabled)
 	m_removeMapReverses = enabled;
 }
 
-int WorldRuntime::lastGoToLine() const
+void WorldRuntime::applyInitialStartPausedState()
 {
-	return m_lastGoTo;
-}
-
-void WorldRuntime::setLastGoToLine(int line)
-{
-	m_lastGoTo = line;
+	if (m_initialStartPausedStateApplied)
+		return;
+	m_initialStartPausedStateApplied = true;
+	const QString value              = m_worldAttributes.value(QStringLiteral("start_paused"));
+	const bool    frozen             = value == QStringLiteral("1") ||
+	                                   value.compare(QStringLiteral("y"), Qt::CaseInsensitive) == 0 ||
+	                                   value.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0;
+	emit          initialOutputFreezeStateRequested(frozen);
 }
 
 void WorldRuntime::fireWorldConnectHandlers()
@@ -21589,10 +21567,7 @@ void WorldRuntime::beginPluginCallbackDispatchCommandGuard(PluginCallbackDispatc
 		++m_drawOutputWindowCallbackInFlightDepth;
 		command.drawOutputWindowExecutionGuardActive = true;
 		if (m_drawOutputWindowCallbackInFlightDepth == 1)
-		{
-			for (WorldView *view : presentationViews())
-				view->setDrawOutputWindowCallbackActive(true);
-		}
+			emit drawOutputWindowCallbackActivityChanged(true);
 	}
 	const bool beginMiniWindowExecution = !command.miniWindowExecutionGuardActive &&
 	                                      !command.request.miniWindowExecutionName.isEmpty() &&
@@ -21630,10 +21605,7 @@ void WorldRuntime::endPluginCallbackDispatchCommandGuard(PluginCallbackDispatchC
 			--m_drawOutputWindowCallbackInFlightDepth;
 		command.drawOutputWindowExecutionGuardActive = false;
 		if (m_drawOutputWindowCallbackInFlightDepth == 0)
-		{
-			for (WorldView *view : presentationViews())
-				view->setDrawOutputWindowCallbackActive(false);
-		}
+			emit drawOutputWindowCallbackActivityChanged(false);
 	}
 }
 
@@ -27280,7 +27252,6 @@ QString WorldRuntime::worldAttributeValue(const QString &key) const
 void WorldRuntime::applyNumericWorldOption(const WorldNumericOptionBinding binding, const long long value)
 {
 	using enum WorldNumericOptionBinding;
-	const bool enabled = value != 0;
 	if (binding == ChatListener)
 	{
 		syncChatAcceptCallsWithPreferences();
@@ -27306,211 +27277,7 @@ void WorldRuntime::applyNumericWorldOption(const WorldNumericOptionBinding bindi
 	}
 	if (binding == OutputWrap)
 		static_cast<void>(synchronizeTelnetNawsEnabledState());
-	for (WorldView *view : presentationViews())
-	{
-		switch (binding)
-		{
-		case AlternativeInverse:
-			view->m_alternativeInverse = enabled;
-			break;
-		case AltArrowRecallsPartial:
-			view->m_altArrowRecallsPartial = enabled;
-			break;
-		case AlwaysRecordCommandHistory:
-			view->m_alwaysRecordCommandHistory = enabled;
-			break;
-		case ArrowsChangeHistory:
-			view->m_arrowsChangeHistory = enabled;
-			break;
-		case ArrowKeysWrap:
-			view->m_arrowKeysWrap = enabled;
-			break;
-		case ArrowRecallsPartial:
-			view->m_arrowRecallsPartial = enabled;
-			break;
-		case AutoPause:
-			view->m_autoPause = enabled;
-			if (!enabled)
-				view->setScrollbackSplitActive(false);
-			break;
-		case AutoRepeat:
-			view->m_autoRepeat = enabled;
-			break;
-		case AutoResizeCommandWindow:
-			view->m_autoResizeCommandWindow = enabled;
-			view->updateInputHeight();
-			break;
-		case AutoResizeMaximumLines:
-			view->m_autoResizeMaximumLines = static_cast<int>(value);
-			view->updateInputHeight();
-			break;
-		case AutoResizeMinimumLines:
-			view->m_autoResizeMinimumLines = static_cast<int>(value);
-			view->updateInputHeight();
-			break;
-		case ConfirmBeforeReplacingTyping:
-			view->m_confirmBeforeReplacingTyping = enabled;
-			break;
-		case ConfirmOnPaste:
-			view->m_confirmOnPaste = enabled;
-			break;
-		case CtrlBackspaceDeletesLastWord:
-			view->m_ctrlBackspaceDeletesLastWord = enabled;
-			break;
-		case CtrlNGoesToNextCommand:
-			view->m_ctrlNGoesToNextCommand = enabled;
-			break;
-		case CtrlPGoesToPreviousCommand:
-			view->m_ctrlPGoesToPreviousCommand = enabled;
-			break;
-		case CtrlZGoesToEndOfBuffer:
-			view->m_ctrlZGoesToEndOfBuffer = enabled;
-			break;
-		case DisplayMyInput:
-			view->m_displayMyInput = enabled;
-			break;
-		case DoubleClickInserts:
-			view->m_doubleClickInserts = enabled;
-			break;
-		case DoubleClickSends:
-			view->m_doubleClickSends = enabled;
-			break;
-		case EchoForceTerminatesPartialPrompts:
-			view->m_echoForceTerminatesPartialPrompts = enabled;
-			break;
-		case EscapeDeletesInput:
-			view->m_escapeDeletesInput = enabled;
-			break;
-		case FadeOutputAfterSeconds:
-			view->m_fadeOutputBufferAfterSeconds = static_cast<int>(value);
-			if (view->m_fadeTimer)
-			{
-				if (value > 0)
-				{
-					if (!view->m_fadeTimer->isActive())
-						view->m_fadeTimer->start(1000);
-				}
-				else
-					view->m_fadeTimer->stop();
-			}
-			break;
-		case FadeOutputOpacityPercent:
-			view->m_fadeOutputOpacityPercent = static_cast<int>(value);
-			break;
-		case FadeOutputSeconds:
-			view->m_fadeOutputSeconds = static_cast<int>(value);
-			break;
-		case HistoryLines:
-			view->applyHistoryLimit(static_cast<int>(value));
-			break;
-		case HyperlinkAddsToCommandHistory:
-			view->m_hyperlinkAddsToCommandHistory = enabled;
-			break;
-		case HyperlinkColour:
-			view->m_hyperlinkColour =
-			    WorldView::parseColor(m_worldAttributes.value(QStringLiteral("hyperlink_colour")));
-			break;
-		case KeepCommandsOnSameLine:
-			view->m_keepCommandsOnSameLine = enabled;
-			break;
-		case KeepPauseAtBottom:
-			view->m_keepPauseAtBottom = enabled;
-			break;
-		case LineInformation:
-			view->m_lineInformation = enabled;
-			break;
-		case LineSpacing:
-			view->m_lineSpacing = static_cast<int>(value);
-			break;
-		case LowerCaseTabCompletion:
-			view->m_lowerCaseTabCompletion = enabled;
-			break;
-		case NoEchoOff:
-			view->m_noEchoOff = enabled;
-			if (enabled)
-				view->m_noEcho = false;
-			break;
-		case PartialSaveCharacterThreshold:
-			view->m_partialSaveCharacterThreshold = static_cast<int>(value);
-			break;
-		case PixelOffset:
-			view->m_inputPixelOffset = static_cast<int>(value);
-			break;
-		case SaveDeletedCommand:
-			view->m_saveDeletedCommand = enabled;
-			break;
-		case ShowBold:
-			view->m_showBold = enabled;
-			break;
-		case ShowItalic:
-			view->m_showItalic = enabled;
-			break;
-		case ShowUnderline:
-			view->m_showUnderline = enabled;
-			break;
-		case TabCompletionExcludesSymbolPrefix:
-			view->setTabCompletionExcludesSymbolPrefix(enabled);
-			break;
-		case TabCompletionExcludesSymbolSuffix:
-			view->setTabCompletionExcludesSymbolSuffix(enabled);
-			break;
-		case TabCompletionLines:
-			view->m_tabCompletionLines = static_cast<int>(value);
-			break;
-		case TabCompletionSpace:
-			view->m_tabCompletionSpace = enabled;
-			break;
-		case UnderlineHyperlinks:
-			view->m_underlineHyperlinks = enabled;
-			break;
-		case UseCustomLinkColour:
-			view->m_useCustomLinkColour = enabled;
-			break;
-		case WrapColumn:
-			view->m_wrapColumn = static_cast<int>(value);
-			view->applyOutputWrapRuntimeSettings();
-			view->updateWrapMargin();
-			break;
-		case WrapInput:
-			view->m_wrapInput = enabled;
-			break;
-		case InputBackgroundColour:
-		case InputTextColour:
-		case InputFont:
-		case OutputFont:
-		case OutputWrap:
-		case TimestampColours:
-			// These bindings are applied below with their related presentation state.
-			break;
-		default:
-			continue;
-		}
-
-		if (binding == InputBackgroundColour || binding == InputTextColour)
-			view->applyInputPaletteRuntimeSettings();
-		else if (binding == InputFont)
-			view->applyInputFontRuntimeSettings();
-		else if (binding == OutputFont)
-		{
-			view->applyOutputFontRuntimeSettings();
-			view->restoreOutputFromPersistedLines(m_lines);
-		}
-		else if (binding == OutputWrap)
-		{
-			view->applyOutputWrapRuntimeSettings();
-			view->updateWrapMargin();
-		}
-		else if (binding == TimestampColours)
-		{
-			view->refreshTimestampRenderSettings();
-			view->restoreOutputFromPersistedLines(m_lines);
-		}
-
-		if (binding == AlternativeInverse)
-			view->restoreOutputFromPersistedLines(m_lines);
-		else if (binding == UnderlineHyperlinks || binding == UseCustomLinkColour)
-			view->requestNativeOutputRepaint();
-	}
+	emit numericWorldOptionPresentationRequested(binding, value);
 	if (binding == OutputWrap)
 		updateTelnetWindowSizeForNaws();
 }
@@ -27522,7 +27289,8 @@ int WorldRuntime::setOptionItem(const WorldNumericOption &option, const long lon
 
 	const long long storedValue = value;
 	const QString   storedText  = QMudWorldOptions::storedNumericOptionText(option, value);
-	setWorldAttributeImpl(QString::fromLatin1(option.name), storedText, false);
+	const QString   key         = QString::fromLatin1(option.name);
+	setWorldAttributeImpl(key, storedText, false);
 	if (option.binding != WorldNumericOptionBinding::None)
 		applyNumericWorldOption(option.binding, storedValue);
 
@@ -27536,27 +27304,7 @@ int WorldRuntime::setOptionItem(const WorldNumericOption &option, const long lon
 	}
 	if (option.flags & OPT_FIX_WRAP_COLUMN)
 		updateTelnetWindowSizeForNaws();
-	for (WorldView *view : presentationViews())
-	{
-		bool rebuiltOutput = option.binding == WorldNumericOptionBinding::OutputFont ||
-		                     option.binding == WorldNumericOptionBinding::TimestampColours;
-		if (option.flags & OPT_FIX_INPUT_WRAP)
-			view->updateInputWrap();
-		if (option.flags & OPT_FIX_TOOLTIP_START)
-			view->applyTooltipStartTimeRuntimeSetting();
-		if (option.flags & OPT_FIX_TOOLTIP_VISIBLE)
-			view->applyTooltipVisibleTimeRuntimeSetting();
-		if (option.flags & OPT_UPDATE_INPUT_FONT)
-			view->applyInputFontRuntimeSettings();
-		if (option.flags & OPT_UPDATE_OUTPUT_FONT)
-		{
-			view->applyOutputFontRuntimeSettings();
-			view->restoreOutputFromPersistedLines(m_lines);
-			rebuiltOutput = true;
-		}
-		if (option.flags & OPT_UPDATE_VIEWS && !rebuiltOutput)
-			view->requestNativeOutputRepaint();
-	}
+	emit numericWorldOptionFlagsPresentationRequested(key, option.flags, option.binding);
 	return eOK;
 }
 
@@ -27611,8 +27359,7 @@ void WorldRuntime::setWorldAttributeImpl(const QString &key, const QString &valu
 		if (applyGenericEffects)
 		{
 			updateTelnetWindowSizeForNaws();
-			if (m_view)
-				m_view->applyRuntimeSettingsWithoutOutputRebuild();
+			applyRuntimeSettingsToPresentationViews(false);
 		}
 	}
 	if (applyGenericEffects && !m_loadingDocument && worldAttributeAffectsCommandProcessor(key))
@@ -34041,12 +33788,18 @@ void WorldRuntime::addLine(const QString &text, int flags, const QVector<StyleSp
 		notifyOutputViewLineAppended(removedHeadCount);
 }
 
-bool WorldRuntime::commitPendingIncomingPartialLineStorage(QString *committedText)
+bool WorldRuntime::commitPendingIncomingPartialLineStorage(QString *committedText,
+                                                           qint64  *committedLineNumber,
+                                                           quint64 *committedPartialLineRevision)
 {
 	if (QThread::currentThread() != thread())
 	{
-		return qmudInvokeMethodOr(this, false, [this, committedText]
-		                          { return commitPendingIncomingPartialLineStorage(committedText); });
+		return qmudInvokeMethodOr(this, false,
+		                          [this, committedText, committedLineNumber, committedPartialLineRevision]
+		                          {
+			                          return commitPendingIncomingPartialLineStorage(
+			                              committedText, committedLineNumber, committedPartialLineRevision);
+		                          });
 	}
 
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::commitPendingIncomingPartialLineStorage");
@@ -34059,6 +33812,8 @@ bool WorldRuntime::commitPendingIncomingPartialLineStorage(QString *committedTex
 	QVector<StyleSpan> spans = m_partialLineSpans;
 	if (committedText)
 		*committedText = text;
+	if (committedPartialLineRevision)
+		*committedPartialLineRevision = m_incomingPartialLineRevision;
 	m_partialLineText.clear();
 	m_partialLineSpans.clear();
 	m_pendingCarriageReturnOverwrite = false;
@@ -34076,11 +33831,14 @@ bool WorldRuntime::commitPendingIncomingPartialLineStorage(QString *committedTex
 		else
 			wrapStyledLineForColumn(text, spans, wrapConfig.wrapColumn, wrapConfig.indentParas);
 	}
+	const qint64 lineNumber = m_nextLineNumber;
 
 	if (spans.isEmpty())
 		addLine(text, LineOutput, true);
 	else
 		addLine(text, LineOutput, spans, true);
+	if (committedLineNumber)
+		*committedLineNumber = lineNumber;
 	return true;
 }
 
@@ -34396,9 +34154,6 @@ bool WorldRuntime::removeHiddenLuaContextLineByAbsoluteNumber(const qint64 absol
 
 void WorldRuntime::notifyOutputViewLineChanged(const int runtimeLineIndex)
 {
-	const QVector<WorldView *> views = presentationViews();
-	if (views.isEmpty())
-		return;
 	if (runtimeLineIndex >= 0)
 	{
 		if (m_outputViewMutationBatchDepth > 0)
@@ -34431,8 +34186,10 @@ void WorldRuntime::notifyOutputViewLineChanged(const int runtimeLineIndex)
 			m_outputViewLineChangedIndex   = runtimeLineIndex;
 			return;
 		}
-		for (WorldView *view : views)
-			view->notifyRuntimeOutputLineChanged(runtimeLineIndex);
+		OutputPresentationMutation mutation;
+		mutation.kind              = OutputPresentationMutation::Kind::LineChanged;
+		mutation.firstChangedIndex = runtimeLineIndex;
+		publishOutputPresentationMutation(mutation);
 		return;
 	}
 	if (m_outputViewMutationBatchDepth > 0)
@@ -34441,8 +34198,15 @@ void WorldRuntime::notifyOutputViewLineChanged(const int runtimeLineIndex)
 		m_outputViewLineChangedIndex   = -1;
 		return;
 	}
-	for (WorldView *view : views)
-		view->notifyRuntimeOutputLineChanged();
+	OutputPresentationMutation mutation;
+	mutation.kind = OutputPresentationMutation::Kind::LineChanged;
+	publishOutputPresentationMutation(mutation);
+}
+
+void WorldRuntime::publishOutputPresentationMutation(OutputPresentationMutation &mutation) const
+{
+	mutation.sequence = ++m_outputPresentationMutationSequence;
+	emit outputPresentationMutationAvailable(mutation);
 }
 
 bool WorldRuntime::transformOutputBufferRange(int &firstIndex, int &lastIndexExclusive,
@@ -34570,9 +34334,6 @@ void WorldRuntime::transformPendingOutputViewRanges(const std::span<const Output
 
 void WorldRuntime::notifyOutputViewLineAppended(const int removedHeadCount)
 {
-	const QVector<WorldView *> views = presentationViews();
-	if (views.isEmpty())
-		return;
 	const int boundedRemovedHeadCount   = qMax(0, removedHeadCount);
 	const int postMutationSize          = safeQSizeToInt(m_lines.size());
 	const int appendIndexBeforeMutation = postMutationSize + boundedRemovedHeadCount - 1;
@@ -34605,9 +34366,14 @@ void WorldRuntime::notifyOutputViewLineAppended(const int removedHeadCount)
 	}
 	const int previousHeadRemovalCount = previousOutputHeadRemovalCount(
 	    outputBufferLineCountBeforeEdits(postMutationSize, editSpan), editSpan);
-	for (WorldView *view : views)
-		view->notifyRuntimeOutputLineAppended(postMutationSize - 1, postMutationSize, editSpan,
-		                                      previousHeadRemovalCount);
+	OutputPresentationMutation mutation;
+	mutation.kind                       = OutputPresentationMutation::Kind::LinesAppended;
+	mutation.firstAppendedIndex         = postMutationSize - 1;
+	mutation.lastAppendedIndexExclusive = postMutationSize;
+	mutation.removedHeadCount           = previousHeadRemovalCount;
+	mutation.fixedStructuralEdits       = structuralEdits;
+	mutation.fixedStructuralEditCount   = static_cast<quint8>(structuralEditCount);
+	publishOutputPresentationMutation(mutation);
 }
 
 void WorldRuntime::notifyOutputViewLinesAppended(const int              firstAppendedIndex,
@@ -34615,9 +34381,6 @@ void WorldRuntime::notifyOutputViewLinesAppended(const int              firstApp
                                                  const OutputBufferEdit structuralEdit,
                                                  const int              removedHeadCount)
 {
-	const QVector<WorldView *> views = presentationViews();
-	if (views.isEmpty())
-		return;
 	Q_ASSERT(firstAppendedIndex >= 0 && lastAppendedIndexExclusive > firstAppendedIndex);
 	if (firstAppendedIndex < 0 || lastAppendedIndexExclusive <= firstAppendedIndex)
 		return;
@@ -34652,18 +34415,20 @@ void WorldRuntime::notifyOutputViewLinesAppended(const int              firstApp
 
 	const int previousHeadRemovalCount = previousOutputHeadRemovalCount(
 	    outputBufferLineCountBeforeEdits(safeQSizeToInt(m_lines.size()), editSpan), editSpan);
-	for (WorldView *view : views)
-		view->notifyRuntimeOutputLineAppended(firstAppendedIndex, lastAppendedIndexExclusive, editSpan,
-		                                      previousHeadRemovalCount);
+	OutputPresentationMutation mutation;
+	mutation.kind                       = OutputPresentationMutation::Kind::LinesAppended;
+	mutation.firstAppendedIndex         = firstAppendedIndex;
+	mutation.lastAppendedIndexExclusive = lastAppendedIndexExclusive;
+	mutation.removedHeadCount           = previousHeadRemovalCount;
+	mutation.fixedStructuralEdits       = structuralEdits;
+	mutation.fixedStructuralEditCount   = static_cast<quint8>(structuralEditCount);
+	publishOutputPresentationMutation(mutation);
 }
 
 void WorldRuntime::notifyOutputViewTailRangeChangedAndLinesAppended(
     const int firstChangedIndex, const int lastChangedIndexExclusive, const int firstAppendedIndex,
     const int lastAppendedIndexExclusive, const OutputBufferEdit structuralEdit, const int removedHeadCount)
 {
-	const QVector<WorldView *> views = presentationViews();
-	if (views.isEmpty())
-		return;
 	Q_ASSERT(firstChangedIndex >= 0 && lastChangedIndexExclusive > firstChangedIndex);
 	Q_ASSERT(firstAppendedIndex >= 0 && lastAppendedIndexExclusive > firstAppendedIndex);
 	if (firstChangedIndex < 0 || lastChangedIndexExclusive <= firstChangedIndex || firstAppendedIndex < 0 ||
@@ -34728,21 +34493,22 @@ void WorldRuntime::notifyOutputViewTailRangeChangedAndLinesAppended(
 
 	const int previousHeadRemovalCount = previousOutputHeadRemovalCount(
 	    outputBufferLineCountBeforeEdits(safeQSizeToInt(m_lines.size()), editSpan), editSpan);
-	for (WorldView *view : views)
-	{
-		view->notifyRuntimeOutputRangeChanged(firstChangedIndex, lastChangedIndexExclusive, editSpan,
-		                                      previousHeadRemovalCount);
-		view->notifyRuntimeOutputLineAppended(firstAppendedIndex, lastAppendedIndexExclusive);
-	}
+	OutputPresentationMutation mutation;
+	mutation.kind                       = OutputPresentationMutation::Kind::RangeChangedAndLinesAppended;
+	mutation.firstChangedIndex          = firstChangedIndex;
+	mutation.lastChangedIndexExclusive  = lastChangedIndexExclusive;
+	mutation.firstAppendedIndex         = firstAppendedIndex;
+	mutation.lastAppendedIndexExclusive = lastAppendedIndexExclusive;
+	mutation.removedHeadCount           = previousHeadRemovalCount;
+	mutation.fixedStructuralEdits       = structuralEdits;
+	mutation.fixedStructuralEditCount   = static_cast<quint8>(structuralEditCount);
+	publishOutputPresentationMutation(mutation);
 }
 
 void WorldRuntime::notifyOutputViewRangeChanged(const int runtimeLineIndex, const int runtimeLineEndExclusive,
                                                 const OutputBufferEdit structuralEdit,
                                                 const int              removedHeadCount)
 {
-	const QVector<WorldView *> views = presentationViews();
-	if (views.isEmpty())
-		return;
 	const int                       boundedRemovedHeadCount = qMax(0, removedHeadCount);
 	std::array<OutputBufferEdit, 2> structuralEdits{};
 	int                             structuralEditCount = 0;
@@ -34789,21 +34555,31 @@ void WorldRuntime::notifyOutputViewRangeChanged(const int runtimeLineIndex, cons
 	}
 	const int previousHeadRemovalCount = previousOutputHeadRemovalCount(
 	    outputBufferLineCountBeforeEdits(safeQSizeToInt(m_lines.size()), editSpan), editSpan);
-	for (WorldView *view : views)
-		view->notifyRuntimeOutputRangeChanged(runtimeLineIndex, runtimeLineEndExclusive, editSpan,
-		                                      previousHeadRemovalCount);
+	OutputPresentationMutation mutation;
+	mutation.kind                      = OutputPresentationMutation::Kind::RangeChanged;
+	mutation.firstChangedIndex         = runtimeLineIndex;
+	mutation.lastChangedIndexExclusive = runtimeLineEndExclusive;
+	mutation.removedHeadCount          = previousHeadRemovalCount;
+	mutation.fixedStructuralEdits      = structuralEdits;
+	mutation.fixedStructuralEditCount  = static_cast<quint8>(structuralEditCount);
+	publishOutputPresentationMutation(mutation);
 }
 
 void WorldRuntime::rebuildOutputPresentationViews() const
 {
-	for (WorldView *view : presentationViews())
-		view->restoreOutputFromPersistedLines(m_lines);
+	OutputPresentationMutation mutation;
+	mutation.kind = OutputPresentationMutation::Kind::Rebuild;
+	publishOutputPresentationMutation(mutation);
 }
 
-void WorldRuntime::clearOutputPresentationViews() const
+void WorldRuntime::clearOutputPresentationViews()
 {
-	for (WorldView *view : presentationViews())
-		view->clearOutputBuffer();
+	m_partialOutputPresentationText.clear();
+	m_partialOutputPresentationSpans.clear();
+	m_partialOutputPresentationRevision = 0;
+	OutputPresentationMutation mutation;
+	mutation.kind = OutputPresentationMutation::Kind::Clear;
+	publishOutputPresentationMutation(mutation);
 }
 
 void WorldRuntime::resetPendingOutputViewMutationNotifications()
@@ -34821,13 +34597,6 @@ void WorldRuntime::resetPendingOutputViewMutationNotifications()
 
 void WorldRuntime::flushOutputViewMutationBatch()
 {
-	const QVector<WorldView *> views = presentationViews();
-	if (views.isEmpty())
-	{
-		resetPendingOutputViewMutationNotifications();
-		m_outputViewMutationBatchInitialLineCount = safeQSizeToInt(m_lines.size());
-		return;
-	}
 	bool                      rangeChanged               = m_outputViewRangeChangedPending;
 	const int                 firstChangedIndex          = m_outputViewFirstChangedIndex;
 	const int                 lastChangedIndexExclusive  = m_outputViewLastChangedIndexExclusive;
@@ -34869,48 +34638,145 @@ void WorldRuntime::flushOutputViewMutationBatch()
 		const int boundedFirstChangedIndex = qMax(0, firstChangedIndex);
 		const int boundedLastChangedIndexExclusive =
 		    firstChangedIndex < 0 || lastChangedIndexExclusive < 0 ? -1 : lastChangedIndexExclusive;
-		for (WorldView *view : views)
-		{
-			view->notifyRuntimeOutputRangeChanged(boundedFirstChangedIndex, boundedLastChangedIndexExclusive,
-			                                      editSpan, previousHeadRemovalCount);
-			if (tailAppended)
-				view->notifyRuntimeOutputLineAppended(firstAppendedIndex, lastAppendedIndexExclusive);
-		}
+		OutputPresentationMutation mutation;
+		mutation.kind = tailAppended ? OutputPresentationMutation::Kind::RangeChangedAndLinesAppended
+		                             : OutputPresentationMutation::Kind::RangeChanged;
+		mutation.firstChangedIndex          = boundedFirstChangedIndex;
+		mutation.lastChangedIndexExclusive  = boundedLastChangedIndexExclusive;
+		mutation.firstAppendedIndex         = firstAppendedIndex;
+		mutation.lastAppendedIndexExclusive = lastAppendedIndexExclusive;
+		mutation.removedHeadCount           = previousHeadRemovalCount;
+		mutation.structuralEditStorage      = std::move(structuralEdits);
+		publishOutputPresentationMutation(mutation);
 		return;
 	}
 	if (changed)
 	{
-		for (WorldView *view : views)
+		OutputPresentationMutation mutation;
+		if (tailAppended)
 		{
-			if (tailAppended)
-			{
-				const int firstChanged = qMax(0, changedIndex);
-				view->notifyRuntimeOutputRangeChanged(firstChanged, changedIndex >= 0 ? firstChanged + 1 : -1,
-				                                      editSpan, previousHeadRemovalCount);
-				view->notifyRuntimeOutputLineAppended(firstAppendedIndex, lastAppendedIndexExclusive);
-			}
-			else if (changedIndex >= 0)
-				view->notifyRuntimeOutputLineChanged(changedIndex);
-			else
-				view->notifyRuntimeOutputLineChanged();
+			const int firstChanged     = qMax(0, changedIndex);
+			mutation.kind              = OutputPresentationMutation::Kind::RangeChangedAndLinesAppended;
+			mutation.firstChangedIndex = firstChanged;
+			mutation.lastChangedIndexExclusive  = changedIndex >= 0 ? firstChanged + 1 : -1;
+			mutation.firstAppendedIndex         = firstAppendedIndex;
+			mutation.lastAppendedIndexExclusive = lastAppendedIndexExclusive;
+			mutation.removedHeadCount           = previousHeadRemovalCount;
+			mutation.structuralEditStorage      = std::move(structuralEdits);
 		}
+		else
+		{
+			mutation.kind              = OutputPresentationMutation::Kind::LineChanged;
+			mutation.firstChangedIndex = changedIndex;
+		}
+		publishOutputPresentationMutation(mutation);
 		return;
 	}
 	if (tailAppended)
 	{
-		for (WorldView *view : views)
-			view->notifyRuntimeOutputLineAppended(firstAppendedIndex, lastAppendedIndexExclusive, editSpan,
-			                                      previousHeadRemovalCount);
+		OutputPresentationMutation mutation;
+		mutation.kind                       = OutputPresentationMutation::Kind::LinesAppended;
+		mutation.firstAppendedIndex         = firstAppendedIndex;
+		mutation.lastAppendedIndexExclusive = lastAppendedIndexExclusive;
+		mutation.removedHeadCount           = previousHeadRemovalCount;
+		mutation.structuralEditStorage      = std::move(structuralEdits);
+		publishOutputPresentationMutation(mutation);
 	}
 }
 
-void WorldRuntime::publishIncomingStyledLinePartial(const QString &line, const QVector<StyleSpan> &spans)
+void WorldRuntime::publishIncomingStyledLinePartial(const QString &line, const QVector<StyleSpan> &spans,
+                                                    const quint64 partialLineRevision)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::publishIncomingStyledLinePartial");
 	if (m_incomingStreamPresentationBatchDepth == 0 &&
 	    (m_outputViewLineChangedPending || m_outputViewRangeChangedPending || m_outputViewTailAppendPending))
 		flushOutputViewMutationBatch();
-	emit incomingStyledLinePartialReceived(line, spans);
+	emit incomingStyledLinePartialReceived(line, spans, partialLineRevision);
+}
+
+bool WorldRuntime::publishPartialOutputPresentation(const QString &text, const QVector<StyleSpan> &spans,
+                                                    const quint64 partialLineRevision)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::publishPartialOutputPresentation");
+	if (partialLineRevision != m_incomingPartialLineRevision)
+		return false;
+	if (text.isEmpty())
+	{
+		return clearPartialOutputPresentation(partialLineRevision);
+	}
+	if (m_partialOutputPresentationRevision == partialLineRevision &&
+	    m_partialOutputPresentationText == text && m_partialOutputPresentationSpans == spans)
+	{
+		return true;
+	}
+	m_partialOutputPresentationText     = text;
+	m_partialOutputPresentationSpans    = spans;
+	m_partialOutputPresentationRevision = partialLineRevision;
+	emit partialOutputPresentationUpdated(m_partialOutputPresentationText, m_partialOutputPresentationSpans,
+	                                      m_partialOutputPresentationRevision);
+	return true;
+}
+
+void WorldRuntime::clearPartialOutputPresentation()
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::clearPartialOutputPresentation");
+	if (m_partialOutputPresentationText.isEmpty() && m_partialOutputPresentationSpans.isEmpty())
+		return;
+	m_partialOutputPresentationText.clear();
+	m_partialOutputPresentationSpans.clear();
+	m_partialOutputPresentationRevision = 0;
+	emit partialOutputPresentationCleared();
+}
+
+bool WorldRuntime::clearPartialOutputPresentation(const quint64 expectedPartialLineRevision)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::clearPartialOutputPresentation");
+	if (m_partialOutputPresentationRevision != expectedPartialLineRevision)
+		return false;
+	if (m_partialOutputPresentationText.isEmpty() && m_partialOutputPresentationSpans.isEmpty())
+		return false;
+	clearPartialOutputPresentation();
+	return true;
+}
+
+void WorldRuntime::completePartialOutputPresentation(const quint64 partialLineRevision,
+                                                     const qint64  runtimeLineNumber)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::completePartialOutputPresentation");
+	if (m_partialOutputPresentationRevision != partialLineRevision ||
+	    (m_partialOutputPresentationText.isEmpty() && m_partialOutputPresentationSpans.isEmpty()))
+	{
+		return;
+	}
+	m_partialOutputPresentationText.clear();
+	m_partialOutputPresentationSpans.clear();
+	m_partialOutputPresentationRevision = 0;
+	emit partialOutputPresentationCompleted(partialLineRevision, runtimeLineNumber);
+}
+
+const QString &WorldRuntime::partialOutputPresentationText() const noexcept
+{
+	return m_partialOutputPresentationText;
+}
+
+const QVector<WorldRuntime::StyleSpan> &WorldRuntime::partialOutputPresentationSpans() const noexcept
+{
+	return m_partialOutputPresentationSpans;
+}
+
+quint64 WorldRuntime::partialOutputPresentationRevision() const noexcept
+{
+	return m_partialOutputPresentationRevision;
+}
+
+bool WorldRuntime::outputPresentationMutationBatchActive() const noexcept
+{
+	return m_outputViewMutationBatchDepth > 0;
+}
+
+bool WorldRuntime::outputPresentationMutationBatchSuppressesDraw() const noexcept
+{
+	return m_outputViewMutationBatchDepth > 0 && m_drawOutputWindowMutationReplayDepth > 0;
 }
 
 void WorldRuntime::setIncomingPartialLineRevision(const quint64 revision)
@@ -34952,12 +34818,7 @@ void WorldRuntime::beginOutputViewMutationBatch()
 	if (m_outputViewMutationBatchDepth == 0)
 	{
 		m_outputViewMutationBatchInitialLineCount = safeQSizeToInt(m_lines.size());
-		m_outputViewMutationBatchViews.clear();
-		for (WorldView *view : presentationViews())
-		{
-			m_outputViewMutationBatchViews.push_back(view);
-			view->beginRuntimeOutputMutationBatch(m_drawOutputWindowMutationReplayDepth > 0);
-		}
+		emit outputPresentationMutationBatchBegan(m_drawOutputWindowMutationReplayDepth > 0);
 	}
 	++m_outputViewMutationBatchDepth;
 }
@@ -34970,14 +34831,8 @@ void WorldRuntime::endOutputViewMutationBatch()
 	--m_outputViewMutationBatchDepth;
 	if (m_outputViewMutationBatchDepth > 0)
 		return;
-	const QVector<QPointer<WorldView>> batchViews = std::move(m_outputViewMutationBatchViews);
-	m_outputViewMutationBatchViews.clear();
 	flushOutputViewMutationBatch();
-	for (const QPointer<WorldView> &view : batchViews)
-	{
-		if (view)
-			view->endRuntimeOutputMutationBatch();
-	}
+	emit outputPresentationMutationBatchEnded();
 }
 
 bool WorldRuntime::writeLuaCallbackOutputAtLineAnchor(
@@ -39227,7 +39082,6 @@ void WorldRuntime::setView(WorldView *view)
 	m_view = view;
 	if (m_view)
 	{
-		registerPresentationView(m_view);
 		m_viewDestroyedConnection = connect(m_view, &QObject::destroyed, this,
 		                                    [this]
 		                                    {
@@ -39243,89 +39097,24 @@ void WorldRuntime::setView(WorldView *view)
 	syncMiniWindowDevicePixelRatioForView();
 }
 
-void WorldRuntime::registerPresentationView(WorldView *view)
+void WorldRuntime::applyRuntimeSettingsToPresentationViews(const bool allowOutputRebuild) const
 {
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::registerPresentationView");
-	if (!view)
-		return;
-
-	bool registered = false;
-	for (auto it = m_presentationViews.begin(); it != m_presentationViews.end();)
-	{
-		if (it->isNull())
-		{
-			it = m_presentationViews.erase(it);
-			continue;
-		}
-		if (it->data() == view)
-			registered = true;
-		++it;
-	}
-	if (!registered)
-	{
-		m_presentationViews.push_back(view);
-		if (m_outputViewMutationBatchDepth > 0)
-		{
-			m_outputViewMutationBatchViews.push_back(view);
-			view->beginRuntimeOutputMutationBatch(m_drawOutputWindowMutationReplayDepth > 0);
-		}
-	}
-	view->setDrawOutputWindowCallbackActive(m_drawOutputWindowCallbackInFlightDepth > 0);
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::applyRuntimeSettingsToPresentationViews");
+	emit runtimeSettingsApplicationRequested(allowOutputRebuild);
 }
 
-void WorldRuntime::unregisterPresentationView(WorldView *view)
+void WorldRuntime::applyAlphaWorldOption(const QString &key, const QString &value, const bool multiline,
+                                         const int flags)
 {
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::unregisterPresentationView");
-	if (!view)
-		return;
-
-	for (auto it = m_presentationViews.begin(); it != m_presentationViews.end();)
-	{
-		if (it->isNull() || it->data() == view)
-			it = m_presentationViews.erase(it);
-		else
-			++it;
-	}
-	if (m_outputViewMutationBatchDepth > 0)
-	{
-		const auto batchView =
-		    std::ranges::find_if(m_outputViewMutationBatchViews, [view](const QPointer<WorldView> &candidate)
-		                         { return candidate.data() == view; });
-		if (batchView != m_outputViewMutationBatchViews.end())
-		{
-			m_outputViewMutationBatchViews.erase(batchView);
-			view->endRuntimeOutputMutationBatch();
-		}
-	}
-	view->setDrawOutputWindowCallbackActive(false);
-	if (m_view != view)
-		return;
-
-	if (m_viewDestroyedConnection)
-	{
-		QObject::disconnect(m_viewDestroyedConnection);
-		m_viewDestroyedConnection = QMetaObject::Connection{};
-	}
-	m_view = nullptr;
-}
-
-void WorldRuntime::setPresentationSplitViewDividerWidth(const int width) const
-{
-	qmudAssertObjectThreadAffinity(this, "WorldRuntime::setPresentationSplitViewDividerWidth");
-	for (WorldView *view : presentationViews())
-		view->setSplitViewDividerWidth(width);
-}
-
-QVector<WorldView *> WorldRuntime::presentationViews() const
-{
-	QVector<WorldView *> views;
-	views.reserve(m_presentationViews.size());
-	for (const QPointer<WorldView> &view : m_presentationViews)
-	{
-		if (view)
-			views.push_back(view.data());
-	}
-	return views;
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::applyAlphaWorldOption");
+	const QString previous = multiline ? m_worldMultilineAttributes.value(key) : m_worldAttributes.value(key);
+	if (multiline)
+		setWorldMultilineAttribute(key, value);
+	else
+		setWorldAttribute(key, value);
+	const QString current = multiline ? m_worldMultilineAttributes.value(key) : m_worldAttributes.value(key);
+	if (current != previous)
+		emit alphaWorldOptionPresentationRequested(key, flags);
 }
 
 bool WorldRuntime::syncMiniWindowDevicePixelRatioForView()
@@ -39647,12 +39436,7 @@ void WorldRuntime::finishPendingPluginInstallAsync(const bool installedAny)
 	{
 		invalidatePluginCallbackPresenceCache();
 		notifyWorldOutputResized();
-		for (WorldView *view : presentationViews())
-		{
-			if (!view->isVisible() || view->outputClientWidth() <= 0 || view->outputClientHeight() <= 0)
-				continue;
-			view->requestSemanticOutputRepaint(WorldView::SemanticOutputRepaint::PresentationVisible, true);
-		}
+		emit visibleOutputPresentationRepaintRequested();
 	}
 
 	if (!m_pluginInstallDeferred && hasPendingPluginInstallWork())
@@ -39716,11 +39500,7 @@ bool WorldRuntime::pluginInstallDeferred() const
 void WorldRuntime::setBackgroundColour(long colour)
 {
 	m_backgroundColour = colour;
-	if (m_view)
-	{
-		m_view->applyRuntimeSettings();
-		m_view->update();
-	}
+	applyRuntimeSettingsToPresentationViews();
 }
 
 long WorldRuntime::backgroundColour() const

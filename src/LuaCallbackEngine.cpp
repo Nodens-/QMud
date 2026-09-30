@@ -28470,8 +28470,7 @@ static int luaSetInputFont(lua_State *L)
 		    targetRuntime.setWorldAttribute(QStringLiteral("input_font_height"), QString::number(pointSize));
 		    targetRuntime.setWorldAttribute(QStringLiteral("input_font_weight"), QString::number(weight));
 		    targetRuntime.setWorldAttribute(QStringLiteral("input_font_italic"), QString::number(italic));
-		    if (WorldView *view = targetRuntime.view())
-			    view->applyRuntimeSettings();
+		    targetRuntime.applyRuntimeSettingsToPresentationViews();
 	    });
 	updateCallbackWorldAttributeSnapshot(engine, runtime, QStringLiteral("input_font_name"), fontName, false);
 	updateCallbackWorldAttributeSnapshot(engine, runtime, QStringLiteral("input_font_height"),
@@ -28528,8 +28527,7 @@ static int luaSetOutputFont(lua_State *L)
 	    {
 		    targetRuntime.setWorldAttribute(QStringLiteral("output_font_name"), fontName);
 		    targetRuntime.setWorldAttribute(QStringLiteral("output_font_height"), QString::number(pointSize));
-		    if (WorldView *view = targetRuntime.view())
-			    view->applyRuntimeSettings();
+		    targetRuntime.applyRuntimeSettingsToPresentationViews();
 	    });
 	updateCallbackWorldAttributeSnapshot(engine, runtime, QStringLiteral("output_font_name"), fontName,
 	                                     false);
@@ -47348,13 +47346,8 @@ static int luaSetAlphaOption(lua_State *L)
 	{
 		enqueueRuntimeThreadDeferredMutationNoResult(
 		    engine, runtime,
-		    [isMultiline, canonical, value](WorldRuntime &targetRuntime)
-		    {
-			    if (isMultiline)
-				    targetRuntime.setWorldMultilineAttribute(canonical, value);
-			    else
-				    targetRuntime.setWorldAttribute(canonical, value);
-		    });
+		    [isMultiline, canonical, value, flags = option->flags](WorldRuntime &targetRuntime)
+		    { targetRuntime.applyAlphaWorldOption(canonical, value, isMultiline, flags); });
 		updateCallbackWorldAttributeSnapshot(engine, runtime, canonical, value, isMultiline);
 		refreshCallbackIndexedNoteColourSnapshotAfterWorldAttributeChange(engine, runtime, canonical,
 		                                                                  isMultiline);
@@ -47364,12 +47357,9 @@ static int luaSetAlphaOption(lua_State *L)
 
 	const int result = runOnRuntimeThreadDeferredMutation(
 	    engine, runtime,
-	    [isMultiline, canonical, value](WorldRuntime &targetRuntime) -> int
+	    [isMultiline, canonical, value, flags = option->flags](WorldRuntime &targetRuntime) -> int
 	    {
-		    if (isMultiline)
-			    targetRuntime.setWorldMultilineAttribute(canonical, value);
-		    else
-			    targetRuntime.setWorldAttribute(canonical, value);
+		    targetRuntime.applyAlphaWorldOption(canonical, value, isMultiline, flags);
 		    return eOK;
 	    },
 	    eWorldClosed);

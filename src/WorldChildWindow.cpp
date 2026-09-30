@@ -198,7 +198,10 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 		{
 			QObject::disconnect(m_runtime, nullptr, m_view, nullptr);
 			QObject::disconnect(m_view, nullptr, m_runtime, nullptr);
-			m_view->setRuntime(nullptr);
+			if (m_primaryRuntimeBinding)
+				m_view->setRuntime(nullptr);
+			else
+				m_view->setRuntimeObserver(nullptr);
 		}
 		if (m_commandProcessor)
 		{
@@ -217,10 +220,16 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 	m_primaryRuntimeBinding = primary;
 	m_autosaveInFlight      = false;
 	refreshAutosaveTimer();
-	if (m_view)
-		m_view->setPassiveBufferView(!primary);
-	if (!worldRuntime || !m_view)
+	if (!m_view)
 		return;
+	if (!worldRuntime)
+	{
+		if (role == RuntimeBindingRole::Primary)
+			m_view->setRuntime(nullptr);
+		else
+			m_view->setRuntimeObserver(nullptr);
+		return;
+	}
 
 	if (const QString worldName = worldRuntime->worldAttributes().value(QStringLiteral("name"));
 	    !worldName.isEmpty())
@@ -293,19 +302,13 @@ void WorldChildWindow::bindRuntime(WorldRuntime *worldRuntime, const RuntimeBind
 	}
 	if (m_view)
 	{
-		connect(worldRuntime, &WorldRuntime::miniWindowsChanged, m_view,
-		        [this]
-		        {
-			        if (m_view)
-				        m_view->onMiniWindowsChanged();
-		        });
 		if (primary)
 		{
-			connect(m_view, &WorldView::outputSelectionChanged, worldRuntime,
-			        [worldRuntime]
+			connect(worldRuntime, &WorldRuntime::miniWindowsChanged, m_view,
+			        [this]
 			        {
-				        if (worldRuntime)
-					        worldRuntime->notifyOutputSelectionChanged();
+				        if (m_view)
+					        m_view->onMiniWindowsChanged();
 			        });
 		}
 		connect(m_view, &WorldView::hyperlinkHighlighted, this,

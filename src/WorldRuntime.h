@@ -69,6 +69,7 @@ struct LuaDeferredRuntimeMutationBatchSequence;
 struct CausalOutboundGroup;
 class WorldRuntimeTestAccess;
 class WorldView;
+class WorldOutputRenderModel;
 class QUdpSocket;
 class QAudioOutput;
 class QMediaPlayer;
@@ -751,6 +752,50 @@ class WorldRuntime : public QObject
 				int index{0};         ///< Zero-based pre-edit insertion/removal index.
 				int removedCount{0};  ///< Number of entries removed at @ref index.
 				int insertedCount{0}; ///< Number of entries inserted at @ref index.
+		};
+		/**
+		 * @brief One allocation-free common-case output presentation mutation.
+		 *
+		 * Immediate mutations use the fixed edit storage. Batched mutations reuse
+		 * the batch's existing edit vector and allocate only when more than two
+		 * structural edits must be retained.
+		 */
+		struct OutputPresentationMutation
+		{
+				enum class Kind : quint8
+				{
+					LineChanged,
+					RangeChanged,
+					LinesAppended,
+					RangeChangedAndLinesAppended,
+					Rebuild,
+					Clear,
+				};
+
+				Kind                                            kind{Kind::LineChanged};
+				quint64                                         sequence{0};
+				int                                             firstChangedIndex{-1};
+				int                                             lastChangedIndexExclusive{-1};
+				int                                             firstAppendedIndex{-1};
+				int                                             lastAppendedIndexExclusive{-1};
+				int                                             removedHeadCount{0};
+				std::array<OutputBufferEdit, 2>                 fixedStructuralEdits{};
+				quint8                                          fixedStructuralEditCount{0};
+				QVector<OutputBufferEdit>                       structuralEditStorage;
+
+				/**
+				 * @brief Returns the ordered structural edits carried by this mutation.
+				 * @return View over fixed or batch-owned edit storage.
+				 */
+				[[nodiscard]] std::span<const OutputBufferEdit> structuralEdits() const noexcept
+				{
+					if (!structuralEditStorage.isEmpty())
+					{
+						return {structuralEditStorage.constData(),
+						        static_cast<std::size_t>(structuralEditStorage.size())};
+					}
+					return {fixedStructuralEdits.data(), fixedStructuralEditCount};
+				}
 		};
 		/**
 		 * @brief Maps an exact half-open output-buffer range through ordered structural edits.
@@ -2901,8 +2946,8 @@ class WorldRuntime : public QObject
 		 * @param pluginId Owning plugin id.
 		 * @return Selected menu item id, or empty when canceled.
 		 */
-		QString                  windowMenu(const QString &name, int left, int top, const QString &items,
-		                                    const QString &pluginId) const;
+		QString windowMenu(const QString &name, int left, int top, const QString &items,
+		                   const QString &pluginId) const;
 
 		/**
 		 * @brief View binding and runtime-mode/stat counters.
@@ -2911,27 +2956,25 @@ class WorldRuntime : public QObject
 		 * @brief Binds runtime to a world view.
 		 * @param view World view pointer.
 		 */
-		void                     setView(WorldView *view);
+		void    setView(WorldView *view);
 		/**
-		 * @brief Registers an additional view presenting this runtime.
-		 * @param view Presentation view to register.
+		 * @brief Applies current runtime settings to every attached presentation view.
+		 * @param allowOutputRebuild Whether views may rebuild their output presentation when required.
 		 */
-		void                     registerPresentationView(WorldView *view);
+		void    applyRuntimeSettingsToPresentationViews(bool allowOutputRebuild = true) const;
 		/**
-		 * @brief Removes a view from this runtime's presentation set.
-		 * @param view Presentation view to remove.
+		 * @brief Applies one alpha option and its authoritative presentation effects.
+		 * @param key Canonical option key.
+		 * @param value Normalized option value.
+		 * @param multiline Whether the option is stored in the multiline map.
+		 * @param flags Authoritative option metadata flags.
 		 */
-		void                     unregisterPresentationView(WorldView *view);
-		/**
-		 * @brief Applies a split-view divider width to every registered presentation.
-		 * @param width Divider width in pixels.
-		 */
-		void                     setPresentationSplitViewDividerWidth(int width) const;
+		void    applyAlphaWorldOption(const QString &key, const QString &value, bool multiline, int flags);
 		/**
 		 * @brief Rebuilds miniwindow backing stores for the bound view DPR.
 		 * @return `true` when at least one miniwindow backing store changed.
 		 */
-		bool                     syncMiniWindowDevicePixelRatioForView();
+		bool    syncMiniWindowDevicePixelRatioForView();
 		/**
 		 * @brief Returns bound world view.
 		 * @return Bound world view pointer.
@@ -4668,15 +4711,12 @@ class WorldRuntime : public QObject
 		 */
 		void                           setRemoveMapReverses(bool enabled);
 		/**
-		 * @brief Returns last goto-line value.
-		 * @return Last goto-line number.
+		 * @brief Applies the configured initial frozen state to presentations attached during startup.
+		 *
+		 * The state is broadcast once, after restored output and the startup banner are presented and before
+		 * startup plugins are installed. Presentations attached later retain their normal unfrozen default.
 		 */
-		[[nodiscard]] int              lastGoToLine() const;
-		/**
-		 * @brief Sets last goto-line value.
-		 * @param line Last goto-line number.
-		 */
-		void                           setLastGoToLine(int line);
+		void                           applyInitialStartPausedState();
 		/**
 		 * @brief Fires OnPluginWorldConnect callbacks.
 		 */
@@ -5287,15 +5327,97 @@ class WorldRuntime : public QObject
 		 * @brief Emitted when full styled line arrives.
 		 * @param line Incoming line text.
 		 * @param spans Style spans.
+		 * @param partialLineRevision Stable identity of the partial line completed by this line.
 		 */
-		void incomingStyledLineReceived(const QString &line, const QVector<WorldRuntime::StyleSpan> &spans);
+		void incomingStyledLineReceived(const QString &line, const QVector<WorldRuntime::StyleSpan> &spans,
+		                                quint64 partialLineRevision);
 		/**
 		 * @brief Emitted when styled partial line arrives.
 		 * @param line Partial line text.
 		 * @param spans Style spans.
+		 * @param partialLineRevision Stable identity of the partial line update.
 		 */
 		void incomingStyledLinePartialReceived(const QString                          &line,
-		                                       const QVector<WorldRuntime::StyleSpan> &spans);
+		                                       const QVector<WorldRuntime::StyleSpan> &spans,
+		                                       quint64                                 partialLineRevision);
+		/**
+		 * @brief Emitted for one runtime output presentation mutation.
+		 * @param mutation Mutation description valid for the duration of direct delivery.
+		 */
+		void
+		outputPresentationMutationAvailable(const WorldRuntime::OutputPresentationMutation &mutation) const;
+		/**
+		 * @brief Emitted synchronously after the shared logical output model commits one render delta.
+		 */
+		void outputRenderDeltaCommitted() const;
+		/**
+		 * @brief Emitted when the outermost output presentation batch begins.
+		 * @param suppressDrawNotifications Whether draw callback notifications are suppressed.
+		 */
+		void outputPresentationMutationBatchBegan(bool suppressDrawNotifications);
+		/**
+		 * @brief Emitted after the outermost output presentation batch flushes.
+		 */
+		void outputPresentationMutationBatchEnded();
+		/**
+		 * @brief Emitted when the shared partial-line presentation changes.
+		 * @param text Rendered partial-line text.
+		 * @param spans Rendered partial-line styles.
+		 * @param partialLineRevision Stable identity of the presented partial line.
+		 */
+		void partialOutputPresentationUpdated(const QString                          &text,
+		                                      const QVector<WorldRuntime::StyleSpan> &spans,
+		                                      quint64                                 partialLineRevision);
+		/**
+		 * @brief Emitted when the shared partial-line presentation is cleared.
+		 */
+		void partialOutputPresentationCleared();
+		/**
+		 * @brief Emitted when the shared partial-line presentation becomes a runtime line.
+		 * @param partialLineRevision Stable identity of the completed partial line.
+		 * @param runtimeLineNumber Stable completed runtime line number.
+		 */
+		void partialOutputPresentationCompleted(quint64 partialLineRevision, qint64 runtimeLineNumber);
+		/**
+		 * @brief Requests the one-shot startup output freeze state in every currently attached presentation.
+		 * @param frozen Whether startup presentations should be frozen.
+		 */
+		void initialOutputFreezeStateRequested(bool frozen);
+		/**
+		 * @brief Requests that every attached view apply current runtime settings.
+		 * @param allowOutputRebuild Whether output presentation may be rebuilt.
+		 */
+		void runtimeSettingsApplicationRequested(bool allowOutputRebuild) const;
+		/**
+		 * @brief Requests alpha-option presentation effects in every attached view.
+		 * @param key Canonical alpha-option key.
+		 * @param flags Authoritative alpha-option metadata flags.
+		 */
+		void alphaWorldOptionPresentationRequested(const QString &key, int flags) const;
+		/**
+		 * @brief Requests bound numeric-option presentation state in every attached view.
+		 * @param binding Presentation binding to apply.
+		 * @param value Stored numeric option value.
+		 */
+		void numericWorldOptionPresentationRequested(WorldNumericOptionBinding binding,
+		                                             long long                 value) const;
+		/**
+		 * @brief Requests flag-driven numeric-option presentation effects in every attached view.
+		 * @param key Canonical numeric-option key.
+		 * @param flags Authoritative numeric-option metadata flags.
+		 * @param binding Presentation binding already applied for the option.
+		 */
+		void numericWorldOptionFlagsPresentationRequested(const QString &key, int flags,
+		                                                  WorldNumericOptionBinding binding) const;
+		/**
+		 * @brief Reports draw-output callback activity to every attached view.
+		 * @param active Whether a draw-output callback is outstanding.
+		 */
+		void drawOutputWindowCallbackActivityChanged(bool active);
+		/**
+		 * @brief Requests a visible semantic repaint after plugin installation.
+		 */
+		void visibleOutputPresentationRepaintRequested();
 		/**
 		 * @brief Emitted to append plain output.
 		 * @param text Output text.
@@ -6597,6 +6719,11 @@ class WorldRuntime : public QObject
 		void notifyOutputViewLinesAppended(int firstAppendedIndex, int lastAppendedIndexExclusive,
 		                                   OutputBufferEdit structuralEdit, int removedHeadCount);
 		/**
+		 * @brief Assigns the next sequence and publishes one output presentation mutation.
+		 * @param mutation Mutation to sequence and publish.
+		 */
+		void publishOutputPresentationMutation(OutputPresentationMutation &mutation) const;
+		/**
 		 * @brief Notifies or defers a tail mutation containing both changed and appended ranges.
 		 * @param firstChangedIndex Zero-based inclusive start of surviving changed lines.
 		 * @param lastChangedIndexExclusive Zero-based exclusive end of surviving changed lines.
@@ -6628,22 +6755,17 @@ class WorldRuntime : public QObject
 		 */
 		void resetPendingOutputViewMutationNotifications();
 		/**
-		 * @brief Rebuilds every registered presentation from the runtime output buffer.
+		 * @brief Rebuilds every attached presentation from the runtime output buffer.
 		 */
 		void rebuildOutputPresentationViews() const;
 		/**
-		 * @brief Clears presentation-local output state in every registered view.
+		 * @brief Clears presentation-local output state in every attached view.
 		 */
-		void clearOutputPresentationViews() const;
+		void clearOutputPresentationViews();
 		/**
 		 * @brief Flushes pending batched runtime output view refresh.
 		 */
 		void flushOutputViewMutationBatch();
-		/**
-		 * @brief Returns all currently live views presenting this runtime.
-		 * @return Registered presentation views in binding order.
-		 */
-		[[nodiscard]] QVector<WorldView *> presentationViews() const;
 		/**
 		 * @brief Commits pending unterminated incoming output to runtime storage without presentation callbacks.
 		 *
@@ -6654,24 +6776,81 @@ class WorldRuntime : public QObject
 		 * deliberately exercise storage without presentation.
 		 *
 		 * @param committedText Receives the unwrapped completed line text.
+		 * @param committedLineNumber Receives the stable runtime line number of the committed line.
+		 * @param committedPartialLineRevision Receives the stable identity of the committed partial line.
 		 * @return `true` when a pending partial line was committed.
 		 */
-		bool                               commitPendingIncomingPartialLineStorage(QString *committedText);
+		bool commitPendingIncomingPartialLineStorage(QString *committedText,
+		                                             qint64  *committedLineNumber          = nullptr,
+		                                             quint64 *committedPartialLineRevision = nullptr);
 		/**
 		 * @brief Publishes a partial incoming line after presenting completed output first.
 		 * @param line Partial line text to publish.
 		 * @param spans Style spans for the partial line.
+		 * @param partialLineRevision Stable identity of the partial line update.
 		 */
-		void publishIncomingStyledLinePartial(const QString &line, const QVector<StyleSpan> &spans);
+		void publishIncomingStyledLinePartial(const QString &line, const QVector<StyleSpan> &spans,
+		                                      quint64 partialLineRevision);
+		/**
+		 * @brief Publishes the rendered partial-line presentation to every attached view.
+		 * @param text Rendered partial line text.
+		 * @param spans Rendered partial line styles.
+		 * @param partialLineRevision Stable identity of the partial line update.
+		 * @return `true` when the current partial-line presentation accepted the update.
+		 */
+		[[nodiscard]] bool publishPartialOutputPresentation(const QString            &text,
+		                                                    const QVector<StyleSpan> &spans,
+		                                                    quint64                   partialLineRevision);
+		/**
+		 * @brief Clears the shared partial-line presentation in every attached view.
+		 */
+		void               clearPartialOutputPresentation();
+		/**
+		 * @brief Clears the shared partial-line presentation when it has the expected identity.
+		 * @param expectedPartialLineRevision Stable identity permitted to be cleared.
+		 * @return `true` when matching presentation state was cleared.
+		 */
+		[[nodiscard]] bool clearPartialOutputPresentation(quint64 expectedPartialLineRevision);
+		/**
+		 * @brief Rebinds the shared partial presentation to a completed runtime line and clears it.
+		 * @param partialLineRevision Stable identity of the completed partial line.
+		 * @param runtimeLineNumber Stable completed runtime line number.
+		 */
+		void completePartialOutputPresentation(quint64 partialLineRevision, qint64 runtimeLineNumber);
+		/**
+		 * @brief Returns the current rendered partial-line text.
+		 * @return Shared partial presentation text.
+		 */
+		[[nodiscard]] const QString            &partialOutputPresentationText() const noexcept;
+		/**
+		 * @brief Returns the current rendered partial-line styles.
+		 * @return Shared partial presentation style spans.
+		 */
+		[[nodiscard]] const QVector<StyleSpan> &partialOutputPresentationSpans() const noexcept;
+		/**
+		 * @brief Returns the stable identity of the current rendered partial line.
+		 * @return Partial-line revision associated with the presentation state.
+		 */
+		[[nodiscard]] quint64                   partialOutputPresentationRevision() const noexcept;
+		/**
+		 * @brief Returns whether an output presentation mutation batch is active.
+		 * @return `true` while presentation changes are being batched.
+		 */
+		[[nodiscard]] bool                      outputPresentationMutationBatchActive() const noexcept;
+		/**
+		 * @brief Returns whether the active batch suppresses draw callback notifications.
+		 * @return `true` when draw callback presentation is suppressed.
+		 */
+		[[nodiscard]] bool outputPresentationMutationBatchSuppressesDraw() const noexcept;
 		/**
 		 * @brief Advances the current partial-line identity and invalidates obsolete queued callbacks.
 		 * @param revision New partial-line revision.
 		 */
-		void setIncomingPartialLineRevision(quint64 revision);
+		void               setIncomingPartialLineRevision(quint64 revision);
 		/**
 		 * @brief Invalidates the queued callback for the previous partial-line identity.
 		 */
-		void invalidatePendingPartialLineDispatch();
+		void               invalidatePendingPartialLineDispatch();
 		/**
 		 * @brief Captures or reuses immutable callback output-line snapshot data.
 		 * @param lineSnapshotPolicy Output-line snapshot depth to attach.
@@ -7628,7 +7807,6 @@ class WorldRuntime : public QObject
 		WorldView                                     *m_view{nullptr};
 		QMetaObject::Connection                        m_viewDestroyedConnection;
 		quint64                                        m_viewBindingGeneration{0};
-		QVector<QPointer<WorldView>>                   m_presentationViews;
 		long                                           m_backgroundColour{0};
 		QImage                                         m_backgroundImage;
 		QImage                                         m_foregroundImage;
@@ -8209,7 +8387,13 @@ class WorldRuntime : public QObject
 		int                                         m_outputViewFirstAppendedIndex{-1};
 		int                                         m_outputViewLastAppendedIndexExclusive{-1};
 		QVector<OutputBufferEdit>                   m_outputViewStructuralEditsPending;
-		QVector<QPointer<WorldView>>                m_outputViewMutationBatchViews;
+		std::shared_ptr<WorldOutputRenderModel>     m_outputRenderModel;
+		/** Number of passive presentations requiring synchronous render-delta delivery. */
+		int                                         m_outputRenderDeltaObserverCount{0};
+		mutable quint64                             m_outputPresentationMutationSequence{0};
+		QString                                     m_partialOutputPresentationText;
+		QVector<StyleSpan>                          m_partialOutputPresentationSpans;
+		quint64                                     m_partialOutputPresentationRevision{0};
 		int                                         m_absoluteReferenceRightOver{0};
 		int                                         m_absoluteReferenceBottomOver{0};
 		int                                         m_absoluteReferenceRightUnder{0};
@@ -8374,7 +8558,7 @@ class WorldRuntime : public QObject
 		std::unique_ptr<ILuaExecutor>  m_luaExecutor;
 		QString                        m_luaScriptText;
 		WorldCommandProcessor         *m_commandProcessor{nullptr};
-		int                            m_lastGoTo{1};
+		bool                           m_initialStartPausedStateApplied{false};
 		QList<QString>                 m_mappingList;
 		qint64                         m_triggerTimeNs{0};
 		qint64                         m_aliasTimeNs{0};
