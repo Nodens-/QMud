@@ -6,6 +6,7 @@
  * Role: Unit coverage for Lua callback-engine dispatch, catalog, and callback-context semantics.
  */
 
+#include "AcceptingWorldSocketService.h"
 #include "AppController.h"
 #include "ColorPacking.h"
 #include "LuaCallbackEngine.h"
@@ -632,6 +633,50 @@ class tst_LuaCallbackEngine final : public QObject
 		void asynchronousCallbackDoesNotCaptureCompletedOperation();
 		void queuedTriggerPriorityActionRetainsOriginatingOperation();
 		void sentNotificationYieldsSendAndPreservesReentryGuard();
+		/**
+		 * @brief Verifies that detaching a processor cancels its suspended decision and queued sends.
+		 */
+		void outboundDetachCancelsSuspendedAndQueuedSends();
+		/**
+		 * @brief Verifies that detaching after a physical write commits it and cancels retained mutation playback.
+		 */
+		void outboundDetachCompletesAcceptedSentNotification();
+		/**
+		 * @brief Verifies that detaching an accepted command stops the remainder of its command stack.
+		 */
+		void outboundDetachStopsAcceptedCommandStack();
+		/**
+		 * @brief Verifies that detaching an accepted deferred send stops later callback mutations.
+		 */
+		void outboundDetachStopsAcceptedSendMutationPlayback();
+		/**
+		 * @brief Verifies that detaching rejects a staged command before its delayed physical write.
+		 */
+		void outboundDetachRejectsBlockedStagedTransaction();
+		/**
+		 * @brief Verifies that completed causal segments release their transactions while their group remains retained.
+		 */
+		void completedCausalSegmentsRetireWhileGroupRemainsRetained();
+		/**
+		 * @brief Verifies that a listener-free command blocked behind a retained causal group is dropped intact.
+		 */
+		void retainedCausalCommandWithoutListenersDropsBeforePhysicalWrite();
+		/**
+		 * @brief Verifies that a delayed causal command resolves in its originating caller context.
+		 */
+		void deferredCausalCommandResolvesInOriginatingCallerContext();
+		/**
+		 * @brief Verifies that queued packet-debug records restore their own caller contexts independently.
+		 */
+		void queuedPacketDebugRecordsRestoreTheirOwnCallerContexts();
+		/**
+		 * @brief Verifies that rejected socket writes commit no command, notification, or spam state.
+		 */
+		void rejectedPhysicalWritesDoNotCommitCommandOrSpamState();
+		/**
+		 * @brief Verifies that disconnect after an accepted write retains accepted host effects.
+		 */
+		void disconnectAfterAcceptedWriteCompletesCommandEffects();
 		void spamFillerCompletesBeforeOriginalSentNotification();
 		void ignoredResultNotificationsDoNotBlockRuntimeThread();
 		void inputCriticalSentOvertakesAndPartialLineCoalesces();
@@ -21058,6 +21103,7 @@ void tst_LuaCallbackEngine::commandPublishedAfterEarlierIncomingTriggerOperation
 	runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 
 	const ILuaExecutor *const initialExecutor = runtime.luaExecutor();
 	QVERIFY(initialExecutor);
@@ -21157,6 +21203,7 @@ void tst_LuaCallbackEngine::numpadMovementWaitsForEarlierMapperTriggerOperation(
 	runtime.setWorldAttribute(QStringLiteral("keypad_enable"), QStringLiteral("y"));
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 
 	WorldRuntime::Keypad northKey;
 	northKey.attributes.insert(QStringLiteral("name"), QStringLiteral("8"));
@@ -22910,6 +22957,425 @@ end
 	QVERIFY(teardownWorkerEngine(*executor, engine));
 }
 
+void tst_LuaCallbackEngine::outboundDetachCancelsSuspendedAndQueuedSends()
+{
+	WorldRuntime runtime;
+	auto        *commandProcessor = new WorldCommandProcessor(&runtime);
+	commandProcessor->setRuntime(&runtime);
+	runtime.setCommandProcessor(commandProcessor);
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+
+	const QString pluginId     = QStringLiteral("outbound.detach.send.plugin");
+	const QString callbackName = luaCallbackEventFunctionName(LuaCallbackEvent::Send);
+	auto          engine       = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*runtime.luaExecutor(), engine, QStringLiteral(R"lua(
+function OnPluginSend(command)
+  return true
+end
+)lua"),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Outbound detach send"));
+	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	runtime.m_observedPluginCallbacks.insert(callbackName);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {callbackName}, {callbackName});
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+
+	std::unique_ptr<ILuaExecutor> delegate = std::move(WorldRuntimeTestAccess::luaExecutorStorage(runtime));
+	auto heldExecutor = std::make_unique<HeldCallbackCompletionLuaExecutor>(std::move(delegate));
+	HeldCallbackCompletionLuaExecutor *const heldExecutorPointer = heldExecutor.get();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime)          = std::move(heldExecutor);
+	heldExecutorPointer->holdNextCompletion(callbackName, QStringLiteral("first"));
+
+	bool firstCompleted  = false;
+	bool firstCancelled  = false;
+	bool secondCompleted = false;
+	bool secondCancelled = false;
+	commandProcessor->doSendMsg(QStringLiteral("first"), false, false,
+	                            WorldCommandProcessor::OutboundTransport::Immediate,
+	                            [&](const bool cancelled)
+	                            {
+		                            firstCompleted = true;
+		                            firstCancelled = cancelled;
+	                            });
+	QTRY_VERIFY_WITH_TIMEOUT(heldExecutorPointer->hasHeldCompletion(), 5000);
+	commandProcessor->doSendMsg(QStringLiteral("second"), false, false,
+	                            WorldCommandProcessor::OutboundTransport::Immediate,
+	                            [&](const bool cancelled)
+	                            {
+		                            secondCompleted = true;
+		                            secondCancelled = cancelled;
+	                            });
+	QCOMPARE(commandProcessor->m_pendingPluginSends.size(), qsizetype{1});
+
+	commandProcessor->setRuntime(nullptr);
+
+	QVERIFY(firstCompleted);
+	QVERIFY(firstCancelled);
+	QVERIFY(secondCompleted);
+	QVERIFY(secondCancelled);
+	QVERIFY(commandProcessor->m_pendingPluginSends.isEmpty());
+	QVERIFY(!commandProcessor->m_pluginSendDecisionPending);
+	QCOMPARE(commandProcessor->m_pluginSendDecisionTicket, quint64{0});
+	QVERIFY(runtime.m_pendingPluginCallbackResultContinuations.isEmpty());
+	QVERIFY(socket->packets.isEmpty());
+
+	heldExecutorPointer->releaseHeldCompletion();
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_pluginCallbackDispatchWorkerInFlight &&
+	                             !runtime.hasQueuedPluginCallbackDispatchCommands(),
+	                         5000);
+	QVERIFY(socket->packets.isEmpty());
+
+	std::unique_ptr<ILuaExecutor> restoredExecutor      = heldExecutorPointer->releaseDelegate();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime) = std::move(restoredExecutor);
+	runtime.clearCommandProcessor(commandProcessor);
+	runtime.m_socketReadyForWorld = false;
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
+}
+
+void tst_LuaCallbackEngine::outboundDetachCompletesAcceptedSentNotification()
+{
+	WorldRuntime runtime;
+	auto        *commandProcessor = new WorldCommandProcessor(&runtime);
+	commandProcessor->setRuntime(&runtime);
+	runtime.setCommandProcessor(commandProcessor);
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+
+	const QString pluginId     = QStringLiteral("outbound.detach.sent.plugin");
+	const QString callbackName = luaCallbackEventFunctionName(LuaCallbackEvent::Sent);
+	auto          engine       = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*runtime.luaExecutor(), engine, QStringLiteral(R"lua(
+function OnPluginSent(command)
+end
+)lua"),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Outbound detach sent"));
+	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	runtime.m_observedPluginCallbacks.insert(callbackName);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {callbackName}, {callbackName});
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+
+	std::unique_ptr<ILuaExecutor> delegate = std::move(WorldRuntimeTestAccess::luaExecutorStorage(runtime));
+	auto heldExecutor = std::make_unique<HeldCallbackCompletionLuaExecutor>(std::move(delegate));
+	HeldCallbackCompletionLuaExecutor *const heldExecutorPointer = heldExecutor.get();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime)          = std::move(heldExecutor);
+	heldExecutorPointer->holdNextCompletion(callbackName, QStringLiteral("accepted"));
+
+	bool mutationCompleted = false;
+	bool mutationCancelled = true;
+	commandProcessor->doSendMsg(QStringLiteral("accepted"), false, false,
+	                            WorldCommandProcessor::OutboundTransport::Immediate,
+	                            [&](const bool cancelled)
+	                            {
+		                            mutationCompleted = true;
+		                            mutationCancelled = cancelled;
+	                            });
+	QTRY_VERIFY_WITH_TIMEOUT(heldExecutorPointer->hasHeldCompletion(), 5000);
+	QVERIFY(commandProcessor->m_pluginSentNotificationPending);
+	QCOMPARE(socket->packets, QVector<QByteArray>{QByteArrayLiteral("accepted\r\n")});
+
+	commandProcessor->setRuntime(nullptr);
+
+	QVERIFY(mutationCompleted);
+	QVERIFY(mutationCancelled);
+	QVERIFY(!commandProcessor->m_pluginSentNotificationPending);
+	QCOMPARE(commandProcessor->m_pluginSentNotificationTicket, quint64{0});
+	QVERIFY(!commandProcessor->m_activeOutboundCommand);
+	QVERIFY(!commandProcessor->m_activeOutboundTransaction);
+	QCOMPARE(runtime.totalLinesSent(), 1);
+	QCOMPARE(runtime.lastCommandSent(), QStringLiteral("accepted"));
+
+	heldExecutorPointer->releaseHeldCompletion();
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_pluginCallbackDispatchWorkerInFlight &&
+	                             !runtime.hasQueuedPluginCallbackDispatchCommands(),
+	                         5000);
+	QCOMPARE(runtime.totalLinesSent(), 1);
+
+	std::unique_ptr<ILuaExecutor> restoredExecutor      = heldExecutorPointer->releaseDelegate();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime) = std::move(restoredExecutor);
+	runtime.clearCommandProcessor(commandProcessor);
+	runtime.m_socketReadyForWorld = false;
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
+}
+
+void tst_LuaCallbackEngine::outboundDetachStopsAcceptedCommandStack()
+{
+	WorldRuntime runtime;
+	auto        *commandProcessor = new WorldCommandProcessor(&runtime);
+	commandProcessor->setRuntime(&runtime);
+	runtime.setCommandProcessor(commandProcessor);
+	runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("enable_command_stack"), QStringLiteral("y"));
+	runtime.setWorldAttribute(QStringLiteral("command_stack_character"), QStringLiteral(";"));
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+
+	WorldRuntime::Alias followingAlias;
+	followingAlias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
+	followingAlias.attributes.insert(QStringLiteral("match"), QStringLiteral("^after-accepted$"));
+	followingAlias.attributes.insert(QStringLiteral("regexp"), QStringLiteral("y"));
+	followingAlias.attributes.insert(QStringLiteral("send_to"), QString::number(eSendToVariable));
+	followingAlias.attributes.insert(QStringLiteral("variable"), QStringLiteral("after_accepted_seen"));
+	followingAlias.children.insert(QStringLiteral("send"), QStringLiteral("yes"));
+	runtime.setAliases({followingAlias});
+
+	const QString pluginId     = QStringLiteral("outbound.detach.stack.sent.plugin");
+	const QString callbackName = luaCallbackEventFunctionName(LuaCallbackEvent::Sent);
+	auto          engine       = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*runtime.luaExecutor(), engine, QStringLiteral(R"lua(
+function OnPluginSent(command)
+end
+)lua"),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Outbound detach stack sent"));
+	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	runtime.m_observedPluginCallbacks.insert(callbackName);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {callbackName}, {callbackName});
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+
+	std::unique_ptr<ILuaExecutor> delegate = std::move(WorldRuntimeTestAccess::luaExecutorStorage(runtime));
+	auto heldExecutor = std::make_unique<HeldCallbackCompletionLuaExecutor>(std::move(delegate));
+	HeldCallbackCompletionLuaExecutor *const heldExecutorPointer = heldExecutor.get();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime)          = std::move(heldExecutor);
+	heldExecutorPointer->holdNextCompletion(callbackName, QStringLiteral("accepted"));
+
+	QCOMPARE(commandProcessor->executeCommand(QStringLiteral("accepted;after-accepted")), eOK);
+	QTRY_VERIFY_WITH_TIMEOUT(heldExecutorPointer->hasHeldCompletion(), 5000);
+	QCOMPARE(socket->packets, QVector<QByteArray>{QByteArrayLiteral("accepted\r\n")});
+	QString followingSeen;
+	QVERIFY(!runtime.findVariable(QStringLiteral("after_accepted_seen"), followingSeen));
+
+	commandProcessor->setRuntime(nullptr);
+
+	QVERIFY(!runtime.findVariable(QStringLiteral("after_accepted_seen"), followingSeen));
+	QCOMPARE(runtime.aliases().constFirst().matched, 0);
+	QCOMPARE(runtime.totalLinesSent(), 1);
+	QCOMPARE(runtime.lastCommandSent(), QStringLiteral("accepted"));
+
+	heldExecutorPointer->releaseHeldCompletion();
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_pluginCallbackDispatchWorkerInFlight &&
+	                             !runtime.hasQueuedPluginCallbackDispatchCommands(),
+	                         5000);
+	QVERIFY(!runtime.findVariable(QStringLiteral("after_accepted_seen"), followingSeen));
+	QCOMPARE(socket->packets, QVector<QByteArray>{QByteArrayLiteral("accepted\r\n")});
+
+	std::unique_ptr<ILuaExecutor> restoredExecutor      = heldExecutorPointer->releaseDelegate();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime) = std::move(restoredExecutor);
+	runtime.clearCommandProcessor(commandProcessor);
+	runtime.m_socketReadyForWorld = false;
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
+}
+
+void tst_LuaCallbackEngine::outboundDetachStopsAcceptedSendMutationPlayback()
+{
+	WorldRuntime runtime;
+	auto        *commandProcessor = new WorldCommandProcessor(&runtime);
+	commandProcessor->setRuntime(&runtime);
+	runtime.setCommandProcessor(commandProcessor);
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+
+	const QString pluginId     = QStringLiteral("outbound.detach.mutation.sent.plugin");
+	const QString callbackName = luaCallbackEventFunctionName(LuaCallbackEvent::Sent);
+	auto          engine       = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*runtime.luaExecutor(), engine, QStringLiteral(R"lua(
+function run_deferred_send()
+  Send("accepted")
+  SetVariable("after_accepted_send", "yes")
+end
+function OnPluginSent(command)
+end
+)lua"),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Outbound detach mutation sent"));
+	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	runtime.m_observedPluginCallbacks.insert(callbackName);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {callbackName}, {callbackName});
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+
+	std::unique_ptr<ILuaExecutor> delegate = std::move(WorldRuntimeTestAccess::luaExecutorStorage(runtime));
+	auto heldExecutor = std::make_unique<HeldCallbackCompletionLuaExecutor>(std::move(delegate));
+	HeldCallbackCompletionLuaExecutor *const heldExecutorPointer = heldExecutor.get();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime)          = std::move(heldExecutor);
+	heldExecutorPointer->holdNextCompletion(callbackName, QStringLiteral("accepted"));
+
+	LuaBatchDispatchRequest request;
+	request.kind         = LuaBatchDispatchKind::NoArgs;
+	request.engines      = {engine};
+	request.functionName = QStringLiteral("run_deferred_send");
+	runtime.queuePluginCallbackDispatchAsync(request);
+	QTRY_VERIFY_WITH_TIMEOUT(heldExecutorPointer->hasHeldCompletion(), 5000);
+	QCOMPARE(socket->packets, QVector<QByteArray>{QByteArrayLiteral("accepted\r\n")});
+	QVERIFY(runtime.pluginVariableValue(pluginId, QStringLiteral("after_accepted_send")).isEmpty());
+
+	commandProcessor->setRuntime(nullptr);
+
+	QVERIFY(runtime.pluginVariableValue(pluginId, QStringLiteral("after_accepted_send")).isEmpty());
+	QCOMPARE(runtime.totalLinesSent(), 1);
+	QCOMPARE(runtime.lastCommandSent(), QStringLiteral("accepted"));
+
+	heldExecutorPointer->releaseHeldCompletion();
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_pluginCallbackDispatchWorkerInFlight &&
+	                             !runtime.hasQueuedPluginCallbackDispatchCommands(),
+	                         5000);
+	QVERIFY(runtime.pluginVariableValue(pluginId, QStringLiteral("after_accepted_send")).isEmpty());
+
+	std::unique_ptr<ILuaExecutor> restoredExecutor      = heldExecutorPointer->releaseDelegate();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime) = std::move(restoredExecutor);
+	runtime.clearCommandProcessor(commandProcessor);
+	runtime.m_socketReadyForWorld = false;
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
+}
+
+void tst_LuaCallbackEngine::outboundDetachRejectsBlockedStagedTransaction()
+{
+	WorldRuntime runtime;
+	auto        *commandProcessor = new WorldCommandProcessor(&runtime);
+	commandProcessor->setRuntime(&runtime);
+	runtime.setCommandProcessor(commandProcessor);
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+
+	const WorldRuntime::CausalOutboundScopeHandle blockingScope = runtime.createCausalOutboundScope(false);
+	const RuntimeCallerContext blockingContext = runtime.captureRuntimeCallerContext(blockingScope);
+	blockingContext.run(
+	    [&runtime]
+	    {
+		    QByteArray payload = QByteArrayLiteral("blocker\r\n");
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(payload, false),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+	    });
+
+	const WorldRuntime::CausalOutboundScopeHandle commandScope = runtime.createCausalOutboundScope(false);
+	const RuntimeCallerContext commandContext    = runtime.captureRuntimeCallerContext(commandScope);
+	bool                       mutationCompleted = false;
+	bool                       mutationCancelled = false;
+	commandContext.run(
+	    [&]
+	    {
+		    commandProcessor->doSendMsg(QStringLiteral("delayed"), false, false,
+		                                WorldCommandProcessor::OutboundTransport::CausalDeferred,
+		                                [&](const bool cancelled)
+		                                {
+			                                mutationCompleted = true;
+			                                mutationCancelled = cancelled;
+		                                });
+	    });
+	QVERIFY(commandProcessor->m_pluginSentNotificationPending);
+	QVERIFY(commandProcessor->m_activeOutboundTransaction);
+	QCOMPARE(commandProcessor->m_activeOutboundTransaction->outcome,
+	         OutboundCommandTransaction::Outcome::PendingWrite);
+	QVERIFY(socket->packets.isEmpty());
+
+	commandProcessor->setRuntime(nullptr);
+	runtime.releaseCausalOutboundScope(commandScope);
+	runtime.releaseCausalOutboundScope(blockingScope);
+
+	QVERIFY(mutationCompleted);
+	QVERIFY(mutationCancelled);
+	QVERIFY(!commandProcessor->m_pluginSentNotificationPending);
+	QVERIFY(!commandProcessor->m_activeOutboundCommand);
+	QVERIFY(!commandProcessor->m_activeOutboundTransaction);
+	QCOMPARE(socket->packets, QVector<QByteArray>{QByteArrayLiteral("blocker\r\n")});
+	QCOMPARE(runtime.totalLinesSent(), 0);
+	QVERIFY(runtime.m_causalOutboundGroups.isEmpty());
+
+	runtime.clearCommandProcessor(commandProcessor);
+	runtime.m_socketReadyForWorld = false;
+}
+
+void tst_LuaCallbackEngine::completedCausalSegmentsRetireWhileGroupRemainsRetained()
+{
+	WorldRuntime runtime;
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+
+	const WorldRuntime::CausalOutboundScopeHandle scope   = runtime.createCausalOutboundScope(false);
+	const RuntimeCallerContext                    context = runtime.captureRuntimeCallerContext(scope);
+	QSharedPointer<OutboundCommandTransaction>    transaction =
+	    QSharedPointer<OutboundCommandTransaction>::create();
+	const QWeakPointer<OutboundCommandTransaction> weakTransaction = transaction.toWeakRef();
+	transaction->accepted                                          = [&runtime, weakTransaction]
+	{
+		if (const QSharedPointer<OutboundCommandTransaction> accepted = weakTransaction.toStrongRef())
+			runtime.finishOutboundCommandNotification(accepted);
+	};
+	context.run(
+	    [&]
+	    {
+		    QByteArray payload = QByteArrayLiteral("first\r\n");
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(payload, false, transaction),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+	    });
+	QCOMPARE(transaction->outcome, OutboundCommandTransaction::Outcome::Accepted);
+	QCOMPARE(runtime.m_causalOutboundGroups.size(), qsizetype{1});
+	transaction.clear();
+	QVERIFY(weakTransaction.isNull());
+
+	context.run(
+	    [&]
+	    {
+		    QByteArray payload = QByteArrayLiteral("second\r\n");
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(payload, false),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+	    });
+	QCOMPARE(socket->packets, QVector<QByteArray>{QByteArrayLiteral("first\r\n")});
+	runtime.releaseCausalOutboundScope(scope);
+	QCOMPARE(socket->packets,
+	         QVector<QByteArray>({QByteArrayLiteral("first\r\n"), QByteArrayLiteral("second\r\n")}));
+	QVERIFY(runtime.m_causalOutboundGroups.isEmpty());
+	runtime.m_socketReadyForWorld = false;
+}
+
 void tst_LuaCallbackEngine::queuedEnteredCommandStartsOutsideCompletedOperation()
 {
 	WorldRuntime runtime;
@@ -22919,7 +23385,8 @@ void tst_LuaCallbackEngine::queuedEnteredCommandStartsOutsideCompletedOperation(
 	runtime.setWorldAttribute(QStringLiteral("enable_aliases"), QStringLiteral("y"));
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	const auto *initialExecutor   = runtime.luaExecutor();
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	const auto *initialExecutor = runtime.luaExecutor();
 	QVERIFY(initialExecutor);
 	WorldRuntime::Alias queuedAlias;
 	queuedAlias.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));
@@ -22991,7 +23458,8 @@ void tst_LuaCallbackEngine::asynchronousCallbackDoesNotCaptureCompletedOperation
 	commandProcessor->setView(&view);
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	const auto *initialExecutor   = runtime.luaExecutor();
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	const auto *initialExecutor = runtime.luaExecutor();
 	QVERIFY(initialExecutor);
 
 	const QString pluginId = QStringLiteral("ambient.callback.operation.plugin");
@@ -23085,7 +23553,8 @@ void tst_LuaCallbackEngine::queuedTriggerPriorityActionRetainsOriginatingOperati
 	runtime.setWorldAttribute(QStringLiteral("script_prefix"), QStringLiteral("#"));
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	const auto *initialExecutor   = runtime.luaExecutor();
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	const auto *initialExecutor = runtime.luaExecutor();
 	QVERIFY(initialExecutor);
 	const QMetaObject::Connection queueActionConnection = QObject::connect(
 	    commandProcessor, &WorldCommandProcessor::sendToScriptRequested, &runtime,
@@ -23152,13 +23621,15 @@ end
 
 void tst_LuaCallbackEngine::sentNotificationYieldsSendAndPreservesReentryGuard()
 {
+	QTcpServer server;
+	if (!server.listen(QHostAddress::LocalHost, 0))
+		QSKIP("Local TCP listen is unavailable in this environment.");
+
 	WorldRuntime runtime;
 	auto        *commandProcessor = new WorldCommandProcessor(&runtime);
 	commandProcessor->setRuntime(&runtime);
 	runtime.setCommandProcessor(commandProcessor);
-	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
-	runtime.m_socketReadyForWorld = true;
-	const auto *initialExecutor   = runtime.luaExecutor();
+	const auto *initialExecutor = runtime.luaExecutor();
 	QVERIFY(initialExecutor);
 
 	const QString firstPluginId = QStringLiteral("sent.guard.first.plugin");
@@ -23166,6 +23637,33 @@ void tst_LuaCallbackEngine::sentNotificationYieldsSendAndPreservesReentryGuard()
 	QVERIFY(initializeWorkerEngine(*initialExecutor, firstEngine, QStringLiteral(R"lua(
 function OnPluginSent(command)
   SetVariable("first_sent_seen", command)
+  SetVariable("sent_counters", string.format("%.0f:%.0f:%.0f", GetInfo(203), GetInfo(205), GetInfo(217)))
+  if command == "outer-send" then
+    SendPkt("sent-raw")
+  end
+end
+local nested_debug_sent = false
+function OnPluginPacketDebug(text)
+  if string.find(text, "Sent  packet:", 1, true) then
+    SetVariable("packet_debug_after_sent", GetVariable("first_sent_seen") or "")
+    SetVariable("packet_debug_lines_sent", string.format("%.0f", GetInfo(203)))
+    if not nested_debug_sent then
+      SetVariable("packet_debug_header_before", string.format("%.0f:%.0f", GetInfo(205), GetInfo(217)))
+      nested_debug_sent = true
+      SendPkt("nested-debug")
+      SetVariable("packet_debug_header_after", string.format("%.0f:%.0f", GetInfo(205), GetInfo(217)))
+    end
+  elseif string.find(text, "outer-send", 1, true) then
+    SetVariable("packet_debug_order", (GetVariable("packet_debug_order") or "") .. "outer,")
+    SetVariable("packet_debug_fragment_counters", string.format("%.0f:%.0f", GetInfo(205), GetInfo(217)))
+  elseif string.find(text, "later-packet", 1, true) then
+    SetVariable("packet_debug_order", (GetVariable("packet_debug_order") or "") .. "later,")
+  elseif string.find(text, "sent-raw", 1, true) then
+    SetVariable("packet_debug_order", (GetVariable("packet_debug_order") or "") .. "sent,")
+  elseif string.find(text, "nested-debug", 1, true) then
+    SetVariable("packet_debug_order", (GetVariable("packet_debug_order") or "") .. "nested,")
+  end
+  return true
 end
 )lua"),
 	                               &runtime, firstPluginId));
@@ -23175,6 +23673,7 @@ end
 function OnPluginSent(command)
   local result = Send("nested-send-must-be-rejected")
   SetVariable("nested_send_result", string.format("%.0f", result))
+  SetVariable("second_sent_counters", string.format("%.0f:%.0f", GetInfo(205), GetInfo(217)))
 end
 )lua"),
 	                               &runtime, secondPluginId));
@@ -23194,10 +23693,246 @@ end
 	    makePlugin(firstPluginId, QStringLiteral("Sent guard first"), firstEngine),
 	    makePlugin(secondPluginId, QStringLiteral("Sent guard second"), secondEngine)};
 	WorldRuntimeTestAccess::commitPluginStructure(runtime);
-	const QString callbackName = luaCallbackEventFunctionName(LuaCallbackEvent::Sent);
+	const QString callbackName    = luaCallbackEventFunctionName(LuaCallbackEvent::Sent);
+	const QString packetDebugName = luaCallbackEventFunctionName(LuaCallbackEvent::PacketDebug);
 	runtime.m_observedPluginCallbacks.insert(callbackName);
-	runtime.recordObservedPluginCallbackPresenceSnapshot(firstPluginId, {callbackName}, {callbackName});
+	runtime.m_observedPluginCallbacks.insert(packetDebugName);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(firstPluginId, {callbackName, packetDebugName},
+	                                                     {callbackName, packetDebugName});
 	runtime.recordObservedPluginCallbackPresenceSnapshot(secondPluginId, {callbackName}, {callbackName});
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+	QSignalSpy connectedSpy(&runtime, &WorldRuntime::connected);
+	QSignalSpy serverAcceptedSpy(&server, &QTcpServer::newConnection);
+	QVERIFY(connectedSpy.isValid());
+	QVERIFY(serverAcceptedSpy.isValid());
+	QVERIFY(runtime.connectToWorld(QStringLiteral("127.0.0.1"), server.serverPort()));
+	QVERIFY(connectedSpy.wait(5000));
+	QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections() || serverAcceptedSpy.count() > 0, 5000);
+	std::unique_ptr<QTcpSocket> acceptedSocket(server.nextPendingConnection());
+	QVERIFY(acceptedSocket);
+	runtime.setDebugIncomingPackets(true);
+
+	std::unique_ptr<ILuaExecutor> delegate = std::move(WorldRuntimeTestAccess::luaExecutorStorage(runtime));
+	auto heldExecutor = std::make_unique<HeldCallbackCompletionLuaExecutor>(std::move(delegate));
+	HeldCallbackCompletionLuaExecutor *const heldExecutorPointer = heldExecutor.get();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime)          = std::move(heldExecutor);
+	heldExecutorPointer->holdNextCompletion(callbackName);
+	bool       heldCompletionReleased = false;
+	const auto releaseHeldCompletion  = qScopeGuard(
+	    [&]
+	    {
+		    if (!heldCompletionReleased)
+			    heldExecutorPointer->releaseHeldCompletion();
+	    });
+	Q_UNUSED(releaseHeldCompletion);
+
+	const QString expectedCounters    = QStringLiteral("%1:%2:%3")
+	                                        .arg(runtime.totalLinesSent())
+	                                        .arg(runtime.outputPacketCount())
+	                                        .arg(runtime.bytesOut());
+	const int     outputPacketsBefore = runtime.outputPacketCount();
+	const qint64  bytesOutBefore      = runtime.bytesOut();
+	commandProcessor->sendRawText(QStringLiteral("outer-send"), false, false, false, false);
+	QTRY_VERIFY_WITH_TIMEOUT(heldExecutorPointer->hasHeldCompletion(), 5000);
+	QVERIFY(commandProcessor->m_pluginSentNotificationPending);
+	QVERIFY(runtime.lastCommandSent().isEmpty());
+	const QByteArray expectedPayload = QByteArrayLiteral("outer-send\r\n");
+	QByteArray       transmittedBytes;
+	QTRY_VERIFY_WITH_TIMEOUT((transmittedBytes += acceptedSocket->readAll()).contains(expectedPayload), 5000);
+	runtime.sendToWorld(QByteArrayLiteral("later-packet"));
+	QTRY_VERIFY_WITH_TIMEOUT((transmittedBytes += acceptedSocket->readAll()).contains("later-packet"), 5000);
+	QVERIFY(runtime.pluginVariableValue(firstPluginId, QStringLiteral("packet_debug_order")).isEmpty());
+
+	heldExecutorPointer->releaseHeldCompletion();
+	heldCompletionReleased = true;
+	QTRY_COMPARE_WITH_TIMEOUT(runtime.lastCommandSent(), QStringLiteral("outer-send"), 5000);
+	QTRY_COMPARE_WITH_TIMEOUT(
+	    runtime.pluginVariableValue(secondPluginId, QStringLiteral("nested_send_result")),
+	    QString::number(eItemInUse), 5000);
+	QCOMPARE(runtime.pluginVariableValue(firstPluginId, QStringLiteral("first_sent_seen")),
+	         QStringLiteral("outer-send"));
+	QCOMPARE(runtime.pluginVariableValue(firstPluginId, QStringLiteral("sent_counters")), expectedCounters);
+	const QString expectedSecondSentCounters =
+	    QStringLiteral("%1:%2")
+	        .arg(outputPacketsBefore + 1)
+	        .arg(bytesOutBefore + QByteArrayLiteral("sent-raw").size());
+	QCOMPARE(runtime.pluginVariableValue(secondPluginId, QStringLiteral("second_sent_counters")),
+	         expectedSecondSentCounters);
+	QCOMPARE(runtime.pluginVariableValue(firstPluginId, QStringLiteral("packet_debug_after_sent")),
+	         QStringLiteral("outer-send"));
+	QCOMPARE(runtime.pluginVariableValue(firstPluginId, QStringLiteral("packet_debug_lines_sent")),
+	         QString::number(runtime.totalLinesSent()));
+	const QString expectedPacketDebugBefore =
+	    QStringLiteral("%1:%2").arg(outputPacketsBefore + 1).arg(bytesOutBefore + expectedPayload.size());
+	const QString expectedPacketDebugAfter =
+	    QStringLiteral("%1:%2")
+	        .arg(outputPacketsBefore + 2)
+	        .arg(bytesOutBefore + expectedPayload.size() + QByteArrayLiteral("nested-debug").size());
+	QCOMPARE(runtime.pluginVariableValue(firstPluginId, QStringLiteral("packet_debug_header_before")),
+	         expectedPacketDebugBefore);
+	QCOMPARE(runtime.pluginVariableValue(firstPluginId, QStringLiteral("packet_debug_header_after")),
+	         expectedPacketDebugAfter);
+	QCOMPARE(runtime.pluginVariableValue(firstPluginId, QStringLiteral("packet_debug_fragment_counters")),
+	         expectedPacketDebugAfter);
+	QTRY_COMPARE_WITH_TIMEOUT(
+	    runtime.pluginVariableValue(firstPluginId, QStringLiteral("packet_debug_order")),
+	    QStringLiteral("outer,later,sent,nested,"), 5000);
+	QVERIFY(!commandProcessor->m_pluginSentNotificationPending);
+
+	std::unique_ptr<ILuaExecutor> restoredExecutor      = heldExecutorPointer->releaseDelegate();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime) = std::move(restoredExecutor);
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), firstEngine));
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), secondEngine));
+}
+
+void tst_LuaCallbackEngine::retainedCausalCommandWithoutListenersDropsBeforePhysicalWrite()
+{
+	WorldRuntime runtime;
+	auto        *commandProcessor = new WorldCommandProcessor(&runtime);
+	commandProcessor->setRuntime(&runtime);
+	runtime.setCommandProcessor(commandProcessor);
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+
+	const WorldRuntime::CausalOutboundScopeHandle headScope = runtime.createCausalOutboundScope(false);
+	const auto headContext                                  = runtime.captureRuntimeCallerContext(headScope);
+	headContext.run(
+	    [&]
+	    {
+		    QByteArray blocker = QByteArrayLiteral("earlier-raw");
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(blocker, false),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+	    });
+
+	const auto rejectedOriginState =
+	    std::make_shared<LuaCallbackConnectionCancellationState>(runtime.m_connectionEpoch);
+	const WorldRuntime::CausalOutboundScopeHandle tailScope = runtime.createCausalOutboundScope(false);
+	runtime.m_currentConnectionCancellationState            = rejectedOriginState;
+	const auto tailContext                                  = runtime.captureRuntimeCallerContext(tailScope);
+	runtime.m_currentConnectionCancellationState.reset();
+	bool                                                    mutationCompleted = false;
+	bool                                                    mutationCancelled = false;
+	std::shared_ptr<LuaCallbackConnectionCancellationState> observedConnectionState;
+	tailContext.run(
+	    [&]
+	    {
+		    commandProcessor->doSendMsg(QStringLiteral("queued-command"), false, false,
+		                                WorldCommandProcessor::OutboundTransport::CausalDeferred,
+		                                [&](const bool cancelled)
+		                                {
+			                                mutationCompleted = true;
+			                                mutationCancelled = cancelled;
+			                                observedConnectionState =
+			                                    runtime.m_currentConnectionCancellationState;
+		                                });
+	    });
+	QCOMPARE(runtime.m_causalOutboundGroups.size(), qsizetype{2});
+	QVERIFY(commandProcessor->m_pluginSentNotificationPending);
+	QVERIFY(socket->packets.isEmpty());
+
+	runtime.invalidateConnectionGeneration();
+	QVERIFY(mutationCompleted);
+	QVERIFY(mutationCancelled);
+	QVERIFY(observedConnectionState == rejectedOriginState);
+	QVERIFY(!commandProcessor->m_pluginSentNotificationPending);
+	QVERIFY(runtime.m_causalOutboundGroups.isEmpty());
+	QVERIFY(socket->packets.isEmpty());
+	QCOMPARE(runtime.totalLinesSent(), 0);
+	QVERIFY(runtime.lastCommandSent().isEmpty());
+	runtime.releaseCausalOutboundScope(headScope);
+	runtime.releaseCausalOutboundScope(tailScope);
+}
+
+void tst_LuaCallbackEngine::deferredCausalCommandResolvesInOriginatingCallerContext()
+{
+	WorldRuntime runtime;
+	auto        *commandProcessor = new WorldCommandProcessor(&runtime);
+	commandProcessor->setRuntime(&runtime);
+	runtime.setCommandProcessor(commandProcessor);
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+
+	const WorldRuntime::CausalOutboundScopeHandle headScope = runtime.createCausalOutboundScope(false);
+	const RuntimeCallerContext headContext                  = runtime.captureRuntimeCallerContext(headScope);
+	headContext.run(
+	    [&]
+	    {
+		    QByteArray blocker = QByteArrayLiteral("origin-context-blocker");
+		    QCOMPARE(runtime.stageCausalOutboundTransmission(blocker, false),
+		             WorldRuntime::CausalOutboundStageResult::Staged);
+	    });
+
+	const auto originatingConnectionState =
+	    std::make_shared<LuaCallbackConnectionCancellationState>(runtime.m_connectionEpoch);
+	const auto unrelatedConnectionState =
+	    std::make_shared<LuaCallbackConnectionCancellationState>(runtime.m_connectionEpoch);
+	const WorldRuntime::CausalOutboundScopeHandle tailScope = runtime.createCausalOutboundScope(false);
+	runtime.m_currentConnectionCancellationState            = originatingConnectionState;
+	const RuntimeCallerContext tailContext                  = runtime.captureRuntimeCallerContext(tailScope);
+	runtime.m_currentConnectionCancellationState            = unrelatedConnectionState;
+	bool                                                    completionCalled = false;
+	std::shared_ptr<LuaCallbackConnectionCancellationState> observedConnectionState;
+	tailContext.run(
+	    [&]
+	    {
+		    commandProcessor->doSendMsg(QStringLiteral("origin-context-command"), false, false,
+		                                WorldCommandProcessor::OutboundTransport::CausalDeferred,
+		                                [&](const bool cancelled)
+		                                {
+			                                QVERIFY(!cancelled);
+			                                completionCalled = true;
+			                                observedConnectionState =
+			                                    runtime.m_currentConnectionCancellationState;
+		                                });
+	    });
+	QVERIFY(!completionCalled);
+	QVERIFY(socket->packets.isEmpty());
+
+	runtime.m_currentConnectionCancellationState = unrelatedConnectionState;
+	runtime.releaseCausalOutboundScope(headScope);
+	QVERIFY(completionCalled);
+	QVERIFY(observedConnectionState == originatingConnectionState);
+	const QVector<QByteArray> expectedPackets{QByteArrayLiteral("origin-context-blocker"),
+	                                          QByteArrayLiteral("origin-context-command\r\n")};
+	QCOMPARE(socket->packets, expectedPackets);
+	runtime.releaseCausalOutboundScope(tailScope);
+	runtime.m_currentConnectionCancellationState.reset();
+}
+
+void tst_LuaCallbackEngine::queuedPacketDebugRecordsRestoreTheirOwnCallerContexts()
+{
+	WorldRuntime runtime;
+	const auto  *initialExecutor = runtime.luaExecutor();
+	QVERIFY(initialExecutor);
+
+	const QString pluginId     = QStringLiteral("packet.debug.context.plugin");
+	const QString callbackName = luaCallbackEventFunctionName(LuaCallbackEvent::PacketDebug);
+	auto          engine       = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*initialExecutor, engine, QStringLiteral(R"lua(
+function OnPluginPacketDebug(text)
+  local sources = GetVariable("sources") or ""
+  SetVariable("sources", sources .. string.format("%.0f,", GetInfo(239)))
+  return true
+end
+)lua"),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Packet debug context"));
+	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	runtime.m_observedPluginCallbacks.insert(callbackName);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {callbackName}, {callbackName});
 	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
 	runtime.invalidatePluginCallbackPresenceCache();
 
@@ -23207,26 +23942,181 @@ end
 	WorldRuntimeTestAccess::luaExecutorStorage(runtime)          = std::move(heldExecutor);
 	heldExecutorPointer->holdNextCompletion(callbackName);
 
-	commandProcessor->sendRawText(QStringLiteral("outer-send"), false, false, false, false);
+	runtime.setCurrentActionSource(WorldRuntime::eTriggerFired);
+	const RuntimeCallerContext firstContext = runtime.captureOutgoingPacketDebugCallerContext();
+	runtime.setCurrentActionSource(WorldRuntime::eUserTyping);
+	const RuntimeCallerContext secondContext = runtime.captureOutgoingPacketDebugCallerContext();
+	runtime.setCurrentActionSource(WorldRuntime::eUnknownActionSource);
+	runtime.m_outgoingPacketDebugRecords.enqueue(WorldRuntime::OutgoingPacketDebugRecord{
+	    QByteArrayLiteral("first"), QDateTime::currentDateTime(), 1, 5, firstContext, {}, {}});
+	runtime.m_outgoingPacketDebugRecords.enqueue(WorldRuntime::OutgoingPacketDebugRecord{
+	    QByteArrayLiteral("second"), QDateTime::currentDateTime(), 2, 11, secondContext, {}, {}});
+	runtime.drainOutgoingPacketDebugRecords();
+	QTRY_VERIFY_WITH_TIMEOUT(heldExecutorPointer->hasHeldCompletion(), 5000);
+	heldExecutorPointer->releaseHeldCompletion();
+
+	const QString expectedSources =
+	    QStringLiteral("%1,%1,%2,%2,").arg(WorldRuntime::eTriggerFired).arg(WorldRuntime::eUserTyping);
+	QTRY_COMPARE_WITH_TIMEOUT(runtime.pluginVariableValue(pluginId, QStringLiteral("sources")),
+	                          expectedSources, 5000);
+	QVERIFY(runtime.m_outgoingPacketDebugRecords.isEmpty());
+	QVERIFY(!runtime.m_outgoingPacketDebugPublication);
+
+	std::unique_ptr<ILuaExecutor> restoredExecutor      = heldExecutorPointer->releaseDelegate();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime) = std::move(restoredExecutor);
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
+}
+
+void tst_LuaCallbackEngine::rejectedPhysicalWritesDoNotCommitCommandOrSpamState()
+{
+	WorldRuntime runtime;
+	auto        *commandProcessor = new WorldCommandProcessor(&runtime);
+	commandProcessor->setRuntime(&runtime);
+	runtime.setCommandProcessor(commandProcessor);
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	auto *socket                  = new AcceptingWorldSocketService(&runtime);
+	socket->rejectWrites          = true;
+	WorldRuntimeTestAccess::setSocket(runtime, socket);
+	commandProcessor->m_enableSpamPrevention = true;
+	commandProcessor->m_spamLineCount        = 3;
+	commandProcessor->m_spamMessage          = QStringLiteral("spam-filler");
+	commandProcessor->m_lastCommandSent      = QStringLiteral("repeat\r\n");
+	commandProcessor->m_lastCommandCount     = 3;
+
+	const QString pluginId     = QStringLiteral("rejected.write.sent.plugin");
+	const QString callbackName = luaCallbackEventFunctionName(LuaCallbackEvent::Sent);
+	auto          engine       = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*runtime.luaExecutor(), engine, QStringLiteral(R"lua(
+function OnPluginSent(command)
+  SetVariable("sent_seen", command)
+end
+)lua"),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Rejected write sent"));
+	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	runtime.m_observedPluginCallbacks.insert(callbackName);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {callbackName}, {callbackName});
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+
+	commandProcessor->sendRawText(QStringLiteral("repeat"), false, false, false, false);
+	QVERIFY(!commandProcessor->m_pluginSentNotificationPending);
+	QVERIFY(commandProcessor->m_pendingPluginSends.isEmpty());
+	QVERIFY(socket->packets.isEmpty());
+	QCOMPARE(commandProcessor->m_lastCommandSent, QStringLiteral("repeat\r\n"));
+	QCOMPARE(commandProcessor->m_lastCommandCount, 3);
+	QCOMPARE(runtime.totalLinesSent(), 0);
+	QVERIFY(runtime.lastCommandSent().isEmpty());
+	QVERIFY(runtime.pluginVariableValue(pluginId, QStringLiteral("sent_seen")).isEmpty());
+
+	WorldRuntimeTestAccess::plugins(runtime).clear();
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
+}
+
+void tst_LuaCallbackEngine::disconnectAfterAcceptedWriteCompletesCommandEffects()
+{
+	WorldRuntime runtime;
+	auto        *commandProcessor = new WorldCommandProcessor(&runtime);
+	commandProcessor->setRuntime(&runtime);
+	runtime.setCommandProcessor(commandProcessor);
+	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+	runtime.m_socketReadyForWorld = true;
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	runtime.m_isMapping = true;
+
+	const QString pluginId     = QStringLiteral("sent.disconnect.drop.plugin");
+	const QString callbackName = luaCallbackEventFunctionName(LuaCallbackEvent::Sent);
+	auto          engine       = QSharedPointer<LuaCallbackEngine>::create();
+	QVERIFY(initializeWorkerEngine(*runtime.luaExecutor(), engine, QStringLiteral(R"lua(
+function OnPluginSent(command)
+  SetVariable("sent_seen", command)
+end
+)lua"),
+	                               &runtime, pluginId));
+	WorldRuntime::Plugin plugin;
+	plugin.attributes.insert(QStringLiteral("id"), pluginId);
+	plugin.attributes.insert(QStringLiteral("name"), QStringLiteral("Sent disconnect drop"));
+	plugin.attributes.insert(QStringLiteral("language"), QStringLiteral("lua"));
+	plugin.attributes.insert(QStringLiteral("enabled"), QStringLiteral("1"));
+	plugin.enabled                           = true;
+	plugin.lua                               = engine;
+	WorldRuntimeTestAccess::plugins(runtime) = {plugin};
+	WorldRuntimeTestAccess::commitPluginStructure(runtime);
+	runtime.m_observedPluginCallbacks.insert(callbackName);
+	runtime.recordObservedPluginCallbackPresenceSnapshot(pluginId, {callbackName}, {callbackName});
+	static_cast<void>(runtime.publishPendingObservedPluginCallbackPresenceSnapshots());
+	runtime.invalidatePluginCallbackPresenceCache();
+
+	std::unique_ptr<ILuaExecutor> delegate = std::move(WorldRuntimeTestAccess::luaExecutorStorage(runtime));
+	auto heldExecutor = std::make_unique<HeldCallbackCompletionLuaExecutor>(std::move(delegate));
+	HeldCallbackCompletionLuaExecutor *const heldExecutorPointer = heldExecutor.get();
+	WorldRuntimeTestAccess::luaExecutorStorage(runtime)          = std::move(heldExecutor);
+	heldExecutorPointer->holdNextCompletion(callbackName);
+	bool       heldCompletionReleased = false;
+	const auto releaseHeldCompletion  = qScopeGuard(
+	    [&]
+	    {
+		    if (!heldCompletionReleased)
+			    heldExecutorPointer->releaseHeldCompletion();
+	    });
+	Q_UNUSED(releaseHeldCompletion);
+
+	const WorldRuntime::CausalOutboundScopeHandle scope         = runtime.createCausalOutboundScope(false);
+	auto                                          callerContext = runtime.captureRuntimeCallerContext(scope);
+	bool                                          mutationCompleted = false;
+	bool                                          mutationCancelled = false;
+	callerContext.run(
+	    [&]
+	    {
+		    commandProcessor->doSendMsg(QStringLiteral("north"), false, false,
+		                                WorldCommandProcessor::OutboundTransport::CausalDeferred,
+		                                [&](const bool cancelled)
+		                                {
+			                                mutationCompleted = true;
+			                                mutationCancelled = cancelled;
+		                                });
+	    });
 	QTRY_VERIFY_WITH_TIMEOUT(heldExecutorPointer->hasHeldCompletion(), 5000);
 	QVERIFY(commandProcessor->m_pluginSentNotificationPending);
+	QCOMPARE(runtime.m_causalOutboundGroups.size(), qsizetype{1});
+	QCOMPARE(runtime.totalLinesSent(), 0);
 	QVERIFY(runtime.lastCommandSent().isEmpty());
+	QCOMPARE(runtime.mappingCount(), 0);
+
+	runtime.invalidateConnectionGeneration();
+	QCOMPARE(runtime.totalLinesSent(), 0);
+	QVERIFY(runtime.lastCommandSent().isEmpty());
+	QCOMPARE(runtime.mappingCount(), 0);
+	QVERIFY(runtime.m_causalOutboundGroups.isEmpty());
+	runtime.releaseCausalOutboundScope(scope);
 
 	heldExecutorPointer->releaseHeldCompletion();
-	QTRY_COMPARE_WITH_TIMEOUT(runtime.lastCommandSent(), QStringLiteral("outer-send"), 5000);
-	QTRY_COMPARE_WITH_TIMEOUT(
-	    runtime.pluginVariableValue(secondPluginId, QStringLiteral("nested_send_result")),
-	    QString::number(eItemInUse), 5000);
-	QCOMPARE(runtime.pluginVariableValue(firstPluginId, QStringLiteral("first_sent_seen")),
-	         QStringLiteral("outer-send"));
+	heldCompletionReleased = true;
+	QTRY_VERIFY_WITH_TIMEOUT(mutationCompleted, 5000);
+	QVERIFY(!mutationCancelled);
 	QVERIFY(!commandProcessor->m_pluginSentNotificationPending);
+	QTRY_VERIFY_WITH_TIMEOUT(!runtime.m_pluginCallbackDispatchWorkerInFlight &&
+	                             !runtime.hasQueuedPluginCallbackDispatchCommands(),
+	                         5000);
+	QCOMPARE(runtime.totalLinesSent(), 1);
+	QCOMPARE(runtime.lastCommandSent(), QStringLiteral("north"));
+	QCOMPARE(runtime.mappingCount(), 0);
+	QCOMPARE(runtime.pluginVariableValue(pluginId, QStringLiteral("sent_seen")), QStringLiteral("north"));
 
 	std::unique_ptr<ILuaExecutor> restoredExecutor      = heldExecutorPointer->releaseDelegate();
 	WorldRuntimeTestAccess::luaExecutorStorage(runtime) = std::move(restoredExecutor);
 	runtime.m_socketReadyForWorld                       = false;
 	WorldRuntimeTestAccess::plugins(runtime).clear();
-	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), firstEngine));
-	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), secondEngine));
+	QVERIFY(teardownWorkerEngine(*runtime.luaExecutor(), engine));
 }
 
 void tst_LuaCallbackEngine::spamFillerCompletesBeforeOriginalSentNotification()
@@ -23236,7 +24126,8 @@ void tst_LuaCallbackEngine::spamFillerCompletesBeforeOriginalSentNotification()
 	commandProcessor->setRuntime(&runtime);
 	runtime.setCommandProcessor(commandProcessor);
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
-	runtime.m_socketReadyForWorld            = true;
+	runtime.m_socketReadyForWorld = true;
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 	commandProcessor->m_enableSpamPrevention = true;
 	commandProcessor->m_spamLineCount        = 3;
 	commandProcessor->m_spamMessage          = QStringLiteral("spam-filler");
@@ -23299,7 +24190,8 @@ end
 	QCOMPARE(heldExecutorPointer->dispatchCount(sentCallback), 3);
 	QCOMPARE(commandProcessor->m_pendingPluginSends.size(), 1);
 	QCOMPARE(commandProcessor->m_pendingPluginSends.head().phase,
-	         WorldCommandProcessor::PendingOutboundSend::Phase::ResumeAfterSpam);
+	         WorldCommandProcessor::PendingOutboundSend::Phase::AfterPluginSend);
+	QVERIFY(commandProcessor->m_pendingPluginSends.head().bypassSpamPrevention);
 
 	heldExecutorPointer->releaseHeldCompletion();
 	QTRY_COMPARE_WITH_TIMEOUT(heldExecutorPointer->dispatchCount(sentCallback), 5, 5000);
@@ -23308,6 +24200,8 @@ end
 	                             !commandProcessor->m_pluginSentNotificationPending,
 	                         5000);
 	QCOMPARE(runtime.lastCommandSent(), QStringLiteral("repeat"));
+	QCOMPARE(commandProcessor->m_lastCommandSent, QStringLiteral("repeat\r\n"));
+	QCOMPARE(commandProcessor->m_lastCommandCount, 1);
 	QVERIFY(runtime.pluginVariableValue(pluginId, QStringLiteral("callback_order"))
 	            .endsWith(QStringLiteral("send:repeat,send:spam-filler,sent:spam-filler,sent:repeat")));
 
@@ -23388,7 +24282,8 @@ void tst_LuaCallbackEngine::inputCriticalSentOvertakesAndPartialLineCoalesces()
 	runtime.setCommandProcessor(commandProcessor);
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	const auto *initialExecutor   = runtime.luaExecutor();
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	const auto *initialExecutor = runtime.luaExecutor();
 	QVERIFY(initialExecutor);
 
 	const QString pluginId = QStringLiteral("sent.priority.partial.coalescing.plugin");
@@ -23570,8 +24465,8 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	const WorldRuntime::CausalOutboundScopeHandle scope         = runtime.createCausalOutboundScope(false);
 	auto                                          callerContext = runtime.captureRuntimeCallerContext(scope);
 	WorldRuntime::CausalOutboundStageResult firstStage = WorldRuntime::CausalOutboundStageResult::Cancelled;
-	std::function<void(const std::function<void()> &)> retainedGroupContext;
-	callerContext(
+	RuntimeCallerContext                    retainedGroupContext;
+	callerContext.run(
 	    [&]
 	    {
 		    QByteArray firstPayload = QByteArrayLiteral("first\r\n");
@@ -23590,7 +24485,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 
 	WorldRuntime::CausalOutboundStageResult retainedGroupStage =
 	    WorldRuntime::CausalOutboundStageResult::Cancelled;
-	retainedGroupContext(
+	retainedGroupContext.run(
 	    [&]
 	    {
 		    QByteArray payload = QByteArrayLiteral("same-group\r\n");
@@ -23604,7 +24499,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	QCOMPARE(replacement.slot, scope.slot);
 	QVERIFY(replacement.generation != scope.generation);
 	WorldRuntime::CausalOutboundStageResult staleStage = WorldRuntime::CausalOutboundStageResult::Cancelled;
-	callerContext(
+	callerContext.run(
 	    [&]
 	    {
 		    QByteArray payload = QByteArrayLiteral("stale\r\n");
@@ -23616,7 +24511,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 
 	const WorldRuntime::CausalOutboundScopeHandle headScope = runtime.createCausalOutboundScope(false);
 	auto headContext                                        = runtime.captureRuntimeCallerContext(headScope);
-	headContext(
+	headContext.run(
 	    [&]
 	    {
 		    QByteArray payload = QByteArrayLiteral("retained-head\r\n");
@@ -23631,7 +24526,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	runtime.releaseCausalOutboundScope(staleTailScope);
 	WorldRuntime::CausalOutboundStageResult staleTailStage =
 	    WorldRuntime::CausalOutboundStageResult::Cancelled;
-	staleTailContext(
+	staleTailContext.run(
 	    [&]
 	    {
 		    QByteArray payload = QByteArrayLiteral("unretained-tail\r\n");
@@ -23649,7 +24544,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	const WorldRuntime::CausalOutboundScopeHandle disconnectHeadScope =
 	    runtime.createCausalOutboundScope(false);
 	auto disconnectHeadContext = runtime.captureRuntimeCallerContext(disconnectHeadScope);
-	disconnectHeadContext(
+	disconnectHeadContext.run(
 	    [&]
 	    {
 		    QByteArray payload = QByteArrayLiteral("disconnect-head\r\n");
@@ -23660,7 +24555,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	    runtime.createCausalOutboundScope(false);
 	auto disconnectTailContext = runtime.captureRuntimeCallerContext(disconnectTailScope);
 	runtime.releaseCausalOutboundScope(disconnectTailScope);
-	disconnectTailContext(
+	disconnectTailContext.run(
 	    [&]
 	    {
 		    QByteArray payload = QByteArrayLiteral("disconnect-tail\r\n");
@@ -23669,7 +24564,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	    });
 	QCOMPARE(runtime.m_causalOutboundGroups.size(), qsizetype{2});
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectDisconnecting);
-	disconnectHeadContext([&] { QVERIFY(runtime.deferSocketDisconnectUntilCausalOutboundFlush()); });
+	disconnectHeadContext.run([&] { QVERIFY(runtime.deferSocketDisconnectUntilCausalOutboundFlush()); });
 	QByteArray unscopedDisconnectPayload = QByteArrayLiteral("unscoped-disconnect-tail\r\n");
 	QCOMPARE(runtime.stageCausalOutboundTransmission(unscopedDisconnectPayload, false),
 	         WorldRuntime::CausalOutboundStageResult::Cancelled);
@@ -23683,7 +24578,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	runtime.invalidateConnectionGeneration();
 	WorldRuntime::CausalOutboundStageResult cancelledStage =
 	    WorldRuntime::CausalOutboundStageResult::Immediate;
-	cancelledContext(
+	cancelledContext.run(
 	    [&]
 	    {
 		    QByteArray payload = QByteArrayLiteral("cancelled\r\n");
@@ -23696,7 +24591,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	auto staleConnectContext = runtime.captureRuntimeCallerContext();
 	runtime.invalidateConnectionGeneration();
 	bool staleConnectAccepted = true;
-	staleConnectContext(
+	staleConnectContext.run(
 	    [&]
 	    { staleConnectAccepted = runtime.connectToWorldFromCurrentContext(QStringLiteral("127.0.0.1"), 1); });
 	QVERIFY(!staleConnectAccepted);
@@ -23708,7 +24603,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	bool staleDisconnectAccepted = true;
 	bool staleRawPacketAccepted  = true;
-	staleConnectionContext(
+	staleConnectionContext.run(
 	    [&]
 	    {
 		    staleDisconnectAccepted = runtime.disconnectFromWorldFromCurrentContext();
@@ -23722,7 +24617,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 
 	const WorldRuntime::CausalOutboundScopeHandle rawPacketScope = runtime.createCausalOutboundScope(false);
 	auto rawPacketContext = runtime.captureRuntimeCallerContext(rawPacketScope);
-	rawPacketContext(
+	rawPacketContext.run(
 	    [&]
 	    {
 		    QByteArray packet("fresh\0packet", 12);
@@ -23737,12 +24632,13 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	runtime.setCommandProcessor(commandProcessor);
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 
 	auto staleSendContext = runtime.captureRuntimeCallerContext();
 	runtime.invalidateConnectionGeneration();
 	bool regularMutationCompleted = false;
 	bool regularMutationCancelled = true;
-	staleSendContext(
+	staleSendContext.run(
 	    [&]
 	    {
 		    commandProcessor->doSendMsg(QStringLiteral("stale-regular"), false, false,
@@ -23760,7 +24656,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 
 	bool immediateMutationCompleted = false;
 	bool immediateMutationCancelled = true;
-	staleSendContext(
+	staleSendContext.run(
 	    [&]
 	    {
 		    commandProcessor->doSendMsg(QStringLiteral("stale-immediate"), false, false,
@@ -23777,7 +24673,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 
 	runtime.setLastImmediateExpression(QStringLiteral("before-stale-send"));
 	const qsizetype queuedCommandCount = commandProcessor->m_queuedCommands.size();
-	staleSendContext(
+	staleSendContext.run(
 	    [&]
 	    {
 		    QCOMPARE(runtime.sendCommand(QStringLiteral("stale-api"), false, true, false, false, false),
@@ -23792,7 +24688,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 
 	auto queuedInputCriticalContext            = runtime.captureRuntimeCallerContext();
 	commandProcessor->m_processingIncomingLine = true;
-	queuedInputCriticalContext(
+	queuedInputCriticalContext.run(
 	    [&]
 	    {
 		    commandProcessor->sendImmediateText(QStringLiteral("queued-before-cancel"), false, false, false);
@@ -23808,7 +24704,7 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	commandProcessor->m_pluginSentNotificationPending = true;
 	auto oldPendingContext                            = commandProcessor->captureRuntimeCallerContextRunner();
 	bool oldPendingMutationCompleted                  = false;
-	oldPendingContext(
+	oldPendingContext.run(
 	    [&]
 	    {
 		    commandProcessor->doSendMsg(QStringLiteral("pending"), false, false,
@@ -23821,7 +24717,8 @@ void tst_LuaCallbackEngine::causalOutboundScopeLifetimeRejectsResurrectionAndCan
 	    });
 	QCOMPARE(commandProcessor->m_pendingPluginSends.size(), 1);
 	commandProcessor->m_pendingPluginSends.head().phase =
-	    WorldCommandProcessor::PendingOutboundSend::Phase::ResumeAfterSpam;
+	    WorldCommandProcessor::PendingOutboundSend::Phase::AfterPluginSend;
+	commandProcessor->m_pendingPluginSends.head().bypassSpamPrevention = true;
 	runtime.invalidateConnectionGeneration();
 	bool newPendingMutationCompleted = false;
 	commandProcessor->doSendMsg(QStringLiteral("pending"), false, false,
@@ -23849,7 +24746,8 @@ void tst_LuaCallbackEngine::staleNetworkIngressIsCancelledAtConnectionGeneration
 	runtime.setWorldAttribute(QStringLiteral("use_mxp"), QStringLiteral("2"));
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	auto *commandProcessor        = new WorldCommandProcessor(&runtime);
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	auto *commandProcessor = new WorldCommandProcessor(&runtime);
 	commandProcessor->setRuntime(&runtime);
 	runtime.setCommandProcessor(commandProcessor);
 
@@ -24061,6 +24959,7 @@ void tst_LuaCallbackEngine::cancelledResultOperationsPreserveCurrentGenerationQu
 	runtime.setCommandProcessor(commandProcessor);
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 
 	runtime.m_currentConnectionCancellationState = runtime.m_connectionCancellationState;
 	const auto oldRuntimeContext                 = runtime.captureRuntimeCallerContext();
@@ -24263,6 +25162,7 @@ void tst_LuaCallbackEngine::shutdownCancellationDoesNotExecuteQueuedResultOperat
 	runtime.setCommandProcessor(commandProcessor);
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 
 	QStringList plainOutput;
 	QStringList styledOutput;
@@ -24395,7 +25295,7 @@ void tst_LuaCallbackEngine::runtimeDestructionDiscardsRetainedCausalOutboundGrou
 	WorldRuntime                                  runtime;
 	const WorldRuntime::CausalOutboundScopeHandle scope         = runtime.createCausalOutboundScope(false);
 	auto                                          callerContext = runtime.captureRuntimeCallerContext(scope);
-	callerContext(
+	callerContext.run(
 	    [&runtime]
 	    {
 		    QByteArray payload = QByteArrayLiteral("must-not-flush\r\n");
@@ -24614,7 +25514,8 @@ void tst_LuaCallbackEngine::stackedCommandWaitsForSuspendedSendDecision()
 	runtime.setWorldAttribute(QStringLiteral("command_stack_character"), QStringLiteral(";"));
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	const auto *initialExecutor   = runtime.luaExecutor();
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	const auto *initialExecutor = runtime.luaExecutor();
 	QVERIFY(initialExecutor);
 
 	WorldRuntime::Alias alias;
@@ -24690,7 +25591,8 @@ void tst_LuaCallbackEngine::triggerExecuteStackWaitsForNestedSuspendedSendDecisi
 	runtime.setWorldAttribute(QStringLiteral("command_stack_character"), QStringLiteral(";"));
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	const auto *initialExecutor   = runtime.luaExecutor();
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	const auto *initialExecutor = runtime.luaExecutor();
 	QVERIFY(initialExecutor);
 
 	WorldRuntime::Alias sendingAlias;
@@ -24775,7 +25677,8 @@ void tst_LuaCallbackEngine::stackedCommandWaitsForAsyncAliasScriptSendDecision()
 	runtime.setWorldAttribute(QStringLiteral("command_stack_character"), QStringLiteral(";"));
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	const auto *initialExecutor   = runtime.luaExecutor();
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	const auto *initialExecutor = runtime.luaExecutor();
 	QVERIFY(initialExecutor);
 
 	WorldRuntime::Alias followingAlias;
@@ -24879,7 +25782,8 @@ void tst_LuaCallbackEngine::deferredSendSuspendsSendDecisionWithoutBlockingCompl
 	runtime.setCommandProcessor(commandProcessor);
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	const auto *executor          = runtime.luaExecutor();
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	const auto *executor = runtime.luaExecutor();
 	QVERIFY(executor);
 
 	const QString pluginId = QStringLiteral("111111111111111111111102");
@@ -24938,7 +25842,8 @@ void tst_LuaCallbackEngine::deferredMultilineSendRunsEveryPluginDecisionInOrder(
 	runtime.setCommandProcessor(commandProcessor);
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	const auto *executor          = runtime.luaExecutor();
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	const auto *executor = runtime.luaExecutor();
 	QVERIFY(executor);
 
 	const QString pluginId = QStringLiteral("111111111111111111111107");
@@ -25000,7 +25905,8 @@ void tst_LuaCallbackEngine::triggerPriorityMultilineActionRetainsBarrierThroughA
 	runtime.setWorldAttribute(QStringLiteral("enable_trigger_sounds"), QStringLiteral("n"));
 	WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
 	runtime.m_socketReadyForWorld = true;
-	const auto *initialExecutor   = runtime.luaExecutor();
+	WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
+	const auto *initialExecutor = runtime.luaExecutor();
 	QVERIFY(initialExecutor);
 
 	const QString pluginId = QStringLiteral("trigger.priority.multiline.plugin");

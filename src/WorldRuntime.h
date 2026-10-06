@@ -67,6 +67,70 @@ class WorldCommandProcessorMutationAccess;
 struct LuaDeferredRuntimeMutationPlayback;
 struct LuaDeferredRuntimeMutationBatchSequence;
 struct CausalOutboundGroup;
+
+/**
+ * @brief Restores one captured runtime caller context around deferred work.
+ *
+ * The captured state is opaque so every deferred path uses WorldRuntime's single capture and restoration
+ * implementation rather than maintaining parallel copies of the context fields.
+ */
+class RuntimeCallerContext final
+{
+	public:
+		RuntimeCallerContext() = default;
+
+		/**
+		 * @brief Runs work with this captured caller context restored.
+		 * @param work Work to run.
+		 */
+		void                   run(const std::function<void()> &work) const;
+		/**
+		 * @brief Checks whether this value contains a captured caller context.
+		 * @return `true` when work can be run through the captured context.
+		 */
+		[[nodiscard]] explicit operator bool() const noexcept;
+
+	private:
+		/**
+		 * @brief Creates a context around the authoritative runtime restoration runner.
+		 * @param runner Runtime restoration runner.
+		 */
+		explicit RuntimeCallerContext(std::function<void(const std::function<void()> &)> runner);
+
+		std::function<void(const std::function<void()> &)> m_runner;
+
+		friend class WorldCommandProcessor;
+		friend class WorldRuntime;
+};
+
+/**
+ * @brief Transport transaction for one command and its post-write notification work.
+ */
+struct OutboundCommandTransaction
+{
+		enum class Outcome : quint8
+		{
+			PendingWrite,
+			Accepted,
+			Rejected
+		};
+
+		Outcome                    outcome{Outcome::PendingWrite};
+		bool                       notificationFinished{false};
+		bool                       discardPacketDebug{false};
+		LuaCallbackSentObservation preWriteObservation;
+		RuntimeCallerContext       callerContext;
+		std::function<void()>      accepted;
+		std::function<void()>      rejected;
+		std::function<void()>      causalCompletion;
+
+		/**
+		 * @brief Resolves the physical write and runs its callback in the originating caller context.
+		 * @param resolvedOutcome Accepted or rejected terminal outcome.
+		 */
+		void                       resolve(Outcome resolvedOutcome);
+};
+
 class WorldRuntimeTestAccess;
 class WorldView;
 class WorldOutputRenderModel;
@@ -3212,153 +3276,156 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] bool                    requestMccpDisableForReload(int timeoutMs);
 		/**
-		 * @brief Sends raw bytes to world socket.
+		 * @brief Sends raw bytes to the world socket.
 		 * @param payload Bytes to send.
+		 * @param commandTransaction Optional command transaction resolved by the physical write.
+		 * @return Number of bytes accepted by the socket, or a non-positive value on failure.
 		 */
-		void                                  sendToWorld(const QByteArray &payload);
+		qint64 sendToWorld(const QByteArray                                 &payload,
+		                   const QSharedPointer<OutboundCommandTransaction> &commandTransaction = {});
 		/**
 		 * @brief Sends an exact raw packet through the guarded causal callback transport.
 		 * @param payload Raw packet bytes, including any embedded NUL bytes.
 		 * @return `true` when the packet was sent immediately or staged for the current connection.
 		 */
-		bool                                  sendRawPacketFromCurrentContext(QByteArray payload);
+		bool   sendRawPacketFromCurrentContext(QByteArray payload);
 		/**
 		 * @brief Increments sent-line counter.
 		 */
-		void                                  incrementLinesSent();
+		void   incrementLinesSent();
 		/**
 		 * @brief Returns total sent lines for current session.
 		 * @return Total sent line count.
 		 */
-		[[nodiscard]] int                     totalLinesSent() const;
+		[[nodiscard]] int            totalLinesSent() const;
 		/**
 		 * @brief Returns total received lines for current session.
 		 * @return Total received line count.
 		 */
-		[[nodiscard]] int                     totalLinesReceived() const;
+		[[nodiscard]] int            totalLinesReceived() const;
 		/**
 		 * @brief Returns unread/new line counter.
 		 * @return New line counter.
 		 */
-		[[nodiscard]] int                     newLines() const;
+		[[nodiscard]] int            newLines() const;
 		/**
 		 * @brief Sets unread/new line counter.
 		 * @param value New unread line counter value.
 		 */
-		void                                  setNewLines(int value);
+		void                         setNewLines(int value);
 		/**
 		 * @brief Increments unread/new line counter.
 		 */
-		void                                  incrementNewLines();
+		void                         incrementNewLines();
 		/**
 		 * @brief Resets unread/new line counter.
 		 */
-		void                                  clearNewLines();
+		void                         clearNewLines();
 		/**
 		 * @brief Requests an ordered script-visible active/inactive transition.
 		 * @param active Mark runtime active when `true`.
 		 */
-		void                                  requestActiveState(bool active);
+		void                         requestActiveState(bool active);
 		/**
 		 * @brief Returns active/inactive UI state.
 		 * @return `true` when runtime is active.
 		 */
-		[[nodiscard]] bool                    isActive() const;
+		[[nodiscard]] bool           isActive() const;
 		/**
 		 * @brief Returns whether outstanding-line badges are suppressed.
 		 * @return `true` when outstanding-line badges are hidden.
 		 */
-		[[nodiscard]] bool                    doNotShowOutstandingLines() const;
+		[[nodiscard]] bool           doNotShowOutstandingLines() const;
 		/**
 		 * @brief Sets current action source for command dispatch context.
 		 * @param source Action source code.
 		 */
-		void                                  setCurrentActionSource(unsigned short source);
+		void                         setCurrentActionSource(unsigned short source);
 		/**
 		 * @brief Returns current action source code.
 		 * @return Current action source code.
 		 */
-		[[nodiscard]] unsigned short          currentActionSource() const;
+		[[nodiscard]] unsigned short currentActionSource() const;
 		/**
 		 * @brief Increments UTF-8 decode error counter.
 		 */
-		void                                  incrementUtf8ErrorCount();
+		void                         incrementUtf8ErrorCount();
 		/**
 		 * @brief Returns UTF-8 decode error counter.
 		 * @return UTF-8 error count.
 		 */
-		[[nodiscard]] int                     utf8ErrorCount() const;
+		[[nodiscard]] int            utf8ErrorCount() const;
 		/**
 		 * @brief Records last line number that ended with IAC-GA.
 		 * @param lineNumber Line number ending with IAC-GA.
 		 */
-		void                                  setLastLineWithIacGa(int lineNumber);
+		void                         setLastLineWithIacGa(int lineNumber);
 		/**
 		 * @brief Returns last line number that ended with IAC-GA.
 		 * @return Last IAC-GA line number.
 		 */
-		[[nodiscard]] int                     lastLineWithIacGa() const;
+		[[nodiscard]] int            lastLineWithIacGa() const;
 		/**
 		 * @brief Increments evaluated-trigger counter.
 		 */
-		void                                  incrementTriggersEvaluated();
+		void                         incrementTriggersEvaluated();
 		/**
 		 * @brief Increments matched-trigger counter.
 		 */
-		void                                  incrementTriggersMatched();
+		void                         incrementTriggersMatched();
 		/**
 		 * @brief Increments evaluated-alias counter.
 		 */
-		void                                  incrementAliasesEvaluated();
+		void                         incrementAliasesEvaluated();
 		/**
 		 * @brief Increments matched-alias counter.
 		 */
-		void                                  incrementAliasesMatched();
+		void                         incrementAliasesMatched();
 		/**
 		 * @brief Increments fired-timer counter.
 		 */
-		void                                  incrementTimersFired();
+		void                         incrementTimersFired();
 		/**
 		 * @brief Returns total evaluated triggers this session.
 		 * @return Evaluated trigger count.
 		 */
-		[[nodiscard]] int                     triggersEvaluatedCount() const;
+		[[nodiscard]] int            triggersEvaluatedCount() const;
 		/**
 		 * @brief Returns total matched triggers this session.
 		 * @return Matched trigger count.
 		 */
-		[[nodiscard]] int                     triggersMatchedThisSession() const;
+		[[nodiscard]] int            triggersMatchedThisSession() const;
 		/**
 		 * @brief Returns total evaluated aliases this session.
 		 * @return Evaluated alias count.
 		 */
-		[[nodiscard]] int                     aliasesEvaluatedCount() const;
+		[[nodiscard]] int            aliasesEvaluatedCount() const;
 		/**
 		 * @brief Returns total matched aliases this session.
 		 * @return Matched alias count.
 		 */
-		[[nodiscard]] int                     aliasesMatchedThisSession() const;
+		[[nodiscard]] int            aliasesMatchedThisSession() const;
 		/**
 		 * @brief Returns total fired timers this session.
 		 * @return Fired timer count.
 		 */
-		[[nodiscard]] int                     timersFiredThisSession() const;
+		[[nodiscard]] int            timersFiredThisSession() const;
 		/**
 		 * @brief Records timestamp of last user-entered command.
 		 * @param when Timestamp to store.
 		 */
-		void                                  setLastUserInput(const QDateTime &when);
+		void                         setLastUserInput(const QDateTime &when);
 		/**
 		 * @brief Returns timestamp of last user-entered command.
 		 * @return Last user input timestamp.
 		 */
-		[[nodiscard]] QDateTime               lastUserInput() const;
+		[[nodiscard]] QDateTime      lastUserInput() const;
 		/**
 		 * @brief Loads font file and tracks it for cleanup.
 		 * @param path Font file path.
 		 * @return API status code.
 		 */
-		int                                   addFontFromFile(const QString &path);
+		int                          addFontFromFile(const QString &path);
 		/**
 		 * @brief Validates and optionally loads a world foreground/background image file.
 		 * @param fileName Image file path.
@@ -3366,91 +3433,91 @@ class WorldRuntime : public QObject
 		 * @param storedName Optional normalized path storage.
 		 * @return API status code.
 		 */
-		[[nodiscard]] static int  loadWorldImageFile(const QString &fileName, QImage *target = nullptr,
-		                                             QString *storedName = nullptr);
+		[[nodiscard]] static int     loadWorldImageFile(const QString &fileName, QImage *target = nullptr,
+		                                                QString *storedName = nullptr);
 		/**
 		 * @brief Returns first loaded special-font path.
 		 * @return First special-font path.
 		 */
-		[[nodiscard]] QString     firstSpecialFontPath() const;
+		[[nodiscard]] QString        firstSpecialFontPath() const;
 		/**
 		 * @brief Adds mapper direction pair.
 		 * @param direction Forward direction command.
 		 * @param reverse Reverse direction command.
 		 * @return API status code.
 		 */
-		int                       addToMapper(const QString &direction, const QString &reverse);
+		int                          addToMapper(const QString &direction, const QString &reverse);
 		/**
 		 * @brief Adds mapper comment entry.
 		 * @param comment Comment text.
 		 * @return API status code.
 		 */
-		int                       addMapperComment(const QString &comment);
+		int                          addMapperComment(const QString &comment);
 		/**
 		 * @brief Checks whether mapper text contains characters reserved by MUSHclient map syntax.
 		 * @param text Mapper direction, reverse direction, or comment text.
 		 * @return True when the text contains a reserved mapper character.
 		 */
-		[[nodiscard]] static bool containsReservedMapperCharacter(const QString &text);
+		[[nodiscard]] static bool    containsReservedMapperCharacter(const QString &text);
 		/**
 		 * @brief Moves item to front of shift-tab completion list.
 		 * @param item Completion item text.
 		 * @return API status code.
 		 */
-		int                       shiftTabCompleteItem(const QString &item);
+		int                          shiftTabCompleteItem(const QString &item);
 		/**
 		 * @brief Checks whether a shift-tab completion item matches MUSHclient syntax.
 		 * @param item Completion item text.
 		 * @return True when the item is accepted.
 		 */
-		[[nodiscard]] static bool isValidShiftTabCompleteItem(const QString &item);
+		[[nodiscard]] static bool    isValidShiftTabCompleteItem(const QString &item);
 		/**
 		 * @brief Deletes latest mapper entry.
 		 * @return API status code.
 		 */
-		int                       deleteLastMapItem();
+		int                          deleteLastMapItem();
 		/**
 		 * @brief Clears mapper history.
 		 * @return API status code.
 		 */
-		int                       deleteAllMapItems();
+		int                          deleteAllMapItems();
 		/**
 		 * @brief Removes last output lines from buffer.
 		 * @param count Number of trailing lines to remove.
 		 */
-		void                      deleteLines(int count);
+		void                         deleteLines(int count);
 		/**
 		 * @brief Clears output line buffer.
 		 */
-		void                      deleteOutput();
+		void                         deleteOutput();
 		/**
 		 * @brief Deletes world variable by name.
 		 * @param name Variable name.
 		 * @return API status code.
 		 */
-		int                       deleteVariable(const QString &name);
+		int                          deleteVariable(const QString &name);
 		/**
 		 * @brief Clears queued commands and returns discarded count.
 		 * @return Number of discarded commands.
 		 */
-		[[nodiscard]] int         discardQueuedCommands() const;
+		[[nodiscard]] int            discardQueuedCommands() const;
 		/**
 		 * @brief Enables/disables mapper collection.
 		 * @param enabled Enable mapping collection when `true`.
 		 */
-		void                      setMappingEnabled(bool enabled);
+		void                         setMappingEnabled(bool enabled);
 		/**
 		 * @brief Expands speedwalk notation into commands.
 		 * @param speedWalkString Speedwalk text.
 		 * @return Expanded command sequence.
 		 */
-		[[nodiscard]] QString     evaluateSpeedwalk(const QString &speedWalkString) const;
+		[[nodiscard]] QString        evaluateSpeedwalk(const QString &speedWalkString) const;
 		/**
 		 * @brief Executes one command via command processor.
 		 * @param text Command text.
 		 * @return API status code.
 		 */
-		[[nodiscard]] int         executeCommand(const QString &text) const;
+		[[nodiscard]] int            executeCommand(const QString &text) const;
 		/**
 		 * @brief Executes one Send Now macro via command processor.
 		 *
@@ -3461,19 +3528,19 @@ class WorldRuntime : public QObject
 		 * @param history Add original macro text to history when `true`.
 		 * @return API status code.
 		 */
-		[[nodiscard]] int         executeUserMacroSendNow(const QString &text, bool history) const;
+		[[nodiscard]] int            executeUserMacroSendNow(const QString &text, bool history) const;
 		/**
 		 * @brief Executes one direct trigger-script command with priority over queued movement.
 		 * @param text Command text.
 		 * @return API status code.
 		 */
-		[[nodiscard]] int         executeCommandWithTriggerPriority(const QString &text) const;
+		[[nodiscard]] int            executeCommandWithTriggerPriority(const QString &text) const;
 		/**
 		 * @brief Gets MXP entity value.
 		 * @param name Entity name.
 		 * @return Entity value.
 		 */
-		[[nodiscard]] QString     getEntityValue(const QString &name) const;
+		[[nodiscard]] QString        getEntityValue(const QString &name) const;
 		/**
 		 * @brief Returns custom MXP entity definitions.
 		 * @return Custom entity values keyed by normalized entity name.
@@ -4884,6 +4951,12 @@ class WorldRuntime : public QObject
 		 */
 		[[nodiscard]] LuaCallbackIncomingLineObservation captureIncomingLineLuaObservation() const;
 		/**
+		 * @brief Prepares the fixed recipient roster for one OnPluginSent event.
+		 * @param text Command text supplied to plugins without its trailing newline.
+		 * @return Prepared callback request whose full runtime snapshot is captured at dispatch.
+		 */
+		[[nodiscard]] LuaBatchDispatchRequest            preparePluginSentDispatch(const QString &text);
+		/**
 		 * @brief Snapshot row for one accelerator mapping used by Lua query APIs.
 		 */
 		struct AcceleratorSnapshot
@@ -5111,12 +5184,12 @@ class WorldRuntime : public QObject
 		void firePluginSent(const QString &text);
 		/**
 		 * @brief Dispatches OnPluginSent and resumes its caller after every recipient completes.
-		 * @param text Sent line text supplied to plugins.
+		 * @param request Prepared OnPluginSent request captured before the socket write.
 		 * @param continuationFactory Lazy factory for the caller-specific suspended state.
 		 * @return Inline callback result or a unique continuation ticket.
 		 */
 		LuaCallbackContinuationDispatchResult
-		     firePluginSentContinuable(const QString                        &text,
+		     firePluginSentContinuable(const LuaBatchDispatchRequest        &request,
 		                               LuaCallbackResultContinuationFactory &continuationFactory);
 		/**
 		 * @brief Fires plugin partial-line callback.
@@ -6959,18 +7032,52 @@ class WorldRuntime : public QObject
 		 * @brief Cancels queued result-dependent operations without starting new callback work.
 		 */
 		void cancelPendingResultOperationsForShutdown();
-		[[nodiscard]] std::function<void(const std::function<void()> &)> captureRuntimeCallerContext() const;
+		/**
+		 * @brief Captures the complete current runtime caller context.
+		 * @return Context value that restores the captured state around deferred work.
+		 */
+		[[nodiscard]] RuntimeCallerContext captureRuntimeCallerContext() const;
 		/**
 		 * @brief Captures runtime caller state using an explicit causal outbound scope.
 		 * @param causalOutboundScope Scope restored while the captured caller runs.
 		 * @return Runner that restores the captured context around supplied work.
 		 */
-		[[nodiscard]] std::function<void(const std::function<void()> &)>
+		[[nodiscard]] RuntimeCallerContext
 		captureRuntimeCallerContext(const CausalOutboundScopeHandle &causalOutboundScope) const;
-		[[nodiscard]] std::function<void(const std::function<void()> &)>
-		captureRuntimeAmbientCallerContext() const;
-		[[nodiscard]] std::function<void(const std::function<void()> &)>
-		     captureRuntimeAmbientCallerContext(CausalOutboundScopeHandle causalOutboundScope) const;
+		/**
+		 * @brief Captures caller state for independent work without retaining a logical operation or causal group.
+		 * @return Context value that restores the captured ambient state around deferred work.
+		 */
+		[[nodiscard]] RuntimeCallerContext captureRuntimeAmbientCallerContext() const;
+		/**
+		 * @brief Captures ambient caller state using an explicit causal outbound scope.
+		 * @param causalOutboundScope Scope restored while the captured caller runs.
+		 * @return Context value that restores the captured ambient state around deferred work.
+		 */
+		[[nodiscard]] RuntimeCallerContext
+		captureRuntimeAmbientCallerContext(const CausalOutboundScopeHandle &causalOutboundScope) const;
+		/**
+		 * @brief Captures command caller state without retaining the current causal group.
+		 * @return Context used while a staged outbound transmission is physically written and resolved.
+		 */
+		[[nodiscard]] RuntimeCallerContext captureOutboundCallerContext() const;
+		/**
+		 * @brief Captures physical-write caller state using the authoritative connection generation.
+		 * @return Context used for every fragment of the resulting packet-debug record.
+		 */
+		[[nodiscard]] RuntimeCallerContext captureOutgoingPacketDebugCallerContext() const;
+		/**
+		 * @brief Captures runtime state through the authoritative caller-context implementation.
+		 * @param causalOutboundScope Scope restored while deferred work runs.
+		 * @param retainCausalOutboundGroup Retain the currently active group directly when `true`.
+		 * @param ambientCommandContext Exclude the active logical command operation when `true`.
+		 * @param connectionCancellationState Connection generation restored for deferred work.
+		 * @return Context value that restores all captured fields together.
+		 */
+		[[nodiscard]] RuntimeCallerContext captureRuntimeCallerContextImpl(
+		    CausalOutboundScopeHandle causalOutboundScope, bool retainCausalOutboundGroup,
+		    bool                                                           ambientCommandContext,
+		    const std::shared_ptr<LuaCallbackConnectionCancellationState> &connectionCancellationState) const;
 		void resumeLuaDeferredRuntimeMutationPlayback(
 		    const std::shared_ptr<LuaDeferredRuntimeMutationPlayback> &playback,
 		    std::function<void()>                                      prelude = {});
@@ -6992,9 +7099,9 @@ class WorldRuntime : public QObject
 		[[nodiscard]] std::function<void(bool)> retainLuaDeferredRuntimeMutationPlayback();
 		struct PendingTraceOperation
 		{
-				QString                                            message;
-				std::function<void(bool)>                          mutationCompletion;
-				std::function<void(const std::function<void()> &)> callerContext;
+				QString                   message;
+				std::function<void(bool)> mutationCompletion;
+				RuntimeCallerContext      callerContext;
 		};
 		/**
 		 * @brief Starts plugin interception for one trace operation.
@@ -7022,15 +7129,15 @@ class WorldRuntime : public QObject
 					StopAll
 				};
 
-				Kind                                               kind{Kind::Play};
-				int                                                buffer{0};
-				QString                                            fileName;
-				bool                                               loop{false};
-				double                                             volume{0.0};
-				double                                             pan{0.0};
-				std::function<void(int)>                           completion;
-				std::function<void(bool)>                          mutationCompletion;
-				std::function<void(const std::function<void()> &)> callerContext;
+				Kind                      kind{Kind::Play};
+				int                       buffer{0};
+				QString                   fileName;
+				bool                      loop{false};
+				double                    volume{0.0};
+				double                    pan{0.0};
+				std::function<void(int)>  completion;
+				std::function<void(bool)> mutationCompletion;
+				RuntimeCallerContext      callerContext;
 		};
 		struct PendingSoundPluginDecision;
 		/**
@@ -7058,11 +7165,11 @@ class WorldRuntime : public QObject
 		void drainPendingSoundOperations();
 		struct PendingChatNoteOperation
 		{
-				short                                              noteType{0};
-				QString                                            text;
-				std::function<void(bool)>                          mutationCompletion;
-				std::function<void(const std::function<void()> &)> callerContext;
-				bool                                               bypassPluginCallback{false};
+				short                     noteType{0};
+				QString                   text;
+				std::function<void(bool)> mutationCompletion;
+				RuntimeCallerContext      callerContext;
+				bool                      bypassPluginCallback{false};
 		};
 		struct PendingChatNoteDispatch;
 		/**
@@ -7106,6 +7213,13 @@ class WorldRuntime : public QObject
 		void        applyCurrentCallbackContextOverrides(LuaBatchDispatchRequest &request) const;
 		static void applyIncomingLineLuaObservation(LuaCallbackSnapshot                      &snapshot,
 		                                            const LuaCallbackIncomingLineObservation &observation);
+		/**
+		 * @brief Applies the pre-send counter view retained by an OnPluginSent request.
+		 * @param snapshot Snapshot to update.
+		 * @param observation Pre-send counter values.
+		 */
+		static void applySentLuaObservation(LuaCallbackSnapshot              &snapshot,
+		                                    const LuaCallbackSentObservation &observation);
 		class IncomingLineLuaObservationScope final
 		{
 			public:
@@ -7408,12 +7522,73 @@ class WorldRuntime : public QObject
 		 * @brief Stages encoded command bytes in the current causal output group.
 		 * @param payload Encoded and telnet-escaped command bytes, consumed only when staged.
 		 * @param triggerPriority Place bytes in the trigger-priority band when `true`.
+		 * @param commandTransaction Optional command commit whose outcome follows the staged bytes.
 		 * @return Whether the payload was staged, should be sent immediately, or belongs to a cancelled connection.
 		 */
-		[[nodiscard]] CausalOutboundStageResult stageCausalOutboundTransmission(QByteArray &payload,
-		                                                                        bool        triggerPriority);
-		void                                    flushReadyCausalOutboundGroups();
+		[[nodiscard]] CausalOutboundStageResult stageCausalOutboundTransmission(
+		    QByteArray &payload, bool triggerPriority,
+		    const QSharedPointer<OutboundCommandTransaction> &commandTransaction = {});
+		void flushReadyCausalOutboundGroups();
 		void flushCausalOutboundGroup(const QSharedPointer<CausalOutboundGroup> &group);
+		/**
+		 * @brief Completes command host accounting and releases its causal transmission group.
+		 * @param commandTransaction Command transaction to release.
+		 */
+		void finishOutboundCommandNotification(
+		    const QSharedPointer<OutboundCommandTransaction> &commandTransaction);
+		/**
+		 * @brief Cancels command host accounting and discards its packet-debug publication.
+		 * @param commandTransaction Command commit to discard.
+		 */
+		void discardOutboundCommandNotification(
+		    const QSharedPointer<OutboundCommandTransaction> &commandTransaction);
+		/**
+		 * @brief Publishes ready outgoing packet-debug records in physical write order.
+		 */
+		void drainOutgoingPacketDebugRecords();
+		/**
+		 * @brief Packet-debug data captured when one outgoing packet is accepted for writing.
+		 */
+		struct OutgoingPacketDebugRecord
+		{
+				QByteArray                                 payload;
+				QDateTime                                  timestamp;
+				int                                        packetNumber{0};
+				qint64                                     bytesOut{0};
+				RuntimeCallerContext                       callerContext;
+				QSharedPointer<OutboundCommandTransaction> commandTransaction;
+				QSharedPointer<CausalOutboundGroup>        causalGroup;
+		};
+		/**
+		 * @brief Resumable publication state for one outgoing packet-debug record.
+		 */
+		struct OutgoingPacketDebugPublication
+		{
+				OutgoingPacketDebugRecord  record;
+				QString                    title;
+				LuaCallbackSentObservation observation;
+				qsizetype                  offset{-1};
+				QString                    pendingFragment;
+		};
+		struct PendingOutgoingPacketDebugFragment;
+		/**
+		 * @brief Starts or resumes publication of the active outgoing packet-debug record.
+		 */
+		void advanceOutgoingPacketDebugPublication();
+		/**
+		 * @brief Completes one outgoing packet-debug callback fragment.
+		 * @param result Callback result for the fragment.
+		 */
+		void completeOutgoingPacketDebugFragment(const LuaBatchDispatchResult &result);
+		/**
+		 * @brief Completes the active packet-debug record and releases its command transaction.
+		 */
+		void completeOutgoingPacketDebugRecord();
+		/**
+		 * @brief Runs packet-debug work in the active record's captured caller context.
+		 * @param work Packet-debug work to run.
+		 */
+		void runInOutgoingPacketDebugCallerContext(const std::function<void()> &work) const;
 		/**
 		 * @brief Invalidates all connection-bound asynchronous state for the previous generation.
 		 */
@@ -7966,14 +8141,14 @@ class WorldRuntime : public QObject
 				PluginCallbackDispatchOptions                                options;
 				std::function<void(const LuaBatchDispatchResult &)>          completion;
 				QVector<std::function<void(const LuaBatchDispatchResult &)>> coalescedCompletions;
-				std::function<void()>                              initialPresentationCommitCompletion;
-				std::function<void(const std::function<void()> &)> callerContext;
-				CausalOutboundScopeHandle                          causalOutboundScope;
-				bool                                               ownsCausalOutboundScope{false};
-				qint64                                             enqueuedAtNs{0};
-				int                                                queueDepthAtEnqueue{0};
-				bool                                               miniWindowExecutionGuardActive{false};
-				bool drawOutputWindowExecutionGuardActive{false};
+				std::function<void()>     initialPresentationCommitCompletion;
+				RuntimeCallerContext      callerContext;
+				CausalOutboundScopeHandle causalOutboundScope;
+				bool                      ownsCausalOutboundScope{false};
+				qint64                    enqueuedAtNs{0};
+				int                       queueDepthAtEnqueue{0};
+				bool                      miniWindowExecutionGuardActive{false};
+				bool                      drawOutputWindowExecutionGuardActive{false};
 				std::shared_ptr<CausalPluginCallbackSnapshotRevision> causalSnapshotRevision;
 				bool                                                  recipientDispatchStarted{false};
 				quint64                                               recipientEligibilityRevisionAtStart{0};
@@ -8024,7 +8199,7 @@ class WorldRuntime : public QObject
 				QSharedPointer<LuaCallbackResultContinuation>           continuation;
 				LuaBatchDispatchResult                                  result;
 				LuaBatchDispatchResult                                  fallback;
-				std::function<void(const std::function<void()> &)>      callerContext;
+				RuntimeCallerContext                                    callerContext;
 				std::shared_ptr<LuaDeferredRuntimeMutationPlayback>     mutationPlayback;
 				std::shared_ptr<LuaCallbackConnectionCancellationState> connectionCancellationState;
 				bool                                                    resolved{false};
@@ -8312,6 +8487,8 @@ class WorldRuntime : public QObject
 		QQueue<PendingTraceOperation>                           m_pendingTraceOperations;
 		QQueue<PendingSoundOperation>                           m_pendingSoundOperations;
 		QQueue<PendingChatNoteOperation>                        m_pendingChatNoteOperations;
+		QQueue<OutgoingPacketDebugRecord>                       m_outgoingPacketDebugRecords;
+		std::optional<OutgoingPacketDebugPublication>           m_outgoingPacketDebugPublication;
 		std::shared_ptr<PendingPartialLineDispatchState>        m_pendingPartialLineDispatch;
 		std::shared_ptr<CausalPluginCallbackSnapshotRevision>   m_causalPluginCallbackSnapshotRevision{
 		    std::make_shared<CausalPluginCallbackSnapshotRevision>()};
@@ -8336,6 +8513,7 @@ class WorldRuntime : public QObject
 		bool                                     m_drainingPendingSoundOperations{false};
 		bool                                     m_chatNotePluginCallbackPending{false};
 		bool                                     m_drainingPendingChatNoteOperations{false};
+		bool                                     m_drainingOutgoingPacketDebugRecords{false};
 		bool                                     m_pluginCallbackDispatchWorkerInFlight{false};
 		bool                                     m_pluginCallbackStrictOrderingFenceInFlight{false};
 		bool                                     m_pluginCallbackDispatchDrainQueued{false};

@@ -16,6 +16,7 @@
 
 // ReSharper disable once CppUnusedIncludeDirective
 #include <QHostAddress>
+#include <QScopeGuard>
 #include <QScopedPointer>
 #include <QTcpServer>
 // ReSharper disable once CppUnusedIncludeDirective
@@ -480,6 +481,13 @@ namespace
 				processor.setView(&view);
 				processor.setRuntime(&runtime);
 				runtime.setCommandProcessor(&processor);
+				const auto detachRuntime = qScopeGuard(
+				    [&runtime, &view, &processor]
+				    {
+					    view.setRuntime(nullptr);
+					    runtime.setCommandProcessor(nullptr);
+					    processor.setRuntime(nullptr);
+				    });
 				QObject::connect(&runtime, &WorldRuntime::incomingStyledLineReceived, &processor,
 				                 &WorldCommandProcessor::onIncomingStyledLineReceived);
 				QObject::connect(&runtime, &WorldRuntime::incomingStyledLinePartialReceived, &processor,

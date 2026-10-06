@@ -6,6 +6,7 @@
  * Role: Integration coverage for WorldRuntime plugin lifecycle callback ordering.
  */
 
+#include "AcceptingWorldSocketService.h"
 #include "AppController.h"
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
@@ -4857,6 +4858,7 @@ Note("post-ansi-output")
 			runtime.setWorldAttribute(QStringLiteral("script_language"), QStringLiteral("Lua"));
 			runtime.setWorldAttribute(QStringLiteral("display_my_input"), QStringLiteral("y"));
 			WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+			WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 
 			WorldRuntime::Trigger trigger;
 			trigger.attributes.insert(QStringLiteral("enabled"), QStringLiteral("y"));

@@ -44,10 +44,12 @@
 #include <QPointer>
 #include <QRegularExpression>
 #include <QScopeGuard>
+#include <QScopedValueRollback>
 #include <QUrl>
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <utility>
 #ifdef HILITE
 constexpr int kStyleHilite = HILITE;
@@ -976,16 +978,18 @@ struct WorldCommandProcessor::PendingPluginLineDecision final : LuaCallbackResul
 struct WorldCommandProcessor::PendingPluginSendDecision final : LuaCallbackResultContinuation
 {
 		QPointer<WorldCommandProcessor> processor;
+		QPointer<WorldRuntime>          runtime;
 		QString                         text;
 		bool                            echo{false};
 		bool                            logIt{false};
 		OutboundTransport               transport{OutboundTransport::Immediate};
 		std::function<void(bool)>       mutationCompletion;
 		LogicalOperationCompletionPtr   operationCompletion;
+		bool                            bypassSpamPrevention{false};
 
 		void                            resume(LuaBatchDispatchResult &&result) override
 		{
-			if (!processor)
+			if (!processor || processor->m_runtime != runtime)
 			{
 				if (mutationCompletion)
 					mutationCompletion(true);
@@ -996,12 +1000,12 @@ struct WorldCommandProcessor::PendingPluginSendDecision final : LuaCallbackResul
 			const bool accepted = result.boolResultValid ? result.boolResult : true;
 			processor->completePluginSendDecision(text, echo, logIt, transport, accepted,
 			                                      std::move(mutationCompletion),
-			                                      std::move(operationCompletion));
+			                                      std::move(operationCompletion), bypassSpamPrevention);
 		}
 
 		void cancel(LuaBatchDispatchResult && /*fallback*/) override
 		{
-			if (!processor)
+			if (!processor || processor->m_runtime != runtime)
 			{
 				if (mutationCompletion)
 					mutationCompletion(true);
@@ -1013,28 +1017,65 @@ struct WorldCommandProcessor::PendingPluginSendDecision final : LuaCallbackResul
 		}
 };
 
+struct WorldCommandProcessor::PendingOutboundCommand
+{
+		QPointer<WorldCommandProcessor>     processor;
+		QPointer<WorldRuntime>              runtime;
+		QString                             text;
+		bool                                echo{false};
+		bool                                logIt{false};
+		LuaBatchDispatchRequest             sentRequest;
+		std::function<void(bool)>           mutationCompletion;
+		LogicalOperationCompletionPtr       operationCompletion;
+		QSharedPointer<CommandHistoryState> historyState;
+		SpamCommitState                     spamCommitState;
+		bool                                settled{false};
+
+		/**
+		 * @brief Releases retained command work when its processor no longer exists.
+		 * @param transaction Physical-write transaction whose notification must be discarded.
+		 */
+		void settleWithoutProcessor(const QSharedPointer<OutboundCommandTransaction> &transaction)
+		{
+			if (settled)
+				return;
+			settled = true;
+			if (transaction && transaction->outcome == OutboundCommandTransaction::Outcome::Rejected &&
+			    historyState)
+			{
+				historyState->sendFailed = true;
+			}
+			if (runtime)
+				runtime->discardOutboundCommandNotification(transaction);
+			else if (transaction)
+			{
+				transaction->notificationFinished = true;
+				transaction->discardPacketDebug   = true;
+				if (auto causalCompletion = std::move(transaction->causalCompletion); causalCompletion)
+					causalCompletion();
+			}
+			if (auto completion = std::move(mutationCompletion); completion)
+				completion(true);
+			if (auto completion = std::move(operationCompletion); completion)
+				completion->release(false);
+		}
+};
+
 struct WorldCommandProcessor::PendingPluginSentNotification final : LuaCallbackResultContinuation
 {
-		QPointer<WorldCommandProcessor> processor;
-		QString                         text;
-		bool                            echo{false};
-		bool                            logIt{false};
-		OutboundTransport               transport{OutboundTransport::Immediate};
-		std::function<void(bool)>       mutationCompletion;
-		LogicalOperationCompletionPtr   operationCompletion;
+		std::shared_ptr<PendingOutboundCommand>    command;
+		QSharedPointer<OutboundCommandTransaction> transaction;
 
-		void                            finish()
+		void finish(const AcceptedOutboundCompletionMode completionMode =
+		                AcceptedOutboundCompletionMode::ContinueOriginatingWork) const
 		{
-			if (!processor)
+			if (!command || !command->processor)
 			{
-				if (mutationCompletion)
-					mutationCompletion(true);
-				if (operationCompletion)
-					operationCompletion->release(false);
+				if (command)
+					command->settleWithoutProcessor(transaction);
 				return;
 			}
-			processor->completePluginSentNotification(
-			    text, echo, logIt, transport, std::move(mutationCompletion), std::move(operationCompletion));
+			command->processor->completePluginSentNotification(command, transaction, completionMode);
 		}
 
 		void resume(LuaBatchDispatchResult && /*result*/) override
@@ -1044,7 +1085,17 @@ struct WorldCommandProcessor::PendingPluginSentNotification final : LuaCallbackR
 
 		void cancel(LuaBatchDispatchResult && /*fallback*/) override
 		{
-			finish();
+			if (command && command->processor && command->runtime &&
+			    command->runtime->m_runtimeDestructionStarted)
+			{
+				command->processor->rejectOutboundCommand(command, transaction);
+				return;
+			}
+			const AcceptedOutboundCompletionMode completionMode =
+			    command && command->processor && command->processor->m_outboundBindingCancellationActive
+			        ? AcceptedOutboundCompletionMode::CancelOriginatingWork
+			        : AcceptedOutboundCompletionMode::ContinueOriginatingWork;
+			finish(completionMode);
 		}
 };
 
@@ -1114,7 +1165,7 @@ struct WorldCommandProcessor::CommandEvaluationSequence final
 						                                             { self->commandCompleted(completed); }));
 				};
 				if (callerContext)
-					callerContext(evaluate);
+					callerContext.run(evaluate);
 				else
 					evaluate();
 				if (nextIndex == startingIndex)
@@ -1363,7 +1414,7 @@ struct WorldCommandProcessor::AliasEvaluationSequence final
 			const auto self   = shared_from_this();
 			const auto resume = [self, completed] { self->orderedActionFinished(completed); };
 			if (callerContext)
-				callerContext(resume);
+				callerContext.run(resume);
 			else
 				resume();
 		}
@@ -1579,7 +1630,7 @@ struct WorldCommandProcessor::AliasEvaluationSequence final
 							        operation->release(true);
 					        };
 					        if (context)
-						        context(complete);
+						        context.run(complete);
 					        else
 						        complete();
 				        });
@@ -2072,7 +2123,7 @@ struct WorldCommandProcessor::TimerEvaluationSequence final
 							        operation->release(true);
 					        };
 					        if (context)
-						        context(complete);
+						        context.run(complete);
 					        else
 						        complete();
 				        });
@@ -2241,12 +2292,16 @@ void WorldCommandProcessor::setRuntime(WorldRuntime *runtime)
 		refreshRuntimeOptions();
 		return;
 	}
-	if (m_activeIncomingLineOperation)
-		cancelIncomingLine(m_activeIncomingLineOperation);
-	else
-		cancelInputCriticalOperations();
-	if (m_processingEnteredCommand)
-		cancelActiveEnteredCommand();
+	{
+		QScopedValueRollback cancellingOutboundBinding(m_outboundBindingCancellationActive, true);
+		if (m_activeIncomingLineOperation)
+			cancelIncomingLine(m_activeIncomingLineOperation);
+		else
+			cancelInputCriticalOperations();
+		if (m_processingEnteredCommand)
+			cancelActiveEnteredCommand();
+		cancelOutboundWorkForRuntimeDetach(m_runtime);
+	}
 	++m_ruleEvaluationGeneration;
 	m_timerEvaluationSequence.reset();
 	m_timerEvaluationRerunPending = false;
@@ -2663,17 +2718,18 @@ WorldCommandProcessor::CallerContextRunner WorldCommandProcessor::captureCallerC
 {
 	const CommandExecutionContext         context = captureCommandExecutionContext();
 	const QPointer<WorldCommandProcessor> processor(const_cast<WorldCommandProcessor *>(this));
-	return [processor, context](const std::function<void()> &work)
-	{
-		if (!work)
-			return;
-		if (!processor)
-		{
-			work();
-			return;
-		}
-		processor->runWithCommandExecutionContext(context, work);
-	};
+	return CallerContextRunner(
+	    [processor, context](const std::function<void()> &work)
+	    {
+		    if (!work)
+			    return;
+		    if (!processor)
+		    {
+			    work();
+			    return;
+		    }
+		    processor->runWithCommandExecutionContext(context, work);
+	    });
 }
 
 WorldCommandProcessor::CallerContextRunner WorldCommandProcessor::captureRuntimeCallerContextRunner() const
@@ -2689,17 +2745,18 @@ WorldCommandProcessor::CallerContextRunner WorldCommandProcessor::captureAmbient
 	context.operationCompletion.reset();
 	context.inputCriticalOperationScope.clear();
 	const QPointer<WorldCommandProcessor> processor(const_cast<WorldCommandProcessor *>(this));
-	return [processor, context](const std::function<void()> &work)
-	{
-		if (!work)
-			return;
-		if (!processor)
-		{
-			work();
-			return;
-		}
-		processor->runWithCommandExecutionContext(context, work);
-	};
+	return CallerContextRunner(
+	    [processor, context](const std::function<void()> &work)
+	    {
+		    if (!work)
+			    return;
+		    if (!processor)
+		    {
+			    work();
+			    return;
+		    }
+		    processor->runWithCommandExecutionContext(context, work);
+	    });
 }
 
 void WorldCommandProcessor::runWithCommandExecutionContext(const CommandExecutionContext &context,
@@ -2924,7 +2981,7 @@ void WorldCommandProcessor::cancelPendingTriggerPriorityActions()
 			action.operationCompletion.clear();
 		};
 		if (action.callerContext)
-			action.callerContext(releaseOperation);
+			action.callerContext.run(releaseOperation);
 		else
 			releaseOperation();
 	}
@@ -2981,7 +3038,7 @@ void WorldCommandProcessor::drainPendingTriggerPriorityActions()
 		    [&action, &executeAction]
 		    {
 			    if (action.callerContext)
-				    action.callerContext(executeAction);
+				    action.callerContext.run(executeAction);
 			    else
 				    executeAction();
 		    });
@@ -3945,7 +4002,7 @@ bool WorldCommandProcessor::processPendingIncomingStreamItem(
 			const auto runWithInputCriticalContext = [&]
 			{ runWithCommandExecutionContext(item.inputCriticalActionContext, runAction); };
 			if (item.inputCriticalCallerContext)
-				item.inputCriticalCallerContext(runWithInputCriticalContext);
+				item.inputCriticalCallerContext.run(runWithInputCriticalContext);
 			else
 				runWithInputCriticalContext();
 			processingBecameAsynchronous =
@@ -4851,11 +4908,12 @@ void WorldCommandProcessor::evaluateCommandSequence(QStringList commands, Comman
 	CommandExecutionContext context = captureCommandExecutionContext();
 	context.processingAutoSay       = autoSayEvaluation;
 	const QPointer<WorldCommandProcessor> processor(this);
-	sequence->callerContext = [processor, context](const std::function<void()> &work)
-	{
-		if (processor)
-			processor->runWithCommandExecutionContext(context, work);
-	};
+	sequence->callerContext = CallerContextRunner(
+	    [processor, context](const std::function<void()> &work)
+	    {
+		    if (processor)
+			    processor->runWithCommandExecutionContext(context, work);
+	    });
 	sequence->advance();
 }
 
@@ -6251,7 +6309,7 @@ void WorldCommandProcessor::dispatchScriptSend(
 		{
 			const auto release = [operationCompletion] { operationCompletion->release(true); };
 			if (completionContext)
-				completionContext(release);
+				completionContext.run(release);
 			else
 				release();
 		};
@@ -6372,7 +6430,8 @@ void WorldCommandProcessor::sendMsg(const QString &text, const bool echo, const 
 void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, const bool logIt,
                                       const OutboundTransport       transport,
                                       std::function<void(bool)>     mutationCompletion,
-                                      LogicalOperationCompletionPtr operationCompletion)
+                                      LogicalOperationCompletionPtr operationCompletion,
+                                      const bool                    bypassSpamPrevention)
 {
 	if (!operationCompletion && m_activeOperationCompletion)
 	{
@@ -6386,13 +6445,14 @@ void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, cons
 	if (m_pluginSentNotificationPending)
 	{
 		PendingOutboundSend pending;
-		pending.text                = text;
-		pending.echo                = echo;
-		pending.logIt               = logIt;
-		pending.transport           = transport;
-		pending.callerContext       = captureRuntimeCallerContextRunner();
-		pending.mutationCompletion  = std::move(mutationCompletion);
-		pending.operationCompletion = std::move(operationCompletion);
+		pending.text                 = text;
+		pending.echo                 = echo;
+		pending.logIt                = logIt;
+		pending.transport            = transport;
+		pending.callerContext        = captureRuntimeCallerContextRunner();
+		pending.mutationCompletion   = std::move(mutationCompletion);
+		pending.operationCompletion  = std::move(operationCompletion);
+		pending.bypassSpamPrevention = bypassSpamPrevention;
 		m_pendingPluginSends.enqueue(std::move(pending));
 		return;
 	}
@@ -6404,13 +6464,14 @@ void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, cons
 		if (!replayingPluginSendMutations)
 		{
 			PendingOutboundSend pending;
-			pending.text                = text;
-			pending.echo                = echo;
-			pending.logIt               = logIt;
-			pending.transport           = transport;
-			pending.callerContext       = captureRuntimeCallerContextRunner();
-			pending.mutationCompletion  = std::move(mutationCompletion);
-			pending.operationCompletion = std::move(operationCompletion);
+			pending.text                 = text;
+			pending.echo                 = echo;
+			pending.logIt                = logIt;
+			pending.transport            = transport;
+			pending.callerContext        = captureRuntimeCallerContextRunner();
+			pending.mutationCompletion   = std::move(mutationCompletion);
+			pending.operationCompletion  = std::move(operationCompletion);
+			pending.bypassSpamPrevention = bypassSpamPrevention;
 			m_pendingPluginSends.enqueue(std::move(pending));
 			return;
 		}
@@ -6456,16 +6517,18 @@ void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, cons
 		{
 			auto continuationFactory = makeLuaCallbackResultContinuationFactory(
 			    [processor = QPointer<WorldCommandProcessor>(this), str, echo, logIt, transport,
-			     &mutationCompletion, &operationCompletion]() mutable
+			     &mutationCompletion, &operationCompletion, bypassSpamPrevention]() mutable
 			    {
 				    PendingPluginSendDecision state;
-				    state.processor           = processor;
-				    state.text                = str;
-				    state.echo                = echo;
-				    state.logIt               = logIt;
-				    state.transport           = transport;
-				    state.mutationCompletion  = std::move(mutationCompletion);
-				    state.operationCompletion = std::move(operationCompletion);
+				    state.processor            = processor;
+				    state.runtime              = processor ? processor->m_runtime : nullptr;
+				    state.text                 = str;
+				    state.echo                 = echo;
+				    state.logIt                = logIt;
+				    state.transport            = transport;
+				    state.mutationCompletion   = std::move(mutationCompletion);
+				    state.operationCompletion  = std::move(operationCompletion);
+				    state.bypassSpamPrevention = bypassSpamPrevention;
 				    return state;
 			    });
 			LuaCallbackContinuationDispatchResult callback =
@@ -6473,6 +6536,7 @@ void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, cons
 			if (callback.suspended())
 			{
 				m_pluginSendDecisionPending = true;
+				m_pluginSendDecisionTicket  = callback.ticket;
 				return;
 			}
 			if (callback.result.boolResultValid && !callback.result.boolResult)
@@ -6489,21 +6553,23 @@ void WorldCommandProcessor::doSendMsg(const QString &text, const bool echo, cons
 	}
 
 	continueDoSendMsgAfterPluginSend(str, echo, logIt, transport, std::move(mutationCompletion),
-	                                 std::move(operationCompletion));
+	                                 std::move(operationCompletion), bypassSpamPrevention);
 }
 
 void WorldCommandProcessor::completePluginSendDecision(const QString &text, const bool echo, const bool logIt,
                                                        const OutboundTransport transport, const bool accepted,
                                                        std::function<void(bool)>     mutationCompletion,
-                                                       LogicalOperationCompletionPtr operationCompletion)
+                                                       LogicalOperationCompletionPtr operationCompletion,
+                                                       const bool                    bypassSpamPrevention)
 {
 	Q_ASSERT(m_pluginSendDecisionPending);
+	m_pluginSendDecisionTicket  = 0;
 	m_pluginSendDecisionPending = false;
 	m_pluginProcessingSend      = false;
 	if (accepted)
 	{
 		continueDoSendMsgAfterPluginSend(text, echo, logIt, transport, std::move(mutationCompletion),
-		                                 std::move(operationCompletion));
+		                                 std::move(operationCompletion), bypassSpamPrevention);
 		return;
 	}
 	if (mutationCompletion)
@@ -6522,6 +6588,7 @@ void WorldCommandProcessor::cancelPluginSendDecision(const std::function<void(bo
 		mutationCompletion(true);
 	if (operationCompletion)
 		operationCompletion->release(false);
+	m_pluginSendDecisionTicket  = 0;
 	m_pluginSendDecisionPending = false;
 	m_pluginProcessingSend      = false;
 	if (!m_runtime || !m_runtime->m_runtimeDestructionStarted)
@@ -6531,6 +6598,32 @@ void WorldCommandProcessor::cancelPluginSendDecision(const std::function<void(bo
 void WorldCommandProcessor::cancelPendingPluginSendsForShutdown()
 {
 	Q_ASSERT(!m_runtime || m_runtime->m_runtimeDestructionStarted);
+	cancelPendingPluginSends();
+}
+
+void WorldCommandProcessor::cancelOutboundWorkForRuntimeDetach(WorldRuntime *const runtime)
+{
+	if (!runtime)
+	{
+		cancelPendingPluginSends();
+		return;
+	}
+
+	if (const quint64 ticket = std::exchange(m_pluginSendDecisionTicket, quint64{0}); ticket != 0)
+		static_cast<void>(runtime->cancelPluginCallbackResultContinuation(ticket));
+	if (const quint64 ticket = std::exchange(m_pluginSentNotificationTicket, quint64{0}); ticket != 0)
+		static_cast<void>(runtime->cancelPluginCallbackResultContinuation(ticket));
+
+	if (m_activeOutboundTransaction &&
+	    m_activeOutboundTransaction->outcome == OutboundCommandTransaction::Outcome::PendingWrite)
+	{
+		m_activeOutboundTransaction->resolve(OutboundCommandTransaction::Outcome::Rejected);
+	}
+	cancelPendingPluginSends();
+}
+
+void WorldCommandProcessor::cancelPendingPluginSends()
+{
 	const bool wasDraining       = m_drainingPendingPluginSends;
 	m_drainingPendingPluginSends = true;
 	while (!m_pendingPluginSends.isEmpty())
@@ -6545,7 +6638,7 @@ void WorldCommandProcessor::cancelPendingPluginSendsForShutdown()
 				pending.operationCompletion->release(false);
 		};
 		if (callerContext)
-			callerContext(cancel);
+			callerContext.run(cancel);
 		else
 			cancel();
 	}
@@ -6556,7 +6649,8 @@ void WorldCommandProcessor::drainPendingPluginSends()
 {
 	if (m_runtime && m_runtime->m_runtimeDestructionStarted)
 		return;
-	if (m_drainingPendingPluginSends || m_pluginProcessingSend || m_pluginSentNotificationPending)
+	if (m_outboundBindingCancellationActive || m_drainingPendingPluginSends || m_pluginProcessingSend ||
+	    m_pluginSentNotificationPending)
 		return;
 	m_drainingPendingPluginSends = true;
 	const auto finishDraining    = qScopeGuard([this] { m_drainingPendingPluginSends = false; });
@@ -6566,32 +6660,20 @@ void WorldCommandProcessor::drainPendingPluginSends()
 		PendingOutboundSend pending = m_pendingPluginSends.dequeue();
 		auto                send    = [this, &pending]() mutable
 		{
-			if (pending.phase == PendingOutboundSend::Phase::ResumeAfterSpam)
+			if (pending.phase == PendingOutboundSend::Phase::AfterPluginSend)
 			{
-				if (rejectInvalidOutboundContext(pending.mutationCompletion, pending.operationCompletion,
-				                                 true))
-				{
-					return;
-				}
-				m_lastCommandSent  = pending.text;
-				m_lastCommandCount = 1;
-				startPluginSentNotification(pending.text, pending.echo, pending.logIt, pending.transport,
-				                            std::move(pending.mutationCompletion),
-				                            std::move(pending.operationCompletion));
-				return;
-			}
-			if (pending.phase == PendingOutboundSend::Phase::PluginSentNotification)
-			{
-				startPluginSentNotification(pending.text, pending.echo, pending.logIt, pending.transport,
-				                            std::move(pending.mutationCompletion),
-				                            std::move(pending.operationCompletion));
+				continueDoSendMsgAfterPluginSend(pending.text, pending.echo, pending.logIt, pending.transport,
+				                                 std::move(pending.mutationCompletion),
+				                                 std::move(pending.operationCompletion),
+				                                 pending.bypassSpamPrevention);
 				return;
 			}
 			doSendMsg(pending.text, pending.echo, pending.logIt, pending.transport,
-			          std::move(pending.mutationCompletion), std::move(pending.operationCompletion));
+			          std::move(pending.mutationCompletion), std::move(pending.operationCompletion),
+			          pending.bypassSpamPrevention);
 		};
 		if (pending.callerContext)
-			pending.callerContext(send);
+			pending.callerContext.run(send);
 		else
 			send();
 	}
@@ -6599,40 +6681,48 @@ void WorldCommandProcessor::drainPendingPluginSends()
 
 void WorldCommandProcessor::continueDoSendMsgAfterPluginSend(
     const QString &str, const bool echo, const bool logIt, const OutboundTransport transport,
-    std::function<void(bool)> mutationCompletion, LogicalOperationCompletionPtr operationCompletion)
+    std::function<void(bool)> mutationCompletion, LogicalOperationCompletionPtr operationCompletion,
+    const bool bypassSpamPrevention)
 {
 	if (rejectInvalidOutboundContext(mutationCompletion, operationCompletion, true))
 		return;
-
-	// count number of times we sent this
-
-	if (str == m_lastCommandSent)
-		m_lastCommandCount++; // same one - count them
-	else
+	if (m_pluginSentNotificationPending)
 	{
-		m_lastCommandSent  = str; // new one - remember it
-		m_lastCommandCount = 1;
+		PendingOutboundSend pending;
+		pending.phase                = PendingOutboundSend::Phase::AfterPluginSend;
+		pending.text                 = str;
+		pending.echo                 = echo;
+		pending.logIt                = logIt;
+		pending.transport            = transport;
+		pending.callerContext        = captureRuntimeCallerContextRunner();
+		pending.mutationCompletion   = std::move(mutationCompletion);
+		pending.operationCompletion  = std::move(operationCompletion);
+		pending.bypassSpamPrevention = bypassSpamPrevention;
+		m_pendingPluginSends.enqueue(std::move(pending));
+		return;
 	}
+
+	SpamCommitState acceptedSpamState{str, str == m_lastCommandSent ? m_lastCommandCount + 1 : 1};
 
 	if (m_enableSpamPrevention && // provided they want it
 	    m_spamLineCount > 2 &&    // otherwise we might loop
 	    !m_spamMessage.isEmpty()) // not much point without something to send
 	{
-		if (m_lastCommandCount > m_spamLineCount)
+		if (!bypassSpamPrevention && acceptedSpamState.count > m_spamLineCount)
 		{
 			PendingOutboundSend resumeOriginal;
-			resumeOriginal.phase               = PendingOutboundSend::Phase::ResumeAfterSpam;
-			resumeOriginal.text                = str;
-			resumeOriginal.echo                = echo;
-			resumeOriginal.logIt               = logIt;
-			resumeOriginal.transport           = transport;
-			resumeOriginal.callerContext       = captureRuntimeCallerContextRunner();
-			resumeOriginal.mutationCompletion  = std::move(mutationCompletion);
-			resumeOriginal.operationCompletion = std::move(operationCompletion);
+			resumeOriginal.phase                = PendingOutboundSend::Phase::AfterPluginSend;
+			resumeOriginal.text                 = str;
+			resumeOriginal.echo                 = echo;
+			resumeOriginal.logIt                = logIt;
+			resumeOriginal.transport            = transport;
+			resumeOriginal.callerContext        = captureRuntimeCallerContextRunner();
+			resumeOriginal.mutationCompletion   = std::move(mutationCompletion);
+			resumeOriginal.operationCompletion  = std::move(operationCompletion);
+			resumeOriginal.bypassSpamPrevention = true;
 			m_pendingPluginSends.prepend(std::move(resumeOriginal));
 
-			m_lastCommandCount = 0;                           // so the filler cannot recurse
-			doSendMsg(m_spamMessage, echo, logIt, transport); // the original resumes after this child
+			doSendMsg(m_spamMessage, echo, logIt, transport, {}, {}, true);
 			if (!m_pluginProcessingSend && !m_pluginSentNotificationPending)
 				drainPendingPluginSends();
 			return;
@@ -6644,86 +6734,153 @@ void WorldCommandProcessor::continueDoSendMsgAfterPluginSend(
 	// See: http://www.gammon.com.au/forum/bbshowpost.php?bbsubject_id=7244
 
 	startPluginSentNotification(str, echo, logIt, transport, std::move(mutationCompletion),
-	                            std::move(operationCompletion));
+	                            std::move(operationCompletion), std::move(acceptedSpamState));
 }
 
 void WorldCommandProcessor::startPluginSentNotification(const QString &str, const bool echo, const bool logIt,
                                                         const OutboundTransport       transport,
                                                         std::function<void(bool)>     mutationCompletion,
-                                                        LogicalOperationCompletionPtr operationCompletion)
+                                                        LogicalOperationCompletionPtr operationCompletion,
+                                                        SpamCommitState               spamCommitState)
 {
 	if (rejectInvalidOutboundContext(mutationCompletion, operationCompletion, true))
 		return;
-	if (m_pluginSentNotificationPending)
-	{
-		PendingOutboundSend pending;
-		pending.phase               = PendingOutboundSend::Phase::PluginSentNotification;
-		pending.text                = str;
-		pending.echo                = echo;
-		pending.logIt               = logIt;
-		pending.transport           = transport;
-		pending.callerContext       = captureRuntimeCallerContextRunner();
-		pending.mutationCompletion  = std::move(mutationCompletion);
-		pending.operationCompletion = std::move(operationCompletion);
-		m_pendingPluginSends.enqueue(std::move(pending));
-		return;
-	}
-
+	Q_ASSERT(!m_pluginSentNotificationPending);
 	QString pluginText = str;
 	if (pluginText.endsWith(kEndLine))
 		pluginText.chop(kEndLine.size());
-	if (m_runtime)
+	if (!m_runtime)
 	{
-		m_pluginSentNotificationPending = true;
-		m_pluginProcessingSent          = true;
-		auto continuationFactory        = makeLuaCallbackResultContinuationFactory(
-		    [processor = QPointer<WorldCommandProcessor>(this), str, echo, logIt, transport,
-		     &mutationCompletion, &operationCompletion]() mutable
-		    {
-			    PendingPluginSentNotification state;
-			    state.processor           = processor;
-			    state.text                = str;
-			    state.echo                = echo;
-			    state.logIt               = logIt;
-			    state.transport           = transport;
-			    state.mutationCompletion  = std::move(mutationCompletion);
-			    state.operationCompletion = std::move(operationCompletion);
-			    return state;
-		    });
-		LuaCallbackContinuationDispatchResult callback =
-		    m_runtime->firePluginSentContinuable(pluginText, continuationFactory);
-		m_pluginProcessingSent = false;
-		if (callback.suspended())
-			return;
-		m_pluginSentNotificationPending = false;
+		finishRejectedOutboundSend(mutationCompletion, operationCompletion, true);
+		return;
 	}
+	auto command                 = std::make_shared<PendingOutboundCommand>();
+	command->processor           = this;
+	command->runtime             = m_runtime;
+	command->text                = str;
+	command->echo                = echo;
+	command->logIt               = logIt;
+	command->sentRequest         = m_runtime->preparePluginSentDispatch(pluginText);
+	command->mutationCompletion  = std::move(mutationCompletion);
+	command->operationCompletion = std::move(operationCompletion);
+	command->historyState        = m_activeCommandHistoryState;
+	command->spamCommitState     = std::move(spamCommitState);
 
-	completePluginSentNotification(str, echo, logIt, transport, std::move(mutationCompletion),
-	                               std::move(operationCompletion));
+	const QSharedPointer<OutboundCommandTransaction> transaction =
+	    QSharedPointer<OutboundCommandTransaction>::create();
+	transaction->callerContext = m_runtime->captureOutboundCallerContext();
+	const QWeakPointer<OutboundCommandTransaction> weakTransaction = transaction.toWeakRef();
+	transaction->accepted = [processor = QPointer<WorldCommandProcessor>(this), command, weakTransaction]
+	{
+		if (const QSharedPointer<OutboundCommandTransaction> resolved = weakTransaction.toStrongRef())
+		{
+			if (processor)
+				processor->beginAcceptedPluginSentNotification(command, resolved);
+			else
+				command->settleWithoutProcessor(resolved);
+		}
+	};
+	transaction->rejected = [processor = QPointer<WorldCommandProcessor>(this), command, weakTransaction]
+	{
+		if (processor)
+		{
+			if (const QSharedPointer<OutboundCommandTransaction> resolved = weakTransaction.toStrongRef())
+				processor->rejectOutboundCommand(command, resolved);
+		}
+		else if (const QSharedPointer<OutboundCommandTransaction> resolved = weakTransaction.toStrongRef())
+			command->settleWithoutProcessor(resolved);
+	};
+
+	QByteArray payload = m_utf8 ? str.toUtf8() : qmudEncodeWorldText(str, m_legacyEncodingName, nullptr);
+	if (!m_doNotTranslateIac)
+		payload.replace(static_cast<char>(0xFF), QByteArray("\xFF\xFF", 2));
+	m_pluginSentNotificationPending = true;
+	m_activeOutboundCommand         = command;
+	m_activeOutboundTransaction     = transaction;
+	const bool causalDeferred       = transport != OutboundTransport::Immediate;
+	const bool triggerPriority      = transport == OutboundTransport::CausalDeferredWithTriggerPriority;
+	const WorldRuntime::CausalOutboundStageResult stageResult =
+	    causalDeferred ? m_runtime->stageCausalOutboundTransmission(payload, triggerPriority, transaction)
+	                   : WorldRuntime::CausalOutboundStageResult::Immediate;
+	if (stageResult == WorldRuntime::CausalOutboundStageResult::Cancelled)
+	{
+		transaction->resolve(OutboundCommandTransaction::Outcome::Rejected);
+		return;
+	}
+	if (stageResult == WorldRuntime::CausalOutboundStageResult::Immediate)
+		m_runtime->sendToWorld(payload, transaction);
 }
 
-void WorldCommandProcessor::completePluginSentNotification(const QString &str, const bool echo,
-                                                           const bool                    logIt,
-                                                           const OutboundTransport       transport,
-                                                           std::function<void(bool)>     mutationCompletion,
-                                                           LogicalOperationCompletionPtr operationCompletion)
+void WorldCommandProcessor::beginAcceptedPluginSentNotification(
+    const std::shared_ptr<PendingOutboundCommand>    &command,
+    const QSharedPointer<OutboundCommandTransaction> &transaction)
 {
+	if (!command || !command->runtime || m_runtime != command->runtime ||
+	    transaction->outcome != OutboundCommandTransaction::Outcome::Accepted)
+	{
+		rejectOutboundCommand(command, transaction);
+		return;
+	}
+	transaction->accepted                   = {};
+	command->sentRequest.sentObservationArg = transaction->preWriteObservation;
+	m_lastCommandSent                       = command->spamCommitState.command;
+	m_lastCommandCount                      = command->spamCommitState.count;
+	m_pluginProcessingSent                  = true;
+	auto continuationFactory                = makeLuaCallbackResultContinuationFactory(
+	    [command, transaction]
+	    {
+		    PendingPluginSentNotification state;
+		    state.command     = command;
+		    state.transaction = transaction;
+		    return state;
+	    });
+	LuaCallbackContinuationDispatchResult callback =
+	    m_runtime->firePluginSentContinuable(command->sentRequest, continuationFactory);
+	m_pluginProcessingSent = false;
+	if (callback.suspended())
+	{
+		m_pluginSentNotificationTicket = callback.ticket;
+		return;
+	}
+	completePluginSentNotification(command, transaction);
+}
+
+void WorldCommandProcessor::completePluginSentNotification(
+    const std::shared_ptr<PendingOutboundCommand>    &command,
+    const QSharedPointer<OutboundCommandTransaction> &transaction,
+    const AcceptedOutboundCompletionMode              completionMode)
+{
+	if (!command || !command->runtime || m_runtime != command->runtime ||
+	    transaction->outcome != OutboundCommandTransaction::Outcome::Accepted)
+	{
+		rejectOutboundCommand(command, transaction);
+		return;
+	}
+	if (command->settled)
+		return;
+	command->settled                = true;
+	m_pluginSentNotificationTicket  = 0;
 	m_pluginSentNotificationPending = false;
 	m_pluginProcessingSent          = false;
-	if (rejectInvalidOutboundContext(mutationCompletion, operationCompletion, true))
-		return;
+	clearActiveOutboundCommand(command, transaction);
+	const QPointer<WorldRuntime> runtime(command->runtime);
+	const QString               &str   = command->text;
+	const bool                   echo  = command->echo;
+	const bool                   logIt = command->logIt;
+	const bool                   cancelOriginatingWork =
+	    completionMode == AcceptedOutboundCompletionMode::CancelOriginatingWork;
 
 	// echo sent text if required
 
 	if (echo && m_view)
 	{
 		m_view->echoInputText(str);
-		if (m_runtime)
+		if (runtime)
 		{
 			QString screenText = str;
 			if (screenText.endsWith(kEndLine))
 				screenText.chop(kEndLine.size());
-			m_runtime->firePluginScreendraw(2, logIt ? 1 : 0, screenText);
+			runtime->firePluginScreendraw(2, logIt ? 1 : 0, screenText);
 		}
 	}
 
@@ -6739,7 +6896,7 @@ void WorldCommandProcessor::completePluginSentNotification(const QString &str, c
 	}
 
 	// add to mapper if required
-	if (m_runtime && m_runtime->isMapping())
+	if (runtime && runtime->isMapping())
 	{
 		QString direction = str.trimmed().toLower();
 		if (direction.endsWith(kEndLine))
@@ -6751,18 +6908,18 @@ void WorldCommandProcessor::completePluginSentNotification(const QString &str, c
 		{
 			const QString reverse = app ? app->mapDirectionReverse(direction) : QString();
 
-			auto          appendMapped = [&] { m_runtime->addToMapper(mapped, reverse); };
+			auto          appendMapped = [&] { runtime->addToMapper(mapped, reverse); };
 
-			if (m_runtime->removeMapReverses() && m_runtime->mappingCount() > 0)
+			if (runtime->removeMapReverses() && runtime->mappingCount() > 0)
 			{
 				QString heldComment;
-				QString last = m_runtime->mappingItem(m_runtime->mappingCount() - 1);
+				QString last = runtime->mappingItem(runtime->mappingCount() - 1);
 				if (last.size() >= 2 && last.startsWith(QLatin1Char('{')) &&
-				    last.endsWith(QLatin1Char('}')) && m_runtime->mappingCount() > 1)
+				    last.endsWith(QLatin1Char('}')) && runtime->mappingCount() > 1)
 				{
 					heldComment = last.mid(1, last.size() - 2);
-					m_runtime->deleteLastMapItem();
-					last = m_runtime->mappingItem(m_runtime->mappingCount() - 1);
+					runtime->deleteLastMapItem();
+					last = runtime->mappingItem(runtime->mappingCount() - 1);
 				}
 
 				bool collapsed = false;
@@ -6775,21 +6932,21 @@ void WorldCommandProcessor::completePluginSentNotification(const QString &str, c
 					{
 						if (lastReverseMapped == mapped)
 						{
-							m_runtime->deleteLastMapItem();
+							runtime->deleteLastMapItem();
 							collapsed = true;
 						}
 					}
 				}
 				else if (last.trimmed().toLower() == reverse)
 				{
-					m_runtime->deleteLastMapItem();
+					runtime->deleteLastMapItem();
 					collapsed = true;
 				}
 
 				if (!collapsed)
 				{
 					if (!heldComment.isEmpty())
-						m_runtime->addMapperComment(heldComment);
+						runtime->addMapperComment(heldComment);
 					appendMapped();
 				}
 			}
@@ -6805,40 +6962,75 @@ void WorldCommandProcessor::completePluginSentNotification(const QString &str, c
 	// Optional Debug_MUD hook is currently disabled in the Qt build.
 #endif
 
-	// line accounting is maintained through incrementLinesSent().
-
-	// send it
-
-	if (m_runtime)
+	// The transport was committed before OnPluginSent. Complete the observable host accounting and the
+	// command's causal mutation batch here. Packet-debug publication continues independently afterward.
+	if (runtime)
 	{
-		QByteArray payload = m_utf8 ? str.toUtf8() : qmudEncodeWorldText(str, m_legacyEncodingName, nullptr);
-		if (!m_doNotTranslateIac)
-			payload.replace(static_cast<char>(0xFF), QByteArray("\xFF\xFF", 2));
-		const bool causalDeferred  = transport != OutboundTransport::Immediate;
-		const bool triggerPriority = transport == OutboundTransport::CausalDeferredWithTriggerPriority;
-		const WorldRuntime::CausalOutboundStageResult stageResult =
-		    causalDeferred ? m_runtime->stageCausalOutboundTransmission(payload, triggerPriority)
-		                   : WorldRuntime::CausalOutboundStageResult::Immediate;
-		if (stageResult == WorldRuntime::CausalOutboundStageResult::Cancelled)
-		{
-			finishRejectedOutboundSend(mutationCompletion, operationCompletion, true);
-			return;
-		}
-		if (stageResult == WorldRuntime::CausalOutboundStageResult::Immediate)
-			m_runtime->sendToWorld(payload);
-		if (m_activeCommandHistoryState)
-			m_activeCommandHistoryState->sendFailed = false;
-		m_runtime->incrementLinesSent();
+		runtime->incrementLinesSent();
 		QString commandText = str;
 		if (commandText.endsWith(kEndLine))
 			commandText.chop(kEndLine.size());
-		m_runtime->setLastCommandSent(commandText);
+		runtime->setLastCommandSent(commandText);
+		const QPointer<WorldCommandProcessor> processor(this);
+		if (auto mutationCompletion = std::move(command->mutationCompletion); mutationCompletion)
+			mutationCompletion(cancelOriginatingWork);
+		if (auto operationCompletion = std::move(command->operationCompletion); operationCompletion)
+			operationCompletion->release(!cancelOriginatingWork);
+		if (!runtime)
+			return;
+		if (processor && processor->m_runtime == runtime.data())
+			processor->drainPendingPluginSends();
+		runtime->finishOutboundCommandNotification(transaction);
+		return;
 	}
-	if (mutationCompletion)
-		mutationCompletion(false);
+	if (auto completion = std::move(command->mutationCompletion); completion)
+		completion(cancelOriginatingWork);
 	drainPendingPluginSends();
-	if (operationCompletion)
-		operationCompletion->release(true);
+	if (auto completion = std::move(command->operationCompletion); completion)
+		completion->release(!cancelOriginatingWork);
+}
+
+void WorldCommandProcessor::rejectOutboundCommand(
+    const std::shared_ptr<PendingOutboundCommand>    &command,
+    const QSharedPointer<OutboundCommandTransaction> &transaction)
+{
+	if (!command || command->settled)
+		return;
+	command->settled             = true;
+	const bool ownsProcessorSlot = !m_runtime || m_runtime == command->runtime;
+	if (ownsProcessorSlot)
+	{
+		m_pluginSentNotificationPending = false;
+		m_pluginProcessingSent          = false;
+	}
+	m_pluginSentNotificationTicket = 0;
+	clearActiveOutboundCommand(command, transaction);
+	if (transaction)
+	{
+		transaction->accepted = {};
+		transaction->rejected = {};
+	}
+	if (command->historyState)
+		command->historyState->sendFailed = true;
+	WorldRuntime *const runtime = command->runtime;
+	if (runtime)
+		runtime->discardOutboundCommandNotification(transaction);
+	if (auto completion = std::move(command->mutationCompletion); completion)
+		completion(true);
+	if (ownsProcessorSlot && m_runtime == runtime && (!runtime || !runtime->m_runtimeDestructionStarted))
+		drainPendingPluginSends();
+	if (auto completion = std::move(command->operationCompletion); completion)
+		completion->release(false);
+}
+
+void WorldCommandProcessor::clearActiveOutboundCommand(
+    const std::shared_ptr<PendingOutboundCommand>    &command,
+    const QSharedPointer<OutboundCommandTransaction> &transaction)
+{
+	if (m_activeOutboundCommand != command || m_activeOutboundTransaction != transaction)
+		return;
+	m_activeOutboundCommand.reset();
+	m_activeOutboundTransaction.clear();
 }
 
 void WorldCommandProcessor::finishRejectedOutboundSend(std::function<void(bool)>     &mutationCompletion,
@@ -6861,7 +7053,7 @@ bool WorldCommandProcessor::rejectInvalidOutboundContext(std::function<void(bool
                                                          LogicalOperationCompletionPtr &operationCompletion,
                                                          const bool                     drainPendingSends)
 {
-	if (!m_runtime || !m_runtime->currentOutboundContextRejected())
+	if (!m_outboundBindingCancellationActive && (!m_runtime || !m_runtime->currentOutboundContextRejected()))
 		return false;
 	finishRejectedOutboundSend(mutationCompletion, operationCompletion, drainPendingSends);
 	return true;
@@ -6869,7 +7061,7 @@ bool WorldCommandProcessor::rejectInvalidOutboundContext(std::function<void(bool
 
 bool WorldCommandProcessor::rejectInvalidOutboundRequest() const
 {
-	if (!m_runtime || !m_runtime->currentOutboundContextRejected())
+	if (!m_outboundBindingCancellationActive && (!m_runtime || !m_runtime->currentOutboundContextRejected()))
 		return false;
 	if (m_activeCommandHistoryState)
 		m_activeCommandHistoryState->sendFailed = true;

@@ -206,6 +206,15 @@ class WorldRuntimeTestAccess final
 			runtime.m_connectPhase = phase;
 		}
 		/**
+		 * @brief Installs a test-owned socket service for physical-write boundary tests.
+		 * @param runtime Runtime whose transport is replaced.
+		 * @param socket Socket service owned by the runtime QObject tree.
+		 */
+		static void setSocket(WorldRuntime &runtime, WorldSocketService *socket)
+		{
+			runtime.m_socket = socket;
+		}
+		/**
 		 * @brief Commits pending partial input to runtime storage without exercising presentation behavior.
 		 * @param runtime Runtime whose pending partial state is committed.
 		 * @param committedText Optional receiver for the unwrapped committed text.

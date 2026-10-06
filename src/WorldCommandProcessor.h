@@ -22,6 +22,7 @@
 #include <QTimer>
 
 #include <functional>
+#include <memory>
 
 class WorldRuntime;
 class WorldView;
@@ -270,11 +271,12 @@ class WorldCommandProcessor : public QObject
 				LogicalOperationCompletionPtr       operationCompletion;
 				InputCriticalOperationScopePtr      inputCriticalOperationScope;
 		};
-		using CallerContextRunner = std::function<void(const std::function<void()> &)>;
+		using CallerContextRunner = RuntimeCallerContext;
 		struct PendingPluginCommandEvaluation;
 		struct PendingPluginCommandEntered;
 		struct PendingPluginSendDecision;
 		struct PendingPluginSentNotification;
+		struct PendingOutboundCommand;
 		struct CommandEvaluationSequence;
 		struct AliasEvaluationSequence;
 		struct TimerEvaluationSequence;
@@ -901,13 +903,22 @@ class WorldCommandProcessor : public QObject
 			CausalDeferred,
 			CausalDeferredWithTriggerPriority
 		};
+		enum class AcceptedOutboundCompletionMode
+		{
+			ContinueOriginatingWork,
+			CancelOriginatingWork
+		};
+		struct SpamCommitState
+		{
+				QString command;
+				int     count{0};
+		};
 		struct PendingOutboundSend
 		{
 				enum class Phase
 				{
 					Start,
-					ResumeAfterSpam,
-					PluginSentNotification
+					AfterPluginSend
 				};
 
 				Phase                         phase{Phase::Start};
@@ -918,6 +929,7 @@ class WorldCommandProcessor : public QObject
 				CallerContextRunner           callerContext;
 				std::function<void(bool)>     mutationCompletion;
 				LogicalOperationCompletionPtr operationCompletion;
+				bool                          bypassSpamPrevention{false};
 		};
 		/**
 		 * @brief Processes a send and either transmits or stages its encoded payload.
@@ -927,10 +939,12 @@ class WorldCommandProcessor : public QObject
 		 * @param transport Transport timing and priority.
 		 * @param mutationCompletion Deferred mutation completion retained by this send.
 		 * @param operationCompletion Logical operation retained by this send.
+		 * @param bypassSpamPrevention Skip insertion of another spam filler for this send.
 		 */
 		void doSendMsg(const QString &text, bool echo, bool logIt, OutboundTransport transport,
-		               std::function<void(bool)>     mutationCompletion  = {},
-		               LogicalOperationCompletionPtr operationCompletion = {});
+		               std::function<void(bool)>     mutationCompletion   = {},
+		               LogicalOperationCompletionPtr operationCompletion  = {},
+		               bool                          bypassSpamPrevention = false);
 		/**
 		 * @brief Cancels one active OnPluginSend decision and resumes queued sends individually.
 		 * @param mutationCompletion Deferred mutation completion retained by the active send.
@@ -943,6 +957,15 @@ class WorldCommandProcessor : public QObject
 		 */
 		void cancelPendingPluginSendsForShutdown();
 		/**
+		 * @brief Settles outbound work owned by the runtime that is about to detach.
+		 * @param runtime Runtime whose outbound binding is ending.
+		 */
+		void cancelOutboundWorkForRuntimeDetach(WorldRuntime *runtime);
+		/**
+		 * @brief Cancels every queued plugin send and releases its retained completions.
+		 */
+		void cancelPendingPluginSends();
+		/**
 		 * @brief Finishes a send after OnPluginSend accepts it.
 		 * @param text Newline-terminated outbound text.
 		 * @param echo Echo text when `true`.
@@ -950,37 +973,60 @@ class WorldCommandProcessor : public QObject
 		 * @param transport Transport timing and priority.
 		 * @param mutationCompletion Deferred mutation completion retained by this send.
 		 * @param operationCompletion Logical operation retained by this send.
+		 * @param bypassSpamPrevention Skip insertion of another spam filler for this send.
 		 */
 		void continueDoSendMsgAfterPluginSend(const QString &text, bool echo, bool logIt,
 		                                      OutboundTransport             transport,
 		                                      std::function<void(bool)>     mutationCompletion,
-		                                      LogicalOperationCompletionPtr operationCompletion);
+		                                      LogicalOperationCompletionPtr operationCompletion,
+		                                      bool                          bypassSpamPrevention);
 		/**
-		 * @brief Starts OnPluginSent after send preprocessing has completed.
+		 * @brief Submits a command transaction after send preprocessing has completed.
 		 * @param text Newline-terminated outbound text.
 		 * @param echo Echo text when `true`.
 		 * @param logIt Log send when `true`.
 		 * @param transport Transport timing and priority.
 		 * @param mutationCompletion Deferred mutation completion retained by this send.
 		 * @param operationCompletion Logical operation retained by this send.
+		 * @param spamCommitState State committed only after the physical write succeeds.
 		 */
 		void startPluginSentNotification(const QString &text, bool echo, bool logIt,
 		                                 OutboundTransport             transport,
 		                                 std::function<void(bool)>     mutationCompletion,
-		                                 LogicalOperationCompletionPtr operationCompletion);
+		                                 LogicalOperationCompletionPtr operationCompletion,
+		                                 SpamCommitState               spamCommitState);
 		/**
-		 * @brief Finishes an accepted send after OnPluginSent completes.
-		 * @param text Newline-terminated outbound text.
-		 * @param echo Echo text when `true`.
-		 * @param logIt Log send when `true`.
-		 * @param transport Transport timing and priority.
-		 * @param mutationCompletion Deferred mutation completion retained by this send.
-		 * @param operationCompletion Logical operation retained by this send.
+		 * @brief Starts the fixed OnPluginSent roster after the socket accepts the command bytes.
+		 * @param command Accepted outbound command state.
+		 * @param transaction Physical-write transaction and causal continuation.
 		 */
-		void completePluginSentNotification(const QString &text, bool echo, bool logIt,
-		                                    OutboundTransport             transport,
-		                                    std::function<void(bool)>     mutationCompletion,
-		                                    LogicalOperationCompletionPtr operationCompletion);
+		void
+		beginAcceptedPluginSentNotification(const std::shared_ptr<PendingOutboundCommand>    &command,
+		                                    const QSharedPointer<OutboundCommandTransaction> &transaction);
+		/**
+		 * @brief Finishes host-side accounting after OnPluginSent completes or is cancelled after acceptance.
+		 * @param command Accepted outbound command state.
+		 * @param transaction Physical-write transaction and causal continuation.
+		 * @param completionMode Whether work retained by the accepted command may continue.
+		 */
+		void completePluginSentNotification(const std::shared_ptr<PendingOutboundCommand>    &command,
+		                                    const QSharedPointer<OutboundCommandTransaction> &transaction,
+		                                    AcceptedOutboundCompletionMode                    completionMode =
+		                                        AcceptedOutboundCompletionMode::ContinueOriginatingWork);
+		/**
+		 * @brief Rejects a command before its socket write is accepted.
+		 * @param command Rejected outbound command state.
+		 * @param transaction Rejected physical-write transaction.
+		 */
+		void rejectOutboundCommand(const std::shared_ptr<PendingOutboundCommand>    &command,
+		                           const QSharedPointer<OutboundCommandTransaction> &transaction);
+		/**
+		 * @brief Clears the active outbound slot when it still belongs to the supplied transaction.
+		 * @param command Command expected to own the slot.
+		 * @param transaction Transaction expected to own the slot.
+		 */
+		void clearActiveOutboundCommand(const std::shared_ptr<PendingOutboundCommand>    &command,
+		                                const QSharedPointer<OutboundCommandTransaction> &transaction);
 		/**
 		 * @brief Applies a completed OnPluginSend decision and advances queued sends.
 		 * @param text Newline-terminated outbound text.
@@ -990,11 +1036,13 @@ class WorldCommandProcessor : public QObject
 		 * @param accepted Whether plugins accepted the send.
 		 * @param mutationCompletion Deferred mutation completion retained by this send.
 		 * @param operationCompletion Logical operation retained by this send.
+		 * @param bypassSpamPrevention Skip insertion of another spam filler for this send.
 		 */
 		void completePluginSendDecision(const QString &text, bool echo, bool logIt,
 		                                OutboundTransport transport, bool accepted,
 		                                std::function<void(bool)>     mutationCompletion,
-		                                LogicalOperationCompletionPtr operationCompletion);
+		                                LogicalOperationCompletionPtr operationCompletion,
+		                                bool                          bypassSpamPrevention);
 		/**
 		 * @brief Completes a send that cannot cross its captured connection epoch.
 		 * @param mutationCompletion Deferred mutation continuation retained by this send.
@@ -1069,6 +1117,11 @@ class WorldCommandProcessor : public QObject
 		bool                                         m_pluginSendDecisionPending{false};
 		bool                                         m_pluginSentNotificationPending{false};
 		bool                                         m_drainingPendingPluginSends{false};
+		bool                                         m_outboundBindingCancellationActive{false};
+		quint64                                      m_pluginSendDecisionTicket{0};
+		quint64                                      m_pluginSentNotificationTicket{0};
+		std::shared_ptr<PendingOutboundCommand>      m_activeOutboundCommand;
+		QSharedPointer<OutboundCommandTransaction>   m_activeOutboundTransaction;
 		QQueue<PendingOutboundSend>                  m_pendingPluginSends;
 		bool                                         m_noEcho{false};
 		bool                                         m_translateGerman{false};

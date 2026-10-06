@@ -8,6 +8,7 @@
 
 #include <QFileInfo>
 
+#include "AcceptingWorldSocketService.h"
 #include "AppController.h"
 #include "LuaCallbackEngine.h"
 #include "LuaExecutor.h"
@@ -645,6 +646,7 @@ end
 					candidate->setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
 					                             QStringLiteral("1"));
 					WorldRuntimeTestAccess::setConnectPhase(*candidate, WorldRuntime::eConnectConnectedToMud);
+					WorldRuntimeTestAccess::setSocket(*candidate, new AcceptingWorldSocketService(candidate));
 				}
 				const auto resetConnectPhase = qScopeGuard(
 				    [&decoyRuntime, &runtime]
@@ -883,6 +885,7 @@ end
 				runtime.setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
 				                          QStringLiteral("1"));
 				WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+				WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 				const auto resetConnectPhase = qScopeGuard(
 				    [&runtime]
 				    {
@@ -920,6 +923,7 @@ end
 				                          QStringLiteral("1"));
 				runtime.setWorldAttribute(QStringLiteral("speed_walk_delay"), QStringLiteral("1000"));
 				WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+				WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 				const auto resetConnectPhase = qScopeGuard(
 				    [&runtime]
 				    {
@@ -963,6 +967,7 @@ end
 				runtime.setWorldAttribute(QStringLiteral("echo_force_terminates_partial_prompts"),
 				                          QStringLiteral("1"));
 				WorldRuntimeTestAccess::setConnectPhase(runtime, WorldRuntime::eConnectConnectedToMud);
+				WorldRuntimeTestAccess::setSocket(runtime, new AcceptingWorldSocketService(&runtime));
 				const auto resetConnectPhase = qScopeGuard(
 				    [&runtime]
 				    {

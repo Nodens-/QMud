@@ -115,6 +115,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <iterator>
@@ -124,6 +125,47 @@
 #include <utility>
 #include <vector>
 #include <zlib.h>
+
+RuntimeCallerContext::RuntimeCallerContext(std::function<void(const std::function<void()> &)> runner)
+    : m_runner(std::move(runner))
+{
+}
+
+void RuntimeCallerContext::run(const std::function<void()> &work) const
+{
+	if (m_runner)
+		m_runner(work);
+}
+
+RuntimeCallerContext::operator bool() const noexcept
+{
+	return static_cast<bool>(m_runner);
+}
+
+void OutboundCommandTransaction::resolve(const Outcome resolvedOutcome)
+{
+	if (outcome != Outcome::PendingWrite || resolvedOutcome == Outcome::PendingWrite)
+		return;
+	outcome = resolvedOutcome;
+	std::function<void()> callback;
+	if (resolvedOutcome == Outcome::Accepted)
+	{
+		rejected = {};
+		callback = std::move(accepted);
+	}
+	else
+	{
+		accepted = {};
+		callback = std::move(rejected);
+	}
+	RuntimeCallerContext context = std::exchange(callerContext, {});
+	if (!callback)
+		return;
+	if (context)
+		context.run(callback);
+	else
+		callback();
+}
 
 namespace
 {
@@ -265,16 +307,33 @@ namespace
 		return changes;
 	}
 
-	void carryCompletedCallbackOutputAnchorState(LuaBatchDispatchRequest      &request,
-	                                             const LuaBatchDispatchResult &result)
+	void carryCompletedCallbackRequestState(LuaBatchDispatchRequest      &request,
+	                                        const LuaBatchDispatchResult &result)
 	{
 		const QSharedPointer<const LuaCallbackSnapshot> completed = result.callbackSnapshotAfterMutations;
 		const QSharedPointer<const LuaCallbackSnapshot> previous  = request.callbackSnapshotArg;
-		if (!completed || !previous || !completed->callbackOutputAnchorState ||
-		    completed->callbackOutputAnchorAbsoluteNumber != previous->callbackOutputAnchorAbsoluteNumber)
-		{
+		if (!completed)
 			return;
+		if (completed->hasRuntimeCountersSnapshot)
+		{
+			if (request.sentObservationArg.valid)
+			{
+#define QMUD_CARRY_SENT_OBSERVATION_FIELD(enumName, member, type)                                            \
+	request.sentObservationArg.member = completed->runtimeCountersSnapshotState.member;
+				QMUD_LUA_CALLBACK_SENT_OBSERVATION_FIELDS(QMUD_CARRY_SENT_OBSERVATION_FIELD)
+#undef QMUD_CARRY_SENT_OBSERVATION_FIELD
+			}
+			if (request.incomingLineObservationArg.valid)
+			{
+#define QMUD_CARRY_INCOMING_LINE_OBSERVATION_FIELD(enumName, member, type, source)                           \
+	request.incomingLineObservationArg.member = completed->runtimeCountersSnapshotState.member;
+				QMUD_LUA_CALLBACK_INCOMING_LINE_OBSERVATION_FIELDS(QMUD_CARRY_INCOMING_LINE_OBSERVATION_FIELD)
+#undef QMUD_CARRY_INCOMING_LINE_OBSERVATION_FIELD
+			}
 		}
+		if (!previous || !completed->callbackOutputAnchorState ||
+		    completed->callbackOutputAnchorAbsoluteNumber != previous->callbackOutputAnchorAbsoluteNumber)
+			return;
 		if (completed->callbackOutputAnchorState == previous->callbackOutputAnchorState)
 			return;
 		auto carried                       = QSharedPointer<LuaCallbackSnapshot>::create(*previous);
@@ -3324,18 +3383,69 @@ namespace
 {
 	struct CausalOutboundTransmission
 	{
-			QByteArray     payload;
-			unsigned short actionSource{WorldRuntime::eUnknownActionSource};
+			QByteArray                                 payload;
+			unsigned short                             actionSource{WorldRuntime::eUnknownActionSource};
+			QSharedPointer<OutboundCommandTransaction> commandTransaction;
+	};
+
+	struct CausalOutboundSegment
+	{
+			QVector<CausalOutboundTransmission> triggerPriorityTransmissions;
+			QVector<CausalOutboundTransmission> ordinaryTransmissions;
+			qsizetype                           nextTriggerPriority{0};
+			qsizetype                           nextOrdinary{0};
+			bool                                sealed{false};
 	};
 } // namespace
 
 struct CausalOutboundGroup
 {
-		int                                 retainCount{0};
-		QVector<CausalOutboundTransmission> triggerPriorityTransmissions;
-		QVector<CausalOutboundTransmission> ordinaryTransmissions;
-		bool                                disconnectAfterFlush{false};
-		bool                                finished{false};
+		int                               retainCount{0};
+		int                               pendingPacketDebugRecords{0};
+		std::deque<CausalOutboundSegment> segments;
+		bool                              commandNotificationPending{false};
+		bool                              disconnectAfterFlush{false};
+		bool                              finished{false};
+};
+
+struct WorldRuntime::PendingOutgoingPacketDebugFragment final : LuaCallbackResultContinuation
+{
+		QPointer<WorldRuntime> runtime;
+
+		void                   resume(LuaBatchDispatchResult &&result) override
+		{
+			if (runtime)
+				runtime->runInOutgoingPacketDebugCallerContext(
+				    [runtime = runtime, result = std::move(result)]
+				    {
+					    if (runtime)
+						    runtime->completeOutgoingPacketDebugFragment(result);
+				    });
+		}
+
+		void cancel(LuaBatchDispatchResult &&fallback) override
+		{
+			if (!runtime)
+				return;
+			runtime->runInOutgoingPacketDebugCallerContext(
+			    [runtime = runtime, fallback = std::move(fallback)]
+			    {
+				    if (!runtime)
+					    return;
+				    if (runtime->m_runtimeDestructionStarted)
+				    {
+					    if (runtime->m_outgoingPacketDebugPublication &&
+					        runtime->m_outgoingPacketDebugPublication->record.commandTransaction)
+					    {
+						    runtime->m_outgoingPacketDebugPublication->record.commandTransaction
+						        ->discardPacketDebug = true;
+					    }
+					    runtime->completeOutgoingPacketDebugRecord();
+					    return;
+				    }
+				    runtime->completeOutgoingPacketDebugFragment(fallback);
+			    });
+		}
 };
 
 struct LuaDeferredRuntimeMutationPlayback
@@ -3355,7 +3465,7 @@ struct LuaDeferredRuntimeMutationPlayback
 		std::shared_ptr<LuaCallbackMutationDependencyState>     mutationDependencies;
 		std::shared_ptr<LuaCallbackConnectionCancellationState> connectionCancellationState;
 		std::shared_ptr<LuaCallbackRuntimeLifetimeState>        runtimeLifetimeState;
-		std::function<void(const std::function<void()> &)>      callerContext;
+		RuntimeCallerContext                                    callerContext;
 		std::function<void(bool)>                               completion;
 		QSharedPointer<CausalOutboundGroup>                     causalOutboundGroup;
 };
@@ -3564,154 +3674,118 @@ void QMudLuaDeferredRuntimeMutation::apply(LuaBatchDispatchResult   &result,
 	sequence->advance();
 }
 
-std::function<void(const std::function<void()> &)> WorldRuntime::captureRuntimeCallerContext() const
+RuntimeCallerContext WorldRuntime::captureRuntimeCallerContext() const
 {
 	return captureRuntimeCallerContext({});
 }
 
-std::function<void(const std::function<void()> &)>
+RuntimeCallerContext
 WorldRuntime::captureRuntimeCallerContext(const CausalOutboundScopeHandle &causalOutboundScope) const
 {
-	CausalOutboundScopeHandle effectiveCausalOutboundScope = causalOutboundScope;
-	if (effectiveCausalOutboundScope.epoch == 0)
-	{
-		effectiveCausalOutboundScope = m_currentCausalOutboundScope;
-		if (effectiveCausalOutboundScope.epoch == 0)
-			effectiveCausalOutboundScope.epoch = m_connectionEpoch;
-	}
-	const auto commandContext = m_commandProcessor ? m_commandProcessor->captureCallerContextRunner()
-	                                               : std::function<void(const std::function<void()> &)>{};
-	const unsigned short                      actionSource          = m_currentActionSource;
-	const quint64                             rawIngressOperationId = m_currentRawIngressOperationId;
-	const QSharedPointer<CausalOutboundGroup> causalOutboundGroup   = currentCausalOutboundGroup();
-	const bool                                doingSimulate         = m_doingSimulate;
-	const std::shared_ptr<LuaCallbackConnectionCancellationState> connectionCancellationState =
-	    m_currentConnectionCancellationState;
-	const LuaCallbackIncomingLineObservation incomingLineObservation = m_currentIncomingLineLuaObservation;
-	const QPointer<WorldRuntime>             runtime(const_cast<WorldRuntime *>(this));
-	return [runtime, commandContext, actionSource, rawIngressOperationId, causalOutboundGroup,
-	        effectiveCausalOutboundScope, doingSimulate, connectionCancellationState,
-	        incomingLineObservation](const std::function<void()> &work)
-	{
-		if (!runtime || !work)
-			return;
-		const auto run = [runtime, actionSource, rawIngressOperationId, causalOutboundGroup,
-		                  effectiveCausalOutboundScope, doingSimulate, connectionCancellationState,
-		                  incomingLineObservation, &work]
-		{
-			const unsigned short previousActionSource          = runtime->m_currentActionSource;
-			const quint64        previousRawIngressOperationId = runtime->m_currentRawIngressOperationId;
-			const QSharedPointer<CausalOutboundGroup> previousCausalOutboundGroup =
-			    runtime->m_currentCausalOutboundGroup;
-			const CausalOutboundScopeHandle previousCausalOutboundScope =
-			    runtime->m_currentCausalOutboundScope;
-			const bool previousDoingSimulate = runtime->m_doingSimulate;
-			const std::shared_ptr<LuaCallbackConnectionCancellationState>
-			    previousConnectionCancellationState = runtime->m_currentConnectionCancellationState;
-			const LuaCallbackIncomingLineObservation previousIncomingLineObservation =
-			    runtime->m_currentIncomingLineLuaObservation;
-			runtime->m_currentActionSource                = actionSource;
-			runtime->m_currentRawIngressOperationId       = rawIngressOperationId;
-			runtime->m_currentCausalOutboundGroup         = causalOutboundGroup;
-			runtime->m_currentCausalOutboundScope         = effectiveCausalOutboundScope;
-			runtime->m_doingSimulate                      = doingSimulate;
-			runtime->m_currentConnectionCancellationState = connectionCancellationState;
-			runtime->m_currentIncomingLineLuaObservation  = incomingLineObservation;
-			const auto restore                            = qScopeGuard(
-			    [runtime, previousActionSource, previousRawIngressOperationId, previousCausalOutboundGroup,
-			     previousCausalOutboundScope, previousDoingSimulate, previousConnectionCancellationState,
-			     previousIncomingLineObservation]
-			    {
-				    if (runtime)
-				    {
-					    runtime->m_currentActionSource                = previousActionSource;
-					    runtime->m_currentRawIngressOperationId       = previousRawIngressOperationId;
-					    runtime->m_currentCausalOutboundGroup         = previousCausalOutboundGroup;
-					    runtime->m_currentCausalOutboundScope         = previousCausalOutboundScope;
-					    runtime->m_doingSimulate                      = previousDoingSimulate;
-					    runtime->m_currentConnectionCancellationState = previousConnectionCancellationState;
-					    runtime->m_currentIncomingLineLuaObservation  = previousIncomingLineObservation;
-				    }
-			    });
-			Q_UNUSED(restore);
-			work();
-		};
-		if (commandContext)
-			commandContext(run);
-		else
-			run();
-	};
+	return captureRuntimeCallerContextImpl(causalOutboundScope, true, false,
+	                                       m_currentConnectionCancellationState);
 }
 
-std::function<void(const std::function<void()> &)> WorldRuntime::captureRuntimeAmbientCallerContext() const
+RuntimeCallerContext WorldRuntime::captureRuntimeAmbientCallerContext() const
 {
 	return captureRuntimeAmbientCallerContext({});
 }
 
-std::function<void(const std::function<void()> &)>
-WorldRuntime::captureRuntimeAmbientCallerContext(CausalOutboundScopeHandle causalOutboundScope) const
+RuntimeCallerContext
+WorldRuntime::captureRuntimeAmbientCallerContext(const CausalOutboundScopeHandle &causalOutboundScope) const
+{
+	return captureRuntimeCallerContextImpl(causalOutboundScope, false, true,
+	                                       m_currentConnectionCancellationState);
+}
+
+RuntimeCallerContext WorldRuntime::captureOutboundCallerContext() const
+{
+	return captureRuntimeCallerContextImpl(m_currentCausalOutboundScope, false, false,
+	                                       m_currentConnectionCancellationState);
+}
+
+RuntimeCallerContext WorldRuntime::captureOutgoingPacketDebugCallerContext() const
+{
+	return captureRuntimeCallerContextImpl(m_currentCausalOutboundScope, false, true,
+	                                       m_connectionCancellationState);
+}
+
+RuntimeCallerContext WorldRuntime::captureRuntimeCallerContextImpl(
+    CausalOutboundScopeHandle causalOutboundScope, const bool retainCausalOutboundGroup,
+    const bool                                                     ambientCommandContext,
+    const std::shared_ptr<LuaCallbackConnectionCancellationState> &connectionCancellationState) const
 {
 	if (causalOutboundScope.epoch == 0)
-		causalOutboundScope.epoch = m_connectionEpoch;
-	const auto commandContext = m_commandProcessor ? m_commandProcessor->captureAmbientCallerContextRunner()
-	                                               : std::function<void(const std::function<void()> &)>{};
-	const unsigned short actionSource          = m_currentActionSource;
-	const quint64        rawIngressOperationId = m_currentRawIngressOperationId;
-	const bool           doingSimulate         = m_doingSimulate;
-	const std::shared_ptr<LuaCallbackConnectionCancellationState> connectionCancellationState =
-	    m_currentConnectionCancellationState;
+	{
+		causalOutboundScope = m_currentCausalOutboundScope;
+		if (causalOutboundScope.epoch == 0)
+			causalOutboundScope.epoch = m_connectionEpoch;
+	}
+	RuntimeCallerContext commandContext =
+	    m_commandProcessor ? (ambientCommandContext ? m_commandProcessor->captureAmbientCallerContextRunner()
+	                                                : m_commandProcessor->captureCallerContextRunner())
+	                       : RuntimeCallerContext{};
+	const unsigned short                      actionSource          = m_currentActionSource;
+	const quint64                             rawIngressOperationId = m_currentRawIngressOperationId;
+	const QSharedPointer<CausalOutboundGroup> causalOutboundGroup =
+	    retainCausalOutboundGroup ? currentCausalOutboundGroup() : QSharedPointer<CausalOutboundGroup>{};
+	const bool                               doingSimulate           = m_doingSimulate;
 	const LuaCallbackIncomingLineObservation incomingLineObservation = m_currentIncomingLineLuaObservation;
 	const QPointer<WorldRuntime>             runtime(const_cast<WorldRuntime *>(this));
-	return [runtime, commandContext, actionSource, rawIngressOperationId, causalOutboundScope, doingSimulate,
-	        connectionCancellationState, incomingLineObservation](const std::function<void()> &work)
-	{
-		if (!runtime || !work)
-			return;
-		const auto run = [runtime, actionSource, rawIngressOperationId, causalOutboundScope, doingSimulate,
-		                  connectionCancellationState, incomingLineObservation, &work]
-		{
-			const unsigned short previousActionSource          = runtime->m_currentActionSource;
-			const quint64        previousRawIngressOperationId = runtime->m_currentRawIngressOperationId;
-			const QSharedPointer<CausalOutboundGroup> previousCausalOutboundGroup =
-			    runtime->m_currentCausalOutboundGroup;
-			const CausalOutboundScopeHandle previousCausalOutboundScope =
-			    runtime->m_currentCausalOutboundScope;
-			const bool previousDoingSimulate = runtime->m_doingSimulate;
-			const std::shared_ptr<LuaCallbackConnectionCancellationState>
-			    previousConnectionCancellationState = runtime->m_currentConnectionCancellationState;
-			const LuaCallbackIncomingLineObservation previousIncomingLineObservation =
-			    runtime->m_currentIncomingLineLuaObservation;
-			runtime->m_currentActionSource          = actionSource;
-			runtime->m_currentRawIngressOperationId = rawIngressOperationId;
-			runtime->m_currentCausalOutboundGroup.clear();
-			runtime->m_currentCausalOutboundScope         = causalOutboundScope;
-			runtime->m_doingSimulate                      = doingSimulate;
-			runtime->m_currentConnectionCancellationState = connectionCancellationState;
-			runtime->m_currentIncomingLineLuaObservation  = incomingLineObservation;
-			const auto restore                            = qScopeGuard(
-			    [runtime, previousActionSource, previousRawIngressOperationId, previousCausalOutboundGroup,
-			     previousCausalOutboundScope, previousDoingSimulate, previousConnectionCancellationState,
-			     previousIncomingLineObservation]
-			    {
-				    if (runtime)
-				    {
-					    runtime->m_currentActionSource                = previousActionSource;
-					    runtime->m_currentRawIngressOperationId       = previousRawIngressOperationId;
-					    runtime->m_currentCausalOutboundGroup         = previousCausalOutboundGroup;
-					    runtime->m_currentCausalOutboundScope         = previousCausalOutboundScope;
-					    runtime->m_doingSimulate                      = previousDoingSimulate;
-					    runtime->m_currentConnectionCancellationState = previousConnectionCancellationState;
-					    runtime->m_currentIncomingLineLuaObservation  = previousIncomingLineObservation;
-				    }
-			    });
-			Q_UNUSED(restore);
-			work();
-		};
-		if (commandContext)
-			commandContext(run);
-		else
-			run();
-	};
+	return RuntimeCallerContext(
+	    [runtime, commandContext = std::move(commandContext), actionSource, rawIngressOperationId,
+	     causalOutboundGroup, causalOutboundScope, doingSimulate, connectionCancellationState,
+	     incomingLineObservation](const std::function<void()> &work)
+	    {
+		    if (!runtime || !work)
+			    return;
+		    const auto run = [runtime, actionSource, rawIngressOperationId, causalOutboundGroup,
+		                      causalOutboundScope, doingSimulate, connectionCancellationState,
+		                      incomingLineObservation, &work]
+		    {
+			    const unsigned short previousActionSource          = runtime->m_currentActionSource;
+			    const quint64        previousRawIngressOperationId = runtime->m_currentRawIngressOperationId;
+			    const QSharedPointer<CausalOutboundGroup> previousCausalOutboundGroup =
+			        runtime->m_currentCausalOutboundGroup;
+			    const CausalOutboundScopeHandle previousCausalOutboundScope =
+			        runtime->m_currentCausalOutboundScope;
+			    const bool previousDoingSimulate = runtime->m_doingSimulate;
+			    const std::shared_ptr<LuaCallbackConnectionCancellationState>
+			        previousConnectionCancellationState = runtime->m_currentConnectionCancellationState;
+			    const LuaCallbackIncomingLineObservation previousIncomingLineObservation =
+			        runtime->m_currentIncomingLineLuaObservation;
+			    runtime->m_currentActionSource                = actionSource;
+			    runtime->m_currentRawIngressOperationId       = rawIngressOperationId;
+			    runtime->m_currentCausalOutboundGroup         = causalOutboundGroup;
+			    runtime->m_currentCausalOutboundScope         = causalOutboundScope;
+			    runtime->m_doingSimulate                      = doingSimulate;
+			    runtime->m_currentConnectionCancellationState = connectionCancellationState;
+			    runtime->m_currentIncomingLineLuaObservation  = incomingLineObservation;
+			    const auto restore                            = qScopeGuard(
+			        [runtime, previousActionSource, previousRawIngressOperationId,
+			         previousCausalOutboundGroup, previousCausalOutboundScope, previousDoingSimulate,
+			         previousConnectionCancellationState, previousIncomingLineObservation]
+			        {
+				        if (runtime)
+				        {
+					        runtime->m_currentActionSource          = previousActionSource;
+					        runtime->m_currentRawIngressOperationId = previousRawIngressOperationId;
+					        runtime->m_currentCausalOutboundGroup   = previousCausalOutboundGroup;
+					        runtime->m_currentCausalOutboundScope   = previousCausalOutboundScope;
+					        runtime->m_doingSimulate                = previousDoingSimulate;
+					        runtime->m_currentConnectionCancellationState =
+					            previousConnectionCancellationState;
+					        runtime->m_currentIncomingLineLuaObservation = previousIncomingLineObservation;
+				        }
+			        });
+			    Q_UNUSED(restore);
+			    work();
+		    };
+		    if (commandContext)
+			    commandContext.run(run);
+		    else
+			    run();
+	    });
 }
 
 WorldRuntime::IncomingLineLuaObservationScope::IncomingLineLuaObservationScope(
@@ -3888,7 +3962,7 @@ void WorldRuntime::resumeLuaDeferredRuntimeMutationPlayback(
 	};
 
 	if (playback->callerContext)
-		playback->callerContext(applySegment);
+		playback->callerContext.run(applySegment);
 	else
 		applySegment();
 	playback->applying = false;
@@ -7617,9 +7691,22 @@ void WorldRuntime::beginRuntimeDestruction()
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::beginRuntimeDestruction");
 	if (m_runtimeDestructionStarted)
 		return;
-	m_runtimeDestructionStarted = true;
-	auto cancelledLifetime      = std::exchange(m_pluginCallbackRuntimeLifetimeState,
-	                                            std::make_shared<LuaCallbackRuntimeLifetimeState>());
+	m_runtimeDestructionStarted        = true;
+	auto discardPacketDebugTransaction = [](const QSharedPointer<OutboundCommandTransaction> &transaction)
+	{
+		if (!transaction)
+			return;
+		transaction->discardPacketDebug = true;
+		transaction->causalCompletion   = {};
+	};
+	for (const OutgoingPacketDebugRecord &record : std::as_const(m_outgoingPacketDebugRecords))
+		discardPacketDebugTransaction(record.commandTransaction);
+	if (m_outgoingPacketDebugPublication)
+		discardPacketDebugTransaction(m_outgoingPacketDebugPublication->record.commandTransaction);
+	m_outgoingPacketDebugRecords.clear();
+	m_outgoingPacketDebugPublication.reset();
+	auto cancelledLifetime = std::exchange(m_pluginCallbackRuntimeLifetimeState,
+	                                       std::make_shared<LuaCallbackRuntimeLifetimeState>());
 	if (cancelledLifetime)
 		cancelledLifetime->cancel();
 	if (m_activeRawIngressOperation)
@@ -8681,19 +8768,35 @@ void WorldRuntime::flushReadyCausalOutboundGroups()
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::flushReadyCausalOutboundGroups");
 	if (m_flushingCausalOutboundGroup)
 		return;
-	while (!m_causalOutboundGroups.isEmpty() && m_causalOutboundGroups.constFirst()->retainCount == 0)
+	while (!m_causalOutboundGroups.isEmpty())
 	{
-		const QSharedPointer<CausalOutboundGroup> group = m_causalOutboundGroups.dequeue();
-		m_flushingCausalOutboundGroup                   = group;
+		const QSharedPointer<CausalOutboundGroup> group = m_causalOutboundGroups.constFirst();
+		if (!group || group->finished)
+		{
+			m_causalOutboundGroups.dequeue();
+			continue;
+		}
+		if (group->commandNotificationPending)
+			break;
+		const bool hasSegment       = !group->segments.empty();
+		const bool hasSealedSegment = hasSegment && group->segments.front().sealed;
+		if (group->retainCount > 0 && !hasSealedSegment)
+			break;
+		m_flushingCausalOutboundGroup = group;
 		flushCausalOutboundGroup(group);
 		m_flushingCausalOutboundGroup.clear();
-		if (group->retainCount > 0)
-		{
-			m_causalOutboundGroups.prepend(group);
+		if (group->commandNotificationPending)
 			break;
-		}
-		group->finished = true;
-		if (group->disconnectAfterFlush)
+		if (!group->finished)
+			break;
+		Q_ASSERT(!m_causalOutboundGroups.isEmpty());
+		Q_ASSERT(m_causalOutboundGroups.constFirst() == group);
+		m_causalOutboundGroups.dequeue();
+		const QPointer<WorldRuntime> runtime(this);
+		drainOutgoingPacketDebugRecords();
+		if (!runtime)
+			return;
+		if (group->disconnectAfterFlush && group->pendingPacketDebugRecords == 0)
 		{
 			performPendingCausalOutboundSocketDisconnect();
 			if (m_connectPhase == eConnectDisconnecting)
@@ -8705,38 +8808,116 @@ void WorldRuntime::flushReadyCausalOutboundGroups()
 void WorldRuntime::flushCausalOutboundGroup(const QSharedPointer<CausalOutboundGroup> &group)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::flushCausalOutboundGroup");
-	if (!group)
+	if (!group || group->finished || group->commandNotificationPending)
 		return;
-	qsizetype nextPriority = 0;
-	qsizetype nextOrdinary = 0;
-	auto      flushOne     = [this](const CausalOutboundTransmission &transmission)
+	auto flushOne = [this, &group](const CausalOutboundTransmission &transmission)
 	{
-		const unsigned short previousActionSource = m_currentActionSource;
-		m_currentActionSource                     = transmission.actionSource;
-		const auto restoreActionSource =
-		    qScopeGuard([this, previousActionSource] { m_currentActionSource = previousActionSource; });
-		Q_UNUSED(restoreActionSource);
-		sendToWorld(transmission.payload);
-	};
-	while (nextPriority < group->triggerPriorityTransmissions.size() ||
-	       nextOrdinary < group->ordinaryTransmissions.size())
-	{
-		if (nextPriority < group->triggerPriorityTransmissions.size())
-			flushOne(group->triggerPriorityTransmissions[nextPriority++]);
+		if (transmission.commandTransaction &&
+		    transmission.commandTransaction->outcome != OutboundCommandTransaction::Outcome::PendingWrite)
+		{
+			return;
+		}
+		const auto write = [this, &group, &transmission]
+		{
+			if (transmission.commandTransaction)
+			{
+				group->commandNotificationPending                 = true;
+				const QWeakPointer<CausalOutboundGroup> weakGroup = group.toWeakRef();
+				transmission.commandTransaction->causalCompletion =
+				    [runtime = QPointer<WorldRuntime>(this), weakGroup]
+				{
+					const QSharedPointer<CausalOutboundGroup> completedGroup = weakGroup.toStrongRef();
+					if (!runtime || !completedGroup || completedGroup->finished)
+						return;
+					completedGroup->commandNotificationPending = false;
+					runtime->flushReadyCausalOutboundGroups();
+				};
+			}
+			const qint64 written = sendToWorld(transmission.payload, transmission.commandTransaction);
+			if (written <= 0 && transmission.commandTransaction)
+			{
+				group->commandNotificationPending                 = false;
+				transmission.commandTransaction->causalCompletion = {};
+			}
+		};
+		if (transmission.commandTransaction && transmission.commandTransaction->callerContext)
+		{
+			const RuntimeCallerContext callerContext = transmission.commandTransaction->callerContext;
+			callerContext.run(write);
+		}
 		else
-			flushOne(group->ordinaryTransmissions[nextOrdinary++]);
+		{
+			const unsigned short previousActionSource = m_currentActionSource;
+			m_currentActionSource                     = transmission.actionSource;
+			const auto restoreActionSource =
+			    qScopeGuard([this, previousActionSource] { m_currentActionSource = previousActionSource; });
+			Q_UNUSED(restoreActionSource);
+			write();
+		}
+	};
+	while (!group->segments.empty())
+	{
+		CausalOutboundSegment &segment = group->segments.front();
+		if (group->retainCount > 0 && !segment.sealed)
+			return;
+		while (group->segments.front().nextTriggerPriority <
+		       group->segments.front().triggerPriorityTransmissions.size())
+		{
+			CausalOutboundSegment           &currentSegment = group->segments.front();
+			const CausalOutboundTransmission transmission =
+			    currentSegment.triggerPriorityTransmissions.at(currentSegment.nextTriggerPriority++);
+			flushOne(transmission);
+			if (group->finished || group->commandNotificationPending)
+				return;
+		}
+		while (group->segments.front().nextOrdinary < group->segments.front().ordinaryTransmissions.size())
+		{
+			CausalOutboundSegment           &currentSegment = group->segments.front();
+			const CausalOutboundTransmission transmission =
+			    currentSegment.ordinaryTransmissions.at(currentSegment.nextOrdinary++);
+			flushOne(transmission);
+			if (group->finished || group->commandNotificationPending)
+				return;
+		}
+		group->segments.pop_front();
 	}
-	group->triggerPriorityTransmissions.clear();
-	group->ordinaryTransmissions.clear();
+	if (group->retainCount == 0)
+	{
+		group->finished = true;
+	}
 }
 
 void WorldRuntime::invalidateConnectionGeneration()
 {
+	QVector<QSharedPointer<OutboundCommandTransaction>> rejectedCommands;
+	auto dropPendingTransmissions = [&rejectedCommands](const QSharedPointer<CausalOutboundGroup> &group)
+	{
+		if (!group)
+			return;
+		auto drop = [&rejectedCommands](const CausalOutboundTransmission &transmission)
+		{
+			if (transmission.commandTransaction &&
+			    transmission.commandTransaction->outcome == OutboundCommandTransaction::Outcome::PendingWrite)
+			{
+				transmission.commandTransaction->causalCompletion = {};
+				rejectedCommands.push_back(transmission.commandTransaction);
+			}
+		};
+		for (const CausalOutboundSegment &segment : group->segments)
+		{
+			std::ranges::for_each(segment.triggerPriorityTransmissions, drop);
+			std::ranges::for_each(segment.ordinaryTransmissions, drop);
+		}
+	};
 	for (const QSharedPointer<CausalOutboundGroup> &group : std::as_const(m_causalOutboundGroups))
 	{
 		if (group)
+		{
+			dropPendingTransmissions(group);
 			group->finished = true;
+		}
 	}
+	dropPendingTransmissions(m_flushingCausalOutboundGroup);
 	m_causalOutboundGroups.clear();
 	const std::shared_ptr<LuaCallbackConnectionCancellationState> invalidatedCancellationState =
 	    std::exchange(m_connectionCancellationState, {});
@@ -8755,6 +8936,13 @@ void WorldRuntime::invalidateConnectionGeneration()
 	m_flushingCausalOutboundGroup.clear();
 	m_currentCausalOutboundGroup.clear();
 	m_currentCausalOutboundScope = {};
+	if (m_commandProcessor)
+	{
+		m_commandProcessor->m_lastCommandSent.clear();
+		m_commandProcessor->m_lastCommandCount = 0;
+	}
+	for (const QSharedPointer<OutboundCommandTransaction> &transaction : std::as_const(rejectedCommands))
+		transaction->resolve(OutboundCommandTransaction::Outcome::Rejected);
 	cancelStaleConnectionRawIngressOperations();
 }
 
@@ -12050,70 +12238,262 @@ bool WorldRuntime::requestMccpDisableForReload(const int timeoutMs)
 	return reloadMccpDisableStatus() == ReloadMccpDisableStatus::Succeeded;
 }
 
-void WorldRuntime::sendToWorld(const QByteArray &payload)
+qint64 WorldRuntime::sendToWorld(const QByteArray                                 &payload,
+                                 const QSharedPointer<OutboundCommandTransaction> &commandTransaction)
 {
+	if (commandTransaction &&
+	    commandTransaction->outcome == OutboundCommandTransaction::Outcome::PendingWrite)
+	{
+#define QMUD_CAPTURE_TRANSACTION_SENT_OBSERVATION_FIELD(enumName, member, type)                              \
+	commandTransaction->preWriteObservation.member = m_##member;
+		QMUD_LUA_CALLBACK_SENT_OBSERVATION_FIELDS(QMUD_CAPTURE_TRANSACTION_SENT_OBSERVATION_FIELD)
+#undef QMUD_CAPTURE_TRANSACTION_SENT_OBSERVATION_FIELD
+		commandTransaction->preWriteObservation.valid = true;
+	}
 	if (!m_socket)
-		return;
+	{
+		if (commandTransaction &&
+		    commandTransaction->outcome == OutboundCommandTransaction::Outcome::PendingWrite)
+			commandTransaction->resolve(OutboundCommandTransaction::Outcome::Rejected);
+		return -1;
+	}
 
 	const qint64 written = m_socket->sendPacket(payload);
 	if (written <= 0)
-		return;
+	{
+		if (commandTransaction &&
+		    commandTransaction->outcome == OutboundCommandTransaction::Outcome::PendingWrite)
+			commandTransaction->resolve(OutboundCommandTransaction::Outcome::Rejected);
+		return written;
+	}
 
 	m_bytesOut += written;
 	m_outputPacketCount++;
 	if (m_debugIncomingPackets)
 	{
-		auto appendPacketDebug = [this](const QString &caption, const QByteArray &packet, qint64 number)
+		QSharedPointer<CausalOutboundGroup> causalGroup;
+		if (m_flushingCausalOutboundGroup && !m_flushingCausalOutboundGroup->finished)
 		{
-			const QString   worldName = m_worldAttributes.value(QStringLiteral("name"));
-			const QString   title     = QStringLiteral("Packet debug - %1")
-			                                .arg(worldName.isEmpty() ? QStringLiteral("World") : worldName);
-			const QDateTime now       = QDateTime::currentDateTime();
-			const QString   timestamp =
-			    QLocale::system().toString(now, QStringLiteral("dddd, MMMM dd, yyyy, h:mm:ss AP"));
-			QString const header = QStringLiteral("\r\n%1 packet: %2 (%3 bytes) at %4\r\n\r\n")
-			                           .arg(caption)
-			                           .arg(number)
-			                           .arg(packet.size())
-			                           .arg(timestamp);
-			if (!callPluginCallbacksStopOnTrueWithString(LuaCallbackEvent::PacketDebug, header))
-			{
-				if (AppController const *app = AppController::instance())
-					if (MainWindow *main = app->mainWindow())
-						main->appendToNotepad(title, header, false, this);
-			}
-
-			int remaining = safeQSizeToInt(packet.size());
-			int offset    = 0;
-			while (remaining > 0)
-			{
-				const int count = qMin(remaining, kPacketDebugChars);
-				QString   ascii;
-				QString   hex;
-				ascii.reserve(kPacketDebugChars);
-				hex.reserve(kPacketDebugChars * 3);
-				for (int i = 0; i < count; ++i)
-				{
-					const auto byte = static_cast<unsigned char>(packet.at(offset + i));
-					ascii += (isAsciiPrintableByte(byte) ? QChar(byte) : QChar('.'));
-					hex += QString::asprintf(" %02x", byte);
-				}
-				const QString line = QStringLiteral("%1%2%3\r\n")
-				                         .arg(ascii.leftJustified(kPacketDebugChars, QLatin1Char(' ')))
-				                         .arg(QLatin1Char(' '))
-				                         .arg(hex);
-				if (!callPluginCallbacksStopOnTrueWithString(LuaCallbackEvent::PacketDebug, line))
-				{
-					if (AppController const *app = AppController::instance())
-						if (MainWindow *main = app->mainWindow())
-							main->appendToNotepad(title, line, false, this);
-				}
-				remaining -= count;
-				offset += count;
-			}
-		};
-		appendPacketDebug(QStringLiteral("Sent "), payload, m_outputPacketCount);
+			causalGroup = m_flushingCausalOutboundGroup;
+			++causalGroup->pendingPacketDebugRecords;
+		}
+		m_outgoingPacketDebugRecords.enqueue(OutgoingPacketDebugRecord{
+		    payload, QDateTime::currentDateTime(), m_outputPacketCount, m_bytesOut,
+		    captureOutgoingPacketDebugCallerContext(), commandTransaction, std::move(causalGroup)});
+		drainOutgoingPacketDebugRecords();
 	}
+	if (commandTransaction &&
+	    commandTransaction->outcome == OutboundCommandTransaction::Outcome::PendingWrite)
+		commandTransaction->resolve(OutboundCommandTransaction::Outcome::Accepted);
+	return written;
+}
+
+void WorldRuntime::finishOutboundCommandNotification(
+    const QSharedPointer<OutboundCommandTransaction> &commandTransaction)
+{
+	if (!commandTransaction)
+		return;
+	commandTransaction->notificationFinished = true;
+	if (auto causalCompletion = std::move(commandTransaction->causalCompletion); causalCompletion)
+	{
+		const QPointer<WorldRuntime> runtime(this);
+		causalCompletion();
+		if (!runtime)
+			return;
+	}
+	drainOutgoingPacketDebugRecords();
+}
+
+void WorldRuntime::discardOutboundCommandNotification(
+    const QSharedPointer<OutboundCommandTransaction> &commandTransaction)
+{
+	if (!commandTransaction)
+		return;
+	commandTransaction->notificationFinished = true;
+	commandTransaction->discardPacketDebug   = true;
+	if (auto causalCompletion = std::move(commandTransaction->causalCompletion); causalCompletion)
+	{
+		const QPointer<WorldRuntime> runtime(this);
+		causalCompletion();
+		if (!runtime)
+			return;
+	}
+	drainOutgoingPacketDebugRecords();
+}
+
+void WorldRuntime::drainOutgoingPacketDebugRecords()
+{
+	if (m_drainingOutgoingPacketDebugRecords || m_outgoingPacketDebugPublication)
+		return;
+	m_drainingOutgoingPacketDebugRecords = true;
+	const auto finishDraining = qScopeGuard([this] { m_drainingOutgoingPacketDebugRecords = false; });
+	Q_UNUSED(finishDraining);
+	while (!m_outgoingPacketDebugRecords.isEmpty())
+	{
+		const OutgoingPacketDebugRecord &head = m_outgoingPacketDebugRecords.head();
+		if (head.commandTransaction && !head.commandTransaction->notificationFinished)
+			break;
+		if (head.causalGroup && !head.causalGroup->finished)
+			break;
+		OutgoingPacketDebugPublication publication;
+		publication.record      = m_outgoingPacketDebugRecords.dequeue();
+		const QString worldName = m_worldAttributes.value(QStringLiteral("name"));
+		publication.title       = QStringLiteral("Packet debug - %1")
+		                              .arg(worldName.isEmpty() ? QStringLiteral("World") : worldName);
+		publication.observation.totalLinesSent    = m_totalLinesSent;
+		publication.observation.outputPacketCount = publication.record.packetNumber;
+		publication.observation.bytesOut          = publication.record.bytesOut;
+		publication.observation.valid             = true;
+		m_outgoingPacketDebugPublication          = std::move(publication);
+		runInOutgoingPacketDebugCallerContext(
+		    [this]
+		    {
+			    if (m_outgoingPacketDebugPublication->record.commandTransaction &&
+			        m_outgoingPacketDebugPublication->record.commandTransaction->discardPacketDebug)
+			    {
+				    completeOutgoingPacketDebugRecord();
+				    return;
+			    }
+			    advanceOutgoingPacketDebugPublication();
+		    });
+		if (m_outgoingPacketDebugPublication)
+			break;
+	}
+}
+
+void WorldRuntime::runInOutgoingPacketDebugCallerContext(const std::function<void()> &work) const
+{
+	if (!work || !m_outgoingPacketDebugPublication)
+		return;
+	if (const RuntimeCallerContext callerContext = m_outgoingPacketDebugPublication->record.callerContext;
+	    callerContext)
+		callerContext.run(work);
+	else
+		work();
+}
+
+void WorldRuntime::advanceOutgoingPacketDebugPublication()
+{
+	while (m_outgoingPacketDebugPublication)
+	{
+		OutgoingPacketDebugPublication &publication = *m_outgoingPacketDebugPublication;
+		QString                         fragment;
+		if (publication.offset < 0)
+		{
+			const QString timestamp = QLocale::system().toString(
+			    publication.record.timestamp, QStringLiteral("dddd, MMMM dd, yyyy, h:mm:ss AP"));
+			fragment           = QStringLiteral("\r\nSent  packet: %1 (%2 bytes) at %3\r\n\r\n")
+			                         .arg(publication.record.packetNumber)
+			                         .arg(publication.record.payload.size())
+			                         .arg(timestamp);
+			publication.offset = 0;
+		}
+		else if (publication.offset < publication.record.payload.size())
+		{
+			const qsizetype count =
+			    qMin<qsizetype>(publication.record.payload.size() - publication.offset, kPacketDebugChars);
+			QString ascii;
+			QString hex;
+			ascii.reserve(kPacketDebugChars);
+			hex.reserve(kPacketDebugChars * 3);
+			for (qsizetype i = 0; i < count; ++i)
+			{
+				const auto byte =
+				    static_cast<unsigned char>(publication.record.payload.at(publication.offset + i));
+				ascii += (isAsciiPrintableByte(byte) ? QChar(byte) : QChar('.'));
+				hex += QString::asprintf(" %02x", byte);
+			}
+			fragment = QStringLiteral("%1%2%3\r\n")
+			               .arg(ascii.leftJustified(kPacketDebugChars, QLatin1Char(' ')))
+			               .arg(QLatin1Char(' '))
+			               .arg(hex);
+			publication.offset += count;
+		}
+		else
+		{
+			completeOutgoingPacketDebugRecord();
+			return;
+		}
+
+		LuaBatchDispatchRequest request;
+		request.kind                         = LuaBatchDispatchKind::StringHandled;
+		request.callbackEvent                = LuaCallbackEvent::PacketDebug;
+		request.functionName                 = luaCallbackEventFunctionName(request.callbackEvent);
+		request.engines                      = collectPluginCallbackRecipients(request.functionName);
+		request.stringArg                    = fragment;
+		request.defaultResult                = false;
+		request.revalidateObservedRecipients = true;
+		request.sentObservationArg           = publication.observation;
+		if (request.engines.isEmpty())
+		{
+			if (AppController const *app = AppController::instance())
+				if (MainWindow *main = app->mainWindow())
+					main->appendToNotepad(publication.title, fragment, false, this);
+			continue;
+		}
+		publication.pendingFragment = std::move(fragment);
+		auto continuationFactory    = makeLuaCallbackResultContinuationFactory(
+		    [runtime = QPointer<WorldRuntime>(this)]
+		    {
+			    PendingOutgoingPacketDebugFragment state;
+			    state.runtime = runtime;
+			    return state;
+		    });
+		LuaCallbackContinuationDispatchResult callback =
+		    dispatchPluginCallbackWithContinuation(request, continuationFactory);
+		if (callback.suspended())
+			return;
+		carryCompletedCallbackRequestState(request, callback.result);
+		publication.observation = request.sentObservationArg;
+		const bool handled      = callback.result.boolResultValid && callback.result.boolResult;
+		if (!handled)
+		{
+			if (AppController const *app = AppController::instance())
+				if (MainWindow *main = app->mainWindow())
+					main->appendToNotepad(publication.title, publication.pendingFragment, false, this);
+		}
+		publication.pendingFragment.clear();
+	}
+}
+
+void WorldRuntime::completeOutgoingPacketDebugFragment(const LuaBatchDispatchResult &result)
+{
+	if (!m_outgoingPacketDebugPublication)
+		return;
+	OutgoingPacketDebugPublication &publication = *m_outgoingPacketDebugPublication;
+	LuaBatchDispatchRequest         request;
+	request.sentObservationArg = publication.observation;
+	carryCompletedCallbackRequestState(request, result);
+	publication.observation = request.sentObservationArg;
+	const bool handled      = result.boolResultValid && result.boolResult;
+	if (!handled)
+	{
+		if (AppController const *app = AppController::instance())
+			if (MainWindow *main = app->mainWindow())
+				main->appendToNotepad(publication.title, publication.pendingFragment, false, this);
+	}
+	publication.pendingFragment.clear();
+	advanceOutgoingPacketDebugPublication();
+}
+
+void WorldRuntime::completeOutgoingPacketDebugRecord()
+{
+	if (!m_outgoingPacketDebugPublication)
+		return;
+	OutgoingPacketDebugRecord record = std::move(m_outgoingPacketDebugPublication->record);
+	m_outgoingPacketDebugPublication.reset();
+	QSharedPointer<CausalOutboundGroup> causalGroup = std::move(record.causalGroup);
+	if (causalGroup)
+	{
+		Q_ASSERT(causalGroup->pendingPacketDebugRecords > 0);
+		--causalGroup->pendingPacketDebugRecords;
+	}
+	if (causalGroup && causalGroup->finished && causalGroup->disconnectAfterFlush &&
+	    causalGroup->pendingPacketDebugRecords == 0)
+	{
+		performPendingCausalOutboundSocketDisconnect();
+	}
+	drainOutgoingPacketDebugRecords();
 }
 
 bool WorldRuntime::sendRawPacketFromCurrentContext(QByteArray payload)
@@ -16389,6 +16769,17 @@ void WorldRuntime::applyIncomingLineLuaObservation(LuaCallbackSnapshot          
 #undef QMUD_APPLY_INCOMING_LINE_OBSERVATION_FIELD
 }
 
+void WorldRuntime::applySentLuaObservation(LuaCallbackSnapshot              &snapshot,
+                                           const LuaCallbackSentObservation &observation)
+{
+	if (!observation.valid || !snapshot.hasRuntimeCountersSnapshot)
+		return;
+#define QMUD_APPLY_SENT_OBSERVATION_FIELD(enumName, member, type)                                            \
+	setLuaCallbackRuntimeCounterValue(snapshot, LuaCallbackRuntimeCounterField::enumName, observation.member);
+	QMUD_LUA_CALLBACK_SENT_OBSERVATION_FIELDS(QMUD_APPLY_SENT_OBSERVATION_FIELD)
+#undef QMUD_APPLY_SENT_OBSERVATION_FIELD
+}
+
 QSharedPointer<const LuaCallbackSnapshot> WorldRuntime::captureLuaCallbackSnapshotForDispatchWithActionSource(
     const QVector<QSharedPointer<LuaCallbackEngine>> &recipients,
     const LuaCallbackLineSnapshotPolicy lineSnapshotPolicy, const int actionSourceOverride) const
@@ -16417,9 +16808,13 @@ WorldRuntime::captureLuaCallbackSnapshotForRequest(const LuaBatchDispatchRequest
 		setLuaCallbackRuntimeCounterValue(*snapshot, LuaCallbackRuntimeCounterField::DoingSimulate,
 		                                  request.doingSimulateOverride);
 	}
+	if (snapshot->hasRuntimeCountersSnapshot)
+		applySentLuaObservation(*snapshot, request.sentObservationArg);
 	if (request.callbackEvent == LuaCallbackEvent::Sent && snapshot->hasRuntimeCountersSnapshot)
+	{
 		setLuaCallbackRuntimeCounterValue(*snapshot, LuaCallbackRuntimeCounterField::PluginProcessingSent,
 		                                  true);
+	}
 	const LuaCallbackIncomingLineObservation &incomingLineObservation =
 	    request.incomingLineObservationArg.valid ? request.incomingLineObservationArg
 	                                             : m_currentIncomingLineLuaObservation;
@@ -17404,7 +17799,7 @@ void WorldRuntime::drainPendingSoundOperations()
 			static_cast<void>(startSoundPluginDecision(operation));
 		};
 		if (callerContext)
-			callerContext(start);
+			callerContext.run(start);
 		else
 			start();
 	}
@@ -21698,7 +22093,7 @@ void WorldRuntime::queueSuspendedLuaCoroutineCancellation(const QSharedPointer<L
 				                                      appliedResult);
 		                                  };
 		                                  if (callerContext)
-			                                  callerContext(apply);
+			                                  callerContext.run(apply);
 		                                  else
 			                                  apply();
 	                                  });
@@ -21777,7 +22172,7 @@ void WorldRuntime::applyCompletedPluginCallbackCommandMutations(
 		applyCompletedPluginCallbackMutations(result, std::move(finish), command.orderingDomain);
 	};
 	if (command.callerContext)
-		command.callerContext(apply);
+		command.callerContext.run(apply);
 	else
 		apply();
 }
@@ -22404,7 +22799,7 @@ void WorldRuntime::handleCompletedPluginCallbackDispatchCommand(PluginCallbackDi
 			{
 				SuspendedPluginCallbackDispatch &originalDispatch = suspendedIt.value();
 				LuaBatchDispatchRequest         &originalRequest  = originalDispatch.command.request;
-				carryCompletedCallbackOutputAnchorState(originalRequest, result);
+				carryCompletedCallbackRequestState(originalRequest, result);
 				if (willQueueRecipientContinuation)
 					originalDispatch.recaptureSnapshotBeforeNextRecipient = true;
 				else
@@ -22441,7 +22836,7 @@ void WorldRuntime::handleCompletedPluginCallbackDispatchCommand(PluginCallbackDi
 		const int nextEngineIndex        = result.nextEngineIndex;
 		result.recipientMutationBoundary = false;
 		result.nextEngineIndex           = -1;
-		carryCompletedCallbackOutputAnchorState(command.request, result);
+		carryCompletedCallbackRequestState(command.request, result);
 
 		SuspendedPluginCallbackDispatch continuation;
 		continuation.command                              = std::move(command);
@@ -22458,7 +22853,7 @@ void WorldRuntime::handleCompletedPluginCallbackDispatchCommand(PluginCallbackDi
 	if (result.suspended)
 	{
 		completeInitialPluginCallbackPresentation(command);
-		carryCompletedCallbackOutputAnchorState(command.request, result);
+		carryCompletedCallbackRequestState(command.request, result);
 		if (mutationBoundaryPublished || callbackSnapshotPublished ||
 		    luaBatchPresentationRequiresRefresh(result))
 		{
@@ -22683,7 +23078,7 @@ void WorldRuntime::handleCompletedPluginCallbackRecipientContinuation(
 
 	const bool presentationRequiresRefresh = luaBatchPresentationRequiresRefresh(result);
 	if (const bool advancesRequest = result.suspended || willQueueRecipientContinuation; advancesRequest)
-		carryCompletedCallbackOutputAnchorState(command.request, result);
+		carryCompletedCallbackRequestState(command.request, result);
 	if (result.suspended)
 	{
 		completeInitialPluginCallbackPresentation(command);
@@ -23371,7 +23766,7 @@ void WorldRuntime::finishPluginCallbackResultContinuation(PendingPluginCallbackR
 	const auto finishInCallerContext = [&pending, &finishContinuation]
 	{
 		if (pending.callerContext)
-			pending.callerContext(finishContinuation);
+			pending.callerContext.run(finishContinuation);
 		else
 			finishContinuation();
 	};
@@ -23429,7 +23824,7 @@ void WorldRuntime::cancelPendingResultOperationsForShutdown()
 		auto                  callerContext = operation.callerContext;
 		auto cancel = [this, operation = std::move(operation)] { finishCancelledSoundOperation(operation); };
 		if (callerContext)
-			callerContext(cancel);
+			callerContext.run(cancel);
 		else
 			cancel();
 	}
@@ -23447,7 +23842,7 @@ void WorldRuntime::cancelPendingResultOperationsForShutdown()
 				operation.mutationCompletion(true);
 		};
 		if (callerContext)
-			callerContext(cancel);
+			callerContext.run(cancel);
 		else
 			cancel();
 	}
@@ -23462,7 +23857,7 @@ void WorldRuntime::cancelPendingResultOperationsForShutdown()
 		auto                     cancel        = [this, operation = std::move(operation)]
 		{ finishCancelledChatNoteOperation(operation); };
 		if (callerContext)
-			callerContext(cancel);
+			callerContext.run(cancel);
 		else
 			cancel();
 	}
@@ -25414,8 +25809,9 @@ int WorldRuntime::sendCommandWithTriggerPriority(const QString &text, const bool
 	return eOK;
 }
 
-WorldRuntime::CausalOutboundStageResult
-WorldRuntime::stageCausalOutboundTransmission(QByteArray &payload, const bool triggerPriority)
+WorldRuntime::CausalOutboundStageResult WorldRuntime::stageCausalOutboundTransmission(
+    QByteArray &payload, const bool triggerPriority,
+    const QSharedPointer<OutboundCommandTransaction> &commandTransaction)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::stageCausalOutboundTransmission");
 	if (currentOutboundContextRejected())
@@ -25467,12 +25863,17 @@ WorldRuntime::stageCausalOutboundTransmission(QByteArray &payload, const bool tr
 	if (!group)
 		return CausalOutboundStageResult::Immediate;
 
-	CausalOutboundTransmission transmission{std::move(payload), m_currentActionSource};
+	if (group->segments.empty() || group->segments.back().sealed)
+		group->segments.emplace_back();
+	CausalOutboundSegment     &segment = group->segments.back();
+	CausalOutboundTransmission transmission{std::move(payload), m_currentActionSource, commandTransaction};
 	if (triggerPriority)
-		group->triggerPriorityTransmissions.push_back(std::move(transmission));
+		segment.triggerPriorityTransmissions.push_back(std::move(transmission));
 	else
-		group->ordinaryTransmissions.push_back(std::move(transmission));
-	if (flushUnretainedTail)
+		segment.ordinaryTransmissions.push_back(std::move(transmission));
+	if (commandTransaction)
+		segment.sealed = true;
+	if (flushUnretainedTail || commandTransaction)
 		flushReadyCausalOutboundGroups();
 	return CausalOutboundStageResult::Staged;
 }
@@ -25742,6 +26143,20 @@ LuaCallbackIncomingLineObservation WorldRuntime::captureIncomingLineLuaObservati
 #undef QMUD_CAPTURE_INCOMING_LINE_OBSERVATION_FIELD
 	observation.valid = true;
 	return observation;
+}
+
+LuaBatchDispatchRequest WorldRuntime::preparePluginSentDispatch(const QString &text)
+{
+	qmudAssertObjectThreadAffinity(this, "WorldRuntime::preparePluginSentDispatch");
+	LuaBatchDispatchRequest request;
+	request.kind                         = LuaBatchDispatchKind::String;
+	request.callbackEvent                = LuaCallbackEvent::Sent;
+	request.functionName                 = luaCallbackEventFunctionName(request.callbackEvent);
+	request.engines                      = collectPluginCallbackRecipients(request.functionName);
+	request.stringArg                    = text;
+	request.defaultResult                = true;
+	request.revalidateObservedRecipients = true;
+	return request;
 }
 
 WorldRuntime::RuntimeCountersSnapshot WorldRuntime::runtimeCountersSnapshotWithResolvedNoteColours(
@@ -26327,7 +26742,7 @@ void WorldRuntime::drainPendingTraceOperations()
 			startTraceDispatch(operation);
 		};
 		if (callerContext)
-			callerContext(start);
+			callerContext.run(start);
 		else
 			start();
 	}
@@ -26378,18 +26793,10 @@ void WorldRuntime::firePluginSent(const QString &text)
 }
 
 LuaCallbackContinuationDispatchResult
-WorldRuntime::firePluginSentContinuable(const QString                        &text,
+WorldRuntime::firePluginSentContinuable(const LuaBatchDispatchRequest        &request,
                                         LuaCallbackResultContinuationFactory &continuationFactory)
 {
 	qmudAssertObjectThreadAffinity(this, "WorldRuntime::firePluginSentContinuable");
-	LuaBatchDispatchRequest request;
-	request.kind          = LuaBatchDispatchKind::String;
-	request.callbackEvent = LuaCallbackEvent::Sent;
-	request.engines = collectPluginCallbackRecipients(luaCallbackEventFunctionName(request.callbackEvent));
-	request.functionName                 = luaCallbackEventFunctionName(request.callbackEvent);
-	request.stringArg                    = text;
-	request.defaultResult                = true;
-	request.revalidateObservedRecipients = true;
 	return dispatchPluginCallbackWithContinuation(request, continuationFactory);
 }
 
@@ -32268,7 +32675,7 @@ void WorldRuntime::drainPendingChatNoteOperations()
 			startChatNoteDispatch(operation);
 		};
 		if (callerContext)
-			callerContext(start);
+			callerContext.run(start);
 		else
 			start();
 	}

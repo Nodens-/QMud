@@ -1316,6 +1316,25 @@ struct LuaCallbackIncomingLineObservation
 };
 
 /**
+ * @brief Outbound counters retained across one asynchronous callback notification.
+ *
+ * The event producer selects the observation boundary. Recipient continuations carry mutations to these fields
+ * without exposing later unrelated runtime values or freezing unrelated callback-visible state.
+ */
+#define QMUD_LUA_CALLBACK_SENT_OBSERVATION_FIELDS(X)                                                         \
+	X(TotalLinesSent, totalLinesSent, int)                                                                   \
+	X(OutputPacketCount, outputPacketCount, int)                                                             \
+	X(BytesOut, bytesOut, qint64)
+
+struct LuaCallbackSentObservation
+{
+#define QMUD_DECLARE_SENT_OBSERVATION_FIELD(enumName, member, type) type member{};
+		QMUD_LUA_CALLBACK_SENT_OBSERVATION_FIELDS(QMUD_DECLARE_SENT_OBSERVATION_FIELD)
+#undef QMUD_DECLARE_SENT_OBSERVATION_FIELD
+		bool valid{false};
+};
+
+/**
  * @brief Queue-ordering domain for a callback event.
  */
 enum class LuaCallbackOrderingDomain : quint8
@@ -2600,6 +2619,7 @@ struct LuaBatchDispatchRequest
 		std::shared_ptr<LuaCallbackConnectionCancellationState>               connectionCancellationState;
 		std::shared_ptr<LuaCallbackRuntimeLifetimeState>                      runtimeLifetimeState;
 		LuaCallbackIncomingLineObservation                                    incomingLineObservationArg;
+		LuaCallbackSentObservation                                            sentObservationArg;
 		long                                                                  numberArg1{0};
 		long                                                                  numberArg2{0};
 		int                                                                   intArg1{0};
