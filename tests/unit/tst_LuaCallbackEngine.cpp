@@ -501,7 +501,7 @@ class tst_LuaCallbackEngine final : public QObject
 		void ruleSnapshotStoreRetainsRecycledPluginOwnerGeneration();
 		void batchedTargetedRuleRuntimePatchesUpdateBaseOnce();
 		void causalTargetedRulePatchesBatchAcrossDensePages();
-		void targetedRulePatchRebuildsMissingOwnerRow();
+		void targetedRulePatchRebuildsMissingRequestedComponent();
 		void batchedFullOwnerRulePatchSuppressesTargetedCausalPatch();
 		void directPluginPatchSuppressesExpandedTargetedRulePatches();
 		void pluginTopologyPatchesMatchColdSnapshotsAfterLoadAndUnload();
@@ -13163,7 +13163,7 @@ void tst_LuaCallbackEngine::causalTargetedRulePatchesBatchAcrossDensePages()
 		QCOMPARE(original.at(index).matchAttempts, 0);
 }
 
-void tst_LuaCallbackEngine::targetedRulePatchRebuildsMissingOwnerRow()
+void tst_LuaCallbackEngine::targetedRulePatchRebuildsMissingRequestedComponent()
 {
 	WorldRuntime::Alias alias;
 	alias.attributes.insert(QStringLiteral("name"), QStringLiteral("fallback"));
@@ -13173,11 +13173,11 @@ void tst_LuaCallbackEngine::targetedRulePatchRebuildsMissingOwnerRow()
 
 	WorldRuntime::Alias &runtimeAlias = runtime.aliasesMutable().first();
 	auto                &store        = runtime.m_luaCallbackDispatchSnapshotBaseCache->aliasSnapshotStore;
-	using RowMap                      = LuaCallbackRuleSnapshotStore<LuaCallbackAliasSnapshot>::RowMap;
-	store.rows                        = store.rows.withUpdates(QVector<RowMap::Update>{
+	using RuntimeStateMap      = LuaCallbackRuleSnapshotStore<LuaCallbackAliasSnapshot>::RuntimeStateMap;
+	store.runtimeStates        = store.runtimeStates.withUpdates(QVector<RuntimeStateMap::Update>{
 	    {runtimeAlias.runtimeLocationHandle, {}}
     });
-	runtimeAlias.matchAttempts        = 7;
+	runtimeAlias.matchAttempts = 7;
 	{
 		auto revision = std::make_shared<WorldRuntime::CausalPluginCallbackSnapshotRevision>();
 		runtime.m_causalPluginCallbackSnapshotCaptureStack.push_back(revision);

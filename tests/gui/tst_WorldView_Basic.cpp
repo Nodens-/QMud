@@ -14685,6 +14685,40 @@ class tst_WorldView_Basic : public QObject
 			resetTestState();
 		}
 
+		void nativeOutputRendererTransparentMiniWindowUsesPremultipliedColorKeyCache()
+		{
+			resetTestState();
+
+			WorldView view;
+			setTestRuntimeObserver(view, runtimeForTest());
+			view.resize(760, 460);
+			view.show();
+			QCoreApplication::processEvents();
+
+			QWidget *const overlayLayer = view.m_miniOverlay;
+			QVERIFY(overlayLayer);
+			QVERIFY(!overlayLayer->size().isEmpty());
+			MiniWindow &window =
+			    appendTestMiniWindow(QStringLiteral("transparent-cache"), QRect(10, 10, 32, 24),
+			                         kMiniWindowTransparent, QColor(Qt::magenta));
+			QCOMPARE(runtimeForTest()->windowSetPixel(QStringLiteral("transparent-cache"), 1, 1,
+			                                          MiniWindowUtils::colorToRef(QColor(Qt::green))),
+			         eOK);
+
+			QImage rendered(overlayLayer->size(), QImage::Format_ARGB32_Premultiplied);
+			rendered.fill(Qt::transparent);
+			{
+				QPainter painter(&rendered);
+				overlayLayer->render(&painter);
+			}
+
+			QVERIFY(!window.transparentSurfaceCache.isNull());
+			QCOMPARE(window.transparentSurfaceCache.format(), QImage::Format_ARGB32_Premultiplied);
+			QCOMPARE(window.transparentSurfaceCache.pixelColor(0, 0), QColor(0, 0, 0, 0));
+			QCOMPARE(window.transparentSurfaceCache.pixelColor(1, 1), QColor(Qt::green));
+			resetTestState();
+		}
+
 		void nativeOutputRendererMiniWindowDamageStaysWithinChangedWindow()
 		{
 			resetTestState();

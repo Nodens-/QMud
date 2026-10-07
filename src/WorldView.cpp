@@ -533,7 +533,7 @@ namespace
 	{
 		if (source.isNull())
 			return source;
-		QImage image = source.convertToFormat(QImage::Format_ARGB32);
+		QImage image = source.convertToFormat(QImage::Format_ARGB32_Premultiplied);
 		image.setDevicePixelRatio(source.devicePixelRatio());
 		for (int y = 0; y < image.height(); ++y)
 		{
@@ -541,7 +541,7 @@ namespace
 			for (int x = 0; x < image.width(); ++x)
 			{
 				if ((line[x] & 0x00FFFFFF) == (keyRgb & 0x00FFFFFF))
-					line[x] &= 0x00FFFFFF;
+					line[x] = 0;
 			}
 		}
 		return image;

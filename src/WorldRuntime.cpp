@@ -1668,28 +1668,18 @@ namespace
 	{
 		if (targetOwnerHandle != beforeOwnerHandle || afterOwnerHandle != beforeOwnerHandle)
 			return std::nullopt;
-		const auto beforeDefinition = beforeStore.rows.value(ruleHandle);
-		const auto afterDefinition  = afterStore.rows.value(ruleHandle);
-		const auto targetDefinition = targetStore.rows.value(ruleHandle);
-		const auto beforeRuntime    = beforeStore.runtimeStates.value(ruleHandle);
-		const auto afterRuntime     = afterStore.runtimeStates.value(ruleHandle);
-		const auto targetRuntime    = targetStore.runtimeStates.value(ruleHandle);
-		const auto beforeDetail     = beforeStore.detailStates.value(ruleHandle);
-		const auto afterDetail      = afterStore.detailStates.value(ruleHandle);
-		const auto targetDetail     = targetStore.detailStates.value(ruleHandle);
-		if (!beforeDefinition || !afterDefinition || !targetDefinition || !beforeRuntime || !afterRuntime ||
-		    !targetRuntime || !beforeDetail || !afterDetail || !targetDetail ||
-		    beforeDefinition->runtimeId != runtimeId || afterDefinition->runtimeId != runtimeId ||
-		    targetDefinition->runtimeId != runtimeId || beforeRuntime->runtimeId != runtimeId ||
-		    afterRuntime->runtimeId != runtimeId || targetRuntime->runtimeId != runtimeId ||
-		    beforeDetail->runtimeId != runtimeId || afterDetail->runtimeId != runtimeId ||
-		    targetDetail->runtimeId != runtimeId)
-		{
-			return std::nullopt;
-		}
 		CausalTargetedRuleUpdates<Row> result;
 		if (parts.testFlag(LuaCallbackRuleSnapshotPart::Definition))
 		{
+			const auto beforeDefinition = beforeStore.rows.value(ruleHandle);
+			const auto afterDefinition  = afterStore.rows.value(ruleHandle);
+			const auto targetDefinition = targetStore.rows.value(ruleHandle);
+			if (!beforeDefinition || !afterDefinition || !targetDefinition ||
+			    beforeDefinition->runtimeId != runtimeId || afterDefinition->runtimeId != runtimeId ||
+			    targetDefinition->runtimeId != runtimeId)
+			{
+				return std::nullopt;
+			}
 			Row merged = *targetDefinition;
 			applyCausalRuleDefinitionDelta(merged, *beforeDefinition, *afterDefinition);
 			result.definition = typename LuaCallbackRuleSnapshotStore<Row>::RowMap::Update{
@@ -1697,6 +1687,14 @@ namespace
 		}
 		if (parts.testFlag(LuaCallbackRuleSnapshotPart::RuntimeState))
 		{
+			const auto beforeRuntime = beforeStore.runtimeStates.value(ruleHandle);
+			const auto afterRuntime  = afterStore.runtimeStates.value(ruleHandle);
+			const auto targetRuntime = targetStore.runtimeStates.value(ruleHandle);
+			if (!beforeRuntime || !afterRuntime || !targetRuntime || beforeRuntime->runtimeId != runtimeId ||
+			    afterRuntime->runtimeId != runtimeId || targetRuntime->runtimeId != runtimeId)
+			{
+				return std::nullopt;
+			}
 			LuaCallbackRuleRuntimeStateSnapshot merged = *targetRuntime;
 			applyCausalSnapshotValueDelta(merged, *beforeRuntime, *afterRuntime);
 			result.runtimeState =
@@ -1704,6 +1702,14 @@ namespace
 		}
 		if (parts.testFlag(LuaCallbackRuleSnapshotPart::DetailState))
 		{
+			const auto beforeDetail = beforeStore.detailStates.value(ruleHandle);
+			const auto afterDetail  = afterStore.detailStates.value(ruleHandle);
+			const auto targetDetail = targetStore.detailStates.value(ruleHandle);
+			if (!beforeDetail || !afterDetail || !targetDetail || beforeDetail->runtimeId != runtimeId ||
+			    afterDetail->runtimeId != runtimeId || targetDetail->runtimeId != runtimeId)
+			{
+				return std::nullopt;
+			}
 			LuaCallbackRuleDetailStateSnapshot merged = *targetDetail;
 			applyCausalSnapshotValueDelta(merged, *beforeDetail, *afterDetail);
 			result.detailState = typename LuaCallbackRuleSnapshotStore<Row>::DetailStateMap::Update{
@@ -15597,12 +15603,20 @@ void WorldRuntime::publishTargetedLuaCallbackRuleSnapshotPatches(const LuaCallba
 			}
 			if (!hasCurrentBase)
 				continue;
-			auto      &store        = std::invoke(selectStore, *m_luaCallbackDispatchSnapshotBaseCache);
-			const auto definition   = store.rows.value(patch.runtimeLocationHandle);
-			const auto runtimeState = store.runtimeStates.value(patch.runtimeLocationHandle);
-			const auto detailState  = store.detailStates.value(patch.runtimeLocationHandle);
-			if (!definition || !runtimeState || !detailState || definition->runtimeId != patch.runtimeId ||
-			    runtimeState->runtimeId != patch.runtimeId || detailState->runtimeId != patch.runtimeId)
+			auto      &store            = std::invoke(selectStore, *m_luaCallbackDispatchSnapshotBaseCache);
+			const auto componentMatches = [&patch](const auto &componentStore)
+			{
+				const auto component = componentStore.value(patch.runtimeLocationHandle);
+				return component && component->runtimeId == patch.runtimeId;
+			};
+			const bool requestedComponentsMatch =
+			    (!patch.parts.testFlag(LuaCallbackRuleSnapshotPart::Definition) ||
+			     componentMatches(store.rows)) &&
+			    (!patch.parts.testFlag(LuaCallbackRuleSnapshotPart::RuntimeState) ||
+			     componentMatches(store.runtimeStates)) &&
+			    (!patch.parts.testFlag(LuaCallbackRuleSnapshotPart::DetailState) ||
+			     componentMatches(store.detailStates));
+			if (!requestedComponentsMatch)
 			{
 				fallbackOwners.insert(ownerHandle, patch.pluginId);
 				fallbackPluginIds.insert(patch.pluginId);

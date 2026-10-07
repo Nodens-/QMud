@@ -1569,7 +1569,7 @@ namespace MiniWindowUtils
 		    window.backingSurfaceSize() == physicalSize)
 			return;
 
-		QImage newSurface(physicalSize, QImage::Format_ARGB32);
+		QImage newSurface(physicalSize, QImage::Format_RGB32);
 		newSurface.setDevicePixelRatio(normalizedRatio);
 		newSurface.fill(window.background.isValid() ? window.background : QColor(0, 0, 0));
 		if (!window.backingSurfaceIsNull())
@@ -2789,7 +2789,7 @@ namespace MiniWindowUtils
 		if (window.width == width && window.height == height)
 			return;
 		const double ratio = surfaceDevicePixelRatio(window);
-		QImage       newImage(MiniWindow::backingStoreSize(width, height, ratio), QImage::Format_ARGB32);
+		QImage       newImage(MiniWindow::backingStoreSize(width, height, ratio), QImage::Format_RGB32);
 		newImage.setDevicePixelRatio(ratio);
 		const QColor fill = colorFromRef(colour);
 		newImage.fill(fill);

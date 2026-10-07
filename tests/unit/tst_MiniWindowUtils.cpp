@@ -393,12 +393,14 @@ namespace
 				QCOMPARE(window.height, 24);
 				QCOMPARE(window.backingSurfaceSize(), QSize(48, 36));
 				QCOMPARE(window.backingSurfaceDevicePixelRatio(), 1.5);
+				QCOMPARE(window.backingSurface().format(), QImage::Format_RGB32);
 			}
 
 			void setBackingSurfaceNormalizesImageDevicePixelRatio()
 			{
 				MiniWindow window;
 				QImage     backing(QSize(8, 6), QImage::Format_ARGB32);
+				backing.fill(QColor(10, 20, 30, 40));
 				backing.setDevicePixelRatio(0.5);
 
 				window.setBackingSurface(backing);
@@ -406,6 +408,8 @@ namespace
 				QCOMPARE(window.devicePixelRatio, 1.0);
 				QCOMPARE(window.backingSurfaceDevicePixelRatio(), 1.0);
 				QCOMPARE(window.backingSurface().devicePixelRatio(), 1.0);
+				QCOMPARE(window.backingSurface().format(), QImage::Format_RGB32);
+				QCOMPARE(window.backingSurface().pixelColor(0, 0), QColor(10, 20, 30));
 			}
 
 			void highDpiLogicalPixelAccessUsesApiCoordinates()

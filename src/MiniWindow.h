@@ -258,11 +258,14 @@ struct MiniWindow
 		}
 
 		/**
-		 * @brief Replaces the high-DPI backing image and records its DPR.
+		 * @brief Replaces the opaque high-DPI backing image and records its DPR.
+		 * @param surface Replacement image, normalized to the native opaque backing format.
 		 */
 		void setBackingSurface(QImage surface)
 		{
 			const double normalizedRatio = normalizedDevicePixelRatio(surface.devicePixelRatio());
+			if (!surface.isNull() && surface.format() != QImage::Format_RGB32)
+				surface = surface.convertToFormat(QImage::Format_RGB32);
 			surface.setDevicePixelRatio(normalizedRatio);
 			devicePixelRatio = normalizedRatio;
 			m_surface        = std::move(surface);
@@ -309,7 +312,7 @@ struct MiniWindow
 			temporarilyHide  = false;
 			show             = false;
 			devicePixelRatio = normalizedDevicePixelRatio(newDevicePixelRatio);
-			m_surface = QImage(backingStoreSize(width, height, devicePixelRatio), QImage::Format_ARGB32);
+			m_surface = QImage(backingStoreSize(width, height, devicePixelRatio), QImage::Format_RGB32);
 			m_surface.setDevicePixelRatio(devicePixelRatio);
 			m_surface.fill(background.isValid() ? background : QColor(0, 0, 0));
 			markBackingSurfaceChanged();
